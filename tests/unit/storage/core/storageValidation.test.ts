@@ -14,6 +14,7 @@ import {
   validateTenantId,
 } from '@/storage/core/storageValidation.js';
 import { JsonRpcErrorCode, McpError } from '@/types-global/errors.js';
+import { stringToBase64 } from '@/utils/internal/encoding.js';
 import type { RequestContext } from '@/utils/internal/requestContext.js';
 
 describe('Storage Validation', () => {
@@ -408,6 +409,29 @@ describe('Storage Validation', () => {
       } catch (error) {
         expect(error).toBeInstanceOf(McpError);
         expect((error as McpError).code).toBe(JsonRpcErrorCode.InvalidParams);
+      }
+    });
+
+    it('should not leak the internal error stack into McpError.data (issue #71)', () => {
+      // Trigger the catch-all branch — JSON.parse throws on a base64-decoded
+      // payload that isn't valid JSON. The pre-fix code would put the parser's
+      // stack on `data.rawError`, which the framework forwards to clients via
+      // structuredContent.error.data (tools) / JSON-RPC error.data (resources).
+      const malformedPayload = stringToBase64('not-json{');
+      const malformedCursor = encodeCursor('seed', 'tenant');
+      // Splice the bad payload before the signature dot to hit the JSON.parse path
+      const dotIndex = malformedCursor.lastIndexOf('.');
+      const forged = `${malformedPayload}${malformedCursor.substring(dotIndex)}`;
+
+      try {
+        decodeCursor(forged, 'tenant', context);
+        throw new Error('decodeCursor should have thrown');
+      } catch (error) {
+        expect(error).toBeInstanceOf(McpError);
+        const data = (error as McpError).data ?? {};
+        expect(data).not.toHaveProperty('rawError');
+        // Sanity — public surface stays minimal: operation + request context only
+        expect(Object.keys(data)).toEqual(expect.arrayContaining(['operation']));
       }
     });
   });

@@ -141,8 +141,9 @@ export class ErrorHandler {
    */
   public static handleError(error: unknown, options: ErrorHandlerOptions): Error {
     // --- OpenTelemetry Integration ---
+    // Skip ended/no-op spans — measure*Execution paths already record + end the span before re-throwing.
     const activeSpan = trace.getActiveSpan();
-    if (activeSpan) {
+    if (activeSpan?.isRecording()) {
       if (error instanceof Error) {
         activeSpan.recordException(error);
       }

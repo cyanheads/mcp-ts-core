@@ -1,6 +1,6 @@
 # mcp-ts-core - Directory Structure
 
-Generated on: 2026-04-28 19:13:21
+Generated on: 2026-05-01 19:18:36
 
 ```text
 mcp-ts-core/
@@ -31,6 +31,17 @@ mcp-ts-core/
 │   ├── 0.8.x/
 │   └── template.md
 ├── docs/
+│   ├── audit/
+│   │   ├── per-server/
+│   │   │   ├── arxiv-mcp-server.md
+│   │   │   ├── cdc-health-mcp-server.md
+│   │   │   ├── clinicaltrialsgov-mcp-server.md
+│   │   │   ├── nhtsa-vehicle-safety-mcp-server.md
+│   │   │   ├── openalex-mcp-server.md
+│   │   │   ├── pubchem-mcp-server.md
+│   │   │   ├── pubmed-mcp-server.md
+│   │   │   └── secedgar-mcp-server.md
+│   │   └── helpfulness-patterns-2026.md
 │   ├── mcp-specification/
 │   │   ├── 2025-06-18/
 │   │   │   ├── best-practices/
@@ -80,6 +91,7 @@ mcp-ts-core/
 │   │       ├── key-changes.md
 │   │       ├── schema-reference.md
 │   │       └── specification.md
+│   ├── server-ideas/
 │   ├── conformance-test-plan.md
 │   └── resource-notifications.md
 ├── examples/

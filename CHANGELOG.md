@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.8.8](changelog/0.8.x/0.8.8.md) — 2026-05-01
+
+ErrorHandler stops double-writing ended OTel spans (recordException/setStatus); storage decodeCursor no longer leaks server stack traces through McpError.data on malformed cursors.
+
 ## [0.8.7](changelog/0.8.x/0.8.7.md) — 2026-04-29
 
 Remove `dev` watch script (finishes 0.8.6 dev-vs-prod cleanup); fix field-test helper state collision when concurrent sessions run from different project directories.

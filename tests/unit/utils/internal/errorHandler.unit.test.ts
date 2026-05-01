@@ -17,6 +17,7 @@ describe('ErrorHandler (unit)', () => {
     getActiveSpanSpy = vi.spyOn(trace, 'getActiveSpan').mockReturnValue({
       recordException: vi.fn(),
       setStatus: vi.fn(),
+      isRecording: vi.fn().mockReturnValue(true),
     } as never);
     errorSpy = vi.spyOn(logger, 'error').mockImplementation(() => {});
   });

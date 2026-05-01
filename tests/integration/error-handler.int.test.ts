@@ -30,6 +30,7 @@ const errorSpy = vi.spyOn(logger, 'error');
 const mockSpan = {
   recordException: vi.fn(),
   setStatus: vi.fn(),
+  isRecording: vi.fn().mockReturnValue(true),
 };
 const getActiveSpanSpy = vi.spyOn(trace, 'getActiveSpan');
 
@@ -155,6 +156,19 @@ describe('ErrorHandler', () => {
         code: SpanStatusCode.ERROR,
         message: 'Telemetry test',
       });
+    });
+
+    it('should skip the OTel block when the active span is no longer recording', () => {
+      // Regression: previously, handleError unconditionally called recordException/
+      // setStatus on whatever getActiveSpan() returned, double-writing on spans
+      // already ended by measureToolExecution and triggering "Cannot execute the
+      // operation on ended Span" warnings. (issue #93)
+      mockSpan.isRecording.mockReturnValueOnce(false);
+      const error = new Error('post-end write');
+      ErrorHandler.handleError(error, { operation: 'endedSpanTest' });
+
+      expect(mockSpan.recordException).not.toHaveBeenCalled();
+      expect(mockSpan.setStatus).not.toHaveBeenCalled();
     });
 
     it('should use a custom errorMapper if provided', () => {
