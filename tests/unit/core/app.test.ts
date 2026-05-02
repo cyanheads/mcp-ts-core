@@ -62,6 +62,17 @@ const {
     storage: {
       providerType: 'in-memory',
     },
+    canvas: {
+      providerType: 'none',
+      defaultMemoryLimitMb: 1024,
+      exportRootPath: './.canvas-exports',
+      maxCanvasesPerTenant: 100,
+      ttlMs: 24 * 60 * 60 * 1000,
+      absoluteCapMs: 7 * 24 * 60 * 60 * 1000,
+      sweeperIntervalMs: 0,
+      defaultRowLimit: 10_000,
+      schemaSniffRows: 100,
+    },
     supabase: undefined as
       | {
           serviceRoleKey?: string | undefined;

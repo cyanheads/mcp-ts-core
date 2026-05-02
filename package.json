@@ -1,6 +1,6 @@
 {
   "name": "@cyanheads/mcp-ts-core",
-  "version": "0.8.8",
+  "version": "0.8.9",
   "mcpName": "io.github.cyanheads/mcp-ts-core",
   "description": "Agent-native TypeScript framework for building MCP servers. Declarative definitions with auth, multi-backend storage, OpenTelemetry, and first-class support for Bun/Node/Cloudflare Workers.",
   "main": "dist/core/index.js",
@@ -72,6 +72,10 @@
     "./storage/types": {
       "types": "./dist/storage/core/IStorageProvider.d.ts",
       "import": "./dist/storage/core/IStorageProvider.js"
+    },
+    "./canvas": {
+      "types": "./dist/canvas/index.d.ts",
+      "import": "./dist/canvas/index.js"
     },
     "./utils": {
       "types": "./dist/utils/index.d.ts",
@@ -157,11 +161,12 @@
     "picomatch": "2.3.2",
     "protobufjs": "7.5.5",
     "yaml": "1.10.3",
-    "zod": "4.4.1"
+    "zod": "4.4.2"
   },
   "devDependencies": {
-    "@biomejs/biome": "2.4.13",
-    "@cloudflare/workers-types": "^4.20260501.1",
+    "@biomejs/biome": "2.4.14",
+    "@cloudflare/workers-types": "^4.20260502.1",
+    "@duckdb/node-api": "^1.5.2-r.1",
     "@hono/otel": "^1.1.1",
     "@opentelemetry/exporter-metrics-otlp-http": "^0.216.0",
     "@opentelemetry/exporter-trace-otlp-http": "^0.216.0",
@@ -266,9 +271,10 @@
     "hono": "^4.12.16",
     "jose": "^6.2.3",
     "pino": "^10.3.1",
-    "zod": "^4.4.1"
+    "zod": "^4.4.2"
   },
   "peerDependencies": {
+    "@duckdb/node-api": "^1.5.0",
     "@hono/otel": "^1.1.1",
     "@opentelemetry/instrumentation-http": "^0.215.0",
     "@opentelemetry/exporter-metrics-otlp-http": "^0.215.0",
@@ -296,6 +302,9 @@
     "validator": "^13.15.35"
   },
   "peerDependenciesMeta": {
+    "@duckdb/node-api": {
+      "optional": true
+    },
     "@hono/otel": {
       "optional": true
     },

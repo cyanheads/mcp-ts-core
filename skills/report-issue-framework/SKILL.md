@@ -172,6 +172,7 @@ Every issue needs exactly one primary label. Stack secondary labels on top when 
 | `performance` | Memory, CPU, latency, or resource usage |
 | `security` | Vulnerability, CVE, or hardening work |
 | `breaking-change` | Fix/feature will break public API; requires a major bump |
+| `surplus-token-idea` | Worth exploring when token budget allows |
 
 Combine labels: `--label "bug" --label "regression"`.
 

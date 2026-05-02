@@ -34,6 +34,7 @@
 | `/auth` | `checkScopes` | Dynamic scope checking |
 | `/storage` | `StorageService` | Storage abstraction |
 | `/storage/types` | `IStorageProvider` | Provider interface |
+| `/canvas` | `DataCanvas`, `CanvasInstance`, `CanvasRegistry`, `IDataCanvasProvider`, `DuckdbProvider`, `assertReadOnlyQuery`, `quoteIdentifier`, ... | DataCanvas primitive (Tier 3, optional peer dep `@duckdb/node-api`); SQL/analytical workspace |
 | `/utils` | formatting, encoding, network, pagination, logging, runtime, telemetry, token counting, parsers†, sanitization†, scheduling† | All utilities (†optional peer deps) |
 | `/services` | `OpenRouterProvider`, `SpeechService`, `createSpeechProvider`, `ElevenLabsProvider`, `WhisperProvider`, `GraphService`, provider interfaces and types | LLM, Speech (TTS/STT), Graph services |
 | `/linter` | `validateDefinitions`, `LintReport`, `LintDiagnostic`, `LintInput`, `LintSeverity` | Definition validation |
@@ -492,6 +493,7 @@ Detailed method signatures, options, and examples live in skill files. Read the 
 | `api-config` | `skills/api-config/SKILL.md` | AppConfig, parseConfig, env vars |
 | `api-testing` | `skills/api-testing/SKILL.md` | createMockContext, test patterns, MockContextOptions |
 | `api-workers` | `skills/api-workers/SKILL.md` | createWorkerHandler, CloudflareBindings, Worker runtime |
+| `api-canvas` | `skills/api-canvas/SKILL.md` | DataCanvas primitive: acquire/register/query/export, token-sharing model, SQL gate, lifecycle |
 | `api-linter` | `skills/api-linter/SKILL.md` | Definition lint rules (`format-parity`, `schema-*`, `name-*`, `server-json-*`, …) — look here when devcheck reports a lint diagnostic |
 | `add-tool` | `skills/add-tool/SKILL.md` | Scaffold a new MCP tool definition |
 | `add-app-tool` | `skills/add-app-tool/SKILL.md` | Scaffold an MCP App tool + UI resource pair |

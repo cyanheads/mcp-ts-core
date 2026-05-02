@@ -30,6 +30,13 @@ import { requestContextService } from '@/utils/internal/requestContext.js';
  */
 export interface CloudflareBindings {
   AI?: Ai;
+  /**
+   * DataCanvas provider type. Surfaced here so an explicit
+   * `CANVAS_PROVIDER_TYPE=duckdb` set in `wrangler.toml` triggers the
+   * factory's fail-closed path (DuckDB has no V8-isolate build) instead
+   * of silently no-opping.
+   */
+  CANVAS_PROVIDER_TYPE?: string;
   DB?: D1Database;
   ENVIRONMENT?: string;
   KV_NAMESPACE?: KVNamespace;
@@ -85,6 +92,7 @@ const CORE_ENV_BINDINGS: ReadonlyArray<[keyof CloudflareBindings, string]> = [
   ['SUPABASE_ANON_KEY', 'SUPABASE_ANON_KEY'],
   ['SUPABASE_SERVICE_ROLE_KEY', 'SUPABASE_SERVICE_ROLE_KEY'],
   ['STORAGE_PROVIDER_TYPE', 'STORAGE_PROVIDER_TYPE'],
+  ['CANVAS_PROVIDER_TYPE', 'CANVAS_PROVIDER_TYPE'],
   ['OAUTH_ISSUER_URL', 'OAUTH_ISSUER_URL'],
   ['OAUTH_AUDIENCE', 'OAUTH_AUDIENCE'],
   ['OAUTH_JWKS_URI', 'OAUTH_JWKS_URI'],

@@ -15,6 +15,7 @@ body:
         - `performance` — memory, CPU, latency, or resource usage
         - `security` — vulnerability, CVE, or hardening work
         - `breaking-change` — fix will break public API
+        - `surplus-token-idea` — worth exploring when token budget allows
 
   - type: input
     id: version

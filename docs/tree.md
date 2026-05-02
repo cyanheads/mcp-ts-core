@@ -1,6 +1,6 @@
 # mcp-ts-core - Directory Structure
 
-Generated on: 2026-05-01 19:18:36
+Generated on: 2026-05-02 22:27:42
 
 ```text
 mcp-ts-core/
@@ -147,6 +147,8 @@ mcp-ts-core/
 │   │   └── SKILL.md
 │   ├── api-auth/
 │   │   └── SKILL.md
+│   ├── api-canvas/
+│   │   └── SKILL.md
 │   ├── api-config/
 │   │   └── SKILL.md
 │   ├── api-context/
@@ -198,6 +200,21 @@ mcp-ts-core/
 │   │   └── SKILL.md
 │   └── README.md
 ├── src/
+│   ├── canvas/
+│   │   ├── core/
+│   │   │   ├── canvasFactory.ts
+│   │   │   ├── CanvasInstance.ts
+│   │   │   ├── CanvasRegistry.ts
+│   │   │   ├── DataCanvas.ts
+│   │   │   ├── IDataCanvasProvider.ts
+│   │   │   └── sqlGate.ts
+│   │   ├── providers/
+│   │   │   └── duckdb/
+│   │   │       ├── DuckdbProvider.ts
+│   │   │       ├── exportWriter.ts
+│   │   │       └── schemaSniffer.ts
+│   │   ├── index.ts
+│   │   └── types.ts
 │   ├── cli/
 │   │   └── init.ts
 │   ├── config/
@@ -485,14 +502,23 @@ mcp-ts-core/
 │   │   ├── resources/
 │   │   │   ├── echo-app-ui.app-resource.test.ts
 │   │   │   └── echo.resource.test.ts
-│   │   └── tools/
-│   │       ├── template-async-countdown.tool.test.ts
-│   │       ├── template-code-review-sampling.tool.test.ts
-│   │       ├── template-data-explorer.app-tool.test.ts
-│   │       ├── template-echo-app.app-tool.test.ts
-│   │       ├── template-echo-message.tool.test.ts
-│   │       └── template-madlibs-elicitation.tool.test.ts
+│   │   ├── tools/
+│   │   │   ├── template-async-countdown.tool.test.ts
+│   │   │   ├── template-code-review-sampling.tool.test.ts
+│   │   │   ├── template-data-explorer.app-tool.test.ts
+│   │   │   ├── template-echo-app.app-tool.test.ts
+│   │   │   ├── template-echo-message.tool.test.ts
+│   │   │   └── template-madlibs-elicitation.tool.test.ts
+│   │   └── canvas-duckdb.test.ts
 │   ├── unit/
+│   │   ├── canvas/
+│   │   │   ├── canvasFactory.test.ts
+│   │   │   ├── CanvasRegistry.test.ts
+│   │   │   ├── classifyDuckdbError.test.ts
+│   │   │   ├── DataCanvas.test.ts
+│   │   │   ├── exportWriter.test.ts
+│   │   │   ├── schemaSniffer.test.ts
+│   │   │   └── sqlGate.test.ts
 │   │   ├── cli/
 │   │   │   └── init.test.ts
 │   │   ├── config/

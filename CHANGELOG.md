@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.8.9](changelog/0.8.x/0.8.9.md) — 2026-05-02
+
+DataCanvas primitive lands as a Tier 3 SQL/analytical workspace backed by DuckDB ([#97](https://github.com/cyanheads/mcp-ts-core/issues/97)) — opt-in via CANVAS_PROVIDER_TYPE, fails closed on Cloudflare Workers.
+
 ## [0.8.8](changelog/0.8.x/0.8.8.md) — 2026-05-01
 
 ErrorHandler stops double-writing ended OTel spans (recordException/setStatus); storage decodeCursor no longer leaks server stack traces through McpError.data on malformed cursors.

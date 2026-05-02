@@ -10,6 +10,7 @@ body:
         - `performance` — improves memory, CPU, latency, or resource usage
         - `security` — hardens the security posture
         - `breaking-change` — will break public API; requires a major bump
+        - `surplus-token-idea` — worth exploring when token budget allows
 
         If a label doesn't exist in this repo yet, create it once: `gh label create <name>`.
 

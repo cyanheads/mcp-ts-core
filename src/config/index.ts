@@ -240,6 +240,42 @@ const ConfigSchema = z
         .default('in-memory'),
       filesystemPath: z.string().default('./.storage'), // This remains, but will only be used if providerType is 'filesystem'
     }),
+    // DataCanvas primitive configuration (issue #97)
+    canvas: z.object({
+      providerType: z.preprocess(
+        emptyStringAsUndefined,
+        z.enum(['none', 'duckdb']).default('none'),
+      ),
+      /**
+       * Per-canvas DuckDB `memory_limit` PRAGMA value, in MB.
+       * Applied at instance creation; one DuckDB instance per canvasId.
+       */
+      defaultMemoryLimitMb: z.coerce.number().min(64).default(1024),
+      /**
+       * Sandbox root for path-targeted exports. Path-based `export()` calls
+       * are resolved relative to this directory and rejected if they escape
+       * via `..` or absolute paths. Stream-based exports bypass this.
+       */
+      exportRootPath: z.string().default('./.canvas-exports'),
+      /** Maximum active canvases per tenant before `RateLimited`. */
+      maxCanvasesPerTenant: z.coerce.number().min(1).default(100),
+      /** Sliding TTL in milliseconds. Default 24h. */
+      ttlMs: z.coerce
+        .number()
+        .min(1000)
+        .default(24 * 60 * 60 * 1000),
+      /** Absolute cap from creation in milliseconds. Default 7d. */
+      absoluteCapMs: z.coerce
+        .number()
+        .min(1000)
+        .default(7 * 24 * 60 * 60 * 1000),
+      /** Sweeper interval in milliseconds. Default 60s. Set to 0 to disable. */
+      sweeperIntervalMs: z.coerce.number().min(0).default(60_000),
+      /** Default row cap for `query()` results. */
+      defaultRowLimit: z.coerce.number().min(1).default(10_000),
+      /** Number of rows to sniff for schema inference when schema is omitted. */
+      schemaSniffRows: z.coerce.number().min(1).default(100),
+    }),
     // Experimental: Task store configuration
     tasks: z.object({
       storeType: z
@@ -444,6 +480,17 @@ const parseConfig = (envOverrides?: Record<string, string | undefined>) => {
     storage: {
       providerType: env.STORAGE_PROVIDER_TYPE,
       filesystemPath: env.STORAGE_FILESYSTEM_PATH,
+    },
+    canvas: {
+      providerType: env.CANVAS_PROVIDER_TYPE,
+      defaultMemoryLimitMb: env.CANVAS_DEFAULT_MEMORY_LIMIT_MB,
+      exportRootPath: env.CANVAS_EXPORT_PATH,
+      maxCanvasesPerTenant: env.CANVAS_MAX_CANVASES_PER_TENANT,
+      ttlMs: env.CANVAS_TTL_MS,
+      absoluteCapMs: env.CANVAS_ABSOLUTE_CAP_MS,
+      sweeperIntervalMs: env.CANVAS_SWEEPER_INTERVAL_MS,
+      defaultRowLimit: env.CANVAS_DEFAULT_ROW_LIMIT,
+      schemaSniffRows: env.CANVAS_SCHEMA_SNIFF_ROWS,
     },
     tasks: {
       storeType: env.TASK_STORE_TYPE,

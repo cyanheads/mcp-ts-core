@@ -1,0 +1,52 @@
+/**
+ * @fileoverview Public barrel for the DataCanvas primitive. Servers import
+ * from `@cyanheads/mcp-ts-core/canvas` to interact with `core.canvas` —
+ * either via tool handlers (acquire → register → query → export) or directly
+ * for advanced lifecycle work.
+ *
+ * The DuckDB provider is lazy-loaded; pulling this barrel does not pull in
+ * `@duckdb/node-api` until {@link DataCanvas.acquire} runs against an active
+ * canvas configuration.
+ *
+ * @module src/canvas/index
+ */
+
+export { CanvasInstance } from './core/CanvasInstance.js';
+export {
+  type AcquireResult,
+  CanvasRegistry,
+  type CanvasRegistryOptions,
+  DEFAULT_CANVAS_REGISTRY_OPTIONS,
+} from './core/CanvasRegistry.js';
+export { createCanvasService } from './core/canvasFactory.js';
+export { DataCanvas } from './core/DataCanvas.js';
+export type { IDataCanvasProvider } from './core/IDataCanvasProvider.js';
+export {
+  ALLOWED_PLAN_OPERATORS,
+  ALLOWED_STATEMENT_TYPES,
+  assertReadOnlyQuery,
+  assertValidIdentifier,
+  collectDisallowedOperators,
+  type DuckdbStatementType,
+  quoteIdentifier,
+} from './core/sqlGate.js';
+export {
+  DuckdbProvider,
+  type DuckdbProviderOptions,
+} from './providers/duckdb/DuckdbProvider.js';
+export type {
+  AcquireOptions,
+  ColumnSchema,
+  ColumnType,
+  DescribeOptions,
+  ExportFormat,
+  ExportOptions,
+  ExportResult,
+  ExportTarget,
+  QueryOptions,
+  QueryResult,
+  RegisterRows,
+  RegisterTableOptions,
+  RegisterTableResult,
+  TableInfo,
+} from './types.js';

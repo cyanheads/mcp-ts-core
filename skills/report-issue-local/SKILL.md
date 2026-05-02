@@ -158,6 +158,7 @@ Every issue needs exactly one primary label. Stack secondary labels on top when 
 | `performance` | Memory, CPU, latency, or resource usage |
 | `security` | Vulnerability, CVE, or hardening work |
 | `breaking-change` | Change will break public API; requires a major bump |
+| `surplus-token-idea` | Worth exploring when token budget allows |
 
 Combine labels: `--label "bug" --label "regression"`.
 
@@ -168,6 +169,7 @@ gh label create regression --color e99695 --description "Worked before, broken a
 gh label create performance --color 5319e7 --description "Memory, CPU, latency, or resource usage"
 gh label create security --color b60205 --description "Vulnerability, CVE, or hardening work"
 gh label create breaking-change --color d93f0b --description "Change will break public API; requires a major bump"
+gh label create surplus-token-idea --color FF10F0 --description "Worth exploring when token budget allows"
 ```
 
 ### Attaching logs or large output

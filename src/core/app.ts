@@ -10,6 +10,8 @@ import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import type { SupabaseClient } from '@supabase/supabase-js';
 import { z } from 'zod';
 
+import { createCanvasService } from '@/canvas/core/canvasFactory.js';
+import type { DataCanvas } from '@/canvas/core/DataCanvas.js';
 import { config, resetConfig } from '@/config/index.js';
 import {
   buildServerManifest,
@@ -80,6 +82,13 @@ export interface CreateAppOptions {
 
 /** Services available in the `setup()` callback and on ServerHandle. */
 export interface CoreServices {
+  /**
+   * Optional DataCanvas primitive (issue #97). Present when
+   * `CANVAS_PROVIDER_TYPE` is set to a supported engine (`duckdb`).
+   * `undefined` when canvas is disabled (`'none'`, the default) or when
+   * running on Cloudflare Workers (DuckDB has no V8-isolate build).
+   */
+  canvas?: DataCanvas;
   config: typeof config;
   llmProvider?: ILlmProvider;
   logger: typeof logger;
@@ -200,11 +209,14 @@ export async function composeServices(options: CreateAppOptions = {}): Promise<C
     }
   }
 
+  const canvas = createCanvasService(config);
+
   const coreServices: CoreServices = {
     config,
     logger,
     rateLimiter,
     storage: storageService,
+    ...(canvas && { canvas }),
     ...(llmProvider && { llmProvider }),
     ...(speechService && { speechService }),
     ...(supabaseClient && { supabase: supabaseClient }),
@@ -526,6 +538,15 @@ export async function createApp(options: CreateAppOptions = {}): Promise<ServerH
         taskManager.cleanup();
         coreServices.rateLimiter.dispose();
         schedulerService.destroyAll();
+
+        if (coreServices.canvas) {
+          await coreServices.canvas.shutdown(shutdownContext).catch((err) => {
+            logger.warning('Canvas shutdown raised — continuing.', {
+              ...shutdownContext,
+              error: err instanceof Error ? err.message : String(err),
+            });
+          });
+        }
 
         logger.info('Graceful shutdown completed successfully.', shutdownContext);
       });
