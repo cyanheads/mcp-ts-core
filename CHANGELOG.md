@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.8.10](changelog/0.8.x/0.8.10.md) — 2026-05-02
+
+Canvas source relocated to src/services/canvas/ matching graph/llm/speech layout (consumer subpath @cyanheads/mcp-ts-core/canvas unchanged); design / add-tool / security-pass skills surface it as an option for tabular API servers.
+
 ## [0.8.9](changelog/0.8.x/0.8.9.md) — 2026-05-02
 
 DataCanvas primitive lands as a Tier 3 SQL/analytical workspace backed by DuckDB ([#97](https://github.com/cyanheads/mcp-ts-core/issues/97)) — opt-in via CANVAS_PROVIDER_TYPE, fails closed on Cloudflare Workers.

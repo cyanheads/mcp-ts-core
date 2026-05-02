@@ -7,8 +7,11 @@
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-import { CanvasRegistry, type CanvasRegistryOptions } from '@/canvas/core/CanvasRegistry.js';
-import type { IDataCanvasProvider } from '@/canvas/core/IDataCanvasProvider.js';
+import {
+  CanvasRegistry,
+  type CanvasRegistryOptions,
+} from '@/services/canvas/core/CanvasRegistry.js';
+import type { IDataCanvasProvider } from '@/services/canvas/core/IDataCanvasProvider.js';
 import { McpError } from '@/types-global/errors.js';
 import type { RequestContext } from '@/utils/internal/requestContext.js';
 

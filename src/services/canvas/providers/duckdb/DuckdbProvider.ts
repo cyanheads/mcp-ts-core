@@ -8,7 +8,7 @@
  * Lazy-loaded via {@link lazyImport} so `@duckdb/node-api` stays a true peer
  * dependency — servers that don't enable canvas pay no install cost.
  *
- * @module src/canvas/providers/duckdb/DuckdbProvider
+ * @module src/services/canvas/providers/duckdb/DuckdbProvider
  */
 
 import { databaseError, notFound, validationError } from '@/types-global/errors.js';

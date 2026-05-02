@@ -8,7 +8,7 @@
 
 import { describe, expect, it } from 'vitest';
 
-import { classifyDuckdbError } from '@/canvas/providers/duckdb/DuckdbProvider.js';
+import { classifyDuckdbError } from '@/services/canvas/providers/duckdb/DuckdbProvider.js';
 import { JsonRpcErrorCode, McpError } from '@/types-global/errors.js';
 
 describe('classifyDuckdbError', () => {

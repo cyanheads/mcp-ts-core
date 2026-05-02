@@ -3,7 +3,7 @@
  * `(canvasId, tenantId)` once so callers don't repeat them on every op, and
  * routes each call through the registry's TTL-touch + tenant validation gate
  * before delegating to the provider.
- * @module src/canvas/core/CanvasInstance
+ * @module src/services/canvas/core/CanvasInstance
  */
 
 import type { RequestContext } from '@/utils/internal/requestContext.js';

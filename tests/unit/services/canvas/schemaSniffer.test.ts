@@ -7,7 +7,7 @@
 
 import { describe, expect, it } from 'vitest';
 
-import { sniffSchema } from '@/canvas/providers/duckdb/schemaSniffer.js';
+import { sniffSchema } from '@/services/canvas/providers/duckdb/schemaSniffer.js';
 
 describe('sniffSchema · single-type columns', () => {
   it('infers VARCHAR for string columns', () => {

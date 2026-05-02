@@ -8,10 +8,9 @@
  */
 
 import { afterEach, describe, expect, it, vi } from 'vitest';
-
-import { createCanvasService } from '@/canvas/core/canvasFactory.js';
-import { DataCanvas } from '@/canvas/core/DataCanvas.js';
 import type { AppConfig } from '@/config/index.js';
+import { createCanvasService } from '@/services/canvas/core/canvasFactory.js';
+import { DataCanvas } from '@/services/canvas/core/DataCanvas.js';
 import { JsonRpcErrorCode, McpError } from '@/types-global/errors.js';
 
 function makeConfig(overrides: Partial<AppConfig['canvas']> = {}): AppConfig {

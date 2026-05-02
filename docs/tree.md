@@ -1,6 +1,6 @@
 # mcp-ts-core - Directory Structure
 
-Generated on: 2026-05-02 22:27:42
+Generated on: 2026-05-02 23:02:44
 
 ```text
 mcp-ts-core/
@@ -200,21 +200,6 @@ mcp-ts-core/
 │   │   └── SKILL.md
 │   └── README.md
 ├── src/
-│   ├── canvas/
-│   │   ├── core/
-│   │   │   ├── canvasFactory.ts
-│   │   │   ├── CanvasInstance.ts
-│   │   │   ├── CanvasRegistry.ts
-│   │   │   ├── DataCanvas.ts
-│   │   │   ├── IDataCanvasProvider.ts
-│   │   │   └── sqlGate.ts
-│   │   ├── providers/
-│   │   │   └── duckdb/
-│   │   │       ├── DuckdbProvider.ts
-│   │   │       ├── exportWriter.ts
-│   │   │       └── schemaSniffer.ts
-│   │   ├── index.ts
-│   │   └── types.ts
 │   ├── cli/
 │   │   └── init.ts
 │   ├── config/
@@ -317,6 +302,21 @@ mcp-ts-core/
 │   │   │   └── manager.ts
 │   │   └── server.ts
 │   ├── services/
+│   │   ├── canvas/
+│   │   │   ├── core/
+│   │   │   │   ├── canvasFactory.ts
+│   │   │   │   ├── CanvasInstance.ts
+│   │   │   │   ├── CanvasRegistry.ts
+│   │   │   │   ├── DataCanvas.ts
+│   │   │   │   ├── IDataCanvasProvider.ts
+│   │   │   │   └── sqlGate.ts
+│   │   │   ├── providers/
+│   │   │   │   └── duckdb/
+│   │   │   │       ├── DuckdbProvider.ts
+│   │   │   │       ├── exportWriter.ts
+│   │   │   │       └── schemaSniffer.ts
+│   │   │   ├── index.ts
+│   │   │   └── types.ts
 │   │   ├── graph/
 │   │   │   ├── core/
 │   │   │   │   ├── GraphService.ts
@@ -511,14 +511,6 @@ mcp-ts-core/
 │   │   │   └── template-madlibs-elicitation.tool.test.ts
 │   │   └── canvas-duckdb.test.ts
 │   ├── unit/
-│   │   ├── canvas/
-│   │   │   ├── canvasFactory.test.ts
-│   │   │   ├── CanvasRegistry.test.ts
-│   │   │   ├── classifyDuckdbError.test.ts
-│   │   │   ├── DataCanvas.test.ts
-│   │   │   ├── exportWriter.test.ts
-│   │   │   ├── schemaSniffer.test.ts
-│   │   │   └── sqlGate.test.ts
 │   │   ├── cli/
 │   │   │   └── init.test.ts
 │   │   ├── config/
@@ -605,6 +597,14 @@ mcp-ts-core/
 │   │   ├── scripts/
 │   │   │   └── devdocs.test.ts
 │   │   ├── services/
+│   │   │   ├── canvas/
+│   │   │   │   ├── canvasFactory.test.ts
+│   │   │   │   ├── CanvasRegistry.test.ts
+│   │   │   │   ├── classifyDuckdbError.test.ts
+│   │   │   │   ├── DataCanvas.test.ts
+│   │   │   │   ├── exportWriter.test.ts
+│   │   │   │   ├── schemaSniffer.test.ts
+│   │   │   │   └── sqlGate.test.ts
 │   │   │   ├── graph/
 │   │   │   │   ├── core/
 │   │   │   │   │   ├── GraphService.metrics.test.ts

@@ -22,7 +22,7 @@
  * Rejection paths throw `ValidationError` with a structured `data.reason`
  * suitable for surfacing to the agent.
  *
- * @module src/canvas/core/sqlGate
+ * @module src/services/canvas/core/sqlGate
  */
 
 import { validationError } from '@/types-global/errors.js';

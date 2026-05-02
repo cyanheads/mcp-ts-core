@@ -3,7 +3,7 @@
  * table info, and option/result shapes for register/query/export/describe.
  * Engine-agnostic: DuckDB is the v1 implementation but these types do not bind
  * to it.
- * @module src/canvas/types
+ * @module src/services/canvas/types
  */
 
 /**

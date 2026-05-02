@@ -8,7 +8,7 @@
  * on first use via `lazyImport`. Servers that set `CANVAS_PROVIDER_TYPE=none`
  * (the default) pay zero install cost.
  *
- * @module src/canvas/core/canvasFactory
+ * @module src/services/canvas/core/canvasFactory
  */
 
 import type { AppConfig } from '@/config/index.js';

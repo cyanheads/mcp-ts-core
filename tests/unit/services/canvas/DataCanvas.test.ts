@@ -9,10 +9,13 @@
 
 import { describe, expect, it, vi } from 'vitest';
 
-import { CanvasInstance } from '@/canvas/core/CanvasInstance.js';
-import { CanvasRegistry, type CanvasRegistryOptions } from '@/canvas/core/CanvasRegistry.js';
-import { DataCanvas } from '@/canvas/core/DataCanvas.js';
-import type { IDataCanvasProvider } from '@/canvas/core/IDataCanvasProvider.js';
+import { CanvasInstance } from '@/services/canvas/core/CanvasInstance.js';
+import {
+  CanvasRegistry,
+  type CanvasRegistryOptions,
+} from '@/services/canvas/core/CanvasRegistry.js';
+import { DataCanvas } from '@/services/canvas/core/DataCanvas.js';
+import type { IDataCanvasProvider } from '@/services/canvas/core/IDataCanvasProvider.js';
 import { JsonRpcErrorCode, McpError } from '@/types-global/errors.js';
 import type { RequestContext } from '@/utils/internal/requestContext.js';
 

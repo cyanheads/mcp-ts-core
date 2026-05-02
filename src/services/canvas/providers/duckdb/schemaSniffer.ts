@@ -15,7 +15,7 @@
  *   4. Return `(schema, sniffedRows)` so the caller can append the buffered
  *      rows without re-iterating.
  *
- * @module src/canvas/providers/duckdb/schemaSniffer
+ * @module src/services/canvas/providers/duckdb/schemaSniffer
  */
 
 import { validationError } from '@/types-global/errors.js';

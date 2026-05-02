@@ -14,10 +14,13 @@ import { join } from 'node:path';
 
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
-import { CanvasRegistry } from '@/canvas/core/CanvasRegistry.js';
-import { DataCanvas } from '@/canvas/core/DataCanvas.js';
-import { ALLOWED_PLAN_OPERATORS, collectDisallowedOperators } from '@/canvas/core/sqlGate.js';
-import { DuckdbProvider } from '@/canvas/providers/duckdb/DuckdbProvider.js';
+import { CanvasRegistry } from '@/services/canvas/core/CanvasRegistry.js';
+import { DataCanvas } from '@/services/canvas/core/DataCanvas.js';
+import {
+  ALLOWED_PLAN_OPERATORS,
+  collectDisallowedOperators,
+} from '@/services/canvas/core/sqlGate.js';
+import { DuckdbProvider } from '@/services/canvas/providers/duckdb/DuckdbProvider.js';
 import type { RequestContext } from '@/utils/internal/requestContext.js';
 
 let duckdbAvailable = false;

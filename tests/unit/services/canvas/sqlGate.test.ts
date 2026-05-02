@@ -14,7 +14,7 @@ import {
   assertValidIdentifier,
   collectDisallowedOperators,
   quoteIdentifier,
-} from '@/canvas/core/sqlGate.js';
+} from '@/services/canvas/core/sqlGate.js';
 import { McpError } from '@/types-global/errors.js';
 
 const validSelectPlan = {

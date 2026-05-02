@@ -8,7 +8,7 @@
  * Public access is gated by {@link DataCanvas} — callers never see this class
  * directly. Tests construct it with a fake provider and a mock `Date.now` to
  * exercise expiry/sweep logic.
- * @module src/canvas/core/CanvasRegistry
+ * @module src/services/canvas/core/CanvasRegistry
  */
 
 import { conflict, notFound, rateLimited } from '@/types-global/errors.js';

@@ -4,7 +4,7 @@
  * DuckDB instance per canvasId) and expose register/query/export/describe
  * operations keyed by canvasId. The lifecycle wrapper ({@link CanvasRegistry})
  * keys these calls by `(tenantId, canvasId)` and enforces TTL/caps.
- * @module src/canvas/core/IDataCanvasProvider
+ * @module src/services/canvas/core/IDataCanvasProvider
  */
 
 import type { RequestContext } from '@/utils/internal/requestContext.js';

@@ -18,7 +18,7 @@ import {
   pipeFileToStream,
   resolveExportPath,
   tempFilePathFor,
-} from '@/canvas/providers/duckdb/exportWriter.js';
+} from '@/services/canvas/providers/duckdb/exportWriter.js';
 
 describe('resolveExportPath', () => {
   let root: string;

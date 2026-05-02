@@ -8,7 +8,7 @@
  * `@duckdb/node-api` until {@link DataCanvas.acquire} runs against an active
  * canvas configuration.
  *
- * @module src/canvas/index
+ * @module src/services/canvas/index
  */
 
 export { CanvasInstance } from './core/CanvasInstance.js';

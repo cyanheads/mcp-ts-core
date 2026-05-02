@@ -3,7 +3,7 @@
  * with debug logging and tenant-id resolution; the registry handles TTL,
  * caps, and provider-keying. Mirrors the StorageService surface pattern but
  * stays OTel-free in v1 (per issue #97 scope).
- * @module src/canvas/core/DataCanvas
+ * @module src/services/canvas/core/DataCanvas
  */
 
 import { JsonRpcErrorCode, McpError } from '@/types-global/errors.js';

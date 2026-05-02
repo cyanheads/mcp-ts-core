@@ -7,7 +7,7 @@
  * write to a temp file inside the sandbox and pipe its bytes to the caller's
  * `WritableStream`, then unlink the temp file.
  *
- * @module src/canvas/providers/duckdb/exportWriter
+ * @module src/services/canvas/providers/duckdb/exportWriter
  */
 
 import { mkdir, open, stat, unlink } from 'node:fs/promises';
