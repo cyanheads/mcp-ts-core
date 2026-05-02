@@ -103,6 +103,7 @@ It also works on Cloudflare Workers with `createWorkerHandler()` — same defini
 - **Definition linter** — validates names, schemas, auth scopes, annotation coherence, and format-parity at startup. Standalone CLI (`lint:mcp`) and devcheck step.
 - **Typed error contracts** — declare `errors: [{ reason, code, when, retryable? }]` on a tool/resource and the handler receives a typed `ctx.fail(reason, …)` keyed against the declared reasons. The contract publishes in `tools/list` so clients preview failure modes; the linter cross-checks the handler body. Error factories (`notFound()`, `httpErrorFromResponse()`, …) for ad-hoc throws; plain `Error` works too — framework auto-classifies.
 - **Multi-backend storage** — `in-memory`, filesystem, Supabase, Cloudflare D1/KV/R2. Swap providers via env var; handlers don't change.
+- **DataCanvas (optional)** — Tier 3 SQL/analytical workspace backed by DuckDB. Register tabular data from upstream APIs, run SQL across registered tables, export CSV/Parquet/JSON. Token-sharing model (opaque `canvas_id`) for multi-agent collaboration; sliding TTL + per-tenant scoping. Opt-in via `CANVAS_PROVIDER_TYPE=duckdb`; fails closed on Workers.
 - **Pluggable auth** — `none`, `jwt`, or `oauth`. Local secret or JWKS verification.
 - **Observability** — Pino logging, optional OpenTelemetry traces and metrics. Request correlation and tool metrics are automatic.
 - **Local + edge** — same definitions run on stdio, HTTP (Hono), and Cloudflare Workers.
@@ -143,6 +144,7 @@ All core config is Zod-validated from environment variables. Server-specific con
 | `MCP_AUTH_MODE` | `none`, `jwt`, or `oauth` | `none` |
 | `MCP_AUTH_SECRET_KEY` | JWT signing secret (required for `jwt` mode) | — |
 | `STORAGE_PROVIDER_TYPE` | `in-memory`, `filesystem`, `supabase`, `cloudflare-d1`/`kv`/`r2` | `in-memory` |
+| `CANVAS_PROVIDER_TYPE` | `none` or `duckdb` (Tier 3, optional peer dep `@duckdb/node-api`) | `none` |
 | `OTEL_ENABLED` | Enable OpenTelemetry | `false` |
 | `OPENROUTER_API_KEY` | OpenRouter LLM API key | — |
 
@@ -193,6 +195,7 @@ import { McpError, JsonRpcErrorCode, notFound, serviceUnavailable } from '@cyanh
 import { checkScopes } from '@cyanheads/mcp-ts-core/auth';
 import { markdown, fetchWithTimeout } from '@cyanheads/mcp-ts-core/utils';
 import { OpenRouterProvider, GraphService } from '@cyanheads/mcp-ts-core/services';
+import type { DataCanvas, CanvasInstance } from '@cyanheads/mcp-ts-core/canvas';
 import { validateDefinitions } from '@cyanheads/mcp-ts-core/linter';
 import { createMockContext } from '@cyanheads/mcp-ts-core/testing';
 import { fuzzTool, fuzzResource, fuzzPrompt } from '@cyanheads/mcp-ts-core/testing/fuzz';
