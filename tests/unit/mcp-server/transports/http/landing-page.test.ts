@@ -354,7 +354,10 @@ describe('renderLandingPage — polish derivations', () => {
     const tools = [
       makeTool('list_items', { annotations: { readOnlyHint: true } }),
       makeTool('search_items', { annotations: { readOnlyHint: true } }),
-      makeTool('create_item'),
+      // Deliberate `write` claim — `readOnlyHint: false` is required now that
+      // unannotated tools bucket as `unspecified` instead of falling back to
+      // `write`.
+      makeTool('create_item', { annotations: { readOnlyHint: false } }),
       makeTool('delete_item', { annotations: { destructiveHint: true } }),
     ];
     const manifest: ServerManifest = {
@@ -380,14 +383,17 @@ describe('renderLandingPage — polish derivations', () => {
     const html = renderLandingPage(manifest, 'https://example.com');
     expect(html).not.toMatch(/<h4 class="group-heading"/);
     // Cards still carry data-mutability so filtering works in the rare case
-    // a server has 13 write-bucket tools — but the heading is suppressed.
-    expect(html).toContain('data-mutability="write"');
+    // a server has 13 unspecified-bucket tools — but the heading is suppressed.
+    expect(html).toContain('data-mutability="unspecified"');
   });
 
   test('renders the tool filter bar with a chip per populated bucket', () => {
     const tools = [
       makeTool('safe_one', { annotations: { readOnlyHint: true } }),
-      makeTool('mut_one'),
+      // Explicit `readOnlyHint: false` — unannotated tools now bucket as
+      // `unspecified`, so a deliberate `write` claim is required to populate
+      // the write filter chip.
+      makeTool('mut_one', { annotations: { readOnlyHint: false } }),
       makeTool('boom', { annotations: { destructiveHint: true } }),
     ];
     const manifest: ServerManifest = {
@@ -415,6 +421,75 @@ describe('renderLandingPage — polish derivations', () => {
     // does an indexOf against this attribute, so casing must be normalized
     // here at render time.
     expect(html).toMatch(/data-search="fetchuser look up a user by email"/);
+  });
+
+  test('renders an unspecified bucket alongside the safety-coded buckets', () => {
+    const tools = [
+      makeTool('list_items', { annotations: { readOnlyHint: true } }),
+      // No annotations — should bucket as `unspecified`.
+      makeTool('connect'),
+      makeTool('mutate', { annotations: { readOnlyHint: false } }),
+      makeTool('delete_item', { annotations: { destructiveHint: true } }),
+    ];
+    const manifest: ServerManifest = {
+      ...defaultServerManifest,
+      definitions: { ...defaultServerManifest.definitions, tools },
+    };
+    const html = renderLandingPage(manifest, 'https://example.com');
+    const body = html.replace(/<style>[\s\S]*?<\/style>/g, '');
+
+    // Group heading + filter chip + card data attribute all render the new
+    // bucket consistently.
+    expect(body).toContain('data-group="unspecified"');
+    expect(body).toContain('data-filter-mutability="unspecified"');
+    expect(body).toContain('data-mutability="unspecified"');
+
+    // The unspecified card carries the muted pill variant.
+    expect(body).toContain('pill-unspecified');
+  });
+
+  test('renders a disabled bucket with the operator-facing reason and hint', () => {
+    const tools = [
+      makeTool('list_items', { annotations: { readOnlyHint: true } }),
+      makeTool('submit_observations', {
+        // Deliberate write claim — the "would be write" companion pill on
+        // disabled cards depends on the underlying classification being a
+        // declared bucket (not `unspecified`).
+        annotations: { readOnlyHint: false },
+        disabled: {
+          reason: 'Writes are turned off in this deployment.',
+          hint: 'BRAPI_ENABLE_WRITES=true',
+        },
+      }),
+    ];
+    const manifest: ServerManifest = {
+      ...defaultServerManifest,
+      definitions: { ...defaultServerManifest.definitions, tools },
+    };
+    const html = renderLandingPage(manifest, 'https://example.com');
+
+    // Bucket markers and chip
+    expect(html).toContain('data-mutability="disabled"');
+    expect(html).toContain('data-filter-mutability="disabled"');
+    expect(html).toContain('data-group="disabled"');
+
+    // Card variant + callout content
+    expect(html).toContain('tool-card--disabled');
+    expect(html).toContain('Writes are turned off in this deployment.');
+    expect(html).toContain('BRAPI_ENABLE_WRITES=true');
+
+    // Companion "would be write" pill surfaces the underlying mutability so
+    // operators understand what flavor of tool is gated. Suppressed when the
+    // underlying classification is `unspecified` (no signal worth surfacing).
+    expect(html).toContain('would be write');
+
+    // Disabled cards omit the invocation snippet but keep the schema preview
+    // available so operators see the contract the tool would expose.
+    const submitCardSlice = html.slice(
+      html.indexOf('data-name="submit_observations"'),
+      html.indexOf('</article>', html.indexOf('data-name="submit_observations"')),
+    );
+    expect(submitCardSlice).not.toContain('<summary>invocation</summary>');
   });
 
   test('renders extensions section when extensions present', () => {
@@ -491,11 +566,11 @@ describe('renderLandingPage — polish derivations', () => {
     expect(html).toContain('pill-app');
   });
 
-  test('annotation-less tools bucket as write rather than destructive', () => {
-    // The MCP spec defaults `destructiveHint` to `true` when `readOnlyHint`
-    // is false, but treating annotation-less tools as destructive surprises
-    // users. The renderer treats `destructiveHint === true` as the trigger,
-    // matching how the existing `pill-destructive` chip rendered.
+  test('annotation-less tools bucket as unspecified rather than write or destructive', () => {
+    // The renderer surfaces only what the author actually declared. With no
+    // mutability annotations on the tool, the bucket is `unspecified` — not
+    // `write` (which would falsely claim mutation) and not `destructive`
+    // (which would invent the spec default).
     const tools = [makeTool('ambiguous_tool')];
     const manifest: ServerManifest = {
       ...defaultServerManifest,
@@ -506,8 +581,24 @@ describe('renderLandingPage — polish derivations', () => {
     // the same attribute selectors for the spine colors, which would
     // false-positive a whole-document substring match.
     const body = html.replace(/<style>[\s\S]*?<\/style>/g, '');
-    expect(body).toContain('data-mutability="write"');
+    expect(body).toContain('data-mutability="unspecified"');
+    expect(body).not.toContain('data-mutability="write"');
     expect(body).not.toContain('data-mutability="destructive"');
+  });
+
+  test('classifies by declared annotation: readOnlyHint:false buckets as write, not unspecified', () => {
+    // `readOnlyHint: false` is a deliberate mutation claim — this is the
+    // signal that distinguishes a real write tool from one whose author
+    // simply hasn't declared mutability either way.
+    const tools = [makeTool('explicit_write', { annotations: { readOnlyHint: false } })];
+    const manifest: ServerManifest = {
+      ...defaultServerManifest,
+      definitions: { ...defaultServerManifest.definitions, tools },
+    };
+    const html = renderLandingPage(manifest, 'https://example.com');
+    const body = html.replace(/<style>[\s\S]*?<\/style>/g, '');
+    expect(body).toContain('data-mutability="write"');
+    expect(body).not.toContain('data-mutability="unspecified"');
   });
 
   test('scope chips render the access level only (not the full scope string)', () => {

@@ -252,6 +252,7 @@ mcp-ts-core/
 │   │   │       └── taskToolDefinition.ts
 │   │   ├── tools/
 │   │   │   ├── utils/
+│   │   │   │   ├── disabled-tool.ts
 │   │   │   │   ├── toolDefinition.ts
 │   │   │   │   └── toolHandlerFactory.ts
 │   │   │   └── tool-registration.ts
@@ -555,6 +556,7 @@ mcp-ts-core/
 │   │   │   │   ├── utils/
 │   │   │   │   │   ├── toolDefinition.test.ts
 │   │   │   │   │   └── toolHandlerFactory.test.ts
+│   │   │   │   ├── disabled-tool.test.ts
 │   │   │   │   ├── tool-registration.lifecycle.test.ts
 │   │   │   │   ├── tool-registration.test.ts
 │   │   │   │   └── typed-error-contract.test.ts

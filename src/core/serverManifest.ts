@@ -22,6 +22,10 @@ import { FRAMEWORK_NAME, FRAMEWORK_VERSION } from '@/config/index.js';
 import type { AnyPromptDefinition } from '@/mcp-server/prompts/utils/promptDefinition.js';
 import type { AnyResourceDefinition } from '@/mcp-server/resources/utils/resourceDefinition.js';
 import type { AnyToolDef } from '@/mcp-server/tools/tool-registration.js';
+import {
+  type DisabledMetadata,
+  getDisabledMetadata,
+} from '@/mcp-server/tools/utils/disabled-tool.js';
 import type { AnyToolDefinition } from '@/mcp-server/tools/utils/toolDefinition.js';
 import { configurationError } from '@/types-global/errors.js';
 
@@ -226,6 +230,14 @@ export interface ManifestTool {
   /** Auth scopes required by the tool, if any. */
   auth?: string[];
   description: string;
+  /**
+   * Present when the definition was wrapped with `disabledTool()` — the tool
+   * is in the manifest but skipped during MCP server registration. Renderers
+   * surface a muted card with the operator-facing reason and optional hint;
+   * discovery agents reading the Server Card should treat the tool as
+   * present-but-uncallable.
+   */
+  disabled?: DisabledMetadata;
   /** JSON Schema for the input (when Zod → JSON Schema succeeds). */
   inputSchema?: unknown;
   /** True when `_meta.ui.resourceUri` is set (MCP Apps). */
@@ -496,6 +508,7 @@ export function buildServerManifest(input: BuildServerManifestInput): ServerMani
     const outputSchema = safeToJsonSchema(d.output);
     const requiredFields = extractRequiredFields(d.input);
     const sourceUrl = d.sourceUrl ?? deriveSourceUrl(repoRoot, 'tools', name);
+    const disabled = getDisabledMetadata(def);
 
     return {
       name,
@@ -509,6 +522,7 @@ export function buildServerManifest(input: BuildServerManifestInput): ServerMani
       ...(outputSchema !== undefined && { outputSchema }),
       requiredFields,
       ...(sourceUrl && { sourceUrl }),
+      ...(disabled && { disabled }),
     };
   });
 

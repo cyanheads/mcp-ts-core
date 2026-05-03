@@ -2,6 +2,9 @@
  * @fileoverview Tool definition types and `tool()` builder function.
  * Provides the canonical `ToolDefinition` interface and `ToolAnnotations` type
  * used by all tool definitions and the handler factory.
+ *
+ * Also re-exports `disabledTool()` and `DisabledMetadata` so consumers can
+ * import the wrapper from the same `/tools` subpath as the builder.
  * @module src/mcp-server/tools/utils/toolDefinition
  */
 
@@ -10,6 +13,8 @@ import type { ZodObject, ZodRawShape, z } from 'zod';
 
 import type { HandlerContext, ReasonOf } from '@/core/context.js';
 import type { ErrorContract } from '@/types-global/errors.js';
+
+export { type DisabledMetadata, disabledTool } from './disabled-tool.js';
 
 /**
  * Defines the annotations that provide hints about a tool's behavior.

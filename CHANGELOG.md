@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.8.11](changelog/0.8.x/0.8.11.md) — 2026-05-02
+
+disabledTool() wrapper for feature-flagged tools (#96); landing page gains an `unspecified` mutability bucket so unannotated tools no longer infer as `write` (#92); skill-versioning policy in CLAUDE.md/AGENTS.md with 7 retroactive bumps (#98).
+
 ## [0.8.10](changelog/0.8.x/0.8.10.md) — 2026-05-02
 
 Canvas source relocated to src/services/canvas/ matching graph/llm/speech layout (consumer subpath @cyanheads/mcp-ts-core/canvas unchanged); design / add-tool / security-pass skills surface it as an option for tabular API servers.

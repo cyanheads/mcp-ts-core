@@ -17,6 +17,7 @@ import {
 } from '@/core/serverManifest.js';
 import { prompt } from '@/mcp-server/prompts/utils/promptDefinition.js';
 import { resource } from '@/mcp-server/resources/utils/resourceDefinition.js';
+import { disabledTool } from '@/mcp-server/tools/utils/disabled-tool.js';
 import { tool } from '@/mcp-server/tools/utils/toolDefinition.js';
 
 /**
@@ -194,6 +195,44 @@ describe('buildServerManifest — baseline', () => {
     expect(manifest.definitions.tools[0]?.sourceUrl).toMatch(
       /blob\/main\/src\/mcp-server\/tools\/definitions\/my-tool\.tool\.ts$/,
     );
+  });
+
+  test('passes disabled metadata through to ManifestTool when wrapped', () => {
+    const enabledDef = tool('readable', {
+      description: 'Read tool',
+      input: z.object({}),
+      output: z.object({}),
+      handler: () => ({}),
+    });
+    const disabledDef = disabledTool(
+      tool('writable', {
+        description: 'Write tool',
+        input: z.object({}),
+        output: z.object({}),
+        handler: () => ({}),
+      }),
+      {
+        reason: 'Writes are turned off in this deployment.',
+        hint: 'BRAPI_ENABLE_WRITES=true',
+      },
+    );
+
+    const manifest = buildServerManifest({
+      config: stubConfig(),
+      tools: [enabledDef, disabledDef] as Parameters<typeof buildServerManifest>[0]['tools'],
+      resources: [],
+      prompts: [],
+    });
+
+    expect(manifest.definitions.tools).toHaveLength(2);
+    expect(manifest.definitionCounts.tools).toBe(2);
+    const readable = manifest.definitions.tools.find((t) => t.name === 'readable');
+    const writable = manifest.definitions.tools.find((t) => t.name === 'writable');
+    expect(readable?.disabled).toBeUndefined();
+    expect(writable?.disabled).toEqual({
+      reason: 'Writes are turned off in this deployment.',
+      hint: 'BRAPI_ENABLE_WRITES=true',
+    });
   });
 });
 

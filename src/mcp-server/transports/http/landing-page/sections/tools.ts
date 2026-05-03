@@ -14,30 +14,33 @@ import { html, type SafeHtml } from '@/utils/formatting/html.js';
 
 import { renderPill, renderSectionHeading, renderSnippet } from '../primitives.js';
 
-type Mutability = 'read' | 'write' | 'destructive';
+type Mutability = 'read' | 'unspecified' | 'write' | 'destructive';
+type Bucket = Mutability | 'disabled';
 
 /**
- * Mutability bucket order — safe defaults first, deliberate engagement last.
- * Filter chips render in this order too.
+ * Bucket order — safety-ascending (`read` → `unspecified` → `write` →
+ * `destructive`), then `disabled` last as operator-facing context for tools
+ * that exist in this server but are skipped at registration. Filter chips
+ * render in this order too.
  */
-const MUTABILITY_ORDER: readonly Mutability[] = ['read', 'write', 'destructive'];
+const BUCKET_ORDER: readonly Bucket[] = ['read', 'unspecified', 'write', 'destructive', 'disabled'];
 
 export function renderToolsSection(tools: ManifestTool[]): SafeHtml {
   if (tools.length === 0) return html``;
 
-  const buckets = bucketByMutability(tools);
-  const populatedBuckets = MUTABILITY_ORDER.filter((m) => buckets[m].length > 0);
+  const buckets = bucketTools(tools);
+  const populatedBuckets = BUCKET_ORDER.filter((b) => buckets[b].length > 0);
   // A single bucket is redundant with the section header — skip per-group
   // labels in that case but keep `data-mutability` on cards so the filter
   // chips still work.
   const showHeadings = populatedBuckets.length > 1;
 
-  const groups = populatedBuckets.map((mutability) => {
-    const bucketTools = buckets[mutability];
+  const groups = populatedBuckets.map((bucket) => {
+    const bucketTools = buckets[bucket];
     const heading = showHeadings
-      ? html`<h4 class="group-heading" data-group="${mutability}">${mutability} <span class="group-count">${String(bucketTools.length)}</span></h4>`
+      ? html`<h4 class="group-heading" data-group="${bucket}">${bucket} <span class="group-count">${String(bucketTools.length)}</span></h4>`
       : html``;
-    return html`${heading}<div class="card-grid" data-grid="${mutability}">${bucketTools.map((t) => renderToolCard(t, mutability))}</div>`;
+    return html`${heading}<div class="card-grid" data-grid="${bucket}">${bucketTools.map((t) => renderToolCard(t, bucket))}</div>`;
   });
 
   return html`
@@ -50,13 +53,13 @@ export function renderToolsSection(tools: ManifestTool[]): SafeHtml {
   `;
 }
 
-function renderToolFilterBar(populatedBuckets: readonly Mutability[]): SafeHtml {
+function renderToolFilterBar(populatedBuckets: readonly Bucket[]): SafeHtml {
   const chips: SafeHtml[] = [
     html`<button type="button" class="tool-chip" data-filter-mutability="all" aria-pressed="true">all</button>`,
   ];
-  for (const m of populatedBuckets) {
+  for (const b of populatedBuckets) {
     chips.push(
-      html`<button type="button" class="tool-chip tool-chip--${m}" data-filter-mutability="${m}" aria-pressed="false">${m}</button>`,
+      html`<button type="button" class="tool-chip tool-chip--${b}" data-filter-mutability="${b}" aria-pressed="false">${b}</button>`,
     );
   }
 
@@ -77,12 +80,23 @@ function renderToolFilterBar(populatedBuckets: readonly Mutability[]): SafeHtml 
   `;
 }
 
-function renderToolCard(tool: ManifestTool, mutability: Mutability): SafeHtml {
+function renderToolCard(tool: ManifestTool, bucket: Bucket): SafeHtml {
   const anchor = `tool-${tool.name}`;
   const annotations = tool.annotations as { openWorldHint?: boolean } | undefined;
+  const isDisabled = bucket === 'disabled';
 
-  // Mutability badge first — the safety signal readers track at a glance.
-  const pills: SafeHtml[] = [renderPill(mutability, mutability)];
+  // Bucket badge first — the safety signal readers track at a glance. For
+  // disabled tools, lead with the disabled pill, then surface the underlying
+  // mutability so operators understand what flavor of tool sits behind the gate
+  // — but skip the companion when the tool is `unspecified`, since "would be
+  // unspecified" carries no signal worth the pixels.
+  const pills: SafeHtml[] = [renderPill(bucket, bucket)];
+  if (isDisabled) {
+    const underlying = classifyMutability(tool);
+    if (underlying !== 'unspecified') {
+      pills.push(renderPill(`would be ${underlying}`, `${underlying}-muted`));
+    }
+  }
   if (annotations?.openWorldHint) pills.push(renderPill('open-world', 'openworld'));
   if (tool.isTask) pills.push(renderPill('task', 'task'));
   if (tool.isApp) pills.push(renderPill('app', 'app'));
@@ -107,12 +121,18 @@ function renderToolCard(tool: ManifestTool, mutability: Mutability): SafeHtml {
       `
     : html``;
 
-  const invocation = html`
-    <details class="card-detail">
-      <summary>invocation</summary>
-      ${renderSnippet(`tool-${tool.name}`, buildInvocationSnippet(tool))}
-    </details>
-  `;
+  // Disabled tools replace the invocation snippet with an operator-facing
+  // disabled notice (reason + optional hint + optional `since`). Schema
+  // preview stays — the contract a tool exposes is still useful info even
+  // when the tool can't be invoked.
+  const callout = isDisabled
+    ? renderDisabledCallout(tool)
+    : html`
+        <details class="card-detail">
+          <summary>invocation</summary>
+          ${renderSnippet(`tool-${tool.name}`, buildInvocationSnippet(tool))}
+        </details>
+      `;
 
   // Search target: name + description as a single lowercase string. Hidden
   // attribute (not visible) so the filter script can match without parsing
@@ -120,12 +140,14 @@ function renderToolCard(tool: ManifestTool, mutability: Mutability): SafeHtml {
   // entries don't waste haystack length.
   const searchTarget = `${tool.name} ${tool.description}`.replace(/\s+/g, ' ').toLowerCase();
 
+  const cardClass = isDisabled ? 'card tool-card tool-card--disabled' : 'card tool-card';
+
   return html`
     <article
-      class="card tool-card"
+      class="${cardClass}"
       id="${anchor}"
       data-tool-card
-      data-mutability="${mutability}"
+      data-mutability="${bucket}"
       data-name="${tool.name}"
       data-search="${searchTarget}"
     >
@@ -138,7 +160,7 @@ function renderToolCard(tool: ManifestTool, mutability: Mutability): SafeHtml {
       <footer class="card-foot">
         ${scopeChips}
         <div class="card-actions">
-          ${invocation}
+          ${callout}
           ${schemaPreview}
         </div>
       </footer>
@@ -146,23 +168,61 @@ function renderToolCard(tool: ManifestTool, mutability: Mutability): SafeHtml {
   `;
 }
 
+function renderDisabledCallout(tool: ManifestTool): SafeHtml {
+  const meta = tool.disabled;
+  if (!meta) return html``;
+  const since = meta.since
+    ? html` <span class="disabled-since">since ${meta.since}</span>`
+    : html``;
+  const hint = meta.hint
+    ? html`<pre class="disabled-hint"><code>${meta.hint}</code></pre>`
+    : html``;
+  return html`
+    <div class="disabled-callout" role="note">
+      <p class="disabled-reason"><strong>Disabled.</strong> ${meta.reason}${since}</p>
+      ${hint}
+    </div>
+  `;
+}
+
 /**
- * Map a tool to a mutability bucket using its annotations. The MCP spec
- * defaults `destructiveHint` to `true`, but treating annotation-less tools
- * as "destructive" surprises readers — bucket as `write` unless the
- * destructive hint is explicitly set. Mirrors how the annotation pills
- * render today (`pill-destructive` requires `=== true`).
+ * Map a tool to a mutability bucket using its annotations. Renders only what
+ * the author actually declared:
+ *
+ * - `destructiveHint === true`        → `destructive`
+ * - `readOnlyHint === true`           → `read`
+ * - `readOnlyHint === false` (only)   → `write` (deliberate mutation claim)
+ * - neither set                       → `unspecified` (no claim either way)
+ *
+ * The MCP spec defaults `destructiveHint` to `true` when `readOnlyHint` is
+ * `false`, but treating annotation-less tools as `destructive` (or `write`,
+ * the prior fallback) surprises readers — surfacing `unspecified` is
+ * honest, gently nudges authors to declare, and keeps the safety pills as
+ * deliberate signals rather than inferred ones.
  */
 function classifyMutability(tool: ManifestTool): Mutability {
   const a = tool.annotations as { readOnlyHint?: boolean; destructiveHint?: boolean } | undefined;
-  if (a?.readOnlyHint === true) return 'read';
   if (a?.destructiveHint === true) return 'destructive';
-  return 'write';
+  if (a?.readOnlyHint === true) return 'read';
+  if (a?.readOnlyHint === false) return 'write';
+  return 'unspecified';
 }
 
-function bucketByMutability(tools: ManifestTool[]): Record<Mutability, ManifestTool[]> {
-  const buckets: Record<Mutability, ManifestTool[]> = { read: [], write: [], destructive: [] };
-  for (const tool of tools) buckets[classifyMutability(tool)].push(tool);
+function bucketTools(tools: ManifestTool[]): Record<Bucket, ManifestTool[]> {
+  const buckets: Record<Bucket, ManifestTool[]> = {
+    read: [],
+    unspecified: [],
+    write: [],
+    destructive: [],
+    disabled: [],
+  };
+  for (const tool of tools) {
+    if (tool.disabled) {
+      buckets.disabled.push(tool);
+      continue;
+    }
+    buckets[classifyMutability(tool)].push(tool);
+  }
   return buckets;
 }
 

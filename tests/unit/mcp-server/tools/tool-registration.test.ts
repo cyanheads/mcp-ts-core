@@ -5,6 +5,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { z } from 'zod';
 import { ToolRegistry } from '@/mcp-server/tools/tool-registration.js';
+import { disabledTool } from '@/mcp-server/tools/utils/disabled-tool.js';
 import { tool } from '@/mcp-server/tools/utils/toolDefinition.js';
 import type { HandlerFactoryServices } from '@/mcp-server/tools/utils/toolHandlerFactory.js';
 import { JsonRpcErrorCode } from '@/types-global/errors.js';
@@ -153,6 +154,73 @@ describe('ToolRegistry', () => {
       expect(mockServer.setToolRequestHandlers).toHaveBeenCalledTimes(1);
       expect(mockServer.experimental.tasks.registerToolTask).toHaveBeenCalledTimes(1);
       expect(mockServer.registerTool).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('Disabled Tools', () => {
+    it('should skip MCP registration for tools wrapped with disabledTool()', async () => {
+      const enabledDef = tool('enabled_tool', {
+        description: 'Enabled tool',
+        input: z.object({}),
+        output: z.object({}),
+        handler: () => ({}),
+      });
+      const disabledDef = disabledTool(
+        tool('disabled_tool', {
+          description: 'Disabled tool',
+          input: z.object({}),
+          output: z.object({}),
+          handler: () => ({}),
+        }),
+        { reason: 'Writes are turned off in this deployment.' },
+      );
+
+      const registry = new ToolRegistry([enabledDef, disabledDef], services);
+      await registry.registerAll(mockServer);
+
+      expect(mockServer.registerTool).toHaveBeenCalledTimes(1);
+      expect(mockServer.registerTool.mock.calls[0][0]).toBe('enabled_tool');
+    });
+
+    it('should skip disabled task tools too', async () => {
+      const disabledTaskDef = disabledTool(
+        tool('disabled_task', {
+          description: 'Disabled task tool',
+          input: z.object({}),
+          output: z.object({}),
+          task: true,
+          handler: async () => ({}),
+        }),
+        { reason: 'Background analytics are disabled in this deployment.' },
+      );
+
+      const registry = new ToolRegistry([disabledTaskDef], services);
+      await registry.registerAll(mockServer);
+
+      expect(mockServer.experimental.tasks.registerToolTask).not.toHaveBeenCalled();
+      expect(mockServer.registerTool).not.toHaveBeenCalled();
+      // SDK tools/list + tools/call handlers are still installed even when
+      // every tool is disabled — clients get a truthful empty list.
+      expect(mockServer.setToolRequestHandlers).toHaveBeenCalledTimes(1);
+    });
+
+    it('should preserve all original definition fields when wrapped', () => {
+      const original = tool('preserved', {
+        description: 'Original description',
+        input: z.object({ q: z.string().describe('q') }),
+        output: z.object({ r: z.string().describe('r') }),
+        auth: ['tool:preserved:read'],
+        handler: () => ({ r: 'ok' }),
+      });
+      const wrapped = disabledTool(original, {
+        reason: 'Disabled until config flag is enabled.',
+        hint: 'PRESERVED_FLAG=true',
+      });
+
+      expect(wrapped.name).toBe('preserved');
+      expect(wrapped.description).toBe('Original description');
+      expect(wrapped.auth).toEqual(['tool:preserved:read']);
+      expect(wrapped.handler).toBe(original.handler);
     });
   });
 

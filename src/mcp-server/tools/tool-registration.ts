@@ -15,6 +15,7 @@ import {
   isTaskToolDefinition,
   type TaskToolDefinition,
 } from '@/mcp-server/tasks/utils/taskToolDefinition.js';
+import { getDisabledMetadata } from '@/mcp-server/tools/utils/disabled-tool.js';
 import type { AnyToolDefinition } from '@/mcp-server/tools/utils/toolDefinition.js';
 import {
   buildToolErrorResult,
@@ -84,8 +85,18 @@ export class ToolRegistry {
 
     const standardTools: AnyToolDefinition[] = [];
     const taskTools: TaskToolDefinition<ZodObject<ZodRawShape>, ZodObject<ZodRawShape>>[] = [];
+    let disabledCount = 0;
 
     for (const def of this.toolDefs) {
+      const disabled = getDisabledMetadata(def);
+      if (disabled) {
+        disabledCount++;
+        logger.debug(
+          `Skipping MCP registration for disabled tool '${def.name}': ${disabled.reason}`,
+          context,
+        );
+        continue;
+      }
       if (isTaskToolDefinition(def)) {
         taskTools.push(def);
       } else {
@@ -93,8 +104,9 @@ export class ToolRegistry {
       }
     }
 
+    const disabledNote = disabledCount > 0 ? ` (${disabledCount} disabled, skipped)` : '';
     logger.debug(
-      `Registering ${standardTools.length} regular tool(s) and ${taskTools.length} task tool(s)...`,
+      `Registering ${standardTools.length} regular tool(s) and ${taskTools.length} task tool(s)${disabledNote}...`,
       context,
     );
 

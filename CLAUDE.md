@@ -1,6 +1,6 @@
 # Agent Protocol
 
-**Package:** `@cyanheads/mcp-ts-core` · **Version:** 0.8.10
+**Package:** `@cyanheads/mcp-ts-core` · **Version:** 0.8.11
 **npm:** [@cyanheads/mcp-ts-core](https://www.npmjs.com/package/@cyanheads/mcp-ts-core) · **Docker:** [ghcr.io/cyanheads/mcp-ts-core](https://ghcr.io/cyanheads/mcp-ts-core)
 
 > **Developer note:** Never assume. Read related files and docs before making changes. Read full file content for context. Never edit a file before reading it.
@@ -482,6 +482,12 @@ Options: `numRuns` (valid inputs, default 50), `numAdversarial` (adversarial inp
 ## API Quick References
 
 Detailed method signatures, options, and examples live in skill files. Read the relevant skill before starting a task it covers.
+
+### Skill versioning
+
+Each `skills/<name>/SKILL.md` carries a `metadata.version` string in its frontmatter. The downstream `maintenance` skill's Phase A reads this field to decide whether to replace a consumer's local copy — when content changes without a version bump, Phase A skips the skill and drift surfaces only through the noisier content-hash backstop.
+
+**Policy:** When you change a SKILL.md body, bump `metadata.version` in the same edit. Pure typo and whitespace fixes are exempt. One bump per release cycle is sufficient — if the file already carries an unreleased bump, additional edits within the same cycle don't each need their own.
 
 | Skill | Path | Covers |
 |:------|:-----|:-------|

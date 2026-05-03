@@ -727,6 +727,18 @@ section { padding: var(--space-12) 0 0; }
   background: color-mix(in oklab, #dc2626, transparent 92%);
   border-color: color-mix(in oklab, #dc2626, transparent 72%);
 }
+.tool-chip--unspecified[aria-pressed="true"] {
+  color: var(--fg-muted);
+  background: var(--bg-subtle);
+  border-color: var(--border);
+  font-style: italic;
+}
+.tool-chip--disabled[aria-pressed="true"] {
+  color: var(--fg-subtle);
+  background: var(--bg-subtle);
+  border-color: var(--border);
+  font-style: italic;
+}
 @media (prefers-color-scheme: dark) {
   .tool-chip--read[aria-pressed="true"] { color: #4ade80; }
   .tool-chip--destructive[aria-pressed="true"] { color: #f87171; }
@@ -849,12 +861,30 @@ section { padding: var(--space-12) 0 0; }
   transition: background var(--duration-fast) var(--ease-out);
 }
 .tool-card[data-mutability="read"] { --card-spine: #16a34a; }
+.tool-card[data-mutability="unspecified"] { --card-spine: var(--border); }
 .tool-card[data-mutability="write"] { --card-spine: var(--border-strong); }
 .tool-card[data-mutability="destructive"] { --card-spine: #dc2626; }
+.tool-card[data-mutability="disabled"] { --card-spine: var(--border); }
 @media (prefers-color-scheme: dark) {
   .tool-card[data-mutability="read"] { --card-spine: #4ade80; }
   .tool-card[data-mutability="destructive"] { --card-spine: #f87171; }
 }
+
+/* Disabled tool card — muted overall to read as "present but not callable".
+   Hover lift is disabled too; no invocation snippet means there's no
+   interactive payoff to suggest. */
+.tool-card--disabled {
+  background: var(--bg-subtle);
+  border-style: dashed;
+}
+.tool-card--disabled .card-title a { color: var(--fg-muted); }
+.tool-card--disabled .card-desc { color: var(--fg-subtle); }
+.tool-card--disabled:hover {
+  border-color: var(--border-strong);
+  transform: none;
+  box-shadow: none;
+}
+.tool-card--disabled::before { opacity: 0.5; }
 .card:hover {
   border-color: var(--accent-edge);
   transform: translateY(-1px);
@@ -1031,12 +1061,78 @@ section { padding: var(--space-12) 0 0; }
 /* Mutability badges — primary safety signal, sized to pass a squint test. */
 .pill-read { color: #16a34a; background: color-mix(in oklab, #16a34a, transparent 88%); border-color: color-mix(in oklab, #16a34a, transparent 65%); }
 .pill-write { color: var(--fg-muted); background: var(--bg-subtle); border-color: var(--border); }
+/* The unspecified bucket reads as indeterminate, not "write" — italic +
+   lighter weight visually separates it from the deliberate-mutation signal
+   of pill-write. */
+.pill-unspecified {
+  color: var(--fg-subtle);
+  background: var(--bg-subtle);
+  border-color: var(--border);
+  font-style: italic;
+  font-weight: 400;
+}
 .pill-destructive { color: #dc2626; background: color-mix(in oklab, #dc2626, transparent 88%); border-color: color-mix(in oklab, #dc2626, transparent 65%); font-weight: 600; }
 .pill-openworld { color: #2563eb; background: color-mix(in oklab, #2563eb, transparent 92%); border-color: color-mix(in oklab, #2563eb, transparent 72%); }
 .pill-task { color: var(--accent); background: var(--accent-softer); border-color: var(--accent-edge); }
 .pill-app { color: #9333ea; background: color-mix(in oklab, #9333ea, transparent 92%); border-color: color-mix(in oklab, #9333ea, transparent 72%); }
 .pill-auth { color: var(--fg-subtle); font-size: 0.65rem; }
 .pill-auth::before { display: none; }
+.pill-disabled {
+  color: var(--fg-subtle);
+  background: var(--bg-subtle);
+  border-color: var(--border);
+  font-style: italic;
+}
+/* "would be <mutability>" pills shown alongside the disabled badge — even more
+   muted than the regular mutability pills so the eye lands on disabled first. */
+.pill-read-muted,
+.pill-write-muted,
+.pill-destructive-muted {
+  color: var(--fg-subtle);
+  background: var(--bg-subtle);
+  border-color: var(--border);
+  font-size: 0.65rem;
+  opacity: 0.85;
+}
+.pill-read-muted::before,
+.pill-write-muted::before,
+.pill-destructive-muted::before { display: none; }
+
+/* Disabled callout — replaces the invocation snippet with operator-facing
+   context about why the tool is disabled and how to enable it. */
+.disabled-callout {
+  border: 1px dashed var(--border);
+  border-radius: var(--radius-sm);
+  padding: var(--space-2) var(--space-3);
+  background: var(--bg-subtle);
+  margin-top: var(--space-1);
+}
+.disabled-reason {
+  margin: 0 0 var(--space-1) 0;
+  font-size: var(--text-sm);
+  color: var(--fg-muted);
+  line-height: 1.5;
+}
+.disabled-reason strong { color: var(--fg); font-weight: 600; }
+.disabled-since {
+  display: inline-block;
+  margin-left: var(--space-1);
+  font-size: var(--text-xs);
+  color: var(--fg-subtle);
+  font-family: var(--font-mono);
+}
+.disabled-hint {
+  margin: 0;
+  padding: var(--space-1) var(--space-2);
+  background: var(--bg-elevated);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  font-size: var(--text-xs);
+  font-family: var(--font-mono);
+  color: var(--fg);
+  overflow-x: auto;
+}
+.disabled-hint code { background: transparent; border: 0; padding: 0; }
 
 @media (prefers-color-scheme: dark) {
   .pill-read { color: #4ade80; }

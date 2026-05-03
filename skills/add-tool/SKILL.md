@@ -4,7 +4,7 @@ description: >
   Scaffold a new MCP tool definition. Use when the user asks to add a tool, create a new tool, or implement a new capability for the server.
 metadata:
   author: cyanheads
-  version: "2.4"
+  version: "2.6"
   audience: external
   type: reference
 ---
@@ -159,6 +159,44 @@ await createApp({
 ```
 
 If the repo already uses `src/mcp-server/tools/definitions/index.ts`, update that barrel instead of switching patterns midstream.
+
+### Feature-flagged tools (`disabledTool` wrapper)
+
+When a tool is gated behind config (e.g., `BRAPI_ENABLE_WRITES`, `FOO_PRO_FEATURES`), the gate has two failure modes when wired naively. **Excluding the tool from the array** hides it from MCP registration *and* from the HTTP landing page — operators see a smaller catalog than the README documents and have no in-page hint that the tool exists at all. **Always registering it** lets clients call the tool and forces handler-side `forbidden` throws, which keeps the dangerous surface in the LLM's reach.
+
+`disabledTool()` resolves this: the wrapped tool is **present in the manifest and rendered on the landing page** (muted card, with a reason and an optional hint for how to enable it), but **skipped during MCP server registration** so clients cannot call it.
+
+```typescript
+import { disabledTool, tool, z } from '@cyanheads/mcp-ts-core';
+import { getServerConfig } from '@/config/server-config.js';
+
+const submitObservationsDef = tool('brapi_submit_observations', {
+  description: 'Submit observation records (POST/PUT) with elicit gate.',
+  annotations: { readOnlyHint: false, destructiveHint: false },
+  input: z.object({ /* … */ }),
+  output: z.object({ /* … */ }),
+  async handler(input, ctx) { /* … */ },
+});
+
+export const submitObservations = getServerConfig().enableWrites
+  ? submitObservationsDef
+  : disabledTool(submitObservationsDef, {
+      reason: 'Writes are turned off in this deployment.',
+      hint: 'BRAPI_ENABLE_WRITES=true',
+    });
+```
+
+`DisabledMetadata` shape: `{ reason: string; hint?: string; since?: string }`. The `reason` renders as a sentence on the disabled card; `hint` (when present) renders as a code-styled block — use whatever the gate is (env var line, config key, doc reference). `since` annotates the card with a small "since vX" tag — useful when phasing a tool out behind a flag before removal.
+
+**Three tool listings** to keep straight:
+
+| Surface | Disabled tools? |
+|:---|:---|
+| `tools/list` (MCP protocol — what clients call) | **No** — disabled tools are skipped at registration |
+| `/.well-known/mcp.json` `definitions.tools` (Server Card) | **Yes**, with `disabled` field — discovery agents see them as present-but-uncallable |
+| `/` (HTML landing page) | **Yes**, in a 4th muted bucket after `read \| write \| destructive` |
+
+The wrapper composes with both standard and task tools, and preserves all original definition fields (handler, schemas, auth scopes, error contracts) — when re-enabled, the tool already conforms to every lint rule.
 
 ## Tool Response Design
 
