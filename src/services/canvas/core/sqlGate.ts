@@ -1,26 +1,25 @@
 /**
  * @fileoverview Read-only SQL gate for the DataCanvas primitive. Engine-agnostic
- * pure validators that the provider invokes after pulling DuckDB-specific
- * metadata (statement extraction, prepared-statement type, EXPLAIN plan JSON).
+ * pure validators the provider invokes after pulling DuckDB-specific metadata.
  *
- * Three layers of enforcement, each authoritative on its own:
+ * Four layers of enforcement, each authoritative:
  *
- * 1. **Single-statement check.** The provider parses the input via DuckDB's
- *    `extractStatements` and passes the count here. Anything other than 1 is
- *    rejected — comment-hidden second statements, multi-statement smuggling,
- *    and Unicode tricks all collapse here because DuckDB's parser is the
- *    arbiter, not a regex.
- * 2. **Statement-type check.** The provider prepares the single statement and
- *    passes the resulting `statementType`. We require `SELECT`. Any DDL, DML,
- *    or utility (PRAGMA/ATTACH/COPY/INSTALL/LOAD/SET/EXECUTE) fails to type as
- *    SELECT and is rejected here.
- * 3. **Plan-walk allowlist.** The provider runs `EXPLAIN (FORMAT JSON)` and
- *    passes the plan JSON. We walk every node and reject if any operator
- *    name is outside the curated allowlist — defense-in-depth against future
- *    DuckDB additions that might smuggle work into a SELECT envelope.
+ * 1. **Function deny-list (text scan).** Pre-EXPLAIN regex against the SQL
+ *    (string literals stripped) for file/HTTP-reading table functions like
+ *    `read_json`, `read_parquet`. These can lower into generic SEQ_SCAN
+ *    operators that pass the operator allowlist; catching them by name closes
+ *    that bypass.
+ * 2. **Single-statement check.** Reject anything other than exactly one
+ *    statement parsed by DuckDB. Comment-hidden second statements, Unicode
+ *    tricks, and multi-statement smuggling collapse here.
+ * 3. **Statement-type check.** Require `SELECT`. DDL, DML, and utility
+ *    statements (PRAGMA/ATTACH/COPY/INSTALL/LOAD/SET/EXECUTE) fail to type as
+ *    SELECT.
+ * 4. **Plan-walk allowlist + denied-function rescan.** Walk the
+ *    `EXPLAIN (FORMAT JSON)` tree; reject any operator outside the allowlist
+ *    or any string field referencing a deny-listed function.
  *
- * Rejection paths throw `ValidationError` with a structured `data.reason`
- * suitable for surfacing to the agent.
+ * Rejection paths throw `ValidationError` with a structured `data.reason`.
  *
  * @module src/services/canvas/core/sqlGate
  */
@@ -28,12 +27,9 @@
 import { validationError } from '@/types-global/errors.js';
 
 /**
- * DuckDB statement-type strings emitted by the Neo client. Only `SELECT` is
- * accepted by the canvas. Other values (`INSERT`, `UPDATE`, `DELETE`,
- * `CREATE`, `DROP`, `ALTER`, `COPY`, `PRAGMA`, `ATTACH`, `DETACH`, `LOAD`,
- * `INSTALL`, `SET`, `RESET`, `EXECUTE`, `EXPLAIN`, `TRANSACTION`, `VACUUM`,
- * `CHECKPOINT`, `CALL`, …) are rejected outright. This is a surface — not
- * an enum we own — so the gate matches on the literal string emitted.
+ * DuckDB statement-type string. Only `SELECT` is accepted; everything else
+ * (DDL, DML, utility) is rejected. Modeled as a string surface rather than an
+ * owned enum so the gate matches on whatever DuckDB emits.
  */
 export type DuckdbStatementType = string;
 
@@ -41,15 +37,27 @@ export type DuckdbStatementType = string;
 export const ALLOWED_STATEMENT_TYPES: ReadonlySet<DuckdbStatementType> = new Set(['SELECT']);
 
 /**
- * Curated allowlist of operator names that can appear in an EXPLAIN plan.
- * Sourced from DuckDB's logical/physical-plan node families (1.5.x). Not
- * every member is reachable from a SELECT — but every member is read-only.
- *
- * Pinned by `tests/canvas/sqlGate.fixtures.test.ts` against live DuckDB
- * EXPLAIN output so version bumps that add operators are caught in CI rather
- * than silently widening the gate.
- *
- * Operators **not** in this list cause rejection. Notable exclusions:
+ * Reason codes set on `validationError.data.reason` by gate assertions.
+ * Consumers can import the {@link SqlGateReason} union to translate gate
+ * denials into typed contract reasons without duplicating the strings.
+ */
+export const SQL_GATE_REASONS = {
+  multiStatement: 'multi_statement',
+  nonSelectStatement: 'non_select_statement',
+  planOperatorNotAllowed: 'plan_operator_not_allowed',
+  deniedFunction: 'denied_function',
+  deniedFunctionInPlan: 'denied_function_in_plan',
+  identifierEmpty: 'identifier_empty',
+  identifierShape: 'identifier_shape',
+  identifierReserved: 'identifier_reserved',
+} as const;
+
+/** Union of all gate reason strings — see {@link SQL_GATE_REASONS}. */
+export type SqlGateReason = (typeof SQL_GATE_REASONS)[keyof typeof SQL_GATE_REASONS];
+
+/**
+ * Allowlist of read-only operator names that can appear in an EXPLAIN plan.
+ * Anything outside this set causes rejection. Notable exclusions:
  *
  * - `READ_CSV`, `READ_PARQUET`, `READ_JSON` — bypass canvas, read external files.
  * - `INSERT`, `UPDATE`, `DELETE`, `MERGE`, `CREATE_*`, `DROP_*`, `ALTER_*` — writes.
@@ -57,7 +65,7 @@ export const ALLOWED_STATEMENT_TYPES: ReadonlySet<DuckdbStatementType> = new Set
  * - `ATTACH`, `DETACH`, `LOAD`, `INSTALL`, `PRAGMA`, `SET`, `RESET` — utility.
  */
 export const ALLOWED_PLAN_OPERATORS: ReadonlySet<string> = new Set([
-  // Scans (registered tables only — file scans like READ_CSV are excluded)
+  // Scans (registered tables only)
   'SEQ_SCAN',
   'COLUMN_DATA_SCAN',
   'CHUNK_SCAN',
@@ -115,9 +123,113 @@ export const ALLOWED_PLAN_OPERATORS: ReadonlySet<string> = new Set([
 ]);
 
 /**
- * Public entry point — validates the trio of `(statementCount, statementType,
- * planJson)`. Throws on the first violation, leaving the provider to pass
- * results back to the caller untouched on success.
+ * External-data table functions (files, HTTP, S3, lakehouse formats). These
+ * lower into generic scan operators that pass the operator allowlist, so the
+ * text-scan and plan-rescan defenses in this module catch them by name
+ * regardless of how DuckDB lowers them.
+ */
+export const DENIED_TABLE_FUNCTIONS: ReadonlySet<string> = new Set([
+  // CSV
+  'read_csv',
+  'read_csv_auto',
+  'sniff_csv',
+  // JSON
+  'read_json',
+  'read_json_auto',
+  'read_json_objects',
+  'read_json_objects_auto',
+  'read_ndjson',
+  'read_ndjson_auto',
+  'read_ndjson_objects',
+  // Parquet
+  'read_parquet',
+  'parquet_scan',
+  'parquet_metadata',
+  'parquet_schema',
+  'parquet_file_metadata',
+  'parquet_kv_metadata',
+  // Text / blob / glob
+  'read_text',
+  'read_blob',
+  'glob',
+  // Iceberg / Delta
+  'iceberg_scan',
+  'iceberg_metadata',
+  'iceberg_snapshots',
+  'delta_scan',
+  // Postgres / MySQL / SQLite scanners (extension-loaded; defense-in-depth)
+  'postgres_scan',
+  'postgres_query',
+  'mysql_scan',
+  'mysql_query',
+  'sqlite_scan',
+  'sqlite_query',
+]);
+
+/**
+ * Call-shape regex (`name(`). Caller strips comments and string literals first
+ * so quoted text and comment-injected separators between a name and its `(`
+ * can't false-positive or bypass.
+ */
+const DENIED_FUNCTION_CALL_REGEX = new RegExp(
+  String.raw`\b(${[...DENIED_TABLE_FUNCTIONS].join('|')})\s*\(`,
+  'gi',
+);
+
+/**
+ * Bare-name regex for the plan-walk rescan only. DuckDB EXPLAIN metadata can
+ * spell out a function as `Function: read_json` without parens. Restricted to
+ * known function-name fields to avoid scanning user-projected string literals.
+ */
+const DENIED_FUNCTION_BARE_REGEX = new RegExp(
+  String.raw`\b(${[...DENIED_TABLE_FUNCTIONS].join('|')})\b`,
+  'gi',
+);
+
+/** Plan-node string fields where DuckDB stores lowered table-function names. */
+const FUNCTION_METADATA_KEYS: ReadonlySet<string> = new Set([
+  'extra_info',
+  'function',
+  'function_name',
+  'table_function',
+  'source',
+]);
+
+/** Strip SQL block and line comments. */
+function stripSqlComments(sql: string): string {
+  return sql.replace(/\/\*[\s\S]*?\*\//g, ' ').replace(/--[^\n]*/g, '');
+}
+
+/**
+ * Strip standard SQL string literals. Doesn't handle E-strings or DuckDB
+ * dollar-quoting; the plan-walk rescan catches anything that survives.
+ */
+function stripSqlStringLiterals(sql: string): string {
+  return sql.replace(/'(?:[^']|'')*'/g, "''");
+}
+
+/**
+ * Layer 1: pre-EXPLAIN function deny-list. Scans the SQL (string literals
+ * stripped) for calls to any function in {@link DENIED_TABLE_FUNCTIONS} so a
+ * malicious `read_json('/etc/passwd')` is rejected before reaching the planner.
+ */
+export function assertNoDeniedFunctions(sql: string): void {
+  if (typeof sql !== 'string' || sql.length === 0) return;
+  const stripped = stripSqlStringLiterals(stripSqlComments(sql));
+  DENIED_FUNCTION_CALL_REGEX.lastIndex = 0;
+  const match = DENIED_FUNCTION_CALL_REGEX.exec(stripped);
+  if (match?.[1]) {
+    const fn = match[1].toLowerCase();
+    throw validationError(
+      `Canvas query references disallowed table function: ${fn}. File-reading and external-data functions are not permitted.`,
+      { reason: SQL_GATE_REASONS.deniedFunction, function: fn },
+    );
+  }
+}
+
+/**
+ * Layers 2-4. Throws on the first violation. Layer 1
+ * ({@link assertNoDeniedFunctions}) runs separately before `extractStatements`.
  */
 export function assertReadOnlyQuery(input: {
   /** Number of statements DuckDB extracted from the user-supplied SQL. */
@@ -132,10 +244,9 @@ export function assertReadOnlyQuery(input: {
 }
 
 /**
- * Pre-EXPLAIN gate: validate statement count and type. Run before the EXPLAIN
- * call so non-SELECT statements (which DuckDB's EXPLAIN can't always wrap —
- * e.g. ATTACH/PRAGMA/COPY/INSTALL) fail with a structured ValidationError
- * here rather than a confusing parser error from EXPLAIN itself.
+ * Layers 2-3: validate statement count and type before EXPLAIN. Non-SELECT
+ * statements (ATTACH/PRAGMA/COPY/INSTALL/...) fail here with a structured
+ * ValidationError rather than a confusing parser error from EXPLAIN itself.
  */
 export function assertSelectOnly(input: {
   statementCount: number;
@@ -143,30 +254,38 @@ export function assertSelectOnly(input: {
 }): void {
   if (input.statementCount !== 1) {
     throw validationError('Canvas query must contain exactly one SQL statement.', {
-      reason: 'multi_statement',
+      reason: SQL_GATE_REASONS.multiStatement,
       statementCount: input.statementCount,
     });
   }
   if (!ALLOWED_STATEMENT_TYPES.has(input.statementType)) {
     throw validationError(
       `Canvas query must be SELECT; got ${input.statementType}. Mutations must use registerTable, drop, or clear.`,
-      { reason: 'non_select_statement', statementType: input.statementType },
+      { reason: SQL_GATE_REASONS.nonSelectStatement, statementType: input.statementType },
     );
   }
 }
 
 /**
- * Post-EXPLAIN gate: walk the plan tree and reject any operator outside the
- * curated allowlist. Defense-in-depth against future DuckDB additions that
- * smuggle work into a SELECT envelope.
+ * Layer 4: walk the plan tree and reject any operator outside the allowlist
+ * or any deny-listed table function smuggled into a generic scan operator.
  */
 export function assertPlanReadOnly(planJson: unknown): void {
-  const offending = collectDisallowedOperators(planJson);
+  const { offending, deniedFunctions } = collectPlanViolations(planJson);
+  if (deniedFunctions.size > 0) {
+    throw validationError(
+      `Canvas query references disallowed table function in plan: ${[...deniedFunctions].sort().join(', ')}.`,
+      {
+        reason: SQL_GATE_REASONS.deniedFunctionInPlan,
+        functions: [...deniedFunctions].sort(),
+      },
+    );
+  }
   if (offending.size > 0) {
     throw validationError(
       `Canvas query contains disallowed operators: ${[...offending].sort().join(', ')}.`,
       {
-        reason: 'plan_operator_not_allowed',
+        reason: SQL_GATE_REASONS.planOperatorNotAllowed,
         operators: [...offending].sort(),
       },
     );
@@ -174,25 +293,34 @@ export function assertPlanReadOnly(planJson: unknown): void {
 }
 
 /**
- * Walks the EXPLAIN plan and returns the set of operator names not in
- * `ALLOWED_PLAN_OPERATORS`. Exported for fixture-driven tests that want
- * to inspect the gate's view of a plan without throwing.
- *
- * Tolerant of structural variation — DuckDB emits operator identity under
- * either `name` (logical plan) or `operator_type` (physical/profile plan)
- * depending on the EXPLAIN flavor. We honor both. Children traversal
- * supports `children`, `child`, and `inputs` arrays.
+ * Returns operator names not in `ALLOWED_PLAN_OPERATORS`. Exported for
+ * fixture-driven tests that want to inspect the gate's view without throwing.
+ * Use {@link collectPlanViolations} to also surface deny-listed function
+ * references in scan-operator metadata.
  */
 export function collectDisallowedOperators(planJson: unknown): Set<string> {
-  const offending = new Set<string>();
-  walk(planJson, offending);
-  return offending;
+  return collectPlanViolations(planJson).offending;
 }
 
-function walk(node: unknown, offending: Set<string>): void {
+/**
+ * Combined plan-walk: disallowed operators and deny-listed table-function
+ * references in string-valued fields, returned separately so callers can word
+ * errors appropriately.
+ */
+export function collectPlanViolations(planJson: unknown): {
+  offending: Set<string>;
+  deniedFunctions: Set<string>;
+} {
+  const offending = new Set<string>();
+  const deniedFunctions = new Set<string>();
+  walk(planJson, offending, deniedFunctions);
+  return { offending, deniedFunctions };
+}
+
+function walk(node: unknown, offending: Set<string>, deniedFunctions: Set<string>): void {
   if (node === null || typeof node !== 'object') return;
   if (Array.isArray(node)) {
-    for (const child of node) walk(child, offending);
+    for (const child of node) walk(child, offending, deniedFunctions);
     return;
   }
   const obj = node as Record<string, unknown>;
@@ -200,19 +328,36 @@ function walk(node: unknown, offending: Set<string>): void {
   if (operator !== undefined && !ALLOWED_PLAN_OPERATORS.has(operator)) {
     offending.add(operator);
   }
-  // Traverse known child slots; ignore string/number leaves.
+  // read_json/read_parquet lower into generic scan operators whose source
+  // function appears in plan metadata, not the operator name. Use the bare
+  // regex on known function-name fields, the call-shape regex elsewhere.
+  for (const [key, value] of Object.entries(obj)) {
+    if (typeof value !== 'string') continue;
+    const regex = FUNCTION_METADATA_KEYS.has(key)
+      ? DENIED_FUNCTION_BARE_REGEX
+      : DENIED_FUNCTION_CALL_REGEX;
+    collectDeniedFunctionMatches(value, regex, deniedFunctions);
+  }
   for (const key of ['children', 'child', 'inputs', 'plan', 'root']) {
-    if (key in obj) walk(obj[key], offending);
+    if (key in obj) walk(obj[key], offending, deniedFunctions);
+  }
+}
+
+function collectDeniedFunctionMatches(value: string, regex: RegExp, sink: Set<string>): void {
+  regex.lastIndex = 0;
+  let match: RegExpExecArray | null = regex.exec(value);
+  while (match !== null) {
+    if (match[1]) sink.add(match[1].toLowerCase());
+    match = regex.exec(value);
   }
 }
 
 function readOperatorName(obj: Record<string, unknown>): string | undefined {
-  const candidates = ['name', 'operator_type', 'operator', 'type'];
-  for (const key of candidates) {
+  // DuckDB emits operator identity under different keys depending on the
+  // EXPLAIN flavor (logical/physical/profile).
+  for (const key of ['name', 'operator_type', 'operator', 'type']) {
     const value = obj[key];
-    if (typeof value === 'string' && value !== '') {
-      return value.toUpperCase();
-    }
+    if (typeof value === 'string' && value !== '') return value.toUpperCase();
   }
   return;
 }
@@ -222,17 +367,16 @@ function readOperatorName(obj: Record<string, unknown>): string | undefined {
 // ---------------------------------------------------------------------------
 
 /**
- * Allowed shape for canvas-local table and column names. Matches the
- * conservative SQL identifier convention: starts with letter/underscore,
- * followed by letters/digits/underscores, max 63 chars (PostgreSQL/DuckDB cap).
+ * Allowed shape for canvas table/column names. SQL identifier convention:
+ * letter/underscore start, letters/digits/underscores after, max 63 chars
+ * (PostgreSQL/DuckDB cap). Exported so consumers can reuse it in Zod schemas
+ * (`z.string().regex(CANVAS_IDENTIFIER_REGEX)`).
  */
-const IDENTIFIER_REGEX = /^[A-Za-z_][A-Za-z0-9_]{0,62}$/;
+export const CANVAS_IDENTIFIER_REGEX = /^[A-Za-z_][A-Za-z0-9_]{0,62}$/;
 
 /**
- * DuckDB reserved words that must not be used as bare identifiers. Not
- * exhaustive — this is a courtesy guard so misnamed tables fail at register
- * time rather than confusing-error time. The `IDENTIFIER_REGEX` is the
- * authoritative shape gate.
+ * Courtesy guard against bare reserved words. Not exhaustive — the shape gate
+ * is authoritative; this just produces a friendlier error at register time.
  */
 const RESERVED_IDENTIFIERS: ReadonlySet<string> = new Set([
   'select',
@@ -273,36 +417,32 @@ const RESERVED_IDENTIFIERS: ReadonlySet<string> = new Set([
   'recursive',
 ]);
 
-/**
- * Validate an identifier for use as a canvas-local table or column name.
- * Throws `ValidationError` on rejection.
- */
+/** Validate a canvas table or column name. Throws `ValidationError` on rejection. */
 export function assertValidIdentifier(value: string, kind: 'table' | 'column'): void {
   if (typeof value !== 'string' || value.length === 0) {
     throw validationError(`Canvas ${kind} name must be a non-empty string.`, {
-      reason: 'identifier_empty',
+      reason: SQL_GATE_REASONS.identifierEmpty,
       kind,
     });
   }
-  if (!IDENTIFIER_REGEX.test(value)) {
+  if (!CANVAS_IDENTIFIER_REGEX.test(value)) {
     throw validationError(
       `Canvas ${kind} name "${value}" is invalid. Use letters, digits, and underscores; must start with a letter or underscore; max 63 chars.`,
-      { reason: 'identifier_shape', kind, value },
+      { reason: SQL_GATE_REASONS.identifierShape, kind, value },
     );
   }
   if (RESERVED_IDENTIFIERS.has(value.toLowerCase())) {
     throw validationError(
       `Canvas ${kind} name "${value}" is a reserved SQL keyword. Choose another name.`,
-      { reason: 'identifier_reserved', kind, value },
+      { reason: SQL_GATE_REASONS.identifierReserved, kind, value },
     );
   }
 }
 
 /**
- * Wrap an identifier in double quotes for safe inclusion in SQL. Internal
- * double quotes are doubled per the SQL standard. Callers should still
- * validate via {@link assertValidIdentifier} before quoting — this helper
- * only escapes; it does not validate shape.
+ * Double-quote-escape an identifier for SQL embedding. Validate via
+ * {@link assertValidIdentifier} first — this helper only escapes, it does not
+ * check shape.
  */
 export function quoteIdentifier(value: string): string {
   return `"${value.replace(/"/g, '""')}"`;

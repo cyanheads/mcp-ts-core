@@ -1,8 +1,7 @@
 /**
  * @fileoverview User-facing DataCanvas service. Wraps the provider and registry
- * with debug logging and tenant-id resolution; the registry handles TTL,
- * caps, and provider-keying. Mirrors the StorageService surface pattern but
- * stays OTel-free in v1 (per issue #97 scope).
+ * with debug logging and tenant-id resolution; the registry handles TTL, caps,
+ * and provider-keying.
  * @module src/services/canvas/core/DataCanvas
  */
 
@@ -14,11 +13,7 @@ import { CanvasInstance } from './CanvasInstance.js';
 import type { CanvasRegistry } from './CanvasRegistry.js';
 import type { IDataCanvasProvider } from './IDataCanvasProvider.js';
 
-/**
- * Resolve the effective tenant ID from the context, throwing when absent.
- * Mirrors `requireTenantId` in StorageService — canvas operations are
- * tenant-scoped by construction.
- */
+/** Resolve the effective tenant ID; throw when absent. */
 function requireTenantId(context: RequestContext): string {
   const tenantId = context.tenantId;
   if (tenantId === undefined || tenantId === null || tenantId === '') {

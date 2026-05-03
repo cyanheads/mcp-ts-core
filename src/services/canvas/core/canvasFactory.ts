@@ -1,12 +1,8 @@
 /**
- * @fileoverview Factory for the optional DataCanvas service. Mirrors the
- * pattern in `createStorageProvider` — switches on `config.canvas.providerType`,
- * fails closed in serverless environments for `duckdb`, and returns
- * `undefined` when canvas is disabled (`'none'`).
- *
- * The factory does NOT eager-load `@duckdb/node-api`; the provider lazy-loads
- * on first use via `lazyImport`. Servers that set `CANVAS_PROVIDER_TYPE=none`
- * (the default) pay zero install cost.
+ * @fileoverview Factory for the optional DataCanvas service. Switches on
+ * `config.canvas.providerType`, fails closed in serverless for `duckdb`, and
+ * returns `undefined` when canvas is disabled. The factory does not eager-load
+ * `@duckdb/node-api`; the provider lazy-loads on first use.
  *
  * @module src/services/canvas/core/canvasFactory
  */
@@ -27,13 +23,9 @@ function isServerless(): boolean {
 
 /**
  * Construct the canvas service from configuration. Returns `undefined` when
- * canvas is disabled (`CANVAS_PROVIDER_TYPE=none`), keeping `core.canvas`
- * `undefined` on `CoreServices` for that case.
- *
- * In serverless environments, an explicit `CANVAS_PROVIDER_TYPE=duckdb`
- * fails closed with a clear ConfigurationError — DuckDB has no V8-isolate
- * build, so canvas is unavailable on Workers. (Refinement #1 in issue #97 is
- * about export-path sandboxing, separate from this Worker fail-closed.)
+ * canvas is disabled. Fails closed with `ConfigurationError` in serverless
+ * environments when `CANVAS_PROVIDER_TYPE=duckdb` — DuckDB has no V8-isolate
+ * build, so canvas is unavailable on Workers.
  */
 export function createCanvasService(config: AppConfig): DataCanvas | undefined {
   const providerType = config.canvas.providerType;
@@ -66,7 +58,6 @@ export function createCanvasService(config: AppConfig): DataCanvas | undefined {
     return new DataCanvas(provider, registry);
   }
 
-  // Exhaustive check for the providerType union.
   const exhaustive: never = providerType;
   throw configurationError(`Unhandled canvas provider type: ${String(exhaustive)}`, context);
 }

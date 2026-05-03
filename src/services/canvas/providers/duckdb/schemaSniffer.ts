@@ -1,37 +1,32 @@
 /**
  * @fileoverview Schema inference for {@link DuckdbProvider.registerTable}.
- * Materializes the first N rows of an iterable, unions JS-side types per
- * column, and maps to DuckDB column types. Used only when the caller does
- * not pass an explicit `schema` to `registerTable`. For `AsyncIterable`
- * inputs the caller must supply a schema — we cannot peek without consuming.
- *
- * Algorithm (refinement 4 in issue #97):
- *   1. Buffer up to `sniffRowCount` rows (default 100).
- *   2. For each column, take the union of observed JS-side types
- *      (`string`, `number-int`, `number-float`, `bigint`, `boolean`, `null`,
- *      `object`).
- *   3. Map the union to a DuckDB type via {@link unionToDuckdbType}, with
- *      `VARCHAR` as the safe fallback when the union has no clean answer.
- *   4. Return `(schema, sniffedRows)` so the caller can append the buffered
- *      rows without re-iterating.
- *
+ * Buffers the first N rows of an iterable, unions JS-side types per column,
+ * and maps to DuckDB types. `VARCHAR` is the safe fallback for ambiguous
+ * unions. Only used when the caller does not pass an explicit `schema`;
+ * `AsyncIterable` inputs must always supply one because we cannot peek
+ * without consuming.
  * @module src/services/canvas/providers/duckdb/schemaSniffer
  */
 
 import { validationError } from '@/types-global/errors.js';
 import type { ColumnSchema, ColumnType } from '../../types.js';
 
-/** Row-shape used internally — mirrors what registerTable accepts. */
+/** Row shape — mirrors what registerTable accepts. */
 type Row = Record<string, unknown>;
 
 /**
- * Outcome of a sniff: the inferred schema plus the buffered rows we consumed
- * from the iterable. Callers append `sniffedRows` first, then continue
- * draining whatever's left of the iterator.
+ * Sniff outcome. Callers must drain via `remaining`; re-iterating the original
+ * input would lose data on generators or duplicate rows on fresh-iterator
+ * iterables.
  */
 export interface SniffedSchema {
+  /**
+   * Iterator positioned just past `sniffedRows`. May yield zero items when the
+   * input fit entirely inside the sniff window.
+   */
+  remaining: Iterator<Row>;
   schema: ColumnSchema[];
-  /** Rows already consumed from the iterable. Append these first. */
+  /** Rows already consumed; append these first. */
   sniffedRows: Row[];
 }
 
@@ -46,14 +41,13 @@ function classify(value: unknown): JsType {
   if (typeof value === 'number') {
     return Number.isInteger(value) ? 'integer' : 'double';
   }
-  // Arrays, plain objects, dates, etc. all fall through here. Stored as JSON.
+  // Arrays, plain objects, dates → stored as JSON.
   return 'object';
 }
 
 /**
- * Choose a DuckDB column type for a column based on the union of JS types
- * observed in the first N rows. Conservative: when the union mixes strings
- * with numerics, falls back to `VARCHAR` rather than guessing.
+ * Pick a DuckDB column type from the union of observed JS types. Conservative:
+ * mixed string+numeric falls back to `VARCHAR` rather than guessing.
  */
 function unionToDuckdbType(observed: Set<JsType>): ColumnType {
   const nonNull = new Set(observed);
@@ -65,11 +59,10 @@ function unionToDuckdbType(observed: Set<JsType>): ColumnType {
       case 'string':
         return 'VARCHAR';
       case 'integer':
+      case 'bigint':
         return 'BIGINT';
       case 'double':
         return 'DOUBLE';
-      case 'bigint':
-        return 'BIGINT';
       case 'boolean':
         return 'BOOLEAN';
       case 'object':
@@ -78,41 +71,31 @@ function unionToDuckdbType(observed: Set<JsType>): ColumnType {
         return 'VARCHAR';
     }
   }
-  // Numeric widening — INTEGER + DOUBLE → DOUBLE; INTEGER + BIGINT → BIGINT.
-  if (nonNull.has('double') && nonNull.has('integer') && nonNull.size === 2) return 'DOUBLE';
-  if (nonNull.has('bigint') && nonNull.has('integer') && nonNull.size === 2) return 'BIGINT';
-  if (
-    nonNull.has('double') &&
-    nonNull.has('integer') &&
-    nonNull.has('bigint') &&
-    nonNull.size === 3
-  ) {
-    return 'DOUBLE';
-  }
-  // Mixed string+structured → JSON when string is absent; otherwise VARCHAR.
+  // Pure-numeric union widens to DOUBLE if any double, otherwise BIGINT.
+  const allNumeric = [...nonNull].every((t) => t === 'integer' || t === 'double' || t === 'bigint');
+  if (allNumeric) return nonNull.has('double') ? 'DOUBLE' : 'BIGINT';
   if (!nonNull.has('string') && nonNull.has('object')) return 'JSON';
   return 'VARCHAR';
 }
 
 /**
- * Materialize up to `sniffRowCount` rows from the iterable and return the
- * inferred schema plus the buffered rows. Throws if the input is empty.
+ * Buffer up to `sniffRowCount` rows and return the inferred schema, the
+ * buffered rows, and a continuation iterator. Throws if the input is empty.
  *
- * Column ordering is determined by first-appearance across the buffered rows
- * — column names from the first row come first, then any new keys added by
- * later rows (each appended in observation order). Missing keys in any row
- * count as `null` for type inference purposes.
+ * Column ordering follows first appearance. A column is `nullable` if any
+ * sampled row had `null`/`undefined` for it or was missing the key.
  */
 export function sniffSchema(iterable: Iterable<Row>, sniffRowCount: number): SniffedSchema {
   if (sniffRowCount < 1) {
     throw validationError('sniffRowCount must be at least 1.', { sniffRowCount });
   }
+  // Consume the same iterator we hand back so generators aren't re-iterated.
+  const iter = iterable[Symbol.iterator]();
   const sniffedRows: Row[] = [];
-  let count = 0;
-  for (const row of iterable) {
-    sniffedRows.push(row);
-    count += 1;
-    if (count >= sniffRowCount) break;
+  while (sniffedRows.length < sniffRowCount) {
+    const next = iter.next();
+    if (next.done) break;
+    sniffedRows.push(next.value);
   }
   if (sniffedRows.length === 0) {
     throw validationError(
@@ -123,6 +106,7 @@ export function sniffSchema(iterable: Iterable<Row>, sniffRowCount: number): Sni
 
   const observedByCol = new Map<string, Set<JsType>>();
   const columnOrder: string[] = [];
+  const presenceCount = new Map<string, number>();
 
   for (const row of sniffedRows) {
     for (const key of Object.keys(row)) {
@@ -133,23 +117,17 @@ export function sniffSchema(iterable: Iterable<Row>, sniffRowCount: number): Sni
         columnOrder.push(key);
       }
       bag.add(classify(row[key]));
-    }
-    // Account for missing keys as `null` against existing columns.
-    for (const key of columnOrder) {
-      if (!(key in row)) {
-        observedByCol.get(key)?.add('null');
-      }
+      presenceCount.set(key, (presenceCount.get(key) ?? 0) + 1);
     }
   }
 
+  const total = sniffedRows.length;
   const schema: ColumnSchema[] = columnOrder.map((name) => {
     const observed = observedByCol.get(name) ?? new Set<JsType>(['null']);
-    return {
-      name,
-      type: unionToDuckdbType(observed),
-      nullable: observed.has('null') || observed.size === 0,
-    };
+    const present = presenceCount.get(name) ?? 0;
+    const nullable = observed.has('null') || present < total;
+    return { name, type: unionToDuckdbType(observed), nullable };
   });
 
-  return { schema, sniffedRows };
+  return { schema, sniffedRows, remaining: iter };
 }

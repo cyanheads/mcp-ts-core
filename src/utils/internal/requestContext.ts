@@ -85,7 +85,7 @@ export interface RequestContext {
    * Authentication data populated by {@link requestContextService.withAuthInfo}.
    * `undefined` when the request is unauthenticated or auth mode is `none`.
    */
-  auth?: AuthContext;
+  auth?: AuthContext | undefined;
   /**
    * Unique identifier for this request, used to correlate log entries across
    * service boundaries. Inherited from a parent context when provided;
@@ -97,14 +97,14 @@ export interface RequestContext {
    * OpenTelemetry span ID from the active span at context-creation time.
    * `undefined` when no active span exists.
    */
-  spanId?: string;
+  spanId?: string | undefined;
 
   /**
    * Tenant identifier used for multi-tenancy data isolation.
    * Resolved in priority order: `additionalContext.tenantId` →
    * rest params → `parentContext.tenantId` → AsyncLocalStorage auth store.
    */
-  tenantId?: string;
+  tenantId?: string | undefined;
 
   /**
    * ISO 8601 UTC timestamp recorded at the moment this context was created.
@@ -115,11 +115,16 @@ export interface RequestContext {
    * OpenTelemetry trace ID from the active span at context-creation time.
    * `undefined` when no active span exists.
    */
-  traceId?: string;
+  traceId?: string | undefined;
 
   /**
    * Additional arbitrary key-value pairs for operation-specific context.
    * Consumers must type-check before accessing extended properties.
+   *
+   * Note: optional fields above are typed `?: T | undefined` (not just `?: T`)
+   * so the handler-facing `Context` — which carries strict-optional fields
+   * under `exactOptionalPropertyTypes` — is structurally assignable to
+   * `RequestContext`, letting services accept `ctx` directly without a cast.
    */
   [key: string]: unknown;
 }

@@ -1,6 +1,6 @@
 # Agent Protocol
 
-**Package:** `@cyanheads/mcp-ts-core` · **Version:** 0.8.11
+**Package:** `@cyanheads/mcp-ts-core` · **Version:** 0.8.12
 **npm:** [@cyanheads/mcp-ts-core](https://www.npmjs.com/package/@cyanheads/mcp-ts-core) · **Docker:** [ghcr.io/cyanheads/mcp-ts-core](https://ghcr.io/cyanheads/mcp-ts-core)
 
 > **Developer note:** Never assume. Read related files and docs before making changes. Read full file content for context. Never edit a file before reading it.
@@ -13,6 +13,7 @@
 - **Full-stack observability.** The framework automatically instruments every tool/resource call — OTel span, duration/payload/memory metrics, structured completion log. Use `ctx.log` for additional domain-specific logging within handlers (external API calls, multi-step operations, business events). `requestId`, `traceId`, `tenantId` auto-correlated. No `console` calls.
 - **Unified Context.** Handlers receive `ctx` with logging (`ctx.log`), tenant-scoped storage (`ctx.state`), optional protocol capabilities (`ctx.elicit`, `ctx.sample`), and cancellation (`ctx.signal`).
 - **Decoupled storage.** `ctx.state` for tenant-scoped KV. Never access persistence backends directly.
+- **Canvas tokens are capabilities, not tenant-scoped state.** A `canvasId` is a 10-char URL-safe token; possession grants full read/write/drop on that canvas. Tokens are designed to be shareable — between agents in one session, and across users in single-tenant deployments (stdio, HTTP + `MCP_AUTH_MODE=none`, where every request resolves to `tenantId='default'`). Tools should accept the token in `input` (or omit to create fresh) and return it in `output`; collaboration is opt-in via explicit token exchange. **Do NOT cache canvasIds in `ctx.state` as a "default canvas"** — under shared `tenantId='default'` every concurrent user reads the same cached id and silently collides on one workspace. The same rule applies to any UUID-keyed primitive (datasets, derived row stores): the ID is the access grant, scoping happens by token possession, not by tenant. Public/free deployments of this framework run stateless and auth-mode-`none` — design accordingly.
 - **Runtime parity.** All features work with `stdio`/`http` and Worker bundle. Guard non-portable deps via `runtimeCaps` from `@cyanheads/mcp-ts-core/utils` — a frozen capability object (`isNode`, `isBun`, `isWorkerLike`, `hasBuffer`, `hasProcess`, etc.) computed once at module load. Prefer runtime-agnostic abstractions (Hono + `@hono/mcp`, Fetch APIs).
 - **Startup validation.** `createApp()` runs the definition linter before proceeding — errors (spec violations) throw `ConfigurationError` and block startup; warnings are logged. Also available standalone via `bun run lint:mcp` and as a devcheck step. Every diagnostic links to the rule reference in `api-linter` skill; see that skill for the full rule catalog.
 - **Elicitation for missing input.** Use `ctx.elicit` when the client supports it.

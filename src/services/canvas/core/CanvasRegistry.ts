@@ -1,13 +1,8 @@
 /**
  * @fileoverview Canvas lifecycle registry. Keys canvases by (tenantId, canvasId),
- * generates crypto-secure 10-char URL-safe IDs, enforces a sliding 24h TTL with
- * a 7-day absolute cap, and runs a periodic sweeper that destroys expired
- * canvases via the underlying provider. Also enforces the per-tenant active
- * canvas cap (default 100).
- *
- * Public access is gated by {@link DataCanvas} — callers never see this class
- * directly. Tests construct it with a fake provider and a mock `Date.now` to
- * exercise expiry/sweep logic.
+ * generates crypto-secure 10-char URL-safe IDs, enforces a sliding 24h TTL
+ * with a 7-day absolute cap, runs a periodic sweeper, and caps active canvases
+ * per tenant (default 100). Public access is gated by {@link DataCanvas}.
  * @module src/services/canvas/core/CanvasRegistry
  */
 
@@ -69,9 +64,8 @@ export interface AcquireResult {
 }
 
 /**
- * Tracks the active canvases for a single process. Not multi-process safe —
- * tokens issued by one process are not portable to another (matches v1 scope
- * in the issue).
+ * Tracks active canvases for a single process. Not multi-process safe — tokens
+ * issued by one process are not portable to another.
  */
 export class CanvasRegistry {
   private readonly idGenerator = new IdGenerator();
@@ -89,7 +83,6 @@ export class CanvasRegistry {
   ) {
     if (options.sweeperIntervalMs > 0) {
       this.sweeperTimer = setInterval(() => void this.sweep(), options.sweeperIntervalMs);
-      // Don't keep the event loop alive solely for the sweeper.
       this.sweeperTimer.unref?.();
     }
   }
@@ -263,7 +256,6 @@ export class CanvasRegistry {
   }
 
   private mintId(): string {
-    // Loop-mint to avoid the (vanishingly rare) collision case.
     for (let i = 0; i < 5; i += 1) {
       const id = this.idGenerator.generateRandomString(CANVAS_ID_LENGTH, CANVAS_ID_CHARSET);
       if (!this.canvases.has(id)) return id;

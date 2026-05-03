@@ -1,8 +1,7 @@
 /**
- * @fileoverview Per-canvas handle returned by {@link DataCanvas.acquire}. Captures
- * `(canvasId, tenantId)` once so callers don't repeat them on every op, and
- * routes each call through the registry's TTL-touch + tenant validation gate
- * before delegating to the provider.
+ * @fileoverview Per-canvas handle returned by {@link DataCanvas.acquire}. Holds
+ * `(canvasId, tenantId)` and routes each operation through the registry's
+ * TTL-touch + tenant validation gate before delegating to the provider.
  * @module src/services/canvas/core/CanvasInstance
  */
 

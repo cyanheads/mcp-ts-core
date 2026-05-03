@@ -24,11 +24,17 @@ export type { IDataCanvasProvider } from './core/IDataCanvasProvider.js';
 export {
   ALLOWED_PLAN_OPERATORS,
   ALLOWED_STATEMENT_TYPES,
+  assertNoDeniedFunctions,
   assertReadOnlyQuery,
   assertValidIdentifier,
+  CANVAS_IDENTIFIER_REGEX,
   collectDisallowedOperators,
+  collectPlanViolations,
+  DENIED_TABLE_FUNCTIONS,
   type DuckdbStatementType,
   quoteIdentifier,
+  SQL_GATE_REASONS,
+  type SqlGateReason,
 } from './core/sqlGate.js';
 export {
   DuckdbProvider,

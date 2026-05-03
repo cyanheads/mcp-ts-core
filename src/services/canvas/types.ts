@@ -1,8 +1,7 @@
 /**
  * @fileoverview Public types for the DataCanvas primitive — column schemas,
  * table info, and option/result shapes for register/query/export/describe.
- * Engine-agnostic: DuckDB is the v1 implementation but these types do not bind
- * to it.
+ * Engine-agnostic; DuckDB is the current implementation.
  * @module src/services/canvas/types
  */
 

@@ -241,41 +241,47 @@ const ConfigSchema = z
       filesystemPath: z.string().default('./.storage'), // This remains, but will only be used if providerType is 'filesystem'
     }),
     // DataCanvas primitive configuration (issue #97)
-    canvas: z.object({
-      providerType: z.preprocess(
-        emptyStringAsUndefined,
-        z.enum(['none', 'duckdb']).default('none'),
-      ),
-      /**
-       * Per-canvas DuckDB `memory_limit` PRAGMA value, in MB.
-       * Applied at instance creation; one DuckDB instance per canvasId.
-       */
-      defaultMemoryLimitMb: z.coerce.number().min(64).default(1024),
-      /**
-       * Sandbox root for path-targeted exports. Path-based `export()` calls
-       * are resolved relative to this directory and rejected if they escape
-       * via `..` or absolute paths. Stream-based exports bypass this.
-       */
-      exportRootPath: z.string().default('./.canvas-exports'),
-      /** Maximum active canvases per tenant before `RateLimited`. */
-      maxCanvasesPerTenant: z.coerce.number().min(1).default(100),
-      /** Sliding TTL in milliseconds. Default 24h. */
-      ttlMs: z.coerce
-        .number()
-        .min(1000)
-        .default(24 * 60 * 60 * 1000),
-      /** Absolute cap from creation in milliseconds. Default 7d. */
-      absoluteCapMs: z.coerce
-        .number()
-        .min(1000)
-        .default(7 * 24 * 60 * 60 * 1000),
-      /** Sweeper interval in milliseconds. Default 60s. Set to 0 to disable. */
-      sweeperIntervalMs: z.coerce.number().min(0).default(60_000),
-      /** Default row cap for `query()` results. */
-      defaultRowLimit: z.coerce.number().min(1).default(10_000),
-      /** Number of rows to sniff for schema inference when schema is omitted. */
-      schemaSniffRows: z.coerce.number().min(1).default(100),
-    }),
+    canvas: z
+      .object({
+        providerType: z.preprocess(
+          emptyStringAsUndefined,
+          z.enum(['none', 'duckdb']).default('none'),
+        ),
+        /**
+         * Per-canvas DuckDB `memory_limit` PRAGMA value, in MB.
+         * Applied at instance creation; one DuckDB instance per canvasId.
+         */
+        defaultMemoryLimitMb: z.coerce.number().min(64).default(1024),
+        /**
+         * Sandbox root for path-targeted exports. Path-based `export()` calls
+         * are resolved relative to this directory and rejected if they escape
+         * via `..` or absolute paths. Stream-based exports bypass this.
+         */
+        exportRootPath: z.string().default('./.canvas-exports'),
+        /** Maximum active canvases per tenant before `RateLimited`. */
+        maxCanvasesPerTenant: z.coerce.number().min(1).default(100),
+        /** Sliding TTL in milliseconds. Default 24h. */
+        ttlMs: z.coerce
+          .number()
+          .min(1000)
+          .default(24 * 60 * 60 * 1000),
+        /** Absolute cap from creation in milliseconds. Default 7d. */
+        absoluteCapMs: z.coerce
+          .number()
+          .min(1000)
+          .default(7 * 24 * 60 * 60 * 1000),
+        /** Sweeper interval in milliseconds. Default 60s. Set to 0 to disable. */
+        sweeperIntervalMs: z.coerce.number().min(0).default(60_000),
+        /** Default row cap for `query()` results. */
+        defaultRowLimit: z.coerce.number().min(1).default(10_000),
+        /** Number of rows to sniff for schema inference when schema is omitted. */
+        schemaSniffRows: z.coerce.number().min(1).default(100),
+      })
+      .refine((c) => c.absoluteCapMs >= c.ttlMs, {
+        message:
+          'CANVAS_ABSOLUTE_CAP_MS must be >= CANVAS_TTL_MS — otherwise canvases die at the absolute cap before the sliding TTL ever extends them.',
+        path: ['absoluteCapMs'],
+      }),
     // Experimental: Task store configuration
     tasks: z.object({
       storeType: z

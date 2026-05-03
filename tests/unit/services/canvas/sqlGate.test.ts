@@ -10,9 +10,13 @@ import { describe, expect, it } from 'vitest';
 import {
   ALLOWED_PLAN_OPERATORS,
   ALLOWED_STATEMENT_TYPES,
+  assertNoDeniedFunctions,
+  assertPlanReadOnly,
   assertReadOnlyQuery,
   assertValidIdentifier,
   collectDisallowedOperators,
+  collectPlanViolations,
+  DENIED_TABLE_FUNCTIONS,
   quoteIdentifier,
 } from '@/services/canvas/core/sqlGate.js';
 import { McpError } from '@/types-global/errors.js';
@@ -188,6 +192,176 @@ describe('sqlGate · quoteIdentifier', () => {
 
   it('escapes embedded double quotes by doubling', () => {
     expect(quoteIdentifier('a"b')).toBe('"a""b"');
+  });
+});
+
+describe('sqlGate · assertNoDeniedFunctions (issue #100)', () => {
+  it.each([
+    'read_json',
+    'read_json_auto',
+    'read_json_objects',
+    'read_ndjson',
+    'read_parquet',
+    'parquet_scan',
+    'parquet_metadata',
+    'read_csv',
+    'read_text',
+    'read_blob',
+    'glob',
+    'iceberg_scan',
+    'delta_scan',
+    'postgres_scan',
+    'sqlite_scan',
+  ])('rejects %s function calls', (fn) => {
+    let caught: unknown;
+    try {
+      assertNoDeniedFunctions(`SELECT * FROM ${fn}('/etc/passwd')`);
+    } catch (err) {
+      caught = err;
+    }
+    expect(caught).toBeInstanceOf(McpError);
+    const data = (caught as McpError).data as { reason: string; function: string };
+    expect(data.reason).toBe('denied_function');
+    expect(data.function).toBe(fn);
+  });
+
+  it('matches case-insensitively', () => {
+    expect(() => assertNoDeniedFunctions("SELECT * FROM Read_Json('/x')")).toThrow(
+      /disallowed table function/,
+    );
+    expect(() => assertNoDeniedFunctions("SELECT * FROM READ_PARQUET('/x')")).toThrow(
+      /disallowed table function/,
+    );
+  });
+
+  it('tolerates whitespace between name and paren', () => {
+    expect(() => assertNoDeniedFunctions("SELECT * FROM read_json   ('/x')")).toThrow(
+      /disallowed table function/,
+    );
+    expect(() => assertNoDeniedFunctions("SELECT * FROM read_json\n('/x')")).toThrow(
+      /disallowed table function/,
+    );
+  });
+
+  it('blocks calls hidden behind block comments', () => {
+    expect(() => assertNoDeniedFunctions("SELECT * FROM read_json /* hide */ ('/x')")).toThrow(
+      /disallowed table function/,
+    );
+  });
+
+  it('blocks calls preceded by line comments', () => {
+    expect(() => assertNoDeniedFunctions("-- some comment\nSELECT * FROM read_json('/x')")).toThrow(
+      /disallowed table function/,
+    );
+  });
+
+  it('does not match the function name appearing only inside a string literal', () => {
+    expect(() =>
+      assertNoDeniedFunctions("SELECT 'read_json(/etc/passwd)' AS s FROM t"),
+    ).not.toThrow();
+  });
+
+  it('does not match bare identifier mentions (no parens)', () => {
+    expect(() => assertNoDeniedFunctions('SELECT read_json FROM t')).not.toThrow();
+  });
+
+  it('handles undefined / empty SQL gracefully', () => {
+    expect(() => assertNoDeniedFunctions('')).not.toThrow();
+    expect(() => assertNoDeniedFunctions(undefined as unknown as string)).not.toThrow();
+  });
+});
+
+describe('sqlGate · plan-walk denied-function rescan (issue #100)', () => {
+  it('rejects plans whose extra_info names a deny-listed function bare', () => {
+    const plan = {
+      name: 'PROJECTION',
+      children: [
+        {
+          name: 'SEQ_SCAN',
+          extra_info: 'Function: read_json\nFiles: [/etc/passwd]',
+        },
+      ],
+    };
+    let caught: unknown;
+    try {
+      assertPlanReadOnly(plan);
+    } catch (err) {
+      caught = err;
+    }
+    expect(caught).toBeInstanceOf(McpError);
+    const data = (caught as McpError).data as { reason: string; functions: string[] };
+    expect(data.reason).toBe('denied_function_in_plan');
+    expect(data.functions).toContain('read_json');
+  });
+
+  it('rejects plans whose function field names a deny-listed function', () => {
+    const plan = {
+      name: 'SEQ_SCAN',
+      function: 'read_parquet',
+    };
+    expect(() => assertPlanReadOnly(plan)).toThrow(/disallowed table function in plan/);
+  });
+
+  it('rejects plans whose function call appears in non-metadata string fields', () => {
+    const plan = {
+      name: 'PROJECTION',
+      // a non-metadata string field — uses call-shape regex
+      description: "Computes read_json('/etc/passwd')",
+    };
+    expect(() => assertPlanReadOnly(plan)).toThrow(/disallowed table function in plan/);
+  });
+
+  it('does not false-positive on non-metadata string fields with bare function name', () => {
+    const plan = {
+      name: 'PROJECTION',
+      // Bare 'read_json' in a non-metadata field — call-shape regex
+      // won't match without parens, so this passes (defense is the SQL pre-scan).
+      description: 'Bare mention: read_json',
+      children: [{ name: 'SEQ_SCAN' }],
+    };
+    expect(() => assertPlanReadOnly(plan)).not.toThrow();
+  });
+
+  it('reports the denied-function violation before the operator violation', () => {
+    const plan = {
+      name: 'COPY_TO_FILE',
+      extra_info: 'Function: read_json',
+    };
+    let caught: unknown;
+    try {
+      assertPlanReadOnly(plan);
+    } catch (err) {
+      caught = err;
+    }
+    expect((caught as McpError).data?.reason).toBe('denied_function_in_plan');
+  });
+});
+
+describe('sqlGate · collectPlanViolations', () => {
+  it('returns empty sets for a clean plan', () => {
+    const result = collectPlanViolations(validSelectPlan);
+    expect(result.offending.size).toBe(0);
+    expect(result.deniedFunctions.size).toBe(0);
+  });
+
+  it('separately reports operator and function violations on the same plan', () => {
+    const plan = {
+      name: 'PROJECTION',
+      children: [{ name: 'COPY_TO_FILE', extra_info: 'Function: read_json' }, { name: 'SEQ_SCAN' }],
+    };
+    const result = collectPlanViolations(plan);
+    expect([...result.offending]).toEqual(['COPY_TO_FILE']);
+    expect([...result.deniedFunctions]).toEqual(['read_json']);
+  });
+});
+
+describe('sqlGate · DENIED_TABLE_FUNCTIONS', () => {
+  it('contains the issue #100 functions', () => {
+    expect(DENIED_TABLE_FUNCTIONS.has('read_json')).toBe(true);
+    expect(DENIED_TABLE_FUNCTIONS.has('read_json_auto')).toBe(true);
+    expect(DENIED_TABLE_FUNCTIONS.has('read_ndjson')).toBe(true);
+    expect(DENIED_TABLE_FUNCTIONS.has('read_parquet')).toBe(true);
+    expect(DENIED_TABLE_FUNCTIONS.has('parquet_scan')).toBe(true);
   });
 });
 

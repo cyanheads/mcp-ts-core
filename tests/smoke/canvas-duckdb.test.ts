@@ -55,7 +55,7 @@ describeIf('canvas · DuckDB round trip', () => {
     const registry = new CanvasRegistry(provider, {
       ttlMs: 60_000,
       absoluteCapMs: 600_000,
-      maxCanvasesPerTenant: 10,
+      maxCanvasesPerTenant: 100,
       sweeperIntervalMs: 0,
     });
     canvas = new DataCanvas(provider, registry);
@@ -114,6 +114,42 @@ describeIf('canvas · DuckDB round trip', () => {
     // Without an existing table, this attempts to plan a READ_CSV which is
     // not in the allowlist. The gate or the planner itself will refuse it.
     await expect(instance.query("SELECT * FROM read_csv('/etc/passwd')")).rejects.toThrow();
+  });
+
+  // Issue #100 — read_json/read_parquet bypass. These functions lower into
+  // generic scan operators that previously passed the allowlist; the SQL
+  // pre-scan and plan-walk rescan should now reject them by name.
+  it.each([
+    ['read_json', "SELECT * FROM read_json('/etc/passwd')"],
+    ['read_json_auto', "SELECT * FROM read_json_auto('/etc/hostname')"],
+    ['read_json_objects', "SELECT * FROM read_json_objects('/etc/x.json')"],
+    ['read_ndjson', "SELECT * FROM read_ndjson('/etc/x.ndjson')"],
+    ['read_parquet', "SELECT * FROM read_parquet('/etc/x.parquet')"],
+    ['parquet_scan', "SELECT * FROM parquet_scan('/etc/x.parquet')"],
+  ])('issue #100 — rejects %s before reaching DuckDB', async (_label, sql) => {
+    const instance = await canvas.acquire(undefined, ctx);
+    await instance.registerTable('t', [{ x: 1 }]);
+    // The error must come from the canvas gate, not from DuckDB's executor —
+    // a "Malformed JSON" or "No such file" message would mean the file was
+    // opened, which is the bug.
+    await expect(instance.query(sql)).rejects.toThrow(/disallowed table function/i);
+  });
+
+  it('issue #100 — comment-injected separator does not bypass the deny-list', async () => {
+    const instance = await canvas.acquire(undefined, ctx);
+    await instance.registerTable('t', [{ x: 1 }]);
+    await expect(instance.query("SELECT * FROM read_json /* x */ ('/etc/passwd')")).rejects.toThrow(
+      /disallowed table function/i,
+    );
+  });
+
+  it('issue #100 — function name as a string literal does not false-positive', async () => {
+    const instance = await canvas.acquire(undefined, ctx);
+    await instance.registerTable('t', [{ x: 1 }]);
+    // The SQL pre-scan strips literals before regex; this query should pass.
+    // Note: BIGINT round-trips as a string via getRowObjectsJson().
+    const result = await instance.query("SELECT 'read_json' AS s, x FROM t");
+    expect(result.rows[0]).toEqual({ s: 'read_json', x: '1' });
   });
 
   it('honors registerAs for full-result materialization', async () => {
@@ -183,6 +219,52 @@ describeIf('canvas · DuckDB round trip', () => {
     expect(remaining.map((t) => t.name)).toEqual(['two']);
     expect(await instance.clear()).toBe(1);
     expect((await instance.describe()).length).toBe(0);
+  });
+
+  // Issue #102 — TIMESTAMP/DATE/BLOB columns previously routed through
+  // `appendVarchar(String(value))` which silently corrupted Date objects
+  // (locale-string format) and binary BLOBs (`String(uint8Array)` →
+  // `"1,2,3"`). The typed-appender path should round-trip values cleanly.
+  it('issue #102 — TIMESTAMP/DATE/BLOB round-trip via typed appenders', async () => {
+    const instance = await canvas.acquire(undefined, ctx);
+    const ts = new Date('2026-01-01T12:34:56.000Z');
+    const isoDate = '2026-01-01';
+    const blob = new Uint8Array([0x00, 0x01, 0xfe, 0xff]);
+
+    await instance.registerTable('typed', [{ ts, d: isoDate, b: blob, s: 'sentinel' }], {
+      schema: [
+        { name: 'ts', type: 'TIMESTAMP' },
+        { name: 'd', type: 'DATE' },
+        { name: 'b', type: 'BLOB' },
+        { name: 's', type: 'VARCHAR' },
+      ],
+    });
+
+    // Cast via SQL so we can assert against scalar values rather than the
+    // engine's structured representation. CAST(ts AS VARCHAR) emits the
+    // canonical ISO-8601-ish DuckDB timestamp form; hex(b) hexes the bytes.
+    const result = await instance.query(
+      'SELECT CAST(ts AS VARCHAR) AS ts_s, CAST(d AS VARCHAR) AS d_s, hex(b) AS b_hex, s FROM typed',
+    );
+    expect(result.rowCount).toBe(1);
+    const row = result.rows[0] as Record<string, string>;
+    // DuckDB renders TIMESTAMP as "YYYY-MM-DD HH:MM:SS[.fff]" — date+time
+    // components must survive the round-trip. The previous corruption path
+    // would land "Wed Mar 13 2026 ..." or similar, failing this match.
+    expect(row.ts_s).toMatch(/^2026-01-01 12:34:56/);
+    expect(row.d_s).toBe('2026-01-01');
+    // hex() returns the bytes as uppercase hex; values round-trip exactly.
+    expect(row.b_hex).toBe('0001FEFF');
+    expect(row.s).toBe('sentinel');
+  });
+
+  it('issue #102 — incompatible BLOB value fails fast with structured error', async () => {
+    const instance = await canvas.acquire(undefined, ctx);
+    await expect(
+      instance.registerTable('bad', [{ b: 'not-bytes' }], {
+        schema: [{ name: 'b', type: 'BLOB' }],
+      }),
+    ).rejects.toThrow(/BLOB column/);
   });
 
   // Refinement #3 — pin allowlist against live DuckDB EXPLAIN output. If

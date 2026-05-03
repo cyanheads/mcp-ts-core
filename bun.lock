@@ -18,7 +18,7 @@
       },
       "devDependencies": {
         "@biomejs/biome": "2.4.14",
-        "@cloudflare/workers-types": "^4.20260502.1",
+        "@cloudflare/workers-types": "^4.20260503.1",
         "@duckdb/node-api": "^1.5.2-r.1",
         "@hono/otel": "^1.1.1",
         "@opentelemetry/exporter-metrics-otlp-http": "^0.216.0",
@@ -190,7 +190,7 @@
 
     "@clack/prompts": ["@clack/prompts@0.11.0", "", { "dependencies": { "@clack/core": "0.5.0", "picocolors": "^1.0.0", "sisteransi": "^1.0.5" } }, "sha512-pMN5FcrEw9hUkZA4f+zLlzivQSeQf5dRGJjSUbvVYDLvpKCdQx5OaknvKzgbtXOizhP+SJJJjqEbOe55uKKfAw=="],
 
-    "@cloudflare/workers-types": ["@cloudflare/workers-types@4.20260502.1", "", {}, "sha512-gttFwGL0pYBF5nA2GIazKTVjDqXLnqWa/Mstd5aGTZyzkhmPy0ej3L2sIn2h8kAbF6I+XGK0P4UXvlmnuxefYg=="],
+    "@cloudflare/workers-types": ["@cloudflare/workers-types@4.20260503.1", "", {}, "sha512-8VKtafR4fNMtddutOnam3yq3AQvrl9bzuMio3B3AEAfrdx7xaaDV0Oyxz54P07lODwX0jydukGLC1rpDdYXAAA=="],
 
     "@duckdb/node-api": ["@duckdb/node-api@1.5.2-r.1", "", { "dependencies": { "@duckdb/node-bindings": "1.5.2-r.1" } }, "sha512-OzBBnS0JGXMoS5mzKNY/Ylr7SshcRQiLFIoxQ4AlePwJ2fNeDL/fbHu/knjxUrXwW1fJBTUgwWftmxDdnZZb3A=="],
 

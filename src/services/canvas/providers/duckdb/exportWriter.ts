@@ -1,12 +1,8 @@
 /**
- * @fileoverview Path resolution and sandboxing for canvas export targets.
- *
- * Refinement #1 in issue #97: path-based exports must be sandboxed to
- * `CANVAS_EXPORT_PATH`. Absolute paths and `..` traversal are rejected;
- * the resolved path is always inside the sandbox root. Stream-based exports
- * write to a temp file inside the sandbox and pipe its bytes to the caller's
- * `WritableStream`, then unlink the temp file.
- *
+ * @fileoverview Path resolution and sandboxing for canvas exports. Path
+ * targets are resolved against `CANVAS_EXPORT_PATH`; absolute paths and `..`
+ * traversal are rejected. Stream targets write a sandboxed temp file, pipe to
+ * the caller's `WritableStream`, then unlink.
  * @module src/services/canvas/providers/duckdb/exportWriter
  */
 
@@ -17,11 +13,9 @@ import { validationError } from '@/types-global/errors.js';
 import type { ExportFormat, ExportTarget } from '../../types.js';
 
 /**
- * Resolve a caller-supplied relative path against the sandbox root, refusing
- * absolute inputs and traversal escapes. Always returns an absolute path
- * that is, by post-condition, a descendant of `rootPath`.
- *
- * The sandbox root itself is created if missing.
+ * Resolve a relative path against the sandbox root. Refuses absolute inputs
+ * and traversal. Returns an absolute path inside `rootPath` and creates the
+ * root directory if missing.
  */
 export async function resolveExportPath(rootPath: string, requested: string): Promise<string> {
   if (typeof requested !== 'string' || requested.length === 0) {
@@ -48,10 +42,7 @@ export async function resolveExportPath(rootPath: string, requested: string): Pr
   return candidate;
 }
 
-/**
- * Map an export format to its DuckDB `COPY ... TO` `(FORMAT ...)` clause.
- * JSON uses DuckDB's `JSON` format (line-delimited JSON by default).
- */
+/** Map an export format to a DuckDB `COPY ... TO ... (FORMAT ...)` clause. */
 export function copyFormatClause(format: ExportFormat): string {
   switch (format) {
     case 'csv':
@@ -64,9 +55,8 @@ export function copyFormatClause(format: ExportFormat): string {
 }
 
 /**
- * Pipe a written sandbox file into a caller-supplied `WritableStream`,
- * unlinking the temp file when finished. Used for the stream branch of
- * {@link ExportTarget}.
+ * Pipe a sandbox file into a caller-supplied `WritableStream`, unlinking the
+ * file in `finally`. Owns the file's lifecycle from the moment of invocation.
  */
 export async function pipeFileToStream(
   filePath: string,
@@ -82,7 +72,7 @@ export async function pipeFileToStream(
       while (true) {
         const { bytesRead } = await handle.read(buffer, 0, chunkSize, null);
         if (bytesRead === 0) break;
-        // Slice owns its bytes — safe to pass to the writer.
+        // slice() copies — the writer owns the bytes after this point.
         await writer.write(buffer.slice(0, bytesRead));
         total += bytesRead;
       }
@@ -94,16 +84,14 @@ export async function pipeFileToStream(
     await writer.abort(err);
     throw err;
   } finally {
-    await unlink(filePath).catch(() => {
-      // Best-effort cleanup — file may already be gone if abort raced.
-    });
+    await unlink(filePath).catch(() => {});
   }
   return { sizeBytes: total };
 }
 
 /**
- * Generate a unique temp file path inside the sandbox for stream-based exports.
- * Creates the sandbox root if missing so the caller can write immediately.
+ * Generate a unique temp file path inside the sandbox. Creates the root if
+ * missing so the caller can write immediately.
  */
 export async function tempFilePathFor(rootPath: string, format: ExportFormat): Promise<string> {
   const root = resolve(rootPath);
@@ -113,9 +101,7 @@ export async function tempFilePathFor(rootPath: string, format: ExportFormat): P
   return join(root, `.canvas-export-${stamp}-${rand}.${format}`);
 }
 
-/**
- * Best-effort size lookup for a written file. Returns 0 if `stat` fails.
- */
+/** Best-effort file size lookup. Returns 0 on failure. */
 export async function safeSizeBytes(path: string): Promise<number> {
   try {
     const info = await stat(path);

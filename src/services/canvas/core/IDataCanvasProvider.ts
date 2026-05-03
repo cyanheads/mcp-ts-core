@@ -1,9 +1,9 @@
 /**
  * @fileoverview Engine-level provider interface for the DataCanvas primitive.
- * Implementations own the physical resources backing each canvas (e.g. one
- * DuckDB instance per canvasId) and expose register/query/export/describe
- * operations keyed by canvasId. The lifecycle wrapper ({@link CanvasRegistry})
- * keys these calls by `(tenantId, canvasId)` and enforces TTL/caps.
+ * Implementations own physical resources per canvas (e.g. one DuckDB instance
+ * per canvasId) and expose register/query/export/describe keyed by canvasId.
+ * The lifecycle wrapper ({@link CanvasRegistry}) handles TTL, caps, and the
+ * tenant authorization check before any provider call.
  * @module src/services/canvas/core/IDataCanvasProvider
  */
 

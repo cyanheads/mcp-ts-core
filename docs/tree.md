@@ -1,6 +1,6 @@
 # mcp-ts-core - Directory Structure
 
-Generated on: 2026-05-02 23:02:44
+Generated on: 2026-05-03 06:41:45
 
 ```text
 mcp-ts-core/
@@ -600,13 +600,15 @@ mcp-ts-core/
 │   │   │   └── devdocs.test.ts
 │   │   ├── services/
 │   │   │   ├── canvas/
+│   │   │   │   ├── appendValueCoerce.test.ts
 │   │   │   │   ├── canvasFactory.test.ts
 │   │   │   │   ├── CanvasRegistry.test.ts
 │   │   │   │   ├── classifyDuckdbError.test.ts
 │   │   │   │   ├── DataCanvas.test.ts
 │   │   │   │   ├── exportWriter.test.ts
 │   │   │   │   ├── schemaSniffer.test.ts
-│   │   │   │   └── sqlGate.test.ts
+│   │   │   │   ├── sqlGate.test.ts
+│   │   │   │   └── toBigInt.test.ts
 │   │   │   ├── graph/
 │   │   │   │   ├── core/
 │   │   │   │   │   ├── GraphService.metrics.test.ts

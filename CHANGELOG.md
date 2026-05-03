@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.8.12](changelog/0.8.x/0.8.12.md) — 2026-05-02
+
+SQL gate blocks read_json*/read_parquet* file disclosure (#100); appendValue routes TIMESTAMP/DATE/BLOB to typed appenders (#102); CANVAS_IDENTIFIER_REGEX + SQL_GATE_REASONS exported (#104); RequestContext widened to accept handler Context (#105).
+
 ## [0.8.11](changelog/0.8.x/0.8.11.md) — 2026-05-02
 
 disabledTool() wrapper for feature-flagged tools (#96); landing page gains an `unspecified` mutability bucket so unannotated tools no longer infer as `write` (#92); skill-versioning policy in CLAUDE.md/AGENTS.md with 7 retroactive bumps (#98).
