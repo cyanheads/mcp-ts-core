@@ -23,17 +23,21 @@ import {
   quoteIdentifier,
 } from '../../core/sqlGate.js';
 import type {
+  CanvasObjectKind,
   ColumnSchema,
   ColumnType,
   DescribeOptions,
   ExportOptions,
   ExportResult,
   ExportTarget,
+  ImportFromOptions,
   QueryOptions,
   QueryResult,
   RegisterRows,
   RegisterTableOptions,
   RegisterTableResult,
+  RegisterViewOptions,
+  RegisterViewResult,
   TableInfo,
 } from '../../types.js';
 import {
@@ -254,34 +258,7 @@ export class DuckdbProvider implements IDataCanvasProvider {
     const duck = await importDuckDB();
     options?.signal?.throwIfAborted();
 
-    // Layer 1: text-level deny-list. read_json/read_parquet/... lower into
-    // generic scans that pass the operator allowlist, so reject by name first.
-    assertNoDeniedFunctions(sql);
-
-    // Layers 2-3: parse and type-check before EXPLAIN.
-    const extracted = await record.controlConnection.extractStatements(sql);
-    const statementCount = extracted.count;
-    let statementType: number | undefined;
-    if (statementCount === 1) {
-      const prepared = await extracted.prepare(0);
-      try {
-        statementType = prepared.statementType;
-      } finally {
-        prepared.destroySync();
-      }
-    }
-    assertSelectOnly({
-      statementCount,
-      statementType:
-        statementType !== undefined ? (duck.StatementType[statementType] ?? 'UNKNOWN') : 'UNKNOWN',
-    });
-
-    // Layer 4: walk the plan with the allowlist + denied-function rescan.
-    const planJson = await this.runExplain(
-      record.controlConnection,
-      `EXPLAIN (FORMAT JSON) ${sql}`,
-    );
-    assertPlanReadOnly(planJson);
+    await this.assertReadOnlySql(record, sql, duck);
 
     // Per-query connection so cancellation interrupts only this call.
     const conn = await record.instance.connect();
@@ -317,11 +294,7 @@ export class DuckdbProvider implements IDataCanvasProvider {
         );
         rowsToReturn = reader.getRowObjectsJson() as Record<string, unknown>[];
         columns = reader.columnNames();
-        const countReader = await conn.runAndReadAll(
-          `SELECT COUNT(*) AS n FROM ${quoteIdentifier(options.registerAs)}`,
-        );
-        const countRow = countReader.getRowObjectsJson()[0] as { n: number | string } | undefined;
-        totalRowCount = Number(countRow?.n ?? 0);
+        totalRowCount = await this.countRows(conn, options.registerAs);
       } else {
         const reader = await conn.runAndReadAll(sql);
         const allRows = reader.getRowObjectsJson() as Record<string, unknown>[];
@@ -376,11 +349,7 @@ export class DuckdbProvider implements IDataCanvasProvider {
     options?.signal?.addEventListener('abort', onAbort, { once: true });
 
     try {
-      const countReader = await conn.runAndReadAll(
-        `SELECT COUNT(*) AS n FROM ${quoteIdentifier(tableName)}`,
-      );
-      const countRow = countReader.getRowObjectsJson()[0] as { n: number | string } | undefined;
-      const rowCount = Number(countRow?.n ?? 0);
+      const rowCount = await this.countRows(conn, tableName);
 
       if (isPathTarget(target)) {
         const absolutePath = await resolveExportPath(this.options.exportRootPath, target.path);
@@ -429,6 +398,136 @@ export class DuckdbProvider implements IDataCanvasProvider {
     }
   }
 
+  async registerView(
+    canvasId: string,
+    name: string,
+    selectSql: string,
+    _context: RequestContext,
+    options?: RegisterViewOptions,
+  ): Promise<RegisterViewResult> {
+    const record = this.requireCanvas(canvasId);
+    const duck = await importDuckDB();
+    assertValidIdentifier(name, 'table');
+    options?.signal?.throwIfAborted();
+
+    // Same four-layer gate `query()` enforces. View definitions inherit the
+    // operator allowlist transitively at query time, but we also gate the
+    // SELECT at registration so a malicious definition fails loud here, not
+    // later when the view is referenced.
+    await this.assertReadOnlySql(record, selectSql, duck);
+    options?.signal?.throwIfAborted();
+
+    // Block view-on-table-name collisions explicitly so the failure carries a
+    // structured `reason` rather than a raw DuckDB catalog message.
+    const existing = await this.lookupKind(record.controlConnection, name);
+    if (existing === 'table') {
+      throw validationError(
+        `Canvas already contains a base table named "${name}". Drop the table or choose a different name.`,
+        { reason: 'view_table_clash', name },
+      );
+    }
+
+    try {
+      await record.controlConnection.run(
+        `CREATE OR REPLACE VIEW ${quoteIdentifier(name)} AS ${selectSql}`,
+      );
+    } catch (err) {
+      throw classifyDuckdbError(err);
+    }
+
+    const colReader = await record.controlConnection.runAndReadAll(
+      `SELECT column_name FROM information_schema.columns ` +
+        `WHERE table_schema = 'main' AND table_name = '${escapeSqlString(name)}' ` +
+        `ORDER BY ordinal_position`,
+    );
+    const columns = (colReader.getRowObjectsJson() as { column_name: string }[]).map(
+      (r) => r.column_name,
+    );
+
+    return { viewName: name, columns };
+  }
+
+  async importFrom(
+    targetCanvasId: string,
+    sourceCanvasId: string,
+    sourceTableName: string,
+    asName: string,
+    _context: RequestContext,
+    options?: ImportFromOptions,
+  ): Promise<RegisterTableResult> {
+    if (sourceCanvasId === targetCanvasId) {
+      throw validationError(
+        'Source and target canvases must differ. Use registerAs in query() to materialize within a single canvas.',
+        { reason: 'import_same_canvas' },
+      );
+    }
+
+    const target = this.requireCanvas(targetCanvasId);
+    const source = this.requireCanvas(sourceCanvasId);
+
+    assertValidIdentifier(sourceTableName, 'table');
+    assertValidIdentifier(asName, 'table');
+    options?.signal?.throwIfAborted();
+
+    const sourceKind = await this.lookupKind(source.controlConnection, sourceTableName);
+    if (sourceKind === undefined) {
+      throw notFound(`Source canvas does not contain a table or view named "${sourceTableName}".`, {
+        sourceCanvasId,
+        sourceTableName,
+      });
+    }
+
+    const targetExisting = await this.lookupKind(target.controlConnection, asName);
+    if (targetExisting === 'view') {
+      throw validationError(
+        `Target canvas already contains a view named "${asName}". Drop the view or choose a different name.`,
+        { reason: 'import_view_clash', asName },
+      );
+    }
+
+    // Drop+create makes import idempotent under re-imports of the same name,
+    // matching registerTable's behavior.
+    await target.controlConnection.run(`DROP TABLE IF EXISTS ${quoteIdentifier(asName)}`);
+
+    // Round-trip through a sandbox-rooted temp Parquet file. Parquet is
+    // built into DuckDB's core (no extension load needed even with
+    // autoload disabled). All column types — including TIMESTAMP/DATE/BLOB
+    // — round-trip losslessly, which an in-memory appender path can't
+    // guarantee for native engine value types.
+    const tempPath = await tempFilePathFor(this.options.exportRootPath, 'parquet');
+    try {
+      await source.controlConnection.run(
+        `COPY ${quoteIdentifier(sourceTableName)} TO '${escapeSqlString(tempPath)}' (FORMAT 'parquet')`,
+      );
+      options?.signal?.throwIfAborted();
+      await target.controlConnection.run(
+        `CREATE TABLE ${quoteIdentifier(asName)} AS SELECT * FROM read_parquet('${escapeSqlString(tempPath)}')`,
+      );
+    } catch (err) {
+      // Best-effort cleanup of a half-written target before surfacing.
+      await target.controlConnection
+        .run(`DROP TABLE IF EXISTS ${quoteIdentifier(asName)}`)
+        .catch(() => {});
+      throw classifyDuckdbError(err);
+    } finally {
+      await unlink(tempPath).catch(() => {});
+    }
+
+    const [colReader, rowCount] = await Promise.all([
+      target.controlConnection.runAndReadAll(
+        `SELECT column_name FROM information_schema.columns ` +
+          `WHERE table_schema = 'main' AND table_name = '${escapeSqlString(asName)}' ` +
+          `ORDER BY ordinal_position`,
+      ),
+      this.countRows(target.controlConnection, asName),
+    ]);
+    const columns = (colReader.getRowObjectsJson() as { column_name: string }[]).map(
+      (r) => r.column_name,
+    );
+
+    return { tableName: asName, rowCount, columns };
+  }
+
   async describe(
     canvasId: string,
     _context: RequestContext,
@@ -438,26 +537,42 @@ export class DuckdbProvider implements IDataCanvasProvider {
     if (options?.tableName !== undefined) {
       assertValidIdentifier(options.tableName, 'table');
     }
-    const filter = options?.tableName
-      ? ` AND table_name = '${escapeSqlString(options.tableName)}'`
-      : '';
+    const filters = [`table_schema = 'main'`];
+    if (options?.tableName) {
+      filters.push(`table_name = '${escapeSqlString(options.tableName)}'`);
+    }
+    if (options?.kind === 'view') {
+      filters.push(`table_type = 'VIEW'`);
+    } else if (options?.kind === 'table') {
+      filters.push(`table_type <> 'VIEW'`);
+    }
     const reader = await record.controlConnection.runAndReadAll(
-      `SELECT table_name FROM information_schema.tables WHERE table_schema = 'main'${filter} ORDER BY table_name`,
+      `SELECT table_name, table_type FROM information_schema.tables WHERE ${filters.join(' AND ')} ORDER BY table_name`,
     );
-    const tableRows = reader.getRowObjectsJson() as { table_name: string }[];
+    const tableRows = reader.getRowObjectsJson() as { table_name: string; table_type: string }[];
     return await Promise.all(
-      tableRows.map((row) => this.describeOne(record.controlConnection, row.table_name)),
+      tableRows.map((row) =>
+        this.describeOne(
+          record.controlConnection,
+          row.table_name,
+          row.table_type === 'VIEW' ? 'view' : 'table',
+        ),
+      ),
     );
   }
 
-  private async describeOne(connection: DuckDBConnection, tableName: string): Promise<TableInfo> {
-    const [colReader, countReader] = await Promise.all([
+  private async describeOne(
+    connection: DuckDBConnection,
+    tableName: string,
+    kind: CanvasObjectKind,
+  ): Promise<TableInfo> {
+    const [colReader, rowCount] = await Promise.all([
       connection.runAndReadAll(
         `SELECT column_name, data_type, is_nullable FROM information_schema.columns ` +
           `WHERE table_schema = 'main' AND table_name = '${escapeSqlString(tableName)}' ` +
           `ORDER BY ordinal_position`,
       ),
-      connection.runAndReadAll(`SELECT COUNT(*) AS n FROM ${quoteIdentifier(tableName)}`),
+      this.countRows(connection, tableName),
     ]);
     const colRows = colReader.getRowObjectsJson() as {
       column_name: string;
@@ -469,10 +584,10 @@ export class DuckdbProvider implements IDataCanvasProvider {
       type: dataTypeToColumnType(c.data_type),
       nullable: c.is_nullable === 'YES',
     }));
-    const countRow = countReader.getRowObjectsJson()[0] as { n: number | string } | undefined;
     return {
       name: tableName,
-      rowCount: Number(countRow?.n ?? 0),
+      kind,
+      rowCount,
       columns,
     };
   }
@@ -480,22 +595,29 @@ export class DuckdbProvider implements IDataCanvasProvider {
   async drop(canvasId: string, name: string, _context: RequestContext): Promise<boolean> {
     const record = this.requireCanvas(canvasId);
     assertValidIdentifier(name, 'table');
-    const checkReader = await record.controlConnection.runAndReadAll(
-      `SELECT 1 FROM information_schema.tables WHERE table_schema = 'main' AND table_name = '${escapeSqlString(name)}' LIMIT 1`,
-    );
-    if (checkReader.getRowsJson().length === 0) return false;
-    await record.controlConnection.run(`DROP TABLE ${quoteIdentifier(name)}`);
+    const kind = await this.lookupKind(record.controlConnection, name);
+    if (kind === undefined) return false;
+    const dropKeyword = kind === 'view' ? 'VIEW' : 'TABLE';
+    await record.controlConnection.run(`DROP ${dropKeyword} ${quoteIdentifier(name)}`);
     return true;
   }
 
   async clear(canvasId: string, _context: RequestContext): Promise<number> {
     const record = this.requireCanvas(canvasId);
     const reader = await record.controlConnection.runAndReadAll(
-      `SELECT table_name FROM information_schema.tables WHERE table_schema = 'main'`,
+      `SELECT table_name, table_type FROM information_schema.tables WHERE table_schema = 'main'`,
     );
-    const rows = reader.getRowObjectsJson() as { table_name: string }[];
-    for (const row of rows) {
-      await record.controlConnection.run(`DROP TABLE ${quoteIdentifier(row.table_name)}`);
+    const rows = reader.getRowObjectsJson() as { table_name: string; table_type: string }[];
+    // Drop views before tables so a dependent view doesn't block its base table.
+    const ordered = [...rows].sort((a, b) => {
+      const aView = a.table_type === 'VIEW';
+      const bView = b.table_type === 'VIEW';
+      if (aView !== bView) return aView ? -1 : 1;
+      return a.table_name.localeCompare(b.table_name);
+    });
+    for (const row of ordered) {
+      const dropKeyword = row.table_type === 'VIEW' ? 'VIEW' : 'TABLE';
+      await record.controlConnection.run(`DROP ${dropKeyword} ${quoteIdentifier(row.table_name)}`);
     }
     return rows.length;
   }
@@ -510,6 +632,77 @@ export class DuckdbProvider implements IDataCanvasProvider {
       throw notFound('Canvas not found in DuckDB provider.', { canvasId });
     }
     return record;
+  }
+
+  /**
+   * Run the same four-layer read-only gate `query()` enforces, against an
+   * arbitrary SELECT string. Used by `query()` and `registerView()` so view
+   * definitions inherit query-level safety.
+   */
+  private async assertReadOnlySql(
+    record: CanvasRecord,
+    sql: string,
+    duck: DuckDBModule,
+  ): Promise<void> {
+    // Layer 1: text-level deny-list. read_json/read_parquet/... lower into
+    // generic scans that pass the operator allowlist, so reject by name first.
+    assertNoDeniedFunctions(sql);
+
+    // Layers 2-3: parse and type-check before EXPLAIN.
+    const extracted = await record.controlConnection.extractStatements(sql);
+    const statementCount = extracted.count;
+    let statementType: number | undefined;
+    if (statementCount === 1) {
+      const prepared = await extracted.prepare(0);
+      try {
+        statementType = prepared.statementType;
+      } finally {
+        prepared.destroySync();
+      }
+    }
+    assertSelectOnly({
+      statementCount,
+      statementType:
+        statementType !== undefined ? (duck.StatementType[statementType] ?? 'UNKNOWN') : 'UNKNOWN',
+    });
+
+    // Layer 4: walk the plan with the allowlist + denied-function rescan.
+    const planJson = await this.runExplain(
+      record.controlConnection,
+      `EXPLAIN (FORMAT JSON) ${sql}`,
+    );
+    assertPlanReadOnly(planJson);
+  }
+
+  /**
+   * Resolve whether a name on the canvas refers to a base table, a view, or
+   * nothing. Returns `undefined` when absent; used by drop/registerView/
+   * importFrom to dispatch the right DDL.
+   */
+  private async lookupKind(
+    connection: DuckDBConnection,
+    name: string,
+  ): Promise<CanvasObjectKind | undefined> {
+    const reader = await connection.runAndReadAll(
+      `SELECT table_type FROM information_schema.tables ` +
+        `WHERE table_schema = 'main' AND table_name = '${escapeSqlString(name)}' LIMIT 1`,
+    );
+    const rows = reader.getRowObjectsJson() as { table_type: string }[];
+    if (rows.length === 0) return;
+    return rows[0]?.table_type === 'VIEW' ? 'view' : 'table';
+  }
+
+  /**
+   * Materialize `COUNT(*)` against a (validated) table or view name. DuckDB
+   * returns BIGINT as a JSON string; this helper centralizes the `Number(...)`
+   * coercion so callers see a plain `number`.
+   */
+  private async countRows(connection: DuckDBConnection, name: string): Promise<number> {
+    const reader = await connection.runAndReadAll(
+      `SELECT COUNT(*) AS n FROM ${quoteIdentifier(name)}`,
+    );
+    const row = reader.getRowObjectsJson()[0] as { n: number | string } | undefined;
+    return Number(row?.n ?? 0);
   }
 
   private async runExplain(connection: DuckDBConnection, explainSql: string): Promise<unknown> {

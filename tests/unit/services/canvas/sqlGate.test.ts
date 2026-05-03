@@ -363,6 +363,25 @@ describe('sqlGate · DENIED_TABLE_FUNCTIONS', () => {
     expect(DENIED_TABLE_FUNCTIONS.has('read_parquet')).toBe(true);
     expect(DENIED_TABLE_FUNCTIONS.has('parquet_scan')).toBe(true);
   });
+
+  // Pre-staged hardening for issue #106 — block GDAL-backed file readers and
+  // index-internals dumpers the moment anyone enables the spatial extension.
+  it.each([
+    'st_read',
+    'st_drivers',
+    'rtree_index_dump',
+  ])('pre-stages spatial deny for %s (issue #106)', (fn) => {
+    expect(DENIED_TABLE_FUNCTIONS.has(fn)).toBe(true);
+    expect(() => assertNoDeniedFunctions(`SELECT * FROM ${fn}('/etc/passwd')`)).toThrow(
+      /disallowed table function/i,
+    );
+  });
+
+  it('matches ST_Read regardless of case (issue #106)', () => {
+    expect(() => assertNoDeniedFunctions("SELECT * FROM ST_Read('/x.shp')")).toThrow(
+      /disallowed table function/i,
+    );
+  });
 });
 
 describe('sqlGate · exported allowlists', () => {
@@ -379,14 +398,46 @@ describe('sqlGate · exported allowlists', () => {
     expect(ALLOWED_PLAN_OPERATORS.has('UNNEST')).toBe(true);
   });
 
+  // DuckDB v1.5.x stringifies operator names that the older long-form list
+  // did not cover. Pinning each one here keeps the audit explicit if someone
+  // later trims the allowlist.
+  it.each([
+    'TABLE_SCAN',
+    'CTE_SCAN',
+    'DELIM_SCAN',
+    'POSITIONAL_SCAN',
+    'REC_CTE_SCAN',
+    'REC_REC_CTE_SCAN',
+    'LEFT_DELIM_JOIN',
+    'RIGHT_DELIM_JOIN',
+    'STREAMING_WINDOW',
+    'REC_CTE',
+    'REC_KEY_CTE',
+    'LIMITED_DISTINCT',
+  ])('allowlist covers v1.5.x operator name: %s', (op) => {
+    expect(ALLOWED_PLAN_OPERATORS.has(op)).toBe(true);
+  });
+
+  // Pre-staged hardening for the future spatial-extension opt-in (issue #106).
+  // Dormant until the extension is loaded — the operator can't surface in a
+  // plan without it.
+  it('allowlist pre-stages RTREE_INDEX_SCAN for issue #106', () => {
+    expect(ALLOWED_PLAN_OPERATORS.has('RTREE_INDEX_SCAN')).toBe(true);
+  });
+
   it('plan operator allowlist explicitly excludes write/external operators', () => {
     expect(ALLOWED_PLAN_OPERATORS.has('INSERT')).toBe(false);
     expect(ALLOWED_PLAN_OPERATORS.has('UPDATE')).toBe(false);
     expect(ALLOWED_PLAN_OPERATORS.has('DELETE')).toBe(false);
+    expect(ALLOWED_PLAN_OPERATORS.has('MERGE_INTO')).toBe(false);
     expect(ALLOWED_PLAN_OPERATORS.has('COPY_TO_FILE')).toBe(false);
+    expect(ALLOWED_PLAN_OPERATORS.has('COPY_DATABASE')).toBe(false);
     expect(ALLOWED_PLAN_OPERATORS.has('READ_CSV')).toBe(false);
     expect(ALLOWED_PLAN_OPERATORS.has('READ_PARQUET')).toBe(false);
     expect(ALLOWED_PLAN_OPERATORS.has('PRAGMA')).toBe(false);
     expect(ALLOWED_PLAN_OPERATORS.has('ATTACH')).toBe(false);
+    expect(ALLOWED_PLAN_OPERATORS.has('INOUT_FUNCTION')).toBe(false);
+    expect(ALLOWED_PLAN_OPERATORS.has('CREATE_TABLE_AS')).toBe(false);
+    expect(ALLOWED_PLAN_OPERATORS.has('CREATE_VIEW')).toBe(false);
   });
 });

@@ -4,7 +4,7 @@ description: >
   DataCanvas primitive reference — a Tier 3 SQL/analytical workspace for tabular MCP servers, backed by DuckDB. Use when registering tables from upstream APIs, running ad-hoc SQL across them, and exporting results. Covers the acquire → register → query → export flow, the token-sharing pattern for multi-agent collaboration, env config, and Cloudflare Workers fail-closed behavior.
 metadata:
   author: cyanheads
-  version: "1.0"
+  version: "1.1"
   audience: external
   type: reference
 ---
@@ -118,12 +118,41 @@ const joined = await instance.query(`
 
 `registerAs` rejects with `Conflict` if the target name already exists — drop it first.
 
-**Read-only enforcement** (three layers):
-1. Statement count (must be 1) via `extractStatements`.
-2. Statement type (must be `SELECT`) via `prepared.statementType`.
-3. EXPLAIN-plan walk against an allowlisted set of physical operators.
+**Read-only enforcement** (four layers):
+1. Text-level deny-list — pre-parse scan for file/HTTP-reading table functions (`read_csv*`, `read_json*`, `read_parquet*`, `read_text`, `read_blob`, `glob`, `iceberg_scan`, `delta_scan`, `postgres_scan`, `mysql_scan`, `sqlite_scan`, plus pre-staged spatial ones).
+2. Statement count (must be 1) via `extractStatements`.
+3. Statement type (must be `SELECT`) via `prepared.statementType`.
+4. EXPLAIN-plan walk against an allowlisted set of physical operators + a denied-function rescan over plan metadata strings.
 
 Any layer's rejection throws `ValidationError` with a structured `data.reason`. File-reading scans (`READ_CSV`, `READ_PARQUET`, `READ_JSON`), DDL (`CREATE_*`, `DROP_*`, `ALTER_*`), DML (`INSERT`, `UPDATE`, `DELETE`), exports (`COPY_TO_FILE`), and utility statements (`PRAGMA`, `ATTACH`, `LOAD`, `SET`) are all rejected.
+
+### `instance.registerView(name, selectSql, options?)`
+
+Register a SQL view on the canvas. The `SELECT` runs through the same four-layer gate `query()` enforces, so a malicious definition fails at registration time, not later when the view is referenced.
+
+```ts
+await instance.registerView(
+  'sales_by_region',
+  'SELECT region, SUM(amount) AS total FROM sales GROUP BY region',
+);
+// { viewName: 'sales_by_region', columns: ['region', 'total'] }
+
+// Subsequent queries against the view inherit normal gate enforcement at execution time.
+const result = await instance.query("SELECT total FROM sales_by_region WHERE region = 'a'");
+```
+
+`CREATE OR REPLACE VIEW` semantics: re-registering the same name succeeds. Conflict with an existing base table throws `validationError({ reason: 'view_table_clash' })`.
+
+### `instance.importFrom(sourceCanvasId, sourceTableName, options?)`
+
+Copy a table from another canvas the caller controls into this one. The lifecycle wrapper validates tenancy on both ids before the provider sees either. Round-trips through a sandbox-rooted Parquet temp file so `TIMESTAMP`/`DATE`/`BLOB` columns survive losslessly.
+
+```ts
+const imported = await target.importFrom(source.canvasId, 'orders', { asName: 'orders_copy' });
+// { tableName: 'orders_copy', rowCount: 2, columns: [...] }
+```
+
+Idempotent on re-import (drop + create on the target). `asName` defaults to `sourceTableName`. Throws `validationError({ reason: 'import_same_canvas' })` if source and target are the same canvas — use `query({ registerAs })` to materialize within a single canvas. Throws `notFound` if the source table is missing; `validationError({ reason: 'import_view_clash' })` if the target name collides with an existing view.
 
 ### `instance.export(tableName, target, options?)`
 
@@ -141,11 +170,16 @@ await instance.export('g_with_obs', { format: 'csv', stream: writableStream });
 
 ```ts
 const tables = await instance.describe();
-// [{ name: 'germplasm', rowCount: 200, columns: [...] }, ...]
+// [{ name: 'germplasm', kind: 'table', rowCount: 200, columns: [...] }, ...]
 
-await instance.drop('staging_table');   // false if missing
-await instance.clear();                  // returns count dropped
+// Filter by kind ('table' | 'view').
+const onlyViews = await instance.describe({ kind: 'view' });
+
+await instance.drop('staging_table');   // detects kind, emits DROP TABLE or DROP VIEW; false if missing
+await instance.clear();                  // returns count dropped (drops views before tables to avoid dependency errors)
 ```
+
+`TableInfo.kind` discriminates `'table'` vs `'view'`. For views, `rowCount` is materialized at describe time via `COUNT(*)` — not free; treat as an approximation if the view is expensive.
 
 ### Cancellation
 

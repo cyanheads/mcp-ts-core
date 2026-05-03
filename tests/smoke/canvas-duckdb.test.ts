@@ -217,7 +217,154 @@ describeIf('canvas · DuckDB round trip', () => {
     expect(await instance.drop('one')).toBe(false);
     const remaining = await instance.describe();
     expect(remaining.map((t) => t.name)).toEqual(['two']);
+    expect(remaining.map((t) => t.kind)).toEqual(['table']);
     expect(await instance.clear()).toBe(1);
+    expect((await instance.describe()).length).toBe(0);
+  });
+
+  it('registerView gates the SELECT and exposes the view via describe/query', async () => {
+    const instance = await canvas.acquire(undefined, ctx);
+    await instance.registerTable(
+      'sales',
+      [
+        { region: 'a', amount: 100 },
+        { region: 'a', amount: 50 },
+        { region: 'b', amount: 25 },
+      ],
+      {
+        schema: [
+          { name: 'region', type: 'VARCHAR' },
+          { name: 'amount', type: 'INTEGER' },
+        ],
+      },
+    );
+
+    const view = await instance.registerView(
+      'sales_by_region',
+      'SELECT region, SUM(amount) AS total FROM sales GROUP BY region',
+    );
+    expect(view.viewName).toBe('sales_by_region');
+    expect(view.columns).toEqual(['region', 'total']);
+
+    // Querying the view goes through the normal gate at execution time.
+    const result = await instance.query("SELECT total FROM sales_by_region WHERE region = 'a'");
+    expect(result.rows).toEqual([{ total: '150' }]);
+
+    const all = await instance.describe();
+    const viewInfo = all.find((t) => t.name === 'sales_by_region');
+    expect(viewInfo?.kind).toBe('view');
+
+    const onlyViews = await instance.describe({ kind: 'view' });
+    expect(onlyViews.map((t) => t.name)).toEqual(['sales_by_region']);
+
+    // CREATE OR REPLACE semantics: re-registering the same name succeeds.
+    await expect(
+      instance.registerView('sales_by_region', 'SELECT region FROM sales'),
+    ).resolves.toBeDefined();
+
+    // drop() detects the kind and emits DROP VIEW.
+    expect(await instance.drop('sales_by_region')).toBe(true);
+    expect((await instance.describe({ kind: 'view' })).length).toBe(0);
+  });
+
+  it('registerView rejects non-SELECT and disallowed-function definitions', async () => {
+    const instance = await canvas.acquire(undefined, ctx);
+    await instance.registerTable('t', [{ x: 1 }]);
+
+    await expect(instance.registerView('bad', 'INSERT INTO t VALUES (2)')).rejects.toThrow(
+      /must be SELECT|rejected/i,
+    );
+    await expect(
+      instance.registerView('bad', "SELECT * FROM read_json('/etc/passwd')"),
+    ).rejects.toThrow(/disallowed table function/i);
+  });
+
+  it('registerView refuses to overwrite a base table of the same name', async () => {
+    const instance = await canvas.acquire(undefined, ctx);
+    await instance.registerTable('items', [{ id: 1 }]);
+    await expect(instance.registerView('items', 'SELECT 1 AS id')).rejects.toThrow(
+      /base table named/i,
+    );
+  });
+
+  it('importFrom copies a table across canvases through a parquet round-trip', async () => {
+    const source = await canvas.acquire(undefined, ctx);
+    const target = await canvas.acquire(undefined, ctx);
+    expect(source.canvasId).not.toBe(target.canvasId);
+
+    const ts = new Date('2026-04-01T00:00:00.000Z');
+    const blob = new Uint8Array([0xfe, 0xed, 0xfa, 0xce]);
+    await source.registerTable(
+      'orders',
+      [
+        { id: 1, name: 'a', placed_at: ts, payload: blob },
+        { id: 2, name: 'b', placed_at: ts, payload: blob },
+      ],
+      {
+        schema: [
+          { name: 'id', type: 'INTEGER' },
+          { name: 'name', type: 'VARCHAR' },
+          { name: 'placed_at', type: 'TIMESTAMP' },
+          { name: 'payload', type: 'BLOB' },
+        ],
+      },
+    );
+
+    const imported = await target.importFrom(source.canvasId, 'orders', { asName: 'orders_copy' });
+    expect(imported.tableName).toBe('orders_copy');
+    expect(imported.rowCount).toBe(2);
+    expect(imported.columns.sort()).toEqual(['id', 'name', 'payload', 'placed_at']);
+
+    // Source remains untouched.
+    const sourceTables = await source.describe();
+    expect(sourceTables.map((t) => t.name)).toEqual(['orders']);
+
+    // TIMESTAMP/BLOB round-trip losslessly through the parquet temp file.
+    const verify = await target.query(
+      'SELECT id, name, CAST(placed_at AS VARCHAR) AS ts_s, hex(payload) AS p_hex FROM orders_copy ORDER BY id',
+    );
+    expect(verify.rows[0]).toMatchObject({
+      id: 1,
+      name: 'a',
+      p_hex: 'FEEDFACE',
+    });
+    expect((verify.rows[0] as { ts_s: string }).ts_s).toMatch(/^2026-04-01 00:00:00/);
+
+    // Re-importing the same name overwrites idempotently.
+    await target.importFrom(source.canvasId, 'orders', { asName: 'orders_copy' });
+    expect((await target.describe()).find((t) => t.name === 'orders_copy')?.rowCount).toBe(2);
+  });
+
+  it('importFrom defaults asName to the source table name', async () => {
+    const source = await canvas.acquire(undefined, ctx);
+    const target = await canvas.acquire(undefined, ctx);
+    await source.registerTable('catalog', [{ id: 1 }]);
+    await target.importFrom(source.canvasId, 'catalog');
+    const tables = await target.describe();
+    expect(tables.map((t) => t.name)).toContain('catalog');
+  });
+
+  it('importFrom rejects a missing source table with NotFound', async () => {
+    const source = await canvas.acquire(undefined, ctx);
+    const target = await canvas.acquire(undefined, ctx);
+    await expect(target.importFrom(source.canvasId, 'no_such_table')).rejects.toThrow(
+      /does not contain a table or view/i,
+    );
+  });
+
+  it('importFrom rejects when source and target are the same canvas', async () => {
+    const instance = await canvas.acquire(undefined, ctx);
+    await instance.registerTable('x', [{ a: 1 }]);
+    await expect(instance.importFrom(instance.canvasId, 'x', { asName: 'y' })).rejects.toThrow(
+      /must differ/i,
+    );
+  });
+
+  it('clear drops views before tables', async () => {
+    const instance = await canvas.acquire(undefined, ctx);
+    await instance.registerTable('base', [{ id: 1 }]);
+    await instance.registerView('derived', 'SELECT id FROM base');
+    expect(await instance.clear()).toBe(2);
     expect((await instance.describe()).length).toBe(0);
   });
 

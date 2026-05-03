@@ -42,6 +42,7 @@ export {
 } from './providers/duckdb/DuckdbProvider.js';
 export type {
   AcquireOptions,
+  CanvasObjectKind,
   ColumnSchema,
   ColumnType,
   DescribeOptions,
@@ -49,10 +50,13 @@ export type {
   ExportOptions,
   ExportResult,
   ExportTarget,
+  ImportFromOptions,
   QueryOptions,
   QueryResult,
   RegisterRows,
   RegisterTableOptions,
   RegisterTableResult,
+  RegisterViewOptions,
+  RegisterViewResult,
   TableInfo,
 } from './types.js';

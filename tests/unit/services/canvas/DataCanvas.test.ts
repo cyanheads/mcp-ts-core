@@ -25,6 +25,8 @@ function makeStubProvider() {
     initCanvas: vi.fn(async () => undefined),
     destroyCanvas: vi.fn(async () => undefined),
     registerTable: vi.fn(async () => ({ tableName: 't', rowCount: 0, columns: [] })),
+    registerView: vi.fn(async () => ({ viewName: 'v', columns: [] })),
+    importFrom: vi.fn(async () => ({ tableName: 'imported', rowCount: 0, columns: [] })),
     query: vi.fn(async () => ({ columns: [], rows: [], rowCount: 0 })),
     export: vi.fn(async () => ({ format: 'csv' as const, rowCount: 0, sizeBytes: 0 })),
     describe: vi.fn(async () => []),
@@ -36,6 +38,8 @@ function makeStubProvider() {
     initCanvas: ReturnType<typeof vi.fn>;
     destroyCanvas: ReturnType<typeof vi.fn>;
     registerTable: ReturnType<typeof vi.fn>;
+    registerView: ReturnType<typeof vi.fn>;
+    importFrom: ReturnType<typeof vi.fn>;
     query: ReturnType<typeof vi.fn>;
     export: ReturnType<typeof vi.fn>;
     describe: ReturnType<typeof vi.fn>;
@@ -203,6 +207,78 @@ describe('CanvasInstance · touch-or-throw + delegation', () => {
     await registry.shutdown(ctxWithTenant);
   });
 
+  it('registerView slides expiresAt and forwards to the provider', async () => {
+    const clock = vi.fn(() => 1_000_000);
+    const provider = makeStubProvider();
+    const registry = new CanvasRegistry(provider, makeOptions(), clock);
+    const canvas = new DataCanvas(provider, registry);
+    const instance = await canvas.acquire(undefined, ctxWithTenant);
+
+    clock.mockReturnValue(1_000_000 + 30_000);
+    await instance.registerView('v', 'SELECT 1');
+    expect(provider.registerView).toHaveBeenCalledWith(
+      instance.canvasId,
+      'v',
+      'SELECT 1',
+      expect.any(Object),
+      undefined,
+    );
+    expect(new Date(instance.expiresAt).getTime()).toBe(1_000_000 + 30_000 + TTL);
+
+    await registry.shutdown(ctxWithTenant);
+  });
+
+  it('importFrom touches both canvases and forwards to the provider', async () => {
+    const clock = vi.fn(() => 1_000_000);
+    const provider = makeStubProvider();
+    const registry = new CanvasRegistry(provider, makeOptions(), clock);
+    const canvas = new DataCanvas(provider, registry);
+    const target = await canvas.acquire(undefined, ctxWithTenant);
+    const source = await canvas.acquire(undefined, ctxWithTenant);
+
+    clock.mockReturnValue(1_000_000 + 60_000);
+    await target.importFrom(source.canvasId, 'src');
+    expect(provider.importFrom).toHaveBeenCalledWith(
+      target.canvasId,
+      source.canvasId,
+      'src',
+      'src',
+      expect.any(Object),
+      undefined,
+    );
+    expect(new Date(target.expiresAt).getTime()).toBe(1_000_000 + 60_000 + TTL);
+
+    // Repeat with explicit asName.
+    await target.importFrom(source.canvasId, 'src', { asName: 'renamed' });
+    expect(provider.importFrom).toHaveBeenLastCalledWith(
+      target.canvasId,
+      source.canvasId,
+      'src',
+      'renamed',
+      expect.any(Object),
+      { asName: 'renamed' },
+    );
+
+    await registry.shutdown(ctxWithTenant);
+  });
+
+  it('importFrom rejects when the source canvas belongs to another tenant', async () => {
+    const provider = makeStubProvider();
+    const registry = new CanvasRegistry(provider, makeOptions());
+    const canvas = new DataCanvas(provider, registry);
+    const target = await canvas.acquire(undefined, ctxWithTenant);
+    const stranger = await canvas.acquire(undefined, {
+      ...ctxWithTenant,
+      tenantId: 'tenant-b',
+    });
+
+    await expect(target.importFrom(stranger.canvasId, 'src')).rejects.toThrow(
+      /not found or expired/i,
+    );
+    expect(provider.importFrom).not.toHaveBeenCalled();
+    await registry.shutdown(ctxWithTenant);
+  });
+
   it('throws NotFound from any op when the canvas has expired', async () => {
     const clock = vi.fn(() => 1_000_000);
     const provider = makeStubProvider();
@@ -214,6 +290,7 @@ describe('CanvasInstance · touch-or-throw + delegation', () => {
     clock.mockReturnValue(1_000_000 + TTL + 1);
 
     await expect(instance.registerTable('t', [{ x: 1 }])).rejects.toThrow(/not found or expired/i);
+    await expect(instance.registerView('v', 'SELECT 1')).rejects.toThrow(/not found or expired/i);
     await expect(instance.query('SELECT 1')).rejects.toThrow(/not found or expired/i);
     await expect(instance.export('t', { format: 'csv', path: 'x.csv' })).rejects.toThrow(
       /not found or expired/i,
@@ -224,6 +301,7 @@ describe('CanvasInstance · touch-or-throw + delegation', () => {
 
     // Provider methods must not have been invoked once touch-or-throw rejected.
     expect(provider.registerTable).not.toHaveBeenCalled();
+    expect(provider.registerView).not.toHaveBeenCalled();
     expect(provider.query).not.toHaveBeenCalled();
     expect(provider.export).not.toHaveBeenCalled();
 

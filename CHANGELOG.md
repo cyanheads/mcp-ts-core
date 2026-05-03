@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.8.13](changelog/0.8.x/0.8.13.md) — 2026-05-03
+
+Canvas registerView and importFrom; CanvasObjectKind discriminator on TableInfo and DescribeOptions; SQL gate allowlist refreshed against DuckDB v1.5.x operator names; spatial-extension hardening pre-staged.
+
 ## [0.8.12](changelog/0.8.x/0.8.12.md) — 2026-05-02
 
 SQL gate blocks read_json*/read_parquet* file disclosure (#100); appendValue routes TIMESTAMP/DATE/BLOB to typed appenders (#102); CANVAS_IDENTIFIER_REGEX + SQL_GATE_REASONS exported (#104); RequestContext widened to accept handler Context (#105).

@@ -13,11 +13,14 @@ import type {
   ExportOptions,
   ExportResult,
   ExportTarget,
+  ImportFromOptions,
   QueryOptions,
   QueryResult,
   RegisterRows,
   RegisterTableOptions,
   RegisterTableResult,
+  RegisterViewOptions,
+  RegisterViewResult,
   TableInfo,
 } from '../types.js';
 
@@ -44,7 +47,11 @@ export interface IDataCanvasProvider {
    */
   destroyCanvas(canvasId: string, context: RequestContext): Promise<void>;
 
-  /** Drop a single canvas table. Returns `true` when found and removed. */
+  /**
+   * Drop a single canvas table or view. Returns `true` when found and removed.
+   * The provider determines the kind from the catalog; callers don't need to
+   * distinguish.
+   */
   drop(canvasId: string, name: string, context: RequestContext): Promise<boolean>;
 
   /** Export a canvas table to a file or stream target. */
@@ -58,6 +65,21 @@ export interface IDataCanvasProvider {
 
   /** Liveness check on the underlying engine. */
   healthCheck(): Promise<boolean>;
+
+  /**
+   * Copy a table from another canvas (`sourceCanvasId`) into this one as
+   * `asName`. Both canvases must already be authorized for the caller —
+   * the lifecycle wrapper validates tenancy on both ids before this call.
+   * Idempotent: a pre-existing target table with the same name is replaced.
+   */
+  importFrom(
+    targetCanvasId: string,
+    sourceCanvasId: string,
+    sourceTableName: string,
+    asName: string,
+    context: RequestContext,
+    options?: ImportFromOptions,
+  ): Promise<RegisterTableResult>;
 
   /**
    * Allocate engine resources for a new canvas. Idempotent — calling twice
@@ -83,6 +105,20 @@ export interface IDataCanvasProvider {
     context: RequestContext,
     options?: RegisterTableOptions,
   ): Promise<RegisterTableResult>;
+
+  /**
+   * Register a SQL view on the canvas. The provider gates `selectSql` through
+   * the same read-only enforcement `query()` applies, then installs the view.
+   * Re-registering an existing view replaces it; conflicting with a base
+   * table of the same name throws `ValidationError`.
+   */
+  registerView(
+    canvasId: string,
+    name: string,
+    selectSql: string,
+    context: RequestContext,
+    options?: RegisterViewOptions,
+  ): Promise<RegisterViewResult>;
 
   /** Tear down all engine resources. Called from `ServerHandle.shutdown()`. */
   shutdown(): Promise<void>;

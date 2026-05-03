@@ -31,15 +31,23 @@ export interface ColumnSchema {
   type: ColumnType;
 }
 
+/** Object kind exposed by {@link TableInfo}. Views are read-only derived projections. */
+export type CanvasObjectKind = 'table' | 'view';
+
 /** Metadata returned by {@link CanvasInstance.describe}. */
 export interface TableInfo {
   /** Approximate in-memory footprint in bytes (engine-specific estimate). */
   approxSizeBytes?: number;
-  /** Resolved schema for the table. */
+  /** Resolved schema for the table or view. */
   columns: ColumnSchema[];
-  /** Canvas-local table name. */
+  /** Whether this entry is a base table or a registered view. */
+  kind: CanvasObjectKind;
+  /** Canvas-local name. */
   name: string;
-  /** Number of rows currently stored. */
+  /**
+   * Row count. For views, this is materialized at describe time via `COUNT(*)`
+   * — not free; treat as an approximation if the view is expensive.
+   */
   rowCount: number;
 }
 
@@ -133,8 +141,32 @@ export interface ExportResult {
 
 /** Options for {@link CanvasInstance.describe}. */
 export interface DescribeOptions {
-  /** When set, return only the named table. */
+  /** When set, return only entries with this kind. */
+  kind?: CanvasObjectKind;
+  /** When set, return only the named table or view. */
   tableName?: string;
+}
+
+/** Options for {@link CanvasInstance.registerView}. */
+export interface RegisterViewOptions {
+  /** Cancellation signal forwarded to the provider. */
+  signal?: AbortSignal;
+}
+
+/** Result of a successful {@link CanvasInstance.registerView} call. */
+export interface RegisterViewResult {
+  /** Column names in projection order. */
+  columns: string[];
+  /** Resolved (validated) view name. */
+  viewName: string;
+}
+
+/** Options for {@link CanvasInstance.importFrom}. */
+export interface ImportFromOptions {
+  /** Target-side name. Defaults to the source table name. */
+  asName?: string;
+  /** Cancellation signal forwarded to the provider. */
+  signal?: AbortSignal;
 }
 
 /** Options for {@link DataCanvas.acquire}. */

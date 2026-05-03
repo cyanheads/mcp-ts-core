@@ -11,11 +11,14 @@ import type {
   ExportOptions,
   ExportResult,
   ExportTarget,
+  ImportFromOptions,
   QueryOptions,
   QueryResult,
   RegisterRows,
   RegisterTableOptions,
   RegisterTableResult,
+  RegisterViewOptions,
+  RegisterViewResult,
   TableInfo,
 } from '../types.js';
 import type { CanvasRegistry } from './CanvasRegistry.js';
@@ -51,6 +54,42 @@ export class CanvasInstance {
   ): Promise<RegisterTableResult> {
     this.expiresAt = this.registry.touchOrThrow(this.canvasId, this.tenantId);
     return await this.provider.registerTable(this.canvasId, name, rows, this.context, options);
+  }
+
+  /**
+   * Register a SQL view on the canvas. `selectSql` runs through the same
+   * read-only gate `query()` uses; queries against the view inherit normal
+   * gate enforcement at execution time.
+   */
+  async registerView(
+    name: string,
+    selectSql: string,
+    options?: RegisterViewOptions,
+  ): Promise<RegisterViewResult> {
+    this.expiresAt = this.registry.touchOrThrow(this.canvasId, this.tenantId);
+    return await this.provider.registerView(this.canvasId, name, selectSql, this.context, options);
+  }
+
+  /**
+   * Copy a table from another canvas the caller controls. The source canvas
+   * must belong to the caller's tenant — the registry validates that before
+   * the provider sees either id. Defaults `asName` to the source name.
+   */
+  async importFrom(
+    sourceCanvasId: string,
+    sourceTableName: string,
+    options?: ImportFromOptions,
+  ): Promise<RegisterTableResult> {
+    this.expiresAt = this.registry.touchOrThrow(this.canvasId, this.tenantId);
+    this.registry.touchOrThrow(sourceCanvasId, this.tenantId);
+    return await this.provider.importFrom(
+      this.canvasId,
+      sourceCanvasId,
+      sourceTableName,
+      options?.asName ?? sourceTableName,
+      this.context,
+      options,
+    );
   }
 
   /** Run a SQL query against the canvas. */

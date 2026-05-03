@@ -60,16 +60,28 @@ export type SqlGateReason = (typeof SQL_GATE_REASONS)[keyof typeof SQL_GATE_REAS
  * Anything outside this set causes rejection. Notable exclusions:
  *
  * - `READ_CSV`, `READ_PARQUET`, `READ_JSON` — bypass canvas, read external files.
- * - `INSERT`, `UPDATE`, `DELETE`, `MERGE`, `CREATE_*`, `DROP_*`, `ALTER_*` — writes.
- * - `COPY_TO_FILE`, `BATCH_COPY_TO_FILE` — exports a SELECT to a file.
- * - `ATTACH`, `DETACH`, `LOAD`, `INSTALL`, `PRAGMA`, `SET`, `RESET` — utility.
+ * - `INSERT`, `UPDATE`, `DELETE`, `MERGE_INTO`, `CREATE_*`, `DROP`, `ALTER` — writes.
+ * - `COPY_TO_FILE`, `BATCH_COPY_TO_FILE`, `COPY_DATABASE` — write a SELECT to a file/db.
+ * - `ATTACH`, `DETACH`, `LOAD`, `PRAGMA`, `SET`, `SET_VARIABLE`, `RESET`, `TRANSACTION`,
+ *   `EXECUTE`, `PREPARE`, `VACUUM`, `EXPORT`, `EXPLAIN_ANALYZE`, `CREATE_SECRET` — utility/system.
+ * - `INOUT_FUNCTION` — table-valued function lowering (read_json/read_parquet/...);
+ *   gated by the function deny-list rather than the operator allowlist.
+ *
+ * Source pinned against `PhysicalOperatorToString` in DuckDB v1.5.2:
+ * https://github.com/duckdb/duckdb/blob/v1.5.2/src/common/enums/physical_operator_type.cpp
  */
 export const ALLOWED_PLAN_OPERATORS: ReadonlySet<string> = new Set([
   // Scans (registered tables only)
+  'TABLE_SCAN',
   'SEQ_SCAN',
   'COLUMN_DATA_SCAN',
   'CHUNK_SCAN',
+  'CTE_SCAN',
+  'REC_CTE_SCAN',
+  'REC_REC_CTE_SCAN',
+  'DELIM_SCAN',
   'EXPRESSION_SCAN',
+  'POSITIONAL_SCAN',
   'DUMMY_SCAN',
   'EMPTY_RESULT',
   'IN_MEMORY_TABLE_SCAN',
@@ -85,6 +97,8 @@ export const ALLOWED_PLAN_OPERATORS: ReadonlySet<string> = new Set([
   'CROSS_PRODUCT',
   'POSITIONAL_JOIN',
   'ASOF_JOIN',
+  'LEFT_DELIM_JOIN',
+  'RIGHT_DELIM_JOIN',
   'DELIM_JOIN',
   // Aggregates
   'HASH_GROUP_BY',
@@ -95,6 +109,7 @@ export const ALLOWED_PLAN_OPERATORS: ReadonlySet<string> = new Set([
   // Distinct / set ops
   'HASH_DISTINCT',
   'DISTINCT',
+  'LIMITED_DISTINCT',
   'UNION',
   // Sorting / limits
   'ORDER_BY',
@@ -104,11 +119,14 @@ export const ALLOWED_PLAN_OPERATORS: ReadonlySet<string> = new Set([
   'STREAMING_LIMIT',
   // Window
   'WINDOW',
+  'STREAMING_WINDOW',
   // Nested
   'UNNEST',
-  // CTEs
+  // CTEs (DuckDB stringifies RECURSIVE_* as REC_*; long names kept for older versions)
   'CTE',
   'CTE_REF',
+  'REC_CTE',
+  'REC_KEY_CTE',
   'RECURSIVE_CTE',
   'MATERIALIZED_CTE',
   // Sampling
@@ -120,6 +138,9 @@ export const ALLOWED_PLAN_OPERATORS: ReadonlySet<string> = new Set([
   'EXPLAIN',
   // Pivot/unpivot collapsed planner forms
   'PIVOT',
+  // Spatial — pre-staged, dormant until the `spatial` extension loads.
+  // See https://github.com/cyanheads/mcp-ts-core/issues/106.
+  'RTREE_INDEX_SCAN',
 ]);
 
 /**
@@ -164,6 +185,13 @@ export const DENIED_TABLE_FUNCTIONS: ReadonlySet<string> = new Set([
   'mysql_query',
   'sqlite_scan',
   'sqlite_query',
+  // Spatial — pre-staged, dormant until the `spatial` extension loads.
+  // ST_Read is a GDAL-backed reader for ~50 vector formats; ST_Drivers exposes
+  // the bundled GDAL driver surface; rtree_index_dump leaks index internals.
+  // See https://github.com/cyanheads/mcp-ts-core/issues/106.
+  'st_read',
+  'st_drivers',
+  'rtree_index_dump',
 ]);
 
 /**
