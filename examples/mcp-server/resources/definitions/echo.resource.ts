@@ -5,31 +5,25 @@
  */
 import { resource, z } from '@cyanheads/mcp-ts-core';
 
-const ParamsSchema = z
-  .object({
-    message: z
-      .string()
-      .optional()
-      .describe(
-        'Optional message to echo back. If omitted, it may be derived from the URI path/host.',
-      ),
-  })
-  .describe('Echo resource parameters.');
+const ParamsSchema = z.object({
+  message: z
+    .string()
+    .optional()
+    .describe(
+      'Message to echo back. If omitted, the message is taken from the URI hostname (or path component when the hostname is empty).',
+    ),
+});
 
-const OutputSchema = z
-  .object({
-    message: z.string().describe('The echoed message.'),
-    timestamp: z.iso
-      .datetime()
-      .describe('ISO 8601 timestamp when the response was generated.'),
-    requestUri: z.url().describe('The request URI used to fetch this resource.'),
-  })
-  .describe('Echo resource response payload.');
+const OutputSchema = z.object({
+  message: z.string().describe('The echoed message.'),
+  timestamp: z.iso.datetime().describe('ISO 8601 timestamp when the response was generated.'),
+  requestUri: z.url().describe('The request URI used to fetch this resource.'),
+});
 
 export const echoResourceDefinition = resource('echo://{message}', {
   name: 'echo-resource',
   title: 'Echo Message Resource',
-  description: 'A simple echo resource that returns a message.',
+  description: 'Echo the message component of the URI back as JSON with a timestamp.',
   params: ParamsSchema,
   output: OutputSchema,
   mimeType: 'application/json',

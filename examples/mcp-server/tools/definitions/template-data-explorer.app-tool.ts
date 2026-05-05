@@ -81,9 +81,9 @@ function generateSalesData(rowCount: number): DataExplorerOutput {
 }
 
 export const dataExplorerAppTool = tool('template_data_explorer', {
-  title: 'Template Data Explorer',
+  title: 'Data Explorer',
   description:
-    'Generates sample sales data and renders an interactive explorer. Users can sort columns, filter rows, and select entries directly in the UI. Hosts without MCP Apps support receive a text table.',
+    'Generate sample sales data and render an interactive table. Users can sort columns, filter rows, and select entries from the UI. Falls back to a plain text table where interactive UI is not available.',
   input: InputSchema,
   output: OutputSchema,
   auth: ['tool:data-explorer:read'],

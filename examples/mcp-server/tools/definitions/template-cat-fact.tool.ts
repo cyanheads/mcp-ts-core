@@ -22,7 +22,7 @@ const InputSchema = z.object({
     .int('Max length must be an integer.')
     .min(1, 'Max length must be at least 1.')
     .optional()
-    .describe('Optional: The maximum character length of the cat fact to retrieve.'),
+    .describe('Maximum character length of the returned fact.'),
 });
 
 const OutputSchema = z.object({
@@ -39,8 +39,8 @@ const OutputSchema = z.object({
 });
 
 export const catFactTool = tool('template_cat_fact', {
-  title: 'Template Cat Fact',
-  description: 'Fetches a random cat fact from a public API with an optional maximum length.',
+  title: 'Random Cat Fact',
+  description: 'Fetch a random cat fact from a public API. Optionally cap its character length.',
   input: InputSchema,
   output: OutputSchema,
   auth: ['tool:cat_fact:read'],
@@ -68,6 +68,7 @@ export const catFactTool = tool('template_cat_fact', {
       throw serviceUnavailable(`Cat fact API returned ${response.status}`, {
         url,
         status: response.status,
+        recovery: { hint: 'The upstream cat fact API is unavailable. Wait briefly and retry.' },
       });
     }
 

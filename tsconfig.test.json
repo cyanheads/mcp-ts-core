@@ -11,6 +11,8 @@
       "node",
       "reflect-metadata",
       "@cloudflare/workers-types",
+      "@cloudflare/vitest-pool-workers",
+      "@cloudflare/vitest-pool-workers/types",
       "vitest/globals" // Include Vitest globals
     ]
   },

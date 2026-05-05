@@ -6,9 +6,12 @@ import { prompt, z } from '@cyanheads/mcp-ts-core';
 
 export const codeReviewPrompt = prompt('code_review', {
   description:
-    'Generates a structured code review prompt for analyzing code quality, security, and performance.',
+    'Generate a structured code review prompt covering quality, security, and performance.',
   args: z.object({
-    language: z.string().optional().describe('Programming language of the code to review.'),
+    language: z
+      .string()
+      .optional()
+      .describe('Programming language of the code to review (e.g., "typescript", "python", "rust").'),
     focus: z
       .enum(['security', 'performance', 'style', 'general'])
       .optional()

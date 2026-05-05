@@ -21,7 +21,7 @@ const InputSchema = z
       .boolean()
       .optional()
       .default(false)
-      .describe('If true, simulates a failure at 50% progress (for testing)'),
+      .describe('Force a failure at 50% progress.'),
   })
   .describe('Parameters for the async countdown task.');
 
@@ -40,9 +40,9 @@ const OutputSchema = z
 type Output = z.infer<typeof OutputSchema>;
 
 export const asyncCountdownTool = tool('template_async_countdown', {
-  title: 'Async Countdown (Task Demo)',
+  title: 'Async Countdown',
   description:
-    'Demonstrates the MCP Tasks API with a countdown timer. When the client supports tasks, returns immediately with a task handle for polling. Otherwise, runs synchronously and returns the result directly.',
+    'Run a countdown timer for the requested number of seconds, reporting progress as it ticks. Cancellable mid-run. On task-capable clients the call returns immediately and progress streams over the task channel; otherwise it runs synchronously and returns when the countdown finishes.',
   task: true,
   input: InputSchema,
   output: OutputSchema,

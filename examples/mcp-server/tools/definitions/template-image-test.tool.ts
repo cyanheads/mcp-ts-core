@@ -5,6 +5,7 @@
  */
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
+import { serviceUnavailable } from '@cyanheads/mcp-ts-core/errors';
 import { arrayBufferToBase64, fetchWithTimeout } from '@cyanheads/mcp-ts-core/utils';
 
 const CAT_API_URL = 'https://cataas.com/cat';
@@ -15,7 +16,7 @@ const InputSchema = z.object({
     .boolean()
     .optional()
     .default(true)
-    .describe('A trigger to invoke the tool and fetch a new cat image.'),
+    .describe('Set true to fetch a new image. Exists because some clients require a non-empty input schema.'),
 });
 
 const OutputSchema = z.object({
@@ -24,9 +25,9 @@ const OutputSchema = z.object({
 });
 
 export const imageTestTool = tool('template_image_test', {
-  title: 'Template Image Test',
+  title: 'Random Cat Image',
   description:
-    'Fetches a random cat image and returns it base64-encoded with the MIME type. Useful for testing image handling.',
+    'Fetch a random cat image and return it base64-encoded with its MIME type.',
   input: InputSchema,
   output: OutputSchema,
   auth: ['tool:image_test:read'],
@@ -45,7 +46,9 @@ export const imageTestTool = tool('template_image_test', {
 
     const arrayBuf = await response.arrayBuffer();
     if (arrayBuf.byteLength === 0) {
-      throw new Error('Image API returned an empty payload.');
+      throw serviceUnavailable('Image API returned an empty payload.', {
+        recovery: { hint: 'The upstream image service returned no body. Retry the request.' },
+      });
     }
 
     const mimeType = response.headers.get('content-type') || 'image/jpeg';

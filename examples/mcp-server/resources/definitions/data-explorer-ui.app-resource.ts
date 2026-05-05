@@ -280,7 +280,7 @@ export const dataExplorerUiResource = resource('ui://template-data-explorer/app.
   name: 'data-explorer-ui',
   title: 'Data Explorer UI',
   description:
-    'Interactive HTML app for the data explorer tool. Renders a sortable, filterable table with row selection. Displayed as a sandboxed iframe by MCP Apps-capable hosts.',
+    'Interactive HTML app for the data explorer tool. Renders a sortable, filterable table with row selection.',
   params: ParamsSchema,
   mimeType: RESOURCE_MIME_TYPE,
   annotations: { audience: ['user'] },

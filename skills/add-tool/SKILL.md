@@ -4,7 +4,7 @@ description: >
   Scaffold a new MCP tool definition. Use when the user asks to add a tool, create a new tool, or implement a new capability for the server.
 metadata:
   author: cyanheads
-  version: "2.6"
+  version: "2.7"
   audience: external
   type: reference
 ---
@@ -65,6 +65,11 @@ export const {{TOOL_EXPORT}} = tool('{{tool_name}}', {
   // (InternalError, ServiceUnavailable, Timeout, ValidationError,
   // SerializationError) bubble freely — only declare domain-specific reasons.
   // Delete this block if no domain failures apply.
+  //
+  // Keep contracts inline on this tool, even when other tools have similar
+  // entries. The contract is part of the tool's documented public surface —
+  // don't extract a shared `errors[]` constant; per-tool repetition is the
+  // intended cost of self-contained tool defs.
   //
   // `recovery` is required (≥ 5 words) — it's the agent's next move when this
   // failure fires. Forcing function for thoughtful guidance: placeholders like
@@ -517,6 +522,7 @@ Large payloads burn the agent's context window. Default to curated summaries; of
 - [ ] If wrapping external API: output schema and `format()` preserve uncertainty from sparse upstream payloads instead of inventing concrete values
 - [ ] `auth` scopes declared if the tool needs authorization
 - [ ] `errors: [...]` contract declared for the tool's domain-specific failure modes — or block deleted if no domain failures apply (baseline codes bubble freely)
+- [ ] Error contract declared inline on this tool — not imported from a shared module, even when other tools have near-identical entries
 - [ ] `task: true` added if the tool is long-running
 - [ ] Registered in the project's existing `createApp()` tool list (directly or via barrel)
 - [ ] `bun run devcheck` passes

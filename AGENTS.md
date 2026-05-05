@@ -1,6 +1,6 @@
 # Agent Protocol
 
-**Package:** `@cyanheads/mcp-ts-core` · **Version:** 0.8.13
+**Package:** `@cyanheads/mcp-ts-core` · **Version:** 0.8.14
 **npm:** [@cyanheads/mcp-ts-core](https://www.npmjs.com/package/@cyanheads/mcp-ts-core) · **Docker:** [ghcr.io/cyanheads/mcp-ts-core](https://ghcr.io/cyanheads/mcp-ts-core)
 
 > **Developer note:** Never assume. Read related files and docs before making changes. Read full file content for context. Never edit a file before reading it.
@@ -377,6 +377,8 @@ async handler(input, ctx) {
 ```
 
 **`ctx.recoveryFor(reason)`** is the first member of a planned family of opt-in resolution helpers (future: `troubleshootingFor`, `userMessageFor`, …). Always present on `Context` (returns `{}` when no contract is attached or the reason is unknown — spread-safe), strictly typed on `HandlerContext<R>` against the declared reason union. The same resolver works in services that accept `ctx`: `throw validationError(msg, { reason: 'X', ...ctx.recoveryFor('X') })`. No auto-population — author opts in by typing the helper.
+
+**Declare contracts inline on each tool, even when they look similar across tools.** The contract is part of the tool's documented public surface — reading one tool definition file should give the full picture (input, output, errors, handler, format). Don't extract a shared `errors[]` constant or contract module to deduplicate; per-tool repetition is the intended cost of locality, and dynamic `recovery` hints often need tool-specific context anyway.
 
 The contract describes the **public failure surface** — declare domain-specific failures only. **Baseline codes** (`InternalError`, `ServiceUnavailable`, `Timeout`, `ValidationError`, `SerializationError`) bubble from anywhere and are auto-allowed by the conformance lint, so you don't need to enumerate them per-tool. The conformance lint scans handler source text only — failures thrown from called services aren't visible to it (still reach the client correctly via the auto-classifier, just without lint enforcement).
 

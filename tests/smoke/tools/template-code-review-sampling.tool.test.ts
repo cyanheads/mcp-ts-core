@@ -3,17 +3,20 @@
  * @module tests/examples/tools/template-code-review-sampling.tool.test
  */
 
+import { JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
 import { createMockContext } from '@cyanheads/mcp-ts-core/testing';
 import { describe, expect, it, vi } from 'vitest';
 import { codeReviewSamplingTool } from '../../../examples/mcp-server/tools/definitions/template-code-review-sampling.tool.js';
 
 describe('codeReviewSamplingTool', () => {
-  it('throws when sampling is unavailable', async () => {
+  it('throws ServiceUnavailable when sampling is unavailable', async () => {
     const ctx = createMockContext();
     const input = codeReviewSamplingTool.input.parse({ code: 'const x = 1;' });
-    await expect(codeReviewSamplingTool.handler(input, ctx)).rejects.toThrow(
-      'Sampling capability is not available',
+    const err = await Promise.resolve(codeReviewSamplingTool.handler(input, ctx)).catch(
+      (e: unknown) => e,
     );
+    expect(err).toBeInstanceOf(McpError);
+    expect(err).toMatchObject({ code: JsonRpcErrorCode.ServiceUnavailable });
   });
 
   it('performs code review via sampling', async () => {

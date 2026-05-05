@@ -5,7 +5,7 @@
 
 <div align="center">
 
-[![Version](https://img.shields.io/badge/Version-0.8.13-blue.svg?style=flat-square)](./CHANGELOG.md) [![MCP Spec](https://img.shields.io/badge/MCP%20Spec-2025--11--25-8A2BE2.svg?style=flat-square)](https://github.com/modelcontextprotocol/modelcontextprotocol/blob/main/docs/specification/2025-11-25/changelog.mdx) [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^1.29.0-green.svg?style=flat-square)](https://modelcontextprotocol.io/) [![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg?style=flat-square)](./LICENSE)
+[![Version](https://img.shields.io/badge/Version-0.8.14-blue.svg?style=flat-square)](./CHANGELOG.md) [![MCP Spec](https://img.shields.io/badge/MCP%20Spec-2025--11--25-8A2BE2.svg?style=flat-square)](https://github.com/modelcontextprotocol/modelcontextprotocol/blob/main/docs/specification/2025-11-25/changelog.mdx) [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^1.29.0-green.svg?style=flat-square)](https://modelcontextprotocol.io/) [![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg?style=flat-square)](./LICENSE)
 
 [![TypeScript](https://img.shields.io/badge/TypeScript-^6.0.3-3178C6.svg?style=flat-square)](https://www.typescriptlang.org/) [![Bun](https://img.shields.io/badge/Bun-v1.3.2-blueviolet.svg?style=flat-square)](https://bun.sh/)
 
@@ -109,6 +109,19 @@ It also works on Cloudflare Workers with `createWorkerHandler()` — same defini
 - **Local + edge** — same definitions run on stdio, HTTP (Hono), and Cloudflare Workers.
 - **Tiered dependencies** — parsers, OTEL SDK, Supabase, and OpenAI are optional peers. Install what you use.
 - **Agent-first DX** — ships `CLAUDE.md` with the full exports catalog so AI agents ramp up without prompting.
+
+### Storage Behavior Snapshot
+
+Provider behavior is intentionally normalized at the interface, but backend limits still matter:
+
+| Provider | Delete count accuracy | List TTL filtering | Notes |
+|:---------|:----------------------|:-------------------|:------|
+| `in-memory` | Exact | Exact | Volatile process memory |
+| `filesystem` | Exact | Exact | Node/Bun only |
+| `supabase` | Exact | Exact | Requires configured Supabase client |
+| `cloudflare-d1` | Exact | Exact | Workers D1 binding |
+| `cloudflare-kv` | Idempotent API success | Native/eventual | Delete cannot prove prior existence |
+| `cloudflare-r2` | Idempotent API success | Not applied during list | Expired envelopes are removed on read |
 
 ## Server structure
 

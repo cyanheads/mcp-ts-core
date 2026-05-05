@@ -42,7 +42,12 @@
 
     // Node.js specific
     "lib": ["ESNext"],
-    "types": ["node", "@cloudflare/workers-types"],
+    "types": [
+      "node",
+      "@cloudflare/workers-types",
+      "@cloudflare/vitest-pool-workers",
+      "@cloudflare/vitest-pool-workers/types"
+    ],
 
     // Error on unused locals and parameters
     "noUnusedLocals": true,

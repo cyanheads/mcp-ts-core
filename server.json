@@ -6,14 +6,14 @@
     "url": "https://github.com/cyanheads/mcp-ts-core",
     "source": "github"
   },
-  "version": "0.8.13",
+  "version": "0.8.14",
   "packages": [
     {
       "registryType": "npm",
       "registryBaseUrl": "https://registry.npmjs.org",
       "identifier": "@cyanheads/mcp-ts-core",
       "runtimeHint": "bun",
-      "version": "0.8.13",
+      "version": "0.8.14",
       "packageArguments": [
         {
           "type": "positional",

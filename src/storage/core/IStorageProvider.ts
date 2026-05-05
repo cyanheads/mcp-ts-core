@@ -11,10 +11,11 @@ import type { RequestContext } from '@/utils/internal/requestContext.js';
  *
  * @property ttl - Time-to-live for the stored item, in seconds. If not provided, the item is stored indefinitely.
  *   Provider-specific behaviors:
- *   - `in-memory`: TTL enforced by `setTimeout` for proactive deletion.
+ *   - `in-memory`: TTL enforced by timers and lazy filtering on get/list.
  *   - `filesystem`: TTL stored in a metadata envelope; expired items are filtered on `get()` and `list()`.
- *   - `supabase`: TTL managed via an `expires_at` column; expired rows are handled by database queries.
- *   - `cloudflare-kv`: TTL is a native feature of the KV store.
+ *   - `supabase`: TTL managed via an `expires_at` column; expired rows are filtered in list queries and lazily removed on reads.
+ *   - `cloudflare-d1`: TTL managed via an `expires_at` column; expired rows are filtered in list queries and lazily removed on reads.
+ *   - `cloudflare-kv`: TTL is a native feature of the KV store. KV propagation is eventually consistent.
  *   - `cloudflare-r2`: TTL stored in a metadata envelope; expired items are filtered on `get()`. `list()` does not filter expired items due to performance cost.
  */
 export interface StorageOptions {
@@ -71,6 +72,12 @@ export interface ListResult {
 /**
  * Defines the contract for a generic storage provider.
  * All methods must be asynchronous and accept a RequestContext for tracing and logging.
+ *
+ * Current provider-status notes:
+ * - `in-memory`, `filesystem`, `supabase`, and `cloudflare-d1` report precise delete/deleteMany counts.
+ * - `cloudflare-kv` and `cloudflare-r2` expose idempotent deletes only; delete() returns true after a successful backend call even when the key may not have existed, and deleteMany() counts attempted successful deletes.
+ * - List TTL filtering is exact for `in-memory`, `filesystem`, `supabase`, and `cloudflare-d1`; native/eventual for `cloudflare-kv`; and not applied for `cloudflare-r2` because listing every object body would be too expensive.
+ * - `values` on ListResult is opportunistic. Consumers must treat it as a cache hint and call getMany() when absent.
  */
 export interface IStorageProvider {
   /**

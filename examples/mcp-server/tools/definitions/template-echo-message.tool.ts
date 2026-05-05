@@ -17,13 +17,11 @@ const InputSchema = z.object({
     .string()
     .min(1, 'Message cannot be empty.')
     .max(1000, 'Message cannot exceed 1000 characters.')
-    .describe(
-      `The message to echo back. To trigger a test error, provide '${TEST_ERROR_TRIGGER_MESSAGE}'.`,
-    ),
+    .describe('The message to echo back.'),
   mode: z
     .enum(ECHO_MODES)
     .default('standard')
-    .describe("How to format the message ('standard' | 'uppercase' | 'lowercase')."),
+    .describe('How to format the message before repetition. `standard` returns it unchanged.'),
   repeat: z
     .number()
     .int()
@@ -46,12 +44,12 @@ const OutputSchema = z.object({
   timestamp: z.iso
     .datetime()
     .optional()
-    .describe('Optional ISO 8601 timestamp of when the response was generated.'),
+    .describe('ISO 8601 timestamp of when the response was generated. Present when `includeTimestamp` is true.'),
 });
 
 export const echoTool = tool('template_echo_message', {
-  title: 'Template Echo Message',
-  description: 'Echoes a message back with optional formatting and repetition.',
+  title: 'Echo Message',
+  description: 'Echo a message back with optional formatting and repetition.',
   input: InputSchema,
   output: OutputSchema,
   auth: ['tool:echo:read'],

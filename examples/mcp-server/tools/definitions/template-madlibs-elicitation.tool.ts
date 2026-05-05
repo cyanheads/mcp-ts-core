@@ -5,6 +5,10 @@
  */
 
 import { type Context, tool, z } from '@cyanheads/mcp-ts-core';
+import { serviceUnavailable, validationError } from '@cyanheads/mcp-ts-core/errors';
+
+const MISSING_PARTS_HINT =
+  'Provide `noun`, `verb`, and `adjective` directly in the input — this client cannot prompt the user mid-call.';
 
 const InputSchema = z.object({
   noun: z.string().optional().describe('A noun for the story.'),
@@ -21,7 +25,10 @@ const OutputSchema = z.object({
 
 async function elicitWord(partOfSpeech: string, ctx: Context): Promise<string> {
   if (!ctx.elicit) {
-    throw new Error('Elicitation is not available in the current context.');
+    throw serviceUnavailable('This client cannot request additional input mid-call.', {
+      partOfSpeech,
+      recovery: { hint: MISSING_PARTS_HINT },
+    });
   }
 
   const result = await ctx.elicit(
@@ -32,21 +39,28 @@ async function elicitWord(partOfSpeech: string, ctx: Context): Promise<string> {
   );
 
   if (result.action !== 'accept') {
-    throw new Error(`User ${result.action} the ${partOfSpeech} elicitation.`);
+    throw validationError(`User ${result.action} the ${partOfSpeech} prompt.`, {
+      partOfSpeech,
+      action: result.action,
+      recovery: { hint: MISSING_PARTS_HINT },
+    });
   }
 
   const value = result.content?.value;
   if (typeof value !== 'string' || value.length === 0) {
-    throw new Error(`Invalid ${partOfSpeech} received from user.`);
+    throw validationError(`Invalid ${partOfSpeech} received from user.`, {
+      partOfSpeech,
+      recovery: { hint: MISSING_PARTS_HINT },
+    });
   }
 
   return value;
 }
 
 export const madlibsElicitationTool = tool('template_madlibs_elicitation', {
-  title: 'Mad Libs Elicitation Game',
+  title: 'Mad Libs',
   description:
-    'Plays a game of Mad Libs. If any parts of speech (noun, verb, adjective) are missing, it will use elicitation to ask the user for them.',
+    'Combine a noun, verb, and adjective into a one-line Mad Libs story. Any parts of speech omitted from the input are requested from the user during execution.',
   input: InputSchema,
   output: OutputSchema,
   auth: ['tool:madlibs:play'],

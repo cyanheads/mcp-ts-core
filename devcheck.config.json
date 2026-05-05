@@ -11,7 +11,8 @@
       "tsc-alias",
       "@cyanheads/mcp-ts-core",
       "@modelcontextprotocol/ext-apps",
-      "typedoc"
+      "typedoc",
+      "cloudflare:*"
     ],
     "ignorePatterns": ["examples"]
   },

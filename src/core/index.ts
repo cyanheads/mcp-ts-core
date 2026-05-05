@@ -62,10 +62,11 @@ export { resource } from '@/mcp-server/resources/utils/resourceDefinition.js';
 export type { AnyToolDef } from '@/mcp-server/tools/tool-registration.js';
 export type {
   AnyToolDefinition,
+  DisabledMetadata,
   ToolAnnotations,
   ToolDefinition,
 } from '@/mcp-server/tools/utils/toolDefinition.js';
-export { tool } from '@/mcp-server/tools/utils/toolDefinition.js';
+export { disabledTool, tool } from '@/mcp-server/tools/utils/toolDefinition.js';
 
 // ---------------------------------------------------------------------------
 // Linter

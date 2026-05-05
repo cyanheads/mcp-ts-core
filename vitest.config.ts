@@ -49,10 +49,22 @@ export default defineConfig({
       include: ['src/**/*.ts'],
       exclude: ['src/**/*.d.ts'],
       thresholds: {
-        lines: 80,
-        functions: 75,
-        branches: 70,
-        statements: 80,
+        lines: 89,
+        functions: 90,
+        branches: 79,
+        statements: 88,
+        'src/linter/rules/server-json-rules.ts': {
+          lines: 100,
+          functions: 100,
+          branches: 90,
+          statements: 100,
+        },
+        'src/storage/providers/supabase/supabaseProvider.ts': {
+          lines: 95,
+          functions: 100,
+          branches: 60,
+          statements: 85,
+        },
       },
     },
     projects: [

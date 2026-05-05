@@ -1,6 +1,6 @@
 # mcp-ts-core - Directory Structure
 
-Generated on: 2026-05-03 06:41:45
+Generated on: 2026-05-05 03:24:45
 
 ```text
 mcp-ts-core/
@@ -31,69 +31,55 @@ mcp-ts-core/
 │   ├── 0.8.x/
 │   └── template.md
 ├── docs/
-│   ├── audit/
-│   │   ├── per-server/
-│   │   │   ├── arxiv-mcp-server.md
-│   │   │   ├── cdc-health-mcp-server.md
-│   │   │   ├── clinicaltrialsgov-mcp-server.md
-│   │   │   ├── nhtsa-vehicle-safety-mcp-server.md
-│   │   │   ├── openalex-mcp-server.md
-│   │   │   ├── pubchem-mcp-server.md
-│   │   │   ├── pubmed-mcp-server.md
-│   │   │   └── secedgar-mcp-server.md
-│   │   └── helpfulness-patterns-2026.md
-│   ├── mcp-specification/
-│   │   ├── 2025-06-18/
-│   │   │   ├── best-practices/
-│   │   │   │   └── security.md
-│   │   │   ├── core/
-│   │   │   │   ├── authorization.md
-│   │   │   │   ├── lifecycle.md
-│   │   │   │   ├── overview.md
-│   │   │   │   └── transports.md
-│   │   │   └── utils/
-│   │   │       ├── cancellation.md
-│   │   │       ├── completion.md
-│   │   │       ├── logging.md
-│   │   │       ├── pagination.md
-│   │   │       ├── ping.md
-│   │   │       └── progress.md
-│   │   └── 2025-11-25/
-│   │       ├── client/
-│   │       │   ├── elicitation.md
-│   │       │   ├── roots.md
-│   │       │   └── sampling.md
-│   │       ├── core/
-│   │       │   ├── authorization.md
-│   │       │   ├── lifecycle.md
-│   │       │   ├── overview.md
-│   │       │   └── transports.md
-│   │       ├── extensions/
-│   │       │   ├── apps-build.md
-│   │       │   ├── apps-overview.md
-│   │       │   ├── auth-enterprise-managed.md
-│   │       │   ├── auth-oauth-client-credentials.md
-│   │       │   ├── auth-overview.md
-│   │       │   ├── client-matrix.md
-│   │       │   └── overview.md
-│   │       ├── server/
-│   │       │   ├── overview.md
-│   │       │   ├── prompts.md
-│   │       │   ├── resources.md
-│   │       │   ├── tools.md
-│   │       │   └── utilities.md
-│   │       ├── utils/
-│   │       │   ├── cancellation.md
-│   │       │   ├── ping.md
-│   │       │   ├── progress.md
-│   │       │   └── tasks.md
-│   │       ├── architecture.md
-│   │       ├── key-changes.md
-│   │       ├── schema-reference.md
-│   │       └── specification.md
-│   ├── server-ideas/
-│   ├── conformance-test-plan.md
-│   └── resource-notifications.md
+│   └── mcp-specification/
+│       ├── 2025-06-18/
+│       │   ├── best-practices/
+│       │   │   └── security.md
+│       │   ├── core/
+│       │   │   ├── authorization.md
+│       │   │   ├── lifecycle.md
+│       │   │   ├── overview.md
+│       │   │   └── transports.md
+│       │   └── utils/
+│       │       ├── cancellation.md
+│       │       ├── completion.md
+│       │       ├── logging.md
+│       │       ├── pagination.md
+│       │       ├── ping.md
+│       │       └── progress.md
+│       └── 2025-11-25/
+│           ├── client/
+│           │   ├── elicitation.md
+│           │   ├── roots.md
+│           │   └── sampling.md
+│           ├── core/
+│           │   ├── authorization.md
+│           │   ├── lifecycle.md
+│           │   ├── overview.md
+│           │   └── transports.md
+│           ├── extensions/
+│           │   ├── apps-build.md
+│           │   ├── apps-overview.md
+│           │   ├── auth-enterprise-managed.md
+│           │   ├── auth-oauth-client-credentials.md
+│           │   ├── auth-overview.md
+│           │   ├── client-matrix.md
+│           │   └── overview.md
+│           ├── server/
+│           │   ├── overview.md
+│           │   ├── prompts.md
+│           │   ├── resources.md
+│           │   ├── tools.md
+│           │   └── utilities.md
+│           ├── utils/
+│           │   ├── cancellation.md
+│           │   ├── ping.md
+│           │   ├── progress.md
+│           │   └── tasks.md
+│           ├── architecture.md
+│           ├── key-changes.md
+│           ├── schema-reference.md
+│           └── specification.md
 ├── examples/
 │   ├── mcp-server/
 │   │   ├── prompts/
@@ -197,6 +183,8 @@ mcp-ts-core/
 │   ├── security-pass/
 │   │   └── SKILL.md
 │   ├── setup/
+│   │   └── SKILL.md
+│   ├── tool-defs-analysis/
 │   │   └── SKILL.md
 │   └── README.md
 ├── src/
@@ -472,7 +460,8 @@ mcp-ts-core/
 │   ├── compliance/
 │   │   └── storage-provider.test.ts
 │   ├── fixtures/
-│   │   └── auth-scoped-server.js
+│   │   ├── auth-scoped-server.js
+│   │   └── worker-runtime.fixture.ts
 │   ├── fuzz/
 │   │   ├── definition-fuzz.test.ts
 │   │   ├── error-handler.fuzz.test.ts
@@ -496,6 +485,7 @@ mcp-ts-core/
 │   │   ├── http.test.ts
 │   │   ├── logger.int.test.ts
 │   │   ├── mcp-apps.int.test.ts
+│   │   ├── package-consumer.int.test.ts
 │   │   └── stdio.test.ts
 │   ├── smoke/
 │   │   ├── prompts/
@@ -528,6 +518,7 @@ mcp-ts-core/
 │   │   │   ├── format-parity-rules.test.ts
 │   │   │   ├── handler-body-rules.test.ts
 │   │   │   ├── landing-rules.test.ts
+│   │   │   ├── server-json-rules.test.ts
 │   │   │   ├── tool-rules.test.ts
 │   │   │   └── validate.test.ts
 │   │   ├── mcp-server/
@@ -717,6 +708,8 @@ mcp-ts-core/
 │   │   │       └── guards.test.ts
 │   │   ├── context.test.ts
 │   │   └── worker.test.ts
+│   ├── worker/
+│   │   └── create-worker-handler.worker.test.ts
 │   └── setup.ts
 ├── .dockerignore
 ├── .env.example
@@ -747,6 +740,7 @@ mcp-ts-core/
 ├── vitest.config.base.mjs
 ├── vitest.config.ts
 ├── vitest.integration.ts
+├── vitest.worker.ts
 └── wrangler.toml
 ```
 
