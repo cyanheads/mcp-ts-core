@@ -15,6 +15,7 @@ import { logger } from '@/utils/internal/logger.js';
 import { type RequestContext, requestContextService } from '@/utils/internal/requestContext.js';
 
 import type { IDataCanvasProvider } from '../../core/IDataCanvasProvider.js';
+import { sniffSchema } from '../../core/schemaSniffer.js';
 import {
   assertNoDeniedFunctions,
   assertPlanReadOnly,
@@ -48,7 +49,6 @@ import {
   safeSizeBytes,
   tempFilePathFor,
 } from './exportWriter.js';
-import { sniffSchema } from './schemaSniffer.js';
 
 const importDuckDB = lazyImport(
   () => import('@duckdb/node-api'),

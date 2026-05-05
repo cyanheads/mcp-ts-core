@@ -21,6 +21,7 @@ export {
 export { createCanvasService } from './core/canvasFactory.js';
 export { DataCanvas } from './core/DataCanvas.js';
 export type { IDataCanvasProvider } from './core/IDataCanvasProvider.js';
+export { inferSchemaFromRows } from './core/schemaSniffer.js';
 export {
   ALLOWED_PLAN_OPERATORS,
   ALLOWED_STATEMENT_TYPES,
@@ -40,6 +41,13 @@ export {
   DuckdbProvider,
   type DuckdbProviderOptions,
 } from './providers/duckdb/DuckdbProvider.js';
+export {
+  type SpilloverFitResult,
+  type SpilloverOptions,
+  type SpilloverResult,
+  type SpilloverSpillResult,
+  spillover,
+} from './spillover.js';
 export type {
   AcquireOptions,
   CanvasObjectKind,

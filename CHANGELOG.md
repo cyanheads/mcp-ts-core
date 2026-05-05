@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.8.15](changelog/0.8.x/0.8.15.md) — 2026-05-05
+
+Source-agnostic `spillover()` helper exported from /canvas (#113); engine-agnostic `inferSchemaFromRows` lifted into canvas/core; api-canvas, add-tool, design-mcp-server skills updated.
+
 ## [0.8.14](changelog/0.8.x/0.8.14.md) — 2026-05-04
 
 disabledTool/DisabledMetadata re-exported from package root (#109); new tool-defs-analysis skill (#111); Worker-runtime test harness via @cloudflare/vitest-pool-workers; example definitions polished; storage provider behavior table in README.

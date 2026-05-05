@@ -1,15 +1,15 @@
 /**
- * @fileoverview Schema inference for {@link DuckdbProvider.registerTable}.
- * Buffers the first N rows of an iterable, unions JS-side types per column,
- * and maps to DuckDB types. `VARCHAR` is the safe fallback for ambiguous
- * unions. Only used when the caller does not pass an explicit `schema`;
- * `AsyncIterable` inputs must always supply one because we cannot peek
- * without consuming.
- * @module src/services/canvas/providers/duckdb/schemaSniffer
+ * @fileoverview Schema inference for canvas table registration. Engine-agnostic
+ * — produces `ColumnSchema[]` from observed JS values; providers map those
+ * tags to native types when needed. `VARCHAR` is the safe fallback for
+ * ambiguous unions. Used by the DuckDB provider for the no-explicit-schema
+ * sync path and by the spillover helper to infer a schema from its preview
+ * buffer when the source is async.
+ * @module src/services/canvas/core/schemaSniffer
  */
 
 import { validationError } from '@/types-global/errors.js';
-import type { ColumnSchema, ColumnType } from '../../types.js';
+import type { ColumnSchema, ColumnType } from '../types.js';
 
 /** Row shape — mirrors what registerTable accepts. */
 type Row = Record<string, unknown>;
@@ -46,10 +46,10 @@ function classify(value: unknown): JsType {
 }
 
 /**
- * Pick a DuckDB column type from the union of observed JS types. Conservative:
+ * Pick a column type tag from the union of observed JS types. Conservative:
  * mixed string+numeric falls back to `VARCHAR` rather than guessing.
  */
-function unionToDuckdbType(observed: Set<JsType>): ColumnType {
+function unionToColumnType(observed: Set<JsType>): ColumnType {
   const nonNull = new Set(observed);
   nonNull.delete('null');
   if (nonNull.size === 0) return 'VARCHAR';
@@ -79,6 +79,45 @@ function unionToDuckdbType(observed: Set<JsType>): ColumnType {
 }
 
 /**
+ * Infer a `ColumnSchema[]` from a set of fully-buffered rows. Column ordering
+ * follows first appearance. A column is `nullable` if any sampled row had
+ * `null`/`undefined` for it or was missing the key. Throws if `rows` is empty.
+ */
+export function inferSchemaFromRows(rows: readonly Row[]): ColumnSchema[] {
+  if (rows.length === 0) {
+    throw validationError(
+      'Cannot infer schema from an empty input. Provide either rows or an explicit `schema`.',
+      { reason: 'empty_input' },
+    );
+  }
+
+  const observedByCol = new Map<string, Set<JsType>>();
+  const columnOrder: string[] = [];
+  const presenceCount = new Map<string, number>();
+
+  for (const row of rows) {
+    for (const key of Object.keys(row)) {
+      let bag = observedByCol.get(key);
+      if (!bag) {
+        bag = new Set();
+        observedByCol.set(key, bag);
+        columnOrder.push(key);
+      }
+      bag.add(classify(row[key]));
+      presenceCount.set(key, (presenceCount.get(key) ?? 0) + 1);
+    }
+  }
+
+  const total = rows.length;
+  return columnOrder.map((name) => {
+    const observed = observedByCol.get(name) ?? new Set<JsType>(['null']);
+    const present = presenceCount.get(name) ?? 0;
+    const nullable = observed.has('null') || present < total;
+    return { name, type: unionToColumnType(observed), nullable };
+  });
+}
+
+/**
  * Buffer up to `sniffRowCount` rows and return the inferred schema, the
  * buffered rows, and a continuation iterator. Throws if the input is empty.
  *
@@ -97,37 +136,6 @@ export function sniffSchema(iterable: Iterable<Row>, sniffRowCount: number): Sni
     if (next.done) break;
     sniffedRows.push(next.value);
   }
-  if (sniffedRows.length === 0) {
-    throw validationError(
-      'Cannot infer schema from an empty input. Provide either rows or an explicit `schema`.',
-      { reason: 'empty_input' },
-    );
-  }
-
-  const observedByCol = new Map<string, Set<JsType>>();
-  const columnOrder: string[] = [];
-  const presenceCount = new Map<string, number>();
-
-  for (const row of sniffedRows) {
-    for (const key of Object.keys(row)) {
-      let bag = observedByCol.get(key);
-      if (!bag) {
-        bag = new Set();
-        observedByCol.set(key, bag);
-        columnOrder.push(key);
-      }
-      bag.add(classify(row[key]));
-      presenceCount.set(key, (presenceCount.get(key) ?? 0) + 1);
-    }
-  }
-
-  const total = sniffedRows.length;
-  const schema: ColumnSchema[] = columnOrder.map((name) => {
-    const observed = observedByCol.get(name) ?? new Set<JsType>(['null']);
-    const present = presenceCount.get(name) ?? 0;
-    const nullable = observed.has('null') || present < total;
-    return { name, type: unionToDuckdbType(observed), nullable };
-  });
-
+  const schema = inferSchemaFromRows(sniffedRows);
   return { schema, sniffedRows, remaining: iter };
 }
