@@ -3,6 +3,7 @@
  * @module tests/mcp-server/transports/http/httpTransport.test
  */
 
+import { StreamableHTTPTransport } from '@hono/mcp';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
 import { createHttpApp } from '@/mcp-server/transports/http/httpTransport.js';
@@ -799,6 +800,124 @@ describe('HTTP Transport', () => {
 
         sessionStore!.destroy();
       });
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // Per-request close — issue #50 regression
+  //
+  // The HTTP transport constructs a fresh McpServer + McpSessionTransport per
+  // request. Production telemetry showed a 1:1 correlation between SSE GETs
+  // and unfinalized server/transport pairs because @hono/mcp's stream.onAbort
+  // does not fire transport.close() on ungraceful client disconnect — so the
+  // framework's onclose path never ran. We bind cleanup to c.req.raw.signal
+  // for SSE responses; on abort, closePerRequestInstances runs both closes.
+  // -------------------------------------------------------------------------
+  describe('Per-request close on SSE abort (issue #50)', () => {
+    let transportCloseSpy: ReturnType<typeof vi.spyOn>;
+    let serverCloseSpy: ReturnType<typeof vi.fn>;
+    let app: Awaited<ReturnType<typeof createHttpApp>>['app'];
+
+    beforeEach(async () => {
+      transportCloseSpy = vi.spyOn(StreamableHTTPTransport.prototype, 'close');
+      serverCloseSpy = vi.fn().mockResolvedValue(undefined);
+      const mockServer = {
+        connect: vi.fn().mockResolvedValue(undefined),
+        close: serverCloseSpy,
+      } as unknown as McpServer;
+      ({ app } = await createHttpApp(() => Promise.resolve(mockServer), mockContext, defaultMeta));
+    });
+
+    afterEach(() => {
+      transportCloseSpy.mockRestore();
+    });
+
+    /** Two `setImmediate` ticks cover: abort listener → `void closePerRequestInstances`
+     * → `Promise.all([transport.close, server.close])`. */
+    const flushCleanup = async (): Promise<void> => {
+      await new Promise((resolve) => setImmediate(resolve));
+      await new Promise((resolve) => setImmediate(resolve));
+    };
+
+    const sseRequest = (signal: AbortSignal): Request =>
+      new Request('http://localhost:3000/mcp', {
+        method: 'GET',
+        headers: {
+          Accept: 'text/event-stream',
+          Origin: 'http://localhost:3000',
+          'Mcp-Protocol-Version': '2025-03-26',
+        },
+        signal,
+      });
+
+    test('aborting an SSE GET triggers per-request transport.close + server.close', async () => {
+      const controller = new AbortController();
+      const response = await app.fetch(sseRequest(controller.signal));
+
+      // Sanity: streamSSE response, not the GET-status fallback.
+      expect(response.headers.get('content-type')).toContain('text/event-stream');
+
+      // Pre-abort: cleanup must NOT have fired — the SSE stream is alive.
+      expect(transportCloseSpy).not.toHaveBeenCalled();
+      expect(serverCloseSpy).not.toHaveBeenCalled();
+
+      controller.abort();
+      await flushCleanup();
+
+      expect(transportCloseSpy).toHaveBeenCalledTimes(1);
+      expect(serverCloseSpy).toHaveBeenCalledTimes(1);
+    });
+
+    test('SSE GET with a pre-aborted signal still runs cleanup', async () => {
+      const controller = new AbortController();
+      // Exercise the `signal.aborted` queueMicrotask branch.
+      controller.abort();
+      await app.fetch(sseRequest(controller.signal));
+      await flushCleanup();
+
+      expect(transportCloseSpy).toHaveBeenCalledTimes(1);
+      expect(serverCloseSpy).toHaveBeenCalledTimes(1);
+    });
+
+    test('aborting twice only fires cleanup once', async () => {
+      // Guards against regressions in `{ once: true }` on the abort listener
+      // and AbortController's own once-only abort semantics.
+      const controller = new AbortController();
+      await app.fetch(sseRequest(controller.signal));
+
+      controller.abort();
+      controller.abort();
+      await flushCleanup();
+
+      expect(transportCloseSpy).toHaveBeenCalledTimes(1);
+      expect(serverCloseSpy).toHaveBeenCalledTimes(1);
+    });
+
+    test('non-SSE POST (notifications-only) cleans up via the success path', async () => {
+      // Notifications-only POST: @hono/mcp returns `ctx.json(null, 202)` —
+      // a plain JSON response, not an SSE stream — so the framework takes
+      // the queueMicrotask cleanup branch, not the abort-signal branch.
+      const request = new Request('http://localhost:3000/mcp', {
+        method: 'POST',
+        headers: {
+          Origin: 'http://localhost:3000',
+          'Content-Type': 'application/json',
+          Accept: 'application/json, text/event-stream',
+          'Mcp-Protocol-Version': '2025-03-26',
+        },
+        body: JSON.stringify({
+          jsonrpc: '2.0',
+          method: 'notifications/initialized',
+        }),
+      });
+
+      const response = await app.fetch(request);
+      expect(response.headers.get('content-type')).not.toContain('text/event-stream');
+
+      await flushCleanup();
+
+      expect(transportCloseSpy).toHaveBeenCalledTimes(1);
+      expect(serverCloseSpy).toHaveBeenCalledTimes(1);
     });
   });
 });

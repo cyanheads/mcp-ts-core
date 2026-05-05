@@ -1,6 +1,6 @@
 # mcp-ts-core - Directory Structure
 
-Generated on: 2026-05-05 03:24:45
+Generated on: 2026-05-05 22:43:18
 
 ```text
 mcp-ts-core/
@@ -298,13 +298,14 @@ mcp-ts-core/
 │   │   │   │   ├── CanvasRegistry.ts
 │   │   │   │   ├── DataCanvas.ts
 │   │   │   │   ├── IDataCanvasProvider.ts
+│   │   │   │   ├── schemaSniffer.ts
 │   │   │   │   └── sqlGate.ts
 │   │   │   ├── providers/
 │   │   │   │   └── duckdb/
 │   │   │   │       ├── DuckdbProvider.ts
-│   │   │   │       ├── exportWriter.ts
-│   │   │   │       └── schemaSniffer.ts
+│   │   │   │       └── exportWriter.ts
 │   │   │   ├── index.ts
+│   │   │   ├── spillover.ts
 │   │   │   └── types.ts
 │   │   ├── graph/
 │   │   │   ├── core/
@@ -481,6 +482,7 @@ mcp-ts-core/
 │   │   ├── http-auth.test.ts
 │   │   ├── http-authz.e2e.test.ts
 │   │   ├── http-sessions.test.ts
+│   │   ├── http-sse-abort.int.test.ts
 │   │   ├── http-transport.int.test.ts
 │   │   ├── http.test.ts
 │   │   ├── logger.int.test.ts
@@ -598,6 +600,7 @@ mcp-ts-core/
 │   │   │   │   ├── DataCanvas.test.ts
 │   │   │   │   ├── exportWriter.test.ts
 │   │   │   │   ├── schemaSniffer.test.ts
+│   │   │   │   ├── spillover.test.ts
 │   │   │   │   ├── sqlGate.test.ts
 │   │   │   │   └── toBigInt.test.ts
 │   │   │   ├── graph/

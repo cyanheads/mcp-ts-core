@@ -133,15 +133,21 @@ function withTimeout<T>(p: Promise<T>, ms: number, label: string): Promise<T> {
   });
 }
 
+/** Triggers for the per-request close path, surfaced as the `trigger` tag on
+ * `mcp.http.close_failures` so failures can be attributed to which lifecycle
+ * event drove the close. */
+type CloseTrigger = 'success' | 'error' | 'sse-abort';
+
 /** Closes the per-request transport and server under a bounded timeout.
  * Runs the two closes in parallel so one hanging close doesn't delay the
- * other, and records each failure to `mcp.http.close_failures` with a
- * `surface` tag. */
+ * other, and records each failure to `mcp.http.close_failures` with
+ * `surface` and `trigger` tags. */
 async function closePerRequestInstances(
   transport: McpSessionTransport,
   server: McpServer,
   sessionId: string,
   transportContext: RequestContext,
+  trigger: CloseTrigger,
 ): Promise<void> {
   const tasks: [PerRequestKind, Promise<void>][] = [
     ['transport', transport.close()],
@@ -153,8 +159,8 @@ async function closePerRequestInstances(
       try {
         await withTimeout(closePromise, PER_REQUEST_CLOSE_TIMEOUT_MS, `${surface}.close`);
       } catch (err) {
-        getCloseFailureCounter().add(1, { surface, trigger: 'success' });
-        logger.warning(`Failed to close ${surface} after non-SSE response`, {
+        getCloseFailureCounter().add(1, { surface, trigger });
+        logger.warning(`Failed to close ${surface} (trigger=${trigger})`, {
           ...transportContext,
           sessionId,
           error: err instanceof Error ? err.message : String(err),
@@ -558,19 +564,43 @@ export async function createHttpApp<TBindings extends object = HonoNodeBindings>
           });
         }
 
-        // For non-SSE responses (standard JSON-RPC POST), close the per-request
-        // server/transport after the Response is handed back to Hono. SSE
-        // streams must stay open — closing would abort the ReadableStream
-        // before Hono can consume it (see GHSA-345p-7cg4-v4c7 comment above).
-        //
-        // Closes run in parallel under a bounded timeout so silent hangs
-        // surface as `mcp.http.close_failures` instead of retaining the
-        // per-request McpServer/McpSessionTransport closures indefinitely.
+        // Non-SSE responses (POST/202): close immediately via queueMicrotask.
+        // SSE streams must stay open until the client disconnects — closing now
+        // would abort the ReadableStream before Hono can write to it (see
+        // GHSA-345p-7cg4-v4c7 above) — so cleanup is bound to the request's
+        // AbortSignal instead. `@hono/mcp` `stream.onAbort` only clears its
+        // internal stream map; it never fires `transport.close()` or `onclose`,
+        // and real clients almost always disconnect ungracefully (no DELETE).
+        // Without this hook every SSE GET leaks its per-request McpServer +
+        // Transport pair (issue #50). `c.req.raw.signal` aborts on client
+        // disconnect across runtimes (`@hono/node-server`, modern Bun, Workers).
         const isSSE = response.headers.get('content-type')?.includes('text/event-stream');
         if (!isSSE) {
           queueMicrotask(() => {
-            void closePerRequestInstances(transport, server, sessionId, transportContext);
+            void closePerRequestInstances(
+              transport,
+              server,
+              sessionId,
+              transportContext,
+              'success',
+            );
           });
+        } else {
+          const sseCleanup = (): void => {
+            void closePerRequestInstances(
+              transport,
+              server,
+              sessionId,
+              transportContext,
+              'sse-abort',
+            );
+          };
+          const reqSignal = c.req.raw.signal;
+          if (reqSignal.aborted) {
+            queueMicrotask(sseCleanup);
+          } else {
+            reqSignal.addEventListener('abort', sseCleanup, { once: true });
+          }
         }
 
         return response;
