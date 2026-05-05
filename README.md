@@ -1,3 +1,5 @@
+[![MseeP.ai Security Assessment Badge](https://mseep.net/pr/cyanheads-mcp-ts-core-badge.png)](https://mseep.ai/app/cyanheads-mcp-ts-core)
+
 <div align="center">
   <h1>@cyanheads/mcp-ts-core</h1>
   <p><b>Agent-native TypeScript framework for building MCP servers. Build tools, not infrastructure. Declarative definitions with auth, multi-backend storage, OpenTelemetry, and first-class support for Bun/Node/Cloudflare Workers.</b></p>
