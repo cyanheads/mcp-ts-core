@@ -14,6 +14,7 @@ import type {
 
 import { ZodError, type ZodObject, type ZodRawShape } from 'zod';
 
+import { config } from '@/config/index.js';
 import type { Context, SamplingOpts } from '@/core/context.js';
 import { attachTypedFail, createContext } from '@/core/context.js';
 import { withRequiredScopes } from '@/mcp-server/transports/auth/lib/authUtils.js';
@@ -38,6 +39,13 @@ interface SdkRuntimeCapabilities {
 
 /** Services required by the handler factory to construct Context. */
 export interface HandlerFactoryServices {
+  /**
+   * When true, surface `ctx.sessionId` even in stateless HTTP mode (per-request
+   * generated token). Wired from `createApp({ context: { exposeStatelessSessionId } })`.
+   * Default false — `ctx.sessionId` is only set when the session has
+   * request-spanning lifetime (HTTP `stateful` / `auto` mode).
+   */
+  exposeStatelessSessionId?: boolean;
   logger: Logger;
   storage: StorageService;
 }
@@ -178,19 +186,34 @@ export function createToolHandler(
     const sdkContext = callContext as unknown as SdkExtra;
     const sdkCaps = callContext as unknown as SdkRuntimeCapabilities;
 
-    const sessionId = typeof sdkContext?.sessionId === 'string' ? sdkContext.sessionId : undefined;
+    const sdkSessionId =
+      typeof sdkContext?.sessionId === 'string' ? sdkContext.sessionId : undefined;
+
+    // Surface sessionId on `Context` only when it has request-spanning
+    // lifetime — stateful HTTP (or `auto`, which resolves to stateful for
+    // HTTP). In stateless mode the SDK still hands us a per-request token;
+    // pass it through only when the consumer opted in via
+    // `createApp({ context: { exposeStatelessSessionId: true } })`. Stdio
+    // gives no sessionId at the SDK layer, so the gate is moot there.
+    const isStatefulMode = config.mcpSessionMode === 'stateful' || config.mcpSessionMode === 'auto';
+    const handlerSessionId =
+      sdkSessionId && (isStatefulMode || services.exposeStatelessSessionId === true)
+        ? sdkSessionId
+        : undefined;
 
     // Create internal RequestContext for tracing. Raw `input` is intentionally
     // excluded — it flows into the completion log via context spread and can
     // contain caller PII or secrets. Input size and top-level parameter names
     // are captured as OTel metric attributes in measureToolExecution instead.
+    // Log correlation always uses the raw SDK sessionId — useful even in
+    // stateless mode for tracing the SDK's per-request token through events.
     const appContext = requestContextService.createRequestContext({
       parentContext: {
         ...(typeof sdkContext?.requestId === 'string' ? { requestId: sdkContext.requestId } : {}),
-        ...(sessionId ? { sessionId } : {}),
+        ...(sdkSessionId ? { sessionId: sdkSessionId } : {}),
       },
       operation: 'HandleToolRequest',
-      additionalContext: { toolName: def.name, sessionId },
+      additionalContext: { toolName: def.name, sessionId: sdkSessionId },
     });
 
     try {
@@ -211,6 +234,7 @@ export function createToolHandler(
           logger: services.logger,
           storage: services.storage,
           signal: sdkContext.signal,
+          sessionId: handlerSessionId,
           elicit: wrapElicit(sdkCaps),
           sample: wrapSample(sdkCaps),
           notifyResourceListChanged: notifiers.notifyResourceListChanged,

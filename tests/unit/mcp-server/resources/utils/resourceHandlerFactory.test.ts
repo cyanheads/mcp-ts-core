@@ -15,7 +15,14 @@ import { JsonRpcErrorCode, McpError } from '@/types-global/errors.js';
 // Module mocks — vi.hoisted ensures variables are available during vi.mock hoisting
 // ---------------------------------------------------------------------------
 
-const { mockLogger } = vi.hoisted(() => ({
+const { mockConfig, mockLogger } = vi.hoisted(() => ({
+  mockConfig: {
+    environment: 'testing',
+    mcpServerVersion: '1.0.0-test',
+    mcpAuthMode: 'none',
+    mcpSessionMode: 'auto' as 'auto' | 'stateful' | 'stateless',
+    openTelemetry: { serviceName: 'test', serviceVersion: '0.0.0' },
+  },
   mockLogger: {
     debug: vi.fn(),
     info: vi.fn(),
@@ -29,12 +36,7 @@ const { mockLogger } = vi.hoisted(() => ({
 }));
 
 vi.mock('@/config/index.js', () => ({
-  config: {
-    environment: 'testing',
-    mcpServerVersion: '1.0.0-test',
-    mcpAuthMode: 'none',
-    openTelemetry: { serviceName: 'test', serviceVersion: '0.0.0' },
-  },
+  config: mockConfig,
 }));
 
 vi.mock('@/utils/internal/logger.js', () => ({
@@ -103,6 +105,9 @@ const notifiers: ResourceHandlerNotifiers = {};
 describe('createResourceHandler', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    // Reset session mode between tests so the durability gate isn't sticky.
+    // 'auto' is the production default and resolves to stateful for HTTP.
+    mockConfig.mcpSessionMode = 'auto';
   });
 
   // -----------------------------------------------------------------------
@@ -271,6 +276,121 @@ describe('createResourceHandler', () => {
 
       expect(capturedCtx.elicit).toBeDefined();
       expect(capturedCtx.sample).toBeDefined();
+    });
+  });
+
+  // -----------------------------------------------------------------------
+  // Session extraction & durability gate
+  // -----------------------------------------------------------------------
+
+  describe('Session extraction', () => {
+    /**
+     * Builds a resource whose handler captures `ctx.sessionId` for assertion.
+     * Returned `getSessionId()` reads it after the handler ran.
+     */
+    function makeSessionCapturingResource() {
+      let captured: string | undefined;
+      const def = resource('session://{id}', {
+        description: 'Captures ctx.sessionId.',
+        handler: (_params, ctx) => {
+          captured = ctx.sessionId;
+          return { ok: true };
+        },
+      });
+      return { def, getSessionId: () => captured };
+    }
+
+    it('always forwards sessionId into RequestContext for log correlation', async () => {
+      // Strictest gate (stateless + no opt-in) still threads the raw SDK
+      // sessionId into RequestContext for tracing.
+      mockConfig.mcpSessionMode = 'stateless';
+      const { requestContextService } = await import('@/utils/internal/requestContext.js');
+
+      const def = resource('log://{id}', {
+        description: 'Log correlation test.',
+        handler: () => ({ ok: true }),
+      });
+
+      const handler = createResourceHandler(def as AnyResourceDefinition, services, notifiers);
+      await handler(new URL('log://x'), { id: 'x' }, createMockSdkContext({ sessionId: 'sess-r' }));
+
+      expect(requestContextService.createRequestContext).toHaveBeenCalledWith(
+        expect.objectContaining({
+          additionalContext: expect.objectContaining({ sessionId: 'sess-r' }),
+          parentContext: expect.objectContaining({ sessionId: 'sess-r' }),
+        }),
+      );
+    });
+
+    it('surfaces ctx.sessionId in stateful HTTP mode', async () => {
+      mockConfig.mcpSessionMode = 'stateful';
+      const { def, getSessionId } = makeSessionCapturingResource();
+
+      const handler = createResourceHandler(def as AnyResourceDefinition, services, notifiers);
+      await handler(
+        new URL('session://x'),
+        { id: 'x' },
+        createMockSdkContext({ sessionId: 'sess-stateful' }),
+      );
+
+      expect(getSessionId()).toBe('sess-stateful');
+    });
+
+    it('surfaces ctx.sessionId in auto mode (resolves to stateful for HTTP)', async () => {
+      mockConfig.mcpSessionMode = 'auto';
+      const { def, getSessionId } = makeSessionCapturingResource();
+
+      const handler = createResourceHandler(def as AnyResourceDefinition, services, notifiers);
+      await handler(
+        new URL('session://x'),
+        { id: 'x' },
+        createMockSdkContext({ sessionId: 'sess-auto' }),
+      );
+
+      expect(getSessionId()).toBe('sess-auto');
+    });
+
+    it('hides ctx.sessionId in stateless mode by default (fail-closed)', async () => {
+      mockConfig.mcpSessionMode = 'stateless';
+      const { def, getSessionId } = makeSessionCapturingResource();
+
+      const handler = createResourceHandler(def as AnyResourceDefinition, services, notifiers);
+      await handler(
+        new URL('session://x'),
+        { id: 'x' },
+        createMockSdkContext({ sessionId: 'sess-stateless' }),
+      );
+
+      expect(getSessionId()).toBeUndefined();
+    });
+
+    it('surfaces ctx.sessionId in stateless mode when exposeStatelessSessionId is true', async () => {
+      mockConfig.mcpSessionMode = 'stateless';
+      const optInServices: ResourceHandlerFactoryServices = {
+        ...services,
+        exposeStatelessSessionId: true,
+      };
+      const { def, getSessionId } = makeSessionCapturingResource();
+
+      const handler = createResourceHandler(def as AnyResourceDefinition, optInServices, notifiers);
+      await handler(
+        new URL('session://x'),
+        { id: 'x' },
+        createMockSdkContext({ sessionId: 'sess-opt-in' }),
+      );
+
+      expect(getSessionId()).toBe('sess-opt-in');
+    });
+
+    it('leaves ctx.sessionId undefined when SDK provides none, in any mode', async () => {
+      const { def, getSessionId } = makeSessionCapturingResource();
+      const handler = createResourceHandler(def as AnyResourceDefinition, services, notifiers);
+
+      for (const mode of ['stateful', 'auto', 'stateless'] as const) {
+        mockConfig.mcpSessionMode = mode;
+        await handler(new URL('session://x'), { id: 'x' }, createMockSdkContext());
+        expect(getSessionId()).toBeUndefined();
+      }
     });
   });
 

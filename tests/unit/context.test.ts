@@ -114,6 +114,18 @@ describe('createContext', () => {
 
       expect(ctx.auth).toEqual(auth);
     });
+
+    it('should forward sessionId from deps when provided', () => {
+      const ctx = createContext(makeDeps({ sessionId: 'sess-abc-123' }));
+
+      expect(ctx.sessionId).toBe('sess-abc-123');
+    });
+
+    it('should leave sessionId undefined when not provided in deps', () => {
+      const ctx = createContext(makeDeps());
+
+      expect(ctx.sessionId).toBeUndefined();
+    });
   });
 
   // -----------------------------------------------------------------------

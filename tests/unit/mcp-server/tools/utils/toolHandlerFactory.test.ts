@@ -16,7 +16,14 @@ import { JsonRpcErrorCode, McpError } from '@/types-global/errors.js';
 // Module mocks — vi.hoisted ensures variables are available during vi.mock hoisting
 // ---------------------------------------------------------------------------
 
-const { mockLogger } = vi.hoisted(() => ({
+const { mockConfig, mockLogger } = vi.hoisted(() => ({
+  mockConfig: {
+    environment: 'testing',
+    mcpServerVersion: '1.0.0-test',
+    mcpAuthMode: 'none',
+    mcpSessionMode: 'auto' as 'auto' | 'stateful' | 'stateless',
+    openTelemetry: { serviceName: 'test', serviceVersion: '0.0.0' },
+  },
   mockLogger: {
     debug: vi.fn(),
     info: vi.fn(),
@@ -30,12 +37,7 @@ const { mockLogger } = vi.hoisted(() => ({
 }));
 
 vi.mock('@/config/index.js', () => ({
-  config: {
-    environment: 'testing',
-    mcpServerVersion: '1.0.0-test',
-    mcpAuthMode: 'none',
-    openTelemetry: { serviceName: 'test', serviceVersion: '0.0.0' },
-  },
+  config: mockConfig,
 }));
 
 vi.mock('@/utils/internal/logger.js', () => ({
@@ -108,6 +110,9 @@ const notifiers: HandlerNotifiers = {};
 describe('createToolHandler', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    // Reset session mode between tests so the durability gate isn't sticky.
+    // 'auto' is the production default and resolves to stateful for HTTP.
+    mockConfig.mcpSessionMode = 'auto';
   });
 
   // -----------------------------------------------------------------------
@@ -545,15 +550,38 @@ describe('createToolHandler', () => {
   });
 
   // -----------------------------------------------------------------------
-  // Session extraction
+  // Session extraction & durability gate
   // -----------------------------------------------------------------------
 
   describe('Session extraction', () => {
-    it('should extract sessionId from SDK context when present', async () => {
+    /**
+     * Builds a tool whose handler captures `ctx.sessionId` for assertion.
+     * Returned `getSessionId()` reads it after the handler ran.
+     */
+    function makeSessionCapturingTool() {
+      let captured: string | undefined;
+      const def = tool('session_capture_tool', {
+        description: 'Captures ctx.sessionId.',
+        input: z.object({}),
+        output: z.object({ ok: z.boolean() }),
+        handler: (_input, ctx) => {
+          captured = ctx.sessionId;
+          return { ok: true };
+        },
+      });
+      return { def, getSessionId: () => captured };
+    }
+
+    it('always forwards sessionId into RequestContext for log correlation', async () => {
+      // Even with the strictest gate (stateless + no opt-in), the raw SDK
+      // sessionId still flows into the RequestContext for tracing — so logs
+      // can correlate against the SDK's per-request token regardless of
+      // whether the handler sees it on `ctx.sessionId`.
+      mockConfig.mcpSessionMode = 'stateless';
       const { requestContextService } = await import('@/utils/internal/requestContext.js');
 
-      const def = tool('session_tool', {
-        description: 'Session test.',
+      const def = tool('session_log_tool', {
+        description: 'Log correlation test.',
         input: z.object({}),
         output: z.object({ ok: z.boolean() }),
         handler: () => ({ ok: true }),
@@ -565,8 +593,66 @@ describe('createToolHandler', () => {
       expect(requestContextService.createRequestContext).toHaveBeenCalledWith(
         expect.objectContaining({
           additionalContext: expect.objectContaining({ sessionId: 'sess-abc' }),
+          parentContext: expect.objectContaining({ sessionId: 'sess-abc' }),
         }),
       );
+    });
+
+    it('surfaces ctx.sessionId in stateful HTTP mode', async () => {
+      mockConfig.mcpSessionMode = 'stateful';
+      const { def, getSessionId } = makeSessionCapturingTool();
+
+      const handler = createToolHandler(def as AnyToolDefinition, services, notifiers);
+      await handler({}, createMockSdkContext({ sessionId: 'sess-stateful' }));
+
+      expect(getSessionId()).toBe('sess-stateful');
+    });
+
+    it('surfaces ctx.sessionId in auto mode (resolves to stateful for HTTP)', async () => {
+      mockConfig.mcpSessionMode = 'auto';
+      const { def, getSessionId } = makeSessionCapturingTool();
+
+      const handler = createToolHandler(def as AnyToolDefinition, services, notifiers);
+      await handler({}, createMockSdkContext({ sessionId: 'sess-auto' }));
+
+      expect(getSessionId()).toBe('sess-auto');
+    });
+
+    it('hides ctx.sessionId in stateless mode by default (fail-closed)', async () => {
+      mockConfig.mcpSessionMode = 'stateless';
+      const { def, getSessionId } = makeSessionCapturingTool();
+
+      // Default services — no exposeStatelessSessionId opt-in.
+      const handler = createToolHandler(def as AnyToolDefinition, services, notifiers);
+      await handler({}, createMockSdkContext({ sessionId: 'sess-stateless' }));
+
+      expect(getSessionId()).toBeUndefined();
+    });
+
+    it('surfaces ctx.sessionId in stateless mode when exposeStatelessSessionId is true', async () => {
+      mockConfig.mcpSessionMode = 'stateless';
+      const optInServices: HandlerFactoryServices = {
+        ...services,
+        exposeStatelessSessionId: true,
+      };
+      const { def, getSessionId } = makeSessionCapturingTool();
+
+      const handler = createToolHandler(def as AnyToolDefinition, optInServices, notifiers);
+      await handler({}, createMockSdkContext({ sessionId: 'sess-opt-in' }));
+
+      expect(getSessionId()).toBe('sess-opt-in');
+    });
+
+    it('leaves ctx.sessionId undefined when SDK provides none, in any mode', async () => {
+      const { def, getSessionId } = makeSessionCapturingTool();
+      const handler = createToolHandler(def as AnyToolDefinition, services, notifiers);
+
+      for (const mode of ['stateful', 'auto', 'stateless'] as const) {
+        mockConfig.mcpSessionMode = mode;
+        // No sessionId on the SDK extra (e.g. stdio).
+        await handler({}, createMockSdkContext());
+        expect(getSessionId()).toBeUndefined();
+      }
     });
   });
 

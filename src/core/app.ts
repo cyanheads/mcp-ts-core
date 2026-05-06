@@ -52,8 +52,28 @@ import {
 import { createObservableGauge } from '@/utils/telemetry/metrics.js';
 import { withSpan } from '@/utils/telemetry/trace.js';
 
+/**
+ * Options affecting the `Context` object passed to every handler.
+ * Surfaced via {@link CreateAppOptions.context}.
+ */
+export interface ContextOptions {
+  /**
+   * When `true`, `ctx.sessionId` is populated in stateless HTTP mode using
+   * the per-request token the SDK generates. Default `false` — `ctx.sessionId`
+   * is only defined when there is a durable session (HTTP `stateful` / `auto`
+   * mode). Stdio handlers always see `undefined`.
+   *
+   * Opt in only when downstream code is structured around `ctx.sessionId`
+   * and accepts that the value changes per-request under stateless mode. For
+   * generic per-request correlation, use `ctx.requestId` (always present).
+   */
+  exposeStatelessSessionId?: boolean;
+}
+
 /** Options for {@link createApp}. All arrays default to empty. */
 export interface CreateAppOptions {
+  /** Options affecting the `Context` object passed to handlers. */
+  context?: ContextOptions;
   /**
    * SEP-2133 extensions to advertise in server capabilities.
    * Keys are extension identifiers (`vendor-prefix/extension-name`).
@@ -131,7 +151,15 @@ export interface ComposedApp {
  * @internal
  */
 export async function composeServices(options: CreateAppOptions = {}): Promise<ComposedApp> {
-  const { tools = [], resources = [], prompts = [], extensions, landing, setup } = options;
+  const {
+    tools = [],
+    resources = [],
+    prompts = [],
+    extensions,
+    landing,
+    setup,
+    context: contextOptions,
+  } = options;
 
   // Validate definitions against MCP spec before proceeding
   const lintReport = validateDefinitions({
@@ -249,13 +277,16 @@ export async function composeServices(options: CreateAppOptions = {}): Promise<C
 
   const taskManager = new TaskManager(config, storageService);
 
+  const exposeStatelessSessionId = contextOptions?.exposeStatelessSessionId === true;
   const toolRegistry = new ToolRegistry(tools, {
     logger,
     storage: storageService,
+    exposeStatelessSessionId,
   });
   const resourceRegistry = new ResourceRegistry(resources, {
     logger,
     storage: storageService,
+    exposeStatelessSessionId,
   });
   const promptRegistry = new PromptRegistry(prompts, logger);
   const rootsRegistry = new RootsRegistry(logger);

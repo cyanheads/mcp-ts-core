@@ -138,4 +138,12 @@ describe('createMockContext helpers', () => {
     expect(customCtx.notifyResourceUpdated).toBe(notifyResourceUpdated);
     expect(customCtx.uri).toBe(uri);
   });
+
+  it('forwards sessionId when provided, leaves undefined by default', () => {
+    const withSession = createMockContext({ sessionId: 'sess-xyz' });
+    const withoutSession = createMockContext();
+
+    expect(withSession.sessionId).toBe('sess-xyz');
+    expect(withoutSession.sessionId).toBeUndefined();
+  });
 });

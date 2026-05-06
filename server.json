@@ -6,14 +6,14 @@
     "url": "https://github.com/cyanheads/mcp-ts-core",
     "source": "github"
   },
-  "version": "0.8.16",
+  "version": "0.8.17",
   "packages": [
     {
       "registryType": "npm",
       "registryBaseUrl": "https://registry.npmjs.org",
       "identifier": "@cyanheads/mcp-ts-core",
       "runtimeHint": "bun",
-      "version": "0.8.16",
+      "version": "0.8.17",
       "packageArguments": [
         {
           "type": "positional",
@@ -42,7 +42,7 @@
       "registryBaseUrl": "https://registry.npmjs.org",
       "identifier": "@cyanheads/mcp-ts-core",
       "runtimeHint": "bun",
-      "version": "0.8.16",
+      "version": "0.8.17",
       "packageArguments": [
         {
           "type": "positional",

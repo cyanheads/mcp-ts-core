@@ -156,6 +156,22 @@ export interface Context {
   readonly sample?:
     | ((messages: SamplingMessage[], opts?: SamplingOpts) => Promise<CreateMessageResult>)
     | undefined;
+  /**
+   * HTTP session ID — the value of the `Mcp-Session-Id` header (or a
+   * server-minted ID for new sessions) when the request carries a durable
+   * session. Defined for HTTP in stateful / `auto` session mode; `undefined`
+   * for stdio and for stateless HTTP unless the server opts in via
+   * `createApp({ context: { exposeStatelessSessionId: true } })`.
+   *
+   * Use as a discovery / scoping key on top of tenant-keyed `ctx.state` —
+   * not as an authorization principal. In `MCP_AUTH_MODE=jwt|oauth`, hijack
+   * mismatches are rejected by the SessionStore before the handler runs, so
+   * possession here implies the calling identity passed identity binding.
+   * Under `MCP_AUTH_MODE=none`, sessions are not identity-bound — possession
+   * of the header value is the only authorization, matching the framework's
+   * capability-token model.
+   */
+  readonly sessionId?: string | undefined;
 
   // --- Cancellation ---
   /** AbortSignal for request cancellation. */
@@ -354,6 +370,12 @@ export interface ContextDeps {
   notifyResourceListChanged?: Context['notifyResourceListChanged'];
   notifyResourceUpdated?: Context['notifyResourceUpdated'];
   sample?: Context['sample'];
+  /**
+   * HTTP session ID. Forwarded onto `Context.sessionId` as-is. Caller is
+   * responsible for the durability gate (stateful mode / opt-in) — by the
+   * time it reaches this dep, the decision has been made.
+   */
+  sessionId?: string | undefined;
   signal: AbortSignal;
   storage: StorageService;
   taskCtx?: { store: RequestTaskStore; taskId: string } | undefined;
@@ -395,6 +417,7 @@ export function createContext(deps: ContextDeps): Context {
     state,
     signal,
     tenantId: effectiveContext.tenantId,
+    sessionId: deps.sessionId,
     traceId: appContext.traceId as string | undefined,
     spanId: appContext.spanId as string | undefined,
     auth: appContext.auth,

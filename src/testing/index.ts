@@ -54,6 +54,12 @@ export interface MockContextOptions {
   requestId?: string;
   /** Mock sampling handler. */
   sample?: (messages: SamplingMessage[], opts?: SamplingOpts) => Promise<CreateMessageResult>;
+  /**
+   * HTTP session ID. Defaults to undefined. Set to exercise handlers that
+   * branch on `ctx.sessionId` — mirrors what a stateful HTTP request would
+   * surface, or what the opt-in `exposeStatelessSessionId` path produces.
+   */
+  sessionId?: string;
   /** Custom AbortSignal. Defaults to a fresh AbortController's signal. */
   signal?: AbortSignal;
   /** Tenant ID. Enables ctx.state operations when provided. */
@@ -242,6 +248,7 @@ export function createMockContext(options: MockContextOptions = {}): Context {
     state,
     signal: options.signal ?? new AbortController().signal,
     tenantId: options.tenantId,
+    sessionId: options.sessionId,
     auth: options.auth,
     elicit: options.elicit,
     sample: options.sample,

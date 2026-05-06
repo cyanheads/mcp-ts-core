@@ -10,7 +10,12 @@
 // Core app API
 // ---------------------------------------------------------------------------
 
-export type { CoreServices, CreateAppOptions, ServerHandle } from '@/core/app.js';
+export type {
+  ContextOptions,
+  CoreServices,
+  CreateAppOptions,
+  ServerHandle,
+} from '@/core/app.js';
 export { createApp } from '@/core/app.js';
 
 // ---------------------------------------------------------------------------

@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.8.17](changelog/0.8.x/0.8.17.md) — 2026-05-05
+
+Surface `ctx.sessionId` on `Context` for HTTP handlers ([#116](https://github.com/cyanheads/mcp-ts-core/issues/116)) — fail-closed under stateless mode with `createApp({ context: { exposeStatelessSessionId } })` opt-in.
+
 ## [0.8.16](changelog/0.8.x/0.8.16.md) — 2026-05-05
 
 Fix HTTP SSE per-request retention leak ([#50](https://github.com/cyanheads/mcp-ts-core/issues/50)) — bind `closePerRequestInstances` to the request `AbortSignal` so ungraceful client disconnects close the per-request McpServer/Transport pair.
