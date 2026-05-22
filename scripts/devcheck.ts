@@ -919,6 +919,19 @@ async function runCheck(check: Check, ctx: AppContext): Promise<CommandResult> {
   const result = await Shell.exec(command, { cwd: ctx.rootDir });
   const duration = Math.round(performance.now() - startTime);
 
+  // Bun's node-shim (via `bun run`) emits "Registry URL must be" errors when
+  // depcheck encounters `cloudflare:*` virtual-module specifiers in Workers
+  // tests. depcheck.ignores already filters them from the report — strip the
+  // cosmetic stderr so the summary stays clean.
+  if (name === 'Unused Dependencies' && result.stderr) {
+    result.stderr = result.stderr
+      .replace(
+        /error: Registry URL must be http:\/\/ or https:\/\/\nReceived: "cloudflare:[^"]*"\n?/g,
+        '',
+      )
+      .trim();
+  }
+
   const finalResult: CommandResult = {
     ...baseResult,
     ...result,
