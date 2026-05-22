@@ -24,10 +24,11 @@ Use after reading `../SKILL.md`. This reference handles the full lifecycle for o
 Before spawning any sub-agents:
 
 1. **Confirm the target list with the user.** Capture absolute paths and the intended GitHub owner/org for each.
-2. **Name the gold-standard references** the polish phase will anchor on. For `@cyanheads/*` servers the canonical anchors are:
+2. **Name the gold-standard references** the polish phase will anchor on — concrete repos whose README, `server.json`, badges, and agent-protocol shape are the target. Name them explicitly in the relevant fanout prompts; don't let agents pick. Examples from the `@cyanheads/*` ecosystem:
    - **Docs/README/metadata** → `pubmed-mcp-server`
    - **Tabular API + DataCanvas/dataframe surface** → `secedgar-mcp-server`
-   - The orchestrator can substitute project-appropriate references; name them explicitly in the relevant fanout prompts, don't let agents pick.
+
+   External projects pick analogous anchors from their own ecosystem; skip the phase if no suitable anchor exists.
 3. **Verify each target has `scripts/list-skills.ts` and the `list-skills` package script.** Both ship via `init`; older projects pick them up on the next `maintenance` sync (Phase C).
 4. **Confirm GH credentials** (`gh auth status`). Repo creation in Phase 4 requires this.
 5. **Surface the plan** — scenario, target list, phase summary, gotchas — and get authorization before kicking off Phase 1.
@@ -70,7 +71,7 @@ Skip if the user already has a clear, written brief per target. The point is to 
 
 One sub-agent per target. Each agent reads its `docs/idea.md`, reads `design-mcp-server`, probes the upstream API if there is one, and writes `docs/design.md`.
 
-**Decisions Log convention.** End the design doc with a "Decisions Log" section recording answered open questions and options declined, with one-line reasoning each. This becomes the audit trail for non-obvious choices and feeds Phase 3 (the reviewer can verify the rationale held up). Every server we shipped used this section; preserve it as a default.
+**Decisions Log convention.** End the design doc with a "Decisions Log" section recording answered open questions and options declined, with one-line reasoning each. This becomes the audit trail for non-obvious choices and feeds Phase 3 (the reviewer can verify the rationale held up). Preserve it as a default.
 
 **Task body (after the orient block):**
 
@@ -84,7 +85,7 @@ Each agent re-reads `docs/design.md`, re-reads `design-mcp-server`, then surgica
 
 ### Phase 4: Setup + repo (fanout)
 
-One sub-agent per target. The agent reads the `setup` skill and runs it: agent-protocol file selection, framework docs read, echo cleanup, skill sync to `.claude/skills/`. Then `git init main`, `gh repo create` private with description and topics derived from `docs/design.md`, but **no commits**.
+One sub-agent per target. The agent reads the `setup` skill and runs it: agent-protocol file selection, framework docs read, echo cleanup, skill sync to `.claude/skills/`. Then `git init -b main`, `gh repo create` private with description and topics derived from `docs/design.md`, but **no commits**.
 
 The `setup` skill's checklist says to commit `chore: scaffold from @cyanheads/mcp-ts-core`. The orchestrator overrides this at the prompt level:
 
@@ -127,7 +128,7 @@ Decide the canonical choice once, then either fix each project yourself (orchest
 
 ### Phase 8: Design extensions (optional fanout)
 
-Some servers fit additional design patterns the base design didn't include. The recurring example: tabular API servers (tools that page large row sets) benefit from `DataCanvas` / dataframe-surface tools — documented in `api-canvas`, exemplified by `secedgar-mcp-server`.
+Some servers fit additional design patterns the base design didn't include. Example: tabular API servers (tools that page large row sets) benefit from `DataCanvas` / dataframe-surface tools — documented in `api-canvas`, exemplified by `secedgar-mcp-server`.
 
 If a subset of targets fits a pattern, spawn a fanout only for that subset. Each agent reads the relevant skill (`api-canvas`), the gold-standard reference (`secedgar-mcp-server`), and its own `docs/design.md`, then extends the design with the new pattern. This phase produces updated `docs/design.md`, not code.
 
@@ -187,7 +188,7 @@ Version bumps live with the change that warrants them per the global protocol's 
 | 4 | `setup` skill's checklist tells the agent to commit; orchestrator overrides this | Restate the no-commit constraint in the Phase 4 prompt body verbatim |
 | 5 | `init` defaults package name to the cwd; if the project was scaffolded inside an outer dir, the name is wrong | Verify in Phase 4 prompt: "Check the substituted package name in `package.json`, `server.json`, and the agent protocol matches the intended server name." |
 | 6 | Sub-agent creates GH repo public by default if `gh repo create` omits `--private` | Restate the scenario hard rule in every fanout that touches `gh`: "Repo must be private before any push." |
-| 7 | Earlier wrap-up agents reported "pushed" but the remote ref didn't land — first push only succeeded on the next phase | Verify after every Bash-git fanout: `git ls-remote --tags origin` and `gh repo view --json defaultBranchRef` per target |
+| 7 | Wrap-up agents have been observed reporting "pushed" while the remote ref didn't actually land — the push only succeeded on a subsequent op | Verify after every Bash-git fanout: `git ls-remote --tags origin` and `gh repo view --json defaultBranchRef` per target |
 
 ## Checklist
 

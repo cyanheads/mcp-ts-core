@@ -36,7 +36,7 @@ Before spawning any sub-agents:
 
 ## Single-target vs. multi-target
 
-The user's typical single-target release flow runs in their own session via `git_set_working_dir` + `git_wrapup_instructions` from `git-mcp-server`. This reference translates that into the multi-target parallel pattern:
+A typical single-target release flow runs in one session via `git_set_working_dir` + `git_wrapup_instructions` from `git-mcp-server`. This reference translates that into the multi-target parallel pattern:
 
 | Single-target (orchestrator session) | Multi-target (parallel sub-agents) |
 |:-------------------------------------|:-----------------------------------|

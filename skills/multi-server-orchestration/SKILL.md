@@ -1,7 +1,7 @@
 ---
 name: multi-server-orchestration
 description: >
-  Orchestrate parallel sub-agent fanouts across one or more MCP server projects — the same workflow run independently per target. Use for greenfield builds across N new servers, maintenance passes across N existing ones, or any repeatable workflow that benefits from fresh-context per-target sub-agents. Encodes the orient template every sub-agent needs (CLAUDE.md chain + list-skills + spec artifacts), the universal hard rules around git tooling and authorization, the gotchas that bit earlier runs, and a router into per-scenario references for the phase pattern.
+  Orchestrate parallel sub-agent fanouts across one or more MCP server projects — the same workflow run independently per target. Use for greenfield builds across N new servers, maintenance passes across N existing ones, or any repeatable workflow that benefits from fresh-context per-target sub-agents. Encodes the orient template every sub-agent needs (CLAUDE.md chain + list-skills + spec artifacts), the universal hard rules around git tooling and authorization, common gotchas that bite across runs, and a router into per-scenario references for the phase pattern.
 metadata:
   author: cyanheads
   version: "1.0"
@@ -96,7 +96,7 @@ test -f scripts/list-skills.ts && grep -q '"list-skills"' package.json
 
 These apply to every scenario. Scenario-specific rules live in their reference.
 
-1. **Bash `git` only in parallel sub-agents.** Do not let parallel sub-agents call `mcp__git-mcp-server__*` tools. The MCP server's session state (`set_working_dir`) leaks across parallel agents in the same orchestrator session, causing silent no-ops, wrong-directory operations, and false "tag already exists" errors. Bash `git` in the agent's CWD is reliable. The orchestrator may still use git-mcp-server itself in serial.
+1. **Bash `git` only in parallel sub-agents.** Do not let parallel sub-agents call `mcp__git-mcp-server__*` tools (or any git MCP tool that holds session state across calls). The MCP server's session state (`set_working_dir`) leaks across parallel agents in the same orchestrator session, causing silent no-ops, wrong-directory operations, and false "tag already exists" errors. Bash `git` in the agent's CWD is reliable. The orchestrator may still use git-mcp-server itself in serial.
 2. **No git commits, pushes, tags, branch creation, or destructive ops without an explicit user request.** Setup-phase and build-phase work is left unstaged for review. Wrap-up phases run only after the user authorizes a commit. Honor every `~/.claude/CLAUDE.md` rule: no `git stash`, no `reset --hard`, no `restore .`, no `clean -f`, no `--no-verify`, plain `-m` commit messages, no `Co-authored-by` or `Generated with` trailers.
 3. **`bun run devcheck` is the handoff gate.** Work phases must hand back a green devcheck. If a sub-agent can't reach green, it reports the failing step verbatim and stops rather than carrying broken state forward to the next phase.
 4. **Verify sub-agent claims with a read-only check.** Agent summaries describe intent, not always reality. After any fanout that touched the filesystem, the orchestrator confirms with `git log`, `git status`, `ls`, or its own `bun run devcheck` before declaring the phase done.
@@ -105,7 +105,7 @@ These apply to every scenario. Scenario-specific rules live in their reference.
 
 ## Gotchas
 
-These bit earlier runs across all scenarios. Scenario-specific gotchas live in their reference.
+These commonly bite across all scenarios. Scenario-specific gotchas live in their reference.
 
 | # | Gotcha | Mitigation |
 |:--|:-------|:-----------|
