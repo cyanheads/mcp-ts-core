@@ -16,6 +16,7 @@
     "scripts/clean.ts",
     "scripts/devcheck.ts",
     "scripts/lint-mcp.ts",
+    "scripts/list-skills.ts",
     "scripts/split-changelog.ts",
     "scripts/tree.ts",
     "skills/",

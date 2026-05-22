@@ -24,6 +24,7 @@
     "clean": "tsx scripts/clean.ts",
     "devcheck": "tsx scripts/devcheck.ts",
     "tree": "tsx scripts/tree.ts",
+    "list-skills": "tsx scripts/list-skills.ts",
     "format": "biome check --write --unsafe .",
     "lint:mcp": "tsx scripts/lint-mcp.ts",
     "changelog:build": "tsx scripts/build-changelog.ts",

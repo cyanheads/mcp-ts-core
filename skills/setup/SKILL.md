@@ -45,7 +45,7 @@ Dockerfile                                      # Starter multi-stage image
 .vscode/                                        # Recommended extensions + editor settings
 server.json                                     # MCP Registry publishing metadata
 changelog/template.md                           # Format reference for per-version changelog files
-scripts/                                        # build, clean, devcheck, lint-mcp, build-changelog, tree, check-docs-sync
+scripts/                                        # build, clean, devcheck, lint-mcp, list-skills, build-changelog, tree, check-docs-sync
 skills/                                         # External skills copied from the package (source of truth)
 src/
   index.ts                                      # createApp() entry point
