@@ -17,6 +17,6 @@
     "ignorePatterns": ["examples"]
   },
   "outdated": {
-    "allowlist": ["fast-xml-parser"]
+    "allowlist": []
   }
 }

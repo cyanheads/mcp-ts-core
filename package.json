@@ -156,7 +156,6 @@
   },
   "resolutions": {
     "brace-expansion": "5.0.6",
-    "fast-xml-parser": "5.7.3",
     "flatted": "3.4.2",
     "handlebars": "4.7.9",
     "lodash": "4.18.1",
@@ -169,7 +168,7 @@
     "@biomejs/biome": "2.4.15",
     "@cloudflare/vitest-pool-workers": "^0.16.9",
     "@cloudflare/workers-types": "^4.20260522.1",
-    "@duckdb/node-api": "^1.5.2-r.2",
+    "@duckdb/node-api": "^1.5.3-r.1",
     "@hono/otel": "^1.1.2",
     "@opentelemetry/exporter-metrics-otlp-http": "^0.218.0",
     "@opentelemetry/exporter-trace-otlp-http": "^0.218.0",
@@ -187,8 +186,8 @@
     "@types/papaparse": "^5.5.2",
     "@types/sanitize-html": "^2.16.1",
     "@types/validator": "^13.15.10",
-    "@vitest/coverage-istanbul": "4.1.6",
-    "@vitest/ui": "4.1.6",
+    "@vitest/coverage-istanbul": "4.1.7",
+    "@vitest/ui": "4.1.7",
     "bun-types": "^1.3.14",
     "chrono-node": "^2.9.1",
     "clipboardy": "^5.3.1",
@@ -197,7 +196,7 @@
     "diff": "^9.0.0",
     "execa": "^9.6.1",
     "fast-check": "^4.8.0",
-    "fast-xml-parser": "5.7.3",
+    "fast-xml-parser": "^5.8.0",
     "ignore": "^7.0.5",
     "js-yaml": "^4.1.1",
     "linkedom": "^0.18.12",
@@ -214,7 +213,7 @@
     "typescript": "^6.0.3",
     "unpdf": "^1.6.2",
     "validator": "^13.15.35",
-    "vite": "8.0.13",
+    "vite": "8.0.14",
     "vitest": "^4.1.7"
   },
   "keywords": [
@@ -267,7 +266,7 @@
     "access": "public"
   },
   "dependencies": {
-    "@hono/mcp": "^0.2.5",
+    "@hono/mcp": "^0.3.0",
     "@hono/node-server": "^2.0.3",
     "@modelcontextprotocol/ext-apps": "^1.7.2",
     "@modelcontextprotocol/sdk": "^1.29.0",
@@ -294,7 +293,7 @@
     "chrono-node": "^2.9.0",
     "defuddle": "^0.18.1",
     "diff": "latest",
-    "fast-xml-parser": "5.7.3",
+    "fast-xml-parser": "^5.8.0",
     "js-yaml": "^4.1.1",
     "linkedom": "^0.18.12",
     "node-cron": "^4.2.1",
