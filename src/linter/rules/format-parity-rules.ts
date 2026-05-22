@@ -46,9 +46,12 @@ interface SentinelLeaf {
 }
 
 interface WalkState {
-  depth: number;
   leaves: SentinelLeaf[];
   numberIndex: number;
+}
+
+interface SyntheticVariant extends WalkState {
+  value: unknown;
 }
 
 /** Zod 4 stores the type discriminator at `_zod.def.type`. Falls back to `_def.type`. */
@@ -82,88 +85,148 @@ function stringSentinel(path: string): string {
   return `__MCP_PARITY_${path.replace(/[.[\]]/g, '_')}__`;
 }
 
-/** Builds a synthetic value and collects every leaf path simultaneously. */
-function walk(schema: unknown, path: string, keyName: string, state: WalkState): unknown {
-  if (state.depth > 8) return null;
-  state.depth++;
-  try {
-    const node = unwrapSchema(schema);
-    const type = zodTypeOf(node);
-    const n = node as Record<string, unknown>;
+/** Terminal variant: append one leaf and use its sentinel as the synthetic value. */
+function leafVariant(
+  state: WalkState,
+  leaf: SentinelLeaf,
+  numberIndex = state.numberIndex,
+): SyntheticVariant {
+  return {
+    value: leaf.sentinel,
+    numberIndex,
+    leaves: [...state.leaves, leaf],
+  };
+}
 
-    switch (type) {
-      case 'string': {
-        const sentinel = stringSentinel(path || keyName || 'root');
-        state.leaves.push({ path, keyName, sentinel, matchStrategy: 'strict' });
-        return sentinel;
-      }
-      case 'number':
-      case 'int':
-      case 'bigint': {
-        const sentinel = 900_000_001 + state.numberIndex++;
-        state.leaves.push({ path, keyName, sentinel, matchStrategy: 'strict' });
-        return sentinel;
-      }
-      case 'boolean': {
-        state.leaves.push({ path, keyName, sentinel: true, matchStrategy: 'permissive' });
-        return true;
-      }
-      case 'enum': {
-        // Zod 4 exposes options as array on the schema itself.
-        const options = (n.options as unknown[] | undefined) ?? getDefOptions(n);
-        const value = Array.isArray(options) && options.length > 0 ? options[0] : '';
-        state.leaves.push({ path, keyName, sentinel: value, matchStrategy: 'permissive' });
-        return value;
-      }
-      case 'literal': {
-        const value = (n.value as unknown) ?? getDefValue(n);
-        state.leaves.push({ path, keyName, sentinel: value, matchStrategy: 'permissive' });
-        return value;
-      }
-      case 'array': {
-        const element = (n.element as unknown) ?? getDefElement(n);
-        return [walk(element, `${path}[]`, keyName, state)];
-      }
-      case 'object': {
-        const shape = (n.shape as Record<string, unknown> | undefined) ?? {};
-        const out: Record<string, unknown> = {};
-        for (const [key, childSchema] of Object.entries(shape)) {
-          const childPath = path ? `${path}.${key}` : key;
-          out[key] = walk(childSchema, childPath, key, state);
-        }
-        return out;
-      }
-      case 'union':
-      case 'discriminated_union': {
-        const options = getDefOptions(n);
-        if (Array.isArray(options) && options.length > 0) {
-          return walk(options[0], path, keyName, state);
-        }
-        return null;
-      }
-      case 'record': {
-        const valueSchema = getDefValueType(n);
-        if (valueSchema) {
-          return { parity_key: walk(valueSchema, `${path}.<key>`, keyName, state) };
-        }
-        return {};
-      }
-      case 'tuple': {
-        const items = getDefItems(n);
-        if (Array.isArray(items)) {
-          return items.map((item, i) => walk(item, `${path}[${i}]`, keyName, state));
-        }
-        return [];
-      }
-      default: {
-        // Unknown/unsupported type — emit leaf with permissive fallback so the
-        // rule still asks "did format render this field's key somehow?"
-        state.leaves.push({ path, keyName, sentinel: null, matchStrategy: 'permissive' });
-        return null;
-      }
+/** Builds synthetic values and collects every leaf path for each union branch. */
+function walkVariants(
+  schema: unknown,
+  path: string,
+  keyName: string,
+  state: WalkState,
+  depth = 0,
+): SyntheticVariant[] {
+  if (depth > 8) return [{ ...state, value: null }];
+
+  const node = unwrapSchema(schema);
+  const type = zodTypeOf(node);
+  const n = node as Record<string, unknown>;
+
+  switch (type) {
+    case 'string': {
+      const sentinel = stringSentinel(path || keyName || 'root');
+      return [leafVariant(state, { path, keyName, sentinel, matchStrategy: 'strict' })];
     }
-  } finally {
-    state.depth--;
+    case 'number':
+    case 'int':
+    case 'bigint': {
+      const sentinel = 900_000_001 + state.numberIndex;
+      return [
+        leafVariant(
+          state,
+          { path, keyName, sentinel, matchStrategy: 'strict' },
+          state.numberIndex + 1,
+        ),
+      ];
+    }
+    case 'boolean':
+      return [leafVariant(state, { path, keyName, sentinel: true, matchStrategy: 'permissive' })];
+    case 'enum': {
+      // Zod 4 exposes options as array on the schema itself.
+      const options = (n.options as unknown[] | undefined) ?? getDefOptions(n);
+      const value = Array.isArray(options) && options.length > 0 ? options[0] : '';
+      return [leafVariant(state, { path, keyName, sentinel: value, matchStrategy: 'permissive' })];
+    }
+    case 'literal': {
+      const value = (n.value as unknown) ?? getDefValue(n);
+      return [leafVariant(state, { path, keyName, sentinel: value, matchStrategy: 'permissive' })];
+    }
+    case 'array': {
+      const element = (n.element as unknown) ?? getDefElement(n);
+      return walkVariants(element, `${path}[]`, keyName, state, depth + 1).map((variant) => ({
+        ...variant,
+        value: [variant.value],
+      }));
+    }
+    case 'object': {
+      const shape = (n.shape as Record<string, unknown> | undefined) ?? {};
+      let variants: SyntheticVariant[] = [{ ...state, value: {} }];
+
+      for (const [key, childSchema] of Object.entries(shape)) {
+        const childPath = path ? `${path}.${key}` : key;
+        const nextVariants: SyntheticVariant[] = [];
+
+        for (const variant of variants) {
+          for (const child of walkVariants(
+            childSchema,
+            childPath,
+            key,
+            { leaves: variant.leaves, numberIndex: variant.numberIndex },
+            depth + 1,
+          )) {
+            nextVariants.push({
+              value: { ...(variant.value as Record<string, unknown>), [key]: child.value },
+              leaves: child.leaves,
+              numberIndex: child.numberIndex,
+            });
+          }
+        }
+
+        variants = nextVariants;
+      }
+
+      return variants;
+    }
+    case 'union':
+    case 'discriminated_union': {
+      const options = getDefOptions(n);
+      if (Array.isArray(options) && options.length > 0) {
+        return options.flatMap((option) => walkVariants(option, path, keyName, state, depth + 1));
+      }
+      return [{ ...state, value: null }];
+    }
+    case 'record': {
+      const valueSchema = getDefValueType(n);
+      if (valueSchema) {
+        return walkVariants(valueSchema, `${path}.<key>`, keyName, state, depth + 1).map(
+          (variant) => ({
+            ...variant,
+            value: { parity_key: variant.value },
+          }),
+        );
+      }
+      return [{ ...state, value: {} }];
+    }
+    case 'tuple': {
+      const items = getDefItems(n);
+      if (!Array.isArray(items)) return [{ ...state, value: [] }];
+
+      let variants: SyntheticVariant[] = [{ ...state, value: [] }];
+      for (const [i, item] of items.entries()) {
+        const nextVariants: SyntheticVariant[] = [];
+        for (const variant of variants) {
+          for (const child of walkVariants(
+            item,
+            `${path}[${i}]`,
+            keyName,
+            { leaves: variant.leaves, numberIndex: variant.numberIndex },
+            depth + 1,
+          )) {
+            nextVariants.push({
+              value: [...(variant.value as unknown[]), child.value],
+              leaves: child.leaves,
+              numberIndex: child.numberIndex,
+            });
+          }
+        }
+        variants = nextVariants;
+      }
+      return variants;
+    }
+    default:
+      // Unknown/unsupported type — emit leaf with permissive fallback so the
+      // rule still asks "did format render this field's key somehow?"
+      return [leafVariant(state, { path, keyName, sentinel: null, matchStrategy: 'permissive' })];
   }
 }
 
@@ -359,11 +422,11 @@ export function lintFormatParity(def: unknown, displayName: string): LintDiagnos
   if (zodTypeOf(output) !== 'object') return [];
   if (typeof format !== 'function') return [];
 
-  // Build synthetic sample.
-  const state: WalkState = { leaves: [], numberIndex: 0, depth: 0 };
-  let synthetic: unknown;
+  // Build synthetic samples. Union schemas produce one sample per branch so
+  // list/detail variants are checked against their own formatter path.
+  let syntheticVariants: SyntheticVariant[];
   try {
-    synthetic = walk(output, '', '', state);
+    syntheticVariants = walkVariants(output, '', '', { leaves: [], numberIndex: 0 });
   } catch (err) {
     return [
       {
@@ -379,34 +442,35 @@ export function lintFormatParity(def: unknown, displayName: string): LintDiagnos
     ];
   }
 
-  if (state.leaves.length === 0) return [];
+  if (syntheticVariants.every((variant) => variant.leaves.length === 0)) return [];
 
-  // Run format().
-  let rendered: string;
-  try {
-    const result = (format as (r: unknown) => unknown)(synthetic);
-    rendered = extractText(result);
-  } catch (err) {
-    return [
-      {
-        rule: 'format-parity-threw',
-        severity: 'warning',
-        message:
-          `Tool '${displayName}' format() threw on a synthetic sample ` +
-          `(${err instanceof Error ? err.message : String(err)}). ` +
-          'format() should be total — render any valid value of the output schema.',
-        definitionType: 'tool',
-        definitionName: displayName,
-      },
-    ];
-  }
+  // Run format() and verify each leaf for every variant.
+  const diagnosticsByPath = new Map<string, LintDiagnostic>();
+  for (const variant of syntheticVariants) {
+    let rendered: string;
+    try {
+      const result = (format as (r: unknown) => unknown)(variant.value);
+      rendered = extractText(result);
+    } catch (err) {
+      return [
+        {
+          rule: 'format-parity-threw',
+          severity: 'warning',
+          message:
+            `Tool '${displayName}' format() threw on a synthetic sample ` +
+            `(${err instanceof Error ? err.message : String(err)}). ` +
+            'format() should be total — render any valid value of the output schema.',
+          definitionType: 'tool',
+          definitionName: displayName,
+        },
+      ];
+    }
 
-  // Verify each leaf.
-  const diagnostics: LintDiagnostic[] = [];
-  for (const leaf of state.leaves) {
-    if (!leafIsRendered(leaf, rendered)) {
+    for (const leaf of variant.leaves) {
+      if (leafIsRendered(leaf, rendered)) continue;
       const displayPath = leaf.path || leaf.keyName || '<root>';
-      diagnostics.push({
+      if (diagnosticsByPath.has(displayPath)) continue;
+      diagnosticsByPath.set(displayPath, {
         rule: 'format-parity',
         severity: 'error',
         message:
@@ -422,5 +486,5 @@ export function lintFormatParity(def: unknown, displayName: string): LintDiagnos
       });
     }
   }
-  return diagnostics;
+  return [...diagnosticsByPath.values()];
 }

@@ -281,6 +281,169 @@ describe('lintFormatParity — missing fields', () => {
 });
 
 // ---------------------------------------------------------------------------
+// Union variants — every branch gets its own synthetic sample
+// ---------------------------------------------------------------------------
+
+describe('lintFormatParity — union variants', () => {
+  it('flags fields that are missing only from a non-first discriminated union branch', () => {
+    const def = tool({
+      output: z.object({
+        result: z
+          .discriminatedUnion('kind', [
+            z.object({
+              kind: z.literal('list').describe('Result kind'),
+              ids: z.array(z.string().describe('ID')).describe('Result IDs'),
+            }),
+            z.object({
+              kind: z.literal('detail').describe('Result kind'),
+              id: z.string().describe('Result ID'),
+              summary: z.string().describe('Detail summary'),
+            }),
+          ])
+          .describe('Result variant'),
+      }),
+      format: (r) => {
+        const result = (
+          r as {
+            result:
+              | { kind: 'list'; ids: string[] }
+              | { kind: 'detail'; id: string; summary: string };
+          }
+        ).result;
+        if (result.kind === 'list') {
+          return [{ type: 'text', text: `Kind: ${result.kind}\nIDs: ${result.ids.join(', ')}` }];
+        }
+        return [{ type: 'text', text: `Kind: ${result.kind}\nDetail: ${result.id}` }];
+      },
+    });
+
+    const errors = parityErrors(def);
+    expect(errors).toHaveLength(1);
+    expect(errors[0]?.message).toContain("'result.summary'");
+  });
+
+  it('passes when format renders every discriminated union branch completely', () => {
+    const def = tool({
+      output: z.object({
+        result: z
+          .discriminatedUnion('kind', [
+            z.object({
+              kind: z.literal('list').describe('Result kind'),
+              ids: z.array(z.string().describe('ID')).describe('Result IDs'),
+            }),
+            z.object({
+              kind: z.literal('detail').describe('Result kind'),
+              id: z.string().describe('Result ID'),
+              summary: z.string().describe('Detail summary'),
+            }),
+          ])
+          .describe('Result variant'),
+      }),
+      format: (r) => {
+        const result = (
+          r as {
+            result:
+              | { kind: 'list'; ids: string[] }
+              | { kind: 'detail'; id: string; summary: string };
+          }
+        ).result;
+        if (result.kind === 'list') {
+          return [{ type: 'text', text: `Kind: ${result.kind}\nIDs: ${result.ids.join(', ')}` }];
+        }
+        return [
+          {
+            type: 'text',
+            text: `Kind: ${result.kind}\nDetail: ${result.id}\nSummary: ${result.summary}`,
+          },
+        ];
+      },
+    });
+
+    expect(parityErrors(def)).toHaveLength(0);
+  });
+
+  it('flags fields missing from a non-first union branch inside an array', () => {
+    const def = tool({
+      output: z.object({
+        rows: z
+          .array(
+            z.discriminatedUnion('kind', [
+              z.object({
+                kind: z.literal('summary').describe('Row kind'),
+                count: z.number().describe('Summary count'),
+              }),
+              z.object({
+                kind: z.literal('detail').describe('Row kind'),
+                id: z.string().describe('Detail ID'),
+                note: z.string().describe('Detail note'),
+              }),
+            ]),
+          )
+          .describe('Rows'),
+      }),
+      format: (r) => {
+        const row = (
+          r as {
+            rows: Array<
+              { kind: 'summary'; count: number } | { kind: 'detail'; id: string; note: string }
+            >;
+          }
+        ).rows[0];
+        if (!row) {
+          return [{ type: 'text', text: 'No rows' }];
+        }
+        if (row.kind === 'summary') {
+          return [{ type: 'text', text: `Kind: ${row.kind}\nCount: ${row.count}` }];
+        }
+        return [{ type: 'text', text: `Kind: ${row.kind}\nID: ${row.id}` }];
+      },
+    });
+
+    const errors = parityErrors(def);
+    expect(errors).toHaveLength(1);
+    expect(errors[0]?.message).toContain("'rows[].note'");
+  });
+
+  it('warns when format throws only for a later union branch sample', () => {
+    const def = tool({
+      output: z.object({
+        result: z
+          .discriminatedUnion('kind', [
+            z.object({
+              kind: z.literal('ok').describe('Result kind'),
+              value: z.string().describe('Value'),
+            }),
+            z.object({
+              kind: z.literal('error').describe('Result kind'),
+              message: z.string().describe('Error message'),
+            }),
+          ])
+          .describe('Result variant'),
+      }),
+      format: (r) => {
+        const result = (
+          r as {
+            result: { kind: 'ok'; value: string } | { kind: 'error'; message: string };
+          }
+        ).result;
+        if (result.kind === 'error') {
+          throw new Error('error branch formatter is not total');
+        }
+        return [{ type: 'text', text: `Kind: ${result.kind}\nValue: ${result.value}` }];
+      },
+    });
+
+    const diagnostics = lintFormatParity(def, def.name);
+    expect(diagnostics).toHaveLength(1);
+    expect(diagnostics[0]).toMatchObject({
+      rule: 'format-parity-threw',
+      severity: 'warning',
+    });
+    expect(diagnostics[0]?.message).toContain('error branch formatter is not total');
+  });
+});
+
+// ---------------------------------------------------------------------------
 // Optional / nullable / default — always populated
 // ---------------------------------------------------------------------------
 
