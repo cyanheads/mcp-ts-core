@@ -2,9 +2,9 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
-## [0.9.2](changelog/0.9.x/0.9.2.md) — 2026-05-22
+## [0.9.2](changelog/0.9.x/0.9.2.md) — 2026-05-22 · ⚠️ Breaking
 
-`multi-server-orchestration` skill + `list-skills` helper for sub-agent fanouts. `format-parity` lint walks each union branch. Landing page refresh. `audit:refresh` script. `fast-xml-parser` unpinned to `^5.8.0`. Runtime + dev dep refresh: `@hono/mcp` `^0.3.0` (relaxed `Accept`), `hono` `^4.12.22`, vitest `^4.1.7`.
+`zod` → peerDep (consumers must `bun add zod`). `field-test` skill: zsh `status` clash + per-session prefix. `multi-server-orchestration` skill + `list-skills`. `format-parity` walks each union branch. Landing refresh. `audit:refresh` script. `fast-xml-parser` unpinned `^5.8.0`. Dep refresh: `@hono/mcp` `^0.3.0`, `hono` `^4.12.22`, vitest `^4.1.7`.
 
 ## [0.9.1](changelog/0.9.x/0.9.1.md) — 2026-05-15
 
