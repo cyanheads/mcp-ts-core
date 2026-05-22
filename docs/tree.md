@@ -1,6 +1,6 @@
 # mcp-ts-core - Directory Structure
 
-Generated on: 2026-05-22 08:24:00
+Generated on: 2026-05-22 20:50:39
 
 ```text
 mcp-ts-core/
@@ -537,6 +537,7 @@ mcp-ts-core/
 │   │   │   ├── landing-rules.test.ts
 │   │   │   ├── portability-rules.test.ts
 │   │   │   ├── server-json-rules.test.ts
+│   │   │   ├── source-text.test.ts
 │   │   │   ├── tool-rules.test.ts
 │   │   │   └── validate.test.ts
 │   │   ├── mcp-server/
