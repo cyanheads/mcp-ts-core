@@ -106,6 +106,23 @@ describe('schema-format-portability', () => {
     expect(rulesOf(report).errors.filter((r) => r === 'schema-format-portability')).toHaveLength(0);
   });
 
+  it('keeps z.url() outside the default allowlist even though fuzz helpers can generate URLs', () => {
+    const report = validateDefinitions({
+      tools: [
+        validTool({
+          input: z.object({ link: z.url().describe('a link') }),
+        }),
+      ],
+    });
+
+    expect(report.errors).toContainEqual(
+      expect.objectContaining({
+        rule: 'schema-format-portability',
+        message: expect.stringContaining('format: "uri"'),
+      }),
+    );
+  });
+
   it('reports the JSON Pointer of the offending field', () => {
     const report = validateDefinitions({
       tools: [
