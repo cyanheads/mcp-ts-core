@@ -49,10 +49,10 @@ function renderPromptCard(prompt: ManifestPrompt): SafeHtml {
     <article class="card" id="${anchor}">
       <div class="card-head">
         <h3 class="card-title"><a href="#${anchor}">${prompt.name}</a></h3>
-        ${source}
       </div>
       <p class="card-desc">${prompt.description}</p>
       ${argsList}
+      ${source ? html`<footer class="card-foot">${source}</footer>` : html``}
     </article>
   `;
 }

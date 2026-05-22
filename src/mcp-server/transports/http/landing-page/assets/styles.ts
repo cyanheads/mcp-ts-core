@@ -134,16 +134,18 @@ body::before {
   pointer-events: none;
 }
 
-/* Ambient background — dual radial glow (accent top-left, accent-2 top-right) + fine dot grid. */
+/* Ambient background — single soft accent wash at top + fine dot grid.
+   Previously dual radials; the second one read as decoration without earning
+   its weight. One directional glow + the grid is enough to anchor the page
+   without competing with content. */
 body::after {
   content: "";
   position: fixed;
   inset: 0;
   background-image:
-    radial-gradient(ellipse 70% 55% at 12% -5%, color-mix(in oklab, var(--accent), transparent calc((1 - var(--glow-strength)) * 100%)), transparent 60%),
-    radial-gradient(ellipse 55% 45% at 92% 10%, color-mix(in oklab, var(--accent-2), transparent calc((1 - var(--glow-strength)) * 115%)), transparent 55%),
+    radial-gradient(ellipse 80% 50% at 20% -8%, color-mix(in oklab, var(--accent), transparent calc((1 - var(--glow-strength)) * 100%)), transparent 60%),
     radial-gradient(circle at center, var(--grid-dot) 1px, transparent 1.5px);
-  background-size: 100% 100%, 100% 100%, 24px 24px;
+  background-size: 100% 100%, 24px 24px;
   pointer-events: none;
   z-index: -1;
 }
@@ -256,7 +258,12 @@ pre code { background: transparent; padding: 0; border: 0; font-size: inherit; }
   letter-spacing: -0.04em;
   line-height: 1.02;
   color: var(--fg);
+  /* overflow-wrap: anywhere lets long scoped package names break at any
+     character if needed (e.g. @cyanheads/pubmed-mcp-server) rather than
+     forcing the title to wrap mid-row and shove the version badge to its
+     own line. word-break: break-word kept as a fallback. */
   word-break: break-word;
+  overflow-wrap: anywhere;
   flex: 1 1 auto;
   min-width: 0;
 }
@@ -605,21 +612,25 @@ pre code { background: transparent; padding: 0; border: 0; font-size: inherit; }
 
 /* -------------------- Sections -------------------- */
 
-section { padding: var(--space-12) 0 0; }
+section { padding: var(--space-10) 0 0; }
 
+/* Section heading — reference-style. The heading is lowercase mono with a
+   thin accent bar; the count rides as a mono numeral at the same weight.
+   Restraint here keeps the visual budget on the cards below. */
 .section-heading {
   display: flex;
   align-items: baseline;
   gap: var(--space-3);
-  margin: 0 0 var(--space-6);
-  padding-bottom: var(--space-3);
+  margin: 0 0 var(--space-5);
+  padding-bottom: var(--space-2);
   border-bottom: 1px solid var(--border-subtle);
 }
 .section-heading h2 {
   margin: 0;
-  font-size: var(--text-2xl);
+  font-family: var(--font-mono);
+  font-size: var(--text-base);
   font-weight: 600;
-  letter-spacing: -0.025em;
+  letter-spacing: 0.02em;
   color: var(--fg);
   text-transform: lowercase;
   display: inline-flex;
@@ -629,54 +640,40 @@ section { padding: var(--space-12) 0 0; }
 .section-heading h2::before {
   content: "";
   display: inline-block;
-  width: 3px;
-  height: 0.9em;
-  background: linear-gradient(180deg, var(--accent), var(--accent-2));
-  border-radius: 2px;
+  width: 2px;
+  height: 0.95em;
+  background: var(--accent);
+  border-radius: 1px;
   flex-shrink: 0;
 }
 .section-count {
   font-family: var(--font-mono);
-  font-size: var(--text-2xl);
+  font-size: var(--text-base);
   font-weight: 600;
   color: var(--accent);
   font-variant-numeric: tabular-nums;
-  letter-spacing: -0.02em;
+  letter-spacing: 0;
   line-height: 1;
 }
 
 .group-heading {
-  margin: var(--space-6) 0 var(--space-3);
-  color: var(--fg-muted);
+  margin: var(--space-5) 0 var(--space-2);
+  color: var(--fg-subtle);
   font-family: var(--font-mono);
-  font-size: 0.6875rem;
+  font-size: 0.625rem;
   font-weight: 600;
-  text-transform: lowercase;
-  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
   display: flex;
   align-items: baseline;
   gap: var(--space-2);
-  position: relative;
-  padding-left: var(--space-3);
-}
-.group-heading::before {
-  content: "";
-  position: absolute;
-  left: 0;
-  top: 50%;
-  transform: translateY(-50%);
-  width: 2px;
-  height: 0.85em;
-  background: var(--accent);
-  border-radius: 1px;
 }
 .group-heading:first-child { margin-top: 0; }
-.group-heading[data-group="read"]::before { background: #16a34a; }
-.group-heading[data-group="destructive"]::before { background: #dc2626; }
 .group-count {
   color: var(--fg-subtle);
   font-weight: 500;
   font-variant-numeric: tabular-nums;
+  opacity: 0.7;
 }
 
 /* -------------------- Tool filter bar -------------------- */
@@ -826,37 +823,37 @@ section { padding: var(--space-12) 0 0; }
 
 .card-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(340px, 1fr));
-  gap: var(--space-3);
+  grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
+  gap: var(--space-2);
   align-items: stretch;
 }
 .card {
   border: 1px solid var(--border-subtle);
-  border-radius: var(--radius-md);
-  padding: var(--space-4) var(--space-5);
+  border-radius: var(--radius-sm);
+  padding: var(--space-3) var(--space-4);
   background: var(--bg-elevated);
   display: flex;
   flex-direction: column;
   gap: var(--space-2);
   transition: border-color var(--duration-fast) var(--ease-out),
-              transform var(--duration-fast) var(--ease-out),
               box-shadow var(--duration-fast) var(--ease-out);
   position: relative;
   height: 100%;
 }
 
-/* Mutability spine — 3px tonal strip down the left edge of each tool
-   card. Bird's-eye scannability: a row of cards reads as a row of
-   colored bars before the eye lands on any title. */
-.tool-card { padding-left: calc(var(--space-5) + 3px); }
+/* Mutability spine — 2px tonal strip down the left edge of each tool
+   card. The primary bird's-eye signal: a row of cards reads as a row of
+   colored bars before the eye lands on any title. Pill in card meta is
+   the redundant a11y backup for non-color signal. */
+.tool-card { padding-left: calc(var(--space-4) + 2px); }
 .tool-card::before {
   content: "";
   position: absolute;
   left: 0;
   top: var(--space-2);
   bottom: var(--space-2);
-  width: 3px;
-  border-radius: 0 2px 2px 0;
+  width: 2px;
+  border-radius: 0 1px 1px 0;
   background: var(--card-spine, var(--border-strong));
   transition: background var(--duration-fast) var(--ease-out);
 }
@@ -871,8 +868,7 @@ section { padding: var(--space-12) 0 0; }
 }
 
 /* Disabled tool card — muted overall to read as "present but not callable".
-   Hover lift is disabled too; no invocation snippet means there's no
-   interactive payoff to suggest. */
+   No interactive payoff means no hover affordance. */
 .tool-card--disabled {
   background: var(--bg-subtle);
   border-style: dashed;
@@ -881,19 +877,19 @@ section { padding: var(--space-12) 0 0; }
 .tool-card--disabled .card-desc { color: var(--fg-subtle); }
 .tool-card--disabled:hover {
   border-color: var(--border-strong);
-  transform: none;
   box-shadow: none;
 }
 .tool-card--disabled::before { opacity: 0.5; }
+/* Hover: border darkens to accent edge + a quiet accent-tinted shadow.
+   Dropped the translateY lift — too "product card" for a reference surface. */
 .card:hover {
   border-color: var(--accent-edge);
-  transform: translateY(-1px);
-  box-shadow: 0 8px 28px -12px var(--accent-glow), var(--shadow-md);
+  box-shadow: 0 4px 16px -10px var(--accent-glow);
 }
 .card-head {
   display: flex;
-  align-items: center;
-  gap: var(--space-2);
+  align-items: baseline;
+  gap: var(--space-2) var(--space-3);
   flex-wrap: wrap;
 }
 .card-title {
@@ -903,6 +899,8 @@ section { padding: var(--space-12) 0 0; }
   font-family: var(--font-mono);
   color: var(--fg);
   letter-spacing: -0.015em;
+  flex: 1 1 auto;
+  min-width: 0;
 }
 .card-title a { color: inherit; }
 .card-title a:hover { color: var(--accent); text-decoration: none; }
@@ -911,15 +909,14 @@ section { padding: var(--space-12) 0 0; }
   color: var(--fg-muted);
   font-size: var(--text-sm);
   line-height: 1.5;
-  /* 3-line preview clamp keeps cards uniform; full text stays in DOM
-     for screen readers and view-source. Non-WebKit engines fall back
-     to the natural height — overflow:hidden truncates to 3 lines via
-     max-height as a graceful degradation. */
+  /* 2-line preview clamp — most tool/resource/prompt descriptions fit. Full
+     text stays in DOM for screen readers and view-source. Non-WebKit engines
+     fall back to the natural height via max-height. */
   display: -webkit-box;
-  -webkit-line-clamp: 3;
+  -webkit-line-clamp: 2;
   -webkit-box-orient: vertical;
   overflow: hidden;
-  max-height: calc(1.5em * 3);
+  max-height: calc(1.5em * 2);
 }
 .card-meta {
   display: flex;
@@ -945,12 +942,11 @@ section { padding: var(--space-12) 0 0; }
 }
 
 /* Card footer — pinned to the bottom so cards align across a row even
-   when descriptions vary in length. Carries the scope chip on the left
-   and the invocation/schema action triggers on the right. */
+   when descriptions vary in length. No divider line: the card already has
+   its own border + bg, and a foot rule competed with the spine. */
 .card-foot {
   margin-top: auto;
-  padding-top: var(--space-3);
-  border-top: 1px solid var(--border-subtle);
+  padding-top: var(--space-2);
   display: flex;
   flex-wrap: wrap;
   align-items: center;
@@ -1012,15 +1008,15 @@ section { padding: var(--space-12) 0 0; }
 .card-detail[open] > summary { color: var(--accent); }
 /* When a detail opens, push its content full-width below the footer. The
    negative side margins recover the card's horizontal padding so the
-   panel spans edge-to-edge. */
+   panel spans edge-to-edge. Margin values track .card padding. */
 .card-detail[open] {
   width: 100%;
-  margin: var(--space-3) calc(var(--space-5) * -1) calc(var(--space-4) * -1);
-  padding: 0 var(--space-5) var(--space-4);
+  margin: var(--space-2) calc(var(--space-4) * -1) calc(var(--space-3) * -1);
+  padding: 0 var(--space-4) var(--space-3);
   background: var(--bg-subtle);
   border-top: 1px solid var(--border-subtle);
 }
-.card-detail[open] > summary { padding-top: var(--space-3); }
+.card-detail[open] > summary { padding-top: var(--space-2); }
 /* When any detail is open the actions row needs to wrap so the open
    panel can claim full width. The :has() selector handles this in
    modern engines; older browsers tolerate the actions row stacking
@@ -1036,6 +1032,11 @@ section { padding: var(--space-12) 0 0; }
 
 /* Annotation pills — dot-chip style */
 .pill-row { display: inline-flex; flex-wrap: wrap; gap: 5px; align-items: center; }
+/* Meta-row variant: pills sit in the card meta strip below the description,
+   so they're calmer than the aux pills next to the title — no leading dot,
+   tighter padding, slightly smaller. */
+.pill-row--meta .pill { padding: 1px 6px; font-size: 0.625rem; }
+.pill-row--meta .pill::before { display: none; }
 .pill {
   display: inline-flex;
   align-items: center;
@@ -1143,7 +1144,7 @@ section { padding: var(--space-12) 0 0; }
 
 .source-link {
   font-size: var(--text-xs);
-  color: var(--fg-muted);
+  color: var(--fg-subtle);
   margin-left: auto;
   font-family: var(--font-mono);
   transition: color var(--duration-fast);
