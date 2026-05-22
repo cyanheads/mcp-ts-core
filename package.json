@@ -215,7 +215,8 @@
     "unpdf": "^1.6.2",
     "validator": "^13.15.35",
     "vite": "8.0.14",
-    "vitest": "^4.1.7"
+    "vitest": "^4.1.7",
+    "zod": "^4.4.3"
   },
   "keywords": [
     "agent",
@@ -275,8 +276,7 @@
     "dotenv": "^17.4.2",
     "hono": "^4.12.22",
     "jose": "^6.2.3",
-    "pino": "^10.3.1",
-    "zod": "^4.4.3"
+    "pino": "^10.3.1"
   },
   "peerDependencies": {
     "@duckdb/node-api": "^1.5.0",
@@ -304,7 +304,8 @@
     "pdf-lib": "^1.17.1",
     "sanitize-html": "^2.17.4",
     "unpdf": "^1.6.0",
-    "validator": "^13.15.35"
+    "validator": "^13.15.35",
+    "zod": "^4.4.3"
   },
   "peerDependenciesMeta": {
     "@duckdb/node-api": {
