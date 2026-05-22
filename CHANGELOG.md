@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.9.2](changelog/0.9.x/0.9.2.md) — 2026-05-22
+
+`multi-server-orchestration` skill + `list-skills` helper for sub-agent fanouts. Landing page refresh. `audit:refresh` script for transitive-advisory triage. `fast-xml-parser` unpinned to `^5.8.0`. Runtime + dev dep refresh including `@hono/mcp` `^0.3.0` (relaxed `Accept` header), `hono` `^4.12.22`, vitest `^4.1.7`.
+
 ## [0.9.1](changelog/0.9.x/0.9.1.md) — 2026-05-15
 
 Gate experimental `tasks` capability on actual task-tool registration — clients pinned to MCP spec 2025-06-18 strict-parse and fail on the unknown key. Add `notifyPromptListChanged`/`notifyToolListChanged` to `Context`. OTel semconv `^1.40 → ^1.41` (stable `deployment.environment.name`). Pin `fast-xml-parser` to `5.7.3`.
