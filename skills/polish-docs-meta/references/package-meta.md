@@ -9,7 +9,7 @@ Fields that may still be empty or generic from scaffolding. Check each one and f
 | `name` | `{{PACKAGE_NAME}}` (substituted by init) | Verify it's correct. Use scoped name if publishing (`@org/my-server`). |
 | `version` | `0.1.0` | Keep for initial development. Bump via the `release-and-publish` skill. |
 | `mcpName` | _(often missing)_ | Reverse-domain identifier: `"io.github.{owner}/{repo}"`. Used in `server.json` `name` field and Dockerfile OCI labels. |
-| `description` | `""` (empty) | One sentence: what the server does and what it wraps. Appears on npm and in `npm search`. |
+| `description` | `""` (empty) | One **action-first** sentence — lead with the actions/workflows, end with `via MCP. STDIO or Streamable HTTP.` (or the transports that apply). Example: `"Search projects, manage tasks, track teams via MCP. STDIO or Streamable HTTP."` Avoid `"MCP server for/that …"` framings. Appears on npm and in `npm search`; the README header tagline and `server.json` `description` derive from this (server.json drops the `via MCP …` suffix). |
 | `repository` | _(often missing)_ | `{ "type": "git", "url": "git+https://github.com/org/repo.git" }` |
 | `homepage` | _(often missing)_ | Repository URL or docs URL. |
 | `bugs` | _(often missing)_ | `{ "url": "https://github.com/org/repo/issues" }` |
