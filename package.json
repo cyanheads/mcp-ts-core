@@ -150,6 +150,7 @@
     "test:coverage": "bunx vitest run --coverage",
     "audit": "bun audit",
     "audit:fix": "bun audit --fix",
+    "audit:refresh": "rm -f bun.lock && bun install && bun audit",
     "changelog:build": "bun run scripts/build-changelog.ts",
     "changelog:check": "bun run scripts/build-changelog.ts --check",
     "publish-mcp": "mcp-publisher login github -token \"$(security find-generic-password -a \"$USER\" -s mcp-publisher-github-pat -w)\" && mcp-publisher publish"

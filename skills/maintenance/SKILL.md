@@ -4,7 +4,7 @@ description: >
   Investigate, adopt, and verify dependency updates — with special handling for `@cyanheads/mcp-ts-core`. Captures what changed, understands why, cross-references against the codebase, adopts framework improvements, syncs project skills, and runs final checks. Supports two entry modes: run the full flow end-to-end, or review updates you already applied.
 metadata:
   author: cyanheads
-  version: "2.1"
+  version: "2.2"
   audience: external
   type: workflow
 ---
@@ -201,6 +201,8 @@ bun run test
 In **Mode B**, the user already ran rebuild + test before invoking this skill, but run them again here — Step 6 made code changes that need verification.
 
 Fix anything that fails. Re-run until clean.
+
+**Transitive advisory triage.** If `bun audit` (inside devcheck) reports a vulnerability in a transitive dep, run `bun run audit:refresh` before treating it as real. Bun's `bun update` is sticky on transitive resolutions — it keeps lockfile entries even when a parent's range allows a newer patched version. `audit:refresh` deletes `bun.lock`, reinstalls, and re-audits; if the advisory disappears, it was a stale-lockfile false positive (commit the refreshed lockfile). If it survives, it's real — patch via `package.json` `overrides` or nudge upstream.
 
 ### 8. Summary
 

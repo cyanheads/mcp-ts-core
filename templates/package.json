@@ -23,6 +23,7 @@
     "rebuild": "tsx scripts/clean.ts && tsx scripts/build.ts",
     "clean": "tsx scripts/clean.ts",
     "devcheck": "tsx scripts/devcheck.ts",
+    "audit:refresh": "rm -f bun.lock && bun install && bun audit",
     "tree": "tsx scripts/tree.ts",
     "list-skills": "tsx scripts/list-skills.ts",
     "format": "biome check --write --unsafe .",

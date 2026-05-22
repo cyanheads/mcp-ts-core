@@ -581,6 +581,7 @@ Each `skills/<name>/SKILL.md` carries a `metadata.version` string in its frontma
 | `bun run build` | Build library output (`scripts/build.ts`) |
 | `bun run rebuild` | Clean and rebuild (`scripts/clean.ts` + `build`) |
 | `bun run devcheck` | **Use often.** Lint, format, typecheck, MCP definition linting, `bun audit`, `bun outdated` |
+| `bun run audit:refresh` | Delete `bun.lock`, reinstall, and re-run `bun audit`. Use when `devcheck` flags a transitive advisory — Bun's `update` is sticky on transitive resolutions, so a stale-lockfile false positive can disguise an already-patched dep. If the advisory survives, it's real. |
 | `bun run lint:mcp` | Validate MCP definitions against spec |
 | `bun run format` | Auto-fix Biome lint/format issues |
 | `bun run test` | Unit/integration tests |
