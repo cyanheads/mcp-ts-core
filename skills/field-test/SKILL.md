@@ -4,7 +4,7 @@ description: >
   Exercise tools, resources, and prompts against a live HTTP server via MCP JSON-RPC over curl. Starts the server, surfaces the catalog, runs real and adversarial inputs, and produces a tight report with concrete findings and numbered follow-up options. Use after adding or modifying definitions, or when the user asks to test, try out, or verify their MCP surface.
 metadata:
   author: cyanheads
-  version: "2.4"
+  version: "2.5"
   audience: external
   type: debug
 ---
@@ -27,115 +27,117 @@ This skill drives an HTTP server because curl + JSON-RPC is the most reliable ha
 
 ### 1. Start the server
 
-Write the helper to `/tmp/mcp-field-test.sh` once, then source it in every subsequent Bash call. Helper keeps PID / URL / session id in a per-`$PWD` state file (`/tmp/mcp-field-test-<hash>.env`) so state survives across tool invocations and concurrent field-tests in different project trees don't clobber each other.
+Generate a 10-character alphanumeric ID (e.g. `9DJ73-K103L`) and write the helper to `/tmp/<project-name>-field-test-<ID>.sh`. Use that exact path in every subsequent Bash call. **Two agents in the same project tree must pick different IDs** — that's what keeps their helper files, server logs, and call scratch from colliding.
+
+The helper itself is **stateless** — every function takes the IDs it needs (server `pid`, server `url`, MCP `sid`, server log path) as positional args. `mcp_start` prints them; the agent threads them through every later call. No env vars, no shared state files.
 
 ```bash
-cat > /tmp/mcp-field-test.sh <<'HELPER_EOF'
+# Pick your ID — example below uses 9DJ73-K103L. Substitute your own.
+# (Helper path also encodes the project name so /tmp/ stays grep-friendly.)
+cat > /tmp/<project-name>-field-test-9DJ73-K103L.sh <<'HELPER_EOF'
 #!/bin/bash
-# Field-test helper: manage an MCP HTTP server + JSON-RPC session across shell calls.
+# Field-test helper: stateless wrappers around an MCP HTTP server + JSON-RPC
+# session. Every function takes the IDs it needs as positional args — the agent
+# threads pid/url/sid/log through each call rather than relying on a state
+# file or env vars (the Bash tool wipes shell state between calls, and a
+# pointer file would race the same way two agents race on shared state).
+# See https://github.com/cyanheads/mcp-ts-core/issues/90, #144.
+#
 # Surfaces failures aggressively — field test is for finding things that fail,
 # so the helper auto-tails logs and prints HTTP status/body on errors instead
 # of swallowing them.
-#
-# State and log paths are namespaced by an 8-char hash of $PWD so concurrent
-# field-tests across different project trees don't clobber each other (see
-# https://github.com/cyanheads/mcp-ts-core/issues/90).
-PREFIX="/tmp/mcp-field-test-$(printf '%s' "$PWD" | shasum | cut -c1-8)"
-STATE_FILE="${PREFIX}.env"
-BUILD_LOG="${PREFIX}-build.log"
-SERVER_LOG="${PREFIX}-server.log"
-[ -f "$STATE_FILE" ] && . "$STATE_FILE"
 
+# Usage: mcp_start /path/to/server
+# Builds, starts the HTTP server in the background, waits for the listen line,
+# and prints: ready pid=<n> url=<u> port=<n> log=<path>
+# Capture these — every later helper takes them as args.
 mcp_start() {
   local dir="${1:-$PWD}"
-  echo "building $dir ..."
-  if ! (cd "$dir" && bun run rebuild) >"$BUILD_LOG" 2>&1; then
-    echo "BUILD FAILED — last 30 lines of $BUILD_LOG:"
-    tail -30 "$BUILD_LOG"
+  local build_log; build_log=$(mktemp /tmp/mcp-field-test-build.XXXXXX)
+  echo "building $dir ..." >&2
+  if ! (cd "$dir" && bun run rebuild) >"$build_log" 2>&1; then
+    echo "BUILD FAILED — last 30 lines of $build_log:" >&2
+    tail -30 "$build_log" >&2
     return 1
   fi
-  echo "starting server ..."
-  (cd "$dir" && bun run start:http) >"$SERVER_LOG" 2>&1 &
+  rm -f "$build_log"
+  local server_log; server_log=$(mktemp /tmp/mcp-field-test-server.XXXXXX)
+  echo "starting server ..." >&2
+  (cd "$dir" && bun run start:http) >"$server_log" 2>&1 &
   local pid=$!
   local line=""
   for _ in $(seq 1 40); do
-    line=$(grep -Eo 'listening at http://[^" ]+/mcp' "$SERVER_LOG" | head -1)
+    line=$(grep -Eo 'listening at http://[^" ]+/mcp' "$server_log" | head -1)
     [ -n "$line" ] && break
     sleep 0.25
   done
   if [ -z "$line" ]; then
-    echo "server failed to start within 10s — last 30 lines of $SERVER_LOG:"
-    tail -30 "$SERVER_LOG"
+    echo "server failed to start within 10s — last 30 lines of $server_log:" >&2
+    tail -30 "$server_log" >&2
     kill "$pid" 2>/dev/null
+    rm -f "$server_log"
     return 1
   fi
   local url="${line#listening at }"
   local port; port=$(echo "$url" | sed -E 's|.*:([0-9]+)/.*|\1|')
-  cat > "$STATE_FILE" <<EOF
-export MCP_PID=$pid
-export MCP_URL=$url
-export MCP_PORT=$port
-EOF
-  . "$STATE_FILE"
-  echo "ready pid=$pid url=$url"
+  echo "ready pid=$pid url=$url port=$port log=$server_log"
 }
 
+# Usage: mcp_init <url>
+# Runs `initialize`, sends `notifications/initialized`, prints: ready sid=<id>
 mcp_init() {
-  [ -z "$MCP_URL" ] && { echo "run mcp_start first"; return 1; }
-  local hdr="${PREFIX}-init-headers.txt"
-  local body_file="${PREFIX}-init-body.txt"
-  local status
-  status=$(curl -sS -D "$hdr" -o "$body_file" -w '%{http_code}' -X POST "$MCP_URL" \
+  local url="$1"
+  [ -z "$url" ] && { echo "usage: mcp_init <url>" >&2; return 1; }
+  local hdr; hdr=$(mktemp)
+  local body_file; body_file=$(mktemp)
+  local code
+  code=$(curl -sS -D "$hdr" -o "$body_file" -w '%{http_code}' -X POST "$url" \
     -H "Content-Type: application/json" \
     -H "Accept: application/json, text/event-stream" \
-    -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"field-test","version":"2.3"}}}')
+    -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"field-test","version":"2.5"}}}')
   local sid; sid=$(grep -i '^mcp-session-id:' "$hdr" | awk '{print $2}' | tr -d '\r\n')
   if [ -z "$sid" ]; then
-    echo "init failed — HTTP $status, no Mcp-Session-Id header returned"
-    echo "--- response body ---"
-    cat "$body_file"
-    echo "--- response headers ---"
-    cat "$hdr"
+    echo "init failed — HTTP $code, no Mcp-Session-Id header returned" >&2
+    echo "--- response body ---" >&2
+    cat "$body_file" >&2
+    echo "--- response headers ---" >&2
+    cat "$hdr" >&2
+    rm -f "$hdr" "$body_file"
     return 1
   fi
-  cat > "$STATE_FILE" <<EOF
-export MCP_PID=$MCP_PID
-export MCP_URL=$MCP_URL
-export MCP_PORT=$MCP_PORT
-export MCP_SID=$sid
-EOF
-  . "$STATE_FILE"
-  curl -sS -X POST "$MCP_URL" \
+  curl -sS -X POST "$url" \
     -H "Content-Type: application/json" \
     -H "Accept: application/json, text/event-stream" \
     -H "Mcp-Session-Id: $sid" \
     -d '{"jsonrpc":"2.0","method":"notifications/initialized"}' >/dev/null
-  echo "session=$sid (HTTP $status)"
+  rm -f "$hdr" "$body_file"
+  echo "ready sid=$sid (HTTP $code)"
 }
 
-# Usage: mcp_call METHOD [JSON_PARAMS]
+# Usage: mcp_call <url> <sid> <method> [JSON_PARAMS]
 # Prints the JSON-RPC response. SSE framing is stripped when present; on
 # non-SSE responses the raw body is printed instead so plain-JSON error
 # replies (HTTP 4xx/5xx) still surface. Pipe to `jq`.
 mcp_call() {
-  [ -z "$MCP_SID" ] && { echo "run mcp_init first"; return 1; }
-  local method="$1"; local params="${2:-}"
+  local url="$1"; local sid="$2"; local method="$3"; local params="${4:-}"
+  [ -z "$url" ] || [ -z "$sid" ] || [ -z "$method" ] && { echo "usage: mcp_call <url> <sid> <method> [params]" >&2; return 1; }
   local body
   if [ -z "$params" ]; then
     body=$(printf '{"jsonrpc":"2.0","id":%d,"method":"%s"}' "$RANDOM" "$method")
   else
     body=$(printf '{"jsonrpc":"2.0","id":%d,"method":"%s","params":%s}' "$RANDOM" "$method" "$params")
   fi
-  local resp_file="${PREFIX}-call-body.txt"
-  local status
-  status=$(curl -sS -o "$resp_file" -w '%{http_code}' -X POST "$MCP_URL" \
+  local resp_file; resp_file=$(mktemp)
+  local code
+  code=$(curl -sS -o "$resp_file" -w '%{http_code}' -X POST "$url" \
     -H "Content-Type: application/json" \
     -H "Accept: application/json, text/event-stream" \
-    -H "Mcp-Session-Id: $MCP_SID" \
+    -H "Mcp-Session-Id: $sid" \
     -d "$body")
-  if [ "$status" -ge 400 ]; then
-    echo "HTTP $status from $method — response:" >&2
+  if [ "$code" -ge 400 ]; then
+    echo "HTTP $code from $method — response:" >&2
     cat "$resp_file" >&2
+    rm -f "$resp_file"
     return 1
   fi
   local sse; sse=$(sed -n 's/^data: //p' "$resp_file")
@@ -144,45 +146,48 @@ mcp_call() {
   else
     cat "$resp_file"
   fi
+  rm -f "$resp_file"
 }
 
-# Tail the server log. Useful when a call surprises you — pino startup banner,
-# definition lint diagnostics, request handler errors, upstream calls, and
-# rate-limit warnings live in the per-session server log.
-# Usage: mcp_log [N]   (default: 50 lines)
+# Usage: mcp_log <server-log-path> [N]   (default: 50 lines)
+# Tail the per-server log printed by mcp_start. Useful when a call surprises
+# you — pino startup banner, definition lint diagnostics, request handler
+# errors, upstream calls, and rate-limit warnings all land here.
 mcp_log() {
-  local n="${1:-50}"
-  tail -n "$n" "$SERVER_LOG"
+  local log="$1"; local n="${2:-50}"
+  [ -z "$log" ] && { echo "usage: mcp_log <log-path> [n]" >&2; return 1; }
+  tail -n "$n" "$log"
 }
 
+# Usage: mcp_stop <pid> [server-log-path]
+# Kills the background server. Removes the server log if a path is given.
 mcp_stop() {
-  if [ -z "$MCP_PID" ]; then
-    rm -f "$STATE_FILE"
-    echo "no PID to stop"
-    return 0
-  fi
-  kill "$MCP_PID" 2>/dev/null
+  local pid="$1"; local log="${2:-}"
+  [ -z "$pid" ] && { echo "usage: mcp_stop <pid> [log-path]" >&2; return 1; }
+  kill "$pid" 2>/dev/null
   for _ in $(seq 1 12); do
-    kill -0 "$MCP_PID" 2>/dev/null || break
+    kill -0 "$pid" 2>/dev/null || break
     sleep 0.25
   done
-  if kill -0 "$MCP_PID" 2>/dev/null; then
-    echo "PID $MCP_PID didn't exit on SIGTERM — sending SIGKILL"
-    kill -9 "$MCP_PID" 2>/dev/null
+  if kill -0 "$pid" 2>/dev/null; then
+    echo "PID $pid didn't exit on SIGTERM — sending SIGKILL"
+    kill -9 "$pid" 2>/dev/null
     sleep 0.5
   fi
-  if kill -0 "$MCP_PID" 2>/dev/null; then
-    echo "WARNING: PID $MCP_PID still alive after SIGKILL"
+  if kill -0 "$pid" 2>/dev/null; then
+    echo "WARNING: PID $pid still alive after SIGKILL"
   else
-    echo "stopped pid=$MCP_PID"
+    echo "stopped pid=$pid"
   fi
-  rm -f "$STATE_FILE"
+  [ -n "$log" ] && rm -f "$log"
 }
 HELPER_EOF
 
-. /tmp/mcp-field-test.sh
+. /tmp/<project-name>-field-test-9DJ73-K103L.sh
 mcp_start /absolute/path/to/server   # replace with the target server
 ```
+
+Capture `pid`, `url`, `port`, `log` from the `mcp_start` output — every later call takes them as positional args. Two agents running concurrently in the same project tree each pick their own ID, so their helper paths, server logs, and call scratch never share a name.
 
 **Notes**
 
@@ -193,19 +198,19 @@ mcp_start /absolute/path/to/server   # replace with the target server
 ### 2. Initialize the session
 
 ```bash
-. /tmp/mcp-field-test.sh
-mcp_init
+. /tmp/<project-name>-field-test-<ID>.sh
+mcp_init <url-from-mcp_start>
 ```
 
-Runs `initialize`, captures the session id, sends `notifications/initialized`.
+Runs `initialize`, sends `notifications/initialized`, prints `sid=<id>` to capture for `mcp_call`.
 
 ### 3. Surface the catalog
 
 ```bash
-. /tmp/mcp-field-test.sh
-mcp_call tools/list     | jq '.result.tools[]     | {name, description, inputSchema, outputSchema}'
-mcp_call resources/list | jq '.result.resources[] | {uri, name, mimeType}'
-mcp_call prompts/list   | jq '.result.prompts[]   | {name, description, arguments}'
+. /tmp/<project-name>-field-test-<ID>.sh
+mcp_call <url> <sid> tools/list     | jq '.result.tools[]     | {name, description, inputSchema, outputSchema}'
+mcp_call <url> <sid> resources/list | jq '.result.resources[] | {uri, name, mimeType}'
+mcp_call <url> <sid> prompts/list   | jq '.result.prompts[]   | {name, description, arguments}'
 ```
 
 Present a compact catalog to the user: each definition's name + 1-line description. Flag vague or missing descriptions as you go — those feed into the report. Use this to build the test plan.
@@ -262,7 +267,7 @@ Use `TaskCreate` — one task per definition. Mark complete as you go. Don't bat
 
 For each call, capture: input sent, response (trim huge payloads to files), whether `isError: true` appeared, anything surprising (slow response, parity drift, unhelpful text, crash).
 
-When a call surprises you — slow, hangs, returns terse output, surfaces an unhelpful error — run `. /tmp/mcp-field-test.sh && mcp_log` to tail the server log. The pino startup banner, request handler errors, upstream API call traces, and rate-limit warnings all land in the per-session server log (read via `mcp_log`) rather than coming back through `mcp_call`. Don't guess at runtime behavior from response text alone.
+When a call surprises you — slow, hangs, returns terse output, surfaces an unhelpful error — run `. /tmp/<project-name>-field-test-<ID>.sh && mcp_log <log>` to tail the server log. The pino startup banner, request handler errors, upstream API call traces, and rate-limit warnings all land in the per-server log (read via `mcp_log`) rather than coming back through `mcp_call`. Don't guess at runtime behavior from response text alone.
 
 **Interpreting responses**
 
@@ -275,11 +280,12 @@ When a call surprises you — slow, hangs, returns terse output, surfaces an unh
 ### 6. Tear down
 
 ```bash
-. /tmp/mcp-field-test.sh
-mcp_stop
+. /tmp/<project-name>-field-test-<ID>.sh
+mcp_stop <pid> <log>
+rm -f /tmp/<project-name>-field-test-<ID>.sh
 ```
 
-Kills the background server, clears state. Do this *before* writing the report so nothing leaks into the next session.
+Kills the background server, removes the server log, then removes the helper script itself. Do this *before* writing the report so nothing leaks into the next session.
 
 ### 7. Report
 
