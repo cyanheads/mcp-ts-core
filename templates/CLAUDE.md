@@ -318,23 +318,25 @@ When you complete a skill's checklist, check the boxes and add a completion time
 | Client | Mechanism |
 |:-------|:----------|
 | Claude Desktop | Browser downloads the `.mcpb` from the latest GitHub Release; OS file handler routes it to Claude Desktop, which opens the install dialog. No deep-link URL scheme yet — this is the canonical path. |
-| Cursor | Official `cursor://` deep link with base64 JSON config. |
-| VS Code / Insiders | Official `vscode:mcp/install?...` and `vscode-insiders:mcp/install?...` deep links with URL-encoded JSON. |
+| Cursor | Official `https://cursor.com/en/install-mcp` endpoint with base64 JSON config. |
+| VS Code / Insiders | Official `vscode:mcp/install?...` deep link, wrapped in `https://vscode.dev/redirect?url=` so GitHub-rendered markdown doesn't strip the non-HTTP scheme. |
 | Claude Code / Codex | CLI only (`claude mcp add` / `codex mcp add`); no URL scheme. |
 
 ```markdown
 [![Install in Claude Desktop](https://img.shields.io/badge/Install_in-Claude_Desktop-D97757?style=for-the-badge&logo=anthropic&logoColor=white)](https://github.com/<OWNER>/<REPO>/releases/latest/download/<PACKAGE_NAME>.mcpb)
-[![Install in Cursor](https://cursor.com/deeplink/mcp-install-dark.svg)](cursor://anysphere.cursor-deeplink/mcp/install?name=<PACKAGE_NAME>&config=<BASE64_CONFIG>)
-[![Install in VS Code](https://img.shields.io/badge/VS_Code-Install_Server-0098FF?style=for-the-badge&logo=visualstudiocode&logoColor=white)](vscode:mcp/install?<URLENCODED_JSON>)
+[![Install in Cursor](https://cursor.com/deeplink/mcp-install-dark.svg)](https://cursor.com/en/install-mcp?name=<PACKAGE_NAME>&config=<BASE64_CONFIG>)
+[![Install in VS Code](https://img.shields.io/badge/VS_Code-Install_Server-0098FF?style=for-the-badge&logo=visualstudiocode&logoColor=white)](https://vscode.dev/redirect?url=vscode:mcp/install?<URLENCODED_JSON>)
 ```
+
+Both install links route through HTTPS endpoints (`cursor.com/en/install-mcp` and `vscode.dev/redirect`) — GitHub-rendered markdown strips non-HTTP URL schemes from anchors, so a raw `cursor://` or `vscode:` link won't click through from github.com.
 
 Generate the encoded configs (replace `<PACKAGE_NAME>` and adjust the install command — `npx -y …` is the standard shape for an npm-published stdio server):
 
 ```bash
-# Cursor: base64-encoded JSON
-echo -n '{"command":"npx","args":["-y","<PACKAGE_NAME>"]}' | base64
+# Cursor: base64-encoded JSON. `command` is a single string (the full invocation), not split into command/args.
+echo -n '{"command":"npx -y <PACKAGE_NAME>"}' | base64
 
-# VS Code: URL-encoded JSON
+# VS Code: URL-encoded JSON. Split into command + args.
 node -p 'encodeURIComponent(JSON.stringify({name:"<PACKAGE_NAME>",command:"npx",args:["-y","<PACKAGE_NAME>"]}))'
 ```
 

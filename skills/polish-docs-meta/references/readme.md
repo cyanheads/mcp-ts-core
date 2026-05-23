@@ -7,10 +7,11 @@ Structure and content guide for creating or updating a README for an MCP server 
 Use this section order. Omit sections that don't apply (e.g., skip Docker/Workers if the server doesn't deploy there).
 
 ```text
-# {Server Name}                         ← centered HTML block
-[Public hosted callout if present]      ← centered HTML block, directly under badges
-Framework badge                         ← solo, spotlight row — `Built on @cyanheads/mcp-ts-core` (cyan-300 #67E8F9)
-Badges rows                             ← grouped on subsequent rows — npm, Docker, Version, MCP SDK, License, TS, Bun, Coverage
+# {Server Name}                         ← centered HTML block (h1 + tagline + surface count)
+Info badges                             ← one centered row — Version, License, Docker, MCP SDK, npm, TypeScript, Bun
+Install badges                          ← one centered row — Claude Desktop, Cursor, VS Code
+Framework badge                         ← solo spotlight row — `Built on @cyanheads/mcp-ts-core` (cyan-300 #67E8F9)
+[Public hosted callout if present]      ← centered HTML block, directly under the Framework badge
 ---
 ## Tools                                ← grouping sentence → summary table → per-tool subsections
 ## Resources and prompts (if any)       ← single combined table (Type / Name / Description)
@@ -40,38 +41,49 @@ Centered HTML. The `<h1>` is the server name — use the scoped package name if 
 
 <div align="center">
 
+[![Version](https://img.shields.io/badge/Version-1.0.0-blue.svg?style=flat-square)](./CHANGELOG.md) [![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg?style=flat-square)](./LICENSE) [![Docker](https://img.shields.io/badge/Docker-ghcr.io-2496ED?style=flat-square&logo=docker&logoColor=white)](https://github.com/users/cyanheads/packages/container/package/my-mcp-server) [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^1.29.0-green.svg?style=flat-square)](https://modelcontextprotocol.io/) [![npm](https://img.shields.io/npm/v/@cyanheads/my-mcp-server?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/@cyanheads/my-mcp-server) [![TypeScript](https://img.shields.io/badge/TypeScript-^6.0.3-3178C6.svg?style=flat-square)](https://www.typescriptlang.org/) [![Bun](https://img.shields.io/badge/Bun-v1.3.2-blueviolet.svg?style=flat-square)](https://bun.sh/)
+
+</div>
+
+<div align="center">
+
+[![Install in Claude Desktop](https://img.shields.io/badge/Install_in-Claude_Desktop-D97757?style=for-the-badge&logo=anthropic&logoColor=white)](https://github.com/cyanheads/my-mcp-server/releases/latest/download/my-mcp-server.mcpb) [![Install in Cursor](https://cursor.com/deeplink/mcp-install-dark.svg)](https://cursor.com/en/install-mcp?name=my-mcp-server&config=<BASE64_CONFIG>) [![Install in VS Code](https://img.shields.io/badge/VS_Code-Install_Server-0098FF?style=for-the-badge&logo=visualstudiocode&logoColor=white)](https://vscode.dev/redirect?url=vscode:mcp/install?<URLENCODED_JSON>)
+
 [![Framework](https://img.shields.io/badge/Built%20on-@cyanheads/mcp--ts--core-67E8F9?style=flat-square)](https://www.npmjs.com/package/@cyanheads/mcp-ts-core)
-
-[![Version](https://img.shields.io/badge/Version-1.0.0-blue.svg?style=flat-square)](./CHANGELOG.md) [![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg?style=flat-square)](./LICENSE) [![Docker](https://img.shields.io/badge/Docker-ghcr.io-2496ED?style=flat-square&logo=docker&logoColor=white)](https://github.com/users/cyanheads/packages/container/package/my-mcp-server)
-
-[![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^1.29.0-green.svg?style=flat-square)](https://modelcontextprotocol.io/) [![npm](https://img.shields.io/npm/v/@cyanheads/my-mcp-server?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/@cyanheads/my-mcp-server) [![TypeScript](https://img.shields.io/badge/TypeScript-^6.0.3-3178C6.svg?style=flat-square)](https://www.typescriptlang.org/)
 
 </div>
 ```
 
+See the **Bundling** section of `templates/CLAUDE.md` (or `templates/AGENTS.md`) for how to generate the `<BASE64_CONFIG>` and `<URLENCODED_JSON>` payloads. Omit any install badge whose target doesn't apply (e.g. no `.mcpb` bundle → drop the Claude Desktop badge).
+
 The header tagline must match the `package.json` `description`.
 
-**Badge selection:** All badges use `style=flat-square`. Include what applies — don't add badges for things the server doesn't have:
+**Badge selection:** All info badges use `style=flat-square`; install badges use `style=for-the-badge`. Include what applies — don't add badges for things the server doesn't have:
 
-| Badge | When to include |
-|:------|:----------------|
-| Framework | Always — links to `@cyanheads/mcp-ts-core` on npm. Cyan-300 (`67E8F9`) for dark text. **Solo on its own row** as the spotlight badge. |
-| npm | Published to npm |
-| Docker | Published to ghcr.io or Docker Hub |
-| Version | Always — link to CHANGELOG.md |
-| MCP SDK | Always — show the `@modelcontextprotocol/sdk` version |
-| License | Always |
-| TypeScript | Always |
-| Bun | If using Bun (standard for this framework) |
-| MCP Spec | Optional — rarely included; the SDK badge usually suffices |
-| Status | Optional — Stable, Beta, etc. |
-| Code Coverage | If coverage is tracked |
+| Badge | Row | When to include |
+|:------|:----|:----------------|
+| Version | info | Always — link to `CHANGELOG.md` |
+| License | info | Always |
+| Docker | info | Published to ghcr.io or Docker Hub |
+| MCP SDK | info | Always — show the `@modelcontextprotocol/sdk` version |
+| npm | info | Published to npm |
+| TypeScript | info | Always |
+| Bun | info | If using Bun (standard for this framework) |
+| MCP Spec | info | Optional — rarely included; the SDK badge usually suffices |
+| Status | info | Optional — Stable, Beta, etc. |
+| Code Coverage | info | If coverage is tracked |
+| Install in Claude Desktop | install | Repo publishes an `.mcpb` bundle on GitHub Releases (orange `D97757`, anthropic logo) |
+| Install in Cursor | install | Published to npm — uses the official `cursor://` deep link |
+| Install in VS Code | install | Published to npm — uses the official `vscode:mcp/install` deep link |
+| Framework | spotlight | Always — links to `@cyanheads/mcp-ts-core` on npm. Cyan-300 (`67E8F9`) for dark text. **Solo on its own row.** |
 
-**Layout:** Framework badge sits alone on the first row of the badge block — it's the brand link back to the framework and earns its own line. Group the remaining badges across one or two subsequent rows; keep related concerns together (e.g., release/license/runtime on one row, ecosystem/language on another). Add a `---` horizontal rule after the badge block.
+**Layout:** three centered `<div>` blocks in a fixed order. (1) **Info row** — one line with all info badges in the order above (release/license/distribution first, then SDK/ecosystem/language). (2) **Install + spotlight block** — install badges on one line, then a blank line, then the Framework badge alone on its own line as the brand link back to the framework. (3) **Public hosted callout** if applicable (see next section). Add a `---` horizontal rule after the whole header block.
+
+Omit a whole row when nothing in it applies — e.g. a server with no `.mcpb` bundle and not on npm has no install row at all, so the install + spotlight block collapses to just the Framework badge.
 
 ### Public Hosted Callout (if present)
 
-If a public hosted instance is available, **promote it to a top-level callout** immediately below the badge block — don't bury it inside Getting Started. This is the highest-value piece of information for a visitor who wants to try the server with zero install.
+If a public hosted instance is available, **promote it to a top-level callout** in its own centered `<div>` immediately below the Framework badge — don't bury it inside Getting Started. This is the highest-value piece of information for a visitor who wants to try the server with zero install.
 
 ```html
 <div align="center">
