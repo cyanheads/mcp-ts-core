@@ -102,6 +102,34 @@ describe('renderLandingPage — structure', () => {
     expect(html).toContain('/.well-known/mcp.json');
   });
 
+  test('emits a canonical link matching the page URL', () => {
+    const html = renderLandingPage(defaultServerManifest, 'https://example.com');
+    // pageUrl in render.ts always has a trailing slash on the origin.
+    expect(html).toContain('<link rel="canonical" href="https://example.com/" />');
+  });
+
+  test('emits og:site_name and og:locale alongside the existing OG tags', () => {
+    const html = renderLandingPage(defaultServerManifest, 'https://example.com');
+    expect(html).toContain('<meta property="og:site_name" content="test-mcp-server" />');
+    expect(html).toContain('<meta property="og:locale" content="en_US" />');
+  });
+
+  test('emits a framework generator meta when attribution is on (default)', () => {
+    const html = renderLandingPage(defaultServerManifest, 'https://example.com');
+    expect(html).toContain(
+      `<meta name="generator" content="${defaultServerManifest.framework.name} ${defaultServerManifest.framework.version}" />`,
+    );
+  });
+
+  test('omits the generator meta when attribution is disabled', () => {
+    const manifest: ServerManifest = {
+      ...defaultServerManifest,
+      landing: { ...defaultServerManifest.landing, attribution: false },
+    };
+    const html = renderLandingPage(manifest, 'https://example.com');
+    expect(html).not.toContain('<meta name="generator"');
+  });
+
   test('emits the auth-status banner', () => {
     const html = renderLandingPage(defaultServerManifest, 'https://example.com');
     expect(html).toContain('Public access');
@@ -214,11 +242,64 @@ describe('renderLandingPage — connect snippets', () => {
 
   test('wraps each connect snippet in Cloudflare email_off comments', () => {
     const html = renderLandingPage(manifestWithEnv(), 'https://example.com');
-    // One pair per tab (stdio, http, claude, curl) — 4 total.
+    // One pair per tab (claude, codex, cursor, gemini, stdio, http, curl) — 7 total.
     const opens = (html.match(/<!--email_off-->/g) ?? []).length;
     const closes = (html.match(/<!--\/email_off-->/g) ?? []).length;
-    expect(opens).toBe(4);
-    expect(closes).toBe(4);
+    expect(opens).toBe(7);
+    expect(closes).toBe(7);
+  });
+
+  test('claude tab is the default checked panel', () => {
+    const html = renderLandingPage(manifestWithEnv(), 'https://example.com');
+    // The claude input carries `checked`; no other connect-tab-input does.
+    expect(html).toMatch(/id="connect-tab-claude"[^>]*\schecked/);
+    for (const tab of ['codex', 'cursor', 'gemini', 'stdio', 'http', 'curl']) {
+      expect(html).not.toMatch(new RegExp(`id="connect-tab-${tab}"[^>]*\\schecked`));
+    }
+  });
+
+  test('codex tab renders `codex mcp add --url` against the HTTP endpoint', () => {
+    const html = renderLandingPage(manifestWithEnv(), 'https://example.com');
+    const codex = extractSnippet(html, 'codex');
+    expect(codex).toContain('codex mcp add test-mcp-server --url https://example.com/mcp');
+    expect(codex).not.toContain('bunx');
+  });
+
+  test('cursor tab renders mcpServers JSON with bare `url` field', () => {
+    const html = renderLandingPage(manifestWithEnv(), 'https://example.com');
+    const cursor = extractSnippet(html, 'cursor');
+    expect(cursor).toContain('&quot;mcpServers&quot;');
+    expect(cursor).toContain('&quot;url&quot;: &quot;https://example.com/mcp&quot;');
+    // No env block (HTTP transport carries no spawned-process env).
+    expect(cursor).not.toContain('&quot;env&quot;');
+    expect(cursor).not.toContain('API_KEY');
+  });
+
+  test('gemini tab renders `gemini mcp add --transport http` command', () => {
+    const html = renderLandingPage(manifestWithEnv(), 'https://example.com');
+    const gemini = extractSnippet(html, 'gemini');
+    expect(gemini).toContain(
+      'gemini mcp add --transport http test-mcp-server https://example.com/mcp',
+    );
+    expect(gemini).not.toContain('bunx');
+  });
+
+  test('honors codex/cursor/gemini connectSnippets overrides', () => {
+    const manifest: ServerManifest = {
+      ...defaultServerManifest,
+      landing: {
+        ...defaultServerManifest.landing,
+        connectSnippets: {
+          codex: 'codex-custom',
+          cursor: '{"custom":"cursor"}',
+          gemini: 'gemini-custom',
+        },
+      },
+    };
+    const html = renderLandingPage(manifest, 'https://example.com');
+    expect(extractSnippet(html, 'codex')).toContain('codex-custom');
+    expect(extractSnippet(html, 'cursor')).toContain('custom&quot;:&quot;cursor');
+    expect(extractSnippet(html, 'gemini')).toContain('gemini-custom');
   });
 
   test('honors operator-supplied connectSnippets overrides per tab', () => {

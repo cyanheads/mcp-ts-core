@@ -12,6 +12,7 @@ import { prompt } from '@/mcp-server/prompts/utils/promptDefinition.js';
 import { resource } from '@/mcp-server/resources/utils/resourceDefinition.js';
 import { tool } from '@/mcp-server/tools/utils/toolDefinition.js';
 import {
+  adversarialObjectArbitrary,
   type FuzzReport,
   fuzzPrompt,
   fuzzResource,
@@ -180,6 +181,39 @@ describe('fuzzPrompt', () => {
     const report = await fuzzPrompt(noArgsPrompt as any, { numRuns: 5 });
     expectCleanReport(report);
   });
+
+  it('reports a crash when generate() returns a non-array for valid args', async () => {
+    const badPrompt = prompt('fuzz_bad_prompt', {
+      description: 'Invalid prompt result.',
+      args: z.object({ message: z.string().describe('Message') }),
+      generate: ((args: { message: string }) => ({
+        role: 'user',
+        content: { type: 'text', text: args.message },
+      })) as any,
+    });
+
+    const report = await fuzzPrompt(badPrompt as any, {
+      numRuns: 3,
+      numAdversarial: 0,
+      seed: 101,
+    });
+
+    expect(report.crashes.length).toBeGreaterThan(0);
+    expect(report.crashes[0]?.error).toBeInstanceOf(Error);
+    expect((report.crashes[0]?.error as Error).message).toContain('did not return array');
+  });
+
+  it('reports a crash when a no-args generate() returns a non-array', async () => {
+    const badPrompt = prompt('fuzz_bad_no_args', {
+      description: 'Invalid no-args prompt result.',
+      generate: (() => ({ role: 'user', content: { type: 'text', text: 'Hello' } })) as any,
+    });
+
+    const report = await fuzzPrompt(badPrompt as any, { numRuns: 1 });
+
+    expect(report.crashes).toHaveLength(1);
+    expect((report.crashes[0]?.error as Error).message).toContain('did not return array');
+  });
 });
 
 describe('zodToArbitrary', () => {
@@ -265,5 +299,71 @@ describe('zodToArbitrary', () => {
       }),
       { numRuns: 30 },
     );
+  });
+
+  it('generates valid values for allowlisted string formats, literal, and union schemas', () => {
+    const schema = z.object({
+      contact: z.email(),
+      id: z.uuid(),
+      kind: z.literal('fixed'),
+      value: z.union([z.string().min(1), z.number().int().min(0).max(10)]),
+    });
+    const arb = zodToArbitrary(schema);
+
+    fc.assert(
+      fc.property(arb, (v) => {
+        expect(schema.safeParse(v).success).toBe(true);
+      }),
+      { numRuns: 30 },
+    );
+  });
+
+  it('can generate valid URL values even though format: "uri" is not portable by default', () => {
+    const schema = z.object({
+      link: z.url(),
+    });
+    const arb = zodToArbitrary(schema);
+
+    fc.assert(
+      fc.property(arb, (v) => {
+        expect(schema.safeParse(v).success).toBe(true);
+      }),
+      { numRuns: 10 },
+    );
+  });
+
+  it('generates an empty object for empty object schemas', () => {
+    const schema = z.object({});
+    const arb = zodToArbitrary(schema);
+
+    fc.assert(
+      fc.property(arb, (v) => {
+        expect(v).toEqual({});
+        expect(schema.safeParse(v).success).toBe(true);
+      }),
+      { numRuns: 5 },
+    );
+  });
+});
+
+describe('adversarialObjectArbitrary', () => {
+  it('generates key-shaped adversarial objects for non-empty schemas', () => {
+    const schema = z.object({
+      query: z.string(),
+      limit: z.number(),
+    });
+    const values = fc.sample(adversarialObjectArbitrary(schema), 10);
+
+    expect(values).toHaveLength(10);
+    for (const value of values) {
+      expect(Object.keys(value).sort()).toEqual(['limit', 'query']);
+    }
+  });
+
+  it('generates adversarial top-level values for empty object schemas', () => {
+    const values = fc.sample(adversarialObjectArbitrary(z.object({})), 20);
+
+    expect(values.length).toBeGreaterThan(0);
+    expect(values.some((value) => value === null || typeof value !== 'object')).toBe(true);
   });
 });

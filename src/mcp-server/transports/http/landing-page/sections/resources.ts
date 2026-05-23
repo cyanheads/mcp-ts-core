@@ -30,13 +30,13 @@ function renderResourceCard(resource: ManifestResource): SafeHtml {
     <article class="card" id="${anchor}">
       <div class="card-head">
         <h3 class="card-title"><a href="#${anchor}">${resource.name}</a></h3>
-        ${source}
       </div>
       <p class="card-desc">${resource.description}</p>
       <div class="card-meta">
         <span><span class="card-meta-label">uri</span> <code>${resource.uriTemplate}</code></span>
         ${resource.mimeType ? html`<span><span class="card-meta-label">mime</span> <code>${resource.mimeType}</code></span>` : html``}
       </div>
+      ${source ? html`<footer class="card-foot">${source}</footer>` : html``}
     </article>
   `;
 }

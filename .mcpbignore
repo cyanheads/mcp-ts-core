@@ -1,0 +1,35 @@
+# Framework is not distributed as .mcpb — this file protects verification
+# packs from leaking credentials and shipping dev-only paths.
+
+# Credentials and agent-local state
+.mcpregistry_*
+.claude/
+.agents/
+
+# Source / dev surface
+src/
+tests/
+coverage/
+docs/
+examples/
+templates/
+skills/
+agent-feedback/
+announcements/
+logs/
+
+# Build/IDE caches and configs
+.env*
+.husky/
+.markdownlint.jsonc
+.tsbuildinfo*
+Dockerfile
+biome.json
+bun.lock
+bunfig.toml
+devcheck.config.json
+repomix.config.json
+smithery.yaml
+tsconfig*.json
+vitest*.config.ts
+wrangler.toml

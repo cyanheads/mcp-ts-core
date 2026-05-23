@@ -295,6 +295,7 @@ When you complete a skill's checklist, check the boxes and add a completion time
 | `npm run rebuild` | Clean + build |
 | `npm run clean` | Remove build artifacts |
 | `npm run devcheck` | Lint + format + typecheck + security + changelog sync |
+| `bun run audit:refresh` | Delete `bun.lock`, reinstall, and re-run `bun audit`. Use when `devcheck` flags a transitive advisory — Bun's `update` is sticky on transitive resolutions, so the advisory may be a stale-lockfile false positive. If it survives the refresh, it's real. |
 | `npm run tree` | Generate directory structure doc |
 | `npm run format` | Auto-fix formatting |
 | `npm test` | Run tests |
@@ -302,6 +303,42 @@ When you complete a skill's checklist, check the boxes and add a completion time
 | `npm run start:http` | Production mode (HTTP) |
 | `npm run changelog:build` | Regenerate `CHANGELOG.md` from `changelog/*.md` |
 | `npm run changelog:check` | Verify `CHANGELOG.md` is in sync (used by devcheck) |
+| `npm run bundle` | Build and pack as `.mcpb` for one-click Claude Desktop install |
+
+---
+
+## Bundling
+
+`npm run bundle` produces a `.mcpb` extension bundle for one-click install in Claude Desktop. MCPB is stdio-only — HTTP and Cloudflare Workers deployments are unaffected. Consumers who don't need it can delete `manifest.json` and `.mcpbignore`; `lint:packaging` skips cleanly.
+
+**Adding an env var requires both files:** `server.json` (registry discovery, `environmentVariables[]`) and `manifest.json` (bundle install UX, `mcp_config.env` + `user_config`). `lint:packaging` (run by `devcheck`) verifies the env var names match.
+
+**README install badges.** Drop these into the project README to give users one-click install paths. Fill in `<OWNER>` / `<REPO>` / `<PACKAGE_NAME>` and encode the per-server config. Cursor + VS Code badges assume the server is published to npm; Claude Desktop downloads the `.mcpb` directly so npm publishing isn't required.
+
+| Client | Mechanism |
+|:-------|:----------|
+| Claude Desktop | Browser downloads the `.mcpb` from the latest GitHub Release; OS file handler routes it to Claude Desktop, which opens the install dialog. No deep-link URL scheme yet — this is the canonical path. |
+| Cursor | Official `cursor://` deep link with base64 JSON config. |
+| VS Code / Insiders | Official `vscode:mcp/install?...` and `vscode-insiders:mcp/install?...` deep links with URL-encoded JSON. |
+| Claude Code / Codex | CLI only (`claude mcp add` / `codex mcp add`); no URL scheme. |
+
+```markdown
+[![Install in Claude Desktop](https://img.shields.io/badge/Install_in-Claude_Desktop-D97757?style=for-the-badge&logo=anthropic&logoColor=white)](https://github.com/<OWNER>/<REPO>/releases/latest/download/<PACKAGE_NAME>.mcpb)
+[![Install in Cursor](https://cursor.com/deeplink/mcp-install-dark.svg)](cursor://anysphere.cursor-deeplink/mcp/install?name=<PACKAGE_NAME>&config=<BASE64_CONFIG>)
+[![Install in VS Code](https://img.shields.io/badge/VS_Code-Install_Server-0098FF?style=for-the-badge&logo=visualstudiocode&logoColor=white)](vscode:mcp/install?<URLENCODED_JSON>)
+```
+
+Generate the encoded configs (replace `<PACKAGE_NAME>` and adjust the install command — `npx -y …` is the standard shape for an npm-published stdio server):
+
+```bash
+# Cursor: base64-encoded JSON
+echo -n '{"command":"npx","args":["-y","<PACKAGE_NAME>"]}' | base64
+
+# VS Code: URL-encoded JSON
+node -p 'encodeURIComponent(JSON.stringify({name:"<PACKAGE_NAME>",command:"npx",args:["-y","<PACKAGE_NAME>"]}))'
+```
+
+The Claude Desktop badge requires the bundle to ship with a stable filename — `bun run bundle` outputs `dist/<PACKAGE_NAME>.mcpb`, and `release-and-publish` attaches that file to the GitHub Release. `releases/latest/download/<PACKAGE_NAME>.mcpb` then redirects to the most recent release.
 
 ---
 

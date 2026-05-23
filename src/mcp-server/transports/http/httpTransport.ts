@@ -23,6 +23,7 @@ import { httpErrorHandler } from '@/mcp-server/transports/http/httpErrorHandler.
 import type { HonoNodeBindings } from '@/mcp-server/transports/http/httpTypes.js';
 import { createLandingPageHandler } from '@/mcp-server/transports/http/landing-page/index.js';
 import { protectedResourceMetadataHandler } from '@/mcp-server/transports/http/protectedResourceMetadata.js';
+import { createRobotsTxtHandler } from '@/mcp-server/transports/http/robotsTxt.js';
 import { createServerCardHandler } from '@/mcp-server/transports/http/serverCard.js';
 import { generateSecureSessionId } from '@/mcp-server/transports/http/sessionIdUtils.js';
 import { type SessionIdentity, SessionStore } from '@/mcp-server/transports/http/sessionStore.js';
@@ -348,6 +349,15 @@ export async function createHttpApp<TBindings extends object = HonoNodeBindings>
   // AND by the landing page when `landing.requireAuth=true`, so both surfaces
   // apply the same token validation (JWT/OAuth) the operator configured.
   const authStrategy = createAuthStrategy();
+
+  // robots.txt — allow `/`, disallow the MCP JSON-RPC endpoint. Only mounted
+  // alongside the landing page; if landing is disabled the host is treated as
+  // an API-only deployment and a robots policy is the operator's call.
+  const robotsTxtPath = '/robots.txt';
+  if (manifest.landing.enabled && config.mcpHttpEndpointPath !== robotsTxtPath) {
+    app.get(robotsTxtPath, createRobotsTxtHandler(manifest));
+    logger.debug(`robots.txt mounted at ${robotsTxtPath}.`, transportContext);
+  }
 
   // HTML landing page at `/` — unauthenticated by default (`landing.requireAuth`
   // is honored inside the handler when enabled). Skipped when landing.enabled=false

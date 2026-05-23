@@ -1,6 +1,6 @@
 # mcp-ts-core - Directory Structure
 
-Generated on: 2026-05-11 16:38:40
+Generated on: 2026-05-23 02:01:12
 
 ```text
 mcp-ts-core/
@@ -115,6 +115,8 @@ mcp-ts-core/
 │   ├── devdocs.ts
 │   ├── fetch-openapi-spec.ts
 │   ├── lint-mcp.ts
+│   ├── lint-packaging.ts
+│   ├── list-skills.ts
 │   ├── split-changelog.ts
 │   ├── tree.ts
 │   └── update-coverage.ts
@@ -172,6 +174,12 @@ mcp-ts-core/
 │   ├── maintenance/
 │   │   └── SKILL.md
 │   ├── migrate-mcp-ts-template/
+│   │   └── SKILL.md
+│   ├── multi-server-orchestration/
+│   │   ├── references/
+│   │   │   ├── greenfield-buildout.md
+│   │   │   ├── maintenance-pass.md
+│   │   │   └── release-pass.md
 │   │   └── SKILL.md
 │   ├── polish-docs-meta/
 │   │   ├── references/
@@ -289,6 +297,7 @@ mcp-ts-core/
 │   │   │   │   ├── httpTransport.ts
 │   │   │   │   ├── httpTypes.ts
 │   │   │   │   ├── protectedResourceMetadata.ts
+│   │   │   │   ├── robotsTxt.ts
 │   │   │   │   ├── serverCard.ts
 │   │   │   │   ├── sessionIdUtils.ts
 │   │   │   │   └── sessionStore.ts
@@ -454,6 +463,7 @@ mcp-ts-core/
 │   │       └── echo.tool.test.ts
 │   ├── _.dockerignore
 │   ├── _.gitignore
+│   ├── _.mcpbignore
 │   ├── _tsconfig.build.json
 │   ├── _tsconfig.json
 │   ├── .env.example
@@ -462,6 +472,7 @@ mcp-ts-core/
 │   ├── CLAUDE.md
 │   ├── devcheck.config.json
 │   ├── Dockerfile
+│   ├── manifest.json
 │   ├── package.json
 │   ├── server.json
 │   └── vitest.config.ts
@@ -530,6 +541,7 @@ mcp-ts-core/
 │   │   │   ├── landing-rules.test.ts
 │   │   │   ├── portability-rules.test.ts
 │   │   │   ├── server-json-rules.test.ts
+│   │   │   ├── source-text.test.ts
 │   │   │   ├── tool-rules.test.ts
 │   │   │   └── validate.test.ts
 │   │   ├── mcp-server/
@@ -585,6 +597,7 @@ mcp-ts-core/
 │   │   │   │   │   ├── httpTypes.test.ts
 │   │   │   │   │   ├── landing-page.test.ts
 │   │   │   │   │   ├── protectedResourceMetadata.test.ts
+│   │   │   │   │   ├── robotsTxt.test.ts
 │   │   │   │   │   ├── serverCard.test.ts
 │   │   │   │   │   ├── sessionIdUtils.runtime.test.ts
 │   │   │   │   │   ├── sessionIdUtils.test.ts
@@ -731,6 +744,7 @@ mcp-ts-core/
 ├── .gitattributes
 ├── .gitignore
 ├── .markdownlint.jsonc
+├── .mcpbignore
 ├── AGENTS.md
 ├── biome.json
 ├── bun.lock

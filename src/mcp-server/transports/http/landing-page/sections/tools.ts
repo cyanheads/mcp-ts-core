@@ -85,25 +85,27 @@ function renderToolCard(tool: ManifestTool, bucket: Bucket): SafeHtml {
   const annotations = tool.annotations as { openWorldHint?: boolean } | undefined;
   const isDisabled = bucket === 'disabled';
 
-  // Bucket badge first — the safety signal readers track at a glance. For
-  // disabled tools, lead with the disabled pill, then surface the underlying
-  // mutability so operators understand what flavor of tool sits behind the gate
-  // — but skip the companion when the tool is `unspecified`, since "would be
-  // unspecified" carries no signal worth the pixels.
-  const pills: SafeHtml[] = [renderPill(bucket, bucket)];
+  // The spine carries the mutability glance signal; the pill remains for
+  // a11y (colorblind users, screen-reader text) but de-emphasized into the
+  // card meta strip. Disabled cards still lead with the disabled pill +
+  // underlying classification companion so operators see what's gated.
+  const mutabilityPills: SafeHtml[] = [renderPill(bucket, bucket)];
   if (isDisabled) {
     const underlying = classifyMutability(tool);
     if (underlying !== 'unspecified') {
-      pills.push(renderPill(`would be ${underlying}`, `${underlying}-muted`));
+      mutabilityPills.push(renderPill(`would be ${underlying}`, `${underlying}-muted`));
     }
   }
-  if (annotations?.openWorldHint) pills.push(renderPill('open-world', 'openworld'));
-  if (tool.isTask) pills.push(renderPill('task', 'task'));
-  if (tool.isApp) pills.push(renderPill('app', 'app'));
+  // Auxiliary signals are orthogonal to mutability and worth a dedicated
+  // slot — these surface inline with the title rather than in the meta strip
+  // because they're rare and meaningful.
+  const auxPills: SafeHtml[] = [];
+  if (annotations?.openWorldHint) auxPills.push(renderPill('open-world', 'openworld'));
+  if (tool.isTask) auxPills.push(renderPill('task', 'task'));
+  if (tool.isApp) auxPills.push(renderPill('app', 'app'));
 
-  const source = tool.sourceUrl
-    ? html`<a class="source-link" href="${tool.sourceUrl}" rel="noopener" aria-label="View source for ${tool.name}">view source ↗</a>`
-    : html``;
+  const auxPillRow =
+    auxPills.length > 0 ? html`<div class="pill-row" role="list">${auxPills}</div>` : html``;
 
   const scopeChips =
     tool.auth && tool.auth.length > 0
@@ -134,6 +136,10 @@ function renderToolCard(tool: ManifestTool, bucket: Bucket): SafeHtml {
         </details>
       `;
 
+  const source = tool.sourceUrl
+    ? html`<a class="source-link" href="${tool.sourceUrl}" rel="noopener" aria-label="View source for ${tool.name}">view source ↗</a>`
+    : html``;
+
   // Search target: name + description as a single lowercase string. Hidden
   // attribute (not visible) so the filter script can match without parsing
   // DOM text repeatedly. Description gets normalized whitespace so multi-line
@@ -153,15 +159,18 @@ function renderToolCard(tool: ManifestTool, bucket: Bucket): SafeHtml {
     >
       <header class="card-head">
         <h3 class="card-title"><a href="#${anchor}">${tool.name}</a></h3>
-        <div class="pill-row" role="list">${pills}</div>
-        ${source}
+        ${auxPillRow}
       </header>
       <p class="card-desc">${tool.description}</p>
       <footer class="card-foot">
-        ${scopeChips}
+        <div class="card-meta">
+          <div class="pill-row pill-row--meta" role="list">${mutabilityPills}</div>
+          ${scopeChips}
+        </div>
         <div class="card-actions">
           ${callout}
           ${schemaPreview}
+          ${source}
         </div>
       </footer>
     </article>

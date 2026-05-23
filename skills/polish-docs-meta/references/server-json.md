@@ -20,7 +20,7 @@ The manifest uses the official MCP schema. A typical server has two package entr
 {
   "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
   "name": "io.github.org-name/my-mcp-server",
-  "description": "MCP server for the Acme API — project management and task tracking.",
+  "description": "Search projects, manage tasks, track teams.",
   "repository": {
     "url": "https://github.com/org-name/my-mcp-server",
     "source": "github"
@@ -126,7 +126,7 @@ The manifest uses the official MCP schema. A typical server has two package entr
 |:------|:---------|:------------|
 | `$schema` | Yes | Always `"https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json"` |
 | `name` | Yes | Reverse-domain identifier: `io.github.{owner}/{repo}`. Matches `mcpName` in `package.json`. |
-| `description` | Yes | One-line description of the server. |
+| `description` | Yes | One-line description of the server. **Action-first** — lead with the actions/workflows (e.g., `"Search projects, manage tasks, track teams."`), not `"MCP server for …"`. Drop the `via MCP. STDIO …` suffix that the `package.json` description carries — registry context already implies MCP. |
 | `repository` | No | `{ "url": "https://github.com/...", "source": "github" }` |
 | `version` | Yes | Semver version. Must match `package.json` version. |
 | `packages` | Yes | Array of package entries — one per transport/runtime combo. |

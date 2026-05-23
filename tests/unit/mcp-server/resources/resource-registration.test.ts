@@ -76,7 +76,9 @@ describe('ResourceRegistry', () => {
     mockServer = {
       resource: vi.fn(() => {}),
       setResourceRequestHandlers: vi.fn(),
+      sendPromptListChanged: vi.fn(),
       sendResourceListChanged: vi.fn(),
+      sendToolListChanged: vi.fn(),
       server: { sendResourceUpdated: vi.fn() },
     };
   });
@@ -116,6 +118,27 @@ describe('ResourceRegistry', () => {
       await registry.registerAll(mockServer);
 
       expect(mockServer.resource).toHaveBeenCalledTimes(0);
+      expect(mockServer.setResourceRequestHandlers).toHaveBeenCalledOnce();
+    });
+
+    it('should reject duplicate resource names before registering the second resource', async () => {
+      const resources = [
+        resource('first://{id}', {
+          name: 'duplicate',
+          description: 'First',
+          handler: () => ({}),
+        }),
+        resource('second://{id}', {
+          name: 'duplicate',
+          description: 'Second',
+          handler: () => ({}),
+        }),
+      ];
+
+      const registry = new ResourceRegistry(resources, services);
+
+      await expect(registry.registerAll(mockServer)).rejects.toThrow(/Duplicate resource name/);
+      expect(mockServer.resource).toHaveBeenCalledTimes(1);
     });
 
     it('should register resources with correct metadata', async () => {
@@ -188,6 +211,34 @@ describe('ResourceRegistry', () => {
       expect(call[0]).toBe('item-resource');
       expect(call[1]).toBeInstanceOf(ResourceTemplate);
       expect(call[1]).not.toBe('items://{id}');
+    });
+
+    it('wires per-server notifier closures into resource handler context', async () => {
+      const testResource = resource('notify://{id}', {
+        name: 'notify-resource',
+        description: 'Notifies from handler',
+        params: z.object({ id: z.string().describe('id') }),
+        handler: (_params, ctx) => {
+          ctx.notifyPromptListChanged?.();
+          ctx.notifyResourceListChanged?.();
+          ctx.notifyResourceUpdated?.('notify://updated');
+          ctx.notifyToolListChanged?.();
+          return { ok: true };
+        },
+      });
+
+      const registry = new ResourceRegistry([testResource], services);
+      await registry.registerAll(mockServer);
+
+      const handler = mockServer.resource.mock.calls[0][3];
+      await handler(new URL('notify://123'), { id: '123' }, new Request('https://example.com'));
+
+      expect(mockServer.sendPromptListChanged).toHaveBeenCalledOnce();
+      expect(mockServer.sendResourceListChanged).toHaveBeenCalledOnce();
+      expect(mockServer.server.sendResourceUpdated).toHaveBeenCalledWith({
+        uri: 'notify://updated',
+      });
+      expect(mockServer.sendToolListChanged).toHaveBeenCalledOnce();
     });
   });
 

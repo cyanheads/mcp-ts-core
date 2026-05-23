@@ -9,7 +9,8 @@ Use this section order. Omit sections that don't apply (e.g., skip Docker/Worker
 ```text
 # {Server Name}                         ← centered HTML block
 [Public hosted callout if present]      ← centered HTML block, directly under badges
-Badges row                              ← npm, Docker, Version, Framework, MCP SDK, License, TS, Bun, Coverage
+Framework badge                         ← solo, spotlight row — `Built on @cyanheads/mcp-ts-core` (cyan-300 #67E8F9)
+Badges rows                             ← grouped on subsequent rows — npm, Docker, Version, MCP SDK, License, TS, Bun, Coverage
 ---
 ## Tools                                ← grouping sentence → summary table → per-tool subsections
 ## Resources and prompts (if any)       ← single combined table (Type / Name / Description)
@@ -27,21 +28,23 @@ Badges row                              ← npm, Docker, Version, Framework, MCP
 
 ### Title Block
 
-Centered HTML. The `<h1>` is the server name — use the scoped package name if published under a scope (e.g., `@cyanheads/my-mcp-server`). The `<p>` is a bold one-liner: what the server wraps, key capabilities, transport/deployment options. **Nest the surface count as a `<div>` inside the same `<p>`**, separated by `•` (U+2022 bullet) — not as a second `<p>`. This matches the shipping convention across `@cyanheads/*` servers.
+Centered HTML. The `<h1>` is the server name — use the scoped package name if published under a scope (e.g., `@cyanheads/my-mcp-server`). The `<p>` is a bold **action-first** one-liner: lead with what the server _does_, not what it _is_. List the headline actions/workflows, then end with `via MCP. STDIO or Streamable HTTP.` (or whichever transports apply). Avoid `MCP server for/that …` framings — they describe the wrapper instead of the capability. **Nest the surface count as a `<div>` inside the same `<p>`**, separated by `•` (U+2022 bullet) — not as a second `<p>`. This matches the shipping convention across `@cyanheads/*` servers.
 
 ```html
 <div align="center">
   <h1>@cyanheads/my-mcp-server</h1>
-  <p><b>MCP server for the Acme API — search projects, manage tasks, track teams. STDIO or Streamable HTTP.</b>
+  <p><b>Search projects, manage tasks, track teams via MCP. STDIO or Streamable HTTP.</b>
   <div>7 Tools • 2 Resources • 1 Prompt</div>
   </p>
 </div>
 
 <div align="center">
 
-[![npm](https://img.shields.io/npm/v/@cyanheads/my-mcp-server?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/@cyanheads/my-mcp-server) [![Version](https://img.shields.io/badge/Version-1.0.0-blue.svg?style=flat-square)](./CHANGELOG.md) [![Framework](https://img.shields.io/badge/Built%20on-@cyanheads/mcp--ts--core-259?style=flat-square)](https://www.npmjs.com/package/@cyanheads/mcp-ts-core) [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^1.29.0-green.svg?style=flat-square)](https://modelcontextprotocol.io/)
+[![Framework](https://img.shields.io/badge/Built%20on-@cyanheads/mcp--ts--core-67E8F9?style=flat-square)](https://www.npmjs.com/package/@cyanheads/mcp-ts-core)
 
-[![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg?style=flat-square)](./LICENSE) [![TypeScript](https://img.shields.io/badge/TypeScript-^6.0.3-3178C6.svg?style=flat-square)](https://www.typescriptlang.org/) [![Bun](https://img.shields.io/badge/Bun-v1.3.2-blueviolet.svg?style=flat-square)](https://bun.sh/)
+[![Version](https://img.shields.io/badge/Version-1.0.0-blue.svg?style=flat-square)](./CHANGELOG.md) [![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg?style=flat-square)](./LICENSE) [![Docker](https://img.shields.io/badge/Docker-ghcr.io-2496ED?style=flat-square&logo=docker&logoColor=white)](https://github.com/users/cyanheads/packages/container/package/my-mcp-server)
+
+[![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^1.29.0-green.svg?style=flat-square)](https://modelcontextprotocol.io/) [![npm](https://img.shields.io/npm/v/@cyanheads/my-mcp-server?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/@cyanheads/my-mcp-server) [![TypeScript](https://img.shields.io/badge/TypeScript-^6.0.3-3178C6.svg?style=flat-square)](https://www.typescriptlang.org/)
 
 </div>
 ```
@@ -52,10 +55,10 @@ The header tagline must match the `package.json` `description`.
 
 | Badge | When to include |
 |:------|:----------------|
+| Framework | Always — links to `@cyanheads/mcp-ts-core` on npm. Cyan-300 (`67E8F9`) for dark text. **Solo on its own row** as the spotlight badge. |
 | npm | Published to npm |
 | Docker | Published to ghcr.io or Docker Hub |
 | Version | Always — link to CHANGELOG.md |
-| Framework | Always — links to `@cyanheads/mcp-ts-core` on npm |
 | MCP SDK | Always — show the `@modelcontextprotocol/sdk` version |
 | License | Always |
 | TypeScript | Always |
@@ -64,7 +67,7 @@ The header tagline must match the `package.json` `description`.
 | Status | Optional — Stable, Beta, etc. |
 | Code Coverage | If coverage is tracked |
 
-Add a `---` horizontal rule after the badge block.
+**Layout:** Framework badge sits alone on the first row of the badge block — it's the brand link back to the framework and earns its own line. Group the remaining badges across one or two subsequent rows; keep related concerns together (e.g., release/license/runtime on one row, ecosystem/language on another). Add a `---` horizontal rule after the badge block.
 
 ### Public Hosted Callout (if present)
 

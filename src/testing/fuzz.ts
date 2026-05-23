@@ -94,8 +94,8 @@ function zodNodeToArbitrary(schema: unknown, depth: number): fc.Arbitrary<unknow
   }
 
   // Primitives
-  if (schema instanceof ZodString) {
-    return arbitraryForZodString(schema);
+  if (schema instanceof ZodString || zodTypeName(schema) === 'string') {
+    return arbitraryForZodString(schema as ZodString);
   }
   if (schema instanceof ZodNumber) {
     return arbitraryForZodNumber(schema);

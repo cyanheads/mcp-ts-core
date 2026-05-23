@@ -17,6 +17,7 @@ const PACKAGE_JSON = JSON.parse(readFileSync(join(PACKAGE_ROOT, 'package.json'),
   version: string;
   files?: string[];
   dependencies?: Record<string, string>;
+  peerDependencies?: Record<string, string>;
 };
 /**
  * Scaffold scripts derived from `package.json` `files:` — the canonical
@@ -86,7 +87,7 @@ function init(): void {
     PACKAGE_NAME: packageName,
     FRAMEWORK_VERSION: PACKAGE_JSON.version,
     MCP_SDK_VERSION: PACKAGE_JSON.dependencies?.['@modelcontextprotocol/sdk'] ?? '',
-    ZOD_VERSION: PACKAGE_JSON.dependencies?.zod ?? '',
+    ZOD_VERSION: PACKAGE_JSON.peerDependencies?.zod ?? '',
   };
 
   const created: string[] = [];
