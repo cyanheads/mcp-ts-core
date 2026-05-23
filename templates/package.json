@@ -28,6 +28,8 @@
     "list-skills": "tsx scripts/list-skills.ts",
     "format": "biome check --write --unsafe .",
     "lint:mcp": "tsx scripts/lint-mcp.ts",
+    "lint:packaging": "tsx scripts/lint-packaging.ts",
+    "bundle": "npm run build && npx -y @anthropic-ai/mcpb pack . dist/{{PACKAGE_NAME}}.mcpb",
     "changelog:build": "tsx scripts/build-changelog.ts",
     "changelog:check": "tsx scripts/build-changelog.ts --check",
     "test": "vitest run",

@@ -4,7 +4,7 @@ All notable changes to this project. Each entry links to its full per-version fi
 
 ## [0.9.2](changelog/0.9.x/0.9.2.md) — 2026-05-22 · ⚠️ Breaking
 
-`zod` → peerDep (consumers must `bun add zod`). `field-test`: zsh `status` clash + per-agent helper paths. `multi-server-orchestration` skill + `list-skills`. `format-parity` walks each union branch. Landing refresh. `audit:refresh` script. `fast-xml-parser` unpinned `^5.8.0`. Dep refresh: `@hono/mcp` `^0.3.0`, `hono` `^4.12.22`, vitest `^4.1.7`.
+`zod` → peerDep (consumers must `bun add zod`). MCPB bundle support (`bundle` script + `lint:packaging`). `field-test`: zsh `status` clash + per-agent helper paths. `multi-server-orchestration` skill + `list-skills`. `format-parity` walks each union branch. `fast-xml-parser` unpinned `^5.8.0`. Dep refresh: `@hono/mcp` `^0.3.0`, vitest `^4.1.7`.
 
 ## [0.9.1](changelog/0.9.x/0.9.1.md) — 2026-05-15
 

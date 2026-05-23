@@ -417,6 +417,20 @@ const ALL_CHECKS: Check[] = [
       `Fix definition errors above — each diagnostic links to its rule in ${c.bold('skills/api-linter/SKILL.md')}.`,
   },
   {
+    name: 'Packaging',
+    flag: '--no-packaging',
+    canFix: false,
+    // Validates env var alignment between manifest.json (MCPB bundle) and
+    // server.json (MCP Registry). Skipped cleanly when manifest.json is absent
+    // — consumers who deleted it for an HTTP-only deploy are unaffected.
+    getCommand: () => {
+      if (!existsSync(path.join(ROOT_DIR, 'manifest.json'))) return null;
+      return ['bun', 'run', 'scripts/lint-packaging.ts'];
+    },
+    tip: (c) =>
+      `Align env var names between ${c.bold('manifest.json')} ${c.bold('mcp_config.env')} and ${c.bold('server.json')} stdio package ${c.bold('environmentVariables[]')}.`,
+  },
+  {
     name: 'Framework Antipatterns',
     flag: '--no-framework-antipatterns',
     canFix: false,
