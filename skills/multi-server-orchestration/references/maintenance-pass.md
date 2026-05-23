@@ -4,8 +4,8 @@ description: >
   Multi-server-orchestration reference for maintenance passes. Drives parallel `bun update --latest`, changelog investigation (via the changelog skill), framework adoption per the maintenance skill's auto-adopt rule, skill/script sync (Phase A/B/C), and verification across N existing MCP server projects. Optional Bash-git wrap-up fanout commits adoptions after user authorization.
 metadata:
   author: cyanheads
-  version: "1.0"
-  audience: external
+  version: "1.1"
+  audience: internal
   type: reference
 ---
 
@@ -46,6 +46,8 @@ Phase 4 is optional — if the user wants to review changes locally first or spl
 
 One sub-agent per target. Each agent runs the `maintenance` skill end-to-end in **Mode A** (full flow from `bun outdated` through verification).
 
+**Orient block substitution.** For maintenance, the parent SKILL.md's orient step 6 ("read spec artifacts") has no applicable artifact — the maintenance skill itself is the spec, already covered by step 5. When constructing the per-target prompt, replace step 6 with "N/A for maintenance" so the sub-agent doesn't hunt for a non-existent `docs/design.md`.
+
 **Task body (after the orient block):**
 
 > Read `skills/maintenance/SKILL.md` (or `.claude/skills/maintenance/SKILL.md`, whichever exists). Run it end-to-end in Mode A:
@@ -60,9 +62,10 @@ One sub-agent per target. Each agent runs the `maintenance` skill end-to-end in 
 > 8. Produce the Step 8 numbered summary (Updated packages, Breaking changes handled, Features adopted, Skills synced, New/changed skills available, Open decisions, Status)
 >
 > Constraints:
-> - Do NOT run `git` commands. Leave the working tree dirty for orchestrator review.
-> - NEVER `git stash` for any reason. NEVER `git reset --hard`, `git restore .`, `git clean -f`, or `git checkout -- .`.
-> - Halt and report if devcheck or tests can't be made green after adoption.
+> - **No write git commands** — no `commit`, `push`, `tag`, `branch`, `merge`, `rebase`, `cherry-pick`, `add`, `reset`, `restore`, `checkout --`, `clean`, `stash`. Leave the working tree dirty for orchestrator review.
+> - Read-only git is allowed and expected — `status`, `diff`, `log`, `show`, `blame`. The maintenance skill's Step 5 Phase A explicitly requires `git diff skills/` after sync to surface adoption signal; do that.
+> - NEVER `git stash` for any reason. NEVER `git reset --hard`, `git restore .`, `git clean -f`, or `git checkout -- .` — these violate the global protocol.
+> - Halt and report if `bun run devcheck` can't be made green after adoption. `bun run test` is skip-not-halt: if the project has no `test` script in `package.json`, note it and continue.
 > - Output the Step 8 summary verbatim at the end of your run — the orchestrator parses it.
 >
 > If the `maintenance` skill's own version increased in Phase A of the skill sync (skill-version paradox), re-read the synced `skills/maintenance/SKILL.md` and continue from Step 5 onward with the new version.
@@ -104,7 +107,7 @@ If the maintenance pass should drive a version bump (breaking framework upgrade,
 | 2 | Skill-version paradox — if `node_modules/@cyanheads/mcp-ts-core/skills/maintenance/SKILL.md` version is newer than the synced project copy, feature-adoption rows added in the new version don't surface | Sub-agent prompt restates the paradox: after Phase A sync completes, re-read the synced `maintenance` SKILL.md and continue from Step 5 |
 | 3 | Per-target adoption divergence is expected — projects on different starting framework versions adopt different things | Don't try to normalize. Surface divergence as informational in the roll-up; the user may run a separate orchestration to bring stragglers forward |
 | 4 | The `changelog` skill may not exist in a target's skill directory yet | Sub-agent falls back to direct `node_modules/<pkg>/CHANGELOG.md` reading, as documented in the maintenance skill's Step 3 |
-| 5 | Sub-agent runs git commands despite instruction | Restate "Do NOT run git commands" + the no-`stash` rule in the prompt body; verify via `git log --oneline -1` per target after Phase 2 |
+| 5 | Sub-agent runs write git commands despite instruction (commit/push/reset/stash/etc.) | Restate the no-write-git list + the no-`stash` rule in the prompt body; verify via `git log --oneline -1` per target after Phase 2 — should show no new commits since pre-flight |
 | 6 | Targets at the same framework version produce inconsistent adoption choices | Usually means one agent missed a site; spot-check the Step 8 "Features adopted" lists across targets. If a feature shows up for 3 of 4, the 4th likely missed it — spawn a narrow finish-pass agent for that target |
 | 7 | Big monorepo or many adoptions cause context exhaustion in a sub-agent | Narrow the prompt: if a target has many breaking framework changes, split the sub-agent's work into "update deps + verify" and "adopt features" as two phases against that target |
 

@@ -4,8 +4,8 @@ description: >
   Orchestrate parallel sub-agent fanouts across one or more MCP server projects — the same workflow run independently per target. Use for greenfield builds across N new servers, maintenance passes across N existing ones, or any repeatable workflow that benefits from fresh-context per-target sub-agents. Encodes the orient template every sub-agent needs (CLAUDE.md chain + list-skills + spec artifacts), the universal hard rules around git tooling and authorization, common gotchas that bite across runs, and a router into per-scenario references for the phase pattern.
 metadata:
   author: cyanheads
-  version: "1.0"
-  audience: external
+  version: "1.1"
+  audience: internal
   type: workflow
 ---
 
@@ -40,9 +40,10 @@ Read this SKILL.md end-to-end first — the concepts, orient block, and hard rul
 |:---------|:----------|:-----|
 | **Greenfield build-out** | `references/greenfield-buildout.md` | New server(s) from `bunx @cyanheads/mcp-ts-core init` driven through design → build → first release |
 | **Maintenance pass** | `references/maintenance-pass.md` | Existing server(s) need `bun update --latest`, changelog investigation, framework adoption, and verification — optionally followed by a commit/push |
-| **Release pass** | `references/release-pass.md` | Existing server(s) have committed/staged work that needs to ship as a new version — verification → README polish → wrapup (version + changelog + commit + tag) → publish (npm / MCP Registry / GHCR via `release-and-publish`) → optional GH issue closure |
+| **Wrap-up pass** | `references/wrapup-pass.md` | Existing server(s) with committed/staged work to land locally as a new commit + annotated tag — verification → optional doc review → wrap-up (version + changelog + commit + tag) — **local only, no push**. Distilled from `git_wrapup_instructions` |
+| **Release-and-publish pass** | `references/release-and-publish-pass.md` | Existing server(s) have committed/staged work that needs to ship as a new version end-to-end — verification → README polish → wrap-up (version + changelog + commit + tag) → publish (npm / MCP Registry / GHCR via the `release-and-publish` skill) → optional GH issue closure. Disambiguated from the standalone `release-and-publish` skill, which is the single-target publish step this reference invokes per target |
 
-Scenarios chain naturally: a maintenance pass often runs into a release pass; a greenfield build-out's final phase is effectively a release pass. Pick the reference for the current scope and chain explicitly if more work follows.
+**Mental model — scenarios are related but never auto-chain.** A maintenance pass often produces work worth wrapping up; a wrap-up commonly precedes a release; a greenfield build-out ends with what's effectively a release. Useful for orienting around what comes next conceptually — but **each scenario requires its own explicit user authorization to invoke**. The orchestrator never advances from one to the next on its own. Pick the reference for the current scope; if more work follows, wait for the user to direct it.
 
 For scenarios not listed (security audits, design-only extensions, framework-wide migrations), the concepts/orient/rules/gotchas below are universal. Author a new reference describing the phase pattern when the workflow becomes repeatable.
 

@@ -4,7 +4,7 @@ description: >
   Investigate, adopt, and verify dependency updates — with special handling for `@cyanheads/mcp-ts-core`. Captures what changed, understands why, cross-references against the codebase, adopts framework improvements, syncs project skills, and runs final checks. Supports two entry modes: run the full flow end-to-end, or review updates you already applied.
 metadata:
   author: cyanheads
-  version: "2.2"
+  version: "2.3"
   audience: external
   type: workflow
 ---
@@ -29,8 +29,10 @@ Both modes converge at Step 3 and end at Step 8.
 ### 1. Survey what's outdated (Mode A only)
 
 ```bash
-bun outdated
+bun run devcheck --only outdated
 ```
+
+Wraps `bun outdated` with the project's `devcheck.config.json` allowlist applied, so intentionally-pinned packages don't surface as actionable. Plain `bun outdated` works too if you want the unfiltered view.
 
 Note: `bun update --latest` crosses semver majors; `bun update` alone respects ranges. Use `--latest` unless a package is intentionally pinned.
 
@@ -101,6 +103,8 @@ Procedure:
    - If the local version is equal or newer, skip (local override)
 3. Do not touch skills in `skills/` that don't exist in the package (server-specific)
 
+**Skill diffs are adoption signal, not just sync output.** After replacing files in `skills/`, run `git diff skills/` to read what changed. Updated skill bodies describe new patterns, refined workflows, or new conventions — apply them to the codebase in Step 6 the same way you'd apply a framework API addition. The file copy is the *trigger*, not the work. The work is what the updated skill now says to do.
+
 **Phase B — Project `skills/` → Agent directories**
 
 The `setup` skill instructs consumers to copy `skills/*` into their agent's skill directory at init time. Those copies go stale unless re-synced. Detect which agent directories exist and propagate:
@@ -162,6 +166,7 @@ Apply the findings from Steps 3 and 4. Framework changes and third-party library
 
 The consumer opted into the framework; its templates, skills, scripts, linter rules, conventions, and new APIs that supersede local code are authoritative. Adopt them now — not as a follow-up.
 
+- **Synced skill content from Phase A** — `git diff skills/` for every skill that was updated. Each updated body is new framework guidance; apply it to matching surfaces in this server. Examples: `add-tool` gains a section on output formatting → audit existing tool definitions against that section; `api-errors` documents a new contract pattern → adopt across error surfaces; `security-pass` adds a new check → run it against the surface. Skill updates aren't metadata.
 - **Breaking changes** — fix call sites. Not optional.
 - **Deprecations** — migrate now, while context is fresh.
 - **New linter rules** — if the rule now flags existing code, fix the code; don't silence the rule.
@@ -178,6 +183,7 @@ The consumer opted into the framework; its templates, skills, scripts, linter ru
 | "Marginal benefit / leaving as-is" | Breaking change with multiple migration paths that need user input |
 | "Per-tool refactor — worth doing as a focused follow-up" | Feature genuinely doesn't apply (the surface doesn't exist in this server) |
 | "Existing helper has rich domain messages we'd lose" | — (port the messages onto the framework path) |
+| "Skill was synced, the file change is the adoption" | — (the file copy is the trigger; the adoption is applying the new guidance to the code) |
 
 If you find yourself writing the left-column phrasing in Step 8's "Open decisions", stop and adopt it instead. Cost/benefit reasoning belongs to third-party changes only.
 

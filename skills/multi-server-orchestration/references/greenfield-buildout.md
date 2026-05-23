@@ -4,8 +4,8 @@ description: >
   Multi-server-orchestration reference for greenfield build-outs. Drives one or more freshly-scaffolded MCP servers through 13 phases: idea seed → design → critical review → setup + repo → first wrap-up (v0.1.0) → polish docs/meta → normalize → optional design extensions → interim wrap-up → build → finish → simplify → final wrap-up. Each phase is a parallel sub-agent fanout (one agent per target) with Bash git for all commit/tag/push steps.
 metadata:
   author: cyanheads
-  version: "1.0"
-  audience: external
+  version: "1.1"
+  audience: internal
   type: reference
 ---
 
@@ -144,7 +144,8 @@ The big one. One sub-agent per target builds the full implementation from `docs/
 
 - "Plan carefully before acting. Think the design through end-to-end before writing files."
 - "Run `bun run devcheck` often to verify your work as you go."
-- "Do NOT use `git` commands."
+- "No write `git` commands: no `commit`, `push`, `add`, `tag`, `reset`, `restore`, `checkout --`, `clean`, `stash`. Read-only git is allowed — `status`, `diff`, `log` are useful for tracking your own changes."
+- "NEVER `git stash` for any reason. NEVER `git reset --hard`, `git restore .`, `git clean -f`, or `git checkout -- .` — these violate the global protocol."
 - "Do NOT run `field-test`. That's reserved for the user's manual verification later."
 - Orient block — non-negotiable.
 

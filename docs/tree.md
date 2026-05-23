@@ -1,6 +1,6 @@
 # mcp-ts-core - Directory Structure
 
-Generated on: 2026-05-23 02:01:12
+Generated on: 2026-05-23 03:37:29
 
 ```text
 mcp-ts-core/
@@ -179,7 +179,8 @@ mcp-ts-core/
 │   │   ├── references/
 │   │   │   ├── greenfield-buildout.md
 │   │   │   ├── maintenance-pass.md
-│   │   │   └── release-pass.md
+│   │   │   ├── release-and-publish-pass.md
+│   │   │   └── wrapup-pass.md
 │   │   └── SKILL.md
 │   ├── polish-docs-meta/
 │   │   ├── references/

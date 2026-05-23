@@ -1,17 +1,19 @@
 ---
-name: release-pass
+name: release-and-publish-pass
 description: >
-  Multi-server-orchestration reference for release passes. Drives parallel verification → README polish → wrap-up (version bump, changelog, commit, annotated tag — local only, Bash git emulating git_wrapup_instructions) → publish (push + npm + MCP Registry + GHCR via the release-and-publish skill) → optional GH issue closure across N MCP server projects. Phase 5 runs serial when npm 2FA prompts interactively; parallel when bypass is configured.
+  Multi-server-orchestration reference for release-and-publish passes — the end-to-end ship workflow combining wrap-up (version bump, changelog, commit, annotated tag) and publish (push + npm + MCP Registry + GHCR) across N MCP server projects. Drives parallel verification → README polish → wrap-up (Bash git, local only — distilled from `git_wrapup_instructions`) → publish (via the standalone `release-and-publish` skill per target) → optional GH issue closure. Phase 5 runs serial when npm 2FA prompts interactively; parallel when bypass is configured. Disambiguated from the single-target `release-and-publish` skill it invokes per target.
 metadata:
   author: cyanheads
-  version: "1.0"
-  audience: external
+  version: "1.2"
+  audience: internal
   type: reference
 ---
 
-# Release Pass — Multi-Server Orchestration
+# Release-and-Publish Pass — Multi-Server Orchestration
 
-Use after reading `../SKILL.md`. This reference handles parallel release work across N MCP server projects — verification gate → README polish → git wrapup (version bump, changelog, commit, annotated tag — local only) → publish (push + npm + MCP Registry + GHCR via the `release-and-publish` skill) → optional GH issue closure.
+Use after reading `../SKILL.md`. This reference handles end-to-end ship work across N MCP server projects — verification gate → README polish → wrap-up (version bump, changelog, commit, annotated tag — Bash git, local) → publish (push + npm + MCP Registry + GHCR via the standalone `release-and-publish` skill) → optional GH issue closure.
+
+> **Disambiguation.** This orchestration reference invokes the standalone `release-and-publish` skill once per target in Phase 5 — the skill is the single-target publish workflow; this reference is the multi-target fanout around it (plus pre-publish phases). Don't conflate them: the skill ships one server; this reference orchestrates shipping N.
 
 ## When applicable
 
@@ -36,7 +38,7 @@ Before spawning any sub-agents:
 
 ## Single-target vs. multi-target
 
-A typical single-target release flow runs in one session via `git_set_working_dir` + `git_wrapup_instructions` from `git-mcp-server`. This reference translates that into the multi-target parallel pattern:
+A typical single-target release-and-publish flow runs in one session: `git_set_working_dir` + `git_wrapup_instructions` from `git-mcp-server` drive the wrap-up phase, then the standalone `release-and-publish` skill drives the publish phase. This reference translates that into the multi-target parallel pattern:
 
 | Single-target (orchestrator session) | Multi-target (parallel sub-agents) |
 |:-------------------------------------|:-----------------------------------|
@@ -66,7 +68,7 @@ One sub-agent per target. Quick verification gate before any version bump or wra
 
 **Task body (after the orient block):**
 
-> Run `bun run devcheck`. Then run `bun run test:all` if it exists in `package.json` scripts, otherwise `bun run test`. Both must pass green. Halt and report the failing step's verbatim output if anything fails — do not attempt fixes from inside this phase.
+> Run `bun run devcheck`. Then run `bun run test:all` if it exists in `package.json` scripts, otherwise `bun run test`. Both must pass green. Halt and report the failing step's verbatim output if anything fails — do not attempt fixes from inside this phase. If neither `test:all` nor `test` exists in `package.json` scripts, note it and continue — devcheck-only is acceptable (though uncommon for a project shipping a release).
 
 Any red target halts the orchestration. The user fixes locally and re-invokes from Phase 2.
 
@@ -113,7 +115,7 @@ One sub-agent per target. The agent executes the wrapup steps via Bash git — t
 >
 > Constraints: Bash git only. NEVER `git stash`. NEVER `reset --hard` / `restore .` / `clean -f` / `checkout -- .`. No marketing adjectives ("comprehensive", "robust", "enhanced", "seamless", "improved") in commit or tag messages. Be concise and accurate.
 
-After this fanout, each target has a clean working tree with the release commit + tag locally; nothing has been pushed.
+After this fanout, each target has a clean working tree with the wrap-up commit + annotated tag locally; nothing has been pushed.
 
 ### Phase 5: Release publish
 
@@ -160,7 +162,7 @@ Only run if pre-flight captured a GH issue map. One sub-agent per target with th
 
 Skip Phase 6 for any target whose Phase 5 didn't complete — there's nothing to close if the release didn't ship.
 
-## Gotchas specific to release pass
+## Gotchas specific to release-and-publish pass
 
 | # | Gotcha | Mitigation |
 |:--|:-------|:-----------|
@@ -178,7 +180,7 @@ Skip Phase 6 for any target whose Phase 5 didn't complete — there's nothing to
 ## Checklist
 
 - [ ] Pre-flight: target list confirmed, version bump intent per target, npm 2FA mode confirmed (bypass / serial / N/A), GH issue map captured (or empty), plan surfaced to user
-- [ ] **User authorization captured for the release**
+- [ ] **User authorization captured for the release-and-publish**
 - [ ] Phase 2: verification fanout — green `bun run devcheck` + tests per target
 - [ ] Phase 3: README review fanout — updates folded, no commits
 - [ ] Phase 4: wrap-up fanout (Bash git only) — version bumped, changelog authored, rollup regenerated, commit + annotated tag per target — **NOT pushed**
