@@ -102,6 +102,34 @@ describe('renderLandingPage — structure', () => {
     expect(html).toContain('/.well-known/mcp.json');
   });
 
+  test('emits a canonical link matching the page URL', () => {
+    const html = renderLandingPage(defaultServerManifest, 'https://example.com');
+    // pageUrl in render.ts always has a trailing slash on the origin.
+    expect(html).toContain('<link rel="canonical" href="https://example.com/" />');
+  });
+
+  test('emits og:site_name and og:locale alongside the existing OG tags', () => {
+    const html = renderLandingPage(defaultServerManifest, 'https://example.com');
+    expect(html).toContain('<meta property="og:site_name" content="test-mcp-server" />');
+    expect(html).toContain('<meta property="og:locale" content="en_US" />');
+  });
+
+  test('emits a framework generator meta when attribution is on (default)', () => {
+    const html = renderLandingPage(defaultServerManifest, 'https://example.com');
+    expect(html).toContain(
+      `<meta name="generator" content="${defaultServerManifest.framework.name} ${defaultServerManifest.framework.version}" />`,
+    );
+  });
+
+  test('omits the generator meta when attribution is disabled', () => {
+    const manifest: ServerManifest = {
+      ...defaultServerManifest,
+      landing: { ...defaultServerManifest.landing, attribution: false },
+    };
+    const html = renderLandingPage(manifest, 'https://example.com');
+    expect(html).not.toContain('<meta name="generator"');
+  });
+
   test('emits the auth-status banner', () => {
     const html = renderLandingPage(defaultServerManifest, 'https://example.com');
     expect(html).toContain('Public access');
