@@ -4,7 +4,7 @@ description: >
   Multi-server-orchestration reference for git wrap-up passes — distilled from `git-mcp-server`'s `git_wrapup_instructions` protocol. Drives parallel verification → optional doc review → wrap-up (version bump, changelog, commit, annotated tag — Bash git, local only, no push) → roll-up across N MCP server projects. Stops at "committed and tagged locally". No push, no publish — those are separate, separately-authorized workflows.
 metadata:
   author: cyanheads
-  version: "1.1"
+  version: "1.2"
   audience: internal
   type: reference
 ---
@@ -110,7 +110,14 @@ One sub-agent per target. The agent executes the seven acceptance criteria via B
 > 4. **Regenerate derived artifacts.** `bun run changelog:build` (rebuilds `CHANGELOG.md` rollup from per-version files); `bun run tree` (regenerates `docs/tree.md` if the file structure changed).
 > 5. **Verification gate.** `bun run devcheck` must pass against the tree being committed. `bun run test:all` if it exists, otherwise `bun run test`. Both green. Halt if not green — do NOT bypass.
 > 6. **Atomic Conventional Commits.** Version bumps ride with the change that warrants them. For a focused patch, this is ONE commit covering the work + the version bump + changelog + regenerated artifacts. Subject form: `feat: <version> — <one-line theme>` or `chore(release): v<version> — <theme>`. Plain `-m` only — no heredoc, no `Co-authored-by`, no `Generated with` trailers. No marketing adjectives.
-> 7. **Annotated tag** `v<version>` (`-a`, NOT lightweight) with terse message: release theme, notable changes, dep arrows in `pkg ^old → ^new` form if applicable. Not a CHANGELOG copy. Length is earned.
+> 7. **Annotated tag** `v<version>` (`-a`, NOT lightweight). The tag body renders as the GitHub Release page via `--notes-from-tag` — it must be structured markdown, never a flat comma-separated string. Format:
+>    - **Subject line:** release theme — omit version number (GitHub prepends `v<VERSION>:`)
+>    - **Prose intro:** 1-2 sentences — what this release does, why it matters
+>    - **Sections:** Keep a Changelog names (Dependency bumps / Added / Changed / Fixed / Removed) — only sections with entries, each with bulleted items
+>    - **Dep arrows:** `pkg ^old → ^new` form, one per line
+>    - **Footer:** test count + devcheck status
+>    - **Backlinks:** link framework issues where relevant (`cyanheads/mcp-ts-core#50`)
+>    - Not a CHANGELOG copy — terse, scannable. No marketing adjectives. Length is earned.
 >
 > Constraints:
 > - **Bash `git` only.** Do not use `git-mcp-server` (`mcp__git-mcp-server__*`) tools — session state leaks across parallel agents in the same orchestrator session.
@@ -152,7 +159,7 @@ Then produces a consolidated report:
 | 1 | Sub-agent pushes prematurely despite "local only" instruction | Restate "Do NOT push" in the Phase 4 prompt verbatim; verify post-fanout that `git log @{u}..HEAD` shows the wrap-up commit (i.e., still ahead of origin) |
 | 2 | Version bump skipped a file (`server.json`'s per-package entries, README badge, Dockerfile OCI labels, `manifest.json`) | Phase 4 prompt enumerates every version-bearing file; the `grep -rn "<current-version>"` step catches stragglers |
 | 3 | Tag at `v<version>` already exists (leftover from failed prior run, or two orchestrator runs against the same target) | Sub-agent halts and surfaces conflict; never `git tag -d` without orchestrator authorization. Inspect with `git tag -l "v<version>"` and `git show v<version>` |
-| 4 | Annotated tag message bloats into a CHANGELOG copy | Restate in Phase 4 prompt: terse theme + notable changes + dep arrows in `pkg ^old → ^new` form. Length is earned |
+| 4 | Annotated tag message bloats into a CHANGELOG copy, or collapses into a flat comma-separated string | Phase 4 prompt has explicit structured format: subject, prose intro, sectioned bullets, dep arrows, test footer. Both extremes (too long, too flat) are format violations |
 | 5 | Marketing adjectives slip into commit/tag messages | Restate the no-marketing rule in the prompt body; orchestrator spot-checks during Phase 5 (`git log --format='%s%n%b' -1`, `git show v<version>`) |
 | 6 | Sub-agent uses `git-mcp-server` instead of Bash git | Phase 4 prompt restates Hard Rule 1 from parent SKILL.md; session-state leak across parallel agents is real |
 | 7 | Verification gate skipped because "the change is small" | Restate "Halt if not green — do NOT bypass" in the prompt; the wrap-up protocol forbids bypass and the orchestrator confirms green status in Phase 5 |

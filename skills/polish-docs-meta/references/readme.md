@@ -182,7 +182,7 @@ Derive all tool/resource/prompt rows directly from the actual definitions. Use t
 
 ### Features
 
-Two subsection groups: framework capabilities, then domain-specific capabilities. Bullet lists, not prose.
+Three subsection groups: framework capabilities, domain-specific capabilities, then agent-friendly output design. Bullet lists, not prose.
 
 ```markdown
 ## Features
@@ -201,7 +201,20 @@ Acme-specific:
 - Type-safe client for the Acme v2 API
 - Automatic cleaning and simplification of API responses for agent consumption
 - Workflow tools parallelize related sub-requests under a configurable concurrency limit
+
+Agent-friendly output:
+
+- Provenance on every response — source labels, effective-query echo, and confidence/coverage caveats so agents can reason about trust
+- Graceful partial failure — batch tools return per-item success/error rows instead of failing the request, with structured status codes and actionable next-step text
+- Discriminated output contracts — typed status and source fields let callers branch on data, not string parsing
 ```
+
+The **Agent-friendly output** subsection documents output-design choices that make the server work well as an AI-agent backend. Include it when the server exhibits at least two of these patterns. Write bullets grounded in the server's actual behavior — not aspirational framework capabilities. Examples of what fits:
+
+- Provenance: source labels (`viaSource`, `source`), license/access-level fields, effective-query echo, best-effort warnings on lossy tiers
+- Partial failure: per-item status in batch operations, structured error rows alongside successes, recovery hints ("Next Step" text)
+- Discriminated outputs: union types on `source` or `status` fields, typed `unavailable` reasons, per-tier outcome traces (`triedTiers`)
+- Response shaping: stripping upstream noise, normalizing inconsistent schemas, deduplicating nested structures
 
 ### Getting Started
 

@@ -179,6 +179,24 @@ Run only after the user authorizes. Same shape as Phase 5: per-target sub-agent 
 
 Version bumps live with the change that warrants them per the global protocol's git rules — don't manufacture extra commits.
 
+## Recommended additional phases
+
+The 13-phase pattern above covers scaffold-to-ship. Experience from multi-server pipeline runs surfaces additional phases that earn their cost. Orchestrators building a prescriptive pipeline layer on top of this reference should consider inserting these:
+
+**Design gate (after Phase 3).** A third agent per target reads ONLY `docs/design.md` (no idea.md, no skill) and gives a pass/fail verdict. The point is cold-read validation: does the design make sense on its own? Filter out noise — only flag genuine structural issues, not style preferences. If all pass, proceed to build. If any fail, spawn focused fix agents.
+
+**Test quality review (after Phase 11/12).** Dedicated agents that audit test coverage and quality: are all tools tested? Are error paths exercised? Are edge cases covered? Build agents write tests as a secondary concern; dedicated test agents treat it as primary.
+
+**Field test (after test quality review).** Run the `field-test` skill per target — exercise tools with real inputs, report issues. May be blocked by API key requirements or rate limits. If blocked, note it and skip. If field tests surface issues, spawn fix agents and re-field-test.
+
+**Pre-launch sweep (before final wrap-up).** Singular-purpose verification agents per target:
+1. **Metadata sync** — descriptions aligned across package.json, manifest.json, server.json (100-char condensed), README header, GH repo description. Keywords/topics include baseline MCP terms. Versions consistent.
+2. **README accuracy** — README matches current code (tool names, parameter lists, examples, config table, feature list).
+3. **PII/secrets sweep** — no hardcoded credentials, API keys, personal emails, internal paths, or sensitive context in tracked files.
+4. **Error code semantic audit** — InvalidParams only for malformed JSON-RPC params shape; ValidationError for domain validation; NotFound for missing entities.
+
+These agents fix, not just report. Re-run devcheck + test after each.
+
 ## Gotchas specific to greenfield build-out
 
 | # | Gotcha | Mitigation |
@@ -190,6 +208,11 @@ Version bumps live with the change that warrants them per the global protocol's 
 | 5 | `init` defaults package name to the cwd; if the project was scaffolded inside an outer dir, the name is wrong | Verify in Phase 4 prompt: "Check the substituted package name in `package.json`, `server.json`, and the agent protocol matches the intended server name." |
 | 6 | Sub-agent creates GH repo public by default if `gh repo create` omits `--private` | Restate the scenario hard rule in every fanout that touches `gh`: "Repo must be private before any push." |
 | 7 | Wrap-up agents have been observed reporting "pushed" while the remote ref didn't actually land — the push only succeeded on a subsequent op | Verify after every Bash-git fanout: `git ls-remote --tags origin` and `gh repo view --json defaultBranchRef` per target |
+| 8 | LICENSE file missing from scaffolded projects despite package.json declaring Apache-2.0 | Copy from `node_modules/@cyanheads/mcp-ts-core/LICENSE` during scaffold phase |
+| 9 | Description drift across surfaces — agents set descriptions independently, creating inconsistencies across package.json, manifest.json, server.json, README, and GH repo description | Pre-launch sweep phase catches this; or define the canonical description once in docs/design.md and have agents reference it |
+| 10 | `server.json` `isRequired` flags set without verifying upstream API reality | Pre-launch sweep should verify each env var's `isRequired` against actual API behavior (does it work without the key?) |
+| 11 | Build agents exhaust context and leave tests half-written — finish agents inherit the gap but don't prioritize test coverage | Dedicated test quality review phase after build/finish is the backstop |
+| 12 | Field-test agents can't run if the API requires a key the user hasn't provided | Check API key requirements before spawning field-test agents; skip with a note if blocked |
 
 ## Checklist
 
@@ -202,6 +225,7 @@ The orchestrator's checklist for a full N-target greenfield build:
 - [ ] Phase 1 — `docs/idea.md` authored per target
 - [ ] Phase 2 — design fanout — `docs/design.md` with Decisions Log per target
 - [ ] Phase 3 — critical review fanout — `docs/design.md` hardened per target
+- [ ] **Recommended: design gate — cold-read pass/fail per target**
 - [ ] Phase 4 — setup + repo fanout — repos created private, working tree unstaged, no commits
 - [ ] Phase 5 — v0.1.0 wrap-up fanout (Bash git only) — commits + annotated tags + pushes; verified via `git log` and `git ls-remote --tags origin`
 - [ ] Phase 6 — polish docs/meta fanout against named gold-standard
@@ -211,6 +235,9 @@ The orchestrator's checklist for a full N-target greenfield build:
 - [ ] Phase 10 — build fanout — implementation + tests + green devcheck per target
 - [ ] **If any Phase 10 agent didn't finish:** Phase 11 — narrow-scope finish fanout per incomplete target
 - [ ] Phase 12 — simplify fanout — `code-simplifier` pass per target
+- [ ] **Recommended: test quality review — dedicated test coverage and quality audit**
+- [ ] **Recommended: field test — `field-test` skill per target (skip if API key blocker)**
+- [ ] **Recommended: pre-launch sweep — metadata sync, README accuracy, PII sweep, error code audit**
 - [ ] All targets: green `bun run devcheck` and `bun run test`
 - [ ] Phase 13 — final wrap-up fanout (Bash git only) — version bump, changelog file, regenerated rollup, commit + annotated tag + push; verified
 - [ ] Final read-only verification: tags pushed, repos still private, no stray uncommitted work

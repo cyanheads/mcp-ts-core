@@ -184,6 +184,17 @@ Print clickable URLs for every destination that succeeded:
 
 Skip any destination that was skipped in its step.
 
+### 9. Verify artifacts are reachable
+
+Confirm each published artifact is actually live — don't rely on a successful push exit code alone. For each destination that succeeded:
+
+- **npm**: `npm view <package.json#name>@<version> version` — must return the version string
+- **MCP Registry**: `curl -s "https://registry.modelcontextprotocol.io/v0/servers?search=<mcpName>"` — response must include `<version>` for the `io.github.cyanheads/<repo>` entry
+- **GitHub Release**: `gh release view v<VERSION> -R <OWNER>/<REPO> --json assets --jq '.assets[].name'` — must list the `.mcpb` file
+- **GHCR**: fetch an anonymous bearer token, then `curl -s -o /dev/null -w "%{http_code}" -H "Authorization: Bearer $TOKEN" "https://ghcr.io/v2/<OWNER>/<REPO>/manifests/<VERSION>"` — must return HTTP 200
+
+If any check fails, halt and report which destination is unreachable. A successful `docker push` or `bun publish` exit code does not guarantee the artifact is queryable — registry propagation delays, auth scoping, and partial failures all exist.
+
 ## Checklist
 
 - [ ] Working tree clean; HEAD tagged `v<version>`
@@ -196,4 +207,5 @@ Skip any destination that was skipped in its step.
 - [ ] `bun run publish-mcp` succeeds (if `server.json` present)
 - [ ] `bun run bundle` + `gh release create --verify-tag --notes-from-tag` succeeds (if `manifest.json` present)
 - [ ] Docker buildx multi-arch push succeeds (if `Dockerfile` present)
+- [ ] All published artifacts verified reachable (npm, MCP Registry, GH Release asset, GHCR manifest)
 - [ ] Deployed artifact URLs reported to the user

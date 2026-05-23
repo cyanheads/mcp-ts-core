@@ -330,15 +330,21 @@ When you complete a skill's checklist, check the boxes and add a completion time
 
 Both install links route through HTTPS endpoints (`cursor.com/en/install-mcp` and `vscode.dev/redirect`) — GitHub-rendered markdown strips non-HTTP URL schemes from anchors, so a raw `cursor://` or `vscode:` link won't click through from github.com.
 
-Generate the encoded configs (replace `<PACKAGE_NAME>` and adjust the install command — `npx -y …` is the standard shape for an npm-published stdio server):
+Generate the encoded configs (replace `<PACKAGE_NAME>` and add env vars for any required API keys):
 
 ```bash
-# Cursor: base64-encoded JSON. `command` is a single string (the full invocation), not split into command/args.
-echo -n '{"command":"npx -y <PACKAGE_NAME>"}' | base64
+# Cursor: base64-encoded JSON. Split command/args, add env when keys are needed.
+echo -n '{"command":"npx","args":["-y","<PACKAGE_NAME>"],"env":{"API_KEY":"your-api-key"}}' | base64
+# Without env (no required keys):
+echo -n '{"command":"npx","args":["-y","<PACKAGE_NAME>"]}' | base64
 
-# VS Code: URL-encoded JSON. Split into command + args.
-node -p 'encodeURIComponent(JSON.stringify({name:"<PACKAGE_NAME>",command:"npx",args:["-y","<PACKAGE_NAME>"]}))'
+# VS Code: URL-encoded JSON. Same shape plus a `name` field.
+node -p 'encodeURIComponent(JSON.stringify({name:"<SHORT_NAME>",command:"npx",args:["-y","<PACKAGE_NAME>"],env:{API_KEY:"your-api-key"}}))'
+# Without env:
+node -p 'encodeURIComponent(JSON.stringify({name:"<SHORT_NAME>",command:"npx",args:["-y","<PACKAGE_NAME>"]}))'
 ```
+
+Both clients use the same `{command, args, env}` shape (matching `mcp.json` schema). VS Code adds a top-level `name` field. Omit `env` entirely when no API keys are needed — don't include empty objects or framework-only vars like `MCP_TRANSPORT_TYPE`.
 
 The Claude Desktop badge requires the bundle to ship with a stable filename — `bun run bundle` outputs `dist/<PACKAGE_NAME>.mcpb`, and `release-and-publish` attaches that file to the GitHub Release. `releases/latest/download/<PACKAGE_NAME>.mcpb` then redirects to the most recent release.
 
@@ -364,6 +370,8 @@ security: false                            # optional — true flags security fi
 `breaking: true` renders a `· ⚠️ Breaking` badge — use it when consumers must update code on upgrade (signature changes, removed APIs, config renames). `security: true` renders a `· 🛡️ Security` badge and pairs with a `## Security` body section. When both are set, badges render `· ⚠️ Breaking · 🛡️ Security`.
 
 **Section order** (Keep a Changelog): Added, Changed, Deprecated, Removed, Fixed, Security. Include only sections with entries — don't ship empty headers.
+
+**Tag annotations** render as GitHub Release bodies via `--notes-from-tag`. They must be structured markdown — never a flat comma-separated string. Subject omits the version number (GitHub prepends it). See `changelog/template.md` for the full format reference.
 
 ---
 
