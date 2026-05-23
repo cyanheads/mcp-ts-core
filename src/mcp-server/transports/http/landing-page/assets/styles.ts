@@ -514,14 +514,28 @@ pre code { background: transparent; padding: 0; border: 0; font-size: inherit; }
   white-space: nowrap;
   transition: color var(--duration-fast) var(--ease-out),
               border-color var(--duration-fast) var(--ease-out),
-              background var(--duration-fast) var(--ease-out);
+              background var(--duration-fast) var(--ease-out),
+              box-shadow var(--duration-fast) var(--ease-out);
 }
 .connect-tab-label:hover { color: var(--fg); }
+/*
+ * Active tab — brighter text (var(--fg) is the max contrast token in both
+ * modes), accent gradient fill, plus a "thin glow outline" that adapts to
+ * light/dark via color-mix against --fg. Both shadow layers are inset
+ * because the tab strip clips overflow on both axes (overflow-x: auto
+ * forces overflow-y to auto), so an outer glow would be cut off:
+ *   inset 0 0 0 1px  -> the sharp rectangular ring at the label edge
+ *   inset 0 0 14px   -> the soft halo bleeding inward from that edge
+ * Kept rectangular (no border-radius) so the outline traces the label edge.
+ */
 .connect-tab-input:checked + .connect-tab-label {
   color: var(--fg);
-  font-weight: 600;
+  font-weight: 700;
   border-bottom-color: var(--accent);
-  background: linear-gradient(to top, var(--accent-softer), transparent 70%);
+  background: linear-gradient(to top, var(--accent-soft), var(--accent-softer) 55%, transparent 100%);
+  box-shadow:
+    inset 0 0 0 1px color-mix(in oklab, var(--fg), transparent 25%),
+    inset 0 0 14px color-mix(in oklab, var(--fg), transparent 70%);
 }
 .connect-tab-input:focus-visible + .connect-tab-label {
   outline: 2px solid var(--accent);
@@ -531,9 +545,12 @@ pre code { background: transparent; padding: 0; border: 0; font-size: inherit; }
 
 .connect-panels { position: relative; padding: var(--space-5) var(--space-4); }
 .connect-panel { display: none; }
+.connect:has(#connect-tab-claude:checked) .panel-claude,
+.connect:has(#connect-tab-codex:checked) .panel-codex,
+.connect:has(#connect-tab-cursor:checked) .panel-cursor,
+.connect:has(#connect-tab-gemini:checked) .panel-gemini,
 .connect:has(#connect-tab-stdio:checked) .panel-stdio,
 .connect:has(#connect-tab-http:checked) .panel-http,
-.connect:has(#connect-tab-claude:checked) .panel-claude,
 .connect:has(#connect-tab-curl:checked) .panel-curl { display: block; }
 /* Fallback when :has() unsupported — show first visible panel */
 @supports not selector(:has(*)) {

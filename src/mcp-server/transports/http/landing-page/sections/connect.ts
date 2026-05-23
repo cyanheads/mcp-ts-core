@@ -1,8 +1,10 @@
 /**
- * @fileoverview Terminal-chrome connect card with STDIO / HTTP / Claude / curl
- * tabs. Generates copy-paste-ready client configs and commands from the
- * server manifest. Radio-input + `:has()` CSS hack drives tab switching with
- * no JS.
+ * @fileoverview Terminal-chrome connect card with one tab per common MCP
+ * client (Claude, Codex, Cursor, Gemini) plus transport / protocol fallbacks
+ * (STDIO, HTTP, curl). Generates copy-paste-ready client configs and commands
+ * from the server manifest. Radio-input + `:has()` CSS hack drives tab
+ * switching with no JS; the `claude` tab is the default checked panel because
+ * it's the most common visitor conversion path.
  *
  * Accessibility: the ARIA tab pattern (`role="tablist"`/`"tab"`/`"tabpanel"`
  * + `aria-selected`/`aria-controls`) is a poor fit for a radio-input-driven
@@ -70,12 +72,16 @@ export function renderConnectSnippets(manifest: ServerManifest, baseUrl: string)
       2,
     );
 
-  // `claude mcp add` — always target the HTTP endpoint. The landing page is
-  // served over HTTP, so a visitor is already interacting with this
-  // instance; a stdio/bunx command here would install a different (local)
-  // copy and carry env placeholders that HTTP wouldn't forward anyway. The
-  // STDIO tab still carries the JSON for anyone who wants to run locally.
+  // Per-client install snippets — always target the HTTP endpoint. The
+  // landing page is served over HTTP, so a visitor is already interacting
+  // with this instance; a stdio/bunx command in these tabs would install a
+  // different (local) copy and carry env placeholders that HTTP wouldn't
+  // forward anyway. The STDIO tab below still carries the JSON for anyone
+  // who wants to run locally.
   const claudeCmd = overrides.claude ?? buildClaudeHttpCmd(shortName, endpoint);
+  const codexCmd = overrides.codex ?? buildCodexHttpCmd(shortName, endpoint);
+  const cursorConfig = overrides.cursor ?? buildCursorHttpConfig(shortName, endpoint);
+  const geminiCmd = overrides.gemini ?? buildGeminiHttpCmd(shortName, endpoint);
 
   const curl =
     overrides.curl ??
@@ -89,19 +95,41 @@ export function renderConnectSnippets(manifest: ServerManifest, baseUrl: string)
   // Chrome label — npm package when published, else the HTTP endpoint (trimmed).
   const chromeLabel = npmPackage ?? endpoint.replace(/^https?:\/\//, '');
 
+  // Order is the rendered tab order. `claude` leads as the default conversion
+  // path; named clients follow alphabetically; transport / protocol fallbacks
+  // bring up the rear. The default checked tab is wired by id below — keep
+  // it in sync with `DEFAULT_TAB`.
   const panels: Array<{ id: string; label: string; content: string; copyAriaLabel: string }> = [
+    {
+      id: 'claude',
+      label: 'Claude',
+      content: claudeCmd,
+      copyAriaLabel: 'Copy claude mcp add command',
+    },
+    {
+      id: 'codex',
+      label: 'Codex',
+      content: codexCmd,
+      copyAriaLabel: 'Copy codex mcp add command',
+    },
+    {
+      id: 'cursor',
+      label: 'Cursor',
+      content: cursorConfig,
+      copyAriaLabel: 'Copy Cursor mcp.json config',
+    },
+    {
+      id: 'gemini',
+      label: 'Gemini',
+      content: geminiCmd,
+      copyAriaLabel: 'Copy gemini mcp add command',
+    },
     { id: 'stdio', label: 'STDIO', content: stdioConfig, copyAriaLabel: 'Copy stdio config' },
     {
       id: 'http',
       label: 'Streamable HTTP',
       content: httpConfig,
       copyAriaLabel: 'Copy HTTP config',
-    },
-    {
-      id: 'claude',
-      label: 'Claude',
-      content: claudeCmd,
-      copyAriaLabel: 'Copy claude mcp add command',
     },
     { id: 'curl', label: 'curl', content: curl, copyAriaLabel: 'Copy curl command' },
   ];
@@ -116,15 +144,11 @@ export function renderConnectSnippets(manifest: ServerManifest, baseUrl: string)
         </span>
         <span class="connect-chrome-endpoint" title="${endpoint}">${chromeLabel}</span>
       </div>
-      ${panels.map((p, i) =>
-        i === 0
-          ? html`<input type="radio" class="connect-tab-input" name="connect" id="connect-tab-${p.id}" checked />`
-          : html`<input type="radio" class="connect-tab-input" name="connect" id="connect-tab-${p.id}" />`,
-      )}
       <div class="connect-tabs">
-        ${panels.map(
-          (p) =>
-            html`<label for="connect-tab-${p.id}" class="connect-tab-label">${p.label}</label>`,
+        ${panels.map((p) =>
+          p.id === DEFAULT_TAB
+            ? html`<input type="radio" class="connect-tab-input" name="connect" id="connect-tab-${p.id}" checked /><label for="connect-tab-${p.id}" class="connect-tab-label">${p.label}</label>`
+            : html`<input type="radio" class="connect-tab-input" name="connect" id="connect-tab-${p.id}" /><label for="connect-tab-${p.id}" class="connect-tab-label">${p.label}</label>`,
         )}
       </div>
       <div class="connect-panels">
@@ -133,6 +157,14 @@ export function renderConnectSnippets(manifest: ServerManifest, baseUrl: string)
     </div>
   `;
 }
+
+/**
+ * Default selected tab id. Claude is the most common conversion path for
+ * MCP visitors; if it ever moves, the `@supports not selector(:has(*))`
+ * fallback in styles.ts (which shows `.connect-panel:first-of-type`) needs
+ * to stay aligned with the first entry in the panels array.
+ */
+const DEFAULT_TAB = 'claude';
 
 /**
  * Single panel inside the connect card — pre/code + copy button.
@@ -173,4 +205,34 @@ function envFromEntries(
 /** `claude mcp add --transport http <name> <url>` */
 function buildClaudeHttpCmd(shortName: string, endpoint: string): string {
   return `claude mcp add --transport http ${shortName} ${endpoint}`;
+}
+
+/** `codex mcp add <name> --url <url>` — adds a streamable-HTTP server to `~/.codex/config.toml`. */
+function buildCodexHttpCmd(shortName: string, endpoint: string): string {
+  return `codex mcp add ${shortName} --url ${endpoint}`;
+}
+
+/** `gemini mcp add --transport http <name> <url>` — writes to `~/.gemini/settings.json`. */
+function buildGeminiHttpCmd(shortName: string, endpoint: string): string {
+  return `gemini mcp add --transport http ${shortName} ${endpoint}`;
+}
+
+/**
+ * Cursor has no first-party CLI; users paste a `mcpServers` block into
+ * `~/.cursor/mcp.json` (or `.cursor/mcp.json` per-project). The bare `url`
+ * field is the modern streamable-HTTP shape — Cursor handles transport
+ * negotiation internally.
+ */
+function buildCursorHttpConfig(shortName: string, endpoint: string): string {
+  return JSON.stringify(
+    {
+      mcpServers: {
+        [shortName]: {
+          url: endpoint,
+        },
+      },
+    },
+    null,
+    2,
+  );
 }

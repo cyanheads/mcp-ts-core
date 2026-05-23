@@ -43,8 +43,22 @@ export interface LandingLink {
   label: string;
 }
 
-/** Tab IDs for the connect card; each may have a derived snippet or operator override. */
-export const CONNECT_SNIPPET_TABS = ['stdio', 'http', 'claude', 'curl'] as const;
+/**
+ * Tab IDs for the connect card; each may have a derived snippet or operator
+ * override. Order here is the render order on the landing page: Claude leads
+ * because it's the most common conversion path for MCP visitors; named
+ * clients follow alphabetically, then transport/protocol fallbacks. Default
+ * selected tab is `claude` (wired in the connect-card renderer, not by index).
+ */
+export const CONNECT_SNIPPET_TABS = [
+  'claude',
+  'codex',
+  'cursor',
+  'gemini',
+  'stdio',
+  'http',
+  'curl',
+] as const;
 export type ConnectSnippetTab = (typeof CONNECT_SNIPPET_TABS)[number];
 
 /** Consumer-supplied landing page configuration. */

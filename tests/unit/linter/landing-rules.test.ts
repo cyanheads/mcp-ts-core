@@ -159,6 +159,18 @@ describe('lintLandingConfig', () => {
     expect(diagnostics).toEqual([]);
   });
 
+  test('accepts overrides for codex, cursor, gemini tabs', () => {
+    const diagnostics = lintLandingConfig({
+      connectSnippets: {
+        claude: 'claude mcp add --transport http my-server https://example.com/mcp',
+        codex: 'codex mcp add my-server --url https://example.com/mcp',
+        cursor: '{"mcpServers":{"my-server":{"url":"https://example.com/mcp"}}}',
+        gemini: 'gemini mcp add --transport http my-server https://example.com/mcp',
+      },
+    });
+    expect(diagnostics).toEqual([]);
+  });
+
   test('errors when connectSnippets is not a plain object', () => {
     expect(lintLandingConfig({ connectSnippets: ['a'] })).toEqual([
       expect.objectContaining({ rule: 'landing-connect-snippets-type', severity: 'error' }),
