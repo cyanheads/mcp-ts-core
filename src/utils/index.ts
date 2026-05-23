@@ -47,6 +47,7 @@ export {
   type AuthContext,
   type CreateRequestContextParams,
   type RequestContext,
+  type RequestContextLike,
   requestContextService,
 } from './internal/requestContext.js';
 // Runtime

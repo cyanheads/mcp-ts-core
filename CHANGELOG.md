@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.9.3](changelog/0.9.x/0.9.3.md) — 2026-05-22
+
+`RequestContextLike` — closed-field projection canvas methods now accept, so handler `Context` passes straight to `DataCanvas`/`CanvasInstance`/`IDataCanvasProvider` without a slice helper (#108).
+
 ## [0.9.2](changelog/0.9.x/0.9.2.md) — 2026-05-22 · ⚠️ Breaking
 
 `zod` → peerDep (consumers must `bun add zod`). MCPB bundle support (`bundle` script + `lint:packaging`). `field-test`: zsh `status` clash + per-agent helper paths. `multi-server-orchestration` skill + `list-skills`. `format-parity` walks each union branch. `fast-xml-parser` unpinned `^5.8.0`. Dep refresh: `@hono/mcp` `^0.3.0`, vitest `^4.1.7`.

@@ -12,7 +12,7 @@ import { unlink } from 'node:fs/promises';
 import { databaseError, notFound, timeout, validationError } from '@/types-global/errors.js';
 import { lazyImport } from '@/utils/internal/lazyImport.js';
 import { logger } from '@/utils/internal/logger.js';
-import { type RequestContext, requestContextService } from '@/utils/internal/requestContext.js';
+import { type RequestContextLike, requestContextService } from '@/utils/internal/requestContext.js';
 
 import type { IDataCanvasProvider } from '../../core/IDataCanvasProvider.js';
 import { sniffSchema } from '../../core/schemaSniffer.js';
@@ -90,7 +90,7 @@ export class DuckdbProvider implements IDataCanvasProvider {
   // Lifecycle
   // ---------------------------------------------------------------------
 
-  async initCanvas(canvasId: string, _context: RequestContext): Promise<void> {
+  async initCanvas(canvasId: string, _context: RequestContextLike): Promise<void> {
     if (this.canvases.has(canvasId)) return;
     const duck = await importDuckDB();
     const instance = await duck.DuckDBInstance.create(':memory:', {
@@ -105,7 +105,7 @@ export class DuckdbProvider implements IDataCanvasProvider {
   }
 
   // biome-ignore lint/suspicious/useAwait: async is required by IDataCanvasProvider; close is sync for DuckDB.
-  async destroyCanvas(canvasId: string, _context: RequestContext): Promise<void> {
+  async destroyCanvas(canvasId: string, _context: RequestContextLike): Promise<void> {
     const record = this.canvases.get(canvasId);
     if (!record) return;
     this.canvases.delete(canvasId);
@@ -161,7 +161,7 @@ export class DuckdbProvider implements IDataCanvasProvider {
     canvasId: string,
     name: string,
     rows: RegisterRows,
-    _context: RequestContext,
+    _context: RequestContextLike,
     options?: RegisterTableOptions,
   ): Promise<RegisterTableResult> {
     const record = this.requireCanvas(canvasId);
@@ -251,7 +251,7 @@ export class DuckdbProvider implements IDataCanvasProvider {
   async query(
     canvasId: string,
     sql: string,
-    _context: RequestContext,
+    _context: RequestContextLike,
     options?: QueryOptions,
   ): Promise<QueryResult> {
     const record = this.requireCanvas(canvasId);
@@ -328,7 +328,7 @@ export class DuckdbProvider implements IDataCanvasProvider {
     canvasId: string,
     tableName: string,
     target: ExportTarget,
-    _context: RequestContext,
+    _context: RequestContextLike,
     options?: ExportOptions,
   ): Promise<ExportResult> {
     const record = this.requireCanvas(canvasId);
@@ -402,7 +402,7 @@ export class DuckdbProvider implements IDataCanvasProvider {
     canvasId: string,
     name: string,
     selectSql: string,
-    _context: RequestContext,
+    _context: RequestContextLike,
     options?: RegisterViewOptions,
   ): Promise<RegisterViewResult> {
     const record = this.requireCanvas(canvasId);
@@ -452,7 +452,7 @@ export class DuckdbProvider implements IDataCanvasProvider {
     sourceCanvasId: string,
     sourceTableName: string,
     asName: string,
-    _context: RequestContext,
+    _context: RequestContextLike,
     options?: ImportFromOptions,
   ): Promise<RegisterTableResult> {
     if (sourceCanvasId === targetCanvasId) {
@@ -530,7 +530,7 @@ export class DuckdbProvider implements IDataCanvasProvider {
 
   async describe(
     canvasId: string,
-    _context: RequestContext,
+    _context: RequestContextLike,
     options?: DescribeOptions,
   ): Promise<TableInfo[]> {
     const record = this.requireCanvas(canvasId);
@@ -592,7 +592,7 @@ export class DuckdbProvider implements IDataCanvasProvider {
     };
   }
 
-  async drop(canvasId: string, name: string, _context: RequestContext): Promise<boolean> {
+  async drop(canvasId: string, name: string, _context: RequestContextLike): Promise<boolean> {
     const record = this.requireCanvas(canvasId);
     assertValidIdentifier(name, 'table');
     const kind = await this.lookupKind(record.controlConnection, name);
@@ -602,7 +602,7 @@ export class DuckdbProvider implements IDataCanvasProvider {
     return true;
   }
 
-  async clear(canvasId: string, _context: RequestContext): Promise<number> {
+  async clear(canvasId: string, _context: RequestContextLike): Promise<number> {
     const record = this.requireCanvas(canvasId);
     const reader = await record.controlConnection.runAndReadAll(
       `SELECT table_name, table_type FROM information_schema.tables WHERE table_schema = 'main'`,

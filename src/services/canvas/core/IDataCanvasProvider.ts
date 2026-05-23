@@ -7,7 +7,7 @@
  * @module src/services/canvas/core/IDataCanvasProvider
  */
 
-import type { RequestContext } from '@/utils/internal/requestContext.js';
+import type { RequestContextLike } from '@/utils/internal/requestContext.js';
 import type {
   DescribeOptions,
   ExportOptions,
@@ -32,12 +32,12 @@ import type {
  */
 export interface IDataCanvasProvider {
   /** Drop every table on the canvas. Returns the number dropped. */
-  clear(canvasId: string, context: RequestContext): Promise<number>;
+  clear(canvasId: string, context: RequestContextLike): Promise<number>;
 
   /** Describe one or all tables on the canvas. */
   describe(
     canvasId: string,
-    context: RequestContext,
+    context: RequestContextLike,
     options?: DescribeOptions,
   ): Promise<TableInfo[]>;
 
@@ -45,21 +45,21 @@ export interface IDataCanvasProvider {
    * Release engine resources for a canvas. After this call, further ops on
    * the canvas throw `NotFound`.
    */
-  destroyCanvas(canvasId: string, context: RequestContext): Promise<void>;
+  destroyCanvas(canvasId: string, context: RequestContextLike): Promise<void>;
 
   /**
    * Drop a single canvas table or view. Returns `true` when found and removed.
    * The provider determines the kind from the catalog; callers don't need to
    * distinguish.
    */
-  drop(canvasId: string, name: string, context: RequestContext): Promise<boolean>;
+  drop(canvasId: string, name: string, context: RequestContextLike): Promise<boolean>;
 
   /** Export a canvas table to a file or stream target. */
   export(
     canvasId: string,
     tableName: string,
     target: ExportTarget,
-    context: RequestContext,
+    context: RequestContextLike,
     options?: ExportOptions,
   ): Promise<ExportResult>;
 
@@ -77,7 +77,7 @@ export interface IDataCanvasProvider {
     sourceCanvasId: string,
     sourceTableName: string,
     asName: string,
-    context: RequestContext,
+    context: RequestContextLike,
     options?: ImportFromOptions,
   ): Promise<RegisterTableResult>;
 
@@ -85,7 +85,7 @@ export interface IDataCanvasProvider {
    * Allocate engine resources for a new canvas. Idempotent — calling twice
    * with the same id is a no-op.
    */
-  initCanvas(canvasId: string, context: RequestContext): Promise<void>;
+  initCanvas(canvasId: string, context: RequestContextLike): Promise<void>;
   /** Provider name (e.g. `'duckdb'`). Used in logs and health output. */
   readonly name: string;
 
@@ -93,7 +93,7 @@ export interface IDataCanvasProvider {
   query(
     canvasId: string,
     sql: string,
-    context: RequestContext,
+    context: RequestContextLike,
     options?: QueryOptions,
   ): Promise<QueryResult>;
 
@@ -102,7 +102,7 @@ export interface IDataCanvasProvider {
     canvasId: string,
     name: string,
     rows: RegisterRows,
-    context: RequestContext,
+    context: RequestContextLike,
     options?: RegisterTableOptions,
   ): Promise<RegisterTableResult>;
 
@@ -116,7 +116,7 @@ export interface IDataCanvasProvider {
     canvasId: string,
     name: string,
     selectSql: string,
-    context: RequestContext,
+    context: RequestContextLike,
     options?: RegisterViewOptions,
   ): Promise<RegisterViewResult>;
 

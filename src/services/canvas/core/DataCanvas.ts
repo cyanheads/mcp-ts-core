@@ -7,20 +7,20 @@
 
 import { JsonRpcErrorCode, McpError } from '@/types-global/errors.js';
 import { logger } from '@/utils/internal/logger.js';
-import type { RequestContext } from '@/utils/internal/requestContext.js';
+import type { RequestContextLike } from '@/utils/internal/requestContext.js';
 import type { AcquireOptions } from '../types.js';
 import { CanvasInstance } from './CanvasInstance.js';
 import type { CanvasRegistry } from './CanvasRegistry.js';
 import type { IDataCanvasProvider } from './IDataCanvasProvider.js';
 
 /** Resolve the effective tenant ID; throw when absent. */
-function requireTenantId(context: RequestContext): string {
+function requireTenantId(context: RequestContextLike, operation: string): string {
   const tenantId = context.tenantId;
   if (tenantId === undefined || tenantId === null || tenantId === '') {
     throw new McpError(
       JsonRpcErrorCode.InternalError,
       'Tenant ID is required for canvas operations but was not found in the request context.',
-      { operation: context.operation || 'DataCanvas.acquire', requestId: context.requestId },
+      { operation, requestId: context.requestId },
     );
   }
   return tenantId;
@@ -53,10 +53,10 @@ export class DataCanvas {
    */
   async acquire(
     maybeId: string | undefined,
-    context: RequestContext,
+    context: RequestContextLike,
     _options?: AcquireOptions,
   ): Promise<CanvasInstance> {
-    const tenantId = requireTenantId(context);
+    const tenantId = requireTenantId(context, 'DataCanvas.acquire');
     const result = await this.registry.acquire(maybeId, tenantId, context);
     logger.debug('Canvas acquired.', {
       ...context,
@@ -79,14 +79,14 @@ export class DataCanvas {
    * Drop a canvas explicitly. Returns true when the canvas existed and was
    * destroyed.
    */
-  async drop(canvasId: string, context: RequestContext): Promise<boolean> {
-    const tenantId = requireTenantId(context);
+  async drop(canvasId: string, context: RequestContextLike): Promise<boolean> {
+    const tenantId = requireTenantId(context, 'DataCanvas.drop');
     return await this.registry.drop(canvasId, tenantId, context);
   }
 
   /** Active canvas count for the calling tenant. */
-  countForTenant(context: RequestContext): number {
-    const tenantId = requireTenantId(context);
+  countForTenant(context: RequestContextLike): number {
+    const tenantId = requireTenantId(context, 'DataCanvas.countForTenant');
     return this.registry.countForTenant(tenantId);
   }
 
@@ -96,7 +96,7 @@ export class DataCanvas {
   }
 
   /** Tear down the registry and provider. Called from `ServerHandle.shutdown()`. */
-  async shutdown(context: RequestContext): Promise<void> {
+  async shutdown(context: RequestContextLike): Promise<void> {
     await this.registry.shutdown(context);
   }
 

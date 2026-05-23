@@ -132,10 +132,34 @@ export interface RequestContext {
    * Note: optional fields above are typed `?: T | undefined` (not just `?: T`)
    * so the handler-facing `Context` — which carries strict-optional fields
    * under `exactOptionalPropertyTypes` — is structurally assignable to
-   * `RequestContext`, letting services accept `ctx` directly without a cast.
+   * {@link RequestContextLike} (the closed canonical-field projection used by
+   * service-layer signatures). `RequestContext` itself remains the open
+   * "context bag" that the logger and `createRequestContext` build by spread.
    */
   [key: string]: unknown;
 }
+
+/**
+ * Closed, canonical-field projection of {@link RequestContext} for service
+ * signatures. The handler-facing `Context` carries strict-optional fields with
+ * `| undefined` and lacks the `[key: string]: unknown` index signature, so it
+ * is not assignable to `RequestContext` itself; this projection is what both
+ * `Context` and `RequestContext` are structurally assignable to.
+ *
+ * Service and canvas method signatures accept `RequestContextLike` instead of
+ * `RequestContext` so consumers can pass the handler `ctx` directly without a
+ * slice helper. Internal context construction (`createRequestContext`,
+ * `enriched` log dispatch) still produces `RequestContext`, preserving the
+ * open-bag spread pattern.
+ */
+export type RequestContextLike = {
+  auth?: AuthContext | undefined;
+  requestId: string;
+  spanId?: string | undefined;
+  tenantId?: string | undefined;
+  timestamp: string;
+  traceId?: string | undefined;
+};
 
 /**
  * Parameters accepted by {@link requestContextService.createRequestContext}.

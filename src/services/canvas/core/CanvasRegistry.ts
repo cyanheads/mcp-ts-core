@@ -8,7 +8,7 @@
 
 import { conflict, notFound, rateLimited } from '@/types-global/errors.js';
 import { logger } from '@/utils/internal/logger.js';
-import { type RequestContext, requestContextService } from '@/utils/internal/requestContext.js';
+import { type RequestContextLike, requestContextService } from '@/utils/internal/requestContext.js';
 import { IdGenerator } from '@/utils/security/idGenerator.js';
 import type { IDataCanvasProvider } from './IDataCanvasProvider.js';
 
@@ -100,7 +100,7 @@ export class CanvasRegistry {
   async acquire(
     maybeId: string | undefined,
     tenantId: string,
-    context: RequestContext,
+    context: RequestContextLike,
   ): Promise<AcquireResult> {
     if (this.isShuttingDown) {
       throw notFound('Canvas registry is shutting down.', { tenantId });
@@ -170,7 +170,7 @@ export class CanvasRegistry {
    * Drop a canvas explicitly (e.g. tenant-initiated cleanup). Returns true
    * when the canvas existed and was destroyed.
    */
-  async drop(canvasId: string, tenantId: string, context: RequestContext): Promise<boolean> {
+  async drop(canvasId: string, tenantId: string, context: RequestContextLike): Promise<boolean> {
     const record = this.lookup(canvasId, tenantId);
     if (!record) return false;
     await this.destroy(record, context);
@@ -188,7 +188,7 @@ export class CanvasRegistry {
   }
 
   /** Stop the sweeper and tear down every active canvas. Idempotent. */
-  async shutdown(context: RequestContext): Promise<void> {
+  async shutdown(context: RequestContextLike): Promise<void> {
     if (this.isShuttingDown) return;
     this.isShuttingDown = true;
     if (this.sweeperTimer) {
@@ -272,7 +272,7 @@ export class CanvasRegistry {
     set.add(canvasId);
   }
 
-  private async destroy(record: CanvasRecord, context: RequestContext): Promise<void> {
+  private async destroy(record: CanvasRecord, context: RequestContextLike): Promise<void> {
     this.canvases.delete(record.canvasId);
     const set = this.byTenant.get(record.tenantId);
     if (set) {

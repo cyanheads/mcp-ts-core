@@ -5,7 +5,7 @@
  * @module src/services/canvas/core/CanvasInstance
  */
 
-import type { RequestContext } from '@/utils/internal/requestContext.js';
+import type { RequestContextLike } from '@/utils/internal/requestContext.js';
 import type {
   DescribeOptions,
   ExportOptions,
@@ -34,13 +34,13 @@ export class CanvasInstance {
   constructor(
     /** Opaque canvas token. Surface this to callers; share it across agents. */
     readonly canvasId: string,
-    /** Tenant the canvas is bound to. Resolved by the registry from `RequestContext`. */
+    /** Tenant the canvas is bound to. Resolved by the registry from the request context. */
     readonly tenantId: string,
     isNew: boolean,
     expiresAt: string,
     private readonly registry: CanvasRegistry,
     private readonly provider: IDataCanvasProvider,
-    private readonly context: RequestContext,
+    private readonly context: RequestContextLike,
   ) {
     this.isNew = isNew;
     this.expiresAt = expiresAt;

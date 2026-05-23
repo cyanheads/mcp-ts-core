@@ -4,7 +4,18 @@
  */
 
 import { type Span, trace } from '@opentelemetry/api';
-import { afterEach, beforeEach, describe, expect, it, type MockInstance, vi } from 'vitest';
+import {
+  afterEach,
+  beforeEach,
+  describe,
+  expect,
+  expectTypeOf,
+  it,
+  type MockInstance,
+  vi,
+} from 'vitest';
+import type { Context } from '@/core/context.js';
+import type { RequestContext, RequestContextLike } from '@/utils/internal/requestContext.js';
 import * as idGeneratorModule from '@/utils/security/idGenerator.js';
 import { authContext } from '../../../../src/mcp-server/transports/auth/lib/authContext.js';
 import { requestContextService } from '../../../../src/utils/internal/requestContext.js';
@@ -253,5 +264,15 @@ describe('requestContextService', () => {
       expect(context.tracing).toBe(true);
       expect(context.auth).toBeDefined();
     });
+  });
+});
+
+describe('RequestContextLike structural assignability (issue #108)', () => {
+  it('accepts the handler Context without a slice helper', () => {
+    expectTypeOf<Context>().toMatchTypeOf<RequestContextLike>();
+  });
+
+  it('accepts the open RequestContext bag', () => {
+    expectTypeOf<RequestContext>().toMatchTypeOf<RequestContextLike>();
   });
 });
