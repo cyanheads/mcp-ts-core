@@ -548,4 +548,4 @@ Badge order when both set: `· ⚠️ Breaking · 🛡️ Security`. Summary > 3
 
 ## Publishing
 
-If the user requests it, run the `release-and-publish` skill — it runs the verification gate (`devcheck`, `rebuild`, `test:all`), pushes commits and tags, and publishes to every applicable destination. The full reference:
+If the user requests it, run the `release-and-publish` skill — it runs the verification gate (`devcheck`, `rebuild`, `test:all`), pushes commits and tags, and publishes to every applicable destination. **Skip the Docker build/push step** — this framework package is consumed via npm, not as a container image. The Dockerfile exists for consumer servers scaffolded from templates, not for the framework itself.
