@@ -4,7 +4,7 @@ description: >
   Ship a release end-to-end across every registry the project targets (npm, MCP Registry, GitHub Releases for `.mcpb` bundles, GHCR). Runs the final verification gate, pushes commits and tags, then publishes to each applicable destination. Assumes git wrapup (version bumps, changelog, commit, annotated tag) is already complete — this skill is the post-wrapup publish workflow. Retries transient network failures on publish steps; halts with a partial-state report when retries are exhausted or the failure is terminal.
 metadata:
   author: cyanheads
-  version: "2.4"
+  version: "2.5"
   audience: external
   type: workflow
 ---
@@ -131,7 +131,7 @@ Halt on any publisher error other than "cannot publish duplicate version".
 
 Only if `manifest.json` exists at the repo root (otherwise skip).
 
-Build the bundle, then create a Release on the existing annotated tag and attach the `.mcpb`. The Release sits on top of the tag from wrapup — `--verify-tag` enforces that the tag already exists on the remote and prevents `gh` from creating a lightweight tag that would shadow the annotated one. `--notes-from-tag` pulls release notes directly from the annotated tag message (no duplication).
+Build the bundle, then create a Release on the existing annotated tag and attach the `.mcpb`. The Release sits on top of the tag from wrapup — `--verify-tag` enforces that the tag already exists on the remote and prevents `gh` from creating a lightweight tag that would shadow the annotated one. `--notes-from-tag` pulls release notes directly from the annotated tag message (no duplication). Note: GitHub prepends `v<VERSION>:` to the release title, so the tag annotation subject must omit the version number to avoid stutter.
 
 ```bash
 bun run bundle              # produces dist/<name>.mcpb (stable filename, no version)
