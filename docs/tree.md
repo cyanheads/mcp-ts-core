@@ -1,6 +1,6 @@
 # mcp-ts-core - Directory Structure
 
-Generated on: 2026-05-22 20:50:39
+Generated on: 2026-05-23 02:01:12
 
 ```text
 mcp-ts-core/
@@ -115,6 +115,7 @@ mcp-ts-core/
 │   ├── devdocs.ts
 │   ├── fetch-openapi-spec.ts
 │   ├── lint-mcp.ts
+│   ├── lint-packaging.ts
 │   ├── list-skills.ts
 │   ├── split-changelog.ts
 │   ├── tree.ts
@@ -296,6 +297,7 @@ mcp-ts-core/
 │   │   │   │   ├── httpTransport.ts
 │   │   │   │   ├── httpTypes.ts
 │   │   │   │   ├── protectedResourceMetadata.ts
+│   │   │   │   ├── robotsTxt.ts
 │   │   │   │   ├── serverCard.ts
 │   │   │   │   ├── sessionIdUtils.ts
 │   │   │   │   └── sessionStore.ts
@@ -461,6 +463,7 @@ mcp-ts-core/
 │   │       └── echo.tool.test.ts
 │   ├── _.dockerignore
 │   ├── _.gitignore
+│   ├── _.mcpbignore
 │   ├── _tsconfig.build.json
 │   ├── _tsconfig.json
 │   ├── .env.example
@@ -469,6 +472,7 @@ mcp-ts-core/
 │   ├── CLAUDE.md
 │   ├── devcheck.config.json
 │   ├── Dockerfile
+│   ├── manifest.json
 │   ├── package.json
 │   ├── server.json
 │   └── vitest.config.ts
@@ -593,6 +597,7 @@ mcp-ts-core/
 │   │   │   │   │   ├── httpTypes.test.ts
 │   │   │   │   │   ├── landing-page.test.ts
 │   │   │   │   │   ├── protectedResourceMetadata.test.ts
+│   │   │   │   │   ├── robotsTxt.test.ts
 │   │   │   │   │   ├── serverCard.test.ts
 │   │   │   │   │   ├── sessionIdUtils.runtime.test.ts
 │   │   │   │   │   ├── sessionIdUtils.test.ts
@@ -739,6 +744,7 @@ mcp-ts-core/
 ├── .gitattributes
 ├── .gitignore
 ├── .markdownlint.jsonc
+├── .mcpbignore
 ├── AGENTS.md
 ├── biome.json
 ├── bun.lock
