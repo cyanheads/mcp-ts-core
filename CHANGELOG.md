@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.9.6](changelog/0.9.x/0.9.6.md) — 2026-05-23
+
+lint-packaging validates manifest name scope and user_config fields; multi-server-orchestration and polish-docs-meta skill gaps from pipeline run 2
+
 ## [0.9.5](changelog/0.9.x/0.9.5.md) — 2026-05-23
 
 mcpbignore recursive-match fix, zod promoted to dependencies, polish-docs-meta MCPB step, maintenance template-file adoption, CLAUDE.md condensed

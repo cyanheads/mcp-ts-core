@@ -4,7 +4,7 @@ description: >
   Multi-server-orchestration reference for git wrap-up passes — distilled from `git-mcp-server`'s `git_wrapup_instructions` protocol. Drives parallel verification → optional doc review → wrap-up (version bump, changelog, commit, annotated tag — Bash git, local only, no push) → roll-up across N MCP server projects. Stops at "committed and tagged locally". No push, no publish — those are separate, separately-authorized workflows.
 metadata:
   author: cyanheads
-  version: "1.0"
+  version: "1.1"
   audience: internal
   type: reference
 ---
@@ -100,7 +100,7 @@ One sub-agent per target. The agent executes the seven acceptance criteria via B
 > 2. **Version bump.** Start from current `package.json` `version`; apply the bump intent (`[patch/minor/major or explicit string]`). Bump every place version is declared:
 >    - `package.json` `version`
 >    - `server.json` `version` at the top level AND every `packages[].version` entry
->    - `manifest.json` (if present) `version`
+>    - `manifest.json` (if present) `version`. Also verify `name` doesn't include the npm scope prefix — it should be the bare package name (e.g. `bls-mcp-server`, not `@cyanheads/bls-mcp-server`)
 >    - README version badge and any hero pinning
 >    - Dockerfile OCI labels (if pinned to version)
 >    - Any agent-instruction file (`CLAUDE.md`, `AGENTS.md`) that pins the version

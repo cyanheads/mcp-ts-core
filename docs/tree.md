@@ -1,6 +1,6 @@
 # mcp-ts-core - Directory Structure
 
-Generated on: 2026-05-23 03:37:29
+Generated on: 2026-05-23 10:21:49
 
 ```text
 mcp-ts-core/
@@ -211,6 +211,7 @@ mcp-ts-core/
 │   ├── core/
 │   │   ├── app.ts
 │   │   ├── context.ts
+│   │   ├── gcPressure.ts
 │   │   ├── index.ts
 │   │   ├── serverManifest.ts
 │   │   └── worker.ts
@@ -531,6 +532,7 @@ mcp-ts-core/
 │   │   │   └── parseEnvConfig.test.ts
 │   │   ├── core/
 │   │   │   ├── app.test.ts
+│   │   │   ├── gcPressure.test.ts
 │   │   │   ├── serverManifest.test.ts
 │   │   │   └── typed-fail.test.ts
 │   │   ├── helpers/

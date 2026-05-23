@@ -4,7 +4,7 @@ description: >
   Multi-server-orchestration reference for maintenance passes. Drives parallel `bun update --latest`, changelog investigation (via the changelog skill), framework adoption per the maintenance skill's auto-adopt rule, skill/script sync (Phase A/B/C), and verification across N existing MCP server projects. Optional Bash-git wrap-up fanout commits adoptions after user authorization.
 metadata:
   author: cyanheads
-  version: "1.1"
+  version: "1.2"
   audience: internal
   type: reference
 ---
@@ -27,7 +27,9 @@ Before spawning any sub-agents:
 2. **Verify each target is a git repo with a clean working tree.** Run `git status` per target. Halt if any is dirty — user fixes locally and re-invokes.
 3. **Verify each target has `scripts/list-skills.ts` and the `list-skills` package script.** Both ship via `init`; older projects pick them up on the next `maintenance` Phase C sync — which is what's about to run. If missing at this moment, that's fine; note it and the sub-agent will pick them up.
 4. **Verify each target has the `maintenance` skill available** (in `skills/` or `.claude/skills/`). If missing, that's a sign the project hasn't been initialized from a recent framework version — flag it; the sub-agent can still work from the package's copy at `node_modules/@cyanheads/mcp-ts-core/skills/maintenance/SKILL.md`.
-5. **Clarify the user authorization scope.** Do they want sub-agents to commit/push at the end, or stop at "changes applied, working tree dirty, awaiting review"? Default is the latter.
+5. **Check `publish-mcp` script presence** when `server.json` exists. If missing, flag it — the maintenance sub-agent or a follow-up agent should add it.
+6. **Check `manifest.json` existence.** If missing and the project has `server.json`, flag it — the maintenance sub-agent should scaffold it from `templates/manifest.json` during framework adoption (Step 6).
+7. **Clarify the user authorization scope.** Do they want sub-agents to commit/push at the end, or stop at "changes applied, working tree dirty, awaiting review"? Default is the latter.
 
 ## Phase pattern
 
@@ -83,6 +85,19 @@ The orchestrator collects each sub-agent's Step 8 summary and produces a consoli
 
 Wait for user direction before Phase 4 — they may want to inspect diffs locally first.
 
+### Phase 3.5: Double-check / normalization pass (recommended)
+
+Independent maintenance agents diverge on incidental choices and miss adoption sites under context pressure. A lightweight follow-up fanout catches gaps before wrap-up:
+
+- **Adoption gaps** — features the updated skills say to do that weren't applied (error code semantic audit, missing scaffolding files like `manifest.json`/`.mcpbignore`, `publish-mcp` script)
+- **Audience compliance** — only skills with `metadata.audience: external` should be in project `skills/`; agents sometimes sync `internal`-audience skills
+- **Content accuracy** — `isRequired` flags in `server.json` match the upstream API's actual requirement; `manifest.json` `name` doesn't include the npm scope prefix; `user_config` entries have required `title` and `type` fields
+- **Cross-target consistency** — if a feature shows up in 3 of 5 Step 8 summaries, the other 2 likely missed it
+
+These agents should **fix, not just report** — analysis-only agents create unnecessary follow-up. After fixing, re-run `bun run rebuild && bun run devcheck && bun run test`.
+
+Use a lighter model (e.g. Sonnet) for this pass — it's verification and targeted fixes, not deep adoption work.
+
 ### Phase 4: Wrap-up fanout (optional, Bash git only)
 
 Run only after explicit user authorization. Per-target commit decisions are driven by the change shape:
@@ -110,10 +125,13 @@ If the maintenance pass should drive a version bump (breaking framework upgrade,
 | 5 | Sub-agent runs write git commands despite instruction (commit/push/reset/stash/etc.) | Restate the no-write-git list + the no-`stash` rule in the prompt body; verify via `git log --oneline -1` per target after Phase 2 — should show no new commits since pre-flight |
 | 6 | Targets at the same framework version produce inconsistent adoption choices | Usually means one agent missed a site; spot-check the Step 8 "Features adopted" lists across targets. If a feature shows up for 3 of 4, the 4th likely missed it — spawn a narrow finish-pass agent for that target |
 | 7 | Big monorepo or many adoptions cause context exhaustion in a sub-agent | Narrow the prompt: if a target has many breaking framework changes, split the sub-agent's work into "update deps + verify" and "adopt features" as two phases against that target |
+| 8 | Agent syncs `internal`-audience skills into project `skills/` | Restate in the prompt: "Only sync skills with `metadata.audience: external`." The maintenance skill's Phase A step 2 says this, but agents miss it under context pressure |
+| 9 | `manifest.json` scaffolded with scoped name from `package.json` (e.g. `@cyanheads/bls-mcp-server`) — renders in the mcpb install dialog | Double-check pass should verify `manifest.json` `name` doesn't contain `/`; the `polish-docs-meta` skill's cross-file consistency section covers this |
+| 10 | `manifest.json` `user_config` entries missing required `title`/`type` fields — `mcpb pack` fails at release time | Agents scaffold from memory, not the template. Double-check pass should verify all `user_config` entries have `title` and `type` |
 
 ## Checklist
 
-- [ ] Pre-flight: target list confirmed, clean working trees verified, `list-skills` presence noted per target, `maintenance` skill availability noted per target, auth scope clarified with user
+- [ ] Pre-flight: target list confirmed, clean working trees verified, `list-skills` presence noted per target, `maintenance` skill availability noted per target, `publish-mcp` and `manifest.json` presence noted, auth scope clarified with user
 - [ ] Phase 2: maintenance fanout spawned; each sub-agent returned a Step 8 summary
 - [ ] All targets: green `bun run devcheck` and `bun run test` post-adoption
 - [ ] Phase 3: consolidated roll-up presented to user with per-target headlines, cross-target patterns, open decisions, outliers

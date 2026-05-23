@@ -4,7 +4,7 @@ description: >
   Finalize documentation and project metadata for a ship-ready MCP server. Use after implementation is complete, tests pass, and devcheck is clean. Safe to run at any stage — each step checks current state and only acts on what still needs work.
 metadata:
   author: cyanheads
-  version: "2.1"
+  version: "2.2"
   audience: external
   type: workflow
 ---
@@ -181,7 +181,11 @@ If the project ships as an `.mcpb` bundle for Claude Desktop (check for `manifes
 
 - `manifest.json` version matches `package.json` version
 - Env var names in `manifest.json` (`mcp_config.env` + `user_config`) match `server.json` `environmentVariables` — `lint:packaging` enforces this, but verify the set is complete
-- `manifest.json` `name` and `description` match `package.json`
+- `manifest.json` `name` matches `package.json` name **without the npm scope prefix** (e.g. `bls-mcp-server`, not `@cyanheads/bls-mcp-server`); `description` matches `package.json`
+- `manifest.json` `user_config` entries must include `title` and `type` fields — `mcpb pack` validates these
+- `server.json` env var `isRequired` must match the upstream API's actual requirement — if the API works without the value (rate-limited, DEMO_KEY fallback, polite pool), mark `isRequired: false` and describe the tradeoff in the description
+- Server description aligned across all surfaces: `package.json`, `manifest.json`, `server.json` (condensed, hard 100-char limit), README header `<p><b>`, and GitHub repo description (`gh repo edit --description`)
+- `package.json` `keywords` include baseline terms: `mcp`, `mcp-server`, `model-context-protocol`, `typescript`, `bun`, `stdio`, `streamable-http`, plus data-domain terms. GitHub repo topics (`gh repo edit --add-topic`) should match.
 
 **README install badges:**
 

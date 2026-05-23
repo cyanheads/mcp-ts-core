@@ -8,11 +8,15 @@
  * `npm run lint:packaging`.
  *
  * Checks:
- *   1. Every `${user_config.X}` reference in manifest `mcp_config.env` must
+ *   1. Manifest `name` must not contain a scope prefix (`@scope/`).
+ *   2. Every `user_config` entry must include `title` and `type` fields.
+ *   3. Every `${user_config.X}` reference in manifest `mcp_config.env` must
  *      appear in server.json stdio `environmentVariables[]` (the registry
  *      advertises the configurable knob the bundle surfaces).
- *   2. Every required stdio env var in server.json (no default) must appear
+ *   4. Every required stdio env var in server.json (no default) must appear
  *      as a key in manifest `mcp_config.env` (the bundle can receive it).
+ *
+ * Checks 1–2 run with `manifest.json` alone; 3–4 require `server.json`.
  *
  * Skips cleanly when `manifest.json` is absent — consumers who deleted it for
  * an HTTP-only deploy should not fail this check.
@@ -37,9 +41,16 @@ interface ServerJson {
   packages?: ServerJsonPackage[];
 }
 
+interface ManifestUserConfigEntry {
+  title?: unknown;
+  type?: unknown;
+  [key: string]: unknown;
+}
+
 interface Manifest {
+  name?: string;
   server?: { mcp_config?: { env?: Record<string, string> } };
-  user_config?: Record<string, unknown>;
+  user_config?: Record<string, ManifestUserConfigEntry>;
 }
 
 const USER_CONFIG_REF = /^\$\{user_config\.([\w-]+)\}$/;
@@ -67,42 +78,59 @@ function main(): void {
     process.exit(1);
   }
 
-  const serverJson = tryReadJson<ServerJson>(resolve('server.json'));
-  if (!serverJson) {
-    console.log('No server.json — skipping cross-validation.');
-    process.exit(0);
-  }
-
-  const manifestEnv = manifest.server?.mcp_config?.env ?? {};
-  const manifestEnvKeys = new Set(Object.keys(manifestEnv));
-
-  const manifestUserConfigKeys = new Set(
-    Object.entries(manifestEnv)
-      .filter(([, v]) => typeof v === 'string' && USER_CONFIG_REF.test(v))
-      .map(([k]) => k),
-  );
-
-  const stdioEnvVars = (serverJson.packages ?? [])
-    .filter((p) => p.transport?.type === 'stdio')
-    .flatMap((p) => p.environmentVariables ?? []);
-  const stdioEnvNames = new Set(stdioEnvVars.map((v) => v.name));
-  const requiredStdioEnvNames = new Set(
-    stdioEnvVars.filter((v) => v.isRequired === true && v.default == null).map((v) => v.name),
-  );
-
-  const missingInServerJson = [...manifestUserConfigKeys].filter((k) => !stdioEnvNames.has(k));
-  const missingInManifest = [...requiredStdioEnvNames].filter((k) => !manifestEnvKeys.has(k));
-
   const errors: string[] = [];
-  if (missingInServerJson.length > 0) {
+
+  if (manifest.name?.includes('/')) {
     errors.push(
-      `manifest.json references user_config env var(s) not advertised in server.json stdio environmentVariables[]: ${missingInServerJson.join(', ')}`,
+      `manifest.json "name" contains a scope prefix ("${manifest.name}") — use the bare package name (e.g. "${manifest.name.split('/').pop()}")`,
     );
   }
-  if (missingInManifest.length > 0) {
-    errors.push(
-      `server.json declares required stdio env var(s) without default missing from manifest.json mcp_config.env: ${missingInManifest.join(', ')}`,
+
+  const userConfig = manifest.user_config ?? {};
+  for (const [key, entry] of Object.entries(userConfig)) {
+    if (typeof entry !== 'object' || entry === null) continue;
+    const missing = (['title', 'type'] as const).filter(
+      (f) => typeof entry[f] !== 'string' || (entry[f] as string).length === 0,
     );
+    if (missing.length > 0) {
+      errors.push(
+        `manifest.json user_config["${key}"] is missing required field(s): ${missing.join(', ')} — mcpb pack will reject this`,
+      );
+    }
+  }
+
+  const serverJson = tryReadJson<ServerJson>(resolve('server.json'));
+  if (serverJson) {
+    const manifestEnv = manifest.server?.mcp_config?.env ?? {};
+    const manifestEnvKeys = new Set(Object.keys(manifestEnv));
+
+    const manifestUserConfigKeys = new Set(
+      Object.entries(manifestEnv)
+        .filter(([, v]) => typeof v === 'string' && USER_CONFIG_REF.test(v))
+        .map(([k]) => k),
+    );
+
+    const stdioEnvVars = (serverJson.packages ?? [])
+      .filter((p) => p.transport?.type === 'stdio')
+      .flatMap((p) => p.environmentVariables ?? []);
+    const stdioEnvNames = new Set(stdioEnvVars.map((v) => v.name));
+    const requiredStdioEnvNames = new Set(
+      stdioEnvVars.filter((v) => v.isRequired === true && v.default == null).map((v) => v.name),
+    );
+
+    const missingInServerJson = [...manifestUserConfigKeys].filter((k) => !stdioEnvNames.has(k));
+    const missingInManifest = [...requiredStdioEnvNames].filter((k) => !manifestEnvKeys.has(k));
+
+    if (missingInServerJson.length > 0) {
+      errors.push(
+        `manifest.json references user_config env var(s) not advertised in server.json stdio environmentVariables[]: ${missingInServerJson.join(', ')}`,
+      );
+    }
+    if (missingInManifest.length > 0) {
+      errors.push(
+        `server.json declares required stdio env var(s) without default missing from manifest.json mcp_config.env: ${missingInManifest.join(', ')}`,
+      );
+    }
   }
 
   if (errors.length === 0) {

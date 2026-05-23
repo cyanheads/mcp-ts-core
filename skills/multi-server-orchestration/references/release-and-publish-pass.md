@@ -4,7 +4,7 @@ description: >
   Multi-server-orchestration reference for release-and-publish passes — the end-to-end ship workflow combining wrap-up (version bump, changelog, commit, annotated tag) and publish (push + npm + MCP Registry + GHCR) across N MCP server projects. Drives parallel verification → README polish → wrap-up (Bash git, local only — distilled from `git_wrapup_instructions`) → publish (via the standalone `release-and-publish` skill per target) → optional GH issue closure. Phase 5 runs serial when npm 2FA prompts interactively; parallel when bypass is configured. Disambiguated from the single-target `release-and-publish` skill it invokes per target.
 metadata:
   author: cyanheads
-  version: "1.2"
+  version: "1.3"
   audience: internal
   type: reference
 ---
@@ -137,8 +137,9 @@ Each target invokes the `release-and-publish` skill end-to-end. Execution mode d
 > 3. Push commits and tags to origin via Bash git
 > 4. `bun publish --access public` (npm — uses the configured bypass token)
 > 5. `bun run publish-mcp` if `server.json` exists (MCP Registry)
-> 6. `docker buildx build --platform linux/amd64,linux/arm64 --push ...` if `Dockerfile` exists (GHCR)
-> 7. Report deployed artifact URLs (npm, MCP Registry, GHCR)
+> 6. `bun run bundle` + `gh release create v<version> --verify-tag --notes-from-tag <dist/*.mcpb>` if `manifest.json` exists (MCPB GitHub Release). Must run from inside the repo dir — `--notes-from-tag` is incompatible with `--repo`.
+> 7. `docker buildx build --platform linux/amd64,linux/arm64 --push ...` if `Dockerfile` exists (GHCR)
+> 8. Report deployed artifact URLs (npm, MCP Registry, GitHub Release, GHCR)
 >
 > Honor the skill's retry/halt protocol — transient network errors retry up to 2× with backoff; idempotent-success signals ("version already exists", "cannot publish duplicate version") are treated as success and proceed. Bash git for all git ops. Never skip the verification gate.
 
@@ -176,6 +177,9 @@ Skip Phase 6 for any target whose Phase 5 didn't complete — there's nothing to
 | 8 | Annotated tag message bloats into a CHANGELOG copy | Restate the rule in Phase 4 prompt: terse release theme + notable changes + dep arrows in `pkg ^old → ^new` form. Length is earned |
 | 9 | Sub-agent uses `git-mcp-server` instead of Bash git in Phase 4 or 5 | Hard Rule 1 restated explicitly in every fanout prompt that touches git |
 | 10 | Failed publish leaves a tag pushed but no npm package — looks shipped, isn't | Collect per-destination status per target in Phase 5 roll-up; surface partial-state targets explicitly to the user before Phase 6 |
+| 11 | `gh release create --notes-from-tag` fails with `--repo` flag | `gh` CLI limitation. Always `cd` into the target repo dir for `gh release` commands instead of using `--repo` |
+| 12 | Post-version doc changes (install badges, description fixes) land after the version commit — tag points at stale content | Move the tag forward: delete remote release, delete remote+local tag, recreate tag at new HEAD with same annotation, re-push, recreate release with `.mcpb`. This is authorized within the pipeline for same-day follow-ups |
+| 13 | `mcpb pack` fails because `manifest.json` `user_config` entries are missing `title`/`type` fields | Verify `manifest.json` `user_config` entries during Phase 3 or a pre-Phase-5 check; the `polish-docs-meta` skill's cross-file consistency section covers this |
 
 ## Checklist
 

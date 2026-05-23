@@ -4,7 +4,7 @@ description: >
   Orchestrate parallel sub-agent fanouts across one or more MCP server projects — the same workflow run independently per target. Use for greenfield builds across N new servers, maintenance passes across N existing ones, or any repeatable workflow that benefits from fresh-context per-target sub-agents. Encodes the orient template every sub-agent needs (CLAUDE.md chain + list-skills + spec artifacts), the universal hard rules around git tooling and authorization, common gotchas that bite across runs, and a router into per-scenario references for the phase pattern.
 metadata:
   author: cyanheads
-  version: "1.1"
+  version: "1.2"
   audience: internal
   type: workflow
 ---
@@ -118,6 +118,7 @@ These commonly bite across all scenarios. Scenario-specific gotchas live in thei
 | 6 | Independent agents diverge on incidental conventions (scoping, scripts, README hero) | Plan an explicit normalization pass; don't expect alignment for free |
 | 7 | Sub-agent skips the orient block and proceeds with pattern-matched defaults | Put orient as a numbered prerequisite in the prompt with "Only after that, begin the task"; spot-check the first tool calls in the agent's response |
 | 8 | Sub-agent runs `git stash` to "test something safely" | Restate the global rule verbatim in every sub-agent prompt that may touch git: "NEVER `git stash` for any reason." |
+| 9 | `gh release create --notes-from-tag` fails when combined with `--repo` flag | `gh` CLI limitation. Always `cd` into the target repo dir for `gh release` commands; don't use `--repo` with `--notes-from-tag` |
 
 ## Extending the pattern
 
