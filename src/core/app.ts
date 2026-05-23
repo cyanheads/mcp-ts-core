@@ -10,6 +10,7 @@ import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import type { SupabaseClient } from '@supabase/supabase-js';
 import { z } from 'zod';
 import { config, resetConfig } from '@/config/index.js';
+import { startGcPressureLoop } from '@/core/gcPressure.js';
 import {
   buildServerManifest,
   type LandingConfig,
@@ -489,6 +490,9 @@ export async function createApp(options: CreateAppOptions = {}): Promise<ServerH
   // --- Initialize logger ---
   await logger.initialize(config.logLevel as McpLogLevel, config.mcpTransportType);
 
+  // --- Optional forced-GC pressure loop (issue #50 mitigation) ---
+  const stopGcPressure = startGcPressureLoop(config.mcpGcPressureIntervalMs);
+
   logger.info(
     `Core services constructed — ${definitionCounts.tools} tool(s), ${definitionCounts.resources} resource(s), ${definitionCounts.prompts} prompt(s). Storage: ${config.storage.providerType}.`,
     requestContextService.createRequestContext({
@@ -560,6 +564,7 @@ export async function createApp(options: CreateAppOptions = {}): Promise<ServerH
         taskManager.cleanup();
         coreServices.rateLimiter.dispose();
         schedulerService.destroyAll();
+        stopGcPressure();
 
         if (coreServices.canvas) {
           await coreServices.canvas.shutdown(shutdownContext).catch((err) => {

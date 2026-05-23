@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.9.4](changelog/0.9.x/0.9.4.md) — 2026-05-22
+
+Opt-in `MCP_GC_PRESSURE_INTERVAL_MS` forced-GC loop (Bun-only) drains the per-request `McpServer`/`McpSessionTransport` cycle under sustained low-traffic HTTP load (#50). Skill-versioning policy extended to reference files. README install-button URLs switched to HTTPS endpoints.
+
 ## [0.9.3](changelog/0.9.x/0.9.3.md) — 2026-05-22
 
 `RequestContextLike` — closed-field projection canvas methods now accept, so handler `Context` passes straight to `DataCanvas`/`CanvasInstance`/`IDataCanvasProvider` without a slice helper (#108).

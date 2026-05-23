@@ -164,6 +164,18 @@ const ConfigSchema = z
     mcpStatefulSessionStaleTimeoutMs: z.coerce.number().default(1_800_000),
     mcpHeartbeatIntervalMs: z.coerce.number().min(0).default(0),
     mcpHeartbeatMissThreshold: z.coerce.number().min(1).default(3),
+    /**
+     * Interval in milliseconds for an opt-in forced GC loop. Only takes effect
+     * when the runtime is Bun and `globalThis.Bun.gc` is callable. When set,
+     * a `setInterval` (`.unref()`'d) calls `Bun.gc(true)` every N ms to drain
+     * the major-GC backlog under sustained moderate load — the scenario behind
+     * issue #50 where per-request `McpServer`/`McpSessionTransport` pairs sit
+     * reachable in old-gen until a major collection fires. Default `0`
+     * (disabled). Recommended starting point for production HTTP deployments
+     * exhibiting heap growth: `60000` (1 min). Cheap (~50 ms reclaims dozens of
+     * pairs); benign on Node / Workers / when unset.
+     */
+    mcpGcPressureIntervalMs: z.coerce.number().min(0).default(0),
     mcpAllowedOrigins: z.array(z.string()).optional(),
     mcpAuthSecretKey: z.string().optional(),
     mcpJwtExpectedIssuer: z.string().optional(),
@@ -447,6 +459,7 @@ const parseConfig = (envOverrides?: Record<string, string | undefined>) => {
     mcpStatefulSessionStaleTimeoutMs: env.MCP_STATEFUL_SESSION_STALE_TIMEOUT_MS,
     mcpHeartbeatIntervalMs: env.MCP_HEARTBEAT_INTERVAL_MS,
     mcpHeartbeatMissThreshold: env.MCP_HEARTBEAT_MISS_THRESHOLD,
+    mcpGcPressureIntervalMs: env.MCP_GC_PRESSURE_INTERVAL_MS,
     mcpAllowedOrigins: env.MCP_ALLOWED_ORIGINS?.split(',')
       .map((o) => o.trim())
       .filter(Boolean),

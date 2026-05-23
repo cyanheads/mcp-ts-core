@@ -1,7 +1,7 @@
 # Developer Protocol
 
 **Package:** `@cyanheads/mcp-ts-core`
-**Version:** 0.9.3
+**Version:** 0.9.4
 **Engines:** Bun ≥1.3.0, Node ≥24.0.0
 **MCP SDK:** `@modelcontextprotocol/sdk` ^1.29.0
 **Zod:** ^4.4.3
@@ -514,9 +514,9 @@ Detailed method signatures, options, and examples live in skill files. Read the 
 
 ### Skill versioning
 
-Each `skills/<name>/SKILL.md` carries a `metadata.version` string in its frontmatter. The downstream `maintenance` skill's Phase A reads this field to decide whether to replace a consumer's local copy — when content changes without a version bump, Phase A skips the skill and drift surfaces only through the noisier content-hash backstop.
+Each `skills/<name>/SKILL.md` carries a `metadata.version` string in its frontmatter. The downstream `maintenance` skill's Phase A reads this field to decide whether to replace a consumer's local copy — Phase A replaces the **entire skill directory** (SKILL.md plus everything under `references/`, `templates/`, etc.) as one unit. When content changes anywhere in the directory without a version bump on SKILL.md, Phase A skips the skill and drift surfaces only through the noisier content-hash backstop.
 
-**Policy:** When you change a SKILL.md body, bump `metadata.version` in the same edit. Pure typo and whitespace fixes are exempt. One bump per release cycle is sufficient — if the file already carries an unreleased bump, additional edits within the same cycle don't each need their own.
+**Policy:** When you change SKILL.md, **or any file under `skills/<name>/`** (references, templates, examples — anything the skill ships), bump `metadata.version` on that skill's SKILL.md in the same edit. The reference files themselves don't carry versions; SKILL.md is the single knob for the whole directory. Pure typo and whitespace fixes are exempt. One bump per release cycle is sufficient — if the file already carries an unreleased bump, additional edits within the same cycle don't each need their own.
 
 | Skill | Path | Covers |
 |:------|:-----|:-------|
