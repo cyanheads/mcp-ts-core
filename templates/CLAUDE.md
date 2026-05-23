@@ -295,7 +295,7 @@ When you complete a skill's checklist, check the boxes and add a completion time
 | `npm run rebuild` | Clean + build |
 | `npm run clean` | Remove build artifacts |
 | `npm run devcheck` | Lint + format + typecheck + security + changelog sync |
-| `bun run audit:refresh` | Delete `bun.lock`, reinstall, and re-run `bun audit`. Use when `devcheck` flags a transitive advisory — Bun's `update` is sticky on transitive resolutions, so the advisory may be a stale-lockfile false positive. If it survives the refresh, it's real. |
+| `bun run audit:refresh` | Delete `bun.lock`, reinstall, re-audit. Use when `devcheck` flags a transitive advisory — stale lockfile can mask already-patched deps. If advisory survives, it's real. |
 | `npm run tree` | Generate directory structure doc |
 | `npm run format` | Auto-fix formatting |
 | `npm test` | Run tests |

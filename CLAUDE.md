@@ -1,7 +1,7 @@
 # Developer Protocol
 
 **Package:** `@cyanheads/mcp-ts-core`
-**Version:** 0.9.4
+**Version:** 0.9.5
 **Engines:** Bun ≥1.3.0, Node ≥24.0.0
 **MCP SDK:** `@modelcontextprotocol/sdk` ^1.29.0
 **Zod:** ^4.4.3
@@ -32,8 +32,8 @@ Both paths share the same public API. Init copies starter `package.json`, config
 - **Full-stack observability.** The framework automatically instruments every tool/resource call — OTel span, duration/payload/memory metrics, structured completion log. Use `ctx.log` for additional domain-specific logging within handlers (external API calls, multi-step operations, business events). `requestId`, `traceId`, `tenantId` auto-correlated. No `console` calls.
 - **Unified Context.** Handlers receive `ctx` with logging (`ctx.log`), tenant-scoped storage (`ctx.state`), optional protocol capabilities (`ctx.elicit`, `ctx.sample`), and cancellation (`ctx.signal`).
 - **Decoupled storage.** `ctx.state` for tenant-scoped KV. Never access persistence backends directly.
-- **Canvas tokens are capabilities, not tenant-scoped state.** A `canvasId` is a 10-char URL-safe token; possession grants full read/write/drop on that canvas. Tokens are designed to be shareable — between agents in one session, and across users in single-tenant deployments (see tenant resolution table under `ctx.state`). Tools should accept the token in `input` (or omit to create fresh) and return it in `output`; collaboration is opt-in via explicit token exchange.
-- **Runtime parity.** All features work with `stdio`/`http` and Worker bundle. Guard non-portable deps via `runtimeCaps` from `@cyanheads/mcp-ts-core/utils` — a frozen capability object (`isNode`, `isBun`, `isWorkerLike`, `hasBuffer`, `hasProcess`, etc.) computed once at module load. Prefer runtime-agnostic abstractions (Hono + `@hono/mcp`, Fetch APIs).
+- **Canvas tokens are capabilities, not tenant-scoped state.** A `canvasId` is a 10-char URL-safe token; possession grants full read/write/drop. Shareable between agents and across users in single-tenant deployments. Tools accept token in `input` (omit to create fresh) and return in `output`; collaboration is opt-in via token exchange.
+- **Runtime parity.** All features work across `stdio`/`http`/Worker. Guard non-portable deps via `runtimeCaps` from `/utils` (`isNode`, `isBun`, `isWorkerLike`, `hasBuffer`, `hasProcess`, etc.). Prefer runtime-agnostic abstractions (Hono, Fetch APIs).
 - **Definition linting is build-time only.** Run `bun run lint:mcp` (standalone) or `bun run devcheck` (gate). Not invoked at server startup — new lint rules are additive and never break deployed servers. Every diagnostic links to the rule reference in `api-linter` skill; see that skill for the full rule catalog.
 - **Elicitation for missing input.** Use `ctx.elicit` when the client supports it.
 
@@ -106,7 +106,7 @@ await createApp({
 });
 ```
 
-**`instructions`** — Optional server-level orientation text. Surfaces on every `initialize` response so spec-compliant clients can forward it to the model as session-level system context. Use for deployment-specific guidance (configured connection aliases, regional notes, scope hints, shortcuts) instead of leaking that text into every tool description. Client adoption is uneven, but clients that ignore the field are no worse off than they are today — strict improvement when set.
+**`instructions`** — Optional server-level orientation, surfaced on every `initialize` response as session-level system context. Use for deployment-specific guidance (connection aliases, regional notes, scope hints) instead of repeating in tool descriptions. Client adoption uneven but no downside when set.
 
 ### Cloudflare Workers — `createWorkerHandler(options)`
 
@@ -124,8 +124,6 @@ export default createWorkerHandler({
   onScheduled: async (controller, env, ctx) => { /* cron */ },
 });
 ```
-
-`instructions` on the Worker handler accepts either a plain string or a `(env) => string` resolver so deployment env (injected at request time) can shape the text.
 
 Per-request `McpServer` factory (security: SDK GHSA-345p-7cg4-v4c7). Requires `compatibility_flags = ["nodejs_compat"]` and `compatibility_date >= "2025-09-01"` in `wrangler.toml`. Only `in-memory`, `cloudflare-r2`, `cloudflare-kv`, `cloudflare-d1` storage in Workers. See `api-workers` skill for full details.
 
@@ -260,56 +258,6 @@ Handler receives `(params, ctx)` — URI on `ctx.uri` if needed. Optional `size`
 
 ---
 
-## Adding a Prompt
-
-```ts
-import { prompt, z } from '@cyanheads/mcp-ts-core';
-
-export const codeReview = prompt('code_review', {
-  description: 'Review code for security and best practices.',
-  args: z.object({
-    code: z.string().describe('Code to review'),
-    language: z.string().optional().describe('Programming language'),
-  }),
-  generate: (args) => [
-    { role: 'user', content: { type: 'text', text: `Review this ${args.language ?? ''} code:\n${args.code}` } },
-  ],
-});
-```
-
-Prompts are pure message templates — no `Context`, no auth, no side effects.
-
----
-
-## Adding a Service
-
-Init/accessor pattern — initialized in `setup()`, accessed at request time.
-
-```ts
-export class MyService {
-  constructor(private readonly config: AppConfig, private readonly storage: StorageService) {}
-  async doWork(input: string, ctx: Context): Promise<string> {
-    ctx.log.debug('Working', { input });
-    return `done: ${input}`;
-  }
-}
-
-let _service: MyService | undefined;
-export function initMyService(config: AppConfig, storage: StorageService): void {
-  _service = new MyService(config, storage);
-}
-export function getMyService(): MyService {
-  if (!_service) throw new Error('MyService not initialized — call initMyService() in setup()');
-  return _service;
-}
-```
-
-Usage: `getMyService().doWork(input.query, ctx)`. Convention: `ctx.elicit`/`ctx.sample` only from tool handlers, not services.
-
-**API efficiency:** Prefer batch endpoints over N+1 individual requests. Use field selection to minimize payload. Cross-reference batch responses against requested IDs to detect missing items. See `add-service` skill for patterns.
-
----
-
 ## Context
 
 ```ts
@@ -404,11 +352,9 @@ async handler(input, ctx) {
 }
 ```
 
-**`ctx.recoveryFor(reason)`** always present on `Context`, returns `{}` when no contract is attached or the reason is unknown (spread-safe). Strictly typed on `HandlerContext<R>` against the declared reason union. Works in services accepting `ctx`: `throw validationError(msg, { reason: 'X', ...ctx.recoveryFor('X') })`. No auto-population — author opts in by typing the helper.
+**`ctx.recoveryFor(reason)`** returns `{}` when no contract exists (spread-safe). Typed against the declared reason union on `HandlerContext<R>`. Works in services: `throw validationError(msg, { reason: 'X', ...ctx.recoveryFor('X') })`. Opt-in — author spreads explicitly.
 
-**Declare contracts inline on each tool.** The contract is part of the tool's public surface — one file should give the full picture (input, output, errors, handler, format). Don't extract a shared `errors[]` constant; per-tool repetition is the intended cost of locality, and dynamic `recovery` hints need tool-specific context.
-
-The contract describes the **public failure surface** — declare domain-specific failures only. **Baseline codes** (`InternalError`, `ServiceUnavailable`, `Timeout`, `ValidationError`, `SerializationError`) bubble from anywhere and are auto-allowed by the conformance lint, so you don't need to enumerate them per-tool. The conformance lint scans handler source text only — failures thrown from called services aren't visible to it (still reach the client correctly via the auto-classifier, just without lint enforcement).
+**Contracts are inline, per-tool.** Don't extract shared `errors[]` constants — locality is the point, and dynamic `recovery` hints need tool-specific context. Declare domain-specific failures only; **baseline codes** (`InternalError`, `ServiceUnavailable`, `Timeout`, `ValidationError`, `SerializationError`) are auto-allowed by conformance lint. The lint scans handler source only — service-layer throws still reach clients via auto-classification.
 
 **Fallback for ad-hoc throws** (no contract entry fits, prototype tools, service-layer code): use error factories.
 
@@ -424,9 +370,9 @@ For HTTP responses from upstream APIs, use `httpErrorFromResponse(response, { se
 
 **Auto-classification.** Plain `Error`, `ZodError`, and any other thrown value are caught and classified automatically. Resolution order: `McpError` code (preserved as-is) → JS constructor name (`TypeError` → `ValidationError`) → provider patterns (HTTP status codes, AWS errors, DB errors) → common message patterns → `AbortError` name → `InternalError` fallback.
 
-**Error-path parity.** Tool errors apply the same parity as success: `content[]` carries markdown with `data.recovery.hint` mirrored in; `structuredContent.error` carries `{ code, message, data? }`. No `_meta.error`. Resources re-throw to the SDK via JSON-RPC error envelope (no parity wiring).
+**Error-path parity.** Tool errors: `content[]` carries markdown with `data.recovery.hint`; `structuredContent.error` carries `{ code, message, data? }`. No `_meta.error`. Resources re-throw via JSON-RPC error envelope.
 
-The startup linter checks handler bodies for `prefer-mcp-error-in-handler`, `prefer-error-factory`, `preserve-cause-on-rethrow`, `no-stringify-upstream-error`, plus contract conformance (`error-contract-conformance` for undeclared non-baseline codes, `error-contract-prefer-fail` for declared codes thrown directly instead of via `ctx.fail`) — all warnings, surfaced in `bun run devcheck`.
+**Lint rules** (all warnings, surfaced in `devcheck`): `prefer-mcp-error-in-handler`, `prefer-error-factory`, `preserve-cause-on-rethrow`, `no-stringify-upstream-error`, `error-contract-conformance`, `error-contract-prefer-fail`. See `api-linter` skill.
 
 See `api-errors` skill for the full pattern-matching table, error code reference, and detailed examples.
 
@@ -447,7 +393,7 @@ Pick one convention per server and stay consistent. Verbs are typically `read`, 
 
 **Modes** (`MCP_AUTH_MODE`): `none` (default) | `jwt` (local secret via `MCP_AUTH_SECRET_KEY`) | `oauth` (JWKS via `OAUTH_ISSUER_URL`, `OAUTH_AUDIENCE`). See `api-auth` skill for claims, CORS, and detailed config.
 
-**Granted scopes** union `scp`, `scope`, and `mcp_tool_scopes` JWT claims. `mcp_tool_scopes` is the escape hatch for OIDC providers (Authentik, Keycloak < 26.5, Zitadel) that ignore property mappings overriding `scope` in `authorization_code` flow. When no custom claim can be injected, `MCP_AUTH_DISABLE_SCOPE_CHECKS=true` bypasses both `withRequiredScopes` and `checkScopes` after auth-context presence check (signature/audience/issuer/expiry intact). Startup logs `WARNING` when active.
+**Granted scopes** union `scp`, `scope`, and `mcp_tool_scopes` JWT claims. `mcp_tool_scopes` is the OIDC escape hatch (Authentik, Keycloak < 26.5, Zitadel). `MCP_AUTH_DISABLE_SCOPE_CHECKS=true` bypasses scope checks while preserving auth-context verification (signature/audience/issuer/expiry). Logs `WARNING` at startup.
 
 ---
 
@@ -514,41 +460,11 @@ Detailed method signatures, options, and examples live in skill files. Read the 
 
 ### Skill versioning
 
-Each `skills/<name>/SKILL.md` carries a `metadata.version` string in its frontmatter. The downstream `maintenance` skill's Phase A reads this field to decide whether to replace a consumer's local copy — Phase A replaces the **entire skill directory** (SKILL.md plus everything under `references/`, `templates/`, etc.) as one unit. When content changes anywhere in the directory without a version bump on SKILL.md, Phase A skips the skill and drift surfaces only through the noisier content-hash backstop.
+Each `skills/<name>/SKILL.md` carries `metadata.version` in frontmatter. The `maintenance` skill's Phase A uses this to sync consumer copies — replaces the **entire skill directory** as one unit. Without a version bump, Phase A skips the skill (content-hash backstop catches drift, but noisier).
 
-**Policy:** When you change SKILL.md, **or any file under `skills/<name>/`** (references, templates, examples — anything the skill ships), bump `metadata.version` on that skill's SKILL.md in the same edit. The reference files themselves don't carry versions; SKILL.md is the single knob for the whole directory. Pure typo and whitespace fixes are exempt. One bump per release cycle is sufficient — if the file already carries an unreleased bump, additional edits within the same cycle don't each need their own.
+**Policy:** Bump `metadata.version` when changing any file under `skills/<name>/` — SKILL.md is the single version knob for the directory. Typo/whitespace fixes exempt. One bump per release cycle suffices.
 
-| Skill | Path | Covers |
-|:------|:-----|:-------|
-| `api-utils` | `skills/api-utils/SKILL.md` | formatting, parsing, security, network, pagination, runtime, scheduling, types, logger, requestContext, errorHandler, telemetry helpers (`withSpan`, `createCounter`, …) |
-| `api-telemetry` | `skills/api-telemetry/SKILL.md` | OTel catalog: span names, metric names + attributes, completion log fields, env config, runtime support, cardinality rules |
-| `api-services` | `skills/api-services/SKILL.md` | LLM (OpenRouter), Speech (ElevenLabs TTS, Whisper STT), Graph (CRUD, traversal, pathfinding) |
-| `api-context` | `skills/api-context/SKILL.md` | Context interface, createContext, ContextLogger/State/Progress |
-| `api-errors` | `skills/api-errors/SKILL.md` | McpError, JsonRpcErrorCode, error handling patterns |
-| `api-auth` | `skills/api-auth/SKILL.md` | Auth modes, scopes, JWT/OAuth strategies |
-| `api-config` | `skills/api-config/SKILL.md` | AppConfig, parseConfig, env vars |
-| `api-testing` | `skills/api-testing/SKILL.md` | createMockContext, test patterns, MockContextOptions |
-| `api-workers` | `skills/api-workers/SKILL.md` | createWorkerHandler, CloudflareBindings, Worker runtime |
-| `api-canvas` | `skills/api-canvas/SKILL.md` | DataCanvas primitive: acquire/register/query/export, token-sharing model, SQL gate, lifecycle, spillover pattern |
-| `api-linter` | `skills/api-linter/SKILL.md` | Definition lint rules (`format-parity`, `schema-*`, `name-*`, `server-json-*`, …) — look here when devcheck reports a lint diagnostic |
-| `add-tool` | `skills/add-tool/SKILL.md` | Scaffold a new MCP tool definition |
-| `add-app-tool` | `skills/add-app-tool/SKILL.md` | Scaffold an MCP App tool + UI resource pair |
-| `add-resource` | `skills/add-resource/SKILL.md` | Scaffold a new MCP resource definition |
-| `add-prompt` | `skills/add-prompt/SKILL.md` | Scaffold a new MCP prompt definition |
-| `add-service` | `skills/add-service/SKILL.md` | Scaffold a new domain service |
-| `add-test` | `skills/add-test/SKILL.md` | Scaffold test file for a tool, resource, or service |
-| `field-test` | `skills/field-test/SKILL.md` | Exercise tools/resources/prompts with real inputs, verify behavior, report issues |
-| `security-pass` | `skills/security-pass/SKILL.md` | Review server for MCP-flavored security gaps: output injection, scope blast radius, elicit gaps, upstream auth, input sinks, tenant isolation, leakage, resource bounds |
-| `add-provider` | `skills/add-provider/SKILL.md` | Add a new provider implementation |
-| `add-export` | `skills/add-export/SKILL.md` | Add a new subpath export |
-| `design-mcp-server` | `skills/design-mcp-server/SKILL.md` | Design tool surface, resources, and service layer for a new server |
-| `setup` | `skills/setup/SKILL.md` | Initialize a new consumer server from the template |
-| `polish-docs-meta` | `skills/polish-docs-meta/SKILL.md` | Finalize docs, README, metadata, and agent protocol for shipping |
-| `report-issue-framework` | `skills/report-issue-framework/SKILL.md` | File a bug or feature request against `@cyanheads/mcp-ts-core` via `gh` CLI |
-| `report-issue-local` | `skills/report-issue-local/SKILL.md` | File a bug or feature request against this server's own repo via `gh` CLI |
-| `release-and-publish` | `skills/release-and-publish/SKILL.md` | Post-wrapup ship workflow: verification gate, push, publish to npm/MCP Registry/GHCR |
-| `maintenance` | `skills/maintenance/SKILL.md` | Dependency updates, housekeeping tasks |
-| `migrate-mcp-ts-template` | `skills/migrate-mcp-ts-template/SKILL.md` | Migrate legacy template fork to package dependency |
+Skills live in `skills/<name>/SKILL.md`. Read the relevant skill before starting a task it covers. The full list is discoverable via the agent's skill registry at session start.
 
 ---
 
@@ -581,7 +497,7 @@ Each `skills/<name>/SKILL.md` carries a `metadata.version` string in its frontma
 | `bun run build` | Build library output (`scripts/build.ts`) |
 | `bun run rebuild` | Clean and rebuild (`scripts/clean.ts` + `build`) |
 | `bun run devcheck` | **Use often.** Lint, format, typecheck, MCP definition linting, `bun audit`, `bun outdated` |
-| `bun run audit:refresh` | Delete `bun.lock`, reinstall, and re-run `bun audit`. Use when `devcheck` flags a transitive advisory — Bun's `update` is sticky on transitive resolutions, so a stale-lockfile false positive can disguise an already-patched dep. If the advisory survives, it's real. |
+| `bun run audit:refresh` | Delete `bun.lock`, reinstall, re-audit. Use when `devcheck` flags a transitive advisory — stale lockfile can mask already-patched deps. If advisory survives, it's real. |
 | `bun run lint:mcp` | Validate MCP definitions against spec |
 | `bun run format` | Auto-fix Biome lint/format issues |
 | `bun run test` | Unit/integration tests |
@@ -596,11 +512,9 @@ After `bun update --latest`, run the `maintenance` skill to investigate changelo
 
 ## Changelog
 
-Directory-based, grouped by minor series via the `.x` semver-wildcard convention. Source of truth is `changelog/<major.minor>.x/<version>.md` — one standalone file per release (e.g. `changelog/0.5.x/0.5.4.md`). Per-version files ship in the npm package so agents can read a specific version directly from `node_modules` without parsing a monolithic file.
+Directory-based. Source of truth: `changelog/<major.minor>.x/<version>.md` — one file per release (e.g. `changelog/0.5.x/0.5.4.md`), shipped in the npm package for direct agent access. `changelog/template.md` is the format reference (never edited).
 
-At release time, author the per-version file with a concrete version and date, then run `bun run changelog:build` to regenerate the rollup. `changelog/template.md` is a format reference — never edited; consult it for frontmatter and section layout when scaffolding a new file. Be concise and accurate.
-
-`CHANGELOG.md` is a **navigation index**, not a copy of bodies — each entry is a clickable header + one-line summary pulled from the per-version file's frontmatter. Regenerated by `bun run changelog:build`. Devcheck runs `changelog:check` and hard-fails on drift. Never hand-edit `CHANGELOG.md` — edit the per-version file and rerun the build.
+`CHANGELOG.md` is a **navigation index** — clickable headers + one-line summaries from frontmatter. Regenerated by `bun run changelog:build`; `changelog:check` hard-fails on drift in devcheck. Never hand-edit — edit the per-version file and rerun the build.
 
 ### Per-version file format
 
@@ -626,11 +540,9 @@ security: false                                         # optional, default fals
 | `breaking` | no (default `false`) | Flags releases with breaking changes. Renders as `· ⚠️ Breaking` badge in the rollup. Agents running the `maintenance` skill read this to prioritize review. |
 | `security` | no (default `false`) | Flags releases with security fixes. Renders as `· 🛡️ Security` badge in the rollup so users can triage upgrade urgency. Pairs with the `## Security` body section. |
 
-When both flags are set, badges render in fixed order: `· ⚠️ Breaking · 🛡️ Security`. Summary > 350 chars or a malformed boolean fails `changelog:check`. Missing `summary` emits a warning and renders the rollup entry as header-only.
+Badge order when both set: `· ⚠️ Breaking · 🛡️ Security`. Summary > 350 chars or malformed boolean fails `changelog:check`.
 
-**Section order** (Keep a Changelog): Added, Changed, Deprecated, Removed, Fixed, Security. Include only sections with entries — don't ship empty headers.
-
-Pre-release versions (`0.6.0-beta.1`, `0.6.0-rc.1`, etc.) are consolidated as `##`/`###` sub-headers inside the final version's per-version file (`changelog/0.6.x/0.6.0.md`) when the final ships — they share the final version's frontmatter, no separate files per pre-release.
+**Section order** (Keep a Changelog): Added, Changed, Deprecated, Removed, Fixed, Security. Omit empty sections. Pre-release versions consolidate as sub-headers inside the final version's file — no separate files per pre-release.
 
 ---
 

@@ -7,9 +7,6 @@
 .agents/
 
 # Source / dev surface
-src/
-tests/
-coverage/
 docs/
 examples/
 templates/

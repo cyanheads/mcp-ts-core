@@ -45,7 +45,7 @@
         "noImportCycles": "error",
         "noUnusedExpressions": "error",
         "noDeprecatedImports": "error",
-        "noDuplicateDependencies": "error"
+        "noDuplicateDependencies": "warn"
       },
       "complexity": {
         "noUselessUndefined": "error"

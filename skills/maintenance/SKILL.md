@@ -4,7 +4,7 @@ description: >
   Investigate, adopt, and verify dependency updates — with special handling for `@cyanheads/mcp-ts-core`. Captures what changed, understands why, cross-references against the codebase, adopts framework improvements, syncs project skills, and runs final checks. Supports two entry modes: run the full flow end-to-end, or review updates you already applied.
 metadata:
   author: cyanheads
-  version: "2.3"
+  version: "2.4"
   audience: external
   type: workflow
 ---
@@ -78,6 +78,7 @@ Scan specifically for:
 | Config changes | New env vars, renamed keys, changed defaults |
 | Linter rules | New definition-lint rules that may now flag existing tools/resources |
 | New or materially-changed skills | Note new skills or workflow changes (renamed steps, new checklist items) worth surfacing at end-of-run. Don't auto-invoke — some skills (e.g. `security-pass`) are user-triggered. The per-version changelog entries (e.g. 0.6.14 calling out `skills/security-pass/ (v1.0)`) name what changed. |
+| New template-scaffolded files | Compare `templates/` in the package against the project root. Files that `init` would create for a new project but don't exist in this project are adoption candidates — create them with project-specific values (version, name, description, env vars from `server.json`). Examples: `manifest.json`, `.mcpbignore`. Skip files the project has intentionally opted out of (documented in CLAUDE.md or a code comment). |
 
 Cross-reference each finding against the server's code. Collect adoption opportunities for Step 6.
 

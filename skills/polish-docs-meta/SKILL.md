@@ -4,7 +4,7 @@ description: >
   Finalize documentation and project metadata for a ship-ready MCP server. Use after implementation is complete, tests pass, and devcheck is clean. Safe to run at any stage — each step checks current state and only acts on what still needs work.
 metadata:
   author: cyanheads
-  version: "2.0"
+  version: "2.1"
   audience: external
   type: workflow
 ---
@@ -163,11 +163,38 @@ Never hand-edit `CHANGELOG.md` when using this pattern — it's a build artifact
 
 **Monolithic** — maintain `CHANGELOG.md` directly in [Keep a Changelog](https://keepachangelog.com/) format. To collapse from the template default: delete the `changelog/` directory, remove `changelog:build` and `changelog:check` from `package.json` scripts (and from `devcheck.config.json` if referenced), and drop `"changelog/"` from the `files` array. The `release` skill's directory-specific steps then don't apply — just edit `CHANGELOG.md` and bump version at release time.
 
-### 10. `LICENSE`
+### 10. MCPB Bundling Artifacts
+
+If the project ships as an `.mcpb` bundle for Claude Desktop (check for `manifest.json` at the project root), verify the full artifact set is present and consistent. If the project doesn't ship `.mcpb` bundles, skip this step.
+
+**Files that must exist:**
+
+- `manifest.json` — MCPB manifest with `mcp_config.env`, `user_config`, and metadata
+- `.mcpbignore` — controls what's excluded from the bundle
+
+**`package.json` scripts:**
+
+- `bundle` — builds the `.mcpb` (e.g., `mcpb pack --output dist/`)
+- `lint:packaging` — validates `manifest.json` ↔ `server.json` env var consistency (run by `devcheck`)
+
+**Cross-file consistency:**
+
+- `manifest.json` version matches `package.json` version
+- Env var names in `manifest.json` (`mcp_config.env` + `user_config`) match `server.json` `environmentVariables` — `lint:packaging` enforces this, but verify the set is complete
+- `manifest.json` `name` and `description` match `package.json`
+
+**README install badges:**
+
+- If `manifest.json` exists, the README should include the Claude Desktop install badge linking to `releases/latest/download/<name>.mcpb`
+- If the package is published to npm, include Cursor and VS Code install badges
+- See `references/readme.md` for badge format and config generation commands
+- See the **Bundling** section of `templates/CLAUDE.md` for `base64` / `encodeURIComponent` generation
+
+### 11. `LICENSE`
 
 Confirm a license file exists. If not, ask the user which license to use (default: Apache-2.0, matching the scaffolded `package.json`). Create the file.
 
-### 11. `Dockerfile`
+### 12. `Dockerfile`
 
 If a `Dockerfile` exists, verify the OCI labels and runtime config match the actual server:
 
@@ -178,7 +205,7 @@ If a `Dockerfile` exists, verify the OCI labels and runtime config match the act
 
 If no `Dockerfile` exists and the server is deployed via HTTP transport, consider scaffolding one — the template is available via `npx @cyanheads/mcp-ts-core init`.
 
-### 12. `docs/tree.md`
+### 13. `docs/tree.md`
 
 Regenerate the directory structure:
 
@@ -188,7 +215,7 @@ bun run tree
 
 Review the output for anything unexpected (leftover files, missing directories).
 
-### 13. Final Verification
+### 14. Final Verification
 
 Run the full check suite one last time:
 
@@ -210,6 +237,7 @@ Both must pass clean.
 - [ ] GitHub repo description matches `package.json` description; topics ↔ keywords in sync
 - [ ] `bunfig.toml` present
 - [ ] Changelog current — either monolithic `CHANGELOG.md` (hand-edited, Keep a Changelog) or directory-based (`changelog/<minor>.x/<version>.md` + rollup regenerated and in sync)
+- [ ] MCPB artifacts consistent (if `manifest.json` present) — version synced, env vars match `server.json`, `bundle` + `lint:packaging` scripts exist, README install badges present
 - [ ] `LICENSE` file present
 - [ ] `Dockerfile` OCI labels and runtime config accurate (if present)
 - [ ] `docs/tree.md` regenerated

@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.9.5](changelog/0.9.x/0.9.5.md) — 2026-05-23
+
+mcpbignore recursive-match fix, zod promoted to dependencies, polish-docs-meta MCPB step, maintenance template-file adoption, CLAUDE.md condensed
+
 ## [0.9.4](changelog/0.9.x/0.9.4.md) — 2026-05-22
 
 Opt-in `MCP_GC_PRESSURE_INTERVAL_MS` forced-GC loop (Bun-only) drains the per-request `McpServer`/`McpSessionTransport` cycle under sustained low-traffic HTTP load (#50). Skill-versioning policy extended to reference files. README install-button URLs switched to HTTPS endpoints.
