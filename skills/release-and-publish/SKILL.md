@@ -4,7 +4,7 @@ description: >
   Ship a release end-to-end across every registry the project targets (npm, MCP Registry, GitHub Releases for `.mcpb` bundles, GHCR). Runs the final verification gate, pushes commits and tags, then publishes to each applicable destination. Assumes git wrapup (version bumps, changelog, commit, annotated tag) is already complete — this skill is the post-wrapup publish workflow. Retries transient network failures on publish steps; halts with a partial-state report when retries are exhausted or the failure is terminal.
 metadata:
   author: cyanheads
-  version: "2.5"
+  version: "2.6"
   audience: external
   type: workflow
 ---
@@ -178,7 +178,7 @@ If the project uses a non-GHCR registry or a custom image name, respect the proj
 Print clickable URLs for every destination that succeeded:
 
 - npm: `https://www.npmjs.com/package/<package.json#name>/v/<version>`
-- MCP Registry: `https://registry.modelcontextprotocol.io/v0/servers?search=<mcpName>` — `mcpName` is the `name` field from `server.json` (the unscoped server name, e.g. `bls-mcp-server`)
+- MCP Registry: `https://registry.modelcontextprotocol.io/v0.1/servers/<mcpName>/versions/<version>` — `mcpName` is the `name` field from `server.json` (URL-encode the `/` as `%2F`)
 - GitHub Release: `https://github.com/<OWNER>/<REPO>/releases/tag/v<VERSION>` (with `.mcpb` asset attached)
 - GHCR: `ghcr.io/<OWNER>/<REPO>:<VERSION>`
 
@@ -189,7 +189,7 @@ Skip any destination that was skipped in its step.
 Confirm each published artifact is actually live — don't rely on a successful push exit code alone. For each destination that succeeded:
 
 - **npm**: `npm view <package.json#name>@<version> version` — must return the version string
-- **MCP Registry**: `curl -s "https://registry.modelcontextprotocol.io/v0/servers?search=<mcpName>"` — response must include `<version>` (`mcpName` is the `name` field from `server.json`)
+- **MCP Registry**: `curl -s "https://registry.modelcontextprotocol.io/v0.1/servers/<mcpName>/versions/<version>"` — must return HTTP 200 with `server.version` matching `<version>` (`mcpName` is the `name` field from `server.json`; URL-encode `/` as `%2F`). The search endpoint (`/v0.1/servers?search=`) paginates and may not include the latest version for packages with many releases — always use the direct version lookup.
 - **GitHub Release**: `gh release view v<VERSION> -R <OWNER>/<REPO> --json assets --jq '.assets[].name'` — must list the `.mcpb` file
 - **GHCR**: fetch an anonymous bearer token, then `curl -s -o /dev/null -w "%{http_code}" -H "Authorization: Bearer $TOKEN" "https://ghcr.io/v2/<OWNER>/<REPO>/manifests/<VERSION>"` — must return HTTP 200
 
