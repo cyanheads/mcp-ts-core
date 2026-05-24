@@ -1,7 +1,7 @@
 # Developer Protocol
 
 **Package:** `@cyanheads/mcp-ts-core`
-**Version:** 0.9.8
+**Version:** 0.9.9
 **Engines:** Bun ≥1.3.0, Node ≥24.0.0
 **MCP SDK:** `@modelcontextprotocol/sdk` ^1.29.0
 **Zod:** ^4.4.3
@@ -36,6 +36,7 @@ Both paths share the same public API. Init copies starter `package.json`, config
 - **Runtime parity.** All features work across `stdio`/`http`/Worker. Guard non-portable deps via `runtimeCaps` from `/utils` (`isNode`, `isBun`, `isWorkerLike`, `hasBuffer`, `hasProcess`, etc.). Prefer runtime-agnostic abstractions (Hono, Fetch APIs).
 - **Definition linting is build-time only.** Run `bun run lint:mcp` (standalone) or `bun run devcheck` (gate). Not invoked at server startup — new lint rules are additive and never break deployed servers. Every diagnostic links to the rule reference in `api-linter` skill; see that skill for the full rule catalog.
 - **Elicitation for missing input.** Use `ctx.elicit` when the client supports it.
+- **Close the loop on issues.** When implementing work tracked by a GitHub issue, comment on the issue with what landed before moving on. The comment is for future readers — state the concrete changes, not the conversation that produced them.
 
 ---
 

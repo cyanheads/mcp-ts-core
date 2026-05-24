@@ -1,9 +1,13 @@
 #!/usr/bin/env node
 /**
- * @fileoverview Guards framework source against three SDK-coupling antipatterns
- * tempting to reach for when fixing tool input-validation error shape (#66) or
- * similar SDK-adjacent bugs. Each rule is narrow and mechanical — the goal is to
- * pin an architectural decision so it does not have to be re-litigated per PR.
+ * @fileoverview Guards against three SDK-coupling antipatterns. Scans `src/`
+ * via `git grep` — all rules target framework-internal paths. Shipped to
+ * consumers via `package.json` `files:` because `devcheck` invokes it; in
+ * consumer projects the scanned paths (`src/mcp-server/tools/`,
+ * `src/mcp-server/transports/`) either don't exist or contain consumer code
+ * that follows different conventions, so the script exits cleanly with 0
+ * findings. Defense-in-depth: harmless when nothing matches, catches real
+ * regressions in the framework.
  *
  * Rules:
  *   1. Framework must not downgrade the Zod `inputSchema` passed to

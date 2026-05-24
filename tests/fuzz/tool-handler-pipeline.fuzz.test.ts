@@ -8,9 +8,14 @@
 import type { RequestHandlerExtra } from '@modelcontextprotocol/sdk/shared/protocol.js';
 import type { ServerNotification, ServerRequest } from '@modelcontextprotocol/sdk/types.js';
 import fc from 'fast-check';
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { z } from 'zod';
-import { ADVERSARIAL_STRINGS, adversarialObjectArbitrary, zodToArbitrary } from '@/testing/fuzz.js';
+import {
+  ADVERSARIAL_STRINGS,
+  adversarialObjectArbitrary,
+  loadFc,
+  zodToArbitrary,
+} from '@/testing/fuzz.js';
 import { JsonRpcErrorCode, McpError } from '@/types-global/errors.js';
 
 // ---------------------------------------------------------------------------
@@ -155,6 +160,7 @@ const optionalTool = tool('fuzz_optional', {
 // ---------------------------------------------------------------------------
 
 describe('Tool Handler Pipeline Fuzz Tests', () => {
+  beforeAll(() => loadFc());
   beforeEach(() => {
     vi.clearAllMocks();
   });

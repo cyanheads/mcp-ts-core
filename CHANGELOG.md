@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.9.9](changelog/0.9.x/0.9.9.md) — 2026-05-24
+
+fuzzTool Phase 1 pre-parse, ZodArray minLength, fast-check → optional peer dep, packaging cleanup
+
 ## [0.9.8](changelog/0.9.x/0.9.8.md) — 2026-05-24
 
 Docs fixes, README context table updates, skill sync, @hono/node-server ^2.0.3 → ^2.0.4

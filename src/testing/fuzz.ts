@@ -9,7 +9,7 @@
  * @module src/testing/fuzz
  */
 
-import fc from 'fast-check';
+import type fc from 'fast-check';
 import type { ZodObject, ZodRawShape } from 'zod';
 import {
   ZodArray,
@@ -27,6 +27,29 @@ import type { AnyPromptDefinition } from '@/mcp-server/prompts/utils/promptDefin
 import type { AnyResourceDefinition } from '@/mcp-server/resources/utils/resourceDefinition.js';
 import type { AnyToolDefinition } from '@/mcp-server/tools/utils/toolDefinition.js';
 import { createMockContext, type MockContextOptions } from './index.js';
+
+// ---------------------------------------------------------------------------
+// Lazy-loaded peer dependency
+// ---------------------------------------------------------------------------
+
+let _fc: typeof fc | undefined;
+
+/** Eagerly loads the `fast-check` peer dependency. Called automatically by `fuzzTool`/`fuzzResource`/`fuzzPrompt`. Call manually before using `zodToArbitrary` or `adversarialArbitrary` standalone. */
+export async function loadFc(): Promise<typeof fc> {
+  if (!_fc) _fc = (await import('fast-check')).default;
+  return _fc;
+}
+
+/** Returns the cached fast-check module. Throws if called before `loadFc()`. */
+function getFc(): typeof fc {
+  if (!_fc) {
+    throw new Error(
+      'fast-check not loaded. Call fuzzTool/fuzzResource/fuzzPrompt first, ' +
+        'or `await loadFc()` before using zodToArbitrary/adversarialArbitrary directly.',
+    );
+  }
+  return _fc;
+}
 
 // ---------------------------------------------------------------------------
 // Configuration
@@ -71,23 +94,27 @@ function zodTypeName(schema: unknown): string {
 /**
  * Converts a Zod schema to a fast-check `Arbitrary` that produces valid values.
  * Supports the JSON-Schema-serializable subset used by MCP tool/resource schemas.
+ *
+ * Requires `fast-check` to be loaded first — call from within a `fuzzTool()`/
+ * `fuzzResource()`/`fuzzPrompt()` run, or call `loadFc()` before standalone use.
  */
 export function zodToArbitrary(schema: unknown): fc.Arbitrary<unknown> {
   return zodNodeToArbitrary(schema, 0);
 }
 
 function zodNodeToArbitrary(schema: unknown, depth: number): fc.Arbitrary<unknown> {
-  if (depth > 6) return fc.constant(null);
+  const f = getFc();
+  if (depth > 6) return f.constant(null);
 
   // Unwrap wrappers — cast through any to avoid Zod 4 $ZodType vs ZodType mismatch
   if (schema instanceof ZodOptional) {
-    return fc.option(zodNodeToArbitrary((schema as any).unwrap(), depth), { nil: undefined });
+    return f.option(zodNodeToArbitrary((schema as any).unwrap(), depth), { nil: undefined });
   }
   if (schema instanceof ZodNullable) {
-    return fc.option(zodNodeToArbitrary((schema as any).unwrap(), depth), { nil: null });
+    return f.option(zodNodeToArbitrary((schema as any).unwrap(), depth), { nil: null });
   }
   if (schema instanceof ZodDefault) {
-    return fc.option(zodNodeToArbitrary((schema as any).removeDefault(), depth), {
+    return f.option(zodNodeToArbitrary((schema as any).removeDefault(), depth), {
       nil: undefined,
       freq: 5,
     });
@@ -101,70 +128,76 @@ function zodNodeToArbitrary(schema: unknown, depth: number): fc.Arbitrary<unknow
     return arbitraryForZodNumber(schema);
   }
   if (schema instanceof ZodBoolean) {
-    return fc.boolean();
+    return f.boolean();
   }
 
   // Enum / literal
   if (schema instanceof ZodEnum) {
     const values = (schema as any).options as unknown[];
-    return fc.constantFrom(...values);
+    return f.constantFrom(...values);
   }
   if (schema instanceof ZodLiteral) {
-    return fc.constant((schema as any).value);
+    return f.constant((schema as any).value);
   }
 
   // Array
   if (schema instanceof ZodArray) {
-    return fc.array(zodNodeToArbitrary((schema as any).element, depth + 1), { maxLength: 5 });
+    const s = schema as any;
+    const minLen: number = typeof s.minLength === 'number' ? s.minLength : 0;
+    return f.array(zodNodeToArbitrary(s.element, depth + 1), {
+      minLength: minLen,
+      maxLength: Math.max(minLen, 5),
+    });
   }
 
   // Union
   if (schema instanceof ZodUnion) {
     const options = (schema as any)._def.options as unknown[];
-    return fc.oneof(...options.map((o) => zodNodeToArbitrary(o, depth + 1)));
+    return f.oneof(...options.map((o) => zodNodeToArbitrary(o, depth + 1)));
   }
 
   // Object — check by _def.type since instanceof ZodObject may have type issues
   if (zodTypeName(schema) === 'object') {
     const shape = (schema as any).shape as Record<string, unknown> | undefined;
-    if (!shape) return fc.constant({});
+    if (!shape) return f.constant({});
     const entries = Object.entries(shape);
-    if (entries.length === 0) return fc.constant({});
+    if (entries.length === 0) return f.constant({});
 
     const arbs: Record<string, fc.Arbitrary<unknown>> = {};
     for (const [key, fieldSchema] of entries) {
       arbs[key] = zodNodeToArbitrary(fieldSchema, depth + 1);
     }
-    return fc.record(arbs);
+    return f.record(arbs);
   }
 
   // Fallback: generate JSON-safe primitives
-  return fc.oneof(fc.string(), fc.integer(), fc.boolean(), fc.constant(null));
+  return f.oneof(f.string(), f.integer(), f.boolean(), f.constant(null));
 }
 
 /**
  * Zod 4 exposes `.minLength`, `.maxLength`, `.format` as direct accessors on ZodString.
  */
 function arbitraryForZodString(schema: ZodString): fc.Arbitrary<string> {
+  const f = getFc();
   const s = schema as any;
   const format: string | undefined = s.format;
   if (format === 'email') {
     // fc.emailAddress() can produce emails Zod 4 rejects (e.g. "!a@a.aa").
     // Generate simple, spec-safe emails instead.
-    return fc
+    return f
       .tuple(
-        fc.stringMatching(/^[a-z][a-z0-9]{0,10}$/),
-        fc.stringMatching(/^[a-z]{2,8}\.[a-z]{2,4}$/),
+        f.stringMatching(/^[a-z][a-z0-9]{0,10}$/),
+        f.stringMatching(/^[a-z]{2,8}\.[a-z]{2,4}$/),
       )
       .map(([local, domain]) => `${local}@${domain}`);
   }
-  if (format === 'url' || format === 'uri') return fc.webUrl();
-  if (format === 'uuid') return fc.uuid();
+  if (format === 'url' || format === 'uri') return f.webUrl();
+  if (format === 'uuid') return f.uuid();
 
   const minLen: number = typeof s.minLength === 'number' ? s.minLength : 0;
   const maxLen: number = typeof s.maxLength === 'number' ? s.maxLength : 200;
 
-  return fc.string({ minLength: minLen, maxLength: Math.max(minLen, maxLen) });
+  return f.string({ minLength: minLen, maxLength: Math.max(minLen, maxLen) });
 }
 
 /**
@@ -172,6 +205,7 @@ function arbitraryForZodString(schema: ZodString): fc.Arbitrary<string> {
  * Zod 4 defaults to `isFinite: true`, rejecting Infinity/NaN — respect that.
  */
 function arbitraryForZodNumber(schema: ZodNumber): fc.Arbitrary<number> {
+  const f = getFc();
   const s = schema as any;
   const isFiniteNum: boolean = s.isFinite !== false;
   const rawMin: number = typeof s.minValue === 'number' ? s.minValue : -1_000_000;
@@ -181,8 +215,8 @@ function arbitraryForZodNumber(schema: ZodNumber): fc.Arbitrary<number> {
   const isInt: boolean = s.isInt === true;
 
   return isInt
-    ? fc.integer({ min, max })
-    : fc.double({ min, max, noNaN: true, noDefaultInfinity: true });
+    ? f.integer({ min, max })
+    : f.double({ min, max, noNaN: true, noDefaultInfinity: true });
 }
 
 // ---------------------------------------------------------------------------
@@ -218,9 +252,9 @@ export const ADVERSARIAL_STRINGS: readonly string[] = [
   // Encoding attacks
   '\0',
   '\x00',
-  '\uFEFF',
+  '﻿',
   '\uD800',
-  '\uDBFF\uDFFF',
+  '􏿿',
   // Format string
   '%s%s%s%s%s',
   '%x%x%x%x',
@@ -250,32 +284,33 @@ export const ADVERSARIAL_STRINGS: readonly string[] = [
 
 /** Generates adversarial values for object fields based on expected type. */
 export function adversarialArbitrary(): fc.Arbitrary<unknown> {
-  return fc.oneof(
+  const f = getFc();
+  return f.oneof(
     // Wrong types
-    fc.constant(null),
-    fc.constant(undefined),
-    fc.constant(true),
-    fc.constant(false),
-    fc.constant(0),
-    fc.constant(-1),
-    fc.constant(Number.MAX_SAFE_INTEGER),
-    fc.constant(Number.MIN_SAFE_INTEGER),
-    fc.constant(NaN),
-    fc.constant(Infinity),
-    fc.constant(-Infinity),
-    fc.constant(''),
-    fc.constantFrom(...ADVERSARIAL_STRINGS),
+    f.constant(null),
+    f.constant(undefined),
+    f.constant(true),
+    f.constant(false),
+    f.constant(0),
+    f.constant(-1),
+    f.constant(Number.MAX_SAFE_INTEGER),
+    f.constant(Number.MIN_SAFE_INTEGER),
+    f.constant(NaN),
+    f.constant(Infinity),
+    f.constant(-Infinity),
+    f.constant(''),
+    f.constantFrom(...ADVERSARIAL_STRINGS),
     // Arrays where objects expected (and vice versa)
-    fc.constant([]),
-    fc.constant([1, 2, 3]),
-    fc.constant({}),
+    f.constant([]),
+    f.constant([1, 2, 3]),
+    f.constant({}),
     // Prototype pollution objects
-    fc.constant({ __proto__: { polluted: true } }),
-    fc.constant({ constructor: { prototype: { polluted: true } } }),
+    f.constant({ __proto__: { polluted: true } }),
+    f.constant({ constructor: { prototype: { polluted: true } } }),
     // Deeply nested
-    fc.constant(buildDeepObject(20)),
+    f.constant(buildDeepObject(20)),
     // Circular-safe deep object
-    fc.constant(buildWideObject(100)),
+    f.constant(buildWideObject(100)),
   );
 }
 
@@ -286,6 +321,7 @@ export function adversarialArbitrary(): fc.Arbitrary<unknown> {
 export function adversarialObjectArbitrary(
   schema: ZodObject<ZodRawShape>,
 ): fc.Arbitrary<Record<string, unknown>> {
+  const f = getFc();
   const shape = (schema as any).shape as Record<string, unknown> | undefined;
   const keys = shape ? Object.keys(shape) : [];
 
@@ -293,7 +329,7 @@ export function adversarialObjectArbitrary(
     return adversarialArbitrary() as fc.Arbitrary<Record<string, unknown>>;
   }
 
-  return fc.record(Object.fromEntries(keys.map((k) => [k, adversarialArbitrary()])));
+  return f.record(Object.fromEntries(keys.map((k) => [k, adversarialArbitrary()])));
 }
 
 function buildDeepObject(depth: number): unknown {
@@ -400,6 +436,7 @@ export async function fuzzTool(
   def: AnyToolDefinition,
   options: FuzzOptions = {},
 ): Promise<FuzzReport> {
+  const f = await loadFc();
   const numRuns = options.numRuns ?? DEFAULTS.numRuns;
   const numAdversarial = options.numAdversarial ?? DEFAULTS.numAdversarial;
   const timeout = options.timeout ?? DEFAULTS.timeout;
@@ -417,17 +454,19 @@ export async function fuzzTool(
 
   const protoGuard = createProtoPollutionGuard();
 
-  // Phase 1: Valid inputs
+  // Phase 1: Valid inputs — pre-parse to match production semantics (resolves defaults, enforces constraints)
   const validArb = zodToArbitrary(def.input) as fc.Arbitrary<Record<string, unknown>>;
-  await fc.assert(
-    fc.asyncProperty(validArb, async (input) => {
+  await f.assert(
+    f.asyncProperty(validArb, async (raw) => {
       report.totalRuns++;
+      const parsed = def.input.safeParse(raw);
+      if (!parsed.success) return;
       const ctx = createMockContext(options.ctx);
       try {
-        const result = await withTimeout(def.handler(input, ctx), timeout);
+        const result = await withTimeout(def.handler(parsed.data, ctx), timeout);
         def.output.parse(result);
       } catch (err) {
-        report.crashes.push({ input, error: err });
+        report.crashes.push({ input: parsed.data, error: err });
       }
     }),
     fcParams,
@@ -435,8 +474,8 @@ export async function fuzzTool(
 
   // Phase 2: Adversarial inputs (should be caught by Zod or handler, never crash)
   const advArb = adversarialObjectArbitrary(def.input);
-  await fc.assert(
-    fc.asyncProperty(advArb, async (input) => {
+  await f.assert(
+    f.asyncProperty(advArb, async (input) => {
       report.totalRuns++;
       const ctx = createMockContext(options.ctx);
       try {
@@ -485,8 +524,9 @@ export async function fuzzTool(
     const controller = new AbortController();
     controller.abort();
     const ctx = createMockContext({ ...options.ctx, signal: controller.signal });
-    const validSample = generateOne(validArb);
-    await withTimeout(def.handler(validSample as any, ctx), timeout);
+    const rawSample = generateOne(validArb);
+    const parsedSample = def.input.parse(rawSample);
+    await withTimeout(def.handler(parsedSample, ctx), timeout);
   } catch {
     // Expected
   }
@@ -512,6 +552,7 @@ export async function fuzzResource(
   def: AnyResourceDefinition,
   options: FuzzOptions = {},
 ): Promise<FuzzReport> {
+  const f = await loadFc();
   const numRuns = options.numRuns ?? DEFAULTS.numRuns;
   const numAdversarial = options.numAdversarial ?? DEFAULTS.numAdversarial;
   const timeout = options.timeout ?? DEFAULTS.timeout;
@@ -531,19 +572,21 @@ export async function fuzzResource(
   const paramsSchema = def.params;
 
   if (paramsSchema) {
-    // Phase 1: Valid params
+    // Phase 1: Valid params — pre-parse to match production semantics
     const validArb = zodToArbitrary(paramsSchema) as fc.Arbitrary<Record<string, unknown>>;
-    await fc.assert(
-      fc.asyncProperty(validArb, async (params) => {
+    await f.assert(
+      f.asyncProperty(validArb, async (raw) => {
         report.totalRuns++;
+        const parsed = paramsSchema.safeParse(raw);
+        if (!parsed.success) return;
         const ctx = createMockContext({
           ...options.ctx,
-          uri: new URL(`fuzz://test/${encodeURIComponent(JSON.stringify(params))}`),
+          uri: new URL(`fuzz://test/${encodeURIComponent(JSON.stringify(parsed.data))}`),
         });
         try {
-          await withTimeout(def.handler(params, ctx), timeout);
+          await withTimeout(def.handler(parsed.data, ctx), timeout);
         } catch (err) {
-          report.crashes.push({ input: params, error: err });
+          report.crashes.push({ input: parsed.data, error: err });
         }
       }),
       fcParams,
@@ -551,8 +594,8 @@ export async function fuzzResource(
 
     // Phase 2: Adversarial params
     const advArb = adversarialObjectArbitrary(paramsSchema);
-    await fc.assert(
-      fc.asyncProperty(advArb, async (params) => {
+    await f.assert(
+      f.asyncProperty(advArb, async (params) => {
         report.totalRuns++;
         const ctx = createMockContext({
           ...options.ctx,
@@ -606,6 +649,7 @@ export async function fuzzPrompt(
   def: AnyPromptDefinition,
   options: FuzzOptions = {},
 ): Promise<FuzzReport> {
+  const f = await loadFc();
   const numRuns = options.numRuns ?? DEFAULTS.numRuns;
   const numAdversarial = options.numAdversarial ?? DEFAULTS.numAdversarial;
   const timeout = options.timeout ?? DEFAULTS.timeout;
@@ -626,27 +670,29 @@ export async function fuzzPrompt(
 
   if (argsSchema) {
     const validArb = zodToArbitrary(argsSchema) as fc.Arbitrary<Record<string, string>>;
-    await fc.assert(
-      fc.asyncProperty(validArb, async (args) => {
+    await f.assert(
+      f.asyncProperty(validArb, async (raw) => {
         report.totalRuns++;
+        const parsed = argsSchema.safeParse(raw);
+        if (!parsed.success) return;
         try {
-          const messages = await withTimeout(def.generate(args), timeout);
+          const messages = await withTimeout(def.generate(parsed.data), timeout);
           if (!Array.isArray(messages)) {
             report.crashes.push({
-              input: args,
+              input: parsed.data,
               error: new Error('generate() did not return array'),
             });
           }
         } catch (err) {
-          report.crashes.push({ input: args, error: err });
+          report.crashes.push({ input: parsed.data, error: err });
         }
       }),
       fcParams,
     );
 
     const advArb = adversarialObjectArbitrary(argsSchema);
-    await fc.assert(
-      fc.asyncProperty(advArb, async (args) => {
+    await f.assert(
+      f.asyncProperty(advArb, async (args) => {
         report.totalRuns++;
         try {
           const validated = argsSchema.safeParse(args);
@@ -688,9 +734,10 @@ function withTimeout<T>(promise: T | Promise<T>, ms: number): Promise<T> {
 }
 
 function generateOne<T>(arb: fc.Arbitrary<T>): T {
+  const f = getFc();
   let value: T | undefined;
-  fc.assert(
-    fc.property(arb, (v) => {
+  f.assert(
+    f.property(arb, (v) => {
       value = v;
       return false; // Stop after first
     }),

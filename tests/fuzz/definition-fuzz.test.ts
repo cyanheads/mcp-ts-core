@@ -6,7 +6,7 @@
  */
 
 import fc from 'fast-check';
-import { describe, expect, it } from 'vitest';
+import { beforeAll, describe, expect, it } from 'vitest';
 import { z } from 'zod';
 import { prompt } from '@/mcp-server/prompts/utils/promptDefinition.js';
 import { resource } from '@/mcp-server/resources/utils/resourceDefinition.js';
@@ -17,8 +17,11 @@ import {
   fuzzPrompt,
   fuzzResource,
   fuzzTool,
+  loadFc,
   zodToArbitrary,
 } from '@/testing/fuzz.js';
+
+beforeAll(() => loadFc());
 
 // ---------------------------------------------------------------------------
 // Test definitions — representative schema shapes
