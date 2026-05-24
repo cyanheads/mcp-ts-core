@@ -72,7 +72,9 @@ Compare `.env.example` against the server config Zod schema. Add any missing ser
 
 Check for empty or placeholder metadata fields. Read `references/package-meta.md` for which fields matter and why. Fill in anything still missing — skip fields that are already correct.
 
-Key fields: `description`, `repository`, `author`, `homepage`, `bugs`, `keywords`.
+Key fields: `name`, `description`, `repository`, `author`, `homepage`, `bugs`, `keywords`.
+
+**`name` must communicate the server's domain at a glance.** See `references/package-meta.md` for the naming convention — ambiguous abbreviations and acronym-only names fail the scannability test for humans and agents alike.
 
 **`description` is the canonical source.** Every other surface (README header, `server.json`, Dockerfile OCI label, GitHub repo description) derives from it. Write it here first, then propagate.
 

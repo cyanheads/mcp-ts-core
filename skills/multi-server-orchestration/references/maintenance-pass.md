@@ -59,7 +59,7 @@ One sub-agent per target. Each agent runs the `maintenance` skill end-to-end in 
 > 3. Invoke the `changelog` skill for each updated package
 > 4. If `@cyanheads/mcp-ts-core` updated, do the deeper framework review from Step 4 of the maintenance skill
 > 5. Run Step 5 skill/script sync (Phase A: package → project `skills/`; Phase B: project `skills/` → agent dirs; Phase C: package scripts + pristine refs → project)
-> 6. Adopt changes per Step 6 — **framework changes are auto-adopt every applicable site in this pass**, no scope/effort/marginal-benefit deferrals; third-party libs are cost/benefit
+> 6. Adopt changes per Step 6 — **framework changes are auto-adopt every applicable site in this pass** (the maintenance skill's Step 6 defines "applicable site" — follow its guidance; don't infer scope from this summary), no scope/effort/marginal-benefit deferrals; third-party libs are cost/benefit
 > 7. `bun run rebuild` → `bun run devcheck` → `bun run test`
 > 8. Produce the Step 8 numbered summary (Updated packages, Breaking changes handled, Features adopted, Skills synced, New/changed skills available, Open decisions, Status)
 >
@@ -67,7 +67,7 @@ One sub-agent per target. Each agent runs the `maintenance` skill end-to-end in 
 > - **No write git commands** — no `commit`, `push`, `tag`, `branch`, `merge`, `rebase`, `cherry-pick`, `add`, `reset`, `restore`, `checkout --`, `clean`, `stash`. Leave the working tree dirty for orchestrator review.
 > - Read-only git is allowed and expected — `status`, `diff`, `log`, `show`, `blame`. The maintenance skill's Step 5 Phase A explicitly requires `git diff skills/` after sync to surface adoption signal; do that.
 > - NEVER `git stash` for any reason. NEVER `git reset --hard`, `git restore .`, `git clean -f`, or `git checkout -- .` — these violate the global protocol.
-> - Halt and report if `bun run devcheck` can't be made green after adoption. `bun run test` is skip-not-halt: if the project has no `test` script in `package.json`, note it and continue.
+> - Halt and report if `bun run devcheck` can't be made green after adoption. `bun audit` failures from devcheck are note-not-halt if the advisory is in a transitive dep with no available patch — surface it in the Step 8 summary under Open decisions. `bun run test` is skip-not-halt: if the project has no `test` script in `package.json`, note it and continue.
 > - Output the Step 8 summary verbatim at the end of your run — the orchestrator parses it.
 >
 > If the `maintenance` skill's own version increased in Phase A of the skill sync (skill-version paradox), re-read the synced `skills/maintenance/SKILL.md` and continue from Step 5 onward with the new version.
@@ -94,6 +94,8 @@ Independent maintenance agents diverge on incidental choices and miss adoption s
 - **Content accuracy** — `isRequired` flags in `server.json` match the upstream API's actual requirement; `manifest.json` `name` doesn't include the npm scope prefix; `user_config` entries have required `title` and `type` fields
 - **Cross-target consistency** — if a feature shows up in 3 of 5 Step 8 summaries, the other 2 likely missed it
 
+Phase 3.5 agents operate under the same no-write-git constraint as Phase 2 agents — leave fixes in the working tree for Phase 4.
+
 These agents should **fix, not just report** — analysis-only agents create unnecessary follow-up. After fixing, re-run `bun run rebuild && bun run devcheck && bun run test`.
 
 Use a lighter model (e.g. Sonnet) for this pass — it's verification and targeted fixes, not deep adoption work.
@@ -104,7 +106,7 @@ Run only after explicit user authorization. Per-target commit decisions are driv
 
 - **Pure third-party dependency update** — `chore(deps): update dependencies` (or per-package if the diff is concentrated)
 - **Framework upgrade with adoption changes** — `chore(framework): mcp-ts-core <old> → <new>, adopt <pattern>`
-- **Mixed** — split into atomic commits per the global git rules ("Related changes ship together; unrelated changes split")
+- **Mixed** — split into atomic commits per the global git rules ("Related changes ship together; unrelated changes split"). Example: `package.json` + `bun.lock` + adoption code ship together in the framework adoption commit; unrelated third-party-only deps ship in a separate `chore(deps)` commit
 
 One sub-agent per target. Each agent:
 
@@ -113,6 +115,10 @@ One sub-agent per target. Each agent:
 3. Pushes to origin
 
 If the maintenance pass should drive a version bump (breaking framework upgrade, or follow-on release intent), see the `release-and-publish` skill — the orchestrator may chain a release scenario as a separate run.
+
+## Orchestrator-driven updates
+
+If the orchestrator runs `bun update --latest` centrally before spawning sub-agents (e.g. to batch the network I/O or to run changelog investigation itself), pass the resolved version deltas (`package old → new`) into each sub-agent's prompt. This lets the agent skip re-discovery and jump straight to changelog review / framework adoption with concrete versions in hand.
 
 ## Gotchas specific to maintenance
 
@@ -133,8 +139,10 @@ If the maintenance pass should drive a version bump (breaking framework upgrade,
 
 - [ ] Pre-flight: target list confirmed, clean working trees verified, `list-skills` presence noted per target, `maintenance` skill availability noted per target, `publish-mcp` and `manifest.json` presence noted, auth scope clarified with user
 - [ ] Phase 2: maintenance fanout spawned; each sub-agent returned a Step 8 summary
+- [ ] Phase 2 integrity: `git log --oneline -1` per target confirms no new commits written by sub-agents
 - [ ] All targets: green `bun run devcheck` and `bun run test` post-adoption
 - [ ] Phase 3: consolidated roll-up presented to user with per-target headlines, cross-target patterns, open decisions, outliers
+- [ ] Phase 3.5: double-check pass completed; adoption gaps fixed, audience compliance verified, `manifest.json` name/`user_config` validated; devcheck + test green per target after fixes
 - [ ] **User authorization captured for wrap-up if proceeding to Phase 4**
 - [ ] Phase 4: per-target commits via Bash git, pushed to origin
 - [ ] Final read-only verification: `git log --oneline -3` and `git ls-remote` per target — commits landed, no stray uncommitted work

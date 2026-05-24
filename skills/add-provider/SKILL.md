@@ -15,6 +15,10 @@ Providers implement interfaces defined in core. They are selected at runtime via
 (e.g., `STORAGE_PROVIDER_TYPE`). Tier 3 providers lazy-load their dependencies to keep the
 core bundle small.
 
+Providers live inside the package source tree — import the interface via relative path
+(e.g., `import type { IStorageProvider } from '../core/IStorageProvider.js'`), not via the
+package subpath exports (those are for consumers).
+
 ## Provider interfaces
 
 | Domain  | Interface file                                    |
@@ -32,9 +36,11 @@ these flags drive routing in `SpeechService`.
 
 Provider file location and naming differ by domain:
 
-- **Storage** — nested subdirectory, PascalCase file:
-  `src/storage/providers/{{provider-name}}/{{provider-name}}Provider.ts`
-  (e.g., `src/storage/providers/inMemory/inMemoryProvider.ts`)
+- **Storage** — nested subdirectory, camelCase directory name, PascalCase-suffixed provider file.
+  Each provider gets its own subdirectory for the provider file plus any co-located types:
+  `src/storage/providers/{{providerName}}/{{providerName}}Provider.ts`
+  (e.g., `src/storage/providers/inMemory/inMemoryProvider.ts`,
+  `src/storage/providers/supabase/supabaseProvider.ts` + `supabase.types.ts`)
 
 - **LLM / Speech** — flat directory, kebab-case with `.provider.ts` suffix:
   `src/services/llm/providers/{{provider-name}}.provider.ts`
@@ -63,8 +69,11 @@ Provider file location and naming differ by domain:
 
 5. **Register the provider** — the registration point differs by domain:
 
-   - **Storage** — add a `case` to the `switch` in `src/storage/core/storageFactory.ts`
-     inside `createStorageProvider()`. Import the new provider class at the top of that file.
+   - **Storage** — two changes required:
+     1. Add the new provider string to the `z.enum` for `STORAGE_PROVIDER_TYPE` in
+        `src/config/index.ts` — without this, the config schema rejects the env var at runtime.
+     2. Add a `case` to the `switch` in `src/storage/core/storageFactory.ts`
+        inside `createStorageProvider()`. Import the new provider class at the top of that file.
 
    - **Speech** — two changes required:
      1. Add the new provider string literal to the `provider` union in
@@ -75,8 +84,10 @@ Provider file location and naming differ by domain:
 
    - **LLM** — currently only one provider exists (`OpenRouterProvider`); it is
      instantiated directly in `src/core/app.ts` rather than through a factory switch.
-     Add a factory function or extend `app.ts` as needed, then update `ILlmProvider`
-     consumers accordingly.
+     There is no factory pattern yet — adding a second provider requires introducing
+     one (a selector env var, a factory function, and a conditional in `app.ts`).
+     Read `src/core/app.ts` to understand the current instantiation site before
+     designing the wiring.
 
 6. **Update the Worker-compatible provider list** if the new storage provider runs in
    Cloudflare Workers. The list is an inline array in `storageFactory.ts` at the
@@ -90,8 +101,11 @@ Provider file location and naming differ by domain:
    Add the new provider string to this array. Non-storage providers have no equivalent
    gate.
 
-7. **Add the dependency** as an optional peer dependency in `package.json` if Tier 3.
-8. **Run `bun run devcheck`** to verify.
+7. **Add the dependency** if Tier 3: add to both `peerDependencies` and
+   `peerDependenciesMeta` (with `{ "optional": true }`) in `package.json`.
+   Without the `peerDependenciesMeta` entry, the dep appears required rather than optional.
+8. **Run `bun run rebuild`** — since this is package source, verify the build output compiles.
+9. **Run `bun run devcheck`** to verify.
 
 ## Checklist
 
@@ -99,8 +113,11 @@ Provider file location and naming differ by domain:
 - [ ] Interface fully implemented (including `name`, `supportsTTS`/`supportsSTT` for speech)
 - [ ] Tier 3 dependencies lazy-loaded (not top-level imports)
 - [ ] Registered in the correct factory for the domain (see Step 5)
-- [ ] Speech: `provider` literal added to `SpeechProviderConfig` union in `types.ts`
+- [ ] Storage: provider string added to `z.enum` in `src/config/index.ts`
 - [ ] Storage: Worker-compatible array in `storageFactory.ts` updated if applicable
-- [ ] Optional peer dependency added to `package.json` if Tier 3
+- [ ] Speech: `provider` literal added to `SpeechProviderConfig` union in `types.ts`
+- [ ] LLM: `src/core/app.ts` instantiation logic updated if adding a second LLM provider
+- [ ] Optional peer dependency added to both `peerDependencies` and `peerDependenciesMeta` in `package.json` if Tier 3
+- [ ] `bun run rebuild` succeeds
 - [ ] `bun run devcheck` passes
-- [ ] Integration tested with the target backend
+- [ ] Test file created at `src/storage/providers/{{name}}/{{name}}Provider.test.ts` (or equivalent path for the domain) and `bun run test` passes

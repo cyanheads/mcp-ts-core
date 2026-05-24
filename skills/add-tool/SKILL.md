@@ -11,18 +11,16 @@ metadata:
 
 ## Context
 
-Tools use the `tool()` builder from `@cyanheads/mcp-ts-core`. Each tool lives in `src/mcp-server/tools/definitions/` with a `.tool.ts` suffix and is registered into `createApp()` in `src/index.ts`. Some larger repos later add `definitions/index.ts` barrels; match the pattern already used by the project you're editing.
-
-For the full `tool()` API, `Context` interface, and error codes, read `node_modules/@cyanheads/mcp-ts-core/CLAUDE.md`.
+Tools use the `tool()` builder from `@cyanheads/mcp-ts-core`. Each tool lives in `src/mcp-server/tools/definitions/` with a `.tool.ts` suffix. The standard registration pattern uses a `definitions/index.ts` barrel that collects all tools into an `allToolDefinitions` array for `createApp()`. Fresh scaffolds from `init` start with direct imports in `src/index.ts` — the barrel is introduced as definitions grow. Match the pattern already used by the project you're editing.
 
 ## Steps
 
-1. **Ask the user** for the tool's name, purpose, and input/output shape
+1. **Gather** the tool's name, purpose, and input/output shape from the user's request — ask only if genuinely absent
 2. **Determine if long-running** — if the tool involves streaming, polling, or
    multi-step async work, it should use `task: true`
 3. **Create the file** at `src/mcp-server/tools/definitions/{{tool-name}}.tool.ts`
 4. **Register** the tool in the project's existing `createApp()` tool list (directly in `src/index.ts` for fresh scaffolds, or via a barrel if the repo already has one)
-5. **Run `bun run devcheck`** to verify
+5. **Run `bun run devcheck`** to verify — if Biome reports formatting issues, run `bun run format` to auto-fix, then re-run devcheck
 6. **Smoke-test** with `bun run rebuild && bun run start:stdio` (or `start:http`)
 
 ## Naming
@@ -136,6 +134,7 @@ export const {{TOOL_EXPORT}} = tool('{{tool_name}}', {
   output: z.object({ /* ... */ }),
 
   async handler(input, ctx) {
+    // ctx.progress is guaranteed non-null when task: true — the ! assertion is safe here.
     await ctx.progress!.setTotal(totalSteps);
     for (const step of steps) {
       if (ctx.signal.aborted) break;
@@ -528,18 +527,26 @@ Large payloads burn the agent's context window. Default to curated summaries; of
 ## Checklist
 
 - [ ] File created at `src/mcp-server/tools/definitions/{{tool-name}}.tool.ts`
+- [ ] Tool name passed to `tool()` uses snake_case
+- [ ] `title` field set
+- [ ] `annotations` set correctly — `readOnlyHint: false` for write tools, `destructiveHint: true` for delete/overwrite tools
 - [ ] All Zod schema fields have `.describe()` annotations
 - [ ] Numeric `output` fields carry units in the field name (`sizeInBytes`, `durationInMs`, `priceInCents`, `latencyInMs`) — `.describe()` may be summarized away or truncated, but the field name persists into the JSON the agent reads. Exempt: dimensionless counts (`totalCount`, `itemCount`), indices (`index`, `position`)
 - [ ] Schemas use only JSON-Schema-serializable types (no `z.custom()`, `z.date()`, `z.transform()`, `z.bigint()`, `z.symbol()`, `z.void()`, `z.map()`, `z.set()`)
 - [ ] JSDoc `@fileoverview` and `@module` header present
 - [ ] Optional nested objects guarded for empty inner values from form-based clients (check `?.field` truthiness, not just object presence)
-- [ ] `handler(input, ctx)` is pure — throws on failure, no try/catch
+- [ ] No `console` calls — use `ctx.log` for handler logging
+- [ ] `handler(input, ctx)` is pure — throws on failure, no try/catch (exception: batch tools with per-item isolation use try/catch inside the loop — that's intentional, don't remove it)
 - [ ] `format()` renders every field in the output schema — enforced at lint time via sentinel injection, startup fails with `format-parity` errors otherwise. Different clients forward different surfaces (Claude Code → `structuredContent`, Claude Desktop → `content[]`); both must carry the same data. Primary fix: render the missing field in `format()` (use `z.discriminatedUnion` for list/detail variants). Escape hatch: if the output schema was over-typed for a genuinely dynamic upstream API, relax it (`z.object({}).passthrough()`) rather than maintaining aspirational typing
 - [ ] If wrapping external API: output schema and `format()` preserve uncertainty from sparse upstream payloads instead of inventing concrete values
 - [ ] `auth` scopes declared if the tool needs authorization
 - [ ] `errors: [...]` contract declared for the tool's domain-specific failure modes — or block deleted if no domain failures apply (baseline codes bubble freely)
 - [ ] Error contract declared inline on this tool — not imported from a shared module, even when other tools have near-identical entries
 - [ ] `task: true` added if the tool is long-running
+- [ ] If `task: true`: handler checks `ctx.signal.aborted` in its loop for cancellation support
+- [ ] If tool returns unbounded arrays: pagination with total count, or `spillover()` / DataCanvas for tabular working sets
+- [ ] If tool is feature-gated: evaluated whether `disabledTool()` wrapper is appropriate (present in manifest but uncallable)
 - [ ] Registered in the project's existing `createApp()` tool list (directly or via barrel)
+- [ ] Test file created via `add-test` skill, or handler tested directly with `createMockContext()`
 - [ ] `bun run devcheck` passes
 - [ ] Smoke-tested with `bun run rebuild && bun run start:stdio` (or `start:http`)

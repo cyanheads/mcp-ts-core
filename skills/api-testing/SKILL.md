@@ -13,6 +13,8 @@ metadata:
 
 Tests target handler behavior directly — call `handler(input, ctx)`, assert on the return value or thrown error. The framework's handler factory (try/catch, formatting, telemetry) is not involved. Use `createMockContext` from `@cyanheads/mcp-ts-core/testing` to construct the `ctx` argument.
 
+**Additional exports from `/testing`:** `createMockLogger()` returns a standalone `MockContextLogger` for unit-testing code that accepts a `ContextLogger` directly (services, utilities). `createInMemoryStorage(options?)` provides a real `StorageService` backed by `InMemoryProvider` for testing services that take a `StorageService` dependency.
+
 **Philosophy:** Test behavior, not implementation. Refactors should not break tests. Match the repo's existing test layout: fresh scaffolds use `tests/`, while colocated `src/**/*.test.ts` files are also supported. Integration tests at I/O boundaries over unit tests of internals.
 
 ---
@@ -43,9 +45,12 @@ interface MockContextOptions {
   auth?: AuthContext;
   elicit?: (message: string, schema: z.ZodObject<z.ZodRawShape>) => Promise<ElicitResult>;
   errors?: readonly ErrorContract[];
+  notifyPromptListChanged?: () => void;
   notifyResourceListChanged?: () => void;
   notifyResourceUpdated?: (uri: string) => void;
+  notifyToolListChanged?: () => void;
   progress?: boolean;
+  sessionId?: string;
   requestId?: string;
   sample?: (messages: SamplingMessage[], opts?: SamplingOpts) => Promise<CreateMessageResult>;
   signal?: AbortSignal;
@@ -60,8 +65,11 @@ interface MockContextOptions {
 | `auth` | Sets `ctx.auth` for scope-checking tests |
 | `elicit` | Assigns a function to `ctx.elicit` for testing elicitation calls |
 | `errors` | Attaches a typed `ctx.fail` against the contract — same wiring the production handler factory uses. Pass `myTool.errors` directly. |
+| `notifyPromptListChanged` | Assigns `ctx.notifyPromptListChanged` for prompt-list change notification tests |
 | `notifyResourceListChanged` | Assigns `ctx.notifyResourceListChanged` for resource notification tests |
 | `notifyResourceUpdated` | Assigns `ctx.notifyResourceUpdated` for resource update notification tests |
+| `notifyToolListChanged` | Assigns `ctx.notifyToolListChanged` for tool-list change notification tests |
+| `sessionId` | Sets `ctx.sessionId` for handlers that branch on session ID |
 | `progress` | Populates `ctx.progress` with real state-tracking implementation (see below) |
 | `requestId` | Overrides `ctx.requestId` (default: `'test-request-id'`) |
 | `sample` | Assigns a function to `ctx.sample` for testing sampling calls |
@@ -93,7 +101,7 @@ expect(progress._messages).toContain('step message');
 
 ### Mock logger
 
-`ctx.log` captures all log calls for inspection. The mock returns the typed `MockContextLogger` from `@cyanheads/mcp-ts-core/testing` — import that instead of hand-casting:
+`ctx.log` captures all log calls for inspection. Import `MockContextLogger` from `@cyanheads/mcp-ts-core/testing` and cast `ctx.log` to access the `.calls` array (the cast is necessary because `createMockContext` returns `Context`, which types `log` as `ContextLogger`):
 
 ```ts
 import { createMockContext, type MockContextLogger } from '@cyanheads/mcp-ts-core/testing';

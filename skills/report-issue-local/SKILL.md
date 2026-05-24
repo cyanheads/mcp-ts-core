@@ -32,7 +32,7 @@ For general `gh` CLI workflows outside issue filing (PRs, workflows, API access)
 gh repo view --json nameWithOwner -q '.nameWithOwner'
 ```
 
-2. **Search existing issues**:
+2. **Search existing issues** — if a close match exists (same symptom, different tool; same tool, different symptom; closed issue that might cover the new case), add a comment on that issue instead of filing a new one — unless the symptom or scope is distinct enough to warrant separate tracking:
 
 ```bash
 gh issue list --search "your error message or keyword"
@@ -176,17 +176,19 @@ gh label create surplus-token-idea --color FF10F0 --description "Worth exploring
 
 ### Attaching logs or large output
 
+Note: `--body-file` replaces the entire body — it does not supplement a `--body` flag. For structured bugs with logs, either embed the log content in the `Additional context` section of a normal `--body`, or file the issue first and add the log as a comment:
+
 ```bash
 bun run rebuild && bun run start:stdio 2>&1 | head -200 > /tmp/server-error.log
 
-# As part of a new issue
+# As part of a new issue (the log becomes the entire body — no template fields)
 gh issue create \
   --title "bug(ingest): crashes on large payload" \
   --label "bug" \
   --assignee "@me" \
   --body-file /tmp/server-error.log
 
-# Or as a comment on an existing issue
+# Or as a comment on an existing issue (preferred — keeps the structured body intact)
 gh issue comment <number> --body-file /tmp/server-error.log
 ```
 
@@ -294,6 +296,9 @@ gh issue close <number> --reason completed --comment "Fixed in <commit or PR>"
 ## Checklist
 
 - [ ] Confirmed bug is in server code, not the framework
-- [ ] Searched existing issues — no duplicate found
+- [ ] Searched existing issues — no duplicate found; close matches commented instead of duplicated
 - [ ] All secrets, credentials, and tokens redacted
-- [ ] Issue filed with: version, runtime, repro steps, actual vs expected behavior
+- [ ] Title follows `type(scope): description` format
+- [ ] Primary label assigned (`bug` / `enhancement` / `documentation`)
+- [ ] If bug: version, runtime, repro steps, actual vs expected behavior included
+- [ ] If feature: Proposal and Scope sections present; Out of scope defined

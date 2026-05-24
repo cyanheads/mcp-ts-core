@@ -147,7 +147,7 @@ The big one. One sub-agent per target builds the full implementation from `docs/
 - "No write `git` commands: no `commit`, `push`, `add`, `tag`, `reset`, `restore`, `checkout --`, `clean`, `stash`. Read-only git is allowed — `status`, `diff`, `log` are useful for tracking your own changes."
 - "NEVER `git stash` for any reason. NEVER `git reset --hard`, `git restore .`, `git clean -f`, or `git checkout -- .` — these violate the global protocol."
 - "Do NOT run `field-test`. That's reserved for the user's manual verification later."
-- Orient block — non-negotiable.
+- Orient block — non-negotiable (see `../SKILL.md` for the template).
 
 **Expect context exhaustion on the largest targets.** The agent's work persists to disk even if its session dies, but the agent itself can't continue. Plan Phase 11 as the backstop — not a fallback for failure, a normal next phase.
 
@@ -175,7 +175,7 @@ No commits in this phase.
 
 ### Phase 13: Final wrap-up (fanout, Bash git only)
 
-Run only after the user authorizes. Same shape as Phase 5: per-target sub-agent invokes `git_wrapup_instructions` advice (via Bash git), authors `changelog/0.1.x/<version>.md`, regenerates `CHANGELOG.md` and `docs/tree.md`, version-bumps `package.json` and `server.json`, commits with a conventional subject, creates an annotated tag, pushes.
+Run only after the user authorizes. One sub-agent per target reads and executes the standalone `git-wrapup` skill (`skills/git-wrapup/SKILL.md`). All git calls use Bash, not git-mcp-server. After the local wrap-up, the agent pushes commits and tags to origin.
 
 Version bumps live with the change that warrants them per the global protocol's git rules — don't manufacture extra commits.
 
@@ -208,7 +208,7 @@ These agents fix, not just report. Re-run devcheck + test after each.
 | 5 | `init` defaults package name to the cwd; if the project was scaffolded inside an outer dir, the name is wrong | Verify in Phase 4 prompt: "Check the substituted package name in `package.json`, `server.json`, and the agent protocol matches the intended server name." |
 | 6 | Sub-agent creates GH repo public by default if `gh repo create` omits `--private` | Restate the scenario hard rule in every fanout that touches `gh`: "Repo must be private before any push." |
 | 7 | Wrap-up agents have been observed reporting "pushed" while the remote ref didn't actually land — the push only succeeded on a subsequent op | Verify after every Bash-git fanout: `git ls-remote --tags origin` and `gh repo view --json defaultBranchRef` per target |
-| 8 | LICENSE file missing from scaffolded projects despite package.json declaring Apache-2.0 | Copy from `node_modules/@cyanheads/mcp-ts-core/LICENSE` during scaffold phase |
+| 8 | LICENSE file missing from scaffolded projects despite package.json declaring Apache-2.0 | Copy from `node_modules/@cyanheads/mcp-ts-core/LICENSE` during scaffold phase (run `bun install` first if `node_modules` isn't present) |
 | 9 | Description drift across surfaces — agents set descriptions independently, creating inconsistencies across package.json, manifest.json, server.json, README, and GH repo description | Pre-launch sweep phase catches this; or define the canonical description once in docs/design.md and have agents reference it |
 | 10 | `server.json` `isRequired` flags set without verifying upstream API reality | Pre-launch sweep should verify each env var's `isRequired` against actual API behavior (does it work without the key?) |
 | 11 | Build agents exhaust context and leave tests half-written — finish agents inherit the gap but don't prioritize test coverage | Dedicated test quality review phase after build/finish is the backstop |
@@ -227,12 +227,15 @@ The orchestrator's checklist for a full N-target greenfield build:
 - [ ] Phase 3 — critical review fanout — `docs/design.md` hardened per target
 - [ ] **Recommended: design gate — cold-read pass/fail per target**
 - [ ] Phase 4 — setup + repo fanout — repos created private, working tree unstaged, no commits
+- [ ] Phase 4 — package name verified in `package.json`, `server.json`, and agent protocol per target
+- [ ] Phase 4 — LICENSE file present in each target
 - [ ] Phase 5 — v0.1.0 wrap-up fanout (Bash git only) — commits + annotated tags + pushes; verified via `git log` and `git ls-remote --tags origin`
 - [ ] Phase 6 — polish docs/meta fanout against named gold-standard
 - [ ] Phase 7 — normalization — divergent conventions aligned
 - [ ] **If extension applicable:** Phase 8 — design extension fanout (e.g., DataCanvas for tabular servers)
 - [ ] **If Phases 6–8 produced doc changes the build should start from:** Phase 9 — interim wrap-up fanout (Bash git only) after user authorizes
 - [ ] Phase 10 — build fanout — implementation + tests + green devcheck per target
+- [ ] **If any Phase 10 agent didn't finish:** Phase 10 state documented per incomplete target (tool count, error count, missing tests) for Phase 11 prompt
 - [ ] **If any Phase 10 agent didn't finish:** Phase 11 — narrow-scope finish fanout per incomplete target
 - [ ] Phase 12 — simplify fanout — `code-simplifier` pass per target
 - [ ] **Recommended: test quality review — dedicated test coverage and quality audit**

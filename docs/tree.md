@@ -1,6 +1,6 @@
 # mcp-ts-core - Directory Structure
 
-Generated on: 2026-05-23 10:21:49
+Generated on: 2026-05-24 09:27:14
 
 ```text
 mcp-ts-core/
@@ -170,6 +170,8 @@ mcp-ts-core/
 │   ├── design-mcp-server/
 │   │   └── SKILL.md
 │   ├── field-test/
+│   │   └── SKILL.md
+│   ├── git-wrapup/
 │   │   └── SKILL.md
 │   ├── maintenance/
 │   │   └── SKILL.md

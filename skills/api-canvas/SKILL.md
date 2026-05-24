@@ -13,7 +13,7 @@ metadata:
 
 `DataCanvas` is a primitive for **storage stashes, canvas computes**. The existing `IStorageProvider` is a key/value abstraction — it can stash blobs but exposes no analytical surface. `DataCanvas` is the analytical surface: register tabular data from upstream APIs, run SQL across multiple registered tables, and export results as CSV/Parquet/JSON.
 
-**Tier 3** — `@duckdb/node-api` is an optional peer dependency. Servers that don't enable canvas pay zero install cost. Lazy-loaded on first use.
+**Tier 3** — `@duckdb/node-api` is an optional peer dependency (`bun add @duckdb/node-api`). Servers that don't enable canvas pay zero install cost. Lazy-loaded on first use.
 
 **Disabled by default.** Set `CANVAS_PROVIDER_TYPE=duckdb` to enable. Otherwise `core.canvas` is `undefined`.
 
@@ -27,7 +27,27 @@ metadata:
 import type { DataCanvas, CanvasInstance, ColumnSchema } from '@cyanheads/mcp-ts-core/canvas';
 ```
 
-The framework wires the optional service onto `CoreServices`:
+The framework wires the optional service onto `CoreServices`, accessible in the `setup()` callback — **not on `Context`**. Handlers access canvas via a module-level accessor:
+
+```ts
+// src/services/canvas-accessor.ts
+import type { DataCanvas } from '@cyanheads/mcp-ts-core/canvas';
+
+let _canvas: DataCanvas | undefined;
+export const setCanvas = (c: DataCanvas | undefined) => { _canvas = c; };
+export const getCanvas = () => _canvas;
+```
+
+```ts
+// src/index.ts — wire in setup()
+import { setCanvas } from './services/canvas-accessor.js';
+
+await createApp({
+  setup(core) {
+    setCanvas(core.canvas);
+  },
+});
+```
 
 ```ts
 interface CoreServices {
@@ -74,7 +94,11 @@ The sweeper runs as an `unref`'d `setInterval` — does not keep the event loop 
 Resolves an existing canvas or creates a new one. Returns a {@link CanvasInstance} bound to `(canvasId, tenantId)`. Subsequent operations don't repeat them.
 
 ```ts
-const instance = await ctx.core.canvas!.acquire(input.canvas_id, ctx);
+import { getCanvas } from '@/services/canvas-accessor.js';
+
+const canvas = getCanvas();
+if (!canvas) throw new Error('DataCanvas is not enabled. Set CANVAS_PROVIDER_TYPE=duckdb.');
+const instance = await canvas.acquire(input.canvas_id, ctx);
 // instance.canvasId — surface to the agent
 // instance.isNew    — true on first call
 // instance.expiresAt — ISO 8601 after sliding extension
@@ -116,7 +140,7 @@ const joined = await instance.query(`
 // joined.tableName === 'g_with_obs'; joined.rows.length === 10; joined.rowCount === <full count>
 ```
 
-`registerAs` rejects with `Conflict` if the target name already exists — drop it first.
+`registerAs` rejects with `ValidationError` (`data.reason: 'register_as_clash'`) if the target name already exists — drop it first.
 
 **Read-only enforcement** (four layers):
 1. Text-level deny-list — pre-parse scan for file/HTTP-reading table functions (`read_csv*`, `read_json*`, `read_parquet*`, `read_text`, `read_blob`, `glob`, `iceberg_scan`, `delta_scan`, `postgres_scan`, `mysql_scan`, `sqlite_scan`, plus pre-staged spatial ones).
@@ -225,6 +249,7 @@ If your tool surfaces row data via `structuredContent`, the JSON-safe shape flow
 
 ```ts
 import { tool, z } from '@cyanheads/mcp-ts-core';
+import { getCanvas } from '@/services/canvas-accessor.js';
 
 export const fetchAndStage = tool('fetch_and_stage_germplasm', {
   description: 'Fetch germplasm matching a query and stage it on a DataCanvas for follow-up SQL.',
@@ -245,7 +270,7 @@ export const fetchAndStage = tool('fetch_and_stage_germplasm', {
     expires_at: z.string().describe('ISO 8601 expiry after sliding 24h window'),
   }),
   async handler(input, ctx) {
-    const canvas = ctx.core.canvas;
+    const canvas = getCanvas();
     if (!canvas) {
       throw new Error('DataCanvas is not enabled. Set CANVAS_PROVIDER_TYPE=duckdb.');
     }
@@ -334,7 +359,7 @@ When the preview budget is small (single-digit rows) and the sniff window matter
 
 ### Out of scope
 
-- **Provenance metadata** (source URI, original query). Caller stores externally — see #112 option 3.
+- **Provenance metadata** (source URI, original query). Caller stores externally via `ctx.state` or tool output — canvas tables carry data only, not lineage.
 - **Pagination-flavored builder.** A `paginate(fetchPage) → AsyncIterable<Row>` adapter is deferred until a second non-paginated consumer surfaces.
 - **Token-accurate budget.** `previewTokens` (tokenizer-driven) is a future option; characters cover the common case.
 - **`caps.maxBytes`.** Row caps cover the common case without re-doing serialization the canvas appender skips.
@@ -362,6 +387,18 @@ When the preview budget is small (single-digit rows) and the sniff window matter
 | Cloudflare Workers | **Not supported** — fail-closed at init time |
 
 ---
+
+## Checklist
+
+- [ ] `@duckdb/node-api` installed as a peer dependency (`bun add @duckdb/node-api`)
+- [ ] `CANVAS_PROVIDER_TYPE=duckdb` set in `.env`
+- [ ] Canvas accessor module created (`src/services/canvas-accessor.ts` or equivalent)
+- [ ] Accessor wired in `setup()` callback via `setCanvas(core.canvas)`
+- [ ] Handler guards for canvas availability (`if (!canvas) throw ...`)
+- [ ] `canvas_id` accepted as optional input, returned in output
+- [ ] SQL queries are read-only (enforced by the four-layer gate, but don't attempt writes)
+- [ ] Testing: mock the module-level `getCanvas()` accessor with `vi.spyOn` or a test setup that calls `setCanvas(mockCanvas)`
+- [ ] `bun run devcheck` passes
 
 ## Related skills
 

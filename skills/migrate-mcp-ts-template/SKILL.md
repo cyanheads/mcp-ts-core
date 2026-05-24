@@ -20,7 +20,7 @@ For the full exports catalog, see `CLAUDE.md` → Exports Reference.
 ## Steps
 
 1. **Install the package**: `bun add @cyanheads/mcp-ts-core`
-2. **Search for all `@/` imports** across `src/` that reference framework internals
+2. **Search for all `@/` imports** across `src/` that reference framework internals: `grep -rn "from '@/" src/`
 3. **Rewrite each import** using the mapping table below
 4. **Identify framework source files** now provided by the package (see candidates below) — review each for server-specific additions before cleaning up
 5. **Update entry point** (`src/index.ts`) to use `createApp()` from the package and the project's chosen registration pattern (fresh scaffold default: direct imports in `src/index.ts`)
@@ -52,9 +52,9 @@ These are the actual `@/` import paths used in framework source. Rewrite any tha
 
 | Old `@/` import | New package import |
 |:----------------|:-------------------|
-| `@/mcp-server/tools/utils/toolDefinition.js` | `@cyanheads/mcp-ts-core/tools` or `@cyanheads/mcp-ts-core` (for `tool()` builder) |
-| `@/mcp-server/resources/utils/resourceDefinition.js` | `@cyanheads/mcp-ts-core/resources` or `@cyanheads/mcp-ts-core` (for `resource()` builder) |
-| `@/mcp-server/prompts/utils/promptDefinition.js` | `@cyanheads/mcp-ts-core/prompts` or `@cyanheads/mcp-ts-core` (for `prompt()` builder) |
+| `@/mcp-server/tools/utils/toolDefinition.js` | `@cyanheads/mcp-ts-core/tools` (types only: `ToolDefinition`, `AnyToolDefinition`) or `@cyanheads/mcp-ts-core` (for the `tool()` builder) |
+| `@/mcp-server/resources/utils/resourceDefinition.js` | `@cyanheads/mcp-ts-core/resources` (types only: `ResourceDefinition`, `AnyResourceDefinition`) or `@cyanheads/mcp-ts-core` (for the `resource()` builder) |
+| `@/mcp-server/prompts/utils/promptDefinition.js` | `@cyanheads/mcp-ts-core/prompts` (types only: `PromptDefinition`) or `@cyanheads/mcp-ts-core` (for the `prompt()` builder) |
 | `@/mcp-server/tasks/utils/taskToolDefinition.js` | `@cyanheads/mcp-ts-core/tasks` |
 
 ### Utils
@@ -90,7 +90,9 @@ After rewriting imports, these directories and files are candidates for cleanup 
 
 **Preserve:** server-specific code under `mcp-server/tools/definitions/`, `mcp-server/resources/definitions/`, `mcp-server/prompts/definitions/`, the server's own `services/`, and `config/server-config.ts`.
 
-Framework directories (typically safe to clean up in full — verify no server-specific files were added):
+A file is server-specific if it doesn't appear in the `mcp-ts-template` repo at its path. Modified framework files should be extracted to a server-specific location (e.g., `src/utils/my-project/`) before deletion.
+
+Framework directories (typically safe to remove in full — verify no server-specific files were added):
 
 - `src/core/` (app, context, worker)
 - `src/cli/`
@@ -113,7 +115,7 @@ Framework files within directories that contain server code:
 
 ## Entry point rewrite
 
-Replace the fork's `src/index.ts` with the scaffold-default direct-registration pattern:
+Rewrite the `createApp()` call and its surrounding imports to use the package. Preserve the project's existing barrel structure and registration pattern if present:
 
 ```ts
 #!/usr/bin/env node
@@ -153,6 +155,8 @@ If the migrated project already has `definitions/index.ts` barrels and you want 
 - [ ] `tsconfig.json` extends `@cyanheads/mcp-ts-core/tsconfig.base.json`
 - [ ] `biome.json` extends `@cyanheads/mcp-ts-core/biome`
 - [ ] `vitest.config.ts` spreads from `@cyanheads/mcp-ts-core/vitest.config`
-- [ ] Framework source files cleaned up from `src/`
+- [ ] Framework-only directories removed (`src/core/`, `src/cli/`, `src/types-global/`, `src/storage/`, `src/utils/`, `src/testing/`, framework service subdirs)
+- [ ] Framework files within mixed directories removed (`server.ts`, `transports/`, `roots/`, tasks infra, `*/utils/` dirs, `*-registration.ts` files)
+- [ ] `vitest.config.ts` includes `@/` alias: `resolve: { alias: { '@/': new URL('./src/', import.meta.url).pathname } }`
 - [ ] Server-specific `@/` imports (own tools, services) still work
 - [ ] `bun run devcheck` passes

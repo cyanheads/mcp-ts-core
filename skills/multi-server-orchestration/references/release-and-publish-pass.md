@@ -70,7 +70,7 @@ One sub-agent per target. Quick verification gate before any version bump or wra
 
 > Run `bun run devcheck`. Then run `bun run test:all` if it exists in `package.json` scripts, otherwise `bun run test`. Both must pass green. Halt and report the failing step's verbatim output if anything fails — do not attempt fixes from inside this phase. If neither `test:all` nor `test` exists in `package.json` scripts, note it and continue — devcheck-only is acceptable (though uncommon for a project shipping a release).
 
-Any red target halts the orchestration. The user fixes locally and re-invokes from Phase 2.
+Any red target halts the orchestration for that target. The user fixes locally and re-invokes Phase 2 for the failing target(s) only — other targets that passed don't need to re-run.
 
 ### Phase 3: README review fanout
 
@@ -80,7 +80,7 @@ One sub-agent per target reads the full README plus key adjacent docs, identifie
 
 > Read `README.md` from front to back. Identify content stale relative to the current code: tool/resource counts, version badges, feature lists, configuration tables, version mentions in install snippets. Fold updates in naturally — don't rewrite sections that are already accurate. Do NOT commit. Leave changes in the working tree for the next phase.
 >
-> If `polish-docs-meta` skill is available and the change spans more than just the README (e.g., new env vars, new tools), invoke that skill instead — it handles README plus `server.json`, `package.json`, agent protocol, and `.env.example` in one pass.
+> If `polish-docs-meta` skill is available (`skills/polish-docs-meta/SKILL.md`) and the change spans more than just the README (e.g., new env vars, new tools), invoke that skill instead — it handles README plus `server.json`, `package.json`, agent protocol, and `.env.example` in one pass.
 >
 > If the README is already accurate, report "no changes needed" and exit cleanly.
 
@@ -88,32 +88,20 @@ For a small patch bump, this phase is often a no-op. That's fine.
 
 ### Phase 4: Wrap-up fanout (Bash git only)
 
-Run only after user authorizes commits.
+Runs on the authorization captured in Pre-flight Step 5 — no separate authorization needed for wrap-up.
 
-One sub-agent per target. The agent executes the wrapup steps via Bash git — the same workflow `git_wrapup_instructions` walks through, but per-target absolute paths instead of session state.
+One sub-agent per target. The agent reads and executes the standalone `git-wrapup` skill (`skills/git-wrapup/SKILL.md`) — the skill contains the complete protocol for version bump, changelog, verification, commit, and annotated tag.
 
 **Task body:**
 
-> Run the version-bump wrapup via Bash `git` (no `git-mcp-server` tools — see the orchestration skill's Hard Rule 1).
+> Read and follow the `git-wrapup` skill — check `skills/git-wrapup/SKILL.md` first; fall back to `.claude/skills/git-wrapup/SKILL.md` if not found. Apply a `[patch/minor/major]` version bump.
 >
-> 1. **Inspect state:** `git status`, `git log --oneline -5`, `git diff --stat` on the working tree.
-> 2. **Determine the new version:** start from the current `package.json` `version`, apply the bump intent (`[patch/minor/major or explicit string]`). For a patch, e.g., `0.1.1 → 0.1.2`.
-> 3. **Author the changelog:** create `changelog/<major.minor>.x/<version>.md` per the directory-based convention. YAML frontmatter (`summary:` required, ≤350 chars, no markdown; `breaking:` and `security:` optional, default false). Grouped sections: Added / Changed / Fixed / Removed. Use the format reference at `changelog/template.md` — never edit, rename, or move that file.
-> 4. **Regenerate:** `bun run changelog:build` (rebuilds `CHANGELOG.md` rollup) and `bun run tree` (regenerates `docs/tree.md`).
-> 5. **Bump every version-bearing file:** `package.json` `version`, `server.json` `version` at the top level AND every `packages[].version` entry, any README badge that references the version. Use `grep -rn "<current-version>"` to find any you missed; resolve case by case.
-> 6. **Stage and commit.** Conventional Commits subject. Per the global protocol: version bumps ride with the change that warrants them — for a focused patch this is one commit. Subject style: `feat: <version> — <one-line theme>` or `chore(release): v<version> — <theme>`. Plain `-m` only, no heredoc, no `Co-authored-by` or `Generated with` trailers.
-> 7. **Annotated tag** `v<version>` (`-a`, NOT lightweight): terse message with release theme, notable changes, and dep arrows in `pkg ^old → ^new` form if applicable. Not a CHANGELOG copy.
+> Additional constraints for orchestrated runs:
+> - **Bash `git` only.** Do not use `git-mcp-server` (`mcp__git-mcp-server__*`) tools — session state leaks across parallel agents in the same orchestrator session.
+> - **Do NOT push.** Phase 5 handles the push as part of `release-and-publish`.
+> - If `v<version>` already exists as a tag, **halt and surface the conflict** to the orchestrator. Do NOT `git tag -d` without authorization.
 >
-> **Do NOT push.** Phase 5 handles the push as part of `release-and-publish`'s verification gate flow.
->
-> **Verify state at the end:**
-> ```bash
-> git log --oneline -1
-> git show v<version> --stat | head -20
-> git status   # should be clean
-> ```
->
-> Constraints: Bash git only. NEVER `git stash`. NEVER `reset --hard` / `restore .` / `clean -f` / `checkout -- .`. No marketing adjectives ("comprehensive", "robust", "enhanced", "seamless", "improved") in commit or tag messages. Be concise and accurate.
+> Output for the orchestrator: commit SHA, tag name, tag annotation subject.
 
 After this fanout, each target has a clean working tree with the wrap-up commit + annotated tag locally; nothing has been pushed.
 
@@ -132,7 +120,7 @@ Each target invokes the `release-and-publish` skill end-to-end. Execution mode d
 
 > Read `skills/release-and-publish/SKILL.md` (or `.claude/skills/release-and-publish/SKILL.md`). Run it end-to-end:
 >
-> 1. Sanity-check wrapup outputs (working tree clean, HEAD tagged `v<version>` from Phase 4)
+> 1. Sanity-check wrapup outputs (working tree clean, HEAD tagged `v<version>` from Phase 4). If either check fails, halt and report to the orchestrator — do not re-run Phase 4 from inside Phase 5
 > 2. Verification gate: `bun run devcheck`, `bun run rebuild`, `bun run test:all` (or `test`)
 > 3. Push commits and tags to origin via Bash git
 > 4. `bun publish --access public` (npm — uses the configured bypass token)
@@ -143,7 +131,7 @@ Each target invokes the `release-and-publish` skill end-to-end. Execution mode d
 >
 > Honor the skill's retry/halt protocol — transient network errors retry up to 2× with backoff; idempotent-success signals ("version already exists", "cannot publish duplicate version") are treated as success and proceed. Bash git for all git ops. Never skip the verification gate.
 
-**Serial mode:** the orchestrator runs `release-and-publish` against each target sequentially in its own session, handling OTP prompts interactively as they appear.
+**Serial mode:** the orchestrator spawns one sub-agent at a time per target — each runs `release-and-publish` end-to-end, completing before the next target starts. This prevents OTP prompt interleaving.
 
 After Phase 5, collect per-target status: which destinations succeeded, which (if any) halted with partial state. The user re-invokes Phase 5 for any failed targets only — completed destinations hit the idempotent-success signal and skip naturally.
 
@@ -178,7 +166,7 @@ Skip Phase 6 for any target whose Phase 5 didn't complete — there's nothing to
 | 9 | Sub-agent uses `git-mcp-server` instead of Bash git in Phase 4 or 5 | Hard Rule 1 restated explicitly in every fanout prompt that touches git |
 | 10 | Failed publish leaves a tag pushed but no npm package — looks shipped, isn't | Collect per-destination status per target in Phase 5 roll-up; surface partial-state targets explicitly to the user before Phase 6 |
 | 11 | `gh release create --notes-from-tag` fails with `--repo` flag | `gh` CLI limitation. Always `cd` into the target repo dir for `gh release` commands instead of using `--repo` |
-| 12 | Post-version doc changes (install badges, description fixes) land after the version commit — tag points at stale content | Move the tag forward: delete remote release, delete remote+local tag, recreate tag at new HEAD with same annotation, re-push, recreate release with `.mcpb`. This is authorized within the pipeline for same-day follow-ups |
+| 12 | Post-version doc changes (install badges, description fixes) land after the version commit — tag points at stale content | Move the tag forward: delete remote release, delete remote+local tag, recreate tag at new HEAD with same annotation, re-push, recreate release with `.mcpb`. This requires explicit user confirmation before executing — ask at runtime |
 | 13 | `mcpb pack` fails because `manifest.json` `user_config` entries are missing `title`/`type` fields | Verify `manifest.json` `user_config` entries during Phase 3 or a pre-Phase-5 check; the `polish-docs-meta` skill's cross-file consistency section covers this |
 
 ## Checklist
@@ -189,6 +177,7 @@ Skip Phase 6 for any target whose Phase 5 didn't complete — there's nothing to
 - [ ] Phase 3: README review fanout — updates folded, no commits
 - [ ] Phase 4: wrap-up fanout (Bash git only) — version bumped, changelog authored, rollup regenerated, commit + annotated tag per target — **NOT pushed**
 - [ ] Working tree clean per target; `git show v<version>` succeeds per target
+- [ ] Version-bearing files consistent across `package.json`, `server.json`, README badge, and `Dockerfile` OCI labels per target — no doc changes pending after the tag
 - [ ] Phase 5: release publish — completed per target via `release-and-publish` (parallel or serial based on 2FA mode); per-target status captured
 - [ ] All targets: deployed artifact URLs reported (npm / MCP Registry / GHCR as applicable)
 - [ ] **If GH issue map captured:** Phase 6: issue closure fanout — relevant issues commented and closed per target whose Phase 5 succeeded

@@ -13,7 +13,7 @@ metadata:
 
 Subpath exports are defined in `package.json` under the `exports` field. Each subpath maps to a source entry point that gets compiled to `dist/`. The exports catalog in `CLAUDE.md` must stay in sync with `package.json`.
 
-The build uses `tsconfig.build.json` (not `tsconfig.json`) with `rootDir: ./src` and `include: ["src/**/*"]`. This means every source file at `src/foo/bar.ts` compiles to `dist/foo/bar.js` — the `dist/` paths in `exports` must mirror the source tree exactly, not flatten it.
+The build uses `tsconfig.build.json` (not `tsconfig.json`) with `rootDir: ./src` and `include: ["src/**/*"]`. This means every source file at `src/foo/bar.ts` compiles to `dist/foo/bar.js` — the `dist/` path in each export entry must match wherever `tsc` produces the compiled output for the named source file. Choose your source file location to produce the `dist/` path you want in the export entry.
 
 ## Steps
 
@@ -28,16 +28,16 @@ The build uses `tsconfig.build.json` (not `tsconfig.json`) with `rootDir: ./src`
    }
    ```
 
-3. **Update the exports catalog** in `CLAUDE.md` — add a row to the table
+3. **Update the exports catalog** in both `CLAUDE.md` and `AGENTS.md` — add a row to the table. These files must stay byte-identical; the simplest approach is `cp CLAUDE.md AGENTS.md` after editing
 4. **Build** with `bun run build` to generate `dist/` output
-5. **Verify the export** by inspecting the compiled output directly:
+5. **Verify the export** resolves through the package's `exports` map:
 
    ```bash
    # Confirm the compiled file exists at the expected dist path
    ls dist/utils/new-util.js
 
-   # Confirm the declared exports resolve to real files
-   bun -e "import('./dist/utils/new-util.js').then(m => console.log(Object.keys(m)))"
+   # Confirm the subpath export resolves correctly (tests the exports map, not just the dist file)
+   bun -e "import('@cyanheads/mcp-ts-core/newutil').then(m => console.log(Object.keys(m)))"
    ```
 
 6. **Run `bun run devcheck`** to verify
@@ -46,7 +46,7 @@ The build uses `tsconfig.build.json` (not `tsconfig.json`) with `rootDir: ./src`
 
 | Convention | Rule |
 |:-----------|:-----|
-| Subpath | lowercase, no underscores (e.g., `utils/errorHandler`) |
+| Subpath | all-lowercase, no underscores (e.g., `utils`, `storage/types`, `testing/fuzz`) |
 | Source file | kebab-case (e.g., `error-handler.ts`) |
 | Export name | camelCase for values, PascalCase for types |
 
@@ -54,7 +54,9 @@ The build uses `tsconfig.build.json` (not `tsconfig.json`) with `rootDir: ./src`
 
 - [ ] Source entry point file created with JSDoc header
 - [ ] Subpath added to `package.json` `exports` with `types` and `import` conditions
-- [ ] Exports catalog in `CLAUDE.md` updated with new row
+- [ ] Exports catalog updated in both `CLAUDE.md` and `AGENTS.md` (must be byte-identical)
+- [ ] If the new export has optional peer dependencies: entries added to both `peerDependencies` and `peerDependenciesMeta` in `package.json`
 - [ ] `bun run build` succeeds
-- [ ] Compiled file exists at expected `dist/` path and exports the expected symbols
+- [ ] Compiled file exists at expected `dist/` path and subpath import resolves correctly
+- [ ] Integration test at `tests/integration/package-consumer.int.test.ts` updated: new subpath added to the import spec list and `toHaveLength` count incremented
 - [ ] `bun run devcheck` passes

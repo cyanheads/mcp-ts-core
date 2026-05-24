@@ -30,11 +30,11 @@ MCP Apps extend the standard tool pattern with an interactive HTML UI rendered i
 
 Both builders are exported from `@cyanheads/mcp-ts-core`. They handle `_meta.ui.resourceUri`, the compat key (`ui/resourceUri`), and the correct MIME type (`text/html;profile=mcp-app`) automatically.
 
-For the full API, Context interface, and error codes, read `node_modules/@cyanheads/mcp-ts-core/CLAUDE.md`.
+For the full API, Context interface, and error codes, read the framework's `CLAUDE.md` (loaded at session start).
 
 ## Steps
 
-1. **Ask the user** for the tool's name, purpose, input/output shape, and what the UI should display
+1. **Confirm the three conditions** in "When to Use" apply — if any is uncertain, default to `add-tool` instead. Then **gather** the tool's name, purpose, input/output shape, and what the UI should display from the user's request — ask only if genuinely absent
 2. **Choose a URI** — convention: `ui://{{tool-name}}/app.html`
 3. **Create the app tool** at `src/mcp-server/tools/definitions/{{tool-name}}.app-tool.ts`
 4. **Create the app resource** at `src/mcp-server/resources/definitions/{{tool-name}}-ui.app-resource.ts`
@@ -233,10 +233,12 @@ If the repo already uses `definitions/index.ts` barrels, update those instead of
 - [ ] App resource created at `src/mcp-server/resources/definitions/{{tool-name}}-ui.app-resource.ts` using `appResource()`
 - [ ] `resourceUri` matches between tool and resource (`ui://{{tool-name}}/app.html`)
 - [ ] Zod schemas: all fields have `.describe()`, only JSON-Schema-serializable types
-- [ ] `format()` renders JSON first block (for UI) + human-readable, content-complete fallback blocks (for non-app hosts and LLMs)
-- [ ] App resource `_meta.ui.csp` covers any external iframe dependencies, or a custom `format()` adds equivalent per-read metadata
+- [ ] `format()` first block is `JSON.stringify(result)` — the full output object for the UI to parse via `app.ontoolresult`. Subsequent blocks are human-readable, content-complete fallback for non-app hosts and LLMs
+- [ ] App resource `_meta.ui.csp.resourceDomains` lists every external domain loaded by the UI
 - [ ] UI bundles or inlines the client SDK for the shipped HTML, and handles `app.ontoolresult`
 - [ ] UI applies host context updates via `app.onhostcontextchanged`
+- [ ] App resource has a `list` callback returning at least one URI so resource-aware clients can discover it
 - [ ] Both registered in the project's existing `createApp()` arrays (directly or via barrels)
+- [ ] Handler tested directly via `createMockContext()`, or `add-test` skill run to scaffold the test file
 - [ ] `bun run devcheck` passes (linter validates `_meta.ui` and tool/resource pairing)
 - [ ] Smoke-tested with `bun run rebuild && bun run start:stdio` (or `start:http`)

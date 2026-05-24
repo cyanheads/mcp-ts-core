@@ -21,10 +21,10 @@ For the full `createMockContext` API and testing patterns, read:
 
 1. **Identify the target** — which tool, resource, or service needs tests
 2. **Read the source file** — understand the handler's logic, input/output schemas, error paths, and which `ctx` features it uses
-3. **Create the test file** in the repo's existing test layout
+3. **Create the test file** in the repo's existing test layout — search for existing `*.test.ts` files to confirm whether tests are colocated with source or under a root `tests/` directory
 4. **Write test cases** covering happy path, error paths, and edge cases
 5. **Run `bun run test`** to verify
-6. **Run `bun run devcheck`** to verify types
+6. **Run `bun run devcheck`** to verify lint, types, and MCP definitions
 
 ## Determining What to Test
 
@@ -41,6 +41,7 @@ Read the handler and identify:
 | **`ctx.fail` (typed contract)** | Definitions with `errors[]` need `fail` attached to the mock ctx — `createMockContext({ errors: myTool.errors })` does it for you. Assert on `data.reason` (stable per-contract entry), not just `code`. |
 | **`format` function** | Test separately if defined — it's pure, no ctx needed. Verify it renders the IDs and fields the model needs, not just a count or title. For projection-style tools, test non-default field selections. |
 | **Sparse upstream payloads** | For third-party API integrations, build a fixture with omitted fields. Assert normalized output still validates and `format()` preserves unknown values instead of inventing facts. |
+| **Form-client payloads** | If handler has optional fields: test with empty-string inner values (form clients send `""` instead of `undefined`). Assert handler doesn't break or produce invalid output. |
 | **Auth scopes** | Not tested at handler level (framework enforces) — skip |
 
 ## Templates
@@ -134,6 +135,8 @@ describe('{{RESOURCE_EXPORT}}', () => {
   //   expect(err.code).toBe(JsonRpcErrorCode.NotFound);
   //   expect(err.data.reason).toBe('no_match');
 
+  // Include this block only when the resource definition exports a `list` function.
+  // Check the source — `list` is optional on resource definitions.
   it('lists available resources', async () => {
     const listing = await {{RESOURCE_EXPORT}}.list!();
     expect(listing.resources).toBeInstanceOf(Array);
@@ -156,14 +159,16 @@ describe('{{RESOURCE_EXPORT}}', () => {
 
 import { beforeEach, describe, expect, it } from 'vitest';
 import { createMockContext } from '@cyanheads/mcp-ts-core/testing';
+import { StorageService } from '@cyanheads/mcp-ts-core/storage';
 import { get{{ServiceClass}}, init{{ServiceClass}} } from '@/services/{{domain}}/{{domain}}-service.js';
 
-import { createInMemoryStorage } from '@cyanheads/mcp-ts-core/testing';
+// Derive the minimal mock config from src/config/server-config.ts — read
+// the server's Zod schema to see which fields init{{ServiceClass}}() needs.
+const mockConfig = { /* fields from server config schema */ } as AppConfig;
 
 describe('{{ServiceClass}}', () => {
-  beforeEach(() => {
-    // Re-initialize with fresh config/storage for each test
-    const mockStorage = createInMemoryStorage();
+  beforeEach(async () => {
+    const mockStorage = await StorageService.create({ type: 'in-memory' });
     init{{ServiceClass}}(mockConfig, mockStorage);
   });
 
@@ -206,8 +211,42 @@ it('respects cancellation', async () => {
   setTimeout(() => controller.abort(), 50);
   const result = await {{TOOL_EXPORT}}.handler(input, ctx);
 
-  // Should have stopped early
-  expect(result.finalCount).toBeGreaterThan(0);
+  // Should have returned a partial result rather than throwing on cancellation.
+  // Assert on a field from the tool's actual output schema.
+  expect(result).toBeDefined();
+});
+```
+
+### Prompt test
+
+```typescript
+/**
+ * @fileoverview Tests for {{PROMPT_NAME}} prompt.
+ * @module tests/prompts/{{PROMPT_NAME}}.prompt.test
+ */
+
+import { describe, expect, it } from 'vitest';
+import { {{PROMPT_EXPORT}} } from '@/mcp-server/prompts/definitions/{{prompt-name}}.prompt.js';
+
+describe('{{PROMPT_EXPORT}}', () => {
+  it('generates valid messages for valid args', () => {
+    const args = {{PROMPT_EXPORT}}.args!.parse({
+      // valid args matching the Zod schema
+    });
+    const messages = {{PROMPT_EXPORT}}.generate(args);
+    expect(messages).toBeInstanceOf(Array);
+    expect(messages.length).toBeGreaterThan(0);
+    for (const msg of messages) {
+      expect(msg).toHaveProperty('role');
+      expect(msg).toHaveProperty('content');
+    }
+  });
+
+  // Include only when the prompt has no required args (args is optional or all fields optional).
+  it('generates messages with no args', () => {
+    const messages = {{PROMPT_EXPORT}}.generate({});
+    expect(messages.length).toBeGreaterThan(0);
+  });
 });
 ```
 
@@ -249,6 +288,8 @@ When scaffolding tests for an existing handler, use the Zod schemas to generate 
 - [ ] `format` function tested if defined
 - [ ] `createMockContext` options match handler's ctx usage (`tenantId`, `progress`, `elicit`, `sample`)
 - [ ] Service re-initialized in `beforeEach` if handler depends on a service singleton
-- [ ] If wrapping external API: sparse-payload case tested (omitted upstream fields still validate; `format()` does not invent facts)
+- [ ] If handler has optional fields: tested with empty-string inner values (form-client simulation)
+- [ ] If wrapping external API: sparse-payload case tested — fixture omits at least one optional upstream field; output still validates and `format()` renders uncertainty honestly instead of inventing values
+- [ ] If target is a prompt: `generate()` tested with valid args and (when applicable) no args
 - [ ] `bun run test` passes
 - [ ] `bun run devcheck` passes

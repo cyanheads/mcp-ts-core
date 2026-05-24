@@ -1,7 +1,7 @@
 ---
 name: api-linter
 description: >
-  MCP definition linter rules reference. Use when `bun run lint:mcp`, `bun run devcheck`, or `createApp()` startup reports a lint error or warning (`format-parity`, `schema-is-object`, `name-format`, `server-json-*`, etc.) and you need to understand the rule, its severity, and how to fix it. Every rule ID the linter emits has an entry in this doc.
+  MCP definition linter rules reference. Use when `bun run lint:mcp` or `bun run devcheck` reports a lint error or warning (`format-parity`, `schema-is-object`, `name-format`, `server-json-*`, etc.) and you need to understand the rule, its severity, and how to fix it. Every rule ID the linter emits has an entry in this doc.
 metadata:
   author: cyanheads
   version: "1.3"
@@ -11,19 +11,18 @@ metadata:
 
 ## Overview
 
-The linter validates tool, resource, and prompt definitions against the MCP spec and framework conventions. It runs in three places:
+The linter validates tool, resource, and prompt definitions against the MCP spec and framework conventions. **It is build-time only — not invoked at server startup.** It runs in two places:
 
 | Entry point | When | On failure |
 |:------------|:-----|:-----------|
-| `createApp()` / `createWorkerHandler()` | Every startup | Throws `ConfigurationError`; process exits with a formatted banner. Warnings are logged and startup continues. |
 | `bun run lint:mcp` | Manual or CI | Prints errors + warnings, exits non-zero on errors. |
 | `bun run devcheck` | Pre-commit workflow | Wraps `lint:mcp` alongside typecheck, format, `bun audit`, `bun outdated`. |
 
-All three surface the same `LintReport` from `validateDefinitions()` (exported from `@cyanheads/mcp-ts-core/linter`). Each diagnostic has a stable `rule` ID — that's the anchor you land on via the `See: skills/api-linter/SKILL.md#<rule>` breadcrumb appended to every message.
+Both surface the same `LintReport` from `validateDefinitions()` (exported from `@cyanheads/mcp-ts-core/linter`). Each diagnostic has a stable `rule` ID — that's the anchor you land on via the `See: skills/api-linter/SKILL.md#<rule>` breadcrumb appended to every message.
 
 **Severity:**
-- **error** — MUST-level spec violation; blocks startup.
-- **warning** — SHOULD-level or quality issue; logged but startup continues.
+- **error** — MUST-level spec violation; blocks `devcheck`.
+- **warning** — SHOULD-level or quality issue; logged but `devcheck` continues.
 
 **Imports (if you need to run the linter programmatically):**
 
@@ -52,7 +51,7 @@ Grouped by family. Jump to any rule ID via its anchor.
 | Landing | `landing-*` (23 rules — shape, tagline, logo, links, repo, envExample, connectSnippets, theme) | [Landing config rules](#landing-config-rules) |
 | Prompts | `generate-required` | [Prompt rules](#prompt-rules) |
 | Handler body | `prefer-mcp-error-in-handler`, `prefer-error-factory`, `preserve-cause-on-rethrow`, `no-stringify-upstream-error` | [Handler body rules](#handler-body-rules) |
-| Error contract (structural) | `error-contract-type`, `error-contract-empty`, `error-contract-entry-type`, `error-contract-code-type`, `error-contract-code-unknown`, `error-contract-code-unknown-error`, `error-contract-reason-required`, `error-contract-reason-format`, `error-contract-reason-unique`, `error-contract-when-required`, `error-contract-retryable-type` | [Error contract rules](#error-contract-rules) |
+| Error contract (structural) | `error-contract-type`, `error-contract-empty`, `error-contract-entry-type`, `error-contract-code-type`, `error-contract-code-unknown`, `error-contract-code-unknown-error`, `error-contract-reason-required`, `error-contract-reason-format`, `error-contract-reason-unique`, `error-contract-when-required`, `error-contract-retryable-type`, `error-contract-recovery-required`, `error-contract-recovery-empty`, `error-contract-recovery-min-words` | [Error contract rules](#error-contract-rules) |
 | Error contract (conformance) | `error-contract-conformance`, `error-contract-prefer-fail` | [Error contract rules](#error-contract-rules) |
 | server.json | ~40 rules prefixed `server-json-*` | [server.json rules](#server-json-rules) |
 
@@ -515,7 +514,9 @@ Heuristic source-text checks that scan `handler.toString()` for common error-han
 
 Fires when a handler contains `throw new Error(...)`. Plain `Error` doesn't carry a JSON-RPC code — the framework's auto-classifier degrades to `InternalError`, hiding the actual failure mode.
 
-**Fix:** use `McpError` or a factory:
+Plain `Error` is acceptable for "don't care" cases where the specific code doesn't matter (per CLAUDE.md: "plain `Error` for don't-care cases"). This rule targets domain-specific failures that deserve a concrete code — upgrade those to factories or `ctx.fail`, and accept the warning for the rest.
+
+**Fix:** use `McpError` or a factory for domain-specific failures:
 
 ```ts
 // instead of:
@@ -596,7 +597,7 @@ Fires when `errors: []` is declared. An empty contract is a no-op — nothing to
 
 **Severity:** error
 
-Fires when an entry in `errors[]` isn't an object. Each entry must be `{ code, reason, when }` (and optionally `retryable`).
+Fires when an entry in `errors[]` isn't an object. Each entry must be `{ code, reason, when, recovery }` (and optionally `retryable`).
 
 ### error-contract-code-type
 
@@ -653,6 +654,28 @@ Fires when an entry's `when` field is missing or empty. `when` is the human-read
 **Severity:** warning
 
 Fires when an entry's optional `retryable` field is present but isn't a boolean. Only `true` or `false` is meaningful — drop the field if you can't commit to either.
+
+### error-contract-recovery-required
+
+**Severity:** error
+
+Fires when an entry's `recovery` field is missing or not a string. `recovery` is the agent's next-move guidance when this failure fires — it flows to the wire via `ctx.recoveryFor`.
+
+### error-contract-recovery-empty
+
+**Severity:** error
+
+Fires when `recovery` is an empty string. A blank recovery is worse than none — it suggests the field was considered and deliberately left empty.
+
+**Fix:** write a concrete recovery hint (≥5 words).
+
+### error-contract-recovery-min-words
+
+**Severity:** warning
+
+Fires when `recovery` has fewer than 5 words. Short recoveries like "Try again." are too vague to guide an agent's next action.
+
+**Fix:** expand with specifics — what to try, what parameter to change, which tool to call instead.
 
 ### error-contract-conformance
 

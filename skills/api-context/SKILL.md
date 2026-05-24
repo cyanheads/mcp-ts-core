@@ -42,9 +42,11 @@ interface Context {
   readonly elicit?: (message: string, schema: z.ZodObject<z.ZodRawShape>) => Promise<ElicitResult>;
   readonly sample?: (messages: SamplingMessage[], opts?: SamplingOpts) => Promise<CreateMessageResult>;
 
-  // Resource notifications — present when transport supports them
+  // Notifications — present when transport supports them
   readonly notifyResourceListChanged?: () => void;
   readonly notifyResourceUpdated?: (uri: string) => void;
+  readonly notifyPromptListChanged?: () => void;
+  readonly notifyToolListChanged?: () => void;
 
   // Cancellation
   readonly signal: AbortSignal;
@@ -415,8 +417,10 @@ Present only when the definition declares an `errors[]` contract. Builds an `Mcp
 export const fetchItems = tool('fetch_items', {
   description: 'Fetch items by ID.',
   errors: [
-    { reason: 'no_match', code: JsonRpcErrorCode.NotFound, when: 'No items matched' },
-    { reason: 'queue_full', code: JsonRpcErrorCode.RateLimited, when: 'Local queue at capacity', retryable: true },
+    { reason: 'no_match', code: JsonRpcErrorCode.NotFound, when: 'No items matched',
+      recovery: 'Broaden the query or check the spelling and try again.' },
+    { reason: 'queue_full', code: JsonRpcErrorCode.RateLimited, when: 'Local queue at capacity', retryable: true,
+      recovery: 'Wait a few seconds before retrying or reduce batch size.' },
   ],
   input: z.object({ ids: z.array(z.string()).describe('Item IDs') }),
   output: z.object({ items: z.array(ItemSchema).describe('Resolved items') }),
@@ -534,6 +538,8 @@ The `≥5 words` lint rule on contract `recovery` (validated at lint time) makes
 | `ctx.sample` | `function \| undefined` | Client supports sampling |
 | `ctx.notifyResourceListChanged` | `function \| undefined` | Transport supports resource notifications |
 | `ctx.notifyResourceUpdated` | `function \| undefined` | Transport supports resource notifications |
+| `ctx.notifyPromptListChanged` | `function \| undefined` | Transport supports prompt notifications |
+| `ctx.notifyToolListChanged` | `function \| undefined` | Transport supports tool notifications |
 | `ctx.progress` | `ContextProgress \| undefined` | Tool defined with `task: true` |
 | `ctx.uri` | `URL \| undefined` | Resource handlers only |
 | `ctx.fail` | `(reason, msg?, data?, opts?) => McpError` | Definition declares `errors[]` contract |

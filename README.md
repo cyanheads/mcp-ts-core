@@ -7,7 +7,7 @@
 
 [![Framework](https://img.shields.io/badge/Built%20on-@cyanheads/mcp--ts--core-67E8F9?style=flat-square)](https://www.npmjs.com/package/@cyanheads/mcp-ts-core)
 
-[![Version](https://img.shields.io/badge/Version-0.9.7-blue.svg?style=flat-square)](./CHANGELOG.md) [![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg?style=flat-square)](./LICENSE) [![MCP Spec](https://img.shields.io/badge/MCP%20Spec-2025--11--25-8A2BE2.svg?style=flat-square)](https://github.com/modelcontextprotocol/modelcontextprotocol/blob/main/docs/specification/2025-11-25/changelog.mdx)
+[![Version](https://img.shields.io/badge/Version-0.9.8-blue.svg?style=flat-square)](./CHANGELOG.md) [![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg?style=flat-square)](./LICENSE) [![MCP Spec](https://img.shields.io/badge/MCP%20Spec-2025--11--25-8A2BE2.svg?style=flat-square)](https://github.com/modelcontextprotocol/modelcontextprotocol/blob/main/docs/specification/2025-11-25/changelog.mdx)
 
 [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^1.29.0-green.svg?style=flat-square)](https://modelcontextprotocol.io/) [![TypeScript](https://img.shields.io/badge/TypeScript-^6.0.3-3178C6.svg?style=flat-square)](https://www.typescriptlang.org/) [![Bun](https://img.shields.io/badge/Bun-v1.3.0%2B-blueviolet.svg?style=flat-square)](https://bun.sh/)
 
@@ -23,6 +23,7 @@ The framework handles the plumbing: transports, auth, config, logging, telemetry
 
 ```ts
 import { createApp, tool, z } from '@cyanheads/mcp-ts-core';
+import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 
 const greet = tool('greet', {
   description: 'Greet someone by name and return a personalized message.',
@@ -38,7 +39,7 @@ const greet = tool('greet', {
       reason: 'name_blocked',
       code: JsonRpcErrorCode.Forbidden,
       when: 'The provided name is on the configured block list.',
-      recovery: 'Use a different name.',
+      recovery: 'Use a different name that is not on the block list.',
     },
   ],
   handler: async (input, ctx) => {
@@ -66,7 +67,7 @@ Start your coding agent (i.e. Claude Code, Codex) and describe what you want. Th
 
 ### What you get
 
-Here's what tool definitions look like:
+Here's what tool definitions look like. Add `format()` to render structured output as markdown — different MCP clients read different surfaces (`structuredContent` vs `content[]`), and `format()` ensures both carry the same data:
 
 ```ts
 import { tool, z } from '@cyanheads/mcp-ts-core';
@@ -151,13 +152,13 @@ It also works on Cloudflare Workers with `createWorkerHandler()` — same defini
 - **Unified Context** — one `ctx` for logging, tenant-scoped storage, elicitation, sampling, cancellation, and task progress.
 - **Auth** — `auth: ['scope']` on definitions, checked before dispatch (no wrapper code). Modes: `none`, `jwt`, or `oauth` (local secret or JWKS).
 - **Task tools** — `task: true` for long-running ops; framework manages create/poll/progress/complete/cancel.
-- **Definition linter** — validates names, schemas, auth scopes, annotations, format-parity, and cross-vendor JSON Schema portability at startup. Standalone via `lint:mcp` or devcheck.
+- **Definition linter** — validates names, schemas, auth scopes, annotations, format-parity, and cross-vendor JSON Schema portability at build time. Run via `lint:mcp` or `devcheck` — not invoked at server startup.
 - **Typed error contracts** — declare `errors: [{ reason, code, when, recovery, retryable? }]` and handlers get a typed `ctx.fail(reason, …)`. Contracts publish in `tools/list` so clients preview failure modes; the linter cross-checks the handler. Factories (`notFound()`, `httpErrorFromResponse()`, …) cover ad-hoc throws; plain `Error` auto-classifies.
 - **Multi-backend storage** — `in-memory`, filesystem, Supabase, Cloudflare D1/KV/R2. Swap via env var; handlers don't change.
 - **DataCanvas (optional)** — Tier 3 SQL/analytical workspace backed by DuckDB. Register tabular data from upstream APIs, run SQL across registered tables, export CSV/Parquet/JSON. Token-sharing model (opaque `canvas_id`) for multi-agent collaboration; sliding TTL + per-tenant scoping. Opt-in via `CANVAS_PROVIDER_TYPE=duckdb`; fails closed on Workers.
 - **Observability** — Pino logging + optional OpenTelemetry traces/metrics. Request correlation and tool metrics automatic.
 - **Tiered dependencies** — parsers, OTEL SDK, Supabase, OpenAI as optional peers. Install what you use.
-- **Agent-first DX** — ships `CLAUDE.md` / `AGENTS.md` with the codebase documented throughout Agent Skills.
+- **Agent-first DX** — ships `CLAUDE.md` / `AGENTS.md` and Agent Skills that give your coding agent full framework knowledge — it can scaffold tools, write tests, run security audits, and ship releases without you writing the boilerplate.
 
 ## Server structure
 
@@ -206,7 +207,7 @@ See [CLAUDE.md](CLAUDE.md) for the full configuration reference.
 | Function | Purpose |
 |:---------|:--------|
 | `createApp(options)` | Node.js server — handles full lifecycle |
-| `createWorkerHandler(options)` | Cloudflare Workers — returns `{ fetch, scheduled }` |
+| `createWorkerHandler(options)` | Cloudflare Workers — returns an `ExportedHandler` |
 
 ### Builders
 
@@ -228,9 +229,12 @@ Handlers receive a unified `Context` object:
 | `ctx.state` | `ContextState` | Tenant-scoped key-value storage |
 | `ctx.elicit` | `Function?` | Ask the user for input (when client supports it) |
 | `ctx.sample` | `Function?` | Request LLM completion from the client |
+| `ctx.fail` | `(reason, msg?, data?) => McpError` | Typed error throw — reason checked against `errors[]` contract at compile time |
 | `ctx.signal` | `AbortSignal` | Cancellation signal |
 | `ctx.notifyResourceUpdated` | `Function?` | Notify subscribed clients a resource changed |
 | `ctx.notifyResourceListChanged` | `Function?` | Notify clients the resource list changed |
+| `ctx.notifyPromptListChanged` | `Function?` | Notify clients the prompt list changed |
+| `ctx.notifyToolListChanged` | `Function?` | Notify clients the tool list changed |
 | `ctx.progress` | `ContextProgress?` | Task progress reporting (when `task: true`) |
 | `ctx.requestId` | `string` | Unique request ID |
 | `ctx.tenantId` | `string?` | Tenant ID (JWT `tid` claim, or `'default'` for stdio and HTTP+`MCP_AUTH_MODE=none`) |
@@ -296,9 +300,9 @@ Also exports `fuzzResource`, `fuzzPrompt`, `zodToArbitrary`, and `ADVERSARIAL_ST
 
 ## Documentation
 
-- **[CLAUDE.md/AGENTS.md](CLAUDE.md)** — Framework reference: exports catalog, patterns, Context interface, error codes, auth, config, testing. Ships in the npm package.
+- **[CLAUDE.md/AGENTS.md](CLAUDE.md)** — Framework reference: exports catalog, patterns, Context interface, error codes, auth, config, testing. Ships in the npm package and is auto-accessible in your project after `init`.
 - **[docs/telemetry/](docs/telemetry/)** — OpenTelemetry: full catalog of spans, metrics, and attributes the framework emits ([observability.md](docs/telemetry/observability.md)), plus an example Grafana dashboard and vendor-agnostic query recipes for Datadog, New Relic, Honeycomb ([dashboards.md](docs/telemetry/dashboards.md)).
-- **[CHANGELOG.md](CHANGELOG.md)** — Version history - Directory based for easier parsing by agents. Each entry includes a summary, migration notes, and links to commits/issues.
+- **[CHANGELOG.md](CHANGELOG.md)** — Version history. Each entry includes a summary, migration notes, and links to commits/issues.
 
 ## Development
 

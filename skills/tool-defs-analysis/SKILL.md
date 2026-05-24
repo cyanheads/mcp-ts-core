@@ -22,7 +22,7 @@ This skill is the **review-time pass** for that drift. Read each definition the 
 | `security-pass` | Injection, scopes, input sinks |
 | `tool-defs-analysis` (this) | LLM-facing language across the existing surface |
 
-`field-test` already audits descriptions for implementation leaks, meta-coaching, and consumer-aware phrasing during its catalog step — that's a fast shallow pass alongside live tool calls. This skill is the deeper review: 10 categories, every field, every recovery hint, every default value, with file:line citations.
+`field-test` already audits descriptions for implementation leaks, meta-coaching, and consumer-aware phrasing during its catalog step — that's a fast shallow pass alongside live tool calls. This skill is the deeper review: 12 categories, every field, every recovery hint, every default value, with file:line citations.
 
 **Read-only.** This skill produces a report; the maintainer applies fixes. While running it, do not run git, do not stage or commit, do not update the changelog, do not run `devcheck`, do not invoke wrapup or release workflows. Fixes flow through the normal authoring path (edit the definition, then re-run this skill if you want to verify).
 
@@ -161,7 +161,7 @@ Prior art: #33.
 
 #### 11. Mutator observability
 
-**Look in:** tool definitions without `annotations.readOnlyHint: true` (writes/updates/deletes/appends/patches).
+**Look in:** mutator tools — any tool that writes, updates, deletes, appends, or patches (i.e., definitions without `annotations.readOnlyHint: true`).
 
 **Check:** `output` carries a state-change discriminator (`created`, `updated`, `mutated`, `unchanged`) or before/after observable state the agent can use to confirm intent-effect match. The server reports what it observed; the agent decides whether it matches what it meant.
 
@@ -218,8 +218,11 @@ End with:
 ## Checklist
 
 - [ ] Scope confirmed (whole server / module / specific files)
+- [ ] Severity floor applied — nits suppressed if user requested
 - [ ] Inventory built — every `*.tool.ts`, `*.app-tool.ts`, `*.resource.ts`, `*.app-resource.ts`, `*.prompt.ts` listed
-- [ ] Each file walked through all 10 categories (per-file, not 10 separate passes)
+- [ ] Each file walked through all 12 categories (per-file, not 12 separate passes)
 - [ ] **Read-only:** no git, no commits, no changelog edits, no `devcheck`, no wrapup invoked during the audit
 - [ ] Findings carry file:line citation, excerpt, issue, fix
 - [ ] Report: summary → grouped-by-category findings → numbered options
+- [ ] Options section produced — numbered, one-per-file, severity tagged, cherry-pickable
+- [ ] If no findings: summary states "no findings"; Findings and Options sections omitted

@@ -6,7 +6,7 @@ Fields that may still be empty or generic from scaffolding. Check each one and f
 
 | Field | Default / Scaffolded | What It Should Be |
 |:------|:---------------------|:------------------|
-| `name` | `{{PACKAGE_NAME}}` (substituted by init) | Verify it's correct. Use scoped name if publishing (`@org/my-server`). |
+| `name` | `{{PACKAGE_NAME}}` (substituted by init) | Verify it communicates the server's domain at a glance. A human or agent scanning a list should know what this server does from the name alone. Prefer full names over ambiguous abbreviations (`libofcongress` not `loc`, `federal-reserve` not `fred`). Non-obvious acronyms get a descriptive suffix (`eia-energy`, `bls-labor`). Use scoped name if publishing (`@org/my-server`). |
 | `version` | `0.1.0` | Keep for initial development. Bump via the `release-and-publish` skill. |
 | `mcpName` | _(often missing)_ | Reverse-domain identifier: `"io.github.{owner}/{repo}"`. Used in `server.json` `name` field and Dockerfile OCI labels. |
 | `description` | `""` (empty) | One **action-first** sentence — lead with the actions/workflows, end with `via MCP. STDIO or Streamable HTTP.` (or the transports that apply). Example: `"Search projects, manage tasks, track teams via MCP. STDIO or Streamable HTTP."` Avoid `"MCP server for/that …"` framings. Appears on npm and in `npm search`; the README header tagline and `server.json` `description` derive from this (server.json drops the `via MCP …` suffix). |

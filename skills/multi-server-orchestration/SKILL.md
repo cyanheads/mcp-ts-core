@@ -28,11 +28,11 @@ Read this SKILL.md end-to-end first — the concepts, orient block, and hard rul
    |:----------------|:---------------------------|
    | **Greenfield build-out** | Echo definitions still present in `src/mcp-server/{tools,resources,prompts}/definitions/`, no real services in `src/services/`, no released changelog files under `changelog/<minor>.x/`, `package.json` version is `0.0.0` or unset |
    | **Maintenance pass** | Real tool/resource definitions present, framework deps installed, `bun outdated` reports updates available, at least one prior release tagged |
-   | **Release pass** | Working tree has uncommitted/staged work, OR `git log v<latest-tag>..HEAD` shows commits since the last release that warrant a new version, OR the user explicitly asks to "ship", "release", or do a version bump |
+   | **Wrap-up / release pass** | Working tree has uncommitted/staged work, OR `git log v<latest-tag>..HEAD` shows commits since the last release that warrant a new version, OR the user explicitly asks to "ship", "release", or do a version bump. If the user explicitly wants to publish to npm/registries → release-and-publish pass; if local-only → wrap-up pass |
    | **Neither** | None of the above match cleanly — surface the state to the user, ask what they want |
 
 3. **Pick the reference** from the References table below. Each reference contains its scenario's phase pattern, per-sub-agent prompt bodies, scenario-specific gotchas, and checklist.
-4. **Surface the plan to the user** before kicking off the first fanout: scenario, target list, phase summary, gotchas in play. Get explicit authorization before any phase that commits, tags, pushes, or creates remote resources.
+4. **Surface the plan to the user** before kicking off the first fanout: scenario, target list, phase summary, gotchas in play. Get explicit authorization before any phase that commits, tags, pushes, or creates remote resources. Non-destructive phases (read, analyze, write files, devcheck) proceed without additional check-ins after the initial plan approval.
 
 ## References
 
@@ -40,8 +40,8 @@ Read this SKILL.md end-to-end first — the concepts, orient block, and hard rul
 |:---------|:----------|:-----|
 | **Greenfield build-out** | `references/greenfield-buildout.md` | New server(s) from `bunx @cyanheads/mcp-ts-core init` driven through design → build → first release |
 | **Maintenance pass** | `references/maintenance-pass.md` | Existing server(s) need `bun update --latest`, changelog investigation, framework adoption, and verification — optionally followed by a commit/push |
-| **Wrap-up pass** | `references/wrapup-pass.md` | Existing server(s) with committed/staged work to land locally as a new commit + annotated tag — verification → optional doc review → wrap-up (version + changelog + commit + tag) — **local only, no push**. Distilled from `git_wrapup_instructions` |
-| **Release-and-publish pass** | `references/release-and-publish-pass.md` | Existing server(s) have committed/staged work that needs to ship as a new version end-to-end — verification → README polish → wrap-up (version + changelog + commit + tag) → publish (npm / MCP Registry / GHCR via the `release-and-publish` skill) → optional GH issue closure. Disambiguated from the standalone `release-and-publish` skill, which is the single-target publish step this reference invokes per target |
+| **Wrap-up pass** | `references/wrapup-pass.md` | Existing server(s) with committed/staged work to land locally as a new commit + annotated tag — verification → optional doc review → wrap-up (version + changelog + commit + tag) — **local only, no push**. Sub-agents execute the standalone `git-wrapup` skill per target |
+| **Release-and-publish pass** | `references/release-and-publish-pass.md` | Existing server(s) have committed/staged work that needs to ship as a new version end-to-end — verification → README polish → wrap-up → publish → optional GH issue closure. Sub-agents execute the standalone `git-wrapup` then `release-and-publish` skills per target |
 
 **Mental model — scenarios are related but never auto-chain.** A maintenance pass often produces work worth wrapping up; a wrap-up commonly precedes a release; a greenfield build-out ends with what's effectively a release. Useful for orienting around what comes next conceptually — but **each scenario requires its own explicit user authorization to invoke**. The orchestrator never advances from one to the next on its own. Pick the reference for the current scope; if more work follows, wait for the user to direct it.
 
@@ -122,4 +122,16 @@ These commonly bite across all scenarios. Scenario-specific gotchas live in thei
 
 ## Extending the pattern
 
-When a new scenario emerges that's worth codifying (security-pass fanout across N servers, framework-wide migration, etc.), author a new reference at `references/<scenario>.md` and add a row to the table above. The reference should follow the shape of the existing two: scope, pre-flight, phase table, phase details, scenario-specific gotchas, checklist. The concepts/orient/rules/gotchas in this SKILL.md don't need to be restated — the reference assumes the reader started here.
+When a new scenario emerges that's worth codifying (security-pass fanout across N servers, framework-wide migration, etc.), author a new reference at `references/<scenario>.md` and add a row to the table above. The reference should follow the shape of the existing references (e.g., `greenfield-buildout.md`): scope, pre-flight, phase table, phase details, scenario-specific gotchas, checklist. The concepts/orient/rules/gotchas in this SKILL.md don't need to be restated — the reference assumes the reader started here.
+
+## Pre-flight Checklist
+
+Applies to all scenarios — verify before picking a reference and kicking off the first fanout.
+
+- [ ] Target list captured with absolute paths and per-target metadata
+- [ ] Scenario identified from intent + state; confirmed with user if ambiguous
+- [ ] Reference selected from the table above
+- [ ] `scripts/list-skills.ts` + `list-skills` package script present in each target
+- [ ] Plan surfaced to user: scenario, targets, phase summary, active gotchas
+- [ ] User authorization captured for any phase that commits, tags, pushes, or creates remote resources
+- [ ] Scenario reference read in full before first fanout

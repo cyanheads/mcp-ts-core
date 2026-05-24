@@ -11,7 +11,7 @@ metadata:
 
 ## Overview
 
-The framework auto-instruments every tool, resource, prompt, storage, LLM, speech, and graph call — each gets its own span and the standard counters/histograms. HTTP server requests pick up spans from `HttpInstrumentation` (or `@hono/otel` on the HTTP transport). Auth checks, session lifecycle, and task lifecycle are tracked as **metrics only** — auth decorates the active HTTP span with attributes, sessions and tasks emit counters.
+The framework auto-instruments every tool, resource, prompt, storage, LLM, speech, and graph call — each gets its own span and the standard counters/histograms. HTTP server requests pick up spans from `HttpInstrumentation` (all Node.js HTTP traffic, skips `/healthz`) plus `httpInstrumentationMiddleware` from `@hono/otel` on the MCP HTTP endpoint when installed (optional Tier 3 peer — `bun add @hono/otel`). On Bun, `HttpInstrumentation` silently no-ops and `@hono/otel` is the only HTTP coverage. Auth checks, session lifecycle, and task lifecycle are tracked as **metrics only** — auth decorates the active HTTP span with attributes, sessions and tasks emit counters.
 
 `requestId`, `traceId`, and `tenantId` correlate automatically across spans, metrics, and logs. Pino logs get `trace_id`/`span_id` injected when a span is active.
 
@@ -76,7 +76,7 @@ Trace context propagates across boundaries via W3C `traceparent` headers. See `a
 
 ## Metrics
 
-All custom metrics are namespaced `mcp.*` (or `process.*` / `http.client.*` where standard semconv applies). Lazy-initialized on first emission; the universal ones are eagerly created at startup so series exist from the first export cycle.
+All custom metrics are namespaced `mcp.*` (or `process.*` / `http.client.*` where standard semconv applies). Lazy-initialized on first emission; tool, resource, prompt, `http.client.request.duration`, heartbeat, session, auth, rate-limit, and error metrics are eagerly created at startup so series exist from the first export cycle. LLM, speech, graph, and storage instruments are lazy-initialized on first use.
 
 ### Tools, resources, prompts
 
@@ -86,17 +86,17 @@ All custom metrics are namespaced `mcp.*` (or `process.*` / `http.client.*` wher
 | `mcp.tool.duration` | histogram | `ms` | `mcp.tool.name`, `mcp.tool.success` |
 | `mcp.tool.errors` | counter | `{errors}` | `mcp.tool.name`, `mcp.tool.error_category` (`upstream`/`server`/`client`) |
 | `mcp.tool.input_bytes` | histogram | `bytes` | `mcp.tool.name` |
-| `mcp.tool.output_bytes` | histogram | `bytes` | `mcp.tool.name` |
+| `mcp.tool.output_bytes` | histogram | `bytes` | `mcp.tool.name` (success only) |
 | `mcp.tool.param.usage` | counter | `{uses}` | `mcp.tool.name`, `mcp.tool.param` (top-level keys supplied by caller) |
 | `mcp.resource.reads` | counter | `{reads}` | `mcp.resource.name`, `mcp.resource.success` |
 | `mcp.resource.duration` | histogram | `ms` | `mcp.resource.name`, `mcp.resource.success` |
 | `mcp.resource.errors` | counter | `{errors}` | `mcp.resource.name` |
-| `mcp.resource.output_bytes` | histogram | `bytes` | `mcp.resource.name` |
+| `mcp.resource.output_bytes` | histogram | `bytes` | `mcp.resource.name` (success only) |
 | `mcp.prompt.generations` | counter | `{generations}` | `mcp.prompt.name`, `mcp.prompt.success` |
 | `mcp.prompt.duration` | histogram | `ms` | `mcp.prompt.name`, `mcp.prompt.success` |
 | `mcp.prompt.errors` | counter | `{errors}` | `mcp.prompt.name`, `mcp.prompt.error_category` |
 | `mcp.prompt.input_bytes` | histogram | `bytes` | `mcp.prompt.name` |
-| `mcp.prompt.output_bytes` | histogram | `bytes` | `mcp.prompt.name` |
+| `mcp.prompt.output_bytes` | histogram | `bytes` | `mcp.prompt.name` (success only) |
 | `mcp.prompt.message_count` | histogram | `{messages}` | `mcp.prompt.name` |
 | `mcp.requests.active` | up/down counter | `{requests}` | — (in-flight handler executions, all three types) |
 

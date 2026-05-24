@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.9.8](changelog/0.9.x/0.9.8.md) — 2026-05-24
+
+Docs fixes, README context table updates, skill sync, @hono/node-server ^2.0.3 → ^2.0.4
+
 ## [0.9.7](changelog/0.9.x/0.9.7.md) — 2026-05-23
 
 biome noDuplicateDependencies off, structured tag annotation format, release artifact verification, skills updates

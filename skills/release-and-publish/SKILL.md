@@ -73,7 +73,7 @@ If working tree is dirty or HEAD isn't on `v<version>`, halt.
 
 ### 2. Run the verification gate
 
-All three must succeed. Use `test:all` if the script exists in `package.json`, otherwise fall back to `test`:
+All three must succeed. Check `package.json` `scripts` for `test:all`; if absent, fall back to `test`:
 
 ```bash
 bun run devcheck
@@ -85,7 +85,7 @@ Any non-zero exit → halt with the failing command's output.
 
 ### 3. Push to origin
 
-Use your git tools to push commits and tags to origin. If the remote rejects either push, halt.
+Use your git tools to push the branch commits first, then push tags to origin. If the remote rejects either push, halt.
 
 ### 4. Publish to npm
 
@@ -106,13 +106,13 @@ Halt on publish error other than "version already exists" (which means this step
 
 ### 5. Publish to MCP Registry
 
-Only if `server.json` exists at the repo root (otherwise skip).
+Only if `server.json` exists at the repo root (otherwise skip). Note: `server.json` (MCP Registry metadata) and `manifest.json` (MCPB bundle manifest, step 6) are independent — a project may have either, both, or neither.
 
 ```bash
 bun run publish-mcp
 ```
 
-If `publish-mcp` isn't defined in `package.json`, add it (macOS):
+If `publish-mcp` isn't defined in `package.json`, add it permanently (one-time setup, macOS):
 
 ```json
 "publish-mcp": "mcp-publisher login github -token \"$(security find-generic-password -a \"$USER\" -s mcp-publisher-github-pat -w)\" && mcp-publisher publish"
@@ -171,14 +171,14 @@ docker buildx build --platform linux/amd64,linux/arm64 \
   --push .
 ```
 
-If the project uses a non-GHCR registry or a custom image name, respect the project's convention. Halt on build or push failure.
+If the project uses a non-GHCR registry or a custom image name, respect the project's convention. If push fails with a 401/403, prompt the user to authenticate (`echo $GITHUB_TOKEN | docker login ghcr.io -u <OWNER> --password-stdin`) and retry. Halt on build failure or non-auth push failure.
 
 ### 8. Report the deployed artifacts
 
 Print clickable URLs for every destination that succeeded:
 
 - npm: `https://www.npmjs.com/package/<package.json#name>/v/<version>`
-- MCP Registry: `https://registry.modelcontextprotocol.io/v0/servers?search=<package.json#mcpName>`
+- MCP Registry: `https://registry.modelcontextprotocol.io/v0/servers?search=<mcpName>` — `mcpName` is the `name` field from `server.json` (the unscoped server name, e.g. `bls-mcp-server`)
 - GitHub Release: `https://github.com/<OWNER>/<REPO>/releases/tag/v<VERSION>` (with `.mcpb` asset attached)
 - GHCR: `ghcr.io/<OWNER>/<REPO>:<VERSION>`
 
@@ -189,7 +189,7 @@ Skip any destination that was skipped in its step.
 Confirm each published artifact is actually live — don't rely on a successful push exit code alone. For each destination that succeeded:
 
 - **npm**: `npm view <package.json#name>@<version> version` — must return the version string
-- **MCP Registry**: `curl -s "https://registry.modelcontextprotocol.io/v0/servers?search=<mcpName>"` — response must include `<version>` for the `io.github.cyanheads/<repo>` entry
+- **MCP Registry**: `curl -s "https://registry.modelcontextprotocol.io/v0/servers?search=<mcpName>"` — response must include `<version>` (`mcpName` is the `name` field from `server.json`)
 - **GitHub Release**: `gh release view v<VERSION> -R <OWNER>/<REPO> --json assets --jq '.assets[].name'` — must list the `.mcpb` file
 - **GHCR**: fetch an anonymous bearer token, then `curl -s -o /dev/null -w "%{http_code}" -H "Authorization: Bearer $TOKEN" "https://ghcr.io/v2/<OWNER>/<REPO>/manifests/<VERSION>"` — must return HTTP 200
 
@@ -197,7 +197,7 @@ If any check fails, halt and report which destination is unreachable. A successf
 
 ## Checklist
 
-- [ ] Working tree clean; HEAD tagged `v<version>`
+- [ ] Working tree clean; HEAD tagged `v<version>`; current branch name noted for push
 - [ ] `bun run devcheck` passes
 - [ ] `bun run rebuild` succeeds
 - [ ] `bun run test:all` (or `test`) passes
@@ -208,4 +208,5 @@ If any check fails, halt and report which destination is unreachable. A successf
 - [ ] `bun run bundle` + `gh release create --verify-tag --notes-from-tag` succeeds (if `manifest.json` present)
 - [ ] Docker buildx multi-arch push succeeds (if `Dockerfile` present)
 - [ ] All published artifacts verified reachable (npm, MCP Registry, GH Release asset, GHCR manifest)
+- [ ] On re-invocation: idempotent-success signals recognized for already-published destinations
 - [ ] Deployed artifact URLs reported to the user

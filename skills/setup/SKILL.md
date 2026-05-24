@@ -17,8 +17,8 @@ This skill assumes `bunx @cyanheads/mcp-ts-core init [name]` has already run. Th
 
 The init CLI generates both `CLAUDE.md` and `AGENTS.md` with the same purpose. Keep one authoritative file for the agent you actually use:
 
-- **Claude Code** — keep `CLAUDE.md`, discard `AGENTS.md`
-- **All other agents** (Codex, Cursor, Windsurf, etc.) — keep `AGENTS.md`, discard `CLAUDE.md`
+- **Claude Code** — keep `CLAUDE.md`, delete `AGENTS.md`
+- **All other agents** (Codex, Cursor, Windsurf, etc.) — keep `AGENTS.md`, delete `CLAUDE.md`
 
 Both files serve the same purpose: project-specific agent instructions. Prefer committing one authoritative copy rather than trying to keep both in sync by hand.
 
@@ -94,7 +94,7 @@ After init:
 
 1. **Clean up what you don't need.** If your server has no prompts, delete the echo prompt and its registration in `src/index.ts`. Same for resources, or the app-tool pair if you're not targeting UI-capable clients.
 2. **Rename and replace what you keep.** The echo definitions and their tests show the pattern — swap them out for your real tools/resources/prompts.
-3. **Definitions register directly in `src/index.ts`.** No barrel files, just import and add to the `tools` / `resources` / `prompts` arrays.
+3. **Definitions register directly in `src/index.ts`.** The init scaffold uses direct imports — no barrel files yet. As the definition count grows, the `add-tool`/`add-resource`/`add-prompt` skills introduce `definitions/index.ts` barrels per the framework convention.
 
 See the `add-tool`, `add-app-tool`, `add-resource`, `add-prompt`, `add-service`, and `add-test` skills for the scaffolding patterns when you start adding real definitions.
 
@@ -126,11 +126,13 @@ This step is the **bootstrap** — it creates the agent directory. From then on,
 
 ## Project Scaffolding
 
-After `bun install`, complete these one-time setup tasks:
+Complete these one-time setup tasks:
 
-1. **Update dependencies to latest** — `bun update --latest`. The scaffolded `package.json` pins minimum versions from when the framework was published; updating ensures you start with the latest compatible releases.
-2. **Initialize git** — use your git tools: init the repo, stage all files, and commit with message `chore: scaffold from @cyanheads/mcp-ts-core`
-3. **Verify the substituted server name** — when `init` runs without a `[name]` argument, the package name defaults to the cwd directory name. If that's not what you want as the published server name, update `package.json`, `CLAUDE.md`/`AGENTS.md`, and `server.json` to your actual server name.
+1. **Install dependencies** — `bun install`
+2. **Update dependencies to latest** — `bun update --latest`. The scaffolded `package.json` pins minimum versions from when the framework was published; updating ensures you start with the latest compatible releases.
+3. **Initialize git** — use your git tools: init the repo, stage all files, and commit with message `chore: scaffold from @cyanheads/mcp-ts-core`
+4. **Verify the substituted server name** — when `init` runs without a `[name]` argument, the package name defaults to the cwd directory name. If that's not what you want as the published server name, update `package.json`, `CLAUDE.md`/`AGENTS.md`, and `server.json` to your actual server name.
+5. **Verify the scaffold builds clean** — `bun run devcheck`. Fix any issues before starting real work.
 
 ## Changelog Convention
 
@@ -153,7 +155,10 @@ Skip or reorder as the project calls for it. The agent protocol's "What's Next?"
 
 ## Checklist
 
-- [ ] Agent protocol file selected — keep one authoritative file (`CLAUDE.md` or `AGENTS.md`)
+- [ ] Agent protocol file selected — one authoritative file kept (`CLAUDE.md` or `AGENTS.md`), the other deleted
+- [ ] `bun install` run
+- [ ] Dependencies updated (`bun update --latest`)
+- [ ] Git repo initialized and initial commit made (`chore: scaffold from @cyanheads/mcp-ts-core`)
 - [ ] Substituted server name verified in `package.json`, agent protocol file, and `server.json`
 - [ ] Framework docs read (`node_modules/@cyanheads/mcp-ts-core/CLAUDE.md`)
 - [ ] Unused echo definitions cleaned up (and unregistered from `src/index.ts`)

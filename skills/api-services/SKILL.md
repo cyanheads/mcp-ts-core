@@ -11,7 +11,7 @@ metadata:
 
 ## Overview
 
-Service interfaces are deferred from core's public exports — they remain in downstream servers until shared by 2+ servers. These are documented here for core contributors and servers that use the built-in providers.
+Service providers are exported from `@cyanheads/mcp-ts-core/services`. These are documented here for servers that use the built-in providers.
 
 All services follow the **init/accessor pattern**: initialized in `setup()`, accessed at request time via lazy accessor. See the `add-service` skill for the full pattern.
 

@@ -62,6 +62,8 @@ Phase 3 is optional — skip when the change is small enough that the README/doc
 
 ## Phase details
 
+> **Orient block:** the standard preamble instructing sub-agents to read `~/.claude/CLAUDE.md`, workspace `CLAUDE.md`, project `CLAUDE.md`, and run `bun run list-skills` — defined in `../SKILL.md`. Every sub-agent prompt starts with this block before the task body.
+
 ### Phase 2: Verification fanout
 
 One sub-agent per target. Quick verification gate before any version bump or wrap-up.
@@ -80,60 +82,27 @@ One sub-agent per target reads the README plus adjacent docs, identifies stale c
 
 > Read `README.md` from front to back. Identify content stale relative to the current code: tool/resource counts, version badges, feature lists, configuration tables, version mentions in install snippets. Fold updates in naturally — don't rewrite sections that are already accurate. Do NOT commit. Leave changes in the working tree for the next phase.
 >
-> If `polish-docs-meta` skill is available and the change spans more than just the README (e.g., new env vars, new tools), invoke that skill instead — it handles README plus `server.json`, `package.json`, agent protocol, and `.env.example` in one pass.
+> If `polish-docs-meta` skill is available (`skills/polish-docs-meta/SKILL.md`) and the change spans more than just the README (e.g., new env vars, new tools), invoke that skill instead — it handles README plus `server.json`, `package.json`, agent protocol, and `.env.example` in one pass.
 >
 > If the README is already accurate, report "no changes needed" and exit cleanly.
 
-For a small patch, this phase is often a no-op. That's fine — skip it entirely if pre-flight confirmed no user-facing change.
+For a small patch, this phase is often a no-op. Skip Phase 3 when the diff introduces no new tools, resources, env vars, or behavior changes visible to the user.
 
 ### Phase 4: Wrap-up fanout (Bash git only)
 
-Run only after user authorizes commits.
+Runs on the authorization captured in Pre-flight Step 4 — no separate authorization needed for wrap-up.
 
-One sub-agent per target. The agent executes the seven acceptance criteria via Bash `git` — no `git-mcp-server` (per the parent SKILL.md's Hard Rule 1, the MCP server's session state leaks across parallel agents).
+One sub-agent per target. The agent reads and executes the standalone `git-wrapup` skill (`skills/git-wrapup/SKILL.md`) — the skill contains the complete protocol for version bump, changelog, verification, commit, and annotated tag.
 
 **Task body:**
 
-> Execute the wrap-up protocol against this target. Acceptance criteria — strict on goals, generic on mechanism — but for `@cyanheads/mcp-ts-core` consumers, mechanism is concrete:
+> Read and follow the `git-wrapup` skill — check `skills/git-wrapup/SKILL.md` first; fall back to `.claude/skills/git-wrapup/SKILL.md` if not found. Apply a `[patch/minor/major]` version bump.
 >
-> 1. **Diff reviewed.** `git status`, `git log v<latest-tag>..HEAD --oneline`, `git diff --stat`. Understand what's about to ship.
-> 2. **Version bump.** Start from current `package.json` `version`; apply the bump intent (`[patch/minor/major or explicit string]`). Bump every place version is declared:
->    - `package.json` `version`
->    - `server.json` `version` at the top level AND every `packages[].version` entry
->    - `manifest.json` (if present) `version`. Also verify `name` doesn't include the npm scope prefix — it should be the bare package name (e.g. `bls-mcp-server`, not `@cyanheads/bls-mcp-server`)
->    - README version badge and any hero pinning
->    - Dockerfile OCI labels (if pinned to version)
->    - Any agent-instruction file (`CLAUDE.md`, `AGENTS.md`) that pins the version
->    
->    Run `grep -rn "<current-version>" .` to catch stragglers; resolve case by case (some hits are historical changelog entries — leave those).
-> 3. **Changelog authored.** Create `changelog/<major.minor>.x/<version>.md` per the directory-based convention. YAML frontmatter (`summary:` required, ≤350 chars, no markdown; `breaking:` and `security:` optional, default false). Section order (Keep a Changelog): Added / Changed / Deprecated / Removed / Fixed / Security. Include only sections with entries. Use `changelog/template.md` as the format reference — never edit, rename, or move it.
-> 4. **Regenerate derived artifacts.** `bun run changelog:build` (rebuilds `CHANGELOG.md` rollup from per-version files); `bun run tree` (regenerates `docs/tree.md` if the file structure changed).
-> 5. **Verification gate.** `bun run devcheck` must pass against the tree being committed. `bun run test:all` if it exists, otherwise `bun run test`. Both green. Halt if not green — do NOT bypass.
-> 6. **Atomic Conventional Commits.** Version bumps ride with the change that warrants them. For a focused patch, this is ONE commit covering the work + the version bump + changelog + regenerated artifacts. Subject form: `feat: <version> — <one-line theme>` or `chore(release): v<version> — <theme>`. Plain `-m` only — no heredoc, no `Co-authored-by`, no `Generated with` trailers. No marketing adjectives.
-> 7. **Annotated tag** `v<version>` (`-a`, NOT lightweight). The tag body renders as the GitHub Release page via `--notes-from-tag` — it must be structured markdown, never a flat comma-separated string. Format:
->    - **Subject line:** release theme — omit version number (GitHub prepends `v<VERSION>:`)
->    - **Prose intro:** 1-2 sentences — what this release does, why it matters
->    - **Sections:** Keep a Changelog names (Dependency bumps / Added / Changed / Fixed / Removed) — only sections with entries, each with bulleted items
->    - **Dep arrows:** `pkg ^old → ^new` form, one per line
->    - **Footer:** test count + devcheck status
->    - **Backlinks:** link framework issues where relevant (`cyanheads/mcp-ts-core#50`)
->    - Not a CHANGELOG copy — terse, scannable. No marketing adjectives. Length is earned.
->
-> Constraints:
+> Additional constraints for orchestrated runs:
 > - **Bash `git` only.** Do not use `git-mcp-server` (`mcp__git-mcp-server__*`) tools — session state leaks across parallel agents in the same orchestrator session.
-> - **Do NOT push.** Wrap-up is local only. Push is a separate authorized step (`release-and-publish-pass.md` Phase 5, or the standalone `release-and-publish` skill).
-> - NEVER `git stash`. NEVER `git reset --hard`, `git restore .`, `git clean -f`, or `git checkout -- .` — these violate the global protocol.
-> - No marketing adjectives ("comprehensive", "robust", "enhanced", "seamless", "improved") in commit or tag messages. State the change.
-> - If `v<version>` already exists as a tag, **halt and surface the conflict**. Do NOT `git tag -d` without orchestrator authorization.
+> - If `v<version>` already exists as a tag, **halt and surface the conflict** to the orchestrator. Do NOT `git tag -d` without authorization.
 >
-> **Verify state at the end:**
-> ```bash
-> git log --oneline -1
-> git show v<version> --stat | head -20
-> git status   # should be clean
-> ```
->
-> Output for the orchestrator: commit SHA, tag name, tag annotation subject. The orchestrator parses these for Phase 5.
+> Output for the orchestrator: commit SHA, tag name, tag annotation subject.
 
 ### Phase 5: Roll-up (orchestrator)
 
@@ -145,6 +114,8 @@ for d in <target paths>; do
   (cd "$d" && git log --oneline -1 && git tag --points-at HEAD && git status --short)
 done
 ```
+
+Spot-check commit and tag quality: `git log --format='%s%n%b' -1` for marketing adjectives in commit messages, `git show v<version>` for tag annotation structure.
 
 Then produces a consolidated report:
 
@@ -176,3 +147,4 @@ Then produces a consolidated report:
 - [ ] Tags exist locally; nothing pushed to remotes
 - [ ] Phase 5: orchestrator verification — `git log --oneline -1`, `git tag --points-at HEAD`, `git status --short` per target
 - [ ] Consolidated report presented to user with per-target headlines, outliers, next steps
+- [ ] Orchestrator has NOT advanced to push, publish, or any remote operation — wrap-up is complete

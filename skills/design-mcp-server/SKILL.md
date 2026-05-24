@@ -29,6 +29,14 @@ Gather before designing. Ask the user if not obvious from context:
 
 If the domain has a public API, read its docs before designing. For internal-only servers, skip API research and go straight to user goals. Don't design from vibes either way.
 
+## Server Naming
+
+The server name (repo name, npm package, public identity) must communicate what it does at a glance. The test: can a human or agent scanning a server list tell what this server does from the name alone?
+
+- **Use the canonical platform/brand name, not abbreviations.** `libofcongress-mcp-server` not `loc-mcp-server` ("loc" reads as lines-of-code or location). `federal-reserve-mcp-server` not `fred-mcp-server` ("fred" reads as a person's name).
+- **Add a descriptive suffix when the base name is a non-obvious acronym.** Pattern: `{acronym}-{domain}-mcp-server` — e.g., `eia-energy-mcp-server`, `bls-labor-mcp-server`, `nhtsa-vehicle-safety-mcp-server`. Skip when the name is already self-descriptive (`earthquake-mcp-server`, `wikidata-mcp-server`).
+- **The name becomes the tool prefix.** Every tool is `{prefix}_{verb}_{noun}`, so the server name shows up in every tool call an agent sees. A descriptive name gives agents domain context without reading the server's instructions.
+
 ## Steps
 
 ### 1. Research External Dependencies
@@ -53,6 +61,8 @@ When research is genuinely parallelizable (multiple independent APIs, several SD
 - **Pagination behavior** — verify token format, page size limits, and what happens when results exceed one page.
 - **Error shapes** — trigger real 400/404/429 responses to see the actual error format, not just what docs claim.
 
+**Stopping condition:** at minimum, probe one list/search endpoint, one single-item GET, and one error case (force a 404 or 400). For large APIs with many resource types, add one probe per major noun. Stop when the response shapes and error envelope are confirmed.
+
 This step prevents building a service layer against assumed response shapes that don't match reality.
 
 ### 2. Map User Goals, Then Domain Operations
@@ -74,7 +84,7 @@ Then enumerate the underlying **domain operations** the system supports, grouped
 | Task | list (by project), get, create, update status, assign, comment |
 | User | list, get current |
 
-The user-goal list shapes the tool surface; the operation list fills in the gaps. Not every operation becomes a tool.
+The user-goal list shapes the tool surface; the operation list fills in the gaps. Not every operation becomes a tool — an operation stays as raw material (not its own tool) when it's already fully covered by an existing tool's output, or when the only agents who'd use it are in scenarios outside this server's stated purpose.
 
 ### 3. Classify into MCP Primitives
 
@@ -482,12 +492,12 @@ What this server does, what system it wraps, who it's for.
 
 Each step is independently testable.
 
-<!-- Optional sections for API-wrapping servers: -->
-## Domain Mapping          <!-- nouns × operations → API endpoints -->
-## Workflow Analysis        <!-- how tools chain for real tasks -->
-## Design Decisions         <!-- rationale for consolidation, naming, tradeoffs -->
-## Known Limitations        <!-- inherent API/data constraints the server can't solve -->
-## API Reference            <!-- query language, pagination, rate limits -->
+<!-- Optional sections — include when the trigger fires: -->
+## Domain Mapping          <!-- nouns × operations → API endpoints; include when ≥3 nouns each with ≥3 operations -->
+## Workflow Analysis        <!-- how tools chain for real tasks; include when any tool makes ≥3 upstream calls -->
+## Design Decisions         <!-- rationale for consolidation, naming, tradeoffs; include when a choice would otherwise be opaque -->
+## Known Limitations        <!-- inherent API/data constraints the server can't solve; include when a constraint visibly caps utility -->
+## API Reference            <!-- query language, pagination, rate limits; include when worth documenting -->
 ```
 
 Keep it concise. The design doc is a working reference, not a spec document — enough to orient a developer (or agent) implementing the server, not more.
@@ -512,7 +522,7 @@ The table surfaces design questions early: should the elicit happen before or af
 
 ### 9. Confirm and Proceed
 
-If the user has already authorized implementation (e.g., "build me a ___ server"), proceed directly to scaffolding using the design doc as the plan. Otherwise, present the design doc to the user for review before implementing.
+If the user has already authorized implementation — any message that contains both a design request and a build/implement verb in the same clause (e.g., "build me a ___ server", "design and implement a ___") — proceed directly to scaffolding using the design doc as the plan. Otherwise, present the design doc to the user for review before implementing.
 
 ## After Design
 
@@ -530,6 +540,7 @@ Execute the plan using the scaffolding skills:
 Items without an `If …:` prefix apply to every design. Conditional items only apply when the trigger fires — otherwise skip them.
 
 - [ ] External APIs/dependencies researched and verified (docs fetched, SDKs identified)
+- [ ] **If wrapping an external API:** live API probed (at minimum: one list/search, one single-item GET, one error case)
 - [ ] User goals enumerated first (3–10 outcomes agents will accomplish, scaled to domain size), then domain operations mapped as raw material
 - [ ] Each operation classified as tool, resource, prompt, or excluded
 - [ ] Catastrophically irreversible operations excluded from the tool surface (stay in vendor UI) — not just `destructiveHint`
@@ -553,6 +564,7 @@ Items without an `If …:` prefix apply to every design. Conditional items only 
 - [ ] **If a parameter determines blast radius:** safe default set (e.g., `mode: 'preview'`, `dryRun: true`, `confirmCount` required)
 - [ ] **App tools default to no.** If one was proposed, verified there's a real human-in-the-loop in an MCP Apps-capable client justifying the iframe/CSP/`format()`-twin maintenance cost — otherwise dropped in favor of a standard tool
 - [ ] **If the server exposes resources:** URIs use `{param}` templates, pagination planned for large lists
+- [ ] **If the server is itself the source of truth (no external API):** state lifecycle planned — tenant-scoped vs. global, TTLs, what survives restart, storage backend chosen
 - [ ] **If the server has external deps or shared state:** service layer planned (or explicitly skipped with reasoning)
 - [ ] **If services wrap external APIs:** resilience planned (retry boundary, backoff, parse classification)
 - [ ] **If exposing a SQL/analytical workspace over tabular data is in scope:** DataCanvas considered (`api-canvas` skill) as one option before designing custom analytical state — register / query / export tools accepting an optional `canvas_id`, with `ctx.core.canvas?` reads

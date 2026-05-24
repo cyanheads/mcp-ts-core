@@ -59,7 +59,7 @@ Fresh scaffolds register definitions directly in the entry point as shown above.
 
 - **Per-request `McpServer` factory**: a new server instance is created for each request. Required by SDK security advisory GHSA-345p-7cg4-v4c7.
 - **Env bindings refreshed per-request**: Cloudflare may rotate binding object references between requests; the handler re-injects them on every call.
-- **`ctx.waitUntil()` is documented but not yet called by the framework**: the `ExecutionContext` is received and passed through to `app.fetch` and `onScheduled`, but the framework does not currently call `ctx.waitUntil()` for telemetry flush. Spans complete synchronously within the request lifecycle.
+- **OTel NodeSDK is disabled in Workers** — `canUseNodeSDK()` returns `false` for V8 isolates, so no OTLP spans or metrics are emitted. Structured logs via `ctx.log` still work. `OTEL_ENABLED=true` has no effect in Workers. `ctx.waitUntil()` is received and passed through to `app.fetch` and `onScheduled` but not called by the framework (nothing to flush asynchronously).
 - **Singleton app promise with retry-on-failure**: the framework init runs once; if it fails, the next request retries rather than leaving the Worker in a permanently broken state.
 
 ---
@@ -130,7 +130,7 @@ In Workers, only these storage providers are allowed:
 `filesystem`, `supabase`, and unknown provider types are not on the whitelist:
 
 - **`filesystem`** and unknown types throw `ConfigurationError` in serverless environments.
-- **`supabase`** does **not** silently fall back. The framework may validate Supabase credentials first, but Worker startup still fails with `ConfigurationError` because Supabase storage is not a supported serverless provider. Do not set `STORAGE_PROVIDER_TYPE=supabase` in a Worker.
+- **`supabase`** does **not** silently fall back. The serverless provider whitelist check fires immediately at the top of `createStorageProvider()` — Supabase credentials are never validated. Worker startup fails with `ConfigurationError` because Supabase is not on the serverless whitelist. Do not set `STORAGE_PROVIDER_TYPE=supabase` in a Worker.
 
 Set `STORAGE_PROVIDER_TYPE` to one of the four whitelisted values to avoid unexpected behavior.
 
@@ -142,16 +142,23 @@ Set `STORAGE_PROVIDER_TYPE` to one of the four whitelisted values to avoid unexp
 compatibility_flags = ["nodejs_compat"]
 compatibility_date = "2025-09-01"  # must be >= 2025-09-01
 
+# Built-in storage providers require these exact binding names:
 [[kv_namespaces]]
-binding = "MY_CUSTOM_KV"
+binding = "KV_NAMESPACE"       # required for cloudflare-kv storage
 id = "..."
 
 [[r2_buckets]]
-binding = "MY_R2_BUCKET"
+binding = "R2_BUCKET"          # required for cloudflare-r2 storage
 bucket_name = "..."
+
+[[d1_databases]]
+binding = "DB"                 # required for cloudflare-d1 storage
+database_id = "..."
 ```
 
 `nodejs_compat` is required for Node.js API shims (e.g., `process.env`, `Buffer`, `crypto`). The minimum `compatibility_date` activates the required shim set.
+
+**Binding names for core storage are hardcoded** — the storage factory looks for `KV_NAMESPACE`, `R2_BUCKET`, and `DB` on `globalThis`. Using different binding names will cause a `ConfigurationError`. For custom (non-storage) bindings, use `extraObjectBindings` to map arbitrary binding names to `globalThis` keys.
 
 ---
 
@@ -190,4 +197,4 @@ export function getServerConfig() {
 
 > `DuckDB canvas requires Node.js or Bun. Set CANVAS_PROVIDER_TYPE=none or omit it for Cloudflare Workers deployment.`
 
-Leave the env unset (or set to `none`) for Worker deployments. Tools that conditionally use canvas should check `if (!ctx.core.canvas) { ... }` and surface a clear "feature unavailable on this deployment" message. See `api-canvas` for the full DataCanvas reference.
+Leave the env unset (or set to `none`) for Worker deployments. Tools that conditionally use canvas should check the module-level accessor (`if (!getCanvas()) { ... }`) and surface a clear "feature unavailable on this deployment" message. See `api-canvas` for the full DataCanvas reference and setup wiring pattern.

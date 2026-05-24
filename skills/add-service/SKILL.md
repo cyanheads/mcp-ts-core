@@ -15,11 +15,11 @@ Services use the init/accessor pattern: initialized once in `createApp`'s `setup
 
 Service methods receive `Context` for correlated logging (`ctx.log`) and tenant-scoped storage (`ctx.state`). Convention: `ctx.elicit` and `ctx.sample` should only be called from tool handlers, not from services.
 
-For the full service pattern, `CoreServices`, and `Context` interface, read `node_modules/@cyanheads/mcp-ts-core/CLAUDE.md`.
+For the full service pattern, `CoreServices`, and `Context` interface, read the framework's `CLAUDE.md` (loaded at session start).
 
 ## Steps
 
-1. **Ask the user** for the service domain name and what it integrates with
+1. **Gather** the service domain name and what it integrates with from the user's request — ask only if genuinely absent
 2. **Create the directory** at `src/services/{{domain}}/`
 3. **Create the service file** at `src/services/{{domain}}/{{domain}}-service.ts`
 4. **Create types** at `src/services/{{domain}}/types.ts` if needed
@@ -71,19 +71,16 @@ export function get{{ServiceName}}(): {{ServiceName}} {
 
 ### Entry point registration
 
+Add the `setup()` callback and import to the existing `createApp()` call — preserve the existing tool/resource/prompt arrays:
+
 ```typescript
-// src/index.ts
-import { createApp } from '@cyanheads/mcp-ts-core';
+// In src/index.ts (or src/worker.ts for Worker-only servers)
 import { init{{ServiceName}} } from './services/{{domain}}/{{domain}}-service.js';
 
-await createApp({
-  tools: [/* existing tools */],
-  resources: [/* existing resources */],
-  prompts: [/* existing prompts */],
-  setup(core) {
-    init{{ServiceName}}(core.config, core.storage);
-  },
-});
+// Add setup() alongside existing options:
+setup(core) {
+  init{{ServiceName}}(core.config, core.storage);
+},
 ```
 
 ### Usage in tool handlers
@@ -133,13 +130,13 @@ async fetchItem(id: string, ctx: Context): Promise<Item> {
 ### Key principles
 
 1. **Calibrate backoff to the upstream.** 200–500ms for ephemeral failures, 1–2s for rate-limited APIs, 2–5s for service degradation. The default `baseDelayMs: 1000` suits most APIs.
-2. **Check HTTP status before parsing.** `fetchWithTimeout` already throws `ServiceUnavailable` on non-OK responses — this prevents feeding HTML error pages into XML/JSON parsers.
+2. **Check HTTP status before parsing.** `fetchWithTimeout` already throws on non-OK responses with granular status mapping (401→`Unauthorized`, 403→`Forbidden`, 404→`NotFound`, 408/425→`Timeout`, 422→`ValidationError`, 429→`RateLimited`, 5xx→`ServiceUnavailable`/`InternalError`) — this prevents feeding HTML error pages into XML/JSON parsers.
 3. **Classify parse failures by content.** If the upstream returns HTTP 200 with an HTML error page, detect it and throw `ServiceUnavailable` (transient) instead of `SerializationError` (non-transient).
 4. **Exhausted retries say so.** `withRetry` automatically enriches the final error with attempt count — callers know retries were already attempted.
 
 ### When you need finer-grained HTTP error classification
 
-`fetchWithTimeout` collapses every non-2xx into `ServiceUnavailable`. That's the safe default but it isn't always right — a `401` should be `Unauthorized`, a `429` should be `RateLimited` (and is retryable), a `408` should be `Timeout` (and is retryable). When you need the nuance, drop down to raw `fetch` + `httpErrorFromResponse`:
+`fetchWithTimeout` already maps status codes to appropriate error codes (see key principle 2 above). Use `httpErrorFromResponse` instead when you need `Retry-After` header capture, request body passthrough in error data, or custom `service`/`data` fields on the thrown error:
 
 ```typescript
 import { httpErrorFromResponse, withRetry } from '@cyanheads/mcp-ts-core/utils';
@@ -289,11 +286,12 @@ Silent truncation is a data integrity bug — the caller thinks it has all resul
 ## Checklist
 
 - [ ] Directory created at `src/services/{{domain}}/`
-- [ ] Service file created with init/accessor pattern
+- [ ] Service file created — `init` function accepts `(config: AppConfig, storage: StorageService)` and stores the instance
+- [ ] Accessor function exported — throws `Error` if not initialized
 - [ ] JSDoc `@fileoverview` and `@module` header present
+- [ ] No `console` calls — use `ctx.log` for service-level logging
 - [ ] Service methods accept `Context` for logging and storage
-- [ ] `init` function registered in `setup()` callback in `src/index.ts`
-- [ ] Accessor throws `Error` if not initialized
+- [ ] `init` function registered in `setup()` callback in the server's entry point (`src/index.ts` or `src/worker.ts`)
 - [ ] If wrapping external API: retry covers full pipeline (fetch + parse), backoff calibrated
 - [ ] If wrapping external API: raw/domain types reflect real upstream sparsity; missing values are preserved as unknown, not fabricated into concrete facts
 - [ ] If wrapping external API: batch endpoints used where available, field selection applied, pagination handled
