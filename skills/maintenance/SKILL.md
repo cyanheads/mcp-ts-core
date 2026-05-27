@@ -78,7 +78,8 @@ Scan specifically for:
 | Config changes | New env vars, renamed keys, changed defaults |
 | Linter rules | New definition-lint rules that may now flag existing tools/resources |
 | New or materially-changed skills | Note new skills or workflow changes (renamed steps, new checklist items) worth surfacing at end-of-run. Don't auto-invoke — some skills (e.g. `security-pass`) are user-triggered. The per-version changelog entries (e.g. 0.6.14 calling out `skills/security-pass/ (v1.0)`) name what changed. |
-| New template-scaffolded files | Compare `templates/` in the package against the project root. Files that `init` would create for a new project but don't exist in this project are adoption candidates — create them with project-specific values (version, name, description, env vars from `server.json`). Examples: `manifest.json`, `.mcpbignore`. Skip files the project has intentionally opted out of (documented in CLAUDE.md or a code comment). |
+| New template-scaffolded files | Compare `templates/` in the package against the project root. Files that `init` would create for a new project but don't exist in this project are adoption candidates — create them with project-specific values (version, name, description, env vars from `server.json`). Examples: `manifest.json`, `.mcpbignore`, `.codex-plugin/`, `.claude-plugin/`. Skip files the project has intentionally opted out of (documented in CLAUDE.md or a code comment). |
+| Changelog `agent-notes` | Read `agent-notes` frontmatter from each new per-version changelog file — these carry release-specific adoption instructions for downstream consumers (new files to create, fields to populate, one-time migration steps). Apply them alongside other adoption work in Step 6. |
 
 Cross-reference each finding against the server's code. Collect adoption opportunities for Step 6.
 

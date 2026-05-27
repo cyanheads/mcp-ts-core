@@ -1,0 +1,9 @@
+{
+  "{{PACKAGE_NAME}}": {
+    "command": "npx",
+    "args": ["-y", "{{PACKAGE_NAME}}"],
+    "env": {
+      "MCP_TRANSPORT_TYPE": "stdio"
+    }
+  }
+}

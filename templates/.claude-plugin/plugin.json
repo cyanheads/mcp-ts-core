@@ -1,0 +1,20 @@
+{
+  "name": "{{PACKAGE_NAME}}",
+  "version": "0.1.0",
+  "description": "",
+  "author": {
+    "name": ""
+  },
+  "homepage": "",
+  "repository": "",
+  "license": "Apache-2.0",
+  "mcpServers": {
+    "{{PACKAGE_NAME}}": {
+      "command": "npx",
+      "args": ["-y", "{{PACKAGE_NAME}}"],
+      "env": {
+        "MCP_TRANSPORT_TYPE": "stdio"
+      }
+    }
+  }
+}

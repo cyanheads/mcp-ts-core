@@ -1,6 +1,6 @@
 # mcp-ts-core - Directory Structure
 
-Generated on: 2026-05-24 09:27:14
+Generated on: 2026-05-27 04:31:12
 
 ```text
 mcp-ts-core/
@@ -434,6 +434,11 @@ mcp-ts-core/
 │   │   └── index.ts
 │   └── index.ts
 ├── templates/
+│   ├── .claude-plugin/
+│   │   └── plugin.json
+│   ├── .codex-plugin/
+│   │   ├── mcp.json
+│   │   └── plugin.json
 │   ├── .github/
 │   │   └── ISSUE_TEMPLATE/
 │   │       ├── bug_report.yml
@@ -755,6 +760,7 @@ mcp-ts-core/
 ├── bun.lock
 ├── bunfig.toml
 ├── CHANGELOG.md
+├── CITATION.cff
 ├── CLAUDE.md
 ├── devcheck.config.json
 ├── Dockerfile

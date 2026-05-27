@@ -1,0 +1,25 @@
+{
+  "name": "{{PACKAGE_NAME}}",
+  "version": "0.1.0",
+  "description": "",
+  "author": {
+    "name": "",
+    "email": "",
+    "url": ""
+  },
+  "homepage": "",
+  "repository": "",
+  "license": "Apache-2.0",
+  "keywords": ["mcp", "mcp-server", "model-context-protocol"],
+  "mcpServers": "./.codex-plugin/mcp.json",
+  "interface": {
+    "displayName": "{{PACKAGE_NAME}}",
+    "shortDescription": "",
+    "longDescription": "",
+    "developerName": "",
+    "category": "",
+    "capabilities": ["Read"],
+    "websiteURL": "",
+    "defaultPrompt": []
+  }
+}

@@ -4,7 +4,7 @@ description: >
   Ship a release end-to-end across every registry the project targets (npm, MCP Registry, GitHub Releases for `.mcpb` bundles, GHCR). Runs the final verification gate, pushes commits and tags, then publishes to each applicable destination. Assumes git wrapup (version bumps, changelog, commit, annotated tag) is already complete — this skill is the post-wrapup publish workflow. Retries transient network failures on publish steps; halts with a partial-state report when retries are exhausted or the failure is terminal.
 metadata:
   author: cyanheads
-  version: "2.6"
+  version: "2.7"
   audience: external
   type: workflow
 ---
@@ -131,11 +131,12 @@ Halt on any publisher error other than "cannot publish duplicate version".
 
 Only if `manifest.json` exists at the repo root (otherwise skip).
 
-Build the bundle, then create a Release on the existing annotated tag and attach the `.mcpb`. The Release sits on top of the tag from wrapup — `--verify-tag` enforces that the tag already exists on the remote and prevents `gh` from creating a lightweight tag that would shadow the annotated one. `--notes-from-tag` pulls release notes directly from the annotated tag message (no duplication). Note: GitHub prepends `v<VERSION>:` to the release title, so the tag annotation subject must omit the version number to avoid stutter.
+Build the bundle, then create a Release on the existing annotated tag and attach the `.mcpb`. The Release sits on top of the tag from wrapup — `--verify-tag` enforces that the tag already exists on the remote and prevents `gh` from creating a lightweight tag that would shadow the annotated one. `--notes-from-tag` pulls the tag annotation body as release notes. `--title` sets the release title from the tag subject — `--notes-from-tag` alone does NOT set the title (it defaults to the bare tag name, e.g. "v0.1.8" with no theme). The tag subject already omits the version number per the git-wrapup skill, so prepending `v<VERSION>:` produces the correct display title.
 
 ```bash
 bun run bundle              # produces dist/<name>.mcpb (stable filename, no version)
-gh release create v<VERSION> --verify-tag --notes-from-tag dist/*.mcpb
+SUBJECT=$(git tag -l --format='%(contents:subject)' v<VERSION>)
+gh release create v<VERSION> --verify-tag --notes-from-tag --title "v<VERSION>: $SUBJECT" dist/*.mcpb
 ```
 
 The stable filename matters: it lets the README "Install in Claude Desktop" badge point at `releases/latest/download/<name>.mcpb` and always resolve to the most recent release. The `bundle` script in the templates outputs `dist/{{PACKAGE_NAME}}.mcpb` for this reason.
@@ -205,7 +206,7 @@ If any check fails, halt and report which destination is unreachable. A successf
 - [ ] Tags pushed to origin
 - [ ] `bun publish --access public` succeeds
 - [ ] `bun run publish-mcp` succeeds (if `server.json` present)
-- [ ] `bun run bundle` + `gh release create --verify-tag --notes-from-tag` succeeds (if `manifest.json` present)
+- [ ] `bun run bundle` + `gh release create --verify-tag --notes-from-tag --title` succeeds (if `manifest.json` present)
 - [ ] Docker buildx multi-arch push succeeds (if `Dockerfile` present)
 - [ ] All published artifacts verified reachable (npm, MCP Registry, GH Release asset, GHCR manifest)
 - [ ] On re-invocation: idempotent-success signals recognized for already-published destinations

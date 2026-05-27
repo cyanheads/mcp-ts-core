@@ -100,6 +100,7 @@ vi.mock('@/mcp-server/transports/http/httpErrorHandler.js', () => ({
 // Import under test — after all mocks are declared.
 // ---------------------------------------------------------------------------
 
+import { config } from '@/config/index.js';
 import { createHttpApp } from '@/mcp-server/transports/http/httpTransport.js';
 import type { RequestContext } from '@/utils/internal/requestContext.js';
 import { defaultServerManifest as defaultMeta } from '../helpers/fixtures.js';
@@ -171,6 +172,121 @@ describe('HTTP Transport Integration', () => {
     const res = await app.request('/nonexistent');
 
     expect(res.status).toBe(404);
+  });
+
+  describe('stateful session gate', () => {
+    afterEach(() => {
+      // Restore stateless for other tests
+      (config as any).mcpSessionMode = 'stateless';
+    });
+
+    test('rejects non-initialize POST without session ID in stateful mode', async () => {
+      (config as any).mcpSessionMode = 'stateful';
+
+      const { app } = await createHttpApp(
+        mockServerFactory as () => Promise<McpServer>,
+        mockContext,
+        defaultMeta,
+      );
+
+      const req = new Request('http://localhost/mcp', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Accept: 'application/json, text/event-stream',
+          'MCP-Protocol-Version': '2025-06-18',
+        },
+        body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/list', params: {} }),
+      });
+      const res = await app.request(req);
+
+      expect(res.status).toBe(400);
+      const body = (await res.json()) as { error?: string };
+      expect(body.error).toContain('Mcp-Session-Id header is required');
+    });
+
+    test('rejects GET SSE without session ID in stateful mode', async () => {
+      (config as any).mcpSessionMode = 'stateful';
+
+      const { app } = await createHttpApp(
+        mockServerFactory as () => Promise<McpServer>,
+        mockContext,
+        defaultMeta,
+      );
+
+      const req = new Request('http://localhost/mcp', {
+        method: 'GET',
+        headers: {
+          Accept: 'text/event-stream',
+          'MCP-Protocol-Version': '2025-06-18',
+        },
+      });
+      const res = await app.request(req);
+
+      expect(res.status).toBe(400);
+      const body = (await res.json()) as { error?: string };
+      expect(body.error).toContain('Mcp-Session-Id header is required');
+    });
+
+    test('allows initialize POST without session ID in stateful mode', async () => {
+      (config as any).mcpSessionMode = 'stateful';
+
+      // Need a factory that produces a server with a connect method
+      const factory = vi.fn(async () => ({
+        connect: vi.fn(),
+        close: vi.fn(),
+      }));
+
+      const { app } = await createHttpApp(factory as any, mockContext, defaultMeta);
+
+      const req = new Request('http://localhost/mcp', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Accept: 'application/json, text/event-stream',
+          'MCP-Protocol-Version': '2025-06-18',
+        },
+        body: JSON.stringify({
+          jsonrpc: '2.0',
+          id: 1,
+          method: 'initialize',
+          params: {
+            protocolVersion: '2025-06-18',
+            capabilities: {},
+            clientInfo: { name: 'test', version: '1.0.0' },
+          },
+        }),
+      });
+      const res = await app.request(req);
+
+      // The request should pass the session gate (not 400).
+      // It may fail downstream (SDK, etc.) but the point is it wasn't rejected by our guard.
+      expect(res.status).not.toBe(400);
+    });
+
+    test('allows non-initialize POST without session ID in stateless mode', async () => {
+      // config.mcpSessionMode is already 'stateless' by default
+      const factory = vi.fn(async () => ({
+        connect: vi.fn(),
+        close: vi.fn(),
+      }));
+
+      const { app } = await createHttpApp(factory as any, mockContext, defaultMeta);
+
+      const req = new Request('http://localhost/mcp', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Accept: 'application/json, text/event-stream',
+          'MCP-Protocol-Version': '2025-06-18',
+        },
+        body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/list', params: {} }),
+      });
+      const res = await app.request(req);
+
+      // Should NOT be rejected — stateless mode has no session gate
+      expect(res.status).not.toBe(400);
+    });
   });
 
   test('OPTIONS preflight returns CORS headers', async () => {

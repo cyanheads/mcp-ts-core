@@ -97,6 +97,48 @@ describe.skipIf(!SERVER_EXISTS)('HTTP session management integration', () => {
     expect(listRes.status).toBe(200);
   });
 
+  it('rejects non-initialize requests without a session ID with 400', async () => {
+    const res = await fetch(`http://localhost:${handle.port}/mcp`, {
+      body: jsonrpc(1, 'tools/list', {}),
+      headers: {
+        ...MCP_HEADERS,
+        'MCP-Protocol-Version': PROTOCOL_VERSION,
+      },
+      method: 'POST',
+    });
+
+    expect(res.status).toBe(400);
+
+    const body = (await res.json()) as { error?: string | undefined };
+    expect(body.error).toContain('Mcp-Session-Id header is required');
+  });
+
+  it('rejects GET SSE without a session ID with 400 in stateful mode', async () => {
+    const res = await fetch(`http://localhost:${handle.port}/mcp`, {
+      headers: {
+        Accept: 'text/event-stream',
+        'MCP-Protocol-Version': PROTOCOL_VERSION,
+      },
+      method: 'GET',
+    });
+
+    expect(res.status).toBe(400);
+
+    const body = (await res.json()) as { error?: string | undefined };
+    expect(body.error).toContain('Mcp-Session-Id header is required');
+  });
+
+  it('allows initialize requests without a session ID', async () => {
+    const res = await fetch(`http://localhost:${handle.port}/mcp`, {
+      body: initializeBody(),
+      headers: { ...MCP_HEADERS },
+      method: 'POST',
+    });
+
+    expect(res.status).toBe(200);
+    expect(res.headers.get('mcp-session-id')).toBeTruthy();
+  });
+
   it('rejects requests with an invalid session ID with 404', async () => {
     const res = await fetch(`http://localhost:${handle.port}/mcp`, {
       body: jsonrpc(1, 'tools/list', {}),

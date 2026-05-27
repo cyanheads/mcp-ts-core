@@ -180,6 +180,7 @@ Dependency bumps:
 - Not a CHANGELOG copy — terse, scannable
 - No marketing adjectives
 - Length is earned — two-line tags are fine for small patches
+- **Issue backlinks:** when changes address GitHub issues, include `(#N)` references in the relevant bullets — same as the changelog entry. The backlinks render as clickable links in the GitHub Release body.
 
 ### 9. Verify end state
 

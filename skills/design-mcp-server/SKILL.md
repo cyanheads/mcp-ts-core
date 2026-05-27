@@ -4,7 +4,7 @@ description: >
   Design the tool surface, resources, and service layer for a new MCP server. Use when starting a new server, planning a major feature expansion, or when the user describes a domain/API they want to expose via MCP. Produces a design doc at docs/design.md that drives implementation.
 metadata:
   author: cyanheads
-  version: "2.11"
+  version: "2.12"
   audience: external
   type: workflow
 ---
@@ -28,6 +28,23 @@ Gather before designing. Ask the user if not obvious from context:
 4. **Scope constraints** — read-only? write access? admin operations? what's off-limits?
 
 If the domain has a public API, read its docs before designing. For internal-only servers, skip API research and go straight to user goals. Don't design from vibes either way.
+
+### Server scope and audience
+
+Before committing to a server boundary, answer: **what workflow does this server serve, and who is the audience?**
+
+The unit of a server is a *user workflow*, not an API. A single rich API can earn its own server when the audience is large and the API surface supports a full workflow (PubMed for literature research, SEC EDGAR for financial analysis, Shodan for internet-wide device intelligence). Multiple APIs should collapse into one server when they serve the same workflow from different angles — a "threat intelligence" server that aggregates VirusTotal, AbuseIPDB, and GreyNoise is more useful than three separate servers because the user's goal is "assess this indicator," not "query VirusTotal."
+
+**Don't default to one-API-one-server.** That's the right call when the API is deep enough and the audience is large enough, but it's not the starting point. The starting point is the workflow:
+
+| Signal | Server boundary |
+|:-------|:----------------|
+| Single API with rich surface, large audience | Standalone server named for the platform (`pubmed-mcp-server`, `secedgar-mcp-server`) |
+| Multiple APIs serving the same workflow | One server named for the workflow (`threat-intel-mcp-server`), APIs are internal sources |
+| Domain with distinct sub-audiences | Consider splitting — a pentester and a SOC analyst have different workflows even in the same domain |
+| Pure computation, no external deps | Standalone server named for the capability (`calculator-mcp-server`, `redteam-mcp-server`) |
+
+When multiple APIs collapse into one server, the tool surface is organized around what the user is doing, not which API gets called. The agent says "investigate this domain" and the server routes to the best available source internally. Individual APIs become service-layer implementation details, not tool-surface identities.
 
 ## Server Naming
 
@@ -140,6 +157,56 @@ const findStudies = tool('clinicaltrials_find_studies', {
 ```
 
 > **Tip — mode consolidation.** When a tool has several related operations on the same noun, you can consolidate them under one tool with a `mode`/`operation` enum. This affects both naming (noun-led, e.g., `github_pull_request`) and handler design (dispatch by mode). Use when it tightens the surface; skip when ops diverge enough to warrant separate tools.
+
+#### Multi-source tools and fallback chains
+
+**Applies when:** a server aggregates multiple data sources for the same workflow, and the "best" source varies by input type, availability, or coverage. Skip for single-API servers.
+
+When a tool's goal can be served by multiple sources, design it as a **multi-source tool** — the agent calls one tool, the handler routes to the best source (or fans out to several) internally. This is the difference between a "PubMed wrapper" and a "literature research server": `pubmed_search_articles` tries PubMed first, falls back to EuropePMC for broader coverage, then Unpaywall for open access. The agent doesn't choose which API to hit — the server makes that decision based on what works.
+
+Two patterns:
+
+**Source fallback chains** — try sources in priority order, fall through on failure or empty results. Best when sources cover the same data with different depth or availability. The output should indicate which source provided the data so the agent (and human) can assess provenance.
+
+```ts
+// Handler pseudocode — not a real implementation
+async handler(input, ctx) {
+  // Primary: PubMed E-utilities (authoritative, best metadata)
+  const result = await pubmedService.search(input.query);
+  if (result.items.length > 0) return { ...result, source: 'pubmed' };
+
+  // Fallback: EuropePMC (broader coverage, includes preprints)
+  const epmcResult = await epmcService.search(input.query);
+  if (epmcResult.items.length > 0) return { ...epmcResult, source: 'europepmc' };
+
+  return { items: [], source: 'none', message: 'No results from any source.' };
+}
+```
+
+**Multi-source fan-out** — query multiple sources in parallel, merge results. Best when sources provide complementary data about the same entity. Use `Promise.allSettled` so one failing source doesn't tank the whole call.
+
+```ts
+// Handler pseudocode — indicator enrichment across threat intel sources
+async handler(input, ctx) {
+  const [vt, abuse, greynoise] = await Promise.allSettled([
+    vtService.lookup(input.indicator),
+    abuseIpService.check(input.indicator),
+    greynoiseService.query(input.indicator),
+  ]);
+  return {
+    indicator: input.indicator,
+    sources: {
+      virustotal: vt.status === 'fulfilled' ? vt.value : { error: vt.reason.message },
+      abuseipdb: abuse.status === 'fulfilled' ? abuse.value : { error: abuse.reason.message },
+      greynoise: greynoise.status === 'fulfilled' ? greynoise.value : { error: greynoise.reason.message },
+    },
+    // Server synthesizes a verdict from available data — the agent gets a conclusion, not raw API dumps
+    assessment: synthesizeVerdict(vt, abuse, greynoise),
+  };
+}
+```
+
+In both patterns, the tool surface is organized around what the user is doing. Sources are service-layer details — the agent sees `threat_enrich_indicator`, not `virustotal_lookup` + `abuseipdb_check` + `greynoise_query`. Mode-based dispatch by input type (e.g., `indicator_type: 'ip' | 'domain' | 'hash'`) naturally routes to different source chains per mode, since different sources cover different indicator types.
 
 There is no fixed ceiling on tool count — tools need to earn their keep, but don't artificially limit the surface. If the domain genuinely has 20 distinct workflows, expose 20 tools.
 
@@ -416,7 +483,7 @@ Skip for purely data/action-oriented servers.
 
 ### 7. Plan Services and Config
 
-**Services** — one per external dependency. Init/accessor pattern. Skip if all tools are thin wrappers with no shared state.
+**Services** — one per external dependency (or per source, for multi-source servers). Init/accessor pattern. Skip if all tools are thin wrappers with no shared state. For multi-source servers, each upstream API gets its own service with its own auth, rate limits, and retry config — tools compose across services internally, agents never see the service boundary.
 
 **Server-as-service.** When the server IS the source of truth (knowledge graph, in-memory task tracker, local scratchpad, embedded inference wrapper), the resilience table below doesn't apply — there's no upstream to retry. The design questions shift to state management: what's tenant-scoped vs. global, what TTLs apply, what survives a restart, what the storage backend is. Plan persistence via `ctx.state` for tenant-scoped KV (auto-namespaced by `tenantId`), or use a `StorageService` provider directly when data must cross tenants. Service init still happens in `setup()`, accessed via `getMyService()` at request time. Calls within the server are local and synchronous-ish — the API-efficiency table below also doesn't apply.
 
@@ -539,6 +606,8 @@ Execute the plan using the scaffolding skills:
 
 Items without an `If …:` prefix apply to every design. Conditional items only apply when the trigger fires — otherwise skip them.
 
+- [ ] Server scope decided — workflow identified, audience sized, boundary drawn (standalone single-API vs. multi-source aggregation vs. internal-only)
+- [ ] **If multi-source:** tool surface organized around user workflows, not API identity. Sources are service-layer details.
 - [ ] External APIs/dependencies researched and verified (docs fetched, SDKs identified)
 - [ ] **If wrapping an external API:** live API probed (at minimum: one list/search, one single-item GET, one error case)
 - [ ] User goals enumerated first (3–10 outcomes agents will accomplish, scaled to domain size), then domain operations mapped as raw material
@@ -567,5 +636,6 @@ Items without an `If …:` prefix apply to every design. Conditional items only 
 - [ ] **If the server is itself the source of truth (no external API):** state lifecycle planned — tenant-scoped vs. global, TTLs, what survives restart, storage backend chosen
 - [ ] **If the server has external deps or shared state:** service layer planned (or explicitly skipped with reasoning)
 - [ ] **If services wrap external APIs:** resilience planned (retry boundary, backoff, parse classification)
+- [ ] **If multi-source server:** each source has its own service with independent auth/retry/rate-limit config. Fallback chains or fan-out strategy documented per tool. Output includes source provenance.
 - [ ] **If exposing a SQL/analytical workspace over tabular data is in scope:** DataCanvas considered (`api-canvas` skill) as one option before designing custom analytical state — register / query / export tools accepting an optional `canvas_id`, with `ctx.core.canvas?` reads
 - [ ] **If the server needs runtime config:** env vars identified in `server-config.ts`

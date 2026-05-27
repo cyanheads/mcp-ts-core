@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.9.10](changelog/0.9.x/0.9.10.md) — 2026-05-26
+
+HTTP session-init gate, expected client error log-level split, plugin metadata scaffolding, skill updates
+
 ## [0.9.9](changelog/0.9.x/0.9.9.md) — 2026-05-24
 
 fuzzTool Phase 1 pre-parse, ZodArray minLength, fast-check → optional peer dep, packaging cleanup

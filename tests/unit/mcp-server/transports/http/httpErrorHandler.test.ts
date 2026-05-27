@@ -8,6 +8,8 @@ import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
 import { httpErrorHandler } from '@/mcp-server/transports/http/httpErrorHandler.js';
 import type { HonoNodeBindings } from '@/mcp-server/transports/http/httpTypes.js';
 import { JsonRpcErrorCode, McpError } from '@/types-global/errors.js';
+import { ErrorHandler } from '@/utils/internal/error-handler/errorHandler.js';
+import { logger } from '@/utils/internal/logger.js';
 
 // Mock config
 vi.mock('@/config/index.js', () => ({
@@ -17,6 +19,25 @@ vi.mock('@/config/index.js', () => ({
       serviceName: 'test-server',
       serviceVersion: '0.0.0',
     },
+  },
+}));
+
+vi.mock('@/utils/internal/logger.js', () => ({
+  logger: {
+    debug: vi.fn(),
+    info: vi.fn(),
+    notice: vi.fn(),
+    warning: vi.fn(),
+    error: vi.fn(),
+  },
+}));
+
+vi.mock('@/utils/internal/requestContext.js', () => ({
+  requestContextService: {
+    createRequestContext: vi.fn(() => ({
+      requestId: 'test-req-id',
+      timestamp: new Date().toISOString(),
+    })),
   },
 }));
 
@@ -257,6 +278,112 @@ describe('HTTP Error Handler', () => {
       await httpErrorHandler(error, mockContext as Context<{ Bindings: HonoNodeBindings }>);
 
       expect((jsonResponseData as any).error.message).toBe('Custom error message');
+    });
+  });
+
+  describe('Client vs server error log treatment', () => {
+    let handleErrorSpy: ReturnType<typeof vi.spyOn>;
+
+    beforeEach(() => {
+      handleErrorSpy = vi
+        .spyOn(ErrorHandler, 'handleError')
+        .mockReturnValue(new McpError(JsonRpcErrorCode.InternalError, 'handled'));
+    });
+
+    afterEach(() => {
+      handleErrorSpy.mockRestore();
+    });
+
+    test('Unauthorized error logs at warning level, skips ErrorHandler.handleError', async () => {
+      const error = new McpError(JsonRpcErrorCode.Unauthorized, 'Invalid token');
+
+      await httpErrorHandler(error, mockContext as Context<{ Bindings: HonoNodeBindings }>);
+
+      expect(handleErrorSpy).not.toHaveBeenCalled();
+      expect(logger.warning).toHaveBeenCalledWith(
+        expect.stringContaining('Invalid token'),
+        expect.objectContaining({ errorCode: JsonRpcErrorCode.Unauthorized }),
+      );
+      expect(statusValue).toBe(401);
+    });
+
+    test('Forbidden error logs at warning level, skips ErrorHandler.handleError', async () => {
+      const error = new McpError(JsonRpcErrorCode.Forbidden, 'Insufficient scopes');
+
+      await httpErrorHandler(error, mockContext as Context<{ Bindings: HonoNodeBindings }>);
+
+      expect(handleErrorSpy).not.toHaveBeenCalled();
+      expect(logger.warning).toHaveBeenCalledWith(
+        expect.stringContaining('Insufficient scopes'),
+        expect.objectContaining({ errorCode: JsonRpcErrorCode.Forbidden }),
+      );
+      expect(statusValue).toBe(403);
+    });
+
+    test('ValidationError logs at warning level, skips ErrorHandler.handleError', async () => {
+      const error = new McpError(JsonRpcErrorCode.ValidationError, 'Bad input');
+
+      await httpErrorHandler(error, mockContext as Context<{ Bindings: HonoNodeBindings }>);
+
+      expect(handleErrorSpy).not.toHaveBeenCalled();
+      expect(logger.warning).toHaveBeenCalledWith(
+        expect.stringContaining('Bad input'),
+        expect.objectContaining({ errorCode: JsonRpcErrorCode.ValidationError }),
+      );
+      expect(statusValue).toBe(400);
+    });
+
+    test('InvalidRequest error logs at warning level, skips ErrorHandler.handleError', async () => {
+      const error = new McpError(JsonRpcErrorCode.InvalidRequest, 'Missing field');
+
+      await httpErrorHandler(error, mockContext as Context<{ Bindings: HonoNodeBindings }>);
+
+      expect(handleErrorSpy).not.toHaveBeenCalled();
+      expect(logger.warning).toHaveBeenCalledWith(
+        expect.stringContaining('Missing field'),
+        expect.objectContaining({ errorCode: JsonRpcErrorCode.InvalidRequest }),
+      );
+      expect(statusValue).toBe(400);
+    });
+
+    test('NotFound error logs at warning level, skips ErrorHandler.handleError', async () => {
+      const error = new McpError(JsonRpcErrorCode.NotFound, 'Session expired');
+
+      await httpErrorHandler(error, mockContext as Context<{ Bindings: HonoNodeBindings }>);
+
+      expect(handleErrorSpy).not.toHaveBeenCalled();
+      expect(logger.warning).toHaveBeenCalledWith(
+        expect.stringContaining('Session expired'),
+        expect.objectContaining({ errorCode: JsonRpcErrorCode.NotFound }),
+      );
+      expect(statusValue).toBe(404);
+    });
+
+    test('server error (InternalError) invokes ErrorHandler.handleError', async () => {
+      const error = new Error('Unexpected failure');
+
+      await httpErrorHandler(error, mockContext as Context<{ Bindings: HonoNodeBindings }>);
+
+      expect(handleErrorSpy).toHaveBeenCalledOnce();
+      expect(statusValue).toBe(500);
+    });
+
+    test('RateLimited error invokes ErrorHandler.handleError (not a client error)', async () => {
+      const error = new McpError(JsonRpcErrorCode.RateLimited, 'Too many requests');
+
+      await httpErrorHandler(error, mockContext as Context<{ Bindings: HonoNodeBindings }>);
+
+      expect(handleErrorSpy).toHaveBeenCalledOnce();
+      expect(statusValue).toBe(429);
+    });
+
+    test('ServiceUnavailable error invokes ErrorHandler.handleError', async () => {
+      const error = new McpError(JsonRpcErrorCode.ServiceUnavailable, 'Upstream down');
+
+      await httpErrorHandler(error, mockContext as Context<{ Bindings: HonoNodeBindings }>);
+
+      expect(handleErrorSpy).toHaveBeenCalledOnce();
+      expect(statusValue).toBe(503);
     });
   });
 });

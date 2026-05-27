@@ -70,12 +70,35 @@ export const httpErrorHandler = async <TBindings extends object = HonoNodeBindin
   // details (stack traces, cause chains, operation context) that must not leak.
   const originalData = err instanceof McpError ? err.data : undefined;
 
-  const handledError = ErrorHandler.handleError(err, {
-    operation: 'httpTransport',
-    context,
-  });
+  // Pre-classify to split expected client errors (4xx) from unexpected server
+  // errors (5xx). Client errors get a compact warning log without stack traces;
+  // server errors go through the full ErrorHandler pipeline with stacks + OTel.
+  const classified = ErrorHandler.classifyOnly(err);
 
-  const errorCode = handledError instanceof McpError ? handledError.code : -32603;
+  const EXPECTED_CLIENT_CODES: ReadonlySet<number> = new Set([
+    JsonRpcErrorCode.Unauthorized,
+    JsonRpcErrorCode.Forbidden,
+    JsonRpcErrorCode.InvalidParams,
+    JsonRpcErrorCode.ValidationError,
+    JsonRpcErrorCode.InvalidRequest,
+    JsonRpcErrorCode.NotFound,
+  ]);
+
+  const isExpectedClientError = EXPECTED_CLIENT_CODES.has(classified.code);
+
+  if (isExpectedClientError) {
+    logger.warning(`Client error: ${classified.message}`, {
+      ...context,
+      errorCode: classified.code,
+    });
+  } else {
+    ErrorHandler.handleError(err, {
+      operation: 'httpTransport',
+      context,
+    });
+  }
+
+  const errorCode = classified.code;
   let status: StatusCode = 500;
   switch (errorCode) {
     case JsonRpcErrorCode.NotFound:
@@ -153,7 +176,7 @@ export const httpErrorHandler = async <TBindings extends object = HonoNodeBindin
     jsonrpc: '2.0',
     error: {
       code: errorCode,
-      message: handledError.message,
+      message: classified.message,
       ...(originalData !== undefined && { data: originalData }),
     },
     id: requestId,

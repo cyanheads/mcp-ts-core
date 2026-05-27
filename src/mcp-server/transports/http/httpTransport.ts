@@ -549,10 +549,42 @@ export async function createHttpApp<TBindings extends object = HonoNodeBindings>
       return c.json({ error: 'Session not found or expired' }, 404);
     }
 
-    // Defer session minting for stateful mode: only assign a session ID to
-    // requests that already carry one (returning clients) or after the SDK
-    // processes the request (new initialize handshakes). This prevents
-    // allocating sessions for requests that will fail protocol validation.
+    // MCP Spec 2025-06-18: stateful sessions require Mcp-Session-Id on all
+    // non-initialize requests. Without this gate, the SDK processes the RPC
+    // on a fresh per-request McpServer (no protocol state to reject against)
+    // and the session store mints an uninitialized session on response.ok.
+    if (sessionStore && !providedSessionId) {
+      let isInitialize = false;
+      if (c.req.method === 'POST') {
+        try {
+          const rawBody: unknown = await c.req.json();
+          const messages = Array.isArray(rawBody) ? rawBody : [rawBody];
+          isInitialize = messages.some(
+            (msg: unknown) =>
+              typeof msg === 'object' &&
+              msg !== null &&
+              'method' in msg &&
+              (msg as Record<string, unknown>).method === 'initialize',
+          );
+        } catch {
+          // Malformed body — let the SDK surface the parse error downstream
+        }
+      }
+      if (!isInitialize) {
+        logger.warning('Rejected non-initialize request without session in stateful mode', {
+          ...transportContext,
+          method: c.req.method,
+        });
+        return c.json(
+          {
+            error:
+              'Bad Request: Mcp-Session-Id header is required. Send an initialize request first.',
+          },
+          400,
+        );
+      }
+    }
+
     const sessionId = providedSessionId ?? generateSecureSessionId();
 
     const transport = new McpSessionTransport(sessionId);
