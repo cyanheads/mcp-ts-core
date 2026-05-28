@@ -1,7 +1,7 @@
 # Developer Protocol
 
 **Package:** `@cyanheads/mcp-ts-core`
-**Version:** 0.9.10
+**Version:** 0.9.11
 **Engines:** Bun ≥1.3.0, Node ≥24.0.0
 **MCP SDK:** `@modelcontextprotocol/sdk` ^1.29.0
 **Zod:** ^4.4.3
@@ -540,6 +540,7 @@ security: false                                         # optional, default fals
 | `summary` | yes | Rollup index line. ≤350 chars, no markdown, single line. Write like a GitHub Release title. |
 | `breaking` | no (default `false`) | Flags releases with breaking changes. Renders as `· ⚠️ Breaking` badge in the rollup. Agents running the `maintenance` skill read this to prioritize review. |
 | `security` | no (default `false`) | Flags releases with security fixes. Renders as `· 🛡️ Security` badge in the rollup so users can triage upgrade urgency. Pairs with the `## Security` body section. |
+| `agent-notes` | no | Free-form adoption notes for downstream `maintenance` agents — new files to create, fields to populate, skills to re-run, one-time migration steps. Not rendered in `CHANGELOG.md`; consumed only by agents running the `maintenance` skill on consumer projects. Omit when there's nothing to say. |
 
 Badge order when both set: `· ⚠️ Breaking · 🛡️ Security`. Summary > 350 chars or malformed boolean fails `changelog:check`.
 

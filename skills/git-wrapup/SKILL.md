@@ -4,7 +4,7 @@ description: >
   Land working-tree changes as a versioned release commit with an annotated tag — version bump, changelog, regenerate derived artifacts, verify, commit, tag. Stops at "committed and tagged locally" — no push, no publish. The release-and-publish skill picks up from here. Distilled from the git_wrapup_instructions protocol.
 metadata:
   author: cyanheads
-  version: "1.0"
+  version: "1.1"
   audience: external
   type: workflow
 ---
@@ -34,8 +34,6 @@ Every item must be true before starting wrapup. Committing means releasing — a
 - [ ] **Docs updated** — surgical updates to existing docs as needed. New docs for new features. No large rewrites for documentation that's still accurate.
 
 If any gate is red, fix it before proceeding. This skill re-verifies build + tests in step 6, but starting wrapup on a broken tree wastes the version number and creates a revert-or-amend situation.
-
-After all gates pass, spawn dedicated agents to handle the wrapup (this skill) and publish (`release-and-publish`). These are separate agents from the ones that did the editing work.
 
 ## Steps
 

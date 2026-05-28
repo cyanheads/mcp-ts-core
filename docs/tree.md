@@ -1,6 +1,6 @@
 # mcp-ts-core - Directory Structure
 
-Generated on: 2026-05-27 04:31:12
+Generated on: 2026-05-28 06:37:54
 
 ```text
 mcp-ts-core/
@@ -167,6 +167,8 @@ mcp-ts-core/
 │   │   └── SKILL.md
 │   ├── api-workers/
 │   │   └── SKILL.md
+│   ├── code-simplifier/
+│   │   └── SKILL.md
 │   ├── design-mcp-server/
 │   │   └── SKILL.md
 │   ├── field-test/
@@ -177,12 +179,12 @@ mcp-ts-core/
 │   │   └── SKILL.md
 │   ├── migrate-mcp-ts-template/
 │   │   └── SKILL.md
-│   ├── multi-server-orchestration/
-│   │   ├── references/
-│   │   │   ├── greenfield-buildout.md
-│   │   │   ├── maintenance-pass.md
-│   │   │   ├── release-and-publish-pass.md
-│   │   │   └── wrapup-pass.md
+│   ├── orchestrations/
+│   │   ├── workflows/
+│   │   │   ├── field-test-fix.md
+│   │   │   ├── fix-wrapup-release.md
+│   │   │   ├── greenfield-build.md
+│   │   │   └── maintenance-release.md
 │   │   └── SKILL.md
 │   ├── polish-docs-meta/
 │   │   ├── references/

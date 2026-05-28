@@ -56,8 +56,10 @@ function printUsage(): void {
   @cyanheads/mcp-ts-core v${PACKAGE_JSON.version}
 
   Usage:
-    mcp-ts-core init [name]   Scaffold a new MCP server project
-    mcp-ts-core --help        Show this help message
+    mcp-ts-core init [name]    Scaffold a new MCP server project
+                               Without [name], scaffolds in place (upgrade flow)
+    mcp-ts-core --help, -h     Show this help message
+    mcp-ts-core init --help    Show init help (same output)
 
   Examples:
     bunx @cyanheads/mcp-ts-core init my-mcp-server
@@ -67,7 +69,21 @@ function printUsage(): void {
 // ── Init command ──────────────────────────────────────────────────────
 
 function init(): void {
-  const name = process.argv.slice(3).find((a) => !a.startsWith('--'));
+  const args = process.argv.slice(3);
+
+  if (args.includes('--help') || args.includes('-h')) {
+    printUsage();
+    process.exit(0);
+  }
+
+  const name = args.find((a) => !a.startsWith('-'));
+  const unknownFlags = args.filter((a) => a.startsWith('-') && a !== name);
+  if (unknownFlags.length > 0) {
+    console.error(`  Error: unknown flag(s): ${unknownFlags.join(', ')}`);
+    console.error(`  Run "bunx @cyanheads/mcp-ts-core init --help" for usage.`);
+    process.exit(1);
+  }
+
   const dest = name ? join(process.cwd(), name) : process.cwd();
   const packageName = name ?? basename(dest);
 

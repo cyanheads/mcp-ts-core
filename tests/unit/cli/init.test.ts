@@ -75,6 +75,37 @@ describe('CLI init command', () => {
     expect(output).toContain('mcp-ts-core --help');
   });
 
+  it('prints usage and exits successfully for "init --help" without scaffolding', async () => {
+    const tempRoot = createTempDir();
+    process.chdir(tempRoot);
+
+    await expect(runCli(['init', '--help'])).rejects.toThrow('EXIT:0');
+
+    const output = getLoggedOutput(logSpy);
+    expect(output).toContain('Usage:');
+    expect(output).toContain('mcp-ts-core init [name]');
+    expect(existsSync(join(tempRoot, 'package.json'))).toBe(false);
+  });
+
+  it('prints usage and exits successfully for "init -h" without scaffolding', async () => {
+    const tempRoot = createTempDir();
+    process.chdir(tempRoot);
+
+    await expect(runCli(['init', '-h'])).rejects.toThrow('EXIT:0');
+
+    expect(existsSync(join(tempRoot, 'package.json'))).toBe(false);
+  });
+
+  it('rejects unknown flags on init without scaffolding', async () => {
+    const tempRoot = createTempDir();
+    process.chdir(tempRoot);
+
+    await expect(runCli(['init', '--bogus'])).rejects.toThrow('EXIT:1');
+
+    expect(getLoggedOutput(errorSpy)).toContain('unknown flag(s): --bogus');
+    expect(existsSync(join(tempRoot, 'package.json'))).toBe(false);
+  });
+
   it('rejects invalid project names before scaffolding', async () => {
     const tempRoot = createTempDir();
     process.chdir(tempRoot);
