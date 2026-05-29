@@ -4,7 +4,7 @@ description: >
   DataCanvas primitive reference — a Tier 3 SQL/analytical workspace for tabular MCP servers, backed by DuckDB. Use when registering tables from upstream APIs, running ad-hoc SQL across them, and exporting results. Covers the acquire → register → query → export flow, the token-sharing pattern for multi-agent collaboration, env config, and Cloudflare Workers fail-closed behavior.
 metadata:
   author: cyanheads
-  version: "1.2"
+  version: "1.3"
   audience: external
   type: reference
 ---
@@ -245,7 +245,112 @@ If your tool surfaces row data via `structuredContent`, the JSON-safe shape flow
 
 ---
 
+## Minimum viable spillover server
+
+Most canvas use cases are public-data analytics: fetch from an upstream API, stage the full result, let the agent SQL it. The primitives are domain-neutral — `canvas.acquire()`, `spillover()`, `instance.query()` — so the minimum viable shape is small and generic. Reach for it first; add scoping only when a real multi-tenant requirement appears.
+
+### Simple-shape defaults
+
+| Concern | Simple-shape answer |
+|:--|:--|
+| Canvas scoping | One shared canvas per tenant. Omit `canvas_id` on the first call to mint one; pass the returned id back to reuse it. |
+| Table naming | `spillover()` auto-names the table `spilled_<id>`; pass `tableName` for a stable handle. A dataframe-query surface commonly adds its own `df_<id>` convention. |
+| Access control | Possession of the `canvas_id` is access — unguessable in practice (see [token-sharing model](#the-token-sharing-model)). TTL + the framework rate limiter backstop brute force. |
+| Enable flag | None of your own — canvas presence is the gate (`CANVAS_PROVIDER_TYPE=duckdb`; `getCanvas()` returns `undefined` otherwise). |
+| Tools | A fetcher that spills, plus `dataframe_query` for SQL. `dataframe_describe` / `dataframe_drop` are optional consumer conventions, not framework-provided. |
+| Fetcher output | Two things in one response: the inline preview (answer to the immediate question) and the table handle (escape hatch for follow-up SQL via `dataframe_query`). Neither replaces the other. |
+
+> The `MCP_HTTP_MAX_BODY_BYTES` request-body cap is **inbound-only** — it bounds the JSON-RPC request, not the upstream data a handler stages into the canvas or the rows it returns. Canvas servers send small requests (queries, SQL, canvas IDs) regardless of dataset size, so the cap never constrains canvas ingestion.
+
+### Recipe
+
+A fetcher that spills and a query tool that runs SQL across what was spilled — the whole surface. Swap `fetchUpstream` for any paginated or streamed source; nothing here is domain-specific.
+
+```ts
+import { tool, z } from '@cyanheads/mcp-ts-core';
+import { spillover } from '@cyanheads/mcp-ts-core/canvas';
+import { getCanvas } from '@/services/canvas-accessor.js';
+
+/** Fetch an upstream dataset, inline a preview, spill the full result to a canvas table. */
+export const fetchDataset = tool('fetch_dataset', {
+  description:
+    'Fetch a dataset and stage it on a DataCanvas. Returns an inline preview plus a ' +
+    'canvas_id + table you can query with dataframe_query for the full result set.',
+  annotations: { readOnlyHint: true },
+  input: z.object({
+    query: z.string().describe('Upstream search/filter expression'),
+    canvas_id: z
+      .string()
+      .optional()
+      .describe('Canvas ID from a prior call. Omit to start fresh — the response returns a new one.'),
+  }),
+  output: z.object({
+    canvas_id: z.string().describe('Canvas ID — pass to dataframe_query or another fetch call'),
+    table_name: z.string().describe('Canvas table holding the full result (empty when not spilled)'),
+    spilled: z.boolean().describe('True when the result exceeded the preview and was staged'),
+    preview: z.array(z.record(z.string(), z.unknown())).describe('Inline rows — the immediate answer'),
+    row_count: z.number().describe('Rows staged on the canvas (preview length when not spilled)'),
+  }),
+  async handler(input, ctx) {
+    const canvas = getCanvas();
+    if (!canvas) throw new Error('DataCanvas is not enabled. Set CANVAS_PROVIDER_TYPE=duckdb.');
+
+    const instance = await canvas.acquire(input.canvas_id, ctx);
+    const result = await spillover({
+      canvas: instance,
+      source: fetchUpstream(input.query), // any AsyncIterable<Row> | Iterable<Row>
+      previewChars: 100_000, // ≈ 25k tokens inline
+      signal: ctx.signal,
+    });
+
+    return {
+      canvas_id: instance.canvasId,
+      table_name: result.spilled ? result.handle.tableName : '',
+      spilled: result.spilled,
+      preview: result.previewRows,
+      row_count: result.spilled ? result.handle.rowCount : result.previewRows.length,
+    };
+  },
+});
+
+/** Run read-only SQL across tables staged on a canvas. */
+export const dataframeQuery = tool('dataframe_query', {
+  description: 'Run a read-only SQL SELECT against tables staged on a canvas by fetch_dataset.',
+  annotations: { readOnlyHint: true },
+  input: z.object({
+    canvas_id: z.string().describe('Canvas ID returned by fetch_dataset'),
+    sql: z.string().describe('Read-only SELECT. Reference tables by the names fetch_dataset returned.'),
+  }),
+  output: z.object({
+    rows: z.array(z.record(z.string(), z.unknown())).describe('Result rows (capped at the canvas row limit)'),
+    row_count: z.number().describe('Full result count before the row cap'),
+  }),
+  async handler(input, ctx) {
+    const canvas = getCanvas();
+    if (!canvas) throw new Error('DataCanvas is not enabled. Set CANVAS_PROVIDER_TYPE=duckdb.');
+
+    const instance = await canvas.acquire(input.canvas_id, ctx);
+    const result = await instance.query(input.sql, { signal: ctx.signal });
+    return { rows: result.rows, row_count: result.rowCount };
+  },
+});
+```
+
+### When the simple shape is enough
+
+| Condition | Simple shape suffices? |
+|:--|:--|
+| Underlying data is publicly accessible | ✅ |
+| Single-user deployment (stdio, or HTTP with one user) | ✅ — no cross-user surface regardless of data sensitivity |
+| Use case is research / analytics, not multi-tenant SaaS | ✅ |
+| Dataframes must age individually | ⚠️ TTL is canvas-level today (a hot canvas keeps stale tables alive); per-table TTL is tracked in [#140](https://github.com/cyanheads/mcp-ts-core/issues/140). Backstop with `ctx.state` bookkeeping in the interim. |
+| Per-user row visibility matters in a multi-user deployment | ❌ — add session/tenant scoping at the server level |
+
+The germplasm-flavored [consumer tool template](#consumer-tool-template) below is the same pattern with domain-specific naming.
+
 ## Consumer tool template
+
+A domain-specific instance of the [minimum viable spillover server](#minimum-viable-spillover-server) above — the same `acquire → register → return handle` flow with germplasm naming.
 
 ```ts
 import { tool, z } from '@cyanheads/mcp-ts-core';
