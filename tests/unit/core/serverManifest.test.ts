@@ -174,6 +174,34 @@ describe('buildServerManifest — baseline', () => {
     expect(manifest.server.name).toBe('test-server');
   });
 
+  test('surfaces server.keywords when configured', () => {
+    const manifest = buildServerManifest({
+      config: stubConfig({ mcpServerKeywords: ['health', 'medical', 'epidemiology'] }),
+      tools: [],
+      resources: [],
+      prompts: [],
+    });
+    expect(manifest.server.keywords).toEqual(['health', 'medical', 'epidemiology']);
+  });
+
+  test('omits server.keywords when unset or empty', () => {
+    const unset = buildServerManifest({
+      config: stubConfig(),
+      tools: [],
+      resources: [],
+      prompts: [],
+    });
+    expect(unset.server.keywords).toBeUndefined();
+
+    const empty = buildServerManifest({
+      config: stubConfig({ mcpServerKeywords: [] }),
+      tools: [],
+      resources: [],
+      prompts: [],
+    });
+    expect(empty.server.keywords).toBeUndefined();
+  });
+
   test('flips capability flags when definitions are present', () => {
     const fakeTool = {
       name: 'my_tool',

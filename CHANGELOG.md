@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.9.12](changelog/0.9.x/0.9.12.md) — 2026-05-29
+
+GET /mcp surfaces package.json keywords; orchestrations and maintenance-release workflow updates; openai patch
+
 ## [0.9.11](changelog/0.9.x/0.9.11.md) — 2026-05-28
 
 code-simplifier skill, orchestrations skill restructure, init --help flag, MCPB user_config default guidance

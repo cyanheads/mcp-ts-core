@@ -12,6 +12,7 @@ export const defaultServerManifest: ServerManifest = {
     name: 'test-mcp-server',
     version: '1.0.0',
     description: 'Test MCP Server',
+    keywords: ['test', 'fixture'],
     environment: 'test',
   },
   transport: {

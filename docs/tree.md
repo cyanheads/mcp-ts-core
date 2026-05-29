@@ -1,6 +1,6 @@
 # mcp-ts-core - Directory Structure
 
-Generated on: 2026-05-28 06:37:54
+Generated on: 2026-05-29 00:30:47
 
 ```text
 mcp-ts-core/
@@ -176,8 +176,6 @@ mcp-ts-core/
 │   ├── git-wrapup/
 │   │   └── SKILL.md
 │   ├── maintenance/
-│   │   └── SKILL.md
-│   ├── migrate-mcp-ts-template/
 │   │   └── SKILL.md
 │   ├── orchestrations/
 │   │   ├── workflows/

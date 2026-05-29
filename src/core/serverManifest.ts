@@ -171,6 +171,7 @@ export interface ManifestServer {
   description?: string;
   environment: string;
   homepage?: string;
+  keywords?: string[];
   name: string;
   version: string;
 }
@@ -575,6 +576,7 @@ export function buildServerManifest(input: BuildServerManifestInput): ServerMani
       name: config.mcpServerName,
       version: config.mcpServerVersion,
       ...(config.mcpServerDescription && { description: config.mcpServerDescription }),
+      ...(config.mcpServerKeywords?.length && { keywords: config.mcpServerKeywords }),
       ...(config.mcpServerHomepage && { homepage: config.mcpServerHomepage }),
       environment: config.environment,
     },

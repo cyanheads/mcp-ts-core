@@ -405,6 +405,7 @@ export async function createHttpApp<TBindings extends object = HonoNodeBindings>
         name: manifest.server.name,
         version: manifest.server.version,
         description: manifest.server.description,
+        ...(manifest.server.keywords?.length && { keywords: manifest.server.keywords }),
         ...(manifest.server.homepage && { homepage: manifest.server.homepage }),
         environment: manifest.server.environment,
         transport: manifest.transport.type,

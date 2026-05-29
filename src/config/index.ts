@@ -22,6 +22,7 @@ type PackageManifest = {
   name?: string;
   version?: string;
   description?: string;
+  keywords?: string[];
 };
 
 const frameworkPkg = packageJson as PackageManifest;
@@ -45,6 +46,9 @@ function resolveConsumerPackage(): PackageManifest {
     if (typeof parsed.name === 'string') pkg.name = parsed.name;
     if (typeof parsed.version === 'string') pkg.version = parsed.version;
     if (typeof parsed.description === 'string') pkg.description = parsed.description;
+    if (Array.isArray(parsed.keywords)) {
+      pkg.keywords = parsed.keywords.filter((k): k is string => typeof k === 'string');
+    }
   } catch {
     // No consumer package.json found — will fall through to framework defaults
   }
@@ -79,10 +83,12 @@ const ConfigSchema = z
       name: z.string(),
       version: z.string(),
       description: z.string().optional(),
+      keywords: z.array(z.string()).optional(),
     }),
     mcpServerName: z.string(), // Will be derived from pkg.name
     mcpServerVersion: z.string(), // Will be derived from pkg.version
     mcpServerDescription: z.string().optional(), // Will be derived from pkg.description
+    mcpServerKeywords: z.array(z.string()).optional(), // Will be derived from pkg.keywords
     mcpServerHomepage: z.string().optional(), // Will be derived from pkg.homepage
     logLevel: z
       .preprocess(
@@ -442,6 +448,10 @@ const parseConfig = (envOverrides?: Record<string, string | undefined>) => {
       name: env.PACKAGE_NAME ?? consumerPkg.name ?? frameworkPkg.name,
       version: env.PACKAGE_VERSION ?? consumerPkg.version ?? frameworkPkg.version,
       description: env.PACKAGE_DESCRIPTION ?? consumerPkg.description ?? frameworkPkg.description,
+      keywords:
+        env.PACKAGE_KEYWORDS?.split(',')
+          .map((k) => k.trim())
+          .filter(Boolean) ?? consumerPkg.keywords,
     },
     logLevel: env.MCP_LOG_LEVEL,
     logsPath: env.LOGS_DIR,
@@ -574,6 +584,7 @@ const parseConfig = (envOverrides?: Record<string, string | undefined>) => {
     name: z.string(),
     version: z.string(),
     description: z.string().optional(),
+    keywords: z.array(z.string()).optional(),
     homepage: z.string().optional(),
   });
   const parsedPkg = pkgSchema.parse(rawConfig.pkg);
@@ -598,6 +609,7 @@ const parseConfig = (envOverrides?: Record<string, string | undefined>) => {
     mcpServerName: env.MCP_SERVER_NAME ?? parsedPkg.name,
     mcpServerVersion: env.MCP_SERVER_VERSION ?? parsedPkg.version,
     mcpServerDescription: env.MCP_SERVER_DESCRIPTION ?? parsedPkg.description,
+    mcpServerKeywords: parsedPkg.keywords,
     mcpServerHomepage: env.MCP_SERVER_HOMEPAGE, // Intentionally no pkg fallback — opt-in only
     openTelemetry: {
       ...rawConfig.openTelemetry,

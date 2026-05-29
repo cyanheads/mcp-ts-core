@@ -58,6 +58,12 @@ describe('config parsing', () => {
     expect(parsed.llmDefaultTemperature).toBeCloseTo(0.7);
   });
 
+  it('derives mcpServerKeywords from PACKAGE_KEYWORDS (comma-split, trimmed, empties dropped)', () => {
+    process.env.PACKAGE_KEYWORDS = 'health, medical ,epidemiology,';
+    const parsed = parseConfig();
+    expect(parsed.mcpServerKeywords).toEqual(['health', 'medical', 'epidemiology']);
+  });
+
   it('rejects DEV_MCP_AUTH_BYPASS=true in production', () => {
     process.env.NODE_ENV = 'production';
     process.env.DEV_MCP_AUTH_BYPASS = 'true';
