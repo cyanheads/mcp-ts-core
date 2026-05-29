@@ -4,7 +4,7 @@ description: >
   Pick and run a multi-phase workflow that chains foundational task skills (`git-wrapup`, `release-and-publish`, `maintenance`, `field-test`, `setup`, etc.) end-to-end. Routes user intent to a workflow file under `workflows/` — greenfield builds, maintenance + release, field-test + fix, or known-work + release. Single source for the universal rules (no commits without authorization, no destructive git, no marketing language), the orchestrator posture (own the goal, ground sub-agents in primary sources, verify against the goal), and the sub-agent strategy (orient block, parallel fanout, isolation, normalization) that apply across every workflow. Sub-agents are an optional capability — workflows run linearly when fanout isn't available.
 metadata:
   author: cyanheads
-  version: "1.0"
+  version: "1.1"
   audience: internal
   type: workflow
 ---
@@ -83,9 +83,15 @@ Why the framing matters:
 
 ## Sub-Agent Strategy (if available)
 
-Sub-agents are optional. If the orchestrator has the capability to spawn them, fan out work in parallel where it makes sense. Single-target workflows usually run linearly; multi-target workflows benefit from a parallel sub-agent per target. Choose based on scope, not by default.
+Sub-agents are optional. Match the mechanism to your platform's capability — three tiers, in increasing order:
 
-The decision tree:
+1. **No fanout** — run phases linearly. The phase structure is the value; parallelism is the optimization.
+2. **Parallel sub-agents** — compose N prompts, launch concurrently, collect, verify (the pattern below). Single-target workflows usually run linearly anyway; multi-target workflows get one sub-agent per target.
+3. **Programmatic orchestration** — if your platform offers deterministic multi-agent control flow, use its primitives: schema-validated sub-agent returns, automatic concurrency management, resumable/journaled runs, and barrier-free pipelining across phases.
+
+Phases, gates, goals, and constraints are identical across all three tiers — only the fanout mechanism changes. Use the most capable tier available, and don't hand-roll what the platform does natively (e.g., rolling concurrency). Choose by scope and capability, not by default.
+
+The decision tree below is orthogonal to tier — it governs *whether* a given phase fans out, by target count and conflict risk:
 
 | Situation | Strategy |
 |:---|:---|
@@ -95,11 +101,9 @@ The decision tree:
 | N > 1 targets, work that conflicts across targets (e.g., all editing the same file) | Linear or serial — the parallel model assumes target independence |
 | Sub-agents not available | Linear, regardless of N — same phases, just sequential |
 
-If sub-agents are not available, the workflow phases still apply — they're just executed sequentially by the orchestrator. The phase structure is the value; parallelism is the optimization.
-
 ### Orient block
 
-Every sub-agent prompt opens with this block. Sub-agents do not inherit the orchestrator's `CLAUDE.md` chain or skill registry — both must be reconstructed in the prompt. Substitute the bracketed values per target.
+Every sub-agent prompt opens with this block. Sub-agents do not inherit the orchestrator's `CLAUDE.md`/`AGENTS.md` chain or skill registry — both must be reconstructed in the prompt. Substitute the bracketed values per target.
 
 ```text
 You are working on `[project name]` at `[project absolute path]`.
@@ -107,10 +111,10 @@ You are working on `[project name]` at `[project absolute path]`.
 Orient first. These steps are required before any task work — do them in
 order. If any file does not exist, note it and continue.
 
-1. Read the global agent protocol at `~/.claude/CLAUDE.md` (or your agent's equivalent).
-2. Read the workspace-level protocol if one exists at `[workspace CLAUDE.md path]`
+1. Read the global agent protocol at `~/.claude/CLAUDE.md` (or your agent's equivalent — `~/.codex/AGENTS.md`, etc.).
+2. Read the workspace-level protocol if one exists at `[workspace agent protocol path]`
    — skip this step if no workspace-tier protocol applies.
-3. Read the project protocol at `[project absolute path]/CLAUDE.md`.
+3. Read the project protocol at `[project absolute path]/CLAUDE.md` (or `AGENTS.md`, whichever the project keeps).
 4. Run `cd [project absolute path] && bun run list-skills` to see the project's
    available skills with descriptions and locations.
 5. Read the skill file(s) for this task: `[Tier 1 skill paths]`.
@@ -136,7 +140,7 @@ The sub-agent reads the primary sources directly during orient (step 6) — do n
 
 2. **Sub-agents do not receive this orchestrations skill or workflow files.** Their prompts include Tier 1 skill paths only. This prevents recursive sub-agent spawning — if a sub-agent decides it needs to fan out work, that's a signal the orchestrator sliced the work too wide. Re-slice; don't let the sub-agent recurse.
 
-3. **Sub-agent prompts must restate the no-git-write and no-`stash` rules verbatim.** The orchestrator's `CLAUDE.md` rules aren't visible to sub-agents at prompt time.
+3. **Sub-agent prompts must restate the no-git-write and no-`stash` rules verbatim.** The orchestrator's `CLAUDE.md`/`AGENTS.md` rules aren't visible to sub-agents at prompt time.
 
 4. **Narrow scope per fanout.** A sub-agent doing "implement everything, write tests, run devcheck, polish, commit, tag" will exhaust its context window before finishing — the work lands on disk but the agent can't continue. Split phases so each sub-agent finishes well under the context limit. Plan a follow-up "finish" phase as a normal backstop, not a fallback for failure.
 
@@ -148,6 +152,8 @@ For N targets in a phase:
 2. Launch them as parallel sub-agents in a single orchestrator action
 3. Collect their reports
 4. Verify with a read-only orchestrator check before advancing to the next phase
+
+**Barriers only where gates sit.** Step 4's "advance to the next phase" implies a barrier — collect every target's phase-N result before any target starts phase N+1. That barrier is only required when a gate sits between the phases: a human decision (authorization, version-bump intent) or cross-target synthesis (the roll-up). Where no gate intervenes, a target may flow through consecutive phases independently — tier-3 platforms pipeline this for wall-clock, and even hand-spawned runs can let one sub-agent carry a target across adjacent gate-free phases. Keep the barrier at gate boundaries; drop it elsewhere.
 
 ### Editor / wrap-up separation
 
@@ -161,7 +167,7 @@ For small N or small diffs, the orchestrator normalizes directly. For large N or
 
 ### Rolling concurrency
 
-Rate limits on parallel sub-agent spawning are intermittent — sometimes 15 concurrent agents work fine, sometimes 3 get throttled. Don't hard-cap; use rolling concurrency. Launch an initial batch, then as each agent completes, kick off the next in line. If a wave gets rate-limited, shrink the window for the next wave.
+If your platform manages sub-agent concurrency automatically (tier 3), rely on it rather than hand-rolling the below. Otherwise: rate limits on parallel sub-agent spawning are intermittent — sometimes 15 concurrent agents work fine, sometimes 3 get throttled. Don't hard-cap; use rolling concurrency. Launch an initial batch, then as each agent completes, kick off the next in line. If a wave gets rate-limited, shrink the window for the next wave.
 
 ### Cross-project naming hygiene
 
@@ -202,7 +208,7 @@ The same discipline applies to gotchas: workflow-specific gotchas are about the 
 
 ## When the Workflow List Doesn't Fit
 
-For scenarios that don't map cleanly to one of the four workflow files — security audits across N servers, framework-wide migrations, design-only extensions, ad-hoc multi-step work — the universal rules and sub-agent strategy above still apply. Author a new workflow file at `workflows/<scenario>.md` when the pattern is repeatable enough to codify. Follow the shape of the existing workflow files: when applicable, Tier 1 skills referenced, pre-flight, phases table, phase notes, workflow-specific gotchas, checklist. Apply the workflow file discipline above.
+For scenarios that don't map cleanly to one of the four workflow files — security audits across N servers, framework-wide migrations, design-only extensions, ad-hoc multi-step work — the universal rules and sub-agent strategy above still apply. Author a new workflow file at `workflows/<scenario>.md` when the pattern is repeatable enough to codify. Follow the shape of the existing workflow files. Open with the back-pointer every workflow carries — a "Read `../SKILL.md` first" tail on the frontmatter `description`, plus a "Use after reading `../SKILL.md`." line under the H1 — so an orchestrator that opens the file directly (not routed through this skill) still picks up the universal rules and sub-agent strategy. Then, when applicable: Tier 1 skills referenced, pre-flight, phases table, phase notes, workflow-specific gotchas, checklist. Apply the workflow file discipline above.
 
 ## Pre-flight Checklist (every workflow)
 

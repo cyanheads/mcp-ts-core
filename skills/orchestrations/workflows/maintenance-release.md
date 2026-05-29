@@ -4,7 +4,7 @@ description: >
   Workflow: run the `maintenance` skill against one or more existing MCP server projects (dependency updates, framework adoption, skill sync), verify adoption gaps in a double-check pass, then wrap up and release via `git-wrapup` and `release-and-publish`. Read `../SKILL.md` first for the universal rules and sub-agent strategy.
 metadata:
   author: cyanheads
-  version: "1.0"
+  version: "1.1"
   audience: internal
   type: workflow
 ---
@@ -18,6 +18,8 @@ Use after reading `../SKILL.md`. Drives maintenance, adoption verification, wrap
 - One or more existing servers built on `@cyanheads/mcp-ts-core` need updates from `bun outdated` landed and shipped
 - N = 1 still benefits — fresh-context sub-agents per phase keep each focused and within context budget
 - Each target should have a clean working tree before the workflow starts — uncommitted work blocks the `maintenance` skill's verification gate
+
+**Scope boundary.** This workflow ships dependency, framework-adoption, and skill-sync upkeep — it does not consult, fix, or close issues in the tracker. Issue-driven work belongs to `fix-wrapup-release.md`. If a maintenance pass incidentally surfaces a genuine bug, file it (don't fix it here) and let a later `fix-wrapup-release` run address it.
 
 ## Tier 1 skills referenced
 
