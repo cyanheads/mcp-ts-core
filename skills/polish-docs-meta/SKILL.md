@@ -4,7 +4,7 @@ description: >
   Finalize documentation and project metadata for a ship-ready MCP server. Use after implementation is complete, tests pass, and devcheck is clean. Safe to run at any stage — each step checks current state and only acts on what still needs work.
 metadata:
   author: cyanheads
-  version: "2.3"
+  version: "2.4"
   audience: external
   type: workflow
 ---
@@ -212,7 +212,6 @@ If the project ships as an `.mcpb` bundle for Claude Desktop (check for `manifes
 - If `manifest.json` exists, the README should include the Claude Desktop install badge linking to `releases/latest/download/<name>.mcpb`
 - If the package is published to npm, include Cursor and VS Code install badges
 - See `references/readme.md` for badge format and config generation commands
-- See the **Bundling** section of `templates/CLAUDE.md` for `base64` / `encodeURIComponent` generation
 
 ### 12. `LICENSE`
 

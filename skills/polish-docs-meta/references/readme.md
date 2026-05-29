@@ -54,7 +54,21 @@ Centered HTML. The `<h1>` is the server name — use the scoped package name if 
 </div>
 ```
 
-See the **Bundling** section of `templates/CLAUDE.md` (or `templates/AGENTS.md`) for how to generate the `<BASE64_CONFIG>` and `<URLENCODED_JSON>` payloads. Omit any install badge whose target doesn't apply (e.g. no `.mcpb` bundle → drop the Claude Desktop badge).
+Generate the `<BASE64_CONFIG>` (Cursor) and `<URLENCODED_JSON>` (VS Code) payloads — replace `<PACKAGE_NAME>` / `<SHORT_NAME>` and add `env` only for required API keys:
+
+```bash
+# Cursor: base64-encoded JSON. Split command/args, add env when keys are needed.
+echo -n '{"command":"npx","args":["-y","<PACKAGE_NAME>"],"env":{"API_KEY":"your-api-key"}}' | base64
+# Without env (no required keys):
+echo -n '{"command":"npx","args":["-y","<PACKAGE_NAME>"]}' | base64
+
+# VS Code: URL-encoded JSON. Same shape plus a `name` field.
+node -p 'encodeURIComponent(JSON.stringify({name:"<SHORT_NAME>",command:"npx",args:["-y","<PACKAGE_NAME>"],env:{API_KEY:"your-api-key"}}))'
+# Without env:
+node -p 'encodeURIComponent(JSON.stringify({name:"<SHORT_NAME>",command:"npx",args:["-y","<PACKAGE_NAME>"]}))'
+```
+
+Both clients use the same `{command, args, env}` shape; VS Code adds a top-level `name`. Omit `env` entirely when no API keys are needed — don't include empty objects or framework-only vars like `MCP_TRANSPORT_TYPE`. Install links route through HTTPS endpoints (`cursor.com/en/install-mcp`, `vscode.dev/redirect`) because GitHub-rendered markdown strips non-HTTP schemes — a raw `cursor://` or `vscode:` link won't click through. Omit any install badge whose target doesn't apply (e.g. no `.mcpb` bundle → drop the Claude Desktop badge).
 
 The header tagline must match the `package.json` `description`.
 
