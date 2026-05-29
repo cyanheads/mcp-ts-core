@@ -30,7 +30,12 @@ For general `gh` CLI workflows outside issue filing (PRs, workflows, API access)
 4. **Search existing issues** — don't file duplicates:
 
 ```bash
-gh issue list -R cyanheads/mcp-ts-core --search "your error message or keyword"
+gh issue list -R cyanheads/mcp-ts-core --search "your error message or keyword" --state all
+
+# Assess a close match before commenting — is it already linked to a fix or referenced elsewhere?
+gh issue view <number> -R cyanheads/mcp-ts-core --comments
+gh api 'repos/cyanheads/mcp-ts-core/issues/<number>/timeline' --paginate \
+  --jq '.[] | select(.event=="cross-referenced") | .source.issue | "\(.repository.full_name)#\(.number) — \(.title)"'
 ```
 
 5. **For documentation- or contract-shaped requests, audit all three doc layers first** — proposals to add reference docs, public-API conventions, attribute/event catalogs, or stability commitments often duplicate surface that already exists. Check `src/` for behavior, `docs/` for human-facing reference, and `skills/` for agent-facing reference. Skill files marked `audience: external` are the framework's public contract — treat them as authoritative when evaluating whether a documentation gap exists. Also verify the constants or types you'd reference aren't already exported from `@cyanheads/mcp-ts-core` or one of its subpaths.
@@ -273,8 +278,8 @@ ISSUE
 ## Following Up
 
 ```bash
-# Check issue status
-gh issue view <number> -R cyanheads/mcp-ts-core
+# Check issue status (with comment thread)
+gh issue view <number> -R cyanheads/mcp-ts-core --comments
 
 # Add context or respond to maintainer questions
 gh issue comment <number> -R cyanheads/mcp-ts-core --body "Additional context..."

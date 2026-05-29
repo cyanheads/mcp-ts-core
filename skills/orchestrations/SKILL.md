@@ -69,7 +69,7 @@ The orchestrator owns the goals. Workflow phases are not "run skill X" — they 
 Before running a phase (or spawning a sub-agent for it), write down four things:
 
 1. **Goal** — the verifiable end state this phase must produce. Concrete and testable: "v0.5.2 tag exists at HEAD with structured-markdown annotation; `bun run devcheck` green; `npm view <pkg>@0.5.2` resolves." Not fuzzy: "ran the release-and-publish skill."
-2. **Primary sources** — the specific files, GH issues, and reference docs the sub-agent must read directly. Inlining content into the prompt is a paraphrase that loses nuance; agents grounded in the source catch details the orchestrator's summary missed. For GH issues, instruct `gh issue view N --comments` — body alone misses thread clarifications. The orchestrator reads these sources too (to construct the prompt), but that's prompt construction, not a substitute for the sub-agent reading them.
+2. **Primary sources** — the specific files, GH issues, and reference docs the sub-agent must read directly. Inlining content into the prompt is a paraphrase that loses nuance; agents grounded in the source catch details the orchestrator's summary missed. For GH issues, instruct both `gh issue view N --comments` (the comment thread) and the timeline cross-reference query in the Orient block (what references the issue, including cross-repo) — the body alone misses both. The orchestrator reads these sources too (to construct the prompt), but that's prompt construction, not a substitute for the sub-agent reading them.
 3. **Path** — the Tier 1 skill(s) and steps that get to the goal. This is what gets handed to the sub-agent.
 4. **Verification** — the read-only checks that confirm the goal was hit. Defined upfront, not as an afterthought.
 
@@ -90,6 +90,8 @@ Sub-agents are optional. Match the mechanism to your platform's capability — t
 3. **Programmatic orchestration** — if your platform offers deterministic multi-agent control flow, use its primitives: schema-validated sub-agent returns, automatic concurrency management, resumable/journaled runs, and barrier-free pipelining across phases.
 
 Phases, gates, goals, and constraints are identical across all three tiers — only the fanout mechanism changes. Use the most capable tier available, and don't hand-roll what the platform does natively (e.g., rolling concurrency). Choose by scope and capability, not by default.
+
+**Model tier ≠ orchestration tier.** A higher orchestration tier is not automatically the right choice. On some platforms, programmatically-orchestrated or *nested* sub-agents (an agent spawning agents) silently run on a cheaper/downgraded model, while the strongest model is reachable only by sub-agents the **main loop spawns directly** (tier 2). When a phase needs the top model (heavy generation, design, framework adoption), prefer direct main-loop fanout even when a more "capable" orchestration primitive exists — the primitive can cost you the model. Verify the model your platform actually assigned via its UI/telemetry; never infer it from a sub-agent's transcript, which interleaves auxiliary calls (titles, summaries) on cheaper models and will mislead you.
 
 The decision tree below is orthogonal to tier — it governs *whether* a given phase fans out, by target count and conflict risk:
 
@@ -119,10 +121,12 @@ order. If any file does not exist, note it and continue.
    available skills with descriptions and locations.
 5. Read the skill file(s) for this task: `[Tier 1 skill paths]`.
 6. Read the primary sources for this task directly — design docs (`docs/design.md`),
-   GH issues (use `gh issue view <N> --comments` to capture the full thread, not
-   just the body), handoff documents, reference/gold-standard files. List each
-   one explicitly: `[primary source paths and gh commands]`. Skip this step only
-   if no primary source applies (rare).
+   GH issues, handoff documents, reference/gold-standard files. For a GH issue, read
+   both the comment thread and its cross-references — the body alone misses both:
+     - `gh issue view <N> --comments` — description + comment thread
+     - `gh api 'repos/{owner}/{repo}/issues/<N>/timeline' --paginate --jq '.[] | select(.event=="cross-referenced") | .source.issue | "\(.repository.full_name)#\(.number) — \(.title)"'` — issues/PRs that reference this one, including from other repos
+   List each source explicitly: `[primary source paths and gh commands]`. Skip this
+   step only if no primary source applies (rare).
 
 Only after that, begin the task below.
 

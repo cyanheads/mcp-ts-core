@@ -35,7 +35,12 @@ gh repo view --json nameWithOwner -q '.nameWithOwner'
 2. **Search existing issues** — if a close match exists (same symptom, different tool; same tool, different symptom; closed issue that might cover the new case), add a comment on that issue instead of filing a new one — unless the symptom or scope is distinct enough to warrant separate tracking:
 
 ```bash
-gh issue list --search "your error message or keyword"
+gh issue list --search "your error message or keyword" --state all
+
+# Assess a close match before commenting — is it already linked to a fix or referenced elsewhere?
+gh issue view <number> --comments
+gh api 'repos/{owner}/{repo}/issues/<number>/timeline' --paginate \
+  --jq '.[] | select(.event=="cross-referenced") | .source.issue | "\(.repository.full_name)#\(.number) — \(.title)"'
 ```
 
 3. **Reproduce the issue** — confirm it's reproducible. Note the exact input, transport mode, and any relevant env vars.
@@ -280,8 +285,8 @@ When genuinely ambiguous, file against this server's repo and note that it might
 ## Following Up
 
 ```bash
-# View issue details
-gh issue view <number>
+# View issue details (with comment thread)
+gh issue view <number> --comments
 
 # Add context
 gh issue comment <number> --body "Additional findings..."
