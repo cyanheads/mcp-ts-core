@@ -628,6 +628,177 @@ describe('HTTP Transport', () => {
     });
   });
 
+  describe('Request body size limit (issue #157)', () => {
+    const overLimitBody = JSON.stringify({
+      jsonrpc: '2.0',
+      method: 'ping',
+      id: 1,
+      params: { padding: 'x'.repeat(2000) },
+    });
+
+    test('rejects an over-limit POST body with 413', async () => {
+      await withConfigOverrides({ mcpHttpMaxBodyBytes: 200 }, async () => {
+        const { app } = await createHttpApp(
+          () => Promise.resolve(mockMcpServer as McpServer),
+          mockContext,
+          defaultMeta,
+        );
+
+        const response = await app.fetch(
+          new Request('http://localhost:3000/mcp', {
+            method: 'POST',
+            headers: {
+              Origin: 'http://localhost:3000',
+              'Content-Type': 'application/json',
+              'Mcp-Protocol-Version': '2025-03-26',
+            },
+            body: overLimitBody,
+          }),
+        );
+
+        expect(response.status).toBe(413);
+        const data: any = await response.json();
+        expect(data.error).toContain('exceeds');
+      });
+    });
+
+    test('rejects an over-limit body with no Content-Length (streamed) with 413', async () => {
+      await withConfigOverrides({ mcpHttpMaxBodyBytes: 200 }, async () => {
+        const { app } = await createHttpApp(
+          () => Promise.resolve(mockMcpServer as McpServer),
+          mockContext,
+          defaultMeta,
+        );
+
+        const stream = new ReadableStream<Uint8Array>({
+          start(controller) {
+            controller.enqueue(new TextEncoder().encode('x'.repeat(2000)));
+            controller.close();
+          },
+        });
+
+        const response = await app.fetch(
+          new Request('http://localhost:3000/mcp', {
+            method: 'POST',
+            headers: {
+              Origin: 'http://localhost:3000',
+              'Content-Type': 'application/json',
+              'Mcp-Protocol-Version': '2025-03-26',
+            },
+            body: stream,
+            duplex: 'half',
+          } as RequestInit),
+        );
+
+        expect(response.status).toBe(413);
+      });
+    });
+
+    test('allows an under-limit POST body (not 413)', async () => {
+      await withConfigOverrides({ mcpHttpMaxBodyBytes: 1024 * 1024 }, async () => {
+        const { app } = await createHttpApp(
+          () => Promise.resolve(mockMcpServer as McpServer),
+          mockContext,
+          defaultMeta,
+        );
+
+        const response = await app.fetch(
+          new Request('http://localhost:3000/mcp', {
+            method: 'POST',
+            headers: {
+              Origin: 'http://localhost:3000',
+              'Content-Type': 'application/json',
+              'Mcp-Protocol-Version': '2025-03-26',
+            },
+            body: JSON.stringify({ jsonrpc: '2.0', method: 'ping', id: 1 }),
+          }),
+        );
+
+        expect(response.status).not.toBe(413);
+      });
+    });
+
+    test('disabled (0) accepts an otherwise-over-limit body', async () => {
+      await withConfigOverrides({ mcpHttpMaxBodyBytes: 0 }, async () => {
+        const { app } = await createHttpApp(
+          () => Promise.resolve(mockMcpServer as McpServer),
+          mockContext,
+          defaultMeta,
+        );
+
+        const response = await app.fetch(
+          new Request('http://localhost:3000/mcp', {
+            method: 'POST',
+            headers: {
+              Origin: 'http://localhost:3000',
+              'Content-Type': 'application/json',
+              'Mcp-Protocol-Version': '2025-03-26',
+            },
+            body: overLimitBody,
+          }),
+        );
+
+        expect(response.status).not.toBe(413);
+      });
+    });
+
+    test('does not apply the limit to GET status requests', async () => {
+      await withConfigOverrides({ mcpHttpMaxBodyBytes: 1 }, async () => {
+        const { app } = await createHttpApp(
+          () => Promise.resolve(mockMcpServer as McpServer),
+          mockContext,
+          defaultMeta,
+        );
+
+        const response = await app.fetch(
+          new Request('http://localhost:3000/mcp', { method: 'GET' }),
+        );
+
+        expect(response.status).toBe(200);
+        const data: any = await response.json();
+        expect(data.status).toBe('ok');
+      });
+    });
+    test('accepts a small canvas-style request even under a tight limit', async () => {
+      // A dataframe_query request is tiny even though the canvas it targets may
+      // hold hundreds of MB — the staged data was fetched upstream server-side
+      // and lives in DuckDB, never in the request body. The cap measures the
+      // inbound JSON-RPC body only, so canvas servers are unaffected by it.
+      await withConfigOverrides({ mcpHttpMaxBodyBytes: 2048 }, async () => {
+        const { app } = await createHttpApp(
+          () => Promise.resolve(mockMcpServer as McpServer),
+          mockContext,
+          defaultMeta,
+        );
+
+        const response = await app.fetch(
+          new Request('http://localhost:3000/mcp', {
+            method: 'POST',
+            headers: {
+              Origin: 'http://localhost:3000',
+              'Content-Type': 'application/json',
+              'Mcp-Protocol-Version': '2025-03-26',
+            },
+            body: JSON.stringify({
+              jsonrpc: '2.0',
+              method: 'tools/call',
+              id: 1,
+              params: {
+                name: 'dataframe_query',
+                arguments: {
+                  canvas_id: 'a1b2c3d4e5',
+                  sql: 'SELECT * FROM spilled_0a1b2c3d LIMIT 100',
+                },
+              },
+            }),
+          }),
+        );
+
+        expect(response.status).not.toBe(413);
+      });
+    });
+  });
+
   describe('Error handling integration', () => {
     test('should use centralized error handler', async () => {
       const { app } = await createHttpApp(

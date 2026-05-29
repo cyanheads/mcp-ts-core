@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.9.13](changelog/0.9.x/0.9.13.md) — 2026-05-28 · 🛡️ Security
+
+HTTP transport hardening: configurable request body limit (413 guard) and auth-gated landing page inventory by default
+
 ## [0.9.12](changelog/0.9.x/0.9.12.md) — 2026-05-29
 
 GET /mcp surfaces package.json keywords; orchestrations and maintenance-release workflow updates; openai patch

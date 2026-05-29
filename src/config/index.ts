@@ -156,6 +156,25 @@ const ConfigSchema = z
     mcpHttpHost: z.string().default('127.0.0.1'),
     mcpHttpEndpointPath: z.string().default('/mcp'),
     /**
+     * Maximum accepted HTTP request body size in bytes for the MCP endpoint.
+     * Oversized requests are rejected with 413 before the per-request
+     * `McpServer`/transport are allocated and before the SDK parses the body.
+     * A declared `Content-Length` over the cap is rejected with zero buffering;
+     * otherwise the body is read once and its actual byte length enforced.
+     *
+     * Caps the inbound JSON-RPC request body only. Data a handler fetches from
+     * upstream into a DataCanvas/DuckDB, and the rows it returns in the
+     * response, flow outside the request body and are unaffected — canvas
+     * servers send small requests (queries, SQL, canvas IDs) regardless of how
+     * much data they stage. Default 1 MiB; raise only for servers whose tools
+     * accept large payloads in the request body itself (base64 media, pasted
+     * documents). Set to `0` to disable and defer to the runtime/reverse proxy.
+     */
+    mcpHttpMaxBodyBytes: z.coerce
+      .number()
+      .min(0)
+      .default(1024 * 1024),
+    /**
      * Public-facing origin of the server (e.g. `https://mcp.example.com`).
      * Overrides the inbound request URL when rendering self-referential
      * URLs — the landing page connect snippets, the SEP-1649 Server Card
@@ -463,6 +482,7 @@ const parseConfig = (envOverrides?: Record<string, string | undefined>) => {
     mcpHttpPort: env.MCP_HTTP_PORT,
     mcpHttpHost: env.MCP_HTTP_HOST,
     mcpHttpEndpointPath: env.MCP_HTTP_ENDPOINT_PATH,
+    mcpHttpMaxBodyBytes: env.MCP_HTTP_MAX_BODY_BYTES,
     mcpPublicUrl: env.MCP_PUBLIC_URL,
     mcpHttpMaxPortRetries: env.MCP_HTTP_MAX_PORT_RETRIES,
     mcpHttpPortRetryDelayMs: env.MCP_HTTP_PORT_RETRY_DELAY_MS,

@@ -311,6 +311,54 @@ export async function createHttpApp<TBindings extends object = HonoNodeBindings>
     return await next();
   });
 
+  // MCP Spec hardening (issue #157): reject oversized request bodies before the
+  // per-request McpServer/transport are allocated and before the SDK parses the
+  // body. A declared Content-Length over the cap is rejected with zero
+  // buffering; otherwise the body is read once — cached so the downstream
+  // `c.req.json()` reuses it — and its actual byte length enforced, closing the
+  // bypass where a client omits or under-declares Content-Length. For a hard
+  // memory ceiling against unbounded chunked uploads, pair with a reverse-proxy
+  // body limit. `MCP_HTTP_MAX_BODY_BYTES=0` disables the guard.
+  const maxBodyBytes = config.mcpHttpMaxBodyBytes;
+  if (maxBodyBytes > 0) {
+    app.use(config.mcpHttpEndpointPath, async (c, next) => {
+      const method = c.req.method;
+      if (method !== 'POST' && method !== 'PUT' && method !== 'PATCH') {
+        return await next();
+      }
+
+      const rejectOversized = (bytes: number): Response => {
+        logger.warning('Rejected request exceeding body size limit', {
+          ...transportContext,
+          bytes,
+          maxBodyBytes,
+        });
+        return c.json(
+          {
+            error: `Request body exceeds the ${maxBodyBytes}-byte limit (configurable via MCP_HTTP_MAX_BODY_BYTES).`,
+          },
+          413,
+        );
+      };
+
+      // Zero-copy early reject when the client honestly declares an over-limit body.
+      const declared = Number(c.req.header('content-length'));
+      if (Number.isFinite(declared) && declared > maxBodyBytes) {
+        return rejectOversized(declared);
+      }
+
+      // Authoritative check on actual bytes — catches missing or under-declared
+      // Content-Length. The buffered read is cached for the downstream handler.
+      const body = await c.req.arrayBuffer();
+      if (body.byteLength > maxBodyBytes) {
+        return rejectOversized(body.byteLength);
+      }
+
+      return await next();
+    });
+    logger.debug(`HTTP request body limit enabled: ${maxBodyBytes} bytes.`, transportContext);
+  }
+
   // Health and GET /mcp status remain unprotected for convenience
   app.get('/healthz', (c) => c.json({ status: 'ok' }));
 
