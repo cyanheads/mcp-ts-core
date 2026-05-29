@@ -3,6 +3,7 @@
  * @module src/linter/rules/index
  */
 
+export { lintEnrichmentContract } from './enrichment-rules.js';
 export { lintErrorContract, lintErrorContractConformance } from './error-contract-rules.js';
 export { lintHandlerBody } from './handler-body-rules.js';
 export { checkDuplicateNames, checkNameRequired, checkToolNameFormat } from './name-rules.js';

@@ -4,7 +4,7 @@ description: >
   MCP definition linter rules reference. Use when `bun run lint:mcp` or `bun run devcheck` reports a lint error or warning (`format-parity`, `schema-is-object`, `name-format`, `server-json-*`, etc.) and you need to understand the rule, its severity, and how to fix it. Every rule ID the linter emits has an entry in this doc.
 metadata:
   author: cyanheads
-  version: "1.3"
+  version: "1.4"
   audience: external
   type: reference
 ---
@@ -53,6 +53,7 @@ Grouped by family. Jump to any rule ID via its anchor.
 | Handler body | `prefer-mcp-error-in-handler`, `prefer-error-factory`, `preserve-cause-on-rethrow`, `no-stringify-upstream-error` | [Handler body rules](#handler-body-rules) |
 | Error contract (structural) | `error-contract-type`, `error-contract-empty`, `error-contract-entry-type`, `error-contract-code-type`, `error-contract-code-unknown`, `error-contract-code-unknown-error`, `error-contract-reason-required`, `error-contract-reason-format`, `error-contract-reason-unique`, `error-contract-when-required`, `error-contract-retryable-type`, `error-contract-recovery-required`, `error-contract-recovery-empty`, `error-contract-recovery-min-words` | [Error contract rules](#error-contract-rules) |
 | Error contract (conformance) | `error-contract-conformance`, `error-contract-prefer-fail` | [Error contract rules](#error-contract-rules) |
+| Enrichment | `enrichment-type`, `enrichment-empty`, `enrichment-field-type`, `enrichment-output-collision`, `enrichment-prefer-block` | [Enrichment rules](#enrichment-rules) |
 | server.json | ~40 rules prefixed `server-json-*` | [server.json rules](#server-json-rules) |
 
 ---
@@ -705,6 +706,52 @@ throw ctx.fail('no_match', 'No items match');
 ```
 
 The diagnostic message includes the declared reason(s) for the code so you can copy-paste.
+
+---
+
+## Enrichment rules
+
+Validate the `enrichment` block — the success-path counterpart to `errors[]`. Enrichment fields are merged into `structuredContent` and advertised as `output.extend(enrichment)`, so the linter guards the block's shape and its disjointness from `output`. See `api-context`'s `ctx.enrich` and `add-tool`'s **Tool Response Design**.
+
+### enrichment-type
+
+**Severity:** error
+
+Fires when `enrichment` is present but isn't a plain object mapping field names to Zod schemas (a `ZodRawShape`) — e.g. an array or a primitive.
+
+**Fix:** declare `enrichment: { <name>: <ZodType>, … }`.
+
+### enrichment-empty
+
+**Severity:** warning
+
+Fires when `enrichment: {}` is declared with no fields — a no-op.
+
+**Fix:** drop the field, or declare the agent-facing fields `ctx.enrich(...)` will populate.
+
+### enrichment-field-type
+
+**Severity:** error
+
+Fires when an enrichment field's value isn't a Zod schema.
+
+**Fix:** use a Zod type (`z.string().describe(…)`, `z.number().describe(…)`, …) for every enrichment field.
+
+### enrichment-output-collision
+
+**Severity:** error
+
+Fires when an enrichment key matches an `output` key. The effective output schema is `output.extend(enrichment)`, so a collision silently overrides the `output` field.
+
+**Fix:** rename one side so enrichment keys are disjoint from output keys.
+
+### enrichment-prefer-block
+
+**Severity:** warning
+
+Advisory. Fires when a tool has **no** `enrichment` block but an `output` field whose name strongly signals agent-facing context (`notice`, `effectiveQuery`, `queryEcho`) rather than domain payload.
+
+**Fix:** move the field into an `enrichment` block and populate it via `ctx.enrich(...)` — it reaches both client surfaces without a `format()` entry. Ignore if the field is genuinely domain data. Deliberately conservative — common domain fields like `totalCount` are not flagged.
 
 ---
 

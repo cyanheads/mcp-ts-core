@@ -13,7 +13,7 @@ import type {
   ModelPreferences,
   SamplingMessage,
 } from '@modelcontextprotocol/sdk/types.js';
-import type { ZodType, z } from 'zod';
+import type { ZodObject, ZodRawShape, ZodType, z } from 'zod';
 
 import type { StorageService } from '@/storage/core/StorageService.js';
 import {
@@ -113,6 +113,20 @@ export interface Context {
     | ((message: string, schema: z.ZodObject<z.ZodRawShape>) => Promise<ElicitResult>)
     | undefined;
 
+  // --- Contract-bound resolvers (always present; no-op when no contract) ---
+  /**
+   * Accumulates agent-facing enrichment fields onto this request — empty-result
+   * notices, query/filter echo, pagination totals. Values reach `structuredContent`
+   * (merged into the validated output) and `content[]` (a trailer), exactly as the
+   * error path surfaces `recovery.hint` across both surfaces. Always present and
+   * callable from the handler and the service layer (mirrors `ctx.log`/`ctx.state`);
+   * when the tool declares no `enrichment` block the merge is a no-op (values are
+   * stripped by the effective-output parse). The strict, typed variant — keyed to
+   * the declared fields — lives on `HandlerContext<R, E>`. Field-helpers
+   * (`enrich.notice` / `enrich.total` / `enrich.echo`) kind-tag the content[] trailer.
+   */
+  readonly enrich: Enrich;
+
   // --- Structured logging ---
   /** Logger scoped to this request. Auto-includes requestId, traceId, tenantId. */
   readonly log: ContextLogger;
@@ -130,8 +144,6 @@ export interface Context {
   // --- Task progress (present when task: true) ---
   /** Progress reporting for background tasks. Undefined for non-task tools. */
   readonly progress?: ContextProgress | undefined;
-
-  // --- Contract-bound resolvers (always present; no-op when no contract) ---
   /**
    * Resolves a contract-bound recovery hint by reason and returns it in the
    * canonical wire shape `{ recovery: { hint } }` — safe to spread directly into
@@ -257,27 +269,91 @@ export type ReasonOf<E> = E extends readonly { reason: infer R extends string }[
  */
 export type TypedRecoveryFor<R extends string> = (reason: R) => { recovery: { hint: string } };
 
+// ---------------------------------------------------------------------------
+// Enrichment — typed agent-facing context on the success path
+// ---------------------------------------------------------------------------
+
 /**
- * Handler context. When a definition declares `errors[]`, the handler receives
- * `Context & { fail: TypedFail<R>; recoveryFor: TypedRecoveryFor<R> }` where
- * `R` is the declared reason union. When no contract is declared, the handler
- * receives plain `Context` (its loose `recoveryFor` is still callable but
- * always returns `{}`) and must throw `McpError` directly.
- *
- * The conditional `[R] extends [never]` distinguishes "no contract declared"
- * (R = never) from "contract declared with reasons" (R = literal union).
- *
- * The contract branch uses `Omit<Context, 'recoveryFor'>` because intersecting
- * the loose `Context.recoveryFor(string)` with the strict `TypedRecoveryFor<R>`
- * would create an overload that widens `parameter(0)` back to `string` — losing
- * the typo-catching benefit. Omit-and-replace narrows cleanly.
+ * Render kind recorded by an `enrich` field-helper, used only to format the
+ * `content[]` trailer at hand-written quality:
+ *   - `notice` → markdown blockquote
+ *   - `total`  → "N total"
+ *   - `echo`   → "Query: …"
+ * Fields populated via the bare `enrich({...})` call carry no kind and render
+ * generically (`**key:** value`).
  */
-export type HandlerContext<R extends string = never> = [R] extends [never]
-  ? Context
-  : Omit<Context, 'recoveryFor'> & {
-      fail: TypedFail<R>;
-      recoveryFor: TypedRecoveryFor<R>;
-    };
+export type EnrichKind = 'notice' | 'total' | 'echo';
+
+/**
+ * Per-request enrichment accumulator. Created in `createContext`, populated by
+ * `ctx.enrich(...)` during handler/service execution, and read by the tool
+ * handler factory after the handler returns to merge into `structuredContent`
+ * and render the `content[]` trailer.
+ *
+ * @internal
+ */
+export interface EnrichmentStore {
+  /** Per-key render kind set by the field-helpers. Absent keys render generically. */
+  kinds: Map<string, EnrichKind>;
+  /** Accumulated field values, insertion-ordered. Merged into the effective output. */
+  values: Record<string, unknown>;
+}
+
+/**
+ * Convenience field-helpers hanging off `ctx.enrich`. Each writes a
+ * conventionally-named field and tags its trailer rendering; use the bare
+ * `enrich({...})` call for any other field names.
+ */
+export interface EnrichHelpers {
+  /** The query as the server actually parsed it. Writes `effectiveQuery`; renders as "Query: …". */
+  echo(query: string): void;
+  /** Guidance when a result set is empty (or otherwise needs a caveat). Writes `notice`; renders as a blockquote. */
+  notice(text: string): void;
+  /** Total matches before a limit/pagination was applied. Writes `totalCount`; renders as "N total". */
+  total(count: number): void;
+}
+
+/**
+ * The `ctx.enrich` callable: merge a partial of the declared enrichment fields
+ * onto the request (accumulating across calls), plus the kind-tagging
+ * {@link EnrichHelpers}. The loose form (`T = Record<string, unknown>`) sits on
+ * the base {@link Context} so service-layer code can call it without the tool's
+ * type; the strict {@link TypedEnrich} form is attached to `HandlerContext<R, E>`.
+ */
+export type Enrich<T = Record<string, unknown>> = ((fields: T) => void) & EnrichHelpers;
+
+/**
+ * Strict, typed `enrich` attached to `HandlerContext<R, E>` when a tool declares
+ * an `enrichment` block. `E` is the declared `ZodRawShape`; `enrich` accepts a
+ * `Partial` of the inferred fields so it can be called incrementally — the
+ * effective-output parse enforces that required fields end up populated.
+ */
+export type TypedEnrich<E extends ZodRawShape> = Enrich<Partial<z.infer<ZodObject<E>>>>;
+
+/**
+ * Handler context. Two independent contract dimensions narrow the base
+ * {@link Context}:
+ *   - **Errors.** When `errors[]` is declared, `R` is the reason union and the
+ *     handler gains `fail: TypedFail<R>` plus a strict `recoveryFor`. Without a
+ *     contract (`R = never`), `recoveryFor` stays the loose always-`{}` resolver
+ *     and the handler throws `McpError` directly.
+ *   - **Enrichment.** When an `enrichment` block is declared, `E` is its
+ *     `ZodRawShape` and `enrich` is typed to a `Partial` of the inferred fields.
+ *     Without one (`E = undefined`), `enrich` stays the loose base form.
+ *
+ * Both dimensions use `Omit`-and-replace rather than intersection: intersecting
+ * the loose `Context.recoveryFor(string)` / `enrich(Record)` with their strict
+ * variants would create overloads that widen the parameters back, losing the
+ * typo-catching and field-typing benefits. Omit-and-replace narrows cleanly.
+ */
+export type HandlerContext<
+  R extends string = never,
+  E extends ZodRawShape | undefined = undefined,
+> = Omit<Context, 'recoveryFor' | 'enrich'> &
+  ([R] extends [never]
+    ? { recoveryFor: Context['recoveryFor'] }
+    : { fail: TypedFail<R>; recoveryFor: TypedRecoveryFor<R> }) &
+  (E extends ZodRawShape ? { enrich: TypedEnrich<E> } : { enrich: Context['enrich'] });
 
 /**
  * @internal
@@ -363,6 +439,68 @@ export function attachTypedFail(
 }
 
 // ---------------------------------------------------------------------------
+// Enrichment runtime — accumulator wiring (internal)
+// ---------------------------------------------------------------------------
+
+/**
+ * Symbol stashing the per-request {@link EnrichmentStore} on a Context. A symbol
+ * key keeps it invisible to `JSON.stringify`, `Object.keys`, and consumers — the
+ * store is framework plumbing the handler factory reads, never wire data.
+ * @internal
+ */
+const ENRICHMENT_STORE: unique symbol = Symbol('mcp.enrichmentStore');
+
+/** Fresh, empty enrichment accumulator. @internal */
+export function createEnrichmentStore(): EnrichmentStore {
+  return { values: {}, kinds: new Map() };
+}
+
+/**
+ * Builds the always-present `ctx.enrich` callable bound to a store. The bare
+ * call merges arbitrary fields; the field-helpers write conventional keys and
+ * tag their trailer render kind.
+ * @internal
+ */
+export function createEnrich(store: EnrichmentStore): Enrich {
+  const enrich = ((fields: Record<string, unknown>): void => {
+    Object.assign(store.values, fields);
+  }) as Enrich;
+  enrich.notice = (text: string): void => {
+    store.values.notice = text;
+    store.kinds.set('notice', 'notice');
+  };
+  enrich.total = (count: number): void => {
+    store.values.totalCount = count;
+    store.kinds.set('totalCount', 'total');
+  };
+  enrich.echo = (query: string): void => {
+    store.values.effectiveQuery = query;
+    store.kinds.set('effectiveQuery', 'echo');
+  };
+  return enrich;
+}
+
+/** Stashes the store on a Context under the private symbol (non-enumerable). @internal */
+export function stashEnrichmentStore(ctx: Context, store: EnrichmentStore): void {
+  Object.defineProperty(ctx, ENRICHMENT_STORE, {
+    value: store,
+    enumerable: false,
+    writable: false,
+    configurable: false,
+  });
+}
+
+/**
+ * Reads the enrichment store wired by `createContext` (or a test mock). Returns
+ * `undefined` when none was stashed — defensive, though every factory-built
+ * Context has one.
+ * @internal
+ */
+export function readEnrichmentStore(ctx: Context): EnrichmentStore | undefined {
+  return (ctx as { [ENRICHMENT_STORE]?: EnrichmentStore })[ENRICHMENT_STORE];
+}
+
+// ---------------------------------------------------------------------------
 // Context construction (internal — not part of the public consumer API)
 // ---------------------------------------------------------------------------
 
@@ -416,7 +554,14 @@ export function createContext(deps: ContextDeps): Context {
     ? createContextProgress(deps.taskCtx.store, deps.taskCtx.taskId)
     : undefined;
 
-  return {
+  // Per-request enrichment accumulator + always-present `enrich` (mirrors
+  // ctx.log/ctx.state — created here, callable from handler and service layer).
+  // Stashed on ctx under a private symbol for the handler factory to read after
+  // the handler returns; tools with no `enrichment` block accumulate harmlessly
+  // (values are stripped by the effective-output parse).
+  const enrichmentStore = createEnrichmentStore();
+
+  const ctx: Context = {
     requestId: effectiveContext.requestId,
     timestamp: effectiveContext.timestamp,
     log,
@@ -435,6 +580,7 @@ export function createContext(deps: ContextDeps): Context {
     notifyToolListChanged: deps.notifyToolListChanged,
     progress,
     uri: deps.uri,
+    enrich: createEnrich(enrichmentStore),
     // No-op resolver for definitions without a contract. `attachTypedFail`
     // overwrites with a contract-aware resolver when `errors[]` is declared.
     // Always-present so service code can spread `...ctx.recoveryFor('x')`
@@ -442,6 +588,9 @@ export function createContext(deps: ContextDeps): Context {
     // declared a contract.
     recoveryFor: () => ({}),
   };
+
+  stashEnrichmentStore(ctx, enrichmentStore);
+  return ctx;
 }
 
 // ---------------------------------------------------------------------------

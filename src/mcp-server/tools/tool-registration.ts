@@ -19,8 +19,10 @@ import { getDisabledMetadata } from '@/mcp-server/tools/utils/disabled-tool.js';
 import type { AnyToolDefinition } from '@/mcp-server/tools/utils/toolDefinition.js';
 import {
   buildToolErrorResult,
+  buildToolSuccessResult,
   classifyAndBuildToolErrorResult,
   createToolHandler,
+  effectiveOutputSchema,
   type HandlerFactoryServices,
   type HandlerNotifiers,
 } from '@/mcp-server/tools/utils/toolHandlerFactory.js';
@@ -183,7 +185,7 @@ export class ToolRegistry {
             title,
             description: tool.description,
             inputSchema: tool.input,
-            outputSchema: tool.output,
+            outputSchema: effectiveOutputSchema(tool),
             ...(tool.annotations && { annotations: tool.annotations }),
             ...(tool._meta && { _meta: tool._meta }),
           },
@@ -242,7 +244,7 @@ export class ToolRegistry {
             title,
             description: tool.description,
             inputSchema: tool.input,
-            outputSchema: tool.output,
+            outputSchema: effectiveOutputSchema(tool),
             ...(tool.annotations && { annotations: tool.annotations }),
             ...(tool._meta && { _meta: tool._meta }),
             execution: { taskSupport: 'optional' },
@@ -367,10 +369,15 @@ export class ToolRegistry {
       const result = await Promise.resolve(tool.handler(input as Record<string, unknown>, ctx));
       const validatedResult = tool.output.parse(result);
 
-      await taskStore.storeTaskResult(taskId, 'completed', {
-        content: formatter(validatedResult),
-        structuredContent: validatedResult,
-      });
+      // Merge enrichment into structuredContent + append the content[] trailer,
+      // mirroring the standard tool handler factory.
+      const { content, structuredContent } = buildToolSuccessResult(
+        tool,
+        ctx,
+        validatedResult as Record<string, unknown>,
+        formatter(validatedResult),
+      );
+      await taskStore.storeTaskResult(taskId, 'completed', { content, structuredContent });
     } catch (error: unknown) {
       // If cancelled, the SDK already set the terminal state — don't overwrite
       if (abortController.signal.aborted && abortController.signal.reason !== TIMEOUT_SENTINEL) {

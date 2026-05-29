@@ -1,6 +1,6 @@
 # mcp-ts-core - Directory Structure
 
-Generated on: 2026-05-29 00:30:47
+Generated on: 2026-05-29 11:43:12
 
 ```text
 mcp-ts-core/
@@ -219,6 +219,7 @@ mcp-ts-core/
 │   │   └── worker.ts
 │   ├── linter/
 │   │   ├── rules/
+│   │   │   ├── enrichment-rules.ts
 │   │   │   ├── error-contract-rules.ts
 │   │   │   ├── format-parity-rules.ts
 │   │   │   ├── handler-body-rules.ts
@@ -545,6 +546,7 @@ mcp-ts-core/
 │   │   ├── helpers/
 │   │   │   └── matchers.test.ts
 │   │   ├── linter/
+│   │   │   ├── enrichment-rules.test.ts
 │   │   │   ├── error-contract-rules.test.ts
 │   │   │   ├── format-parity-rules.test.ts
 │   │   │   ├── handler-body-rules.test.ts
@@ -581,6 +583,7 @@ mcp-ts-core/
 │   │   │   │   │   ├── toolDefinition.test.ts
 │   │   │   │   │   └── toolHandlerFactory.test.ts
 │   │   │   │   ├── disabled-tool.test.ts
+│   │   │   │   ├── enrichment.test.ts
 │   │   │   │   ├── tool-registration.lifecycle.test.ts
 │   │   │   │   ├── tool-registration.test.ts
 │   │   │   │   └── typed-error-contract.test.ts

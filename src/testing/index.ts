@@ -20,7 +20,13 @@ import type {
   ContextState,
   SamplingOpts,
 } from '@/core/context.js';
-import { attachTypedFail } from '@/core/context.js';
+import {
+  attachTypedFail,
+  createEnrich,
+  createEnrichmentStore,
+  readEnrichmentStore,
+  stashEnrichmentStore,
+} from '@/core/context.js';
 import { StorageService } from '@/storage/core/StorageService.js';
 import {
   InMemoryProvider,
@@ -245,6 +251,8 @@ export function createMockContext(options: MockContextOptions = {}): Context {
   const state = createMockState(options.tenantId);
   const progress = options.progress ? createMockProgress() : undefined;
 
+  const enrichmentStore = createEnrichmentStore();
+
   const ctx: Context = {
     requestId: options.requestId ?? 'test-request-id',
     timestamp: new Date().toISOString(),
@@ -262,15 +270,36 @@ export function createMockContext(options: MockContextOptions = {}): Context {
     notifyToolListChanged: options.notifyToolListChanged,
     progress,
     uri: options.uri,
+    enrich: createEnrich(enrichmentStore),
     // No-op resolver for definitions without a contract. `attachTypedFail` below
     // overwrites it with a contract-aware resolver when `options.errors` is set.
     recoveryFor: () => ({}),
   };
 
+  // Stash the enrichment store so `getEnrichment(ctx)` can read what a handler
+  // (or the service layer) accumulated via `ctx.enrich(...)` during the test.
+  stashEnrichmentStore(ctx, enrichmentStore);
+
   // Mirror the production handler factory: when a contract is declared, attach
   // a typed `fail` and `recoveryFor` keyed by the contract's reasons. Empty
   // contracts leave the no-op resolver in place.
   return attachTypedFail(ctx, options.errors);
+}
+
+/**
+ * Reads the enrichment a handler accumulated via `ctx.enrich(...)` on a mock
+ * context, for assertions. Returns the merged field values (empty object when
+ * nothing was enriched).
+ *
+ * @example
+ * ```ts
+ * const ctx = createMockContext();
+ * await search.handler(search.input.parse({ query: 'x' }), ctx);
+ * expect(getEnrichment(ctx)).toMatchObject({ effectiveQuery: 'x', totalCount: 0 });
+ * ```
+ */
+export function getEnrichment(ctx: Context): Record<string, unknown> {
+  return readEnrichmentStore(ctx)?.values ?? {};
 }
 
 // ---------------------------------------------------------------------------

@@ -262,12 +262,17 @@ const toBytes = (payload: unknown): number => {
  * @param toolLogicFn - Zero-argument async function containing the tool's business logic.
  * @param context - Request context extended with `toolName`; used for span/log correlation.
  * @param inputPayload - The raw input object passed to the tool, serialized to compute byte size.
+ * @param successAttributes - Optional thunk evaluated after a successful run; its
+ *   returned key/value map is set on the span as extra attributes. Lets callers
+ *   attach post-hoc signals (e.g. `mcp.tool.enriched`) without coupling this
+ *   function to their domain. Not called on the error path.
  * @returns A promise that resolves with the tool's return value or rejects with the original error.
  */
 export async function measureToolExecution<T>(
   toolLogicFn: () => Promise<T>,
   context: RequestContext & { toolName: string },
   inputPayload: unknown,
+  successAttributes?: () => Record<string, boolean | number | string>,
 ): Promise<T> {
   const tracer = trace.getTracer(
     config.openTelemetry.serviceName,
@@ -319,6 +324,11 @@ export async function measureToolExecution<T>(
         if (batchFailed !== undefined) span.setAttribute(ATTR_MCP_TOOL_BATCH_FAILED, batchFailed);
         if (batchSucceeded !== undefined)
           span.setAttribute(ATTR_MCP_TOOL_BATCH_SUCCEEDED, batchSucceeded);
+      }
+      if (successAttributes) {
+        for (const [key, value] of Object.entries(successAttributes())) {
+          span.setAttribute(key, value);
+        }
       }
       return result;
     } catch (err) {

@@ -18,6 +18,14 @@ export const echoTool = tool('template_echo_message', {
     message: z.string().describe('The echoed message.'),
   }),
 
+  // Agent-facing context on the success path — the counterpart to errors[]. Merged
+  // into structuredContent AND mirrored into content[] automatically (no format()
+  // entry needed). Declare the fields here; populate via ctx.enrich(...) in the
+  // handler or service layer. Delete this block if your tool has no such context.
+  enrichment: {
+    characterCount: z.number().describe('Length of the echoed message.'),
+  },
+
   // Declare each domain failure mode the agent should plan around. The framework
   // types `ctx.fail(reason, …)` against the declared union. Baseline codes
   // (InternalError, ServiceUnavailable, Timeout, ValidationError,
@@ -36,6 +44,8 @@ export const echoTool = tool('template_echo_message', {
     if (input.message.trim().length === 0) {
       throw ctx.fail('empty_message', 'Message must contain at least one non-whitespace character.');
     }
+    // Reaches both client surfaces with no format() plumbing.
+    ctx.enrich({ characterCount: input.message.length });
     return { message: input.message };
   },
 

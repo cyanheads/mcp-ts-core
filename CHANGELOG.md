@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.9.14](changelog/0.9.x/0.9.14.md) — 2026-05-29
+
+The enrichment block on tool(): a typed, success-path contract for agent-facing context — empty-result notices, query echo, pagination totals — populated via ctx.enrich() and surfaced to both structuredContent and content[] without a format() entry. The success-path counterpart to errors[].
+
 ## [0.9.13](changelog/0.9.x/0.9.13.md) — 2026-05-28 · 🛡️ Security
 
 HTTP transport hardening: configurable request body limit (413 guard) and auth-gated landing page inventory by default

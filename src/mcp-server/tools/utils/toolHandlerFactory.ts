@@ -15,8 +15,8 @@ import type {
 import { ZodError, type ZodObject, type ZodRawShape } from 'zod';
 
 import { config } from '@/config/index.js';
-import type { Context, SamplingOpts } from '@/core/context.js';
-import { attachTypedFail, createContext } from '@/core/context.js';
+import type { Context, EnrichmentStore, SamplingOpts } from '@/core/context.js';
+import { attachTypedFail, createContext, readEnrichmentStore } from '@/core/context.js';
 import { withRequiredScopes } from '@/mcp-server/transports/auth/lib/authUtils.js';
 import type { StorageService } from '@/storage/core/StorageService.js';
 import { type JsonRpcErrorCode, McpError } from '@/types-global/errors.js';
@@ -24,6 +24,7 @@ import { ErrorHandler } from '@/utils/internal/error-handler/errorHandler.js';
 import type { Logger } from '@/utils/internal/logger.js';
 import { measureToolExecution } from '@/utils/internal/performance.js';
 import { requestContextService } from '@/utils/internal/requestContext.js';
+import { ATTR_MCP_TOOL_ENRICHED } from '@/utils/telemetry/attributes.js';
 import type { AnyToolDefinition } from './toolDefinition.js';
 
 // ---------------------------------------------------------------------------
@@ -142,6 +143,89 @@ export function classifyAndBuildToolErrorResult(error: unknown): CallToolResult 
 }
 
 // ---------------------------------------------------------------------------
+// Success response shaping — enrichment merge + trailer
+// ---------------------------------------------------------------------------
+
+/**
+ * The output schema advertised to clients in `tools/list`. When a tool declares
+ * an `enrichment` block, that's `output.extend(enrichment)` so enrichment fields
+ * appear in the advertised `outputSchema`; otherwise the bare `output`.
+ */
+export function effectiveOutputSchema(def: AnyToolDefinition): ZodObject<ZodRawShape> {
+  if (!def.enrichment) return def.output;
+  return def.output.extend(def.enrichment) as ZodObject<ZodRawShape>;
+}
+
+/** Renders a non-kind-tagged enrichment value as compact trailer text. */
+function formatEnrichmentScalar(value: unknown): string {
+  if (value == null) return String(value);
+  if (typeof value === 'object') return JSON.stringify(value);
+  return String(value);
+}
+
+/**
+ * Renders accumulated enrichment as a single `content[]` trailer block, so
+ * `content[]`-only clients see the same context `structuredContent` clients get
+ * from the merged output. Field-helpers tag a render kind (notice → blockquote,
+ * total → "N total", echo → "Query: …"); bare `enrich({...})` fields render as
+ * `**key:** value`. Returns `[]` when nothing was enriched.
+ */
+function renderEnrichmentTrailer(store: EnrichmentStore): ContentBlock[] {
+  const lines: string[] = [];
+  for (const [key, value] of Object.entries(store.values)) {
+    switch (store.kinds.get(key)) {
+      case 'notice':
+        lines.push(`> ${String(value)}`);
+        break;
+      case 'total':
+        lines.push(`**${String(value)} total**`);
+        break;
+      case 'echo':
+        lines.push(`Query: ${String(value)}`);
+        break;
+      default:
+        lines.push(`**${key}:** ${formatEnrichmentScalar(value)}`);
+    }
+  }
+  return lines.length > 0 ? [{ type: 'text', text: lines.join('\n') }] : [];
+}
+
+/**
+ * Shapes the success `CallToolResult` surfaces from the validated domain payload
+ * plus any accumulated enrichment:
+ * - `structuredContent` — domain output merged with enrichment (validated against
+ *   `output.extend(enrichment)`); the bare domain output when no enrichment block.
+ * - `content[]` — the caller-rendered domain content (from `format()` or the
+ *   JSON-stringify default, applied to the **domain payload only**) with the
+ *   enrichment trailer always appended. Rendering the domain payload — never the
+ *   merged object — keeps enrichment out of the JSON blob and avoids double-render.
+ *
+ * A required enrichment field the handler never populated fails the parse here,
+ * surfacing the authoring bug as a loud error rather than dropping it silently.
+ */
+export function buildToolSuccessResult(
+  def: AnyToolDefinition,
+  ctx: Context,
+  domainValidated: Record<string, unknown>,
+  domainContent: ContentBlock[],
+): Pick<CallToolResult, 'content' | 'structuredContent'> {
+  if (!def.enrichment) {
+    return { structuredContent: domainValidated, content: domainContent };
+  }
+  const store = readEnrichmentStore(ctx);
+  const values = store?.values ?? {};
+  const structuredContent = effectiveOutputSchema(def).parse({
+    ...domainValidated,
+    ...values,
+  }) as Record<string, unknown>;
+  const trailer = store && Object.keys(values).length > 0 ? renderEnrichmentTrailer(store) : [];
+  return {
+    structuredContent,
+    content: trailer.length > 0 ? [...domainContent, ...trailer] : domainContent,
+  };
+}
+
+// ---------------------------------------------------------------------------
 // Capability detection helpers
 // ---------------------------------------------------------------------------
 
@@ -253,24 +337,34 @@ export function createToolHandler(
         () => Promise.resolve(def.handler(validatedInput, ctx)),
         { ...appContext, toolName: def.name },
         validatedInput,
+        () => {
+          const store = readEnrichmentStore(ctx);
+          return store && Object.keys(store.values).length > 0
+            ? { [ATTR_MCP_TOOL_ENRICHED]: true }
+            : {};
+        },
       );
 
       const validatedResult = def.output.parse(result);
 
-      // Isolate formatter errors from handler errors so they get classified correctly
-      let content: ContentBlock[];
+      // Render content[] from the domain payload only (Resolution B). Isolate
+      // formatter errors from handler errors so they get classified correctly.
+      let domainContent: ContentBlock[];
       try {
-        content = formatter(validatedResult);
+        domainContent = formatter(validatedResult);
       } catch (formatError) {
         throw new Error(
           `Output formatting failed: ${formatError instanceof Error ? formatError.message : String(formatError)}`,
         );
       }
 
-      return {
-        structuredContent: validatedResult,
-        content,
-      };
+      // Merge enrichment into structuredContent and append the content[] trailer.
+      return buildToolSuccessResult(
+        def,
+        ctx,
+        validatedResult as Record<string, unknown>,
+        domainContent,
+      );
     } catch (error: unknown) {
       ErrorHandler.handleError(error, {
         operation: `tool:${def.name}`,

@@ -50,6 +50,9 @@ export const ATTR_MCP_TOOL_ERROR_CATEGORY = 'mcp.tool.error_category';
 /** Whether the tool returned a result containing partial failures (non-empty `failed` array). */
 export const ATTR_MCP_TOOL_PARTIAL_SUCCESS = 'mcp.tool.partial_success';
 
+/** Whether the tool populated agent-facing enrichment (`ctx.enrich`) on this call. */
+export const ATTR_MCP_TOOL_ENRICHED = 'mcp.tool.enriched';
+
 /** Number of items in the `succeeded` array of a batch tool result. */
 export const ATTR_MCP_TOOL_BATCH_SUCCEEDED = 'mcp.tool.batch.succeeded_count';
 

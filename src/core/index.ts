@@ -40,9 +40,12 @@ export type {
   ContextLogger,
   ContextProgress,
   ContextState,
+  Enrich,
+  EnrichHelpers,
   HandlerContext,
   ReasonOf,
   SamplingOpts,
+  TypedEnrich,
   TypedFail,
   TypedRecoveryFor,
 } from '@/core/context.js';

@@ -59,11 +59,16 @@ export interface ToolAnnotations {
  * definition (or `undefined` when none are declared). The reason union extracted
  * from `TErrors` flows into the handler's `ctx.fail` for compile-time-checked
  * error throws.
+ *
+ * `TEnrich` is the `ZodRawShape` of the `enrichment` block (or `undefined` when
+ * none is declared). Its inferred fields type `ctx.enrich(...)` and are advertised
+ * to clients as part of `outputSchema`.
  */
 export interface ToolDefinition<
   TInput extends ZodObject<ZodRawShape> = ZodObject<ZodRawShape>,
   TOutput extends ZodObject<ZodRawShape> = ZodObject<ZodRawShape>,
   TErrors extends readonly ErrorContract[] | undefined = undefined,
+  TEnrich extends ZodRawShape | undefined = undefined,
 > {
   /** Protocol-level metadata (e.g., MCP Apps extension). */
   _meta?: Record<string, unknown>;
@@ -73,6 +78,27 @@ export interface ToolDefinition<
   auth?: string[];
   /** LLM-facing description. */
   description: string;
+  /**
+   * Declarative contract for agent-facing context on the success path — the
+   * counterpart to `errors[]`. A `ZodRawShape` (`{ <name>: <ZodType> }`) of
+   * fields the handler populates via `ctx.enrich(...)`: empty-result notices,
+   * the query/filter as the server parsed it, pagination totals.
+   *
+   * **Reaches both client surfaces.** Enrichment is merged into the validated
+   * output (→ `structuredContent`) and mirrored into `content[]` as a trailer —
+   * so `structuredContent`-only clients (e.g. Claude Code) and `content[]`-only
+   * clients (e.g. Claude Desktop) both see it, even when the tool defines no
+   * `format()`. The extended schema (`output.extend(enrichment)`) is advertised
+   * as the tool's `outputSchema` in `tools/list`.
+   *
+   * **Type-driven.** When declared, `ctx.enrich(...)` is typed to a `Partial` of
+   * these fields. Enrichment is not part of `output`, so `format-parity` never
+   * touches it. A *required* enrichment field that is never populated fails the
+   * effective-output parse — surfacing the bug rather than dropping it silently.
+   * Keys must be disjoint from `output` keys (lint-enforced; `.extend` would
+   * otherwise silently override).
+   */
+  enrichment?: TEnrich;
   /**
    * Declarative contract describing the failure modes this tool can surface.
    *
@@ -104,8 +130,13 @@ export interface ToolDefinition<
    * clients can see. The `format-parity` lint rule enforces this at startup.
    *
    * If omitted, the handler factory JSON-stringifies the output as a fallback.
+   *
+   * Declared as a method (not an arrow property) for the same reason as `handler`:
+   * method parameters are checked bivariantly, so a concrete tool's narrow `format`
+   * stays assignable to the type-erased `AnyToolDefinition` (whose `format` param is
+   * the widened `Record<string, unknown>`).
    */
-  format?: (result: z.infer<TOutput>) => ContentBlock[];
+  format?(result: z.infer<TOutput>): ContentBlock[];
   /**
    * The core handler function. Receives validated input and unified Context.
    * Throw on failure — no try/catch needed.
@@ -114,13 +145,17 @@ export interface ToolDefinition<
    * helper keyed by the declared reason union — `ctx.fail('typo')` is a TS error.
    * Without `errors[]`, `ctx` is plain `Context` and you throw `McpError` directly.
    *
+   * When `enrichment` is declared, `ctx.enrich(...)` is typed to a `Partial` of
+   * the declared fields; without it, the loose base `enrich` is available (a
+   * no-op merge, since nothing reads it).
+   *
    * Declared as a method (not an arrow property) so TypeScript checks the
-   * signature bivariantly — concrete tools with narrow `ctx.fail` types remain
-   * assignable to the type-erased `AnyToolDefinition` array.
+   * signature bivariantly — concrete tools with narrow `ctx.fail` / `ctx.enrich`
+   * types remain assignable to the type-erased `AnyToolDefinition` array.
    */
   handler(
     input: z.infer<TInput>,
-    ctx: HandlerContext<ReasonOf<TErrors>>,
+    ctx: HandlerContext<ReasonOf<TErrors>, TEnrich>,
   ): Promise<z.infer<TOutput>> | z.infer<TOutput>;
   /** Zod schema for input validation. All fields need `.describe()`. */
   input: TInput;
@@ -146,7 +181,8 @@ export interface ToolDefinition<
 export type AnyToolDefinition = ToolDefinition<
   ZodObject<ZodRawShape>,
   ZodObject<ZodRawShape>,
-  readonly ErrorContract[] | undefined
+  readonly ErrorContract[] | undefined,
+  ZodRawShape | undefined
 >;
 
 // ---------------------------------------------------------------------------
@@ -204,9 +240,10 @@ export function tool<
   TInput extends ZodObject<ZodRawShape>,
   TOutput extends ZodObject<ZodRawShape>,
   const TErrors extends readonly ErrorContract[] | undefined = undefined,
+  const TEnrich extends ZodRawShape | undefined = undefined,
 >(
   name: string,
-  options: Omit<ToolDefinition<TInput, TOutput, TErrors>, 'name'>,
-): ToolDefinition<TInput, TOutput, TErrors> {
+  options: Omit<ToolDefinition<TInput, TOutput, TErrors, TEnrich>, 'name'>,
+): ToolDefinition<TInput, TOutput, TErrors, TEnrich> {
   return { name, ...options };
 }

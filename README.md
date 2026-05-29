@@ -5,7 +5,7 @@
 
 <div align="center">
 
-[![Version](https://img.shields.io/badge/Version-0.9.13-blue.svg?style=flat-square)](./CHANGELOG.md) [![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg?style=flat-square)](./LICENSE) [![MCP Spec](https://img.shields.io/badge/MCP%20Spec-2025--11--25-8A2BE2.svg?style=flat-square)](https://github.com/modelcontextprotocol/modelcontextprotocol/blob/main/docs/specification/2025-11-25/changelog.mdx)
+[![Version](https://img.shields.io/badge/Version-0.9.14-blue.svg?style=flat-square)](./CHANGELOG.md) [![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg?style=flat-square)](./LICENSE) [![MCP Spec](https://img.shields.io/badge/MCP%20Spec-2025--11--25-8A2BE2.svg?style=flat-square)](https://github.com/modelcontextprotocol/modelcontextprotocol/blob/main/docs/specification/2025-11-25/changelog.mdx)
 
 [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^1.29.0-green.svg?style=flat-square)](https://modelcontextprotocol.io/) [![TypeScript](https://img.shields.io/badge/TypeScript-^6.0.3-3178C6.svg?style=flat-square)](https://www.typescriptlang.org/) [![Bun](https://img.shields.io/badge/Bun-v1.3.0%2B-blueviolet.svg?style=flat-square)](https://bun.sh/)
 
@@ -25,33 +25,45 @@ The framework handles the plumbing: transports, auth, config, logging, telemetry
 import { createApp, tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 
-const greet = tool('greet', {
-  description: 'Greet someone by name and return a personalized message.',
+const search = tool('search', {
+  description: 'Search the catalog and return ranked matches.',
   annotations: { readOnlyHint: true },
   input: z.object({
-    name: z.string().describe('Name of the person to greet'),
+    query: z.string().describe('Search terms'),
+    limit: z.number().default(10).describe('Max results'),
   }),
   output: z.object({
-    message: z.string().describe('The greeting message'),
+    items: z.array(z.string()).describe('Matching item names, best first'),
   }),
+  enrichment: {
+    effectiveQuery: z.string().describe('Query as the server parsed it'),
+    totalCount: z.number().describe('Total matches before the limit'),
+    notice: z.string().optional().describe('Guidance when nothing matched'),
+  },
   errors: [
     {
-      reason: 'name_blocked',
-      code: JsonRpcErrorCode.Forbidden,
-      when: 'The provided name is on the configured block list.',
-      recovery: 'Use a different name that is not on the block list.',
+      reason: 'index_unavailable',
+      code: JsonRpcErrorCode.ServiceUnavailable,
+      when: 'The upstream search index is unreachable.',
+      retryable: true,
+      recovery: 'Retry in a few seconds — the index may be briefly unavailable.',
     },
   ],
   handler: async (input, ctx) => {
-    if (isBlocked(input.name)) throw ctx.fail('name_blocked', `"${input.name}" is blocked`);
-    return { message: `Hello, ${input.name}!` };
+    const res = await runSearch(input.query, input.limit);
+    if (!res) throw ctx.fail('index_unavailable'); // genuine failure → typed error contract
+    ctx.enrich({ effectiveQuery: res.parsed, totalCount: res.total });
+    if (res.items.length === 0) {
+      ctx.enrich({ notice: `No matches for "${input.query}". Try broader terms.` }); // empty result → notice, not a throw
+    }
+    return { items: res.items }; // enrichment never rides in the domain return
   },
 });
 
-await createApp({ tools: [greet] });
+await createApp({ tools: [search] });
 ```
 
-That's a complete MCP server. Every tool call is automatically logged with duration, payload sizes, and request correlation — no instrumentation code needed. `createApp()` handles config parsing, logger init, transport startup, signal handlers, and graceful shutdown.
+That's a complete MCP server, showing both flagship contracts. **`enrichment`** carries the context an agent reasons with — the parsed query, the true total, an empty-result notice — which the framework merges into `structuredContent` *and* mirrors into `content[]`, so `structuredContent`-only clients (Claude Code) and `content[]`-only clients (Claude Desktop) both see it, no `format()` needed. The typed **`errors[]`** contract handles genuine failures (an empty result is a `notice`, not a throw). The linter cross-checks both against the handler body, and both publish in `tools/list` so clients preview a tool's success *and* failure shapes. Every tool call is automatically logged with duration, payload sizes, and request correlation — no instrumentation code needed; `createApp()` handles config parsing, logger init, transport startup, signal handlers, and graceful shutdown.
 
 ## Quick start
 
@@ -67,12 +79,12 @@ Start your coding agent (i.e. Claude Code, Codex) and describe what you want. Th
 
 ### What you get
 
-Here's what tool definitions look like. Add `format()` to render structured output as markdown — different MCP clients read different surfaces (`structuredContent` vs `content[]`), and `format()` ensures both carry the same data:
+The headline tool returns structured output — clients that read `structuredContent` (Claude Code) get it directly. To also render markdown for clients that read `content[]` (Claude Desktop), add a `format()`. The `format-parity` linter checks it renders every `output` field, so the two surfaces never drift:
 
 ```ts
 import { tool, z } from '@cyanheads/mcp-ts-core';
 
-export const search = tool('search', {
+export const itemSearch = tool('item_search', {
   description: 'Search for items by query.',
   input: z.object({
     query: z.string().describe('Search query'),
@@ -85,6 +97,9 @@ export const search = tool('search', {
     const results = await doSearch(input.query, input.limit);
     return { items: results };
   },
+  format: (result) => [
+    { type: 'text', text: result.items.map((name) => `- ${name}`).join('\n') },
+  ],
 });
 ```
 
@@ -103,32 +118,6 @@ export const itemData = resource('items://{itemId}', {
   },
 });
 ```
-
-And contracts for failure modes — typed at compile time, surfaced to clients with recovery hints the model can act on:
-
-```ts
-import { tool, z } from '@cyanheads/mcp-ts-core';
-import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
-
-export const search = tool('search', {
-  // ...input, output as above
-  errors: [
-    {
-      reason: 'no_match',
-      code: JsonRpcErrorCode.NotFound,
-      when: 'The query returned zero items from the upstream index.',
-      recovery: 'Broaden the query — close matches by edit distance are in `data.suggestions`.',
-    },
-  ],
-  async handler(input, ctx) {
-    const { items, suggestions } = await doSearch(input.query, input.limit);
-    if (items.length === 0) throw ctx.fail('no_match', `No matches for "${input.query}"`, { suggestions });
-    return { items };
-  },
-});
-```
-
-The linter cross-checks `errors[]` against the handler body, contracts publish in `tools/list` so clients can preview failure modes, and `data.recovery.hint` mirrors into the markdown `content[]` so tool-only clients see it too.
 
 Everything registers through `createApp()` in your entry point:
 

@@ -5,6 +5,7 @@
  */
 
 import type { LintDiagnostic } from '../types.js';
+import { lintEnrichmentContract } from './enrichment-rules.js';
 import { lintErrorContract, lintErrorContractConformance } from './error-contract-rules.js';
 import { lintFormatParity } from './format-parity-rules.js';
 import { lintHandlerBody } from './handler-body-rules.js';
@@ -95,6 +96,12 @@ export function lintToolDefinition(
       diagnostics.push(...lintFormatParity(d, displayName));
     }
   }
+
+  // Enrichment block: shape, output-key collisions, and the advisory nudge for
+  // agent-facing context that should move out of `output`.
+  diagnostics.push(
+    ...lintEnrichmentContract(d as { enrichment?: unknown; output?: unknown }, 'tool', displayName),
+  );
 
   // Auth scopes validation
   if (d?.auth !== undefined) {

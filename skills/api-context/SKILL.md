@@ -1,10 +1,10 @@
 ---
 name: api-context
 description: >
-  Canonical reference for the unified `Context` object passed to every tool and resource handler in `@cyanheads/mcp-ts-core`. Covers the full interface, all sub-APIs (`ctx.log`, `ctx.state`, `ctx.elicit`, `ctx.sample`, `ctx.progress`), and when to use each.
+  Canonical reference for the unified `Context` object passed to every tool and resource handler in `@cyanheads/mcp-ts-core`. Covers the full interface, all sub-APIs (`ctx.log`, `ctx.state`, `ctx.elicit`, `ctx.sample`, `ctx.progress`, `ctx.enrich`), and when to use each.
 metadata:
   author: cyanheads
-  version: "1.3"
+  version: "1.4"
   audience: external
   type: reference
 ---
@@ -56,6 +56,12 @@ interface Context {
 
   // Raw URI — present only for resource handlers
   readonly uri?: URL;
+
+  // Agent-facing success-path enrichment — accumulates notices, query echo, totals
+  // onto the request; reaches structuredContent + content[]. Always present (no-op
+  // when no `enrichment` block), strictly typed on HandlerContext<R, E> against the
+  // declared fields. Kind-tagged helpers: enrich.notice / .total / .echo.
+  readonly enrich: Enrich;
 
   // Opt-in contract resolver — always present (returns {} when no contract is attached
   // or the reason is unknown), strictly typed on HandlerContext<R> against declared reasons.
@@ -520,6 +526,62 @@ The `≥5 words` lint rule on contract `recovery` (validated at lint time) makes
 
 ---
 
+## `ctx.enrich`
+
+Always present on `Context`. Accumulates agent-facing **success-path** context — empty-result notices, the query/filter as the server parsed it, pagination totals — onto the request. The framework merges it into `structuredContent`, advertises `output.extend(enrichment)` as the tool's `outputSchema`, and mirrors it into a `content[]` trailer. The success-path counterpart to `ctx.fail` / `ctx.recoveryFor`.
+
+```ts
+export const search = tool('search', {
+  description: 'Search the catalog.',
+  input: z.object({ query: z.string().describe('Search terms') }),
+  output: z.object({ items: z.array(z.string()).describe('Matching items') }),
+  enrichment: {
+    effectiveQuery: z.string().describe('Query as the server parsed it'),
+    totalCount: z.number().describe('Total matches before the limit'),
+    notice: z.string().optional().describe('Guidance when nothing matched'),
+  },
+  async handler(input, ctx) {
+    const res = await runSearch(input.query);
+    ctx.enrich.echo(res.parsed);              // → effectiveQuery + "Query: …" trailer
+    ctx.enrich.total(res.total);              // → totalCount + "N total" trailer
+    if (res.items.length === 0) ctx.enrich.notice(`No matches for "${input.query}".`);
+    return { items: res.items };              // enrichment never rides in the domain return
+  },
+});
+```
+
+### Signature
+
+```ts
+// Loose (always present on Context — works without a block; service-callable):
+ctx.enrich(fields: Record<string, unknown>): void
+
+// Strict (HandlerContext<R, E> when the definition declares an enrichment block):
+ctx.enrich(fields: Partial<z.infer<ZodObject<E>>>): void
+
+// Kind-tagged field-helpers (always present) — write a conventional key and tag
+// the content[] trailer rendering:
+ctx.enrich.notice(text: string): void      // writes `notice`         → blockquote
+ctx.enrich.total(count: number): void       // writes `totalCount`     → "N total"
+ctx.enrich.echo(query: string): void        // writes `effectiveQuery`  → "Query: …"
+```
+
+### Behavior
+
+| Aspect | Detail |
+|:-------|:-------|
+| Accumulation | Each call merges its fields onto the request; later calls override earlier keys. |
+| Both surfaces | Merged into `structuredContent` (validated against `output.extend(enrichment)`) and appended to `content[]` as a trailer — even when the tool defines no `format()`. |
+| Domain payload untouched | `content[]` renders the handler's return via `format()` (or the JSON default); enrichment is a separate trailer, never double-rendered. The handler return must NOT carry enrichment fields. |
+| Required-field guard | A required enrichment field never populated fails the effective-output parse — the bug surfaces loudly rather than dropping silently. |
+| No block | Calling `ctx.enrich` on a tool that declared no `enrichment` is a silent no-op (values are stripped by the parse) — the price of service-layer callability. |
+| Service usage | Services accepting `ctx: Context` can call `ctx.enrich(...)`; the value reaches `structuredContent` exactly as if the handler had. |
+| `format-parity` | Enrichment lives outside `output`, so the `format-parity` lint never requires it in `format()`. |
+
+See `add-tool`'s **Tool Response Design** and `skills/api-linter` (`enrichment-*` rules) for the full pattern. Test enrichment with `getEnrichment(ctx)` from `@cyanheads/mcp-ts-core/testing`.
+
+---
+
 ## Quick reference
 
 | Property | Type | Present when |
@@ -534,6 +596,7 @@ The `≥5 words` lint rule on contract `recovery` (validated at lint time) makes
 | `ctx.log` | `ContextLogger` | Always |
 | `ctx.state` | `ContextState` | Always (throws if `tenantId` missing) |
 | `ctx.signal` | `AbortSignal` | Always |
+| `ctx.enrich` | `Enrich` | Always; typed on `HandlerContext<R, E>` when an `enrichment` block is declared |
 | `ctx.elicit` | `function \| undefined` | Client supports elicitation |
 | `ctx.sample` | `function \| undefined` | Client supports sampling |
 | `ctx.notifyResourceListChanged` | `function \| undefined` | Transport supports resource notifications |
