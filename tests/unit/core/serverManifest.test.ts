@@ -499,6 +499,60 @@ describe('buildServerManifest — landing auto-derivation', () => {
   });
 });
 
+describe('buildServerManifest — landing requireAuth default (issue #156)', () => {
+  test('defaults requireAuth=true when auth mode is jwt', () => {
+    const manifest = buildServerManifest({
+      config: stubConfig({ mcpAuthMode: 'jwt' }),
+      tools: [],
+      resources: [],
+      prompts: [],
+    });
+    expect(manifest.landing.requireAuth).toBe(true);
+  });
+
+  test('defaults requireAuth=true when auth mode is oauth', () => {
+    const manifest = buildServerManifest({
+      config: stubConfig({ mcpAuthMode: 'oauth' }),
+      tools: [],
+      resources: [],
+      prompts: [],
+    });
+    expect(manifest.landing.requireAuth).toBe(true);
+  });
+
+  test('defaults requireAuth=false when auth mode is none', () => {
+    const manifest = buildServerManifest({
+      config: stubConfig({ mcpAuthMode: 'none' }),
+      tools: [],
+      resources: [],
+      prompts: [],
+    });
+    expect(manifest.landing.requireAuth).toBe(false);
+  });
+
+  test('explicit requireAuth=false overrides the auth-enabled default (public catalog)', () => {
+    const manifest = buildServerManifest({
+      config: stubConfig({ mcpAuthMode: 'jwt' }),
+      tools: [],
+      resources: [],
+      prompts: [],
+      landing: { requireAuth: false },
+    });
+    expect(manifest.landing.requireAuth).toBe(false);
+  });
+
+  test('explicit requireAuth=true overrides the none default', () => {
+    const manifest = buildServerManifest({
+      config: stubConfig({ mcpAuthMode: 'none' }),
+      tools: [],
+      resources: [],
+      prompts: [],
+      landing: { requireAuth: true },
+    });
+    expect(manifest.landing.requireAuth).toBe(true);
+  });
+});
+
 describe('buildServerManifest — auth reflection', () => {
   test('mode=none emits minimal auth block', () => {
     const manifest = buildServerManifest({

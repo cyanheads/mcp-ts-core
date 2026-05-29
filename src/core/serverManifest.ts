@@ -121,7 +121,18 @@ export interface LandingConfig {
    * Auto-derived from `mcpServerHomepage` when that URL matches the pattern.
    */
   repoRoot?: string;
-  /** When true, unauthenticated callers receive a reduced landing body. */
+  /**
+   * Gate the landing page inventory (tool/resource/prompt listings, scope
+   * chips, invocation snippets) behind authentication. When true,
+   * unauthenticated callers receive a reduced landing body.
+   *
+   * Defaults to `true` when `MCP_AUTH_MODE` is `jwt` or `oauth`, and `false`
+   * when auth is `none` — an auth-gated server shouldn't disclose more through
+   * the marketing surface than through `GET /mcp` (which already hides
+   * metadata when auth is enabled). Set to `false` explicitly to serve the
+   * full inventory on an authenticated deployment (public catalog), or `true`
+   * to force the reduced body even without auth.
+   */
   requireAuth?: boolean;
   /** One-line tagline under the server name. ≤120 chars. */
   tagline?: string;
@@ -513,7 +524,10 @@ export function buildServerManifest(input: BuildServerManifestInput): ServerMani
     );
   }
   const attribution = landing.attribution ?? true;
-  const requireAuth = landing.requireAuth ?? false;
+  // Default the inventory gate to auth presence: an auth-enabled server
+  // shouldn't disclose more through the landing page than through GET /mcp.
+  // Explicit landing.requireAuth (true or false) always wins.
+  const requireAuth = landing.requireAuth ?? config.mcpAuthMode !== 'none';
 
   // Source URL resolution order: per-definition override → repo-convention derivation.
   const toolList: ManifestTool[] = tools.map((def) => {
