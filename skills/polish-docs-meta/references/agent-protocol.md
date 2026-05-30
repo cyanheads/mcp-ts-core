@@ -71,11 +71,11 @@ These sections should remain intact unless you have a specific reason to change 
 - **Core Rules** — universal to all servers built on the framework
 - **Errors section** — "handlers throw, framework catches" is universal
 - **Imports section** — keep unless the alias convention was changed
-- **Framework reference pointer** — the line directing agents to `node_modules/@cyanheads/mcp-ts-core/CLAUDE.md`
+- **Framework reference pointer** — the line directing agents to `node_modules/@cyanheads/mcp-ts-core/CLAUDE.md` (or `AGENTS.md`)
 
 ## Pitfalls
 
-- Don't duplicate the full framework CLAUDE.md into the project file. The project file covers server-specific conventions; the framework file covers the API. The pointer at the top connects them.
+- Don't duplicate the full framework CLAUDE.md/AGENTS.md into the project file. The project file covers server-specific conventions; the framework file covers the API. The pointer at the top connects them.
 - Don't remove `## Core Rules` even if it seems obvious — agents read this fresh each session.
 - Don't add implementation details that change frequently. The agent protocol file should be stable — update it when the server's shape changes, not on every commit.
 - Don't assume this is a one-time pass. The protocol file should be revisited whenever the server's surface area changes (tools added/removed, new services, config changes).

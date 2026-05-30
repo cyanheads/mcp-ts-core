@@ -198,7 +198,9 @@ function reportMissingSummaries(missing: string[]): void {
   console.warn(`\nWarning: ${missing.length} file(s) missing 'summary' frontmatter:`);
   for (const file of shown) console.warn(`  - ${file}`);
   if (extra > 0) console.warn(`  ... and ${extra} more`);
-  console.warn(`\nBackfill these — see CLAUDE.md § Changelog for the frontmatter format.`);
+  console.warn(
+    `\nBackfill these — see CLAUDE.md/AGENTS.md § Changelog for the frontmatter format.`,
+  );
 }
 
 function main(): void {

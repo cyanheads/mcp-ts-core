@@ -4,14 +4,14 @@ description: >
   Add a new subpath export to the @cyanheads/mcp-ts-core package. Use when creating a new public API surface that consumers import from a dedicated subpath (e.g., @cyanheads/mcp-ts-core/newutil).
 metadata:
   author: cyanheads
-  version: "1.0"
+  version: "1.1"
   audience: internal
   type: reference
 ---
 
 ## Context
 
-Subpath exports are defined in `package.json` under the `exports` field. Each subpath maps to a source entry point that gets compiled to `dist/`. The exports catalog in `CLAUDE.md` must stay in sync with `package.json`.
+Subpath exports are defined in `package.json` under the `exports` field. Each subpath maps to a source entry point that gets compiled to `dist/`. The exports catalog in `CLAUDE.md`/`AGENTS.md` must stay in sync with `package.json`.
 
 The build uses `tsconfig.build.json` (not `tsconfig.json`) with `rootDir: ./src` and `include: ["src/**/*"]`. This means every source file at `src/foo/bar.ts` compiles to `dist/foo/bar.js` — the `dist/` path in each export entry must match wherever `tsc` produces the compiled output for the named source file. Choose your source file location to produce the `dist/` path you want in the export entry.
 

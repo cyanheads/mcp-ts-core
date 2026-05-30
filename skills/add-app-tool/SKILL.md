@@ -4,7 +4,7 @@ description: >
   Scaffold an MCP App tool + UI resource pair. Use when the user asks to add a tool with interactive UI, create an MCP App, or build a visual/interactive tool.
 metadata:
   author: cyanheads
-  version: "1.3"
+  version: "1.4"
   audience: external
   type: reference
 ---
@@ -30,7 +30,7 @@ MCP Apps extend the standard tool pattern with an interactive HTML UI rendered i
 
 Both builders are exported from `@cyanheads/mcp-ts-core`. They handle `_meta.ui.resourceUri`, the compat key (`ui/resourceUri`), and the correct MIME type (`text/html;profile=mcp-app`) automatically.
 
-For the full API, Context interface, and error codes, read the framework's `CLAUDE.md` (loaded at session start).
+For the full API, Context interface, and error codes, read the framework's `CLAUDE.md`/`AGENTS.md` (loaded at session start).
 
 ## Steps
 

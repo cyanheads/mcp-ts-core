@@ -43,7 +43,7 @@ security: false
   name the symbol, state what changed, stop. Use a second sentence only when
   it carries weight. If a bullet feels long, it is.
 
-  Cut: mechanism walkthroughs (those belong in JSDoc, AGENTS.md, or the
+  Cut: mechanism walkthroughs (those belong in JSDoc, CLAUDE.md/AGENTS.md, or the
   relevant skill), ceremonial framings ("This release introduces…",
   backwards-compat paragraphs), file-by-file test enumerations, internal
   implementation notes. Prefer code/symbol names over English re-explanations.

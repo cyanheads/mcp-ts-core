@@ -20,7 +20,7 @@ Framework badge                         ← solo spotlight row — `Built on @cy
 ## Configuration                        ← env var table + `.env.example` pointer
 ## Running the server                   ← dev, production, Workers/Docker
 ## Project structure                    ← directory/purpose table
-## Development guide                    ← link to CLAUDE.md, key rules
+## Development guide                    ← link to CLAUDE.md/AGENTS.md, key rules
 ## Contributing                         ← brief
 ## License                              ← one line
 ```
@@ -471,12 +471,12 @@ Directory/purpose table orienting contributors to the codebase.
 
 ### Development Guide
 
-Brief — link to CLAUDE.md for full details. State 3-4 key rules. **Include the "validate → normalize → never fabricate" bullet** — it's the canonical anti-hallucination convention for external API wrappers and reinforces the framework's `no fabricated signal` principle.
+Brief — link to CLAUDE.md/AGENTS.md for full details. State 3-4 key rules. **Include the "validate → normalize → never fabricate" bullet** — it's the canonical anti-hallucination convention for external API wrappers and reinforces the framework's `no fabricated signal` principle.
 
 ```markdown
 ## Development guide
 
-See [`CLAUDE.md`](./CLAUDE.md) for development guidelines and architectural rules. The short version:
+See [`CLAUDE.md`/`AGENTS.md`](./CLAUDE.md) for development guidelines and architectural rules. The short version:
 
 - Handlers throw, framework catches — no `try/catch` in tool logic
 - Use `ctx.log` for request-scoped logging, `ctx.state` for tenant-scoped storage

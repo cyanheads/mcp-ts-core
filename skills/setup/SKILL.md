@@ -4,7 +4,7 @@ description: >
   Post-init orientation for an MCP server built on @cyanheads/mcp-ts-core. Use after running `@cyanheads/mcp-ts-core init` to understand the project structure, conventions, and skill sync model. Also use when onboarding to an existing project for the first time.
 metadata:
   author: cyanheads
-  version: "1.7"
+  version: "1.8"
   audience: external
   type: workflow
 ---
@@ -15,14 +15,9 @@ This skill assumes `bunx @cyanheads/mcp-ts-core init [name]` has already run. Th
 
 ## Agent Protocol File
 
-The init CLI generates both `CLAUDE.md` and `AGENTS.md` with the same purpose. Keep one authoritative file for the agent you actually use:
+The init CLI generates both `CLAUDE.md` and `AGENTS.md` with identical content — `CLAUDE.md` is read by Claude Code, `AGENTS.md` by Codex, Cursor, Windsurf, and other agents. **Keep both.** Shipping both keeps the project agent-agnostic, and they're cheap to hold in sync: edit one, then `cp CLAUDE.md AGENTS.md` (the framework keeps its own pair byte-identical the same way, enforced by `check-docs-sync`). Only delete one if you're certain the project will never be opened by the other family of agents.
 
-- **Claude Code** — keep `CLAUDE.md`, delete `AGENTS.md`
-- **All other agents** (Codex, Cursor, Windsurf, etc.) — keep `AGENTS.md`, delete `CLAUDE.md`
-
-Both files serve the same purpose: project-specific agent instructions. Prefer committing one authoritative copy rather than trying to keep both in sync by hand.
-
-For the full framework docs, read `node_modules/@cyanheads/mcp-ts-core/CLAUDE.md` once per session. It contains the exports catalog, tool/resource/prompt contracts, error codes, context API, and common import patterns.
+For the full framework docs, read `node_modules/@cyanheads/mcp-ts-core/CLAUDE.md` (or its identical twin `AGENTS.md`) once per session. It contains the exports catalog, tool/resource/prompt contracts, error codes, context API, and common import patterns.
 
 ## Project Structure
 
@@ -155,12 +150,12 @@ Skip or reorder as the project calls for it. The agent protocol's "What's Next?"
 
 ## Checklist
 
-- [ ] Agent protocol file selected — one authoritative file kept (`CLAUDE.md` or `AGENTS.md`), the other deleted
+- [ ] Agent protocol files kept — both `CLAUDE.md` and `AGENTS.md` present and in sync (or the unused one deliberately deleted)
 - [ ] `bun install` run
 - [ ] Dependencies updated (`bun update --latest`)
 - [ ] Git repo initialized and initial commit made (`chore: scaffold from @cyanheads/mcp-ts-core`)
 - [ ] Substituted server name verified in `package.json`, agent protocol file, and `server.json`
-- [ ] Framework docs read (`node_modules/@cyanheads/mcp-ts-core/CLAUDE.md`)
+- [ ] Framework docs read (`node_modules/@cyanheads/mcp-ts-core/CLAUDE.md` or `AGENTS.md`)
 - [ ] Unused echo definitions cleaned up (and unregistered from `src/index.ts`)
 - [ ] Skills copied to agent directory (`cp -R skills/* .claude/skills/` or equivalent)
 - [ ] Project structure understood (definitions directories, entry point)
