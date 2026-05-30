@@ -53,6 +53,37 @@ export interface ToolAnnotations {
 }
 
 /**
+ * Per-field rendering config for the `enrichment` block's `content[]` trailer,
+ * keyed to the declared enrichment field names. The success-path analogue of how
+ * `format()` controls `output` rendering: `enrichment` is the data contract,
+ * `enrichmentTrailer` is its presentation.
+ *
+ * Scope: this shapes the `content[]` trailer text ONLY. It never affects
+ * `structuredContent`, which always carries the raw validated enrichment value
+ * (the object/array/scalar exactly as declared) — never the rendered markdown.
+ *
+ * Each entry is optional and may set:
+ *   - `render` — maps the field's validated value to trailer markdown. Wins over
+ *     the kind-tag and the generic `**key:** value` fallback. Use it to stop a
+ *     structured (object/array) field from collapsing to a JSON blob in
+ *     `content[]`; `structuredContent` always keeps the full structured value.
+ *   - `label` — overrides the field-name shown in the generic / `delta` rendering
+ *     (e.g. `Total Found` for a `totalFound` field, instead of the raw key).
+ *
+ * Resolves to `never` when no `enrichment` block is declared — `enrichmentTrailer`
+ * requires one.
+ */
+export type EnrichmentTrailerConfig<TEnrich extends ZodRawShape | undefined> =
+  TEnrich extends ZodRawShape
+    ? {
+        [K in keyof TEnrich]?: {
+          label?: string;
+          render?: (value: z.infer<TEnrich[K]>) => string;
+        };
+      }
+    : never;
+
+/**
  * Represents the complete, self-contained definition of an MCP tool.
  *
  * `TErrors` is the const tuple of `ErrorContract` entries declared on the
@@ -99,6 +130,19 @@ export interface ToolDefinition<
    * otherwise silently override).
    */
   enrichment?: TEnrich;
+  /**
+   * Per-field `content[]` trailer rendering for the `enrichment` block — the
+   * presentation layer to `enrichment`'s data contract (mirrors `output` /
+   * `format`).
+   *
+   * Supply a `render` to stop a structured (object/array) enrichment field from
+   * collapsing to a JSON blob in `content[]` (it renders as bulleted markdown
+   * instead; `structuredContent` is unaffected), or a `label` to show a
+   * human-readable field name. Keyed to the declared `enrichment` fields and
+   * type-checked against them. The `enrichment-trailer-render` lint rule requires
+   * a `render` for any non-scalar enrichment field that isn't a `delta` shape.
+   */
+  enrichmentTrailer?: EnrichmentTrailerConfig<TEnrich>;
   /**
    * Declarative contract describing the failure modes this tool can surface.
    *

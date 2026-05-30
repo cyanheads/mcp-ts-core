@@ -279,10 +279,12 @@ export type TypedRecoveryFor<R extends string> = (reason: R) => { recovery: { hi
  *   - `notice` → markdown blockquote
  *   - `total`  → "N total"
  *   - `echo`   → "Query: …"
+ *   - `delta`  → "field: before → after" (raw mutation before/after state)
  * Fields populated via the bare `enrich({...})` call carry no kind and render
- * generically (`**key:** value`).
+ * generically (`**key:** value`), optionally customized per-field by the
+ * definition's `enrichmentTrailer` (`render`/`label`).
  */
-export type EnrichKind = 'notice' | 'total' | 'echo';
+export type EnrichKind = 'notice' | 'total' | 'echo' | 'delta';
 
 /**
  * Per-request enrichment accumulator. Created in `createContext`, populated by
@@ -305,6 +307,16 @@ export interface EnrichmentStore {
  * `enrich({...})` call for any other field names.
  */
 export interface EnrichHelpers {
+  /**
+   * Raw before/after observable state for a mutation. Writes `{ before, after }`
+   * under `field` (→ `structuredContent`) and renders as "field: before → after"
+   * in the `content[]` trailer. Surface raw state and let the agent judge the
+   * change against intent — never synthesize a verdict (a shrink may be intended
+   * truncation or a bug; only the agent knows). Declare `field` in the
+   * `enrichment` block as `z.object({ before, after })` — the linter recognizes
+   * the shape, so it needs no custom trailer renderer.
+   */
+  delta(args: { field: string; before: unknown; after: unknown }): void;
   /** The query as the server actually parsed it. Writes `effectiveQuery`; renders as "Query: …". */
   echo(query: string): void;
   /** Guidance when a result set is empty (or otherwise needs a caveat). Writes `notice`; renders as a blockquote. */
@@ -476,6 +488,10 @@ export function createEnrich(store: EnrichmentStore): Enrich {
   enrich.echo = (query: string): void => {
     store.values.effectiveQuery = query;
     store.kinds.set('effectiveQuery', 'echo');
+  };
+  enrich.delta = ({ field, before, after }): void => {
+    store.values[field] = { before, after };
+    store.kinds.set(field, 'delta');
   };
   return enrich;
 }

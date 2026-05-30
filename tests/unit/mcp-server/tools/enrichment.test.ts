@@ -370,4 +370,118 @@ describe('enrichment block', () => {
       expect(getEnrichment(ctx)).toEqual({});
     });
   });
+
+  describe('enrichmentTrailer rendering (#175) and delta (#176)', () => {
+    it('renders a structured field via a custom renderer instead of JSON; structuredContent keeps the object', async () => {
+      const search = tool('search_render', {
+        description: 'Search.',
+        input: z.object({ q: z.string().describe('q') }),
+        output: z.object({ items: z.array(z.string()).describe('items') }),
+        enrichment: {
+          appliedFilters: z
+            .object({
+              dateRange: z.string().describe('range'),
+              types: z.array(z.string()).describe('types'),
+            })
+            .describe('applied filters'),
+        },
+        enrichmentTrailer: {
+          appliedFilters: {
+            label: 'Applied Filters',
+            render: (v) =>
+              `### Applied Filters\n- Range: ${v.dateRange}\n- Types: ${v.types.join(', ')}`,
+          },
+        },
+        handler: (_input, ctx) => {
+          ctx.enrich({ appliedFilters: { dateRange: '2020–2024', types: ['Review'] } });
+          return { items: [] };
+        },
+      });
+
+      const handler = createToolHandler(search as AnyToolDefinition, services, notifiers);
+      const result = await handler({ q: 'x' }, createMockSdkContext());
+
+      const trailer = lastText(result.content);
+      expect(trailer).toContain('### Applied Filters');
+      expect(trailer).toContain('- Range: 2020–2024');
+      expect(trailer).toContain('- Types: Review');
+      expect(trailer).not.toContain('{"dateRange"'); // no JSON blob
+      // structuredContent keeps the full structured value, unaffected by trailer rendering.
+      expect(result.structuredContent).toEqual({
+        items: [],
+        appliedFilters: { dateRange: '2020–2024', types: ['Review'] },
+      });
+    });
+
+    it('applies a label to a bare scalar field (totalFound → "Total Found")', async () => {
+      const search = tool('search_label', {
+        description: 'Search.',
+        input: z.object({ q: z.string().describe('q') }),
+        output: z.object({ items: z.array(z.string()).describe('items') }),
+        enrichment: { totalFound: z.number().describe('total found') },
+        enrichmentTrailer: { totalFound: { label: 'Total Found' } },
+        handler: (_input, ctx) => {
+          ctx.enrich({ totalFound: 2990 });
+          return { items: [] };
+        },
+      });
+
+      const handler = createToolHandler(search as AnyToolDefinition, services, notifiers);
+      const result = await handler({ q: 'x' }, createMockSdkContext());
+
+      const trailer = lastText(result.content);
+      expect(trailer).toContain('**Total Found:** 2990');
+      expect(trailer).not.toContain('totalFound'); // raw key replaced by the label
+    });
+
+    it('a custom renderer wins over a kind-tag', async () => {
+      const t = tool('render_over_kind', {
+        description: 'x',
+        input: z.object({ q: z.string().describe('q') }),
+        output: z.object({ items: z.array(z.string()).describe('items') }),
+        enrichment: { totalCount: z.number().describe('total') },
+        enrichmentTrailer: { totalCount: { render: (n) => `Found ${n} records.` } },
+        handler: (_i, ctx) => {
+          ctx.enrich.total(42); // kind-tagged, but render takes precedence
+          return { items: [] };
+        },
+      });
+
+      const handler = createToolHandler(t as AnyToolDefinition, services, notifiers);
+      const result = await handler({ q: 'x' }, createMockSdkContext());
+
+      const trailer = lastText(result.content);
+      expect(trailer).toContain('Found 42 records.');
+      expect(trailer).not.toContain('42 total'); // kind rendering suppressed
+    });
+
+    it('enrich.delta renders "before → after" and structures { before, after }', async () => {
+      const writeTool = tool('write_frontmatter', {
+        description: 'Mutate frontmatter.',
+        input: z.object({ path: z.string().describe('path') }),
+        output: z.object({ ok: z.boolean().describe('ok') }),
+        enrichment: {
+          sizeInBytes: z
+            .object({
+              before: z.number().describe('size before'),
+              after: z.number().describe('size after'),
+            })
+            .describe('size before/after'),
+        },
+        handler: (_input, ctx) => {
+          ctx.enrich.delta({ field: 'sizeInBytes', before: 0, after: 68 });
+          return { ok: true };
+        },
+      });
+
+      const handler = createToolHandler(writeTool as AnyToolDefinition, services, notifiers);
+      const result = await handler({ path: 'note.md' }, createMockSdkContext());
+
+      const trailer = lastText(result.content);
+      expect(trailer).toContain('0 → 68');
+      expect(trailer).toContain('sizeInBytes'); // default label is the field key
+      // structuredContent gets the raw before/after object — the agent judges the change.
+      expect(result.structuredContent).toEqual({ ok: true, sizeInBytes: { before: 0, after: 68 } });
+    });
+  });
 });

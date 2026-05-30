@@ -166,13 +166,37 @@ function formatEnrichmentScalar(value: unknown): string {
 /**
  * Renders accumulated enrichment as a single `content[]` trailer block, so
  * `content[]`-only clients see the same context `structuredContent` clients get
- * from the merged output. Field-helpers tag a render kind (notice → blockquote,
- * total → "N total", echo → "Query: …"); bare `enrich({...})` fields render as
- * `**key:** value`. Returns `[]` when nothing was enriched.
+ * from the merged output. Per field, rendering resolves in order:
+ *   1. a per-field `enrichmentTrailer.render` (the author's full control; wins
+ *      over everything — the escape hatch for structured fields that would
+ *      otherwise JSON-blob),
+ *   2. the kind-tag set by a field-helper (notice → blockquote, total →
+ *      "N total", echo → "Query: …", delta → "field: before → after"),
+ *   3. the generic `**key:** value` fallback (key overridable via `label`),
+ *      `JSON.stringify`-ing non-scalars.
+ *
+ * `parsed` is the validated effective output, so renderers receive the typed,
+ * post-parse value rather than the raw accumulator entry. The rendered markdown
+ * is appended to `content[]` only — `structuredContent` is built separately from
+ * the raw merged values and never carries this trailer text. Returns `[]` when
+ * nothing was enriched.
  */
-function renderEnrichmentTrailer(store: EnrichmentStore): ContentBlock[] {
+function renderEnrichmentTrailer(
+  store: EnrichmentStore,
+  trailer: AnyToolDefinition['enrichmentTrailer'],
+  parsed: Record<string, unknown>,
+): ContentBlock[] {
   const lines: string[] = [];
-  for (const [key, value] of Object.entries(store.values)) {
+  for (const key of Object.keys(store.values)) {
+    // Skip keys the effective-output parse stripped (enriched but not declared in
+    // the block) — the trailer mirrors what reached structuredContent.
+    if (!(key in parsed)) continue;
+    const value = parsed[key];
+    const cfg = trailer?.[key];
+    if (cfg?.render) {
+      lines.push(cfg.render(value));
+      continue;
+    }
     switch (store.kinds.get(key)) {
       case 'notice':
         lines.push(`> ${String(value)}`);
@@ -183,8 +207,15 @@ function renderEnrichmentTrailer(store: EnrichmentStore): ContentBlock[] {
       case 'echo':
         lines.push(`Query: ${String(value)}`);
         break;
+      case 'delta': {
+        const d = (value ?? {}) as { after?: unknown; before?: unknown };
+        lines.push(
+          `**${cfg?.label ?? key}:** ${formatEnrichmentScalar(d.before)} → ${formatEnrichmentScalar(d.after)}`,
+        );
+        break;
+      }
       default:
-        lines.push(`**${key}:** ${formatEnrichmentScalar(value)}`);
+        lines.push(`**${cfg?.label ?? key}:** ${formatEnrichmentScalar(value)}`);
     }
   }
   return lines.length > 0 ? [{ type: 'text', text: lines.join('\n') }] : [];
@@ -218,7 +249,10 @@ export function buildToolSuccessResult(
     ...domainValidated,
     ...values,
   }) as Record<string, unknown>;
-  const trailer = store && Object.keys(values).length > 0 ? renderEnrichmentTrailer(store) : [];
+  const trailer =
+    store && Object.keys(values).length > 0
+      ? renderEnrichmentTrailer(store, def.enrichmentTrailer, structuredContent)
+      : [];
   return {
     structuredContent,
     content: trailer.length > 0 ? [...domainContent, ...trailer] : domainContent,
