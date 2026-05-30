@@ -102,6 +102,39 @@ describe('AnyToolDefinition', () => {
     expect(tools[0]!.name).toBe('tool_a');
     expect(tools[1]!.name).toBe('tool_b');
   });
+
+  it('keeps enrichment tools assignable through the type erasure', () => {
+    // A concrete enrichment field's narrow `render` param must not break
+    // assignability to the type-erased AnyToolDefinition, exactly as `format`
+    // and `handler` already guarantee via method-syntax bivariance.
+    const withTrailer = tool('with_trailer', {
+      description: 'Enrichment tool with a per-field trailer renderer.',
+      input: z.object({ q: z.string().describe('Query') }),
+      output: z.object({ ids: z.array(z.string()).describe('Result IDs') }),
+      enrichment: {
+        appliedFilters: z
+          .object({ author: z.string().optional().describe('Author filter') })
+          .describe('Filters applied'),
+      },
+      enrichmentTrailer: {
+        appliedFilters: { render: (f) => `Author: ${f.author ?? 'none'}` },
+      },
+      handler: () => ({ ids: [] }),
+    });
+
+    // The `enrichment` block alone (no trailer literal) must stay assignable too.
+    const withoutTrailer = tool('without_trailer', {
+      description: 'Enrichment tool without a trailer literal.',
+      input: z.object({ q: z.string().describe('Query') }),
+      output: z.object({ ids: z.array(z.string()).describe('Result IDs') }),
+      enrichment: { total: z.number().describe('Total matches') },
+      handler: () => ({ ids: [] }),
+    });
+
+    const tools: AnyToolDefinition[] = [withTrailer, withoutTrailer];
+    expect(tools).toHaveLength(2);
+    expect(tools[0]!.name).toBe('with_trailer');
+  });
 });
 
 describe('tool() builder', () => {

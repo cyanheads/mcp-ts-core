@@ -78,7 +78,15 @@ export type EnrichmentTrailerConfig<TEnrich extends ZodRawShape | undefined> =
     ? {
         [K in keyof TEnrich]?: {
           label?: string;
-          render?: (value: z.infer<TEnrich[K]>) => string;
+          /**
+           * Declared with method syntax (not an arrow property) for the same
+           * reason as `format` / `handler`: method parameters are checked
+           * bivariantly, so a concrete tool's narrow `render` value stays
+           * assignable to the type-erased `AnyToolDefinition` (whose param
+           * widens to `unknown`). An arrow property would be variance-strict
+           * and break `createApp({ tools: [...] })` for every enrichment tool.
+           */
+          render?(value: z.infer<TEnrich[K]>): string;
         };
       }
     : never;
