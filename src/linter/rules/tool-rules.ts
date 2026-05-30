@@ -100,7 +100,11 @@ export function lintToolDefinition(
   // Enrichment block: shape, output-key collisions, and the advisory nudge for
   // agent-facing context that should move out of `output`.
   diagnostics.push(
-    ...lintEnrichmentContract(d as { enrichment?: unknown; output?: unknown }, 'tool', displayName),
+    ...lintEnrichmentContract(
+      d as { enrichment?: unknown; output?: unknown; enrichmentTrailer?: unknown },
+      'tool',
+      displayName,
+    ),
   );
 
   // Auth scopes validation

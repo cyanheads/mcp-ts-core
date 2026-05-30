@@ -146,7 +146,7 @@ function isLiteralVariant(field: unknown): boolean {
 }
 
 /** Recursively strips optional/nullable/default/readonly/nonoptional wrappers. */
-function unwrapWrappers(field: unknown): unknown {
+export function unwrapWrappers(field: unknown): unknown {
   if (!field || typeof field !== 'object') return field;
   const def = (field as { _zod?: { def?: { type?: string; innerType?: unknown } } })._zod?.def;
   if (!def) return field;
@@ -164,7 +164,7 @@ function isCompound(field: unknown): boolean {
 }
 
 /** Unwrap optional/nullable/default and return the Zod 4 `_zod.def.type` discriminator. */
-function getCoreDefType(field: unknown): string | undefined {
+export function getCoreDefType(field: unknown): string | undefined {
   const core = unwrapWrappers(field);
   if (!core || typeof core !== 'object') return;
   return (core as { _zod?: { def?: { type?: string } } })._zod?.def?.type;
