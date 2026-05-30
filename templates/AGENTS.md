@@ -309,7 +309,8 @@ When you complete a skill's checklist, check the boxes and add a completion time
 | `npm run devcheck` | Lint + format + typecheck + security + changelog sync |
 | `bun run audit:refresh` | Delete `bun.lock`, reinstall, and re-run `bun audit`. Use when `devcheck` flags a transitive advisory — Bun's `update` is sticky on transitive resolutions, so the advisory may be a stale-lockfile false positive. If it survives the refresh, it's real. |
 | `npm run tree` | Generate directory structure doc |
-| `npm run format` | Auto-fix formatting |
+| `npm run format` | Auto-fix formatting (safe fixes only) |
+| `npm run format:unsafe` | Also apply Biome's unsafe autofixes — review the diff; they can change behavior |
 | `npm test` | Run tests |
 | `npm run start:stdio` | Production mode (stdio) |
 | `npm run start:http` | Production mode (HTTP) |
