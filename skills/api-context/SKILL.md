@@ -4,7 +4,7 @@ description: >
   Canonical reference for the unified `Context` object passed to every tool and resource handler in `@cyanheads/mcp-ts-core`. Covers the full interface, all sub-APIs (`ctx.log`, `ctx.state`, `ctx.elicit`, `ctx.sample`, `ctx.progress`, `ctx.enrich`), and when to use each.
 metadata:
   author: cyanheads
-  version: "1.4"
+  version: "1.5"
   audience: external
   type: reference
 ---
@@ -214,7 +214,7 @@ Use this only when downstream code is structured around `ctx.sessionId` and acce
 
 ### Capability-token model
 
-Surfacing `sessionId` does not change the framework's capability-as-token rule (possession of an opaque ID grants access — see CLAUDE.md `# Core Rules`). It is an opt-in *discovery-scoping* axis, not an access boundary.
+Surfacing `sessionId` does not change the framework's capability-as-token rule (possession of an opaque ID grants access — see CLAUDE.md/AGENTS.md `# Core Rules`). It is an opt-in *discovery-scoping* axis, not an access boundary.
 
 - Tokens shared across sessions (e.g. `df_<uuid>` handed from Agent A to Agent B) still resolve on the receiving side. The lookup key is the token, not the session.
 - Session-scoped *enumeration* (e.g. `dataframe_describe` returning only items registered by the current session) is a per-server pattern: maintain a session-keyed lookup of known names, gate list-all on it, but route direct lookups against the shared backing store.
@@ -564,6 +564,7 @@ ctx.enrich(fields: Partial<z.infer<ZodObject<E>>>): void
 ctx.enrich.notice(text: string): void      // writes `notice`         → blockquote
 ctx.enrich.total(count: number): void       // writes `totalCount`     → "N total"
 ctx.enrich.echo(query: string): void        // writes `effectiveQuery`  → "Query: …"
+ctx.enrich.delta({ field, before, after }): void  // writes `{before, after}` → "field: before → after"
 ```
 
 ### Behavior
@@ -577,6 +578,7 @@ ctx.enrich.echo(query: string): void        // writes `effectiveQuery`  → "Que
 | No block | Calling `ctx.enrich` on a tool that declared no `enrichment` is a silent no-op (values are stripped by the parse) — the price of service-layer callability. |
 | Service usage | Services accepting `ctx: Context` can call `ctx.enrich(...)`; the value reaches `structuredContent` exactly as if the handler had. |
 | `format-parity` | Enrichment lives outside `output`, so the `format-parity` lint never requires it in `format()`. |
+| Trailer rendering | Per field: kind-tag if set (notice/total/echo/delta), else the definition's `enrichmentTrailer.render`/`label`, else `**key:** value` (objects/arrays `JSON.stringify`'d). A structured field with no `render` errors under `enrichment-trailer-render` — supply one so it renders as markdown; `structuredContent` keeps the full value regardless. |
 
 See `add-tool`'s **Tool Response Design** and `skills/api-linter` (`enrichment-*` rules) for the full pattern. Test enrichment with `getEnrichment(ctx)` from `@cyanheads/mcp-ts-core/testing`.
 

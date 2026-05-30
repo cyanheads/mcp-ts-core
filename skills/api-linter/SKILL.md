@@ -4,7 +4,7 @@ description: >
   MCP definition linter rules reference. Use when `bun run lint:mcp` or `bun run devcheck` reports a lint error or warning (`format-parity`, `schema-is-object`, `name-format`, `server-json-*`, etc.) and you need to understand the rule, its severity, and how to fix it. Every rule ID the linter emits has an entry in this doc.
 metadata:
   author: cyanheads
-  version: "1.4"
+  version: "1.5"
   audience: external
   type: reference
 ---
@@ -53,7 +53,7 @@ Grouped by family. Jump to any rule ID via its anchor.
 | Handler body | `prefer-mcp-error-in-handler`, `prefer-error-factory`, `preserve-cause-on-rethrow`, `no-stringify-upstream-error` | [Handler body rules](#handler-body-rules) |
 | Error contract (structural) | `error-contract-type`, `error-contract-empty`, `error-contract-entry-type`, `error-contract-code-type`, `error-contract-code-unknown`, `error-contract-code-unknown-error`, `error-contract-reason-required`, `error-contract-reason-format`, `error-contract-reason-unique`, `error-contract-when-required`, `error-contract-retryable-type`, `error-contract-recovery-required`, `error-contract-recovery-empty`, `error-contract-recovery-min-words` | [Error contract rules](#error-contract-rules) |
 | Error contract (conformance) | `error-contract-conformance`, `error-contract-prefer-fail` | [Error contract rules](#error-contract-rules) |
-| Enrichment | `enrichment-type`, `enrichment-empty`, `enrichment-field-type`, `enrichment-output-collision`, `enrichment-prefer-block` | [Enrichment rules](#enrichment-rules) |
+| Enrichment | `enrichment-type`, `enrichment-empty`, `enrichment-field-type`, `enrichment-output-collision`, `enrichment-prefer-block`, `enrichment-trailer-render`, `enrichment-trailer-orphan`, `enrichment-trailer-unknown-field` | [Enrichment rules](#enrichment-rules) |
 | server.json | ~40 rules prefixed `server-json-*` | [server.json rules](#server-json-rules) |
 
 ---
@@ -515,7 +515,7 @@ Heuristic source-text checks that scan `handler.toString()` for common error-han
 
 Fires when a handler contains `throw new Error(...)`. Plain `Error` doesn't carry a JSON-RPC code — the framework's auto-classifier degrades to `InternalError`, hiding the actual failure mode.
 
-Plain `Error` is acceptable for "don't care" cases where the specific code doesn't matter (per CLAUDE.md: "plain `Error` for don't-care cases"). This rule targets domain-specific failures that deserve a concrete code — upgrade those to factories or `ctx.fail`, and accept the warning for the rest.
+Plain `Error` is acceptable for "don't care" cases where the specific code doesn't matter (per CLAUDE.md/AGENTS.md: "plain `Error` for don't-care cases"). This rule targets domain-specific failures that deserve a concrete code — upgrade those to factories or `ctx.fail`, and accept the warning for the rest.
 
 **Fix:** use `McpError` or a factory for domain-specific failures:
 
@@ -752,6 +752,30 @@ Fires when an enrichment key matches an `output` key. The effective output schem
 Advisory. Fires when a tool has **no** `enrichment` block but an `output` field whose name strongly signals agent-facing context (`notice`, `effectiveQuery`, `queryEcho`) rather than domain payload.
 
 **Fix:** move the field into an `enrichment` block and populate it via `ctx.enrich(...)` — it reaches both client surfaces without a `format()` entry. Ignore if the field is genuinely domain data. Deliberately conservative — common domain fields like `totalCount` are not flagged.
+
+### enrichment-trailer-render
+
+**Severity:** error
+
+Fires when a non-scalar (object/array) enrichment field has no `enrichmentTrailer.render`. It would `JSON.stringify` into a one-line blob in the `content[]` trailer (`structuredContent` keeps the full value either way). The `delta` shape (`z.object({ before, after })`, populated by `ctx.enrich.delta()`) is exempt — it renders natively as `field: before → after`.
+
+**Fix:** add a renderer — `enrichmentTrailer: { <field>: { render: (v) => … } }` — use `ctx.enrich.delta()` for before/after state, or opt into the JSON blob explicitly with `render: (v) => JSON.stringify(v)`.
+
+### enrichment-trailer-orphan
+
+**Severity:** error
+
+Fires when `enrichmentTrailer` is declared without an `enrichment` block — trailer config only renders enrichment fields.
+
+**Fix:** add the `enrichment` block, or drop the `enrichmentTrailer`.
+
+### enrichment-trailer-unknown-field
+
+**Severity:** error
+
+Fires when an `enrichmentTrailer` key doesn't match any declared `enrichment` field (a typo or drift the `keyof`-typed config already catches for TS authors).
+
+**Fix:** rename the trailer key to a declared enrichment field, or remove it.
 
 ---
 

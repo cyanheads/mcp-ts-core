@@ -4,7 +4,7 @@ description: >
   Scaffold a new MCP tool definition. Use when the user asks to add a tool, create a new tool, or implement a new capability for the server.
 metadata:
   author: cyanheads
-  version: "2.10"
+  version: "2.11"
   audience: external
   type: reference
 ---
@@ -237,6 +237,21 @@ async handler(input, ctx) {
 
 A *required* enrichment field the handler never populates fails the effective-output parse — surfacing the bug rather than dropping it silently. Enrichment keys must be disjoint from `output` keys (lint-enforced). The sections below are applications of this rule.
 
+**Trailer rendering is a per-field call.** Each field's `content[]` trailer line resolves as: its kind-tag if set (`notice`/`total`/`echo`/`delta`), else the definition's per-field `enrichmentTrailer.render`/`label`, else the generic `**key:** value` (objects/arrays `JSON.stringify`'d). A structured (object/array) field with no `render` ships as a one-line JSON blob — the `enrichment-trailer-render` lint rule errors on that. Give it a renderer, or a `label` to relabel a scalar key:
+
+```typescript
+enrichment: {
+  totalFound: z.number().describe('Matches before the page limit.'),
+  appliedFilters: z.object({ /* … */ }).describe('Filters the server applied.'),
+},
+enrichmentTrailer: {
+  totalFound: { label: 'Total Found' },                                  // → "**Total Found:** 2990"
+  appliedFilters: { render: (f) => `### Filters\n- Range: ${f.dateRange}` }, // markdown, not JSON
+},
+```
+
+`structuredContent` always keeps the full structured value; `enrichmentTrailer` only controls the human-facing `content[]` line.
+
 ### Communicate filtering and exclusions
 
 If the tool omitted, truncated, or filtered anything, say what and how to get it back. Silent omission is invisible to the agent — it can't act on what it doesn't know about.
@@ -328,6 +343,19 @@ output: z.object({
 ```
 
 The agent reads `created: true, previousSizeInBytes: 0, currentSizeInBytes: 68` and knows: brand new target, the full file content is the body. If that matches intent, fine; if not (typo path, uninitialized periodic note), the agent self-corrects without re-fetching. Anti-pattern: server-side `>=` integrity throws on mutators — the server can't distinguish intentional shrink from bug, so it throws on every shrink, including the deliberate ones.
+
+When the before/after is agent-facing context rather than primary payload, the `enrichment`-native form is `ctx.enrich.delta({ field, before, after })` — it writes `{ before, after }` to `structuredContent` and renders `**field:** before → after` in the `content[]` trailer. Declare the field in the `enrichment` block as `z.object({ before, after })`; the linter recognizes the shape, so it needs no custom `enrichmentTrailer.render`. Same stance — surface raw state, never a verdict:
+
+```typescript
+enrichment: {
+  sizeInBytes: z.object({
+    before: z.number().describe('Byte size before the mutation.'),
+    after: z.number().describe('Byte size after the mutation.'),
+  }).describe('Raw size before/after — the agent judges whether a shrink was intended.'),
+},
+// handler:
+ctx.enrich.delta({ field: 'sizeInBytes', before: prev, after: next });
+```
 
 ### Sparse upstream data must stay honest
 
@@ -492,7 +520,7 @@ throw invalidParams(
 
 Counts, applied filters, truncation notices, and chaining IDs help the agent decide its next action without extra round trips.
 
-Counts, applied-filter summaries, and query echo that describe the *result set* (rather than being the result) are textbook `enrichment` — `ctx.enrich.total(n)`, `ctx.enrich.echo(parsedQuery)`, or `ctx.enrich({ appliedFilters })` put them on both client surfaces with no `format()` entry. Reserve domain `output` for the payload itself and post-action state (e.g. `currentStatus` after a write), as below:
+Counts, applied-filter summaries, and query echo that describe the *result set* (rather than being the result) are textbook `enrichment` — `ctx.enrich.total(n)`, `ctx.enrich.echo(parsedQuery)`, or `ctx.enrich({ appliedFilters })` put them on both client surfaces with no `format()` entry (a structured field like `appliedFilters` also needs an `enrichmentTrailer.render` so its trailer line is markdown, not a JSON blob — see **Tool Response Design**). Reserve domain `output` for the payload itself and post-action state (e.g. `currentStatus` after a write), as below:
 
 ```typescript
 return {
