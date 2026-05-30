@@ -1,17 +1,17 @@
 ---
 name: git-wrapup
 description: >
-  Land working-tree changes as a versioned release commit with an annotated tag — version bump, changelog, regenerate derived artifacts, verify, commit, tag. Stops at "committed and tagged locally" — no push, no publish. The release-and-publish skill picks up from here. Distilled from the git_wrapup_instructions protocol.
+  Land working-tree changes as logical commits — the work grouped by concern, topped by a release commit (version bump, changelog, regenerated artifacts) and an annotated tag. Verify, commit, tag. Stops at "committed and tagged locally" — no push, no publish. The release-and-publish skill picks up from here. Distilled from the git_wrapup_instructions protocol.
 metadata:
   author: cyanheads
-  version: "1.1"
+  version: "1.2"
   audience: external
   type: workflow
 ---
 
 ## When to use
 
-Working-tree or staged changes are ready to ship as a new version. This skill lands them as a single atomic commit with an annotated tag. It does NOT push or publish — that's a separate step (`release-and-publish`).
+Working-tree or staged changes are ready to ship as a new version. This skill lands them as a stack of logical commits — the work grouped by concern, topped by a release commit (version + changelog + tree) — with an annotated tag. It does NOT push or publish — that's a separate step (`release-and-publish`).
 
 Common triggers:
 - Feature work, bug fixes, or dependency updates are done and tested
@@ -119,27 +119,34 @@ bun run test:all           # or `bun run test` if no test:all script exists
 
 **If either fails, halt.** Do not bypass verification to land the commit. Fix the issue first, then re-run from step 6.
 
-### 7. Commit
+### 7. Commit — group by concern, release artifacts on top
 
-Stage everything and create ONE atomic commit. Version bumps ride with the change that warrants them — the version bump is not a separate commit.
+Do NOT `git add -A` into one commit. Group the working tree into a handful of logical commits — never one blob:
+
+1. **The work — one commit per concern.** A feature spanning multiple layers splits by layer: runtime/logic, linter/tooling, docs/skills. Unrelated changes (two separate fixes, an incidental doc tweak) are their own commits. Work commits do not carry the version.
+2. **The release commit — last, on top.** Version bumps (`package.json`, `server.json`, README badge, `CLAUDE.md`/`AGENTS.md`), the changelog entry, `CHANGELOG.md`, and `docs/tree.md` go in a single final commit that sits on top of the work stack — never mixed into a feature commit.
+
+Stage each group explicitly, commit it, then move to the next — the release commit goes last:
 
 ```bash
-git add -A
+git add <paths-for-this-concern>
 git commit -m "<subject>"
+# repeat per concern; version + changelog + tree are the final commit
 ```
 
-**Subject format:** Conventional Commits. Examples:
-- `feat: 0.1.5 — hosted server endpoint`
-- `fix: 0.2.1 — handle empty SPARQL result sets`
-- `chore(deps): 0.3.2 — mcp-ts-core ^0.9.1 → ^0.9.6`
+**The file is the atomic boundary:** NEVER split a single file's changes across commits. When one file serves two concerns, it ships whole in the commit of its dominant concern.
+
+**Subject format:** Conventional Commits.
+- Work commits (no version): `feat: hosted server endpoint`, `fix: handle empty SPARQL result sets`, `feat(linter): enrichment contract rules`, `docs: document the enrichment block`
+- Release commit (subject leads with the version): `chore(release): 0.2.1 — empty SPARQL result handling`
 
 **Rules:**
 - Plain `-m` flag only — no heredoc, no command substitution
 - No `Co-authored-by` or `Generated with` trailers
 - No marketing adjectives ("comprehensive", "robust", "enhanced", "seamless", "improved")
-- The commit message must stand alone for someone reading `git log` — no references to chat context, option numbers, or "as discussed"
+- Each commit message stands alone for someone reading `git log` — no chat context, option numbers, or "as discussed"
 
-**When to split into multiple commits:** Only when the working tree contains genuinely independent concerns (e.g., two unrelated bug fixes in unrelated files). NEVER split a single file's changes across commits.
+**Right-size it.** "Group by concern" is not "always split." A genuinely single-concern change — one fix, a dependency bump, a small doc edit — is one work commit plus the release commit; when the change and its version bump are inseparable for a tiny patch, a single commit whose subject leads with the version is fine. The failure mode to prevent is the inverse: a large, multi-layer feature crammed into one commit alongside the release artifacts.
 
 ### 8. Create an annotated tag
 
@@ -183,8 +190,8 @@ Dependency bumps:
 ### 9. Verify end state
 
 ```bash
-git log --oneline -1              # confirm commit subject
-git show v<version> --stat | head -20   # confirm tag points at HEAD
+git log --oneline -8              # confirm the commit stack: work commits + release commit on top
+git show v<version> --stat | head -20   # confirm tag points at HEAD (the release commit)
 git status                        # must be clean
 ```
 
@@ -211,7 +218,7 @@ If the working tree isn't clean or the tag doesn't point at HEAD, something went
 - [ ] `docs/tree.md` regenerated if structure changed (`bun run tree`)
 - [ ] `bun run devcheck` passes
 - [ ] `bun run test:all` (or `test`) passes
-- [ ] One atomic commit in Conventional Commits format
+- [ ] Work grouped into logical commits (large features split by layer); release artifacts (version + changelog + tree) committed separately on top, subject leading with the version
 - [ ] Annotated tag `v<version>` with structured markdown message
 - [ ] Working tree clean
 - [ ] Nothing pushed — local only

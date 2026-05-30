@@ -133,7 +133,7 @@ Each sub-agent reads BOTH `skills/git-wrapup/SKILL.md` AND `skills/release-and-p
 - No bypass → Phase 4 runs serially, orchestrator-driven, one target at a time
 - No npm publish involved (private only) → non-issue
 
-**Commit structure.** Version bump rides with the change that warrants it. For a maintenance pass with a single cohesive change shape (e.g. just dep updates, or just one framework adoption), that's **one commit** — subject can lead with the version (e.g. `feat: 0.5.2 — adopt new error factories, framework ^0.9.6`). For a maintenance pass containing multiple distinct concerns, split into per-concern commits with the version bump folded into the headline-change commit, not a separate ceremonial release commit.
+**Commit structure.** Group the work by concern, then land the release artifacts (version bumps + changelog + regenerated `docs/tree.md`/`server.json`/`manifest.json`) as a `chore(release): <version> — <theme>` commit on top — same model as `git-wrapup` Step 7. A single-concern pass (just dep updates, or one framework adoption) is one work commit plus the release commit; a pass spanning multiple distinct concerns splits into per-concern work commits with the release commit last. Regenerated meta-drift is release-artifact-shaped — it rides in the release commit, never carved out as its own.
 
 **Tag annotations are for end users.** Internal dev cleanup (lockfile refreshes, linter fixes, build config) belongs in the commit body, not the tag annotation.
 
