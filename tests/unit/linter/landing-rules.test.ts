@@ -197,4 +197,72 @@ describe('lintLandingConfig', () => {
       expect.objectContaining({ rule: 'landing-connect-snippets-empty', severity: 'warning' }),
     ]);
   });
+
+  test('errors when logo is not a string', () => {
+    expect(lintLandingConfig({ logo: 42 })).toEqual([
+      expect.objectContaining({ rule: 'landing-logo-type', severity: 'error' }),
+    ]);
+  });
+
+  test('accepts a non-base64 (URL-encoded) data URI logo under the byte limit', () => {
+    expect(lintLandingConfig({ logo: 'data:image/svg+xml,<svg/>' })).toEqual([]);
+  });
+
+  test('treats a malformed data URI with no comma as raw bytes (under the limit)', () => {
+    // No comma → approximateDataUriBytes falls back to the URI length, which is tiny.
+    expect(lintLandingConfig({ logo: 'data:not-a-real-uri' })).toEqual([]);
+  });
+
+  test('errors when links is not an array', () => {
+    expect(lintLandingConfig({ links: { href: 'x', label: 'y' } })).toEqual([
+      expect.objectContaining({ rule: 'landing-links-type', severity: 'error' }),
+    ]);
+  });
+
+  test('errors when a links entry is not an object', () => {
+    const diagnostics = lintLandingConfig({ links: ['https://example.com'] });
+    expect(diagnostics).toEqual([
+      expect.objectContaining({ rule: 'landing-link-shape', severity: 'error' }),
+    ]);
+  });
+
+  test('errors when repoRoot is not a string', () => {
+    expect(lintLandingConfig({ repoRoot: 42 })).toEqual([
+      expect.objectContaining({ rule: 'landing-repo-root-type', severity: 'error' }),
+    ]);
+  });
+
+  test('accepts a valid envExample object', () => {
+    expect(
+      lintLandingConfig({ envExample: { API_KEY: 'your-key-here', BASE_URL: 'https://api' } }),
+    ).toEqual([]);
+  });
+
+  test('errors when envExample is not a plain object', () => {
+    expect(lintLandingConfig({ envExample: ['API_KEY'] })).toEqual([
+      expect.objectContaining({ rule: 'landing-env-example-type', severity: 'error' }),
+    ]);
+  });
+
+  test('warns when envExample exceeds the entry limit', () => {
+    const envExample = Object.fromEntries(
+      Array.from({ length: 14 }, (_, i) => [`VAR_${i}`, 'value']),
+    );
+    const diagnostics = lintLandingConfig({ envExample });
+    expect(diagnostics).toContainEqual(
+      expect.objectContaining({ rule: 'landing-env-example-count', severity: 'warning' }),
+    );
+  });
+
+  test('warns when an envExample key is not SCREAMING_SNAKE_CASE', () => {
+    expect(lintLandingConfig({ envExample: { apiKey: 'value' } })).toEqual([
+      expect.objectContaining({ rule: 'landing-env-example-key', severity: 'warning' }),
+    ]);
+  });
+
+  test('errors when an envExample value is not a string', () => {
+    expect(lintLandingConfig({ envExample: { API_KEY: 123 } })).toEqual([
+      expect.objectContaining({ rule: 'landing-env-example-value', severity: 'error' }),
+    ]);
+  });
 });

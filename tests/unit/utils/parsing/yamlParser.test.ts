@@ -44,6 +44,18 @@ describe('yamlParser.parse', () => {
     }
   });
 
+  it('truncates the original content sample to 200 chars on long invalid input', async () => {
+    const longInvalid = `bad: [${'a, '.repeat(100)}`; // > 200 chars, unterminated flow sequence
+    try {
+      await yamlParser.parse(longInvalid);
+      throw new Error('Expected yamlParser.parse to throw');
+    } catch (error) {
+      const sample = (error as McpError).data?.originalContentSample as string;
+      expect(sample.endsWith('...')).toBe(true);
+      expect(sample).toHaveLength(203); // 200 chars + ellipsis
+    }
+  });
+
   it('logs parse failures with an auto-generated context when none is provided', async () => {
     const errorSpy = vi.spyOn(logger, 'error');
     await expect(yamlParser.parse('invalid: [unterminated')).rejects.toThrow(McpError);

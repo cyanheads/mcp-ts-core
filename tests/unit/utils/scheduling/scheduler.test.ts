@@ -179,6 +179,55 @@ describe('schedulerService', () => {
       schedulerService.schedule('job-duplicate', '* * * * *', () => undefined, 'Second'),
     ).rejects.toThrowError("Job with ID 'job-duplicate' already exists.");
   });
+
+  it('lists all registered jobs in insertion order', async () => {
+    await schedulerService.schedule('job-a', '* * * * *', () => undefined, 'A');
+    await schedulerService.schedule('job-b', '* * * * *', () => undefined, 'B');
+
+    expect(schedulerService.listJobs().map((j) => j.id)).toEqual(['job-a', 'job-b']);
+  });
+
+  it('throws NotFound when operating on an unknown job id', () => {
+    expect(() => schedulerService.start('ghost')).toThrowError(/not found/);
+    expect(() => schedulerService.stop('ghost')).toThrowError(/not found/);
+    expect(() => schedulerService.remove('ghost')).toThrowError(/not found/);
+  });
+
+  it('destroys all jobs, stopping each underlying task', async () => {
+    const jobA = await schedulerService.schedule('job-x', '* * * * *', () => undefined, 'X');
+    const jobB = await schedulerService.schedule('job-y', '* * * * *', () => undefined, 'Y');
+    const stopA = (jobA.task as unknown as { stop: MockInstance }).stop;
+    const stopB = (jobB.task as unknown as { stop: MockInstance }).stop;
+
+    schedulerService.destroyAll();
+
+    expect(stopA).toHaveBeenCalled();
+    expect(stopB).toHaveBeenCalled();
+    expect(schedulerService.listJobs()).toHaveLength(0);
+    expect(infoSpy).toHaveBeenCalledWith(
+      'All scheduled jobs destroyed (2 removed).',
+      expect.any(Object),
+    );
+  });
+
+  it('wraps a non-Error value thrown by the handler', async () => {
+    const job = await schedulerService.schedule(
+      'job-throw-str',
+      '* * * * *',
+      () => {
+        throw 'string failure';
+      },
+      'Throws a string',
+    );
+
+    await (job.task as unknown as { trigger: () => Promise<void> | void }).trigger();
+
+    expect(errorSpy).toHaveBeenCalledWith(
+      "Job 'job-throw-str' failed.",
+      expect.any(Error),
+      expect.objectContaining({ jobId: 'job-throw-str' }),
+    );
+  });
 });
 
 describe('schedulerService (non-Node runtime)', () => {

@@ -628,3 +628,105 @@ describe('lintToolDefinition — format-parity integration', () => {
     expect(parity[0]?.message).toContain("'hidden'");
   });
 });
+
+// ---------------------------------------------------------------------------
+// Content-block traversal and matching edge cases
+// ---------------------------------------------------------------------------
+
+describe('lintFormatParity — content traversal', () => {
+  it('flags every field when format returns a non-array (renders nothing)', () => {
+    const def = tool({
+      output: z.object({ name: z.string().describe('Name') }),
+      // A format() that returns a bare value instead of ContentBlock[] renders
+      // nothing to content[] — parity must flag it rather than crash.
+      format: (() => 'not an array') as unknown as (r: unknown) => ContentBlock[],
+    });
+    expect(parityErrors(def).length).toBeGreaterThan(0);
+  });
+
+  it('finds a field rendered inside a nested array/object within a block', () => {
+    const def = tool({
+      output: z.object({ tags: z.array(z.string().describe('Tag')).describe('Tags') }),
+      format: (r) => {
+        const result = r as { tags: string[] };
+        // Sentinel lives inside a nested array; a null sibling must be tolerated.
+        return [
+          { type: 'text', text: 'Tags below', _extra: { values: result.tags, note: null } },
+        ] as unknown as ContentBlock[];
+      },
+    });
+    expect(parityErrors(def)).toHaveLength(0);
+  });
+
+  it('treats an empty output object as nothing to verify', () => {
+    const def = tool({
+      output: z.object({}),
+      format: () => [{ type: 'text', text: 'nothing to render' }],
+    });
+    expect(parityErrors(def)).toHaveLength(0);
+  });
+
+  it('handles integer fields like numbers', () => {
+    const def = tool({
+      output: z.object({ count: z.int().describe('Count') }),
+      format: (r) => [{ type: 'text', text: `Count: ${(r as { count: number }).count}` }],
+    });
+    expect(parityErrors(def)).toHaveLength(0);
+  });
+});
+
+describe('lintFormatParity — key-name matching edge cases', () => {
+  it('accepts a literal("") field rendered only by its key name', () => {
+    const def = tool({
+      output: z.object({ mode: z.literal('').describe('Mode') }),
+      format: () => [{ type: 'text', text: 'Mode: default' }],
+    });
+    expect(parityErrors(def)).toHaveLength(0);
+  });
+
+  it('flags a short-keyed (<3 char) boolean that renders neither its value nor key', () => {
+    const def = tool({
+      output: z.object({ ok: z.boolean().describe('OK flag') }),
+      format: () => [{ type: 'text', text: 'no relevant content here' }],
+    });
+    // "ok" is too short for whole-word matching, so the boolean value must render.
+    expect(parityErrors(def)).toHaveLength(1);
+  });
+
+  it('accepts a boolean matched by a camelCase key segment', () => {
+    const def = tool({
+      output: z.object({ wasArchived: z.boolean().describe('Archived') }),
+      // No "true" and no whole "wasArchived" — only the "archived" segment.
+      format: () => [{ type: 'text', text: 'Archived: yes' }],
+    });
+    expect(parityErrors(def)).toHaveLength(0);
+  });
+});
+
+describe('lintFormatParity — deduplication', () => {
+  it('reports a field shared across union branches only once', () => {
+    const def = tool({
+      output: z.object({
+        result: z
+          .discriminatedUnion('kind', [
+            z.object({
+              kind: z.literal('a').describe('Kind'),
+              shared: z.string().describe('Shared'),
+            }),
+            z.object({
+              kind: z.literal('b').describe('Kind'),
+              shared: z.string().describe('Shared'),
+            }),
+          ])
+          .describe('Result'),
+      }),
+      format: (r) => {
+        const result = (r as { result: { kind: string } }).result;
+        return [{ type: 'text', text: `Kind: ${result.kind}` }];
+      },
+    });
+    const errors = parityErrors(def);
+    expect(errors).toHaveLength(1);
+    expect(errors[0]?.message).toContain("'result.shared'");
+  });
+});

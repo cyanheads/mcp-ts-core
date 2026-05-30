@@ -7,15 +7,18 @@ import { describe, expect, it } from 'vitest';
 import {
   configurationError,
   conflict,
+  databaseError,
   type ErrorResponse,
   ErrorSchema,
   forbidden,
+  internalError,
   invalidParams,
   invalidRequest,
   JsonRpcErrorCode,
   McpError,
   notFound,
   rateLimited,
+  serializationError,
   serviceUnavailable,
   timeout,
   unauthorized,
@@ -265,6 +268,13 @@ describe('Global Error Types', () => {
         name: 'configurationError',
         code: JsonRpcErrorCode.ConfigurationError,
       },
+      { fn: internalError, name: 'internalError', code: JsonRpcErrorCode.InternalError },
+      {
+        fn: serializationError,
+        name: 'serializationError',
+        code: JsonRpcErrorCode.SerializationError,
+      },
+      { fn: databaseError, name: 'databaseError', code: JsonRpcErrorCode.DatabaseError },
     ];
 
     for (const { fn, name, code } of factories) {

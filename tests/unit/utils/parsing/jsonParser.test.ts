@@ -122,6 +122,18 @@ describe('JsonParser', () => {
     }
   });
 
+  it('truncates the original content sample to 200 chars on long invalid input', async () => {
+    const longInvalid = 'this is not json '.repeat(20); // > 200 chars, unparseable
+    try {
+      await parser.parse(longInvalid, Allow.ALL, context);
+      throw new Error('Expected parser.parse to throw');
+    } catch (error) {
+      const sample = (error as McpError).data?.originalContentSample as string;
+      expect(sample.endsWith('...')).toBe(true);
+      expect(sample).toHaveLength(203); // 200 chars + ellipsis
+    }
+  });
+
   it('logs parse failures with an auto-created context when none is provided', async () => {
     const errorSpy = vi.spyOn(logger, 'error');
     try {

@@ -261,4 +261,72 @@ describe('Sanitization Utility', () => {
       expect(pinoFields.length).toBe(baseFields.length * 3);
     });
   });
+
+  describe('security edge cases', () => {
+    it('strips all tags in the "attribute" context', async () => {
+      const sanitized = await sanitization.sanitizeString('<b>danger</b>"onload="x', {
+        context: 'attribute',
+      });
+      expect(sanitized).not.toContain('<b>');
+      expect(sanitized).toContain('danger');
+    });
+
+    it('rejects a pseudo-protocol URL even when its scheme is explicitly allow-listed', async () => {
+      // isURL accepts the scheme, but the explicit pseudo-protocol guard still rejects it.
+      await expect(sanitization.sanitizeUrl('data://example.com', ['data'])).rejects.toThrow(
+        McpError,
+      );
+    });
+
+    it('converts backslashes to forward slashes with toPosix', () => {
+      const result = sanitization.sanitizePath('sub\\dir\\file.txt', { toPosix: true });
+      expect(result.sanitizedPath).not.toContain('\\');
+    });
+
+    it('returns "." when a path resolves to exactly the root directory', () => {
+      const result = sanitization.sanitizePath('.', { rootDir: '/app/data' });
+      expect(result.sanitizedPath).toBe('.');
+    });
+
+    it('rejects relative traversal that escapes the working directory (no rootDir)', () => {
+      expect(() => sanitization.sanitizePath('../../../../etc/passwd')).toThrow(
+        expect.objectContaining({ code: JsonRpcErrorCode.ValidationError }),
+      );
+    });
+
+    it('rejects non-string input to sanitizeJson', () => {
+      expect(() => sanitization.sanitizeJson(123 as unknown as string)).toThrow(
+        expect.objectContaining({ message: 'Invalid input: expected a JSON string.' }),
+      );
+    });
+
+    it('truncates the input preview for long invalid JSON', () => {
+      const longInvalid = `{${'"a":1,'.repeat(40)}`; // > 100 chars, missing closing brace
+      try {
+        sanitization.sanitizeJson(longInvalid);
+        throw new Error('expected throw');
+      } catch (error) {
+        const preview = (error as McpError).data?.inputPreview as string;
+        expect(preview.endsWith('...')).toBe(true);
+      }
+    });
+
+    it('rejects a non-number, non-string input type to sanitizeNumber', async () => {
+      await expect(sanitization.sanitizeNumber(null as unknown as number)).rejects.toThrow(
+        expect.objectContaining({ message: 'Invalid input type: expected number or string.' }),
+      );
+    });
+
+    it('rejects Infinity in sanitizeNumber', async () => {
+      await expect(sanitization.sanitizeNumber(Number.POSITIVE_INFINITY)).rejects.toThrow(
+        expect.objectContaining({ message: 'Invalid number value (NaN or Infinity).' }),
+      );
+    });
+
+    it('degrades to a placeholder when the log input cannot be structured-cloned', () => {
+      // A function value makes structuredClone throw — the method must not propagate.
+      const result = sanitization.sanitizeForLogging({ work: () => 'noop' });
+      expect(result).toBe('[Log Sanitization Failed]');
+    });
+  });
 });

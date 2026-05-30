@@ -24,6 +24,19 @@ describe('tokenCounter', () => {
       const tokenCount = await countTokens(text);
       expect(tokenCount).toBe(0);
     });
+
+    it('returns 0 for a whitespace-only string', async () => {
+      expect(await countTokens('   \n\t  ')).toBe(0);
+    });
+
+    it('falls back to the default heuristic for an unrecognized model', async () => {
+      // > 53 chars so the error-handler input sample exercises the truncation path.
+      const text = 'lorem ipsum dolor sit amet consectetur adipiscing elit';
+      const known = await countTokens(text, undefined, 'gpt-4o-mini');
+      const unknown = await countTokens(text, undefined, 'some-unrecognized-model');
+      expect(known).toBeGreaterThan(0);
+      expect(unknown).toBe(known);
+    });
   });
 
   describe('countChatTokens', () => {
@@ -93,6 +106,14 @@ describe('tokenCounter', () => {
       const withName = await countChatTokens(messages);
 
       expect(withName).toBeGreaterThan(withoutName);
+    });
+
+    it('counts tool-role messages by their tool_call_id', async () => {
+      const withId = await countChatTokens([
+        { role: 'tool', tool_call_id: 'call_abc123', content: 'result payload' },
+      ]);
+      const withoutId = await countChatTokens([{ role: 'tool', content: 'result payload' }]);
+      expect(withId).toBeGreaterThan(withoutId);
     });
   });
 });

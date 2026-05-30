@@ -51,7 +51,9 @@ describe('httpErrorFromResponse', () => {
       url?: string;
     } = {},
   ): Response {
-    const response = new Response(options.body ?? '', {
+    // Null-body statuses (204/205/304) reject any body, including ''. Default to
+    // null so the helper works across runtimes; `.text()` still yields ''.
+    const response = new Response(options.body ?? null, {
       status,
       statusText: options.statusText ?? '',
       ...(options.headers && { headers: options.headers }),
