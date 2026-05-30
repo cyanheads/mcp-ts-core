@@ -5,15 +5,17 @@
  * updates `skills/` for downstream servers; the mirrors are what local agent
  * toolchains actually read, and silent drift means agents run on stale guidance.
  *
- * Propagation is one-way (`skills/` → mirrors), so only missing or
- * content-drifted files are reported. Files that exist *only* in a mirror are
- * typically unrelated skills (globally installed, other sources) and are left
- * alone.
+ * Propagation is one-way (`skills/` → mirrors), so missing or content-drifted
+ * files are reported. A skill that exists *only* in a mirror is left alone when
+ * it's externally sourced (globally installed, other tools), but flagged as
+ * stale when its `SKILL.md` carries `metadata.audience: external` — a framework
+ * skill removed from `skills/` upstream that the mirror never had pruned.
  *
  * Behavior:
  *   • In sync                          → pass
  *   • Mirrors missing entirely         → skip (no mirrors to sync)
  *   • Drift (missing or changed files) → exit 1 with details (devcheck demotes to warning)
+ *   • Stale framework skill in mirror  → exit 1 (mirror-only dir with audience: external)
  *
  * Ignore specific skills or files via `devcheck.config.json`:
  *
@@ -79,6 +81,20 @@ function walkFiles(root: string): string[] {
   return files;
 }
 
+/** Top-level skill directory names under a path (empty when the path is absent). */
+function skillDirNames(root: string): string[] {
+  if (!existsSync(root)) return [];
+  return readdirSync(root, { withFileTypes: true })
+    .filter((e) => e.isDirectory())
+    .map((e) => e.name);
+}
+
+/** True when a skill is framework-managed — its SKILL.md carries `audience: external`. */
+function isFrameworkManaged(skillMdPath: string): boolean {
+  if (!existsSync(skillMdPath)) return false;
+  return /^\s*audience:\s*external\s*$/m.test(readFileSync(skillMdPath, 'utf-8'));
+}
+
 if (!existsSync(SKILLS_DIR)) {
   console.log('Skipped: no skills/ directory.');
   process.exit(0);
@@ -114,11 +130,26 @@ for (const mirror of presentMirrors) {
   if (driftedHere.length) drifted[mirror.label] = driftedHere.sort();
 }
 
+// Stale framework skills: a skill dir present only in a mirror (absent from
+// canonical skills/) is fine when externally sourced, but stale when it carries
+// `audience: external` — a framework skill removed from skills/ that was never
+// pruned from the mirror. User/external skills (no marker) are left alone.
+const canonicalDirs = new Set(skillDirNames(SKILLS_DIR));
+const stale: Record<string, string[]> = {};
+for (const mirror of presentMirrors) {
+  const staleHere = skillDirNames(mirror.path)
+    .filter((name) => !canonicalDirs.has(name) && !isIgnored(name, ignore))
+    .filter((name) => isFrameworkManaged(resolve(mirror.path, name, 'SKILL.md')))
+    .sort();
+  if (staleHere.length) stale[mirror.label] = staleHere;
+}
+
 const totals = {
   missing: Object.values(missing).reduce((n, arr) => n + arr.length, 0),
   drifted: Object.values(drifted).reduce((n, arr) => n + arr.length, 0),
+  stale: Object.values(stale).reduce((n, arr) => n + arr.length, 0),
 };
-const driftCount = totals.missing + totals.drifted;
+const driftCount = totals.missing + totals.drifted + totals.stale;
 
 if (driftCount === 0) {
   console.log(`skills/ is in sync with ${presentMirrors.map((m) => m.label).join(' and ')}.`);
@@ -128,7 +159,7 @@ if (driftCount === 0) {
 const lines: string[] = [];
 lines.push(
   `skills/ has drifted from ${presentMirrors.length > 1 ? 'mirrors' : 'its mirror'} ` +
-    `(${totals.missing} missing, ${totals.drifted} changed).`,
+    `(${totals.missing} missing, ${totals.drifted} changed, ${totals.stale} stale).`,
 );
 
 const renderSection = (title: string, groups: Record<string, string[]>) => {
@@ -141,10 +172,13 @@ const renderSection = (title: string, groups: Record<string, string[]>) => {
 
 renderSection('Missing in', missing);
 renderSection('Content differs in', drifted);
+renderSection('Stale framework skill (deleted upstream) in', stale);
 
 lines.push('');
-lines.push('Fix: propagate skills/ to the mirror(s), or add entries to');
-lines.push('     devcheck.config.json `skillsSync.ignore` to silence specific paths.');
+lines.push('Fix: propagate skills/ to the mirror(s) and delete stale framework skills from them,');
+lines.push(
+  '     or add entries to devcheck.config.json `skillsSync.ignore` to silence specific paths.',
+);
 
 console.log(lines.join('\n'));
 process.exit(1);
