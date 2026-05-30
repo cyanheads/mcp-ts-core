@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.9.15](changelog/0.9.x/0.9.15.md) — 2026-05-29
+
+enrichmentTrailer per-field rendering, ctx.enrich.delta, three new enrichment lint rules, skill-sync prune for upstream-deleted skills, AGENTS.md shipped in npm package, safe format script
+
 ## [0.9.14](changelog/0.9.x/0.9.14.md) — 2026-05-29
 
 The enrichment block on tool(): a typed, success-path contract for agent-facing context — empty-result notices, query echo, pagination totals — populated via ctx.enrich() and surfaced to both structuredContent and content[] without a format() entry. The success-path counterpart to errors[].
