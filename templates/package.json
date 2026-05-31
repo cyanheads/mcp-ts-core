@@ -33,6 +33,7 @@
     "bundle": "npm run build && npx -y @anthropic-ai/mcpb pack . dist/{{PACKAGE_NAME}}.mcpb",
     "changelog:build": "tsx scripts/build-changelog.ts",
     "changelog:check": "tsx scripts/build-changelog.ts --check",
+    "release:github": "tsx scripts/release-github.ts",
     "test": "vitest run",
     "start": "node dist/index.js",
     "start:stdio": "MCP_TRANSPORT_TYPE=stdio node dist/index.js",

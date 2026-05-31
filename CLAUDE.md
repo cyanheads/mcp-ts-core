@@ -1,7 +1,7 @@
 # Developer Protocol
 
 **Package:** `@cyanheads/mcp-ts-core`
-**Version:** 0.9.18
+**Version:** 0.9.19
 **Engines:** Bun ≥1.3.0, Node ≥24.0.0
 **MCP SDK:** `@modelcontextprotocol/sdk` ^1.29.0
 **Zod:** ^4.4.3
@@ -555,6 +555,6 @@ Badge order when both set: `· ⚠️ Breaking · 🛡️ Security`. Summary > 3
 
 ## Publishing
 
-If the user requests it, run the `release-and-publish` skill — it runs the verification gate (`devcheck`, `rebuild`, `test:all`), pushes commits and tags, and publishes to every applicable destination. After pushing, create a GitHub Release on the annotated tag (`gh release create v<VERSION> --verify-tag --notes-from-tag`) — no assets to attach, but the Release surfaces the tag's notes in the repo UI. **Skip the Docker build/push step** — this framework package is consumed via npm, not as a container image.
+If the user requests it, run the `release-and-publish` skill — it runs the verification gate (`devcheck`, `rebuild`, `test:all`), pushes commits and tags, and publishes to every applicable destination. After pushing, create a GitHub Release via `bun run release:github` — no `manifest.json` here so no assets to attach, but the Release surfaces the tag's notes with the correct `v<VERSION>: <subject>` title. **Skip the Docker build/push step** — this framework package is consumed via npm, not as a container image.
 
 **Tag annotations render as GitHub Release bodies** via `--notes-from-tag`. They must be structured markdown — never a flat comma-separated string. Subject must omit the version number (GitHub prepends `v<VERSION>:`). Body uses Keep a Changelog sections with bullets. See `changelog/template.md` for the full format reference including an example.

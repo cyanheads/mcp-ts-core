@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.9.19](changelog/0.9.x/0.9.19.md) — 2026-05-31
+
+withRetry fail-fast on data.retryable === false; bun run release:github enforces v<VERSION>: <subject> title; Gate after column in workflow phase tables
+
 ## [0.9.18](changelog/0.9.x/0.9.18.md) — 2026-05-31
 
 Two devcheck enforcement gates: a metadata.version bump check for SKILL.md body changes (#99), and an AST check for open-indexed-named interfaces (#123).

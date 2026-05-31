@@ -1,6 +1,6 @@
 # mcp-ts-core - Directory Structure
 
-Generated on: 2026-05-31 10:16:15
+Generated on: 2026-05-31 11:05:45
 
 ```text
 mcp-ts-core/
@@ -119,6 +119,7 @@ mcp-ts-core/
 │   ├── lint-mcp.ts
 │   ├── lint-packaging.ts
 │   ├── list-skills.ts
+│   ├── release-github.ts
 │   ├── split-changelog.ts
 │   ├── tree.ts
 │   └── update-coverage.ts

@@ -4,7 +4,7 @@ description: >
   Ship a release end-to-end across every registry the project targets (npm, MCP Registry, GitHub Releases for `.mcpb` bundles, GHCR). Runs the final verification gate, pushes commits and tags, then publishes to each applicable destination. Assumes git wrapup (version bumps, changelog, commit, annotated tag) is already complete — this skill is the post-wrapup publish workflow. Retries transient network failures on publish steps; halts with a partial-state report when retries are exhausted or the failure is terminal.
 metadata:
   author: cyanheads
-  version: "2.7"
+  version: "2.8"
   audience: external
   type: workflow
 ---
@@ -127,34 +127,41 @@ security add-generic-password -a "$USER" -s mcp-publisher-github-pat -w
 
 Halt on any publisher error other than "cannot publish duplicate version".
 
-### 6. Attach MCPB bundle to GitHub Release
+### 6. Create GitHub Release
 
-Only if `manifest.json` exists at the repo root (otherwise skip).
+For all projects (including those without `manifest.json`):
 
-Build the bundle, then create a Release on the existing annotated tag and attach the `.mcpb`. The Release sits on top of the tag from wrapup — `--verify-tag` enforces that the tag already exists on the remote and prevents `gh` from creating a lightweight tag that would shadow the annotated one. `--notes-from-tag` pulls the tag annotation body as release notes. `--title` sets the release title from the tag subject — `--notes-from-tag` alone does NOT set the title (it defaults to the bare tag name, e.g. "v0.1.8" with no theme). The tag subject already omits the version number per the git-wrapup skill, so prepending `v<VERSION>:` produces the correct display title.
+```bash
+bun run release:github
+```
+
+The script (`scripts/release-github.ts`) handles everything in one command:
+
+- Reads `version` from `package.json`
+- Derives the tag subject via `git for-each-ref refs/tags/v<version>`
+- Runs `gh release create v<version> --verify-tag --notes-from-tag --title "v<version>: <subject>"`
+- Attaches `dist/*.mcpb` when `manifest.json` exists (skip the `bun run bundle` step first if not already built — see below)
+- On "release already exists" (re-invocation after a prior partial run): uploads/clobbers the `.mcpb` asset (if applicable) and patches the title via `gh release edit`
+
+**If `manifest.json` exists**, build the bundle first so the asset is ready:
 
 ```bash
 bun run bundle              # produces dist/<name>.mcpb (stable filename, no version)
-SUBJECT=$(git tag -l --format='%(contents:subject)' v<VERSION>)
-gh release create v<VERSION> --verify-tag --notes-from-tag --title "v<VERSION>: $SUBJECT" dist/*.mcpb
+bun run release:github      # attach + release in one step
 ```
 
 The stable filename matters: it lets the README "Install in Claude Desktop" badge point at `releases/latest/download/<name>.mcpb` and always resolve to the most recent release. The `bundle` script in the templates outputs `dist/{{PACKAGE_NAME}}.mcpb` for this reason.
 
-If the release already exists (re-invocation after a prior partial run), `gh release create` exits with "release already exists" — fall back to uploading the asset to the existing release:
-
-```bash
-gh release upload v<VERSION> dist/*.mcpb --clobber
-```
-
-Deterministic download URLs:
+Deterministic download URLs (for MCPB projects):
 
 - Pinned to this version: `https://github.com/<OWNER>/<REPO>/releases/download/v<VERSION>/<name>.mcpb`
 - Always latest (powers the install badge): `https://github.com/<OWNER>/<REPO>/releases/latest/download/<name>.mcpb`
 
 If `server.json` includes an MCPB `packages[]` entry, its `identifier` should match this URL and `fileSha256` should match `shasum -a 256 <bundle>` — keep these in sync during wrapup, not here.
 
-Halt on any error other than "release already exists" (handled via the upload fallback above).
+**Framework note:** `mcp-ts-core` has no `manifest.json` — the bundle attach path is skipped automatically. Skip the Docker build/push step too (this framework package is consumed via npm, not as a container image).
+
+Halt on any non-zero exit not handled by the script's built-in fallback.
 
 ### 7. Publish Docker image
 
@@ -206,7 +213,7 @@ If any check fails, halt and report which destination is unreachable. A successf
 - [ ] Tags pushed to origin
 - [ ] `bun publish --access public` succeeds
 - [ ] `bun run publish-mcp` succeeds (if `server.json` present)
-- [ ] `bun run bundle` + `gh release create --verify-tag --notes-from-tag --title` succeeds (if `manifest.json` present)
+- [ ] `bun run bundle` (if `manifest.json` present) + `bun run release:github` succeeds
 - [ ] Docker buildx multi-arch push succeeds (if `Dockerfile` present)
 - [ ] All published artifacts verified reachable (npm, MCP Registry, GH Release asset, GHCR manifest)
 - [ ] On re-invocation: idempotent-success signals recognized for already-published destinations

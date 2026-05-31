@@ -1,6 +1,6 @@
 {
   "name": "@cyanheads/mcp-ts-core",
-  "version": "0.9.18",
+  "version": "0.9.19",
   "mcpName": "io.github.cyanheads/mcp-ts-core",
   "description": "Agent-native TypeScript framework for building MCP servers. Declarative definitions with auth, multi-backend storage, OpenTelemetry, and first-class support for Bun/Node/Cloudflare Workers.",
   "main": "dist/core/index.js",
@@ -19,6 +19,7 @@
     "scripts/lint-mcp.ts",
     "scripts/lint-packaging.ts",
     "scripts/list-skills.ts",
+    "scripts/release-github.ts",
     "scripts/tree.ts",
     "skills/",
     "templates/",
@@ -161,6 +162,7 @@
     "audit:refresh": "rm -f bun.lock && bun install && bun audit",
     "changelog:build": "bun run scripts/build-changelog.ts",
     "changelog:check": "bun run scripts/build-changelog.ts --check",
+    "release:github": "bun run scripts/release-github.ts",
     "publish-mcp": "mcp-publisher login github -token \"$(security find-generic-password -a \"$USER\" -s mcp-publisher-github-pat -w)\" && mcp-publisher publish"
   },
   "resolutions": {
