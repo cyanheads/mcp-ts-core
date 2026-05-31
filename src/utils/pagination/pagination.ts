@@ -28,6 +28,7 @@ export interface PaginationState {
   /** Zero-based index of the first item in the current page */
   offset: number;
   /** Optional additional state preserved across pages (implementation-specific) */
+  // allow open-indexed-named: generic pagination state for implementer extension
   [key: string]: unknown;
 }
 

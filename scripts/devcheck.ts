@@ -242,6 +242,9 @@ interface DevcheckConfig {
   skillsSync?: {
     ignore?: string[];
   };
+  skillVersions?: {
+    ignore?: string[];
+  };
 }
 
 function loadDevcheckConfig(rootDir: string): DevcheckConfig {
@@ -439,6 +442,21 @@ const ALL_CHECKS: Check[] = [
       `Remove the flagged SDK-coupling shortcut. See ${c.bold('scripts/check-framework-antipatterns.ts')} for rule rationale.`,
   },
   {
+    name: 'Open-Indexed Interfaces',
+    flag: '--no-open-index',
+    canFix: false,
+    // Framework-only AST check (#123): flags interfaces mixing named members with an
+    // open `[key: string]: unknown|any` index signature that lack an opt-out comment.
+    // Not shipped in package.json `files:`, so the existence guard skips it cleanly in
+    // consumer projects — the pattern is common and legitimate in consumer code.
+    getCommand: () => {
+      if (!existsSync(path.join(ROOT_DIR, 'scripts/audit-open-index-signatures.ts'))) return null;
+      return ['bun', 'run', 'scripts/audit-open-index-signatures.ts'];
+    },
+    tip: (c) =>
+      `Add ${c.bold('// allow open-indexed-named: <rationale>')} above the index signature, or use explicit fields. See ${c.bold('scripts/audit-open-index-signatures.ts')}.`,
+  },
+  {
     name: 'Docs Sync',
     flag: '--no-docs-sync',
     canFix: false,
@@ -469,6 +487,27 @@ const ALL_CHECKS: Check[] = [
     },
     tip: (c) =>
       `Propagate ${c.bold('skills/')} to ${c.bold('.agents/skills/')} and ${c.bold('.claude/skills/')}, or add entries to ${c.bold('devcheck.config.json')} ${c.bold('skillsSync.ignore')}.`,
+  },
+  {
+    name: 'Skill Versions',
+    flag: '--no-skill-versions',
+    canFix: false,
+    // Flags skills/<name>/SKILL.md body changes (vs HEAD) that lack a metadata.version
+    // bump (#99). Skipped when skills/ is absent. Drift is demoted to a warning via
+    // isSuccess — the typo/whitespace carve-out lives in devcheck.config.json
+    // `skillVersions.ignore`.
+    getCommand: () => {
+      if (!existsSync(path.join(ROOT_DIR, 'skills'))) return null;
+      return ['bun', 'run', 'scripts/check-skill-versions.ts'];
+    },
+    isSuccess: (result) => {
+      if (result.exitCode === 0) return true;
+      const firstLine =
+        result.stdout.split('\n')[0]?.trim() || 'Skill bodies changed without a version bump.';
+      return { success: true, warning: firstLine };
+    },
+    tip: (c) =>
+      `Bump ${c.bold('metadata.version')} in the changed ${c.bold('SKILL.md')}, or add it to ${c.bold('devcheck.config.json')} ${c.bold('skillVersions.ignore')}.`,
   },
   {
     name: 'Changelog Sync',

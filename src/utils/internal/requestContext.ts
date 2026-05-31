@@ -69,6 +69,7 @@ export interface AuthContext {
    */
   token?: string;
   /** Additional token payload properties not mapped to named fields. */
+  // allow open-indexed-named: forward-extensibility for future JWT claims (post-#121)
   [key: string]: unknown;
 }
 
@@ -136,6 +137,7 @@ export interface RequestContext {
    * service-layer signatures). `RequestContext` itself remains the open
    * "context bag" that the logger and `createRequestContext` build by spread.
    */
+  // allow open-indexed-named: central context bag — handlers attach ad-hoc operation context
   [key: string]: unknown;
 }
 
@@ -201,6 +203,7 @@ export interface CreateRequestContextParams {
   parentContext?: Record<string, unknown> | RequestContext | undefined;
 
   /** Any additional key-value pairs spread directly onto the resulting context. */
+  // allow open-indexed-named: spread params semantics — documented
   [key: string]: unknown;
 }
 

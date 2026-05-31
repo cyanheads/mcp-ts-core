@@ -33,6 +33,7 @@ export interface ErrorContext {
    * Allows for arbitrary additional context information.
    * Keys are strings, and values can be of any type.
    */
+  // allow open-indexed-named: documented arbitrary additional context
   [key: string]: unknown;
 }
 

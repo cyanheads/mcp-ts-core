@@ -1,7 +1,7 @@
 # Developer Protocol
 
 **Package:** `@cyanheads/mcp-ts-core`
-**Version:** 0.9.17
+**Version:** 0.9.18
 **Engines:** Bun ≥1.3.0, Node ≥24.0.0
 **MCP SDK:** `@modelcontextprotocol/sdk` ^1.29.0
 **Zod:** ^4.4.3
@@ -467,7 +467,7 @@ Detailed method signatures, options, and examples live in skill files. Read the 
 
 Each `skills/<name>/SKILL.md` carries `metadata.version` in frontmatter. The `maintenance` skill's Phase A uses this to sync consumer copies — replaces the **entire skill directory** as one unit. Without a version bump, Phase A skips the skill (content-hash backstop catches drift, but noisier).
 
-**Policy:** Bump `metadata.version` when changing any file under `skills/<name>/` — SKILL.md is the single version knob for the directory. Typo/whitespace fixes exempt. One bump per release cycle suffices.
+**Policy:** Bump `metadata.version` when changing any file under `skills/<name>/` — SKILL.md is the single version knob for the directory. Typo/whitespace fixes exempt. One bump per release cycle suffices. Enforced by `bun run devcheck` (`scripts/check-skill-versions.ts`): a SKILL.md body change vs `HEAD` without a `metadata.version` bump surfaces as a warning; whitespace-only edits are ignored, and `devcheck.config.json` `skillVersions.ignore` opts out the typo-fix carve-out.
 
 Skills live in `skills/<name>/SKILL.md`. Read the relevant skill before starting a task it covers. The full list is discoverable via the agent's skill registry at session start.
 

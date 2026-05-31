@@ -1,6 +1,6 @@
 # mcp-ts-core - Directory Structure
 
-Generated on: 2026-05-31 05:40:28
+Generated on: 2026-05-31 10:16:15
 
 ```text
 mcp-ts-core/
@@ -105,10 +105,12 @@ mcp-ts-core/
 │   ├── index.ts
 │   └── worker.ts
 ├── scripts/
+│   ├── audit-open-index-signatures.ts
 │   ├── build-changelog.ts
 │   ├── build.ts
 │   ├── check-docs-sync.ts
 │   ├── check-framework-antipatterns.ts
+│   ├── check-skill-versions.ts
 │   ├── check-skills-sync.ts
 │   ├── clean.ts
 │   ├── devcheck.ts

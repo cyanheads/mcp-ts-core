@@ -49,6 +49,7 @@ export interface ToolAnnotations {
    * If provided, it may be used by clients instead of the programmatic `name`.
    */
   title?: string;
+  // allow open-indexed-named: MCP spec — annotation hints are extensible by design
   [key: string]: unknown;
 }
 
