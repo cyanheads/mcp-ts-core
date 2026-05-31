@@ -4,7 +4,7 @@ description: >
   Scaffold a new service integration. Use when the user asks to add a service, integrate an external API, or create a reusable domain module with its own initialization and state.
 metadata:
   author: cyanheads
-  version: "1.6"
+  version: "1.7"
   audience: external
   type: reference
 ---
@@ -131,7 +131,7 @@ async fetchItem(id: string, ctx: Context): Promise<Item> {
 
 1. **Calibrate backoff to the upstream.** 200–500ms for ephemeral failures, 1–2s for rate-limited APIs, 2–5s for service degradation. The default `baseDelayMs: 1000` suits most APIs.
 2. **Check HTTP status before parsing.** `fetchWithTimeout` already throws on non-OK responses with granular status mapping (401→`Unauthorized`, 403→`Forbidden`, 404→`NotFound`, 408/425→`Timeout`, 422→`ValidationError`, 429→`RateLimited`, 5xx→`ServiceUnavailable`/`InternalError`) — this prevents feeding HTML error pages into XML/JSON parsers.
-3. **Classify parse failures by content.** If the upstream returns HTTP 200 with an HTML error page, detect it and throw `ServiceUnavailable` (transient) instead of `SerializationError` (non-transient).
+3. **Classify parse failures by content.** If the upstream returns HTTP 200 with an HTML error page, detect it and throw `ServiceUnavailable` (transient) instead of `SerializationError` (non-transient). **Exception — deterministic HTTP 200 errors fail fast, not transient.** Some upstreams return HTTP 200 with a structured error body for failures that will *never* succeed regardless of how many times you retry: a query too expensive for the server's budget, an oversized result set, or a malformed request the server rejects. Retrying these wastes upstream capacity and delays the client. Declare them in the contract with `retryable: false` (or pass `{ retryable: false }` in `data` at the throw site) — `withRetry`'s default predicate reads `error.data.retryable === false` and fails immediately, even for `Timeout`/`ServiceUnavailable` codes. `ctx.fail` auto-populates `data.retryable` from the contract entry, so declaring it once in `errors[]` is enough.
 4. **Exhausted retries say so.** `withRetry` automatically enriches the final error with attempt count — callers know retries were already attempted.
 
 ### When you need finer-grained HTTP error classification

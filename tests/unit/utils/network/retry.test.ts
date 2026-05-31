@@ -234,4 +234,94 @@ describe('withRetry', () => {
 
     await expect(resultPromise).resolves.toBe('boom');
   });
+
+  // -----------------------------------------------------------------------
+  // data.retryable opt-out (#174)
+  // -----------------------------------------------------------------------
+
+  it('fails fast for a transient-coded McpError when data.retryable === false', async () => {
+    const failure = new McpError(JsonRpcErrorCode.Timeout, 'query too expensive', {
+      retryable: false,
+    });
+    const fn = vi.fn().mockRejectedValue(failure);
+
+    await expect(withRetry(fn, { maxRetries: 3 })).rejects.toBe(failure);
+    expect(fn).toHaveBeenCalledTimes(1);
+    expect(debugSpy).not.toHaveBeenCalled();
+  });
+
+  it('still retries a transient-coded McpError when data.retryable is absent', async () => {
+    vi.useFakeTimers();
+
+    const failure = new McpError(JsonRpcErrorCode.Timeout, 'ephemeral timeout');
+    const fn = vi
+      .fn<() => Promise<string>>()
+      .mockRejectedValueOnce(failure)
+      .mockResolvedValueOnce('ok');
+
+    const promise = withRetry(fn, { baseDelayMs: 10, jitter: 0, maxRetries: 1 });
+
+    await vi.advanceTimersByTimeAsync(10);
+
+    await expect(promise).resolves.toBe('ok');
+    expect(fn).toHaveBeenCalledTimes(2);
+  });
+
+  it('still retries a transient-coded McpError when data.retryable === true', async () => {
+    vi.useFakeTimers();
+
+    const failure = new McpError(JsonRpcErrorCode.ServiceUnavailable, 'upstream down', {
+      retryable: true,
+    });
+    const fn = vi
+      .fn<() => Promise<string>>()
+      .mockRejectedValueOnce(failure)
+      .mockResolvedValueOnce('recovered');
+
+    const promise = withRetry(fn, { baseDelayMs: 10, jitter: 0, maxRetries: 1 });
+
+    await vi.advanceTimersByTimeAsync(10);
+
+    await expect(promise).resolves.toBe('recovered');
+    expect(fn).toHaveBeenCalledTimes(2);
+  });
+
+  it('custom isTransient option fully replaces the default predicate (including data.retryable)', async () => {
+    vi.useFakeTimers();
+
+    // Even with data.retryable === false, the custom predicate overrides.
+    const failure = new McpError(JsonRpcErrorCode.Timeout, 'timed out', { retryable: false });
+    const fn = vi.fn().mockRejectedValue(failure);
+
+    const resultPromise = withRetry(fn, {
+      baseDelayMs: 5,
+      jitter: 0,
+      isTransient: () => true,
+      maxRetries: 3,
+    }).catch((e) => e);
+
+    await vi.advanceTimersByTimeAsync(200);
+
+    const result = await resultPromise;
+    expect(result).toMatchObject({ message: expect.stringContaining('failed after 4 attempts') });
+    expect(fn).toHaveBeenCalledTimes(4);
+  });
+
+  it('non-McpError is still treated as transient regardless of any retryable property', async () => {
+    vi.useFakeTimers();
+
+    // A plain Error with a retryable-looking property — should still retry
+    const failure = Object.assign(new Error('network blip'), { retryable: false });
+    const fn = vi
+      .fn<() => Promise<string>>()
+      .mockRejectedValueOnce(failure)
+      .mockResolvedValueOnce('ok');
+
+    const promise = withRetry(fn, { baseDelayMs: 10, jitter: 0, maxRetries: 1 });
+
+    await vi.advanceTimersByTimeAsync(10);
+
+    await expect(promise).resolves.toBe('ok');
+    expect(fn).toHaveBeenCalledTimes(2);
+  });
 });

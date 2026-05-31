@@ -377,6 +377,17 @@ export type HandlerContext<
  * data, which is spread first and then overwritten so the contract reason
  * wins. This keeps `data.reason` a stable observability identifier.
  *
+ * **`data.retryable` precedence.** When the contract entry declares `retryable`,
+ * it is used as the base default. Caller-supplied `data.retryable` (per-occurrence
+ * override) is then spread on top, so a throw site can still override the
+ * contract default for that one occurrence. `reason` is always forced last.
+ * Only the `retryable` key is injected when the entry actually declares it —
+ * entries without the field produce no `retryable` key on `data`.
+ *
+ * Net effect: `withRetry`'s default predicate receives `data.retryable === false`
+ * automatically for any contract entry that declares `retryable: false`, so
+ * deterministic failures fail fast without a per-throw-site flag.
+ *
  * If the reason isn't in the contract — a JS caller or stale contract slipping
  * past the `TypedFail` type-system guard — `createFail` returns an
  * `McpError(InternalError)` with diagnostic data (`{ reason, declaredReasons }`)
@@ -399,10 +410,18 @@ export function createFail(errors: readonly ErrorContract[]): TypedFail<string> 
         options,
       );
     }
-    // `reason` is spread last so caller-supplied `data.reason` (accidental or
-    // adversarial) cannot override the contract reason — preserves the
-    // observability invariant that `data.reason` always matches the contract.
-    return new McpError(entry.code, message ?? entry.when, { ...data, reason }, options);
+    // Precedence (last write wins):
+    //   1. contract `retryable` as base default (only when the entry declares it)
+    //   2. caller-supplied `data` (per-occurrence override, spread over the default)
+    //   3. contract `reason` forced last (never overridable — observability invariant)
+    const retryableBase =
+      entry.retryable !== undefined ? { retryable: entry.retryable } : undefined;
+    return new McpError(
+      entry.code,
+      message ?? entry.when,
+      { ...retryableBase, ...data, reason },
+      options,
+    );
   };
 }
 

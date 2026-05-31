@@ -258,9 +258,13 @@ export type ErrorResponse = z.infer<typeof ErrorSchema>;
  * - Use `when` for the natural-language explanation, not the message that ends
  *   up on the error itself. The error's runtime `message` is per-occurrence;
  *   `when` is the type-level description.
- * - Set `retryable` for ergonomics — clients can adjust their backoff strategy
- *   without re-deriving from the code. When omitted, callers can infer from
- *   the code (see `getErrorCategory`).
+ * - Set `retryable` on every entry where retry behavior matters. It drives two
+ *   things: (1) `withRetry`'s default predicate fails fast when
+ *   `data.retryable === false`, even for transient-coded errors — so deterministic
+ *   failures don't hammer the upstream; (2) `ctx.fail` auto-populates
+ *   `data.retryable` from the contract entry so no per-throw-site flag is needed.
+ *   A caller can still override per-occurrence by passing `data.retryable`
+ *   explicitly. When omitted, callers infer retryability from the code.
  *
  * @example
  * ```ts
@@ -309,8 +313,29 @@ export interface ErrorContract {
    */
   recovery: string;
   /**
-   * Whether the failure is transient (eligible for retry). Optional hint for
-   * clients; when omitted, callers fall back to inferring from the code.
+   * Whether the failure is transient (eligible for retry).
+   *
+   * This field is now wired to two distinct audiences:
+   *
+   * **Retry engine (`withRetry`).** The default predicate (`defaultIsTransient`)
+   * checks `error.data.retryable === false` and fails fast when set, even when the
+   * error code is in the transient set (`Timeout`, `ServiceUnavailable`,
+   * `RateLimited`). This lets deterministic upstream failures (e.g. a query too
+   * expensive to ever succeed) fail immediately without hammering the upstream
+   * through all retry attempts.
+   *
+   * **Auto-population via `ctx.fail`.** `createFail` uses the contract entry's
+   * `retryable` as a base default on `data.retryable`, so every `ctx.fail(reason)`
+   * call automatically carries the right flag — no per-throw-site flag needed.
+   * A caller can still override it per-occurrence by passing `data.retryable`
+   * explicitly; `reason` is always forced last regardless.
+   *
+   * **Client backoff hint.** Clients that don't use `withRetry` can read
+   * `error.data.retryable` to decide their own backoff strategy; when omitted,
+   * they fall back to inferring from the code.
+   *
+   * When omitted from a contract entry, no `retryable` key is injected onto
+   * `data` — callers can still infer from the code.
    */
   retryable?: boolean;
   /**

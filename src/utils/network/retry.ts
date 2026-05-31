@@ -41,8 +41,14 @@ export interface RetryOptions {
 
   /**
    * Custom predicate to determine if an error is transient and should be
-   * retried. When provided, this replaces the default `McpError` code check.
-   * Return `true` to retry, `false` to fail immediately.
+   * retried. When provided, this **replaces** the default predicate entirely
+   * (including the `data.retryable === false` opt-out). Return `true` to
+   * retry, `false` to fail immediately.
+   *
+   * Use this only when you need fully custom classification logic. For the
+   * common case of opting a single throw site out of retry, set
+   * `data.retryable: false` on the thrown `McpError` instead — the default
+   * predicate handles it automatically.
    */
   isTransient?: (error: unknown) => boolean;
 
@@ -100,9 +106,21 @@ function computeDelay(
 /**
  * Default transient check: `McpError` with a transient code, or any non-McpError
  * (network failures, unexpected throws) which are assumed transient.
+ *
+ * **Per-error opt-out.** When a thrown `McpError` carries `data.retryable === false`,
+ * the error is treated as non-transient and fails fast — even if its code is in
+ * `TRANSIENT_CODES`. This is the in-band escape hatch for deterministic upstream
+ * failures (e.g. a query too expensive to ever succeed surfaced as HTTP 200 +
+ * error body) that arrive with a transient code but should never be retried.
+ *
+ * Absent the flag (or when it is `true`), behavior is unchanged — code-based
+ * classification applies. Non-`McpError` throws (raw network errors, unexpected
+ * throws) are always assumed transient regardless of the flag.
  */
 function defaultIsTransient(error: unknown): boolean {
   if (error instanceof McpError) {
+    // Explicit opt-out wins over code-based classification.
+    if (error.data?.retryable === false) return false;
     return TRANSIENT_CODES.has(error.code);
   }
   // Non-McpError (raw network errors, unexpected throws) — assume transient
@@ -141,6 +159,13 @@ function enrichExhaustedError(error: unknown, totalAttempts: number, operation?:
  * The retry boundary should wrap the **full pipeline** — HTTP fetch, response
  * parsing, and validation — not just the network call. This ensures that
  * transient upstream errors (e.g., HTTP 200 with an error body) are retried.
+ *
+ * **Deterministic-failure opt-out.** When the thrown `McpError` carries
+ * `data.retryable === false`, the default predicate treats it as non-transient
+ * and fails immediately — even for `Timeout`/`ServiceUnavailable`/`RateLimited`
+ * codes. Use this at the throw site (or let the error contract auto-populate it
+ * via `ctx.fail`) for failures that can never succeed on retry (oversized query,
+ * malformed request surfaced as HTTP 200 + error body, etc.).
  *
  * When retries exhaust, the final error is enriched with attempt count in both
  * the message and structured data, so callers know retries were already attempted.

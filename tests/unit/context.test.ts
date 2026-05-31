@@ -745,11 +745,104 @@ describe('createContext', () => {
         ...ctx.recoveryFor('rate_limited'),
       });
 
+      // retryable: true is now auto-populated from the contract entry (#174).
       expect(err.data).toEqual({
         reason: 'rate_limited',
+        retryable: true,
         attempt: 3,
         recovery: { hint: 'Wait a few seconds before retrying.' },
       });
+    });
+  });
+
+  // -----------------------------------------------------------------------
+  // createFail — data.retryable auto-population from contract (#174)
+  // -----------------------------------------------------------------------
+
+  describe('createFail — data.retryable auto-population', () => {
+    it('populates data.retryable === false when the contract entry declares retryable: false', () => {
+      const ctx = attachTypedFail(createContext(makeDeps()), [
+        {
+          reason: 'query_timeout',
+          code: JsonRpcErrorCode.Timeout,
+          when: 'Query exceeded budget',
+          retryable: false,
+          recovery: 'Simplify the query or reduce the result set before retrying.',
+        },
+      ]);
+
+      const err = (ctx as any).fail('query_timeout');
+
+      expect(err.data?.retryable).toBe(false);
+      expect(err.data?.reason).toBe('query_timeout');
+    });
+
+    it('populates data.retryable === true when the contract entry declares retryable: true', () => {
+      const ctx = attachTypedFail(createContext(makeDeps()), [
+        {
+          reason: 'upstream_down',
+          code: JsonRpcErrorCode.ServiceUnavailable,
+          when: 'Upstream unreachable',
+          retryable: true,
+          recovery: 'Wait a few minutes and retry the request.',
+        },
+      ]);
+
+      const err = (ctx as any).fail('upstream_down');
+
+      expect(err.data?.retryable).toBe(true);
+    });
+
+    it('caller-supplied data.retryable overrides the contract default (per-occurrence wins)', () => {
+      // Contract says retryable: false, but caller overrides to true for this occurrence.
+      const ctx = attachTypedFail(createContext(makeDeps()), [
+        {
+          reason: 'query_timeout',
+          code: JsonRpcErrorCode.Timeout,
+          when: 'Query exceeded budget',
+          retryable: false,
+          recovery: 'Simplify the query or reduce the result set before retrying.',
+        },
+      ]);
+
+      const err = (ctx as any).fail('query_timeout', undefined, { retryable: true });
+
+      expect(err.data?.retryable).toBe(true);
+      // reason is still the contract reason — not affected by caller data
+      expect(err.data?.reason).toBe('query_timeout');
+    });
+
+    it('no retryable key on data when the contract entry omits retryable', () => {
+      const ctx = attachTypedFail(createContext(makeDeps()), [
+        {
+          reason: 'no_match',
+          code: JsonRpcErrorCode.NotFound,
+          when: 'No items matched',
+          recovery: 'Try a different identifier and retry the call.',
+        },
+      ]);
+
+      const err = (ctx as any).fail('no_match');
+
+      expect(err.data).not.toHaveProperty('retryable');
+      expect(err.data?.reason).toBe('no_match');
+    });
+
+    it('reason is always the contract reason regardless of caller data', () => {
+      const ctx = attachTypedFail(createContext(makeDeps()), [
+        {
+          reason: 'query_timeout',
+          code: JsonRpcErrorCode.Timeout,
+          when: 'Query exceeded budget',
+          retryable: false,
+          recovery: 'Simplify the query or reduce the result set before retrying.',
+        },
+      ]);
+
+      // Caller tries to pass a different reason in data — should be overridden.
+      const err = (ctx as any).fail('query_timeout', undefined, { reason: 'something_else' });
+
+      expect(err.data?.reason).toBe('query_timeout');
     });
   });
 });

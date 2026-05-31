@@ -75,6 +75,8 @@ describe('createFail (runtime)', () => {
       reason: 'rate_limited',
       retryAfterMs: 5000,
       upstream: 'pubmed',
+      // Auto-populated from the contract entry — `rate_limited` declares `retryable: true`.
+      retryable: true,
     });
   });
 
