@@ -52,26 +52,26 @@ Everything stays at **v0.1.0** through the build. Intermediate commits don't bum
 
 Each phase's Objective column is the goal state per target — the verifiable end state the phase must produce. Phase notes only appear for orchestration overrides; phases without notes run the foundational skill end-to-end.
 
-| # | Phase | Objective | Sub-agent mode |
-|:--|:---|:---|:---|
-| 1 | Scaffold + repo | `bunx init` scaffold complete; `--private` GH repo created; LICENSE in place; working tree dirty (no commit) | parallel fanout |
-| 2 | Initial commit | v0.1.0 commit + annotated tag + push to private GH repo | parallel fanout |
-| 3 | Design | `docs/design.md` authored with Decisions Log | parallel fanout |
-| 4 | Design validation | `docs/design.md` hardened by review pass; gate sub-agent returned PASS | two sub-agents per target |
-| 5 | Design commit | Design changes committed and pushed | parallel fanout |
-| 6 | Build | All designed tools/resources/prompts implemented; no echo definitions; `devcheck` + `test` green | parallel fanout |
-| 7 | Tool-def audit | `tool-defs-analysis` findings reviewed and applied | parallel fanout |
-| 8 | Test coverage | Tests extended beyond happy path; `devcheck` + `test` green | parallel fanout |
-| 9 | Design ↔ implementation check | Every surface element in `docs/design.md` has a definition (or `docs/design.md` updated to reflect what shipped) | parallel fanout or orchestrator-direct |
-| 10 | Build commit | Build work committed and pushed | parallel fanout |
-| 11 | Field-test loop (optional) | Live API surface exercised; valid findings filed and fixed (or skipped with note) | conditional |
-| 12 | Simplify | `code-simplifier` applied; `devcheck` + `test` green — last source-code modification | parallel fanout |
-| 13 | Polish docs/meta | README, metadata, and agent protocol aligned to gold-standard reference | parallel fanout |
-| 14 | Security pass | `security-pass` findings addressed; no open security gaps | parallel fanout |
-| 15 | Final-state check | `rebuild` + `devcheck` + `test:all` + `lint:packaging` green; LICENSE present; no unfinished TODO/FIXME | orchestrator-direct |
-| 16 | Pre-launch commit | Final polish + security work committed and pushed | parallel fanout |
-| 17 | Final wrap-up | Launch version (typically v0.1.1) commit + annotated tag in place; **not pushed** | parallel fanout (Bash git only) |
-| 18 | Release | Pushed and published per scope; tag annotation renders as structured markdown on GitHub Release; artifacts reachable | parallel fanout or serial (per npm 2FA mode) |
+| # | Phase | Objective | Sub-agent mode | Gate after |
+|:--|:---|:---|:---|:---|
+| 1 | Scaffold + repo | `bunx init` scaffold complete; `--private` GH repo created; LICENSE in place; working tree dirty (no commit) | parallel fanout | gate-free |
+| 2 | Initial commit | v0.1.0 commit + annotated tag + push to private GH repo | parallel fanout | gate-free |
+| 3 | Design | `docs/design.md` authored with Decisions Log | parallel fanout | gate-free |
+| 4 | Design validation | `docs/design.md` hardened by review pass; gate sub-agent returned PASS | two sub-agents per target | **barrier** — gate sub-agent must return PASS (or FAIL → fix loop) before build proceeds |
+| 5 | Design commit | Design changes committed and pushed | parallel fanout | gate-free |
+| 6 | Build | All designed tools/resources/prompts implemented; no echo definitions; `devcheck` + `test` green | parallel fanout | **barrier** — orchestrator inspects each target and spawns finish sub-agents for incomplete work (cross-target synthesis) |
+| 7 | Tool-def audit | `tool-defs-analysis` findings reviewed and applied | parallel fanout | gate-free |
+| 8 | Test coverage | Tests extended beyond happy path; `devcheck` + `test` green | parallel fanout | gate-free |
+| 9 | Design ↔ implementation check | Every surface element in `docs/design.md` has a definition (or `docs/design.md` updated to reflect what shipped) | parallel fanout or orchestrator-direct | gate-free |
+| 10 | Build commit | Build work committed and pushed | parallel fanout | gate-free |
+| 11 | Field-test loop (optional) | Live API surface exercised; valid findings filed and fixed (or skipped with note) | conditional | gate-free |
+| 12 | Simplify | `code-simplifier` applied; `devcheck` + `test` green — last source-code modification | parallel fanout | gate-free |
+| 13 | Polish docs/meta | README, metadata, and agent protocol aligned to gold-standard reference | parallel fanout | gate-free |
+| 14 | Security pass | `security-pass` findings addressed; no open security gaps | parallel fanout | gate-free |
+| 15 | Final-state check | `rebuild` + `devcheck` + `test:all` + `lint:packaging` green; LICENSE present; no unfinished TODO/FIXME | orchestrator-direct | gate-free |
+| 16 | Pre-launch commit | Final polish + security work committed and pushed | parallel fanout | **barrier** — human decision: version-bump intent (typically v0.1.1) |
+| 17 | Final wrap-up | Launch version (typically v0.1.1) commit + annotated tag in place; **not pushed** | parallel fanout (Bash git only) | **barrier** — release authorization required before push and publish |
+| 18 | Release | Pushed and published per scope; tag annotation renders as structured markdown on GitHub Release; artifacts reachable | parallel fanout or serial (per npm 2FA mode) | — |
 
 Phase 11 is optional. Phase 12 is the last phase that modifies source code — everything after is docs/metadata/verification.
 

@@ -49,15 +49,15 @@ Per target:
 
 Each phase's Objective column is the goal state per target — the verifiable end state the phase must produce.
 
-| # | Phase | Objective | Sub-agent mode |
-|:--|:---|:---|:---|
-| 1 | Field-test | Per target: live tool/resource/prompt surface exercised across happy/error/edge paths; valid findings filed as GH issues against the server's own repo; noise filtered | parallel fanout per target; within a target, 1 or 3 sub-agents (see below) |
-| 2 | Issue triage | Per-target GH issue count + severity breakdown reconciled against actual GH state | orchestrator (serial) |
-| 3 | Fix | Per target: priority issues fixed in source, tests updated, `devcheck` + `test` green, each issue commented with fix details, working tree dirty for review | parallel fanout (one sub-agent per target — hard constraint) |
-| 4 | Verify | Per target: full diff cold-reviewed; simplified if warranted; each fix re-exercised against the running server with actual tool output in the summary | parallel fanout |
-| 5 | Loop decision | Orchestrator decision recorded — proceed to release, loop another field-test cycle, or pause/surface to user. Evidence-based | orchestrator (serial) |
-| 6 | Wrap-up + release | (Optional) Per target: fixes split into per-file commits with a release commit on top; annotated tag; published per repo visibility; tag annotation is structured markdown with issue backlinks | parallel fanout (Bash git only) |
-| 7 | Issue cleanup | Every GH issue that shipped a fix closed with "Fixed in v\<version\>" comment; skipped issues remain open | orchestrator (serial) |
+| # | Phase | Objective | Sub-agent mode | Gate after |
+|:--|:---|:---|:---|:---|
+| 1 | Field-test | Per target: live tool/resource/prompt surface exercised across happy/error/edge paths; valid findings filed as GH issues against the server's own repo; noise filtered | parallel fanout per target; within a target, 1 or 3 sub-agents (see below) | **barrier** — cross-target synthesis: orchestrator reconciles all findings before filing triage |
+| 2 | Issue triage | Per-target GH issue count + severity breakdown reconciled against actual GH state | orchestrator (serial) | gate-free |
+| 3 | Fix | Per target: priority issues fixed in source, tests updated, `devcheck` + `test` green, each issue commented with fix details, working tree dirty for review | parallel fanout (one sub-agent per target — hard constraint) | gate-free |
+| 4 | Verify | Per target: full diff cold-reviewed; simplified if warranted; each fix re-exercised against the running server with actual tool output in the summary | parallel fanout | **barrier** — orchestrator loop decision (human/evidence-based: proceed, loop, or surface to user) |
+| 5 | Loop decision | Orchestrator decision recorded — proceed to release, loop another field-test cycle, or pause/surface to user. Evidence-based | orchestrator (serial) | **barrier** — release authorization required before advancing |
+| 6 | Wrap-up + release | (Optional) Per target: fixes split into per-file commits with a release commit on top; annotated tag; published per repo visibility; tag annotation is structured markdown with issue backlinks | parallel fanout (Bash git only) | gate-free |
+| 7 | Issue cleanup | Every GH issue that shipped a fix closed with "Fixed in v\<version\>" comment; skipped issues remain open | orchestrator (serial) | — |
 
 Phase 6 is optional — stop earlier if release isn't authorized. Phase 7 only runs if Phase 6 ran.
 

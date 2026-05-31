@@ -57,13 +57,13 @@ Per target:
 
 Each phase's Objective column is the goal state per target — the verifiable end state the phase must produce.
 
-| # | Phase | Objective | Sub-agent mode |
-|:--|:---|:---|:---|
-| 1a | Validate (conditional) | Each handoff finding field-tested live; valid ones filed as GH issues; invalidated ones reported back with reason. If zero validate, workflow stops | one sub-agent per target |
-| 1b | Fix | Per target: targeted issues fixed in source, tests updated/added, `devcheck` + `rebuild` + `test` green, each fixed issue commented with fix details, working tree dirty for review | parallel fanout (one sub-agent per target — hard constraint) |
-| 2 | Verify | Per target: full diff cold-reviewed; simplified if warranted; each fix re-exercised against the running server with actual tool output in the summary | parallel fanout |
-| 3 | Wrap-up + release | Per target: fixes split into per-file commits with a release commit on top; annotated tag; published per repo visibility; tag annotation is structured markdown with issue backlinks | parallel fanout (Bash git only) |
-| 4 | Issue cleanup | Every GH issue that shipped a fix closed with "Fixed in v\<version\>" comment | orchestrator (serial) |
+| # | Phase | Objective | Sub-agent mode | Gate after |
+|:--|:---|:---|:---|:---|
+| 1a | Validate (conditional) | Each handoff finding field-tested live; valid ones filed as GH issues; invalidated ones reported back with reason. If zero validate, workflow stops | one sub-agent per target | **barrier** — cross-target synthesis: orchestrator confirms validated findings before fix proceeds (or stops workflow if zero validate) |
+| 1b | Fix | Per target: targeted issues fixed in source, tests updated/added, `devcheck` + `rebuild` + `test` green, each fixed issue commented with fix details, working tree dirty for review | parallel fanout (one sub-agent per target — hard constraint) | **barrier** — orchestrator reviews diffs before verify (explicit gate in checklist) |
+| 2 | Verify | Per target: full diff cold-reviewed; simplified if warranted; each fix re-exercised against the running server with actual tool output in the summary | parallel fanout | **barrier** — orchestrator reviews simplified diff and verified outputs; release authorization required |
+| 3 | Wrap-up + release | Per target: fixes split into per-file commits with a release commit on top; annotated tag; published per repo visibility; tag annotation is structured markdown with issue backlinks | parallel fanout (Bash git only) | gate-free |
+| 4 | Issue cleanup | Every GH issue that shipped a fix closed with "Fixed in v\<version\>" comment | orchestrator (serial) | — |
 
 Phase 1a is conditional — only runs when the input is a handoff document or otherwise unvalidated. When the input is already tracked GH issues, skip directly to Phase 1b. The release portion of Phase 3 is conditional on user authorization to ship.
 

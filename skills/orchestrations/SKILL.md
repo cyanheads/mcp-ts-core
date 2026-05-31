@@ -4,7 +4,7 @@ description: >
   Pick and run a multi-phase workflow that chains foundational task skills (`git-wrapup`, `release-and-publish`, `maintenance`, `field-test`, `setup`, etc.) end-to-end. Routes user intent to a workflow file under `workflows/` — greenfield builds, maintenance + release, field-test + fix, or known-work + release. Single source for the universal rules (no commits without authorization, no destructive git, no marketing language), the orchestrator posture (own the goal, ground sub-agents in primary sources, verify against the goal), and the sub-agent strategy (orient block, parallel fanout, isolation, normalization) that apply across every workflow. Sub-agents are an optional capability — workflows run linearly when fanout isn't available.
 metadata:
   author: cyanheads
-  version: "1.1"
+  version: "1.2"
   audience: internal
   type: workflow
 ---
@@ -157,7 +157,7 @@ For N targets in a phase:
 3. Collect their reports
 4. Verify with a read-only orchestrator check before advancing to the next phase
 
-**Barriers only where gates sit.** Step 4's "advance to the next phase" implies a barrier — collect every target's phase-N result before any target starts phase N+1. That barrier is only required when a gate sits between the phases: a human decision (authorization, version-bump intent) or cross-target synthesis (the roll-up). Where no gate intervenes, a target may flow through consecutive phases independently — tier-3 platforms pipeline this for wall-clock, and even hand-spawned runs can let one sub-agent carry a target across adjacent gate-free phases. Keep the barrier at gate boundaries; drop it elsewhere.
+**Barriers only where gates sit.** Step 4's "advance to the next phase" implies a barrier — collect every target's phase-N result before any target starts phase N+1. That barrier is only required when a gate sits between the phases: a human decision (authorization, version-bump intent) or cross-target synthesis (the roll-up). Where no gate intervenes, a target may flow through consecutive phases independently — tier-3 platforms pipeline this for wall-clock, and even hand-spawned runs can let one sub-agent carry a target across adjacent gate-free phases. Keep the barrier at gate boundaries; drop it elsewhere. Each workflow's phases table encodes this directly: the `Gate after` column marks every boundary as `barrier` (with a terse reason) or `gate-free` so the spawn/round structure is derivable without re-derivation.
 
 ### Editor / wrap-up separation
 

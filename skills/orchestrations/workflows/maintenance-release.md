@@ -46,12 +46,12 @@ Per target:
 
 Each phase's Objective column is the goal state per target — the verifiable end state the phase must produce.
 
-| # | Phase | Objective | Sub-agent mode |
-|:--|:---|:---|:---|
-| 1 | Maintenance | Per target: deps updated, framework adoption applied, project skills synced, `rebuild` + `devcheck` + `test` green, Step 8 numbered summary returned | parallel fanout |
-| 2 | Double-check | Adoption gaps from Phase 1 fixed; `manifest.json`/`server.json` content validated; audience compliance verified; `rebuild` + `devcheck` + `test` green | parallel fanout |
-| 3 | Roll-up | Per-target headlines + cross-target patterns surfaced to user; version-bump intent confirmed (patch/minor/major) | orchestrator (serial) |
-| 4 | Wrap-up + release | Per target: version-bumped commit + annotated tag + push + publish per scope; tag annotation renders as structured markdown on GitHub Release | parallel fanout (Bash git only) |
+| # | Phase | Objective | Sub-agent mode | Gate after |
+|:--|:---|:---|:---|:---|
+| 1 | Maintenance | Per target: deps updated, framework adoption applied, project skills synced, `rebuild` + `devcheck` + `test` green, Step 8 numbered summary returned | parallel fanout | gate-free |
+| 2 | Double-check | Adoption gaps from Phase 1 fixed; `manifest.json`/`server.json` content validated; audience compliance verified; `rebuild` + `devcheck` + `test` green | parallel fanout | **barrier** — cross-target synthesis: orchestrator roll-up + human decision on version-bump intent |
+| 3 | Roll-up | Per-target headlines + cross-target patterns surfaced to user; version-bump intent confirmed (patch/minor/major) | orchestrator (serial) | **barrier** — release authorization required before wrap-up and publish |
+| 4 | Wrap-up + release | Per target: version-bumped commit + annotated tag + push + publish per scope; tag annotation renders as structured markdown on GitHub Release | parallel fanout (Bash git only) | — |
 
 Phase 4 combines wrap-up and release in one sub-agent because the work is sequential and shares context (version, changelog, tag annotation). The sub-agent reads both Tier 1 skills.
 
