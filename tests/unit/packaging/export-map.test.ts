@@ -29,6 +29,7 @@ const EXPECTED_PUBLIC_SUBPATHS = [
   './config',
   './errors',
   './linter',
+  './mirror',
   './package.json',
   './prompts',
   './resources',

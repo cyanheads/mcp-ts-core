@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.9.17](changelog/0.9.x/0.9.17.md) — 2026-05-30
+
+MirrorService — persistent, self-refreshing local mirror of a bulk upstream dataset (embedded SQLite + FTS5) via new @cyanheads/mcp-ts-core/mirror subpath
+
 ## [0.9.16](changelog/0.9.x/0.9.16.md) — 2026-05-29
 
 enrichmentTrailer.render switched to method syntax so tools declaring an enrichment block stay assignable to AnyToolDefinition — fixes the 0.9.15 createApp({ tools }) typecheck regression for every enrichment tool

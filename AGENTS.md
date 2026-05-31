@@ -1,7 +1,7 @@
 # Developer Protocol
 
 **Package:** `@cyanheads/mcp-ts-core`
-**Version:** 0.9.16
+**Version:** 0.9.17
 **Engines:** Bun ≥1.3.0, Node ≥24.0.0
 **MCP SDK:** `@modelcontextprotocol/sdk` ^1.29.0
 **Zod:** ^4.4.3
@@ -56,6 +56,7 @@ Both paths share the same public API. Init copies starter `package.json`, config
 | `/storage` | `StorageService` | Storage abstraction |
 | `/storage/types` | `IStorageProvider` | Provider interface |
 | `/canvas` | `DataCanvas`, `CanvasInstance`, `CanvasRegistry`, `IDataCanvasProvider`, `DuckdbProvider`, `spillover`, `inferSchemaFromRows`, `assertReadOnlyQuery`, `quoteIdentifier`, ... | DataCanvas primitive (Tier 3, optional peer dep `@duckdb/node-api`); SQL/analytical workspace + source-agnostic spillover helper |
+| `/mirror` | `defineMirror`, `sqliteMirrorStore`, `buildSchemaSql`, `openSqliteHandle`, `Mirror`, `MirrorStore`, `MirrorDefinition`, `SyncContext`, `SyncPage`, ... | MirrorService primitive (Tier 3, optional peer dep `better-sqlite3` on Node; `bun:sqlite` built-in on Bun); persistent self-refreshing local mirror of a bulk upstream dataset (embedded SQLite + FTS5). Node/Bun only |
 | `/utils` | formatting, encoding, network, pagination, logging, runtime, telemetry, token counting, parsers†, sanitization†, scheduling† | All utilities (†optional peer deps) |
 | `/services` | `OpenRouterProvider`, `SpeechService`, `createSpeechProvider`, `ElevenLabsProvider`, `WhisperProvider`, `GraphService`, provider interfaces and types | LLM, Speech (TTS/STT), Graph services |
 | `/linter` | `validateDefinitions`, `LintReport`, `LintDiagnostic`, `LintInput`, `LintSeverity` | Definition validation |

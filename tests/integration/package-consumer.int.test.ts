@@ -117,6 +117,7 @@ import {
 } from '@cyanheads/mcp-ts-core';
 import { checkScopes } from '@cyanheads/mcp-ts-core/auth';
 import { DataCanvas } from '@cyanheads/mcp-ts-core/canvas';
+import { defineMirror, sqliteMirrorStore } from '@cyanheads/mcp-ts-core/mirror';
 import { config } from '@cyanheads/mcp-ts-core/config';
 import { JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
 import type { PromptDefinition } from '@cyanheads/mcp-ts-core/prompts';
@@ -177,6 +178,20 @@ const fail = createFail([
 const ctx = createMockContext({ tenantId: 'consumer' });
 const worker = createWorkerHandler({ tools: [echo, uiTool], resources: [echoResource], prompts: [echoPrompt] });
 
+const mirror = defineMirror({
+  name: 'consumer-mirror',
+  store: sqliteMirrorStore({
+    path: './data/consumer.db',
+    table: 'docs',
+    primaryKey: 'id',
+    columns: { id: 'TEXT', title: 'TEXT' },
+    fts: ['title'],
+  }),
+  async *sync() {
+    yield { records: [{ id: '1', title: 'hello' }], checkpoint: '2024-01-01' };
+  },
+});
+
 type Bindings = CloudflareBindings & { CUSTOM: string };
 const bindings: Bindings = { CUSTOM: 'value' };
 type PublicTypes = [
@@ -202,6 +217,7 @@ void [
   fail,
   fuzzTool,
   isTaskToolDefinition,
+  mirror,
   publicTypes,
   stringToBase64('consumer'),
   ui,
@@ -229,6 +245,7 @@ const specs = [
   '@cyanheads/mcp-ts-core/storage',
   '@cyanheads/mcp-ts-core/storage/types',
   '@cyanheads/mcp-ts-core/canvas',
+  '@cyanheads/mcp-ts-core/mirror',
   '@cyanheads/mcp-ts-core/utils',
   '@cyanheads/mcp-ts-core/services',
   '@cyanheads/mcp-ts-core/linter',
@@ -254,7 +271,7 @@ console.log(JSON.stringify(loaded));
 
     expect(result.exitCode, result.stderr || result.stdout).toBe(0);
     const loaded = JSON.parse(result.stdout) as Array<[string, number]>;
-    expect(loaded).toHaveLength(17);
+    expect(loaded).toHaveLength(18);
     expect(loaded.find(([spec]) => spec === '@cyanheads/mcp-ts-core')?.[1]).toBeGreaterThan(0);
   });
 });

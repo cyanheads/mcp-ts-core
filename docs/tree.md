@@ -1,6 +1,6 @@
 # mcp-ts-core - Directory Structure
 
-Generated on: 2026-05-29 11:43:12
+Generated on: 2026-05-31 05:40:28
 
 ```text
 mcp-ts-core/
@@ -148,6 +148,8 @@ mcp-ts-core/
 │   ├── api-errors/
 │   │   └── SKILL.md
 │   ├── api-linter/
+│   │   └── SKILL.md
+│   ├── api-mirror/
 │   │   └── SKILL.md
 │   ├── api-services/
 │   │   ├── references/
@@ -340,6 +342,16 @@ mcp-ts-core/
 │   │   │   │   └── ILlmProvider.ts
 │   │   │   ├── providers/
 │   │   │   │   └── openrouter.provider.ts
+│   │   │   └── types.ts
+│   │   ├── mirror/
+│   │   │   ├── core/
+│   │   │   │   ├── defineMirror.ts
+│   │   │   │   └── runner.ts
+│   │   │   ├── sqlite/
+│   │   │   │   ├── handle.ts
+│   │   │   │   ├── schema.ts
+│   │   │   │   └── sqliteMirrorStore.ts
+│   │   │   ├── index.ts
 │   │   │   └── types.ts
 │   │   ├── speech/
 │   │   │   ├── core/
@@ -552,6 +564,7 @@ mcp-ts-core/
 │   │   │   ├── handler-body-rules.test.ts
 │   │   │   ├── landing-rules.test.ts
 │   │   │   ├── portability-rules.test.ts
+│   │   │   ├── resource-rules.test.ts
 │   │   │   ├── server-json-rules.test.ts
 │   │   │   ├── source-text.test.ts
 │   │   │   ├── tool-rules.test.ts
@@ -653,6 +666,10 @@ mcp-ts-core/
 │   │   │   │   │   ├── openrouter.provider.test.ts
 │   │   │   │   │   └── openrouter.provider.test.ts.disabled
 │   │   │   │   └── types.test.ts
+│   │   │   ├── mirror/
+│   │   │   │   ├── runner.test.ts
+│   │   │   │   ├── schema.test.ts
+│   │   │   │   └── sqliteMirrorStore.test.ts
 │   │   │   └── speech/
 │   │   │       ├── core/
 │   │   │       │   ├── ISpeechProvider.test.ts
