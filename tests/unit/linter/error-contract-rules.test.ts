@@ -383,6 +383,30 @@ describe('lintErrorContractConformance', () => {
       );
       expect(d).toEqual([]);
     });
+
+    it('does not treat JsonRpcErrorCode comparisons as direct throws', () => {
+      const handler = new Function(
+        `return async () => {
+          try {
+            throw new Error("boom");
+          } catch (err) {
+            if (err instanceof McpError && err.code === JsonRpcErrorCode.NotFound) {
+              throw ctx.fail("not_found", "Not found");
+            }
+            throw err;
+          }
+        }`,
+      )();
+      const d = lintErrorContractConformance(
+        {
+          handler,
+          errors: [{ code: JsonRpcErrorCode.NotFound, reason: 'not_found', when: 'no match' }],
+        },
+        'tool',
+        'x',
+      );
+      expect(d).toEqual([]);
+    });
   });
 
   it('produces no diagnostics for a clean handler that uses ctx.fail', () => {

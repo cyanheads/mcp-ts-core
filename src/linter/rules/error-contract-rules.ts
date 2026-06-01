@@ -316,8 +316,8 @@ export function lintErrorContractConformance(
 
   const observed = new Set<JsonRpcErrorCode>();
 
-  // Direct references: `JsonRpcErrorCode.NotFound`
-  for (const m of cleaned.matchAll(/JsonRpcErrorCode\.(\w+)/g)) {
+  // Direct throws: `throw new McpError(JsonRpcErrorCode.NotFound, ...)`
+  for (const m of cleaned.matchAll(/\bthrow\s+new\s+McpError\s*\(\s*JsonRpcErrorCode\.(\w+)/g)) {
     const value = m[1] ? CODE_NAME_TO_VALUE[m[1]] : undefined;
     if (value !== undefined) observed.add(value);
   }
