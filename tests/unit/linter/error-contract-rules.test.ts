@@ -385,6 +385,74 @@ describe('lintErrorContractConformance', () => {
     });
   });
 
+  describe('throw-awareness — comparisons and case labels are not throws (#191)', () => {
+    it('does not count a JsonRpcErrorCode comparison as a direct throw', () => {
+      // The only throw is ctx.fail — the NotFound reference is a comparison in a
+      // catch that re-routes correctly. Neither conformance rule should fire.
+      const handler = new Function(
+        `return async () => {
+          try {
+            await doThing();
+          } catch (err) {
+            if (err instanceof McpError && err.code === JsonRpcErrorCode.NotFound) {
+              throw ctx.fail('not_found', 'gone');
+            }
+            throw err;
+          }
+        }`,
+      )();
+      const d = lintErrorContractConformance(
+        {
+          handler,
+          errors: [{ code: JsonRpcErrorCode.NotFound, reason: 'not_found', when: 'no record' }],
+        },
+        'tool',
+        'x',
+      );
+      expect(d).toEqual([]);
+    });
+
+    it('does not count a JsonRpcErrorCode case label as a direct throw', () => {
+      const handler = new Function(
+        `return async () => {
+          switch (someCode) {
+            case JsonRpcErrorCode.RateLimited:
+              return retry();
+          }
+          throw ctx.fail('not_found', 'gone');
+        }`,
+      )();
+      const d = lintErrorContractConformance(
+        {
+          handler,
+          errors: [{ code: JsonRpcErrorCode.NotFound, reason: 'not_found', when: 'no record' }],
+        },
+        'tool',
+        'x',
+      );
+      // RateLimited appears only in a case label → must not be flagged as undeclared,
+      // and NotFound is never thrown → prefer-fail must not fire either.
+      expect(d.map((x) => x.rule)).not.toContain('error-contract-conformance');
+      expect(d.map((x) => x.rule)).not.toContain('error-contract-prefer-fail');
+    });
+
+    it('still counts new McpError(JsonRpcErrorCode.X) construction as a direct throw', () => {
+      // Regression guard: narrowing the scan must not stop catching the real case.
+      const handler = new Function(
+        `return async () => { throw new McpError(JsonRpcErrorCode.NotFound, "x"); }`,
+      )();
+      const d = lintErrorContractConformance(
+        {
+          handler,
+          errors: [{ code: JsonRpcErrorCode.NotFound, reason: 'no_match', when: 'no match' }],
+        },
+        'tool',
+        'x',
+      );
+      expect(d.map((x) => x.rule)).toContain('error-contract-prefer-fail');
+    });
+  });
+
   it('produces no diagnostics for a clean handler that uses ctx.fail', () => {
     // ctx.fail-routed throws don't reference JsonRpcErrorCode.X or a factory,
     // so they're invisible to the scan — and that's correct.

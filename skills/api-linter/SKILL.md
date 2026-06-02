@@ -4,7 +4,7 @@ description: >
   MCP definition linter rules reference. Use when `bun run lint:mcp` or `bun run devcheck` reports a lint error or warning (`format-parity`, `schema-is-object`, `name-format`, `server-json-*`, etc.) and you need to understand the rule, its severity, and how to fix it. Every rule ID the linter emits has an entry in this doc.
 metadata:
   author: cyanheads
-  version: "1.5"
+  version: "1.6"
   audience: external
   type: reference
 ---
@@ -682,13 +682,13 @@ Fires when `recovery` has fewer than 5 words. Short recoveries like "Try again."
 
 **Severity:** warning
 
-Cross-check rule. Fires when a handler throws a non-baseline code (via `JsonRpcErrorCode.X` or a factory like `notFound()`) that isn't declared in `errors[]`.
+Cross-check rule. Fires when a handler throws a non-baseline code (via `new McpError(JsonRpcErrorCode.X, …)` or a factory like `notFound()`) that isn't declared in `errors[]`.
 
 Baseline codes (`InternalError`, `ServiceUnavailable`, `Timeout`, `ValidationError`, `SerializationError`) are auto-allowed because they bubble from anywhere — services, framework utilities, the auto-classifier — and are implicitly always-possible on any tool. Only domain-specific codes need declaring.
 
 **Fix:** add the missing code to `errors[]` with a stable reason, or route through `ctx.fail(reason, …)` if it maps to an existing entry.
 
-**Heuristic limitations:** the scan reads `handler.toString()` and only catches direct `throw new McpError(JsonRpcErrorCode.X, …)` and `throw factory(…)` patterns. Indirect throws (`const e = notFound(); throw e;`), throws from called services, and throws via runtime helpers like `httpErrorFromResponse(...)` are invisible.
+**Heuristic limitations:** the scan reads `handler.toString()` and only counts code *construction* sites — `new McpError(JsonRpcErrorCode.X, …)` and `throw factory(…)`. A bare `JsonRpcErrorCode.X` reference in a comparison (`err.code === JsonRpcErrorCode.X`) or a `case` label is not a throw and is correctly ignored. Indirect throws (`const e = notFound(); throw e;`), throws from called services, and throws via runtime helpers like `httpErrorFromResponse(...)` are invisible.
 
 ### error-contract-prefer-fail
 

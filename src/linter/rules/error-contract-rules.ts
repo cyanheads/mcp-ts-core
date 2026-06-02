@@ -290,9 +290,11 @@ const BASELINE_CONFORMANCE_CODES: ReadonlySet<JsonRpcErrorCode> = new Set([
  * `ValidationError`, `SerializationError`) are skipped — they bubble from
  * anywhere and don't need to be enumerated per-tool.
  *
- * Heuristic only: scans handler source text for `JsonRpcErrorCode.X` references
- * and factory calls. Codes thrown from called services are invisible — so this
- * is always a warning, never an error.
+ * Heuristic only: scans handler source text for `new McpError(JsonRpcErrorCode.X)`
+ * constructions and `throw factory()` calls — comparisons (`=== JsonRpcErrorCode.X`)
+ * and `case JsonRpcErrorCode.X:` labels that merely reference a code are not counted.
+ * Codes thrown from called services are invisible — so this is always a warning,
+ * never an error.
  */
 export function lintErrorContractConformance(
   def: { handler?: unknown; errors?: unknown },
@@ -316,8 +318,12 @@ export function lintErrorContractConformance(
 
   const observed = new Set<JsonRpcErrorCode>();
 
-  // Direct references: `JsonRpcErrorCode.NotFound`
-  for (const m of cleaned.matchAll(/JsonRpcErrorCode\.(\w+)/g)) {
+  // Direct construction: `new McpError(JsonRpcErrorCode.NotFound, …)`. Scoped to
+  // the construction site — like the factory scan below, and mirroring the
+  // `prefer-error-factory` rule in handler-body-rules.ts — so a `JsonRpcErrorCode.X`
+  // reference in a comparison (`err.code === JsonRpcErrorCode.X`) or a `case
+  // JsonRpcErrorCode.X:` label is NOT counted as a thrown code.
+  for (const m of cleaned.matchAll(/new\s+McpError\s*\(\s*JsonRpcErrorCode\.(\w+)/g)) {
     const value = m[1] ? CODE_NAME_TO_VALUE[m[1]] : undefined;
     if (value !== undefined) observed.add(value);
   }
