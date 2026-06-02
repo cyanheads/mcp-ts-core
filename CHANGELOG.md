@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.9.21](changelog/0.9.x/0.9.21.md) — 2026-06-02
+
+HTTP transport per-request log context fixed — handlers now derive a fresh requestId/timestamp + live trace/span IDs instead of the frozen boot context
+
 ## [0.9.20](changelog/0.9.x/0.9.20.md) — 2026-06-01 · 🛡️ Security
 
 Security: fetchWithTimeout redacts query-string secrets; error-contract lint scoped to throw sites; list-changed notifications routed via request scope under HTTP
