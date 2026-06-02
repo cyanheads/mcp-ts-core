@@ -17,6 +17,7 @@ import { ZodError, type ZodObject, type ZodRawShape } from 'zod';
 import { config } from '@/config/index.js';
 import type { Context, EnrichmentStore, SamplingOpts } from '@/core/context.js';
 import { attachTypedFail, createContext, readEnrichmentStore } from '@/core/context.js';
+import { buildRequestScopedNotifiers } from '@/mcp-server/notifications.js';
 import { withRequiredScopes } from '@/mcp-server/transports/auth/lib/authUtils.js';
 import type { StorageService } from '@/storage/core/StorageService.js';
 import { type JsonRpcErrorCode, McpError } from '@/types-global/errors.js';
@@ -52,11 +53,18 @@ export interface HandlerFactoryServices {
 }
 
 /**
- * Per-server notifier closures bound at registration time.
+ * Per-server notifier closures bound at registration time, targeting
+ * `server.send*ListChanged()`.
+ *
  * Split from {@link HandlerFactoryServices} so each per-request McpServer gets
  * its own notifier closures — preventing a concurrent registerAll() from
  * overwriting an in-flight handler's notifier target (and potentially
  * notifying the wrong server).
+ *
+ * The sync handler factory prefers request-scoped notifiers
+ * ({@link buildRequestScopedNotifiers}, #135) and uses these only as a fallback;
+ * the background auto-task path uses them directly (no request scope), so those
+ * notifications deliver on stdio but drop under HTTP.
  */
 export interface HandlerNotifiers {
   notifyPromptListChanged?: () => void;
@@ -306,6 +314,13 @@ export function createToolHandler(
     const sdkContext = callContext as unknown as SdkExtra;
     const sdkCaps = callContext as unknown as SdkRuntimeCapabilities;
 
+    // Route handler-time list-changed / resource-updated notifications through
+    // this request's `extra.sendNotification` so they carry `relatedRequestId`
+    // and reach the client under the per-request HTTP/Worker McpServer model
+    // (#135). Fall back to the server-level notifiers when the extra exposes no
+    // sender (non-request scopes) — those deliver on stdio but drop under HTTP.
+    const effectiveNotifiers = buildRequestScopedNotifiers(sdkContext) ?? notifiers;
+
     const sdkSessionId =
       typeof sdkContext?.sessionId === 'string' ? sdkContext.sessionId : undefined;
 
@@ -357,10 +372,10 @@ export function createToolHandler(
           sessionId: handlerSessionId,
           elicit: wrapElicit(sdkCaps),
           sample: wrapSample(sdkCaps),
-          notifyPromptListChanged: notifiers.notifyPromptListChanged,
-          notifyResourceListChanged: notifiers.notifyResourceListChanged,
-          notifyResourceUpdated: notifiers.notifyResourceUpdated,
-          notifyToolListChanged: notifiers.notifyToolListChanged,
+          notifyPromptListChanged: effectiveNotifiers.notifyPromptListChanged,
+          notifyResourceListChanged: effectiveNotifiers.notifyResourceListChanged,
+          notifyResourceUpdated: effectiveNotifiers.notifyResourceUpdated,
+          notifyToolListChanged: effectiveNotifiers.notifyToolListChanged,
         }),
         def.errors,
       );

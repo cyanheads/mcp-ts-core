@@ -4,7 +4,7 @@ description: >
   Canonical reference for the unified `Context` object passed to every tool and resource handler in `@cyanheads/mcp-ts-core`. Covers the full interface, all sub-APIs (`ctx.log`, `ctx.state`, `ctx.elicit`, `ctx.sample`, `ctx.progress`, `ctx.enrich`), and when to use each.
 metadata:
   author: cyanheads
-  version: "1.5"
+  version: "1.6"
   audience: external
   type: reference
 ---
@@ -42,7 +42,8 @@ interface Context {
   readonly elicit?: (message: string, schema: z.ZodObject<z.ZodRawShape>) => Promise<ElicitResult>;
   readonly sample?: (messages: SamplingMessage[], opts?: SamplingOpts) => Promise<CreateMessageResult>;
 
-  // Notifications — present when transport supports them
+  // List-changed / resource-updated notifications — wired in every handler ctx;
+  // delivery is request-scoped (see § list-changed notifications)
   readonly notifyResourceListChanged?: () => void;
   readonly notifyResourceUpdated?: (uri: string) => void;
   readonly notifyPromptListChanged?: () => void;
@@ -328,6 +329,31 @@ interface SamplingOpts {
 
 ---
 
+## List-changed notifications (`ctx.notify*`)
+
+Fire-and-forget signals that the tool / resource / prompt list changed (the client should re-list), or that a specific resource was updated. The framework advertises the matching `listChanged` capabilities on every `initialize`. All four are wired in every tool and resource handler context — call with optional chaining (`?.`), the type is optional for mock / forward-compat only.
+
+```ts
+async handler(input, ctx) {
+  await enableFeatureTools();
+  ctx.notifyToolListChanged?.();   // tells the client to re-fetch tools/list
+  return { ok: true };
+}
+```
+
+### Delivery
+
+A notification fired **from inside a handler** routes through that request's own channel (`relatedRequestId`), so it reaches the client on **every transport** — stdio, HTTP, and Workers — even though HTTP/Workers run a per-request `McpServer` with no long-lived notification channel.
+
+| Fired from | stdio | HTTP / Workers |
+|:-----------|:------|:---------------|
+| A tool / resource handler | ✅ delivered | ✅ delivered (on the request's SSE response stream) |
+| A `task: true` background handler, cron, or any non-request scope | ✅ delivered | ⚠️ dropped — no request scope to route through |
+
+The background-under-HTTP gap is a known limitation; a session-scoped notification bus would close it. `notifyResourceUpdated` routes to the calling request, not to clients that subscribed to the URI — the framework tracks no subscription state.
+
+---
+
 ## `ctx.signal`
 
 Standard `AbortSignal`. Present on every context. Set when the client cancels the request or when a task tool is cancelled.
@@ -601,10 +627,10 @@ See `add-tool`'s **Tool Response Design** and `skills/api-linter` (`enrichment-*
 | `ctx.enrich` | `Enrich` | Always; typed on `HandlerContext<R, E>` when an `enrichment` block is declared |
 | `ctx.elicit` | `function \| undefined` | Client supports elicitation |
 | `ctx.sample` | `function \| undefined` | Client supports sampling |
-| `ctx.notifyResourceListChanged` | `function \| undefined` | Transport supports resource notifications |
-| `ctx.notifyResourceUpdated` | `function \| undefined` | Transport supports resource notifications |
-| `ctx.notifyPromptListChanged` | `function \| undefined` | Transport supports prompt notifications |
-| `ctx.notifyToolListChanged` | `function \| undefined` | Transport supports tool notifications |
+| `ctx.notifyResourceListChanged` | `function \| undefined` | Always in handler ctx; delivery request-scoped (see [§ list-changed notifications](#list-changed-notifications-ctxnotify)) |
+| `ctx.notifyResourceUpdated` | `function \| undefined` | Always in handler ctx; delivery request-scoped |
+| `ctx.notifyPromptListChanged` | `function \| undefined` | Always in handler ctx; delivery request-scoped |
+| `ctx.notifyToolListChanged` | `function \| undefined` | Always in handler ctx; delivery request-scoped |
 | `ctx.progress` | `ContextProgress \| undefined` | Tool defined with `task: true` |
 | `ctx.uri` | `URL \| undefined` | Resource handlers only |
 | `ctx.fail` | `(reason, msg?, data?, opts?) => McpError` | Definition declares `errors[]` contract |

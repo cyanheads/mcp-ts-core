@@ -73,9 +73,12 @@ export class ToolRegistry {
     // per-request McpServer instances in HTTP mode (GHSA-345p-7cg4-v4c7).
     this.registeredNames.clear();
 
-    // Per-server notifier closures. Bound once per registerAll() call and
-    // passed through to each handler factory — never mutated on a shared
-    // services object (which would race under concurrent HTTP requests).
+    // Per-server notifier closures targeting `server.send*ListChanged()`. Bound
+    // once per registerAll() call — never mutated on a shared services object
+    // (which would race under concurrent HTTP requests). The sync handler
+    // factory prefers request-scoped notifiers (#135) and falls back to these;
+    // the background auto-task path uses them directly (no request scope), so
+    // those notifications deliver on stdio but drop under HTTP.
     const notifiers: HandlerNotifiers = {
       notifyPromptListChanged: () => server.sendPromptListChanged(),
       notifyResourceListChanged: () => server.sendResourceListChanged(),

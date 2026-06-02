@@ -680,4 +680,73 @@ describe('createToolHandler', () => {
       expect(JSON.stringify(additionalContext)).not.toContain('super-sensitive-value');
     });
   });
+
+  // -----------------------------------------------------------------------
+  // List-changed notification routing (#135)
+  // -----------------------------------------------------------------------
+
+  describe('list-changed notification routing (#135)', () => {
+    const notifyingTool = tool('notify_tool', {
+      description: 'Fires every list-changed notification.',
+      input: z.object({}),
+      output: z.object({ ok: z.boolean() }),
+      handler: (_input, ctx) => {
+        ctx.notifyToolListChanged?.();
+        ctx.notifyResourceListChanged?.();
+        ctx.notifyPromptListChanged?.();
+        ctx.notifyResourceUpdated?.('items://42');
+        return { ok: true };
+      },
+    });
+
+    it('routes handler-time notifications through the request-scoped sender (relatedRequestId path)', async () => {
+      const sendNotification = vi.fn(() => Promise.resolve());
+      const handler = createToolHandler(notifyingTool as AnyToolDefinition, services, notifiers);
+      await handler({}, createMockSdkContext({ sendNotification }));
+
+      // Routing through extra.sendNotification is what stamps relatedRequestId,
+      // so @hono/mcp delivers to the POST SSE stream instead of dropping (#135).
+      expect(sendNotification).toHaveBeenCalledWith({ method: 'notifications/tools/list_changed' });
+      expect(sendNotification).toHaveBeenCalledWith({
+        method: 'notifications/resources/list_changed',
+      });
+      expect(sendNotification).toHaveBeenCalledWith({
+        method: 'notifications/prompts/list_changed',
+      });
+      expect(sendNotification).toHaveBeenCalledWith({
+        method: 'notifications/resources/updated',
+        params: { uri: 'items://42' },
+      });
+    });
+
+    it('falls back to the server-level notifiers when the extra exposes no sender', async () => {
+      const serverNotifiers: HandlerNotifiers = {
+        notifyToolListChanged: vi.fn(),
+        notifyResourceListChanged: vi.fn(),
+        notifyPromptListChanged: vi.fn(),
+        notifyResourceUpdated: vi.fn(),
+      };
+      const handler = createToolHandler(
+        notifyingTool as AnyToolDefinition,
+        services,
+        serverNotifiers,
+      );
+      await handler({}, createMockSdkContext({ sendNotification: undefined }));
+
+      expect(serverNotifiers.notifyToolListChanged).toHaveBeenCalledOnce();
+      expect(serverNotifiers.notifyResourceListChanged).toHaveBeenCalledOnce();
+      expect(serverNotifiers.notifyPromptListChanged).toHaveBeenCalledOnce();
+      expect(serverNotifiers.notifyResourceUpdated).toHaveBeenCalledWith('items://42');
+    });
+
+    it('does not let a failed notification flush reject the handler', async () => {
+      const sendNotification = vi.fn(() => Promise.reject(new Error('stream closed')));
+      const handler = createToolHandler(notifyingTool as AnyToolDefinition, services, notifiers);
+
+      const result = await handler({}, createMockSdkContext({ sendNotification }));
+
+      expect(result.isError).toBeUndefined();
+      expect(result.structuredContent).toEqual({ ok: true });
+    });
+  });
 });

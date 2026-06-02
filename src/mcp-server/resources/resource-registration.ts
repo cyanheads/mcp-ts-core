@@ -38,9 +38,11 @@ export class ResourceRegistry {
   public async registerAll(server: McpServer): Promise<void> {
     this.registeredNames.clear();
 
-    // Per-server notifier closures. Bound once per registerAll() call and
-    // passed through to each handler factory — never mutated on a shared
-    // services object (which would race under concurrent HTTP requests).
+    // Per-server notifier closures targeting `server.send*ListChanged()`. Bound
+    // once per registerAll() call — never mutated on a shared services object
+    // (which would race under concurrent HTTP requests). The resource handler
+    // factory prefers request-scoped notifiers (#135) and falls back to these
+    // only when a request has no notification sender.
     const notifiers: ResourceHandlerNotifiers = {
       notifyPromptListChanged: () => server.sendPromptListChanged(),
       notifyResourceListChanged: () => server.sendResourceListChanged(),

@@ -16,6 +16,7 @@ import type { ZodObject, ZodRawShape } from 'zod';
 import { config } from '@/config/index.js';
 import type { Context, SamplingOpts } from '@/core/context.js';
 import { attachTypedFail, createContext } from '@/core/context.js';
+import { buildRequestScopedNotifiers } from '@/mcp-server/notifications.js';
 import type { AnyResourceDefinition } from '@/mcp-server/resources/utils/resourceDefinition.js';
 import { withRequiredScopes } from '@/mcp-server/transports/auth/lib/authUtils.js';
 import type { StorageService } from '@/storage/core/StorageService.js';
@@ -50,10 +51,16 @@ export interface ResourceHandlerFactoryServices {
 }
 
 /**
- * Per-server notifier closures bound at registration time.
+ * Per-server notifier closures bound at registration time, targeting
+ * `server.send*ListChanged()`.
+ *
  * Split from {@link ResourceHandlerFactoryServices} so each per-request
  * McpServer gets its own notifier closures — preventing a concurrent
  * registerAll() from overwriting an in-flight handler's notifier target.
+ *
+ * The resource handler factory prefers request-scoped notifiers
+ * ({@link buildRequestScopedNotifiers}, #135) and uses these only as a fallback
+ * when the SDK extra exposes no sender (e.g. a non-request test scope).
  */
 export interface ResourceHandlerNotifiers {
   notifyPromptListChanged?: () => void;
@@ -137,6 +144,13 @@ export function createResourceHandler(
     const sdkContext = callContext as unknown as SdkExtra;
     const sdkCaps = callContext as unknown as SdkRuntimeCapabilities;
 
+    // Route handler-time list-changed / resource-updated notifications through
+    // this request's `extra.sendNotification` so they carry `relatedRequestId`
+    // and reach the client under the per-request HTTP/Worker McpServer model
+    // (#135). Fall back to the server-level notifiers when the extra exposes no
+    // sender (non-request scopes) — those deliver on stdio but drop under HTTP.
+    const effectiveNotifiers = buildRequestScopedNotifiers(sdkContext) ?? notifiers;
+
     const sdkSessionId =
       typeof sdkContext?.sessionId === 'string' ? sdkContext.sessionId : undefined;
 
@@ -191,10 +205,10 @@ export function createResourceHandler(
           sessionId: handlerSessionId,
           elicit: wrapElicit(sdkCaps),
           sample: wrapSample(sdkCaps),
-          notifyPromptListChanged: notifiers.notifyPromptListChanged,
-          notifyResourceListChanged: notifiers.notifyResourceListChanged,
-          notifyResourceUpdated: notifiers.notifyResourceUpdated,
-          notifyToolListChanged: notifiers.notifyToolListChanged,
+          notifyPromptListChanged: effectiveNotifiers.notifyPromptListChanged,
+          notifyResourceListChanged: effectiveNotifiers.notifyResourceListChanged,
+          notifyResourceUpdated: effectiveNotifiers.notifyResourceUpdated,
+          notifyToolListChanged: effectiveNotifiers.notifyToolListChanged,
           uri,
         }),
         def.errors,

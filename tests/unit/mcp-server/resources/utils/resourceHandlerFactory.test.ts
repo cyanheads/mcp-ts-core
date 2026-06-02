@@ -535,4 +535,68 @@ describe('createResourceHandler', () => {
       expect(additionalContext).not.toHaveProperty('inputParams');
     });
   });
+
+  // -----------------------------------------------------------------------
+  // List-changed notification routing (#135)
+  // -----------------------------------------------------------------------
+
+  describe('list-changed notification routing (#135)', () => {
+    const notifyingResource = resource('notify://{id}', {
+      description: 'Fires every list-changed notification.',
+      params: z.object({ id: z.string().describe('id') }),
+      handler: (_params, ctx) => {
+        ctx.notifyToolListChanged?.();
+        ctx.notifyResourceListChanged?.();
+        ctx.notifyPromptListChanged?.();
+        ctx.notifyResourceUpdated?.('notify://updated');
+        return { ok: true };
+      },
+    });
+
+    it('routes handler-time notifications through the request-scoped sender (relatedRequestId path)', async () => {
+      const sendNotification = vi.fn(() => Promise.resolve());
+      const handler = createResourceHandler(
+        notifyingResource as AnyResourceDefinition,
+        services,
+        notifiers,
+      );
+      await handler(new URL('notify://1'), { id: '1' }, createMockSdkContext({ sendNotification }));
+
+      // Routing through extra.sendNotification stamps relatedRequestId, so
+      // @hono/mcp delivers to the POST SSE stream instead of dropping (#135).
+      expect(sendNotification).toHaveBeenCalledWith({ method: 'notifications/tools/list_changed' });
+      expect(sendNotification).toHaveBeenCalledWith({
+        method: 'notifications/resources/list_changed',
+      });
+      expect(sendNotification).toHaveBeenCalledWith({
+        method: 'notifications/prompts/list_changed',
+      });
+      expect(sendNotification).toHaveBeenCalledWith({
+        method: 'notifications/resources/updated',
+        params: { uri: 'notify://updated' },
+      });
+    });
+
+    it('falls back to the server-level notifiers when the extra exposes no sender', async () => {
+      const serverNotifiers: ResourceHandlerNotifiers = {
+        notifyToolListChanged: vi.fn(),
+        notifyResourceListChanged: vi.fn(),
+        notifyPromptListChanged: vi.fn(),
+        notifyResourceUpdated: vi.fn(),
+      };
+      const handler = createResourceHandler(
+        notifyingResource as AnyResourceDefinition,
+        services,
+        serverNotifiers,
+      );
+      await handler(
+        new URL('notify://1'),
+        { id: '1' },
+        createMockSdkContext({ sendNotification: undefined }),
+      );
+
+      expect(serverNotifiers.notifyResourceListChanged).toHaveBeenCalledOnce();
+      expect(serverNotifiers.notifyResourceUpdated).toHaveBeenCalledWith('notify://updated');
+    });
+  });
 });
