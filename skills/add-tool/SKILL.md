@@ -4,7 +4,7 @@ description: >
   Scaffold a new MCP tool definition. Use when the user asks to add a tool, create a new tool, or implement a new capability for the server.
 metadata:
   author: cyanheads
-  version: "2.11"
+  version: "2.12"
   audience: external
   type: reference
 ---
@@ -574,7 +574,33 @@ Large payloads burn the agent's context window. Default to curated summaries; of
 - **Lists**: Return top N with a total count and pagination cursor, not unbounded arrays
 - **Large objects**: Return key fields by default; accept a `fields` or `verbose` parameter for full data
 - **Binary/blob content**: Return metadata and a reference, not the raw content
-- **Tabular working sets**: When upstream returns more rows than fit in context, `DataCanvas` (`ctx.core.canvas?`, Tier 3 — opt-in via `CANVAS_PROVIDER_TYPE=duckdb`) lets you register the rows and return the `canvas_id` plus a preview so the agent can run SQL to slice down without a re-fetch. The `spillover()` helper (`@cyanheads/mcp-ts-core/canvas`) automates the overflow case: drain rows up to a character budget for the inline preview, auto-register the full source on overflow, return both as a discriminated union. Compute distributions or refinement hints across the full result — not the preview — so the agent gets honest aggregate signal on the rows it didn't read. See `api-canvas` for the register / query / export pattern and the spillover flow.
+- **Analytical working sets**: When upstream returns more *analytical* rows (data an agent would SQL — aggregate, group, join) than fit in context, `DataCanvas` (`ctx.core.canvas?`, Tier 3 — opt-in via `CANVAS_PROVIDER_TYPE=duckdb`) lets you register the rows and return the `canvas_id` plus a preview so the agent can run SQL to slice down without a re-fetch. The `spillover()` helper (`@cyanheads/mcp-ts-core/canvas`) automates the overflow case: drain rows up to a character budget for the inline preview, auto-register the full source on overflow, return both as a discriminated union. **Two gates:** it must be analytical, not a discovery/search surface of categorical metadata (those don't earn a canvas regardless of row count — use MCP-side list filtering or pagination); and a tool emitting a `canvas_id` MUST be paired with a registered `dataframe_query` tool, or the handle is unreachable. Compute distributions or refinement hints across the full result — not the preview — so the agent gets honest aggregate signal on the rows it didn't read. See `api-canvas` for the register / query / export pattern and the spillover flow.
+
+## MCP-side list filtering
+
+When an upstream API has no native search but the relevant set is **bounded** (fits one or a few fetches), fetch it in full and filter on the server so an agent resolves a name → opaque ID in one call instead of scanning a blob. The `design-mcp-server` skill covers *when* to reach for this (the earns-its-keep gate, the `query`-vs-local-filter split); this is the *how*.
+
+**Name the local param for the mechanic** — `filter` or `nameContains`, distinct from an upstream `query`. **Filter the complete set, not the page** (fetch up to the cap first). **Strict token match is the default** — normalize, then require every query token to appear; that handles word order and partials, needs no fuzzy library, and is too small to extract into a shared helper:
+
+```typescript
+const normalize = (s: string) =>
+  s.toLowerCase().normalize('NFKD').replace(/[̀-ͯ]/g, '').replace(/[^a-z0-9\s]/g, ' ');
+
+// Filter the full bounded set — not a single page.
+const tokens = normalize(input.nameContains).split(/\s+/).filter(Boolean);
+const hits = items.filter((it) => {
+  const hay = normalize(it.name);
+  return tokens.every((t) => hay.includes(t));
+});
+if (hits.length === 0) {
+  ctx.enrich.notice(
+    `No name matched "${input.nameContains}". Call the tool without a filter to browse the full list.`,
+  );
+}
+return { items: hits };
+```
+
+**Add a fuzzy fallback only when a caller genuinely needs typo tolerance** — an LLM caller rarely does. If you do: fire it *only* when the strict match is empty, score against the best-matching token in each name (not the whole string) and **cap** the results, and label hits `approximate`. Test it against a **full-scale** fixture with a deliberate near-miss — a small fixture has no long-name noise floor, so a unit test won't catch a fallback that returns dozens of bogus matches. A bare "no match — browse the unfiltered list" often beats an `approximate` guess: it lets the model self-correct rather than commit to the wrong record.
 
 ## Checklist
 
@@ -597,8 +623,9 @@ Large payloads burn the agent's context window. Default to curated summaries; of
 - [ ] Error contract declared inline on this tool — not imported from a shared module, even when other tools have near-identical entries
 - [ ] `task: true` added if the tool is long-running
 - [ ] If `task: true`: handler checks `ctx.signal.aborted` in its loop for cancellation support
-- [ ] If tool returns unbounded arrays: pagination with total count, or `spillover()` / DataCanvas for tabular working sets
+- [ ] If tool returns unbounded arrays: pagination with total count, or `spillover()` / DataCanvas for *analytical* working sets (an agent would SQL them — not a discovery/search surface). If any tool emits a `canvas_id`, a `dataframe_query` tool is registered in the same server — a token with no query tool is dead output
 - [ ] If tool is feature-gated: evaluated whether `disabledTool()` wrapper is appropriate (present in manifest but uncallable)
+- [ ] If the tool filters a bounded list locally (no upstream search): a distinct local param (`filter`/`nameContains`, not `query`), filters the full set (not one page), strict token match by default
 - [ ] Registered in the project's existing `createApp()` tool list (directly or via barrel)
 - [ ] Test file created via `add-test` skill, or handler tested directly with `createMockContext()`
 - [ ] `bun run devcheck` passes

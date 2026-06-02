@@ -4,7 +4,7 @@ description: >
   DataCanvas primitive reference — a Tier 3 SQL/analytical workspace for tabular MCP servers, backed by DuckDB. Use when registering tables from upstream APIs, running ad-hoc SQL across them, and exporting results. Covers the acquire → register → query → export flow, the token-sharing pattern for multi-agent collaboration, env config, and Cloudflare Workers fail-closed behavior.
 metadata:
   author: cyanheads
-  version: "1.3"
+  version: "1.4"
   audience: external
   type: reference
 ---
@@ -18,6 +18,17 @@ metadata:
 **Disabled by default.** Set `CANVAS_PROVIDER_TYPE=duckdb` to enable. Otherwise `core.canvas` is `undefined`.
 
 **Cloudflare Workers:** unsupported. DuckDB has no V8-isolate build. Setting `CANVAS_PROVIDER_TYPE=duckdb` on a Worker fails closed with a `ConfigurationError` at init time.
+
+---
+
+## When canvas earns its keep
+
+Two gates before wiring canvas in — **both** must be yes. Canvas that fails either is a SQL surface nobody queries.
+
+1. **Is the data analytical, not just large?** Canvas is for tabular/numeric result sets an agent runs SQL over — aggregate, group, join, time-series filter. A **discovery/search surface** returning categorical metadata (titles, IDs, types, dates) where the workflow is *find the record, then drill into it* does **not** qualify, regardless of row count. A 5,000-row search result is still discovery. The gate is **shape, not size**: the right question is "would an agent write `SELECT … GROUP BY` against this?", not "does it have many rows?" For name→ID resolution over a bounded list, reach for MCP-side list filtering (see the `design-mcp-server` skill) instead.
+2. **Is it too big to inline?** A result that fits the response (≤ ~100 rows of compact data) just gets inlined — no canvas. Canvas is the third option only when shape *and* size both call for it.
+
+If canvas earns its keep, it carries an obligation: **a tool that emits a `canvas_id` MUST ship a `dataframe_query` tool in the same server's surface** (see the [simple-shape Tools row](#simple-shape-defaults) and the [Checklist](#checklist)). A `canvas_id` with no query tool is dead output — the agent literally cannot reach the staged data.
 
 ---
 
@@ -257,7 +268,7 @@ Most canvas use cases are public-data analytics: fetch from an upstream API, sta
 | Table naming | `spillover()` auto-names the table `spilled_<id>`; pass `tableName` for a stable handle. A dataframe-query surface commonly adds its own `df_<id>` convention. |
 | Access control | Possession of the `canvas_id` is access — unguessable in practice (see [token-sharing model](#the-token-sharing-model)). TTL + the framework rate limiter backstop brute force. |
 | Enable flag | None of your own — canvas presence is the gate (`CANVAS_PROVIDER_TYPE=duckdb`; `getCanvas()` returns `undefined` otherwise). |
-| Tools | A fetcher that spills, plus `dataframe_query` for SQL. `dataframe_describe` / `dataframe_drop` are optional consumer conventions, not framework-provided. |
+| Tools | A fetcher that spills **plus a `dataframe_query` tool — mandatory once anything emits a `canvas_id`**: a token with no query tool in the same server is dead output (the agent can't reach the staged data). `dataframe_describe` is strongly recommended — it lets the agent discover staged table and column names before writing SQL. `dataframe_drop` is optional. None are framework-provided; you register them. |
 | Fetcher output | Two things in one response: the inline preview (answer to the immediate question) and the table handle (escape hatch for follow-up SQL via `dataframe_query`). Neither replaces the other. |
 
 > The `MCP_HTTP_MAX_BODY_BYTES` request-body cap is **inbound-only** — it bounds the JSON-RPC request, not the upstream data a handler stages into the canvas or the rows it returns. Canvas servers send small requests (queries, SQL, canvas IDs) regardless of dataset size, so the cap never constrains canvas ingestion.
@@ -458,6 +469,7 @@ When the preview budget is small (single-digit rows) and the sniff window matter
 
 ### When *not* to use spillover
 
+- **Discovery/search surfaces.** A result that's categorical metadata for *find-then-drill-in* — search hits, ID lookups, catalog browsing — is not analytical and doesn't earn a canvas regardless of row count (see [When canvas earns its keep](#when-canvas-earns-its-keep)). Use MCP-side list filtering or plain pagination instead.
 - **Tiny known result.** If the upstream call returns ≤ 100 rows, just inline them — no canvas needed.
 - **Headless register** (caller wants the full set on canvas with zero preview rows). Call `canvas.registerTable` directly. `previewChars` is rejected at `0`; spillover always implies a visible preview.
 - **Workers runtime.** Canvas requires DuckDB native; spillover is a canvas-coupled helper. For Workers parity, persist via `ctx.state` instead.
@@ -501,6 +513,8 @@ When the preview budget is small (single-digit rows) and the sniff window matter
 - [ ] Accessor wired in `setup()` callback via `setCanvas(core.canvas)`
 - [ ] Handler guards for canvas availability (`if (!canvas) throw ...`)
 - [ ] `canvas_id` accepted as optional input, returned in output
+- [ ] A `dataframe_query` tool is registered in this server whenever any tool emits a `canvas_id` — a token with no query tool is dead output. Register `dataframe_describe` too (lets the agent discover staged table/column names)
+- [ ] Canvas earns its keep: the staged data is analytical (an agent would SQL it), not a discovery/search surface of categorical metadata
 - [ ] SQL queries are read-only (enforced by the four-layer gate, but don't attempt writes)
 - [ ] Testing: mock the module-level `getCanvas()` accessor with `vi.spyOn` or a test setup that calls `setCanvas(mockCanvas)`
 - [ ] `bun run devcheck` passes

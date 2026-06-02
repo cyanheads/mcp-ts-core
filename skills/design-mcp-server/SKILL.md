@@ -4,7 +4,7 @@ description: >
   Design the tool surface, resources, and service layer for a new MCP server. Use when starting a new server, planning a major feature expansion, or when the user describes a domain/API they want to expose via MCP. Produces a design doc at docs/design.md that drives implementation.
 metadata:
   author: cyanheads
-  version: "2.15"
+  version: "2.16"
   audience: external
   type: workflow
 ---
@@ -349,7 +349,7 @@ output: z.object({
 ```
 
 - **Truncate large output with counts.** When a list exceeds a reasonable display size, show the top N and append "...and X more". Don't silently drop results.
-- **Spill big tabular results to a queryable surface.** When a tool's row set can exceed any reasonable context budget — paginated APIs, streamed exports, big query results — pair an inline preview with a `DataCanvas` table holding the full set, returned as a token the agent can SQL. Compute distributions or refinement hints across the full result, not the preview, so aggregate signal stays honest. See `api-canvas` for the `spillover()` helper.
+- **Spill big *analytical* results to a queryable surface.** When a tool's row set is something an agent would run SQL over (aggregate, group, join) *and* can exceed any reasonable context budget — paginated APIs, streamed exports, big query results — pair an inline preview with a `DataCanvas` table holding the full set. **Two rules gate this:** (1) it must earn its keep on *shape, not size* — a discovery/search surface of categorical metadata (titles, IDs) is not analytical and doesn't get a canvas regardless of row count; for name→ID resolution over a bounded list use [MCP-side list filtering](#mcp-side-list-filtering); (2) the `canvas_id` is reachable only if the same server **also exposes a `dataframe_query` tool** — emit one without the other and the handle is dead output. Compute distributions or refinement hints across the full result, not the preview, so aggregate signal stays honest. See `api-canvas` for the `spillover()` helper and both rules in full.
 - **Mirror a bulk upstream instead of paginating it live.** When the server wraps a large or slow API whose corpus is queried far more than it changes, sync it once into a persistent local index and query that as the primary data path — not the live API per request. Match the backend to corpus size: ≲ tens of thousands of rows → an in-memory index (server-level, no primitive); ~10⁴–10⁷ → the `MirrorService` (embedded SQLite + FTS5; declare a schema + a `sync` ingester via `defineMirror`/`sqliteMirrorStore`, then `runSync`/`query`, see `api-mirror`); ≳ 10⁸ → an external store. Distinct lifecycle from DataCanvas: a mirror is long-lived and cross-session, refreshed on a schedule; canvas is ephemeral and per-session.
 - **`format()` is the markdown twin of `structuredContent` — make both content-complete.** Different MCP clients forward different surfaces to the model: some (e.g., Claude Code) read `structuredContent` from `output`, others (e.g., Claude Desktop) read `content[]` from `format()`. Both must carry the same data so every client sees the same picture — `format()` just dresses it up with markdown. A thin `format()` that returns only a count or title leaves `content[]`-only clients blind to data that `structuredContent` clients can see. Render all fields the LLM needs, with structured markdown (headers, bold labels, lists) for readability.
 - **Agent-facing context must reach both client surfaces — put it in `enrichment`.** `structuredContent` (from `output`) and `content[]` (from `format()`) are read by different clients. Empty-result notices, the query/filter as the server parsed it, and pagination totals — the context the agent *reasons with*, distinct from the domain payload — reach only `content[]` if hand-authored into `format()` text alone, leaving `structuredContent`-only clients (Claude Code) blind. (The reverse can't happen: `format-parity` drags every `output` field into `format()`, so `output`-authored context already reaches both.) An `enrichment` block — the success-path counterpart to `errors[]`, populated via `ctx.enrich(...)` — reaches both automatically: merged into `structuredContent`, advertised as `output.extend(enrichment)`, mirrored into a `content[]` trailer, no `format()` entry needed. How each field renders in that trailer is a per-tool call — a kind-tag (`notice`/`total`/`echo`/`delta`) when a canonical form fits, a domain key like `totalFound` otherwise, and an `enrichmentTrailer.render` for any structured (object/array) field so it doesn't ship as a JSON blob. See `add-tool`'s **Tool Response Design**.
@@ -399,6 +399,21 @@ query: z.record(z.unknown()).optional()
 ```
 
 The pattern: name the shortcut for what it does (`text_search`, `name_search`), document what it expands to, and point to the full parameter for advanced use. Validate that at least one of the two is provided.
+
+#### MCP-side list filtering
+
+**Applies when:** an upstream API has no native search, the relevant set is bounded (fits one or a few fetches), and an agent needs to resolve a name → opaque ID. Skip when the API already searches, or when the set is unbounded (bills, votes, filings) — that belongs in the DataCanvas dataframe layer (`*_dataframe_query`), not an in-memory filter.
+
+Two params, two behaviors — keep them named distinctly:
+
+- **`query`** → **upstream** full-text search. The API does the work; it may honor operators and ranking.
+- **a local filter param** → **fetched-then-filtered on our side**. Name it for the mechanic: `filter` or `nameContains` (the latter self-documents the local, name-keyed half of the split). Don't overload `query` for it — the two have different semantics and different cost.
+
+**Earns-its-keep gate — all must hold:** bounded set; no native upstream search; real scan pain (opaque IDs, a large/unordered list, or a default page that hides relevant rows); and it filters the natural lookup key (name/title). When any fails, skip it — paginate, or send the agent to upstream `query`.
+
+**Correctness: filter the *complete* bounded set, not the current page.** Fetch up to the cap (or page through) before filtering — filtering one page returns a misleading partial slice.
+
+**Matching: strict token match is the default.** Normalize (lowercase, strip punctuation/diacritics) and require every query token to appear, so word order and missing interior words still match. That strict core is the ~90% case, needs no fuzzy library, and is too small to centralize (~6 lines — guidance, not a shared helper). Add a fuzzy fallback **only when a caller genuinely needs typo tolerance** (an LLM caller rarely does): fire it only when the strict match is empty, score against the best-matching *token* in each name (not the whole string) and **cap** the results — or one short query clears the threshold against dozens of long multi-word names — and label its hits `approximate`. Often a bare "no match — call the unfiltered list to browse" beats an `approximate` guess: it lets the model self-correct instead of committing to the wrong record. See `add-tool` for the param + handler implementation.
 
 #### Error design
 
@@ -489,7 +504,7 @@ Skip for purely data/action-oriented servers.
 
 **Server-as-service.** When the server IS the source of truth (knowledge graph, in-memory task tracker, local scratchpad, embedded inference wrapper), the resilience table below doesn't apply — there's no upstream to retry. The design questions shift to state management: what's tenant-scoped vs. global, what TTLs apply, what survives a restart, what the storage backend is. Plan persistence via `ctx.state` for tenant-scoped KV (auto-namespaced by `tenantId`), or use a `StorageService` provider directly when data must cross tenants. Service init still happens in `setup()`, accessed via `getMyService()` at request time. Calls within the server are local and synchronous-ish — the API-efficiency table below also doesn't apply.
 
-**Tabular API servers: DataCanvas is one option.** For servers that fetch tabular data and want to expose a SQL/analytical workspace — register tables, run cross-table queries, export results — the framework's optional `DataCanvas` primitive (Tier 3, opt-in via `CANVAS_PROVIDER_TYPE=duckdb`) handles lifecycle, ID generation, eviction, and export wiring so you don't design your own. If you opt in, surface `canvas_id` as an optional input on register/query/export tools; the framework mints on omit and resolves on match. Tools access it via `ctx.core.canvas?` (undefined when disabled or running on Workers — DuckDB has no V8-isolate build). See `api-canvas` for the full reference.
+**Analytical API servers: DataCanvas is one option.** For servers that fetch **analytical** data — result sets an agent runs SQL over (aggregate, group, join, time-series) — and want to expose a SQL workspace, the framework's optional `DataCanvas` primitive (Tier 3, opt-in via `CANVAS_PROVIDER_TYPE=duckdb`) handles lifecycle, ID generation, eviction, and export wiring so you don't design your own. **It earns its keep on shape, not size:** a discovery/search surface returning categorical metadata (titles, IDs, types) — where the workflow is find-the-record-then-drill-in — does *not* qualify even when the result is large; resolve names over a bounded set with [MCP-side list filtering](#mcp-side-list-filtering) instead. **If you opt in, the consumer tools are mandatory:** a tool that emits a `canvas_id` MUST be paired with a `dataframe_query` (and `dataframe_describe`) tool in the same surface — a `canvas_id` with no query tool is dead output the agent can't reach. Surface `canvas_id` as an optional input on register/query/export tools; the framework mints on omit and resolves on match. Tools access it via `ctx.core.canvas?` (undefined when disabled or running on Workers — DuckDB has no V8-isolate build). See `api-canvas` for the full reference.
 
 For services wrapping external APIs, plan the resilience layer.
 
@@ -629,6 +644,7 @@ Items without an `If …:` prefix apply to every design. Conditional items only 
 - [ ] Design doc written to `docs/design.md`
 - [ ] Design confirmed with user (or user pre-authorized implementation)
 - [ ] **If ops share a noun:** related operations consolidated under one tool with `mode`/`operation` enum
+- [ ] **If an upstream API has no native search but the relevant set is bounded:** MCP-side list filtering considered — a distinct local filter param (`filter`/`nameContains`, not `query`), filtering the full set, strict token match (fuzzy only when a caller needs typo tolerance)
 - [ ] **If the server has workflow tools:** call-flow documented (upstream sequence + mode arms) in design doc's Workflow Analysis
 - [ ] **If state-aware procedural guidance adds value:** instruction tool considered with `nextToolSuggestions` pre-filled from diagnostics
 - [ ] **If workflow tools have destructive modes:** destructive arm guarded by `ctx.elicit` when available, with `destructiveHint` annotation as fallback for non-interactive clients
@@ -639,5 +655,5 @@ Items without an `If …:` prefix apply to every design. Conditional items only 
 - [ ] **If the server has external deps or shared state:** service layer planned (or explicitly skipped with reasoning)
 - [ ] **If services wrap external APIs:** resilience planned (retry boundary, backoff, parse classification)
 - [ ] **If multi-source server:** each source has its own service with independent auth/retry/rate-limit config. Fallback chains or fan-out strategy documented per tool. Output includes source provenance.
-- [ ] **If exposing a SQL/analytical workspace over tabular data is in scope:** DataCanvas considered (`api-canvas` skill) as one option before designing custom analytical state — register / query / export tools accepting an optional `canvas_id`, with `ctx.core.canvas?` reads
+- [ ] **If exposing a SQL/analytical workspace is in scope:** DataCanvas considered (`api-canvas` skill), and it earns its keep on *analytical* fit (an agent would SQL it), not row count — a discovery/search surface of categorical metadata doesn't qualify. Any tool emitting a `canvas_id` is paired with a `dataframe_query` (+ `dataframe_describe`) tool in the same surface — a token with no query tool is dead output
 - [ ] **If the server needs runtime config:** env vars identified in `server-config.ts`
