@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.9.20](changelog/0.9.x/0.9.20.md) — 2026-06-01 · 🛡️ Security
+
+Security: fetchWithTimeout redacts query-string secrets; error-contract lint scoped to throw sites; list-changed notifications routed via request scope under HTTP
+
 ## [0.9.19](changelog/0.9.x/0.9.19.md) — 2026-05-31
 
 withRetry fail-fast on data.retryable === false; bun run release:github enforces v<VERSION>: <subject> title; Gate after column in workflow phase tables

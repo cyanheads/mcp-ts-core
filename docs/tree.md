@@ -1,6 +1,6 @@
 # mcp-ts-core - Directory Structure
 
-Generated on: 2026-05-31 11:05:45
+Generated on: 2026-06-02 03:41:15
 
 ```text
 mcp-ts-core/
@@ -316,6 +316,7 @@ mcp-ts-core/
 │   │   │   ├── heartbeat.ts
 │   │   │   ├── ITransport.ts
 │   │   │   └── manager.ts
+│   │   ├── notifications.ts
 │   │   └── server.ts
 │   ├── services/
 │   │   ├── canvas/
