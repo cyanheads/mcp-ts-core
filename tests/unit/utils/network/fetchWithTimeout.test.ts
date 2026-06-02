@@ -315,6 +315,60 @@ describe('fetchWithTimeout', () => {
     );
   });
 
+  describe('URL redaction (#190 — query-string secrets must not leak)', () => {
+    // The Guardian (?api-key=…) and many api.data.gov services (?api_key=…)
+    // authenticate via the query string. The secret must never reach a
+    // client-facing error message or the logs.
+    const secretUrl = 'https://api.example.com/search?q=cats&api-key=SUPERSECRET';
+    const safePrefix = 'https://api.example.com/search';
+
+    it('redacts the secret from the thrown error and the log on a non-OK response', async () => {
+      vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response('nope', { status: 401 }));
+      const error = (await fetchWithTimeout(secretUrl, 1000, context).catch((e) => e)) as McpError;
+
+      expect(error.message).not.toContain('SUPERSECRET');
+      expect(error.message).not.toContain('api-key');
+      expect(error.message).toContain(safePrefix);
+
+      const logged = String(errorSpy.mock.calls.at(-1)?.[0]);
+      expect(logged).not.toContain('SUPERSECRET');
+      expect(logged).toContain(safePrefix);
+    });
+
+    it('redacts the secret from the timeout error', async () => {
+      vi.spyOn(globalThis, 'fetch').mockImplementation(
+        (_url, init) =>
+          new Promise((_resolve, reject) => {
+            init?.signal?.addEventListener('abort', () => {
+              const abortError = new Error('Aborted');
+              abortError.name = 'AbortError';
+              reject(abortError);
+            });
+          }),
+      );
+      const error = (await fetchWithTimeout(secretUrl, 5, context).catch((e) => e)) as McpError;
+      expect(error.message).not.toContain('SUPERSECRET');
+      expect(error.message).toContain(safePrefix);
+    });
+
+    it('redacts the secret from the network-error wrapper', async () => {
+      vi.spyOn(globalThis, 'fetch').mockRejectedValue(new Error('connection reset'));
+      const error = (await fetchWithTimeout(secretUrl, 1000, context).catch((e) => e)) as McpError;
+      expect(error.message).not.toContain('SUPERSECRET');
+      expect(error.message).toContain(safePrefix);
+    });
+
+    it('redacts the secret from the success debug log', async () => {
+      vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response('ok', { status: 200 }));
+      await fetchWithTimeout(secretUrl, 1000, context);
+      const logged = String(
+        debugSpy.mock.calls.find((c) => String(c[0]).includes('Successfully fetched'))?.[0],
+      );
+      expect(logged).not.toContain('SUPERSECRET');
+      expect(logged).toContain(safePrefix);
+    });
+  });
+
   describe('SSRF protection', () => {
     describe('hostname/IP pattern checks', () => {
       const ssrfOpts = { rejectPrivateIPs: true };

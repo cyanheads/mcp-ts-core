@@ -36,6 +36,31 @@ export function initHttpClientMetrics(): void {
 }
 
 /**
+ * Redacts a URL to `origin + pathname` for safe inclusion in error messages and
+ * logs. Drops the query string — where API keys commonly ride (`?api-key=…`,
+ * `?api_key=…`, `?key=…`) — along with the fragment and any embedded
+ * `user:pass@` credentials (`URL.origin` omits userinfo). A trailing `?…` marks
+ * that a query was present (redacted) so diagnostics still signal it; a
+ * bare-domain `/` pathname is elided to keep output clean.
+ *
+ * Fail-closed: an unparseable URL returns a fixed placeholder rather than
+ * echoing the raw (possibly secret-bearing) string.
+ *
+ * Used only for log/error *text* — never for the actual `fetch` call, which
+ * always receives the full URL.
+ */
+function redactUrl(url: string | URL): string {
+  try {
+    const parsed = url instanceof URL ? url : new URL(String(url));
+    const path = parsed.pathname === '/' ? '' : parsed.pathname;
+    const marker = parsed.search ? '?…' : '';
+    return `${parsed.origin}${path}${marker}`;
+  } catch {
+    return '[unparseable URL]';
+  }
+}
+
+/**
  * Options for the `fetchWithTimeout` utility.
  *
  * Extends the standard `RequestInit` type, omitting `signal` (which is managed
@@ -178,7 +203,8 @@ async function assertNotPrivateUrl(urlString: string): Promise<void> {
   try {
     parsed = new URL(urlString);
   } catch {
-    throw validationError(`Invalid URL: ${urlString}`);
+    // Don't echo the raw string — it failed to parse and may carry a secret query.
+    throw validationError('Invalid URL: could not be parsed.');
   }
 
   const hostname = parsed.hostname.replace(/^\[|\]$/g, ''); // Strip IPv6 brackets
@@ -316,7 +342,7 @@ export async function fetchWithTimeout(
     await assertNotPrivateUrl(urlString);
   }
 
-  const operationDescription = `fetch ${options?.method || 'GET'} ${urlString}`;
+  const operationDescription = `fetch ${options?.method || 'GET'} ${redactUrl(urlString)}`;
 
   logger.debug(`Attempting ${operationDescription} with ${timeoutMs}ms timeout.`, context);
 
@@ -366,7 +392,7 @@ export async function fetchWithTimeout(
         const location = response.headers.get('location');
         if (!location) {
           throw serviceUnavailable(
-            `Redirect response missing Location header from ${String(currentUrl)}`,
+            `Redirect response missing Location header from ${redactUrl(currentUrl)}`,
           );
         }
 
@@ -383,7 +409,10 @@ export async function fetchWithTimeout(
         // Validate the redirect target against SSRF rules
         await assertNotPrivateUrl(redirectUrl);
 
-        logger.debug(`Following validated redirect ${redirectCount}: ${redirectUrl}`, context);
+        logger.debug(
+          `Following validated redirect ${redirectCount}: ${redactUrl(redirectUrl)}`,
+          context,
+        );
         currentUrl = redirectUrl;
         continue;
       }
@@ -394,7 +423,7 @@ export async function fetchWithTimeout(
         const rawBody = await response.text().catch(() => 'Could not read response body');
         const responseBody =
           rawBody.length > ERROR_BODY_LIMIT ? `${rawBody.slice(0, ERROR_BODY_LIMIT)}…` : rawBody;
-        logger.error(`Fetch failed for ${String(currentUrl)} with status ${response.status}.`, {
+        logger.error(`Fetch failed for ${redactUrl(currentUrl)} with status ${response.status}.`, {
           ...context,
           statusCode: response.status,
           statusText: response.statusText,
@@ -405,7 +434,7 @@ export async function fetchWithTimeout(
         const retryAfter = response.headers.get('retry-after');
         throw new McpError(
           code,
-          `Fetch failed for ${String(currentUrl)}. Status: ${response.status}`,
+          `Fetch failed for ${redactUrl(currentUrl)}. Status: ${response.status}`,
           {
             requestId: context.requestId,
             operation: context.operation as string | undefined,
@@ -419,7 +448,7 @@ export async function fetchWithTimeout(
       }
 
       logger.debug(
-        `Successfully fetched ${String(currentUrl)}. Status: ${response.status}`,
+        `Successfully fetched ${redactUrl(currentUrl)}. Status: ${response.status}`,
         context,
       );
       return response;
