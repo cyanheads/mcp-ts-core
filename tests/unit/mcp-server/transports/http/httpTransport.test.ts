@@ -7,6 +7,7 @@ import { StreamableHTTPTransport } from '@hono/mcp';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
 import { createHttpApp } from '@/mcp-server/transports/http/httpTransport.js';
+import { logger } from '@/utils/internal/logger.js';
 import type { RequestContext } from '@/utils/internal/requestContext.js';
 import { defaultServerManifest as defaultMeta } from '../../../../helpers/fixtures.js';
 
@@ -1114,6 +1115,62 @@ describe('HTTP Transport', () => {
 
       expect(transportCloseSpy).toHaveBeenCalledTimes(1);
       expect(serverCloseSpy).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // Per-request log context — issue #194 regression
+  //
+  // Per-request route handlers previously logged with the setup-time
+  // `transportContext` (built once in createHttpApp from the boot parent
+  // context), freezing requestId/timestamp/traceId/spanId at boot — so a
+  // session-termination logged hours after startup carried boot's timestamp
+  // and trace IDs. Each handler now derives its own context via
+  // createRequestContext, so every per-request log line gets a fresh
+  // requestId + timestamp (and live trace/span IDs when OTel is enabled).
+  // -------------------------------------------------------------------------
+  describe('Per-request log context (issue #194)', () => {
+    test('per-request handler logs carry a fresh context, not the frozen boot context', async () => {
+      const warnSpy = vi.spyOn(logger, 'warning').mockImplementation(() => {});
+      const { app } = await createHttpApp(
+        () => Promise.resolve(mockMcpServer as McpServer),
+        mockContext,
+        defaultMeta,
+      );
+
+      // DELETE without a session ID hits a per-request handler log.
+      await app.fetch(new Request('http://localhost:3000/mcp', { method: 'DELETE' }));
+
+      const call = warnSpy.mock.calls.find(([msg]) => msg === 'DELETE request without session ID');
+      expect(call).toBeDefined();
+      const ctx = call![1] as RequestContext;
+
+      // Fresh per-request requestId — not the boot context's id.
+      expect(ctx.requestId).toBeTruthy();
+      expect(ctx.requestId).not.toBe(mockContext.requestId);
+      // Fresh ISO 8601 timestamp — not the boot context's (numeric) stamp.
+      expect(typeof ctx.timestamp).toBe('string');
+      expect(ctx.timestamp).not.toBe(mockContext.timestamp);
+      expect(Number.isNaN(Date.parse(ctx.timestamp as string))).toBe(false);
+    });
+
+    test('distinct requests get distinct per-request contexts (not frozen at boot)', async () => {
+      const warnSpy = vi.spyOn(logger, 'warning').mockImplementation(() => {});
+      const { app } = await createHttpApp(
+        () => Promise.resolve(mockMcpServer as McpServer),
+        mockContext,
+        defaultMeta,
+      );
+
+      await app.fetch(new Request('http://localhost:3000/mcp', { method: 'DELETE' }));
+      await app.fetch(new Request('http://localhost:3000/mcp', { method: 'DELETE' }));
+
+      const ids = warnSpy.mock.calls
+        .filter(([msg]) => msg === 'DELETE request without session ID')
+        .map(([, ctx]) => (ctx as RequestContext).requestId);
+
+      expect(ids).toHaveLength(2);
+      expect(ids[0]).not.toBe(ids[1]);
     });
   });
 });

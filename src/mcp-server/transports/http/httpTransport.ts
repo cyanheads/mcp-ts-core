@@ -28,7 +28,7 @@ import { createServerCardHandler } from '@/mcp-server/transports/http/serverCard
 import { generateSecureSessionId } from '@/mcp-server/transports/http/sessionIdUtils.js';
 import { type SessionIdentity, SessionStore } from '@/mcp-server/transports/http/sessionStore.js';
 import { logger } from '@/utils/internal/logger.js';
-import type { RequestContext } from '@/utils/internal/requestContext.js';
+import { type RequestContext, requestContextService } from '@/utils/internal/requestContext.js';
 import { createCounter, createObservableGauge } from '@/utils/telemetry/metrics.js';
 
 /**
@@ -146,7 +146,7 @@ async function closePerRequestInstances(
   transport: McpSessionTransport,
   server: McpServer,
   sessionId: string,
-  transportContext: RequestContext,
+  requestContext: RequestContext,
   trigger: CloseTrigger,
 ): Promise<void> {
   const tasks: [PerRequestKind, Promise<void>][] = [
@@ -161,7 +161,7 @@ async function closePerRequestInstances(
       } catch (err) {
         getCloseFailureCounter().add(1, { surface, trigger });
         logger.warning(`Failed to close ${surface} (trigger=${trigger})`, {
-          ...transportContext,
+          ...requestContext,
           sessionId,
           error: err instanceof Error ? err.message : String(err),
         });
@@ -299,8 +299,12 @@ export async function createHttpApp<TBindings extends object = HonoNodeBindings>
         (explicitOrigins ? explicitOrigins.includes(origin) : LOOPBACK_ORIGIN_RE.test(origin));
 
       if (!isAllowed) {
+        const requestContext = requestContextService.createRequestContext({
+          operation: 'HttpOriginGuard',
+          component: 'HttpTransport',
+        });
         logger.warning('Rejected request with invalid Origin header', {
-          ...transportContext,
+          ...requestContext,
           origin,
           allowedOrigins: explicitOrigins ?? 'loopback-only',
         });
@@ -328,8 +332,12 @@ export async function createHttpApp<TBindings extends object = HonoNodeBindings>
       }
 
       const rejectOversized = (bytes: number): Response => {
+        const requestContext = requestContextService.createRequestContext({
+          operation: 'HttpBodyLimit',
+          component: 'HttpTransport',
+        });
         logger.warning('Rejected request exceeding body size limit', {
-          ...transportContext,
+          ...requestContext,
           bytes,
           maxBodyBytes,
         });
@@ -504,15 +512,19 @@ export async function createHttpApp<TBindings extends object = HonoNodeBindings>
   // Clients SHOULD send DELETE to explicitly terminate sessions
   // https://modelcontextprotocol.io/specification/2025-06-18/basic/transports#session-management
   app.delete(config.mcpHttpEndpointPath, (c) => {
+    const requestContext = requestContextService.createRequestContext({
+      operation: 'HttpSessionTermination',
+      component: 'HttpTransport',
+    });
     const sessionId = c.req.header('mcp-session-id');
 
     if (!sessionId) {
-      logger.warning('DELETE request without session ID', transportContext);
+      logger.warning('DELETE request without session ID', requestContext);
       return c.json({ error: 'Mcp-Session-Id header required' }, 400);
     }
 
     logger.info('Session termination requested', {
-      ...transportContext,
+      ...requestContext,
       sessionId,
     });
 
@@ -526,7 +538,7 @@ export async function createHttpApp<TBindings extends object = HonoNodeBindings>
 
     if (!sessionStore.isValidForIdentity(sessionId, sessionIdentity)) {
       logger.warning('Session termination rejected - ownership validation failed', {
-        ...transportContext,
+        ...requestContext,
         sessionId,
         requestTenant: sessionIdentity?.tenantId,
         requestClient: sessionIdentity?.clientId,
@@ -538,7 +550,7 @@ export async function createHttpApp<TBindings extends object = HonoNodeBindings>
     sessionStore.terminate(sessionId);
 
     logger.info('Session terminated successfully', {
-      ...transportContext,
+      ...requestContext,
       sessionId,
     });
 
@@ -547,9 +559,13 @@ export async function createHttpApp<TBindings extends object = HonoNodeBindings>
 
   // JSON-RPC over HTTP (Streamable)
   app.all(config.mcpHttpEndpointPath, async (c) => {
+    const requestContext = requestContextService.createRequestContext({
+      operation: 'HttpRpcRequest',
+      component: 'HttpTransport',
+    });
     const protocolVersion = c.req.header('mcp-protocol-version') ?? '2025-03-26';
     logger.debug('Handling MCP request.', {
-      ...transportContext,
+      ...requestContext,
       path: c.req.path,
       method: c.req.method,
       protocolVersion,
@@ -561,7 +577,7 @@ export async function createHttpApp<TBindings extends object = HonoNodeBindings>
     const supportedVersions = manifest.protocol.supportedVersions;
     if (!supportedVersions.includes(protocolVersion)) {
       logger.warning('Unsupported MCP protocol version requested.', {
-        ...transportContext,
+        ...requestContext,
         protocolVersion,
         supportedVersions,
       });
@@ -590,7 +606,7 @@ export async function createHttpApp<TBindings extends object = HonoNodeBindings>
       !sessionStore.isValidForIdentity(providedSessionId, sessionIdentity)
     ) {
       logger.warning('Session validation failed - invalid or hijacked session', {
-        ...transportContext,
+        ...requestContext,
         sessionId: providedSessionId,
         requestTenant: sessionIdentity?.tenantId,
         requestClient: sessionIdentity?.clientId,
@@ -621,7 +637,7 @@ export async function createHttpApp<TBindings extends object = HonoNodeBindings>
       }
       if (!isInitialize) {
         logger.warning('Rejected non-initialize request without session in stateful mode', {
-          ...transportContext,
+          ...requestContext,
           method: c.req.method,
         });
         return c.json(
@@ -662,7 +678,7 @@ export async function createHttpApp<TBindings extends object = HonoNodeBindings>
         if (isStateful && response.ok) {
           response.headers.set('Mcp-Session-Id', sessionId);
           logger.debug('Added Mcp-Session-Id header to response', {
-            ...transportContext,
+            ...requestContext,
             sessionId,
           });
         }
@@ -680,13 +696,7 @@ export async function createHttpApp<TBindings extends object = HonoNodeBindings>
         const isSSE = response.headers.get('content-type')?.includes('text/event-stream');
         if (!isSSE) {
           queueMicrotask(() => {
-            void closePerRequestInstances(
-              transport,
-              server,
-              sessionId,
-              transportContext,
-              'success',
-            );
+            void closePerRequestInstances(transport, server, sessionId, requestContext, 'success');
           });
         } else {
           const sseCleanup = (): void => {
@@ -694,7 +704,7 @@ export async function createHttpApp<TBindings extends object = HonoNodeBindings>
               transport,
               server,
               sessionId,
-              transportContext,
+              requestContext,
               'sse-abort',
             );
           };
@@ -724,7 +734,7 @@ export async function createHttpApp<TBindings extends object = HonoNodeBindings>
         (closeErr: unknown) => {
           getCloseFailureCounter().add(1, { surface: 'transport', trigger: 'error' });
           logger.warning('Failed to close transport after error', {
-            ...transportContext,
+            ...requestContext,
             sessionId,
             error: closeErr instanceof Error ? closeErr.message : String(closeErr),
           });
