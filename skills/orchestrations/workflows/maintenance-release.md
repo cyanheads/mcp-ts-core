@@ -5,7 +5,7 @@ description: >
 metadata:
   author: cyanheads
   version: "1.1"
-  audience: internal
+  audience: external
   type: workflow
 ---
 
