@@ -67,6 +67,18 @@ export {
   httpStatusToErrorCode,
 } from './network/httpError.js';
 export { type RetryOptions, withRetry } from './network/retry.js';
+// Overflow (outline-on-overflow — issue #204)
+export {
+  DEFAULT_OUTLINE_BUDGET_BYTES,
+  formatOutline,
+  OUTLINE_VARIANT,
+  type OutlineOptions,
+  type OutlinePayload,
+  type OutlineResult,
+  outlineOnOverflow,
+  type SectionMeta,
+  selectSections,
+} from './overflow/outlineOnOverflow.js';
 // Pagination
 export {
   DEFAULT_PAGINATION_CONFIG,

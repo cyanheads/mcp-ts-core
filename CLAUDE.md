@@ -57,7 +57,7 @@ Both paths share the same public API. Init copies starter `package.json`, config
 | `/storage/types` | `IStorageProvider` | Provider interface |
 | `/canvas` | `DataCanvas`, `CanvasInstance`, `CanvasRegistry`, `IDataCanvasProvider`, `DuckdbProvider`, `spillover`, `inferSchemaFromRows`, `assertReadOnlyQuery`, `quoteIdentifier`, ... | DataCanvas primitive (Tier 3, optional peer dep `@duckdb/node-api`); SQL/analytical workspace + source-agnostic spillover helper |
 | `/mirror` | `defineMirror`, `sqliteMirrorStore`, `buildSchemaSql`, `openSqliteHandle`, `Mirror`, `MirrorStore`, `MirrorDefinition`, `SyncContext`, `SyncPage`, ... | MirrorService primitive (Tier 3, optional peer dep `better-sqlite3` on Node; `bun:sqlite` built-in on Bun); persistent self-refreshing local mirror of a bulk upstream dataset (embedded SQLite + FTS5). Node/Bun only |
-| `/utils` | formatting, encoding, network, pagination, logging, runtime, telemetry, token counting, parsers†, sanitization†, scheduling† | All utilities (†optional peer deps) |
+| `/utils` | formatting, encoding, network, pagination, overflow (`outlineOnOverflow`, `OUTLINE_VARIANT`, `selectSections`, `formatOutline`), logging, runtime, telemetry, token counting, parsers†, sanitization†, scheduling† | All utilities (†optional peer deps) |
 | `/services` | `OpenRouterProvider`, `SpeechService`, `createSpeechProvider`, `ElevenLabsProvider`, `WhisperProvider`, `GraphService`, provider interfaces and types | LLM, Speech (TTS/STT), Graph services |
 | `/linter` | `validateDefinitions`, `LintReport`, `LintDiagnostic`, `LintInput`, `LintSeverity` | Definition validation |
 | `/testing` | `createMockContext`, `getEnrichment` | Test helpers |

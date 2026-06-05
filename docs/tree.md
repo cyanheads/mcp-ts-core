@@ -1,6 +1,6 @@
 # mcp-ts-core - Directory Structure
 
-Generated on: 2026-06-02 03:41:15
+Generated on: 2026-06-05 12:06:04
 
 ```text
 mcp-ts-core/
@@ -205,6 +205,10 @@ mcp-ts-core/
 │   ├── security-pass/
 │   │   └── SKILL.md
 │   ├── setup/
+│   │   └── SKILL.md
+│   ├── techniques/
+│   │   ├── references/
+│   │   │   └── outline-on-overflow.md
 │   │   └── SKILL.md
 │   ├── tool-defs-analysis/
 │   │   └── SKILL.md
@@ -419,6 +423,8 @@ mcp-ts-core/
 │   │   │   ├── fetchWithTimeout.ts
 │   │   │   ├── httpError.ts
 │   │   │   └── retry.ts
+│   │   ├── overflow/
+│   │   │   └── outlineOnOverflow.ts
 │   │   ├── pagination/
 │   │   │   └── pagination.ts
 │   │   ├── parsing/
@@ -740,6 +746,8 @@ mcp-ts-core/
 │   │   │   │   ├── fetchWithTimeout.test.ts
 │   │   │   │   ├── httpError.test.ts
 │   │   │   │   └── retry.test.ts
+│   │   │   ├── overflow/
+│   │   │   │   └── outlineOnOverflow.test.ts
 │   │   │   ├── pagination/
 │   │   │   │   └── index.test.ts
 │   │   │   ├── parsing/
