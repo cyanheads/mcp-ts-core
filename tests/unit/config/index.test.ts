@@ -103,6 +103,40 @@ describe('config parsing', () => {
     }
   });
 
+  it('parses env boolean flags via stringbool (the z.coerce.boolean footgun fix)', () => {
+    for (const value of ['false', '0', 'no', 'off', 'FALSE', 'Off']) {
+      process.env.OTEL_ENABLED = value;
+      expect(parseConfig().openTelemetry.enabled, `OTEL_ENABLED=${value}`).toBe(false);
+    }
+    for (const value of ['true', '1', 'yes', 'on', 'TRUE', 'On']) {
+      process.env.OTEL_ENABLED = value;
+      expect(parseConfig().openTelemetry.enabled, `OTEL_ENABLED=${value}`).toBe(true);
+    }
+  });
+
+  it('defaults env boolean flags to false when unset or empty', () => {
+    delete process.env.OTEL_ENABLED;
+    expect(parseConfig().openTelemetry.enabled).toBe(false);
+    process.env.OTEL_ENABLED = '';
+    expect(parseConfig().openTelemetry.enabled).toBe(false);
+  });
+
+  it('rejects an unrecognized env boolean value instead of silently coercing it', () => {
+    const consoleSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    process.env.OTEL_ENABLED = 'enable'; // plausible typo for "enabled" — must fail loudly
+
+    let thrown: unknown;
+    try {
+      parseConfig();
+    } catch (error) {
+      thrown = error;
+    }
+
+    expect(thrown).toBeInstanceOf(McpError);
+    expect((thrown as McpError).code).toBe(JsonRpcErrorCode.ConfigurationError);
+    consoleSpy.mockRestore();
+  });
+
   it('parses MCP_PUBLIC_URL when set, defaults to undefined', () => {
     expect(parseConfig().mcpPublicUrl).toBeUndefined();
 

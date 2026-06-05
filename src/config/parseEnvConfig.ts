@@ -23,6 +23,9 @@ import { configurationError } from '../types-global/errors.js';
  * const ServerConfigSchema = z.object({
  *   apiKey: z.string().describe('External API key'),
  *   maxResults: z.coerce.number().default(100),
+ *   // Use z.stringbool() for env booleans, never z.coerce.boolean() —
+ *   // Boolean("false") is true, so coerce can't be turned off via the env.
+ *   verboseLogging: z.stringbool().default(false),
  * });
  *
  * let _config: z.infer<typeof ServerConfigSchema> | undefined;
@@ -30,6 +33,7 @@ import { configurationError } from '../types-global/errors.js';
  *   _config ??= parseEnvConfig(ServerConfigSchema, {
  *     apiKey: 'MY_API_KEY',
  *     maxResults: 'MY_MAX_RESULTS',
+ *     verboseLogging: 'MY_VERBOSE_LOGGING',
  *   });
  *   return _config;
  * }

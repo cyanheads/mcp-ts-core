@@ -69,11 +69,20 @@ const emptyStringAsUndefined = (val: unknown) => {
   return val;
 };
 
-/** Parses string booleans from env vars correctly (`"false"` → `false`). */
-const envBoolean = z.preprocess((val) => {
-  if (typeof val === 'string') return val.toLowerCase() === 'true' || val === '1';
-  return val;
-}, z.boolean());
+/**
+ * Boolean env flag parser. Uses Zod's `stringbool` — accepts `true/false/1/0/
+ * yes/no/on/off` (case-insensitive) and rejects anything else, so `"false"`
+ * disables. This is the safe alternative to `z.coerce.boolean()`, where
+ * `Boolean("false") === true` makes a flag impossible to turn off through the
+ * environment. Empty string and unset both fall through to the baked `false`
+ * default; real booleans pass through for runtimes that inject typed env vars
+ * (Cloudflare Workers `[vars]`). Field sites use `envBoolean` directly — the
+ * default lives under the preprocess so empty strings resolve to it.
+ */
+const envBoolean = z.preprocess(
+  emptyStringAsUndefined,
+  z.union([z.boolean(), z.stringbool()]).default(false),
+);
 
 // --- Schema Definition ---
 const ConfigSchema = z
@@ -121,7 +130,7 @@ const ConfigSchema = z
      * explicitly opted into. When `false`, interaction logs carry metadata
      * only (model, message count, token usage, duration).
      */
-    logLlmInteractions: envBoolean.default(false),
+    logLlmInteractions: envBoolean,
     environment: z
       .preprocess(
         (val) => {
@@ -218,20 +227,14 @@ const ConfigSchema = z
      * with server-side ACLs — without an in-handler ACL, every authenticated user
      * effectively has every scope.
      */
-    mcpAuthDisableScopeChecks: envBoolean.default(false),
+    mcpAuthDisableScopeChecks: envBoolean,
     oauthIssuerUrl: z.url().optional(),
     oauthJwksUri: z.url().optional(),
     oauthAudience: z.string().optional(),
     oauthJwksCooldownMs: z.coerce.number().default(300_000), // 5 minutes
     oauthJwksTimeoutMs: z.coerce.number().default(5_000), // 5 seconds
     mcpServerResourceIdentifier: z.url().optional(), // RFC 8707 resource indicator
-    devMcpAuthBypass: z
-      .preprocess((val) => {
-        if (val === undefined || val === null || val === '') return false;
-        const str = String(val).toLowerCase().trim();
-        return str === 'true' || str === '1';
-      }, z.boolean())
-      .default(false),
+    devMcpAuthBypass: envBoolean,
     devMcpClientId: z.string().optional(),
     devMcpScopes: z.array(z.string()).optional(),
     openrouterAppUrl: z.string().default('http://localhost:3000'),
@@ -353,7 +356,7 @@ const ConfigSchema = z
       defaultTtlMs: z.coerce.number().nullable().optional(),
     }),
     openTelemetry: z.object({
-      enabled: envBoolean.default(false),
+      enabled: envBoolean,
       serviceName: z.string(),
       serviceVersion: z.string(),
       tracesEndpoint: z.url().optional(),
@@ -382,7 +385,7 @@ const ConfigSchema = z
       .object({
         tts: z
           .object({
-            enabled: envBoolean.default(false),
+            enabled: envBoolean,
             provider: z.enum(['elevenlabs']).default('elevenlabs'),
             apiKey: z.string().optional(),
             baseUrl: z.url().optional(),
@@ -393,7 +396,7 @@ const ConfigSchema = z
           .optional(),
         stt: z
           .object({
-            enabled: envBoolean.default(false),
+            enabled: envBoolean,
             provider: z.enum(['openai-whisper']).default('openai-whisper'),
             apiKey: z.string().optional(),
             baseUrl: z.url().optional(),
