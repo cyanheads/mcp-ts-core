@@ -37,9 +37,12 @@ WORKDIR /usr/src/app
 ENV NODE_ENV=production
 
 # OCI image metadata (https://github.com/opencontainers/image-spec/blob/main/annotations.md)
+ARG APP_VERSION
 LABEL org.opencontainers.image.title="{{PACKAGE_NAME}}"
 LABEL org.opencontainers.image.description=""
 LABEL org.opencontainers.image.licenses="Apache-2.0"
+LABEL org.opencontainers.image.version="${APP_VERSION}"
+LABEL org.opencontainers.image.source=""
 
 # Copy dependency manifests
 COPY package.json bun.lock ./

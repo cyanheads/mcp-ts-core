@@ -4,7 +4,7 @@ description: >
   Ship a release end-to-end across every registry the project targets (npm, MCP Registry, GitHub Releases for `.mcpb` bundles, GHCR). Runs the final verification gate, pushes commits and tags, then publishes to each applicable destination. Assumes git wrapup (version bumps, changelog, commit, annotated tag) is already complete — this skill is the post-wrapup publish workflow. Retries transient network failures on publish steps; halts with a partial-state report when retries are exhausted or the failure is terminal.
 metadata:
   author: cyanheads
-  version: "2.8"
+  version: "2.9"
   audience: external
   type: workflow
 ---
@@ -174,6 +174,7 @@ Derive:
 
 ```bash
 docker buildx build --platform linux/amd64,linux/arm64 \
+  --build-arg APP_VERSION=<VERSION> \
   -t ghcr.io/<OWNER>/<REPO>:<VERSION> \
   -t ghcr.io/<OWNER>/<REPO>:latest \
   --push .
