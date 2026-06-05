@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.10.0](changelog/0.10.x/0.10.0.md) — 2026-06-05
+
+Outline-on-overflow helper for oversized document payloads; env booleans parse via Zod stringbool (rejects unrecognized values); built Docker images stamp image.version.
+
 ## [0.9.21](changelog/0.9.x/0.9.21.md) — 2026-06-02
 
 HTTP transport per-request log context fixed — handlers now derive a fresh requestId/timestamp + live trace/span IDs instead of the frozen boot context
