@@ -214,6 +214,22 @@ const DENIED_FUNCTION_BARE_REGEX = new RegExp(
   'gi',
 );
 
+/**
+ * Deny the entire `pragma_*` namespace. DuckDB rewrites bare PRAGMA statements
+ * (e.g. `PRAGMA table_info('t')`) into `SELECT * FROM pragma_table_info('t')`,
+ * which types as SELECT and would otherwise pass `assertSelectOnly`. Covering
+ * the namespace with a prefix regex rather than an enumerated set ensures new
+ * pragma metadata TVFs DuckDB adds in future versions are also blocked.
+ *
+ * Two forms match the two scan layers:
+ * - `DENIED_PRAGMA_CALL_REGEX` — call shape (`pragma_<name>(`) for the text scan
+ * - `DENIED_PRAGMA_BARE_REGEX` — bare name for the plan-walk rescan on metadata fields
+ *
+ * See https://github.com/cyanheads/mcp-ts-core/issues/210.
+ */
+const DENIED_PRAGMA_CALL_REGEX = /\b(pragma_\w+)\s*\(/gi;
+const DENIED_PRAGMA_BARE_REGEX = /\b(pragma_\w+)\b/gi;
+
 /** Plan-node string fields where DuckDB stores lowered table-function names. */
 const FUNCTION_METADATA_KEYS: ReadonlySet<string> = new Set([
   'extra_info',
@@ -238,8 +254,9 @@ function stripSqlStringLiterals(sql: string): string {
 
 /**
  * Layer 1: pre-EXPLAIN function deny-list. Scans the SQL (string literals
- * stripped) for calls to any function in {@link DENIED_TABLE_FUNCTIONS} so a
- * malicious `read_json('/etc/passwd')` is rejected before reaching the planner.
+ * stripped) for calls to any function in {@link DENIED_TABLE_FUNCTIONS} or the
+ * `pragma_*` namespace so a malicious `read_json('/etc/passwd')` or
+ * `pragma_table_info('t')` is rejected before reaching the planner.
  */
 export function assertNoDeniedFunctions(sql: string): void {
   if (typeof sql !== 'string' || sql.length === 0) return;
@@ -250,6 +267,16 @@ export function assertNoDeniedFunctions(sql: string): void {
     const fn = match[1].toLowerCase();
     throw validationError(
       `Canvas query references disallowed table function: ${fn}. File-reading and external-data functions are not permitted.`,
+      { reason: SQL_GATE_REASONS.deniedFunction, function: fn },
+    );
+  }
+  // Deny pragma_* table function calls (whole namespace, not just known names).
+  DENIED_PRAGMA_CALL_REGEX.lastIndex = 0;
+  const pragmaMatch = DENIED_PRAGMA_CALL_REGEX.exec(stripped);
+  if (pragmaMatch?.[1]) {
+    const fn = pragmaMatch[1].toLowerCase();
+    throw validationError(
+      `Canvas query references disallowed table function: ${fn}. PRAGMA metadata functions are not permitted.`,
       { reason: SQL_GATE_REASONS.deniedFunction, function: fn },
     );
   }
@@ -359,12 +386,17 @@ function walk(node: unknown, offending: Set<string>, deniedFunctions: Set<string
   // read_json/read_parquet lower into generic scan operators whose source
   // function appears in plan metadata, not the operator name. Use the bare
   // regex on known function-name fields, the call-shape regex elsewhere.
+  // Also scan for pragma_* metadata TVFs using the namespace-level regexes.
   for (const [key, value] of Object.entries(obj)) {
     if (typeof value !== 'string') continue;
-    const regex = FUNCTION_METADATA_KEYS.has(key)
+    const setRegex = FUNCTION_METADATA_KEYS.has(key)
       ? DENIED_FUNCTION_BARE_REGEX
       : DENIED_FUNCTION_CALL_REGEX;
-    collectDeniedFunctionMatches(value, regex, deniedFunctions);
+    collectDeniedFunctionMatches(value, setRegex, deniedFunctions);
+    const pragmaRegex = FUNCTION_METADATA_KEYS.has(key)
+      ? DENIED_PRAGMA_BARE_REGEX
+      : DENIED_PRAGMA_CALL_REGEX;
+    collectDeniedFunctionMatches(value, pragmaRegex, deniedFunctions);
   }
   for (const key of ['children', 'child', 'inputs', 'plan', 'root']) {
     if (key in obj) walk(obj[key], offending, deniedFunctions);

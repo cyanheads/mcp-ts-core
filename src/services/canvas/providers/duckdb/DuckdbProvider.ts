@@ -22,6 +22,7 @@ import {
   assertSelectOnly,
   assertValidIdentifier,
   quoteIdentifier,
+  SQL_GATE_REASONS,
 } from '../../core/sqlGate.js';
 import type {
   CanvasObjectKind,
@@ -649,28 +650,47 @@ export class DuckdbProvider implements IDataCanvasProvider {
     assertNoDeniedFunctions(sql);
 
     // Layers 2-3: parse and type-check before EXPLAIN.
-    const extracted = await record.controlConnection.extractStatements(sql);
-    const statementCount = extracted.count;
-    let statementType: number | undefined;
-    if (statementCount === 1) {
-      const prepared = await extracted.prepare(0);
-      try {
-        statementType = prepared.statementType;
-      } finally {
-        prepared.destroySync();
+    // Fail closed: if extractStatements or prepare(0) throws (e.g. bare PRAGMA
+    // that DuckDB cannot prepare), treat the input as non-SELECT rather than
+    // letting the raw engine error escape as a generic InternalError (-32603).
+    let statementCount: number;
+    let statementType: string;
+    try {
+      const extracted = await record.controlConnection.extractStatements(sql);
+      statementCount = extracted.count;
+      if (statementCount === 1) {
+        const prepared = await extracted.prepare(0);
+        try {
+          const typeInt = prepared.statementType;
+          statementType = duck.StatementType[typeInt] ?? 'UNKNOWN';
+        } finally {
+          prepared.destroySync();
+        }
+      } else {
+        statementType = 'UNKNOWN';
       }
+    } catch {
+      throw validationError(
+        'Canvas query must be SELECT; the statement could not be parsed or prepared.',
+        { reason: SQL_GATE_REASONS.nonSelectStatement, statementType: 'UNKNOWN' },
+      );
     }
-    assertSelectOnly({
-      statementCount,
-      statementType:
-        statementType !== undefined ? (duck.StatementType[statementType] ?? 'UNKNOWN') : 'UNKNOWN',
-    });
+    assertSelectOnly({ statementCount, statementType });
 
     // Layer 4: walk the plan with the allowlist + denied-function rescan.
-    const planJson = await this.runExplain(
-      record.controlConnection,
-      `EXPLAIN (FORMAT JSON) ${sql}`,
-    );
+    // Fail closed: EXPLAIN itself can throw for statements that parse as SELECT
+    // but cannot produce a plan (e.g. bare `PRAGMA show_tables`). Treat any
+    // EXPLAIN failure as a non-SELECT rejection rather than letting the raw
+    // engine error escape as InternalError (-32603).
+    let planJson: unknown;
+    try {
+      planJson = await this.runExplain(record.controlConnection, `EXPLAIN (FORMAT JSON) ${sql}`);
+    } catch {
+      throw validationError('Canvas query must be SELECT; the statement could not be explained.', {
+        reason: SQL_GATE_REASONS.nonSelectStatement,
+        statementType,
+      });
+    }
     assertPlanReadOnly(planJson);
   }
 

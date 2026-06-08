@@ -21,6 +21,7 @@ import {
   collectDisallowedOperators,
 } from '@/services/canvas/core/sqlGate.js';
 import { DuckdbProvider } from '@/services/canvas/providers/duckdb/DuckdbProvider.js';
+import { McpError } from '@/types-global/errors.js';
 import type { RequestContext } from '@/utils/internal/requestContext.js';
 
 let duckdbAvailable = false;
@@ -452,5 +453,39 @@ describeIf('canvas · DuckDB round trip', () => {
         );
       }
     }
+  });
+
+  // Issue #210 — fail-closed gate: bare PRAGMA returns ValidationError, not -32603.
+  it('issue #210 — bare PRAGMA yields non_select_statement ValidationError, not InternalError', async () => {
+    const instance = await canvas.acquire(undefined, ctx);
+    await instance.registerTable('t', [{ x: 1 }]);
+    let caught: unknown;
+    try {
+      await instance.query('PRAGMA show_tables');
+    } catch (err) {
+      caught = err;
+    }
+    expect(caught).toBeInstanceOf(McpError);
+    const mcpErr = caught as McpError;
+    // Must be ValidationError (-32007), not InternalError (-32603).
+    expect(mcpErr.code).toBe(-32007);
+    expect((mcpErr.data as { reason?: string } | undefined)?.reason).toBe('non_select_statement');
+  });
+
+  // Issue #210 — pragma_* TVF bypass: SELECT * FROM pragma_table_info('t')
+  // must be rejected before executing.
+  it('issue #210 — pragma_* table function is denied by the gate', async () => {
+    const instance = await canvas.acquire(undefined, ctx);
+    await instance.registerTable('t', [{ x: 1 }]);
+    await expect(instance.query("SELECT * FROM pragma_table_info('t')")).rejects.toThrow(
+      /disallowed table function/i,
+    );
+  });
+
+  it('issue #210 — pragma_database_list() is denied by the gate', async () => {
+    const instance = await canvas.acquire(undefined, ctx);
+    await expect(instance.query('SELECT * FROM pragma_database_list()')).rejects.toThrow(
+      /disallowed table function/i,
+    );
   });
 });

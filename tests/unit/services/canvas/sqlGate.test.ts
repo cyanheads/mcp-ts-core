@@ -384,6 +384,69 @@ describe('sqlGate · DENIED_TABLE_FUNCTIONS', () => {
   });
 });
 
+describe('sqlGate · pragma_* deny-list (issue #210)', () => {
+  it.each([
+    'pragma_table_info',
+    'pragma_database_list',
+    'pragma_storage_info',
+    'pragma_table_structure',
+    'pragma_version',
+    'pragma_user_agent',
+    'pragma_some_future_function',
+  ])('assertNoDeniedFunctions rejects %s call', (fn) => {
+    let caught: unknown;
+    try {
+      assertNoDeniedFunctions(`SELECT * FROM ${fn}('t')`);
+    } catch (err) {
+      caught = err;
+    }
+    expect(caught).toBeInstanceOf(McpError);
+    const data = (caught as McpError).data as { reason: string; function: string };
+    expect(data.reason).toBe('denied_function');
+    expect(data.function).toBe(fn);
+  });
+
+  it('assertNoDeniedFunctions rejects pragma_* calls case-insensitively', () => {
+    expect(() => assertNoDeniedFunctions("SELECT * FROM PRAGMA_TABLE_INFO('t')")).toThrow(
+      /disallowed table function/i,
+    );
+  });
+
+  it('plan-walk rejects pragma_table_info in function metadata field', () => {
+    const plan = {
+      name: 'SEQ_SCAN',
+      function_name: 'pragma_table_info',
+    };
+    let caught: unknown;
+    try {
+      assertPlanReadOnly(plan);
+    } catch (err) {
+      caught = err;
+    }
+    expect(caught).toBeInstanceOf(McpError);
+    const data = (caught as McpError).data as { reason: string; functions: string[] };
+    expect(data.reason).toBe('denied_function_in_plan');
+    expect(data.functions).toContain('pragma_table_info');
+  });
+
+  it('plan-walk rejects pragma_database_list in extra_info field', () => {
+    const plan = {
+      name: 'PROJECTION',
+      children: [
+        {
+          name: 'SEQ_SCAN',
+          extra_info: 'Function: pragma_database_list',
+        },
+      ],
+    };
+    expect(() => assertPlanReadOnly(plan)).toThrow(/disallowed table function in plan/);
+  });
+
+  it('assertNoDeniedFunctions does not false-positive on pragma_ in a string literal', () => {
+    expect(() => assertNoDeniedFunctions("SELECT 'pragma_table_info' AS s FROM t")).not.toThrow();
+  });
+});
+
 describe('sqlGate · exported allowlists', () => {
   it('SELECT is the only allowed statement type', () => {
     expect([...ALLOWED_STATEMENT_TYPES]).toEqual(['SELECT']);
