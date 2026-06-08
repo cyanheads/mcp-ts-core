@@ -7,6 +7,7 @@ import { trace } from '@opentelemetry/api';
 import * as cron from 'node-cron';
 import { afterEach, beforeEach, describe, expect, it, type MockInstance, vi } from 'vitest';
 
+import { JsonRpcErrorCode, type McpError as McpErrorType } from '@/types-global/errors.js';
 import { logger } from '../../../../src/utils/internal/logger.js';
 
 const validateMock = vi.fn(() => true);
@@ -257,6 +258,43 @@ describe('schedulerService (non-Node runtime)', () => {
 
     // Clean up
     vi.doUnmock('@/utils/internal/runtime.js');
+    vi.resetModules();
+  });
+});
+
+describe('schedulerService (missing node-cron peer)', () => {
+  it('wraps a module-not-found error into a configurationError naming the peer', async () => {
+    // Mock the node-cron module to simulate it not being installed.
+    vi.doMock('node-cron', () => {
+      throw new Error("Cannot find package 'node-cron'");
+    });
+
+    vi.resetModules();
+
+    const { McpError } = await import('@/types-global/errors.js');
+    const { SchedulerService } = await import('../../../../src/utils/scheduling/scheduler.js');
+    const service = SchedulerService.getInstance();
+
+    let caught: unknown;
+    try {
+      await service.schedule('test-peer', '* * * * *', () => undefined, 'Test');
+    } catch (err) {
+      caught = err;
+    }
+
+    expect(caught).toBeInstanceOf(McpError);
+    const err = caught as McpErrorType;
+    expect(err.message).toMatch(/node-cron/);
+    expect(err.message).toMatch(/peer dependency/);
+    expect(err.message).toMatch(/\^4\.2\.1/);
+    expect(err.code).toBe(JsonRpcErrorCode.ConfigurationError);
+    // The underlying module-not-found error chains via `cause` (3rd factory arg),
+    // not the wire-serialized `data` payload.
+    expect(err.cause).toBeInstanceOf(Error);
+    expect(err.data).toBeUndefined();
+
+    // Clean up
+    vi.doUnmock('node-cron');
     vi.resetModules();
   });
 });

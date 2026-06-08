@@ -35,7 +35,14 @@ async function loadCron(): Promise<typeof import('node-cron')> {
     );
   }
   if (!cronModulePromise) {
-    cronModulePromise = import('node-cron');
+    cronModulePromise = import('node-cron').catch((err: unknown) => {
+      cronModulePromise = null;
+      throw configurationError(
+        'SchedulerService requires the "node-cron" peer dependency — add it to your server\'s dependencies (^4.2.1).',
+        undefined,
+        { cause: err instanceof Error ? err : undefined },
+      );
+    });
   }
   return await cronModulePromise;
 }
