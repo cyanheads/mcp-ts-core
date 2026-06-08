@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.10.1](changelog/0.10.x/0.10.1.md) — 2026-06-08 · 🛡️ Security
+
+Security: DataCanvas SQL gate fails closed on non-SELECT and denies pragma_* table functions; scaffold/packaging fixes and actionable scheduler peer error.
+
 ## [0.10.0](changelog/0.10.x/0.10.0.md) — 2026-06-05
 
 Outline-on-overflow helper for oversized document payloads; env booleans parse via Zod stringbool (rejects unrecognized values); built Docker images stamp image.version.
