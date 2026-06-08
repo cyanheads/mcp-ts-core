@@ -22,5 +22,6 @@
   },
   "tools_generated": true,
   "prompts_generated": true,
+  "repository": { "type": "git", "url": "" },
   "user_config": {}
 }
