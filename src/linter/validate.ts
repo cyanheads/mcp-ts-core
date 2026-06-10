@@ -5,13 +5,19 @@
  * @module src/linter/validate
  */
 
+import { lintCappedListTruncation, type TruncationOptions } from './rules/enrichment-rules.js';
 import { lintLandingConfig } from './rules/landing-rules.js';
 import { checkDuplicateNames } from './rules/name-rules.js';
 import { DEFAULT_FORMAT_ALLOWLIST, type PortabilityOptions } from './rules/portability-rules.js';
 import { lintPromptDefinition } from './rules/prompt-rules.js';
 import { lintResourceDefinition } from './rules/resource-rules.js';
 import { lintServerJson } from './rules/server-json-rules.js';
-import { lintAppToolResourcePairing, lintToolDefinition } from './rules/tool-rules.js';
+import {
+  type CanvasOptions,
+  lintAppToolResourcePairing,
+  lintCanvasConsumerPairing,
+  lintToolDefinition,
+} from './rules/tool-rules.js';
 import type { LintDiagnostic, LintInput, LintReport } from './types.js';
 
 /** Where the rule reference lives. Appended to every diagnostic message. */
@@ -45,6 +51,54 @@ function resolvePortabilityOptions(input: LintInput): PortabilityOptions {
         ? input.formatAllowlist
         : new Set(input.formatAllowlist);
   return portability ? { portability, formatAllowlist } : { formatAllowlist };
+}
+
+/**
+ * Resolves the `canvas-consumer-missing` rule options. Programmatic
+ * `input.canvasConsumers` takes precedence over `MCP_LINT_CANVAS_CONSUMERS`.
+ * CSV env value; the literal `false` disables the rule.
+ */
+function resolveCanvasOptions(input: LintInput): CanvasOptions {
+  if (input.canvasConsumers !== undefined) {
+    return { canvasConsumers: input.canvasConsumers };
+  }
+  if (typeof process !== 'undefined') {
+    const raw = process.env?.MCP_LINT_CANVAS_CONSUMERS;
+    if (raw === 'false') return { canvasConsumers: false };
+    if (raw && raw.length > 0) {
+      return {
+        canvasConsumers: raw
+          .split(',')
+          .map((s) => s.trim())
+          .filter(Boolean),
+      };
+    }
+  }
+  return {};
+}
+
+/**
+ * Resolves the `capped-list-no-truncation` rule options. Programmatic
+ * `input.truncationAllowlist` takes precedence over `MCP_LINT_TRUNCATION_ALLOWLIST`.
+ * CSV env value; the literal `false` disables the rule.
+ */
+function resolveTruncationOptions(input: LintInput): TruncationOptions {
+  if (input.truncationAllowlist !== undefined) {
+    return { truncationAllowlist: input.truncationAllowlist };
+  }
+  if (typeof process !== 'undefined') {
+    const raw = process.env?.MCP_LINT_TRUNCATION_ALLOWLIST;
+    if (raw === 'false') return { truncationAllowlist: false };
+    if (raw && raw.length > 0) {
+      return {
+        truncationAllowlist: raw
+          .split(',')
+          .map((s) => s.trim())
+          .filter(Boolean),
+      };
+    }
+  }
+  return {};
 }
 
 /** Appends a "See: skills/api-linter/SKILL.md#<rule>" breadcrumb to the message. */
@@ -84,10 +138,18 @@ export function validateDefinitions(input: LintInput): LintReport {
   const resources = input.resources ?? [];
   const prompts = input.prompts ?? [];
   const portabilityOptions = resolvePortabilityOptions(input);
+  const canvasOptions = resolveCanvasOptions(input);
+  const truncationOptions = resolveTruncationOptions(input);
 
   // Per-definition validation
   for (const def of tools) {
     diagnostics.push(...lintToolDefinition(def, portabilityOptions));
+    diagnostics.push(
+      ...lintCappedListTruncation(
+        def as { name?: unknown; input?: unknown; output?: unknown; enrichment?: unknown },
+        truncationOptions,
+      ),
+    );
   }
   for (const def of resources) {
     diagnostics.push(...lintResourceDefinition(def, portabilityOptions));
@@ -131,6 +193,9 @@ export function validateDefinitions(input: LintInput): LintReport {
 
   // Cross-definition: app tool ↔ app resource pairing
   diagnostics.push(...lintAppToolResourcePairing(tools, resources));
+
+  // Cross-definition: canvas token must have a consumer tool
+  diagnostics.push(...lintCanvasConsumerPairing(tools, canvasOptions));
 
   // Landing page configuration
   if (input.landing != null) {

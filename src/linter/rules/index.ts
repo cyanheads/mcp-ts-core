@@ -3,7 +3,7 @@
  * @module src/linter/rules/index
  */
 
-export { lintEnrichmentContract } from './enrichment-rules.js';
+export { lintCappedListTruncation, lintEnrichmentContract } from './enrichment-rules.js';
 export { lintErrorContract, lintErrorContractConformance } from './error-contract-rules.js';
 export { lintHandlerBody } from './handler-body-rules.js';
 export { checkDuplicateNames, checkNameRequired, checkToolNameFormat } from './name-rules.js';
@@ -20,4 +20,9 @@ export {
   checkSchemaSerializable,
 } from './schema-rules.js';
 export { lintServerJson } from './server-json-rules.js';
-export { lintAppToolResourcePairing, lintAuthScopes, lintToolDefinition } from './tool-rules.js';
+export {
+  lintAppToolResourcePairing,
+  lintAuthScopes,
+  lintCanvasConsumerPairing,
+  lintToolDefinition,
+} from './tool-rules.js';

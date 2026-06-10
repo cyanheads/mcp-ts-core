@@ -15,7 +15,11 @@
  */
 
 import type { LintDefinitionType, LintDiagnostic } from '../types.js';
-import { getCoreDefType, unwrapWrappers } from './schema-rules.js';
+import { getCoreDefType, objectShape, objectShapeKeys, unwrapWrappers } from './schema-rules.js';
+
+/** Pattern matching depth-0 cap-like input fields (case-insensitive, snake or camel). */
+const CAP_FIELD_RE =
+  /^(limit|per_page|perPage|page_size|pageSize|max_results|maxResults|max_items|maxItems)$/i;
 
 /**
  * Output field names that almost always indicate agent-facing context rather
@@ -24,18 +28,6 @@ import { getCoreDefType, unwrapWrappers } from './schema-rules.js';
  * listed. Compared case-insensitively.
  */
 const META_FIELD_HINTS: ReadonlySet<string> = new Set(['notice', 'effectivequery', 'queryecho']);
-
-/** Reads the top-level field names of a ZodObject, defensively across Zod 4 / legacy shapes. */
-function objectShapeKeys(schema: unknown): string[] {
-  if (!schema || typeof schema !== 'object') return [];
-  const s = schema as {
-    shape?: Record<string, unknown>;
-    _zod?: { def?: { shape?: Record<string, unknown> } };
-    _def?: { shape?: Record<string, unknown> };
-  };
-  const shape = s.shape ?? s._zod?.def?.shape ?? s._def?.shape;
-  return shape && typeof shape === 'object' ? Object.keys(shape) : [];
-}
 
 /** Heuristic: a value is a Zod schema if it carries the Zod 4 (`_zod`) or legacy (`_def`) marker. */
 function isZodSchema(value: unknown): boolean {
@@ -234,4 +226,87 @@ export function lintEnrichmentContract(
   }
 
   return diagnostics;
+}
+
+/** Options for the capped-list-no-truncation rule. */
+export interface TruncationOptions {
+  /** Tool names exempt from the rule. `false` disables the rule entirely. */
+  truncationAllowlist?: ReadonlyArray<string> | false;
+}
+
+/**
+ * Warns when a tool takes a cap-like input field (e.g. `limit`, `per_page`) and
+ * returns an array output, but declares no truncation disclosure — neither a
+ * `truncated` key in its declared `enrichment` shape, nor `totalCount` in enrichment,
+ * nor `truncated` or `totalCount` as top-level `output` keys.
+ *
+ * The established `enrich.total()` convention (`totalCount`) and bespoke output fields
+ * count as honest disclosure — the rule fires only on a genuinely silent cap.
+ */
+export function lintCappedListTruncation(
+  def: { name?: unknown; input?: unknown; output?: unknown; enrichment?: unknown },
+  truncationOptions?: TruncationOptions,
+): LintDiagnostic[] {
+  // Rule disabled via knob
+  if (truncationOptions?.truncationAllowlist === false) return [];
+
+  const name = typeof def.name === 'string' ? def.name : '<unnamed>';
+
+  // Check allowlist
+  const allowlist = truncationOptions?.truncationAllowlist;
+  if (allowlist && allowlist.includes(name)) return [];
+
+  // Check input for a cap-like field
+  const inputKeys = objectShapeKeys(def.input);
+  const hasCap = inputKeys.some((k) => CAP_FIELD_RE.test(k));
+  if (!hasCap) return [];
+
+  // Check output for at least one array-typed field
+  const hasArrayOutput = hasTopLevelArray(def.output);
+  if (!hasArrayOutput) return [];
+
+  // Check for truncation disclosure:
+  // 1. Declared enrichment has `truncated` or `totalCount`
+  // 2. Output schema has a top-level `truncated` or `totalCount` key
+  if (hasTruncationDisclosure(def.enrichment, def.output)) return [];
+
+  return [
+    {
+      rule: 'capped-list-no-truncation',
+      severity: 'warning',
+      message:
+        `Tool '${name}' accepts a cap-like input (${inputKeys.filter((k) => CAP_FIELD_RE.test(k)).join(', ')}) ` +
+        `and returns an array, but discloses no truncation. A silently capped list leaves the agent ` +
+        `unaware that results were cut off. Disclose via \`ctx.enrich.truncated({ shown, cap })\` and ` +
+        `declare \`truncated\`, \`shown\`, \`cap\` in the \`enrichment\` block; or call \`ctx.enrich.total(n)\` ` +
+        `when the upstream total is known; or add \`truncated\` / \`totalCount\` to the \`output\` schema. ` +
+        `To suppress for this tool, add its name to \`truncationAllowlist\` in \`LintInput\` or ` +
+        `\`MCP_LINT_TRUNCATION_ALLOWLIST\` in the environment.`,
+      definitionType: 'tool',
+      definitionName: name,
+    },
+  ];
+}
+
+/** True when the schema has at least one depth-0 field whose core Zod type is `array`. */
+function hasTopLevelArray(schema: unknown): boolean {
+  const shape = objectShape(schema);
+  if (!shape) return false;
+  return Object.values(shape).some((field) => getCoreDefType(unwrapWrappers(field)) === 'array');
+}
+
+/**
+ * True when truncation is already disclosed — enrichment block has `truncated` or
+ * `totalCount`, or output schema has a depth-0 `truncated` or `totalCount` key.
+ */
+function hasTruncationDisclosure(enrichment: unknown, output: unknown): boolean {
+  const DISCLOSURE_KEYS = ['truncated', 'totalCount'];
+  // Check enrichment shape
+  if (enrichment && typeof enrichment === 'object' && !Array.isArray(enrichment)) {
+    const enrichKeys = Object.keys(enrichment as Record<string, unknown>);
+    if (DISCLOSURE_KEYS.some((k) => enrichKeys.includes(k))) return true;
+  }
+  // Check output shape
+  const outputKeys = objectShapeKeys(output);
+  return DISCLOSURE_KEYS.some((k) => outputKeys.includes(k));
 }

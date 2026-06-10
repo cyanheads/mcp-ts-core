@@ -323,6 +323,23 @@ export interface EnrichHelpers {
   notice(text: string): void;
   /** Total matches before a limit/pagination was applied. Writes `totalCount`; renders as "N total". */
   total(count: number): void;
+  /**
+   * Discloses that the returned list was capped. Writes `truncated: true`, `shown`, `cap`,
+   * and optionally `truncationCeiling` (the smallest shown value when the list is sorted by the
+   * cap key — a rigorous upper bound on all omitted items). Also writes a `notice` (last-wins;
+   * compose multiple notice sources into one string) using `guidance` or a generated default.
+   *
+   * Declare the corresponding fields in the `enrichment` block:
+   * ```ts
+   * enrichment: {
+   *   truncated: z.boolean().describe('True when the list was capped.'),
+   *   shown: z.number().describe('Number of items returned.'),
+   *   cap: z.number().describe('The cap that was applied.'),
+   *   truncationCeiling: z.number().optional().describe('Upper bound for omitted items.'),
+   * }
+   * ```
+   */
+  truncated(args: { shown: number; cap: number; ceiling?: number; guidance?: string }): void;
 }
 
 /**
@@ -511,6 +528,18 @@ export function createEnrich(store: EnrichmentStore): Enrich {
   enrich.delta = ({ field, before, after }): void => {
     store.values[field] = { before, after };
     store.kinds.set(field, 'delta');
+  };
+  enrich.truncated = ({ shown, cap, ceiling, guidance }): void => {
+    store.values.truncated = true;
+    store.values.shown = shown;
+    store.values.cap = cap;
+    if (ceiling !== undefined) store.values.truncationCeiling = ceiling;
+    // Route through notice (last-wins — callers with multiple notice sources compose one string)
+    const text =
+      guidance ??
+      `Results capped at ${cap}; showing ${shown}. Raise the cap or narrow with filters.`;
+    store.values.notice = text;
+    store.kinds.set('notice', 'notice');
   };
   return enrich;
 }

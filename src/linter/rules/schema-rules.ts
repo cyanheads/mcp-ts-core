@@ -208,6 +208,24 @@ export function isZodObject(value: unknown): boolean {
   return zod?.def?.type === 'object';
 }
 
+/** Reads a ZodObject's raw shape, defensively across Zod 4 / legacy internals. */
+export function objectShape(schema: unknown): Record<string, unknown> | undefined {
+  if (!schema || typeof schema !== 'object') return;
+  const s = schema as {
+    shape?: Record<string, unknown>;
+    _zod?: { def?: { shape?: Record<string, unknown> } };
+    _def?: { shape?: Record<string, unknown> };
+  };
+  const shape = s.shape ?? s._zod?.def?.shape ?? s._def?.shape;
+  return shape && typeof shape === 'object' ? shape : undefined;
+}
+
+/** Reads the top-level field names of a ZodObject, defensively across Zod 4 / legacy shapes. */
+export function objectShapeKeys(schema: unknown): string[] {
+  const shape = objectShape(schema);
+  return shape ? Object.keys(shape) : [];
+}
+
 /**
  * Checks whether a Zod schema (possibly wrapped in optional/nullable/default)
  * has a `.describe()` set at any level.

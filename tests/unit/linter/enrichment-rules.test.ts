@@ -8,9 +8,38 @@
 import { describe, expect, it } from 'vitest';
 import { z } from 'zod';
 
-import { lintEnrichmentContract } from '@/linter/rules/enrichment-rules.js';
+import {
+  lintCappedListTruncation,
+  lintEnrichmentContract,
+} from '@/linter/rules/enrichment-rules.js';
 
 const output = z.object({ items: z.array(z.string()).describe('items') });
+
+// ---------------------------------------------------------------------------
+// Helpers for capped-list tests
+// ---------------------------------------------------------------------------
+
+function cappedDef(
+  overrides: {
+    inputExtra?: Record<string, unknown>;
+    outputExtra?: Record<string, unknown>;
+    enrichment?: Record<string, unknown>;
+    name?: string;
+  } = {},
+) {
+  return {
+    name: overrides.name ?? 'search_results',
+    input: z.object({
+      limit: z.number().describe('max items'),
+      ...(overrides.inputExtra ?? {}),
+    }),
+    output: z.object({
+      items: z.array(z.string()).describe('items'),
+      ...(overrides.outputExtra ?? {}),
+    }),
+    ...(overrides.enrichment !== undefined ? { enrichment: overrides.enrichment } : {}),
+  };
+}
 
 describe('lintEnrichmentContract', () => {
   describe('no enrichment block', () => {
@@ -217,6 +246,117 @@ describe('lintEnrichmentContract', () => {
       const err = d.find((x) => x.rule === 'enrichment-trailer-unknown-field');
       expect(err?.severity).toBe('error');
       expect(err?.message).toContain('notAField');
+    });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// lintCappedListTruncation
+// ---------------------------------------------------------------------------
+
+describe('lintCappedListTruncation', () => {
+  describe('fires on the silent-cap shape', () => {
+    it('warns when input has limit + output has array + no disclosure', () => {
+      const d = lintCappedListTruncation(cappedDef());
+      expect(d).toHaveLength(1);
+      expect(d[0]).toMatchObject({
+        rule: 'capped-list-no-truncation',
+        severity: 'warning',
+        definitionName: 'search_results',
+      });
+    });
+
+    it('warns for each cap-like field name variant', () => {
+      for (const capField of ['limit', 'per_page', 'page_size', 'max_results', 'max_items']) {
+        const def = {
+          name: 'tool',
+          input: z.object({ [capField]: z.number().describe('cap') }),
+          output: z.object({ items: z.array(z.string()).describe('items') }),
+        };
+        const d = lintCappedListTruncation(def);
+        expect(d.map((x) => x.rule)).toContain('capped-list-no-truncation');
+      }
+    });
+
+    it('cap field match is case-insensitive', () => {
+      const def = {
+        name: 'tool',
+        input: z.object({ Limit: z.number().describe('cap') }),
+        output: z.object({ items: z.array(z.string()).describe('items') }),
+      };
+      const d = lintCappedListTruncation(def);
+      expect(d).toHaveLength(1);
+    });
+  });
+
+  describe('silent when disclosure is present', () => {
+    it('passes when enrichment has truncated key', () => {
+      const d = lintCappedListTruncation(
+        cappedDef({ enrichment: { truncated: z.boolean().describe('truncated') } }),
+      );
+      expect(d).toHaveLength(0);
+    });
+
+    it('passes when enrichment has totalCount key (enrich.total() convention)', () => {
+      const d = lintCappedListTruncation(
+        cappedDef({ enrichment: { totalCount: z.number().describe('total') } }),
+      );
+      expect(d).toHaveLength(0);
+    });
+
+    it('passes when output has truncated key', () => {
+      const d = lintCappedListTruncation(
+        cappedDef({ outputExtra: { truncated: z.boolean().describe('truncated') } }),
+      );
+      expect(d).toHaveLength(0);
+    });
+
+    it('passes when output has totalCount key', () => {
+      const d = lintCappedListTruncation(
+        cappedDef({ outputExtra: { totalCount: z.number().describe('total') } }),
+      );
+      expect(d).toHaveLength(0);
+    });
+  });
+
+  describe('suppression knobs', () => {
+    it('truncationAllowlist by name suppresses the rule', () => {
+      const d = lintCappedListTruncation(cappedDef({ name: 'search_results' }), {
+        truncationAllowlist: ['search_results'],
+      });
+      expect(d).toHaveLength(0);
+    });
+
+    it('false disables the rule entirely', () => {
+      const d = lintCappedListTruncation(cappedDef(), { truncationAllowlist: false });
+      expect(d).toHaveLength(0);
+    });
+
+    it('allowlist does not suppress other tool names', () => {
+      const d = lintCappedListTruncation(cappedDef({ name: 'other_tool' }), {
+        truncationAllowlist: ['search_results'],
+      });
+      expect(d).toHaveLength(1);
+    });
+  });
+
+  describe('does not fire when shape does not match', () => {
+    it('no cap-like input field → silent', () => {
+      const def = {
+        name: 'plain',
+        input: z.object({ query: z.string().describe('q') }),
+        output: z.object({ items: z.array(z.string()).describe('items') }),
+      };
+      expect(lintCappedListTruncation(def)).toHaveLength(0);
+    });
+
+    it('cap-like field but no array output → silent', () => {
+      const def = {
+        name: 'counter',
+        input: z.object({ limit: z.number().describe('limit') }),
+        output: z.object({ count: z.number().describe('count') }),
+      };
+      expect(lintCappedListTruncation(def)).toHaveLength(0);
     });
   });
 });

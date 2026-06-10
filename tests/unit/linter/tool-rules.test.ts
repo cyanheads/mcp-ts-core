@@ -10,6 +10,7 @@ import { z } from 'zod';
 import {
   lintAppToolResourcePairing,
   lintAuthScopes,
+  lintCanvasConsumerPairing,
   lintToolDefinition,
 } from '@/linter/rules/tool-rules.js';
 
@@ -298,6 +299,102 @@ describe('lintAppToolResourcePairing', () => {
     const resources = [{ uriTemplate: 'ui://app/app.html', name: 'app-ui' }];
 
     expect(lintAppToolResourcePairing(tools, resources)).toHaveLength(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// lintCanvasConsumerPairing
+// ---------------------------------------------------------------------------
+
+describe('lintCanvasConsumerPairing', () => {
+  function canvasTool(
+    name: string,
+    outputField: 'canvas_id' | 'canvasId' | 'result' = 'canvas_id',
+  ) {
+    return {
+      name,
+      description: 'A canvas-producing tool',
+      input: z.object({ query: z.string().describe('query') }),
+      output: z.object({
+        [outputField]: z.string().describe(outputField),
+        data: z.array(z.string()).describe('preview rows'),
+      }),
+      handler: async () => ({ [outputField]: 'tok', data: [] }),
+    };
+  }
+
+  function queryTool(name: string) {
+    return {
+      name,
+      description: 'A dataframe query tool',
+      input: z.object({ sql: z.string().describe('SQL') }),
+      output: z.object({ rows: z.array(z.unknown()).describe('rows') }),
+      handler: async () => ({ rows: [] }),
+    };
+  }
+
+  it('returns no diagnostics when no tool has a canvas output', () => {
+    const tools = [validTool({ name: 'search_data' }), validTool({ name: 'get_record' })];
+    expect(lintCanvasConsumerPairing(tools)).toHaveLength(0);
+  });
+
+  it('warns when a tool outputs canvas_id with no consumer', () => {
+    const tools = [canvasTool('my_query_data')];
+    const diagnostics = lintCanvasConsumerPairing(tools);
+    expect(diagnostics).toHaveLength(1);
+    expect(diagnostics[0]).toMatchObject({
+      rule: 'canvas-consumer-missing',
+      severity: 'warning',
+      definitionName: 'my_query_data',
+    });
+    expect(diagnostics[0]!.message).toContain('canvas_id');
+  });
+
+  it('warns when a tool outputs canvasId with no consumer', () => {
+    const tools = [canvasTool('my_query_data', 'canvasId')];
+    const diagnostics = lintCanvasConsumerPairing(tools);
+    expect(diagnostics).toHaveLength(1);
+    expect(diagnostics[0]!.rule).toBe('canvas-consumer-missing');
+  });
+
+  it('passes when a *_dataframe_query consumer is registered', () => {
+    const tools = [canvasTool('my_search'), queryTool('my_dataframe_query')];
+    expect(lintCanvasConsumerPairing(tools)).toHaveLength(0);
+  });
+
+  it('passes for any tool name ending in _dataframe_query', () => {
+    const tools = [canvasTool('some_tool'), queryTool('some_prefix_dataframe_query')];
+    expect(lintCanvasConsumerPairing(tools)).toHaveLength(0);
+  });
+
+  it('passes when canvasConsumers override lists the query tool', () => {
+    const tools = [canvasTool('my_search'), queryTool('my_custom_sql_tool')];
+    expect(
+      lintCanvasConsumerPairing(tools, { canvasConsumers: ['my_custom_sql_tool'] }),
+    ).toHaveLength(0);
+  });
+
+  it('false disables the rule entirely', () => {
+    const tools = [canvasTool('my_search')];
+    expect(lintCanvasConsumerPairing(tools, { canvasConsumers: false })).toHaveLength(0);
+  });
+
+  it('does not warn for tools without canvas output', () => {
+    // A server with only ordinary tools and a query consumer should produce no warnings
+    expect(lintCanvasConsumerPairing([validTool({ name: 'normal_tool' })])).toHaveLength(0);
+  });
+
+  it('warns once per emitter tool, not once per consumer', () => {
+    // Two emitters, no consumer
+    const tools = [canvasTool('tool_a'), canvasTool('tool_b')];
+    const diagnostics = lintCanvasConsumerPairing(tools);
+    expect(diagnostics).toHaveLength(2);
+    expect(diagnostics.map((d) => d.definitionName).sort()).toEqual(['tool_a', 'tool_b']);
+  });
+
+  it('passes when multiple emitters share one consumer', () => {
+    const tools = [canvasTool('tool_a'), canvasTool('tool_b'), queryTool('shared_dataframe_query')];
+    expect(lintCanvasConsumerPairing(tools)).toHaveLength(0);
   });
 });
 

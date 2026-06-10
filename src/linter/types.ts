@@ -48,6 +48,15 @@ export interface LintReport {
  */
 export interface LintInput {
   /**
+   * Canvas consumer rule (`canvas-consumer-missing`).
+   * Additional tool names accepted as canvas consumers — for servers that name their
+   * query tool something other than the `*_dataframe_query` default predicate.
+   * `false` disables the rule entirely.
+   * When omitted, the env var `MCP_LINT_CANVAS_CONSUMERS` is consulted (CSV of tool
+   * names; the literal `false` disables). A programmatic value takes precedence.
+   */
+  canvasConsumers?: ReadonlyArray<string> | false;
+  /**
    * Allowlist of JSON Schema `format` values used by the
    * `schema-format-portability` rule. When omitted, the default is OpenAI's
    * nine recognized values (`date-time`, `time`, `date`, `duration`, `email`,
@@ -71,4 +80,12 @@ export interface LintInput {
   /** Parsed server.json content. When provided, validated against the MCP server manifest spec. */
   serverJson?: unknown;
   tools?: unknown[];
+  /**
+   * Truncation-disclosure rule (`capped-list-no-truncation`).
+   * Tool names to exempt from the rule.
+   * `false` disables the rule entirely.
+   * When omitted, the env var `MCP_LINT_TRUNCATION_ALLOWLIST` is consulted (CSV of
+   * tool names; the literal `false` disables). A programmatic value takes precedence.
+   */
+  truncationAllowlist?: ReadonlyArray<string> | false;
 }

@@ -4,7 +4,7 @@ description: >
   Scaffold a new MCP tool definition. Use when the user asks to add a tool, create a new tool, or implement a new capability for the server.
 metadata:
   author: cyanheads
-  version: "2.13"
+  version: "2.14"
   audience: external
   type: reference
 ---
@@ -251,6 +251,43 @@ enrichmentTrailer: {
 ```
 
 `structuredContent` always keeps the full structured value; `enrichmentTrailer` only controls the human-facing `content[]` line.
+
+### Capped lists must disclose truncation
+
+When a tool accepts a cap-like input (`limit`, `per_page`, `page_size`, `max_results`, `max_items`) and returns an array, disclose when the cap was hit — the agent otherwise treats a partial set as complete.
+
+The one-liner: `ctx.enrich.truncated({ shown, cap })`. Declare the fields in the `enrichment` block:
+
+```ts
+enrichment: {
+  truncated: z.boolean().describe('True when the list was capped at the limit.'),
+  shown: z.number().describe('Number of items returned.'),
+  cap: z.number().describe('The limit that was applied.'),
+},
+async handler(input, ctx) {
+  const items = await fetchItems(input.limit);
+  if (items.length >= input.limit) {
+    ctx.enrich.truncated({ shown: items.length, cap: input.limit });
+  }
+  return { items };
+},
+```
+
+Alternatively, if the upstream total is known, `ctx.enrich.total(n)` (writes `totalCount`) also satisfies the lint rule.
+
+**Threshold bound** — when the upstream total is unknowable but the list is sorted by the cap key, the smallest shown value is a rigorous upper bound on all omitted items (Fagin Threshold Algorithm). Pass it as `ceiling`:
+
+```ts
+// items is sorted descending by count; anything hidden has count ≤ items.at(-1).count
+ctx.enrich.truncated({
+  shown: items.length,
+  cap: input.limit,
+  ceiling: items.at(-1)?.count,
+  guidance: 'Narrow with filters or raise per_page (max 200).',
+});
+```
+
+Declare `truncationCeiling: z.number().optional()` in the `enrichment` block to surface it. The `capped-list-no-truncation` lint rule warns when this disclosure is absent — see `api-linter`.
 
 ### Communicate filtering and exclusions
 

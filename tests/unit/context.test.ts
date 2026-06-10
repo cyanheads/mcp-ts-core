@@ -46,7 +46,13 @@ vi.mock('@/utils/internal/logger.js', () => ({
 import { z } from 'zod';
 
 import type { ContextDeps } from '@/core/context.js';
-import { attachTypedFail, createContext } from '@/core/context.js';
+import {
+  attachTypedFail,
+  createContext,
+  createEnrich,
+  createEnrichmentStore,
+  readEnrichmentStore,
+} from '@/core/context.js';
 import { JsonRpcErrorCode } from '@/types-global/errors.js';
 import type { Logger } from '@/utils/internal/logger.js';
 import { createFakeStorage, makeRequestContext } from '../helpers/index.js';
@@ -843,6 +849,70 @@ describe('createContext', () => {
       const err = (ctx as any).fail('query_timeout', undefined, { reason: 'something_else' });
 
       expect(err.data?.reason).toBe('query_timeout');
+    });
+  });
+
+  // -----------------------------------------------------------------------
+  // ctx.enrich.truncated() — truncation disclosure helper (#197)
+  // -----------------------------------------------------------------------
+
+  describe('ctx.enrich.truncated()', () => {
+    function makeStore() {
+      const store = createEnrichmentStore();
+      const enrich = createEnrich(store);
+      return { store, enrich };
+    }
+
+    it('writes truncated=true, shown, and cap to the store', () => {
+      const { store, enrich } = makeStore();
+      enrich.truncated({ shown: 10, cap: 20 });
+      expect(store.values.truncated).toBe(true);
+      expect(store.values.shown).toBe(10);
+      expect(store.values.cap).toBe(20);
+    });
+
+    it('writes truncationCeiling when provided', () => {
+      const { store, enrich } = makeStore();
+      enrich.truncated({ shown: 10, cap: 20, ceiling: 5 });
+      expect(store.values.truncationCeiling).toBe(5);
+    });
+
+    it('does not write truncationCeiling when not provided', () => {
+      const { store, enrich } = makeStore();
+      enrich.truncated({ shown: 10, cap: 20 });
+      expect(store.values).not.toHaveProperty('truncationCeiling');
+    });
+
+    it('routes guidance through notice (last-wins)', () => {
+      const { store, enrich } = makeStore();
+      enrich.truncated({ shown: 5, cap: 10, guidance: 'Use filters to narrow.' });
+      expect(store.values.notice).toBe('Use filters to narrow.');
+      expect(store.kinds.get('notice')).toBe('notice');
+    });
+
+    it('generates a default notice when guidance is omitted', () => {
+      const { store, enrich } = makeStore();
+      enrich.truncated({ shown: 5, cap: 10 });
+      expect(typeof store.values.notice).toBe('string');
+      expect((store.values.notice as string).length).toBeGreaterThan(0);
+    });
+
+    it('last-wins: a subsequent truncated() call overwrites notice', () => {
+      const { store, enrich } = makeStore();
+      enrich.truncated({ shown: 5, cap: 10, guidance: 'First.' });
+      enrich.truncated({ shown: 3, cap: 5, guidance: 'Second.' });
+      expect(store.values.notice).toBe('Second.');
+      expect(store.values.shown).toBe(3);
+    });
+
+    it('is available on ctx.enrich from createContext', () => {
+      const ctx = createContext(makeDeps());
+      expect(typeof ctx.enrich.truncated).toBe('function');
+      ctx.enrich.truncated({ shown: 2, cap: 5 });
+      const store = readEnrichmentStore(ctx);
+      expect(store?.values.truncated).toBe(true);
+      expect(store?.values.shown).toBe(2);
+      expect(store?.values.cap).toBe(5);
     });
   });
 });

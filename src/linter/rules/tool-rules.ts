@@ -15,6 +15,7 @@ import {
   checkFieldDescriptions,
   checkIsZodObject,
   checkSchemaSerializable,
+  objectShapeKeys,
 } from './schema-rules.js';
 
 /**
@@ -220,6 +221,65 @@ function lintToolMeta(meta: Record<string, unknown>, toolName: string): LintDiag
     });
   }
 
+  return diagnostics;
+}
+
+/** Options for the canvas-consumer-missing cross-definition rule. */
+export interface CanvasOptions {
+  /** Additional tool names accepted as consumers. `false` disables the rule. */
+  canvasConsumers?: ReadonlyArray<string> | false;
+}
+
+/**
+ * Cross-definition check: warns when a tool's output schema has a top-level
+ * `canvas_id` or `canvasId` field, but no same-server consumer tool (a tool
+ * whose name matches `*_dataframe_query` or the `canvasConsumers` list) is
+ * registered. A canvas token with no query path is unreachable dead output.
+ */
+export function lintCanvasConsumerPairing(
+  tools: unknown[],
+  options?: CanvasOptions,
+): LintDiagnostic[] {
+  // Rule disabled via knob
+  if (options?.canvasConsumers === false) return [];
+
+  const extraConsumers = new Set<string>(options?.canvasConsumers ?? []);
+  const toolNames: string[] = [];
+  for (const t of tools) {
+    const td = t as Record<string, unknown>;
+    if (typeof td?.name === 'string') toolNames.push(td.name);
+  }
+
+  // Default predicate: name ends with '_dataframe_query'
+  const hasDefaultConsumer = toolNames.some((n) => n.endsWith('_dataframe_query'));
+  const hasExtraConsumer = toolNames.some((n) => extraConsumers.has(n));
+  const hasConsumer = hasDefaultConsumer || hasExtraConsumer;
+
+  const diagnostics: LintDiagnostic[] = [];
+  for (const t of tools) {
+    const td = t as Record<string, unknown>;
+    const toolName = typeof td?.name === 'string' ? td.name : '<unnamed>';
+    const outputKeys = objectShapeKeys(td?.output);
+    const hasCanvasOutput = outputKeys.includes('canvas_id') || outputKeys.includes('canvasId');
+    if (!hasCanvasOutput) continue;
+
+    if (!hasConsumer) {
+      diagnostics.push({
+        rule: 'canvas-consumer-missing',
+        severity: 'warning',
+        message:
+          `Tool '${toolName}' outputs a canvas token (\`canvas_id\`/\`canvasId\`) but no consumer ` +
+          `tool is registered in this server. A canvas token with no query path is unreachable — ` +
+          `the agent cannot use it. Fix in either direction: complete the integration by adding the ` +
+          `standard \`<prefix>_dataframe_query\` and \`<prefix>_dataframe_describe\` consumers, or ` +
+          `remove the DataCanvas staging when the data isn't row-shaped and SQL access adds nothing. ` +
+          `To accept a non-standard consumer name, set \`canvasConsumers\` in \`LintInput\` or ` +
+          `\`MCP_LINT_CANVAS_CONSUMERS\` in the environment.`,
+        definitionType: 'tool',
+        definitionName: toolName,
+      });
+    }
+  }
   return diagnostics;
 }
 

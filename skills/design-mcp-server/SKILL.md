@@ -4,7 +4,7 @@ description: >
   Design the tool surface, resources, and service layer for a new MCP server. Use when starting a new server, planning a major feature expansion, or when the user describes a domain/API they want to expose via MCP. Produces a design doc at docs/design.md that drives implementation.
 metadata:
   author: cyanheads
-  version: "2.17"
+  version: "2.18"
   audience: external
   type: workflow
 ---
@@ -348,6 +348,7 @@ output: z.object({
 }),
 ```
 
+- **Capped lists disclose truncation.** When a tool accepts a cap-like input (`limit`, `per_page`, `page_size`, `max_results`, `max_items`) and returns an array, the handler must disclose when the cap was hit. Standard fields: `truncated: true`, `shown`, `cap` in the `enrichment` block via `ctx.enrich.truncated({ shown, cap })`. `ctx.enrich.total(n)` (writes `totalCount`) is also recognized. Silent caps leave the agent treating a partial set as complete. The `capped-list-no-truncation` lint rule enforces this; see `api-linter` and `api-context`'s `ctx.enrich.truncated()` section.
 - **Truncate large output with counts.** When a list exceeds a reasonable display size, show the top N and append "...and X more". Don't silently drop results.
 - **Spill big *analytical* results to a queryable surface.** When a tool's row set is something an agent would run SQL over (aggregate, group, join) *and* can exceed any reasonable context budget — paginated APIs, streamed exports, big query results — pair an inline preview with a `DataCanvas` table holding the full set. **Two rules gate this:** (1) it must earn its keep on *shape, not size* — a discovery/search surface of categorical metadata (titles, IDs) is not analytical and doesn't get a canvas regardless of row count; for name→ID resolution over a bounded list use [MCP-side list filtering](#mcp-side-list-filtering); (2) the `canvas_id` is reachable only if the same server **also exposes a `dataframe_query` tool** — emit one without the other and the handle is dead output. Compute distributions or refinement hints across the full result, not the preview, so aggregate signal stays honest. See `api-canvas` for the `spillover()` helper and both rules in full.
 - **Outline one large *document* into sections.** When a single tool call returns one document-shaped record (not many rows) that can exceed context — a ~130KB FDA drug label, a big API entity dominated by a few fat fields — return a section *outline* (top-level keys + per-section byte size) instead of truncating, and let the agent re-call with `sections: [...]` to pull only what it needs. The `outlineOnOverflow()` helper (`@cyanheads/mcp-ts-core/utils`) measures the payload and returns a `full | outline` discriminated union; declare its `OUTLINE_VARIANT` as a branch of the tool's `output` so `format()`-parity is enforced per branch. Pure measure + key-slice — Workers-portable, unlike canvas-bound `spillover()`. Distinct from spillover on *shape*: spillover splits a row collection, this outlines one fat record. See the `techniques` skill's `outline-on-overflow` reference.
