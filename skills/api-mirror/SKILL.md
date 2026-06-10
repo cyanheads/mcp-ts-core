@@ -4,7 +4,7 @@ description: >
   Stand up a persistent, self-refreshing local mirror of a bulk upstream dataset with the MirrorService (@cyanheads/mcp-ts-core/mirror). Use when a server wraps a large or slow API and should query a synced local index (embedded SQLite + FTS5) instead of paginating the live API per request.
 metadata:
   author: cyanheads
-  version: "1.0"
+  version: "1.1"
   audience: external
   type: reference
 ---
@@ -91,6 +91,35 @@ The service owns `runSync` + state; it does not schedule. Wire "self-refreshing"
 
 - **Refresh** — register `runSync({ mode: 'refresh' })` on a cron via `schedulerService` from `@cyanheads/mcp-ts-core/utils`, inside `setup()`. Gate on transport (HTTP) when stdio operators run it out-of-band.
 - **Init** — run out-of-band (a CLI script / one-shot), never on startup: a full init can take hours and must not block the server. It is idempotent and resumable — re-running after an interrupt continues from the persisted cursor.
+
+### Shipping the mirror CLI in a production Docker image
+
+The scaffold `Dockerfile` copies only `dist/` to the runtime stage. A mirror lifecycle script (`mirror:init`, `mirror:refresh`, `mirror:verify`) that imports through the `@/` path alias fails under `docker exec` — `@/` resolves to `src/` via the source `tsconfig.json`, and `src/` never reaches the image.
+
+On the Bun runtime image (`oven/bun`), two stanzas fix it — no build change, no `rootDir` surgery, and the `mirror:*` package scripts stay identical between a dev checkout and the image.
+
+Add the following to the runtime stage of `Dockerfile`, after the `COPY --from=build .../dist ./dist` line:
+
+```dockerfile
+# Copy mirror lifecycle scripts. The shared context shim (_mirror-context.ts)
+# is imported by the three named scripts, so it must travel with them.
+COPY --from=build /usr/src/app/scripts/<your>-mirror-init.ts \
+                  /usr/src/app/scripts/<your>-mirror-refresh.ts \
+                  /usr/src/app/scripts/<your>-mirror-verify.ts \
+                  /usr/src/app/scripts/_mirror-context.ts \
+                  ./scripts/
+
+# Bun honors tsconfig `paths` at runtime — map `@/` to the compiled `./dist/`
+# so the .ts scripts resolve their alias imports against the build output.
+# In a dev checkout the source tsconfig.json maps @/* → ./src/*; in the image
+# this emitted one maps @/* → ./dist/*. Same `bun run mirror:*` command, both
+# environments — the only lever is which tsconfig.json is on disk.
+RUN echo '{"compilerOptions":{"baseUrl":".","paths":{"@/*":["./dist/*"]}}}' > tsconfig.json
+```
+
+**Caveat:** this relies on Bun's runtime `paths` resolution. A Node runtime image (no native `.ts` execution) needs the scripts compiled into `dist/` instead — a separate tsconfig pass with a different `rootDir` is required in that case.
+
+**`package.json` `files[]`:** add `scripts/_mirror-context.ts` and the three named lifecycle scripts so the npm tarball and `.mcpb` bundle carry them. Consumers installing from npm need them for `docker exec` access.
 
 ## Checklist
 
