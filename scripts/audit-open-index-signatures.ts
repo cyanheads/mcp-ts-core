@@ -30,7 +30,7 @@
  * @module scripts/audit-open-index-signatures
  */
 import { spawnSync } from 'node:child_process';
-import { readFileSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import process from 'node:process';
 import * as ts from 'typescript';
 
@@ -45,14 +45,21 @@ interface Finding {
   typeName: string;
 }
 
-/** Tracked, non-test `.ts` files under `src/` (empty when not a git repo). */
+/**
+ * Tracked, non-test `.ts` files under `src/` (empty when not a git repo).
+ * `git ls-files` still lists files deleted from the worktree but not yet
+ * staged — filter to files that exist so an uncommitted deletion can't crash
+ * the audit.
+ */
 function listSourceFiles(): string[] {
   const result = spawnSync('git', ['ls-files', 'src'], { encoding: 'utf-8' });
   if (result.status !== 0) return [];
   return result.stdout
     .trim()
     .split('\n')
-    .filter((p) => p.endsWith('.ts') && !p.endsWith('.test.ts') && !p.endsWith('.d.ts'));
+    .filter(
+      (p) => p.endsWith('.ts') && !p.endsWith('.test.ts') && !p.endsWith('.d.ts') && existsSync(p),
+    );
 }
 
 function indexValue(node: ts.IndexSignatureDeclaration): 'unknown' | 'any' | null {
