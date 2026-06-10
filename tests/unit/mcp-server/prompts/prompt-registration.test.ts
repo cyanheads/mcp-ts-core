@@ -2,6 +2,8 @@
  * @fileoverview Tests for prompt registration system.
  * @module tests/mcp-server/prompts/prompt-registration.test
  */
+
+import { completable, isCompletable } from '@modelcontextprotocol/sdk/server/completable.js';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { z } from 'zod';
 
@@ -181,6 +183,52 @@ describe('PromptRegistry', () => {
         expect(metadata.description).toBeDefined();
         expect(metadata.description.length).toBeGreaterThan(0);
       });
+    });
+
+    it('forwards title to registerPrompt config when provided', async () => {
+      const titledPrompt = prompt('titled_prompt', {
+        description: 'A titled prompt.',
+        title: 'My Titled Prompt',
+        generate: () => [{ role: 'user' as const, content: { type: 'text' as const, text: 'Hi' } }],
+      });
+      const titledRegistry = new PromptRegistry([titledPrompt], logger);
+      await titledRegistry.registerAll(mockServer);
+
+      const call = mockServer.registerPrompt.mock.calls[0];
+      expect(call[1].title).toBe('My Titled Prompt');
+    });
+
+    it('omits title from registerPrompt config when not provided', async () => {
+      await registry.registerAll(mockServer);
+
+      // testPrompt has no title — key should be absent (not undefined)
+      const call = mockServer.registerPrompt.mock.calls[0];
+      expect(call[1]).not.toHaveProperty('title');
+    });
+
+    it('forwards completable args shape to registerPrompt argsSchema', async () => {
+      const argsWithCompletion = z.object({
+        language: completable(z.string().describe('Programming language'), async (partial) =>
+          ['typescript', 'python', 'rust'].filter((l) => l.startsWith(partial)),
+        ),
+      });
+      const completablePrompt = prompt('completable_prompt', {
+        description: 'Prompt with completable args.',
+        args: argsWithCompletion,
+        generate: (args) => [
+          { role: 'user' as const, content: { type: 'text' as const, text: args.language } },
+        ],
+      });
+
+      const completableRegistry = new PromptRegistry([completablePrompt], logger);
+      await completableRegistry.registerAll(mockServer);
+
+      const call = mockServer.registerPrompt.mock.calls[0];
+      // argsSchema is the shape (ZodRawShape), not the ZodObject itself
+      expect(call[1].argsSchema).toBeDefined();
+      expect(call[1].argsSchema).toHaveProperty('language');
+      // The completable wrapper is preserved on the shape's field
+      expect(isCompletable(call[1].argsSchema.language)).toBe(true);
     });
   });
 });

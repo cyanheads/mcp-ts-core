@@ -76,6 +76,7 @@ export class PromptRegistry {
         server.registerPrompt(
           promptDef.name,
           {
+            ...(promptDef.title && { title: promptDef.title }),
             description: promptDef.description,
             ...(promptDef.args && {
               argsSchema: promptDef.args.shape,

@@ -44,6 +44,8 @@ export class ResourceRegistry {
     // factory prefers request-scoped notifiers (#135) and falls back to these
     // only when a request has no notification sender.
     const notifiers: ResourceHandlerNotifiers = {
+      elicitInput: (params) => server.server.elicitInput(params),
+      getClientCapabilities: () => server.server.getClientCapabilities(),
       notifyPromptListChanged: () => server.sendPromptListChanged(),
       notifyResourceListChanged: () => server.sendResourceListChanged(),
       notifyResourceUpdated: (uri: string) => server.server.sendResourceUpdated({ uri }),
@@ -110,6 +112,7 @@ export class ResourceRegistry {
         if (hasUriTemplateVariables(def.uriTemplate)) {
           const template = new ResourceTemplate(def.uriTemplate, {
             list: def.list,
+            ...(def.complete && { complete: def.complete }),
           });
 
           server.resource(resourceName, template, metadata, handler);

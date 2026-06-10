@@ -79,7 +79,11 @@ describe('ResourceRegistry', () => {
       sendPromptListChanged: vi.fn(),
       sendResourceListChanged: vi.fn(),
       sendToolListChanged: vi.fn(),
-      server: { sendResourceUpdated: vi.fn() },
+      server: {
+        sendResourceUpdated: vi.fn(),
+        elicitInput: vi.fn(),
+        getClientCapabilities: vi.fn(() => undefined),
+      },
     };
   });
 
@@ -239,6 +243,53 @@ describe('ResourceRegistry', () => {
         uri: 'notify://updated',
       });
       expect(mockServer.sendToolListChanged).toHaveBeenCalledOnce();
+    });
+  });
+
+  describe('ResourceTemplate complete map forwarding', () => {
+    it('registers a resource with a complete map and produces a ResourceTemplate', async () => {
+      const completer = async (value: string) =>
+        ['alpha', 'beta', 'gamma'].filter((v) => v.startsWith(value));
+
+      const testResource = resource('items://{id}', {
+        name: 'completable-resource',
+        description: 'Resource with URI template completions',
+        params: z.object({ id: z.string().describe('Item ID') }),
+        handler: () => ({ ok: true }),
+        list: () => ({ resources: [] }),
+        complete: { id: completer },
+      });
+
+      const registry = new ResourceRegistry([testResource], services);
+      await registry.registerAll(mockServer);
+
+      // The registration path constructs a ResourceTemplate and passes it as the
+      // second argument to server.resource(). Verify the template was created.
+      const call = mockServer.resource.mock.calls[0];
+      const template = call[1];
+      expect(template).toBeInstanceOf(ResourceTemplate);
+    });
+
+    it('ResourceDefinition.complete field carries the callback map', () => {
+      // Verify the definition type accepts and retains the complete map.
+      // Full wire-path forwarding is covered by tests/integration/completions.int.test.ts.
+      const completer = async (value: string) => ['alpha'].filter((v) => v.startsWith(value));
+      const defWithComplete = resource('things://{id}', {
+        name: 'things-complete',
+        description: 'Has complete',
+        handler: () => ({ ok: true }),
+        complete: { id: completer },
+      });
+
+      const defWithoutComplete = resource('widgets://{id}', {
+        name: 'widgets-no-complete',
+        description: 'No complete',
+        handler: () => ({ ok: true }),
+      });
+
+      expect(defWithComplete.complete).toBeDefined();
+      expect(defWithComplete.complete!.id).toBe(completer);
+      expect(defWithoutComplete.complete).toBeUndefined();
     });
   });
 

@@ -16,6 +16,10 @@ import type { ZodObject, ZodRawShape, z } from 'zod';
 export interface PromptDefinition<TArgs extends ZodObject<ZodRawShape> | undefined = undefined> {
   /**
    * Optional Zod schema for prompt arguments. All fields need `.describe()`.
+   * Individual fields may be wrapped with `completable()` from
+   * `@cyanheads/mcp-ts-core` to enable argument autocompletion — the SDK
+   * auto-installs `completion/complete` handling when any registered prompt
+   * arg is completable.
    * If undefined, the prompt accepts no arguments.
    */
   args?: TArgs;
@@ -37,6 +41,8 @@ export interface PromptDefinition<TArgs extends ZodObject<ZodRawShape> | undefin
    * domain-namespaced subdirectories or a filename that doesn't mirror `name`).
    */
   sourceUrl?: string;
+  /** Human-readable display title surfaced in `prompts/list`. */
+  title?: string;
 }
 
 /** Widened type that accepts any `PromptDefinition` regardless of args schema. */

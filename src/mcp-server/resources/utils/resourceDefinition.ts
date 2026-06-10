@@ -7,6 +7,7 @@
  * @module src/mcp-server/resources/utils/resourceDefinition
  */
 
+import type { CompleteResourceTemplateCallback } from '@modelcontextprotocol/sdk/server/mcp.js';
 import type { RequestHandlerExtra } from '@modelcontextprotocol/sdk/shared/protocol.js';
 import type {
   ListResourcesResult,
@@ -68,6 +69,14 @@ export interface ResourceDefinition<
   annotations?: ResourceAnnotations;
   /** Required auth scopes. */
   auth?: string[];
+  /**
+   * Per-variable completion callbacks for URI template variables. Forwarded to
+   * the SDK's `ResourceTemplate` constructor so the SDK auto-installs
+   * `completion/complete` handling and advertises the `completions` capability.
+   * Keys must match variable names in `uriTemplate` (e.g., `{ itemId: async (v) => [...] }`).
+   * Only applies to templated resources (URI templates with `{variable}` syntax).
+   */
+  complete?: Record<string, CompleteResourceTemplateCallback>;
   /** LLM-facing description. */
   description: string;
   /**

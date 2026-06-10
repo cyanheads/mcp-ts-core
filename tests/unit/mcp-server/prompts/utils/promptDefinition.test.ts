@@ -3,6 +3,7 @@
  * @module tests/mcp-server/prompts/utils/promptDefinition.test
  */
 
+import { completable } from '@modelcontextprotocol/sdk/server/completable.js';
 import { describe, expect, it } from 'vitest';
 import { z } from 'zod';
 import type { PromptDefinition } from '@/mcp-server/prompts/utils/promptDefinition.js';
@@ -134,5 +135,46 @@ describe('prompt() builder', () => {
     const messages = await def.generate({ query: 'hello' });
     expect(messages).toHaveLength(1);
     expect((messages[0]!.content as { text: string }).text).toBe('hello');
+  });
+
+  it('accepts optional title field', () => {
+    const def = prompt('titled_prompt', {
+      description: 'A prompt with a display title.',
+      title: 'Titled Prompt',
+      generate: () => [{ role: 'user', content: { type: 'text', text: 'Hello' } }],
+    });
+
+    expect(def.title).toBe('Titled Prompt');
+    expect(def.name).toBe('titled_prompt');
+  });
+
+  it('title is optional — omitting it leaves the field undefined', () => {
+    const def = prompt('no_title_prompt', {
+      description: 'A prompt without a title.',
+      generate: () => [{ role: 'user', content: { type: 'text', text: 'Hello' } }],
+    });
+
+    expect(def.title).toBeUndefined();
+  });
+
+  it('accepts completable()-wrapped args without TypeScript error', () => {
+    const argsSchema = z.object({
+      language: completable(z.string().describe('Programming language'), async (partial) =>
+        ['typescript', 'python', 'rust'].filter((l) => l.startsWith(partial)),
+      ),
+    });
+
+    const def = prompt('completable_prompt', {
+      description: 'Prompt with completable arg.',
+      args: argsSchema,
+      generate: (args) => [
+        { role: 'user', content: { type: 'text', text: `Language: ${args.language}` } },
+      ],
+    });
+
+    expect(def.args).toBeDefined();
+    // The completable wrapper is non-enumerable so the arg still parses normally
+    const parsed = def.args!.parse({ language: 'typescript' });
+    expect(parsed.language).toBe('typescript');
   });
 });
