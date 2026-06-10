@@ -24,7 +24,6 @@ const {
   mockRequestContextService,
   mockResetConfig,
   mockResourceRegistry,
-  mockRootsRegistry,
   mockSchedulerService,
   mockShutdownOpenTelemetry,
   mockTaskManager,
@@ -35,7 +34,6 @@ const {
   MockPromptRegistry,
   MockRateLimiter,
   MockResourceRegistry,
-  MockRootsRegistry,
   MockSpeechService,
   MockStorageService,
   MockTaskManager,
@@ -147,10 +145,6 @@ const {
   const MockPromptRegistry = vi.fn(function MockPromptRegistry() {
     return mockPromptRegistry.instance;
   });
-  const mockRootsRegistry = { instance: { kind: 'roots-registry' } };
-  const MockRootsRegistry = vi.fn(function MockRootsRegistry() {
-    return mockRootsRegistry.instance;
-  });
 
   const mockCreateMcpServerInstance = vi.fn(async () => ({ server: 'mcp-server' }));
 
@@ -212,7 +206,6 @@ const {
     mockRequestContextService,
     mockResetConfig,
     mockResourceRegistry,
-    mockRootsRegistry,
     mockSchedulerService,
     mockShutdownOpenTelemetry,
     mockTaskManager,
@@ -223,7 +216,6 @@ const {
     MockPromptRegistry,
     MockRateLimiter,
     MockResourceRegistry,
-    MockRootsRegistry,
     MockSpeechService,
     MockStorageService,
     MockTaskManager,
@@ -245,10 +237,6 @@ vi.mock('@/mcp-server/prompts/prompt-registration.js', () => ({
 
 vi.mock('@/mcp-server/resources/resource-registration.js', () => ({
   ResourceRegistry: MockResourceRegistry,
-}));
-
-vi.mock('@/mcp-server/roots/roots-registration.js', () => ({
-  RootsRegistry: MockRootsRegistry,
 }));
 
 vi.mock('@/mcp-server/server.js', () => ({
@@ -502,11 +490,37 @@ describe('core/app', () => {
       config: mockConfig,
       promptRegistry: mockPromptRegistry.instance,
       resourceRegistry: mockResourceRegistry.instance,
-      rootsRegistry: mockRootsRegistry.instance,
       taskMessageQueue: 'task-message-queue',
       taskStore: 'task-store',
       toolRegistry: mockToolRegistry.instance,
     });
+  });
+
+  it('forwards server identity fields through composeServices to createMcpServerInstance (#213)', async () => {
+    const icons = [{ src: 'https://example.com/icon.png', mimeType: 'image/png' }];
+    const composed = await composeServices({
+      title: 'My Server',
+      websiteUrl: 'https://github.com/owner/repo',
+      description: 'One-line description.',
+      icons,
+    });
+
+    await composed.createServer();
+
+    expect(mockCreateMcpServerInstance).toHaveBeenCalledWith(
+      expect.objectContaining({
+        title: 'My Server',
+        websiteUrl: 'https://github.com/owner/repo',
+        description: 'One-line description.',
+        icons,
+      }),
+    );
+
+    // Identity fields also surface on the manifest
+    expect(composed.manifest.server.title).toBe('My Server');
+    expect(composed.manifest.server.websiteUrl).toBe('https://github.com/owner/repo');
+    expect(composed.manifest.server.description).toBe('One-line description.');
+    expect(composed.manifest.server.icons).toEqual(icons);
   });
 
   it('starts the app, registers shutdown handlers, and performs graceful shutdown', async () => {

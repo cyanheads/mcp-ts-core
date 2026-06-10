@@ -13,6 +13,7 @@
  * @module src/core/serverManifest
  */
 
+import type { Implementation } from '@modelcontextprotocol/sdk/types.js';
 import { SUPPORTED_PROTOCOL_VERSIONS } from '@modelcontextprotocol/sdk/types.js';
 import type { ZodObject, ZodRawShape } from 'zod';
 import { toJSONSchema } from 'zod/v4/core';
@@ -182,9 +183,15 @@ export interface ManifestServer {
   description?: string;
   environment: string;
   homepage?: string;
+  /** Server icon(s) forwarded from `createApp({ icons })`. */
+  icons?: Implementation['icons'];
   keywords?: string[];
   name: string;
+  /** Human-readable display name forwarded from `createApp({ title })`. */
+  title?: string;
   version: string;
+  /** Canonical server URL forwarded from `createApp({ websiteUrl })`. */
+  websiteUrl?: string;
 }
 
 export interface ManifestTransport {
@@ -496,11 +503,22 @@ function normalizeEnvExample(
 
 export interface BuildServerManifestInput {
   config: AppConfig;
+  /**
+   * Explicit description — overrides `config.mcpServerDescription`
+   * (`MCP_SERVER_DESCRIPTION` / `package.json` `description`).
+   */
+  description?: string;
   extensions?: Record<string, object>;
+  /** Server icon(s) forwarded from `createApp({ icons })`. */
+  icons?: Implementation['icons'];
   landing?: LandingConfig;
   prompts: AnyPromptDefinition[];
   resources: AnyResourceDefinition[];
+  /** Human-readable display name forwarded from `createApp({ title })`. */
+  title?: string;
   tools: AnyToolDef[];
+  /** Canonical server URL forwarded from `createApp({ websiteUrl })`. */
+  websiteUrl?: string;
 }
 
 /**
@@ -508,7 +526,18 @@ export interface BuildServerManifestInput {
  * Called once at startup from `composeServices()`.
  */
 export function buildServerManifest(input: BuildServerManifestInput): ServerManifest {
-  const { config, tools, resources, prompts, extensions, landing = {} } = input;
+  const {
+    config,
+    description,
+    extensions,
+    icons,
+    landing = {},
+    prompts,
+    resources,
+    title,
+    tools,
+    websiteUrl,
+  } = input;
 
   const protocolVersions = SUPPORTED_PROTOCOL_VERSIONS;
   const latestProtocol = protocolVersions[0] ?? '2025-06-18';
@@ -589,9 +618,17 @@ export function buildServerManifest(input: BuildServerManifestInput): ServerMani
     server: {
       name: config.mcpServerName,
       version: config.mcpServerVersion,
-      ...(config.mcpServerDescription && { description: config.mcpServerDescription }),
+      // Explicit option wins; fall back to env/package.json config value.
+      ...(description
+        ? { description }
+        : config.mcpServerDescription
+          ? { description: config.mcpServerDescription }
+          : {}),
       ...(config.mcpServerKeywords?.length && { keywords: config.mcpServerKeywords }),
       ...(config.mcpServerHomepage && { homepage: config.mcpServerHomepage }),
+      ...(title && { title }),
+      ...(websiteUrl && { websiteUrl }),
+      ...(icons && { icons }),
       environment: config.environment,
     },
     transport: {

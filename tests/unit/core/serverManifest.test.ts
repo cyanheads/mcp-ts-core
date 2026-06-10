@@ -583,6 +583,103 @@ describe('buildServerManifest — auth reflection', () => {
   });
 });
 
+describe('buildServerManifest — server identity fields (#213)', () => {
+  test('title surfaces on manifest.server when provided', () => {
+    const manifest = buildServerManifest({
+      config: stubConfig(),
+      tools: [],
+      resources: [],
+      prompts: [],
+      title: 'My Server',
+    });
+    expect(manifest.server.title).toBe('My Server');
+  });
+
+  test('title is absent from manifest.server when not provided', () => {
+    const manifest = buildServerManifest({
+      config: stubConfig(),
+      tools: [],
+      resources: [],
+      prompts: [],
+    });
+    expect(manifest.server).not.toHaveProperty('title');
+  });
+
+  test('websiteUrl surfaces on manifest.server when provided', () => {
+    const manifest = buildServerManifest({
+      config: stubConfig(),
+      tools: [],
+      resources: [],
+      prompts: [],
+      websiteUrl: 'https://github.com/owner/my-server',
+    });
+    expect(manifest.server.websiteUrl).toBe('https://github.com/owner/my-server');
+  });
+
+  test('websiteUrl is absent from manifest.server when not provided', () => {
+    const manifest = buildServerManifest({
+      config: stubConfig(),
+      tools: [],
+      resources: [],
+      prompts: [],
+    });
+    expect(manifest.server).not.toHaveProperty('websiteUrl');
+  });
+
+  test('icons surface on manifest.server when provided', () => {
+    const icons = [{ src: 'https://example.com/icon.png', mimeType: 'image/png' }] as const;
+    const manifest = buildServerManifest({
+      config: stubConfig(),
+      tools: [],
+      resources: [],
+      prompts: [],
+      icons: [...icons],
+    });
+    expect(manifest.server.icons).toEqual(icons);
+  });
+
+  test('icons are absent from manifest.server when not provided', () => {
+    const manifest = buildServerManifest({
+      config: stubConfig(),
+      tools: [],
+      resources: [],
+      prompts: [],
+    });
+    expect(manifest.server).not.toHaveProperty('icons');
+  });
+
+  test('explicit description option wins over config.mcpServerDescription', () => {
+    const manifest = buildServerManifest({
+      config: stubConfig({ mcpServerDescription: 'from config' }),
+      tools: [],
+      resources: [],
+      prompts: [],
+      description: 'from option',
+    });
+    expect(manifest.server.description).toBe('from option');
+  });
+
+  test('config.mcpServerDescription is used as fallback when no explicit description', () => {
+    const manifest = buildServerManifest({
+      config: stubConfig({ mcpServerDescription: 'from config' }),
+      tools: [],
+      resources: [],
+      prompts: [],
+    });
+    expect(manifest.server.description).toBe('from config');
+  });
+
+  test('description is absent when neither explicit option nor config value is set', () => {
+    const manifest = buildServerManifest({
+      config: stubConfig({ mcpServerDescription: undefined }),
+      tools: [],
+      resources: [],
+      prompts: [],
+    });
+    expect(manifest.server).not.toHaveProperty('description');
+  });
+});
+
 describe('buildServerManifest — per-definition sourceUrl override', () => {
   test('respects sourceUrl override on tool definitions', () => {
     const myTool = tool('my_tool', {

@@ -70,7 +70,6 @@ describe('createMcpServerInstance', () => {
   let mockToolRegistry: { registerAll: ReturnType<typeof vi.fn> };
   let mockResourceRegistry: { registerAll: ReturnType<typeof vi.fn> };
   let mockPromptRegistry: { registerAll: ReturnType<typeof vi.fn> };
-  let mockRootsRegistry: { registerAll: ReturnType<typeof vi.fn> };
   let deps: McpServerDeps;
 
   beforeEach(() => {
@@ -79,7 +78,6 @@ describe('createMcpServerInstance', () => {
     mockToolRegistry = { registerAll: vi.fn().mockResolvedValue(undefined) };
     mockResourceRegistry = { registerAll: vi.fn().mockResolvedValue(undefined) };
     mockPromptRegistry = { registerAll: vi.fn() };
-    mockRootsRegistry = { registerAll: vi.fn() };
 
     deps = {
       config: {
@@ -89,7 +87,6 @@ describe('createMcpServerInstance', () => {
       toolRegistry: mockToolRegistry as unknown as McpServerDeps['toolRegistry'],
       resourceRegistry: mockResourceRegistry as unknown as McpServerDeps['resourceRegistry'],
       promptRegistry: mockPromptRegistry as unknown as McpServerDeps['promptRegistry'],
-      rootsRegistry: mockRootsRegistry as unknown as McpServerDeps['rootsRegistry'],
     };
   });
 
@@ -112,11 +109,6 @@ describe('createMcpServerInstance', () => {
   it('should call PromptRegistry.registerAll', async () => {
     await createMcpServerInstance(deps);
     expect(mockPromptRegistry.registerAll).toHaveBeenCalledTimes(1);
-  });
-
-  it('should call RootsRegistry.registerAll', async () => {
-    await createMcpServerInstance(deps);
-    expect(mockRootsRegistry.registerAll).toHaveBeenCalledTimes(1);
   });
 
   it('should log initialization and success messages', async () => {
@@ -202,6 +194,75 @@ describe('createMcpServerInstance', () => {
     it('does not pass through an empty string (falsy guard)', async () => {
       await createMcpServerInstance({ ...deps, instructions: '' });
       expect(lastConstructorOptions()).not.toHaveProperty('instructions');
+    });
+  });
+
+  describe('server identity fields (#213)', () => {
+    const McpServerMock = McpServer as unknown as {
+      clearCapturedArgs(): void;
+      getCapturedArgs(): unknown[][];
+    };
+
+    function lastServerInfo(): Record<string, unknown> | undefined {
+      const calls = McpServerMock.getCapturedArgs();
+      const last = calls[calls.length - 1];
+      return last?.[0] as Record<string, unknown> | undefined;
+    }
+
+    beforeEach(() => {
+      McpServerMock.clearCapturedArgs();
+    });
+
+    it('forwards title to McpServer serverInfo when provided', async () => {
+      await createMcpServerInstance({ ...deps, title: 'My Server' });
+      expect(lastServerInfo()?.title).toBe('My Server');
+    });
+
+    it('omits title from McpServer serverInfo when not provided', async () => {
+      await createMcpServerInstance(deps);
+      expect(lastServerInfo()).not.toHaveProperty('title');
+    });
+
+    it('forwards websiteUrl to McpServer serverInfo when provided', async () => {
+      await createMcpServerInstance({
+        ...deps,
+        websiteUrl: 'https://github.com/owner/my-server',
+      });
+      expect(lastServerInfo()?.websiteUrl).toBe('https://github.com/owner/my-server');
+    });
+
+    it('omits websiteUrl from McpServer serverInfo when not provided', async () => {
+      await createMcpServerInstance(deps);
+      expect(lastServerInfo()).not.toHaveProperty('websiteUrl');
+    });
+
+    it('forwards description to McpServer serverInfo when provided', async () => {
+      await createMcpServerInstance({ ...deps, description: 'My server description.' });
+      expect(lastServerInfo()?.description).toBe('My server description.');
+    });
+
+    it('omits description from McpServer serverInfo when not provided', async () => {
+      await createMcpServerInstance(deps);
+      expect(lastServerInfo()).not.toHaveProperty('description');
+    });
+
+    it('forwards icons to McpServer serverInfo when provided', async () => {
+      const icons = [{ src: 'https://example.com/icon.png', mimeType: 'image/png' }];
+      await createMcpServerInstance({ ...deps, icons });
+      expect(lastServerInfo()?.icons).toEqual(icons);
+    });
+
+    it('omits icons from McpServer serverInfo when not provided', async () => {
+      await createMcpServerInstance(deps);
+      expect(lastServerInfo()).not.toHaveProperty('icons');
+    });
+
+    it('always includes name and version in serverInfo', async () => {
+      await createMcpServerInstance({ ...deps, title: 'T', websiteUrl: 'https://x.com' });
+      expect(lastServerInfo()).toMatchObject({
+        name: 'test-server',
+        version: '1.0.0',
+      });
     });
   });
 });

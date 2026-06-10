@@ -7,6 +7,7 @@
  */
 
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
+import type { Implementation } from '@modelcontextprotocol/sdk/types.js';
 import type { SupabaseClient } from '@supabase/supabase-js';
 import { z } from 'zod';
 import { config, resetConfig } from '@/config/index.js';
@@ -20,7 +21,6 @@ import { PromptRegistry } from '@/mcp-server/prompts/prompt-registration.js';
 import type { AnyPromptDefinition } from '@/mcp-server/prompts/utils/promptDefinition.js';
 import { ResourceRegistry } from '@/mcp-server/resources/resource-registration.js';
 import type { AnyResourceDefinition } from '@/mcp-server/resources/utils/resourceDefinition.js';
-import { RootsRegistry } from '@/mcp-server/roots/roots-registration.js';
 import { createMcpServerInstance } from '@/mcp-server/server.js';
 import { TaskManager } from '@/mcp-server/tasks/core/taskManager.js';
 import { isTaskToolDefinition } from '@/mcp-server/tasks/utils/taskToolDefinition.js';
@@ -76,10 +76,29 @@ export interface CreateAppOptions {
   /** Options affecting the `Context` object passed to handlers. */
   context?: ContextOptions;
   /**
+   * One-line description shown in client listings and the server card.
+   * When set, this takes priority over the `MCP_SERVER_DESCRIPTION` env var
+   * and `package.json` `description`. Forwarded to the `McpServer` constructor
+   * and to `buildServerManifest` so `initialize` and `/.well-known/mcp.json`
+   * stay consistent.
+   */
+  description?: string;
+  /**
    * SEP-2133 extensions to advertise in server capabilities.
    * Keys are extension identifiers (`vendor-prefix/extension-name`).
    */
   extensions?: Record<string, object>;
+  /**
+   * Server icon(s) rendered in client listings. Typed against the SDK's
+   * `Implementation['icons']` — each entry carries `src` (URL), optional
+   * `mimeType`, `sizes?: string[]`, and `theme?: 'light' | 'dark'`.
+   *
+   * @example
+   * ```ts
+   * icons: [{ src: 'https://example.com/icon.png', sizes: ['48x48'], mimeType: 'image/png' }]
+   * ```
+   */
+  icons?: Implementation['icons'];
   /**
    * Server-level orientation text included on every `initialize` response.
    * Spec-compliant clients SHOULD forward this to the model as session-level
@@ -105,10 +124,26 @@ export interface CreateAppOptions {
   resources?: AnyResourceDefinition[];
   /** Runs after core services are constructed, before transport starts. */
   setup?: (core: CoreServices) => void | Promise<void>;
+  /**
+   * Human-readable display name shown in client listings and consent UIs.
+   * Supplements `name` (which is the machine identifier). Forwarded to the
+   * `McpServer` constructor's `serverInfo` and to the server manifest.
+   *
+   * @example `'My Server'`
+   */
+  title?: string;
   /** Tool definitions (legacy, new-style, or task). */
   tools?: AnyToolDef[];
   /** Server version — overrides package.json and MCP_SERVER_VERSION env var. */
   version?: string;
+  /**
+   * Canonical URL for the server's homepage or repository. Forwarded to the
+   * `McpServer` constructor's `serverInfo` and to the server manifest so
+   * `initialize` and `/.well-known/mcp.json` stay consistent.
+   *
+   * @example `'https://github.com/owner/my-mcp-server'`
+   */
+  websiteUrl?: string;
 }
 
 /** Services available in the `setup()` callback and on ServerHandle. */
@@ -165,10 +200,14 @@ export async function composeServices(options: CreateAppOptions = {}): Promise<C
     tools = [],
     resources = [],
     prompts = [],
+    description,
     extensions,
+    icons,
     instructions,
     landing,
     setup,
+    title,
+    websiteUrl,
     context: contextOptions,
   } = options;
 
@@ -285,17 +324,19 @@ export async function composeServices(options: CreateAppOptions = {}): Promise<C
     exposeStatelessSessionId,
   });
   const promptRegistry = new PromptRegistry(prompts, logger);
-  const rootsRegistry = new RootsRegistry(logger);
 
   const createServer = () =>
     createMcpServerInstance({
       advertiseTasks,
       config,
+      ...(description && { description }),
       ...(extensions && { extensions }),
+      ...(icons && { icons }),
       ...(instructions && { instructions }),
+      ...(title && { title }),
+      ...(websiteUrl && { websiteUrl }),
       promptRegistry,
       resourceRegistry,
-      rootsRegistry,
       taskStore: taskManager.getTaskStore(),
       taskMessageQueue: taskManager.getMessageQueue(),
       toolRegistry,
@@ -306,8 +347,12 @@ export async function composeServices(options: CreateAppOptions = {}): Promise<C
     tools,
     resources,
     prompts,
+    ...(description && { description }),
     ...(extensions && { extensions }),
+    ...(icons && { icons }),
     ...(landing && { landing }),
+    ...(title && { title }),
+    ...(websiteUrl && { websiteUrl }),
   });
 
   return {

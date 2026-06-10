@@ -11,11 +11,11 @@
  */
 import type { TaskMessageQueue, TaskStore } from '@modelcontextprotocol/sdk/experimental/tasks';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
+import type { Implementation } from '@modelcontextprotocol/sdk/types.js';
 
 import type { AppConfig } from '@/config/index.js';
 import type { PromptRegistry } from '@/mcp-server/prompts/prompt-registration.js';
 import type { ResourceRegistry } from '@/mcp-server/resources/resource-registration.js';
-import type { RootsRegistry } from '@/mcp-server/roots/roots-registration.js';
 import type { ToolRegistry } from '@/mcp-server/tools/tool-registration.js';
 import { logger } from '@/utils/internal/logger.js';
 import { requestContextService } from '@/utils/internal/requestContext.js';
@@ -30,8 +30,15 @@ export interface McpServerDeps {
    */
   advertiseTasks?: boolean;
   config: AppConfig;
+  /**
+   * One-line description forwarded to `new McpServer({ serverInfo })`.
+   * Explicit option wins over `MCP_SERVER_DESCRIPTION` / `package.json`.
+   */
+  description?: string;
   /** SEP-2133 extensions to advertise in server capabilities. */
   extensions?: Record<string, object>;
+  /** Server icon(s) forwarded to `new McpServer({ serverInfo })`. */
+  icons?: Implementation['icons'];
   /**
    * Server-level orientation text. The MCP SDK includes this on every
    * `initialize` response; spec-compliant clients SHOULD forward it to the
@@ -42,13 +49,22 @@ export interface McpServerDeps {
   instructions?: string;
   promptRegistry: PromptRegistry;
   resourceRegistry: ResourceRegistry;
-  rootsRegistry: RootsRegistry;
   /** Task message queue for side-channel delivery via tasks/result. */
   taskMessageQueue?: TaskMessageQueue;
   /** Task store for managing task lifecycle (create, status, result). */
   taskStore?: TaskStore;
+  /**
+   * Human-readable display name forwarded to `new McpServer({ serverInfo })`.
+   * Supplements the machine-identifier `name`.
+   */
+  title?: string;
   /** Tool registry. */
   toolRegistry: ToolRegistry;
+  /**
+   * Canonical server URL forwarded to `new McpServer({ serverInfo })`.
+   * Should match `landing.repoRoot` or `mcpServerHomepage` when set.
+   */
+  websiteUrl?: string;
 }
 
 /**
@@ -68,6 +84,10 @@ export async function createMcpServerInstance(deps: McpServerDeps): Promise<McpS
     {
       name: deps.config.mcpServerName,
       version: deps.config.mcpServerVersion,
+      ...(deps.title && { title: deps.title }),
+      ...(deps.websiteUrl && { websiteUrl: deps.websiteUrl }),
+      ...(deps.description && { description: deps.description }),
+      ...(deps.icons && { icons: deps.icons }),
     },
     {
       capabilities: {
@@ -103,8 +123,6 @@ export async function createMcpServerInstance(deps: McpServerDeps): Promise<McpS
       deps.resourceRegistry.registerAll(server),
       deps.promptRegistry.registerAll(server),
     ]);
-
-    deps.rootsRegistry.registerAll(server);
 
     logger.debug('All MCP capabilities registered successfully', context);
   } catch (err) {
