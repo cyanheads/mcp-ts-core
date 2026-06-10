@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.10.2](changelog/0.10.x/0.10.2.md) — 2026-06-10
+
+Per-table TTL for DataCanvas; ctx.enrich.truncated() helper; canvas-consumer and capped-list-no-truncation lint rules; scaffold Dockerfile pre-creates writable data dirs.
+
 ## [0.10.1](changelog/0.10.x/0.10.1.md) — 2026-06-08 · 🛡️ Security
 
 Security: DataCanvas SQL gate fails closed on non-SELECT and denies pragma_* table functions; scaffold/packaging fixes and actionable scheduler peer error.

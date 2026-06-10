@@ -1,7 +1,7 @@
 # Developer Protocol
 
 **Package:** `@cyanheads/mcp-ts-core`
-**Version:** 0.10.1
+**Version:** 0.10.2
 **Engines:** Bun ≥1.3.0, Node ≥24.0.0
 **MCP SDK:** `@modelcontextprotocol/sdk` ^1.29.0
 **Zod:** ^4.4.3
@@ -231,7 +231,7 @@ export const myTool = tool('my_tool', {
 - **Escape hatch:** if the schema was over-typed for a genuinely dynamic upstream API, relax it (`z.object({}).passthrough()`) — passthrough still flows data to `structuredContent`.
 - **Fallback:** omit `format` for JSON stringify. Additional formatters in `/utils`: `markdown()` (builder), `diffFormatter` (async), `tableFormatter`, `treeFormatter`.
 
-**`enrichment`** (optional): The success-path counterpart to `errors[]` — a `ZodRawShape` of agent-facing context (empty-result notices, query/filter echo, pagination totals) that must reach both client surfaces. Populate via `ctx.enrich(...)` (or `ctx.enrich.notice()` / `.total()` / `.echo()`) in the handler or service layer. The framework merges it into `structuredContent`, advertises `output.extend(enrichment)` as `outputSchema`, and mirrors it into a `content[]` trailer — so it reaches `structuredContent`-only and `content[]`-only clients alike, with no `format()` entry. Keys must be disjoint from `output`; a required field never populated fails the effective-output parse. See `api-context`'s `ctx.enrich`.
+**`enrichment`** (optional): The success-path counterpart to `errors[]` — a `ZodRawShape` of agent-facing context (empty-result notices, query/filter echo, pagination totals, truncation disclosure) that must reach both client surfaces. Populate via `ctx.enrich(...)` (or `ctx.enrich.notice()` / `.total()` / `.echo()` / `.truncated()`) in the handler or service layer. The framework merges it into `structuredContent`, advertises `output.extend(enrichment)` as `outputSchema`, and mirrors it into a `content[]` trailer — so it reaches `structuredContent`-only and `content[]`-only clients alike, with no `format()` entry. Keys must be disjoint from `output`; a required field never populated fails the effective-output parse. See `api-context`'s `ctx.enrich`.
 
 **Task tools:** Add `task: true` for long-running async operations. Framework manages lifecycle: creates task → returns ID immediately → runs handler in background with `ctx.progress` → stores result/error → `ctx.signal` for cancellation. See `add-tool` skill for full example.
 
