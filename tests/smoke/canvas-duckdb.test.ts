@@ -488,4 +488,53 @@ describeIf('canvas · DuckDB round trip', () => {
       /disallowed table function/i,
     );
   });
+
+  // Issue #140 — per-table TTL: register table with ttlMs, advance clock, verify
+  // the table is dropped but the canvas survives with its other tables intact.
+  it('issue #140 — per-table TTL: describe surfaces expiresAt; sweep drops expired table; canvas survives', async () => {
+    // Use a short-lived registry for this test so we can control the clock.
+    const TABLE_TTL = 10 * 60 * 1000; // 10 min
+    const CANVAS_TTL = 24 * 60 * 60 * 1000; // 24h
+
+    let now = 1_000_000;
+    const testClock = () => now;
+
+    const testRegistry = new CanvasRegistry(
+      provider,
+      {
+        ttlMs: CANVAS_TTL,
+        absoluteCapMs: 7 * 24 * 60 * 60 * 1000,
+        maxCanvasesPerTenant: 100,
+        sweeperIntervalMs: 0,
+      },
+      testClock,
+    );
+    const testCanvas = new DataCanvas(provider, testRegistry);
+
+    try {
+      const instance = await testCanvas.acquire(undefined, ctx);
+
+      // Register two tables: one with a short per-table TTL, one without.
+      await instance.registerTable('expiring', [{ id: 1 }, { id: 2 }], { ttlMs: TABLE_TTL });
+      await instance.registerTable('permanent', [{ id: 3 }]);
+
+      // Before sweep: describe surfaces expiresAt for expiring, not for permanent.
+      const beforeSweep = await instance.describe();
+      const expiringInfo = beforeSweep.find((t) => t.name === 'expiring');
+      const permanentInfo = beforeSweep.find((t) => t.name === 'permanent');
+      expect(expiringInfo?.expiresAt).toBeDefined();
+      expect(permanentInfo?.expiresAt).toBeUndefined();
+
+      // Advance clock past the per-table TTL but well within the canvas TTL.
+      now = 1_000_000 + TABLE_TTL + 1;
+      await testRegistry.sweep();
+
+      // The canvas is still alive.
+      const afterSweep = await instance.describe();
+      expect(afterSweep.map((t) => t.name)).not.toContain('expiring');
+      expect(afterSweep.map((t) => t.name)).toContain('permanent');
+    } finally {
+      await testRegistry.shutdown(ctx);
+    }
+  });
 });

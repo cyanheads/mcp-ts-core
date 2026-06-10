@@ -1,10 +1,10 @@
 ---
 name: api-canvas
 description: >
-  DataCanvas primitive reference — a Tier 3 SQL/analytical workspace for tabular MCP servers, backed by DuckDB. Use when registering tables from upstream APIs, running ad-hoc SQL across them, and exporting results. Covers the acquire → register → query → export flow, the token-sharing pattern for multi-agent collaboration, env config, and Cloudflare Workers fail-closed behavior.
+  DataCanvas primitive reference — a Tier 3 SQL/analytical workspace for tabular MCP servers, backed by DuckDB. Use when registering tables from upstream APIs, running ad-hoc SQL across them, and exporting results. Covers the acquire → register → query → export flow, per-table TTL, the token-sharing pattern for multi-agent collaboration, env config, and Cloudflare Workers fail-closed behavior.
 metadata:
   author: cyanheads
-  version: "1.4"
+  version: "1.5"
   audience: external
   type: reference
 ---
@@ -129,9 +129,20 @@ await instance.registerTable('big_dataset', asyncRows, {
     { name: 'label', type: 'VARCHAR', nullable: true },
   ],
 });
+
+// Per-table TTL — this table ages on its own clock (30 min sliding window).
+// The canvas itself is unaffected; other tables on the same canvas are not touched.
+await instance.registerTable('recent_fetch', rows, { ttlMs: 30 * 60 * 1000 });
 ```
 
 **Schema inference** when `schema` is omitted: sniffer materializes the first 100 rows, unions JS-side types per column, and maps to DuckDB types. Fall-backs to `VARCHAR` for ambiguous unions (string mixed with numerics). Numeric widening: `INTEGER + DOUBLE → DOUBLE`, `INTEGER + BIGINT → BIGINT`. Column ordering follows first-appearance.
+
+**Per-table TTL (`ttlMs`)** — optional sliding TTL for this table specifically. When set:
+- The sweep loop drops the table (and clears its bookkeeping) when its window expires.
+- The TTL slides on any read or write against this table: on `registerTable` (initial set), on `query()` (both when the table appears in the SQL text and when it is the `registerAs` target).
+- The canvas itself is unaffected — canvas-level expiry is independent.
+- Tables registered without `ttlMs` inherit the canvas lifecycle exactly as before (no change to default behavior).
+- `instance.describe()` surfaces `TableInfo.expiresAt` (ISO 8601) for tables that have a per-table TTL; absent otherwise.
 
 ### `instance.query(sql, options?)`
 
@@ -149,9 +160,17 @@ const joined = await instance.query(`
   FROM germplasm g JOIN observations o ON g.germplasmDbId = o.germplasmDbId
 `, { registerAs: 'g_with_obs', preview: 10 });
 // joined.tableName === 'g_with_obs'; joined.rows.length === 10; joined.rowCount === <full count>
+
+// Materialize with a per-table TTL so the chained result ages independently.
+const chained = await instance.query(
+  'SELECT * FROM recent_fetch WHERE score > 0.8',
+  { registerAs: 'high_score', ttlMs: 15 * 60 * 1000 },
+);
 ```
 
 `registerAs` rejects with `ValidationError` (`data.reason: 'register_as_clash'`) if the target name already exists — drop it first.
+
+`ttlMs` on `query({ registerAs })` assigns a per-table TTL to the materialized table — the same sliding semantics as `registerTable({ ttlMs })`. The SQL text is also scanned for referenced table names; any tracked per-table TTL entry found is slid on each `query()` call.
 
 **Read-only enforcement** (four layers):
 1. Text-level deny-list — pre-parse scan for file/HTTP-reading table functions (`read_csv*`, `read_json*`, `read_parquet*`, `read_text`, `read_blob`, `glob`, `iceberg_scan`, `delta_scan`, `postgres_scan`, `mysql_scan`, `sqlite_scan`, plus pre-staged spatial ones).
@@ -354,7 +373,7 @@ export const dataframeQuery = tool('dataframe_query', {
 | Underlying data is publicly accessible | ✅ |
 | Single-user deployment (stdio, or HTTP with one user) | ✅ — no cross-user surface regardless of data sensitivity |
 | Use case is research / analytics, not multi-tenant SaaS | ✅ |
-| Dataframes must age individually | ⚠️ TTL is canvas-level today (a hot canvas keeps stale tables alive); per-table TTL is tracked in [#140](https://github.com/cyanheads/mcp-ts-core/issues/140). Backstop with `ctx.state` bookkeeping in the interim. |
+| Dataframes must age individually | ✅ Use `registerTable({ ttlMs })` or `query({ registerAs, ttlMs })` — per-table TTL is independent of canvas-level expiry. The sweep loop drops expired tables while keeping the canvas (and other tables) alive. |
 | Per-user row visibility matters in a multi-user deployment | ❌ — add session/tenant scoping at the server level |
 
 The germplasm-flavored [consumer tool template](#consumer-tool-template) below is the same pattern with domain-specific naming.
@@ -421,6 +440,7 @@ const result = await spillover({
   previewChars: 100_000,           // ≈ 25k tokens of inline rows
   caps: { maxRows: 50_000 },       // hard upper bound on registered rows
   signal: ctx.signal,
+  ttlMs: 30 * 60 * 1000,          // optional: per-table TTL forwarded to registerTable
 });
 
 if (result.spilled) {

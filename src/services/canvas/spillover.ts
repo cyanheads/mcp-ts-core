@@ -60,6 +60,12 @@ export interface SpilloverOptions<T extends Row> {
    * before any draining begins.
    */
   tableName?: string;
+  /**
+   * Per-table sliding TTL forwarded to {@link CanvasInstance.registerTable}.
+   * When set, the spilled table ages independently of the canvas; the TTL
+   * window slides on reads or writes against this specific table.
+   */
+  ttlMs?: number;
 }
 
 /** Return value when the source fit inside the preview budget. No canvas call was made. */
@@ -188,6 +194,7 @@ export async function spillover<T extends Row>(
     handle = await opts.canvas.registerTable(tableName, merged, {
       schema,
       ...(opts.signal !== undefined && { signal: opts.signal }),
+      ...(opts.ttlMs !== undefined && { ttlMs: opts.ttlMs }),
     });
   } catch (err) {
     // Best-effort cleanup so an aborted or failed registration doesn't leave

@@ -269,6 +269,183 @@ describe('CanvasRegistry · drop and sweep', () => {
   });
 });
 
+describe('CanvasRegistry · per-table TTL', () => {
+  it('registerTableTtl sets expiresAt that appears in annotateDescribeResult', async () => {
+    const clock = vi.fn(() => 1_000_000);
+    const provider = makeStubProvider();
+    const registry = new CanvasRegistry(provider, makeOptions(), clock);
+    const r = await registry.acquire(undefined, 'tenant-a', baseContext);
+
+    const TABLE_TTL = 5 * 60 * 1000; // 5 min
+    registry.registerTableTtl(r.canvasId, 'tenant-a', 'my_table', TABLE_TTL);
+
+    const raw = [
+      { name: 'my_table', kind: 'table' as const, rowCount: 10, columns: [] },
+      { name: 'other_table', kind: 'table' as const, rowCount: 5, columns: [] },
+    ];
+    const annotated = registry.annotateDescribeResult(r.canvasId, 'tenant-a', raw);
+
+    expect(annotated[0]?.expiresAt).toBe(new Date(1_000_000 + TABLE_TTL).toISOString());
+    expect(annotated[1]?.expiresAt).toBeUndefined();
+    await registry.shutdown(baseContext);
+  });
+
+  it('touchWithTable slides per-table expiry on registerTable', async () => {
+    const clock = vi.fn(() => 1_000_000);
+    const provider = makeStubProvider();
+    const registry = new CanvasRegistry(provider, makeOptions(), clock);
+    const r = await registry.acquire(undefined, 'tenant-a', baseContext);
+
+    const TABLE_TTL = 5 * 60 * 1000;
+    registry.registerTableTtl(r.canvasId, 'tenant-a', 'my_table', TABLE_TTL);
+
+    // Advance time and touch the table
+    clock.mockReturnValue(2_000_000);
+    registry.touchWithTable(r.canvasId, 'tenant-a', 'my_table');
+
+    const raw = [{ name: 'my_table', kind: 'table' as const, rowCount: 0, columns: [] }];
+    const annotated = registry.annotateDescribeResult(r.canvasId, 'tenant-a', raw);
+    expect(annotated[0]?.expiresAt).toBe(new Date(2_000_000 + TABLE_TTL).toISOString());
+    await registry.shutdown(baseContext);
+  });
+
+  it('touchWithSqlTables slides tables referenced in SQL text', async () => {
+    const clock = vi.fn(() => 1_000_000);
+    const provider = makeStubProvider();
+    const registry = new CanvasRegistry(provider, makeOptions(), clock);
+    const r = await registry.acquire(undefined, 'tenant-a', baseContext);
+
+    const TABLE_TTL = 5 * 60 * 1000;
+    registry.registerTableTtl(r.canvasId, 'tenant-a', 'orders', TABLE_TTL);
+    registry.registerTableTtl(r.canvasId, 'tenant-a', 'customers', TABLE_TTL);
+
+    clock.mockReturnValue(2_000_000);
+    registry.touchWithSqlTables(
+      r.canvasId,
+      'tenant-a',
+      undefined,
+      'SELECT * FROM orders JOIN customers ON orders.cid = customers.id',
+    );
+
+    const raw = [
+      { name: 'orders', kind: 'table' as const, rowCount: 0, columns: [] },
+      { name: 'customers', kind: 'table' as const, rowCount: 0, columns: [] },
+    ];
+    const annotated = registry.annotateDescribeResult(r.canvasId, 'tenant-a', raw);
+    expect(annotated[0]?.expiresAt).toBe(new Date(2_000_000 + TABLE_TTL).toISOString());
+    expect(annotated[1]?.expiresAt).toBe(new Date(2_000_000 + TABLE_TTL).toISOString());
+    await registry.shutdown(baseContext);
+  });
+
+  it('sweep() drops expired table but leaves the canvas alive with remaining tables', async () => {
+    const clock = vi.fn(() => 1_000_000);
+    const provider = makeStubProvider();
+    const registry = new CanvasRegistry(provider, makeOptions(), clock);
+    const r = await registry.acquire(undefined, 'tenant-a', baseContext);
+
+    const TABLE_TTL = 10 * 60 * 1000; // 10 min
+    registry.registerTableTtl(r.canvasId, 'tenant-a', 'old_table', TABLE_TTL);
+    registry.registerTableTtl(r.canvasId, 'tenant-a', 'fresh_table', TABLE_TTL * 10);
+
+    // Advance past old_table TTL but well within canvas TTL and fresh_table TTL
+    clock.mockReturnValue(1_000_000 + TABLE_TTL + 1);
+    await registry.sweep();
+
+    // old_table should have been dropped via provider.drop
+    expect(provider.drop).toHaveBeenCalledWith(r.canvasId, 'old_table', expect.any(Object));
+    // Canvas itself is still alive (not destroyed)
+    expect(provider.destroyCalls).not.toContain(r.canvasId);
+    expect(registry.totalActive()).toBe(1);
+
+    // Annotate — old_table is gone from bookkeeping, fresh_table still has expiresAt
+    const raw = [
+      { name: 'old_table', kind: 'table' as const, rowCount: 0, columns: [] },
+      { name: 'fresh_table', kind: 'table' as const, rowCount: 0, columns: [] },
+    ];
+    const annotated = registry.annotateDescribeResult(r.canvasId, 'tenant-a', raw);
+    expect(annotated[0]?.expiresAt).toBeUndefined(); // bookkeeping cleared
+    expect(annotated[1]?.expiresAt).toBeDefined();
+
+    await registry.shutdown(baseContext);
+  });
+
+  it('sweep ordering: table drop pass runs before canvas-level expiry check', async () => {
+    const clock = vi.fn(() => 1_000_000);
+    const provider = makeStubProvider();
+    const registry = new CanvasRegistry(provider, makeOptions(), clock);
+    const r = await registry.acquire(undefined, 'tenant-a', baseContext);
+
+    const TABLE_TTL = 10 * 60 * 1000; // 10 min
+    registry.registerTableTtl(r.canvasId, 'tenant-a', 'expiring_table', TABLE_TTL);
+
+    // Advance past table TTL but NOT past canvas TTL
+    clock.mockReturnValue(1_000_000 + TABLE_TTL + 1);
+    await registry.sweep();
+
+    // Table dropped
+    expect(provider.drop).toHaveBeenCalledWith(r.canvasId, 'expiring_table', expect.any(Object));
+    // Canvas NOT destroyed — its own TTL hasn't fired
+    expect(provider.destroyCalls).not.toContain(r.canvasId);
+    await registry.shutdown(baseContext);
+  });
+
+  it('dropTableBookkeeping removes the entry so annotate returns no expiresAt', async () => {
+    const clock = vi.fn(() => 1_000_000);
+    const provider = makeStubProvider();
+    const registry = new CanvasRegistry(provider, makeOptions(), clock);
+    const r = await registry.acquire(undefined, 'tenant-a', baseContext);
+
+    registry.registerTableTtl(r.canvasId, 'tenant-a', 'gone_table', 60_000);
+    registry.dropTableBookkeeping(r.canvasId, 'tenant-a', 'gone_table');
+
+    const raw = [{ name: 'gone_table', kind: 'table' as const, rowCount: 0, columns: [] }];
+    const annotated = registry.annotateDescribeResult(r.canvasId, 'tenant-a', raw);
+    expect(annotated[0]?.expiresAt).toBeUndefined();
+    await registry.shutdown(baseContext);
+  });
+
+  it('omitting ttlMs → no expiresAt annotation (unchanged default path)', async () => {
+    const clock = vi.fn(() => 1_000_000);
+    const provider = makeStubProvider();
+    const registry = new CanvasRegistry(provider, makeOptions(), clock);
+    const r = await registry.acquire(undefined, 'tenant-a', baseContext);
+
+    // No registerTableTtl call — table has no per-table TTL
+    const raw = [{ name: 'plain_table', kind: 'table' as const, rowCount: 0, columns: [] }];
+    const annotated = registry.annotateDescribeResult(r.canvasId, 'tenant-a', raw);
+    expect(annotated[0]?.expiresAt).toBeUndefined();
+    await registry.shutdown(baseContext);
+  });
+
+  it('sweep() keeps bookkeeping when provider.drop throws and retries next pass', async () => {
+    const clock = vi.fn(() => 1_000_000);
+    const provider = makeStubProvider();
+    const registry = new CanvasRegistry(provider, makeOptions(), clock);
+    const r = await registry.acquire(undefined, 'tenant-a', baseContext);
+
+    const TABLE_TTL = 10 * 60 * 1000;
+    registry.registerTableTtl(r.canvasId, 'tenant-a', 'stuck_table', TABLE_TTL);
+
+    clock.mockReturnValue(1_000_000 + TABLE_TTL + 1);
+    (provider.drop as ReturnType<typeof vi.fn>).mockRejectedValueOnce(new Error('transient'));
+    await registry.sweep();
+
+    // Drop failed — bookkeeping survives so the table is still tracked as expired.
+    const raw = [{ name: 'stuck_table', kind: 'table' as const, rowCount: 0, columns: [] }];
+    expect(
+      registry.annotateDescribeResult(r.canvasId, 'tenant-a', raw)[0]?.expiresAt,
+    ).toBeDefined();
+
+    // Next sweep: drop succeeds, bookkeeping cleared.
+    await registry.sweep();
+    expect(provider.drop).toHaveBeenCalledTimes(2);
+    expect(
+      registry.annotateDescribeResult(r.canvasId, 'tenant-a', raw)[0]?.expiresAt,
+    ).toBeUndefined();
+    await registry.shutdown(baseContext);
+  });
+});
+
 describe('CanvasRegistry · shutdown', () => {
   let registry: CanvasRegistry | undefined;
   let timer: ReturnType<typeof setInterval> | undefined;

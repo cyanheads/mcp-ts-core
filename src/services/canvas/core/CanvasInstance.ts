@@ -52,8 +52,22 @@ export class CanvasInstance {
     rows: RegisterRows,
     options?: RegisterTableOptions,
   ): Promise<RegisterTableResult> {
-    this.expiresAt = this.registry.touchOrThrow(this.canvasId, this.tenantId);
-    return await this.provider.registerTable(this.canvasId, name, rows, this.context, options);
+    this.expiresAt = this.registry.touchWithTable(this.canvasId, this.tenantId, name);
+    const result = await this.provider.registerTable(
+      this.canvasId,
+      name,
+      rows,
+      this.context,
+      options,
+    );
+    if (options?.ttlMs !== undefined) {
+      this.registry.registerTableTtl(this.canvasId, this.tenantId, name, options.ttlMs);
+    } else {
+      // The provider replaces an existing table — the new registration's options
+      // fully describe its lifecycle, so a stale per-table TTL must not survive.
+      this.registry.dropTableBookkeeping(this.canvasId, this.tenantId, name);
+    }
+    return result;
   }
 
   /**
@@ -81,21 +95,40 @@ export class CanvasInstance {
     options?: ImportFromOptions,
   ): Promise<RegisterTableResult> {
     this.expiresAt = this.registry.touchOrThrow(this.canvasId, this.tenantId);
-    this.registry.touchOrThrow(sourceCanvasId, this.tenantId);
-    return await this.provider.importFrom(
+    this.registry.touchWithTable(sourceCanvasId, this.tenantId, sourceTableName);
+    const asName = options?.asName ?? sourceTableName;
+    const result = await this.provider.importFrom(
       this.canvasId,
       sourceCanvasId,
       sourceTableName,
-      options?.asName ?? sourceTableName,
+      asName,
       this.context,
       options,
     );
+    // The provider replaces an existing destination table; the imported copy
+    // carries no per-table TTL, so clear any stale entry under that name.
+    this.registry.dropTableBookkeeping(this.canvasId, this.tenantId, asName);
+    return result;
   }
 
   /** Run a SQL query against the canvas. */
   async query(sql: string, options?: QueryOptions): Promise<QueryResult> {
-    this.expiresAt = this.registry.touchOrThrow(this.canvasId, this.tenantId);
-    return await this.provider.query(this.canvasId, sql, this.context, options);
+    this.expiresAt = this.registry.touchWithSqlTables(
+      this.canvasId,
+      this.tenantId,
+      options?.registerAs,
+      sql,
+    );
+    const result = await this.provider.query(this.canvasId, sql, this.context, options);
+    if (options?.registerAs !== undefined && options.ttlMs !== undefined) {
+      this.registry.registerTableTtl(
+        this.canvasId,
+        this.tenantId,
+        options.registerAs,
+        options.ttlMs,
+      );
+    }
+    return result;
   }
 
   /** Export a canvas table to a path or stream target. */
@@ -104,25 +137,32 @@ export class CanvasInstance {
     target: ExportTarget,
     options?: ExportOptions,
   ): Promise<ExportResult> {
-    this.expiresAt = this.registry.touchOrThrow(this.canvasId, this.tenantId);
+    this.expiresAt = this.registry.touchWithTable(this.canvasId, this.tenantId, tableName);
     return await this.provider.export(this.canvasId, tableName, target, this.context, options);
   }
 
-  /** Describe one or all canvas tables. */
+  /** Describe one or all canvas tables. Per-table `expiresAt` is injected for tables with a TTL. */
   async describe(options?: DescribeOptions): Promise<TableInfo[]> {
     this.expiresAt = this.registry.touchOrThrow(this.canvasId, this.tenantId);
-    return await this.provider.describe(this.canvasId, this.context, options);
+    const result = await this.provider.describe(this.canvasId, this.context, options);
+    return this.registry.annotateDescribeResult(this.canvasId, this.tenantId, result);
   }
 
   /** Drop a single canvas table. Returns `true` when found and removed. */
   async drop(name: string): Promise<boolean> {
     this.expiresAt = this.registry.touchOrThrow(this.canvasId, this.tenantId);
-    return await this.provider.drop(this.canvasId, name, this.context);
+    const result = await this.provider.drop(this.canvasId, name, this.context);
+    if (result) {
+      this.registry.dropTableBookkeeping(this.canvasId, this.tenantId, name);
+    }
+    return result;
   }
 
   /** Drop every table on the canvas. Returns the number dropped. */
   async clear(): Promise<number> {
     this.expiresAt = this.registry.touchOrThrow(this.canvasId, this.tenantId);
-    return await this.provider.clear(this.canvasId, this.context);
+    const count = await this.provider.clear(this.canvasId, this.context);
+    this.registry.clearTableBookkeeping(this.canvasId, this.tenantId);
+    return count;
   }
 }

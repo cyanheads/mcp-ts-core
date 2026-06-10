@@ -168,6 +168,162 @@ describe('DataCanvas · drop / countForTenant / healthCheck / shutdown', () => {
   });
 });
 
+describe('CanvasInstance · per-table TTL', () => {
+  it('registerTable with ttlMs: describe returns expiresAt for that table', async () => {
+    const clock = vi.fn(() => 1_000_000);
+    const provider = makeStubProvider();
+    const registry = new CanvasRegistry(provider, makeOptions(), clock);
+    const canvas = new DataCanvas(provider, registry);
+    const instance = await canvas.acquire(undefined, ctxWithTenant);
+
+    const TABLE_TTL = 5 * 60 * 1000;
+    await instance.registerTable('my_table', [], { ttlMs: TABLE_TTL });
+
+    // Stub describe to return a table entry
+    provider.describe.mockResolvedValueOnce([
+      { name: 'my_table', kind: 'table', rowCount: 0, columns: [] },
+    ]);
+
+    const result = await instance.describe();
+    expect(result[0]?.expiresAt).toBe(new Date(1_000_000 + TABLE_TTL).toISOString());
+    await registry.shutdown(ctxWithTenant);
+  });
+
+  it('registerTable without ttlMs: describe returns no expiresAt', async () => {
+    const clock = vi.fn(() => 1_000_000);
+    const provider = makeStubProvider();
+    const registry = new CanvasRegistry(provider, makeOptions(), clock);
+    const canvas = new DataCanvas(provider, registry);
+    const instance = await canvas.acquire(undefined, ctxWithTenant);
+
+    await instance.registerTable('plain_table', []);
+
+    provider.describe.mockResolvedValueOnce([
+      { name: 'plain_table', kind: 'table', rowCount: 0, columns: [] },
+    ]);
+
+    const result = await instance.describe();
+    expect(result[0]?.expiresAt).toBeUndefined();
+    await registry.shutdown(ctxWithTenant);
+  });
+
+  it('query({ registerAs, ttlMs }) registers TTL for the materialized table', async () => {
+    const clock = vi.fn(() => 1_000_000);
+    const provider = makeStubProvider();
+    const registry = new CanvasRegistry(provider, makeOptions(), clock);
+    const canvas = new DataCanvas(provider, registry);
+    const instance = await canvas.acquire(undefined, ctxWithTenant);
+
+    const TABLE_TTL = 3 * 60 * 1000;
+    await instance.query('SELECT 1', { registerAs: 'result_table', ttlMs: TABLE_TTL });
+
+    provider.describe.mockResolvedValueOnce([
+      { name: 'result_table', kind: 'table', rowCount: 0, columns: [] },
+    ]);
+
+    const described = await instance.describe();
+    expect(described[0]?.expiresAt).toBe(new Date(1_000_000 + TABLE_TTL).toISOString());
+    await registry.shutdown(ctxWithTenant);
+  });
+
+  it('query({ registerAs }) without ttlMs: no expiresAt on the materialized table', async () => {
+    const clock = vi.fn(() => 1_000_000);
+    const provider = makeStubProvider();
+    const registry = new CanvasRegistry(provider, makeOptions(), clock);
+    const canvas = new DataCanvas(provider, registry);
+    const instance = await canvas.acquire(undefined, ctxWithTenant);
+
+    await instance.query('SELECT 1', { registerAs: 'result_table' });
+
+    provider.describe.mockResolvedValueOnce([
+      { name: 'result_table', kind: 'table', rowCount: 0, columns: [] },
+    ]);
+
+    const described = await instance.describe();
+    expect(described[0]?.expiresAt).toBeUndefined();
+    await registry.shutdown(ctxWithTenant);
+  });
+
+  it('drop clears per-table TTL bookkeeping', async () => {
+    const clock = vi.fn(() => 1_000_000);
+    const provider = makeStubProvider();
+    const registry = new CanvasRegistry(provider, makeOptions(), clock);
+    const canvas = new DataCanvas(provider, registry);
+    const instance = await canvas.acquire(undefined, ctxWithTenant);
+
+    await instance.registerTable('temp_table', [], { ttlMs: 60_000 });
+    await instance.drop('temp_table');
+
+    provider.describe.mockResolvedValueOnce([
+      { name: 'temp_table', kind: 'table', rowCount: 0, columns: [] },
+    ]);
+
+    const described = await instance.describe();
+    expect(described[0]?.expiresAt).toBeUndefined();
+    await registry.shutdown(ctxWithTenant);
+  });
+
+  it('re-registering without ttlMs clears the prior per-table TTL (replace semantics)', async () => {
+    const clock = vi.fn(() => 1_000_000);
+    const provider = makeStubProvider();
+    const registry = new CanvasRegistry(provider, makeOptions(), clock);
+    const canvas = new DataCanvas(provider, registry);
+    const instance = await canvas.acquire(undefined, ctxWithTenant);
+
+    await instance.registerTable('my_table', [], { ttlMs: 60_000 });
+    await instance.registerTable('my_table', []); // replace — no ttlMs
+
+    provider.describe.mockResolvedValueOnce([
+      { name: 'my_table', kind: 'table', rowCount: 0, columns: [] },
+    ]);
+
+    const described = await instance.describe();
+    expect(described[0]?.expiresAt).toBeUndefined();
+    await registry.shutdown(ctxWithTenant);
+  });
+
+  it('export slides the per-table TTL of the exported table', async () => {
+    const clock = vi.fn(() => 1_000_000);
+    const provider = makeStubProvider();
+    const registry = new CanvasRegistry(provider, makeOptions(), clock);
+    const canvas = new DataCanvas(provider, registry);
+    const instance = await canvas.acquire(undefined, ctxWithTenant);
+
+    const TABLE_TTL = 5 * 60 * 1000;
+    await instance.registerTable('my_table', [], { ttlMs: TABLE_TTL });
+
+    clock.mockReturnValue(2_000_000);
+    await instance.export('my_table', { kind: 'path', path: '/tmp/out.csv' } as never);
+
+    provider.describe.mockResolvedValueOnce([
+      { name: 'my_table', kind: 'table', rowCount: 0, columns: [] },
+    ]);
+    const described = await instance.describe();
+    expect(described[0]?.expiresAt).toBe(new Date(2_000_000 + TABLE_TTL).toISOString());
+    await registry.shutdown(ctxWithTenant);
+  });
+
+  it('importFrom clears stale per-table TTL on the replaced destination table', async () => {
+    const clock = vi.fn(() => 1_000_000);
+    const provider = makeStubProvider();
+    const registry = new CanvasRegistry(provider, makeOptions(), clock);
+    const canvas = new DataCanvas(provider, registry);
+    const source = await canvas.acquire(undefined, ctxWithTenant);
+    const dest = await canvas.acquire(undefined, ctxWithTenant);
+
+    await source.registerTable('shared_name', []);
+    await dest.registerTable('shared_name', [], { ttlMs: 60_000 });
+    await dest.importFrom(source.canvasId, 'shared_name');
+
+    provider.describe.mockResolvedValueOnce([
+      { name: 'shared_name', kind: 'table', rowCount: 0, columns: [] },
+    ]);
+    const described = await dest.describe();
+    expect(described[0]?.expiresAt).toBeUndefined();
+    await registry.shutdown(ctxWithTenant);
+  });
+});
+
 describe('CanvasInstance · touch-or-throw + delegation', () => {
   it('every op slides expiresAt and forwards to the provider', async () => {
     const clock = vi.fn(() => 1_000_000);

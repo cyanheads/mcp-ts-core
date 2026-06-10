@@ -40,6 +40,12 @@ export interface TableInfo {
   approxSizeBytes?: number;
   /** Resolved schema for the table or view. */
   columns: ColumnSchema[];
+  /**
+   * ISO 8601 wall-clock expiry for this table's per-table TTL. Present only
+   * when the table was registered with a `ttlMs` option. When absent, the
+   * table inherits the canvas lifecycle (no independent expiry).
+   */
+  expiresAt?: string;
   /** Whether this entry is a base table or a registered view. */
   kind: CanvasObjectKind;
   /** Canvas-local name. */
@@ -62,6 +68,15 @@ export interface RegisterTableOptions {
   schema?: ColumnSchema[];
   /** Cancellation signal forwarded to the provider. */
   signal?: AbortSignal;
+  /**
+   * Per-table sliding TTL in milliseconds. When set, this table expires
+   * independently of the canvas — the sliding window is extended on any read
+   * or write against this specific table. The sweep loop drops the table and
+   * clears its bookkeeping when it expires; the canvas itself is unaffected
+   * unless its own expiry fires independently. When omitted, the table
+   * inherits the canvas lifecycle (no independent expiry).
+   */
+  ttlMs?: number;
 }
 
 /** Result of a successful {@link CanvasInstance.registerTable} call. */
@@ -96,6 +111,12 @@ export interface QueryOptions {
   rowLimit?: number;
   /** Cancellation signal — interrupts the underlying connection. */
   signal?: AbortSignal;
+  /**
+   * Per-table sliding TTL for the table materialized via `registerAs`.
+   * Ignored when `registerAs` is not set. Semantics match
+   * {@link RegisterTableOptions.ttlMs}.
+   */
+  ttlMs?: number;
 }
 
 /** Result of a successful {@link CanvasInstance.query} call. */

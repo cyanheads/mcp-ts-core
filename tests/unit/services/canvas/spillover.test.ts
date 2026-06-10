@@ -424,6 +424,46 @@ describe('spillover · tableName', () => {
 });
 
 // ---------------------------------------------------------------------
+// ttlMs forwarding
+// ---------------------------------------------------------------------
+
+describe('spillover · ttlMs', () => {
+  it('forwards ttlMs to registerTable when source spills', async () => {
+    const { canvas, harness, shutdown } = await freshCanvas();
+    const source = Array.from({ length: 10 }, (_, i) => ({ i }));
+    await spillover({ canvas, source, previewChars: 5, ttlMs: 30_000 });
+    // registerTable should have been called with ttlMs in the options
+    const registerTableMock = harness.provider.registerTable as ReturnType<typeof vi.fn>;
+    const callOptions = registerTableMock.mock.calls[0]?.[4] as { ttlMs?: number } | undefined;
+    expect(callOptions?.ttlMs).toBe(30_000);
+    await shutdown();
+  });
+
+  it('does not pass ttlMs when omitted', async () => {
+    const { canvas, harness, shutdown } = await freshCanvas();
+    const source = Array.from({ length: 10 }, (_, i) => ({ i }));
+    await spillover({ canvas, source, previewChars: 5 });
+    const registerTableMock = harness.provider.registerTable as ReturnType<typeof vi.fn>;
+    const callOptions = registerTableMock.mock.calls[0]?.[4] as { ttlMs?: number } | undefined;
+    expect(callOptions?.ttlMs).toBeUndefined();
+    await shutdown();
+  });
+
+  it('does not call registerTable when source fits (ttlMs has no effect on fit path)', async () => {
+    const { canvas, harness, shutdown } = await freshCanvas();
+    const result = await spillover({
+      canvas,
+      source: [{ a: 1 }],
+      previewChars: 10_000,
+      ttlMs: 30_000,
+    });
+    expect(result.spilled).toBe(false);
+    expect(harness.provider.registerTable).not.toHaveBeenCalled();
+    await shutdown();
+  });
+});
+
+// ---------------------------------------------------------------------
 // previewChars validation
 // ---------------------------------------------------------------------
 
