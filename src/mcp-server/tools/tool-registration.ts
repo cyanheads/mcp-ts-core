@@ -80,6 +80,8 @@ export class ToolRegistry {
     // the background auto-task path uses them directly (no request scope), so
     // those notifications deliver on stdio but drop under HTTP.
     const notifiers: HandlerNotifiers = {
+      elicitInput: (params) => server.server.elicitInput(params),
+      getClientCapabilities: () => server.server.getClientCapabilities(),
       notifyPromptListChanged: () => server.sendPromptListChanged(),
       notifyResourceListChanged: () => server.sendResourceListChanged(),
       notifyResourceUpdated: (uri: string) => server.server.sendResourceUpdated({ uri }),

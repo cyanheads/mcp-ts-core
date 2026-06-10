@@ -20,10 +20,10 @@ import { logger } from '@/utils/internal/logger.js';
 /**
  * The minimal shape we need off the SDK's `RequestHandlerExtra`. Typed with an
  * optional `sendNotification` (the SDK declares it required) so the runtime
- * presence check below is type-meaningful — mirroring how `wrapElicit` /
- * `wrapSample` narrow against a loose capability interface rather than the full
- * extra. A non-request scope (some test harnesses pass a bare `Request`) has no
- * sender, and we fall back to the server-level notifiers there.
+ * presence check below is type-meaningful — mirroring how `wrapElicit` narrows
+ * against a loose capability interface rather than the full extra. A non-request
+ * scope (some test harnesses pass a bare `Request`) has no sender, and we fall
+ * back to the server-level notifiers there.
  */
 interface NotificationSender {
   sendNotification?: (notification: ServerNotification) => Promise<void>;

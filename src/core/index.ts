@@ -40,11 +40,11 @@ export type {
   ContextLogger,
   ContextProgress,
   ContextState,
+  ElicitFn,
   Enrich,
   EnrichHelpers,
   HandlerContext,
   ReasonOf,
-  SamplingOpts,
   TypedEnrich,
   TypedFail,
   TypedRecoveryFor,
@@ -96,9 +96,18 @@ export { validateDefinitions } from '@/linter/validate.js';
 export type {
   CallToolResult,
   ContentBlock,
-  CreateMessageResult,
   ElicitResult,
   ModelPreferences,
   PromptMessage,
-  SamplingMessage,
 } from '@modelcontextprotocol/sdk/types.js';
+
+// ---------------------------------------------------------------------------
+// Completions — `completable()` wraps prompt args or resource template
+// variables so the SDK auto-installs completion/complete handling and
+// advertises the `completions` capability. Re-exported here so consumers
+// don't need a direct @modelcontextprotocol/sdk dependency.
+// ---------------------------------------------------------------------------
+
+export type { CompleteCallback } from '@modelcontextprotocol/sdk/server/completable.js';
+export { completable, isCompletable } from '@modelcontextprotocol/sdk/server/completable.js';
+export type { CompleteResourceTemplateCallback } from '@modelcontextprotocol/sdk/server/mcp.js';

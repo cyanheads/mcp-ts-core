@@ -6,11 +6,7 @@
  * @module src/testing/index
  */
 
-import type {
-  CreateMessageResult,
-  ElicitResult,
-  SamplingMessage,
-} from '@modelcontextprotocol/sdk/types.js';
+import type { ElicitResult } from '@modelcontextprotocol/sdk/types.js';
 import type { ZodType, z } from 'zod';
 import type {
   AuthContext,
@@ -18,7 +14,7 @@ import type {
   ContextLogger,
   ContextProgress,
   ContextState,
-  SamplingOpts,
+  ElicitFn,
 } from '@/core/context.js';
 import {
   attachTypedFail,
@@ -41,7 +37,12 @@ import type { ErrorContract } from '@/types-global/errors.js';
 export interface MockContextOptions {
   /** Auth context. */
   auth?: AuthContext;
-  /** Mock elicitation handler. */
+  /**
+   * Mock elicitation handler for form-mode elicitation. When provided, the
+   * mock context's `ctx.elicit` is set to this function with a default no-op
+   * `.url(...)` stub attached — tests that only exercise form-mode elicitation
+   * don't need to supply `.url` explicitly.
+   */
   elicit?: (message: string, schema: z.ZodObject<z.ZodRawShape>) => Promise<ElicitResult>;
   /**
    * Error contract to attach a typed `ctx.fail` against. Pass the definition's
@@ -62,8 +63,6 @@ export interface MockContextOptions {
   progress?: boolean;
   /** Request ID override. Defaults to 'test-request-id'. */
   requestId?: string;
-  /** Mock sampling handler. */
-  sample?: (messages: SamplingMessage[], opts?: SamplingOpts) => Promise<CreateMessageResult>;
   /**
    * HTTP session ID. Defaults to undefined. Set to exercise handlers that
    * branch on `ctx.sessionId` — mirrors what a stateful HTTP request would
@@ -233,15 +232,6 @@ function createMockProgress(): ContextProgress & {
  * // With tenant (for tools that use ctx.state)
  * const ctx = createMockContext({ tenantId: 'test-tenant' });
  *
- * // With sampling capability
- * const ctx = createMockContext({
- *   sample: vi.fn().mockResolvedValue({
- *     role: 'assistant',
- *     content: { type: 'text', text: 'Response' },
- *     model: 'test',
- *   }),
- * });
- *
  * // With task progress
  * const ctx = createMockContext({ progress: true });
  * ```
@@ -253,6 +243,17 @@ export function createMockContext(options: MockContextOptions = {}): Context {
 
   const enrichmentStore = createEnrichmentStore();
 
+  // Wrap the caller's elicit mock into an ElicitFn so that tests calling
+  // ctx.elicit.url(...) don't throw TypeError. The default url stub returns a
+  // cancelled result and can be overridden by casting the mock to ElicitFn.
+  let elicit: ElicitFn | undefined;
+  if (options.elicit) {
+    const base = options.elicit as ElicitFn;
+    base.url = async (_message: string, _url: string): Promise<ElicitResult> =>
+      ({ action: 'cancel' }) as ElicitResult;
+    elicit = base;
+  }
+
   const ctx: Context = {
     requestId: options.requestId ?? 'test-request-id',
     timestamp: new Date().toISOString(),
@@ -262,8 +263,7 @@ export function createMockContext(options: MockContextOptions = {}): Context {
     tenantId: options.tenantId,
     sessionId: options.sessionId,
     auth: options.auth,
-    elicit: options.elicit,
-    sample: options.sample,
+    elicit,
     notifyPromptListChanged: options.notifyPromptListChanged,
     notifyResourceListChanged: options.notifyResourceListChanged,
     notifyResourceUpdated: options.notifyResourceUpdated,

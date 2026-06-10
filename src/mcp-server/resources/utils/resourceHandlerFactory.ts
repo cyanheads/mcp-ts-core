@@ -7,14 +7,18 @@
 import type { RequestHandlerExtra } from '@modelcontextprotocol/sdk/shared/protocol.js';
 import type { Variables } from '@modelcontextprotocol/sdk/shared/uriTemplate.js';
 import type {
+  ElicitRequestFormParams,
+  ElicitRequestURLParams,
+  ElicitResult,
   ReadResourceResult,
   ServerNotification,
   ServerRequest,
 } from '@modelcontextprotocol/sdk/types.js';
 import type { ZodObject, ZodRawShape } from 'zod';
+import { toJSONSchema } from 'zod';
 
 import { config } from '@/config/index.js';
-import type { Context, SamplingOpts } from '@/core/context.js';
+import type { ElicitFn } from '@/core/context.js';
 import { attachTypedFail, createContext } from '@/core/context.js';
 import { buildRequestScopedNotifiers } from '@/mcp-server/notifications.js';
 import type { AnyResourceDefinition } from '@/mcp-server/resources/utils/resourceDefinition.js';
@@ -32,11 +36,6 @@ import { requestContextService } from '@/utils/internal/requestContext.js';
 
 type SdkExtra = RequestHandlerExtra<ServerRequest, ServerNotification>;
 
-interface SdkRuntimeCapabilities {
-  createMessage?: (params: Record<string, unknown>) => Promise<unknown>;
-  elicitInput?: (params: { message: string; requestedSchema: unknown }) => Promise<unknown>;
-}
-
 /** Services required by the handler factory to construct Context. */
 export interface ResourceHandlerFactoryServices {
   /**
@@ -52,7 +51,7 @@ export interface ResourceHandlerFactoryServices {
 
 /**
  * Per-server notifier closures bound at registration time, targeting
- * `server.send*ListChanged()`.
+ * `server.send*ListChanged()` and `server.server.elicitInput(...)`.
  *
  * Split from {@link ResourceHandlerFactoryServices} so each per-request
  * McpServer gets its own notifier closures — preventing a concurrent
@@ -61,8 +60,17 @@ export interface ResourceHandlerFactoryServices {
  * The resource handler factory prefers request-scoped notifiers
  * ({@link buildRequestScopedNotifiers}, #135) and uses these only as a fallback
  * when the SDK extra exposes no sender (e.g. a non-request test scope).
+ *
+ * `elicitInput` and `getClientCapabilities` are bound at registration time to
+ * the per-server `Server` instance so `wrapElicit` can gate `ctx.elicit` on
+ * the client's advertised capability and forward elicitation requests on the
+ * wire.
  */
 export interface ResourceHandlerNotifiers {
+  /** Bound to `server.server.elicitInput.bind(server.server)`. */
+  elicitInput?: (params: ElicitRequestFormParams | ElicitRequestURLParams) => Promise<ElicitResult>;
+  /** Bound to `server.server.getClientCapabilities.bind(server.server)`. */
+  getClientCapabilities?: () => { elicitation?: unknown } | undefined;
   notifyPromptListChanged?: () => void;
   notifyResourceListChanged?: () => void;
   notifyResourceUpdated?: (uri: string) => void;
@@ -102,18 +110,30 @@ function defaultResponseFormatter(
 // Capability detection helpers
 // ---------------------------------------------------------------------------
 
-function wrapElicit(sdkContext: SdkRuntimeCapabilities): Context['elicit'] {
-  if (typeof sdkContext.elicitInput !== 'function') return;
-  const fn = sdkContext.elicitInput;
-  return (msg: string, schema: ZodObject<ZodRawShape>) =>
-    fn({ message: msg, requestedSchema: schema }) as ReturnType<NonNullable<Context['elicit']>>;
-}
+/**
+ * Builds `ctx.elicit` from the notifiers bound at registration time.
+ * Returns `undefined` when elicitInput was not bound or the client did not
+ * advertise the elicitation capability.
+ * See toolHandlerFactory.wrapElicit for the full contract description.
+ */
+function wrapElicit(notifiers: ResourceHandlerNotifiers): ElicitFn | undefined {
+  const { elicitInput, getClientCapabilities } = notifiers;
+  if (typeof elicitInput !== 'function') return;
+  if (!getClientCapabilities?.()?.elicitation) return;
 
-function wrapSample(sdkContext: SdkRuntimeCapabilities): Context['sample'] {
-  if (typeof sdkContext.createMessage !== 'function') return;
-  const fn = sdkContext.createMessage;
-  return (msgs: Parameters<NonNullable<Context['sample']>>[0], opts?: SamplingOpts) =>
-    fn({ messages: msgs, ...opts }) as ReturnType<NonNullable<Context['sample']>>;
+  const formFn = (msg: string, schema: ZodObject<ZodRawShape>): Promise<ElicitResult> => {
+    const requestedSchema = toJSONSchema(schema) as ElicitRequestFormParams['requestedSchema'];
+    return elicitInput({ message: msg, requestedSchema });
+  };
+
+  const urlFn = (msg: string, url: string): Promise<ElicitResult> => {
+    const elicitationId = crypto.randomUUID();
+    return elicitInput({ mode: 'url', message: msg, elicitationId, url });
+  };
+
+  const elicitFn = formFn as ElicitFn;
+  elicitFn.url = urlFn;
+  return elicitFn;
 }
 
 // ---------------------------------------------------------------------------
@@ -142,7 +162,6 @@ export function createResourceHandler(
 
   return async (uri, variables, callContext): Promise<ReadResourceResult> => {
     const sdkContext = callContext as unknown as SdkExtra;
-    const sdkCaps = callContext as unknown as SdkRuntimeCapabilities;
 
     // Route handler-time list-changed / resource-updated notifications through
     // this request's `extra.sendNotification` so they carry `relatedRequestId`
@@ -203,8 +222,7 @@ export function createResourceHandler(
           storage: services.storage,
           signal: sdkContext.signal,
           sessionId: handlerSessionId,
-          elicit: wrapElicit(sdkCaps),
-          sample: wrapSample(sdkCaps),
+          elicit: wrapElicit(notifiers),
           notifyPromptListChanged: effectiveNotifiers.notifyPromptListChanged,
           notifyResourceListChanged: effectiveNotifiers.notifyResourceListChanged,
           notifyResourceUpdated: effectiveNotifiers.notifyResourceUpdated,

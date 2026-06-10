@@ -207,23 +207,18 @@ describe('createMockContext fidelity', () => {
       expect(mock.signal.aborted).toBe(true);
     });
 
-    it('elicit/sample should pass through when provided', () => {
+    it('elicit should pass through when provided', () => {
       const elicit = vi.fn();
-      const sample = vi.fn();
 
       const real = makeRealContext({
         elicit: elicit as any,
-        sample: sample as any,
       });
       const mock = createMockContext({
         elicit: elicit as any,
-        sample: sample as any,
       });
 
       expect(real.elicit).toBe(elicit);
       expect(mock.elicit).toBe(elicit);
-      expect(real.sample).toBe(sample);
-      expect(mock.sample).toBe(sample);
     });
 
     it('uri should pass through when provided', () => {

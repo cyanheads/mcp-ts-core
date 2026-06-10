@@ -577,13 +577,6 @@ describe('createContext', () => {
       expect(ctx.elicit).toBeUndefined();
     });
 
-    it('should include sample when provided', () => {
-      const sample = vi.fn();
-      const ctx = createContext(makeDeps({ sample: sample as any }));
-
-      expect(ctx.sample).toBe(sample);
-    });
-
     it('should include uri when provided', () => {
       const uri = new URL('myscheme://item/123');
       const ctx = createContext(makeDeps({ uri }));

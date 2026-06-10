@@ -457,15 +457,15 @@ describe('createToolHandler', () => {
   });
 
   // -----------------------------------------------------------------------
-  // Capability detection (elicit / sample)
+  // Capability detection (elicit)
   // -----------------------------------------------------------------------
 
   describe('Capability detection', () => {
-    it('should wrap elicitInput when SDK context has it', async () => {
+    it('should define ctx.elicit when notifier has elicitInput and client advertises capability', async () => {
       let capturedCtx: any;
       const mockElicitInput = vi.fn(async () => ({
         action: 'accept' as const,
-        data: { format: 'json' },
+        content: { format: 'json' },
       }));
 
       const def = tool('elicit_tool', {
@@ -478,14 +478,20 @@ describe('createToolHandler', () => {
         },
       });
 
-      const handler = createToolHandler(def as AnyToolDefinition, services, notifiers);
-      await handler({}, createMockSdkContext({ elicitInput: mockElicitInput }));
+      const notifiersWithElicit: HandlerNotifiers = {
+        elicitInput: mockElicitInput,
+        getClientCapabilities: () => ({ elicitation: {} }),
+      };
+
+      const handler = createToolHandler(def as AnyToolDefinition, services, notifiersWithElicit);
+      await handler({}, createMockSdkContext());
 
       expect(capturedCtx.elicit).toBeDefined();
       expect(typeof capturedCtx.elicit).toBe('function');
+      expect(typeof capturedCtx.elicit.url).toBe('function');
     });
 
-    it('should leave elicit undefined when SDK context lacks elicitInput', async () => {
+    it('should leave ctx.elicit undefined when client does not advertise elicitation', async () => {
       let capturedCtx: any;
 
       const def = tool('no_elicit_tool', {
@@ -498,42 +504,47 @@ describe('createToolHandler', () => {
         },
       });
 
+      // elicitInput is bound but client does not advertise capability
+      const notifiersNoCapability: HandlerNotifiers = {
+        elicitInput: vi.fn(),
+        getClientCapabilities: () => ({}),
+      };
+
+      const handler = createToolHandler(def as AnyToolDefinition, services, notifiersNoCapability);
+      await handler({}, createMockSdkContext());
+
+      expect(capturedCtx.elicit).toBeUndefined();
+    });
+
+    it('should leave ctx.elicit undefined when notifiers lack elicitInput', async () => {
+      let capturedCtx: any;
+
+      const def = tool('bare_notifiers_tool', {
+        description: 'No elicitation binding.',
+        input: z.object({}),
+        output: z.object({ ok: z.boolean() }),
+        handler: (_input, ctx) => {
+          capturedCtx = ctx;
+          return { ok: true };
+        },
+      });
+
+      // Default notifiers — no elicitInput
       const handler = createToolHandler(def as AnyToolDefinition, services, notifiers);
       await handler({}, createMockSdkContext());
 
       expect(capturedCtx.elicit).toBeUndefined();
     });
 
-    it('should wrap createMessage when SDK context has it', async () => {
-      let capturedCtx: any;
-      const mockCreateMessage = vi.fn(async () => ({
-        role: 'assistant',
-        content: { type: 'text', text: 'hi' },
-        model: 'test',
+    it('should convert Zod schema to JSON Schema before sending (form-mode)', async () => {
+      const mockElicitInput = vi.fn<NonNullable<HandlerNotifiers['elicitInput']>>(async () => ({
+        action: 'accept' as const,
+        content: { format: 'csv' },
       }));
 
-      const def = tool('sample_tool', {
-        description: 'Uses sampling.',
-        input: z.object({}),
-        output: z.object({ ok: z.boolean() }),
-        handler: (_input, ctx) => {
-          capturedCtx = ctx;
-          return { ok: true };
-        },
-      });
-
-      const handler = createToolHandler(def as AnyToolDefinition, services, notifiers);
-      await handler({}, createMockSdkContext({ createMessage: mockCreateMessage }));
-
-      expect(capturedCtx.sample).toBeDefined();
-      expect(typeof capturedCtx.sample).toBe('function');
-    });
-
-    it('should leave sample undefined when SDK context lacks createMessage', async () => {
       let capturedCtx: any;
-
-      const def = tool('no_sample_tool', {
-        description: 'No sampling.',
+      const def = tool('elicit_schema_tool', {
+        description: 'Checks schema conversion.',
         input: z.object({}),
         output: z.object({ ok: z.boolean() }),
         handler: (_input, ctx) => {
@@ -542,10 +553,66 @@ describe('createToolHandler', () => {
         },
       });
 
-      const handler = createToolHandler(def as AnyToolDefinition, services, notifiers);
+      const notifiersWithElicit: HandlerNotifiers = {
+        elicitInput: mockElicitInput,
+        getClientCapabilities: () => ({ elicitation: {} }),
+      };
+
+      const handler = createToolHandler(def as AnyToolDefinition, services, notifiersWithElicit);
       await handler({}, createMockSdkContext());
 
-      expect(capturedCtx.sample).toBeUndefined();
+      // Call elicit with a Zod schema
+      const schema = z.object({
+        format: z.enum(['json', 'csv']).describe('Output format'),
+      });
+      await capturedCtx.elicit('Choose format', schema);
+
+      expect(mockElicitInput).toHaveBeenCalledOnce();
+      const [firstCall] = mockElicitInput.mock.calls;
+      const params = firstCall![0] as any;
+      // requestedSchema must be a plain JSON Schema object, NOT a ZodObject
+      expect(params.requestedSchema).toBeDefined();
+      expect(typeof params.requestedSchema).toBe('object');
+      expect(params.requestedSchema).not.toHaveProperty('_def'); // ZodObject internals
+      expect(params.requestedSchema.type).toBe('object'); // Valid JSON Schema
+      expect(params.message).toBe('Choose format');
+    });
+
+    it('should attach .url() helper that sends url-mode params with a generated elicitationId', async () => {
+      const mockElicitInput = vi.fn<NonNullable<HandlerNotifiers['elicitInput']>>(async () => ({
+        action: 'accept' as const,
+      }));
+
+      let capturedCtx: any;
+      const def = tool('url_elicit_tool', {
+        description: 'Tests url-mode elicitation.',
+        input: z.object({}),
+        output: z.object({ ok: z.boolean() }),
+        handler: (_input, ctx) => {
+          capturedCtx = ctx;
+          return { ok: true };
+        },
+      });
+
+      const notifiersWithElicit: HandlerNotifiers = {
+        elicitInput: mockElicitInput,
+        getClientCapabilities: () => ({ elicitation: {} }),
+      };
+
+      const handler = createToolHandler(def as AnyToolDefinition, services, notifiersWithElicit);
+      await handler({}, createMockSdkContext());
+
+      await capturedCtx.elicit.url('Please authorize', 'https://example.com/auth');
+
+      expect(mockElicitInput).toHaveBeenCalledOnce();
+      const [firstUrlCall] = mockElicitInput.mock.calls;
+      const params = firstUrlCall![0] as any;
+      expect(params.mode).toBe('url');
+      expect(params.message).toBe('Please authorize');
+      expect(params.url).toBe('https://example.com/auth');
+      // elicitationId is auto-generated
+      expect(typeof params.elicitationId).toBe('string');
+      expect(params.elicitationId.length).toBeGreaterThan(0);
     });
   });
 

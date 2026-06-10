@@ -7,12 +7,7 @@
  */
 
 import type { RequestTaskStore } from '@modelcontextprotocol/sdk/shared/protocol.js';
-import type {
-  CreateMessageResult,
-  ElicitResult,
-  ModelPreferences,
-  SamplingMessage,
-} from '@modelcontextprotocol/sdk/types.js';
+import type { ElicitResult } from '@modelcontextprotocol/sdk/types.js';
 import type { ZodObject, ZodRawShape, ZodType, z } from 'zod';
 
 import type { StorageService } from '@/storage/core/StorageService.js';
@@ -27,6 +22,38 @@ import type { AuthContext, RequestContext } from '@/utils/internal/requestContex
 
 // Re-export AuthContext so consumers can type against it from ./context
 export type { AuthContext };
+
+// ---------------------------------------------------------------------------
+// ElicitFn — callable + .url() method
+// ---------------------------------------------------------------------------
+
+/**
+ * The full elicitation surface on `ctx.elicit`. Callable as a function for
+ * form-mode elicitation (present `requestedSchema` to the client as a structured
+ * form), plus a `.url()` helper for URL-mode elicitation (send the user to an
+ * external URL and wait for their return).
+ *
+ * Present only when the connected client advertised the elicitation capability.
+ * Check for presence before calling: `if (ctx.elicit) { ... }`.
+ */
+export interface ElicitFn {
+  /**
+   * URL-mode elicitation. Directs the user to an external URL (an authorization
+   * link, hosted form, etc.) and returns an `ElicitResult` when the client
+   * signals completion. `content` is absent on URL-mode results — only `action`
+   * is meaningful.
+   *
+   * An `elicitationId` is generated automatically.
+   */
+  url(message: string, url: string): Promise<ElicitResult>;
+  /**
+   * Form-mode elicitation. Presents a structured form to the user from the
+   * provided Zod schema and returns an `ElicitResult` when the user responds.
+   * The schema is converted to the MCP elicitation spec's restricted flat JSON
+   * Schema form before being sent on the wire.
+   */
+  (message: string, schema: ZodObject<ZodRawShape>): Promise<ElicitResult>;
+}
 
 // ---------------------------------------------------------------------------
 // Sub-interfaces
@@ -86,15 +113,6 @@ export interface ContextProgress {
   update(message: string): Promise<void>;
 }
 
-/** Options for sampling requests. */
-export interface SamplingOpts {
-  includeContext?: 'none' | 'thisServer' | 'allServers';
-  maxTokens?: number;
-  modelPreferences?: ModelPreferences;
-  stopSequences?: string[];
-  temperature?: number;
-}
-
 // ---------------------------------------------------------------------------
 // Context
 // ---------------------------------------------------------------------------
@@ -108,10 +126,12 @@ export interface Context {
   readonly auth?: AuthContext | undefined;
 
   // --- Protocol capabilities (optional — not all clients support these) ---
-  /** Ask the human user a question. Present when client supports elicitation. */
-  readonly elicit?:
-    | ((message: string, schema: z.ZodObject<z.ZodRawShape>) => Promise<ElicitResult>)
-    | undefined;
+  /**
+   * Ask the human user a question. Present when the connected client advertised
+   * the elicitation capability. Call the function for form-mode elicitation, or
+   * use `.url(message, url)` for URL-mode elicitation.
+   */
+  readonly elicit?: ElicitFn | undefined;
 
   // --- Contract-bound resolvers (always present; no-op when no contract) ---
   /**
@@ -168,10 +188,6 @@ export interface Context {
   // --- Identity & tracing ---
   /** Unique request ID for log correlation. */
   readonly requestId: string;
-  /** Request LLM completion from the client. Present when client supports sampling. */
-  readonly sample?:
-    | ((messages: SamplingMessage[], opts?: SamplingOpts) => Promise<CreateMessageResult>)
-    | undefined;
   /**
    * HTTP session ID — the value of the `Mcp-Session-Id` header (or a
    * server-minted ID for new sessions) when the request carries a durable
@@ -571,13 +587,12 @@ export function readEnrichmentStore(ctx: Context): EnrichmentStore | undefined {
 /** @internal */
 export interface ContextDeps {
   appContext: RequestContext;
-  elicit?: Context['elicit'];
+  elicit?: ElicitFn | undefined;
   logger: Logger;
   notifyPromptListChanged?: Context['notifyPromptListChanged'];
   notifyResourceListChanged?: Context['notifyResourceListChanged'];
   notifyResourceUpdated?: Context['notifyResourceUpdated'];
   notifyToolListChanged?: Context['notifyToolListChanged'];
-  sample?: Context['sample'];
   /**
    * HTTP session ID. Forwarded onto `Context.sessionId` as-is. Caller is
    * responsible for the durability gate (stateful mode / opt-in) — by the
@@ -637,7 +652,6 @@ export function createContext(deps: ContextDeps): Context {
     spanId: appContext.spanId as string | undefined,
     auth: appContext.auth,
     elicit: deps.elicit,
-    sample: deps.sample,
     notifyPromptListChanged: deps.notifyPromptListChanged,
     notifyResourceListChanged: deps.notifyResourceListChanged,
     notifyResourceUpdated: deps.notifyResourceUpdated,

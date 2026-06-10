@@ -254,10 +254,9 @@ describe('createResourceHandler', () => {
       expect(capturedTenant).toBe('default');
     });
 
-    it('should wire elicit/sample from SDK context when available', async () => {
+    it('should wire ctx.elicit when notifiers provide elicitInput and client advertises capability', async () => {
       let capturedCtx: any;
-      const mockElicit = vi.fn();
-      const mockCreate = vi.fn();
+      const mockElicitInput = vi.fn(async () => ({ action: 'accept' as const, content: {} }));
 
       const def = resource('cap://{id}', {
         description: 'Capability test.',
@@ -267,15 +266,47 @@ describe('createResourceHandler', () => {
         },
       });
 
-      const handler = createResourceHandler(def as AnyResourceDefinition, services, notifiers);
-      await handler(
-        new URL('cap://x'),
-        { id: 'x' },
-        createMockSdkContext({ elicitInput: mockElicit, createMessage: mockCreate }),
+      const notifiersWithElicit: ResourceHandlerNotifiers = {
+        elicitInput: mockElicitInput,
+        getClientCapabilities: () => ({ elicitation: {} }),
+      };
+
+      const handler = createResourceHandler(
+        def as AnyResourceDefinition,
+        services,
+        notifiersWithElicit,
       );
+      await handler(new URL('cap://x'), { id: 'x' }, createMockSdkContext());
 
       expect(capturedCtx.elicit).toBeDefined();
-      expect(capturedCtx.sample).toBeDefined();
+      expect(typeof capturedCtx.elicit).toBe('function');
+      expect(typeof capturedCtx.elicit.url).toBe('function');
+    });
+
+    it('should leave ctx.elicit undefined when client does not advertise elicitation', async () => {
+      let capturedCtx: any;
+
+      const def = resource('nocap://{id}', {
+        description: 'No capability.',
+        handler: (_params, ctx) => {
+          capturedCtx = ctx;
+          return {};
+        },
+      });
+
+      const notifiersNoCapability: ResourceHandlerNotifiers = {
+        elicitInput: vi.fn(),
+        getClientCapabilities: () => ({}),
+      };
+
+      const handler = createResourceHandler(
+        def as AnyResourceDefinition,
+        services,
+        notifiersNoCapability,
+      );
+      await handler(new URL('nocap://x'), { id: 'x' }, createMockSdkContext());
+
+      expect(capturedCtx.elicit).toBeUndefined();
     });
   });
 

@@ -8,7 +8,6 @@
 import { createApp } from '@cyanheads/mcp-ts-core';
 import { asyncCountdownTool } from './mcp-server/tools/definitions/template-async-countdown.tool.js';
 import { catFactTool } from './mcp-server/tools/definitions/template-cat-fact.tool.js';
-import { codeReviewSamplingTool } from './mcp-server/tools/definitions/template-code-review-sampling.tool.js';
 import { dataExplorerAppTool } from './mcp-server/tools/definitions/template-data-explorer.app-tool.js';
 import { echoTool } from './mcp-server/tools/definitions/template-echo-message.tool.js';
 import { imageTestTool } from './mcp-server/tools/definitions/template-image-test.tool.js';
@@ -22,7 +21,6 @@ await createApp({
   version: '0.1.0',
   tools: [
     catFactTool,
-    codeReviewSamplingTool,
     echoTool,
     imageTestTool,
     madlibsElicitationTool,
