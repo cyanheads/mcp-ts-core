@@ -4,7 +4,7 @@ description: >
   Scaffold a new service integration. Use when the user asks to add a service, integrate an external API, or create a reusable domain module with its own initialization and state.
 metadata:
   author: cyanheads
-  version: "1.7"
+  version: "1.8"
   audience: external
   type: reference
 ---
@@ -13,7 +13,7 @@ metadata:
 
 Services use the init/accessor pattern: initialized once in `createApp`'s `setup()` callback, then accessed at request time via a lazy getter. Each service lives in `src/services/[domain]/` with an init function and accessor.
 
-Service methods receive `Context` for correlated logging (`ctx.log`) and tenant-scoped storage (`ctx.state`). Convention: `ctx.elicit` and `ctx.sample` should only be called from tool handlers, not from services.
+Service methods receive `Context` for correlated logging (`ctx.log`) and tenant-scoped storage (`ctx.state`). Convention: `ctx.elicit` should only be called from tool handlers, not from services.
 
 For the full service pattern, `CoreServices`, and `Context` interface, read the framework's `CLAUDE.md`/`AGENTS.md` (loaded at session start).
 

@@ -4,7 +4,7 @@ description: >
   Reference for core and server configuration in `@cyanheads/mcp-ts-core`. Covers env var tables with defaults, priority order, server-specific Zod schema pattern, and Workers lazy-parsing requirement.
 metadata:
   author: cyanheads
-  version: "1.6"
+  version: "1.7"
   audience: external
   type: reference
 ---
@@ -23,7 +23,7 @@ Managed by `@cyanheads/mcp-ts-core`. Validated via Zod from environment variable
 
 **Priority (highest to lowest):**
 
-1. `name`/`version` overrides passed to `createApp()` or `createWorkerHandler()`
+1. `name`/`version`/`title`/`websiteUrl`/`description`/`icons` options passed to `createApp()` or `createWorkerHandler()`
 2. Environment variables
 3. `package.json` fields
 
@@ -35,9 +35,18 @@ Managed by `@cyanheads/mcp-ts-core`. Validated via Zod from environment variable
 |:--------|:-----------------|:--------|:------|
 | `MCP_SERVER_NAME` | `mcpServerName` | `package.json` `name` | Overrides package name |
 | `MCP_SERVER_VERSION` | `mcpServerVersion` | `package.json` `version` | Overrides package version |
-| `MCP_SERVER_DESCRIPTION` | `mcpServerDescription` | `package.json` `description` | Optional |
+| `MCP_SERVER_DESCRIPTION` | `mcpServerDescription` | `package.json` `description` | Optional; `createApp({ description })` wins when set |
 | `PACKAGE_NAME` | `pkg.name` | `package.json` `name` | Rarely needed |
 | `PACKAGE_VERSION` | `pkg.version` | `package.json` `version` | Rarely needed |
+
+**SDK identity fields** (API-only, no env var equivalent — passed to `createApp()` / `createWorkerHandler()`, forwarded to `initialize` and `/.well-known/mcp.json`):
+
+| Option | Type | Notes |
+|:-------|:-----|:------|
+| `title` | `string?` | Human-readable display name shown in client listings |
+| `websiteUrl` | `string?` | Canonical homepage / repository URL |
+| `description` | `string?` | One-line description; wins over `MCP_SERVER_DESCRIPTION` when set |
+| `icons` | `Implementation['icons']?` | Array of icon objects: `{ src, mimeType?, sizes?: string[], theme?: 'light'\|'dark' }` |
 | `NODE_ENV` | `environment` | `development` | Aliases: `dev`→`development`, `prod`→`production`, `test`→`testing` |
 | `MCP_LOG_LEVEL` | `logLevel` | `debug` | Aliases: `warn`→`warning`, `err`→`error`, `fatal`/`silent`→`emerg`, `trace`→`debug`, `information`→`info` |
 | `LOGS_DIR` | `logsPath` | `<project-root>/logs` | Node.js only; absolute or relative to project root |

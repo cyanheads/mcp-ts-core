@@ -5,7 +5,7 @@
 
 <div align="center">
 
-[![Version](https://img.shields.io/badge/Version-0.10.2-blue.svg?style=flat-square)](./CHANGELOG.md) [![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg?style=flat-square)](./LICENSE) [![MCP Spec](https://img.shields.io/badge/MCP%20Spec-2025--11--25-8A2BE2.svg?style=flat-square)](https://github.com/modelcontextprotocol/modelcontextprotocol/blob/main/docs/specification/2025-11-25/changelog.mdx)
+[![Version](https://img.shields.io/badge/Version-0.10.3-blue.svg?style=flat-square)](./CHANGELOG.md) [![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg?style=flat-square)](./LICENSE) [![MCP Spec](https://img.shields.io/badge/MCP%20Spec-2025--11--25-8A2BE2.svg?style=flat-square)](https://github.com/modelcontextprotocol/modelcontextprotocol/blob/main/docs/specification/2025-11-25/changelog.mdx)
 
 [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^1.29.0-green.svg?style=flat-square)](https://modelcontextprotocol.io/) [![TypeScript](https://img.shields.io/badge/TypeScript-^6.0.3-3178C6.svg?style=flat-square)](https://www.typescriptlang.org/) [![Bun](https://img.shields.io/badge/Bun-v1.3.0%2B-blueviolet.svg?style=flat-square)](https://bun.sh/)
 
@@ -138,7 +138,8 @@ It also works on Cloudflare Workers with `createWorkerHandler()` — same defini
 
 - **Declarative definitions** — `tool()`, `resource()`, `prompt()` builders with Zod schemas; `appTool()`/`appResource()` add interactive HTML UIs.
 - **Server-level orientation** — `instructions` on `createApp`/`createWorkerHandler` rides every `initialize` for the model. Cross-tool composition hints, regional notes, scope guidance — without leaking text into every tool description.
-- **Unified Context** — one `ctx` for logging, tenant-scoped storage, elicitation, sampling, cancellation, and task progress.
+- **Server identity** — optional `title`, `websiteUrl`, `description`, `icons` (SEP-973) on `createApp`/`createWorkerHandler` flow to `initialize` serverInfo, the `/.well-known/mcp.json` server card, and the landing page.
+- **Unified Context** — one `ctx` for logging, tenant-scoped storage, elicitation, cancellation, and task progress.
 - **Auth** — `auth: ['scope']` on definitions, checked before dispatch (no wrapper code). Modes: `none`, `jwt`, or `oauth` (local secret or JWKS).
 - **Task tools** — `task: true` for long-running ops; framework manages create/poll/progress/complete/cancel.
 - **Definition linter** — validates names, schemas, auth scopes, annotations, format-parity, and cross-vendor JSON Schema portability at build time. Run via `lint:mcp` or `devcheck` — not invoked at server startup.
@@ -216,8 +217,7 @@ Handlers receive a unified `Context` object:
 |:---------|:-----|:------------|
 | `ctx.log` | `ContextLogger` | Request-scoped logger (auto-correlates requestId, traceId, tenantId) |
 | `ctx.state` | `ContextState` | Tenant-scoped key-value storage |
-| `ctx.elicit` | `Function?` | Ask the user for input (when client supports it) |
-| `ctx.sample` | `Function?` | Request LLM completion from the client |
+| `ctx.elicit` | `ElicitFn?` | Ask the user for input — form schema, or `.url()` for an external link (when client supports it) |
 | `ctx.fail` | `(reason, msg?, data?) => McpError` | Typed error throw — reason checked against `errors[]` contract at compile time |
 | `ctx.signal` | `AbortSignal` | Cancellation signal |
 | `ctx.notifyResourceUpdated` | `Function?` | Notify subscribed clients a resource changed |
@@ -254,7 +254,6 @@ The `examples/` directory contains a reference server consuming core through pub
 | `template_echo_message` | Basic tool with `format`, `auth` |
 | `template_cat_fact` | External API call, error factories |
 | `template_madlibs_elicitation` | `ctx.elicit` for interactive input |
-| `template_code_review_sampling` | `ctx.sample` for LLM completion |
 | `template_image_test` | Image content blocks |
 | `template_async_countdown` | `task: true` with `ctx.progress` |
 | `template_data_explorer` | MCP Apps with linked UI resource via `appTool()`/`appResource()` builders |
@@ -270,7 +269,7 @@ const input = myTool.input.parse({ query: 'test' });
 const result = await myTool.handler(input, ctx);
 ```
 
-`createMockContext()` provides stubbed `log`, `state`, and `signal`. Pass `{ tenantId }` for state operations, `{ sample }` for LLM mocking, `{ elicit }` for elicitation mocking, `{ progress: true }` for task tools.
+`createMockContext()` provides stubbed `log`, `state`, and `signal`. Pass `{ tenantId }` for state operations, `{ elicit }` for elicitation mocking, `{ progress: true }` for task tools.
 
 ### Fuzz testing
 

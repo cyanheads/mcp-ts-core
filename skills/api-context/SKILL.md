@@ -1,17 +1,17 @@
 ---
 name: api-context
 description: >
-  Canonical reference for the unified `Context` object passed to every tool and resource handler in `@cyanheads/mcp-ts-core`. Covers the full interface, all sub-APIs (`ctx.log`, `ctx.state`, `ctx.elicit`, `ctx.sample`, `ctx.progress`, `ctx.enrich`), and when to use each.
+  Canonical reference for the unified `Context` object passed to every tool and resource handler in `@cyanheads/mcp-ts-core`. Covers the full interface, all sub-APIs (`ctx.log`, `ctx.state`, `ctx.elicit`, `ctx.progress`, `ctx.enrich`), and when to use each.
 metadata:
   author: cyanheads
-  version: "1.7"
+  version: "1.8"
   audience: external
   type: reference
 ---
 
 ## Overview
 
-Every tool and resource handler receives a single `Context` (`ctx`) argument. It provides request identity, structured logging, tenant-scoped storage, optional protocol capabilities (elicitation, sampling), cancellation, and task progress — all auto-correlated to the current request.
+Every tool and resource handler receives a single `Context` (`ctx`) argument. It provides request identity, structured logging, tenant-scoped storage, optional protocol capabilities (elicitation), cancellation, and task progress — all auto-correlated to the current request.
 
 The framework auto-instruments every handler call (OTel span, duration, payload metrics). Use `ctx.log` for domain-specific logging and `ctx.state` for storage inside handlers. Use the global `logger` and `StorageService` directly only in lifecycle/background code (`setup()`, services).
 
@@ -39,8 +39,7 @@ interface Context {
   readonly state: ContextState;
 
   // Optional protocol capabilities (undefined when client doesn't support them)
-  readonly elicit?: (message: string, schema: z.ZodObject<z.ZodRawShape>) => Promise<ElicitResult>;
-  readonly sample?: (messages: SamplingMessage[], opts?: SamplingOpts) => Promise<CreateMessageResult>;
+  readonly elicit?: ElicitFn; // callable (message, schema) for form mode + .url(message, url) — see § ctx.elicit
 
   // List-changed / resource-updated notifications — wired in every handler ctx;
   // delivery is request-scoped (see § list-changed notifications)
@@ -254,9 +253,11 @@ await ctx.state.set(sessionKey, value);
 
 ---
 
-## `ctx.elicit` / `ctx.sample`
+## `ctx.elicit`
 
-Both are optional — `undefined` when the connected client doesn't support the capability. Check for presence before calling. A simple truthiness check is enough; no type guards needed.
+Optional — `undefined` when the connected client doesn't advertise the `elicitation` capability (checked per request, after the initialize handshake). Check for presence before calling. A simple truthiness check is enough; no type guards needed.
+
+`ctx.elicit` is an `ElicitFn` (exported from the main entry): directly callable for form-mode elicitation, with a `.url(message, url)` method for URL-mode. On the wire, the Zod schema is converted to the restricted flat JSON Schema the MCP spec requires — handlers never deal with that detail.
 
 ### `ctx.elicit` — ask the user for structured input
 
@@ -295,37 +296,23 @@ interface ElicitResult {
 
 > **Note:** `content` is not typed against the Zod schema you pass — it is a `Record` of primitives. Validate `content` against your schema manually (e.g. `MySchema.parse(result.content)`) when `action === 'accept'`.
 
-**Convention:** Only call `ctx.elicit` from tool handlers, not from services.
+### `ctx.elicit.url` — hand the user an external link
 
-### `ctx.sample` — request an LLM completion from the client
-
-Requests a completion from the client's LLM via the MCP sampling protocol. Useful for AI-assisted tool behavior without managing a separate LLM provider.
+URL-mode elicitation (MCP 2025-11-25): instead of an inline form, the client directs the user to an external URL — authorization flows, hosted forms. The framework generates the protocol-required `elicitationId` internally.
 
 ```ts
-if (ctx.sample) {
-  const result = await ctx.sample(
-    [
-      { role: 'user', content: { type: 'text', text: `Summarize: ${data}` } },
-    ],
-    { maxTokens: 500 },
+if (ctx.elicit) {
+  const result = await ctx.elicit.url(
+    'Authorize access to your account',
+    'https://example.com/oauth/authorize?state=...',
   );
-  return { summary: result.content.text };
+  if (result.action !== 'accept') throw forbidden('Authorization declined');
 }
 ```
 
-`SamplingOpts`:
+`result.content` is absent in URL mode — the interaction completes out-of-band; only `action` reports the outcome.
 
-```ts
-interface SamplingOpts {
-  includeContext?: 'none' | 'thisServer' | 'allServers';
-  maxTokens?: number;
-  modelPreferences?: ModelPreferences;
-  stopSequences?: string[];
-  temperature?: number;
-}
-```
-
-**Convention:** Only call `ctx.sample` from tool handlers, not from services.
+**Convention:** Only call `ctx.elicit` from tool handlers, not from services.
 
 ---
 
@@ -666,7 +653,6 @@ See `add-tool`'s **Tool Response Design** and `skills/api-linter` (`enrichment-*
 | `ctx.signal` | `AbortSignal` | Always |
 | `ctx.enrich` | `Enrich` | Always; typed on `HandlerContext<R, E>` when an `enrichment` block is declared |
 | `ctx.elicit` | `function \| undefined` | Client supports elicitation |
-| `ctx.sample` | `function \| undefined` | Client supports sampling |
 | `ctx.notifyResourceListChanged` | `function \| undefined` | Always in handler ctx; delivery request-scoped (see [§ list-changed notifications](#list-changed-notifications-ctxnotify)) |
 | `ctx.notifyResourceUpdated` | `function \| undefined` | Always in handler ctx; delivery request-scoped |
 | `ctx.notifyPromptListChanged` | `function \| undefined` | Always in handler ctx; delivery request-scoped |

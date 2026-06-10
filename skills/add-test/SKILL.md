@@ -4,7 +4,7 @@ description: >
   Scaffold a test file for an existing tool, resource, or service. Use when the user asks to add tests, improve coverage, or when a definition exists without a matching test file.
 metadata:
   author: cyanheads
-  version: "1.3"
+  version: "1.4"
   audience: external
   type: reference
 ---
@@ -36,7 +36,7 @@ Read the handler and identify:
 | **Input variations** | Optional fields omitted, defaults applied, boundary values |
 | **Error paths** | Invalid state, missing resources, service failures → correct error thrown |
 | **`ctx.state` usage** | Use `createMockContext({ tenantId: 'test' })` to enable storage |
-| **`ctx.elicit` / `ctx.sample`** | Mock with `vi.fn()`, also test the absent case (undefined) |
+| **`ctx.elicit`** | Mock with `vi.fn()`, also test the absent case (undefined) |
 | **`ctx.progress`** | Use `createMockContext({ progress: true })` for task tools |
 | **`ctx.fail` (typed contract)** | Definitions with `errors[]` need `fail` attached to the mock ctx — `createMockContext({ errors: myTool.errors })` does it for you. Assert on `data.reason` (stable per-contract entry), not just `code`. |
 | **`format` function** | Test separately if defined — it's pure, no ctx needed. Verify it renders the IDs and fields the model needs, not just a count or title. For projection-style tools, test non-default field selections. |
@@ -286,7 +286,7 @@ When scaffolding tests for an existing handler, use the Zod schemas to generate 
 - [ ] Happy path tested with valid input → expected output
 - [ ] Error paths tested (at least one `.rejects.toThrow()`)
 - [ ] `format` function tested if defined
-- [ ] `createMockContext` options match handler's ctx usage (`tenantId`, `progress`, `elicit`, `sample`)
+- [ ] `createMockContext` options match handler's ctx usage (`tenantId`, `progress`, `elicit`)
 - [ ] Service re-initialized in `beforeEach` if handler depends on a service singleton
 - [ ] If handler has optional fields: tested with empty-string inner values (form-client simulation)
 - [ ] If wrapping external API: sparse-payload case tested — fixture omits at least one optional upstream field; output still validates and `format()` renders uncertainty honestly instead of inventing values

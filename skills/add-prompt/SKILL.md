@@ -4,7 +4,7 @@ description: >
   Scaffold a new MCP prompt template. Use when the user asks to add a prompt, create a reusable message template, or define a prompt for LLM interactions.
 metadata:
   author: cyanheads
-  version: "1.2"
+  version: "1.3"
   audience: external
   type: reference
 ---
@@ -30,14 +30,18 @@ Prompts are pure message templates — no `Context`, no auth, no side effects. `
  * @module mcp-server/prompts/definitions/{{PROMPT_NAME}}
  */
 
-import { prompt, z } from '@cyanheads/mcp-ts-core';
+import { completable, prompt, z } from '@cyanheads/mcp-ts-core';
 
 export const {{PROMPT_EXPORT}} = prompt('{{prompt_name}}', {
   description: '{{PROMPT_DESCRIPTION}}',
+  // title is optional — human-readable display name surfaced in prompts/list.
+  // title: '{{PROMPT_DISPLAY_TITLE}}',
   // args is optional — omit entirely for prompts with no parameters.
   // When present, all fields need .describe(). Only JSON-Schema-serializable types allowed.
+  // Wrap any field with completable() to enable argument autocompletion.
   args: z.object({
     // All fields need .describe()
+    // language: completable(z.string().describe('Language'), async (partial) => matchingLanguages(partial)),
   }),
   generate: (args) => [
     {
@@ -92,13 +96,40 @@ If the repo already uses `src/mcp-server/prompts/definitions/index.ts`, add the 
 export { {{PROMPT_EXPORT}} } from './{{prompt-name}}.prompt.js';
 ```
 
+## Argument autocompletion
+
+Wrap any `args` field with `completable()` (re-exported from `@cyanheads/mcp-ts-core`) to enable argument autocompletion. The SDK auto-installs `completion/complete` handling and advertises the `completions` capability when any registered prompt has a completable argument — no other changes are needed.
+
+```typescript
+import { completable, prompt, z } from '@cyanheads/mcp-ts-core';
+
+export const codeReview = prompt('code_review', {
+  description: 'Review code for issues.',
+  title: 'Code Review',
+  args: z.object({
+    language: completable(
+      z.string().describe('Programming language'),
+      async (partial) => ['typescript', 'python', 'rust'].filter((l) => l.startsWith(partial)),
+    ),
+    code: z.string().describe('Code to review'),
+  }),
+  generate: (args) => [
+    { role: 'user', content: { type: 'text', text: `Review this ${args.language} code:\n${args.code}` } },
+  ],
+});
+```
+
+`completable()` is transparent to the linter — it does not affect `describe-on-fields` or `schema-serializable` rules. All completable-wrapped fields still require `.describe()` on the underlying schema.
+
 ## Checklist
 
 - [ ] File created at `src/mcp-server/prompts/definitions/{{prompt-name}}.prompt.ts`
 - [ ] Prompt name passed to `prompt()` uses snake_case
 - [ ] `description` field set (lint warns if absent, but `devcheck` won't hard-fail — verify it's present)
+- [ ] `title` field set if a human-readable display name is needed in `prompts/list`
 - [ ] All Zod `args` fields have `.describe()` annotations — or `args` omitted entirely for no-parameter prompts
 - [ ] `args` fields use only JSON-Schema-serializable Zod types (no `z.date()`, `z.transform()`, `z.bigint()`, `z.symbol()`, `z.custom()`, etc.)
+- [ ] If using `completable()`, the underlying schema still has `.describe()` on each wrapped field
 - [ ] JSDoc `@fileoverview` and `@module` header present
 - [ ] `generate` function present and returns at least one `{ role, content: { type: 'text', text } }` message
 - [ ] No side effects — prompts are pure templates

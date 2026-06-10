@@ -4,7 +4,7 @@ description: >
   Scaffold a new MCP resource definition. Use when the user asks to add a resource, expose data via URI, or create a readable endpoint.
 metadata:
   author: cyanheads
-  version: "1.3"
+  version: "1.4"
   audience: external
   type: reference
 ---
@@ -141,6 +141,29 @@ export const articleResource = resource('article://{pmid}', {
 
 Without `errors[]`, the handler receives plain `Context` (no `fail` method) and throws via error factories (`notFound`, `serviceUnavailable`, …) directly. The contract is opt-in. See `skills/api-errors/SKILL.md` for the full pattern, baseline codes, and conformance rules.
 
+### URI template variable completion
+
+Add a `complete` map to enable autocompletion for URI template variables. The SDK auto-installs `completion/complete` handling and advertises the `completions` capability when a registered resource template has completion callbacks — no other changes needed.
+
+```typescript
+import { resource, z } from '@cyanheads/mcp-ts-core';
+
+const ITEM_IDS = ['item-001', 'item-002', 'item-abc'];
+
+export const itemResource = resource('items://{itemId}', {
+  description: 'Retrieve an item by ID.',
+  params: z.object({ itemId: z.string().describe('Item identifier') }),
+  handler: (params) => ({ id: params.itemId }),
+  list: () => ({ resources: ITEM_IDS.map((id) => ({ uri: `items://${id}`, name: id })) }),
+  // Per-variable completion callbacks — keys must match URI template variable names.
+  complete: {
+    itemId: async (partial) => ITEM_IDS.filter((id) => id.startsWith(partial)),
+  },
+});
+```
+
+Only applies to templated resources (URI templates with `{variable}` syntax). Static URIs don't support completion.
+
 ### Other `resource()` options
 
 Beyond `description`, `params`, `handler`, and `list`, the builder also supports:
@@ -153,6 +176,7 @@ Beyond `description`, `params`, `handler`, and `list`, the builder also supports
 | `annotations` | Resource annotations (e.g., `audience`, `priority`) — see `ResourceAnnotations`. |
 | `title` | Human-readable display title (defaults to `name`). |
 | `examples` | Array of `{ name, uri }` example entries surfaced in `resources/list` for discoverability. |
+| `complete` | Per-variable completion callbacks for URI template variables. Keys match template variable names. Enables `completion/complete` and the `completions` capability. |
 
 ## Checklist
 

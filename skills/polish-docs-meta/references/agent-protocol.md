@@ -46,7 +46,7 @@ Compare the structure diagram against the actual directory layout. If it still r
 
 ### 4. Update the Context Table
 
-Review the `ctx` feature table. Remove rows for features the server doesn't use (e.g., `ctx.elicit`, `ctx.sample` if no tools call them). Add any custom context usage that's become important. The table should reflect what this server actually uses, not the full framework surface.
+Review the `ctx` feature table. Remove rows for features the server doesn't use (e.g., `ctx.elicit` if no tools call it). Add any custom context usage that's become important. The table should reflect what this server actually uses, not the full framework surface.
 
 ### 5. Update Server Config Example
 

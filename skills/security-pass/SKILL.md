@@ -1,10 +1,10 @@
 ---
 name: security-pass
 description: >
-  Review an MCP server for common security gaps: LLM-facing surfaces as injection vector (tools, resources, prompts, descriptions), scope blast radius, destructive ops without consent, upstream auth shape, input sinks (URL / path / roots / shell / sampling / schema strictness / ReDoS), tenant isolation, leakage through errors and telemetry, unbounded resources, and HTTP-mode deployment surface. Use before a release, after a batch of handler changes, or when the user asks for a security review, audit, or hardening pass. Produces grouped findings and a numbered options list.
+  Review an MCP server for common security gaps: LLM-facing surfaces as injection vector (tools, resources, prompts, descriptions), scope blast radius, destructive ops without consent, upstream auth shape, input sinks (URL / path / roots / shell / schema strictness / ReDoS), tenant isolation, leakage through errors and telemetry, unbounded resources, and HTTP-mode deployment surface. Use before a release, after a batch of handler changes, or when the user asks for a security review, audit, or hardening pass. Produces grouped findings and a numbered options list.
 metadata:
   author: cyanheads
-  version: "1.4"
+  version: "1.5"
   audience: external
   type: audit
 ---
@@ -44,7 +44,7 @@ find src/mcp-server/prompts/definitions -name "*.prompt.ts" 2>/dev/null | sort
 find src/services -maxdepth 1 -mindepth 1 -type d | sort
 ```
 
-Note: tool / resource / prompt counts, auth mode, storage provider, upstream APIs, which tools have `destructiveHint`, which handlers use `ctx.sample` or `ctx.elicit`, which services hold module-scope state, whether the server reads `roots`.
+Note: tool / resource / prompt counts, auth mode, storage provider, upstream APIs, which tools have `destructiveHint`, which handlers use `ctx.elicit`, which services hold module-scope state, whether the server reads `roots`.
 
 **If transport is streamable HTTP or SSE**, also capture:
 
@@ -162,9 +162,6 @@ grep -rnE "\b(exec|spawn|execSync|spawnSync)\b" src/
 # Merges — prototype pollution
 grep -rn "Object.assign\b\|structuredClone" src/
 
-# Sampling — LLM-generated content flowing back into server logic
-grep -rn "ctx.sample\|sampling/createMessage" src/
-
 # Roots — client-shared filesystem
 grep -rn "roots/list\|ctx.roots" src/
 
@@ -182,9 +179,7 @@ grep -rn "\.passthrough()\|\.catchall(" src/mcp-server/
 - User-JSON merges reject `__proto__`, `constructor`, `prototype` keys?
 - **Input schemas `.strict()`** — unknown fields rejected, not silently passed to downstream code that destructures with `...rest`?
 - **Output schemas without `.passthrough()` / `.catchall()`** — no accidental exfiltration of fields your schema didn't declare?
-- Sampling responses (`ctx.sample` result) treated as untrusted input — schema-validated before reaching any other sink, never concatenated into prompts, shells, or queries?
-
-**Smell:** `z.string().url()` with no allowlist; `readFile(input.path)` with no canonicalization; `await ctx.sample(...)` result interpolated into a shell, SQL, or URL.
+**Smell:** `z.string().url()` with no allowlist; `readFile(input.path)` with no canonicalization.
 
 #### Axis 6 — Tenant isolation
 
@@ -333,14 +328,14 @@ End with:
 ## Checklist
 
 - [ ] Scope confirmed (whole server / module / diff)
-- [ ] Map built: tools / resources / prompts, services, upstream APIs, auth mode, sampling / elicit / roots usage
+- [ ] Map built: tools / resources / prompts, services, upstream APIs, auth mode, elicit / roots usage
 - [ ] Deployment surface reviewed (if HTTP): bind address, Origin allowlist, session ID, unauth routes, auth-spec compliance
 - [ ] `fuzzTool` started in parallel
 - [ ] Axis 1 — LLM-facing surfaces (tool / resource / prompt output + descriptions) framed and static
 - [ ] Axis 2 — scope granularity audited
 - [ ] Axis 3 — destructive ops verified to elicit, elicit response schema-validated
 - [ ] Axis 4 — upstream auth + token passthrough reviewed
-- [ ] Axis 5 — input sinks (URL / path / roots / shell / proto / sampling / schema strictness / ReDoS) checked
+- [ ] Axis 5 — input sinks (URL / path / roots / shell / proto / schema strictness / ReDoS) checked
 - [ ] Axis 6 — tenant isolation: module-scope state swept
 - [ ] Axis 7 — leakage back: errors / outputs / `ctx.log` / `console.*` / telemetry / constant-time comparisons
 - [ ] Axis 8 — resource bounds on loops / retries / pagination / parse size+depth / per-tenant rate

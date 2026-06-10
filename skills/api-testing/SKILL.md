@@ -4,7 +4,7 @@ description: >
   Testing patterns for MCP tool/resource handlers using `createMockContext` and Vitest. Covers mock context options, handler testing, McpError assertions, format testing, Vitest config setup, and test isolation conventions.
 metadata:
   author: cyanheads
-  version: "1.2"
+  version: "1.3"
   audience: external
   type: reference
 ---
@@ -27,7 +27,6 @@ import { createMockContext } from '@cyanheads/mcp-ts-core/testing';
 createMockContext()                                           // minimal — ctx.state operations throw without tenantId
 createMockContext({ tenantId: 'test-tenant' })               // enables ctx.state (tenant-scoped in-memory storage)
 createMockContext({ errors: myTool.errors })                 // attaches typed ctx.fail keyed by the contract reasons
-createMockContext({ sample: vi.fn().mockResolvedValue(...) }) // with MCP sampling
 createMockContext({ elicit: vi.fn().mockResolvedValue(...) }) // with elicitation
 createMockContext({ progress: true })                        // with task progress (ctx.progress populated)
 createMockContext({ requestId: 'my-id' })                    // override request ID (default: 'test-request-id')
@@ -52,7 +51,6 @@ interface MockContextOptions {
   progress?: boolean;
   sessionId?: string;
   requestId?: string;
-  sample?: (messages: SamplingMessage[], opts?: SamplingOpts) => Promise<CreateMessageResult>;
   signal?: AbortSignal;
   tenantId?: string;
   uri?: URL;
@@ -61,7 +59,7 @@ interface MockContextOptions {
 
 | Option | Effect |
 |:-------|:-------|
-| _(none)_ | Minimal context — `ctx.state` operations throw without `tenantId`; `ctx.elicit`/`ctx.sample`/`ctx.progress` are `undefined` |
+| _(none)_ | Minimal context — `ctx.state` operations throw without `tenantId`; `ctx.elicit`/`ctx.progress` are `undefined` |
 | `auth` | Sets `ctx.auth` for scope-checking tests |
 | `elicit` | Assigns a function to `ctx.elicit` for testing elicitation calls |
 | `errors` | Attaches a typed `ctx.fail` against the contract — same wiring the production handler factory uses. Pass `myTool.errors` directly. |
@@ -72,7 +70,6 @@ interface MockContextOptions {
 | `sessionId` | Sets `ctx.sessionId` for handlers that branch on session ID |
 | `progress` | Populates `ctx.progress` with real state-tracking implementation (see below) |
 | `requestId` | Overrides `ctx.requestId` (default: `'test-request-id'`) |
-| `sample` | Assigns a function to `ctx.sample` for testing sampling calls |
 | `signal` | Overrides `ctx.signal` — useful for cancellation testing |
 | `tenantId` | Sets `ctx.tenantId` and enables `ctx.state` operations with in-memory storage |
 | `uri` | Sets `ctx.uri` for resource handler testing |
@@ -162,17 +159,6 @@ it('uses elicitation when available', async () => {
   const input = myTool.input.parse({ query: 'hello' });
   await myTool.handler(input, ctx);
   expect(elicit).toHaveBeenCalledOnce();
-});
-
-it('uses sampling when available', async () => {
-  const sample = vi.fn().mockResolvedValue({
-    role: 'assistant',
-    content: { type: 'text', text: 'Summary text' },
-  });
-  const ctx = createMockContext({ sample });
-  const input = myTool.input.parse({ query: 'summarize this' });
-  const result = await myTool.handler(input, ctx);
-  expect(result.summary).toBeDefined();
 });
 
 it('handles missing elicitation gracefully', async () => {

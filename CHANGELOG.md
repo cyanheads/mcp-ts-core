@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.10.3](changelog/0.10.x/0.10.3.md) — 2026-06-10 · ⚠️ Breaking
+
+Elicitation wired on the wire (#211), URL-mode elicitation (#212), sampling surface removed (#220), server identity fields (#213), completable prompt args + resource template completion (#214), RootsRegistry deleted (#218)
+
 ## [0.10.2](changelog/0.10.x/0.10.2.md) — 2026-06-10
 
 Per-table TTL for DataCanvas; ctx.enrich.truncated() helper; canvas-consumer and capped-list-no-truncation lint rules; scaffold Dockerfile pre-creates writable data dirs.

@@ -1,6 +1,6 @@
 # mcp-ts-core - Directory Structure
 
-Generated on: 2026-06-08 14:43:18
+Generated on: 2026-06-10 22:56:46
 
 ```text
 mcp-ts-core/
@@ -98,7 +98,6 @@ mcp-ts-core/
 │   │       └── definitions/
 │   │           ├── template-async-countdown.tool.ts
 │   │           ├── template-cat-fact.tool.ts
-│   │           ├── template-code-review-sampling.tool.ts
 │   │           ├── template-data-explorer.app-tool.ts
 │   │           ├── template-echo-message.tool.ts
 │   │           ├── template-image-test.tool.ts
@@ -258,8 +257,6 @@ mcp-ts-core/
 │   │   │   │   ├── resourceDefinition.ts
 │   │   │   │   └── resourceHandlerFactory.ts
 │   │   │   └── resource-registration.ts
-│   │   ├── roots/
-│   │   │   └── roots-registration.ts
 │   │   ├── tasks/
 │   │   │   ├── core/
 │   │   │   │   ├── sessionAwareTaskStore.ts
@@ -528,7 +525,9 @@ mcp-ts-core/
 │   │   ├── matchers.ts
 │   │   └── server-process.ts
 │   ├── integration/
+│   │   ├── completions.int.test.ts
 │   │   ├── config.int.test.ts
+│   │   ├── elicitation.int.test.ts
 │   │   ├── error-handler.int.test.ts
 │   │   ├── http-auth-sessions.test.ts
 │   │   ├── http-auth.test.ts
@@ -549,7 +548,6 @@ mcp-ts-core/
 │   │   │   └── echo.resource.test.ts
 │   │   ├── tools/
 │   │   │   ├── template-async-countdown.tool.test.ts
-│   │   │   ├── template-code-review-sampling.tool.test.ts
 │   │   │   ├── template-data-explorer.app-tool.test.ts
 │   │   │   ├── template-echo-app.app-tool.test.ts
 │   │   │   ├── template-echo-message.tool.test.ts
@@ -575,6 +573,7 @@ mcp-ts-core/
 │   │   │   ├── handler-body-rules.test.ts
 │   │   │   ├── landing-rules.test.ts
 │   │   │   ├── portability-rules.test.ts
+│   │   │   ├── prompt-rules.test.ts
 │   │   │   ├── resource-rules.test.ts
 │   │   │   ├── server-json-rules.test.ts
 │   │   │   ├── source-text.test.ts
@@ -592,8 +591,6 @@ mcp-ts-core/
 │   │   │   │   │   ├── resourceDefinition.test.ts
 │   │   │   │   │   └── resourceHandlerFactory.test.ts
 │   │   │   │   └── resource-registration.test.ts
-│   │   │   ├── roots/
-│   │   │   │   └── roots-registration.test.ts
 │   │   │   ├── tasks/
 │   │   │   │   ├── core/
 │   │   │   │   │   ├── sessionAwareTaskStore.test.ts

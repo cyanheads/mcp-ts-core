@@ -1,7 +1,7 @@
 # Developer Protocol
 
 **Package:** `@cyanheads/mcp-ts-core`
-**Version:** 0.10.2
+**Version:** 0.10.3
 **Engines:** Bun ≥1.3.0, Node ≥24.0.0
 **MCP SDK:** `@modelcontextprotocol/sdk` ^1.29.0
 **Zod:** ^4.4.3
@@ -30,7 +30,7 @@ Both paths share the same public API. Init copies starter `package.json`, config
 
 - **Logic throws, framework catches.** Pure, stateless `handler` functions, no `try/catch`. Plain `Error` works — framework catches, classifies, formats. Use `McpError(code, message, data, options?)` only when you need a specific JSON-RPC code or structured data; 4th arg `{ cause }` chains.
 - **Full-stack observability.** The framework automatically instruments every tool/resource call — OTel span, duration/payload/memory metrics, structured completion log. Use `ctx.log` for additional domain-specific logging within handlers (external API calls, multi-step operations, business events). `requestId`, `traceId`, `tenantId` auto-correlated. No `console` calls.
-- **Unified Context.** Handlers receive `ctx` with logging (`ctx.log`), tenant-scoped storage (`ctx.state`), optional protocol capabilities (`ctx.elicit`, `ctx.sample`), and cancellation (`ctx.signal`).
+- **Unified Context.** Handlers receive `ctx` with logging (`ctx.log`), tenant-scoped storage (`ctx.state`), optional protocol capabilities (`ctx.elicit`), and cancellation (`ctx.signal`).
 - **Decoupled storage.** `ctx.state` for tenant-scoped KV. Never access persistence backends directly.
 - **Canvas tokens are capabilities, not tenant-scoped state.** A `canvasId` is a 10-char URL-safe token; possession grants full read/write/drop. Shareable between agents and across users in single-tenant deployments. Tools accept token in `input` (omit to create fresh) and return in `output`; collaboration is opt-in via token exchange.
 - **Runtime parity.** All features work across `stdio`/`http`/Worker. Guard non-portable deps via `runtimeCaps` from `/utils` (`isNode`, `isBun`, `isWorkerLike`, `hasBuffer`, `hasProcess`, etc.). Prefer runtime-agnostic abstractions (Hono, Fetch APIs).
@@ -44,7 +44,7 @@ Both paths share the same public API. Init copies starter `package.json`, config
 
 | Subpath | Key Exports | Purpose |
 |:--------|:------------|:--------|
-| `@cyanheads/mcp-ts-core` | `createApp`, `tool`, `resource`, `prompt`, `appTool`, `appResource`, `APP_RESOURCE_MIME_TYPE`, `Context`, `createFail`, `createRecoveryFor`, `TypedFail`, `TypedRecoveryFor`, `ReasonOf`, `HandlerContext`, `Enrich`, `EnrichHelpers`, `TypedEnrich`, `z` | Main entry point |
+| `@cyanheads/mcp-ts-core` | `createApp`, `tool`, `resource`, `prompt`, `appTool`, `appResource`, `APP_RESOURCE_MIME_TYPE`, `Context`, `createFail`, `createRecoveryFor`, `TypedFail`, `TypedRecoveryFor`, `ReasonOf`, `HandlerContext`, `Enrich`, `EnrichHelpers`, `TypedEnrich`, `z`, `completable`, `isCompletable`, `CompleteCallback`, `CompleteResourceTemplateCallback` | Main entry point |
 | `/worker` | `createWorkerHandler`, `CloudflareBindings` | Cloudflare Workers entry |
 | `/tools` | `ToolDefinition`, `AnyToolDefinition`, `ToolAnnotations` | Tool definition types |
 | `/resources` | `ResourceDefinition`, `AnyResourceDefinition` | Resource definition types |
@@ -93,6 +93,9 @@ import { allPromptDefinitions } from './mcp-server/prompts/index.js';
 await createApp({
   name: 'my-mcp-server',           // overrides package.json / MCP_SERVER_NAME
   version: '0.1.0',                // overrides package.json / MCP_SERVER_VERSION
+  title: 'My Server',              // optional identity (SEP-973): display name for client UIs
+  websiteUrl: 'https://github.com/owner/my-mcp-server',
+  icons: [{ src: 'https://example.com/icon.png', sizes: ['48x48'], mimeType: 'image/png' }],
   tools: allToolDefinitions,
   resources: allResourceDefinitions,
   prompts: allPromptDefinitions,
@@ -109,6 +112,8 @@ await createApp({
 ```
 
 **`instructions`** — Optional server-level orientation, surfaced on every `initialize` response as session-level system context. Use for deployment-specific guidance (connection aliases, regional notes, scope hints) instead of repeating in tool descriptions. Client adoption uneven but no downside when set.
+
+**Identity fields** — Optional `title`, `websiteUrl`, `description`, `icons` (SEP-973) pass through to the SDK's `initialize` serverInfo and to the server manifest, keeping the `/.well-known/mcp.json` server card and landing page consistent with what `initialize` reports. Explicit `description` wins over `MCP_SERVER_DESCRIPTION`/package.json.
 
 ### Cloudflare Workers — `createWorkerHandler(options)`
 
@@ -274,8 +279,7 @@ interface Context {
   readonly auth?: AuthContext;
   readonly log: ContextLogger;                // auto-correlated: requestId, traceId, tenantId
   readonly state: ContextState;               // tenant-scoped KV storage
-  readonly elicit?: (message: string, schema: z.ZodObject<any>) => Promise<ElicitResult>;
-  readonly sample?: (messages: SamplingMessage[], opts?: SamplingOpts) => Promise<CreateMessageResult>;
+  readonly elicit?: ElicitFn;                 // form call (message, schema) + .url(message, url); present iff client advertises elicitation
   readonly notifyResourceListChanged?: (() => void) | undefined;   // resource list changed
   readonly notifyResourceUpdated?: ((uri: string) => void) | undefined; // resource content changed
   readonly signal: AbortSignal;               // cancellation
@@ -312,7 +316,7 @@ Throws `McpError(InvalidRequest)` if `tenantId` missing. Tenant ID resolution:
 | HTTP + `MCP_AUTH_MODE=none` | `'default'` (single-tenant by design) |
 | HTTP + `MCP_AUTH_MODE=jwt`/`oauth` | JWT `'tid'` claim — fail-closed if absent |
 
-### `ctx.elicit` / `ctx.sample`
+### `ctx.elicit`
 
 Check for presence before calling:
 
@@ -324,6 +328,8 @@ if (ctx.elicit) {
   if (result.action === 'accept') useFormat(result.content.format);
 }
 ```
+
+URL mode: `await ctx.elicit.url('Authorize access', 'https://example.com/authorize')` — hands the user an external link instead of a form. `elicitationId` is generated internally; `content` is absent, only `action` reports the outcome.
 
 ### `ctx.progress`
 
@@ -438,7 +444,7 @@ describe('myTool', () => {
 });
 ```
 
-**`createMockContext` options:** `createMockContext()` (minimal), `{ tenantId: 'test-tenant' }` (enables state), `{ sample: vi.fn() }`, `{ elicit: vi.fn() }`, `{ progress: true }` (task progress).
+**`createMockContext` options:** `createMockContext()` (minimal), `{ tenantId: 'test-tenant' }` (enables state), `{ elicit: vi.fn() }`, `{ progress: true }` (task progress).
 
 **Fuzz testing:** `fuzzTool`/`fuzzResource`/`fuzzPrompt` from `/testing/fuzz` generate valid and adversarial inputs from Zod schemas via `fast-check`, then assert handler invariants (no crashes, no prototype pollution, no stack trace leaks). Returns a `FuzzReport` for custom assertions.
 
@@ -485,7 +491,7 @@ Skills live in `skills/<name>/SKILL.md`. Read the relevant skill before starting
 - **Builders:** `tool()`/`resource()`/`prompt()` with correct fields (`handler`, `input`, `output`, `format`, `auth`, `args`)
 - **`format()` completeness:** must carry the same data as `output` (parity is lint-enforced — see Adding a Tool)
 - **Auth:** via `auth: ['scope']` on definitions (not HOF wrapper)
-- **Presence checks:** `ctx.elicit`/`ctx.sample` checked before use
+- **Presence checks:** `ctx.elicit` checked before use
 - **Task tools:** use `task: true` flag
 - **Pagination:** large resource lists use `extractCursor`/`paginateArray`
 - **Registration:** definitions exported in `definitions/index.ts` barrel
