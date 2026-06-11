@@ -132,7 +132,7 @@ describe('R2Provider', () => {
       expect(mockBucket.list).toHaveBeenCalledWith(
         expect.objectContaining({
           prefix: 'tenant-1:key',
-          limit: 1001,
+          limit: 1000,
         }),
       );
     });
@@ -163,6 +163,21 @@ describe('R2Provider', () => {
           startAfter: 'tenant-1:incoming-cursor', // decoded cursor used as startAfter
         }),
       );
+    });
+
+    it('should clamp the +1 page probe at the R2 1000-key cap and use truncated for has-more', async () => {
+      mockBucket.list.mockResolvedValueOnce({
+        objects: [{ key: 'tenant-1:key-1' }],
+        truncated: true,
+      });
+
+      const result = await r2Provider.list('tenant-1', 'key', context, { limit: 1000 });
+
+      // 1001 would be rejected by R2 — the probe must clamp to 1000
+      expect(mockBucket.list).toHaveBeenCalledWith(expect.objectContaining({ limit: 1000 }));
+      expect(result.keys).toEqual(['key-1']);
+      // truncated response → cursor present even though fewer than limit keys came back
+      expect(result.nextCursor).toBe(encodeCursor('key-1', 'tenant-1'));
     });
   });
 

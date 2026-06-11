@@ -28,6 +28,8 @@ type R2Envelope = {
 
 const R2_ENVELOPE_VERSION = 1;
 const DEFAULT_LIST_LIMIT = 1000;
+/** R2 rejects `list()` limits above 1000, so the +1 page probe clamps here. */
+const R2_MAX_LIST_LIMIT = 1000;
 
 export class R2Provider implements IStorageProvider {
   private readonly bucket: R2Bucket;
@@ -178,7 +180,10 @@ export class R2Provider implements IStorageProvider {
         const limit = options?.limit ?? DEFAULT_LIST_LIMIT;
         const listOptions: import('@cloudflare/workers-types').R2ListOptions = {
           prefix: r2Prefix,
-          limit: limit + 1, // Fetch one extra to detect if more pages exist
+          // Fetch one extra to detect more pages, clamped to R2's hard cap of
+          // 1000 keys per list() call (1001 is rejected). At the cap, the
+          // response's `truncated` flag covers has-more detection instead.
+          limit: Math.min(limit + 1, R2_MAX_LIST_LIMIT),
         };
         if (options?.cursor) {
           // Decode tenant-bound cursor to resume after the last key
@@ -196,8 +201,10 @@ export class R2Provider implements IStorageProvider {
          * Pure limit+1 pagination (consistent with D1/Supabase providers):
          * - If we got limit+1 items, there are more pages — return only `limit` items
          * - If we got <= limit items, this is the last page — no cursor
+         * - At the R2 cap (limit >= 1000) the +1 probe can't fit, so the
+         *   response's `truncated` flag detects further pages instead
          */
-        const hasMore = keys.length > limit;
+        const hasMore = keys.length > limit || listed.truncated;
         const resultKeys = hasMore ? keys.slice(0, limit) : keys;
         const nextCursor =
           hasMore && resultKeys.length > 0
