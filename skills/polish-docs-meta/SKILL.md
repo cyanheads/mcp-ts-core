@@ -4,7 +4,7 @@ description: >
   Finalize documentation and project metadata for a ship-ready MCP server. Use after implementation is complete, tests pass, and devcheck is clean. Safe to run at any stage — each step checks current state and only acts on what still needs work.
 metadata:
   author: cyanheads
-  version: "2.6"
+  version: "2.7"
   audience: external
   type: workflow
 ---
@@ -75,6 +75,8 @@ Check for empty or placeholder metadata fields. Read `references/package-meta.md
 Key fields: `name`, `description`, `repository`, `author`, `homepage`, `bugs`, `keywords`.
 
 **`name` must communicate the server's domain at a glance.** See `references/package-meta.md` for the naming convention — ambiguous abbreviations and acronym-only names fail the scannability test for humans and agents alike.
+
+**`name` and `title` in `createApp()` / `createWorkerHandler()` must match the unscoped `package.json` `name`** — display identity is the machine name on every surface; `lint:packaging` (run by `devcheck`) enforces the match and warns when the pair is partial. `description` is never duplicated into the entrypoint — `package.json` is the canonical source (the framework derives the served description from it).
 
 **`description` is the canonical source.** Every other surface (README header, `server.json`, Dockerfile OCI label, GitHub repo description) derives from it. Write it here first, then propagate.
 
@@ -193,7 +195,7 @@ If the project ships as an `.mcpb` bundle for Claude Desktop (check for `manifes
 
 **`package.json` scripts:**
 
-- `bundle` — builds the `.mcpb` (e.g., `mcpb pack --output dist/`)
+- `bundle` — builds the `.mcpb` (`mcpb pack`, then `scripts/clean-mcpb.ts` prunes dev deps and strips dependency-shipped agent docs)
 - `lint:packaging` — validates `manifest.json` ↔ `server.json` env var consistency (run by `devcheck`)
 
 **Cross-file consistency:**

@@ -2,7 +2,8 @@
 /**
  * @fileoverview MCPB packaging linter — validates env var alignment between
  * `manifest.json` (MCPB bundle install UX) and `server.json` (MCP Registry
- * discovery) for stdio packages, and guards against bundle-content mistakes.
+ * discovery) for stdio packages, and guards against bundle-content and
+ * identity mistakes.
  *
  * Used by devcheck and as a standalone script: `bun run lint:packaging` /
  * `npm run lint:packaging`.
@@ -22,17 +23,26 @@
  *      `node_modules/x/skills/` (runtime path bypass, issues #172/#207).
  *   7. Bundle-content guard: `.mcpbignore` patterns must not strip critical
  *      runtime package paths (e.g. `node_modules/@opentelemetry/api/build/src/`).
+ *   8. Post-bundle content: a built `.mcpb` under `dist/` must contain zero
+ *      `node_modules/**` agent-doc entries (dependency-shipped `skills/`,
+ *      `.claude/`, `.agents/`, `SKILL.md`) — unreachable by root-anchored
+ *      `.mcpbignore` patterns; `scripts/clean-mcpb.ts` strips them at bundle
+ *      time (issue #230).
+ *   9. Identity: `name`/`title` literals in `createApp()` /
+ *      `createWorkerHandler()` (src/index.ts, src/worker.ts) and manifest
+ *      `display_name` must equal the unscoped package name; a partial
+ *      `name`/`title` pair warns without failing (issue #231).
  *
- * Checks 1–2 run with `manifest.json` alone; 3–4 require `server.json`.
- * Checks 5–7 run when `.mcpbignore` is present (silently skip otherwise).
- *
- * Skips cleanly when `manifest.json` is absent — consumers who deleted it for
- * an HTTP-only deploy should not fail this check.
+ * Every check skips cleanly when its input is absent — consumers who deleted
+ * `manifest.json` for an HTTP-only deploy, or who haven't built a bundle,
+ * should not fail the checks that need those files.
  *
  * @module scripts/lint-packaging
  */
-import { existsSync, readFileSync } from 'node:fs';
-import { resolve } from 'node:path';
+import { execFileSync } from 'node:child_process';
+import { existsSync, readdirSync, readFileSync } from 'node:fs';
+import { join, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 interface ServerJsonEnvVar {
   default?: string;
@@ -56,6 +66,7 @@ interface ManifestUserConfigEntry {
 }
 
 interface Manifest {
+  display_name?: unknown;
   name?: string;
   server?: { mcp_config?: { env?: Record<string, string> } };
   user_config?: Record<string, ManifestUserConfigEntry>;
@@ -69,19 +80,30 @@ const USER_CONFIG_REF = /^\$\{user_config\.([\w-]+)\}$/;
  * stripping nested runtime paths like `node_modules/x/skills/`. Keep in step
  * with the directory entries in `templates/_.mcpbignore`.
  */
-const KNOWN_DEV_DIRS = ['skills/', '.agents/', '.claude/'];
+export const KNOWN_DEV_DIRS = ['skills/', '.agents/', '.claude/'];
 
 /**
  * Critical runtime paths that must NOT be stripped by any `.mcpbignore` pattern.
  * These are sampled representative paths — enough to catch a bare `skills/`
  * pattern accidentally stripping `node_modules/…/skills/`.
  */
-const CRITICAL_RUNTIME_PATHS = [
+export const CRITICAL_RUNTIME_PATHS = [
   'node_modules/@opentelemetry/api/build/src/',
   'node_modules/@modelcontextprotocol/sdk/dist/',
   'node_modules/@cyanheads/mcp-ts-core/dist/',
   'dist/index.js',
 ];
+
+/**
+ * Agent-doc entries under `node_modules/` that must not ship in a bundle.
+ * KEEP IN SYNC with `AGENT_DOC_ENTRY` in `scripts/clean-mcpb.ts` (the strip
+ * step this check verifies) — a unit test asserts the two are identical.
+ */
+export const AGENT_DOC_ENTRY =
+  /^node_modules\/.*(?:\/skills\/|\/\.claude\/|\/\.agents\/|\/SKILL\.md$)/;
+
+/** The canonical in-code identity pair — both must equal the unscoped package name. */
+const IDENTITY_PAIR = ['name', 'title'] as const;
 
 function tryReadJson<T>(path: string): T | undefined {
   try {
@@ -94,7 +116,7 @@ function tryReadJson<T>(path: string): T | undefined {
 }
 
 /**
- * Run bundle-content checks (5–7) against the .mcpbignore patterns.
+ * Run bundle-content checks (5–7) against raw `.mcpbignore` content.
  *
  * Uses the `ignore` package (already a devDependency in scaffolded servers)
  * to evaluate which paths survive the ignore rules. Returns an array of error
@@ -105,20 +127,32 @@ function tryReadJson<T>(path: string): T | undefined {
  * devDependencies (`^7.0.5`) and is therefore available in the server's
  * `node_modules` when `bun run lint:packaging` is invoked there.
  */
-async function checkBundleContent(mcpbignorePath: string): Promise<string[]> {
+interface IgnoreMatcher {
+  add(patterns: string[]): IgnoreMatcher;
+  ignores(path: string): boolean;
+}
+
+/**
+ * The `ignore` package's factory, typed structurally — the CJS interop shape
+ * of `import('ignore')` differs between the script and test tsconfig programs,
+ * so naming the module's own types breaks one or the other.
+ */
+type IgnoreFactory = (options?: unknown) => IgnoreMatcher;
+
+export async function checkBundleContent(raw: string): Promise<string[]> {
   const errors: string[] = [];
 
-  let createIgnore: typeof import('ignore')['default'];
+  let createIgnore: IgnoreFactory;
   try {
     // Dynamic import so the rest of the linter still runs when `ignore` is absent.
-    createIgnore = ((await import('ignore')) as typeof import('ignore')).default;
+    const mod: unknown = await import('ignore');
+    createIgnore = ((mod as { default?: unknown }).default ?? mod) as IgnoreFactory;
   } catch {
     // `ignore` not installed — skip the guard without failing (e.g. in a minimal
     // CI environment that omits devDependencies).
     return errors;
   }
 
-  const raw = readFileSync(mcpbignorePath, 'utf-8');
   const lines = raw
     .split('\n')
     .map((l) => l.trim())
@@ -180,80 +214,290 @@ async function checkBundleContent(mcpbignorePath: string): Promise<string[]> {
   return errors;
 }
 
-async function main(): Promise<void> {
-  const manifestPath = resolve('manifest.json');
-  if (!existsSync(manifestPath)) {
-    console.log('No manifest.json — skipping lint:packaging.');
-    process.exit(0);
-  }
+/**
+ * Check 8: a built bundle must contain zero `node_modules/**` agent-doc
+ * entries. `scripts/clean-mcpb.ts` (wired into the `bundle` script) strips
+ * them after `mcpb pack`.
+ */
+export function checkBundleEntries(entries: string[], bundleLabel: string): string[] {
+  const offending = entries.filter((entry) => AGENT_DOC_ENTRY.test(entry));
+  if (offending.length === 0) return [];
+  const sample = offending
+    .slice(0, 5)
+    .map((entry) => `\n      ${entry}`)
+    .join('');
+  return [
+    `${bundleLabel} contains ${offending.length} node_modules agent-doc entries ` +
+      `(dependency-shipped skills/, .claude/, .agents/, SKILL.md) — re-run the \`bundle\` ` +
+      `script (scripts/clean-mcpb.ts strips them):${sample}`,
+  ];
+}
 
-  const manifest = tryReadJson<Manifest>(manifestPath);
-  if (!manifest) {
-    console.error('manifest.json is unreadable or malformed.');
-    process.exit(1);
-  }
+/**
+ * Collect the direct (depth-1) property lines of the options object passed to
+ * `createApp()` / `createWorkerHandler()`. Returns undefined when no call with
+ * an inline options object exists (e.g. the framework's bare `createApp()`
+ * dev entry).
+ *
+ * Line-based, no AST: nested object literals (a `setup(core) { … }` body,
+ * `extensions: { … }`) are excluded by brace-depth tracking so an inner
+ * `name:`/`title:` key can't false-positive the identity check. Reliable for
+ * the template-scaffolded entrypoint shape with single-line string literals.
+ */
+function identityCandidateLines(source: string): string[] | undefined {
+  const call = source.match(/\b(?:createApp|createWorkerHandler)\s*\(\s*\{/);
+  if (call?.index === undefined) return;
 
+  const lines: string[] = [];
+  let depth = 0;
+  let lineStartDepth = 0;
+  let buf = '';
+  let inString: string | undefined;
+  let inBlockComment = false;
+
+  const flush = (): void => {
+    const trimmed = buf.trim();
+    if (
+      lineStartDepth === 1 &&
+      trimmed.length > 0 &&
+      !trimmed.startsWith('//') &&
+      !trimmed.startsWith('*')
+    ) {
+      lines.push(trimmed);
+    }
+    buf = '';
+  };
+
+  for (let i = call.index + call[0].length - 1; i < source.length; i++) {
+    const ch = source[i] as string;
+    if (ch === '\n') {
+      flush();
+      lineStartDepth = depth;
+      continue;
+    }
+    buf += ch;
+    if (inBlockComment) {
+      if (ch === '/' && source[i - 1] === '*') inBlockComment = false;
+      continue;
+    }
+    if (inString) {
+      if (ch === '\\') {
+        buf += source[i + 1] ?? '';
+        i++;
+        continue;
+      }
+      if (ch === inString) inString = undefined;
+      continue;
+    }
+    if (ch === '/' && source[i + 1] === '/') {
+      const nl = source.indexOf('\n', i);
+      const end = nl === -1 ? source.length : nl;
+      buf += source.slice(i + 1, end);
+      i = end - 1;
+      continue;
+    }
+    if (ch === '/' && source[i + 1] === '*') {
+      inBlockComment = true;
+      continue;
+    }
+    if (ch === "'" || ch === '"' || ch === '`') {
+      inString = ch;
+      continue;
+    }
+    if (ch === '{' || ch === '(' || ch === '[') {
+      depth++;
+    } else if (ch === '}' || ch === ')' || ch === ']') {
+      depth--;
+      if (depth === 0) {
+        flush();
+        return lines;
+      }
+    }
+  }
+  flush();
+  return lines;
+}
+
+/**
+ * Check 9 (entrypoint surface): `name`/`title` literals passed to
+ * `createApp()` / `createWorkerHandler()` must equal the unscoped package
+ * name. A partial pair (one or both missing) warns without failing — explicit
+ * `name` also keeps scoped npm names out of the served `server_name`.
+ */
+export function checkEntrypointIdentity(
+  source: string,
+  unscopedName: string,
+  fileLabel: string,
+): { errors: string[]; warnings: string[] } {
   const errors: string[] = [];
+  const warnings: string[] = [];
 
-  if (manifest.name?.includes('/')) {
-    errors.push(
-      `manifest.json "name" contains a scope prefix ("${manifest.name}") — use the bare package name (e.g. "${manifest.name.split('/').pop()}")`,
-    );
-  }
+  const optionLines = identityCandidateLines(source);
+  if (!optionLines) return { errors, warnings };
 
-  const userConfig = manifest.user_config ?? {};
-  for (const [key, entry] of Object.entries(userConfig)) {
-    if (typeof entry !== 'object' || entry === null) continue;
-    const missing = (['title', 'type'] as const).filter(
-      (f) => typeof entry[f] !== 'string' || (entry[f] as string).length === 0,
-    );
-    if (missing.length > 0) {
-      errors.push(
-        `manifest.json user_config["${key}"] is missing required field(s): ${missing.join(', ')} — mcpb pack will reject this`,
-      );
+  const present = new Set<string>();
+  for (const field of IDENTITY_PAIR) {
+    const fieldRe = new RegExp(`^['"\`]?${field}['"\`]?\\s*:`);
+    const literalRe = new RegExp(`^['"\`]?${field}['"\`]?\\s*:\\s*(['"\`])((?:(?!\\1).)*)\\1`);
+    for (const line of optionLines) {
+      if (!fieldRe.test(line)) continue;
+      present.add(field);
+      const literal = line.match(literalRe)?.[2];
+      if (literal !== undefined && literal !== unscopedName) {
+        errors.push(
+          `${fileLabel} sets ${field}: "${literal}" — must equal the unscoped package name ` +
+            `"${unscopedName}" (display identity is the machine name on every surface)`,
+        );
+      }
     }
   }
 
-  const serverJson = tryReadJson<ServerJson>(resolve('server.json'));
-  if (serverJson) {
-    const manifestEnv = manifest.server?.mcp_config?.env ?? {};
-    const manifestEnvKeys = new Set(Object.keys(manifestEnv));
-
-    const manifestUserConfigKeys = new Set(
-      Object.entries(manifestEnv)
-        .filter(([, v]) => typeof v === 'string' && USER_CONFIG_REF.test(v))
-        .map(([k]) => k),
+  const missing = IDENTITY_PAIR.filter((field) => !present.has(field));
+  if (missing.length > 0) {
+    warnings.push(
+      `${fileLabel} identity pair is partial — missing: ${missing.join(', ')} ` +
+        `(set both name and title to the unscoped package name "${unscopedName}")`,
     );
-
-    const stdioEnvVars = (serverJson.packages ?? [])
-      .filter((p) => p.transport?.type === 'stdio')
-      .flatMap((p) => p.environmentVariables ?? []);
-    const stdioEnvNames = new Set(stdioEnvVars.map((v) => v.name));
-    const requiredStdioEnvNames = new Set(
-      stdioEnvVars.filter((v) => v.isRequired === true && v.default == null).map((v) => v.name),
-    );
-
-    const missingInServerJson = [...manifestUserConfigKeys].filter((k) => !stdioEnvNames.has(k));
-    const missingInManifest = [...requiredStdioEnvNames].filter((k) => !manifestEnvKeys.has(k));
-
-    if (missingInServerJson.length > 0) {
-      errors.push(
-        `manifest.json references user_config env var(s) not advertised in server.json stdio environmentVariables[]: ${missingInServerJson.join(', ')}`,
-      );
-    }
-    if (missingInManifest.length > 0) {
-      errors.push(
-        `server.json declares required stdio env var(s) without default missing from manifest.json mcp_config.env: ${missingInManifest.join(', ')}`,
-      );
-    }
   }
 
-  // Bundle-content guard (checks 5–7).
+  return { errors, warnings };
+}
+
+/** Check 9 (manifest surface): `display_name`, when present, must be the unscoped package name. */
+export function checkManifestIdentity(manifest: Manifest, unscopedName: string): string[] {
+  if (typeof manifest.display_name === 'string' && manifest.display_name !== unscopedName) {
+    return [
+      `manifest.json "display_name" is "${manifest.display_name}" — must equal the unscoped ` +
+        `package name "${unscopedName}"`,
+    ];
+  }
+  return [];
+}
+
+async function main(): Promise<void> {
+  const errors: string[] = [];
+  const warnings: string[] = [];
+  const notes: string[] = [];
+
+  const pkg = tryReadJson<{ name?: string }>(resolve('package.json'));
+  const unscopedName = pkg?.name?.split('/').pop();
+
+  // ── Manifest-dependent checks (1–4 + manifest identity) ──
+  const manifestPath = resolve('manifest.json');
+  let manifest: Manifest | undefined;
+  if (existsSync(manifestPath)) {
+    manifest = tryReadJson<Manifest>(manifestPath);
+    if (!manifest) {
+      console.error('manifest.json is unreadable or malformed.');
+      process.exit(1);
+    }
+
+    if (manifest.name?.includes('/')) {
+      errors.push(
+        `manifest.json "name" contains a scope prefix ("${manifest.name}") — use the bare package name (e.g. "${manifest.name.split('/').pop()}")`,
+      );
+    }
+
+    const userConfig = manifest.user_config ?? {};
+    for (const [key, entry] of Object.entries(userConfig)) {
+      if (typeof entry !== 'object' || entry === null) continue;
+      const missing = (['title', 'type'] as const).filter(
+        (f) => typeof entry[f] !== 'string' || (entry[f] as string).length === 0,
+      );
+      if (missing.length > 0) {
+        errors.push(
+          `manifest.json user_config["${key}"] is missing required field(s): ${missing.join(', ')} — mcpb pack will reject this`,
+        );
+      }
+    }
+
+    const serverJson = tryReadJson<ServerJson>(resolve('server.json'));
+    if (serverJson) {
+      const manifestEnv = manifest.server?.mcp_config?.env ?? {};
+      const manifestEnvKeys = new Set(Object.keys(manifestEnv));
+
+      const manifestUserConfigKeys = new Set(
+        Object.entries(manifestEnv)
+          .filter(([, v]) => typeof v === 'string' && USER_CONFIG_REF.test(v))
+          .map(([k]) => k),
+      );
+
+      const stdioEnvVars = (serverJson.packages ?? [])
+        .filter((p) => p.transport?.type === 'stdio')
+        .flatMap((p) => p.environmentVariables ?? []);
+      const stdioEnvNames = new Set(stdioEnvVars.map((v) => v.name));
+      const requiredStdioEnvNames = new Set(
+        stdioEnvVars.filter((v) => v.isRequired === true && v.default == null).map((v) => v.name),
+      );
+
+      const missingInServerJson = [...manifestUserConfigKeys].filter((k) => !stdioEnvNames.has(k));
+      const missingInManifest = [...requiredStdioEnvNames].filter((k) => !manifestEnvKeys.has(k));
+
+      if (missingInServerJson.length > 0) {
+        errors.push(
+          `manifest.json references user_config env var(s) not advertised in server.json stdio environmentVariables[]: ${missingInServerJson.join(', ')}`,
+        );
+      }
+      if (missingInManifest.length > 0) {
+        errors.push(
+          `server.json declares required stdio env var(s) without default missing from manifest.json mcp_config.env: ${missingInManifest.join(', ')}`,
+        );
+      }
+    }
+
+    if (unscopedName) {
+      errors.push(...checkManifestIdentity(manifest, unscopedName));
+    }
+  } else {
+    notes.push('No manifest.json — skipping manifest/server.json alignment checks.');
+  }
+
+  // ── Bundle-content guard (checks 5–7) ──
   const mcpbignorePath = resolve('.mcpbignore');
   if (existsSync(mcpbignorePath)) {
-    const bundleErrors = await checkBundleContent(mcpbignorePath);
-    errors.push(...bundleErrors);
+    errors.push(...(await checkBundleContent(readFileSync(mcpbignorePath, 'utf-8'))));
   }
+
+  // ── Post-bundle content check (8) ──
+  const distDir = resolve('dist');
+  if (existsSync(distDir)) {
+    for (const file of readdirSync(distDir).filter((f) => f.endsWith('.mcpb'))) {
+      try {
+        const listing = execFileSync('unzip', ['-Z1', join(distDir, file)], {
+          encoding: 'utf-8',
+          maxBuffer: 64 * 1024 * 1024,
+        });
+        errors.push(
+          ...checkBundleEntries(
+            listing.split('\n').filter((line) => line.length > 0),
+            `dist/${file}`,
+          ),
+        );
+      } catch (err) {
+        if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
+          notes.push(`unzip not available — skipping bundle content check for dist/${file}.`);
+        } else {
+          errors.push(
+            `failed to list entries of dist/${file}: ${err instanceof Error ? err.message : err}`,
+          );
+        }
+      }
+    }
+  }
+
+  // ── Entrypoint identity check (9) ──
+  if (unscopedName) {
+    for (const entry of ['src/index.ts', 'src/worker.ts']) {
+      const entryPath = resolve(entry);
+      if (!existsSync(entryPath)) continue;
+      const result = checkEntrypointIdentity(readFileSync(entryPath, 'utf-8'), unscopedName, entry);
+      errors.push(...result.errors);
+      warnings.push(...result.warnings);
+    }
+  }
+
+  for (const note of notes) console.log(note);
+  for (const warning of warnings) console.warn(`  ⚠ ${warning}`);
 
   if (errors.length === 0) {
     console.log('Packaging alignment OK.');
@@ -263,4 +507,6 @@ async function main(): Promise<void> {
   process.exit(1);
 }
 
-await main();
+if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  await main();
+}

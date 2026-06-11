@@ -12,6 +12,8 @@ import { echoAppUiResource } from './mcp-server/resources/definitions/echo-app-u
 import { echoPrompt } from './mcp-server/prompts/definitions/echo.prompt.js';
 
 await createApp({
+  name: '{{PACKAGE_NAME}}',
+  title: '{{PACKAGE_NAME}}',
   tools: [echoTool, echoAppTool],
   resources: [echoResource, echoAppUiResource],
   prompts: [echoPrompt],

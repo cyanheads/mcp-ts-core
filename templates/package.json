@@ -30,7 +30,7 @@
     "format:unsafe": "biome check --write --unsafe .",
     "lint:mcp": "bun run scripts/lint-mcp.ts",
     "lint:packaging": "bun run scripts/lint-packaging.ts",
-    "bundle": "bun run build && npx -y @anthropic-ai/mcpb pack . dist/{{PACKAGE_NAME}}.mcpb",
+    "bundle": "bun run build && npx -y @anthropic-ai/mcpb pack . dist/{{PACKAGE_NAME}}.mcpb && bun run scripts/clean-mcpb.ts dist/{{PACKAGE_NAME}}.mcpb",
     "changelog:build": "bun run scripts/build-changelog.ts",
     "changelog:check": "bun run scripts/build-changelog.ts --check",
     "release:github": "bun run scripts/release-github.ts",
