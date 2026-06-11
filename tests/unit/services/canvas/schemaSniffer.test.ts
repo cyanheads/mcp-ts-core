@@ -7,12 +7,13 @@
 
 import { describe, expect, it } from 'vitest';
 
-import { sniffSchema } from '@/services/canvas/core/schemaSniffer.js';
+import { inferSchemaFromRows, sniffSchema } from '@/services/canvas/core/schemaSniffer.js';
 
 describe('sniffSchema · single-type columns', () => {
   it('infers VARCHAR for string columns', () => {
     const { schema } = sniffSchema([{ name: 'a' }, { name: 'b' }], 100);
-    expect(schema).toEqual([{ name: 'name', type: 'VARCHAR', nullable: false }]);
+    // Inferred schemas always emit nullable: true (issue #221)
+    expect(schema).toEqual([{ name: 'name', type: 'VARCHAR', nullable: true }]);
   });
 
   it('infers BIGINT for integer columns', () => {
@@ -173,5 +174,33 @@ describe('sniffSchema · errors', () => {
 
   it('throws when sniffRowCount is below 1', () => {
     expect(() => sniffSchema([{ a: 1 }], 0)).toThrow(/sniffRowCount must be at least 1/i);
+  });
+});
+
+// Issue #221 — inferred schemas always emit nullable: true
+describe('sniffSchema · always-nullable inference (issue #221)', () => {
+  it('emits nullable: true for a fully non-null column', () => {
+    const { schema } = sniffSchema([{ x: 1 }, { x: 2 }, { x: 3 }], 100);
+    expect(schema[0]?.nullable).toBe(true);
+  });
+
+  it('emits nullable: true even when every sampled row has a value', () => {
+    const { schema } = sniffSchema(
+      [{ ticker: 'AAPL' }, { ticker: 'MSFT' }, { ticker: 'GOOG' }],
+      100,
+    );
+    expect(schema[0]?.nullable).toBe(true);
+  });
+
+  it('inferSchemaFromRows never emits nullable: false', () => {
+    const rows = Array.from({ length: 50 }, (_, i) => ({
+      id: i,
+      label: `row_${i}`,
+      score: i / 10,
+    }));
+    const schema = inferSchemaFromRows(rows);
+    for (const col of schema) {
+      expect(col.nullable).toBe(true);
+    }
   });
 });

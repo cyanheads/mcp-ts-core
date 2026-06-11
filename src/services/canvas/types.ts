@@ -92,6 +92,18 @@ export interface RegisterTableResult {
 /** Options for {@link CanvasInstance.query}. */
 export interface QueryOptions {
   /**
+   * When `true`, the SQL gate rejects any reference to system catalog
+   * namespaces (`information_schema`, `pg_catalog`, `sqlite_master`,
+   * `duckdb_<name>()` functions) before executing. Default `false`.
+   *
+   * Use on shared canvases where handle possession is the access boundary —
+   * catalog namespaces let callers enumerate every staged handle and defeat
+   * that model. Canvas-token servers that expose `describe()` to agents do
+   * not need this; only servers that intentionally hide the full catalog should
+   * opt in.
+   */
+  denySystemCatalogs?: boolean;
+  /**
    * Number of rows to include in the immediate response. Defaults to
    * `rowLimit`. Use a smaller value (e.g. 50) when `registerAs` is set and
    * the caller only wants a sample.
@@ -123,12 +135,23 @@ export interface QueryOptions {
 export interface QueryResult {
   /** Column names in projection order. */
   columns: string[];
-  /** Total rows the query produced (may exceed `rows.length` when capped). */
+  /**
+   * Rows the query produced, up to `rowLimit`. When `truncated` is `true`,
+   * this equals `rowLimit` and the full result set is larger — use `registerAs`
+   * to materialize the full result. When `truncated` is absent or `false`, this
+   * is the exact row count.
+   */
   rowCount: number;
   /** Materialized rows (bounded by `preview`/`rowLimit`). */
   rows: Record<string, unknown>[];
   /** Set when `registerAs` was supplied. */
   tableName?: string;
+  /**
+   * `true` when the query produced more rows than `rowLimit` and the result was
+   * capped. Use `registerAs` to materialize the full result set as a canvas
+   * table for follow-up SQL.
+   */
+  truncated?: boolean;
 }
 
 /** Supported export formats. */
@@ -170,6 +193,12 @@ export interface DescribeOptions {
 
 /** Options for {@link CanvasInstance.registerView}. */
 export interface RegisterViewOptions {
+  /**
+   * When `true`, the SQL gate rejects catalog namespace references in the view
+   * definition SQL. Same semantics as {@link QueryOptions.denySystemCatalogs}.
+   * Default `false`.
+   */
+  denySystemCatalogs?: boolean;
   /** Cancellation signal forwarded to the provider. */
   signal?: AbortSignal;
 }

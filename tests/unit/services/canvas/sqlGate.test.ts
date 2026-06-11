@@ -11,6 +11,7 @@ import {
   ALLOWED_PLAN_OPERATORS,
   ALLOWED_STATEMENT_TYPES,
   assertNoDeniedFunctions,
+  assertNoSystemCatalogs,
   assertPlanReadOnly,
   assertReadOnlyQuery,
   assertValidIdentifier,
@@ -444,6 +445,65 @@ describe('sqlGate · pragma_* deny-list (issue #210)', () => {
 
   it('assertNoDeniedFunctions does not false-positive on pragma_ in a string literal', () => {
     expect(() => assertNoDeniedFunctions("SELECT 'pragma_table_info' AS s FROM t")).not.toThrow();
+  });
+});
+
+// Issue #224 — opt-in system-catalog denial
+describe('sqlGate · assertNoSystemCatalogs (issue #224)', () => {
+  it('rejects information_schema reference', () => {
+    let caught: unknown;
+    try {
+      assertNoSystemCatalogs('SELECT * FROM information_schema.tables');
+    } catch (err) {
+      caught = err;
+    }
+    expect(caught).toBeInstanceOf(McpError);
+    const data = (caught as McpError).data as { reason: string; catalog: string };
+    expect(data.reason).toBe('system_catalog_access');
+    expect(data.catalog).toContain('information_schema');
+  });
+
+  it('rejects pg_catalog reference', () => {
+    expect(() => assertNoSystemCatalogs('SELECT * FROM pg_catalog.pg_tables')).toThrow(
+      /system catalog/i,
+    );
+  });
+
+  it('rejects sqlite_master reference', () => {
+    expect(() => assertNoSystemCatalogs('SELECT * FROM sqlite_master')).toThrow(/system catalog/i);
+  });
+
+  it('rejects duckdb_tables() call', () => {
+    let caught: unknown;
+    try {
+      assertNoSystemCatalogs('SELECT * FROM duckdb_tables()');
+    } catch (err) {
+      caught = err;
+    }
+    expect(caught).toBeInstanceOf(McpError);
+    const data = (caught as McpError).data as { reason: string };
+    expect(data.reason).toBe('system_catalog_access');
+  });
+
+  it('rejects duckdb_columns() call', () => {
+    expect(() => assertNoSystemCatalogs('SELECT * FROM duckdb_columns()')).toThrow(
+      /system catalog/i,
+    );
+  });
+
+  it('does not reject catalog name appearing only in a string literal', () => {
+    expect(() => assertNoSystemCatalogs("SELECT 'information_schema' AS s FROM t")).not.toThrow();
+  });
+
+  it('does not reject clean SELECT against a user table', () => {
+    expect(() =>
+      assertNoSystemCatalogs('SELECT id, name FROM germplasm WHERE id = 1'),
+    ).not.toThrow();
+  });
+
+  it('handles empty / undefined SQL gracefully', () => {
+    expect(() => assertNoSystemCatalogs('')).not.toThrow();
+    expect(() => assertNoSystemCatalogs(undefined as unknown as string)).not.toThrow();
   });
 });
 

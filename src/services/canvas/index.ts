@@ -26,6 +26,7 @@ export {
   ALLOWED_PLAN_OPERATORS,
   ALLOWED_STATEMENT_TYPES,
   assertNoDeniedFunctions,
+  assertNoSystemCatalogs,
   assertReadOnlyQuery,
   assertValidIdentifier,
   CANVAS_IDENTIFIER_REGEX,

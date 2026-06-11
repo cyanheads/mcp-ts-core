@@ -9,7 +9,13 @@
 
 import { unlink } from 'node:fs/promises';
 
-import { databaseError, notFound, timeout, validationError } from '@/types-global/errors.js';
+import {
+  databaseError,
+  McpError,
+  notFound,
+  timeout,
+  validationError,
+} from '@/types-global/errors.js';
 import { lazyImport } from '@/utils/internal/lazyImport.js';
 import { logger } from '@/utils/internal/logger.js';
 import { type RequestContextLike, requestContextService } from '@/utils/internal/requestContext.js';
@@ -18,6 +24,7 @@ import type { IDataCanvasProvider } from '../../core/IDataCanvasProvider.js';
 import { sniffSchema } from '../../core/schemaSniffer.js';
 import {
   assertNoDeniedFunctions,
+  assertNoSystemCatalogs,
   assertPlanReadOnly,
   assertSelectOnly,
   assertValidIdentifier,
@@ -259,7 +266,7 @@ export class DuckdbProvider implements IDataCanvasProvider {
     const duck = await importDuckDB();
     options?.signal?.throwIfAborted();
 
-    await this.assertReadOnlySql(record, sql, duck);
+    await this.assertReadOnlySql(record, sql, duck, options);
 
     // Per-query connection so cancellation interrupts only this call.
     const conn = await record.instance.connect();
@@ -282,6 +289,7 @@ export class DuckdbProvider implements IDataCanvasProvider {
       let rowsToReturn: Record<string, unknown>[] = [];
       let columns: string[] = [];
       let totalRowCount = 0;
+      let truncated: boolean | undefined;
 
       if (options?.registerAs) {
         assertValidIdentifier(options.registerAs, 'table');
@@ -296,18 +304,33 @@ export class DuckdbProvider implements IDataCanvasProvider {
         rowsToReturn = reader.getRowObjectsJson() as Record<string, unknown>[];
         columns = reader.columnNames();
         totalRowCount = await this.countRows(conn, options.registerAs);
+        // truncated is false on the registerAs path — rowCount is exact.
       } else {
-        const reader = await conn.runAndReadAll(sql);
-        const allRows = reader.getRowObjectsJson() as Record<string, unknown>[];
+        // Use streamAndReadUntil to keep the engine pipeline lazy: reads at
+        // most rowLimit+1 rows without materializing the full result in JS.
+        const reader = await conn.streamAndReadUntil(sql, rowLimit + 1);
+        const fetched = reader.getRowObjectsJson() as Record<string, unknown>[];
         columns = reader.columnNames();
-        totalRowCount = allRows.length;
-        rowsToReturn = allRows.slice(0, Math.min(preview, rowLimit));
+        if (fetched.length > rowLimit) {
+          // More rows exist beyond the cap.
+          rowsToReturn = fetched.slice(0, rowLimit);
+          totalRowCount = rowLimit;
+          truncated = true;
+        } else {
+          rowsToReturn = fetched;
+          totalRowCount = fetched.length;
+        }
+        // Apply preview cap (may be smaller than rowLimit when caller requests a smaller slice).
+        if (rowsToReturn.length > preview) {
+          rowsToReturn = rowsToReturn.slice(0, preview);
+        }
       }
 
       return {
         rows: rowsToReturn,
         columns,
         rowCount: totalRowCount,
+        ...(truncated && { truncated }),
         ...(registeredAs && { tableName: registeredAs }),
       };
     } catch (err) {
@@ -415,7 +438,7 @@ export class DuckdbProvider implements IDataCanvasProvider {
     // operator allowlist transitively at query time, but we also gate the
     // SELECT at registration so a malicious definition fails loud here, not
     // later when the view is referenced.
-    await this.assertReadOnlySql(record, selectSql, duck);
+    await this.assertReadOnlySql(record, selectSql, duck, options);
     options?.signal?.throwIfAborted();
 
     // Block view-on-table-name collisions explicitly so the failure carries a
@@ -547,16 +570,32 @@ export class DuckdbProvider implements IDataCanvasProvider {
     } else if (options?.kind === 'table') {
       filters.push(`table_type <> 'VIEW'`);
     }
+
+    // Fetch table list and size estimates in one pass. duckdb_tables() returns
+    // estimated_size (BIGINT) for base tables — not available for views, which
+    // have no row in duckdb_tables(). LEFT JOIN so views still appear.
+    // estimated_size arrives as a JSON string for BIGINT; coerce via Number().
     const reader = await record.controlConnection.runAndReadAll(
-      `SELECT table_name, table_type FROM information_schema.tables WHERE ${filters.join(' AND ')} ORDER BY table_name`,
+      `SELECT t.table_name, t.table_type, dt.estimated_size
+       FROM information_schema.tables t
+       LEFT JOIN duckdb_tables() dt
+         ON dt.schema_name = 'main' AND dt.table_name = t.table_name
+       WHERE ${filters.join(' AND ')}
+       ORDER BY t.table_name`,
     );
-    const tableRows = reader.getRowObjectsJson() as { table_name: string; table_type: string }[];
+    const tableRows = reader.getRowObjectsJson() as {
+      table_name: string;
+      table_type: string;
+      estimated_size: string | number | null;
+    }[];
+
     return await Promise.all(
       tableRows.map((row) =>
         this.describeOne(
           record.controlConnection,
           row.table_name,
           row.table_type === 'VIEW' ? 'view' : 'table',
+          row.estimated_size != null ? Number(row.estimated_size) : undefined,
         ),
       ),
     );
@@ -566,6 +605,7 @@ export class DuckdbProvider implements IDataCanvasProvider {
     connection: DuckDBConnection,
     tableName: string,
     kind: CanvasObjectKind,
+    approxSizeBytes?: number,
   ): Promise<TableInfo> {
     const [colReader, rowCount] = await Promise.all([
       connection.runAndReadAll(
@@ -590,6 +630,7 @@ export class DuckdbProvider implements IDataCanvasProvider {
       kind,
       rowCount,
       columns,
+      ...(approxSizeBytes !== undefined && { approxSizeBytes }),
     };
   }
 
@@ -644,32 +685,71 @@ export class DuckdbProvider implements IDataCanvasProvider {
     record: CanvasRecord,
     sql: string,
     duck: DuckDBModule,
+    options?: { denySystemCatalogs?: boolean },
   ): Promise<void> {
+    // Optional layer 0: reject system catalog references on shared canvases
+    // where handle possession is the access boundary.
+    if (options?.denySystemCatalogs) {
+      assertNoSystemCatalogs(sql);
+    }
+
     // Layer 1: text-level deny-list. read_json/read_parquet/... lower into
     // generic scans that pass the operator allowlist, so reject by name first.
     assertNoDeniedFunctions(sql);
 
     // Layers 2-3: parse and type-check before EXPLAIN.
-    // Fail closed: if extractStatements or prepare(0) throws (e.g. bare PRAGMA
-    // that DuckDB cannot prepare), treat the input as non-SELECT rather than
-    // letting the raw engine error escape as a generic InternalError (-32603).
+    // Fail closed: if extractStatements or prepare(0) throws for a missing-
+    // table binder error, surface NotFound so the agent knows to re-stage.
+    // Any other error is treated as non-SELECT (the existing fail-closed path).
     let statementCount: number;
     let statementType: string;
     try {
       const extracted = await record.controlConnection.extractStatements(sql);
       statementCount = extracted.count;
       if (statementCount === 1) {
-        const prepared = await extracted.prepare(0);
+        let prepared: { statementType: number; destroySync(): void } | undefined;
         try {
+          prepared = await extracted.prepare(0);
           const typeInt = prepared.statementType;
           statementType = duck.StatementType[typeInt] ?? 'UNKNOWN';
+        } catch (prepErr) {
+          // DuckDB raises a Catalog/Binder error at prepare time when the
+          // referenced table doesn't exist. Surface a structured NotFound so
+          // the agent knows to re-stage rather than blaming the SQL shape.
+          if (prepErr instanceof Error) {
+            const tableNameMatch = prepErr.message.match(
+              /Table with name (\S+) does not exist|Catalog Error:.*?(\S+) does not exist/i,
+            );
+            if (tableNameMatch) {
+              const tableName = tableNameMatch[1] ?? tableNameMatch[2];
+              throw notFound(
+                `Canvas table ${tableName ? `"${tableName}"` : '(unknown)'} does not exist. The table may have expired or been dropped — re-stage it or call describe() to inspect the canvas.`,
+                {
+                  reason: 'missing_table',
+                  ...(tableName && { tableName }),
+                  recovery: {
+                    hint: 'Re-stage the table via registerTable() or call describe() to see what tables are currently available.',
+                  },
+                },
+              );
+            }
+          }
+          throw validationError(
+            'Canvas query must be SELECT; the statement could not be parsed or prepared.',
+            { reason: SQL_GATE_REASONS.nonSelectStatement, statementType: 'UNKNOWN' },
+          );
         } finally {
-          prepared.destroySync();
+          prepared?.destroySync();
         }
       } else {
         statementType = 'UNKNOWN';
       }
-    } catch {
+    } catch (err) {
+      // Re-throw NotFound (missing_table) and any ValidationError we just threw;
+      // only fall through to the generic non-SELECT path for unexpected errors.
+      // instanceof McpError, not a loose `'code' in err` — engine/Node errors
+      // can carry errno-style `code` props and must not escape the gate raw.
+      if (err instanceof McpError) throw err;
       throw validationError(
         'Canvas query must be SELECT; the statement could not be parsed or prepared.',
         { reason: SQL_GATE_REASONS.nonSelectStatement, statementType: 'UNKNOWN' },

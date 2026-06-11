@@ -489,6 +489,135 @@ describeIf('canvas · DuckDB round trip', () => {
     );
   });
 
+  // Issue #221 — inferred schema always nullable: register table with no explicit
+  // schema where a column is null-free in the sniff window but has nulls after.
+  it('issue #221 — null past the sniff window does not fail registration', async () => {
+    const instance = await canvas.acquire(undefined, ctx);
+    // Build rows where the first 100 (the sniff window) have ticker populated,
+    // but row 101 is null for ticker.
+    const rows = Array.from({ length: 110 }, (_, i) =>
+      i < 100 ? { id: i, ticker: `TICK_${i}` } : { id: i, ticker: null },
+    );
+    // Pre-fix: this would throw because inferred schema had NOT NULL on ticker.
+    await expect(instance.registerTable('stocks', rows)).resolves.toMatchObject({
+      tableName: 'stocks',
+      rowCount: 110,
+    });
+    // The null row survives the round-trip.
+    const result = await instance.query('SELECT COUNT(*) AS n FROM stocks WHERE ticker IS NULL');
+    expect(Number(result.rows[0]?.n)).toBe(10);
+  });
+
+  // Issue #222 — streamAndReadUntil: truncated flag set when result exceeds rowLimit.
+  it('issue #222 — query sets truncated: true when result exceeds rowLimit', async () => {
+    const bigProvider = new DuckdbProvider({
+      memoryLimitMb: 256,
+      exportRootPath: exportRoot,
+      defaultRowLimit: 10,
+      schemaSniffRows: 100,
+    });
+    const bigRegistry = new CanvasRegistry(bigProvider, {
+      ttlMs: 60_000,
+      absoluteCapMs: 600_000,
+      maxCanvasesPerTenant: 100,
+      sweeperIntervalMs: 0,
+    });
+    const bigCanvas = new DataCanvas(bigProvider, bigRegistry);
+    try {
+      const instance = await bigCanvas.acquire(undefined, ctx);
+      const rows = Array.from({ length: 50 }, (_, i) => ({ x: i }));
+      await instance.registerTable('big', rows);
+
+      const result = await instance.query('SELECT x FROM big ORDER BY x');
+      expect(result.truncated).toBe(true);
+      expect(result.rows.length).toBe(10);
+      expect(result.rowCount).toBe(10);
+
+      // Below the limit: no truncation.
+      const small = await instance.query('SELECT x FROM big WHERE x < 5 ORDER BY x');
+      expect(small.truncated).toBeUndefined();
+      expect(small.rows.length).toBe(5);
+    } finally {
+      await bigCanvas.shutdown(ctx);
+    }
+  });
+
+  // Issue #223 — missing-table query yields NotFound, not ValidationError.
+  it('issue #223 — querying a non-existent table throws NotFound with reason missing_table', async () => {
+    const instance = await canvas.acquire(undefined, ctx);
+    let caught: unknown;
+    try {
+      await instance.query('SELECT * FROM does_not_exist');
+    } catch (err) {
+      caught = err;
+    }
+    expect(caught).toBeInstanceOf(McpError);
+    const mcpErr = caught as McpError;
+    // Must be NotFound (-32001), not ValidationError (-32007).
+    expect(mcpErr.code).toBe(-32001);
+    expect((mcpErr.data as { reason?: string })?.reason).toBe('missing_table');
+  });
+
+  // Issue #224 — denySystemCatalogs: when set, the gate rejects catalog
+  // references at the text-scan layer (system_catalog_access). Without the
+  // flag, catalog queries may still fail at a later layer (plan-walk), but with
+  // a different reason — the text-scan layer is the early-exit for this guard.
+  it('issue #224 — denySystemCatalogs emits system_catalog_access when set', async () => {
+    const instance = await canvas.acquire(undefined, ctx);
+    await instance.registerTable('t', [{ x: 1 }]);
+
+    // With denySystemCatalogs: true — the text-scan layer fires early with the
+    // structured reason before any later layer runs.
+    let caught: unknown;
+    try {
+      await instance.query('SELECT * FROM information_schema.tables', {
+        denySystemCatalogs: true,
+      });
+    } catch (err) {
+      caught = err;
+    }
+    expect(caught).toBeInstanceOf(McpError);
+    expect((caught as McpError).data?.reason).toBe('system_catalog_access');
+
+    // Without the flag: a different reason (from a later gate layer), NOT system_catalog_access.
+    let caughtDefault: unknown;
+    try {
+      await instance.query('SELECT * FROM information_schema.tables');
+    } catch (err) {
+      caughtDefault = err;
+    }
+    // May fail (plan-walk), but must not carry the system_catalog_access reason.
+    if (caughtDefault instanceof McpError) {
+      expect(caughtDefault.data?.reason).not.toBe('system_catalog_access');
+    }
+  });
+
+  it('issue #224 — denySystemCatalogs also applies to registerView', async () => {
+    const instance = await canvas.acquire(undefined, ctx);
+    await instance.registerTable('t', [{ x: 1 }]);
+    await expect(
+      instance.registerView('bad_view', 'SELECT * FROM information_schema.tables', {
+        denySystemCatalogs: true,
+      }),
+    ).rejects.toMatchObject({ data: { reason: 'system_catalog_access' } });
+  });
+
+  // Issue #226 — approxSizeBytes populated for tables, undefined for views.
+  it('issue #226 — describe() sets approxSizeBytes for tables, undefined for views', async () => {
+    const instance = await canvas.acquire(undefined, ctx);
+    const rows = Array.from({ length: 100 }, (_, i) => ({ id: i, label: `row_${i}` }));
+    await instance.registerTable('sized_table', rows);
+    await instance.registerView('sized_view', 'SELECT id FROM sized_table');
+
+    const tables = await instance.describe();
+    const tableInfo = tables.find((t) => t.name === 'sized_table');
+    const viewInfo = tables.find((t) => t.name === 'sized_view');
+
+    expect(typeof tableInfo?.approxSizeBytes).toBe('number');
+    expect((tableInfo?.approxSizeBytes ?? 0) > 0).toBe(true);
+    expect(viewInfo?.approxSizeBytes).toBeUndefined();
+  });
+
   // Issue #140 — per-table TTL: register table with ttlMs, advance clock, verify
   // the table is dropped but the canvas survives with its other tables intact.
   it('issue #140 — per-table TTL: describe surfaces expiresAt; sweep drops expired table; canvas survives', async () => {

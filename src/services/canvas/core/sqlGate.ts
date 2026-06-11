@@ -50,6 +50,7 @@ export const SQL_GATE_REASONS = {
   identifierEmpty: 'identifier_empty',
   identifierShape: 'identifier_shape',
   identifierReserved: 'identifier_reserved',
+  systemCatalogAccess: 'system_catalog_access',
 } as const;
 
 /** Union of all gate reason strings — see {@link SQL_GATE_REASONS}. */
@@ -278,6 +279,50 @@ export function assertNoDeniedFunctions(sql: string): void {
     throw validationError(
       `Canvas query references disallowed table function: ${fn}. PRAGMA metadata functions are not permitted.`,
       { reason: SQL_GATE_REASONS.deniedFunction, function: fn },
+    );
+  }
+}
+
+/**
+ * System-catalog namespace patterns for the text-scan deny layer.
+ *
+ * Covers bare and dotted references to `information_schema`, `pg_catalog`,
+ * `sqlite_master` (all three are reachable via DuckDB compatibility layers)
+ * plus the `duckdb_<name>(` call namespace. String literals are stripped
+ * before the scan so quoted catalog names do not false-positive.
+ *
+ * Two forms to cover how each namespace can appear in SQL:
+ * - `information_schema.` / `pg_catalog.` — schema-qualified table or view
+ *   reference; bare `information_schema` alone selects the schema namespace.
+ * - `sqlite_master` — bare table name (no dot required).
+ * - `duckdb_<word>(` — metadata TVF call shape (e.g. `duckdb_tables()`).
+ */
+const SYSTEM_CATALOG_REGEX =
+  /\b(information_schema|pg_catalog)\b|\bsqlite_master\b|\b(duckdb_\w+)\s*\(/gi;
+
+/**
+ * Optional gate layer: reject references to system catalog namespaces.
+ *
+ * Enable via `QueryOptions.denySystemCatalogs` or
+ * `RegisterViewOptions.denySystemCatalogs` on servers that use a hidden shared
+ * canvas where handle possession is the access boundary. When enabled, any
+ * reference to `information_schema`, `pg_catalog`, `sqlite_master`, or
+ * `duckdb_<name>()` throws `ValidationError` with
+ * `data.reason: 'system_catalog_access'`.
+ *
+ * Callers strip comments and string literals before this scan (identical
+ * pre-processing to {@link assertNoDeniedFunctions}).
+ */
+export function assertNoSystemCatalogs(sql: string): void {
+  if (typeof sql !== 'string' || sql.length === 0) return;
+  const stripped = stripSqlStringLiterals(stripSqlComments(sql));
+  SYSTEM_CATALOG_REGEX.lastIndex = 0;
+  const match = SYSTEM_CATALOG_REGEX.exec(stripped);
+  if (match) {
+    const name = (match[1] ?? match[2] ?? match[0]).toLowerCase();
+    throw validationError(
+      `Canvas query references a system catalog: ${name}. System catalogs are not permitted when denySystemCatalogs is enabled.`,
+      { reason: SQL_GATE_REASONS.systemCatalogAccess, catalog: name },
     );
   }
 }

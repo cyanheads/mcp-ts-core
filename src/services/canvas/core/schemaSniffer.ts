@@ -80,8 +80,10 @@ function unionToColumnType(observed: Set<JsType>): ColumnType {
 
 /**
  * Infer a `ColumnSchema[]` from a set of fully-buffered rows. Column ordering
- * follows first appearance. A column is `nullable` if any sampled row had
- * `null`/`undefined` for it or was missing the key. Throws if `rows` is empty.
+ * follows first appearance. All inferred columns are `nullable: true` — a
+ * sample can prove a column nullable, but can never prove NOT NULL (a null may
+ * appear past the sniff window). Pass an explicit `RegisterTableOptions.schema`
+ * to enforce NOT NULL constraints. Throws if `rows` is empty.
  */
 export function inferSchemaFromRows(rows: readonly Row[]): ColumnSchema[] {
   if (rows.length === 0) {
@@ -93,7 +95,6 @@ export function inferSchemaFromRows(rows: readonly Row[]): ColumnSchema[] {
 
   const observedByCol = new Map<string, Set<JsType>>();
   const columnOrder: string[] = [];
-  const presenceCount = new Map<string, number>();
 
   for (const row of rows) {
     for (const key of Object.keys(row)) {
@@ -104,16 +105,12 @@ export function inferSchemaFromRows(rows: readonly Row[]): ColumnSchema[] {
         columnOrder.push(key);
       }
       bag.add(classify(row[key]));
-      presenceCount.set(key, (presenceCount.get(key) ?? 0) + 1);
     }
   }
 
-  const total = rows.length;
   return columnOrder.map((name) => {
     const observed = observedByCol.get(name) ?? new Set<JsType>(['null']);
-    const present = presenceCount.get(name) ?? 0;
-    const nullable = observed.has('null') || present < total;
-    return { name, type: unionToColumnType(observed), nullable };
+    return { name, type: unionToColumnType(observed), nullable: true };
   });
 }
 
@@ -121,8 +118,8 @@ export function inferSchemaFromRows(rows: readonly Row[]): ColumnSchema[] {
  * Buffer up to `sniffRowCount` rows and return the inferred schema, the
  * buffered rows, and a continuation iterator. Throws if the input is empty.
  *
- * Column ordering follows first appearance. A column is `nullable` if any
- * sampled row had `null`/`undefined` for it or was missing the key.
+ * Column ordering follows first appearance. All inferred columns are
+ * `nullable: true` — pass an explicit schema to enforce NOT NULL.
  */
 export function sniffSchema(iterable: Iterable<Row>, sniffRowCount: number): SniffedSchema {
   if (sniffRowCount < 1) {

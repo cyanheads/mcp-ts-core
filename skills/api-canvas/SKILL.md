@@ -4,7 +4,7 @@ description: >
   DataCanvas primitive reference — a Tier 3 SQL/analytical workspace for tabular MCP servers, backed by DuckDB. Use when registering tables from upstream APIs, running ad-hoc SQL across them, and exporting results. Covers the acquire → register → query → export flow, per-table TTL, the token-sharing pattern for multi-agent collaboration, env config, and Cloudflare Workers fail-closed behavior.
 metadata:
   author: cyanheads
-  version: "1.5"
+  version: "1.6"
   audience: external
   type: reference
 ---
@@ -135,7 +135,7 @@ await instance.registerTable('big_dataset', asyncRows, {
 await instance.registerTable('recent_fetch', rows, { ttlMs: 30 * 60 * 1000 });
 ```
 
-**Schema inference** when `schema` is omitted: sniffer materializes the first 100 rows, unions JS-side types per column, and maps to DuckDB types. Fall-backs to `VARCHAR` for ambiguous unions (string mixed with numerics). Numeric widening: `INTEGER + DOUBLE → DOUBLE`, `INTEGER + BIGINT → BIGINT`. Column ordering follows first-appearance.
+**Schema inference** when `schema` is omitted: sniffer materializes the first 100 rows, unions JS-side types per column, and maps to DuckDB types. All inferred columns are **always nullable** — a sample can prove a column is nullable, but can never prove NOT NULL (a null may appear past the sniff window). Pass an explicit `schema` when `NOT NULL` enforcement is required. Fall-backs to `VARCHAR` for ambiguous unions (string mixed with numerics). Numeric widening: `INTEGER + DOUBLE → DOUBLE`, `INTEGER + BIGINT → BIGINT`. Column ordering follows first-appearance.
 
 **Per-table TTL (`ttlMs`)** — optional sliding TTL for this table specifically. When set:
 - The sweep loop drops the table (and clears its bookkeeping) when its window expires.
@@ -146,7 +146,9 @@ await instance.registerTable('recent_fetch', rows, { ttlMs: 30 * 60 * 1000 });
 
 ### `instance.query(sql, options?)`
 
-Run SQL across registered tables. Returns at most `rowLimit` rows (default 10 000). For full result sets, pass `registerAs` — the result is materialized as a new canvas table; the response carries a `preview` slice plus the table reference.
+Run SQL across registered tables. Returns at most `rowLimit` rows (default 10 000). When the result exceeds `rowLimit`, the response carries `truncated: true` and `rowCount` reflects the number of materialized rows (not the full result set). For full result sets and exact counts, pass `registerAs` — the result is materialized as a new canvas table; the response carries a `preview` slice and the exact `rowCount`.
+
+Querying a table that does not exist throws `NotFound` (`data.reason: 'missing_table'`) with a recovery hint to re-stage the table or call `describe()`. This happens when a table has expired (per-table TTL), been dropped, or the name is mistyped. The error is `NotFound`, not `ValidationError` — agents should re-stage, not fix the SQL shape.
 
 ```ts
 const result = await instance.query(`
@@ -172,7 +174,9 @@ const chained = await instance.query(
 
 `ttlMs` on `query({ registerAs })` assigns a per-table TTL to the materialized table — the same sliding semantics as `registerTable({ ttlMs })`. The SQL text is also scanned for referenced table names; any tracked per-table TTL entry found is slid on each `query()` call.
 
-**Read-only enforcement** (four layers):
+`denySystemCatalogs?: boolean` (default `false`) — when `true`, the gate rejects any reference to system catalog namespaces (`information_schema`, `pg_catalog`, `sqlite_master`, `duckdb_<name>()` calls) at the text-scan layer before the query executes. Use on shared canvases where handle possession is the access boundary — catalog namespaces let callers enumerate every staged handle. Rejection throws `ValidationError` with `data.reason: 'system_catalog_access'`. Canvas-token servers that explicitly expose `describe()` to agents do not need this; only servers that intentionally hide the full catalog should opt in.
+
+**Read-only enforcement** (four layers + optional catalog layer):
 1. Text-level deny-list — pre-parse scan for file/HTTP-reading table functions (`read_csv*`, `read_json*`, `read_parquet*`, `read_text`, `read_blob`, `glob`, `iceberg_scan`, `delta_scan`, `postgres_scan`, `mysql_scan`, `sqlite_scan`, plus pre-staged spatial ones).
 2. Statement count (must be 1) via `extractStatements`.
 3. Statement type (must be `SELECT`) via `prepared.statementType`.
@@ -182,7 +186,7 @@ Any layer's rejection throws `ValidationError` with a structured `data.reason`. 
 
 ### `instance.registerView(name, selectSql, options?)`
 
-Register a SQL view on the canvas. The `SELECT` runs through the same four-layer gate `query()` enforces, so a malicious definition fails at registration time, not later when the view is referenced.
+Register a SQL view on the canvas. The `SELECT` runs through the same gate `query()` enforces (four layers), so a malicious definition fails at registration time, not later when the view is referenced. Pass `{ denySystemCatalogs: true }` to also block catalog namespace references in the view definition — same semantics as the `query()` flag.
 
 ```ts
 await instance.registerView(
@@ -224,7 +228,7 @@ await instance.export('g_with_obs', { format: 'csv', stream: writableStream });
 
 ```ts
 const tables = await instance.describe();
-// [{ name: 'germplasm', kind: 'table', rowCount: 200, columns: [...] }, ...]
+// [{ name: 'germplasm', kind: 'table', rowCount: 200, approxSizeBytes: 8192, columns: [...] }, ...]
 
 // Filter by kind ('table' | 'view').
 const onlyViews = await instance.describe({ kind: 'view' });
@@ -234,6 +238,8 @@ await instance.clear();                  // returns count dropped (drops views b
 ```
 
 `TableInfo.kind` discriminates `'table'` vs `'view'`. For views, `rowCount` is materialized at describe time via `COUNT(*)` — not free; treat as an approximation if the view is expensive.
+
+`TableInfo.approxSizeBytes` is set for base tables (DuckDB's `estimated_size` from `duckdb_tables()`). It is `undefined` for views — views have no entry in `duckdb_tables()`. Use it to decide what to drop when a canvas approaches its memory limit.
 
 ### Cancellation
 
