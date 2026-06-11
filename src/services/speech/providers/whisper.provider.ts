@@ -111,7 +111,7 @@ export class WhisperProvider implements ISpeechProvider {
 
   /**
    * Transcribe audio to text using the OpenAI Whisper API.
-   * Audio may be provided as a raw `Buffer` or a base64-encoded string. The data is
+   * Audio may be provided as a raw `Uint8Array` or a base64-encoded string. The data is
    * submitted to `POST /audio/transcriptions` as multipart `FormData`. When
    * `options.timestamps` is `true`, the request uses `verbose_json` format and requests
    * word-level granularity, populating `result.words`.
@@ -140,11 +140,11 @@ export class WhisperProvider implements ISpeechProvider {
       throw invalidParams('Audio data is required', context);
     }
 
-    // Convert audio to Buffer if it's a base64 string
-    let audioBuffer: Buffer;
+    // Convert audio to Uint8Array if it's a base64 string
+    let audioBuffer: Uint8Array;
     if (typeof options.audio === 'string') {
       try {
-        audioBuffer = Buffer.from(options.audio, 'base64');
+        audioBuffer = Uint8Array.fromBase64(options.audio);
       } catch (_error) {
         throw invalidParams('Invalid base64 audio data', context);
       }

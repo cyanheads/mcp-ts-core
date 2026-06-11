@@ -478,4 +478,18 @@ describe('CanvasRegistry · shutdown', () => {
     );
     registry = undefined;
   });
+
+  it('[Symbol.asyncDispose] shuts down the registry using a synthetic context', async () => {
+    const provider = makeStubProvider();
+    registry = new CanvasRegistry(provider, makeOptions());
+    await registry.acquire(undefined, 'tenant-a', baseContext);
+
+    await expect(
+      (registry as unknown as { [Symbol.asyncDispose](): Promise<void> })[Symbol.asyncDispose](),
+    ).resolves.toBeUndefined();
+
+    expect(provider.destroyCalls.length).toBe(1);
+    expect(provider.shutdown).toHaveBeenCalled();
+    registry = undefined;
+  });
 });

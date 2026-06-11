@@ -1,80 +1,59 @@
 /**
- * @fileoverview Focused tests for initHighResTimer variants.
+ * @fileoverview Tests for the now-deprecated initHighResTimer and loadPerfHooks exports.
+ * Both are no-ops under the Node ≥24 / Bun ≥1.3 floors; tests verify they remain
+ * callable without error and that nowMs delegates to globalThis.performance.now().
  * @module tests/utils/internal/performance.init.test
  */
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { describe, expect, it } from 'vitest';
 
-type PerfHooksPerformance = typeof import('perf_hooks').performance;
+import {
+  // biome-ignore lint/suspicious/noDeprecatedImports: exercising the deprecated no-op shim is this suite's purpose
+  initHighResTimer,
+  // biome-ignore lint/suspicious/noDeprecatedImports: exercising the deprecated no-op shim is this suite's purpose
+  loadPerfHooks,
+  nowMs,
+} from '../../../../src/utils/internal/performance.js';
 
-import { logger } from '../../../../src/utils/internal/logger.js';
-import * as performanceModule from '../../../../src/utils/internal/performance.js';
+describe('initHighResTimer (deprecated no-op)', () => {
+  it('resolves without error when called with no arguments', async () => {
+    await expect(initHighResTimer()).resolves.toBeUndefined();
+  });
 
-type GlobalWithPerf = typeof globalThis & { performance?: Performance };
-
-const g = globalThis as GlobalWithPerf;
-const originalPerformance = g.performance;
-const originalDateNow = Date.now;
-
-afterEach(() => {
-  if (originalPerformance) {
-    g.performance = originalPerformance;
-  } else {
-    delete g.performance;
-  }
-  Date.now = originalDateNow;
-  vi.restoreAllMocks();
+  it('resolves without error when called with a loader argument (ignored)', async () => {
+    const neverCalled = async () => ({ performance: { now: () => 0 } });
+    await expect(initHighResTimer(neverCalled)).resolves.toBeUndefined();
+  });
 });
 
-describe('initHighResTimer', () => {
-  it('uses browser performance.now when available', async () => {
-    const nowSpy = vi.fn(() => 123.45);
-    g.performance = { now: nowSpy } as unknown as Performance;
-
-    await performanceModule.initHighResTimer();
-
-    expect(performanceModule.nowMs()).toBe(123.45);
-    expect(nowSpy).toHaveBeenCalledTimes(1);
-  });
-
-  it('falls back to Date.now when perf_hooks import fails', async () => {
-    const warningSpy = vi.spyOn(logger, 'warning').mockImplementation(() => {});
-    const dateNowSpy = vi.spyOn(Date, 'now').mockReturnValue(678.9);
-
-    delete g.performance;
-
-    // Pass a failing loader directly — vi.spyOn on ESM exports doesn't
-    // affect internal module calls.
-    const failingLoader = async () => {
-      throw new Error('perf_hooks unavailable');
-    };
-    await performanceModule.initHighResTimer(failingLoader);
-
-    const result = performanceModule.nowMs();
-    expect(typeof result).toBe('number');
-    expect(warningSpy).toHaveBeenCalledWith(
-      'Could not import perf_hooks, falling back to Date.now() for performance timing.',
-    );
-    expect(dateNowSpy).toHaveBeenCalled();
-  });
-
-  it('uses perf_hooks when available in a Node environment', async () => {
-    const nowSpy = vi.fn(() => 456.78);
-
-    delete g.performance;
-
-    // Pass a mock loader that returns a fake perf_hooks performance object.
-    const mockLoader = async () => ({
-      performance: { now: nowSpy } as unknown as PerfHooksPerformance,
-    });
-    await performanceModule.initHighResTimer(mockLoader);
-
-    const result = performanceModule.nowMs();
-    expect(typeof result).toBe('number');
-    expect(nowSpy).toHaveBeenCalled();
-  });
-
-  it('loadPerfHooks returns the perf_hooks performance interface', async () => {
-    const mod = await performanceModule.loadPerfHooks();
+describe('loadPerfHooks (deprecated)', () => {
+  it('returns an object with a performance.now function', async () => {
+    const mod = await loadPerfHooks();
     expect(typeof mod.performance.now).toBe('function');
+  });
+
+  it('delegates to performance.now', async () => {
+    const mod = await loadPerfHooks();
+    const t0 = performance.now();
+    const t1 = mod.performance.now();
+    // Both should be close (same monotonic clock, within 10ms of each other)
+    expect(Math.abs(t1 - t0)).toBeLessThan(10);
+  });
+});
+
+describe('nowMs', () => {
+  it('returns a positive number', () => {
+    expect(nowMs()).toBeGreaterThan(0);
+  });
+
+  it('is monotonically non-decreasing', () => {
+    const t0 = nowMs();
+    const t1 = nowMs();
+    expect(t1).toBeGreaterThanOrEqual(t0);
+  });
+
+  it('matches performance.now() within 1ms', () => {
+    const t0 = performance.now();
+    const t1 = nowMs();
+    expect(Math.abs(t1 - t0)).toBeLessThan(1);
   });
 });

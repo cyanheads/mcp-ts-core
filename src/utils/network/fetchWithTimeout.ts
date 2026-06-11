@@ -360,17 +360,11 @@ export async function fetchWithTimeout(
   const timeoutSentinel = 'FETCH_TIMEOUT';
   const timeoutId = setTimeout(() => controller.abort(timeoutSentinel), timeoutMs);
 
-  // If an external signal is provided (e.g., client disconnect), forward its abort
-  if (externalSignal) {
-    if (externalSignal.aborted) {
-      controller.abort(externalSignal.reason);
-    } else {
-      externalSignal.addEventListener('abort', () => controller.abort(externalSignal.reason), {
-        once: true,
-        signal: controller.signal,
-      });
-    }
-  }
+  // Compose the timeout signal with any caller-supplied signal. AbortSignal.any
+  // is available on all supported floors (Node ≥24, Bun ≥1.3, workerd).
+  const fetchSignal = externalSignal
+    ? AbortSignal.any([controller.signal, externalSignal])
+    : controller.signal;
 
   const startTime = performance.now();
   const parsedUrl = new URL(urlString);
@@ -384,7 +378,7 @@ export async function fetchWithTimeout(
     for (;;) {
       const response = await fetch(currentUrl, {
         ...fetchInit,
-        signal: controller.signal,
+        signal: fetchSignal,
       });
 
       // Handle redirects manually when SSRF protection is active

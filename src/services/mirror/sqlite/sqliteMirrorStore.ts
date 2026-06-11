@@ -96,7 +96,7 @@ export function sqliteMirrorStore(spec: SqliteMirrorStoreSpec): MirrorStore {
     }
   }
 
-  return {
+  const store: MirrorStore = {
     async applyBatch(records: MirrorRow[], tombstones: string[]): Promise<void> {
       if (records.length === 0 && tombstones.length === 0) return;
       const { handle } = await open();
@@ -239,7 +239,14 @@ export function sqliteMirrorStore(spec: SqliteMirrorStoreSpec): MirrorStore {
       }
       return Promise.resolve();
     },
+
+    /** Alias for {@link close}. Enables `await using store = sqliteMirrorStore(spec)`. */
+    async [Symbol.asyncDispose](): Promise<void> {
+      await this.close();
+    },
   };
+
+  return store;
 }
 
 // ---------------------------------------------------------------------------

@@ -6,7 +6,6 @@
  * @module src/utils/internal/performance
  */
 
-import type { performance as PerfHooksPerformance } from 'node:perf_hooks';
 import { SpanStatusCode, trace } from '@opentelemetry/api';
 
 import { config } from '@/config/index.js';
@@ -92,75 +91,45 @@ function getActiveRequestsGauge() {
   return activeRequests;
 }
 
-// Environment-aware high-resolution timer
-let performanceNow: () => number = () => Date.now(); // Fallback
-
 /**
- * Dynamically loads Node's `perf_hooks` module.
- * Exposed as a named export so tests can inject a mock loader into
- * {@link initHighResTimer} without patching the dynamic import machinery.
- *
- * @returns A promise resolving to the `perf_hooks` module shape (just the `performance` export).
+ * @deprecated No longer needed. `globalThis.performance.now` is universally
+ * available on Node ≥24 and Bun ≥1.3. Kept as a no-op export to avoid a
+ * breaking change for consumers that call it during startup.
  */
-export async function loadPerfHooks(): Promise<{
-  performance: typeof PerfHooksPerformance;
+export function loadPerfHooks(): Promise<{
+  performance: { now: () => number };
 }> {
-  return await (import('node:perf_hooks') as Promise<{
-    performance: typeof PerfHooksPerformance;
-  }>);
+  // performance is an ambient global declared by @types/node (perf_hooks.d.ts)
+  // and available in all supported environments (Node ≥24, Bun ≥1.3, workerd).
+  return Promise.resolve({ performance });
 }
 
 /**
- * Initializes the module-level high-resolution timer used by {@link nowMs}.
+ * @deprecated No longer needed. `nowMs` now delegates directly to
+ * `globalThis.performance.now()`, which is universally available on Node ≥24
+ * and Bun ≥1.3. This function is a no-op and will be removed in a future
+ * major release.
  *
- * Resolution priority:
- * 1. `globalThis.performance.now` — available in Cloudflare Workers and modern browsers.
- * 2. `node:perf_hooks` `performance.now` — loaded dynamically to stay Workers-compatible.
- * 3. `Date.now()` — millisecond-precision fallback; a warning is logged when this path is taken.
- *
- * Must be called once during server startup (before any tool executions) to ensure
- * sub-millisecond timing accuracy. Subsequent calls are safe but no-ops in practice
- * because the module-level `performanceNow` closure is overwritten each time.
- *
- * @param perfLoader - Optional override for the `perf_hooks` import; defaults to
- *   {@link loadPerfHooks}. Inject a mock here in unit tests.
- * @returns A promise that resolves once the timer is ready.
+ * @returns A promise that resolves immediately.
  */
-export async function initHighResTimer(
-  perfLoader: typeof loadPerfHooks = loadPerfHooks,
-): Promise<void> {
-  const globalWithPerf = globalThis as {
-    performance?: { now: () => number };
-  };
-
-  if (typeof globalWithPerf.performance?.now === 'function') {
-    const perf = globalWithPerf.performance;
-    performanceNow = () => perf.now();
-  } else {
-    try {
-      const { performance: nodePerformance } = await perfLoader();
-      performanceNow = () => nodePerformance.now();
-    } catch (_e) {
-      performanceNow = () => Date.now();
-      logger.warning(
-        'Could not import perf_hooks, falling back to Date.now() for performance timing.',
-      );
-    }
-  }
+export function initHighResTimer(_perfLoader?: typeof loadPerfHooks): Promise<void> {
+  // No-op: globalThis.performance.now is guaranteed on all supported floors.
+  return Promise.resolve();
 }
 
 /**
- * Returns the current time in milliseconds using the highest-resolution timer
- * available in this environment.
+ * Returns the current time in milliseconds using `globalThis.performance.now()`.
  *
- * The precision depends on which timer was selected by {@link initHighResTimer}:
- * sub-millisecond after a successful init, millisecond-granular otherwise.
- * The returned value is suitable for computing durations but its epoch origin
- * is implementation-defined — do not treat it as a wall-clock timestamp.
+ * Sub-millisecond resolution is guaranteed on all supported engine floors
+ * (Node ≥24, Bun ≥1.3, Cloudflare Workers). The returned value is suitable for
+ * computing durations but its epoch origin is implementation-defined — do not
+ * treat it as a wall-clock timestamp.
  *
  * @returns Current time in milliseconds.
  */
-export const nowMs = (): number => performanceNow();
+// performance is an ambient global declared by @types/node (perf_hooks.d.ts)
+// and available in all supported environments (Node ≥24, Bun ≥1.3, workerd).
+export const nowMs = (): number => performance.now();
 
 // Module-level TextEncoder singleton (stateless, safe to reuse)
 let cachedEncoder: TextEncoder | undefined;

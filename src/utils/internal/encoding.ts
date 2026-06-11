@@ -19,19 +19,11 @@ import { runtimeCaps } from './runtime.js';
  */
 export function arrayBufferToBase64(buffer: ArrayBuffer): string {
   if (runtimeCaps.hasBuffer) {
-    // Node.js environment
+    // Node.js/Bun environment — Buffer is fastest
     return Buffer.from(buffer).toString('base64');
   } else {
-    // Browser/Worker environment — chunked to avoid stack overflow on large buffers
-    const bytes = new Uint8Array(buffer);
-    const chunks: string[] = [];
-    const CHUNK_SIZE = 0x8000; // 32KB
-    for (let i = 0; i < bytes.length; i += CHUNK_SIZE) {
-      chunks.push(
-        String.fromCharCode.apply(null, bytes.subarray(i, i + CHUNK_SIZE) as unknown as number[]),
-      );
-    }
-    return btoa(chunks.join(''));
+    // workerd/browser — Uint8Array.toBase64() is available on V8 25+ / workerd
+    return new Uint8Array(buffer).toBase64();
   }
 }
 
@@ -74,15 +66,10 @@ export function stringToBase64(str: string): string {
  */
 export function base64ToString(base64: string): string {
   if (runtimeCaps.hasBuffer) {
-    // Node.js environment - most performant
+    // Node.js/Bun environment — Buffer is fastest
     return Buffer.from(base64, 'base64').toString('utf-8');
   } else {
-    // Worker/Browser environment - use Web APIs
-    const decoded = atob(base64);
-    const bytes = new Uint8Array(decoded.length);
-    for (let i = 0; i < decoded.length; i++) {
-      bytes[i] = decoded.charCodeAt(i);
-    }
-    return new TextDecoder().decode(bytes);
+    // workerd/browser — Uint8Array.fromBase64() is available on V8 25+ / workerd
+    return new TextDecoder().decode(Uint8Array.fromBase64(base64));
   }
 }

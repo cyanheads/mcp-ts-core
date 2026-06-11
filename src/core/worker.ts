@@ -21,7 +21,6 @@ import type { Hono } from 'hono';
 import { type CreateAppOptions, composeServices } from '@/core/app.js';
 import { createHttpApp } from '@/mcp-server/transports/http/httpTransport.js';
 import { logger, type McpLogLevel } from '@/utils/internal/logger.js';
-import { initHighResTimer } from '@/utils/internal/performance.js';
 import { requestContextService } from '@/utils/internal/requestContext.js';
 
 /**
@@ -201,8 +200,6 @@ export function createWorkerHandler(options: WorkerHandlerOptions = {}) {
           ...appOptions,
           ...(resolvedInstructions && { instructions: resolvedInstructions }),
         });
-
-        await initHighResTimer();
 
         const logLevel = env.LOG_LEVEL?.toLowerCase() ?? 'info';
         const validLogLevels: McpLogLevel[] = [

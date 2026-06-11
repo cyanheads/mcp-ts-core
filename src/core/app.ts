@@ -41,7 +41,7 @@ import type { Database } from '@/storage/providers/supabase/supabase.types.js';
 import { configurationError, JsonRpcErrorCode, McpError } from '@/types-global/errors.js';
 import { initErrorMetrics } from '@/utils/internal/error-handler/errorHandler.js';
 import { logger, type McpLogLevel } from '@/utils/internal/logger.js';
-import { initHandlerMetrics, initHighResTimer } from '@/utils/internal/performance.js';
+import { initHandlerMetrics } from '@/utils/internal/performance.js';
 import { requestContextService } from '@/utils/internal/requestContext.js';
 import { initHttpClientMetrics } from '@/utils/network/fetchWithTimeout.js';
 import { schedulerService } from '@/utils/scheduling/scheduler.js';
@@ -445,13 +445,10 @@ export async function createApp(options: CreateAppOptions = {}): Promise<ServerH
   const { coreServices, createServer, manifest, taskManager } = composed;
   const { definitionCounts } = manifest;
 
-  // --- Initialize OTEL + high-res timer (independent, run in parallel) ---
-  await Promise.all([
-    initializeOpenTelemetry().catch((err: unknown) => {
-      console.error('[Startup] Failed to initialize OpenTelemetry:', err);
-    }),
-    initHighResTimer(),
-  ]);
+  // --- Initialize OTEL ---
+  await initializeOpenTelemetry().catch((err: unknown) => {
+    console.error('[Startup] Failed to initialize OpenTelemetry:', err);
+  });
 
   // --- Eager-init universal metrics so series exist from first export cycle ---
   initHeartbeatMetrics();

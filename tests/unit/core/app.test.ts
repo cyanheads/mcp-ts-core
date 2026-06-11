@@ -13,7 +13,6 @@ const {
   mockInitErrorMetrics,
   mockInitHandlerMetrics,
   mockInitHeartbeatMetrics,
-  mockInitHighResTimer,
   mockInitHttpClientMetrics,
   mockInitRateLimitMetrics,
   mockInitSessionMetrics,
@@ -154,7 +153,6 @@ const {
   const mockInitRateLimitMetrics = vi.fn();
   const mockInitHttpClientMetrics = vi.fn();
   const mockInitHandlerMetrics = vi.fn();
-  const mockInitHighResTimer = vi.fn(async () => {});
   const mockInitializeOpenTelemetry = vi.fn(async () => {});
   const mockShutdownOpenTelemetry = vi.fn(async () => {});
   const mockCreateObservableGauge = vi.fn();
@@ -195,7 +193,6 @@ const {
     mockInitErrorMetrics,
     mockInitHandlerMetrics,
     mockInitHeartbeatMetrics,
-    mockInitHighResTimer,
     mockInitHttpClientMetrics,
     mockInitRateLimitMetrics,
     mockInitSessionMetrics,
@@ -296,7 +293,6 @@ vi.mock('@/utils/internal/logger.js', () => ({
 
 vi.mock('@/utils/internal/performance.js', () => ({
   initHandlerMetrics: mockInitHandlerMetrics,
-  initHighResTimer: mockInitHighResTimer,
 }));
 
 vi.mock('@/utils/internal/requestContext.js', () => ({
@@ -532,7 +528,6 @@ describe('core/app', () => {
     expect(process.env.NO_COLOR).toBe('1');
     expect(process.env.FORCE_COLOR).toBe('0');
     expect(mockInitializeOpenTelemetry).toHaveBeenCalledTimes(1);
-    expect(mockInitHighResTimer).toHaveBeenCalledTimes(1);
     expect(mockInitHeartbeatMetrics).toHaveBeenCalledTimes(1);
     expect(mockInitSessionMetrics).toHaveBeenCalledTimes(1);
     expect(mockInitErrorMetrics).toHaveBeenCalledTimes(1);

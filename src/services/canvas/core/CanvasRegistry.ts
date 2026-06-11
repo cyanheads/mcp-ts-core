@@ -306,6 +306,18 @@ export class CanvasRegistry {
   }
 
   /**
+   * Alias for {@link shutdown} with a synthesized sweep context. Enables
+   * `await using registry = new CanvasRegistry(...)` with TypeScript's explicit
+   * resource management (ES2022 `await using` declarations).
+   */
+  async [Symbol.asyncDispose](): Promise<void> {
+    const context = requestContextService.createRequestContext({
+      operation: 'CanvasRegistry.asyncDispose',
+    });
+    await this.shutdown(context);
+  }
+
+  /**
    * Run one sweep pass. Per-table expiry is checked first: expired tables are
    * dropped via `provider.drop()` and their bookkeeping cleared. Then the
    * existing canvas-level check runs — the two clocks are fully independent;

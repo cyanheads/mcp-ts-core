@@ -297,4 +297,16 @@ describe('RateLimiter', () => {
     expect(() => rateLimiter.check('window-key', ctx)).not.toThrow();
     expect(rateLimiter.getStatus('window-key')).toMatchObject({ current: 1 });
   });
+
+  it('[Symbol.dispose] is equivalent to dispose()', () => {
+    rateLimiter.configure({ windowMs: 60_000, maxRequests: 10 });
+    rateLimiter.check('sym-key', { requestId: 'sym-req', timestamp: new Date().toISOString() });
+
+    expect(rateLimiter.getStatus('sym-key')).not.toBeNull();
+
+    // Call via the well-known symbol
+    (rateLimiter as unknown as { [Symbol.dispose](): void })[Symbol.dispose]();
+
+    expect(rateLimiter.getStatus('sym-key')).toBeNull();
+  });
 });

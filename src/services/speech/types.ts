@@ -62,8 +62,8 @@ export interface TextToSpeechOptions {
  * Result from text-to-speech synthesis.
  */
 export interface TextToSpeechResult {
-  /** Audio data as Buffer or base64 string */
-  audio: Buffer | string;
+  /** Audio data as Uint8Array or base64 string */
+  audio: Uint8Array | string;
   /** Character count of input text */
   characterCount: number;
   /** Duration in seconds (if available) */
@@ -78,8 +78,8 @@ export interface TextToSpeechResult {
  * Options for speech-to-text transcription.
  */
 export interface SpeechToTextOptions {
-  /** Audio data as Buffer or base64 string */
-  audio: Buffer | string;
+  /** Audio data as Uint8Array or base64 string */
+  audio: Uint8Array | string;
   /** Optional context for request tracing */
   context?: {
     requestId?: string;

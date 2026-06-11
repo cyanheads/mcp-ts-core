@@ -250,19 +250,26 @@ function sleep(ms: number, signal?: AbortSignal): Promise<void> {
       return;
     }
 
-    let onAbort: (() => void) | undefined;
+    const controller = new AbortController();
+    // AbortSignal.any is available on all supported floors (Node ≥24, Bun ≥1.3, workerd).
+    const combined = signal ? AbortSignal.any([controller.signal, signal]) : controller.signal;
 
     const timer = setTimeout(() => {
-      if (onAbort) signal?.removeEventListener('abort', onAbort);
+      controller.abort();
       resolve();
     }, ms);
 
-    if (signal) {
-      onAbort = () => {
+    combined.addEventListener(
+      'abort',
+      () => {
         clearTimeout(timer);
-        reject(signal.reason);
-      };
-      signal.addEventListener('abort', onAbort, { once: true });
-    }
+        // If the external signal fired, reject with its reason; otherwise the
+        // timer already resolved (controller.abort() does not set a reason here).
+        if (signal?.aborted) {
+          reject(signal.reason);
+        }
+      },
+      { once: true },
+    );
   });
 }

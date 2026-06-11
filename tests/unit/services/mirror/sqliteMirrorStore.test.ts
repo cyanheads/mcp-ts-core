@@ -61,6 +61,17 @@ describe('sqliteMirrorStore', () => {
     await rm(dir, { recursive: true, force: true });
   });
 
+  it('[Symbol.asyncDispose] closes the store without error', async () => {
+    await store.applyBatch([rec('asyncDispose1')], []);
+    expect(await store.count()).toBe(1);
+
+    const disposable = store as unknown as { [Symbol.asyncDispose](): Promise<void> };
+    await expect(disposable[Symbol.asyncDispose]()).resolves.toBeUndefined();
+
+    // Calling close() again on an already-closed store is a no-op
+    await expect(store.close()).resolves.toBeUndefined();
+  });
+
   it('upserts records and counts them', async () => {
     await store.applyBatch([rec('1'), rec('2')], []);
     expect(await store.count()).toBe(2);

@@ -372,4 +372,12 @@ export class RateLimiter {
     }
     this.limits.clear();
   }
+
+  /**
+   * Alias for {@link dispose}. Enables `using limiter = new RateLimiter(...)` with
+   * TypeScript's explicit resource management (ES2022 `using` declarations).
+   */
+  [Symbol.dispose](): void {
+    this.dispose();
+  }
 }

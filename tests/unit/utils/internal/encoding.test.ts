@@ -2,7 +2,7 @@
  * @fileoverview Tests for the cross-platform encoding helper.
  * @module tests/utils/internal/encoding.test
  */
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it } from 'vitest';
 
 import {
   arrayBufferToBase64,
@@ -13,16 +13,9 @@ import { runtimeCaps } from '../../../../src/utils/internal/runtime.js';
 
 describe('arrayBufferToBase64', () => {
   const originalHasBuffer = runtimeCaps.hasBuffer;
-  const originalBtoa = globalThis.btoa;
 
   afterEach(() => {
     runtimeCaps.hasBuffer = originalHasBuffer;
-    if (originalBtoa) {
-      globalThis.btoa = originalBtoa;
-    } else {
-      // eslint-disable-next-line @typescript-eslint/no-dynamic-delete
-      delete (globalThis as { btoa?: typeof globalThis.btoa }).btoa;
-    }
   });
 
   it('encodes using Buffer when available', () => {
@@ -35,15 +28,12 @@ describe('arrayBufferToBase64', () => {
     expect(result).toBe(Buffer.from('hello world').toString('base64'));
   });
 
-  it('falls back to btoa when Buffer is unavailable', () => {
+  it('uses Uint8Array.toBase64() when Buffer is unavailable', () => {
     runtimeCaps.hasBuffer = false;
-    const btoaSpy = vi.fn((value: string) => Buffer.from(value, 'binary').toString('base64'));
-    globalThis.btoa = btoaSpy as typeof globalThis.btoa;
 
     const bytes = new Uint8Array([0, 1, 2, 3]);
     const result = arrayBufferToBase64(bytes.buffer);
 
-    expect(btoaSpy).toHaveBeenCalledTimes(1);
     expect(result).toBe(Buffer.from(bytes).toString('base64'));
   });
 
@@ -88,15 +78,9 @@ describe('stringToBase64', () => {
 
 describe('base64ToString', () => {
   const originalHasBuffer = runtimeCaps.hasBuffer;
-  const originalAtob = globalThis.atob;
 
   afterEach(() => {
     runtimeCaps.hasBuffer = originalHasBuffer;
-    if (originalAtob) {
-      globalThis.atob = originalAtob;
-    } else {
-      delete (globalThis as { atob?: typeof globalThis.atob }).atob;
-    }
   });
 
   it('decodes using Buffer when available', () => {
@@ -105,7 +89,7 @@ describe('base64ToString', () => {
     expect(base64ToString(encoded)).toBe('hello world');
   });
 
-  it('falls back to atob + TextDecoder when Buffer is unavailable', () => {
+  it('uses Uint8Array.fromBase64() + TextDecoder when Buffer is unavailable', () => {
     runtimeCaps.hasBuffer = false;
     const encoded = Buffer.from('hello world', 'utf-8').toString('base64');
     expect(base64ToString(encoded)).toBe('hello world');

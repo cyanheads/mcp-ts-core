@@ -99,13 +99,13 @@ export class ElevenLabsProvider implements ISpeechProvider {
 
   /**
    * Synthesize speech from text using the ElevenLabs text-to-speech API.
-   * Posts to `POST /text-to-speech/{voiceId}` and returns the raw MP3 audio as a Buffer.
+   * Posts to `POST /text-to-speech/{voiceId}` and returns the raw MP3 audio as a Uint8Array.
    * Voice settings (stability, similarity_boost, style) are merged from `options.voice`
    * with provider defaults. Text is validated for non-empty and ≤ 5 000 characters.
    *
    * @param options - TTS options. `options.text` is required. `options.voice.voiceId`
    *   overrides the provider default voice; `options.modelId` overrides the default model.
-   * @returns Resolved {@link TextToSpeechResult} with `audio` as a `Buffer`, `format` of
+   * @returns Resolved {@link TextToSpeechResult} with `audio` as a `Uint8Array`, `format` of
    *   `'mp3'`, `characterCount` equal to `options.text.length`, and `metadata` containing
    *   `voiceId`, `modelId`, and `provider`.
    * @throws {McpError} With `InvalidParams` for empty text or text > 5 000 chars.
@@ -164,7 +164,7 @@ export class ElevenLabsProvider implements ISpeechProvider {
           });
 
           // fetchWithTimeout already throws McpError on non-ok responses
-          const audioBuffer = Buffer.from(await response.arrayBuffer());
+          const audioBuffer = new Uint8Array(await response.arrayBuffer());
           ok = true;
 
           span.setAttribute(ATTR_MCP_SPEECH_OUTPUT_BYTES, audioBuffer.length);

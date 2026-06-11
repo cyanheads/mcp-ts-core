@@ -186,9 +186,11 @@ export interface Migration {
  * implementation is `sqliteMirrorStore`; the interface leaves a clean path to
  * other backends (DuckDB, Postgres) without re-architecting the runner. All
  * methods lazy-open the underlying store on first call (async per the Tier-3
- * convention) and are then backed by synchronous driver calls.
+ * convention) and are then backed by synchronous driver calls. Stores are
+ * async-disposable (`await using store = ...`); `[Symbol.asyncDispose]`
+ * aliases {@link MirrorStore.close}.
  */
-export interface MirrorStore {
+export interface MirrorStore extends AsyncDisposable {
   /** Upsert records and delete tombstoned primary keys in one transaction. */
   applyBatch(records: MirrorRow[], tombstones: string[]): Promise<void>;
   /** Close the underlying store. */
