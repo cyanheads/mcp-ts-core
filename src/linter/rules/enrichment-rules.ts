@@ -254,7 +254,7 @@ export function lintCappedListTruncation(
 
   // Check allowlist
   const allowlist = truncationOptions?.truncationAllowlist;
-  if (allowlist && allowlist.includes(name)) return [];
+  if (Array.isArray(allowlist) && allowlist.includes(name)) return [];
 
   // Check input for a cap-like field
   const inputKeys = objectShapeKeys(def.input);
