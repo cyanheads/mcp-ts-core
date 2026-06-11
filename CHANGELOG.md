@@ -4,7 +4,7 @@ All notable changes to this project. Each entry links to its full per-version fi
 
 ## [0.10.5](changelog/0.10.x/0.10.5.md) — 2026-06-11
 
-mcpTest fixture-based Vitest subpath; platform-native utils sweep under Node≥24/Bun≥1.3 (AbortSignal.any, Uint8Array base64, Symbol.Dispose, performance.now); workerd R2/D1 storage suites; typecheck project with @ts-expect-error negative cases; R2 list cap fix
+mcpTest fixture-based Vitest subpath; platform-native utils sweep under Node≥24/Bun≥1.3 (AbortSignal.any, Uint8Array base64, Symbol.dispose, performance.now); workerd R2/D1 storage suites; typecheck project with @ts-expect-error negative cases; R2 list cap fix
 
 ## [0.10.4](changelog/0.10.x/0.10.4.md) — 2026-06-10
 
