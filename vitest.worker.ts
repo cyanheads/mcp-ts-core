@@ -33,6 +33,8 @@ export default defineConfig({
         compatibilityDate: '2026-02-13',
         compatibilityFlags: ['nodejs_compat'],
         kvNamespaces: ['KV_NAMESPACE', 'CUSTOM_KV'],
+        r2Buckets: ['R2_BUCKET'],
+        d1Databases: ['DB'],
       },
     }),
   ],

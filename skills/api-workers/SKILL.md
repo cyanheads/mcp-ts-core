@@ -4,7 +4,7 @@ description: >
   Cloudflare Workers deployment using `createWorkerHandler` from `@cyanheads/mcp-ts-core/worker`. Covers the full handler signature, binding types, CloudflareBindings extensibility, runtime compatibility guards, and wrangler.toml requirements.
 metadata:
   author: cyanheads
-  version: "1.4"
+  version: "1.5"
   audience: external
   type: reference
 ---
@@ -198,3 +198,99 @@ export function getServerConfig() {
 > `DuckDB canvas requires Node.js or Bun. Set CANVAS_PROVIDER_TYPE=none or omit it for Cloudflare Workers deployment.`
 
 Leave the env unset (or set to `none`) for Worker deployments. Tools that conditionally use canvas should check the module-level accessor (`if (!getCanvas()) { ... }`) and surface a clear "feature unavailable on this deployment" message. See `api-canvas` for the full DataCanvas reference and setup wiring pattern.
+
+---
+
+## Testing Workers with miniflare
+
+`bun run test:worker` runs the worker suite under `vitest.worker.ts` (using `@cloudflare/vitest-pool-workers` + miniflare). Each test **file** gets its own fresh V8 isolate — module scope (including `createWorkerHandler`'s `appPromise` singleton) is reset between files.
+
+### vitest.worker.ts miniflare bindings
+
+Declare all storage bindings used in the suite:
+
+```ts
+cloudflareTest({
+  main: './tests/fixtures/worker-runtime.fixture.ts',
+  miniflare: {
+    bindings: { STORAGE_PROVIDER_TYPE: 'cloudflare-kv', ... },
+    kvNamespaces: ['KV_NAMESPACE', 'CUSTOM_KV'],
+    r2Buckets:    ['R2_BUCKET'],
+    d1Databases:  ['DB'],
+  },
+})
+```
+
+Binding names must match the hardcoded names in `storageFactory.ts` (`KV_NAMESPACE`, `R2_BUCKET`, `DB`).
+
+### Per-provider test isolation
+
+`bindings.STORAGE_PROVIDER_TYPE` is a global default. Per-provider test files override it by passing a modified env to `worker.fetch()`:
+
+```ts
+import { env } from 'cloudflare:workers';
+
+// Fresh isolate per file — appPromise starts null.
+// First fetch initialises the singleton with the overridden provider type.
+const r2Env = { ...env, STORAGE_PROVIDER_TYPE: 'cloudflare-r2' };
+await worker.fetch(request, r2Env, ctx);
+```
+
+Use `reset()` from `cloudflare:test` in `afterEach` to clear binding state between tests. For D1, re-apply migrations immediately after each `reset()` (reset wipes the schema):
+
+```ts
+import { applyD1Migrations, reset } from 'cloudflare:test';
+
+afterEach(async () => {
+  await reset();
+  await applyD1Migrations(env.DB, [{ name: '0001_schema', queries: [CREATE_TABLE_SQL] }]);
+});
+```
+
+### D1 schema setup
+
+The `cloudflare-d1` provider requires the `kv_store` table before any operations. Apply it in `beforeAll` via `applyD1Migrations`:
+
+```ts
+const KV_STORE_MIGRATION = `
+CREATE TABLE IF NOT EXISTS kv_store (
+  tenant_id TEXT NOT NULL,
+  key       TEXT NOT NULL,
+  value     TEXT NOT NULL,
+  expires_at INTEGER,
+  PRIMARY KEY (tenant_id, key)
+)`;
+
+beforeAll(async () => {
+  await applyD1Migrations(env.DB, [
+    { name: '0001_create_kv_store', queries: [KV_STORE_MIGRATION] },
+  ]);
+  sessionId = await openSession(d1Env);
+});
+```
+
+### R2 list limit
+
+The R2 provider fetches `limit + 1` objects to detect further pages. Miniflare caps R2 `MaxKeys` at 1000, so the default `limit=1000` → request 1001 → error. Pass `limit: 100` (or any value ≤ 999) to `ctx.state.list()` in test fixtures to stay under the cap:
+
+```ts
+const result = await ctx.state.list(prefix, { limit: 100 });
+```
+
+### Storage probe pattern
+
+Expose storage operations as MCP tools in the fixture to test them through the real HTTP surface:
+
+```ts
+const storageSetTool = tool('storage_set', {
+  input: z.object({ key: z.string().describe('...'), value: z.string().describe('...') }),
+  output: z.object({ ok: z.boolean().describe('Always true on success') }),
+  async handler(input, ctx) {
+    await ctx.state.set(input.key, input.value);
+    return { ok: true };
+  },
+  format: (r) => [{ type: 'text', text: `ok=${r.ok}` }],
+});
+```
+
+Call via `tools/call` over MCP JSON-RPC and assert on `structuredContent`. See `tests/worker/storage-r2.worker.test.ts` and `tests/worker/storage-d1.worker.test.ts` for the full pattern.
