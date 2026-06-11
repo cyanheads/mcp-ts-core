@@ -105,6 +105,22 @@ export default defineConfig({
           testTimeout: 15_000,
         },
       },
+      {
+        extends: true,
+        test: {
+          name: 'typecheck',
+          // Must match the runtime projects — vitest rejects differing
+          // maxWorkers within the same sequence group.
+          maxWorkers: 4,
+          include: ['tests/types/**/*.test-d.ts'],
+          typecheck: {
+            enabled: true,
+            checker: 'tsc',
+            include: ['tests/types/**/*.test-d.ts'],
+            ignoreSourceErrors: true,
+          },
+        },
+      },
     ],
   },
 });
