@@ -63,7 +63,7 @@ Each phase's Objective column is the goal state per target — the verifiable en
 | 1b | Fix | Per target: targeted issues fixed in source, tests updated/added, `devcheck` + `rebuild` + `test` green, each fixed issue commented with fix details, working tree dirty for review | parallel fanout (one sub-agent per target — hard constraint) | **barrier** — orchestrator reviews diffs before verify (explicit gate in checklist) |
 | 2 | Verify | Per target: full diff cold-reviewed; simplified if warranted; each fix re-exercised against the running server with actual tool output in the summary | parallel fanout | **barrier** — orchestrator reviews simplified diff and verified outputs; release authorization required |
 | 3 | Wrap-up + release | Per target: fixes split into per-file commits with a release commit on top; annotated tag; published per repo visibility; tag annotation is structured markdown with issue backlinks | parallel fanout (Bash git only) | gate-free |
-| 4 | Issue cleanup | Every GH issue that shipped a fix closed with "Fixed in v\<version\>" comment | orchestrator (serial) | — |
+| 4 | Issue cleanup | Every shipped issue closed (reason: completed) carrying exactly one what-landed comment that cites the version | orchestrator (serial) | — |
 
 Phase 1a is conditional — only runs when the input is a handoff document or otherwise unvalidated. When the input is already tracked GH issues, skip directly to Phase 1b. The release portion of Phase 3 is conditional on user authorization to ship.
 
@@ -137,13 +137,17 @@ The tag annotation and changelog cover ALL fixes — the commit split is about g
 **Tag annotations** are for end users — internal dev cleanup (lockfile refreshes, linter fixes, build config) belongs in commit bodies, not the tag annotation.
 
 ### Phase 4: Issue cleanup
-Close issues that shipped fixes — only those. Skipped issues stay open.
+Close issues that shipped — only those. Skipped issues stay open.
+
+Each issue gets exactly ONE substantive comment recording what landed — concrete changes, file paths, and the version — written either by the fix sub-agent (Phase 1b) or by the orchestrator here. Then close without an additional comment:
 
 ```bash
-for n in <fixed-issue-numbers>; do
-  gh issue close "$n" -R "<owner>/<repo>" --reason completed --comment "Fixed in v<version>."
+for n in <shipped-issue-numbers>; do
+  gh issue close "$n" -R "<owner>/<repo>" --reason completed
 done
 ```
+
+If no what-landed comment exists yet, the version belongs in that one comment ("Shipped in v\<version\>: …"). Never stack a bare "Fixed in v\<version\>" trailer on top of an existing summary — it duplicates the record, and "fixed" misdescribes enhancements (enhancements ship/land; only bugs are fixed).
 
 ## Workflow-specific gotchas
 
@@ -170,6 +174,6 @@ done
 - [ ] Orchestrator gate after Phase 2: simplified diff reviewed, field-test claims verified
 - [ ] Phase 3: version bumped, fix commits + release commit, annotated tag per target — scope matches private/public status
 - [ ] Phase 3: published per scope (push, npm if public, MCP Registry if applicable, GH release, Docker if applicable)
-- [ ] Phase 4: fixed issues closed; skipped issues remain open
+- [ ] Phase 4: shipped issues closed, one what-landed comment each; skipped issues remain open
 - [ ] Post-workflow verification: `git ls-remote --tags origin`, `npm view <pkg>@<version>` if public, GH release artifacts attached
 - [ ] Tag/release quality review: tag subject omits version number, structured markdown, no marketing adjectives, issue backlinks present
