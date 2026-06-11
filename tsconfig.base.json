@@ -20,7 +20,6 @@
     "declarationMap": true,
     "sourceMap": true,
 
-    "importHelpers": true,
     "incremental": true,
     "skipLibCheck": true,
     "forceConsistentCasingInFileNames": true,

@@ -62,12 +62,12 @@
     "zod": "{{ZOD_VERSION}}"
   },
   "devDependencies": {
-    "@biomejs/biome": "^2.4.7",
-    "@types/node": "^25.6.0",
+    "@biomejs/biome": "2.4.16",
+    "@types/node": "25.9.3",
     "depcheck": "^1.4.7",
     "ignore": "^7.0.5",
-    "tsc-alias": "^1.8.16",
-    "typescript": "^5.9.3",
-    "vitest": "^4.1.0"
+    "tsc-alias": "^1.8.17",
+    "typescript": "^6.0.3",
+    "vitest": "^4.1.8"
   }
 }

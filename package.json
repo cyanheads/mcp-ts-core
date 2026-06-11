@@ -1,6 +1,6 @@
 {
   "name": "@cyanheads/mcp-ts-core",
-  "version": "0.10.3",
+  "version": "0.10.4",
   "mcpName": "io.github.cyanheads/mcp-ts-core",
   "description": "Agent-native TypeScript framework for building MCP servers. Declarative definitions with auth, multi-backend storage, OpenTelemetry, and first-class support for Bun/Node/Cloudflare Workers.",
   "main": "dist/core/index.js",
@@ -35,75 +35,93 @@
   "exports": {
     ".": {
       "types": "./dist/core/index.d.ts",
-      "import": "./dist/core/index.js"
+      "import": "./dist/core/index.js",
+      "default": "./dist/core/index.js"
     },
     "./worker": {
       "types": "./dist/core/worker.d.ts",
-      "import": "./dist/core/worker.js"
+      "import": "./dist/core/worker.js",
+      "default": "./dist/core/worker.js"
     },
     "./tools": {
       "types": "./dist/mcp-server/tools/utils/toolDefinition.d.ts",
-      "import": "./dist/mcp-server/tools/utils/toolDefinition.js"
+      "import": "./dist/mcp-server/tools/utils/toolDefinition.js",
+      "default": "./dist/mcp-server/tools/utils/toolDefinition.js"
     },
     "./resources": {
       "types": "./dist/mcp-server/resources/utils/resourceDefinition.d.ts",
-      "import": "./dist/mcp-server/resources/utils/resourceDefinition.js"
+      "import": "./dist/mcp-server/resources/utils/resourceDefinition.js",
+      "default": "./dist/mcp-server/resources/utils/resourceDefinition.js"
     },
     "./prompts": {
       "types": "./dist/mcp-server/prompts/utils/promptDefinition.d.ts",
-      "import": "./dist/mcp-server/prompts/utils/promptDefinition.js"
+      "import": "./dist/mcp-server/prompts/utils/promptDefinition.js",
+      "default": "./dist/mcp-server/prompts/utils/promptDefinition.js"
     },
     "./tasks": {
       "types": "./dist/mcp-server/tasks/utils/taskToolDefinition.d.ts",
-      "import": "./dist/mcp-server/tasks/utils/taskToolDefinition.js"
+      "import": "./dist/mcp-server/tasks/utils/taskToolDefinition.js",
+      "default": "./dist/mcp-server/tasks/utils/taskToolDefinition.js"
     },
     "./errors": {
       "types": "./dist/types-global/errors.d.ts",
-      "import": "./dist/types-global/errors.js"
+      "import": "./dist/types-global/errors.js",
+      "default": "./dist/types-global/errors.js"
     },
     "./config": {
       "types": "./dist/config/index.d.ts",
-      "import": "./dist/config/index.js"
+      "import": "./dist/config/index.js",
+      "default": "./dist/config/index.js"
     },
     "./auth": {
       "types": "./dist/mcp-server/transports/auth/lib/checkScopes.d.ts",
-      "import": "./dist/mcp-server/transports/auth/lib/checkScopes.js"
+      "import": "./dist/mcp-server/transports/auth/lib/checkScopes.js",
+      "default": "./dist/mcp-server/transports/auth/lib/checkScopes.js"
     },
     "./storage": {
       "types": "./dist/storage/core/StorageService.d.ts",
-      "import": "./dist/storage/core/StorageService.js"
+      "import": "./dist/storage/core/StorageService.js",
+      "default": "./dist/storage/core/StorageService.js"
     },
     "./storage/types": {
       "types": "./dist/storage/core/IStorageProvider.d.ts",
-      "import": "./dist/storage/core/IStorageProvider.js"
+      "import": "./dist/storage/core/IStorageProvider.js",
+      "default": "./dist/storage/core/IStorageProvider.js"
     },
     "./canvas": {
       "types": "./dist/services/canvas/index.d.ts",
-      "import": "./dist/services/canvas/index.js"
+      "import": "./dist/services/canvas/index.js",
+      "default": "./dist/services/canvas/index.js"
     },
     "./mirror": {
       "types": "./dist/services/mirror/index.d.ts",
-      "import": "./dist/services/mirror/index.js"
+      "import": "./dist/services/mirror/index.js",
+      "default": "./dist/services/mirror/index.js"
     },
     "./utils": {
       "types": "./dist/utils/index.d.ts",
-      "import": "./dist/utils/index.js"
+      "import": "./dist/utils/index.js",
+      "default": "./dist/utils/index.js"
     },
     "./services": {
       "types": "./dist/services/index.d.ts",
-      "import": "./dist/services/index.js"
+      "import": "./dist/services/index.js",
+      "default": "./dist/services/index.js"
     },
     "./linter": {
       "types": "./dist/linter/index.d.ts",
-      "import": "./dist/linter/index.js"
+      "import": "./dist/linter/index.js",
+      "default": "./dist/linter/index.js"
     },
     "./testing": {
       "types": "./dist/testing/index.d.ts",
-      "import": "./dist/testing/index.js"
+      "import": "./dist/testing/index.js",
+      "default": "./dist/testing/index.js"
     },
     "./testing/fuzz": {
       "types": "./dist/testing/fuzz.d.ts",
-      "import": "./dist/testing/fuzz.js"
+      "import": "./dist/testing/fuzz.js",
+      "default": "./dist/testing/fuzz.js"
     },
     "./tsconfig.base.json": "./tsconfig.base.json",
     "./vitest.config": "./vitest.config.base.mjs",
@@ -148,8 +166,10 @@
     "tree": "bun run scripts/tree.ts",
     "fetch-spec": "bun run scripts/fetch-openapi-spec.ts",
     "test": "bunx vitest run",
-    "test:all": "bun run test && bun run test:worker && bun run test:integration",
+    "test:all": "bun run test:coverage && bun run test:node && bun run test:worker && bun run test:integration",
     "test:integration": "bunx vitest run --config vitest.integration.ts",
+    "test:leaks": "bunx vitest run --detect-async-leaks",
+    "test:node": "sh -c 'NODE_BIN=$(which -a node | grep -v /bun-node- | head -n 1); \"$NODE_BIN\" ./node_modules/vitest/vitest.mjs run && \"$NODE_BIN\" ./node_modules/vitest/vitest.mjs run --config vitest.integration.ts'",
     "test:unit": "bunx vitest run --project unit",
     "test:smoke": "bunx vitest run --project smoke",
     "test:fuzz": "bunx vitest run --project fuzz",
@@ -207,6 +227,7 @@
     "depcheck": "^1.4.7",
     "diff": "^9.0.0",
     "execa": "^9.6.1",
+    "fast-check": "^4.8.0",
     "fast-xml-parser": "^5.8.0",
     "ignore": "^7.0.5",
     "js-yaml": "^4.2.0",
@@ -257,7 +278,7 @@
       "url": "https://www.buymeacoffee.com/cyanheads"
     }
   ],
-  "packageManager": "bun@1.3.2",
+  "packageManager": "bun@1.3.11",
   "engines": {
     "bun": ">=1.3.0",
     "node": ">=24.0.0"
@@ -303,8 +324,8 @@
     "better-sqlite3": "^12.0.0",
     "chrono-node": "^2.9.0",
     "defuddle": "^0.18.1",
-    "diff": "latest",
-    "fast-check": "latest",
+    "diff": "^9.0.0",
+    "fast-check": "^4.0.0",
     "fast-xml-parser": "^5.8.0",
     "js-yaml": "^4.1.1",
     "linkedom": "^0.18.12",

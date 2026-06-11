@@ -27,9 +27,6 @@
     "declarationMap": true,
     "sourceMap": true,
 
-    // Import helpers to reduce bundle size
-    "importHelpers": true,
-
     // Incremental compilation for faster type checking
     "incremental": true,
     "tsBuildInfoFile": ".tsbuildinfo",

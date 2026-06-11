@@ -4,7 +4,7 @@ description: >
   Testing patterns for MCP tool/resource handlers using `createMockContext` and Vitest. Covers mock context options, handler testing, McpError assertions, format testing, Vitest config setup, and test isolation conventions.
 metadata:
   author: cyanheads
-  version: "1.3"
+  version: "1.4"
   audience: external
   type: reference
 ---
@@ -308,6 +308,22 @@ it('throws NotFound for missing resource', async () => {
 ```
 
 Use `.rejects.toThrow(McpError)` to assert type only. Use `.rejects.toMatchObject({ code: ... })` when the specific error code matters.
+
+---
+
+## Output schema assertions
+
+`expect.schemaMatching` (Vitest 4, Standard Schema) validates a value against any Zod schema — including the definition's own `output`. Use it to assert schema conformance without duplicating the shape in the test:
+
+```ts
+it('output conforms to the declared output schema', async () => {
+  const ctx = createMockContext();
+  const result = await myTool.handler(myTool.input.parse({ query: 'x' }), ctx);
+  expect(result).toEqual(expect.schemaMatching(myTool.output));
+});
+```
+
+It composes as an asymmetric matcher anywhere a value is expected — e.g. `toHaveBeenCalledWith(expect.schemaMatching(schema))`. Prefer exact-value assertions when the expected output is fully known; reach for `schemaMatching` when the output is dynamic (timestamps, generated IDs) or the schema itself is the contract under test.
 
 ---
 

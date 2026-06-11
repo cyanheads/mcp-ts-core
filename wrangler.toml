@@ -6,7 +6,7 @@ main = "examples/worker.ts"
 
 # The compatibility date ensures your worker runs on a recent version of the Workers runtime.
 # It's good practice to update this periodically.
-compatibility_date = "2026-02-13"
+compatibility_date = "2026-06-10"
 
 # Enable Node.js compatibility for Bun and other dependencies.
 compatibility_flags = ["nodejs_compat"]

@@ -25,8 +25,8 @@ export interface McpServerDeps {
   /**
    * When true, advertise the experimental `tasks` capability (SEP-1686).
    * The capability is gated on actual usage — at least one registered tool
-   * must be a task tool — because the spec targets DRAFT-2025-11-25 and some
-   * clients pinned to 2025-06-18 fail on the unknown key.
+   * must be a task tool — because the capability ships in spec revision
+   * 2025-11-25 (GA) and clients pinned to 2025-06-18 fail on the unknown key.
    */
   advertiseTasks?: boolean;
   config: AppConfig;
@@ -95,9 +95,9 @@ export async function createMcpServerInstance(deps: McpServerDeps): Promise<McpS
         resources: { listChanged: true },
         tools: { listChanged: true },
         prompts: { listChanged: true },
-        // SEP-1686 (DRAFT-2025-11-25, experimental in SDK) — only advertised
-        // when the server registers at least one task tool. Clients pinned to
-        // 2025-06-18 that strict-parse capabilities fail on the unknown key.
+        // SEP-1686 (spec revision 2025-11-25, GA) — only advertised when the
+        // server registers at least one task tool. Clients pinned to 2025-06-18
+        // that strict-parse capabilities fail on the unknown key.
         ...(deps.advertiseTasks && {
           tasks: {
             list: {},

@@ -138,7 +138,6 @@ scripts/ export-ignore
 .gitattributes export-ignore
 biome.json export-ignore
 tsconfig.json export-ignore
-tsconfig.test.json export-ignore
 vitest.config.ts export-ignore
 vitest.integration.config.ts export-ignore
 bunfig.toml export-ignore

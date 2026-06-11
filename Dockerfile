@@ -99,5 +99,8 @@ ENV MCP_FORCE_CONSOLE_LOGGING="true"
 # Expose the port the server listens on
 EXPOSE ${MCP_HTTP_PORT}
 
+# Health check using a bun-native fetch (slim image ships no curl/wget)
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 CMD bun -e "fetch('http://localhost:'+(process.env.MCP_HTTP_PORT??'3010')+'/healthz').then((r)=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
+
 # The command to start the server
 CMD ["bun", "run", "dist/index.js"]

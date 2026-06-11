@@ -1,6 +1,6 @@
 # mcp-ts-core - Directory Structure
 
-Generated on: 2026-06-10 22:56:46
+Generated on: 2026-06-11 00:25:09
 
 ```text
 mcp-ts-core/
@@ -805,7 +805,6 @@ mcp-ts-core/
 ├── tsconfig.build.json
 ├── tsconfig.json
 ├── tsconfig.scripts.json
-├── tsconfig.test.json
 ├── tsdoc.json
 ├── typedoc.json
 ├── vitest.config.base.mjs

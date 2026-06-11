@@ -1,6 +1,12 @@
 /**
  * @fileoverview Spawns and manages server subprocesses for integration tests.
  * Supports both stdio and HTTP transport modes.
+ *
+ * The server subprocess runs on the same runtime as the test runner
+ * (`process.execPath`): Bun under `bun run test:integration` (the bun-node
+ * PATH shim would intercept a bare `node` anyway), real Node under
+ * `bun run test:node`. This makes the integration lane's runtime explicit
+ * instead of depending on PATH resolution.
  * @module tests/integration/helpers/server-process
  */
 import { type ChildProcess, spawn } from 'node:child_process';
@@ -82,7 +88,7 @@ export async function startServerFromEntrypoint(
   const resolvedEntrypoint = assertServerEntrypoint(entrypoint);
   const port = transport === 'http' ? await getFreePort() : undefined;
 
-  const proc = spawn('node', [resolvedEntrypoint], {
+  const proc = spawn(process.execPath, [resolvedEntrypoint], {
     env: {
       ...process.env,
       MCP_TRANSPORT_TYPE: transport,

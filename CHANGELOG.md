@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.10.4](changelog/0.10.x/0.10.4.md) — 2026-06-10
+
+Canvas: inferred schemas always nullable, query() streaming cap, missing-table NotFound, system-catalog deny layer, approxSizeBytes in describe(); packaging: exports default condition, HEALTHCHECK, template toolchain sync, wrangler date, importHelpers removed; test-infra: test:node, test:leaks, fast-check devDep, coverage bumps
+
 ## [0.10.3](changelog/0.10.x/0.10.3.md) — 2026-06-10 · ⚠️ Breaking
 
 Elicitation wired on the wire (#211), URL-mode elicitation (#212), sampling surface removed (#220), server identity fields (#213), completable prompt args + resource template completion (#214), RootsRegistry deleted (#218)

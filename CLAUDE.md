@@ -1,7 +1,7 @@
 # Developer Protocol
 
 **Package:** `@cyanheads/mcp-ts-core`
-**Version:** 0.10.3
+**Version:** 0.10.4
 **Engines:** Bun ≥1.3.0, Node ≥24.0.0
 **MCP SDK:** `@modelcontextprotocol/sdk` ^1.29.0
 **Zod:** ^4.4.3
@@ -55,7 +55,7 @@ Both paths share the same public API. Init copies starter `package.json`, config
 | `/auth` | `checkScopes` | Dynamic scope checking |
 | `/storage` | `StorageService` | Storage abstraction |
 | `/storage/types` | `IStorageProvider` | Provider interface |
-| `/canvas` | `DataCanvas`, `CanvasInstance`, `CanvasRegistry`, `IDataCanvasProvider`, `DuckdbProvider`, `spillover`, `inferSchemaFromRows`, `assertReadOnlyQuery`, `quoteIdentifier`, ... | DataCanvas primitive (Tier 3, optional peer dep `@duckdb/node-api`); SQL/analytical workspace + source-agnostic spillover helper |
+| `/canvas` | `DataCanvas`, `CanvasInstance`, `CanvasRegistry`, `IDataCanvasProvider`, `DuckdbProvider`, `spillover`, `inferSchemaFromRows`, `assertReadOnlyQuery`, `assertNoSystemCatalogs`, `quoteIdentifier`, ... | DataCanvas primitive (Tier 3, optional peer dep `@duckdb/node-api`); SQL/analytical workspace + source-agnostic spillover helper |
 | `/mirror` | `defineMirror`, `sqliteMirrorStore`, `buildSchemaSql`, `openSqliteHandle`, `Mirror`, `MirrorStore`, `MirrorDefinition`, `SyncContext`, `SyncPage`, ... | MirrorService primitive (Tier 3, optional peer dep `better-sqlite3` on Node; `bun:sqlite` built-in on Bun); persistent self-refreshing local mirror of a bulk upstream dataset (embedded SQLite + FTS5). Node/Bun only |
 | `/utils` | formatting, encoding, network, pagination, overflow (`outlineOnOverflow`, `OUTLINE_VARIANT`, `selectSections`, `formatOutline`), logging, runtime, telemetry, token counting, parsers†, sanitization†, scheduling† | All utilities (†optional peer deps) |
 | `/services` | `OpenRouterProvider`, `SpeechService`, `createSpeechProvider`, `ElevenLabsProvider`, `WhisperProvider`, `GraphService`, provider interfaces and types | LLM, Speech (TTS/STT), Graph services |
@@ -446,6 +446,8 @@ describe('myTool', () => {
 
 **`createMockContext` options:** `createMockContext()` (minimal), `{ tenantId: 'test-tenant' }` (enables state), `{ elicit: vi.fn() }`, `{ progress: true }` (task progress).
 
+**Schema assertions:** `expect(result).toEqual(expect.schemaMatching(myTool.output))` — Vitest 4's Standard Schema asymmetric matcher validates handler output against the definition's own Zod schema. Use when output is dynamic (timestamps, generated IDs); exact `toEqual` still wins when the full value is known.
+
 **Fuzz testing:** `fuzzTool`/`fuzzResource`/`fuzzPrompt` from `/testing/fuzz` generate valid and adversarial inputs from Zod schemas via `fast-check`, then assert handler invariants (no crashes, no prototype pollution, no stack trace leaks). Returns a `FuzzReport` for custom assertions.
 
 ```ts
@@ -512,7 +514,9 @@ Skills live in `skills/<name>/SKILL.md`. Read the relevant skill before starting
 | `bun run lint:mcp` | Validate MCP definitions against spec |
 | `bun run format` | Auto-fix Biome lint/format issues (safe fixes only) |
 | `bun run format:unsafe` | Also apply Biome's unsafe autofixes — review the diff; they can change behavior, not just formatting |
-| `bun run test` | Unit/integration tests |
+| `bun run test` | Unit/compliance/smoke/fuzz suites (Bun runtime) |
+| `bun run test:node` | Same suites + integration under real Node (bypasses the bun-node PATH shim) |
+| `bun run test:leaks` | Suites with Vitest async-leak detection (`--detect-async-leaks`) |
 | `bun run start:stdio` | Production mode (stdio, after build) |
 | `bun run start:http` | Production mode (HTTP, after build) |
 | `bun run changelog:build` | Regenerate `CHANGELOG.md` from `changelog/*.md` |
