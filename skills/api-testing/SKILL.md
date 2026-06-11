@@ -4,7 +4,7 @@ description: >
   Testing patterns for MCP tool/resource handlers using `createMockContext` and Vitest. Covers mock context options, handler testing, McpError assertions, format testing, Vitest config setup, and test isolation conventions.
 metadata:
   author: cyanheads
-  version: "1.4"
+  version: "1.5"
   audience: external
   type: reference
 ---
@@ -16,6 +16,52 @@ Tests target handler behavior directly — call `handler(input, ctx)`, assert on
 **Additional exports from `/testing`:** `createMockLogger()` returns a standalone `MockContextLogger` for unit-testing code that accepts a `ContextLogger` directly (services, utilities). `createInMemoryStorage(options?)` provides a real `StorageService` backed by `InMemoryProvider` for testing services that take a `StorageService` dependency.
 
 **Philosophy:** Test behavior, not implementation. Refactors should not break tests. Match the repo's existing test layout: fresh scaffolds use `tests/`, while colocated `src/**/*.test.ts` files are also supported. Integration tests at I/O boundaries over unit tests of internals.
+
+---
+
+## `mcpTest` — fixture-based Vitest test
+
+`mcpTest` is a `test.extend`-based Vitest test that provides `ctx` and `storage` as **per-test fixtures** — fresh instances for every test, eliminating the `createMockContext()` boilerplate and enforcing the fresh-context-per-test convention automatically.
+
+```ts
+import { mcpTest } from '@cyanheads/mcp-ts-core/testing/vitest';
+
+mcpTest('echoes the message', async ({ ctx }) => {
+  const result = await echoTool.handler(echoTool.input.parse({ message: 'hi' }), ctx);
+  expect(result.message).toBe('hi');
+});
+
+mcpTest('uses storage fixture', async ({ ctx, storage }) => {
+  const svc = new MyService(config, storage);
+  const result = await svc.doWork(ctx);
+  expect(result).toBeDefined();
+});
+```
+
+### Fixtures
+
+| Fixture | Type | Per-test? | Notes |
+|:--------|:-----|:----------|:------|
+| `ctx` | `Context` | Yes | Fresh `createMockContext()` each test |
+| `storage` | `StorageService` | Yes | Fresh `createInMemoryStorage()` each test |
+
+### Extending with the function form
+
+Override fixtures using the **function form** (`async ({}, use) => { ... }`) to preserve per-test freshness. A bare-value override shares one mutable instance across the entire file — defeating the fixture's isolation guarantee.
+
+```ts
+import { createMockContext } from '@cyanheads/mcp-ts-core/testing/vitest';
+
+// Correct — function form gives each test a fresh context:
+const tenantTest = mcpTest.extend({
+  ctx: async ({}, use) => { await use(createMockContext({ tenantId: 'test-tenant' })); },
+});
+
+// Wrong — bare value shares one ctx across every test in the file:
+// const tenantTest = mcpTest.extend({ ctx: createMockContext({ tenantId: 'test-tenant' }) });
+```
+
+`createMockContext` and `createInMemoryStorage` are re-exported from `@cyanheads/mcp-ts-core/testing/vitest` so overrides don't need a second import.
 
 ---
 

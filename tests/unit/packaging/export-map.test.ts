@@ -39,6 +39,7 @@ const EXPECTED_PUBLIC_SUBPATHS = [
   './tasks',
   './testing',
   './testing/fuzz',
+  './testing/vitest',
   './tools',
   './tsconfig.base.json',
   './utils',

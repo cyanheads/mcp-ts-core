@@ -1,17 +1,28 @@
 /**
- * @fileoverview Verifies the public test helpers exported from `@/testing`.
- * Covers `createMockLogger` and `createInMemoryStorage` — both are meant to
- * stand alone, independent of `createMockContext`.
+ * @fileoverview Verifies the public test helpers exported from `@/testing`
+ * and the `@/testing/vitest` subpath. Covers `createMockLogger`,
+ * `createInMemoryStorage`, and the `mcpTest` fixture.
  * @module tests/testing/exports.test
  */
 import { describe, expect, it } from 'vitest';
 import { StorageService } from '@/storage/core/StorageService.js';
 import { createInMemoryStorage, createMockLogger } from '@/testing/index.js';
+import { mcpTest } from '@/testing/vitest.js';
 import type { RequestContext } from '@/utils/internal/requestContext.js';
 
 function rctx(tenantId: string): RequestContext {
   return { requestId: 'exports-test', timestamp: new Date().toISOString(), tenantId };
 }
+
+describe('./testing/vitest subpath', () => {
+  it('exports mcpTest as a function', () => {
+    expect(typeof mcpTest).toBe('function');
+  });
+
+  it('mcpTest has an extend method', () => {
+    expect(typeof mcpTest.extend).toBe('function');
+  });
+});
 
 describe('createMockLogger', () => {
   it('records calls across every level', () => {

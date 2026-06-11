@@ -1,6 +1,6 @@
 # mcp-ts-core - Directory Structure
 
-Generated on: 2026-06-11 00:25:09
+Generated on: 2026-06-11 16:29:22
 
 ```text
 mcp-ts-core/
@@ -389,7 +389,8 @@ mcp-ts-core/
 │   │           └── supabaseProvider.ts
 │   ├── testing/
 │   │   ├── fuzz.ts
-│   │   └── index.ts
+│   │   ├── index.ts
+│   │   └── vitest.ts
 │   ├── types-global/
 │   │   └── errors.ts
 │   ├── utils/
@@ -553,6 +554,10 @@ mcp-ts-core/
 │   │   │   ├── template-echo-message.tool.test.ts
 │   │   │   └── template-madlibs-elicitation.tool.test.ts
 │   │   └── canvas-duckdb.test.ts
+│   ├── types/
+│   │   ├── error-contract.test-d.ts
+│   │   ├── handler-context.test-d.ts
+│   │   └── tool-builder.test-d.ts
 │   ├── unit/
 │   │   ├── cli/
 │   │   │   └── init.test.ts
@@ -710,7 +715,8 @@ mcp-ts-core/
 │   │   ├── testing/
 │   │   │   ├── exports.test.ts
 │   │   │   ├── mockContext.test.ts
-│   │   │   └── mockContextFidelity.test.ts
+│   │   │   ├── mockContextFidelity.test.ts
+│   │   │   └── vitest.test.ts
 │   │   ├── types-global/
 │   │   │   └── errors.test.ts
 │   │   ├── utils/
@@ -778,7 +784,10 @@ mcp-ts-core/
 │   │   ├── context.test.ts
 │   │   └── worker.test.ts
 │   ├── worker/
-│   │   └── create-worker-handler.worker.test.ts
+│   │   ├── create-worker-handler.worker.test.ts
+│   │   ├── encoding.worker.test.ts
+│   │   ├── storage-d1.worker.test.ts
+│   │   └── storage-r2.worker.test.ts
 │   └── setup.ts
 ├── .dockerignore
 ├── .env.example

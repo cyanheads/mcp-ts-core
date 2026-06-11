@@ -16,6 +16,19 @@ import { describe, expect, it } from 'vitest';
 const ROOT = join(import.meta.dirname, '..', '..', '..');
 const SRC = join(ROOT, 'src');
 
+/**
+ * Dedicated integration entry modules may eagerly import the one peer they
+ * integrate. The subpath export itself is the consumer's opt-in: importing
+ * `./testing/vitest` without vitest installed is the documented requirement
+ * of that subpath, not an accidental crash. Each entry here must be an
+ * exports-map entry point that no other src/ module imports — laziness is
+ * impossible for these because the integration value (e.g. `test.extend`)
+ * must be produced at module evaluation.
+ */
+const INTEGRATION_ENTRYPOINTS: Record<string, string> = {
+  'src/testing/vitest.ts': 'vitest',
+};
+
 /** Reads optional peer dep names from package.json peerDependenciesMeta. */
 function getOptionalPeerDeps(): string[] {
   const pkg = JSON.parse(readFileSync(join(ROOT, 'package.json'), 'utf8'));
@@ -71,6 +84,7 @@ describe('optional peer dependencies', () => {
         const pkg = extractPackageName(specifier);
         if (optionalDeps.has(pkg)) {
           const rel = relative(ROOT, file);
+          if (INTEGRATION_ENTRYPOINTS[rel] === pkg) continue;
           violations.push(`  ${rel}:${i + 1} → ${line}`);
         }
       }
