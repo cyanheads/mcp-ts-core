@@ -4,7 +4,7 @@ description: >
   Land working-tree changes as logical commits — the work grouped by concern, topped by a release commit (version bump, changelog, regenerated artifacts) and an annotated tag. Verify, commit, tag. Stops at "committed and tagged locally" — no push, no publish. The release-and-publish skill picks up from here. Distilled from the git_wrapup_instructions protocol.
 metadata:
   author: cyanheads
-  version: "1.2"
+  version: "1.3"
   audience: external
   type: workflow
 ---
@@ -159,8 +159,6 @@ Use `-m` with embedded newlines in the string (the commit `-m`-only constraint a
 ```
 <theme — omit version number, GitHub prepends v<VERSION>:>
 
-<1-2 sentence context: what this release does>
-
 <Sections — Keep a Changelog names, only those with entries>
 
 Added:
@@ -182,6 +180,7 @@ Dependency bumps:
 
 **Rules:**
 - Subject line omits the version number (GitHub prepends `v<VERSION>:` to the release title)
+- **No narrative preamble** — nothing between the subject and the first section header. The body is sections + bullets only; context belongs in the bullets
 - Not a CHANGELOG copy — terse, scannable
 - No marketing adjectives
 - Length is earned — two-line tags are fine for small patches
