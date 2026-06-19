@@ -1,6 +1,6 @@
 # mcp-ts-core - Directory Structure
 
-Generated on: 2026-06-19 21:21:13
+Generated on: 2026-06-19 23:51:06
 
 ```text
 mcp-ts-core/
@@ -609,6 +609,7 @@ mcp-ts-core/
 │   │   │   │   ├── utils/
 │   │   │   │   │   ├── toolDefinition.test.ts
 │   │   │   │   │   └── toolHandlerFactory.test.ts
+│   │   │   │   ├── content.test.ts
 │   │   │   │   ├── disabled-tool.test.ts
 │   │   │   │   ├── enrichment.test.ts
 │   │   │   │   ├── tool-registration.lifecycle.test.ts

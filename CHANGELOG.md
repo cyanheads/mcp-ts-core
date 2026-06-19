@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.10.8](changelog/0.10.x/0.10.8.md) — 2026-06-19
+
+ctx.content collector for image/audio blocks (bytes ride content[] only, never structuredContent); SQL gate classifies SELECT-shaped prepare failures as invalid_sql with DuckDB binder detail; OTEL_SERVICE_NAME-seeding docs corrected
+
 ## [0.10.7](changelog/0.10.x/0.10.7.md) — 2026-06-19
 
 Fresh-scaffold devcheck guards (changelog sync, git-dependent checks), check-skill-versions worktree-deletion guard, DuckdbProvider.describe() filter-qualification fix, seven skill version bumps, biome 2.5 + dependency refresh
