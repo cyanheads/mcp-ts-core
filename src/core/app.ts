@@ -116,7 +116,12 @@ export interface CreateAppOptions {
    * sane defaults for everything.
    */
   landing?: LandingConfig;
-  /** Server name — overrides package.json and MCP_SERVER_NAME env var. */
+  /**
+   * Server name — overrides `package.json` `name` and the `MCP_SERVER_NAME`
+   * env var. Also seeds `OTEL_SERVICE_NAME` when that var is unset (`??=`), so
+   * telemetry's `service.name` defaults to this value; an explicit
+   * `OTEL_SERVICE_NAME` in the environment still wins.
+   */
   name?: string;
   /** Prompt definitions. */
   prompts?: AnyPromptDefinition[];

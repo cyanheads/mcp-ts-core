@@ -4,7 +4,7 @@ description: >
   Finalize documentation and project metadata for a ship-ready MCP server. Use after implementation is complete, tests pass, and devcheck is clean. Safe to run at any stage — each step checks current state and only acts on what still needs work.
 metadata:
   author: cyanheads
-  version: "2.7"
+  version: "2.8"
   audience: external
   type: workflow
 ---
@@ -76,7 +76,7 @@ Key fields: `name`, `description`, `repository`, `author`, `homepage`, `bugs`, `
 
 **`name` must communicate the server's domain at a glance.** See `references/package-meta.md` for the naming convention — ambiguous abbreviations and acronym-only names fail the scannability test for humans and agents alike.
 
-**`name` and `title` in `createApp()` / `createWorkerHandler()` must match the unscoped `package.json` `name`** — display identity is the machine name on every surface; `lint:packaging` (run by `devcheck`) enforces the match and warns when the pair is partial. `description` is never duplicated into the entrypoint — `package.json` is the canonical source (the framework derives the served description from it).
+**`name` and `title` in `createApp()` / `createWorkerHandler()` must match the unscoped `package.json` `name`** — display identity is the machine name on every surface; `lint:packaging` (run by `devcheck`) enforces the match and warns when the pair is partial. `description` is never duplicated into the entrypoint — `package.json` is the canonical source (the framework derives the served description from it). Adopting the pair also seeds `OTEL_SERVICE_NAME` when unset, so telemetry's `service.name` switches to the machine name on first boot — expect a one-time series split in backends keyed on the old scoped label.
 
 **`description` is the canonical source.** Every other surface (README header, `server.json`, Dockerfile OCI label, GitHub repo description) derives from it. Write it here first, then propagate.
 

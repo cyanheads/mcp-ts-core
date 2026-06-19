@@ -15,7 +15,7 @@ OTel is **off by default**. Setting `OTEL_ENABLED=true` alone does nothing — y
 | `OTEL_ENABLED` | `false` | Master switch. Must be `true` to start the SDK. |
 | `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` | — | OTLP/HTTP traces endpoint (e.g. `http://localhost:4318/v1/traces`). |
 | `OTEL_EXPORTER_OTLP_METRICS_ENDPOINT` | — | OTLP/HTTP metrics endpoint (e.g. `http://localhost:4318/v1/metrics`). |
-| `OTEL_SERVICE_NAME` | `package.json` `name` | `service.name` resource attribute. |
+| `OTEL_SERVICE_NAME` | `createApp` `name` → `package.json` `name` | `service.name` resource attribute. Seeded from `createApp({ name })` when unset; an env value set before startup wins. |
 | `OTEL_SERVICE_VERSION` | `package.json` `version` | `service.version` resource attribute. |
 | `OTEL_TRACES_SAMPLER_ARG` | `1.0` | Trace sampling ratio (0–1) for `TraceIdRatioBasedSampler`. |
 | `OTEL_LOG_LEVEL` | `INFO` | OTel diagnostic logger level (`NONE`/`ERROR`/`WARN`/`INFO`/`DEBUG`/`VERBOSE`/`ALL`). |
