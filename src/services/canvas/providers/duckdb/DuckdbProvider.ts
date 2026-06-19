@@ -739,6 +739,17 @@ export class DuckdbProvider implements IDataCanvasProvider {
               );
             }
           }
+          if (isSelectShaped(sql) && prepErr instanceof Error) {
+            const binderMessage = sanitizeBinderMessage(
+              prepErr.message,
+              this.options.exportRootPath,
+            );
+            throw validationError(`Canvas query failed to prepare: ${binderMessage}`, {
+              reason: SQL_GATE_REASONS.invalidSql,
+              statementType: 'UNKNOWN',
+              binderMessage,
+            });
+          }
           throw validationError(
             'Canvas query must be SELECT; the statement could not be parsed or prepared.',
             { reason: SQL_GATE_REASONS.nonSelectStatement, statementType: 'UNKNOWN' },
@@ -755,6 +766,14 @@ export class DuckdbProvider implements IDataCanvasProvider {
       // instanceof McpError, not a loose `'code' in err` — engine/Node errors
       // can carry errno-style `code` props and must not escape the gate raw.
       if (err instanceof McpError) throw err;
+      if (isSelectShaped(sql) && err instanceof Error) {
+        const binderMessage = sanitizeBinderMessage(err.message, this.options.exportRootPath);
+        throw validationError(`Canvas query failed to prepare: ${binderMessage}`, {
+          reason: SQL_GATE_REASONS.invalidSql,
+          statementType: 'UNKNOWN',
+          binderMessage,
+        });
+      }
       throw validationError(
         'Canvas query must be SELECT; the statement could not be parsed or prepared.',
         { reason: SQL_GATE_REASONS.nonSelectStatement, statementType: 'UNKNOWN' },
@@ -1036,6 +1055,31 @@ function describeValueType(value: unknown): string {
 /** Escape a string literal for safe inclusion in `'...'` SQL contexts. */
 function escapeSqlString(value: string): string {
   return value.replace(/'/g, "''");
+}
+
+/**
+ * SELECT-shape probe for prepare-failure classification. A statement that
+ * starts with `SELECT` or `WITH` (CTE) but throws at prepare time is an invalid
+ * SELECT (unknown column/function/expression), not a non-SELECT statement.
+ */
+function isSelectShaped(sql: string): boolean {
+  return /^\s*(?:select|with)\b/i.test(sql);
+}
+
+/**
+ * Strip any occurrence of the configured export root path from a DuckDB binder
+ * message before it leaves the gate. Column/function/expression binder errors
+ * carry no host or path material, but the export root is the one local path
+ * that could in principle appear — redact it defensively so the detail surfaced
+ * to callers stays free of filesystem hints.
+ */
+function sanitizeBinderMessage(raw: string, exportRootPath: string): string {
+  const trimmed = raw.trim();
+  if (exportRootPath.length > 1) {
+    const escaped = exportRootPath.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    return trimmed.replace(new RegExp(escaped, 'g'), '[path]');
+  }
+  return trimmed;
 }
 
 async function ensureTableMissing(connection: DuckDBConnection, tableName: string): Promise<void> {

@@ -19,6 +19,7 @@ import {
   collectPlanViolations,
   DENIED_TABLE_FUNCTIONS,
   quoteIdentifier,
+  SQL_GATE_REASONS,
 } from '@/services/canvas/core/sqlGate.js';
 import { McpError } from '@/types-global/errors.js';
 
@@ -510,6 +511,13 @@ describe('sqlGate · assertNoSystemCatalogs (issue #224)', () => {
 describe('sqlGate · exported allowlists', () => {
   it('SELECT is the only allowed statement type', () => {
     expect([...ALLOWED_STATEMENT_TYPES]).toEqual(['SELECT']);
+  });
+
+  // Issue #236 — invalid_sql classifies SELECT-shaped statements that fail to
+  // prepare (bad column/function), kept distinct from non_select_statement.
+  it('SQL_GATE_REASONS includes invalid_sql distinct from non_select_statement', () => {
+    expect(SQL_GATE_REASONS.invalidSql).toBe('invalid_sql');
+    expect(SQL_GATE_REASONS.nonSelectStatement).toBe('non_select_statement');
   });
 
   it('plan operator allowlist contains read-only families', () => {

@@ -44,6 +44,8 @@ export const ALLOWED_STATEMENT_TYPES: ReadonlySet<DuckdbStatementType> = new Set
 export const SQL_GATE_REASONS = {
   multiStatement: 'multi_statement',
   nonSelectStatement: 'non_select_statement',
+  /** SELECT-shaped statement that failed to prepare (unknown column/function/expression). */
+  invalidSql: 'invalid_sql',
   planOperatorNotAllowed: 'plan_operator_not_allowed',
   deniedFunction: 'denied_function',
   deniedFunctionInPlan: 'denied_function_in_plan',

@@ -599,6 +599,45 @@ describeIf('canvas · DuckDB round trip', () => {
     expect((mcpErr.data as { reason?: string })?.reason).toBe('missing_table');
   });
 
+  // Issue #236 — a SELECT-shaped statement that fails to prepare for a reason
+  // other than a missing table (here a mistyped column) is classified as
+  // invalid_sql, and the DuckDB binder detail is preserved in data.binderMessage
+  // so callers see which column was wrong — not mislabeled non_select_statement.
+  it('issue #236 — mistyped column in a SELECT yields invalid_sql with binder detail', async () => {
+    const instance = await canvas.acquire(undefined, ctx);
+    await instance.registerTable('items236', [{ id: 1, name: 'alpha' }]);
+    let caught: unknown;
+    try {
+      await instance.query('SELECT nonexistent_col FROM items236');
+    } catch (err) {
+      caught = err;
+    }
+    expect(caught).toBeInstanceOf(McpError);
+    const mcpErr = caught as McpError;
+    // ValidationError (-32007), reason invalid_sql — NOT non_select_statement.
+    expect(mcpErr.code).toBe(-32007);
+    const data = mcpErr.data as { reason?: string; binderMessage?: string };
+    expect(data.reason).toBe('invalid_sql');
+    expect(typeof data.binderMessage).toBe('string');
+    expect(data.binderMessage).toContain('nonexistent_col');
+  });
+
+  // Issue #236 — a genuine non-SELECT statement (prepares, but types as INSERT)
+  // still classifies as non_select_statement; the invalid_sql path must not
+  // leak onto statements that are simply the wrong shape.
+  it('issue #236 — a genuine non-SELECT still yields non_select_statement', async () => {
+    const instance = await canvas.acquire(undefined, ctx);
+    await instance.registerTable('items236b', [{ x: 1 }]);
+    let caught: unknown;
+    try {
+      await instance.query('INSERT INTO items236b VALUES (2)');
+    } catch (err) {
+      caught = err;
+    }
+    expect(caught).toBeInstanceOf(McpError);
+    expect((caught as McpError).data?.reason).toBe('non_select_statement');
+  });
+
   // Issue #224 — denySystemCatalogs: when set, the gate rejects catalog
   // references at the text-scan layer (system_catalog_access). Without the
   // flag, catalog queries may still fail at a later layer (plan-walk), but with
