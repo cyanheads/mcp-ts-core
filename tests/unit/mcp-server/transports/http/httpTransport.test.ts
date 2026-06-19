@@ -800,6 +800,79 @@ describe('HTTP Transport', () => {
     });
   });
 
+  // Verification for issue #244. The #157 tests above only assert an eventual
+  // 413 — they pass even when the entire over-limit body is buffered first
+  // (the line-666 streamed test enqueues 2000 bytes and checks status alone).
+  // These assert the property that actually protects memory: when no
+  // Content-Length is present, the cap must be enforced by a streaming read
+  // that stops shortly after the limit is exceeded — not by buffering the whole
+  // body via arrayBuffer() and checking afterward.
+  describe('Body-size cap must bound buffering, not just eventually reject (issue #244)', () => {
+    const CAP = 200;
+
+    /** A lazy stream that records how many bytes were pulled and whether it was
+     * cancelled. Offers `chunkSize × chunks` bytes total, far over the cap, but
+     * only as the consumer pulls — so `bytesPulled` reflects how much the
+     * middleware actually read before responding. */
+    function instrumentedStream(chunkSize: number, chunks: number) {
+      const state = { bytesPulled: 0, cancelled: false, pulls: 0 };
+      const stream = new ReadableStream<Uint8Array>({
+        pull(controller) {
+          if (state.pulls >= chunks) {
+            controller.close();
+            return;
+          }
+          state.pulls++;
+          state.bytesPulled += chunkSize;
+          controller.enqueue(new Uint8Array(chunkSize));
+        },
+        cancel() {
+          state.cancelled = true;
+        },
+      });
+      return { stream, state };
+    }
+
+    // Marked `test.fails`: it asserts the CORRECT (post-fix) behavior, which the
+    // current arrayBuffer()-then-check code does not satisfy — so today the
+    // assertions throw and `test.fails` keeps the suite green while #244 is open.
+    // Implementing the streaming cap makes them pass, which flips this to RED —
+    // the signal to change `test.fails` back to `test`.
+    test.fails('rejects an over-limit no-Content-Length body without buffering all of it', async () => {
+      await withConfigOverrides({ mcpHttpMaxBodyBytes: CAP }, async () => {
+        const { app } = await createHttpApp(
+          () => Promise.resolve(mockMcpServer as McpServer),
+          mockContext,
+          defaultMeta,
+        );
+
+        // 64 KiB offered in 1 KiB pulls — 327x the 200-byte cap.
+        const { stream, state } = instrumentedStream(1024, 64);
+
+        const response = await app.fetch(
+          new Request('http://localhost:3000/mcp', {
+            method: 'POST',
+            headers: {
+              Origin: 'http://localhost:3000',
+              'Content-Type': 'application/json',
+              'Mcp-Protocol-Version': '2025-03-26',
+            },
+            body: stream,
+            duplex: 'half',
+          } as RequestInit),
+        );
+
+        expect(response.status).toBe(413);
+
+        // A streaming cap stops reading shortly after the limit is exceeded
+        // (8 KiB slack for read-ahead). The current code drains all 64 KiB and
+        // never cancels, so both assertions throw today.
+        expect(state.cancelled).toBe(true);
+        expect(state.bytesPulled).toBeLessThan(CAP + 8 * 1024);
+      });
+    });
+  });
+
   describe('Error handling integration', () => {
     test('should use centralized error handler', async () => {
       const { app } = await createHttpApp(
