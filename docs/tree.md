@@ -1,6 +1,6 @@
 # mcp-ts-core - Directory Structure
 
-Generated on: 2026-06-11 20:23:29
+Generated on: 2026-06-19 21:21:13
 
 ```text
 mcp-ts-core/
@@ -655,7 +655,10 @@ mcp-ts-core/
 │   │   ├── public-api/
 │   │   │   └── type-contract.test.ts
 │   │   ├── scripts/
+│   │   │   ├── build-changelog.test.ts
+│   │   │   ├── check-skill-versions.test.ts
 │   │   │   ├── clean-mcpb.test.ts
+│   │   │   ├── devcheck-git-guard.test.ts
 │   │   │   ├── devdocs.test.ts
 │   │   │   └── lint-packaging.test.ts
 │   │   ├── services/

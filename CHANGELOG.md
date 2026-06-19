@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.10.7](changelog/0.10.x/0.10.7.md) — 2026-06-19
+
+Fresh-scaffold devcheck guards (changelog sync, git-dependent checks), check-skill-versions worktree-deletion guard, DuckdbProvider.describe() filter-qualification fix, seven skill version bumps, biome 2.5 + dependency refresh
+
 ## [0.10.6](changelog/0.10.x/0.10.6.md) — 2026-06-11
 
 Post-pack bundle cleaner strips dependency-shipped agent docs; packaging linter adds post-bundle content and entrypoint identity checks; template scaffolds name/title pair

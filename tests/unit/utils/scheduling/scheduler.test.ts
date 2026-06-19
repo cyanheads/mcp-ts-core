@@ -4,29 +4,38 @@
  */
 
 import { trace } from '@opentelemetry/api';
-import * as cron from 'node-cron';
 import { afterEach, beforeEach, describe, expect, it, type MockInstance, vi } from 'vitest';
 
 import { JsonRpcErrorCode, type McpError as McpErrorType } from '@/types-global/errors.js';
 import { logger } from '../../../../src/utils/internal/logger.js';
 
-const validateMock = vi.fn(() => true);
-const createTaskMock = vi.fn(
-  (schedule: string, handler: () => Promise<void> | void) =>
-    ({
-      start: vi.fn(),
-      stop: vi.fn(),
-      trigger: () => handler(),
-      schedule,
-    }) as unknown as {
-      start: () => void;
-      stop: () => void;
-      trigger: () => Promise<void> | void;
-    },
-);
+// node-cron 4.4.x ships a frozen ESM namespace whose bindings cannot be
+// reassigned, so `vi.spyOn(cron, 'validate')` throws "Module namespace is not
+// configurable in ESM". Mock the module instead; `vi.hoisted` makes the mock
+// functions available to the hoisted `vi.mock` factory. The missing-peer and
+// non-Node suites below override this per-test via `vi.doMock` after
+// `vi.resetModules()`.
+const { validateMock, createTaskMock } = vi.hoisted(() => ({
+  validateMock: vi.fn(() => true),
+  createTaskMock: vi.fn(
+    (schedule: string, handler: () => Promise<void> | void) =>
+      ({
+        start: vi.fn(),
+        stop: vi.fn(),
+        trigger: () => handler(),
+        schedule,
+      }) as unknown as {
+        start: () => void;
+        stop: () => void;
+        trigger: () => Promise<void> | void;
+      },
+  ),
+}));
 
-let validateSpy: MockInstance;
-let createTaskSpy: MockInstance;
+vi.mock('node-cron', () => ({
+  validate: validateMock,
+  createTask: createTaskMock,
+}));
 
 type SchedulerModule = typeof import('../../../../src/utils/scheduling/scheduler.js');
 let schedulerService: SchedulerModule['schedulerService'];
@@ -47,9 +56,6 @@ describe('schedulerService', () => {
       spanContext: () => ({ traceId: 'trace', spanId: 'span' }),
     } as never);
 
-    validateSpy = vi.spyOn(cron, 'validate').mockImplementation(validateMock as never);
-    createTaskSpy = vi.spyOn(cron, 'createTask').mockImplementation(createTaskMock as never);
-
     const module: SchedulerModule = await import('../../../../src/utils/scheduling/scheduler.js');
     schedulerService = module.schedulerService;
     (schedulerService as unknown as { jobs: Map<string, unknown> }).jobs.clear();
@@ -60,8 +66,6 @@ describe('schedulerService', () => {
     warningSpy.mockRestore();
     errorSpy.mockRestore();
     getActiveSpanSpy.mockRestore();
-    validateSpy?.mockRestore();
-    createTaskSpy?.mockRestore();
     if (schedulerService) {
       (schedulerService as unknown as { jobs: Map<string, unknown> }).jobs.clear();
     }
