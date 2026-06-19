@@ -7,7 +7,7 @@
  */
 
 import type { RequestTaskStore } from '@modelcontextprotocol/sdk/shared/protocol.js';
-import type { ElicitResult } from '@modelcontextprotocol/sdk/types.js';
+import type { ContentBlock, ElicitResult } from '@modelcontextprotocol/sdk/types.js';
 import type { ZodObject, ZodRawShape, ZodType, z } from 'zod';
 
 import type { StorageService } from '@/storage/core/StorageService.js';
@@ -124,6 +124,20 @@ export interface ContextProgress {
 export interface Context {
   /** Auth data when request is authenticated. */
   readonly auth?: AuthContext | undefined;
+
+  // --- Content blocks (always present; no-op when unused) ---
+  /**
+   * Accumulates non-text content blocks (image/audio bytes) onto this request.
+   * Blocks are prepended to the tool's `content[]` after `format()` runs and are
+   * never placed in `structuredContent` — so a handler can emit media for the
+   * calling model to see or hear without the base64 also duplicating into the
+   * typed output field. Always present and callable from the handler and the
+   * service layer (mirrors `ctx.enrich`); a no-op surface when never called. Call
+   * `content.image(data, mimeType)` / `content.audio(data, mimeType)`, or
+   * `content(block)` to push a raw {@link ContentBlock} (embedded resources,
+   * resource links).
+   */
+  readonly content: ContentCollect;
 
   // --- Protocol capabilities (optional — not all clients support these) ---
   /**
@@ -375,6 +389,45 @@ export type Enrich<T = Record<string, unknown>> = ((fields: T) => void) & Enrich
  */
 export type TypedEnrich<E extends ZodRawShape> = Enrich<Partial<z.infer<ZodObject<E>>>>;
 
+// ---------------------------------------------------------------------------
+// Content collection — non-text content blocks on the success path
+// ---------------------------------------------------------------------------
+
+/**
+ * Per-request content-block accumulator. Created in `createContext`, populated by
+ * `ctx.content(...)` during handler/service execution, and read by the tool
+ * handler factory after the handler returns to prepend onto `content[]`. Blocks
+ * collected here ride `content[]` only and never enter `structuredContent` — the
+ * entire purpose, so a tool can emit image/audio bytes for the calling model
+ * without the base64 also duplicating into the typed output field.
+ *
+ * @internal
+ */
+export interface ContentStore {
+  /** Accumulated content blocks, insertion-ordered. Prepended to `content[]`. */
+  blocks: ContentBlock[];
+}
+
+/**
+ * The `ctx.content` surface: a callable that pushes a raw {@link ContentBlock},
+ * plus typed helpers for the two base64 media blocks (image, audio). Mirrors the
+ * `ctx.enrich` accumulator — always present and callable from the handler and the
+ * service layer, a no-op when never called. Use it for binary media the calling
+ * model should see or hear; data that belongs in the typed result stays on the
+ * handler's return value (and thus `structuredContent`).
+ */
+export interface ContentCollect {
+  /** Emit a base64-encoded audio block for the calling model to hear. */
+  audio(data: string, mimeType: string): void;
+  /** Emit a base64-encoded image block for the calling model to see. */
+  image(data: string, mimeType: string): void;
+  /**
+   * Push a raw content block — the escape hatch for block types without a typed
+   * helper (embedded resources, resource links, extra text).
+   */
+  (block: ContentBlock): void;
+}
+
 /**
  * Handler context. Two independent contract dimensions narrow the base
  * {@link Context}:
@@ -581,6 +634,62 @@ export function readEnrichmentStore(ctx: Context): EnrichmentStore | undefined {
 }
 
 // ---------------------------------------------------------------------------
+// Content runtime — accumulator wiring (internal)
+// ---------------------------------------------------------------------------
+
+/**
+ * Symbol stashing the per-request {@link ContentStore} on a Context. Like the
+ * enrichment store, a symbol key keeps it invisible to `JSON.stringify`,
+ * `Object.keys`, and consumers — framework plumbing the handler factory reads,
+ * never wire data.
+ * @internal
+ */
+const CONTENT_STORE: unique symbol = Symbol('mcp.contentStore');
+
+/** Fresh, empty content accumulator. @internal */
+export function createContentStore(): ContentStore {
+  return { blocks: [] };
+}
+
+/**
+ * Builds the always-present `ctx.content` callable bound to a store. The bare
+ * call pushes a raw block; the helpers push the conventional media blocks.
+ * @internal
+ */
+export function createContentCollect(store: ContentStore): ContentCollect {
+  const content = ((block: ContentBlock): void => {
+    store.blocks.push(block);
+  }) as ContentCollect;
+  content.image = (data: string, mimeType: string): void => {
+    store.blocks.push({ type: 'image', data, mimeType });
+  };
+  content.audio = (data: string, mimeType: string): void => {
+    store.blocks.push({ type: 'audio', data, mimeType });
+  };
+  return content;
+}
+
+/** Stashes the store on a Context under the private symbol (non-enumerable). @internal */
+export function stashContentStore(ctx: Context, store: ContentStore): void {
+  Object.defineProperty(ctx, CONTENT_STORE, {
+    value: store,
+    enumerable: false,
+    writable: false,
+    configurable: false,
+  });
+}
+
+/**
+ * Reads the content store wired by `createContext` (or a test mock). Returns
+ * `undefined` when none was stashed — defensive, though every factory-built
+ * Context has one.
+ * @internal
+ */
+export function readContentStore(ctx: Context): ContentStore | undefined {
+  return (ctx as { [CONTENT_STORE]?: ContentStore })[CONTENT_STORE];
+}
+
+// ---------------------------------------------------------------------------
 // Context construction (internal — not part of the public consumer API)
 // ---------------------------------------------------------------------------
 
@@ -640,6 +749,11 @@ export function createContext(deps: ContextDeps): Context {
   // (values are stripped by the effective-output parse).
   const enrichmentStore = createEnrichmentStore();
 
+  // Per-request content-block accumulator + always-present `ctx.content`. Blocks
+  // collected here are prepended to `content[]` by the handler factory and never
+  // reach `structuredContent` (mirrors the enrichment store's stash/read wiring).
+  const contentStore = createContentStore();
+
   const ctx: Context = {
     requestId: effectiveContext.requestId,
     timestamp: effectiveContext.timestamp,
@@ -658,6 +772,7 @@ export function createContext(deps: ContextDeps): Context {
     notifyToolListChanged: deps.notifyToolListChanged,
     progress,
     uri: deps.uri,
+    content: createContentCollect(contentStore),
     enrich: createEnrich(enrichmentStore),
     // No-op resolver for definitions without a contract. `attachTypedFail`
     // overwrites with a contract-aware resolver when `errors[]` is declared.
@@ -668,6 +783,7 @@ export function createContext(deps: ContextDeps): Context {
   };
 
   stashEnrichmentStore(ctx, enrichmentStore);
+  stashContentStore(ctx, contentStore);
   return ctx;
 }
 

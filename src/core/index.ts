@@ -36,6 +36,7 @@ export { z } from 'zod';
 
 export type {
   AuthContext,
+  ContentCollect,
   Context,
   ContextLogger,
   ContextProgress,

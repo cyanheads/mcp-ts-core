@@ -19,7 +19,12 @@ import { toJSONSchema, ZodError, type ZodObject, type ZodRawShape } from 'zod';
 
 import { config } from '@/config/index.js';
 import type { Context, ElicitFn, EnrichmentStore } from '@/core/context.js';
-import { attachTypedFail, createContext, readEnrichmentStore } from '@/core/context.js';
+import {
+  attachTypedFail,
+  createContext,
+  readContentStore,
+  readEnrichmentStore,
+} from '@/core/context.js';
 import { buildRequestScopedNotifiers } from '@/mcp-server/notifications.js';
 import { withRequiredScopes } from '@/mcp-server/transports/auth/lib/authUtils.js';
 import type { StorageService } from '@/storage/core/StorageService.js';
@@ -438,6 +443,15 @@ export function createToolHandler(
         throw new Error(
           `Output formatting failed: ${formatError instanceof Error ? formatError.message : String(formatError)}`,
         );
+      }
+
+      // Prepend any blocks collected via `ctx.content` (image/audio bytes). They
+      // ride content[] only — never structuredContent — so a handler can surface
+      // media for the model without the base64 duplicating into the typed output.
+      // Empty for tools that never call ctx.content, leaving content[] unchanged.
+      const collected = readContentStore(ctx)?.blocks;
+      if (collected && collected.length > 0) {
+        domainContent = [...collected, ...domainContent];
       }
 
       // Merge enrichment into structuredContent and append the content[] trailer.

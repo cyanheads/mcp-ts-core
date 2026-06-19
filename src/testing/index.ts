@@ -6,7 +6,7 @@
  * @module src/testing/index
  */
 
-import type { ElicitResult } from '@modelcontextprotocol/sdk/types.js';
+import type { ContentBlock, ElicitResult } from '@modelcontextprotocol/sdk/types.js';
 import type { ZodType, z } from 'zod';
 import type {
   AuthContext,
@@ -18,9 +18,13 @@ import type {
 } from '@/core/context.js';
 import {
   attachTypedFail,
+  createContentCollect,
+  createContentStore,
   createEnrich,
   createEnrichmentStore,
+  readContentStore,
   readEnrichmentStore,
+  stashContentStore,
   stashEnrichmentStore,
 } from '@/core/context.js';
 import { StorageService } from '@/storage/core/StorageService.js';
@@ -242,6 +246,7 @@ export function createMockContext(options: MockContextOptions = {}): Context {
   const progress = options.progress ? createMockProgress() : undefined;
 
   const enrichmentStore = createEnrichmentStore();
+  const contentStore = createContentStore();
 
   // Wrap the caller's elicit mock into an ElicitFn so that tests calling
   // ctx.elicit.url(...) don't throw TypeError. The default url stub returns a
@@ -270,6 +275,7 @@ export function createMockContext(options: MockContextOptions = {}): Context {
     notifyToolListChanged: options.notifyToolListChanged,
     progress,
     uri: options.uri,
+    content: createContentCollect(contentStore),
     enrich: createEnrich(enrichmentStore),
     // No-op resolver for definitions without a contract. `attachTypedFail` below
     // overwrites it with a contract-aware resolver when `options.errors` is set.
@@ -279,6 +285,9 @@ export function createMockContext(options: MockContextOptions = {}): Context {
   // Stash the enrichment store so `getEnrichment(ctx)` can read what a handler
   // (or the service layer) accumulated via `ctx.enrich(...)` during the test.
   stashEnrichmentStore(ctx, enrichmentStore);
+  // Stash the content store so `getContentBlocks(ctx)` can read what a handler
+  // emitted via `ctx.content(...)` during the test.
+  stashContentStore(ctx, contentStore);
 
   // Mirror the production handler factory: when a contract is declared, attach
   // a typed `fail` and `recoveryFor` keyed by the contract's reasons. Empty
@@ -300,6 +309,23 @@ export function createMockContext(options: MockContextOptions = {}): Context {
  */
 export function getEnrichment(ctx: Context): Record<string, unknown> {
   return readEnrichmentStore(ctx)?.values ?? {};
+}
+
+/**
+ * Reads the content blocks a handler emitted via `ctx.content(...)` on a mock
+ * context, for assertions. Returns them in insertion order (empty array when none
+ * were emitted) — the same blocks the handler factory prepends to `content[]`,
+ * never placed in `structuredContent`.
+ *
+ * @example
+ * ```ts
+ * const ctx = createMockContext();
+ * await render.handler(render.input.parse({ text: 'hi' }), ctx);
+ * expect(getContentBlocks(ctx)).toEqual([{ type: 'image', data: '...', mimeType: 'image/png' }]);
+ * ```
+ */
+export function getContentBlocks(ctx: Context): ContentBlock[] {
+  return readContentStore(ctx)?.blocks ?? [];
 }
 
 // ---------------------------------------------------------------------------
