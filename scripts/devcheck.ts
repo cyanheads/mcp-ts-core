@@ -229,6 +229,15 @@ const Shell = {
 
 const ROOT_DIR = path.join(path.dirname(fileURLToPath(import.meta.url)), '..');
 
+/**
+ * Whether the project root is inside a git repository. The git-dependent checks
+ * (TODOs/FIXMEs, Tracked Secrets, Framework Antipatterns) shell out to
+ * `git grep`/`git ls-files`, which exit 128 — not a real finding — when there's
+ * no repo. A fresh `init` scaffold has no `.git` until the user runs `git init`,
+ * so those checks guard on this and skip cleanly instead of failing.
+ */
+const isGitRepo = (): boolean => existsSync(path.join(ROOT_DIR, '.git'));
+
 // ── Project-local config (devcheck.config.json) ─────────────────────
 
 interface DevcheckConfig {
@@ -356,6 +365,7 @@ const ALL_CHECKS: Check[] = [
     flag: '--no-todos',
     canFix: false,
     getCommand: (ctx) => {
+      if (!isGitRepo()) return null; // no repo to grep — fresh scaffold before `git init`
       // git grep -n (line number) -E (extended regex) -i (case-insensitive)
       const baseCmd = ['git', 'grep', '-nEi', '\\b(TODO|FIXME)\\b'];
       // Exclude files where TODO/FIXME appears as prose or intentional stubs
@@ -388,18 +398,21 @@ const ALL_CHECKS: Check[] = [
     flag: '--no-secrets',
     canFix: false,
     // Check if common sensitive files are tracked by git.
-    getCommand: () => [
-      'git',
-      'ls-files',
-      '*.env*',
-      '**/.npmrc',
-      '**/.netrc',
-      '**/credentials.json',
-      '**/*.pem',
-      '**/*.key',
-      '**/secret*',
-      '**/.htpasswd',
-    ],
+    getCommand: () => {
+      if (!isGitRepo()) return null; // no repo — `git ls-files` would exit 128, not a finding
+      return [
+        'git',
+        'ls-files',
+        '*.env*',
+        '**/.npmrc',
+        '**/.netrc',
+        '**/credentials.json',
+        '**/*.pem',
+        '**/*.key',
+        '**/secret*',
+        '**/.htpasswd',
+      ];
+    },
     // Success if output is empty OR only contains safe patterns.
     isSuccess: (result, _mode) => {
       if (result.exitCode !== 0) return false;
@@ -437,7 +450,11 @@ const ALL_CHECKS: Check[] = [
     name: 'Framework Antipatterns',
     flag: '--no-framework-antipatterns',
     canFix: false,
-    getCommand: () => ['bun', 'run', 'scripts/check-framework-antipatterns.ts'],
+    // Runs `git grep` per rule; skip cleanly without a repo (fresh scaffold before `git init`).
+    getCommand: () => {
+      if (!isGitRepo()) return null;
+      return ['bun', 'run', 'scripts/check-framework-antipatterns.ts'];
+    },
     tip: (c) =>
       `Remove the flagged SDK-coupling shortcut. See ${c.bold('scripts/check-framework-antipatterns.ts')} for rule rationale.`,
   },
