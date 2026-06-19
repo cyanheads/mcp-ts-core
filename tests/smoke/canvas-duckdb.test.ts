@@ -87,6 +87,47 @@ describeIf('canvas · DuckDB round trip', () => {
     expect(result.columns).toEqual(['name']);
   });
 
+  // Issue #235 — describe({ tableName }) pushed an unqualified `table_name`
+  // filter into a query joining information_schema.tables with duckdb_tables();
+  // both expose `table_name`, so DuckDB raised a Binder Error (ambiguous column).
+  // The fix qualifies the pushed filters with the `t` alias. Assert the filtered
+  // path returns the single table's correct metadata, not merely "doesn't throw".
+  it('issue #235 — describe({ tableName }) returns one table with correct metadata', async () => {
+    const instance = await canvas.acquire(undefined, ctx);
+    await instance.registerTable('df_target', [
+      { id: 1, label: 'a' },
+      { id: 2, label: 'b' },
+    ]);
+    // A second table on the same canvas — the filter must exclude it.
+    await instance.registerTable('df_other', [{ id: 9 }]);
+
+    const filtered = await instance.describe({ tableName: 'df_target' });
+
+    expect(filtered).toHaveLength(1);
+    const info = filtered[0]!;
+    expect(info.name).toBe('df_target');
+    expect(info.kind).toBe('table');
+    expect(info.rowCount).toBe(2);
+    expect(info.columns.map((col) => col.name).sort()).toEqual(['id', 'label']);
+  });
+
+  // Issue #235, latent arm — `kind` filters also pushed unqualified `table_type`.
+  // duckdb_tables() exposes no `table_type` so it wasn't yet ambiguous, but the
+  // fix qualifies it too. Combining tableName + kind exercises both qualified
+  // predicates together.
+  it('issue #235 — describe({ tableName, kind: "table" }) keeps both filters qualified', async () => {
+    const instance = await canvas.acquire(undefined, ctx);
+    await instance.registerTable('df_combo', [{ id: 1 }, { id: 2 }, { id: 3 }]);
+
+    const filtered = await instance.describe({ tableName: 'df_combo', kind: 'table' });
+    expect(filtered.map((t) => t.name)).toEqual(['df_combo']);
+    expect(filtered[0]!.rowCount).toBe(3);
+
+    // The same table excluded when the kind filter doesn't match it.
+    const asView = await instance.describe({ tableName: 'df_combo', kind: 'view' });
+    expect(asView).toHaveLength(0);
+  });
+
   it('rejects multi-statement input via the SQL gate', async () => {
     const instance = await canvas.acquire(undefined, ctx);
     await instance.registerTable('t', [{ x: 1 }]);

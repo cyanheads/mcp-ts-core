@@ -561,14 +561,19 @@ export class DuckdbProvider implements IDataCanvasProvider {
     if (options?.tableName !== undefined) {
       assertValidIdentifier(options.tableName, 'table');
     }
-    const filters = [`table_schema = 'main'`];
+    // Qualify every pushed filter with the `t` alias: both `information_schema.tables t`
+    // and `duckdb_tables() dt` expose `table_name`, so an unqualified `table_name`
+    // predicate raises a Binder Error (ambiguous column). `table_schema`/`table_type`
+    // are unambiguous today (duckdb_tables() exposes `schema_name`, not `table_schema`,
+    // and no `table_type`), but qualify them too for consistency and latent safety.
+    const filters = [`t.table_schema = 'main'`];
     if (options?.tableName) {
-      filters.push(`table_name = '${escapeSqlString(options.tableName)}'`);
+      filters.push(`t.table_name = '${escapeSqlString(options.tableName)}'`);
     }
     if (options?.kind === 'view') {
-      filters.push(`table_type = 'VIEW'`);
+      filters.push(`t.table_type = 'VIEW'`);
     } else if (options?.kind === 'table') {
-      filters.push(`table_type <> 'VIEW'`);
+      filters.push(`t.table_type <> 'VIEW'`);
     }
 
     // Fetch table list and size estimates in one pass. duckdb_tables() returns
