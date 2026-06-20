@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.10.9](changelog/0.10.x/0.10.9.md) — 2026-06-20
+
+devcheck gains two static guards: floating dependency specifiers (latest/*/dist-tags) in package.json + bun.lock workspaces, and plugin marketplace manifest correctness (descriptions + scoped/unscoped identity)
+
 ## [0.10.8](changelog/0.10.x/0.10.8.md) — 2026-06-19
 
 ctx.content collector for image/audio blocks (bytes ride content[] only, never structuredContent); SQL gate classifies SELECT-shaped prepare failures as invalid_sql with DuckDB binder detail; OTEL_SERVICE_NAME-seeding docs corrected
