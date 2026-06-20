@@ -129,6 +129,7 @@ describe('CLI init command', () => {
     expect(existsSync(join(dest, 'scripts', 'build.ts'))).toBe(true);
     expect(existsSync(join(dest, 'scripts', 'devcheck.ts'))).toBe(true);
     expect(existsSync(join(dest, 'scripts', 'check-framework-antipatterns.ts'))).toBe(true);
+    expect(existsSync(join(dest, 'scripts', 'check-dependency-specifiers.ts'))).toBe(true);
     expect(existsSync(join(dest, 'skills', 'add-tool', 'SKILL.md'))).toBe(true);
     expect(existsSync(join(dest, 'skills', 'README.md'))).toBe(false);
     expect(existsSync(join(dest, 'tsconfig.json'))).toBe(true);

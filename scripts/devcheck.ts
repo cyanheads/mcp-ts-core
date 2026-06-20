@@ -437,10 +437,16 @@ const ALL_CHECKS: Check[] = [
     flag: '--no-packaging',
     canFix: false,
     // Validates env var alignment between manifest.json (MCPB bundle) and
-    // server.json (MCP Registry). Skipped cleanly when manifest.json is absent
-    // — consumers who deleted it for an HTTP-only deploy are unaffected.
+    // server.json (MCP Registry), plus plugin marketplace manifests (#240).
+    // Runs when manifest.json OR any plugin manifest is present; skipped cleanly
+    // when none exist — consumers on an HTTP-only deploy are unaffected.
     getCommand: () => {
-      if (!existsSync(path.join(ROOT_DIR, 'manifest.json'))) return null;
+      const hasManifest = existsSync(path.join(ROOT_DIR, 'manifest.json'));
+      const hasPluginManifest =
+        existsSync(path.join(ROOT_DIR, '.claude-plugin/plugin.json')) ||
+        existsSync(path.join(ROOT_DIR, '.codex-plugin/plugin.json')) ||
+        existsSync(path.join(ROOT_DIR, '.codex-plugin/mcp.json'));
+      if (!hasManifest && !hasPluginManifest) return null;
       return ['bun', 'run', 'scripts/lint-packaging.ts'];
     },
     tip: (c) =>
@@ -457,6 +463,18 @@ const ALL_CHECKS: Check[] = [
     },
     tip: (c) =>
       `Remove the flagged SDK-coupling shortcut. See ${c.bold('scripts/check-framework-antipatterns.ts')} for rule rationale.`,
+  },
+  {
+    name: 'Dependency Specifiers',
+    flag: '--no-dep-specifiers',
+    canFix: false,
+    // Rejects floating specifiers (latest/*/dist-tags) in package.json + the
+    // bun.lock workspaces map (#246). Static and local — no network, no git —
+    // so it runs in the default and --fast passes. Shipped to consumers via
+    // package.json `files:`; reads package.json/bun.lock directly, no guard.
+    getCommand: () => ['bun', 'run', 'scripts/check-dependency-specifiers.ts'],
+    tip: (c) =>
+      `Pin the flagged dep to a concrete range; after ${c.bold('bun update --latest')} run a plain ${c.bold('bun install')} to reconcile ${c.bold('bun.lock')}.`,
   },
   {
     name: 'Open-Indexed Interfaces',

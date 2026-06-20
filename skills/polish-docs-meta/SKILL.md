@@ -4,7 +4,7 @@ description: >
   Finalize documentation and project metadata for a ship-ready MCP server. Use after implementation is complete, tests pass, and devcheck is clean. Safe to run at any stage — each step checks current state and only acts on what still needs work.
 metadata:
   author: cyanheads
-  version: "2.8"
+  version: "2.9"
   audience: external
   type: workflow
 ---
@@ -169,20 +169,22 @@ Never hand-edit `CHANGELOG.md` when using this pattern — it's a build artifact
 
 ### 10. Plugin Metadata (Codex / Claude Code)
 
+`lint:packaging` (run by `devcheck`) now enforces the high-value subset automatically when these manifests are present: non-empty descriptions, and identity/install correctness — display fields (`name`, server key, `interface.displayName`) must be the **unscoped** machine name, while the `npx -y` install arg must be the full `package.json` `name` (scoped if scoped). Opt out per project with `"packaging": { "pluginManifests": false }` in `devcheck.config.json`. The checks below cover the fields the gate doesn't (version / repository / license sync, category, env vars).
+
 If `.codex-plugin/plugin.json` exists, verify it's populated and in sync with `package.json` and `server.json`:
 
-- `name` matches `package.json` `name`
+- `name` is the unscoped `package.json` `name` (display identity is the machine name on every surface)
 - `version` matches `package.json` `version`
 - `description` matches `package.json` `description`
 - `repository` matches `package.json` `repository.url`
 - `license` matches `package.json` `license`
-- `interface.displayName` = `package.json` `name`
+- `interface.displayName` is the unscoped `package.json` `name`
 - `interface.shortDescription` matches `package.json` `description`
 - `interface.category` is set to a meaningful category
 
-If `.codex-plugin/mcp.json` exists, verify the server name key matches `package.json` `name` and env vars include any required API keys from the server config schema.
+If `.codex-plugin/mcp.json` exists, verify the server-name key is the unscoped `package.json` `name`, the `npx -y` install arg is the full `package.json` `name`, and env vars include any required API keys from the server config schema.
 
-If `.claude-plugin/plugin.json` exists, apply the same checks: `name`, `version`, `description`, `repository`, `license` from `package.json`. Verify the inline `mcpServers` entry key matches `package.json` `name` and env vars include any required API keys.
+If `.claude-plugin/plugin.json` exists, apply the same checks: `name` (unscoped), `version`, `description`, `repository`, `license` from `package.json`. Verify the inline `mcpServers` entry key is the unscoped name, its `npx -y` install arg is the full `package.json` `name`, and env vars include any required API keys.
 
 ### 11. MCPB Bundling Artifacts
 

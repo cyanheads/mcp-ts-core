@@ -14,6 +14,7 @@ import {
   checkBundleEntries,
   checkEntrypointIdentity,
   checkManifestIdentity,
+  checkPluginManifests,
 } from '../../../scripts/lint-packaging.js';
 
 describe('lint-packaging · bundle-content guard (checks 5–7)', () => {
@@ -243,5 +244,123 @@ describe('lint-packaging · manifest identity (check 9, manifest surface)', () =
   it('skips when display_name is absent or not a string', () => {
     expect(checkManifestIdentity({}, 'pubmed-mcp-server')).toEqual([]);
     expect(checkManifestIdentity({ display_name: 42 }, 'pubmed-mcp-server')).toEqual([]);
+  });
+});
+
+describe('lint-packaging · plugin marketplace manifests (check 10, #240)', () => {
+  const UNSCOPED = 'pubmed-mcp-server';
+  const FULL = '@cyanheads/pubmed-mcp-server';
+
+  const validClaude = {
+    name: UNSCOPED,
+    description: 'Search and fetch PubMed articles.',
+    mcpServers: { [UNSCOPED]: { command: 'npx', args: ['-y', FULL] } },
+  };
+  const validCodex = {
+    name: UNSCOPED,
+    description: 'Search and fetch PubMed articles.',
+    mcpServers: './.codex-plugin/mcp.json',
+    interface: {
+      displayName: UNSCOPED,
+      shortDescription: 'Search PubMed.',
+      longDescription: 'Search and fetch PubMed articles via E-utilities.',
+    },
+  };
+  const validCodexMcp = { [UNSCOPED]: { command: 'npx', args: ['-y', FULL] } };
+
+  it('passes a fully populated, correctly-scoped manifest set', () => {
+    const errors = checkPluginManifests(
+      { claudePlugin: validClaude, codexPlugin: validCodex, codexMcp: validCodexMcp },
+      UNSCOPED,
+      FULL,
+    );
+    expect(errors).toEqual([]);
+  });
+
+  it('skips cleanly when no plugin manifests are present', () => {
+    expect(checkPluginManifests({}, UNSCOPED, FULL)).toEqual([]);
+  });
+
+  it('flags an empty description in .claude-plugin/plugin.json', () => {
+    const errors = checkPluginManifests(
+      { claudePlugin: { ...validClaude, description: '' } },
+      UNSCOPED,
+      FULL,
+    );
+    expect(errors).toHaveLength(1);
+    expect(errors[0]).toContain('.claude-plugin/plugin.json');
+    expect(errors[0]).toContain('description');
+  });
+
+  it('flags empty codex short/long descriptions', () => {
+    const errors = checkPluginManifests(
+      {
+        codexPlugin: {
+          ...validCodex,
+          interface: { ...validCodex.interface, shortDescription: '', longDescription: '' },
+        },
+      },
+      UNSCOPED,
+      FULL,
+    );
+    expect(errors.some((e) => e.includes('interface.shortDescription'))).toBe(true);
+    expect(errors.some((e) => e.includes('interface.longDescription'))).toBe(true);
+  });
+
+  it('flags an unscoped install arg for a scoped package (the 404 case)', () => {
+    const errors = checkPluginManifests(
+      { claudePlugin: { ...validClaude, mcpServers: { [UNSCOPED]: { args: ['-y', UNSCOPED] } } } },
+      UNSCOPED,
+      FULL,
+    );
+    expect(errors).toHaveLength(1);
+    expect(errors[0]).toContain('install arg');
+    expect(errors[0]).toContain(FULL);
+  });
+
+  it('flags an unscoped install arg in .codex-plugin/mcp.json', () => {
+    const errors = checkPluginManifests(
+      { codexMcp: { [UNSCOPED]: { args: ['-y', UNSCOPED] } } },
+      UNSCOPED,
+      FULL,
+    );
+    expect(errors).toHaveLength(1);
+    expect(errors[0]).toContain('.codex-plugin/mcp.json');
+    expect(errors[0]).toContain('install arg');
+  });
+
+  it('flags a scoped name — display identity must be the unscoped machine name', () => {
+    const errors = checkPluginManifests(
+      { claudePlugin: { ...validClaude, name: FULL } },
+      UNSCOPED,
+      FULL,
+    );
+    expect(errors).toHaveLength(1);
+    expect(errors[0]).toContain('"name"');
+    expect(errors[0]).toContain('unscoped');
+  });
+
+  it('flags a Title-Case codex displayName', () => {
+    const errors = checkPluginManifests(
+      {
+        codexPlugin: {
+          ...validCodex,
+          interface: { ...validCodex.interface, displayName: 'PubMed MCP Server' },
+        },
+      },
+      UNSCOPED,
+      FULL,
+    );
+    expect(errors).toHaveLength(1);
+    expect(errors[0]).toContain('interface.displayName');
+  });
+
+  it('flags a wrong server key in .codex-plugin/mcp.json', () => {
+    const errors = checkPluginManifests(
+      { codexMcp: { 'wrong-key': { args: ['-y', FULL] } } },
+      UNSCOPED,
+      FULL,
+    );
+    expect(errors.some((e) => e.includes('server key must be the unscoped'))).toBe(true);
   });
 });
