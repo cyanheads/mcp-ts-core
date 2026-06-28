@@ -301,15 +301,6 @@ bun run lint:mcp       # validate MCP definitions against spec
 bun run test:all       # vitest: unit + Workers pool + integration
 ```
 
-## Contributing
-
-Issues and pull requests welcome. Run checks before submitting:
-
-```bash
-bun run devcheck
-bun run test:all
-```
-
 ## License
 
 Apache 2.0 — see [LICENSE](./LICENSE).
