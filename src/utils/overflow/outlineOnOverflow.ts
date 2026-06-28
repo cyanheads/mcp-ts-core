@@ -27,14 +27,21 @@ export interface SectionMeta {
 }
 
 /**
- * Reusable outline arm for a tool's discriminated-union `output`. Pair it with
- * the tool's full-payload schema so the parity linter validates each branch:
+ * Reusable outline fields for a tool's flat `output` object. A tool's `output`
+ * must be a `ZodObject` (not a discriminated union), so declare `kind` plus
+ * presence-based optional arms — full-payload fields when `kind === 'full'`,
+ * `sections` and `notice` when `kind === 'outline'`:
  *
  * ```ts
- * output: z.discriminatedUnion('kind', [
- *   FullLabel.extend({ kind: z.literal('full') }),
- *   OUTLINE_VARIANT,
- * ]),
+ * output: z.object({
+ *   kind: z.enum(['full', 'outline']),
+ *   // full-mode arms (present when kind === 'full')
+ *   id: z.string().optional(),
+ *   body: z.string().optional(),
+ *   // outline-mode arms (present when kind === 'outline')
+ *   sections: OUTLINE_VARIANT.shape.sections.optional(),
+ *   notice: z.string().optional(),
+ * }),
  * ```
  */
 export const OUTLINE_VARIANT = z.object({
@@ -97,8 +104,8 @@ function defaultNotice(sections: SectionMeta[]): string {
 
 /**
  * Returns the document whole when it fits the budget, or a section outline when
- * it overflows. The caller spreads the result into a discriminated-union `output`
- * keyed on `kind` ({@link OUTLINE_VARIANT} supplies the outline arm).
+ * it overflows. The caller spreads the result into a flat `output` object keyed
+ * on `kind` (use {@link OUTLINE_VARIANT} fields for the outline arms).
  *
  * Single-entry short-circuit: a document with fewer than two sections is returned
  * whole even when over budget — an outline of one section would cost a round-trip
