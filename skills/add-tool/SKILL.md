@@ -4,7 +4,7 @@ description: >
   Scaffold a new MCP tool definition. Use when the user asks to add a tool, create a new tool, or implement a new capability for the server.
 metadata:
   author: cyanheads
-  version: "2.15"
+  version: "2.16"
   audience: external
   type: reference
 ---
@@ -25,7 +25,7 @@ Tools use the `tool()` builder from `@cyanheads/mcp-ts-core`. Each tool lives in
 
 ## Naming
 
-Tools use lowercase snake_case with a canonical server/domain prefix: `{server}_{verb}_{noun}` — 3 words.
+Tools use lowercase snake_case with a canonical server/domain prefix. **3 segments is the strong default** (`{server}_{verb}_{noun}`). See the `design-mcp-server` skill's **Design table → Name** row for the full rule — including when a legitimate 2-segment name is fine (`git_pull`, `git_status`) vs when the noun is required (`search` → `search_terms`, `connect` → `connect_endpoint`).
 
 Examples: `pubmed_search_articles`, `pubmed_fetch_fulltext`, `clinicaltrials_find_studies`.
 
