@@ -21,7 +21,6 @@ Framework badge                         ← solo spotlight row — `Built on @cy
 ## Running the server                   ← dev, production, Workers/Docker
 ## Project structure                    ← directory/purpose table
 ## Development guide                    ← link to CLAUDE.md/AGENTS.md, key rules
-## Contributing                         ← brief
 ## License                              ← one line
 ```
 
@@ -482,19 +481,6 @@ See [`CLAUDE.md`/`AGENTS.md`](./CLAUDE.md) for development guidelines and archit
 - Use `ctx.log` for request-scoped logging, `ctx.state` for tenant-scoped storage
 - Register new tools and resources via the barrels in `src/mcp-server/*/definitions/index.ts`
 - Wrap external API calls: validate raw → normalize to domain type → return output schema; never fabricate missing fields
-```
-
-### Contributing
-
-```markdown
-## Contributing
-
-Issues and pull requests are welcome. Run checks and tests before submitting:
-
-\`\`\`sh
-bun run devcheck
-bun run test
-\`\`\`
 ```
 
 ### License
