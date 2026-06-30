@@ -80,4 +80,9 @@ describe('yamlParser.parse', () => {
 
     debugSpy.mockRestore();
   });
+
+  it('applies YAML 1.1 schema semantics (yes/no → boolean) via YAML11_SCHEMA', async () => {
+    const result = await yamlParser.parse<Record<string, boolean>>('enabled: yes\ndisabled: no');
+    expect(result).toEqual({ enabled: true, disabled: false });
+  });
 });

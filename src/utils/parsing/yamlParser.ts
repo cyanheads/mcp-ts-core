@@ -32,7 +32,7 @@ export class YamlParser {
    * This method is async because `js-yaml` is loaded lazily on first call.
    * If the input begins with a `<think>...</think>` block, that block is stripped
    * and its content logged before parsing the remainder. Uses `js-yaml`'s
-   * `DEFAULT_SCHEMA` for parsing.
+   * `YAML11_SCHEMA` (YAML 1.1 load semantics) for parsing.
    *
    * @template T - The expected type of the parsed result. Defaults to `unknown`.
    * @param yamlString - The YAML string to parse. May be prefixed with a `<think>` block.
@@ -88,7 +88,10 @@ export class YamlParser {
 
     try {
       const yaml = await getYaml();
-      return yaml.load(stringToParse, { schema: yaml.DEFAULT_SCHEMA }) as T;
+      // js-yaml v5 removed DEFAULT_SCHEMA and defaults load() to the stricter 1.2
+      // CORE_SCHEMA; YAML11_SCHEMA preserves the prior 1.1 load semantics
+      // (yes/no/on/off → boolean, !!timestamp → Date) that LLM YAML output relies on.
+      return yaml.load(stringToParse, { schema: yaml.YAML11_SCHEMA }) as T;
     } catch (e: unknown) {
       const error = e instanceof Error ? e : new Error(String(e));
       const errorLogContext =
