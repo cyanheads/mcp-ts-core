@@ -4,7 +4,7 @@ description: >
   API reference for all utilities exported from `@cyanheads/mcp-ts-core/utils`. Use when looking up utility method signatures, options, peer dependencies, or usage patterns.
 metadata:
   author: cyanheads
-  version: "2.3"
+  version: "2.4"
   audience: external
   type: reference
 ---

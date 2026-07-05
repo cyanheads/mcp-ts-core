@@ -4,7 +4,7 @@ description: >
   Ship a release end-to-end across every registry the project targets (npm, MCP Registry, GitHub Releases for `.mcpb` bundles, GHCR). Runs the final verification gate, pushes commits and tags, then publishes to each applicable destination. Assumes git wrapup (version bumps, changelog, commit, annotated tag) is already complete — this skill is the post-wrapup publish workflow. Retries transient network failures on publish steps; halts with a partial-state report when retries are exhausted or the failure is terminal.
 metadata:
   author: cyanheads
-  version: "2.9"
+  version: "2.10"
   audience: external
   type: workflow
 ---
@@ -128,6 +128,8 @@ security add-generic-password -a "$USER" -s mcp-publisher-github-pat -w
 Halt on any publisher error other than "cannot publish duplicate version".
 
 ### 6. Create GitHub Release
+
+Pre-flight: `--notes-from-tag` publishes the tag message as-is. With tag signing enabled, confirm the tag's signature parses — `git tag -l v<version> --format='%(contents:signature)'` must be non-empty. Empty on a signing-enabled repo (e.g. a tag created with `--cleanup=verbatim`) means git is treating the signature as message text, and the `-----BEGIN SSH SIGNATURE-----` block will land in the public release body — recreate the tag per git-wrapup step 8 first.
 
 For all projects (including those without `manifest.json`):
 

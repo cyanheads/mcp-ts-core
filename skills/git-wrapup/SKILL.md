@@ -4,7 +4,7 @@ description: >
   Land working-tree changes as logical commits — the work grouped by concern, topped by a release commit (version bump, changelog, regenerated artifacts) and an annotated tag. Verify, commit, tag. Stops at "committed and tagged locally" — no push, no publish. The release-and-publish skill picks up from here. Distilled from the git_wrapup_instructions protocol.
 metadata:
   author: cyanheads
-  version: "1.4"
+  version: "1.6"
   audience: external
   type: workflow
 ---
@@ -91,9 +91,11 @@ Create `changelog/<major.minor>.x/<version>.md`. Use `changelog/template.md` as 
 ---
 summary: "<one-line headline, ≤350 chars, no markdown>"
 breaking: false    # true if consumers must change code to upgrade
-security: false    # true if this release contains a security fix
+security: false    # true ONLY for a security fix in this server's own source — NOT a dependency/transitive CVE bump (those go under ## Dependencies)
 ---
 ```
+
+**`security:` is a source-code signal — not a dependency-CVE signal.** Set `security: true` only when this release fixes a vulnerability or adds hardening in code *this server ships*. A dependency or transitive CVE bump — even one that clears an advisory (`bun audit` going 1 → 0) — is routine maintenance: record it under `## Dependencies` with the advisory ID and leave the flag `false`. The `🛡️ Security` badge answers "does the server itself have a vuln"; a dep bump must not trip it.
 
 **Body:** Section order follows Keep a Changelog — Added / Changed / Deprecated / Removed / Fixed / Security. Include only sections with entries. Delete empty sections.
 
@@ -151,10 +153,14 @@ git commit -m "<subject>"
 ### 8. Create an annotated tag
 
 ```bash
-git tag -a v<version> -m "<tag message with embedded newlines>"
+git tag -a v<version> --cleanup=whitespace -m "<tag message with embedded newlines>"
 ```
 
-Use `-m` with embedded newlines in the string (the commit `-m`-only constraint applies here too — no heredoc). The tag message renders as the GitHub Release body via `--notes-from-tag`. It must be structured markdown, not a flat string. Format:
+Use `-m` with embedded newlines in the string (the commit `-m`-only constraint applies here too — no heredoc). The tag message renders as the GitHub Release body via `--notes-from-tag`. It must be structured markdown, not a flat string.
+
+`--cleanup=whitespace` is load-bearing. The default cleanup (`strip`) deletes `#`-leading lines as comments, so markdown headers silently vanish from the tag body. `--cleanup=verbatim` is worse: it skips end-of-message normalization, so with tag signing enabled the signature is appended flush against the message's last character — git then can't parse its own signature (the tag reads as unsigned) and the whole `-----BEGIN SSH SIGNATURE-----` block publishes verbatim into the GitHub Release body.
+
+Format:
 
 ```
 <theme — omit version number, GitHub prepends v<VERSION>:>
@@ -194,9 +200,10 @@ Dependency bumps:
 git log --oneline -8              # confirm the commit stack: work commits + release commit on top
 git show v<version> --stat | head -20   # confirm tag points at HEAD (the release commit)
 git status                        # must be clean
+git tag -l v<version> --format='%(if)%(contents:signature)%(then)signed%(else)unsigned%(end)'   # with tag signing enabled, must print "signed"
 ```
 
-If the working tree isn't clean or the tag doesn't point at HEAD, something went wrong — investigate before proceeding.
+If the working tree isn't clean or the tag doesn't point at HEAD, something went wrong — investigate before proceeding. `unsigned` under enabled tag signing means the signature didn't parse (see step 8's cleanup note) — delete and recreate the tag before it leaks the signature block into the GitHub Release body.
 
 **Do NOT push.** This skill stops here. Use the `release-and-publish` skill for the push + publish workflow.
 
