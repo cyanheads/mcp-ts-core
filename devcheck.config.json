@@ -11,6 +11,7 @@
       "tsc-alias",
       "@cyanheads/mcp-ts-core",
       "@modelcontextprotocol/ext-apps",
+      "@socketsecurity/bun-security-scanner",
       "typedoc",
       "cloudflare:*"
     ],

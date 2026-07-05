@@ -3,17 +3,13 @@
 
 [install]
 # Block package versions published less than 3 days ago — supply-chain guard
-# against freshly compromised releases. Bun widens the window automatically
-# when it detects rapid-fire publishes just past the gate. Existing versions
-# in bun.lock are unaffected.
+# against freshly compromised releases. Existing versions in bun.lock are
+# unaffected.
 minimumReleaseAge = 259200 # seconds (3 days)
+# Framework releases are first-party — adopt them same-day.
+minimumReleaseAgeExcludes = ["@cyanheads/mcp-ts-core"]
 
 [install.security]
 # Socket scans every package before install (malware, typosquats, CVEs).
 # Note: configuring a scanner disables Bun's auto-install.
 scanner = "@socketsecurity/bun-security-scanner"
-
-[run]
-# When true, scripts running 'node' (e.g., from a dependency) will transparently use 'bun' instead.
-# Set to false if you need to enforce a strict Node.js runtime for a specific script.
-bun = true

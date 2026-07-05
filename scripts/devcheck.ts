@@ -694,10 +694,25 @@ const ALL_CHECKS: Check[] = [
         return true;
       });
 
-      // Check if every outdated package is in the allowlist
+      // A row is a real finding only if it's neither allowlisted nor a version
+      // held back by bunfig's `minimumReleaseAge` supply-chain guard.
       const unexpected = packageLines.filter((line) => {
-        const pkgName = stripWorkspaceMarker(line.split('|')[1]?.trim() ?? '');
-        return !OUTDATED_ALLOWLIST.has(pkgName);
+        const cells = line.split('|').map((cell) => cell.trim());
+        const pkgName = stripWorkspaceMarker(cells[1] ?? '');
+        if (OUTDATED_ALLOWLIST.has(pkgName)) return false;
+
+        // `minimumReleaseAge` blocks freshly published versions, so bun reports
+        // the installable target (Update) as equal to Current and marks the row
+        // with `*` ("isn't true latest due to minimum release age"). There is
+        // nothing to adopt until the newer release ages past the gate — skip it.
+        // A genuine update (Update > Current) still falls through and fails.
+        const current = cells[2] ?? '';
+        const update = (cells[3] ?? '').replace(/\*/g, '').trim();
+        const heldByReleaseAge =
+          current !== '' &&
+          update === current &&
+          [cells[3], cells[4]].some((cell) => (cell ?? '').includes('*'));
+        return !heldByReleaseAge;
       });
 
       return unexpected.length === 0;
