@@ -167,8 +167,9 @@ export interface ToolDefinition<
    * framework's auto-classifier produces correct codes at runtime — the
    * contract just adds compile-time enforcement.
    *
-   * The startup linter validates each entry's `code` is a real `JsonRpcErrorCode`
-   * and that `reason` strings are unique within the contract.
+   * The definition linter (`bun run lint:mcp`, gated in `devcheck`) validates each
+   * entry's `code` is a real `JsonRpcErrorCode` and that `reason` strings are
+   * unique within the contract.
    */
   errors?: TErrors;
   /**
@@ -180,7 +181,7 @@ export interface ToolDefinition<
    *
    * **Make `format()` content-complete.** A thin one-liner (e.g., a count or
    * title) leaves `content[]`-only clients blind to data that `structuredContent`
-   * clients can see. The `format-parity` lint rule enforces this at startup.
+   * clients can see. The `format-parity` lint rule enforces this at build time.
    *
    * If omitted, the handler factory JSON-stringifies the output as a fallback.
    *

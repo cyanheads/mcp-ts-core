@@ -434,9 +434,9 @@ export async function createApp(options: CreateAppOptions = {}): Promise<ServerH
   suppressColors();
 
   // --- Compose services (handles env overrides internally for config parsing) ---
-  // Configuration errors at this stage (from the definition linter, server
-  // setup(), or missing required env vars) are startup-fatal. Print a clean
-  // banner and exit rather than letting the raw error dump to stderr.
+  // Configuration errors at this stage (from server setup() or missing required
+  // env vars) are startup-fatal. Print a clean banner and exit rather than
+  // letting the raw error dump to stderr.
   let composed: ComposedApp;
   try {
     composed = await composeServices(options);
