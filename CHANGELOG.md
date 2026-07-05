@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.10.12](changelog/0.10.x/0.10.12.md) — 2026-07-05
+
+Canvas not-found errors carry reason 'canvas_not_found' plus a recovery hint so consumer error contracts populate on the wire, classifyDuckdbError passes structured McpErrors through unchanged (register_as_clash / export_path_* keep code and reason), and the enrichment trailer gains a leading blank-line separator.
+
 ## [0.10.11](changelog/0.10.x/0.10.11.md) — 2026-07-04
 
 Fresh-scaffold devcheck fix (template biome pin 2.5.2), changelog security flag scoped to source-code fixes only, protocol docs synced to as-built, stale startup-linter JSDoc corrected to build-time lint, tag-signing safeguards in the release skills, dependency refresh.
