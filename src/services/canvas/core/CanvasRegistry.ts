@@ -8,7 +8,7 @@
  * @module src/services/canvas/core/CanvasRegistry
  */
 
-import { conflict, notFound, rateLimited } from '@/types-global/errors.js';
+import { conflict, type McpError, notFound, rateLimited } from '@/types-global/errors.js';
 import { logger } from '@/utils/internal/logger.js';
 import { type RequestContextLike, requestContextService } from '@/utils/internal/requestContext.js';
 import { IdGenerator } from '@/utils/security/idGenerator.js';
@@ -105,7 +105,7 @@ export class CanvasRegistry {
    * or the supplied id is unknown for the caller's tenant.
    *
    * - Omitted id → create fresh, return `isNew: true`.
-   * - Unknown id → throw `NotFound` (caller should retry without an id).
+   * - Unknown id → throw `NotFound` (`reason: 'canvas_not_found'` + recovery hint).
    * - Known id under wrong tenant → throw `NotFound` (uniform with unknown
    *   to avoid leaking existence across tenants).
    * - Known + own tenant → touch (extend TTL), return `isNew: false`.
@@ -122,9 +122,7 @@ export class CanvasRegistry {
     if (maybeId !== undefined) {
       const record = this.lookup(maybeId, tenantId);
       if (!record) {
-        throw notFound('Canvas not found or expired. Omit canvas_id to start a new canvas.', {
-          canvasId: maybeId,
-        });
+        throw canvasNotFound(maybeId);
       }
       this.touch(record);
       return {
@@ -174,7 +172,7 @@ export class CanvasRegistry {
   touchOrThrow(canvasId: string, tenantId: string): string {
     const record = this.lookup(canvasId, tenantId);
     if (!record) {
-      throw notFound('Canvas not found or expired.', { canvasId });
+      throw canvasNotFound(canvasId);
     }
     this.touch(record);
     return new Date(record.expiresAt).toISOString();
@@ -188,7 +186,7 @@ export class CanvasRegistry {
   touchWithTable(canvasId: string, tenantId: string, tableName: string): string {
     const record = this.lookup(canvasId, tenantId);
     if (!record) {
-      throw notFound('Canvas not found or expired.', { canvasId });
+      throw canvasNotFound(canvasId);
     }
     this.touch(record);
     this.touchTableRecord(record, tableName);
@@ -209,7 +207,7 @@ export class CanvasRegistry {
   ): string {
     const record = this.lookup(canvasId, tenantId);
     if (!record) {
-      throw notFound('Canvas not found or expired.', { canvasId });
+      throw canvasNotFound(canvasId);
     }
     this.touch(record);
     if (primaryTable !== undefined) {
@@ -463,6 +461,27 @@ export class CanvasRegistry {
 // ---------------------------------------------------------------------------
 // Module-level helpers
 // ---------------------------------------------------------------------------
+
+/**
+ * Structured `NotFound` for a missing or expired canvas. Carries
+ * `reason: 'canvas_not_found'` plus a default `recovery.hint` so consumer
+ * tools that declare a `canvas_not_found` error contract surface the reason
+ * and recovery on the wire — the throw happens inside the framework, before
+ * handler code runs, so this is the only place the fields can originate (#261).
+ * The hint deliberately avoids suggesting omission of `canvas_id`: omission
+ * mints a fresh, empty canvas — rarely what a describe/query-style tool wants
+ * with a stale id — and a tool that requires the parameter would reject the
+ * retry, looping the agent.
+ */
+function canvasNotFound(canvasId: string): McpError {
+  return notFound('Canvas not found or expired.', {
+    reason: 'canvas_not_found',
+    canvasId,
+    recovery: {
+      hint: 'Re-run the tool that produced this canvas_id to stage fresh data, or verify the id was copied correctly.',
+    },
+  });
+}
 
 /**
  * Return true when `tableName` appears in `sqlText` as a whole word (i.e.

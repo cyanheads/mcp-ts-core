@@ -676,7 +676,16 @@ export class DuckdbProvider implements IDataCanvasProvider {
   private requireCanvas(canvasId: string): CanvasRecord {
     const record = this.canvases.get(canvasId);
     if (!record) {
-      throw notFound('Canvas not found in DuckDB provider.', { canvasId });
+      // Defensive — CanvasInstance touches the registry first, which throws
+      // the same structured canvas_not_found shape before the provider is
+      // reached (#261). Kept identical for consistency.
+      throw notFound('Canvas not found in DuckDB provider.', {
+        reason: 'canvas_not_found',
+        canvasId,
+        recovery: {
+          hint: 'Re-run the tool that produced this canvas_id to stage fresh data, or verify the id was copied correctly.',
+        },
+      });
     }
     return record;
   }
@@ -1095,10 +1104,16 @@ async function ensureTableMissing(connection: DuckDBConnection, tableName: strin
 }
 
 /**
- * Map a DuckDB-thrown error to a framework error class.
+ * Map a DuckDB-thrown error to a framework error class. Classification is for
+ * raw engine errors only — an already-structured `McpError` passes through
+ * unchanged (#254): structured throws from inside the provider's try blocks
+ * (`ensureTableMissing`'s `register_as_clash`, `resolveExportPath`'s path
+ * validations) must keep their code and `data.reason` instead of being
+ * reclassified as `DatabaseError`.
  * @internal Exported for unit testing.
  */
 export function classifyDuckdbError(err: unknown): Error {
+  if (err instanceof McpError) return err;
   if (err instanceof Error) {
     const msg = err.message;
     if (/parser error|syntax/i.test(msg)) {

@@ -9,7 +9,7 @@
 import { describe, expect, it } from 'vitest';
 
 import { classifyDuckdbError } from '@/services/canvas/providers/duckdb/DuckdbProvider.js';
-import { JsonRpcErrorCode, McpError } from '@/types-global/errors.js';
+import { JsonRpcErrorCode, McpError, notFound, validationError } from '@/types-global/errors.js';
 
 describe('classifyDuckdbError', () => {
   it('classifies parser errors as ValidationError with sql_parse_error reason', () => {
@@ -61,5 +61,30 @@ describe('classifyDuckdbError', () => {
     expect(mcp.code).toBe(JsonRpcErrorCode.DatabaseError);
     expect(mcp.message).toMatch(/non-Error value/);
     expect(mcp.data?.value).toBe('weird string thrown');
+  });
+
+  // Issue #254 — classification is for raw engine errors only. A structured
+  // McpError thrown inside a provider try block (ensureTableMissing's
+  // register_as_clash, resolveExportPath's path validations) must pass
+  // through unchanged instead of being reclassified to DatabaseError, which
+  // stripped code, data.reason, and data.tableName.
+  it('issue #254 — passes an already-structured McpError through unchanged', () => {
+    const original = validationError(
+      'Canvas table "df_x" already exists. Drop it before reusing the name.',
+      { reason: 'register_as_clash', tableName: 'df_x' },
+    );
+    const result = classifyDuckdbError(original);
+    expect(result).toBe(original); // same instance — not rewrapped
+    const mcp = result as McpError;
+    expect(mcp.code).toBe(JsonRpcErrorCode.ValidationError);
+    expect(mcp.data?.reason).toBe('register_as_clash');
+    expect(mcp.data?.tableName).toBe('df_x');
+  });
+
+  it('issue #254 — the McpError guard wins over message-pattern matching', () => {
+    // Message matches the parser-error regex, but the value is already
+    // classified — it must not be re-tagged sql_parse_error.
+    const original = notFound('syntax detail: table gone', { reason: 'missing_table' });
+    expect(classifyDuckdbError(original)).toBe(original);
   });
 });

@@ -4,7 +4,7 @@ description: >
   DataCanvas primitive reference — a Tier 3 SQL/analytical workspace for tabular MCP servers, backed by DuckDB. Use when registering tables from upstream APIs, running ad-hoc SQL across them, and exporting results. Covers the acquire → register → query → export flow, per-table TTL, the token-sharing pattern for multi-agent collaboration, env config, and Cloudflare Workers fail-closed behavior.
 metadata:
   author: cyanheads
-  version: "1.7"
+  version: "1.8"
   audience: external
   type: reference
 ---
@@ -78,7 +78,7 @@ A canvas is identified by an opaque 10-character URL-safe `canvasId` (~10¹⁸ k
 | **Omitted** | Framework mints a fresh canvasId, returns it in the tool output. Caller surfaces it to the user / next tool call / another agent. |
 | **Existing id (own tenant)** | Resolves to that canvas, slides TTL forward, returns `isNew: false`. |
 | **Existing id (other tenant)** | Throws `NotFound` — uniform with unknown to avoid leaking existence across tenants. |
-| **Unknown id** | Throws `NotFound` with a hint to omit the parameter on retry. |
+| **Unknown id** | Throws `NotFound` (`data.reason: 'canvas_not_found'`) with a recovery hint to re-run the producing tool or re-check the id. |
 
 When auth is enabled, the effective scope is the composite `(tenantId, canvasId)`. In `MCP_AUTH_MODE=none`, `tenantId` collapses to `'default'` and the canvasId is the only differentiator — entropy + TTL + the framework's rate limiter make brute-force discovery operationally infeasible. **Designed for public-data servers (BrAPI, OpenFEC, etc.). Don't put PII on a no-auth canvas.**
 
@@ -148,7 +148,7 @@ await instance.registerTable('recent_fetch', rows, { ttlMs: 30 * 60 * 1000 });
 
 Run SQL across registered tables. Returns at most `rowLimit` rows (default 10 000). When the result exceeds `rowLimit`, the response carries `truncated: true` and `rowCount` reflects the number of materialized rows (not the full result set). For full result sets and exact counts, pass `registerAs` — the result is materialized as a new canvas table; the response carries a `preview` slice and the exact `rowCount`.
 
-Querying a table that does not exist throws `NotFound` (`data.reason: 'missing_table'`) with a recovery hint to re-stage the table or call `describe()`. This happens when a table has expired (per-table TTL), been dropped, or the name is mistyped. The error is `NotFound`, not `ValidationError` — agents should re-stage, not fix the SQL shape.
+Querying a table that does not exist throws `NotFound` (`data.reason: 'missing_table'`) with a recovery hint to re-stage the table or call `describe()`. This happens when a table has expired (per-table TTL), been dropped, or the name is mistyped. The error is `NotFound`, not `ValidationError` — agents should re-stage, not fix the SQL shape. An unknown or expired `canvas_id` fails the same way (`data.reason: 'canvas_not_found'`, with its own recovery hint) — thrown by `acquire()` and every canvas operation.
 
 A `SELECT` that parses but fails to prepare for any other reason — a mistyped column, an unknown function, an invalid expression — throws `ValidationError` (`data.reason: 'invalid_sql'`) and preserves the DuckDB binder detail in `data.binderMessage` (e.g. `Referenced column "x" not found...`, often with a candidate suggestion). This is distinct from `non_select_statement`, reserved for statements that genuinely aren't `SELECT`s — here the shape is fine, so the agent should fix the named column or function.
 

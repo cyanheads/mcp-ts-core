@@ -216,12 +216,27 @@ describeIf('canvas · DuckDB round trip', () => {
     expect(found?.rowCount).toBe(250);
   });
 
+  // Issue #254 — ensureTableMissing's structured validationError crosses
+  // query()'s classifyDuckdbError catch. The message alone survived the old
+  // reclassification, so this test asserts code + data too: it must stay
+  // ValidationError with reason/tableName intact, not become DatabaseError.
   it('rejects registerAs clashes', async () => {
     const instance = await canvas.acquire(undefined, ctx);
     await instance.registerTable('users', [{ id: 1 }]);
-    await expect(instance.query('SELECT 1 AS one', { registerAs: 'users' })).rejects.toThrow(
-      /already exists/i,
-    );
+    let caught: unknown;
+    try {
+      await instance.query('SELECT 1 AS one', { registerAs: 'users' });
+    } catch (err) {
+      caught = err;
+    }
+    expect(caught).toBeInstanceOf(McpError);
+    const mcpErr = caught as McpError;
+    expect(mcpErr.message).toMatch(/already exists/i);
+    // Must be ValidationError (-32007), not DatabaseError (-32010).
+    expect(mcpErr.code).toBe(-32007);
+    const data = mcpErr.data as { reason?: string; tableName?: string };
+    expect(data.reason).toBe('register_as_clash');
+    expect(data.tableName).toBe('users');
   });
 
   it('exports CSV to a sandboxed path', async () => {
@@ -240,14 +255,37 @@ describeIf('canvas · DuckDB round trip', () => {
     expect(result.sizeBytes).toBeGreaterThan(0);
   });
 
+  // Issue #254, export() manifestation — resolveExportPath's structured
+  // validationErrors cross the same classifyDuckdbError catch as
+  // register_as_clash; code and data.reason must survive intact.
   it('rejects export paths that escape the sandbox', async () => {
     const instance = await canvas.acquire(undefined, ctx);
     await instance.registerTable('t', [{ x: 1 }]);
-    await expect(instance.export('t', { format: 'csv', path: '../escape.csv' })).rejects.toThrow(
-      /escapes/i,
+
+    let escapeErr: unknown;
+    try {
+      await instance.export('t', { format: 'csv', path: '../escape.csv' });
+    } catch (err) {
+      escapeErr = err;
+    }
+    expect(escapeErr).toBeInstanceOf(McpError);
+    expect((escapeErr as McpError).message).toMatch(/escapes/i);
+    expect((escapeErr as McpError).code).toBe(-32007);
+    expect(((escapeErr as McpError).data as { reason?: string }).reason).toBe(
+      'export_path_escapes',
     );
-    await expect(instance.export('t', { format: 'csv', path: '/tmp/escape.csv' })).rejects.toThrow(
-      /absolute/i,
+
+    let absoluteErr: unknown;
+    try {
+      await instance.export('t', { format: 'csv', path: '/tmp/escape.csv' });
+    } catch (err) {
+      absoluteErr = err;
+    }
+    expect(absoluteErr).toBeInstanceOf(McpError);
+    expect((absoluteErr as McpError).message).toMatch(/absolute/i);
+    expect((absoluteErr as McpError).code).toBe(-32007);
+    expect(((absoluteErr as McpError).data as { reason?: string }).reason).toBe(
+      'export_path_absolute',
     );
   });
 
@@ -581,6 +619,25 @@ describeIf('canvas · DuckDB round trip', () => {
     } finally {
       await bigCanvas.shutdown(ctx);
     }
+  });
+
+  // Issue #261 — the provider's own lookup throw is defensive (CanvasInstance
+  // touches the registry first, which rejects before the provider is reached),
+  // but it carries the same structured canvas_not_found reason/recovery shape.
+  it('issue #261 — provider-level unknown canvas id throws canvas_not_found with recovery', async () => {
+    let caught: unknown;
+    try {
+      await provider.query('ZZZZZZZZZZ', 'SELECT 1', ctx);
+    } catch (err) {
+      caught = err;
+    }
+    expect(caught).toBeInstanceOf(McpError);
+    const mcpErr = caught as McpError;
+    // Must be NotFound (-32001).
+    expect(mcpErr.code).toBe(-32001);
+    const data = mcpErr.data as { reason?: string; recovery?: { hint?: string } };
+    expect(data.reason).toBe('canvas_not_found');
+    expect(typeof data.recovery?.hint).toBe('string');
   });
 
   // Issue #223 — missing-table query yields NotFound, not ValidationError.

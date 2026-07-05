@@ -141,6 +141,103 @@ describe('CanvasRegistry · acquire (existing)', () => {
   });
 });
 
+// Issue #261 — every registry not-found throw must carry a structured
+// `reason: 'canvas_not_found'` and a default `recovery.hint`, so consumer
+// tools that declare a `canvas_not_found` error contract surface reason and
+// recovery on the wire (the throw happens inside the framework, before any
+// handler code can rewrap it).
+describe('CanvasRegistry · not-found error shape (#261)', () => {
+  /** Pins the structured not-found contract: reason, canvasId, recovery hint. */
+  function expectCanvasNotFoundShape(caught: unknown, canvasId: string): void {
+    expect(caught).toBeInstanceOf(McpError);
+    const err = caught as McpError;
+    expect(err.message).toMatch(/not found or expired/i);
+    // The default guidance must not steer agents toward omitting canvas_id —
+    // omission mints a fresh empty canvas, and a tool that requires the id
+    // would reject the retry, looping the agent.
+    expect(err.message).not.toMatch(/omit/i);
+    const data = err.data as {
+      canvasId?: string;
+      reason?: string;
+      recovery?: { hint?: string };
+    };
+    expect(data.reason).toBe('canvas_not_found');
+    expect(data.canvasId).toBe(canvasId);
+    expect(typeof data.recovery?.hint).toBe('string');
+    expect((data.recovery?.hint ?? '').length).toBeGreaterThan(0);
+    expect(data.recovery?.hint).not.toMatch(/omit/i);
+  }
+
+  it('acquire() with an unknown id carries reason + recovery', async () => {
+    const provider = makeStubProvider();
+    const registry = new CanvasRegistry(provider, makeOptions());
+    let caught: unknown;
+    try {
+      await registry.acquire('AAAAAAAAAA', 'tenant-a', baseContext);
+    } catch (err) {
+      caught = err;
+    }
+    expectCanvasNotFoundShape(caught, 'AAAAAAAAAA');
+    await registry.shutdown(baseContext);
+  });
+
+  it('touchOrThrow() carries reason + recovery', async () => {
+    const provider = makeStubProvider();
+    const registry = new CanvasRegistry(provider, makeOptions());
+    let caught: unknown;
+    try {
+      registry.touchOrThrow('AAAAAAAAAA', 'tenant-a');
+    } catch (err) {
+      caught = err;
+    }
+    expectCanvasNotFoundShape(caught, 'AAAAAAAAAA');
+    await registry.shutdown(baseContext);
+  });
+
+  it('touchWithTable() carries reason + recovery', async () => {
+    const provider = makeStubProvider();
+    const registry = new CanvasRegistry(provider, makeOptions());
+    let caught: unknown;
+    try {
+      registry.touchWithTable('AAAAAAAAAA', 'tenant-a', 'my_table');
+    } catch (err) {
+      caught = err;
+    }
+    expectCanvasNotFoundShape(caught, 'AAAAAAAAAA');
+    await registry.shutdown(baseContext);
+  });
+
+  it('touchWithSqlTables() carries reason + recovery', async () => {
+    const provider = makeStubProvider();
+    const registry = new CanvasRegistry(provider, makeOptions());
+    let caught: unknown;
+    try {
+      registry.touchWithSqlTables('AAAAAAAAAA', 'tenant-a', undefined, 'SELECT 1 FROM t');
+    } catch (err) {
+      caught = err;
+    }
+    expectCanvasNotFoundShape(caught, 'AAAAAAAAAA');
+    await registry.shutdown(baseContext);
+  });
+
+  it('an expired canvas surfaces the same structured shape', async () => {
+    const clock = vi.fn(() => 1_000_000);
+    const provider = makeStubProvider();
+    const registry = new CanvasRegistry(provider, makeOptions(), clock);
+    const first = await registry.acquire(undefined, 'tenant-a', baseContext);
+
+    clock.mockReturnValue(1_000_000 + TTL + 1);
+    let caught: unknown;
+    try {
+      registry.touchOrThrow(first.canvasId, 'tenant-a');
+    } catch (err) {
+      caught = err;
+    }
+    expectCanvasNotFoundShape(caught, first.canvasId);
+    await registry.shutdown(baseContext);
+  });
+});
+
 describe('CanvasRegistry · sliding TTL and absolute cap', () => {
   it('expires after TTL of inactivity', async () => {
     const clock = vi.fn(() => 1_000_000);
