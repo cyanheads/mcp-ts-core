@@ -11,8 +11,17 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { defineMirror } from '@/services/mirror/core/defineMirror.js';
+import { runSync } from '@/services/mirror/core/runner.js';
 import { sqliteMirrorStore } from '@/services/mirror/sqlite/sqliteMirrorStore.js';
-import type { MirrorRow, SyncContext, SyncGenerator, SyncPage } from '@/services/mirror/types.js';
+import type {
+  MirrorRow,
+  MirrorStore,
+  SqliteHandle,
+  SyncContext,
+  SyncGenerator,
+  SyncPage,
+  SyncState,
+} from '@/services/mirror/types.js';
 
 const stamp = (i: number): string => `2024-01-${String(i + 1).padStart(2, '0')}`;
 const corpusOf = (n: number): MirrorRow[] =>
@@ -119,6 +128,7 @@ describe('mirror runner / defineMirror', () => {
     const errored = await m1.store.readState();
     expect(errored.status).toBe('error');
     expect(errored.cursor).toBe('4');
+    expect(errored.startedAt).toBeDefined();
     expect(await m1.store.count()).toBe(4);
     await m1.close();
 
@@ -131,7 +141,29 @@ describe('mirror runner / defineMirror', () => {
     expect(result.recordsApplied).toBe(4); // only the remaining 4
     expect(await m2.store.count()).toBe(8); // all 8 present after resume
     expect((await m2.status()).ready).toBe(true);
+    // The resumed run keeps the original startedAt (how long the run has truly
+    // been going), not a fresh "now" timestamp from the recovering call.
+    expect((await m2.store.readState()).startedAt).toBe(errored.startedAt);
     await m2.close();
+  });
+
+  it('restarts a full init from scratch after a prior init completed, ignoring any stale cursor/checkpoint', async () => {
+    const src: FakeSource = { records: corpusOf(4), pageSize: 4, received: [] };
+    const mirror = mirrorFor(src);
+    await mirror.runSync({ mode: 'init' });
+    expect((await mirror.status()).ready).toBe(true);
+    await mirror.close();
+
+    // status is already 'complete', so incompleteInit is false on this second
+    // init regardless of the checkpoint left over from the first run — it must
+    // restart from scratch, not resume.
+    const second: FakeSource = { records: corpusOf(4), pageSize: 4, received: [] };
+    const mirror2 = mirrorFor(second);
+    await mirror2.runSync({ mode: 'init' });
+    expect(second.received[0]?.cursor).toBeUndefined();
+    expect(second.received[0]?.checkpoint).toBeUndefined();
+    expect(await mirror2.store.count()).toBe(4); // re-applied cleanly, not doubled
+    await mirror2.close();
   });
 
   it('refreshes incrementally from the durable checkpoint', async () => {
@@ -194,6 +226,7 @@ describe('mirror runner / defineMirror', () => {
     expect(status.status).toBe('error');
     expect(status.ready).toBe(true); // durable completion marker survives
     expect(status.total).toBe(4);
+    expect(status.error).toBe('simulated upstream failure');
     await mirror2.close();
   });
 
@@ -209,5 +242,119 @@ describe('mirror runner / defineMirror', () => {
     });
     expect(calls).toBe(3); // 6 records / pageSize 2
     await mirror.close();
+  });
+
+  it('never lets the durable checkpoint regress, and leaves it unchanged when a page omits it', async () => {
+    const pages: SyncPage[] = [
+      { records: [{ id: 'a', title: 'A', stamp: stamp(0) }], checkpoint: '2024-06-01' },
+      // Out-of-order vs. the checkpoint already recorded — must not regress.
+      { records: [{ id: 'b', title: 'B', stamp: stamp(1) }], checkpoint: '2024-01-01' },
+      // No checkpoint at all — must leave the prior value untouched, not clear it.
+      { records: [{ id: 'c', title: 'C', stamp: stamp(2) }] },
+    ];
+    const sync: SyncGenerator = async function* (): AsyncGenerator<SyncPage> {
+      for (const page of pages) yield page;
+    };
+    const mirror = defineMirror({
+      name: 'checkpoint-order',
+      store: sqliteMirrorStore({
+        path: dbPath,
+        table: 'docs',
+        primaryKey: 'id',
+        columns: { id: 'TEXT', title: 'TEXT', stamp: 'TEXT' },
+      }),
+      sync,
+    });
+    await mirror.runSync({ mode: 'init' });
+    expect((await mirror.status()).checkpoint).toBe('2024-06-01');
+    await mirror.close();
+  });
+
+  it('records a String()-coerced message when the sync generator throws a non-Error value', async () => {
+    // biome-ignore lint/correctness/useYield: deliberately throws before ever yielding — that failure-before-any-page case is what this test covers.
+    const sync: SyncGenerator = async function* (): AsyncGenerator<SyncPage> {
+      throw 'a plain string failure, not an Error instance';
+    };
+    const mirror = defineMirror({
+      name: 'non-error-throw',
+      store: sqliteMirrorStore({
+        path: dbPath,
+        table: 'docs',
+        primaryKey: 'id',
+        columns: { id: 'TEXT', title: 'TEXT', stamp: 'TEXT' },
+      }),
+      sync,
+    });
+    await expect(mirror.runSync({ mode: 'init' })).rejects.toBe(
+      'a plain string failure, not an Error instance',
+    );
+    const state = await mirror.store.readState();
+    expect(state.status).toBe('error');
+    expect(state.error).toBe('a plain string failure, not an Error instance');
+    await mirror.close();
+  });
+});
+
+describe('runSync (direct) — defensive logger handling', () => {
+  /** A minimal spec-conformant MirrorStore double — just enough state to drive runSync directly. */
+  function makeMinimalStore(): MirrorStore {
+    let state: SyncState = { status: 'pending' };
+    const store: MirrorStore = {
+      async applyBatch() {},
+      async close() {},
+      async count() {
+        return 0;
+      },
+      async getByIds() {
+        return [];
+      },
+      async integrityCheck() {
+        return { ok: true, results: [] };
+      },
+      async query() {
+        return { rows: [], total: 0 };
+      },
+      async raw() {
+        return {} as SqliteHandle;
+      },
+      async readState() {
+        return state;
+      },
+      async writeState(next) {
+        state = next;
+      },
+      async [Symbol.asyncDispose]() {
+        await store.close();
+      },
+    };
+    return store;
+  }
+
+  it('completes a successful sync when the logger provides no methods at all', async () => {
+    const sync: SyncGenerator = async function* (): AsyncGenerator<SyncPage> {
+      yield { records: [{ id: '1' }] };
+    };
+    const result = await runSync(
+      makeMinimalStore(),
+      sync,
+      { log: {}, signal: new AbortController().signal },
+      { mode: 'init' },
+    );
+    expect(result.recordsApplied).toBe(1);
+  });
+
+  it('propagates a sync failure when the logger provides no methods at all (error path optional-chains safely too)', async () => {
+    // biome-ignore lint/correctness/useYield: deliberately throws before ever yielding — that failure-before-any-page case is what this test covers.
+    const sync: SyncGenerator = async function* (): AsyncGenerator<SyncPage> {
+      throw new Error('boom');
+    };
+    await expect(
+      runSync(
+        makeMinimalStore(),
+        sync,
+        { log: {}, signal: new AbortController().signal },
+        { mode: 'init' },
+      ),
+    ).rejects.toThrow('boom');
   });
 });

@@ -6,6 +6,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { encodeCursor } from '@/storage/core/storageValidation.js';
 import { SupabaseProvider } from '@/storage/providers/supabase/supabaseProvider.js';
+import { JsonRpcErrorCode, McpError } from '@/types-global/errors.js';
 import type { RequestContext } from '@/utils/internal/requestContext.js';
 import { requestContextService } from '@/utils/internal/requestContext.js';
 
@@ -228,5 +229,196 @@ describe('SupabaseProvider', () => {
 
     await expect(clearProvider.clear('tenant-1', context)).resolves.toBe(7);
     expect(clearBuilder.eq).toHaveBeenCalledWith('tenant_id', 'tenant-1');
+  });
+
+  it('returns stored values when there is no expiry set', async () => {
+    const builder = createQueryBuilder({
+      data: { value: { fresh: true }, expires_at: null },
+      error: null,
+    });
+    const provider = new SupabaseProvider(createClient(builder) as never);
+
+    await expect(provider.get('tenant-1', 'key-1', context)).resolves.toEqual({ fresh: true });
+  });
+
+  it('returns stored values when expires_at is still in the future', async () => {
+    vi.setSystemTime(new Date('2026-01-01T00:00:00.000Z'));
+    const builder = createQueryBuilder({
+      data: { value: { fresh: true }, expires_at: '2026-06-01T00:00:00.000Z' },
+      error: null,
+    });
+    const provider = new SupabaseProvider(createClient(builder) as never);
+
+    await expect(provider.get('tenant-1', 'key-1', context)).resolves.toEqual({ fresh: true });
+  });
+
+  it('propagates and classifies non-not-found errors from get', async () => {
+    const builder = createQueryBuilder({
+      data: null,
+      error: { code: 'PGRST301', message: 'JWT expired' },
+    });
+    const provider = new SupabaseProvider(createClient(builder) as never);
+
+    await expect(provider.get('tenant-1', 'key-1', context)).rejects.toMatchObject({
+      code: JsonRpcErrorCode.Unauthorized,
+    });
+  });
+
+  it('stores a null expires_at when no ttl is provided', async () => {
+    const builder = createQueryBuilder({ error: null });
+    const provider = new SupabaseProvider(createClient(builder) as never);
+
+    await provider.set('tenant-1', 'key-1', { value: 1 }, context);
+
+    expect(builder.upsert).toHaveBeenCalledWith({
+      tenant_id: 'tenant-1',
+      key: 'key-1',
+      value: { value: 1 },
+      expires_at: null,
+    });
+  });
+
+  it('propagates and classifies errors from set', async () => {
+    const builder = createQueryBuilder({
+      error: { code: '23505', message: 'duplicate key value violates unique constraint' },
+    });
+    const provider = new SupabaseProvider(createClient(builder) as never);
+
+    await expect(provider.set('tenant-1', 'key-1', { value: 1 }, context)).rejects.toMatchObject({
+      code: JsonRpcErrorCode.Conflict,
+    });
+  });
+
+  it('reports true when delete removes a row', async () => {
+    const builder = createQueryBuilder({ count: 1, error: null });
+    const provider = new SupabaseProvider(createClient(builder) as never);
+
+    await expect(provider.delete('tenant-1', 'present', context)).resolves.toBe(true);
+  });
+
+  it('propagates and classifies errors from delete', async () => {
+    const builder = createQueryBuilder({ error: { message: 'connection refused' } });
+    const provider = new SupabaseProvider(createClient(builder) as never);
+
+    await expect(provider.delete('tenant-1', 'key-1', context)).rejects.toMatchObject({
+      code: JsonRpcErrorCode.ServiceUnavailable,
+    });
+  });
+
+  it('lists with the default limit when no options are provided', async () => {
+    const builder = createQueryBuilder({
+      data: [{ key: 'a' }, { key: 'b' }],
+      error: null,
+    });
+    const provider = new SupabaseProvider(createClient(builder) as never);
+
+    const result = await provider.list('tenant-1', '', context);
+
+    expect(result.keys).toEqual(['a', 'b']);
+    expect(result.nextCursor).toBeUndefined();
+    expect(builder.limit).toHaveBeenCalledWith(1001);
+  });
+
+  it('reports no next page when results exactly fill the requested limit', async () => {
+    const builder = createQueryBuilder({
+      data: [{ key: 'a' }, { key: 'b' }],
+      error: null,
+    });
+    const provider = new SupabaseProvider(createClient(builder) as never);
+
+    const result = await provider.list('tenant-1', '', context, { limit: 2 });
+
+    expect(result.keys).toEqual(['a', 'b']);
+    expect(result.nextCursor).toBeUndefined();
+  });
+
+  it('returns an empty key list when the query yields no data', async () => {
+    const builder = createQueryBuilder({ data: null, error: null });
+    const provider = new SupabaseProvider(createClient(builder) as never);
+
+    const result = await provider.list('tenant-1', '', context);
+
+    expect(result.keys).toEqual([]);
+    expect(result.nextCursor).toBeUndefined();
+  });
+
+  it('rejects a cursor issued for a different tenant', async () => {
+    const builder = createQueryBuilder({ data: [], error: null });
+    const provider = new SupabaseProvider(createClient(builder) as never);
+    const cursor = encodeCursor('some-key', 'other-tenant');
+
+    await expect(provider.list('tenant-1', 'prefix', context, { cursor })).rejects.toMatchObject({
+      code: JsonRpcErrorCode.InvalidParams,
+    });
+  });
+
+  it('propagates and classifies errors from list', async () => {
+    const builder = createQueryBuilder({ error: { message: 'statement timeout' } });
+    const provider = new SupabaseProvider(createClient(builder) as never);
+
+    await expect(provider.list('tenant-1', '', context)).rejects.toMatchObject({
+      code: JsonRpcErrorCode.Timeout,
+    });
+  });
+
+  it('returns an empty map when getMany yields no data', async () => {
+    const builder = createQueryBuilder({ data: null, error: null });
+    const provider = new SupabaseProvider(createClient(builder) as never);
+
+    await expect(provider.getMany('tenant-1', ['a', 'b'], context)).resolves.toEqual(new Map());
+  });
+
+  it('propagates and classifies errors from getMany', async () => {
+    const builder = createQueryBuilder({
+      error: { message: 'permission denied for table kv_store' },
+    });
+    const provider = new SupabaseProvider(createClient(builder) as never);
+
+    await expect(provider.getMany('tenant-1', ['a'], context)).rejects.toMatchObject({
+      code: JsonRpcErrorCode.Forbidden,
+    });
+  });
+
+  it('setMany upserts rows with a null expires_at when no ttl is given', async () => {
+    const builder = createQueryBuilder({ error: null });
+    const provider = new SupabaseProvider(createClient(builder) as never);
+
+    await provider.setMany('tenant-1', new Map<string, unknown>([['a', { n: 1 }]]), context);
+
+    expect(builder.upsert).toHaveBeenCalledWith([
+      { tenant_id: 'tenant-1', key: 'a', value: { n: 1 }, expires_at: null },
+    ]);
+  });
+
+  it('propagates and classifies errors from setMany', async () => {
+    const builder = createQueryBuilder({
+      error: { message: 'invalid input syntax for type json' },
+    });
+    const provider = new SupabaseProvider(createClient(builder) as never);
+
+    await expect(
+      provider.setMany('tenant-1', new Map<string, unknown>([['a', 1]]), context),
+    ).rejects.toMatchObject({ code: JsonRpcErrorCode.ValidationError });
+  });
+
+  it('propagates errors from deleteMany', async () => {
+    const builder = createQueryBuilder({ error: { message: 'unexpected failure' } });
+    const provider = new SupabaseProvider(createClient(builder) as never);
+
+    await expect(provider.deleteMany('tenant-1', ['a'], context)).rejects.toThrow(McpError);
+  });
+
+  it('propagates errors from clear', async () => {
+    const builder = createQueryBuilder({ error: { message: 'relation does not exist' } });
+    const provider = new SupabaseProvider(createClient(builder) as never);
+
+    await expect(provider.clear('tenant-1', context)).rejects.toThrow(McpError);
+  });
+
+  it('returns 0 when clear reports no count', async () => {
+    const builder = createQueryBuilder({ count: null, error: null });
+    const provider = new SupabaseProvider(createClient(builder) as never);
+
+    await expect(provider.clear('tenant-1', context)).resolves.toBe(0);
   });
 });

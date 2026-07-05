@@ -412,6 +412,24 @@ describe('Storage Validation', () => {
       }
     });
 
+    it('rejects a cursor whose payload was tampered to enumerate a different key (HMAC forgery)', () => {
+      // Attack: take a validly-signed cursor and swap its base64 payload to point
+      // at another key inside the same tenant, keeping the original signature.
+      // The HMAC must reject it, blocking key enumeration by cursor forgery.
+      const valid = encodeCursor('user:alice', 'tenant');
+      const dotIndex = valid.lastIndexOf('.');
+      const originalSignature = valid.substring(dotIndex + 1);
+      const forgedPayload = stringToBase64(JSON.stringify({ k: 'user:victim', t: 'tenant' }));
+      const forged = `${forgedPayload}.${originalSignature}`;
+
+      expect(() => decodeCursor(forged, 'tenant', context)).toThrow(McpError);
+      try {
+        decodeCursor(forged, 'tenant', context);
+      } catch (error) {
+        expect((error as McpError).code).toBe(JsonRpcErrorCode.InvalidParams);
+      }
+    });
+
     it('should not leak the internal error stack into McpError.data (issue #71)', () => {
       // Trigger the catch-all branch — JSON.parse throws on a base64-decoded
       // payload that isn't valid JSON. The pre-fix code would put the parser's

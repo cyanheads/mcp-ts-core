@@ -90,6 +90,26 @@ describe('DataCanvas · acquire', () => {
     await registry.shutdown(ctxWithTenant);
   });
 
+  it('throws when tenantId is an empty string (distinct branch from undefined/null)', async () => {
+    const provider = makeStubProvider();
+    const registry = new CanvasRegistry(provider, makeOptions());
+    const canvas = new DataCanvas(provider, registry);
+    const ctxEmptyTenant: RequestContext = {
+      requestId: 'test-req',
+      timestamp: '2026-01-01T00:00:00.000Z',
+      tenantId: '',
+    };
+    let caught: unknown;
+    try {
+      await canvas.acquire(undefined, ctxEmptyTenant);
+    } catch (err) {
+      caught = err;
+    }
+    expect(caught).toBeInstanceOf(McpError);
+    expect((caught as McpError).message).toMatch(/Tenant ID is required/);
+    await registry.shutdown(ctxWithTenant);
+  });
+
   it('returns a CanvasInstance with canvasId, tenantId, isNew=true, and expiresAt', async () => {
     const provider = makeStubProvider();
     const registry = new CanvasRegistry(provider, makeOptions(), () => 1_000_000);

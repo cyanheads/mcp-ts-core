@@ -8,6 +8,7 @@
 import { describe, expect, it } from 'vitest';
 
 import { toBigInt } from '@/services/canvas/providers/duckdb/DuckdbProvider.js';
+import { McpError } from '@/types-global/errors.js';
 
 describe('toBigInt', () => {
   it('returns bigint inputs unchanged', () => {
@@ -37,5 +38,32 @@ describe('toBigInt', () => {
     // regex; they fall through to Number-based coercion (lossy by design —
     // BigInt() throws on these inputs).
     expect(toBigInt('3.7')).toBe(3n);
+  });
+});
+
+describe('toBigInt · null and undefined (documented current behavior)', () => {
+  it('coerces null to 0n via Number(null) === 0 — no explicit null guard', () => {
+    // Number(null) is 0, so toBigInt(null) silently succeeds as 0n rather
+    // than throwing — unlike its sibling coercers (toTimestampMicros /
+    // toDateDays / toUint8Array), which all reject invalid types with a
+    // structured validationError. In production this path is unreachable
+    // (appendValue intercepts null/undefined before dispatching to
+    // toBigInt), but the exported function itself does not guard against it.
+    expect(toBigInt(null)).toBe(0n);
+  });
+
+  it('throws a raw (non-McpError) error for undefined — inconsistent with sibling coercers', () => {
+    // Number(undefined) is NaN, and BigInt(NaN) throws a native RangeError —
+    // uncaught by toBigInt, so callers see an unstructured error instead of
+    // the validationError() its appendValue-coercion siblings produce for
+    // every other invalid input.
+    let caught: unknown;
+    try {
+      toBigInt(undefined);
+    } catch (err) {
+      caught = err;
+    }
+    expect(caught).toBeDefined();
+    expect(caught).not.toBeInstanceOf(McpError);
   });
 });

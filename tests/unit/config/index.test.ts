@@ -103,6 +103,80 @@ describe('config parsing', () => {
     }
   });
 
+  it('rejects MCP_AUTH_MODE=jwt without a secret key when the dev bypass is off', () => {
+    process.env.NODE_ENV = 'development';
+    process.env.MCP_AUTH_MODE = 'jwt';
+    delete process.env.MCP_AUTH_SECRET_KEY;
+    delete process.env.DEV_MCP_AUTH_BYPASS;
+
+    let thrown: unknown;
+    try {
+      parseConfig();
+    } catch (error) {
+      thrown = error;
+    }
+
+    expect(thrown).toBeInstanceOf(McpError);
+    expect((thrown as McpError).code).toBe(JsonRpcErrorCode.ConfigurationError);
+  });
+
+  it('rejects an MCP_AUTH_SECRET_KEY shorter than 32 characters in jwt mode', () => {
+    // A short HMAC key is brute-forceable; the 32-char floor is a security guard.
+    process.env.NODE_ENV = 'development';
+    process.env.MCP_AUTH_MODE = 'jwt';
+    process.env.MCP_AUTH_SECRET_KEY = 'too-short-key';
+    delete process.env.DEV_MCP_AUTH_BYPASS;
+
+    let thrown: unknown;
+    try {
+      parseConfig();
+    } catch (error) {
+      thrown = error;
+    }
+
+    expect(thrown).toBeInstanceOf(McpError);
+    expect((thrown as McpError).code).toBe(JsonRpcErrorCode.ConfigurationError);
+  });
+
+  it('accepts a 32+ character secret key in jwt mode', () => {
+    process.env.NODE_ENV = 'production';
+    process.env.MCP_AUTH_MODE = 'jwt';
+    process.env.MCP_AUTH_SECRET_KEY = 'a-secret-key-that-is-at-least-32-chars';
+    delete process.env.DEV_MCP_AUTH_BYPASS;
+
+    const parsed = parseConfig();
+    expect(parsed.mcpAuthMode).toBe('jwt');
+  });
+
+  it('rejects MCP_AUTH_MODE=oauth without an issuer URL and audience', () => {
+    process.env.NODE_ENV = 'development';
+    process.env.MCP_AUTH_MODE = 'oauth';
+    delete process.env.OAUTH_ISSUER_URL;
+    delete process.env.OAUTH_AUDIENCE;
+
+    let thrown: unknown;
+    try {
+      parseConfig();
+    } catch (error) {
+      thrown = error;
+    }
+
+    expect(thrown).toBeInstanceOf(McpError);
+    expect((thrown as McpError).code).toBe(JsonRpcErrorCode.ConfigurationError);
+  });
+
+  it('accepts MCP_AUTH_MODE=oauth with an issuer URL and audience', () => {
+    process.env.NODE_ENV = 'production';
+    process.env.MCP_AUTH_MODE = 'oauth';
+    process.env.OAUTH_ISSUER_URL = 'https://issuer.example.com/';
+    process.env.OAUTH_AUDIENCE = 'https://api.example.com';
+
+    const parsed = parseConfig();
+    expect(parsed.mcpAuthMode).toBe('oauth');
+    expect(parsed.oauthIssuerUrl).toBe('https://issuer.example.com/');
+    expect(parsed.oauthAudience).toBe('https://api.example.com');
+  });
+
   it('parses env boolean flags via stringbool (the z.coerce.boolean footgun fix)', () => {
     for (const value of ['false', '0', 'no', 'off', 'FALSE', 'Off']) {
       process.env.OTEL_ENABLED = value;

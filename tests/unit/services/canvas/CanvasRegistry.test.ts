@@ -14,6 +14,7 @@ import {
 import type { IDataCanvasProvider } from '@/services/canvas/core/IDataCanvasProvider.js';
 import { McpError } from '@/types-global/errors.js';
 import type { RequestContext } from '@/utils/internal/requestContext.js';
+import { IdGenerator } from '@/utils/security/idGenerator.js';
 
 /** Stub provider — only the lifecycle methods that CanvasRegistry calls are real. */
 function makeStubProvider(): IDataCanvasProvider & {
@@ -588,5 +589,101 @@ describe('CanvasRegistry · shutdown', () => {
     expect(provider.destroyCalls.length).toBe(1);
     expect(provider.shutdown).toHaveBeenCalled();
     registry = undefined;
+  });
+
+  it('a second shutdown() call does not re-invoke provider.shutdown()', async () => {
+    const provider = makeStubProvider();
+    registry = new CanvasRegistry(provider, makeOptions());
+    await registry.acquire(undefined, 'tenant-a', baseContext);
+
+    await registry.shutdown(baseContext);
+    expect(provider.shutdown).toHaveBeenCalledTimes(1);
+
+    // Idempotent — the isShuttingDown guard short-circuits before re-tearing
+    // down the provider or re-destroying (already-empty) canvases.
+    await registry.shutdown(baseContext);
+    expect(provider.shutdown).toHaveBeenCalledTimes(1);
+    expect(provider.destroyCalls.length).toBe(1);
+  });
+});
+
+describe('CanvasRegistry · mintId collision handling', () => {
+  it('throws Conflict after 5 failed attempts to mint a unique canvas ID', async () => {
+    const provider = makeStubProvider();
+    const registry = new CanvasRegistry(provider, makeOptions());
+    // Force every mint attempt to collide by pinning the generator's output.
+    const spy = vi
+      .spyOn(IdGenerator.prototype, 'generateRandomString')
+      .mockReturnValue('AAAAAAAAAA');
+    try {
+      const first = await registry.acquire(undefined, 'tenant-a', baseContext);
+      expect(first.canvasId).toBe('AAAAAAAAAA');
+      // Every subsequent mint attempt collides with the id already claimed above.
+      await expect(registry.acquire(undefined, 'tenant-a', baseContext)).rejects.toThrow(
+        /unique canvas ID/i,
+      );
+    } finally {
+      spy.mockRestore();
+      await registry.shutdown(baseContext);
+    }
+  });
+});
+
+describe('CanvasRegistry · sweep() after shutdown', () => {
+  it('sweep() is a no-op once the registry is shutting down', async () => {
+    const clock = vi.fn(() => 1_000_000);
+    const provider = makeStubProvider();
+    const registry = new CanvasRegistry(provider, makeOptions(), clock);
+    await registry.acquire(undefined, 'tenant-a', baseContext);
+    await registry.shutdown(baseContext);
+    const destroyCountAfterShutdown = provider.destroyCalls.length;
+
+    // Even with the clock walked far past every expiry, a post-shutdown sweep
+    // must not touch the (already-empty) canvas map or the provider again.
+    clock.mockReturnValue(1_000_000 + TTL + ABSOLUTE_CAP);
+    await registry.sweep();
+    expect(provider.destroyCalls.length).toBe(destroyCountAfterShutdown);
+  });
+});
+
+describe('CanvasRegistry · wordBoundaryMatch correctness', () => {
+  it('does not slide a table whose name is a substring of another word in the SQL', async () => {
+    const clock = vi.fn(() => 1_000_000);
+    const provider = makeStubProvider();
+    const registry = new CanvasRegistry(provider, makeOptions(), clock);
+    const r = await registry.acquire(undefined, 'tenant-a', baseContext);
+
+    const TABLE_TTL = 5 * 60 * 1000;
+    // 'order' is a substring of 'orders' — a naive substring match would
+    // falsely slide it; the word-boundary regex must not.
+    registry.registerTableTtl(r.canvasId, 'tenant-a', 'order', TABLE_TTL);
+
+    clock.mockReturnValue(2_000_000);
+    registry.touchWithSqlTables(r.canvasId, 'tenant-a', undefined, 'SELECT * FROM orders');
+
+    const raw = [{ name: 'order', kind: 'table' as const, rowCount: 0, columns: [] }];
+    const annotated = registry.annotateDescribeResult(r.canvasId, 'tenant-a', raw);
+    // Still the ORIGINAL expiry set by registerTableTtl (clock was 1_000_000
+    // at that call) — touchWithSqlTables must not have slid it.
+    expect(annotated[0]?.expiresAt).toBe(new Date(1_000_000 + TABLE_TTL).toISOString());
+    await registry.shutdown(baseContext);
+  });
+
+  it('leaves a registered table untouched when it never appears in the SQL text', async () => {
+    const clock = vi.fn(() => 1_000_000);
+    const provider = makeStubProvider();
+    const registry = new CanvasRegistry(provider, makeOptions(), clock);
+    const r = await registry.acquire(undefined, 'tenant-a', baseContext);
+
+    const TABLE_TTL = 5 * 60 * 1000;
+    registry.registerTableTtl(r.canvasId, 'tenant-a', 'unrelated_table', TABLE_TTL);
+
+    clock.mockReturnValue(2_000_000);
+    registry.touchWithSqlTables(r.canvasId, 'tenant-a', undefined, 'SELECT * FROM orders');
+
+    const raw = [{ name: 'unrelated_table', kind: 'table' as const, rowCount: 0, columns: [] }];
+    const annotated = registry.annotateDescribeResult(r.canvasId, 'tenant-a', raw);
+    expect(annotated[0]?.expiresAt).toBe(new Date(1_000_000 + TABLE_TTL).toISOString());
+    await registry.shutdown(baseContext);
   });
 });

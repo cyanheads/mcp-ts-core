@@ -148,4 +148,38 @@ describe('pipeFileToStream', () => {
     expect(sizeBytes).toBe(payload.length);
     await expect(readFile(filePath, 'utf-8')).rejects.toMatchObject({ code: 'ENOENT' });
   });
+
+  it('aborts the writer and propagates the error when the source file does not exist', async () => {
+    const missingPath = join(root, 'never-written.csv');
+    let abortedWith: unknown;
+    const stream = new WritableStream<Uint8Array>({
+      abort(reason) {
+        abortedWith = reason;
+      },
+    });
+
+    await expect(pipeFileToStream(missingPath, stream)).rejects.toMatchObject({ code: 'ENOENT' });
+    expect(abortedWith).toBeDefined();
+    expect((abortedWith as { code?: string }).code).toBe('ENOENT');
+  });
+});
+
+describe('resolveExportPath · non-string requested (runtime defensive check)', () => {
+  let root: string;
+
+  beforeEach(async () => {
+    root = await mkdtemp(join(tmpdir(), 'canvas-export-'));
+  });
+  afterEach(async () => {
+    await rm(root, { recursive: true, force: true });
+  });
+
+  it('rejects a non-string requested path — a distinct branch from the empty-string check', async () => {
+    await expect(resolveExportPath(root, 123 as unknown as string)).rejects.toThrow(
+      /non-empty string/i,
+    );
+    await expect(resolveExportPath(root, null as unknown as string)).rejects.toThrow(
+      /non-empty string/i,
+    );
+  });
 });

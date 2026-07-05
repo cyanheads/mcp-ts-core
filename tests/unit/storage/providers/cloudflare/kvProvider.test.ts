@@ -31,6 +31,15 @@ describe('KvProvider', () => {
     });
   });
 
+  describe('constructor', () => {
+    it('should throw McpError when kv is not provided', () => {
+      expect(() => new KvProvider(null as any)).toThrow(McpError);
+      expect(() => new KvProvider(null as any)).toThrow(
+        /KvProvider requires a valid KVNamespace instance/,
+      );
+    });
+  });
+
   describe('get', () => {
     it('should return null if key not found', async () => {
       mockKv.get.mockResolvedValue(null);
@@ -70,6 +79,22 @@ describe('KvProvider', () => {
         expirationTtl: 3600,
       });
     });
+
+    it('should clamp expirationTtl to the Cloudflare-required 60s minimum', async () => {
+      const value = { data: 'test' };
+      await kvProvider.set('tenant-1', 'key-1', value, context, { ttl: 10 });
+      expect(mockKv.put).toHaveBeenCalledWith('tenant-1:key-1', JSON.stringify(value), {
+        expirationTtl: 60,
+      });
+    });
+
+    it('should propagate errors from the underlying put call', async () => {
+      mockKv.put.mockRejectedValue(new Error('KV unavailable'));
+
+      await expect(kvProvider.set('tenant-1', 'key-1', { data: 'test' }, context)).rejects.toThrow(
+        McpError,
+      );
+    });
   });
 
   describe('delete', () => {
@@ -80,6 +105,12 @@ describe('KvProvider', () => {
       expect(mockKv.delete).toHaveBeenCalledWith('tenant-1:key-1');
       // Should not check existence first — KV delete is idempotent
       expect(mockKv.get).not.toHaveBeenCalled();
+    });
+
+    it('should propagate errors from the underlying delete call', async () => {
+      mockKv.delete.mockRejectedValue(new Error('KV unavailable'));
+
+      await expect(kvProvider.delete('tenant-1', 'key-1', context)).rejects.toThrow(McpError);
     });
   });
 
@@ -124,6 +155,24 @@ describe('KvProvider', () => {
           cursor: 'prev-cursor', // decoded native cursor passed to KV
         }),
       );
+    });
+
+    it('should not forward a cursor when the list is already complete', async () => {
+      mockKv.list.mockResolvedValue({
+        keys: [{ name: 'tenant-1:key-1' }],
+        list_complete: true,
+        cursor: 'stale-cursor',
+      });
+
+      const result = await kvProvider.list('tenant-1', 'key', context);
+
+      expect(result.nextCursor).toBeUndefined();
+    });
+
+    it('should propagate errors from the underlying list call', async () => {
+      mockKv.list.mockRejectedValue(new Error('KV unavailable'));
+
+      await expect(kvProvider.list('tenant-1', 'key', context)).rejects.toThrow(McpError);
     });
   });
 
@@ -203,6 +252,21 @@ describe('KvProvider', () => {
         limit: 1000,
         cursor: 'cursor-1',
       });
+    });
+
+    it('getMany should return an empty map when no keys are requested', async () => {
+      const result = await kvProvider.getMany('tenant-1', [], context);
+      expect(result.size).toBe(0);
+    });
+
+    it('setMany should be a no-op for an empty entries map', async () => {
+      await kvProvider.setMany('tenant-1', new Map(), context);
+      expect(mockKv.put).not.toHaveBeenCalled();
+    });
+
+    it('deleteMany should return 0 for an empty key list', async () => {
+      const deleted = await kvProvider.deleteMany('tenant-1', [], context);
+      expect(deleted).toBe(0);
     });
   });
 });

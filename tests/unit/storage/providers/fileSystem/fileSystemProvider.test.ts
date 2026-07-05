@@ -6,6 +6,7 @@
 import { existsSync, mkdirSync, rmSync } from 'node:fs';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { encodeCursor } from '@/storage/core/storageValidation.js';
 import { FileSystemProvider } from '@/storage/providers/fileSystem/fileSystemProvider.js';
 import { McpError } from '@/types-global/errors.js';
 import { requestContextService } from '@/utils/internal/requestContext.js';
@@ -244,6 +245,11 @@ describe('FileSystemProvider', () => {
         expect(results.has('key1')).toBe(true);
         expect(results.has('nonexistent')).toBe(false);
       });
+
+      it('should return an empty map when no keys are requested', async () => {
+        const results = await provider.getMany('tenant1', [], testContext);
+        expect(results.size).toBe(0);
+      });
     });
 
     describe('setMany', () => {
@@ -282,6 +288,10 @@ describe('FileSystemProvider', () => {
         expect(result1).toBeNull();
         expect(result2).toBeNull();
       });
+
+      it('should be a no-op for an empty entries map', async () => {
+        await expect(provider.setMany('tenant1', new Map(), testContext)).resolves.toBeUndefined();
+      });
     });
 
     describe('deleteMany', () => {
@@ -313,6 +323,11 @@ describe('FileSystemProvider', () => {
         );
 
         expect(deletedCount).toBe(1);
+      });
+
+      it('should return 0 for an empty key list', async () => {
+        const deletedCount = await provider.deleteMany('tenant1', [], testContext);
+        expect(deletedCount).toBe(0);
       });
     });
   });
@@ -394,6 +409,48 @@ describe('FileSystemProvider', () => {
       expect(result.keys[1]).toBe('mango');
       expect(result.keys[2]).toBe('zebra');
     });
+
+    it('should resume after the next surviving key when the cursor key was deleted', async () => {
+      await provider.set('tenant1', 'alpha', { value: 1 }, testContext);
+      await provider.set('tenant1', 'charlie', { value: 3 }, testContext);
+      await provider.set('tenant1', 'delta', { value: 4 }, testContext);
+      // 'bravo' was never set — simulates a key that existed on a prior page
+      // and was deleted before the client resumed pagination.
+      const staleCursor = encodeCursor('bravo', 'tenant1');
+
+      const result = await provider.list('tenant1', '', testContext, {
+        cursor: staleCursor,
+        limit: 10,
+      });
+
+      expect(result.keys).toEqual(['charlie', 'delta']);
+    });
+
+    it('should return no results when the cursor key sorts after every remaining key', async () => {
+      await provider.set('tenant1', 'alpha', { value: 1 }, testContext);
+      await provider.set('tenant1', 'bravo', { value: 2 }, testContext);
+      const cursorPastEverything = encodeCursor('zzz-past-everything', 'tenant1');
+
+      const result = await provider.list('tenant1', '', testContext, {
+        cursor: cursorPastEverything,
+        limit: 10,
+      });
+
+      expect(result.keys).toEqual([]);
+      expect(result.nextCursor).toBeUndefined();
+    });
+
+    it('should skip files with corrupted JSON during list rather than throwing', async () => {
+      const fs = await import('node:fs/promises');
+      const tenantPath = path.join(TEST_STORAGE_PATH, 'tenant1');
+      mkdirSync(tenantPath, { recursive: true });
+      await provider.set('tenant1', 'good-key', { value: 1 }, testContext);
+      await fs.writeFile(path.join(tenantPath, 'corrupt-key'), 'not-valid-json{{{', 'utf-8');
+
+      const result = await provider.list('tenant1', '', testContext);
+
+      expect(result.keys).toEqual(['good-key']);
+    });
   });
 
   describe('Clear Operation', () => {
@@ -469,6 +526,32 @@ describe('FileSystemProvider', () => {
 
       const result = await provider.get('tenant1', longKey, testContext);
       expect(result).toEqual({ data: 'test' });
+    });
+
+    it('should throw McpError when stored JSON is corrupted', async () => {
+      const fs = await import('node:fs/promises');
+      const tenantPath = path.join(TEST_STORAGE_PATH, 'tenant1');
+      mkdirSync(tenantPath, { recursive: true });
+      await fs.writeFile(path.join(tenantPath, 'corrupt-key'), 'not-valid-json{{{', 'utf-8');
+
+      await expect(provider.get('tenant1', 'corrupt-key', testContext)).rejects.toThrow(McpError);
+    });
+
+    it('should re-throw non-ENOENT errors from get', async () => {
+      // Create a directory where a file is expected — readFile() on a directory
+      // fails with a directory-related error, not ENOENT, so the provider must
+      // re-throw rather than treat it as a missing key.
+      const tenantPath = path.join(TEST_STORAGE_PATH, 'tenant1');
+      mkdirSync(path.join(tenantPath, 'dir-not-file'), { recursive: true });
+
+      await expect(provider.get('tenant1', 'dir-not-file', testContext)).rejects.toThrow();
+    });
+
+    it('should re-throw non-ENOENT errors from delete', async () => {
+      const tenantPath = path.join(TEST_STORAGE_PATH, 'tenant1');
+      mkdirSync(path.join(tenantPath, 'dir-not-file'), { recursive: true });
+
+      await expect(provider.delete('tenant1', 'dir-not-file', testContext)).rejects.toThrow();
     });
   });
 

@@ -300,5 +300,57 @@ describe('JwtStrategy', () => {
       expect(authInfo.expiresAt).toBeGreaterThan(beforeSign);
       expect(authInfo.expiresAt).toBeLessThanOrEqual(beforeSign + 3601);
     });
+
+    describe('algorithm and claim security', () => {
+      /** Hand-crafts a compact JWS the way an attacker would — jose refuses to
+       *  sign with `alg: none`, so we assemble the segments directly. */
+      const b64url = (value: object): string =>
+        Buffer.from(JSON.stringify(value)).toString('base64url');
+
+      it('rejects an unsigned alg:none token (algorithm-confusion bypass)', async () => {
+        const header = b64url({ alg: 'none', typ: 'JWT' });
+        const payload = b64url({
+          cid: 'attacker',
+          scp: ['tool:admin'],
+          exp: Math.floor(Date.now() / 1000) + 3600,
+        });
+        const noneToken = `${header}.${payload}.`;
+
+        await expect(strategy.verify(noneToken)).rejects.toThrow(McpError);
+      });
+
+      it('rejects an alg:none token carrying a forged signature segment', async () => {
+        const header = b64url({ alg: 'none', typ: 'JWT' });
+        const payload = b64url({
+          cid: 'attacker',
+          scp: ['tool:admin'],
+          exp: Math.floor(Date.now() / 1000) + 3600,
+        });
+        const forged = `${header}.${payload}.Zm9yZ2Vk`;
+
+        await expect(strategy.verify(forged)).rejects.toThrow(McpError);
+      });
+
+      it('rejects a token whose header uses a non-allowlisted algorithm even when signed with the real secret', async () => {
+        // HS384 is a valid MAC over the same key, but the strategy pins HS256 —
+        // an attacker must not be able to downgrade/substitute the algorithm.
+        const token = await new SignJWT({ cid: 'test-client', scp: ['tool:read'] })
+          .setProtectedHeader({ alg: 'HS384' })
+          .setExpirationTime('1h')
+          .sign(testSecretBytes);
+
+        await expect(strategy.verify(token)).rejects.toThrow(McpError);
+      });
+
+      it('rejects a token that is not yet valid (nbf in the future)', async () => {
+        const token = await new SignJWT({ cid: 'test-client', scp: ['tool:read'] })
+          .setProtectedHeader({ alg: 'HS256' })
+          .setNotBefore('1h')
+          .setExpirationTime('2h')
+          .sign(testSecretBytes);
+
+        await expect(strategy.verify(token)).rejects.toThrow(McpError);
+      });
+    });
   });
 });

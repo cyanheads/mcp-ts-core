@@ -477,5 +477,26 @@ describe('OAuth Strategy', () => {
         }),
       );
     });
+
+    it('restricts verification to asymmetric algorithms (blocks HS256 JWKS confusion)', async () => {
+      // The JWKS holds public keys. Permitting an HMAC algorithm would let an
+      // attacker sign a token with the public key material as the shared secret.
+      // The allowlist must contain only asymmetric algorithms — never HS*.
+      mockJwtVerify.mockResolvedValue({
+        payload: { client_id: 'test-client', scope: 'read' },
+        protectedHeader: { alg: 'RS256' },
+        key: {} as any,
+      } as any);
+
+      await strategy.verify('test-token');
+
+      expect(mockJwtVerify).toHaveBeenCalledWith(
+        'test-token',
+        mockJWKS,
+        expect.objectContaining({ algorithms: ['RS256', 'ES256', 'PS256'] }),
+      );
+      const options = mockJwtVerify.mock.calls[0]?.[2] as { algorithms: string[] };
+      expect(options.algorithms.some((alg) => alg.startsWith('HS'))).toBe(false);
+    });
   });
 });

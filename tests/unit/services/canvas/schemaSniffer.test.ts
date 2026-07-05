@@ -204,3 +204,66 @@ describe('sniffSchema · always-nullable inference (issue #221)', () => {
     }
   });
 });
+
+describe('classify() · undefined is equivalent to null', () => {
+  it('treats undefined the same as null when mixed with a populated column', () => {
+    const { schema } = sniffSchema([{ x: 'a' }, { x: undefined }], 100);
+    expect(schema[0]).toMatchObject({ type: 'VARCHAR', nullable: true });
+  });
+
+  it('falls back to VARCHAR when only undefined values are observed', () => {
+    const { schema } = sniffSchema([{ x: undefined }, { x: undefined }], 100);
+    expect(schema[0]).toMatchObject({ type: 'VARCHAR', nullable: true });
+  });
+});
+
+describe('sniffSchema · pure-bigint column', () => {
+  it('infers BIGINT for a column observed only as bigint values', () => {
+    const { schema } = sniffSchema([{ id: 1n }, { id: 2n }], 100);
+    expect(schema[0]).toMatchObject({ name: 'id', type: 'BIGINT' });
+  });
+});
+
+describe('classify() · object-tagged values beyond plain objects', () => {
+  it('classifies arrays as object → JSON column type', () => {
+    const { schema } = sniffSchema([{ tags: [1, 2] }, { tags: [3] }], 100);
+    expect(schema[0]).toMatchObject({ name: 'tags', type: 'JSON' });
+  });
+
+  it('classifies Date instances as object → JSON column type', () => {
+    const { schema } = sniffSchema([{ when: new Date() }, { when: new Date() }], 100);
+    expect(schema[0]).toMatchObject({ name: 'when', type: 'JSON' });
+  });
+});
+
+describe('unionToColumnType · non-numeric mixed unions', () => {
+  it('falls back to VARCHAR when boolean mixes with string', () => {
+    const { schema } = sniffSchema([{ x: true }, { x: 'yes' }], 100);
+    expect(schema[0]?.type).toBe('VARCHAR');
+  });
+
+  it('falls back to VARCHAR when object mixes with string (string beats object → JSON)', () => {
+    const { schema } = sniffSchema([{ x: { a: 1 } }, { x: 'plain' }], 100);
+    expect(schema[0]?.type).toBe('VARCHAR');
+  });
+
+  it('widens to JSON when object mixes with boolean (non-numeric, no string present)', () => {
+    const { schema } = sniffSchema([{ x: { a: 1 } }, { x: true }], 100);
+    expect(schema[0]?.type).toBe('JSON');
+  });
+});
+
+describe('inferSchemaFromRows · rows with no observed keys', () => {
+  it('returns an empty schema for a single empty-object row (rows.length !== 0, but no columns)', () => {
+    expect(inferSchemaFromRows([{}])).toEqual([]);
+  });
+});
+
+describe('sniffSchema · exact sniff-window boundary', () => {
+  it('drains the whole input and reports remaining as done when rows === sniffRowCount exactly', () => {
+    const rows = [{ x: 1 }, { x: 2 }, { x: 3 }];
+    const { sniffedRows, remaining } = sniffSchema(rows, 3);
+    expect(sniffedRows.length).toBe(3);
+    expect(remaining.next().done).toBe(true);
+  });
+});

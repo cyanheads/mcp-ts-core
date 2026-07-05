@@ -7,6 +7,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const {
   mockConfig,
+  mockCreateCanvasService,
   mockCreateMcpServerInstance,
   mockCreateObservableGauge,
   mockCreateStorageProvider,
@@ -89,6 +90,7 @@ const {
   };
 
   const mockResetConfig = vi.fn();
+  const mockCreateCanvasService = vi.fn();
   const mockCreateStorageProvider = vi.fn(() => ({ provider: 'storage-provider' }));
   const mockStorageService = {
     instance: {
@@ -187,6 +189,7 @@ const {
 
   return {
     mockConfig,
+    mockCreateCanvasService,
     mockCreateMcpServerInstance,
     mockCreateObservableGauge,
     mockCreateStorageProvider,
@@ -260,6 +263,10 @@ vi.mock('@/mcp-server/transports/manager.js', () => ({
   TransportManager: MockTransportManager,
 }));
 
+vi.mock('@/services/canvas/core/canvasFactory.js', () => ({
+  createCanvasService: mockCreateCanvasService,
+}));
+
 vi.mock('@/services/llm/providers/openrouter.provider.js', () => ({
   OpenRouterProvider: MockOpenRouterProvider,
 }));
@@ -329,6 +336,7 @@ import { composeServices, createApp } from '@/core/app.js';
 
 describe('core/app', () => {
   let originalEnv: NodeJS.ProcessEnv;
+  let originalIsTTY: boolean;
   let processOnSpy: ReturnType<typeof vi.spyOn>;
   let processRemoveListenerSpy: ReturnType<typeof vi.spyOn>;
 
@@ -354,6 +362,7 @@ describe('core/app', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     originalEnv = { ...process.env };
+    originalIsTTY = process.stdout.isTTY;
     process.env.MCP_SERVER_NAME = undefined;
     process.env.MCP_SERVER_VERSION = undefined;
     process.env.OTEL_SERVICE_NAME = undefined;
@@ -361,6 +370,7 @@ describe('core/app', () => {
     process.env.NO_COLOR = undefined;
     process.env.FORCE_COLOR = undefined;
     process.env.MCP_TRANSPORT_TYPE = 'stdio';
+    process.env.DEBUG = undefined;
 
     mockConfig.environment = 'test';
     mockConfig.logLevel = 'debug';
@@ -372,6 +382,7 @@ describe('core/app', () => {
     mockConfig.storage.providerType = 'in-memory';
     mockConfig.supabase = undefined;
     mockInitializeOpenTelemetry.mockResolvedValue(undefined);
+    mockCreateCanvasService.mockReturnValue(undefined);
 
     processOnSpy = vi.spyOn(process, 'on');
     processRemoveListenerSpy = vi.spyOn(process, 'removeListener');
@@ -381,6 +392,7 @@ describe('core/app', () => {
     processOnSpy.mockRestore();
     processRemoveListenerSpy.mockRestore();
     process.env = originalEnv;
+    process.stdout.isTTY = originalIsTTY;
   });
 
   it('converts ZodError thrown from setup() into a ConfigurationError', async () => {
@@ -732,5 +744,283 @@ describe('core/app', () => {
 
     await handle.shutdown();
     consoleErrorSpy.mockRestore();
+  });
+
+  it('applies only the name override when version is omitted', async () => {
+    await composeServices({ name: 'name-only' });
+
+    expect(mockResetConfig).toHaveBeenCalledTimes(1);
+    expect(process.env.MCP_SERVER_NAME).toBe('name-only');
+    expect(process.env.OTEL_SERVICE_NAME).toBe('name-only');
+    expect(process.env.MCP_SERVER_VERSION).toBeUndefined();
+    expect(process.env.OTEL_SERVICE_VERSION).toBeUndefined();
+  });
+
+  it('applies only the version override when name is omitted', async () => {
+    await composeServices({ version: '3.3.3' });
+
+    expect(mockResetConfig).toHaveBeenCalledTimes(1);
+    expect(process.env.MCP_SERVER_VERSION).toBe('3.3.3');
+    expect(process.env.OTEL_SERVICE_VERSION).toBe('3.3.3');
+    expect(process.env.MCP_SERVER_NAME).toBeUndefined();
+    expect(process.env.OTEL_SERVICE_NAME).toBeUndefined();
+  });
+
+  it('does not overwrite an already-set OTEL_SERVICE_NAME/VERSION when name/version overrides are applied', async () => {
+    process.env.OTEL_SERVICE_NAME = 'preexisting-otel-name';
+    process.env.OTEL_SERVICE_VERSION = 'preexisting-otel-version';
+
+    await composeServices({ name: 'new-name', version: '9.9.9' });
+
+    expect(process.env.MCP_SERVER_NAME).toBe('new-name');
+    expect(process.env.MCP_SERVER_VERSION).toBe('9.9.9');
+    expect(process.env.OTEL_SERVICE_NAME).toBe('preexisting-otel-name');
+    expect(process.env.OTEL_SERVICE_VERSION).toBe('preexisting-otel-version');
+  });
+
+  it('does not call resetConfig or touch env when neither name nor version is provided', async () => {
+    await composeServices({});
+
+    expect(mockResetConfig).not.toHaveBeenCalled();
+    expect(process.env.MCP_SERVER_NAME).toBeUndefined();
+    expect(process.env.MCP_SERVER_VERSION).toBeUndefined();
+  });
+
+  it('throws when supabase serviceRoleKey is present but url is missing', async () => {
+    mockConfig.storage.providerType = 'supabase';
+    mockConfig.supabase = { serviceRoleKey: 'service-role-key', url: undefined };
+
+    await expect(composeServices()).rejects.toThrow(
+      'Supabase URL or service role key is missing for admin client.',
+    );
+  });
+
+  it('throws when supabase url is present but serviceRoleKey is missing', async () => {
+    mockConfig.storage.providerType = 'supabase';
+    mockConfig.supabase = { serviceRoleKey: undefined, url: 'https://example.supabase.co' };
+
+    await expect(composeServices()).rejects.toThrow(
+      'Supabase URL or service role key is missing for admin client.',
+    );
+  });
+
+  it('does not construct an llmProvider when openrouterApiKey is unset', async () => {
+    const composed = await composeServices();
+
+    expect(MockOpenRouterProvider).not.toHaveBeenCalled();
+    expect(composed.coreServices).not.toHaveProperty('llmProvider');
+  });
+
+  it('does not construct speechService when config.speech is undefined', async () => {
+    const composed = await composeServices();
+
+    expect(MockSpeechService).not.toHaveBeenCalled();
+    expect(composed.coreServices).not.toHaveProperty('speechService');
+  });
+
+  it('does not construct speechService when config.speech is set but neither tts nor stt is enabled', async () => {
+    mockConfig.speech = {
+      tts: { enabled: false, provider: 'elevenlabs' },
+      stt: { enabled: false, provider: 'whisper' },
+    };
+
+    const composed = await composeServices();
+
+    expect(MockSpeechService).not.toHaveBeenCalled();
+    expect(composed.coreServices).not.toHaveProperty('speechService');
+  });
+
+  it('constructs speechService with only the tts config when only tts is enabled', async () => {
+    mockConfig.speech = { tts: { enabled: true, provider: 'elevenlabs' } };
+
+    const composed = await composeServices();
+
+    expect(MockSpeechService).toHaveBeenCalledWith(mockConfig.speech.tts, undefined);
+    expect(composed.coreServices.speechService).toBeDefined();
+  });
+
+  it('constructs speechService with only the stt config when only stt is enabled', async () => {
+    mockConfig.speech = { stt: { enabled: true, provider: 'whisper' } };
+
+    const composed = await composeServices();
+
+    expect(MockSpeechService).toHaveBeenCalledWith(undefined, mockConfig.speech.stt);
+    expect(composed.coreServices.speechService).toBeDefined();
+  });
+
+  it('sets advertiseTasks=true when a tool declares task: true', async () => {
+    const composed = await composeServices({
+      tools: [{ name: 'task-tool', task: true }] as never[],
+    });
+
+    await composed.createServer();
+
+    expect(mockCreateMcpServerInstance).toHaveBeenCalledWith(
+      expect.objectContaining({ advertiseTasks: true }),
+    );
+  });
+
+  it('sets advertiseTasks=true when a tool definition has the task-tool shape (taskHandlers present)', async () => {
+    const composed = await composeServices({
+      tools: [{ name: 'handler-tool', taskHandlers: {} }] as never[],
+    });
+
+    await composed.createServer();
+
+    expect(mockCreateMcpServerInstance).toHaveBeenCalledWith(
+      expect.objectContaining({ advertiseTasks: true }),
+    );
+  });
+
+  it('exposes canvas on coreServices when createCanvasService returns an instance', async () => {
+    const canvasInstance = { kind: 'canvas', shutdown: vi.fn(async () => {}) };
+    mockCreateCanvasService.mockReturnValueOnce(canvasInstance);
+
+    const composed = await composeServices();
+
+    expect(mockCreateCanvasService).toHaveBeenCalledWith(mockConfig);
+    expect(composed.coreServices.canvas).toBe(canvasInstance);
+  });
+
+  it('omits canvas from coreServices when createCanvasService returns undefined', async () => {
+    const composed = await composeServices();
+
+    expect(composed.coreServices).not.toHaveProperty('canvas');
+  });
+
+  it('calls canvas.shutdown during graceful app shutdown when canvas is present', async () => {
+    const canvasShutdown = vi.fn(async () => {});
+    mockCreateCanvasService.mockReturnValueOnce({ kind: 'canvas', shutdown: canvasShutdown });
+
+    const handle = await createApp();
+    await handle.shutdown('SIGTERM');
+
+    expect(canvasShutdown).toHaveBeenCalledWith(
+      expect.objectContaining({ operation: 'ServerShutdown', triggerEvent: 'SIGTERM' }),
+    );
+    expect(mockLogger.info).toHaveBeenCalledWith(
+      'Graceful shutdown completed successfully.',
+      expect.objectContaining({ operation: 'ServerShutdown' }),
+    );
+  });
+
+  it('logs a warning and completes shutdown when canvas.shutdown rejects', async () => {
+    const canvasShutdown = vi.fn(async () => {
+      throw new Error('canvas shutdown boom');
+    });
+    mockCreateCanvasService.mockReturnValueOnce({ kind: 'canvas', shutdown: canvasShutdown });
+
+    const handle = await createApp();
+    await handle.shutdown('SIGTERM');
+
+    expect(mockLogger.warning).toHaveBeenCalledWith(
+      'Canvas shutdown raised — continuing.',
+      expect.objectContaining({ error: 'canvas shutdown boom' }),
+    );
+    expect(mockLogger.info).toHaveBeenCalledWith(
+      'Graceful shutdown completed successfully.',
+      expect.objectContaining({ operation: 'ServerShutdown' }),
+    );
+    expect(mockLogger.error).not.toHaveBeenCalledWith(
+      'Critical error during shutdown process.',
+      expect.anything(),
+      expect.anything(),
+    );
+  });
+
+  it('does not suppress colors when transport is http and stdout is a TTY', async () => {
+    process.env.MCP_TRANSPORT_TYPE = 'http';
+    mockConfig.mcpTransportType = 'http';
+    process.stdout.isTTY = true;
+
+    const handle = await createApp();
+
+    expect(process.env.NO_COLOR).toBeUndefined();
+    expect(process.env.FORCE_COLOR).toBeUndefined();
+
+    await handle.shutdown();
+  });
+
+  it('suppresses colors when transport is http and stdout is not a TTY', async () => {
+    process.env.MCP_TRANSPORT_TYPE = 'http';
+    mockConfig.mcpTransportType = 'http';
+    process.stdout.isTTY = false;
+
+    const handle = await createApp();
+
+    expect(process.env.NO_COLOR).toBe('1');
+    expect(process.env.FORCE_COLOR).toBe('0');
+
+    await handle.shutdown();
+  });
+
+  it('prints a startup config error banner and exits when composeServices throws a ConfigurationError (DEBUG unset)', async () => {
+    const processExitSpy = vi
+      .spyOn(process, 'exit')
+      .mockImplementation(((_: number) => undefined as never) as typeof process.exit);
+    const stderrWriteSpy = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+
+    const { z } = await import('zod');
+    const schema = z.object({ apiKey: z.string() });
+    const setup = () => {
+      schema.parse({ apiKey: undefined });
+    };
+
+    const { McpError } = await import('@/types-global/errors.js');
+    await expect(createApp({ setup })).rejects.toBeInstanceOf(McpError);
+
+    expect(processExitSpy).toHaveBeenCalledWith(1);
+    const written = stderrWriteSpy.mock.calls.map((call) => String(call[0])).join('');
+    expect(written).toContain('Configuration error — server failed to start');
+    expect(written).toContain('Server setup failed');
+    expect(written).toContain('Set DEBUG=true for the full stack trace.');
+    expect(written).not.toContain('Data:');
+
+    stderrWriteSpy.mockRestore();
+    processExitSpy.mockRestore();
+  });
+
+  it('prints config error data and stack trace to stderr when DEBUG=true', async () => {
+    process.env.DEBUG = 'true';
+    const processExitSpy = vi
+      .spyOn(process, 'exit')
+      .mockImplementation(((_: number) => undefined as never) as typeof process.exit);
+    const stderrWriteSpy = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+
+    const { z } = await import('zod');
+    const schema = z.object({ apiKey: z.string() });
+    const setup = () => {
+      schema.parse({ apiKey: undefined });
+    };
+
+    const { McpError } = await import('@/types-global/errors.js');
+    await expect(createApp({ setup })).rejects.toBeInstanceOf(McpError);
+
+    const written = stderrWriteSpy.mock.calls.map((call) => String(call[0])).join('');
+    expect(written).not.toContain('Set DEBUG=true for the full stack trace.');
+    expect(written).toContain('Data:');
+    expect(written).toContain('issues');
+
+    stderrWriteSpy.mockRestore();
+    processExitSpy.mockRestore();
+  });
+
+  it('does not print a startup banner or exit when createApp fails with a non-configuration error', async () => {
+    const original = new Error('database unreachable');
+    const setup = () => {
+      throw original;
+    };
+    const stderrWriteSpy = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+    const processExitSpy = vi
+      .spyOn(process, 'exit')
+      .mockImplementation(((_: number) => undefined as never) as typeof process.exit);
+
+    await expect(createApp({ setup })).rejects.toBe(original);
+
+    expect(processExitSpy).not.toHaveBeenCalled();
+    expect(stderrWriteSpy).not.toHaveBeenCalled();
+
+    stderrWriteSpy.mockRestore();
+    processExitSpy.mockRestore();
   });
 });

@@ -494,3 +494,101 @@ describe('spillover · previewChars validation', () => {
     await shutdown();
   });
 });
+
+// ---------------------------------------------------------------------
+// safeJsonLength failure handling — unstringifiable rows must not crash the
+// drain; they're treated as maximally oversized so they force overflow.
+// ---------------------------------------------------------------------
+
+describe('spillover · safeJsonLength failure handling', () => {
+  it('treats a row containing a BigInt as maximally oversized instead of crashing', async () => {
+    const { canvas, harness, shutdown } = await freshCanvas();
+    const source = [{ a: 1 }, { a: 2n }, { a: 3 }];
+    const result = await spillover({ canvas, source, previewChars: 1_000 });
+    expect(result.spilled).toBe(true);
+    if (!result.spilled) throw new Error('unreachable');
+    // The BigInt row's JSON.stringify throws (caught → treated as oversized),
+    // so it becomes the overflow sentinel — everything from that point on
+    // (itself plus whatever follows) lands on the canvas table.
+    expect(harness.capture.last?.rows).toEqual(source);
+    await shutdown();
+  });
+
+  it('treats a row with a circular reference as maximally oversized instead of crashing', async () => {
+    const { canvas, harness, shutdown } = await freshCanvas();
+    const circular: Row = { a: 1 };
+    circular.self = circular;
+    const result = await spillover({ canvas, source: [circular], previewChars: 1_000 });
+    expect(result.spilled).toBe(true);
+    if (!result.spilled) throw new Error('unreachable');
+    expect(result.previewRows).toEqual([]);
+    expect(harness.capture.last?.rows).toEqual([circular]);
+    await shutdown();
+  });
+});
+
+// ---------------------------------------------------------------------
+// Abort during the spill phase (post-overflow) — distinct from the
+// preview-drain abort path, which never reaches registerTable at all.
+// ---------------------------------------------------------------------
+
+describe('spillover · abort during the spill phase', () => {
+  it('reaches registerTable, then drops the partial table, when the signal aborts mid-drain', async () => {
+    const { canvas, harness, shutdown } = await freshCanvas();
+    const ctrl = new AbortController();
+    async function* gen(): AsyncIterable<Row> {
+      for (let i = 0; i < 50; i++) {
+        if (i === 4) ctrl.abort();
+        yield { i };
+      }
+    }
+    await expect(
+      spillover({
+        canvas,
+        source: gen(),
+        previewChars: 10,
+        signal: ctrl.signal,
+        tableName: 'abort_mid_spill',
+      }),
+    ).rejects.toThrow();
+    // Unlike a preview-phase abort, the overflow was detected early (small
+    // previewChars) so registerTable had already begun draining the merged
+    // rows before the abort was observed mid-stream.
+    expect(harness.provider.registerTable).toHaveBeenCalled();
+    expect(harness.drops).toContain('abort_mid_spill');
+    await shutdown();
+  });
+});
+
+// ---------------------------------------------------------------------
+// caps.maxRows exact-boundary behavior — off-by-one correctness for the
+// truncated flag.
+// ---------------------------------------------------------------------
+
+describe('spillover · caps.maxRows exact-boundary behavior', () => {
+  it('does not report truncated when the source has exactly maxRows total rows', async () => {
+    const { canvas, harness, shutdown } = await freshCanvas();
+    const source = Array.from({ length: 5 }, (_, i) => ({ i }));
+    const result = await spillover({ canvas, source, previewChars: 10, caps: { maxRows: 5 } });
+    expect(result.spilled).toBe(true);
+    if (!result.spilled) throw new Error('unreachable');
+    expect(result.truncated).toBe(false);
+    expect(harness.capture.last?.rows).toHaveLength(5);
+    await shutdown();
+  });
+
+  it('truncates and never registers the overflow sentinel when the cap lands exactly at the buffered/sentinel boundary', async () => {
+    const { canvas, harness, shutdown } = await freshCanvas();
+    // previewChars=14 fits exactly 2 rows of `{"i":N}` (7 chars each) before
+    // the 3rd row overflows. caps.maxRows=2 means the cap is reached the
+    // instant the buffered rows are exhausted — before the sentinel is ever
+    // yielded into the merged stream.
+    const source = Array.from({ length: 10 }, (_, i) => ({ i }));
+    const result = await spillover({ canvas, source, previewChars: 14, caps: { maxRows: 2 } });
+    expect(result.spilled).toBe(true);
+    if (!result.spilled) throw new Error('unreachable');
+    expect(result.truncated).toBe(true);
+    expect(harness.capture.last?.rows).toEqual([{ i: 0 }, { i: 1 }]);
+    await shutdown();
+  });
+});

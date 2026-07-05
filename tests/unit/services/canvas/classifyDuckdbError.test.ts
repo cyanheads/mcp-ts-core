@@ -87,4 +87,34 @@ describe('classifyDuckdbError', () => {
     const original = notFound('syntax detail: table gone', { reason: 'missing_table' });
     expect(classifyDuckdbError(original)).toBe(original);
   });
+
+  it('matches "read only" with a plain space separator, not just a hyphen', () => {
+    // The regex uses `.?` (any single char, optional) between "read" and
+    // "only" — a space must match just as well as a hyphen or no separator.
+    expect((classifyDuckdbError(new Error('database is read only')) as McpError).data?.reason).toBe(
+      'sql_read_only',
+    );
+  });
+
+  it('classifies a thrown null as DatabaseError with the stringified value', () => {
+    const result = classifyDuckdbError(null);
+    expect(result).toBeInstanceOf(McpError);
+    const mcp = result as McpError;
+    expect(mcp.code).toBe(JsonRpcErrorCode.DatabaseError);
+    expect(mcp.message).toMatch(/non-Error value/);
+    expect(mcp.data?.value).toBe('null');
+  });
+
+  it('classifies a thrown plain object as DatabaseError with the stringified value', () => {
+    const result = classifyDuckdbError({ code: 42, detail: 'x' });
+    expect(result).toBeInstanceOf(McpError);
+    const mcp = result as McpError;
+    expect(mcp.code).toBe(JsonRpcErrorCode.DatabaseError);
+    expect(mcp.data?.value).toBe('[object Object]');
+  });
+
+  it('classifies a thrown number as DatabaseError with the stringified value', () => {
+    const result = classifyDuckdbError(42);
+    expect((result as McpError).data?.value).toBe('42');
+  });
 });

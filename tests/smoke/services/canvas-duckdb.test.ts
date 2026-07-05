@@ -803,4 +803,147 @@ describeIf('canvas · DuckDB round trip', () => {
       await testRegistry.shutdown(ctx);
     }
   });
+
+  it('healthCheck() confirms live DuckDB connectivity', async () => {
+    await expect(provider.healthCheck()).resolves.toBe(true);
+  });
+
+  // dataTypeToColumnType round-trip — every ColumnType tag maps to and from
+  // its DuckDB information_schema.columns.data_type string correctly. This is
+  // the describe()/describeOne() column-typing path, otherwise untested.
+  it('describe() round-trips every ColumnType through DuckDB information_schema types', async () => {
+    const instance = await canvas.acquire(undefined, ctx);
+    await instance.registerTable(
+      'typed_columns',
+      [
+        {
+          a: 'x',
+          b: 1,
+          c: 2n,
+          d: 1.5,
+          e: true,
+          f: new Date('2026-01-01T00:00:00.000Z'),
+          g: '2026-01-01',
+          h: { k: 'v' },
+          i: new Uint8Array([1, 2]),
+        },
+      ],
+      {
+        schema: [
+          { name: 'a', type: 'VARCHAR' },
+          { name: 'b', type: 'INTEGER' },
+          { name: 'c', type: 'BIGINT' },
+          { name: 'd', type: 'DOUBLE' },
+          { name: 'e', type: 'BOOLEAN' },
+          { name: 'f', type: 'TIMESTAMP' },
+          { name: 'g', type: 'DATE' },
+          { name: 'h', type: 'JSON' },
+          { name: 'i', type: 'BLOB' },
+        ],
+      },
+    );
+
+    const [info] = await instance.describe({ tableName: 'typed_columns' });
+    const byName = new Map(info!.columns.map((c) => [c.name, c.type]));
+    expect(byName.get('a')).toBe('VARCHAR');
+    expect(byName.get('b')).toBe('INTEGER');
+    expect(byName.get('c')).toBe('BIGINT');
+    expect(byName.get('d')).toBe('DOUBLE');
+    expect(byName.get('e')).toBe('BOOLEAN');
+    expect(byName.get('f')).toBe('TIMESTAMP');
+    expect(byName.get('g')).toBe('DATE');
+    expect(byName.get('h')).toBe('JSON');
+    expect(byName.get('i')).toBe('BLOB');
+  });
+
+  it('describe() reports nullable:false for a NOT NULL column, true otherwise', async () => {
+    const instance = await canvas.acquire(undefined, ctx);
+    await instance.registerTable('nn_table', [{ id: 1, label: 'a' }], {
+      schema: [
+        { name: 'id', type: 'INTEGER', nullable: false },
+        { name: 'label', type: 'VARCHAR' },
+      ],
+    });
+    const [info] = await instance.describe({ tableName: 'nn_table' });
+    const idCol = info!.columns.find((c) => c.name === 'id');
+    const labelCol = info!.columns.find((c) => c.name === 'label');
+    expect(idCol?.nullable).toBe(false);
+    expect(labelCol?.nullable).toBe(true);
+  });
+
+  // importFrom's sourceKind resolution — COPY works directly against a VIEW
+  // name, not just a base table. Every existing importFrom test copies a
+  // table; this exercises the view branch of lookupKind().
+  it('importFrom copies from a registered VIEW, not just a base table', async () => {
+    const source = await canvas.acquire(undefined, ctx);
+    const target = await canvas.acquire(undefined, ctx);
+    await source.registerTable('view_source_base', [{ id: 1 }, { id: 2 }, { id: 3 }]);
+    await source.registerView('view_source', 'SELECT id FROM view_source_base WHERE id > 1');
+
+    const imported = await target.importFrom(source.canvasId, 'view_source', {
+      asName: 'view_copy',
+    });
+    expect(imported.tableName).toBe('view_copy');
+    expect(imported.rowCount).toBe(2);
+
+    const result = await target.query('SELECT id FROM view_copy ORDER BY id');
+    expect(result.rows).toEqual([{ id: '2' }, { id: '3' }]);
+  });
+
+  // targetExisting === 'view' clash — distinct from the table-vs-table
+  // idempotent-overwrite path already covered above.
+  it('importFrom rejects when the destination name collides with an existing view', async () => {
+    const source = await canvas.acquire(undefined, ctx);
+    const target = await canvas.acquire(undefined, ctx);
+    await source.registerTable('import_src', [{ id: 1 }]);
+    await target.registerTable('base_for_view', [{ id: 1 }]);
+    await target.registerView('taken_name', 'SELECT id FROM base_for_view');
+
+    let caught: unknown;
+    try {
+      await target.importFrom(source.canvasId, 'import_src', { asName: 'taken_name' });
+    } catch (err) {
+      caught = err;
+    }
+    expect(caught).toBeInstanceOf(McpError);
+    const mcpErr = caught as McpError;
+    expect(mcpErr.message).toMatch(/already contains a view/i);
+    expect((mcpErr.data as { reason?: string })?.reason).toBe('import_view_clash');
+  });
+
+  // isSelectShaped's `with` branch — a CTE-prefixed query with a bad column
+  // must classify as invalid_sql (not non_select_statement), same as the
+  // plain-`select` case already covered by issue #236 above.
+  it('issue #236 — a malformed column inside a WITH/CTE query also yields invalid_sql', async () => {
+    const instance = await canvas.acquire(undefined, ctx);
+    await instance.registerTable('cte_source', [{ id: 1 }]);
+    let caught: unknown;
+    try {
+      await instance.query(
+        'WITH cte AS (SELECT id FROM cte_source) SELECT nonexistent_col FROM cte',
+      );
+    } catch (err) {
+      caught = err;
+    }
+    expect(caught).toBeInstanceOf(McpError);
+    const mcpErr = caught as McpError;
+    expect(mcpErr.code).toBe(-32007);
+    const data = mcpErr.data as { reason?: string; binderMessage?: string };
+    expect(data.reason).toBe('invalid_sql');
+    expect(data.binderMessage).toContain('nonexistent_col');
+  });
+
+  // preview narrows the returned rows independently of rowLimit-driven
+  // truncation — `truncated` is reserved for hitting the rowLimit cap, not
+  // for a caller-requested smaller preview slice.
+  it('preview narrows returned rows without setting truncated (distinct from rowLimit truncation)', async () => {
+    const instance = await canvas.acquire(undefined, ctx);
+    const rows = Array.from({ length: 10 }, (_, i) => ({ x: i }));
+    await instance.registerTable('preview_table', rows);
+
+    const result = await instance.query('SELECT x FROM preview_table ORDER BY x', { preview: 3 });
+    expect(result.rows.length).toBe(3);
+    expect(result.rowCount).toBe(10);
+    expect(result.truncated).toBeUndefined();
+  });
 });

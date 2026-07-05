@@ -31,6 +31,15 @@ describe('R2Provider', () => {
     });
   });
 
+  describe('constructor', () => {
+    it('should throw McpError when bucket is not provided', () => {
+      expect(() => new R2Provider(null as any)).toThrow(McpError);
+      expect(() => new R2Provider(null as any)).toThrow(
+        /R2Provider requires a valid R2Bucket instance/,
+      );
+    });
+  });
+
   describe('get', () => {
     it('should return null if object not found', async () => {
       mockBucket.get.mockResolvedValue(null);
@@ -76,6 +85,23 @@ describe('R2Provider', () => {
       expect(result).toBeNull();
       expect(mockBucket.delete).toHaveBeenCalledWith('tenant-1:key-1');
     });
+
+    it('should return a legacy value stored without an envelope', async () => {
+      const mockR2Object = {
+        text: async () => JSON.stringify({ legacy: true }),
+      };
+      mockBucket.get.mockResolvedValue(mockR2Object);
+
+      const result = await r2Provider.get('tenant-1', 'key-1', context);
+
+      expect(result).toEqual({ legacy: true });
+    });
+
+    it('should propagate errors from the underlying get call', async () => {
+      mockBucket.get.mockRejectedValue(new Error('R2 unavailable'));
+
+      await expect(r2Provider.get('tenant-1', 'key-1', context)).rejects.toThrow(McpError);
+    });
   });
 
   describe('set', () => {
@@ -109,6 +135,14 @@ describe('R2Provider', () => {
       expect(envelope.__mcp.expiresAt).toBeGreaterThanOrEqual(now + ttl * 1000);
       // Allow for a small delay in execution
       expect(envelope.__mcp.expiresAt).toBeLessThan(now + ttl * 1000 + 100);
+    });
+
+    it('should propagate errors from the underlying put call', async () => {
+      mockBucket.put.mockRejectedValue(new Error('R2 unavailable'));
+
+      await expect(r2Provider.set('tenant-1', 'key-1', { data: 'test' }, context)).rejects.toThrow(
+        McpError,
+      );
     });
   });
 
@@ -179,6 +213,12 @@ describe('R2Provider', () => {
       // truncated response → cursor present even though fewer than limit keys came back
       expect(result.nextCursor).toBe(encodeCursor('key-1', 'tenant-1'));
     });
+
+    it('should propagate errors from the underlying list call', async () => {
+      mockBucket.list.mockRejectedValue(new Error('R2 unavailable'));
+
+      await expect(r2Provider.list('tenant-1', 'key', context)).rejects.toThrow(McpError);
+    });
   });
 
   describe('getMany', () => {
@@ -196,6 +236,11 @@ describe('R2Provider', () => {
       expect(result.get('key-3')).toEqual({ payload: 3 });
       expect(result.has('key-2')).toBe(false);
       expect(spy).toHaveBeenCalledTimes(3);
+    });
+
+    it('should return an empty map when no keys are requested', async () => {
+      const result = await r2Provider.getMany('tenant-1', [], context);
+      expect(result.size).toBe(0);
     });
   });
 
@@ -216,6 +261,14 @@ describe('R2Provider', () => {
       expect(spy).toHaveBeenNthCalledWith(2, 'tenant-1', 'key-2', { data: 2 }, context, {
         ttl: 10,
       });
+    });
+
+    it('should be a no-op for an empty entries map', async () => {
+      const spy = vi.spyOn(r2Provider, 'set');
+
+      await r2Provider.setMany('tenant-1', new Map(), context);
+
+      expect(spy).not.toHaveBeenCalled();
     });
   });
 

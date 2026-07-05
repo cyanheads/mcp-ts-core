@@ -14,6 +14,7 @@ import {
   assertNoSystemCatalogs,
   assertPlanReadOnly,
   assertReadOnlyQuery,
+  assertSelectOnly,
   assertValidIdentifier,
   collectDisallowedOperators,
   collectPlanViolations,
@@ -570,5 +571,197 @@ describe('sqlGate · exported allowlists', () => {
     expect(ALLOWED_PLAN_OPERATORS.has('INOUT_FUNCTION')).toBe(false);
     expect(ALLOWED_PLAN_OPERATORS.has('CREATE_TABLE_AS')).toBe(false);
     expect(ALLOWED_PLAN_OPERATORS.has('CREATE_VIEW')).toBe(false);
+  });
+});
+
+describe('sqlGate · readOperatorName key fallback (name/operator_type/operator/type)', () => {
+  it('reads operator identity from the `operator` key', () => {
+    const plan = { operator: 'PROJECTION', children: [{ operator: 'SEQ_SCAN' }] };
+    expect(() => assertPlanReadOnly(plan)).not.toThrow();
+  });
+
+  it('reads operator identity from the `type` key', () => {
+    const plan = { type: 'PROJECTION', children: [{ type: 'SEQ_SCAN' }] };
+    expect(() => assertPlanReadOnly(plan)).not.toThrow();
+  });
+
+  it('rejects a disallowed operator reported only via the `operator` key', () => {
+    const plan = { operator: 'PROJECTION', children: [{ operator: 'INSERT' }] };
+    expect(() => assertPlanReadOnly(plan)).toThrow(/disallowed operators/);
+  });
+
+  it('rejects a disallowed operator reported only via the `type` key', () => {
+    const plan = { type: 'PROJECTION', children: [{ type: 'COPY_TO_FILE' }] };
+    expect(() => assertPlanReadOnly(plan)).toThrow(/disallowed operators/);
+  });
+
+  it('skips an empty-string `name` and falls through to `operator_type`', () => {
+    const plan = {
+      name: '',
+      operator_type: 'PROJECTION',
+      children: [{ name: '', operator_type: 'SEQ_SCAN' }],
+    };
+    expect(() => assertPlanReadOnly(plan)).not.toThrow();
+  });
+});
+
+describe('sqlGate · collectPlanViolations multi-function detection', () => {
+  it('collects distinct denied functions surfaced under different metadata keys', () => {
+    const plan = {
+      name: 'PROJECTION',
+      children: [
+        { name: 'SEQ_SCAN', function: 'read_parquet' },
+        { name: 'SEQ_SCAN', extra_info: 'Function: read_json\nFiles: [/x]' },
+      ],
+    };
+    const result = collectPlanViolations(plan);
+    expect([...result.deniedFunctions].sort()).toEqual(['read_json', 'read_parquet']);
+    expect(result.offending.size).toBe(0); // SEQ_SCAN itself is allowlisted
+  });
+
+  it('dedupes the same denied function appearing more than once', () => {
+    const plan = {
+      name: 'PROJECTION',
+      children: [
+        { name: 'SEQ_SCAN', function: 'read_parquet' },
+        { name: 'SEQ_SCAN', function_name: 'read_parquet' },
+      ],
+    };
+    const result = collectPlanViolations(plan);
+    expect([...result.deniedFunctions]).toEqual(['read_parquet']);
+  });
+
+  it('reports multiple denied functions sorted alphabetically on the thrown error', () => {
+    const plan = {
+      name: 'SEQ_SCAN',
+      extra_info: 'Function: read_parquet',
+      children: [{ name: 'SEQ_SCAN', function: 'read_json' }],
+    };
+    let caught: unknown;
+    try {
+      assertPlanReadOnly(plan);
+    } catch (err) {
+      caught = err;
+    }
+    const data = (caught as McpError).data as { functions: string[] };
+    expect(data.functions).toEqual(['read_json', 'read_parquet']);
+  });
+});
+
+describe('sqlGate · FUNCTION_METADATA_KEYS coverage (table_function, source)', () => {
+  it('rejects a denied function named in the `table_function` field', () => {
+    const plan = { name: 'SEQ_SCAN', table_function: 'read_csv' };
+    let caught: unknown;
+    try {
+      assertPlanReadOnly(plan);
+    } catch (err) {
+      caught = err;
+    }
+    expect(caught).toBeInstanceOf(McpError);
+    expect((caught as McpError).data?.functions).toContain('read_csv');
+  });
+
+  it('rejects a denied function named in the `source` field', () => {
+    const plan = { name: 'SEQ_SCAN', source: 'read_ndjson' };
+    let caught: unknown;
+    try {
+      assertPlanReadOnly(plan);
+    } catch (err) {
+      caught = err;
+    }
+    expect(caught).toBeInstanceOf(McpError);
+    expect((caught as McpError).data?.functions).toContain('read_ndjson');
+  });
+
+  it('tolerates non-string metadata field values without crashing', () => {
+    const plan = {
+      name: 'SEQ_SCAN',
+      extra_info: 12345,
+      function: null,
+      children: [{ name: 'PROJECTION' }],
+    };
+    expect(() => collectPlanViolations(plan)).not.toThrow();
+  });
+});
+
+describe('sqlGate · assertNoSystemCatalogs case/whitespace tolerance', () => {
+  it('rejects uppercase INFORMATION_SCHEMA', () => {
+    expect(() => assertNoSystemCatalogs('SELECT * FROM INFORMATION_SCHEMA.TABLES')).toThrow(
+      /system catalog/i,
+    );
+  });
+
+  it('rejects mixed-case duckdb_tables() with whitespace before the paren', () => {
+    expect(() => assertNoSystemCatalogs('SELECT * FROM DuckDB_Tables ()')).toThrow(
+      /system catalog/i,
+    );
+  });
+});
+
+describe('sqlGate · assertReadOnlyQuery tolerates degenerate planJson', () => {
+  it('does not throw for a null planJson (no operators to violate)', () => {
+    expect(() =>
+      assertReadOnlyQuery({ statementCount: 1, statementType: 'SELECT', planJson: null }),
+    ).not.toThrow();
+  });
+
+  it('does not throw for a scalar (non-object) planJson', () => {
+    expect(() =>
+      assertReadOnlyQuery({ statementCount: 1, statementType: 'SELECT', planJson: 'not-a-plan' }),
+    ).not.toThrow();
+  });
+});
+
+describe('sqlGate · layer ordering (multi-statement / statement-type beat the plan-walk)', () => {
+  it('rejects on the multi-statement layer even when the plan would also fail', () => {
+    const badPlan = { name: 'INSERT' };
+    expect(() =>
+      assertReadOnlyQuery({ statementCount: 2, statementType: 'SELECT', planJson: badPlan }),
+    ).toThrow(/exactly one SQL statement/i);
+  });
+
+  it('rejects on the statement-type layer even when the plan would also fail', () => {
+    const badPlan = { name: 'INSERT' };
+    expect(() =>
+      assertReadOnlyQuery({ statementCount: 1, statementType: 'INSERT', planJson: badPlan }),
+    ).toThrow(/Canvas query must be SELECT/);
+  });
+});
+
+describe('sqlGate · assertValidIdentifier defensive runtime-type checks', () => {
+  it('rejects non-string values at runtime, bypassing TS static types', () => {
+    expect(() => assertValidIdentifier(undefined as unknown as string, 'table')).toThrow(
+      /non-empty string/,
+    );
+    expect(() => assertValidIdentifier(123 as unknown as string, 'column')).toThrow(
+      /non-empty string/,
+    );
+  });
+});
+
+describe('sqlGate · quoteIdentifier with multiple embedded quotes', () => {
+  it('escapes every embedded quote, not just the first', () => {
+    expect(quoteIdentifier('a"b"c')).toBe('"a""b""c"');
+  });
+});
+
+describe('sqlGate · statement-type matching is exact-case', () => {
+  it('rejects lowercase "select" — only the exact uppercase form is allowed', () => {
+    expect(() => assertSelectOnly({ statementCount: 1, statementType: 'select' })).toThrow(
+      /Canvas query must be SELECT/,
+    );
+  });
+});
+
+describe('sqlGate · assertNoDeniedFunctions reports the first match by position', () => {
+  it('reports the first denied function when the SQL references two', () => {
+    let caught: unknown;
+    try {
+      assertNoDeniedFunctions("SELECT * FROM read_csv('/a') JOIN read_json('/b') ON true");
+    } catch (err) {
+      caught = err;
+    }
+    const data = (caught as McpError).data as { function: string };
+    expect(data.function).toBe('read_csv');
   });
 });

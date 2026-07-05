@@ -328,5 +328,45 @@ describe('Sanitization Utility', () => {
       const result = sanitization.sanitizeForLogging({ work: () => 'noop' });
       expect(result).toBe('[Log Sanitization Failed]');
     });
+
+    it('strips the style attribute to prevent CSS injection', async () => {
+      // style is deliberately excluded from the default allowlist: sanitize-html
+      // does not sanitize CSS values, so allowing it enables data exfiltration
+      // via background:url() and UI-redress via positioning.
+      const sanitized = await sanitization.sanitizeHtml(
+        '<p style="position:absolute;background:url(https://evil.example/x)" class="ok">hi</p>',
+      );
+      expect(sanitized).not.toContain('style');
+      expect(sanitized).toContain('hi');
+      expect(sanitized).toContain('class="ok"');
+    });
+
+    it('strips a javascript: href from an anchor (XSS)', async () => {
+      const sanitized = await sanitization.sanitizeHtml('<a href="javascript:alert(1)">click</a>');
+      expect(sanitized.toLowerCase()).not.toContain('javascript:');
+      expect(sanitized).toContain('click');
+    });
+
+    it('adds rel="noopener noreferrer" to anchors (reverse-tabnabbing defense)', async () => {
+      const sanitized = await sanitization.sanitizeHtml(
+        '<a href="https://example.com" target="_blank">go</a>',
+      );
+      expect(sanitized).toContain('rel="noopener noreferrer"');
+      expect(sanitized).toContain('href="https://example.com"');
+    });
+
+    it('redacts authorization and cookie fields when sanitizing for logging', () => {
+      const redacted = sanitization.sanitizeForLogging({
+        authorization: 'Bearer super-secret-token',
+        cookie: 'session=abc123',
+        headers: { Authorization: 'Bearer nested' },
+        safe: 'visible',
+      }) as Record<string, unknown>;
+
+      expect(redacted.authorization).toBe('[REDACTED]');
+      expect(redacted.cookie).toBe('[REDACTED]');
+      expect((redacted.headers as Record<string, unknown>).Authorization).toBe('[REDACTED]');
+      expect(redacted.safe).toBe('visible');
+    });
   });
 });

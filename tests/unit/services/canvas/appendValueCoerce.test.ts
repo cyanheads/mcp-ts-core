@@ -63,6 +63,47 @@ describe('toTimestampMicros', () => {
     expect(caught).toBeInstanceOf(McpError);
     expect((caught as McpError).message).toContain('TIMESTAMP');
   });
+
+  it('rejects NaN even though typeof NaN is "number" (Number.isFinite gate)', () => {
+    expect(() => toTimestampMicros(Number.NaN, COL)).toThrow(McpError);
+  });
+
+  it('rejects Infinity even though typeof Infinity is "number" (Number.isFinite gate)', () => {
+    expect(() => toTimestampMicros(Number.POSITIVE_INFINITY, COL)).toThrow(McpError);
+  });
+
+  it('rejects null with the "null" type tag in the message', () => {
+    let caught: unknown;
+    try {
+      toTimestampMicros(null, COL);
+    } catch (err) {
+      caught = err;
+    }
+    expect(caught).toBeInstanceOf(McpError);
+    expect((caught as McpError).message).toContain('null');
+  });
+
+  it('rejects a raw Uint8Array with the "Uint8Array" type tag in the message', () => {
+    let caught: unknown;
+    try {
+      toTimestampMicros(new Uint8Array([1, 2]), COL);
+    } catch (err) {
+      caught = err;
+    }
+    expect(caught).toBeInstanceOf(McpError);
+    expect((caught as McpError).message).toContain('Uint8Array');
+  });
+
+  it('rejects a raw ArrayBuffer with the "ArrayBuffer" type tag in the message', () => {
+    let caught: unknown;
+    try {
+      toTimestampMicros(new ArrayBuffer(4), COL);
+    } catch (err) {
+      caught = err;
+    }
+    expect(caught).toBeInstanceOf(McpError);
+    expect((caught as McpError).message).toContain('ArrayBuffer');
+  });
 });
 
 describe('toDateDays', () => {
@@ -95,6 +136,14 @@ describe('toDateDays', () => {
 
   it.each([true, [], {}, 0n])('rejects type %p', (value) => {
     expect(() => toDateDays(value, COL)).toThrow(McpError);
+  });
+
+  it('rejects NaN even though typeof NaN is "number" (Number.isFinite gate)', () => {
+    expect(() => toDateDays(Number.NaN, COL)).toThrow(McpError);
+  });
+
+  it('rejects Infinity even though typeof Infinity is "number" (Number.isFinite gate)', () => {
+    expect(() => toDateDays(Number.POSITIVE_INFINITY, COL)).toThrow(McpError);
   });
 });
 
@@ -143,5 +192,19 @@ describe('toUint8Array', () => {
     expect(caught).toBeInstanceOf(McpError);
     expect((caught as McpError).message).toContain('BLOB');
     expect(((caught as McpError).data as { reason: string }).reason).toBe('invalid_value_for_type');
+  });
+
+  it('rejects a Date instance — falls through to the generic rejection with the "Date" type tag', () => {
+    // Unlike toTimestampMicros/toDateDays (which special-case Date), toUint8Array
+    // has no Date branch, so a Date value reaches describeValueType's Date tag.
+    let caught: unknown;
+    try {
+      toUint8Array(new Date(), COL);
+    } catch (err) {
+      caught = err;
+    }
+    expect(caught).toBeInstanceOf(McpError);
+    expect((caught as McpError).message).toContain('Date');
+    expect((caught as McpError).message).toContain('BLOB');
   });
 });

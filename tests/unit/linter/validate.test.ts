@@ -3,7 +3,7 @@
  * @module tests/unit/linter/validate.test
  */
 
-import { describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { z } from 'zod';
 
 import { validateDefinitions } from '@/linter/validate.js';
@@ -904,6 +904,351 @@ describe('validateDefinitions', () => {
       expect(report.warnings.length).toBeGreaterThan(0);
       expect(report.errors).toHaveLength(0);
       expect(report.passed).toBe(true);
+    });
+
+    it('appends a rule-anchor breadcrumb to every diagnostic message', () => {
+      const report = validateDefinitions({ tools: [validTool({ name: '' })] });
+      const nameError = report.errors.find((e) => e.rule === 'name-required');
+      expect(nameError?.message).toContain('See: skills/api-linter/SKILL.md#name-required');
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // server.json integration
+  // -------------------------------------------------------------------------
+
+  describe('server.json integration', () => {
+    function validServerJson(overrides: Record<string, unknown> = {}) {
+      return {
+        name: 'io.github.cyanheads/test-server',
+        description: 'A test server manifest.',
+        version: '1.0.0',
+        repository: {
+          url: 'https://github.com/cyanheads/test-server',
+          source: 'github',
+        },
+        packages: [
+          {
+            registryType: 'npm',
+            identifier: 'test-server',
+            version: '1.0.0',
+            transport: { type: 'stdio' },
+          },
+        ],
+        ...overrides,
+      };
+    }
+
+    it('produces no errors for a valid server.json manifest', () => {
+      const report = validateDefinitions({ serverJson: validServerJson() });
+      expect(report.errors).toHaveLength(0);
+    });
+
+    it('does not run server.json rules when serverJson is omitted', () => {
+      const report = validateDefinitions({ tools: [validTool()] });
+      expect(report.errors.some((e) => e.rule.startsWith('server-json-'))).toBe(false);
+      expect(report.warnings.some((w) => w.rule.startsWith('server-json-'))).toBe(false);
+    });
+
+    it('surfaces server.json errors anchored to the shared server-json-rules section', () => {
+      const report = validateDefinitions({ serverJson: validServerJson({ name: '' }) });
+      const nameError = report.errors.find((e) => e.rule === 'server-json-name-required');
+      expect(nameError).toBeDefined();
+      expect(nameError?.message).toContain('See: skills/api-linter/SKILL.md#server-json-rules');
+    });
+
+    it('warns on a version mismatch against packageJson.version', () => {
+      const report = validateDefinitions({
+        serverJson: validServerJson({ version: '1.0.0' }),
+        packageJson: { version: '2.0.0' },
+      });
+      expect(report.warnings).toContainEqual(
+        expect.objectContaining({ rule: 'server-json-version-sync' }),
+      );
+    });
+
+    it('skips the version-sync cross-check when packageJson is not provided', () => {
+      const report = validateDefinitions({ serverJson: validServerJson({ version: '1.0.0' }) });
+      expect(report.warnings.filter((w) => w.rule === 'server-json-version-sync')).toHaveLength(0);
+    });
+
+    it('does not warn on version-sync when versions match', () => {
+      const report = validateDefinitions({
+        serverJson: validServerJson({ version: '3.2.1' }),
+        packageJson: { version: '3.2.1' },
+      });
+      expect(report.warnings.filter((w) => w.rule === 'server-json-version-sync')).toHaveLength(0);
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // Landing config integration
+  // -------------------------------------------------------------------------
+
+  describe('landing config integration', () => {
+    it('produces no diagnostics for a valid landing config', () => {
+      const report = validateDefinitions({ landing: { tagline: 'Short and punchy' } });
+      expect(report.errors.filter((e) => e.rule.startsWith('landing-'))).toHaveLength(0);
+    });
+
+    it('does not run landing rules when landing is omitted', () => {
+      const report = validateDefinitions({ tools: [validTool()] });
+      expect(report.errors.some((e) => e.rule.startsWith('landing-'))).toBe(false);
+    });
+
+    it('surfaces landing errors anchored to their own rule id (not the server-json section)', () => {
+      const report = validateDefinitions({ landing: { tagline: 'x'.repeat(121) } });
+      const taglineError = report.errors.find((e) => e.rule === 'landing-tagline-length');
+      expect(taglineError).toBeDefined();
+      expect(taglineError?.message).toContain(
+        'See: skills/api-linter/SKILL.md#landing-tagline-length',
+      );
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // canvas-consumer-missing option/env resolution
+  // -------------------------------------------------------------------------
+
+  describe('canvas-consumer-missing dispatch', () => {
+    const ENV = 'MCP_LINT_CANVAS_CONSUMERS';
+
+    function canvasTool(overrides: Record<string, unknown> = {}) {
+      return validTool({
+        name: 'produces_canvas',
+        output: z.object({
+          canvas_id: z.string().describe('Canvas token'),
+          preview: z.array(z.string()).describe('Preview rows'),
+        }),
+        handler: async () => ({ canvas_id: 'tok', preview: [] }),
+        ...overrides,
+      });
+    }
+
+    beforeEach(() => {
+      delete process.env[ENV];
+    });
+    afterEach(() => {
+      delete process.env[ENV];
+    });
+
+    it('warns when a canvas-output tool has no consumer and no options are set', () => {
+      const report = validateDefinitions({ tools: [canvasTool()] });
+      expect(report.warnings).toContainEqual(
+        expect.objectContaining({ rule: 'canvas-consumer-missing' }),
+      );
+    });
+
+    it('passes when a *_dataframe_query consumer is registered (default predicate)', () => {
+      const report = validateDefinitions({
+        tools: [canvasTool(), validTool({ name: 'my_dataframe_query' })],
+      });
+      expect(report.warnings.filter((w) => w.rule === 'canvas-consumer-missing')).toHaveLength(0);
+    });
+
+    it('accepts an explicit canvasConsumers array naming a non-standard consumer', () => {
+      const report = validateDefinitions({
+        canvasConsumers: ['my_custom_sql'],
+        tools: [canvasTool(), validTool({ name: 'my_custom_sql' })],
+      });
+      expect(report.warnings.filter((w) => w.rule === 'canvas-consumer-missing')).toHaveLength(0);
+    });
+
+    it('disables the rule entirely when canvasConsumers is false', () => {
+      const report = validateDefinitions({ canvasConsumers: false, tools: [canvasTool()] });
+      expect(report.warnings.filter((w) => w.rule === 'canvas-consumer-missing')).toHaveLength(0);
+    });
+
+    it('reads MCP_LINT_CANVAS_CONSUMERS as a CSV of consumer names', () => {
+      process.env[ENV] = 'tool_a, my_custom_sql ,tool_b';
+      const report = validateDefinitions({
+        tools: [canvasTool(), validTool({ name: 'my_custom_sql' })],
+      });
+      expect(report.warnings.filter((w) => w.rule === 'canvas-consumer-missing')).toHaveLength(0);
+    });
+
+    it('treats MCP_LINT_CANVAS_CONSUMERS=false as disabling the rule via env', () => {
+      process.env[ENV] = 'false';
+      const report = validateDefinitions({ tools: [canvasTool()] });
+      expect(report.warnings.filter((w) => w.rule === 'canvas-consumer-missing')).toHaveLength(0);
+    });
+
+    it('explicit canvasConsumers input takes precedence over the env var', () => {
+      process.env[ENV] = 'some_other_tool';
+      const report = validateDefinitions({ canvasConsumers: false, tools: [canvasTool()] });
+      expect(report.warnings.filter((w) => w.rule === 'canvas-consumer-missing')).toHaveLength(0);
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // capped-list-no-truncation option/env resolution
+  // -------------------------------------------------------------------------
+
+  describe('capped-list-no-truncation dispatch', () => {
+    const ENV = 'MCP_LINT_TRUNCATION_ALLOWLIST';
+
+    function cappedTool(overrides: Record<string, unknown> = {}) {
+      return validTool({
+        name: 'search_results',
+        input: z.object({ limit: z.number().describe('Max results') }),
+        output: z.object({ items: z.array(z.string()).describe('Items') }),
+        handler: async () => ({ items: [] }),
+        ...overrides,
+      });
+    }
+
+    beforeEach(() => {
+      delete process.env[ENV];
+    });
+    afterEach(() => {
+      delete process.env[ENV];
+    });
+
+    it('warns on the silent-cap shape with no options set', () => {
+      const report = validateDefinitions({ tools: [cappedTool()] });
+      expect(report.warnings).toContainEqual(
+        expect.objectContaining({ rule: 'capped-list-no-truncation' }),
+      );
+    });
+
+    it('truncationAllowlist array suppresses by tool name', () => {
+      const report = validateDefinitions({
+        truncationAllowlist: ['search_results'],
+        tools: [cappedTool()],
+      });
+      expect(report.warnings.filter((w) => w.rule === 'capped-list-no-truncation')).toHaveLength(0);
+    });
+
+    it('disables the rule entirely when truncationAllowlist is false', () => {
+      const report = validateDefinitions({ truncationAllowlist: false, tools: [cappedTool()] });
+      expect(report.warnings.filter((w) => w.rule === 'capped-list-no-truncation')).toHaveLength(0);
+    });
+
+    it('reads MCP_LINT_TRUNCATION_ALLOWLIST as a CSV allowlist', () => {
+      process.env[ENV] = 'other_tool, search_results ,third_tool';
+      const report = validateDefinitions({ tools: [cappedTool()] });
+      expect(report.warnings.filter((w) => w.rule === 'capped-list-no-truncation')).toHaveLength(0);
+    });
+
+    it('treats MCP_LINT_TRUNCATION_ALLOWLIST=false as disabling the rule via env', () => {
+      process.env[ENV] = 'false';
+      const report = validateDefinitions({ tools: [cappedTool()] });
+      expect(report.warnings.filter((w) => w.rule === 'capped-list-no-truncation')).toHaveLength(0);
+    });
+
+    it('explicit truncationAllowlist input takes precedence over the env var', () => {
+      process.env[ENV] = 'unrelated_tool';
+      const report = validateDefinitions({
+        truncationAllowlist: ['search_results'],
+        tools: [cappedTool()],
+      });
+      expect(report.warnings.filter((w) => w.rule === 'capped-list-no-truncation')).toHaveLength(0);
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // formatAllowlist resolution
+  // -------------------------------------------------------------------------
+
+  describe('formatAllowlist resolution', () => {
+    it('accepts a Set instance directly, not just an array', () => {
+      const report = validateDefinitions({
+        formatAllowlist: new Set(['uri', 'email']),
+        tools: [validTool({ input: z.object({ link: z.url().describe('a link') }) })],
+      });
+      expect(report.errors.filter((e) => e.rule === 'schema-format-portability')).toHaveLength(0);
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // Cross-definition name dedup edge cases
+  // -------------------------------------------------------------------------
+
+  describe('cross-definition name dedup edge cases', () => {
+    it('does not flag name-unique when duplicate empty tool names are filtered before dedup', () => {
+      const { name: _n1, ...noName1 } = validTool();
+      const { name: _n2, ...noName2 } = validTool();
+      const report = validateDefinitions({ tools: [noName1, noName2] });
+      expect(report.errors.filter((e) => e.rule === 'name-required')).toHaveLength(2);
+      expect(report.errors.filter((e) => e.rule === 'name-unique')).toHaveLength(0);
+    });
+
+    it('flags name-unique exactly once even with three duplicate tool names', () => {
+      const report = validateDefinitions({
+        tools: [validTool({ name: 'dup' }), validTool({ name: 'dup' }), validTool({ name: 'dup' })],
+      });
+      expect(report.errors.filter((e) => e.rule === 'name-unique')).toHaveLength(1);
+    });
+
+    it('tracks multiple independent duplicate groups without cross-contamination', () => {
+      const report = validateDefinitions({
+        tools: [
+          validTool({ name: 'a' }),
+          validTool({ name: 'a' }),
+          validTool({ name: 'b' }),
+          validTool({ name: 'b' }),
+          validTool({ name: 'c' }),
+        ],
+      });
+      const dupNames = report.errors
+        .filter((e) => e.rule === 'name-unique')
+        .map((e) => e.definitionName)
+        .sort();
+      expect(dupNames).toEqual(['a', 'b']);
+    });
+
+    it('falls back to uriTemplate for resource dedup when name is omitted on both', () => {
+      const report = validateDefinitions({
+        resources: [
+          validResource({ name: undefined, uriTemplate: 'shared://{id}' }),
+          validResource({ name: undefined, uriTemplate: 'shared://{id}' }),
+        ],
+      });
+      expect(report.errors).toContainEqual(
+        expect.objectContaining({
+          rule: 'name-unique',
+          definitionType: 'resource',
+          definitionName: 'shared://{id}',
+        }),
+      );
+    });
+
+    it('does not flag resource dedup when both name and uriTemplate are absent', () => {
+      const { uriTemplate: _u1, name: _n1, ...bare1 } = validResource();
+      const { uriTemplate: _u2, name: _n2, ...bare2 } = validResource();
+      const report = validateDefinitions({ resources: [bare1, bare2] });
+      expect(report.errors.filter((e) => e.rule === 'uri-template-required')).toHaveLength(2);
+      expect(report.errors.filter((e) => e.rule === 'name-unique')).toHaveLength(0);
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // Malformed definition entries (edge inputs)
+  // -------------------------------------------------------------------------
+
+  describe('malformed definition entries (edge inputs)', () => {
+    it('handles an empty-object tool definition without throwing', () => {
+      expect(() => validateDefinitions({ tools: [{}] })).not.toThrow();
+      const report = validateDefinitions({ tools: [{}] });
+      expect(report.errors).toContainEqual(expect.objectContaining({ rule: 'name-required' }));
+      expect(report.errors).toContainEqual(expect.objectContaining({ rule: 'handler-required' }));
+      expect(report.errors.filter((e) => e.rule === 'schema-is-object')).toHaveLength(2);
+    });
+
+    it('handles an empty-object resource definition without throwing', () => {
+      expect(() => validateDefinitions({ resources: [{}] })).not.toThrow();
+      const report = validateDefinitions({ resources: [{}] });
+      expect(report.errors).toContainEqual(
+        expect.objectContaining({ rule: 'uri-template-required' }),
+      );
+      expect(report.errors).toContainEqual(expect.objectContaining({ rule: 'handler-required' }));
+    });
+
+    it('handles an empty-object prompt definition without throwing', () => {
+      expect(() => validateDefinitions({ prompts: [{}] })).not.toThrow();
+      const report = validateDefinitions({ prompts: [{}] });
+      expect(report.errors).toContainEqual(expect.objectContaining({ rule: 'name-required' }));
+      expect(report.errors).toContainEqual(expect.objectContaining({ rule: 'generate-required' }));
     });
   });
 });

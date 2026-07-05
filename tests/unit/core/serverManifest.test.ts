@@ -4,7 +4,7 @@
  */
 import { describe, expect, test } from 'vitest';
 import { z } from 'zod';
-import type { AppConfig } from '@/config/index.js';
+import { type AppConfig, FRAMEWORK_NAME, FRAMEWORK_VERSION } from '@/config/index.js';
 import {
   buildServerManifest,
   classifyPreRelease,
@@ -12,6 +12,7 @@ import {
   deriveTitleFromName,
   detectGitHubRepo,
   GITHUB_REPO_ROOT_PATTERN,
+  isSafeCssColor,
   LANDING_MAX_ENV_EXAMPLE,
   LANDING_MAX_LINKS,
   snakeToKebab,
@@ -748,5 +749,339 @@ describe('buildServerManifest — per-definition sourceUrl override', () => {
     expect(manifest.definitions.tools[0]?.sourceUrl).toBe(
       'https://github.com/acme/demo/blob/main/src/mcp-server/tools/definitions/plain-tool.tool.ts',
     );
+  });
+});
+
+describe('isSafeCssColor', () => {
+  test.each([
+    ['#6366f1', true],
+    ['#fff', true],
+    ['red', true],
+    ['rgb(99 102 241)', true],
+    ['oklch(0.7 0.2 280)', true],
+    ['', false],
+    ['   ', false],
+    ['123red', false],
+    ['red;background:url(x)', false],
+    ['red{}', false],
+    ['red/*comment*/', false],
+    ['red<script>', false],
+    ['a'.repeat(129), false],
+  ])('%s → %s', (value, expected) => {
+    expect(isSafeCssColor(value)).toBe(expected);
+  });
+
+  test('accepts a value at exactly the max length', () => {
+    expect(isSafeCssColor(`#${'a'.repeat(127)}`)).toBe(true);
+  });
+});
+
+describe('buildServerManifest — theme.accent safety', () => {
+  test('throws a configurationError when theme.accent contains unsafe characters', () => {
+    expect(() =>
+      buildServerManifest({
+        config: stubConfig(),
+        tools: [],
+        resources: [],
+        prompts: [],
+        landing: { theme: { accent: 'red; } body { background: url(evil)' } },
+      }),
+    ).toThrow(/unsafe to interpolate into CSS/);
+  });
+
+  test('accepts a custom safe accent value in functional color notation', () => {
+    const manifest = buildServerManifest({
+      config: stubConfig(),
+      tools: [],
+      resources: [],
+      prompts: [],
+      landing: { theme: { accent: 'oklch(0.7 0.2 280)' } },
+    });
+    expect(manifest.landing.theme.accent).toBe('oklch(0.7 0.2 280)');
+  });
+});
+
+describe('buildServerManifest — schema conversion edge cases', () => {
+  test('produces inputSchema/outputSchema JSON Schema for a real Zod tool definition', () => {
+    const realTool = tool('typed_tool', {
+      description: 'x',
+      input: z.object({ q: z.string().describe('query') }),
+      output: z.object({ r: z.string().describe('result') }),
+      handler: async () => ({ r: '' }),
+    });
+    const manifest = buildServerManifest({
+      config: stubConfig(),
+      tools: [realTool],
+      resources: [],
+      prompts: [],
+    });
+    expect(manifest.definitions.tools[0]?.inputSchema).toBeDefined();
+    expect(manifest.definitions.tools[0]?.outputSchema).toBeDefined();
+  });
+
+  test('omits inputSchema/outputSchema and reports no required fields when the schema is not a real Zod object', () => {
+    const fakeTool = {
+      name: 'not_really_zod',
+      description: 'x',
+      input: {},
+      output: {},
+      handler: async () => ({}),
+    };
+    const manifest = buildServerManifest({
+      config: stubConfig(),
+      tools: [fakeTool] as unknown as Parameters<typeof buildServerManifest>[0]['tools'],
+      resources: [],
+      prompts: [],
+    });
+    const entry = manifest.definitions.tools[0];
+    expect(entry).not.toHaveProperty('inputSchema');
+    expect(entry).not.toHaveProperty('outputSchema');
+    expect(entry?.requiredFields).toEqual([]);
+  });
+
+  test('reports an empty requiredFields array when every input field is optional', () => {
+    const allOptionalTool = tool('all_optional', {
+      description: 'x',
+      input: z.object({ q: z.string().optional().describe('optional query') }),
+      output: z.object({}),
+      handler: async () => ({}),
+    });
+    const manifest = buildServerManifest({
+      config: stubConfig(),
+      tools: [allOptionalTool],
+      resources: [],
+      prompts: [],
+    });
+    expect(manifest.definitions.tools[0]?.requiredFields).toEqual([]);
+  });
+});
+
+describe('buildServerManifest — isApp detection edge cases', () => {
+  test('isApp is false for a tool with no _meta at all', () => {
+    const plainTool = tool('plain', {
+      description: 'x',
+      input: z.object({}),
+      output: z.object({}),
+      handler: async () => ({}),
+    });
+    const manifest = buildServerManifest({
+      config: stubConfig(),
+      tools: [plainTool],
+      resources: [],
+      prompts: [],
+    });
+    expect(manifest.definitions.tools[0]?.isApp).toBe(false);
+  });
+
+  test('isApp is false when _meta.ui.resourceUri is an empty string', () => {
+    const almostAppTool = {
+      name: 'almost_app',
+      description: 'x',
+      input: z.object({}),
+      output: z.object({}),
+      handler: async () => ({}),
+      _meta: { ui: { resourceUri: '' } },
+    };
+    const manifest = buildServerManifest({
+      config: stubConfig(),
+      tools: [almostAppTool] as Parameters<typeof buildServerManifest>[0]['tools'],
+      resources: [],
+      prompts: [],
+    });
+    expect(manifest.definitions.tools[0]?.isApp).toBe(false);
+  });
+
+  test('isApp is false when _meta is present but has no ui field', () => {
+    const noUiTool = {
+      name: 'no_ui',
+      description: 'x',
+      input: z.object({}),
+      output: z.object({}),
+      handler: async () => ({}),
+      _meta: { other: true },
+    };
+    const manifest = buildServerManifest({
+      config: stubConfig(),
+      tools: [noUiTool] as Parameters<typeof buildServerManifest>[0]['tools'],
+      resources: [],
+      prompts: [],
+    });
+    expect(manifest.definitions.tools[0]?.isApp).toBe(false);
+  });
+});
+
+describe('buildServerManifest — landing.links edge cases', () => {
+  test('defaults to an empty links array when landing.links is not provided', () => {
+    const manifest = buildServerManifest({
+      config: stubConfig(),
+      tools: [],
+      resources: [],
+      prompts: [],
+    });
+    expect(manifest.landing.links).toEqual([]);
+  });
+
+  test('respects an explicit external:false override on an https link', () => {
+    const manifest = buildServerManifest({
+      config: stubConfig(),
+      tools: [],
+      resources: [],
+      prompts: [],
+      landing: {
+        links: [{ href: 'https://example.com', label: 'Ext', external: false }],
+      },
+    });
+    expect(manifest.landing.links[0]?.external).toBe(false);
+  });
+});
+
+describe('buildServerManifest — npm package link edge cases', () => {
+  test('links an unscoped but slashed package name', () => {
+    const manifest = buildServerManifest({
+      config: stubConfig({ mcpServerName: 'owner/repo-style-name' }),
+      tools: [],
+      resources: [],
+      prompts: [],
+    });
+    expect(manifest.landing.npmPackage).toEqual({
+      name: 'owner/repo-style-name',
+      url: 'https://www.npmjs.com/package/owner%2Frepo-style-name',
+    });
+  });
+
+  test('skips npm linking when mcpServerName is an empty string', () => {
+    const manifest = buildServerManifest({
+      config: stubConfig({ mcpServerName: '' }),
+      tools: [],
+      resources: [],
+      prompts: [],
+    });
+    expect(manifest.landing.npmPackage).toBeUndefined();
+  });
+});
+
+describe('buildServerManifest — landing.envExample edge cases', () => {
+  test('defaults to an empty envExample array when not provided', () => {
+    const manifest = buildServerManifest({
+      config: stubConfig(),
+      tools: [],
+      resources: [],
+      prompts: [],
+    });
+    expect(manifest.landing.envExample).toEqual([]);
+  });
+
+  test('skips an entry with an empty-string key', () => {
+    const manifest = buildServerManifest({
+      config: stubConfig(),
+      tools: [],
+      resources: [],
+      prompts: [],
+      landing: { envExample: { '': 'should-be-skipped', GOOD_KEY: 'good-value' } },
+    });
+    expect(manifest.landing.envExample).toEqual([{ key: 'GOOD_KEY', value: 'good-value' }]);
+  });
+});
+
+describe('buildServerManifest — landing.connectSnippets edge cases', () => {
+  test('defaults to an empty object when connectSnippets is not provided', () => {
+    const manifest = buildServerManifest({
+      config: stubConfig(),
+      tools: [],
+      resources: [],
+      prompts: [],
+    });
+    expect(manifest.landing.connectSnippets).toEqual({});
+  });
+});
+
+describe('buildServerManifest — prompt args edge cases', () => {
+  test('reports an empty args array for a prompt with no args schema', () => {
+    const noArgsPrompt = prompt('no_args_prompt', {
+      description: 'A prompt with no args.',
+      generate: () => [],
+    });
+    const manifest = buildServerManifest({
+      config: stubConfig(),
+      tools: [],
+      resources: [],
+      prompts: [noArgsPrompt],
+    });
+    expect(manifest.definitions.prompts[0]?.args).toEqual([]);
+  });
+
+  test('omits the description key for an arg field with no .describe() text', () => {
+    const undocumentedArgPrompt = prompt('undocumented_prompt', {
+      description: 'x',
+      args: z.object({ topic: z.string() }),
+      generate: () => [],
+    });
+    const manifest = buildServerManifest({
+      config: stubConfig(),
+      tools: [],
+      resources: [],
+      prompts: [undocumentedArgPrompt],
+    });
+    const arg = manifest.definitions.prompts[0]?.args[0];
+    expect(arg).toEqual({ name: 'topic', required: true });
+    expect(arg).not.toHaveProperty('description');
+  });
+});
+
+describe('buildServerManifest — extensions and public URL passthrough', () => {
+  test('surfaces extensions on the manifest when provided', () => {
+    const extensions = { 'vendor/my-extension': { enabled: true } };
+    const manifest = buildServerManifest({
+      config: stubConfig(),
+      tools: [],
+      resources: [],
+      prompts: [],
+      extensions,
+    });
+    expect(manifest.extensions).toEqual(extensions);
+  });
+
+  test('omits extensions from the manifest when not provided', () => {
+    const manifest = buildServerManifest({
+      config: stubConfig(),
+      tools: [],
+      resources: [],
+      prompts: [],
+    });
+    expect(manifest).not.toHaveProperty('extensions');
+  });
+
+  test('surfaces transport.publicUrl when config.mcpPublicUrl is set', () => {
+    const manifest = buildServerManifest({
+      config: stubConfig({ mcpPublicUrl: 'https://mcp.example.com' }),
+      tools: [],
+      resources: [],
+      prompts: [],
+    });
+    expect(manifest.transport.publicUrl).toBe('https://mcp.example.com');
+  });
+
+  test('omits transport.publicUrl when config.mcpPublicUrl is unset', () => {
+    const manifest = buildServerManifest({
+      config: stubConfig(),
+      tools: [],
+      resources: [],
+      prompts: [],
+    });
+    expect(manifest.transport).not.toHaveProperty('publicUrl');
+  });
+
+  test('reports the framework identity block', () => {
+    const manifest = buildServerManifest({
+      config: stubConfig(),
+      tools: [],
+      resources: [],
+      prompts: [],
+    });
+    expect(manifest.framework).toEqual({
+      name: FRAMEWORK_NAME,
+      version: FRAMEWORK_VERSION,
+      homepage: 'https://github.com/cyanheads/mcp-ts-core',
+    });
   });
 });

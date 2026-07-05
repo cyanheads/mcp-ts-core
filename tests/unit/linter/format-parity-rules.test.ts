@@ -730,3 +730,120 @@ describe('lintFormatParity — deduplication', () => {
     expect(errors[0]?.message).toContain("'result.shared'");
   });
 });
+
+// ---------------------------------------------------------------------------
+// Recursion-depth guard
+// ---------------------------------------------------------------------------
+
+describe('lintFormatParity — recursion depth guard', () => {
+  it('silently stops verifying fields nested beyond depth 8', () => {
+    function nestedObject(depth: number): z.ZodTypeAny {
+      if (depth === 0) return z.string().describe('Deep leaf value');
+      return z.object({ child: nestedObject(depth - 1) }).describe(`Level ${depth}`);
+    }
+    const def = tool({
+      output: z.object({ root: nestedObject(12) }),
+      // Formatter ignores the deeply nested value entirely — if the walker
+      // actually verified fields past the recursion guard, this would fail.
+      format: () => [{ type: 'text', text: 'summary only, no deep fields rendered' }],
+    });
+    expect(parityErrors(def)).toHaveLength(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Additional leaf-type coverage
+// ---------------------------------------------------------------------------
+
+describe('lintFormatParity — additional leaf types', () => {
+  it('handles an empty tuple with nothing to verify', () => {
+    const def = tool({
+      output: z.object({ pair: z.tuple([]).describe('Empty tuple') }),
+      format: () => [{ type: 'text', text: 'nothing to render' }],
+    });
+    expect(parityErrors(def)).toHaveLength(0);
+  });
+
+  it('handles bigint fields like numbers', () => {
+    const def = tool({
+      output: z.object({ big: z.bigint().describe('Big count') }),
+      format: (r) => [{ type: 'text', text: `Big: ${(r as { big: bigint }).big}` }],
+    });
+    expect(parityErrors(def)).toHaveLength(0);
+  });
+
+  it('flags an untyped (z.any()) field whose key name never appears', () => {
+    const def = tool({
+      output: z.object({ payload: z.any().describe('Dynamic payload') }),
+      format: () => [{ type: 'text', text: 'nothing relevant here' }],
+    });
+    expect(parityErrors(def)).toHaveLength(1);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Locale grouping — documented limitation
+// ---------------------------------------------------------------------------
+
+describe('lintFormatParity — locale grouping limitation', () => {
+  it('does not normalize hi-IN lakh/crore grouping (documented tradeoff)', () => {
+    const def = tool({
+      output: z.object({ total: z.number().describe('Total') }),
+      format: (r) => [
+        {
+          type: 'text',
+          text: `Total: ${(r as { total: number }).total.toLocaleString('hi-IN')}`,
+        },
+      ],
+    });
+    // hi-IN groups in 2-digit runs after the initial 3 digits (e.g. 90,00,00,001);
+    // THOUSANDS_GROUP_PATTERN only recognizes \d{3} groups, so this legitimately
+    // fails parity — matching the "Known weakness" documented on the pattern.
+    expect(parityErrors(def).length).toBeGreaterThan(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Additional wrapper coverage
+// ---------------------------------------------------------------------------
+
+describe('lintFormatParity — additional wrappers', () => {
+  it('treats a nullable field as present and flags if not rendered', () => {
+    const def = tool({
+      output: z.object({ tag: z.string().nullable().describe('Tag') }),
+      format: () => [{ type: 'text', text: 'no tag mention' }],
+    });
+    expect(parityErrors(def)).toHaveLength(1);
+  });
+
+  it('treats a defaulted field as present and flags if not rendered', () => {
+    const def = tool({
+      output: z.object({ mode: z.string().default('auto').describe('Mode') }),
+      format: () => [{ type: 'text', text: 'no mode mention' }],
+    });
+    expect(parityErrors(def)).toHaveLength(1);
+  });
+
+  it('unwraps multiple stacked optional/nullable layers', () => {
+    const def = tool({
+      output: z.object({ note: z.string().nullable().optional().describe('Note') }),
+      format: () => [{ type: 'text', text: 'no mention of the note field' }],
+    });
+    expect(parityErrors(def)).toHaveLength(1);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Key-splitting on literal underscores (not just camelCase-derived ones)
+// ---------------------------------------------------------------------------
+
+describe('lintFormatParity — snake_case key segment matching', () => {
+  it('matches a snake_case key by its underscore-delimited segment', () => {
+    const def = tool({
+      output: z.object({ was_archived: z.boolean().describe('Archived flag') }),
+      // No "true"/"false" literal and no whole "was_archived" — only "archived".
+      format: () => [{ type: 'text', text: 'Archived: yes' }],
+    });
+    expect(parityErrors(def)).toHaveLength(0);
+  });
+});
