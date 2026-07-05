@@ -1,6 +1,6 @@
 # mcp-ts-core - Directory Structure
 
-Generated on: 2026-06-20 07:44:15
+Generated on: 2026-07-05 17:53:08
 
 ```text
 mcp-ts-core/
@@ -11,7 +11,8 @@ mcp-ts-core/
 │   │   ├── bug_report.yml
 │   │   ├── config.yml
 │   │   └── feature_request.yml
-│   └── FUNDING.yml
+│   ├── FUNDING.yml
+│   └── SECURITY.md
 ├── .husky/
 │   └── pre-commit
 ├── .vscode/
@@ -102,6 +103,7 @@ mcp-ts-core/
 │   │           ├── template-echo-message.tool.ts
 │   │           ├── template-image-test.tool.ts
 │   │           └── template-madlibs-elicitation.tool.ts
+│   ├── duckdb-stub.ts
 │   ├── index.ts
 │   └── worker.ts
 ├── scripts/
@@ -495,6 +497,7 @@ mcp-ts-core/
 │   │   └── tools/
 │   │       └── echo.tool.test.ts
 │   ├── _.dockerignore
+│   ├── _.gitattributes
 │   ├── _.gitignore
 │   ├── _.mcpbignore
 │   ├── _tsconfig.build.json
@@ -502,9 +505,11 @@ mcp-ts-core/
 │   ├── .env.example
 │   ├── AGENTS.md
 │   ├── biome.template.json
+│   ├── bunfig.toml
 │   ├── CLAUDE.md
 │   ├── devcheck.config.json
 │   ├── Dockerfile
+│   ├── LICENSE
 │   ├── manifest.json
 │   ├── package.json
 │   ├── server.json
@@ -549,13 +554,14 @@ mcp-ts-core/
 │   │   ├── resources/
 │   │   │   ├── echo-app-ui.app-resource.test.ts
 │   │   │   └── echo.resource.test.ts
-│   │   ├── tools/
-│   │   │   ├── template-async-countdown.tool.test.ts
-│   │   │   ├── template-data-explorer.app-tool.test.ts
-│   │   │   ├── template-echo-app.app-tool.test.ts
-│   │   │   ├── template-echo-message.tool.test.ts
-│   │   │   └── template-madlibs-elicitation.tool.test.ts
-│   │   └── canvas-duckdb.test.ts
+│   │   ├── services/
+│   │   │   └── canvas-duckdb.test.ts
+│   │   └── tools/
+│   │       ├── template-async-countdown.tool.test.ts
+│   │       ├── template-data-explorer.app-tool.test.ts
+│   │       ├── template-echo-app.app-tool.test.ts
+│   │       ├── template-echo-message.tool.test.ts
+│   │       └── template-madlibs-elicitation.tool.test.ts
 │   ├── types/
 │   │   ├── error-contract.test-d.ts
 │   │   ├── handler-context.test-d.ts
@@ -568,6 +574,7 @@ mcp-ts-core/
 │   │   │   └── parseEnvConfig.test.ts
 │   │   ├── core/
 │   │   │   ├── app.test.ts
+│   │   │   ├── context.test.ts
 │   │   │   ├── gcPressure.test.ts
 │   │   │   ├── serverManifest.test.ts
 │   │   │   └── typed-fail.test.ts
@@ -579,9 +586,11 @@ mcp-ts-core/
 │   │   │   ├── format-parity-rules.test.ts
 │   │   │   ├── handler-body-rules.test.ts
 │   │   │   ├── landing-rules.test.ts
+│   │   │   ├── name-rules.test.ts
 │   │   │   ├── portability-rules.test.ts
 │   │   │   ├── prompt-rules.test.ts
 │   │   │   ├── resource-rules.test.ts
+│   │   │   ├── schema-rules.test.ts
 │   │   │   ├── server-json-rules.test.ts
 │   │   │   ├── source-text.test.ts
 │   │   │   ├── tool-rules.test.ts
@@ -689,6 +698,8 @@ mcp-ts-core/
 │   │   │   │   │   └── openrouter.provider.test.ts.disabled
 │   │   │   │   └── types.test.ts
 │   │   │   ├── mirror/
+│   │   │   │   ├── defineMirror.test.ts
+│   │   │   │   ├── handle.test.ts
 │   │   │   │   ├── runner.test.ts
 │   │   │   │   ├── schema.test.ts
 │   │   │   │   └── sqliteMirrorStore.test.ts
@@ -817,7 +828,6 @@ mcp-ts-core/
 ├── README.md
 ├── repomix.config.json
 ├── server.json
-├── smithery.yaml
 ├── tsconfig.base.json
 ├── tsconfig.build.json
 ├── tsconfig.json
@@ -828,7 +838,7 @@ mcp-ts-core/
 ├── vitest.config.ts
 ├── vitest.integration.ts
 ├── vitest.worker.ts
-└── wrangler.toml
+└── wrangler.jsonc
 ```
 
 _Note: This tree excludes files and directories matched by .gitignore and default patterns._

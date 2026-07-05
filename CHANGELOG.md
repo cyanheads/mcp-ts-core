@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.10.13](changelog/0.10.x/0.10.13.md) — 2026-07-05
+
+Supply-chain hardening: a bunfig minimumReleaseAge 3-day hold and the Socket install scanner, a SECURITY.md policy, and a devcheck Outdated gate that skips release-age holds. Wrangler migrated to JSONC with a DuckDB Worker stub; tsconfig, Dockerfile, and packaging modernized; Smithery config removed; test coverage expanded.
+
 ## [0.10.12](changelog/0.10.x/0.10.12.md) — 2026-07-05
 
 Canvas not-found errors carry reason 'canvas_not_found' plus a recovery hint so consumer error contracts populate on the wire, classifyDuckdbError passes structured McpErrors through unchanged (register_as_clash / export_path_* keep code and reason), and the enrichment trailer gains a leading blank-line separator.
