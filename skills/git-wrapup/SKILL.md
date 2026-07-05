@@ -4,7 +4,7 @@ description: >
   Land working-tree changes as logical commits — the work grouped by concern, topped by a release commit (version bump, changelog, regenerated artifacts) and an annotated tag. Verify, commit, tag. Stops at "committed and tagged locally" — no push, no publish. The release-and-publish skill picks up from here. Distilled from the git_wrapup_instructions protocol.
 metadata:
   author: cyanheads
-  version: "1.6"
+  version: "1.7"
   audience: external
   type: workflow
 ---
@@ -184,6 +184,8 @@ Dependency bumps:
 - `pkg` ^old → ^new
 
 <N> tests pass; `bun run devcheck` clean.
+
+[CHANGELOG v<version>](https://github.com/<OWNER>/<REPO>/blob/main/changelog/<major.minor>.x/<version>.md)
 ```
 
 **Rules:**
@@ -193,6 +195,7 @@ Dependency bumps:
 - No marketing adjectives
 - Length is earned — two-line tags are fine for small patches
 - **Issue backlinks:** when changes address GitHub issues, include `(#N)` references in the relevant bullets — same as the changelog entry. The backlinks render as clickable links in the GitHub Release body.
+- **Changelog link (final line):** end the tag body with a Markdown link to this version's changelog file, so the GitHub Release offers a one-click jump to the full entry — `[CHANGELOG v<version>](https://github.com/<OWNER>/<REPO>/blob/main/changelog/<major.minor>.x/<version>.md)`. Derive `<OWNER>/<REPO>` from the origin remote; the path mirrors the file authored in step 4 (e.g. `changelog/0.10.x/0.10.12.md`). Keep the blank line above it so it renders as its own paragraph, not appended to the gates line.
 
 ### 9. Verify end state
 
@@ -227,6 +230,6 @@ If the working tree isn't clean or the tag doesn't point at HEAD, something went
 - [ ] `bun run devcheck` passes
 - [ ] `bun run test:all` (or `test`) passes
 - [ ] Work grouped into logical commits (large features split by layer); release artifacts (version + changelog + tree) committed separately on top, subject leading with the version
-- [ ] Annotated tag `v<version>` with structured markdown message
+- [ ] Annotated tag `v<version>` with structured markdown message, final line linking this version's changelog file
 - [ ] Working tree clean
 - [ ] Nothing pushed — local only
