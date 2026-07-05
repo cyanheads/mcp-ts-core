@@ -13,7 +13,6 @@
     "useGitignore": true,
     "useDefaultPatterns": true,
     "customPatterns": [
-      ".clinerules/",
       ".github/",
       ".storage/",
       ".vscode/",
@@ -21,8 +20,7 @@
       "changelog/",
       "coverage/",
       "docs/",
-      "repomix.config.json",
-      ".husky/_"
+      "repomix.config.json"
     ]
   },
   "security": {

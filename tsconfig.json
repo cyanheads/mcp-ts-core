@@ -1,44 +1,9 @@
 {
+  "extends": "./tsconfig.base.json",
   "compilerOptions": {
-    // Target latest JavaScript features
-    "target": "ESNext",
-
-    // Use modern Node.js module system
-    "module": "NodeNext",
-    "moduleResolution": "NodeNext",
-
-    // Enable all strict type checking
-    "strict": true,
-    "noUncheckedIndexedAccess": true,
-    "exactOptionalPropertyTypes": true,
-    "useUnknownInCatchVariables": true,
-    "verbatimModuleSyntax": true,
-    "noUncheckedSideEffectImports": true,
-    "moduleDetection": "force",
-
-    // Module interop for CommonJS compatibility
-    "esModuleInterop": true,
-    "allowSyntheticDefaultImports": true,
-
-    // Output configuration
     "rootDir": ".",
-    "outDir": "./dist",
-    "declaration": true,
-    "declarationMap": true,
-    "sourceMap": true,
-
-    // Incremental compilation for faster type checking
-    "incremental": true,
     "tsBuildInfoFile": ".tsbuildinfo",
 
-    // Skip type checking of declaration files
-    "skipLibCheck": true,
-
-    // Ensure consistent file naming
-    "forceConsistentCasingInFileNames": true,
-
-    // Node.js specific
-    "lib": ["ESNext"],
     "types": [
       "node",
       "@cloudflare/workers-types",
@@ -46,26 +11,11 @@
       "@cloudflare/vitest-pool-workers/types"
     ],
 
-    // Error on unused locals and parameters
-    "noUnusedLocals": true,
-    "noUnusedParameters": true,
-
-    // Ensure void returns are handled
-    "noImplicitReturns": true,
-    "noFallthroughCasesInSwitch": true,
-
-    // Modern resolution features
-    "resolveJsonModule": true,
-    "allowJs": false,
     "paths": {
       "@/*": ["./src/*"],
       "tests/*": ["./tests/*"]
     }
   },
   "include": ["src/**/*", "tests/**/*"],
-  "exclude": ["node_modules", "dist", "templates", "examples"],
-  "ts-node": {
-    "esm": true,
-    "experimentalSpecifierResolution": "node"
-  }
+  "exclude": ["node_modules", "dist", "templates", "examples"]
 }

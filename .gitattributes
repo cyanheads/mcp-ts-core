@@ -75,10 +75,12 @@ out/** linguist-generated
 coverage/** linguist-generated
 *.d.ts linguist-generated
 
-# Lock files - mark as generated
-package-lock.json linguist-generated
-bun.lockb linguist-generated
-yarn.lock linguist-generated
+# Lockfile - Bun's text lockfile, machine-generated
+bun.lock linguist-generated
+
+# Script-generated files (changelog:build, tree) - collapse in PR diffs
+CHANGELOG.md linguist-generated
+docs/tree.md linguist-generated
 
 # Documentation
 *.md linguist-documentation
@@ -104,25 +106,11 @@ vendor/** linguist-vendored
 *.json diff=json
 package.json diff=json
 
-# Lockfiles - disable diff (too noisy)
-package-lock.json -diff
-bun.lockb -diff
-yarn.lock -diff
-
-# =============================================================================
-# MERGE STRATEGIES
-# =============================================================================
-# Custom merge behavior for specific files
-
-# Lockfiles - use binary merge to avoid conflicts
-package-lock.json merge=binary
-bun.lockb merge=binary
-yarn.lock merge=binary
-
 # =============================================================================
 # EXPORT-IGNORE
 # =============================================================================
-# Files to exclude from `git archive` (reduces npm package size)
+# Files excluded from `git archive` (GitHub source tarballs / "Download ZIP").
+# npm package contents are governed by package.json `files`, not this list.
 
 .github/ export-ignore
 .vscode/ export-ignore
@@ -139,9 +127,10 @@ scripts/ export-ignore
 biome.json export-ignore
 tsconfig.json export-ignore
 vitest.config.ts export-ignore
-vitest.integration.config.ts export-ignore
+vitest.integration.ts export-ignore
+vitest.worker.ts export-ignore
 bunfig.toml export-ignore
-wrangler.toml export-ignore
+wrangler.jsonc export-ignore
 Dockerfile export-ignore
 .dockerignore export-ignore
 .env.example export-ignore

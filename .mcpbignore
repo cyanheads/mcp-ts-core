@@ -26,7 +26,6 @@ bun.lock
 bunfig.toml
 devcheck.config.json
 repomix.config.json
-smithery.yaml
 tsconfig*.json
 vitest*.config.ts
-wrangler.toml
+wrangler.jsonc

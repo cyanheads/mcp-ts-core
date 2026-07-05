@@ -482,6 +482,7 @@ async function executeCommand(
     if (captureOutput) {
       return (result.stdout ?? '').trim();
     }
+    return;
   } catch (error: unknown) {
     const message = `Error executing command: "${command} ${args.join(' ')}"`;
     throw new DevDocsError(message, error);

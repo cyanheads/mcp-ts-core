@@ -1,6 +1,6 @@
 {
   "compilerOptions": {
-    "target": "ESNext",
+    "target": "ES2025",
     "module": "NodeNext",
     "moduleResolution": "NodeNext",
 
@@ -13,7 +13,6 @@
     "moduleDetection": "force",
 
     "esModuleInterop": true,
-    "allowSyntheticDefaultImports": true,
 
     "outDir": "./dist",
     "declaration": true,
@@ -22,9 +21,8 @@
 
     "incremental": true,
     "skipLibCheck": true,
-    "forceConsistentCasingInFileNames": true,
 
-    "lib": ["ESNext"],
+    "lib": ["ES2025", "ESNext.TypedArrays"],
     "types": ["node"],
 
     "noUnusedLocals": true,
