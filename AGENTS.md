@@ -22,7 +22,7 @@ This package serves two consumer paths. When making changes, know which audience
 | **Direct package import** — existing project pulls in the package | `bun add @cyanheads/mcp-ts-core` → `import { createApp, tool, z } from '@cyanheads/mcp-ts-core'` | Public API surface (`src/`) — existing consumers feel changes immediately on upgrade |
 | **Init-scaffolded server** — fresh project bootstrapped from this repo's templates | `bunx @cyanheads/mcp-ts-core init [name]` copies `templates/` into the new directory | `templates/` — only affects newly scaffolded servers, not existing ones |
 
-Both paths share the same public API. Init copies starter `package.json`, configs (`tsconfig`, `biome.json`, `vitest.config.ts`), `.env.example`, `Dockerfile`, `CLAUDE.md`/`AGENTS.md`, and example definitions. `_`-prefixed files (e.g. `_.gitignore`) drop the prefix on copy. After init, consult the `setup` skill.
+Both paths share the same public API. Init copies starter `package.json`, configs (`tsconfig`, `biome.json`, `vitest.config.ts`, `devcheck.config.json`), `.env.example`, `Dockerfile`, `CLAUDE.md`/`AGENTS.md`, example definitions and tests, framework `scripts/`, and external-audience `skills/`. `_`-prefixed files (e.g. `_.gitignore`) drop the prefix on copy. Existing files are never overwritten; `init` without a name scaffolds in place (upgrade flow). After init, consult the `setup` skill.
 
 ---
 
@@ -44,7 +44,7 @@ Both paths share the same public API. Init copies starter `package.json`, config
 
 | Subpath | Key Exports | Purpose |
 |:--------|:------------|:--------|
-| `@cyanheads/mcp-ts-core` | `createApp`, `tool`, `resource`, `prompt`, `appTool`, `appResource`, `APP_RESOURCE_MIME_TYPE`, `Context`, `createFail`, `createRecoveryFor`, `TypedFail`, `TypedRecoveryFor`, `ReasonOf`, `HandlerContext`, `Enrich`, `EnrichHelpers`, `TypedEnrich`, `z`, `completable`, `isCompletable`, `CompleteCallback`, `CompleteResourceTemplateCallback` | Main entry point |
+| `@cyanheads/mcp-ts-core` | `createApp`, `tool`, `resource`, `prompt`, `appTool`, `appResource`, `APP_RESOURCE_MIME_TYPE`, `Context`, `createFail`, `createRecoveryFor`, `TypedFail`, `TypedRecoveryFor`, `ReasonOf`, `HandlerContext`, `Enrich`, `EnrichHelpers`, `TypedEnrich`, `ContentCollect`, `ContentBlock`, `z`, `completable`, `isCompletable`, `CompleteCallback`, `CompleteResourceTemplateCallback` | Main entry point |
 | `/worker` | `createWorkerHandler`, `CloudflareBindings` | Cloudflare Workers entry |
 | `/tools` | `ToolDefinition`, `AnyToolDefinition`, `ToolAnnotations` | Tool definition types |
 | `/resources` | `ResourceDefinition`, `AnyResourceDefinition` | Resource definition types |
@@ -60,7 +60,7 @@ Both paths share the same public API. Init copies starter `package.json`, config
 | `/utils` | formatting, encoding, network, pagination, overflow (`outlineOnOverflow`, `OUTLINE_VARIANT`, `selectSections`, `formatOutline`), logging, runtime, telemetry, token counting, parsers†, sanitization†, scheduling† | All utilities (†optional peer deps) |
 | `/services` | `OpenRouterProvider`, `SpeechService`, `createSpeechProvider`, `ElevenLabsProvider`, `WhisperProvider`, `GraphService`, provider interfaces and types | LLM, Speech (TTS/STT), Graph services |
 | `/linter` | `validateDefinitions`, `LintReport`, `LintDiagnostic`, `LintInput`, `LintSeverity` | Definition validation |
-| `/testing` | `createMockContext`, `getEnrichment` | Test helpers |
+| `/testing` | `createMockContext`, `createMockLogger`, `getEnrichment`, `getContentBlocks`, `createInMemoryStorage` | Test helpers |
 | `/testing/fuzz` | `fuzzTool`, `fuzzResource`, `fuzzPrompt`, `zodToArbitrary`, `adversarialArbitrary`, `ADVERSARIAL_STRINGS` | Fuzz testing |
 | `/testing/vitest` | `mcpTest`, `McpTestFixtures` (+ re-exported `createMockContext`, `createInMemoryStorage`) | Vitest fixture-based tests (optional peer `vitest`) |
 
@@ -116,6 +116,8 @@ await createApp({
 
 **Identity fields** — Optional `title`, `websiteUrl`, `description`, `icons` (SEP-973) pass through to the SDK's `initialize` serverInfo and to the server manifest, keeping the `/.well-known/mcp.json` server card and landing page consistent with what `initialize` reports. Explicit `description` wins over `MCP_SERVER_DESCRIPTION`/package.json.
 
+**Also available** — `landing` (`LandingConfig`, HTTP transport only: landing-page config, all fields optional) and `context: { exposeStatelessSessionId }` (populate `ctx.sessionId` from the SDK's per-request token in stateless HTTP mode; default `false`).
+
 ### Cloudflare Workers — `createWorkerHandler(options)`
 
 ```ts
@@ -145,6 +147,7 @@ interface CoreServices {
   logger: Logger;
   storage: StorageService;
   rateLimiter: RateLimiter;
+  canvas?: DataCanvas;          // present when CANVAS_PROVIDER_TYPE=duckdb; never on Workers
   llmProvider?: ILlmProvider;
   speechService?: SpeechService;
   supabase?: SupabaseClient;
@@ -226,13 +229,13 @@ export const myTool = tool('my_tool', {
 
 **Steps:** Create `src/mcp-server/tools/definitions/[name].tool.ts` (kebab-case) → use `tool('snake_case', {...})` with Zod `.describe()` on all fields → implement `handler(input, ctx)` (pure, throws on failure) → add `auth`/`format` if needed → register in `definitions/index.ts` → `bun run devcheck` → smoke-test with `bun run rebuild && bun run start:stdio` (or `start:http`).
 
-**Schema constraint:** Input/output schemas must use JSON-Schema-serializable Zod types only. The MCP SDK converts schemas to JSON Schema for `tools/list` — non-serializable types (`z.custom()`, `z.date()`, `z.transform()`, `z.bigint()`, `z.symbol()`, `z.void()`, `z.map()`, `z.set()`, `z.function()`, `z.nan()`) cause a hard runtime failure. Use structural equivalents instead (e.g., `z.string()` with `.describe('ISO 8601 date')` instead of `z.date()`). The linter validates this at startup.
+**Schema constraint:** Input/output schemas must use JSON-Schema-serializable Zod types only. The MCP SDK converts schemas to JSON Schema for `tools/list` — non-serializable types (`z.custom()`, `z.date()`, `z.transform()`, `z.bigint()`, `z.symbol()`, `z.void()`, `z.map()`, `z.set()`, `z.function()`, `z.nan()`) cause a hard runtime failure. Use structural equivalents instead (e.g., `z.string()` with `.describe('ISO 8601 date')` instead of `z.date()`). The `schema-serializable` lint rule catches this at build time (`bun run lint:mcp` / `devcheck`).
 
 **Form-client safety:** Form-based clients (MCP Inspector, web UIs) send optional fields as empty strings, not `undefined`. Don't reject with `.min(1)` on optional fields — guard for meaningful values in the handler (`if (input.dateRange?.minDate && input.dateRange?.maxDate)`). Test with both omitted and empty-value payloads. When schema-level constraints (regex/length) need to surface in the JSON Schema, wrap in a union with a `z.literal('')` sentinel: `z.union([z.literal(''), z.string().regex(...).describe(...)])` — the linter exempts the literal variant from `describe-on-fields`.
 
 **`format`**: Maps output to MCP `content[]`. Different clients forward different surfaces to the agent — some (Claude Code) read `structuredContent` from `output`, others (Claude Desktop) read `content[]` from `format()`. `format()` is the markdown twin of `structuredContent`, not a reduced summary.
 
-- **Parity is enforced.** Every terminal field in `output` must appear in `format()`'s rendered text (via sentinel injection), or startup fails with a `format-parity` lint error.
+- **Parity is lint-enforced.** Every terminal field in `output` must appear in `format()`'s rendered text (via sentinel injection), or the `format-parity` rule fails `bun run lint:mcp` / `devcheck`.
 - **Primary fix:** render the missing field in `format()`. Use `z.discriminatedUnion` for list/detail variants — each branch is validated separately.
 - **Escape hatch:** if the schema was over-typed for a genuinely dynamic upstream API, relax it (`z.object({}).passthrough()`) — passthrough still flows data to `structuredContent`.
 - **Fallback:** omit `format` for JSON stringify. Additional formatters in `/utils`: `markdown()` (builder), `diffFormatter` (async), `tableFormatter`, `treeFormatter`.
@@ -273,6 +276,7 @@ Handler receives `(params, ctx)` — URI on `ctx.uri` if needed. Optional `size`
 ```ts
 interface Context {
   readonly requestId: string;
+  readonly sessionId?: string;                // HTTP durable-session ID; stdio/stateless: undefined (opt-in: context.exposeStatelessSessionId)
   readonly timestamp: string;
   readonly tenantId?: string;
   readonly traceId?: string;
@@ -281,11 +285,14 @@ interface Context {
   readonly log: ContextLogger;                // auto-correlated: requestId, traceId, tenantId
   readonly state: ContextState;               // tenant-scoped KV storage
   readonly elicit?: ElicitFn;                 // form call (message, schema) + .url(message, url); present iff client advertises elicitation
+  readonly notifyPromptListChanged?: (() => void) | undefined;     // prompt list changed
   readonly notifyResourceListChanged?: (() => void) | undefined;   // resource list changed
   readonly notifyResourceUpdated?: ((uri: string) => void) | undefined; // resource content changed
+  readonly notifyToolListChanged?: (() => void) | undefined;       // tool list changed
   readonly signal: AbortSignal;               // cancellation
   readonly progress?: ContextProgress;        // present when task: true
   readonly uri?: URL;                         // present for resource handlers
+  readonly content: ContentCollect;           // media blocks → prepended to content[]; never in structuredContent
   readonly enrich: Enrich;                    // success-path agent context → structuredContent + content[]; typed on HandlerContext<R, E>
   recoveryFor(reason: string): { recovery: { hint: string } } | {};  // opt-in contract resolver
 }
@@ -331,6 +338,10 @@ if (ctx.elicit) {
 ```
 
 URL mode: `await ctx.elicit.url('Authorize access', 'https://example.com/authorize')` — hands the user an external link instead of a form. `elicitationId` is generated internally; `content` is absent, only `action` reports the outcome.
+
+### `ctx.content`
+
+Accumulates non-text content blocks — image/audio bytes, embedded resources, resource links — onto the response: `ctx.content.image(data, mimeType)`, `ctx.content.audio(data, mimeType)`, or `ctx.content(block)` for a raw `ContentBlock`. Blocks are prepended to `content[]` after `format()` runs and never enter `structuredContent`, so a handler can emit media for the calling model without the base64 duplicating into typed output. Always present (no-op when unused); callable from handler and service layer.
 
 ### `ctx.progress`
 
@@ -478,9 +489,9 @@ Detailed method signatures, options, and examples live in skill files. Read the 
 
 Each `skills/<name>/SKILL.md` carries `metadata.version` in frontmatter. The `maintenance` skill's Phase A uses this to sync consumer copies — replaces the **entire skill directory** as one unit. Without a version bump, Phase A skips the skill (content-hash backstop catches drift, but noisier).
 
-**Policy:** Bump `metadata.version` when changing any file under `skills/<name>/` — SKILL.md is the single version knob for the directory. Typo/whitespace fixes exempt. One bump per release cycle suffices. Enforced by `bun run devcheck` (`scripts/check-skill-versions.ts`): a SKILL.md body change vs `HEAD` without a `metadata.version` bump surfaces as a warning; whitespace-only edits are ignored, and `devcheck.config.json` `skillVersions.ignore` opts out the typo-fix carve-out.
+**Policy:** Bump `metadata.version` when changing any file under `skills/<name>/` — SKILL.md is the single version knob for the directory. Typo/whitespace fixes exempt. One bump per release cycle suffices. Enforced by `bun run devcheck` (`scripts/check-skill-versions.ts`): a SKILL.md body change vs `HEAD` without a `metadata.version` bump surfaces as a warning; whitespace-only edits never trigger it, and a genuine typo fix opts out via `devcheck.config.json` `skillVersions.ignore`.
 
-Skills live in `skills/<name>/SKILL.md`. Read the relevant skill before starting a task it covers. The full list is discoverable via the agent's skill registry at session start.
+Skills live in `skills/<name>/SKILL.md`; the full list is discoverable via the agent's skill registry at session start.
 
 ---
 
@@ -512,12 +523,13 @@ Skills live in `skills/<name>/SKILL.md`. Read the relevant skill before starting
 |:--------|:--------|
 | `bun run build` | Build library output (`scripts/build.ts`) |
 | `bun run rebuild` | Clean and rebuild (`scripts/clean.ts` + `build`) |
-| `bun run devcheck` | **Use often.** Lint, format, typecheck, MCP definition linting, `bun audit`, `bun outdated` |
+| `bun run devcheck` | **Use often.** Biome lint/format, typecheck, MCP definition + packaging lint, docs/skills/changelog sync checks, secrets + antipattern scans, `bun audit`, `bun outdated` |
 | `bun run audit:refresh` | Delete `bun.lock`, reinstall, re-audit. Use when `devcheck` flags a transitive advisory — stale lockfile can mask already-patched deps. If advisory survives, it's real. |
 | `bun run lint:mcp` | Validate MCP definitions against spec |
 | `bun run format` | Auto-fix Biome lint/format issues (safe fixes only) |
 | `bun run format:unsafe` | Also apply Biome's unsafe autofixes — review the diff; they can change behavior, not just formatting |
 | `bun run test` | Unit/compliance/smoke/fuzz/typecheck suites (Bun runtime) |
+| `bun run test:all` | Release gate: `test:coverage` + `test:node` + `test:worker` + `test:integration` |
 | `bun run test:node` | Same suites + integration under real Node (bypasses the bun-node PATH shim) |
 | `bun run test:leaks` | Suites with Vitest async-leak detection (`--detect-async-leaks`) |
 | `bun run test:typecheck` | Typecheck project only — `.test-d.ts` contracts with `@ts-expect-error` negative cases |
@@ -558,7 +570,7 @@ security: false                                         # optional, default fals
 |:------|:---------|:--------|
 | `summary` | yes | Rollup index line. ≤350 chars, no markdown, single line. Write like a GitHub Release title. |
 | `breaking` | no (default `false`) | Flags releases with breaking changes. Renders as `· ⚠️ Breaking` badge in the rollup. Agents running the `maintenance` skill read this to prioritize review. |
-| `security` | no (default `false`) | Flags releases with security fixes. Renders as `· 🛡️ Security` badge in the rollup so users can triage upgrade urgency. Pairs with the `## Security` body section. |
+| `security` | no (default `false`) | Flags a security fix in **this project's own source code** — a vulnerability or hardening in code we ship. A routine dependency or transitive CVE bump is **not** a security release: leave `false` and record it under `## Dependencies`. Renders as `· 🛡️ Security` badge in the rollup so users can triage upgrade urgency; pairs with the `## Security` body section. |
 | `agent-notes` | no | Free-form adoption notes for downstream `maintenance` agents — new files to create, fields to populate, skills to re-run, one-time migration steps. Not rendered in `CHANGELOG.md`; consumed only by agents running the `maintenance` skill on consumer projects. Omit when there's nothing to say. |
 
 Badge order when both set: `· ⚠️ Breaking · 🛡️ Security`. Summary > 350 chars or malformed boolean fails `changelog:check`.
