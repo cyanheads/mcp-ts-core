@@ -1,7 +1,7 @@
 # Developer Protocol
 
 **Package:** `@cyanheads/mcp-ts-core`
-**Version:** 0.10.12
+**Version:** 0.10.13
 **Engines:** Bun ≥1.3.0, Node ≥24.0.0
 **MCP SDK:** `@modelcontextprotocol/sdk` ^1.29.0
 **Zod:** ^4.4.3
@@ -22,7 +22,7 @@ This package serves two consumer paths. When making changes, know which audience
 | **Direct package import** — existing project pulls in the package | `bun add @cyanheads/mcp-ts-core` → `import { createApp, tool, z } from '@cyanheads/mcp-ts-core'` | Public API surface (`src/`) — existing consumers feel changes immediately on upgrade |
 | **Init-scaffolded server** — fresh project bootstrapped from this repo's templates | `bunx @cyanheads/mcp-ts-core init [name]` copies `templates/` into the new directory | `templates/` — only affects newly scaffolded servers, not existing ones |
 
-Both paths share the same public API. Init copies starter `package.json`, configs (`tsconfig`, `biome.json`, `vitest.config.ts`, `devcheck.config.json`), `.env.example`, `Dockerfile`, `CLAUDE.md`/`AGENTS.md`, example definitions and tests, framework `scripts/`, and external-audience `skills/`. `_`-prefixed files (e.g. `_.gitignore`) drop the prefix on copy. Existing files are never overwritten; `init` without a name scaffolds in place (upgrade flow). After init, consult the `setup` skill.
+Both paths share the same public API. Init copies starter `package.json`, configs (`tsconfig`, `biome.json`, `vitest.config.ts`, `devcheck.config.json`, `bunfig.toml`), `.env.example`, `Dockerfile`, `LICENSE`, `.gitattributes`, `CLAUDE.md`/`AGENTS.md`, example definitions and tests, framework `scripts/`, and external-audience `skills/`. `_`-prefixed files (e.g. `_.gitignore`) drop the prefix on copy. Existing files are never overwritten; `init` without a name scaffolds in place (upgrade flow). After init, consult the `setup` skill.
 
 ---
 
