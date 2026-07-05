@@ -197,6 +197,10 @@ describe('enrichment block', () => {
       const trailer = lastText(result.content);
       expect(trailer).toContain('effectiveQuery');
       expect(trailer).toContain('No matches for "widget".');
+      // #257 — the trailer leads with a blank-line separator so clients that
+      // concatenate adjacent text blocks with no join (Claude Desktop,
+      // claude.ai) don't glue it onto the last domain line.
+      expect(trailer.startsWith('\n\n')).toBe(true);
     });
 
     it('field-helpers kind-tag the trailer (notice → blockquote, total → "N total", echo → "Query: …")', async () => {

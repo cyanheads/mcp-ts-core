@@ -199,7 +199,11 @@ function formatEnrichmentScalar(value: unknown): string {
  * `parsed` is the validated effective output, so renderers receive the typed,
  * post-parse value rather than the raw accumulator entry. The rendered markdown
  * is appended to `content[]` only — `structuredContent` is built separately from
- * the raw merged values and never carries this trailer text. Returns `[]` when
+ * the raw merged values and never carries this trailer text. The trailer text
+ * leads with a blank-line separator so it stands off the preceding block on
+ * clients that concatenate adjacent text blocks with no join (#257); markdown
+ * collapses consecutive blank lines, so clients that do insert their own
+ * separator render at most one blank line either way. Returns `[]` when
  * nothing was enriched.
  */
 function renderEnrichmentTrailer(
@@ -239,7 +243,7 @@ function renderEnrichmentTrailer(
         lines.push(`**${cfg?.label ?? key}:** ${formatEnrichmentScalar(value)}`);
     }
   }
-  return lines.length > 0 ? [{ type: 'text', text: lines.join('\n') }] : [];
+  return lines.length > 0 ? [{ type: 'text', text: `\n\n${lines.join('\n')}` }] : [];
 }
 
 /**
