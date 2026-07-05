@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.10.11](changelog/0.10.x/0.10.11.md) — 2026-07-04
+
+Fresh-scaffold devcheck fix (template biome pin 2.5.2), changelog security flag scoped to source-code fixes only, protocol docs synced to as-built, stale startup-linter JSDoc corrected to build-time lint, tag-signing safeguards in the release skills, dependency refresh.
+
 ## [0.10.10](changelog/0.10.x/0.10.10.md) — 2026-06-30 · ⚠️ Breaking
 
 js-yaml v4 → v5 migration: YamlParser uses YAML11_SCHEMA to preserve YAML 1.1 load semantics after v5 defaults to CORE_SCHEMA, namespace import replaces the removed default export, @types/js-yaml dropped (v5 self-types). Breaking: the js-yaml peer dependency moves ^4 → ^5. Plus biome 2.5.1 and a dependency refresh.
