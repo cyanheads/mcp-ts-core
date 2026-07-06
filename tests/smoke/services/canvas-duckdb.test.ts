@@ -427,9 +427,20 @@ describeIf('canvas · DuckDB round trip', () => {
   it('importFrom rejects a missing source table with NotFound', async () => {
     const source = await canvas.acquire(undefined, ctx);
     const target = await canvas.acquire(undefined, ctx);
-    await expect(target.importFrom(source.canvasId, 'no_such_table')).rejects.toThrow(
-      /does not contain a table or view/i,
-    );
+    let caught: unknown;
+    try {
+      await target.importFrom(source.canvasId, 'no_such_table');
+    } catch (err) {
+      caught = err;
+    }
+    expect(caught).toBeInstanceOf(McpError);
+    const mcpErr = caught as McpError;
+    // NotFound (-32001) with a structured reason + recovery (issue #264) — not a bare message.
+    expect(mcpErr.code).toBe(-32001);
+    expect(mcpErr.message).toMatch(/does not contain a table or view/i);
+    const data = mcpErr.data as { reason?: string; recovery?: { hint?: string } };
+    expect(data.reason).toBe('missing_table');
+    expect(typeof data.recovery?.hint).toBe('string');
   });
 
   it('importFrom rejects when source and target are the same canvas', async () => {

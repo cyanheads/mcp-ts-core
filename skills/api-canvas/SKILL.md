@@ -4,7 +4,7 @@ description: >
   DataCanvas primitive reference — a Tier 3 SQL/analytical workspace for tabular MCP servers, backed by DuckDB. Use when registering tables from upstream APIs, running ad-hoc SQL across them, and exporting results. Covers the acquire → register → query → export flow, per-table TTL, the token-sharing pattern for multi-agent collaboration, env config, and Cloudflare Workers fail-closed behavior.
 metadata:
   author: cyanheads
-  version: "1.8"
+  version: "1.9"
   audience: external
   type: reference
 ---
@@ -212,7 +212,7 @@ const imported = await target.importFrom(source.canvasId, 'orders', { asName: 'o
 // { tableName: 'orders_copy', rowCount: 2, columns: [...] }
 ```
 
-Idempotent on re-import (drop + create on the target). `asName` defaults to `sourceTableName`. Throws `validationError({ reason: 'import_same_canvas' })` if source and target are the same canvas — use `query({ registerAs })` to materialize within a single canvas. Throws `notFound` if the source table is missing; `validationError({ reason: 'import_view_clash' })` if the target name collides with an existing view.
+Idempotent on re-import (drop + create on the target). `asName` defaults to `sourceTableName`. Throws `validationError({ reason: 'import_same_canvas' })` if source and target are the same canvas — use `query({ registerAs })` to materialize within a single canvas. Throws `notFound({ reason: 'missing_table' })` if the source table is missing; `validationError({ reason: 'import_view_clash' })` if the target name collides with an existing view.
 
 ### `instance.export(tableName, target, options?)`
 

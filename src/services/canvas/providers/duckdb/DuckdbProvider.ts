@@ -482,7 +482,12 @@ export class DuckdbProvider implements IDataCanvasProvider {
     if (sourceCanvasId === targetCanvasId) {
       throw validationError(
         'Source and target canvases must differ. Use registerAs in query() to materialize within a single canvas.',
-        { reason: 'import_same_canvas' },
+        {
+          reason: 'import_same_canvas',
+          recovery: {
+            hint: 'Import between two different canvases, or use registerAs in query() to materialize a table within a single canvas.',
+          },
+        },
       );
     }
 
@@ -496,8 +501,12 @@ export class DuckdbProvider implements IDataCanvasProvider {
     const sourceKind = await this.lookupKind(source.controlConnection, sourceTableName);
     if (sourceKind === undefined) {
       throw notFound(`Source canvas does not contain a table or view named "${sourceTableName}".`, {
+        reason: 'missing_table',
         sourceCanvasId,
         sourceTableName,
+        recovery: {
+          hint: 'Re-check the source table name, or call describe() on the source canvas to see the tables and views currently staged.',
+        },
       });
     }
 
@@ -505,7 +514,13 @@ export class DuckdbProvider implements IDataCanvasProvider {
     if (targetExisting === 'view') {
       throw validationError(
         `Target canvas already contains a view named "${asName}". Drop the view or choose a different name.`,
-        { reason: 'import_view_clash', asName },
+        {
+          reason: 'import_view_clash',
+          asName,
+          recovery: {
+            hint: 'Drop the existing view with drop(), or choose a different asName for the imported table.',
+          },
+        },
       );
     }
 
