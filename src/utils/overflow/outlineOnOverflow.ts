@@ -27,14 +27,19 @@ export interface SectionMeta {
 }
 
 /**
- * Reusable outline arm for a tool's discriminated-union `output`. Pair it with
- * the tool's full-payload schema so the parity linter validates each branch:
+ * Reusable outline arm for a tool's `output`. A tool's `output` must be a flat
+ * `z.object` — `tool()` rejects a `z.discriminatedUnion` (the `schema-is-object`
+ * lint rule and the enrichment `.extend()` are both `ZodObject`-only). Model the
+ * two modes as one object with a `kind` discriminator and presence-based optional
+ * arms, folding this schema's `sections` / `notice` shape into the outline arm:
  *
  * ```ts
- * output: z.discriminatedUnion('kind', [
- *   FullLabel.extend({ kind: z.literal('full') }),
- *   OUTLINE_VARIANT,
- * ]),
+ * output: z.object({
+ *   kind: z.enum(['full', 'outline']),
+ *   // full-mode arms (present when kind === 'full') — each .optional()
+ *   sections: OUTLINE_VARIANT.shape.sections.optional(),   // outline-mode arms
+ *   notice: OUTLINE_VARIANT.shape.notice.optional(),
+ * }),
  * ```
  */
 export const OUTLINE_VARIANT = z.object({
@@ -97,8 +102,10 @@ function defaultNotice(sections: SectionMeta[]): string {
 
 /**
  * Returns the document whole when it fits the budget, or a section outline when
- * it overflows. The caller spreads the result into a discriminated-union `output`
- * keyed on `kind` ({@link OUTLINE_VARIANT} supplies the outline arm).
+ * it overflows. Declare the tool's `output` as a flat `z.object` with a `kind`
+ * discriminator and presence-based optional arms — `tool()` rejects a
+ * `z.discriminatedUnion` output ({@link OUTLINE_VARIANT} supplies the outline
+ * arm's `sections` / `notice`).
  *
  * Single-entry short-circuit: a document with fewer than two sections is returned
  * whole even when over budget — an outline of one section would cost a round-trip
@@ -160,11 +167,17 @@ export function selectSections<T extends Record<string, unknown>>(
 
 /**
  * Renders an outline payload to MCP `content[]` — the markdown twin of the
- * outline's `structuredContent`, so `format()`-parity holds. Drop into a tool's
- * `format`:
+ * outline's `structuredContent`, so `format()`-parity holds. The flat-object
+ * `output` carries both modes as optional fields, so render each arm on field
+ * presence, independently — never branch on `kind`. Parity injects one synthetic
+ * sample with every optional field populated at once, so a mutually-exclusive
+ * `kind` branch would leave the untaken arm's fields unrendered:
  *
  * ```ts
- * format: (r) => (r.kind === 'outline' ? formatOutline(r) : renderFull(r)),
+ * format: (r) => [
+ *   ...(r.id ? renderFull(r) : []),  // full arm — key on a full-only field
+ *   ...(r.sections ? formatOutline({ kind: 'outline', sections: r.sections, notice: r.notice ?? '' }) : []),
+ * ],
  * ```
  */
 export function formatOutline(outline: OutlinePayload): ContentBlock[] {

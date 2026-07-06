@@ -114,7 +114,7 @@ describe('formatOutline', () => {
   });
 });
 
-describe('OUTLINE_VARIANT in a discriminated-union output', () => {
+describe('outlineOnOverflow results validate against a kind-discriminated union', () => {
   const FullLabel = z.object({ id: z.string(), body: z.string() });
   const output = z.discriminatedUnion('kind', [
     FullLabel.extend({ kind: z.literal('full') }),
