@@ -14,7 +14,7 @@ COPY package.json bun.lock ./
 # Install all dependencies (including dev dependencies for building).
 # The BuildKit cache mount persists Bun's global package cache across builds.
 RUN --mount=type=cache,target=/root/.bun/install/cache \
-    bun install --frozen-lockfile
+    bun install --frozen-lockfile --ignore-scripts
 
 # Copy the rest of the source code
 COPY . .
