@@ -19,7 +19,7 @@
 
 `@cyanheads/mcp-ts-core` is the infrastructure layer for TypeScript MCP servers. Install it as a dependency — don't fork it. Your agent collaborates with you to design and build the tools, resources, and prompts for your server.
 
-The framework handles the plumbing: transports, auth, config, logging, telemetry, & more. Define your domain logic with the builders and let the framework take care of the rest.
+The framework handles the plumbing: transports, auth, config, logging, telemetry, & more.
 
 ```ts
 import { createApp, tool, z } from '@cyanheads/mcp-ts-core';
@@ -63,7 +63,11 @@ const search = tool('search', {
 await createApp({ tools: [search] });
 ```
 
-That's a complete MCP server, showing both flagship contracts. **`enrichment`** carries the context an agent reasons with — the parsed query, the true total, an empty-result notice — which the framework merges into `structuredContent` *and* mirrors into `content[]`, so `structuredContent`-only clients (Claude Code) and `content[]`-only clients (Claude Desktop) both see it, no `format()` needed. The typed **`errors[]`** contract handles genuine failures (an empty result is a `notice`, not a throw). The linter cross-checks both against the handler body, and both publish in `tools/list` so clients preview a tool's success *and* failure shapes. Every tool call is automatically logged with duration, payload sizes, and request correlation — no instrumentation code needed; `createApp()` handles config parsing, logger init, transport startup, signal handlers, and graceful shutdown.
+That's a complete MCP server, and it shows both of the framework's core contracts.
+
+**`enrichment`** carries the context an agent reasons with (the parsed query, the true total, an empty-result notice); the framework merges it into `structuredContent` *and* mirrors it into `content[]`, so `structuredContent`-only clients (Claude Code) and `content[]`-only clients (Claude Desktop) both see it, no `format()` needed. The typed **`errors[]`** contract handles genuine failures (an empty result is a `notice`, not a throw), and the linter cross-checks both against the handler body. Both publish in `tools/list`, so clients preview a tool's success *and* failure shapes.
+
+The rest is automatic: every tool call is logged with duration, payload sizes, and request correlation, and `createApp()` handles config parsing, logger init, transport startup, signal handlers, and graceful shutdown.
 
 ## Quick start
 
@@ -73,13 +77,13 @@ cd my-mcp-server
 bun install
 ```
 
-You get a scaffolded project with `CLAUDE.md`/`AGENTS.md`, Agent Skills, plugin metadata (Codex + Claude Code), and a `src/` tree ready for your tools. Infrastructure — transports, auth, storage, telemetry, lifecycle, linting — lives in `node_modules`. What's left is domain: which APIs to wrap, which workflows to expose.
+You get a scaffolded project with `CLAUDE.md`/`AGENTS.md`, Agent Skills, plugin metadata (Codex + Claude Code), and a `src/` tree ready for your tools. Infrastructure (transports, auth, storage, telemetry, lifecycle, linting) lives in `node_modules`. What's left is domain: which APIs to wrap, which workflows to expose.
 
-Start your coding agent (i.e. Claude Code, Codex) and describe what you want. The agent knows what to do from there. The included Agent Skills cover the full cycle: `setup`, `design-mcp-server`, scaffolding, testing, `security-pass`, `release-and-publish`, `maintenance`, & more.
+Start your coding agent (e.g. Claude Code, Codex) and describe what you want. The agent knows what to do from there. The included Agent Skills cover the full cycle: `setup`, `design-mcp-server`, scaffolding, testing, `security-pass`, `release-and-publish`, `maintenance`, & more.
 
 ### What you get
 
-The headline tool returns structured output — clients that read `structuredContent` (Claude Code) get it directly. To also render markdown for clients that read `content[]` (Claude Desktop), add a `format()`. The `format-parity` linter checks it renders every `output` field, so the two surfaces never drift:
+The headline tool returns structured output. Clients that read `structuredContent` (Claude Code) get it directly. To also render markdown for clients that read `content[]` (Claude Desktop), add a `format()`. The `format-parity` linter checks it renders every `output` field, so the two surfaces never drift:
 
 ```ts
 import { tool, z } from '@cyanheads/mcp-ts-core';
