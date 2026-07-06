@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.10.14](changelog/0.10.x/0.10.14.md) — 2026-07-06
+
+Docker build stage adds --ignore-scripts so native postinstalls no longer fail the build; the definition linter surfaces a definition-invalid diagnostic instead of crashing on a null definitions entry; canvas importFrom's missing-table NotFound carries reason 'missing_table' + recovery; outline-on-overflow and release-skill docs corrected.
+
 ## [0.10.13](changelog/0.10.x/0.10.13.md) — 2026-07-05
 
 Supply-chain hardening: a bunfig minimumReleaseAge 3-day hold and the Socket install scanner, a SECURITY.md policy, and a devcheck Outdated gate that skips release-age holds. Wrangler migrated to JSONC with a DuckDB Worker stub; tsconfig, Dockerfile, and packaging modernized; Smithery config removed; test coverage expanded.

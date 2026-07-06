@@ -1,6 +1,6 @@
 # mcp-ts-core - Directory Structure
 
-Generated on: 2026-07-05 17:53:08
+Generated on: 2026-07-06 08:01:02
 
 ```text
 mcp-ts-core/
@@ -232,6 +232,7 @@ mcp-ts-core/
 │   │   └── worker.ts
 │   ├── linter/
 │   │   ├── rules/
+│   │   │   ├── definition-rules.ts
 │   │   │   ├── enrichment-rules.ts
 │   │   │   ├── error-contract-rules.ts
 │   │   │   ├── format-parity-rules.ts
@@ -808,6 +809,7 @@ mcp-ts-core/
 │   │   ├── storage-d1.worker.test.ts
 │   │   └── storage-r2.worker.test.ts
 │   └── setup.ts
+├── tmp/
 ├── .dockerignore
 ├── .env.example
 ├── .gitattributes
