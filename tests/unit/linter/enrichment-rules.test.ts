@@ -360,3 +360,17 @@ describe('lintCappedListTruncation', () => {
     });
   });
 });
+
+describe('malformed def entries', () => {
+  it('lintEnrichmentContract returns [] instead of throwing on a null/undefined def', () => {
+    expect(() => lintEnrichmentContract(null, 'tool', 'x')).not.toThrow();
+    expect(lintEnrichmentContract(null, 'tool', 'x')).toEqual([]);
+    expect(lintEnrichmentContract(undefined, 'tool', 'x')).toEqual([]);
+  });
+
+  it('lintCappedListTruncation returns [] instead of throwing on a null/undefined def', () => {
+    expect(() => lintCappedListTruncation(null)).not.toThrow();
+    expect(lintCappedListTruncation(null)).toEqual([]);
+    expect(lintCappedListTruncation(undefined)).toEqual([]);
+  });
+});

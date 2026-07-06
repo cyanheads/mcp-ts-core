@@ -157,6 +157,30 @@ describe('lintToolDefinition — _meta.ui', () => {
 });
 
 // ---------------------------------------------------------------------------
+// lintToolDefinition — malformed entry (null/undefined)
+// ---------------------------------------------------------------------------
+
+describe('lintToolDefinition — malformed entry', () => {
+  it('returns a definition-invalid diagnostic instead of throwing on null', () => {
+    expect(() => lintToolDefinition(null)).not.toThrow();
+    expect(lintToolDefinition(null)).toContainEqual(
+      expect.objectContaining({
+        rule: 'definition-invalid',
+        definitionType: 'tool',
+        severity: 'error',
+      }),
+    );
+  });
+
+  it('returns a definition-invalid diagnostic instead of throwing on undefined', () => {
+    expect(() => lintToolDefinition(undefined)).not.toThrow();
+    expect(lintToolDefinition(undefined)).toContainEqual(
+      expect.objectContaining({ rule: 'definition-invalid', definitionType: 'tool' }),
+    );
+  });
+});
+
+// ---------------------------------------------------------------------------
 // lintAppToolResourcePairing
 // ---------------------------------------------------------------------------
 

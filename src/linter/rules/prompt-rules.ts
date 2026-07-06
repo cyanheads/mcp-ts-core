@@ -5,6 +5,7 @@
  */
 
 import type { LintDiagnostic } from '../types.js';
+import { invalidDefinitionEntry, isDefinitionObject } from './definition-rules.js';
 import { checkNameRequired } from './name-rules.js';
 import { lintSchemaPortability, type PortabilityOptions } from './portability-rules.js';
 import {
@@ -20,6 +21,7 @@ export function lintPromptDefinition(
   def: unknown,
   portability?: PortabilityOptions,
 ): LintDiagnostic[] {
+  if (!isDefinitionObject(def)) return [invalidDefinitionEntry(def, 'prompt')];
   const diagnostics: LintDiagnostic[] = [];
   const d = def as Record<string, unknown>;
   const name = typeof d?.name === 'string' ? d.name : '';

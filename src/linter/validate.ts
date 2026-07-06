@@ -5,6 +5,7 @@
  * @module src/linter/validate
  */
 
+import { invalidDefinitionEntry, isDefinitionObject } from './rules/definition-rules.js';
 import { lintCappedListTruncation, type TruncationOptions } from './rules/enrichment-rules.js';
 import { lintLandingConfig } from './rules/landing-rules.js';
 import { checkDuplicateNames } from './rules/name-rules.js';
@@ -141,8 +142,14 @@ export function validateDefinitions(input: LintInput): LintReport {
   const canvasOptions = resolveCanvasOptions(input);
   const truncationOptions = resolveTruncationOptions(input);
 
-  // Per-definition validation
+  // Per-definition validation. A null/undefined (or non-object) entry is
+  // surfaced once here and skipped, so no sub-linter — including the
+  // capped-list-truncation check below — dereferences it and throws.
   for (const def of tools) {
+    if (!isDefinitionObject(def)) {
+      diagnostics.push(invalidDefinitionEntry(def, 'tool'));
+      continue;
+    }
     diagnostics.push(...lintToolDefinition(def, portabilityOptions));
     diagnostics.push(
       ...lintCappedListTruncation(
@@ -152,9 +159,17 @@ export function validateDefinitions(input: LintInput): LintReport {
     );
   }
   for (const def of resources) {
+    if (!isDefinitionObject(def)) {
+      diagnostics.push(invalidDefinitionEntry(def, 'resource'));
+      continue;
+    }
     diagnostics.push(...lintResourceDefinition(def, portabilityOptions));
   }
   for (const def of prompts) {
+    if (!isDefinitionObject(def)) {
+      diagnostics.push(invalidDefinitionEntry(def, 'prompt'));
+      continue;
+    }
     diagnostics.push(...lintPromptDefinition(def, portabilityOptions));
   }
 

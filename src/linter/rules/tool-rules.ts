@@ -5,6 +5,7 @@
  */
 
 import type { LintDiagnostic } from '../types.js';
+import { invalidDefinitionEntry, isDefinitionObject } from './definition-rules.js';
 import { lintEnrichmentContract } from './enrichment-rules.js';
 import { lintErrorContract, lintErrorContractConformance } from './error-contract-rules.js';
 import { lintFormatParity } from './format-parity-rules.js';
@@ -26,6 +27,7 @@ export function lintToolDefinition(
   def: unknown,
   portability?: PortabilityOptions,
 ): LintDiagnostic[] {
+  if (!isDefinitionObject(def)) return [invalidDefinitionEntry(def, 'tool')];
   const diagnostics: LintDiagnostic[] = [];
   const d = def as Record<string, unknown>;
   const name = typeof d?.name === 'string' ? d.name : '';

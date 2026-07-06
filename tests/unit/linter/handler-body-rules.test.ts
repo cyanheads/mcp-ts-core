@@ -185,3 +185,11 @@ describe('lintHandlerBody — edge cases', () => {
     expect(d[0]?.message).toContain('resource');
   });
 });
+
+describe('malformed def entries', () => {
+  it('returns [] instead of throwing on a null/undefined def', () => {
+    expect(() => lintHandlerBody(null, 'tool')).not.toThrow();
+    expect(lintHandlerBody(null, 'tool')).toEqual([]);
+    expect(lintHandlerBody(undefined, 'tool')).toEqual([]);
+  });
+});

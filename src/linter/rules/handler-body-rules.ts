@@ -7,6 +7,7 @@
  */
 
 import type { LintDefinitionType, LintDiagnostic } from '../types.js';
+import { isDefinitionObject } from './definition-rules.js';
 import { stripCommentsAndStrings } from './source-text.js';
 
 /**
@@ -45,9 +46,10 @@ const STRUCTURED_THROW_RE = new RegExp(
  * common anti-patterns documented in the framework conventions.
  */
 export function lintHandlerBody(
-  def: { handler?: unknown; name?: string },
+  def: { handler?: unknown; name?: string } | null | undefined,
   definitionType: LintDefinitionType,
 ): LintDiagnostic[] {
+  if (!isDefinitionObject(def)) return [];
   const diagnostics: LintDiagnostic[] = [];
   const definitionName = typeof def.name === 'string' && def.name ? def.name : '<unnamed>';
 

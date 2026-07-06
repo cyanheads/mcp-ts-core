@@ -1250,5 +1250,67 @@ describe('validateDefinitions', () => {
       expect(report.errors).toContainEqual(expect.objectContaining({ rule: 'name-required' }));
       expect(report.errors).toContainEqual(expect.objectContaining({ rule: 'generate-required' }));
     });
+
+    it('surfaces a null tool entry as a diagnostic instead of throwing', () => {
+      expect(() => validateDefinitions({ tools: [null] })).not.toThrow();
+      const report = validateDefinitions({ tools: [null] });
+      expect(report.passed).toBe(false);
+      expect(report.errors).toContainEqual(
+        expect.objectContaining({ rule: 'definition-invalid', definitionType: 'tool' }),
+      );
+    });
+
+    it('surfaces a null resource entry as a diagnostic instead of throwing', () => {
+      expect(() => validateDefinitions({ resources: [null] })).not.toThrow();
+      const report = validateDefinitions({ resources: [null] });
+      expect(report.errors).toContainEqual(
+        expect.objectContaining({ rule: 'definition-invalid', definitionType: 'resource' }),
+      );
+    });
+
+    it('surfaces a null prompt entry as a diagnostic instead of throwing', () => {
+      expect(() => validateDefinitions({ prompts: [null] })).not.toThrow();
+      const report = validateDefinitions({ prompts: [null] });
+      expect(report.errors).toContainEqual(
+        expect.objectContaining({ rule: 'definition-invalid', definitionType: 'prompt' }),
+      );
+    });
+
+    it('surfaces an undefined entry as a diagnostic for every definition kind', () => {
+      expect(() => validateDefinitions({ tools: [undefined] })).not.toThrow();
+      expect(validateDefinitions({ tools: [undefined] }).errors).toContainEqual(
+        expect.objectContaining({ rule: 'definition-invalid', definitionType: 'tool' }),
+      );
+      expect(() => validateDefinitions({ resources: [undefined] })).not.toThrow();
+      expect(validateDefinitions({ resources: [undefined] }).errors).toContainEqual(
+        expect.objectContaining({ rule: 'definition-invalid', definitionType: 'resource' }),
+      );
+      expect(() => validateDefinitions({ prompts: [undefined] })).not.toThrow();
+      expect(validateDefinitions({ prompts: [undefined] }).errors).toContainEqual(
+        expect.objectContaining({ rule: 'definition-invalid', definitionType: 'prompt' }),
+      );
+    });
+
+    it('skips a null entry and still lints valid tools after it (masked truncation site)', () => {
+      const cappedAfterNull = validTool({
+        name: 'search_results',
+        input: z.object({ limit: z.number().describe('Max results') }),
+        output: z.object({ items: z.array(z.string()).describe('Items') }),
+        handler: async () => ({ items: [] }),
+      });
+      expect(() => validateDefinitions({ tools: [null, cappedAfterNull] })).not.toThrow();
+      const report = validateDefinitions({ tools: [null, cappedAfterNull] });
+      // Null entry surfaced...
+      expect(report.errors).toContainEqual(
+        expect.objectContaining({ rule: 'definition-invalid', definitionType: 'tool' }),
+      );
+      // ...and the per-tool loop (including lintCappedListTruncation) still ran on the valid tool.
+      expect(report.warnings).toContainEqual(
+        expect.objectContaining({
+          rule: 'capped-list-no-truncation',
+          definitionName: 'search_results',
+        }),
+      );
+    });
   });
 });

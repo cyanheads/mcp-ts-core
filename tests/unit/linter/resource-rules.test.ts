@@ -193,4 +193,22 @@ describe('lintResourceDefinition', () => {
       ).toContain('error-contract-type');
     });
   });
+
+  describe('malformed entry', () => {
+    it('returns a definition-invalid diagnostic instead of throwing on null', () => {
+      expect(() => lintResourceDefinition(null)).not.toThrow();
+      expect(lintResourceDefinition(null)).toContainEqual(
+        expect.objectContaining({
+          rule: 'definition-invalid',
+          definitionType: 'resource',
+          severity: 'error',
+        }),
+      );
+    });
+
+    it('returns a definition-invalid diagnostic instead of throwing on undefined', () => {
+      expect(() => lintResourceDefinition(undefined)).not.toThrow();
+      expect(rules(undefined)).toContain('definition-invalid');
+    });
+  });
 });

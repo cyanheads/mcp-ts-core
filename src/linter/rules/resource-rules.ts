@@ -7,6 +7,7 @@
 import type { ZodObject, ZodRawShape } from 'zod';
 
 import type { LintDiagnostic } from '../types.js';
+import { invalidDefinitionEntry, isDefinitionObject } from './definition-rules.js';
 import { lintErrorContract, lintErrorContractConformance } from './error-contract-rules.js';
 import { lintHandlerBody } from './handler-body-rules.js';
 import { checkNameRequired } from './name-rules.js';
@@ -25,6 +26,7 @@ export function lintResourceDefinition(
   def: unknown,
   portability?: PortabilityOptions,
 ): LintDiagnostic[] {
+  if (!isDefinitionObject(def)) return [invalidDefinitionEntry(def, 'resource')];
   const diagnostics: LintDiagnostic[] = [];
   const d = def as Record<string, unknown>;
   const uriTemplate = typeof d?.uriTemplate === 'string' ? d.uriTemplate : '';

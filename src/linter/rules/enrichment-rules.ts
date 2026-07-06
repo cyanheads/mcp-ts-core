@@ -15,6 +15,7 @@
  */
 
 import type { LintDefinitionType, LintDiagnostic } from '../types.js';
+import { isDefinitionObject } from './definition-rules.js';
 import { getCoreDefType, objectShape, objectShapeKeys, unwrapWrappers } from './schema-rules.js';
 
 /** Pattern matching depth-0 cap-like input fields (case-insensitive, snake or camel). */
@@ -86,10 +87,11 @@ function isDeltaShape(schema: unknown): boolean {
  * an `enrichmentTrailer` is declared with no block to attach to.
  */
 export function lintEnrichmentContract(
-  def: { enrichment?: unknown; output?: unknown; enrichmentTrailer?: unknown },
+  def: { enrichment?: unknown; output?: unknown; enrichmentTrailer?: unknown } | null | undefined,
   definitionType: LintDefinitionType,
   definitionName: string,
 ): LintDiagnostic[] {
+  if (!isDefinitionObject(def)) return [];
   const diagnostics: LintDiagnostic[] = [];
   const outputKeys = objectShapeKeys(def.output);
 
@@ -244,9 +246,14 @@ export interface TruncationOptions {
  * count as honest disclosure — the rule fires only on a genuinely silent cap.
  */
 export function lintCappedListTruncation(
-  def: { name?: unknown; input?: unknown; output?: unknown; enrichment?: unknown },
+  def:
+    | { name?: unknown; input?: unknown; output?: unknown; enrichment?: unknown }
+    | null
+    | undefined,
   truncationOptions?: TruncationOptions,
 ): LintDiagnostic[] {
+  if (!isDefinitionObject(def)) return [];
+
   // Rule disabled via knob
   if (truncationOptions?.truncationAllowlist === false) return [];
 
