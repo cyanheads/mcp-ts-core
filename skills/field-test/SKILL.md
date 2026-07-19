@@ -4,7 +4,7 @@ description: >
   Exercise tools, resources, and prompts against a live HTTP server via MCP JSON-RPC over curl. Starts the server, surfaces the catalog, runs real and adversarial inputs, and produces a tight report with concrete findings and numbered follow-up options. Use after adding or modifying definitions, or when the user asks to test, try out, or verify their MCP surface.
 metadata:
   author: cyanheads
-  version: "2.6"
+  version: "2.7"
   audience: external
   type: debug
 ---
@@ -232,7 +232,7 @@ Treat any hit as a `ux` finding in the report. The authoring rule lives under *T
 | Category | What to verify |
 |:---------|:---------------|
 | Happy path | One realistic input. Output shape matches schema. `content[]` text reads clearly to a human. |
-| `structuredContent` ↔ `content[]` parity | Every field in `structuredContent` is surfaced in the text. Parity gap = client-specific blindness. |
+| `structuredContent` ↔ `content[]` parity | Dump the whole array (`jq '.result.content'`) and check every `structuredContent` field is surfaced *somewhere* in it — enrichment lands in its own trailing block, not in `content[0]`. Parity gap = client-specific blindness. |
 | Input error | One invalid input (wrong type or missing required). Error text says *what*, *why*, *how to fix*. |
 
 **Situational — add only when triggered**
@@ -271,6 +271,7 @@ When a call surprises you — slow, hangs, returns terse output, surfaces an unh
 
 **Interpreting responses**
 
+- **`content[]` is an array of blocks — read all of them, never just `content[0]`.** A success result is assembled as `[...ctx.content media blocks, ...the format()/JSON domain render, ...the enrichment trailer]`. Everything the handler put on `ctx.enrich` — empty-result notices, totals, query echoes, truncation disclosure — renders in that trailer, a **separate trailing block**, not inside the `format()` block. Quoting `content[0].text` and reporting those fields as absent from `content[]` is a false parity gap; the suggested fix (render them in `format()` too) would double-render them. Dump `.result.content` in full before claiming drift.
 - Tool domain errors return `{result: {content: [...], isError: true}}` — they live in `result`, not `error`. Check `isError`, not the JSON-RPC error field.
 - **Tool error code/reason** rides on `result.structuredContent.error.{code, message, data?.reason}` — inspect that, not just the text. `data` is only spread when the handler threw an `McpError` (or `ZodError`); plain `throw new Error(...)` won't populate `data.reason`. Use `ctx.fail`-thrown errors when the contract reason matters. The text in `result.content[0].text` mirrors the message and includes `Recovery: <hint>` when `data.recovery.hint` is present.
 - **Resource errors** are JSON-RPC-level — they appear in the top-level `error.{code, data.reason}` field, not inside `result`. Resource handlers re-throw rather than producing an `isError` envelope.
@@ -297,7 +298,7 @@ One paragraph. How many definitions exercised, how many passed clean, how many h
 
 #### Findings
 
-Only include definitions with issues. Group by severity. Each finding is 2–4 lines unless it genuinely needs more.
+Only include definitions with issues. Group by severity. Each finding is 2–4 lines unless it genuinely needs more. A parity finding cites the full `content[]` dump as its evidence — a quote from one index doesn't establish drift.
 
 | Severity | Meaning |
 |:---------|:--------|
@@ -336,7 +337,7 @@ End with:
 - [ ] HTTP server built and started; real port parsed from log
 - [ ] Session initialized; `notifications/initialized` sent
 - [ ] Catalog surfaced and presented; descriptions audited for leaks (implementation details, meta-coaching, consumer-aware phrasing)
-- [ ] Universal battery run on every definition (happy path, parity, input error)
+- [ ] Universal battery run on every definition (happy path, parity against the full `content[]` array, input error)
 - [ ] Situational categories applied only when triggered
 - [ ] **If >15 tools:** sampled 30–40% for situational testing; skipped definitions listed in report
 - [ ] **If a tool declared an `errors: [...]` contract:** ≥1 declared failure mode triggered; `result.structuredContent.error.code` and `data.reason` verified against the contract entry

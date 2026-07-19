@@ -4,7 +4,7 @@ description: >
   Land working-tree changes as logical commits — the work grouped by concern, topped by a release commit (version bump, changelog, regenerated artifacts) and an annotated tag. Verify, commit, tag. Stops at "committed and tagged locally" — no push, no publish. The release-and-publish skill picks up from here. Distilled from the git_wrapup_instructions protocol.
 metadata:
   author: cyanheads
-  version: "1.7"
+  version: "1.8"
   audience: external
   type: workflow
 ---
@@ -160,40 +160,28 @@ Use `-m` with embedded newlines in the string (the commit `-m`-only constraint a
 
 `--cleanup=whitespace` is load-bearing. The default cleanup (`strip`) deletes `#`-leading lines as comments, so markdown headers silently vanish from the tag body. `--cleanup=verbatim` is worse: it skips end-of-message normalization, so with tag signing enabled the signature is appended flush against the message's last character — git then can't parse its own signature (the tag reads as unsigned) and the whole `-----BEGIN SSH SIGNATURE-----` block publishes verbatim into the GitHub Release body.
 
-Format:
+Format — a **headline digest**, never a section-by-section changelog mirror:
 
 ```
 <theme — omit version number, GitHub prepends v<VERSION>:>
 
-<optional context — one concise line, two max>
-
-<Sections — Keep a Changelog names, only those with entries>
-
-Added:
-
-- <bullet>
-
-Changed:
-
-- <bullet>
-
-<dep arrows if applicable>
-
-Dependency bumps:
-
-- `pkg` ^old → ^new
-
-<N> tests pass; `bun run devcheck` clean.
+- <notable user-facing change> (#N)
+- <notable user-facing change> (#N)
+- <ONE compact grouped line for the minor/internal changes — build config, repo hygiene, metadata>
+- deps: `@cyanheads/mcp-ts-core` ^0.10.6 → ^0.10.14 (+ dev-dep bumps)
 
 [CHANGELOG v<version>](https://github.com/<OWNER>/<REPO>/blob/main/changelog/<major.minor>.x/<version>.md)
 ```
 
 **Rules:**
 - Subject line omits the version number (GitHub prepends `v<VERSION>:` to the release title)
-- **No narrative preamble** — context under the subject is one concise line, two max; never paragraph blocks. Detail belongs in the bullets
-- Not a CHANGELOG copy — terse, scannable
+- **Flat bullets only — never Keep-a-Changelog section headers.** `Added:`/`Changed:`/`Fixed:`/`Dependency bumps:` belong in the changelog file; a tag that mirrors the changelog's structure is wrong even when every line is accurate
+- **Complete at headline granularity** — every changelog-worthy change stays visible: notable changes get their own bullet, minor/internal items (build config, repo hygiene, metadata) share ONE grouped compact bullet. Nothing silently dropped, nothing expanded — the changelog carries the depth, the tag carries the existence
+- **Deps: one line max**, naming only what earns it (the framework bump, a major); per-package arrows for the rest live in the changelog entry only
+- **No gates line** — test counts and devcheck status are changelog detail, not release-body material
+- No narrative preamble — bullets under the subject, no paragraph blocks
 - No marketing adjectives
-- Length is earned — two-line tags are fine for small patches
+- Length is earned — a subject + two bullets + changelog link is a fine tag for a small patch
 - **Issue backlinks:** when changes address GitHub issues, include `(#N)` references in the relevant bullets — same as the changelog entry. The backlinks render as clickable links in the GitHub Release body.
 - **Changelog link (final line):** end the tag body with a Markdown link to this version's changelog file, so the GitHub Release offers a one-click jump to the full entry — `[CHANGELOG v<version>](https://github.com/<OWNER>/<REPO>/blob/main/changelog/<major.minor>.x/<version>.md)`. Derive `<OWNER>/<REPO>` from the origin remote; the path mirrors the file authored in step 4 (e.g. `changelog/0.10.x/0.10.12.md`). Keep the blank line above it so it renders as its own paragraph, not appended to the gates line.
 
