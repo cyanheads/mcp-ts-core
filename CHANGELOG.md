@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.10.15](changelog/0.10.x/0.10.15.md) — 2026-07-19
+
+withRetry honors Retry-After (delta-seconds and HTTP-date, capped at maxDelayMs); fetchWithTimeout adds an expectedStatuses log opt-out and canonical status/body error fields (legacy aliases kept); fixes duplicate error logging and a stale 0.10.13 changelog note; biome 2.5.4 migration, dependency refresh, skill updates.
+
 ## [0.10.14](changelog/0.10.x/0.10.14.md) — 2026-07-06
 
 Docker build stage adds --ignore-scripts so native postinstalls no longer fail the build; the definition linter surfaces a definition-invalid diagnostic instead of crashing on a null definitions entry; canvas importFrom's missing-table NotFound carries reason 'missing_table' + recovery; outline-on-overflow and release-skill docs corrected.
