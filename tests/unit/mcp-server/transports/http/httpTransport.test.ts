@@ -498,30 +498,33 @@ describe('HTTP Transport', () => {
       ['127.0.0.1', 'http://127.0.0.1'],
       ['127.0.0.1 with port', 'http://127.0.0.1:3000'],
       ['IPv6 loopback', 'http://[::1]:3010'],
-    ])('Origin guard: accepts %s (%s) as loopback when no allowlist configured', async (_label, origin) => {
-      await withConfigOverrides({ mcpAllowedOrigins: [] }, async () => {
-        const { app } = await createHttpApp(
-          () => Promise.resolve(mockMcpServer as McpServer),
-          mockContext,
-          defaultMeta,
-        );
+    ])(
+      'Origin guard: accepts %s (%s) as loopback when no allowlist configured',
+      async (_label, origin) => {
+        await withConfigOverrides({ mcpAllowedOrigins: [] }, async () => {
+          const { app } = await createHttpApp(
+            () => Promise.resolve(mockMcpServer as McpServer),
+            mockContext,
+            defaultMeta,
+          );
 
-        const request = new Request('http://localhost:3000/mcp', {
-          method: 'POST',
-          headers: {
-            Origin: origin,
-            'Content-Type': 'application/json',
-            'Mcp-Protocol-Version': '2025-03-26',
-          },
-          body: JSON.stringify({ jsonrpc: '2.0', method: 'ping', id: 1 }),
+          const request = new Request('http://localhost:3000/mcp', {
+            method: 'POST',
+            headers: {
+              Origin: origin,
+              'Content-Type': 'application/json',
+              'Mcp-Protocol-Version': '2025-03-26',
+            },
+            body: JSON.stringify({ jsonrpc: '2.0', method: 'ping', id: 1 }),
+          });
+
+          const response = await app.fetch(request);
+          // Not a 403 — Origin passed the guard. Handler may 4xx/5xx on the
+          // JSON-RPC payload, but the Origin check must have allowed it.
+          expect(response.status).not.toBe(403);
         });
-
-        const response = await app.fetch(request);
-        // Not a 403 — Origin passed the guard. Handler may 4xx/5xx on the
-        // JSON-RPC payload, but the Origin check must have allowed it.
-        expect(response.status).not.toBe(403);
-      });
-    });
+      },
+    );
 
     test('Origin guard: MCP_ALLOWED_ORIGINS="*" accepts any Origin (explicit opt-in)', async () => {
       await withConfigOverrides({ mcpAllowedOrigins: ['*'] }, async () => {

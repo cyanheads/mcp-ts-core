@@ -438,26 +438,29 @@ describe('createContext — tenantId resolution', () => {
     ['stdio', 'jwt'],
     ['http', 'none'],
     ['http', undefined],
-  ])('defaults tenantId to "default" when appContext has none and transport=%s/auth=%s', (transportType, authMode) => {
-    setEnvVar('MCP_TRANSPORT_TYPE', transportType);
-    setEnvVar('MCP_AUTH_MODE', authMode);
+  ])(
+    'defaults tenantId to "default" when appContext has none and transport=%s/auth=%s',
+    (transportType, authMode) => {
+      setEnvVar('MCP_TRANSPORT_TYPE', transportType);
+      setEnvVar('MCP_AUTH_MODE', authMode);
 
-    const ctx = createContext(buildDeps({ appContext: buildAppContext() }));
+      const ctx = createContext(buildDeps({ appContext: buildAppContext() }));
 
-    expect(ctx.tenantId).toBe('default');
-  });
+      expect(ctx.tenantId).toBe('default');
+    },
+  );
 
-  it.each([
-    ['jwt'],
-    ['oauth'],
-  ])('leaves tenantId undefined (fail-closed) when transport=http, auth=%s, and appContext has no tenantId', (authMode) => {
-    process.env.MCP_TRANSPORT_TYPE = 'http';
-    process.env.MCP_AUTH_MODE = authMode;
+  it.each([['jwt'], ['oauth']])(
+    'leaves tenantId undefined (fail-closed) when transport=http, auth=%s, and appContext has no tenantId',
+    (authMode) => {
+      process.env.MCP_TRANSPORT_TYPE = 'http';
+      process.env.MCP_AUTH_MODE = authMode;
 
-    const ctx = createContext(buildDeps({ appContext: buildAppContext() }));
+      const ctx = createContext(buildDeps({ appContext: buildAppContext() }));
 
-    expect(ctx.tenantId).toBeUndefined();
-  });
+      expect(ctx.tenantId).toBeUndefined();
+    },
+  );
 });
 
 describe('createContext — field wiring', () => {

@@ -202,8 +202,9 @@ describe('fuzzPrompt', () => {
     });
 
     expect(report.crashes.length).toBeGreaterThan(0);
-    expect(report.crashes[0]?.error).toBeInstanceOf(Error);
-    expect((report.crashes[0]?.error as Error).message).toContain('did not return array');
+    const firstError = report.crashes[0]?.error as Error;
+    expect(firstError).toBeInstanceOf(Error);
+    expect(firstError.message).toContain('did not return array');
   });
 
   it('reports a crash when a no-args generate() returns a non-array', async () => {
@@ -215,7 +216,8 @@ describe('fuzzPrompt', () => {
     const report = await fuzzPrompt(badPrompt as any, { numRuns: 1 });
 
     expect(report.crashes).toHaveLength(1);
-    expect((report.crashes[0]?.error as Error).message).toContain('did not return array');
+    const crashError = report.crashes[0]?.error as Error;
+    expect(crashError.message).toContain('did not return array');
   });
 });
 

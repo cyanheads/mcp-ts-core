@@ -143,9 +143,8 @@ describe('public API type contract', () => {
     } satisfies CreateAppOptions;
 
     expect(typedAppResource.mimeType).toBe(APP_RESOURCE_MIME_TYPE);
-    expect((typedAppTool._meta?.ui as Record<string, unknown>).resourceUri).toBe(
-      'ui://typed/app.html',
-    );
+    const typedUi = typedAppTool._meta?.ui as Record<string, unknown>;
+    expect(typedUi.resourceUri).toBe('ui://typed/app.html');
     expect(options.tools).toHaveLength(1);
     expect(options.resources).toHaveLength(1);
   });

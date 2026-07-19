@@ -92,8 +92,8 @@ describe('MCP Apps — end-to-end integration', () => {
     it('tool and resource URIs match', () => {
       const tool = createAppToolDef();
       const resource = createAppResourceDef();
-      const toolUri = (tool._meta?.ui as { resourceUri: string }).resourceUri;
-      expect(toolUri).toBe(resource.uriTemplate);
+      const toolUi = tool._meta?.ui as { resourceUri: string };
+      expect(toolUi.resourceUri).toBe(resource.uriTemplate);
     });
   });
 
@@ -235,7 +235,8 @@ describe('MCP Apps — end-to-end integration', () => {
       const tool = createAppToolDef();
       const resource = createAppResourceDef();
 
-      const toolResourceUri = (tool._meta?.ui as Record<string, unknown>).resourceUri as string;
+      const toolUi = tool._meta?.ui as Record<string, unknown>;
+      const toolResourceUri = toolUi.resourceUri as string;
       const compatUri = tool._meta?.['ui/resourceUri'] as string;
 
       expect(toolResourceUri).toBe(resource.uriTemplate);

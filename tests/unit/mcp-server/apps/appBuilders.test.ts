@@ -87,7 +87,8 @@ describe('appTool()', () => {
     });
 
     // Auto-populated value wins because it's spread after extraMeta.ui
-    expect((def._meta?.ui as Record<string, unknown>).resourceUri).toBe('ui://my-app/app.html');
+    const ui = def._meta?.ui as Record<string, unknown>;
+    expect(ui.resourceUri).toBe('ui://my-app/app.html');
   });
 
   it('merges extraMeta.ui fields (visibility) with resourceUri', () => {
@@ -120,7 +121,8 @@ describe('appTool()', () => {
     });
 
     // Non-object ui is ignored, resourceUri still set
-    expect((def._meta?.ui as Record<string, unknown>).resourceUri).toBe('ui://my-app/app.html');
+    const ui = def._meta?.ui as Record<string, unknown>;
+    expect(ui.resourceUri).toBe('ui://my-app/app.html');
   });
 
   it('preserves description', () => {

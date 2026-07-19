@@ -164,16 +164,12 @@ describe('sqlGate · assertValidIdentifier', () => {
     expect(() => assertValidIdentifier('', 'table')).toThrow(/non-empty string/);
   });
 
-  it.each([
-    '1leading_digit',
-    'has space',
-    'has-dash',
-    'has.dot',
-    'has;semi',
-    'a"b',
-  ])('rejects non-identifier shape: %s', (name) => {
-    expect(() => assertValidIdentifier(name, 'table')).toThrow(/invalid/i);
-  });
+  it.each(['1leading_digit', 'has space', 'has-dash', 'has.dot', 'has;semi', 'a"b'])(
+    'rejects non-identifier shape: %s',
+    (name) => {
+      expect(() => assertValidIdentifier(name, 'table')).toThrow(/invalid/i);
+    },
+  );
 
   it('rejects reserved keywords', () => {
     expect(() => assertValidIdentifier('select', 'table')).toThrow(/reserved/i);
@@ -369,16 +365,15 @@ describe('sqlGate · DENIED_TABLE_FUNCTIONS', () => {
 
   // Pre-staged hardening for issue #106 — block GDAL-backed file readers and
   // index-internals dumpers the moment anyone enables the spatial extension.
-  it.each([
-    'st_read',
-    'st_drivers',
-    'rtree_index_dump',
-  ])('pre-stages spatial deny for %s (issue #106)', (fn) => {
-    expect(DENIED_TABLE_FUNCTIONS.has(fn)).toBe(true);
-    expect(() => assertNoDeniedFunctions(`SELECT * FROM ${fn}('/etc/passwd')`)).toThrow(
-      /disallowed table function/i,
-    );
-  });
+  it.each(['st_read', 'st_drivers', 'rtree_index_dump'])(
+    'pre-stages spatial deny for %s (issue #106)',
+    (fn) => {
+      expect(DENIED_TABLE_FUNCTIONS.has(fn)).toBe(true);
+      expect(() => assertNoDeniedFunctions(`SELECT * FROM ${fn}('/etc/passwd')`)).toThrow(
+        /disallowed table function/i,
+      );
+    },
+  );
 
   it('matches ST_Read regardless of case (issue #106)', () => {
     expect(() => assertNoDeniedFunctions("SELECT * FROM ST_Read('/x.shp')")).toThrow(

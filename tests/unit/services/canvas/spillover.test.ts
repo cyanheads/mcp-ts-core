@@ -468,19 +468,16 @@ describe('spillover · ttlMs', () => {
 // ---------------------------------------------------------------------
 
 describe('spillover · previewChars validation', () => {
-  it.each([
-    0,
-    -1,
-    1.5,
-    Number.NaN,
-    Number.POSITIVE_INFINITY,
-  ])('rejects previewChars=%s', async (value) => {
-    const { canvas, shutdown } = await freshCanvas();
-    await expect(spillover({ canvas, source: [{ a: 1 }], previewChars: value })).rejects.toThrow(
-      /previewChars/,
-    );
-    await shutdown();
-  });
+  it.each([0, -1, 1.5, Number.NaN, Number.POSITIVE_INFINITY])(
+    'rejects previewChars=%s',
+    async (value) => {
+      const { canvas, shutdown } = await freshCanvas();
+      await expect(spillover({ canvas, source: [{ a: 1 }], previewChars: value })).rejects.toThrow(
+        /previewChars/,
+      );
+      await shutdown();
+    },
+  );
 
   it('throws an McpError validation error for invalid previewChars', async () => {
     const { canvas, shutdown } = await freshCanvas();

@@ -53,19 +53,18 @@ describe('devcheck git-repo guard on a fresh scaffold (#243)', () => {
     rmSync(dir, { recursive: true, force: true });
   });
 
-  it.each([
-    'TODOs',
-    'Tracked Secrets',
-    'Framework Antipatterns',
-  ])('skips %s cleanly when not a git repository (no exit-128 failure)', (check) => {
-    const { code, out } = runDevcheckOnly(dir, check);
-    expect(code).toBe(0);
-    // The fix routes the check to the "No relevant files to check" skip path.
-    expect(out).toContain('SKIPPED');
-    // The pre-fix bug surfaced these — assert neither escapes.
-    expect(out).not.toContain('FAILED');
-    expect(out).not.toContain('not a git repository');
-  });
+  it.each(['TODOs', 'Tracked Secrets', 'Framework Antipatterns'])(
+    'skips %s cleanly when not a git repository (no exit-128 failure)',
+    (check) => {
+      const { code, out } = runDevcheckOnly(dir, check);
+      expect(code).toBe(0);
+      // The fix routes the check to the "No relevant files to check" skip path.
+      expect(out).toContain('SKIPPED');
+      // The pre-fix bug surfaced these — assert neither escapes.
+      expect(out).not.toContain('FAILED');
+      expect(out).not.toContain('not a git repository');
+    },
+  );
 });
 
 describe('check-framework-antipatterns standalone self-guard (#243)', () => {
