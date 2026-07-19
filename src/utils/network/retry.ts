@@ -61,6 +61,10 @@ export interface RetryOptions {
   /**
    * Maximum delay cap in milliseconds. Prevents unbounded growth on high
    * retry counts. Default: `30000` (30s).
+   *
+   * Also the ceiling for an honored upstream `Retry-After`: when the error
+   * carries `data.retryAfter` and the requested wait exceeds this cap, the
+   * error is treated as non-transient and fails fast (see {@link withRetry}).
    */
   maxDelayMs?: number;
   /**
@@ -101,6 +105,43 @@ function computeDelay(
   if (jitter <= 0) return exponential;
   const jitterRange = exponential * jitter;
   return exponential - jitterRange + Math.random() * jitterRange * 2;
+}
+
+/**
+ * Parses an upstream `Retry-After` hint into milliseconds. The two HTTP helpers
+ * (`fetchWithTimeout`, `httpErrorFromResponse`) capture the raw header value into
+ * `error.data.retryAfter`; this reads it back so the retry delay can honor the
+ * wait the upstream explicitly asked for instead of blind exponential backoff.
+ *
+ * Handles both RFC 9110 §10.2.3 forms:
+ * - **delta-seconds** — a bare non-negative integer (`"30"` → `30_000`).
+ * - **HTTP-date** — an absolute instant, converted to a wait from now and
+ *   clamped at `0` (a past date means "retry now").
+ *
+ * A numeric `data.retryAfter` is also accepted and interpreted as delta-seconds,
+ * matching the header's units. Returns `undefined` when the error carries no
+ * parseable hint, so callers fall back to exponential backoff.
+ */
+function parseRetryAfterMs(error: unknown): number | undefined {
+  if (!(error instanceof McpError)) return;
+  const raw = error.data?.retryAfter;
+
+  if (typeof raw === 'number') {
+    return Number.isFinite(raw) && raw >= 0 ? raw * 1000 : undefined;
+  }
+  if (typeof raw !== 'string') return;
+
+  const trimmed = raw.trim();
+  if (trimmed === '') return;
+
+  // delta-seconds: a bare non-negative integer. Checked before Date.parse so a
+  // value like "120" is never misread as a calendar year.
+  if (/^\d+$/.test(trimmed)) return Number(trimmed) * 1000;
+
+  // HTTP-date: absolute instant → wait from now, clamped at 0.
+  const dateMs = Date.parse(trimmed);
+  if (Number.isNaN(dateMs)) return;
+  return Math.max(0, dateMs - Date.now());
 }
 
 /**
@@ -167,6 +208,14 @@ function enrichExhaustedError(error: unknown, totalAttempts: number, operation?:
  * via `ctx.fail`) for failures that can never succeed on retry (oversized query,
  * malformed request surfaced as HTTP 200 + error body, etc.).
  *
+ * **Retry-After honoring.** When a transient error carries `data.retryAfter`
+ * (captured by `fetchWithTimeout` / `httpErrorFromResponse` from the upstream
+ * header), the retry delay honors it — parsing both delta-seconds and HTTP-date
+ * forms (RFC 9110 §10.2.3) — instead of the exponential value. If the requested
+ * wait exceeds `maxDelayMs`, the error is treated as non-transient and fails
+ * fast: a window that won't clear within the retry budget is surfaced to the
+ * caller immediately rather than burning attempts that cannot succeed.
+ *
  * When retries exhaust, the final error is enriched with attempt count in both
  * the message and structured data, so callers know retries were already attempted.
  *
@@ -221,16 +270,31 @@ export async function withRetry<T>(fn: () => Promise<T>, options: RetryOptions =
         throw error;
       }
 
+      // Honor an upstream Retry-After hint over blind exponential backoff.
+      const retryAfterMs = parseRetryAfterMs(error);
+
+      // A requested wait longer than the cap can't clear within the retry budget —
+      // surface the limit immediately instead of burning an attempt on a window
+      // that won't open in time.
+      if (retryAfterMs !== undefined && retryAfterMs > maxDelayMs) {
+        logger.debug(
+          `Retry-After ${Math.round(retryAfterMs)}ms exceeds maxDelayMs ${maxDelayMs}ms for ${operation ?? 'operation'} — failing fast`,
+          context,
+        );
+        throw error;
+      }
+
       if (isLastAttempt) {
         throw enrichExhaustedError(error, totalAttempts, operation);
       }
 
-      // Log and backoff
-      const delay = computeDelay(attempt, baseDelayMs, maxDelayMs, jitter);
+      // Log and backoff — the honored Retry-After wins over the exponential value.
+      const delay = retryAfterMs ?? computeDelay(attempt, baseDelayMs, maxDelayMs, jitter);
       const errorMessage = error instanceof Error ? error.message : String(error);
+      const delaySource = retryAfterMs === undefined ? '' : ' (Retry-After)';
 
       logger.debug(
-        `Retry ${attempt + 1}/${maxRetries} for ${operation ?? 'operation'}: ${errorMessage} — waiting ${Math.round(delay)}ms`,
+        `Retry ${attempt + 1}/${maxRetries} for ${operation ?? 'operation'}: ${errorMessage} — waiting ${Math.round(delay)}ms${delaySource}`,
         context,
       );
 

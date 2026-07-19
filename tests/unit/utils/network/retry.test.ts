@@ -324,4 +324,114 @@ describe('withRetry', () => {
     await expect(promise).resolves.toBe('ok');
     expect(fn).toHaveBeenCalledTimes(2);
   });
+
+  // -----------------------------------------------------------------------
+  // Retry-After honoring (#285)
+  // -----------------------------------------------------------------------
+
+  it('honors a delta-seconds Retry-After over exponential backoff, bounded by the cap', async () => {
+    vi.useFakeTimers();
+
+    // baseDelayMs 10 → exponential first retry would be ~10ms; Retry-After asks 5s.
+    const failure = new McpError(JsonRpcErrorCode.RateLimited, 'slow down', { retryAfter: '5' });
+    const fn = vi
+      .fn<() => Promise<string>>()
+      .mockRejectedValueOnce(failure)
+      .mockResolvedValueOnce('ok');
+
+    const promise = withRetry(fn, {
+      baseDelayMs: 10,
+      jitter: 0,
+      maxRetries: 2,
+      maxDelayMs: 30_000,
+      operation: 'rateLimited',
+      context,
+    });
+
+    // Non-vacuity: after the 10ms exponential window it must NOT have retried yet —
+    // it is waiting the full 5s the upstream asked for.
+    await vi.advanceTimersByTimeAsync(4000);
+    expect(fn).toHaveBeenCalledTimes(1);
+
+    await vi.advanceTimersByTimeAsync(1000);
+    await expect(promise).resolves.toBe('ok');
+    expect(fn).toHaveBeenCalledTimes(2);
+    expect(debugSpy).toHaveBeenCalledWith(
+      'Retry 1/2 for rateLimited: slow down — waiting 5000ms (Retry-After)',
+      context,
+    );
+  });
+
+  it('honors an HTTP-date Retry-After', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-06-01T00:00:00Z'));
+    const retryAt = new Date('2026-06-01T00:00:03Z').toUTCString(); // +3s
+
+    const failure = new McpError(JsonRpcErrorCode.RateLimited, 'slow', { retryAfter: retryAt });
+    const fn = vi
+      .fn<() => Promise<string>>()
+      .mockRejectedValueOnce(failure)
+      .mockResolvedValueOnce('ok');
+
+    const promise = withRetry(fn, {
+      baseDelayMs: 10,
+      jitter: 0,
+      maxRetries: 1,
+      operation: 'rateLimited',
+      context,
+    });
+
+    await vi.advanceTimersByTimeAsync(2000);
+    expect(fn).toHaveBeenCalledTimes(1); // still waiting ~3s, not the 10ms exponential
+
+    await vi.advanceTimersByTimeAsync(1000);
+    await expect(promise).resolves.toBe('ok');
+    expect(fn).toHaveBeenCalledTimes(2);
+    expect(debugSpy).toHaveBeenCalledWith(
+      'Retry 1/1 for rateLimited: slow — waiting 3000ms (Retry-After)',
+      context,
+    );
+  });
+
+  it('fails fast without retrying when Retry-After exceeds maxDelayMs', async () => {
+    // 1h wait, cap 30s — the window cannot clear within the retry budget.
+    const failure = new McpError(JsonRpcErrorCode.RateLimited, 'rate limited', {
+      retryAfter: '3600',
+    });
+    const fn = vi.fn().mockRejectedValue(failure);
+
+    await expect(
+      withRetry(fn, { maxRetries: 5, maxDelayMs: 30_000, operation: 'rateLimited', context }),
+    ).rejects.toBe(failure); // the original error surfaces, not an enriched/exhausted one
+    expect(fn).toHaveBeenCalledTimes(1); // no attempts burned
+    expect(debugSpy).toHaveBeenCalledWith(expect.stringContaining('exceeds maxDelayMs'), context);
+  });
+
+  it('uses exponential backoff (no Retry-After suffix) when the error carries no retryAfter', async () => {
+    vi.useFakeTimers();
+
+    const failure = new McpError(JsonRpcErrorCode.RateLimited, 'slow down'); // no data.retryAfter
+    const fn = vi
+      .fn<() => Promise<string>>()
+      .mockRejectedValueOnce(failure)
+      .mockResolvedValueOnce('ok');
+
+    const promise = withRetry(fn, {
+      baseDelayMs: 100,
+      jitter: 0,
+      maxRetries: 1,
+      operation: 'rateLimited',
+      context,
+    });
+
+    await vi.advanceTimersByTimeAsync(100);
+    await expect(promise).resolves.toBe('ok');
+    expect(fn).toHaveBeenCalledTimes(2);
+    // Exact message, without the "(Retry-After)" marker — proves the marker is
+    // exclusive to the honored path, and that 429 still retries by default.
+    expect(debugSpy).toHaveBeenCalledWith(
+      'Retry 1/1 for rateLimited: slow down — waiting 100ms',
+      context,
+    );
+  });
 });
