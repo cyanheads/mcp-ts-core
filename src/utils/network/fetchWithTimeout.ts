@@ -69,6 +69,16 @@ function redactUrl(url: string | URL): string {
  */
 export interface FetchWithTimeoutOptions extends Omit<RequestInit, 'signal'> {
   /**
+   * HTTP status codes the caller treats as an *expected* outcome rather than a
+   * failure — e.g. a service that maps `404` to an empty result set. A non-2xx
+   * response whose status is listed is logged at `debug` instead of `error`;
+   * the status-mapped `McpError` is still thrown, unchanged, so the caller's
+   * catch and classification stay byte-identical — only the log severity drops.
+   *
+   * Default: empty — every non-2xx response is logged at `error`.
+   */
+  expectedStatuses?: number[];
+  /**
    * When `true`, rejects requests to private/reserved IP ranges and localhost.
    *
    * Use this when fetching user-controlled URLs to reduce the SSRF blast radius
@@ -302,7 +312,10 @@ async function assertDnsNotPrivate(hostname: string): Promise<void> {
  * @throws {McpError} `InternalError` if the request is cancelled via the external signal.
  * @throws {McpError} A status-mapped code (`InvalidParams`/`Unauthorized`/`Forbidden`/
  *   `NotFound`/`RateLimited`/`ServiceUnavailable`/...) if the server returns a non-2xx
- *   status. `error.data` carries `{ statusCode, statusText, responseBody, retryAfter? }`.
+ *   status. `error.data` carries `{ status, statusText, body, retryAfter? }` — plus the
+ *   legacy aliases `statusCode` (= `status`) and `responseBody` (= `body`), kept for
+ *   existing consumers and slated for consolidation in a future major. List a status in
+ *   `options.expectedStatuses` to log it at `debug` rather than `error` (still thrown).
  * @throws {McpError} `ServiceUnavailable` if a network-level error occurs.
  * @example
  * ```ts
@@ -347,7 +360,12 @@ export async function fetchWithTimeout(
   logger.debug(`Attempting ${operationDescription} with ${timeoutMs}ms timeout.`, context);
 
   // Strip custom options before passing to native fetch
-  const { rejectPrivateIPs: rejectPrivate, signal: externalSignal, ...fetchInit } = options ?? {};
+  const {
+    rejectPrivateIPs: rejectPrivate,
+    signal: externalSignal,
+    expectedStatuses,
+    ...fetchInit
+  } = options ?? {};
 
   // When SSRF protection is active, handle redirects manually to validate each hop
   if (rejectPrivate) {
@@ -417,13 +435,21 @@ export async function fetchWithTimeout(
         const rawBody = await response.text().catch(() => 'Could not read response body');
         const responseBody =
           rawBody.length > ERROR_BODY_LIMIT ? `${rawBody.slice(0, ERROR_BODY_LIMIT)}…` : rawBody;
-        logger.error(`Fetch failed for ${redactUrl(currentUrl)} with status ${response.status}.`, {
+        // Callers that treat a status as expected (e.g. 404 → empty result) get a
+        // debug line instead of error; the thrown McpError below is unchanged.
+        const logMessage = `Fetch failed for ${redactUrl(currentUrl)} with status ${response.status}.`;
+        const logPayload = {
           ...context,
           statusCode: response.status,
           statusText: response.statusText,
           responseBody,
           errorSource: 'FetchHttpError',
-        });
+        };
+        if (expectedStatuses?.includes(response.status)) {
+          logger.debug(logMessage, logPayload);
+        } else {
+          logger.error(logMessage, logPayload);
+        }
         const code = httpStatusToErrorCode(response.status) ?? JsonRpcErrorCode.InternalError;
         const retryAfter = response.headers.get('retry-after');
         throw new McpError(
@@ -432,8 +458,13 @@ export async function fetchWithTimeout(
           {
             requestId: context.requestId,
             operation: context.operation as string | undefined,
-            statusCode: response.status,
+            // Canonical (Fetch `Response`-aligned) field names.
+            status: response.status,
             statusText: response.statusText,
+            body: responseBody,
+            // Legacy aliases — kept for consumers reading the original shape;
+            // slated for consolidation onto `status`/`body` in a future major.
+            statusCode: response.status,
             responseBody,
             ...(retryAfter !== null && { retryAfter }),
             errorSource: 'FetchHttpError',
@@ -448,6 +479,13 @@ export async function fetchWithTimeout(
       return response;
     }
   } catch (error: unknown) {
+    // A status-mapped HTTP error from the non-OK branch was already logged there,
+    // at the severity the caller asked for (`expectedStatuses` → debug). Re-throw
+    // it as-is instead of relabeling it a network error and logging it again.
+    if (error instanceof McpError && error.data?.errorSource === 'FetchHttpError') {
+      throw error;
+    }
+
     if (error instanceof Error && (error.name === 'TimeoutError' || error.name === 'AbortError')) {
       const isTimeout =
         error.name === 'TimeoutError' || controller.signal.reason === timeoutSentinel;

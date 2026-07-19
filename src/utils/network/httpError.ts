@@ -102,7 +102,10 @@ export interface HttpErrorFromResponseOptions {
   codeOverride?: (status: number) => JsonRpcErrorCode | undefined;
   /**
    * Additional fields merged into `error.data`. Always includes
-   * `{ url, status, statusText, body? }` from the response itself.
+   * `{ url, status, statusText, body? }` from the response itself, plus the
+   * legacy aliases `statusCode` (= `status`) and `responseBody` (= `body`) for
+   * consumers reading `fetchWithTimeout`'s shape — slated for consolidation in a
+   * future major. Fields passed here override the defaults on key collision.
    */
   data?: Record<string, unknown>;
   /**
@@ -186,9 +189,15 @@ export async function httpErrorFromResponse(
 
   const data: Record<string, unknown> = {
     url: response.url || undefined,
+    // Canonical (Fetch `Response`-aligned) field names.
     status: response.status,
     statusText: response.statusText || undefined,
     ...(body !== undefined && { body }),
+    // Legacy aliases — mirror fetchWithTimeout's original shape so a consumer can
+    // classify either helper's error without knowing which raised it; slated for
+    // consolidation onto `status`/`body` in a future major.
+    statusCode: response.status,
+    ...(body !== undefined && { responseBody: body }),
     ...(retryAfter !== undefined && { retryAfter }),
     ...extraData,
   };

@@ -315,6 +315,56 @@ describe('fetchWithTimeout', () => {
     );
   });
 
+  it('emits both status/body and legacy statusCode/responseBody with equal values (#279)', async () => {
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(
+      new Response('boom', { status: 500, statusText: 'Internal Server Error' }),
+    );
+    const error = (await fetchWithTimeout('https://example.com', 1000, context).catch(
+      (e) => e,
+    )) as McpError;
+    const data = error.data as Record<string, unknown>;
+
+    expect(data.status).toBe(500);
+    expect(data.statusCode).toBe(500);
+    expect(data.status).toBe(data.statusCode);
+    expect(data.body).toBe('boom');
+    expect(data.responseBody).toBe('boom');
+    expect(data.body).toBe(data.responseBody);
+  });
+
+  describe('expectedStatuses (#256)', () => {
+    it('logs an expected status at debug (not error) but still throws the same McpError', async () => {
+      vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response('missing', { status: 404 }));
+
+      await expect(
+        fetchWithTimeout('https://example.com', 1000, context, { expectedStatuses: [404] }),
+      ).rejects.toMatchObject({
+        code: JsonRpcErrorCode.NotFound,
+        data: { status: 404, statusCode: 404 },
+      });
+
+      // Non-vacuity: pre-fix a 404 logged at error — this must stay clean.
+      expect(errorSpy).not.toHaveBeenCalled();
+      expect(debugSpy).toHaveBeenCalledWith(
+        'Fetch failed for https://example.com with status 404.',
+        expect.objectContaining({ statusCode: 404, errorSource: 'FetchHttpError' }),
+      );
+    });
+
+    it('still logs at error for a non-2xx status not listed in expectedStatuses', async () => {
+      vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response('boom', { status: 500 }));
+
+      await expect(
+        fetchWithTimeout('https://example.com', 1000, context, { expectedStatuses: [404] }),
+      ).rejects.toMatchObject({ code: JsonRpcErrorCode.InternalError });
+
+      expect(errorSpy).toHaveBeenCalledWith(
+        'Fetch failed for https://example.com with status 500.',
+        expect.objectContaining({ statusCode: 500, errorSource: 'FetchHttpError' }),
+      );
+    });
+  });
+
   describe('URL redaction (#190 — query-string secrets must not leak)', () => {
     // The Guardian (?api-key=…) and many api.data.gov services (?api_key=…)
     // authenticate via the query string. The secret must never reach a

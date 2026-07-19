@@ -166,4 +166,26 @@ describe('httpErrorFromResponse', () => {
 
     expect(error.code).toBe(JsonRpcErrorCode.InternalError);
   });
+
+  it('emits both status/body and legacy statusCode/responseBody with equal values (#279)', async () => {
+    const response = makeResponse(500, { body: 'boom', url: 'https://api.example.com/x' });
+    const error = await httpErrorFromResponse(response);
+    const data = error.data as Record<string, unknown>;
+
+    expect(data.status).toBe(500);
+    expect(data.statusCode).toBe(500);
+    expect(data.status).toBe(data.statusCode);
+    expect(data.body).toBe('boom');
+    expect(data.responseBody).toBe('boom');
+    expect(data.body).toBe(data.responseBody);
+  });
+
+  it('omits both body and responseBody when captureBody is false (#279)', async () => {
+    const error = await httpErrorFromResponse(makeResponse(500, { body: 'secret' }), {
+      captureBody: false,
+    });
+
+    expect(error.data).not.toHaveProperty('body');
+    expect(error.data).not.toHaveProperty('responseBody');
+  });
 });
