@@ -73,6 +73,9 @@ describe('Logger', () => {
     if (logger.isInitialized()) {
       await logger.close();
     }
+    // The serverless cases stub IS_SERVERLESS, and `isServerless()` is read at
+    // call time — a leaked stub silently changes behaviour in later tests.
+    vi.unstubAllEnvs();
   });
 
   describe('singleton', () => {
@@ -203,9 +206,9 @@ describe('Logger', () => {
       expect(mockLogger.info.mock.calls.length).toBeGreaterThanOrEqual(20);
     });
 
-    it('should evict expired messageCounts entries on flush even when nothing was suppressed', async () => {
-      // Pre-fix: flushSuppressedMessages() returned early when suppressedMessages was empty,
-      // leaving messageCounts to grow unbounded with one-shot dynamic-content messages.
+    it('should evict expired messageCounts entries even when nothing was suppressed', async () => {
+      // messageCounts must not grow unbounded with one-shot dynamic-content
+      // messages that never repeat enough to trigger suppression.
       await logger.initialize('info');
 
       // Emit 5 unique messages — none repeats enough to trigger suppression.
@@ -216,17 +219,18 @@ describe('Logger', () => {
       const counts = (logger as any).messageCounts as Map<string, { firstSeen: number }>;
       expect(counts.size).toBeGreaterThanOrEqual(5);
 
-      // Backdate each entry past the rate-limit window.
+      // Backdate the entries and the last sweep past the rate-limit window.
       const window = (logger as any).rateLimitWindow as number;
       const stale = Date.now() - window - 1000;
       for (const entry of counts.values()) entry.firstSeen = stale;
+      (logger as any).lastSweep = stale;
 
-      // Trigger the flush — entries should be evicted despite no suppression.
-      (logger as any).flushSuppressedMessages();
-      expect(counts.size).toBe(0);
+      // The next log call drives the sweep — no timer involved.
+      logger.info('drives-the-sweep');
+      expect([...counts.keys()]).toEqual(['info:drives-the-sweep']);
     });
 
-    it('should retain in-window messageCounts entries across flushes', async () => {
+    it('should retain in-window messageCounts entries across sweeps', async () => {
       await logger.initialize('info');
 
       logger.info('fresh-message-A');
@@ -236,9 +240,48 @@ describe('Logger', () => {
       const before = counts.size;
       expect(before).toBeGreaterThanOrEqual(2);
 
-      // Flush without suppression — fresh entries (firstSeen = now) stay.
-      (logger as any).flushSuppressedMessages();
+      // Force a sweep while every entry is still inside its window — the
+      // per-window counts must survive or the threshold stops being enforced.
+      (logger as any).maybeSweep(Date.now());
       expect(counts.size).toBe(before);
+    });
+
+    // The eviction interval was armed only under Node, so on Workers nothing
+    // ever bounded these maps and the suppression record was never emitted. (#277)
+    it('should bound messageCounts on a serverless runtime, where no timer is armed', async () => {
+      vi.stubEnv('IS_SERVERLESS', 'true');
+      await logger.initialize('info');
+
+      const counts = (logger as any).messageCounts as Map<string, { firstSeen: number }>;
+      const cap = 1000;
+
+      // A high-cardinality burst inside a single window: every message is
+      // distinct, so the window-expiry pass alone would evict nothing.
+      for (let i = 0; i < cap + 500; i++) logger.info(`dynamic-key-${i}`);
+
+      expect(counts.size).toBeLessThanOrEqual(cap);
+    });
+
+    it('should emit the suppression record on a serverless runtime once a window elapses', async () => {
+      vi.stubEnv('IS_SERVERLESS', 'true');
+      await logger.initialize('info');
+
+      const pino = (await import('pino')).default;
+      const mockLogger = pino() as any;
+
+      // Push one message past the threshold so suppression accrues.
+      for (let i = 0; i < 15; i++) logger.info('storm');
+      expect((logger as any).suppressedMessages.size).toBe(1);
+
+      // Age the window, then log again — the record flushes on traffic.
+      const window = (logger as any).rateLimitWindow as number;
+      (logger as any).lastSweep = Date.now() - window - 1000;
+      const warnBefore = mockLogger.warn.mock.calls.length;
+      logger.info('after-the-window');
+
+      expect(mockLogger.warn.mock.calls.length).toBeGreaterThan(warnBefore);
+      expect(String(mockLogger.warn.mock.calls.at(-1)?.[1])).toContain('Suppressed');
+      expect((logger as any).suppressedMessages.size).toBe(0);
     });
 
     // The limiter used to key on the message alone, so an error storm and

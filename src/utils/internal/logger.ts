@@ -85,6 +85,16 @@ const SENSITIVE_PINO_FIELDS: string[] = [
 const MAX_SANITIZE_DEPTH = 4;
 
 /**
+ * Hard ceiling on distinct rate-limit keys retained between sweeps.
+ *
+ * Many framework log messages interpolate dynamic values (storage keys, tenant
+ * IDs, canvas and table names, redacted URLs), so key cardinality tracks
+ * traffic rather than code paths. A window-based sweep alone would let a
+ * high-cardinality burst grow the map without bound inside a single window.
+ */
+const MAX_TRACKED_LOG_KEYS = 1000;
+
+/**
  * Recursively sanitizes a value for pino consumption. Returns a JSON-safe
  * replacement, or `undefined` when the value is unsafe and should be dropped.
  *
@@ -148,7 +158,9 @@ export function sanitizeLogBindings(obj: Record<string, unknown>): Record<string
  * - Sensitive field redaction via Pino's `redact` option.
  * - Rate limiting per level + message to suppress log storms, configurable via
  *   `MCP_LOG_RATE_LIMIT_THRESHOLD` (0 disables) and `MCP_LOG_RATE_LIMIT_WINDOW_MS`.
- *   Suppressed counts are flushed at `warning` at the end of each window. The
+ *   Suppressed counts are flushed at `warning` once a window has elapsed, on
+ *   the next log call or at {@link Logger.close} — traffic-driven rather than
+ *   timer-driven, so the bookkeeping stays bounded on serverless runtimes. The
  *   framework's per-call telemetry lines (see `telemetryMessages.ts`) bypass the
  *   limiter, since their repetition is request throughput rather than a storm.
  * - OpenTelemetry trace context is auto-injected via {@link RequestContext} fields.
@@ -169,7 +181,7 @@ export class Logger {
   private rateLimitWindow = config.logRateLimitWindowMs;
   private messageCounts = new Map<string, { count: number; firstSeen: number }>();
   private suppressedMessages = new Map<string, number>();
-  private cleanupTimer?: NodeJS.Timeout;
+  private lastSweep = Date.now();
 
   private constructor() {
     // The constructor is now safe to call in a global scope.
@@ -350,12 +362,7 @@ export class Logger {
     this.pinoLogger = await this.createPinoLogger(level, transportType);
     this.interactionLogger = await this.createInteractionLogger();
 
-    // Start the cleanup timer only after initialization and only in Node.js
-    if (!isServerless() && !this.cleanupTimer) {
-      this.cleanupTimer = setInterval(() => this.flushSuppressedMessages(), this.rateLimitWindow);
-      this.cleanupTimer.unref?.();
-    }
-
+    this.lastSweep = Date.now();
     this.initialized = true;
     this.info(
       `Logger initialized. MCP level: ${level}.`,
@@ -409,7 +416,7 @@ export class Logger {
   /**
    * Flushes all pending log entries and shuts down transports gracefully.
    *
-   * Clears the rate-limit cleanup timer, flushes any suppressed message counts,
+   * Flushes any outstanding suppressed message counts,
    * and waits for both the main Pino logger and the interaction logger to drain
    * before resolving. Safe to call multiple times — subsequent calls on an
    * already-closed logger resolve immediately.
@@ -426,7 +433,6 @@ export class Logger {
       'Logger shutting down.',
       requestContextService.createRequestContext({ operation: 'loggerClose' }),
     );
-    if (this.cleanupTimer) clearInterval(this.cleanupTimer);
     this.flushSuppressedMessages();
 
     // Wait for all pending writes to complete
@@ -473,6 +479,44 @@ export class Logger {
     return this.initialized;
   }
 
+  /**
+   * Evicts expired rate-limit bookkeeping and flushes the suppression record.
+   *
+   * Replaces the `setInterval` this class used to arm in {@link initialize},
+   * which was skipped entirely on serverless runtimes: with no timer and no
+   * `close()` in a Worker isolate, `messageCounts` and `suppressedMessages`
+   * grew for the isolate's whole lifetime and the "suppressed N times" record
+   * was never emitted. Driving the sweep from log calls keeps the timer's
+   * cadence wherever traffic exists and bounds the maps on every runtime,
+   * without runtime-specific scheduling.
+   *
+   * @param now - Current epoch milliseconds, shared with the caller's window math.
+   */
+  private maybeSweep(now: number): void {
+    const windowElapsed = now - this.lastSweep >= this.rateLimitWindow;
+    if (!windowElapsed && this.messageCounts.size < MAX_TRACKED_LOG_KEYS) return;
+
+    // Claim the sweep before emitting: flushing logs through `log()`, which
+    // re-enters this method. Both guards are false by the time it does.
+    this.lastSweep = now;
+
+    for (const [key, entry] of this.messageCounts) {
+      if (now - entry.firstSeen > this.rateLimitWindow) this.messageCounts.delete(key);
+    }
+
+    // A burst of distinct messages within a single window survives the expiry
+    // pass. Drop the oldest — they are the closest to expiring anyway.
+    const excess = this.messageCounts.size - MAX_TRACKED_LOG_KEYS + 1;
+    if (excess > 0) {
+      const oldestFirst = [...this.messageCounts.entries()].sort(
+        (a, b) => a[1].firstSeen - b[1].firstSeen,
+      );
+      for (const [key] of oldestFirst.slice(0, excess)) this.messageCounts.delete(key);
+    }
+
+    this.flushSuppressedMessages();
+  }
+
   private isRateLimited(level: McpLogLevel, message: string): boolean {
     // Threshold 0 disables rate limiting entirely.
     if (this.rateLimitThreshold === 0) return false;
@@ -482,10 +526,12 @@ export class Logger {
     // log-derived call volume at the threshold and silently drop the rest.
     if (UNTHROTTLED_MESSAGES.has(message)) return false;
 
+    const now = Date.now();
+    this.maybeSweep(now);
+
     // Key on level + message: an error storm and ordinary info throughput that
     // happen to share a string are different events and must not share a budget.
     const key = `${level}:${message}`;
-    const now = Date.now();
     const entry = this.messageCounts.get(key);
     if (!entry) {
       this.messageCounts.set(key, { count: 1, firstSeen: now });
@@ -528,16 +574,6 @@ export class Logger {
           },
         }),
       );
-    }
-    // Evict entries whose rate-limit window has elapsed. Walking the map
-    // every tick (vs. clearing wholesale) preserves the per-window count
-    // for messages still inside their window, so the threshold is enforced
-    // correctly across ticks.
-    const now = Date.now();
-    for (const [message, entry] of this.messageCounts) {
-      if (now - entry.firstSeen > this.rateLimitWindow) {
-        this.messageCounts.delete(message);
-      }
     }
   }
 
