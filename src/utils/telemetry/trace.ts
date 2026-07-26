@@ -7,6 +7,7 @@
 import {
   context as otContext,
   propagation,
+  ROOT_CONTEXT,
   type Span,
   SpanStatusCode,
   trace,
@@ -231,4 +232,32 @@ export function runInContext<T>(ctx: RequestContext | undefined, fn: () => T): T
   // Note: Full context restoration would require span recreation
   // This simplified version maintains execution but doesn't create new spans
   return otContext.with(otContext.active(), fn);
+}
+
+/**
+ * Runs a function with no active span, detached from whatever context is
+ * current at the call site.
+ *
+ * Long-lived listeners must be registered this way. The OTel context manager is
+ * AsyncLocalStorage-backed, and an ALS store captured when a server socket or
+ * stream listener is created propagates to every async resource that listener
+ * later spawns. Registering inside an active span therefore pins every
+ * subsequent request to that span's trace — the span itself has long since
+ * ended, but an ended span still carries a valid `SpanContext`, so later
+ * children inherit its `traceId` and parent `spanId` for the process lifetime.
+ *
+ * Detaching the registration lets each request start its own trace (or join the
+ * caller's, when a `traceparent` header is present).
+ *
+ * @param fn - Function to execute with no active span
+ * @returns Result of `fn`
+ *
+ * @example
+ * ```typescript
+ * // Bind an HTTP server without pinning every request to the startup trace
+ * await runDetached(() => transportManager.start());
+ * ```
+ */
+export function runDetached<T>(fn: () => T): T {
+  return otContext.with(ROOT_CONTEXT, fn);
 }

@@ -330,6 +330,9 @@ vi.mock('@/utils/telemetry/metrics.js', () => ({
 
 vi.mock('@/utils/telemetry/trace.js', () => ({
   withSpan: mockWithSpan,
+  // Pass-through: the detach behavior itself is covered in trace.test.ts. Here
+  // it only needs to not swallow the transport start it wraps.
+  runDetached: <T>(fn: () => T): T => fn(),
 }));
 
 import { composeServices, createApp } from '@/core/app.js';

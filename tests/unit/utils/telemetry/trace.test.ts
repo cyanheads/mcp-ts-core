@@ -3,9 +3,13 @@
  * @module tests/utils/telemetry/trace.test
  */
 
+import { AsyncLocalStorage } from 'node:async_hooks';
 import {
+  type ContextManager,
+  type Context as OtelContext,
   context as otContext,
   propagation,
+  ROOT_CONTEXT,
   type Span,
   type SpanContext,
   SpanStatusCode,
@@ -520,6 +524,104 @@ describe('OpenTelemetry Tracing', () => {
       expect(childContext.traceId).toBe(parentTraceId);
       expect(childContext.parentSpanId).toBe(parentSpanId);
       expect(childContext.operation).toBe('child-operation');
+    });
+  });
+
+  describe('runDetached', () => {
+    /**
+     * Minimal AsyncLocalStorage-backed context manager. The API default is a
+     * no-op that never propagates, which would make these assertions vacuous —
+     * and ALS propagation is exactly the mechanism under test (#294).
+     */
+    class AlsContextManager implements ContextManager {
+      private readonly als = new AsyncLocalStorage<OtelContext>();
+
+      active(): OtelContext {
+        return this.als.getStore() ?? ROOT_CONTEXT;
+      }
+
+      with<A extends unknown[], F extends (...args: A) => ReturnType<F>>(
+        ctx: OtelContext,
+        fn: F,
+        thisArg?: ThisParameterType<F>,
+        ...args: A
+      ): ReturnType<F> {
+        return this.als.run(ctx, () => fn.call(thisArg as ThisParameterType<F>, ...args));
+      }
+
+      bind<T>(_ctx: OtelContext, target: T): T {
+        return target;
+      }
+
+      enable(): this {
+        return this;
+      }
+
+      disable(): this {
+        this.als.disable();
+        return this;
+      }
+    }
+
+    const fakeSpanContext: SpanContext = {
+      traceId: 'f'.repeat(32),
+      spanId: 'e'.repeat(16),
+      traceFlags: 1,
+    };
+
+    beforeEach(() => {
+      otContext.setGlobalContextManager(new AlsContextManager());
+    });
+
+    afterEach(() => {
+      otContext.disable();
+      vi.restoreAllMocks();
+    });
+
+    test('should run the callback with no active span and restore the caller context', () => {
+      const parent = trace.setSpanContext(ROOT_CONTEXT, fakeSpanContext);
+
+      otContext.with(parent, () => {
+        expect(trace.getActiveSpan()?.spanContext().traceId).toBe(fakeSpanContext.traceId);
+
+        traceUtils.runDetached(() => {
+          expect(trace.getActiveSpan()).toBeUndefined();
+        });
+
+        expect(trace.getActiveSpan()?.spanContext().traceId).toBe(fakeSpanContext.traceId);
+      });
+    });
+
+    test('should return the callback result', () => {
+      expect(traceUtils.runDetached(() => 'bound')).toBe('bound');
+    });
+
+    /**
+     * The regression case. Async work started inside an active span inherits it
+     * through ALS — that is how binding a server inside the startup span pinned
+     * every later request to one traceId. `runDetached` severs the inheritance.
+     */
+    test('should sever ALS inheritance for async work started inside a span', async () => {
+      const parent = trace.setSpanContext(ROOT_CONTEXT, fakeSpanContext);
+      let inherited: string | undefined;
+      let detached: string | undefined;
+
+      const deferred = () => new Promise<void>((resolve) => setTimeout(resolve, 0));
+
+      await otContext.with(parent, async () => {
+        await deferred();
+        inherited = trace.getActiveSpan()?.spanContext().traceId;
+
+        await traceUtils.runDetached(async () => {
+          await deferred();
+          detached = trace.getActiveSpan()?.spanContext().traceId;
+        });
+      });
+
+      // Guards the test itself: without real propagation the next assertion
+      // would pass for the wrong reason.
+      expect(inherited).toBe(fakeSpanContext.traceId);
+      expect(detached).toBeUndefined();
     });
   });
 });

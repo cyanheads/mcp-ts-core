@@ -51,7 +51,7 @@ import {
   shutdownOpenTelemetry,
 } from '@/utils/telemetry/instrumentation.js';
 import { createObservableGauge } from '@/utils/telemetry/metrics.js';
-import { withSpan } from '@/utils/telemetry/trace.js';
+import { runDetached, withSpan } from '@/utils/telemetry/trace.js';
 
 /**
  * Options affecting the `Context` object passed to every handler.
@@ -675,8 +675,14 @@ export async function createApp(options: CreateAppOptions = {}): Promise<ServerH
     span.setAttribute('mcp.server.resources_count', definitionCounts.resources);
     span.setAttribute('mcp.server.prompts_count', definitionCounts.prompts);
 
+    // The span times the bind, but the bind itself runs detached. Transport
+    // start registers long-lived listeners (an HTTP server socket, the stdio
+    // stream), and ALS-backed OTel context propagates whatever span is active
+    // at registration to every request those listeners later serve — pinning
+    // the whole process to one traceId. `runDetached` keeps this span's timing
+    // while leaving each request free to start its own trace.
     await withSpan('mcp.server.startup.transport', async () => {
-      await transportManager.start();
+      await runDetached(() => transportManager.start());
     });
   });
 

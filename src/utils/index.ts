@@ -220,6 +220,7 @@ export {
   createContextWithParentTrace,
   extractTraceparent,
   injectCurrentContextInto,
+  runDetached,
   runInContext,
   type TraceparentInfo,
   withSpan,
