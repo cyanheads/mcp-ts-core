@@ -19,10 +19,12 @@ import type { RequestContext } from '@/utils/internal/requestContext.js';
 import { idGenerator } from '@/utils/security/idGenerator.js';
 import { ATTR_MCP_TASK_STATUS, ATTR_MCP_TASK_STORE_TYPE } from '@/utils/telemetry/attributes.js';
 import { createCounter, createObservableGauge } from '@/utils/telemetry/metrics.js';
+import { EvictingTaskMessageQueue } from './evictingTaskMessageQueue.js';
 import { SessionAwareTaskStore } from './sessionAwareTaskStore.js';
 import { StorageBackedTaskStore } from './storageBackedTaskStore.js';
 import {
   type CreateTaskOptions,
+  DEFAULT_AUTO_TASK_TTL_MS,
   InMemoryTaskMessageQueue,
   InMemoryTaskStore,
   type Task,
@@ -136,13 +138,19 @@ class InstrumentedTaskStore implements TaskStore {
 export class TaskManager {
   private readonly taskStore: TaskStore;
   private readonly inMemoryTaskStore: InMemoryTaskStore | null = null;
-  private readonly messageQueue: InMemoryTaskMessageQueue;
+  private readonly messageQueue: TaskMessageQueue;
   private readonly storeType: 'in-memory' | 'storage';
   private isShuttingDown = false;
 
   constructor(config: typeof configType, storageService: StorageService) {
     this.storeType = config.tasks.storeType;
-    this.messageQueue = new InMemoryTaskMessageQueue();
+    // The SDK's queue only ever deletes on `dequeueAll`, so a task the client
+    // abandons strands its queue for the life of the process. Wrapping it
+    // bounds queue lifetime by the same TTL the task store applies.
+    this.messageQueue = new EvictingTaskMessageQueue(
+      new InMemoryTaskMessageQueue(),
+      config.tasks.defaultTtlMs ?? DEFAULT_AUTO_TASK_TTL_MS,
+    );
 
     let baseStore: TaskStore;
     if (this.storeType === 'storage') {

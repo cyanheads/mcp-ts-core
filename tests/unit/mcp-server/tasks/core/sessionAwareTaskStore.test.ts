@@ -162,4 +162,121 @@ describe('SessionAwareTaskStore', () => {
     expect(innerListTasks).toHaveBeenNthCalledWith(1, 'cursor-1', 'session-a');
     expect(innerListTasks).toHaveBeenNthCalledWith(2, 'cursor-1', undefined);
   });
+
+  // The inner store drops the task at TTL, so an ownership row that outlives
+  // it leaks one permanent entry per task call under HTTP. (#276)
+  describe('ownership eviction', () => {
+    /** Reach the private map — there is no public accessor for bookkeeping. */
+    function ownershipOf(store: SessionAwareTaskStore): Map<string, unknown> {
+      return (store as unknown as { ownership: Map<string, unknown> }).ownership;
+    }
+
+    it('reclaims a row once the task TTL has elapsed', async () => {
+      vi.useFakeTimers();
+      try {
+        const task = makeTask('task-expiring');
+        const store = new SessionAwareTaskStore({
+          createTask: vi.fn().mockResolvedValue(task),
+          getTask: vi.fn().mockResolvedValue(null),
+        } as unknown as TaskStore);
+
+        await store.createTask({ ttl: task.ttl }, testRequestId, testRequest, 'session-a');
+        expect(ownershipOf(store).size).toBe(1);
+
+        vi.advanceTimersByTime(60_001);
+
+        // A read past the deadline prunes the row on the way through.
+        await store.getTask(task.taskId, 'session-a');
+        expect(ownershipOf(store).size).toBe(0);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('falls through to not-found instead of Forbidden once the row expires', async () => {
+      vi.useFakeTimers();
+      try {
+        const task = makeTask('task-evicted');
+        const innerGetTask = vi.fn().mockResolvedValue(null);
+        const store = new SessionAwareTaskStore({
+          createTask: vi.fn().mockResolvedValue(task),
+          getTask: innerGetTask,
+        } as unknown as TaskStore);
+
+        await store.createTask({ ttl: task.ttl }, testRequestId, testRequest, 'session-a');
+        vi.advanceTimersByTime(60_001);
+
+        // A stale Forbidden would confirm to a stranger that the id existed.
+        await expect(store.getTask(task.taskId, 'session-b')).resolves.toBeNull();
+        expect(innerGetTask).toHaveBeenCalledWith(task.taskId, 'session-b');
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('sweeps expired rows as new tasks are created', async () => {
+      vi.useFakeTimers();
+      try {
+        const first = makeTask('task-1');
+        const second = makeTask('task-2');
+        const store = new SessionAwareTaskStore({
+          createTask: vi.fn().mockResolvedValueOnce(first).mockResolvedValueOnce(second),
+        } as unknown as TaskStore);
+
+        await store.createTask({ ttl: first.ttl }, testRequestId, testRequest, 'session-a');
+        vi.advanceTimersByTime(60_001);
+        await store.createTask({ ttl: second.ttl }, testRequestId, testRequest, 'session-a');
+
+        expect([...ownershipOf(store).keys()]).toEqual(['task-2']);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('extends the deadline when a terminal status resets the inner TTL', async () => {
+      vi.useFakeTimers();
+      try {
+        const task = makeTask('task-terminal');
+        const store = new SessionAwareTaskStore({
+          createTask: vi.fn().mockResolvedValue(task),
+          getTask: vi.fn().mockResolvedValue(task),
+          updateTaskStatus: vi.fn().mockResolvedValue(undefined),
+        } as unknown as TaskStore);
+
+        await store.createTask({ ttl: task.ttl }, testRequestId, testRequest, 'session-a');
+
+        // Just shy of the original deadline, go terminal — the inner store
+        // restarts its cleanup timer, so ownership must not expire first.
+        vi.advanceTimersByTime(59_999);
+        await store.updateTaskStatus(task.taskId, 'completed', undefined, 'session-a');
+        vi.advanceTimersByTime(59_999);
+
+        await expect(store.getTask(task.taskId, 'session-b')).rejects.toMatchObject({
+          code: JsonRpcErrorCode.Forbidden,
+        });
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('never expires a task created without a TTL', async () => {
+      vi.useFakeTimers();
+      try {
+        const task = { ...makeTask('task-forever'), ttl: undefined } as unknown as Task;
+        const store = new SessionAwareTaskStore({
+          createTask: vi.fn().mockResolvedValue(task),
+          getTask: vi.fn().mockResolvedValue(task),
+        } as unknown as TaskStore);
+
+        await store.createTask({}, testRequestId, testRequest, 'session-a');
+        vi.advanceTimersByTime(365 * 24 * 60 * 60 * 1000);
+
+        await expect(store.getTask(task.taskId, 'session-b')).rejects.toMatchObject({
+          code: JsonRpcErrorCode.Forbidden,
+        });
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+  });
 });

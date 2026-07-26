@@ -49,3 +49,11 @@ export {
   takeResult,
   toArrayAsync,
 } from '@modelcontextprotocol/sdk/experimental/tasks';
+
+/**
+ * TTL applied to a task when `TASK_STORE_DEFAULT_TTL_MS` is unset.
+ *
+ * Shared so task creation and the bookkeeping that must expire alongside it
+ * (ownership rows, message queues) cannot drift onto different lifetimes.
+ */
+export const DEFAULT_AUTO_TASK_TTL_MS = 120_000;

@@ -11,6 +11,7 @@ import type { ZodObject, ZodRawShape } from 'zod';
 
 import { config } from '@/config/index.js';
 import { attachTypedFail, createContext } from '@/core/context.js';
+import { DEFAULT_AUTO_TASK_TTL_MS } from '@/mcp-server/tasks/core/taskTypes.js';
 import {
   isTaskToolDefinition,
   type TaskToolDefinition,
@@ -41,9 +42,6 @@ interface AutoTaskOptions {
   taskStore: RequestTaskStore;
   ttlMs: number;
 }
-
-/** Default TTL for auto-task tools when config doesn't specify one. */
-const DEFAULT_AUTO_TASK_TTL_MS = 120_000;
 
 /** Union of all accepted tool definition shapes. */
 export type AnyToolDef =
