@@ -1,6 +1,6 @@
 # mcp-ts-core - Directory Structure
 
-Generated on: 2026-07-26 07:54:46
+Generated on: 2026-07-26 10:16:35
 
 ```text
 mcp-ts-core/
@@ -264,6 +264,7 @@ mcp-ts-core/
 │   │   │   └── resource-registration.ts
 │   │   ├── tasks/
 │   │   │   ├── core/
+│   │   │   │   ├── evictingTaskMessageQueue.ts
 │   │   │   │   ├── sessionAwareTaskStore.ts
 │   │   │   │   ├── storageBackedTaskStore.ts
 │   │   │   │   ├── taskManager.ts
@@ -611,6 +612,7 @@ mcp-ts-core/
 │   │   │   │   └── resource-registration.test.ts
 │   │   │   ├── tasks/
 │   │   │   │   ├── core/
+│   │   │   │   │   ├── evictingTaskMessageQueue.test.ts
 │   │   │   │   │   ├── sessionAwareTaskStore.test.ts
 │   │   │   │   │   ├── storageBackedTaskStore.test.ts
 │   │   │   │   │   └── taskManager.test.ts
@@ -682,6 +684,7 @@ mcp-ts-core/
 │   │   │   │   ├── CanvasRegistry.test.ts
 │   │   │   │   ├── classifyDuckdbError.test.ts
 │   │   │   │   ├── DataCanvas.test.ts
+│   │   │   │   ├── duckdbTempRoot.test.ts
 │   │   │   │   ├── exportWriter.test.ts
 │   │   │   │   ├── schemaSniffer.test.ts
 │   │   │   │   ├── spillover.test.ts

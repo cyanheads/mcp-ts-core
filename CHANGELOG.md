@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.10.17](changelog/0.10.x/0.10.17.md) — 2026-07-26
+
+fetch timeouts classify as Timeout again; logger and task bookkeeping evict without a timer; DuckDB scratch I/O moves off the process cwd behind CANVAS_TEMP_PATH; .mcpb bundles drop platform-specific native bindings.
+
 ## [0.10.16](changelog/0.10.x/0.10.16.md) — 2026-07-26
 
 MCP_AUTH_MODE=none no longer advertises OAuth Protected Resource Metadata; transport bind runs detached so long-lived listeners can't pin every request to the startup trace; logger rate limiting is configurable, keyed on level+message, and exempts per-call telemetry lines; scaffold gitignore, depcheck, and Docker template fixes.
