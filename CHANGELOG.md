@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.10.16](changelog/0.10.x/0.10.16.md) — 2026-07-26
+
+MCP_AUTH_MODE=none no longer advertises OAuth Protected Resource Metadata; transport bind runs detached so long-lived listeners can't pin every request to the startup trace; logger rate limiting is configurable, keyed on level+message, and exempts per-call telemetry lines; scaffold gitignore, depcheck, and Docker template fixes.
+
 ## [0.10.15](changelog/0.10.x/0.10.15.md) — 2026-07-19
 
 withRetry honors Retry-After (delta-seconds and HTTP-date, capped at maxDelayMs); fetchWithTimeout adds an expectedStatuses log opt-out and canonical status/body error fields (legacy aliases kept); fixes duplicate error logging and a stale 0.10.13 changelog note; biome 2.5.4 migration, dependency refresh, skill updates.
