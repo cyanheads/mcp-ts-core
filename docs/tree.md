@@ -1,6 +1,6 @@
 # mcp-ts-core - Directory Structure
 
-Generated on: 2026-07-26 10:16:35
+Generated on: 2026-07-26 11:02:11
 
 ```text
 mcp-ts-core/
@@ -23,6 +23,7 @@ mcp-ts-core/
 ├── changelog/
 │   ├── 0.1.x/
 │   ├── 0.10.x/
+│   ├── 0.11.x/
 │   ├── 0.2.x/
 │   ├── 0.3.x/
 │   ├── 0.4.x/

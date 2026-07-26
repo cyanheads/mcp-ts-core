@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.11.0](changelog/0.11.x/0.11.0.md) — 2026-07-26 · ⚠️ Breaking
+
+TypeScript 7 across tsc and the scaffold templates; optional peerDependency floors rise to current lines, so a consumer that installs one must move with it; a new overrides block pins six transitives; docs:generate stays out until typedoc supports TypeScript 7.
+
 ## [0.10.17](changelog/0.10.x/0.10.17.md) — 2026-07-26
 
 fetch timeouts classify as Timeout again; logger and task bookkeeping evict without a timer; DuckDB scratch I/O moves off the process cwd behind CANVAS_TEMP_PATH; .mcpb bundles drop platform-specific native bindings.
