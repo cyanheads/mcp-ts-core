@@ -64,13 +64,13 @@
     "zod": "{{ZOD_VERSION}}"
   },
   "devDependencies": {
-    "@biomejs/biome": "2.5.4",
+    "@biomejs/biome": "2.5.5",
     "@socketsecurity/bun-security-scanner": "^1.1.2",
     "@types/node": "26.1.1",
     "depcheck": "^1.4.7",
-    "ignore": "^7.0.5",
-    "tsc-alias": "^1.9.0",
-    "typescript": "^6.0.3",
-    "vitest": "^4.1.9"
+    "ignore": "^7.0.6",
+    "tsc-alias": "^1.9.1",
+    "typescript": "^7.0.2",
+    "vitest": "^4.1.10"
   }
 }

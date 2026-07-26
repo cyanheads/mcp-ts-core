@@ -32,7 +32,17 @@
 import { spawnSync } from 'node:child_process';
 import { existsSync, readFileSync } from 'node:fs';
 import process from 'node:process';
-import * as ts from 'typescript';
+/**
+ * Pinned to TypeScript 6 deliberately. TypeScript 7 dropped the programmatic
+ * compiler API — its root export is the version string, and the replacement
+ * lives behind `typescript/unstable/*` with no standalone parser (that
+ * `createSourceFile` is the factory, not the parser) and no exported
+ * `forEachChild`. Reaching it means driving the Go server through the sync
+ * Project/Program API, and the whole surface is slated to change again in 7.1.
+ * This audit is a pure syntactic walk, so it keeps the stable v6 parser while
+ * `tsc` itself runs on 7.
+ */
+import * as ts from 'typescript-v6';
 
 const OPT_OUT_MARKER = 'allow open-indexed-named';
 
