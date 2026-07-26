@@ -694,25 +694,30 @@ const ALL_CHECKS: Check[] = [
         return true;
       });
 
-      // A row is a real finding only if it's neither allowlisted nor a version
-      // held back by bunfig's `minimumReleaseAge` supply-chain guard.
+      // A row is a real finding only if it's neither allowlisted, a peer range,
+      // nor a version held back by bunfig's `minimumReleaseAge` supply-chain guard.
       const unexpected = packageLines.filter((line) => {
         const cells = line.split('|').map((cell) => cell.trim());
-        const pkgName = stripWorkspaceMarker(cells[1] ?? '');
+        const rawName = cells[1] ?? '';
+        const pkgName = stripWorkspaceMarker(rawName);
         if (OUTDATED_ALLOWLIST.has(pkgName)) return false;
 
-        // `minimumReleaseAge` blocks freshly published versions, so bun reports
-        // the installable target (Update) as equal to Current and marks the row
-        // with `*` ("isn't true latest due to minimum release age"). There is
-        // nothing to adopt until the newer release ages past the gate — skip it.
-        // A genuine update (Update > Current) still falls through and fails.
+        // A peerDependency range declares the *lowest* version supported, not
+        // the version to track — widening it as upstream publishes only narrows
+        // what consumers may install. Currency for the versions actually
+        // exercised is enforced through the matching devDependency row.
+        if (rawName.endsWith('(peer)')) return false;
+
+        // `Update` is the newest version installable under the declared range;
+        // `Latest` ignores the range. Update === Current means there is nothing
+        // to adopt — either `minimumReleaseAge` is holding a fresh publish, or
+        // the range deliberately caps below latest (an exact pin, `^12` against
+        // 13.0.1). Crossing that cap is a deliberate range change, i.e.
+        // maintenance work rather than a gate failure. The gate fails on what
+        // `bun update` would actually change: being behind within the range.
         const current = cells[2] ?? '';
         const update = (cells[3] ?? '').replace(/\*/g, '').trim();
-        const heldByReleaseAge =
-          current !== '' &&
-          update === current &&
-          [cells[3], cells[4]].some((cell) => (cell ?? '').includes('*'));
-        return !heldByReleaseAge;
+        return !(current !== '' && update === current);
       });
 
       return unexpected.length === 0;
