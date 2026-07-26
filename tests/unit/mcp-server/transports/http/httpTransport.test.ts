@@ -254,26 +254,58 @@ describe('HTTP Transport', () => {
     });
 
     test('should serve OAuth metadata endpoint with minimal metadata when OAuth not configured', async () => {
-      const { app } = await createHttpApp(
-        () => Promise.resolve(mockMcpServer as McpServer),
-        mockContext,
-        defaultMeta,
-      );
+      await withConfigOverrides({ mcpAuthMode: 'jwt' }, async () => {
+        const { app } = await createHttpApp(
+          () => Promise.resolve(mockMcpServer as McpServer),
+          mockContext,
+          defaultMeta,
+        );
 
-      const request = new Request('http://localhost:3000/.well-known/oauth-protected-resource', {
-        method: 'GET',
+        const request = new Request('http://localhost:3000/.well-known/oauth-protected-resource', {
+          method: 'GET',
+        });
+
+        const response = await app.fetch(request);
+        const data: any = await response.json();
+
+        expect(response.status).toBe(200);
+        expect(data.bearer_methods_supported).toEqual(['header']);
+        // No authorization_servers when OAuth is not configured
+        expect(data.authorization_servers).toBeUndefined();
       });
-
-      const response = await app.fetch(request);
-      const data: any = await response.json();
-
-      expect(response.status).toBe(200);
-      expect(data.bearer_methods_supported).toEqual(['header']);
-      // No authorization_servers when OAuth is not configured
-      expect(data.authorization_servers).toBeUndefined();
     });
 
     test('should also serve OAuth metadata at the RFC 8414 path-suffixed variant', async () => {
+      await withConfigOverrides({ mcpAuthMode: 'jwt' }, async () => {
+        const { app } = await createHttpApp(
+          () => Promise.resolve(mockMcpServer as McpServer),
+          mockContext,
+          defaultMeta,
+        );
+
+        const bare = await app.fetch(
+          new Request('http://localhost:3000/.well-known/oauth-protected-resource', {
+            method: 'GET',
+          }),
+        );
+        const suffixed = await app.fetch(
+          new Request('http://localhost:3000/.well-known/oauth-protected-resource/mcp', {
+            method: 'GET',
+          }),
+        );
+
+        expect(suffixed.status).toBe(200);
+        const bareBody = (await bare.json()) as Record<string, unknown>;
+        const suffixedBody = (await suffixed.json()) as Record<string, unknown>;
+        expect(suffixedBody).toEqual(bareBody);
+      });
+    });
+
+    // Serving Protected Resource Metadata declares the server an OAuth-protected
+    // resource. In `none` mode that sends a discovering client into an OAuth flow
+    // it can never complete — no authorization_servers to register with — so the
+    // routes must not exist at all. (#293)
+    test('should not mount Protected Resource Metadata when auth mode is none', async () => {
       const { app } = await createHttpApp(
         () => Promise.resolve(mockMcpServer as McpServer),
         mockContext,
@@ -291,10 +323,31 @@ describe('HTTP Transport', () => {
         }),
       );
 
-      expect(suffixed.status).toBe(200);
-      const bareBody = (await bare.json()) as Record<string, unknown>;
-      const suffixedBody = (await suffixed.json()) as Record<string, unknown>;
-      expect(suffixedBody).toEqual(bareBody);
+      expect(bare.status).toBe(404);
+      expect(suffixed.status).toBe(404);
+    });
+
+    test('should mount Protected Resource Metadata with authorization servers in oauth mode', async () => {
+      await withConfigOverrides(
+        { mcpAuthMode: 'oauth', oauthIssuerUrl: 'https://auth.example.com' },
+        async () => {
+          const { app } = await createHttpApp(
+            () => Promise.resolve(mockMcpServer as McpServer),
+            mockContext,
+            defaultMeta,
+          );
+
+          const response = await app.fetch(
+            new Request('http://localhost:3000/.well-known/oauth-protected-resource', {
+              method: 'GET',
+            }),
+          );
+
+          expect(response.status).toBe(200);
+          const data = (await response.json()) as Record<string, unknown>;
+          expect(data.authorization_servers).toEqual(['https://auth.example.com']);
+        },
+      );
     });
 
     test('should handle DELETE request in stateless mode', async () => {

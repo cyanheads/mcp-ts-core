@@ -1,9 +1,11 @@
 /**
  * @fileoverview RFC 9728 OAuth Protected Resource Metadata endpoint handler.
  * Serves `/.well-known/oauth-protected-resource` to enable MCP clients to
- * discover the authorization server for this resource. Always returns 200
- * regardless of auth mode — oauth mode includes full authorization server
- * metadata; jwt/none modes return a minimal resource identifier only.
+ * discover the authorization server for this resource. Mounted only when an
+ * auth mode is configured — `oauth` includes full authorization server
+ * metadata, `jwt` returns a minimal resource identifier. In `none` mode the
+ * route is not mounted at all, so discovery 404s and the client treats the
+ * resource as unauthenticated.
  * @see {@link https://datatracker.ietf.org/doc/html/rfc9728 | RFC 9728: OAuth 2.0 Protected Resource Metadata}
  * @module src/mcp-server/transports/http/protectedResourceMetadata
  */
@@ -17,9 +19,12 @@ import { requestContextService } from '@/utils/internal/requestContext.js';
 /**
  * Hono route handler for the RFC 9728 Protected Resource Metadata endpoint.
  *
- * Always mounted and always returns 200. Behavior varies by auth mode:
+ * Returns 200 wherever it is mounted. Behavior varies by auth mode:
  * - `oauth`: full metadata including `authorization_servers`, signing algorithms
- * - `jwt`/`none`: minimal metadata with just the resource identifier
+ * - `jwt`: minimal metadata with just the resource identifier
+ *
+ * The caller is responsible for not mounting this route in `none` mode; see
+ * `httpTransport.ts`.
  *
  * Response is cacheable for 1 hour per RFC 9728 recommendations.
  */

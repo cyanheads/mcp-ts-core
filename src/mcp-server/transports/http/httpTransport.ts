@@ -370,19 +370,30 @@ export async function createHttpApp<TBindings extends object = HonoNodeBindings>
   // Health and GET /mcp status remain unprotected for convenience
   app.get('/healthz', (c) => c.json({ status: 'ok' }));
 
-  // RFC 9728 Protected Resource Metadata — always mounted, unauthenticated
+  // RFC 9728 Protected Resource Metadata — unauthenticated, but only mounted
+  // when the server actually is a protected resource. Serving this document
+  // declares it one, sending a discovering client into an OAuth flow it cannot
+  // finish: there is no `authorization_servers` to register with in `none`
+  // mode. The 404 is the signal that the resource is unauthenticated.
   // https://datatracker.ietf.org/doc/html/rfc9728
-  const protectedResourcePath = '/.well-known/oauth-protected-resource';
-  app.get(protectedResourcePath, protectedResourceMetadataHandler);
+  if (config.mcpAuthMode !== 'none') {
+    const protectedResourcePath = '/.well-known/oauth-protected-resource';
+    app.get(protectedResourcePath, protectedResourceMetadataHandler);
 
-  // RFC 8414 §3 path-suffixed variant — clients also probe
-  // `/.well-known/oauth-protected-resource{mcpHttpEndpointPath}` when the MCP
-  // endpoint is not at the root. Mount the same handler at that path too.
-  if (config.mcpHttpEndpointPath !== '/') {
-    const suffixedProtectedResourcePath = `${protectedResourcePath}${config.mcpHttpEndpointPath}`;
-    app.get(suffixedProtectedResourcePath, protectedResourceMetadataHandler);
+    // RFC 8414 §3 path-suffixed variant — clients also probe
+    // `/.well-known/oauth-protected-resource{mcpHttpEndpointPath}` when the MCP
+    // endpoint is not at the root. Mount the same handler at that path too.
+    if (config.mcpHttpEndpointPath !== '/') {
+      const suffixedProtectedResourcePath = `${protectedResourcePath}${config.mcpHttpEndpointPath}`;
+      app.get(suffixedProtectedResourcePath, protectedResourceMetadataHandler);
+      logger.debug(
+        `RFC 8414 path-suffixed metadata mounted at ${suffixedProtectedResourcePath}.`,
+        transportContext,
+      );
+    }
+  } else {
     logger.debug(
-      `RFC 8414 path-suffixed metadata mounted at ${suffixedProtectedResourcePath}.`,
+      'MCP_AUTH_MODE=none — Protected Resource Metadata not mounted (server is not an OAuth-protected resource).',
       transportContext,
     );
   }
