@@ -127,4 +127,55 @@ describe('check-dependency-specifiers (#246)', () => {
     expect(code).toBe(1);
     expect(output).toContain('a → next');
   });
+
+  /**
+   * An override exists to hold a transitive off a known-vulnerable version, so
+   * a floating specifier there re-resolves the pin it was added to enforce —
+   * the advisory returns while the block still reads as present.
+   */
+  describe('overrides', () => {
+    it('passes concrete override ranges', () => {
+      write(dir, 'package.json', {
+        name: 'x',
+        overrides: { 'brace-expansion': '^2.1.2', postcss: '8.5.22' },
+      });
+
+      const { code, output } = runCheck(dir);
+
+      expect(code).toBe(0);
+      expect(output).toContain('No floating dependency specifiers found.');
+    });
+
+    it('rejects `latest`, `*`, and dist-tags in overrides', () => {
+      write(dir, 'package.json', {
+        name: 'x',
+        overrides: { a: 'latest', b: '*', c: 'beta', ok: '^1.2.3' },
+      });
+
+      const { code, output } = runCheck(dir);
+
+      expect(code).toBe(1);
+      expect(output).toContain('a → latest');
+      expect(output).toContain('b → *');
+      expect(output).toContain('c → beta');
+      expect(output).toContain('package.json overrides');
+      expect(output).not.toContain('ok →');
+    });
+
+    /**
+     * npm's nested form (`{ "pkg": { "child": "^1" } }`) is not flat strings.
+     * Bun only reads the flat form, but the parse must not crash on one.
+     */
+    it('skips non-string override values instead of throwing', () => {
+      write(dir, 'package.json', {
+        name: 'x',
+        overrides: { nested: { child: 'latest' }, flat: '^1.0.0' },
+      });
+
+      const { code, output } = runCheck(dir);
+
+      expect(code).toBe(0);
+      expect(output).toContain('No floating dependency specifiers found.');
+    });
+  });
 });
