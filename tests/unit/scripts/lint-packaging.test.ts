@@ -1,13 +1,16 @@
 /**
  * @fileoverview Tests for scripts/lint-packaging.ts — the `.mcpbignore` static
  * guards (checks 5–7, issues #172/#207), the post-bundle content check
- * (check 8, issue #230), and the identity checks (check 9, issue #231).
+ * (check 8, issues #230/#274), and the identity checks (check 9, issue #231).
  * Imports the real implementation; no inline mirror.
  * @module tests/unit/scripts/lint-packaging.test
  */
 
 import { describe, expect, it } from 'vitest';
-import { AGENT_DOC_ENTRY as CLEAN_AGENT_DOC_ENTRY } from '../../../scripts/clean-mcpb.js';
+import {
+  AGENT_DOC_ENTRY as CLEAN_AGENT_DOC_ENTRY,
+  NATIVE_BINDING_ENTRY as CLEAN_NATIVE_BINDING_ENTRY,
+} from '../../../scripts/clean-mcpb.js';
 import {
   AGENT_DOC_ENTRY,
   checkBundleContent,
@@ -15,6 +18,7 @@ import {
   checkEntrypointIdentity,
   checkManifestIdentity,
   checkPluginManifests,
+  NATIVE_BINDING_ENTRY,
 } from '../../../scripts/lint-packaging.js';
 
 describe('lint-packaging · bundle-content guard (checks 5–7)', () => {
@@ -125,6 +129,41 @@ describe('lint-packaging · post-bundle content check (check 8)', () => {
     expect(errors[0]).toContain('dist/test.mcpb');
     expect(errors[0]).toContain('3 node_modules agent-doc entries');
     expect(errors[0]).toContain('clean-mcpb.ts');
+  });
+
+  it('keeps the native-binding filter in sync with clean-mcpb.ts', () => {
+    expect(NATIVE_BINDING_ENTRY.source).toBe(CLEAN_NATIVE_BINDING_ENTRY.source);
+    expect(NATIVE_BINDING_ENTRY.flags).toBe(CLEAN_NATIVE_BINDING_ENTRY.flags);
+  });
+
+  // A packed bundle carries only the build host's platform slice, so shipping
+  // it locks the "Install in Claude Desktop" artifact to that platform. (#274)
+  it('flags platform-specific native bindings', () => {
+    const entries = [
+      'dist/index.js',
+      'node_modules/@duckdb/node-bindings-darwin-arm64/duckdb.node',
+      'node_modules/@duckdb/node-bindings-darwin-arm64/libduckdb.dylib',
+    ];
+    const errors = checkBundleEntries(entries, 'dist/test.mcpb');
+    expect(errors).toHaveLength(1);
+    expect(errors[0]).toContain('2 platform-specific native binding entries');
+    expect(errors[0]).toContain('clean-mcpb.ts');
+  });
+
+  it('keeps the portable duckdb packages — only the platform slices go', () => {
+    const entries = [
+      'node_modules/@duckdb/node-api/lib/index.js',
+      'node_modules/@duckdb/node-bindings/duckdb.d.ts',
+    ];
+    expect(checkBundleEntries(entries, 'dist/test.mcpb')).toEqual([]);
+  });
+
+  it('reports agent-doc and native-binding classes as separate errors', () => {
+    const entries = [
+      'node_modules/dotenv/skills/dotenv/SKILL.md',
+      'node_modules/@duckdb/node-bindings-linux-x64/libduckdb.so',
+    ];
+    expect(checkBundleEntries(entries, 'dist/test.mcpb')).toHaveLength(2);
   });
 });
 
