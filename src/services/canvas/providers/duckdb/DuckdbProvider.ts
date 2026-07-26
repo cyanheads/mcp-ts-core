@@ -7,7 +7,9 @@
  * @module src/services/canvas/providers/duckdb/DuckdbProvider
  */
 
-import { unlink } from 'node:fs/promises';
+import { mkdir, unlink } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join, resolve } from 'node:path';
 
 import {
   databaseError,
@@ -79,6 +81,12 @@ export interface DuckdbProviderOptions {
   memoryLimitMb: number;
   /** Number of rows to sniff for schema inference. */
   schemaSniffRows: number;
+  /**
+   * Root for scratch I/O — DuckDB's `temp_directory` plus the transient files
+   * behind stream exports and the spillover round-trip. Defaults to
+   * `<os.tmpdir()>/mcp-canvas` when unset; never the process cwd.
+   */
+  tempRootPath?: string | undefined;
 }
 
 interface CanvasRecord {
@@ -98,11 +106,28 @@ export class DuckdbProvider implements IDataCanvasProvider {
   // Lifecycle
   // ---------------------------------------------------------------------
 
+  /**
+   * Absolute scratch root, created on first use.
+   *
+   * DuckDB defaults an in-memory database's `temp_directory` to a
+   * cwd-relative `.tmp`, so the first query that spills `mkdir`s under the
+   * process working directory — which fails with `EACCES` whenever the
+   * container runs non-root or on a read-only rootfs. Resolving scratch to an
+   * explicitly writable directory keeps spills working regardless of cwd.
+   */
+  private async ensureTempRoot(): Promise<string> {
+    const root = resolve(this.options.tempRootPath ?? join(tmpdir(), 'mcp-canvas'));
+    await mkdir(root, { recursive: true });
+    return root;
+  }
+
   async initCanvas(canvasId: string, _context: RequestContextLike): Promise<void> {
     if (this.canvases.has(canvasId)) return;
     const duck = await importDuckDB();
+    const tempDirectory = await this.ensureTempRoot();
     const instance = await duck.DuckDBInstance.create(':memory:', {
       memory_limit: `${this.options.memoryLimitMb}MB`,
+      temp_directory: tempDirectory,
       // Disable extension install/load paths in canvas mode.
       autoinstall_known_extensions: 'false',
       autoload_known_extensions: 'false',
@@ -389,10 +414,10 @@ export class DuckdbProvider implements IDataCanvasProvider {
         };
       }
 
-      // Stream branch: COPY to a sandbox temp file, pipe to the caller's
-      // stream, then unlink. pipeFileToStream owns cleanup once invoked; if
-      // the COPY itself fails we must unlink here before re-throwing.
-      const tempPath = await tempFilePathFor(this.options.exportRootPath, target.format);
+      // Stream branch: COPY to a scratch file, pipe to the caller's stream,
+      // then unlink. pipeFileToStream owns cleanup once invoked; if the COPY
+      // itself fails we must unlink here before re-throwing.
+      const tempPath = await tempFilePathFor(await this.ensureTempRoot(), target.format);
       try {
         await conn.run(
           `COPY ${quoteIdentifier(tableName)} TO '${escapeSqlString(tempPath)}' ${formatClause}`,
@@ -528,12 +553,12 @@ export class DuckdbProvider implements IDataCanvasProvider {
     // matching registerTable's behavior.
     await target.controlConnection.run(`DROP TABLE IF EXISTS ${quoteIdentifier(asName)}`);
 
-    // Round-trip through a sandbox-rooted temp Parquet file. Parquet is
+    // Round-trip through a scratch Parquet file. Parquet is
     // built into DuckDB's core (no extension load needed even with
     // autoload disabled). All column types — including TIMESTAMP/DATE/BLOB
     // — round-trip losslessly, which an in-memory appender path can't
     // guarantee for native engine value types.
-    const tempPath = await tempFilePathFor(this.options.exportRootPath, 'parquet');
+    const tempPath = await tempFilePathFor(await this.ensureTempRoot(), 'parquet');
     try {
       await source.controlConnection.run(
         `COPY ${quoteIdentifier(sourceTableName)} TO '${escapeSqlString(tempPath)}' (FORMAT 'parquet')`,

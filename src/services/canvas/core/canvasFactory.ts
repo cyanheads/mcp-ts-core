@@ -46,6 +46,7 @@ export function createCanvasService(config: AppConfig): DataCanvas | undefined {
     const provider = new DuckdbProvider({
       memoryLimitMb: config.canvas.defaultMemoryLimitMb,
       exportRootPath: config.canvas.exportRootPath,
+      tempRootPath: config.canvas.tempRootPath,
       defaultRowLimit: config.canvas.defaultRowLimit,
       schemaSniffRows: config.canvas.schemaSniffRows,
     });

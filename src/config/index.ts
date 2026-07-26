@@ -318,6 +318,19 @@ const ConfigSchema = z
          * via `..` or absolute paths. Stream-based exports bypass this.
          */
         exportRootPath: z.string().default('./.canvas-exports'),
+        /**
+         * Root for scratch I/O: DuckDB's `temp_directory` (where a query
+         * exceeding `memory_limit` spills) and the transient files behind
+         * stream exports and the spillover round-trip.
+         *
+         * Left unset, the DuckDB provider resolves it under the OS temp
+         * directory. It must not fall back to the process cwd — DuckDB's own
+         * default for an in-memory database is a cwd-relative `.tmp`, which
+         * fails outright under a non-root or read-only container rootfs.
+         * Distinct from `CANVAS_EXPORT_PATH`, which holds user-requested
+         * export files and stays where the caller asked for them.
+         */
+        tempRootPath: z.string().optional(),
         /** Maximum active canvases per tenant before `RateLimited`. */
         maxCanvasesPerTenant: z.coerce.number().min(1).default(100),
         /** Sliding TTL in milliseconds. Default 24h. */
@@ -560,6 +573,7 @@ const parseConfig = (envOverrides?: Record<string, string | undefined>) => {
       providerType: env.CANVAS_PROVIDER_TYPE,
       defaultMemoryLimitMb: env.CANVAS_DEFAULT_MEMORY_LIMIT_MB,
       exportRootPath: env.CANVAS_EXPORT_PATH,
+      tempRootPath: env.CANVAS_TEMP_PATH,
       maxCanvasesPerTenant: env.CANVAS_MAX_CANVASES_PER_TENANT,
       ttlMs: env.CANVAS_TTL_MS,
       absoluteCapMs: env.CANVAS_ABSOLUTE_CAP_MS,

@@ -90,8 +90,10 @@ export async function pipeFileToStream(
 }
 
 /**
- * Generate a unique temp file path inside the sandbox. Creates the root if
- * missing so the caller can write immediately.
+ * Generate a unique scratch file path under `rootPath`. Creates the root if
+ * missing so the caller can write immediately. Callers pass the scratch root
+ * (see `CANVAS_TEMP_PATH`), not the user-facing export sandbox — these files
+ * are transient and unlinked once consumed.
  */
 export async function tempFilePathFor(rootPath: string, format: ExportFormat): Promise<string> {
   const root = resolve(rootPath);
