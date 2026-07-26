@@ -182,7 +182,7 @@ docs/api/
 .storage/
 repomix-output*
 duckdata/
-data/
+/data/
 docs/devdocs.md
 ideas/
 .mcp.json
