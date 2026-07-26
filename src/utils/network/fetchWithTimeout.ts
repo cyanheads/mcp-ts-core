@@ -375,8 +375,20 @@ export async function fetchWithTimeout(
   // Use AbortController instead of AbortSignal.timeout() for cross-runtime compatibility
   // (AbortSignal.timeout() can fail in Bun's stdio transport due to realm mismatch)
   const controller = new AbortController();
-  const timeoutSentinel = 'FETCH_TIMEOUT';
-  const timeoutId = setTimeout(() => controller.abort(timeoutSentinel), timeoutMs);
+  /**
+   * Abort with a real exception, not a string. `fetch` rejects with the abort
+   * reason *value*, so a string reason produces a rejection that no
+   * `instanceof Error` branch can classify — the timeout then falls through to
+   * the generic network-error wrapper. A `TimeoutError` DOMException is what
+   * `AbortSignal.timeout()` itself raises, and holding the instance lets the
+   * catch block identity-match it: a caller signal that aborts with its own
+   * `TimeoutError` stays classified as a caller abort, not our timeout.
+   */
+  const timeoutReason = new DOMException(
+    `${operationDescription} timed out after ${timeoutMs}ms.`,
+    'TimeoutError',
+  );
+  const timeoutId = setTimeout(() => controller.abort(timeoutReason), timeoutMs);
 
   // Compose the timeout signal with any caller-supplied signal. AbortSignal.any
   // is available on all supported floors (Node ≥24, Bun ≥1.3, workerd).
@@ -486,21 +498,29 @@ export async function fetchWithTimeout(
       throw error;
     }
 
-    if (error instanceof Error && (error.name === 'TimeoutError' || error.name === 'AbortError')) {
-      const isTimeout =
-        error.name === 'TimeoutError' || controller.signal.reason === timeoutSentinel;
-      if (isTimeout) {
-        logger.error(`${operationDescription} timed out after ${timeoutMs}ms.`, {
-          ...context,
-          errorSource: 'FetchTimeout',
-        });
-        throw timeout(`${operationDescription} timed out.`, {
-          requestId: context.requestId,
-          operation: context.operation as string | undefined,
-          errorSource: 'FetchTimeout',
-        });
-      }
-      // External signal abort (e.g., client disconnect) — not a timeout
+    /**
+     * Classify aborts from the signals, not from the rejection value. `fetch`
+     * rejects with the abort *reason*, and a reason may be any value — a
+     * string, a plain object — so an `instanceof Error` gate silently drops
+     * both our own timeout and any caller abort carrying a custom reason into
+     * the generic network-error wrapper below.
+     */
+    if (controller.signal.reason === timeoutReason) {
+      logger.error(`${operationDescription} timed out after ${timeoutMs}ms.`, {
+        ...context,
+        errorSource: 'FetchTimeout',
+      });
+      throw timeout(`${operationDescription} timed out.`, {
+        requestId: context.requestId,
+        operation: context.operation as string | undefined,
+        errorSource: 'FetchTimeout',
+      });
+    }
+
+    // External signal abort (e.g. client disconnect) — not a timeout. The
+    // `AbortError` fallback covers an abort raised somewhere other than the
+    // two signals composed here, such as a response body stream.
+    if (fetchSignal.aborted || (error instanceof Error && error.name === 'AbortError')) {
       logger.info(`${operationDescription} aborted by caller.`, {
         ...context,
         errorSource: 'FetchAborted',

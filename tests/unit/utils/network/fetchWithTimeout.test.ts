@@ -171,11 +171,10 @@ describe('fetchWithTimeout', () => {
     vi.spyOn(globalThis, 'fetch').mockImplementation(
       (_url, init) =>
         new Promise((_resolve, reject) => {
-          init?.signal?.addEventListener('abort', () => {
-            const abortError = new Error('Aborted');
-            abortError.name = 'AbortError';
-            reject(abortError);
-          });
+          const signal = init?.signal;
+          // Spec behaviour: `fetch` rejects with the abort *reason* value
+          // itself, whatever its type — never a synthesized `AbortError`.
+          signal?.addEventListener('abort', () => reject(signal.reason));
         }),
     );
 
@@ -290,11 +289,10 @@ describe('fetchWithTimeout', () => {
     vi.spyOn(globalThis, 'fetch').mockImplementation(
       (_url, init) =>
         new Promise((_resolve, reject) => {
-          init?.signal?.addEventListener('abort', () => {
-            const abortError = new Error('Aborted');
-            abortError.name = 'AbortError';
-            reject(abortError);
-          });
+          const signal = init?.signal;
+          // Spec behaviour: `fetch` rejects with the abort *reason* value
+          // itself, whatever its type — never a synthesized `AbortError`.
+          signal?.addEventListener('abort', () => reject(signal.reason));
         }),
     );
 
@@ -313,6 +311,32 @@ describe('fetchWithTimeout', () => {
       expect.stringContaining('aborted by caller'),
       expect.objectContaining({ errorSource: 'FetchAborted' }),
     );
+  });
+
+  it('keeps a caller TimeoutError classified as FetchAborted, not FetchTimeout', async () => {
+    vi.spyOn(logger, 'info').mockImplementation(() => {});
+    const externalController = new AbortController();
+
+    vi.spyOn(globalThis, 'fetch').mockImplementation(
+      (_url, init) =>
+        new Promise((_resolve, reject) => {
+          const signal = init?.signal;
+          signal?.addEventListener('abort', () => reject(signal.reason));
+        }),
+    );
+
+    const promise = fetchWithTimeout('https://example.com', 30_000, context, {
+      signal: externalController.signal,
+    });
+
+    // A caller may abort with a TimeoutError of its own — matching on the name
+    // alone would misattribute that to this helper's internal timeout.
+    externalController.abort(new DOMException('caller deadline', 'TimeoutError'));
+
+    await expect(promise).rejects.toMatchObject({
+      code: JsonRpcErrorCode.InternalError,
+      data: expect.objectContaining({ errorSource: 'FetchAborted' }),
+    });
   });
 
   it('emits both status/body and legacy statusCode/responseBody with equal values (#279)', async () => {
@@ -389,11 +413,8 @@ describe('fetchWithTimeout', () => {
       vi.spyOn(globalThis, 'fetch').mockImplementation(
         (_url, init) =>
           new Promise((_resolve, reject) => {
-            init?.signal?.addEventListener('abort', () => {
-              const abortError = new Error('Aborted');
-              abortError.name = 'AbortError';
-              reject(abortError);
-            });
+            const signal = init?.signal;
+            signal?.addEventListener('abort', () => reject(signal.reason));
           }),
       );
       const error = (await fetchWithTimeout(secretUrl, 5, context).catch((e) => e)) as McpError;
