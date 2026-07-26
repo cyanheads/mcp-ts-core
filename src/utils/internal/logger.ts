@@ -10,6 +10,7 @@ import pino from 'pino';
 
 import { config } from '@/config/index.js';
 import { type RequestContext, requestContextService } from '@/utils/internal/requestContext.js';
+import { UNTHROTTLED_MESSAGES } from '@/utils/internal/telemetryMessages.js';
 
 /**
  * RFC 5424 severity levels supported by the MCP logger, ordered from least to most severe.
@@ -145,8 +146,11 @@ export function sanitizeLogBindings(obj: Record<string, unknown>): Record<string
  * - Optional file sinks: `combined.log` at the configured log level, `error.log` for
  *   errors and above, and `interactions.log` for structured interaction records.
  * - Sensitive field redaction via Pino's `redact` option.
- * - Per-message rate limiting to suppress log storms; suppressed counts are flushed
- *   at the end of each rate-limit window.
+ * - Rate limiting per level + message to suppress log storms, configurable via
+ *   `MCP_LOG_RATE_LIMIT_THRESHOLD` (0 disables) and `MCP_LOG_RATE_LIMIT_WINDOW_MS`.
+ *   Suppressed counts are flushed at `warning` at the end of each window. The
+ *   framework's per-call telemetry lines (see `telemetryMessages.ts`) bypass the
+ *   limiter, since their repetition is request throughput rather than a storm.
  * - OpenTelemetry trace context is auto-injected via {@link RequestContext} fields.
  * - Serverless-safe: when `IS_SERVERLESS=true` or `process` is unavailable, falls
  *   back to minimal Pino config without file transports or Node.js APIs.
@@ -161,8 +165,8 @@ export class Logger {
   private currentMcpLevel: McpLogLevel = 'info';
   private transportType: 'stdio' | 'http' | undefined;
 
-  private rateLimitThreshold = 10;
-  private rateLimitWindow = 60000;
+  private rateLimitThreshold = config.logRateLimitThreshold;
+  private rateLimitWindow = config.logRateLimitWindowMs;
   private messageCounts = new Map<string, { count: number; firstSeen: number }>();
   private suppressedMessages = new Map<string, number>();
   private cleanupTimer?: NodeJS.Timeout;
@@ -469,36 +473,62 @@ export class Logger {
     return this.initialized;
   }
 
-  private isRateLimited(message: string): boolean {
+  private isRateLimited(level: McpLogLevel, message: string): boolean {
+    // Threshold 0 disables rate limiting entirely.
+    if (this.rateLimitThreshold === 0) return false;
+
+    // Per-call telemetry lines are one-per-request by construction, so their
+    // repetition is throughput rather than a storm. Limiting them would cap
+    // log-derived call volume at the threshold and silently drop the rest.
+    if (UNTHROTTLED_MESSAGES.has(message)) return false;
+
+    // Key on level + message: an error storm and ordinary info throughput that
+    // happen to share a string are different events and must not share a budget.
+    const key = `${level}:${message}`;
     const now = Date.now();
-    const entry = this.messageCounts.get(message);
+    const entry = this.messageCounts.get(key);
     if (!entry) {
-      this.messageCounts.set(message, { count: 1, firstSeen: now });
+      this.messageCounts.set(key, { count: 1, firstSeen: now });
       return false;
     }
     if (now - entry.firstSeen > this.rateLimitWindow) {
-      this.messageCounts.set(message, { count: 1, firstSeen: now });
+      this.messageCounts.set(key, { count: 1, firstSeen: now });
       return false;
     }
     entry.count++;
     if (entry.count > this.rateLimitThreshold) {
-      this.suppressedMessages.set(message, (this.suppressedMessages.get(message) || 0) + 1);
+      this.suppressedMessages.set(key, (this.suppressedMessages.get(key) || 0) + 1);
       return true;
     }
     return false;
   }
 
   private flushSuppressedMessages(): void {
-    for (const [message, count] of this.suppressedMessages.entries()) {
-      this.debug(
-        `Log message suppressed ${count} times due to rate limiting.`,
+    // Snapshot and clear before emitting — each notice goes back through
+    // `log()`, which can write to `suppressedMessages`, and mutating the map
+    // mid-iteration would drop or double-count entries.
+    const pending = [...this.suppressedMessages.entries()];
+    this.suppressedMessages.clear();
+
+    for (const [key, count] of pending) {
+      // Emitted at `warning`, not `debug`: suppression happens at `info` and
+      // above, so a debug-level notice is filtered out at exactly the levels
+      // where lines are being dropped — leaving a truncated log that reads as
+      // a quiet one. The threshold and window are included so the reader can
+      // act on it (raise MCP_LOG_RATE_LIMIT_THRESHOLD, or set it to 0).
+      this.warning(
+        `Suppressed ${count} occurrences of "${key}" — rate limit is ${this.rateLimitThreshold} per ${this.rateLimitWindow}ms.`,
         requestContextService.createRequestContext({
           operation: 'loggerRateLimitFlush',
-          additionalContext: { originalMessage: message },
+          additionalContext: {
+            suppressedKey: key,
+            suppressedCount: count,
+            rateLimitThreshold: this.rateLimitThreshold,
+            rateLimitWindowMs: this.rateLimitWindow,
+          },
         }),
       );
     }
-    this.suppressedMessages.clear();
     // Evict entries whose rate-limit window has elapsed. Walking the map
     // every tick (vs. clearing wholesale) preserves the per-window count
     // for messages still inside their window, so the threshold is enforced
@@ -528,7 +558,7 @@ export class Logger {
       return;
     }
 
-    if (this.isRateLimited(msg)) return;
+    if (this.isRateLimited(level, msg)) return;
 
     const logObject: Record<string, unknown> = { ...context };
     // Pass the raw Error so pino's `err` serializer (default: `pino.stdSerializers.err`)

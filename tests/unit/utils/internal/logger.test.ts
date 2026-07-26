@@ -8,6 +8,7 @@ import fc from 'fast-check';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { Logger, type McpLogLevel, sanitizeLogBindings } from '@/utils/internal/logger.js';
+import { TELEMETRY_LOG_MESSAGES } from '@/utils/internal/telemetryMessages.js';
 
 // Mock pino to avoid file I/O in unit tests
 vi.mock('pino', () => {
@@ -39,6 +40,8 @@ vi.mock('@/config/index.js', () => ({
     environment: 'testing',
     mcpServerVersion: '1.0.0-test',
     logsPath: undefined,
+    logRateLimitThreshold: 10,
+    logRateLimitWindowMs: 60000,
   },
 }));
 
@@ -236,6 +239,100 @@ describe('Logger', () => {
       // Flush without suppression — fresh entries (firstSeen = now) stay.
       (logger as any).flushSuppressedMessages();
       expect(counts.size).toBe(before);
+    });
+
+    // The limiter used to key on the message alone, so an error storm and
+    // ordinary info throughput sharing a string also shared a budget. (#295)
+    it('should budget the same message separately per level', async () => {
+      await logger.initialize('debug');
+
+      const pino = (await import('pino')).default;
+      const mockLogger = pino() as any;
+      const infoBefore = mockLogger.info.mock.calls.length;
+      const errorBefore = mockLogger.error.mock.calls.length;
+
+      for (let i = 0; i < 10; i++) logger.info('shared string');
+      for (let i = 0; i < 10; i++) logger.error('shared string', new Error('boom'));
+
+      expect(mockLogger.info.mock.calls.length - infoBefore).toBe(10);
+      expect(mockLogger.error.mock.calls.length - errorBefore).toBe(10);
+    });
+
+    // Per-call telemetry lines carry a constant message by design, so the
+    // limiter would cap log-derived call volume at the threshold. (#295)
+    it('should not rate-limit the framework per-call telemetry lines', async () => {
+      await logger.initialize('info');
+
+      const pino = (await import('pino')).default;
+      const mockLogger = pino() as any;
+      const before = mockLogger.info.mock.calls.length;
+
+      for (let i = 0; i < 30; i++) {
+        logger.info(TELEMETRY_LOG_MESSAGES.toolExecutionFinished);
+      }
+
+      expect(mockLogger.info.mock.calls.length - before).toBe(30);
+      expect((logger as any).suppressedMessages.size).toBe(0);
+    });
+
+    it('should disable rate limiting entirely when the threshold is 0', async () => {
+      await logger.initialize('info');
+
+      // Logger is a singleton — restore the threshold so it does not leak.
+      const saved = (logger as any).rateLimitThreshold;
+      (logger as any).rateLimitThreshold = 0;
+      try {
+        const pino = (await import('pino')).default;
+        const mockLogger = pino() as any;
+        const before = mockLogger.info.mock.calls.length;
+
+        for (let i = 0; i < 25; i++) logger.info('unthrottled');
+
+        expect(mockLogger.info.mock.calls.length - before).toBe(25);
+      } finally {
+        (logger as any).rateLimitThreshold = saved;
+      }
+    });
+
+    // Suppression happens at info and above; a debug-level notice is filtered
+    // out at exactly those levels, so truncation read as silence. (#295)
+    it('should report suppression at warning level with the counts', async () => {
+      await logger.initialize('info');
+
+      const pino = (await import('pino')).default;
+      const mockLogger = pino() as any;
+
+      for (let i = 0; i < 15; i++) logger.info('noisy');
+
+      const warnBefore = mockLogger.warn.mock.calls.length;
+      (logger as any).flushSuppressedMessages();
+
+      // The notice must land on warn — it previously went to debug, which is
+      // filtered out at the levels where suppression actually happens.
+      const emitted = mockLogger.warn.mock.calls.slice(warnBefore);
+      expect(emitted).toHaveLength(1);
+      expect(mockLogger.debug).not.toHaveBeenCalled();
+
+      const message = emitted[0][1];
+      expect(message).toContain('Suppressed 5 occurrences');
+      expect(message).toContain('info:noisy');
+      expect(message).toContain('rate limit is 10');
+    });
+
+    it('should clear suppressed counts before emitting so a flush cannot double-report', async () => {
+      await logger.initialize('info');
+
+      for (let i = 0; i < 15; i++) logger.info('noisy-once');
+
+      (logger as any).flushSuppressedMessages();
+      expect((logger as any).suppressedMessages.size).toBe(0);
+
+      const pino = (await import('pino')).default;
+      const mockLogger = pino() as any;
+      const warnBefore = mockLogger.warn.mock.calls.length;
+
+      (logger as any).flushSuppressedMessages();
+      expect(mockLogger.warn.mock.calls.length).toBe(warnBefore);
     });
   });
 

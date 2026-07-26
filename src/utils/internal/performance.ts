@@ -13,6 +13,7 @@ import { McpError } from '@/types-global/errors.js';
 import { type ErrorCategory, getErrorCategory } from '@/utils/internal/error-handler/mappings.js';
 import { logger } from '@/utils/internal/logger.js';
 import type { RequestContext } from '@/utils/internal/requestContext.js';
+import { TELEMETRY_LOG_MESSAGES } from '@/utils/internal/telemetryMessages.js';
 import {
   ATTR_CODE_FUNCTION_NAME,
   ATTR_CODE_NAMESPACE,
@@ -349,7 +350,7 @@ export async function measureToolExecution<T>(
         }
       }
 
-      logger.info('Tool execution finished.', {
+      logger.info(TELEMETRY_LOG_MESSAGES.toolExecutionFinished, {
         ...context,
         metrics: {
           durationMs,
@@ -477,7 +478,7 @@ export async function measureResourceExecution<T>(
       if (ok) m.resourceOutputBytes.record(outputBytes, resourceAttrs);
       if (!ok) m.resourceReadErrors.add(1, resourceAttrs);
 
-      logger.info('Resource read finished.', {
+      logger.info(TELEMETRY_LOG_MESSAGES.resourceReadFinished, {
         ...context,
         metrics: {
           durationMs,
@@ -640,7 +641,10 @@ export async function measurePromptGeneration<T>(
       }
 
       const logFn = ok ? logger.info : logger.error;
-      logFn.call(logger, `Prompt generation ${ok ? 'finished' : 'failed'}.`, {
+      const promptMessage = ok
+        ? TELEMETRY_LOG_MESSAGES.promptGenerationFinished
+        : TELEMETRY_LOG_MESSAGES.promptGenerationFailed;
+      logFn.call(logger, promptMessage, {
         ...context,
         metrics: {
           durationMs,

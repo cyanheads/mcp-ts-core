@@ -131,6 +131,16 @@ const ConfigSchema = z
      * only (model, message count, token usage, duration).
      */
     logLlmInteractions: envBoolean,
+    /**
+     * Maximum times a given level + message pair is emitted per
+     * `logRateLimitWindowMs` before further occurrences are suppressed.
+     * Guards against log storms from a repeated error. Set to `0` to disable
+     * rate limiting entirely — appropriate for a high-throughput server whose
+     * per-call lines use a constant message by design.
+     */
+    logRateLimitThreshold: z.coerce.number().int().min(0).default(10),
+    /** Window, in milliseconds, over which `logRateLimitThreshold` is counted. */
+    logRateLimitWindowMs: z.coerce.number().int().positive().default(60_000),
     environment: z
       .preprocess(
         (val) => {
@@ -478,6 +488,8 @@ const parseConfig = (envOverrides?: Record<string, string | undefined>) => {
     logLevel: env.MCP_LOG_LEVEL,
     logsPath: env.LOGS_DIR,
     logLlmInteractions: env.LOG_LLM_INTERACTIONS,
+    logRateLimitThreshold: env.MCP_LOG_RATE_LIMIT_THRESHOLD,
+    logRateLimitWindowMs: env.MCP_LOG_RATE_LIMIT_WINDOW_MS,
     environment: env.NODE_ENV,
     mcpTransportType: env.MCP_TRANSPORT_TYPE,
     mcpSessionMode: env.MCP_SESSION_MODE,
