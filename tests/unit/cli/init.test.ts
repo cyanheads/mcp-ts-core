@@ -137,13 +137,22 @@ describe('CLI init command', () => {
     expect(existsSync(join(dest, 'biome.json'))).toBe(true);
     expect(existsSync(join(dest, '.gitignore'))).toBe(true);
     expect(existsSync(join(dest, '.dockerignore'))).toBe(true);
+    expect(existsSync(join(dest, 'tests', 'smoke', 'definitions.smoke.test.ts'))).toBe(true);
+    expect(existsSync(join(dest, 'tests', 'integration', 'echo-contract.int.test.ts'))).toBe(true);
+    expect(existsSync(join(dest, 'tests', 'fuzz', 'echo-tool.fuzz.test.ts'))).toBe(true);
 
     const packageJson = readFileSync(join(dest, 'package.json'), 'utf-8');
     const claude = readFileSync(join(dest, 'CLAUDE.md'), 'utf-8');
+    const vitestConfig = readFileSync(join(dest, 'vitest.config.ts'), 'utf-8');
 
     expect(packageJson).toContain('"name": "demo-server"');
     expect(packageJson).not.toContain('{{PACKAGE_NAME}}');
     expect(packageJson).not.toContain('{{FRAMEWORK_VERSION}}');
+    expect(packageJson).toContain('"test:coverage": "vitest run --coverage"');
+    expect(packageJson).toContain('"@vitest/coverage-istanbul": "4.1.10"');
+    expect(vitestConfig).toContain("name: 'smoke'");
+    expect(vitestConfig).toContain("name: 'integration'");
+    expect(vitestConfig).toContain("name: 'fuzz'");
     expect(claude).toContain('**Server:** demo-server');
     expect(claude).not.toContain('{{PACKAGE_NAME}}');
 

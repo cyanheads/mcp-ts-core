@@ -36,6 +36,7 @@
     "changelog:check": "bun run scripts/build-changelog.ts --check",
     "release:github": "bun run scripts/release-github.ts",
     "test": "vitest run",
+    "test:coverage": "vitest run --coverage",
     "start": "node dist/index.js",
     "start:stdio": "MCP_TRANSPORT_TYPE=stdio node dist/index.js",
     "start:http": "MCP_TRANSPORT_TYPE=http node dist/index.js"
@@ -67,6 +68,7 @@
     "@biomejs/biome": "2.5.5",
     "@socketsecurity/bun-security-scanner": "^1.1.2",
     "@types/node": "26.1.1",
+    "@vitest/coverage-istanbul": "4.1.10",
     "depcheck": "^1.4.7",
     "ignore": "^7.0.6",
     "tsc-alias": "^1.9.1",
