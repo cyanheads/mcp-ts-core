@@ -20,6 +20,7 @@ import {
   loadFc,
   zodToArbitrary,
 } from '@/testing/fuzz.js';
+import { JsonRpcErrorCode, McpError } from '@/types-global/errors.js';
 
 beforeAll(() => loadFc());
 
@@ -154,6 +155,33 @@ describe('fuzzTool', () => {
     expectCleanReport(report);
   });
 
+  it('treats deliberate MCP domain errors as handled outcomes', async () => {
+    const domainErrorTool = tool('fuzz_domain_error', {
+      description: 'Always reports a declared domain failure.',
+      input: z.object({ mode: z.literal('fail').describe('Failure mode') }),
+      output: z.object({ ok: z.boolean().describe('Success state') }),
+      errors: [
+        {
+          reason: 'expected_failure',
+          code: JsonRpcErrorCode.InvalidParams,
+          when: 'The failure mode is requested.',
+          recovery: 'Use a successful tool input.',
+        },
+      ],
+      handler(_input, ctx) {
+        throw ctx.fail('expected_failure', 'Requested failure.');
+      },
+    });
+
+    const report = await fuzzTool(domainErrorTool, {
+      numRuns: 5,
+      numAdversarial: 0,
+      seed: 101,
+    });
+
+    expectCleanReport(report);
+  });
+
   it('reports are reproducible with seed', async () => {
     const report1 = await fuzzTool(echoTool as any, { numRuns: 20, seed: 12345 });
     const report2 = await fuzzTool(echoTool as any, { numRuns: 20, seed: 12345 });
@@ -170,6 +198,24 @@ describe('fuzzResource', () => {
 
   it('noParamsResource survives fuzz testing', async () => {
     const report = await fuzzResource(noParamsResource as any, { numRuns: 5 });
+    expectCleanReport(report);
+  });
+
+  it('treats deliberate MCP resource errors as handled outcomes', async () => {
+    const domainErrorResource = resource('fuzz://error/{id}', {
+      description: 'Always reports a resource failure.',
+      params: z.object({ id: z.string().describe('Resource ID') }),
+      handler() {
+        throw new McpError(JsonRpcErrorCode.NotFound, 'Resource was not found.');
+      },
+    });
+
+    const report = await fuzzResource(domainErrorResource, {
+      numRuns: 5,
+      numAdversarial: 0,
+      seed: 102,
+    });
+
     expectCleanReport(report);
   });
 });

@@ -26,6 +26,7 @@ import {
 import type { AnyPromptDefinition } from '@/mcp-server/prompts/utils/promptDefinition.js';
 import type { AnyResourceDefinition } from '@/mcp-server/resources/utils/resourceDefinition.js';
 import type { AnyToolDefinition } from '@/mcp-server/tools/utils/toolDefinition.js';
+import { McpError } from '@/types-global/errors.js';
 import { createMockContext, type MockContextOptions } from './index.js';
 
 // ---------------------------------------------------------------------------
@@ -91,33 +92,79 @@ function zodTypeName(schema: unknown): string {
 // Zod → fast-check arbitrary generation
 // ---------------------------------------------------------------------------
 
+/** Elements generated for an array with no declared upper bound. */
+const DEFAULT_ARRAY_MAX = 5;
+
+/**
+ * Nesting levels expanded before a node is treated as non-terminating. Cycle
+ * detection catches self-referential schemas by identity; this is the backstop
+ * for a schema whose getters mint a fresh node on every access, where there is
+ * no repeated identity to detect.
+ */
+const MAX_SCHEMA_DEPTH = 32;
+
 /**
  * Converts a Zod schema to a fast-check `Arbitrary` that produces valid values.
  * Supports the JSON-Schema-serializable subset used by MCP tool/resource schemas.
+ *
+ * Finite nesting is expanded in full, however deep. A self-referential schema —
+ * Zod 4's getter pattern, where reading `.shape` re-enters the same node —
+ * terminates at the point of recursion with an absence the schema accepts.
  *
  * Requires `fast-check` to be loaded first — call from within a `fuzzTool()`/
  * `fuzzResource()`/`fuzzPrompt()` run, or call `loadFc()` before standalone use.
  */
 export function zodToArbitrary(schema: unknown): fc.Arbitrary<unknown> {
-  return zodNodeToArbitrary(schema, 0);
+  return zodNodeToArbitrary(schema, new Set(), 0) ?? getFc().constant(null);
 }
 
-function zodNodeToArbitrary(schema: unknown, depth: number): fc.Arbitrary<unknown> {
-  const f = getFc();
-  if (depth > 6) return f.constant(null);
+/**
+ * Expands one schema node, tracking the nodes on the current path so recursion
+ * is distinguished from finite nesting.
+ *
+ * Returns `undefined` when the node cannot yield a finite value — it re-enters
+ * itself, or nesting passed `MAX_SCHEMA_DEPTH`. Callers turn that into a
+ * schema-valid absence where one exists (`[]`, omitted optional, `null`), and
+ * propagate it otherwise, so a generated sample never carries an invalid value
+ * at an arbitrary position.
+ */
+function zodNodeToArbitrary(
+  schema: unknown,
+  path: Set<unknown>,
+  depth: number,
+): fc.Arbitrary<unknown> | undefined {
+  if (depth > MAX_SCHEMA_DEPTH) return;
+  if (typeof schema !== 'object' || schema === null) return expandNode(schema, path, depth);
+  if (path.has(schema)) return;
 
-  // Unwrap wrappers — cast through any to avoid Zod 4 $ZodType vs ZodType mismatch
+  path.add(schema);
+  try {
+    return expandNode(schema, path, depth);
+  } finally {
+    path.delete(schema);
+  }
+}
+
+function expandNode(
+  schema: unknown,
+  path: Set<unknown>,
+  depth: number,
+): fc.Arbitrary<unknown> | undefined {
+  const f = getFc();
+
+  // Unwrap wrappers — cast through any to avoid Zod 4 $ZodType vs ZodType mismatch.
+  // A wrapper whose inner node cannot terminate collapses to the absence it permits.
   if (schema instanceof ZodOptional) {
-    return f.option(zodNodeToArbitrary((schema as any).unwrap(), depth), { nil: undefined });
+    const inner = zodNodeToArbitrary((schema as any).unwrap(), path, depth);
+    return inner ? f.option(inner, { nil: undefined }) : f.constant(undefined);
   }
   if (schema instanceof ZodNullable) {
-    return f.option(zodNodeToArbitrary((schema as any).unwrap(), depth), { nil: null });
+    const inner = zodNodeToArbitrary((schema as any).unwrap(), path, depth);
+    return inner ? f.option(inner, { nil: null }) : f.constant(null);
   }
   if (schema instanceof ZodDefault) {
-    return f.option(zodNodeToArbitrary((schema as any).removeDefault(), depth), {
-      nil: undefined,
-      freq: 5,
-    });
+    const inner = zodNodeToArbitrary((schema as any).removeDefault(), path, depth);
+    return inner ? f.option(inner, { nil: undefined, freq: 5 }) : f.constant(undefined);
   }
 
   // Primitives
@@ -142,18 +189,20 @@ function zodNodeToArbitrary(schema: unknown, depth: number): fc.Arbitrary<unknow
 
   // Array
   if (schema instanceof ZodArray) {
-    const s = schema as any;
-    const minLen: number = typeof s.minLength === 'number' ? s.minLength : 0;
-    return f.array(zodNodeToArbitrary(s.element, depth + 1), {
-      minLength: minLen,
-      maxLength: Math.max(minLen, 5),
-    });
+    const { minLength, maxLength } = arrayLengthBounds(schema);
+    const element = zodNodeToArbitrary((schema as any).element, path, depth + 1);
+    // A recursive element type terminates here — an empty array is the finite value.
+    if (!element) return f.constant([]);
+    return f.array(element, { minLength, maxLength });
   }
 
   // Union
   if (schema instanceof ZodUnion) {
     const options = (schema as any)._def.options as unknown[];
-    return f.oneof(...options.map((o) => zodNodeToArbitrary(o, depth + 1)));
+    const arbs = options
+      .map((o) => zodNodeToArbitrary(o, path, depth + 1))
+      .filter((arb): arb is fc.Arbitrary<unknown> => arb !== undefined);
+    return arbs.length > 0 ? f.oneof(...arbs) : undefined;
   }
 
   // Object — check by _def.type since instanceof ZodObject may have type issues
@@ -165,13 +214,46 @@ function zodNodeToArbitrary(schema: unknown, depth: number): fc.Arbitrary<unknow
 
     const arbs: Record<string, fc.Arbitrary<unknown>> = {};
     for (const [key, fieldSchema] of entries) {
-      arbs[key] = zodNodeToArbitrary(fieldSchema, depth + 1);
+      const field = zodNodeToArbitrary(fieldSchema, path, depth + 1);
+      // An optional or nullable field already collapsed to its permitted absence,
+      // so reaching here means a required field cannot terminate.
+      if (!field) return;
+      arbs[key] = field;
     }
     return f.record(arbs);
   }
 
   // Fallback: generate JSON-safe primitives
   return f.oneof(f.string(), f.integer(), f.boolean(), f.constant(null));
+}
+
+/**
+ * Resolves an array's declared length bounds.
+ *
+ * Unlike ZodString, Zod 4's ZodArray exposes no `.minLength`/`.maxLength`
+ * accessors — `.min()`, `.max()`, `.length()`, and `.nonempty()` all land in
+ * `_def.checks`. Reading the absent accessor silently drops every one of them.
+ */
+function arrayLengthBounds(schema: unknown): { minLength: number; maxLength: number } {
+  const checks = ((schema as any)?._def?.checks ?? []) as unknown[];
+  let min = 0;
+  let max: number | undefined;
+
+  for (const check of checks) {
+    const def = (check as any)?._zod?.def;
+    if (def?.check === 'min_length' && typeof def.minimum === 'number') {
+      min = Math.max(min, def.minimum);
+    } else if (def?.check === 'max_length' && typeof def.maximum === 'number') {
+      max = max === undefined ? def.maximum : Math.min(max, def.maximum);
+    } else if (def?.check === 'length_equals' && typeof def.length === 'number') {
+      min = Math.max(min, def.length);
+      max = max === undefined ? def.length : Math.min(max, def.length);
+    }
+  }
+
+  // An unsatisfiable schema (min above max) still has to yield an arbitrary
+  // rather than throw out of the generator; the sample is rejected at parse.
+  return { minLength: min, maxLength: Math.max(min, max ?? DEFAULT_ARRAY_MAX) };
 }
 
 /**
@@ -362,6 +444,30 @@ function checkErrorLeaks(errorText: string): { leakedStack: boolean; leakedInter
   return { leakedStack, leakedInternals };
 }
 
+function recordHandlerError(report: FuzzReport, input: unknown, error: unknown): void {
+  if (!(error instanceof McpError)) {
+    report.crashes.push({ input, error });
+    return;
+  }
+
+  const leakCheck = checkErrorLeaks(error.message);
+  if (leakCheck.leakedStack || leakCheck.leakedInternals) {
+    report.leaks.push({ input, errorText: error.message });
+  }
+}
+
+function createToolFuzzContext(
+  def: AnyToolDefinition,
+  options: FuzzOptions,
+  overrides: MockContextOptions = {},
+) {
+  return createMockContext({
+    ...options.ctx,
+    ...(def.errors !== undefined && { errors: def.errors }),
+    ...overrides,
+  });
+}
+
 // ---------------------------------------------------------------------------
 // Prototype pollution detection
 // ---------------------------------------------------------------------------
@@ -410,7 +516,7 @@ export interface FuzzReport {
  * Designed to be called inside a `describe()` / `it()` block.
  *
  * Checks:
- * 1. Valid inputs -> handler runs without crash, output matches schema
+ * 1. Valid inputs -> handler returns schema-valid output or a well-formed MCP error
  * 2. Adversarial inputs -> Zod rejects or handler errors gracefully
  * 3. No prototype pollution on Object.prototype
  * 4. No stack trace / path leaks in error messages
@@ -461,12 +567,12 @@ export async function fuzzTool(
       report.totalRuns++;
       const parsed = def.input.safeParse(raw);
       if (!parsed.success) return;
-      const ctx = createMockContext(options.ctx);
+      const ctx = createToolFuzzContext(def, options);
       try {
         const result = await withTimeout(def.handler(parsed.data, ctx), timeout);
         def.output.parse(result);
       } catch (err) {
-        report.crashes.push({ input: parsed.data, error: err });
+        recordHandlerError(report, parsed.data, err);
       }
     }),
     fcParams,
@@ -477,7 +583,7 @@ export async function fuzzTool(
   await f.assert(
     f.asyncProperty(advArb, async (input) => {
       report.totalRuns++;
-      const ctx = createMockContext(options.ctx);
+      const ctx = createToolFuzzContext(def, options);
       try {
         const validated = def.input.safeParse(input);
         if (!validated.success) return;
@@ -511,7 +617,7 @@ export async function fuzzTool(
     try {
       const validated = def.input.safeParse(input);
       if (!validated.success) continue;
-      const ctx = createMockContext(options.ctx);
+      const ctx = createToolFuzzContext(def, options);
       await withTimeout(def.handler(validated.data, ctx), timeout);
     } catch {
       // Expected
@@ -523,7 +629,7 @@ export async function fuzzTool(
   try {
     const controller = new AbortController();
     controller.abort();
-    const ctx = createMockContext({ ...options.ctx, signal: controller.signal });
+    const ctx = createToolFuzzContext(def, options, { signal: controller.signal });
     const rawSample = generateOne(validArb);
     const parsedSample = def.input.parse(rawSample);
     await withTimeout(def.handler(parsedSample, ctx), timeout);
@@ -586,7 +692,7 @@ export async function fuzzResource(
         try {
           await withTimeout(def.handler(parsed.data, ctx), timeout);
         } catch (err) {
-          report.crashes.push({ input: parsed.data, error: err });
+          recordHandlerError(report, parsed.data, err);
         }
       }),
       fcParams,
@@ -624,7 +730,7 @@ export async function fuzzResource(
     try {
       await withTimeout(def.handler({}, ctx), timeout);
     } catch (err) {
-      report.crashes.push({ input: {}, error: err });
+      recordHandlerError(report, {}, err);
     }
   }
 
