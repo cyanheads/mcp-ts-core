@@ -1,9 +1,9 @@
 # Developer Protocol
 
 **Package:** `@cyanheads/mcp-ts-core`
-**Version:** 0.11.0
+**Version:** 0.11.1
 **Engines:** Bun ≥1.3.0, Node ≥24.0.0
-**MCP SDK:** `@modelcontextprotocol/sdk` ^1.29.0
+**MCP SDK:** `@modelcontextprotocol/sdk` ^1.30.0
 **Zod:** ^4.4.3
 **GitHub:** [cyanheads/mcp-ts-core](https://github.com/cyanheads/mcp-ts-core)
 **npm:** [@cyanheads/mcp-ts-core](https://www.npmjs.com/package/@cyanheads/mcp-ts-core)
@@ -60,9 +60,9 @@ Both paths share the same public API. Init copies starter `package.json`, config
 | `/utils` | formatting, encoding, network, pagination, overflow (`outlineOnOverflow`, `OUTLINE_VARIANT`, `selectSections`, `formatOutline`), logging, runtime, telemetry, token counting, parsers†, sanitization†, scheduling† | All utilities (†optional peer deps) |
 | `/services` | `OpenRouterProvider`, `SpeechService`, `createSpeechProvider`, `ElevenLabsProvider`, `WhisperProvider`, `GraphService`, provider interfaces and types | LLM, Speech (TTS/STT), Graph services |
 | `/linter` | `validateDefinitions`, `LintReport`, `LintDiagnostic`, `LintInput`, `LintSeverity` | Definition validation |
-| `/testing` | `createMockContext`, `createMockLogger`, `getEnrichment`, `getContentBlocks`, `createInMemoryStorage` | Test helpers |
+| `/testing` | `createMockContext`, `createMockSession`, `createFetchMock`, `runToolContract`, `createMockLogger`, `getEnrichment`, `getContentBlocks`, `createInMemoryStorage` | Test kit for handlers and upstream HTTP boundaries |
 | `/testing/fuzz` | `fuzzTool`, `fuzzResource`, `fuzzPrompt`, `zodToArbitrary`, `adversarialArbitrary`, `ADVERSARIAL_STRINGS` | Fuzz testing |
-| `/testing/vitest` | `mcpTest`, `McpTestFixtures` (+ re-exported `createMockContext`, `createInMemoryStorage`) | Vitest fixture-based tests (optional peer `vitest`) |
+| `/testing/vitest` | `mcpTest`, `toolContractSuite`, `McpTestFixtures` (+ re-exported `/testing` helpers) | Vitest fixtures and tool conformance suites (optional peer `vitest`) |
 
 All subpaths prefixed with `@cyanheads/mcp-ts-core`. **†Tier 3 modules** require optional peer dependencies — see `package.json` `peerDependencies`. Tier 3 methods that lazy-load deps are **async**.
 
@@ -458,9 +458,13 @@ describe('myTool', () => {
 
 **`createMockContext` options:** `createMockContext()` (minimal), `{ tenantId: 'test-tenant' }` (enables state), `{ elicit: vi.fn() }`, `{ progress: true }` (task progress).
 
+**HTTP/session fixtures:** `createFetchMock(routes)` provides a strict fetch-compatible fake with ordered routes, captured `Request` objects, one-shot responses, and optional global install/restore. `createMockSession(options)` returns `{ sessionId, tenantId?, ctx }` for handlers that branch on durable HTTP session identity.
+
 **Schema assertions:** `expect(result).toEqual(expect.schemaMatching(myTool.output))` — Vitest 4's Standard Schema asymmetric matcher validates handler output against the definition's own Zod schema. Use when output is dynamic (timestamps, generated IDs); exact `toEqual` still wins when the full value is known.
 
-**Fixture-based tests:** `mcpTest` from `/testing/vitest` (optional peer `vitest`) extends Vitest's `test` with per-test fixtures: `ctx` (fresh mock context) and `storage` (fresh in-memory `StorageService`). Override fixtures via `.extend` with the function form only — a bare value would share one mutable context across every test in the file.
+**Fixture-based tests:** `mcpTest` from `/testing/vitest` (optional peer `vitest`) extends Vitest's `test` with per-test fixtures: `ctx` (fresh mock context), `session` (session-bound context), `fetchMock` (strict fetch fake, installed/restored around the test), and `storage` (fresh in-memory `StorageService`). Override fixtures via `.extend` with the function form only — a bare value would share one mutable context across every test in the file.
+
+**Tool contracts:** `runToolContract(definition, input)` from `/testing` validates input/output, invokes the handler, formats content, and returns production-shaped success/error surfaces without transport auth or telemetry. `toolContractSuite(definition, { success, errors })` from `/testing/vitest` registers reusable schema/handler/error-envelope conformance cases for a server's own tool definitions.
 
 **Fuzz testing:** `fuzzTool`/`fuzzResource`/`fuzzPrompt` from `/testing/fuzz` generate valid and adversarial inputs from Zod schemas via `fast-check`, then assert handler invariants (no crashes, no prototype pollution, no stack trace leaks). Returns a `FuzzReport` for custom assertions.
 

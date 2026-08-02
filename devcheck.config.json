@@ -18,6 +18,6 @@
     "ignorePatterns": ["examples"]
   },
   "outdated": {
-    "allowlist": ["typescript"]
+    "allowlist": []
   }
 }

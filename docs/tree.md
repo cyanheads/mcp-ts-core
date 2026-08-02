@@ -1,6 +1,6 @@
 # mcp-ts-core - Directory Structure
 
-Generated on: 2026-07-26 11:02:11
+Generated on: 2026-08-02 18:02:27
 
 ```text
 mcp-ts-core/
@@ -494,10 +494,16 @@ mcp-ts-core/
 │   │   │           └── echo.tool.ts
 │   │   └── index.ts
 │   ├── tests/
+│   │   ├── fuzz/
+│   │   │   └── echo-tool.fuzz.test.ts
+│   │   ├── integration/
+│   │   │   └── echo-contract.int.test.ts
 │   │   ├── prompts/
 │   │   │   └── echo.prompt.test.ts
 │   │   ├── resources/
 │   │   │   └── echo.resource.test.ts
+│   │   ├── smoke/
+│   │   │   └── definitions.smoke.test.ts
 │   │   └── tools/
 │   │       └── echo.tool.test.ts
 │   ├── _.dockerignore
@@ -527,6 +533,8 @@ mcp-ts-core/
 │   ├── fuzz/
 │   │   ├── definition-fuzz.test.ts
 │   │   ├── error-handler.fuzz.test.ts
+│   │   ├── resource-handler-pipeline.fuzz.test.ts
+│   │   ├── session-store.fuzz.test.ts
 │   │   └── tool-handler-pipeline.fuzz.test.ts
 │   ├── helpers/
 │   │   ├── context-helpers.ts
@@ -739,13 +747,17 @@ mcp-ts-core/
 │   │   │   └── StorageService.test.ts
 │   │   ├── testing/
 │   │   │   ├── exports.test.ts
+│   │   │   ├── fuzz-branches.test.ts
 │   │   │   ├── mockContext.test.ts
 │   │   │   ├── mockContextFidelity.test.ts
+│   │   │   ├── test-kit.test.ts
+│   │   │   ├── tool-contract-suite.test.ts
 │   │   │   └── vitest.test.ts
 │   │   ├── types-global/
 │   │   │   └── errors.test.ts
 │   │   ├── utils/
 │   │   │   ├── formatting/
+│   │   │   │   ├── diffFormatter.branches.test.ts
 │   │   │   │   ├── diffFormatter.test.ts
 │   │   │   │   ├── html.test.ts
 │   │   │   │   ├── markdownBuilder.test.ts
@@ -784,8 +796,10 @@ mcp-ts-core/
 │   │   │   │   ├── csvParser.test.ts
 │   │   │   │   ├── dateParser.test.ts
 │   │   │   │   ├── frontmatterParser.test.ts
+│   │   │   │   ├── htmlExtractor.branches.test.ts
 │   │   │   │   ├── htmlExtractor.test.ts
 │   │   │   │   ├── jsonParser.test.ts
+│   │   │   │   ├── pdfParser.branches.test.ts
 │   │   │   │   ├── pdfParser.test.ts
 │   │   │   │   ├── xmlParser.test.ts
 │   │   │   │   └── yamlParser.test.ts

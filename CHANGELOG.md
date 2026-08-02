@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.11.1](changelog/0.11.x/0.11.1.md) — 2026-08-02
+
+Test kit gains session, upstream-HTTP, and tool-contract helpers; the fuzz generator expands finite nesting in full and honors array length constraints; scaffolds ship smoke, integration, and fuzz suites.
+
 ## [0.11.0](changelog/0.11.x/0.11.0.md) — 2026-07-26 · ⚠️ Breaking
 
 TypeScript 7 across tsc and the scaffold templates; optional peerDependency floors rise to current lines, so a consumer that installs one must move with it; a new overrides block pins six transitives; docs:generate stays out until typedoc supports TypeScript 7.
