@@ -8,6 +8,7 @@ import { JsonRpcErrorCode, McpError } from '@/types-global/errors.js';
 import { logger } from '@/utils/internal/logger.js';
 import { requestContextService } from '@/utils/internal/requestContext.js';
 import { frontmatterParser } from '@/utils/parsing/frontmatterParser.js';
+import { yamlParser } from '@/utils/parsing/yamlParser.js';
 
 describe('frontmatterParser.parse', () => {
   const createContext = () =>
@@ -206,6 +207,18 @@ Content here.`;
       expect(result.frontmatter).toEqual({});
       expect(result.content).toBe('Content here.');
     });
+
+    it('defaults absent regex capture groups to empty strings', async () => {
+      const markdownLike = {
+        match: () => ['---'],
+      };
+
+      await expect(frontmatterParser.parse(markdownLike as unknown as string)).resolves.toEqual({
+        frontmatter: {},
+        content: '',
+        hasFrontmatter: true,
+      });
+    });
   });
 
   describe('error handling', () => {
@@ -282,6 +295,29 @@ Content`;
         expect(String(error)).toBeTruthy();
       }
     });
+
+    it('normalizes a non-Error YAML parser failure', async () => {
+      vi.spyOn(yamlParser, 'parse').mockRejectedValueOnce('parser unavailable');
+      const markdown = '---\ntitle: Test\n---\nContent';
+
+      await expect(frontmatterParser.parse(markdown)).rejects.toMatchObject({
+        code: JsonRpcErrorCode.ValidationError,
+        message: 'Failed to parse frontmatter: parser unavailable',
+      });
+    });
+
+    it('truncates a long YAML sample for a non-framework parser failure', async () => {
+      vi.spyOn(yamlParser, 'parse').mockRejectedValueOnce(new Error('parser failed'));
+      const yaml = `title: ${'x'.repeat(240)}`;
+
+      try {
+        await frontmatterParser.parse(`---\n${yaml}\n---\nContent`);
+        throw new Error('expected parse to fail');
+      } catch (error) {
+        const sample = (error as McpError).data?.yamlContentSample;
+        expect(sample).toBe(`${yaml.substring(0, 200)}...`);
+      }
+    });
   });
 
   describe('edge cases', () => {
@@ -348,6 +384,16 @@ Content`;
         defaults: { timeout: 30, retry: 3 },
         production: { timeout: 30, retry: 3, env: 'prod' },
       });
+    });
+
+    it.each([
+      ['scalar', 'plain value', 'plain value'],
+      ['array', '- first\n- second', ['first', 'second']],
+    ])('accepts %s YAML frontmatter without object keys', async (_kind, yaml, expected) => {
+      const result = await frontmatterParser.parse(`---\n${yaml}\n---\nContent`);
+
+      expect(result.frontmatter).toEqual(expected);
+      expect(result.hasFrontmatter).toBe(true);
     });
   });
 

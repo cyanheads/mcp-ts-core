@@ -179,6 +179,60 @@ describe('createToolHandler', () => {
       const text = (result.content![0] as { text: string }).text;
       expect(JSON.parse(text)).toEqual({ ok: true });
     });
+
+    it.each([
+      [
+        'Error',
+        () => {
+          throw new Error('formatter error');
+        },
+        'formatter error',
+      ],
+      [
+        'non-Error',
+        () => {
+          throw 'formatter string';
+        },
+        'formatter string',
+      ],
+    ])('should classify %s formatter failures as tool errors', async (_kind, format, message) => {
+      const def = tool('bad_formatter_tool', {
+        description: 'Formatter failure.',
+        input: z.object({}),
+        output: z.object({ ok: z.boolean().describe('ok') }),
+        handler: () => ({ ok: true }),
+        format,
+      });
+
+      const handler = createToolHandler(def as AnyToolDefinition, services, notifiers);
+      const result = await handler({}, createMockSdkContext());
+
+      expect(result.isError).toBe(true);
+      expect(result.structuredContent).toMatchObject({
+        error: { message: `Output formatting failed: ${message}` },
+      });
+    });
+
+    it('should prepend handler-collected media to formatted content', async () => {
+      const def = tool('media_tool', {
+        description: 'Collects media.',
+        input: z.object({}),
+        output: z.object({ ok: z.boolean().describe('ok') }),
+        handler: (_input, ctx) => {
+          ctx.content.image('aW1hZ2U=', 'image/png');
+          return { ok: true };
+        },
+        format: () => [{ type: 'text', text: 'done' }],
+      });
+
+      const handler = createToolHandler(def as AnyToolDefinition, services, notifiers);
+      const result = await handler({}, createMockSdkContext());
+
+      expect(result.content).toEqual([
+        { type: 'image', data: 'aW1hZ2U=', mimeType: 'image/png' },
+        { type: 'text', text: 'done' },
+      ]);
+    });
   });
 
   // -----------------------------------------------------------------------

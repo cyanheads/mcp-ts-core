@@ -178,6 +178,33 @@ describe('createResourceHandler', () => {
       expect(result.contents[0]!.mimeType).toBe('application/json');
     });
 
+    it('should preserve plain text and JSON-encode vendor JSON resources', async () => {
+      const plain = resource('plain://text', {
+        description: 'Plain text.',
+        mimeType: 'text/plain; charset=utf-8',
+        handler: () => 'hello',
+      });
+      const vendorJson = resource('vendor://json', {
+        description: 'Vendor JSON.',
+        mimeType: 'application/problem+json; charset=utf-8',
+        handler: () => 'hello',
+      });
+
+      const plainResult = await createResourceHandler(
+        plain as AnyResourceDefinition,
+        services,
+        notifiers,
+      )(new URL('plain://text'), {}, createMockSdkContext());
+      const jsonResult = await createResourceHandler(
+        vendorJson as AnyResourceDefinition,
+        services,
+        notifiers,
+      )(new URL('vendor://json'), {}, createMockSdkContext());
+
+      expect((plainResult.contents[0] as { text: string }).text).toBe('hello');
+      expect((jsonResult.contents[0] as { text: string }).text).toBe('"hello"');
+    });
+
     it('should pass string handler results through without JSON quote wrapping', async () => {
       const html = '<!DOCTYPE html><html><body>Hello</body></html>';
       const def = resource('ui://app/app.html', {

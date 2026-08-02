@@ -1,7 +1,8 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 
 import { JsonRpcErrorCode, McpError } from '../../../../src/types-global/errors.js';
-import { sanitization } from '../../../../src/utils/security/sanitization.js';
+import { runtimeCaps } from '../../../../src/utils/internal/runtime.js';
+import { Sanitization, sanitization } from '../../../../src/utils/security/sanitization.js';
 
 describe('Sanitization Utility', () => {
   describe('sanitizeHtml', () => {
@@ -21,9 +22,23 @@ describe('Sanitization Utility', () => {
       expect(await sanitization.sanitizeHtml(null as unknown as string)).toBe('');
       expect(await sanitization.sanitizeHtml(undefined as unknown as string)).toBe('');
     });
+
+    it('honors an explicit transform and disabled comment preservation', async () => {
+      const sanitized = await sanitization.sanitizeHtml('<!-- secret --><a href="/x">x</a>', {
+        preserveComments: false,
+        transformTags: {},
+      });
+
+      expect(sanitized).toBe('<a href="/x">x</a>');
+      expect(sanitized).not.toContain('noopener');
+    });
   });
 
   describe('sanitizeString', () => {
+    it('defaults to plain-text sanitization when options are omitted', async () => {
+      expect(await sanitization.sanitizeString('<b>plain</b>')).toBe('plain');
+    });
+
     it('should handle "text" context by stripping all HTML', async () => {
       const input = '<p>Hello World</p>';
       const expected = 'Hello World';
@@ -68,6 +83,15 @@ describe('Sanitization Utility', () => {
   });
 
   describe('sanitizePath', () => {
+    it('rejects empty and wrong-type path inputs', () => {
+      expect(() => sanitization.sanitizePath('')).toThrow(
+        expect.objectContaining({ message: 'Invalid path input: must be a non-empty string.' }),
+      );
+      expect(() => sanitization.sanitizePath(42 as unknown as string)).toThrow(
+        expect.objectContaining({ message: 'Invalid path input: must be a non-empty string.' }),
+      );
+    });
+
     it('should prevent path traversal with ../ by normalizing', () => {
       const traversalPath = 'a/b/../c';
       const result = sanitization.sanitizePath(traversalPath);
@@ -108,6 +132,31 @@ describe('Sanitization Utility', () => {
       expect(sanitization.sanitizePath(absolutePath, { allowAbsolute: true }).sanitizedPath).toBe(
         absolutePath,
       );
+    });
+
+    it('converts an absolute path within rootDir to a relative path', () => {
+      const result = sanitization.sanitizePath('/app/safe-zone/data/file.txt', {
+        rootDir: '/app/safe-zone',
+      });
+
+      expect(result.sanitizedPath).toBe('data/file.txt');
+      expect(result.wasAbsolute).toBe(true);
+      expect(result.convertedToRelative).toBe(true);
+    });
+
+    it('rejects path sanitization when the runtime is not Node-compatible', () => {
+      const original = runtimeCaps.isNode;
+      runtimeCaps.isNode = false;
+      try {
+        expect(() => sanitization.sanitizePath('file.txt')).toThrow(
+          expect.objectContaining({
+            code: JsonRpcErrorCode.InternalError,
+            message: 'File-based path sanitization is not supported in this environment.',
+          }),
+        );
+      } finally {
+        runtimeCaps.isNode = original;
+      }
     });
   });
 
@@ -176,6 +225,15 @@ describe('Sanitization Utility', () => {
       }
     });
 
+    it('ignores primitive array members and non-record objects', () => {
+      const date = new Date('2026-01-01T00:00:00.000Z');
+      const sanitized = sanitization.sanitizeForLogging([null, 1, date]) as unknown[];
+
+      expect(sanitized[0]).toBeNull();
+      expect(sanitized[1]).toBe(1);
+      expect(sanitized[2]).toEqual(date);
+    });
+
     it('should handle edge case where nested property is undefined', () => {
       const sensitiveObject = {
         user: 'casey',
@@ -220,6 +278,35 @@ describe('Sanitization Utility', () => {
       const json = '{"key": "value"}';
       expect(() => sanitization.sanitizeJson(json, 5)).toThrow(McpError);
     });
+
+    it('uses TextEncoder and string-length byte fallbacks outside Buffer runtimes', () => {
+      const originalBuffer = runtimeCaps.hasBuffer;
+      const originalEncoder = runtimeCaps.hasTextEncoder;
+      try {
+        runtimeCaps.hasBuffer = false;
+        runtimeCaps.hasTextEncoder = true;
+        expect(sanitization.sanitizeJson('"\u00e9"', 4)).toBe('é');
+
+        runtimeCaps.hasTextEncoder = false;
+        expect(sanitization.sanitizeJson('"ok"', 4)).toBe('ok');
+      } finally {
+        runtimeCaps.hasBuffer = originalBuffer;
+        runtimeCaps.hasTextEncoder = originalEncoder;
+      }
+    });
+
+    it('normalizes a non-Error JSON parser failure', () => {
+      const parseSpy = vi.spyOn(JSON, 'parse').mockImplementation(() => {
+        throw 'parser unavailable';
+      });
+      try {
+        expect(() => sanitization.sanitizeJson('{"ok":true}')).toThrow(
+          expect.objectContaining({ message: 'Invalid JSON format.' }),
+        );
+      } finally {
+        parseSpy.mockRestore();
+      }
+    });
   });
 
   describe('sanitizeNumber', () => {
@@ -239,6 +326,10 @@ describe('Sanitization Utility', () => {
   });
 
   describe('setSensitiveFields and getSensitiveFields', () => {
+    it('returns the same singleton on subsequent access', () => {
+      expect(Sanitization.getInstance()).toBe(sanitization);
+    });
+
     it('should allow adding and retrieving sensitive fields', () => {
       const initialFields = sanitization.getSensitiveFields();
       sanitization.setSensitiveFields(['customSecret', 'customToken']);
@@ -327,6 +418,17 @@ describe('Sanitization Utility', () => {
       // A function value makes structuredClone throw — the method must not propagate.
       const result = sanitization.sanitizeForLogging({ work: () => 'noop' });
       expect(result).toBe('[Log Sanitization Failed]');
+    });
+
+    it('normalizes a non-Error structured-clone failure', () => {
+      const cloneSpy = vi.spyOn(globalThis, 'structuredClone').mockImplementation(() => {
+        throw 'clone unavailable';
+      });
+      try {
+        expect(sanitization.sanitizeForLogging({ safe: true })).toBe('[Log Sanitization Failed]');
+      } finally {
+        cloneSpy.mockRestore();
+      }
     });
 
     it('strips the style attribute to prevent CSS injection', async () => {

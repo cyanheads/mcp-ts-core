@@ -2,7 +2,7 @@
  * @fileoverview Tests for SessionStore tenant isolation and security.
  * @module tests/mcp-server/transports/http/sessionStore.test
  */
-import { beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { type SessionIdentity, SessionStore } from '@/mcp-server/transports/http/sessionStore.js';
 
@@ -33,6 +33,11 @@ describe('SessionStore - Security & Tenant Isolation', () => {
     store = new SessionStore(STALE_TIMEOUT);
   });
 
+  afterEach(() => {
+    store.destroy();
+    vi.useRealTimers();
+  });
+
   describe('Basic Session Management', () => {
     it('should create a new session', () => {
       const session = store.getOrCreate(SESSION_1);
@@ -56,6 +61,18 @@ describe('SessionStore - Security & Tenant Isolation', () => {
 
       const session2 = store.getOrCreate(SESSION_1);
       expect(session2.lastAccessedAt.getTime()).toBeGreaterThan(firstAccess.getTime());
+    });
+
+    it('should reject new sessions when capacity is exhausted', () => {
+      const cappedStore = new SessionStore(STALE_TIMEOUT, 1);
+      try {
+        cappedStore.getOrCreate(SESSION_1);
+        expect(() => cappedStore.getOrCreate(SESSION_2)).toThrow(
+          'Maximum session capacity reached (1)',
+        );
+      } finally {
+        cappedStore.destroy();
+      }
     });
 
     it('should validate existing session', () => {
@@ -283,6 +300,7 @@ describe('SessionStore - Security & Tenant Isolation', () => {
       await new Promise((resolve) => setTimeout(resolve, 100));
 
       expect(shortStore.isValidForIdentity(SESSION_1)).toBe(false);
+      shortStore.destroy();
     });
 
     it('should invalidate stale sessions with identity validation', async () => {
@@ -297,6 +315,20 @@ describe('SessionStore - Security & Tenant Isolation', () => {
       await new Promise((resolve) => setTimeout(resolve, 100));
 
       expect(shortStore.isValidForIdentity(SESSION_1, identity)).toBe(false);
+      shortStore.destroy();
+    });
+
+    it('should evict stale sessions on the scheduled cleanup interval', async () => {
+      vi.useFakeTimers();
+      vi.setSystemTime(new Date('2026-08-02T00:00:00.000Z'));
+      const shortStore = new SessionStore(1_000);
+      shortStore.getOrCreate(SESSION_1);
+
+      vi.setSystemTime(new Date('2026-08-02T00:01:00.001Z'));
+      await vi.advanceTimersByTimeAsync(60_000);
+
+      expect(shortStore.getSessionCount()).toBe(0);
+      shortStore.destroy();
     });
   });
 

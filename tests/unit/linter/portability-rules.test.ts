@@ -159,6 +159,54 @@ describe('schema-format-portability', () => {
   });
 });
 
+describe('portability walker boundaries', () => {
+  const options = { formatAllowlist: DEFAULT_FORMAT_ALLOWLIST };
+
+  it('silently skips non-object and non-Zod schemas', () => {
+    expect(lintSchemaPortability(null, 'input', 'tool', 'fake', options)).toEqual([]);
+    expect(lintSchemaPortability(z.string(), 'input', 'tool', 'fake', options)).toEqual([]);
+  });
+
+  it('defers malformed Zod-object internals to schema-serializable', () => {
+    const malformed = { _zod: { def: { type: 'object' } } };
+    expect(lintSchemaPortability(malformed, 'input', 'tool', 'fake', options)).toEqual([]);
+  });
+
+  it('walks records, tuples, combinators, definitions, and invalid child nodes safely', () => {
+    const schema = z
+      .object({
+        record: z.record(z.string(), z.string()),
+        tuple: z.tuple([z.string(), z.number()]),
+      })
+      .meta({
+        additionalProperties: [],
+        allOf: [{ type: 'object' }],
+        anyOf: [null, 42, { $ref: '#/$defs/a' }, { description: 'missing type' }],
+        $defs: { 'a~/b': { type: 'string' } },
+      });
+
+    const diagnostics = lintSchemaPortability(schema, 'input', 'tool', 'walker', {
+      ...options,
+      portability: 'strict',
+    });
+
+    expect(diagnostics.map((diagnostic) => diagnostic.rule)).toContain('schema-anyof-needs-type');
+    expect(diagnostics.map((diagnostic) => diagnostic.rule)).toContain('schema-no-defs');
+  });
+
+  it('warns when strict mode receives an empty dialect tag', () => {
+    const diagnostics = lintSchemaPortability(
+      z.object({ value: z.string() }).meta({ $schema: '' }),
+      'input',
+      'tool',
+      'empty-dialect',
+      { ...options, portability: 'strict' },
+    );
+
+    expect(diagnostics.map((diagnostic) => diagnostic.rule)).toContain('schema-dialect-tag');
+  });
+});
+
 // ---------------------------------------------------------------------------
 // schema-anyof-needs-type — always-on warning
 // ---------------------------------------------------------------------------

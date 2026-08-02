@@ -196,6 +196,27 @@ describe('HTTP Transport lifecycle', () => {
     expect(serveSpy).not.toHaveBeenCalled();
   });
 
+  test('retries when the real server bind throws after a successful port probe', async () => {
+    vi.useFakeTimers();
+    probeOutcomes.push('free', 'free');
+    serveSpy.mockImplementationOnce(() => {
+      throw new Error('bind raced');
+    });
+
+    const { startHttpTransport } = await import('@/mcp-server/transports/http/httpServer.js');
+    const handlePromise = startHttpTransport(
+      () => Promise.resolve({} as McpServer),
+      mockContext,
+      defaultMeta,
+    );
+
+    await vi.advanceTimersByTimeAsync(5);
+    const handle = await handlePromise;
+
+    expect(serveSpy).toHaveBeenCalledTimes(2);
+    expect(handle.server).toBeDefined();
+  });
+
   test('stop destroys the session store and closes the server cleanly', async () => {
     const { SessionStore } = await import('@/mcp-server/transports/http/sessionStore.js');
     vi.spyOn(SessionStore.prototype, 'destroy').mockImplementation(destroySpy);
@@ -215,5 +236,44 @@ describe('HTTP Transport lifecycle', () => {
     expect(destroySpy).toHaveBeenCalledTimes(1);
     expect(serverCloseSpy).toHaveBeenCalledTimes(1);
     expect(closeAllConnectionsSpy).not.toHaveBeenCalled();
+  });
+
+  test('stop rejects when the Node server reports a close error', async () => {
+    const closeError = new Error('close failed');
+    serverCloseSpy.mockImplementationOnce((callback?: (err?: Error) => void) =>
+      callback?.(closeError),
+    );
+    probeOutcomes.push('free');
+
+    const { startHttpTransport } = await import('@/mcp-server/transports/http/httpServer.js');
+    const handle = await startHttpTransport(
+      () => Promise.resolve({} as McpServer),
+      mockContext,
+      defaultMeta,
+    );
+
+    await expect(handle.stop(mockContext)).rejects.toBe(closeError);
+  });
+
+  test('force-closes lingering connections after the drain timeout', async () => {
+    vi.useFakeTimers();
+    let closeCallback: ((err?: Error) => void) | undefined;
+    serverCloseSpy.mockImplementationOnce((callback?: (err?: Error) => void) => {
+      closeCallback = callback;
+    });
+    probeOutcomes.push('free');
+
+    const { startHttpTransport } = await import('@/mcp-server/transports/http/httpServer.js');
+    const handle = await startHttpTransport(
+      () => Promise.resolve({} as McpServer),
+      mockContext,
+      defaultMeta,
+    );
+    const stopPromise = handle.stop(mockContext);
+
+    await vi.advanceTimersByTimeAsync(5_000);
+    expect(closeAllConnectionsSpy).toHaveBeenCalledOnce();
+    closeCallback?.();
+    await stopPromise;
   });
 });

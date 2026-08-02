@@ -346,6 +346,95 @@ describe('measureToolExecution', () => {
       infoSpy = vi.spyOn(logger, 'info').mockImplementation(() => {});
     }
   });
+
+  it('estimates every JSON value shape when BigInt makes serialization fail', async () => {
+    const payload = {
+      nil: null,
+      missing: undefined,
+      string: 'é',
+      number: 12,
+      bigint: 1n,
+      yes: true,
+      no: false,
+      array: [1, 2],
+      object: { first: 'x', second: 2 },
+      ignored: () => 'not serialized',
+    };
+
+    await measureToolExecution(
+      async () => ({ output: 2n }),
+      { toolName: 'bigint-payload', requestId: 'req-5', timestamp: new Date().toISOString() },
+      payload,
+    );
+
+    const call = infoSpy.mock.calls[0];
+    if (!call) throw new Error('infoSpy was not called');
+    const [, logMeta] = call;
+    expect((logMeta as any).metrics.inputBytes).toBeGreaterThan(0);
+    expect((logMeta as any).metrics.outputBytes).toBeGreaterThan(0);
+  });
+
+  it('returns zero bytes when both serialization and structural estimation fail', async () => {
+    const hostileOutput = new Proxy(
+      {},
+      {
+        ownKeys() {
+          throw new Error('keys unavailable');
+        },
+      },
+    );
+
+    await measureToolExecution(
+      async () => hostileOutput,
+      { toolName: 'hostile-output', requestId: 'req-6', timestamp: new Date().toISOString() },
+      null,
+    );
+
+    const call = infoSpy.mock.calls[0];
+    if (!call) throw new Error('infoSpy was not called');
+    const [, logMeta] = call;
+    expect((logMeta as any).metrics.inputBytes).toBe(0);
+    expect((logMeta as any).metrics.outputBytes).toBe(0);
+  });
+
+  it('adds caller-provided success attributes and ignores array results for batch detection', async () => {
+    await measureToolExecution(
+      async () => [{ failed: ['not-a-batch-envelope'] }],
+      { toolName: 'annotated-tool', requestId: 'req-7', timestamp: new Date().toISOString() },
+      'primitive input',
+      () => ({ 'mcp.tool.cached': true, 'mcp.tool.result_count': 1 }),
+    );
+
+    expect(span.setAttribute).toHaveBeenCalledWith('mcp.tool.cached', true);
+    expect(span.setAttribute).toHaveBeenCalledWith('mcp.tool.result_count', 1);
+    expect(span.setAttribute).not.toHaveBeenCalledWith(
+      'mcp.tool.partial_success',
+      expect.anything(),
+    );
+  });
+
+  it('classifies non-Error throws without recording an exception', async () => {
+    await expect(
+      measureToolExecution(
+        async () => {
+          throw 'string failure';
+        },
+        { toolName: 'string-failure', requestId: 'req-8', timestamp: new Date().toISOString() },
+        undefined,
+      ),
+    ).rejects.toBe('string failure');
+
+    expect(span.recordException).not.toHaveBeenCalled();
+    expect(span.setStatus).toHaveBeenCalledWith({
+      code: SpanStatusCode.ERROR,
+      message: 'string failure',
+    });
+    expect(span.setAttribute).toHaveBeenCalledWith('mcp.tool.error_code', 'UNKNOWN_ERROR');
+    expect(mockErrorCounterAdd).toHaveBeenCalledWith(1, {
+      'mcp.tool.name': 'string-failure',
+      'mcp.tool.error_category': 'server',
+    });
+  });
 });
 
 describe('measureResourceExecution', () => {
@@ -488,6 +577,36 @@ describe('measureResourceExecution', () => {
       String(JsonRpcErrorCode.NotFound),
     );
   });
+
+  it.each([
+    [new Error('resource exploded'), 'UNHANDLED_ERROR', 'resource exploded', true],
+    ['resource rejected', 'UNKNOWN_ERROR', 'resource rejected', false],
+  ])(
+    'classifies a resource failure %#',
+    async (failure, expectedCode, expectedMessage, recordsException) => {
+      await expect(
+        measureResourceExecution(
+          async () => {
+            throw failure;
+          },
+          {
+            resourceName: 'classified-resource',
+            requestId: 'req-r8',
+            timestamp: new Date().toISOString(),
+          },
+          { uri: 'test://items/8', mimeType: 'text/plain' },
+        ),
+      ).rejects.toBe(failure);
+
+      expect(span.setAttribute).toHaveBeenCalledWith('mcp.resource.error_code', expectedCode);
+      expect(span.setStatus).toHaveBeenCalledWith({
+        code: SpanStatusCode.ERROR,
+        message: expectedMessage,
+      });
+      if (recordsException) expect(span.recordException).toHaveBeenCalledWith(failure);
+      else expect(span.recordException).not.toHaveBeenCalled();
+    },
+  );
 });
 
 describe('measurePromptGeneration', () => {
@@ -683,5 +802,29 @@ describe('measurePromptGeneration', () => {
     );
 
     expect(span.setAttribute).toHaveBeenCalledWith('mcp.prompt.message_count', 0);
+  });
+
+  it('classifies non-Error prompt failures without recording an exception', async () => {
+    await expect(
+      measurePromptGeneration(
+        async () => {
+          throw 503;
+        },
+        {
+          promptName: 'numeric-failure',
+          requestId: 'req-p10',
+          timestamp: new Date().toISOString(),
+        },
+        null,
+      ),
+    ).rejects.toBe(503);
+
+    expect(span.recordException).not.toHaveBeenCalled();
+    expect(span.setStatus).toHaveBeenCalledWith({ code: SpanStatusCode.ERROR, message: '503' });
+    expect(span.setAttribute).toHaveBeenCalledWith('mcp.prompt.error_code', 'UNKNOWN_ERROR');
+    expect(mockErrorCounterAdd).toHaveBeenCalledWith(1, {
+      'mcp.prompt.name': 'numeric-failure',
+      'mcp.prompt.error_category': 'server',
+    });
   });
 });

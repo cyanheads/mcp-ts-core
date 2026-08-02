@@ -847,3 +847,148 @@ describe('lintFormatParity — snake_case key segment matching', () => {
     expect(parityErrors(def)).toHaveLength(0);
   });
 });
+
+// ---------------------------------------------------------------------------
+// Schema metadata compatibility and hostile metadata
+// ---------------------------------------------------------------------------
+
+describe('lintFormatParity — schema metadata compatibility', () => {
+  it('accepts complete formatters across legacy Zod metadata layouts', () => {
+    const legacyString = { _def: { type: 'string' } };
+    const legacyNumber = { _def: { type: 'number' } };
+    const output = {
+      _def: { type: 'object' },
+      shape: {
+        wrapped: { _def: { type: 'optional', innerType: legacyString } },
+        status: { _def: { type: 'enum', values: ['ready'] } },
+        kind: { _def: { type: 'literal', value: 'summary' } },
+        rows: { _def: { type: 'array', element: legacyString } },
+        choice: { _def: { type: 'union', options: [legacyString, legacyNumber] } },
+        scores: { _def: { type: 'record', valueType: legacyNumber } },
+        pair: { _def: { type: 'tuple', items: [legacyString, legacyNumber] } },
+      },
+    };
+
+    const diagnostics = lintFormatParity(
+      {
+        output,
+        format: (result: unknown) => [{ type: 'text', text: JSON.stringify(result) }],
+      },
+      'legacy_layout_tool',
+    );
+
+    expect(diagnostics).toHaveLength(0);
+  });
+
+  it('accepts complete formatters across nested _zod.def metadata layouts', () => {
+    const zodString = { _zod: { def: { type: 'string' } } };
+    const zodNumber = { _zod: { def: { type: 'number' } } };
+    const output = {
+      _zod: { def: { type: 'object' } },
+      shape: {
+        status: { _zod: { def: { type: 'enum', entries: { ready: 'ready' } } } },
+        kind: { _zod: { def: { type: 'literal', values: ['summary'] } } },
+        rows: { _zod: { def: { type: 'array', element: zodString } } },
+        choice: { _zod: { def: { type: 'union', options: [zodString, zodNumber] } } },
+        scores: { _zod: { def: { type: 'record', valueType: zodNumber } } },
+        pair: { _zod: { def: { type: 'tuple', items: [zodString, zodNumber] } } },
+      },
+    };
+
+    const diagnostics = lintFormatParity(
+      {
+        output,
+        format: (result: unknown) => [{ type: 'text', text: JSON.stringify(result) }],
+      },
+      'zod_metadata_tool',
+    );
+
+    expect(diagnostics).toHaveLength(0);
+  });
+
+  it('degrades safely when wrapper and collection metadata is incomplete', () => {
+    const output = {
+      _def: { type: 'object' },
+      shape: {
+        brokenWrapper: { _def: { type: 'optional' } },
+        missingUnionOptions: { _def: { type: 'union' } },
+        missingRecordValue: { _def: { type: 'record' } },
+        missingTupleItems: { _def: { type: 'tuple' } },
+        missingObjectShape: { _def: { type: 'object' } },
+      },
+    };
+
+    const diagnostics = lintFormatParity(
+      {
+        output,
+        format: () => [{ type: 'text', text: 'brokenWrapper is present' }],
+      },
+      'incomplete_metadata_tool',
+    );
+
+    expect(diagnostics).toHaveLength(0);
+  });
+
+  it.each([new Error('shape getter failed'), 'shape getter failed'])(
+    'warns instead of throwing when schema traversal fails with %s',
+    (thrown) => {
+      const output = {
+        _def: { type: 'object' },
+        get shape(): never {
+          throw thrown;
+        },
+      };
+
+      const diagnostics = lintFormatParity(
+        { output, format: () => [{ type: 'text', text: '' }] },
+        'hostile_schema_tool',
+      );
+
+      expect(diagnostics).toHaveLength(1);
+      expect(diagnostics[0]).toMatchObject({
+        rule: 'format-parity-walk-failed',
+        severity: 'warning',
+      });
+      expect(diagnostics[0]?.message).toContain('shape getter failed');
+    },
+  );
+
+  it('reports a non-Error formatter throw without leaking the thrown value', () => {
+    const diagnostics = lintFormatParity(
+      {
+        output: z.object({ value: z.string().describe('Value') }),
+        format: () => {
+          throw 'formatter rejected synthetic input';
+        },
+      },
+      'non_error_throw_tool',
+    );
+
+    expect(diagnostics).toHaveLength(1);
+    expect(diagnostics[0]).toMatchObject({ rule: 'format-parity-threw', severity: 'warning' });
+    expect(diagnostics[0]?.message).toContain('formatter rejected synthetic input');
+  });
+
+  it('ignores non-serializable block metadata while still finding rendered fields', () => {
+    const def = tool({
+      output: z.object({ name: z.string().describe('Name') }),
+      format: (result) =>
+        [
+          {
+            type: 'text',
+            text: (result as { name: string }).name,
+            metadata: { callback: () => 'ignored', marker: Symbol('ignored') },
+          },
+        ] as unknown as ContentBlock[],
+    });
+
+    expect(parityErrors(def)).toHaveLength(0);
+  });
+
+  it('skips null and primitive output metadata', () => {
+    const format = () => [{ type: 'text', text: 'unused' }];
+
+    expect(lintFormatParity({ output: null, format }, 'null_output')).toHaveLength(0);
+    expect(lintFormatParity({ output: 'object', format }, 'primitive_output')).toHaveLength(0);
+  });
+});

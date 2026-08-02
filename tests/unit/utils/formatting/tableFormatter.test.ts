@@ -89,6 +89,20 @@ describe('TableFormatter', () => {
       expect(result).toContain('test');
       expect(result).toContain('[Object]');
     });
+
+    it('stringifies bigint, symbol, and function values', () => {
+      const result = tableFormatter.format([
+        {
+          bigint: 9007199254740993n,
+          symbol: Symbol.for('table-value'),
+          function: () => 'value',
+        },
+      ]);
+
+      expect(result).toContain('9007199254740993');
+      expect(result).toContain('Symbol(table-value)');
+      expect(result).toContain('[Function]');
+    });
   });
 
   describe('formatRaw() with headers and rows', () => {
@@ -145,6 +159,15 @@ describe('TableFormatter', () => {
       expect(result).not.toContain('─');
       expect(result).toContain('Alice');
       expect(result).toContain('30');
+    });
+
+    it('measures an empty cell as zero-width content', () => {
+      const result = tableFormatter.formatRaw(['A'], [['']], {
+        style: 'compact',
+        minWidth: 1,
+      });
+
+      expect(result.split('\n')).toEqual(['A', ' ']);
     });
   });
 
@@ -214,6 +237,15 @@ describe('TableFormatter', () => {
       // Index-based alignment should produce same separator indicators as name-based
       const separatorLine = result.split('\n')[1];
       expect(separatorLine).toMatch(/-+:/);
+    });
+
+    it('returns unpadded content for an unknown alignment', () => {
+      const result = tableFormatter.formatRaw(['Column'], [['x']], {
+        style: 'compact',
+        alignment: { Column: 'decimal' as never },
+      });
+
+      expect(result).toBe('Column\nx');
     });
   });
 
@@ -411,6 +443,30 @@ describe('TableFormatter', () => {
       }
 
       errorSpy.mockRestore();
+    });
+
+    it('normalizes an unknown table style as an internal rendering error', () => {
+      expect(() => tableFormatter.formatRaw(['A'], [['1']], { style: 'future' as never })).toThrow(
+        expect.objectContaining({
+          code: JsonRpcErrorCode.InternalError,
+          message: 'Failed to render table: Unknown table style: future',
+        }),
+      );
+    });
+
+    it('normalizes a non-Error rendering failure', () => {
+      const formatter = new TableFormatter();
+      const internals = formatter as unknown as { renderTable: () => string };
+      vi.spyOn(internals, 'renderTable').mockImplementation(() => {
+        throw 'renderer rejected';
+      });
+
+      expect(() => formatter.formatRaw(['A'], [['1']])).toThrow(
+        expect.objectContaining({
+          code: JsonRpcErrorCode.InternalError,
+          message: 'Failed to render table: renderer rejected',
+        }),
+      );
     });
   });
 

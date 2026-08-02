@@ -49,10 +49,10 @@ export default defineConfig({
       include: ['src/**/*.ts'],
       exclude: ['src/**/*.d.ts'],
       thresholds: {
-        lines: 92,
-        functions: 92,
-        branches: 83,
-        statements: 91,
+        lines: 94,
+        functions: 94,
+        branches: 87,
+        statements: 94,
         'src/linter/rules/server-json-rules.ts': {
           lines: 100,
           functions: 100,

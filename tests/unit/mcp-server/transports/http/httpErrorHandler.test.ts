@@ -3,7 +3,9 @@
  * @module tests/mcp-server/transports/http/httpErrorHandler.test
  */
 
+import { trace } from '@opentelemetry/api';
 import type { Context } from 'hono';
+import { HTTPException } from 'hono/http-exception';
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
 import { httpErrorHandler } from '@/mcp-server/transports/http/httpErrorHandler.js';
 import type { HonoNodeBindings } from '@/mcp-server/transports/http/httpTypes.js';
@@ -84,6 +86,37 @@ describe('HTTP Error Handler', () => {
   });
 
   describe('Basic error handling', () => {
+    test('should preserve Hono protocol responses and annotate an active span', async () => {
+      const recordException = vi.fn();
+      const setStatus = vi.fn();
+      vi.spyOn(trace, 'getActiveSpan').mockReturnValue({ recordException, setStatus } as never);
+      const error = new HTTPException(405, { message: 'Method not allowed' });
+
+      const response = await httpErrorHandler(
+        error,
+        mockContext as Context<{ Bindings: HonoNodeBindings }>,
+      );
+
+      expect(response.status).toBe(405);
+      expect(recordException).toHaveBeenCalledWith(error);
+      expect(setStatus).toHaveBeenCalledWith(
+        expect.objectContaining({ message: 'Method not allowed' }),
+      );
+      expect(mockContext.json).not.toHaveBeenCalled();
+    });
+
+    test('should preserve Hono protocol responses when no span is active', async () => {
+      vi.spyOn(trace, 'getActiveSpan').mockReturnValue(undefined);
+      const error = new HTTPException(400, { message: 'Bad protocol request' });
+
+      const response = await httpErrorHandler(
+        error,
+        mockContext as Context<{ Bindings: HonoNodeBindings }>,
+      );
+
+      expect(response.status).toBe(400);
+    });
+
     test('should handle generic Error and return 500', async () => {
       const error = new Error('Something went wrong');
 
@@ -219,6 +252,22 @@ describe('HTTP Error Handler', () => {
       expect((jsonResponseData as any).error.code).toBe(JsonRpcErrorCode.RateLimited);
     });
 
+    test('should map Timeout to 504', async () => {
+      const error = new McpError(JsonRpcErrorCode.Timeout, 'Timed out');
+
+      await httpErrorHandler(error, mockContext as Context<{ Bindings: HonoNodeBindings }>);
+
+      expect(statusValue).toBe(504);
+    });
+
+    test('should map ServiceUnavailable to 503', async () => {
+      const error = new McpError(JsonRpcErrorCode.ServiceUnavailable, 'Unavailable');
+
+      await httpErrorHandler(error, mockContext as Context<{ Bindings: HonoNodeBindings }>);
+
+      expect(statusValue).toBe(503);
+    });
+
     test('should default to 500 for unknown error codes', async () => {
       const error = new McpError(-99999 as JsonRpcErrorCode, 'Unknown error');
 
@@ -278,6 +327,16 @@ describe('HTTP Error Handler', () => {
       await httpErrorHandler(error, mockContext as Context<{ Bindings: HonoNodeBindings }>);
 
       expect((jsonResponseData as any).error.message).toBe('Custom error message');
+    });
+
+    test('should preserve explicitly declared McpError data', async () => {
+      const error = new McpError(JsonRpcErrorCode.NotFound, 'Missing', {
+        reason: 'missing_item',
+      });
+
+      await httpErrorHandler(error, mockContext as Context<{ Bindings: HonoNodeBindings }>);
+
+      expect((jsonResponseData as any).error.data).toEqual({ reason: 'missing_item' });
     });
   });
 

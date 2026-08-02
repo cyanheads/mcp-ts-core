@@ -11,9 +11,20 @@ import {
   COMPILED_PROVIDER_PATTERNS,
   ERROR_TYPE_MAPPINGS,
   getCompiledPattern,
+  getErrorCategory,
 } from '@/utils/internal/error-handler/mappings.js';
 
 describe('Error Handler Mappings', () => {
+  describe('getErrorCategory', () => {
+    it.each([
+      [JsonRpcErrorCode.Timeout, 'upstream'],
+      [JsonRpcErrorCode.InternalError, 'server'],
+      [JsonRpcErrorCode.InvalidParams, 'client'],
+    ] as const)('classifies %s as %s', (code, category) => {
+      expect(getErrorCategory(code)).toBe(category);
+    });
+  });
+
   // ─── getCompiledPattern ──────────────────────────────────────────────────────
 
   describe('getCompiledPattern', () => {

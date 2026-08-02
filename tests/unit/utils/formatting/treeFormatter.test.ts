@@ -245,6 +245,16 @@ describe('TreeFormatter', () => {
       expect(result).toContain('parent');
       expect(result).toContain('child');
     });
+
+    it('uses a tee connector when a circular reference is not the last child', () => {
+      const root: TreeNode = { name: 'root', children: [] };
+      root.children = [root, { name: 'after-cycle' }];
+
+      const result = treeFormatter.format(root, { style: 'unicode' });
+
+      expect(result).toContain('├─  [Circular Reference]');
+      expect(result).toContain('after-cycle');
+    });
   });
 
   describe('Error handling', () => {
@@ -292,6 +302,64 @@ describe('TreeFormatter', () => {
         // @ts-expect-error Testing invalid input
         treeFormatter.formatMultiple('not an array');
       }).toThrow(McpError);
+    });
+
+    it.each([
+      [new Error('children unavailable'), 'children unavailable'],
+      ['children rejected', 'children rejected'],
+    ])('normalizes a tree-rendering failure %#', (failure, message) => {
+      const root = { name: 'root' } as TreeNode;
+      Object.defineProperty(root, 'children', {
+        get() {
+          throw failure;
+        },
+      });
+
+      expect(() => treeFormatter.format(root)).toThrow(
+        expect.objectContaining({
+          code: JsonRpcErrorCode.InternalError,
+          message: `Failed to format tree: ${message}`,
+        }),
+      );
+    });
+
+    it('passes through framework errors raised during rendering', () => {
+      const failure = new McpError(JsonRpcErrorCode.ValidationError, 'invalid children');
+      const root = { name: 'root' } as TreeNode;
+      Object.defineProperty(root, 'children', {
+        get() {
+          throw failure;
+        },
+      });
+
+      expect(() => treeFormatter.format(root)).toThrow(failure);
+    });
+
+    it.each([
+      [new Error('forest unavailable'), 'forest unavailable'],
+      ['forest rejected', 'forest rejected'],
+    ])('normalizes a non-framework forest failure %#', (failure, message) => {
+      const formatter = new TreeFormatter();
+      vi.spyOn(formatter, 'format').mockImplementation(() => {
+        throw failure;
+      });
+
+      expect(() => formatter.formatMultiple([{ name: 'root' }])).toThrow(
+        expect.objectContaining({
+          code: JsonRpcErrorCode.InternalError,
+          message: `Failed to format multiple trees: ${message}`,
+        }),
+      );
+    });
+
+    it('passes through framework errors raised while formatting a forest', () => {
+      const formatter = new TreeFormatter();
+      const failure = new McpError(JsonRpcErrorCode.ValidationError, 'invalid tree');
+      vi.spyOn(formatter, 'format').mockImplementation(() => {
+        throw failure;
+      });
+
+      expect(() => formatter.formatMultiple([{ name: 'root' }])).toThrow(failure);
     });
   });
 
@@ -468,6 +536,30 @@ describe('TreeFormatter', () => {
       expect(ascii).toContain('+');
       expect(compact).not.toContain('├');
       expect(compact).not.toContain('+');
+    });
+
+    it('keeps ASCII vertical connectors for a non-last branch', () => {
+      const result = treeFormatter.format(
+        {
+          name: 'root',
+          children: [{ name: 'branch', children: [{ name: 'nested' }] }, { name: 'sibling' }],
+        },
+        { style: 'ascii', indent: '---' },
+      );
+
+      expect(result).toContain('|  \\-- nested');
+    });
+
+    it('degrades an unknown style to indentation without connectors', () => {
+      const result = treeFormatter.format(
+        {
+          name: 'root',
+          children: [{ name: 'branch', children: [{ name: 'nested' }] }, { name: 'sibling' }],
+        },
+        { style: 'future' as never, indent: '..' },
+      );
+
+      expect(result).toBe('root\nbranch\n..nested\nsibling');
     });
   });
 });
