@@ -125,8 +125,14 @@ import type { ResourceDefinition } from '@cyanheads/mcp-ts-core/resources';
 import { StorageService } from '@cyanheads/mcp-ts-core/storage';
 import type { IStorageProvider } from '@cyanheads/mcp-ts-core/storage/types';
 import { isTaskToolDefinition, type TaskToolDefinition } from '@cyanheads/mcp-ts-core/tasks';
-import { createMockContext } from '@cyanheads/mcp-ts-core/testing';
+import {
+  createFetchMock,
+  createMockContext,
+  createMockSession,
+  runToolContract,
+} from '@cyanheads/mcp-ts-core/testing';
 import { fuzzTool } from '@cyanheads/mcp-ts-core/testing/fuzz';
+import { toolContractSuite } from '@cyanheads/mcp-ts-core/testing/vitest';
 import type { ToolDefinition } from '@cyanheads/mcp-ts-core/tools';
 import { stringToBase64 } from '@cyanheads/mcp-ts-core/utils';
 import { createWorkerHandler, type CloudflareBindings } from '@cyanheads/mcp-ts-core/worker';
@@ -176,6 +182,9 @@ const fail = createFail([
 ] as const);
 
 const ctx = createMockContext({ tenantId: 'consumer' });
+const session = createMockSession({ tenantId: 'consumer' });
+const fetchMock = createFetchMock();
+const contractResult = runToolContract(echo, { message: 'consumer' });
 const worker = createWorkerHandler({ tools: [echo, uiTool], resources: [echoResource], prompts: [echoPrompt] });
 
 const mirror = defineMirror({
@@ -214,12 +223,16 @@ void [
   config,
   createApp,
   ctx,
+  contractResult,
   fail,
+  fetchMock,
   fuzzTool,
   isTaskToolDefinition,
   mirror,
   publicTypes,
   stringToBase64('consumer'),
+  session,
+  toolContractSuite,
   ui,
   worker,
 ];

@@ -6,7 +6,11 @@
  * @module src/testing/index
  */
 
-import type { ContentBlock, ElicitResult } from '@modelcontextprotocol/sdk/types.js';
+import type {
+  CallToolResult,
+  ContentBlock,
+  ElicitResult,
+} from '@modelcontextprotocol/sdk/types.js';
 import type { ZodType, z } from 'zod';
 import type {
   AuthContext,
@@ -27,6 +31,11 @@ import {
   stashContentStore,
   stashEnrichmentStore,
 } from '@/core/context.js';
+import type { AnyToolDefinition } from '@/mcp-server/tools/utils/toolDefinition.js';
+import {
+  buildToolSuccessResult,
+  classifyAndBuildToolErrorResult,
+} from '@/mcp-server/tools/utils/toolHandlerFactory.js';
 import { StorageService } from '@/storage/core/StorageService.js';
 import {
   InMemoryProvider,
@@ -295,6 +304,44 @@ export function createMockContext(options: MockContextOptions = {}): Context {
   return attachTypedFail(ctx, options.errors);
 }
 
+// ---------------------------------------------------------------------------
+// Session fixtures
+// ---------------------------------------------------------------------------
+
+/** A mock HTTP session and the handler context bound to it. */
+export interface MockSession {
+  /** Context carrying this session's identity. Pass it directly to a handler. */
+  ctx: Context;
+  /** Session identifier exposed as `ctx.sessionId`. */
+  sessionId: string;
+  /** Optional tenant identifier exposed as `ctx.tenantId`. */
+  tenantId?: string;
+}
+
+/**
+ * Creates a handler context bound to a deterministic HTTP session.
+ *
+ * All {@link MockContextOptions} remain available, including `errors`,
+ * `signal`, and notification callbacks. The default session ID is stable so
+ * assertions do not depend on generated values.
+ *
+ * @example
+ * ```ts
+ * const session = createMockSession({ tenantId: 'tenant-a' });
+ * const result = await myTool.handler(input, session.ctx);
+ * expect(session.ctx.sessionId).toBe('test-session-id');
+ * ```
+ */
+export function createMockSession(options: MockContextOptions = {}): MockSession {
+  const sessionId = options.sessionId ?? 'test-session-id';
+  const ctx = createMockContext({ ...options, sessionId });
+  return {
+    ctx,
+    sessionId,
+    ...(options.tenantId !== undefined && { tenantId: options.tenantId }),
+  };
+}
+
 /**
  * Reads the enrichment a handler accumulated via `ctx.enrich(...)` on a mock
  * context, for assertions. Returns the merged field values (empty object when
@@ -326,6 +373,198 @@ export function getEnrichment(ctx: Context): Record<string, unknown> {
  */
 export function getContentBlocks(ctx: Context): ContentBlock[] {
   return readContentStore(ctx)?.blocks ?? [];
+}
+
+// ---------------------------------------------------------------------------
+// Fetch / HTTP harness
+// ---------------------------------------------------------------------------
+
+/** A request matcher used by {@link createFetchMock}. */
+export type FetchMockMatcher = string | RegExp | ((request: Request) => boolean);
+
+/** A response factory used by {@link createFetchMock}. */
+export type FetchMockResponder = Response | ((request: Request) => Promise<Response> | Response);
+
+/** One upstream route handled by a {@link FetchMockHarness}. */
+export interface FetchMockRoute {
+  /** URL string, regular expression, or request predicate. */
+  match: FetchMockMatcher;
+  /** Optional HTTP method constraint. Compared case-insensitively. */
+  method?: string;
+  /** Remove the route after its first matching request. */
+  once?: boolean;
+  /** Static response (cloned per call) or response factory. */
+  respond: FetchMockResponder;
+}
+
+/** A captured upstream request and the route that matched it. */
+export interface FetchMockCall {
+  /** Clone of the request, safe to inspect after the responder reads its body. */
+  request: Request;
+  /** The route selected for the request. */
+  route: FetchMockRoute;
+}
+
+/** Options for {@link createFetchMock}. */
+export interface FetchMockOptions {
+  /** Optional fallback for unmatched requests. The default throws. */
+  onUnhandled?: (request: Request) => Promise<Response> | Response;
+}
+
+/**
+ * Stateful fetch fake for testing upstream HTTP boundaries without mocking
+ * server-owned services. Routes are evaluated in registration order.
+ */
+export interface FetchMockHarness {
+  /** Captured requests in call order. */
+  readonly calls: readonly FetchMockCall[];
+  /** Fetch-compatible function for explicit dependency injection. */
+  fetch: typeof globalThis.fetch;
+  /** Install the harness as `globalThis.fetch`. Idempotent until restored. */
+  install(): void;
+  /** Drop all captured calls and registered routes. */
+  reset(): void;
+  /** Restore the fetch implementation captured by {@link install}. */
+  restore(): void;
+  /** Add one or more routes. */
+  route(...routes: FetchMockRoute[]): FetchMockHarness;
+}
+
+function matchesFetchRoute(route: FetchMockRoute, request: Request): boolean {
+  if (route.method && route.method.toUpperCase() !== request.method.toUpperCase()) {
+    return false;
+  }
+  if (typeof route.match === 'string') return request.url === route.match;
+  if (route.match instanceof RegExp) {
+    route.match.lastIndex = 0;
+    return route.match.test(request.url);
+  }
+  return route.match(request);
+}
+
+/**
+ * Creates a strict fetch/HTTP harness for upstream API tests.
+ *
+ * Unmatched requests throw by default, making accidental network access loud.
+ * Use `harness.fetch` as an injected dependency or call `install()` and
+ * `restore()` around code that reads `globalThis.fetch`.
+ *
+ * @example
+ * ```ts
+ * const http = createFetchMock([
+ *   {
+ *     method: 'GET',
+ *     match: 'https://api.example.test/items/42',
+ *     respond: Response.json({ id: '42', name: 'Example' }),
+ *   },
+ * ]);
+ * http.install();
+ * try {
+ *   await expect(loadItem('42')).resolves.toMatchObject({ id: '42' });
+ *   expect(http.calls).toHaveLength(1);
+ * } finally {
+ *   http.restore();
+ * }
+ * ```
+ */
+export function createFetchMock(
+  initialRoutes: readonly FetchMockRoute[] = [],
+  options: FetchMockOptions = {},
+): FetchMockHarness {
+  const routes = [...initialRoutes];
+  const calls: FetchMockCall[] = [];
+  let installedFetch: typeof globalThis.fetch | undefined;
+
+  const mockFetch: typeof globalThis.fetch = (input, init) => {
+    const request = new Request(input, init);
+    const route = routes.find((candidate) => matchesFetchRoute(candidate, request));
+    if (!route) {
+      if (options.onUnhandled) return Promise.resolve(options.onUnhandled(request));
+      return Promise.reject(new Error(`Unhandled fetch request: ${request.method} ${request.url}`));
+    }
+
+    calls.push({ request: request.clone(), route });
+    if (route.once) routes.splice(routes.indexOf(route), 1);
+    return Promise.resolve(
+      route.respond instanceof Response ? route.respond.clone() : route.respond(request),
+    );
+  };
+
+  const harness: FetchMockHarness = {
+    calls,
+    fetch: mockFetch,
+    install() {
+      if (installedFetch) return;
+      installedFetch = globalThis.fetch;
+      globalThis.fetch = mockFetch;
+    },
+    reset() {
+      calls.length = 0;
+      routes.length = 0;
+    },
+    restore() {
+      if (!installedFetch) return;
+      globalThis.fetch = installedFetch;
+      installedFetch = undefined;
+    },
+    route(...newRoutes) {
+      routes.push(...newRoutes);
+      return harness;
+    },
+  };
+  return harness;
+}
+
+// ---------------------------------------------------------------------------
+// Tool contract runner
+// ---------------------------------------------------------------------------
+
+/** Options for {@link runToolContract}. */
+export interface RunToolContractOptions {
+  /** Context capabilities and identity supplied to the handler. */
+  context?: MockContextOptions;
+}
+
+/**
+ * Executes a tool definition through its public contract boundary.
+ *
+ * The runner validates input and output schemas, invokes the real handler,
+ * applies `format()`, enrichment, and collected content, and converts thrown
+ * values to the same dual-surface error envelope used by the production tool
+ * pipeline. It intentionally skips transport auth and telemetry.
+ */
+export async function runToolContract<TDefinition extends AnyToolDefinition>(
+  definition: TDefinition,
+  input: z.input<TDefinition['input']>,
+  options: RunToolContractOptions = {},
+): Promise<CallToolResult> {
+  const ctx = createMockContext({
+    ...options.context,
+    ...(definition.errors && { errors: definition.errors }),
+  });
+
+  try {
+    const validatedInput = definition.input.parse(input);
+    const output = await definition.handler(validatedInput, ctx);
+    const validatedOutput = definition.output.parse(output) as Record<string, unknown>;
+
+    let content: ContentBlock[];
+    try {
+      content = definition.format
+        ? definition.format(validatedOutput)
+        : [{ type: 'text', text: JSON.stringify(validatedOutput, null, 2) }];
+    } catch (error) {
+      throw new Error(
+        `Output formatting failed: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+
+    const collected = getContentBlocks(ctx);
+    if (collected.length > 0) content = [...collected, ...content];
+    return buildToolSuccessResult(definition, ctx, validatedOutput, content);
+  } catch (error) {
+    return classifyAndBuildToolErrorResult(error);
+  }
 }
 
 // ---------------------------------------------------------------------------

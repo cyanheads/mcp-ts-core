@@ -64,6 +64,22 @@ mcpTest('storage fixture is a real StorageService', ({ storage }) => {
   expect(storage).toBeInstanceOf(StorageService);
 });
 
+mcpTest('session fixture carries a fresh HTTP session context', ({ session }) => {
+  expect(session.sessionId).toBe('test-session-id');
+  expect(session.ctx.sessionId).toBe(session.sessionId);
+});
+
+mcpTest('fetchMock fixture installs a strict upstream HTTP fake', async ({ fetchMock }) => {
+  fetchMock.route({
+    match: 'https://api.example.test/fixture',
+    respond: Response.json({ ok: true }),
+  });
+
+  const response = await fetch('https://api.example.test/fixture');
+  await expect(response.json()).resolves.toEqual({ ok: true });
+  expect(fetchMock.calls).toHaveLength(1);
+});
+
 // ---------------------------------------------------------------------------
 // extend — function-form override preserves per-test freshness
 // ---------------------------------------------------------------------------
