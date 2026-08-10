@@ -288,9 +288,28 @@ export class DuckdbProvider implements IDataCanvasProvider {
     options?: QueryOptions,
   ): Promise<QueryResult> {
     const record = this.requireCanvas(canvasId);
-    const duck = await importDuckDB();
     options?.signal?.throwIfAborted();
 
+    const rowLimit = options?.rowLimit ?? this.options.defaultRowLimit;
+    if (
+      !Number.isSafeInteger(rowLimit) ||
+      rowLimit < 1 ||
+      rowLimit > this.options.defaultRowLimit
+    ) {
+      throw validationError(
+        `rowLimit must be a positive safe integer no greater than ${this.options.defaultRowLimit}.`,
+        { reason: 'invalid_query_bounds', field: 'rowLimit' },
+      );
+    }
+    const preview = options?.preview ?? rowLimit;
+    if (!Number.isSafeInteger(preview) || preview < 0 || preview > rowLimit) {
+      throw validationError(
+        'preview must be a non-negative safe integer no greater than rowLimit.',
+        { reason: 'invalid_query_bounds', field: 'preview' },
+      );
+    }
+
+    const duck = await importDuckDB();
     await this.assertReadOnlySql(record, sql, duck, options);
 
     // Per-query connection so cancellation interrupts only this call.
@@ -305,9 +324,6 @@ export class DuckdbProvider implements IDataCanvasProvider {
       }
     };
     options?.signal?.addEventListener('abort', onAbort, { once: true });
-
-    const rowLimit = options?.rowLimit ?? this.options.defaultRowLimit;
-    const preview = options?.preview ?? rowLimit;
 
     try {
       let registeredAs: string | undefined;

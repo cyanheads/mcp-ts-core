@@ -54,10 +54,10 @@ export class DataCanvas {
   async acquire(
     maybeId: string | undefined,
     context: RequestContextLike,
-    _options?: AcquireOptions,
+    options?: AcquireOptions,
   ): Promise<CanvasInstance> {
     const tenantId = requireTenantId(context, 'DataCanvas.acquire');
-    const result = await this.registry.acquire(maybeId, tenantId, context);
+    const result = await this.registry.acquire(maybeId, tenantId, context, options);
     logger.debug('Canvas acquired.', {
       ...context,
       canvasId: result.canvasId,

@@ -134,6 +134,21 @@ describe('DataCanvas · acquire', () => {
     expect(second.isNew).toBe(false);
     await registry.shutdown(ctxWithTenant);
   });
+
+  it('rejects a pre-aborted acquire without allocating provider or registry state', async () => {
+    const provider = makeStubProvider();
+    const registry = new CanvasRegistry(provider, makeOptions());
+    const canvas = new DataCanvas(provider, registry);
+    const controller = new AbortController();
+    controller.abort(new DOMException('cancelled', 'AbortError'));
+
+    await expect(
+      canvas.acquire(undefined, ctxWithTenant, { signal: controller.signal }),
+    ).rejects.toMatchObject({ name: 'AbortError' });
+    expect(provider.initCanvas).not.toHaveBeenCalled();
+    expect(canvas.countForTenant(ctxWithTenant)).toBe(0);
+    await registry.shutdown(ctxWithTenant);
+  });
 });
 
 describe('DataCanvas · drop / countForTenant / healthCheck / shutdown', () => {

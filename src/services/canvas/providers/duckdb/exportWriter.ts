@@ -6,7 +6,7 @@
  * @module src/services/canvas/providers/duckdb/exportWriter
  */
 
-import { mkdir, open, stat, unlink } from 'node:fs/promises';
+import { lstat, mkdir, open, realpath, stat, unlink } from 'node:fs/promises';
 import { isAbsolute, join, relative, resolve, sep } from 'node:path';
 
 import { validationError } from '@/types-global/errors.js';
@@ -30,6 +30,8 @@ export async function resolveExportPath(rootPath: string, requested: string): Pr
     );
   }
   const root = resolve(rootPath);
+  await mkdir(root, { recursive: true });
+  const canonicalRoot = await realpath(root);
   const candidate = resolve(root, requested);
   const rel = relative(root, candidate);
   if (rel.startsWith(`..${sep}`) || rel === '..') {
@@ -38,7 +40,25 @@ export async function resolveExportPath(rootPath: string, requested: string): Pr
       { reason: 'export_path_escapes', requested },
     );
   }
-  await mkdir(root, { recursive: true });
+
+  // Lexical confinement does not stop an in-sandbox symlink from pointing
+  // outside. Reject every existing symlink in the destination chain (including
+  // an existing destination file) before handing the path to DuckDB.
+  let cursor = canonicalRoot;
+  for (const segment of rel.split(sep)) {
+    cursor = join(cursor, segment);
+    const info = await lstat(cursor).catch((error: NodeJS.ErrnoException) => {
+      if (error.code === 'ENOENT') return;
+      throw error;
+    });
+    if (!info) break;
+    if (info.isSymbolicLink()) {
+      throw validationError('Export path contains a symbolic link.', {
+        reason: 'export_path_symlink',
+        requested,
+      });
+    }
+  }
   return candidate;
 }
 

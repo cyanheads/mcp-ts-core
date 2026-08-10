@@ -536,12 +536,11 @@ describeIf('canvas · DuckDB round trip', () => {
         `EXPLAIN (FORMAT JSON) ${sql}`,
       );
       const offending = collectDisallowedOperators(explainResult);
-      if (offending.size > 0) {
-        const all = [...ALLOWED_PLAN_OPERATORS].sort();
-        throw new Error(
-          `SQL gate allowlist drift detected for "${sql}". Offending operators: ${[...offending].join(', ')}.\nAllowlist: ${all.join(', ')}`,
-        );
-      }
+      const all = [...ALLOWED_PLAN_OPERATORS].sort();
+      expect(
+        [...offending],
+        `SQL gate allowlist drift detected for "${sql}". Allowlist: ${all.join(', ')}`,
+      ).toEqual([]);
     }
   });
 
@@ -956,5 +955,21 @@ describeIf('canvas · DuckDB round trip', () => {
     expect(result.rows.length).toBe(3);
     expect(result.rowCount).toBe(10);
     expect(result.truncated).toBeUndefined();
+  });
+
+  it.each([
+    ['zero rowLimit', { rowLimit: 0 }],
+    ['negative rowLimit', { rowLimit: -1 }],
+    ['fractional rowLimit', { rowLimit: 1.5 }],
+    ['non-finite rowLimit', { rowLimit: Number.POSITIVE_INFINITY }],
+    ['rowLimit above provider cap', { rowLimit: 1_001 }],
+    ['negative preview', { preview: -1 }],
+    ['fractional preview', { preview: 1.5 }],
+    ['preview above rowLimit', { preview: 3, rowLimit: 2 }],
+  ])('rejects invalid query bounds: %s', async (_label, options) => {
+    const instance = await canvas.acquire(undefined, ctx);
+    await expect(instance.query('SELECT 1 AS x', options)).rejects.toMatchObject({
+      data: { reason: 'invalid_query_bounds' },
+    });
   });
 });

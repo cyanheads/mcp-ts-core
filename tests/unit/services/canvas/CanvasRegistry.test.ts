@@ -90,6 +90,51 @@ describe('CanvasRegistry · acquire (new)', () => {
     }
     await registry.shutdown(baseContext);
   });
+
+  it('rolls back registry and provider state when initialization fails', async () => {
+    const provider = makeStubProvider();
+    vi.mocked(provider.initCanvas)
+      .mockRejectedValueOnce(new Error('init failed'))
+      .mockResolvedValueOnce(undefined);
+    const registry = new CanvasRegistry(provider, makeOptions({ maxCanvasesPerTenant: 1 }));
+
+    await expect(registry.acquire(undefined, 'tenant-a', baseContext)).rejects.toThrow(
+      'init failed',
+    );
+    expect(registry.countForTenant('tenant-a')).toBe(0);
+    expect(provider.destroyCalls).toHaveLength(1);
+
+    await expect(registry.acquire(undefined, 'tenant-a', baseContext)).resolves.toMatchObject({
+      isNew: true,
+      tenantId: 'tenant-a',
+    });
+    await registry.shutdown(baseContext);
+  });
+
+  it('rolls back an initialization that is cancelled while the provider is pending', async () => {
+    const provider = makeStubProvider();
+    let releaseInit: (() => void) | undefined;
+    vi.mocked(provider.initCanvas).mockImplementationOnce(
+      () =>
+        new Promise<void>((resolve) => {
+          releaseInit = resolve;
+        }),
+    );
+    const registry = new CanvasRegistry(provider, makeOptions());
+    const controller = new AbortController();
+
+    const acquiring = registry.acquire(undefined, 'tenant-a', baseContext, {
+      signal: controller.signal,
+    });
+    await vi.waitFor(() => expect(releaseInit).toBeTypeOf('function'));
+    controller.abort(new DOMException('cancelled', 'AbortError'));
+    releaseInit?.();
+
+    await expect(acquiring).rejects.toMatchObject({ name: 'AbortError' });
+    expect(registry.countForTenant('tenant-a')).toBe(0);
+    expect(provider.destroyCalls).toHaveLength(1);
+    await registry.shutdown(baseContext);
+  });
 });
 
 describe('CanvasRegistry · acquire (existing)', () => {

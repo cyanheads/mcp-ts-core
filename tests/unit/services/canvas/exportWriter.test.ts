@@ -6,7 +6,7 @@
  * @module tests/unit/canvas/exportWriter.test
  */
 
-import { mkdir, mkdtemp, readFile, rm } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { isAbsolute, join, sep } from 'node:path';
 
@@ -65,6 +65,32 @@ describe('resolveExportPath', () => {
     const a = await resolveExportPath(root, './nested/x.csv');
     const b = await resolveExportPath(root, 'nested/x.csv');
     expect(a).toBe(b);
+  });
+
+  it('rejects a symlinked parent that escapes the sandbox', async () => {
+    const outside = await mkdtemp(join(tmpdir(), 'canvas-export-outside-'));
+    try {
+      await symlink(outside, join(root, 'escape'));
+      await expect(resolveExportPath(root, 'escape/output.csv')).rejects.toMatchObject({
+        data: { reason: 'export_path_symlink' },
+      });
+    } finally {
+      await rm(outside, { recursive: true, force: true });
+    }
+  });
+
+  it('rejects an existing destination that is itself a symlink', async () => {
+    const outside = join(root, '..', `outside-${crypto.randomUUID()}.csv`);
+    try {
+      await writeFile(outside, 'do not overwrite');
+      await symlink(outside, join(root, 'output.csv'));
+      await expect(resolveExportPath(root, 'output.csv')).rejects.toMatchObject({
+        data: { reason: 'export_path_symlink' },
+      });
+      await expect(readFile(outside, 'utf8')).resolves.toBe('do not overwrite');
+    } finally {
+      await rm(outside, { force: true });
+    }
   });
 });
 

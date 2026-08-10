@@ -12,7 +12,7 @@ import { conflict, type McpError, notFound, rateLimited } from '@/types-global/e
 import { logger } from '@/utils/internal/logger.js';
 import { type RequestContextLike, requestContextService } from '@/utils/internal/requestContext.js';
 import { IdGenerator } from '@/utils/security/idGenerator.js';
-import type { TableInfo } from '../types.js';
+import type { AcquireOptions, TableInfo } from '../types.js';
 import type { IDataCanvasProvider } from './IDataCanvasProvider.js';
 
 /**
@@ -114,7 +114,9 @@ export class CanvasRegistry {
     maybeId: string | undefined,
     tenantId: string,
     context: RequestContextLike,
+    options?: AcquireOptions,
   ): Promise<AcquireResult> {
+    options?.signal?.throwIfAborted();
     if (this.isShuttingDown) {
       throw notFound('Canvas registry is shutting down.', { tenantId });
     }
@@ -147,7 +149,16 @@ export class CanvasRegistry {
     this.canvases.set(canvasId, record);
     this.indexByTenant(tenantId, canvasId);
 
-    await this.provider.initCanvas(canvasId, context);
+    try {
+      await this.provider.initCanvas(canvasId, context);
+      // `initCanvas` has no signal parameter, so re-check immediately after
+      // it settles and roll back any resources created while cancellation was
+      // pending.
+      options?.signal?.throwIfAborted();
+    } catch (error) {
+      await this.destroy(record, context);
+      throw error;
+    }
 
     logger.debug('Canvas created.', {
       ...context,
@@ -449,7 +460,7 @@ export class CanvasRegistry {
     try {
       await this.provider.destroyCanvas(record.canvasId, context);
     } catch (err) {
-      logger.warning('Provider destroyCanvas failed during sweep.', {
+      logger.warning('Provider destroyCanvas failed during canvas cleanup.', {
         ...context,
         canvasId: record.canvasId,
         error: err instanceof Error ? err.message : String(err),
