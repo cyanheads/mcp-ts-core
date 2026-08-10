@@ -4,7 +4,7 @@ description: >
   Land working-tree changes as logical commits — the work grouped by concern, topped by a release commit (version bump, changelog, regenerated artifacts) and an annotated tag. Verify, commit, tag. Stops at "committed and tagged locally" — no push, no publish. The release-and-publish skill picks up from here. Distilled from the git_wrapup_instructions protocol.
 metadata:
   author: cyanheads
-  version: "1.8"
+  version: "1.9"
   audience: external
   type: workflow
 ---
@@ -95,6 +95,8 @@ security: false    # true ONLY for a security fix in this server's own source �
 ---
 ```
 
+**Write `summary:` LAST, derived from the body you just wrote — never independently.** It is the line most readers see, and it propagates unedited to three further surfaces: the `CHANGELOG.md` rollup, the GitHub Release body, and the annotated tag (which cannot be edited once pushed). Written from recollection rather than from the body, it reliably names a mechanism that was never built or a target that was never fixed, while the body beside it stays correct. After writing it, re-read the body and confirm every claim in the summary appears there.
+
 **`security:` is a source-code signal — not a dependency-CVE signal.** Set `security: true` only when this release fixes a vulnerability or adds hardening in code *this server ships*. A dependency or transitive CVE bump — even one that clears an advisory (`bun audit` going 1 → 0) — is routine maintenance: record it under `## Dependencies` with the advisory ID and leave the flag `false`. The `🛡️ Security` badge answers "does the server itself have a vuln"; a dep bump must not trip it.
 
 **Body:** Section order follows Keep a Changelog — Added / Changed / Deprecated / Removed / Fixed / Security. Include only sections with entries. Delete empty sections.
@@ -141,6 +143,24 @@ git commit -m "<subject>"
 **Subject format:** Conventional Commits.
 - Work commits (no version): `feat: hosted server endpoint`, `fix: handle empty SPARQL result sets`, `feat(linter): enrichment contract rules`, `docs: document the enrichment block`
 - Release commit (subject leads with the version): `chore(release): 0.2.1 — empty SPARQL result handling`
+
+**Body: every commit has one, and it is one or two lines.** Uniform across the stack — no commit ships subject-only, none ships a paragraph. One sentence stating the *why* or the load-bearing constraint, a second only if the first genuinely cannot carry it. Two lines is the hard ceiling.
+
+```
+fix: handle empty SPARQL result sets
+
+Upstream returns 200 with an empty bindings array rather than 404.
+```
+
+**Never put a closing keyword in a commit body.** `Fixes #N`, `Closes #N`, `Resolves #N` and friends close the issue the moment the commit is pushed — before the close-out comment recording what shipped, so the issue closes with no account of the fix. Reference issues as bare `(#N)` backlinks in the subject or body; closing is a deliberate later step.
+
+A body is too long the moment it:
+- enumerates the files, subsystems, or symbols touched — that is `git show --stat`
+- walks through how the implementation works — that is the code
+- narrates a fix's mechanism across multiple sentences — that is the changelog entry
+- runs to a second paragraph, ever
+
+The changelog carries the depth, the tag carries the headline, the commit carries one line of why. When the body wants to grow, that pressure is telling you the content belongs in the changelog entry.
 
 **Rules:**
 - Plain `-m` flag only — no heredoc, no command substitution
@@ -218,6 +238,7 @@ If the working tree isn't clean or the tag doesn't point at HEAD, something went
 - [ ] `bun run devcheck` passes
 - [ ] `bun run test:all` (or `test`) passes
 - [ ] Work grouped into logical commits (large features split by layer); release artifacts (version + changelog + tree) committed separately on top, subject leading with the version
+- [ ] Every commit carries a body, and every body is one or two lines — none subject-only, none a paragraph
 - [ ] Annotated tag `v<version>` with structured markdown message, final line linking this version's changelog file
 - [ ] Working tree clean
 - [ ] Nothing pushed — local only
