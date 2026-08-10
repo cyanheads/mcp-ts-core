@@ -11,6 +11,7 @@ import { validationError } from '@/types-global/errors.js';
 import { lazyImport } from '@/utils/internal/lazyImport.js';
 import { logger } from '@/utils/internal/logger.js';
 import { type RequestContext, requestContextService } from '@/utils/internal/requestContext.js';
+import { assertTextInputBudget, type ParserInputBudgetOptions } from './inputBudget.js';
 import { thinkBlockRegex } from './thinkBlock.js';
 
 const getYaml = lazyImport(
@@ -37,6 +38,7 @@ export class YamlParser {
    * @template T - The expected type of the parsed result. Defaults to `unknown`.
    * @param yamlString - The YAML string to parse. May be prefixed with a `<think>` block.
    * @param context - Optional request context for correlated logging and error metadata.
+   * @param budget - Optional UTF-8 byte budget for the input. Defaults to 1 MiB.
    * @returns A promise resolving to the parsed object cast to `T`.
    * @throws {McpError} With code `ConfigurationError` if `js-yaml` is not installed.
    * @throws {McpError} With code `ValidationError` if the string is empty after stripping
@@ -53,7 +55,13 @@ export class YamlParser {
    * console.log(fromLlm); // { key: 'value' }
    * ```
    */
-  async parse<T = unknown>(yamlString: string, context?: RequestContext): Promise<T> {
+  async parse<T = unknown>(
+    yamlString: string,
+    context?: RequestContext,
+    budget?: ParserInputBudgetOptions,
+  ): Promise<T> {
+    assertTextInputBudget(yamlString, budget);
+
     let stringToParse = yamlString;
     const match = yamlString.match(thinkBlockRegex);
 
@@ -105,12 +113,11 @@ export class YamlParser {
         contentAttempted: stringToParse.substring(0, 200),
       });
 
-      throw validationError(`Failed to parse YAML: ${error.message}`, {
-        ...context,
-        originalContentSample:
-          stringToParse.substring(0, 200) + (stringToParse.length > 200 ? '...' : ''),
-        rawError: error instanceof Error ? error.stack : String(error),
-      });
+      throw validationError(
+        'Failed to parse YAML content.',
+        { reason: 'yaml_parse_failed' },
+        { cause: error },
+      );
     }
   }
 }

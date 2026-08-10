@@ -75,16 +75,45 @@ describe('XmlParser', () => {
 
   it('wraps parser errors in an McpError and logs details', async () => {
     const parser = new XmlParser();
-    const xml = '<'; // triggers fast-xml-parser failure
+    const sentinel = 'SUPERSECRET at parser (/Users/example/private/xml.ts:1:1)';
+    const xml = `<\n${sentinel}`; // triggers fast-xml-parser failure
 
-    await expect(parser.parse(xml)).rejects.toThrow(McpError);
+    const failure = (await parser.parse(xml).catch((error: unknown) => error)) as McpError;
+
+    expect(failure).toBeInstanceOf(McpError);
+    expect(failure).toMatchObject({
+      code: JsonRpcErrorCode.ValidationError,
+      message: 'Failed to parse XML content.',
+      data: { reason: 'xml_parse_failed' },
+    });
+    expect(JSON.stringify({ message: failure.message, data: failure.data })).not.toContain(
+      sentinel,
+    );
+    expect(failure.cause).toBeInstanceOf(Error);
 
     expect(errorSpy).toHaveBeenCalledWith(
       'Failed to parse XML content.',
       expect.objectContaining({
         errorDetails: expect.any(String),
-        contentAttempted: '<',
+        contentAttempted: xml,
       }),
     );
+  });
+
+  it('rejects XML nested beyond the configured parser ceiling', async () => {
+    const parser = new XmlParser();
+    const nested = `${'<node>'.repeat(102)}value${'</node>'.repeat(102)}`;
+
+    await expect(parser.parse(nested)).rejects.toMatchObject({
+      code: JsonRpcErrorCode.ValidationError,
+      data: { reason: 'xml_parse_failed' },
+    });
+  });
+
+  it('does not expand document-defined entities', async () => {
+    const parser = new XmlParser();
+    const xml = '<!DOCTYPE root [<!ENTITY secret "expanded">]><root>&secret;</root>';
+
+    await expect(parser.parse(xml)).resolves.toEqual({ root: '&secret;' });
   });
 });

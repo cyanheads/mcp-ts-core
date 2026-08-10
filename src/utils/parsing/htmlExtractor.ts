@@ -31,6 +31,7 @@ import { McpError, validationError } from '@/types-global/errors.js';
 import { lazyImport } from '@/utils/internal/lazyImport.js';
 import { logger } from '@/utils/internal/logger.js';
 import { type RequestContext, requestContextService } from '@/utils/internal/requestContext.js';
+import { assertTextInputBudget } from './inputBudget.js';
 
 const getDefuddle = lazyImport<typeof import('defuddle/node')>(
   () => import('defuddle/node'),
@@ -93,6 +94,10 @@ export interface ExtractArticleOptions {
    * `'en'`, `'fr'`, `'ja'`).
    */
   language?: string;
+  /**
+   * UTF-8 input budget in bytes. Defaults to 1 MiB; raise it for known-large pages.
+   */
+  maxBytes?: number;
   /**
    * Strip all images from the extracted content. Defaults to `false`.
    */
@@ -195,6 +200,7 @@ export class HtmlExtractor {
     options?: ExtractArticleOptions,
     context?: RequestContext,
   ): Promise<ExtractArticleResult> {
+    const byteLength = assertTextInputBudget(html, options);
     const logContext =
       context ??
       requestContextService.createRequestContext({
@@ -224,7 +230,7 @@ export class HtmlExtractor {
 
     logger.debug('Extracting article content from HTML.', {
       ...logContext,
-      byteLength: trimmed.length,
+      byteLength,
       format,
       hasUrl: Boolean(options?.url),
       hasContentSelector: Boolean(options?.contentSelector),
@@ -264,10 +270,11 @@ export class HtmlExtractor {
         ...logContext,
         errorDetails: error.message,
       });
-      throw validationError(`Failed to extract article from HTML: ${error.message}`, {
-        ...context,
-        rawError: error.stack ?? String(error),
-      });
+      throw validationError(
+        'Failed to extract article from HTML.',
+        { reason: 'html_extract_failed' },
+        { cause: error },
+      );
     }
   }
 }

@@ -6,10 +6,15 @@
  */
 import type { PDFDocument, PDFFont, PDFImage, PDFPage, RGB } from 'pdf-lib';
 
-import { JsonRpcErrorCode, McpError, validationError } from '@/types-global/errors.js';
+import { JsonRpcErrorCode, McpError } from '@/types-global/errors.js';
 import { lazyImport } from '@/utils/internal/lazyImport.js';
 import { logger } from '@/utils/internal/logger.js';
 import { type RequestContext, requestContextService } from '@/utils/internal/requestContext.js';
+import {
+  assertBinaryInputBudget,
+  assertBinaryInputsBudget,
+  type ParserInputBudgetOptions,
+} from './inputBudget.js';
 
 const getPdfLib = lazyImport(
   () => import('pdf-lib'),
@@ -20,6 +25,26 @@ const getUnpdf = lazyImport(
   () => import('unpdf'),
   'Install "unpdf" to use PDF text extraction: bun add unpdf',
 );
+
+/**
+ * Build the client-facing PDF failure envelope without copying parser/library
+ * diagnostics into `McpError.data` or `message`. The original failure remains
+ * available to the internal error pipeline through `cause`.
+ *
+ * An `McpError` thrown from inside the operation is already classified and
+ * client-safe — most often the `ConfigurationError` a lazy import raises for a
+ * missing peer dependency — so it passes through with its code and remediation
+ * intact rather than being relabelled as a PDF failure.
+ */
+function pdfFailure(
+  code: JsonRpcErrorCode.InternalError | JsonRpcErrorCode.ValidationError,
+  message: string,
+  reason: string,
+  cause: Error,
+): McpError {
+  if (cause instanceof McpError) return cause;
+  return new McpError(code, message, { reason }, { cause });
+}
 
 /**
  * Options for adding a new page to a PDF document.
@@ -97,6 +122,8 @@ export interface EmbedImageOptions {
    * Image data as Uint8Array or ArrayBuffer.
    */
   imageBytes: Uint8Array | ArrayBuffer;
+  /** Input budget in bytes. Defaults to 25 MiB; raise it for known-large images. */
+  maxBytes?: number;
 }
 
 /**
@@ -255,6 +282,8 @@ export interface FillFormOptions {
  * Options for extracting text from a PDF document.
  */
 export interface ExtractTextOptions {
+  /** Input budget in bytes. Defaults to 25 MiB; raise it for known-large documents. */
+  maxBytes?: number;
   /**
    * Whether to merge all pages into a single string.
    * If true, returns text as a single string.
@@ -323,13 +352,11 @@ export class PdfParser {
         errorDetails: error.message,
       });
 
-      throw new McpError(
+      throw pdfFailure(
         JsonRpcErrorCode.InternalError,
-        `Failed to create PDF document: ${error.message}`,
-        {
-          ...context,
-          rawError: error instanceof Error ? error.stack : String(error),
-        },
+        'Failed to create PDF document.',
+        'pdf_create_failed',
+        error,
       );
     }
   }
@@ -341,6 +368,7 @@ export class PdfParser {
    *
    * @param pdfBytes - The PDF file contents as `Uint8Array` or `ArrayBuffer`.
    * @param context - Optional `RequestContext` for correlated logging and error metadata.
+   * @param budget - Optional byte budget for the input. Defaults to 25 MiB.
    * @returns The loaded `PDFDocument` instance.
    * @throws {McpError} With `ConfigurationError` if `pdf-lib` is not installed.
    * @throws {McpError} With `ValidationError` if the bytes are not a valid PDF.
@@ -354,7 +382,9 @@ export class PdfParser {
   async loadDocument(
     pdfBytes: Uint8Array | ArrayBuffer,
     context?: RequestContext,
+    budget?: ParserInputBudgetOptions,
   ): Promise<PDFDocument> {
+    const byteLength = assertBinaryInputBudget(pdfBytes, budget);
     const logContext =
       context ||
       requestContextService.createRequestContext({
@@ -365,7 +395,7 @@ export class PdfParser {
       const pdfLib = await getPdfLib();
       logger.debug('Loading PDF document from bytes.', {
         ...logContext,
-        byteLength: pdfBytes instanceof Uint8Array ? pdfBytes.length : pdfBytes.byteLength,
+        byteLength,
       });
 
       const doc = await pdfLib.PDFDocument.load(pdfBytes);
@@ -377,10 +407,12 @@ export class PdfParser {
         errorDetails: error.message,
       });
 
-      throw validationError(`Failed to load PDF document: ${error.message}`, {
-        ...context,
-        rawError: error instanceof Error ? error.stack : String(error),
-      });
+      throw pdfFailure(
+        JsonRpcErrorCode.ValidationError,
+        'Failed to load PDF document.',
+        'pdf_load_failed',
+        error,
+      );
     }
   }
 
@@ -449,13 +481,11 @@ export class PdfParser {
         errorDetails: error.message,
       });
 
-      throw new McpError(
+      throw pdfFailure(
         JsonRpcErrorCode.InternalError,
-        `Failed to embed font '${fontName}': ${error.message}`,
-        {
-          ...context,
-          rawError: error instanceof Error ? error.stack : String(error),
-        },
+        'Failed to embed PDF font.',
+        'pdf_font_embed_failed',
+        error,
       );
     }
   }
@@ -485,6 +515,7 @@ export class PdfParser {
     options: EmbedImageOptions,
     context?: RequestContext,
   ): Promise<PDFImage> {
+    assertBinaryInputBudget(options.imageBytes, options);
     const logContext =
       context ||
       requestContextService.createRequestContext({
@@ -511,13 +542,11 @@ export class PdfParser {
         errorDetails: error.message,
       });
 
-      throw new McpError(
+      throw pdfFailure(
         JsonRpcErrorCode.InternalError,
-        `Failed to embed ${options.format} image: ${error.message}`,
-        {
-          ...context,
-          rawError: error instanceof Error ? error.stack : String(error),
-        },
+        'Failed to embed PDF image.',
+        'pdf_image_embed_failed',
+        error,
       );
     }
   }
@@ -657,6 +686,7 @@ export class PdfParser {
    *
    * @param pdfBytesArray - Source PDF files as `Uint8Array` or `ArrayBuffer` elements.
    * @param context - Optional `RequestContext` for correlated logging and error metadata.
+   * @param budget - Optional aggregate byte budget across all inputs. Defaults to 25 MiB.
    * @returns A new `PDFDocument` containing all pages from the input documents.
    * @throws {McpError} With `ConfigurationError` if `pdf-lib` is not installed.
    * @throws {McpError} With `InternalError` if any source PDF is invalid or merging fails.
@@ -672,7 +702,11 @@ export class PdfParser {
   async mergePdfs(
     pdfBytesArray: (Uint8Array | ArrayBuffer)[],
     context?: RequestContext,
+    budget?: ParserInputBudgetOptions,
   ): Promise<PDFDocument> {
+    const presentInputs = pdfBytesArray.filter(Boolean);
+    assertBinaryInputsBudget(presentInputs, budget);
+
     const logContext =
       context ||
       requestContextService.createRequestContext({
@@ -688,10 +722,7 @@ export class PdfParser {
 
       const mergedPdf = await pdfLib.PDFDocument.create();
 
-      for (let i = 0; i < pdfBytesArray.length; i++) {
-        const pdfBytes = pdfBytesArray[i];
-        if (!pdfBytes) continue;
-
+      for (const pdfBytes of presentInputs) {
         const pdfDoc = await pdfLib.PDFDocument.load(pdfBytes);
         const copiedPages = await mergedPdf.copyPages(pdfDoc, pdfDoc.getPageIndices());
         for (const page of copiedPages) mergedPdf.addPage(page);
@@ -710,10 +741,12 @@ export class PdfParser {
         errorDetails: error.message,
       });
 
-      throw new McpError(JsonRpcErrorCode.InternalError, `Failed to merge PDFs: ${error.message}`, {
-        ...context,
-        rawError: error instanceof Error ? error.stack : String(error),
-      });
+      throw pdfFailure(
+        JsonRpcErrorCode.InternalError,
+        'Failed to merge PDF documents.',
+        'pdf_merge_failed',
+        error,
+      );
     }
   }
 
@@ -727,6 +760,7 @@ export class PdfParser {
    * @param pdfBytes - The source PDF as `Uint8Array` or `ArrayBuffer`.
    * @param ranges - Page ranges to extract; each produces one output document.
    * @param context - Optional `RequestContext` for correlated logging and error metadata.
+   * @param budget - Optional byte budget for the input. Defaults to 25 MiB.
    * @returns An array of new `PDFDocument` instances, one per range, in order.
    * @throws {McpError} With `ConfigurationError` if `pdf-lib` is not installed.
    * @throws {McpError} With `InternalError` if the source PDF is invalid or a page index is out of bounds.
@@ -744,7 +778,9 @@ export class PdfParser {
     pdfBytes: Uint8Array | ArrayBuffer,
     ranges: PageRange[],
     context?: RequestContext,
+    budget?: ParserInputBudgetOptions,
   ): Promise<PDFDocument[]> {
+    assertBinaryInputBudget(pdfBytes, budget);
     const logContext =
       context ||
       requestContextService.createRequestContext({
@@ -788,10 +824,12 @@ export class PdfParser {
         errorDetails: error.message,
       });
 
-      throw new McpError(JsonRpcErrorCode.InternalError, `Failed to split PDF: ${error.message}`, {
-        ...context,
-        rawError: error instanceof Error ? error.stack : String(error),
-      });
+      throw pdfFailure(
+        JsonRpcErrorCode.InternalError,
+        'Failed to split PDF document.',
+        'pdf_split_failed',
+        error,
+      );
     }
   }
 
@@ -881,13 +919,11 @@ export class PdfParser {
         errorDetails: error.message,
       });
 
-      throw new McpError(
+      throw pdfFailure(
         JsonRpcErrorCode.InternalError,
-        `Failed to fill PDF form: ${error.message}`,
-        {
-          ...context,
-          rawError: error instanceof Error ? error.stack : String(error),
-        },
+        'Failed to fill PDF form.',
+        'pdf_form_fill_failed',
+        error,
       );
     }
   }
@@ -1001,21 +1037,45 @@ export class PdfParser {
         operation: 'PdfParser.extractText',
       });
 
-    try {
-      const mergePages = options?.mergePages ?? false;
-      const isBytes = input instanceof Uint8Array || input instanceof ArrayBuffer;
+    const mergePages = options?.mergePages ?? false;
+    const isBytes = input instanceof Uint8Array || input instanceof ArrayBuffer;
+    let pdfBytes: Uint8Array;
 
+    if (isBytes) {
+      assertBinaryInputBudget(input, options);
+      pdfBytes = input instanceof ArrayBuffer ? new Uint8Array(input) : input;
+    } else {
+      let rawBytes: Uint8Array;
+      try {
+        rawBytes = await input.save();
+      } catch (e: unknown) {
+        const error = e instanceof Error ? e : new Error(String(e));
+        logger.error('Failed to extract text from PDF.', {
+          ...logContext,
+          errorDetails: error.message,
+        });
+        throw pdfFailure(
+          JsonRpcErrorCode.InternalError,
+          'Failed to extract text from PDF.',
+          'pdf_text_extract_failed',
+          error,
+        );
+      }
+      assertBinaryInputBudget(rawBytes, options);
+      pdfBytes = rawBytes;
+    }
+
+    try {
       logger.debug('Extracting text from PDF using unpdf.', {
         ...logContext,
         mergePages,
         inputKind: isBytes ? 'bytes' : 'document',
       });
 
-      const rawBytes = isBytes ? input : await input.save();
-      const pdfBytes = rawBytes instanceof ArrayBuffer ? new Uint8Array(rawBytes) : rawBytes;
-
       const { getDocumentProxy, extractText: unpdfExtractText } = await getUnpdf();
-      const pdfProxy = await getDocumentProxy(pdfBytes);
+      // Cap decoded images at 4096×4096 pixels (pdf.js defaults to unbounded), so a
+      // crafted page cannot force a huge raster allocation during extraction.
+      const pdfProxy = await getDocumentProxy(pdfBytes, { maxImageSize: 4096 * 4096 });
 
       const result: { totalPages: number; text: string | string[] } = mergePages
         ? await unpdfExtractText(pdfProxy, { mergePages: true })
@@ -1040,13 +1100,11 @@ export class PdfParser {
         errorDetails: error.message,
       });
 
-      throw new McpError(
+      throw pdfFailure(
         JsonRpcErrorCode.InternalError,
-        `Failed to extract text: ${error.message}`,
-        {
-          ...context,
-          rawError: error instanceof Error ? error.stack : String(error),
-        },
+        'Failed to extract text from PDF.',
+        'pdf_text_extract_failed',
+        error,
       );
     }
   }
@@ -1090,13 +1148,11 @@ export class PdfParser {
         errorDetails: error.message,
       });
 
-      throw new McpError(
+      throw pdfFailure(
         JsonRpcErrorCode.InternalError,
-        `Failed to save PDF document: ${error.message}`,
-        {
-          ...context,
-          rawError: error instanceof Error ? error.stack : String(error),
-        },
+        'Failed to save PDF document.',
+        'pdf_save_failed',
+        error,
       );
     }
   }

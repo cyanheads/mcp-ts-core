@@ -44,15 +44,19 @@ describe('yamlParser.parse', () => {
     }
   });
 
-  it('truncates the original content sample to 200 chars on long invalid input', async () => {
-    const longInvalid = `bad: [${'a, '.repeat(100)}`; // > 200 chars, unterminated flow sequence
+  it('keeps untrusted content and parser diagnostics out of the public error', async () => {
+    const sentinel = 'SUPERSECRET at parser (/home/example/private/parser.ts:1:1)';
     try {
-      await yamlParser.parse(longInvalid);
+      await yamlParser.parse(`bad: [unterminated ${sentinel}`);
       throw new Error('Expected yamlParser.parse to throw');
     } catch (error) {
-      const sample = (error as McpError).data?.originalContentSample as string;
-      expect(sample.endsWith('...')).toBe(true);
-      expect(sample).toHaveLength(203); // 200 chars + ellipsis
+      const mcpError = error as McpError;
+      expect(mcpError.message).toBe('Failed to parse YAML content.');
+      expect(mcpError.data).toEqual({ reason: 'yaml_parse_failed' });
+      expect(JSON.stringify({ message: mcpError.message, data: mcpError.data })).not.toContain(
+        sentinel,
+      );
+      expect(mcpError.cause).toBeInstanceOf(Error);
     }
   });
 

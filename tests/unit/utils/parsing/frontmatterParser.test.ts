@@ -297,25 +297,33 @@ Content`;
     });
 
     it('normalizes a non-Error YAML parser failure', async () => {
-      vi.spyOn(yamlParser, 'parse').mockRejectedValueOnce('parser unavailable');
+      vi.spyOn(yamlParser, 'parse').mockRejectedValueOnce(
+        'SUPERSECRET at parser (/Users/example/private/frontmatter.ts:1:1)',
+      );
       const markdown = '---\ntitle: Test\n---\nContent';
 
       await expect(frontmatterParser.parse(markdown)).rejects.toMatchObject({
         code: JsonRpcErrorCode.ValidationError,
-        message: 'Failed to parse frontmatter: parser unavailable',
+        message: 'Failed to parse frontmatter content.',
+        data: { reason: 'frontmatter_parse_failed' },
       });
     });
 
-    it('truncates a long YAML sample for a non-framework parser failure', async () => {
-      vi.spyOn(yamlParser, 'parse').mockRejectedValueOnce(new Error('parser failed'));
-      const yaml = `title: ${'x'.repeat(240)}`;
+    it('keeps YAML content and parser diagnostics out of a non-framework error', async () => {
+      const sentinel = 'SUPERSECRET at parser (/Users/example/private/frontmatter.ts:1:1)';
+      vi.spyOn(yamlParser, 'parse').mockRejectedValueOnce(new Error(sentinel));
+      const yaml = `title: ${sentinel}`;
 
       try {
         await frontmatterParser.parse(`---\n${yaml}\n---\nContent`);
         throw new Error('expected parse to fail');
       } catch (error) {
-        const sample = (error as McpError).data?.yamlContentSample;
-        expect(sample).toBe(`${yaml.substring(0, 200)}...`);
+        const mcpError = error as McpError;
+        const publicError = JSON.stringify({ message: mcpError.message, data: mcpError.data });
+        expect(publicError).not.toContain('SUPERSECRET');
+        expect(publicError).not.toContain('/Users/example/private');
+        expect(mcpError.data).toEqual({ reason: 'frontmatter_parse_failed' });
+        expect(mcpError.cause).toBeInstanceOf(Error);
       }
     });
   });

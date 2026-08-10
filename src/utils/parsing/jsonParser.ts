@@ -8,6 +8,7 @@ import { validationError } from '@/types-global/errors.js';
 import { lazyImport } from '@/utils/internal/lazyImport.js';
 import { logger } from '@/utils/internal/logger.js';
 import { type RequestContext, requestContextService } from '@/utils/internal/requestContext.js';
+import { assertTextInputBudget, type ParserInputBudgetOptions } from './inputBudget.js';
 import { thinkBlockRegex } from './thinkBlock.js';
 
 const getPartialJson = lazyImport(
@@ -85,6 +86,7 @@ export class JsonParser {
    * @param allowPartial - Bitwise OR combination of `Allow` flags controlling which
    *   partial JSON types are accepted. Defaults to `Allow.ALL`.
    * @param context - Optional `RequestContext` for correlated logging and error metadata.
+   * @param budget - Optional UTF-8 byte budget for the input. Defaults to 1 MiB.
    * @returns The parsed JavaScript value cast to `T`.
    * @throws {McpError} With `ValidationError` if the string is empty after stripping the
    *   `<think>` block and trimming, or if `partial-json` fails to parse the content.
@@ -107,7 +109,10 @@ export class JsonParser {
     jsonString: string,
     allowPartial: number = Allow.ALL,
     context?: RequestContext,
+    budget?: ParserInputBudgetOptions,
   ): Promise<T> {
+    assertTextInputBudget(jsonString, budget);
+
     let stringToParse = jsonString;
     const match = jsonString.match(thinkBlockRegex);
 
@@ -156,12 +161,11 @@ export class JsonParser {
         contentAttempted: stringToParse.substring(0, 200),
       });
 
-      throw validationError(`Failed to parse JSON: ${error.message}`, {
-        ...context,
-        originalContentSample:
-          stringToParse.substring(0, 200) + (stringToParse.length > 200 ? '...' : ''),
-        rawError: error instanceof Error ? error.stack : String(error),
-      });
+      throw validationError(
+        'Failed to parse JSON content.',
+        { reason: 'json_parse_failed' },
+        { cause: error },
+      );
     }
   }
 }

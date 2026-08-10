@@ -18,6 +18,11 @@ export {
   HtmlExtractor,
   htmlExtractor,
 } from './htmlExtractor.js';
+export {
+  DEFAULT_BINARY_PARSER_MAX_BYTES,
+  DEFAULT_TEXT_PARSER_MAX_BYTES,
+  type ParserInputBudgetOptions,
+} from './inputBudget.js';
 export { Allow, JsonParser, jsonParser } from './jsonParser.js';
 export {
   type AddPageOptions,

@@ -11,6 +11,7 @@
 import { configurationError, validationError } from '@/types-global/errors.js';
 import { logger } from '@/utils/internal/logger.js';
 import { type RequestContext, requestContextService } from '@/utils/internal/requestContext.js';
+import { assertTextInputBudget, type ParserInputBudgetOptions } from './inputBudget.js';
 import { thinkBlockRegex } from './thinkBlock.js';
 
 interface FxpModule {
@@ -55,6 +56,7 @@ export class XmlParser {
    * @template T - The expected type of the parsed result. Defaults to `unknown`.
    * @param xmlString - The XML string to parse. May be prefixed with a `<think>` block.
    * @param context - Optional request context for correlated logging and error metadata.
+   * @param budget - Optional UTF-8 byte budget for the input. Defaults to 1 MiB.
    * @returns A promise resolving to the parsed object cast to `T`.
    * @throws {McpError} With code `ConfigurationError` if `fast-xml-parser` is not installed.
    * @throws {McpError} With code `ValidationError` if the string is empty after stripping
@@ -71,7 +73,13 @@ export class XmlParser {
    * console.log(fromLlm); // { root: { key: 'value' } }
    * ```
    */
-  async parse<T = unknown>(xmlString: string, context?: RequestContext): Promise<T> {
+  async parse<T = unknown>(
+    xmlString: string,
+    context?: RequestContext,
+    budget?: ParserInputBudgetOptions,
+  ): Promise<T> {
+    assertTextInputBudget(xmlString, budget);
+
     let stringToParse = xmlString;
     const match = xmlString.match(thinkBlockRegex);
 
@@ -109,6 +117,9 @@ export class XmlParser {
       _xmlParserInstance ??= new fxp.XMLParser({
         processEntities: false,
         htmlEntities: false,
+        // Pins fast-xml-parser's own nesting-depth default so an upstream change
+        // can't silently raise the bound a deeply nested document runs against.
+        maxNestedTags: 100,
       });
       return _xmlParserInstance.parse(stringToParse) as T;
     } catch (e: unknown) {
@@ -124,12 +135,11 @@ export class XmlParser {
         contentAttempted: stringToParse.substring(0, 200),
       });
 
-      throw validationError(`Failed to parse XML: ${error.message}`, {
-        ...context,
-        originalContentSample:
-          stringToParse.substring(0, 200) + (stringToParse.length > 200 ? '...' : ''),
-        rawError: error instanceof Error ? error.stack : String(error),
-      });
+      throw validationError(
+        'Failed to parse XML content.',
+        { reason: 'xml_parse_failed' },
+        { cause: error },
+      );
     }
   }
 }

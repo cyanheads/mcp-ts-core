@@ -122,15 +122,19 @@ describe('JsonParser', () => {
     }
   });
 
-  it('truncates the original content sample to 200 chars on long invalid input', async () => {
-    const longInvalid = 'this is not json '.repeat(20); // > 200 chars, unparseable
+  it('keeps untrusted content and parser diagnostics out of the public error', async () => {
+    const sentinel = 'SUPERSECRET at parser (/Users/example/private/parser.ts:1:1)';
     try {
-      await parser.parse(longInvalid, Allow.ALL, context);
+      await parser.parse(`not-json ${sentinel}`, Allow.ALL, context);
       throw new Error('Expected parser.parse to throw');
     } catch (error) {
-      const sample = (error as McpError).data?.originalContentSample as string;
-      expect(sample.endsWith('...')).toBe(true);
-      expect(sample).toHaveLength(203); // 200 chars + ellipsis
+      const mcpError = error as McpError;
+      expect(mcpError.message).toBe('Failed to parse JSON content.');
+      expect(mcpError.data).toEqual({ reason: 'json_parse_failed' });
+      expect(JSON.stringify({ message: mcpError.message, data: mcpError.data })).not.toContain(
+        sentinel,
+      );
+      expect(mcpError.cause).toBeInstanceOf(Error);
     }
   });
 
