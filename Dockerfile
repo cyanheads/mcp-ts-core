@@ -50,10 +50,14 @@ COPY package.json bun.lock ./
 
 # Install only production dependencies, ignoring any lifecycle scripts (like 'prepare')
 # that are not needed in the final production image.
+# `--omit=peer` drops the optional peer tiers (test runner, service SDKs,
+# parsers); every package the runtime actually loads is a direct dependency.
+# The OTEL step below carries the same flag — without it, that install
+# re-resolves the graph and pulls every optional peer back in.
 # Remove platform-specific bun/rollup binaries pulled as optionalDependencies
 # by @modelcontextprotocol/ext-apps — only needed for its build toolchain, not runtime.
 RUN --mount=type=cache,target=/root/.bun/install/cache \
-    bun install --production --frozen-lockfile --ignore-scripts \
+    bun install --production --omit=peer --frozen-lockfile --ignore-scripts \
     && rm -rf node_modules/@oven node_modules/@rollup
 
 # Conditionally install OpenTelemetry optional peer dependencies (Tier 3).
@@ -62,7 +66,7 @@ RUN --mount=type=cache,target=/root/.bun/install/cache \
 ARG OTEL_ENABLED=true
 RUN --mount=type=cache,target=/root/.bun/install/cache \
     if [ "$OTEL_ENABLED" = "true" ]; then \
-      bun add --omit=dev --ignore-scripts @hono/otel \
+      bun add --omit=dev --omit=peer --ignore-scripts @hono/otel \
         @opentelemetry/instrumentation-http \
         @opentelemetry/exporter-metrics-otlp-http \
         @opentelemetry/exporter-trace-otlp-http \
