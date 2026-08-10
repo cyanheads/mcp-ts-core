@@ -595,6 +595,9 @@ describe('core/app', () => {
     expect(mockSchedulerService.destroyAll).toHaveBeenCalledTimes(1);
     expect(mockShutdownOpenTelemetry).toHaveBeenCalledTimes(1);
     expect(mockLogger.close).toHaveBeenCalledTimes(1);
+    expect(mockTaskManager.instance.cleanup).toHaveBeenCalledTimes(1);
+    expect(mockRateLimiter.instance.dispose).toHaveBeenCalledTimes(1);
+    expect(mockSchedulerService.destroyAll).toHaveBeenCalledTimes(1);
   });
 
   it('exposes executable process gauge callbacks', async () => {
@@ -653,6 +656,31 @@ describe('core/app', () => {
     );
     expect(mockShutdownOpenTelemetry).toHaveBeenCalledTimes(1);
     expect(mockLogger.close).toHaveBeenCalledTimes(1);
+  });
+
+  it('rolls back allocated resources and listeners when transport startup fails', async () => {
+    const startupError = new Error('address already in use');
+    mockTransportManager.instance.start.mockRejectedValueOnce(startupError);
+
+    await expect(createApp()).rejects.toBe(startupError);
+
+    expect(processRemoveListenerSpy).toHaveBeenCalledWith(
+      'uncaughtException',
+      expect.any(Function),
+    );
+    expect(processRemoveListenerSpy).toHaveBeenCalledWith(
+      'unhandledRejection',
+      expect.any(Function),
+    );
+    expect(processRemoveListenerSpy).toHaveBeenCalledWith('SIGTERM', expect.any(Function));
+    expect(processRemoveListenerSpy).toHaveBeenCalledWith('SIGINT', expect.any(Function));
+    expect(mockTransportManager.instance.stop).toHaveBeenCalledOnce();
+    expect(mockTransportManager.instance.stop).toHaveBeenCalledWith('STARTUP_FAILURE');
+    expect(mockTaskManager.instance.cleanup).toHaveBeenCalledOnce();
+    expect(mockRateLimiter.instance.dispose).toHaveBeenCalledOnce();
+    expect(mockSchedulerService.destroyAll).toHaveBeenCalledOnce();
+    expect(mockShutdownOpenTelemetry).toHaveBeenCalledOnce();
+    expect(mockLogger.close).toHaveBeenCalledOnce();
   });
 
   it('registered fatal handlers log errors and trigger exit backstops', async () => {
@@ -927,7 +955,7 @@ describe('core/app', () => {
     expect(mockLogger.error).not.toHaveBeenCalledWith(
       'Critical error during shutdown process.',
       expect.anything(),
-      expect.anything(),
+      expect.objectContaining({ operation: 'ServerShutdown' }),
     );
   });
 

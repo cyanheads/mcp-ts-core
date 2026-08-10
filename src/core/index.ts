@@ -15,6 +15,7 @@ export type {
   CoreServices,
   CreateAppOptions,
   ServerHandle,
+  SupabaseClientHandle,
 } from '@/core/app.js';
 export { createApp } from '@/core/app.js';
 

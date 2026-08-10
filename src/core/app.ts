@@ -6,7 +6,6 @@
  * @module src/core/app
  */
 
-import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import type { Implementation } from '@modelcontextprotocol/sdk/types.js';
 import type { SupabaseClient } from '@supabase/supabase-js';
 import { z } from 'zod';
@@ -19,6 +18,7 @@ import {
 } from '@/core/serverManifest.js';
 import { PromptRegistry } from '@/mcp-server/prompts/prompt-registration.js';
 import type { AnyPromptDefinition } from '@/mcp-server/prompts/utils/promptDefinition.js';
+import type { McpServerFactory, ProtocolSessionHooks } from '@/mcp-server/protocolSession.js';
 import { ResourceRegistry } from '@/mcp-server/resources/resource-registration.js';
 import type { AnyResourceDefinition } from '@/mcp-server/resources/utils/resourceDefinition.js';
 import { createMcpServerInstance } from '@/mcp-server/server.js';
@@ -71,8 +71,29 @@ export interface ContextOptions {
   exposeStatelessSessionId?: boolean;
 }
 
+/**
+ * Dependency-free default type for the optional Supabase admin client.
+ *
+ * The framework deliberately does not expose Supabase's concrete generic graph
+ * from its root declarations. Consumers that use the raw client can opt into
+ * its exact type without making Supabase a requirement for every consumer:
+ *
+ * @example
+ * ```ts
+ * import type { SupabaseClient } from '@supabase/supabase-js';
+ * import { createApp } from '@cyanheads/mcp-ts-core';
+ *
+ * await createApp<SupabaseClient<MyDatabase>>({
+ *   setup(core) {
+ *     core.supabase?.from('items').select();
+ *   },
+ * });
+ * ```
+ */
+export type SupabaseClientHandle = object;
+
 /** Options for {@link createApp}. All arrays default to empty. */
-export interface CreateAppOptions {
+export interface CreateAppOptions<TSupabaseClient extends object = SupabaseClientHandle> {
   /** Options affecting the `Context` object passed to handlers. */
   context?: ContextOptions;
   /**
@@ -128,7 +149,7 @@ export interface CreateAppOptions {
   /** Resource definitions. */
   resources?: AnyResourceDefinition[];
   /** Runs after core services are constructed, before transport starts. */
-  setup?: (core: CoreServices) => void | Promise<void>;
+  setup?: (core: CoreServices<TSupabaseClient>) => void | Promise<void>;
   /**
    * Human-readable display name shown in client listings and consent UIs.
    * Supplements `name` (which is the machine identifier). Forwarded to the
@@ -152,7 +173,7 @@ export interface CreateAppOptions {
 }
 
 /** Services available in the `setup()` callback and on ServerHandle. */
-export interface CoreServices {
+export interface CoreServices<TSupabaseClient extends object = SupabaseClientHandle> {
   /**
    * Optional DataCanvas primitive (issue #97). Present when
    * `CANVAS_PROVIDER_TYPE` is set to a supported engine (`duckdb`).
@@ -166,13 +187,18 @@ export interface CoreServices {
   rateLimiter: RateLimiter;
   speechService?: SpeechService;
   storage: StorageService;
-  supabase?: SupabaseClient<Database>;
+  /**
+   * Optional Supabase admin client used by the Supabase storage provider.
+   * The default handle is intentionally dependency-free; pass the concrete
+   * client type to {@link createApp} when setup code accesses the raw SDK.
+   */
+  supabase?: TSupabaseClient;
 }
 
 /** Handle returned by {@link createApp} for controlling the server lifecycle. */
-export interface ServerHandle {
+export interface ServerHandle<TSupabaseClient extends object = SupabaseClientHandle> {
   /** Read-only access to core services for integration testing or embedding. */
-  readonly services: CoreServices;
+  readonly services: CoreServices<TSupabaseClient>;
   /** Initiates graceful shutdown (stops transport, flushes OTEL, closes logger). */
   shutdown(signal?: string): Promise<void>;
 }
@@ -182,9 +208,9 @@ export interface ServerHandle {
 // ---------------------------------------------------------------------------
 
 /** @internal Result of composeServices — used by createApp and createWorkerHandler. */
-export interface ComposedApp {
-  coreServices: CoreServices;
-  createServer: () => Promise<McpServer>;
+export interface ComposedApp<TSupabaseClient extends object = SupabaseClientHandle> {
+  coreServices: CoreServices<TSupabaseClient>;
+  createServer: McpServerFactory;
   /**
    * Server manifest — the single source of truth for the `/mcp` status JSON,
    * the SEP-1649 Server Card at `/.well-known/mcp.json`, and the HTML landing
@@ -200,7 +226,9 @@ export interface ComposedApp {
  * Does NOT start transport, register signal handlers, or init OTEL/logger.
  * @internal
  */
-export async function composeServices(options: CreateAppOptions = {}): Promise<ComposedApp> {
+export async function composeServices<TSupabaseClient extends object = SupabaseClientHandle>(
+  options: CreateAppOptions<TSupabaseClient> = {},
+): Promise<ComposedApp<TSupabaseClient>> {
   const {
     tools = [],
     resources = [],
@@ -277,7 +305,7 @@ export async function composeServices(options: CreateAppOptions = {}): Promise<C
 
   const canvas = createCanvasService(config);
 
-  const coreServices: CoreServices = {
+  const coreServices: CoreServices<TSupabaseClient> = {
     config,
     logger,
     rateLimiter,
@@ -285,7 +313,9 @@ export async function composeServices(options: CreateAppOptions = {}): Promise<C
     ...(canvas && { canvas }),
     ...(llmProvider && { llmProvider }),
     ...(speechService && { speechService }),
-    ...(supabaseClient && { supabase: supabaseClient }),
+    // The runtime client is always SupabaseClient<Database>. The generic is an
+    // explicit consumer-side view of that same instance, never a constructor.
+    ...(supabaseClient && { supabase: supabaseClient as unknown as TSupabaseClient }),
   };
 
   // --- Server-specific setup ---
@@ -330,7 +360,7 @@ export async function composeServices(options: CreateAppOptions = {}): Promise<C
   });
   const promptRegistry = new PromptRegistry(prompts, logger);
 
-  const createServer = () =>
+  const createServer = (protocolSession?: ProtocolSessionHooks) =>
     createMcpServerInstance({
       advertiseTasks,
       config,
@@ -341,6 +371,7 @@ export async function composeServices(options: CreateAppOptions = {}): Promise<C
       ...(title && { title }),
       ...(websiteUrl && { websiteUrl }),
       promptRegistry,
+      ...(protocolSession && { protocolSession }),
       resourceRegistry,
       taskStore: taskManager.getTaskStore(),
       taskMessageQueue: taskManager.getMessageQueue(),
@@ -430,16 +461,18 @@ function printStartupConfigError(err: McpError): void {
  * @returns A {@link ServerHandle} with `shutdown()` and `services`.
  * @throws {McpError} If config parsing or service construction fails.
  */
-export async function createApp(options: CreateAppOptions = {}): Promise<ServerHandle> {
+export async function createApp<TSupabaseClient extends object = SupabaseClientHandle>(
+  options: CreateAppOptions<TSupabaseClient> = {},
+): Promise<ServerHandle<TSupabaseClient>> {
   suppressColors();
 
   // --- Compose services (handles env overrides internally for config parsing) ---
   // Configuration errors at this stage (from server setup() or missing required
   // env vars) are startup-fatal. Print a clean banner and exit rather than
   // letting the raw error dump to stderr.
-  let composed: ComposedApp;
+  let composed: ComposedApp<TSupabaseClient>;
   try {
-    composed = await composeServices(options);
+    composed = await composeServices<TSupabaseClient>(options);
   } catch (err) {
     if (err instanceof McpError && err.code === JsonRpcErrorCode.ConfigurationError) {
       printStartupConfigError(err);
@@ -604,14 +637,35 @@ export async function createApp(options: CreateAppOptions = {}): Promise<ServerH
       await withSpan('mcp.server.shutdown', async (span) => {
         span.setAttribute('mcp.server.shutdown.signal', signal);
 
-        await withSpan('mcp.server.shutdown.transport', async () => {
-          await transportManager.stop(signal);
+        const cleanupFailures: unknown[] = [];
+        const attemptCleanup = async (
+          step: string,
+          cleanup: () => Promise<void> | void,
+        ): Promise<void> => {
+          try {
+            await cleanup();
+          } catch (error) {
+            cleanupFailures.push(error);
+            if (cleanupFailures.length > 1) {
+              logger.warning('Additional shutdown cleanup failure.', {
+                ...shutdownContext,
+                cleanupStep: step,
+                error: error instanceof Error ? error.message : String(error),
+              });
+            }
+          }
+        };
+
+        await attemptCleanup('transport', async () => {
+          await withSpan('mcp.server.shutdown.transport', async () => {
+            await transportManager.stop(signal);
+          });
         });
 
-        taskManager.cleanup();
-        coreServices.rateLimiter.dispose();
-        schedulerService.destroyAll();
-        stopGcPressure();
+        await attemptCleanup('task-manager', () => taskManager.cleanup());
+        await attemptCleanup('rate-limiter', () => coreServices.rateLimiter.dispose());
+        await attemptCleanup('scheduler', () => schedulerService.destroyAll());
+        await attemptCleanup('gc-pressure', stopGcPressure);
 
         if (coreServices.canvas) {
           await coreServices.canvas.shutdown(shutdownContext).catch((err) => {
@@ -620,6 +674,10 @@ export async function createApp(options: CreateAppOptions = {}): Promise<ServerH
               error: err instanceof Error ? err.message : String(err),
             });
           });
+        }
+
+        if (cleanupFailures.length > 0) {
+          throw cleanupFailures[0];
         }
 
         logger.info('Graceful shutdown completed successfully.', shutdownContext);
@@ -667,24 +725,32 @@ export async function createApp(options: CreateAppOptions = {}): Promise<ServerH
   process.on('SIGINT', onSigint);
 
   // --- Start transport (wrapped in startup span with phase breakdown) ---
-  await withSpan('mcp.server.startup', async (span) => {
-    span.setAttribute('mcp.server.name', config.mcpServerName);
-    span.setAttribute('mcp.server.version', config.mcpServerVersion);
-    span.setAttribute('mcp.server.transport', config.mcpTransportType);
-    span.setAttribute('mcp.server.tools_count', definitionCounts.tools);
-    span.setAttribute('mcp.server.resources_count', definitionCounts.resources);
-    span.setAttribute('mcp.server.prompts_count', definitionCounts.prompts);
+  try {
+    await withSpan('mcp.server.startup', async (span) => {
+      span.setAttribute('mcp.server.name', config.mcpServerName);
+      span.setAttribute('mcp.server.version', config.mcpServerVersion);
+      span.setAttribute('mcp.server.transport', config.mcpTransportType);
+      span.setAttribute('mcp.server.tools_count', definitionCounts.tools);
+      span.setAttribute('mcp.server.resources_count', definitionCounts.resources);
+      span.setAttribute('mcp.server.prompts_count', definitionCounts.prompts);
 
-    // The span times the bind, but the bind itself runs detached. Transport
-    // start registers long-lived listeners (an HTTP server socket, the stdio
-    // stream), and ALS-backed OTel context propagates whatever span is active
-    // at registration to every request those listeners later serve — pinning
-    // the whole process to one traceId. `runDetached` keeps this span's timing
-    // while leaving each request free to start its own trace.
-    await withSpan('mcp.server.startup.transport', async () => {
-      await runDetached(() => transportManager.start());
+      // The span times the bind, but the bind itself runs detached. Transport
+      // start registers long-lived listeners (an HTTP server socket, the stdio
+      // stream), and ALS-backed OTel context propagates whatever span is active
+      // at registration to every request those listeners later serve — pinning
+      // the whole process to one traceId. `runDetached` keeps this span's timing
+      // while leaving each request free to start its own trace.
+      await withSpan('mcp.server.startup.transport', async () => {
+        await runDetached(() => transportManager.start());
+      });
     });
-  });
+  } catch (error) {
+    // Startup has already allocated process listeners, task/storage resources,
+    // telemetry, and possibly a partially-bound transport. Roll all of them
+    // back before preserving the original startup failure for the caller.
+    await shutdown('STARTUP_FAILURE');
+    throw error;
+  }
 
   logger.info(`${config.mcpServerName} is now running and ready.`, startupContext);
 
