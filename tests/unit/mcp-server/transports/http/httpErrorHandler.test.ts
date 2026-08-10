@@ -13,15 +13,20 @@ import { JsonRpcErrorCode, McpError } from '@/types-global/errors.js';
 import { ErrorHandler } from '@/utils/internal/error-handler/errorHandler.js';
 import { logger } from '@/utils/internal/logger.js';
 
-// Mock config
-vi.mock('@/config/index.js', () => ({
-  config: {
+const { mockConfig } = vi.hoisted(() => ({
+  mockConfig: {
     mcpServerName: 'test-server',
+    mcpPublicUrl: undefined as string | undefined,
     openTelemetry: {
       serviceName: 'test-server',
       serviceVersion: '0.0.0',
     },
   },
+}));
+
+// Mock config
+vi.mock('@/config/index.js', () => ({
+  config: mockConfig,
 }));
 
 vi.mock('@/utils/internal/logger.js', () => ({
@@ -50,6 +55,7 @@ describe('HTTP Error Handler', () => {
   let jsonResponseData: unknown;
 
   beforeEach(() => {
+    mockConfig.mcpPublicUrl = undefined;
     statusValue = 200;
     headers = new Map();
     jsonResponseData = null;
@@ -289,6 +295,38 @@ describe('HTTP Error Handler', () => {
       expect(wwwAuthHeader).toContain('Bearer realm="test-server"');
       expect(wwwAuthHeader).toContain('resource_metadata=');
       expect(wwwAuthHeader).toContain('.well-known/oauth-protected-resource');
+    });
+
+    test.each(['http://internal.container:8080/mcp', 'https://malicious-host.example/mcp'])(
+      'prefers MCP_PUBLIC_URL over the inbound origin for %s',
+      async (requestUrl) => {
+        mockConfig.mcpPublicUrl = 'https://public.example.com/';
+        mockContext = {
+          ...mockContext,
+          req: { ...mockContext.req, url: requestUrl } as any,
+        };
+        const error = new McpError(JsonRpcErrorCode.Unauthorized, 'Unauthorized');
+
+        await httpErrorHandler(error, mockContext as Context<{ Bindings: HonoNodeBindings }>);
+
+        expect(headers.get('www-authenticate')).toBe(
+          'Bearer realm="test-server", resource_metadata="https://public.example.com/.well-known/oauth-protected-resource"',
+        );
+      },
+    );
+
+    test('falls back to the inbound origin when MCP_PUBLIC_URL is unset', async () => {
+      mockContext = {
+        ...mockContext,
+        req: { ...mockContext.req, url: 'https://trusted.example:8443/mcp' } as any,
+      };
+      const error = new McpError(JsonRpcErrorCode.Unauthorized, 'Unauthorized');
+
+      await httpErrorHandler(error, mockContext as Context<{ Bindings: HonoNodeBindings }>);
+
+      expect(headers.get('www-authenticate')).toBe(
+        'Bearer realm="test-server", resource_metadata="https://trusted.example:8443/.well-known/oauth-protected-resource"',
+      );
     });
 
     test('should not add WWW-Authenticate header for non-401 errors', async () => {
