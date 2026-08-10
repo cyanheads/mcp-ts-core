@@ -1,6 +1,6 @@
 # mcp-ts-core - Directory Structure
 
-Generated on: 2026-08-02 18:02:27
+Generated on: 2026-08-10 06:57:54
 
 ```text
 mcp-ts-core/
@@ -11,6 +11,8 @@ mcp-ts-core/
 │   │   ├── bug_report.yml
 │   │   ├── config.yml
 │   │   └── feature_request.yml
+│   ├── workflows/
+│   │   └── ci.yml
 │   ├── FUNDING.yml
 │   └── SECURITY.md
 ├── .husky/
@@ -110,6 +112,7 @@ mcp-ts-core/
 ├── scripts/
 │   ├── audit-open-index-signatures.ts
 │   ├── build-changelog.ts
+│   ├── build-inputs.ts
 │   ├── build.ts
 │   ├── check-dependency-specifiers.ts
 │   ├── check-docs-sync.ts
@@ -124,10 +127,13 @@ mcp-ts-core/
 │   ├── lint-mcp.ts
 │   ├── lint-packaging.ts
 │   ├── list-skills.ts
+│   ├── public-api-contract-update.ts
+│   ├── public-api-contract.ts
 │   ├── release-github.ts
 │   ├── split-changelog.ts
 │   ├── tree.ts
-│   └── update-coverage.ts
+│   ├── update-coverage.ts
+│   └── verify-package.ts
 ├── skills/
 │   ├── add-app-tool/
 │   │   └── SKILL.md
@@ -325,7 +331,9 @@ mcp-ts-core/
 │   │   │   ├── heartbeat.ts
 │   │   │   ├── ITransport.ts
 │   │   │   └── manager.ts
+│   │   ├── elicitation.ts
 │   │   ├── notifications.ts
+│   │   ├── protocolSession.ts
 │   │   └── server.ts
 │   ├── services/
 │   │   ├── canvas/
@@ -429,6 +437,7 @@ mcp-ts-core/
 │   │   ├── network/
 │   │   │   ├── fetchWithTimeout.ts
 │   │   │   ├── httpError.ts
+│   │   │   ├── responseBody.ts
 │   │   │   └── retry.ts
 │   │   ├── overflow/
 │   │   │   └── outlineOnOverflow.ts
@@ -440,6 +449,7 @@ mcp-ts-core/
 │   │   │   ├── frontmatterParser.ts
 │   │   │   ├── htmlExtractor.ts
 │   │   │   ├── index.ts
+│   │   │   ├── inputBudget.ts
 │   │   │   ├── jsonParser.ts
 │   │   │   ├── pdfParser.ts
 │   │   │   ├── thinkBlock.ts
@@ -526,15 +536,19 @@ mcp-ts-core/
 │   └── vitest.config.ts
 ├── tests/
 │   ├── compliance/
-│   │   └── storage-provider.test.ts
+│   │   ├── storage-provider.test.ts
+│   │   └── storage-provider.ts
 │   ├── fixtures/
 │   │   ├── auth-scoped-server.js
+│   │   ├── mcp-app-server.js
+│   │   ├── task-protocol-server.js
 │   │   └── worker-runtime.fixture.ts
 │   ├── fuzz/
 │   │   ├── definition-fuzz.test.ts
 │   │   ├── error-handler.fuzz.test.ts
 │   │   ├── resource-handler-pipeline.fuzz.test.ts
 │   │   ├── session-store.fuzz.test.ts
+│   │   ├── session-store.model.fuzz.test.ts
 │   │   └── tool-handler-pipeline.fuzz.test.ts
 │   ├── helpers/
 │   │   ├── context-helpers.ts
@@ -543,6 +557,7 @@ mcp-ts-core/
 │   │   ├── http-helpers.ts
 │   │   ├── index.ts
 │   │   ├── matchers.ts
+│   │   ├── oauth-jwks-fixture.ts
 │   │   └── server-process.ts
 │   ├── integration/
 │   │   ├── completions.int.test.ts
@@ -558,8 +573,12 @@ mcp-ts-core/
 │   │   ├── http.test.ts
 │   │   ├── logger.int.test.ts
 │   │   ├── mcp-apps.int.test.ts
+│   │   ├── oauth-jwks.int.test.ts
 │   │   ├── package-consumer.int.test.ts
-│   │   └── stdio.test.ts
+│   │   ├── public-api-contract.int.test.ts
+│   │   ├── setup.ts
+│   │   ├── stdio.test.ts
+│   │   └── tasks-protocol.int.test.ts
 │   ├── smoke/
 │   │   ├── prompts/
 │   │   │   └── code-review.prompt.test.ts
@@ -575,9 +594,12 @@ mcp-ts-core/
 │   │       ├── template-echo-message.tool.test.ts
 │   │       └── template-madlibs-elicitation.tool.test.ts
 │   ├── types/
+│   │   ├── context-helpers.test-d.ts
 │   │   ├── error-contract.test-d.ts
 │   │   ├── handler-context.test-d.ts
-│   │   └── tool-builder.test-d.ts
+│   │   ├── request-context-like.test-d.ts
+│   │   ├── tool-builder.test-d.ts
+│   │   └── tool-contract-suite.test-d.ts
 │   ├── unit/
 │   │   ├── cli/
 │   │   │   └── init.test.ts
@@ -743,6 +765,7 @@ mcp-ts-core/
 │   │   │   │   └── supabase/
 │   │   │   │       ├── supabase.types.test.ts
 │   │   │   │       └── supabaseProvider.test.ts
+│   │   │   ├── StorageService.boundaries.test.ts
 │   │   │   ├── StorageService.metrics.test.ts
 │   │   │   └── StorageService.test.ts
 │   │   ├── testing/
@@ -798,12 +821,15 @@ mcp-ts-core/
 │   │   │   │   ├── frontmatterParser.test.ts
 │   │   │   │   ├── htmlExtractor.branches.test.ts
 │   │   │   │   ├── htmlExtractor.test.ts
+│   │   │   │   ├── inputBudget.test.ts
+│   │   │   │   ├── inputBudgetDependencies.test.ts
 │   │   │   │   ├── jsonParser.test.ts
 │   │   │   │   ├── pdfParser.branches.test.ts
 │   │   │   │   ├── pdfParser.test.ts
 │   │   │   │   ├── xmlParser.test.ts
 │   │   │   │   └── yamlParser.test.ts
 │   │   │   ├── scheduling/
+│   │   │   │   ├── scheduler.runtime.test.ts
 │   │   │   │   └── scheduler.test.ts
 │   │   │   ├── security/
 │   │   │   │   ├── idGenerator.test.ts
@@ -826,6 +852,7 @@ mcp-ts-core/
 │   │   ├── create-worker-handler.worker.test.ts
 │   │   ├── encoding.worker.test.ts
 │   │   ├── storage-d1.worker.test.ts
+│   │   ├── storage-provider-compliance.worker.test.ts
 │   │   └── storage-r2.worker.test.ts
 │   └── setup.ts
 ├── tmp/
@@ -858,6 +885,7 @@ mcp-ts-core/
 ├── vitest.config.base.mjs
 ├── vitest.config.ts
 ├── vitest.integration.ts
+├── vitest.package.ts
 ├── vitest.worker.ts
 └── wrangler.jsonc
 ```

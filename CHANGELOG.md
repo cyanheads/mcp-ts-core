@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.11.2](changelog/0.11.x/0.11.2.md) — 2026-08-10 · 🛡️ Security
+
+Elicitation and cancellation now work over Streamable HTTP, SSRF blocking moves from pattern matching to full non-global IP range checks, parsers bound their input and stop echoing library diagnostics into client errors, and a hermetic lane verifies the published tarball.
+
 ## [0.11.1](changelog/0.11.x/0.11.1.md) — 2026-08-02
 
 Test kit gains session, upstream-HTTP, and tool-contract helpers; the fuzz generator expands finite nesting in full and honors array length constraints; scaffolds ship smoke, integration, and fuzz suites.
