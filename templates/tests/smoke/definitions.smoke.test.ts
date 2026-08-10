@@ -13,23 +13,27 @@ import { echoTool } from '@/mcp-server/tools/definitions/echo.tool.js';
 
 describe('scaffold definition smoke test', () => {
   it('executes the shipped tool, resource, and prompt definitions', async () => {
-    const ctx = createMockContext();
+    // `echoTool` declares an error contract, so its handler wants a context
+    // typed against it — passing `errors` narrows what `createMockContext` returns.
+    const ctx = createMockContext({ errors: echoTool.errors });
     const toolResult = await echoTool.handler(
       echoTool.input.parse({ message: 'smoke' }),
       ctx,
     );
     const resourceResult = await echoResource.handler(
-      echoResource.params.parse({ message: 'smoke' }),
+      echoResource.params!.parse({ message: 'smoke' }),
       ctx,
     );
-    const promptMessages = echoPrompt.generate(echoPrompt.args.parse({ message: 'smoke' }));
+    const promptMessages = await echoPrompt.generate(
+      echoPrompt.args!.parse({ message: 'smoke' }),
+    );
     const appResult = await echoAppTool.handler(
       echoAppTool.input.parse({ message: 'smoke app' }),
       ctx,
     );
     const appContent = echoAppTool.format?.(appResult);
     const appHtml = await echoAppUiResource.handler(
-      echoAppUiResource.params.parse({}),
+      echoAppUiResource.params!.parse({}),
       createMockContext({ uri: new URL('ui://template-echo-app/app.html') }),
     );
 

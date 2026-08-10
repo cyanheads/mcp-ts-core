@@ -70,6 +70,7 @@
     "@types/node": "26.1.1",
     "@vitest/coverage-istanbul": "4.1.10",
     "depcheck": "^1.4.7",
+    "fast-check": "^4.9.0",
     "ignore": "^7.0.6",
     "tsc-alias": "^1.9.1",
     "typescript": "^7.0.2",
