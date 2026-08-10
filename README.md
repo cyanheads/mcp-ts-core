@@ -5,7 +5,7 @@
 
 <div align="center">
 
-[![Version](https://img.shields.io/badge/Version-0.11.2-blue.svg?style=flat-square)](./CHANGELOG.md) [![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg?style=flat-square)](./LICENSE) [![MCP Spec](https://img.shields.io/badge/MCP%20Spec-2025--11--25-8A2BE2.svg?style=flat-square)](https://github.com/modelcontextprotocol/modelcontextprotocol/blob/main/docs/specification/2025-11-25/changelog.mdx)
+[![Version](https://img.shields.io/badge/Version-0.11.3-blue.svg?style=flat-square)](./CHANGELOG.md) [![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg?style=flat-square)](./LICENSE) [![MCP Spec](https://img.shields.io/badge/MCP%20Spec-2025--11--25-8A2BE2.svg?style=flat-square)](https://github.com/modelcontextprotocol/modelcontextprotocol/blob/main/docs/specification/2025-11-25/changelog.mdx)
 
 [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^1.30.0-green.svg?style=flat-square)](https://modelcontextprotocol.io/) [![TypeScript](https://img.shields.io/badge/TypeScript-^7.0.2-3178C6.svg?style=flat-square)](https://www.typescriptlang.org/) [![Bun](https://img.shields.io/badge/Bun-v1.3.0%2B-blueviolet.svg?style=flat-square)](https://bun.sh/)
 
@@ -268,12 +268,12 @@ The `examples/` directory contains a reference server consuming core through pub
 import { createMockContext } from '@cyanheads/mcp-ts-core/testing';
 import { myTool } from '@/mcp-server/tools/definitions/my-tool.tool.js';
 
-const ctx = createMockContext({ tenantId: 'test-tenant' });
+const ctx = createMockContext();
 const input = myTool.input.parse({ query: 'test' });
 const result = await myTool.handler(input, ctx);
 ```
 
-`createMockContext()` provides stubbed `log`, `state`, and `signal`. Pass `{ tenantId }` for state operations, `{ elicit }` for elicitation mocking, `{ progress: true }` for task tools.
+`createMockContext()` provides a recording `log`, a working `state`, and a `signal`. State runs on a real `StorageService` over an in-memory provider — the same key validation and TTL expiry a deployed server applies — scoped to tenant `'default'` unless `{ tenantId }` says otherwise. Pass `{ errors: myTool.errors }` for a typed `ctx.fail` matching the definition's contract, `{ elicit }` for elicitation mocking, `{ progress: true }` for task tools.
 
 `/testing` also exports `createMockSession()` for session-bound contexts, `createFetchMock()` for upstream HTTP boundaries, and `runToolContract()` to drive a definition through schema, handler, formatting, and error-envelope checks. `/testing/vitest` adds the `mcpTest` fixtures (`ctx`, `session`, `fetchMock`, `storage`) and `toolContractSuite()`.
 

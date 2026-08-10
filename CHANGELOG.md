@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.11.3](changelog/0.11.x/0.11.3.md) — 2026-08-10 · ⚠️ Breaking
+
+Input ceilings are opt-in again and parse errors carry the library diagnostic, fetchWithTimeout's timeoutMs now bounds the response body and keeps both ends of an over-budget error body, the /utils context parameters accept the handler Context, and the mock context runs the real storage path.
+
 ## [0.11.2](changelog/0.11.x/0.11.2.md) — 2026-08-10 · 🛡️ Security
 
 Elicitation and cancellation now work over Streamable HTTP, SSRF blocking moves from pattern matching to full non-global IP range checks, parsers bound their input and stop echoing library diagnostics into client errors, and a hermetic lane verifies the published tarball.

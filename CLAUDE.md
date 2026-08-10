@@ -1,7 +1,7 @@
 # Developer Protocol
 
 **Package:** `@cyanheads/mcp-ts-core`
-**Version:** 0.11.2
+**Version:** 0.11.3
 **Engines:** Bun ≥1.3.0, Node ≥24.0.0
 **MCP SDK:** `@modelcontextprotocol/sdk` ^1.30.0
 **Zod:** ^4.4.3
@@ -307,14 +307,16 @@ Opt-in domain-specific logging. Methods: `debug`, `info`, `notice`, `warning`, `
 Tenant-scoped KV. Accepts any serializable value — no manual `JSON.stringify`/`JSON.parse` needed.
 
 ```ts
-await ctx.state.set('item:123', { name: 'Widget', count: 42 });
-await ctx.state.set('item:123', data, { ttl: 3600 });           // with TTL (seconds)
-const item = await ctx.state.get<Item>('item:123');              // T | null
-const safe = await ctx.state.get('item:123', ItemSchema);        // Zod-validated T | null
-await ctx.state.delete('item:123');
-const values = await ctx.state.getMany<Item>(['item:1', 'item:2']); // Map<string, T>
-const page = await ctx.state.list('item:', { cursor, limit: 20 });  // { items, cursor? }
+await ctx.state.set('item/123', { name: 'Widget', count: 42 });
+await ctx.state.set('item/123', data, { ttl: 3600 });           // with TTL (seconds)
+const item = await ctx.state.get<Item>('item/123');              // T | null
+const safe = await ctx.state.get('item/123', ItemSchema);        // Zod-validated T | null
+await ctx.state.delete('item/123');
+const values = await ctx.state.getMany<Item>(['item/1', 'item/2']); // Map<string, T>
+const page = await ctx.state.list('item/', { cursor, limit: 20 });  // { items, cursor? }
 ```
+
+**Keys match `^[a-zA-Z0-9_.\-/]+$` and may not contain `..`** — slashes are the namespace separator. A colon (`item:123`) throws `McpError(ValidationError)` on every call, in tests and in production alike.
 
 Throws `McpError(InvalidRequest)` if `tenantId` missing. Tenant ID resolution:
 
@@ -456,9 +458,11 @@ describe('myTool', () => {
 });
 ```
 
-**`createMockContext` options:** `createMockContext()` (minimal), `{ tenantId: 'test-tenant' }` (enables state), `{ elicit: vi.fn() }`, `{ progress: true }` (task progress).
+**`createMockContext` options:** `createMockContext()` (state included), `{ tenantId: 'test-tenant' }` (explicit tenant; defaults to `'default'`, as stdio resolves it), `{ errors: myTool.errors }` (typed `ctx.fail`), `{ elicit: vi.fn() }`, `{ progress: true }` (task progress).
 
-**HTTP/session fixtures:** `createFetchMock(routes)` provides a strict fetch-compatible fake with ordered routes, captured `Request` objects, one-shot responses, and optional global install/restore. `createMockSession(options)` returns `{ sessionId, tenantId?, ctx }` for handlers that branch on durable HTTP session identity.
+**`ctx.state` in tests is the production path.** The mock backs it with a real `StorageService` over an `InMemoryProvider`, so key validation (`[a-zA-Z0-9_.\-/]+` — colons rejected) and TTL expiry behave exactly as they do in a deployment. Passing `errors` narrows the return type to `HandlerContext<ReasonOf<…>>`, which is what a definition declaring a contract types its handler's `ctx` as — so `definition.handler(input, ctx)` typechecks.
+
+**HTTP/session fixtures:** `createFetchMock(routes)` provides a strict fetch-compatible fake with ordered routes, captured `Request` objects, one-shot responses, and optional global install/restore. `createMockSession(options)` returns `{ sessionId, tenantId, ctx }` for handlers that branch on durable HTTP session identity.
 
 **Schema assertions:** `expect(result).toEqual(expect.schemaMatching(myTool.output))` — Vitest 4's Standard Schema asymmetric matcher validates handler output against the definition's own Zod schema. Use when output is dynamic (timestamps, generated IDs); exact `toEqual` still wins when the full value is known.
 

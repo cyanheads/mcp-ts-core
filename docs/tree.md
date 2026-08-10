@@ -1,6 +1,6 @@
 # mcp-ts-core - Directory Structure
 
-Generated on: 2026-08-10 06:57:54
+Generated on: 2026-08-10 09:06:35
 
 ```text
 mcp-ts-core/
@@ -11,8 +11,6 @@ mcp-ts-core/
 │   │   ├── bug_report.yml
 │   │   ├── config.yml
 │   │   └── feature_request.yml
-│   ├── workflows/
-│   │   └── ci.yml
 │   ├── FUNDING.yml
 │   └── SECURITY.md
 ├── .husky/
@@ -229,6 +227,7 @@ mcp-ts-core/
 │   │   └── init.ts
 │   ├── config/
 │   │   ├── index.ts
+│   │   ├── logLevelAlias.ts
 │   │   └── parseEnvConfig.ts
 │   ├── core/
 │   │   ├── app.ts
@@ -597,6 +596,7 @@ mcp-ts-core/
 │   │   ├── context-helpers.test-d.ts
 │   │   ├── error-contract.test-d.ts
 │   │   ├── handler-context.test-d.ts
+│   │   ├── mock-context.test-d.ts
 │   │   ├── request-context-like.test-d.ts
 │   │   ├── tool-builder.test-d.ts
 │   │   └── tool-contract-suite.test-d.ts
@@ -605,6 +605,7 @@ mcp-ts-core/
 │   │   │   └── init.test.ts
 │   │   ├── config/
 │   │   │   ├── index.test.ts
+│   │   │   ├── logLevelAlias.test.ts
 │   │   │   └── parseEnvConfig.test.ts
 │   │   ├── core/
 │   │   │   ├── app.test.ts
@@ -773,6 +774,7 @@ mcp-ts-core/
 │   │   │   ├── fuzz-branches.test.ts
 │   │   │   ├── mockContext.test.ts
 │   │   │   ├── mockContextFidelity.test.ts
+│   │   │   ├── mockContextState.test.ts
 │   │   │   ├── test-kit.test.ts
 │   │   │   ├── tool-contract-suite.test.ts
 │   │   │   └── vitest.test.ts
@@ -807,6 +809,7 @@ mcp-ts-core/
 │   │   │   ├── metrics/
 │   │   │   │   └── tokenCounter.test.ts
 │   │   │   ├── network/
+│   │   │   │   ├── fetchWithTimeout.bodyDeadline.test.ts
 │   │   │   │   ├── fetchWithTimeout.metrics.test.ts
 │   │   │   │   ├── fetchWithTimeout.test.ts
 │   │   │   │   ├── httpError.test.ts
@@ -825,6 +828,7 @@ mcp-ts-core/
 │   │   │   │   ├── inputBudgetDependencies.test.ts
 │   │   │   │   ├── jsonParser.test.ts
 │   │   │   │   ├── pdfParser.branches.test.ts
+│   │   │   │   ├── pdfParser.imageCap.test.ts
 │   │   │   │   ├── pdfParser.test.ts
 │   │   │   │   ├── xmlParser.test.ts
 │   │   │   │   └── yamlParser.test.ts
@@ -851,6 +855,7 @@ mcp-ts-core/
 │   ├── worker/
 │   │   ├── create-worker-handler.worker.test.ts
 │   │   ├── encoding.worker.test.ts
+│   │   ├── fetch-with-timeout.worker.test.ts
 │   │   ├── storage-d1.worker.test.ts
 │   │   ├── storage-provider-compliance.worker.test.ts
 │   │   └── storage-r2.worker.test.ts
