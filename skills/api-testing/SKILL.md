@@ -4,7 +4,7 @@ description: >
   Testing patterns for MCP tool/resource handlers using `createMockContext` and Vitest. Covers mock context options, handler testing, McpError assertions, format testing, Vitest config setup, and test isolation conventions.
 metadata:
   author: cyanheads
-  version: "1.6"
+  version: "1.7"
   audience: external
   type: reference
 ---
@@ -51,7 +51,7 @@ mcpTest('stubs an upstream HTTP boundary', async ({ fetchMock }) => {
 | Fixture | Type | Per-test? | Notes |
 |:--------|:-----|:----------|:------|
 | `ctx` | `Context` | Yes | Fresh `createMockContext()` each test |
-| `session` | `MockSession` | Yes | Fresh `{ sessionId, tenantId?, ctx }` from `createMockSession()` |
+| `session` | `MockSession` | Yes | Fresh `{ sessionId, tenantId, ctx }` from `createMockSession()` |
 | `fetchMock` | `FetchMockHarness` | Yes | Strict fetch fake installed/restored around the requesting test |
 | `storage` | `StorageService` | Yes | Fresh `createInMemoryStorage()` each test |
 
@@ -131,8 +131,8 @@ Use `runToolContract(definition, input, { context })` from `/testing` when a cus
 ```ts
 import { createMockContext } from '@cyanheads/mcp-ts-core/testing';
 
-createMockContext()                                           // minimal — ctx.state operations throw without tenantId
-createMockContext({ tenantId: 'test-tenant' })               // enables ctx.state (tenant-scoped in-memory storage)
+createMockContext()                                           // working ctx.state on tenant 'default'
+createMockContext({ tenantId: 'test-tenant' })               // explicit tenant scope for ctx.state
 createMockContext({ errors: myTool.errors })                 // attaches typed ctx.fail keyed by the contract reasons
 createMockContext({ elicit: vi.fn().mockResolvedValue(...) }) // with elicitation
 createMockContext({ progress: true })                        // with task progress (ctx.progress populated)
@@ -147,10 +147,10 @@ createMockContext({ uri: new URL('myscheme://item/123') })   // for resource han
 `MockContextOptions` interface:
 
 ```ts
-interface MockContextOptions {
+interface MockContextOptions<TErrors extends readonly ErrorContract[] | undefined> {
   auth?: AuthContext;
   elicit?: (message: string, schema: z.ZodObject<z.ZodRawShape>) => Promise<ElicitResult>;
-  errors?: readonly ErrorContract[];
+  errors?: TErrors | undefined;
   notifyPromptListChanged?: () => void;
   notifyResourceListChanged?: () => void;
   notifyResourceUpdated?: (uri: string) => void;
@@ -166,10 +166,10 @@ interface MockContextOptions {
 
 | Option | Effect |
 |:-------|:-------|
-| _(none)_ | Minimal context — `ctx.state` operations throw without `tenantId`; `ctx.elicit`/`ctx.progress` are `undefined` |
+| _(none)_ | Working `ctx.state` on tenant `'default'`; `ctx.elicit`/`ctx.progress` are `undefined` |
 | `auth` | Sets `ctx.auth` for scope-checking tests |
 | `elicit` | Assigns a function to `ctx.elicit` for testing elicitation calls |
-| `errors` | Attaches a typed `ctx.fail` against the contract — same wiring the production handler factory uses. Pass `myTool.errors` directly. |
+| `errors` | Attaches a typed `ctx.fail` against the contract — same wiring the production handler factory uses. Pass `myTool.errors` directly; the return type narrows to `HandlerContext<ReasonOf<…>>`, so the context is assignable to that definition's handler parameter. |
 | `notifyPromptListChanged` | Assigns `ctx.notifyPromptListChanged` for prompt-list change notification tests |
 | `notifyResourceListChanged` | Assigns `ctx.notifyResourceListChanged` for resource notification tests |
 | `notifyResourceUpdated` | Assigns `ctx.notifyResourceUpdated` for resource update notification tests |
@@ -178,8 +178,27 @@ interface MockContextOptions {
 | `progress` | Populates `ctx.progress` with real state-tracking implementation (see below) |
 | `requestId` | Overrides `ctx.requestId` (default: `'test-request-id'`) |
 | `signal` | Overrides `ctx.signal` — useful for cancellation testing |
-| `tenantId` | Sets `ctx.tenantId` and enables `ctx.state` operations with in-memory storage |
+| `tenantId` | Scopes `ctx.state` to a specific tenant. Defaults to `'default'` — the value stdio (and HTTP with `MCP_AUTH_MODE=none`) resolves |
 | `uri` | Sets `ctx.uri` for resource handler testing |
+
+### Mock state
+
+`ctx.state` is a real `StorageService` over an `InMemoryProvider` — the production storage path, not a `Map`. A test therefore sees the same rules a deployed server enforces:
+
+- **Keys** match `^[a-zA-Z0-9_.\-/]+$` and may not contain `..`. Colons are rejected, so `cache:v1:abc` throws `McpError(ValidationError)` in the test exactly as it would in a deployment; use `cache/v1/abc`.
+- **TTL** is honored. An entry written with `{ ttl: 30 }` reads back as `null` once 30 seconds elapse — drive the clock with `vi.useFakeTimers()` to assert expiry.
+- **`getMany` / `setMany` / `deleteMany` / `list`** validate every key and prefix, and `list` paginates with the same opaque cursors.
+- **Cancellation** applies: once `ctx.signal` aborts, state operations reject.
+
+```ts
+const ctx = createMockContext();
+
+await ctx.state.set('cache/v1/abc', { hits: 1 }, { ttl: 30 });
+await expect(ctx.state.get('cache/v1/abc')).resolves.toEqual({ hits: 1 });
+await expect(ctx.state.set('cache:v1:abc', {})).rejects.toThrow(McpError);
+```
+
+Reach for `createInMemoryStorage()` when a service takes a `StorageService` directly — it builds the same pair.
 
 ### Mock progress
 
@@ -396,7 +415,7 @@ describe('myTool with service', () => {
 
 - Re-init services with `initMyService()` (or equivalent) in `beforeEach` when tests share a module-level singleton.
 - Vitest runs test files in separate workers — parallel file execution is safe by default.
-- Use `createMockContext({ tenantId })` whenever the handler accesses `ctx.state` — omitting `tenantId` causes `ctx.state` to throw.
+- Pass `createMockContext({ tenantId })` when a test needs a specific tenant; omitting it scopes state to `'default'`, not to a broken state surface.
 
 ---
 

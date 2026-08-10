@@ -4,7 +4,7 @@ description: >
   Scaffold a test file for an existing tool, resource, or service. Use when the user asks to add tests, improve coverage, or when a definition exists without a matching test file.
 metadata:
   author: cyanheads
-  version: "1.4"
+  version: "1.5"
   audience: external
   type: reference
 ---
@@ -35,7 +35,7 @@ Read the handler and identify:
 | **Happy path** | Valid input → expected output. Include at least one. |
 | **Input variations** | Optional fields omitted, defaults applied, boundary values |
 | **Error paths** | Invalid state, missing resources, service failures → correct error thrown |
-| **`ctx.state` usage** | Use `createMockContext({ tenantId: 'test' })` to enable storage |
+| **`ctx.state` usage** | Available on any mock context (tenant `'default'` unless `{ tenantId }` says otherwise). It runs the production storage path, so use storage-legal keys (`cache/v1/abc`, never `cache:v1:abc`) and assert TTL expiry with fake timers. |
 | **`ctx.elicit`** | Mock with `vi.fn()`, also test the absent case (undefined) |
 | **`ctx.progress`** | Use `createMockContext({ progress: true })` for task tools |
 | **`ctx.fail` (typed contract)** | Definitions with `errors[]` need `fail` attached to the mock ctx — `createMockContext({ errors: myTool.errors })` does it for you. Assert on `data.reason` (stable per-contract entry), not just `code`. |

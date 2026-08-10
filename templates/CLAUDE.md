@@ -104,7 +104,7 @@ export const itemData = resource('inventory://{itemId}', {
   params: z.object({ itemId: z.string().describe('Item identifier') }),
   auth: ['inventory:read'],
   async handler(params, ctx) {
-    const item = await ctx.state.get(`item:${params.itemId}`);
+    const item = await ctx.state.get(`item/${params.itemId}`);
     if (!item) throw notFound(`Item ${params.itemId} not found`, { itemId: params.itemId });
     return item;
   },

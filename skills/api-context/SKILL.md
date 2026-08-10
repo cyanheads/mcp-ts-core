@@ -4,7 +4,7 @@ description: >
   Canonical reference for the unified `Context` object passed to every tool and resource handler in `@cyanheads/mcp-ts-core`. Covers the full interface, all sub-APIs (`ctx.log`, `ctx.state`, `ctx.elicit`, `ctx.progress`, `ctx.enrich`, `ctx.content`), and when to use each.
 metadata:
   author: cyanheads
-  version: "1.9"
+  version: "1.10"
   audience: external
   type: reference
 ---
@@ -155,23 +155,23 @@ interface ContextState {
 
 ```ts
 // Store — accepts any serializable value, no manual JSON.stringify needed
-await ctx.state.set('item:123', { name: 'Widget', count: 42 });
-await ctx.state.set('session:xyz', token, { ttl: 3600 }); // TTL in seconds
+await ctx.state.set('item/123', { name: 'Widget', count: 42 });
+await ctx.state.set('session/xyz', token, { ttl: 3600 }); // TTL in seconds
 
 // Retrieve — generic type assertion or Zod-validated
-const item = await ctx.state.get<Item>('item:123');       // T | null (type assertion)
-const safe = await ctx.state.get('item:123', ItemSchema);  // T | null (runtime validated)
+const item = await ctx.state.get<Item>('item/123');       // T | null (type assertion)
+const safe = await ctx.state.get('item/123', ItemSchema);  // T | null (runtime validated)
 
 // Delete
-await ctx.state.delete('item:123');
+await ctx.state.delete('item/123');
 
 // Batch operations
-const values = await ctx.state.getMany<Item>(['item:1', 'item:2']); // Map<string, T>
+const values = await ctx.state.getMany<Item>(['item/1', 'item/2']); // Map<string, T>
 await ctx.state.setMany(new Map([['a', 1], ['b', 2]]));
-const deleted = await ctx.state.deleteMany(['item:1', 'item:2']);    // number
+const deleted = await ctx.state.deleteMany(['item/1', 'item/2']);    // number
 
 // List with prefix + pagination
-const page = await ctx.state.list('item:', { cursor, limit: 20 });
+const page = await ctx.state.list('item/', { cursor, limit: 20 });
 for (const { key, value } of page.items) { /* ... */ }
 if (page.cursor) { /* more pages available */ }
 ```
@@ -180,6 +180,7 @@ if (page.cursor) { /* more pages available */ }
 
 - Throws `McpError(InvalidRequest)` if `tenantId` is missing. Won't happen in stdio (any auth mode) or HTTP+`MCP_AUTH_MODE=none` — both default to `'default'`. Can happen in HTTP+`MCP_AUTH_MODE=jwt`/`oauth` when the token lacks a `tid` claim (intentional fail-closed: distinct authenticated callers must not silently share state).
 - Keys are tenant-prefixed internally; handlers never need to namespace manually.
+- **Key charset:** `^[a-zA-Z0-9_.\-/]+$`, 1024 chars max, no `..`. Slashes are the namespace separator — a colon (`item:123`) throws `McpError(ValidationError)` on every call. The rule covers `list` prefixes and every key in a batch operation. `createMockContext().state` enforces it identically, so an illegal key fails in the test rather than in a deployment.
 - **Workers persistence:** The `in-memory` provider loses data on cold starts. Use `cloudflare-kv`, `cloudflare-r2`, or `cloudflare-d1` for durable storage in Workers.
 
 ---
@@ -237,14 +238,14 @@ import { invalidRequest } from '@cyanheads/mcp-ts-core/errors';
 if (!ctx.sessionId) {
   throw invalidRequest('Session required for this operation.');
 }
-await ctx.state.set(`session:${ctx.sessionId}:${baseKey}`, value);
+await ctx.state.set(`session/${ctx.sessionId}/${baseKey}`, value);
 ```
 
 **Lax — fall back to tenant-shared key:**
 
 ```ts
 const sessionKey = ctx.sessionId
-  ? `session:${ctx.sessionId}:${baseKey}`
+  ? `session/${ctx.sessionId}/${baseKey}`
   : baseKey;
 await ctx.state.set(sessionKey, value);
 ```
@@ -253,7 +254,7 @@ await ctx.state.set(sessionKey, value);
 
 ### Behavior notes
 
-- **Not a tenant boundary.** `ctx.state` is still tenant-scoped. Building session-scoped state is the consumer's responsibility — prefix with `session:${ctx.sessionId}:` as shown above.
+- **Not a tenant boundary.** `ctx.state` is still tenant-scoped. Building session-scoped state is the consumer's responsibility — prefix with `session/${ctx.sessionId}/` as shown above.
 - **Auto-task tools.** `task: true` handlers run in a detached background context with no session attachment — `ctx.sessionId` is always `undefined` regardless of mode.
 - **Worker bundle.** Workers use the same HTTP transport plumbing; session behavior matches Node HTTP.
 

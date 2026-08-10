@@ -30,6 +30,14 @@ vi.mock('@/config/index.js', () => ({
     environment: 'testing',
     mcpServerVersion: '1.0.0-test',
     mcpAuthMode: 'none',
+    // The mock context's state runs on a real StorageService, which opens an
+    // OTel span per operation and reads the service identity from config.
+    openTelemetry: {
+      enabled: false,
+      serviceName: 'mcp-ts-core-test',
+      serviceVersion: '1.0.0-test',
+      samplingRatio: 1,
+    },
   },
 }));
 
@@ -114,37 +122,6 @@ describe('createMockContext fidelity', () => {
   // -----------------------------------------------------------------------
 
   describe('Documented divergences', () => {
-    it('DIVERGENCE: real defaults tenantId to "default", mock leaves it undefined', () => {
-      const real = makeRealContext();
-      const mock = createMockContext();
-
-      // Real createContext defaults tenantId to 'default' for stdio mode
-      expect(real.tenantId).toBe('default');
-      // Mock leaves it undefined when not provided
-      expect(mock.tenantId).toBeUndefined();
-    });
-
-    it('DIVERGENCE: real state throws McpError, mock throws plain Error when tenantId missing', async () => {
-      const mock = createMockContext(); // no tenantId
-
-      // Mock throws plain Error
-      try {
-        await mock.state.get('key');
-        expect.fail('should throw');
-      } catch (err) {
-        expect(err).toBeInstanceOf(Error);
-        expect(err).not.toBeInstanceOf(McpError);
-      }
-
-      // Real with tenantId=undefined defaults to 'default', so it DOESN'T throw.
-      // This means the error path diverges: real context never reaches the
-      // "tenantId required" guard because of the default.
-      const real = makeRealContext();
-      // Should NOT throw — tenantId is defaulted
-      const result = await real.state.get('nonexistent');
-      expect(result).toBeNull();
-    });
-
     it('DIVERGENCE: real logger includes requestId in log calls, mock logger does not', () => {
       const real = makeRealContext();
       const mock = createMockContext();
@@ -167,6 +144,28 @@ describe('createMockContext fidelity', () => {
   // -----------------------------------------------------------------------
 
   describe('Behavioral parity', () => {
+    it('both default tenantId to "default" when none is supplied', () => {
+      const real = makeRealContext();
+      const mock = createMockContext();
+
+      expect(real.tenantId).toBe('default');
+      expect(mock.tenantId).toBe('default');
+    });
+
+    it('both serve state on the default tenant instead of throwing', async () => {
+      const real = makeRealContext();
+      const mock = createMockContext();
+
+      await expect(real.state.get('nonexistent')).resolves.toBeNull();
+      await expect(mock.state.get('nonexistent')).resolves.toBeNull();
+    });
+
+    it('mock state rejects an invalid key with the same McpError the real service throws', async () => {
+      const mock = createMockContext();
+
+      await expect(mock.state.set('cache:v1:abc', 'value')).rejects.toBeInstanceOf(McpError);
+    });
+
     it('state get/set/delete should work the same with tenant provided', async () => {
       const real = makeRealContext({
         appContext: {

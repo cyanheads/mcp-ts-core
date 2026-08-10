@@ -825,7 +825,16 @@ function createContextLogger(appLogger: Logger, appContext: RequestContext): Con
 // ContextState implementation
 // ---------------------------------------------------------------------------
 
-function createContextState(
+/**
+ * Builds the `ctx.state` surface over a {@link StorageService}. Exported so the
+ * test kit's mock context can reuse the production implementation verbatim —
+ * key validation, TTL, list pagination, and signal cancellation are then
+ * identical in tests and in a running server by construction, not by a
+ * hand-rolled fake that has to be kept in step.
+ *
+ * @internal
+ */
+export function createContextState(
   storage: StorageService,
   appContext: RequestContext,
   signal: AbortSignal,

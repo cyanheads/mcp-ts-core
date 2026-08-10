@@ -103,7 +103,7 @@ describe('createMockSession', () => {
 
     expect(session.sessionId).toBe('test-session-id');
     expect(session.ctx.sessionId).toBe('test-session-id');
-    expect(session.tenantId).toBeUndefined();
+    expect(session.tenantId).toBe('default');
   });
 
   it('passes context options and tenant identity through', async () => {

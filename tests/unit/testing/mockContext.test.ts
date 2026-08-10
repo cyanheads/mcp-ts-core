@@ -33,17 +33,17 @@ describe('createMockContext helpers', () => {
   it('supports schema-aware state reads and batch state operations', async () => {
     const ctx = createMockContext({ tenantId: 'tenant-1' });
 
-    await ctx.state.set('profile:1', { name: 'Casey', active: true });
+    await ctx.state.set('profile/1', { name: 'Casey', active: true });
     await ctx.state.setMany(
       new Map<string, unknown>([
-        ['profile:2', { name: 'Morgan', active: false }],
-        ['misc:1', { kind: 'other' }],
+        ['profile/2', { name: 'Morgan', active: false }],
+        ['misc/1', { kind: 'other' }],
       ]),
     );
 
     await expect(
       ctx.state.get(
-        'profile:1',
+        'profile/1',
         z.object({
           name: z.string(),
           active: z.boolean(),
@@ -51,36 +51,22 @@ describe('createMockContext helpers', () => {
       ),
     ).resolves.toEqual({ name: 'Casey', active: true });
 
-    await expect(ctx.state.getMany(['profile:1', 'profile:2', 'missing'])).resolves.toEqual(
+    await expect(ctx.state.getMany(['profile/1', 'profile/2', 'missing'])).resolves.toEqual(
       new Map([
-        ['profile:1', { name: 'Casey', active: true }],
-        ['profile:2', { name: 'Morgan', active: false }],
+        ['profile/1', { name: 'Casey', active: true }],
+        ['profile/2', { name: 'Morgan', active: false }],
       ]),
     );
 
-    await expect(ctx.state.list('profile:')).resolves.toEqual({
+    await expect(ctx.state.list('profile/')).resolves.toEqual({
       items: [
-        { key: 'profile:1', value: { name: 'Casey', active: true } },
-        { key: 'profile:2', value: { name: 'Morgan', active: false } },
+        { key: 'profile/1', value: { name: 'Casey', active: true } },
+        { key: 'profile/2', value: { name: 'Morgan', active: false } },
       ],
     });
 
-    await expect(ctx.state.deleteMany(['profile:2', 'missing'])).resolves.toBe(1);
-    await expect(ctx.state.get('profile:2')).resolves.toBeNull();
-  });
-
-  it('throws for state operations when no tenant is configured', async () => {
-    const ctx = createMockContext();
-
-    expect(() => ctx.state.set('key', 'value')).toThrow('tenantId required for state operations');
-    expect(() => ctx.state.deleteMany(['a', 'b'])).toThrow(
-      'tenantId required for state operations',
-    );
-    expect(() => ctx.state.getMany(['a'])).toThrow('tenantId required for state operations');
-    expect(() => ctx.state.setMany(new Map<string, unknown>([['a', 1]]))).toThrow(
-      'tenantId required for state operations',
-    );
-    expect(() => ctx.state.list('prefix')).toThrow('tenantId required for state operations');
+    await expect(ctx.state.deleteMany(['profile/2', 'missing'])).resolves.toBe(1);
+    await expect(ctx.state.get('profile/2')).resolves.toBeNull();
   });
 
   it('tracks progress totals, clamps increments, and stores update messages', async () => {

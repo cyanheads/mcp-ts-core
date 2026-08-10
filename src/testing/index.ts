@@ -11,19 +11,21 @@ import type {
   ContentBlock,
   ElicitResult,
 } from '@modelcontextprotocol/sdk/types.js';
-import type { ZodType, z } from 'zod';
+import type { z } from 'zod';
 import type {
   AuthContext,
   Context,
   ContextLogger,
   ContextProgress,
-  ContextState,
   ElicitFn,
+  HandlerContext,
+  ReasonOf,
 } from '@/core/context.js';
 import {
   attachTypedFail,
   createContentCollect,
   createContentStore,
+  createContextState,
   createEnrich,
   createEnrichmentStore,
   readContentStore,
@@ -47,7 +49,17 @@ import type { ErrorContract } from '@/types-global/errors.js';
 // Options
 // ---------------------------------------------------------------------------
 
-export interface MockContextOptions {
+/**
+ * Options for {@link createMockContext} and {@link createMockSession}.
+ *
+ * `TErrors` is the definition's own `errors[]` contract, inferred from the
+ * `errors` property. Supplying it narrows the returned context to
+ * `HandlerContext<ReasonOf<TErrors>>`, which is what a definition declaring a
+ * contract types its handler's `ctx` parameter as.
+ */
+export interface MockContextOptions<
+  TErrors extends readonly ErrorContract[] | undefined = readonly ErrorContract[] | undefined,
+> {
   /** Auth context. */
   auth?: AuthContext;
   /**
@@ -62,8 +74,12 @@ export interface MockContextOptions {
    * own `errors` array (`createMockContext({ errors: myTool.errors })`) so the
    * mock's `fail` matches what the production handler factory wires up. Tests
    * can then assert on `data.reason` without manually composing `createFail`.
+   *
+   * Typed to include `undefined` so a definition's `errors` — optional on the
+   * definition, hence `readonly ErrorContract[] | undefined` — can be forwarded
+   * directly under `exactOptionalPropertyTypes`.
    */
-  errors?: readonly ErrorContract[];
+  errors?: TErrors | undefined;
   /** Mock prompt list changed notifier. */
   notifyPromptListChanged?: () => void;
   /** Mock resource list changed notifier. */
@@ -84,7 +100,11 @@ export interface MockContextOptions {
   sessionId?: string;
   /** Custom AbortSignal. Defaults to a fresh AbortController's signal. */
   signal?: AbortSignal;
-  /** Tenant ID. Enables ctx.state operations when provided. */
+  /**
+   * Tenant ID for `ctx.state`. Defaults to `'default'`, matching how a stdio
+   * server (and HTTP with `MCP_AUTH_MODE=none`) resolves it, so state works
+   * without options. Set it to exercise tenant-scoped behavior explicitly.
+   */
   tenantId?: string;
   /** Resource URI for resource handler testing. */
   uri?: URL;
@@ -132,68 +152,6 @@ export function createMockLogger(): MockContextLogger {
   };
 }
 
-function createMockState(tenantId?: string): ContextState {
-  const store = new Map<string, unknown>();
-
-  const requireTenant = () => {
-    if (!tenantId) {
-      throw new Error('tenantId required for state operations');
-    }
-  };
-
-  return {
-    get<T = unknown>(key: string, schema?: ZodType<T>) {
-      requireTenant();
-      const value = store.get(key);
-      if (value === undefined) return Promise.resolve(null);
-      return Promise.resolve(schema ? schema.parse(value) : (value as T));
-    },
-    set(key, value) {
-      requireTenant();
-      store.set(key, value);
-      return Promise.resolve();
-    },
-    delete(key) {
-      requireTenant();
-      store.delete(key);
-      return Promise.resolve();
-    },
-    deleteMany(keys) {
-      requireTenant();
-      let count = 0;
-      for (const key of keys) {
-        if (store.delete(key)) count++;
-      }
-      return Promise.resolve(count);
-    },
-    getMany<T = unknown>(keys: string[]) {
-      requireTenant();
-      const result = new Map<string, T>();
-      for (const key of keys) {
-        if (store.has(key)) result.set(key, store.get(key) as T);
-      }
-      return Promise.resolve(result);
-    },
-    setMany(entries) {
-      requireTenant();
-      for (const [key, value] of entries) {
-        store.set(key, value);
-      }
-      return Promise.resolve();
-    },
-    list(prefix) {
-      requireTenant();
-      const items: Array<{ key: string; value: unknown }> = [];
-      for (const [key, value] of store) {
-        if (!prefix || key.startsWith(prefix)) {
-          items.push({ key, value });
-        }
-      }
-      return Promise.resolve({ items });
-    },
-  };
-}
-
 function createMockProgress(): ContextProgress & {
   _total: number;
   _completed: number;
@@ -234,24 +192,49 @@ function createMockProgress(): ContextProgress & {
 // Factory
 // ---------------------------------------------------------------------------
 
+/** Tenant used when none is supplied — the value a stdio server resolves to. */
+const DEFAULT_MOCK_TENANT_ID = 'default';
+
 /**
  * Creates a mock Context for testing tool and resource handlers.
  *
+ * `ctx.state` runs on a real `StorageService` over an `InMemoryProvider`, so a
+ * test sees the same key validation, TTL expiry, and pagination a deployed
+ * server does — an invalid key fails in the test rather than in the field.
+ *
+ * When `errors` is supplied, the return type narrows to
+ * `HandlerContext<ReasonOf<TErrors>>`: the context carries a typed `ctx.fail`
+ * and is assignable to the `ctx` parameter of the handler whose contract it was
+ * given.
+ *
  * @example
  * ```ts
- * // Minimal — works for most tests
+ * // Minimal — state works out of the box on tenant 'default'
  * const ctx = createMockContext();
  *
- * // With tenant (for tools that use ctx.state)
+ * // Explicit tenant
  * const ctx = createMockContext({ tenantId: 'test-tenant' });
+ *
+ * // Typed ctx.fail against a definition's contract
+ * const ctx = createMockContext({ errors: myTool.errors });
  *
  * // With task progress
  * const ctx = createMockContext({ progress: true });
  * ```
  */
-export function createMockContext(options: MockContextOptions = {}): Context {
+export function createMockContext<
+  const TErrors extends readonly ErrorContract[] | undefined = undefined,
+>(options: MockContextOptions<TErrors> = {}): HandlerContext<ReasonOf<TErrors>> {
   const log = createMockLogger();
-  const state = createMockState(options.tenantId);
+  const requestId = options.requestId ?? 'test-request-id';
+  const timestamp = new Date().toISOString();
+  const tenantId = options.tenantId ?? DEFAULT_MOCK_TENANT_ID;
+  const signal = options.signal ?? new AbortController().signal;
+  const state = createContextState(
+    createInMemoryStorage(),
+    { requestId, timestamp, operation: 'createMockContext', tenantId },
+    signal,
+  );
   const progress = options.progress ? createMockProgress() : undefined;
 
   const enrichmentStore = createEnrichmentStore();
@@ -269,12 +252,12 @@ export function createMockContext(options: MockContextOptions = {}): Context {
   }
 
   const ctx: Context = {
-    requestId: options.requestId ?? 'test-request-id',
-    timestamp: new Date().toISOString(),
+    requestId,
+    timestamp,
     log,
     state,
-    signal: options.signal ?? new AbortController().signal,
-    tenantId: options.tenantId,
+    signal,
+    tenantId,
     sessionId: options.sessionId,
     auth: options.auth,
     elicit,
@@ -300,22 +283,27 @@ export function createMockContext(options: MockContextOptions = {}): Context {
 
   // Mirror the production handler factory: when a contract is declared, attach
   // a typed `fail` and `recoveryFor` keyed by the contract's reasons. Empty
-  // contracts leave the no-op resolver in place.
-  return attachTypedFail(ctx, options.errors);
+  // contracts leave the no-op resolver in place. The assertion re-states in the
+  // type system what `attachTypedFail` just did at runtime.
+  return attachTypedFail(ctx, options.errors) as HandlerContext<ReasonOf<TErrors>>;
 }
 
 // ---------------------------------------------------------------------------
 // Session fixtures
 // ---------------------------------------------------------------------------
 
-/** A mock HTTP session and the handler context bound to it. */
-export interface MockSession {
+/**
+ * A mock HTTP session and the handler context bound to it. `R` is the reason
+ * union of the contract passed as `errors`, so `session.ctx` carries the same
+ * typed `fail` a contract-bearing handler expects.
+ */
+export interface MockSession<R extends string = never> {
   /** Context carrying this session's identity. Pass it directly to a handler. */
-  ctx: Context;
+  ctx: HandlerContext<R>;
   /** Session identifier exposed as `ctx.sessionId`. */
   sessionId: string;
-  /** Optional tenant identifier exposed as `ctx.tenantId`. */
-  tenantId?: string;
+  /** Tenant identifier exposed as `ctx.tenantId`. Defaults to `'default'`. */
+  tenantId: string;
 }
 
 /**
@@ -332,14 +320,12 @@ export interface MockSession {
  * expect(session.ctx.sessionId).toBe('test-session-id');
  * ```
  */
-export function createMockSession(options: MockContextOptions = {}): MockSession {
+export function createMockSession<
+  const TErrors extends readonly ErrorContract[] | undefined = undefined,
+>(options: MockContextOptions<TErrors> = {}): MockSession<ReasonOf<TErrors>> {
   const sessionId = options.sessionId ?? 'test-session-id';
-  const ctx = createMockContext({ ...options, sessionId });
-  return {
-    ctx,
-    sessionId,
-    ...(options.tenantId !== undefined && { tenantId: options.tenantId }),
-  };
+  const ctx = createMockContext<TErrors>({ ...options, sessionId });
+  return { ctx, sessionId, tenantId: options.tenantId ?? DEFAULT_MOCK_TENANT_ID };
 }
 
 /**
