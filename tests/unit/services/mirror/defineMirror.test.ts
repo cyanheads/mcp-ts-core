@@ -251,6 +251,43 @@ describe('defineMirror — runSync() option wiring', () => {
       { pages: 2, records: 3 },
     ]);
   });
+
+  it('rejects overlapping scheduled sync invocations and permits the next run after completion', async () => {
+    const entered = Promise.withResolvers<void>();
+    const release = Promise.withResolvers<void>();
+    let generatorRuns = 0;
+    const sync: SyncGenerator = async function* (): AsyncGenerator<SyncPage> {
+      generatorRuns += 1;
+      entered.resolve();
+      await release.promise;
+      yield { records: [] };
+    };
+    const mirror = defineMirror({ name: 'scheduled-mirror', store: makeFakeStore(), sync });
+
+    const firstRun = mirror.runSync({ mode: 'refresh' });
+    await entered.promise;
+    await expect(mirror.runSync({ mode: 'refresh' })).rejects.toThrow(/already in progress/);
+    expect(generatorRuns).toBe(1);
+
+    release.resolve();
+    await expect(firstRun).resolves.toMatchObject({ pagesFetched: 1 });
+    await expect(mirror.runSync({ mode: 'refresh' })).resolves.toMatchObject({ pagesFetched: 1 });
+    expect(generatorRuns).toBe(2);
+  });
+
+  it('releases the single-flight guard after a failed sync', async () => {
+    let attempts = 0;
+    const sync: SyncGenerator = async function* (): AsyncGenerator<SyncPage> {
+      attempts += 1;
+      if (attempts === 1) throw new Error('scheduled refresh failed');
+      yield { records: [] };
+    };
+    const mirror = defineMirror({ name: 'retryable-mirror', store: makeFakeStore(), sync });
+
+    await expect(mirror.runSync({ mode: 'refresh' })).rejects.toThrow('scheduled refresh failed');
+    await expect(mirror.runSync({ mode: 'refresh' })).resolves.toMatchObject({ pagesFetched: 1 });
+    expect(attempts).toBe(2);
+  });
 });
 
 describe('defineMirror — edge-shaped sync definitions', () => {

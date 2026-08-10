@@ -6,6 +6,7 @@
  * @module services/mirror/core/defineMirror
  */
 
+import { conflict } from '@/types-global/errors.js';
 import { logger } from '@/utils/internal/logger.js';
 import { requestContextService } from '@/utils/internal/requestContext.js';
 import type {
@@ -100,18 +101,28 @@ function ctxFrom(meta?: object) {
 export function defineMirror(definition: MirrorDefinition): Mirror {
   const { name, store, sync } = definition;
   const log = definition.logger ?? defaultLogger;
+  let syncRunning = false;
 
   return {
     name,
     store,
 
-    runSync(options: MirrorRunOptions): Promise<SyncResult> {
-      const signal = options.signal ?? new AbortController().signal;
-      const runOptions: RunSyncOptions = {
-        mode: options.mode,
-        ...(options.onProgress && { onProgress: options.onProgress }),
-      };
-      return runSyncCore(store, sync, { log, signal }, runOptions);
+    async runSync(options: MirrorRunOptions): Promise<SyncResult> {
+      if (syncRunning) {
+        throw conflict(`Mirror "${name}" sync is already in progress.`, { mirror: name });
+      }
+
+      syncRunning = true;
+      try {
+        const signal = options.signal ?? new AbortController().signal;
+        const runOptions: RunSyncOptions = {
+          mode: options.mode,
+          ...(options.onProgress && { onProgress: options.onProgress }),
+        };
+        return await runSyncCore(store, sync, { log, signal }, runOptions);
+      } finally {
+        syncRunning = false;
+      }
     },
 
     query(options: QueryOptions): Promise<QueryResult> {

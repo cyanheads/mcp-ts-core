@@ -26,6 +26,7 @@ export {
   validateSchemaSpec,
 } from './sqlite/schema.js';
 export {
+  type SqliteMirrorStoreLimits,
   type SqliteMirrorStoreSpec,
   sqliteMirrorStore,
 } from './sqlite/sqliteMirrorStore.js';

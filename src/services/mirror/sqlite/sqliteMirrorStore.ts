@@ -22,10 +22,31 @@ import type {
 import { type OpenHandleOptions, openSqliteHandle, type SqliteHandle } from './handle.js';
 import { buildSchemaSql, type SchemaSpec, validateSchemaSpec } from './schema.js';
 
+/**
+ * Ceilings applied to {@link MirrorStore.query} and {@link MirrorStore.getByIds}.
+ * The defaults bound a read whose shape a client can influence. Raise them on a
+ * store whose reads are server-driven — a bulk internal scan the caller already
+ * bounds by filter — rather than routing around the store.
+ */
+export interface SqliteMirrorStoreLimits {
+  /** Maximum number of filters on one query. Default 32. */
+  filters?: number;
+  /** Maximum bound values across all filters, counting each `in` element. Default 500. */
+  filterValues?: number;
+  /** Maximum `ids` accepted by `getByIds`. Default 500. */
+  getByIds?: number;
+  /** Maximum `limit` on one query. Default 1000. */
+  limit?: number;
+  /** Maximum `offset` on one query. Default 1,000,000. */
+  offset?: number;
+}
+
 /** Configuration for {@link sqliteMirrorStore}. */
 export interface SqliteMirrorStoreSpec extends SchemaSpec {
   /** `PRAGMA busy_timeout` in ms. Default 5000. */
   busyTimeoutMs?: number;
+  /** Query and batch ceilings. Omitted fields keep their defaults. */
+  limits?: SqliteMirrorStoreLimits;
   /** Migrations applied in order when the stored version is lower than `version`. */
   migrations?: Migration[];
   /** Filesystem path to the SQLite database (created if absent). */
@@ -41,6 +62,14 @@ const SQL_OP: Record<Exclude<FilterOp, 'in'>, string> = {
   gte: '>=',
   lt: '<',
   lte: '<=',
+};
+
+const DEFAULT_LIMITS: Required<SqliteMirrorStoreLimits> = {
+  filterValues: 500,
+  filters: 32,
+  getByIds: 500,
+  limit: 1_000,
+  offset: 1_000_000,
 };
 
 /** Internal handle to an opened store plus its derived metadata. */
@@ -59,13 +88,18 @@ export function sqliteMirrorStore(spec: SqliteMirrorStoreSpec): MirrorStore {
   const { ftsColumns } = validateSchemaSpec(spec);
   const allColumns = Object.keys(spec.columns);
   const ftsTable = `${spec.table}_fts`;
+  const limits: Required<SqliteMirrorStoreLimits> = { ...DEFAULT_LIMITS, ...spec.limits };
 
   let opened: OpenStore | undefined;
   let opening: Promise<OpenStore> | undefined;
+  let closing: Promise<void> | undefined;
 
   function open(): Promise<OpenStore> {
+    if (closing) return closing.then(open);
     if (opened) return Promise.resolve(opened);
-    opening ??= (async () => {
+    if (opening) return opening;
+
+    const attempt = (async () => {
       const handleOptions: OpenHandleOptions = {
         ...(spec.busyTimeoutMs !== undefined && { busyTimeoutMs: spec.busyTimeoutMs }),
       };
@@ -84,7 +118,11 @@ export function sqliteMirrorStore(spec: SqliteMirrorStoreSpec): MirrorStore {
       opened = { handle, allColumns, hasFts: ftsColumns.length > 0 };
       return opened;
     })();
-    return opening;
+    opening = attempt;
+    void attempt.catch(() => {
+      if (opening === attempt) opening = undefined;
+    });
+    return attempt;
   }
 
   function assertColumn(column: string, role: string): void {
@@ -123,6 +161,7 @@ export function sqliteMirrorStore(spec: SqliteMirrorStoreSpec): MirrorStore {
     },
 
     async query(options: QueryOptions): Promise<QueryResult> {
+      validateQueryOptions(options, limits);
       const store = await open();
       if (options.match && !store.hasFts) {
         throw validationError('This mirror has no FTS index; `match` is not supported.', {
@@ -188,6 +227,12 @@ export function sqliteMirrorStore(spec: SqliteMirrorStoreSpec): MirrorStore {
     },
 
     async getByIds(ids: string[]): Promise<MirrorRow[]> {
+      if (ids.length > limits.getByIds) {
+        throw validationError(`Mirror ID list cannot exceed ${limits.getByIds} values.`, {
+          count: ids.length,
+          max: limits.getByIds,
+        });
+      }
       if (ids.length === 0) return [];
       const { handle } = await open();
       const placeholders = ids.map(() => '?').join(', ');
@@ -232,12 +277,31 @@ export function sqliteMirrorStore(spec: SqliteMirrorStoreSpec): MirrorStore {
     },
 
     close(): Promise<void> {
-      if (opened) {
-        opened.handle.close();
-        opened = undefined;
-        opening = undefined;
-      }
-      return Promise.resolve();
+      if (closing) return closing;
+
+      const pendingOpen = opening;
+      const active = opened;
+      const closeAttempt = (async () => {
+        let target = active;
+        if (!target && pendingOpen) {
+          try {
+            target = await pendingOpen;
+          } catch {
+            // Initialization already closes its handle before rejecting.
+            return;
+          }
+        }
+
+        if (opening === pendingOpen) opening = undefined;
+        if (!target) return;
+        if (opened === target) opened = undefined;
+        target.handle.close();
+      })();
+      const trackedClose = closeAttempt.finally(() => {
+        if (closing === trackedClose) closing = undefined;
+      });
+      closing = trackedClose;
+      return trackedClose;
     },
 
     /** Alias for {@link close}. Enables `await using store = sqliteMirrorStore(spec)`. */
@@ -252,6 +316,47 @@ export function sqliteMirrorStore(spec: SqliteMirrorStoreSpec): MirrorStore {
 // ---------------------------------------------------------------------------
 // Query building
 // ---------------------------------------------------------------------------
+
+function validateQueryOptions(
+  options: QueryOptions,
+  limits: Required<SqliteMirrorStoreLimits>,
+): void {
+  if (!Number.isSafeInteger(options.limit) || options.limit < 1 || options.limit > limits.limit) {
+    throw validationError(`Mirror query limit must be an integer from 1 to ${limits.limit}.`, {
+      limit: options.limit,
+      max: limits.limit,
+    });
+  }
+  if (
+    !Number.isSafeInteger(options.offset) ||
+    options.offset < 0 ||
+    options.offset > limits.offset
+  ) {
+    throw validationError(`Mirror query offset must be an integer from 0 to ${limits.offset}.`, {
+      offset: options.offset,
+      max: limits.offset,
+    });
+  }
+
+  const filters = options.filters ?? [];
+  if (filters.length > limits.filters) {
+    throw validationError(`Mirror query cannot exceed ${limits.filters} filters.`, {
+      count: filters.length,
+      max: limits.filters,
+    });
+  }
+
+  const filterValueCount = filters.reduce((count, filter) => {
+    if (filter.op !== 'in') return count + 1;
+    return count + (Array.isArray(filter.value) ? filter.value.length : 1);
+  }, 0);
+  if (filterValueCount > limits.filterValues) {
+    throw validationError(
+      `Mirror query filters cannot exceed ${limits.filterValues} bound values.`,
+      { count: filterValueCount, max: limits.filterValues },
+    );
+  }
+}
 
 function buildFilterClauses(filters: QueryFilter[]): { clauses: string[]; params: SqlValue[] } {
   const clauses: string[] = [];

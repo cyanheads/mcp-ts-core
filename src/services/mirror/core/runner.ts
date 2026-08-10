@@ -68,6 +68,7 @@ export async function runSync(
       checkpoint: startCheckpoint,
       signal: ctx.signal,
     })) {
+      ctx.signal.throwIfAborted();
       const tombstones = page.tombstones ?? [];
       await store.applyBatch(page.records, tombstones);
 
@@ -91,7 +92,9 @@ export async function runSync(
       });
     }
 
+    ctx.signal.throwIfAborted();
     const total = await store.count();
+    ctx.signal.throwIfAborted();
     await store.writeState({
       status: 'complete',
       startedAt,

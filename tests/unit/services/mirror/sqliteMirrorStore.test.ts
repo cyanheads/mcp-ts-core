@@ -72,6 +72,25 @@ describe('sqliteMirrorStore', () => {
     await expect(store.close()).resolves.toBeUndefined();
   });
 
+  it('closes exactly once when close races the lazy asynchronous open', async () => {
+    const opening = store.raw();
+    const firstClose = store.close();
+    const concurrentClose = store.close();
+    const reopenDuringClose = store.raw();
+    const handle = await opening;
+
+    expect(concurrentClose).toBe(firstClose);
+    await expect(Promise.all([firstClose, concurrentClose])).resolves.toEqual([
+      undefined,
+      undefined,
+    ]);
+    expect(() => handle.prepare('SELECT 1').get()).toThrow();
+    const reopened = await reopenDuringClose;
+    expect(reopened).not.toBe(handle);
+    await expect(store.close()).resolves.toBeUndefined();
+    expect(() => reopened.prepare('SELECT 1').get()).toThrow();
+  });
+
   it('upserts records and counts them', async () => {
     await store.applyBatch([rec('1'), rec('2')], []);
     expect(await store.count()).toBe(2);
@@ -157,6 +176,78 @@ describe('sqliteMirrorStore', () => {
     });
     expect(page.total).toBe(4);
     expect(page.rows.map((r) => r.id)).toEqual(['3', '4']);
+  });
+
+  it.each([0, -1, 1.5, Number.NaN, Number.POSITIVE_INFINITY, 1_001])(
+    'rejects an unsafe query limit (%s)',
+    async (limit) => {
+      await expect(store.query({ limit, offset: 0 })).rejects.toThrow(/limit must be an integer/);
+    },
+  );
+
+  it.each([-1, 1.5, Number.NaN, Number.POSITIVE_INFINITY, 1_000_001])(
+    'rejects an unsafe query offset (%s)',
+    async (offset) => {
+      await expect(store.query({ limit: 1, offset })).rejects.toThrow(/offset must be an integer/);
+    },
+  );
+
+  it('bounds ID, filter, and filter-value cardinality while accepting each exact boundary', async () => {
+    const idsAtBoundary = Array.from({ length: 500 }, (_, index) => `id-${index}`);
+    const filtersAtBoundary = Array.from({ length: 32 }, () => ({
+      column: 'category',
+      op: 'eq' as const,
+      value: 'cs.LG',
+    }));
+    const valuesAtBoundary = Array.from({ length: 500 }, (_, index) => `category-${index}`);
+
+    await expect(store.getByIds(idsAtBoundary)).resolves.toEqual([]);
+    await expect(store.getByIds([...idsAtBoundary, 'one-too-many'])).rejects.toThrow(
+      /ID list cannot exceed 500/,
+    );
+    await expect(
+      store.query({ filters: filtersAtBoundary, limit: 1, offset: 0 }),
+    ).resolves.toMatchObject({ rows: [], total: 0 });
+    await expect(
+      store.query({
+        filters: [...filtersAtBoundary, filtersAtBoundary[0] as (typeof filtersAtBoundary)[number]],
+        limit: 1,
+        offset: 0,
+      }),
+    ).rejects.toThrow(/cannot exceed 32 filters/);
+    await expect(
+      store.query({
+        filters: [{ column: 'category', op: 'in', value: valuesAtBoundary }],
+        limit: 1,
+        offset: 0,
+      }),
+    ).resolves.toMatchObject({ rows: [], total: 0 });
+    await expect(
+      store.query({
+        filters: [{ column: 'category', op: 'in', value: [...valuesAtBoundary, 'one-too-many'] }],
+        limit: 1,
+        offset: 0,
+      }),
+    ).rejects.toThrow(/cannot exceed 500 bound values/);
+  });
+
+  it('applies spec-declared limits in place of the defaults', async () => {
+    const bulk = sqliteMirrorStore(
+      specFor(join(dir, 'bulk.db'), { limits: { limit: 50_000, getByIds: 2 } }),
+    );
+    try {
+      await expect(bulk.query({ limit: 50_000, offset: 0 })).resolves.toMatchObject({ total: 0 });
+      await expect(bulk.query({ limit: 50_001, offset: 0 })).rejects.toThrow(
+        /limit must be an integer from 1 to 50000/,
+      );
+      await expect(bulk.getByIds(['a', 'b', 'c'])).rejects.toThrow(/cannot exceed 2 values/);
+      // Unset fields keep their defaults rather than becoming unbounded.
+      await expect(bulk.query({ limit: 1, offset: 1_000_001 })).rejects.toThrow(
+        /offset must be an integer from 0 to 1000000/,
+      );
+    } finally {
+      await bulk.close();
+    }
   });
 
   it('sorts by FTS relevance when match + relevance are given', async () => {

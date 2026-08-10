@@ -9,7 +9,7 @@
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { defineMirror } from '@/services/mirror/core/defineMirror.js';
 import { runSync } from '@/services/mirror/core/runner.js';
 import { sqliteMirrorStore } from '@/services/mirror/sqlite/sqliteMirrorStore.js';
@@ -356,5 +356,55 @@ describe('runSync (direct) — defensive logger handling', () => {
         { mode: 'init' },
       ),
     ).rejects.toThrow('boom');
+  });
+
+  it('checks cancellation before applying a yielded page', async () => {
+    const controller = new AbortController();
+    controller.abort(new Error('cancel before apply'));
+    const store = makeMinimalStore();
+    const applyBatch = vi.spyOn(store, 'applyBatch');
+    const writeState = vi.spyOn(store, 'writeState');
+    const sync: SyncGenerator = async function* (): AsyncGenerator<SyncPage> {
+      yield { records: [{ id: 'must-not-apply' }] };
+    };
+
+    await expect(
+      runSync(store, sync, { log: {}, signal: controller.signal }, { mode: 'init' }),
+    ).rejects.toThrow('cancel before apply');
+    expect(applyBatch).not.toHaveBeenCalled();
+    expect(writeState.mock.calls.at(-1)?.[0]).toMatchObject({
+      status: 'error',
+      error: 'cancel before apply',
+    });
+  });
+
+  it('checks cancellation after the last page before terminal count and completion', async () => {
+    const controller = new AbortController();
+    const store = makeMinimalStore();
+    const applyBatch = vi.spyOn(store, 'applyBatch');
+    const count = vi.spyOn(store, 'count');
+    const writeState = vi.spyOn(store, 'writeState');
+    const sync: SyncGenerator = async function* (): AsyncGenerator<SyncPage> {
+      yield { records: [{ id: 'applied-before-cancel' }] };
+    };
+
+    await expect(
+      runSync(
+        store,
+        sync,
+        { log: {}, signal: controller.signal },
+        {
+          mode: 'refresh',
+          onProgress: () => controller.abort(new Error('cancel before completion')),
+        },
+      ),
+    ).rejects.toThrow('cancel before completion');
+    expect(applyBatch).toHaveBeenCalledOnce();
+    expect(count).not.toHaveBeenCalled();
+    expect(writeState.mock.calls.at(-1)?.[0]).toMatchObject({
+      status: 'error',
+      error: 'cancel before completion',
+    });
+    expect(writeState.mock.calls.some(([state]) => state.status === 'complete')).toBe(false);
   });
 });
