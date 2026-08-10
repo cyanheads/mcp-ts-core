@@ -12,8 +12,16 @@ import {
   waitOnExecutionContext,
 } from 'cloudflare:test';
 import { env } from 'cloudflare:workers';
-import { describe, expect, it } from 'vitest';
-import worker from '../fixtures/worker-runtime.fixture.js';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import { logger } from '@/utils/internal/logger.js';
+import worker, {
+  createWorkerLifecycleTestHandler,
+  getWorkerLifecycleObjectBinding,
+  getWorkerLoggerLevel,
+  resetWorkerLogger,
+  type WorkerLifecycleTestBindings,
+  type WorkerLifecycleTestControl,
+} from '../fixtures/worker-runtime.fixture.js';
 
 declare global {
   namespace Cloudflare {
@@ -64,6 +72,18 @@ function initializeBody(id = 1): string {
   });
 }
 
+function lifecycleEnv(
+  overrides: Partial<WorkerLifecycleTestBindings> = {},
+): WorkerLifecycleTestBindings {
+  return { ...env, ...overrides };
+}
+
+function requestWithLoggedUrl(loggedUrl: string): Request {
+  const request = new Request('https://example.com/healthz');
+  Object.defineProperty(request, 'url', { configurable: true, value: loggedUrl });
+  return request;
+}
+
 /** Parses SSE event frames into their JSON `data:` payloads. */
 function parseSseDataFrames(body: string): unknown[] {
   return body
@@ -80,6 +100,219 @@ function parseSseDataFrames(body: string): unknown[] {
 }
 
 describe('createWorkerHandler in the Workers runtime', () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+    delete process.env.TEST_BLANK_TARGET;
+  });
+
+  describe('lifecycle', () => {
+    it('falls back to info for an invalid log-level binding', async () => {
+      await resetWorkerLogger();
+      const control: WorkerLifecycleTestControl = { setupCalls: 0 };
+      const lifecycleWorker = createWorkerLifecycleTestHandler(control);
+      const ctx = createExecutionContext();
+
+      const response = await lifecycleWorker.fetch(
+        new Request('http://example.com/healthz'),
+        lifecycleEnv({ LOG_LEVEL: 'definitely-not-a-level' }),
+        ctx,
+      );
+      await waitOnExecutionContext(ctx);
+
+      expect(response.status).toBe(200);
+      expect(getWorkerLoggerLevel()).toBe('info');
+      expect(control.setupCalls).toBe(1);
+    });
+
+    it('shares one initialization promise across concurrent first requests', async () => {
+      let releaseInitialization!: () => void;
+      const initializationGate = new Promise<void>((resolve) => {
+        releaseInitialization = resolve;
+      });
+      const control: WorkerLifecycleTestControl = { initializationGate, setupCalls: 0 };
+      const lifecycleWorker = createWorkerLifecycleTestHandler(control);
+      const firstCtx = createExecutionContext();
+      const secondCtx = createExecutionContext();
+
+      const first = lifecycleWorker.fetch(
+        new Request('http://example.com/healthz'),
+        lifecycleEnv(),
+        firstCtx,
+      );
+      const second = lifecycleWorker.fetch(
+        new Request('http://example.com/healthz'),
+        lifecycleEnv(),
+        secondCtx,
+      );
+      await vi.waitFor(() => expect(control.setupCalls).toBe(1));
+      releaseInitialization();
+
+      const responses = await Promise.all([first, second]);
+      await Promise.all([waitOnExecutionContext(firstCtx), waitOnExecutionContext(secondCtx)]);
+      expect(responses.map((response) => response.status)).toEqual([200, 200]);
+      expect(control.setupCalls).toBe(1);
+    });
+
+    it('returns a sanitized 500 for first-init failure and retries initialization', async () => {
+      const control: WorkerLifecycleTestControl = {
+        setupCalls: 0,
+        setupFailures: [new Error('private initialization detail')],
+      };
+      const lifecycleWorker = createWorkerLifecycleTestHandler(control);
+
+      const firstResponse = await lifecycleWorker.fetch(
+        new Request('http://example.com/healthz'),
+        lifecycleEnv(),
+        createExecutionContext(),
+      );
+      const firstBody = await firstResponse.text();
+      expect(firstResponse.status).toBe(500);
+      expect(JSON.parse(firstBody)).toEqual({
+        error: 'Internal Server Error',
+        message: 'An internal error occurred.',
+      });
+      expect(firstBody).not.toContain('private initialization detail');
+      expect(control.setupCalls).toBe(1);
+
+      const retryResponse = await lifecycleWorker.fetch(
+        new Request('http://example.com/healthz'),
+        lifecycleEnv(),
+        createExecutionContext(),
+      );
+      expect(retryResponse.status).toBe(200);
+      expect(control.setupCalls).toBe(2);
+    });
+
+    it('sanitizes non-Error initialization failures', async () => {
+      const control: WorkerLifecycleTestControl = {
+        setupCalls: 0,
+        setupFailures: ['non-error private initialization detail'],
+      };
+      const lifecycleWorker = createWorkerLifecycleTestHandler(control);
+
+      const response = await lifecycleWorker.fetch(
+        new Request('http://example.com/healthz'),
+        lifecycleEnv(),
+        createExecutionContext(),
+      );
+      const body = await response.text();
+
+      expect(response.status).toBe(500);
+      expect(JSON.parse(body)).toEqual({
+        error: 'Internal Server Error',
+        message: 'An internal error occurred.',
+      });
+      expect(body).not.toContain('non-error private initialization detail');
+    });
+
+    it('ignores blank string bindings and refreshes object bindings on every invocation', async () => {
+      process.env.TEST_BLANK_TARGET = 'preserved-value';
+      const control: WorkerLifecycleTestControl = { setupCalls: 0 };
+      const lifecycleWorker = createWorkerLifecycleTestHandler(control);
+      const firstObject = { invocation: 1 };
+      const secondObject = { invocation: 2 };
+
+      const firstResponse = await lifecycleWorker.fetch(
+        new Request('http://example.com/healthz'),
+        lifecycleEnv({ TEST_BLANK_BINDING: '   ', TEST_OBJECT_BINDING: firstObject }),
+        createExecutionContext(),
+      );
+      expect(firstResponse.status).toBe(200);
+      expect(control.blankBindingAtSetup).toBe('preserved-value');
+      expect(getWorkerLifecycleObjectBinding()).toBe(firstObject);
+
+      const secondResponse = await lifecycleWorker.fetch(
+        new Request('http://example.com/healthz'),
+        lifecycleEnv({ TEST_BLANK_BINDING: '', TEST_OBJECT_BINDING: secondObject }),
+        createExecutionContext(),
+      );
+      expect(secondResponse.status).toBe(200);
+      expect(getWorkerLifecycleObjectBinding()).toBe(secondObject);
+      expect(control.setupCalls).toBe(1);
+    });
+
+    it('propagates scheduled callback rejection to the runtime', async () => {
+      const scheduledFailure = new Error('scheduled callback failed');
+      const control: WorkerLifecycleTestControl = { scheduledFailure, setupCalls: 0 };
+      const lifecycleWorker = createWorkerLifecycleTestHandler(control);
+      const controller = createScheduledController({ cron: '0 * * * *' });
+
+      await expect(
+        lifecycleWorker.scheduled(controller, lifecycleEnv(), createExecutionContext()),
+      ).rejects.toBe(scheduledFailure);
+      expect(control.scheduledCalls).toBe(1);
+    });
+
+    it('completes scheduled events when no callback is configured', async () => {
+      const control: WorkerLifecycleTestControl = {
+        installScheduledCallback: false,
+        setupCalls: 0,
+      };
+      const lifecycleWorker = createWorkerLifecycleTestHandler(control);
+      const controller = createScheduledController({ cron: '0 0 * * *' });
+
+      await expect(
+        lifecycleWorker.scheduled(controller, lifecycleEnv(), createExecutionContext()),
+      ).resolves.toBeUndefined();
+      expect(control.setupCalls).toBe(1);
+      expect(control.scheduledCalls).toBeUndefined();
+    });
+  });
+
+  describe('request URL log boundary', () => {
+    const loggedUrl =
+      'https://userinfo-secret:password-secret@example.com/healthz?token=query-secret#fragment-secret';
+
+    it('redacts success-log URL credentials, query, and fragment', async () => {
+      const debugSpy = vi.spyOn(logger, 'debug');
+      const lifecycleWorker = createWorkerLifecycleTestHandler({ setupCalls: 0 });
+
+      const response = await lifecycleWorker.fetch(
+        requestWithLoggedUrl(loggedUrl),
+        lifecycleEnv(),
+        createExecutionContext(),
+      );
+
+      expect(response.status).toBe(200);
+      const context = debugSpy.mock.calls.find(
+        ([message]) => message === 'Processing Worker fetch request.',
+      )?.[1];
+      expect(context).toMatchObject({
+        url: 'https://example.com/healthz',
+        queryPresent: true,
+      });
+      expect(JSON.stringify(context)).not.toMatch(
+        /userinfo-secret|password-secret|query-secret|fragment-secret/,
+      );
+    });
+
+    it('redacts error-log URL credentials, query, and fragment', async () => {
+      const errorSpy = vi.spyOn(logger, 'error');
+      const lifecycleWorker = createWorkerLifecycleTestHandler({
+        setupCalls: 0,
+        setupFailures: [new Error('initialize failed')],
+      });
+
+      const response = await lifecycleWorker.fetch(
+        requestWithLoggedUrl(loggedUrl),
+        lifecycleEnv(),
+        createExecutionContext(),
+      );
+
+      expect(response.status).toBe(500);
+      const context = errorSpy.mock.calls.find(
+        ([message]) => message === 'Worker fetch handler error.',
+      )?.[2];
+      expect(context).toMatchObject({
+        url: 'https://example.com/healthz',
+        queryPresent: true,
+      });
+      expect(JSON.stringify(context)).not.toMatch(
+        /userinfo-secret|password-secret|query-secret|fragment-secret/,
+      );
+    });
+  });
+
   it('serves HTTP requests and injects string/object bindings', async () => {
     const ctx = createExecutionContext();
     const response = await worker.fetch(new Request('http://example.com/healthz'), env, ctx);

@@ -13,11 +13,27 @@
 
 import { prompt, resource, tool, z } from '@/core/index.js';
 import { type CloudflareBindings, createWorkerHandler } from '@/core/worker.js';
+import { logger, type McpLogLevel } from '@/utils/internal/logger.js';
 import { runtimeCaps } from '@/utils/internal/runtime.js';
 
 interface WorkerRuntimeBindings extends CloudflareBindings {
   CUSTOM_API_KEY?: string;
   CUSTOM_KV?: KVNamespace;
+}
+
+export interface WorkerLifecycleTestBindings extends CloudflareBindings {
+  TEST_BLANK_BINDING?: string;
+  TEST_OBJECT_BINDING?: object;
+}
+
+export interface WorkerLifecycleTestControl {
+  blankBindingAtSetup?: string;
+  initializationGate?: Promise<void>;
+  installScheduledCallback?: boolean;
+  scheduledCalls?: number;
+  scheduledFailure?: unknown;
+  setupCalls: number;
+  setupFailures?: unknown[];
 }
 
 type RuntimeProbe = {
@@ -37,9 +53,49 @@ type ScheduledProbe = {
 
 const runtimeGlobal = globalThis as typeof globalThis & {
   CUSTOM_KV_GLOBAL?: KVNamespace;
+  __WORKER_LIFECYCLE_OBJECT__?: object;
   __WORKER_RUNTIME_PROBE__?: RuntimeProbe;
   __WORKER_SCHEDULED_PROBE__?: ScheduledProbe;
 };
+
+/** Creates an isolated handler whose mutable control object is observable from
+ * the real Workerd tests. Each call gets a fresh initialization promise. */
+export function createWorkerLifecycleTestHandler(control: WorkerLifecycleTestControl) {
+  return createWorkerHandler({
+    name: 'worker-lifecycle-test-fixture',
+    version: '0.0.0-test',
+    extraEnvBindings: [['TEST_BLANK_BINDING', 'TEST_BLANK_TARGET']],
+    extraObjectBindings: [['TEST_OBJECT_BINDING', '__WORKER_LIFECYCLE_OBJECT__']],
+    async setup() {
+      control.setupCalls += 1;
+      await control.initializationGate;
+      const blankBinding = process.env.TEST_BLANK_TARGET;
+      if (blankBinding === undefined) delete control.blankBindingAtSetup;
+      else control.blankBindingAtSetup = blankBinding;
+      if (control.setupFailures && control.setupFailures.length > 0) {
+        throw control.setupFailures.shift();
+      }
+    },
+    ...(control.installScheduledCallback !== false && {
+      async onScheduled() {
+        control.scheduledCalls = (control.scheduledCalls ?? 0) + 1;
+        if ('scheduledFailure' in control) throw control.scheduledFailure;
+      },
+    }),
+  });
+}
+
+export function getWorkerLifecycleObjectBinding(): object | undefined {
+  return runtimeGlobal.__WORKER_LIFECYCLE_OBJECT__;
+}
+
+export function getWorkerLoggerLevel(): McpLogLevel {
+  return (logger as unknown as { currentMcpLevel: McpLogLevel }).currentMcpLevel;
+}
+
+export async function resetWorkerLogger(): Promise<void> {
+  await logger.close();
+}
 
 /** Storage probe — set a key via ctx.state. */
 const storageSetTool = tool('storage_set', {

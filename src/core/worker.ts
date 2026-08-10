@@ -18,6 +18,7 @@ import type {
   ScheduledController,
 } from '@cloudflare/workers-types';
 import type { Hono } from 'hono';
+import { normalizeLogLevelAlias } from '@/config/index.js';
 import { type CreateAppOptions, composeServices } from '@/core/app.js';
 import { createHttpApp } from '@/mcp-server/transports/http/httpTransport.js';
 import { logger, type McpLogLevel } from '@/utils/internal/logger.js';
@@ -128,12 +129,44 @@ const CORE_OBJECT_BINDINGS: ReadonlyArray<[keyof CloudflareBindings, string]> = 
   ['AI', 'AI'],
 ] as const;
 
+const VALID_LOG_LEVELS: readonly McpLogLevel[] = [
+  'debug',
+  'info',
+  'notice',
+  'warning',
+  'error',
+  'crit',
+  'alert',
+  'emerg',
+];
+
+/**
+ * Resolves a `LOG_LEVEL` binding to a level the config schema accepts, so an
+ * invalid one cannot make `parseConfig` throw and fail the request. Aliases are
+ * resolved through the schema's own table first — screening on the raw value
+ * would discard `warn` as invalid and silently downgrade it to the fallback.
+ */
+function normalizeLogLevel(value: string | undefined): McpLogLevel {
+  const normalized = value === undefined ? undefined : normalizeLogLevelAlias(value);
+  return VALID_LOG_LEVELS.includes(normalized as McpLogLevel)
+    ? (normalized as McpLogLevel)
+    : 'info';
+}
+
+function requestUrlLogFields(requestUrl: string): { queryPresent: boolean; url: string } {
+  const parsed = new URL(requestUrl);
+  return {
+    queryPresent: parsed.search.length > 0,
+    url: `${parsed.origin}${parsed.pathname}`,
+  };
+}
+
 function injectEnvVars(env: CloudflareBindings, extraBindings?: Array<[string, string]>): void {
   if (typeof process === 'undefined') return;
   for (const [bindingKey, processKey] of CORE_ENV_BINDINGS) {
     const value = env[bindingKey];
     if (typeof value === 'string' && value.trim() !== '') {
-      process.env[processKey] = value;
+      process.env[processKey] = bindingKey === 'LOG_LEVEL' ? normalizeLogLevel(value) : value;
     }
   }
   if (extraBindings) {
@@ -201,21 +234,7 @@ export function createWorkerHandler(options: WorkerHandlerOptions = {}) {
           ...(resolvedInstructions && { instructions: resolvedInstructions }),
         });
 
-        const logLevel = env.LOG_LEVEL?.toLowerCase() ?? 'info';
-        const validLogLevels: McpLogLevel[] = [
-          'debug',
-          'info',
-          'notice',
-          'warning',
-          'error',
-          'crit',
-          'alert',
-          'emerg',
-        ];
-        const validatedLogLevel = validLogLevels.includes(logLevel as McpLogLevel)
-          ? (logLevel as McpLogLevel)
-          : 'info';
-        await logger.initialize(validatedLogLevel, 'http');
+        await logger.initialize(normalizeLogLevel(env.LOG_LEVEL), 'http');
 
         const workerContext = requestContextService.createRequestContext({
           operation: 'WorkerInitialization',
@@ -295,7 +314,7 @@ export function createWorkerHandler(options: WorkerHandlerOptions = {}) {
         logger.debug('Processing Worker fetch request.', {
           ...requestContext,
           method: request.method,
-          url: request.url,
+          ...requestUrlLogFields(request.url),
           colo: cfProperties?.colo,
         });
 
@@ -306,7 +325,7 @@ export function createWorkerHandler(options: WorkerHandlerOptions = {}) {
           operation: 'WorkerFetch',
           isServerless: true,
           method: request.method,
-          url: request.url,
+          ...requestUrlLogFields(request.url),
           ...(requestId && { requestId }),
         });
 
@@ -369,6 +388,7 @@ export function createWorkerHandler(options: WorkerHandlerOptions = {}) {
           error instanceof Error ? error : new Error(String(error)),
           errorContext,
         );
+        throw error;
       }
     },
   };

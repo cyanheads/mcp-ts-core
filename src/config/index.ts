@@ -70,6 +70,33 @@ const emptyStringAsUndefined = (val: unknown) => {
 };
 
 /**
+ * Common log-level spellings mapped to their RFC5424/MCP names, so an operator
+ * writing `warn` or `trace` gets the level they meant.
+ */
+const LOG_LEVEL_ALIASES: Record<string, string> = {
+  err: 'error',
+  fatal: 'emerg',
+  information: 'info',
+  silent: 'emerg',
+  trace: 'debug',
+  warn: 'warning',
+};
+
+/**
+ * Lowercases a log-level string and resolves its alias. Exported so runtimes
+ * that pre-screen `LOG_LEVEL` before it reaches {@link ConfigSchema} — the
+ * Worker entry point sanitizes bindings — accept the same spellings the schema
+ * does, instead of discarding an aliased level as invalid.
+ *
+ * @param value - A raw log-level string, in any casing.
+ * @returns The canonical spelling, which may still be an unsupported level.
+ */
+export function normalizeLogLevelAlias(value: string): string {
+  const lower = value.toLowerCase();
+  return LOG_LEVEL_ALIASES[lower] ?? lower;
+}
+
+/**
  * Boolean env flag parser. Uses Zod's `stringbool` — accepts `true/false/1/0/
  * yes/no/on/off` (case-insensitive) and rejects anything else, so `"false"`
  * disables. This is the safe alternative to `z.coerce.boolean()`, where
@@ -103,19 +130,7 @@ const ConfigSchema = z
       .preprocess(
         (val) => {
           const str = emptyStringAsUndefined(val);
-          if (typeof str === 'string') {
-            const lower = str.toLowerCase();
-            // Normalize common aliases to RFC5424/MCP log level names
-            const aliasMap: Record<string, string> = {
-              warn: 'warning',
-              err: 'error',
-              information: 'info',
-              fatal: 'emerg',
-              trace: 'debug',
-              silent: 'emerg',
-            };
-            return aliasMap[lower] ?? lower;
-          }
+          if (typeof str === 'string') return normalizeLogLevelAlias(str);
           return str;
         },
         z.enum(['debug', 'info', 'notice', 'warning', 'error', 'crit', 'alert', 'emerg']),
