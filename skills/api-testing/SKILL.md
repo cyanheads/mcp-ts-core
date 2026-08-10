@@ -4,7 +4,7 @@ description: >
   Testing patterns for MCP tool/resource handlers using `createMockContext` and Vitest. Covers mock context options, handler testing, McpError assertions, format testing, Vitest config setup, and test isolation conventions.
 metadata:
   author: cyanheads
-  version: "1.7"
+  version: "1.8"
   audience: external
   type: reference
 ---
@@ -522,3 +522,5 @@ it('survives fuzz testing', async () => {
 | `adversarialArbitrary()` / `ADVERSARIAL_STRINGS` | Targeted injection sets (prototype pollution probes, control characters, oversized payloads). |
 
 `FuzzOptions`: `numRuns` (default 50), `numAdversarial` (default 30), `seed` (reproducibility), `timeout` (per-call ms, default 5000), `ctx` (`MockContextOptions` for stateful handlers).
+
+`report.leaks` looks for a stack frame or a server-side path in what a client can observe — the `code`, `message`, and `data` of the thrown `McpError`. Strings the input itself supplied are removed before that check, so naming the offending value in error data (`throw validationError(msg, { key })`) never registers as a leak: the client sent those bytes and learns nothing from seeing them again.

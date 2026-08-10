@@ -468,10 +468,64 @@ function publicErrorText(error: unknown): string {
   }
 }
 
-/** Records a leak entry when an error's client-visible text exposes a stack or internal path. */
+/** Every string the fuzz input carries, object keys included. */
+function collectInputStrings(value: unknown, out: string[] = []): string[] {
+  if (typeof value === 'string') {
+    out.push(value);
+    return out;
+  }
+  if (Array.isArray(value)) {
+    for (const item of value) collectInputStrings(item, out);
+    return out;
+  }
+  if (value !== null && typeof value === 'object') {
+    for (const [key, item] of Object.entries(value)) {
+      out.push(key);
+      collectInputStrings(item, out);
+    }
+  }
+  return out;
+}
+
+/**
+ * Removes the input's own strings from an error's client-visible text before the
+ * leak heuristic reads it.
+ *
+ * A handler that names the offending value in its error data — the pattern the
+ * framework recommends (`throw validationError(msg, { key })`) — hands the
+ * fuzzer's own generated string back to the fuzzer. The heuristic then reads
+ * that echo as a leak, even though the client supplied the bytes and learns
+ * nothing from seeing them again. The rate is not theoretical: a generated
+ * string carries a `<letter>:\` trigram about once in six thousand, which is
+ * enough to fail a suite intermittently and nowhere near often enough to be
+ * reproducible by rerunning it.
+ *
+ * Longest needle first, so a JSON-escaped occurrence (`C:\\`) is consumed before
+ * its raw form (`C:\`) can leave residue. Needles under two characters are
+ * skipped — stripping every `a` would hollow out the text the heuristic reads.
+ */
+function stripInputEcho(text: string, input: unknown): string {
+  const needles = new Set<string>();
+  for (const raw of collectInputStrings(input)) {
+    if (raw.length < 2) continue;
+    needles.add(raw);
+    const encoded = JSON.stringify(raw).slice(1, -1);
+    if (encoded.length >= 2) needles.add(encoded);
+  }
+  let stripped = text;
+  for (const needle of [...needles].sort((a, b) => b.length - a.length)) {
+    stripped = stripped.split(needle).join('');
+  }
+  return stripped;
+}
+
+/**
+ * Records a leak entry when an error's client-visible text exposes a stack or
+ * internal path that did not come from the input itself.
+ */
 function recordLeak(report: FuzzReport, input: unknown, error: unknown): void {
   const errorText = publicErrorText(error);
-  const { leakedStack, leakedInternals } = checkErrorLeaks(errorText);
+  const { leakedStack, leakedInternals } = checkErrorLeaks(stripInputEcho(errorText, input));
   if (leakedStack || leakedInternals) {
     report.leaks.push({ input, errorText });
   }

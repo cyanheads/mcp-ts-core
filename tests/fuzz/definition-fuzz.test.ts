@@ -155,6 +155,60 @@ describe('fuzzTool', () => {
     expectCleanReport(report);
   });
 
+  it('does not read an input echoed back in error data as a leak', async () => {
+    // The key is pinned to a value that trips every branch of the leak
+    // heuristic, so the assertion is deterministic rather than a sampling
+    // question. `ctx.state.get` rejects it and names it in `data`, which is the
+    // exact shape that made this suite fail intermittently: the fuzzer's own
+    // generated string came back and read as an internal path.
+    const echoingTool = tool('fuzz_echoes_key', {
+      description: 'Looks up a storage key and lets the validator name it on failure.',
+      input: z
+        .object({
+          key: z
+            .enum(['C:\\Windows\\system32', '/Users/someone/.ssh:id', 'at fn (node_modules/x)'])
+            .describe('Storage key'),
+        })
+        .describe('Lookup input'),
+      output: z.object({ found: z.boolean().describe('Whether key exists') }),
+      async handler(input, ctx) {
+        const value = await ctx.state.get(input.key);
+        return { found: value !== null };
+      },
+    });
+
+    const report = await fuzzTool(echoingTool as any, {
+      numRuns: 40,
+      numAdversarial: 0,
+      seed: 4242,
+      ctx: { tenantId: 'fuzz-tenant' },
+    });
+
+    expect(report.leaks).toHaveLength(0);
+    expect(report.crashes).toHaveLength(0);
+  });
+
+  it('still reports a leak the input did not supply', async () => {
+    const leakyTool = tool('fuzz_leaks_path', {
+      description: 'Reports a failure whose data carries a server-side path.',
+      input: z.object({ message: z.string().describe('Message') }),
+      output: z.object({ ok: z.boolean().describe('Success state') }),
+      handler(): never {
+        throw new McpError(JsonRpcErrorCode.InternalError, 'Read failed', {
+          path: '/Users/build-agent/app/node_modules/pkg/index.js',
+        });
+      },
+    });
+
+    const report = await fuzzTool(leakyTool as any, {
+      numRuns: 5,
+      numAdversarial: 0,
+      seed: 7,
+    });
+
+    expect(report.leaks.length).toBeGreaterThan(0);
+  });
+
   it('treats deliberate MCP domain errors as handled outcomes', async () => {
     const domainErrorTool = tool('fuzz_domain_error', {
       description: 'Always reports a declared domain failure.',
