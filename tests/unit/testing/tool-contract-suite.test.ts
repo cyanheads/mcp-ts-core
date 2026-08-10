@@ -3,6 +3,7 @@
  * @module tests/testing/tool-contract-suite.test
  */
 
+import { expect } from 'vitest';
 import { z } from 'zod';
 import { tool } from '@/mcp-server/tools/utils/toolDefinition.js';
 import { toolContractSuite } from '@/testing/vitest.js';
@@ -31,12 +32,15 @@ toolContractSuite(definition, {
   context: { requestId: 'suite-request' },
   success: [
     {
-      name: 'accepts schema-valid handler output',
+      name: 'matches expected structured behavior',
       input: { value: 'ok' },
+      expected: { value: 'ok' },
+    },
+    {
+      name: 'supports behavior-specific assertions',
+      input: { value: 'asserted' },
       assert: (result) => {
-        if (result.structuredContent?.value !== 'ok') {
-          throw new Error('Behavior assertion did not receive the handler result.');
-        }
+        expect(result.content).toContainEqual({ type: 'text', text: 'asserted' });
       },
     },
   ],

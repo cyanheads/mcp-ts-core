@@ -118,12 +118,21 @@ export const mcpTest = test.extend<McpTestFixtures>({
 // Tool contract conformance suite
 // ---------------------------------------------------------------------------
 
-/** One schema-valid success case for {@link toolContractSuite}. */
+/**
+ * One schema-valid success case for {@link toolContractSuite}.
+ *
+ * The suite always checks the shared contract (no `isError`, structured output
+ * matching the declared schema, non-empty content). Add `expected` for a
+ * structured-output subset, or `assert` for richer content/enrichment
+ * expectations, so the case pins behavior rather than shape alone.
+ */
 export interface ToolContractSuccessCase<TDefinition extends AnyToolDefinition> {
-  /** Optional behavior-specific assertions after contract checks pass. */
+  /** Behavior-specific assertions after the shared contract checks pass. */
   assert?: (result: CallToolResult) => Promise<void> | void;
   /** Per-case context overrides. */
   context?: MockContextOptions;
+  /** Expected structured-output subset for this input. */
+  expected?: Partial<z.output<TDefinition['output']>>;
   /** Schema-valid tool input. */
   input: z.input<TDefinition['input']>;
   /** Test name. */
@@ -198,6 +207,9 @@ export function toolContractSuite<TDefinition extends AnyToolDefinition>(
         expect(result.isError).not.toBe(true);
         expect(result.structuredContent).toEqual(expect.schemaMatching(definition.output));
         expect(result.content).toEqual(expect.arrayContaining([expect.objectContaining({})]));
+        if (successCase.expected !== undefined) {
+          expect(result.structuredContent).toMatchObject(successCase.expected);
+        }
         await successCase.assert?.(result);
       });
     }
