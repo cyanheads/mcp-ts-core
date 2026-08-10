@@ -4,17 +4,14 @@
  * rejection of invalid IDs, and explicit termination via DELETE.
  * @module tests/integration/http-sessions
  */
-import { existsSync } from 'node:fs';
-import { resolve } from 'node:path';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
 import { initializeBody, jsonrpc, MCP_HEADERS } from '../helpers/http-helpers.js';
 import { assertServerBuilt, type ServerHandle, startServer } from '../helpers/server-process.js';
 
-const SERVER_EXISTS = existsSync(resolve(process.cwd(), 'dist/index.js'));
 const PROTOCOL_VERSION = '2025-06-18';
 
-describe.skipIf(!SERVER_EXISTS)('HTTP session management integration', () => {
+describe('HTTP session management integration', () => {
   let handle: ServerHandle;
 
   beforeAll(async () => {

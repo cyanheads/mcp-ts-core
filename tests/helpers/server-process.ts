@@ -10,9 +10,10 @@
  * @module tests/integration/helpers/server-process
  */
 import { type ChildProcess, spawn } from 'node:child_process';
-import { existsSync } from 'node:fs';
+import { existsSync, readdirSync, statSync } from 'node:fs';
 import { createServer } from 'node:net';
 import { resolve } from 'node:path';
+import { BUILD_INPUT_PATHS } from '../../scripts/build-inputs.js';
 
 export interface ServerHandle {
   kill: () => Promise<void>;
@@ -21,6 +22,20 @@ export interface ServerHandle {
 }
 
 const DIST_INDEX = resolve(process.cwd(), 'dist/index.js');
+const DIST_CORE_INDEX = resolve(process.cwd(), 'dist/core/index.js');
+const BUILD_INPUTS = BUILD_INPUT_PATHS.map((path) => resolve(process.cwd(), path));
+
+function newestMtimeMs(path: string): number {
+  const stat = statSync(path);
+  if (!stat.isDirectory()) return stat.mtimeMs;
+
+  let newest = stat.mtimeMs;
+  for (const entry of readdirSync(path, { withFileTypes: true })) {
+    const child = resolve(path, entry.name);
+    newest = Math.max(newest, newestMtimeMs(child));
+  }
+  return newest;
+}
 
 function resolveEntrypoint(entrypoint: string): string {
   return entrypoint.startsWith('/') ? entrypoint : resolve(process.cwd(), entrypoint);
@@ -34,6 +49,26 @@ export function assertServerBuilt(): void {
     throw new Error(
       `Built server not found at ${DIST_INDEX}. Run "bun run build" before integration tests.`,
     );
+  }
+}
+
+/**
+ * Fails integration startup when package build outputs are absent or older than
+ * any TypeScript build input. Direct integration runs must never silently test a
+ * stale `dist/`; `bun run test:all` rebuilds before reaching this precondition.
+ */
+export function assertBuildFresh(): void {
+  const outputs = [DIST_INDEX, DIST_CORE_INDEX];
+  for (const output of outputs) {
+    if (!existsSync(output)) {
+      throw new Error(`Required build output not found at ${output}. Run "bun run rebuild".`);
+    }
+  }
+
+  const newestInput = Math.max(...BUILD_INPUTS.map(newestMtimeMs));
+  const oldestOutput = Math.min(...outputs.map((output) => statSync(output).mtimeMs));
+  if (oldestOutput < newestInput) {
+    throw new Error('Build output is stale. Run "bun run rebuild" before integration tests.');
   }
 }
 

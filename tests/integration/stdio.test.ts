@@ -3,7 +3,6 @@
  * subprocess and drives it via the official MCP SDK client over stdio pipes.
  * @module tests/integration/stdio
  */
-import { existsSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
@@ -17,9 +16,8 @@ import {
 } from '../helpers/default-server-mcp.js';
 
 const DIST_INDEX = resolve(process.cwd(), 'dist/index.js');
-const SERVER_EXISTS = existsSync(DIST_INDEX);
 
-describe.skipIf(!SERVER_EXISTS)('Stdio transport integration', () => {
+describe('Stdio transport integration', () => {
   let client: Client;
   let transport: StdioClientTransport;
 

@@ -8,14 +8,11 @@
  * compensating abort hook).
  * @module tests/integration/http-sse-abort
  */
-import { existsSync } from 'node:fs';
-import { resolve } from 'node:path';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
 import { initializeBody, MCP_HEADERS } from '../helpers/http-helpers.js';
 import { assertServerBuilt, type ServerHandle, startServer } from '../helpers/server-process.js';
 
-const SERVER_EXISTS = existsSync(resolve(process.cwd(), 'dist/index.js'));
 const PROTOCOL_VERSION = '2025-06-18';
 
 /** Initialize a fresh stateful session and return its session id. */
@@ -70,7 +67,7 @@ async function openAndAbortSse(
   return result;
 }
 
-describe.skipIf(!SERVER_EXISTS)('HTTP SSE abort cleanup (issue #50)', () => {
+describe('HTTP SSE abort cleanup (issue #50)', () => {
   let handle: ServerHandle;
   let port: number;
   /** Combined stdout + stderr from the server subprocess. */

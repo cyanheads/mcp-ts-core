@@ -4,17 +4,14 @@
  * and unprotected endpoint accessibility.
  * @module tests/integration/http-auth
  */
-import { existsSync } from 'node:fs';
-import { resolve } from 'node:path';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
 import { generateTestJwt, initializeBody, MCP_HEADERS } from '../helpers/http-helpers.js';
 import { assertServerBuilt, type ServerHandle, startServer } from '../helpers/server-process.js';
 
-const SERVER_EXISTS = existsSync(resolve(process.cwd(), 'dist/index.js'));
 const AUTH_SECRET = 'test-secret-key-for-conformance!';
 
-describe.skipIf(!SERVER_EXISTS)('HTTP auth integration', () => {
+describe('HTTP auth integration', () => {
   let handle: ServerHandle;
 
   beforeAll(async () => {
