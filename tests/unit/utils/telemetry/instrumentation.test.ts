@@ -151,15 +151,7 @@ describe('OpenTelemetry Instrumentation', () => {
   });
 
   describe('Error handling', () => {
-    test('should handle import errors gracefully', async () => {
-      // Note: process.versions is readonly in vitest environment
-      // We can only mock runtime detection, not modify process.versions directly
-      vi.spyOn(runtimeModule.runtimeCaps, 'isNode', 'get').mockReturnValue(true);
-
-      // This would test error handling during import, but we can't easily
-      // simulate import failures in unit tests without complex mocking
-      // The try-catch in the actual code handles this
-    });
+    test.todo('should handle import errors gracefully');
   });
 
   describe('Configuration handling', () => {

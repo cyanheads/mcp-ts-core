@@ -11,7 +11,7 @@
 
 import type { RequestHandlerExtra } from '@modelcontextprotocol/sdk/shared/protocol.js';
 import type { ServerNotification, ServerRequest } from '@modelcontextprotocol/sdk/types.js';
-import { beforeEach, describe, expect, expectTypeOf, it, vi } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { z } from 'zod';
 
 // ---------------------------------------------------------------------------
@@ -124,41 +124,6 @@ describe('enrichment block', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     mockConfig.mcpSessionMode = 'auto';
-  });
-
-  describe('type inference', () => {
-    it('types ctx.enrich against the declared fields; loose when no block', () => {
-      tool('typed_enrich', {
-        description: 'demo',
-        input: z.object({ q: z.string().describe('q') }),
-        output: z.object({ items: z.array(z.string()).describe('items') }),
-        enrichment: {
-          totalCount: z.number().describe('total'),
-          notice: z.string().optional().describe('notice'),
-        },
-        handler: (_input, ctx) => {
-          ctx.enrich({ totalCount: 1 });
-          ctx.enrich({ notice: 'ok' });
-          // @ts-expect-error — totalCount must be a number
-          ctx.enrich({ totalCount: 'nope' });
-          // Field-helpers are always available.
-          ctx.enrich.total(2);
-          return { items: [] };
-        },
-      });
-
-      tool('no_enrich', {
-        description: 'demo',
-        input: z.object({ q: z.string().describe('q') }),
-        output: z.object({ items: z.array(z.string()).describe('items') }),
-        handler: (_input, ctx) => {
-          // Loose enrich on base Context — accepts any record (service-callable).
-          expectTypeOf(ctx.enrich).toBeFunction();
-          ctx.enrich({ anything: 1 });
-          return { items: [] };
-        },
-      });
-    });
   });
 
   describe('structuredContent merge + content[] trailer', () => {

@@ -14,11 +14,7 @@ if (typeof process !== 'undefined' && process.stderr?.write) {
   const originalWrite = process.stderr.write.bind(process.stderr);
   // biome-ignore lint/suspicious/noExplicitAny: stderr.write overload union
   process.stderr.write = ((chunk: any, ...args: any[]) => {
-    if (
-      typeof chunk === 'string' &&
-      chunk.includes('node-cron') &&
-      chunk.includes('Sourcemap')
-    ) {
+    if (typeof chunk === 'string' && chunk.includes('node-cron') && chunk.includes('Sourcemap')) {
       return true;
     }
     return originalWrite(chunk, ...args);
@@ -43,6 +39,9 @@ export default defineConfig({
     noExternal: ['zod'],
   },
   test: {
+    expect: {
+      requireAssertions: true,
+    },
     coverage: {
       provider: 'istanbul',
       reporter: ['text', 'json', 'html'],
@@ -108,9 +107,18 @@ export default defineConfig({
       {
         extends: true,
         test: {
+          /**
+           * `expectTypeOf` is evaluated by the typechecker and does not count as
+           * a runtime assertion in Vitest's assertion counter.
+           */
+          expect: {
+            requireAssertions: false,
+          },
           name: 'typecheck',
-          // Must match the runtime projects — vitest rejects differing
-          // maxWorkers within the same sequence group.
+          /**
+           * Must match the runtime projects — vitest rejects differing
+           * maxWorkers within the same sequence group.
+           */
           maxWorkers: 4,
           include: ['tests/types/**/*.test-d.ts'],
           typecheck: {

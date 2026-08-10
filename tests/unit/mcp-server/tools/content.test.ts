@@ -12,7 +12,7 @@
 
 import type { RequestHandlerExtra } from '@modelcontextprotocol/sdk/shared/protocol.js';
 import type { ServerNotification, ServerRequest } from '@modelcontextprotocol/sdk/types.js';
-import { beforeEach, describe, expect, expectTypeOf, it, vi } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { z } from 'zod';
 
 // ---------------------------------------------------------------------------
@@ -325,23 +325,6 @@ describe('ctx.content', () => {
 
     it('returns an empty array when no blocks were emitted', () => {
       expect(getContentBlocks(createMockContext())).toEqual([]);
-    });
-  });
-
-  describe('type surface', () => {
-    it('exposes a callable ctx.content with image/audio helpers on any tool', () => {
-      tool('typed_content', {
-        description: 'demo',
-        input: z.object({ q: z.string().describe('q') }),
-        output: z.object({ ok: z.boolean().describe('ok') }),
-        handler: (_input, ctx) => {
-          expectTypeOf(ctx.content).toBeFunction();
-          ctx.content.image(BYTES, 'image/png');
-          ctx.content.audio(BYTES, 'audio/mpeg');
-          ctx.content({ type: 'text', text: 'raw' });
-          return { ok: true };
-        },
-      });
     });
   });
 });

@@ -4,9 +4,8 @@
  * @module tests/unit/core/typed-fail.test
  */
 
-import { describe, expect, expectTypeOf, it } from 'vitest';
+import { describe, expect, it } from 'vitest';
 
-import type { HandlerContext, ReasonOf } from '@/core/context.js';
 import { createFail, createRecoveryFor } from '@/core/context.js';
 import { type ErrorContract, JsonRpcErrorCode, McpError } from '@/types-global/errors.js';
 
@@ -97,64 +96,6 @@ describe('createFail (runtime)', () => {
       reason: 'not_a_reason',
       declaredReasons: ['no_match', 'rate_limited'],
     });
-  });
-});
-
-describe('ReasonOf<E> (type-only)', () => {
-  it('extracts the literal reason union from a const tuple', () => {
-    const errors = [
-      {
-        reason: 'a',
-        code: JsonRpcErrorCode.NotFound,
-        when: 'x',
-        recovery: 'Try a different identifier and retry the call.',
-      },
-      {
-        reason: 'b',
-        code: JsonRpcErrorCode.RateLimited,
-        when: 'y',
-        recovery: 'Wait a few seconds before retrying.',
-      },
-    ] as const;
-    type R = ReasonOf<typeof errors>;
-    expectTypeOf<R>().toEqualTypeOf<'a' | 'b'>();
-  });
-
-  it('returns never for undefined', () => {
-    type R = ReasonOf<undefined>;
-    expectTypeOf<R>().toEqualTypeOf<never>();
-  });
-
-  it('returns never for the wide ErrorContract[] type (no literal narrowing)', () => {
-    type R = ReasonOf<readonly ErrorContract[]>;
-    expectTypeOf<R>().toEqualTypeOf<never>();
-  });
-
-  it('returns never for a non-contract shape', () => {
-    type R = ReasonOf<{ foo: 'bar' }>;
-    expectTypeOf<R>().toEqualTypeOf<never>();
-  });
-});
-
-describe('HandlerContext<R> (type-only)', () => {
-  it('omits fail when R is never (no contract)', () => {
-    type Ctx = HandlerContext<never>;
-    expectTypeOf<Ctx>().not.toHaveProperty('fail');
-  });
-
-  it('includes a typed fail when R is a literal union', () => {
-    type Ctx = HandlerContext<'a' | 'b'>;
-    expectTypeOf<Ctx>().toHaveProperty('fail');
-    // The fail signature should accept 'a' | 'b' but not other strings
-    type FailFn = Ctx extends { fail: infer F } ? F : never;
-    expectTypeOf<FailFn>().parameter(0).toEqualTypeOf<'a' | 'b'>();
-  });
-
-  it('includes a typed recoveryFor when R is a literal union', () => {
-    type Ctx = HandlerContext<'a' | 'b'>;
-    expectTypeOf<Ctx>().toHaveProperty('recoveryFor');
-    type RecoveryFn = Ctx extends { recoveryFor: infer F } ? F : never;
-    expectTypeOf<RecoveryFn>().parameter(0).toEqualTypeOf<'a' | 'b'>();
   });
 });
 

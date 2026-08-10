@@ -430,18 +430,18 @@ describe('TableFormatter', () => {
     });
 
     it('should log errors with context', () => {
-      const errorSpy = vi.spyOn(logger, 'error');
+      const errorSpy = vi.spyOn(logger, 'error').mockImplementation(() => {});
       const context = requestContextService.createRequestContext({
         operation: 'test',
       });
 
-      try {
-        // @ts-expect-error Testing invalid input
-        tableFormatter.format('invalid', {}, context);
-      } catch {
-        // Expected to throw
-      }
-
+      expect(() =>
+        tableFormatter.formatRaw(['A'], [['1']], { style: 'future' as never }, context),
+      ).toThrow(McpError);
+      expect(errorSpy).toHaveBeenCalledWith(
+        'Failed to render table',
+        expect.objectContaining({ operation: 'test', requestId: context.requestId }),
+      );
       errorSpy.mockRestore();
     });
 

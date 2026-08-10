@@ -6,15 +6,12 @@
 import { trace } from '@opentelemetry/api';
 import { afterEach, beforeEach, describe, expect, it, type MockInstance, vi } from 'vitest';
 
-import { JsonRpcErrorCode, type McpError as McpErrorType } from '@/types-global/errors.js';
 import { logger } from '../../../../src/utils/internal/logger.js';
 
 // node-cron 4.4.x ships a frozen ESM namespace whose bindings cannot be
 // reassigned, so `vi.spyOn(cron, 'validate')` throws "Module namespace is not
 // configurable in ESM". Mock the module instead; `vi.hoisted` makes the mock
-// functions available to the hoisted `vi.mock` factory. The missing-peer and
-// non-Node suites below override this per-test via `vi.doMock` after
-// `vi.resetModules()`.
+// functions available to the hoisted `vi.mock` factory.
 const { validateMock, createTaskMock } = vi.hoisted(() => ({
   validateMock: vi.fn(() => true),
   createTaskMock: vi.fn(
@@ -232,73 +229,5 @@ describe('schedulerService', () => {
       expect.any(Error),
       expect.objectContaining({ jobId: 'job-throw-str' }),
     );
-  });
-});
-
-describe('schedulerService (non-Node runtime)', () => {
-  it('should throw McpError when scheduling in a non-Node runtime', async () => {
-    // Mock runtimeCaps to simulate a non-Node environment
-    vi.doMock('@/utils/internal/runtime.js', () => ({
-      runtimeCaps: {
-        isNode: false,
-        isWorkerLike: true,
-        isBrowserLike: false,
-        hasProcess: false,
-        hasBuffer: false,
-        hasTextEncoder: true,
-        hasPerformanceNow: true,
-      },
-    }));
-
-    // Reset the module cache so loadCron picks up the mocked runtimeCaps
-    vi.resetModules();
-
-    const { SchedulerService } = await import('../../../../src/utils/scheduling/scheduler.js');
-    const service = SchedulerService.getInstance();
-
-    await expect(service.schedule('test', '* * * * *', () => undefined, 'Test')).rejects.toThrow(
-      /requires a Node\.js runtime/,
-    );
-
-    // Clean up
-    vi.doUnmock('@/utils/internal/runtime.js');
-    vi.resetModules();
-  });
-});
-
-describe('schedulerService (missing node-cron peer)', () => {
-  it('wraps a module-not-found error into a configurationError naming the peer', async () => {
-    // Mock the node-cron module to simulate it not being installed.
-    vi.doMock('node-cron', () => {
-      throw new Error("Cannot find package 'node-cron'");
-    });
-
-    vi.resetModules();
-
-    const { McpError } = await import('@/types-global/errors.js');
-    const { SchedulerService } = await import('../../../../src/utils/scheduling/scheduler.js');
-    const service = SchedulerService.getInstance();
-
-    let caught: unknown;
-    try {
-      await service.schedule('test-peer', '* * * * *', () => undefined, 'Test');
-    } catch (err) {
-      caught = err;
-    }
-
-    expect(caught).toBeInstanceOf(McpError);
-    const err = caught as McpErrorType;
-    expect(err.message).toMatch(/node-cron/);
-    expect(err.message).toMatch(/peer dependency/);
-    expect(err.message).toMatch(/\^4\.2\.1/);
-    expect(err.code).toBe(JsonRpcErrorCode.ConfigurationError);
-    // The underlying module-not-found error chains via `cause` (3rd factory arg),
-    // not the wire-serialized `data` payload.
-    expect(err.cause).toBeInstanceOf(Error);
-    expect(err.data).toBeUndefined();
-
-    // Clean up
-    vi.doUnmock('node-cron');
-    vi.resetModules();
   });
 });

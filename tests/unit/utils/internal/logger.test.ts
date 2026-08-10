@@ -132,8 +132,7 @@ describe('Logger', () => {
       await logger.initialize('info');
       logger.setLevel('debug');
 
-      // Should not throw
-      logger.debug('test debug after level change');
+      expect(() => logger.debug('test debug after level change')).not.toThrow();
     });
 
     it('should not throw when not initialized', () => {

@@ -4,7 +4,7 @@
  */
 
 import type { ParseError, ParseResult } from 'papaparse';
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { JsonRpcErrorCode, McpError } from '@/types-global/errors.js';
 import { logger } from '@/utils/internal/logger.js';
 import { requestContextService } from '@/utils/internal/requestContext.js';
@@ -31,6 +31,17 @@ vi.mock('papaparse', async (importOriginal) => {
       parse: mockParse,
     },
   };
+});
+
+beforeAll(async () => {
+  // Resolve the lazy peer mock before any test installs a per-case parser
+  // implementation. Otherwise a shuffled first test can have the async mock
+  // factory overwrite its implementation with the real parser.
+  await import('papaparse');
+});
+
+beforeEach(() => {
+  mockParse.mockImplementation(realParseFn);
 });
 
 afterEach(() => {

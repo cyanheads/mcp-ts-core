@@ -851,9 +851,17 @@ describe('ContextState (ctx.state)', () => {
     });
   });
 
-  it('short-circuits on an already-aborted signal before touching storage', async () => {
-    const getMock = vi.fn();
-    const fakeStorage = { get: getMock } as unknown as StorageService;
+  it('short-circuits every state operation on an already-aborted signal', async () => {
+    const methods = {
+      delete: vi.fn(),
+      deleteMany: vi.fn(),
+      get: vi.fn(),
+      getMany: vi.fn(),
+      list: vi.fn(),
+      set: vi.fn(),
+      setMany: vi.fn(),
+    };
+    const fakeStorage = methods as unknown as StorageService;
     const controller = new AbortController();
     controller.abort();
 
@@ -866,7 +874,13 @@ describe('ContextState (ctx.state)', () => {
     );
 
     await expect(ctx.state.get('any-key')).rejects.toThrow();
-    expect(getMock).not.toHaveBeenCalled();
+    await expect(ctx.state.set('any-key', 1)).rejects.toThrow();
+    await expect(ctx.state.delete('any-key')).rejects.toThrow();
+    expect(() => ctx.state.getMany(['any-key'])).toThrow();
+    expect(() => ctx.state.deleteMany(['any-key'])).toThrow();
+    await expect(ctx.state.setMany(new Map([['any-key', 1]]))).rejects.toThrow();
+    await expect(ctx.state.list('any-key')).rejects.toThrow();
+    for (const method of Object.values(methods)) expect(method).not.toHaveBeenCalled();
   });
 });
 

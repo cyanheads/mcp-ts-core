@@ -4,15 +4,16 @@
  */
 
 import { Hono } from 'hono';
-import { describe, expect, it, vi } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 
-const mockConfig = {
+const defaultMockConfig = {
   mcpAuthMode: 'oauth',
   mcpServerResourceIdentifier: undefined as string | undefined,
   oauthAudience: undefined as string | undefined,
   oauthIssuerUrl: 'https://issuer.example.com',
   mcpPublicUrl: undefined as string | undefined,
 };
+const mockConfig = { ...defaultMockConfig };
 
 const debugSpy = vi.fn();
 const createRequestContextSpy = vi.fn(() => ({
@@ -41,13 +42,28 @@ const { protectedResourceMetadataHandler } = await import(
   '@/mcp-server/transports/http/protectedResourceMetadata.js'
 );
 
+/** Reads a metadata response body, which is always a JSON object. */
+async function readMetadata(response: Response): Promise<Record<string, unknown>> {
+  const body: unknown = await response.json();
+  if (typeof body !== 'object' || body === null || Array.isArray(body)) {
+    throw new Error(`Expected a JSON object metadata body, received: ${JSON.stringify(body)}`);
+  }
+  return body as Record<string, unknown>;
+}
+
 describe('protectedResourceMetadataHandler', () => {
+  beforeEach(() => {
+    Object.assign(mockConfig, defaultMockConfig);
+    debugSpy.mockClear();
+    createRequestContextSpy.mockClear();
+  });
+
   it('returns OAuth metadata with authorization server details and cache headers', async () => {
     const app = new Hono();
     app.get('/.well-known/oauth-protected-resource', protectedResourceMetadataHandler);
 
     const response = await app.request('http://localhost/.well-known/oauth-protected-resource');
-    const data: Record<string, unknown> = await response.json();
+    const data = await readMetadata(response);
 
     expect(response.status).toBe(200);
     expect(response.headers.get('cache-control')).toBe('public, max-age=3600');
@@ -79,7 +95,7 @@ describe('protectedResourceMetadataHandler', () => {
     app.get('/.well-known/oauth-protected-resource', protectedResourceMetadataHandler);
 
     const response = await app.request('http://localhost/.well-known/oauth-protected-resource');
-    const data: Record<string, unknown> = await response.json();
+    const data = await readMetadata(response);
 
     expect(data).toEqual({
       bearer_methods_supported: ['header'],
@@ -96,7 +112,7 @@ describe('protectedResourceMetadataHandler', () => {
     app.get('/.well-known/oauth-protected-resource', protectedResourceMetadataHandler);
 
     const response = await app.request('http://localhost/.well-known/oauth-protected-resource');
-    const data: Record<string, unknown> = await response.json();
+    const data = await readMetadata(response);
 
     expect(data).toEqual({
       bearer_methods_supported: ['header'],
@@ -117,7 +133,7 @@ describe('protectedResourceMetadataHandler', () => {
     const response = await app.request(
       'http://internal.container/.well-known/oauth-protected-resource',
     );
-    const data: Record<string, unknown> = await response.json();
+    const data = await readMetadata(response);
 
     expect(data.resource).toBe('https://mcp.example.com/mcp');
   });
@@ -134,7 +150,7 @@ describe('protectedResourceMetadataHandler', () => {
     const response = await app.request(
       'http://internal.container/.well-known/oauth-protected-resource',
     );
-    const data: Record<string, unknown> = await response.json();
+    const data = await readMetadata(response);
 
     expect(data.resource).toBe('https://mcp.example.com/mcp');
   });

@@ -39,6 +39,9 @@ export default defineConfig({
     }),
   ],
   test: {
+    expect: {
+      requireAssertions: true,
+    },
     include: ['tests/worker/**/*.test.ts'],
     testTimeout: 30_000,
   },
