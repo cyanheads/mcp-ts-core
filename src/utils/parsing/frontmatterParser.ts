@@ -6,7 +6,11 @@
  */
 import { McpError, validationError } from '@/types-global/errors.js';
 import { logger } from '@/utils/internal/logger.js';
-import { type RequestContext, requestContextService } from '@/utils/internal/requestContext.js';
+import {
+  type RequestContext,
+  type RequestContextLike,
+  requestContextService,
+} from '@/utils/internal/requestContext.js';
 import { assertTextInputBudget, type ParserInputBudgetOptions } from './inputBudget.js';
 import { yamlParser } from './yamlParser.js';
 
@@ -56,8 +60,9 @@ export class FrontmatterParser {
    *
    * @template T - The expected shape of the parsed frontmatter object. Defaults to `unknown`.
    * @param markdown - The markdown string that may contain a frontmatter block.
-   * @param context - Optional {@link RequestContext} used for correlated logging.
-   * @param budget - Optional UTF-8 byte budget for the input. Defaults to 1 MiB.
+   * @param context - Optional context for correlated logging. The handler `Context`
+   *   is accepted directly.
+   * @param budget - Optional UTF-8 byte budget for the input. Unbounded when omitted.
    * @returns A {@link FrontmatterResult} with `frontmatter`, `content`, and `hasFrontmatter`.
    * @throws {McpError} With code `ValidationError` if the YAML content is present but malformed.
    * @example
@@ -73,7 +78,7 @@ export class FrontmatterParser {
    */
   async parse<T = unknown>(
     markdown: string,
-    context?: RequestContext,
+    context?: RequestContextLike | RequestContext,
     budget?: ParserInputBudgetOptions,
   ): Promise<FrontmatterResult<T>> {
     assertTextInputBudget(markdown, budget);
@@ -161,7 +166,7 @@ export class FrontmatterParser {
       }
 
       throw validationError(
-        'Failed to parse frontmatter content.',
+        `Failed to parse frontmatter content: ${error.message}`,
         { reason: 'frontmatter_parse_failed' },
         { cause: error },
       );

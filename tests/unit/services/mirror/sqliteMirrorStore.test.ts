@@ -178,75 +178,87 @@ describe('sqliteMirrorStore', () => {
     expect(page.rows.map((r) => r.id)).toEqual(['3', '4']);
   });
 
-  it.each([0, -1, 1.5, Number.NaN, Number.POSITIVE_INFINITY, 1_001])(
-    'rejects an unsafe query limit (%s)',
+  it.each([0, -1, 1.5, Number.NaN, Number.POSITIVE_INFINITY])(
+    'rejects a malformed query limit (%s)',
     async (limit) => {
       await expect(store.query({ limit, offset: 0 })).rejects.toThrow(/limit must be an integer/);
     },
   );
 
-  it.each([-1, 1.5, Number.NaN, Number.POSITIVE_INFINITY, 1_000_001])(
-    'rejects an unsafe query offset (%s)',
+  it.each([-1, 1.5, Number.NaN, Number.POSITIVE_INFINITY])(
+    'rejects a malformed query offset (%s)',
     async (offset) => {
       await expect(store.query({ limit: 1, offset })).rejects.toThrow(/offset must be an integer/);
     },
   );
 
-  it('bounds ID, filter, and filter-value cardinality while accepting each exact boundary', async () => {
-    const idsAtBoundary = Array.from({ length: 500 }, (_, index) => `id-${index}`);
-    const filtersAtBoundary = Array.from({ length: 32 }, () => ({
+  it('leaves query and batch cardinality unbounded unless the spec declares a ceiling', async () => {
+    const largeIds = Array.from({ length: 501 }, (_, index) => `id-${index}`);
+    const manyFilters = Array.from({ length: 33 }, () => ({
       column: 'category',
       op: 'eq' as const,
       value: 'cs.LG',
     }));
-    const valuesAtBoundary = Array.from({ length: 500 }, (_, index) => `category-${index}`);
+    const manyValues = Array.from({ length: 501 }, (_, index) => `category-${index}`);
 
-    await expect(store.getByIds(idsAtBoundary)).resolves.toEqual([]);
-    await expect(store.getByIds([...idsAtBoundary, 'one-too-many'])).rejects.toThrow(
-      /ID list cannot exceed 500/,
+    await expect(store.getByIds(largeIds)).resolves.toEqual([]);
+    await expect(store.query({ limit: 50_000, offset: 2_000_000 })).resolves.toMatchObject({
+      rows: [],
+      total: 0,
+    });
+    await expect(store.query({ filters: manyFilters, limit: 1, offset: 0 })).resolves.toMatchObject(
+      {
+        rows: [],
+        total: 0,
+      },
     );
     await expect(
-      store.query({ filters: filtersAtBoundary, limit: 1, offset: 0 }),
-    ).resolves.toMatchObject({ rows: [], total: 0 });
-    await expect(
       store.query({
-        filters: [...filtersAtBoundary, filtersAtBoundary[0] as (typeof filtersAtBoundary)[number]],
-        limit: 1,
-        offset: 0,
-      }),
-    ).rejects.toThrow(/cannot exceed 32 filters/);
-    await expect(
-      store.query({
-        filters: [{ column: 'category', op: 'in', value: valuesAtBoundary }],
+        filters: [{ column: 'category', op: 'in', value: manyValues }],
         limit: 1,
         offset: 0,
       }),
     ).resolves.toMatchObject({ rows: [], total: 0 });
-    await expect(
-      store.query({
-        filters: [{ column: 'category', op: 'in', value: [...valuesAtBoundary, 'one-too-many'] }],
-        limit: 1,
-        offset: 0,
-      }),
-    ).rejects.toThrow(/cannot exceed 500 bound values/);
   });
 
-  it('applies spec-declared limits in place of the defaults', async () => {
-    const bulk = sqliteMirrorStore(
-      specFor(join(dir, 'bulk.db'), { limits: { limit: 50_000, getByIds: 2 } }),
+  it('enforces spec-declared ceilings at and past their boundary', async () => {
+    const bounded = sqliteMirrorStore(
+      specFor(join(dir, 'bounded.db'), {
+        limits: { limit: 1_000, offset: 1_000_000, getByIds: 2, filters: 2, filterValues: 3 },
+      }),
     );
     try {
-      await expect(bulk.query({ limit: 50_000, offset: 0 })).resolves.toMatchObject({ total: 0 });
-      await expect(bulk.query({ limit: 50_001, offset: 0 })).rejects.toThrow(
-        /limit must be an integer from 1 to 50000/,
+      await expect(bounded.query({ limit: 1_000, offset: 1_000_000 })).resolves.toMatchObject({
+        total: 0,
+      });
+      await expect(bounded.query({ limit: 1_001, offset: 0 })).rejects.toThrow(
+        /limit must be an integer from 1 to 1000/,
       );
-      await expect(bulk.getByIds(['a', 'b', 'c'])).rejects.toThrow(/cannot exceed 2 values/);
-      // Unset fields keep their defaults rather than becoming unbounded.
-      await expect(bulk.query({ limit: 1, offset: 1_000_001 })).rejects.toThrow(
+      await expect(bounded.query({ limit: 1, offset: 1_000_001 })).rejects.toThrow(
         /offset must be an integer from 0 to 1000000/,
       );
+      await expect(bounded.getByIds(['a', 'b'])).resolves.toEqual([]);
+      await expect(bounded.getByIds(['a', 'b', 'c'])).rejects.toThrow(/cannot exceed 2 values/);
+      await expect(
+        bounded.query({
+          filters: [
+            { column: 'category', op: 'eq', value: 'a' },
+            { column: 'category', op: 'eq', value: 'b' },
+            { column: 'category', op: 'eq', value: 'c' },
+          ],
+          limit: 1,
+          offset: 0,
+        }),
+      ).rejects.toThrow(/cannot exceed 2 filters/);
+      await expect(
+        bounded.query({
+          filters: [{ column: 'category', op: 'in', value: ['a', 'b', 'c', 'd'] }],
+          limit: 1,
+          offset: 0,
+        }),
+      ).rejects.toThrow(/cannot exceed 3 bound values/);
     } finally {
-      await bulk.close();
+      await bounded.close();
     }
   });
 

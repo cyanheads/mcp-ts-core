@@ -7,7 +7,11 @@
 import { validationError } from '@/types-global/errors.js';
 import { lazyImport } from '@/utils/internal/lazyImport.js';
 import { logger } from '@/utils/internal/logger.js';
-import { type RequestContext, requestContextService } from '@/utils/internal/requestContext.js';
+import {
+  type RequestContext,
+  type RequestContextLike,
+  requestContextService,
+} from '@/utils/internal/requestContext.js';
 import { assertTextInputBudget, type ParserInputBudgetOptions } from './inputBudget.js';
 import { thinkBlockRegex } from './thinkBlock.js';
 
@@ -85,8 +89,9 @@ export class JsonParser {
    *   and/or be a partial (incomplete) JSON value.
    * @param allowPartial - Bitwise OR combination of `Allow` flags controlling which
    *   partial JSON types are accepted. Defaults to `Allow.ALL`.
-   * @param context - Optional `RequestContext` for correlated logging and error metadata.
-   * @param budget - Optional UTF-8 byte budget for the input. Defaults to 1 MiB.
+   * @param context - Optional context for correlated logging and error metadata. The
+   *   handler `Context` is accepted directly.
+   * @param budget - Optional UTF-8 byte budget for the input. Unbounded when omitted.
    * @returns The parsed JavaScript value cast to `T`.
    * @throws {McpError} With `ValidationError` if the string is empty after stripping the
    *   `<think>` block and trimming, or if `partial-json` fails to parse the content.
@@ -108,7 +113,7 @@ export class JsonParser {
   async parse<T = unknown>(
     jsonString: string,
     allowPartial: number = Allow.ALL,
-    context?: RequestContext,
+    context?: RequestContextLike | RequestContext,
     budget?: ParserInputBudgetOptions,
   ): Promise<T> {
     assertTextInputBudget(jsonString, budget);
@@ -162,7 +167,7 @@ export class JsonParser {
       });
 
       throw validationError(
-        'Failed to parse JSON content.',
+        `Failed to parse JSON content: ${error.message}`,
         { reason: 'json_parse_failed' },
         { cause: error },
       );

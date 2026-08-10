@@ -9,7 +9,7 @@ import { InMemoryProvider } from '@/storage/providers/inMemory/inMemoryProvider.
 import type { RequestContext } from '@/utils/internal/requestContext.js';
 import { requestContextService } from '@/utils/internal/requestContext.js';
 
-const MAX_BATCH_SIZE = 10_000;
+const LARGE_BATCH_SIZE = 10_001;
 
 describe('StorageService batch and pagination boundaries', () => {
   let context: RequestContext;
@@ -41,36 +41,18 @@ describe('StorageService batch and pagination boundaries', () => {
     expect(deleteMany).not.toHaveBeenCalled();
   });
 
-  it('rejects oversized batches before provider dispatch', async () => {
-    const oversizedKeys = Array.from({ length: MAX_BATCH_SIZE + 1 }, () => 'same-key');
-    const oversizedEntries = new Map<string, unknown>(
-      Array.from({ length: MAX_BATCH_SIZE + 1 }, (_, index) => [`key-${index}`, index]),
-    );
-    const getMany = vi.spyOn(provider, 'getMany');
-    const setMany = vi.spyOn(provider, 'setMany');
-    const deleteMany = vi.spyOn(provider, 'deleteMany');
-
-    await expect(storage.getMany(oversizedKeys, context)).rejects.toThrow(/maximum batch size/i);
-    await expect(storage.deleteMany(oversizedKeys, context)).rejects.toThrow(/maximum batch size/i);
-    await expect(storage.setMany(oversizedEntries, context)).rejects.toThrow(/maximum batch size/i);
-
-    expect(getMany).not.toHaveBeenCalled();
-    expect(setMany).not.toHaveBeenCalled();
-    expect(deleteMany).not.toHaveBeenCalled();
-  });
-
-  it('preserves compatibility at the finite batch boundary', async () => {
-    const boundaryKeys = Array.from({ length: MAX_BATCH_SIZE }, () => 'same-key');
-    const boundaryEntries = new Map<string, unknown>(
-      Array.from({ length: MAX_BATCH_SIZE }, (_, index) => [`key-${index}`, index]),
+  it('dispatches batches larger than the former ten-thousand-key cap', async () => {
+    const largeKeys = Array.from({ length: LARGE_BATCH_SIZE }, () => 'same-key');
+    const largeEntries = new Map<string, unknown>(
+      Array.from({ length: LARGE_BATCH_SIZE }, (_, index) => [`key-${index}`, index]),
     );
     const getMany = vi.spyOn(provider, 'getMany').mockResolvedValue(new Map());
     const setMany = vi.spyOn(provider, 'setMany').mockResolvedValue();
     const deleteMany = vi.spyOn(provider, 'deleteMany').mockResolvedValue(0);
 
-    await expect(storage.getMany(boundaryKeys, context)).resolves.toEqual(new Map());
-    await expect(storage.setMany(boundaryEntries, context)).resolves.toBeUndefined();
-    await expect(storage.deleteMany(boundaryKeys, context)).resolves.toBe(0);
+    await expect(storage.getMany(largeKeys, context)).resolves.toEqual(new Map());
+    await expect(storage.setMany(largeEntries, context)).resolves.toBeUndefined();
+    await expect(storage.deleteMany(largeKeys, context)).resolves.toBe(0);
 
     expect(getMany).toHaveBeenCalledOnce();
     expect(setMany).toHaveBeenCalledOnce();

@@ -162,7 +162,7 @@ describe('PdfParser branch boundaries', () => {
     expect(() => parser.fillForm(doc, { fields: {} }, context)).toThrow(
       expect.objectContaining({
         code: JsonRpcErrorCode.InternalError,
-        message: 'Failed to fill PDF form.',
+        message: 'Failed to fill PDF form: form access failed',
         data: { reason: 'pdf_form_fill_failed' },
       }),
     );
@@ -189,7 +189,7 @@ describe('PdfParser branch boundaries', () => {
 
     await expect(parser.createDocument(context)).rejects.toMatchObject({
       code: JsonRpcErrorCode.InternalError,
-      message: 'Failed to create PDF document.',
+      message: 'Failed to create PDF document: creation rejected',
       data: { reason: 'pdf_create_failed' },
     });
   });
@@ -199,7 +199,7 @@ describe('PdfParser branch boundaries', () => {
 
     await expect(parser.loadDocument(new Uint8Array(), context)).rejects.toMatchObject({
       code: JsonRpcErrorCode.ValidationError,
-      message: 'Failed to load PDF document.',
+      message: 'Failed to load PDF document: load rejected',
       data: { reason: 'pdf_load_failed' },
     });
   });
@@ -212,14 +212,14 @@ describe('PdfParser branch boundaries', () => {
 
     await expect(parser.embedFont(doc, 'Helvetica', context)).rejects.toMatchObject({
       code: JsonRpcErrorCode.InternalError,
-      message: 'Failed to embed PDF font.',
+      message: 'Failed to embed PDF font: font rejected',
       data: { reason: 'pdf_font_embed_failed' },
     });
     await expect(
       parser.embedImage(doc, { format: 'jpg', imageBytes: new Uint8Array([0xff, 0xd8]) }, context),
     ).rejects.toMatchObject({
       code: JsonRpcErrorCode.InternalError,
-      message: 'Failed to embed PDF image.',
+      message: 'Failed to embed PDF image: image rejected',
       data: { reason: 'pdf_image_embed_failed' },
     });
   });
@@ -228,14 +228,14 @@ describe('PdfParser branch boundaries', () => {
     vi.spyOn(PDFDocument, 'create').mockRejectedValueOnce('merge rejected');
     await expect(parser.mergePdfs([], context)).rejects.toMatchObject({
       code: JsonRpcErrorCode.InternalError,
-      message: 'Failed to merge PDF documents.',
+      message: 'Failed to merge PDF documents: merge rejected',
       data: { reason: 'pdf_merge_failed' },
     });
 
     vi.spyOn(PDFDocument, 'load').mockRejectedValueOnce('split rejected');
     await expect(parser.splitPdf(new Uint8Array(), [], context)).rejects.toMatchObject({
       code: JsonRpcErrorCode.InternalError,
-      message: 'Failed to split PDF document.',
+      message: 'Failed to split PDF document: split rejected',
       data: { reason: 'pdf_split_failed' },
     });
   });
@@ -247,21 +247,25 @@ describe('PdfParser branch boundaries', () => {
 
     await expect(parser.extractText(doc, undefined, context)).rejects.toMatchObject({
       code: JsonRpcErrorCode.InternalError,
-      message: 'Failed to extract text from PDF.',
+      message: 'Failed to extract text from PDF: save rejected',
       data: { reason: 'pdf_text_extract_failed' },
     });
     await expect(parser.saveDocument(doc, context)).rejects.toBeInstanceOf(McpError);
     await expect(parser.saveDocument(doc, context)).rejects.toMatchObject({
       code: JsonRpcErrorCode.InternalError,
-      message: 'Failed to save PDF document.',
+      message: 'Failed to save PDF document: save rejected',
       data: { reason: 'pdf_save_failed' },
     });
   });
 
-  it('keeps stack paths and sentinel diagnostics out of public PDF errors', async () => {
-    const sentinel = 'SUPERSECRET at parser (/Users/example/private/pdf.ts:1:1)';
+  it('carries the library diagnostic in the message and keeps the stack out of data', async () => {
+    const libraryFailure = new Error('Cannot serialize an encrypted document');
+    Object.defineProperty(libraryFailure, 'stack', {
+      value:
+        'Error: Cannot serialize an encrypted document\n    at save (/Users/example/pdf.ts:1:1)',
+    });
     const doc = {
-      save: vi.fn().mockRejectedValue(new Error(sentinel)),
+      save: vi.fn().mockRejectedValue(libraryFailure),
     } as unknown as PDFDocument;
 
     const failure = (await parser
@@ -269,11 +273,13 @@ describe('PdfParser branch boundaries', () => {
       .catch((error: unknown) => error)) as McpError;
     const publicError = JSON.stringify({ message: failure.message, data: failure.data });
 
-    expect(publicError).not.toContain('SUPERSECRET');
-    expect(publicError).not.toContain('/Users/example/private');
-    expect(publicError).not.toContain(' at parser ');
+    expect(failure.message).toBe(
+      'Failed to save PDF document: Cannot serialize an encrypted document',
+    );
+    expect(publicError).not.toContain('/Users/example/pdf.ts');
+    expect(publicError).not.toContain('    at save');
     expect(failure.data).toEqual({ reason: 'pdf_save_failed' });
-    expect(failure.cause).toBeInstanceOf(Error);
+    expect(failure.cause).toBe(libraryFailure);
   });
 
   it('surfaces an already-classified failure instead of relabelling it (#306)', async () => {

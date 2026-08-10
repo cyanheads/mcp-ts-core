@@ -75,32 +75,31 @@ describe('XmlParser', () => {
 
   it('wraps parser errors in an McpError and logs details', async () => {
     const parser = new XmlParser();
-    const sentinel = 'SUPERSECRET at parser (/Users/example/private/xml.ts:1:1)';
-    const xml = `<\n${sentinel}`; // triggers fast-xml-parser failure
+    const marker = 'TAIL_MARKER_NOT_IN_DIAGNOSTIC';
+    const xml = `<\n${'x'.repeat(400)} ${marker}`; // triggers fast-xml-parser failure
 
     const failure = (await parser.parse(xml).catch((error: unknown) => error)) as McpError;
+    const cause = failure.cause as Error;
 
     expect(failure).toBeInstanceOf(McpError);
+    expect(cause).toBeInstanceOf(Error);
     expect(failure).toMatchObject({
       code: JsonRpcErrorCode.ValidationError,
-      message: 'Failed to parse XML content.',
+      message: `Failed to parse XML content: ${cause.message}`,
       data: { reason: 'xml_parse_failed' },
     });
-    expect(JSON.stringify({ message: failure.message, data: failure.data })).not.toContain(
-      sentinel,
-    );
-    expect(failure.cause).toBeInstanceOf(Error);
+    expect(JSON.stringify({ message: failure.message, data: failure.data })).not.toContain(marker);
 
     expect(errorSpy).toHaveBeenCalledWith(
       'Failed to parse XML content.',
       expect.objectContaining({
         errorDetails: expect.any(String),
-        contentAttempted: xml,
+        contentAttempted: xml.substring(0, 200),
       }),
     );
   });
 
-  it('rejects XML nested beyond the configured parser ceiling', async () => {
+  it("rejects XML nested beyond fast-xml-parser's own depth bound", async () => {
     const parser = new XmlParser();
     const nested = `${'<node>'.repeat(102)}value${'</node>'.repeat(102)}`;
 

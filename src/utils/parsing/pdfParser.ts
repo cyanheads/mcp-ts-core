@@ -9,7 +9,11 @@ import type { PDFDocument, PDFFont, PDFImage, PDFPage, RGB } from 'pdf-lib';
 import { JsonRpcErrorCode, McpError } from '@/types-global/errors.js';
 import { lazyImport } from '@/utils/internal/lazyImport.js';
 import { logger } from '@/utils/internal/logger.js';
-import { type RequestContext, requestContextService } from '@/utils/internal/requestContext.js';
+import {
+  type RequestContext,
+  type RequestContextLike,
+  requestContextService,
+} from '@/utils/internal/requestContext.js';
 import {
   assertBinaryInputBudget,
   assertBinaryInputsBudget,
@@ -27,9 +31,11 @@ const getUnpdf = lazyImport(
 );
 
 /**
- * Build the client-facing PDF failure envelope without copying parser/library
- * diagnostics into `McpError.data` or `message`. The original failure remains
- * available to the internal error pipeline through `cause`.
+ * Build the client-facing PDF failure envelope: a fixed summary plus the
+ * library's own diagnostic, which is what tells a caller how to repair the
+ * input. `data` carries only the stable `reason` discriminator — never a
+ * content sample or a stack, both of which stay on `cause` for the internal
+ * error pipeline.
  *
  * An `McpError` thrown from inside the operation is already classified and
  * client-safe — most often the `ConfigurationError` a lazy import raises for a
@@ -38,12 +44,12 @@ const getUnpdf = lazyImport(
  */
 function pdfFailure(
   code: JsonRpcErrorCode.InternalError | JsonRpcErrorCode.ValidationError,
-  message: string,
+  summary: string,
   reason: string,
   cause: Error,
 ): McpError {
   if (cause instanceof McpError) return cause;
-  return new McpError(code, message, { reason }, { cause });
+  return new McpError(code, `${summary}: ${cause.message}`, { reason }, { cause });
 }
 
 /**
@@ -122,7 +128,7 @@ export interface EmbedImageOptions {
    * Image data as Uint8Array or ArrayBuffer.
    */
   imageBytes: Uint8Array | ArrayBuffer;
-  /** Input budget in bytes. Defaults to 25 MiB; raise it for known-large images. */
+  /** Input budget in bytes. Unbounded when omitted. */
   maxBytes?: number;
 }
 
@@ -282,8 +288,13 @@ export interface FillFormOptions {
  * Options for extracting text from a PDF document.
  */
 export interface ExtractTextOptions {
-  /** Input budget in bytes. Defaults to 25 MiB; raise it for known-large documents. */
+  /** Input budget in bytes. Unbounded when omitted. */
   maxBytes?: number;
+  /**
+   * Ceiling in pixels on a single decoded image, forwarded to pdf.js as
+   * `maxImageSize`. Unbounded when omitted, matching pdf.js's own default.
+   */
+  maxImageSize?: number;
   /**
    * Whether to merge all pages into a single string.
    * If true, returns text as a single string.
@@ -323,7 +334,8 @@ export class PdfParser {
    *
    * Async due to lazy loading of the `pdf-lib` peer dependency (`bun add pdf-lib`).
    *
-   * @param context - Optional `RequestContext` for correlated logging and error metadata.
+   * @param context - Optional context for correlated logging and error metadata. The
+   *   handler `Context` is accepted directly.
    * @returns A new empty `PDFDocument` instance.
    * @throws {McpError} With `ConfigurationError` if `pdf-lib` is not installed.
    * @throws {McpError} With `InternalError` if document creation fails.
@@ -333,7 +345,7 @@ export class PdfParser {
    * const page = pdfParser.addPage(doc);
    * ```
    */
-  async createDocument(context?: RequestContext): Promise<PDFDocument> {
+  async createDocument(context?: RequestContextLike | RequestContext): Promise<PDFDocument> {
     const logContext =
       context ||
       requestContextService.createRequestContext({
@@ -354,7 +366,7 @@ export class PdfParser {
 
       throw pdfFailure(
         JsonRpcErrorCode.InternalError,
-        'Failed to create PDF document.',
+        'Failed to create PDF document',
         'pdf_create_failed',
         error,
       );
@@ -367,8 +379,9 @@ export class PdfParser {
    * Async due to lazy loading of the `pdf-lib` peer dependency (`bun add pdf-lib`).
    *
    * @param pdfBytes - The PDF file contents as `Uint8Array` or `ArrayBuffer`.
-   * @param context - Optional `RequestContext` for correlated logging and error metadata.
-   * @param budget - Optional byte budget for the input. Defaults to 25 MiB.
+   * @param context - Optional context for correlated logging and error metadata. The
+   *   handler `Context` is accepted directly.
+   * @param budget - Optional byte budget for the input. Unbounded when omitted.
    * @returns The loaded `PDFDocument` instance.
    * @throws {McpError} With `ConfigurationError` if `pdf-lib` is not installed.
    * @throws {McpError} With `ValidationError` if the bytes are not a valid PDF.
@@ -381,7 +394,7 @@ export class PdfParser {
    */
   async loadDocument(
     pdfBytes: Uint8Array | ArrayBuffer,
-    context?: RequestContext,
+    context?: RequestContextLike | RequestContext,
     budget?: ParserInputBudgetOptions,
   ): Promise<PDFDocument> {
     const byteLength = assertBinaryInputBudget(pdfBytes, budget);
@@ -409,7 +422,7 @@ export class PdfParser {
 
       throw pdfFailure(
         JsonRpcErrorCode.ValidationError,
-        'Failed to load PDF document.',
+        'Failed to load PDF document',
         'pdf_load_failed',
         error,
       );
@@ -444,7 +457,8 @@ export class PdfParser {
    *
    * @param doc - The `PDFDocument` to embed the font into.
    * @param fontName - A `StandardFonts` key. Defaults to `'Helvetica'`.
-   * @param context - Optional `RequestContext` for correlated logging and error metadata.
+   * @param context - Optional context for correlated logging and error metadata. The
+   *   handler `Context` is accepted directly.
    * @returns The embedded `PDFFont` ready to pass to `drawText`.
    * @throws {McpError} With `ConfigurationError` if `pdf-lib` is not installed.
    * @throws {McpError} With `InternalError` if the font name is invalid or embedding fails.
@@ -456,7 +470,7 @@ export class PdfParser {
   async embedFont(
     doc: PDFDocument,
     fontName: string = 'Helvetica',
-    context?: RequestContext,
+    context?: RequestContextLike | RequestContext,
   ): Promise<PDFFont> {
     const logContext =
       context ||
@@ -483,7 +497,7 @@ export class PdfParser {
 
       throw pdfFailure(
         JsonRpcErrorCode.InternalError,
-        'Failed to embed PDF font.',
+        'Failed to embed PDF font',
         'pdf_font_embed_failed',
         error,
       );
@@ -498,7 +512,8 @@ export class PdfParser {
    *
    * @param doc - The `PDFDocument` to embed the image into.
    * @param options - Image bytes and format (`'png'` or `'jpg'`).
-   * @param context - Optional `RequestContext` for correlated logging and error metadata.
+   * @param context - Optional context for correlated logging and error metadata. The
+   *   handler `Context` is accepted directly.
    * @returns The embedded `PDFImage`, usable as the `image` option in `drawImage`.
    * @throws {McpError} With `ConfigurationError` if `pdf-lib` is not installed.
    * @throws {McpError} With `InternalError` if the image data is invalid or embedding fails.
@@ -513,7 +528,7 @@ export class PdfParser {
   async embedImage(
     doc: PDFDocument,
     options: EmbedImageOptions,
-    context?: RequestContext,
+    context?: RequestContextLike | RequestContext,
   ): Promise<PDFImage> {
     assertBinaryInputBudget(options.imageBytes, options);
     const logContext =
@@ -544,7 +559,7 @@ export class PdfParser {
 
       throw pdfFailure(
         JsonRpcErrorCode.InternalError,
-        'Failed to embed PDF image.',
+        'Failed to embed PDF image',
         'pdf_image_embed_failed',
         error,
       );
@@ -685,8 +700,9 @@ export class PdfParser {
    * `pdf-lib` (`bun add pdf-lib`).
    *
    * @param pdfBytesArray - Source PDF files as `Uint8Array` or `ArrayBuffer` elements.
-   * @param context - Optional `RequestContext` for correlated logging and error metadata.
-   * @param budget - Optional aggregate byte budget across all inputs. Defaults to 25 MiB.
+   * @param context - Optional context for correlated logging and error metadata. The
+   *   handler `Context` is accepted directly.
+   * @param budget - Optional aggregate byte budget across all inputs. Unbounded when omitted.
    * @returns A new `PDFDocument` containing all pages from the input documents.
    * @throws {McpError} With `ConfigurationError` if `pdf-lib` is not installed.
    * @throws {McpError} With `InternalError` if any source PDF is invalid or merging fails.
@@ -701,7 +717,7 @@ export class PdfParser {
    */
   async mergePdfs(
     pdfBytesArray: (Uint8Array | ArrayBuffer)[],
-    context?: RequestContext,
+    context?: RequestContextLike | RequestContext,
     budget?: ParserInputBudgetOptions,
   ): Promise<PDFDocument> {
     const presentInputs = pdfBytesArray.filter(Boolean);
@@ -743,7 +759,7 @@ export class PdfParser {
 
       throw pdfFailure(
         JsonRpcErrorCode.InternalError,
-        'Failed to merge PDF documents.',
+        'Failed to merge PDF documents',
         'pdf_merge_failed',
         error,
       );
@@ -759,8 +775,9 @@ export class PdfParser {
    *
    * @param pdfBytes - The source PDF as `Uint8Array` or `ArrayBuffer`.
    * @param ranges - Page ranges to extract; each produces one output document.
-   * @param context - Optional `RequestContext` for correlated logging and error metadata.
-   * @param budget - Optional byte budget for the input. Defaults to 25 MiB.
+   * @param context - Optional context for correlated logging and error metadata. The
+   *   handler `Context` is accepted directly.
+   * @param budget - Optional byte budget for the input. Unbounded when omitted.
    * @returns An array of new `PDFDocument` instances, one per range, in order.
    * @throws {McpError} With `ConfigurationError` if `pdf-lib` is not installed.
    * @throws {McpError} With `InternalError` if the source PDF is invalid or a page index is out of bounds.
@@ -777,7 +794,7 @@ export class PdfParser {
   async splitPdf(
     pdfBytes: Uint8Array | ArrayBuffer,
     ranges: PageRange[],
-    context?: RequestContext,
+    context?: RequestContextLike | RequestContext,
     budget?: ParserInputBudgetOptions,
   ): Promise<PDFDocument[]> {
     assertBinaryInputBudget(pdfBytes, budget);
@@ -826,7 +843,7 @@ export class PdfParser {
 
       throw pdfFailure(
         JsonRpcErrorCode.InternalError,
-        'Failed to split PDF document.',
+        'Failed to split PDF document',
         'pdf_split_failed',
         error,
       );
@@ -843,7 +860,8 @@ export class PdfParser {
    *
    * @param doc - The `PDFDocument` containing the AcroForm.
    * @param options - Map of field names to values, plus optional `flatten` flag.
-   * @param context - Optional `RequestContext` for correlated logging and error metadata.
+   * @param context - Optional context for correlated logging and error metadata. The
+   *   handler `Context` is accepted directly.
    * @throws {McpError} With `InternalError` if the overall form operation fails.
    * @example
    * ```typescript
@@ -857,7 +875,11 @@ export class PdfParser {
    * });
    * ```
    */
-  fillForm(doc: PDFDocument, options: FillFormOptions, context?: RequestContext): void {
+  fillForm(
+    doc: PDFDocument,
+    options: FillFormOptions,
+    context?: RequestContextLike | RequestContext,
+  ): void {
     const logContext =
       context ||
       requestContextService.createRequestContext({
@@ -921,7 +943,7 @@ export class PdfParser {
 
       throw pdfFailure(
         JsonRpcErrorCode.InternalError,
-        'Failed to fill PDF form.',
+        'Failed to fill PDF form',
         'pdf_form_fill_failed',
         error,
       );
@@ -1009,7 +1031,8 @@ export class PdfParser {
    * @param input - Raw PDF bytes (`Uint8Array` | `ArrayBuffer`) or a loaded `PDFDocument`.
    * @param options - Optional extraction options. Set `mergePages: true` to get a
    *   single concatenated string instead of one string per page.
-   * @param context - Optional `RequestContext` for correlated logging and error metadata.
+   * @param context - Optional context for correlated logging and error metadata. The
+   *   handler `Context` is accepted directly.
    * @returns An `ExtractTextResult` with `totalPages` and `text` — a `string[]` (one
    *   per page) by default, or a single `string` when `mergePages` is `true`.
    * @throws {McpError} With `ConfigurationError` if `unpdf` is not installed (or
@@ -1029,7 +1052,7 @@ export class PdfParser {
   async extractText(
     input: PDFDocument | Uint8Array | ArrayBuffer,
     options?: ExtractTextOptions,
-    context?: RequestContext,
+    context?: RequestContextLike | RequestContext,
   ): Promise<ExtractTextResult> {
     const logContext =
       context ||
@@ -1056,7 +1079,7 @@ export class PdfParser {
         });
         throw pdfFailure(
           JsonRpcErrorCode.InternalError,
-          'Failed to extract text from PDF.',
+          'Failed to extract text from PDF',
           'pdf_text_extract_failed',
           error,
         );
@@ -1073,9 +1096,10 @@ export class PdfParser {
       });
 
       const { getDocumentProxy, extractText: unpdfExtractText } = await getUnpdf();
-      // Cap decoded images at 4096×4096 pixels (pdf.js defaults to unbounded), so a
-      // crafted page cannot force a huge raster allocation during extraction.
-      const pdfProxy = await getDocumentProxy(pdfBytes, { maxImageSize: 4096 * 4096 });
+      const pdfProxy =
+        options?.maxImageSize === undefined
+          ? await getDocumentProxy(pdfBytes)
+          : await getDocumentProxy(pdfBytes, { maxImageSize: options.maxImageSize });
 
       const result: { totalPages: number; text: string | string[] } = mergePages
         ? await unpdfExtractText(pdfProxy, { mergePages: true })
@@ -1102,7 +1126,7 @@ export class PdfParser {
 
       throw pdfFailure(
         JsonRpcErrorCode.InternalError,
-        'Failed to extract text from PDF.',
+        'Failed to extract text from PDF',
         'pdf_text_extract_failed',
         error,
       );
@@ -1116,7 +1140,8 @@ export class PdfParser {
    * compatible). Does not reload peer dependencies if already cached.
    *
    * @param doc - The `PDFDocument` to serialize.
-   * @param context - Optional `RequestContext` for correlated logging and error metadata.
+   * @param context - Optional context for correlated logging and error metadata. The
+   *   handler `Context` is accepted directly.
    * @returns The complete PDF file as a `Uint8Array`.
    * @throws {McpError} With `InternalError` if serialization fails.
    * @example
@@ -1126,7 +1151,10 @@ export class PdfParser {
    * await writeFile('output.pdf', pdfBytes);
    * ```
    */
-  async saveDocument(doc: PDFDocument, context?: RequestContext): Promise<Uint8Array> {
+  async saveDocument(
+    doc: PDFDocument,
+    context?: RequestContextLike | RequestContext,
+  ): Promise<Uint8Array> {
     const logContext =
       context ||
       requestContextService.createRequestContext({
@@ -1150,7 +1178,7 @@ export class PdfParser {
 
       throw pdfFailure(
         JsonRpcErrorCode.InternalError,
-        'Failed to save PDF document.',
+        'Failed to save PDF document',
         'pdf_save_failed',
         error,
       );

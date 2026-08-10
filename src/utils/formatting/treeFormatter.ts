@@ -6,7 +6,11 @@
 
 import { JsonRpcErrorCode, McpError, validationError } from '@/types-global/errors.js';
 import { logger } from '@/utils/internal/logger.js';
-import { type RequestContext, requestContextService } from '@/utils/internal/requestContext.js';
+import {
+  type RequestContext,
+  type RequestContextLike,
+  requestContextService,
+} from '@/utils/internal/requestContext.js';
 
 /**
  * Tree output style options.
@@ -212,7 +216,11 @@ export class TreeFormatter {
    * //     └── 📄 types.ts
    * ```
    */
-  format(root: TreeNode, options?: TreeFormatterOptions, context?: RequestContext): string {
+  format(
+    root: TreeNode,
+    options?: TreeFormatterOptions,
+    context?: RequestContextLike | RequestContext,
+  ): string {
     const logContext =
       context ||
       requestContextService.createRequestContext({
@@ -304,7 +312,7 @@ export class TreeFormatter {
   formatMultiple(
     roots: TreeNode[],
     options?: TreeFormatterOptions,
-    context?: RequestContext,
+    context?: RequestContextLike | RequestContext,
   ): string {
     const logContext =
       context ||

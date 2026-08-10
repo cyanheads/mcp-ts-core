@@ -14,7 +14,7 @@ import {
 } from '@opentelemetry/api';
 
 import { config } from '@/config/index.js';
-import type { RequestContext } from '@/utils/internal/requestContext.js';
+import type { RequestContext, RequestContextLike } from '@/utils/internal/requestContext.js';
 import { requestContextService } from '@/utils/internal/requestContext.js';
 
 /**
@@ -48,7 +48,7 @@ export interface TraceparentInfo {
  * }
  * ```
  */
-export function buildTraceparent(ctx?: RequestContext): string | undefined {
+export function buildTraceparent(ctx?: RequestContextLike | RequestContext): string | undefined {
   const traceId =
     (ctx?.traceId as string | undefined) ?? trace.getActiveSpan()?.spanContext().traceId;
   const spanId = (ctx?.spanId as string | undefined) ?? trace.getActiveSpan()?.spanContext().spanId;
@@ -222,7 +222,10 @@ export async function withSpan<T>(
  * }, 1000);
  * ```
  */
-export function runInContext<T>(ctx: RequestContext | undefined, fn: () => T): T {
+export function runInContext<T>(
+  ctx: RequestContextLike | RequestContext | undefined,
+  fn: () => T,
+): T {
   // If no trace context, run directly
   if (!ctx?.traceId || !ctx?.spanId) {
     return fn();

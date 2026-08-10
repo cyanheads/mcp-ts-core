@@ -9,7 +9,7 @@ import { JsonRpcErrorCode } from '@/types-global/errors.js';
 import { ErrorHandler } from '@/utils/internal/error-handler/errorHandler.js';
 import { lazyImport } from '@/utils/internal/lazyImport.js';
 import { logger } from '@/utils/internal/logger.js';
-import type { RequestContext } from '@/utils/internal/requestContext.js';
+import type { RequestContext, RequestContextLike } from '@/utils/internal/requestContext.js';
 
 const getChrono = lazyImport(
   () => import('chrono-node'),
@@ -27,7 +27,8 @@ const getChrono = lazyImport(
  * (`bun add chrono-node`).
  *
  * @param text - The natural language date string to parse (e.g. `"next Friday at 3pm"`).
- * @param context - `RequestContext` for correlated logging and error metadata.
+ * @param context - Context for correlated logging and error metadata. The handler
+ *   `Context` is accepted directly.
  * @param refDate - Reference date for relative expressions. Defaults to the current date/time.
  * @returns A `Date` object if a date was found, or `null` if parsing yields no result.
  * @throws {McpError} With `ConfigurationError` if `chrono-node` is not installed.
@@ -35,7 +36,7 @@ const getChrono = lazyImport(
  */
 export async function parseDateString(
   text: string,
-  context: RequestContext,
+  context: RequestContextLike | RequestContext,
   refDate?: Date,
 ): Promise<Date | null> {
   // Resolve dependency outside ErrorHandler.tryCatch — a missing peer dep is a
@@ -82,7 +83,8 @@ export async function parseDateString(
  * (`bun add chrono-node`).
  *
  * @param text - The natural language date string to parse.
- * @param context - `RequestContext` for correlated logging and error metadata.
+ * @param context - Context for correlated logging and error metadata. The handler
+ *   `Context` is accepted directly.
  * @param refDate - Reference date for relative expressions. Defaults to the current date/time.
  * @returns An array of `chrono.ParsedResult` objects — one per date expression found.
  *   Empty array if no dates are present in the text.
@@ -91,7 +93,7 @@ export async function parseDateString(
  */
 export async function parseDateStringDetailed(
   text: string,
-  context: RequestContext,
+  context: RequestContextLike | RequestContext,
   refDate?: Date,
 ): Promise<chrono.ParsedResult[]> {
   const chronoMod = await getChrono();
@@ -151,7 +153,8 @@ export const dateParser = {
    * Async due to lazy loading of `chrono-node` (`bun add chrono-node`).
    *
    * @param text - The natural language date string to parse.
-   * @param context - `RequestContext` for correlated logging and error metadata.
+   * @param context - Context for correlated logging and error metadata. The handler
+   *   `Context` is accepted directly.
    * @param refDate - Reference date for relative expressions. Defaults to now.
    * @returns An array of `chrono.ParsedResult` objects; empty if no dates found.
    * @throws {McpError} With `ConfigurationError` if `chrono-node` is not installed.
@@ -164,7 +167,8 @@ export const dateParser = {
    * Async due to lazy loading of `chrono-node` (`bun add chrono-node`).
    *
    * @param text - The natural language date string to parse.
-   * @param context - `RequestContext` for correlated logging and error metadata.
+   * @param context - Context for correlated logging and error metadata. The handler
+   *   `Context` is accepted directly.
    * @param refDate - Reference date for relative expressions. Defaults to now.
    * @returns A `Date` if a date expression was found, or `null` if none was recognized.
    * @throws {McpError} With `ConfigurationError` if `chrono-node` is not installed.

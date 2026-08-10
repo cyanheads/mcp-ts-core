@@ -280,8 +280,8 @@ describe('Tool Handler Pipeline Fuzz Tests', () => {
       }
     });
 
-    it('parser failures keep input samples and stack paths out of the complete result', async () => {
-      const sentinel = 'SUPERSECRET at parser (/Users/example/private/parser.ts:1:1)';
+    it('parser failures carry the diagnostic but no input sample or stack path', async () => {
+      const marker = 'TAIL_MARKER_NOT_IN_DIAGNOSTIC';
       const def = tool('fuzz_parser_leak_check', {
         description: 'Parses caller-provided JSON.',
         input: z.object({ payload: z.string().describe('JSON payload') }),
@@ -293,17 +293,20 @@ describe('Tool Handler Pipeline Fuzz Tests', () => {
       });
 
       const handler = createToolHandler(def as AnyToolDefinition, services, notifiers);
-      const result = await handler({ payload: `not-json ${sentinel}` }, createSdkContext());
+      const result = await handler(
+        { payload: `not-json ${'x'.repeat(400)} ${marker}` },
+        createSdkContext(),
+      );
       const serializedResult = JSON.stringify(result);
 
       expect(result.isError).toBe(true);
-      expect(serializedResult).not.toContain('SUPERSECRET');
-      expect(serializedResult).not.toContain('/Users/example/private');
+      expect(serializedResult).not.toContain(marker);
+      expect(serializedResult).not.toMatch(/\/Users\/|\/home\//);
       expect(serializedResult).not.toMatch(/\bat\s+\S+\s+\(/);
       expect(result.structuredContent).toEqual({
         error: {
           code: JsonRpcErrorCode.ValidationError,
-          message: 'Failed to parse JSON content.',
+          message: expect.stringContaining('Failed to parse JSON content: '),
           data: { reason: 'json_parse_failed' },
         },
       });

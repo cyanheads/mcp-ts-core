@@ -122,20 +122,18 @@ describe('JsonParser', () => {
     }
   });
 
-  it('keeps untrusted content and parser diagnostics out of the public error', async () => {
-    const sentinel = 'SUPERSECRET at parser (/Users/example/private/parser.ts:1:1)';
-    try {
-      await parser.parse(`not-json ${sentinel}`, Allow.ALL, context);
-      throw new Error('Expected parser.parse to throw');
-    } catch (error) {
-      const mcpError = error as McpError;
-      expect(mcpError.message).toBe('Failed to parse JSON content.');
-      expect(mcpError.data).toEqual({ reason: 'json_parse_failed' });
-      expect(JSON.stringify({ message: mcpError.message, data: mcpError.data })).not.toContain(
-        sentinel,
-      );
-      expect(mcpError.cause).toBeInstanceOf(Error);
-    }
+  it('carries the parser diagnostic in the message and keeps the sample and stack out of data', async () => {
+    const marker = 'TAIL_MARKER_NOT_IN_DIAGNOSTIC';
+    const failure = (await parser
+      .parse(`not-json ${'x'.repeat(400)} ${marker}`, Allow.ALL, context)
+      .catch((error: unknown) => error)) as McpError;
+    const cause = failure.cause as Error;
+
+    expect(cause).toBeInstanceOf(Error);
+    expect(failure.code).toBe(JsonRpcErrorCode.ValidationError);
+    expect(failure.message).toBe(`Failed to parse JSON content: ${cause.message}`);
+    expect(failure.data).toEqual({ reason: 'json_parse_failed' });
+    expect(JSON.stringify({ message: failure.message, data: failure.data })).not.toContain(marker);
   });
 
   it('logs parse failures with an auto-created context when none is provided', async () => {

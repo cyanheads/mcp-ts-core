@@ -57,25 +57,32 @@ describe('parser input budgets', () => {
     for (const maxBytes of [0, -1, 1.5, Number.NaN, Number.POSITIVE_INFINITY]) {
       expect(() => assertTextInputBudget('x', { maxBytes })).toThrowError(
         expect.objectContaining({
-          data: {
-            reason: 'parser_input_limit_invalid',
-            limitBytes: DEFAULT_TEXT_PARSER_MAX_BYTES,
-          },
+          data: { reason: 'parser_input_limit_invalid' },
         }),
       );
     }
   });
 
-  it('lets a caller raise the budget above the default for known-large documents', () => {
-    const oversized = 'x'.repeat(DEFAULT_TEXT_PARSER_MAX_BYTES + 1);
-    expect(() => assertTextInputBudget(oversized)).toThrow(McpError);
-    expect(assertTextInputBudget(oversized, { maxBytes: oversized.length })).toBe(oversized.length);
+  it('applies no budget at all unless the caller supplies one', () => {
+    const oversizedText = 'x'.repeat(DEFAULT_TEXT_PARSER_MAX_BYTES + 1);
+    expect(assertTextInputBudget(oversizedText)).toBe(oversizedText.length);
+    expect(() =>
+      assertTextInputBudget(oversizedText, { maxBytes: oversizedText.length - 1 }),
+    ).toThrow(McpError);
 
-    const binary = new Uint8Array(DEFAULT_BINARY_PARSER_MAX_BYTES + 1);
-    expect(() => assertBinaryInputBudget(binary)).toThrow(McpError);
-    expect(assertBinaryInputBudget(binary, { maxBytes: binary.byteLength })).toBe(
-      binary.byteLength,
-    );
+    const oversizedBinary = new Uint8Array(DEFAULT_BINARY_PARSER_MAX_BYTES + 1);
+    expect(assertBinaryInputBudget(oversizedBinary)).toBe(oversizedBinary.byteLength);
+    expect(() =>
+      assertBinaryInputBudget(oversizedBinary, { maxBytes: oversizedBinary.byteLength - 1 }),
+    ).toThrow(McpError);
+  });
+
+  it('parses a document past the suggested text ceiling when no budget is given', async () => {
+    const oversized = `{"blob":"${'x'.repeat(DEFAULT_TEXT_PARSER_MAX_BYTES)}"}`;
+
+    await expect(jsonParser.parse<{ blob: string }>(oversized, Allow.ALL)).resolves.toMatchObject({
+      blob: expect.any(String),
+    });
   });
 
   it('enforces the JSON budget before think-block stripping', async () => {

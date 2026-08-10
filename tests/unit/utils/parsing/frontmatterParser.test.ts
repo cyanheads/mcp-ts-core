@@ -297,34 +297,31 @@ Content`;
     });
 
     it('normalizes a non-Error YAML parser failure', async () => {
-      vi.spyOn(yamlParser, 'parse').mockRejectedValueOnce(
-        'SUPERSECRET at parser (/Users/example/private/frontmatter.ts:1:1)',
-      );
+      vi.spyOn(yamlParser, 'parse').mockRejectedValueOnce('mapping values are not allowed here');
       const markdown = '---\ntitle: Test\n---\nContent';
 
       await expect(frontmatterParser.parse(markdown)).rejects.toMatchObject({
         code: JsonRpcErrorCode.ValidationError,
-        message: 'Failed to parse frontmatter content.',
+        message: 'Failed to parse frontmatter content: mapping values are not allowed here',
         data: { reason: 'frontmatter_parse_failed' },
       });
     });
 
-    it('keeps YAML content and parser diagnostics out of a non-framework error', async () => {
-      const sentinel = 'SUPERSECRET at parser (/Users/example/private/frontmatter.ts:1:1)';
-      vi.spyOn(yamlParser, 'parse').mockRejectedValueOnce(new Error(sentinel));
-      const yaml = `title: ${sentinel}`;
+    it('carries the parser diagnostic in the message and keeps the sample and stack out of data', async () => {
+      const marker = 'TAIL_MARKER_NOT_IN_DIAGNOSTIC';
+      vi.spyOn(yamlParser, 'parse').mockRejectedValueOnce(new Error('bad indentation'));
 
-      try {
-        await frontmatterParser.parse(`---\n${yaml}\n---\nContent`);
-        throw new Error('expected parse to fail');
-      } catch (error) {
-        const mcpError = error as McpError;
-        const publicError = JSON.stringify({ message: mcpError.message, data: mcpError.data });
-        expect(publicError).not.toContain('SUPERSECRET');
-        expect(publicError).not.toContain('/Users/example/private');
-        expect(mcpError.data).toEqual({ reason: 'frontmatter_parse_failed' });
-        expect(mcpError.cause).toBeInstanceOf(Error);
-      }
+      const failure = (await frontmatterParser
+        .parse(`---\ntitle: ${marker}\n---\nContent`)
+        .catch((error: unknown) => error)) as McpError;
+      const cause = failure.cause as Error;
+
+      expect(cause).toBeInstanceOf(Error);
+      expect(failure.message).toBe(`Failed to parse frontmatter content: ${cause.message}`);
+      expect(failure.data).toEqual({ reason: 'frontmatter_parse_failed' });
+      expect(JSON.stringify({ message: failure.message, data: failure.data })).not.toContain(
+        marker,
+      );
     });
   });
 

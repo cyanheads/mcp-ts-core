@@ -208,7 +208,9 @@ describe('PdfParser', () => {
       } catch (error) {
         const mcpError = error as McpError;
         expect(mcpError.code).toBe(JsonRpcErrorCode.InternalError);
-        expect(mcpError.message).toBe('Failed to embed PDF font.');
+        expect(mcpError.message).toBe(
+          `Failed to embed PDF font: ${(mcpError.cause as Error).message}`,
+        );
         expect(mcpError.data).toEqual({ reason: 'pdf_font_embed_failed' });
         expect(errorSpy).toHaveBeenCalled();
       }
@@ -345,7 +347,9 @@ describe('PdfParser', () => {
       } catch (error) {
         const mcpError = error as McpError;
         expect(mcpError.code).toBe(JsonRpcErrorCode.InternalError);
-        expect(mcpError.message).toBe('Failed to embed PDF image.');
+        expect(mcpError.message).toBe(
+          `Failed to embed PDF image: ${(mcpError.cause as Error).message}`,
+        );
         expect(mcpError.data).toEqual({ reason: 'pdf_image_embed_failed' });
         expect(errorSpy).toHaveBeenCalled();
       }
@@ -589,7 +593,9 @@ describe('PdfParser', () => {
       } catch (error) {
         const mcpError = error as McpError;
         expect(mcpError.code).toBe(JsonRpcErrorCode.InternalError);
-        expect(mcpError.message).toBe('Failed to merge PDF documents.');
+        expect(mcpError.message).toBe(
+          `Failed to merge PDF documents: ${(mcpError.cause as Error).message}`,
+        );
         expect(mcpError.data).toEqual({ reason: 'pdf_merge_failed' });
         expect(errorSpy).toHaveBeenCalled();
       }

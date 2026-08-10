@@ -16,7 +16,11 @@ const getDiff = lazyImport(
   'Install "diff" to use diff formatting: bun add diff',
 );
 
-import { type RequestContext, requestContextService } from '@/utils/internal/requestContext.js';
+import {
+  type RequestContext,
+  type RequestContextLike,
+  requestContextService,
+} from '@/utils/internal/requestContext.js';
 
 /**
  * Diff output format options.
@@ -112,7 +116,7 @@ export class DiffFormatter {
     oldText: string,
     newText: string,
     options?: DiffFormatterOptions,
-    context?: RequestContext,
+    context?: RequestContextLike | RequestContext,
   ): Promise<string> {
     const logContext =
       context ||
@@ -200,7 +204,7 @@ export class DiffFormatter {
     oldLines: string[],
     newLines: string[],
     options?: DiffFormatterOptions,
-    context?: RequestContext,
+    context?: RequestContextLike | RequestContext,
   ): Promise<string> {
     const logContext =
       context ||
@@ -246,7 +250,11 @@ export class DiffFormatter {
    * // => 'The [-quick-][+fast+] brown [-fox-][+dog+]'
    * ```
    */
-  async diffWords(oldText: string, newText: string, context?: RequestContext): Promise<string> {
+  async diffWords(
+    oldText: string,
+    newText: string,
+    context?: RequestContextLike | RequestContext,
+  ): Promise<string> {
     const logContext =
       context ||
       requestContextService.createRequestContext({
@@ -412,7 +420,7 @@ export class DiffFormatter {
   async getStats(
     oldText: string,
     newText: string,
-    context?: RequestContext,
+    context?: RequestContextLike | RequestContext,
   ): Promise<{ additions: number; deletions: number; changes: number }> {
     const logContext =
       context ||

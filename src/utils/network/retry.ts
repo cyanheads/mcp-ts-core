@@ -6,7 +6,7 @@
  */
 import { JsonRpcErrorCode, McpError } from '@/types-global/errors.js';
 import { logger } from '@/utils/internal/logger.js';
-import type { RequestContext } from '@/utils/internal/requestContext.js';
+import type { RequestContext, RequestContextLike } from '@/utils/internal/requestContext.js';
 
 /**
  * Error codes considered transient — eligible for retry.
@@ -37,7 +37,7 @@ export interface RetryOptions {
    * safe — the logger strips non-serializable fields (`signal`, `log`,
    * `state`, protocol method handles) before pino sees them.
    */
-  context?: RequestContext;
+  context?: RequestContextLike | RequestContext;
 
   /**
    * Custom predicate to determine if an error is transient and should be

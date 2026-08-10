@@ -7,7 +7,7 @@
 import { JsonRpcErrorCode } from '@/types-global/errors.js';
 import { ErrorHandler } from '@/utils/internal/error-handler/errorHandler.js';
 import { logger } from '@/utils/internal/logger.js';
-import type { RequestContext } from '@/utils/internal/requestContext.js';
+import type { RequestContext, RequestContextLike } from '@/utils/internal/requestContext.js';
 
 /**
  * Minimal chat message shape used for token counting, intentionally provider-agnostic.
@@ -113,7 +113,7 @@ function approxTokenCount(text: string, charsPerToken: number): number {
  */
 export async function countTokens(
   text: string,
-  context?: RequestContext,
+  context?: RequestContextLike | RequestContext,
   model?: string,
 ): Promise<number> {
   return await ErrorHandler.tryCatch(
@@ -165,7 +165,7 @@ export async function countTokens(
  */
 export async function countChatTokens(
   messages: ReadonlyArray<ChatMessage>,
-  context?: RequestContext,
+  context?: RequestContextLike | RequestContext,
   model?: string,
 ): Promise<number> {
   return await ErrorHandler.tryCatch(

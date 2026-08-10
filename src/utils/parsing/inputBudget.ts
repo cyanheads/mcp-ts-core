@@ -1,36 +1,42 @@
 /**
- * @fileoverview Input byte budgets shared by the parsing utilities. Bounds the
- * work a single parse can schedule, so a hostile document cannot amplify a
- * modest request into unbounded CPU or memory in the parser dependency.
+ * @fileoverview Opt-in input byte budgets shared by the parsing utilities. A
+ * parser is unbounded unless its caller supplies `maxBytes`: the input is
+ * already resident in memory by the time a parser sees it, so a budget is a
+ * caller's work-shaping knob rather than a trust boundary.
  * @module src/utils/parsing/inputBudget
  */
 
 import { validationError } from '@/types-global/errors.js';
 
-/** Default UTF-8 input budget for text parsers (1 MiB). */
+/**
+ * Suggested UTF-8 input budget for text parsers (1 MiB). Not applied unless a
+ * caller passes it as `maxBytes`.
+ */
 export const DEFAULT_TEXT_PARSER_MAX_BYTES = 1024 * 1024;
 
-/** Default input budget for binary parsers (25 MiB). */
+/**
+ * Suggested input budget for binary parsers (25 MiB). Not applied unless a
+ * caller passes it as `maxBytes`.
+ */
 export const DEFAULT_BINARY_PARSER_MAX_BYTES = 25 * 1024 * 1024;
 
 /**
- * Caller override for a parser's input budget. The defaults are a safe starting
- * point rather than a security boundary — the input is already resident in
- * memory by the time a parser sees it — so a caller that knowingly handles
- * larger documents may raise as well as lower the limit.
+ * Caller override for a parser's input budget. Omit `maxBytes` for no bound;
+ * {@link DEFAULT_TEXT_PARSER_MAX_BYTES} and
+ * {@link DEFAULT_BINARY_PARSER_MAX_BYTES} are starting points for a caller that
+ * wants one.
  */
 export interface ParserInputBudgetOptions {
   maxBytes?: number;
 }
 
-function resolveLimit(options: ParserInputBudgetOptions | undefined, defaultLimit: number): number {
+function resolveLimit(options: ParserInputBudgetOptions | undefined): number | undefined {
   const requested = options?.maxBytes;
-  if (requested === undefined) return defaultLimit;
+  if (requested === undefined) return;
 
   if (!Number.isSafeInteger(requested) || requested < 1) {
     throw validationError('Parser input byte limit must be a positive safe integer.', {
       reason: 'parser_input_limit_invalid',
-      limitBytes: defaultLimit,
     });
   }
 
@@ -65,8 +71,8 @@ export function utf8ByteLength(input: string): number {
   return bytes;
 }
 
-function assertWithinLimit(sizeBytes: number, limitBytes: number): number {
-  if (sizeBytes > limitBytes) {
+function assertWithinLimit(sizeBytes: number, limitBytes: number | undefined): number {
+  if (limitBytes !== undefined && sizeBytes > limitBytes) {
     throw validationError('Parser input exceeds the maximum allowed byte size.', {
       reason: 'parser_input_too_large',
       sizeBytes,
@@ -77,19 +83,17 @@ function assertWithinLimit(sizeBytes: number, limitBytes: number): number {
   return sizeBytes;
 }
 
-/** Assert a text input fits its budget. Returns the input's UTF-8 byte length. */
+/** Assert a text input fits any budget the caller declared. Returns its UTF-8 byte length. */
 export function assertTextInputBudget(input: string, options?: ParserInputBudgetOptions): number {
-  const limitBytes = resolveLimit(options, DEFAULT_TEXT_PARSER_MAX_BYTES);
-  return assertWithinLimit(utf8ByteLength(input), limitBytes);
+  return assertWithinLimit(utf8ByteLength(input), resolveLimit(options));
 }
 
-/** Assert a binary input fits its budget. Returns the input's byte length. */
+/** Assert a binary input fits any budget the caller declared. Returns its byte length. */
 export function assertBinaryInputBudget(
   input: Uint8Array | ArrayBuffer,
   options?: ParserInputBudgetOptions,
 ): number {
-  const limitBytes = resolveLimit(options, DEFAULT_BINARY_PARSER_MAX_BYTES);
-  return assertWithinLimit(input.byteLength, limitBytes);
+  return assertWithinLimit(input.byteLength, resolveLimit(options));
 }
 
 /** Assert a set of binary inputs fits one shared budget. Returns their combined byte length. */
@@ -97,7 +101,6 @@ export function assertBinaryInputsBudget(
   inputs: readonly (Uint8Array | ArrayBuffer)[],
   options?: ParserInputBudgetOptions,
 ): number {
-  const limitBytes = resolveLimit(options, DEFAULT_BINARY_PARSER_MAX_BYTES);
   const sizeBytes = inputs.reduce((total, input) => total + input.byteLength, 0);
-  return assertWithinLimit(sizeBytes, limitBytes);
+  return assertWithinLimit(sizeBytes, resolveLimit(options));
 }

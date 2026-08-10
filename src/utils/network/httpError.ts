@@ -179,8 +179,7 @@ export async function httpErrorFromResponse(
   let body: string | undefined;
   if (captureBody) {
     try {
-      const captured = await readBoundedResponseText(response, bodyLimit);
-      body = captured.truncated ? `${captured.text}…` : captured.text;
+      body = await readBoundedResponseText(response, bodyLimit);
     } catch {
       /* body unreadable (already consumed, network error mid-stream) */
     }

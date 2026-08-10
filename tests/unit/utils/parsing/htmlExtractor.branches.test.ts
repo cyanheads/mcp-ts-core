@@ -124,21 +124,19 @@ describe('HtmlExtractor branch behavior', () => {
   });
 
   it('normalizes non-Error failures from the extractor', async () => {
-    const sentinel = 'SUPERSECRET at parser (/Users/example/private/html.ts:1:1)';
-    defuddleMock.mockRejectedValue(sentinel);
+    const marker = 'TAIL_MARKER_NOT_IN_DIAGNOSTIC';
+    defuddleMock.mockRejectedValue('no readable content found');
 
     const failure = (await extractor
-      .extract(`<p>${sentinel}</p>`)
+      .extract(`<p>${marker}</p>`)
       .catch((error: unknown) => error)) as McpError;
 
     expect(failure).toMatchObject({
       code: JsonRpcErrorCode.ValidationError,
-      message: 'Failed to extract article from HTML.',
+      message: 'Failed to extract article from HTML: no readable content found',
       data: { reason: 'html_extract_failed' },
     });
-    expect(JSON.stringify({ message: failure.message, data: failure.data })).not.toContain(
-      'SUPERSECRET',
-    );
+    expect(JSON.stringify({ message: failure.message, data: failure.data })).not.toContain(marker);
     expect(failure.cause).toBeInstanceOf(Error);
   });
 
@@ -150,7 +148,9 @@ describe('HtmlExtractor branch behavior', () => {
     const failureResult = (await extractor
       .extract('<p>body</p>')
       .catch((error: unknown) => error)) as McpError;
-    expect(failureResult.message).toBe('Failed to extract article from HTML.');
+    expect(failureResult.message).toBe(
+      'Failed to extract article from HTML: stackless parser error',
+    );
     expect(failureResult.cause).toBe(failure);
   });
 });

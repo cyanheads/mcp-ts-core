@@ -7,7 +7,11 @@ import { trace } from '@opentelemetry/api';
 import type { config as ConfigType } from '@/config/index.js';
 import { rateLimited } from '@/types-global/errors.js';
 import type { logger as LoggerType } from '@/utils/internal/logger.js';
-import { type RequestContext, requestContextService } from '@/utils/internal/requestContext.js';
+import {
+  type RequestContext,
+  type RequestContextLike,
+  requestContextService,
+} from '@/utils/internal/requestContext.js';
 import { createCounter } from '@/utils/telemetry/metrics.js';
 
 let rejectionCounter: ReturnType<typeof createCounter> | undefined;
@@ -253,7 +257,7 @@ export class RateLimiter {
    * rateLimiter.check('client-abc', requestContext);
    * ```
    */
-  public check(key: string, context?: RequestContext): void {
+  public check(key: string, context?: RequestContextLike | RequestContext): void {
     const activeSpan = trace.getActiveSpan();
     activeSpan?.setAttribute('mcp.rate_limit.checked', true);
 

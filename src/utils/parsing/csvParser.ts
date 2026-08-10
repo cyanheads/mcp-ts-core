@@ -12,7 +12,11 @@ import type Papa from 'papaparse';
 import { validationError } from '@/types-global/errors.js';
 import { lazyImport } from '@/utils/internal/lazyImport.js';
 import { logger } from '@/utils/internal/logger.js';
-import { type RequestContext, requestContextService } from '@/utils/internal/requestContext.js';
+import {
+  type RequestContext,
+  type RequestContextLike,
+  requestContextService,
+} from '@/utils/internal/requestContext.js';
 import { thinkBlockRegex } from './thinkBlock.js';
 
 const importPapa = lazyImport(
@@ -78,7 +82,7 @@ export class CsvParser {
   async parse<T = unknown>(
     csvString: string,
     options?: Papa.ParseConfig,
-    context?: RequestContext,
+    context?: RequestContextLike | RequestContext,
   ): Promise<Papa.ParseResult<T>> {
     let stringToParse = csvString;
     const match = csvString.match(thinkBlockRegex);

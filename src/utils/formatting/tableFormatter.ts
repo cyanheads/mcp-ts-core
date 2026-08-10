@@ -7,7 +7,11 @@
 
 import { JsonRpcErrorCode, McpError, validationError } from '@/types-global/errors.js';
 import { logger } from '@/utils/internal/logger.js';
-import { type RequestContext, requestContextService } from '@/utils/internal/requestContext.js';
+import {
+  type RequestContext,
+  type RequestContextLike,
+  requestContextService,
+} from '@/utils/internal/requestContext.js';
 
 /**
  * Table output style options.
@@ -176,7 +180,7 @@ export class TableFormatter {
   format<T extends Record<string, unknown>>(
     data: T[],
     options?: TableFormatterOptions,
-    context?: RequestContext,
+    context?: RequestContextLike | RequestContext,
   ): string {
     const logContext =
       context ||
@@ -241,7 +245,7 @@ export class TableFormatter {
     headers: string[],
     rows: string[][],
     options?: TableFormatterOptions,
-    context?: RequestContext,
+    context?: RequestContextLike | RequestContext,
   ): string {
     const logContext =
       context ||

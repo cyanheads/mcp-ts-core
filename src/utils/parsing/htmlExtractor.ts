@@ -30,7 +30,11 @@ import type { DefuddleOptions } from 'defuddle/node';
 import { McpError, validationError } from '@/types-global/errors.js';
 import { lazyImport } from '@/utils/internal/lazyImport.js';
 import { logger } from '@/utils/internal/logger.js';
-import { type RequestContext, requestContextService } from '@/utils/internal/requestContext.js';
+import {
+  type RequestContext,
+  type RequestContextLike,
+  requestContextService,
+} from '@/utils/internal/requestContext.js';
 import { assertTextInputBudget } from './inputBudget.js';
 
 const getDefuddle = lazyImport<typeof import('defuddle/node')>(
@@ -95,7 +99,7 @@ export interface ExtractArticleOptions {
    */
   language?: string;
   /**
-   * UTF-8 input budget in bytes. Defaults to 1 MiB; raise it for known-large pages.
+   * UTF-8 input budget in bytes. Unbounded when omitted.
    */
   maxBytes?: number;
   /**
@@ -174,7 +178,8 @@ export class HtmlExtractor {
    *
    * @param html - Raw HTML string to extract from.
    * @param options - Optional extraction options (format, URL, content selector, etc.).
-   * @param context - Optional `RequestContext` for correlated logging and error metadata.
+   * @param context - Optional context for correlated logging and error metadata. The
+   *   handler `Context` is accepted directly.
    * @returns Extracted content and metadata. Only `content` is guaranteed to
    *   be present; all other fields are best-effort.
    * @throws {McpError} With `ConfigurationError` if `defuddle` or `linkedom` is not installed.
@@ -198,7 +203,7 @@ export class HtmlExtractor {
   async extract(
     html: string,
     options?: ExtractArticleOptions,
-    context?: RequestContext,
+    context?: RequestContextLike | RequestContext,
   ): Promise<ExtractArticleResult> {
     const byteLength = assertTextInputBudget(html, options);
     const logContext =
@@ -271,7 +276,7 @@ export class HtmlExtractor {
         errorDetails: error.message,
       });
       throw validationError(
-        'Failed to extract article from HTML.',
+        `Failed to extract article from HTML: ${error.message}`,
         { reason: 'html_extract_failed' },
         { cause: error },
       );

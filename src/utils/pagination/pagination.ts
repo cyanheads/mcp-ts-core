@@ -15,7 +15,7 @@
 import { invalidParams, JsonRpcErrorCode, McpError } from '@/types-global/errors.js';
 import { base64ToString, stringToBase64 } from '@/utils/internal/encoding.js';
 import { logger } from '@/utils/internal/logger.js';
-import type { RequestContext } from '@/utils/internal/requestContext.js';
+import type { RequestContext, RequestContextLike } from '@/utils/internal/requestContext.js';
 
 /**
  * Generic pagination state that can be encoded into a cursor.
@@ -95,7 +95,10 @@ export function encodeCursor(state: PaginationState): string {
  * const state = decodeCursor(req.params.cursor, ctx);
  * // state.offset and state.limit are safe to use directly
  */
-export function decodeCursor(cursor: string, context: RequestContext): PaginationState {
+export function decodeCursor(
+  cursor: string,
+  context: RequestContextLike | RequestContext,
+): PaginationState {
   try {
     // Convert base64url back to standard base64, then decode cross-platform
     const standardBase64 = cursor.replace(/-/g, '+').replace(/_/g, '/');
@@ -189,7 +192,7 @@ export function paginateArray<T>(
   cursorStr: string | undefined,
   defaultPageSize: number,
   maxPageSize: number,
-  context: RequestContext,
+  context: RequestContextLike | RequestContext,
 ): PaginatedResult<T> {
   let offset = 0;
   let limit = defaultPageSize;

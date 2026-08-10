@@ -27,12 +27,16 @@ describe('fetchWithTimeout', () => {
   });
 
   it('resolves with the response when fetch succeeds', async () => {
-    const response = new Response('ok', { status: 200 });
+    const response = new Response('ok', { status: 200, headers: { 'x-trace': 'abc' } });
     const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValue(response as Response);
 
     const result = await fetchWithTimeout('https://example.com', 1000, context);
 
-    expect(result).toBe(response);
+    // A response carrying a body is handed back through the body-deadline
+    // passthrough, so it is an equivalent response rather than the same object.
+    expect(result.status).toBe(200);
+    expect(result.headers.get('x-trace')).toBe('abc');
+    expect(await result.text()).toBe('ok');
     expect(fetchMock).toHaveBeenCalledWith(
       'https://example.com',
       expect.objectContaining({ signal: expect.any(AbortSignal) }),
@@ -127,14 +131,37 @@ describe('fetchWithTimeout', () => {
     expect((error as { data?: Record<string, unknown> }).data).not.toHaveProperty('retryAfter');
   });
 
-  it('truncates large error response bodies to ERROR_BODY_LIMIT with ellipsis', async () => {
-    const huge = 'x'.repeat(10_000);
+  it('keeps ERROR_BODY_LIMIT bytes of a large error body, split head and tail', async () => {
+    const huge = `HEAD${'x'.repeat(10_000)}TAIL`;
     vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(huge, { status: 500 }));
     const error = await fetchWithTimeout('https://example.com', 1000, context).catch((e) => e);
     const body = (error as { data?: { responseBody?: string } }).data?.responseBody ?? '';
-    expect(body.length).toBeLessThanOrEqual(501); // 500 chars + ellipsis
-    expect(body.endsWith('…')).toBe(true);
-    expect(body.startsWith('xxx')).toBe(true);
+    expect(body.startsWith('HEAD')).toBe(true);
+    expect(body.endsWith('TAIL')).toBe(true);
+    expect(body).toContain('…[9508 bytes elided]…');
+    // 500 bytes of body content, plus the elision marker itself.
+    expect(body.replace(/…\[\d+ bytes elided]…/, '')).toHaveLength(500);
+  });
+
+  it('reads past the capture budget to reach the tail of an over-budget body', async () => {
+    // The Overpass 400 shape: the diagnostic sits behind a fixed preamble, past
+    // the 500-byte cap, so a head-only capture would drop the only useful line.
+    const document = `<html>${'<!-- boilerplate -->'.repeat(30)}<strong>Error</strong>: line 1: parse error</html>`;
+    expect(document.length).toBeGreaterThan(500);
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(document, { status: 400 }));
+    const error = await fetchWithTimeout('https://example.com', 1000, context).catch((e) => e);
+    expect((error as McpError).data?.body).toContain('parse error');
+  });
+
+  it('honors an explicit errorBodyLimit', async () => {
+    const document = `HEAD${'x'.repeat(4000)}TAIL`;
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(document, { status: 500 }));
+    const error = await fetchWithTimeout('https://example.com', 1000, context, {
+      errorBodyLimit: 2000,
+    }).catch((e) => e);
+    const body = (error as { data?: { body?: string } }).data?.body ?? '';
+    expect(body.replace(/…\[\d+ bytes elided]…/, '')).toHaveLength(2000);
+    expect(body.endsWith('TAIL')).toBe(true);
   });
 
   it('does not truncate bodies shorter than ERROR_BODY_LIMIT', async () => {
@@ -152,12 +179,12 @@ describe('fetchWithTimeout', () => {
     });
   });
 
-  it('adds ellipsis as soon as body exceeds ERROR_BODY_LIMIT by one byte', async () => {
+  it('elides as soon as body exceeds ERROR_BODY_LIMIT by one byte', async () => {
     const over = 'x'.repeat(501);
     vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(over, { status: 500 }));
     const error = await fetchWithTimeout('https://example.com', 1000, context).catch((e) => e);
     const body = (error as { data?: { responseBody?: string } }).data?.responseBody ?? '';
-    expect(body).toBe(`${'x'.repeat(500)}…`);
+    expect(body).toBe(`${'x'.repeat(200)}…[1 byte elided]…${'x'.repeat(300)}`);
   });
 
   it('handles empty error bodies cleanly', async () => {
@@ -263,7 +290,7 @@ describe('fetchWithTimeout', () => {
     );
   });
 
-  it('cancels an oversized streaming error body after bounded read-ahead', async () => {
+  it('cancels an endless streaming error body after bounded read-ahead', async () => {
     let pulls = 0;
     let cancelled = false;
     const stream = new ReadableStream<Uint8Array>({
@@ -278,8 +305,10 @@ describe('fetchWithTimeout', () => {
     vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(stream, { status: 500 }));
 
     const error = await fetchWithTimeout('https://example.com', 1000, context).catch((e) => e);
+    // A body still streaming at the scan ceiling never showed its tail, so the
+    // capture stays head-only — and the read stops at the ceiling, not the body's end.
     expect((error as McpError).data?.responseBody).toBe(`${'x'.repeat(500)}…`);
-    expect(pulls).toBeLessThanOrEqual(3);
+    expect(pulls).toBeLessThanOrEqual(Math.ceil(16_384 / 300) + 1);
     expect(cancelled).toBe(true);
   });
 
@@ -659,7 +688,11 @@ describe('fetchWithTimeout', () => {
       });
 
       it('should allow public IPv6 addresses', async () => {
-        vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response('ok', { status: 200 }));
+        // A fresh Response per call: the returned body is read under the deadline,
+        // so one shared instance would be locked after the first request.
+        vi.spyOn(globalThis, 'fetch').mockImplementation(async () =>
+          Promise.resolve(new Response('ok', { status: 200 })),
+        );
         for (const addr of ['2001:4860:4860::8888', '2606:4700:4700::1111']) {
           await expect(
             fetchWithTimeout(`http://[${addr}]/`, 1000, context, ssrfOpts),

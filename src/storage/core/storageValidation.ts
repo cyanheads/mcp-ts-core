@@ -51,9 +51,6 @@ const MAX_PREFIX_LENGTH = 512 as const;
  */
 const MAX_LIST_LIMIT = 10000 as const;
 
-/** Maximum keys or entries accepted by a single batch operation. */
-const MAX_BATCH_SIZE = 10000 as const;
-
 /**
  * Pattern for valid tenant IDs (alphanumeric, hyphens, underscores, dots).
  * More restrictive than key pattern - no slashes allowed to prevent path traversal.
@@ -253,9 +250,9 @@ export function validateStorageOptions(
 }
 
 /**
- * Validates a getMany/deleteMany key array before iteration or provider dispatch.
- * The finite cap prevents a single request from creating an unbounded Promise.all,
- * SQL placeholder list, or backend batch.
+ * Validates the shape of a getMany/deleteMany key list before iteration or
+ * provider dispatch. Batch size is left to the caller — a server that wants a
+ * ceiling applies its own at the tool boundary, where it knows the workload.
  */
 export function validateBatchKeys(
   keys: unknown,
@@ -268,19 +265,9 @@ export function validateBatchKeys(
       operation: `validateBatchKeys.${operation}`,
     });
   }
-  if (keys.length > MAX_BATCH_SIZE) {
-    throw validationError(
-      `${operation} exceeds the maximum batch size of ${MAX_BATCH_SIZE} keys.`,
-      {
-        ...context,
-        operation: `validateBatchKeys.${operation}`,
-        keyCount: keys.length,
-      },
-    );
-  }
 }
 
-/** Validates a setMany Map and applies the common finite batch cap. */
+/** Validates the shape of a setMany entry set. Batch size is left to the caller. */
 export function validateBatchEntries(
   entries: unknown,
   context: RequestContext,
@@ -289,13 +276,6 @@ export function validateBatchEntries(
     throw validationError('setMany entries must be a Map.', {
       ...context,
       operation: 'validateBatchEntries.setMany',
-    });
-  }
-  if (entries.size > MAX_BATCH_SIZE) {
-    throw validationError(`setMany exceeds the maximum batch size of ${MAX_BATCH_SIZE} entries.`, {
-      ...context,
-      operation: 'validateBatchEntries.setMany',
-      entryCount: entries.size,
     });
   }
 }
