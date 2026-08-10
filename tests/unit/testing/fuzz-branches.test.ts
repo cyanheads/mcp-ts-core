@@ -262,6 +262,25 @@ describe('fuzzTool failure accounting', () => {
     expect(report.leaks[0]?.errorText).toContain('/Users/example/private');
   });
 
+  it('scans client-visible McpError data for leaked internals', async () => {
+    const definition = tool('fuzz_mcp_data_leak_accounting', {
+      description: 'Throws an MCP error with unsafe public data.',
+      input: z.object({ value: z.string().describe('Value') }),
+      output: z.object({ ok: z.boolean().describe('Success') }),
+      handler() {
+        throw new McpError(JsonRpcErrorCode.InternalError, 'Safe message', {
+          rawError: 'Error: sentinel\n    at parser (/Users/example/private/parser.ts:1:1)',
+        });
+      },
+    });
+
+    const report = await fuzzTool(definition, { numRuns: 1, numAdversarial: 0, seed: 421 });
+
+    expect(report.crashes).toHaveLength(0);
+    expect(report.leaks).toHaveLength(1);
+    expect(report.leaks[0]?.errorText).toContain('/Users/example/private/parser.ts');
+  });
+
   it('detects and removes Object.prototype pollution introduced by a handler', async () => {
     const definition = tool('fuzz_prototype_pollution_accounting', {
       description: 'Pollutes Object.prototype for guard verification.',

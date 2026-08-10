@@ -444,16 +444,46 @@ function checkErrorLeaks(errorText: string): { leakedStack: boolean; leakedInter
   return { leakedStack, leakedInternals };
 }
 
+/** Serialize the fields an MCP client can observe, excluding the local Error stack itself. */
+function publicErrorText(error: unknown): string {
+  if (!(error instanceof McpError)) {
+    return error instanceof Error ? error.message : String(error);
+  }
+
+  const seen = new WeakSet<object>();
+  try {
+    return JSON.stringify(
+      { code: error.code, message: error.message, data: error.data },
+      (_key, value: unknown) => {
+        if (typeof value === 'bigint') return value.toString();
+        if (typeof value === 'object' && value !== null) {
+          if (seen.has(value)) return '[Circular]';
+          seen.add(value);
+        }
+        return value;
+      },
+    );
+  } catch {
+    return error.message;
+  }
+}
+
+/** Records a leak entry when an error's client-visible text exposes a stack or internal path. */
+function recordLeak(report: FuzzReport, input: unknown, error: unknown): void {
+  const errorText = publicErrorText(error);
+  const { leakedStack, leakedInternals } = checkErrorLeaks(errorText);
+  if (leakedStack || leakedInternals) {
+    report.leaks.push({ input, errorText });
+  }
+}
+
 function recordHandlerError(report: FuzzReport, input: unknown, error: unknown): void {
   if (!(error instanceof McpError)) {
     report.crashes.push({ input, error });
     return;
   }
 
-  const leakCheck = checkErrorLeaks(error.message);
-  if (leakCheck.leakedStack || leakCheck.leakedInternals) {
-    report.leaks.push({ input, errorText: error.message });
-  }
+  recordLeak(report, input, error);
 }
 
 function createToolFuzzContext(
@@ -590,11 +620,7 @@ export async function fuzzTool(
         const result = await withTimeout(def.handler(validated.data, ctx), timeout);
         def.output.parse(result);
       } catch (err) {
-        const msg = err instanceof Error ? err.message : String(err);
-        const leakCheck = checkErrorLeaks(msg);
-        if (leakCheck.leakedStack || leakCheck.leakedInternals) {
-          report.leaks.push({ input, errorText: msg });
-        }
+        recordLeak(report, input, err);
       }
     }),
     { ...fcParams, numRuns: numAdversarial },
@@ -712,11 +738,7 @@ export async function fuzzResource(
           if (!validated.success) return;
           await withTimeout(def.handler(validated.data, ctx), timeout);
         } catch (err) {
-          const msg = err instanceof Error ? err.message : String(err);
-          const leakCheck = checkErrorLeaks(msg);
-          if (leakCheck.leakedStack || leakCheck.leakedInternals) {
-            report.leaks.push({ input: params, errorText: msg });
-          }
+          recordLeak(report, params, err);
         }
       }),
       { ...fcParams, numRuns: numAdversarial },

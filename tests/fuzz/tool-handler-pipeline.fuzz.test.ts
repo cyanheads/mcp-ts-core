@@ -75,6 +75,7 @@ import {
   type HandlerFactoryServices,
   type HandlerNotifiers,
 } from '@/mcp-server/tools/utils/toolHandlerFactory.js';
+import { Allow, jsonParser } from '@/utils/parsing/jsonParser.js';
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -270,13 +271,42 @@ describe('Tool Handler Pipeline Fuzz Tests', () => {
       for (const mode of modes) {
         const result = await handler({ mode }, createSdkContext());
         expect(result.isError).toBe(true);
-        const text = (result.content![0] as { text: string }).text;
-        // Should not contain file paths or node_modules references
-        expect(text).not.toMatch(/node_modules/);
-        expect(text).not.toMatch(/\/Users\//);
-        expect(text).not.toMatch(/\/home\//);
-        expect(text).not.toMatch(/\bat\s+\S+\s+\(/); // Stack trace pattern
+        const serializedResult = JSON.stringify(result);
+        // Scan the complete client-visible result, including structuredContent.error.data.
+        expect(serializedResult).not.toMatch(/node_modules/);
+        expect(serializedResult).not.toMatch(/\/Users\//);
+        expect(serializedResult).not.toMatch(/\/home\//);
+        expect(serializedResult).not.toMatch(/\bat\s+\S+\s+\(/); // Stack trace pattern
       }
+    });
+
+    it('parser failures keep input samples and stack paths out of the complete result', async () => {
+      const sentinel = 'SUPERSECRET at parser (/Users/example/private/parser.ts:1:1)';
+      const def = tool('fuzz_parser_leak_check', {
+        description: 'Parses caller-provided JSON.',
+        input: z.object({ payload: z.string().describe('JSON payload') }),
+        output: z.object({ ok: z.boolean().describe('Ok') }),
+        async handler(input) {
+          await jsonParser.parse(input.payload, Allow.ALL);
+          return { ok: true };
+        },
+      });
+
+      const handler = createToolHandler(def as AnyToolDefinition, services, notifiers);
+      const result = await handler({ payload: `not-json ${sentinel}` }, createSdkContext());
+      const serializedResult = JSON.stringify(result);
+
+      expect(result.isError).toBe(true);
+      expect(serializedResult).not.toContain('SUPERSECRET');
+      expect(serializedResult).not.toContain('/Users/example/private');
+      expect(serializedResult).not.toMatch(/\bat\s+\S+\s+\(/);
+      expect(result.structuredContent).toEqual({
+        error: {
+          code: JsonRpcErrorCode.ValidationError,
+          message: 'Failed to parse JSON content.',
+          data: { reason: 'json_parse_failed' },
+        },
+      });
     });
   });
 
