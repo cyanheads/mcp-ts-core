@@ -9,7 +9,17 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { logger } from '@/utils/internal/logger.js';
 import { fetchWithTimeout, initHttpClientMetrics } from '@/utils/network/fetchWithTimeout.js';
-import * as metricsModule from '@/utils/telemetry/metrics.js';
+
+const { createHistogramMock, mockRecord } = vi.hoisted(() => ({
+  createHistogramMock: vi.fn(),
+  mockRecord: vi.fn(),
+}));
+
+createHistogramMock.mockReturnValue({ record: mockRecord });
+
+vi.mock('@/utils/telemetry/metrics.js', () => ({
+  createHistogram: createHistogramMock,
+}));
 
 describe('fetchWithTimeout – http.client.request.duration histogram', () => {
   const context = {
@@ -17,17 +27,11 @@ describe('fetchWithTimeout – http.client.request.duration histogram', () => {
     timestamp: new Date().toISOString(),
   };
 
-  const mockRecord = vi.fn();
-
   beforeEach(() => {
-    vi.clearAllMocks();
+    mockRecord.mockClear();
     vi.spyOn(logger, 'debug').mockImplementation(() => {});
     vi.spyOn(logger, 'info').mockImplementation(() => {});
     vi.spyOn(logger, 'error').mockImplementation(() => {});
-
-    vi.spyOn(metricsModule, 'createHistogram').mockReturnValue({
-      record: mockRecord,
-    } as any);
   });
 
   afterEach(() => {
@@ -37,7 +41,7 @@ describe('fetchWithTimeout – http.client.request.duration histogram', () => {
   it('uses the correct metric name and unit via createHistogram', () => {
     initHttpClientMetrics();
 
-    expect(metricsModule.createHistogram).toHaveBeenCalledWith(
+    expect(createHistogramMock).toHaveBeenCalledWith(
       'http.client.request.duration',
       'Duration of outbound HTTP requests',
       's',

@@ -114,6 +114,28 @@ describe('httpErrorFromResponse', () => {
     expect(body.endsWith('…')).toBe(true);
   });
 
+  it('cancels an oversized streaming body and bounds multibyte capture by bytes', async () => {
+    let cancelled = false;
+    const encoded = new TextEncoder().encode('😀'.repeat(100));
+    const response = new Response(
+      new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.enqueue(encoded);
+        },
+        cancel() {
+          cancelled = true;
+        },
+      }),
+      { status: 500 },
+    );
+
+    const error = await httpErrorFromResponse(response, { bodyLimit: 50 });
+    const body = error.data?.body as string;
+    expect(new TextEncoder().encode(body).byteLength).toBeLessThanOrEqual(53);
+    expect(body.endsWith('…')).toBe(true);
+    expect(cancelled).toBe(true);
+  });
+
   it('skips body capture when captureBody is false', async () => {
     const response = makeResponse(500, { body: 'secret' });
 

@@ -14,6 +14,7 @@ import { logger } from '@/utils/internal/logger.js';
 import type { RequestContext } from '@/utils/internal/requestContext.js';
 import { runtimeCaps } from '@/utils/internal/runtime.js';
 import { httpStatusToErrorCode } from '@/utils/network/httpError.js';
+import { readBoundedResponseText } from '@/utils/network/responseBody.js';
 import { createHistogram } from '@/utils/telemetry/metrics.js';
 
 /** Maximum captured bytes of an upstream error response body. Keeps tool errors from poisoning the agent's context. */
@@ -79,15 +80,16 @@ export interface FetchWithTimeoutOptions extends Omit<RequestInit, 'signal'> {
    */
   expectedStatuses?: number[];
   /**
-   * When `true`, rejects requests to private/reserved IP ranges and localhost.
+   * When `true`, rejects requests to non-global/reserved IP ranges and localhost.
    *
    * Use this when fetching user-controlled URLs to reduce the SSRF blast radius
    * against internal services (e.g., cloud metadata endpoints, internal APIs).
-   * Covered ranges include RFC 1918, loopback (127.x, ::1), link-local (169.254.x),
-   * CGNAT (100.64–127.x), and known internal hostnames (e.g., `metadata.google.internal`).
+   * Covered ranges include private/shared space, loopback, link-local, unspecified,
+   * protocol assignments, documentation/benchmarking ranges, multicast, reserved,
+   * broadcast, and known internal hostnames (e.g., `metadata.google.internal`).
    *
    * DNS is resolved (via `node:dns/promises`) and all A/AAAA records are
-   * validated against private ranges before the request is sent. Available in
+   * validated against those ranges before the request is sent. Available in
    * Node, Bun, and Cloudflare Workers under `nodejs_compat`.
    *
    * When enabled, redirects are followed manually (up to {@link MAX_SSRF_REDIRECTS}
@@ -118,29 +120,97 @@ export interface FetchWithTimeoutOptions extends Omit<RequestInit, 'signal'> {
 }
 
 /**
- * IPv4 patterns for private/reserved ranges that should be blocked when
- * `rejectPrivateIPs` is enabled. Covers RFC 1918, loopback, link-local,
- * and cloud metadata endpoints.
+ * Parse a dotted-decimal IPv4 address. URL parsing canonicalizes unusual IPv4
+ * spellings (integer, octal, hexadecimal) before this point; DNS answers are
+ * already dotted decimal.
  */
-const PRIVATE_IP_PATTERNS = [
-  /^127\./, // Loopback
-  /^10\./, // RFC 1918 Class A
-  /^172\.(1[6-9]|2\d|3[01])\./, // RFC 1918 Class B
-  /^192\.168\./, // RFC 1918 Class C
-  /^169\.254\./, // Link-local / cloud metadata
-  /^0\./, // Current network
-  /^100\.(6[4-9]|[7-9]\d|1[01]\d|12[0-7])\./, // RFC 6598 (CGNAT)
-];
+function parseIpv4(ip: string): [number, number, number, number] | undefined {
+  const parts = ip.split('.');
+  if (parts.length !== 4) return;
+  const octets = parts.map((part) => (/^\d{1,3}$/.test(part) ? Number(part) : Number.NaN));
+  if (octets.some((octet) => !Number.isInteger(octet) || octet < 0 || octet > 255)) return;
+  return octets as [number, number, number, number];
+}
 
 /**
- * IPv6 patterns for private/reserved ranges. Anchored to a 4-hex-digit first
- * segment so canonical forms (e.g. `0fe8::1` → `fe8::1`) don't false-positive
- * against link-local/ULA prefixes.
+ * IPv4 destinations that are not globally routable unicast. Includes private,
+ * shared, loopback, link-local, protocol-assignment, documentation,
+ * benchmarking, multicast, reserved, and limited-broadcast space.
  */
-const PRIVATE_IPV6_PATTERNS = [
-  /^fe[89ab][0-9a-f]:/i, // fe80::/10 link-local (third nibble 8/9/a/b)
-  /^f[cd][0-9a-f]{2}:/i, // fc00::/7 ULA
+function isNonGlobalIpv4(ip: string): boolean {
+  const octets = parseIpv4(ip);
+  if (!octets) return false;
+  const [a, b, c, d] = octets;
+
+  if (a === 0 || a === 10 || a === 127) return true;
+  if (a === 100 && b >= 64 && b <= 127) return true; // RFC 6598 shared/CGNAT
+  if (a === 169 && b === 254) return true; // Link-local / cloud metadata
+  if (a === 172 && b >= 16 && b <= 31) return true;
+  if (a === 192 && b === 168) return true;
+  if (a === 192 && b === 0 && c === 0) return d !== 9 && d !== 10;
+  if (a === 192 && b === 0 && c === 2) return true; // TEST-NET-1
+  if (a === 192 && b === 88 && c === 99) return d !== 2; // Deprecated 6to4 relay
+  if (a === 198 && (b === 18 || b === 19)) return true; // Benchmarking
+  if (a === 198 && b === 51 && c === 100) return true; // TEST-NET-2
+  if (a === 203 && b === 0 && c === 113) return true; // TEST-NET-3
+  return a >= 224; // Multicast (224/4), reserved (240/4), limited broadcast
+}
+
+/** Convert a conventional or compressed IPv6 address to a 128-bit integer. */
+function ipv6ToBigInt(ip: string): bigint | undefined {
+  let lower = ip.toLowerCase();
+  if (!lower.includes(':') || lower.includes('%')) return;
+
+  // DNS APIs may retain dotted-decimal notation in an IPv4-embedded address,
+  // while URL parsing canonicalizes it to two hexadecimal segments.
+  if (lower.includes('.')) {
+    const finalColon = lower.lastIndexOf(':');
+    const embedded = parseIpv4(lower.slice(finalColon + 1));
+    if (!embedded) return;
+    const [a, b, c, d] = embedded;
+    lower = `${lower.slice(0, finalColon + 1)}${((a << 8) | b).toString(16)}:${((c << 8) | d).toString(16)}`;
+  }
+
+  const halves = lower.split('::');
+  if (halves.length > 2) return;
+  const head = halves[0] ? halves[0].split(':') : [];
+  const tail = halves[1] ? halves[1].split(':') : [];
+  const missing = 8 - head.length - tail.length;
+  if ((halves.length === 1 && missing !== 0) || (halves.length === 2 && missing < 1)) return;
+
+  const segments = [...head, ...Array.from({ length: missing }, () => '0'), ...tail];
+  if (segments.length !== 8 || segments.some((part) => !/^[0-9a-f]{1,4}$/.test(part))) return;
+
+  return segments.reduce((value, part) => (value << 16n) | BigInt(`0x${part}`), 0n);
+}
+
+function isInIpv6Cidr(value: bigint, network: string, prefixLength: number): boolean {
+  const networkValue = ipv6ToBigInt(network);
+  if (networkValue === undefined) return false;
+  const shift = 128n - BigInt(prefixLength);
+  return value >> shift === networkValue >> shift;
+}
+
+/** Non-global/reserved ranges within the otherwise globally routed 2000::/3 block. */
+const NON_GLOBAL_IPV6_CIDRS: ReadonlyArray<readonly [network: string, prefixLength: number]> = [
+  ['2001::', 32], // Teredo transition space
+  ['2001:2::', 48], // Benchmarking
+  ['2001:10::', 28], // ORCHID
+  ['2001:20::', 28], // ORCHIDv2
+  ['2001:db8::', 32], // Documentation
+  ['2002::', 16], // Deprecated 6to4 transition space
+  ['3fff::', 20], // Documentation
 ];
+
+function isNonGlobalIpv6(ip: string): boolean {
+  const value = ipv6ToBigInt(ip);
+  if (value === undefined) return false;
+
+  // Current globally routable IPv6 unicast allocation. This rejects unspecified,
+  // loopback, IPv4-compatible, discard-only, ULA, site/link-local, and multicast.
+  if (!isInIpv6Cidr(value, '2000::', 3)) return true;
+  return NON_GLOBAL_IPV6_CIDRS.some(([network, prefix]) => isInIpv6Cidr(value, network, prefix));
+}
 
 const PRIVATE_HOSTNAMES = new Set(['localhost', 'metadata.google.internal', 'metadata.internal']);
 
@@ -167,27 +237,41 @@ function extractMappedIpv4(lower: string): string | undefined {
 }
 
 /**
- * Checks whether an IP address (v4 or v6, including IPv4-mapped IPv6) falls
- * within a private or reserved range.
+ * Checks whether an IP address (v4 or v6, including IPv4-mapped IPv6) is not a
+ * globally routable unicast destination.
  *
- * IPv4-mapped IPv6 addresses are unwrapped and run through the IPv4 patterns,
- * so the full RFC 1918 / CGNAT / link-local space is covered automatically
- * without duplicating the table.
+ * IPv4-mapped IPv6 addresses are unwrapped and run through the IPv4 check, so
+ * the full RFC 1918 / CGNAT / link-local space is covered automatically without
+ * duplicating the ranges.
  *
  * @param ip - The IP address string to check (bare, no brackets).
- * @returns `true` if the address is private or reserved, `false` otherwise.
+ * @returns `true` if the address is not globally routable unicast, `false` otherwise.
  */
-function isPrivateIP(ip: string): boolean {
-  if (PRIVATE_IP_PATTERNS.some((pattern) => pattern.test(ip))) return true;
+function isNonGlobalIP(ip: string): boolean {
+  if (isNonGlobalIpv4(ip)) return true;
   const lower = ip.toLowerCase();
-  if (lower === '::1' || lower === '0:0:0:0:0:0:0:1') return true;
   const mapped = extractMappedIpv4(lower);
-  if (mapped !== undefined) return PRIVATE_IP_PATTERNS.some((pattern) => pattern.test(mapped));
-  return PRIVATE_IPV6_PATTERNS.some((pattern) => pattern.test(lower));
+  if (mapped !== undefined) return isNonGlobalIpv4(mapped);
+  return isNonGlobalIpv6(lower);
+}
+
+/** Parses a URL, rejecting anything that isn't a well-formed `http:`/`https:` target. */
+function parseHttpUrl(urlString: string): URL {
+  let parsed: URL;
+  try {
+    parsed = new URL(urlString);
+  } catch {
+    // Don't echo the raw string — it failed to parse and may carry a secret query.
+    throw validationError('Invalid URL: could not be parsed.');
+  }
+  if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+    throw validationError('Only HTTP and HTTPS URLs are allowed.');
+  }
+  return parsed;
 }
 
 /**
- * Validates that a URL string does not target private or reserved IP space.
+ * Validates that an HTTP(S) URL does not target non-global or reserved IP space.
  *
  * Performs three checks in order:
  * 1. Known private hostnames (`localhost`, `metadata.google.internal`, etc.)
@@ -206,16 +290,10 @@ function isPrivateIP(ip: string): boolean {
  *
  * @param urlString - The fully-qualified URL string to validate.
  * @throws {McpError} `ValidationError` if the URL is malformed, the hostname is a known
- *   internal name, the literal IP is private, or DNS resolves to a private address.
+ *   internal name, the literal IP is non-global, or DNS resolves to a non-global address.
  */
 async function assertNotPrivateUrl(urlString: string): Promise<void> {
-  let parsed: URL;
-  try {
-    parsed = new URL(urlString);
-  } catch {
-    // Don't echo the raw string — it failed to parse and may carry a secret query.
-    throw validationError('Invalid URL: could not be parsed.');
-  }
+  const parsed = parseHttpUrl(urlString);
 
   const hostname = parsed.hostname.replace(/^\[|\]$/g, ''); // Strip IPv6 brackets
 
@@ -225,8 +303,8 @@ async function assertNotPrivateUrl(urlString: string): Promise<void> {
   }
 
   // Check literal IP (v4, v6, or IPv4-mapped IPv6)
-  if (isPrivateIP(hostname)) {
-    throw validationError(`Request to private/reserved IP blocked: ${hostname}`);
+  if (isNonGlobalIP(hostname)) {
+    throw validationError(`Request to non-global/reserved IP blocked: ${hostname}`);
   }
 
   // `node:dns/promises` is available in Node, Bun, and Workers under
@@ -249,7 +327,7 @@ async function assertNotPrivateUrl(urlString: string): Promise<void> {
  * not a guarantee.
  *
  * @param hostname - The bare hostname to resolve (no brackets, no port).
- * @throws {McpError} `ValidationError` if any resolved address is private.
+ * @throws {McpError} `ValidationError` if any resolved address is non-global.
  */
 async function assertDnsNotPrivate(hostname: string): Promise<void> {
   try {
@@ -266,8 +344,8 @@ async function assertDnsNotPrivate(hostname: string): Promise<void> {
     ];
 
     for (const ip of resolvedIPs) {
-      if (isPrivateIP(ip)) {
-        throw validationError(`DNS resolved ${hostname} to private IP ${ip} — SSRF blocked`);
+      if (isNonGlobalIP(ip)) {
+        throw validationError(`DNS resolved ${hostname} to non-global IP ${ip} — SSRF blocked`);
       }
     }
   } catch (error) {
@@ -306,8 +384,8 @@ async function assertDnsNotPrivate(hostname: string): Promise<void> {
  *   - `signal`: External `AbortSignal` to cancel the request independently of the timeout.
  *   - All other standard `RequestInit` fields (method, headers, body, etc.) are forwarded.
  * @returns A promise resolving to the `Response` object on HTTP 2xx.
- * @throws {McpError} `ValidationError` if the URL targets a private/reserved address
- *   and `rejectPrivateIPs` is enabled.
+ * @throws {McpError} `ValidationError` for a non-HTTP(S) URL, or if the URL targets
+ *   a non-global/reserved address and `rejectPrivateIPs` is enabled.
  * @throws {McpError} `Timeout` if the request exceeds `timeoutMs`.
  * @throws {McpError} `InternalError` if the request is cancelled via the external signal.
  * @throws {McpError} A status-mapped code (`InvalidParams`/`Unauthorized`/`Forbidden`/
@@ -349,8 +427,9 @@ export async function fetchWithTimeout(
   options?: FetchWithTimeoutOptions,
 ): Promise<Response> {
   const urlString = url.toString();
+  const parsedUrl = parseHttpUrl(urlString);
 
-  // SSRF protection: reject private/internal targets when enabled
+  // SSRF protection: reject non-global/internal targets when enabled
   if (options?.rejectPrivateIPs) {
     await assertNotPrivateUrl(urlString);
   }
@@ -397,7 +476,6 @@ export async function fetchWithTimeout(
     : controller.signal;
 
   const startTime = performance.now();
-  const parsedUrl = new URL(urlString);
   const method = (fetchInit.method ?? 'GET').toUpperCase();
   let statusCode = 0;
 
@@ -444,9 +522,13 @@ export async function fetchWithTimeout(
       statusCode = response.status;
 
       if (!response.ok) {
-        const rawBody = await response.text().catch(() => 'Could not read response body');
-        const responseBody =
-          rawBody.length > ERROR_BODY_LIMIT ? `${rawBody.slice(0, ERROR_BODY_LIMIT)}…` : rawBody;
+        const capturedBody = await readBoundedResponseText(response, ERROR_BODY_LIMIT).catch(
+          () => ({
+            text: 'Could not read response body',
+            truncated: false,
+          }),
+        );
+        const responseBody = capturedBody.truncated ? `${capturedBody.text}…` : capturedBody.text;
         // Callers that treat a status as expected (e.g. 404 → empty result) get a
         // debug line instead of error; the thrown McpError below is unchanged.
         const logMessage = `Fetch failed for ${redactUrl(currentUrl)} with status ${response.status}.`;

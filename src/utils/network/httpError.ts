@@ -6,6 +6,7 @@
  */
 
 import { JsonRpcErrorCode, McpError } from '@/types-global/errors.js';
+import { readBoundedResponseText } from '@/utils/network/responseBody.js';
 
 /**
  * Maps an HTTP status code to a `JsonRpcErrorCode`. Covers the full client/server
@@ -178,8 +179,8 @@ export async function httpErrorFromResponse(
   let body: string | undefined;
   if (captureBody) {
     try {
-      const raw = await response.text();
-      body = raw.length > bodyLimit ? `${raw.slice(0, bodyLimit)}…` : raw;
+      const captured = await readBoundedResponseText(response, bodyLimit);
+      body = captured.truncated ? `${captured.text}…` : captured.text;
     } catch {
       /* body unreadable (already consumed, network error mid-stream) */
     }

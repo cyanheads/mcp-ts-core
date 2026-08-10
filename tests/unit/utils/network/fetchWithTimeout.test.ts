@@ -234,7 +234,11 @@ describe('fetchWithTimeout', () => {
       status: 502,
       statusText: 'Bad Gateway',
       headers: new Headers(),
-      text: vi.fn().mockRejectedValue(new Error('stream closed')),
+      body: {
+        getReader: vi.fn(() => {
+          throw new Error('stream closed');
+        }),
+      },
     } as unknown as Response;
 
     vi.spyOn(globalThis, 'fetch').mockResolvedValue(failingResponse);
@@ -249,7 +253,7 @@ describe('fetchWithTimeout', () => {
       }),
     });
 
-    expect(failingResponse.text).toHaveBeenCalledTimes(1);
+    expect(failingResponse.body?.getReader).toHaveBeenCalledTimes(1);
     expect(errorSpy).toHaveBeenCalledWith(
       'Fetch failed for https://bad-body.example.com with status 502.',
       expect.objectContaining({
@@ -257,6 +261,26 @@ describe('fetchWithTimeout', () => {
         errorSource: 'FetchHttpError',
       }),
     );
+  });
+
+  it('cancels an oversized streaming error body after bounded read-ahead', async () => {
+    let pulls = 0;
+    let cancelled = false;
+    const stream = new ReadableStream<Uint8Array>({
+      pull(controller) {
+        pulls += 1;
+        controller.enqueue(new Uint8Array(300).fill(120));
+      },
+      cancel() {
+        cancelled = true;
+      },
+    });
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(stream, { status: 500 }));
+
+    const error = await fetchWithTimeout('https://example.com', 1000, context).catch((e) => e);
+    expect((error as McpError).data?.responseBody).toBe(`${'x'.repeat(500)}…`);
+    expect(pulls).toBeLessThanOrEqual(3);
+    expect(cancelled).toBe(true);
   });
 
   it('wraps non-Error rejection values into McpError instances', async () => {
@@ -444,6 +468,21 @@ describe('fetchWithTimeout', () => {
     describe('hostname/IP pattern checks', () => {
       const ssrfOpts = { rejectPrivateIPs: true };
 
+      it.each([
+        'data:text/plain,hello',
+        'file:///etc/passwd',
+        'ftp://example.com/archive',
+        'gopher://example.com/resource',
+      ])('rejects the non-HTTP URL scheme in %s before fetch', async (url) => {
+        const fetchMock = vi.spyOn(globalThis, 'fetch');
+
+        await expect(fetchWithTimeout(url, 1000, context)).rejects.toMatchObject({
+          code: JsonRpcErrorCode.ValidationError,
+          message: 'Only HTTP and HTTPS URLs are allowed.',
+        });
+        expect(fetchMock).not.toHaveBeenCalled();
+      });
+
       it('should reject localhost', async () => {
         await expect(
           fetchWithTimeout('http://localhost/secrets', 1000, context, ssrfOpts),
@@ -515,6 +554,46 @@ describe('fetchWithTimeout', () => {
         ).rejects.toMatchObject({ code: JsonRpcErrorCode.ValidationError });
       });
 
+      it.each([
+        ['unspecified', '0.0.0.0'],
+        ['IETF protocol assignments', '192.0.0.1'],
+        ['TEST-NET-1', '192.0.2.1'],
+        ['benchmarking', '198.18.0.1'],
+        ['TEST-NET-2', '198.51.100.1'],
+        ['TEST-NET-3', '203.0.113.1'],
+        ['multicast', '224.0.0.1'],
+        ['administratively scoped multicast', '239.255.255.250'],
+        ['reserved', '240.0.0.1'],
+        ['limited broadcast', '255.255.255.255'],
+      ])('rejects non-global IPv4 %s destination %s', async (_label, address) => {
+        await expect(
+          fetchWithTimeout(`http://${address}/`, 1000, context, ssrfOpts),
+        ).rejects.toMatchObject({
+          code: JsonRpcErrorCode.ValidationError,
+          message: expect.stringContaining('non-global/reserved IP'),
+        });
+      });
+
+      it.each([
+        ['unspecified', '::'],
+        ['IPv4-compatible', '::c0a8:101'],
+        ['discard-only', '100::1'],
+        ['benchmarking', '2001:2::1'],
+        ['ORCHIDv2', '2001:20::1'],
+        ['documentation', '2001:db8::1'],
+        ['deprecated 6to4', '2002::1'],
+        ['documentation prefix', '3fff::1'],
+        ['deprecated site-local', 'fec0::1'],
+        ['multicast', 'ff02::1'],
+      ])('rejects non-global IPv6 %s destination %s', async (_label, address) => {
+        await expect(
+          fetchWithTimeout(`http://[${address}]/`, 1000, context, ssrfOpts),
+        ).rejects.toMatchObject({
+          code: JsonRpcErrorCode.ValidationError,
+          message: expect.stringContaining('non-global/reserved IP'),
+        });
+      });
+
       it('should allow public IPs when SSRF protection is enabled', async () => {
         vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response('ok', { status: 200 }));
         // 8.8.8.8 is a public IP — string check passes, DNS resolution skipped for literal IPs
@@ -539,16 +618,12 @@ describe('fetchWithTimeout', () => {
         }
       });
 
-      it('should not false-positive on public IPv6 with zero-stripped segments', async () => {
-        // fe8::1 is canonical form of 0fe8::1 (public space), not link-local
-        // fc::1 is canonical form of 00fc::1 (public space), not ULA
-        vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response('ok', { status: 200 }));
-        await expect(
-          fetchWithTimeout('http://[fe8::1]/', 1000, context, ssrfOpts),
-        ).resolves.toMatchObject({ status: 200 });
-        await expect(
-          fetchWithTimeout('http://[fc::1]/', 1000, context, ssrfOpts),
-        ).resolves.toMatchObject({ status: 200 });
+      it('should reject zero-stripped IPv6 addresses outside global unicast space', async () => {
+        for (const addr of ['fe8::1', 'fc::1']) {
+          await expect(
+            fetchWithTimeout(`http://[${addr}]/`, 1000, context, ssrfOpts),
+          ).rejects.toMatchObject({ code: JsonRpcErrorCode.ValidationError });
+        }
       });
 
       it('should reject IPv4-mapped IPv6 across full RFC 1918 / CGNAT space', async () => {
@@ -575,21 +650,17 @@ describe('fetchWithTimeout', () => {
         }
       });
 
-      it('should not block addresses just outside the private IPv6 ranges', async () => {
-        // fe7f::1 — third nibble 7, bits 9-10 = 01 → outside fe80::/10
-        // fec0::1 — third nibble c, bits 9-10 = 11 → outside fe80::/10
-        // fbff::1 — first byte fb, bits 1-7 = 1111101 → outside fc00::/7
-        vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response('ok', { status: 200 }));
+      it('should reject non-global IPv6 addresses outside the legacy private prefixes', async () => {
         for (const addr of ['fe7f::1', 'fec0::1', 'fbff::1']) {
           await expect(
             fetchWithTimeout(`http://[${addr}]/`, 1000, context, ssrfOpts),
-          ).resolves.toMatchObject({ status: 200 });
+          ).rejects.toMatchObject({ code: JsonRpcErrorCode.ValidationError });
         }
       });
 
       it('should allow public IPv6 addresses', async () => {
         vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response('ok', { status: 200 }));
-        for (const addr of ['2001:db8::1', '2606:4700::1111']) {
+        for (const addr of ['2001:4860:4860::8888', '2606:4700:4700::1111']) {
           await expect(
             fetchWithTimeout(`http://[${addr}]/`, 1000, context, ssrfOpts),
           ).resolves.toMatchObject({ status: 200 });
@@ -598,6 +669,25 @@ describe('fetchWithTimeout', () => {
     });
 
     describe('redirect validation', () => {
+      it('should reject a redirect to a non-HTTP scheme', async () => {
+        const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(
+          new Response(null, {
+            status: 302,
+            headers: { location: 'file:///etc/passwd' },
+          }),
+        );
+
+        await expect(
+          fetchWithTimeout('https://public.example.com', 1000, context, {
+            rejectPrivateIPs: true,
+          }),
+        ).rejects.toMatchObject({
+          code: JsonRpcErrorCode.ValidationError,
+          message: 'Only HTTP and HTTPS URLs are allowed.',
+        });
+        expect(fetchMock).toHaveBeenCalledTimes(1);
+      });
+
       it('should reject redirect to private IP', async () => {
         vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(
           new Response(null, {
