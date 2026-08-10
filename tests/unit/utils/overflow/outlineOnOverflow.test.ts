@@ -28,7 +28,7 @@ describe('outlineOnOverflow', () => {
     expect(result.sections.map((s) => s.name)).toEqual(['big', 'small']); // largest first
     expect(result.sections[0]!.bytes).toBeGreaterThan(result.sections[1]!.bytes);
     expect(result.notice).toContain('sections:[...]');
-    expect(result.notice).toContain('big'); // names the largest section
+    expect(result.notice).toContain('small'); // names the largest section that fits
   });
 
   it('short-circuits to full when over budget but fewer than 2 sections', () => {
@@ -70,6 +70,125 @@ describe('outlineOnOverflow', () => {
     );
     if (result.kind !== 'outline') throw new Error('expected outline');
     expect(result.notice).toBe('pick from 2');
+  });
+
+  it('passes the effective budget to a custom notice builder', () => {
+    const explicit = outlineOnOverflow(
+      { a: 'x'.repeat(200), b: 'y'.repeat(200) },
+      { budget: 50, notice: (_s, budget) => `budget ${budget}` },
+    );
+    const defaulted = outlineOnOverflow(
+      { a: 'x'.repeat(30_000), b: 'y'.repeat(30_000) },
+      { notice: (_s, budget) => `budget ${budget}` },
+    );
+
+    if (explicit.kind !== 'outline' || defaulted.kind !== 'outline') {
+      throw new Error('expected outlines');
+    }
+    expect(explicit.notice).toBe('budget 50');
+    expect(defaulted.notice).toBe(`budget ${DEFAULT_OUTLINE_BUDGET_BYTES}`);
+  });
+});
+
+describe('the default notice offers a worked example that fits the budget (#328)', () => {
+  /**
+   * Pulls the section names out of any `sections:["a","b"]` example in the
+   * notice. The instructional `sections:[...]` placeholder carries no quoted
+   * names, so only a real worked example contributes.
+   */
+  function exampleSections(notice: string): string[] {
+    return [...notice.matchAll(/sections:\[([^\]]*)\]/g)].flatMap((group) =>
+      [...(group[1] ?? '').matchAll(/"([^"]+)"/g)].map((m) => m[1] as string),
+    );
+  }
+
+  /**
+   * Runs the notice's own worked example down the selection path the tool would
+   * take, and returns the serialized size the agent would actually receive.
+   */
+  function replayExample(doc: Record<string, unknown>, notice: string): number {
+    const want = exampleSections(notice);
+    expect(want.length).toBeGreaterThan(0);
+    return JSON.stringify(selectSections(doc, want)).length;
+  }
+
+  it('names the only section that fits, and that example fits when replayed', () => {
+    const budget = 2_000;
+    const doc = {
+      warnings: 'w'.repeat(9_000),
+      adverse_reactions: 'a'.repeat(5_000),
+      dosage: 'd'.repeat(1_500),
+    };
+    const result = outlineOnOverflow(doc, { budget });
+    if (result.kind !== 'outline') throw new Error('expected outline');
+
+    expect(exampleSections(result.notice)).toEqual(['dosage']);
+    expect(result.notice).toContain('1502 bytes'); // the section's own size, inline
+    expect(replayExample(doc, result.notice)).toBeLessThanOrEqual(budget);
+  });
+
+  it('picks the largest fitting section when several fit', () => {
+    const budget = 6_000;
+    const doc = {
+      warnings: 'w'.repeat(9_000),
+      adverse_reactions: 'a'.repeat(5_000),
+      dosage: 'd'.repeat(1_500),
+      id: 'x',
+    };
+    const result = outlineOnOverflow(doc, { budget });
+    if (result.kind !== 'outline') throw new Error('expected outline');
+
+    expect(exampleSections(result.notice)).toEqual(['adverse_reactions']);
+    expect(replayExample(doc, result.notice)).toBeLessThanOrEqual(budget);
+    // Never the largest section — the one the outline just refused to inline.
+    expect(result.notice).not.toContain('"warnings"');
+  });
+
+  it('names no section when nothing fits, and points at narrowing the request', () => {
+    const budget = 1_000;
+    const doc = { warnings: 'w'.repeat(9_000), adverse_reactions: 'a'.repeat(5_000) };
+    const result = outlineOnOverflow(doc, { budget });
+    if (result.kind !== 'outline') throw new Error('expected outline');
+
+    expect(exampleSections(result.notice)).toEqual([]);
+    expect(result.notice).toContain('no single section fits');
+    expect(result.notice).toContain('5002 bytes'); // the smallest section's size
+    expect(result.notice).toContain('Narrow the request');
+    // The whole point: no name is offered that an agent could replay into an overflow.
+    for (const name of Object.keys(doc)) expect(result.notice).not.toContain(`"${name}"`);
+  });
+
+  it('handles an outline of exactly two sections', () => {
+    const budget = 500;
+    const doc = { body: 'b'.repeat(2_000), summary: 's'.repeat(200) };
+    const result = outlineOnOverflow(doc, { budget });
+    if (result.kind !== 'outline') throw new Error('expected outline');
+
+    expect(exampleSections(result.notice)).toEqual(['summary']);
+    expect(replayExample(doc, result.notice)).toBeLessThanOrEqual(budget);
+  });
+
+  it('offers the largest metadata key when metadata is all that fits', () => {
+    // One fat section plus id-shaped metadata: the metadata keys are the only
+    // things under budget, so they are what the example can honestly name.
+    const budget = 1_000;
+    const doc = { body: 'b'.repeat(9_000), set_id: 'set-abcdef', id: 'x' };
+    const result = outlineOnOverflow(doc, { budget });
+    if (result.kind !== 'outline') throw new Error('expected outline');
+
+    expect(exampleSections(result.notice)).toEqual(['set_id']);
+    expect(replayExample(doc, result.notice)).toBeLessThanOrEqual(budget);
+  });
+
+  it('replays within budget against the default budget constant', () => {
+    const doc = {
+      warnings: 'w'.repeat(DEFAULT_OUTLINE_BUDGET_BYTES * 2),
+      dosage: 'd'.repeat(DEFAULT_OUTLINE_BUDGET_BYTES - 5_000),
+    };
+    const result = outlineOnOverflow(doc);
+    if (result.kind !== 'outline') throw new Error('expected outline');
+
+    expect(replayExample(doc, result.notice)).toBeLessThanOrEqual(DEFAULT_OUTLINE_BUDGET_BYTES);
   });
 });
 

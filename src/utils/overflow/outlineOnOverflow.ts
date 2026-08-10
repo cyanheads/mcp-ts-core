@@ -77,10 +77,11 @@ export interface OutlineOptions<T> {
    */
   extract?: (doc: T) => SectionMeta[];
   /**
-   * Builds the re-call notice from the size-sorted sections. Default names the
-   * three largest sections as examples.
+   * Builds the re-call notice from the size-sorted sections and the budget they
+   * were measured against. Default names the largest section that fits the
+   * budget, with its size inline.
    */
-  notice?: (sections: SectionMeta[]) => string;
+  notice?: (sections: SectionMeta[], budget: number) => string;
 }
 
 /** Default extractor: one section per top-level key, sized by serialized length. */
@@ -91,13 +92,32 @@ function defaultExtract(doc: Record<string, unknown>): SectionMeta[] {
   }));
 }
 
-/** Default notice: re-call instruction naming the three largest sections. */
-function defaultNotice(sections: SectionMeta[]): string {
-  const examples = sections
-    .slice(0, 3)
-    .map((s) => s.name)
-    .join(', ');
-  return `Record too large to inline. Re-call this tool with sections:[...] to retrieve specific sections — e.g. ${examples}.`;
+/**
+ * Default notice: a re-call instruction whose worked example names the largest
+ * section that fits the budget, with its size inline.
+ *
+ * Naming the largest sections instead would hand the agent the most expensive
+ * retrieval available — the one most likely to blow the same budget the outline
+ * exists to enforce. Picking the largest *fitting* section is also what keeps
+ * trivial metadata keys (ids, timestamps — sections that retrieve nothing
+ * substantive) out of the example without the helper needing to know which keys
+ * those are.
+ *
+ * One section, not several: each listed size is per-section, and a selection
+ * naming several sums them, so a multi-section example would advertise a
+ * combination that may not fit. Every section's size is listed alongside the
+ * outline, so the agent can build a larger selection deliberately. When nothing
+ * fits, no section is named at all — every name available would be a worked
+ * example that overflows.
+ */
+function defaultNotice(sections: SectionMeta[], budget: number): string {
+  // `sections` is sorted largest-first, so the first that fits is the largest.
+  const fits = sections.find((s) => s.bytes <= budget);
+  if (!fits) {
+    const smallest = Math.min(...sections.map((s) => s.bytes));
+    return `Record too large to inline, and no single section fits the ${budget}-byte budget — the smallest is ${smallest} bytes. Narrow the request through this tool's other inputs; sections:[...] cannot bring this record under the budget.`;
+  }
+  return `Record too large to inline. Re-call this tool with sections:[...] to retrieve specific sections — e.g. sections:["${fits.name}"] (${fits.bytes} bytes, against a ${budget}-byte budget). Sizes are listed per section and a selection returns whatever it names, so sum them yourself before requesting several.`;
 }
 
 /**
@@ -141,7 +161,7 @@ export function outlineOnOverflow<T extends Record<string, unknown>>(
     return { ...doc, kind: 'full' };
   }
 
-  const notice = (options?.notice ?? defaultNotice)(sections);
+  const notice = (options?.notice ?? defaultNotice)(sections, budget);
   return { kind: 'outline', sections, notice };
 }
 
