@@ -4,6 +4,7 @@
  */
 import { type McpServer, ResourceTemplate } from '@modelcontextprotocol/sdk/server/mcp.js';
 
+import type { ProtocolSessionHooks } from '@/mcp-server/protocolSession.js';
 import type { AnyResourceDefinition } from '@/mcp-server/resources/utils/resourceDefinition.js';
 import {
   createResourceHandler,
@@ -35,7 +36,10 @@ export class ResourceRegistry {
   /**
    * Registers all resolved resource definitions with the provided McpServer instance.
    */
-  public async registerAll(server: McpServer): Promise<void> {
+  public async registerAll(
+    server: McpServer,
+    protocolSession?: ProtocolSessionHooks,
+  ): Promise<void> {
     this.registeredNames.clear();
 
     // Per-server notifier closures targeting `server.send*ListChanged()`. Bound
@@ -45,11 +49,16 @@ export class ResourceRegistry {
     // only when a request has no notification sender.
     const notifiers: ResourceHandlerNotifiers = {
       elicitInput: (params) => server.server.elicitInput(params),
-      getClientCapabilities: () => server.server.getClientCapabilities(),
+      getClientCapabilities: () =>
+        protocolSession?.clientCapabilities ?? server.server.getClientCapabilities(),
       notifyPromptListChanged: () => server.sendPromptListChanged(),
       notifyResourceListChanged: () => server.sendResourceListChanged(),
       notifyResourceUpdated: (uri: string) => server.server.sendResourceUpdated({ uri }),
       notifyToolListChanged: () => server.sendToolListChanged(),
+      requestScopedElicitation: protocolSession !== undefined,
+      ...(protocolSession?.registerRequest && {
+        registerRequest: protocolSession.registerRequest,
+      }),
     };
 
     const context = requestContextService.createRequestContext({

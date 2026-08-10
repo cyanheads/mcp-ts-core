@@ -5,6 +5,8 @@
  * @module src/mcp-server/transports/http/sessionStore
  */
 
+import type { ClientCapabilities, RequestId } from '@modelcontextprotocol/sdk/types.js';
+import type { ProtocolSessionHooks } from '@/mcp-server/protocolSession.js';
 import { validateSessionIdFormat } from '@/mcp-server/transports/http/sessionIdUtils.js';
 import { invalidParams, serviceUnavailable } from '@/types-global/errors.js';
 import { logger } from '@/utils/internal/logger.js';
@@ -52,11 +54,13 @@ export interface SessionIdentity {
  * Sessions are bound to the authenticated identity to prevent hijacking.
  */
 interface Session {
+  clientCapabilities?: ClientCapabilities;
   clientId?: string;
   createdAt: Date;
   id: string;
   /** Whether identity fields have been bound (atomic snapshot on first write). */
   identityBound: boolean;
+  inFlightRequests: Map<string, Set<AbortController>>;
   lastAccessedAt: Date;
   subject?: string;
 
@@ -91,6 +95,7 @@ export class SessionStore {
    */
   destroy(): void {
     clearInterval(this.cleanupInterval);
+    for (const session of this.sessions.values()) this.abortSessionRequests(session);
     this.sessions.clear();
   }
 
@@ -143,6 +148,7 @@ export class SessionStore {
         createdAt: now,
         lastAccessedAt: now,
         identityBound: hasIdentity,
+        inFlightRequests: new Map(),
       };
 
       // Only set identity fields if they have actual values (not undefined)
@@ -183,6 +189,75 @@ export class SessionStore {
     }
 
     return session;
+  }
+
+  /** Stores capabilities only after the initialize response succeeded. */
+  setClientCapabilities(sessionId: string, capabilities: ClientCapabilities): void {
+    const session = this.sessions.get(sessionId);
+    if (session) session.clientCapabilities = capabilities;
+  }
+
+  /**
+   * Builds the minimal state hooks restored onto the next per-request server.
+   * The session ID remains the isolation boundary for both capability state
+   * and cancellation routing.
+   */
+  createProtocolSessionHooks(sessionId: string): ProtocolSessionHooks | undefined {
+    const session = this.sessions.get(sessionId);
+    if (!session) return;
+
+    return {
+      ...(session.clientCapabilities && { clientCapabilities: session.clientCapabilities }),
+      registerRequest: (requestId) => this.registerRequest(sessionId, requestId),
+    };
+  }
+
+  /** Aborts all active handlers with the matching JSON-RPC request ID. */
+  cancelRequest(sessionId: string, requestId: RequestId, reason?: string): boolean {
+    const controllers = this.sessions
+      .get(sessionId)
+      ?.inFlightRequests.get(this.requestKey(requestId));
+    if (!controllers || controllers.size === 0) return false;
+
+    const abortReason = new DOMException(reason || 'MCP request cancelled', 'AbortError');
+    for (const controller of controllers) controller.abort(abortReason);
+    return true;
+  }
+
+  private requestKey(requestId: RequestId): string {
+    return `${typeof requestId}:${String(requestId)}`;
+  }
+
+  private registerRequest(sessionId: string, requestId: RequestId) {
+    const session = this.sessions.get(sessionId);
+    const controller = new AbortController();
+    if (!session) {
+      return { signal: controller.signal, unregister: () => undefined };
+    }
+
+    const key = this.requestKey(requestId);
+    const controllers = session.inFlightRequests.get(key) ?? new Set<AbortController>();
+    controllers.add(controller);
+    session.inFlightRequests.set(key, controllers);
+    let registered = true;
+
+    return {
+      signal: controller.signal,
+      unregister: () => {
+        if (!registered) return;
+        registered = false;
+        controllers.delete(controller);
+        if (controllers.size === 0) session.inFlightRequests.delete(key);
+      },
+    };
+  }
+
+  private abortSessionRequests(session: Session): void {
+    const reason = new DOMException('MCP session ended', 'AbortError');
+    for (const controllers of session.inFlightRequests.values()) {
+      for (const controller of controllers) controller.abort(reason);
+    }
+    session.inFlightRequests.clear();
   }
 
   /**
@@ -273,6 +348,7 @@ export class SessionStore {
   terminate(sessionId: string): void {
     const session = this.sessions.get(sessionId);
     if (session) {
+      this.abortSessionRequests(session);
       this.sessions.delete(sessionId);
       const metrics = getSessionMetrics();
       metrics.sessionEventCounter.add(1, { [ATTR_MCP_SESSION_EVENT]: 'terminated' });
@@ -295,6 +371,7 @@ export class SessionStore {
     const metrics = getSessionMetrics();
     for (const [id, session] of this.sessions.entries()) {
       if (now - session.lastAccessedAt.getTime() > this.staleTimeout) {
+        this.abortSessionRequests(session);
         metrics.sessionDuration.record((now - session.createdAt.getTime()) / 1000);
         this.sessions.delete(id);
         cleanedCount++;

@@ -98,7 +98,7 @@ describe('createMcpServerInstance', () => {
   it('should call ToolRegistry.registerAll', async () => {
     await createMcpServerInstance(deps);
     expect(mockToolRegistry.registerAll).toHaveBeenCalledTimes(1);
-    expect(mockToolRegistry.registerAll).toHaveBeenCalledWith(expect.any(McpServer));
+    expect(mockToolRegistry.registerAll).toHaveBeenCalledWith(expect.any(McpServer), undefined);
   });
 
   it('should call ResourceRegistry.registerAll', async () => {

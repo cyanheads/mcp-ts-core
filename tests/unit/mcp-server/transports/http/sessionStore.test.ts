@@ -289,6 +289,78 @@ describe('SessionStore - Security & Tenant Isolation', () => {
     });
   });
 
+  describe('Protocol session state', () => {
+    it('persists negotiated capabilities and exposes them through session hooks', () => {
+      const capabilities = {
+        elicitation: { form: {} },
+        sampling: {},
+      };
+      store.getOrCreate(SESSION_1);
+
+      store.setClientCapabilities(SESSION_1, capabilities);
+
+      const hooks = store.createProtocolSessionHooks(SESSION_1);
+      expect(hooks?.clientCapabilities).toEqual(capabilities);
+      expect(hooks?.registerRequest).toBeTypeOf('function');
+      expect(store.createProtocolSessionHooks(SESSION_2)).toBeUndefined();
+    });
+
+    it('registers by typed request ID and unregisters only that invocation', () => {
+      store.getOrCreate(SESSION_A);
+      store.getOrCreate(SESSION_B);
+      const hooksA = store.createProtocolSessionHooks(SESSION_A)!;
+      const hooksB = store.createProtocolSessionHooks(SESSION_B)!;
+      const removed = hooksA.registerRequest!(42);
+      const active = hooksA.registerRequest!(42);
+      const stringId = hooksA.registerRequest!('42');
+      const otherSession = hooksB.registerRequest!(42);
+
+      removed.unregister();
+      removed.unregister();
+      expect(store.cancelRequest(SESSION_A, 42, 'client stopped')).toBe(true);
+
+      expect(removed.signal.aborted).toBe(false);
+      expect(active.signal.aborted).toBe(true);
+      expect(active.signal.reason).toMatchObject({ name: 'AbortError', message: 'client stopped' });
+      expect(stringId.signal.aborted).toBe(false);
+      expect(otherSession.signal.aborted).toBe(false);
+      expect(store.cancelRequest(SESSION_A, '42')).toBe(true);
+      expect(stringId.signal.aborted).toBe(true);
+    });
+
+    it('does not route cancellation across sessions', () => {
+      store.getOrCreate(SESSION_A);
+      store.getOrCreate(SESSION_B);
+      const requestA = store.createProtocolSessionHooks(SESSION_A)!.registerRequest!('shared-id');
+      const requestB = store.createProtocolSessionHooks(SESSION_B)!.registerRequest!('shared-id');
+
+      expect(store.cancelRequest(SESSION_A, 'shared-id')).toBe(true);
+      expect(requestA.signal.aborted).toBe(true);
+      expect(requestB.signal.aborted).toBe(false);
+      expect(store.cancelRequest(SESSION_2, 'shared-id')).toBe(false);
+    });
+
+    it('aborts every in-flight request when the session terminates', () => {
+      store.getOrCreate(SESSION_1);
+      const hooks = store.createProtocolSessionHooks(SESSION_1)!;
+      const first = hooks.registerRequest!(1);
+      const second = hooks.registerRequest!('two');
+
+      store.terminate(SESSION_1);
+
+      for (const registration of [first, second]) {
+        expect(registration.signal.aborted).toBe(true);
+        expect(registration.signal.reason).toMatchObject({
+          name: 'AbortError',
+          message: 'MCP session ended',
+        });
+        expect(() => registration.unregister()).not.toThrow();
+      }
+      expect(store.createProtocolSessionHooks(SESSION_1)).toBeUndefined();
+      expect(store.cancelRequest(SESSION_1, 1)).toBe(false);
+    });
+  });
+
   describe('Staleness & Cleanup', () => {
     it('should invalidate stale sessions', async () => {
       // Use a very short timeout for faster test execution

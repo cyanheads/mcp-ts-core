@@ -8,10 +8,10 @@
 
 import http from 'node:http';
 import { type ServerType, serve } from '@hono/node-server';
-import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import type { Hono } from 'hono';
 import { config } from '@/config/index.js';
 import type { ServerManifest } from '@/core/serverManifest.js';
+import type { McpServerFactory } from '@/mcp-server/protocolSession.js';
 import { createHttpApp } from '@/mcp-server/transports/http/httpTransport.js';
 import type { HonoNodeBindings } from '@/mcp-server/transports/http/httpTypes.js';
 import type { SessionStore } from '@/mcp-server/transports/http/sessionStore.js';
@@ -107,7 +107,7 @@ function startHttpServerWithRetry<TBindings extends object = HonoNodeBindings>(
 }
 
 export async function startHttpTransport(
-  serverFactory: () => Promise<McpServer>,
+  serverFactory: McpServerFactory,
   parentContext: RequestContext,
   manifest: ServerManifest,
 ): Promise<HttpTransportHandle> {

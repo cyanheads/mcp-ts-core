@@ -11,10 +11,11 @@
  */
 import type { TaskMessageQueue, TaskStore } from '@modelcontextprotocol/sdk/experimental/tasks';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
-import type { Implementation } from '@modelcontextprotocol/sdk/types.js';
+import type { ClientCapabilities, Implementation } from '@modelcontextprotocol/sdk/types.js';
 
 import type { AppConfig } from '@/config/index.js';
 import type { PromptRegistry } from '@/mcp-server/prompts/prompt-registration.js';
+import type { ProtocolSessionHooks } from '@/mcp-server/protocolSession.js';
 import type { ResourceRegistry } from '@/mcp-server/resources/resource-registration.js';
 import type { ToolRegistry } from '@/mcp-server/tools/tool-registration.js';
 import { logger } from '@/utils/internal/logger.js';
@@ -48,6 +49,8 @@ export interface McpServerDeps {
    */
   instructions?: string;
   promptRegistry: PromptRegistry;
+  /** Request-spanning state restored for a per-request HTTP server instance. */
+  protocolSession?: ProtocolSessionHooks;
   resourceRegistry: ResourceRegistry;
   /** Task message queue for side-channel delivery via tasks/result. */
   taskMessageQueue?: TaskMessageQueue;
@@ -115,12 +118,25 @@ export async function createMcpServerInstance(deps: McpServerDeps): Promise<McpS
     },
   );
 
+  if (deps.protocolSession?.clientCapabilities) {
+    // The SDK keeps negotiated capabilities on each `Server` instance but
+    // exposes no restoration API. HTTP must use a fresh instance per request
+    // (GHSA-345p-7cg4-v4c7), so restore only the validated capability snapshot
+    // captured from this session's successful initialize request. This retains
+    // the SDK's own outgoing-request capability assertions without sharing a
+    // mutable Server between clients.
+    const restorableServer = server.server as unknown as {
+      _clientCapabilities?: ClientCapabilities;
+    };
+    restorableServer._clientCapabilities = deps.protocolSession.clientCapabilities;
+  }
+
   try {
     logger.debug('Registering all MCP capabilities via registries...', context);
 
     await Promise.all([
-      deps.toolRegistry.registerAll(server),
-      deps.resourceRegistry.registerAll(server),
+      deps.toolRegistry.registerAll(server, deps.protocolSession),
+      deps.resourceRegistry.registerAll(server, deps.protocolSession),
       deps.promptRegistry.registerAll(server),
     ]);
 

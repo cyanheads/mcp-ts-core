@@ -12,10 +12,12 @@
 
 import { StreamableHTTPTransport } from '@hono/mcp';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
+import type { ClientCapabilities } from '@modelcontextprotocol/sdk/types.js';
 import { Hono } from 'hono';
 import { cors } from 'hono/cors';
 import { config } from '@/config/index.js';
 import type { ServerManifest } from '@/core/serverManifest.js';
+import type { McpServerFactory } from '@/mcp-server/protocolSession.js';
 import { createAuthStrategy } from '@/mcp-server/transports/auth/authFactory.js';
 import { createAuthMiddleware } from '@/mcp-server/transports/auth/authMiddleware.js';
 import { authContext } from '@/mcp-server/transports/auth/lib/authContext.js';
@@ -144,20 +146,18 @@ type CloseTrigger = 'success' | 'error' | 'sse-abort';
  * `surface` and `trigger` tags. */
 async function closePerRequestInstances(
   transport: McpSessionTransport,
-  server: McpServer,
+  server: McpServer | undefined,
   sessionId: string,
   requestContext: RequestContext,
   trigger: CloseTrigger,
 ): Promise<void> {
-  const tasks: [PerRequestKind, Promise<void>][] = [
-    ['transport', transport.close()],
-    ['server', server.close()],
-  ];
+  const tasks: [PerRequestKind, () => Promise<void>][] = [['transport', () => transport.close()]];
+  if (server) tasks.push(['server', () => server.close()]);
 
   await Promise.all(
-    tasks.map(async ([surface, closePromise]) => {
+    tasks.map(async ([surface, close]) => {
       try {
-        await withTimeout(closePromise, PER_REQUEST_CLOSE_TIMEOUT_MS, `${surface}.close`);
+        await withTimeout(close(), PER_REQUEST_CLOSE_TIMEOUT_MS, `${surface}.close`);
       } catch (err) {
         getCloseFailureCounter().add(1, { surface, trigger });
         logger.warning(`Failed to close ${surface} (trigger=${trigger})`, {
@@ -168,6 +168,45 @@ async function closePerRequestInstances(
       }
     }),
   );
+}
+
+type BoundedBodyRead =
+  | { exceeded: false; body: ArrayBuffer }
+  | { exceeded: true; bytesRead: number };
+
+/** Reads at most one stream chunk beyond `maxBytes`, cancelling as soon as the
+ * limit is crossed. Fetch body chunks are not size-bounded by the consumer, so
+ * the final chunk may itself be larger than the remaining allowance. */
+async function readBodyWithinLimit(request: Request, maxBytes: number): Promise<BoundedBodyRead> {
+  if (!request.body) return { exceeded: false, body: new ArrayBuffer(0) };
+
+  const reader = request.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let bytesRead = 0;
+
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+
+    bytesRead += value.byteLength;
+    if (bytesRead > maxBytes) {
+      try {
+        await reader.cancel('Request body size limit exceeded');
+      } catch {
+        // The 413 remains authoritative even when the producer rejects cancel.
+      }
+      return { exceeded: true, bytesRead };
+    }
+    chunks.push(value);
+  }
+
+  const body = new Uint8Array(bytesRead);
+  let offset = 0;
+  for (const chunk of chunks) {
+    body.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return { exceeded: false, body: body.buffer };
 }
 
 /**
@@ -186,7 +225,7 @@ async function closePerRequestInstances(
  * @returns Configured Hono application with the specified binding type
  */
 export async function createHttpApp<TBindings extends object = HonoNodeBindings>(
-  serverFactory: () => Promise<McpServer>,
+  serverFactory: McpServerFactory,
   parentContext: RequestContext,
   manifest: ServerManifest,
 ): Promise<{ app: Hono<{ Bindings: TBindings }>; sessionStore: SessionStore | null }> {
@@ -318,11 +357,11 @@ export async function createHttpApp<TBindings extends object = HonoNodeBindings>
   // MCP Spec hardening (issue #157): reject oversized request bodies before the
   // per-request McpServer/transport are allocated and before the SDK parses the
   // body. A declared Content-Length over the cap is rejected with zero
-  // buffering; otherwise the body is read once — cached so the downstream
-  // `c.req.json()` reuses it — and its actual byte length enforced, closing the
-  // bypass where a client omits or under-declares Content-Length. For a hard
-  // memory ceiling against unbounded chunked uploads, pair with a reverse-proxy
-  // body limit. `MCP_HTTP_MAX_BODY_BYTES=0` disables the guard.
+  // buffering; otherwise the body stream is read only to the first chunk that
+  // crosses the limit, then cancelled. Valid bodies are cached so downstream
+  // `c.req.json()` reuses the preserved bytes. This closes the bypass where a
+  // client omits or under-declares Content-Length. `MCP_HTTP_MAX_BODY_BYTES=0`
+  // disables the guard.
   const maxBodyBytes = config.mcpHttpMaxBodyBytes;
   if (maxBodyBytes > 0) {
     app.use(config.mcpHttpEndpointPath, async (c, next) => {
@@ -355,12 +394,17 @@ export async function createHttpApp<TBindings extends object = HonoNodeBindings>
         return rejectOversized(declared);
       }
 
-      // Authoritative check on actual bytes — catches missing or under-declared
-      // Content-Length. The buffered read is cached for the downstream handler.
-      const body = await c.req.arrayBuffer();
-      if (body.byteLength > maxBodyBytes) {
-        return rejectOversized(body.byteLength);
+      // Authoritative streaming check — catches missing or under-declared
+      // Content-Length without draining an unbounded upload.
+      const bodyRead = await readBodyWithinLimit(c.req.raw, maxBodyBytes);
+      if (bodyRead.exceeded) {
+        return rejectOversized(bodyRead.bytesRead);
       }
+
+      // Hono's body cache stores promises internally even though its public
+      // BodyCache type describes resolved values. Seeding it preserves the body
+      // for the SDK after the raw stream has been consumed above.
+      Object.assign(c.req.bodyCache, { arrayBuffer: Promise.resolve(bodyRead.body) });
 
       return await next();
     });
@@ -604,6 +648,32 @@ export async function createHttpApp<TBindings extends object = HonoNodeBindings>
 
     const providedSessionId = c.req.header('mcp-session-id');
 
+    // Parse once for the small amount of protocol state the per-request SDK
+    // server cannot retain itself. Hono caches body parsing, so the transport
+    // still receives the same body below. Malformed JSON remains the SDK's job.
+    let rpcMessages: Record<string, unknown>[] = [];
+    if (c.req.method === 'POST') {
+      try {
+        const rawBody: unknown = await c.req.json();
+        const messages = Array.isArray(rawBody) ? rawBody : [rawBody];
+        rpcMessages = messages.filter(
+          (message): message is Record<string, unknown> =>
+            typeof message === 'object' && message !== null,
+        );
+      } catch {
+        // Malformed body — let the SDK surface the parse error downstream.
+      }
+    }
+
+    const initializeMessage = rpcMessages.find((message) => message.method === 'initialize');
+    const declaredCapabilities = (
+      initializeMessage?.params as { capabilities?: unknown } | undefined
+    )?.capabilities;
+    const initializeCapabilities =
+      typeof declaredCapabilities === 'object' && declaredCapabilities !== null
+        ? (declaredCapabilities as ClientCapabilities)
+        : undefined;
+
     // Extract identity from auth context (if auth is enabled)
     // This MUST happen before session validation for security
     const sessionIdentity = extractSessionIdentity();
@@ -629,48 +699,62 @@ export async function createHttpApp<TBindings extends object = HonoNodeBindings>
     // non-initialize requests. Without this gate, the SDK processes the RPC
     // on a fresh per-request McpServer (no protocol state to reject against)
     // and the session store mints an uninitialized session on response.ok.
-    if (sessionStore && !providedSessionId) {
-      let isInitialize = false;
-      if (c.req.method === 'POST') {
-        try {
-          const rawBody: unknown = await c.req.json();
-          const messages = Array.isArray(rawBody) ? rawBody : [rawBody];
-          isInitialize = messages.some(
-            (msg: unknown) =>
-              typeof msg === 'object' &&
-              msg !== null &&
-              'method' in msg &&
-              (msg as Record<string, unknown>).method === 'initialize',
-          );
-        } catch {
-          // Malformed body — let the SDK surface the parse error downstream
-        }
-      }
-      if (!isInitialize) {
-        logger.warning('Rejected non-initialize request without session in stateful mode', {
-          ...requestContext,
-          method: c.req.method,
-        });
-        return c.json(
-          {
-            error:
-              'Bad Request: Mcp-Session-Id header is required. Send an initialize request first.',
-          },
-          400,
-        );
-      }
+    if (sessionStore && !providedSessionId && !initializeMessage) {
+      logger.warning('Rejected non-initialize request without session in stateful mode', {
+        ...requestContext,
+        method: c.req.method,
+      });
+      return c.json(
+        {
+          error:
+            'Bad Request: Mcp-Session-Id header is required. Send an initialize request first.',
+        },
+        400,
+      );
     }
 
     const sessionId = providedSessionId ?? generateSecureSessionId();
 
+    // The cancellation notification is handled by a different SDK Server
+    // instance than the original request. Mirror it into the durable session
+    // registry before passing it to the SDK so the original handler's merged
+    // `ctx.signal` is aborted without sharing Server instances across clients.
+    if (sessionStore) {
+      for (const message of rpcMessages) {
+        if (message.method !== 'notifications/cancelled') continue;
+        const params = message.params as { reason?: unknown; requestId?: unknown } | undefined;
+        const requestId = params?.requestId;
+        if (typeof requestId !== 'string' && typeof requestId !== 'number') continue;
+        const reason = params?.reason;
+        sessionStore.cancelRequest(
+          sessionId,
+          requestId,
+          typeof reason === 'string' ? reason : undefined,
+        );
+      }
+    }
+
     const transport = new McpSessionTransport(sessionId);
     trackPerRequestInstance(transport, 'transport');
+    let server: McpServer | undefined;
+    let closePromise: Promise<void> | undefined;
+
+    const closeOnce = (trigger: CloseTrigger): Promise<void> => {
+      closePromise ??= closePerRequestInstances(
+        transport,
+        server,
+        sessionId,
+        requestContext,
+        trigger,
+      );
+      return closePromise;
+    };
 
     const handleRpc = async (): Promise<Response> => {
       // SDK 1.26.0: Protocol.connect() throws if already connected.
       // Create a fresh McpServer per request to prevent cross-client data leaks.
       // See GHSA-345p-7cg4-v4c7.
-      const server = await serverFactory();
+      server = await serverFactory(sessionStore?.createProtocolSessionHooks(sessionId));
       trackPerRequestInstance(server, 'server');
       await server.connect(transport);
       const response = await transport.handleRequest(c);
@@ -681,6 +765,9 @@ export async function createHttpApp<TBindings extends object = HonoNodeBindings>
         // validation (e.g. tools/list without prior initialize).
         if (sessionStore && response.ok) {
           sessionStore.getOrCreate(sessionId, sessionIdentity);
+          if (initializeCapabilities) {
+            sessionStore.setClientCapabilities(sessionId, initializeCapabilities);
+          }
         }
 
         // MCP Spec 2025-06-18: For stateful sessions, return Mcp-Session-Id header
@@ -707,17 +794,11 @@ export async function createHttpApp<TBindings extends object = HonoNodeBindings>
         const isSSE = response.headers.get('content-type')?.includes('text/event-stream');
         if (!isSSE) {
           queueMicrotask(() => {
-            void closePerRequestInstances(transport, server, sessionId, requestContext, 'success');
+            void closeOnce('success');
           });
         } else {
           const sseCleanup = (): void => {
-            void closePerRequestInstances(
-              transport,
-              server,
-              sessionId,
-              requestContext,
-              'sse-abort',
-            );
+            void closeOnce('sse-abort');
           };
           const reqSignal = c.req.raw.signal;
           if (reqSignal.aborted) {
@@ -729,6 +810,9 @@ export async function createHttpApp<TBindings extends object = HonoNodeBindings>
 
         return response;
       }
+      queueMicrotask(() => {
+        void closeOnce('success');
+      });
       return c.body(null, 204);
     };
 
@@ -737,20 +821,9 @@ export async function createHttpApp<TBindings extends object = HonoNodeBindings>
     try {
       return await handleRpc();
     } catch (err) {
-      // On error, close transport immediately under the same bounded timeout
-      // + failure-metric contract as the success path. No `server` is in
-      // scope here — creation happens inside handleRpc — so only the transport
-      // is closed.
-      await withTimeout(transport.close(), PER_REQUEST_CLOSE_TIMEOUT_MS, 'transport.close').catch(
-        (closeErr: unknown) => {
-          getCloseFailureCounter().add(1, { surface: 'transport', trigger: 'error' });
-          logger.warning('Failed to close transport after error', {
-            ...requestContext,
-            sessionId,
-            error: closeErr instanceof Error ? closeErr.message : String(closeErr),
-          });
-        },
-      );
+      // Close every surface that was successfully created. The idempotent
+      // closure also protects against any cleanup already scheduled elsewhere.
+      await closeOnce('error');
       throw err instanceof Error ? err : new Error(String(err));
     }
   });

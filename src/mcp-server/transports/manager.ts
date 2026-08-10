@@ -2,11 +2,11 @@
  * @fileoverview Manages the lifecycle of the configured MCP transport.
  * @module src/mcp-server/transports/manager
  */
-import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { EmptyResultSchema } from '@modelcontextprotocol/sdk/types.js';
 
 import type { AppConfig as AppConfigType } from '@/config/index.js';
 import type { ServerManifest } from '@/core/serverManifest.js';
+import type { McpServerFactory } from '@/mcp-server/protocolSession.js';
 import type { TaskManager } from '@/mcp-server/tasks/core/taskManager.js';
 import { HeartbeatMonitor } from '@/mcp-server/transports/heartbeat.js';
 import { startHttpTransport } from '@/mcp-server/transports/http/httpServer.js';
@@ -27,7 +27,7 @@ export class TransportManager {
   constructor(
     private config: AppConfigType,
     private logger: typeof LoggerType,
-    private createMcpServer: () => Promise<McpServer>,
+    private createMcpServer: McpServerFactory,
     private taskManager: TaskManager,
     private manifest: ServerManifest,
   ) {}

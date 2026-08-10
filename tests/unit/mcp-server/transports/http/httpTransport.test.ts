@@ -6,6 +6,7 @@
 import { StreamableHTTPTransport } from '@hono/mcp';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
+import type { ProtocolSessionHooks } from '@/mcp-server/protocolSession.js';
 import { createHttpApp } from '@/mcp-server/transports/http/httpTransport.js';
 import { logger } from '@/utils/internal/logger.js';
 import type { RequestContext } from '@/utils/internal/requestContext.js';
@@ -854,6 +855,59 @@ describe('HTTP Transport', () => {
         expect(response.status).not.toBe(413);
       });
     });
+
+    test('preserves a valid streamed body for the downstream SDK handler', async () => {
+      await withConfigOverrides({ mcpHttpMaxBodyBytes: 2048 }, async () => {
+        const expectedBody = { jsonrpc: '2.0', method: 'ping', id: 1 };
+        const encodedBody = new TextEncoder().encode(JSON.stringify(expectedBody));
+        const stream = new ReadableStream<Uint8Array>({
+          start(controller) {
+            controller.enqueue(encodedBody.subarray(0, 10));
+            controller.enqueue(encodedBody.subarray(10));
+            controller.close();
+          },
+        });
+        const handleRequestSpy = vi
+          .spyOn(StreamableHTTPTransport.prototype, 'handleRequest')
+          .mockImplementation(async (c) => {
+            expect(await c.req.json()).toEqual(expectedBody);
+            return new Response(null, { status: 202 });
+          });
+        const transportCloseSpy = vi
+          .spyOn(StreamableHTTPTransport.prototype, 'close')
+          .mockResolvedValue(undefined);
+        const serverCloseSpy = vi.fn().mockResolvedValue(undefined);
+        const mockServer = {
+          connect: vi.fn().mockResolvedValue(undefined),
+          close: serverCloseSpy,
+        } as unknown as McpServer;
+        const { app } = await createHttpApp(
+          () => Promise.resolve(mockServer),
+          mockContext,
+          defaultMeta,
+        );
+
+        const response = await app.fetch(
+          new Request('http://localhost:3000/mcp', {
+            method: 'POST',
+            headers: {
+              Origin: 'http://localhost:3000',
+              'Content-Type': 'application/json',
+              'Mcp-Protocol-Version': '2025-03-26',
+            },
+            body: stream,
+            duplex: 'half',
+          } as RequestInit),
+        );
+
+        expect(response.status).toBe(202);
+        expect(handleRequestSpy).toHaveBeenCalledOnce();
+
+        await new Promise((resolve) => setImmediate(resolve));
+        expect(transportCloseSpy).toHaveBeenCalledOnce();
+        expect(serverCloseSpy).toHaveBeenCalledOnce();
+      });
+    });
   });
 
   // Verification for issue #244. The #157 tests above only assert an eventual
@@ -889,12 +943,7 @@ describe('HTTP Transport', () => {
       return { stream, state };
     }
 
-    // Marked `test.fails`: it asserts the CORRECT (post-fix) behavior, which the
-    // current arrayBuffer()-then-check code does not satisfy — so today the
-    // assertions throw and `test.fails` keeps the suite green while #244 is open.
-    // Implementing the streaming cap makes them pass, which flips this to RED —
-    // the signal to change `test.fails` back to `test`.
-    test.fails('rejects an over-limit no-Content-Length body without buffering all of it', async () => {
+    test('rejects an over-limit no-Content-Length body without buffering all of it', async () => {
       await withConfigOverrides({ mcpHttpMaxBodyBytes: CAP }, async () => {
         const { app } = await createHttpApp(
           () => Promise.resolve(mockMcpServer as McpServer),
@@ -923,6 +972,35 @@ describe('HTTP Transport', () => {
         // A streaming cap stops reading shortly after the limit is exceeded
         // (8 KiB slack for read-ahead). The current code drains all 64 KiB and
         // never cancels, so both assertions throw today.
+        expect(state.cancelled).toBe(true);
+        expect(state.bytesPulled).toBeLessThan(CAP + 8 * 1024);
+      });
+    });
+
+    test('rejects and cancels an over-limit body with dishonest Content-Length', async () => {
+      await withConfigOverrides({ mcpHttpMaxBodyBytes: CAP }, async () => {
+        const { app } = await createHttpApp(
+          () => Promise.resolve(mockMcpServer as McpServer),
+          mockContext,
+          defaultMeta,
+        );
+        const { stream, state } = instrumentedStream(1024, 64);
+
+        const response = await app.fetch(
+          new Request('http://localhost:3000/mcp', {
+            method: 'POST',
+            headers: {
+              Origin: 'http://localhost:3000',
+              'Content-Type': 'application/json',
+              'Content-Length': '100',
+              'Mcp-Protocol-Version': '2025-03-26',
+            },
+            body: stream,
+            duplex: 'half',
+          } as RequestInit),
+        );
+
+        expect(response.status).toBe(413);
         expect(state.cancelled).toBe(true);
         expect(state.bytesPulled).toBeLessThan(CAP + 8 * 1024);
       });
@@ -1127,6 +1205,166 @@ describe('HTTP Transport', () => {
         sessionStore!.destroy();
       });
     });
+
+    test('persists initialize capabilities into the next request server factory', async () => {
+      await withConfigOverrides({ mcpSessionMode: 'stateful' }, async () => {
+        const transportCloseSpy = vi
+          .spyOn(StreamableHTTPTransport.prototype, 'close')
+          .mockResolvedValue(undefined);
+        vi.spyOn(StreamableHTTPTransport.prototype, 'handleRequest').mockImplementation(
+          async () =>
+            new Response(JSON.stringify({ jsonrpc: '2.0', id: 1, result: {} }), {
+              status: 200,
+              headers: { 'Content-Type': 'application/json' },
+            }),
+        );
+        const serverCloseSpies: ReturnType<typeof vi.fn>[] = [];
+        const serverFactory = vi.fn(async (_hooks?: ProtocolSessionHooks) => {
+          const close = vi.fn().mockResolvedValue(undefined);
+          serverCloseSpies.push(close);
+          return {
+            connect: vi.fn().mockResolvedValue(undefined),
+            close,
+          } as unknown as McpServer;
+        });
+        const { app, sessionStore } = await createHttpApp(serverFactory, mockContext, defaultMeta);
+        const capabilities = { elicitation: { form: {} }, sampling: {} };
+
+        const initializeResponse = await app.fetch(
+          new Request('http://localhost:3000/mcp', {
+            method: 'POST',
+            headers: {
+              Origin: 'http://localhost:3000',
+              'Content-Type': 'application/json',
+              'Mcp-Protocol-Version': '2025-03-26',
+            },
+            body: JSON.stringify({
+              jsonrpc: '2.0',
+              method: 'initialize',
+              id: 1,
+              params: {
+                protocolVersion: '2025-03-26',
+                capabilities,
+                clientInfo: { name: 'test-client', version: '1.0.0' },
+              },
+            }),
+          }),
+        );
+        const sessionId = initializeResponse.headers.get('mcp-session-id');
+        expect(sessionId).toBeTruthy();
+        expect(serverFactory.mock.calls[0]?.[0]).toBeUndefined();
+
+        const nextResponse = await app.fetch(
+          new Request('http://localhost:3000/mcp', {
+            method: 'POST',
+            headers: {
+              Origin: 'http://localhost:3000',
+              'Content-Type': 'application/json',
+              'Mcp-Protocol-Version': '2025-03-26',
+              'Mcp-Session-Id': sessionId!,
+            },
+            body: JSON.stringify({ jsonrpc: '2.0', method: 'tools/list', id: 2 }),
+          }),
+        );
+
+        expect(nextResponse.status).toBe(200);
+        expect(serverFactory.mock.calls[1]?.[0]?.clientCapabilities).toEqual(capabilities);
+        expect(serverFactory.mock.calls[1]?.[0]?.registerRequest).toBeTypeOf('function');
+
+        await new Promise((resolve) => setImmediate(resolve));
+        expect(transportCloseSpy).toHaveBeenCalledTimes(2);
+        expect(serverCloseSpies).toHaveLength(2);
+        expect(serverCloseSpies.every((close) => close.mock.calls.length === 1)).toBe(true);
+        sessionStore!.destroy();
+      });
+    });
+
+    test('routes cancellation only to the session supplied by the request', async () => {
+      await withConfigOverrides({ mcpSessionMode: 'stateful' }, async () => {
+        vi.spyOn(StreamableHTTPTransport.prototype, 'close').mockResolvedValue(undefined);
+        vi.spyOn(StreamableHTTPTransport.prototype, 'handleRequest').mockImplementation(
+          async (c) => {
+            const body = (await c.req.json()) as { method?: string };
+            return new Response(
+              body.method === 'notifications/cancelled'
+                ? null
+                : JSON.stringify({ jsonrpc: '2.0', id: 1, result: {} }),
+              {
+                status: body.method === 'notifications/cancelled' ? 202 : 200,
+                headers: { 'Content-Type': 'application/json' },
+              },
+            );
+          },
+        );
+        const serverFactory = vi.fn(
+          async (_hooks?: ProtocolSessionHooks) =>
+            ({
+              connect: vi.fn().mockResolvedValue(undefined),
+              close: vi.fn().mockResolvedValue(undefined),
+            }) as unknown as McpServer,
+        );
+        const { app, sessionStore } = await createHttpApp(serverFactory, mockContext, defaultMeta);
+        const initialize = async (id: number): Promise<string> => {
+          const response = await app.fetch(
+            new Request('http://localhost:3000/mcp', {
+              method: 'POST',
+              headers: {
+                Origin: 'http://localhost:3000',
+                'Content-Type': 'application/json',
+                'Mcp-Protocol-Version': '2025-03-26',
+              },
+              body: JSON.stringify({
+                jsonrpc: '2.0',
+                method: 'initialize',
+                id,
+                params: {
+                  protocolVersion: '2025-03-26',
+                  capabilities: {},
+                  clientInfo: { name: `client-${id}`, version: '1.0.0' },
+                },
+              }),
+            }),
+          );
+          return response.headers.get('mcp-session-id')!;
+        };
+        const sessionA = await initialize(1);
+        const sessionB = await initialize(2);
+        expect(sessionA).toBeTruthy();
+        expect(sessionB).toBeTruthy();
+        expect(sessionA).not.toBe(sessionB);
+        const requestA = sessionStore!.createProtocolSessionHooks(sessionA)!.registerRequest!(99);
+        const requestB = sessionStore!.createProtocolSessionHooks(sessionB)!.registerRequest!(99);
+
+        const cancelResponse = await app.fetch(
+          new Request('http://localhost:3000/mcp', {
+            method: 'POST',
+            headers: {
+              Origin: 'http://localhost:3000',
+              'Content-Type': 'application/json',
+              'Mcp-Protocol-Version': '2025-03-26',
+              'Mcp-Session-Id': sessionA,
+            },
+            body: JSON.stringify({
+              jsonrpc: '2.0',
+              method: 'notifications/cancelled',
+              params: { requestId: 99, reason: 'user cancelled' },
+            }),
+          }),
+        );
+
+        expect(cancelResponse.status).toBe(202);
+        expect(requestA.signal.aborted).toBe(true);
+        expect(requestA.signal.reason).toMatchObject({
+          name: 'AbortError',
+          message: 'user cancelled',
+        });
+        expect(requestB.signal.aborted).toBe(false);
+        expect(serverFactory.mock.calls.at(-1)?.[0]).toEqual(
+          expect.objectContaining({ registerRequest: expect.any(Function) }),
+        );
+        sessionStore!.destroy();
+      });
+    });
   });
 
   // -------------------------------------------------------------------------
@@ -1244,6 +1482,93 @@ describe('HTTP Transport', () => {
 
       expect(transportCloseSpy).toHaveBeenCalledTimes(1);
       expect(serverCloseSpy).toHaveBeenCalledTimes(1);
+    });
+
+    test('undefined handler response returns 204 and closes both surfaces exactly once', async () => {
+      const requestServerCloseSpy = vi.fn().mockResolvedValue(undefined);
+      const requestServer = {
+        connect: vi.fn().mockResolvedValue(undefined),
+        close: requestServerCloseSpy,
+      } as unknown as McpServer;
+      vi.spyOn(StreamableHTTPTransport.prototype, 'handleRequest').mockResolvedValue(undefined);
+      const { app: undefinedResponseApp } = await createHttpApp(
+        () => Promise.resolve(requestServer),
+        mockContext,
+        defaultMeta,
+      );
+
+      const response = await undefinedResponseApp.fetch(
+        new Request('http://localhost:3000/mcp', {
+          method: 'POST',
+          headers: {
+            Origin: 'http://localhost:3000',
+            'Content-Type': 'application/json',
+            'Mcp-Protocol-Version': '2025-03-26',
+          },
+          body: JSON.stringify({ jsonrpc: '2.0', method: 'ping', id: 1 }),
+        }),
+      );
+      await flushCleanup();
+
+      expect(response.status).toBe(204);
+      expect(transportCloseSpy).toHaveBeenCalledTimes(1);
+      expect(requestServerCloseSpy).toHaveBeenCalledTimes(1);
+    });
+
+    test('server factory error closes the created transport exactly once', async () => {
+      const factoryError = new Error('factory failed');
+      const { app: factoryErrorApp } = await createHttpApp(
+        () => Promise.reject(factoryError),
+        mockContext,
+        defaultMeta,
+      );
+
+      const response = await factoryErrorApp.fetch(sseRequest(new AbortController().signal));
+
+      expect(response.status).toBe(500);
+      expect(transportCloseSpy).toHaveBeenCalledTimes(1);
+      expect(serverCloseSpy).not.toHaveBeenCalled();
+    });
+
+    test('connect error closes the created server and transport exactly once', async () => {
+      const requestServerCloseSpy = vi.fn().mockResolvedValue(undefined);
+      const requestServer = {
+        connect: vi.fn().mockRejectedValue(new Error('connect failed')),
+        close: requestServerCloseSpy,
+      } as unknown as McpServer;
+      const { app: connectErrorApp } = await createHttpApp(
+        () => Promise.resolve(requestServer),
+        mockContext,
+        defaultMeta,
+      );
+
+      const response = await connectErrorApp.fetch(sseRequest(new AbortController().signal));
+
+      expect(response.status).toBe(500);
+      expect(transportCloseSpy).toHaveBeenCalledTimes(1);
+      expect(requestServerCloseSpy).toHaveBeenCalledTimes(1);
+    });
+
+    test('handler error closes the created server and transport exactly once', async () => {
+      const requestServerCloseSpy = vi.fn().mockResolvedValue(undefined);
+      const requestServer = {
+        connect: vi.fn().mockResolvedValue(undefined),
+        close: requestServerCloseSpy,
+      } as unknown as McpServer;
+      vi.spyOn(StreamableHTTPTransport.prototype, 'handleRequest').mockRejectedValue(
+        new Error('handler failed'),
+      );
+      const { app: handlerErrorApp } = await createHttpApp(
+        () => Promise.resolve(requestServer),
+        mockContext,
+        defaultMeta,
+      );
+
+      const response = await handlerErrorApp.fetch(sseRequest(new AbortController().signal));
+
+      expect(response.status).toBe(500);
+      expect(transportCloseSpy).toHaveBeenCalledTimes(1);
+      expect(requestServerCloseSpy).toHaveBeenCalledTimes(1);
     });
   });
 

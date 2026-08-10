@@ -8,24 +8,23 @@ import type { RequestHandlerExtra } from '@modelcontextprotocol/sdk/shared/proto
 import type {
   CallToolResult,
   ContentBlock,
-  ElicitRequestFormParams,
-  ElicitRequestURLParams,
-  ElicitResult,
   ServerNotification,
   ServerRequest,
 } from '@modelcontextprotocol/sdk/types.js';
 
-import { toJSONSchema, ZodError, type ZodObject, type ZodRawShape } from 'zod';
+import { ZodError, type ZodObject, type ZodRawShape } from 'zod';
 
 import { config } from '@/config/index.js';
-import type { Context, ElicitFn, EnrichmentStore } from '@/core/context.js';
+import type { Context, EnrichmentStore } from '@/core/context.js';
 import {
   attachTypedFail,
   createContext,
   readContentStore,
   readEnrichmentStore,
 } from '@/core/context.js';
+import { type ElicitationNotifiers, wrapElicit } from '@/mcp-server/elicitation.js';
 import { buildRequestScopedNotifiers } from '@/mcp-server/notifications.js';
+import type { ProtocolRequestRegistration } from '@/mcp-server/protocolSession.js';
 import { withRequiredScopes } from '@/mcp-server/transports/auth/lib/authUtils.js';
 import type { StorageService } from '@/storage/core/StorageService.js';
 import { type JsonRpcErrorCode, McpError } from '@/types-global/errors.js';
@@ -69,21 +68,15 @@ export interface HandlerFactoryServices {
  * the background auto-task path uses them directly (no request scope), so those
  * notifications deliver on stdio but drop under HTTP.
  *
- * `elicitInput` and `getClientCapabilities` are bound at registration time to
- * the per-server `Server` instance so `wrapElicit` can gate `ctx.elicit` on
- * the client's advertised capability and forward elicitation requests on the
- * wire. Both are undefined in the auto-task background path (no connected
- * client is available).
+ * The elicitation fields come from {@link ElicitationNotifiers}.
  */
-export interface HandlerNotifiers {
-  /** Bound to `server.server.elicitInput.bind(server.server)`. */
-  elicitInput?: (params: ElicitRequestFormParams | ElicitRequestURLParams) => Promise<ElicitResult>;
-  /** Bound to `server.server.getClientCapabilities.bind(server.server)`. */
-  getClientCapabilities?: () => { elicitation?: unknown } | undefined;
+export interface HandlerNotifiers extends ElicitationNotifiers {
   notifyPromptListChanged?: () => void;
   notifyResourceListChanged?: () => void;
   notifyResourceUpdated?: (uri: string) => void;
   notifyToolListChanged?: () => void;
+  /** Registers this handler invocation for session-scoped HTTP cancellation. */
+  registerRequest?: (requestId: SdkExtra['requestId']) => ProtocolRequestRegistration;
 }
 
 // ---------------------------------------------------------------------------
@@ -285,51 +278,6 @@ export function buildToolSuccessResult(
 }
 
 // ---------------------------------------------------------------------------
-// Capability detection helpers
-// ---------------------------------------------------------------------------
-
-/**
- * Builds `ctx.elicit` from the notifiers bound at registration time.
- *
- * Returns `undefined` when:
- * - `elicitInput` was not bound (auto-task background path, or no server),
- * - the client did not advertise the elicitation capability (checked at
- *   request time, after the initialize handshake populates capabilities).
- *
- * When defined, the returned function is an `ElicitFn`: directly callable for
- * form-mode elicitation (schema converted from ZodObject to the restricted
- * flat JSON Schema the MCP spec requires), plus a `.url(message, url)` helper
- * for URL-mode elicitation (elicitationId generated internally).
- *
- * CRITICAL: `requestedSchema` must be a plain JSON Schema object in the spec's
- * restricted flat form — passing a raw ZodObject causes AJV validation to
- * reject the request on the SDK side. `z.toJSONSchema(schema)` produces the
- * correct shape.
- */
-function wrapElicit(notifiers: HandlerNotifiers): ElicitFn | undefined {
-  const { elicitInput, getClientCapabilities } = notifiers;
-  if (typeof elicitInput !== 'function') return;
-
-  // Capability check runs at request time (not registration time) so that
-  // capabilities populated during the initialize handshake are visible.
-  if (!getClientCapabilities?.()?.elicitation) return;
-
-  const formFn = (msg: string, schema: ZodObject<ZodRawShape>): Promise<ElicitResult> => {
-    const requestedSchema = toJSONSchema(schema) as ElicitRequestFormParams['requestedSchema'];
-    return elicitInput({ message: msg, requestedSchema });
-  };
-
-  const urlFn = (msg: string, url: string): Promise<ElicitResult> => {
-    const elicitationId = crypto.randomUUID();
-    return elicitInput({ mode: 'url', message: msg, elicitationId, url });
-  };
-
-  const elicitFn = formFn as ElicitFn;
-  elicitFn.url = urlFn;
-  return elicitFn;
-}
-
-// ---------------------------------------------------------------------------
 // Factory
 // ---------------------------------------------------------------------------
 
@@ -356,6 +304,10 @@ export function createToolHandler(
   return async (input, callContext): Promise<CallToolResult> => {
     // The SDK types `extra` as Record<string, unknown> at the boundary
     const sdkContext = callContext as unknown as SdkExtra;
+    const protocolRequest = notifiers.registerRequest?.(sdkContext.requestId);
+    const signal = protocolRequest
+      ? AbortSignal.any([sdkContext.signal, protocolRequest.signal])
+      : sdkContext.signal;
 
     // Route handler-time list-changed / resource-updated notifications through
     // this request's `extra.sendNotification` so they carry `relatedRequestId`
@@ -411,9 +363,9 @@ export function createToolHandler(
           appContext,
           logger: services.logger,
           storage: services.storage,
-          signal: sdkContext.signal,
+          signal,
           sessionId: handlerSessionId,
-          elicit: wrapElicit(notifiers),
+          elicit: wrapElicit(notifiers, sdkContext),
           notifyPromptListChanged: effectiveNotifiers.notifyPromptListChanged,
           notifyResourceListChanged: effectiveNotifiers.notifyResourceListChanged,
           notifyResourceUpdated: effectiveNotifiers.notifyResourceUpdated,
@@ -471,6 +423,8 @@ export function createToolHandler(
         context: appContext,
       });
       return classifyAndBuildToolErrorResult(error);
+    } finally {
+      protocolRequest?.unregister();
     }
   };
 }

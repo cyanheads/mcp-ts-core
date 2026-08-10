@@ -7,20 +7,16 @@
 import type { RequestHandlerExtra } from '@modelcontextprotocol/sdk/shared/protocol.js';
 import type { Variables } from '@modelcontextprotocol/sdk/shared/uriTemplate.js';
 import type {
-  ElicitRequestFormParams,
-  ElicitRequestURLParams,
-  ElicitResult,
   ReadResourceResult,
   ServerNotification,
   ServerRequest,
 } from '@modelcontextprotocol/sdk/types.js';
-import type { ZodObject, ZodRawShape } from 'zod';
-import { toJSONSchema } from 'zod';
 
 import { config } from '@/config/index.js';
-import type { ElicitFn } from '@/core/context.js';
 import { attachTypedFail, createContext } from '@/core/context.js';
+import { type ElicitationNotifiers, wrapElicit } from '@/mcp-server/elicitation.js';
 import { buildRequestScopedNotifiers } from '@/mcp-server/notifications.js';
+import type { ProtocolRequestRegistration } from '@/mcp-server/protocolSession.js';
 import type { AnyResourceDefinition } from '@/mcp-server/resources/utils/resourceDefinition.js';
 import { withRequiredScopes } from '@/mcp-server/transports/auth/lib/authUtils.js';
 import type { StorageService } from '@/storage/core/StorageService.js';
@@ -61,20 +57,15 @@ export interface ResourceHandlerFactoryServices {
  * ({@link buildRequestScopedNotifiers}, #135) and uses these only as a fallback
  * when the SDK extra exposes no sender (e.g. a non-request test scope).
  *
- * `elicitInput` and `getClientCapabilities` are bound at registration time to
- * the per-server `Server` instance so `wrapElicit` can gate `ctx.elicit` on
- * the client's advertised capability and forward elicitation requests on the
- * wire.
+ * The elicitation fields come from {@link ElicitationNotifiers}.
  */
-export interface ResourceHandlerNotifiers {
-  /** Bound to `server.server.elicitInput.bind(server.server)`. */
-  elicitInput?: (params: ElicitRequestFormParams | ElicitRequestURLParams) => Promise<ElicitResult>;
-  /** Bound to `server.server.getClientCapabilities.bind(server.server)`. */
-  getClientCapabilities?: () => { elicitation?: unknown } | undefined;
+export interface ResourceHandlerNotifiers extends ElicitationNotifiers {
   notifyPromptListChanged?: () => void;
   notifyResourceListChanged?: () => void;
   notifyResourceUpdated?: (uri: string) => void;
   notifyToolListChanged?: () => void;
+  /** Registers this handler invocation for session-scoped HTTP cancellation. */
+  registerRequest?: (requestId: SdkExtra['requestId']) => ProtocolRequestRegistration;
 }
 
 // ---------------------------------------------------------------------------
@@ -106,34 +97,16 @@ function defaultResponseFormatter(
   ];
 }
 
-// ---------------------------------------------------------------------------
-// Capability detection helpers
-// ---------------------------------------------------------------------------
-
-/**
- * Builds `ctx.elicit` from the notifiers bound at registration time.
- * Returns `undefined` when elicitInput was not bound or the client did not
- * advertise the elicitation capability.
- * See toolHandlerFactory.wrapElicit for the full contract description.
- */
-function wrapElicit(notifiers: ResourceHandlerNotifiers): ElicitFn | undefined {
-  const { elicitInput, getClientCapabilities } = notifiers;
-  if (typeof elicitInput !== 'function') return;
-  if (!getClientCapabilities?.()?.elicitation) return;
-
-  const formFn = (msg: string, schema: ZodObject<ZodRawShape>): Promise<ElicitResult> => {
-    const requestedSchema = toJSONSchema(schema) as ElicitRequestFormParams['requestedSchema'];
-    return elicitInput({ message: msg, requestedSchema });
-  };
-
-  const urlFn = (msg: string, url: string): Promise<ElicitResult> => {
-    const elicitationId = crypto.randomUUID();
-    return elicitInput({ mode: 'url', message: msg, elicitationId, url });
-  };
-
-  const elicitFn = formFn as ElicitFn;
-  elicitFn.url = urlFn;
-  return elicitFn;
+/** Strip URL components that commonly carry credentials or caller secrets
+ * before the URI reaches logs or telemetry. The protocol response still uses
+ * the original URI; this projection is observability-only. */
+function observableResourceUri(uri: URL): string {
+  const safe = new URL(uri.href);
+  safe.username = '';
+  safe.password = '';
+  safe.search = '';
+  safe.hash = '';
+  return safe.href;
 }
 
 // ---------------------------------------------------------------------------
@@ -162,6 +135,10 @@ export function createResourceHandler(
 
   return async (uri, variables, callContext): Promise<ReadResourceResult> => {
     const sdkContext = callContext as unknown as SdkExtra;
+    const protocolRequest = notifiers.registerRequest?.(sdkContext.requestId);
+    const signal = protocolRequest
+      ? AbortSignal.any([sdkContext.signal, protocolRequest.signal])
+      : sdkContext.signal;
 
     // Route handler-time list-changed / resource-updated notifications through
     // this request's `extra.sendNotification` so they carry `relatedRequestId`
@@ -184,6 +161,7 @@ export function createResourceHandler(
       sdkSessionId && (isStatefulMode || services.exposeStatelessSessionId === true)
         ? sdkSessionId
         : undefined;
+    const resourceUri = observableResourceUri(uri);
 
     // Raw `inputParams` is intentionally excluded from the context — it flows
     // into the completion log via context spread and can contain caller data.
@@ -199,7 +177,8 @@ export function createResourceHandler(
       operation: 'HandleResourceRead',
       additionalContext: {
         resourceName: def.name ?? def.uriTemplate,
-        resourceUri: uri.href,
+        resourceUri,
+        resourceHasQuery: uri.search.length > 0,
         sessionId: sdkSessionId,
       },
     });
@@ -220,9 +199,9 @@ export function createResourceHandler(
           appContext,
           logger: services.logger,
           storage: services.storage,
-          signal: sdkContext.signal,
+          signal,
           sessionId: handlerSessionId,
-          elicit: wrapElicit(notifiers),
+          elicit: wrapElicit(notifiers, sdkContext),
           notifyPromptListChanged: effectiveNotifiers.notifyPromptListChanged,
           notifyResourceListChanged: effectiveNotifiers.notifyResourceListChanged,
           notifyResourceUpdated: effectiveNotifiers.notifyResourceUpdated,
@@ -237,7 +216,7 @@ export function createResourceHandler(
       const handlerResult = await measureResourceExecution(
         () => Promise.resolve(def.handler(validatedParams, ctx)),
         { ...appContext, resourceName },
-        { uri: uri.href, mimeType },
+        { uri: resourceUri, mimeType },
       );
 
       // Validate output against schema when defined
@@ -252,6 +231,8 @@ export function createResourceHandler(
       }
       const { code, message, data } = ErrorHandler.classifyOnly(error);
       throw new McpError(code, message, data, { cause: error });
+    } finally {
+      protocolRequest?.unregister();
     }
   };
 }

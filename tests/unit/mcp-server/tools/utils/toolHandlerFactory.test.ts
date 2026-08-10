@@ -508,6 +508,59 @@ describe('createToolHandler', () => {
 
       expect(capturedSignal).toBe(controller.signal);
     });
+
+    it.each(['sdk', 'protocol'] as const)(
+      'merges the %s cancellation signal and unregisters after completion',
+      async (source) => {
+        const sdkController = new AbortController();
+        const protocolController = new AbortController();
+        const unregister = vi.fn();
+        const registerRequest = vi.fn(() => ({
+          signal: protocolController.signal,
+          unregister,
+        }));
+        let releaseHandler!: () => void;
+        const handlerReleased = new Promise<void>((resolve) => {
+          releaseHandler = resolve;
+        });
+        let publishSignal!: (signal: AbortSignal) => void;
+        const signalReady = new Promise<AbortSignal>((resolve) => {
+          publishSignal = resolve;
+        });
+        const def = tool('merged_signal_tool', {
+          description: 'Checks merged cancellation.',
+          input: z.object({}),
+          output: z.object({ ok: z.boolean() }),
+          handler: async (_input, ctx) => {
+            publishSignal(ctx.signal);
+            await handlerReleased;
+            return { ok: true };
+          },
+        });
+        const handler = createToolHandler(def as AnyToolDefinition, services, {
+          registerRequest,
+        });
+
+        const resultPromise = handler(
+          {},
+          createMockSdkContext({ requestId: 73, signal: sdkController.signal }),
+        );
+        const mergedSignal = await signalReady;
+        const reason = new DOMException(`${source} cancelled`, 'AbortError');
+        if (source === 'sdk') sdkController.abort(reason);
+        else protocolController.abort(reason);
+
+        expect(registerRequest).toHaveBeenCalledWith(73);
+        expect(mergedSignal).not.toBe(sdkController.signal);
+        expect(mergedSignal).not.toBe(protocolController.signal);
+        expect(mergedSignal.aborted).toBe(true);
+        expect(mergedSignal.reason).toBe(reason);
+
+        releaseHandler();
+        await resultPromise;
+        expect(unregister).toHaveBeenCalledOnce();
+      },
+    );
   });
 
   // -----------------------------------------------------------------------
@@ -667,6 +720,46 @@ describe('createToolHandler', () => {
       // elicitationId is auto-generated
       expect(typeof params.elicitationId).toBe('string');
       expect(params.elicitationId.length).toBeGreaterThan(0);
+    });
+
+    it('routes request-scoped elicitation through sdkContext.sendRequest', async () => {
+      const fallbackElicitInput = vi.fn<NonNullable<HandlerNotifiers['elicitInput']>>();
+      const sendRequest = vi.fn(async (_request: unknown, _resultSchema: unknown) => ({
+        action: 'accept' as const,
+        content: { format: 'json' },
+      }));
+      const def = tool('request_scoped_elicit_tool', {
+        description: 'Uses request-scoped elicitation.',
+        input: z.object({}),
+        output: z.object({ format: z.string() }),
+        handler: async (_input, ctx) => {
+          const result = await ctx.elicit!(
+            'Choose format',
+            z.object({ format: z.enum(['json', 'csv']).describe('Output format') }),
+          );
+          return { format: String(result.content?.format) };
+        },
+      });
+      const handler = createToolHandler(def as AnyToolDefinition, services, {
+        elicitInput: fallbackElicitInput,
+        getClientCapabilities: () => ({ elicitation: {} }),
+        requestScopedElicitation: true,
+      });
+
+      const result = await handler({}, createMockSdkContext({ sendRequest }));
+
+      expect(result.structuredContent).toEqual({ format: 'json' });
+      expect(fallbackElicitInput).not.toHaveBeenCalled();
+      expect(sendRequest).toHaveBeenCalledOnce();
+      expect(sendRequest.mock.calls[0]?.[0]).toEqual({
+        method: 'elicitation/create',
+        params: expect.objectContaining({
+          mode: 'form',
+          message: 'Choose format',
+          requestedSchema: expect.objectContaining({ type: 'object' }),
+        }),
+      });
+      expect(sendRequest.mock.calls[0]?.[1]).toBeDefined();
     });
   });
 

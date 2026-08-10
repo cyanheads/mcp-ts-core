@@ -335,6 +335,99 @@ describe('createResourceHandler', () => {
 
       expect(capturedCtx.elicit).toBeUndefined();
     });
+
+    it('routes request-scoped elicitation through sdkContext.sendRequest', async () => {
+      const fallbackElicitInput = vi.fn<NonNullable<ResourceHandlerNotifiers['elicitInput']>>();
+      const sendRequest = vi.fn(async (_request: unknown, _resultSchema: unknown) => ({
+        action: 'accept' as const,
+        content: { choice: 'yes' },
+      }));
+      const def = resource('elicit://{id}', {
+        description: 'Uses request-scoped elicitation.',
+        handler: async (_params, ctx) => {
+          const result = await ctx.elicit!(
+            'Continue?',
+            z.object({ choice: z.enum(['yes', 'no']).describe('Decision') }),
+          );
+          return { choice: result.content?.choice };
+        },
+      });
+      const handler = createResourceHandler(def as AnyResourceDefinition, services, {
+        elicitInput: fallbackElicitInput,
+        getClientCapabilities: () => ({ elicitation: {} }),
+        requestScopedElicitation: true,
+      });
+
+      await handler(
+        new URL('elicit://item'),
+        { id: 'item' },
+        createMockSdkContext({ sendRequest }),
+      );
+
+      expect(fallbackElicitInput).not.toHaveBeenCalled();
+      expect(sendRequest).toHaveBeenCalledOnce();
+      expect(sendRequest.mock.calls[0]?.[0]).toEqual({
+        method: 'elicitation/create',
+        params: expect.objectContaining({
+          mode: 'form',
+          message: 'Continue?',
+          requestedSchema: expect.objectContaining({ type: 'object' }),
+        }),
+      });
+      expect(sendRequest.mock.calls[0]?.[1]).toBeDefined();
+    });
+
+    it.each(['sdk', 'protocol'] as const)(
+      'merges the %s cancellation signal and unregisters after completion',
+      async (source) => {
+        const sdkController = new AbortController();
+        const protocolController = new AbortController();
+        const unregister = vi.fn();
+        const registerRequest = vi.fn(() => ({
+          signal: protocolController.signal,
+          unregister,
+        }));
+        let releaseHandler!: () => void;
+        const handlerReleased = new Promise<void>((resolve) => {
+          releaseHandler = resolve;
+        });
+        let publishSignal!: (signal: AbortSignal) => void;
+        const signalReady = new Promise<AbortSignal>((resolve) => {
+          publishSignal = resolve;
+        });
+        const def = resource('cancel://{id}', {
+          description: 'Checks merged cancellation.',
+          handler: async (_params, ctx) => {
+            publishSignal(ctx.signal);
+            await handlerReleased;
+            return { ok: true };
+          },
+        });
+        const handler = createResourceHandler(def as AnyResourceDefinition, services, {
+          registerRequest,
+        });
+
+        const resultPromise = handler(
+          new URL('cancel://item'),
+          { id: 'item' },
+          createMockSdkContext({ requestId: 91, signal: sdkController.signal }),
+        );
+        const mergedSignal = await signalReady;
+        const reason = new DOMException(`${source} cancelled`, 'AbortError');
+        if (source === 'sdk') sdkController.abort(reason);
+        else protocolController.abort(reason);
+
+        expect(registerRequest).toHaveBeenCalledWith(91);
+        expect(mergedSignal).not.toBe(sdkController.signal);
+        expect(mergedSignal).not.toBe(protocolController.signal);
+        expect(mergedSignal.aborted).toBe(true);
+        expect(mergedSignal.reason).toBe(reason);
+
+        releaseHandler();
+        await resultPromise;
+        expect(unregister).toHaveBeenCalledOnce();
+      },
+    );
   });
 
   // -----------------------------------------------------------------------
@@ -559,7 +652,7 @@ describe('createResourceHandler', () => {
   });
 
   describe('log payload redaction', () => {
-    it('does not attach raw inputParams to the RequestContext', async () => {
+    it('does not attach raw inputParams, credentials, query, or fragments to observability context', async () => {
       const { requestContextService } = await import('@/utils/internal/requestContext.js');
 
       const def = resource('resource://{itemId}', {
@@ -571,26 +664,29 @@ describe('createResourceHandler', () => {
 
       const handler = createResourceHandler(def as AnyResourceDefinition, services, notifiers);
       await handler(
-        new URL('resource://sensitive-item-id-value'),
+        new URL(
+          'resource://user:password@sensitive-item-id-value/path?api_key=SUPERSECRET#fragment-secret',
+        ),
         { itemId: 'sensitive-item-id-value' },
         createMockSdkContext(),
       );
 
-      const call =
-        vi
-          .mocked(requestContextService.createRequestContext)
-          .mock.calls.find(
-            (args) => (args[0] as any)?.additionalContext?.operation === 'HandleResourceRead',
-          ) ??
-        vi
-          .mocked(requestContextService.createRequestContext)
-          .mock.calls.find((args) =>
-            (args[0] as any)?.additionalContext?.resourceUri?.includes('sensitive'),
-          );
+      const call = vi
+        .mocked(requestContextService.createRequestContext)
+        .mock.calls.find((args) => (args[0] as any)?.operation === 'HandleResourceRead');
 
       expect(call).toBeDefined();
       const additionalContext = (call![0] as any).additionalContext as Record<string, unknown>;
       expect(additionalContext).not.toHaveProperty('inputParams');
+      expect(additionalContext.resourceUri).toBe('resource://sensitive-item-id-value/path');
+      expect(additionalContext.resourceHasQuery).toBe(true);
+
+      const serializedCalls = JSON.stringify(
+        vi.mocked(requestContextService.createRequestContext).mock.calls,
+      );
+      expect(serializedCalls).not.toContain('SUPERSECRET');
+      expect(serializedCalls).not.toContain('password');
+      expect(serializedCalls).not.toContain('fragment-secret');
     });
   });
 

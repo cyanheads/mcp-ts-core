@@ -11,6 +11,7 @@ import type { ZodObject, ZodRawShape } from 'zod';
 
 import { config } from '@/config/index.js';
 import { attachTypedFail, createContext } from '@/core/context.js';
+import type { ProtocolSessionHooks } from '@/mcp-server/protocolSession.js';
 import { DEFAULT_AUTO_TASK_TTL_MS } from '@/mcp-server/tasks/core/taskTypes.js';
 import {
   isTaskToolDefinition,
@@ -66,7 +67,10 @@ export class ToolRegistry {
    * Automatically detects standard tools, auto-task tools (task: true),
    * and escape-hatch TaskToolDefinitions.
    */
-  public async registerAll(server: McpServer): Promise<void> {
+  public async registerAll(
+    server: McpServer,
+    protocolSession?: ProtocolSessionHooks,
+  ): Promise<void> {
     // Reset per-server uniqueness tracking — registries are shared across
     // per-request McpServer instances in HTTP mode (GHSA-345p-7cg4-v4c7).
     this.registeredNames.clear();
@@ -79,11 +83,16 @@ export class ToolRegistry {
     // those notifications deliver on stdio but drop under HTTP.
     const notifiers: HandlerNotifiers = {
       elicitInput: (params) => server.server.elicitInput(params),
-      getClientCapabilities: () => server.server.getClientCapabilities(),
+      getClientCapabilities: () =>
+        protocolSession?.clientCapabilities ?? server.server.getClientCapabilities(),
       notifyPromptListChanged: () => server.sendPromptListChanged(),
       notifyResourceListChanged: () => server.sendResourceListChanged(),
       notifyResourceUpdated: (uri: string) => server.server.sendResourceUpdated({ uri }),
       notifyToolListChanged: () => server.sendToolListChanged(),
+      requestScopedElicitation: protocolSession !== undefined,
+      ...(protocolSession?.registerRequest && {
+        registerRequest: protocolSession.registerRequest,
+      }),
     };
 
     const context = requestContextService.createRequestContext({
