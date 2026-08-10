@@ -11,6 +11,7 @@ import { lintSchemaPortability, type PortabilityOptions } from './portability-ru
 import {
   checkFieldDescriptions,
   checkIsZodObject,
+  checkSchemaSatisfiable,
   checkSchemaSerializable,
 } from './schema-rules.js';
 
@@ -63,10 +64,13 @@ export function lintPromptDefinition(
       const argsSerial = checkSchemaSerializable(d.args, 'args', 'prompt', displayName);
       if (argsSerial) {
         diagnostics.push(argsSerial);
-      } else if (portability) {
-        diagnostics.push(
-          ...lintSchemaPortability(d.args, 'args', 'prompt', displayName, portability),
-        );
+      } else {
+        diagnostics.push(...checkSchemaSatisfiable(d.args, 'args', 'prompt', displayName));
+        if (portability) {
+          diagnostics.push(
+            ...lintSchemaPortability(d.args, 'args', 'prompt', displayName, portability),
+          );
+        }
       }
     }
   }

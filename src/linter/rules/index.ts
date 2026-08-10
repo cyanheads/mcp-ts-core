@@ -17,6 +17,7 @@ export { lintResourceDefinition } from './resource-rules.js';
 export {
   checkFieldDescriptions,
   checkIsZodObject,
+  checkSchemaSatisfiable,
   checkSchemaSerializable,
 } from './schema-rules.js';
 export { lintServerJson } from './server-json-rules.js';

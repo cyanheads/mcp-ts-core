@@ -18,9 +18,38 @@ import type { LintDefinitionType, LintDiagnostic } from '../types.js';
 import { isDefinitionObject } from './definition-rules.js';
 import { getCoreDefType, objectShape, objectShapeKeys, unwrapWrappers } from './schema-rules.js';
 
-/** Pattern matching depth-0 cap-like input fields (case-insensitive, snake or camel). */
-const CAP_FIELD_RE =
-  /^(limit|per_page|perPage|page_size|pageSize|max_results|maxResults|max_items|maxItems)$/i;
+/** Cap-like names that carry no `max`/`limit` morpheme and must be listed outright. */
+const CAP_FIELD_EXACT: ReadonlySet<string> = new Set(['limit', 'per_page', 'page_size']);
+
+/**
+ * True for a depth-0 input field name that caps how many items come back.
+ *
+ * Matched by shape, not by an enumeration: an allowlist turns every new cap noun
+ * (`maxRecords`, `maxRows`, `resultLimit`) into a silent gap where the rule never
+ * runs at all, which is the same defect class the rule exists to catch. Both
+ * naming conventions normalize to the same snake form first, so `maxRecords` and
+ * `max_records` are one case.
+ *
+ *   - `limit`, and any `<noun>_limit` / `<noun>Limit`
+ *   - any `max_<noun>` / `max<Noun>`
+ *   - the page-size idioms `per_page`/`perPage` and `page_size`/`pageSize`
+ *
+ * Deliberately NOT matched: bare `count`, `size`, `n`, `rows`, `records`, and
+ * words that merely start with the letters (`maximum`).
+ *
+ * The shape cannot separate a cap on *how many* from an upper bound on a *value*,
+ * so a range filter spelled `max_<noun>` (`max_magnitude`, `maxLat`, `max_date`)
+ * matches as well. The rule still has to clear its other two conditions before it
+ * says anything, and `truncationAllowlist` exempts a tool that trips it anyway.
+ */
+function isCapFieldName(key: string): boolean {
+  const normalized = key.replace(/([a-z0-9])([A-Z])/g, '$1_$2').toLowerCase();
+  return (
+    CAP_FIELD_EXACT.has(normalized) ||
+    normalized.startsWith('max_') ||
+    normalized.endsWith('_limit')
+  );
+}
 
 /**
  * Output field names that almost always indicate agent-facing context rather
@@ -237,8 +266,9 @@ export interface TruncationOptions {
 }
 
 /**
- * Warns when a tool takes a cap-like input field (e.g. `limit`, `per_page`) and
- * returns an array output, but declares no truncation disclosure — neither a
+ * Warns when a tool takes a cap-like input field (`limit`, `per_page`,
+ * `maxRecords`, … — see `isCapFieldName`) and returns an array output, but
+ * declares no truncation disclosure — neither a
  * `truncated` key in its declared `enrichment` shape, nor `totalCount` in enrichment,
  * nor `truncated` or `totalCount` as top-level `output` keys.
  *
@@ -265,8 +295,8 @@ export function lintCappedListTruncation(
 
   // Check input for a cap-like field
   const inputKeys = objectShapeKeys(def.input);
-  const hasCap = inputKeys.some((k) => CAP_FIELD_RE.test(k));
-  if (!hasCap) return [];
+  const capKeys = inputKeys.filter(isCapFieldName);
+  if (capKeys.length === 0) return [];
 
   // Check output for at least one array-typed field
   const hasArrayOutput = hasTopLevelArray(def.output);
@@ -282,7 +312,7 @@ export function lintCappedListTruncation(
       rule: 'capped-list-no-truncation',
       severity: 'warning',
       message:
-        `Tool '${name}' accepts a cap-like input (${inputKeys.filter((k) => CAP_FIELD_RE.test(k)).join(', ')}) ` +
+        `Tool '${name}' accepts a cap-like input (${capKeys.join(', ')}) ` +
         `and returns an array, but discloses no truncation. A silently capped list leaves the agent ` +
         `unaware that results were cut off. Disclose via \`ctx.enrich.truncated({ shown, cap })\` and ` +
         `declare \`truncated\`, \`shown\`, \`cap\` in the \`enrichment\` block; or call \`ctx.enrich.total(n)\` ` +

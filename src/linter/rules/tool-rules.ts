@@ -15,6 +15,7 @@ import { lintSchemaPortability, type PortabilityOptions } from './portability-ru
 import {
   checkFieldDescriptions,
   checkIsZodObject,
+  checkSchemaSatisfiable,
   checkSchemaSerializable,
   objectShapeKeys,
 } from './schema-rules.js';
@@ -73,10 +74,13 @@ export function lintToolDefinition(
     const inputSerial = checkSchemaSerializable(d?.input, 'input', 'tool', displayName);
     if (inputSerial) {
       diagnostics.push(inputSerial);
-    } else if (portability) {
-      diagnostics.push(
-        ...lintSchemaPortability(d?.input, 'input', 'tool', displayName, portability),
-      );
+    } else {
+      diagnostics.push(...checkSchemaSatisfiable(d?.input, 'input', 'tool', displayName));
+      if (portability) {
+        diagnostics.push(
+          ...lintSchemaPortability(d?.input, 'input', 'tool', displayName, portability),
+        );
+      }
     }
   }
 
@@ -89,10 +93,13 @@ export function lintToolDefinition(
     const outputSerial = checkSchemaSerializable(d?.output, 'output', 'tool', displayName);
     if (outputSerial) {
       diagnostics.push(outputSerial);
-    } else if (portability) {
-      diagnostics.push(
-        ...lintSchemaPortability(d?.output, 'output', 'tool', displayName, portability),
-      );
+    } else {
+      diagnostics.push(...checkSchemaSatisfiable(d?.output, 'output', 'tool', displayName));
+      if (portability) {
+        diagnostics.push(
+          ...lintSchemaPortability(d?.output, 'output', 'tool', displayName, portability),
+        );
+      }
     }
     // Format parity: skip when output isn't serializable (synthetic sample may misbehave).
     if (!outputSerial && typeof d?.format === 'function') {

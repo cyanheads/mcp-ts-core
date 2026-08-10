@@ -7,6 +7,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { z } from 'zod';
 
 import { validateDefinitions } from '@/linter/validate.js';
+import { tool } from '@/mcp-server/tools/utils/toolDefinition.js';
 
 // ---------------------------------------------------------------------------
 // Helpers — minimal valid definitions
@@ -1309,6 +1310,122 @@ describe('validateDefinitions', () => {
         expect.objectContaining({
           rule: 'capped-list-no-truncation',
           definitionName: 'search_results',
+        }),
+      );
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // False-negative removals, exercised end to end through validateDefinitions
+  // -------------------------------------------------------------------------
+
+  describe('silent-coverage gaps', () => {
+    it('verifies parity on a tool whose output carries a multi-value literal', () => {
+      const def = tool('probe_priority', {
+        description: 'Reports a priority drawn from a closed numeric set.',
+        annotations: { readOnlyHint: true },
+        input: z.object({ q: z.string().describe('Anything.') }),
+        output: z.object({
+          priority: z.literal([1, 2, 3, 4, 5]).describe('Closed numeric set as one schema node.'),
+          label: z.string().describe('Human-readable label.'),
+        }),
+        handler: async () => ({ priority: 3 as const, label: 'high' }),
+        format: (r) => [{ type: 'text', text: `priority ${r.priority}` }],
+      });
+
+      const report = validateDefinitions({ tools: [def] });
+      expect(report.warnings.map((w) => w.rule)).not.toContain('format-parity-walk-failed');
+      expect(report.errors).toContainEqual(
+        expect.objectContaining({ rule: 'format-parity', definitionName: 'probe_priority' }),
+      );
+      expect(report.errors.find((e) => e.rule === 'format-parity')?.message).toContain("'label'");
+    });
+
+    it('fails parity for an enum whose value only collides with a sibling field', () => {
+      const def = tool('probe_kind', {
+        description: 'Returns a case record in one of two shapes.',
+        annotations: { readOnlyHint: true },
+        input: z.object({ q: z.string().describe('Anything.') }),
+        output: z.object({
+          kind: z.enum(['full', 'outline']).describe('Which shape was returned.'),
+          case_name_full: z.string().describe('Full case name.'),
+        }),
+        handler: async () => ({ kind: 'full' as const, case_name_full: 'A v. B' }),
+        format: (r) => [{ type: 'text', text: `Name: ${r.case_name_full}` }],
+      });
+
+      const report = validateDefinitions({ tools: [def] });
+      expect(report.errors).toContainEqual(
+        expect.objectContaining({ rule: 'format-parity', definitionName: 'probe_kind' }),
+      );
+      expect(report.errors.find((e) => e.rule === 'format-parity')?.message).toContain("'kind'");
+    });
+
+    it('passes parity for a format() that escapes markdown on every value', () => {
+      const escapeMarkdown = (value: string) => value.replace(/([\\`*_{}[\]()#+\-.!<>])/g, '\\$1');
+      const def = tool('probe_escaped', {
+        description: 'Renders upstream text with markdown escaped at the render boundary.',
+        annotations: { readOnlyHint: true },
+        input: z.object({ q: z.string().describe('Anything.') }),
+        output: z.object({
+          title: z.string().describe('Upstream title.'),
+          body: z.string().describe('Upstream body.'),
+        }),
+        handler: async () => ({ title: 't', body: 'b' }),
+        format: (r) => [
+          { type: 'text', text: `# ${escapeMarkdown(r.title)}\n${escapeMarkdown(r.body)}` },
+        ],
+      });
+
+      expect(validateDefinitions({ tools: [def] }).errors).toEqual([]);
+    });
+
+    it('reports the unevaluated subtree when output nests past the walker depth limit', () => {
+      function nested(depth: number): z.ZodTypeAny {
+        if (depth === 0) return z.string().describe('Deep leaf value');
+        return z.object({ child: nested(depth - 1) }).describe(`Level ${depth}`);
+      }
+      const def = validTool({
+        name: 'deep_tool',
+        output: z.object({ root: nested(9).describe('Root') }),
+        handler: async () => ({}),
+        format: () => [{ type: 'text', text: 'summary only' }],
+      });
+
+      const report = validateDefinitions({ tools: [def] });
+      expect(report.warnings).toContainEqual(
+        expect.objectContaining({ rule: 'format-parity-depth-limit', definitionName: 'deep_tool' }),
+      );
+    });
+
+    it('evaluates truncation disclosure for a cap named maxRecords', () => {
+      const def = validTool({
+        name: 'search_records',
+        input: z.object({ maxRecords: z.number().describe('Max records to return') }),
+        output: z.object({ records: z.array(z.string()).describe('Records') }),
+        handler: async () => ({ records: [] }),
+      });
+
+      expect(validateDefinitions({ tools: [def] }).warnings).toContainEqual(
+        expect.objectContaining({
+          rule: 'capped-list-no-truncation',
+          definitionName: 'search_records',
+        }),
+      );
+    });
+
+    it('errors on an input field that no value can satisfy', () => {
+      const def = validTool({
+        name: 'unsatisfiable_tool',
+        input: z.object({
+          priority: z.enum([1, 2, 3, 4, 5] as unknown as [string, ...string[]]).describe('P'),
+        }),
+      });
+
+      expect(validateDefinitions({ tools: [def] }).errors).toContainEqual(
+        expect.objectContaining({
+          rule: 'schema-unsatisfiable',
+          definitionName: 'unsatisfiable_tool',
         }),
       );
     });

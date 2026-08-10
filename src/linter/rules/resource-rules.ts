@@ -15,6 +15,7 @@ import { lintSchemaPortability, type PortabilityOptions } from './portability-ru
 import {
   checkFieldDescriptions,
   checkIsZodObject,
+  checkSchemaSatisfiable,
   checkSchemaSerializable,
 } from './schema-rules.js';
 import { lintAuthScopes } from './tool-rules.js';
@@ -99,10 +100,13 @@ export function lintResourceDefinition(
       const paramsSerial = checkSchemaSerializable(d.params, 'params', 'resource', displayName);
       if (paramsSerial) {
         diagnostics.push(paramsSerial);
-      } else if (portability) {
-        diagnostics.push(
-          ...lintSchemaPortability(d.params, 'params', 'resource', displayName, portability),
-        );
+      } else {
+        diagnostics.push(...checkSchemaSatisfiable(d.params, 'params', 'resource', displayName));
+        if (portability) {
+          diagnostics.push(
+            ...lintSchemaPortability(d.params, 'params', 'resource', displayName, portability),
+          );
+        }
       }
 
       // Cross-reference: template variables must match params schema keys
@@ -127,10 +131,13 @@ export function lintResourceDefinition(
       const outputSerial = checkSchemaSerializable(d.output, 'output', 'resource', displayName);
       if (outputSerial) {
         diagnostics.push(outputSerial);
-      } else if (portability) {
-        diagnostics.push(
-          ...lintSchemaPortability(d.output, 'output', 'resource', displayName, portability),
-        );
+      } else {
+        diagnostics.push(...checkSchemaSatisfiable(d.output, 'output', 'resource', displayName));
+        if (portability) {
+          diagnostics.push(
+            ...lintSchemaPortability(d.output, 'output', 'resource', displayName, portability),
+          );
+        }
       }
     }
   }

@@ -1,6 +1,6 @@
 /**
- * @fileoverview Lint rules for Zod schema validation: type checking, `.describe()` presence,
- * and JSON Schema serializability.
+ * @fileoverview Lint rules for Zod schema validation: type checking, `.describe()`
+ * presence, JSON Schema serializability, and satisfiability of the emitted schema.
  * Covers MCP spec rules T3-T5 and framework convention for field descriptions.
  * @module src/linter/rules/schema-rules
  */
@@ -198,6 +198,128 @@ export function checkSchemaSerializable(
       definitionType,
       definitionName,
     };
+  }
+}
+
+/**
+ * Checks that no node in the schema the SDK advertises describes an empty value
+ * set — a field no input can ever satisfy.
+ *
+ * Evaluated on the emitted JSON Schema rather than on Zod internals, because the
+ * two disagree in exactly the case that matters: `z.enum([1, 2, 3])` (a numeric
+ * array handed to a string-only constructor) keeps its five options on the Zod
+ * side but serializes to `{"type":"string","enum":[]}`. The emitted form is what
+ * reaches the model, so it is the decisive one.
+ *
+ * Unsatisfiable: `enum: []`, `anyOf: []`, `oneOf: []`, `type: []`, and `not: {}`
+ * / `not: true`. Explicitly NOT unsatisfiable: `allOf: []` (vacuously true —
+ * matches everything), and empty `required` / `properties` / `prefixItems`,
+ * which are absent constraints rather than impossible ones.
+ *
+ * Serializability failures are `checkSchemaSerializable`'s diagnostic, so this
+ * check stays silent when conversion throws.
+ */
+export function checkSchemaSatisfiable(
+  schema: unknown,
+  fieldName: string,
+  definitionType: LintDiagnostic['definitionType'],
+  definitionName: string,
+): LintDiagnostic[] {
+  if (!isZodObject(schema)) return [];
+
+  let json: unknown;
+  try {
+    json = toJSONSchema(schema as ZodObject<ZodRawShape>);
+  } catch {
+    return [];
+  }
+
+  const paths: string[] = [];
+  collectUnsatisfiablePaths(json, fieldName, paths, new Set());
+
+  return paths.map((path) => ({
+    rule: 'schema-unsatisfiable',
+    severity: 'error' as const,
+    message:
+      `${definitionType} '${definitionName}' ${path} describes an empty value set — no value can ` +
+      'satisfy it, so the field can never be populated and nothing downstream reports the gap. ' +
+      'Common cause: a non-string array passed to z.enum(), which serializes to ' +
+      '{"type":"string","enum":[]}; use z.literal([1, 2, 3]) for a closed set of non-string ' +
+      'values. Also produced by z.enum([]), z.union([]), and z.never().',
+    definitionType,
+    definitionName,
+  }));
+}
+
+/** True when a JSON Schema node's own keywords admit no value at all. */
+function isUnsatisfiableNode(node: Record<string, unknown>): boolean {
+  if (Array.isArray(node.enum) && node.enum.length === 0) return true;
+  if (Array.isArray(node.anyOf) && node.anyOf.length === 0) return true;
+  if (Array.isArray(node.oneOf) && node.oneOf.length === 0) return true;
+  if (Array.isArray(node.type) && node.type.length === 0) return true;
+  // `not: {}` / `not: true` negates the always-true schema.
+  if (node.not === true) return true;
+  if (
+    typeof node.not === 'object' &&
+    node.not !== null &&
+    !Array.isArray(node.not) &&
+    Object.keys(node.not).length === 0
+  ) {
+    return true;
+  }
+  return false;
+}
+
+/**
+ * Walks the emitted JSON Schema collecting the path of every unsatisfiable node.
+ * Never descends into `not` — an unsatisfiable subschema *there* makes the parent
+ * match everything, the opposite finding. `seen` breaks `$ref` cycles from
+ * recursive schemas.
+ */
+function collectUnsatisfiablePaths(
+  node: unknown,
+  path: string,
+  out: string[],
+  seen: Set<object>,
+): void {
+  if (!node || typeof node !== 'object' || Array.isArray(node)) return;
+  if (seen.has(node)) return;
+  seen.add(node);
+
+  const n = node as Record<string, unknown>;
+  if (isUnsatisfiableNode(n)) {
+    out.push(path);
+    return;
+  }
+
+  const properties = n.properties;
+  if (properties && typeof properties === 'object') {
+    for (const [key, child] of Object.entries(properties as Record<string, unknown>)) {
+      collectUnsatisfiablePaths(child, `${path}.${key}`, out, seen);
+    }
+  }
+
+  collectUnsatisfiablePaths(n.items, `${path}[]`, out, seen);
+  collectUnsatisfiablePaths(n.additionalProperties, `${path}.<key>`, out, seen);
+
+  for (const [i, item] of (Array.isArray(n.prefixItems) ? n.prefixItems : []).entries()) {
+    collectUnsatisfiablePaths(item, `${path}[${i}]`, out, seen);
+  }
+
+  for (const keyword of ['anyOf', 'oneOf', 'allOf'] as const) {
+    const branches = n[keyword];
+    if (!Array.isArray(branches)) continue;
+    for (const [i, branch] of branches.entries()) {
+      collectUnsatisfiablePaths(branch, `${path}|${i}`, out, seen);
+    }
+  }
+
+  for (const keyword of ['$defs', 'definitions'] as const) {
+    const defs = n[keyword];
+    if (!defs || typeof defs !== 'object') continue;
+    for (const [key, def] of Object.entries(defs as Record<string, unknown>)) {
+      collectUnsatisfiablePaths(def, `${path}.$defs.${key}`, out, seen);
+    }
   }
 }
 

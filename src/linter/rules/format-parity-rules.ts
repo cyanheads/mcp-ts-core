@@ -12,12 +12,16 @@
  *
  * Approach: sentinel injection.
  *   1. Walk the output schema, build a synthetic value where every leaf is a
- *      uniquely identifiable sentinel (distinctive string, large number, or
- *      boolean/enum/literal with key-name fallback).
+ *      uniquely identifiable sentinel (distinctive alphanumeric string, large
+ *      number, or — where the schema dictates the value — a boolean/enum member/
+ *      literal, which falls back to key-name matching).
  *   2. Invoke `def.format(synthetic)` once and concatenate `content[].text`.
  *   3. For each leaf path, verify either the sentinel value or the field's key
- *      name appears in the rendered text.
- *   4. Emit one error per missing path.
+ *      name appears in the rendered text. Schema-dictated sentinels must appear
+ *      as a delimited token, since a short member like `full` collides with
+ *      incidental output.
+ *   4. Emit one error per missing path, and one warning per subtree the depth
+ *      guard could not reach.
  *
  * Deterministic, dependency-free. Runs inside `validateDefinitions()` alongside
  * every other lint rule — picked up automatically by `bun run lint:mcp`,
@@ -33,10 +37,13 @@ interface SentinelLeaf {
   /** Trailing key segment (no array notation) for fallback key-name matching. */
   keyName: string;
   /**
-   * 'strict'     — sentinel is distinctive (string/number); pass iff it appears.
-   * 'permissive' — sentinel may collide (boolean/enum/literal); also accept
-   *                the key name as whole word (case insensitive) or a camelCase
-   *                segment of length >= 3.
+   * 'strict'     — sentinel is distinctive (string/number); pass iff it appears
+   *                anywhere in the rendered text.
+   * 'permissive' — sentinel is a value the schema itself constrains (boolean /
+   *                enum member / literal), so it can collide with incidental
+   *                output. Matched as a delimited token rather than a bare
+   *                substring, and the key name is accepted as a fallback (whole
+   *                word, case insensitive, or a camelCase segment of length >= 3).
    */
   matchStrategy: 'strict' | 'permissive';
   /** Human-readable path like `articles[].journalInfo.issn` for error messages. */
@@ -53,6 +60,25 @@ interface WalkState {
 interface SyntheticVariant extends WalkState {
   value: unknown;
 }
+
+/**
+ * Walk-wide sink for facts that outlive a single variant. `truncatedPaths`
+ * collects every schema path the depth guard declined to descend into, so the
+ * bail surfaces as "not evaluated" instead of degrading into an indistinguishable
+ * resolved-to-nothing state.
+ */
+interface WalkContext {
+  truncatedPaths: Set<string>;
+}
+
+/**
+ * Maximum schema nesting the sentinel walk descends. The bound exists because
+ * every array / union / record hop multiplies the variant set, and a
+ * self-referential shape (Zod 4 recursive objects use getters) would otherwise
+ * recurse forever. Anything past it is reported via `format-parity-depth-limit`
+ * rather than passed.
+ */
+const MAX_WALK_DEPTH = 8;
 
 /** Zod 4 stores the type discriminator at `_zod.def.type`. Falls back to `_def.type`. */
 function zodTypeOf(schema: unknown): string {
@@ -81,8 +107,21 @@ function unwrapSchema(schema: unknown): unknown {
   return current;
 }
 
+/**
+ * Sentinel for string leaves — alphanumeric by construction.
+ *
+ * `content[]` is markdown carrying upstream text the server does not control, so
+ * a correct `format()` escapes its values at the render boundary. An
+ * underscore-delimited probe does not survive that: `\_\_MCP\_PARITY…` is a
+ * correct escape of the sentinel and would read as an unrendered field. An
+ * alphanumeric run is inert under markdown escaping, HTML escaping, and URL
+ * encoding alike, so the matcher needs no branch per escaping convention.
+ *
+ * Path separators fold to `Q` rather than being dropped, so `a.bc` and `ab.c`
+ * keep distinct sentinels.
+ */
 function stringSentinel(path: string): string {
-  return `__MCP_PARITY_${path.replace(/[.[\]]/g, '_')}__`;
+  return `MCPPARITY${path.replace(/[^A-Za-z0-9]+/g, 'Q')}`;
 }
 
 /** Terminal variant: append one leaf and use its sentinel as the synthetic value. */
@@ -104,9 +143,13 @@ function walkVariants(
   path: string,
   keyName: string,
   state: WalkState,
+  ctx: WalkContext,
   depth = 0,
 ): SyntheticVariant[] {
-  if (depth > 8) return [{ ...state, value: null }];
+  if (depth > MAX_WALK_DEPTH) {
+    ctx.truncatedPaths.add(path || keyName || '<root>');
+    return [{ ...state, value: null }];
+  }
 
   const node = unwrapSchema(schema);
   const type = zodTypeOf(node);
@@ -138,12 +181,17 @@ function walkVariants(
       return [leafVariant(state, { path, keyName, sentinel: value, matchStrategy: 'permissive' })];
     }
     case 'literal': {
-      const value = (n.value as unknown) ?? getDefValue(n);
+      // Read the def, never the instance getter: Zod 4's `.value` throws on a
+      // multi-value literal (`z.literal([1, 2, 3])`, the idiomatic way to
+      // advertise a closed non-string set as one schema node), and the instance
+      // `.values` is a Set, so an index read on it yields undefined. `_zod.def.values`
+      // is a plain array for single- and multi-value literals alike.
+      const value = getDefValue(n);
       return [leafVariant(state, { path, keyName, sentinel: value, matchStrategy: 'permissive' })];
     }
     case 'array': {
       const element = (n.element as unknown) ?? getDefElement(n);
-      return walkVariants(element, `${path}[]`, keyName, state, depth + 1).map((variant) => ({
+      return walkVariants(element, `${path}[]`, keyName, state, ctx, depth + 1).map((variant) => ({
         ...variant,
         value: [variant.value],
       }));
@@ -162,6 +210,7 @@ function walkVariants(
             childPath,
             key,
             { leaves: variant.leaves, numberIndex: variant.numberIndex },
+            ctx,
             depth + 1,
           )) {
             nextVariants.push({
@@ -181,14 +230,16 @@ function walkVariants(
     case 'discriminated_union': {
       const options = getDefOptions(n);
       if (Array.isArray(options) && options.length > 0) {
-        return options.flatMap((option) => walkVariants(option, path, keyName, state, depth + 1));
+        return options.flatMap((option) =>
+          walkVariants(option, path, keyName, state, ctx, depth + 1),
+        );
       }
       return [{ ...state, value: null }];
     }
     case 'record': {
       const valueSchema = getDefValueType(n);
       if (valueSchema) {
-        return walkVariants(valueSchema, `${path}.<key>`, keyName, state, depth + 1).map(
+        return walkVariants(valueSchema, `${path}.<key>`, keyName, state, ctx, depth + 1).map(
           (variant) => ({
             ...variant,
             value: { parity_key: variant.value },
@@ -210,6 +261,7 @@ function walkVariants(
             `${path}[${i}]`,
             keyName,
             { leaves: variant.leaves, numberIndex: variant.numberIndex },
+            ctx,
             depth + 1,
           )) {
             nextVariants.push({
@@ -351,18 +403,36 @@ function normalizeDigitGroups(text: string): string {
   );
 }
 
-function sentinelAppears(sentinel: unknown, text: string): boolean {
+/**
+ * How a sentinel is looked for in the rendered text.
+ *   'substring' — anywhere. Safe for the distinctive string/number sentinels the
+ *                 walker mints, which cannot occur by accident.
+ *   'delimited' — only as a standalone token, i.e. not flanked by another
+ *                 alphanumeric or `_`. Required for values the schema dictates
+ *                 (enum members, literals, booleans): a short natural-word member
+ *                 like `full` or `all` otherwise matches incidental output —
+ *                 including the rendered text of a *sibling* leaf's sentinel —
+ *                 and an unrendered field reads as present.
+ */
+type MatchMode = 'substring' | 'delimited';
+
+function occursIn(value: string, text: string, mode: MatchMode): boolean {
+  if (mode === 'substring') return text.includes(value);
+  return new RegExp(`(?<![A-Za-z0-9_])${escapeRegex(value)}(?![A-Za-z0-9_])`).test(text);
+}
+
+function sentinelAppears(sentinel: unknown, text: string, mode: MatchMode): boolean {
   if (sentinel === null || sentinel === undefined) return false;
   const asString = typeof sentinel === 'string' ? sentinel : String(sentinel);
   if (asString.length === 0) return false;
-  if (text.includes(asString)) return true;
+  if (occursIn(asString, text, mode)) return true;
   // Numeric sentinels may be rendered with locale-aware digit-group separators —
   // collapse separators only inside well-formed thousands-group runs and retry.
   // Context-aware matching avoids false positives from decimal marks (e.g. a
   // `total / 10` lossy transform rendered as `90,000,000.1` would otherwise
   // collapse to `900000001` and falsely satisfy the sentinel match).
   if (typeof sentinel === 'number' || typeof sentinel === 'bigint') {
-    return normalizeDigitGroups(text).includes(asString);
+    return occursIn(asString, normalizeDigitGroups(text), mode);
   }
   return false;
 }
@@ -396,7 +466,8 @@ function keyNameAppears(keyName: string, text: string): boolean {
 }
 
 function leafIsRendered(leaf: SentinelLeaf, text: string): boolean {
-  if (sentinelAppears(leaf.sentinel, text)) return true;
+  const mode: MatchMode = leaf.matchStrategy === 'permissive' ? 'delimited' : 'substring';
+  if (sentinelAppears(leaf.sentinel, text, mode)) return true;
   if (leaf.matchStrategy === 'permissive') {
     return keyNameAppears(leaf.keyName, text);
   }
@@ -424,9 +495,10 @@ export function lintFormatParity(def: unknown, displayName: string): LintDiagnos
 
   // Build synthetic samples. Union schemas produce one sample per branch so
   // list/detail variants are checked against their own formatter path.
+  const walkContext: WalkContext = { truncatedPaths: new Set() };
   let syntheticVariants: SyntheticVariant[];
   try {
-    syntheticVariants = walkVariants(output, '', '', { leaves: [], numberIndex: 0 });
+    syntheticVariants = walkVariants(output, '', '', { leaves: [], numberIndex: 0 }, walkContext);
   } catch (err) {
     return [
       {
@@ -442,7 +514,22 @@ export function lintFormatParity(def: unknown, displayName: string): LintDiagnos
     ];
   }
 
-  if (syntheticVariants.every((variant) => variant.leaves.length === 0)) return [];
+  // Paths the depth guard refused to descend into are unknowns, not passes —
+  // report them so the coverage gap is visible instead of reading as enforcement.
+  const depthDiagnostics: LintDiagnostic[] = [...walkContext.truncatedPaths].map((path) => ({
+    rule: 'format-parity-depth-limit',
+    severity: 'warning',
+    message:
+      `Tool '${displayName}' output field '${path}' is nested deeper than the format-parity ` +
+      `walker's depth limit (${MAX_WALK_DEPTH}), so it and anything under it were NOT evaluated. ` +
+      'Parity for that subtree is unknown, not verified.\n' +
+      'Fix: flatten the output shape so the field sits within the limit, or verify by hand that ' +
+      'format() renders it.',
+    definitionType: 'tool',
+    definitionName: displayName,
+  }));
+
+  if (syntheticVariants.every((variant) => variant.leaves.length === 0)) return depthDiagnostics;
 
   // Run format() and verify each leaf for every variant.
   const diagnosticsByPath = new Map<string, LintDiagnostic>();
@@ -486,5 +573,5 @@ export function lintFormatParity(def: unknown, displayName: string): LintDiagnos
       });
     }
   }
-  return [...diagnosticsByPath.values()];
+  return [...depthDiagnostics, ...diagnosticsByPath.values()];
 }

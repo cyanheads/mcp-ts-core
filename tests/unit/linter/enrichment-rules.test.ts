@@ -267,15 +267,45 @@ describe('lintCappedListTruncation', () => {
     });
 
     it('warns for each cap-like field name variant', () => {
-      for (const capField of ['limit', 'per_page', 'page_size', 'max_results', 'max_items']) {
+      for (const capField of [
+        'limit',
+        'per_page',
+        'perPage',
+        'page_size',
+        'pageSize',
+        'max_results',
+        'maxResults',
+        'max_items',
+        'maxItems',
+        // Shape-matched rather than enumerated: any max_<noun> / max<Noun>, and
+        // any <noun>_limit / <noun>Limit, is a cap whatever the noun.
+        'max_records',
+        'maxRecords',
+        'maxRows',
+        'max_hits',
+        'result_limit',
+        'resultLimit',
+      ]) {
         const def = {
           name: 'tool',
           input: z.object({ [capField]: z.number().describe('cap') }),
           output: z.object({ items: z.array(z.string()).describe('items') }),
         };
         const d = lintCappedListTruncation(def);
-        expect(d.map((x) => x.rule)).toContain('capped-list-no-truncation');
+        expect(
+          d.map((x) => x.rule),
+          capField,
+        ).toContain('capped-list-no-truncation');
       }
+    });
+
+    it('names the matched cap field in the message', () => {
+      const def = {
+        name: 'tool',
+        input: z.object({ maxRecords: z.number().describe('cap') }),
+        output: z.object({ items: z.array(z.string()).describe('items') }),
+      };
+      expect(lintCappedListTruncation(def)[0]?.message).toContain('maxRecords');
     });
 
     it('cap field match is case-insensitive', () => {
@@ -357,6 +387,30 @@ describe('lintCappedListTruncation', () => {
         output: z.object({ count: z.number().describe('count') }),
       };
       expect(lintCappedListTruncation(def)).toHaveLength(0);
+    });
+
+    it('leaves ordinary domain field names alone', () => {
+      // Widening the shape must not sweep in generic nouns — a false positive
+      // here is the failure mode that matters on this side of the rule.
+      for (const plainField of [
+        'count',
+        'size',
+        'n',
+        'records',
+        'rows',
+        'total',
+        'pageCount',
+        'maximum',
+        'maxwell',
+        'climate',
+      ]) {
+        const def = {
+          name: 'tool',
+          input: z.object({ [plainField]: z.number().describe('not a cap') }),
+          output: z.object({ items: z.array(z.string()).describe('items') }),
+        };
+        expect(lintCappedListTruncation(def), plainField).toHaveLength(0);
+      }
     });
   });
 });

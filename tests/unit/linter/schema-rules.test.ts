@@ -12,6 +12,7 @@ import { z } from 'zod';
 import {
   checkFieldDescriptions,
   checkIsZodObject,
+  checkSchemaSatisfiable,
   checkSchemaSerializable,
   getCoreDefType,
   isZodObject,
@@ -282,6 +283,113 @@ describe('checkSchemaSerializable', () => {
     expect(
       checkSchemaSerializable(z.object({ n: z.bigint().describe('n') }), 'output', 'tool', 'x'),
     ).toMatchObject({ rule: 'schema-serializable', message: expect.stringContaining('output') });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// checkSchemaSatisfiable
+// ---------------------------------------------------------------------------
+
+describe('checkSchemaSatisfiable', () => {
+  it('returns [] for an ordinary schema', () => {
+    expect(
+      checkSchemaSatisfiable(
+        z.object({
+          a: z.string().describe('a'),
+          b: z.enum(['x', 'y']).describe('b'),
+          c: z.array(z.object({ d: z.number().describe('d') })).describe('c'),
+        }),
+        'input',
+        'tool',
+        'x',
+      ),
+    ).toEqual([]);
+  });
+
+  it('errors on an empty enum', () => {
+    const diagnostics = checkSchemaSatisfiable(
+      z.object({ mode: z.enum([] as unknown as [string, ...string[]]).describe('mode') }),
+      'input',
+      'tool',
+      'x',
+    );
+    expect(diagnostics).toHaveLength(1);
+    expect(diagnostics[0]).toMatchObject({ rule: 'schema-unsatisfiable', severity: 'error' });
+    expect(diagnostics[0]?.message).toContain('input.mode');
+  });
+
+  it('errors on a numeric array handed to z.enum()', () => {
+    // Zod keeps the five options internally but serializes to
+    // {"type":"string","enum":[]} — the emitted schema is the decisive one, so
+    // this must be caught even though the Zod-side option list is non-empty.
+    const diagnostics = checkSchemaSatisfiable(
+      z.object({
+        priority: z.enum([1, 2, 3, 4, 5] as unknown as [string, ...string[]]).describe('priority'),
+      }),
+      'input',
+      'tool',
+      'x',
+    );
+    expect(diagnostics).toHaveLength(1);
+    expect(diagnostics[0]?.message).toContain('input.priority');
+  });
+
+  it('errors on an empty union and on z.never()', () => {
+    expect(
+      checkSchemaSatisfiable(
+        z.object({ choice: z.union([]).describe('choice') }),
+        'output',
+        'tool',
+        'x',
+      ),
+    ).toHaveLength(1);
+    expect(
+      checkSchemaSatisfiable(
+        z.object({ nothing: z.never().describe('nothing') }),
+        'output',
+        'tool',
+        'x',
+      ),
+    ).toHaveLength(1);
+  });
+
+  it('finds an unsatisfiable node nested in arrays and objects', () => {
+    const diagnostics = checkSchemaSatisfiable(
+      z.object({
+        rows: z
+          .array(
+            z.object({
+              tag: z.enum([] as unknown as [string, ...string[]]).describe('tag'),
+            }),
+          )
+          .describe('rows'),
+      }),
+      'output',
+      'tool',
+      'x',
+    );
+    expect(diagnostics).toHaveLength(1);
+    expect(diagnostics[0]?.message).toContain('output.rows[].tag');
+  });
+
+  it('does not flag empty constraints that are merely permissive', () => {
+    // `properties: {}` / `required: []` describe an object with no declared keys,
+    // not an impossible one — and `allOf: []` is vacuously true.
+    expect(
+      checkSchemaSatisfiable(
+        z.object({ meta: z.object({}).describe('meta'), tags: z.array(z.string()).describe('t') }),
+        'input',
+        'tool',
+        'x',
+      ),
+    ).toEqual([]);
+  });
+
+  it('stays silent for a non-object or non-serializable schema', () => {
+    expect(checkSchemaSatisfiable(z.string(), 'input', 'tool', 'x')).toEqual([]);
+    expect(
+      checkSchemaSatisfiable(z.object({ when: z.date().describe('w') }), 'input', 'tool', 'x'),
+    ).toEqual([]);
   });
 });
 

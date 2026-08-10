@@ -580,7 +580,7 @@ describe('lintFormatParity — graceful degradation', () => {
       output: z.object({ x: z.string().describe('x') }),
       format: (r) => {
         const result = r as { x: string };
-        if (result.x.startsWith('__MCP_PARITY_')) {
+        if (result.x.startsWith('MCPPARITY')) {
           throw new Error('format assumes real data');
         }
         return [{ type: 'text', text: result.x }];
@@ -735,17 +735,273 @@ describe('lintFormatParity — deduplication', () => {
 // Recursion-depth guard
 // ---------------------------------------------------------------------------
 
+/** Chain of `depth` nested objects (key `child`) terminating in a string leaf. */
+function nestedObject(depth: number): z.ZodTypeAny {
+  if (depth === 0) return z.string().describe('Deep leaf value');
+  return z.object({ child: nestedObject(depth - 1) }).describe(`Level ${depth}`);
+}
+
 describe('lintFormatParity — recursion depth guard', () => {
-  it('silently stops verifying fields nested beyond depth 8', () => {
-    function nestedObject(depth: number): z.ZodTypeAny {
-      if (depth === 0) return z.string().describe('Deep leaf value');
-      return z.object({ child: nestedObject(depth - 1) }).describe(`Level ${depth}`);
-    }
+  it('stops verifying fields nested beyond depth 8 but reports the gap', () => {
     const def = tool({
       output: z.object({ root: nestedObject(12) }),
-      // Formatter ignores the deeply nested value entirely — if the walker
-      // actually verified fields past the recursion guard, this would fail.
+      // Formatter ignores the deeply nested value entirely. Past the guard the
+      // walker cannot evaluate it — that must surface as "not evaluated", not
+      // as a silent pass.
       format: () => [{ type: 'text', text: 'summary only, no deep fields rendered' }],
+    });
+    expect(parityErrors(def)).toHaveLength(0);
+
+    const warnings = lintFormatParity(def, def.name).filter((d) => d.severity === 'warning');
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0]?.rule).toBe('format-parity-depth-limit');
+    expect(warnings[0]?.message).toContain('root.child.child.child.child.child.child.child.child');
+  });
+
+  it('evaluates a leaf sitting exactly at the depth limit', () => {
+    // nestedObject(7) under `root` puts the string leaf at walker depth 8 — the
+    // last depth the walker still evaluates.
+    const def = tool({
+      output: z.object({ root: nestedObject(7) }),
+      format: () => [{ type: 'text', text: 'summary only, no deep fields rendered' }],
+    });
+    const diagnostics = lintFormatParity(def, def.name);
+    expect(diagnostics.filter((d) => d.rule === 'format-parity-depth-limit')).toHaveLength(0);
+    expect(parityErrors(def)).toHaveLength(1);
+  });
+
+  it('reports the first unevaluated path when the leaf sits one level past the limit', () => {
+    const def = tool({
+      output: z.object({ root: nestedObject(8) }),
+      format: () => [{ type: 'text', text: 'summary only, no deep fields rendered' }],
+    });
+    const diagnostics = lintFormatParity(def, def.name);
+    const depthLimit = diagnostics.filter((d) => d.rule === 'format-parity-depth-limit');
+    expect(depthLimit).toHaveLength(1);
+    expect(depthLimit[0]?.severity).toBe('warning');
+    expect(depthLimit[0]?.message).toContain(
+      'root.child.child.child.child.child.child.child.child',
+    );
+    expect(parityErrors(def)).toHaveLength(0);
+  });
+
+  it('reports the depth gap even when no leaf was reachable at all', () => {
+    // Everything the walker can see is past the limit, so there are no leaves to
+    // verify — the diagnostic must still be emitted rather than short-circuited.
+    const def = tool({
+      output: z.object({ root: nestedObject(9) }),
+      format: () => [{ type: 'text', text: 'nothing rendered' }],
+    });
+    const diagnostics = lintFormatParity(def, def.name);
+    expect(diagnostics).toHaveLength(1);
+    expect(diagnostics[0]?.rule).toBe('format-parity-depth-limit');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Multi-value literals (Zod 4 closed sets)
+// ---------------------------------------------------------------------------
+
+describe('lintFormatParity — multi-value literals', () => {
+  it('walks a multi-value z.literal instead of failing the whole tool', () => {
+    const def = tool({
+      output: z.object({
+        priority: z.literal([1, 2, 3, 4, 5]).describe('Closed numeric set as one schema node.'),
+      }),
+      format: (r) => [{ type: 'text', text: `priority ${(r as { priority: number }).priority}` }],
+    });
+    expect(lintFormatParity(def, def.name)).toHaveLength(0);
+  });
+
+  it('flags an unrendered multi-value literal instead of disabling the rule', () => {
+    const def = tool({
+      output: z.object({
+        priority: z.literal([1, 2, 3, 4, 5]).describe('Priority'),
+        label: z.string().describe('Label'),
+      }),
+      format: (r) => [{ type: 'text', text: `label ${(r as { label: string }).label}` }],
+    });
+    const diagnostics = lintFormatParity(def, def.name);
+    expect(diagnostics.filter((d) => d.rule === 'format-parity-walk-failed')).toHaveLength(0);
+    const errors = parityErrors(def);
+    expect(errors).toHaveLength(1);
+    expect(errors[0]?.message).toContain("'priority'");
+  });
+
+  it('still walks a single-value literal unchanged', () => {
+    const def = tool({
+      output: z.object({ kind: z.literal('summary').describe('Result kind') }),
+      format: (r) => [{ type: 'text', text: `kind ${(r as { kind: string }).kind}` }],
+    });
+    expect(lintFormatParity(def, def.name)).toHaveLength(0);
+  });
+
+  it('falls back to the key name for an empty enum, whose value set has no member', () => {
+    // z.enum([]) — and a numeric array handed to z.enum(), which serializes to
+    // the same `{"type":"string","enum":[]}` — yields no sampleable member. The
+    // walker must not crash, and must not silently pass on an absent sentinel.
+    const empty = z.enum([] as unknown as [string, ...string[]]);
+    const rendered = tool({
+      output: z.object({ status: empty.describe('Status') }),
+      format: () => [{ type: 'text', text: 'Status: unknown' }],
+    });
+    expect(lintFormatParity(rendered, rendered.name)).toHaveLength(0);
+
+    const absent = tool({
+      output: z.object({ status: empty.describe('Status') }),
+      format: () => [{ type: 'text', text: 'nothing relevant here' }],
+    });
+    expect(parityErrors(absent)).toHaveLength(1);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Sentinel inertness under render-boundary escaping
+// ---------------------------------------------------------------------------
+
+/** Escapes the characters a Markdown renderer must neutralize in upstream text. */
+function escapeMarkdown(value: string): string {
+  return value.replace(/([\\`*_{}[\]()#+\-.!<>])/g, '\\$1');
+}
+
+describe('lintFormatParity — escaping formatters', () => {
+  it('passes a format() that Markdown-escapes every rendered value', () => {
+    const def = tool({
+      output: z.object({
+        title: z.string().describe('Title'),
+        body: z.string().describe('Body'),
+      }),
+      format: (r) => {
+        const result = r as { title: string; body: string };
+        return [
+          {
+            type: 'text',
+            text: `# ${escapeMarkdown(result.title)}\n${escapeMarkdown(result.body)}`,
+          },
+        ];
+      },
+    });
+    expect(lintFormatParity(def, def.name)).toHaveLength(0);
+  });
+
+  it('still flags a field a Markdown-escaping format() drops', () => {
+    const def = tool({
+      output: z.object({
+        title: z.string().describe('Title'),
+        body: z.string().describe('Body'),
+      }),
+      format: (r) => [
+        { type: 'text', text: `# ${escapeMarkdown((r as { title: string }).title)}` },
+      ],
+    });
+    const errors = parityErrors(def);
+    expect(errors).toHaveLength(1);
+    expect(errors[0]?.message).toContain("'body'");
+  });
+
+  it('passes a format() that HTML-escapes or URL-encodes its values', () => {
+    const def = tool({
+      output: z.object({
+        label: z.string().describe('Label'),
+        href: z.string().describe('Link target'),
+      }),
+      format: (r) => {
+        const result = r as { label: string; href: string };
+        return [
+          {
+            type: 'text',
+            text: `<a href="https://example.com/${encodeURIComponent(result.href)}">${result.label.replace(
+              /[&<>"']/g,
+              (c) => `&#${c.charCodeAt(0)};`,
+            )}</a>`,
+          },
+        ];
+      },
+    });
+    expect(lintFormatParity(def, def.name)).toHaveLength(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Permissive-leaf collision resistance
+// ---------------------------------------------------------------------------
+
+describe('lintFormatParity — permissive collision resistance', () => {
+  it('flags an unrendered enum whose value is a substring of a sibling field', () => {
+    const def = tool({
+      output: z.object({
+        kind: z.enum(['full', 'outline']).describe('Result kind'),
+        case_name_full: z.string().describe('Full case name'),
+      }),
+      // Renders the sibling only. The enum's value ('full') appears inside the
+      // sibling's rendered text as an incidental substring, which must not count.
+      format: (r) => [
+        { type: 'text', text: `Name: ${(r as { case_name_full: string }).case_name_full}` },
+      ],
+    });
+    const errors = parityErrors(def);
+    expect(errors).toHaveLength(1);
+    expect(errors[0]?.message).toContain("'kind'");
+  });
+
+  it('flags an enum whose value only appears inside a longer word', () => {
+    const def = tool({
+      output: z.object({ state: z.enum(['active', 'archived']).describe('State') }),
+      // "inactive" contains "active"; the field is not actually rendered, and the
+      // key name "state" never appears either.
+      format: () => [{ type: 'text', text: 'Currently inactive' }],
+    });
+    expect(parityErrors(def)).toHaveLength(1);
+  });
+
+  it('flags a boolean whose value only appears inside a longer token', () => {
+    const def = tool({
+      output: z.object({ verified: z.boolean().describe('Verified') }),
+      // "construed" contains no boundary-delimited "true"; nothing renders the field.
+      format: () => [{ type: 'text', text: 'nothing construed from this' }],
+    });
+    expect(parityErrors(def)).toHaveLength(1);
+  });
+
+  it('flags a literal whose value only appears inside a longer token', () => {
+    const def = tool({
+      output: z.object({
+        mode: z.literal('list').describe('Mode'),
+        headline: z.string().describe('Headline'),
+      }),
+      // "listing" contains "list"; neither the literal nor the key name renders.
+      format: (r) => [
+        { type: 'text', text: `A listing of ${(r as { headline: string }).headline}` },
+      ],
+    });
+    const errors = parityErrors(def);
+    expect(errors).toHaveLength(1);
+    expect(errors[0]?.message).toContain("'mode'");
+  });
+
+  it('still accepts a permissive value rendered as a delimited token', () => {
+    const def = tool({
+      output: z.object({
+        state: z.enum(['active', 'archived']).describe('State'),
+        flag: z.boolean().describe('Flag'),
+      }),
+      format: (r) => {
+        const result = r as { state: string; flag: boolean };
+        return [{ type: 'text', text: `State: **${result.state}** | Flag: ${result.flag}` }];
+      },
+    });
+    expect(parityErrors(def)).toHaveLength(0);
+  });
+
+  it('still normalizes digit grouping for a numeric multi-value literal', () => {
+    const def = tool({
+      output: z.object({ tier: z.literal([1000, 2000]).describe('Tier') }),
+      format: (r) => [
+        {
+          type: 'text',
+          text: `Tier: ${(r as { tier: number }).tier.toLocaleString('en-US')}`,
+        },
+      ],
     });
     expect(parityErrors(def)).toHaveLength(0);
   });
