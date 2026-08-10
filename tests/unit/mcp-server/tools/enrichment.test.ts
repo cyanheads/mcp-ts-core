@@ -116,6 +116,23 @@ function allText(content: unknown): string[] {
   return (content as Array<{ text?: string }>).map((b) => b.text ?? '');
 }
 
+/**
+ * Lines in a rendered trailer that CommonMark lazy continuation folds the next
+ * line into: a line opening a block quote (`>`) or a list item (indent ≤ 3, per
+ * the spec) followed directly by an unprefixed non-blank line. Asserting on the
+ * raw trailer string can't see this — only the block structure of the markdown
+ * can.
+ */
+function lazyContinuationLines(trailer: string): string[] {
+  const lines = trailer.split('\n');
+  const opensContainer = (line: string | undefined) =>
+    /^ {0,3}(?:>|(?:[-+*]|\d{1,9}[.)])(?: |$))/.test(line ?? '');
+  return lines.filter(
+    (line, i) =>
+      opensContainer(line) && /\S/.test(lines[i + 1] ?? '') && !opensContainer(lines[i + 1]),
+  );
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -451,6 +468,180 @@ describe('enrichment block', () => {
       expect(trailer).toContain('sizeInBytes'); // default label is the field key
       // structuredContent gets the raw before/after object — the agent judges the change.
       expect(result.structuredContent).toEqual({ ok: true, sizeInBytes: { before: 0, after: 68 } });
+    });
+  });
+
+  describe('block-quote termination in the trailer (#308)', () => {
+    /**
+     * Superset enrichment block — every kind declared optional so a handler can
+     * populate `notice` plus exactly one follower per case.
+     */
+    const kindsBlock = {
+      notice: z.string().optional().describe('empty-result notice'),
+      totalCount: z.number().optional().describe('total before limit'),
+      effectiveQuery: z.string().optional().describe('query as parsed'),
+      pageSize: z.number().optional().describe('page size'),
+      sizeInBytes: z
+        .object({
+          before: z.number().describe('size before'),
+          after: z.number().describe('size after'),
+        })
+        .optional()
+        .describe('size before/after'),
+    };
+
+    /** Runs a tool whose handler enriches via `enrich`, returns the trailer text. */
+    async function trailerFor(
+      name: string,
+      enrich: (ctx: any) => void,
+      extra: Partial<Parameters<typeof tool>[1]> = {},
+    ): Promise<string> {
+      const t = tool(name, {
+        description: 'Search.',
+        input: z.object({ q: z.string().describe('q') }),
+        output: z.object({ items: z.array(z.string()).describe('items') }),
+        enrichment: kindsBlock,
+        handler: (_input: unknown, ctx: any) => {
+          enrich(ctx);
+          return { items: [] };
+        },
+        ...extra,
+      } as any);
+      const handler = createToolHandler(t as AnyToolDefinition, services, notifiers);
+      const result = await handler({ q: 'x' }, createMockSdkContext());
+      expect(result.isError).toBeUndefined();
+      return lastText(result.content);
+    }
+
+    it('leaves a lone notice compact — no trailing separator bloat', async () => {
+      const trailer = await trailerFor('lone_notice', (ctx) =>
+        ctx.enrich.notice('Nothing matched.'),
+      );
+      expect(trailer).toBe('\n\n> Nothing matched.');
+      expect(lazyContinuationLines(trailer)).toEqual([]);
+    });
+
+    it.each([
+      ['total', (ctx: any) => ctx.enrich.total(0), '**0 total**'],
+      ['echo', (ctx: any) => ctx.enrich.echo('product_name=xyz'), 'Query: product_name=xyz'],
+      [
+        'delta',
+        (ctx: any) => ctx.enrich.delta({ field: 'sizeInBytes', before: 0, after: 68 }),
+        '**sizeInBytes:** 0 → 68',
+      ],
+      ['generic scalar', (ctx: any) => ctx.enrich({ pageSize: 25 }), '**pageSize:** 25'],
+    ])(
+      'renders a %s enriched after a notice as its own block, not quoted text',
+      async (kind, enrichFollower, expectedLine) => {
+        const trailer = await trailerFor(`notice_then_${kind.replace(/\W/g, '_')}`, (ctx) => {
+          ctx.enrich.notice('No recalls matched that filter.');
+          enrichFollower(ctx);
+        });
+
+        expect(trailer).toContain('> No recalls matched that filter.');
+        expect(trailer).toContain(expectedLine);
+        // The rendered structure — not the raw string — is what the bug was
+        // invisible in: a `>` line followed by an unprefixed non-blank line is
+        // folded into the quote by CommonMark lazy continuation.
+        expect(lazyContinuationLines(trailer)).toEqual([]);
+      },
+    );
+
+    it('keeps every field its own block when a notice precedes several kinds', async () => {
+      const trailer = await trailerFor('notice_then_many', (ctx) => {
+        ctx.enrich.notice('No recalls matched that filter.');
+        ctx.enrich.total(0);
+        ctx.enrich.echo('product_name=xyz');
+        ctx.enrich({ pageSize: 25 });
+      });
+
+      expect(lazyContinuationLines(trailer)).toEqual([]);
+      expect(trailer).toBe(
+        '\n\n> No recalls matched that filter.\n\n**0 total**\nQuery: product_name=xyz\n**pageSize:** 25',
+      );
+    });
+
+    it('terminates a custom multi-line render that ends in a quote', async () => {
+      const trailer = await trailerFor(
+        'render_ends_in_quote',
+        (ctx) => {
+          ctx.enrich({ pageSize: 25 });
+          ctx.enrich.total(3);
+        },
+        {
+          enrichmentTrailer: {
+            pageSize: { render: (n: unknown) => `### Page\n- size: ${n}\n> capped by the server` },
+          },
+        },
+      );
+
+      expect(trailer).toContain('> capped by the server');
+      expect(trailer).toContain('**3 total**');
+      expect(lazyContinuationLines(trailer)).toEqual([]);
+    });
+
+    it('terminates a custom multi-line render that ends in a list item', async () => {
+      // A bullet swallows the following line the same way a quote does — the
+      // next field would render as the tail of `- size: 25`, inside its <li>.
+      const trailer = await trailerFor(
+        'render_ends_in_list',
+        (ctx) => {
+          ctx.enrich({ pageSize: 25 });
+          ctx.enrich.total(3);
+        },
+        {
+          enrichmentTrailer: {
+            pageSize: { render: (n: unknown) => `### Page\n- size: ${n}` },
+          },
+        },
+      );
+
+      expect(trailer).toBe('\n\n### Page\n- size: 25\n\n**3 total**');
+      expect(lazyContinuationLines(trailer)).toEqual([]);
+    });
+
+    it('leaves a custom render ending in a plain paragraph line compact', async () => {
+      const trailer = await trailerFor(
+        'render_no_container',
+        (ctx) => {
+          ctx.enrich({ pageSize: 25 });
+          ctx.enrich.total(3);
+        },
+        {
+          enrichmentTrailer: {
+            pageSize: { render: (n: unknown) => `### Page\nsize: ${n}` },
+          },
+        },
+      );
+
+      expect(trailer).toBe('\n\n### Page\nsize: 25\n**3 total**');
+    });
+
+    it('keeps back-to-back quote-producing fields as separate quotes', async () => {
+      const trailer = await trailerFor(
+        'quote_then_notice',
+        (ctx) => {
+          ctx.enrich({ pageSize: 25 });
+          ctx.enrich.notice('Nothing matched.');
+        },
+        {
+          enrichmentTrailer: { pageSize: { render: (n: unknown) => `> page size ${n}` } },
+        },
+      );
+
+      // A bare `\n` here would merge both into one quote block.
+      expect(trailer).toBe('\n\n> page size 25\n\n> Nothing matched.');
+    });
+
+    it('renders a trailer with no notice byte-identically to the pre-fix layout', async () => {
+      const trailer = await trailerFor('no_notice', (ctx) => {
+        ctx.enrich.echo('parsed terms');
+        ctx.enrich.total(42);
+        ctx.enrich({ pageSize: 25 });
+      });
+
+      // Single `\n` between ordinary scalar lines — the compact layout is unchanged.
+      expect(trailer).toBe('\n\nQuery: parsed terms\n**42 total**\n**pageSize:** 25');
     });
   });
 });

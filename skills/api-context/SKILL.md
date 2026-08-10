@@ -4,7 +4,7 @@ description: >
   Canonical reference for the unified `Context` object passed to every tool and resource handler in `@cyanheads/mcp-ts-core`. Covers the full interface, all sub-APIs (`ctx.log`, `ctx.state`, `ctx.elicit`, `ctx.progress`, `ctx.enrich`, `ctx.content`), and when to use each.
 metadata:
   author: cyanheads
-  version: "1.10"
+  version: "1.11"
   audience: external
   type: reference
 ---
@@ -604,6 +604,7 @@ ctx.enrich.truncated({ shown, cap, ceiling?, guidance? }): void
 | Service usage | Services accepting `ctx: Context` can call `ctx.enrich(...)`; the value reaches `structuredContent` exactly as if the handler had. |
 | `format-parity` | Enrichment lives outside `output`, so the `format-parity` lint never requires it in `format()`. |
 | Trailer rendering | Per field: kind-tag if set (notice/total/echo/delta), else the definition's `enrichmentTrailer.render`/`label`, else `**key:** value` (objects/arrays `JSON.stringify`'d). A structured field with no `render` errors under `enrichment-trailer-render` — supply one so it renders as markdown; `structuredContent` keeps the full value regardless. |
+| Trailer layout | One field per line. A field whose last line opens a block quote or a list item (`notice`, or a `render` ending in `>`, `-`, `*`, `1.`) gets a blank line after it, so the next field renders as its own block instead of being folded into that container by CommonMark lazy continuation. |
 
 ### `ctx.enrich.truncated()` — capped-list disclosure
 

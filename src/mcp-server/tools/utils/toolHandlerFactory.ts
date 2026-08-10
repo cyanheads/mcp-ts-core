@@ -178,6 +178,40 @@ function formatEnrichmentScalar(value: unknown): string {
 }
 
 /**
+ * True when a rendered field's last line leaves open a CommonMark container that
+ * lazy continuation would pull the next field into — a block quote (`>`) or a
+ * list item (`-`, `+`, `*`, `1.`, `1)`), each indented up to three spaces.
+ *
+ * Keyed on the line, not the field kind: a custom `enrichmentTrailer.render` can
+ * emit multi-line markdown whose final line is a quote or a bullet, and either
+ * one swallows what follows exactly as a `notice` does.
+ *
+ * A list marker must be followed by a space or end the line, so `**0 total**`
+ * and a `***` rule are not mistaken for bullets.
+ */
+function opensLazyContainer(text: string): boolean {
+  const lastLine = text.slice(text.lastIndexOf('\n') + 1);
+  return /^ {0,3}(?:>|(?:[-+*]|\d{1,9}[.)])(?: |$))/.test(lastLine);
+}
+
+/**
+ * Joins rendered fields into the trailer body, closing any open container before
+ * the next field. CommonMark lazy continuation folds an unprefixed paragraph line
+ * that follows a block quote or list item *into* it, so a bare `\n` would render
+ * server-authored facts (totals, query echoes) as quoted text attributed to the
+ * notice, or as the tail of somebody's last bullet. Emitting the blank line only
+ * after those lines keeps the compact single-`\n` layout everywhere else.
+ */
+function joinTrailerFields(fields: string[]): string {
+  let text = '';
+  for (const field of fields) {
+    if (text.length > 0) text += opensLazyContainer(text) ? '\n\n' : '\n';
+    text += field;
+  }
+  return text;
+}
+
+/**
  * Renders accumulated enrichment as a single `content[]` trailer block, so
  * `content[]`-only clients see the same context `structuredContent` clients get
  * from the merged output. Per field, rendering resolves in order:
@@ -196,15 +230,16 @@ function formatEnrichmentScalar(value: unknown): string {
  * leads with a blank-line separator so it stands off the preceding block on
  * clients that concatenate adjacent text blocks with no join (#257); markdown
  * collapses consecutive blank lines, so clients that do insert their own
- * separator render at most one blank line either way. Returns `[]` when
- * nothing was enriched.
+ * separator render at most one blank line either way. Fields are joined by
+ * {@link joinTrailerFields}, which terminates block quotes so a following field
+ * renders as its own block (#308). Returns `[]` when nothing was enriched.
  */
 function renderEnrichmentTrailer(
   store: EnrichmentStore,
   trailer: AnyToolDefinition['enrichmentTrailer'],
   parsed: Record<string, unknown>,
 ): ContentBlock[] {
-  const lines: string[] = [];
+  const fields: string[] = [];
   for (const key of Object.keys(store.values)) {
     // Skip keys the effective-output parse stripped (enriched but not declared in
     // the block) — the trailer mirrors what reached structuredContent.
@@ -212,31 +247,31 @@ function renderEnrichmentTrailer(
     const value = parsed[key];
     const cfg = trailer?.[key];
     if (cfg?.render) {
-      lines.push(cfg.render(value));
+      fields.push(cfg.render(value));
       continue;
     }
     switch (store.kinds.get(key)) {
       case 'notice':
-        lines.push(`> ${String(value)}`);
+        fields.push(`> ${String(value)}`);
         break;
       case 'total':
-        lines.push(`**${String(value)} total**`);
+        fields.push(`**${String(value)} total**`);
         break;
       case 'echo':
-        lines.push(`Query: ${String(value)}`);
+        fields.push(`Query: ${String(value)}`);
         break;
       case 'delta': {
         const d = (value ?? {}) as { after?: unknown; before?: unknown };
-        lines.push(
+        fields.push(
           `**${cfg?.label ?? key}:** ${formatEnrichmentScalar(d.before)} → ${formatEnrichmentScalar(d.after)}`,
         );
         break;
       }
       default:
-        lines.push(`**${cfg?.label ?? key}:** ${formatEnrichmentScalar(value)}`);
+        fields.push(`**${cfg?.label ?? key}:** ${formatEnrichmentScalar(value)}`);
     }
   }
-  return lines.length > 0 ? [{ type: 'text', text: `\n\n${lines.join('\n')}` }] : [];
+  return fields.length > 0 ? [{ type: 'text', text: `\n\n${joinTrailerFields(fields)}` }] : [];
 }
 
 /**
