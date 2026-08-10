@@ -9,8 +9,6 @@ import { InMemoryProvider } from '@/storage/providers/inMemory/inMemoryProvider.
 import { McpError } from '@/types-global/errors.js';
 import { requestContextService } from '@/utils/internal/requestContext.js';
 
-import { storageProviderTests } from '../../../../compliance/storage-provider.test.js';
-
 const createTestContext = () =>
   requestContextService.createRequestContext({
     operation: 'in-memory-provider-test',
@@ -102,7 +100,50 @@ describe('InMemoryProvider (unit)', () => {
     await expect(provider.deleteMany(tenantId, [], context)).resolves.toBe(0);
   });
 
+  it('does not retain empty tenant namespaces after read misses or cleanup', async () => {
+    const context = createTestContext();
+    for (let index = 0; index < 100; index++) {
+      await provider.get(`missing-tenant-${index}`, 'missing', context);
+      await provider.list(`missing-tenant-${index}`, '', context);
+      await provider.delete(`missing-tenant-${index}`, 'missing', context);
+      await provider.clear(`missing-tenant-${index}`, context);
+    }
+
+    const internalStore = (provider as unknown as { store: Map<string, unknown> }).store;
+    expect(internalStore.size).toBe(0);
+
+    await provider.set(tenantId, 'only-key', 'value', context);
+    await provider.delete(tenantId, 'only-key', context);
+    expect(internalStore.size).toBe(0);
+  });
+
+  it('does not allocate tenant namespaces for empty setMany calls', async () => {
+    const context = createTestContext();
+    for (let index = 0; index < 100; index++) {
+      await provider.setMany(`empty-tenant-${index}`, new Map(), context);
+    }
+
+    const internalStore = (provider as unknown as { store: Map<string, unknown> }).store;
+    expect(internalStore.size).toBe(0);
+    expect(provider.size).toBe(0);
+  });
+
   describe('capacity management', () => {
+    it.each([-1, 1.5, Number.NaN, Number.POSITIVE_INFINITY])(
+      'rejects invalid maxEntries configuration: %s',
+      (maxEntries) => {
+        expect(() => new InMemoryProvider({ maxEntries })).toThrow(McpError);
+      },
+    );
+
+    it('supports a zero-entry provider that rejects writes without retaining a tenant', () => {
+      const context = createTestContext();
+      const boundedProvider = new InMemoryProvider({ maxEntries: 0 });
+      expect(() => boundedProvider.set(tenantId, 'key', 'value', context)).toThrow(McpError);
+      const internalStore = (boundedProvider as unknown as { store: Map<string, unknown> }).store;
+      expect(internalStore.size).toBe(0);
+    });
+
     it('throws McpError when a new key would exceed maxEntries', async () => {
       const context = createTestContext();
       const boundedProvider = new InMemoryProvider({ maxEntries: 2 });
@@ -152,8 +193,51 @@ describe('InMemoryProvider (unit)', () => {
       // synchronously (set() is not declared `async`).
       expect(() => boundedProvider.set(tenantId, 'key3', 'v3', context)).toThrow(McpError);
     });
+
+    it('preflights setMany capacity so a rejected batch commits no partial entries', async () => {
+      const context = createTestContext();
+      const boundedProvider = new InMemoryProvider({ maxEntries: 2 });
+      await boundedProvider.set(tenantId, 'existing', 'stable', context);
+
+      await expect(
+        boundedProvider.setMany(
+          tenantId,
+          new Map<string, unknown>([
+            ['batch-a', 'a'],
+            ['batch-b', 'b'],
+          ]),
+          context,
+        ),
+      ).rejects.toThrow(McpError);
+
+      await expect(boundedProvider.get(tenantId, 'existing', context)).resolves.toBe('stable');
+      await expect(boundedProvider.get(tenantId, 'batch-a', context)).resolves.toBeNull();
+      await expect(boundedProvider.get(tenantId, 'batch-b', context)).resolves.toBeNull();
+      expect(boundedProvider.size).toBe(1);
+    });
+
+    it('sweeps expired batch keys before calculating the atomic capacity delta', async () => {
+      const context = createTestContext();
+      const boundedProvider = new InMemoryProvider({ maxEntries: 2 });
+      await boundedProvider.set(tenantId, 'expired', 'old', context, { ttl: 1 });
+      await boundedProvider.set(tenantId, 'stable', 'stable', context);
+      now += 1_100;
+
+      await expect(
+        boundedProvider.setMany(
+          tenantId,
+          new Map<string, unknown>([
+            ['expired', 'replacement'],
+            ['new-key', 'new'],
+          ]),
+          context,
+        ),
+      ).rejects.toThrow(McpError);
+
+      await expect(boundedProvider.get(tenantId, 'stable', context)).resolves.toBe('stable');
+      await expect(boundedProvider.get(tenantId, 'expired', context)).resolves.toBeNull();
+      await expect(boundedProvider.get(tenantId, 'new-key', context)).resolves.toBeNull();
+      expect(boundedProvider.size).toBe(1);
+    });
   });
 });
-
-// Run the generic compliance suite to ensure contract compatibility
-storageProviderTests(() => new InMemoryProvider(), 'InMemoryProvider');

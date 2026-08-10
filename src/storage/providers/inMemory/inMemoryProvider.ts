@@ -12,7 +12,7 @@ import type {
   StorageOptions,
 } from '@/storage/core/IStorageProvider.js';
 import { decodeCursor, encodeCursor } from '@/storage/core/storageValidation.js';
-import { JsonRpcErrorCode, McpError } from '@/types-global/errors.js';
+import { configurationError, JsonRpcErrorCode, McpError } from '@/types-global/errors.js';
 import { logger } from '@/utils/internal/logger.js';
 import type { RequestContext } from '@/utils/internal/requestContext.js';
 
@@ -43,7 +43,11 @@ export class InMemoryProvider implements IStorageProvider {
   private entryCount = 0;
 
   constructor(options?: InMemoryProviderOptions) {
-    this.maxEntries = options?.maxEntries ?? DEFAULT_MAX_ENTRIES;
+    const maxEntries = options?.maxEntries ?? DEFAULT_MAX_ENTRIES;
+    if (!Number.isSafeInteger(maxEntries) || maxEntries < 0) {
+      throw configurationError('InMemoryProvider maxEntries must be a non-negative safe integer.');
+    }
+    this.maxEntries = maxEntries;
   }
 
   /** Returns the total number of entries across all tenants. */
@@ -51,13 +55,12 @@ export class InMemoryProvider implements IStorageProvider {
     return this.entryCount;
   }
 
-  private getTenantStore(tenantId: string): Map<string, InMemoryStoreEntry> {
-    let tenantStore = this.store.get(tenantId);
-    if (!tenantStore) {
-      tenantStore = new Map<string, InMemoryStoreEntry>();
-      this.store.set(tenantId, tenantStore);
-    }
-    return tenantStore;
+  private getOrCreateTenantStore(tenantId: string): Map<string, InMemoryStoreEntry> {
+    const existing = this.store.get(tenantId);
+    if (existing) return existing;
+    const created = new Map<string, InMemoryStoreEntry>();
+    this.store.set(tenantId, created);
+    return created;
   }
 
   /** Sweeps all tenant stores and removes expired entries, returning the count reclaimed. */
@@ -83,15 +86,15 @@ export class InMemoryProvider implements IStorageProvider {
    * Ensures capacity for a new entry. If at limit, runs a TTL sweep first.
    * If still at capacity after sweep, throws.
    */
-  private ensureCapacity(): void {
-    if (this.entryCount < this.maxEntries) return;
+  private ensureCapacity(additionalEntries = 1): void {
+    if (this.entryCount + additionalEntries <= this.maxEntries) return;
 
     const reclaimed = this.sweepExpired();
     if (reclaimed > 0) {
       logger.debug(`[InMemoryProvider] TTL sweep reclaimed ${reclaimed} expired entries`);
     }
 
-    if (this.entryCount >= this.maxEntries) {
+    if (this.entryCount + additionalEntries > this.maxEntries) {
       throw new McpError(
         JsonRpcErrorCode.InternalError,
         `In-memory storage capacity exceeded (max: ${this.maxEntries}). ` +
@@ -102,7 +105,10 @@ export class InMemoryProvider implements IStorageProvider {
 
   get<T>(tenantId: string, key: string, context: RequestContext): Promise<T | null> {
     logger.debug(`[InMemoryProvider] Getting key: ${key} for tenant: ${tenantId}`, context);
-    const tenantStore = this.getTenantStore(tenantId);
+    const tenantStore = this.store.get(tenantId);
+    if (!tenantStore) {
+      return Promise.resolve(null);
+    }
     const entry = tenantStore.get(key);
 
     if (!entry) {
@@ -112,6 +118,7 @@ export class InMemoryProvider implements IStorageProvider {
     if (entry.expiresAt && Date.now() > entry.expiresAt) {
       tenantStore.delete(key);
       this.entryCount--;
+      if (tenantStore.size === 0) this.store.delete(tenantId);
       logger.debug(
         `[InMemoryProvider] Key expired and removed: ${key} for tenant: ${tenantId}`,
         context,
@@ -130,11 +137,12 @@ export class InMemoryProvider implements IStorageProvider {
     options?: StorageOptions,
   ): Promise<void> {
     logger.debug(`[InMemoryProvider] Setting key: ${key} for tenant: ${tenantId}`, context);
-    const tenantStore = this.getTenantStore(tenantId);
-    const isNew = !tenantStore.has(key);
+    let tenantStore = this.store.get(tenantId);
+    const isNew = !tenantStore?.has(key);
     if (isNew) {
       this.ensureCapacity();
     }
+    tenantStore ??= this.getOrCreateTenantStore(tenantId);
     // Fix: Check for undefined instead of truthy to handle ttl=0 correctly
     const expiresAt = options?.ttl !== undefined ? Date.now() + options.ttl * 1000 : undefined;
     tenantStore.set(key, {
@@ -149,10 +157,12 @@ export class InMemoryProvider implements IStorageProvider {
 
   delete(tenantId: string, key: string, context: RequestContext): Promise<boolean> {
     logger.debug(`[InMemoryProvider] Deleting key: ${key} for tenant: ${tenantId}`, context);
-    const tenantStore = this.getTenantStore(tenantId);
+    const tenantStore = this.store.get(tenantId);
+    if (!tenantStore) return Promise.resolve(false);
     const deleted = tenantStore.delete(key);
     if (deleted) {
       this.entryCount--;
+      if (tenantStore.size === 0) this.store.delete(tenantId);
     }
     return Promise.resolve(deleted);
   }
@@ -167,7 +177,14 @@ export class InMemoryProvider implements IStorageProvider {
       ...context,
       options,
     });
-    const tenantStore = this.getTenantStore(tenantId);
+    // Authenticate tenant-bound cursors before an empty-namespace fast path.
+    // Otherwise a cursor issued to another tenant is silently accepted whenever
+    // the requested tenant has no entries.
+    const lastKey = options?.cursor ? decodeCursor(options.cursor, tenantId, context) : undefined;
+    const tenantStore = this.store.get(tenantId);
+    if (!tenantStore) {
+      return Promise.resolve({ keys: [], nextCursor: undefined });
+    }
     const now = Date.now();
     const allKeys: string[] = [];
 
@@ -182,6 +199,7 @@ export class InMemoryProvider implements IStorageProvider {
         }
       }
     }
+    if (tenantStore.size === 0) this.store.delete(tenantId);
 
     // Sort for consistent pagination
     allKeys.sort();
@@ -190,9 +208,7 @@ export class InMemoryProvider implements IStorageProvider {
     const limit = options?.limit ?? DEFAULT_LIST_LIMIT;
     let startIndex = 0;
 
-    if (options?.cursor) {
-      // Decode and validate cursor
-      const lastKey = decodeCursor(options.cursor, tenantId, context);
+    if (lastKey) {
       const cursorIndex = allKeys.indexOf(lastKey);
       if (cursorIndex !== -1) {
         startIndex = cursorIndex + 1;
@@ -245,6 +261,7 @@ export class InMemoryProvider implements IStorageProvider {
     return results;
   }
 
+  // biome-ignore lint/suspicious/useAwait: async is required by IStorageProvider; the in-memory batch write is synchronous.
   async setMany(
     tenantId: string,
     entries: Map<string, unknown>,
@@ -260,11 +277,27 @@ export class InMemoryProvider implements IStorageProvider {
       context,
     );
 
-    // Parallel set for better performance
-    const promises = Array.from(entries.entries()).map(([key, value]) =>
-      this.set(tenantId, key, value, context, options),
-    );
-    await Promise.all(promises);
+    // Expired entries must be removed before computing the batch delta. If an
+    // expired key is present in this batch, counting it as an overwrite and
+    // sweeping it later can undercount additions and exceed maxEntries.
+    this.sweepExpired();
+    let tenantStore = this.store.get(tenantId);
+    let newEntryCount = 0;
+    for (const key of entries.keys()) {
+      if (!tenantStore?.has(key)) newEntryCount++;
+    }
+    // Preflight the complete batch so capacity failures cannot partially commit.
+    this.ensureCapacity(newEntryCount);
+    tenantStore ??= this.getOrCreateTenantStore(tenantId);
+
+    const expiresAt = options?.ttl !== undefined ? Date.now() + options.ttl * 1000 : undefined;
+    for (const [key, value] of entries) {
+      tenantStore.set(key, {
+        value,
+        ...(expiresAt !== undefined && { expiresAt }),
+      });
+    }
+    this.entryCount += newEntryCount;
 
     logger.debug(
       `[InMemoryProvider] Successfully set ${entries.size} keys for tenant: ${tenantId}`,
@@ -296,9 +329,10 @@ export class InMemoryProvider implements IStorageProvider {
 
   clear(tenantId: string, context: RequestContext): Promise<number> {
     logger.debug(`[InMemoryProvider] Clearing all keys for tenant: ${tenantId}`, context);
-    const tenantStore = this.getTenantStore(tenantId);
+    const tenantStore = this.store.get(tenantId);
+    if (!tenantStore) return Promise.resolve(0);
     const count = tenantStore.size;
-    tenantStore.clear();
+    this.store.delete(tenantId);
     this.entryCount -= count;
     logger.info(`[InMemoryProvider] Cleared ${count} keys for tenant: ${tenantId}`, context);
     return Promise.resolve(count);

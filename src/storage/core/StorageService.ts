@@ -13,6 +13,8 @@ import type {
   StorageOptions,
 } from '@/storage/core/IStorageProvider.js';
 import {
+  validateBatchEntries,
+  validateBatchKeys,
   validateKey,
   validateListOptions,
   validatePrefix,
@@ -203,6 +205,7 @@ export class StorageService {
 
   async getMany<T>(keys: string[], context: RequestContext): Promise<Map<string, T>> {
     const tenantId = requireTenantId(context);
+    validateBatchKeys(keys, 'getMany', context);
     for (const key of keys) {
       validateKey(key, context);
     }
@@ -227,6 +230,7 @@ export class StorageService {
     options?: StorageOptions,
   ): Promise<void> {
     const tenantId = requireTenantId(context);
+    validateBatchEntries(entries, context);
     validateStorageOptions(options, context);
     for (const key of entries.keys()) {
       validateKey(key, context);
@@ -252,6 +256,7 @@ export class StorageService {
 
   async deleteMany(keys: string[], context: RequestContext): Promise<number> {
     const tenantId = requireTenantId(context);
+    validateBatchKeys(keys, 'deleteMany', context);
     for (const key of keys) {
       validateKey(key, context);
     }
