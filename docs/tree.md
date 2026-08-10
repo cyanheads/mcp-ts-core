@@ -1,11 +1,9 @@
 # mcp-ts-core - Directory Structure
 
-Generated on: 2026-08-10 09:06:35
+Generated on: 2026-08-10 10:43:17
 
 ```text
 mcp-ts-core/
-├── .agents/
-├── .claude/
 ├── .github/
 │   ├── ISSUE_TEMPLATE/
 │   │   ├── bug_report.yml
@@ -18,8 +16,6 @@ mcp-ts-core/
 ├── .vscode/
 │   ├── extensions.json
 │   └── settings.json
-├── agent-feedback/
-├── announcements/
 ├── changelog/
 │   ├── 0.1.x/
 │   ├── 0.10.x/
@@ -708,7 +704,8 @@ mcp-ts-core/
 │   │   │   ├── clean-mcpb.test.ts
 │   │   │   ├── devcheck-git-guard.test.ts
 │   │   │   ├── devdocs.test.ts
-│   │   │   └── lint-packaging.test.ts
+│   │   │   ├── lint-packaging.test.ts
+│   │   │   └── tree.test.ts
 │   │   ├── services/
 │   │   │   ├── canvas/
 │   │   │   │   ├── appendValueCoerce.test.ts
@@ -860,7 +857,6 @@ mcp-ts-core/
 │   │   ├── storage-provider-compliance.worker.test.ts
 │   │   └── storage-r2.worker.test.ts
 │   └── setup.ts
-├── tmp/
 ├── .dockerignore
 ├── .env.example
 ├── .gitattributes

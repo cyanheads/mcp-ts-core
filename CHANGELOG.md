@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.11.4](changelog/0.11.x/0.11.4.md) — 2026-08-10
+
+The definition linter reports gaps it previously passed over — an unsatisfiable emitted schema, four format-parity false negatives, and cap names it never matched — so a server carrying one goes red on its next lint:mcp; enrichment trailers no longer fold the next field into a notice, and the scaffold typechecks tests/.
+
 ## [0.11.3](changelog/0.11.x/0.11.3.md) — 2026-08-10 · ⚠️ Breaking
 
 Input ceilings are opt-in again and parse errors carry the library diagnostic, fetchWithTimeout's timeoutMs now bounds the response body and keeps both ends of an over-budget error body, the /utils context parameters accept the handler Context, and the mock context runs the real storage path.

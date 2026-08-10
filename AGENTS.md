@@ -1,7 +1,7 @@
 # Developer Protocol
 
 **Package:** `@cyanheads/mcp-ts-core`
-**Version:** 0.11.3
+**Version:** 0.11.4
 **Engines:** Bun ≥1.3.0, Node ≥24.0.0
 **MCP SDK:** `@modelcontextprotocol/sdk` ^1.30.0
 **Zod:** ^4.4.3
