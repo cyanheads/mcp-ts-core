@@ -18,7 +18,7 @@ import type {
   ScheduledController,
 } from '@cloudflare/workers-types';
 import type { Hono } from 'hono';
-import { normalizeLogLevelAlias } from '@/config/index.js';
+import { normalizeLogLevelAlias } from '@/config/logLevelAlias.js';
 import { type CreateAppOptions, composeServices } from '@/core/app.js';
 import { createHttpApp } from '@/mcp-server/transports/http/httpTransport.js';
 import { logger, type McpLogLevel } from '@/utils/internal/logger.js';

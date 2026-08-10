@@ -124,6 +124,28 @@ describe('createWorkerHandler in the Workers runtime', () => {
       expect(control.setupCalls).toBe(1);
     });
 
+    it('resolves a log-level alias binding to the level the config schema accepts', async () => {
+      const previousLevel = process.env.MCP_LOG_LEVEL;
+      const control: WorkerLifecycleTestControl = { setupCalls: 0 };
+      const lifecycleWorker = createWorkerLifecycleTestHandler(control);
+      const ctx = createExecutionContext();
+
+      try {
+        const response = await lifecycleWorker.fetch(
+          new Request('http://example.com/healthz'),
+          lifecycleEnv({ LOG_LEVEL: 'WARN' }),
+          ctx,
+        );
+        await waitOnExecutionContext(ctx);
+
+        expect(response.status).toBe(200);
+        expect(process.env.MCP_LOG_LEVEL).toBe('warning');
+      } finally {
+        if (previousLevel === undefined) delete process.env.MCP_LOG_LEVEL;
+        else process.env.MCP_LOG_LEVEL = previousLevel;
+      }
+    });
+
     it('shares one initialization promise across concurrent first requests', async () => {
       let releaseInitialization!: () => void;
       const initializationGate = new Promise<void>((resolve) => {
