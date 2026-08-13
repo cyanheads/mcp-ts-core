@@ -4,7 +4,7 @@ description: >
   Design the tool surface, resources, and service layer for a new MCP server. Use when starting a new server, planning a major feature expansion, or when the user describes a domain/API they want to expose via MCP. Produces a design doc at docs/design.md that drives implementation.
 metadata:
   author: cyanheads
-  version: "2.20"
+  version: "2.21"
   audience: external
   type: workflow
 ---
@@ -52,7 +52,9 @@ The server name (repo name, npm package, public identity) must communicate what 
 
 - **Use the canonical platform/brand name, not abbreviations.** `libofcongress-mcp-server` not `loc-mcp-server` ("loc" reads as lines-of-code or location). `federal-reserve-mcp-server` not `fred-mcp-server` ("fred" reads as a person's name).
 - **Add a descriptive suffix when the base name is a non-obvious acronym.** Pattern: `{acronym}-{domain}-mcp-server` — e.g., `eia-energy-mcp-server`, `bls-labor-mcp-server`, `nhtsa-vehicle-safety-mcp-server`. Skip when the name is already self-descriptive (`earthquake-mcp-server`, `wikidata-mcp-server`).
-- **The name becomes the tool prefix.** Every tool is `{prefix}_{verb}_{noun}`, so the server name shows up in every tool call an agent sees. A descriptive name gives agents domain context without reading the server's instructions.
+- **Don't overclaim scope.** A name asserts breadth on two independent axes, and must be honest on both. *Source breadth:* is this a first-party wrapper around one provider's API, or genuine aggregation across several independent sources behind one normalized surface? *Domain or jurisdiction breadth:* one, or many? A generic name claims breadth on whichever axis it leaves unqualified. `threat-intel-mcp-server` earns its generic name by aggregating independent sources for one workflow; that same name over a single vendor's API would be a defect — name that for the vendor. When the real scope is one jurisdiction, put it in the name (`uk-legislation-mcp-server`, `statistics-canada-mcp-server`) rather than letting a generic noun imply worldwide coverage a user will only discover is absent after installing. Note that aggregating several bodies *within* one jurisdiction earns a cross-source name, not a cross-jurisdiction one.
+- **Aggregation is a claim about entities, not endpoints.** One provider publishing five APIs is still first-party. Wrapping several endpoints of the same upstream does not make a server an aggregator and does not earn a generic name.
+- **The tool prefix derives from the name but is a separate identifier.** Every tool is `{prefix}_{verb}_{noun}`, so the prefix shows up in every tool call an agent sees, and a descriptive one gives agents domain context without reading the server's instructions. The prefix names the *source*, dropping the descriptive qualifier the repo name carries for human browsing: `eia-energy-mcp-server` → `eia_`, `nhtsa-vehicle-safety-mcp-server` → `nhtsa_`. Because it names the source rather than the repo, the two can diverge — a later repo rename does not have to move the prefix, and usually shouldn't: renaming an advertised tool surface is a breaking change for every existing client, while renaming a package is not.
 
 ## Steps
 
