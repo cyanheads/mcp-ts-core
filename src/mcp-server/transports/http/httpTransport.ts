@@ -12,7 +12,15 @@
 
 import { StreamableHTTPTransport } from '@hono/mcp';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
-import type { ClientCapabilities } from '@modelcontextprotocol/sdk/types.js';
+import {
+  type ClientCapabilities,
+  isJSONRPCErrorResponse,
+  isJSONRPCRequest,
+  isJSONRPCResultResponse,
+  type JSONRPCMessage,
+  type JSONRPCResponse,
+  type RequestId,
+} from '@modelcontextprotocol/sdk/types.js';
 import { Hono } from 'hono';
 import { cors } from 'hono/cors';
 import { config } from '@/config/index.js';
@@ -28,7 +36,11 @@ import { protectedResourceMetadataHandler } from '@/mcp-server/transports/http/p
 import { createRobotsTxtHandler } from '@/mcp-server/transports/http/robotsTxt.js';
 import { createServerCardHandler } from '@/mcp-server/transports/http/serverCard.js';
 import { generateSecureSessionId } from '@/mcp-server/transports/http/sessionIdUtils.js';
-import { type SessionIdentity, SessionStore } from '@/mcp-server/transports/http/sessionStore.js';
+import {
+  type ServerRequestRegistration,
+  type SessionIdentity,
+  SessionStore,
+} from '@/mcp-server/transports/http/sessionStore.js';
 import { logger } from '@/utils/internal/logger.js';
 import { type RequestContext, requestContextService } from '@/utils/internal/requestContext.js';
 import { createCounter, createObservableGauge } from '@/utils/telemetry/metrics.js';
@@ -38,10 +50,60 @@ import { createCounter, createObservableGauge } from '@/utils/telemetry/metrics.
  */
 class McpSessionTransport extends StreamableHTTPTransport {
   public sessionId: string;
+  private readonly pendingServerRequests = new Set<ServerRequestRegistration>();
 
-  constructor(sessionId: string) {
+  constructor(
+    sessionId: string,
+    private readonly sessionStore: SessionStore | null,
+  ) {
     super();
     this.sessionId = sessionId;
+  }
+
+  /**
+   * Rewrites outbound server-request IDs into the durable session namespace.
+   * Every per-request SDK Server starts its request counter at zero; without
+   * this bridge concurrent elicitations collide and a response POST reaches a
+   * different Server instance than the one holding the response handler.
+   */
+  public override async send(
+    message: JSONRPCMessage,
+    options?: { relatedRequestId?: RequestId },
+  ): Promise<void> {
+    if (!isJSONRPCRequest(message) || !this.sessionStore) {
+      await super.send(message, options);
+      return;
+    }
+
+    const registration = this.sessionStore.registerServerRequest(
+      this.sessionId,
+      (response: JSONRPCResponse) => {
+        this.settleServerRequest(registration);
+        this.onmessage?.({ ...response, id: message.id });
+      },
+    );
+    if (!registration) throw new Error('Cannot send a server request after its session ended.');
+
+    this.pendingServerRequests.add(registration);
+    try {
+      await super.send({ ...message, id: registration.requestId }, options);
+    } catch (error) {
+      this.settleServerRequest(registration);
+      throw error;
+    }
+  }
+
+  public override async close(): Promise<void> {
+    for (const registration of this.pendingServerRequests) registration.unregister();
+    this.pendingServerRequests.clear();
+    await super.close();
+  }
+
+  /** Drops a route from both the session registry and this transport's pending set. */
+  private settleServerRequest(registration: ServerRequestRegistration | undefined): void {
+    if (!registration) return;
+    registration.unregister();
+    this.pendingServerRequests.delete(registration);
   }
 }
 
@@ -651,10 +713,12 @@ export async function createHttpApp<TBindings extends object = HonoNodeBindings>
     // Parse once for the small amount of protocol state the per-request SDK
     // server cannot retain itself. Hono caches body parsing, so the transport
     // still receives the same body below. Malformed JSON remains the SDK's job.
+    let parsedRpcBody: unknown;
     let rpcMessages: Record<string, unknown>[] = [];
     if (c.req.method === 'POST') {
       try {
         const rawBody: unknown = await c.req.json();
+        parsedRpcBody = rawBody;
         const messages = Array.isArray(rawBody) ? rawBody : [rawBody];
         rpcMessages = messages.filter(
           (message): message is Record<string, unknown> =>
@@ -715,6 +779,24 @@ export async function createHttpApp<TBindings extends object = HonoNodeBindings>
 
     const sessionId = providedSessionId ?? generateSecureSessionId();
 
+    // A response to a server-initiated request arrives on a new POST and would
+    // otherwise be delivered to a fresh SDK Server with no matching response
+    // handler. Route recognized responses through the durable session registry
+    // and strip them before normal SDK dispatch. An emptied batch still goes to
+    // the transport rather than short-circuiting here: it owns the Accept and
+    // Content-Type checks, and returns the same 202 every other
+    // response/notification POST does.
+    let transportBody = parsedRpcBody;
+    if (sessionStore && parsedRpcBody !== undefined) {
+      const messages = Array.isArray(parsedRpcBody) ? parsedRpcBody : [parsedRpcBody];
+      const unrouted = messages.filter((message) => {
+        if (!isJSONRPCResultResponse(message) && !isJSONRPCErrorResponse(message)) return true;
+        return !sessionStore.routeServerResponse(sessionId, message);
+      });
+
+      if (unrouted.length !== messages.length) transportBody = unrouted;
+    }
+
     // The cancellation notification is handled by a different SDK Server
     // instance than the original request. Mirror it into the durable session
     // registry before passing it to the SDK so the original handler's merged
@@ -734,7 +816,7 @@ export async function createHttpApp<TBindings extends object = HonoNodeBindings>
       }
     }
 
-    const transport = new McpSessionTransport(sessionId);
+    const transport = new McpSessionTransport(sessionId, sessionStore);
     trackPerRequestInstance(transport, 'transport');
     let server: McpServer | undefined;
     let closePromise: Promise<void> | undefined;
@@ -757,7 +839,7 @@ export async function createHttpApp<TBindings extends object = HonoNodeBindings>
       server = await serverFactory(sessionStore?.createProtocolSessionHooks(sessionId));
       trackPerRequestInstance(server, 'server');
       await server.connect(transport);
-      const response = await transport.handleRequest(c);
+      const response = await transport.handleRequest(c, transportBody);
 
       if (response) {
         // Only register the session in the store AFTER a successful response.

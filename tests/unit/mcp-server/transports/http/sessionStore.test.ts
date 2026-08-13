@@ -2,6 +2,8 @@
  * @fileoverview Tests for SessionStore tenant isolation and security.
  * @module tests/mcp-server/transports/http/sessionStore.test
  */
+
+import { ErrorCode } from '@modelcontextprotocol/sdk/types.js';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { type SessionIdentity, SessionStore } from '@/mcp-server/transports/http/sessionStore.js';
@@ -338,6 +340,65 @@ describe('SessionStore - Security & Tenant Isolation', () => {
       expect(requestA.signal.aborted).toBe(true);
       expect(requestB.signal.aborted).toBe(false);
       expect(store.cancelRequest(SESSION_2, 'shared-id')).toBe(false);
+    });
+
+    it('routes server responses once by session and unique wire ID', () => {
+      store.getOrCreate(SESSION_A);
+      store.getOrCreate(SESSION_B);
+      const deliveredA: unknown[] = [];
+      const deliveredB: unknown[] = [];
+      const firstA = store.registerServerRequest(SESSION_A, (response) => {
+        deliveredA.push(response);
+      })!;
+      const secondA = store.registerServerRequest(SESSION_A, (response) => {
+        deliveredA.push(response);
+      })!;
+      const requestB = store.registerServerRequest(SESSION_B, (response) => {
+        deliveredB.push(response);
+      })!;
+
+      expect(new Set([firstA.requestId, secondA.requestId, requestB.requestId])).toHaveLength(3);
+      const response = {
+        jsonrpc: '2.0' as const,
+        id: firstA.requestId,
+        result: { action: 'accept' },
+      };
+      expect(store.routeServerResponse(SESSION_B, response)).toBe(false);
+      expect(store.routeServerResponse(SESSION_A, response)).toBe(true);
+      expect(store.routeServerResponse(SESSION_A, response)).toBe(false);
+      expect(deliveredA).toEqual([response]);
+      expect(deliveredB).toEqual([]);
+
+      secondA.unregister();
+      expect(
+        store.routeServerResponse(SESSION_A, {
+          jsonrpc: '2.0',
+          id: secondA.requestId,
+          result: { action: 'accept' },
+        }),
+      ).toBe(false);
+    });
+
+    it('rejects pending server requests when the session terminates', () => {
+      store.getOrCreate(SESSION_1);
+      const delivered: unknown[] = [];
+      const registration = store.registerServerRequest(SESSION_1, (response) => {
+        delivered.push(response);
+      })!;
+
+      store.terminate(SESSION_1);
+
+      expect(delivered).toEqual([
+        {
+          jsonrpc: '2.0',
+          id: registration.requestId,
+          error: {
+            code: ErrorCode.ConnectionClosed,
+            message: 'MCP session ended',
+          },
+        },
+      ]);
+      expect(() => registration.unregister()).not.toThrow();
     });
 
     it('aborts every in-flight request when the session terminates', () => {

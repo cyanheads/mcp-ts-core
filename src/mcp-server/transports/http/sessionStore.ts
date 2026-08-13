@@ -5,7 +5,12 @@
  * @module src/mcp-server/transports/http/sessionStore
  */
 
-import type { ClientCapabilities, RequestId } from '@modelcontextprotocol/sdk/types.js';
+import {
+  type ClientCapabilities,
+  ErrorCode,
+  type JSONRPCResponse,
+  type RequestId,
+} from '@modelcontextprotocol/sdk/types.js';
 import type { ProtocolSessionHooks } from '@/mcp-server/protocolSession.js';
 import { validateSessionIdFormat } from '@/mcp-server/transports/http/sessionIdUtils.js';
 import { invalidParams, serviceUnavailable } from '@/types-global/errors.js';
@@ -62,10 +67,24 @@ interface Session {
   identityBound: boolean;
   inFlightRequests: Map<string, Set<AbortController>>;
   lastAccessedAt: Date;
+  serverRequests: Map<string, ServerRequestRoute>;
   subject?: string;
 
   // Identity binding for security
   tenantId?: string;
+}
+
+interface ServerRequestRoute {
+  deliver: (response: JSONRPCResponse) => void;
+  requestId: string;
+}
+
+/** Registration for one server-to-client request awaiting a later HTTP POST. */
+export interface ServerRequestRegistration {
+  /** Session-unique request ID sent to the client. */
+  requestId: string;
+  /** Removes the route without delivering a response. Safe to call repeatedly. */
+  unregister: () => void;
 }
 
 /**
@@ -95,7 +114,7 @@ export class SessionStore {
    */
   destroy(): void {
     clearInterval(this.cleanupInterval);
-    for (const session of this.sessions.values()) this.abortSessionRequests(session);
+    for (const session of this.sessions.values()) this.endSessionRequests(session);
     this.sessions.clear();
   }
 
@@ -149,6 +168,7 @@ export class SessionStore {
         lastAccessedAt: now,
         identityBound: hasIdentity,
         inFlightRequests: new Map(),
+        serverRequests: new Map(),
       };
 
       // Only set identity fields if they have actual values (not undefined)
@@ -224,6 +244,49 @@ export class SessionStore {
     return true;
   }
 
+  /**
+   * Registers a server-to-client request whose response will arrive on a later
+   * HTTP POST handled by a different SDK Server instance.
+   *
+   * Each per-request SDK Server starts its outbound request counter at zero, so
+   * the wire ID is replaced with a session-unique value. The caller restores
+   * the original ID before delivering the response to the originating Server.
+   */
+  registerServerRequest(
+    sessionId: string,
+    deliver: (response: JSONRPCResponse) => void,
+  ): ServerRequestRegistration | undefined {
+    const session = this.sessions.get(sessionId);
+    if (!session) return;
+
+    const requestId = `server-${crypto.randomUUID()}`;
+    const key = this.requestKey(requestId);
+    const route: ServerRequestRoute = { requestId, deliver };
+    session.serverRequests.set(key, route);
+
+    let registered = true;
+    return {
+      requestId,
+      unregister: () => {
+        if (!registered) return;
+        registered = false;
+        if (session.serverRequests.get(key) === route) session.serverRequests.delete(key);
+      },
+    };
+  }
+
+  /** Routes one client response back to the per-request Server that emitted it. */
+  routeServerResponse(sessionId: string, response: JSONRPCResponse): boolean {
+    if (response.id === undefined) return false;
+    const routes = this.sessions.get(sessionId)?.serverRequests;
+    const route = routes?.get(this.requestKey(response.id));
+    if (!routes || !route) return false;
+
+    routes.delete(this.requestKey(response.id));
+    route.deliver(response);
+    return true;
+  }
+
   private requestKey(requestId: RequestId): string {
     return `${typeof requestId}:${String(requestId)}`;
   }
@@ -252,12 +315,25 @@ export class SessionStore {
     };
   }
 
-  private abortSessionRequests(session: Session): void {
+  private endSessionRequests(session: Session): void {
     const reason = new DOMException('MCP session ended', 'AbortError');
     for (const controllers of session.inFlightRequests.values()) {
       for (const controller of controllers) controller.abort(reason);
     }
     session.inFlightRequests.clear();
+
+    const routes = [...session.serverRequests.values()];
+    session.serverRequests.clear();
+    for (const route of routes) {
+      route.deliver({
+        jsonrpc: '2.0',
+        id: route.requestId,
+        error: {
+          code: ErrorCode.ConnectionClosed,
+          message: 'MCP session ended',
+        },
+      });
+    }
   }
 
   /**
@@ -348,7 +424,7 @@ export class SessionStore {
   terminate(sessionId: string): void {
     const session = this.sessions.get(sessionId);
     if (session) {
-      this.abortSessionRequests(session);
+      this.endSessionRequests(session);
       this.sessions.delete(sessionId);
       const metrics = getSessionMetrics();
       metrics.sessionEventCounter.add(1, { [ATTR_MCP_SESSION_EVENT]: 'terminated' });
@@ -371,7 +447,7 @@ export class SessionStore {
     const metrics = getSessionMetrics();
     for (const [id, session] of this.sessions.entries()) {
       if (now - session.lastAccessedAt.getTime() > this.staleTimeout) {
-        this.abortSessionRequests(session);
+        this.endSessionRequests(session);
         metrics.sessionDuration.record((now - session.createdAt.getTime()) / 1000);
         this.sessions.delete(id);
         cleanedCount++;
