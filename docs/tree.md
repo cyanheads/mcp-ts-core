@@ -1,6 +1,6 @@
 # mcp-ts-core - Directory Structure
 
-Generated on: 2026-08-10 10:43:17
+Generated on: 2026-08-12 12:36:07
 
 ```text
 mcp-ts-core/
@@ -9,6 +9,8 @@ mcp-ts-core/
 │   │   ├── bug_report.yml
 │   │   ├── config.yml
 │   │   └── feature_request.yml
+│   ├── CODE_OF_CONDUCT.md
+│   ├── CONTRIBUTING.md
 │   ├── FUNDING.yml
 │   └── SECURITY.md
 ├── .husky/
@@ -46,39 +48,81 @@ mcp-ts-core/
 │   │   │       ├── pagination.md
 │   │   │       ├── ping.md
 │   │   │       └── progress.md
-│   │   └── 2025-11-25/
+│   │   ├── 2025-11-25/
+│   │   │   ├── client/
+│   │   │   │   ├── elicitation.md
+│   │   │   │   ├── roots.md
+│   │   │   │   └── sampling.md
+│   │   │   ├── core/
+│   │   │   │   ├── authorization.md
+│   │   │   │   ├── lifecycle.md
+│   │   │   │   ├── overview.md
+│   │   │   │   └── transports.md
+│   │   │   ├── extensions/
+│   │   │   │   ├── apps-build.md
+│   │   │   │   ├── apps-overview.md
+│   │   │   │   ├── auth-enterprise-managed.md
+│   │   │   │   ├── auth-oauth-client-credentials.md
+│   │   │   │   ├── auth-overview.md
+│   │   │   │   ├── client-matrix.md
+│   │   │   │   └── overview.md
+│   │   │   ├── server/
+│   │   │   │   ├── overview.md
+│   │   │   │   ├── prompts.md
+│   │   │   │   ├── resources.md
+│   │   │   │   ├── tools.md
+│   │   │   │   └── utilities.md
+│   │   │   ├── utils/
+│   │   │   │   ├── cancellation.md
+│   │   │   │   ├── ping.md
+│   │   │   │   ├── progress.md
+│   │   │   │   └── tasks.md
+│   │   │   ├── architecture.md
+│   │   │   ├── key-changes.md
+│   │   │   ├── schema-reference.md
+│   │   │   └── specification.md
+│   │   └── 2026-07-28/
+│   │       ├── architecture/
+│   │       │   └── index.md
+│   │       ├── basic/
+│   │       │   ├── authorization/
+│   │       │   │   ├── authorization-server-discovery.md
+│   │       │   │   ├── client-registration.md
+│   │       │   │   ├── index.md
+│   │       │   │   └── security-considerations.md
+│   │       │   ├── patterns/
+│   │       │   │   ├── cancellation.md
+│   │       │   │   ├── index.md
+│   │       │   │   ├── mrtr.md
+│   │       │   │   ├── progress.md
+│   │       │   │   └── subscriptions.md
+│   │       │   ├── transports/
+│   │       │   │   ├── index.md
+│   │       │   │   ├── stdio.md
+│   │       │   │   └── streamable-http.md
+│   │       │   ├── index.md
+│   │       │   └── versioning.md
 │   │       ├── client/
 │   │       │   ├── elicitation.md
 │   │       │   ├── roots.md
 │   │       │   └── sampling.md
-│   │       ├── core/
-│   │       │   ├── authorization.md
-│   │       │   ├── lifecycle.md
-│   │       │   ├── overview.md
-│   │       │   └── transports.md
-│   │       ├── extensions/
-│   │       │   ├── apps-build.md
-│   │       │   ├── apps-overview.md
-│   │       │   ├── auth-enterprise-managed.md
-│   │       │   ├── auth-oauth-client-credentials.md
-│   │       │   ├── auth-overview.md
-│   │       │   ├── client-matrix.md
-│   │       │   └── overview.md
 │   │       ├── server/
-│   │       │   ├── overview.md
+│   │       │   ├── utilities/
+│   │       │   │   ├── caching.md
+│   │       │   │   ├── completion.md
+│   │       │   │   ├── logging.md
+│   │       │   │   └── pagination.md
+│   │       │   ├── discover.md
+│   │       │   ├── index.md
 │   │       │   ├── prompts.md
+│   │       │   ├── resource-picker.png
 │   │       │   ├── resources.md
-│   │       │   ├── tools.md
-│   │       │   └── utilities.md
-│   │       ├── utils/
-│   │       │   ├── cancellation.md
-│   │       │   ├── ping.md
-│   │       │   ├── progress.md
-│   │       │   └── tasks.md
-│   │       ├── architecture.md
-│   │       ├── key-changes.md
-│   │       ├── schema-reference.md
-│   │       └── specification.md
+│   │       │   ├── slash-command.png
+│   │       │   └── tools.md
+│   │       ├── changelog.md
+│   │       ├── deprecated.md
+│   │       ├── index.md
+│   │       └── schema.md
 │   └── telemetry/
 │       ├── dashboards.md
 │       ├── mcp-ts-core-dashboard.json
@@ -475,10 +519,13 @@ mcp-ts-core/
 │   │   ├── mcp.json
 │   │   └── plugin.json
 │   ├── .github/
-│   │   └── ISSUE_TEMPLATE/
-│   │       ├── bug_report.yml
-│   │       ├── config.yml
-│   │       └── feature_request.yml
+│   │   ├── ISSUE_TEMPLATE/
+│   │   │   ├── bug_report.yml
+│   │   │   ├── config.yml
+│   │   │   └── feature_request.yml
+│   │   ├── CODE_OF_CONDUCT.md
+│   │   ├── CONTRIBUTING.md
+│   │   └── SECURITY.md
 │   ├── .vscode/
 │   │   ├── extensions.json
 │   │   └── settings.json
@@ -535,6 +582,7 @@ mcp-ts-core/
 │   │   └── storage-provider.ts
 │   ├── fixtures/
 │   │   ├── auth-scoped-server.js
+│   │   ├── http-protocol-session-server.js
 │   │   ├── mcp-app-server.js
 │   │   ├── task-protocol-server.js
 │   │   └── worker-runtime.fixture.ts
@@ -562,6 +610,7 @@ mcp-ts-core/
 │   │   ├── http-auth-sessions.test.ts
 │   │   ├── http-auth.test.ts
 │   │   ├── http-authz.e2e.test.ts
+│   │   ├── http-protocol-session.int.test.ts
 │   │   ├── http-sessions.test.ts
 │   │   ├── http-sse-abort.int.test.ts
 │   │   ├── http-transport.int.test.ts
@@ -693,6 +742,7 @@ mcp-ts-core/
 │   │   │   │   └── manager.test.ts
 │   │   │   └── server.test.ts
 │   │   ├── packaging/
+│   │   │   ├── dockerfile.test.ts
 │   │   │   ├── export-map.test.ts
 │   │   │   └── optional-peer-deps.test.ts
 │   │   ├── public-api/

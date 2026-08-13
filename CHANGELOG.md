@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.11.5](changelog/0.11.x/0.11.5.md) — 2026-08-12
+
+Server-initiated requests survive the stateful HTTP request boundary, so ctx.elicit completes over Streamable HTTP instead of stranding the handler; init scaffolds the .github community-health files.
+
 ## [0.11.4](changelog/0.11.x/0.11.4.md) — 2026-08-10
 
 The definition linter reports gaps it previously passed over — an unsatisfiable emitted schema, four format-parity false negatives, and cap names it never matched — so a server carrying one goes red on its next lint:mcp; enrichment trailers no longer fold the next field into a notice, and the scaffold typechecks tests/.
