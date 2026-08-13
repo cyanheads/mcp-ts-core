@@ -131,6 +131,29 @@ describe('lintResourceDefinition', () => {
       ).toContain('schema-serializable');
     });
 
+    it('errors when emitted params contain an unsatisfiable field', () => {
+      const diagnostics = lintResourceDefinition({
+        uriTemplate: 'widget://{priority}',
+        name: 'impossible_params',
+        description: 'Carries impossible resource parameters.',
+        handler,
+        params: z.object({
+          priority: z.enum([1, 2, 3] as unknown as [string, ...string[]]).describe('Priority'),
+        }),
+      });
+
+      expect(diagnostics).toContainEqual(
+        expect.objectContaining({
+          rule: 'schema-unsatisfiable',
+          definitionType: 'resource',
+          definitionName: 'impossible_params',
+        }),
+      );
+      expect(
+        diagnostics.find((diagnostic) => diagnostic.rule === 'schema-unsatisfiable')?.message,
+      ).toContain('params.priority');
+    });
+
     it('errors when a uriTemplate variable has no matching params key', () => {
       expect(
         rules({
@@ -185,6 +208,27 @@ describe('lintResourceDefinition', () => {
           output: z.object({ when: z.date().describe('when') }),
         }),
       ).toContain('schema-serializable');
+    });
+
+    it('errors when emitted output contains an unsatisfiable field', () => {
+      const diagnostics = lintResourceDefinition({
+        uriTemplate: 'widget://all',
+        name: 'impossible_output',
+        description: 'Carries an impossible resource output.',
+        handler,
+        output: z.object({ nothing: z.never().describe('Impossible value') }),
+      });
+
+      expect(diagnostics).toContainEqual(
+        expect.objectContaining({
+          rule: 'schema-unsatisfiable',
+          definitionType: 'resource',
+          definitionName: 'impossible_output',
+        }),
+      );
+      expect(
+        diagnostics.find((diagnostic) => diagnostic.rule === 'schema-unsatisfiable')?.message,
+      ).toContain('output.nothing');
     });
 
     it('validates a declared error contract (non-array is rejected)', () => {

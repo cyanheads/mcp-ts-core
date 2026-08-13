@@ -132,4 +132,23 @@ describe('createMockContext helpers', () => {
     expect(withSession.sessionId).toBe('sess-xyz');
     expect(withoutSession.sessionId).toBeUndefined();
   });
+
+  it('attaches a safe URL-mode fallback to a form elicitation mock', async () => {
+    const formCalls: string[] = [];
+    const ctx = createMockContext({
+      elicit: async (message) => {
+        formCalls.push(message);
+        return { action: 'accept', content: { value: 'form-result' } };
+      },
+    });
+
+    await expect(ctx.elicit?.('Choose a value', z.object({ value: z.string() }))).resolves.toEqual({
+      action: 'accept',
+      content: { value: 'form-result' },
+    });
+    await expect(ctx.elicit?.url('Authorize', 'https://example.test/authorize')).resolves.toEqual({
+      action: 'cancel',
+    });
+    expect(formCalls).toEqual(['Choose a value']);
+  });
 });

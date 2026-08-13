@@ -102,6 +102,28 @@ describe('lintPromptDefinition', () => {
         }),
       ).toContain('schema-serializable');
     });
+
+    it('errors when emitted args contain an unsatisfiable field', () => {
+      const diagnostics = lintPromptDefinition({
+        name: 'impossible_prompt',
+        description: 'Carries an impossible argument schema.',
+        args: z.object({
+          priority: z.enum([1, 2, 3] as unknown as [string, ...string[]]).describe('Priority'),
+        }),
+        generate,
+      });
+
+      expect(diagnostics).toContainEqual(
+        expect.objectContaining({
+          rule: 'schema-unsatisfiable',
+          definitionType: 'prompt',
+          definitionName: 'impossible_prompt',
+        }),
+      );
+      expect(
+        diagnostics.find((diagnostic) => diagnostic.rule === 'schema-unsatisfiable')?.message,
+      ).toContain('args.priority');
+    });
   });
 
   describe('completable() compatibility', () => {
