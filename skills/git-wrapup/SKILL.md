@@ -4,7 +4,7 @@ description: >
   Land working-tree changes as logical commits — the work grouped by concern, topped by a release commit (version bump, changelog, regenerated artifacts) and an annotated tag. Verify, commit, tag. Stops at "committed and tagged locally" — no push, no publish. The release-and-publish skill picks up from here. Distilled from the git_wrapup_instructions protocol.
 metadata:
   author: cyanheads
-  version: "1.9"
+  version: "1.10"
   audience: external
   type: workflow
 ---
@@ -95,13 +95,13 @@ security: false    # true ONLY for a security fix in this server's own source �
 ---
 ```
 
-**Write `summary:` LAST, derived from the body you just wrote — never independently.** It is the line most readers see, and it propagates unedited to three further surfaces: the `CHANGELOG.md` rollup, the GitHub Release body, and the annotated tag (which cannot be edited once pushed). Written from recollection rather than from the body, it reliably names a mechanism that was never built or a target that was never fixed, while the body beside it stays correct. After writing it, re-read the body and confirm every claim in the summary appears there.
+**Write `summary:` LAST, derived from the body you just wrote — never independently.** It is the line most readers see, and it propagates unedited to three further surfaces: the `CHANGELOG.md` rollup, the GitHub Release body, and the annotated tag (which cannot be edited once pushed). Written from recollection rather than from the body, it reliably names a mechanism that was never built or a target that was never fixed, while the body beside it stays correct. After writing it, re-read the body and confirm every claim in the summary appears there. Derived-from-the-body means the facts come from the body — not that every body item appears: the summary is the tag's theme line, and comma-stitching every change into an inventory near the 350-char cap is the failure mode.
 
 **`security:` is a source-code signal — not a dependency-CVE signal.** Set `security: true` only when this release fixes a vulnerability or adds hardening in code *this server ships*. A dependency or transitive CVE bump — even one that clears an advisory (`bun audit` going 1 → 0) — is routine maintenance: record it under `## Dependencies` with the advisory ID and leave the flag `false`. The `🛡️ Security` badge answers "does the server itself have a vuln"; a dep bump must not trip it.
 
 **Body:** Section order follows Keep a Changelog — Added / Changed / Deprecated / Removed / Fixed / Security. Include only sections with entries. Delete empty sections.
 
-**Tone:** Terse, fact-dense. Lead each bullet with the symbol or concept in **bold**. One sentence per bullet by default. See the authoring guide in `changelog/template.md` for full conventions.
+**Tone:** Terse, fact-dense. Bullet = **symbol** + what changed + at most one consumer-facing caveat; one sentence by default, two max — a bullet past ~40 words or three sentences is wrong. The linked issue carries the why and the commit diff the how; the changelog names what changed and what a consumer does about it. Cut: history/justification narration, design-rationale defense, "X unchanged" clauses (short parenthetical only where a misread is likely), edge-case inventories. **Verified ≠ included** — the diff-is-source-of-truth rule bounds the truth of what you write, never the amount. Model length on `changelog/template.md`'s authoring guide, never on the previous entry (entries modeled on entries compound). `agent-notes` carries adoption steps only, never a second rendering of the body; a consequence shared by many bullets is stated once, not per bullet. Full conventions: the authoring guide in `changelog/template.md`.
 
 ### 5. Regenerate derived artifacts
 
