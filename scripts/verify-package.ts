@@ -579,6 +579,8 @@ async function verifyCli(
   consumerDir: string,
   installedPackageDir: string,
   pkg: PackageJson,
+  tarball: string,
+  bunBin: string,
   nodeBin: string,
 ): Promise<string> {
   const binName = Object.keys(pkg.bin ?? {})[0];
@@ -603,6 +605,7 @@ async function verifyCli(
   const projectDir = join(consumerDir, projectName);
   const scaffoldPackage = JSON.parse(await readFile(join(projectDir, 'package.json'), 'utf8')) as {
     dependencies?: Record<string, string>;
+    devDependencies?: Record<string, string>;
     name?: string;
   };
   if (scaffoldPackage.name !== projectName) {
@@ -611,8 +614,52 @@ async function verifyCli(
   if (scaffoldPackage.dependencies?.[pkg.name] !== `^${pkg.version}`) {
     throw new Error(`CLI scaffold did not substitute framework version ${pkg.version}.`);
   }
+  if (scaffoldPackage.devDependencies?.['fast-check'] !== dependencyVersion(pkg, 'fast-check')) {
+    throw new Error('CLI scaffold did not declare fast-check as a direct devDependency.');
+  }
   await access(join(projectDir, 'src', 'index.ts'), constants.R_OK);
   await access(join(projectDir, 'scripts', 'build.ts'), constants.R_OK);
+
+  // Preserve the generated manifest long enough to assert its published
+  // dependency contract above, then point only this temporary verifier copy at
+  // the tarball. An offline install gives the scaffold its own dependency tree:
+  // undeclared template imports cannot resolve through the repository or the
+  // parent consumer, and the registry cannot mask a broken packed artifact.
+  await writeFile(
+    join(projectDir, 'package.json'),
+    `${JSON.stringify(
+      {
+        ...scaffoldPackage,
+        dependencies: {
+          ...scaffoldPackage.dependencies,
+          [pkg.name]: `file:${tarball}`,
+        },
+      },
+      null,
+      2,
+    )}\n`,
+  );
+  const install = await run(
+    bunBin,
+    ['install', '--offline', '--ignore-scripts', '--backend=copyfile', '--no-progress'],
+    projectDir,
+  );
+  assertSuccess(install, 'installed CLI scaffold offline install');
+
+  const tsc = join(projectDir, 'node_modules', 'typescript', 'bin', 'tsc');
+  const typecheck = await run(tsc, ['--project', 'tsconfig.json', '--pretty', 'false'], projectDir);
+  assertSuccess(typecheck, 'installed CLI scaffold typecheck (src + tests)');
+
+  const build = await run(
+    tsc,
+    ['--project', 'tsconfig.build.json', '--pretty', 'false'],
+    projectDir,
+  );
+  assertSuccess(build, 'installed CLI scaffold build config');
+
+  const vitest = join(projectDir, 'node_modules', 'vitest', 'vitest.mjs');
+  const tests = await run(bunBin, [vitest, 'run', '--config', 'vitest.config.ts'], projectDir);
+  assertSuccess(tests, 'installed CLI scaffold test suites');
   return projectDir;
 }
 
@@ -708,7 +755,14 @@ export async function verifyPublishedPackage(): Promise<PackageVerificationRepor
 
     await verifyRuntimeImports(consumerDir, installedPkg, nodeBin, bunBin);
     await verifyTypes(consumerDir, installedPkg);
-    const cliProject = await verifyCli(consumerDir, installedPackageDir, installedPkg, nodeBin);
+    const cliProject = await verifyCli(
+      consumerDir,
+      installedPackageDir,
+      installedPkg,
+      tarball,
+      bunBin,
+      nodeBin,
+    );
 
     return {
       cliProject,
@@ -725,7 +779,7 @@ if (resolve(process.argv[1] ?? '') === fileURLToPath(import.meta.url)) {
   verifyPublishedPackage()
     .then((report) => {
       console.log(
-        `Package verification passed: ${report.runtimeSubpaths.length} runtime subpaths, ${report.packEntries} packed entries, CLI scaffolded.`,
+        `Package verification passed: ${report.runtimeSubpaths.length} runtime subpaths, ${report.packEntries} packed entries, CLI scaffolded/typechecked/built/tested.`,
       );
     })
     .catch((error: unknown) => {
