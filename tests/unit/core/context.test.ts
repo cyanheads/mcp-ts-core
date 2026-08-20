@@ -1032,3 +1032,32 @@ describe('ContextLogger — wire sink (ctx.mcpReq.log mirror)', () => {
     expect(errorSpy).toHaveBeenCalledWith('no wire either', expect.anything());
   });
 });
+
+describe('createContext inherits the RequestContext contract', () => {
+  it('carries operation and extra through to the handler ctx', () => {
+    // `Context extends RequestContext`, and the #110 contract is that a handler
+    // ctx goes straight into `storage.get(key, ctx)` / `logger.info(msg, ctx)`.
+    // Dropping these loses the operation and every `additionalContext` field
+    // the request was created with.
+    const ctx = createContext(
+      buildDeps({
+        appContext: buildAppContext({
+          operation: 'HandleToolRequest',
+          extra: { toolName: 'echo_message' },
+        }),
+      }),
+    );
+
+    expect(ctx.operation).toBe('HandleToolRequest');
+    expect(ctx.extra).toEqual({ toolName: 'echo_message' });
+  });
+
+  it('is assignable to RequestContext with those fields intact', () => {
+    const ctx = createContext(
+      buildDeps({ appContext: buildAppContext({ operation: 'HandleResourceRead' }) }),
+    );
+    const asRequestContext: RequestContext = ctx;
+
+    expect(asRequestContext.operation).toBe('HandleResourceRead');
+  });
+});

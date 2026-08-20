@@ -804,6 +804,12 @@ export function createContext(deps: ContextDeps): Context {
   const ctx: Context = {
     requestId: effectiveContext.requestId,
     timestamp: effectiveContext.timestamp,
+    // Inherited from RequestContext: a handler `ctx` is passed straight into
+    // `storage.get(key, ctx)` and `logger.info(msg, ctx)`, so dropping these
+    // silently loses the operation and every `additionalContext` correlation
+    // field the request was created with.
+    operation: effectiveContext.operation,
+    extra: effectiveContext.extra,
     log,
     state,
     signal,
