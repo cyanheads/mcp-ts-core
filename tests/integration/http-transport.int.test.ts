@@ -49,6 +49,22 @@ vi.mock('@/utils/internal/logger.js', () => ({
 }));
 
 vi.mock('@/utils/internal/requestContext.js', () => ({
+  toCanonicalContext: (context: Record<string, unknown>) =>
+    Object.fromEntries(
+      [
+        'auth',
+        'extra',
+        'operation',
+        'requestId',
+        'sessionId',
+        'spanId',
+        'tenantId',
+        'timestamp',
+        'traceId',
+      ]
+        .filter((k) => context[k] !== undefined)
+        .map((k) => [k, context[k]]),
+    ),
   requestContextService: {
     createRequestContext: vi.fn(() => ({
       requestId: 'test-req-id',

@@ -318,8 +318,10 @@ describe('Logger Integration (Pino)', () => {
           const hit = entries.find((e) => e.testId === 'fetch-ctx-like');
           expect(hit).toBeDefined();
           expect(hit.signal).toBeUndefined();
-          expect(hit.log).toEqual({});
-          expect(hit.state).toEqual({});
+          // Dropped outright now, not emptied: the logger projects a context
+          // down to the declared RequestContext fields before writing.
+          expect(hit.log).toBeUndefined();
+          expect(hit.state).toBeUndefined();
           expect(hit.requestId).toBe('ftx-1');
         },
         { timeout: 2000, interval: 50 },
@@ -364,7 +366,7 @@ describe('Logger Integration (Pino)', () => {
           const hit = entries.find((e) => e.testId === 'retry-ctx-like');
           expect(hit).toBeDefined();
           expect(hit.signal).toBeUndefined();
-          expect(hit.log).toEqual({});
+          expect(hit.log).toBeUndefined();
           expect(hit.operation).toBe('retry-regression');
         },
         { timeout: 2000, interval: 50 },
@@ -377,10 +379,13 @@ describe('Logger Integration (Pino)', () => {
       logger.info('Redaction with Context-like bindings', {
         requestId: 'redact-1',
         timestamp: new Date().toISOString(),
-        extra: { testId: 'redact-with-sanitize' },
+        extra: {
+          testId: 'redact-with-sanitize',
+          token: 'super-secret-token',
+          nested: { apiKey: 'sk-abc123' },
+        },
         signal: new AbortController().signal,
-        token: 'super-secret-token',
-        nested: { apiKey: 'sk-abc123' },
+        droppedTopLevelKey: 'not a RequestContext field',
       } as any);
 
       await vi.waitFor(
@@ -389,8 +394,11 @@ describe('Logger Integration (Pino)', () => {
           const hit = entries.find((e) => e.testId === 'redact-with-sanitize');
           expect(hit).toBeDefined();
           expect(hit.signal).toBeUndefined();
+          // Emitted through `extra`, so redaction still runs over it.
           expect(hit.token).toBe('[REDACTED]');
           expect(hit.nested.apiKey).toBe('[REDACTED]');
+          // Not a declared RequestContext field — the projection drops it.
+          expect(hit.droppedTopLevelKey).toBeUndefined();
         },
         { timeout: 2000, interval: 50 },
       );

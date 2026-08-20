@@ -5,11 +5,12 @@
  */
 
 import { SpanStatusCode, trace } from '@opentelemetry/api';
+
 import { ZodError } from 'zod';
 
 import { JsonRpcErrorCode, McpError } from '@/types-global/errors.js';
 import { logger } from '@/utils/internal/logger.js';
-import type { RequestContext } from '@/utils/internal/requestContext.js';
+import { type RequestContext, toCanonicalContext } from '@/utils/internal/requestContext.js';
 import { generateUUID } from '@/utils/security/idGenerator.js';
 import { sanitizeInputForLogging } from '@/utils/security/sanitization.js';
 import { ATTR_MCP_ERROR_CLASSIFIED_CODE } from '@/utils/telemetry/attributes.js';
@@ -178,9 +179,18 @@ export class ErrorHandler {
         ? { ...error.data }
         : {};
 
+    // `consolidatedData` becomes `McpError.data`, which the tool handler puts on
+    // `structuredContent.error.data`. A service handed the handler `ctx` (the
+    // documented `{ context: ctx }` pattern) would otherwise publish that whole
+    // object — `inputs.responses` carries whatever the user typed into an
+    // elicitation prompt. Project to the declared contract first.
+    const { extra, ...canonicalContext } = toCanonicalContext(
+      context as Readonly<Record<string, unknown>>,
+    );
     const consolidatedData: Record<string, unknown> = {
       ...errorDataSeed,
-      ...context,
+      ...canonicalContext,
+      ...extra,
       originalErrorName,
       originalMessage: originalErrorMessage,
     };

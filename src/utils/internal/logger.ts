@@ -9,7 +9,11 @@ import type { LevelWithSilent, Logger as PinoLogger } from 'pino';
 import pino from 'pino';
 
 import { config } from '@/config/index.js';
-import { type RequestContext, requestContextService } from '@/utils/internal/requestContext.js';
+import {
+  type RequestContext,
+  requestContextService,
+  toCanonicalContext,
+} from '@/utils/internal/requestContext.js';
 import { UNTHROTTLED_MESSAGES } from '@/utils/internal/telemetryMessages.js';
 
 /**
@@ -597,8 +601,13 @@ export class Logger {
     if (this.isRateLimited(level, msg)) return;
 
     // `extra` is flattened rather than nested so the emitted line keeps the
-    // shape callers had when `RequestContext` was an open bag.
-    const { extra, ...canonical } = context ?? {};
+    // shape callers had when `RequestContext` was an open bag. The projection
+    // runs first: `logger.info(msg, ctx)` with a handler context is a documented
+    // call, and that object carries live request machinery and the user-entered
+    // content in `inputs.responses` — none of which belongs in a log line.
+    const { extra, ...canonical } = toCanonicalContext(
+      (context ?? {}) as Readonly<Record<string, unknown>>,
+    );
     const logObject: Record<string, unknown> = { ...canonical, ...extra };
     // Pass the raw Error so pino's `err` serializer (default: `pino.stdSerializers.err`)
     // runs *after* our `formatters.log` sanitizer. Pre-serializing here would produce

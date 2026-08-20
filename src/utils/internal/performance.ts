@@ -371,6 +371,7 @@ export async function measureToolExecution<T>(
       logger.info(
         TELEMETRY_LOG_MESSAGES.toolExecutionFinished,
         withExtra(context, {
+          toolName,
           metrics: {
             durationMs,
             isSuccess: ok,
@@ -516,6 +517,7 @@ export async function measureResourceExecution<T>(
       logger.info(
         TELEMETRY_LOG_MESSAGES.resourceReadFinished,
         withExtra(context, {
+          resourceName,
           metrics: {
             durationMs,
             isSuccess: ok,
@@ -700,6 +702,7 @@ export async function measurePromptGeneration<T>(
         logger,
         promptMessage,
         withExtra(context, {
+          promptName,
           metrics: {
             durationMs,
             isSuccess: ok,

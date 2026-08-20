@@ -375,3 +375,70 @@ describe('ErrorHandler', () => {
     });
   });
 });
+
+describe('ErrorHandler context projection', () => {
+  /**
+   * A handler `ctx` satisfies the `RequestContext` parameter — excess-property
+   * checking only applies to object literals — so the documented
+   * `{ context: ctx }` service pattern hands over the whole object. Everything
+   * in `McpError.data` reaches the client as `structuredContent.error.data`.
+   */
+  const handlerShapedContext = {
+    requestId: 'req-leak',
+    timestamp: '2026-08-20T00:00:00.000Z',
+    operation: 'HandleToolRequest',
+    tenantId: 'tenant-1',
+    extra: { toolName: 'leaky_tool' },
+    auth: { clientId: 'client-1', scopes: ['tools:read'], token: 'secret-bearer' },
+    inputs: {
+      responses: { creds: { action: 'accept', content: { passphrase: 'hunter2' } } },
+      dropped: [],
+    },
+    log: { info: () => {} },
+    signal: new AbortController().signal,
+    state: new Map(),
+    requestInput: () => {},
+    notifyResourceUpdated: () => {},
+  };
+
+  it('keeps user-entered input out of the serialized error payload', () => {
+    const handled = ErrorHandler.handleError(new Error('upstream failed'), {
+      operation: 'svc',
+      context: handlerShapedContext as never,
+    });
+
+    const data = (handled as McpError).data as Record<string, unknown>;
+    expect(JSON.stringify(data)).not.toContain('hunter2');
+    expect(data).not.toHaveProperty('inputs');
+    expect(data).not.toHaveProperty('log');
+    expect(data).not.toHaveProperty('signal');
+    expect(data).not.toHaveProperty('state');
+    expect(data).not.toHaveProperty('requestInput');
+    expect(data).not.toHaveProperty('notifyResourceUpdated');
+  });
+
+  it('keeps the credential out too (#355)', () => {
+    const handled = ErrorHandler.handleError(new Error('upstream failed'), {
+      operation: 'svc',
+      context: handlerShapedContext as never,
+    });
+
+    const data = (handled as McpError).data as Record<string, unknown>;
+    expect(JSON.stringify(data)).not.toContain('secret-bearer');
+    expect(data).not.toHaveProperty('auth');
+  });
+
+  it('preserves the declared correlation fields, extra flattened', () => {
+    const handled = ErrorHandler.handleError(new Error('upstream failed'), {
+      operation: 'svc',
+      context: handlerShapedContext as never,
+    });
+
+    expect((handled as McpError).data).toMatchObject({
+      requestId: 'req-leak',
+      operation: 'HandleToolRequest',
+      tenantId: 'tenant-1',
+      toolName: 'leaky_tool',
+    });
+  });
+});

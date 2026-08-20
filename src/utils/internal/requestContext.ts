@@ -166,6 +166,46 @@ export interface RequestContext {
 export type RequestContextLike = RequestContext;
 
 /**
+ * The complete key set of {@link RequestContext}. The type is closed, so this
+ * list is its runtime mirror — used by {@link toCanonicalContext} to project a
+ * wider object back down to the contract.
+ */
+const CANONICAL_CONTEXT_KEYS = [
+  'auth',
+  'extra',
+  'operation',
+  'requestId',
+  'sessionId',
+  'spanId',
+  'tenantId',
+  'timestamp',
+  'traceId',
+] as const satisfies readonly (keyof RequestContext)[];
+
+/**
+ * Projects any context-shaped object down to the {@link RequestContext}
+ * contract, dropping every key the type does not declare.
+ *
+ * TypeScript cannot enforce this at the call site: excess-property checking
+ * applies to object *literals*, not to a variable, so a handler `ctx` — which
+ * carries live request machinery (`log`, `signal`, `state`) and, after a
+ * multi-round-trip round, the user-entered content in `inputs.responses` —
+ * satisfies a `RequestContext` parameter and arrives whole. Anything that
+ * serializes a caller-supplied context onto a wire or into a log must project
+ * first, or that payload rides along.
+ *
+ * Allowlist, not denylist: a field added to a handler context later is dropped
+ * by default rather than silently published.
+ */
+export function toCanonicalContext(context: Readonly<Record<string, unknown>>): RequestContext {
+  const projected: Record<string, unknown> = {};
+  for (const key of CANONICAL_CONTEXT_KEYS) {
+    if (context[key] !== undefined) projected[key] = context[key];
+  }
+  return projected as unknown as RequestContext;
+}
+
+/**
  * Returns a copy of `context` with `fields` merged into its {@link
  * RequestContext.extra} bag.
  *

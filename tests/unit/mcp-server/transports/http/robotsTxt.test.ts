@@ -12,6 +12,22 @@ vi.mock('@/utils/internal/logger.js', () => ({
   logger: { debug: vi.fn(), info: vi.fn(), warning: vi.fn(), error: vi.fn() },
 }));
 vi.mock('@/utils/internal/requestContext.js', () => ({
+  toCanonicalContext: (context: Record<string, unknown>) =>
+    Object.fromEntries(
+      [
+        'auth',
+        'extra',
+        'operation',
+        'requestId',
+        'sessionId',
+        'spanId',
+        'tenantId',
+        'timestamp',
+        'traceId',
+      ]
+        .filter((k) => context[k] !== undefined)
+        .map((k) => [k, context[k]]),
+    ),
   withExtra: (ctx: { extra?: Record<string, unknown> }, fields: Record<string, unknown>) => ({
     ...ctx,
     extra: { ...ctx.extra, ...fields },
