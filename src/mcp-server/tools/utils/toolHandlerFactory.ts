@@ -9,6 +9,7 @@ import type {
   ContentBlock,
   InputRequiredResult,
   ServerContext,
+  ServerNotifier,
 } from '@modelcontextprotocol/server';
 
 import { ZodError, type ZodObject, type ZodRawShape, type ZodType, z } from 'zod';
@@ -26,10 +27,7 @@ import {
   createRequestInput,
   isInputRequiredSignal,
 } from '@/mcp-server/inputRequired.js';
-import {
-  buildRequestScopedNotifiers,
-  type ResourceSubscriptions,
-} from '@/mcp-server/notifications.js';
+import { type ResourceSubscriptions, selectNotifiers } from '@/mcp-server/notifications.js';
 import { withRequiredScopes } from '@/mcp-server/transports/auth/lib/authUtils.js';
 import type { StorageService } from '@/storage/core/StorageService.js';
 import { type JsonRpcErrorCode, McpError } from '@/types-global/errors.js';
@@ -66,16 +64,24 @@ export interface HandlerFactoryServices {
  * overwriting an in-flight handler's notifier target (and potentially
  * notifying the wrong server).
  *
- * The handler factory prefers request-scoped notifiers
- * ({@link buildRequestScopedNotifiers}, #135) and uses these only as a fallback
- * for scopes with no `ctx.mcpReq.notify` (test harnesses, background callers).
+ * The handler factory picks a delivery path per era via
+ * {@link selectNotifiers}, and uses these closures only as a fallback for
+ * scopes with neither a bus nor a request sender (stdio, test harnesses).
  */
 export interface HandlerNotifiers {
+  /**
+   * Publish facade for the modern era's `subscriptions/listen` bus, supplied
+   * only for `modern` instances. Takes precedence over the request-scoped path:
+   * on 2026-07-28 the client opts into notification types through its listen
+   * stream, and only what reaches the bus is filtered against that opt-in
+   * (#193).
+   */
+  bus?: ServerNotifier;
   notifyPromptListChanged?: () => void;
   notifyResourceListChanged?: () => void;
   notifyResourceUpdated?: (uri: string) => void;
   notifyToolListChanged?: () => void;
-  /** Per-connection `resources/subscribe` registry (#354). */
+  /** Per-connection `resources/subscribe` registry (#354). Legacy era only. */
   subscriptions?: ResourceSubscriptions;
 }
 
@@ -460,12 +466,7 @@ export function createToolHandler(
     const mcpReq = serverContext?.mcpReq;
     const signal = mcpReq?.signal ?? new AbortController().signal;
 
-    // Route handler-time list-changed / resource-updated notifications through
-    // this request's `ctx.mcpReq.notify` so they carry `relatedRequestId` and
-    // reach the client under per-request serving (#135). Fall back to the
-    // server-level notifiers when the scope exposes no sender.
-    const effectiveNotifiers =
-      buildRequestScopedNotifiers(mcpReq ?? {}, notifiers.subscriptions) ?? notifiers;
+    const effectiveNotifiers = selectNotifiers(notifiers, mcpReq);
 
     const sdkSessionId =
       typeof serverContext?.sessionId === 'string' ? serverContext.sessionId : undefined;
@@ -508,40 +509,51 @@ export function createToolHandler(
       // Validate input
       const validatedInput = def.input.parse(input);
 
-      // Construct Context with detected capabilities. When the definition
-      // declares an error contract, `attachTypedFail` adds `ctx.fail` so
-      // handlers can `throw ctx.fail('reason', ...)`; otherwise ctx is unchanged.
-      const ctx = attachTypedFail(
-        createContext({
-          appContext,
-          logger: services.logger,
-          storage: services.storage,
-          signal,
-          sessionId: handlerSessionId,
-          inputs: createContextInputs(mcpReq),
-          requestInput: createRequestInput(),
-          ...(mcpReq?.log && { wireLog: mcpReq.log }),
-          notifyPromptListChanged: effectiveNotifiers.notifyPromptListChanged,
-          notifyResourceListChanged: effectiveNotifiers.notifyResourceListChanged,
-          notifyResourceUpdated: effectiveNotifiers.notifyResourceUpdated,
-          notifyToolListChanged: effectiveNotifiers.notifyToolListChanged,
-        }),
-        def.errors,
-      );
+      // Construct Context with detected capabilities, from inside the execution
+      // span so `ctx.traceId` / `ctx.spanId` — and the child logger built from
+      // them — name the `tool_execution:*` span the handler runs in rather than
+      // the enclosing request span (#296). When the definition declares an error
+      // contract, `attachTypedFail` adds `ctx.fail` so handlers can
+      // `throw ctx.fail('reason', ...)`; otherwise ctx is unchanged.
+      // Assigned by the measured callback below and read after it settles, on
+      // both the success and error paths.
+      let ctx: Context | undefined;
 
       // Execute handler with performance measurement.
       // Wrap with Promise.resolve — handler may return sync or async.
       const result = await measureToolExecution(
-        () => Promise.resolve(def.handler(validatedInput, ctx)),
+        (spanContext) => {
+          ctx = attachTypedFail(
+            createContext({
+              appContext: spanContext,
+              logger: services.logger,
+              storage: services.storage,
+              signal,
+              sessionId: handlerSessionId,
+              inputs: createContextInputs(mcpReq),
+              requestInput: createRequestInput(),
+              ...(mcpReq?.log && { wireLog: mcpReq.log }),
+              notifyPromptListChanged: effectiveNotifiers.notifyPromptListChanged,
+              notifyResourceListChanged: effectiveNotifiers.notifyResourceListChanged,
+              notifyResourceUpdated: effectiveNotifiers.notifyResourceUpdated,
+              notifyToolListChanged: effectiveNotifiers.notifyToolListChanged,
+            }),
+            def.errors,
+          );
+          return Promise.resolve(def.handler(validatedInput, ctx));
+        },
         { ...appContext, toolName: def.name },
         validatedInput,
         () => {
-          const store = readEnrichmentStore(ctx);
+          const store = ctx ? readEnrichmentStore(ctx) : undefined;
           return store && Object.keys(store.values).length > 0
             ? { [ATTR_MCP_TOOL_ENRICHED]: true }
             : {};
         },
       );
+
+      // Assigned by the measured callback above before the handler ran.
+      const handlerCtx = ctx as Context;
 
       const validatedResult = def.output.parse(result);
 
@@ -560,7 +572,7 @@ export function createToolHandler(
       // ride content[] only — never structuredContent — so a handler can surface
       // media for the model without the base64 duplicating into the typed output.
       // Empty for tools that never call ctx.content, leaving content[] unchanged.
-      const collected = readContentStore(ctx)?.blocks;
+      const collected = readContentStore(handlerCtx)?.blocks;
       if (collected && collected.length > 0) {
         domainContent = [...collected, ...domainContent];
       }
@@ -568,7 +580,7 @@ export function createToolHandler(
       // Merge enrichment into structuredContent and append the content[] trailer.
       return buildToolSuccessResult(
         def,
-        ctx,
+        handlerCtx,
         validatedResult as Record<string, unknown>,
         domainContent,
       );

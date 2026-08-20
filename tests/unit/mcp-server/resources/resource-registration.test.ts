@@ -64,6 +64,7 @@ vi.mock('@/utils/internal/requestContext.js', () => ({
     ...ctx,
     extra: { ...ctx.extra, ...fields },
   }),
+  withActiveSpan: <T>(ctx: T): T => ctx,
   requestContextService: {
     createRequestContext: vi.fn((opts: any) => ({
       requestId: 'test-req-id',

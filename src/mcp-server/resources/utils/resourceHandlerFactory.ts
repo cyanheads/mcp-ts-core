@@ -8,6 +8,7 @@ import type {
   InputRequiredResult,
   ReadResourceResult,
   ServerContext,
+  ServerNotifier,
   Variables,
 } from '@modelcontextprotocol/server';
 
@@ -18,10 +19,7 @@ import {
   createRequestInput,
   isInputRequiredSignal,
 } from '@/mcp-server/inputRequired.js';
-import {
-  buildRequestScopedNotifiers,
-  type ResourceSubscriptions,
-} from '@/mcp-server/notifications.js';
+import { type ResourceSubscriptions, selectNotifiers } from '@/mcp-server/notifications.js';
 import type { AnyResourceDefinition } from '@/mcp-server/resources/utils/resourceDefinition.js';
 import { withRequiredScopes } from '@/mcp-server/transports/auth/lib/authUtils.js';
 import type { StorageService } from '@/storage/core/StorageService.js';
@@ -56,16 +54,24 @@ export interface ResourceHandlerFactoryServices {
  * McpServer gets its own notifier closures — preventing a concurrent
  * registerAll() from overwriting an in-flight handler's notifier target.
  *
- * The resource handler factory prefers request-scoped notifiers
- * ({@link buildRequestScopedNotifiers}, #135) and uses these only as a fallback
- * when the request scope exposes no sender (e.g. a non-request test scope).
+ * The resource handler factory picks a delivery path per era via
+ * {@link selectNotifiers}, and uses these closures only as a fallback for
+ * scopes with neither a bus nor a request sender (stdio, test harnesses).
  */
 export interface ResourceHandlerNotifiers {
+  /**
+   * Publish facade for the modern era's `subscriptions/listen` bus, supplied
+   * only for `modern` instances. Takes precedence over the request-scoped path:
+   * on 2026-07-28 the client opts into notification types through its listen
+   * stream, and only what reaches the bus is filtered against that opt-in
+   * (#193).
+   */
+  bus?: ServerNotifier;
   notifyPromptListChanged?: () => void;
   notifyResourceListChanged?: () => void;
   notifyResourceUpdated?: (uri: string) => void;
   notifyToolListChanged?: () => void;
-  /** Per-connection `resources/subscribe` registry (#354). */
+  /** Per-connection `resources/subscribe` registry (#354). Legacy era only. */
   subscriptions?: ResourceSubscriptions;
 }
 
@@ -147,12 +153,7 @@ export function createResourceHandler(
     const mcpReq = serverContext?.mcpReq;
     const signal = mcpReq?.signal ?? new AbortController().signal;
 
-    // Route handler-time list-changed / resource-updated notifications through
-    // this request's `ctx.mcpReq.notify` so they carry `relatedRequestId` and
-    // reach the client under per-request serving (#135). Fall back to the
-    // server-level notifiers when the scope exposes no sender.
-    const effectiveNotifiers =
-      buildRequestScopedNotifiers(mcpReq ?? {}, notifiers.subscriptions) ?? notifiers;
+    const effectiveNotifiers = selectNotifiers(notifiers, mcpReq);
 
     const sdkSessionId =
       typeof serverContext?.sessionId === 'string' ? serverContext.sessionId : undefined;
@@ -199,30 +200,34 @@ export function createResourceHandler(
       // Validate params via schema if defined
       const validatedParams = def.params ? def.params.parse(variables) : variables;
 
-      // Construct Context with uri set. `attachTypedFail` adds `ctx.fail`
-      // when the definition declares an error contract; otherwise no-op.
-      const ctx = attachTypedFail(
-        createContext({
-          appContext,
-          logger: services.logger,
-          storage: services.storage,
-          signal,
-          sessionId: handlerSessionId,
-          inputs: createContextInputs(mcpReq),
-          requestInput: createRequestInput(),
-          ...(mcpReq?.log && { wireLog: mcpReq.log }),
-          notifyPromptListChanged: effectiveNotifiers.notifyPromptListChanged,
-          notifyResourceListChanged: effectiveNotifiers.notifyResourceListChanged,
-          notifyResourceUpdated: effectiveNotifiers.notifyResourceUpdated,
-          notifyToolListChanged: effectiveNotifiers.notifyToolListChanged,
-          uri,
-        }),
-        def.errors,
-      );
-
-      // Execute handler with performance measurement
+      // Execute handler with performance measurement. The context is built
+      // from inside the execution span so `ctx.traceId` / `ctx.spanId` — and
+      // the child logger built from them — name the `resource_read:*` span the
+      // handler runs in rather than the enclosing request span (#296).
+      // `attachTypedFail` adds `ctx.fail` when the definition declares an error
+      // contract; otherwise no-op.
       const handlerResult = await measureResourceExecution(
-        () => Promise.resolve(def.handler(validatedParams, ctx)),
+        (spanContext) => {
+          const ctx = attachTypedFail(
+            createContext({
+              appContext: spanContext,
+              logger: services.logger,
+              storage: services.storage,
+              signal,
+              sessionId: handlerSessionId,
+              inputs: createContextInputs(mcpReq),
+              requestInput: createRequestInput(),
+              ...(mcpReq?.log && { wireLog: mcpReq.log }),
+              notifyPromptListChanged: effectiveNotifiers.notifyPromptListChanged,
+              notifyResourceListChanged: effectiveNotifiers.notifyResourceListChanged,
+              notifyResourceUpdated: effectiveNotifiers.notifyResourceUpdated,
+              notifyToolListChanged: effectiveNotifiers.notifyToolListChanged,
+              uri,
+            }),
+            def.errors,
+          );
+          return Promise.resolve(def.handler(validatedParams, ctx));
+        },
         { ...appContext, resourceName },
         { uri: resourceUri, mimeType },
       );

@@ -72,6 +72,7 @@ vi.mock('@/utils/internal/requestContext.js', () => ({
     ...ctx,
     extra: { ...ctx.extra, ...fields },
   }),
+  withActiveSpan: <T>(ctx: T): T => ctx,
   requestContextService: {
     createRequestContext: vi.fn((opts: any) => ({
       requestId: 'test-req-id',
@@ -83,7 +84,11 @@ vi.mock('@/utils/internal/requestContext.js', () => ({
 }));
 
 vi.mock('@/utils/internal/performance.js', () => ({
-  measureToolExecution: vi.fn((fn: () => unknown) => fn()),
+  // Passes the span-bound context through, as the real implementation does —
+  // the handler factory builds its `ctx` from that argument.
+  measureToolExecution: vi.fn((fn: (spanContext: unknown) => unknown, context: unknown) =>
+    fn(context),
+  ),
 }));
 
 // ---------------------------------------------------------------------------

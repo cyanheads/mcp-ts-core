@@ -13,7 +13,7 @@ import { isInputRequiredSignal } from '@/mcp-server/inputRequired.js';
 import { McpError } from '@/types-global/errors.js';
 import { type ErrorCategory, getErrorCategory } from '@/utils/internal/error-handler/mappings.js';
 import { logger } from '@/utils/internal/logger.js';
-import { type RequestContext, withExtra } from '@/utils/internal/requestContext.js';
+import { type RequestContext, withActiveSpan, withExtra } from '@/utils/internal/requestContext.js';
 import { TELEMETRY_LOG_MESSAGES } from '@/utils/internal/telemetryMessages.js';
 import {
   ATTR_CODE_FUNCTION_NAME,
@@ -233,7 +233,10 @@ const toBytes = (payload: unknown): number => {
  * `McpError` instances surface their numeric `code` as the error code attribute.
  *
  * @template T - The resolved type of the tool's return value.
- * @param toolLogicFn - Zero-argument async function containing the tool's business logic.
+ * @param toolLogicFn - Async function containing the tool's business logic. Receives
+ *   `context` re-bound to the execution span this function opens, so a handler
+ *   context built from it correlates to the span the handler actually runs in
+ *   rather than to the enclosing request span.
  * @param context - Request context extended with `toolName`; used for span/log correlation.
  * @param inputPayload - The raw input object passed to the tool, serialized to compute byte size.
  * @param successAttributes - Optional thunk evaluated after a successful run; its
@@ -243,7 +246,7 @@ const toBytes = (payload: unknown): number => {
  * @returns A promise that resolves with the tool's return value or rejects with the original error.
  */
 export async function measureToolExecution<T>(
-  toolLogicFn: () => Promise<T>,
+  toolLogicFn: (spanContext: RequestContext & { toolName: string }) => Promise<T>,
   context: RequestContext & { toolName: string },
   inputPayload: unknown,
   successAttributes?: () => Record<string, boolean | number | string>,
@@ -256,6 +259,11 @@ export async function measureToolExecution<T>(
   const { toolName } = context;
 
   return await tracer.startActiveSpan(`tool_execution:${toolName}` as const, async (span) => {
+    // The span is active from here down, so everything below — the handler
+    // context the logic function builds and this function's own completion log
+    // — correlates to `tool_execution:*` rather than to whatever was active
+    // when the caller built `context`.
+    const spanContext = withActiveSpan(context);
     const activeGauge = getActiveRequestsGauge();
     activeGauge.add(1);
 
@@ -277,7 +285,7 @@ export async function measureToolExecution<T>(
     let batchFailed: number | undefined;
 
     try {
-      const result = await toolLogicFn();
+      const result = await toolLogicFn(spanContext);
       ok = true;
       outputBytes = toBytes(result);
 
@@ -370,7 +378,7 @@ export async function measureToolExecution<T>(
 
       logger.info(
         TELEMETRY_LOG_MESSAGES.toolExecutionFinished,
-        withExtra(context, {
+        withExtra(spanContext, {
           toolName,
           metrics: {
             durationMs,
@@ -426,13 +434,14 @@ function getResourceMetrics() {
  * and a structured log. Mirrors {@link measureToolExecution} but tuned for resource reads.
  *
  * @template T - The resolved type of the resource handler's return value.
- * @param resourceLogicFn - Zero-argument async function containing the resource handler.
+ * @param resourceLogicFn - Async function containing the resource handler. Receives
+ *   `context` re-bound to the execution span this function opens.
  * @param context - Request context extended with `resourceName`; used for span/log correlation.
  * @param meta - Resource metadata: URI and MIME type for span attributes.
  * @returns A promise that resolves with the handler's return value or rejects with the original error.
  */
 export async function measureResourceExecution<T>(
-  resourceLogicFn: () => Promise<T>,
+  resourceLogicFn: (spanContext: RequestContext & { resourceName: string }) => Promise<T>,
   context: RequestContext & { resourceName: string },
   meta: { uri: string; mimeType: string },
 ): Promise<T> {
@@ -444,6 +453,8 @@ export async function measureResourceExecution<T>(
   const { resourceName } = context;
 
   return await tracer.startActiveSpan(`resource_read:${resourceName}` as const, async (span) => {
+    // Active from here down — see the note in `measureToolExecution`.
+    const spanContext = withActiveSpan(context);
     const activeGauge = getActiveRequestsGauge();
     activeGauge.add(1);
     const t0 = nowMs();
@@ -461,7 +472,7 @@ export async function measureResourceExecution<T>(
     let outputBytes = 0;
 
     try {
-      const result = await resourceLogicFn();
+      const result = await resourceLogicFn(spanContext);
       ok = true;
       outputBytes = toBytes(result);
       span.setStatus({ code: SpanStatusCode.OK });
@@ -516,7 +527,7 @@ export async function measureResourceExecution<T>(
 
       logger.info(
         TELEMETRY_LOG_MESSAGES.resourceReadFinished,
-        withExtra(context, {
+        withExtra(spanContext, {
           resourceName,
           metrics: {
             durationMs,
@@ -609,6 +620,10 @@ export async function measurePromptGeneration<T>(
   const { promptName } = context;
 
   return await tracer.startActiveSpan(`prompt_generation:${promptName}` as const, async (span) => {
+    // Active from here down — see the note in `measureToolExecution`. Prompt
+    // generators take no handler context, so this only re-binds the completion
+    // log below.
+    const spanContext = withActiveSpan(context);
     const activeGauge = getActiveRequestsGauge();
     activeGauge.add(1);
 
@@ -701,7 +716,7 @@ export async function measurePromptGeneration<T>(
       logFn.call(
         logger,
         promptMessage,
-        withExtra(context, {
+        withExtra(spanContext, {
           promptName,
           metrics: {
             durationMs,

@@ -7,7 +7,25 @@ import { type Span, trace } from '@opentelemetry/api';
 import { afterEach, beforeEach, describe, expect, it, type MockInstance, vi } from 'vitest';
 import * as idGeneratorModule from '@/utils/security/idGenerator.js';
 import { authContext } from '../../../../src/mcp-server/transports/auth/lib/authContext.js';
-import { requestContextService } from '../../../../src/utils/internal/requestContext.js';
+import {
+  type RequestContext,
+  requestContextService,
+  withActiveSpan,
+} from '../../../../src/utils/internal/requestContext.js';
+
+/** A valid span context — 32/16 lowercase hex digits, sampled. */
+const RECORDING_SPAN_CONTEXT = {
+  traceId: '4bf92f3577b34da6a3ce929d0e0e4736',
+  spanId: '00f067aa0ba902b7',
+  traceFlags: 1,
+};
+
+/** The all-zero span context a non-recording span carries. */
+const NON_RECORDING_SPAN_CONTEXT = {
+  traceId: '00000000000000000000000000000000',
+  spanId: '0000000000000000',
+  traceFlags: 0,
+};
 
 describe('requestContextService', () => {
   let idSpy: MockInstance;
@@ -26,9 +44,8 @@ describe('requestContextService', () => {
   });
 
   it('creates a context with generated IDs, added fields, and trace metadata', () => {
-    const spanContext = { traceId: 'trace-id', spanId: 'span-id' };
     getActiveSpanSpy.mockReturnValue({
-      spanContext: () => spanContext,
+      spanContext: () => RECORDING_SPAN_CONTEXT,
     } as never);
 
     const context = requestContextService.createRequestContext({
@@ -41,8 +58,22 @@ describe('requestContextService', () => {
     expect(context.operation).toBe('UnitTest');
     expect(context.extra).toEqual({ detail: 'value' });
     expect(context.tenantId).toBe('manual-tenant');
-    expect(context.traceId).toBe('trace-id');
-    expect(context.spanId).toBe('span-id');
+    expect(context.traceId).toBe(RECORDING_SPAN_CONTEXT.traceId);
+    expect(context.spanId).toBe(RECORDING_SPAN_CONTEXT.spanId);
+  });
+
+  it('leaves trace IDs undefined when the active span context is invalid (#296)', () => {
+    // What `startActiveSpan` yields with telemetry disabled: a non-recording
+    // span whose IDs are all zeroes. They correlate to nothing, so publishing
+    // them would be worse than reporting no correlation at all.
+    getActiveSpanSpy.mockReturnValue({
+      spanContext: () => NON_RECORDING_SPAN_CONTEXT,
+    } as never);
+
+    const context = requestContextService.createRequestContext({ operation: 'UnitTest' });
+
+    expect(context.traceId).toBeUndefined();
+    expect(context.spanId).toBeUndefined();
   });
 
   it('inherits data from a parent context and prefers explicit tenant overrides', () => {
@@ -249,6 +280,53 @@ describe('requestContextService', () => {
       expect(context.requestId).toBe(parent.requestId);
       expect(context.extra).toEqual({ tracing: true });
       expect(context.auth).toBeDefined();
+    });
+  });
+  describe('withActiveSpan (#296)', () => {
+    const base: RequestContext = {
+      requestId: 'req-1',
+      timestamp: '2026-01-01T00:00:00.000Z',
+      traceId: 'stale-trace',
+      spanId: 'stale-span',
+    };
+
+    it('re-binds both IDs to the span active now', () => {
+      getActiveSpanSpy.mockReturnValue({
+        spanContext: () => RECORDING_SPAN_CONTEXT,
+      } as never);
+
+      expect(withActiveSpan(base)).toEqual({
+        ...base,
+        traceId: RECORDING_SPAN_CONTEXT.traceId,
+        spanId: RECORDING_SPAN_CONTEXT.spanId,
+      });
+    });
+
+    it('returns the context untouched when no span is active', () => {
+      // The telemetry-disabled path — nothing to correlate to, so nothing to
+      // rewrite, and the caller keeps its own reference.
+      expect(withActiveSpan(base)).toBe(base);
+    });
+
+    it('returns the context untouched when the active span is non-recording', () => {
+      getActiveSpanSpy.mockReturnValue({
+        spanContext: () => NON_RECORDING_SPAN_CONTEXT,
+      } as never);
+
+      expect(withActiveSpan(base)).toBe(base);
+    });
+
+    it('allocates nothing when the IDs already match the active span', () => {
+      getActiveSpanSpy.mockReturnValue({
+        spanContext: () => RECORDING_SPAN_CONTEXT,
+      } as never);
+      const bound = {
+        ...base,
+        traceId: RECORDING_SPAN_CONTEXT.traceId,
+        spanId: RECORDING_SPAN_CONTEXT.spanId,
+      };
+
+      expect(withActiveSpan(bound)).toBe(bound);
     });
   });
 });

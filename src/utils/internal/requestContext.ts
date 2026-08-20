@@ -20,7 +20,7 @@
  *
  * @module src/utils/internal/requestContext
  */
-import { trace } from '@opentelemetry/api';
+import { isSpanContextValid, trace } from '@opentelemetry/api';
 
 import { authContext as alsAuthContext } from '@/mcp-server/transports/auth/lib/authContext.js';
 import type { AuthInfo } from '@/mcp-server/transports/auth/lib/authTypes.js';
@@ -226,6 +226,42 @@ export function withExtra(
 }
 
 /**
+ * Reads the trace and span IDs of the currently-active OpenTelemetry span, or
+ * `undefined` when there is no active span or its span context is invalid.
+ *
+ * An invalid span context is what a non-recording span carries — the shape
+ * `startActiveSpan` produces when telemetry is disabled. Its IDs are all
+ * zeroes, which correlate to nothing; treating them as absent keeps a
+ * telemetry-off deployment reporting `undefined` rather than a run of zeroes.
+ */
+function activeSpanIds(): { spanId: string; traceId: string } | undefined {
+  const activeSpan = trace.getActiveSpan();
+  if (!activeSpan || typeof activeSpan.spanContext !== 'function') return undefined;
+  const spanContext = activeSpan.spanContext();
+  if (!spanContext || !isSpanContextValid(spanContext)) return undefined;
+  return { spanId: spanContext.spanId, traceId: spanContext.traceId };
+}
+
+/**
+ * Returns a copy of `context` whose `traceId` / `spanId` name the span that is
+ * active *now*, rather than the one that was active when the context was built.
+ *
+ * A context created before a span opens carries the enclosing span's IDs, so a
+ * handler running inside a `tool_execution:*` span would advertise the request
+ * span instead of its own. Re-binding at the point the span becomes active is
+ * what makes `ctx.spanId` name the execution the handler is part of.
+ *
+ * Returns the input unchanged when no valid span is active, so a
+ * telemetry-disabled path is untouched.
+ */
+export function withActiveSpan<T extends RequestContext>(context: T): T {
+  const ids = activeSpanIds();
+  if (!ids) return context;
+  if (context.traceId === ids.traceId && context.spanId === ids.spanId) return context;
+  return { ...context, traceId: ids.traceId, spanId: ids.spanId };
+}
+
+/**
  * Parameters accepted by {@link requestContextService.createRequestContext}.
  *
  * Closed, like the context it builds. Operation-specific keys go in
@@ -336,13 +372,10 @@ const requestContextServiceInstance = {
     };
 
     // --- OpenTelemetry Integration ---
-    const activeSpan = trace.getActiveSpan();
-    if (activeSpan && typeof activeSpan.spanContext === 'function') {
-      const spanContext = activeSpan.spanContext();
-      if (spanContext) {
-        context.traceId = spanContext.traceId;
-        context.spanId = spanContext.spanId;
-      }
+    const ids = activeSpanIds();
+    if (ids) {
+      context.traceId = ids.traceId;
+      context.spanId = ids.spanId;
     }
     // --- End OpenTelemetry Integration ---
 

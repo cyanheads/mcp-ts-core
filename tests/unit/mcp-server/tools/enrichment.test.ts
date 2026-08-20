@@ -80,7 +80,11 @@ vi.mock('@/utils/internal/requestContext.js', () => ({
 // Pass the success-attributes thunk through so the factory's enrichment-detection
 // closure still runs, but otherwise just execute the handler logic.
 vi.mock('@/utils/internal/performance.js', () => ({
-  measureToolExecution: vi.fn((fn: () => unknown) => fn()),
+  // Passes the span-bound context through, as the real implementation does —
+  // the handler factory builds its `ctx` from that argument.
+  measureToolExecution: vi.fn((fn: (spanContext: unknown) => unknown, context: unknown) =>
+    fn(context),
+  ),
 }));
 
 // ---------------------------------------------------------------------------

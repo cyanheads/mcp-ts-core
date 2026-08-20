@@ -76,7 +76,11 @@ vi.mock('@/utils/internal/requestContext.js', () => ({
 }));
 
 vi.mock('@/utils/internal/performance.js', () => ({
-  measureResourceExecution: vi.fn((fn: () => unknown) => fn()),
+  // Passes the span-bound context through, as the real implementation does —
+  // the handler factory builds its `ctx` from that argument.
+  measureResourceExecution: vi.fn((fn: (spanContext: unknown) => unknown, context: unknown) =>
+    fn(context),
+  ),
 }));
 
 function serverContext() {
