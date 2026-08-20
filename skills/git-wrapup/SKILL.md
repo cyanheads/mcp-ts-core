@@ -4,7 +4,7 @@ description: >
   Land working-tree changes as logical commits — the work grouped by concern, topped by a release commit (version bump, changelog, regenerated artifacts) and an annotated tag. Verify, commit, tag. Stops at "committed and tagged locally" — no push, no publish. The release-and-publish skill picks up from here. Distilled from the git_wrapup_instructions protocol.
 metadata:
   author: cyanheads
-  version: "1.10"
+  version: "1.11"
   audience: external
   type: workflow
 ---
@@ -27,7 +27,7 @@ Every item must be true before starting wrapup. Committing means releasing — a
 - [ ] **Code simplified** — if the diff spans more than ~50 changed lines or touches 3+ source files, the `code-simplifier` skill has been run across the changes
 - [ ] **`bun run devcheck` passes** — typecheck + lint clean
 - [ ] **`bun run rebuild` succeeds** — full clean build from scratch
-- [ ] **All tests pass** — `bun run test:all` (or `bun run test`). New tests and regression tests added as needed for the changes being shipped.
+- [ ] **All tests pass** — `bun run test:all` (or `bun run test`), plus `bun run test:package` where the project defines one: it guards the public-export manifest and is not part of `test:all`. New tests and regression tests added as needed for the changes being shipped.
 - [ ] **Fixes verified** — bug fixes validated, generally via `bun run rebuild` and field-testing. Not just written — confirmed to resolve the described behavior.
 - [ ] **No known regressions** — the changes don't break existing functionality
 - [ ] **GH issues updated** — issues addressed by this work commented with what landed and any follow-ups needed. Concise. Backlinked as needed.
@@ -119,6 +119,7 @@ The tree being committed must pass verification. Both must succeed:
 ```bash
 bun run devcheck
 bun run test:all           # or `bun run test` if no test:all script exists
+bun run test:package       # only if the script exists — NOT part of test:all
 ```
 
 **If either fails, halt.** Do not bypass verification to land the commit. Fix the issue first, then re-run from step 6.
@@ -237,6 +238,7 @@ If the working tree isn't clean or the tag doesn't point at HEAD, something went
 - [ ] `docs/tree.md` regenerated if structure changed (`bun run tree`)
 - [ ] `bun run devcheck` passes
 - [ ] `bun run test:all` (or `test`) passes
+- [ ] `bun run test:package` passes, when the project defines it — it guards the public-export manifest and `test:all` does not run it
 - [ ] Work grouped into logical commits (large features split by layer); release artifacts (version + changelog + tree) committed separately on top, subject leading with the version
 - [ ] Every commit carries a body, and every body is one or two lines — none subject-only, none a paragraph
 - [ ] Annotated tag `v<version>` with structured markdown message, final line linking this version's changelog file

@@ -4,7 +4,7 @@ description: >
   Ship a release end-to-end across every registry the project targets (npm, MCP Registry, GitHub Releases for `.mcpb` bundles, GHCR). Runs the final verification gate, pushes commits and tags, then publishes to each applicable destination. Assumes git wrapup (version bumps, changelog, commit, annotated tag) is already complete — this skill is the post-wrapup publish workflow. Retries transient network failures on publish steps; halts with a partial-state report when retries are exhausted or the failure is terminal.
 metadata:
   author: cyanheads
-  version: "2.12"
+  version: "1.11"
   audience: external
   type: workflow
 ---
@@ -73,13 +73,19 @@ If working tree is dirty or HEAD isn't on `v<version>`, halt.
 
 ### 2. Run the verification gate
 
-All three must succeed. Check `package.json` `scripts` for `test:all`; if absent, fall back to `test`:
+All must succeed. Check `package.json` `scripts` for `test:all`; if absent, fall back to `test`:
 
 ```bash
 bun run devcheck
 bun run rebuild
 bun run test:all        # or `bun run test` if no test:all
+bun run test:package    # only if the script exists — NOT part of test:all
 ```
+
+`test:package` is a separate gate wherever a project defines one: it verifies the public-export
+manifest against what the built subpaths actually export. A release that adds, removes, or renames
+an export passes `test:all` and fails here. Regenerate the manifest with the command the failure
+names rather than editing it by hand.
 
 Any non-zero exit → halt with the failing command's output.
 
@@ -214,6 +220,7 @@ If any check fails, halt and report which destination is unreachable. A successf
 - [ ] `bun run devcheck` passes
 - [ ] `bun run rebuild` succeeds
 - [ ] `bun run test:all` (or `test`) passes
+- [ ] `bun run test:package` passes, when the project defines it
 - [ ] Commits pushed to origin
 - [ ] Tags pushed to origin
 - [ ] `bun publish --access public` succeeds
