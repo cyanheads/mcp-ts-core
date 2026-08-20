@@ -12,7 +12,7 @@
  *
  * @module src/utils/overflow/outlineOnOverflow
  */
-import type { ContentBlock } from '@modelcontextprotocol/sdk/types.js';
+import type { ContentBlock } from '@modelcontextprotocol/server';
 import { z } from 'zod';
 
 /** Default serialized-byte budget. Over this, a document overflows to an outline. */

@@ -6,6 +6,7 @@
  */
 import { vi } from 'vitest';
 import type { ContextDeps } from '@/core/context.js';
+import { createContextInputs, createRequestInput } from '@/mcp-server/inputRequired.js';
 import type { Logger } from '@/utils/internal/logger.js';
 import type { RequestContext } from '@/utils/internal/requestContext.js';
 
@@ -101,7 +102,9 @@ export function makeRequestContext(overrides: Partial<RequestContext> = {}): Req
 export function makeContextDeps(overrides: Partial<ContextDeps> = {}): ContextDeps {
   return {
     appContext: makeRequestContext(),
+    inputs: createContextInputs(undefined),
     logger: createMockLogger() as unknown as Logger,
+    requestInput: createRequestInput(),
     storage: createFakeStorage() as unknown as ContextDeps['storage'],
     signal: new AbortController().signal,
     ...overrides,

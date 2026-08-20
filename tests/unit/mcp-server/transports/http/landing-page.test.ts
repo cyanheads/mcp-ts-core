@@ -53,7 +53,6 @@ function makeTool(name: string, extra: Partial<ManifestTool> = {}): ManifestTool
     name,
     title: name,
     description: `Description of ${name}`,
-    isTask: false,
     isApp: false,
     requiredFields: [],
     ...extra,
@@ -677,7 +676,7 @@ describe('renderLandingPage — polish derivations', () => {
     expect(html).not.toContain('view source');
   });
 
-  test('renders mutability badge + auxiliary pills (openWorld / task / app)', () => {
+  test('renders mutability badge + auxiliary pills (openWorld / app)', () => {
     const tools = [
       makeTool('read_tool', { annotations: { readOnlyHint: true } }),
       makeTool('write_tool'),
@@ -685,7 +684,6 @@ describe('renderLandingPage — polish derivations', () => {
       makeTool('search_tool', {
         annotations: { readOnlyHint: true, openWorldHint: true },
       }),
-      makeTool('long_task', { isTask: true }),
       makeTool('ui_tool', { isApp: true }),
     ];
     const manifest: ServerManifest = {
@@ -697,7 +695,6 @@ describe('renderLandingPage — polish derivations', () => {
     expect(html).toContain('pill-write');
     expect(html).toContain('pill-destructive');
     expect(html).toContain('pill-openworld');
-    expect(html).toContain('pill-task');
     expect(html).toContain('pill-app');
   });
 

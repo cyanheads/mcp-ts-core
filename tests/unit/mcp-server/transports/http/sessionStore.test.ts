@@ -1,543 +1,347 @@
 /**
- * @fileoverview Tests for SessionStore tenant isolation and security.
+ * @fileoverview Tests for SessionStore identity binding, capacity, lifecycle,
+ * and tenant isolation.
  * @module tests/mcp-server/transports/http/sessionStore.test
  */
 
-import { ErrorCode } from '@modelcontextprotocol/sdk/types.js';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-import { type SessionIdentity, SessionStore } from '@/mcp-server/transports/http/sessionStore.js';
+import {
+  type SessionConnection,
+  type SessionIdentity,
+  SessionStore,
+} from '@/mcp-server/transports/http/sessionStore.js';
+import { JsonRpcErrorCode } from '@/types-global/errors.js';
 
 /**
  * Helper to create valid 64-character hex session IDs for testing.
  * Format matches the output of generateSecureSessionId().
  */
 function createTestSessionId(suffix: string): string {
-  // Convert suffix to hex if it's not already
   const hexSuffix = Buffer.from(suffix, 'utf8').toString('hex');
-  // Pad to 64 characters with zeros
-  const paddedSuffix = hexSuffix.padStart(64, '0');
-  return paddedSuffix.slice(-64);
+  return hexSuffix.padStart(64, '0').slice(-64);
+}
+
+/** A `{ server, transport }` pair whose closes are observable. */
+function createTestConnection(): SessionConnection & {
+  closes: { server: number; transport: number };
+} {
+  const closes = { server: 0, transport: 0 };
+  return {
+    closes,
+    server: {
+      close: vi.fn(async () => {
+        closes.server++;
+      }),
+    } as unknown as SessionConnection['server'],
+    transport: {
+      close: vi.fn(async () => {
+        closes.transport++;
+      }),
+    } as unknown as SessionConnection['transport'],
+  };
 }
 
 describe('SessionStore - Security & Tenant Isolation', () => {
   let store: SessionStore;
   const STALE_TIMEOUT = 30_000; // 30 seconds for testing
 
-  // Valid session IDs for testing
   const SESSION_1 = createTestSessionId('1');
   const SESSION_2 = createTestSessionId('2');
   const SESSION_A = createTestSessionId('a');
   const SESSION_B = createTestSessionId('b');
-  const SHARED_SESSION = createTestSessionId('shared');
+
+  /** Registers a session with a throwaway connection and returns it. */
+  const register = (id: string, identity?: SessionIdentity) => {
+    const connection = createTestConnection();
+    store.register(id, connection, identity);
+    return connection;
+  };
 
   beforeEach(() => {
     store = new SessionStore(STALE_TIMEOUT);
   });
 
-  afterEach(() => {
-    store.destroy();
+  afterEach(async () => {
+    await store.destroy();
     vi.useRealTimers();
   });
 
-  describe('Basic Session Management', () => {
-    it('should create a new session', () => {
-      const session = store.getOrCreate(SESSION_1);
-      expect(session.id).toBe(SESSION_1);
-      expect(session.createdAt).toBeInstanceOf(Date);
-      expect(session.lastAccessedAt).toBeInstanceOf(Date);
-    });
-
-    it('should retrieve existing session', () => {
-      const session1 = store.getOrCreate(SESSION_1);
-      const session2 = store.getOrCreate(SESSION_1);
-      expect(session1).toBe(session2);
-      expect(session1.id).toBe(SESSION_1);
-    });
-
-    it('should update lastAccessedAt on retrieval', async () => {
-      const session1 = store.getOrCreate(SESSION_1);
-      const firstAccess = session1.lastAccessedAt;
-
-      await new Promise((resolve) => setTimeout(resolve, 10));
-
-      const session2 = store.getOrCreate(SESSION_1);
-      expect(session2.lastAccessedAt.getTime()).toBeGreaterThan(firstAccess.getTime());
-    });
-
-    it('should reject new sessions when capacity is exhausted', () => {
-      const cappedStore = new SessionStore(STALE_TIMEOUT, 1);
-      try {
-        cappedStore.getOrCreate(SESSION_1);
-        expect(() => cappedStore.getOrCreate(SESSION_2)).toThrow(
-          'Maximum session capacity reached (1)',
-        );
-      } finally {
-        cappedStore.destroy();
-      }
-    });
-
-    it('should validate existing session', () => {
-      store.getOrCreate(SESSION_1);
-      expect(store.isValidForIdentity(SESSION_1)).toBe(true);
-    });
-
-    it('should reject non-existent session', () => {
-      const invalidId = createTestSessionId('nonexistent');
-      expect(store.isValidForIdentity(invalidId)).toBe(false);
-    });
-
-    it('should terminate a session', () => {
-      store.getOrCreate(SESSION_1);
-      expect(store.isValidForIdentity(SESSION_1)).toBe(true);
-
-      store.terminate(SESSION_1);
-      expect(store.isValidForIdentity(SESSION_1)).toBe(false);
-    });
-
-    it('should return session count', () => {
-      expect(store.getSessionCount()).toBe(0);
-      store.getOrCreate(SESSION_1);
+  describe('Registration', () => {
+    it('makes a registered session reachable and counts it', () => {
+      const connection = register(SESSION_1);
+      expect(store.getConnection(SESSION_1)).toBe(connection);
       expect(store.getSessionCount()).toBe(1);
-      store.getOrCreate(SESSION_2);
-      expect(store.getSessionCount()).toBe(2);
+    });
+
+    it('rejects a session ID that is not 64 hex characters', () => {
+      expect(() => store.register('not-a-session-id', createTestConnection())).toThrow(
+        /64 hexadecimal/,
+      );
+      expect(store.getSessionCount()).toBe(0);
+    });
+
+    it('returns undefined for an unknown session', () => {
+      expect(store.getConnection(SESSION_1)).toBeUndefined();
+    });
+
+    it('refreshes lastAccessedAt on every connection lookup', async () => {
+      vi.useFakeTimers();
+      register(SESSION_1);
+
+      // Past the stale timeout without a touch, the session would expire.
+      vi.advanceTimersByTime(STALE_TIMEOUT - 1);
+      expect(store.getConnection(SESSION_1)).toBeDefined();
+      vi.advanceTimersByTime(STALE_TIMEOUT - 1);
+
+      // Still valid: the lookup above reset the clock.
+      expect(store.isValidForIdentity(SESSION_1)).toBe(true);
+    });
+  });
+
+  describe('Capacity', () => {
+    it('throws ServiceUnavailable once at capacity, before any instance is built', () => {
+      const capped = new SessionStore(STALE_TIMEOUT, 1);
+      capped.register(SESSION_1, createTestConnection());
+
+      expect(() => capped.assertCapacity()).toThrow(/Maximum session capacity reached \(1\)/);
+      try {
+        capped.assertCapacity();
+      } catch (error) {
+        expect(error).toMatchObject({ code: JsonRpcErrorCode.ServiceUnavailable });
+      }
+      expect(() => capped.register(SESSION_2, createTestConnection())).toThrow(/capacity/);
+      expect(capped.getSessionCount()).toBe(1);
+    });
+
+    it('accepts a new session again after one is terminated', async () => {
+      const capped = new SessionStore(STALE_TIMEOUT, 1);
+      capped.register(SESSION_1, createTestConnection());
+      await capped.terminate(SESSION_1);
+
+      expect(() => capped.assertCapacity()).not.toThrow();
+      capped.register(SESSION_2, createTestConnection());
+      expect(capped.getSessionCount()).toBe(1);
+      await capped.destroy();
+    });
+  });
+
+  describe('Termination', () => {
+    it('closes both surfaces and makes the session unreachable', async () => {
+      const connection = register(SESSION_1);
+      await store.terminate(SESSION_1);
+
+      expect(connection.closes).toEqual({ server: 1, transport: 1 });
+      expect(store.getConnection(SESSION_1)).toBeUndefined();
+      expect(store.isValidForIdentity(SESSION_1)).toBe(false);
+      expect(store.getSessionCount()).toBe(0);
+    });
+
+    it('is idempotent — the SDK transport also calls it via onsessionclosed', async () => {
+      const connection = register(SESSION_1);
+      await store.terminate(SESSION_1);
+      await store.terminate(SESSION_1);
+
+      expect(connection.closes).toEqual({ server: 1, transport: 1 });
+    });
+
+    it('terminates a session whose transport close rejects', async () => {
+      const connection = createTestConnection();
+      (connection.transport.close as ReturnType<typeof vi.fn>).mockRejectedValueOnce(
+        new Error('already closed'),
+      );
+      store.register(SESSION_1, connection);
+
+      await expect(store.terminate(SESSION_1)).resolves.toBeUndefined();
+      expect(store.getConnection(SESSION_1)).toBeUndefined();
+    });
+
+    it('destroy() closes every live connection', async () => {
+      const a = register(SESSION_A);
+      const b = register(SESSION_B);
+
+      await store.destroy();
+
+      expect(a.closes).toEqual({ server: 1, transport: 1 });
+      expect(b.closes).toEqual({ server: 1, transport: 1 });
+      expect(store.getSessionCount()).toBe(0);
     });
   });
 
   describe('Identity Binding', () => {
-    it('should bind identity on session creation', () => {
-      const identity: SessionIdentity = {
-        tenantId: 'tenant-a',
-        clientId: 'client-1',
-        subject: 'user@example.com',
-      };
+    it('binds identity at registration', () => {
+      register(SESSION_1, { tenantId: 'tenant-a', clientId: 'client-1', subject: 'user-1' });
 
-      const session = store.getOrCreate(SESSION_1, identity);
-      expect(session.tenantId).toBe('tenant-a');
-      expect(session.clientId).toBe('client-1');
-      expect(session.subject).toBe('user@example.com');
+      expect(
+        store.isValidForIdentity(SESSION_1, {
+          tenantId: 'tenant-a',
+          clientId: 'client-1',
+          subject: 'user-1',
+        }),
+      ).toBe(true);
     });
 
-    it('should create session without identity (backwards compatibility)', () => {
-      const session = store.getOrCreate(SESSION_1);
-      expect(session.tenantId).toBeUndefined();
-      expect(session.clientId).toBeUndefined();
-      expect(session.subject).toBeUndefined();
+    it('registers without identity (no-auth mode)', () => {
+      register(SESSION_1);
+      expect(store.isValidForIdentity(SESSION_1)).toBe(true);
     });
 
-    it('should lazy-bind identity on first authenticated request', () => {
-      // Create session without identity
-      const session1 = store.getOrCreate(SESSION_1);
-      expect(session1.tenantId).toBeUndefined();
+    it('lazy-binds identity on the first authenticated request', () => {
+      register(SESSION_1);
 
-      // Bind identity on subsequent request
-      const identity: SessionIdentity = {
-        tenantId: 'tenant-a',
-        clientId: 'client-1',
-      };
-      const session2 = store.getOrCreate(SESSION_1, identity);
-
-      expect(session2.tenantId).toBe('tenant-a');
-      expect(session2.clientId).toBe('client-1');
-      expect(session1).toBe(session2); // Same session object
+      expect(store.isValidForIdentity(SESSION_1, { tenantId: 'tenant-a' })).toBe(true);
+      // Bound now — a different tenant can no longer reach it.
+      expect(store.isValidForIdentity(SESSION_1, { tenantId: 'tenant-b' })).toBe(false);
     });
 
-    it('should not rebind identity once set', () => {
-      // Create with first identity
-      const identity1: SessionIdentity = {
-        tenantId: 'tenant-a',
-        clientId: 'client-1',
-      };
-      store.getOrCreate(SESSION_1, identity1);
+    it('does not rebind identity once set', () => {
+      register(SESSION_1, { tenantId: 'tenant-a' });
 
-      // Try to rebind with different identity (should not change)
-      const identity2: SessionIdentity = {
-        tenantId: 'tenant-b',
-        clientId: 'client-2',
-      };
-      const session = store.getOrCreate(SESSION_1, identity2);
-
-      // Should still have original identity
-      expect(session.tenantId).toBe('tenant-a');
-      expect(session.clientId).toBe('client-1');
+      expect(store.isValidForIdentity(SESSION_1, { tenantId: 'tenant-b' })).toBe(false);
+      expect(store.isValidForIdentity(SESSION_1, { tenantId: 'tenant-a' })).toBe(true);
     });
   });
 
   describe('Tenant Isolation - Security', () => {
-    it('should accept valid tenant for bound session', () => {
-      const identity: SessionIdentity = {
-        tenantId: 'tenant-a',
-        clientId: 'client-1',
-      };
-      store.getOrCreate(SESSION_1, identity);
-
-      // Validate with same tenant
-      expect(store.isValidForIdentity(SESSION_1, identity)).toBe(true);
+    it('accepts the bound tenant', () => {
+      register(SESSION_1, { tenantId: 'tenant-a' });
+      expect(store.isValidForIdentity(SESSION_1, { tenantId: 'tenant-a' })).toBe(true);
     });
 
-    it('should REJECT session reuse across different tenants (CRITICAL)', () => {
-      // User from tenant-a creates session
-      const tenantA: SessionIdentity = {
-        tenantId: 'tenant-a',
-        clientId: 'client-1',
-      };
-      store.getOrCreate(SESSION_1, tenantA);
+    it('REJECTS session reuse across different tenants (CRITICAL)', () => {
+      register(SESSION_1, { tenantId: 'tenant-a', clientId: 'client-1' });
 
-      // Attacker from tenant-b tries to use same session
-      const tenantB: SessionIdentity = {
-        tenantId: 'tenant-b',
-        clientId: 'client-2',
-      };
-
-      // Should REJECT - this prevents session hijacking
-      expect(store.isValidForIdentity(SESSION_1, tenantB)).toBe(false);
+      expect(
+        store.isValidForIdentity(SESSION_1, { tenantId: 'tenant-b', clientId: 'client-1' }),
+      ).toBe(false);
     });
 
-    it('should REJECT session reuse across different clients', () => {
-      // User with client-1 creates session
-      const client1: SessionIdentity = {
-        tenantId: 'tenant-a',
-        clientId: 'client-1',
-      };
-      store.getOrCreate(SESSION_1, client1);
+    it('REJECTS session reuse across different clients', () => {
+      register(SESSION_1, { tenantId: 'tenant-a', clientId: 'client-1' });
 
-      // Different client from same tenant tries to use session
-      const client2: SessionIdentity = {
-        tenantId: 'tenant-a',
-        clientId: 'client-2',
-      };
-
-      // Should REJECT
-      expect(store.isValidForIdentity(SESSION_1, client2)).toBe(false);
+      expect(
+        store.isValidForIdentity(SESSION_1, { tenantId: 'tenant-a', clientId: 'client-2' }),
+      ).toBe(false);
     });
 
-    it('should allow unbound session in no-auth mode', () => {
-      // Create session without identity (no-auth mode)
-      store.getOrCreate(SESSION_1);
-
-      // Should accept requests without identity
+    it('allows an unbound session in no-auth mode', () => {
+      register(SESSION_1);
       expect(store.isValidForIdentity(SESSION_1)).toBe(true);
       expect(store.isValidForIdentity(SESSION_1, undefined)).toBe(true);
     });
 
-    it('should REJECT authenticated request for unbound session', () => {
-      // Session created without identity
-      store.getOrCreate(SESSION_1);
-
-      // Authenticated request with identity
-      const identity: SessionIdentity = {
-        tenantId: 'tenant-a',
-      };
-
-      // Should allow (will trigger lazy binding)
-      expect(store.isValidForIdentity(SESSION_1, identity)).toBe(true);
-    });
-
-    it('should REJECT unauthenticated request for bound session', () => {
-      // Session created with identity
-      const identity: SessionIdentity = {
-        tenantId: 'tenant-a',
-        clientId: 'client-1',
-      };
-      store.getOrCreate(SESSION_1, identity);
-
-      // Unauthenticated request (no identity)
-      expect(store.isValidForIdentity(SESSION_1)).toBe(false);
+    it('REJECTS an unauthenticated request for a bound session', () => {
+      register(SESSION_1, { tenantId: 'tenant-a' });
       expect(store.isValidForIdentity(SESSION_1, undefined)).toBe(false);
     });
   });
 
   describe('Subject Isolation', () => {
-    it('should REJECT session reuse across different subjects', () => {
-      const user1: SessionIdentity = {
-        tenantId: 'tenant-a',
-        clientId: 'client-1',
-        subject: 'user-1@example.com',
-      };
-      store.getOrCreate(SESSION_1, user1);
+    it('REJECTS session reuse across different subjects', () => {
+      register(SESSION_1, { tenantId: 'tenant-a', subject: 'user-1' });
 
-      const user2: SessionIdentity = {
-        tenantId: 'tenant-a',
-        clientId: 'client-1',
-        subject: 'user-2@example.com',
-      };
-      expect(store.isValidForIdentity(SESSION_1, user2)).toBe(false);
+      expect(store.isValidForIdentity(SESSION_1, { tenantId: 'tenant-a', subject: 'user-2' })).toBe(
+        false,
+      );
     });
 
-    it('should accept same subject for bound session', () => {
-      const identity: SessionIdentity = {
-        tenantId: 'tenant-a',
-        clientId: 'client-1',
-        subject: 'user-1@example.com',
-      };
-      store.getOrCreate(SESSION_1, identity);
-      expect(store.isValidForIdentity(SESSION_1, identity)).toBe(true);
+    it('accepts the same subject for a bound session', () => {
+      register(SESSION_1, { tenantId: 'tenant-a', subject: 'user-1' });
+
+      expect(store.isValidForIdentity(SESSION_1, { tenantId: 'tenant-a', subject: 'user-1' })).toBe(
+        true,
+      );
     });
 
-    it('should validate when only subject is set', () => {
-      const identity: SessionIdentity = { subject: 'user-1@example.com' };
-      store.getOrCreate(SESSION_1, identity);
+    it('validates when only subject is set', () => {
+      register(SESSION_1, { subject: 'user-1' });
 
-      expect(store.isValidForIdentity(SESSION_1, { subject: 'user-1@example.com' })).toBe(true);
-      expect(store.isValidForIdentity(SESSION_1, { subject: 'user-2@example.com' })).toBe(false);
+      expect(store.isValidForIdentity(SESSION_1, { subject: 'user-1' })).toBe(true);
+      expect(store.isValidForIdentity(SESSION_1, { subject: 'user-2' })).toBe(false);
     });
 
-    it('should REJECT unauthenticated request for subject-bound session', () => {
-      const identity: SessionIdentity = { subject: 'user-1@example.com' };
-      store.getOrCreate(SESSION_1, identity);
-
-      expect(store.isValidForIdentity(SESSION_1)).toBe(false);
+    it('REJECTS an unauthenticated request for a subject-bound session', () => {
+      register(SESSION_1, { subject: 'user-1' });
       expect(store.isValidForIdentity(SESSION_1, undefined)).toBe(false);
     });
   });
 
-  describe('Protocol session state', () => {
-    it('persists negotiated capabilities and exposes them through session hooks', () => {
-      const capabilities = {
-        elicitation: { form: {} },
-        sampling: {},
-      };
-      store.getOrCreate(SESSION_1);
+  describe('Partial Identity Matching', () => {
+    it('validates when only tenantId is set', () => {
+      register(SESSION_1, { tenantId: 'tenant-a' });
 
-      store.setClientCapabilities(SESSION_1, capabilities);
-
-      const hooks = store.createProtocolSessionHooks(SESSION_1);
-      expect(hooks?.clientCapabilities).toEqual(capabilities);
-      expect(hooks?.registerRequest).toBeTypeOf('function');
-      expect(store.createProtocolSessionHooks(SESSION_2)).toBeUndefined();
+      expect(store.isValidForIdentity(SESSION_1, { tenantId: 'tenant-a' })).toBe(true);
+      expect(store.isValidForIdentity(SESSION_1, { tenantId: 'tenant-a', clientId: 'any' })).toBe(
+        true,
+      );
     });
 
-    it('registers by typed request ID and unregisters only that invocation', () => {
-      store.getOrCreate(SESSION_A);
-      store.getOrCreate(SESSION_B);
-      const hooksA = store.createProtocolSessionHooks(SESSION_A)!;
-      const hooksB = store.createProtocolSessionHooks(SESSION_B)!;
-      const removed = hooksA.registerRequest!(42);
-      const active = hooksA.registerRequest!(42);
-      const stringId = hooksA.registerRequest!('42');
-      const otherSession = hooksB.registerRequest!(42);
+    it('validates when only clientId is set', () => {
+      register(SESSION_1, { clientId: 'client-1' });
 
-      removed.unregister();
-      removed.unregister();
-      expect(store.cancelRequest(SESSION_A, 42, 'client stopped')).toBe(true);
-
-      expect(removed.signal.aborted).toBe(false);
-      expect(active.signal.aborted).toBe(true);
-      expect(active.signal.reason).toMatchObject({ name: 'AbortError', message: 'client stopped' });
-      expect(stringId.signal.aborted).toBe(false);
-      expect(otherSession.signal.aborted).toBe(false);
-      expect(store.cancelRequest(SESSION_A, '42')).toBe(true);
-      expect(stringId.signal.aborted).toBe(true);
-    });
-
-    it('does not route cancellation across sessions', () => {
-      store.getOrCreate(SESSION_A);
-      store.getOrCreate(SESSION_B);
-      const requestA = store.createProtocolSessionHooks(SESSION_A)!.registerRequest!('shared-id');
-      const requestB = store.createProtocolSessionHooks(SESSION_B)!.registerRequest!('shared-id');
-
-      expect(store.cancelRequest(SESSION_A, 'shared-id')).toBe(true);
-      expect(requestA.signal.aborted).toBe(true);
-      expect(requestB.signal.aborted).toBe(false);
-      expect(store.cancelRequest(SESSION_2, 'shared-id')).toBe(false);
-    });
-
-    it('routes server responses once by session and unique wire ID', () => {
-      store.getOrCreate(SESSION_A);
-      store.getOrCreate(SESSION_B);
-      const deliveredA: unknown[] = [];
-      const deliveredB: unknown[] = [];
-      const firstA = store.registerServerRequest(SESSION_A, (response) => {
-        deliveredA.push(response);
-      })!;
-      const secondA = store.registerServerRequest(SESSION_A, (response) => {
-        deliveredA.push(response);
-      })!;
-      const requestB = store.registerServerRequest(SESSION_B, (response) => {
-        deliveredB.push(response);
-      })!;
-
-      expect(new Set([firstA.requestId, secondA.requestId, requestB.requestId])).toHaveLength(3);
-      const response = {
-        jsonrpc: '2.0' as const,
-        id: firstA.requestId,
-        result: { action: 'accept' },
-      };
-      expect(store.routeServerResponse(SESSION_B, response)).toBe(false);
-      expect(store.routeServerResponse(SESSION_A, response)).toBe(true);
-      expect(store.routeServerResponse(SESSION_A, response)).toBe(false);
-      expect(deliveredA).toEqual([response]);
-      expect(deliveredB).toEqual([]);
-
-      secondA.unregister();
-      expect(
-        store.routeServerResponse(SESSION_A, {
-          jsonrpc: '2.0',
-          id: secondA.requestId,
-          result: { action: 'accept' },
-        }),
-      ).toBe(false);
-    });
-
-    it('rejects pending server requests when the session terminates', () => {
-      store.getOrCreate(SESSION_1);
-      const delivered: unknown[] = [];
-      const registration = store.registerServerRequest(SESSION_1, (response) => {
-        delivered.push(response);
-      })!;
-
-      store.terminate(SESSION_1);
-
-      expect(delivered).toEqual([
-        {
-          jsonrpc: '2.0',
-          id: registration.requestId,
-          error: {
-            code: ErrorCode.ConnectionClosed,
-            message: 'MCP session ended',
-          },
-        },
-      ]);
-      expect(() => registration.unregister()).not.toThrow();
-    });
-
-    it('aborts every in-flight request when the session terminates', () => {
-      store.getOrCreate(SESSION_1);
-      const hooks = store.createProtocolSessionHooks(SESSION_1)!;
-      const first = hooks.registerRequest!(1);
-      const second = hooks.registerRequest!('two');
-
-      store.terminate(SESSION_1);
-
-      for (const registration of [first, second]) {
-        expect(registration.signal.aborted).toBe(true);
-        expect(registration.signal.reason).toMatchObject({
-          name: 'AbortError',
-          message: 'MCP session ended',
-        });
-        expect(() => registration.unregister()).not.toThrow();
-      }
-      expect(store.createProtocolSessionHooks(SESSION_1)).toBeUndefined();
-      expect(store.cancelRequest(SESSION_1, 1)).toBe(false);
+      expect(store.isValidForIdentity(SESSION_1, { clientId: 'client-1' })).toBe(true);
+      expect(store.isValidForIdentity(SESSION_1, { clientId: 'client-2' })).toBe(false);
     });
   });
 
   describe('Staleness & Cleanup', () => {
-    it('should invalidate stale sessions', async () => {
-      // Use a very short timeout for faster test execution
-      const shortStore = new SessionStore(50); // 50ms timeout
-      shortStore.getOrCreate(SESSION_1);
-      expect(shortStore.isValidForIdentity(SESSION_1)).toBe(true);
-
-      // Wait for session to become stale
-      await new Promise((resolve) => setTimeout(resolve, 100));
-
-      expect(shortStore.isValidForIdentity(SESSION_1)).toBe(false);
-      shortStore.destroy();
-    });
-
-    it('should invalidate stale sessions with identity validation', async () => {
-      const shortStore = new SessionStore(50); // 50ms timeout
-      const identity: SessionIdentity = {
-        tenantId: 'tenant-a',
-      };
-      shortStore.getOrCreate(SESSION_1, identity);
-      expect(shortStore.isValidForIdentity(SESSION_1, identity)).toBe(true);
-
-      // Wait for session to become stale
-      await new Promise((resolve) => setTimeout(resolve, 100));
-
-      expect(shortStore.isValidForIdentity(SESSION_1, identity)).toBe(false);
-      shortStore.destroy();
-    });
-
-    it('should evict stale sessions on the scheduled cleanup interval', async () => {
+    it('invalidates and tears down a stale session on validation', async () => {
       vi.useFakeTimers();
-      vi.setSystemTime(new Date('2026-08-02T00:00:00.000Z'));
-      const shortStore = new SessionStore(1_000);
-      shortStore.getOrCreate(SESSION_1);
+      const connection = register(SESSION_1);
 
-      vi.setSystemTime(new Date('2026-08-02T00:01:00.001Z'));
-      await vi.advanceTimersByTimeAsync(60_000);
+      vi.advanceTimersByTime(STALE_TIMEOUT + 1);
 
-      expect(shortStore.getSessionCount()).toBe(0);
-      shortStore.destroy();
+      expect(store.isValidForIdentity(SESSION_1)).toBe(false);
+      await vi.runOnlyPendingTimersAsync();
+      expect(store.getConnection(SESSION_1)).toBeUndefined();
+      expect(connection.closes.transport).toBe(1);
+    });
+
+    it('invalidates a stale session even when the identity matches', async () => {
+      vi.useFakeTimers();
+      register(SESSION_1, { tenantId: 'tenant-a' });
+
+      vi.advanceTimersByTime(STALE_TIMEOUT + 1);
+
+      expect(store.isValidForIdentity(SESSION_1, { tenantId: 'tenant-a' })).toBe(false);
+    });
+
+    it('evicts stale sessions on the scheduled cleanup interval', async () => {
+      // The interval is created in the constructor, so the clock has to be
+      // faked before the store exists for the sweep to be drivable.
+      vi.useFakeTimers();
+      const scheduled = new SessionStore(STALE_TIMEOUT);
+      const connection = createTestConnection();
+      scheduled.register(SESSION_1, connection);
+      expect(scheduled.getSessionCount()).toBe(1);
+
+      await vi.advanceTimersByTimeAsync(STALE_TIMEOUT + 60_001);
+
+      expect(scheduled.getSessionCount()).toBe(0);
+      expect(connection.closes).toEqual({ server: 1, transport: 1 });
+      await scheduled.destroy();
     });
   });
 
   describe('Multi-Tenant Scenarios', () => {
-    it('should isolate sessions across multiple tenants', () => {
-      // Tenant A creates session
-      const tenantA: SessionIdentity = {
-        tenantId: 'tenant-a',
-        clientId: 'client-a',
-      };
-      store.getOrCreate(SESSION_A, tenantA);
+    it('isolates sessions across multiple tenants', () => {
+      register(SESSION_A, { tenantId: 'tenant-a', clientId: 'client-a' });
+      register(SESSION_B, { tenantId: 'tenant-b', clientId: 'client-b' });
 
-      // Tenant B creates different session
-      const tenantB: SessionIdentity = {
-        tenantId: 'tenant-b',
-        clientId: 'client-b',
-      };
-      store.getOrCreate(SESSION_B, tenantB);
+      expect(
+        store.isValidForIdentity(SESSION_A, { tenantId: 'tenant-a', clientId: 'client-a' }),
+      ).toBe(true);
+      expect(
+        store.isValidForIdentity(SESSION_B, { tenantId: 'tenant-b', clientId: 'client-b' }),
+      ).toBe(true);
 
-      // Each tenant can access their own session
-      expect(store.isValidForIdentity(SESSION_A, tenantA)).toBe(true);
-      expect(store.isValidForIdentity(SESSION_B, tenantB)).toBe(true);
-
-      // But NOT each other's sessions
-      expect(store.isValidForIdentity(SESSION_A, tenantB)).toBe(false);
-      expect(store.isValidForIdentity(SESSION_B, tenantA)).toBe(false);
-    });
-
-    it('should handle same session ID across different tenants (edge case)', () => {
-      // This shouldn't happen with crypto-strong IDs, but test defensive behavior
-      // Tenant A creates session first
-      const tenantA: SessionIdentity = {
-        tenantId: 'tenant-a',
-      };
-      store.getOrCreate(SHARED_SESSION, tenantA);
-
-      // Tenant B tries to use same session ID
-      const tenantB: SessionIdentity = {
-        tenantId: 'tenant-b',
-      };
-
-      // Tenant A should work
-      expect(store.isValidForIdentity(SHARED_SESSION, tenantA)).toBe(true);
-
-      // Tenant B should be REJECTED (session belongs to A)
-      expect(store.isValidForIdentity(SHARED_SESSION, tenantB)).toBe(false);
-    });
-  });
-
-  describe('Partial Identity Matching', () => {
-    it('should validate when only tenantId is set', () => {
-      const identity: SessionIdentity = {
-        tenantId: 'tenant-a',
-        // No clientId
-      };
-      store.getOrCreate(SESSION_1, identity);
-
-      // Should validate with same tenant
-      expect(store.isValidForIdentity(SESSION_1, { tenantId: 'tenant-a' })).toBe(true);
-
-      // Should reject different tenant
-      expect(store.isValidForIdentity(SESSION_1, { tenantId: 'tenant-b' })).toBe(false);
-    });
-
-    it('should validate when only clientId is set', () => {
-      const identity: SessionIdentity = {
-        clientId: 'client-1',
-        // No tenantId
-      };
-      store.getOrCreate(SESSION_1, identity);
-
-      // Should validate with same client
-      expect(store.isValidForIdentity(SESSION_1, { clientId: 'client-1' })).toBe(true);
-
-      // Should reject different client
-      expect(store.isValidForIdentity(SESSION_1, { clientId: 'client-2' })).toBe(false);
+      // Cross-tenant access is refused in both directions.
+      expect(
+        store.isValidForIdentity(SESSION_A, { tenantId: 'tenant-b', clientId: 'client-b' }),
+      ).toBe(false);
+      expect(
+        store.isValidForIdentity(SESSION_B, { tenantId: 'tenant-a', clientId: 'client-a' }),
+      ).toBe(false);
     });
   });
 });

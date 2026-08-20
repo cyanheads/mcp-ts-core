@@ -18,6 +18,7 @@ export const PUBLIC_RUNTIME_EXPORTS = {
     'createFail',
     'createRecoveryFor',
     'disabledTool',
+    'inputRequired',
     'isCompletable',
     'prompt',
     'resource',
@@ -29,7 +30,6 @@ export const PUBLIC_RUNTIME_EXPORTS = {
   './tools': ['disabledTool', 'tool'],
   './resources': ['resource'],
   './prompts': ['prompt'],
-  './tasks': ['isTaskToolDefinition'],
   './errors': [
     'ErrorSchema',
     'JsonRpcErrorCode',

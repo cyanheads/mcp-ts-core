@@ -36,7 +36,6 @@ const EXPECTED_PUBLIC_SUBPATHS = [
   './services',
   './storage',
   './storage/types',
-  './tasks',
   './testing',
   './testing/fuzz',
   './testing/vitest',

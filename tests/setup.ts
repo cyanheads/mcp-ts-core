@@ -23,24 +23,12 @@ if (typeof process !== 'undefined' && process.env && !process.env.NODE_ENV) {
 // ensure poolOptions.forks.isolate = true in vitest.config.ts.
 // See: https://github.com/vitest-dev/vitest/issues/5858
 
-vi.mock('@modelcontextprotocol/sdk/server/mcp.js', () => {
-  class McpServer {
-    connect = vi.fn(async () => {});
-  }
-  class ResourceTemplate {
-    match = vi.fn(() => null);
-    render = vi.fn(() => '');
-  }
-  return { McpServer, ResourceTemplate };
-});
-
-vi.mock('@modelcontextprotocol/sdk/server/stdio.js', () => {
-  const StdioServerTransport: any = vi.fn(function StdioServerTransport(
-    this: any,
-    ..._args: any[]
-  ) {});
-  return { StdioServerTransport };
-});
+// The SDK is no longer globally mocked. v2 collapses the server surface onto a
+// single `@modelcontextprotocol/server` entry, so a whole-module stub would also
+// replace `createMcpHandler`, `inputRequired`, the error classes, and the wire
+// codecs that the framework depends on for real behavior. Constructing a real
+// `McpServer` is cheap (no I/O until `connect`); tests that need a stub mock the
+// entry locally with `importOriginal` and override only what they assert on.
 
 vi.mock('chrono-node', () => ({
   parseDate: vi.fn(() => null),

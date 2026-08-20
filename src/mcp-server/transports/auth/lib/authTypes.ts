@@ -2,7 +2,7 @@
  * @fileoverview Shared types for authentication middleware.
  * @module src/mcp-server/transports/auth/lib/authTypes
  */
-import type { AuthInfo as SdkAuthInfo } from '@modelcontextprotocol/sdk/server/auth/types.js';
+import type { AuthInfo as SdkAuthInfo } from '@modelcontextprotocol/server';
 
 /**
  * Extends the SDK's base AuthInfo with common optional JWT claims

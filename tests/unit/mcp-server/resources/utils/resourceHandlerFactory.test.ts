@@ -1,15 +1,23 @@
 /**
  * @fileoverview Tests for createResourceHandler — the production handler factory
  * for all `resource()` builder definitions. Verifies context creation with uri,
- * param validation, error re-throwing, response formatting, and capability wrapping.
+ * param validation, error re-throwing, response formatting, multi-round-trip
+ * input, and notification routing.
  * @module tests/mcp-server/resources/utils/resourceHandlerFactory.test
  */
 
-import type { RequestHandlerExtra } from '@modelcontextprotocol/sdk/shared/protocol.js';
-import type { ServerNotification, ServerRequest } from '@modelcontextprotocol/sdk/types.js';
+import {
+  type InputRequiredResult,
+  inputRequired,
+  type ReadResourceResult,
+} from '@modelcontextprotocol/server';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { z } from 'zod';
 import { JsonRpcErrorCode, McpError } from '@/types-global/errors.js';
+import {
+  makeSenderlessServerContext,
+  makeServerContext,
+} from '../../../../helpers/server-context.js';
 
 // ---------------------------------------------------------------------------
 // Module mocks — vi.hoisted ensures variables are available during vi.mock hoisting
@@ -59,6 +67,7 @@ vi.mock('@/utils/internal/requestContext.js', () => ({
 // Imports (after mocks)
 // ---------------------------------------------------------------------------
 
+import type { ResourceSubscriptions } from '@/mcp-server/notifications.js';
 import type { AnyResourceDefinition } from '@/mcp-server/resources/utils/resourceDefinition.js';
 import { resource } from '@/mcp-server/resources/utils/resourceDefinition.js';
 import {
@@ -71,16 +80,16 @@ import {
 // Helpers
 // ---------------------------------------------------------------------------
 
-type MockSdkContext = RequestHandlerExtra<ServerRequest, ServerNotification>;
-
-function createMockSdkContext(overrides: Record<string, unknown> = {}): MockSdkContext {
-  return {
-    signal: new AbortController().signal,
-    requestId: 'sdk-request-id',
-    sendNotification: () => Promise.resolve(),
-    sendRequest: () => Promise.resolve({}) as never,
-    ...overrides,
-  } as MockSdkContext;
+/**
+ * Narrows a handler result to the `resources/read` arm. The factory returns
+ * `ReadResourceResult | InputRequiredResult`, so every content assertion goes
+ * through here rather than casting at each call site.
+ */
+function readContents(
+  result: ReadResourceResult | InputRequiredResult,
+): ReadResourceResult['contents'] {
+  expect(result).toHaveProperty('contents');
+  return (result as ReadResourceResult).contents;
 }
 
 const mockStorage = {
@@ -131,11 +140,11 @@ describe('createResourceHandler', () => {
 
       const handler = createResourceHandler(def as AnyResourceDefinition, services, notifiers);
       const uri = new URL('items://item-42/data');
-      const result = await handler(uri, { itemId: 'item-42' }, createMockSdkContext());
+      const contents = readContents(await handler(uri, { itemId: 'item-42' }, makeServerContext()));
 
       // Response
-      expect(result.contents).toHaveLength(1);
-      const content = result.contents[0]!;
+      expect(contents).toHaveLength(1);
+      const content = contents[0]!;
       expect(content.uri).toBe('items://item-42/data');
       expect(content.mimeType).toBe('application/json');
       const parsed = JSON.parse((content as { text: string }).text);
@@ -161,9 +170,11 @@ describe('createResourceHandler', () => {
       });
 
       const handler = createResourceHandler(def as AnyResourceDefinition, services, notifiers);
-      const result = await handler(new URL('custom://abc'), { id: 'abc' }, createMockSdkContext());
+      const contents = readContents(
+        await handler(new URL('custom://abc'), { id: 'abc' }, makeServerContext()),
+      );
 
-      expect((result.contents[0] as { text: string }).text).toBe('Custom: abc');
+      expect((contents[0] as { text: string }).text).toBe('Custom: abc');
     });
 
     it('should default mimeType to application/json', async () => {
@@ -173,9 +184,11 @@ describe('createResourceHandler', () => {
       });
 
       const handler = createResourceHandler(def as AnyResourceDefinition, services, notifiers);
-      const result = await handler(new URL('plain://x'), { id: 'x' }, createMockSdkContext());
+      const contents = readContents(
+        await handler(new URL('plain://x'), { id: 'x' }, makeServerContext()),
+      );
 
-      expect(result.contents[0]!.mimeType).toBe('application/json');
+      expect(contents[0]!.mimeType).toBe('application/json');
     });
 
     it('should preserve plain text and JSON-encode vendor JSON resources', async () => {
@@ -190,19 +203,23 @@ describe('createResourceHandler', () => {
         handler: () => 'hello',
       });
 
-      const plainResult = await createResourceHandler(
-        plain as AnyResourceDefinition,
-        services,
-        notifiers,
-      )(new URL('plain://text'), {}, createMockSdkContext());
-      const jsonResult = await createResourceHandler(
-        vendorJson as AnyResourceDefinition,
-        services,
-        notifiers,
-      )(new URL('vendor://json'), {}, createMockSdkContext());
+      const plainContents = readContents(
+        await createResourceHandler(plain as AnyResourceDefinition, services, notifiers)(
+          new URL('plain://text'),
+          {},
+          makeServerContext(),
+        ),
+      );
+      const jsonContents = readContents(
+        await createResourceHandler(vendorJson as AnyResourceDefinition, services, notifiers)(
+          new URL('vendor://json'),
+          {},
+          makeServerContext(),
+        ),
+      );
 
-      expect((plainResult.contents[0] as { text: string }).text).toBe('hello');
-      expect((jsonResult.contents[0] as { text: string }).text).toBe('"hello"');
+      expect((plainContents[0] as { text: string }).text).toBe('hello');
+      expect((jsonContents[0] as { text: string }).text).toBe('"hello"');
     });
 
     it('should pass string handler results through without JSON quote wrapping', async () => {
@@ -214,9 +231,11 @@ describe('createResourceHandler', () => {
       });
 
       const handler = createResourceHandler(def as AnyResourceDefinition, services, notifiers);
-      const result = await handler(new URL('ui://app/app.html'), {}, createMockSdkContext());
+      const contents = readContents(
+        await handler(new URL('ui://app/app.html'), {}, makeServerContext()),
+      );
 
-      expect(result.contents[0]).toMatchObject({
+      expect(contents[0]).toMatchObject({
         uri: 'ui://app/app.html',
         mimeType: 'text/html;profile=mcp-app',
         text: html,
@@ -231,9 +250,11 @@ describe('createResourceHandler', () => {
       });
 
       const handler = createResourceHandler(def as AnyResourceDefinition, services, notifiers);
-      const result = await handler(new URL('json://app/data'), {}, createMockSdkContext());
+      const contents = readContents(
+        await handler(new URL('json://app/data'), {}, makeServerContext()),
+      );
 
-      expect(result.contents[0]).toMatchObject({
+      expect(contents[0]).toMatchObject({
         uri: 'json://app/data',
         mimeType: 'application/json',
         text: '"hello"',
@@ -259,7 +280,7 @@ describe('createResourceHandler', () => {
 
       const handler = createResourceHandler(def as AnyResourceDefinition, services, notifiers);
       const uri = new URL('scheme://test-123');
-      await handler(uri, { id: 'test-123' }, createMockSdkContext());
+      await handler(uri, { id: 'test-123' }, makeServerContext());
 
       expect(capturedUri).toBe(uri);
     });
@@ -276,158 +297,135 @@ describe('createResourceHandler', () => {
       });
 
       const handler = createResourceHandler(def as AnyResourceDefinition, services, notifiers);
-      await handler(new URL('t://x'), { id: 'x' }, createMockSdkContext());
+      await handler(new URL('t://x'), { id: 'x' }, makeServerContext());
 
       expect(capturedTenant).toBe('default');
     });
 
-    it('should wire ctx.elicit when notifiers provide elicitInput and client advertises capability', async () => {
-      let capturedCtx: any;
-      const mockElicitInput = vi.fn(async () => ({ action: 'accept' as const, content: {} }));
+    it('threads the request scope cancellation signal onto ctx.signal', async () => {
+      const controller = new AbortController();
+      let capturedSignal: AbortSignal | undefined;
 
-      const def = resource('cap://{id}', {
-        description: 'Capability test.',
+      const def = resource('signal://{id}', {
+        description: 'Signal test.',
         handler: (_params, ctx) => {
-          capturedCtx = ctx;
+          capturedSignal = ctx.signal;
           return {};
         },
       });
 
-      const notifiersWithElicit: ResourceHandlerNotifiers = {
-        elicitInput: mockElicitInput,
-        getClientCapabilities: () => ({ elicitation: {} }),
-      };
-
-      const handler = createResourceHandler(
-        def as AnyResourceDefinition,
-        services,
-        notifiersWithElicit,
-      );
-      await handler(new URL('cap://x'), { id: 'x' }, createMockSdkContext());
-
-      expect(capturedCtx.elicit).toBeDefined();
-      expect(typeof capturedCtx.elicit).toBe('function');
-      expect(typeof capturedCtx.elicit.url).toBe('function');
-    });
-
-    it('should leave ctx.elicit undefined when client does not advertise elicitation', async () => {
-      let capturedCtx: any;
-
-      const def = resource('nocap://{id}', {
-        description: 'No capability.',
-        handler: (_params, ctx) => {
-          capturedCtx = ctx;
-          return {};
-        },
-      });
-
-      const notifiersNoCapability: ResourceHandlerNotifiers = {
-        elicitInput: vi.fn(),
-        getClientCapabilities: () => ({}),
-      };
-
-      const handler = createResourceHandler(
-        def as AnyResourceDefinition,
-        services,
-        notifiersNoCapability,
-      );
-      await handler(new URL('nocap://x'), { id: 'x' }, createMockSdkContext());
-
-      expect(capturedCtx.elicit).toBeUndefined();
-    });
-
-    it('routes request-scoped elicitation through sdkContext.sendRequest', async () => {
-      const fallbackElicitInput = vi.fn<NonNullable<ResourceHandlerNotifiers['elicitInput']>>();
-      const sendRequest = vi.fn(async (_request: unknown, _resultSchema: unknown) => ({
-        action: 'accept' as const,
-        content: { choice: 'yes' },
-      }));
-      const def = resource('elicit://{id}', {
-        description: 'Uses request-scoped elicitation.',
-        handler: async (_params, ctx) => {
-          const result = await ctx.elicit!(
-            'Continue?',
-            z.object({ choice: z.enum(['yes', 'no']).describe('Decision') }),
-          );
-          return { choice: result.content?.choice };
-        },
-      });
-      const handler = createResourceHandler(def as AnyResourceDefinition, services, {
-        elicitInput: fallbackElicitInput,
-        getClientCapabilities: () => ({ elicitation: {} }),
-        requestScopedElicitation: true,
-      });
-
+      const handler = createResourceHandler(def as AnyResourceDefinition, services, notifiers);
       await handler(
-        new URL('elicit://item'),
-        { id: 'item' },
-        createMockSdkContext({ sendRequest }),
+        new URL('signal://x'),
+        { id: 'x' },
+        makeServerContext({ signal: controller.signal }),
       );
 
-      expect(fallbackElicitInput).not.toHaveBeenCalled();
-      expect(sendRequest).toHaveBeenCalledOnce();
-      expect(sendRequest.mock.calls[0]?.[0]).toEqual({
-        method: 'elicitation/create',
-        params: expect.objectContaining({
-          mode: 'form',
-          message: 'Continue?',
-          requestedSchema: expect.objectContaining({ type: 'object' }),
-        }),
-      });
-      expect(sendRequest.mock.calls[0]?.[1]).toBeDefined();
+      expect(capturedSignal).toBe(controller.signal);
+    });
+  });
+
+  // -----------------------------------------------------------------------
+  // Multi-round-trip input (ctx.requestInput / ctx.inputs)
+  // -----------------------------------------------------------------------
+
+  describe('multi-round-trip input', () => {
+    const confirmingResource = resource('confirm://{id}', {
+      description: 'Requests confirmation before answering.',
+      params: z.object({ id: z.string().describe('id') }),
+      handler: (params, ctx) => {
+        const confirmed = ctx.inputs.accepted<{ ok: boolean }>('confirm');
+        if (!confirmed) {
+          return ctx.requestInput({
+            inputRequests: {
+              confirm: inputRequired.elicit({
+                message: `Read ${params.id}?`,
+                requestedSchema: z.object({ ok: z.boolean().describe('Confirm the read.') }),
+              }),
+            },
+            requestState: 'awaiting-confirm',
+          });
+        }
+        return { id: params.id, confirmed: confirmed.ok };
+      },
     });
 
-    it.each(['sdk', 'protocol'] as const)(
-      'merges the %s cancellation signal and unregisters after completion',
-      async (source) => {
-        const sdkController = new AbortController();
-        const protocolController = new AbortController();
-        const unregister = vi.fn();
-        const registerRequest = vi.fn(() => ({
-          signal: protocolController.signal,
-          unregister,
-        }));
-        let releaseHandler!: () => void;
-        const handlerReleased = new Promise<void>((resolve) => {
-          releaseHandler = resolve;
-        });
-        let publishSignal!: (signal: AbortSignal) => void;
-        const signalReady = new Promise<AbortSignal>((resolve) => {
-          publishSignal = resolve;
-        });
-        const def = resource('cancel://{id}', {
-          description: 'Checks merged cancellation.',
-          handler: async (_params, ctx) => {
-            publishSignal(ctx.signal);
-            await handlerReleased;
-            return { ok: true };
+    it('returns the SDK input_required result instead of throwing an McpError', async () => {
+      const handler = createResourceHandler(
+        confirmingResource as AnyResourceDefinition,
+        services,
+        notifiers,
+      );
+
+      const result = await handler(
+        new URL('confirm://item-1'),
+        { id: 'item-1' },
+        makeServerContext(),
+      );
+
+      expect(result).toMatchObject({
+        resultType: 'input_required',
+        requestState: 'awaiting-confirm',
+        inputRequests: {
+          confirm: {
+            method: 'elicitation/create',
+            params: expect.objectContaining({ message: 'Read item-1?', mode: 'form' }),
           },
-        });
-        const handler = createResourceHandler(def as AnyResourceDefinition, services, {
-          registerRequest,
-        });
+        },
+      });
+      expect(result).not.toHaveProperty('contents');
+    });
 
-        const resultPromise = handler(
-          new URL('cancel://item'),
-          { id: 'item' },
-          createMockSdkContext({ requestId: 91, signal: sdkController.signal }),
-        );
-        const mergedSignal = await signalReady;
-        const reason = new DOMException(`${source} cancelled`, 'AbortError');
-        if (source === 'sdk') sdkController.abort(reason);
-        else protocolController.abort(reason);
+    it('completes normally on the retried request carrying the input responses', async () => {
+      const handler = createResourceHandler(
+        confirmingResource as AnyResourceDefinition,
+        services,
+        notifiers,
+      );
 
-        expect(registerRequest).toHaveBeenCalledWith(91);
-        expect(mergedSignal).not.toBe(sdkController.signal);
-        expect(mergedSignal).not.toBe(protocolController.signal);
-        expect(mergedSignal.aborted).toBe(true);
-        expect(mergedSignal.reason).toBe(reason);
+      const contents = readContents(
+        await handler(
+          new URL('confirm://item-1'),
+          { id: 'item-1' },
+          makeServerContext({
+            inputResponses: { confirm: { action: 'accept', content: { ok: true } } },
+            requestState: 'awaiting-confirm',
+          }),
+        ),
+      );
 
-        releaseHandler();
-        await resultPromise;
-        expect(unregister).toHaveBeenCalledOnce();
-      },
-    );
+      expect(JSON.parse((contents[0] as { text: string }).text)).toEqual({
+        id: 'item-1',
+        confirmed: true,
+      });
+    });
+
+    it('exposes the round state and dropped response keys on ctx.inputs', async () => {
+      let capturedState: string | undefined;
+      let capturedDropped: readonly string[] | undefined;
+
+      const def = resource('state://{id}', {
+        description: 'Reads round state.',
+        handler: (_params, ctx) => {
+          capturedState = ctx.inputs.state<string>();
+          capturedDropped = ctx.inputs.dropped;
+          return { ok: true };
+        },
+      });
+
+      const handler = createResourceHandler(def as AnyResourceDefinition, services, notifiers);
+      await handler(
+        new URL('state://x'),
+        { id: 'x' },
+        makeServerContext({
+          requestState: 'round-2',
+          droppedInputResponseKeys: ['stale'],
+        }),
+      );
+
+      expect(capturedState).toBe('round-2');
+      expect(capturedDropped).toEqual(['stale']);
+    });
   });
 
   // -----------------------------------------------------------------------
@@ -463,12 +461,30 @@ describe('createResourceHandler', () => {
       });
 
       const handler = createResourceHandler(def as AnyResourceDefinition, services, notifiers);
-      await handler(new URL('log://x'), { id: 'x' }, createMockSdkContext({ sessionId: 'sess-r' }));
+      await handler(new URL('log://x'), { id: 'x' }, makeServerContext({ sessionId: 'sess-r' }));
 
       expect(requestContextService.createRequestContext).toHaveBeenCalledWith(
         expect.objectContaining({
           additionalContext: expect.objectContaining({ sessionId: 'sess-r' }),
           parentContext: expect.objectContaining({ sessionId: 'sess-r' }),
+        }),
+      );
+    });
+
+    it('carries the request scope id into RequestContext', async () => {
+      const { requestContextService } = await import('@/utils/internal/requestContext.js');
+
+      const def = resource('reqid://{id}', {
+        description: 'Request id correlation.',
+        handler: () => ({ ok: true }),
+      });
+
+      const handler = createResourceHandler(def as AnyResourceDefinition, services, notifiers);
+      await handler(new URL('reqid://x'), { id: 'x' }, makeServerContext({ requestId: 'req-77' }));
+
+      expect(requestContextService.createRequestContext).toHaveBeenCalledWith(
+        expect.objectContaining({
+          parentContext: expect.objectContaining({ requestId: 'req-77' }),
         }),
       );
     });
@@ -481,7 +497,7 @@ describe('createResourceHandler', () => {
       await handler(
         new URL('session://x'),
         { id: 'x' },
-        createMockSdkContext({ sessionId: 'sess-stateful' }),
+        makeServerContext({ sessionId: 'sess-stateful' }),
       );
 
       expect(getSessionId()).toBe('sess-stateful');
@@ -495,7 +511,7 @@ describe('createResourceHandler', () => {
       await handler(
         new URL('session://x'),
         { id: 'x' },
-        createMockSdkContext({ sessionId: 'sess-auto' }),
+        makeServerContext({ sessionId: 'sess-auto' }),
       );
 
       expect(getSessionId()).toBe('sess-auto');
@@ -509,7 +525,7 @@ describe('createResourceHandler', () => {
       await handler(
         new URL('session://x'),
         { id: 'x' },
-        createMockSdkContext({ sessionId: 'sess-stateless' }),
+        makeServerContext({ sessionId: 'sess-stateless' }),
       );
 
       expect(getSessionId()).toBeUndefined();
@@ -527,19 +543,19 @@ describe('createResourceHandler', () => {
       await handler(
         new URL('session://x'),
         { id: 'x' },
-        createMockSdkContext({ sessionId: 'sess-opt-in' }),
+        makeServerContext({ sessionId: 'sess-opt-in' }),
       );
 
       expect(getSessionId()).toBe('sess-opt-in');
     });
 
-    it('leaves ctx.sessionId undefined when SDK provides none, in any mode', async () => {
+    it('leaves ctx.sessionId undefined when the SDK provides none, in any mode', async () => {
       const { def, getSessionId } = makeSessionCapturingResource();
       const handler = createResourceHandler(def as AnyResourceDefinition, services, notifiers);
 
       for (const mode of ['stateful', 'auto', 'stateless'] as const) {
         mockConfig.mcpSessionMode = mode;
-        await handler(new URL('session://x'), { id: 'x' }, createMockSdkContext());
+        await handler(new URL('session://x'), { id: 'x' }, makeServerContext());
         expect(getSessionId()).toBeUndefined();
       }
     });
@@ -560,7 +576,7 @@ describe('createResourceHandler', () => {
       const handler = createResourceHandler(def as AnyResourceDefinition, services, notifiers);
 
       await expect(
-        handler(new URL('strict://abc'), { count: 'not-a-number' } as any, createMockSdkContext()),
+        handler(new URL('strict://abc'), { count: 'not-a-number' } as any, makeServerContext()),
       ).rejects.toThrow();
     });
 
@@ -578,7 +594,7 @@ describe('createResourceHandler', () => {
       const err = await handler(
         new URL('clinical://INVALID'),
         { nctId: 'INVALID' } as any,
-        createMockSdkContext(),
+        makeServerContext(),
       ).catch((e) => e);
 
       expect(err).toBeInstanceOf(McpError);
@@ -605,7 +621,7 @@ describe('createResourceHandler', () => {
       });
 
       const handler = createResourceHandler(def as AnyResourceDefinition, services, notifiers);
-      await handler(new URL('loose://x'), { id: 'x', extra: 'field' }, createMockSdkContext());
+      await handler(new URL('loose://x'), { id: 'x', extra: 'field' }, makeServerContext());
 
       expect(capturedParams).toEqual({ id: 'x', extra: 'field' });
     });
@@ -626,9 +642,7 @@ describe('createResourceHandler', () => {
 
       const handler = createResourceHandler(def as AnyResourceDefinition, services, notifiers);
 
-      await expect(
-        handler(new URL('err://x'), { id: 'x' }, createMockSdkContext()),
-      ).rejects.toThrow();
+      await expect(handler(new URL('err://x'), { id: 'x' }, makeServerContext())).rejects.toThrow();
     });
 
     it('should re-throw McpError with code preserved', async () => {
@@ -642,7 +656,7 @@ describe('createResourceHandler', () => {
       const handler = createResourceHandler(def as AnyResourceDefinition, services, notifiers);
 
       try {
-        await handler(new URL('mcperr://x'), { id: 'x' }, createMockSdkContext());
+        await handler(new URL('mcperr://x'), { id: 'x' }, makeServerContext());
         expect.fail('should have thrown');
       } catch (err) {
         expect(err).toBeInstanceOf(McpError);
@@ -668,7 +682,7 @@ describe('createResourceHandler', () => {
           'resource://user:password@sensitive-item-id-value/path?api_key=SUPERSECRET#fragment-secret',
         ),
         { itemId: 'sensitive-item-id-value' },
-        createMockSdkContext(),
+        makeServerContext(),
       );
 
       const call = vi
@@ -708,30 +722,26 @@ describe('createResourceHandler', () => {
     });
 
     it('routes handler-time notifications through the request-scoped sender (relatedRequestId path)', async () => {
-      const sendNotification = vi.fn(() => Promise.resolve());
+      const notify = vi.fn(async () => {});
       const handler = createResourceHandler(
         notifyingResource as AnyResourceDefinition,
         services,
         notifiers,
       );
-      await handler(new URL('notify://1'), { id: '1' }, createMockSdkContext({ sendNotification }));
+      await handler(new URL('notify://1'), { id: '1' }, makeServerContext({ notify }));
 
-      // Routing through extra.sendNotification stamps relatedRequestId, so
-      // @hono/mcp delivers to the POST SSE stream instead of dropping (#135).
-      expect(sendNotification).toHaveBeenCalledWith({ method: 'notifications/tools/list_changed' });
-      expect(sendNotification).toHaveBeenCalledWith({
-        method: 'notifications/resources/list_changed',
-      });
-      expect(sendNotification).toHaveBeenCalledWith({
-        method: 'notifications/prompts/list_changed',
-      });
-      expect(sendNotification).toHaveBeenCalledWith({
+      // Routing through `ctx.mcpReq.notify` stamps relatedRequestId, so the
+      // message lands on this request's own response stream (#135).
+      expect(notify).toHaveBeenCalledWith({ method: 'notifications/tools/list_changed' });
+      expect(notify).toHaveBeenCalledWith({ method: 'notifications/resources/list_changed' });
+      expect(notify).toHaveBeenCalledWith({ method: 'notifications/prompts/list_changed' });
+      expect(notify).toHaveBeenCalledWith({
         method: 'notifications/resources/updated',
         params: { uri: 'notify://updated' },
       });
     });
 
-    it('falls back to the server-level notifiers when the extra exposes no sender', async () => {
+    it('falls back to the server-level notifiers when the request scope exposes no sender', async () => {
       const serverNotifiers: ResourceHandlerNotifiers = {
         notifyToolListChanged: vi.fn(),
         notifyResourceListChanged: vi.fn(),
@@ -743,14 +753,26 @@ describe('createResourceHandler', () => {
         services,
         serverNotifiers,
       );
-      await handler(
-        new URL('notify://1'),
-        { id: '1' },
-        createMockSdkContext({ sendNotification: undefined }),
-      );
+      await handler(new URL('notify://1'), { id: '1' }, makeSenderlessServerContext());
 
       expect(serverNotifiers.notifyResourceListChanged).toHaveBeenCalledOnce();
       expect(serverNotifiers.notifyResourceUpdated).toHaveBeenCalledWith('notify://updated');
+    });
+
+    it('suppresses resources/updated for a URI the connection never subscribed to (#354)', async () => {
+      const notify = vi.fn(async () => {});
+      const subscriptions: ResourceSubscriptions = { has: vi.fn(() => false) };
+      const handler = createResourceHandler(notifyingResource as AnyResourceDefinition, services, {
+        subscriptions,
+      });
+
+      await handler(new URL('notify://1'), { id: '1' }, makeServerContext({ notify }));
+
+      expect(subscriptions.has).toHaveBeenCalledWith('notify://updated');
+      expect(notify).not.toHaveBeenCalledWith(
+        expect.objectContaining({ method: 'notifications/resources/updated' }),
+      );
+      expect(notify).toHaveBeenCalledWith({ method: 'notifications/tools/list_changed' });
     });
   });
 });

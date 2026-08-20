@@ -3,8 +3,7 @@
  * @module tests/fuzz/resource-handler-pipeline.fuzz.test
  */
 
-import type { RequestHandlerExtra } from '@modelcontextprotocol/sdk/shared/protocol.js';
-import type { ServerNotification, ServerRequest } from '@modelcontextprotocol/sdk/types.js';
+import type { ReadResourceResult } from '@modelcontextprotocol/server';
 import fc from 'fast-check';
 import { beforeAll, describe, expect, it, vi } from 'vitest';
 import { z } from 'zod';
@@ -16,6 +15,7 @@ import {
 } from '@/mcp-server/resources/utils/resourceHandlerFactory.js';
 import { adversarialObjectArbitrary, loadFc, zodToArbitrary } from '@/testing/fuzz.js';
 import { McpError } from '@/types-global/errors.js';
+import { makeServerContext } from '../helpers/server-context.js';
 
 const { mockLogger } = vi.hoisted(() => ({
   mockLogger: {
@@ -59,15 +59,8 @@ vi.mock('@/utils/internal/performance.js', () => ({
   measureResourceExecution: vi.fn((fn: () => unknown) => fn()),
 }));
 
-type SdkExtra = RequestHandlerExtra<ServerRequest, ServerNotification>;
-
-function sdkExtra(): SdkExtra {
-  return {
-    signal: new AbortController().signal,
-    requestId: 'resource-fuzz-sdk',
-    sendNotification: () => Promise.resolve(),
-    sendRequest: () => Promise.resolve({}) as never,
-  } as SdkExtra;
+function serverContext() {
+  return makeServerContext({ requestId: 'resource-fuzz-sdk', method: 'resources/read' });
 }
 
 const services: ResourceHandlerFactoryServices = {
@@ -110,11 +103,11 @@ describe('resource handler pipeline fuzzing', () => {
       fc.asyncProperty(arbitrary, async (raw) => {
         const parsed = paramsSchema.safeParse(raw);
         if (!parsed.success) return;
-        const result = await handler(
+        const result = (await handler(
           new URL(`fuzz://${encodeURIComponent(parsed.data.id)}`),
           parsed.data,
-          sdkExtra(),
-        );
+          serverContext(),
+        )) as ReadResourceResult;
         const content = result.contents[0] as { text: string };
         expect(JSON.parse(content.text)).toEqual(parsed.data);
       }),
@@ -129,7 +122,7 @@ describe('resource handler pipeline fuzzing', () => {
     await fc.assert(
       fc.asyncProperty(arbitrary, async (variables) => {
         try {
-          await handler(new URL('fuzz://adversarial'), variables as never, sdkExtra());
+          await handler(new URL('fuzz://adversarial'), variables as never, serverContext());
         } catch (error) {
           expect(error).toBeInstanceOf(McpError);
           expect((error as McpError).message).not.toMatch(/node_modules|\/Users\/|\/home\//);
@@ -150,7 +143,7 @@ describe('resource handler pipeline fuzzing', () => {
         });
         const handler = createResourceHandler(failing as AnyResourceDefinition, services, {});
 
-        await expect(handler(new URL('fuzz://failure'), {}, sdkExtra())).rejects.toSatisfy(
+        await expect(handler(new URL('fuzz://failure'), {}, serverContext())).rejects.toSatisfy(
           (error: unknown) =>
             error instanceof McpError && !/node_modules|\/Users\/|\/home\//.test(error.message),
         );

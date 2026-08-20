@@ -1,34 +1,41 @@
 /**
  * @fileoverview Worker-safe Hono application factory for the HTTP MCP transport.
- * Builds the routing, auth, session, and per-request server lifecycle wiring
- * using only web-standard APIs. The Node-only `serve()` start path lives in
- * `httpServer.ts` so the Worker bundle drops `@hono/node-server` and
- * `node:http` via tree-shaking.
+ * Builds the routing, auth, session, and serving wiring using only web-standard
+ * APIs. The Node-only `serve()` start path lives in `httpServer.ts` so the
+ * Worker bundle drops `@hono/node-server` and `node:http` via tree-shaking.
  *
- * Implements MCP Specification 2025-06-18 Streamable HTTP Transport.
- * @see {@link https://modelcontextprotocol.io/specification/2025-06-18/basic/transports#streamable-http | MCP Streamable HTTP Transport}
+ * Serving is split by session mode:
+ *
+ * - **stateless** — one `createMcpHandler(factory)` answers both protocol eras
+ *   per request (its default `legacy: 'stateless'` posture).
+ * - **stateful / auto** — `isLegacyRequest(request)` splits the traffic. 2025-era
+ *   requests go to a sessionful `WebStandardStreamableHTTPServerTransport` with
+ *   one persistent `McpServer` per `Mcp-Session-Id`; 2026-07-28 requests go to a
+ *   strict (`legacy: 'reject'`) modern handler, which is per-request by
+ *   construction — that revision has no session.
+ *
+ * The sessionful arm is load-bearing rather than legacy courtesy: the SDK's
+ * multi-round-trip legacy shim needs a live session, so dropping it would break
+ * interactive tools for every 2025 client that is not on stdio.
+ *
+ * @see {@link https://modelcontextprotocol.io/specification/2026-07-28/basic/transports | MCP Transports}
  * @module src/mcp-server/transports/http/httpTransport
  */
 
-import { StreamableHTTPTransport } from '@hono/mcp';
-import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import {
-  type ClientCapabilities,
-  isJSONRPCErrorResponse,
-  isJSONRPCRequest,
-  isJSONRPCResultResponse,
-  type JSONRPCMessage,
-  type JSONRPCResponse,
-  type RequestId,
-} from '@modelcontextprotocol/sdk/types.js';
+  createMcpHandler,
+  isLegacyRequest,
+  type McpHttpHandler,
+  WebStandardStreamableHTTPServerTransport,
+} from '@modelcontextprotocol/server';
 import { Hono } from 'hono';
 import { cors } from 'hono/cors';
 import { config } from '@/config/index.js';
 import type { ServerManifest } from '@/core/serverManifest.js';
-import type { McpServerFactory } from '@/mcp-server/protocolSession.js';
 import { createAuthStrategy } from '@/mcp-server/transports/auth/authFactory.js';
 import { createAuthMiddleware } from '@/mcp-server/transports/auth/authMiddleware.js';
 import { authContext } from '@/mcp-server/transports/auth/lib/authContext.js';
+import type { AuthInfo } from '@/mcp-server/transports/auth/lib/authTypes.js';
 import { httpErrorHandler } from '@/mcp-server/transports/http/httpErrorHandler.js';
 import type { HonoNodeBindings } from '@/mcp-server/transports/http/httpTypes.js';
 import { createLandingPageHandler } from '@/mcp-server/transports/http/landing-page/index.js';
@@ -37,200 +44,23 @@ import { createRobotsTxtHandler } from '@/mcp-server/transports/http/robotsTxt.j
 import { createServerCardHandler } from '@/mcp-server/transports/http/serverCard.js';
 import { generateSecureSessionId } from '@/mcp-server/transports/http/sessionIdUtils.js';
 import {
-  type ServerRequestRegistration,
+  closeConnection,
   type SessionIdentity,
   SessionStore,
 } from '@/mcp-server/transports/http/sessionStore.js';
+import type { FrameworkServerFactory } from '@/mcp-server/types.js';
 import { logger } from '@/utils/internal/logger.js';
 import { type RequestContext, requestContextService } from '@/utils/internal/requestContext.js';
-import { createCounter, createObservableGauge } from '@/utils/telemetry/metrics.js';
-
-/**
- * Extends the base StreamableHTTPTransport to include a session ID.
- */
-class McpSessionTransport extends StreamableHTTPTransport {
-  public sessionId: string;
-  private readonly pendingServerRequests = new Set<ServerRequestRegistration>();
-
-  constructor(
-    sessionId: string,
-    private readonly sessionStore: SessionStore | null,
-  ) {
-    super();
-    this.sessionId = sessionId;
-  }
-
-  /**
-   * Rewrites outbound server-request IDs into the durable session namespace.
-   * Every per-request SDK Server starts its request counter at zero; without
-   * this bridge concurrent elicitations collide and a response POST reaches a
-   * different Server instance than the one holding the response handler.
-   */
-  public override async send(
-    message: JSONRPCMessage,
-    options?: { relatedRequestId?: RequestId },
-  ): Promise<void> {
-    if (!isJSONRPCRequest(message) || !this.sessionStore) {
-      await super.send(message, options);
-      return;
-    }
-
-    const registration = this.sessionStore.registerServerRequest(
-      this.sessionId,
-      (response: JSONRPCResponse) => {
-        this.settleServerRequest(registration);
-        this.onmessage?.({ ...response, id: message.id });
-      },
-    );
-    if (!registration) throw new Error('Cannot send a server request after its session ended.');
-
-    this.pendingServerRequests.add(registration);
-    try {
-      await super.send({ ...message, id: registration.requestId }, options);
-    } catch (error) {
-      this.settleServerRequest(registration);
-      throw error;
-    }
-  }
-
-  public override async close(): Promise<void> {
-    for (const registration of this.pendingServerRequests) registration.unregister();
-    this.pendingServerRequests.clear();
-    await super.close();
-  }
-
-  /** Drops a route from both the session registry and this transport's pending set. */
-  private settleServerRequest(registration: ServerRequestRegistration | undefined): void {
-    if (!registration) return;
-    registration.unregister();
-    this.pendingServerRequests.delete(registration);
-  }
-}
-
-/** Max time (ms) we wait for per-request transport/server close to complete
- * before giving up and logging a failure. Silent hangs here accumulate
- * retained closures — bounded wait surfaces the issue as a metric. */
-const PER_REQUEST_CLOSE_TIMEOUT_MS = 5_000;
+import { createObservableGauge } from '@/utils/telemetry/metrics.js';
 
 /** Matches loopback origins (http(s)://localhost|127.0.0.1|[::1] with optional port).
  * Used as the fail-closed default for the Origin guard when no explicit
  * MCP_ALLOWED_ORIGINS is configured — an unauthenticated MCP server must not
- * accept browser Origin headers from arbitrary hosts (MCP Spec 2025-06-18 DNS
- * rebinding protection). */
+ * accept browser Origin headers from arbitrary hosts (DNS rebinding
+ * protection). The SDK's `validateOriginHeader` matches bare hostnames from a
+ * fixed list and so cannot express "any loopback port", which is exactly the
+ * dev-server case this guard exists for. */
 const LOOPBACK_ORIGIN_RE = /^https?:\/\/(?:localhost|127\.0\.0\.1|\[::1\])(?::\d+)?$/i;
-
-let closeFailureCounter: ReturnType<typeof createCounter> | undefined;
-function getCloseFailureCounter(): ReturnType<typeof createCounter> {
-  closeFailureCounter ??= createCounter(
-    'mcp.http.close_failures',
-    'Per-request HTTP close failures (transport or server close threw or timed out)',
-    '{failures}',
-  );
-  return closeFailureCounter;
-}
-
-// ---------------------------------------------------------------------------
-// Finalization-lag diagnostic (issue #50)
-//
-// The HTTP transport constructs a fresh `McpServer` + `McpSessionTransport`
-// per request (SDK 1.26 GHSA-345p-7cg4-v4c7). Production heap graphs show
-// linear growth proportional to request volume, which suggests some of
-// these per-request instances are being retained past their scope.
-//
-// Compare `mcp.http.per_request.created_total` against
-// `mcp.http.per_request.finalized_total` (both tagged with `kind`) to
-// detect retention. A persistent gap that grows with traffic is the
-// signature of the leak; a gap that closes within minutes is just GC
-// timing.
-// ---------------------------------------------------------------------------
-
-let perRequestCreatedCounter: ReturnType<typeof createCounter> | undefined;
-let perRequestFinalizedCounter: ReturnType<typeof createCounter> | undefined;
-function getPerRequestCreatedCounter(): ReturnType<typeof createCounter> {
-  perRequestCreatedCounter ??= createCounter(
-    'mcp.http.per_request.created',
-    'Per-request McpServer/McpSessionTransport instances created',
-    '{instances}',
-  );
-  return perRequestCreatedCounter;
-}
-function getPerRequestFinalizedCounter(): ReturnType<typeof createCounter> {
-  perRequestFinalizedCounter ??= createCounter(
-    'mcp.http.per_request.finalized',
-    'Per-request McpServer/McpSessionTransport instances reclaimed by GC',
-    '{instances}',
-  );
-  return perRequestFinalizedCounter;
-}
-
-/** Held-value payload is a primitive string literal, not a reference — so
- * registration does not keep the target alive. */
-type PerRequestKind = 'server' | 'transport';
-
-/** Lazy so the registry only exists when HTTP transport is active. The
- * FinalizationRegistry callback itself does not run during this process's
- * exit teardown — so we deliberately don't try to drain it. */
-let perRequestFinalizationRegistry: FinalizationRegistry<PerRequestKind> | undefined;
-function getPerRequestFinalizationRegistry(): FinalizationRegistry<PerRequestKind> {
-  perRequestFinalizationRegistry ??= new FinalizationRegistry<PerRequestKind>((kind) => {
-    getPerRequestFinalizedCounter().add(1, { kind });
-  });
-  return perRequestFinalizationRegistry;
-}
-
-function trackPerRequestInstance(obj: object, kind: PerRequestKind): void {
-  getPerRequestCreatedCounter().add(1, { kind });
-  getPerRequestFinalizationRegistry().register(obj, kind);
-}
-
-/** Await a promise with a bounded timeout. Rejects with the timeout error
- * if the promise doesn't settle first. */
-function withTimeout<T>(p: Promise<T>, ms: number, label: string): Promise<T> {
-  let timer: ReturnType<typeof setTimeout> | undefined;
-  return Promise.race([
-    p,
-    new Promise<T>((_, reject) => {
-      timer = setTimeout(() => reject(new Error(`${label} timed out after ${ms}ms`)), ms);
-    }),
-  ]).finally(() => {
-    if (timer !== undefined) clearTimeout(timer);
-  });
-}
-
-/** Triggers for the per-request close path, surfaced as the `trigger` tag on
- * `mcp.http.close_failures` so failures can be attributed to which lifecycle
- * event drove the close. */
-type CloseTrigger = 'success' | 'error' | 'sse-abort';
-
-/** Closes the per-request transport and server under a bounded timeout.
- * Runs the two closes in parallel so one hanging close doesn't delay the
- * other, and records each failure to `mcp.http.close_failures` with
- * `surface` and `trigger` tags. */
-async function closePerRequestInstances(
-  transport: McpSessionTransport,
-  server: McpServer | undefined,
-  sessionId: string,
-  requestContext: RequestContext,
-  trigger: CloseTrigger,
-): Promise<void> {
-  const tasks: [PerRequestKind, () => Promise<void>][] = [['transport', () => transport.close()]];
-  if (server) tasks.push(['server', () => server.close()]);
-
-  await Promise.all(
-    tasks.map(async ([surface, close]) => {
-      try {
-        await withTimeout(close(), PER_REQUEST_CLOSE_TIMEOUT_MS, `${surface}.close`);
-      } catch (err) {
-        getCloseFailureCounter().add(1, { surface, trigger });
-        logger.warning(`Failed to close ${surface} (trigger=${trigger})`, {
-          ...requestContext,
-          sessionId,
-          error: err instanceof Error ? err.message : String(err),
-        });
-      }
-    }),
-  );
-}
 
 type BoundedBodyRead =
   | { exceeded: false; body: ArrayBuffer }
@@ -287,10 +117,17 @@ async function readBodyWithinLimit(request: Request, maxBytes: number): Promise<
  * @returns Configured Hono application with the specified binding type
  */
 export async function createHttpApp<TBindings extends object = HonoNodeBindings>(
-  serverFactory: McpServerFactory,
+  serverFactory: FrameworkServerFactory,
   parentContext: RequestContext,
   manifest: ServerManifest,
-): Promise<{ app: Hono<{ Bindings: TBindings }>; sessionStore: SessionStore | null }> {
+): Promise<{
+  app: Hono<{ Bindings: TBindings }>;
+  /** Tears down the modern leg's in-flight exchanges and per-request instances. */
+  close: () => Promise<void>;
+  /** The modern handler's `subscriptions/listen` bus and publish facade. */
+  handler: McpHttpHandler;
+  sessionStore: SessionStore | null;
+}> {
   const app = new Hono<{ Bindings: TBindings }>();
   const transportContext = {
     ...parentContext,
@@ -625,291 +462,184 @@ export async function createHttpApp<TBindings extends object = HonoNodeBindings>
     ) as SessionIdentity;
   }
 
-  // MCP Spec 2025-06-18: DELETE endpoint for session termination
-  // Clients SHOULD send DELETE to explicitly terminate sessions
-  // https://modelcontextprotocol.io/specification/2025-06-18/basic/transports#session-management
-  app.delete(config.mcpHttpEndpointPath, (c) => {
+  // DELETE terminates a session. Ownership is validated here, before the SDK
+  // transport is allowed to tear the session down; the transport itself owns
+  // the spec-shaped response and fires `onsessionclosed`.
+  // https://modelcontextprotocol.io/specification/2026-07-28/basic/transports
+  app.delete(config.mcpHttpEndpointPath, async (c, next) => {
     const requestContext = requestContextService.createRequestContext({
       operation: 'HttpSessionTermination',
       component: 'HttpTransport',
     });
     const sessionId = c.req.header('mcp-session-id');
 
+    // Stateless mode has no session to terminate — the stateless handler
+    // answers with the spec's 405.
+    if (!sessionStore) return await next();
+
     if (!sessionId) {
       logger.warning('DELETE request without session ID', requestContext);
       return c.json({ error: 'Mcp-Session-Id header required' }, 400);
     }
 
-    logger.info('Session termination requested', {
-      ...requestContext,
-      sessionId,
-    });
+    logger.info('Session termination requested', { ...requestContext, sessionId });
 
-    // For stateless mode or if session management is disabled, return 405
-    if (config.mcpSessionMode === 'stateless' || !sessionStore) {
-      return c.json({ error: 'Session termination not supported in stateless mode' }, 405);
-    }
-
-    // SECURITY: Validate session ownership before termination
-    const sessionIdentity = extractSessionIdentity();
-
-    if (!sessionStore.isValidForIdentity(sessionId, sessionIdentity)) {
+    // SECURITY: validate session ownership before termination.
+    if (!sessionStore.isValidForIdentity(sessionId, extractSessionIdentity())) {
       logger.warning('Session termination rejected - ownership validation failed', {
         ...requestContext,
         sessionId,
-        requestTenant: sessionIdentity?.tenantId,
-        requestClient: sessionIdentity?.clientId,
       });
       return c.json({ error: 'Session not found or access denied' }, 404);
     }
 
-    // Terminate the session in the store
-    sessionStore.terminate(sessionId);
+    const connection = sessionStore.getConnection(sessionId);
+    if (!connection) {
+      // Identity-valid but no live connection (already torn down). Drop the
+      // record and answer exactly as the transport does below — one status and
+      // one body shape for one operation.
+      await sessionStore.terminate(sessionId);
+      return c.body(null, 200);
+    }
 
-    logger.info('Session terminated successfully', {
-      ...requestContext,
-      sessionId,
-    });
-
-    return c.json({ status: 'terminated', sessionId }, 200);
+    return await connection.transport.handleRequest(c.req.raw);
   });
 
+  // -------------------------------------------------------------------------
   // JSON-RPC over HTTP (Streamable)
+  // -------------------------------------------------------------------------
+
+  /** Reads the POST body once, from the cache the body-limit guard may have
+   * seeded. Every downstream consumer takes it as `parsedBody` because the raw
+   * stream is not guaranteed re-readable after that guard runs. */
+  const readParsedBody = async (c: {
+    req: { method: string; json: () => Promise<unknown> };
+  }): Promise<{ ok: true; value: unknown } | { ok: false }> => {
+    if (c.req.method !== 'POST') return { ok: true, value: undefined };
+    try {
+      return { ok: true, value: await c.req.json() };
+    } catch {
+      return { ok: false };
+    }
+  };
+
+  /** Validated auth info for pass-through to the SDK's `ctx.http.authInfo`. */
+  const currentAuthInfo = (): AuthInfo | undefined => authContext.getStore()?.authInfo;
+
+  // The modern (2026-07-28) leg. In stateless mode the same handler also serves
+  // 2025-era traffic per request (`legacy: 'stateless'`, the default); in
+  // stateful mode it is strict and the sessionful arm below owns 2025.
+  const handler = createMcpHandler(serverFactory, {
+    ...(isStateful && { legacy: 'reject' as const }),
+    onerror: (error) => {
+      logger.debug(`MCP handler reported: ${error.message}`, transportContext);
+    },
+  });
+
+  /** Serves one 2025-era request on the sessionful arm. */
+  const handleLegacySessionful = async (
+    store: SessionStore,
+    request: Request,
+    parsedBody: unknown,
+    requestContext: RequestContext,
+  ): Promise<Response> => {
+    const authInfo = currentAuthInfo();
+    const identity = extractSessionIdentity();
+    const providedSessionId = request.headers.get('mcp-session-id') ?? undefined;
+    const options = {
+      ...(parsedBody !== undefined && { parsedBody }),
+      ...(authInfo && { authInfo }),
+    };
+
+    if (providedSessionId) {
+      // SECURITY: identity binding is checked before the session is reachable,
+      // so a stolen session ID alone cannot resume someone else's session.
+      if (!store.isValidForIdentity(providedSessionId, identity)) {
+        logger.warning('Session validation failed - invalid or hijacked session', {
+          ...requestContext,
+          sessionId: providedSessionId,
+        });
+        return Response.json({ error: 'Session not found or expired' }, { status: 404 });
+      }
+      const connection = store.getConnection(providedSessionId);
+      if (!connection) {
+        return Response.json({ error: 'Session not found or expired' }, { status: 404 });
+      }
+      return await connection.transport.handleRequest(request, options);
+    }
+
+    // No session yet: this is an `initialize` (anything else is rejected by the
+    // SDK transport with the spec's 400). Capacity is checked before the
+    // instance is built so a saturated server never allocates one.
+    store.assertCapacity();
+
+    const server = await serverFactory({
+      era: 'legacy',
+      ...(authInfo && { authInfo }),
+      requestInfo: request,
+    });
+    const transport = new WebStandardStreamableHTTPServerTransport({
+      sessionIdGenerator: generateSecureSessionId,
+      onsessioninitialized: (sessionId) => {
+        store.register(sessionId, { server, transport }, identity);
+        logger.debug('Session initialized', { ...requestContext, sessionId });
+      },
+      onsessionclosed: (sessionId) => store.terminate(sessionId),
+    });
+
+    await server.connect(transport);
+    try {
+      const response = await transport.handleRequest(request, options);
+      // A handshake the transport refused never mints a session, so the
+      // instance pair it would have owned has no owner — close it here.
+      if (!transport.sessionId) await closeConnection({ server, transport });
+      return response;
+    } catch (error) {
+      await closeConnection({ server, transport });
+      throw error;
+    }
+  };
+
   app.all(config.mcpHttpEndpointPath, async (c) => {
     const requestContext = requestContextService.createRequestContext({
       operation: 'HttpRpcRequest',
       component: 'HttpTransport',
     });
-    const protocolVersion = c.req.header('mcp-protocol-version') ?? '2025-03-26';
     logger.debug('Handling MCP request.', {
       ...requestContext,
       path: c.req.path,
       method: c.req.method,
-      protocolVersion,
     });
 
-    // Per MCP Spec 2025-06-18: MCP-Protocol-Version header MUST be validated
-    // Server MUST respond with 400 Bad Request for unsupported versions
-    // We default to 2025-03-26 for backward compatibility if not provided
-    const supportedVersions = manifest.protocol.supportedVersions;
-    if (!supportedVersions.includes(protocolVersion)) {
-      logger.warning('Unsupported MCP protocol version requested.', {
-        ...requestContext,
-        protocolVersion,
-        supportedVersions,
-      });
+    const body = await readParsedBody(c);
+    if (!body.ok) {
+      // Malformed JSON never reaches classification — answer the spec's parse
+      // error directly rather than letting an unreadable body reach a transport.
       return c.json(
-        {
-          error: 'Unsupported MCP protocol version',
-          protocolVersion,
-          supportedVersions,
-        },
+        { jsonrpc: '2.0', id: null, error: { code: -32700, message: 'Parse error' } },
         400,
       );
     }
 
-    const providedSessionId = c.req.header('mcp-session-id');
-
-    // Parse once for the small amount of protocol state the per-request SDK
-    // server cannot retain itself. Hono caches body parsing, so the transport
-    // still receives the same body below. Malformed JSON remains the SDK's job.
-    let parsedRpcBody: unknown;
-    let rpcMessages: Record<string, unknown>[] = [];
-    if (c.req.method === 'POST') {
-      try {
-        const rawBody: unknown = await c.req.json();
-        parsedRpcBody = rawBody;
-        const messages = Array.isArray(rawBody) ? rawBody : [rawBody];
-        rpcMessages = messages.filter(
-          (message): message is Record<string, unknown> =>
-            typeof message === 'object' && message !== null,
-        );
-      } catch {
-        // Malformed body — let the SDK surface the parse error downstream.
-      }
+    if (sessionStore && (await isLegacyRequest(c.req.raw, body.value))) {
+      return await handleLegacySessionful(sessionStore, c.req.raw, body.value, requestContext);
     }
 
-    const initializeMessage = rpcMessages.find((message) => message.method === 'initialize');
-    const declaredCapabilities = (
-      initializeMessage?.params as { capabilities?: unknown } | undefined
-    )?.capabilities;
-    const initializeCapabilities =
-      typeof declaredCapabilities === 'object' && declaredCapabilities !== null
-        ? (declaredCapabilities as ClientCapabilities)
-        : undefined;
-
-    // Extract identity from auth context (if auth is enabled)
-    // This MUST happen before session validation for security
-    const sessionIdentity = extractSessionIdentity();
-
-    // MCP Spec 2025-06-18: Return 404 for invalid/terminated sessions
-    // https://modelcontextprotocol.io/specification/2025-06-18/basic/transports#session-management
-    // SECURITY: Validate session WITH identity binding to prevent hijacking
-    if (
-      sessionStore &&
-      providedSessionId &&
-      !sessionStore.isValidForIdentity(providedSessionId, sessionIdentity)
-    ) {
-      logger.warning('Session validation failed - invalid or hijacked session', {
-        ...requestContext,
-        sessionId: providedSessionId,
-        requestTenant: sessionIdentity?.tenantId,
-        requestClient: sessionIdentity?.clientId,
-      });
-      return c.json({ error: 'Session not found or expired' }, 404);
-    }
-
-    // MCP Spec 2025-06-18: stateful sessions require Mcp-Session-Id on all
-    // non-initialize requests. Without this gate, the SDK processes the RPC
-    // on a fresh per-request McpServer (no protocol state to reject against)
-    // and the session store mints an uninitialized session on response.ok.
-    if (sessionStore && !providedSessionId && !initializeMessage) {
-      logger.warning('Rejected non-initialize request without session in stateful mode', {
-        ...requestContext,
-        method: c.req.method,
-      });
-      return c.json(
-        {
-          error:
-            'Bad Request: Mcp-Session-Id header is required. Send an initialize request first.',
-        },
-        400,
-      );
-    }
-
-    const sessionId = providedSessionId ?? generateSecureSessionId();
-
-    // A response to a server-initiated request arrives on a new POST and would
-    // otherwise be delivered to a fresh SDK Server with no matching response
-    // handler. Route recognized responses through the durable session registry
-    // and strip them before normal SDK dispatch. An emptied batch still goes to
-    // the transport rather than short-circuiting here: it owns the Accept and
-    // Content-Type checks, and returns the same 202 every other
-    // response/notification POST does.
-    let transportBody = parsedRpcBody;
-    if (sessionStore && parsedRpcBody !== undefined) {
-      const messages = Array.isArray(parsedRpcBody) ? parsedRpcBody : [parsedRpcBody];
-      const unrouted = messages.filter((message) => {
-        if (!isJSONRPCResultResponse(message) && !isJSONRPCErrorResponse(message)) return true;
-        return !sessionStore.routeServerResponse(sessionId, message);
-      });
-
-      if (unrouted.length !== messages.length) transportBody = unrouted;
-    }
-
-    // The cancellation notification is handled by a different SDK Server
-    // instance than the original request. Mirror it into the durable session
-    // registry before passing it to the SDK so the original handler's merged
-    // `ctx.signal` is aborted without sharing Server instances across clients.
-    if (sessionStore) {
-      for (const message of rpcMessages) {
-        if (message.method !== 'notifications/cancelled') continue;
-        const params = message.params as { reason?: unknown; requestId?: unknown } | undefined;
-        const requestId = params?.requestId;
-        if (typeof requestId !== 'string' && typeof requestId !== 'number') continue;
-        const reason = params?.reason;
-        sessionStore.cancelRequest(
-          sessionId,
-          requestId,
-          typeof reason === 'string' ? reason : undefined,
-        );
-      }
-    }
-
-    const transport = new McpSessionTransport(sessionId, sessionStore);
-    trackPerRequestInstance(transport, 'transport');
-    let server: McpServer | undefined;
-    let closePromise: Promise<void> | undefined;
-
-    const closeOnce = (trigger: CloseTrigger): Promise<void> => {
-      closePromise ??= closePerRequestInstances(
-        transport,
-        server,
-        sessionId,
-        requestContext,
-        trigger,
-      );
-      return closePromise;
-    };
-
-    const handleRpc = async (): Promise<Response> => {
-      // SDK 1.26.0: Protocol.connect() throws if already connected.
-      // Create a fresh McpServer per request to prevent cross-client data leaks.
-      // See GHSA-345p-7cg4-v4c7.
-      server = await serverFactory(sessionStore?.createProtocolSessionHooks(sessionId));
-      trackPerRequestInstance(server, 'server');
-      await server.connect(transport);
-      const response = await transport.handleRequest(c, transportBody);
-
-      if (response) {
-        // Only register the session in the store AFTER a successful response.
-        // This avoids minting sessions for requests that fail protocol
-        // validation (e.g. tools/list without prior initialize).
-        if (sessionStore && response.ok) {
-          sessionStore.getOrCreate(sessionId, sessionIdentity);
-          if (initializeCapabilities) {
-            sessionStore.setClientCapabilities(sessionId, initializeCapabilities);
-          }
-        }
-
-        // MCP Spec 2025-06-18: For stateful sessions, return Mcp-Session-Id header
-        // in InitializeResponse (and all subsequent responses).
-        // 'auto' resolves to stateful for HTTP, matching the SessionStore creation above.
-        if (isStateful && response.ok) {
-          response.headers.set('Mcp-Session-Id', sessionId);
-          logger.debug('Added Mcp-Session-Id header to response', {
-            ...requestContext,
-            sessionId,
-          });
-        }
-
-        // Non-SSE responses (POST/202): close immediately via queueMicrotask.
-        // SSE streams must stay open until the client disconnects — closing now
-        // would abort the ReadableStream before Hono can write to it (see
-        // GHSA-345p-7cg4-v4c7 above) — so cleanup is bound to the request's
-        // AbortSignal instead. `@hono/mcp` `stream.onAbort` only clears its
-        // internal stream map; it never fires `transport.close()` or `onclose`,
-        // and real clients almost always disconnect ungracefully (no DELETE).
-        // Without this hook every SSE GET leaks its per-request McpServer +
-        // Transport pair (issue #50). `c.req.raw.signal` aborts on client
-        // disconnect across runtimes (`@hono/node-server`, modern Bun, Workers).
-        const isSSE = response.headers.get('content-type')?.includes('text/event-stream');
-        if (!isSSE) {
-          queueMicrotask(() => {
-            void closeOnce('success');
-          });
-        } else {
-          const sseCleanup = (): void => {
-            void closeOnce('sse-abort');
-          };
-          const reqSignal = c.req.raw.signal;
-          if (reqSignal.aborted) {
-            queueMicrotask(sseCleanup);
-          } else {
-            reqSignal.addEventListener('abort', sseCleanup, { once: true });
-          }
-        }
-
-        return response;
-      }
-      queueMicrotask(() => {
-        void closeOnce('success');
-      });
-      return c.body(null, 204);
-    };
-
-    // Auth context is already populated by the middleware's authContext.run().
-    // ALS propagates through all async continuations in this handler.
-    try {
-      return await handleRpc();
-    } catch (err) {
-      // Close every surface that was successfully created. The idempotent
-      // closure also protects against any cleanup already scheduled elsewhere.
-      await closeOnce('error');
-      throw err instanceof Error ? err : new Error(String(err));
-    }
+    const authInfo = currentAuthInfo();
+    return await handler.fetch(c.req.raw, {
+      ...(body.value !== undefined && { parsedBody: body.value }),
+      ...(authInfo && { authInfo }),
+    });
   });
 
   logger.info('Hono application setup complete.', transportContext);
-  return { app, sessionStore };
+  return {
+    app,
+    handler,
+    sessionStore,
+    close: async () => {
+      await handler.close();
+      await sessionStore?.destroy();
+    },
+  };
 }

@@ -1,12 +1,13 @@
 #!/usr/bin/env node
 /**
- * @fileoverview Stateful HTTP protocol-session fixture. Exposes elicitation
- * and indefinitely-running tool/resource handlers so black-box tests can
- * verify capability restoration and cross-request cancellation.
+ * @fileoverview Stateful HTTP protocol-session fixture. Exposes multi-round-trip
+ * input and indefinitely-running tool/resource handlers so black-box tests can
+ * verify that a session's persistent server carries an interactive exchange
+ * across POSTs and that cancellation reaches an in-flight handler.
  * @module tests/fixtures/http-protocol-session-server
  */
 
-import { createApp, resource, tool, z } from '@cyanheads/mcp-ts-core';
+import { createApp, inputRequired, resource, tool, z } from '@cyanheads/mcp-ts-core';
 
 const observations = {
   resourceActive: 0,
@@ -27,35 +28,53 @@ function waitForAbort(signal) {
   });
 }
 
+const AnswerSchema = z.object({ value: z.string().describe('Value returned to the fixture.') });
+
 const elicitationProbe = tool('session_elicitation_probe', {
-  description: 'Exercises form and URL elicitation through a stateful HTTP session.',
+  description: 'Exercises form and URL multi-round-trip input through a stateful HTTP session.',
   input: z.object({
     label: z.string().optional().describe('Value label used to correlate concurrent requests.'),
     mode: z.enum(['form', 'url']).describe('Elicitation mode to exercise.'),
   }),
   output: z.object({
     action: z.string().nullable().describe('Client elicitation action, if available.'),
-    available: z.boolean().describe('Whether elicitation is available in this request.'),
+    reentered: z.boolean().describe('Whether this was a re-entry round.'),
     value: z.string().nullable().describe('Accepted form value, when supplied.'),
   }),
-  async handler(input, ctx) {
-    if (!ctx.elicit) return { action: null, available: false, value: null };
-    if (input.mode === 'url') {
-      const result = await ctx.elicit.url(
-        'Authorize the protocol-session fixture.',
-        'https://example.test/authorize',
-      );
-      return { action: result.action, available: true, value: null };
+  handler(input, ctx) {
+    const view = ctx.inputs.view('answer');
+    const reentered = ctx.inputs.state() === 'awaiting-answer';
+
+    if (view.kind === 'elicit' && view.action !== 'accept') {
+      return { action: view.action, reentered, value: null };
     }
-    const result = await ctx.elicit(
-      `Choose a protocol-session value${input.label ? ` for ${input.label}` : ''}.`,
-      z.object({ value: z.string().describe('Value returned to the fixture.') }),
-    );
-    return {
-      action: result.action,
-      available: true,
-      value: typeof result.content?.value === 'string' ? result.content.value : null,
-    };
+
+    if (input.mode === 'url') {
+      if (view.kind === 'elicit') return { action: view.action, reentered, value: null };
+      ctx.requestInput({
+        inputRequests: {
+          answer: inputRequired.elicitUrl({
+            message: 'Authorize the protocol-session fixture.',
+            url: 'https://example.test/authorize',
+          }),
+        },
+        requestState: 'awaiting-answer',
+      });
+    }
+
+    const accepted = ctx.inputs.accepted('answer', AnswerSchema);
+    if (!accepted) {
+      ctx.requestInput({
+        inputRequests: {
+          answer: inputRequired.elicit({
+            message: `Choose a protocol-session value${input.label ? ` for ${input.label}` : ''}.`,
+            requestedSchema: AnswerSchema,
+          }),
+        },
+        requestState: 'awaiting-answer',
+      });
+    }
+    return { action: 'accept', reentered, value: accepted.value };
   },
 });
 

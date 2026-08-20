@@ -344,29 +344,6 @@ const ConfigSchema = z
           'CANVAS_ABSOLUTE_CAP_MS must be >= CANVAS_TTL_MS — otherwise canvases die at the absolute cap before the sliding TTL ever extends them.',
         path: ['absoluteCapMs'],
       }),
-    // Experimental: Task store configuration
-    tasks: z.object({
-      storeType: z
-        .preprocess(
-          (val) => {
-            const str = emptyStringAsUndefined(val);
-            if (typeof str === 'string') {
-              const lower = str.toLowerCase();
-              const aliasMap: Record<string, string> = {
-                mem: 'in-memory',
-                memory: 'in-memory',
-                persistent: 'storage',
-              };
-              return aliasMap[lower] ?? lower;
-            }
-            return str;
-          },
-          z.enum(['in-memory', 'storage']),
-        )
-        .default('in-memory'),
-      tenantId: z.string().default('system-tasks'),
-      defaultTtlMs: z.coerce.number().nullable().optional(),
-    }),
     openTelemetry: z.object({
       enabled: envBoolean,
       serviceName: z.string(),
@@ -569,11 +546,6 @@ const parseConfig = (envOverrides?: Record<string, string | undefined>) => {
       sweeperIntervalMs: env.CANVAS_SWEEPER_INTERVAL_MS,
       defaultRowLimit: env.CANVAS_DEFAULT_ROW_LIMIT,
       schemaSniffRows: env.CANVAS_SCHEMA_SNIFF_ROWS,
-    },
-    tasks: {
-      storeType: env.TASK_STORE_TYPE,
-      tenantId: env.TASK_STORE_TENANT_ID,
-      defaultTtlMs: env.TASK_STORE_DEFAULT_TTL_MS,
     },
     openTelemetry: {
       enabled: env.OTEL_ENABLED,

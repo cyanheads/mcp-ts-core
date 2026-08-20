@@ -36,10 +36,18 @@ vi.mock('@/utils/internal/requestContext.js', () => ({
   },
 }));
 
-import { SessionStore } from '@/mcp-server/transports/http/sessionStore.js';
+import { type SessionConnection, SessionStore } from '@/mcp-server/transports/http/sessionStore.js';
 
 /** Valid 64-character hex session ID for all tests. */
 const SESSION_ID = 'a'.repeat(64);
+
+/** A `{ server, transport }` pair with inert closes. */
+function connection(): SessionConnection {
+  return {
+    server: { close: vi.fn(async () => {}) },
+    transport: { close: vi.fn(async () => {}) },
+  } as unknown as SessionConnection;
+}
 
 describe('SessionStore — mcp.sessions.events counter', () => {
   let store: SessionStore;
@@ -49,40 +57,40 @@ describe('SessionStore — mcp.sessions.events counter', () => {
     store = new SessionStore(60_000);
   });
 
-  afterEach(() => {
-    store.destroy();
+  afterEach(async () => {
+    await store.destroy();
   });
 
-  it('records "created" when a new session is created via getOrCreate', () => {
-    store.getOrCreate(SESSION_ID);
+  it('records "created" when a session is registered', () => {
+    store.register(SESSION_ID, connection());
 
     expect(mockCounterAdd).toHaveBeenCalledWith(1, {
       'mcp.session.event': 'created',
     });
   });
 
-  it('does NOT record an event when getOrCreate retrieves an existing session', () => {
-    store.getOrCreate(SESSION_ID);
+  it('does NOT record an event when an existing session is looked up', () => {
+    store.register(SESSION_ID, connection());
     mockCounterAdd.mockClear();
 
-    store.getOrCreate(SESSION_ID);
+    store.getConnection(SESSION_ID);
 
     expect(mockCounterAdd).not.toHaveBeenCalled();
   });
 
-  it('records "terminated" when an existing session is terminated', () => {
-    store.getOrCreate(SESSION_ID);
+  it('records "terminated" when an existing session is terminated', async () => {
+    store.register(SESSION_ID, connection());
     mockCounterAdd.mockClear();
 
-    store.terminate(SESSION_ID);
+    await store.terminate(SESSION_ID);
 
     expect(mockCounterAdd).toHaveBeenCalledWith(1, {
       'mcp.session.event': 'terminated',
     });
   });
 
-  it('does NOT record "terminated" when terminating a non-existent session', () => {
-    store.terminate(SESSION_ID);
+  it('does NOT record "terminated" when terminating a non-existent session', async () => {
+    await store.terminate(SESSION_ID);
 
     // The only call should NOT be 'terminated' — no call at all
     expect(mockCounterAdd).not.toHaveBeenCalledWith(1, {
@@ -91,7 +99,7 @@ describe('SessionStore — mcp.sessions.events counter', () => {
   });
 
   it('records "rejected" on identity mismatch (tenant)', () => {
-    store.getOrCreate(SESSION_ID, {
+    store.register(SESSION_ID, connection(), {
       tenantId: 'tenant-a',
       clientId: 'client-1',
       subject: 'user-1',
@@ -111,7 +119,7 @@ describe('SessionStore — mcp.sessions.events counter', () => {
   });
 
   it('records "rejected" on identity mismatch (client)', () => {
-    store.getOrCreate(SESSION_ID, {
+    store.register(SESSION_ID, connection(), {
       tenantId: 'tenant-a',
       clientId: 'client-1',
       subject: 'user-1',
@@ -131,7 +139,7 @@ describe('SessionStore — mcp.sessions.events counter', () => {
   });
 
   it('records "rejected" when session has identity but request has none', () => {
-    store.getOrCreate(SESSION_ID, {
+    store.register(SESSION_ID, connection(), {
       tenantId: 'tenant-a',
       clientId: 'client-1',
     });
@@ -147,7 +155,7 @@ describe('SessionStore — mcp.sessions.events counter', () => {
 
   it('does NOT record an event when isValidForIdentity succeeds', () => {
     const identity = { tenantId: 'tenant-a', clientId: 'client-1', subject: 'user-1' };
-    store.getOrCreate(SESSION_ID, identity);
+    store.register(SESSION_ID, connection(), identity);
     mockCounterAdd.mockClear();
 
     const valid = store.isValidForIdentity(SESSION_ID, identity);

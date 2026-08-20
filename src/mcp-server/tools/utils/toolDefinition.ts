@@ -8,7 +8,7 @@
  * @module src/mcp-server/tools/utils/toolDefinition
  */
 
-import type { ContentBlock } from '@modelcontextprotocol/sdk/types.js';
+import type { ContentBlock } from '@modelcontextprotocol/server';
 import type { ZodObject, ZodRawShape, z } from 'zod';
 
 import type { HandlerContext, ReasonOf } from '@/core/context.js';
@@ -225,8 +225,6 @@ export interface ToolDefinition<
    * domain-namespaced subdirectories or a filename that doesn't mirror `name`).
    */
   sourceUrl?: string;
-  /** When true, the framework manages task lifecycle automatically. */
-  task?: boolean;
   /** Human-readable title for UI display. */
   title?: string;
 }
@@ -299,5 +297,28 @@ export function tool<
   name: string,
   options: Omit<ToolDefinition<TInput, TOutput, TErrors, TEnrich>, 'name'>,
 ): ToolDefinition<TInput, TOutput, TErrors, TEnrich> {
-  return { name, ...options };
+  return { name, ...options, input: strictenInput(options.input) };
+}
+
+/**
+ * Applies strict semantics to a tool's input schema.
+ *
+ * An unrecognized argument key is rejected instead of silently stripped, and
+ * the advertised `inputSchema` carries `additionalProperties: false` to match.
+ * Stripping turns a caller's misspelled key into a wrong answer they cannot
+ * detect: the value vanishes before the handler runs and the call fails
+ * downstream pointing at the wrong problem (#232).
+ *
+ * Only the default (strip) mode is upgraded. A definition that explicitly
+ * declared `.passthrough()` or `.catchall(...)` asked for an open object, and
+ * that intent wins — Zod records it as a catchall type, which is what this
+ * checks for.
+ *
+ * Root-level only, matching `.strict()` itself: a nested `z.object()` inside
+ * the input still strips unless it is strict in its own right.
+ */
+function strictenInput<TInput extends ZodObject<ZodRawShape>>(input: TInput): TInput {
+  const declaresCatchall =
+    (input as unknown as { _zod: { def: { catchall?: unknown } } })._zod.def.catchall !== undefined;
+  return declaresCatchall ? input : (input.strict() as TInput);
 }

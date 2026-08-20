@@ -5,7 +5,6 @@
  */
 
 import { createWorkerHandler } from '@cyanheads/mcp-ts-core/worker';
-import { asyncCountdownTool } from './mcp-server/tools/definitions/template-async-countdown.tool.js';
 import { catFactTool } from './mcp-server/tools/definitions/template-cat-fact.tool.js';
 import { dataExplorerAppTool } from './mcp-server/tools/definitions/template-data-explorer.app-tool.js';
 import { echoTool } from './mcp-server/tools/definitions/template-echo-message.tool.js';
@@ -23,7 +22,6 @@ export default createWorkerHandler({
     echoTool,
     imageTestTool,
     madlibsElicitationTool,
-    asyncCountdownTool,
     dataExplorerAppTool,
   ],
   resources: [echoResourceDefinition, dataExplorerUiResource],

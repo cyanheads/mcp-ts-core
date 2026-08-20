@@ -4,19 +4,24 @@
  * @module src/mcp-server/resources/utils/resourceHandlerFactory
  */
 
-import type { RequestHandlerExtra } from '@modelcontextprotocol/sdk/shared/protocol.js';
-import type { Variables } from '@modelcontextprotocol/sdk/shared/uriTemplate.js';
 import type {
+  InputRequiredResult,
   ReadResourceResult,
-  ServerNotification,
-  ServerRequest,
-} from '@modelcontextprotocol/sdk/types.js';
+  ServerContext,
+  Variables,
+} from '@modelcontextprotocol/server';
 
 import { config } from '@/config/index.js';
 import { attachTypedFail, createContext } from '@/core/context.js';
-import { type ElicitationNotifiers, wrapElicit } from '@/mcp-server/elicitation.js';
-import { buildRequestScopedNotifiers } from '@/mcp-server/notifications.js';
-import type { ProtocolRequestRegistration } from '@/mcp-server/protocolSession.js';
+import {
+  createContextInputs,
+  createRequestInput,
+  isInputRequiredSignal,
+} from '@/mcp-server/inputRequired.js';
+import {
+  buildRequestScopedNotifiers,
+  type ResourceSubscriptions,
+} from '@/mcp-server/notifications.js';
 import type { AnyResourceDefinition } from '@/mcp-server/resources/utils/resourceDefinition.js';
 import { withRequiredScopes } from '@/mcp-server/transports/auth/lib/authUtils.js';
 import type { StorageService } from '@/storage/core/StorageService.js';
@@ -29,8 +34,6 @@ import { requestContextService } from '@/utils/internal/requestContext.js';
 // ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
-
-type SdkExtra = RequestHandlerExtra<ServerRequest, ServerNotification>;
 
 /** Services required by the handler factory to construct Context. */
 export interface ResourceHandlerFactoryServices {
@@ -47,7 +50,7 @@ export interface ResourceHandlerFactoryServices {
 
 /**
  * Per-server notifier closures bound at registration time, targeting
- * `server.send*ListChanged()` and `server.server.elicitInput(...)`.
+ * `server.send*ListChanged()`.
  *
  * Split from {@link ResourceHandlerFactoryServices} so each per-request
  * McpServer gets its own notifier closures — preventing a concurrent
@@ -55,17 +58,15 @@ export interface ResourceHandlerFactoryServices {
  *
  * The resource handler factory prefers request-scoped notifiers
  * ({@link buildRequestScopedNotifiers}, #135) and uses these only as a fallback
- * when the SDK extra exposes no sender (e.g. a non-request test scope).
- *
- * The elicitation fields come from {@link ElicitationNotifiers}.
+ * when the request scope exposes no sender (e.g. a non-request test scope).
  */
-export interface ResourceHandlerNotifiers extends ElicitationNotifiers {
+export interface ResourceHandlerNotifiers {
   notifyPromptListChanged?: () => void;
   notifyResourceListChanged?: () => void;
   notifyResourceUpdated?: (uri: string) => void;
   notifyToolListChanged?: () => void;
-  /** Registers this handler invocation for session-scoped HTTP cancellation. */
-  registerRequest?: (requestId: SdkExtra['requestId']) => ProtocolRequestRegistration;
+  /** Per-connection `resources/subscribe` registry (#354). */
+  subscriptions?: ResourceSubscriptions;
 }
 
 // ---------------------------------------------------------------------------
@@ -129,26 +130,31 @@ export function createResourceHandler(
   def: AnyResourceDefinition,
   services: ResourceHandlerFactoryServices,
   notifiers: ResourceHandlerNotifiers,
-): (uri: URL, variables: Variables, extra: SdkExtra) => Promise<ReadResourceResult> {
+): (
+  uri: URL,
+  variables: Variables,
+  ctx: ServerContext,
+) => Promise<ReadResourceResult | InputRequiredResult> {
   const mimeType = def.mimeType ?? 'application/json';
   const formatter = def.format ?? defaultResponseFormatter;
 
-  return async (uri, variables, callContext): Promise<ReadResourceResult> => {
-    const sdkContext = callContext as unknown as SdkExtra;
-    const protocolRequest = notifiers.registerRequest?.(sdkContext.requestId);
-    const signal = protocolRequest
-      ? AbortSignal.any([sdkContext.signal, protocolRequest.signal])
-      : sdkContext.signal;
+  return async (
+    uri,
+    variables,
+    serverContext,
+  ): Promise<ReadResourceResult | InputRequiredResult> => {
+    const mcpReq = serverContext?.mcpReq;
+    const signal = mcpReq?.signal ?? new AbortController().signal;
 
     // Route handler-time list-changed / resource-updated notifications through
-    // this request's `extra.sendNotification` so they carry `relatedRequestId`
-    // and reach the client under the per-request HTTP/Worker McpServer model
-    // (#135). Fall back to the server-level notifiers when the extra exposes no
-    // sender (non-request scopes) — those deliver on stdio but drop under HTTP.
-    const effectiveNotifiers = buildRequestScopedNotifiers(sdkContext) ?? notifiers;
+    // this request's `ctx.mcpReq.notify` so they carry `relatedRequestId` and
+    // reach the client under per-request serving (#135). Fall back to the
+    // server-level notifiers when the scope exposes no sender.
+    const effectiveNotifiers =
+      buildRequestScopedNotifiers(mcpReq ?? {}, notifiers.subscriptions) ?? notifiers;
 
     const sdkSessionId =
-      typeof sdkContext?.sessionId === 'string' ? sdkContext.sessionId : undefined;
+      typeof serverContext?.sessionId === 'string' ? serverContext.sessionId : undefined;
 
     // Surface sessionId on `Context` only when it has request-spanning
     // lifetime — stateful HTTP (or `auto`, which resolves to stateful for
@@ -169,9 +175,10 @@ export function createResourceHandler(
     // query-string / caller-supplied and belongs in metrics, not logs.
     // Log correlation always uses the raw SDK sessionId — useful even in
     // stateless mode for tracing the SDK's per-request token through events.
+    const requestId = mcpReq?.id;
     const appContext = requestContextService.createRequestContext({
       parentContext: {
-        ...(typeof sdkContext?.requestId === 'string' ? { requestId: sdkContext.requestId } : {}),
+        ...(typeof requestId === 'string' ? { requestId } : {}),
         ...(sdkSessionId ? { sessionId: sdkSessionId } : {}),
       },
       operation: 'HandleResourceRead',
@@ -201,7 +208,9 @@ export function createResourceHandler(
           storage: services.storage,
           signal,
           sessionId: handlerSessionId,
-          elicit: wrapElicit(notifiers, sdkContext),
+          inputs: createContextInputs(mcpReq),
+          requestInput: createRequestInput(),
+          ...(mcpReq?.log && { wireLog: mcpReq.log }),
           notifyPromptListChanged: effectiveNotifiers.notifyPromptListChanged,
           notifyResourceListChanged: effectiveNotifiers.notifyResourceListChanged,
           notifyResourceUpdated: effectiveNotifiers.notifyResourceUpdated,
@@ -225,14 +234,16 @@ export function createResourceHandler(
       const contents = formatter(validatedResult, { uri, mimeType });
       return { contents };
     } catch (error: unknown) {
+      // `ctx.requestInput(...)` is protocol control flow, not a failure —
+      // `resources/read` honors `input_required` on the 2026-07-28 revision.
+      if (isInputRequiredSignal(error)) return error.result;
+
       // Classify without logging — the SDK logs when it catches the thrown error.
       if (error instanceof McpError) {
         throw error;
       }
       const { code, message, data } = ErrorHandler.classifyOnly(error);
       throw new McpError(code, message, data, { cause: error });
-    } finally {
-      protocolRequest?.unregister();
     }
   };
 }

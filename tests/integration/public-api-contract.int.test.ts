@@ -7,7 +7,6 @@ import * as Worker from '@/core/worker.js';
 import * as Linter from '@/linter/index.js';
 import * as Prompts from '@/mcp-server/prompts/utils/promptDefinition.js';
 import * as Resources from '@/mcp-server/resources/utils/resourceDefinition.js';
-import * as Tasks from '@/mcp-server/tasks/utils/taskToolDefinition.js';
 import * as Tools from '@/mcp-server/tools/utils/toolDefinition.js';
 import * as Auth from '@/mcp-server/transports/auth/lib/checkScopes.js';
 import * as Canvas from '@/services/canvas/index.js';
@@ -28,7 +27,6 @@ const SOURCE_MODULES = {
   './tools': Tools,
   './resources': Resources,
   './prompts': Prompts,
-  './tasks': Tasks,
   './errors': Errors,
   './config': Config,
   './auth': Auth,

@@ -2,11 +2,12 @@
  * @fileoverview Unit tests for the unified Context construction, the error
  * contract helpers (createFail/createRecoveryFor/attachTypedFail), the
  * enrichment/content accumulators, and the request-scoped logger/state/
- * progress wiring in src/core/context.ts.
+ * multi-round-trip-input wiring in src/core/context.ts.
  * @module tests/unit/core/context.test
  */
 
-import type { RequestTaskStore } from '@modelcontextprotocol/sdk/shared/protocol.js';
+import type { LoggingLevel } from '@modelcontextprotocol/server';
+import { inputRequired } from '@modelcontextprotocol/server';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { z } from 'zod';
 
@@ -24,6 +25,12 @@ import {
   readContentStore,
   readEnrichmentStore,
 } from '@/core/context.js';
+import {
+  createContextInputs,
+  createRequestInput,
+  InputRequiredSignal,
+  isInputRequiredSignal,
+} from '@/mcp-server/inputRequired.js';
 import { StorageService } from '@/storage/core/StorageService.js';
 import { InMemoryProvider } from '@/storage/providers/inMemory/inMemoryProvider.js';
 import { type ErrorContract, JsonRpcErrorCode, McpError } from '@/types-global/errors.js';
@@ -46,7 +53,9 @@ function buildAppContext(overrides: Partial<RequestContext> = {}): RequestContex
 function buildDeps(overrides: Partial<ContextDeps> = {}): ContextDeps {
   return {
     appContext: buildAppContext(),
+    inputs: createContextInputs(undefined),
     logger,
+    requestInput: createRequestInput(),
     signal: new AbortController().signal,
     storage: new StorageService(new InMemoryProvider()),
     ...overrides,
@@ -514,15 +523,6 @@ describe('createContext — field wiring', () => {
     expect(ctx.auth).toBeUndefined();
   });
 
-  it('forwards elicit from deps by reference, and leaves it undefined when absent', () => {
-    const elicit = vi.fn() as unknown as Context['elicit'];
-    const withElicit = createContext(buildDeps({ elicit }));
-    expect(withElicit.elicit).toBe(elicit);
-
-    const withoutElicit = createContext(buildDeps());
-    expect(withoutElicit.elicit).toBeUndefined();
-  });
-
   it('forwards notifyPromptListChanged from deps, undefined when absent', () => {
     const notifier = vi.fn();
     const withNotifier = createContext(buildDeps({ notifyPromptListChanged: notifier }));
@@ -557,15 +557,6 @@ describe('createContext — field wiring', () => {
 
     const withoutNotifier = createContext(buildDeps());
     expect(withoutNotifier.notifyToolListChanged).toBeUndefined();
-  });
-
-  it('leaves progress undefined without a taskCtx, and defines it when a taskCtx is given', () => {
-    const withoutTask = createContext(buildDeps());
-    expect(withoutTask.progress).toBeUndefined();
-
-    const store = { updateTaskStatus: vi.fn(async () => {}) } as unknown as RequestTaskStore;
-    const withTask = createContext(buildDeps({ taskCtx: { store, taskId: 'task-1' } }));
-    expect(withTask.progress).toBeDefined();
   });
 
   it('forwards uri from deps, undefined when absent', () => {
@@ -883,57 +874,161 @@ describe('ContextState (ctx.state)', () => {
     for (const method of Object.values(methods)) expect(method).not.toHaveBeenCalled();
   });
 });
+describe('createContext — multi-round-trip input wiring', () => {
+  it('exposes the inputs reader handed in via deps, by reference', () => {
+    const inputs = createContextInputs(undefined);
+    const ctx = createContext(buildDeps({ inputs }));
 
-describe('ContextProgress (ctx.progress)', () => {
-  function buildProgressCtx() {
-    const updateTaskStatus = vi.fn(async () => {});
-    const store = { updateTaskStatus } as unknown as RequestTaskStore;
-    const ctx = createContext(buildDeps({ taskCtx: { store, taskId: 'task-42' } }));
-    return { ctx, updateTaskStatus };
+    expect(ctx.inputs).toBe(inputs);
+  });
+
+  it('reads a retried request’s responses through ctx.inputs (accepted / view / state / dropped)', () => {
+    const inputs = createContextInputs({
+      inputResponses: {
+        confirm: { action: 'accept', content: { ok: true } },
+        cancelled: { action: 'cancel' },
+      },
+      droppedInputResponseKeys: ['wrapped'],
+      requestState: () => 'round-1',
+    } as never);
+    const ctx = createContext(buildDeps({ inputs }));
+
+    expect(ctx.inputs.accepted('confirm', z.object({ ok: z.boolean() }))).toEqual({ ok: true });
+    expect(ctx.inputs.accepted('cancelled')).toBeUndefined();
+    expect(ctx.inputs.view('cancelled')).toEqual({ kind: 'elicit', action: 'cancel' });
+    expect(ctx.inputs.view('never-asked')).toEqual({ kind: 'missing' });
+    expect(ctx.inputs.state()).toBe('round-1');
+    expect(ctx.inputs.dropped).toEqual(['wrapped']);
+  });
+
+  it('defaults to an empty inputs reader on the first round', () => {
+    const ctx = createContext(buildDeps());
+
+    expect(ctx.inputs.accepted('confirm')).toBeUndefined();
+    expect(ctx.inputs.view('confirm')).toEqual({ kind: 'missing' });
+    expect(ctx.inputs.state()).toBeUndefined();
+    expect(ctx.inputs.dropped).toEqual([]);
+    expect(ctx.inputs.responses).toBeUndefined();
+  });
+
+  it('exposes requestInput as a callable that never returns normally', () => {
+    const ctx = createContext(buildDeps());
+
+    expect(typeof ctx.requestInput).toBe('function');
+    expect(() => ctx.requestInput({ requestState: 'round-1' })).toThrow(InputRequiredSignal);
+  });
+
+  it('throws a signal carrying the SDK input_required result for the requested elicitation', () => {
+    const ctx = createContext(buildDeps());
+
+    let thrown: unknown;
+    try {
+      ctx.requestInput({
+        inputRequests: {
+          confirm: inputRequired.elicit({
+            message: 'Delete it?',
+            requestedSchema: z.object({ ok: z.boolean() }),
+          }),
+        },
+        requestState: 'round-1',
+      });
+    } catch (error) {
+      thrown = error;
+    }
+
+    expect(isInputRequiredSignal(thrown)).toBe(true);
+    const { result } = thrown as InputRequiredSignal;
+    expect(result.resultType).toBe('input_required');
+    expect(result.requestState).toBe('round-1');
+    expect(result.inputRequests?.confirm).toMatchObject({
+      method: 'elicitation/create',
+      params: { message: 'Delete it?', mode: 'form' },
+    });
+  });
+
+  it('rejects a spec carrying neither inputRequests nor requestState', () => {
+    const ctx = createContext(buildDeps());
+
+    expect(() => ctx.requestInput({})).toThrow(TypeError);
+  });
+});
+
+describe('ContextLogger — wire sink (ctx.mcpReq.log mirror)', () => {
+  function buildWireCtx() {
+    const wireLog = vi.fn(async () => {});
+    const ctx = createContext(
+      buildDeps({ appContext: buildAppContext({ tenantId: 'tenant-wire' }), wireLog }),
+    );
+    return { ctx, wireLog };
   }
 
-  it('setTotal sets the total and resets completed without calling the task store', async () => {
-    const { ctx, updateTaskStatus } = buildProgressCtx();
+  it.each<[Exclude<keyof Context['log'], 'error'>, LoggingLevel]>([
+    ['debug', 'debug'],
+    ['info', 'info'],
+    ['notice', 'notice'],
+    ['warning', 'warning'],
+  ])('mirrors ctx.log.%s to the wire at RFC 5424 level "%s"', (method, level) => {
+    const { ctx, wireLog } = buildWireCtx();
 
-    await ctx.progress?.setTotal(10);
+    ctx.log[method]('hello', { step: 1 });
 
-    expect(updateTaskStatus).not.toHaveBeenCalled();
+    expect(wireLog).toHaveBeenCalledWith(level, { message: 'hello', step: 1 });
   });
 
-  it('increment without a prior setTotal advances without clamping and reports no percentage', async () => {
-    const { ctx, updateTaskStatus } = buildProgressCtx();
+  it('sends only { message } when no call-site data is supplied', () => {
+    const { ctx, wireLog } = buildWireCtx();
 
-    await ctx.progress?.increment();
-    await ctx.progress?.increment(2);
+    ctx.log.info('bare');
 
-    expect(updateTaskStatus).toHaveBeenNthCalledWith(1, 'task-42', 'working', undefined);
-    expect(updateTaskStatus).toHaveBeenNthCalledWith(2, 'task-42', 'working', undefined);
+    expect(wireLog).toHaveBeenCalledWith('info', { message: 'bare' });
   });
 
-  it('increment after setTotal reports a rounded percentage message', async () => {
-    const { ctx, updateTaskStatus } = buildProgressCtx();
+  it('adds error: <message> to the wire payload when an Error is supplied', () => {
+    const { ctx, wireLog } = buildWireCtx();
 
-    await ctx.progress?.setTotal(4);
-    await ctx.progress?.increment(1);
+    ctx.log.error('failed', new Error('boom'), { detail: 'x' });
 
-    expect(updateTaskStatus).toHaveBeenCalledWith('task-42', 'working', '25% complete');
+    expect(wireLog).toHaveBeenCalledWith('error', {
+      message: 'failed',
+      detail: 'x',
+      error: 'boom',
+    });
   });
 
-  it('increment clamps completed at the total and does not exceed 100%', async () => {
-    const { ctx, updateTaskStatus } = buildProgressCtx();
+  it('omits the error key when ctx.log.error is called without an Error', () => {
+    const { ctx, wireLog } = buildWireCtx();
 
-    await ctx.progress?.setTotal(2);
-    await ctx.progress?.increment(5);
-    await ctx.progress?.increment(5);
+    ctx.log.error('failed', undefined, { detail: 'y' });
 
-    expect(updateTaskStatus).toHaveBeenLastCalledWith('task-42', 'working', '100% complete');
+    expect(wireLog).toHaveBeenCalledWith('error', { message: 'failed', detail: 'y' });
   });
 
-  it('update sends a status message without advancing completed/total', async () => {
-    const { ctx, updateTaskStatus } = buildProgressCtx();
+  it('swallows a rejecting wire sink — a log that cannot flush never fails the handler', async () => {
+    const wireLog = vi.fn(async () => {
+      throw new Error('transport gone');
+    });
+    const infoSpy = vi.spyOn(logger, 'info').mockImplementation(() => {});
+    const ctx = createContext(buildDeps({ wireLog }));
 
-    await ctx.progress?.update('halfway there');
+    expect(() => ctx.log.info('still logged')).not.toThrow();
+    // Flush the rejected promise's microtask queue; an unhandled rejection here
+    // would fail the run.
+    await Promise.resolve();
+    await Promise.resolve();
 
-    expect(updateTaskStatus).toHaveBeenCalledWith('task-42', 'working', 'halfway there');
+    expect(wireLog).toHaveBeenCalledTimes(1);
+    expect(infoSpy).toHaveBeenCalledWith('still logged', expect.anything());
+  });
+
+  it('still writes to the Pino sink when no wire sink is wired', () => {
+    const infoSpy = vi.spyOn(logger, 'info').mockImplementation(() => {});
+    const errorSpy = vi.spyOn(logger, 'error').mockImplementation(() => {});
+    const ctx = createContext(buildDeps());
+
+    ctx.log.info('no wire');
+    ctx.log.error('no wire either');
+
+    expect(infoSpy).toHaveBeenCalledWith('no wire', expect.anything());
+    expect(errorSpy).toHaveBeenCalledWith('no wire either', expect.anything());
   });
 });

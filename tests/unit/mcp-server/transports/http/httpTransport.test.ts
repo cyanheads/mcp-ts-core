@@ -3,14 +3,18 @@
  * @module tests/mcp-server/transports/http/httpTransport.test
  */
 
-import { StreamableHTTPTransport } from '@hono/mcp';
-import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
+import { type McpRequestContext, McpServer } from '@modelcontextprotocol/server';
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
-import type { ProtocolSessionHooks } from '@/mcp-server/protocolSession.js';
+import { z } from 'zod';
+import { authContext } from '@/mcp-server/transports/auth/lib/authContext.js';
+import type { AuthInfo } from '@/mcp-server/transports/auth/lib/authTypes.js';
 import { createHttpApp } from '@/mcp-server/transports/http/httpTransport.js';
+import type { HonoNodeBindings } from '@/mcp-server/transports/http/httpTypes.js';
+import type { SessionStore } from '@/mcp-server/transports/http/sessionStore.js';
 import { logger } from '@/utils/internal/logger.js';
 import type { RequestContext } from '@/utils/internal/requestContext.js';
 import { defaultServerManifest as defaultMeta } from '../../../../helpers/fixtures.js';
+import { parseSSEEvents } from '../../../../helpers/http-helpers.js';
 
 // Mock dependencies — factory is hoisted, so all values must be inline.
 vi.mock('@/config/index.js', () => ({
@@ -74,33 +78,165 @@ async function withConfigOverrides<T>(
   }
 }
 
+/** Runs `fn` inside a stateful-mode config override. */
+const withStatefulMode = <T>(fn: () => T | Promise<T>): Promise<T> =>
+  withConfigOverrides({ mcpSessionMode: 'stateful' }, fn);
+
+// ---------------------------------------------------------------------------
+// Harness
+//
+// The transport genuinely connects the instance the factory returns, so the
+// factory builds a real `McpServer` with one trivial tool and requests actually
+// round-trip. `factory.mock.calls` is therefore also the instance-identity
+// probe: one call per constructed instance, so a session that reuses its pinned
+// server shows exactly one call across every request it serves.
+// ---------------------------------------------------------------------------
+
+/** A factory over real `McpServer` instances, plus the instances it produced. */
+function createTestFactory() {
+  const servers: McpServer[] = [];
+  const factory = vi.fn(async (_ctx: McpRequestContext): Promise<McpServer> => {
+    const server = new McpServer(
+      { name: 'test-mcp-server', version: '1.0.0' },
+      { capabilities: { tools: {} } },
+    );
+    server.registerTool(
+      'echo',
+      { description: 'Echoes its input.', inputSchema: z.object({ value: z.string() }) },
+      ({ value }) => ({ content: [{ type: 'text' as const, text: value }] }),
+    );
+    servers.push(server);
+    return server;
+  });
+  return { factory, servers };
+}
+
+/** The Hono app `createHttpApp` returns. */
+type TestApp = Awaited<ReturnType<typeof createHttpApp<HonoNodeBindings>>>['app'];
+
+const ORIGIN = 'http://localhost:3000';
+const ENDPOINT = '/mcp';
+
+/** Headers a 2025-era client sends on the MCP endpoint. */
+const legacyHeaders = (extra: Record<string, string> = {}): Record<string, string> => ({
+  'content-type': 'application/json',
+  accept: 'application/json, text/event-stream',
+  origin: ORIGIN,
+  ...extra,
+});
+
+const initializeBody = (id = 1): string =>
+  JSON.stringify({
+    jsonrpc: '2.0',
+    method: 'initialize',
+    id,
+    params: {
+      protocolVersion: '2025-06-18',
+      capabilities: {},
+      clientInfo: { name: 'test-client', version: '1.0.0' },
+    },
+  });
+
+/**
+ * A 2026-07-28 request: the three routing headers plus the per-request `_meta`
+ * envelope that `isLegacyRequest` classifies as modern.
+ */
+const modernToolCall = (toolName: string): { headers: Record<string, string>; body: string } => ({
+  headers: {
+    'content-type': 'application/json',
+    accept: 'application/json, text/event-stream',
+    origin: ORIGIN,
+    'mcp-protocol-version': '2026-07-28',
+    'mcp-method': 'tools/call',
+    'mcp-name': toolName,
+  },
+  body: JSON.stringify({
+    jsonrpc: '2.0',
+    id: 1,
+    method: 'tools/call',
+    params: {
+      name: toolName,
+      arguments: { value: 'hello' },
+      _meta: {
+        'io.modelcontextprotocol/protocolVersion': '2026-07-28',
+        'io.modelcontextprotocol/clientInfo': { name: 'test', version: '1.0.0' },
+        'io.modelcontextprotocol/clientCapabilities': {},
+      },
+    },
+  }),
+});
+
+/**
+ * Reads a JSON-RPC response, which may arrive as a plain JSON body or as an SSE
+ * stream — in the latter case every `data:` frame is decoded and the one
+ * carrying an `id` (the result, not a mid-call notification) is returned.
+ */
+async function readJsonRpc(response: Response): Promise<Record<string, unknown>> {
+  const text = await response.text();
+  if (!response.headers.get('content-type')?.includes('text/event-stream')) {
+    return JSON.parse(text) as Record<string, unknown>;
+  }
+  const frames = parseSSEEvents(text).map(
+    (event) => JSON.parse(event.data) as Record<string, unknown>,
+  );
+  const result = frames.find((frame) => frame.id !== undefined);
+  if (!result) throw new Error(`No id-carrying SSE frame in: ${text}`);
+  return result;
+}
+
+const AUTH_A: AuthInfo = {
+  token: 'token-a',
+  clientId: 'client-a',
+  scopes: [],
+  subject: 'user-a',
+  tenantId: 'tenant-a',
+};
+const AUTH_B: AuthInfo = {
+  token: 'token-b',
+  clientId: 'client-b',
+  scopes: [],
+  subject: 'user-b',
+  tenantId: 'tenant-b',
+};
+
+/** Serves one request with `authInfo` visible to the transport's identity extraction. */
+const asIdentity = (
+  authInfo: AuthInfo,
+  run: () => Response | Promise<Response>,
+): Promise<Response> => authContext.run({ authInfo }, async () => await run());
+
 describe('HTTP Transport', () => {
-  let mockMcpServer: Partial<McpServer>;
+  let factory: ReturnType<typeof createTestFactory>['factory'];
+  let servers: McpServer[];
   let mockContext: RequestContext;
+  let teardown: Array<() => Promise<void>>;
 
   beforeEach(() => {
-    mockMcpServer = {
-      // Mock McpServer methods if needed
-    } as any;
+    ({ factory, servers } = createTestFactory());
+    teardown = [];
 
     mockContext = {
       requestId: 'test-request-123',
-      timestamp: Date.now() as any,
+      timestamp: Date.now() as unknown as string,
       operation: 'test-http-transport',
     };
   });
 
-  afterEach(() => {
+  afterEach(async () => {
+    for (const close of teardown) await close();
     vi.restoreAllMocks();
   });
 
+  /** Builds the app under test and registers its teardown. */
+  async function buildApp(manifest = defaultMeta) {
+    const created = await createHttpApp(factory, mockContext, manifest);
+    teardown.push(created.close);
+    return created;
+  }
+
   describe('createHttpApp', () => {
     test('should create Hono app instance', async () => {
-      const { app } = await createHttpApp(
-        () => Promise.resolve(mockMcpServer as McpServer),
-        mockContext,
-        defaultMeta,
-      );
+      const { app } = await buildApp();
 
       expect(app).toBeDefined();
       expect(typeof app.fetch).toBe('function');
@@ -110,38 +246,20 @@ describe('HTTP Transport', () => {
     });
 
     test('should configure CORS middleware', async () => {
-      const { app } = await createHttpApp(
-        () => Promise.resolve(mockMcpServer as McpServer),
-        mockContext,
-        defaultMeta,
-      );
+      const { app } = await buildApp();
 
-      // Make an OPTIONS request to test CORS
-      const request = new Request('http://localhost:3000/test', {
+      const response = await app.request('/test', {
         method: 'OPTIONS',
-        headers: {
-          Origin: 'http://localhost:3000',
-        },
+        headers: { Origin: ORIGIN },
       });
 
-      const response = await app.fetch(request);
-
-      // CORS headers should be present
       expect(response.headers.get('access-control-allow-origin')).toBeTruthy();
     });
 
     test('should register health endpoint', async () => {
-      const { app } = await createHttpApp(
-        () => Promise.resolve(mockMcpServer as McpServer),
-        mockContext,
-        defaultMeta,
-      );
+      const { app } = await buildApp();
 
-      const request = new Request('http://localhost:3000/healthz', {
-        method: 'GET',
-      });
-
-      const response = await app.fetch(request);
+      const response = await app.request('/healthz', { method: 'GET' });
       const data = await response.json();
 
       expect(response.status).toBe(200);
@@ -149,18 +267,10 @@ describe('HTTP Transport', () => {
     });
 
     test('should register MCP status endpoint', async () => {
-      const { app } = await createHttpApp(
-        () => Promise.resolve(mockMcpServer as McpServer),
-        mockContext,
-        defaultMeta,
-      );
+      const { app } = await buildApp();
 
-      const request = new Request('http://localhost:3000/mcp', {
-        method: 'GET',
-      });
-
-      const response = await app.fetch(request);
-      const data: any = await response.json();
+      const response = await app.request(ENDPOINT, { method: 'GET' });
+      const data = (await response.json()) as Record<string, unknown>;
 
       expect(response.status).toBe(200);
       expect(data.status).toBe('ok');
@@ -176,34 +286,24 @@ describe('HTTP Transport', () => {
     });
 
     test('should serve SEP-1649 Server Card at /.well-known/mcp.json', async () => {
-      const { app } = await createHttpApp(
-        () => Promise.resolve(mockMcpServer as McpServer),
-        mockContext,
-        defaultMeta,
-      );
+      const { app } = await buildApp();
 
-      const response = await app.fetch(
-        new Request('http://localhost:3000/.well-known/mcp.json', { method: 'GET' }),
-      );
-      const data: any = await response.json();
+      const response = await app.request('/.well-known/mcp.json', { method: 'GET' });
+      const data = (await response.json()) as Record<string, unknown>;
 
       expect(response.status).toBe(200);
       expect(response.headers.get('content-type')).toContain('application/json');
       expect(response.headers.get('x-content-type-options')).toBe('nosniff');
       expect(data.server_name).toBe('test-mcp-server');
       expect(data.mcp_version).toBeDefined();
-      expect(data.endpoints?.streamable_http).toBe('http://localhost:3000/mcp');
+      expect((data.endpoints as Record<string, unknown>)?.streamable_http).toContain(ENDPOINT);
       expect(data.capabilities).toBeDefined();
     });
 
     test('should serve HTML landing page at /', async () => {
-      const { app } = await createHttpApp(
-        () => Promise.resolve(mockMcpServer as McpServer),
-        mockContext,
-        defaultMeta,
-      );
+      const { app } = await buildApp();
 
-      const response = await app.fetch(new Request('http://localhost:3000/', { method: 'GET' }));
+      const response = await app.request('/', { method: 'GET' });
 
       expect(response.status).toBe(200);
       expect(response.headers.get('content-type')).toContain('text/html');
@@ -215,59 +315,45 @@ describe('HTTP Transport', () => {
     });
 
     test('should skip landing page when landing.enabled=false', async () => {
-      const disabled = {
+      const { app } = await buildApp({
         ...defaultMeta,
         landing: { ...defaultMeta.landing, enabled: false },
-      };
-      const { app } = await createHttpApp(
-        () => Promise.resolve(mockMcpServer as McpServer),
-        mockContext,
-        disabled,
-      );
+      });
 
-      const response = await app.fetch(new Request('http://localhost:3000/'));
+      const response = await app.request('/');
       expect(response.status).toBe(404);
     });
 
-    test('should pass SSE GET requests through to transport handler', async () => {
-      const { app } = await createHttpApp(
-        () => Promise.resolve(mockMcpServer as McpServer),
-        mockContext,
-        defaultMeta,
-      );
+    test('should serve robots.txt alongside the landing page', async () => {
+      const { app } = await buildApp();
 
-      const request = new Request('http://localhost:3000/mcp', {
+      const response = await app.request('/robots.txt', { method: 'GET' });
+
+      expect(response.status).toBe(200);
+      expect(await response.text()).toContain('Disallow');
+    });
+
+    test('should pass SSE GET requests through to transport handler', async () => {
+      const { app } = await buildApp();
+
+      const response = await app.request(ENDPOINT, {
         method: 'GET',
-        headers: {
-          Accept: 'text/event-stream',
-          Origin: 'http://localhost:3000',
-          'Mcp-Protocol-Version': '2025-03-26',
-        },
+        headers: { Accept: 'text/event-stream', Origin: ORIGIN },
       });
 
-      const response = await app.fetch(request);
-
-      // Should NOT return the info JSON — it falls through to the transport handler.
-      // Without a fully wired McpServer the response won't be a valid SSE stream,
-      // but we verify it did not return the status endpoint response.
+      // Falls through to the MCP handler rather than returning the status JSON.
       const text = await response.text();
       expect(text).not.toContain('"status":"ok"');
     });
 
     test('should serve OAuth metadata endpoint with minimal metadata when OAuth not configured', async () => {
       await withConfigOverrides({ mcpAuthMode: 'jwt' }, async () => {
-        const { app } = await createHttpApp(
-          () => Promise.resolve(mockMcpServer as McpServer),
-          mockContext,
-          defaultMeta,
-        );
+        const { app } = await buildApp();
 
-        const request = new Request('http://localhost:3000/.well-known/oauth-protected-resource', {
+        const response = await app.request('/.well-known/oauth-protected-resource', {
           method: 'GET',
         });
-
-        const response = await app.fetch(request);
-        const data: any = await response.json();
+        const data = (await response.json()) as Record<string, unknown>;
 
         expect(response.status).toBe(200);
         expect(data.bearer_methods_supported).toEqual(['header']);
@@ -278,22 +364,12 @@ describe('HTTP Transport', () => {
 
     test('should also serve OAuth metadata at the RFC 8414 path-suffixed variant', async () => {
       await withConfigOverrides({ mcpAuthMode: 'jwt' }, async () => {
-        const { app } = await createHttpApp(
-          () => Promise.resolve(mockMcpServer as McpServer),
-          mockContext,
-          defaultMeta,
-        );
+        const { app } = await buildApp();
 
-        const bare = await app.fetch(
-          new Request('http://localhost:3000/.well-known/oauth-protected-resource', {
-            method: 'GET',
-          }),
-        );
-        const suffixed = await app.fetch(
-          new Request('http://localhost:3000/.well-known/oauth-protected-resource/mcp', {
-            method: 'GET',
-          }),
-        );
+        const bare = await app.request('/.well-known/oauth-protected-resource', { method: 'GET' });
+        const suffixed = await app.request('/.well-known/oauth-protected-resource/mcp', {
+          method: 'GET',
+        });
 
         expect(suffixed.status).toBe(200);
         const bareBody = (await bare.json()) as Record<string, unknown>;
@@ -307,22 +383,12 @@ describe('HTTP Transport', () => {
     // it can never complete — no authorization_servers to register with — so the
     // routes must not exist at all. (#293)
     test('should not mount Protected Resource Metadata when auth mode is none', async () => {
-      const { app } = await createHttpApp(
-        () => Promise.resolve(mockMcpServer as McpServer),
-        mockContext,
-        defaultMeta,
-      );
+      const { app } = await buildApp();
 
-      const bare = await app.fetch(
-        new Request('http://localhost:3000/.well-known/oauth-protected-resource', {
-          method: 'GET',
-        }),
-      );
-      const suffixed = await app.fetch(
-        new Request('http://localhost:3000/.well-known/oauth-protected-resource/mcp', {
-          method: 'GET',
-        }),
-      );
+      const bare = await app.request('/.well-known/oauth-protected-resource', { method: 'GET' });
+      const suffixed = await app.request('/.well-known/oauth-protected-resource/mcp', {
+        method: 'GET',
+      });
 
       expect(bare.status).toBe(404);
       expect(suffixed.status).toBe(404);
@@ -332,17 +398,11 @@ describe('HTTP Transport', () => {
       await withConfigOverrides(
         { mcpAuthMode: 'oauth', oauthIssuerUrl: 'https://auth.example.com' },
         async () => {
-          const { app } = await createHttpApp(
-            () => Promise.resolve(mockMcpServer as McpServer),
-            mockContext,
-            defaultMeta,
-          );
+          const { app } = await buildApp();
 
-          const response = await app.fetch(
-            new Request('http://localhost:3000/.well-known/oauth-protected-resource', {
-              method: 'GET',
-            }),
-          );
+          const response = await app.request('/.well-known/oauth-protected-resource', {
+            method: 'GET',
+          });
 
           expect(response.status).toBe(200);
           const data = (await response.json()) as Record<string, unknown>;
@@ -351,170 +411,52 @@ describe('HTTP Transport', () => {
       );
     });
 
-    test('should handle DELETE request in stateless mode', async () => {
-      const { app } = await createHttpApp(
-        () => Promise.resolve(mockMcpServer as McpServer),
-        mockContext,
-        defaultMeta,
-      );
-
-      const request = new Request('http://localhost:3000/mcp', {
-        method: 'DELETE',
-        headers: {
-          'Mcp-Session-Id': 'test-session',
-        },
-      });
-
-      const response = await app.fetch(request);
-      const data: any = await response.json();
-
-      expect(response.status).toBe(405);
-      expect(data.error).toContain('not supported in stateless mode');
-    });
-
-    test('should handle DELETE request without session ID', async () => {
-      const { app } = await createHttpApp(
-        () => Promise.resolve(mockMcpServer as McpServer),
-        mockContext,
-        defaultMeta,
-      );
-
-      const request = new Request('http://localhost:3000/mcp', {
-        method: 'DELETE',
-      });
-
-      const response = await app.fetch(request);
-      const data: any = await response.json();
-
-      expect(response.status).toBe(400);
-      expect(data.error).toContain('Mcp-Session-Id header required');
-    });
-
-    test('should handle DELETE request in stateful mode', async () => {
-      await withConfigOverrides({ mcpSessionMode: 'stateful' }, async () => {
-        const { app, sessionStore } = await createHttpApp(
-          () => Promise.resolve(mockMcpServer as McpServer),
-          mockContext,
-          defaultMeta,
-        );
-
-        // Seed session
-        const testSessionId = 'b'.repeat(64);
-        sessionStore!.getOrCreate(testSessionId);
-
-        const request = new Request('http://localhost:3000/mcp', {
-          method: 'DELETE',
-          headers: { 'Mcp-Session-Id': testSessionId },
-        });
-
-        const response = await app.fetch(request);
-        const data: any = await response.json();
-
-        expect(response.status).toBe(200);
-        expect(data.status).toBe('terminated');
-        expect(data.sessionId).toBe(testSessionId);
-
-        sessionStore!.destroy();
-      });
-    });
-
     test('should reject requests with invalid origin', async () => {
-      const { app } = await createHttpApp(
-        () => Promise.resolve(mockMcpServer as McpServer),
-        mockContext,
-        defaultMeta,
-      );
+      const { app } = await buildApp();
 
-      const request = new Request('http://localhost:3000/mcp', {
+      const response = await app.request(ENDPOINT, {
         method: 'POST',
-        headers: {
-          Origin: 'http://evil.com',
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          jsonrpc: '2.0',
-          method: 'ping',
-          id: 1,
-        }),
+        headers: legacyHeaders({ origin: 'http://evil.com' }),
+        body: JSON.stringify({ jsonrpc: '2.0', method: 'ping', id: 1 }),
       });
-
-      const response = await app.fetch(request);
-      const data: any = await response.json();
+      const data = (await response.json()) as Record<string, unknown>;
 
       expect(response.status).toBe(403);
       expect(data.error).toContain('Invalid origin');
     });
 
     test('should allow requests with valid origin', async () => {
-      const { app } = await createHttpApp(
-        () => Promise.resolve(mockMcpServer as McpServer),
-        mockContext,
-        defaultMeta,
-      );
+      const { app } = await buildApp();
 
-      const request = new Request('http://localhost:3000/mcp', {
+      const response = await app.request(ENDPOINT, {
         method: 'POST',
-        headers: {
-          Origin: 'http://localhost:3000',
-          'Content-Type': 'application/json',
-          'Mcp-Protocol-Version': '2025-03-26',
-        },
-        body: JSON.stringify({
-          jsonrpc: '2.0',
-          method: 'initialize',
-          id: 1,
-          params: {
-            protocolVersion: '2025-03-26',
-            capabilities: {},
-            clientInfo: { name: 'test-client', version: '1.0.0' },
-          },
-        }),
+        headers: legacyHeaders(),
+        body: initializeBody(),
       });
 
-      // This will fail because we haven't set up full MCP server mock,
-      // but it should pass the origin check
-      const response = await app.fetch(request);
-
-      // Should not be rejected with 403 (origin validation)
       expect(response.status).not.toBe(403);
     });
 
     test('should include credentials in CORS when origin is explicitly configured', async () => {
-      const { app } = await createHttpApp(
-        () => Promise.resolve(mockMcpServer as McpServer),
-        mockContext,
-        defaultMeta,
-      );
+      const { app } = await buildApp();
 
-      const request = new Request('http://localhost:3000/mcp', {
+      const response = await app.request(ENDPOINT, {
         method: 'OPTIONS',
-        headers: {
-          Origin: 'http://localhost:3000',
-          'Access-Control-Request-Method': 'POST',
-        },
+        headers: { Origin: ORIGIN, 'Access-Control-Request-Method': 'POST' },
       });
 
-      const response = await app.fetch(request);
       expect(response.headers.get('access-control-allow-credentials')).toBe('true');
     });
 
     test('should omit credentials in CORS when origin is wildcard', async () => {
       await withConfigOverrides({ mcpAllowedOrigins: [] }, async () => {
-        const { app } = await createHttpApp(
-          () => Promise.resolve(mockMcpServer as McpServer),
-          mockContext,
-          defaultMeta,
-        );
+        const { app } = await buildApp();
 
-        const request = new Request('http://localhost:3000/mcp', {
+        const response = await app.request(ENDPOINT, {
           method: 'OPTIONS',
-          headers: {
-            Origin: 'http://localhost:3000',
-            'Access-Control-Request-Method': 'POST',
-          },
+          headers: { Origin: ORIGIN, 'Access-Control-Request-Method': 'POST' },
         });
 
-        const response = await app.fetch(request);
         // Wildcard origin must not set credentials (browsers reject the preflight)
         expect(response.headers.get('access-control-allow-credentials')).toBeNull();
         expect(response.headers.get('access-control-allow-origin')).toBe('*');
@@ -523,25 +465,16 @@ describe('HTTP Transport', () => {
 
     test('Origin guard: rejects non-loopback browser Origin when no allowlist configured', async () => {
       await withConfigOverrides({ mcpAllowedOrigins: [] }, async () => {
-        const { app } = await createHttpApp(
-          () => Promise.resolve(mockMcpServer as McpServer),
-          mockContext,
-          defaultMeta,
-        );
+        const { app } = await buildApp();
 
-        const request = new Request('http://localhost:3000/mcp', {
+        const response = await app.request(ENDPOINT, {
           method: 'POST',
-          headers: {
-            Origin: 'http://evil.example',
-            'Content-Type': 'application/json',
-            'Mcp-Protocol-Version': '2025-03-26',
-          },
+          headers: legacyHeaders({ origin: 'http://evil.example' }),
           body: JSON.stringify({ jsonrpc: '2.0', method: 'ping', id: 1 }),
         });
 
-        const response = await app.fetch(request);
         expect(response.status).toBe(403);
-        const data: any = await response.json();
+        const data = (await response.json()) as Record<string, unknown>;
         expect(data.error).toContain('Invalid origin');
       });
     });
@@ -556,25 +489,16 @@ describe('HTTP Transport', () => {
       'Origin guard: accepts %s (%s) as loopback when no allowlist configured',
       async (_label, origin) => {
         await withConfigOverrides({ mcpAllowedOrigins: [] }, async () => {
-          const { app } = await createHttpApp(
-            () => Promise.resolve(mockMcpServer as McpServer),
-            mockContext,
-            defaultMeta,
-          );
+          const { app } = await buildApp();
 
-          const request = new Request('http://localhost:3000/mcp', {
+          const response = await app.request(ENDPOINT, {
             method: 'POST',
-            headers: {
-              Origin: origin,
-              'Content-Type': 'application/json',
-              'Mcp-Protocol-Version': '2025-03-26',
-            },
+            headers: legacyHeaders({ origin }),
             body: JSON.stringify({ jsonrpc: '2.0', method: 'ping', id: 1 }),
           });
 
-          const response = await app.fetch(request);
-          // Not a 403 — Origin passed the guard. Handler may 4xx/5xx on the
-          // JSON-RPC payload, but the Origin check must have allowed it.
+          // Not a 403 — Origin passed the guard. The handler may still answer
+          // an error for the payload, but the Origin check must have allowed it.
           expect(response.status).not.toBe(403);
         });
       },
@@ -582,107 +506,330 @@ describe('HTTP Transport', () => {
 
     test('Origin guard: MCP_ALLOWED_ORIGINS="*" accepts any Origin (explicit opt-in)', async () => {
       await withConfigOverrides({ mcpAllowedOrigins: ['*'] }, async () => {
-        const { app } = await createHttpApp(
-          () => Promise.resolve(mockMcpServer as McpServer),
-          mockContext,
-          defaultMeta,
-        );
+        const { app } = await buildApp();
 
-        const request = new Request('http://localhost:3000/mcp', {
+        const response = await app.request(ENDPOINT, {
           method: 'POST',
-          headers: {
-            Origin: 'https://anything.example',
-            'Content-Type': 'application/json',
-            'Mcp-Protocol-Version': '2025-03-26',
-          },
+          headers: legacyHeaders({ origin: 'https://anything.example' }),
           body: JSON.stringify({ jsonrpc: '2.0', method: 'ping', id: 1 }),
         });
 
-        const response = await app.fetch(request);
         expect(response.status).not.toBe(403);
       });
     });
 
     test('Origin guard: passes through when no Origin header (CLI client)', async () => {
       await withConfigOverrides({ mcpAllowedOrigins: [] }, async () => {
-        const { app } = await createHttpApp(
-          () => Promise.resolve(mockMcpServer as McpServer),
-          mockContext,
-          defaultMeta,
-        );
+        const { app } = await buildApp();
 
-        const request = new Request('http://localhost:3000/mcp', {
+        const response = await app.request(ENDPOINT, {
           method: 'POST',
           headers: {
-            'Content-Type': 'application/json',
-            'Mcp-Protocol-Version': '2025-03-26',
+            'content-type': 'application/json',
+            accept: 'application/json, text/event-stream',
           },
           body: JSON.stringify({ jsonrpc: '2.0', method: 'ping', id: 1 }),
         });
 
-        const response = await app.fetch(request);
         expect(response.status).not.toBe(403);
       });
     });
 
-    test('should reject unsupported MCP protocol version', async () => {
-      const { app } = await createHttpApp(
-        () => Promise.resolve(mockMcpServer as McpServer),
-        mockContext,
-        defaultMeta,
-      );
+    test('answers malformed JSON with a -32700 parse error before any transport sees it', async () => {
+      const { app } = await buildApp();
 
-      const request = new Request('http://localhost:3000/mcp', {
+      const response = await app.request(ENDPOINT, {
         method: 'POST',
-        headers: {
-          Origin: 'http://localhost:3000',
-          'Content-Type': 'application/json',
-          'Mcp-Protocol-Version': '1999-01-01',
-        },
-        body: JSON.stringify({
-          jsonrpc: '2.0',
-          method: 'initialize',
-          id: 1,
-        }),
+        headers: legacyHeaders(),
+        body: '{ "jsonrpc": "2.0", ',
       });
-
-      const response = await app.fetch(request);
-      const data: any = await response.json();
+      const body = (await response.json()) as { error: { code: number; message: string } };
 
       expect(response.status).toBe(400);
-      expect(data.error).toContain('Unsupported MCP protocol version');
+      expect(body.error).toMatchObject({ code: -32700, message: 'Parse error' });
+      expect(factory).not.toHaveBeenCalled();
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // Stateless mode: one `createMcpHandler` answers both eras per request, so
+  // there is no session store and no session lifecycle at all.
+  // -------------------------------------------------------------------------
+  describe('Stateless session mode', () => {
+    test('does not create a session store', async () => {
+      const { sessionStore } = await buildApp();
+      expect(sessionStore).toBeNull();
     });
 
-    test('should default to protocol version 2025-03-26 when not provided', async () => {
-      const { app } = await createHttpApp(
-        () => Promise.resolve(mockMcpServer as McpServer),
-        mockContext,
-        defaultMeta,
-      );
+    test('serves a 2025-era initialize without minting a session', async () => {
+      const { app } = await buildApp();
 
-      const request = new Request('http://localhost:3000/mcp', {
+      const response = await app.request(ENDPOINT, {
         method: 'POST',
-        headers: {
-          Origin: 'http://localhost:3000',
-          'Content-Type': 'application/json',
-          // No MCP-Protocol-Version header
-        },
-        body: JSON.stringify({
-          jsonrpc: '2.0',
-          method: 'initialize',
-          id: 1,
-          params: {
-            protocolVersion: '2025-03-26',
-            capabilities: {},
-            clientInfo: { name: 'test-client', version: '1.0.0' },
-          },
-        }),
+        headers: legacyHeaders(),
+        body: initializeBody(),
+      });
+      const body = (await readJsonRpc(response)) as { result?: { serverInfo?: unknown } };
+
+      expect(response.status).toBe(200);
+      expect(response.headers.get('mcp-session-id')).toBeNull();
+      expect(body.result?.serverInfo).toMatchObject({ name: 'test-mcp-server' });
+    });
+
+    test.each([['GET'], ['DELETE']])(
+      'answers %s on the MCP endpoint with 405 (no session operations)',
+      async (method) => {
+        const { app } = await buildApp();
+
+        const response = await app.request(ENDPOINT, {
+          method,
+          headers: { accept: 'text/event-stream', origin: ORIGIN },
+        });
+        const body = (await response.json()) as { error: { message: string } };
+
+        expect(response.status).toBe(405);
+        expect(body.error.message).toContain('Method not allowed');
+      },
+    );
+  });
+
+  // -------------------------------------------------------------------------
+  // Stateful mode: 2025-era traffic is served by a persistent McpServer +
+  // transport pair per Mcp-Session-Id, held in the session store.
+  // -------------------------------------------------------------------------
+  describe('Stateful session mode', () => {
+    /** Initializes a session and returns its ID. */
+    async function initialize(app: TestApp, id = 1): Promise<string> {
+      const response = await app.request(ENDPOINT, {
+        method: 'POST',
+        headers: legacyHeaders(),
+        body: initializeBody(id),
+      });
+      await response.text();
+      const sessionId = response.headers.get('mcp-session-id');
+      expect(sessionId).toBeTruthy();
+      return sessionId as string;
+    }
+
+    test('creates an empty session store', async () => {
+      await withStatefulMode(async () => {
+        const { sessionStore } = await buildApp();
+
+        expect(sessionStore).not.toBeNull();
+        expect((sessionStore as SessionStore).getSessionCount()).toBe(0);
+      });
+    });
+
+    test('mints a 64-hex session ID on initialize', async () => {
+      await withStatefulMode(async () => {
+        const { app, sessionStore } = await buildApp();
+
+        const response = await app.request(ENDPOINT, {
+          method: 'POST',
+          headers: legacyHeaders(),
+          body: initializeBody(),
+        });
+        await response.text();
+
+        expect(response.status).toBe(200);
+        expect(response.headers.get('mcp-session-id')).toMatch(/^[0-9a-f]{64}$/);
+        expect((sessionStore as SessionStore).getSessionCount()).toBe(1);
+      });
+    });
+
+    test('routes every request on a session to the SAME McpServer instance', async () => {
+      await withStatefulMode(async () => {
+        const { app, sessionStore } = await buildApp();
+        const sessionId = await initialize(app);
+
+        expect(factory).toHaveBeenCalledTimes(1);
+        expect(factory.mock.calls[0]?.[0]).toMatchObject({ era: 'legacy' });
+
+        for (const id of [2, 3]) {
+          const response = await app.request(ENDPOINT, {
+            method: 'POST',
+            headers: legacyHeaders({ 'mcp-session-id': sessionId }),
+            body: JSON.stringify({ jsonrpc: '2.0', method: 'tools/list', id }),
+          });
+          const body = (await readJsonRpc(response)) as {
+            result: { tools: Array<{ name: string }> };
+          };
+          expect(response.status).toBe(200);
+          expect(body.result.tools.map((tool) => tool.name)).toEqual(['echo']);
+        }
+
+        // One instance for the whole session — not one per request.
+        expect(factory).toHaveBeenCalledTimes(1);
+        expect(servers).toHaveLength(1);
+        expect(sessionStore?.getConnection(sessionId)?.server).toBe(servers[0]);
+      });
+    });
+
+    test('answers an unknown session ID with 404', async () => {
+      await withStatefulMode(async () => {
+        const { app } = await buildApp();
+
+        const response = await app.request(ENDPOINT, {
+          method: 'POST',
+          headers: legacyHeaders({ 'mcp-session-id': 'f'.repeat(64) }),
+          body: JSON.stringify({ jsonrpc: '2.0', method: 'tools/list', id: 1 }),
+        });
+
+        expect(response.status).toBe(404);
+        expect(factory).not.toHaveBeenCalled();
+      });
+    });
+
+    test('answers a non-initialize request with no session ID with the transport 400', async () => {
+      await withStatefulMode(async () => {
+        const { app, sessionStore } = await buildApp();
+
+        const response = await app.request(ENDPOINT, {
+          method: 'POST',
+          headers: legacyHeaders(),
+          body: JSON.stringify({ jsonrpc: '2.0', method: 'tools/list', id: 1 }),
+        });
+        const body = (await response.json()) as { error: { message: string } };
+
+        expect(response.status).toBe(400);
+        expect(body.error.message).toContain('Bad Request');
+        expect((sessionStore as SessionStore).getSessionCount()).toBe(0);
+      });
+    });
+
+    test('refuses a new session once the store is at capacity, before building an instance', async () => {
+      await withStatefulMode(async () => {
+        const { app, sessionStore } = await buildApp();
+        await initialize(app);
+        expect(factory).toHaveBeenCalledTimes(1);
+
+        // Saturate: the one live session now equals the cap.
+        (sessionStore as unknown as { maxSessions: number }).maxSessions = 1;
+
+        const response = await app.request(ENDPOINT, {
+          method: 'POST',
+          headers: legacyHeaders(),
+          body: initializeBody(2),
+        });
+        const body = (await response.json()) as { error: string };
+
+        expect(response.ok).toBe(false);
+        expect(body.error).toContain('Maximum session capacity reached');
+        // No second instance was allocated only to be thrown away.
+        expect(factory).toHaveBeenCalledTimes(1);
+        expect((sessionStore as SessionStore).getSessionCount()).toBe(1);
+      });
+    });
+
+    describe('DELETE', () => {
+      test('terminates the session and makes it unreachable', async () => {
+        await withStatefulMode(async () => {
+          const { app, sessionStore } = await buildApp();
+          const sessionId = await initialize(app);
+
+          const response = await app.request(ENDPOINT, {
+            method: 'DELETE',
+            headers: { origin: ORIGIN, 'mcp-session-id': sessionId },
+          });
+
+          expect(response.status).toBe(200);
+          expect((sessionStore as SessionStore).getSessionCount()).toBe(0);
+
+          const afterwards = await app.request(ENDPOINT, {
+            method: 'POST',
+            headers: legacyHeaders({ 'mcp-session-id': sessionId }),
+            body: JSON.stringify({ jsonrpc: '2.0', method: 'tools/list', id: 9 }),
+          });
+          expect(afterwards.status).toBe(404);
+        });
       });
 
-      const response = await app.fetch(request);
+      test('requires the Mcp-Session-Id header', async () => {
+        await withStatefulMode(async () => {
+          const { app } = await buildApp();
 
-      // Should not be rejected for unsupported protocol version
-      expect(response.status).not.toBe(400);
+          const response = await app.request(ENDPOINT, {
+            method: 'DELETE',
+            headers: { origin: ORIGIN },
+          });
+          const data = (await response.json()) as Record<string, unknown>;
+
+          expect(response.status).toBe(400);
+          expect(data.error).toContain('Mcp-Session-Id header required');
+        });
+      });
+
+      test('refuses a session bound to a different identity with 404', async () => {
+        await withStatefulMode(async () => {
+          const { app, sessionStore } = await buildApp();
+
+          const initialized = await asIdentity(AUTH_A, () =>
+            app.request(ENDPOINT, {
+              method: 'POST',
+              headers: legacyHeaders(),
+              body: initializeBody(),
+            }),
+          );
+          await initialized.text();
+          const sessionId = initialized.headers.get('mcp-session-id') as string;
+          expect(sessionId).toBeTruthy();
+
+          const response = await asIdentity(AUTH_B, () =>
+            app.request(ENDPOINT, {
+              method: 'DELETE',
+              headers: { origin: ORIGIN, 'mcp-session-id': sessionId },
+            }),
+          );
+          const data = (await response.json()) as Record<string, unknown>;
+
+          expect(response.status).toBe(404);
+          expect(data.error).toContain('Session not found or access denied');
+          // The rightful owner's session survives the refused termination.
+          expect((sessionStore as SessionStore).getSessionCount()).toBe(1);
+        });
+      });
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // In stateful mode `isLegacyRequest` splits the traffic: 2026-07-28 requests
+  // go to the strict (`legacy: 'reject'`) modern handler, which is per-request
+  // by construction; claim-less requests go to the sessionful arm.
+  // -------------------------------------------------------------------------
+  describe('Legacy/modern request split (stateful)', () => {
+    test('serves a 2026-07-28 request on the modern handler, minting no session', async () => {
+      await withStatefulMode(async () => {
+        const { app, sessionStore } = await buildApp();
+        const { headers, body } = modernToolCall('echo');
+
+        const response = await app.request(ENDPOINT, { method: 'POST', headers, body });
+        const result = (await readJsonRpc(response)) as {
+          result: { content: Array<{ text: string }> };
+        };
+
+        expect(response.status).toBe(200);
+        expect(response.headers.get('mcp-session-id')).toBeNull();
+        expect(result.result.content[0]?.text).toBe('hello');
+        expect((sessionStore as SessionStore).getSessionCount()).toBe(0);
+        expect(factory.mock.calls.map((call) => call[0]?.era)).toEqual(['modern']);
+      });
+    });
+
+    test('serves a claim-less request on the sessionful arm', async () => {
+      await withStatefulMode(async () => {
+        const { app, sessionStore } = await buildApp();
+
+        const response = await app.request(ENDPOINT, {
+          method: 'POST',
+          headers: legacyHeaders(),
+          body: initializeBody(),
+        });
+        await response.text();
+
+        expect(response.headers.get('mcp-session-id')).toMatch(/^[0-9a-f]{64}$/);
+        expect((sessionStore as SessionStore).getSessionCount()).toBe(1);
+        expect(factory.mock.calls.map((call) => call[0]?.era)).toEqual(['legacy']);
+      });
     });
   });
 
@@ -696,37 +843,23 @@ describe('HTTP Transport', () => {
 
     test('rejects an over-limit POST body with 413', async () => {
       await withConfigOverrides({ mcpHttpMaxBodyBytes: 200 }, async () => {
-        const { app } = await createHttpApp(
-          () => Promise.resolve(mockMcpServer as McpServer),
-          mockContext,
-          defaultMeta,
-        );
+        const { app } = await buildApp();
 
-        const response = await app.fetch(
-          new Request('http://localhost:3000/mcp', {
-            method: 'POST',
-            headers: {
-              Origin: 'http://localhost:3000',
-              'Content-Type': 'application/json',
-              'Mcp-Protocol-Version': '2025-03-26',
-            },
-            body: overLimitBody,
-          }),
-        );
+        const response = await app.request(ENDPOINT, {
+          method: 'POST',
+          headers: legacyHeaders(),
+          body: overLimitBody,
+        });
 
         expect(response.status).toBe(413);
-        const data: any = await response.json();
+        const data = (await response.json()) as Record<string, unknown>;
         expect(data.error).toContain('exceeds');
       });
     });
 
     test('rejects an over-limit body with no Content-Length (streamed) with 413', async () => {
       await withConfigOverrides({ mcpHttpMaxBodyBytes: 200 }, async () => {
-        const { app } = await createHttpApp(
-          () => Promise.resolve(mockMcpServer as McpServer),
-          mockContext,
-          defaultMeta,
-        );
+        const { app } = await buildApp();
 
         const stream = new ReadableStream<Uint8Array>({
           start(controller) {
@@ -735,18 +868,12 @@ describe('HTTP Transport', () => {
           },
         });
 
-        const response = await app.fetch(
-          new Request('http://localhost:3000/mcp', {
-            method: 'POST',
-            headers: {
-              Origin: 'http://localhost:3000',
-              'Content-Type': 'application/json',
-              'Mcp-Protocol-Version': '2025-03-26',
-            },
-            body: stream,
-            duplex: 'half',
-          } as RequestInit),
-        );
+        const response = await app.request(ENDPOINT, {
+          method: 'POST',
+          headers: legacyHeaders(),
+          body: stream,
+          duplex: 'half',
+        } as RequestInit);
 
         expect(response.status).toBe(413);
       });
@@ -754,23 +881,13 @@ describe('HTTP Transport', () => {
 
     test('allows an under-limit POST body (not 413)', async () => {
       await withConfigOverrides({ mcpHttpMaxBodyBytes: 1024 * 1024 }, async () => {
-        const { app } = await createHttpApp(
-          () => Promise.resolve(mockMcpServer as McpServer),
-          mockContext,
-          defaultMeta,
-        );
+        const { app } = await buildApp();
 
-        const response = await app.fetch(
-          new Request('http://localhost:3000/mcp', {
-            method: 'POST',
-            headers: {
-              Origin: 'http://localhost:3000',
-              'Content-Type': 'application/json',
-              'Mcp-Protocol-Version': '2025-03-26',
-            },
-            body: JSON.stringify({ jsonrpc: '2.0', method: 'ping', id: 1 }),
-          }),
-        );
+        const response = await app.request(ENDPOINT, {
+          method: 'POST',
+          headers: legacyHeaders(),
+          body: JSON.stringify({ jsonrpc: '2.0', method: 'ping', id: 1 }),
+        });
 
         expect(response.status).not.toBe(413);
       });
@@ -778,23 +895,13 @@ describe('HTTP Transport', () => {
 
     test('disabled (0) accepts an otherwise-over-limit body', async () => {
       await withConfigOverrides({ mcpHttpMaxBodyBytes: 0 }, async () => {
-        const { app } = await createHttpApp(
-          () => Promise.resolve(mockMcpServer as McpServer),
-          mockContext,
-          defaultMeta,
-        );
+        const { app } = await buildApp();
 
-        const response = await app.fetch(
-          new Request('http://localhost:3000/mcp', {
-            method: 'POST',
-            headers: {
-              Origin: 'http://localhost:3000',
-              'Content-Type': 'application/json',
-              'Mcp-Protocol-Version': '2025-03-26',
-            },
-            body: overLimitBody,
-          }),
-        );
+        const response = await app.request(ENDPOINT, {
+          method: 'POST',
+          headers: legacyHeaders(),
+          body: overLimitBody,
+        });
 
         expect(response.status).not.toBe(413);
       });
@@ -802,117 +909,78 @@ describe('HTTP Transport', () => {
 
     test('does not apply the limit to GET status requests', async () => {
       await withConfigOverrides({ mcpHttpMaxBodyBytes: 1 }, async () => {
-        const { app } = await createHttpApp(
-          () => Promise.resolve(mockMcpServer as McpServer),
-          mockContext,
-          defaultMeta,
-        );
+        const { app } = await buildApp();
 
-        const response = await app.fetch(
-          new Request('http://localhost:3000/mcp', { method: 'GET' }),
-        );
+        const response = await app.request(ENDPOINT, { method: 'GET' });
 
         expect(response.status).toBe(200);
-        const data: any = await response.json();
+        const data = (await response.json()) as Record<string, unknown>;
         expect(data.status).toBe('ok');
       });
     });
+
     test('accepts a small canvas-style request even under a tight limit', async () => {
       // A dataframe_query request is tiny even though the canvas it targets may
       // hold hundreds of MB — the staged data was fetched upstream server-side
       // and lives in DuckDB, never in the request body. The cap measures the
       // inbound JSON-RPC body only, so canvas servers are unaffected by it.
       await withConfigOverrides({ mcpHttpMaxBodyBytes: 2048 }, async () => {
-        const { app } = await createHttpApp(
-          () => Promise.resolve(mockMcpServer as McpServer),
-          mockContext,
-          defaultMeta,
-        );
+        const { app } = await buildApp();
 
-        const response = await app.fetch(
-          new Request('http://localhost:3000/mcp', {
-            method: 'POST',
-            headers: {
-              Origin: 'http://localhost:3000',
-              'Content-Type': 'application/json',
-              'Mcp-Protocol-Version': '2025-03-26',
-            },
-            body: JSON.stringify({
-              jsonrpc: '2.0',
-              method: 'tools/call',
-              id: 1,
-              params: {
-                name: 'dataframe_query',
-                arguments: {
-                  canvas_id: 'a1b2c3d4e5',
-                  sql: 'SELECT * FROM spilled_0a1b2c3d LIMIT 100',
-                },
+        const response = await app.request(ENDPOINT, {
+          method: 'POST',
+          headers: legacyHeaders(),
+          body: JSON.stringify({
+            jsonrpc: '2.0',
+            method: 'tools/call',
+            id: 1,
+            params: {
+              name: 'dataframe_query',
+              arguments: {
+                canvas_id: 'a1b2c3d4e5',
+                sql: 'SELECT * FROM spilled_0a1b2c3d LIMIT 100',
               },
-            }),
+            },
           }),
-        );
+        });
 
         expect(response.status).not.toBe(413);
       });
     });
 
     test('preserves a valid streamed body for the downstream SDK handler', async () => {
+      // The guard drains the raw stream to measure it, so the body it caches is
+      // the only copy the SDK can still read. A real round-trip is the proof:
+      // an initialize split across two chunks still produces an initialize result.
       await withConfigOverrides({ mcpHttpMaxBodyBytes: 2048 }, async () => {
-        const expectedBody = { jsonrpc: '2.0', method: 'ping', id: 1 };
-        const encodedBody = new TextEncoder().encode(JSON.stringify(expectedBody));
+        const encoded = new TextEncoder().encode(initializeBody());
         const stream = new ReadableStream<Uint8Array>({
           start(controller) {
-            controller.enqueue(encodedBody.subarray(0, 10));
-            controller.enqueue(encodedBody.subarray(10));
+            controller.enqueue(encoded.subarray(0, 10));
+            controller.enqueue(encoded.subarray(10));
             controller.close();
           },
         });
-        const handleRequestSpy = vi
-          .spyOn(StreamableHTTPTransport.prototype, 'handleRequest')
-          .mockImplementation(async (c) => {
-            expect(await c.req.json()).toEqual(expectedBody);
-            return new Response(null, { status: 202 });
-          });
-        const transportCloseSpy = vi
-          .spyOn(StreamableHTTPTransport.prototype, 'close')
-          .mockResolvedValue(undefined);
-        const serverCloseSpy = vi.fn().mockResolvedValue(undefined);
-        const mockServer = {
-          connect: vi.fn().mockResolvedValue(undefined),
-          close: serverCloseSpy,
-        } as unknown as McpServer;
-        const { app } = await createHttpApp(
-          () => Promise.resolve(mockServer),
-          mockContext,
-          defaultMeta,
-        );
+        const { app } = await buildApp();
 
-        const response = await app.fetch(
-          new Request('http://localhost:3000/mcp', {
-            method: 'POST',
-            headers: {
-              Origin: 'http://localhost:3000',
-              'Content-Type': 'application/json',
-              'Mcp-Protocol-Version': '2025-03-26',
-            },
-            body: stream,
-            duplex: 'half',
-          } as RequestInit),
-        );
+        const response = await app.request(ENDPOINT, {
+          method: 'POST',
+          headers: legacyHeaders(),
+          body: stream,
+          duplex: 'half',
+        } as RequestInit);
+        const body = (await readJsonRpc(response)) as {
+          result?: { protocolVersion?: string };
+        };
 
-        expect(response.status).toBe(202);
-        expect(handleRequestSpy).toHaveBeenCalledOnce();
-
-        await new Promise((resolve) => setImmediate(resolve));
-        expect(transportCloseSpy).toHaveBeenCalledOnce();
-        expect(serverCloseSpy).toHaveBeenCalledOnce();
+        expect(response.status).toBe(200);
+        expect(body.result?.protocolVersion).toBeTruthy();
       });
     });
   });
 
   // Verification for issue #244. The #157 tests above only assert an eventual
-  // 413 — they pass even when the entire over-limit body is buffered first
-  // (the line-666 streamed test enqueues 2000 bytes and checks status alone).
+  // 413 — they pass even when the entire over-limit body is buffered first.
   // These assert the property that actually protects memory: when no
   // Content-Length is present, the cap must be enforced by a streaming read
   // that stops shortly after the limit is exceeded — not by buffering the whole
@@ -945,33 +1013,22 @@ describe('HTTP Transport', () => {
 
     test('rejects an over-limit no-Content-Length body without buffering all of it', async () => {
       await withConfigOverrides({ mcpHttpMaxBodyBytes: CAP }, async () => {
-        const { app } = await createHttpApp(
-          () => Promise.resolve(mockMcpServer as McpServer),
-          mockContext,
-          defaultMeta,
-        );
+        const { app } = await buildApp();
 
         // 64 KiB offered in 1 KiB pulls — 327x the 200-byte cap.
         const { stream, state } = instrumentedStream(1024, 64);
 
-        const response = await app.fetch(
-          new Request('http://localhost:3000/mcp', {
-            method: 'POST',
-            headers: {
-              Origin: 'http://localhost:3000',
-              'Content-Type': 'application/json',
-              'Mcp-Protocol-Version': '2025-03-26',
-            },
-            body: stream,
-            duplex: 'half',
-          } as RequestInit),
-        );
+        const response = await app.request(ENDPOINT, {
+          method: 'POST',
+          headers: legacyHeaders(),
+          body: stream,
+          duplex: 'half',
+        } as RequestInit);
 
         expect(response.status).toBe(413);
 
         // A streaming cap stops reading shortly after the limit is exceeded
-        // (8 KiB slack for read-ahead). The current code drains all 64 KiB and
-        // never cancels, so both assertions throw today.
+        // (8 KiB slack for read-ahead).
         expect(state.cancelled).toBe(true);
         expect(state.bytesPulled).toBeLessThan(CAP + 8 * 1024);
       });
@@ -979,26 +1036,15 @@ describe('HTTP Transport', () => {
 
     test('rejects and cancels an over-limit body with dishonest Content-Length', async () => {
       await withConfigOverrides({ mcpHttpMaxBodyBytes: CAP }, async () => {
-        const { app } = await createHttpApp(
-          () => Promise.resolve(mockMcpServer as McpServer),
-          mockContext,
-          defaultMeta,
-        );
+        const { app } = await buildApp();
         const { stream, state } = instrumentedStream(1024, 64);
 
-        const response = await app.fetch(
-          new Request('http://localhost:3000/mcp', {
-            method: 'POST',
-            headers: {
-              Origin: 'http://localhost:3000',
-              'Content-Type': 'application/json',
-              'Content-Length': '100',
-              'Mcp-Protocol-Version': '2025-03-26',
-            },
-            body: stream,
-            duplex: 'half',
-          } as RequestInit),
-        );
+        const response = await app.request(ENDPOINT, {
+          method: 'POST',
+          headers: legacyHeaders({ 'content-length': '100' }),
+          body: stream,
+          duplex: 'half',
+        } as RequestInit);
 
         expect(response.status).toBe(413);
         expect(state.cancelled).toBe(true);
@@ -1009,566 +1055,74 @@ describe('HTTP Transport', () => {
 
   describe('Error handling integration', () => {
     test('should use centralized error handler', async () => {
-      const { app } = await createHttpApp(
-        () => Promise.resolve(mockMcpServer as McpServer),
-        mockContext,
-        defaultMeta,
-      );
+      const { app } = await buildApp();
 
       // Simulate an error by accessing a non-existent route with proper method
-      const request = new Request('http://localhost:3000/nonexistent', {
-        method: 'GET',
-      });
-
-      const response = await app.fetch(request);
+      const response = await app.request('/nonexistent', { method: 'GET' });
 
       // Should return 404 for non-existent route
       expect(response.status).toBe(404);
     });
   });
 
-  describe('Session management', () => {
-    test('should create session store in stateful mode', async () => {
-      await withConfigOverrides({ mcpSessionMode: 'stateful' }, async () => {
-        const { sessionStore } = await createHttpApp(
-          () => Promise.resolve(mockMcpServer as McpServer),
-          mockContext,
-          defaultMeta,
-        );
+  // -------------------------------------------------------------------------
+  // Teardown. `close()` owns the whole MCP layer: the modern handler (which
+  // aborts its in-flight exchanges and closes their per-request instances) and
+  // the session store (which closes every live session's server + transport).
+  // -------------------------------------------------------------------------
+  describe('close() teardown', () => {
+    test('closes the modern handler', async () => {
+      const { handler, close } = await createHttpApp(factory, mockContext, defaultMeta);
+      const handlerCloseSpy = vi.spyOn(handler, 'close');
 
-        expect(sessionStore).not.toBeNull();
-        expect(sessionStore!.getSessionCount()).toBe(0);
-        sessionStore!.destroy();
-      });
+      await close();
+
+      expect(handlerCloseSpy).toHaveBeenCalledTimes(1);
     });
 
-    test('should not create session store in stateless mode', async () => {
-      const { sessionStore } = await createHttpApp(
-        () => Promise.resolve(mockMcpServer as McpServer),
-        mockContext,
-        defaultMeta,
-      );
+    test('closes every live session exactly once and empties the store', async () => {
+      await withStatefulMode(async () => {
+        const { app, close, sessionStore } = await createHttpApp(factory, mockContext, defaultMeta);
+        const store = sessionStore as SessionStore;
 
-      expect(sessionStore).toBeNull();
-    });
-
-    test('should return Mcp-Session-Id header on successful initialize in stateful mode', async () => {
-      await withConfigOverrides({ mcpSessionMode: 'stateful' }, async () => {
-        // Wire up a mock server whose connect + transport.handleRequest succeed
-        const mockServer = {
-          connect: vi.fn().mockResolvedValue(undefined),
-        } as unknown as McpServer;
-
-        const { app, sessionStore } = await createHttpApp(
-          () => Promise.resolve(mockServer),
-          mockContext,
-          defaultMeta,
-        );
-
-        const request = new Request('http://localhost:3000/mcp', {
-          method: 'POST',
-          headers: {
-            Origin: 'http://localhost:3000',
-            'Content-Type': 'application/json',
-            'Mcp-Protocol-Version': '2025-03-26',
-          },
-          body: JSON.stringify({
-            jsonrpc: '2.0',
-            method: 'initialize',
-            id: 1,
-            params: {
-              protocolVersion: '2025-03-26',
-              capabilities: {},
-              clientInfo: { name: 'test-client', version: '1.0.0' },
-            },
-          }),
-        });
-
-        const response = await app.fetch(request);
-
-        // The SDK transport processes the request — if it returns a successful
-        // response the session header must be present.
-        if (response.ok) {
-          expect(response.headers.get('mcp-session-id')).toBeTruthy();
-          // Session should also be registered in the store
-          expect(sessionStore!.getSessionCount()).toBe(1);
+        const sessionIds: string[] = [];
+        for (const id of [1, 2]) {
+          const response = await app.request(ENDPOINT, {
+            method: 'POST',
+            headers: legacyHeaders(),
+            body: initializeBody(id),
+          });
+          await response.text();
+          sessionIds.push(response.headers.get('mcp-session-id') as string);
         }
-        // Regardless of SDK outcome, should not be a 403/400 (our guards passed)
-        expect(response.status).not.toBe(403);
+        expect(store.getSessionCount()).toBe(2);
 
-        sessionStore!.destroy();
-      });
-    });
-
-    test('should NOT return Mcp-Session-Id header in stateless mode', async () => {
-      const mockServer = {
-        connect: vi.fn().mockResolvedValue(undefined),
-      } as unknown as McpServer;
-
-      const { app } = await createHttpApp(
-        () => Promise.resolve(mockServer),
-        mockContext,
-        defaultMeta,
-      );
-
-      const request = new Request('http://localhost:3000/mcp', {
-        method: 'POST',
-        headers: {
-          Origin: 'http://localhost:3000',
-          'Content-Type': 'application/json',
-          'Mcp-Protocol-Version': '2025-03-26',
-        },
-        body: JSON.stringify({
-          jsonrpc: '2.0',
-          method: 'initialize',
-          id: 1,
-          params: {
-            protocolVersion: '2025-03-26',
-            capabilities: {},
-            clientInfo: { name: 'test-client', version: '1.0.0' },
-          },
-        }),
-      });
-
-      const response = await app.fetch(request);
-
-      // Stateless mode never emits the session header
-      expect(response.headers.get('mcp-session-id')).toBeNull();
-    });
-
-    test('should not mint a session for requests that fail protocol validation', async () => {
-      await withConfigOverrides({ mcpSessionMode: 'stateful' }, async () => {
-        const mockServer = {
-          connect: vi.fn().mockResolvedValue(undefined),
-        } as unknown as McpServer;
-
-        const { app, sessionStore } = await createHttpApp(
-          () => Promise.resolve(mockServer),
-          mockContext,
-          defaultMeta,
-        );
-
-        // Send a request with an unsupported protocol version — should fail
-        // before reaching the transport handler, so no session is minted.
-        const request = new Request('http://localhost:3000/mcp', {
-          method: 'POST',
-          headers: {
-            Origin: 'http://localhost:3000',
-            'Content-Type': 'application/json',
-            'Mcp-Protocol-Version': '1999-01-01',
-          },
-          body: JSON.stringify({
-            jsonrpc: '2.0',
-            method: 'initialize',
-            id: 1,
-          }),
-        });
-
-        const response = await app.fetch(request);
-
-        expect(response.status).toBe(400);
-        // No session should have been created
-        expect(sessionStore!.getSessionCount()).toBe(0);
-        expect(response.headers.get('mcp-session-id')).toBeNull();
-
-        sessionStore!.destroy();
-      });
-    });
-
-    test('should handle DELETE in stateful mode and terminate session', async () => {
-      await withConfigOverrides({ mcpSessionMode: 'stateful' }, async () => {
-        const { app, sessionStore } = await createHttpApp(
-          () => Promise.resolve(mockMcpServer as McpServer),
-          mockContext,
-          defaultMeta,
-        );
-
-        // Manually seed a session in the store
-        const testSessionId = 'a'.repeat(64);
-        sessionStore!.getOrCreate(testSessionId);
-        expect(sessionStore!.getSessionCount()).toBe(1);
-
-        const request = new Request('http://localhost:3000/mcp', {
-          method: 'DELETE',
-          headers: {
-            'Mcp-Session-Id': testSessionId,
-          },
-        });
-
-        const response = await app.fetch(request);
-        const data: any = await response.json();
-
-        expect(response.status).toBe(200);
-        expect(data.status).toBe('terminated');
-        expect(sessionStore!.getSessionCount()).toBe(0);
-
-        sessionStore!.destroy();
-      });
-    });
-
-    test('persists initialize capabilities into the next request server factory', async () => {
-      await withConfigOverrides({ mcpSessionMode: 'stateful' }, async () => {
-        const transportCloseSpy = vi
-          .spyOn(StreamableHTTPTransport.prototype, 'close')
-          .mockResolvedValue(undefined);
-        vi.spyOn(StreamableHTTPTransport.prototype, 'handleRequest').mockImplementation(
-          async () =>
-            new Response(JSON.stringify({ jsonrpc: '2.0', id: 1, result: {} }), {
-              status: 200,
-              headers: { 'Content-Type': 'application/json' },
-            }),
-        );
-        const serverCloseSpies: ReturnType<typeof vi.fn>[] = [];
-        const serverFactory = vi.fn(async (_hooks?: ProtocolSessionHooks) => {
-          const close = vi.fn().mockResolvedValue(undefined);
-          serverCloseSpies.push(close);
+        const closeSpies = sessionIds.map((sessionId) => {
+          const connection = store.getConnection(sessionId);
+          if (!connection) throw new Error(`missing connection for ${sessionId}`);
           return {
-            connect: vi.fn().mockResolvedValue(undefined),
-            close,
-          } as unknown as McpServer;
+            server: vi.spyOn(connection.server, 'close'),
+            transport: vi.spyOn(connection.transport, 'close'),
+          };
         });
-        const { app, sessionStore } = await createHttpApp(serverFactory, mockContext, defaultMeta);
-        const capabilities = { elicitation: { form: {} }, sampling: {} };
 
-        const initializeResponse = await app.fetch(
-          new Request('http://localhost:3000/mcp', {
-            method: 'POST',
-            headers: {
-              Origin: 'http://localhost:3000',
-              'Content-Type': 'application/json',
-              'Mcp-Protocol-Version': '2025-03-26',
-            },
-            body: JSON.stringify({
-              jsonrpc: '2.0',
-              method: 'initialize',
-              id: 1,
-              params: {
-                protocolVersion: '2025-03-26',
-                capabilities,
-                clientInfo: { name: 'test-client', version: '1.0.0' },
-              },
-            }),
-          }),
-        );
-        const sessionId = initializeResponse.headers.get('mcp-session-id');
-        expect(sessionId).toBeTruthy();
-        expect(serverFactory.mock.calls[0]?.[0]).toBeUndefined();
+        await close();
 
-        const nextResponse = await app.fetch(
-          new Request('http://localhost:3000/mcp', {
-            method: 'POST',
-            headers: {
-              Origin: 'http://localhost:3000',
-              'Content-Type': 'application/json',
-              'Mcp-Protocol-Version': '2025-03-26',
-              'Mcp-Session-Id': sessionId!,
-            },
-            body: JSON.stringify({ jsonrpc: '2.0', method: 'tools/list', id: 2 }),
-          }),
-        );
-
-        expect(nextResponse.status).toBe(200);
-        expect(serverFactory.mock.calls[1]?.[0]?.clientCapabilities).toEqual(capabilities);
-        expect(serverFactory.mock.calls[1]?.[0]?.registerRequest).toBeTypeOf('function');
-
-        await new Promise((resolve) => setImmediate(resolve));
-        expect(transportCloseSpy).toHaveBeenCalledTimes(2);
-        expect(serverCloseSpies).toHaveLength(2);
-        expect(serverCloseSpies.every((close) => close.mock.calls.length === 1)).toBe(true);
-        sessionStore!.destroy();
+        expect(store.getSessionCount()).toBe(0);
+        for (const spy of closeSpies) {
+          expect(spy.server).toHaveBeenCalledTimes(1);
+          expect(spy.transport).toHaveBeenCalledTimes(1);
+        }
       });
     });
 
-    test('routes cancellation only to the session supplied by the request', async () => {
-      await withConfigOverrides({ mcpSessionMode: 'stateful' }, async () => {
-        vi.spyOn(StreamableHTTPTransport.prototype, 'close').mockResolvedValue(undefined);
-        vi.spyOn(StreamableHTTPTransport.prototype, 'handleRequest').mockImplementation(
-          async (c) => {
-            const body = (await c.req.json()) as { method?: string };
-            return new Response(
-              body.method === 'notifications/cancelled'
-                ? null
-                : JSON.stringify({ jsonrpc: '2.0', id: 1, result: {} }),
-              {
-                status: body.method === 'notifications/cancelled' ? 202 : 200,
-                headers: { 'Content-Type': 'application/json' },
-              },
-            );
-          },
-        );
-        const serverFactory = vi.fn(
-          async (_hooks?: ProtocolSessionHooks) =>
-            ({
-              connect: vi.fn().mockResolvedValue(undefined),
-              close: vi.fn().mockResolvedValue(undefined),
-            }) as unknown as McpServer,
-        );
-        const { app, sessionStore } = await createHttpApp(serverFactory, mockContext, defaultMeta);
-        const initialize = async (id: number): Promise<string> => {
-          const response = await app.fetch(
-            new Request('http://localhost:3000/mcp', {
-              method: 'POST',
-              headers: {
-                Origin: 'http://localhost:3000',
-                'Content-Type': 'application/json',
-                'Mcp-Protocol-Version': '2025-03-26',
-              },
-              body: JSON.stringify({
-                jsonrpc: '2.0',
-                method: 'initialize',
-                id,
-                params: {
-                  protocolVersion: '2025-03-26',
-                  capabilities: {},
-                  clientInfo: { name: `client-${id}`, version: '1.0.0' },
-                },
-              }),
-            }),
-          );
-          return response.headers.get('mcp-session-id')!;
-        };
-        const sessionA = await initialize(1);
-        const sessionB = await initialize(2);
-        expect(sessionA).toBeTruthy();
-        expect(sessionB).toBeTruthy();
-        expect(sessionA).not.toBe(sessionB);
-        const requestA = sessionStore!.createProtocolSessionHooks(sessionA)!.registerRequest!(99);
-        const requestB = sessionStore!.createProtocolSessionHooks(sessionB)!.registerRequest!(99);
+    test('is safe to call when no session was ever created', async () => {
+      await withStatefulMode(async () => {
+        const { close, sessionStore } = await createHttpApp(factory, mockContext, defaultMeta);
 
-        const cancelResponse = await app.fetch(
-          new Request('http://localhost:3000/mcp', {
-            method: 'POST',
-            headers: {
-              Origin: 'http://localhost:3000',
-              'Content-Type': 'application/json',
-              'Mcp-Protocol-Version': '2025-03-26',
-              'Mcp-Session-Id': sessionA,
-            },
-            body: JSON.stringify({
-              jsonrpc: '2.0',
-              method: 'notifications/cancelled',
-              params: { requestId: 99, reason: 'user cancelled' },
-            }),
-          }),
-        );
-
-        expect(cancelResponse.status).toBe(202);
-        expect(requestA.signal.aborted).toBe(true);
-        expect(requestA.signal.reason).toMatchObject({
-          name: 'AbortError',
-          message: 'user cancelled',
-        });
-        expect(requestB.signal.aborted).toBe(false);
-        expect(serverFactory.mock.calls.at(-1)?.[0]).toEqual(
-          expect.objectContaining({ registerRequest: expect.any(Function) }),
-        );
-        sessionStore!.destroy();
+        await expect(close()).resolves.toBeUndefined();
+        expect((sessionStore as SessionStore).getSessionCount()).toBe(0);
       });
-    });
-  });
-
-  // -------------------------------------------------------------------------
-  // Per-request close — issue #50 regression
-  //
-  // The HTTP transport constructs a fresh McpServer + McpSessionTransport per
-  // request. Production telemetry showed a 1:1 correlation between SSE GETs
-  // and unfinalized server/transport pairs because @hono/mcp's stream.onAbort
-  // does not fire transport.close() on ungraceful client disconnect — so the
-  // framework's onclose path never ran. We bind cleanup to c.req.raw.signal
-  // for SSE responses; on abort, closePerRequestInstances runs both closes.
-  // -------------------------------------------------------------------------
-  describe('Per-request close on SSE abort (issue #50)', () => {
-    let transportCloseSpy: ReturnType<typeof vi.spyOn>;
-    let serverCloseSpy: ReturnType<typeof vi.fn>;
-    let app: Awaited<ReturnType<typeof createHttpApp>>['app'];
-
-    beforeEach(async () => {
-      transportCloseSpy = vi.spyOn(StreamableHTTPTransport.prototype, 'close');
-      serverCloseSpy = vi.fn().mockResolvedValue(undefined);
-      const mockServer = {
-        connect: vi.fn().mockResolvedValue(undefined),
-        close: serverCloseSpy,
-      } as unknown as McpServer;
-      ({ app } = await createHttpApp(() => Promise.resolve(mockServer), mockContext, defaultMeta));
-    });
-
-    afterEach(() => {
-      transportCloseSpy.mockRestore();
-    });
-
-    /** Two `setImmediate` ticks cover: abort listener → `void closePerRequestInstances`
-     * → `Promise.all([transport.close, server.close])`. */
-    const flushCleanup = async (): Promise<void> => {
-      await new Promise((resolve) => setImmediate(resolve));
-      await new Promise((resolve) => setImmediate(resolve));
-    };
-
-    const sseRequest = (signal: AbortSignal): Request =>
-      new Request('http://localhost:3000/mcp', {
-        method: 'GET',
-        headers: {
-          Accept: 'text/event-stream',
-          Origin: 'http://localhost:3000',
-          'Mcp-Protocol-Version': '2025-03-26',
-        },
-        signal,
-      });
-
-    test('aborting an SSE GET triggers per-request transport.close + server.close', async () => {
-      const controller = new AbortController();
-      const response = await app.fetch(sseRequest(controller.signal));
-
-      // Sanity: streamSSE response, not the GET-status fallback.
-      expect(response.headers.get('content-type')).toContain('text/event-stream');
-
-      // Pre-abort: cleanup must NOT have fired — the SSE stream is alive.
-      expect(transportCloseSpy).not.toHaveBeenCalled();
-      expect(serverCloseSpy).not.toHaveBeenCalled();
-
-      controller.abort();
-      await flushCleanup();
-
-      expect(transportCloseSpy).toHaveBeenCalledTimes(1);
-      expect(serverCloseSpy).toHaveBeenCalledTimes(1);
-    });
-
-    test('SSE GET with a pre-aborted signal still runs cleanup', async () => {
-      const controller = new AbortController();
-      // Exercise the `signal.aborted` queueMicrotask branch.
-      controller.abort();
-      await app.fetch(sseRequest(controller.signal));
-      await flushCleanup();
-
-      expect(transportCloseSpy).toHaveBeenCalledTimes(1);
-      expect(serverCloseSpy).toHaveBeenCalledTimes(1);
-    });
-
-    test('aborting twice only fires cleanup once', async () => {
-      // Guards against regressions in `{ once: true }` on the abort listener
-      // and AbortController's own once-only abort semantics.
-      const controller = new AbortController();
-      await app.fetch(sseRequest(controller.signal));
-
-      controller.abort();
-      controller.abort();
-      await flushCleanup();
-
-      expect(transportCloseSpy).toHaveBeenCalledTimes(1);
-      expect(serverCloseSpy).toHaveBeenCalledTimes(1);
-    });
-
-    test('non-SSE POST (notifications-only) cleans up via the success path', async () => {
-      // Notifications-only POST: @hono/mcp returns `ctx.json(null, 202)` —
-      // a plain JSON response, not an SSE stream — so the framework takes
-      // the queueMicrotask cleanup branch, not the abort-signal branch.
-      const request = new Request('http://localhost:3000/mcp', {
-        method: 'POST',
-        headers: {
-          Origin: 'http://localhost:3000',
-          'Content-Type': 'application/json',
-          Accept: 'application/json, text/event-stream',
-          'Mcp-Protocol-Version': '2025-03-26',
-        },
-        body: JSON.stringify({
-          jsonrpc: '2.0',
-          method: 'notifications/initialized',
-        }),
-      });
-
-      const response = await app.fetch(request);
-      expect(response.headers.get('content-type')).not.toContain('text/event-stream');
-
-      await flushCleanup();
-
-      expect(transportCloseSpy).toHaveBeenCalledTimes(1);
-      expect(serverCloseSpy).toHaveBeenCalledTimes(1);
-    });
-
-    test('undefined handler response returns 204 and closes both surfaces exactly once', async () => {
-      const requestServerCloseSpy = vi.fn().mockResolvedValue(undefined);
-      const requestServer = {
-        connect: vi.fn().mockResolvedValue(undefined),
-        close: requestServerCloseSpy,
-      } as unknown as McpServer;
-      vi.spyOn(StreamableHTTPTransport.prototype, 'handleRequest').mockResolvedValue(undefined);
-      const { app: undefinedResponseApp } = await createHttpApp(
-        () => Promise.resolve(requestServer),
-        mockContext,
-        defaultMeta,
-      );
-
-      const response = await undefinedResponseApp.fetch(
-        new Request('http://localhost:3000/mcp', {
-          method: 'POST',
-          headers: {
-            Origin: 'http://localhost:3000',
-            'Content-Type': 'application/json',
-            'Mcp-Protocol-Version': '2025-03-26',
-          },
-          body: JSON.stringify({ jsonrpc: '2.0', method: 'ping', id: 1 }),
-        }),
-      );
-      await flushCleanup();
-
-      expect(response.status).toBe(204);
-      expect(transportCloseSpy).toHaveBeenCalledTimes(1);
-      expect(requestServerCloseSpy).toHaveBeenCalledTimes(1);
-    });
-
-    test('server factory error closes the created transport exactly once', async () => {
-      const factoryError = new Error('factory failed');
-      const { app: factoryErrorApp } = await createHttpApp(
-        () => Promise.reject(factoryError),
-        mockContext,
-        defaultMeta,
-      );
-
-      const response = await factoryErrorApp.fetch(sseRequest(new AbortController().signal));
-
-      expect(response.status).toBe(500);
-      expect(transportCloseSpy).toHaveBeenCalledTimes(1);
-      expect(serverCloseSpy).not.toHaveBeenCalled();
-    });
-
-    test('connect error closes the created server and transport exactly once', async () => {
-      const requestServerCloseSpy = vi.fn().mockResolvedValue(undefined);
-      const requestServer = {
-        connect: vi.fn().mockRejectedValue(new Error('connect failed')),
-        close: requestServerCloseSpy,
-      } as unknown as McpServer;
-      const { app: connectErrorApp } = await createHttpApp(
-        () => Promise.resolve(requestServer),
-        mockContext,
-        defaultMeta,
-      );
-
-      const response = await connectErrorApp.fetch(sseRequest(new AbortController().signal));
-
-      expect(response.status).toBe(500);
-      expect(transportCloseSpy).toHaveBeenCalledTimes(1);
-      expect(requestServerCloseSpy).toHaveBeenCalledTimes(1);
-    });
-
-    test('handler error closes the created server and transport exactly once', async () => {
-      const requestServerCloseSpy = vi.fn().mockResolvedValue(undefined);
-      const requestServer = {
-        connect: vi.fn().mockResolvedValue(undefined),
-        close: requestServerCloseSpy,
-      } as unknown as McpServer;
-      vi.spyOn(StreamableHTTPTransport.prototype, 'handleRequest').mockRejectedValue(
-        new Error('handler failed'),
-      );
-      const { app: handlerErrorApp } = await createHttpApp(
-        () => Promise.resolve(requestServer),
-        mockContext,
-        defaultMeta,
-      );
-
-      const response = await handlerErrorApp.fetch(sseRequest(new AbortController().signal));
-
-      expect(response.status).toBe(500);
-      expect(transportCloseSpy).toHaveBeenCalledTimes(1);
-      expect(requestServerCloseSpy).toHaveBeenCalledTimes(1);
     });
   });
 
@@ -1585,46 +1139,44 @@ describe('HTTP Transport', () => {
   // -------------------------------------------------------------------------
   describe('Per-request log context (issue #194)', () => {
     test('per-request handler logs carry a fresh context, not the frozen boot context', async () => {
-      const warnSpy = vi.spyOn(logger, 'warning').mockImplementation(() => {});
-      const { app } = await createHttpApp(
-        () => Promise.resolve(mockMcpServer as McpServer),
-        mockContext,
-        defaultMeta,
-      );
+      await withStatefulMode(async () => {
+        const warnSpy = vi.spyOn(logger, 'warning').mockImplementation(() => {});
+        const { app } = await buildApp();
 
-      // DELETE without a session ID hits a per-request handler log.
-      await app.fetch(new Request('http://localhost:3000/mcp', { method: 'DELETE' }));
+        // DELETE without a session ID hits a per-request handler log.
+        await app.request(ENDPOINT, { method: 'DELETE', headers: { origin: ORIGIN } });
 
-      const call = warnSpy.mock.calls.find(([msg]) => msg === 'DELETE request without session ID');
-      expect(call).toBeDefined();
-      const ctx = call![1] as RequestContext;
+        const call = warnSpy.mock.calls.find(
+          ([msg]) => msg === 'DELETE request without session ID',
+        );
+        expect(call).toBeDefined();
+        const ctx = call?.[1] as RequestContext;
 
-      // Fresh per-request requestId — not the boot context's id.
-      expect(ctx.requestId).toBeTruthy();
-      expect(ctx.requestId).not.toBe(mockContext.requestId);
-      // Fresh ISO 8601 timestamp — not the boot context's (numeric) stamp.
-      expect(typeof ctx.timestamp).toBe('string');
-      expect(ctx.timestamp).not.toBe(mockContext.timestamp);
-      expect(Number.isNaN(Date.parse(ctx.timestamp as string))).toBe(false);
+        // Fresh per-request requestId — not the boot context's id.
+        expect(ctx.requestId).toBeTruthy();
+        expect(ctx.requestId).not.toBe(mockContext.requestId);
+        // Fresh ISO 8601 timestamp — not the boot context's (numeric) stamp.
+        expect(typeof ctx.timestamp).toBe('string');
+        expect(ctx.timestamp).not.toBe(mockContext.timestamp);
+        expect(Number.isNaN(Date.parse(ctx.timestamp as string))).toBe(false);
+      });
     });
 
     test('distinct requests get distinct per-request contexts (not frozen at boot)', async () => {
-      const warnSpy = vi.spyOn(logger, 'warning').mockImplementation(() => {});
-      const { app } = await createHttpApp(
-        () => Promise.resolve(mockMcpServer as McpServer),
-        mockContext,
-        defaultMeta,
-      );
+      await withStatefulMode(async () => {
+        const warnSpy = vi.spyOn(logger, 'warning').mockImplementation(() => {});
+        const { app } = await buildApp();
 
-      await app.fetch(new Request('http://localhost:3000/mcp', { method: 'DELETE' }));
-      await app.fetch(new Request('http://localhost:3000/mcp', { method: 'DELETE' }));
+        await app.request(ENDPOINT, { method: 'DELETE', headers: { origin: ORIGIN } });
+        await app.request(ENDPOINT, { method: 'DELETE', headers: { origin: ORIGIN } });
 
-      const ids = warnSpy.mock.calls
-        .filter(([msg]) => msg === 'DELETE request without session ID')
-        .map(([, ctx]) => (ctx as RequestContext).requestId);
+        const ids = warnSpy.mock.calls
+          .filter(([msg]) => msg === 'DELETE request without session ID')
+          .map(([, ctx]) => (ctx as RequestContext).requestId);
 
-      expect(ids).toHaveLength(2);
-      expect(ids[0]).not.toBe(ids[1]);
+        expect(ids).toHaveLength(2);
+        expect(ids[0]).not.toBe(ids[1]);
+      });
     });
   });
 });

@@ -106,8 +106,10 @@ describe('HTTP session management integration', () => {
 
     expect(res.status).toBe(400);
 
-    const body = (await res.json()) as { error?: string | undefined };
-    expect(body.error).toContain('Mcp-Session-Id header is required');
+    // The SDK transport owns the rejection: a session-less non-initialize
+    // request reaches an uninitialized instance.
+    const body = (await res.json()) as { error?: { message?: string } };
+    expect(body.error?.message).toContain('Server not initialized');
   });
 
   it('rejects GET SSE without a session ID with 400 in stateful mode', async () => {
@@ -120,9 +122,6 @@ describe('HTTP session management integration', () => {
     });
 
     expect(res.status).toBe(400);
-
-    const body = (await res.json()) as { error?: string | undefined };
-    expect(body.error).toContain('Mcp-Session-Id header is required');
   });
 
   it('allows initialize requests without a session ID', async () => {
@@ -171,9 +170,9 @@ describe('HTTP session management integration', () => {
       method: 'DELETE',
     });
 
+    // The SDK transport answers DELETE itself (200, empty body) after the
+    // framework has validated session ownership.
     expect(deleteRes.status).toBe(200);
-    const deleteBody = (await deleteRes.json()) as { status?: string | undefined };
-    expect(deleteBody.status).toBe('terminated');
 
     // Step 3: Attempt to use the terminated session — should fail
     const postRes = await fetch(`http://localhost:${handle.port}/mcp`, {

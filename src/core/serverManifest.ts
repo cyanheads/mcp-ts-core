@@ -13,8 +13,8 @@
  * @module src/core/serverManifest
  */
 
-import type { Implementation } from '@modelcontextprotocol/sdk/types.js';
-import { SUPPORTED_PROTOCOL_VERSIONS } from '@modelcontextprotocol/sdk/types.js';
+import { type Implementation, SUPPORTED_PROTOCOL_VERSIONS } from '@modelcontextprotocol/server';
+
 import type { ZodObject, ZodRawShape } from 'zod';
 import { toJSONSchema } from 'zod/v4/core';
 
@@ -28,6 +28,7 @@ import {
   getDisabledMetadata,
 } from '@/mcp-server/tools/utils/disabled-tool.js';
 import type { AnyToolDefinition } from '@/mcp-server/tools/utils/toolDefinition.js';
+import { MODERN_PROTOCOL_REVISION } from '@/mcp-server/types.js';
 import { configurationError } from '@/types-global/errors.js';
 
 // ---------------------------------------------------------------------------
@@ -275,8 +276,6 @@ export interface ManifestTool {
   inputSchema?: unknown;
   /** True when `_meta.ui.resourceUri` is set (MCP Apps). */
   isApp: boolean;
-  /** True when `task: true` on the definition. */
-  isTask: boolean;
   name: string;
   /** JSON Schema for the output (when Zod → JSON Schema succeeds). */
   outputSchema?: unknown;
@@ -539,8 +538,13 @@ export function buildServerManifest(input: BuildServerManifestInput): ServerMani
     websiteUrl,
   } = input;
 
-  const protocolVersions = SUPPORTED_PROTOCOL_VERSIONS;
-  const latestProtocol = protocolVersions[0] ?? '2025-06-18';
+  // The SDK's `SUPPORTED_PROTOCOL_VERSIONS` covers only the revisions that are
+  // negotiated through `initialize` — the 2025 era. Revision 2026-07-28 is
+  // selected per request by the `_meta` envelope rather than negotiated, so it
+  // is absent from that list even though every HTTP endpoint the framework
+  // builds serves it. Advertise it first: it is the newest revision on offer.
+  const protocolVersions = [MODERN_PROTOCOL_REVISION, ...SUPPORTED_PROTOCOL_VERSIONS];
+  const latestProtocol = protocolVersions[0] ?? MODERN_PROTOCOL_REVISION;
 
   // Auto-derive repoRoot from homepage when the consumer didn't set it explicitly.
   const repoRoot = detectGitHubRepo(landing.repoRoot ?? config.mcpServerHomepage);
@@ -573,7 +577,6 @@ export function buildServerManifest(input: BuildServerManifestInput): ServerMani
       title: d.title ?? d.annotations?.title ?? deriveTitleFromName(name),
       description: d.description ?? '',
       ...(d.annotations && { annotations: d.annotations as Record<string, unknown> }),
-      isTask: d.task === true,
       isApp: isMcpAppTool(def),
       ...(d.auth && d.auth.length > 0 && { auth: d.auth }),
       ...(inputSchema !== undefined && { inputSchema }),

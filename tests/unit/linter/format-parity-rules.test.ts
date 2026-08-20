@@ -3,7 +3,7 @@
  * @module tests/unit/linter/format-parity-rules.test
  */
 
-import type { ContentBlock } from '@modelcontextprotocol/sdk/types.js';
+import type { ContentBlock } from '@modelcontextprotocol/server';
 import { describe, expect, it } from 'vitest';
 import { z } from 'zod';
 

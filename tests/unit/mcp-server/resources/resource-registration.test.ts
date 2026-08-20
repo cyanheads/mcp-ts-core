@@ -2,13 +2,15 @@
  * @fileoverview Tests for resource registration system.
  * @module tests/mcp-server/resources/resource-registration.test
  */
-import { ResourceTemplate } from '@modelcontextprotocol/sdk/server/mcp.js';
+import { ResourceTemplate } from '@modelcontextprotocol/server';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { z } from 'zod';
+import type { ResourceSubscriptions } from '@/mcp-server/notifications.js';
 import { ResourceRegistry } from '@/mcp-server/resources/resource-registration.js';
 import { resource } from '@/mcp-server/resources/utils/resourceDefinition.js';
 import type { ResourceHandlerFactoryServices } from '@/mcp-server/resources/utils/resourceHandlerFactory.js';
 import { JsonRpcErrorCode } from '@/types-global/errors.js';
+import { makeSenderlessServerContext, makeServerContext } from '../../../helpers/server-context.js';
 
 // ---------------------------------------------------------------------------
 // Mocks
@@ -68,22 +70,33 @@ const services: ResourceHandlerFactoryServices = {
   storage: mockStorage as any,
 };
 
+/** Fires every list-changed / resource-updated notifier from its handler. */
+const notifyingResource = resource('notify://{id}', {
+  name: 'notify-resource',
+  description: 'Notifies from handler',
+  params: z.object({ id: z.string().describe('id') }),
+  handler: (_params, ctx) => {
+    ctx.notifyPromptListChanged?.();
+    ctx.notifyResourceListChanged?.();
+    ctx.notifyResourceUpdated?.('notify://updated');
+    ctx.notifyToolListChanged?.();
+    return { ok: true };
+  },
+});
+
 describe('ResourceRegistry', () => {
   let mockServer: any;
 
   beforeEach(() => {
     vi.clearAllMocks();
+    // v2 installs `resources/list` / `resources/read` from the declared
+    // `resources` capability, so registration only ever calls
+    // `registerResource`.
     mockServer = {
-      resource: vi.fn(() => {}),
-      setResourceRequestHandlers: vi.fn(),
+      registerResource: vi.fn(() => {}),
       sendPromptListChanged: vi.fn(),
       sendResourceListChanged: vi.fn(),
       sendToolListChanged: vi.fn(),
-      server: {
-        sendResourceUpdated: vi.fn(),
-        elicitInput: vi.fn(),
-        getClientCapabilities: vi.fn(() => undefined),
-      },
     };
   });
 
@@ -98,7 +111,7 @@ describe('ResourceRegistry', () => {
       const registry = new ResourceRegistry([testResource], services);
       await registry.registerAll(mockServer);
 
-      expect(mockServer.resource).toHaveBeenCalledTimes(1);
+      expect(mockServer.registerResource).toHaveBeenCalledTimes(1);
     });
 
     it('should register multiple resources', async () => {
@@ -114,15 +127,14 @@ describe('ResourceRegistry', () => {
       const registry = new ResourceRegistry([r1, r2], services);
       await registry.registerAll(mockServer);
 
-      expect(mockServer.resource).toHaveBeenCalledTimes(2);
+      expect(mockServer.registerResource).toHaveBeenCalledTimes(2);
     });
 
     it('should handle empty resource list', async () => {
       const registry = new ResourceRegistry([], services);
       await registry.registerAll(mockServer);
 
-      expect(mockServer.resource).toHaveBeenCalledTimes(0);
-      expect(mockServer.setResourceRequestHandlers).toHaveBeenCalledOnce();
+      expect(mockServer.registerResource).toHaveBeenCalledTimes(0);
     });
 
     it('should reject duplicate resource names before registering the second resource', async () => {
@@ -142,7 +154,7 @@ describe('ResourceRegistry', () => {
       const registry = new ResourceRegistry(resources, services);
 
       await expect(registry.registerAll(mockServer)).rejects.toThrow(/Duplicate resource name/);
-      expect(mockServer.resource).toHaveBeenCalledTimes(1);
+      expect(mockServer.registerResource).toHaveBeenCalledTimes(1);
     });
 
     it('should register resources with correct metadata', async () => {
@@ -157,7 +169,7 @@ describe('ResourceRegistry', () => {
       const registry = new ResourceRegistry([testResource], services);
       await registry.registerAll(mockServer);
 
-      const call = mockServer.resource.mock.calls[0];
+      const call = mockServer.registerResource.mock.calls[0];
       expect(call[0]).toBe('echo-resource');
       expect(call[2]).toMatchObject({
         title: 'Echo Resource',
@@ -175,7 +187,7 @@ describe('ResourceRegistry', () => {
       const registry = new ResourceRegistry([testResource], services);
       await registry.registerAll(mockServer);
 
-      const call = mockServer.resource.mock.calls[0];
+      const call = mockServer.registerResource.mock.calls[0];
       expect(call[0]).toBe('scheme://{id}');
     });
 
@@ -192,7 +204,7 @@ describe('ResourceRegistry', () => {
       const registry = new ResourceRegistry([testResource], services);
       await registry.registerAll(mockServer);
 
-      const call = mockServer.resource.mock.calls[0];
+      const call = mockServer.registerResource.mock.calls[0];
       expect(call[0]).toBe('app-ui');
       expect(call[1]).toBe('ui://app/app.html');
     });
@@ -211,38 +223,57 @@ describe('ResourceRegistry', () => {
       const registry = new ResourceRegistry([testResource], services);
       await registry.registerAll(mockServer);
 
-      const call = mockServer.resource.mock.calls[0];
+      const call = mockServer.registerResource.mock.calls[0];
       expect(call[0]).toBe('item-resource');
       expect(call[1]).toBeInstanceOf(ResourceTemplate);
       expect(call[1]).not.toBe('items://{id}');
     });
 
-    it('wires per-server notifier closures into resource handler context', async () => {
-      const testResource = resource('notify://{id}', {
-        name: 'notify-resource',
-        description: 'Notifies from handler',
-        params: z.object({ id: z.string().describe('id') }),
-        handler: (_params, ctx) => {
-          ctx.notifyPromptListChanged?.();
-          ctx.notifyResourceListChanged?.();
-          ctx.notifyResourceUpdated?.('notify://updated');
-          ctx.notifyToolListChanged?.();
-          return { ok: true };
-        },
-      });
-
-      const registry = new ResourceRegistry([testResource], services);
+    it('falls back to the per-server notifier closures when the request scope has no sender', async () => {
+      const registry = new ResourceRegistry([notifyingResource], services);
       await registry.registerAll(mockServer);
 
-      const handler = mockServer.resource.mock.calls[0][3];
-      await handler(new URL('notify://123'), { id: '123' }, new Request('https://example.com'));
+      const handler = mockServer.registerResource.mock.calls[0][3];
+      await handler(new URL('notify://123'), { id: '123' }, makeSenderlessServerContext());
 
       expect(mockServer.sendPromptListChanged).toHaveBeenCalledOnce();
       expect(mockServer.sendResourceListChanged).toHaveBeenCalledOnce();
-      expect(mockServer.server.sendResourceUpdated).toHaveBeenCalledWith({
-        uri: 'notify://updated',
-      });
       expect(mockServer.sendToolListChanged).toHaveBeenCalledOnce();
+    });
+
+    it('routes handler-time notifications through the request scope when it has a sender', async () => {
+      const notify = vi.fn(async () => {});
+      const subscriptions: ResourceSubscriptions = { has: () => true };
+      const registry = new ResourceRegistry([notifyingResource], services);
+      await registry.registerAll(mockServer, subscriptions);
+
+      const handler = mockServer.registerResource.mock.calls[0][3];
+      await handler(new URL('notify://123'), { id: '123' }, makeServerContext({ notify }));
+
+      expect(notify).toHaveBeenCalledWith({ method: 'notifications/prompts/list_changed' });
+      expect(notify).toHaveBeenCalledWith({ method: 'notifications/resources/list_changed' });
+      expect(notify).toHaveBeenCalledWith({ method: 'notifications/tools/list_changed' });
+      expect(notify).toHaveBeenCalledWith({
+        method: 'notifications/resources/updated',
+        params: { uri: 'notify://updated' },
+      });
+      expect(mockServer.sendPromptListChanged).not.toHaveBeenCalled();
+    });
+
+    it('gates resources/updated on the connection subscription registry (#354)', async () => {
+      const notify = vi.fn(async () => {});
+      const has = vi.fn(() => false);
+      const registry = new ResourceRegistry([notifyingResource], services);
+      await registry.registerAll(mockServer, { has });
+
+      const handler = mockServer.registerResource.mock.calls[0][3];
+      await handler(new URL('notify://123'), { id: '123' }, makeServerContext({ notify }));
+
+      expect(has).toHaveBeenCalledWith('notify://updated');
+      expect(notify).not.toHaveBeenCalledWith(
+        expect.objectContaining({ method: 'notifications/resources/updated' }),
+      );
+      expect(notify).toHaveBeenCalledWith({ method: 'notifications/tools/list_changed' });
     });
   });
 
@@ -264,8 +295,8 @@ describe('ResourceRegistry', () => {
       await registry.registerAll(mockServer);
 
       // The registration path constructs a ResourceTemplate and passes it as the
-      // second argument to server.resource(). Verify the template was created.
-      const call = mockServer.resource.mock.calls[0];
+      // second argument to server.registerResource(). Verify the template was created.
+      const call = mockServer.registerResource.mock.calls[0];
       const template = call[1];
       expect(template).toBeInstanceOf(ResourceTemplate);
     });
@@ -304,14 +335,14 @@ describe('ResourceRegistry', () => {
       const registry = new ResourceRegistry(resources, services);
       await registry.registerAll(mockServer);
 
-      expect(mockServer.resource.mock.calls[0][0]).toBe('first');
-      expect(mockServer.resource.mock.calls[1][0]).toBe('second');
-      expect(mockServer.resource.mock.calls[2][0]).toBe('third');
+      expect(mockServer.registerResource.mock.calls[0][0]).toBe('first');
+      expect(mockServer.registerResource.mock.calls[1][0]).toBe('second');
+      expect(mockServer.registerResource.mock.calls[2][0]).toBe('third');
     });
   });
 
   describe('Annotations and Examples', () => {
-    it('should pass annotations to server.resource', async () => {
+    it('should pass annotations to server.registerResource', async () => {
       const testResource = resource('ann://{id}', {
         description: 'Annotated',
         handler: () => ({}),
@@ -321,11 +352,11 @@ describe('ResourceRegistry', () => {
       const registry = new ResourceRegistry([testResource], services);
       await registry.registerAll(mockServer);
 
-      const call = mockServer.resource.mock.calls[0];
+      const call = mockServer.registerResource.mock.calls[0];
       expect(call[2].annotations).toEqual({ audience: ['user'], priority: 0.8 });
     });
 
-    it('should pass _meta to server.resource', async () => {
+    it('should pass _meta to server.registerResource', async () => {
       const testResource = resource('ui://app/app.html', {
         name: 'app-ui',
         description: 'App UI resource',
@@ -342,7 +373,7 @@ describe('ResourceRegistry', () => {
       const registry = new ResourceRegistry([testResource], services);
       await registry.registerAll(mockServer);
 
-      const call = mockServer.resource.mock.calls[0];
+      const call = mockServer.registerResource.mock.calls[0];
       expect(call[2]._meta).toEqual({
         ui: {
           csp: { resourceDomains: ['https://cdn.example.com'] },
@@ -360,7 +391,7 @@ describe('ResourceRegistry', () => {
       const registry = new ResourceRegistry([testResource], services);
       await registry.registerAll(mockServer);
 
-      const call = mockServer.resource.mock.calls[0];
+      const call = mockServer.registerResource.mock.calls[0];
       expect(call[2]._meta).toBeUndefined();
     });
 
@@ -381,7 +412,7 @@ describe('ResourceRegistry', () => {
       const registry = new ResourceRegistry([errorContractResource], services);
       await registry.registerAll(mockServer);
 
-      const call = mockServer.resource.mock.calls[0];
+      const call = mockServer.registerResource.mock.calls[0];
       expect(call[2]._meta).toBeUndefined();
     });
 
@@ -403,12 +434,12 @@ describe('ResourceRegistry', () => {
       const registry = new ResourceRegistry([mixedResource], services);
       await registry.registerAll(mockServer);
 
-      const call = mockServer.resource.mock.calls[0];
+      const call = mockServer.registerResource.mock.calls[0];
       expect(call[2]._meta).toEqual({ ui: { resourceUri: 'ui://mixed/app.html' } });
       expect(call[2]._meta).not.toHaveProperty('mcp-ts-core/errors');
     });
 
-    it('should pass examples to server.resource', async () => {
+    it('should pass examples to server.registerResource', async () => {
       const testResource = resource('ex://{id}', {
         description: 'With examples',
         handler: () => ({}),
@@ -418,7 +449,7 @@ describe('ResourceRegistry', () => {
       const registry = new ResourceRegistry([testResource], services);
       await registry.registerAll(mockServer);
 
-      const call = mockServer.resource.mock.calls[0];
+      const call = mockServer.registerResource.mock.calls[0];
       expect(call[2].examples).toEqual([{ name: 'Ex1', uri: 'ex://1' }]);
     });
   });

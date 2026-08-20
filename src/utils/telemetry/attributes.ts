@@ -241,16 +241,6 @@ export const ATTR_MCP_AUTH_SCOPES = 'mcp.auth.scopes';
 export const ATTR_MCP_AUTH_SUBJECT = 'mcp.auth.subject';
 
 // ============================================================================
-// MCP Task Attributes
-// ============================================================================
-
-/** Task status (e.g., `working`, `completed`, `failed`, `cancelled`). */
-export const ATTR_MCP_TASK_STATUS = 'mcp.task.status';
-
-/** Task store type: `in-memory` or `storage`. */
-export const ATTR_MCP_TASK_STORE_TYPE = 'mcp.task.store_type';
-
-// ============================================================================
 // MCP Heartbeat / Connection Attributes
 // ============================================================================
 

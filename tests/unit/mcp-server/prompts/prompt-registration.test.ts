@@ -3,8 +3,9 @@
  * @module tests/mcp-server/prompts/prompt-registration.test
  */
 
-import { completable, isCompletable } from '@modelcontextprotocol/sdk/server/completable.js';
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { Client, InMemoryTransport } from '@modelcontextprotocol/client';
+import { completable, isCompletable, McpServer } from '@modelcontextprotocol/server';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { z } from 'zod';
 
 import { PromptRegistry } from '@/mcp-server/prompts/prompt-registration.js';
@@ -45,9 +46,10 @@ describe('PromptRegistry', () => {
   let registry: PromptRegistry;
 
   beforeEach(() => {
+    // v2 installs `prompts/list` / `prompts/get` from the declared `prompts`
+    // capability, so registration only ever calls `registerPrompt`.
     mockServer = {
       registerPrompt: vi.fn(() => {}),
-      setPromptRequestHandlers: vi.fn(),
     };
     registry = new PromptRegistry(testDefinitions, logger);
   });
@@ -224,11 +226,69 @@ describe('PromptRegistry', () => {
       await completableRegistry.registerAll(mockServer);
 
       const call = mockServer.registerPrompt.mock.calls[0];
-      // argsSchema is the shape (ZodRawShape), not the ZodObject itself
-      expect(call[1].argsSchema).toBeDefined();
-      expect(call[1].argsSchema).toHaveProperty('language');
-      // The completable wrapper is preserved on the shape's field
-      expect(isCompletable(call[1].argsSchema.language)).toBe(true);
+      // argsSchema is the ZodObject itself, not its `.shape` — the raw-shape
+      // overload rebuilds a fresh non-strict object and loses object-level
+      // refinements, and requiredness is derived from the emitted JSON Schema (#258).
+      expect(call[1].argsSchema).toBe(argsWithCompletion);
+      // The completable wrapper is preserved on the object's field
+      expect(isCompletable(call[1].argsSchema.shape.language)).toBe(true);
     });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Advertised argument requiredness (#258)
+// ---------------------------------------------------------------------------
+
+describe('advertised prompt arguments (#258)', () => {
+  const cleanups: Array<() => Promise<void>> = [];
+
+  afterEach(async () => {
+    while (cleanups.length) {
+      try {
+        await cleanups.pop()?.();
+      } catch {
+        // Pair may already be closed.
+      }
+    }
+  });
+
+  it('advertises a .default()ed argument as optional and a bare one as required', async () => {
+    const defaultedPrompt = prompt('defaulted_prompt', {
+      description: 'A prompt with one required and one defaulted argument.',
+      args: z.object({
+        topic: z.string().describe('Topic to discuss.'),
+        tone: z.string().default('neutral').describe('Tone to use.'),
+      }),
+      generate: (args) => [
+        {
+          role: 'user' as const,
+          content: { type: 'text' as const, text: `${args.topic} (${args.tone})` },
+        },
+      ],
+    });
+
+    const server = new McpServer(
+      { name: 'prompt-args-test', version: '0.0.0' },
+      { capabilities: { prompts: { listChanged: true } } },
+    );
+    await new PromptRegistry([defaultedPrompt], logger).registerAll(server);
+
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    const client = new Client({ name: 'prompt-args-client', version: '0.0.0' });
+    await server.connect(serverTransport);
+    await client.connect(clientTransport);
+    cleanups.push(async () => {
+      await client.close();
+      await server.close();
+    });
+
+    const { prompts } = await client.listPrompts();
+    const advertised = prompts.find((p) => p.name === 'defaulted_prompt');
+
+    expect(advertised?.arguments).toEqual([
+      { name: 'topic', description: 'Topic to discuss.', required: true },
+      { name: 'tone', description: 'Tone to use.', required: false },
+    ]);
   });
 });

@@ -3,18 +3,16 @@
  * Handler receives `(params, ctx)` — URI is available on `ctx.uri`.
  *
  * MCP Resources Specification:
- * @see {@link https://modelcontextprotocol.io/specification/2025-06-18/basic/resources | MCP Resources}
+ * @see {@link https://modelcontextprotocol.io/specification/2026-07-28/server/resources | MCP Resources}
  * @module src/mcp-server/resources/utils/resourceDefinition
  */
 
-import type { CompleteResourceTemplateCallback } from '@modelcontextprotocol/sdk/server/mcp.js';
-import type { RequestHandlerExtra } from '@modelcontextprotocol/sdk/shared/protocol.js';
 import type {
+  CompleteResourceTemplateCallback,
   ListResourcesResult,
   ReadResourceResult,
-  ServerNotification,
-  ServerRequest,
-} from '@modelcontextprotocol/sdk/types.js';
+  ServerContext,
+} from '@modelcontextprotocol/server';
 import type { ZodObject, ZodRawShape, z } from 'zod';
 
 import type { HandlerContext, ReasonOf } from '@/core/context.js';
@@ -34,7 +32,7 @@ export interface ResourceAnnotations {
 }
 
 /** Extra context provided to list() handlers. */
-export type ListExtra = RequestHandlerExtra<ServerRequest, ServerNotification>;
+export type ListExtra = ServerContext;
 
 /**
  * Represents a complete, self-contained definition of an MCP resource.

@@ -4,15 +4,15 @@
  * and raw HTTP endpoint behavior.
  * @module tests/integration/http
  */
-import { Client } from '@modelcontextprotocol/sdk/client/index.js';
-import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
+import { Client, StreamableHTTPClientTransport } from '@modelcontextprotocol/client';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
 import {
   expectDefaultServerCapabilities,
   expectDefaultServerDiscoverySurface,
+  expectDefaultServerLoggingSurface,
   expectDefaultServerProtocolErrors,
-  expectDefaultServerTaskSurface,
+  expectDefaultServerSubscriptionSurface,
 } from '../helpers/default-server-mcp.js';
 import { initializeBody, MCP_HEADERS } from '../helpers/http-helpers.js';
 import { assertServerBuilt, type ServerHandle, startServer } from '../helpers/server-process.js';
@@ -72,8 +72,9 @@ describe('HTTP transport integration', () => {
       await expectDefaultServerProtocolErrors(client);
     });
 
-    it('supports empty task and logging operations', async () => {
-      await expectDefaultServerTaskSurface(client);
+    it('resolves logging and resource-subscription operations', async () => {
+      await expectDefaultServerLoggingSurface(client);
+      await expectDefaultServerSubscriptionSurface(client);
     });
   });
 
@@ -99,26 +100,32 @@ describe('HTTP transport integration', () => {
       expect(body.server?.version).toBeTruthy();
     });
 
-    it('rejects unsupported protocol versions with 400', async () => {
-      const res = await fetch(`http://localhost:${handle.port}/mcp`, {
+    it('rejects an unsupported MCP-Protocol-Version on a post-initialize request', async () => {
+      // The header is only meaningful after the handshake — an `initialize`
+      // POST carries its version in the body, so the SDK transport ignores the
+      // header there and validates it on every subsequent request instead.
+      const init = await fetch(`http://localhost:${handle.port}/mcp`, {
         body: initializeBody(),
+        headers: MCP_HEADERS,
+        method: 'POST',
+      });
+      const sessionId = init.headers.get('mcp-session-id');
+      expect(sessionId).toBeTruthy();
+      await init.text();
+
+      const res = await fetch(`http://localhost:${handle.port}/mcp`, {
+        body: JSON.stringify({ jsonrpc: '2.0', id: 2, method: 'tools/list' }),
         headers: {
           ...MCP_HEADERS,
+          'Mcp-Session-Id': sessionId as string,
           'MCP-Protocol-Version': '1900-01-01',
         },
         method: 'POST',
       });
 
       expect(res.status).toBe(400);
-
-      const body = (await res.json()) as {
-        error?: string | undefined;
-        protocolVersion?: string | undefined;
-        supportedVersions?: string[] | undefined;
-      };
-      expect(body.error).toBe('Unsupported MCP protocol version');
-      expect(body.protocolVersion).toBe('1900-01-01');
-      expect(body.supportedVersions?.length).toBeGreaterThan(0);
+      const body = (await res.json()) as { error?: { message?: string } };
+      expect(body.error?.message).toContain('Unsupported protocol version: 1900-01-01');
     });
 
     it('rejects disallowed Origin headers on the MCP endpoint', async () => {

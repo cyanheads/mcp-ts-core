@@ -1,35 +1,30 @@
 /**
  * @fileoverview Factory for creating configured MCP server instances.
  * Creates an McpServer with identity, capabilities, and registered
- * tools/resources/prompts/roots from the provided registries.
+ * tools/resources/prompts from the provided registries.
  *
  * MCP Specification References:
- * - Lifecycle: https://modelcontextprotocol.io/specification/2025-06-18/basic/lifecycle
- * - Overview (Capabilities): https://modelcontextprotocol.io/specification/2025-06-18/basic/index
- * - Transports: https://modelcontextprotocol.io/specification/2025-06-18/basic/transports
+ * - Lifecycle: https://modelcontextprotocol.io/specification/2026-07-28/basic/lifecycle
+ * - Overview (Capabilities): https://modelcontextprotocol.io/specification/2026-07-28/basic/index
+ * - Transports: https://modelcontextprotocol.io/specification/2026-07-28/basic/transports
  * @module src/mcp-server/server
  */
-import type { TaskMessageQueue, TaskStore } from '@modelcontextprotocol/sdk/experimental/tasks';
-import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
-import type { ClientCapabilities, Implementation } from '@modelcontextprotocol/sdk/types.js';
+import {
+  type Implementation,
+  McpServer,
+  type ServerCapabilities,
+} from '@modelcontextprotocol/server';
 
 import type { AppConfig } from '@/config/index.js';
 import type { PromptRegistry } from '@/mcp-server/prompts/prompt-registration.js';
-import type { ProtocolSessionHooks } from '@/mcp-server/protocolSession.js';
 import type { ResourceRegistry } from '@/mcp-server/resources/resource-registration.js';
+import { installResourceSubscriptions } from '@/mcp-server/resources/resourceSubscriptions.js';
 import type { ToolRegistry } from '@/mcp-server/tools/tool-registration.js';
 import { logger } from '@/utils/internal/logger.js';
 import { requestContextService } from '@/utils/internal/requestContext.js';
 
 /** Dependencies required to create an MCP server instance. */
 export interface McpServerDeps {
-  /**
-   * When true, advertise the experimental `tasks` capability (SEP-1686).
-   * The capability is gated on actual usage — at least one registered tool
-   * must be a task tool — because the capability ships in spec revision
-   * 2025-11-25 (GA) and clients pinned to 2025-06-18 fail on the unknown key.
-   */
-  advertiseTasks?: boolean;
   config: AppConfig;
   /**
    * One-line description forwarded to `new McpServer({ serverInfo })`.
@@ -49,13 +44,7 @@ export interface McpServerDeps {
    */
   instructions?: string;
   promptRegistry: PromptRegistry;
-  /** Request-spanning state restored for a per-request HTTP server instance. */
-  protocolSession?: ProtocolSessionHooks;
   resourceRegistry: ResourceRegistry;
-  /** Task message queue for side-channel delivery via tasks/result. */
-  taskMessageQueue?: TaskMessageQueue;
-  /** Task store for managing task lifecycle (create, status, result). */
-  taskStore?: TaskStore;
   /**
    * Human-readable display name forwarded to `new McpServer({ serverInfo })`.
    * Supplements the machine-identifier `name`.
@@ -94,49 +83,37 @@ export async function createMcpServerInstance(deps: McpServerDeps): Promise<McpS
     },
     {
       capabilities: {
+        // Declaring `logging` installs the SDK's `logging/setLevel` handler and
+        // gates `notifications/message` on the client's chosen level; `ctx.log`
+        // mirrors onto that stream.
         logging: {},
-        resources: { listChanged: true },
+        // `subscribe: true` is backed by real `resources/subscribe` handlers
+        // installed below, and gates the 2026-era `subscriptions/listen`
+        // filter's `resourceSubscriptions` field (#354).
+        resources: { listChanged: true, subscribe: true },
         tools: { listChanged: true },
         prompts: { listChanged: true },
-        // SEP-1686 (spec revision 2025-11-25, GA) — only advertised when the
-        // server registers at least one task tool. Clients pinned to 2025-06-18
-        // that strict-parse capabilities fail on the unknown key.
-        ...(deps.advertiseTasks && {
-          tasks: {
-            list: {},
-            cancel: {},
-            requests: {
-              tools: { call: {} },
-            },
-          },
+        ...(deps.extensions && {
+          extensions: deps.extensions as ServerCapabilities['extensions'],
         }),
-        ...(deps.extensions && { extensions: deps.extensions }),
       },
       ...(deps.instructions && { instructions: deps.instructions }),
-      ...(deps.taskStore && { taskStore: deps.taskStore }),
-      ...(deps.taskMessageQueue && { taskMessageQueue: deps.taskMessageQueue }),
+      // Multi-round-trip serving: `ctx.requestInput(...)` returns are fulfilled
+      // by the client on 2026-era requests and by the SDK's legacy shim (real
+      // `elicitation/create` round trips over the live session) on 2025-era
+      // ones, so handlers are written once.
+      inputRequired: { legacyShim: true },
     },
   );
 
-  if (deps.protocolSession?.clientCapabilities) {
-    // The SDK keeps negotiated capabilities on each `Server` instance but
-    // exposes no restoration API. HTTP must use a fresh instance per request
-    // (GHSA-345p-7cg4-v4c7), so restore only the validated capability snapshot
-    // captured from this session's successful initialize request. This retains
-    // the SDK's own outgoing-request capability assertions without sharing a
-    // mutable Server between clients.
-    const restorableServer = server.server as unknown as {
-      _clientCapabilities?: ClientCapabilities;
-    };
-    restorableServer._clientCapabilities = deps.protocolSession.clientCapabilities;
-  }
+  const subscriptions = installResourceSubscriptions(server);
 
   try {
     logger.debug('Registering all MCP capabilities via registries...', context);
 
     await Promise.all([
-      deps.toolRegistry.registerAll(server, deps.protocolSession),
-      deps.resourceRegistry.registerAll(server, deps.protocolSession),
+      deps.toolRegistry.registerAll(server, subscriptions),
+      deps.resourceRegistry.registerAll(server, subscriptions),
       deps.promptRegistry.registerAll(server),
     ]);
 

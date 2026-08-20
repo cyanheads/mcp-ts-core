@@ -4,15 +4,14 @@
  * @module src/mcp-server/tools/utils/toolHandlerFactory
  */
 
-import type { RequestHandlerExtra } from '@modelcontextprotocol/sdk/shared/protocol.js';
 import type {
   CallToolResult,
   ContentBlock,
-  ServerNotification,
-  ServerRequest,
-} from '@modelcontextprotocol/sdk/types.js';
+  InputRequiredResult,
+  ServerContext,
+} from '@modelcontextprotocol/server';
 
-import { ZodError, type ZodObject, type ZodRawShape } from 'zod';
+import { ZodError, type ZodObject, type ZodRawShape, type ZodType, z } from 'zod';
 
 import { config } from '@/config/index.js';
 import type { Context, EnrichmentStore } from '@/core/context.js';
@@ -22,9 +21,15 @@ import {
   readContentStore,
   readEnrichmentStore,
 } from '@/core/context.js';
-import { type ElicitationNotifiers, wrapElicit } from '@/mcp-server/elicitation.js';
-import { buildRequestScopedNotifiers } from '@/mcp-server/notifications.js';
-import type { ProtocolRequestRegistration } from '@/mcp-server/protocolSession.js';
+import {
+  createContextInputs,
+  createRequestInput,
+  isInputRequiredSignal,
+} from '@/mcp-server/inputRequired.js';
+import {
+  buildRequestScopedNotifiers,
+  type ResourceSubscriptions,
+} from '@/mcp-server/notifications.js';
 import { withRequiredScopes } from '@/mcp-server/transports/auth/lib/authUtils.js';
 import type { StorageService } from '@/storage/core/StorageService.js';
 import { type JsonRpcErrorCode, McpError } from '@/types-global/errors.js';
@@ -38,8 +43,6 @@ import type { AnyToolDefinition } from './toolDefinition.js';
 // ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
-
-type SdkExtra = RequestHandlerExtra<ServerRequest, ServerNotification>;
 
 /** Services required by the handler factory to construct Context. */
 export interface HandlerFactoryServices {
@@ -56,27 +59,24 @@ export interface HandlerFactoryServices {
 
 /**
  * Per-server notifier closures bound at registration time, targeting
- * `server.send*ListChanged()` and `server.server.elicitInput(...)`.
+ * `server.send*ListChanged()`.
  *
  * Split from {@link HandlerFactoryServices} so each per-request McpServer gets
  * its own notifier closures — preventing a concurrent registerAll() from
  * overwriting an in-flight handler's notifier target (and potentially
  * notifying the wrong server).
  *
- * The sync handler factory prefers request-scoped notifiers
- * ({@link buildRequestScopedNotifiers}, #135) and uses these only as a fallback;
- * the background auto-task path uses them directly (no request scope), so those
- * notifications deliver on stdio but drop under HTTP.
- *
- * The elicitation fields come from {@link ElicitationNotifiers}.
+ * The handler factory prefers request-scoped notifiers
+ * ({@link buildRequestScopedNotifiers}, #135) and uses these only as a fallback
+ * for scopes with no `ctx.mcpReq.notify` (test harnesses, background callers).
  */
-export interface HandlerNotifiers extends ElicitationNotifiers {
+export interface HandlerNotifiers {
   notifyPromptListChanged?: () => void;
   notifyResourceListChanged?: () => void;
   notifyResourceUpdated?: (uri: string) => void;
   notifyToolListChanged?: () => void;
-  /** Registers this handler invocation for session-scoped HTTP cancellation. */
-  registerRequest?: (requestId: SdkExtra['requestId']) => ProtocolRequestRegistration;
+  /** Per-connection `resources/subscribe` registry (#354). */
+  subscriptions?: ResourceSubscriptions;
 }
 
 // ---------------------------------------------------------------------------
@@ -161,13 +161,111 @@ export function classifyAndBuildToolErrorResult(error: unknown): CallToolResult 
 // ---------------------------------------------------------------------------
 
 /**
- * The output schema advertised to clients in `tools/list`. When a tool declares
- * an `enrichment` block, that's `output.extend(enrichment)` so enrichment fields
- * appear in the advertised `outputSchema`; otherwise the bare `output`.
+ * The schema the framework **parses** a successful result against: the declared
+ * `output`, extended with the `enrichment` block when one is declared. Strict by
+ * construction — a required enrichment field the handler never populated fails
+ * here, surfacing the authoring bug loudly.
+ *
+ * This is deliberately *not* what is advertised — see
+ * {@link advertisedOutputSchema}.
  */
 export function effectiveOutputSchema(def: AnyToolDefinition): ZodObject<ZodRawShape> {
   if (!def.enrichment) return def.output;
   return def.output.extend(def.enrichment) as ZodObject<ZodRawShape>;
+}
+
+/**
+ * The error envelope a tool can put on `structuredContent` when it fails,
+ * mirroring {@link buildToolErrorResult}'s runtime shape.
+ *
+ * Loose at every level on purpose: `data` carries the throw site's arbitrary
+ * keys alongside `reason` / `recovery` / `retryable`, and generic classified
+ * errors carry no `data` at all. A strict declaration would recreate on the
+ * error path the very `-32602` this envelope exists to prevent (#241).
+ *
+ * When the definition declares an `errors[]` contract, `data.reason` is narrowed
+ * to that tool's own reason literals, with each entry's `when` carried in the
+ * description — the schema then documents which failures this specific tool can
+ * actually produce.
+ */
+function toolErrorEnvelopeSchema(def: AnyToolDefinition): ZodObject<ZodRawShape> {
+  const contract = def.errors ?? [];
+  const reasons = contract.map((entry) => entry.reason);
+  const reasonSchema =
+    reasons.length > 0
+      ? z
+          .enum(reasons as [string, ...string[]])
+          .describe(
+            `Machine-readable failure mode. ${contract
+              .map((entry) => `\`${entry.reason}\`: ${entry.when}`)
+              .join(' ')}`,
+          )
+      : z.string().describe('Machine-readable failure mode.');
+
+  return z.looseObject({
+    code: z.number().int().describe('JSON-RPC error code for this failure.'),
+    message: z.string().describe('Human-readable description of what went wrong.'),
+    data: z
+      .looseObject({
+        reason: reasonSchema.optional(),
+        recovery: z
+          .looseObject({ hint: z.string() })
+          .optional()
+          .describe('Actionable next step for the caller.'),
+        retryable: z.boolean().optional().describe('Whether retrying may succeed.'),
+      })
+      .optional(),
+  }) as unknown as ZodObject<ZodRawShape>;
+}
+
+/**
+ * The `outputSchema` advertised to clients in `tools/list` — every success field
+ * made optional, plus a declared `error` property (#241).
+ *
+ * A tool that fails returns `structuredContent: { error: … }`, which can never
+ * satisfy a success-only schema. Clients shipping an SDK whose `callTool()`
+ * validates `structuredContent` without first checking `isError` (every v1
+ * client, and every caller pinned to one) reject that envelope with `-32602`
+ * before the `isError` result reaches the agent. Widening the advertised schema
+ * is the only fix a server can ship, because the validator runs in the caller.
+ *
+ * **The root stays `type: 'object'`.** A discriminated union is the natural
+ * expression of success-or-error and is a trap: it emits `anyOf` with no `type`,
+ * which SEP-2106's legacy projection classifies as a non-object root and
+ * rewrites to `{ result: <natural> }` for every 2025-era client — silently
+ * breaking the *success* path for existing consumers to fix the error path.
+ *
+ * The cost of the object form is that `required` drops. An `anyOf` refinement
+ * carried in schema metadata recovers it: a result must satisfy either the
+ * success branch (success fields present, no `error`) or the failure branch
+ * (`error` present). `type: 'object'` is still there, so the projection does not
+ * trip, and `{}` — a handler that returned nothing — is rejected, which the
+ * success-only schema never caught either.
+ *
+ * Emission only. {@link buildToolSuccessResult} keeps parsing against
+ * {@link effectiveOutputSchema}, so the required-enrichment authoring check is
+ * unaffected.
+ */
+export function advertisedOutputSchema(def: AnyToolDefinition): ZodObject<ZodRawShape> {
+  const success = effectiveOutputSchema(def);
+  const requiredSuccessKeys = Object.entries(success.shape)
+    .filter(([, field]) => !(field as ZodType).safeParse(undefined).success)
+    .map(([key]) => key);
+
+  const widened = success.partial().extend({
+    error: toolErrorEnvelopeSchema(def)
+      .optional()
+      .describe('Present when the call failed. Absent on success.'),
+  }) as ZodObject<ZodRawShape>;
+
+  const successBranch: Record<string, unknown> = { not: { required: ['error'] } };
+  if (requiredSuccessKeys.length > 0) successBranch.required = requiredSuccessKeys;
+
+  // `.meta()` last: `.extend()` discards metadata, so the refinement has to be
+  // attached to the final widened object or it is lost before emission.
+  return widened.meta({
+    anyOf: [successBranch, { required: ['error'] }],
+  }) as ZodObject<ZodRawShape>;
 }
 
 /** Renders a non-kind-tagged enrichment value as compact trailer text. */
@@ -333,26 +431,25 @@ export function createToolHandler(
   def: AnyToolDefinition,
   services: HandlerFactoryServices,
   notifiers: HandlerNotifiers,
-): (input: Record<string, unknown>, extra: SdkExtra) => Promise<CallToolResult> {
+): (
+  input: Record<string, unknown>,
+  ctx: ServerContext,
+) => Promise<CallToolResult | InputRequiredResult> {
   const formatter = def.format ?? defaultResponseFormatter;
 
-  return async (input, callContext): Promise<CallToolResult> => {
-    // The SDK types `extra` as Record<string, unknown> at the boundary
-    const sdkContext = callContext as unknown as SdkExtra;
-    const protocolRequest = notifiers.registerRequest?.(sdkContext.requestId);
-    const signal = protocolRequest
-      ? AbortSignal.any([sdkContext.signal, protocolRequest.signal])
-      : sdkContext.signal;
+  return async (input, serverContext): Promise<CallToolResult | InputRequiredResult> => {
+    const mcpReq = serverContext?.mcpReq;
+    const signal = mcpReq?.signal ?? new AbortController().signal;
 
     // Route handler-time list-changed / resource-updated notifications through
-    // this request's `extra.sendNotification` so they carry `relatedRequestId`
-    // and reach the client under the per-request HTTP/Worker McpServer model
-    // (#135). Fall back to the server-level notifiers when the extra exposes no
-    // sender (non-request scopes) — those deliver on stdio but drop under HTTP.
-    const effectiveNotifiers = buildRequestScopedNotifiers(sdkContext) ?? notifiers;
+    // this request's `ctx.mcpReq.notify` so they carry `relatedRequestId` and
+    // reach the client under per-request serving (#135). Fall back to the
+    // server-level notifiers when the scope exposes no sender.
+    const effectiveNotifiers =
+      buildRequestScopedNotifiers(mcpReq ?? {}, notifiers.subscriptions) ?? notifiers;
 
     const sdkSessionId =
-      typeof sdkContext?.sessionId === 'string' ? sdkContext.sessionId : undefined;
+      typeof serverContext?.sessionId === 'string' ? serverContext.sessionId : undefined;
 
     // Surface sessionId on `Context` only when it has request-spanning
     // lifetime — stateful HTTP (or `auto`, which resolves to stateful for
@@ -366,6 +463,8 @@ export function createToolHandler(
         ? sdkSessionId
         : undefined;
 
+    const requestId = mcpReq?.id;
+
     // Create internal RequestContext for tracing. Raw `input` is intentionally
     // excluded — it flows into the completion log via context spread and can
     // contain caller PII or secrets. Input size and top-level parameter names
@@ -374,7 +473,7 @@ export function createToolHandler(
     // stateless mode for tracing the SDK's per-request token through events.
     const appContext = requestContextService.createRequestContext({
       parentContext: {
-        ...(typeof sdkContext?.requestId === 'string' ? { requestId: sdkContext.requestId } : {}),
+        ...(typeof requestId === 'string' ? { requestId } : {}),
         ...(sdkSessionId ? { sessionId: sdkSessionId } : {}),
       },
       operation: 'HandleToolRequest',
@@ -400,7 +499,9 @@ export function createToolHandler(
           storage: services.storage,
           signal,
           sessionId: handlerSessionId,
-          elicit: wrapElicit(notifiers, sdkContext),
+          inputs: createContextInputs(mcpReq),
+          requestInput: createRequestInput(),
+          ...(mcpReq?.log && { wireLog: mcpReq.log }),
           notifyPromptListChanged: effectiveNotifiers.notifyPromptListChanged,
           notifyResourceListChanged: effectiveNotifiers.notifyResourceListChanged,
           notifyResourceUpdated: effectiveNotifiers.notifyResourceUpdated,
@@ -453,13 +554,17 @@ export function createToolHandler(
         domainContent,
       );
     } catch (error: unknown) {
+      // `ctx.requestInput(...)` is protocol control flow, not a failure: return
+      // the `input_required` result untouched, with no span, log, or
+      // classification. The client (2026 era) or the SDK's legacy shim (2025
+      // era) fulfils it and re-invokes this handler.
+      if (isInputRequiredSignal(error)) return error.result;
+
       ErrorHandler.handleError(error, {
         operation: `tool:${def.name}`,
         context: appContext,
       });
       return classifyAndBuildToolErrorResult(error);
-    } finally {
-      protocolRequest?.unregister();
     }
   };
 }

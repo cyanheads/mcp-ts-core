@@ -3,9 +3,11 @@
  * @module tests/testing/mockContext.test
  */
 
+import { inputRequired } from '@modelcontextprotocol/server';
 import { describe, expect, it } from 'vitest';
 import { z } from 'zod';
 
+import { isInputRequiredSignal } from '@/mcp-server/inputRequired.js';
 import { createMockContext } from '@/testing/index.js';
 
 describe('createMockContext helpers', () => {
@@ -69,42 +71,6 @@ describe('createMockContext helpers', () => {
     await expect(ctx.state.get('profile/2')).resolves.toBeNull();
   });
 
-  it('tracks progress totals, clamps increments, and stores update messages', async () => {
-    const ctx = createMockContext({ progress: true });
-    const progress = ctx.progress as {
-      _completed: number;
-      _messages: string[];
-      _total: number;
-      increment: (amount?: number) => Promise<void>;
-      setTotal: (n: number) => Promise<void>;
-      update: (message: string) => Promise<void>;
-    };
-
-    await progress.setTotal(3);
-    await progress.increment();
-    await progress.increment(5);
-    await progress.update('step one');
-    await progress.update('step two');
-
-    expect(progress._total).toBe(3);
-    expect(progress._completed).toBe(3);
-    expect(progress._messages).toEqual(['step one', 'step two']);
-  });
-
-  it('increments without a total when progress is unbounded', async () => {
-    const ctx = createMockContext({ progress: true });
-    const progress = ctx.progress as unknown as {
-      _completed: number;
-      _total: number;
-      increment: (amount?: number) => Promise<void>;
-    };
-
-    await progress.increment(2);
-
-    expect(progress._total).toBe(0);
-    expect(progress._completed).toBe(2);
-  });
-
   it('applies requestId defaults and passes through optional handlers', () => {
     const notifyResourceListChanged = () => {};
     const notifyResourceUpdated = (_uri: string) => {};
@@ -133,22 +99,53 @@ describe('createMockContext helpers', () => {
     expect(withoutSession.sessionId).toBeUndefined();
   });
 
-  it('attaches a safe URL-mode fallback to a form elicitation mock', async () => {
-    const formCalls: string[] = [];
+  it('seeds ctx.inputs from inputResponses and requestState for a second-round handler', () => {
     const ctx = createMockContext({
-      elicit: async (message) => {
-        formCalls.push(message);
-        return { action: 'accept', content: { value: 'form-result' } };
+      inputResponses: {
+        confirm: { action: 'accept', content: { ok: true } },
+        cancelled: { action: 'cancel' },
       },
+      requestState: { attempt: 2 },
     });
 
-    await expect(ctx.elicit?.('Choose a value', z.object({ value: z.string() }))).resolves.toEqual({
-      action: 'accept',
-      content: { value: 'form-result' },
+    expect(ctx.inputs.accepted('confirm', z.object({ ok: z.boolean() }))).toEqual({ ok: true });
+    expect(ctx.inputs.accepted('cancelled')).toBeUndefined();
+    expect(ctx.inputs.view('cancelled')).toEqual({ kind: 'elicit', action: 'cancel' });
+    expect(ctx.inputs.view('never-asked')).toEqual({ kind: 'missing' });
+    expect(ctx.inputs.state<{ attempt: number }>()).toEqual({ attempt: 2 });
+  });
+
+  it('leaves ctx.inputs empty on the first round', () => {
+    const ctx = createMockContext();
+
+    expect(ctx.inputs.responses).toBeUndefined();
+    expect(ctx.inputs.dropped).toEqual([]);
+    expect(ctx.inputs.state()).toBeUndefined();
+    expect(ctx.inputs.accepted('confirm')).toBeUndefined();
+  });
+
+  it('drives ctx.requestInput through the same input_required signal the server throws', () => {
+    const ctx = createMockContext();
+
+    let thrown: unknown;
+    try {
+      ctx.requestInput({
+        inputRequests: {
+          confirm: inputRequired.elicit({
+            message: 'Proceed?',
+            requestedSchema: z.object({ ok: z.boolean() }),
+          }),
+        },
+      });
+    } catch (error) {
+      thrown = error;
+    }
+
+    expect(isInputRequiredSignal(thrown)).toBe(true);
+    const { result } = thrown as { result: { resultType: string; inputRequests?: unknown } };
+    expect(result.resultType).toBe('input_required');
+    expect(result.inputRequests).toMatchObject({
+      confirm: { method: 'elicitation/create', params: { message: 'Proceed?' } },
     });
-    await expect(ctx.elicit?.url('Authorize', 'https://example.test/authorize')).resolves.toEqual({
-      action: 'cancel',
-    });
-    expect(formCalls).toEqual(['Choose a value']);
   });
 });

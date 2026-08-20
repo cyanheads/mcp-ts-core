@@ -3,7 +3,7 @@
  * @module tests/mcp-server/transports/http/httpTransport.lifecycle
  */
 
-import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
+import type { McpServer } from '@modelcontextprotocol/server';
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
 
 import type { RequestContext } from '@/utils/internal/requestContext.js';
@@ -133,7 +133,7 @@ describe('HTTP Transport lifecycle', () => {
 
     serverCloseSpy.mockImplementation((callback?: (err?: Error) => void) => callback?.());
     closeAllConnectionsSpy.mockImplementation(() => {});
-    destroySpy.mockImplementation(() => {});
+    destroySpy.mockResolvedValue(undefined);
   });
 
   afterEach(() => {

@@ -2,50 +2,51 @@
  * @fileoverview Tests for stdio transport functionality.
  * @module tests/mcp-server/transports/stdio/stdioTransport.test.ts
  *
- * NOTE: Full stdio transport flow testing requires integration testing with real
- * process.stdin/stdout streams. These unit tests cover the error handling and
- * lifecycle management paths.
+ * NOTE: The SDK's `serveStdio` owns the wire (it binds this process's stdin and
+ * stdout and makes the era decision), so it is mocked here. These tests cover
+ * the framework's wrapper: handle pass-through, logging, error escalation, and
+ * shutdown.
  */
 
-import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
+import type { McpServer, McpServerFactory } from '@modelcontextprotocol/server';
+import type { StdioServerHandle } from '@modelcontextprotocol/server/stdio';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { RequestContext } from '@/utils/internal/requestContext.js';
 
-// Mock the SDK's StdioServerTransport
-vi.mock('@modelcontextprotocol/sdk/server/stdio.js', () => {
-  class MockStdioServerTransportClass {
-    close = vi.fn().mockResolvedValue(undefined);
-  }
+const { handleCloseSpy, serveStdioSpy } = vi.hoisted(() => ({
+  handleCloseSpy: vi.fn(async () => {}),
+  serveStdioSpy: vi.fn(),
+}));
 
-  return {
-    StdioServerTransport: MockStdioServerTransportClass,
-  };
-});
+vi.mock('@modelcontextprotocol/server/stdio', () => ({
+  serveStdio: serveStdioSpy,
+}));
 
 describe('Stdio Transport', () => {
-  let mockServer: Partial<McpServer>;
+  let handle: StdioServerHandle;
+  let serverFactory: McpServerFactory;
   let mockContext: RequestContext;
   let loggerSpy: {
-    info: { mockImplementation: (fn: any) => any };
-    debug: { mockImplementation: (fn: any) => any };
-    error: { mockImplementation: (fn: any) => any };
+    info: ReturnType<typeof vi.spyOn>;
+    debug: ReturnType<typeof vi.spyOn>;
+    error: ReturnType<typeof vi.spyOn>;
   };
-  let logStartupBannerSpy: { mockImplementation: (fn: any) => any };
-  let errorHandlerSpy: { mockImplementation: (fn: any) => any };
+  let logStartupBannerSpy: ReturnType<typeof vi.spyOn>;
+  let errorHandlerSpy: ReturnType<typeof vi.spyOn>;
 
   beforeEach(async () => {
-    mockServer = {
-      connect: vi.fn().mockResolvedValue(undefined),
-      close: vi.fn().mockResolvedValue(undefined),
-    };
+    vi.clearAllMocks();
+
+    handle = { close: handleCloseSpy };
+    serveStdioSpy.mockReturnValue(handle);
+    serverFactory = vi.fn(async () => ({}) as McpServer);
 
     mockContext = {
       requestId: 'test-stdio',
-      timestamp: Date.now() as any,
+      timestamp: new Date().toISOString(),
       operation: 'test-stdio-transport',
     };
 
-    // Import and spy on actual utilities
     const loggerModule = await import('@/utils/internal/logger.js');
     const bannerModule = await import('@/utils/internal/startupBanner.js');
     const errorModule = await import('@/utils/internal/error-handler/errorHandler.js');
@@ -54,12 +55,12 @@ describe('Stdio Transport', () => {
       debug: vi.spyOn(loggerModule.logger, 'debug').mockImplementation(() => {}),
       error: vi.spyOn(loggerModule.logger, 'error').mockImplementation(() => {}),
     };
-    logStartupBannerSpy = vi.spyOn(bannerModule, 'logStartupBanner').mockImplementation(() => {});
+    logStartupBannerSpy = vi
+      .spyOn(bannerModule, 'logStartupBanner')
+      .mockImplementation(() => undefined);
     errorHandlerSpy = vi
       .spyOn(errorModule.ErrorHandler, 'handleError')
-      .mockImplementation((err) => err as any);
-
-    vi.clearAllMocks();
+      .mockImplementation((err) => err as Error);
   });
 
   afterEach(() => {
@@ -67,15 +68,22 @@ describe('Stdio Transport', () => {
   });
 
   describe('startStdioTransport', () => {
-    it('should successfully start stdio transport', async () => {
+    it('serves the factory over stdio and returns the connection handle', async () => {
       const { startStdioTransport } = await import(
         '@/mcp-server/transports/stdio/stdioTransport.js'
       );
 
-      const result = await startStdioTransport(mockServer as McpServer, mockContext);
+      const result = startStdioTransport(serverFactory, mockContext);
 
-      expect(result).toBe(mockServer);
-      expect(mockServer.connect).toHaveBeenCalledTimes(1);
+      expect(result).toBe(handle);
+      expect(serveStdioSpy).toHaveBeenCalledTimes(1);
+      expect(serveStdioSpy).toHaveBeenCalledWith(
+        serverFactory,
+        expect.objectContaining({ onerror: expect.any(Function) }),
+      );
+      // The factory is not called here — `serveStdio` calls it when the
+      // connection opens and pins the one instance it returns.
+      expect(serverFactory).not.toHaveBeenCalled();
       expect(loggerSpy.info).toHaveBeenCalledWith(
         'Attempting to connect stdio transport...',
         expect.objectContaining({
@@ -86,20 +94,34 @@ describe('Stdio Transport', () => {
       expect(logStartupBannerSpy).toHaveBeenCalled();
     });
 
-    it('should handle connection errors', async () => {
+    it('reports out-of-band transport errors at debug level', async () => {
       const { startStdioTransport } = await import(
         '@/mcp-server/transports/stdio/stdioTransport.js'
       );
 
-      const connectionError = new Error('Connection failed');
-      mockServer.connect = vi.fn().mockRejectedValue(connectionError);
+      startStdioTransport(serverFactory, mockContext);
+      const options = serveStdioSpy.mock.calls[0]?.[1] as { onerror: (error: Error) => void };
+      options.onerror(new Error('wire glitch'));
 
-      await expect(startStdioTransport(mockServer as McpServer, mockContext)).rejects.toThrow(
-        'Connection failed',
+      expect(loggerSpy.debug).toHaveBeenCalledWith(
+        'Stdio transport reported: wire glitch',
+        expect.objectContaining({ operation: 'connectStdioTransport' }),
+      );
+    });
+
+    it('escalates a serving failure through the ErrorHandler and rethrows', async () => {
+      const { startStdioTransport } = await import(
+        '@/mcp-server/transports/stdio/stdioTransport.js'
       );
 
+      const servingError = new Error('Connection failed');
+      serveStdioSpy.mockImplementationOnce(() => {
+        throw servingError;
+      });
+
+      expect(() => startStdioTransport(serverFactory, mockContext)).toThrow('Connection failed');
       expect(errorHandlerSpy).toHaveBeenCalledWith(
-        connectionError,
+        servingError,
         expect.objectContaining({
           operation: 'connectStdioTransport',
           critical: true,
@@ -107,28 +129,17 @@ describe('Stdio Transport', () => {
         }),
       );
     });
-
-    it('should create StdioServerTransport and connect server', async () => {
-      const { startStdioTransport } = await import(
-        '@/mcp-server/transports/stdio/stdioTransport.js'
-      );
-
-      await startStdioTransport(mockServer as McpServer, mockContext);
-
-      expect(mockServer.connect).toHaveBeenCalledTimes(1);
-      expect(mockServer.connect).toHaveBeenCalledWith(expect.any(Object));
-    });
   });
 
   describe('stopStdioTransport', () => {
-    it('should successfully stop stdio transport', async () => {
+    it('closes the connection handle', async () => {
       const { stopStdioTransport } = await import(
         '@/mcp-server/transports/stdio/stdioTransport.js'
       );
 
-      await stopStdioTransport(mockServer as McpServer, mockContext);
+      await stopStdioTransport(handle, mockContext);
 
-      expect(mockServer.close).toHaveBeenCalledTimes(1);
+      expect(handleCloseSpy).toHaveBeenCalledTimes(1);
       expect(loggerSpy.info).toHaveBeenCalledWith(
         'Attempting to stop stdio transport...',
         expect.objectContaining({
@@ -142,13 +153,17 @@ describe('Stdio Transport', () => {
       );
     });
 
-    it('should handle null server gracefully', async () => {
+    it('propagates a close failure rather than reporting a clean stop', async () => {
       const { stopStdioTransport } = await import(
         '@/mcp-server/transports/stdio/stdioTransport.js'
       );
+      handleCloseSpy.mockRejectedValueOnce(new Error('already closed'));
 
-      // Should not throw
-      await expect(stopStdioTransport(null as any, mockContext)).resolves.toBeUndefined();
+      await expect(stopStdioTransport(handle, mockContext)).rejects.toThrow('already closed');
+      expect(loggerSpy.info).not.toHaveBeenCalledWith(
+        'Stdio transport stopped successfully.',
+        expect.any(Object),
+      );
     });
 
     it('should log context with correct operation', async () => {
@@ -156,7 +171,7 @@ describe('Stdio Transport', () => {
         '@/mcp-server/transports/stdio/stdioTransport.js'
       );
 
-      await stopStdioTransport(mockServer as McpServer, mockContext);
+      await stopStdioTransport(handle, mockContext);
 
       expect(loggerSpy.info).toHaveBeenCalledWith(
         expect.any(String),

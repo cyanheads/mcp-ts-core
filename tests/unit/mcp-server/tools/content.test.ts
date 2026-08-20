@@ -10,10 +10,10 @@
  * @module tests/unit/mcp-server/tools/content.test
  */
 
-import type { RequestHandlerExtra } from '@modelcontextprotocol/sdk/shared/protocol.js';
-import type { ServerNotification, ServerRequest } from '@modelcontextprotocol/sdk/types.js';
+import type { CallToolResult, ContentBlock } from '@modelcontextprotocol/server';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { z } from 'zod';
+import { makeServerContext } from '../../../helpers/server-context.js';
 
 // ---------------------------------------------------------------------------
 // Module mocks — mirror enrichment.test.ts so createToolHandler runs against the
@@ -79,18 +79,6 @@ import { createMockContext, getContentBlocks } from '@/testing/index.js';
 // Helpers
 // ---------------------------------------------------------------------------
 
-type MockSdkContext = RequestHandlerExtra<ServerRequest, ServerNotification>;
-
-function createMockSdkContext(overrides: Record<string, unknown> = {}): MockSdkContext {
-  return {
-    signal: new AbortController().signal,
-    requestId: 'sdk-request-id',
-    sendNotification: () => Promise.resolve(),
-    sendRequest: () => Promise.resolve({}) as never,
-    ...overrides,
-  } as MockSdkContext;
-}
-
 const services: HandlerFactoryServices = {
   logger: mockLogger as any,
   storage: {
@@ -103,6 +91,14 @@ const services: HandlerFactoryServices = {
 };
 
 const notifiers: HandlerNotifiers = {};
+
+/**
+ * `content[]` of a completed tool result. Narrows off the `input_required`
+ * branch of the handler's return union, which carries no `content`.
+ */
+function blocks(result: Awaited<ReturnType<ReturnType<typeof createToolHandler>>>): ContentBlock[] {
+  return (result as CallToolResult).content ?? [];
+}
 
 /** A tiny base64 payload (decodes to "hello") — stands in for image/audio bytes. */
 const BYTES = 'aGVsbG8=';
@@ -135,7 +131,7 @@ describe('ctx.content', () => {
       });
 
       const handler = createToolHandler(render as AnyToolDefinition, services, notifiers);
-      const result = await handler({ text: 'hi' }, createMockSdkContext());
+      const result = await handler({ text: 'hi' }, makeServerContext());
 
       expect(result.isError).toBeUndefined();
       // The bytes never enter structuredContent — the whole point of #239.
@@ -160,7 +156,7 @@ describe('ctx.content', () => {
       });
 
       const handler = createToolHandler(render as AnyToolDefinition, services, notifiers);
-      const result = await handler({ text: 'a cat' }, createMockSdkContext());
+      const result = await handler({ text: 'a cat' }, makeServerContext());
 
       expect(result.content).toEqual([
         { type: 'image', data: BYTES, mimeType: 'image/png' },
@@ -181,9 +177,9 @@ describe('ctx.content', () => {
       });
 
       const handler = createToolHandler(speak as AnyToolDefinition, services, notifiers);
-      const result = await handler({ text: 'hello' }, createMockSdkContext());
+      const result = await handler({ text: 'hello' }, makeServerContext());
 
-      expect(result.content![0]).toEqual({ type: 'audio', data: BYTES, mimeType: 'audio/mpeg' });
+      expect(blocks(result)[0]).toEqual({ type: 'audio', data: BYTES, mimeType: 'audio/mpeg' });
       expect(result.structuredContent).toEqual({ ok: true });
     });
 
@@ -204,9 +200,9 @@ describe('ctx.content', () => {
       });
 
       const handler = createToolHandler(link as AnyToolDefinition, services, notifiers);
-      const result = await handler({ id: 'x' }, createMockSdkContext());
+      const result = await handler({ id: 'x' }, makeServerContext());
 
-      expect(result.content![0]).toEqual({
+      expect(blocks(result)[0]).toEqual({
         type: 'resource_link',
         uri: 'https://example.com/report.pdf',
         name: 'report.pdf',
@@ -228,7 +224,7 @@ describe('ctx.content', () => {
       });
 
       const handler = createToolHandler(multi as AnyToolDefinition, services, notifiers);
-      const result = await handler({ n: 1 }, createMockSdkContext());
+      const result = await handler({ n: 1 }, makeServerContext());
 
       expect(result.content).toEqual([
         { type: 'image', data: BYTES, mimeType: 'image/png' },
@@ -253,7 +249,7 @@ describe('ctx.content', () => {
       });
 
       const handler = createToolHandler(render as AnyToolDefinition, services, notifiers);
-      const result = await handler({ text: 'hi' }, createMockSdkContext());
+      const result = await handler({ text: 'hi' }, makeServerContext());
 
       const content = result.content as Array<{ type: string; text?: string }>;
       // [image block, domain JSON, enrichment trailer].
@@ -276,7 +272,7 @@ describe('ctx.content', () => {
       });
 
       const handler = createToolHandler(plain as AnyToolDefinition, services, notifiers);
-      const result = await handler({ text: 'hi' }, createMockSdkContext());
+      const result = await handler({ text: 'hi' }, makeServerContext());
 
       // Byte-identical to pre-#239: structuredContent is the domain output, content[] is domain-only.
       expect(result.structuredContent).toEqual({ ok: true });
@@ -295,7 +291,7 @@ describe('ctx.content', () => {
       });
 
       const handler = createToolHandler(failing as AnyToolDefinition, services, notifiers);
-      const result = await handler({ text: 'hi' }, createMockSdkContext());
+      const result = await handler({ text: 'hi' }, makeServerContext());
 
       expect(result.isError).toBe(true);
       // Only the error text block — the partial image is dropped, not half-emitted.

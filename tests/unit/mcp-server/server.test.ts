@@ -1,39 +1,15 @@
 /**
  * @fileoverview Test suite for createMcpServerInstance — server initialization,
- * registry wiring, capability registration, and error handling.
+ * registry wiring, declared capabilities, identity fields, and error handling.
+ * Identity and capability assertions run against a real `McpServer` connected
+ * to a real `Client` over a linked in-memory transport pair, so they read what
+ * `initialize` actually advertises rather than constructor arguments.
  * @module tests/mcp-server/server.test
  */
 
-import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
-import { beforeEach, describe, expect, it, vi } from 'vitest';
-
-/**
- * File-level override of the global McpServer mock so the suite can read
- * constructor arguments. Without this we'd only see the stub class from
- * `tests/setup.ts`, which discards args. Static helpers expose the call log
- * to assertions; `clearCapturedArgs()` runs per-test to avoid cross-test
- * bleed.
- */
-vi.mock('@modelcontextprotocol/sdk/server/mcp.js', () => {
-  const capturedArgs: unknown[][] = [];
-  class McpServerMock {
-    static getCapturedArgs(): unknown[][] {
-      return capturedArgs;
-    }
-    static clearCapturedArgs(): void {
-      capturedArgs.length = 0;
-    }
-    connect = vi.fn(async () => {});
-    constructor(...args: unknown[]) {
-      capturedArgs.push(args);
-    }
-  }
-  class ResourceTemplateMock {
-    match = vi.fn(() => null);
-    render = vi.fn(() => '');
-  }
-  return { McpServer: McpServerMock, ResourceTemplate: ResourceTemplateMock };
-});
+import { Client, InMemoryTransport } from '@modelcontextprotocol/client';
+import { McpServer } from '@modelcontextprotocol/server';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 // Mock logger and requestContextService
 vi.mock('@/utils/internal/logger.js', async (importOriginal) => {
@@ -63,8 +39,31 @@ vi.mock('@/utils/internal/requestContext.js', async (importOriginal) => {
   };
 });
 
+import type { ResourceSubscriptionRegistry } from '@/mcp-server/resources/resourceSubscriptions.js';
+import { installResourceSubscriptions } from '@/mcp-server/resources/resourceSubscriptions.js';
 import { createMcpServerInstance, type McpServerDeps } from '@/mcp-server/server.js';
 import { logger } from '@/utils/internal/logger.js';
+
+/** Teardown for every connected client/server pair a test opened. */
+const cleanups: Array<() => Promise<void>> = [];
+
+/**
+ * Connects a real `Client` to `server` over a linked in-memory pair and
+ * registers teardown. Returns the initialized client, so
+ * `getServerCapabilities()` / `getServerVersion()` read what the server
+ * actually advertised on `initialize`.
+ */
+async function connect(server: McpServer): Promise<Client> {
+  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+  const client = new Client({ name: 'server-test-client', version: '0.0.0' });
+  await server.connect(serverTransport);
+  await client.connect(clientTransport);
+  cleanups.push(async () => {
+    await client.close();
+    await server.close();
+  });
+  return client;
+}
 
 describe('createMcpServerInstance', () => {
   let mockToolRegistry: { registerAll: ReturnType<typeof vi.fn> };
@@ -90,20 +89,37 @@ describe('createMcpServerInstance', () => {
     };
   });
 
+  afterEach(async () => {
+    while (cleanups.length) {
+      try {
+        await cleanups.pop()?.();
+      } catch {
+        // Pair may already be closed.
+      }
+    }
+  });
+
   it('should return an McpServer instance', async () => {
     const server = await createMcpServerInstance(deps);
     expect(server).toBeInstanceOf(McpServer);
   });
 
-  it('should call ToolRegistry.registerAll', async () => {
-    await createMcpServerInstance(deps);
+  it('should call ToolRegistry.registerAll with the server and the subscription registry', async () => {
+    const server = await createMcpServerInstance(deps);
     expect(mockToolRegistry.registerAll).toHaveBeenCalledTimes(1);
-    expect(mockToolRegistry.registerAll).toHaveBeenCalledWith(expect.any(McpServer), undefined);
+    expect(mockToolRegistry.registerAll).toHaveBeenCalledWith(
+      server,
+      expect.objectContaining({ has: expect.any(Function) }),
+    );
   });
 
-  it('should call ResourceRegistry.registerAll', async () => {
-    await createMcpServerInstance(deps);
+  it('should call ResourceRegistry.registerAll with the server and the subscription registry', async () => {
+    const server = await createMcpServerInstance(deps);
     expect(mockResourceRegistry.registerAll).toHaveBeenCalledTimes(1);
+    expect(mockResourceRegistry.registerAll).toHaveBeenCalledWith(
+      server,
+      expect.objectContaining({ has: expect.any(Function) }),
+    );
   });
 
   it('should call PromptRegistry.registerAll', async () => {
@@ -154,112 +170,198 @@ describe('createMcpServerInstance', () => {
     );
   });
 
-  describe('instructions option (#91)', () => {
-    const McpServerMock = McpServer as unknown as {
-      clearCapturedArgs(): void;
-      getCapturedArgs(): unknown[][];
-    };
+  // -------------------------------------------------------------------------
+  // Declared capabilities
+  // -------------------------------------------------------------------------
 
-    /**
-     * Reads the most recent McpServer constructor arguments captured by the
-     * file-level mock. Asserts against the options bag (second argument) since
-     * that's where `instructions` lives — see `tests/setup.ts` for the global
-     * stub and the file's own vi.mock for the args-capturing override.
-     */
-    function lastConstructorOptions(): Record<string, unknown> | undefined {
-      const calls = McpServerMock.getCapturedArgs();
-      const last = calls[calls.length - 1];
-      return last?.[1] as Record<string, unknown> | undefined;
+  describe('declared capabilities', () => {
+    it('advertises logging, subscribable resources, and list-changed for every primitive', async () => {
+      const client = await connect(await createMcpServerInstance(deps));
+
+      expect(client.getServerCapabilities()).toMatchObject({
+        logging: {},
+        resources: { listChanged: true, subscribe: true },
+        tools: { listChanged: true },
+        prompts: { listChanged: true },
+      });
+    });
+
+    it('advertises no tasks capability', async () => {
+      const client = await connect(await createMcpServerInstance(deps));
+
+      expect(client.getServerCapabilities()).not.toHaveProperty('tasks');
+    });
+
+    it('forwards declared extensions into server capabilities', async () => {
+      const client = await connect(
+        await createMcpServerInstance({ ...deps, extensions: { 'io.example/thing': {} } }),
+      );
+
+      expect(client.getServerCapabilities()?.extensions).toEqual({ 'io.example/thing': {} });
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // Resource subscriptions (#354)
+  // -------------------------------------------------------------------------
+
+  describe('resource subscriptions (#354)', () => {
+    /** A bare server carrying only the subscribe capability under test. */
+    function subscribableServer(name: string): {
+      server: McpServer;
+      subscriptions: ResourceSubscriptionRegistry;
+    } {
+      const server = new McpServer(
+        { name, version: '0.0.0' },
+        { capabilities: { resources: { listChanged: true, subscribe: true } } },
+      );
+      return { server, subscriptions: installResourceSubscriptions(server) };
     }
 
-    beforeEach(() => {
-      McpServerMock.clearCapturedArgs();
+    it('answers resources/subscribe and resources/unsubscribe with an empty result', async () => {
+      const client = await connect(await createMcpServerInstance(deps));
+
+      await expect(client.subscribeResource({ uri: 'items://1' })).resolves.toEqual({});
+      await expect(client.unsubscribeResource({ uri: 'items://1' })).resolves.toEqual({});
     });
 
-    it('threads instructions into the McpServer options when provided', async () => {
-      await createMcpServerInstance({
-        ...deps,
-        instructions: 'Use shortcut alpha for the most common case.',
-      });
-      expect(lastConstructorOptions()?.instructions).toBe(
-        'Use shortcut alpha for the most common case.',
+    it('tracks exactly the subscribed URIs in the returned registry', async () => {
+      const { server, subscriptions } = subscribableServer('subs');
+      const client = await connect(server);
+
+      await client.subscribeResource({ uri: 'items://1' });
+      await client.subscribeResource({ uri: 'items://2' });
+
+      expect(subscriptions.has('items://1')).toBe(true);
+      expect(subscriptions.has('items://2')).toBe(true);
+      expect(subscriptions.has('items://3')).toBe(false);
+      expect(subscriptions.size).toBe(2);
+
+      await client.unsubscribeResource({ uri: 'items://1' });
+
+      expect(subscriptions.has('items://1')).toBe(false);
+      expect(subscriptions.has('items://2')).toBe(true);
+      expect(subscriptions.size).toBe(1);
+    });
+
+    it('treats a repeat subscribe and an unknown unsubscribe as no-op successes', async () => {
+      const { server, subscriptions } = subscribableServer('subs-idempotent');
+      const client = await connect(server);
+
+      await client.subscribeResource({ uri: 'items://1' });
+      await expect(client.subscribeResource({ uri: 'items://1' })).resolves.toEqual({});
+      expect(subscriptions.size).toBe(1);
+
+      await expect(client.unsubscribeResource({ uri: 'items://never' })).resolves.toEqual({});
+      expect(subscriptions.size).toBe(1);
+      expect(subscriptions.has('items://1')).toBe(true);
+    });
+
+    it('scopes the subscription set to one McpServer instance', async () => {
+      const first = subscribableServer('subs-a');
+      const second = subscribableServer('subs-b');
+      const firstClient = await connect(first.server);
+      await connect(second.server);
+
+      await firstClient.subscribeResource({ uri: 'items://1' });
+
+      expect(first.subscriptions.has('items://1')).toBe(true);
+      expect(second.subscriptions.has('items://1')).toBe(false);
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // Server identity and instructions
+  // -------------------------------------------------------------------------
+
+  describe('instructions option (#91)', () => {
+    it('threads instructions into the initialize result when provided', async () => {
+      const client = await connect(
+        await createMcpServerInstance({
+          ...deps,
+          instructions: 'Use shortcut alpha for the most common case.',
+        }),
       );
+
+      expect(client.getInstructions()).toBe('Use shortcut alpha for the most common case.');
     });
 
-    it('omits instructions from McpServer options when option is unset', async () => {
-      await createMcpServerInstance(deps);
-      expect(lastConstructorOptions()).not.toHaveProperty('instructions');
+    it('omits instructions when the option is unset', async () => {
+      const client = await connect(await createMcpServerInstance(deps));
+
+      expect(client.getInstructions()).toBeUndefined();
     });
 
     it('does not pass through an empty string (falsy guard)', async () => {
-      await createMcpServerInstance({ ...deps, instructions: '' });
-      expect(lastConstructorOptions()).not.toHaveProperty('instructions');
+      const client = await connect(await createMcpServerInstance({ ...deps, instructions: '' }));
+
+      expect(client.getInstructions()).toBeUndefined();
     });
   });
 
   describe('server identity fields (#213)', () => {
-    const McpServerMock = McpServer as unknown as {
-      clearCapturedArgs(): void;
-      getCapturedArgs(): unknown[][];
-    };
+    it('forwards title to serverInfo when provided', async () => {
+      const client = await connect(await createMcpServerInstance({ ...deps, title: 'My Server' }));
 
-    function lastServerInfo(): Record<string, unknown> | undefined {
-      const calls = McpServerMock.getCapturedArgs();
-      const last = calls[calls.length - 1];
-      return last?.[0] as Record<string, unknown> | undefined;
-    }
-
-    beforeEach(() => {
-      McpServerMock.clearCapturedArgs();
+      expect(client.getServerVersion()?.title).toBe('My Server');
     });
 
-    it('forwards title to McpServer serverInfo when provided', async () => {
-      await createMcpServerInstance({ ...deps, title: 'My Server' });
-      expect(lastServerInfo()?.title).toBe('My Server');
+    it('omits title from serverInfo when not provided', async () => {
+      const client = await connect(await createMcpServerInstance(deps));
+
+      expect(client.getServerVersion()).not.toHaveProperty('title');
     });
 
-    it('omits title from McpServer serverInfo when not provided', async () => {
-      await createMcpServerInstance(deps);
-      expect(lastServerInfo()).not.toHaveProperty('title');
+    it('forwards websiteUrl to serverInfo when provided', async () => {
+      const client = await connect(
+        await createMcpServerInstance({
+          ...deps,
+          websiteUrl: 'https://github.com/owner/my-server',
+        }),
+      );
+
+      expect(client.getServerVersion()?.websiteUrl).toBe('https://github.com/owner/my-server');
     });
 
-    it('forwards websiteUrl to McpServer serverInfo when provided', async () => {
-      await createMcpServerInstance({
-        ...deps,
-        websiteUrl: 'https://github.com/owner/my-server',
-      });
-      expect(lastServerInfo()?.websiteUrl).toBe('https://github.com/owner/my-server');
+    it('omits websiteUrl from serverInfo when not provided', async () => {
+      const client = await connect(await createMcpServerInstance(deps));
+
+      expect(client.getServerVersion()).not.toHaveProperty('websiteUrl');
     });
 
-    it('omits websiteUrl from McpServer serverInfo when not provided', async () => {
-      await createMcpServerInstance(deps);
-      expect(lastServerInfo()).not.toHaveProperty('websiteUrl');
+    it('forwards description to serverInfo when provided', async () => {
+      const client = await connect(
+        await createMcpServerInstance({ ...deps, description: 'My server description.' }),
+      );
+
+      expect(client.getServerVersion()?.description).toBe('My server description.');
     });
 
-    it('forwards description to McpServer serverInfo when provided', async () => {
-      await createMcpServerInstance({ ...deps, description: 'My server description.' });
-      expect(lastServerInfo()?.description).toBe('My server description.');
+    it('omits description from serverInfo when not provided', async () => {
+      const client = await connect(await createMcpServerInstance(deps));
+
+      expect(client.getServerVersion()).not.toHaveProperty('description');
     });
 
-    it('omits description from McpServer serverInfo when not provided', async () => {
-      await createMcpServerInstance(deps);
-      expect(lastServerInfo()).not.toHaveProperty('description');
-    });
-
-    it('forwards icons to McpServer serverInfo when provided', async () => {
+    it('forwards icons to serverInfo when provided', async () => {
       const icons = [{ src: 'https://example.com/icon.png', mimeType: 'image/png' }];
-      await createMcpServerInstance({ ...deps, icons });
-      expect(lastServerInfo()?.icons).toEqual(icons);
+      const client = await connect(await createMcpServerInstance({ ...deps, icons }));
+
+      expect(client.getServerVersion()?.icons).toEqual(icons);
     });
 
-    it('omits icons from McpServer serverInfo when not provided', async () => {
-      await createMcpServerInstance(deps);
-      expect(lastServerInfo()).not.toHaveProperty('icons');
+    it('omits icons from serverInfo when not provided', async () => {
+      const client = await connect(await createMcpServerInstance(deps));
+
+      expect(client.getServerVersion()).not.toHaveProperty('icons');
     });
 
     it('always includes name and version in serverInfo', async () => {
-      await createMcpServerInstance({ ...deps, title: 'T', websiteUrl: 'https://x.com' });
-      expect(lastServerInfo()).toMatchObject({
+      const client = await connect(
+        await createMcpServerInstance({ ...deps, title: 'T', websiteUrl: 'https://x.com' }),
+      );
+
+      expect(client.getServerVersion()).toMatchObject({
         name: 'test-server',
         version: '1.0.0',
       });

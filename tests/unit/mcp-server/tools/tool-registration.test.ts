@@ -33,9 +33,6 @@ vi.mock('@/config/index.js', () => ({
     mcpServerVersion: '1.0.0-test',
     mcpAuthMode: 'none',
     openTelemetry: { serviceName: 'test', serviceVersion: '0.0.0' },
-    tasks: {
-      defaultTtlMs: 60_000,
-    },
   },
 }));
 
@@ -82,12 +79,9 @@ describe('ToolRegistry', () => {
     vi.clearAllMocks();
     mockServer = {
       registerTool: vi.fn(() => {}),
-      setToolRequestHandlers: vi.fn(() => {}),
-      experimental: {
-        tasks: {
-          registerToolTask: vi.fn(() => {}),
-        },
-      },
+      sendPromptListChanged: vi.fn(() => {}),
+      sendResourceListChanged: vi.fn(() => {}),
+      sendToolListChanged: vi.fn(() => {}),
     };
   });
 
@@ -136,24 +130,6 @@ describe('ToolRegistry', () => {
       await registry.registerAll(mockServer);
 
       expect(mockServer.registerTool).toHaveBeenCalledTimes(0);
-      expect(mockServer.setToolRequestHandlers).toHaveBeenCalledTimes(1);
-    });
-
-    it('should initialize MCP tool handlers for task-only tool registries', async () => {
-      const taskOnlyTool = tool('task_only_tool', {
-        description: 'Task-only tool',
-        input: z.object({ query: z.string().describe('query') }),
-        output: z.object({ result: z.string().describe('result') }),
-        task: true,
-        handler: async (input) => ({ result: input.query.toUpperCase() }),
-      });
-
-      const registry = new ToolRegistry([taskOnlyTool], services);
-      await registry.registerAll(mockServer);
-
-      expect(mockServer.setToolRequestHandlers).toHaveBeenCalledTimes(1);
-      expect(mockServer.experimental.tasks.registerToolTask).toHaveBeenCalledTimes(1);
-      expect(mockServer.registerTool).not.toHaveBeenCalled();
     });
   });
 
@@ -182,26 +158,23 @@ describe('ToolRegistry', () => {
       expect(mockServer.registerTool.mock.calls[0][0]).toBe('enabled_tool');
     });
 
-    it('should skip disabled task tools too', async () => {
-      const disabledTaskDef = disabledTool(
-        tool('disabled_task', {
-          description: 'Disabled task tool',
+    it('should register nothing when every tool in the registry is disabled', async () => {
+      const disabledDef = disabledTool(
+        tool('only_disabled', {
+          description: 'Disabled tool',
           input: z.object({}),
           output: z.object({}),
-          task: true,
-          handler: async () => ({}),
+          handler: () => ({}),
         }),
         { reason: 'Background analytics are disabled in this deployment.' },
       );
 
-      const registry = new ToolRegistry([disabledTaskDef], services);
+      const registry = new ToolRegistry([disabledDef], services);
       await registry.registerAll(mockServer);
 
-      expect(mockServer.experimental.tasks.registerToolTask).not.toHaveBeenCalled();
+      // `tools/list` and `tools/call` come from the declared capability, so a
+      // registry with nothing enabled still answers with a truthful empty list.
       expect(mockServer.registerTool).not.toHaveBeenCalled();
-      // SDK tools/list + tools/call handlers are still installed even when
-      // every tool is disabled — clients get a truthful empty list.
-      expect(mockServer.setToolRequestHandlers).toHaveBeenCalledTimes(1);
     });
 
     it('should preserve all original definition fields when wrapped', () => {
@@ -291,20 +264,20 @@ describe('ToolRegistry', () => {
   });
 
   describe('Schema Registration', () => {
-    it('should register input and output schemas', async () => {
-      const testTool = tool('typed_tool', {
-        description: 'Tool with schemas',
-        input: z.object({
-          name: z.string().describe('name'),
-          age: z.number().describe('age'),
-        }),
-        output: z.object({
-          greeting: z.string().describe('greeting'),
-        }),
-        handler: (input) => ({ greeting: `Hello ${input.name}` }),
-      });
+    const typedTool = tool('typed_tool', {
+      description: 'Tool with schemas',
+      input: z.object({
+        name: z.string().describe('name'),
+        age: z.number().describe('age'),
+      }),
+      output: z.object({
+        greeting: z.string().describe('greeting'),
+      }),
+      handler: (input) => ({ greeting: `Hello ${input.name}` }),
+    });
 
-      const registry = new ToolRegistry([testTool], services);
+    it('should register input and output schemas', async () => {
+      const registry = new ToolRegistry([typedTool], services);
       await registry.registerAll(mockServer);
 
       const call = mockServer.registerTool.mock.calls[0];
@@ -312,6 +285,21 @@ describe('ToolRegistry', () => {
       expect(call[1].outputSchema).toBeDefined();
       expect(call[1].inputSchema.shape.name).toBeDefined();
       expect(call[1].outputSchema.shape.greeting).toBeDefined();
+    });
+
+    it('should advertise the widened output schema, not the strict parse schema', async () => {
+      const registry = new ToolRegistry([typedTool], services);
+      await registry.registerAll(mockServer);
+
+      const advertised = mockServer.registerTool.mock.calls[0][1].outputSchema;
+      // Registration advertises `advertisedOutputSchema` — success fields
+      // optional plus a declared `error` envelope (#241).
+      expect(advertised).not.toBe(typedTool.output);
+      expect(advertised.shape.error).toBeDefined();
+      expect(advertised.safeParse({ error: { code: -32001, message: 'nope' } }).success).toBe(true);
+      expect(typedTool.output.safeParse({ error: { code: -32001, message: 'nope' } }).success).toBe(
+        false,
+      );
     });
   });
 
@@ -459,29 +447,6 @@ describe('ToolRegistry', () => {
       expect(call[1]._meta).toBeUndefined();
     });
 
-    it('should pass _meta to registerToolTask for auto-task tools', async () => {
-      const taskTool = tool('task_app_tool', {
-        description: 'Task app tool',
-        input: z.object({}),
-        output: z.object({}),
-        task: true,
-        handler: async () => ({}),
-        _meta: {
-          ui: { resourceUri: 'ui://task-app/app.html' },
-          'ui/resourceUri': 'ui://task-app/app.html',
-        },
-      });
-
-      const registry = new ToolRegistry([taskTool], services);
-      await registry.registerAll(mockServer);
-
-      const call = mockServer.experimental.tasks.registerToolTask.mock.calls[0];
-      expect(call[1]._meta).toEqual({
-        ui: { resourceUri: 'ui://task-app/app.html' },
-        'ui/resourceUri': 'ui://task-app/app.html',
-      });
-    });
-
     it('should not publish errors[] contract under _meta on standard tools', async () => {
       const errorContractTool = tool('contract_tool', {
         description: 'Tool with errors contract',
@@ -528,30 +493,6 @@ describe('ToolRegistry', () => {
       const call = mockServer.registerTool.mock.calls[0];
       expect(call[1]._meta).toEqual({ ui: { resourceUri: 'ui://mixed/app.html' } });
       expect(call[1]._meta).not.toHaveProperty('mcp-ts-core/errors');
-    });
-
-    it('should not publish errors[] contract under _meta on auto-task tools', async () => {
-      const taskContractTool = tool('task_contract_tool', {
-        description: 'Auto-task tool with errors contract',
-        input: z.object({}),
-        output: z.object({}),
-        task: true,
-        errors: [
-          {
-            reason: 'queue_full',
-            code: JsonRpcErrorCode.RateLimited,
-            when: 'Queue full.',
-            recovery: 'Wait a few seconds before retrying.',
-          },
-        ],
-        handler: async () => ({}),
-      });
-
-      const registry = new ToolRegistry([taskContractTool], services);
-      await registry.registerAll(mockServer);
-
-      const call = mockServer.experimental.tasks.registerToolTask.mock.calls[0];
-      expect(call[1]._meta).toBeUndefined();
     });
   });
 

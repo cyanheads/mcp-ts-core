@@ -4,15 +4,16 @@
  * @module tests/integration/stdio
  */
 import { resolve } from 'node:path';
-import { Client } from '@modelcontextprotocol/sdk/client/index.js';
-import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
+import { Client } from '@modelcontextprotocol/client';
+import { StdioClientTransport } from '@modelcontextprotocol/client/stdio';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
 import {
   expectDefaultServerCapabilities,
   expectDefaultServerDiscoverySurface,
+  expectDefaultServerLoggingSurface,
   expectDefaultServerProtocolErrors,
-  expectDefaultServerTaskSurface,
+  expectDefaultServerSubscriptionSurface,
 } from '../helpers/default-server-mcp.js';
 
 const DIST_INDEX = resolve(process.cwd(), 'dist/index.js');
@@ -68,8 +69,9 @@ describe('Stdio transport integration', () => {
     await expectDefaultServerProtocolErrors(client);
   });
 
-  it('supports empty task and logging operations', async () => {
-    await expectDefaultServerTaskSurface(client);
+  it('resolves logging and resource-subscription operations', async () => {
+    await expectDefaultServerLoggingSurface(client);
+    await expectDefaultServerSubscriptionSurface(client);
   });
 
   it('shuts down cleanly without hanging', async () => {

@@ -5,7 +5,7 @@
  * @module tests/unit/linter/prompt-rules.test
  */
 
-import { completable } from '@modelcontextprotocol/sdk/server/completable.js';
+import { completable } from '@modelcontextprotocol/server';
 import { describe, expect, it } from 'vitest';
 import { z } from 'zod';
 

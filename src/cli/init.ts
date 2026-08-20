@@ -102,7 +102,7 @@ function init(): void {
   const substitutions: Record<string, string> = {
     PACKAGE_NAME: packageName,
     FRAMEWORK_VERSION: PACKAGE_JSON.version,
-    MCP_SDK_VERSION: PACKAGE_JSON.dependencies?.['@modelcontextprotocol/sdk'] ?? '',
+    MCP_SDK_VERSION: PACKAGE_JSON.dependencies?.['@modelcontextprotocol/server'] ?? '',
     ZOD_VERSION: PACKAGE_JSON.peerDependencies?.zod ?? '',
   };
 

@@ -3,20 +3,18 @@
  * @module tests/integration/helpers/default-server-mcp
  */
 
-import type { Client } from '@modelcontextprotocol/sdk/client/index.js';
-import { ErrorCode } from '@modelcontextprotocol/sdk/types.js';
+import { type Client, ProtocolErrorCode } from '@modelcontextprotocol/client';
 import { expect } from 'vitest';
-import { z } from 'zod';
 
 export function expectDefaultServerCapabilities(client: Client): void {
   const capabilities = client.getServerCapabilities();
   expect(capabilities).toMatchObject({
     logging: {},
     prompts: { listChanged: true },
-    resources: { listChanged: true },
+    resources: { listChanged: true, subscribe: true },
     tools: { listChanged: true },
   });
-  // SEP-1686 tasks is gated on usage — default server has no task tools.
+  // The experimental tasks surface was removed from the SDK in v2.
   expect(capabilities?.tasks).toBeUndefined();
 }
 
@@ -35,15 +33,10 @@ export async function expectDefaultServerDiscoverySurface(client: Client): Promi
 }
 
 export async function expectDefaultServerProtocolErrors(client: Client): Promise<void> {
-  const toolResult = await client.callTool({
-    name: 'missing_tool',
-    arguments: {},
-  });
-
-  expect(toolResult.isError).toBe(true);
-  expect(toolResult.content).toContainEqual({
-    type: 'text',
-    text: 'MCP error -32602: Tool missing_tool not found',
+  // An unknown tool is a protocol error in v2, not an `isError: true` result.
+  await expect(client.callTool({ name: 'missing_tool', arguments: {} })).rejects.toMatchObject({
+    code: ProtocolErrorCode.InvalidParams,
+    message: expect.stringContaining('Tool missing_tool not found'),
   });
 
   await expect(
@@ -51,8 +44,8 @@ export async function expectDefaultServerProtocolErrors(client: Client): Promise
       uri: 'missing://resource/item',
     }),
   ).rejects.toMatchObject({
-    code: ErrorCode.InvalidParams,
-    message: expect.stringContaining('Resource missing://resource/item not found'),
+    code: ProtocolErrorCode.InvalidParams,
+    message: expect.stringContaining('missing://resource/item'),
   });
 
   await expect(
@@ -60,32 +53,24 @@ export async function expectDefaultServerProtocolErrors(client: Client): Promise
       name: 'missing_prompt',
     }),
   ).rejects.toMatchObject({
-    code: ErrorCode.InvalidParams,
+    code: ProtocolErrorCode.InvalidParams,
     message: expect.stringContaining('Prompt missing_prompt not found'),
   });
 }
 
-export async function expectDefaultServerTaskSurface(client: Client): Promise<void> {
+/**
+ * The `logging` capability is declared, so `logging/setLevel` must resolve —
+ * the SDK installs the handler from the declaration with no framework code.
+ */
+export async function expectDefaultServerLoggingSurface(client: Client): Promise<void> {
   await expect(client.setLoggingLevel('debug')).resolves.toBeDefined();
+}
 
-  const tasks = await client.experimental.tasks.listTasks();
-  expect(tasks.tasks).toEqual([]);
-  expect(tasks.nextCursor).toBeUndefined();
-
-  await expect(client.experimental.tasks.getTask('missing-task')).rejects.toMatchObject({
-    code: ErrorCode.InvalidParams,
-    message: expect.stringContaining('Task not found'),
-  });
-
-  await expect(client.experimental.tasks.cancelTask('missing-task')).rejects.toMatchObject({
-    code: ErrorCode.InvalidParams,
-    message: expect.stringContaining('Task not found'),
-  });
-
-  await expect(
-    client.experimental.tasks.getTaskResult('missing-task', z.object({})),
-  ).rejects.toMatchObject({
-    code: ErrorCode.InvalidParams,
-    message: expect.stringContaining('Task not found'),
-  });
+/**
+ * `resources: { subscribe: true }` is declared, so subscribe/unsubscribe must
+ * resolve rather than answering `-32601` (#354).
+ */
+export async function expectDefaultServerSubscriptionSurface(client: Client): Promise<void> {
+  await expect(client.subscribeResource({ uri: 'thing://1' })).resolves.toBeDefined();
+  await expect(client.unsubscribeResource({ uri: 'thing://1' })).resolves.toBeDefined();
 }

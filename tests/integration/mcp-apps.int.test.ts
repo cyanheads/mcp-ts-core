@@ -5,8 +5,7 @@
  * @module tests/integration/mcp-apps.int.test
  */
 
-import { Client } from '@modelcontextprotocol/sdk/client/index.js';
-import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
+import { Client, StreamableHTTPClientTransport } from '@modelcontextprotocol/client';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { z } from 'zod';
 
@@ -291,7 +290,6 @@ describe('MCP Apps — HTTP wire conformance', () => {
     expect(listed.tools).toHaveLength(1);
     expect(listed.tools[0]).toMatchObject({
       name: 'wire_app_search',
-      execution: { taskSupport: 'forbidden' },
       _meta: {
         ui: {
           resourceUri,

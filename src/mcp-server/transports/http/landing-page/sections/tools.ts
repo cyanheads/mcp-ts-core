@@ -101,7 +101,6 @@ function renderToolCard(tool: ManifestTool, bucket: Bucket): SafeHtml {
   // because they're rare and meaningful.
   const auxPills: SafeHtml[] = [];
   if (annotations?.openWorldHint) auxPills.push(renderPill('open-world', 'openworld'));
-  if (tool.isTask) auxPills.push(renderPill('task', 'task'));
   if (tool.isApp) auxPills.push(renderPill('app', 'app'));
 
   const auxPillRow =

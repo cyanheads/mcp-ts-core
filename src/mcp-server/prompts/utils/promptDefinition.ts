@@ -7,7 +7,7 @@
  * @module src/mcp-server/prompts/utils/promptDefinition
  */
 
-import type { PromptMessage } from '@modelcontextprotocol/sdk/types.js';
+import type { PromptMessage } from '@modelcontextprotocol/server';
 import type { ZodObject, ZodRawShape, z } from 'zod';
 
 /**

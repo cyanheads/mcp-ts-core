@@ -6,11 +6,17 @@
  * @module tests/mcp-server/tools/utils/toolHandlerFactory.test
  */
 
-import type { RequestHandlerExtra } from '@modelcontextprotocol/sdk/shared/protocol.js';
-import type { ServerNotification, ServerRequest } from '@modelcontextprotocol/sdk/types.js';
+import type { CallToolResult, ContentBlock } from '@modelcontextprotocol/server';
+import { inputRequired } from '@modelcontextprotocol/server';
+import { AjvJsonSchemaValidator } from '@modelcontextprotocol/server/validators/ajv';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { z } from 'zod';
 import { JsonRpcErrorCode, McpError } from '@/types-global/errors.js';
+import type { ServerContextOverrides } from '../../../../helpers/server-context.js';
+import {
+  makeSenderlessServerContext,
+  makeServerContext,
+} from '../../../../helpers/server-context.js';
 
 // ---------------------------------------------------------------------------
 // Module mocks — vi.hoisted ensures variables are available during vi.mock hoisting
@@ -67,25 +73,38 @@ vi.mock('@/utils/internal/performance.js', () => ({
 import type { AnyToolDefinition } from '@/mcp-server/tools/utils/toolDefinition.js';
 import { tool } from '@/mcp-server/tools/utils/toolDefinition.js';
 import {
+  advertisedOutputSchema,
+  buildToolErrorResult,
   createToolHandler,
+  effectiveOutputSchema,
   type HandlerFactoryServices,
   type HandlerNotifiers,
 } from '@/mcp-server/tools/utils/toolHandlerFactory.js';
+import { ErrorHandler } from '@/utils/internal/error-handler/errorHandler.js';
 
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 
-type MockSdkContext = RequestHandlerExtra<ServerRequest, ServerNotification>;
+/** What `createToolHandler` resolves with: a tool result, or `input_required`. */
+type HandlerResult = Awaited<ReturnType<ReturnType<typeof createToolHandler>>>;
 
-function createMockSdkContext(overrides: Record<string, unknown> = {}): MockSdkContext {
-  return {
-    signal: new AbortController().signal,
-    requestId: 'sdk-request-id',
-    sendNotification: () => Promise.resolve(),
-    sendRequest: () => Promise.resolve({}) as never,
-    ...overrides,
-  } as MockSdkContext;
+/**
+ * First `content[]` block of a completed tool result. Narrows off the
+ * `input_required` branch of the union, which carries no `content`.
+ */
+function firstBlock(result: HandlerResult): ContentBlock {
+  return (result as CallToolResult).content![0]!;
+}
+
+/**
+ * A `ctx.mcpReq.log` sink typed with the SDK's real signature, so the
+ * `toHaveBeenCalledWith(level, data)` assertions are arity-checked.
+ */
+function makeWireLog(
+  impl: NonNullable<ServerContextOverrides['log']> = async () => {},
+): ReturnType<typeof vi.fn<NonNullable<ServerContextOverrides['log']>>> {
+  return vi.fn(impl);
 }
 
 const mockStorage = {
@@ -134,12 +153,12 @@ describe('createToolHandler', () => {
       });
 
       const handler = createToolHandler(def as AnyToolDefinition, services, notifiers);
-      const result = await handler({ message: 'hello' }, createMockSdkContext());
+      const result = await handler({ message: 'hello' }, makeServerContext());
 
       // Response structure
       expect(result.structuredContent).toEqual({ echo: 'hello' });
       expect(result.content).toHaveLength(1);
-      expect(result.content![0]!.type).toBe('text');
+      expect(firstBlock(result).type).toBe('text');
       expect(result.isError).toBeUndefined();
 
       // Context was created with correct fields
@@ -160,9 +179,9 @@ describe('createToolHandler', () => {
       });
 
       const handler = createToolHandler(def as AnyToolDefinition, services, notifiers);
-      const result = await handler({ n: 5 }, createMockSdkContext());
+      const result = await handler({ n: 5 }, makeServerContext());
 
-      expect((result.content![0] as { text: string }).text).toBe('Result: 10');
+      expect((firstBlock(result) as { text: string }).text).toBe('Result: 10');
     });
 
     it('should default to JSON stringify when no format is provided', async () => {
@@ -174,9 +193,9 @@ describe('createToolHandler', () => {
       });
 
       const handler = createToolHandler(def as AnyToolDefinition, services, notifiers);
-      const result = await handler({}, createMockSdkContext());
+      const result = await handler({}, makeServerContext());
 
-      const text = (result.content![0] as { text: string }).text;
+      const text = (firstBlock(result) as { text: string }).text;
       expect(JSON.parse(text)).toEqual({ ok: true });
     });
 
@@ -205,7 +224,7 @@ describe('createToolHandler', () => {
       });
 
       const handler = createToolHandler(def as AnyToolDefinition, services, notifiers);
-      const result = await handler({}, createMockSdkContext());
+      const result = await handler({}, makeServerContext());
 
       expect(result.isError).toBe(true);
       expect(result.structuredContent).toMatchObject({
@@ -226,7 +245,7 @@ describe('createToolHandler', () => {
       });
 
       const handler = createToolHandler(def as AnyToolDefinition, services, notifiers);
-      const result = await handler({}, createMockSdkContext());
+      const result = await handler({}, makeServerContext());
 
       expect(result.content).toEqual([
         { type: 'image', data: 'aW1hZ2U=', mimeType: 'image/png' },
@@ -249,7 +268,7 @@ describe('createToolHandler', () => {
       });
 
       const handler = createToolHandler(def as AnyToolDefinition, services, notifiers);
-      const result = await handler({ name: 123 } as any, createMockSdkContext());
+      const result = await handler({ name: 123 } as any, makeServerContext());
 
       expect(result.isError).toBe(true);
       // Input validation errors flow through the same error-shaping path:
@@ -271,7 +290,7 @@ describe('createToolHandler', () => {
       });
 
       const handler = createToolHandler(def as AnyToolDefinition, services, notifiers);
-      await handler({} as any, createMockSdkContext());
+      await handler({} as any, makeServerContext());
 
       expect(handlerFn).not.toHaveBeenCalled();
     });
@@ -293,10 +312,10 @@ describe('createToolHandler', () => {
       });
 
       const handler = createToolHandler(def as AnyToolDefinition, services, notifiers);
-      const result = await handler({}, createMockSdkContext());
+      const result = await handler({}, makeServerContext());
 
       expect(result.isError).toBe(true);
-      expect((result.content![0] as { text: string }).text).toContain('something broke');
+      expect((firstBlock(result) as { text: string }).text).toContain('something broke');
       // _meta.error is no longer emitted — error data lives on structuredContent.error
       expect(result._meta).toBeUndefined();
       // Plain errors get classified as InternalError, no data
@@ -316,10 +335,10 @@ describe('createToolHandler', () => {
       });
 
       const handler = createToolHandler(def as AnyToolDefinition, services, notifiers);
-      const result = await handler({}, createMockSdkContext());
+      const result = await handler({}, makeServerContext());
 
       expect(result.isError).toBe(true);
-      expect((result.content![0] as { text: string }).text).toContain('Item not found');
+      expect((firstBlock(result) as { text: string }).text).toContain('Item not found');
       expect(result._meta).toBeUndefined();
       expect(result.structuredContent).toEqual({
         error: {
@@ -343,7 +362,7 @@ describe('createToolHandler', () => {
       });
 
       const handler = createToolHandler(def as AnyToolDefinition, services, notifiers);
-      const result = await handler({}, createMockSdkContext());
+      const result = await handler({}, makeServerContext());
 
       expect(result.isError).toBe(true);
       // ZodError data.issues should appear in structuredContent.error
@@ -364,7 +383,7 @@ describe('createToolHandler', () => {
       });
 
       const handler = createToolHandler(def as AnyToolDefinition, services, notifiers);
-      const result = await handler({}, createMockSdkContext());
+      const result = await handler({}, makeServerContext());
 
       expect(result.isError).toBe(true);
       expect(result._meta).toBeUndefined();
@@ -375,7 +394,7 @@ describe('createToolHandler', () => {
           data: errorData,
         },
       });
-      const text = (result.content![0] as { text: string }).text;
+      const text = (firstBlock(result) as { text: string }).text;
       expect(text).toContain('Validation failed');
     });
 
@@ -390,7 +409,7 @@ describe('createToolHandler', () => {
       });
 
       const handler = createToolHandler(def as AnyToolDefinition, services, notifiers);
-      const result = await handler({}, createMockSdkContext());
+      const result = await handler({}, makeServerContext());
 
       expect(result.isError).toBe(true);
       expect(result._meta).toBeUndefined();
@@ -412,10 +431,10 @@ describe('createToolHandler', () => {
       });
 
       const handler = createToolHandler(def as AnyToolDefinition, services, notifiers);
-      const result = await handler({}, createMockSdkContext());
+      const result = await handler({}, makeServerContext());
 
       expect(result.isError).toBe(true);
-      const text = (result.content![0] as { text: string }).text;
+      const text = (firstBlock(result) as { text: string }).text;
       // content[] text carries the recovery hint for format()-only clients (Claude Desktop)
       expect(text).toContain('No items returned');
       expect(text).toContain('Recovery: Try the search tool with broader terms.');
@@ -437,9 +456,9 @@ describe('createToolHandler', () => {
       });
 
       const handler = createToolHandler(def as AnyToolDefinition, services, notifiers);
-      const result = await handler({}, createMockSdkContext());
+      const result = await handler({}, makeServerContext());
 
-      const text = (result.content![0] as { text: string }).text;
+      const text = (firstBlock(result) as { text: string }).text;
       expect(text).toBe('Error: Boom');
       expect(text).not.toContain('Recovery:');
     });
@@ -457,9 +476,9 @@ describe('createToolHandler', () => {
       });
 
       const handler = createToolHandler(def as AnyToolDefinition, services, notifiers);
-      const result = await handler({}, createMockSdkContext());
+      const result = await handler({}, makeServerContext());
 
-      const text = (result.content![0] as { text: string }).text;
+      const text = (firstBlock(result) as { text: string }).text;
       expect(text).toBe('Error: Boom');
     });
   });
@@ -483,7 +502,7 @@ describe('createToolHandler', () => {
       });
 
       const handler = createToolHandler(def as AnyToolDefinition, services, notifiers);
-      await handler({}, createMockSdkContext());
+      await handler({}, makeServerContext());
 
       // Without auth, tenantId should be defaulted to 'default' by createContext
       expect(capturedCtx.tenantId).toBe('default');
@@ -504,262 +523,9 @@ describe('createToolHandler', () => {
       });
 
       const handler = createToolHandler(def as AnyToolDefinition, services, notifiers);
-      await handler({}, createMockSdkContext({ signal: controller.signal }));
+      await handler({}, makeServerContext({ signal: controller.signal }));
 
       expect(capturedSignal).toBe(controller.signal);
-    });
-
-    it.each(['sdk', 'protocol'] as const)(
-      'merges the %s cancellation signal and unregisters after completion',
-      async (source) => {
-        const sdkController = new AbortController();
-        const protocolController = new AbortController();
-        const unregister = vi.fn();
-        const registerRequest = vi.fn(() => ({
-          signal: protocolController.signal,
-          unregister,
-        }));
-        let releaseHandler!: () => void;
-        const handlerReleased = new Promise<void>((resolve) => {
-          releaseHandler = resolve;
-        });
-        let publishSignal!: (signal: AbortSignal) => void;
-        const signalReady = new Promise<AbortSignal>((resolve) => {
-          publishSignal = resolve;
-        });
-        const def = tool('merged_signal_tool', {
-          description: 'Checks merged cancellation.',
-          input: z.object({}),
-          output: z.object({ ok: z.boolean() }),
-          handler: async (_input, ctx) => {
-            publishSignal(ctx.signal);
-            await handlerReleased;
-            return { ok: true };
-          },
-        });
-        const handler = createToolHandler(def as AnyToolDefinition, services, {
-          registerRequest,
-        });
-
-        const resultPromise = handler(
-          {},
-          createMockSdkContext({ requestId: 73, signal: sdkController.signal }),
-        );
-        const mergedSignal = await signalReady;
-        const reason = new DOMException(`${source} cancelled`, 'AbortError');
-        if (source === 'sdk') sdkController.abort(reason);
-        else protocolController.abort(reason);
-
-        expect(registerRequest).toHaveBeenCalledWith(73);
-        expect(mergedSignal).not.toBe(sdkController.signal);
-        expect(mergedSignal).not.toBe(protocolController.signal);
-        expect(mergedSignal.aborted).toBe(true);
-        expect(mergedSignal.reason).toBe(reason);
-
-        releaseHandler();
-        await resultPromise;
-        expect(unregister).toHaveBeenCalledOnce();
-      },
-    );
-  });
-
-  // -----------------------------------------------------------------------
-  // Capability detection (elicit)
-  // -----------------------------------------------------------------------
-
-  describe('Capability detection', () => {
-    it('should define ctx.elicit when notifier has elicitInput and client advertises capability', async () => {
-      let capturedCtx: any;
-      const mockElicitInput = vi.fn(async () => ({
-        action: 'accept' as const,
-        content: { format: 'json' },
-      }));
-
-      const def = tool('elicit_tool', {
-        description: 'Uses elicitation.',
-        input: z.object({}),
-        output: z.object({ ok: z.boolean() }),
-        handler: (_input, ctx) => {
-          capturedCtx = ctx;
-          return { ok: true };
-        },
-      });
-
-      const notifiersWithElicit: HandlerNotifiers = {
-        elicitInput: mockElicitInput,
-        getClientCapabilities: () => ({ elicitation: {} }),
-      };
-
-      const handler = createToolHandler(def as AnyToolDefinition, services, notifiersWithElicit);
-      await handler({}, createMockSdkContext());
-
-      expect(capturedCtx.elicit).toBeDefined();
-      expect(typeof capturedCtx.elicit).toBe('function');
-      expect(typeof capturedCtx.elicit.url).toBe('function');
-    });
-
-    it('should leave ctx.elicit undefined when client does not advertise elicitation', async () => {
-      let capturedCtx: any;
-
-      const def = tool('no_elicit_tool', {
-        description: 'No elicitation.',
-        input: z.object({}),
-        output: z.object({ ok: z.boolean() }),
-        handler: (_input, ctx) => {
-          capturedCtx = ctx;
-          return { ok: true };
-        },
-      });
-
-      // elicitInput is bound but client does not advertise capability
-      const notifiersNoCapability: HandlerNotifiers = {
-        elicitInput: vi.fn(),
-        getClientCapabilities: () => ({}),
-      };
-
-      const handler = createToolHandler(def as AnyToolDefinition, services, notifiersNoCapability);
-      await handler({}, createMockSdkContext());
-
-      expect(capturedCtx.elicit).toBeUndefined();
-    });
-
-    it('should leave ctx.elicit undefined when notifiers lack elicitInput', async () => {
-      let capturedCtx: any;
-
-      const def = tool('bare_notifiers_tool', {
-        description: 'No elicitation binding.',
-        input: z.object({}),
-        output: z.object({ ok: z.boolean() }),
-        handler: (_input, ctx) => {
-          capturedCtx = ctx;
-          return { ok: true };
-        },
-      });
-
-      // Default notifiers — no elicitInput
-      const handler = createToolHandler(def as AnyToolDefinition, services, notifiers);
-      await handler({}, createMockSdkContext());
-
-      expect(capturedCtx.elicit).toBeUndefined();
-    });
-
-    it('should convert Zod schema to JSON Schema before sending (form-mode)', async () => {
-      const mockElicitInput = vi.fn<NonNullable<HandlerNotifiers['elicitInput']>>(async () => ({
-        action: 'accept' as const,
-        content: { format: 'csv' },
-      }));
-
-      let capturedCtx: any;
-      const def = tool('elicit_schema_tool', {
-        description: 'Checks schema conversion.',
-        input: z.object({}),
-        output: z.object({ ok: z.boolean() }),
-        handler: (_input, ctx) => {
-          capturedCtx = ctx;
-          return { ok: true };
-        },
-      });
-
-      const notifiersWithElicit: HandlerNotifiers = {
-        elicitInput: mockElicitInput,
-        getClientCapabilities: () => ({ elicitation: {} }),
-      };
-
-      const handler = createToolHandler(def as AnyToolDefinition, services, notifiersWithElicit);
-      await handler({}, createMockSdkContext());
-
-      // Call elicit with a Zod schema
-      const schema = z.object({
-        format: z.enum(['json', 'csv']).describe('Output format'),
-      });
-      await capturedCtx.elicit('Choose format', schema);
-
-      expect(mockElicitInput).toHaveBeenCalledOnce();
-      const [firstCall] = mockElicitInput.mock.calls;
-      const params = firstCall![0] as any;
-      // requestedSchema must be a plain JSON Schema object, NOT a ZodObject
-      expect(params.requestedSchema).toBeDefined();
-      expect(typeof params.requestedSchema).toBe('object');
-      expect(params.requestedSchema).not.toHaveProperty('_def'); // ZodObject internals
-      expect(params.requestedSchema.type).toBe('object'); // Valid JSON Schema
-      expect(params.message).toBe('Choose format');
-    });
-
-    it('should attach .url() helper that sends url-mode params with a generated elicitationId', async () => {
-      const mockElicitInput = vi.fn<NonNullable<HandlerNotifiers['elicitInput']>>(async () => ({
-        action: 'accept' as const,
-      }));
-
-      let capturedCtx: any;
-      const def = tool('url_elicit_tool', {
-        description: 'Tests url-mode elicitation.',
-        input: z.object({}),
-        output: z.object({ ok: z.boolean() }),
-        handler: (_input, ctx) => {
-          capturedCtx = ctx;
-          return { ok: true };
-        },
-      });
-
-      const notifiersWithElicit: HandlerNotifiers = {
-        elicitInput: mockElicitInput,
-        getClientCapabilities: () => ({ elicitation: {} }),
-      };
-
-      const handler = createToolHandler(def as AnyToolDefinition, services, notifiersWithElicit);
-      await handler({}, createMockSdkContext());
-
-      await capturedCtx.elicit.url('Please authorize', 'https://example.com/auth');
-
-      expect(mockElicitInput).toHaveBeenCalledOnce();
-      const [firstUrlCall] = mockElicitInput.mock.calls;
-      const params = firstUrlCall![0] as any;
-      expect(params.mode).toBe('url');
-      expect(params.message).toBe('Please authorize');
-      expect(params.url).toBe('https://example.com/auth');
-      // elicitationId is auto-generated
-      expect(typeof params.elicitationId).toBe('string');
-      expect(params.elicitationId.length).toBeGreaterThan(0);
-    });
-
-    it('routes request-scoped elicitation through sdkContext.sendRequest', async () => {
-      const fallbackElicitInput = vi.fn<NonNullable<HandlerNotifiers['elicitInput']>>();
-      const sendRequest = vi.fn(async (_request: unknown, _resultSchema: unknown) => ({
-        action: 'accept' as const,
-        content: { format: 'json' },
-      }));
-      const def = tool('request_scoped_elicit_tool', {
-        description: 'Uses request-scoped elicitation.',
-        input: z.object({}),
-        output: z.object({ format: z.string() }),
-        handler: async (_input, ctx) => {
-          const result = await ctx.elicit!(
-            'Choose format',
-            z.object({ format: z.enum(['json', 'csv']).describe('Output format') }),
-          );
-          return { format: String(result.content?.format) };
-        },
-      });
-      const handler = createToolHandler(def as AnyToolDefinition, services, {
-        elicitInput: fallbackElicitInput,
-        getClientCapabilities: () => ({ elicitation: {} }),
-        requestScopedElicitation: true,
-      });
-
-      const result = await handler({}, createMockSdkContext({ sendRequest }));
-
-      expect(result.structuredContent).toEqual({ format: 'json' });
-      expect(fallbackElicitInput).not.toHaveBeenCalled();
-      expect(sendRequest).toHaveBeenCalledOnce();
-      expect(sendRequest.mock.calls[0]?.[0]).toEqual({
-        method: 'elicitation/create',
-        params: expect.objectContaining({
-          mode: 'form',
-          message: 'Choose format',
-          requestedSchema: expect.objectContaining({ type: 'object' }),
-        }),
-      });
-      expect(sendRequest.mock.calls[0]?.[1]).toBeDefined();
     });
   });
 
@@ -802,7 +568,7 @@ describe('createToolHandler', () => {
       });
 
       const handler = createToolHandler(def as AnyToolDefinition, services, notifiers);
-      await handler({}, createMockSdkContext({ sessionId: 'sess-abc' }));
+      await handler({}, makeServerContext({ sessionId: 'sess-abc' }));
 
       expect(requestContextService.createRequestContext).toHaveBeenCalledWith(
         expect.objectContaining({
@@ -817,7 +583,7 @@ describe('createToolHandler', () => {
       const { def, getSessionId } = makeSessionCapturingTool();
 
       const handler = createToolHandler(def as AnyToolDefinition, services, notifiers);
-      await handler({}, createMockSdkContext({ sessionId: 'sess-stateful' }));
+      await handler({}, makeServerContext({ sessionId: 'sess-stateful' }));
 
       expect(getSessionId()).toBe('sess-stateful');
     });
@@ -827,7 +593,7 @@ describe('createToolHandler', () => {
       const { def, getSessionId } = makeSessionCapturingTool();
 
       const handler = createToolHandler(def as AnyToolDefinition, services, notifiers);
-      await handler({}, createMockSdkContext({ sessionId: 'sess-auto' }));
+      await handler({}, makeServerContext({ sessionId: 'sess-auto' }));
 
       expect(getSessionId()).toBe('sess-auto');
     });
@@ -838,7 +604,7 @@ describe('createToolHandler', () => {
 
       // Default services — no exposeStatelessSessionId opt-in.
       const handler = createToolHandler(def as AnyToolDefinition, services, notifiers);
-      await handler({}, createMockSdkContext({ sessionId: 'sess-stateless' }));
+      await handler({}, makeServerContext({ sessionId: 'sess-stateless' }));
 
       expect(getSessionId()).toBeUndefined();
     });
@@ -852,7 +618,7 @@ describe('createToolHandler', () => {
       const { def, getSessionId } = makeSessionCapturingTool();
 
       const handler = createToolHandler(def as AnyToolDefinition, optInServices, notifiers);
-      await handler({}, createMockSdkContext({ sessionId: 'sess-opt-in' }));
+      await handler({}, makeServerContext({ sessionId: 'sess-opt-in' }));
 
       expect(getSessionId()).toBe('sess-opt-in');
     });
@@ -864,7 +630,7 @@ describe('createToolHandler', () => {
       for (const mode of ['stateful', 'auto', 'stateless'] as const) {
         mockConfig.mcpSessionMode = mode;
         // No sessionId on the SDK extra (e.g. stdio).
-        await handler({}, createMockSdkContext());
+        await handler({}, makeServerContext());
         expect(getSessionId()).toBeUndefined();
       }
     });
@@ -882,7 +648,7 @@ describe('createToolHandler', () => {
       });
 
       const handler = createToolHandler(def as AnyToolDefinition, services, notifiers);
-      await handler({ secret: 'super-sensitive-value' }, createMockSdkContext());
+      await handler({ secret: 'super-sensitive-value' }, makeServerContext());
 
       const call = vi
         .mocked(requestContextService.createRequestContext)
@@ -914,26 +680,22 @@ describe('createToolHandler', () => {
     });
 
     it('routes handler-time notifications through the request-scoped sender (relatedRequestId path)', async () => {
-      const sendNotification = vi.fn(() => Promise.resolve());
+      const notify = vi.fn(async () => {});
       const handler = createToolHandler(notifyingTool as AnyToolDefinition, services, notifiers);
-      await handler({}, createMockSdkContext({ sendNotification }));
+      await handler({}, makeServerContext({ notify }));
 
-      // Routing through extra.sendNotification is what stamps relatedRequestId,
-      // so @hono/mcp delivers to the POST SSE stream instead of dropping (#135).
-      expect(sendNotification).toHaveBeenCalledWith({ method: 'notifications/tools/list_changed' });
-      expect(sendNotification).toHaveBeenCalledWith({
-        method: 'notifications/resources/list_changed',
-      });
-      expect(sendNotification).toHaveBeenCalledWith({
-        method: 'notifications/prompts/list_changed',
-      });
-      expect(sendNotification).toHaveBeenCalledWith({
+      // Routing through ctx.mcpReq.notify is what stamps relatedRequestId, so
+      // the message lands on this request's own response stream (#135).
+      expect(notify).toHaveBeenCalledWith({ method: 'notifications/tools/list_changed' });
+      expect(notify).toHaveBeenCalledWith({ method: 'notifications/resources/list_changed' });
+      expect(notify).toHaveBeenCalledWith({ method: 'notifications/prompts/list_changed' });
+      expect(notify).toHaveBeenCalledWith({
         method: 'notifications/resources/updated',
         params: { uri: 'items://42' },
       });
     });
 
-    it('falls back to the server-level notifiers when the extra exposes no sender', async () => {
+    it('falls back to the server-level notifiers when the request scope exposes no sender', async () => {
       const serverNotifiers: HandlerNotifiers = {
         notifyToolListChanged: vi.fn(),
         notifyResourceListChanged: vi.fn(),
@@ -945,7 +707,7 @@ describe('createToolHandler', () => {
         services,
         serverNotifiers,
       );
-      await handler({}, createMockSdkContext({ sendNotification: undefined }));
+      await handler({}, makeSenderlessServerContext());
 
       expect(serverNotifiers.notifyToolListChanged).toHaveBeenCalledOnce();
       expect(serverNotifiers.notifyResourceListChanged).toHaveBeenCalledOnce();
@@ -954,13 +716,451 @@ describe('createToolHandler', () => {
     });
 
     it('does not let a failed notification flush reject the handler', async () => {
-      const sendNotification = vi.fn(() => Promise.reject(new Error('stream closed')));
+      const notify = vi.fn(() => Promise.reject(new Error('stream closed')));
       const handler = createToolHandler(notifyingTool as AnyToolDefinition, services, notifiers);
 
-      const result = await handler({}, createMockSdkContext({ sendNotification }));
+      const result = await handler({}, makeServerContext({ notify }));
 
       expect(result.isError).toBeUndefined();
       expect(result.structuredContent).toEqual({ ok: true });
+    });
+  });
+
+  // -----------------------------------------------------------------------
+  // Subscription-scoped resource updates (#354)
+  // -----------------------------------------------------------------------
+
+  describe('notifyResourceUpdated subscription gate (#354)', () => {
+    const updatingTool = tool('update_tool', {
+      description: 'Announces a resource update.',
+      input: z.object({ uri: z.string().describe('uri') }),
+      output: z.object({ ok: z.boolean() }),
+      handler: (input, ctx) => {
+        ctx.notifyResourceUpdated?.(input.uri);
+        return { ok: true };
+      },
+    });
+
+    /** A `resources/subscribe` registry holding exactly the listed URIs. */
+    function subscriptionsFor(...uris: string[]) {
+      return { has: vi.fn((uri: string) => uris.includes(uri)) };
+    }
+
+    it('suppresses the notification for a URI the client never subscribed to', async () => {
+      const notify = vi.fn(async () => {});
+      const subscriptions = subscriptionsFor('items://subscribed');
+      const handler = createToolHandler(updatingTool as AnyToolDefinition, services, {
+        subscriptions,
+      });
+
+      await handler({ uri: 'items://other' }, makeServerContext({ notify }));
+
+      expect(subscriptions.has).toHaveBeenCalledWith('items://other');
+      expect(notify).not.toHaveBeenCalled();
+    });
+
+    it('emits the notification for a subscribed URI', async () => {
+      const notify = vi.fn(async () => {});
+      const handler = createToolHandler(updatingTool as AnyToolDefinition, services, {
+        subscriptions: subscriptionsFor('items://subscribed'),
+      });
+
+      await handler({ uri: 'items://subscribed' }, makeServerContext({ notify }));
+
+      expect(notify).toHaveBeenCalledWith({
+        method: 'notifications/resources/updated',
+        params: { uri: 'items://subscribed' },
+      });
+    });
+
+    it('emits every URI when no subscription registry is available', async () => {
+      // No `subscriptions` means no per-connection tracking to consult — the
+      // gate is skipped rather than defaulting to "nothing is subscribed".
+      const notify = vi.fn(async () => {});
+      const handler = createToolHandler(updatingTool as AnyToolDefinition, services, notifiers);
+
+      await handler({ uri: 'items://untracked' }, makeServerContext({ notify }));
+
+      expect(notify).toHaveBeenCalledWith({
+        method: 'notifications/resources/updated',
+        params: { uri: 'items://untracked' },
+      });
+    });
+  });
+
+  // -----------------------------------------------------------------------
+  // Multi-round-trip input (ctx.requestInput / ctx.inputs)
+  // -----------------------------------------------------------------------
+
+  describe('ctx.requestInput', () => {
+    const confirmSchema = z.object({ confirm: z.boolean().describe('confirm') });
+
+    /** Asks for confirmation on the first round; echoes it back on the retry. */
+    const confirmingTool = tool('confirming_tool', {
+      description: 'Requests confirmation before acting.',
+      input: z.object({ path: z.string().describe('path') }),
+      output: z.object({ confirmed: z.boolean().describe('confirmed') }),
+      handler: (input, ctx) => {
+        const accepted = ctx.inputs.accepted('confirm', confirmSchema);
+        if (!accepted) {
+          ctx.requestInput({
+            inputRequests: {
+              confirm: inputRequired.elicit({
+                message: `Delete ${input.path}?`,
+                requestedSchema: confirmSchema,
+              }),
+            },
+            requestState: 'round-1',
+          });
+        }
+        // `requestInput` never returns — past the guard the value is present.
+        return { confirmed: (accepted as { confirm: boolean }).confirm };
+      },
+    });
+
+    it('returns the SDK input_required result rather than an isError envelope', async () => {
+      const handleError = vi.spyOn(ErrorHandler, 'handleError');
+      const handler = createToolHandler(confirmingTool as AnyToolDefinition, services, notifiers);
+
+      const result = (await handler({ path: '/tmp/x' }, makeServerContext())) as Record<
+        string,
+        any
+      >;
+
+      // Protocol control flow, not a failure: no isError, no error envelope,
+      // and the classifier/telemetry path is never entered.
+      expect(result.resultType).toBe('input_required');
+      expect(result.requestState).toBe('round-1');
+      expect(result.inputRequests.confirm.method).toBe('elicitation/create');
+      expect(result.isError).toBeUndefined();
+      expect(result.structuredContent).toBeUndefined();
+      expect(handleError).not.toHaveBeenCalled();
+      handleError.mockRestore();
+    });
+
+    it('completes normally once the retry carries the accepted response', async () => {
+      const handler = createToolHandler(confirmingTool as AnyToolDefinition, services, notifiers);
+
+      const result = await handler(
+        { path: '/tmp/x' },
+        makeServerContext({
+          inputResponses: { confirm: { action: 'accept', content: { confirm: true } } },
+          requestState: 'round-1',
+        }),
+      );
+
+      expect(result.structuredContent).toEqual({ confirmed: true });
+      expect(result.isError).toBeUndefined();
+    });
+  });
+
+  describe('ctx.inputs', () => {
+    const confirmSchema = z.object({ confirm: z.boolean().describe('confirm') });
+
+    /** Runs a probe handler against a request scope and returns what it read. */
+    async function readInputs(
+      overrides: Parameters<typeof makeServerContext>[0],
+      read: (ctx: any) => unknown,
+    ): Promise<unknown> {
+      let captured: unknown;
+      const def = tool('inputs_probe', {
+        description: 'Reads ctx.inputs.',
+        input: z.object({}),
+        output: z.object({ ok: z.boolean() }),
+        handler: (_input, ctx) => {
+          captured = read(ctx);
+          return { ok: true };
+        },
+      });
+      const handler = createToolHandler(def as AnyToolDefinition, services, notifiers);
+      const result = await handler({}, makeServerContext(overrides));
+      expect(result.isError).toBeUndefined();
+      return captured;
+    }
+
+    it('returns the validated content of an accepted response', async () => {
+      const accepted = await readInputs(
+        { inputResponses: { confirm: { action: 'accept', content: { confirm: true } } } },
+        (ctx) => ctx.inputs.accepted('confirm', confirmSchema),
+      );
+
+      expect(accepted).toEqual({ confirm: true });
+    });
+
+    it.each([
+      ['declined', { confirm: { action: 'decline' } }],
+      ['cancelled', { confirm: { action: 'cancel' } }],
+      ['missing', { other: { action: 'accept', content: { confirm: true } } }],
+      ['schema-invalid', { confirm: { action: 'accept', content: { confirm: 'yes' } } }],
+    ])('returns undefined for a %s entry', async (_kind, inputResponses) => {
+      // Every `undefined` reads the same to a handler: re-issue, or give up.
+      const accepted = await readInputs({ inputResponses }, (ctx) =>
+        ctx.inputs.accepted('confirm', confirmSchema),
+      );
+
+      expect(accepted).toBeUndefined();
+    });
+
+    it('returns undefined when the request carried no responses at all', async () => {
+      const accepted = await readInputs({}, (ctx) => ctx.inputs.accepted('confirm', confirmSchema));
+
+      expect(accepted).toBeUndefined();
+    });
+
+    it.each([
+      [
+        'elicit',
+        { confirm: { action: 'accept', content: { confirm: true } } },
+        { kind: 'elicit', action: 'accept', content: { confirm: true } },
+      ],
+      [
+        'sampling',
+        { confirm: { role: 'assistant', content: { type: 'text', text: 'hi' }, model: 'test' } },
+        {
+          kind: 'sampling',
+          result: { role: 'assistant', content: { type: 'text', text: 'hi' }, model: 'test' },
+        },
+      ],
+      [
+        'roots',
+        { confirm: { roots: [{ uri: 'file:///work' }] } },
+        { kind: 'roots', roots: [{ uri: 'file:///work' }] },
+      ],
+    ])('discriminates a %s response via view()', async (_kind, inputResponses, expected) => {
+      const view = await readInputs({ inputResponses }, (ctx) => ctx.inputs.view('confirm'));
+
+      expect(view).toEqual(expected);
+    });
+
+    it('reads a missing key as { kind: "missing" }', async () => {
+      const view = await readInputs({}, (ctx) => ctx.inputs.view('confirm'));
+
+      expect(view).toEqual({ kind: 'missing' });
+    });
+
+    it('surfaces the SDK-dropped keys and the round-trip request state', async () => {
+      const seen = await readInputs(
+        { droppedInputResponseKeys: ['confirm'], requestState: 'round-2' },
+        (ctx) => ({ dropped: [...ctx.inputs.dropped], state: ctx.inputs.state() }),
+      );
+
+      expect(seen).toEqual({ dropped: ['confirm'], state: 'round-2' });
+    });
+  });
+
+  // -----------------------------------------------------------------------
+  // ctx.log → notifications/message mirroring
+  // -----------------------------------------------------------------------
+
+  describe('ctx.log wire mirroring', () => {
+    /** Runs a tool whose handler logs once against the supplied wire sink. */
+    async function logOnce(emit: (ctx: any) => void, log = makeWireLog()) {
+      const def = tool('logging_tool', {
+        description: 'Logs from the handler.',
+        input: z.object({}),
+        output: z.object({ ok: z.boolean() }),
+        handler: (_input, ctx) => {
+          emit(ctx);
+          return { ok: true };
+        },
+      });
+      const handler = createToolHandler(def as AnyToolDefinition, services, notifiers);
+      const result = await handler({}, makeServerContext({ log }));
+      return { log, result };
+    }
+
+    it.each([
+      ['debug', (ctx: any) => ctx.log.debug('msg', { k: 1 })],
+      ['info', (ctx: any) => ctx.log.info('msg', { k: 1 })],
+      ['notice', (ctx: any) => ctx.log.notice('msg', { k: 1 })],
+      ['warning', (ctx: any) => ctx.log.warning('msg', { k: 1 })],
+      ['error', (ctx: any) => ctx.log.error('msg', undefined, { k: 1 })],
+    ])('mirrors ctx.log.%s onto ctx.mcpReq.log at the RFC 5424 level', async (level, emit) => {
+      const { log } = await logOnce(emit);
+
+      expect(log).toHaveBeenCalledWith(level, { message: 'msg', k: 1 });
+    });
+
+    it('carries the Error message alongside the data on the error level', async () => {
+      const { log } = await logOnce((ctx) => ctx.log.error('failed', new Error('boom'), { k: 1 }));
+
+      expect(log).toHaveBeenCalledWith('error', { message: 'failed', k: 1, error: 'boom' });
+    });
+
+    it('sends the message alone when the call carried no data payload', async () => {
+      const { log } = await logOnce((ctx) => ctx.log.info('bare'));
+
+      expect(log).toHaveBeenCalledWith('info', { message: 'bare' });
+    });
+
+    it('still writes to the process logger', async () => {
+      await logOnce((ctx) => ctx.log.info('msg', { k: 1 }));
+
+      expect(mockLogger.info).toHaveBeenCalledWith('msg', expect.objectContaining({ k: 1 }));
+    });
+
+    it('does not fail the handler when the wire log rejects', async () => {
+      // A log that cannot flush (client gone, stream never upgraded) must never
+      // turn a successful tool call into an error.
+      const rejecting = makeWireLog(async () => {
+        throw new Error('stream closed');
+      });
+      const { result } = await logOnce((ctx) => ctx.log.warning('degraded'), rejecting);
+
+      expect(result.isError).toBeUndefined();
+      expect(result.structuredContent).toEqual({ ok: true });
+    });
+  });
+
+  // -----------------------------------------------------------------------
+  // Advertised vs. effective output schema (#241)
+  // -----------------------------------------------------------------------
+
+  describe('advertisedOutputSchema (#241)', () => {
+    const searchTool = tool('advertised_search', {
+      description: 'Search with a declared error contract.',
+      input: z.object({ q: z.string().describe('q') }),
+      output: z.object({
+        items: z.array(z.string()).describe('matches'),
+        cursor: z.string().optional().describe('next page cursor'),
+      }),
+      enrichment: { totalCount: z.number().describe('total before limit') },
+      errors: [
+        {
+          reason: 'no_match',
+          code: JsonRpcErrorCode.NotFound,
+          when: 'No items match the query',
+          recovery: 'Broaden the query and try again.',
+        },
+        {
+          reason: 'rate_limited',
+          code: JsonRpcErrorCode.RateLimited,
+          when: 'Upstream rate limit hit',
+          retryable: true,
+          recovery: 'Wait a few seconds before retrying.',
+        },
+      ],
+      handler: (_input, ctx) => {
+        ctx.enrich.total(0);
+        return { items: [] };
+      },
+    });
+
+    const plainTool = tool('advertised_plain', {
+      description: 'Search with no declared error contract.',
+      input: z.object({ q: z.string().describe('q') }),
+      output: z.object({ items: z.array(z.string()).describe('matches') }),
+      handler: () => ({ items: [] }),
+    });
+
+    /** The JSON Schema a client actually receives in `tools/list`. */
+    function emitted(def: AnyToolDefinition): Record<string, any> {
+      return z.toJSONSchema(advertisedOutputSchema(def)) as Record<string, any>;
+    }
+
+    it('keeps the root an object rather than an anyOf-only union', () => {
+      // A discriminated union emits `anyOf` with no `type`, which SEP-2106's
+      // legacy projection rewrites to `{ result: … }` — breaking the success
+      // path for 2025-era clients to fix the error path.
+      const schema = emitted(searchTool as AnyToolDefinition);
+
+      expect(schema.type).toBe('object');
+      expect(schema.oneOf).toBeUndefined();
+    });
+
+    it('makes every success field optional so an error envelope can never be missing one', () => {
+      const schema = emitted(searchTool as AnyToolDefinition);
+
+      expect(schema.required).toBeUndefined();
+      expect(Object.keys(schema.properties).sort()).toEqual([
+        'cursor',
+        'error',
+        'items',
+        'totalCount',
+      ]);
+    });
+
+    it('declares the error envelope with code, message, and a loose optional data', () => {
+      const error = emitted(searchTool as AnyToolDefinition).properties.error;
+
+      expect(error.type).toBe('object');
+      expect(error.required).toEqual(['code', 'message']);
+      expect(error.properties.data.type).toBe('object');
+      // Loose at every level — a throw site's arbitrary keys must not recreate
+      // on the error path the very -32602 this envelope exists to prevent.
+      expect(error.additionalProperties).toEqual({});
+      expect(error.properties.data.additionalProperties).toEqual({});
+      expect(error.required).not.toContain('data');
+    });
+
+    it("narrows data.reason to the definition's declared reason literals", () => {
+      const reason = emitted(searchTool as AnyToolDefinition).properties.error.properties.data
+        .properties.reason;
+
+      expect(reason.enum).toEqual(['no_match', 'rate_limited']);
+      expect(reason.description).toContain('no_match');
+      expect(reason.description).toContain('No items match the query');
+    });
+
+    it('leaves data.reason an open string when no contract is declared', () => {
+      const reason = emitted(plainTool as AnyToolDefinition).properties.error.properties.data
+        .properties.reason;
+
+      expect(reason.type).toBe('string');
+      expect(reason.enum).toBeUndefined();
+    });
+
+    it('carries the two-branch anyOf refinement that the dropped `required` no longer expresses', () => {
+      expect(emitted(searchTool as AnyToolDefinition).anyOf).toEqual([
+        { not: { required: ['error'] }, required: ['items', 'totalCount'] },
+        { required: ['error'] },
+      ]);
+      expect(emitted(plainTool as AnyToolDefinition).anyOf).toEqual([
+        { not: { required: ['error'] }, required: ['items'] },
+        { required: ['error'] },
+      ]);
+    });
+
+    it('accepts a real error envelope and rejects an empty result', () => {
+      const validate = new AjvJsonSchemaValidator().getValidator(
+        emitted(searchTool as AnyToolDefinition),
+      );
+      const envelope = buildToolErrorResult(JsonRpcErrorCode.NotFound, 'No items returned', {
+        reason: 'no_match',
+        recovery: { hint: 'Broaden the query and try again.' },
+        retryable: false,
+      }).structuredContent;
+
+      expect(validate(envelope).valid).toBe(true);
+      expect(validate({ items: [], totalCount: 0 }).valid).toBe(true);
+      // `{}` — a handler that returned nothing — is what the success-only
+      // schema never caught either.
+      expect(validate({}).valid).toBe(false);
+    });
+
+    it('leaves effectiveOutputSchema strict — the authoring check is unchanged', async () => {
+      const strict = effectiveOutputSchema(searchTool as AnyToolDefinition);
+
+      expect(Object.keys(strict.shape).sort()).toEqual(['cursor', 'items', 'totalCount']);
+      expect(strict.safeParse({ items: [], totalCount: 0 }).success).toBe(true);
+      // The advertised schema drops `required`; the parse schema does not.
+      expect(strict.safeParse({ items: [] }).success).toBe(false);
+      expect(strict.safeParse({ error: { code: -32001, message: 'x' } }).success).toBe(false);
+    });
+
+    it('still fails the call when a required enrichment field is never populated', async () => {
+      const forgetful = tool('forgets_enrichment', {
+        description: 'Declares enrichment but never populates it.',
+        input: z.object({ q: z.string().describe('q') }),
+        output: z.object({ items: z.array(z.string()).describe('items') }),
+        enrichment: { totalCount: z.number().describe('required total') },
+        handler: () => ({ items: [] }),
+      });
+      const handler = createToolHandler(forgetful as AnyToolDefinition, services, notifiers);
+
+      const result = await handler({ q: 'x' }, makeServerContext());
+
+      expect(result.isError).toBe(true);
     });
   });
 });

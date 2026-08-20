@@ -6,7 +6,7 @@
  * @module src/core/app
  */
 
-import type { Implementation } from '@modelcontextprotocol/sdk/types.js';
+import type { Implementation } from '@modelcontextprotocol/server';
 import type { SupabaseClient } from '@supabase/supabase-js';
 import { z } from 'zod';
 import { config, resetConfig } from '@/config/index.js';
@@ -18,17 +18,15 @@ import {
 } from '@/core/serverManifest.js';
 import { PromptRegistry } from '@/mcp-server/prompts/prompt-registration.js';
 import type { AnyPromptDefinition } from '@/mcp-server/prompts/utils/promptDefinition.js';
-import type { McpServerFactory, ProtocolSessionHooks } from '@/mcp-server/protocolSession.js';
 import { ResourceRegistry } from '@/mcp-server/resources/resource-registration.js';
 import type { AnyResourceDefinition } from '@/mcp-server/resources/utils/resourceDefinition.js';
 import { createMcpServerInstance } from '@/mcp-server/server.js';
-import { TaskManager } from '@/mcp-server/tasks/core/taskManager.js';
-import { isTaskToolDefinition } from '@/mcp-server/tasks/utils/taskToolDefinition.js';
 import type { AnyToolDef } from '@/mcp-server/tools/tool-registration.js';
 import { ToolRegistry } from '@/mcp-server/tools/tool-registration.js';
 import { initHeartbeatMetrics } from '@/mcp-server/transports/heartbeat.js';
 import { initSessionMetrics } from '@/mcp-server/transports/http/sessionStore.js';
 import { TransportManager } from '@/mcp-server/transports/manager.js';
+import type { FrameworkServerFactory } from '@/mcp-server/types.js';
 import { createCanvasService } from '@/services/canvas/core/canvasFactory.js';
 import type { DataCanvas } from '@/services/canvas/core/DataCanvas.js';
 import type { ILlmProvider } from '@/services/llm/core/ILlmProvider.js';
@@ -158,7 +156,7 @@ export interface CreateAppOptions<TSupabaseClient extends object = SupabaseClien
    * @example `'My Server'`
    */
   title?: string;
-  /** Tool definitions (legacy, new-style, or task). */
+  /** Tool definitions. */
   tools?: AnyToolDef[];
   /** Server version — overrides package.json and MCP_SERVER_VERSION env var. */
   version?: string;
@@ -210,14 +208,13 @@ export interface ServerHandle<TSupabaseClient extends object = SupabaseClientHan
 /** @internal Result of composeServices — used by createApp and createWorkerHandler. */
 export interface ComposedApp<TSupabaseClient extends object = SupabaseClientHandle> {
   coreServices: CoreServices<TSupabaseClient>;
-  createServer: McpServerFactory;
+  createServer: FrameworkServerFactory;
   /**
    * Server manifest — the single source of truth for the `/mcp` status JSON,
    * the SEP-1649 Server Card at `/.well-known/mcp.json`, and the HTML landing
    * page at `/`.
    */
   manifest: ServerManifest;
-  taskManager: TaskManager;
 }
 
 /**
@@ -344,9 +341,6 @@ export async function composeServices<TSupabaseClient extends object = SupabaseC
 
   // --- MCP services ---
 
-  const taskManager = new TaskManager(config, storageService);
-  const advertiseTasks = tools.some((def) => isTaskToolDefinition(def) || def.task === true);
-
   const exposeStatelessSessionId = contextOptions?.exposeStatelessSessionId === true;
   const toolRegistry = new ToolRegistry(tools, {
     logger,
@@ -360,9 +354,8 @@ export async function composeServices<TSupabaseClient extends object = SupabaseC
   });
   const promptRegistry = new PromptRegistry(prompts, logger);
 
-  const createServer = (protocolSession?: ProtocolSessionHooks) =>
+  const createServer: FrameworkServerFactory = () =>
     createMcpServerInstance({
-      advertiseTasks,
       config,
       ...(description && { description }),
       ...(extensions && { extensions }),
@@ -371,10 +364,7 @@ export async function composeServices<TSupabaseClient extends object = SupabaseC
       ...(title && { title }),
       ...(websiteUrl && { websiteUrl }),
       promptRegistry,
-      ...(protocolSession && { protocolSession }),
       resourceRegistry,
-      taskStore: taskManager.getTaskStore(),
-      taskMessageQueue: taskManager.getMessageQueue(),
       toolRegistry,
     });
 
@@ -395,7 +385,6 @@ export async function composeServices<TSupabaseClient extends object = SupabaseC
     coreServices,
     createServer,
     manifest,
-    taskManager,
   };
 }
 
@@ -480,7 +469,7 @@ export async function createApp<TSupabaseClient extends object = SupabaseClientH
     }
     throw err;
   }
-  const { coreServices, createServer, manifest, taskManager } = composed;
+  const { coreServices, createServer, manifest } = composed;
   const { definitionCounts } = manifest;
 
   // --- Initialize OTEL ---
@@ -586,13 +575,7 @@ export async function createApp<TSupabaseClient extends object = SupabaseClientH
   );
 
   // --- Transport ---
-  const transportManager = new TransportManager(
-    config,
-    logger,
-    createServer,
-    taskManager,
-    manifest,
-  );
+  const transportManager = new TransportManager(config, logger, createServer, manifest);
 
   // --- Startup context ---
   const startupContext = requestContextService.createRequestContext({
@@ -662,7 +645,6 @@ export async function createApp<TSupabaseClient extends object = SupabaseClientH
           });
         });
 
-        await attemptCleanup('task-manager', () => taskManager.cleanup());
         await attemptCleanup('rate-limiter', () => coreServices.rateLimiter.dispose());
         await attemptCleanup('scheduler', () => schedulerService.destroyAll());
         await attemptCleanup('gc-pressure', stopGcPressure);
@@ -745,7 +727,7 @@ export async function createApp<TSupabaseClient extends object = SupabaseClientH
       });
     });
   } catch (error) {
-    // Startup has already allocated process listeners, task/storage resources,
+    // Startup has already allocated process listeners, storage resources,
     // telemetry, and possibly a partially-bound transport. Roll all of them
     // back before preserving the original startup failure for the caller.
     await shutdown('STARTUP_FAILURE');
@@ -762,7 +744,7 @@ export async function createApp<TSupabaseClient extends object = SupabaseClientH
 // ---------------------------------------------------------------------------
 
 export { z } from 'zod';
-export type { Context, ContextLogger, ContextProgress, ContextState } from '@/core/context.js';
+export type { Context, ContextInputs, ContextLogger, ContextState } from '@/core/context.js';
 export type { PromptDefinition } from '@/mcp-server/prompts/utils/promptDefinition.js';
 export { prompt } from '@/mcp-server/prompts/utils/promptDefinition.js';
 export type {

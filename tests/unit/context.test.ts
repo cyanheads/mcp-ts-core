@@ -1,8 +1,9 @@
 /**
  * @fileoverview Tests for createContext — the internal factory that builds the
  * unified Context every tool/resource handler receives.
- * Covers: field assembly, tenant defaulting, ctx.log correlation, ctx.state
- * scoping, ctx.progress lifecycle, and optional capability wiring.
+ * Covers: field assembly, tenant defaulting, ctx.log correlation and its wire
+ * mirror, ctx.state scoping, multi-round-trip input, and optional capability
+ * wiring.
  * @module tests/context.test
  */
 
@@ -53,6 +54,11 @@ import {
   createEnrichmentStore,
   readEnrichmentStore,
 } from '@/core/context.js';
+import {
+  createContextInputs,
+  createRequestInput,
+  isInputRequiredSignal,
+} from '@/mcp-server/inputRequired.js';
 import { JsonRpcErrorCode } from '@/types-global/errors.js';
 import type { Logger } from '@/utils/internal/logger.js';
 import { createFakeStorage, makeRequestContext } from '../helpers/index.js';
@@ -61,7 +67,9 @@ import { createFakeStorage, makeRequestContext } from '../helpers/index.js';
 function makeDeps(overrides: Partial<ContextDeps> = {}): ContextDeps {
   return {
     appContext: makeRequestContext(),
+    inputs: createContextInputs(undefined),
     logger: mockLogger as unknown as Logger,
+    requestInput: createRequestInput(),
     storage: createFakeStorage() as unknown as ContextDeps['storage'],
     signal: new AbortController().signal,
     ...overrides,
@@ -564,19 +572,6 @@ describe('createContext', () => {
   // -----------------------------------------------------------------------
 
   describe('Optional capabilities', () => {
-    it('should include elicit when provided', () => {
-      const elicit = vi.fn();
-      const ctx = createContext(makeDeps({ elicit: elicit as any }));
-
-      expect(ctx.elicit).toBe(elicit);
-    });
-
-    it('should leave elicit undefined when not provided', () => {
-      const ctx = createContext(makeDeps());
-
-      expect(ctx.elicit).toBeUndefined();
-    });
-
     it('should include uri when provided', () => {
       const uri = new URL('myscheme://item/123');
       const ctx = createContext(makeDeps({ uri }));
@@ -607,82 +602,75 @@ describe('createContext', () => {
   });
 
   // -----------------------------------------------------------------------
-  // ctx.progress
+  // Multi-round-trip input (ctx.inputs / ctx.requestInput)
   // -----------------------------------------------------------------------
 
-  describe('ctx.progress', () => {
-    it('should be undefined when no taskCtx is provided', () => {
+  describe('ctx.inputs and ctx.requestInput', () => {
+    it('is always present, and empty on the first round', () => {
       const ctx = createContext(makeDeps());
 
-      expect(ctx.progress).toBeUndefined();
+      expect(ctx.inputs.responses).toBeUndefined();
+      expect(ctx.inputs.dropped).toEqual([]);
+      expect(ctx.inputs.state()).toBeUndefined();
+      expect(typeof ctx.requestInput).toBe('function');
     });
 
-    it('should create ContextProgress when taskCtx is provided', async () => {
-      const mockStore = {
-        updateTaskStatus: vi.fn(),
-      };
+    it('surfaces a retried request\u2019s responses and state through ctx.inputs', () => {
+      const inputs = createContextInputs({
+        inputResponses: { confirm: { action: 'accept', content: { ok: true } } },
+        droppedInputResponseKeys: ['wrapped'],
+        requestState: () => ({ attempt: 2 }),
+      } as never);
+      const ctx = createContext(makeDeps({ inputs }));
 
-      const ctx = createContext(
-        makeDeps({
-          taskCtx: { store: mockStore as any, taskId: 'task-001' },
-        }),
-      );
-
-      expect(ctx.progress).toBeDefined();
-
-      await ctx.progress!.setTotal(10);
-      await ctx.progress!.increment();
-      await ctx.progress!.update('halfway there');
-
-      expect(mockStore.updateTaskStatus).toHaveBeenCalledWith(
-        'task-001',
-        'working',
-        '10% complete',
-      );
-      expect(mockStore.updateTaskStatus).toHaveBeenCalledWith(
-        'task-001',
-        'working',
-        'halfway there',
-      );
+      expect(ctx.inputs.accepted('confirm')).toEqual({ ok: true });
+      expect(ctx.inputs.view('confirm')).toMatchObject({ kind: 'elicit', action: 'accept' });
+      expect(ctx.inputs.dropped).toEqual(['wrapped']);
+      expect(ctx.inputs.state<{ attempt: number }>()).toEqual({ attempt: 2 });
     });
 
-    it('should track percentage correctly through increment', async () => {
-      const mockStore = { updateTaskStatus: vi.fn() };
+    it('requestInput throws the input_required control-flow signal instead of returning', () => {
+      const ctx = createContext(makeDeps());
 
-      const ctx = createContext(
-        makeDeps({
-          taskCtx: { store: mockStore as any, taskId: 'task-002' },
-        }),
-      );
+      let thrown: unknown;
+      try {
+        ctx.requestInput({ requestState: 'round-1' });
+      } catch (error) {
+        thrown = error;
+      }
 
-      await ctx.progress!.setTotal(4);
-      await ctx.progress!.increment(); // 25%
-      await ctx.progress!.increment(); // 50%
-      await ctx.progress!.increment(2); // 100%
+      expect(isInputRequiredSignal(thrown)).toBe(true);
+      expect((thrown as { result: { resultType: string; requestState?: string } }).result).toEqual({
+        resultType: 'input_required',
+        requestState: 'round-1',
+      });
+    });
+  });
 
-      const calls = mockStore.updateTaskStatus.mock.calls;
-      expect(calls[0]).toEqual(['task-002', 'working', '25% complete']);
-      expect(calls[1]).toEqual(['task-002', 'working', '50% complete']);
-      expect(calls[2]).toEqual(['task-002', 'working', '100% complete']);
+  // -----------------------------------------------------------------------
+  // ctx.log \u2014 wire mirror (ctx.mcpReq.log)
+  // -----------------------------------------------------------------------
+
+  describe('ctx.log wire mirror', () => {
+    it('writes to both the Pino sink and the wire sink from one call', () => {
+      const wireLog = vi.fn(async () => {});
+      const ctx = createContext(makeDeps({ wireLog }));
+
+      ctx.log.warning('disk filling up', { freeMb: 12 });
+
+      expect(mockLogger.warning).toHaveBeenCalledTimes(1);
+      expect(wireLog).toHaveBeenCalledWith('warning', {
+        message: 'disk filling up',
+        freeMb: 12,
+      });
     });
 
-    it('should pass undefined message when incrementing without setTotal', async () => {
-      const mockStore = { updateTaskStatus: vi.fn() };
+    it('leaves the Pino sink as the only sink when no wireLog dep is supplied', () => {
+      const ctx = createContext(makeDeps());
 
-      const ctx = createContext(
-        makeDeps({
-          taskCtx: { store: mockStore as any, taskId: 'task-003' },
-        }),
-      );
+      ctx.log.info('single sink');
 
-      // No setTotal — total stays 0
-      await ctx.progress!.increment();
-      await ctx.progress!.increment(3);
-
-      const calls = mockStore.updateTaskStatus.mock.calls;
-      // percentage is undefined when total is 0
-      expect(calls[0]).toEqual(['task-003', 'working', undefined]);
-      expect(calls[1]).toEqual(['task-003', 'working', undefined]);
+      expect(mockLogger.info).toHaveBeenCalledTimes(1);
     });
   });
 

@@ -24,7 +24,7 @@
  * @module src/testing/vitest
  */
 
-import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
+import type { CallToolResult } from '@modelcontextprotocol/server';
 import { describe, expect, test } from 'vitest';
 import type { z } from 'zod';
 import type { Context } from '@/core/context.js';

@@ -9,10 +9,8 @@
  * (c) prompt `title` visible in prompts/list
  * @module tests/integration/completions.int.test
  */
-import { Client } from '@modelcontextprotocol/sdk/client/index.js';
-import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
-import { completable } from '@modelcontextprotocol/sdk/server/completable.js';
-import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
+import { Client } from '@modelcontextprotocol/client';
+import { completable, InMemoryTransport, McpServer } from '@modelcontextprotocol/server';
 import { afterEach, describe, expect, it } from 'vitest';
 import { z } from 'zod';
 

@@ -2,9 +2,9 @@
  * @fileoverview Encapsulates the registration of all resource definitions with an McpServer.
  * @module src/mcp-server/resources/resource-registration
  */
-import { type McpServer, ResourceTemplate } from '@modelcontextprotocol/sdk/server/mcp.js';
+import { type McpServer, ResourceTemplate } from '@modelcontextprotocol/server';
 
-import type { ProtocolSessionHooks } from '@/mcp-server/protocolSession.js';
+import type { ResourceSubscriptions } from '@/mcp-server/notifications.js';
 import type { AnyResourceDefinition } from '@/mcp-server/resources/utils/resourceDefinition.js';
 import {
   createResourceHandler,
@@ -15,10 +15,6 @@ import { JsonRpcErrorCode } from '@/types-global/errors.js';
 import { ErrorHandler } from '@/utils/internal/error-handler/errorHandler.js';
 import { logger } from '@/utils/internal/logger.js';
 import { requestContextService } from '@/utils/internal/requestContext.js';
-
-type McpServerWithResourceHandlerInit = {
-  setResourceRequestHandlers: () => void;
-};
 
 function hasUriTemplateVariables(uriTemplate: string): boolean {
   return /\{[^}]+\}/.test(uriTemplate);
@@ -38,7 +34,7 @@ export class ResourceRegistry {
    */
   public async registerAll(
     server: McpServer,
-    protocolSession?: ProtocolSessionHooks,
+    subscriptions?: ResourceSubscriptions,
   ): Promise<void> {
     this.registeredNames.clear();
 
@@ -48,17 +44,10 @@ export class ResourceRegistry {
     // factory prefers request-scoped notifiers (#135) and falls back to these
     // only when a request has no notification sender.
     const notifiers: ResourceHandlerNotifiers = {
-      elicitInput: (params) => server.server.elicitInput(params),
-      getClientCapabilities: () =>
-        protocolSession?.clientCapabilities ?? server.server.getClientCapabilities(),
       notifyPromptListChanged: () => server.sendPromptListChanged(),
       notifyResourceListChanged: () => server.sendResourceListChanged(),
-      notifyResourceUpdated: (uri: string) => server.server.sendResourceUpdated({ uri }),
       notifyToolListChanged: () => server.sendToolListChanged(),
-      requestScopedElicitation: protocolSession !== undefined,
-      ...(protocolSession?.registerRequest && {
-        registerRequest: protocolSession.registerRequest,
-      }),
+      ...(subscriptions && { subscriptions }),
     };
 
     const context = requestContextService.createRequestContext({
@@ -67,11 +56,9 @@ export class ResourceRegistry {
 
     logger.debug(`Registering ${this.resourceDefs.length} resource(s)...`, context);
 
-    // The SDK only initializes resources/list + resources/read handlers when a
-    // resource is first registered. Initialize them up front so empty servers
-    // still expose truthful MCP resource behavior.
-    (server as unknown as McpServerWithResourceHandlerInit).setResourceRequestHandlers();
-
+    // `resources/list` and `resources/read` are installed by the SDK from the
+    // declared `resources` capability, so a server with no resources still
+    // answers `resources/list` with an empty array rather than `-32601`.
     for (const resourceDef of this.resourceDefs) {
       await this.registerResource(server, resourceDef, notifiers);
     }
@@ -124,10 +111,10 @@ export class ResourceRegistry {
             ...(def.complete && { complete: def.complete }),
           });
 
-          server.resource(resourceName, template, metadata, handler);
+          server.registerResource(resourceName, template, metadata, handler);
         } else {
-          server.resource(resourceName, def.uriTemplate, metadata, (uri, extra) =>
-            handler(uri, {}, extra),
+          server.registerResource(resourceName, def.uriTemplate, metadata, (uri, ctx) =>
+            handler(uri, {}, ctx),
           );
         }
 

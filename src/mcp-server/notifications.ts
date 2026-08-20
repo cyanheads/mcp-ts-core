@@ -1,32 +1,32 @@
 /**
  * @fileoverview Request-scoped list-changed / resource-updated notifiers.
  *
- * Under the per-request `McpServer` model (HTTP and Workers,
- * GHSA-345p-7cg4-v4c7), the server-level `server.send*ListChanged()` path emits
- * a notification with no `relatedRequestId`. `@hono/mcp` then looks for the
- * standalone GET SSE stream — which lives on a *different* transport instance —
- * and, finding none on the POST transport, drops the notification silently
- * (#135). The fix is to route handler-time notifications through the request's
- * own `extra.sendNotification`, which stamps `relatedRequestId` so the
- * notification reaches that request's SSE response stream.
+ * Notifications fired from inside a handler are sent through the request's own
+ * `ctx.mcpReq.notify`, which stamps `relatedRequestId` so the message lands on
+ * that request's own response stream. The server-level `send*ListChanged()`
+ * path targets the standalone GET SSE stream instead, which does not exist
+ * under per-request serving (`createMcpHandler`'s modern leg and its stateless
+ * legacy fallback both build one instance per request) — notifications sent
+ * that way drop silently (#135).
+ *
+ * `notifications/resources/updated` is subscription-scoped: it is emitted only
+ * for URIs the client actually subscribed to via `resources/subscribe` (#354).
  *
  * @module src/mcp-server/notifications
  */
 
-import type { ServerNotification } from '@modelcontextprotocol/sdk/types.js';
+import type { ServerNotification } from '@modelcontextprotocol/server';
 
 import { logger } from '@/utils/internal/logger.js';
 
 /**
- * The minimal shape we need off the SDK's `RequestHandlerExtra`. Typed with an
- * optional `sendNotification` (the SDK declares it required) so the runtime
- * presence check below is type-meaningful — mirroring how `wrapElicit` narrows
- * against a loose capability interface rather than the full extra. A non-request
- * scope (some test harnesses pass a bare `Request`) has no sender, and we fall
- * back to the server-level notifiers there.
+ * The slice of `ctx.mcpReq` these notifiers need. Typed with an optional
+ * `notify` so the runtime presence check is type-meaningful — a background or
+ * test scope may pass a stand-in without one, and callers fall back to the
+ * server-level notifiers there.
  */
-interface NotificationSender {
-  sendNotification?: (notification: ServerNotification) => Promise<void>;
+export interface NotificationSender {
+  notify?: (notification: ServerNotification) => Promise<void>;
 }
 
 /** The four list-changed / resource-updated closures attached to a handler `ctx`. */
@@ -37,30 +37,34 @@ export interface RequestScopedNotifiers {
   notifyToolListChanged: () => void;
 }
 
+/** Per-connection subscription state consulted before a resource-updated emit. */
+export interface ResourceSubscriptions {
+  /** True when the connected client subscribed to this exact URI. */
+  has: (uri: string) => boolean;
+}
+
 /**
- * Builds notifier closures bound to a single request's `extra.sendNotification`.
- * The SDK stamps `relatedRequestId` onto these sends, so `@hono/mcp` routes them
- * to that request's SSE response stream — the delivery path the server-level
- * `server.send*ListChanged()` calls miss under the per-request McpServer model,
- * where they drop silently (#135).
+ * Builds notifier closures bound to a single request's `ctx.mcpReq.notify`.
  *
- * Returns `undefined` when the supplied extra exposes no sender; callers fall
- * back to the server-level notifiers in that case.
+ * Returns `undefined` when the supplied request scope exposes no sender;
+ * callers fall back to the server-level notifiers in that case.
  *
- * Fire-and-forget by contract (`() => void`): the underlying `sendNotification`
- * promise is not awaited — a notification that can't flush (client already gone,
- * response not upgraded to SSE) must not fail the handler. A flush failure is
- * logged at debug rather than swallowed silently.
+ * Fire-and-forget by contract (`() => void`): the underlying promise is not
+ * awaited — a notification that can't flush (client already gone, response not
+ * upgraded to SSE) must not fail the handler. A flush failure is logged at
+ * debug rather than swallowed silently.
  *
- * Handler-time only. A background task (auto-task handler, cron) has no request
- * scope; those paths keep the server-level notifiers, which deliver on stdio but
- * not under HTTP — the residual gap a session-scoped notification bus would close.
+ * @param mcpReq - The request scope from the SDK's `ServerContext`.
+ * @param subscriptions - Per-connection `resources/subscribe` registry. When
+ *   supplied, `notifyResourceUpdated` emits only for subscribed URIs; when
+ *   omitted (no subscription tracking available) every URI is emitted.
  */
 export function buildRequestScopedNotifiers(
-  extra: NotificationSender,
+  mcpReq: NotificationSender,
+  subscriptions?: ResourceSubscriptions,
 ): RequestScopedNotifiers | undefined {
-  if (typeof extra.sendNotification !== 'function') return;
-  const send = extra.sendNotification.bind(extra);
+  if (typeof mcpReq.notify !== 'function') return;
+  const send = mcpReq.notify.bind(mcpReq);
   const emit = (notification: ServerNotification): void => {
     void send(notification).catch((error: unknown) => {
       logger.debug(
@@ -74,7 +78,15 @@ export function buildRequestScopedNotifiers(
     notifyToolListChanged: () => emit({ method: 'notifications/tools/list_changed' }),
     notifyResourceListChanged: () => emit({ method: 'notifications/resources/list_changed' }),
     notifyPromptListChanged: () => emit({ method: 'notifications/prompts/list_changed' }),
-    notifyResourceUpdated: (uri: string) =>
-      emit({ method: 'notifications/resources/updated', params: { uri } }),
+    notifyResourceUpdated: (uri: string) => {
+      // Spec: `notifications/resources/updated` SHOULD only be sent for a URI
+      // the client subscribed to. Emitting to a client that never subscribed is
+      // noise it has no handler for.
+      if (subscriptions && !subscriptions.has(uri)) {
+        logger.debug(`Resource update for ${uri} not sent: no active subscription.`);
+        return;
+      }
+      emit({ method: 'notifications/resources/updated', params: { uri } });
+    },
   };
 }

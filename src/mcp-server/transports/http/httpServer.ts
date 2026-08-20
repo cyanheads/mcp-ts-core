@@ -11,10 +11,9 @@ import { type ServerType, serve } from '@hono/node-server';
 import type { Hono } from 'hono';
 import { config } from '@/config/index.js';
 import type { ServerManifest } from '@/core/serverManifest.js';
-import type { McpServerFactory } from '@/mcp-server/protocolSession.js';
 import { createHttpApp } from '@/mcp-server/transports/http/httpTransport.js';
 import type { HonoNodeBindings } from '@/mcp-server/transports/http/httpTypes.js';
-import type { SessionStore } from '@/mcp-server/transports/http/sessionStore.js';
+import type { FrameworkServerFactory } from '@/mcp-server/types.js';
 import { logger } from '@/utils/internal/logger.js';
 import type { RequestContext } from '@/utils/internal/requestContext.js';
 import { logStartupBanner } from '@/utils/internal/startupBanner.js';
@@ -107,7 +106,7 @@ function startHttpServerWithRetry<TBindings extends object = HonoNodeBindings>(
 }
 
 export async function startHttpTransport(
-  serverFactory: McpServerFactory,
+  serverFactory: FrameworkServerFactory,
   parentContext: RequestContext,
   manifest: ServerManifest,
 ): Promise<HttpTransportHandle> {
@@ -117,7 +116,7 @@ export async function startHttpTransport(
   };
   logger.info('Starting HTTP transport.', transportContext);
 
-  const { app, sessionStore } = await createHttpApp(serverFactory, transportContext, manifest);
+  const { app, close } = await createHttpApp(serverFactory, transportContext, manifest);
 
   const server = await startHttpServerWithRetry(
     app,
@@ -131,16 +130,16 @@ export async function startHttpTransport(
 
   return {
     server,
-    stop: (ctx: RequestContext) => stopHttpTransport(server, sessionStore, ctx),
+    stop: (ctx: RequestContext) => stopHttpTransport(server, close, ctx),
   };
 }
 
 /** Max time (ms) to wait for in-flight connections (e.g. SSE streams) to drain. */
 const DRAIN_TIMEOUT_MS = 5_000;
 
-function stopHttpTransport(
+async function stopHttpTransport(
   server: ServerType,
-  sessionStore: SessionStore | null,
+  closeApp: () => Promise<void>,
   parentContext: RequestContext,
 ): Promise<void> {
   const operationContext = {
@@ -150,9 +149,11 @@ function stopHttpTransport(
   };
   logger.info('Attempting to stop http transport...', operationContext);
 
-  sessionStore?.destroy();
+  // Tear the MCP layer down first: aborts in-flight modern exchanges, closes
+  // per-request instances, and closes every live session's server + transport.
+  await closeApp();
 
-  return new Promise((resolve, reject) => {
+  return new Promise<void>((resolve, reject) => {
     // Force-close all connections (including pre-existing SSE streams) after a
     // grace period. server.closeAllConnections() (Node 18.2+) covers sockets
     // that were already alive before server.close() — unlike the `connection`

@@ -5,8 +5,6 @@
  * @module tests/fuzz/tool-handler-pipeline.fuzz.test
  */
 
-import type { RequestHandlerExtra } from '@modelcontextprotocol/sdk/shared/protocol.js';
-import type { ServerNotification, ServerRequest } from '@modelcontextprotocol/sdk/types.js';
 import fc from 'fast-check';
 import { beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { z } from 'zod';
@@ -68,6 +66,7 @@ vi.mock('@/utils/internal/performance.js', () => ({
 // Imports (after mocks)
 // ---------------------------------------------------------------------------
 
+import type { CallToolResult } from '@modelcontextprotocol/server';
 import type { AnyToolDefinition } from '@/mcp-server/tools/utils/toolDefinition.js';
 import { tool } from '@/mcp-server/tools/utils/toolDefinition.js';
 import {
@@ -76,21 +75,27 @@ import {
   type HandlerNotifiers,
 } from '@/mcp-server/tools/utils/toolHandlerFactory.js';
 import { Allow, jsonParser } from '@/utils/parsing/jsonParser.js';
+import { makeServerContext } from '../helpers/server-context.js';
 
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 
-type SdkExtra = RequestHandlerExtra<ServerRequest, ServerNotification>;
+type ToolHandler = ReturnType<typeof createToolHandler>;
 
-function createSdkContext(overrides: Record<string, unknown> = {}): SdkExtra {
-  return {
-    signal: new AbortController().signal,
-    requestId: 'fuzz-sdk-id',
-    sendNotification: () => Promise.resolve(),
-    sendRequest: () => Promise.resolve({}) as never,
-    ...overrides,
-  } as SdkExtra;
+/**
+ * Invokes a handler and narrows away the `input_required` arm of its return
+ * union. None of the fixtures below call `ctx.requestInput`, so a signal
+ * reaching here is a pipeline bug, not a case to assert on.
+ */
+async function call(
+  handler: ToolHandler,
+  input: unknown,
+  ctx = makeServerContext({ requestId: 'fuzz-sdk-id' }),
+): Promise<CallToolResult> {
+  const result = await handler(input as Record<string, unknown>, ctx);
+  if ('resultType' in result) throw new Error('Unexpected input_required result');
+  return result;
 }
 
 const services: HandlerFactoryServices = {
@@ -181,7 +186,7 @@ describe('Tool Handler Pipeline Fuzz Tests', () => {
 
         await fc.assert(
           fc.asyncProperty(arb, async (input) => {
-            const result = await handler(input, createSdkContext());
+            const result = await call(handler, input);
             expect(result.isError).toBeUndefined();
             expect(result.content).toBeDefined();
             expect(result.structuredContent).toBeDefined();
@@ -206,7 +211,7 @@ describe('Tool Handler Pipeline Fuzz Tests', () => {
 
         await fc.assert(
           fc.asyncProperty(arb, async (input) => {
-            const result = await handler(input as any, createSdkContext());
+            const result = await call(handler, input);
             // Must always return a result (either success or error), never throw
             expect(result).toBeDefined();
             expect(result.content).toBeDefined();
@@ -222,7 +227,7 @@ describe('Tool Handler Pipeline Fuzz Tests', () => {
 
         await fc.assert(
           fc.asyncProperty(arb, async (input) => {
-            const result = await handler(input as any, createSdkContext());
+            const result = await call(handler, input);
             if (result.isError) {
               // Error responses must have text content
               expect(result.content!.length).toBeGreaterThan(0);
@@ -269,7 +274,7 @@ describe('Tool Handler Pipeline Fuzz Tests', () => {
       const modes = ['plain', 'mcp', 'type', 'unknown'];
 
       for (const mode of modes) {
-        const result = await handler({ mode }, createSdkContext());
+        const result = await call(handler, { mode });
         expect(result.isError).toBe(true);
         const serializedResult = JSON.stringify(result);
         // Scan the complete client-visible result, including structuredContent.error.data.
@@ -293,10 +298,7 @@ describe('Tool Handler Pipeline Fuzz Tests', () => {
       });
 
       const handler = createToolHandler(def as AnyToolDefinition, services, notifiers);
-      const result = await handler(
-        { payload: `not-json ${'x'.repeat(400)} ${marker}` },
-        createSdkContext(),
-      );
+      const result = await call(handler, { payload: `not-json ${'x'.repeat(400)} ${marker}` });
       const serializedResult = JSON.stringify(result);
 
       expect(result.isError).toBe(true);
@@ -325,7 +327,7 @@ describe('Tool Handler Pipeline Fuzz Tests', () => {
       ];
 
       for (const payload of payloads) {
-        await handler(payload, createSdkContext());
+        await call(handler, payload);
       }
 
       const protoKeysAfter = new Set(Object.keys(Object.prototype));
@@ -359,7 +361,7 @@ describe('Tool Handler Pipeline Fuzz Tests', () => {
       ];
 
       for (const input of wrongTypes) {
-        const result = await handler(input as any, createSdkContext());
+        const result = await call(handler, input);
         expect(result).toBeDefined();
         expect(result.content).toBeDefined();
         // Most should be errors (Zod will reject non-objects)
@@ -372,7 +374,7 @@ describe('Tool Handler Pipeline Fuzz Tests', () => {
       const handler = createToolHandler(stringTool as AnyToolDefinition, services, notifiers);
 
       for (const str of ADVERSARIAL_STRINGS) {
-        const result = await handler({ value: str }, createSdkContext());
+        const result = await call(handler, { value: str });
         // All are valid string inputs, should succeed
         expect(result).toBeDefined();
         expect(result.content).toBeDefined();
@@ -390,9 +392,10 @@ describe('Tool Handler Pipeline Fuzz Tests', () => {
       const controller = new AbortController();
       controller.abort();
 
-      const result = await handler(
+      const result = await call(
+        handler,
         { value: 'test' },
-        createSdkContext({ signal: controller.signal }),
+        makeServerContext({ signal: controller.signal }),
       );
       // Framework should handle abort gracefully
       expect(result).toBeDefined();
@@ -405,7 +408,7 @@ describe('Tool Handler Pipeline Fuzz Tests', () => {
       const handler = createToolHandler(stringTool as AnyToolDefinition, services, notifiers);
       const largeInput = { value: 'x'.repeat(1_000_000) };
 
-      const result = await handler(largeInput, createSdkContext());
+      const result = await call(handler, largeInput);
       expect(result).toBeDefined();
       expect(result.content).toBeDefined();
     });
@@ -418,9 +421,10 @@ describe('Tool Handler Pipeline Fuzz Tests', () => {
         deep = { nested: deep, value: 'mid' };
       }
 
-      const result = await handler(deep, createSdkContext());
+      const result = await call(handler, deep);
       expect(result).toBeDefined();
-      // Zod should accept it (extra keys are stripped) or reject it
+      // Strict input rejects the undeclared `nested` key; the pipeline still
+      // answers with a shaped error result rather than throwing.
     });
   });
 });

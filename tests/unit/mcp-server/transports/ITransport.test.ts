@@ -4,7 +4,7 @@
  */
 
 import type { ServerType } from '@hono/node-server';
-import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
+import type { StdioServerHandle } from '@modelcontextprotocol/server/stdio';
 import { describe, expect, it } from 'vitest';
 
 import type { ITransport, TransportServer } from '@/mcp-server/transports/ITransport.js';
@@ -22,10 +22,10 @@ describe('ITransport Interface', () => {
       expect(httpTransport.stop).toBeDefined();
     });
 
-    it('should allow implementations with start() returning Promise<McpServer>', () => {
-      // Mock implementation returning McpServer
+    it('should allow implementations with start() returning Promise<StdioServerHandle>', () => {
+      // Mock implementation returning the stdio connection handle
       const stdioTransport: ITransport = {
-        start: async (): Promise<McpServer> => ({}) as McpServer,
+        start: async (): Promise<StdioServerHandle> => ({}) as StdioServerHandle,
         stop: async (): Promise<void> => {},
       };
 
@@ -59,13 +59,13 @@ describe('ITransport Interface', () => {
       expect(transport).toBeDefined();
     });
 
-    it('should have TransportServer as union type of ServerType | McpServer', () => {
+    it('should have TransportServer as union type of ServerType | StdioServerHandle', () => {
       // Type test: TransportServer should accept both types
       const serverType: TransportServer = {} as ServerType;
-      const mcpServer: TransportServer = {} as McpServer;
+      const stdioHandle: TransportServer = {} as StdioServerHandle;
 
       expect(serverType).toBeDefined();
-      expect(mcpServer).toBeDefined();
+      expect(stdioHandle).toBeDefined();
     });
   });
 
@@ -127,16 +127,16 @@ describe('ITransport Interface', () => {
       expect(transport).toHaveProperty('stop');
     });
 
-    it('should document that start() can return either HTTP server or MCP server', () => {
+    it('should document that start() can return either the HTTP server or the stdio handle', () => {
       // HTTP transport returns ServerType (from @hono/node-server)
       const httpTransport: ITransport = {
         start: async () => ({}) as ServerType,
         stop: async () => {},
       };
 
-      // Stdio transport returns McpServer
+      // Stdio transport returns the SDK's StdioServerHandle
       const stdioTransport: ITransport = {
-        start: async () => ({}) as McpServer,
+        start: async () => ({}) as StdioServerHandle,
         stop: async () => {},
       };
 

@@ -6,6 +6,7 @@
 import { createMockContext } from '@cyanheads/mcp-ts-core/testing';
 import { describe, expect, it } from 'vitest';
 import { echoResourceDefinition } from '../../../examples/mcp-server/resources/definitions/echo.resource.js';
+import { makeServerContext } from '../../helpers/server-context.js';
 
 describe('echoResourceDefinition', () => {
   it('echoes message from URI hostname', async () => {
@@ -31,13 +32,9 @@ describe('echoResourceDefinition', () => {
   });
 
   it('lists default resources', async () => {
-    const extra = {
-      signal: new AbortController().signal,
-      requestId: 'test',
-      sendNotification: () => Promise.resolve(),
-      sendRequest: () => Promise.resolve({} as never),
-    };
-    const listing = await echoResourceDefinition.list!(extra);
+    const listing = await echoResourceDefinition.list!(
+      makeServerContext({ method: 'resources/list' }),
+    );
     expect(listing.resources).toHaveLength(1);
     expect(listing.resources[0]!.uri).toBe('echo://hello');
   });

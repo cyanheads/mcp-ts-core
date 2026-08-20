@@ -1,7 +1,7 @@
 /**
  * @fileoverview Public barrel for the `"."` package entry point.
  * Selectively re-exports only the public API from `app.ts` and related modules,
- * keeping internal types (`ComposedApp`, `composeServices`, `TaskManager`,
+ * keeping internal types (`ComposedApp`, `composeServices`,
  * `DefinitionCounts`, `Database`) out of the consumer-facing surface.
  * @module src/core/index
  */
@@ -39,10 +39,9 @@ export type {
   AuthContext,
   ContentCollect,
   Context,
+  ContextInputs,
   ContextLogger,
-  ContextProgress,
   ContextState,
-  ElicitFn,
   Enrich,
   EnrichHelpers,
   HandlerContext,
@@ -68,7 +67,7 @@ export type {
   ResourceDefinition,
 } from '@/mcp-server/resources/utils/resourceDefinition.js';
 export { resource } from '@/mcp-server/resources/utils/resourceDefinition.js';
-/** Union of all accepted tool definition shapes (standard + task). */
+/** The accepted tool definition shape. */
 export type { AnyToolDef } from '@/mcp-server/tools/tool-registration.js';
 export type {
   AnyToolDefinition,
@@ -77,6 +76,12 @@ export type {
   ToolDefinition,
 } from '@/mcp-server/tools/utils/toolDefinition.js';
 export { disabledTool, tool } from '@/mcp-server/tools/utils/toolDefinition.js';
+
+// ---------------------------------------------------------------------------
+// Multi-round-trip input (MCP 2026-07-28)
+// ---------------------------------------------------------------------------
+
+export { InputRequiredSignal, isInputRequiredSignal } from '@/mcp-server/inputRequired.js';
 
 // ---------------------------------------------------------------------------
 // Linter
@@ -92,24 +97,30 @@ export type {
 export { validateDefinitions } from '@/linter/validate.js';
 
 // ---------------------------------------------------------------------------
-// SDK type re-exports — saves consumers from depending on @modelcontextprotocol/sdk directly
+// SDK re-exports — saves consumers from depending on @modelcontextprotocol/server
+// directly.
 // ---------------------------------------------------------------------------
 
 export type {
   CallToolResult,
+  CompleteCallback,
+  CompleteResourceTemplateCallback,
   ContentBlock,
   ElicitResult,
+  InputRequest,
+  InputRequests,
+  InputRequiredResult,
+  InputRequiredSpec,
+  InputResponseView,
   ModelPreferences,
   PromptMessage,
-} from '@modelcontextprotocol/sdk/types.js';
-
-// ---------------------------------------------------------------------------
-// Completions — `completable()` wraps prompt args or resource template
-// variables so the SDK auto-installs completion/complete handling and
-// advertises the `completions` capability. Re-exported here so consumers
-// don't need a direct @modelcontextprotocol/sdk dependency.
-// ---------------------------------------------------------------------------
-
-export type { CompleteCallback } from '@modelcontextprotocol/sdk/server/completable.js';
-export { completable, isCompletable } from '@modelcontextprotocol/sdk/server/completable.js';
-export type { CompleteResourceTemplateCallback } from '@modelcontextprotocol/sdk/server/mcp.js';
+} from '@modelcontextprotocol/server';
+// `completable()` wraps prompt args or resource template variables so the SDK
+// auto-installs `completion/complete` handling and advertises the `completions`
+// capability. `inputRequired` builds the embedded requests a handler passes to
+// `ctx.requestInput(...)` (multi-round-trip, MCP 2026-07-28).
+export {
+  completable,
+  inputRequired,
+  isCompletable,
+} from '@modelcontextprotocol/server';

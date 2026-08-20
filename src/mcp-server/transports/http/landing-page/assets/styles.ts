@@ -1091,7 +1091,6 @@ section { padding: var(--space-10) 0 0; }
 }
 .pill-destructive { color: #dc2626; background: color-mix(in oklab, #dc2626, transparent 88%); border-color: color-mix(in oklab, #dc2626, transparent 65%); font-weight: 600; }
 .pill-openworld { color: #2563eb; background: color-mix(in oklab, #2563eb, transparent 92%); border-color: color-mix(in oklab, #2563eb, transparent 72%); }
-.pill-task { color: var(--accent); background: var(--accent-softer); border-color: var(--accent-edge); }
 .pill-app { color: #9333ea; background: color-mix(in oklab, #9333ea, transparent 92%); border-color: color-mix(in oklab, #9333ea, transparent 72%); }
 .pill-auth { color: var(--fg-subtle); font-size: 0.65rem; }
 .pill-auth::before { display: none; }

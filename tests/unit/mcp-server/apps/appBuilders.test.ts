@@ -149,10 +149,13 @@ describe('appTool()', () => {
       handler: (i) => ({ doubled: i.x * 2 }),
     });
 
-    expect(def.input).toBe(input);
+    // `tool()` stores `input.strict()`, so the stored schema is a new object
+    // carrying the same shape — identity holds only for `output`.
+    expect(Object.keys(def.input.shape)).toEqual(['x']);
     expect(def.output).toBe(output);
     const parsed = def.input.parse({ x: 5 });
     expect(parsed.x).toBe(5);
+    expect(() => def.input.parse({ x: 5, rogue: true })).toThrow();
   });
 
   it('preserves handler and it works', async () => {
@@ -226,19 +229,6 @@ describe('appTool()', () => {
     });
 
     expect(def.title).toBe('My App Tool');
-  });
-
-  it('preserves task flag', () => {
-    const def = appTool('app_tool', {
-      resourceUri: 'ui://my-app/app.html',
-      description: 'Test',
-      task: true,
-      input: minimalInput,
-      output: minimalOutput,
-      handler: () => ({ result: 'ok' }),
-    });
-
-    expect(def.task).toBe(true);
   });
 
   it('does not leak resourceUri or extraMeta as top-level fields', () => {

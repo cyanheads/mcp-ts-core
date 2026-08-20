@@ -112,7 +112,7 @@ describe('lint-packaging · post-bundle content check (check 8)', () => {
       'manifest.json',
       'dist/index.js',
       'node_modules/@cyanheads/mcp-ts-core/dist/core/index.js',
-      'node_modules/@modelcontextprotocol/sdk/dist/esm/server/index.js',
+      'node_modules/@modelcontextprotocol/server/dist/index.mjs',
     ];
     expect(checkBundleEntries(entries, 'dist/test.mcpb')).toEqual([]);
   });

@@ -1,24 +1,23 @@
 /**
- * @fileoverview Handles the setup and connection for the Stdio MCP transport.
- * Implements the MCP Specification 2025-06-18 for stdio transport.
- * This transport communicates directly over standard input (stdin) and
- * standard output (stdout), typically used when the MCP server is launched
- * as a child process by a host application.
+ * @fileoverview Handles the setup and connection for the stdio MCP transport.
+ * Communicates over standard input and standard output, the shape a host
+ * application uses when it launches the MCP server as a child process.
  *
- * Specification Reference:
- * https://modelcontextprotocol.io/specification/2025-06-18/basic/transports#stdio
+ * Serving goes through the SDK's `serveStdio` entry, which owns the era
+ * decision: the opening exchange selects 2025 or 2026-07-28, ONE instance from
+ * the factory is pinned for the connection's lifetime, and everything after
+ * passes straight through to it. The same factory serves both eras.
  *
  * --- Authentication Note ---
- * As per the MCP Authorization Specification (2025-06-18, Section 1.2),
- * STDIO transports SHOULD NOT implement HTTP-based authentication flows.
- * Authorization is typically handled implicitly by the host application
- * controlling the server process. This implementation follows that guideline.
+ * Per the MCP Authorization specification, stdio transports SHOULD NOT
+ * implement HTTP-based authentication flows. Authorization is handled
+ * implicitly by the host application controlling the server process.
  *
- * @see {@link https://modelcontextprotocol.io/specification/2025-06-18/basic/authorization | MCP Authorization Specification}
+ * @see {@link https://modelcontextprotocol.io/specification/2026-07-28/basic/transports | MCP Transports}
  * @module src/mcp-server/transports/stdioTransport
  */
-import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
-import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
+import type { McpServerFactory } from '@modelcontextprotocol/server';
+import { type StdioServerHandle, serveStdio } from '@modelcontextprotocol/server/stdio';
 
 import { ErrorHandler } from '@/utils/internal/error-handler/errorHandler.js';
 import { logger } from '@/utils/internal/logger.js';
@@ -26,29 +25,22 @@ import type { RequestContext } from '@/utils/internal/requestContext.js';
 import { logStartupBanner } from '@/utils/internal/startupBanner.js';
 
 /**
- * Connects a given `McpServer` instance to the Stdio transport.
- * This function initializes the SDK's `StdioServerTransport`, which manages
- * communication over `process.stdin` and `process.stdout` according to the
- * MCP stdio transport specification.
+ * Serves MCP over this process's stdio from the supplied server factory.
  *
- * MCP Spec Points Covered by SDK's `StdioServerTransport`:
- * - Reads JSON-RPC messages (requests, notifications, responses, batches) from stdin.
- * - Writes JSON-RPC messages to stdout.
- * - Handles newline delimiters and ensures no embedded newlines in output messages.
- * - Ensures only valid MCP messages are written to stdout.
+ * The SDK's `StdioServerTransport` reads newline-delimited JSON-RPC from stdin
+ * and writes it to stdout, skipping non-JSON stdout lines rather than failing on
+ * them. Logging via the `logger` utility goes to stderr, which the spec permits.
  *
- * Logging via the `logger` utility MAY result in output to stderr, which is
- * permitted by the spec for logging purposes.
- *
- * @param server - The `McpServer` instance.
- * @param parentContext - The logging and tracing context from the calling function.
- * @returns A promise that resolves when the Stdio transport is successfully connected.
+ * @param serverFactory - Produces the `McpServer` pinned to the connection.
+ * @param parentContext - The logging and tracing context from the caller.
+ * @returns The connection handle, whose `close()` tears down the pinned
+ *   instance and the underlying transport.
  * @throws {Error} If the connection fails during setup.
  */
-export async function startStdioTransport(
-  server: McpServer,
+export function startStdioTransport(
+  serverFactory: McpServerFactory,
   parentContext: RequestContext,
-): Promise<McpServer> {
+): StdioServerHandle {
   const operationContext = {
     ...parentContext,
     operation: 'connectStdioTransport',
@@ -57,18 +49,15 @@ export async function startStdioTransport(
   logger.info('Attempting to connect stdio transport...', operationContext);
 
   try {
-    logger.debug('Creating StdioServerTransport instance...', operationContext);
-    const transport = new StdioServerTransport();
-
-    logger.debug('Connecting McpServer instance to StdioServerTransport...', operationContext);
-    await server.connect(transport);
+    const handle = serveStdio(serverFactory, {
+      onerror: (error) => {
+        logger.debug(`Stdio transport reported: ${error.message}`, operationContext);
+      },
+    });
 
     logger.info('MCP Server connected and listening via stdio transport.', operationContext);
-    logStartupBanner(
-      `\n🚀 MCP Server running in STDIO mode.\n   (MCP Spec: 2025-06-18 Stdio Transport)\n`,
-      'stdio',
-    );
-    return server;
+    logStartupBanner(`\n🚀 MCP Server running in STDIO mode.\n`, 'stdio');
+    return handle;
   } catch (err) {
     // Let the ErrorHandler log the error with all context, then rethrow.
     throw ErrorHandler.handleError(err, {
@@ -81,7 +70,7 @@ export async function startStdioTransport(
 }
 
 export async function stopStdioTransport(
-  server: McpServer,
+  handle: StdioServerHandle,
   parentContext: RequestContext,
 ): Promise<void> {
   const operationContext = {
@@ -90,8 +79,6 @@ export async function stopStdioTransport(
     transportType: 'Stdio',
   };
   logger.info('Attempting to stop stdio transport...', operationContext);
-  if (server) {
-    await server.close();
-    logger.info('Stdio transport stopped successfully.', operationContext);
-  }
+  await handle.close();
+  logger.info('Stdio transport stopped successfully.', operationContext);
 }

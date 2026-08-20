@@ -1,17 +1,25 @@
 /**
- * @fileoverview Simple in-memory session store for MCP HTTP transport.
- * Implements session management as per MCP Spec 2025-06-18.
- * @see {@link https://modelcontextprotocol.io/specification/2025-06-18/basic/transports#session-management | MCP Session Management}
+ * @fileoverview In-memory session registry for the HTTP transport's sessionful
+ * (2025-era) arm.
+ *
+ * The SDK's streamable HTTP transport owns the protocol side of a session — it
+ * mints the ID, rejects unknown ones, stamps `Mcp-Session-Id`, and answers
+ * DELETE. This store owns what the SDK deliberately does not: binding a session
+ * to the authenticated identity that created it, capping concurrent sessions,
+ * expiring idle ones, and holding the `McpServer` + transport pair that serves
+ * the session for its lifetime.
+ *
+ * The 2026-07-28 revision has no session at all, so nothing here applies to it.
+ *
+ * @see {@link https://modelcontextprotocol.io/specification/2026-07-28/basic/transports | MCP Transports}
  * @module src/mcp-server/transports/http/sessionStore
  */
 
-import {
-  type ClientCapabilities,
-  ErrorCode,
-  type JSONRPCResponse,
-  type RequestId,
-} from '@modelcontextprotocol/sdk/types.js';
-import type { ProtocolSessionHooks } from '@/mcp-server/protocolSession.js';
+import type {
+  McpServer,
+  WebStandardStreamableHTTPServerTransport,
+} from '@modelcontextprotocol/server';
+
 import { validateSessionIdFormat } from '@/mcp-server/transports/http/sessionIdUtils.js';
 import { invalidParams, serviceUnavailable } from '@/types-global/errors.js';
 import { logger } from '@/utils/internal/logger.js';
@@ -55,42 +63,28 @@ export interface SessionIdentity {
 }
 
 /**
- * Represents a stateful MCP session with identity binding.
- * Sessions are bound to the authenticated identity to prevent hijacking.
+ * The live protocol pair serving one session. Persistent for the session's
+ * lifetime, which is what gives 2025-era clients working cancellation, negotiated
+ * capabilities, and the SDK's multi-round-trip legacy shim.
  */
+export interface SessionConnection {
+  server: McpServer;
+  transport: WebStandardStreamableHTTPServerTransport;
+}
+
+/** A stateful MCP session with identity binding and its live connection. */
 interface Session {
-  clientCapabilities?: ClientCapabilities;
   clientId?: string;
+  connection: SessionConnection;
   createdAt: Date;
   id: string;
   /** Whether identity fields have been bound (atomic snapshot on first write). */
   identityBound: boolean;
-  inFlightRequests: Map<string, Set<AbortController>>;
   lastAccessedAt: Date;
-  serverRequests: Map<string, ServerRequestRoute>;
   subject?: string;
-
-  // Identity binding for security
   tenantId?: string;
 }
 
-interface ServerRequestRoute {
-  deliver: (response: JSONRPCResponse) => void;
-  requestId: string;
-}
-
-/** Registration for one server-to-client request awaiting a later HTTP POST. */
-export interface ServerRequestRegistration {
-  /** Session-unique request ID sent to the client. */
-  requestId: string;
-  /** Removes the route without delivering a response. Safe to call repeatedly. */
-  unregister: () => void;
-}
-
-/**
- * Simple in-memory session store for stateful MCP sessions.
- * In production, consider using Redis or another persistent store.
- */
 /** Default maximum number of concurrent sessions before new ones are rejected. */
 const DEFAULT_MAX_SESSIONS = 10_000;
 
@@ -104,34 +98,53 @@ export class SessionStore {
     this.staleTimeout = staleTimeoutMs;
     this.maxSessions = maxSessions;
     // Clean up stale sessions every minute. unref() prevents blocking graceful shutdown.
-    this.cleanupInterval = setInterval(() => this.cleanupStaleSessions(), 60_000);
+    this.cleanupInterval = setInterval(() => void this.cleanupStaleSessions(), 60_000);
     this.cleanupInterval.unref?.();
   }
 
   /**
-   * Stops the cleanup interval and clears all sessions.
+   * Stops the cleanup interval and closes every live connection.
    * Call this during transport shutdown to prevent resource leaks.
    */
-  destroy(): void {
+  async destroy(): Promise<void> {
     clearInterval(this.cleanupInterval);
-    for (const session of this.sessions.values()) this.endSessionRequests(session);
+    const connections = [...this.sessions.values()].map((session) => session.connection);
     this.sessions.clear();
+    await Promise.allSettled(connections.map((connection) => closeConnection(connection)));
   }
 
   /**
-   * Creates or retrieves a session with optional identity binding.
-   * If identity is provided, binds the session to prevent cross-tenant/client hijacking.
+   * Throws before a new session's protocol instances are built when the server
+   * is already at capacity — allocating them first and discarding them is the
+   * expensive way to answer 503.
    *
-   * @param sessionId - The session identifier
-   * @param identity - Optional identity info (tenantId, clientId, subject)
-   * @returns The session object
-   * @throws {McpError} If session ID format is invalid
+   * @throws {McpError} `ServiceUnavailable` when at `maxSessions`.
    */
-  getOrCreate(sessionId: string, identity?: SessionIdentity): Session {
-    // Validate session ID format to prevent injection attacks
+  assertCapacity(): void {
+    if (this.sessions.size < this.maxSessions) return;
+    const context = requestContextService.createRequestContext({
+      operation: 'SessionStore.assertCapacity',
+      currentSessions: this.sessions.size,
+      maxSessions: this.maxSessions,
+    });
+    logger.warning('Session capacity reached, rejecting new session', context);
+    throw serviceUnavailable(
+      `Maximum session capacity reached (${this.maxSessions}). Try again later.`,
+      context,
+    );
+  }
+
+  /**
+   * Records a session the SDK transport just initialized, binding it to the
+   * identity that created it.
+   *
+   * @throws {McpError} `InvalidParams` when the session ID format is invalid,
+   *   `ServiceUnavailable` when at capacity.
+   */
+  register(sessionId: string, connection: SessionConnection, identity?: SessionIdentity): void {
     if (!validateSessionIdFormat(sessionId)) {
       const context = requestContextService.createRequestContext({
-        operation: 'SessionStore.getOrCreate',
+        operation: 'SessionStore.register',
         sessionIdPrefix: sessionId.substring(0, 16),
       });
       logger.warning('Invalid session ID format rejected', context);
@@ -140,200 +153,43 @@ export class SessionStore {
         context,
       );
     }
+    this.assertCapacity();
 
-    let session = this.sessions.get(sessionId);
+    // Identity is bound atomically as a snapshot on creation.
+    const hasIdentity = !!(identity?.tenantId || identity?.clientId || identity?.subject);
+    const now = new Date();
+    const session: Session = {
+      id: sessionId,
+      connection,
+      createdAt: now,
+      lastAccessedAt: now,
+      identityBound: hasIdentity,
+    };
+    if (identity?.tenantId) session.tenantId = identity.tenantId;
+    if (identity?.clientId) session.clientId = identity.clientId;
+    if (identity?.subject) session.subject = identity.subject;
 
-    if (!session) {
-      // Enforce maximum session capacity to prevent unbounded memory growth
-      if (this.sessions.size >= this.maxSessions) {
-        const context = requestContextService.createRequestContext({
-          operation: 'SessionStore.getOrCreate',
-          currentSessions: this.sessions.size,
-          maxSessions: this.maxSessions,
-        });
-        logger.warning('Session capacity reached, rejecting new session', context);
-        throw serviceUnavailable(
-          `Maximum session capacity reached (${this.maxSessions}). Try again later.`,
-          context,
-        );
-      }
-
-      // Build session object conditionally to satisfy exactOptionalPropertyTypes.
-      // Identity is bound atomically as a snapshot on creation.
-      const hasIdentity = !!(identity?.tenantId || identity?.clientId || identity?.subject);
-      const now = new Date();
-      const newSession: Session = {
-        id: sessionId,
-        createdAt: now,
-        lastAccessedAt: now,
-        identityBound: hasIdentity,
-        inFlightRequests: new Map(),
-        serverRequests: new Map(),
-      };
-
-      // Only set identity fields if they have actual values (not undefined)
-      if (identity?.tenantId) newSession.tenantId = identity.tenantId;
-      if (identity?.clientId) newSession.clientId = identity.clientId;
-      if (identity?.subject) newSession.subject = identity.subject;
-
-      session = newSession;
-      this.sessions.set(sessionId, session);
-      getSessionMetrics().sessionEventCounter.add(1, { [ATTR_MCP_SESSION_EVENT]: 'created' });
-      const context = requestContextService.createRequestContext({
-        operation: 'SessionStore.create',
+    this.sessions.set(sessionId, session);
+    getSessionMetrics().sessionEventCounter.add(1, { [ATTR_MCP_SESSION_EVENT]: 'created' });
+    logger.debug(
+      'Session created with identity binding',
+      requestContextService.createRequestContext({
+        operation: 'SessionStore.register',
         sessionId,
         tenantId: identity?.tenantId,
-      });
-      logger.debug('Session created with identity binding', context);
-    } else {
-      session.lastAccessedAt = new Date();
-
-      // Bind identity atomically on first authenticated request after an
-      // unauthenticated session creation. All fields are snapshotted together
-      // to prevent chimeric identities from per-field races.
-      if (identity && !session.identityBound) {
-        const hasIdentity = !!(identity.tenantId || identity.clientId || identity.subject);
-        if (hasIdentity) {
-          if (identity.tenantId) session.tenantId = identity.tenantId;
-          if (identity.clientId) session.clientId = identity.clientId;
-          if (identity.subject) session.subject = identity.subject;
-          session.identityBound = true;
-          const context = requestContextService.createRequestContext({
-            operation: 'SessionStore.bindIdentity',
-            sessionId,
-            tenantId: identity.tenantId,
-          });
-          logger.debug('Session identity bound atomically on authenticated request', context);
-        }
-      }
-    }
-
-    return session;
-  }
-
-  /** Stores capabilities only after the initialize response succeeded. */
-  setClientCapabilities(sessionId: string, capabilities: ClientCapabilities): void {
-    const session = this.sessions.get(sessionId);
-    if (session) session.clientCapabilities = capabilities;
+      }),
+    );
   }
 
   /**
-   * Builds the minimal state hooks restored onto the next per-request server.
-   * The session ID remains the isolation boundary for both capability state
-   * and cancellation routing.
+   * The live connection for a session, touching its access time.
+   * Call {@link isValidForIdentity} first — this performs no ownership check.
    */
-  createProtocolSessionHooks(sessionId: string): ProtocolSessionHooks | undefined {
+  getConnection(sessionId: string): SessionConnection | undefined {
     const session = this.sessions.get(sessionId);
     if (!session) return;
-
-    return {
-      ...(session.clientCapabilities && { clientCapabilities: session.clientCapabilities }),
-      registerRequest: (requestId) => this.registerRequest(sessionId, requestId),
-    };
-  }
-
-  /** Aborts all active handlers with the matching JSON-RPC request ID. */
-  cancelRequest(sessionId: string, requestId: RequestId, reason?: string): boolean {
-    const controllers = this.sessions
-      .get(sessionId)
-      ?.inFlightRequests.get(this.requestKey(requestId));
-    if (!controllers || controllers.size === 0) return false;
-
-    const abortReason = new DOMException(reason || 'MCP request cancelled', 'AbortError');
-    for (const controller of controllers) controller.abort(abortReason);
-    return true;
-  }
-
-  /**
-   * Registers a server-to-client request whose response will arrive on a later
-   * HTTP POST handled by a different SDK Server instance.
-   *
-   * Each per-request SDK Server starts its outbound request counter at zero, so
-   * the wire ID is replaced with a session-unique value. The caller restores
-   * the original ID before delivering the response to the originating Server.
-   */
-  registerServerRequest(
-    sessionId: string,
-    deliver: (response: JSONRPCResponse) => void,
-  ): ServerRequestRegistration | undefined {
-    const session = this.sessions.get(sessionId);
-    if (!session) return;
-
-    const requestId = `server-${crypto.randomUUID()}`;
-    const key = this.requestKey(requestId);
-    const route: ServerRequestRoute = { requestId, deliver };
-    session.serverRequests.set(key, route);
-
-    let registered = true;
-    return {
-      requestId,
-      unregister: () => {
-        if (!registered) return;
-        registered = false;
-        if (session.serverRequests.get(key) === route) session.serverRequests.delete(key);
-      },
-    };
-  }
-
-  /** Routes one client response back to the per-request Server that emitted it. */
-  routeServerResponse(sessionId: string, response: JSONRPCResponse): boolean {
-    if (response.id === undefined) return false;
-    const routes = this.sessions.get(sessionId)?.serverRequests;
-    const route = routes?.get(this.requestKey(response.id));
-    if (!routes || !route) return false;
-
-    routes.delete(this.requestKey(response.id));
-    route.deliver(response);
-    return true;
-  }
-
-  private requestKey(requestId: RequestId): string {
-    return `${typeof requestId}:${String(requestId)}`;
-  }
-
-  private registerRequest(sessionId: string, requestId: RequestId) {
-    const session = this.sessions.get(sessionId);
-    const controller = new AbortController();
-    if (!session) {
-      return { signal: controller.signal, unregister: () => undefined };
-    }
-
-    const key = this.requestKey(requestId);
-    const controllers = session.inFlightRequests.get(key) ?? new Set<AbortController>();
-    controllers.add(controller);
-    session.inFlightRequests.set(key, controllers);
-    let registered = true;
-
-    return {
-      signal: controller.signal,
-      unregister: () => {
-        if (!registered) return;
-        registered = false;
-        controllers.delete(controller);
-        if (controllers.size === 0) session.inFlightRequests.delete(key);
-      },
-    };
-  }
-
-  private endSessionRequests(session: Session): void {
-    const reason = new DOMException('MCP session ended', 'AbortError');
-    for (const controllers of session.inFlightRequests.values()) {
-      for (const controller of controllers) controller.abort(reason);
-    }
-    session.inFlightRequests.clear();
-
-    const routes = [...session.serverRequests.values()];
-    session.serverRequests.clear();
-    for (const route of routes) {
-      route.deliver({
-        jsonrpc: '2.0',
-        id: route.requestId,
-        error: {
-          code: ErrorCode.ConnectionClosed,
-          message: 'MCP session ended',
-        },
-      });
-    }
+    session.lastAccessedAt = new Date();
+    return session.connection;
   }
 
   /**
@@ -347,6 +203,9 @@ export class SessionStore {
    * 4. Client ID match (if session has clientId)
    * 5. Subject match (if session has subject)
    *
+   * Binds the identity atomically on the first authenticated request when the
+   * session was created unauthenticated.
+   *
    * @param sessionId - The session identifier
    * @param identity - The identity to validate against (from auth)
    * @returns True if session is valid and matches identity
@@ -359,12 +218,32 @@ export class SessionStore {
 
     // Check staleness
     if (Date.now() - session.lastAccessedAt.getTime() > this.staleTimeout) {
-      this.terminate(sessionId);
+      void this.terminate(sessionId);
       return false;
     }
 
     // If session has no identity bound, allow (backwards compatibility / no-auth mode)
     if (!session.tenantId && !session.clientId && !session.subject) {
+      // Bind atomically on the first authenticated request after an
+      // unauthenticated creation. All fields are snapshotted together to
+      // prevent chimeric identities from per-field races.
+      if (identity && !session.identityBound) {
+        const hasIdentity = !!(identity.tenantId || identity.clientId || identity.subject);
+        if (hasIdentity) {
+          if (identity.tenantId) session.tenantId = identity.tenantId;
+          if (identity.clientId) session.clientId = identity.clientId;
+          if (identity.subject) session.subject = identity.subject;
+          session.identityBound = true;
+          logger.debug(
+            'Session identity bound atomically on authenticated request',
+            requestContextService.createRequestContext({
+              operation: 'SessionStore.bindIdentity',
+              sessionId,
+              tenantId: identity.tenantId,
+            }),
+          );
+        }
+      }
       return true;
     }
 
@@ -418,54 +297,52 @@ export class SessionStore {
   }
 
   /**
-   * Terminates a session.
-   * @param sessionId - The session identifier
+   * Terminates a session and closes its connection.
+   * Idempotent — the SDK transport's own DELETE path also calls this via
+   * `onsessionclosed`, after the request that triggered it already removed it.
    */
-  terminate(sessionId: string): void {
+  async terminate(sessionId: string): Promise<void> {
     const session = this.sessions.get(sessionId);
-    if (session) {
-      this.endSessionRequests(session);
-      this.sessions.delete(sessionId);
-      const metrics = getSessionMetrics();
-      metrics.sessionEventCounter.add(1, { [ATTR_MCP_SESSION_EVENT]: 'terminated' });
-      metrics.sessionDuration.record((Date.now() - session.createdAt.getTime()) / 1000);
-      const context = requestContextService.createRequestContext({
+    if (!session) return;
+
+    this.sessions.delete(sessionId);
+    const metrics = getSessionMetrics();
+    metrics.sessionEventCounter.add(1, { [ATTR_MCP_SESSION_EVENT]: 'terminated' });
+    metrics.sessionDuration.record((Date.now() - session.createdAt.getTime()) / 1000);
+    logger.info(
+      'Session terminated',
+      requestContextService.createRequestContext({
         operation: 'SessionStore.terminate',
         sessionId,
-      });
-      logger.info('Session terminated', context);
-    }
+      }),
+    );
+    await closeConnection(session.connection);
   }
 
-  /**
-   * Cleans up stale sessions that haven't been accessed recently.
-   */
-  private cleanupStaleSessions(): void {
+  /** Cleans up stale sessions that haven't been accessed recently. */
+  private async cleanupStaleSessions(): Promise<void> {
     const now = Date.now();
-    let cleanedCount = 0;
+    const stale: Session[] = [];
 
     const metrics = getSessionMetrics();
     for (const [id, session] of this.sessions.entries()) {
       if (now - session.lastAccessedAt.getTime() > this.staleTimeout) {
-        this.endSessionRequests(session);
         metrics.sessionDuration.record((now - session.createdAt.getTime()) / 1000);
         this.sessions.delete(id);
-        cleanedCount++;
+        stale.push(session);
       }
     }
 
-    if (cleanedCount > 0) {
-      metrics.sessionEventCounter.add(cleanedCount, {
-        [ATTR_MCP_SESSION_EVENT]: 'stale_cleanup',
-      });
-      const context = requestContextService.createRequestContext({
-        operation: 'SessionStore.cleanup',
-      });
-      logger.debug('Cleaned up stale sessions', {
-        ...context,
-        count: cleanedCount,
-      });
-    }
+    if (stale.length === 0) return;
+
+    metrics.sessionEventCounter.add(stale.length, {
+      [ATTR_MCP_SESSION_EVENT]: 'stale_cleanup',
+    });
+    logger.debug('Cleaned up stale sessions', {
+      ...requestContextService.createRequestContext({ operation: 'SessionStore.cleanup' }),
+      count: stale.length,
+    });
+    await Promise.allSettled(stale.map((session) => closeConnection(session.connection)));
   }
 
   /**
@@ -474,5 +351,22 @@ export class SessionStore {
    */
   getSessionCount(): number {
     return this.sessions.size;
+  }
+}
+
+/** Closes a session's server and transport, tolerating either one throwing. */
+export async function closeConnection(connection: SessionConnection): Promise<void> {
+  const results = await Promise.allSettled([
+    connection.transport.close(),
+    connection.server.close(),
+  ]);
+  for (const result of results) {
+    if (result.status === 'rejected') {
+      logger.warning(
+        `Failed to close a session surface: ${
+          result.reason instanceof Error ? result.reason.message : String(result.reason)
+        }`,
+      );
+    }
   }
 }

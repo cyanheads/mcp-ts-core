@@ -4,8 +4,7 @@
  * authentication and per-tool authorization both behave correctly.
  * @module tests/integration/http-authz.e2e
  */
-import { Client } from '@modelcontextprotocol/sdk/client/index.js';
-import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
+import { Client, StreamableHTTPClientTransport } from '@modelcontextprotocol/client';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
 import { generateTestJwt } from '../helpers/http-helpers.js';

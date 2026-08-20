@@ -58,11 +58,6 @@
       "import": "./dist/mcp-server/prompts/utils/promptDefinition.js",
       "default": "./dist/mcp-server/prompts/utils/promptDefinition.js"
     },
-    "./tasks": {
-      "types": "./dist/mcp-server/tasks/utils/taskToolDefinition.d.ts",
-      "import": "./dist/mcp-server/tasks/utils/taskToolDefinition.js",
-      "default": "./dist/mcp-server/tasks/utils/taskToolDefinition.js"
-    },
     "./errors": {
       "types": "./dist/types-global/errors.d.ts",
       "import": "./dist/types-global/errors.js",
@@ -298,10 +293,10 @@
     "access": "public"
   },
   "dependencies": {
-    "@hono/mcp": "^0.3.1",
     "@hono/node-server": "^2.1.0",
+    "@modelcontextprotocol/client": "^2.0.0",
     "@modelcontextprotocol/ext-apps": "^1.7.5",
-    "@modelcontextprotocol/sdk": "^1.30.0",
+    "@modelcontextprotocol/server": "^2.0.0",
     "@opentelemetry/api": "^1.9.1",
     "dotenv": "^17.4.2",
     "hono": "^4.13.1",

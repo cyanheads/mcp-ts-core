@@ -6,8 +6,14 @@
  * @module src/core/context
  */
 
-import type { RequestTaskStore } from '@modelcontextprotocol/sdk/shared/protocol.js';
-import type { ContentBlock, ElicitResult } from '@modelcontextprotocol/sdk/types.js';
+import type {
+  ContentBlock,
+  InputRequiredSpec,
+  InputResponses,
+  InputResponseView,
+  LoggingLevel,
+  StandardSchemaV1,
+} from '@modelcontextprotocol/server';
 import type { ZodObject, ZodRawShape, ZodType, z } from 'zod';
 
 import type { StorageService } from '@/storage/core/StorageService.js';
@@ -24,35 +30,84 @@ import type { AuthContext, RequestContext } from '@/utils/internal/requestContex
 export type { AuthContext };
 
 // ---------------------------------------------------------------------------
-// ElicitFn — callable + .url() method
+// Multi-round-trip input (MCP 2026-07-28)
 // ---------------------------------------------------------------------------
 
 /**
- * The full elicitation surface on `ctx.elicit`. Callable as a function for
- * form-mode elicitation (present `requestedSchema` to the client as a structured
- * form), plus a `.url()` helper for URL-mode elicitation (send the user to an
- * external URL and wait for their return).
+ * Suspends the handler and asks the caller for more input.
  *
- * Present only when the connected client advertised the elicitation capability.
- * Check for presence before calling: `if (ctx.elicit) { ... }`.
+ * Never returns: it throws a control-flow signal the handler factory converts
+ * into the protocol's `input_required` result. The client (2026-07-28 era) or
+ * the SDK's legacy shim (2025 era) fulfils the embedded requests and re-invokes
+ * the handler with the same arguments plus `ctx.inputs` populated, so a handler
+ * reads `ctx.inputs` first and only requests what is still missing.
+ *
+ * **Write it as `return ctx.requestInput(...)`.** The `never` return makes it
+ * valid in return position for any output type, and it is what lets TypeScript
+ * narrow away the `undefined` on the line below:
+ *
+ * ```ts
+ * const confirmed = ctx.inputs.accepted('confirm', Confirm);
+ * if (!confirmed) {
+ *   return ctx.requestInput({
+ *     inputRequests: {
+ *       confirm: inputRequired.elicit({
+ *         message: `Delete ${input.path}?`,
+ *         requestedSchema: Confirm,
+ *       }),
+ *     },
+ *   });
+ * }
+ * // `confirmed` is narrowed here.
+ * ```
+ *
+ * Calling it as a bare statement works at runtime and is the only option from a
+ * service-layer helper, but TypeScript will not narrow across it.
+ *
+ * At least one of `inputRequests` or `requestState` must be supplied.
+ * `requestState` round-trips through the client and is attacker-controlled on
+ * re-entry — integrity-protect anything that influences authorization.
  */
-export interface ElicitFn {
+export type RequestInputFn = (spec: InputRequiredSpec) => never;
+
+/**
+ * Reader over the input responses a retried request carried. Empty on the first
+ * round; populated once the client (or the legacy shim) has fulfilled a prior
+ * `ctx.requestInput(...)`.
+ *
+ * Responses arrive from the client and are never validated by the SDK — pass a
+ * schema to {@link ContextInputs.accepted} wherever the content matters.
+ */
+export interface ContextInputs {
   /**
-   * URL-mode elicitation. Directs the user to an external URL (an authorization
-   * link, hosted form, etc.) and returns an `ElicitResult` when the client
-   * signals completion. `content` is absent on URL-mode results — only `action`
-   * is meaningful.
-   *
-   * An `elicitationId` is generated automatically.
+   * Accepted form-mode elicitation content for `key`, or `undefined` when the
+   * key is missing, the user declined or cancelled, the response was of another
+   * kind, or (with a schema) validation failed. Handlers treat every
+   * `undefined` the same way: re-issue the request, or give up.
    */
-  url(message: string, url: string): Promise<ElicitResult>;
+  accepted<S extends StandardSchemaV1>(
+    key: string,
+    schema: S,
+  ): StandardSchemaV1.InferOutput<S> | undefined;
+  accepted<T extends Record<string, unknown> = Record<string, unknown>>(key: string): T | undefined;
   /**
-   * Form-mode elicitation. Presents a structured form to the user from the
-   * provided Zod schema and returns an `ElicitResult` when the user responds.
-   * The schema is converted to the MCP elicitation spec's restricted flat JSON
-   * Schema form before being sent on the wire.
+   * Keys the SDK dropped because the client sent a wrapped rather than a bare
+   * response object. Re-issue those requests instead of hard-failing.
    */
-  (message: string, schema: ZodObject<ZodRawShape>): Promise<ElicitResult>;
+  readonly dropped: readonly string[];
+  /** The raw response map, for kinds the helpers do not cover. */
+  readonly responses: InputResponses | Record<string, unknown> | undefined;
+  /**
+   * The multi-round-trip state for this round: the value
+   * `ServerOptions.requestState.verify` resolved with, the raw wire string when
+   * no verifier is configured, or `undefined` on the first round.
+   */
+  state<T = string>(): T | undefined;
+  /**
+   * Discriminated view of one response entry — covers decline/cancel detection
+   * and the sampling / roots kinds {@link ContextInputs.accepted} does not surface.
+   */
+  view(key: string): InputResponseView;
 }
 
 // ---------------------------------------------------------------------------
@@ -100,19 +155,6 @@ export interface ContextState {
   setMany(entries: Map<string, unknown>, opts?: { ttl?: number }): Promise<void>;
 }
 
-/**
- * Progress reporting for background tasks.
- * Present only when the tool has `task: true`.
- */
-export interface ContextProgress {
-  /** Increment completed work by amount (default: 1). */
-  increment(amount?: number): Promise<void>;
-  /** Set the total expected units of work. */
-  setTotal(total: number): Promise<void>;
-  /** Set a custom status message. */
-  update(message: string): Promise<void>;
-}
-
 // ---------------------------------------------------------------------------
 // Context
 // ---------------------------------------------------------------------------
@@ -139,14 +181,6 @@ export interface Context {
    */
   readonly content: ContentCollect;
 
-  // --- Protocol capabilities (optional — not all clients support these) ---
-  /**
-   * Ask the human user a question. Present when the connected client advertised
-   * the elicitation capability. Call the function for form-mode elicitation, or
-   * use `.url(message, url)` for URL-mode elicitation.
-   */
-  readonly elicit?: ElicitFn | undefined;
-
   // --- Contract-bound resolvers (always present; no-op when no contract) ---
   /**
    * Accumulates agent-facing enrichment fields onto this request — empty-result
@@ -160,6 +194,13 @@ export interface Context {
    * (`enrich.notice` / `enrich.total` / `enrich.echo`) kind-tag the content[] trailer.
    */
   readonly enrich: Enrich;
+
+  // --- Multi-round-trip input (always present) ---
+  /**
+   * Input responses carried by a retried request. Empty on the first round.
+   * @see {@link ContextInputs}
+   */
+  readonly inputs: ContextInputs;
 
   // --- Structured logging ---
   /** Logger scoped to this request. Auto-includes requestId, traceId, tenantId. */
@@ -175,9 +216,6 @@ export interface Context {
   /** Notify clients that the tool list has changed (tools added/removed). */
   readonly notifyToolListChanged?: (() => void) | undefined;
 
-  // --- Task progress (present when task: true) ---
-  /** Progress reporting for background tasks. Undefined for non-task tools. */
-  readonly progress?: ContextProgress | undefined;
   /**
    * Resolves a contract-bound recovery hint by reason and returns it in the
    * canonical wire shape `{ recovery: { hint } }` — safe to spread directly into
@@ -199,9 +237,18 @@ export interface Context {
    * queue state) override at the throw site as today.
    */
   recoveryFor(reason: string): { recovery: { hint: string } } | Record<string, never>;
+
   // --- Identity & tracing ---
   /** Unique request ID for log correlation. */
   readonly requestId: string;
+
+  // --- Multi-round-trip input (always present) ---
+  /**
+   * Suspend the handler and ask the caller for more input. Never returns —
+   * write it as `return ctx.requestInput(...)`.
+   * @see {@link RequestInputFn}
+   */
+  readonly requestInput: RequestInputFn;
   /**
    * HTTP session ID — the value of the `Mcp-Session-Id` header (or a
    * server-minted ID for new sessions) when the request carries a durable
@@ -696,12 +743,13 @@ export function readContentStore(ctx: Context): ContentStore | undefined {
 /** @internal */
 export interface ContextDeps {
   appContext: RequestContext;
-  elicit?: ElicitFn | undefined;
+  inputs: ContextInputs;
   logger: Logger;
   notifyPromptListChanged?: Context['notifyPromptListChanged'];
   notifyResourceListChanged?: Context['notifyResourceListChanged'];
   notifyResourceUpdated?: Context['notifyResourceUpdated'];
   notifyToolListChanged?: Context['notifyToolListChanged'];
+  requestInput: RequestInputFn;
   /**
    * HTTP session ID. Forwarded onto `Context.sessionId` as-is. Caller is
    * responsible for the durability gate (stateful mode / opt-in) — by the
@@ -710,8 +758,13 @@ export interface ContextDeps {
   sessionId?: string | undefined;
   signal: AbortSignal;
   storage: StorageService;
-  taskCtx?: { store: RequestTaskStore; taskId: string } | undefined;
   uri?: URL | undefined;
+  /**
+   * Mirrors `ctx.log` onto the MCP wire as `notifications/message`
+   * (`ctx.mcpReq.log`). Absent outside a live request scope; a rejected send is
+   * swallowed — a log that cannot flush must never fail the handler.
+   */
+  wireLog?: ((level: LoggingLevel, data: unknown) => Promise<void>) | undefined;
 }
 
 /**
@@ -736,11 +789,8 @@ export function createContext(deps: ContextDeps): Context {
       ? { ...appContext, tenantId: 'default' }
       : appContext;
 
-  const log = createContextLogger(pinoLogger, effectiveContext);
+  const log = createContextLogger(pinoLogger, effectiveContext, deps.wireLog);
   const state = createContextState(storage, effectiveContext, signal);
-  const progress = deps.taskCtx
-    ? createContextProgress(deps.taskCtx.store, deps.taskCtx.taskId)
-    : undefined;
 
   // Per-request enrichment accumulator + always-present `enrich` (mirrors
   // ctx.log/ctx.state — created here, callable from handler and service layer).
@@ -765,12 +815,12 @@ export function createContext(deps: ContextDeps): Context {
     traceId: appContext.traceId as string | undefined,
     spanId: appContext.spanId as string | undefined,
     auth: appContext.auth,
-    elicit: deps.elicit,
+    inputs: deps.inputs,
+    requestInput: deps.requestInput,
     notifyPromptListChanged: deps.notifyPromptListChanged,
     notifyResourceListChanged: deps.notifyResourceListChanged,
     notifyResourceUpdated: deps.notifyResourceUpdated,
     notifyToolListChanged: deps.notifyToolListChanged,
-    progress,
     uri: deps.uri,
     content: createContentCollect(contentStore),
     enrich: createEnrich(enrichmentStore),
@@ -791,25 +841,45 @@ export function createContext(deps: ContextDeps): Context {
 // ContextLogger implementation
 // ---------------------------------------------------------------------------
 
-function createContextLogger(appLogger: Logger, appContext: RequestContext): ContextLogger {
+function createContextLogger(
+  appLogger: Logger,
+  appContext: RequestContext,
+  wireLog?: ((level: LoggingLevel, data: unknown) => Promise<void>) | undefined,
+): ContextLogger {
   // Build a RequestContext enriched with extra data for each log call.
   // Our Logger accepts (msg, RequestContext?) — the extra data fields are
   // spread into the context's index signature.
   const enriched = (data?: Record<string, unknown>): RequestContext =>
     data ? { ...appContext, ...data } : appContext;
 
+  // Second sink: the MCP `notifications/message` stream. The framework
+  // advertises the `logging` capability, so every `ctx.log` call must reach the
+  // client that asked for it — not just the process logger. Fire-and-forget:
+  // the client may have set a higher level (the SDK filters), may not have
+  // upgraded to SSE, or may already be gone.
+  const toWire = (level: LoggingLevel, msg: string, data?: Record<string, unknown>): void => {
+    if (!wireLog) return;
+    void wireLog(level, data ? { message: msg, ...data } : { message: msg }).catch(() => {
+      // A log that cannot be delivered must never fail the request.
+    });
+  };
+
   return {
     debug(msg, data) {
       appLogger.debug(msg, enriched(data));
+      toWire('debug', msg, data);
     },
     info(msg, data) {
       appLogger.info(msg, enriched(data));
+      toWire('info', msg, data);
     },
     notice(msg, data) {
       appLogger.notice(msg, enriched(data));
+      toWire('notice', msg, data);
     },
     warning(msg, data) {
       appLogger.warning(msg, enriched(data));
+      toWire('warning', msg, data);
     },
     error(msg, error, data) {
       if (error) {
@@ -817,6 +887,7 @@ function createContextLogger(appLogger: Logger, appContext: RequestContext): Con
       } else {
         appLogger.error(msg, enriched(data));
       }
+      toWire('error', msg, error ? { ...data, error: error.message } : data);
     },
   };
 }
@@ -915,35 +986,6 @@ export function createContextState(
       const out: { items: Array<{ key: string; value: unknown }>; cursor?: string } = { items };
       if (result.nextCursor) out.cursor = result.nextCursor;
       return out;
-    },
-  };
-}
-
-// ---------------------------------------------------------------------------
-// ContextProgress implementation
-// ---------------------------------------------------------------------------
-
-function createContextProgress(store: RequestTaskStore, taskId: string): ContextProgress {
-  let total = 0;
-  let completed = 0;
-
-  return {
-    setTotal(n) {
-      total = n;
-      completed = 0;
-      return Promise.resolve();
-    },
-    async increment(amount = 1) {
-      completed = Math.min(completed + amount, total || completed + amount);
-      const percentage = total > 0 ? Math.round((completed / total) * 100) : undefined;
-      await store.updateTaskStatus(
-        taskId,
-        'working',
-        percentage !== undefined ? `${percentage}% complete` : undefined,
-      );
-    },
-    async update(message) {
-      await store.updateTaskStatus(taskId, 'working', message);
     },
   };
 }

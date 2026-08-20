@@ -1,11 +1,13 @@
 /**
- * @fileoverview End-to-end regression for issue #50 — SSE per-request cleanup.
+ * @fileoverview End-to-end regression for SSE stream cleanup (issue #50).
  * Boots a real MCP server subprocess in stateful HTTP mode, opens SSE GET
  * streams, ungracefully aborts them (mirroring real-client disconnects that
- * never send DELETE), and asserts the server stays healthy and never logs a
- * close-failure warning. Catches reintroduction of the leak path in
- * `httpTransport.ts` (skipping `closePerRequestInstances` for SSE without a
- * compensating abort hook).
+ * never send DELETE), and asserts the server stays healthy and quiet.
+ *
+ * The per-request close machinery this originally guarded is gone — a session's
+ * `McpServer` and transport now live for the session and are closed by
+ * `SessionStore.terminate`. The abort traffic still has to leave the server
+ * usable, which is what these cases pin.
  * @module tests/integration/http-sse-abort
  */
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
@@ -120,12 +122,12 @@ describe('HTTP SSE abort cleanup (issue #50)', () => {
     expect(((await health.json()) as { status: string }).status).toBe('ok');
   });
 
-  it('logs no close-failure warnings during abort cycles', async () => {
+  it('logs no close failures or unhandled rejections during abort cycles', async () => {
     // Drain any deferred logger flushes from prior tests.
     await new Promise((r) => setTimeout(r, 200));
 
-    expect(serverOutput).not.toMatch(/Failed to close (transport|server)/);
-    expect(serverOutput).not.toMatch(/mcp\.http\.close_failures/);
+    expect(serverOutput).not.toMatch(/Failed to close a session surface/);
+    expect(serverOutput).not.toMatch(/UnhandledPromiseRejection/);
   });
 
   it('a normal POST still works after a long sequence of SSE aborts', async () => {
@@ -145,8 +147,7 @@ describe('HTTP SSE abort cleanup (issue #50)', () => {
       headers: { 'Mcp-Session-Id': sid, 'MCP-Protocol-Version': PROTOCOL_VERSION },
     });
     expect(del.status).toBe(200);
-    const body = (await del.json()) as { status: string };
-    expect(body.status).toBe('terminated');
+    await del.body?.cancel().catch(() => {});
   });
 
   it('aborting a GET against an unknown session fails-closed', async () => {

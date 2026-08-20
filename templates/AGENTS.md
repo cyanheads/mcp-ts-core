@@ -4,7 +4,7 @@
 **Version:** 0.1.0
 **Framework:** [@cyanheads/mcp-ts-core](https://www.npmjs.com/package/@cyanheads/mcp-ts-core) `^{{FRAMEWORK_VERSION}}`
 **Engines:** Bun ≥1.3.0, Node ≥24.0.0
-**MCP SDK:** `@modelcontextprotocol/sdk` {{MCP_SDK_VERSION}}
+**MCP SDK:** `@modelcontextprotocol/server` {{MCP_SDK_VERSION}}
 **Zod:** {{ZOD_VERSION}}
 
 > **Read the framework docs first:** `node_modules/@cyanheads/mcp-ts-core/CLAUDE.md` contains the full API reference — builders, Context, error codes, exports, patterns. This file covers server-specific conventions only.

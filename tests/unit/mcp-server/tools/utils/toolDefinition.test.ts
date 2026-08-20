@@ -37,7 +37,6 @@ describe('ToolDefinition', () => {
       input: inputSchema,
       output: outputSchema,
       auth: ['tool:full:read'],
-      task: false,
       title: 'Full Tool',
       annotations: { readOnlyHint: true },
       _meta: { version: '1.0' },
@@ -46,7 +45,6 @@ describe('ToolDefinition', () => {
     };
 
     expect(definition.auth).toEqual(['tool:full:read']);
-    expect(definition.task).toBe(false);
     expect(definition.title).toBe('Full Tool');
     expect(definition.annotations?.readOnlyHint).toBe(true);
     expect(definition._meta?.version).toBe('1.0');
@@ -240,18 +238,6 @@ describe('tool() builder', () => {
     expect(def.annotations?.openWorldHint).toBe(false);
   });
 
-  it('preserves task flag', () => {
-    const def = tool('task_tool', {
-      description: 'Task tool',
-      task: true,
-      input: z.object({ count: z.number().describe('Count') }),
-      output: z.object({ done: z.boolean() }),
-      handler: async () => ({ done: true }),
-    });
-
-    expect(def.task).toBe(true);
-  });
-
   it('preserves format function', () => {
     const def = tool('formatted_tool', {
       description: 'Formatted',
@@ -288,5 +274,39 @@ describe('tool() builder', () => {
     });
 
     expect(def.title).toBe('My Titled Tool');
+  });
+});
+
+describe('tool() strict input (#232)', () => {
+  const strictInputTool = tool('strict_input_tool', {
+    description: 'Rejects unrecognized argument keys.',
+    input: z.object({ query: z.string().describe('Search query') }),
+    output: z.object({ ok: z.boolean().describe('ok') }),
+    handler: () => ({ ok: true }),
+  });
+
+  it('rejects an unknown argument key instead of stripping it', () => {
+    const parsed = strictInputTool.input.safeParse({ query: 'widget', qeury: 'widget' });
+
+    expect(parsed.success).toBe(false);
+    expect(parsed.error?.issues.map((issue) => issue.code)).toContain('unrecognized_keys');
+  });
+
+  it('still accepts input containing only declared keys', () => {
+    expect(strictInputTool.input.parse({ query: 'widget' })).toEqual({ query: 'widget' });
+  });
+
+  it('carries additionalProperties: false into the advertised input JSON Schema', () => {
+    // The SDK converts `input` with `io: 'input'`; only `.strict()` surfaces
+    // there, so a client sees the same rejection the parse performs.
+    const emitted = z.toJSONSchema(strictInputTool.input, { io: 'input' });
+
+    expect(emitted.additionalProperties).toBe(false);
+    // The raw schema handed to `tool()` carries no such constraint — the
+    // builder is what adds it.
+    expect(
+      z.toJSONSchema(z.object({ query: z.string().describe('Search query') }), { io: 'input' })
+        .additionalProperties,
+    ).toBeUndefined();
   });
 });

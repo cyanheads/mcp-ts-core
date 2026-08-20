@@ -7,7 +7,7 @@
  * @module src/mcp-server/apps/appBuilders
  */
 
-import type { ReadResourceResult } from '@modelcontextprotocol/sdk/types.js';
+import type { ReadResourceResult } from '@modelcontextprotocol/server';
 import type { ZodObject, ZodRawShape } from 'zod';
 
 import type { ResourceDefinition } from '@/mcp-server/resources/utils/resourceDefinition.js';

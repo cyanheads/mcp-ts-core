@@ -6,6 +6,7 @@
  */
 
 import { describe, expect, it, vi } from 'vitest';
+import { z } from 'zod';
 import { McpError } from '@/types-global/errors.js';
 
 // ---------------------------------------------------------------------------
@@ -52,9 +53,15 @@ vi.mock('@/utils/internal/logger.js', () => ({
 
 import type { ContextDeps } from '@/core/context.js';
 import { createContext } from '@/core/context.js';
+import {
+  createContextInputs,
+  createRequestInput,
+  isInputRequiredSignal,
+} from '@/mcp-server/inputRequired.js';
 import { createMockContext } from '@/testing/index.js';
 import type { Logger } from '@/utils/internal/logger.js';
 import { createFakeStorage, makeRequestContext } from '../../helpers/index.js';
+import { makeServerContext } from '../../helpers/server-context.js';
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -63,7 +70,9 @@ import { createFakeStorage, makeRequestContext } from '../../helpers/index.js';
 function makeRealContext(overrides: Partial<ContextDeps> = {}) {
   return createContext({
     appContext: makeRequestContext((overrides as any).appContextOverrides),
+    inputs: createContextInputs(undefined),
     logger: mockLogger as unknown as Logger,
+    requestInput: createRequestInput(),
     storage: createFakeStorage() as unknown as ContextDeps['storage'],
     signal: new AbortController().signal,
     ...overrides,
@@ -88,10 +97,43 @@ describe('createMockContext fidelity', () => {
       const mockKeys = new Set(Object.keys(mock));
 
       // Both should have the same core fields
-      for (const key of ['requestId', 'timestamp', 'log', 'state', 'signal']) {
+      for (const key of [
+        'requestId',
+        'timestamp',
+        'log',
+        'state',
+        'signal',
+        'inputs',
+        'requestInput',
+        'content',
+        'enrich',
+        'recoveryFor',
+      ]) {
         expect(realKeys.has(key), `real missing ${key}`).toBe(true);
         expect(mockKeys.has(key), `mock missing ${key}`).toBe(true);
       }
+    });
+
+    it('should carry neither of the removed elicit/progress fields', () => {
+      const real = makeRealContext();
+      const mock = createMockContext({ tenantId: 'test' });
+
+      for (const key of ['elicit', 'progress']) {
+        expect(real, `real still has ${key}`).not.toHaveProperty(key);
+        expect(mock, `mock still has ${key}`).not.toHaveProperty(key);
+      }
+    });
+
+    it('should expose the same ContextInputs methods', () => {
+      const real = makeRealContext();
+      const mock = createMockContext();
+
+      for (const method of ['accepted', 'state', 'view'] as const) {
+        expect(typeof real.inputs[method], `real.inputs.${method}`).toBe('function');
+        expect(typeof mock.inputs[method], `mock.inputs.${method}`).toBe('function');
+      }
+      expect(Array.isArray(real.inputs.dropped)).toBe(true);
+      expect(Array.isArray(mock.inputs.dropped)).toBe(true);
     });
 
     it('should expose the same ContextLogger methods', () => {
@@ -206,18 +248,78 @@ describe('createMockContext fidelity', () => {
       expect(mock.signal.aborted).toBe(true);
     });
 
-    it('elicit should pass through when provided', () => {
-      const elicit = vi.fn();
+    it('mock ctx.inputs reads a seeded round exactly as the production reader does', () => {
+      const inputResponses = {
+        confirm: { action: 'accept', content: { ok: true } },
+        declined: { action: 'decline' },
+        malformed: { action: 'accept', content: { ok: 'yes' } },
+      };
+      const requestState = { attempt: 2 };
+      const schema = z.object({ ok: z.boolean() });
 
       const real = makeRealContext({
-        elicit: elicit as any,
+        inputs: createContextInputs(makeServerContext({ inputResponses, requestState }).mcpReq),
       });
-      const mock = createMockContext({
-        elicit: elicit as any,
-      });
+      const mock = createMockContext({ inputResponses, requestState });
 
-      expect(real.elicit).toBe(elicit);
-      expect(mock.elicit).toBe(elicit);
+      // Anchor the comparison: a parity assertion between two `undefined`s
+      // would pass even if both readers were broken.
+      expect(real.inputs.accepted('confirm', schema)).toEqual({ ok: true });
+      expect(real.inputs.view('declined')).toEqual({ kind: 'elicit', action: 'decline' });
+      expect(real.inputs.state()).toEqual({ attempt: 2 });
+
+      // accepted(): validated content, and undefined for decline / failed
+      // validation / an unasked key — the four cases a handler branches on.
+      expect(mock.inputs.accepted('confirm', schema)).toEqual(
+        real.inputs.accepted('confirm', schema),
+      );
+      expect(mock.inputs.accepted('confirm')).toEqual(real.inputs.accepted('confirm'));
+      expect(mock.inputs.accepted('declined')).toBe(real.inputs.accepted('declined'));
+      expect(mock.inputs.accepted('malformed', schema)).toBe(
+        real.inputs.accepted('malformed', schema),
+      );
+      expect(mock.inputs.accepted('never-asked')).toBe(real.inputs.accepted('never-asked'));
+
+      // view(): the discriminated view, including the missing-key kind.
+      expect(mock.inputs.view('confirm')).toEqual(real.inputs.view('confirm'));
+      expect(mock.inputs.view('declined')).toEqual(real.inputs.view('declined'));
+      expect(mock.inputs.view('never-asked')).toEqual(real.inputs.view('never-asked'));
+
+      // state(): the round's multi-round-trip state.
+      expect(mock.inputs.state()).toEqual(real.inputs.state());
+    });
+
+    it('both leave ctx.inputs empty on the first round', () => {
+      const real = makeRealContext();
+      const mock = createMockContext();
+
+      expect(mock.inputs.responses).toBe(real.inputs.responses);
+      expect(mock.inputs.dropped).toEqual(real.inputs.dropped);
+      expect(mock.inputs.state()).toBe(real.inputs.state());
+      expect(mock.inputs.view('anything')).toEqual(real.inputs.view('anything'));
+    });
+
+    it('ctx.requestInput throws the same input_required signal on both', () => {
+      const real = makeRealContext();
+      const mock = createMockContext();
+
+      const capture = (fn: () => never): unknown => {
+        try {
+          fn();
+        } catch (error) {
+          return error;
+        }
+        throw new Error('requestInput returned instead of throwing');
+      };
+
+      const realThrown = capture(() => real.requestInput({ requestState: 'round-1' }));
+      const mockThrown = capture(() => mock.requestInput({ requestState: 'round-1' }));
+
+      expect(isInputRequiredSignal(realThrown)).toBe(true);
+      expect(isInputRequiredSignal(mockThrown)).toBe(true);
+      expect((mockThrown as { result: unknown }).result).toEqual(
+        (realThrown as { result: unknown }).result,
+      );
     });
 
     it('uri should pass through when provided', () => {
@@ -245,24 +347,6 @@ describe('createMockContext fidelity', () => {
 
       expect(real.notifyResourceListChanged).toBe(notifyResourceListChanged);
       expect(mock.notifyResourceListChanged).toBe(notifyResourceListChanged);
-    });
-
-    it('progress should be available when requested', async () => {
-      const mockStore = { updateTaskStatus: vi.fn() };
-      const real = makeRealContext({
-        taskCtx: { store: mockStore as any, taskId: 'task-1' },
-      });
-      const mock = createMockContext({ progress: true });
-
-      expect(real.progress).toBeDefined();
-      expect(mock.progress).toBeDefined();
-
-      // Both should support the same methods
-      const progressMethods = ['setTotal', 'increment', 'update'] as const;
-      for (const method of progressMethods) {
-        expect(typeof real.progress![method]).toBe('function');
-        expect(typeof mock.progress![method]).toBe('function');
-      }
     });
   });
 });

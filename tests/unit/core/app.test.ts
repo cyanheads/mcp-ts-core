@@ -26,7 +26,6 @@ const {
   mockResourceRegistry,
   mockSchedulerService,
   mockShutdownOpenTelemetry,
-  mockTaskManager,
   mockToolRegistry,
   mockTransportManager,
   mockWithSpan,
@@ -36,7 +35,6 @@ const {
   MockResourceRegistry,
   MockSpeechService,
   MockStorageService,
-  MockTaskManager,
   MockToolRegistry,
   MockTransportManager,
 } = vi.hoisted(() => {
@@ -75,9 +73,6 @@ const {
           url?: string | undefined;
         }
       | undefined,
-    tasks: {
-      defaultTtlMs: 60_000,
-    },
   };
 
   const mockLogger = {
@@ -121,17 +116,6 @@ const {
   };
   const MockSpeechService = vi.fn(function MockSpeechService() {
     return mockSpeechService.instance;
-  });
-
-  const mockTaskManager = {
-    instance: {
-      cleanup: vi.fn(),
-      getMessageQueue: vi.fn(() => 'task-message-queue'),
-      getTaskStore: vi.fn(() => 'task-store'),
-    },
-  };
-  const MockTaskManager = vi.fn(function MockTaskManager() {
-    return mockTaskManager.instance;
   });
 
   const mockToolRegistry = { instance: { kind: 'tool-registry' } };
@@ -208,7 +192,6 @@ const {
     mockResourceRegistry,
     mockSchedulerService,
     mockShutdownOpenTelemetry,
-    mockTaskManager,
     mockToolRegistry,
     mockTransportManager,
     mockWithSpan,
@@ -218,7 +201,6 @@ const {
     MockResourceRegistry,
     MockSpeechService,
     MockStorageService,
-    MockTaskManager,
     MockToolRegistry,
     MockTransportManager,
   };
@@ -241,10 +223,6 @@ vi.mock('@/mcp-server/resources/resource-registration.js', () => ({
 
 vi.mock('@/mcp-server/server.js', () => ({
   createMcpServerInstance: mockCreateMcpServerInstance,
-}));
-
-vi.mock('@/mcp-server/tasks/core/taskManager.js', () => ({
-  TaskManager: MockTaskManager,
 }));
 
 vi.mock('@/mcp-server/tools/tool-registration.js', () => ({
@@ -494,15 +472,12 @@ describe('core/app', () => {
       tools: 1,
     });
 
-    await composed.createServer();
+    await composed.createServer({ era: 'modern' });
 
     expect(mockCreateMcpServerInstance).toHaveBeenCalledWith({
-      advertiseTasks: false,
       config: mockConfig,
       promptRegistry: mockPromptRegistry.instance,
       resourceRegistry: mockResourceRegistry.instance,
-      taskMessageQueue: 'task-message-queue',
-      taskStore: 'task-store',
       toolRegistry: mockToolRegistry.instance,
     });
   });
@@ -516,7 +491,7 @@ describe('core/app', () => {
       icons,
     });
 
-    await composed.createServer();
+    await composed.createServer({ era: 'modern' });
 
     expect(mockCreateMcpServerInstance).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -554,7 +529,6 @@ describe('core/app', () => {
       mockConfig,
       mockLogger,
       expect.any(Function),
-      mockTaskManager.instance,
       expect.objectContaining({
         definitionCounts: { prompts: 0, resources: 0, tools: 0 },
         server: expect.objectContaining({ name: 'mock-server', version: '1.0.0' }),
@@ -590,14 +564,10 @@ describe('core/app', () => {
     expect(processRemoveListenerSpy).toHaveBeenCalledWith('SIGINT', expect.any(Function));
     expect(mockTransportManager.instance.stop).toHaveBeenCalledTimes(1);
     expect(mockTransportManager.instance.stop).toHaveBeenCalledWith('SIGTERM');
-    expect(mockTaskManager.instance.cleanup).toHaveBeenCalledTimes(1);
     expect(mockRateLimiter.instance.dispose).toHaveBeenCalledTimes(1);
     expect(mockSchedulerService.destroyAll).toHaveBeenCalledTimes(1);
     expect(mockShutdownOpenTelemetry).toHaveBeenCalledTimes(1);
     expect(mockLogger.close).toHaveBeenCalledTimes(1);
-    expect(mockTaskManager.instance.cleanup).toHaveBeenCalledTimes(1);
-    expect(mockRateLimiter.instance.dispose).toHaveBeenCalledTimes(1);
-    expect(mockSchedulerService.destroyAll).toHaveBeenCalledTimes(1);
   });
 
   it('exposes executable process gauge callbacks', async () => {
@@ -676,7 +646,6 @@ describe('core/app', () => {
     expect(processRemoveListenerSpy).toHaveBeenCalledWith('SIGINT', expect.any(Function));
     expect(mockTransportManager.instance.stop).toHaveBeenCalledOnce();
     expect(mockTransportManager.instance.stop).toHaveBeenCalledWith('STARTUP_FAILURE');
-    expect(mockTaskManager.instance.cleanup).toHaveBeenCalledOnce();
     expect(mockRateLimiter.instance.dispose).toHaveBeenCalledOnce();
     expect(mockSchedulerService.destroyAll).toHaveBeenCalledOnce();
     expect(mockShutdownOpenTelemetry).toHaveBeenCalledOnce();
@@ -877,30 +846,6 @@ describe('core/app', () => {
 
     expect(MockSpeechService).toHaveBeenCalledWith(undefined, mockConfig.speech.stt);
     expect(composed.coreServices.speechService).toBeDefined();
-  });
-
-  it('sets advertiseTasks=true when a tool declares task: true', async () => {
-    const composed = await composeServices({
-      tools: [{ name: 'task-tool', task: true }] as never[],
-    });
-
-    await composed.createServer();
-
-    expect(mockCreateMcpServerInstance).toHaveBeenCalledWith(
-      expect.objectContaining({ advertiseTasks: true }),
-    );
-  });
-
-  it('sets advertiseTasks=true when a tool definition has the task-tool shape (taskHandlers present)', async () => {
-    const composed = await composeServices({
-      tools: [{ name: 'handler-tool', taskHandlers: {} }] as never[],
-    });
-
-    await composed.createServer();
-
-    expect(mockCreateMcpServerInstance).toHaveBeenCalledWith(
-      expect.objectContaining({ advertiseTasks: true }),
-    );
   });
 
   it('exposes canvas on coreServices when createCanvasService returns an instance', async () => {

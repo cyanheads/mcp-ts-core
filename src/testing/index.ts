@@ -9,15 +9,17 @@
 import type {
   CallToolResult,
   ContentBlock,
-  ElicitResult,
-} from '@modelcontextprotocol/sdk/types.js';
+  InputRequiredResult,
+  InputResponses,
+  InputResponseView,
+} from '@modelcontextprotocol/server';
+import { acceptedContent, inputResponse } from '@modelcontextprotocol/server';
 import type { z } from 'zod';
 import type {
   AuthContext,
   Context,
+  ContextInputs,
   ContextLogger,
-  ContextProgress,
-  ElicitFn,
   HandlerContext,
   ReasonOf,
 } from '@/core/context.js';
@@ -33,6 +35,7 @@ import {
   stashContentStore,
   stashEnrichmentStore,
 } from '@/core/context.js';
+import { createRequestInput, isInputRequiredSignal } from '@/mcp-server/inputRequired.js';
 import type { AnyToolDefinition } from '@/mcp-server/tools/utils/toolDefinition.js';
 import {
   buildToolSuccessResult,
@@ -63,13 +66,6 @@ export interface MockContextOptions<
   /** Auth context. */
   auth?: AuthContext;
   /**
-   * Mock elicitation handler for form-mode elicitation. When provided, the
-   * mock context's `ctx.elicit` is set to this function with a default no-op
-   * `.url(...)` stub attached — tests that only exercise form-mode elicitation
-   * don't need to supply `.url` explicitly.
-   */
-  elicit?: (message: string, schema: z.ZodObject<z.ZodRawShape>) => Promise<ElicitResult>;
-  /**
    * Error contract to attach a typed `ctx.fail` against. Pass the definition's
    * own `errors` array (`createMockContext({ errors: myTool.errors })`) so the
    * mock's `fail` matches what the production handler factory wires up. Tests
@@ -80,6 +76,12 @@ export interface MockContextOptions<
    * directly under `exactOptionalPropertyTypes`.
    */
   errors?: TErrors | undefined;
+  /**
+   * Input responses a retried request would carry, keyed by the identifiers a
+   * prior `ctx.requestInput(...)` assigned. Seeds `ctx.inputs` so a
+   * multi-round-trip handler can be driven through its second round directly.
+   */
+  inputResponses?: InputResponses | Record<string, unknown>;
   /** Mock prompt list changed notifier. */
   notifyPromptListChanged?: () => void;
   /** Mock resource list changed notifier. */
@@ -88,10 +90,10 @@ export interface MockContextOptions<
   notifyResourceUpdated?: (uri: string) => void;
   /** Mock tool list changed notifier. */
   notifyToolListChanged?: () => void;
-  /** Enable task progress (creates a mock ContextProgress). */
-  progress?: boolean;
   /** Request ID override. Defaults to 'test-request-id'. */
   requestId?: string;
+  /** Multi-round-trip state for this round. Seeds `ctx.inputs.state()`. */
+  requestState?: unknown;
   /**
    * HTTP session ID. Defaults to undefined. Set to exercise handlers that
    * branch on `ctx.sessionId` — mirrors what a stateful HTTP request would
@@ -152,39 +154,21 @@ export function createMockLogger(): MockContextLogger {
   };
 }
 
-function createMockProgress(): ContextProgress & {
-  _total: number;
-  _completed: number;
-  _messages: string[];
-} {
-  const state = { _total: 0, _completed: 0, _messages: [] as string[] };
+function createMockInputs(
+  responses: InputResponses | Record<string, unknown> | undefined,
+  requestState: unknown,
+): ContextInputs {
+  const accepted = ((key: string, schema?: Parameters<typeof acceptedContent>[2]) =>
+    schema === undefined
+      ? acceptedContent(responses, key)
+      : acceptedContent(responses, key, schema)) as ContextInputs['accepted'];
 
   return {
-    get _total() {
-      return state._total;
-    },
-    get _completed() {
-      return state._completed;
-    },
-    get _messages() {
-      return state._messages;
-    },
-    setTotal(n) {
-      state._total = n;
-      state._completed = 0;
-      return Promise.resolve();
-    },
-    increment(amount = 1) {
-      state._completed = Math.min(
-        state._completed + amount,
-        state._total || state._completed + amount,
-      );
-      return Promise.resolve();
-    },
-    update(message) {
-      state._messages.push(message);
-      return Promise.resolve();
-    },
+    accepted,
+    dropped: [],
+    responses,
+    state: <T>(): T | undefined => requestState as T | undefined,
+    view: (key: string): InputResponseView => inputResponse(responses, key),
   };
 }
 
@@ -218,8 +202,8 @@ const DEFAULT_MOCK_TENANT_ID = 'default';
  * // Typed ctx.fail against a definition's contract
  * const ctx = createMockContext({ errors: myTool.errors });
  *
- * // With task progress
- * const ctx = createMockContext({ progress: true });
+ * // Second round of a multi-round-trip handler
+ * const ctx = createMockContext({ inputResponses: { confirm: { action: 'accept', content: { ok: true } } } });
  * ```
  */
 export function createMockContext<
@@ -235,21 +219,9 @@ export function createMockContext<
     { requestId, timestamp, operation: 'createMockContext', tenantId },
     signal,
   );
-  const progress = options.progress ? createMockProgress() : undefined;
 
   const enrichmentStore = createEnrichmentStore();
   const contentStore = createContentStore();
-
-  // Wrap the caller's elicit mock into an ElicitFn so that tests calling
-  // ctx.elicit.url(...) don't throw TypeError. The default url stub returns a
-  // cancelled result and can be overridden by casting the mock to ElicitFn.
-  let elicit: ElicitFn | undefined;
-  if (options.elicit) {
-    const base = options.elicit as ElicitFn;
-    base.url = async (_message: string, _url: string): Promise<ElicitResult> =>
-      ({ action: 'cancel' }) as ElicitResult;
-    elicit = base;
-  }
 
   const ctx: Context = {
     requestId,
@@ -260,12 +232,12 @@ export function createMockContext<
     tenantId,
     sessionId: options.sessionId,
     auth: options.auth,
-    elicit,
+    inputs: createMockInputs(options.inputResponses, options.requestState),
+    requestInput: createRequestInput(),
     notifyPromptListChanged: options.notifyPromptListChanged,
     notifyResourceListChanged: options.notifyResourceListChanged,
     notifyResourceUpdated: options.notifyResourceUpdated,
     notifyToolListChanged: options.notifyToolListChanged,
-    progress,
     uri: options.uri,
     content: createContentCollect(contentStore),
     enrich: createEnrich(enrichmentStore),
@@ -577,4 +549,44 @@ export async function runToolContract<TDefinition extends AnyToolDefinition>(
  */
 export function createInMemoryStorage(options?: InMemoryProviderOptions): StorageService {
   return new StorageService(new InMemoryProvider(options));
+}
+
+// ---------------------------------------------------------------------------
+// Multi-round-trip input
+// ---------------------------------------------------------------------------
+
+/**
+ * Runs a handler and returns the `input_required` result it asked for.
+ *
+ * `ctx.requestInput(...)` never returns — it throws a control-flow signal the
+ * handler factory converts into the protocol result — so a direct unit test of
+ * a multi-round-trip handler has to catch it. Drive the next round by feeding
+ * the answers back through `createMockContext({ inputResponses, requestState })`.
+ *
+ * @throws When the handler returned normally or failed for any other reason —
+ *   the original error propagates untouched.
+ *
+ * @example
+ * ```ts
+ * const asked = await expectInputRequired(() => deleteTool.handler({ path }, ctx));
+ * expect(asked.inputRequests?.confirm?.method).toBe('elicitation/create');
+ *
+ * const answered = createMockContext({
+ *   inputResponses: { confirm: { action: 'accept', content: { ok: true } } },
+ *   requestState: asked.requestState,
+ * });
+ * expect(await deleteTool.handler({ path }, answered)).toEqual({ deleted: true });
+ * ```
+ */
+export async function expectInputRequired(run: () => unknown): Promise<InputRequiredResult> {
+  let returned: unknown;
+  try {
+    returned = await run();
+  } catch (error) {
+    if (isInputRequiredSignal(error)) return error.result;
+    throw error;
+  }
+  throw new Error(
+    `Expected the handler to request input, but it returned: ${JSON.stringify(returned)}`,
+  );
 }

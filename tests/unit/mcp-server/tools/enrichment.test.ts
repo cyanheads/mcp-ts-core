@@ -9,10 +9,10 @@
  * @module tests/unit/mcp-server/tools/enrichment.test
  */
 
-import type { RequestHandlerExtra } from '@modelcontextprotocol/sdk/shared/protocol.js';
-import type { ServerNotification, ServerRequest } from '@modelcontextprotocol/sdk/types.js';
+import type { CallToolResult, ContentBlock } from '@modelcontextprotocol/server';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { z } from 'zod';
+import { makeServerContext } from '../../../helpers/server-context.js';
 
 // ---------------------------------------------------------------------------
 // Module mocks — mirror toolHandlerFactory.test.ts so createToolHandler runs
@@ -81,18 +81,6 @@ import { createMockContext, getEnrichment } from '@/testing/index.js';
 // Helpers
 // ---------------------------------------------------------------------------
 
-type MockSdkContext = RequestHandlerExtra<ServerRequest, ServerNotification>;
-
-function createMockSdkContext(overrides: Record<string, unknown> = {}): MockSdkContext {
-  return {
-    signal: new AbortController().signal,
-    requestId: 'sdk-request-id',
-    sendNotification: () => Promise.resolve(),
-    sendRequest: () => Promise.resolve({}) as never,
-    ...overrides,
-  } as MockSdkContext;
-}
-
 const services: HandlerFactoryServices = {
   logger: mockLogger as any,
   storage: {
@@ -105,6 +93,14 @@ const services: HandlerFactoryServices = {
 };
 
 const notifiers: HandlerNotifiers = {};
+
+/**
+ * `content[]` of a completed tool result. Narrows off the `input_required`
+ * branch of the handler's return union, which carries no `content`.
+ */
+function blocks(result: Awaited<ReturnType<ReturnType<typeof createToolHandler>>>): ContentBlock[] {
+  return (result as CallToolResult).content ?? [];
+}
 
 /** Trailing content[] block text (the enrichment trailer, when present). */
 function lastText(content: unknown): string {
@@ -162,7 +158,7 @@ describe('enrichment block', () => {
       });
 
       const handler = createToolHandler(search as AnyToolDefinition, services, notifiers);
-      const result = await handler({ q: '  widget ' }, createMockSdkContext());
+      const result = await handler({ q: '  widget ' }, makeServerContext());
 
       expect(result.isError).toBeUndefined();
       // Enrichment merged into structuredContent (accumulates across enrich calls).
@@ -173,8 +169,8 @@ describe('enrichment block', () => {
         notice: 'No matches for "widget".',
       });
       // content[] = domain JSON block + enrichment trailer block.
-      expect(result.content!.length).toBe(2);
-      const domain = (result.content![0] as { text: string }).text;
+      expect(blocks(result).length).toBe(2);
+      const domain = (blocks(result)[0] as { text: string }).text;
       expect(JSON.parse(domain)).toEqual({ items: [] }); // domain payload only — no enrichment in the JSON
       const trailer = lastText(result.content);
       expect(trailer).toContain('effectiveQuery');
@@ -204,7 +200,7 @@ describe('enrichment block', () => {
       });
 
       const handler = createToolHandler(search as AnyToolDefinition, services, notifiers);
-      const result = await handler({ q: 'x' }, createMockSdkContext());
+      const result = await handler({ q: 'x' }, makeServerContext());
 
       const trailer = lastText(result.content);
       expect(trailer).toContain('Query: parsed terms');
@@ -232,7 +228,7 @@ describe('enrichment block', () => {
       });
 
       const handler = createToolHandler(search as AnyToolDefinition, services, notifiers);
-      const result = await handler({ q: 'x' }, createMockSdkContext());
+      const result = await handler({ q: 'x' }, makeServerContext());
 
       const texts = allText(result.content);
       // format() rendered the domain payload exactly once — and without enrichment in it.
@@ -260,7 +256,7 @@ describe('enrichment block', () => {
       });
 
       const handler = createToolHandler(t as AnyToolDefinition, services, notifiers);
-      const result = await handler({ q: 'x' }, createMockSdkContext());
+      const result = await handler({ q: 'x' }, makeServerContext());
 
       expect(result.structuredContent).toEqual({ items: ['x'], totalCount: 99 });
       expect(lastText(result.content)).toContain('99');
@@ -278,7 +274,7 @@ describe('enrichment block', () => {
       });
 
       const handler = createToolHandler(t as AnyToolDefinition, services, notifiers);
-      const result = await handler({ q: 'x' }, createMockSdkContext());
+      const result = await handler({ q: 'x' }, makeServerContext());
 
       // Surfaces as a tool error rather than silently dropping the contract.
       expect(result.isError).toBe(true);
@@ -296,7 +292,7 @@ describe('enrichment block', () => {
       });
 
       const handler = createToolHandler(t as AnyToolDefinition, services, notifiers);
-      const result = await handler({ q: 'x' }, createMockSdkContext());
+      const result = await handler({ q: 'x' }, makeServerContext());
 
       expect(result.structuredContent).toEqual({ items: ['a'] }); // no 'ignored'
       expect(result.content).toHaveLength(1); // domain only — no trailer
@@ -385,7 +381,7 @@ describe('enrichment block', () => {
       });
 
       const handler = createToolHandler(search as AnyToolDefinition, services, notifiers);
-      const result = await handler({ q: 'x' }, createMockSdkContext());
+      const result = await handler({ q: 'x' }, makeServerContext());
 
       const trailer = lastText(result.content);
       expect(trailer).toContain('### Applied Filters');
@@ -413,7 +409,7 @@ describe('enrichment block', () => {
       });
 
       const handler = createToolHandler(search as AnyToolDefinition, services, notifiers);
-      const result = await handler({ q: 'x' }, createMockSdkContext());
+      const result = await handler({ q: 'x' }, makeServerContext());
 
       const trailer = lastText(result.content);
       expect(trailer).toContain('**Total Found:** 2990');
@@ -434,7 +430,7 @@ describe('enrichment block', () => {
       });
 
       const handler = createToolHandler(t as AnyToolDefinition, services, notifiers);
-      const result = await handler({ q: 'x' }, createMockSdkContext());
+      const result = await handler({ q: 'x' }, makeServerContext());
 
       const trailer = lastText(result.content);
       expect(trailer).toContain('Found 42 records.');
@@ -461,7 +457,7 @@ describe('enrichment block', () => {
       });
 
       const handler = createToolHandler(writeTool as AnyToolDefinition, services, notifiers);
-      const result = await handler({ path: 'note.md' }, createMockSdkContext());
+      const result = await handler({ path: 'note.md' }, makeServerContext());
 
       const trailer = lastText(result.content);
       expect(trailer).toContain('0 → 68');
@@ -508,7 +504,7 @@ describe('enrichment block', () => {
         ...extra,
       } as any);
       const handler = createToolHandler(t as AnyToolDefinition, services, notifiers);
-      const result = await handler({ q: 'x' }, createMockSdkContext());
+      const result = await handler({ q: 'x' }, makeServerContext());
       expect(result.isError).toBeUndefined();
       return lastText(result.content);
     }

@@ -3,9 +3,9 @@
  * @module src/mcp-server/transports/ITransport
  */
 import type { ServerType } from '@hono/node-server';
-import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
+import type { StdioServerHandle } from '@modelcontextprotocol/server/stdio';
 
-export type TransportServer = ServerType | McpServer;
+export type TransportServer = ServerType | StdioServerHandle;
 
 /**
  * Transport lifecycle contract for HTTP and stdio transports.
