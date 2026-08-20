@@ -87,7 +87,7 @@ export class HeartbeatMonitor {
   constructor(opts: HeartbeatOptions, parentContext?: RequestContext) {
     this.opts = opts;
     this.context = requestContextService.createRequestContext({
-      ...(parentContext && { parentContext }),
+      parentContext,
       additionalContext: { component: 'HeartbeatMonitor', transport: opts.transport },
     });
     this.attrs = { [ATTR_MCP_CONNECTION_TRANSPORT]: opts.transport };

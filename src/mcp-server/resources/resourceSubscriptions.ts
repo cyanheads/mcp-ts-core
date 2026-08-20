@@ -28,10 +28,12 @@ import type { McpServer } from '@modelcontextprotocol/server';
 
 import type { ResourceSubscriptions } from '@/mcp-server/notifications.js';
 
-/** Subscription set for one connection, with the mutations the handlers need. */
+/**
+ * Read-only view of one connection's subscription set. The set is mutated only
+ * by the `resources/subscribe` / `resources/unsubscribe` handlers installed
+ * alongside it.
+ */
 export interface ResourceSubscriptionRegistry extends ResourceSubscriptions {
-  add: (uri: string) => void;
-  remove: (uri: string) => void;
   readonly size: number;
 }
 
@@ -57,9 +59,7 @@ export function installResourceSubscriptions(server: McpServer): ResourceSubscri
   });
 
   return {
-    add: (uri) => void subscribed.add(uri),
     has: (uri) => subscribed.has(uri),
-    remove: (uri) => void subscribed.delete(uri),
     get size() {
       return subscribed.size;
     },

@@ -25,7 +25,7 @@ import { logger } from '@/utils/internal/logger.js';
  * test scope may pass a stand-in without one, and callers fall back to the
  * server-level notifiers there.
  */
-export interface NotificationSender {
+interface NotificationSender {
   notify?: (notification: ServerNotification) => Promise<void>;
 }
 

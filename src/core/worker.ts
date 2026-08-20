@@ -322,7 +322,6 @@ export function createWorkerHandler(options: WorkerHandlerOptions = {}) {
           withExtra(requestContext, {
             method: request.method,
             ...requestUrlLogFields(request.url),
-            colo: cfProperties?.colo,
           }),
         );
 

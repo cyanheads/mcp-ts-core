@@ -192,7 +192,7 @@ export function effectiveOutputSchema(def: AnyToolDefinition): ZodObject<ZodRawS
  * carried as `examples` plus their `when` text in the description instead:
  * documented, not enforced.
  */
-function toolErrorEnvelopeSchema(def: AnyToolDefinition): ZodObject<ZodRawShape> {
+function toolErrorEnvelopeSchema(def: AnyToolDefinition): ZodType {
   const contract = def.errors ?? [];
   const reasons = contract.map((entry) => entry.reason);
   const reasonSchema =
@@ -220,7 +220,7 @@ function toolErrorEnvelopeSchema(def: AnyToolDefinition): ZodObject<ZodRawShape>
         retryable: z.boolean().optional().describe('Whether retrying may succeed.'),
       })
       .optional(),
-  }) as unknown as ZodObject<ZodRawShape>;
+  });
 }
 
 /**
@@ -266,8 +266,7 @@ export function advertisedOutputSchema(def: AnyToolDefinition): ZodObject<ZodRaw
   const optionalShape = Object.fromEntries(
     Object.entries(success.shape).map(([key, field]) => [key, (field as ZodType).optional()]),
   ) as ZodRawShape;
-  const catchall = (success as unknown as { _zod: { def: { catchall?: ZodType } } })._zod.def
-    .catchall;
+  const catchall = success.def.catchall;
   const base =
     catchall === undefined ? z.object(optionalShape) : z.object(optionalShape).catchall(catchall);
   const widened = base.extend({
@@ -276,8 +275,10 @@ export function advertisedOutputSchema(def: AnyToolDefinition): ZodObject<ZodRaw
       .describe('Present when the call failed. Absent on success.'),
   }) as ZodObject<ZodRawShape>;
 
-  const successBranch: Record<string, unknown> = { not: { required: ['error'] } };
-  if (requiredSuccessKeys.length > 0) successBranch.required = requiredSuccessKeys;
+  const successBranch = {
+    not: { required: ['error'] },
+    ...(requiredSuccessKeys.length > 0 && { required: requiredSuccessKeys }),
+  };
 
   // `.meta()` last: `.extend()` discards metadata, so the refinement has to be
   // attached to the final widened object or it is lost before emission.

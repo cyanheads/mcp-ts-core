@@ -5,12 +5,7 @@
  * @see {@link https://modelcontextprotocol.io/specification/2026-07-28/server/prompts | MCP Prompts}
  * @module src/mcp-server/prompts/prompt-registration
  */
-import type {
-  GetPromptResult,
-  InputRequiredResult,
-  McpServer,
-  PromptCallback,
-} from '@modelcontextprotocol/server';
+import type { GetPromptResult, InputRequiredResult, McpServer } from '@modelcontextprotocol/server';
 
 import { isInputRequiredSignal } from '@/mcp-server/inputRequired.js';
 import type { AnyPromptDefinition } from '@/mcp-server/prompts/utils/promptDefinition.js';
@@ -87,9 +82,7 @@ export class PromptRegistry {
               argsSchema: promptDef.args,
             }),
           },
-          (async (
-            args: Record<string, unknown>,
-          ): Promise<GetPromptResult | InputRequiredResult> => {
+          async (args: Record<string, unknown>): Promise<GetPromptResult | InputRequiredResult> => {
             try {
               const validatedArgs = promptDef.args ? promptDef.args.parse(args) : args;
               const messages = await measurePromptGeneration(
@@ -115,7 +108,7 @@ export class PromptRegistry {
                 ? handled
                 : new McpError(JsonRpcErrorCode.InternalError, handled.message);
             }
-          }) as PromptCallback<NonNullable<typeof promptDef.args>>,
+          },
         );
 
         this.logger.debug(`Registered prompt: ${promptDef.name}`, context);

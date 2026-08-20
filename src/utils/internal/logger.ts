@@ -141,9 +141,9 @@ function sanitizeValue(value: unknown, depth: number): unknown {
 /**
  * Pino `formatters.log` hook. Strips values that break pino-redact's wildcard
  * traversal on Node 25+ — notably `AbortSignal` (via `ctx.signal`) and the
- * method-bearing handles on the framework `Context` (`log`, `state`, `elicit`,
- * `sample`, `notifyResource*`, `progress`). Acts as a safety net for every log
- * call regardless of how callers shaped their bindings.
+ * method-bearing handles on the framework `Context` (`log`, `state`, `content`,
+ * `enrich`, `inputs`, `requestInput`, `notifyResource*`). Acts as a safety net
+ * for every log call regardless of how callers shaped their bindings.
  *
  * @internal Exported only for unit testing. Not part of the public API.
  */

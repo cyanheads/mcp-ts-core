@@ -428,7 +428,7 @@ export class ErrorHandler {
    * ```ts
    * const user = await ErrorHandler.tryCatch(
    *   () => db.findUser(id),
-   *   { operation: 'findUser', context: { requestId, userId: id } },
+   *   { operation: 'findUser', context: { requestId, extra: { userId: id } } },
    * );
    * ```
    */

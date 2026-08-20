@@ -137,6 +137,7 @@ export function createResourceHandler(
 ) => Promise<ReadResourceResult | InputRequiredResult> {
   const mimeType = def.mimeType ?? 'application/json';
   const formatter = def.format ?? defaultResponseFormatter;
+  const resourceName = def.name ?? def.uriTemplate;
 
   return async (
     uri,
@@ -183,7 +184,7 @@ export function createResourceHandler(
       },
       operation: 'HandleResourceRead',
       additionalContext: {
-        resourceName: def.name ?? def.uriTemplate,
+        resourceName,
         resourceUri,
         resourceHasQuery: uri.search.length > 0,
       },
@@ -220,7 +221,6 @@ export function createResourceHandler(
       );
 
       // Execute handler with performance measurement
-      const resourceName = def.name ?? def.uriTemplate;
       const handlerResult = await measureResourceExecution(
         () => Promise.resolve(def.handler(validatedParams, ctx)),
         { ...appContext, resourceName },

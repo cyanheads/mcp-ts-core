@@ -179,9 +179,10 @@ export function createStorageProvider(
       );
     default: {
       const exhaustiveCheck: never = providerType;
-      throw configurationError(`Unhandled storage provider type: ${String(exhaustiveCheck)}`, {
-        ...context,
-      });
+      throw configurationError(
+        `Unhandled storage provider type: ${String(exhaustiveCheck)}`,
+        context,
+      );
     }
   }
 }

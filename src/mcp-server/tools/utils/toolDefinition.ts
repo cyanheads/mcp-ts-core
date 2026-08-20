@@ -351,7 +351,6 @@ function assertErrorKeyUnreserved(
  * the input still strips unless it is strict in its own right.
  */
 function strictenInput<TInput extends ZodObject<ZodRawShape>>(input: TInput): TInput {
-  const declaresCatchall =
-    (input as unknown as { _zod: { def: { catchall?: unknown } } })._zod.def.catchall !== undefined;
+  const declaresCatchall = input.def.catchall !== undefined;
   return declaresCatchall ? input : (input.strict() as TInput);
 }

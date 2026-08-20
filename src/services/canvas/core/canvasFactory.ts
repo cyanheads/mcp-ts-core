@@ -60,7 +60,5 @@ export function createCanvasService(config: AppConfig): DataCanvas | undefined {
   }
 
   const exhaustive: never = providerType;
-  throw configurationError(`Unhandled canvas provider type: ${String(exhaustive)}`, {
-    ...context,
-  });
+  throw configurationError(`Unhandled canvas provider type: ${String(exhaustive)}`, context);
 }

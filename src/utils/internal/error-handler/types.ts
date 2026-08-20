@@ -7,18 +7,19 @@ import type { JsonRpcErrorCode } from '@/types-global/errors.js';
 import type { RequestContext } from '@/utils/internal/requestContext.js';
 
 /**
- * Arbitrary key-value context attached to an error for logging and tracing.
+ * Request context attached to an error for logging and tracing.
  *
- * Passed as `options.context` to `ErrorHandler.handleError`. All entries are merged
- * into the structured log record. `requestId` and `timestamp` receive special treatment:
- * if present and valid they are used directly; otherwise they are generated automatically.
+ * Passed as `options.context` to `ErrorHandler.handleError`. Closed like the
+ * {@link RequestContext} it partials — operation-specific keys go in `extra`.
+ * Canonical fields and `extra` are both merged into the structured log record.
+ * `requestId` and `timestamp` receive special treatment: if present and valid
+ * they are used directly; otherwise they are generated automatically.
  *
  * @example
  * ```ts
  * const ctx: ErrorContext = {
  *   requestId: 'req-abc123',
- *   userId: 'usr-456',
- *   resource: '/api/users',
+ *   extra: { userId: 'usr-456', resource: '/api/users' },
  * };
  * ErrorHandler.handleError(err, { operation: 'getUser', context: ctx });
  * ```
@@ -40,7 +41,7 @@ export interface ErrorContext extends Partial<RequestContext> {
  * ```ts
  * const opts: ErrorHandlerOptions = {
  *   operation: 'fetchArticle',
- *   context: { requestId: 'req-123', articleId: 'art-456' },
+ *   context: { requestId: 'req-123', extra: { articleId: 'art-456' } },
  *   input: { id: 'art-456' },
  *   rethrow: true,
  *   critical: false,

@@ -77,7 +77,6 @@ interface Session {
   clientId?: string;
   connection: SessionConnection;
   createdAt: Date;
-  id: string;
   /** Whether identity fields have been bound (atomic snapshot on first write). */
   identityBound: boolean;
   lastAccessedAt: Date;
@@ -161,7 +160,6 @@ export class SessionStore {
     const hasIdentity = !!(identity?.tenantId || identity?.clientId || identity?.subject);
     const now = new Date();
     const session: Session = {
-      id: sessionId,
       connection,
       createdAt: now,
       lastAccessedAt: now,

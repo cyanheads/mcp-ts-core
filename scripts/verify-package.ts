@@ -369,8 +369,6 @@ const invalidExpectedSubset: ToolContractSuccessCase<typeof echo> = {
 import type { ComposedApp } from '${pkg.name}';
 // @ts-expect-error Internal composition is not part of the root API.
 import { composeServices } from '${pkg.name}';
-// @ts-expect-error Internal task orchestration is not part of the root API.
-import type { TaskManager } from '${pkg.name}';
 // @ts-expect-error The framework's storage schema remains internal.
 import type { Database } from '${pkg.name}';
 // @ts-expect-error Internal manifest accounting remains private.
