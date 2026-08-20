@@ -327,7 +327,7 @@
     "js-yaml": "^5.2.2",
     "linkedom": "^0.18.13",
     "node-cron": "^4.6.0",
-    "openai": "^6.48.0",
+    "openai": "^6.48.0 || ^7.0.0",
     "papaparse": "^5.5.4",
     "partial-json": "^0.1.7",
     "pdf-lib": "^1.17.1",
