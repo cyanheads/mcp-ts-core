@@ -44,7 +44,7 @@ Both paths share the same public API. Init copies starter `package.json`, config
 
 | Subpath | Key Exports | Purpose |
 |:--------|:------------|:--------|
-| `@cyanheads/mcp-ts-core` | `createApp`, `tool`, `resource`, `prompt`, `appTool`, `appResource`, `APP_RESOURCE_MIME_TYPE`, `Context`, `createFail`, `createRecoveryFor`, `TypedFail`, `TypedRecoveryFor`, `ReasonOf`, `HandlerContext`, `Enrich`, `EnrichHelpers`, `TypedEnrich`, `ContentCollect`, `ContentBlock`, `z`, `completable`, `isCompletable`, `CompleteCallback`, `CompleteResourceTemplateCallback` | Main entry point |
+| `@cyanheads/mcp-ts-core` | `createApp`, `tool`, `resource`, `prompt`, `appTool`, `appResource`, `APP_RESOURCE_MIME_TYPE`, `headerParam`, `Context`, `createFail`, `createRecoveryFor`, `TypedFail`, `TypedRecoveryFor`, `ReasonOf`, `HandlerContext`, `Enrich`, `EnrichHelpers`, `TypedEnrich`, `ContentCollect`, `ContentBlock`, `z`, `completable`, `isCompletable`, `CompleteCallback`, `CompleteResourceTemplateCallback`, `CacheHint`, `CacheHints`, `CacheScope` | Main entry point |
 | `/worker` | `createWorkerHandler`, `CloudflareBindings` | Cloudflare Workers entry |
 | `/tools` | `ToolDefinition`, `AnyToolDefinition`, `ToolAnnotations` | Tool definition types |
 | `/resources` | `ResourceDefinition`, `AnyResourceDefinition` | Resource definition types |
@@ -115,7 +115,7 @@ await createApp({
 
 **Identity fields** — Optional `title`, `websiteUrl`, `description`, `icons` (SEP-973) pass through to the SDK's `initialize` serverInfo and to the server manifest, keeping the `/.well-known/mcp.json` server card and landing page consistent with what `initialize` reports. Explicit `description` wins over `MCP_SERVER_DESCRIPTION`/package.json.
 
-**Also available** — `landing` (`LandingConfig`, HTTP transport only: landing-page config, all fields optional) and `context: { exposeStatelessSessionId }` (populate `ctx.sessionId` from the SDK's per-request token in stateless HTTP mode; default `false`).
+**Also available** — `landing` (`LandingConfig`, HTTP transport only: landing-page config, all fields optional), `context: { exposeStatelessSessionId }` (populate `ctx.sessionId` from the SDK's per-request token in stateless HTTP mode; default `false`), and `cacheHints` (2026-07-28 `ttlMs`/`cacheScope` per cacheable operation — see Adding a Resource for the per-resource override).
 
 ### Cloudflare Workers — `createWorkerHandler(options)`
 
@@ -243,6 +243,8 @@ export const myTool = tool('my_tool', {
 
 **Strict input:** `tool()` stores `input.strict()`, so an unrecognized argument key is rejected by name before the handler runs and `inputSchema` advertises `additionalProperties: false`. Root-level only — a nested `z.object()` still strips unless it is strict itself. An explicit `.passthrough()` / `.catchall()` is honored.
 
+**Header-mirrored input (2026-07-28):** `headerParam(z.string(), 'Region')` designates an input property with `x-mcp-header`, so its value also rides an `Mcp-Param-Region` request header and an intermediary can read it without parsing the body. Mirroring, not relocation — the handler still reads the argument from the body, and nothing else about the field changes. Only a primitive-typed (`string`/`integer`/`number`/`boolean`) property statically reachable through a chain of `properties` keys qualifies: an array element, a `z.record()` value, and every field of a discriminated-union input root are unreachable, and header names must be RFC 9110 tokens, case-insensitively unique per schema. `tool()` rejects a violation at definition time naming the field path — the SDK only warns, then conforming Streamable HTTP clients drop the tool. Lint rule: `header-param-designation`.
+
 **Advertised vs. parsed output:** `tools/list` advertises a widened schema (success fields optional, `error` declared) so an error envelope validates in strict clients; the framework still parses success results against the strict `output` (+ `enrichment`).
 
 ---
@@ -269,6 +271,8 @@ export const myResource = resource('myscheme://{itemId}/data', {
 ```
 
 Handler receives `(params, ctx)` — URI on `ctx.uri` if needed. Optional `size` (bytes) for content size metadata. Large lists must use `extractCursor`/`paginateArray` from `/utils`.
+
+**Cache hints (2026-07-28).** `cacheHint: { ttlMs, cacheScope }` on a resource sets what a client may cache that resource's `resources/read` result for. It overrides `createApp({ cacheHints })`'s `resources/read` entry field by field — a field left unset falls back to that per-operation hint, then to the SDK defaults (`ttlMs: 0`, `cacheScope: 'private'`). `ttlMs` must be a non-negative safe integer; an invalid value fails at startup naming the field. 2025-era responses are unaffected.
 
 ---
 

@@ -13,6 +13,7 @@ import {
   lintCanvasConsumerPairing,
   lintToolDefinition,
 } from '@/linter/rules/tool-rules.js';
+import { headerParam } from '@/mcp-server/tools/utils/headerParam.js';
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -439,5 +440,41 @@ describe('lintAuthScopes', () => {
   it('errors on empty string in array', () => {
     const diagnostics = lintAuthScopes(['scope:read', ''], 'tool', 'test');
     expect(diagnostics).toContainEqual(expect.objectContaining({ rule: 'auth-scope-format' }));
+  });
+});
+
+// ---------------------------------------------------------------------------
+// header-param-designation wiring
+// ---------------------------------------------------------------------------
+
+describe('header-param-designation', () => {
+  it('is not raised for a legal designation', () => {
+    const diagnostics = lintToolDefinition(
+      validTool({
+        input: z.object({
+          routing: z
+            .object({ region: headerParam(z.string(), 'Region').describe('Region.') })
+            .describe('Routing.'),
+        }),
+      }),
+    );
+
+    expect(diagnostics.map((d) => d.rule)).not.toContain('header-param-designation');
+  });
+
+  it('is raised as an error for an unreachable designation', () => {
+    const diagnostics = lintToolDefinition(
+      validTool({
+        input: z.object({
+          rows: z
+            .array(z.object({ region: headerParam(z.string(), 'Region').describe('Region.') }))
+            .describe('Rows.'),
+        }),
+      }),
+    );
+
+    const diagnostic = diagnostics.find((d) => d.rule === 'header-param-designation');
+    expect(diagnostic).toMatchObject({ severity: 'error', definitionName: 'test_tool' });
+    expect(diagnostic?.message).toContain('input.rows[].region');
   });
 });

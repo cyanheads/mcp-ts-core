@@ -26,6 +26,12 @@ export { createApp } from '@/core/app.js';
 export type { LandingConfig, LandingLink } from '@/core/serverManifest.js';
 
 // ---------------------------------------------------------------------------
+// Cache hints (MCP 2026-07-28)
+// ---------------------------------------------------------------------------
+
+export type { CacheableResultMethod, CacheHints } from '@/mcp-server/cacheHints.js';
+
+// ---------------------------------------------------------------------------
 // Zod re-export (consumers use the framework's copy, no separate zod dep)
 // ---------------------------------------------------------------------------
 
@@ -75,7 +81,7 @@ export type {
   ToolAnnotations,
   ToolDefinition,
 } from '@/mcp-server/tools/utils/toolDefinition.js';
-export { disabledTool, tool } from '@/mcp-server/tools/utils/toolDefinition.js';
+export { disabledTool, headerParam, tool } from '@/mcp-server/tools/utils/toolDefinition.js';
 
 // ---------------------------------------------------------------------------
 // Multi-round-trip input (MCP 2026-07-28)
@@ -102,6 +108,8 @@ export { validateDefinitions } from '@/linter/validate.js';
 // ---------------------------------------------------------------------------
 
 export type {
+  CacheHint,
+  CacheScope,
   CallToolResult,
   CompleteCallback,
   CompleteResourceTemplateCallback,

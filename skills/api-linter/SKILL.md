@@ -4,7 +4,7 @@ description: >
   MCP definition linter rules reference. Use when `bun run lint:mcp` or `bun run devcheck` reports a lint error or warning (`format-parity`, `schema-is-object`, `name-format`, `server-json-*`, etc.) and you need to understand the rule, its severity, and how to fix it. Every rule ID the linter emits has an entry in this doc.
 metadata:
   author: cyanheads
-  version: "1.11"
+  version: "1.12"
   audience: external
   type: reference
 ---
@@ -44,7 +44,7 @@ Grouped by family. Jump to any rule ID via its anchor.
 |:-------|:------|:--------|
 | Definition | `definition-invalid` | [Definition rules](#definition-rules) |
 | Format parity | `format-parity`, `format-parity-threw`, `format-parity-walk-failed`, `format-parity-depth-limit` | [Format parity](#format-parity) |
-| Schema | `schema-is-object`, `describe-on-fields`, `schema-serializable`, `schema-unsatisfiable` | [Schema rules](#schema-rules) |
+| Schema | `schema-is-object`, `describe-on-fields`, `schema-serializable`, `schema-unsatisfiable`, `header-param-designation` | [Schema rules](#schema-rules) |
 | Portability | `schema-format-portability`, `schema-anyof-needs-type`, `schema-no-discriminator-keyword`, `schema-no-defs`, `schema-root-oneof-portability`, `schema-dialect-tag` | [Portability rules](#portability-rules) |
 | Names | `name-required`, `name-format`, `name-unique` | [Name rules](#name-rules) |
 | Tools | `description-required`, `handler-required`, `auth-type`, `auth-scope-format`, `annotation-type`, `annotation-coherence`, `meta-ui-type`, `meta-ui-resource-uri-required`, `meta-ui-resource-uri-scheme`, `app-tool-resource-pairing`, `canvas-consumer-missing` | [Tool rules](#tool-rules) |
@@ -246,6 +246,29 @@ Evaluated on the emitted schema rather than on the Zod schema, because the two d
 **Fix:** for a closed set of non-string values, use a multi-value literal — `z.literal([1, 2, 3, 4, 5])` emits `{"type": "number", "enum": [1, 2, 3, 4, 5]}`. For an empty enum or union, the field has no legal values at all; drop it or give it real members.
 
 Not flagged, deliberately: `allOf: []` is vacuously true (matches everything), and empty `required` / `properties` / `prefixItems` are absent constraints rather than impossible ones.
+
+### header-param-designation
+
+**Severity:** error
+
+Fires when a tool's `input` carries an `x-mcp-header` designation — from `headerParam(schema, 'Name')` or a hand-written `.meta({ 'x-mcp-header': 'Name' })` — that violates one of the constraints protocol revision 2026-07-28 places on it.
+
+| Constraint | Example violation |
+|:--|:--|
+| Statically reachable through a chain of `properties` keys | A designation on an array element, a `z.record()` value, any field of a **discriminated-union input root** (the root advertises `oneOf`), or a schema hoisted into `$defs` by `.meta({ id })` |
+| Primitive-typed property — `string`, `integer`, `number`, `boolean` | `headerParam(z.object({ … }), 'Region')` |
+| Non-empty RFC 9110 token | `headerParam(z.string(), 'Bad Name')` — spaces, control characters, and HTTP delimiters are all rejected |
+| Case-insensitively unique across the whole input schema | `'Region'` and `'REGION'` on two sibling fields |
+
+Evaluated on the emitted JSON Schema, which is the same input the SDK's own scan reads — so a verdict here is the SDK's verdict.
+
+The message names the offending field in the linter's path vocabulary: `input.rows[].region` for an array element, `input.map.<key>` for a record value, `input|0.region` for a union branch.
+
+**Fix:** move the designation to a top-level or nested object property. For a multi-mode tool, there is no placement that works — a union input root puts every field behind `oneOf`; flatten the schema or drop the designation.
+
+**Why it is an error, not a warning:** the SDK enforces this with a `console.warn`. The tool still registers, and conforming Streamable HTTP clients then exclude it from `tools/list` — it silently disappears with nothing reporting the gap. `tool()` throws on the same condition at definition time, so this rule normally fires only for a definition assembled without the builder.
+
+Silent when the schema cannot be converted to JSON Schema at all — that is `schema-serializable`'s diagnostic.
 
 ---
 

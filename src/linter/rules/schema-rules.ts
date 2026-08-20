@@ -9,6 +9,10 @@ import type { ZodObject, ZodRawShape } from 'zod';
 import { toJSONSchema } from 'zod/v4/core';
 
 import {
+  formatDesignationPath,
+  scanHeaderDesignations,
+} from '@/mcp-server/tools/utils/headerParam.js';
+import {
   inputVariants,
   isDiscriminatedUnionSchema,
   isZodObjectSchema,
@@ -273,6 +277,47 @@ export function checkSchemaSatisfiable(
     definitionType,
     definitionName,
   }));
+}
+
+/**
+ * Checks every `x-mcp-header` designation on a tool's input root against the
+ * constraints protocol revision 2026-07-28 places on them: a non-empty RFC 9110
+ * token, case-insensitively unique across the schema, on a primitive-typed
+ * property statically reachable through a chain of `properties` keys.
+ *
+ * An illegal placement is not a soft failure. The SDK only `console.warn`s,
+ * registers the tool anyway, and conforming Streamable HTTP clients then drop
+ * it from `tools/list` — a tool that silently disappears with nothing reporting
+ * the gap. `tool()` already rejects it at definition time; this rule is the
+ * same verdict for a definition assembled without the builder, and the
+ * documented diagnostic for the error a consumer sees at startup.
+ *
+ * Evaluated on the emitted JSON Schema, which is what the SDK scans — so the
+ * rule and the runtime cannot disagree. Silent when conversion fails; that is
+ * `checkSchemaSerializable`'s diagnostic.
+ */
+export function checkHeaderDesignations(
+  schema: unknown,
+  fieldName: string,
+  definitionType: LintDiagnostic['definitionType'],
+  definitionName: string,
+): LintDiagnostic | null {
+  if (!isSchemaRoot(schema)) return null;
+
+  const scan = scanHeaderDesignations(schema);
+  if (scan === undefined || scan.valid) return null;
+
+  return {
+    rule: 'header-param-designation',
+    severity: 'error',
+    message:
+      `${definitionType} '${definitionName}' ${formatDesignationPath(scan.path, fieldName)}: ` +
+      `${scan.reason} Designate a field with headerParam(schema, 'Name') on a top-level or ` +
+      'nested object property; an array element, a z.record() value, and any field of a ' +
+      'discriminated-union input root are all unreachable.',
+    definitionType,
+    definitionName,
+  };
 }
 
 /** True when a JSON Schema node's own keywords admit no value at all. */

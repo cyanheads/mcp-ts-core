@@ -4,7 +4,7 @@ description: >
   Scaffold a new MCP tool definition. Use when the user asks to add a tool, create a new tool, or implement a new capability for the server.
 metadata:
   author: cyanheads
-  version: "2.19"
+  version: "2.20"
   audience: external
   type: reference
 ---
@@ -279,6 +279,40 @@ Three constraints:
 - **The union must be discriminated.** A bare `z.union(...)` is rejected: with no literal-tagged key the model has nothing to choose a branch by, and every variant's `required` would read as applying at once.
 - **`output` stays a flat `z.object`** — see the widening section below for why a non-object output root breaks the success path. When the *result* shape varies by mode, use a `kind` discriminator with presence-based optional fields and render each arm on field presence in `format()`.
 - **Portability is unmeasured at the parameter root.** `schema-root-oneof-portability` (strict mode only) says so; for Anthropic clients the union is the better shape, and flattening is the escape hatch if you target the widest vendor matrix.
+- **A union root rules out `headerParam`.** See below — the branches sit under `oneOf`, which the reachability rule excludes.
+
+### `headerParam` mirrors an argument into a request header
+
+Protocol revision 2026-07-28 lets a tool designate an input property with `x-mcp-header`, so its value also rides an `Mcp-Param-<Name>` request header. A proxy, gateway, or router can then read it without parsing the JSON-RPC body:
+
+```ts
+import { headerParam, tool, z } from '@cyanheads/mcp-ts-core';
+
+input: z.object({
+  query: z.string().describe('Search query.'),
+  routing: z.object({
+    region: headerParam(z.string(), 'Region').describe('Deployment region.'),
+    shard: headerParam(z.int(), 'Shard-Id').describe('Shard the record lives on.'),
+  }).describe('Where to route the lookup.'),
+}),
+```
+
+The emitted property carries `"x-mcp-header": "Region"` and nothing else about the field changes — description, type, validation, and requiredness are untouched. Order does not matter: `headerParam(z.string(), 'Region').describe('…')` and `headerParam(z.string().describe('…'), 'Region')` are the same schema.
+
+**It mirrors, it does not relocate.** When the body carries a value for a designated property, the matching `Mcp-Param-<Name>` header MUST be present and decode to an equal value; the SDK cross-checks the pair before dispatch and rejects a disagreement with `-32020` (`HeaderMismatch`, HTTP `400`). Absent or `null` in the body means no header is expected. **Your handler still reads the argument from `input`** — there is nothing new to do in the handler body.
+
+**Where a designation is legal.** The property must be primitive-typed (`string`, `integer`, `number`, `boolean`) and statically reachable through a chain of `properties` keys. Top-level and nested `z.object()` fields qualify. These do not:
+
+| Placement | Why |
+|:--|:--|
+| An array element (`z.array(z.object({ … }))`) | Lives under `items` |
+| A `z.record()` value | Lives under `additionalProperties` |
+| Any field of a **discriminated-union input root** | The root advertises `oneOf`, so every branch is off the chain — no field of a union-input tool can be designated |
+| A schema reused under `.meta({ id })` | Hoisted into `$defs` and reached by `$ref` |
+
+Header names must be non-empty RFC 9110 tokens (no spaces, control characters, or HTTP delimiters) and case-insensitively unique across the whole input schema.
+
+**Violations fail at definition time.** `tool()` throws on import, naming the field path and the reason. That is deliberate: the SDK only `console.warn`s and registers the tool anyway, leaving conforming Streamable HTTP clients to drop it from `tools/list` — a tool that silently disappears with nothing reporting the gap. The linter reports the same verdict as `header-param-designation` for definitions assembled without the builder.
 
 ### The advertised `outputSchema` is widened
 

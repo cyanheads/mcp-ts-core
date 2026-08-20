@@ -1,8 +1,9 @@
 /**
  * @fileoverview Tests for Zod schema lint rules: object-shape checks,
- * `.describe()` presence/recursion, JSON Schema serializability, and the
- * shared schema-introspection helpers (`objectShape`,
- * `objectShapeKeys`, `unwrapWrappers`, `getCoreDefType`).
+ * `.describe()` presence/recursion, JSON Schema serializability,
+ * `x-mcp-header` designation placement, and the shared schema-introspection
+ * helpers (`objectShape`, `objectShapeKeys`, `unwrapWrappers`,
+ * `getCoreDefType`).
  * @module tests/unit/linter/schema-rules.test
  */
 
@@ -11,6 +12,7 @@ import { z } from 'zod';
 
 import {
   checkFieldDescriptions,
+  checkHeaderDesignations,
   checkIsZodObject,
   checkSchemaSatisfiable,
   checkSchemaSerializable,
@@ -19,6 +21,7 @@ import {
   objectShapeKeys,
   unwrapWrappers,
 } from '@/linter/rules/schema-rules.js';
+import { headerParam } from '@/mcp-server/tools/utils/headerParam.js';
 
 // ---------------------------------------------------------------------------
 // checkIsZodObject
@@ -582,5 +585,77 @@ describe('discriminated-union roots', () => {
 
     expect(diagnostics.map((d) => d.rule)).toEqual(['schema-unsatisfiable']);
     expect(diagnostics[0]?.message).toContain('input|1.pick');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// checkHeaderDesignations
+// ---------------------------------------------------------------------------
+
+describe('checkHeaderDesignations', () => {
+  it('returns null for a schema with no designations', () => {
+    const schema = z.object({ query: z.string().describe('Search query') });
+    expect(checkHeaderDesignations(schema, 'input', 'tool', 't')).toBeNull();
+  });
+
+  it('returns null for a legal designation nested in an object', () => {
+    const schema = z.object({
+      routing: z
+        .object({ region: headerParam(z.string(), 'Region').describe('Deployment region.') })
+        .describe('Routing.'),
+    });
+    expect(checkHeaderDesignations(schema, 'input', 'tool', 't')).toBeNull();
+  });
+
+  it('reports an illegal placement at input|<i>.<field> for a union root', () => {
+    const schema = z.discriminatedUnion('mode', [
+      z.object({
+        mode: z.literal('byId').describe('By ID.'),
+        region: headerParam(z.string(), 'Region').describe('Deployment region.'),
+      }),
+      z.object({ mode: z.literal('byName').describe('By name.'), name: z.string().describe('N.') }),
+    ]);
+
+    const diagnostic = checkHeaderDesignations(schema, 'input', 'tool', 'multi_lookup');
+    expect(diagnostic).toMatchObject({
+      rule: 'header-param-designation',
+      severity: 'error',
+      definitionType: 'tool',
+      definitionName: 'multi_lookup',
+    });
+    expect(diagnostic?.message).toContain('input|0.region');
+    expect(diagnostic?.message).toContain('statically reachable');
+  });
+
+  it('reports an illegal placement under an array element', () => {
+    const schema = z.object({
+      rows: z
+        .array(z.object({ region: headerParam(z.string(), 'Region').describe('R.') }))
+        .describe('Rows.'),
+    });
+
+    expect(checkHeaderDesignations(schema, 'input', 'tool', 't')?.message).toContain(
+      'input.rows[].region',
+    );
+  });
+
+  it('reports a malformed header name', () => {
+    const schema = z.object({ r: headerParam(z.string(), 'Bad Name').describe('R.') });
+    expect(checkHeaderDesignations(schema, 'input', 'tool', 't')?.message).toContain(
+      'RFC 9110 token',
+    );
+  });
+
+  it('stays silent when the schema is not a definition root', () => {
+    expect(checkHeaderDesignations(z.string(), 'input', 'tool', 't')).toBeNull();
+    expect(checkHeaderDesignations(undefined, 'input', 'tool', 't')).toBeNull();
+  });
+
+  it('stays silent when the schema cannot be converted — schema-serializable owns that', () => {
+    const schema = z.object({
+      when: z.date().describe('When.'),
+      r: headerParam(z.string(), 'Bad Name').describe('R.'),
+    });
+    expect(checkHeaderDesignations(schema, 'input', 'tool', 't')).toBeNull();
   });
 });

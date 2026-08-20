@@ -14,6 +14,7 @@ import { checkNameRequired, checkToolNameFormat } from './name-rules.js';
 import { lintSchemaPortability, type PortabilityOptions } from './portability-rules.js';
 import {
   checkFieldDescriptions,
+  checkHeaderDesignations,
   checkIsZodObject,
   checkSchemaSatisfiable,
   checkSchemaSerializable,
@@ -79,6 +80,8 @@ export function lintToolDefinition(
       diagnostics.push(inputSerial);
     } else {
       diagnostics.push(...checkSchemaSatisfiable(d?.input, 'input', 'tool', displayName));
+      const designations = checkHeaderDesignations(d?.input, 'input', 'tool', displayName);
+      if (designations) diagnostics.push(designations);
       if (portability) {
         diagnostics.push(
           ...lintSchemaPortability(d?.input, 'input', 'tool', displayName, portability),

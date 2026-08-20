@@ -13,9 +13,11 @@ import { type ZodDiscriminatedUnion, type ZodObject, type ZodRawShape, z } from 
 
 import type { HandlerContext, ReasonOf } from '@/core/context.js';
 import type { ErrorContract } from '@/types-global/errors.js';
+import { assertHeaderDesignations } from './headerParam.js';
 import { isDiscriminatedUnionSchema } from './schemaShape.js';
 
 export { type DisabledMetadata, disabledTool } from './disabled-tool.js';
+export { headerParam } from './headerParam.js';
 
 /**
  * Defines the annotations that provide hints about a tool's behavior.
@@ -324,7 +326,9 @@ export function tool<
   options: Omit<ToolDefinition<TInput, TOutput, TErrors, TEnrich>, 'name'>,
 ): ToolDefinition<TInput, TOutput, TErrors, TEnrich> {
   assertErrorKeyUnreserved(name, options.output, options.enrichment);
-  return { name, ...options, input: strictenInput(options.input) };
+  const input = strictenInput(options.input);
+  assertHeaderDesignations(name, input);
+  return { name, ...options, input };
 }
 
 /**

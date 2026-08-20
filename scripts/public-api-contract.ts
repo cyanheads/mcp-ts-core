@@ -19,6 +19,7 @@ export const PUBLIC_RUNTIME_EXPORTS = {
     'createFail',
     'createRecoveryFor',
     'disabledTool',
+    'headerParam',
     'inputRequired',
     'isCompletable',
     'isInputRequiredSignal',
@@ -29,7 +30,7 @@ export const PUBLIC_RUNTIME_EXPORTS = {
     'z',
   ],
   './worker': ['createWorkerHandler'],
-  './tools': ['disabledTool', 'tool'],
+  './tools': ['disabledTool', 'headerParam', 'tool'],
   './resources': ['resource'],
   './prompts': ['prompt'],
   './errors': [
