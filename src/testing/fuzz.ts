@@ -10,7 +10,6 @@
  */
 
 import type fc from 'fast-check';
-import type { ZodObject, ZodRawShape } from 'zod';
 import {
   ZodArray,
   ZodBoolean,
@@ -25,7 +24,11 @@ import {
 } from 'zod';
 import type { AnyPromptDefinition } from '@/mcp-server/prompts/utils/promptDefinition.js';
 import type { AnyResourceDefinition } from '@/mcp-server/resources/utils/resourceDefinition.js';
-import type { AnyToolDefinition } from '@/mcp-server/tools/utils/toolDefinition.js';
+import { inputVariants } from '@/mcp-server/tools/utils/schemaShape.js';
+import type {
+  AnyToolDefinition,
+  ToolInputSchema,
+} from '@/mcp-server/tools/utils/toolDefinition.js';
 import { McpError } from '@/types-global/errors.js';
 import { createMockContext, type MockContextOptions } from './index.js';
 
@@ -397,21 +400,27 @@ export function adversarialArbitrary(): fc.Arbitrary<unknown> {
 }
 
 /**
- * Generates an adversarial variant of a Zod object schema's input.
+ * Generates an adversarial variant of a tool input schema's input.
  * Produces objects that match the key structure but have wrong-type values.
+ *
+ * A discriminated-union root draws from every variant's key structure, so no
+ * branch goes unexercised — including the discriminator itself, which gets
+ * adversarial values like any other key.
  */
 export function adversarialObjectArbitrary(
-  schema: ZodObject<ZodRawShape>,
+  schema: ToolInputSchema,
 ): fc.Arbitrary<Record<string, unknown>> {
   const f = getFc();
-  const shape = (schema as any).shape as Record<string, unknown> | undefined;
-  const keys = shape ? Object.keys(shape) : [];
+  const variants = inputVariants(schema);
+  const perVariant = variants
+    .map((variant) => Object.keys(variant.shape))
+    .filter((keys) => keys.length > 0)
+    .map((keys) => f.record(Object.fromEntries(keys.map((k) => [k, adversarialArbitrary()]))));
 
-  if (keys.length === 0) {
+  if (perVariant.length === 0) {
     return adversarialArbitrary() as fc.Arbitrary<Record<string, unknown>>;
   }
-
-  return f.record(Object.fromEntries(keys.map((k) => [k, adversarialArbitrary()])));
+  return f.oneof(...(perVariant as fc.Arbitrary<Record<string, unknown>>[]));
 }
 
 function buildDeepObject(depth: number): unknown {

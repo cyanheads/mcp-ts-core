@@ -246,10 +246,36 @@ function scopeAccessLevel(scope: string): string {
   return scope.slice(idx + 1);
 }
 
+/** One `oneOf` branch of an advertised input schema, as far as the snippet reads it. */
+interface InputBranch {
+  properties?: Record<string, { const?: unknown } | undefined>;
+  required?: string[];
+}
+
+/**
+ * The first variant of a discriminated-union input schema, or `undefined` for
+ * the ordinary single-object shape.
+ */
+function firstInputBranch(inputSchema: unknown): InputBranch | undefined {
+  if (!inputSchema || typeof inputSchema !== 'object') return undefined;
+  const oneOf = (inputSchema as { oneOf?: unknown }).oneOf;
+  if (!Array.isArray(oneOf) || oneOf.length === 0) return undefined;
+  const first = oneOf[0];
+  return first && typeof first === 'object' ? (first as InputBranch) : undefined;
+}
+
 function buildInvocationSnippet(tool: ManifestTool): string {
+  // A multi-mode tool's `requiredFields` is the intersection across variants,
+  // which on its own would render a call no branch accepts. Show the first
+  // branch instead — a complete, valid example — with the discriminator's
+  // literal value in place of a placeholder.
+  const branch = firstInputBranch(tool.inputSchema);
+  const fields = branch?.required ?? tool.requiredFields;
+
   const args: Record<string, unknown> = {};
-  for (const field of tool.requiredFields) {
-    args[field] = `<${field}>`;
+  for (const field of fields) {
+    const constant = branch?.properties?.[field]?.const;
+    args[field] = constant === undefined ? `<${field}>` : constant;
   }
   return JSON.stringify(
     {

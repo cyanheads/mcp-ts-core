@@ -70,7 +70,8 @@ export interface LintInput {
   packageJson?: { version?: string };
   /**
    * Cross-vendor portability mode. When set to `'strict'`, opt-in rules
-   * (`schema-no-defs`, `schema-dialect-tag`) emit as warnings.
+   * (`schema-no-defs`, `schema-dialect-tag`, `schema-root-oneof-portability`)
+   * emit as warnings.
    * Otherwise they don't fire. When omitted, the value defaults to
    * `'strict'` if `MCP_LINT_PORTABILITY=strict` is set in the environment.
    */

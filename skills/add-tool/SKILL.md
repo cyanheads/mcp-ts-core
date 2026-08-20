@@ -4,7 +4,7 @@ description: >
   Scaffold a new MCP tool definition. Use when the user asks to add a tool, create a new tool, or implement a new capability for the server.
 metadata:
   author: cyanheads
-  version: "2.18"
+  version: "2.19"
   audience: external
   type: reference
 ---
@@ -244,6 +244,41 @@ Two limits worth knowing when you write a schema:
 
 - **Root level only**, matching `.strict()` itself. A nested `z.object()` inside the input still strips unknown keys unless it is strict in its own right — mark the nested option objects you want guarded.
 - **An explicit opening wins.** A definition that declared `.passthrough()` or `.catchall(...)` asked for an open object, and `tool()` leaves it alone. Use that (deliberately) for tools that proxy arbitrary upstream query parameters.
+- **A union root is strictened per variant.** See below — the branch is where the properties live, so that is where `additionalProperties: false` lands.
+
+### Multi-mode tools take a discriminated-union input
+
+When a tool has genuinely exclusive argument sets — look up by ID *or* search by name, never both — declare the union directly instead of making every field optional and checking the combination by hand:
+
+```ts
+const lookup = tool('lookup', {
+  description: 'Looks a record up by exactly one of the supported keys.',
+  input: z.discriminatedUnion('mode', [
+    z.object({
+      mode: z.literal('byId').describe('Look up by exact ID.'),
+      id: z.string().describe('Record ID.'),
+    }),
+    z.object({
+      mode: z.literal('byName').describe('Search by name.'),
+      name: z.string().describe('Name fragment.'),
+      fuzzy: z.boolean().default(false).describe('Whether to match loosely.'),
+    }),
+  ]),
+  output: z.object({ /* … a flat object; see below */ }),
+  handler: (input) =>
+    input.mode === 'byId' ? byId(input.id) : byName(input.name, input.fuzzy),
+});
+```
+
+The handler dispatches on the discriminator and TypeScript narrows `input` to that branch — `input.id` exists only under `'byId'`, and reaching for `input.name` there is a compile error.
+
+What reaches the wire is `{"type": "object", "oneOf": [<branch>, …]}`: branches intact, each with its own `required` list and a `const`-tagged discriminator, `additionalProperties: false` on every one. Identical bytes on a 2025-11-25 and a 2026-07-28 connection — the legacy projection inspects `outputSchema` alone and never rewrites an input root.
+
+Three constraints:
+
+- **The union must be discriminated.** A bare `z.union(...)` is rejected: with no literal-tagged key the model has nothing to choose a branch by, and every variant's `required` would read as applying at once.
+- **`output` stays a flat `z.object`** — see the widening section below for why a non-object output root breaks the success path. When the *result* shape varies by mode, use a `kind` discriminator with presence-based optional fields and render each arm on field presence in `format()`.
+- **Portability is unmeasured at the parameter root.** `schema-root-oneof-portability` (strict mode only) says so; for Anthropic clients the union is the better shape, and flattening is the escape hatch if you target the widest vendor matrix.
 
 ### The advertised `outputSchema` is widened
 

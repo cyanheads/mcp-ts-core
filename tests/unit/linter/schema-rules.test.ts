@@ -1,7 +1,7 @@
 /**
  * @fileoverview Tests for Zod schema lint rules: object-shape checks,
  * `.describe()` presence/recursion, JSON Schema serializability, and the
- * shared schema-introspection helpers (`isZodObject`, `objectShape`,
+ * shared schema-introspection helpers (`objectShape`,
  * `objectShapeKeys`, `unwrapWrappers`, `getCoreDefType`).
  * @module tests/unit/linter/schema-rules.test
  */
@@ -15,7 +15,6 @@ import {
   checkSchemaSatisfiable,
   checkSchemaSerializable,
   getCoreDefType,
-  isZodObject,
   objectShape,
   objectShapeKeys,
   unwrapWrappers,
@@ -394,27 +393,6 @@ describe('checkSchemaSatisfiable', () => {
 });
 
 // ---------------------------------------------------------------------------
-// isZodObject
-// ---------------------------------------------------------------------------
-
-describe('isZodObject', () => {
-  it('true for a real ZodObject', () => {
-    expect(isZodObject(z.object({}))).toBe(true);
-  });
-
-  it.each([
-    ['a non-object Zod schema', z.string()],
-    ['null', null],
-    ['undefined', undefined],
-    ['a number', 42],
-    ['a plain object with no _zod', {}],
-    ['a string', 'not a schema'],
-  ])('false for %s', (_label, value) => {
-    expect(isZodObject(value)).toBe(false);
-  });
-});
-
-// ---------------------------------------------------------------------------
 // objectShape / objectShapeKeys
 // ---------------------------------------------------------------------------
 
@@ -523,5 +501,86 @@ describe('getCoreDefType', () => {
 
   it('returns undefined for a plain object with no _zod.def', () => {
     expect(getCoreDefType({})).toBeUndefined();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Discriminated-union input roots (#142)
+// ---------------------------------------------------------------------------
+
+describe('discriminated-union roots', () => {
+  const union = z.discriminatedUnion('mode', [
+    z.object({
+      mode: z.literal('byId').describe('Look up by exact ID.'),
+      id: z.string().describe('Record ID.'),
+    }),
+    z.object({
+      mode: z.literal('byName').describe('Search by name.'),
+      name: z.string().describe('Name fragment.'),
+    }),
+  ]);
+
+  it('is rejected by checkIsZodObject unless explicitly allowed', () => {
+    expect(checkIsZodObject(union, 'output', 'tool', 't')).toMatchObject({
+      rule: 'schema-is-object',
+    });
+    expect(
+      checkIsZodObject(union, 'input', 'tool', 't', { allowDiscriminatedUnion: true }),
+    ).toBeNull();
+  });
+
+  it('rejects a bare z.union() even when unions are allowed', () => {
+    // No discriminator means no key for the model to choose a branch by, and
+    // every variant's `required` would apply at once.
+    const bare = z.union([
+      z.object({ a: z.string().describe('a') }),
+      z.object({ b: z.string().describe('b') }),
+    ]);
+    expect(
+      checkIsZodObject(bare, 'input', 'tool', 't', { allowDiscriminatedUnion: true }),
+    ).toMatchObject({ rule: 'schema-is-object' });
+  });
+
+  it('walks every variant for missing .describe() instead of returning empty', () => {
+    const missing = z.discriminatedUnion('mode', [
+      z.object({ mode: z.literal('byId').describe('By id.'), id: z.string() }),
+      z.object({ mode: z.literal('byName').describe('By name.'), name: z.string() }),
+    ]);
+    const diagnostics = checkFieldDescriptions(missing, 'input', 'tool', 't');
+
+    expect(diagnostics.map((d) => d.rule)).toEqual(['describe-on-fields', 'describe-on-fields']);
+    expect(diagnostics[0]?.message).toContain('input|0.id');
+    expect(diagnostics[1]?.message).toContain('input|1.name');
+  });
+
+  it('reports a fully described union as clean', () => {
+    expect(checkFieldDescriptions(union, 'input', 'tool', 't')).toEqual([]);
+  });
+
+  it('checks serializability of a union root', () => {
+    expect(checkSchemaSerializable(union, 'input', 'tool', 't')).toBeNull();
+
+    const unserializable = z.discriminatedUnion('mode', [
+      z.object({ mode: z.literal('a').describe('a'), when: z.date().describe('when') }),
+      z.object({ mode: z.literal('b').describe('b'), id: z.string().describe('id') }),
+    ]);
+    expect(checkSchemaSerializable(unserializable, 'input', 'tool', 't')).toMatchObject({
+      rule: 'schema-serializable',
+    });
+  });
+
+  it('finds an unsatisfiable node inside a variant', () => {
+    const unsatisfiable = z.discriminatedUnion('mode', [
+      z.object({ mode: z.literal('a').describe('a'), id: z.string().describe('id') }),
+      z.object({
+        mode: z.literal('b').describe('b'),
+        // A non-string array handed to z.enum() serializes to an empty enum.
+        pick: z.enum([1, 2, 3] as unknown as [string, ...string[]]).describe('pick'),
+      }),
+    ]);
+    const diagnostics = checkSchemaSatisfiable(unsatisfiable, 'input', 'tool', 't');
+
+    expect(diagnostics.map((d) => d.rule)).toEqual(['schema-unsatisfiable']);
+    expect(diagnostics[0]?.message).toContain('input|1.pick');
   });
 });

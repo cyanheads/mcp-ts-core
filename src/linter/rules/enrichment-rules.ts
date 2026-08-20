@@ -14,6 +14,7 @@
  * @module src/linter/rules/enrichment-rules
  */
 
+import { inputVariants } from '@/mcp-server/tools/utils/schemaShape.js';
 import type { LintDefinitionType, LintDiagnostic } from '../types.js';
 import { isDefinitionObject } from './definition-rules.js';
 import { getCoreDefType, objectShape, objectShapeKeys, unwrapWrappers } from './schema-rules.js';
@@ -293,8 +294,10 @@ export function lintCappedListTruncation(
   const allowlist = truncationOptions?.truncationAllowlist;
   if (Array.isArray(allowlist) && allowlist.includes(name)) return [];
 
-  // Check input for a cap-like field
-  const inputKeys = objectShapeKeys(def.input);
+  // Check input for a cap-like field. A multi-mode tool declares its arguments
+  // per variant, so a cap in any branch counts — the rule asks whether the tool
+  // can be capped at all, not whether every branch caps.
+  const inputKeys = inputVariants(def.input).flatMap((variant) => objectShapeKeys(variant));
   const capKeys = inputKeys.filter(isCapFieldName);
   if (capKeys.length === 0) return [];
 

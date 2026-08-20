@@ -18,9 +18,11 @@
 
 import type { ZodObject, ZodRawShape } from 'zod';
 import { toJSONSchema } from 'zod/v4/core';
-
+import {
+  isDiscriminatedUnionSchema,
+  isZodObjectSchema,
+} from '@/mcp-server/tools/utils/schemaShape.js';
 import type { LintDefinitionType, LintDiagnostic } from '../types.js';
-import { isZodObject } from './schema-rules.js';
 
 /**
  * Default allowlist of JSON Schema `format` values, taken from OpenAI's
@@ -123,8 +125,10 @@ function encodePointer(segment: string): string {
 /**
  * Runs every cross-vendor portability rule against one Zod schema.
  *
- * Caller contract: pass a ZodObject (validated by `checkIsZodObject`) that has
- * already passed `checkSchemaSerializable`. Non-objects are silently skipped;
+ * Caller contract: pass a root schema (validated by `checkIsZodObject`) that has
+ * already passed `checkSchemaSerializable` — a ZodObject, or a discriminated
+ * union of them on a tool input. `walkJsonSchema` descends `oneOf`, so union
+ * variants are covered by the same pass. Other shapes are silently skipped;
  * serialization failures return no diagnostics so the existing
  * `schema-serializable` error stays the single source of truth for that class.
  */
@@ -135,7 +139,7 @@ export function lintSchemaPortability(
   definitionName: string,
   opts: PortabilityOptions,
 ): LintDiagnostic[] {
-  if (!isZodObject(schema)) return [];
+  if (!isZodObjectSchema(schema) && !isDiscriminatedUnionSchema(schema)) return [];
 
   let json: unknown;
   try {
@@ -146,6 +150,35 @@ export function lintSchemaPortability(
 
   const strict = opts.portability === 'strict';
   const diagnostics: LintDiagnostic[] = [];
+
+  // schema-root-oneof-portability (info / opt-in) — top-level check only.
+  //
+  // A multi-mode tool advertises `{"type":"object","oneOf":[…]}`. Every branch
+  // is a typed object, so `schema-anyof-needs-type` is satisfied and the shape
+  // is the one this file already recommends over the OpenAPI `discriminator`
+  // keyword — in a *nested* position. At the parameter root it is unmeasured:
+  // a vendor that reads `type` and `properties` and ignores `oneOf` sees a
+  // parameterless tool and drops the constraint silently rather than erroring.
+  // Flagged under the strict knob so an author targeting a broad vendor matrix
+  // makes that call deliberately; not an error, since the emitted shape is
+  // valid 2020-12 and correct on both MCP eras.
+  if (strict && Array.isArray((json as Record<string, unknown>).oneOf)) {
+    diagnostics.push({
+      rule: 'schema-root-oneof-portability',
+      severity: 'warning',
+      message:
+        `${definitionType} '${definitionName}' ${fieldName} has a root-level oneOf (a ` +
+        `z.discriminatedUnion input). Branches are typed objects, so the shape is valid ` +
+        `2020-12 and identical on both MCP protocol revisions — but vendor handling of a ` +
+        `oneOf at the parameter root is unmeasured, and a client that reads only 'type' and ` +
+        `'properties' would see a parameterless tool. ` +
+        `Fix, if you need the widest vendor reach: flatten to a single z.object() with a ` +
+        `discriminator field and optional per-mode fields, and validate the combination in ` +
+        `the handler.`,
+      definitionType,
+      definitionName,
+    });
+  }
 
   // schema-dialect-tag (info / opt-in) — top-level check only.
   if (strict) {

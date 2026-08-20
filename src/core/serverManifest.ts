@@ -27,6 +27,7 @@ import {
   type DisabledMetadata,
   getDisabledMetadata,
 } from '@/mcp-server/tools/utils/disabled-tool.js';
+import { inputVariants } from '@/mcp-server/tools/utils/schemaShape.js';
 import type { AnyToolDefinition } from '@/mcp-server/tools/utils/toolDefinition.js';
 import { MODERN_PROTOCOL_REVISION } from '@/mcp-server/types.js';
 import { configurationError } from '@/types-global/errors.js';
@@ -279,7 +280,11 @@ export interface ManifestTool {
   name: string;
   /** JSON Schema for the output (when Zod → JSON Schema succeeds). */
   outputSchema?: unknown;
-  /** Required field names from the input schema — used for invocation snippets. */
+  /**
+   * Required field names from the input schema — used for invocation snippets.
+   * For a multi-mode tool this is the intersection across variants; the
+   * per-variant lists are in `inputSchema.oneOf[i].required`.
+   */
   requiredFields: string[];
   /** View-source URL; auto-derived from `landing.repoRoot` or per-definition override. */
   sourceUrl?: string;
@@ -411,22 +416,39 @@ function safeToJsonSchema(schema: unknown): unknown {
   }
 }
 
-/** Extract required field names from a Zod object schema. Silent on failure. */
+/**
+ * Extract required field names from a tool's input root. Silent on failure.
+ *
+ * For a discriminated union this is the *intersection* across variants — the
+ * fields required no matter which branch a caller picks, which for the usual
+ * shape is the discriminator alone. A union of every variant's required fields
+ * would claim a call needs keys that belong to branches it is not making. The
+ * per-variant lists are not lost: they ride the advertised `inputSchema` as
+ * `oneOf[i].required`, which is where a renderer showing one branch reads them.
+ */
 function extractRequiredFields(schema: unknown): string[] {
   if (!schema || typeof schema !== 'object') return [];
   try {
-    const asObj = schema as { shape?: Record<string, { isOptional?: () => boolean }> };
-    if (!asObj.shape || typeof asObj.shape !== 'object') return [];
-    const fields: string[] = [];
-    for (const [key, field] of Object.entries(asObj.shape)) {
-      if (typeof field?.isOptional === 'function' && !field.isOptional()) {
-        fields.push(key);
-      }
-    }
-    return fields;
+    const perVariant = inputVariants(schema).map(requiredShapeKeys);
+    const first = perVariant[0];
+    if (!first) return [];
+    return first.filter((key) => perVariant.every((keys) => keys.includes(key)));
   } catch {
     return [];
   }
+}
+
+/** Non-optional top-level field names of a single ZodObject. */
+function requiredShapeKeys(schema: unknown): string[] {
+  const asObj = schema as { shape?: Record<string, { isOptional?: () => boolean }> };
+  if (!asObj.shape || typeof asObj.shape !== 'object') return [];
+  const fields: string[] = [];
+  for (const [key, field] of Object.entries(asObj.shape)) {
+    if (typeof field?.isOptional === 'function' && !field.isOptional()) {
+      fields.push(key);
+    }
+  }
+  return fields;
 }
 
 /** Detect whether a tool's `_meta.ui.resourceUri` flags it as an MCP App tool. */

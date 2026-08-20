@@ -4,7 +4,7 @@ description: >
   MCP definition linter rules reference. Use when `bun run lint:mcp` or `bun run devcheck` reports a lint error or warning (`format-parity`, `schema-is-object`, `name-format`, `server-json-*`, etc.) and you need to understand the rule, its severity, and how to fix it. Every rule ID the linter emits has an entry in this doc.
 metadata:
   author: cyanheads
-  version: "1.10"
+  version: "1.11"
   audience: external
   type: reference
 ---
@@ -45,7 +45,7 @@ Grouped by family. Jump to any rule ID via its anchor.
 | Definition | `definition-invalid` | [Definition rules](#definition-rules) |
 | Format parity | `format-parity`, `format-parity-threw`, `format-parity-walk-failed`, `format-parity-depth-limit` | [Format parity](#format-parity) |
 | Schema | `schema-is-object`, `describe-on-fields`, `schema-serializable`, `schema-unsatisfiable` | [Schema rules](#schema-rules) |
-| Portability | `schema-format-portability`, `schema-anyof-needs-type`, `schema-no-discriminator-keyword`, `schema-no-defs`, `schema-dialect-tag` | [Portability rules](#portability-rules) |
+| Portability | `schema-format-portability`, `schema-anyof-needs-type`, `schema-no-discriminator-keyword`, `schema-no-defs`, `schema-root-oneof-portability`, `schema-dialect-tag` | [Portability rules](#portability-rules) |
 | Names | `name-required`, `name-format`, `name-unique` | [Name rules](#name-rules) |
 | Tools | `description-required`, `handler-required`, `auth-type`, `auth-scope-format`, `annotation-type`, `annotation-coherence`, `meta-ui-type`, `meta-ui-resource-uri-required`, `meta-ui-resource-uri-scheme`, `app-tool-resource-pairing`, `canvas-consumer-missing` | [Tool rules](#tool-rules) |
 | Resources | `uri-template-required`, `uri-template-valid`, `resource-name-not-uri`, `template-params-align` | [Resource rules](#resource-rules) |
@@ -169,6 +169,10 @@ input: z.array(z.string())
 input: z.object({ items: z.array(z.string()).describe('List of items') })
 ```
 
+**One exception, on tool `input` only:** a `z.discriminatedUnion(...)` of object variants is accepted, for a multi-mode tool with mutually exclusive argument sets. It advertises as `{"type": "object", "oneOf": [...]}` — the object requirement holds, and each branch keeps its own `required` list and `const`-tagged discriminator. A bare `z.union(...)` is still rejected: with no discriminator the model has no key to pick a branch by. Output roots stay object-only — the 2025-era projection rewrites a non-object output root and wraps `structuredContent` to match.
+
+The other schema rules walk every variant, so a missing `.describe()`, a non-serializable type, or an unsatisfiable node inside one branch is reported at `input|<i>.<field>`.
+
 ### describe-on-fields
 
 **Severity:** warning
@@ -186,6 +190,7 @@ Every field in `input`, `output`, `params`, or `args` needs a `.describe('...')`
 | `z.array(primitive)` element — string, number, enum, regex-branded primitive, etc. | **No** | No — outer array describe is sufficient |
 | `z.union([a, b, ...])` non-literal option | Yes | Yes, on each option |
 | `z.union([..., z.literal(X), ...])` literal option | **No** | No — outer union describe is sufficient |
+| A tool `input` root that is a `z.discriminatedUnion(...)` — its variant objects | Yes, their **fields** | No, not on the variant itself — it is a root, and roots carry no describe |
 
 The asymmetry that catches agents: inside `z.union([z.string(), z.array(z.string())])`, the outer `z.string()` option **does** need a describe (unions walk non-literal options), but the `z.string()` inside the inner array does **not** (arrays don't walk primitive elements). If the linter didn't flag a path, don't add a describe there — the redundant describe ships to the JSON Schema as clutter.
 
@@ -308,6 +313,14 @@ Fires when a schema carries the OpenAPI `discriminator` keyword. OpenAI silently
 Fires when emitted output contains `$defs` or `$ref`. Gemini rejects these (`400: reference to undefined schema`). Typically caused by reused or recursive types built with `z.lazy(...)`. Opt-in because [SEP-1576](https://github.com/modelcontextprotocol/modelcontextprotocol/issues/1576) (token-bloat mitigation) is moving the community toward more `$defs`.
 
 **Fix:** inline the recursive type with bounded depth, or accept the Gemini limitation if you target only Anthropic clients.
+
+### schema-root-oneof-portability
+
+**Severity:** warning (only when `portability: 'strict'`)
+
+Fires when a tool's advertised `inputSchema` has a root-level `oneOf` — that is, when `input` is a `z.discriminatedUnion(...)`. The emitted shape is valid 2020-12, every branch is a typed object, and the bytes are identical on both MCP protocol revisions. What is unmeasured is vendor handling of a `oneOf` at the *parameter* root: a client that reads only `type` and `properties` would see a parameterless tool and drop the constraint silently rather than erroring. Opt-in, because for Anthropic clients the union is the better shape.
+
+**Fix (only if you need the widest vendor reach):** flatten to a single `z.object()` with a discriminator field and optional per-mode fields, and validate the combination in the handler.
 
 ### schema-dialect-tag
 

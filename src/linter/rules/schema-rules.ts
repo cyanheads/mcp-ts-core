@@ -8,30 +8,46 @@
 import type { ZodObject, ZodRawShape } from 'zod';
 import { toJSONSchema } from 'zod/v4/core';
 
+import {
+  inputVariants,
+  isDiscriminatedUnionSchema,
+  isZodObjectSchema,
+} from '@/mcp-server/tools/utils/schemaShape.js';
 import type { LintDiagnostic } from '../types.js';
 
 /**
  * Checks that a schema is a ZodObject (required for tool inputSchema).
  * Spec: T3-T4 — inputSchema MUST be a JSON Schema object with type: "object".
+ *
+ * Pass `allowDiscriminatedUnion` on a tool's `input` root, where a
+ * `z.discriminatedUnion()` of object variants is also valid: it advertises as
+ * `{"type":"object","oneOf":[…]}`, satisfying the spec's object requirement
+ * while keeping per-variant required fields. Output roots must stay objects —
+ * the 2025-era projection rewrites a non-object output root and wraps
+ * `structuredContent` to match.
  */
 export function checkIsZodObject(
   schema: unknown,
   fieldName: string,
   definitionType: LintDiagnostic['definitionType'],
   definitionName: string,
+  options: { allowDiscriminatedUnion?: boolean } = {},
 ): LintDiagnostic | null {
-  if (!isZodObject(schema)) {
-    return {
-      rule: 'schema-is-object',
-      severity: 'error',
-      message:
-        `${definitionType} '${definitionName}' ${fieldName} must be a z.object(). ` +
-        'MCP spec requires inputSchema to have type: "object".',
-      definitionType,
-      definitionName,
-    };
-  }
-  return null;
+  if (isZodObjectSchema(schema)) return null;
+  if (options.allowDiscriminatedUnion && isDiscriminatedUnionSchema(schema)) return null;
+
+  const accepted = options.allowDiscriminatedUnion
+    ? 'must be a z.object() or a z.discriminatedUnion() of z.object() variants'
+    : 'must be a z.object()';
+  return {
+    rule: 'schema-is-object',
+    severity: 'error',
+    message:
+      `${definitionType} '${definitionName}' ${fieldName} ${accepted}. ` +
+      'MCP spec requires inputSchema to have type: "object".',
+    definitionType,
+    definitionName,
+  };
 }
 
 /**
@@ -50,14 +66,22 @@ export function checkFieldDescriptions(
   definitionType: LintDiagnostic['definitionType'],
   definitionName: string,
 ): LintDiagnostic[] {
-  if (!isZodObject(schema)) return [];
+  const roots = inputVariants(schema);
+  if (roots.length === 0) return [];
 
   const diagnostics: LintDiagnostic[] = [];
-  const shape = (schema as ZodObject<ZodRawShape>).shape;
-
-  for (const [key, field] of Object.entries(shape)) {
-    walkField(field, `${fieldName}.${key}`, diagnostics, definitionType, definitionName);
-  }
+  // A root carries no `.describe()` of its own — neither an object root nor a
+  // union's variant objects, which are structural branches rather than fields
+  // the model reads. So walk each root's *shape*, not the root. (A union in a
+  // nested position is different: there the branch is a value a field can hold,
+  // and `recurseIntoCompound` does ask it to describe itself.)
+  const single = roots.length === 1;
+  roots.forEach((root, i) => {
+    const prefix = single ? fieldName : `${fieldName}|${i}`;
+    for (const [key, field] of Object.entries(root.shape)) {
+      walkField(field, `${prefix}.${key}`, diagnostics, definitionType, definitionName);
+    }
+  });
 
   return diagnostics;
 }
@@ -182,7 +206,7 @@ export function checkSchemaSerializable(
   definitionType: LintDiagnostic['definitionType'],
   definitionName: string,
 ): LintDiagnostic | null {
-  if (!isZodObject(schema)) return null;
+  if (!isSchemaRoot(schema)) return null;
 
   try {
     toJSONSchema(schema as ZodObject<ZodRawShape>);
@@ -225,7 +249,7 @@ export function checkSchemaSatisfiable(
   definitionType: LintDiagnostic['definitionType'],
   definitionName: string,
 ): LintDiagnostic[] {
-  if (!isZodObject(schema)) return [];
+  if (!isSchemaRoot(schema)) return [];
 
   let json: unknown;
   try {
@@ -323,11 +347,18 @@ function collectUnsatisfiablePaths(
   }
 }
 
-/** Runtime check for ZodObject via Zod 4's `_zod.def.type`. */
-export function isZodObject(value: unknown): boolean {
-  if (!value || typeof value !== 'object') return false;
-  const zod = (value as Record<string, unknown>)._zod as { def?: { type?: string } } | undefined;
-  return zod?.def?.type === 'object';
+/**
+ * True for either root a definition may declare: a `z.object()` or a
+ * `z.discriminatedUnion()` of object variants.
+ *
+ * The per-node rules below evaluate the emitted JSON Schema, and both walkers
+ * already descend `oneOf`, so a union root needs no traversal of its own — only
+ * for the root gate to let it through. Whether a union root is *allowed* on a
+ * given field is `checkIsZodObject`'s call, made once per field; a rule that
+ * runs after it should not re-litigate the decision by skipping the schema.
+ */
+function isSchemaRoot(value: unknown): boolean {
+  return isZodObjectSchema(value) || isDiscriminatedUnionSchema(value);
 }
 
 /** Reads a ZodObject's raw shape, defensively across Zod 4 / legacy internals. */

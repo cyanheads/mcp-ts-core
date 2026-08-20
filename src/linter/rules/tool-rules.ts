@@ -65,8 +65,11 @@ export function lintToolDefinition(
     });
   }
 
-  // Input schema: must be ZodObject, serializable to JSON Schema
-  const inputCheck = checkIsZodObject(d?.input, 'input', 'tool', displayName);
+  // Input schema: a ZodObject, or a discriminated union of them for a
+  // multi-mode tool; serializable to JSON Schema either way.
+  const inputCheck = checkIsZodObject(d?.input, 'input', 'tool', displayName, {
+    allowDiscriminatedUnion: true,
+  });
   if (inputCheck) {
     diagnostics.push(inputCheck);
   } else {

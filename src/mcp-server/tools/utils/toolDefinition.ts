@@ -9,10 +9,11 @@
  */
 
 import type { ContentBlock } from '@modelcontextprotocol/server';
-import type { ZodObject, ZodRawShape, z } from 'zod';
+import { type ZodDiscriminatedUnion, type ZodObject, type ZodRawShape, z } from 'zod';
 
 import type { HandlerContext, ReasonOf } from '@/core/context.js';
 import type { ErrorContract } from '@/types-global/errors.js';
+import { isDiscriminatedUnionSchema } from './schemaShape.js';
 
 export { type DisabledMetadata, disabledTool } from './disabled-tool.js';
 
@@ -93,6 +94,26 @@ export type EnrichmentTrailerConfig<TEnrich extends ZodRawShape | undefined> =
     : never;
 
 /**
+ * What a tool may declare as its `input` root.
+ *
+ * A `z.object()` is the common shape. A `z.discriminatedUnion()` is the
+ * multi-mode shape: mutually exclusive argument sets with a literal
+ * discriminator and per-variant required fields. It advertises as
+ * `{"type":"object","oneOf":[<branch>, …]}` — branches intact, each carrying
+ * its own `required` and `const`-tagged discriminator — with identical bytes on
+ * a 2025-11-25 and a 2026-07-28 connection, since the legacy projection
+ * inspects `outputSchema` alone.
+ *
+ * Input roots may be unions; **output roots may not**. The 2025-era projection
+ * rewrites a non-object output root to `{ result: <natural> }` and wraps
+ * `structuredContent` to match, which would break the success path for every
+ * current client. `output` and `enrichment` stay `ZodObject`-only.
+ */
+export type ToolInputSchema =
+  | ZodDiscriminatedUnion<readonly ZodObject<ZodRawShape>[]>
+  | ZodObject<ZodRawShape>;
+
+/**
  * Represents the complete, self-contained definition of an MCP tool.
  *
  * `TErrors` is the const tuple of `ErrorContract` entries declared on the
@@ -105,7 +126,7 @@ export type EnrichmentTrailerConfig<TEnrich extends ZodRawShape | undefined> =
  * to clients as part of `outputSchema`.
  */
 export interface ToolDefinition<
-  TInput extends ZodObject<ZodRawShape> = ZodObject<ZodRawShape>,
+  TInput extends ToolInputSchema = ZodObject<ZodRawShape>,
   TOutput extends ZodObject<ZodRawShape> = ZodObject<ZodRawShape>,
   TErrors extends readonly ErrorContract[] | undefined = undefined,
   TEnrich extends ZodRawShape | undefined = undefined,
@@ -211,7 +232,12 @@ export interface ToolDefinition<
     input: z.infer<TInput>,
     ctx: HandlerContext<ReasonOf<TErrors>, TEnrich>,
   ): Promise<z.infer<TOutput>> | z.infer<TOutput>;
-  /** Zod schema for input validation. All fields need `.describe()`. */
+  /**
+   * Zod schema for input validation. All fields need `.describe()`.
+   *
+   * A `z.object()` root, or a `z.discriminatedUnion()` of object variants for a
+   * multi-mode tool — see {@link ToolInputSchema}.
+   */
   input: TInput;
   /** Programmatic unique name (snake_case). */
   name: string;
@@ -231,7 +257,7 @@ export interface ToolDefinition<
 
 /** Type-erased union for mixed arrays passed to createApp(). */
 export type AnyToolDefinition = ToolDefinition<
-  ZodObject<ZodRawShape>,
+  ToolInputSchema,
   ZodObject<ZodRawShape>,
   readonly ErrorContract[] | undefined,
   ZodRawShape | undefined
@@ -289,7 +315,7 @@ export type AnyToolDefinition = ToolDefinition<
  * ```
  */
 export function tool<
-  TInput extends ZodObject<ZodRawShape>,
+  TInput extends ToolInputSchema,
   TOutput extends ZodObject<ZodRawShape>,
   const TErrors extends readonly ErrorContract[] | undefined = undefined,
   const TEnrich extends ZodRawShape | undefined = undefined,
@@ -344,13 +370,27 @@ function assertErrorKeyUnreserved(
  *
  * Only the default (strip) mode is upgraded. A definition that explicitly
  * declared `.passthrough()` or `.catchall(...)` asked for an open object, and
- * that intent wins — Zod records it as a catchall type, which is what this
- * checks for.
+ * that intent wins — Zod records it as a catchall type (a `ZodNever` catchall
+ * for `.strict()` itself), which is what this checks for.
+ *
+ * A discriminated-union root is strictened per variant, since the branch is
+ * where the properties live and `additionalProperties` is emitted. The union is
+ * rebuilt from the strictened options rather than mutated: Zod indexes variants
+ * by discriminator value at construction time, so replacing the options on a
+ * built union would leave the index pointing at the loose ones.
  *
  * Root-level only, matching `.strict()` itself: a nested `z.object()` inside
  * the input still strips unless it is strict in its own right.
  */
-function strictenInput<TInput extends ZodObject<ZodRawShape>>(input: TInput): TInput {
+function strictenInput<TInput extends ToolInputSchema>(input: TInput): TInput {
+  if (isDiscriminatedUnionSchema(input)) {
+    const options = input.options as readonly ZodObject<ZodRawShape>[];
+    const strictened = options.map((option) =>
+      option.def.catchall === undefined ? option.strict() : option,
+    );
+    if (strictened.every((option, i) => option === options[i])) return input;
+    return z.discriminatedUnion(input.def.discriminator, strictened as never) as unknown as TInput;
+  }
   const declaresCatchall = input.def.catchall !== undefined;
   return declaresCatchall ? input : (input.strict() as TInput);
 }

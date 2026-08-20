@@ -513,3 +513,41 @@ function makeZodObjectEmittingDiscriminator(): z.ZodObject<z.ZodRawShape> {
       .describe('a payload'),
   });
 }
+
+describe('schema-root-oneof-portability (#142)', () => {
+  const unionTool = validTool({
+    input: z.discriminatedUnion('mode', [
+      z.object({
+        mode: z.literal('byId').describe('Look up by exact ID.'),
+        id: z.string().describe('Record ID.'),
+      }),
+      z.object({
+        mode: z.literal('byName').describe('Search by name.'),
+        name: z.string().describe('Name fragment.'),
+      }),
+    ]),
+  });
+
+  it('stays silent outside strict portability mode', () => {
+    const report = validateDefinitions({ tools: [unionTool] });
+    expect(rulesOf(report).warnings).not.toContain('schema-root-oneof-portability');
+  });
+
+  it('flags a root-level oneOf under strict portability', () => {
+    const report = validateDefinitions({ tools: [unionTool], portability: 'strict' });
+    expect(rulesOf(report).warnings).toContain('schema-root-oneof-portability');
+  });
+
+  it('does not fire for an ordinary object root', () => {
+    const report = validateDefinitions({ tools: [validTool()], portability: 'strict' });
+    expect(rulesOf(report).warnings).not.toContain('schema-root-oneof-portability');
+  });
+
+  it('leaves the typed branches alone — schema-anyof-needs-type does not fire', () => {
+    // Every variant emits its own `type: "object"`, which is the shape the
+    // anyOf rule asks for.
+    const report = validateDefinitions({ tools: [unionTool], portability: 'strict' });
+    expect(rulesOf(report).warnings).not.toContain('schema-anyof-needs-type');
+    expect(rulesOf(report).errors).toEqual([]);
+  });
+});

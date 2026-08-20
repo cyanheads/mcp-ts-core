@@ -311,6 +311,79 @@ describe('tool() strict input (#232)', () => {
   });
 });
 
+describe('tool() discriminated-union input (#142)', () => {
+  const lookup = tool('union_input_tool', {
+    description: 'Looks a record up by one of two mutually exclusive modes.',
+    input: z.discriminatedUnion('mode', [
+      z.object({
+        mode: z.literal('byId').describe('Look up by exact ID.'),
+        id: z.string().describe('Record ID.'),
+      }),
+      z.object({
+        mode: z.literal('byName').describe('Search by name.'),
+        name: z.string().describe('Name fragment.'),
+      }),
+    ]),
+    output: z.object({ ok: z.boolean().describe('ok') }),
+    handler: () => ({ ok: true }),
+  });
+
+  it('still routes by discriminator after the strictening rebuild', () => {
+    // Zod indexes variants by discriminator value at construction, so a union
+    // whose options were swapped in place would route to the loose originals.
+    expect(lookup.input.parse({ mode: 'byId', id: 'r-1' })).toEqual({ mode: 'byId', id: 'r-1' });
+    expect(lookup.input.parse({ mode: 'byName', name: 'wid' })).toEqual({
+      mode: 'byName',
+      name: 'wid',
+    });
+  });
+
+  it('rejects an unrecognized key inside a branch', () => {
+    const parsed = lookup.input.safeParse({ mode: 'byId', id: 'r-1', limit: 5 });
+
+    expect(parsed.success).toBe(false);
+    expect(parsed.error?.issues.map((issue) => issue.code)).toContain('unrecognized_keys');
+  });
+
+  it("rejects a sibling branch's field under the wrong discriminator", () => {
+    expect(lookup.input.safeParse({ mode: 'byId', name: 'wid' }).success).toBe(false);
+  });
+
+  it('advertises additionalProperties: false on every branch', () => {
+    const emitted = z.toJSONSchema(lookup.input, { io: 'input' }) as {
+      oneOf?: Array<{ additionalProperties?: unknown }>;
+    };
+
+    expect(emitted.oneOf).toHaveLength(2);
+    expect(emitted.oneOf?.map((branch) => branch.additionalProperties)).toEqual([false, false]);
+  });
+
+  it('leaves a variant that asked to stay open alone', () => {
+    // `.catchall()` is an explicit declaration of an open object, and that
+    // intent wins per variant exactly as it does for a single-object root.
+    const mixed = tool('mixed_union_tool', {
+      description: 'One open branch, one strict.',
+      input: z.discriminatedUnion('mode', [
+        z
+          .object({ mode: z.literal('open').describe('Open branch.') })
+          .catchall(z.string().describe('Arbitrary passthrough value.')),
+        z.object({
+          mode: z.literal('closed').describe('Closed branch.'),
+          id: z.string().describe('Record ID.'),
+        }),
+      ]),
+      output: z.object({ ok: z.boolean().describe('ok') }),
+      handler: () => ({ ok: true }),
+    });
+
+    expect(mixed.input.parse({ mode: 'open', anything: 'kept' })).toEqual({
+      mode: 'open',
+      anything: 'kept',
+    });
+    expect(mixed.input.safeParse({ mode: 'closed', id: 'r-1', extra: 1 }).success).toBe(false);
+  });
+});
+
 describe('tool() reserved `error` output key', () => {
   it('rejects an `error` field on the output schema', () => {
     expect(() =>
