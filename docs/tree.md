@@ -1,6 +1,6 @@
 # mcp-ts-core - Directory Structure
 
-Generated on: 2026-08-20 18:02:27
+Generated on: 2026-08-20 20:22:21
 
 ```text
 mcp-ts-core/
@@ -312,6 +312,7 @@ mcp-ts-core/
 │   │   ├── tools/
 │   │   │   ├── utils/
 │   │   │   │   ├── disabled-tool.ts
+│   │   │   │   ├── headerParam.ts
 │   │   │   │   ├── schemaShape.ts
 │   │   │   │   ├── toolDefinition.ts
 │   │   │   │   └── toolHandlerFactory.ts
@@ -364,6 +365,7 @@ mcp-ts-core/
 │   │   │   ├── heartbeat.ts
 │   │   │   ├── ITransport.ts
 │   │   │   └── manager.ts
+│   │   ├── cacheHints.ts
 │   │   ├── inputRequired.ts
 │   │   ├── notifications.ts
 │   │   ├── server.ts
@@ -597,6 +599,7 @@ mcp-ts-core/
 │   │   ├── server-context.ts
 │   │   └── server-process.ts
 │   ├── integration/
+│   │   ├── cache-hints.int.test.ts
 │   │   ├── completions.int.test.ts
 │   │   ├── config.int.test.ts
 │   │   ├── error-handler.int.test.ts
@@ -618,7 +621,8 @@ mcp-ts-core/
 │   │   ├── setup.ts
 │   │   ├── stdio.test.ts
 │   │   ├── union-input.int.test.ts
-│   │   └── wire-conformance.int.test.ts
+│   │   ├── wire-conformance.int.test.ts
+│   │   └── x-mcp-header.int.test.ts
 │   ├── smoke/
 │   │   ├── prompts/
 │   │   │   └── code-review.prompt.test.ts
@@ -684,6 +688,7 @@ mcp-ts-core/
 │   │   │   │   └── resource-registration.test.ts
 │   │   │   ├── tools/
 │   │   │   │   ├── utils/
+│   │   │   │   │   ├── header-param.test.ts
 │   │   │   │   │   ├── schemaShape.test.ts
 │   │   │   │   │   ├── toolDefinition.test.ts
 │   │   │   │   │   └── toolHandlerFactory.test.ts
