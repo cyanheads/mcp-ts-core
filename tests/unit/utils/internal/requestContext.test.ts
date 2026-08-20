@@ -32,14 +32,14 @@ describe('requestContextService', () => {
     } as never);
 
     const context = requestContextService.createRequestContext({
-      additionalContext: { extra: 'value' },
+      additionalContext: { detail: 'value' },
       operation: 'UnitTest',
       tenantId: 'manual-tenant',
     });
 
     expect(context.requestId).toBe('CTX-TEST-ID');
     expect(context.operation).toBe('UnitTest');
-    expect(context.extra).toBe('value');
+    expect(context.extra).toEqual({ detail: 'value' });
     expect(context.tenantId).toBe('manual-tenant');
     expect(context.traceId).toBe('trace-id');
     expect(context.spanId).toBe('span-id');
@@ -58,8 +58,7 @@ describe('requestContextService', () => {
     });
 
     expect(child.requestId).toBe(parent.requestId);
-    expect(child.parentOnly).toBe(true);
-    expect(child.childOnly).toBe(true);
+    expect(child.extra).toEqual({ parentOnly: true, childOnly: true });
     expect(child.tenantId).toBe('child-tenant');
   });
 
@@ -99,17 +98,15 @@ describe('requestContextService', () => {
     expect(typeof context.timestamp).toBe('string');
   });
 
-  it('passes ad-hoc properties through the index signature', () => {
+  it('routes ad-hoc properties into the extra bag and inherits declared fields', () => {
     const context = requestContextService.createRequestContext({
       operation: 'test',
-      toolName: 'my-tool',
-      sessionId: 'sess-123',
-      isServerless: true,
+      parentContext: { sessionId: 'sess-123' },
+      additionalContext: { toolName: 'my-tool', isServerless: true },
     });
 
-    expect(context.toolName).toBe('my-tool');
+    expect(context.extra).toEqual({ toolName: 'my-tool', isServerless: true });
     expect(context.sessionId).toBe('sess-123');
-    expect(context.isServerless).toBe(true);
   });
 
   describe('tenant ID resolution priority', () => {
@@ -250,7 +247,7 @@ describe('requestContextService', () => {
 
       const context = requestContextService.withAuthInfo(authInfo, parent);
       expect(context.requestId).toBe(parent.requestId);
-      expect(context.tracing).toBe(true);
+      expect(context.extra).toEqual({ tracing: true });
       expect(context.auth).toBeDefined();
     });
   });

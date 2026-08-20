@@ -8,8 +8,8 @@ import { McpError, validationError } from '@/types-global/errors.js';
 import { logger } from '@/utils/internal/logger.js';
 import {
   type RequestContext,
-  type RequestContextLike,
   requestContextService,
+  withExtra,
 } from '@/utils/internal/requestContext.js';
 import { assertTextInputBudget, type ParserInputBudgetOptions } from './inputBudget.js';
 import { yamlParser } from './yamlParser.js';
@@ -78,7 +78,7 @@ export class FrontmatterParser {
    */
   async parse<T = unknown>(
     markdown: string,
-    context?: RequestContextLike | RequestContext,
+    context?: RequestContext,
     budget?: ParserInputBudgetOptions,
   ): Promise<FrontmatterResult<T>> {
     assertTextInputBudget(markdown, budget);
@@ -110,11 +110,13 @@ export class FrontmatterParser {
         operation: 'FrontmatterParser.parse',
       });
 
-    logger.debug('Frontmatter detected, extracting and parsing.', {
-      ...logContext,
-      yamlLength: yamlContent.length,
-      contentLength: markdownContent.length,
-    });
+    logger.debug(
+      'Frontmatter detected, extracting and parsing.',
+      withExtra(logContext, {
+        yamlLength: yamlContent.length,
+        contentLength: markdownContent.length,
+      }),
+    );
 
     // Validate that we have YAML content
     const trimmedYaml = yamlContent.trim();
@@ -131,15 +133,17 @@ export class FrontmatterParser {
       // Use existing yamlParser for parsing (handles <think> blocks too)
       const parsedFrontmatter = await yamlParser.parse<T>(yamlContent, context, budget);
 
-      logger.debug('Frontmatter parsed successfully.', {
-        ...logContext,
-        frontmatterKeys:
-          parsedFrontmatter &&
-          typeof parsedFrontmatter === 'object' &&
-          !Array.isArray(parsedFrontmatter)
-            ? Object.keys(parsedFrontmatter)
-            : [],
-      });
+      logger.debug(
+        'Frontmatter parsed successfully.',
+        withExtra(logContext, {
+          frontmatterKeys:
+            parsedFrontmatter &&
+            typeof parsedFrontmatter === 'object' &&
+            !Array.isArray(parsedFrontmatter)
+              ? Object.keys(parsedFrontmatter)
+              : [],
+        }),
+      );
 
       return {
         frontmatter: parsedFrontmatter,
@@ -154,11 +158,13 @@ export class FrontmatterParser {
           operation: 'FrontmatterParser.parseError',
         });
 
-      logger.error('Failed to parse frontmatter YAML content.', {
-        ...errorLogContext,
-        errorDetails: error.message,
-        yamlContentSample: yamlContent.substring(0, 200),
-      });
+      logger.error(
+        'Failed to parse frontmatter YAML content.',
+        withExtra(errorLogContext, {
+          errorDetails: error.message,
+          yamlContentSample: yamlContent.substring(0, 200),
+        }),
+      );
 
       // Re-throw McpError from yamlParser or create new one
       if (error instanceof McpError) {

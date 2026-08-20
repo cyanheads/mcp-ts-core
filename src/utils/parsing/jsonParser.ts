@@ -9,8 +9,8 @@ import { lazyImport } from '@/utils/internal/lazyImport.js';
 import { logger } from '@/utils/internal/logger.js';
 import {
   type RequestContext,
-  type RequestContextLike,
   requestContextService,
+  withExtra,
 } from '@/utils/internal/requestContext.js';
 import { assertTextInputBudget, type ParserInputBudgetOptions } from './inputBudget.js';
 import { thinkBlockRegex } from './thinkBlock.js';
@@ -113,7 +113,7 @@ export class JsonParser {
   async parse<T = unknown>(
     jsonString: string,
     allowPartial: number = Allow.ALL,
-    context?: RequestContextLike | RequestContext,
+    context?: RequestContext,
     budget?: ParserInputBudgetOptions,
   ): Promise<T> {
     assertTextInputBudget(jsonString, budget);
@@ -131,10 +131,10 @@ export class JsonParser {
           operation: 'JsonParser.thinkBlock',
         });
       if (thinkContent) {
-        logger.debug('LLM <think> block detected and logged.', {
-          ...logContext,
-          thinkContent,
-        });
+        logger.debug(
+          'LLM <think> block detected and logged.',
+          withExtra(logContext, { thinkContent }),
+        );
       } else {
         logger.debug('Empty LLM <think> block detected.', logContext);
       }
@@ -160,11 +160,13 @@ export class JsonParser {
         requestContextService.createRequestContext({
           operation: 'JsonParser.parseError',
         });
-      logger.error('Failed to parse JSON content.', {
-        ...errorLogContext,
-        errorDetails: error.message,
-        contentAttempted: stringToParse.substring(0, 200),
-      });
+      logger.error(
+        'Failed to parse JSON content.',
+        withExtra(errorLogContext, {
+          errorDetails: error.message,
+          contentAttempted: stringToParse.substring(0, 200),
+        }),
+      );
 
       throw validationError(
         `Failed to parse JSON content: ${error.message}`,

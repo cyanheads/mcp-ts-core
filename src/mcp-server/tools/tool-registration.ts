@@ -112,7 +112,7 @@ export class ToolRegistry {
   ): Promise<void> {
     const registrationContext = requestContextService.createRequestContext({
       operation: 'ToolRegistry.registerTool',
-      toolName: tool.name,
+      additionalContext: { toolName: tool.name },
     });
 
     logger.debug(`Registering tool: '${tool.name}'`, registrationContext);

@@ -20,7 +20,11 @@ import {
 } from '@/types-global/errors.js';
 import { lazyImport } from '@/utils/internal/lazyImport.js';
 import { logger } from '@/utils/internal/logger.js';
-import { type RequestContextLike, requestContextService } from '@/utils/internal/requestContext.js';
+import {
+  type RequestContext,
+  requestContextService,
+  withExtra,
+} from '@/utils/internal/requestContext.js';
 
 import type { IDataCanvasProvider } from '../../core/IDataCanvasProvider.js';
 import { sniffSchema } from '../../core/schemaSniffer.js';
@@ -121,7 +125,7 @@ export class DuckdbProvider implements IDataCanvasProvider {
     return root;
   }
 
-  async initCanvas(canvasId: string, _context: RequestContextLike): Promise<void> {
+  async initCanvas(canvasId: string, _context: RequestContext): Promise<void> {
     if (this.canvases.has(canvasId)) return;
     const duck = await importDuckDB();
     const tempDirectory = await this.ensureTempRoot();
@@ -138,29 +142,29 @@ export class DuckdbProvider implements IDataCanvasProvider {
   }
 
   // biome-ignore lint/suspicious/useAwait: async is required by IDataCanvasProvider; close is sync for DuckDB.
-  async destroyCanvas(canvasId: string, _context: RequestContextLike): Promise<void> {
+  async destroyCanvas(canvasId: string, _context: RequestContext): Promise<void> {
     const record = this.canvases.get(canvasId);
     if (!record) return;
     this.canvases.delete(canvasId);
     const closeContext = requestContextService.createRequestContext({
       operation: 'DuckdbProvider.destroyCanvas',
-      canvasId,
+      additionalContext: { canvasId },
     });
     try {
       record.controlConnection.closeSync();
     } catch (err) {
-      logger.warning('DuckDB control connection close failed.', {
-        ...closeContext,
-        error: err instanceof Error ? err.message : String(err),
-      });
+      logger.warning(
+        'DuckDB control connection close failed.',
+        withExtra(closeContext, { error: err instanceof Error ? err.message : String(err) }),
+      );
     }
     try {
       record.instance.closeSync();
     } catch (err) {
-      logger.warning('DuckDB instance close failed.', {
-        ...closeContext,
-        error: err instanceof Error ? err.message : String(err),
-      });
+      logger.warning(
+        'DuckDB instance close failed.',
+        withExtra(closeContext, { error: err instanceof Error ? err.message : String(err) }),
+      );
     }
   }
 
@@ -194,7 +198,7 @@ export class DuckdbProvider implements IDataCanvasProvider {
     canvasId: string,
     name: string,
     rows: RegisterRows,
-    _context: RequestContextLike,
+    _context: RequestContext,
     options?: RegisterTableOptions,
   ): Promise<RegisterTableResult> {
     const record = this.requireCanvas(canvasId);
@@ -284,7 +288,7 @@ export class DuckdbProvider implements IDataCanvasProvider {
   async query(
     canvasId: string,
     sql: string,
-    _context: RequestContextLike,
+    _context: RequestContext,
     options?: QueryOptions,
   ): Promise<QueryResult> {
     const record = this.requireCanvas(canvasId);
@@ -393,7 +397,7 @@ export class DuckdbProvider implements IDataCanvasProvider {
     canvasId: string,
     tableName: string,
     target: ExportTarget,
-    _context: RequestContextLike,
+    _context: RequestContext,
     options?: ExportOptions,
   ): Promise<ExportResult> {
     const record = this.requireCanvas(canvasId);
@@ -467,7 +471,7 @@ export class DuckdbProvider implements IDataCanvasProvider {
     canvasId: string,
     name: string,
     selectSql: string,
-    _context: RequestContextLike,
+    _context: RequestContext,
     options?: RegisterViewOptions,
   ): Promise<RegisterViewResult> {
     const record = this.requireCanvas(canvasId);
@@ -517,7 +521,7 @@ export class DuckdbProvider implements IDataCanvasProvider {
     sourceCanvasId: string,
     sourceTableName: string,
     asName: string,
-    _context: RequestContextLike,
+    _context: RequestContext,
     options?: ImportFromOptions,
   ): Promise<RegisterTableResult> {
     if (sourceCanvasId === targetCanvasId) {
@@ -610,7 +614,7 @@ export class DuckdbProvider implements IDataCanvasProvider {
 
   async describe(
     canvasId: string,
-    _context: RequestContextLike,
+    _context: RequestContext,
     options?: DescribeOptions,
   ): Promise<TableInfo[]> {
     const record = this.requireCanvas(canvasId);
@@ -695,7 +699,7 @@ export class DuckdbProvider implements IDataCanvasProvider {
     };
   }
 
-  async drop(canvasId: string, name: string, _context: RequestContextLike): Promise<boolean> {
+  async drop(canvasId: string, name: string, _context: RequestContext): Promise<boolean> {
     const record = this.requireCanvas(canvasId);
     assertValidIdentifier(name, 'table');
     const kind = await this.lookupKind(record.controlConnection, name);
@@ -705,7 +709,7 @@ export class DuckdbProvider implements IDataCanvasProvider {
     return true;
   }
 
-  async clear(canvasId: string, _context: RequestContextLike): Promise<number> {
+  async clear(canvasId: string, _context: RequestContext): Promise<number> {
     const record = this.requireCanvas(canvasId);
     const reader = await record.controlConnection.runAndReadAll(
       `SELECT table_name, table_type FROM information_schema.tables WHERE table_schema = 'main'`,

@@ -52,6 +52,10 @@ vi.mock('@/utils/internal/logger.js', () => ({
 }));
 
 vi.mock('@/utils/internal/requestContext.js', () => ({
+  withExtra: (ctx: { extra?: Record<string, unknown> }, fields: Record<string, unknown>) => ({
+    ...ctx,
+    extra: { ...ctx.extra, ...fields },
+  }),
   requestContextService: {
     createRequestContext: vi.fn((opts: any) => ({
       requestId: 'test-req-id',
@@ -572,7 +576,6 @@ describe('createToolHandler', () => {
 
       expect(requestContextService.createRequestContext).toHaveBeenCalledWith(
         expect.objectContaining({
-          additionalContext: expect.objectContaining({ sessionId: 'sess-abc' }),
           parentContext: expect.objectContaining({ sessionId: 'sess-abc' }),
         }),
       );
@@ -996,7 +999,10 @@ describe('createToolHandler', () => {
     it('still writes to the process logger', async () => {
       await logOnce((ctx) => ctx.log.info('msg', { k: 1 }));
 
-      expect(mockLogger.info).toHaveBeenCalledWith('msg', expect.objectContaining({ k: 1 }));
+      expect(mockLogger.info).toHaveBeenCalledWith(
+        'msg',
+        expect.objectContaining({ extra: expect.objectContaining({ k: 1 }) }),
+      );
     });
 
     it('does not fail the handler when the wire log rejects', async () => {

@@ -23,11 +23,11 @@ export type SyncStatus = 'pending' | 'in_progress' | 'complete' | 'error';
  * console wrapper). All methods are optional.
  */
 export interface MirrorLogger {
-  debug?(message: string, meta?: object): void;
-  error?(message: string, meta?: object): void;
-  info?(message: string, meta?: object): void;
-  notice?(message: string, meta?: object): void;
-  warning?(message: string, meta?: object): void;
+  debug?(message: string, meta?: Readonly<Record<string, unknown>>): void;
+  error?(message: string, meta?: Readonly<Record<string, unknown>>): void;
+  info?(message: string, meta?: Readonly<Record<string, unknown>>): void;
+  notice?(message: string, meta?: Readonly<Record<string, unknown>>): void;
+  warning?(message: string, meta?: Readonly<Record<string, unknown>>): void;
 }
 
 /**

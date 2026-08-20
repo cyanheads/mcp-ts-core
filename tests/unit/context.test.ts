@@ -239,12 +239,13 @@ describe('createContext', () => {
       expect(mockLogger.info).toHaveBeenCalledTimes(1);
       const [msg, passedContext] = mockLogger.info.mock.calls[0]!;
       expect(msg).toBe('test message');
-      // The enriched context should spread RequestContext + extra data
+      // Canonical fields stay top-level; call-site data lands in `extra`,
+      // which the logger flattens into the emitted line.
       expect(passedContext).toMatchObject({
         requestId: 'req-001',
         tenantId: 'tenant-x',
         traceId: 'trace-123',
-        extra: 'data',
+        extra: { extra: 'data' },
       });
     });
 
@@ -267,7 +268,7 @@ describe('createContext', () => {
       const [msg, errorArg, contextArg] = mockLogger.error.mock.calls[0]!;
       expect(msg).toBe('something failed');
       expect(errorArg).toBe(err);
-      expect(contextArg).toMatchObject({ requestId: 'req-001', detail: 'info' });
+      expect(contextArg).toMatchObject({ requestId: 'req-001', extra: { detail: 'info' } });
     });
 
     it('should call logger.error with enriched context when no Error is provided', () => {

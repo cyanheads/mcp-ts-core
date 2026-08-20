@@ -129,7 +129,7 @@ export class WhisperProvider implements ISpeechProvider {
   async speechToText(options: SpeechToTextOptions): Promise<SpeechToTextResult> {
     const context = requestContextService.createRequestContext({
       operation: 'whisper-stt',
-      ...(options.context ?? {}),
+      ...(options.context && { parentContext: options.context }),
     });
     const modelId = options.modelId ?? this.defaultModelId;
 

@@ -12,7 +12,7 @@ import type { Context } from 'hono';
 
 import type { ServerManifest } from '@/core/serverManifest.js';
 import { logger } from '@/utils/internal/logger.js';
-import { requestContextService } from '@/utils/internal/requestContext.js';
+import { requestContextService, withExtra } from '@/utils/internal/requestContext.js';
 
 /**
  * Build the robots.txt body from the manifest. Disallows the MCP JSON-RPC
@@ -35,7 +35,7 @@ export function createRobotsTxtHandler(manifest: ServerManifest) {
     const context = requestContextService.createRequestContext({
       operation: 'robotsTxtHandler',
     });
-    logger.debug('Serving robots.txt.', { ...context, bytes: body.length });
+    logger.debug('Serving robots.txt.', withExtra(context, { bytes: body.length }));
     c.header('Content-Type', 'text/plain; charset=utf-8');
     c.header('X-Content-Type-Options', 'nosniff');
     c.header('Cache-Control', 'public, max-age=86400');

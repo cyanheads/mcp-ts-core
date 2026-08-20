@@ -50,6 +50,10 @@ vi.mock('@/utils/internal/logger.js', () => ({
 }));
 
 vi.mock('@/utils/internal/requestContext.js', () => ({
+  withExtra: (ctx: { extra?: Record<string, unknown> }, fields: Record<string, unknown>) => ({
+    ...ctx,
+    extra: { ...ctx.extra, ...fields },
+  }),
   requestContextService: mockRequestContextService,
 }));
 

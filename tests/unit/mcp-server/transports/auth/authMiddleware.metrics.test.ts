@@ -42,6 +42,10 @@ vi.mock('@/utils/internal/performance.js', () => ({
 }));
 
 vi.mock('@/utils/internal/requestContext.js', () => ({
+  withExtra: (ctx: { extra?: Record<string, unknown> }, fields: Record<string, unknown>) => ({
+    ...ctx,
+    extra: { ...ctx.extra, ...fields },
+  }),
   requestContextService: {
     createRequestContext: vi.fn((ctx: Record<string, unknown>) => ({
       requestId: 'req-auth-test',

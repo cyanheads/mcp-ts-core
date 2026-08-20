@@ -4,7 +4,11 @@
  * @module tests/fixtures
  */
 import type { ServerManifest } from '@/core/serverManifest.js';
-import { type RequestContext, requestContextService } from '@/utils/internal/requestContext.js';
+import {
+  type CreateRequestContextParams,
+  type RequestContext,
+  requestContextService,
+} from '@/utils/internal/requestContext.js';
 
 /** Default server manifest for tests that need a {@link ServerManifest} value. */
 export const defaultServerManifest: ServerManifest = {
@@ -66,7 +70,7 @@ export const defaultServerManifest: ServerManifest = {
  * Wraps `requestContextService.createRequestContext` with common test values.
  */
 export function createTestAppContext(
-  overrides: Partial<RequestContext> & Record<string, unknown> = {},
+  overrides: Partial<CreateRequestContextParams> = {},
 ): RequestContext {
   return requestContextService.createRequestContext({
     operation: 'test-operation',

@@ -33,7 +33,7 @@ export class TransportManager {
   async start(): Promise<void> {
     const context = requestContextService.createRequestContext({
       operation: 'TransportManager.start',
-      transport: this.config.mcpTransportType,
+      additionalContext: { transport: this.config.mcpTransportType },
     });
 
     this.logger.info(`Starting transport: ${this.config.mcpTransportType}`, context);
@@ -94,7 +94,7 @@ export class TransportManager {
   async stop(signal: string): Promise<void> {
     const context = requestContextService.createRequestContext({
       operation: 'TransportManager.stop',
-      signal,
+      additionalContext: { signal },
     });
 
     if (!this.shutdown) {

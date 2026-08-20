@@ -39,7 +39,9 @@ describe('XmlParser', () => {
     expect(result).toEqual({ root: { item: 'value' } });
     expect(debugSpy).toHaveBeenCalledWith(
       'LLM <think> block detected and logged.',
-      expect.objectContaining({ thinkContent: 'Reasoning notes' }),
+      expect.objectContaining({
+        extra: expect.objectContaining({ thinkContent: 'Reasoning notes' }),
+      }),
     );
   });
 
@@ -93,8 +95,10 @@ describe('XmlParser', () => {
     expect(errorSpy).toHaveBeenCalledWith(
       'Failed to parse XML content.',
       expect.objectContaining({
-        errorDetails: expect.any(String),
-        contentAttempted: xml.substring(0, 200),
+        extra: expect.objectContaining({
+          errorDetails: expect.any(String),
+          contentAttempted: xml.substring(0, 200),
+        }),
       }),
     );
   });

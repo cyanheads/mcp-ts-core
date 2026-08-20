@@ -33,6 +33,10 @@ vi.mock('@/utils/internal/logger.js', () => ({
 }));
 
 vi.mock('@/utils/internal/requestContext.js', () => ({
+  withExtra: (ctx: { extra?: Record<string, unknown> }, fields: Record<string, unknown>) => ({
+    ...ctx,
+    extra: { ...ctx.extra, ...fields },
+  }),
   requestContextService: {
     createRequestContext: createRequestContextSpy,
   },
@@ -79,9 +83,11 @@ describe('protectedResourceMetadataHandler', () => {
     expect(debugSpy).toHaveBeenCalledWith(
       'Serving Protected Resource Metadata.',
       expect.objectContaining({
-        authMode: 'oauth',
         operation: 'protectedResourceMetadataHandler',
-        resource: 'http://localhost/mcp',
+        extra: expect.objectContaining({
+          authMode: 'oauth',
+          resource: 'http://localhost/mcp',
+        }),
       }),
     );
   });

@@ -15,7 +15,7 @@ import type { Context } from 'hono';
 
 import type { ServerManifest } from '@/core/serverManifest.js';
 import { logger } from '@/utils/internal/logger.js';
-import { requestContextService } from '@/utils/internal/requestContext.js';
+import { requestContextService, withExtra } from '@/utils/internal/requestContext.js';
 
 /** Shape of the SEP-1649 Server Card document. */
 export interface ServerCard {
@@ -126,11 +126,10 @@ export function createServerCardHandler(manifest: ServerManifest) {
     const origin = manifest.transport.publicUrl ?? new URL(c.req.url).origin;
     const card = buildServerCard(manifest, origin);
 
-    logger.debug('Serving SEP-1649 Server Card.', {
-      ...context,
-      origin,
-      authMode: manifest.auth.mode,
-    });
+    logger.debug(
+      'Serving SEP-1649 Server Card.',
+      withExtra(context, { origin, authMode: manifest.auth.mode }),
+    );
 
     c.header('Content-Type', 'application/json; charset=utf-8');
     c.header('X-Content-Type-Options', 'nosniff');

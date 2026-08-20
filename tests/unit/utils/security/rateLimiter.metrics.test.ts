@@ -31,6 +31,10 @@ vi.mock('@/utils/internal/requestContext.js', () => ({
       ...((params.additionalContext as Record<string, unknown>) ?? {}),
     })),
   },
+  withExtra: (context: any, fields: any) => ({
+    ...context,
+    extra: { ...context?.extra, ...fields },
+  }),
 }));
 
 // ---------------------------------------------------------------------------

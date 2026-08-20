@@ -50,12 +50,17 @@ vi.mock('@/utils/internal/logger.js', () => ({
 vi.mock('@/utils/internal/requestContext.js', () => ({
   requestContextService: {
     createRequestContext: vi.fn((opts: any) => ({
+      ...(opts?.parentContext ?? {}),
       requestId: 'fuzz-req-id',
       timestamp: new Date().toISOString(),
       operation: opts?.operation ?? 'fuzz',
-      ...(opts?.additionalContext ?? {}),
+      ...(opts?.additionalContext && { extra: opts.additionalContext }),
     })),
   },
+  withExtra: (context: any, fields: any) => ({
+    ...context,
+    extra: { ...context?.extra, ...fields },
+  }),
 }));
 
 vi.mock('@/utils/internal/performance.js', () => ({

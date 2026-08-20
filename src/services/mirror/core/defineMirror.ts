@@ -65,10 +65,10 @@ const defaultLogger: MirrorLogger = {
   error: (message, meta) => logger.error(message, ctxFrom(meta)),
 };
 
-function ctxFrom(meta?: object) {
+function ctxFrom(meta?: Readonly<Record<string, unknown>>) {
   return requestContextService.createRequestContext({
     operation: 'mirror.sync',
-    ...(meta ?? {}),
+    ...(meta && { additionalContext: meta }),
   });
 }
 

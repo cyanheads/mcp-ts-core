@@ -23,7 +23,7 @@ import type {
 import { validateSessionIdFormat } from '@/mcp-server/transports/http/sessionIdUtils.js';
 import { invalidParams, serviceUnavailable } from '@/types-global/errors.js';
 import { logger } from '@/utils/internal/logger.js';
-import { requestContextService } from '@/utils/internal/requestContext.js';
+import { requestContextService, withExtra } from '@/utils/internal/requestContext.js';
 import { ATTR_MCP_SESSION_EVENT } from '@/utils/telemetry/attributes.js';
 import { createCounter, createHistogram } from '@/utils/telemetry/metrics.js';
 
@@ -124,8 +124,10 @@ export class SessionStore {
     if (this.sessions.size < this.maxSessions) return;
     const context = requestContextService.createRequestContext({
       operation: 'SessionStore.assertCapacity',
-      currentSessions: this.sessions.size,
-      maxSessions: this.maxSessions,
+      additionalContext: {
+        currentSessions: this.sessions.size,
+        maxSessions: this.maxSessions,
+      },
     });
     logger.warning('Session capacity reached, rejecting new session', context);
     throw serviceUnavailable(
@@ -145,7 +147,7 @@ export class SessionStore {
     if (!validateSessionIdFormat(sessionId)) {
       const context = requestContextService.createRequestContext({
         operation: 'SessionStore.register',
-        sessionIdPrefix: sessionId.substring(0, 16),
+        additionalContext: { sessionIdPrefix: sessionId.substring(0, 16) },
       });
       logger.warning('Invalid session ID format rejected', context);
       throw invalidParams(
@@ -175,8 +177,8 @@ export class SessionStore {
       'Session created with identity binding',
       requestContextService.createRequestContext({
         operation: 'SessionStore.register',
-        sessionId,
-        tenantId: identity?.tenantId,
+        parentContext: { sessionId },
+        ...(identity?.tenantId && { tenantId: identity.tenantId }),
       }),
     );
   }
@@ -238,8 +240,8 @@ export class SessionStore {
             'Session identity bound atomically on authenticated request',
             requestContextService.createRequestContext({
               operation: 'SessionStore.bindIdentity',
-              sessionId,
-              tenantId: identity.tenantId,
+              parentContext: { sessionId },
+              ...(identity.tenantId && { tenantId: identity.tenantId }),
             }),
           );
         }
@@ -251,9 +253,9 @@ export class SessionStore {
     const warn = (message: string, extra?: Record<string, unknown>) => {
       const context = requestContextService.createRequestContext({
         operation: 'SessionStore.isValidForIdentity',
-        sessionId,
+        parentContext: { sessionId },
       });
-      logger.warning(message, extra ? { ...context, ...extra } : context);
+      logger.warning(message, extra ? withExtra(context, extra) : context);
     };
 
     // If request has no identity but session does, reject (security: session was authenticated)
@@ -313,7 +315,7 @@ export class SessionStore {
       'Session terminated',
       requestContextService.createRequestContext({
         operation: 'SessionStore.terminate',
-        sessionId,
+        parentContext: { sessionId },
       }),
     );
     await closeConnection(session.connection);
@@ -338,10 +340,13 @@ export class SessionStore {
     metrics.sessionEventCounter.add(stale.length, {
       [ATTR_MCP_SESSION_EVENT]: 'stale_cleanup',
     });
-    logger.debug('Cleaned up stale sessions', {
-      ...requestContextService.createRequestContext({ operation: 'SessionStore.cleanup' }),
-      count: stale.length,
-    });
+    logger.debug(
+      'Cleaned up stale sessions',
+      requestContextService.createRequestContext({
+        operation: 'SessionStore.cleanup',
+        additionalContext: { count: stale.length },
+      }),
+    );
     await Promise.allSettled(stale.map((session) => closeConnection(session.connection)));
   }
 

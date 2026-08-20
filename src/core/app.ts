@@ -40,7 +40,7 @@ import { configurationError, JsonRpcErrorCode, McpError } from '@/types-global/e
 import { initErrorMetrics } from '@/utils/internal/error-handler/errorHandler.js';
 import { logger, type McpLogLevel } from '@/utils/internal/logger.js';
 import { initHandlerMetrics } from '@/utils/internal/performance.js';
-import { requestContextService } from '@/utils/internal/requestContext.js';
+import { requestContextService, withExtra } from '@/utils/internal/requestContext.js';
 import { initHttpClientMetrics } from '@/utils/network/fetchWithTimeout.js';
 import { schedulerService } from '@/utils/scheduling/scheduler.js';
 import { initRateLimitMetrics, RateLimiter } from '@/utils/security/rateLimiter.js';
@@ -580,9 +580,11 @@ export async function createApp<TSupabaseClient extends object = SupabaseClientH
   // --- Startup context ---
   const startupContext = requestContextService.createRequestContext({
     operation: 'ServerStartup',
-    applicationName: config.mcpServerName,
-    applicationVersion: config.mcpServerVersion,
-    nodeEnvironment: config.environment,
+    additionalContext: {
+      applicationName: config.mcpServerName,
+      applicationVersion: config.mcpServerVersion,
+      nodeEnvironment: config.environment,
+    },
   });
 
   logger.info(`Starting ${config.mcpServerName} (v${config.mcpServerVersion})...`, startupContext);
@@ -611,7 +613,7 @@ export async function createApp<TSupabaseClient extends object = SupabaseClientH
 
     const shutdownContext = requestContextService.createRequestContext({
       operation: 'ServerShutdown',
-      triggerEvent: signal,
+      additionalContext: { triggerEvent: signal },
     });
 
     logger.info(`Received ${signal}. Initiating graceful shutdown...`, shutdownContext);
@@ -630,11 +632,13 @@ export async function createApp<TSupabaseClient extends object = SupabaseClientH
           } catch (error) {
             cleanupFailures.push(error);
             if (cleanupFailures.length > 1) {
-              logger.warning('Additional shutdown cleanup failure.', {
-                ...shutdownContext,
-                cleanupStep: step,
-                error: error instanceof Error ? error.message : String(error),
-              });
+              logger.warning(
+                'Additional shutdown cleanup failure.',
+                withExtra(shutdownContext, {
+                  cleanupStep: step,
+                  error: error instanceof Error ? error.message : String(error),
+                }),
+              );
             }
           }
         };
@@ -651,10 +655,12 @@ export async function createApp<TSupabaseClient extends object = SupabaseClientH
 
         if (coreServices.canvas) {
           await coreServices.canvas.shutdown(shutdownContext).catch((err) => {
-            logger.warning('Canvas shutdown raised — continuing.', {
-              ...shutdownContext,
-              error: err instanceof Error ? err.message : String(err),
-            });
+            logger.warning(
+              'Canvas shutdown raised — continuing.',
+              withExtra(shutdownContext, {
+                error: err instanceof Error ? err.message : String(err),
+              }),
+            );
           });
         }
 
@@ -682,7 +688,7 @@ export async function createApp<TSupabaseClient extends object = SupabaseClientH
   const onUncaughtException = (error: Error) => {
     const fatalContext = requestContextService.createRequestContext({
       operation: 'FatalError',
-      triggerEvent: 'uncaughtException',
+      additionalContext: { triggerEvent: 'uncaughtException' },
     });
     logger.fatal('FATAL: Uncaught exception detected.', error, fatalContext);
     fatalShutdown('uncaughtException');
@@ -691,7 +697,7 @@ export async function createApp<TSupabaseClient extends object = SupabaseClientH
     const err = reason instanceof Error ? reason : new Error(String(reason));
     const fatalContext = requestContextService.createRequestContext({
       operation: 'FatalError',
-      triggerEvent: 'unhandledRejection',
+      additionalContext: { triggerEvent: 'unhandledRejection' },
     });
     logger.fatal('FATAL: Unhandled promise rejection detected.', err, fatalContext);
     fatalShutdown('unhandledRejection');

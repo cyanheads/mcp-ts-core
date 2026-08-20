@@ -8,8 +8,8 @@ import { JsonRpcErrorCode, McpError, validationError } from '@/types-global/erro
 import { logger } from '@/utils/internal/logger.js';
 import {
   type RequestContext,
-  type RequestContextLike,
   requestContextService,
+  withExtra,
 } from '@/utils/internal/requestContext.js';
 
 /**
@@ -216,11 +216,7 @@ export class TreeFormatter {
    * //     └── 📄 types.ts
    * ```
    */
-  format(
-    root: TreeNode,
-    options?: TreeFormatterOptions,
-    context?: RequestContextLike | RequestContext,
-  ): string {
+  format(root: TreeNode, options?: TreeFormatterOptions, context?: RequestContext): string {
     const logContext =
       context ||
       requestContextService.createRequestContext({
@@ -241,21 +237,20 @@ export class TreeFormatter {
       // Reset circular reference detection
       this.seenNodes.clear();
 
-      logger.debug('Formatting tree structure', {
-        ...logContext,
-        rootName: root.name,
-        style: opts.style,
-      });
+      logger.debug(
+        'Formatting tree structure',
+        withExtra(logContext, { rootName: root.name, style: opts.style }),
+      );
 
       const lines: string[] = [];
       this.renderNode(root, '', true, true, lines, opts, 0);
 
       const result = lines.join('\n');
 
-      logger.debug('Tree formatted successfully', {
-        ...logContext,
-        lineCount: lines.length,
-      });
+      logger.debug(
+        'Tree formatted successfully',
+        withExtra(logContext, { lineCount: lines.length }),
+      );
 
       return result;
     } catch (error: unknown) {
@@ -265,10 +260,7 @@ export class TreeFormatter {
 
       const message = error instanceof Error ? error.message : String(error);
       const stack = error instanceof Error ? error.stack : undefined;
-      logger.error('Failed to format tree', {
-        ...logContext,
-        error: message,
-      });
+      logger.error('Failed to format tree', withExtra(logContext, { error: message }));
 
       throw new McpError(JsonRpcErrorCode.InternalError, `Failed to format tree: ${message}`, {
         ...logContext,
@@ -312,7 +304,7 @@ export class TreeFormatter {
   formatMultiple(
     roots: TreeNode[],
     options?: TreeFormatterOptions,
-    context?: RequestContextLike | RequestContext,
+    context?: RequestContext,
   ): string {
     const logContext =
       context ||
@@ -325,10 +317,10 @@ export class TreeFormatter {
     }
 
     try {
-      logger.debug('Formatting multiple tree structures', {
-        ...logContext,
-        count: roots.length,
-      });
+      logger.debug(
+        'Formatting multiple tree structures',
+        withExtra(logContext, { count: roots.length }),
+      );
 
       const results = roots.map((root) => this.format(root, options, logContext));
 

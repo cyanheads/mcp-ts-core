@@ -601,19 +601,19 @@ describe('ContextLogger (ctx.log)', () => {
 
     expect(debugSpy).toHaveBeenCalledWith(
       'debug msg',
-      expect.objectContaining({ requestId: 'req-log', extra: 1 }),
+      expect.objectContaining({ requestId: 'req-log', extra: { extra: 1 } }),
     );
     expect(infoSpy).toHaveBeenCalledWith(
       'info msg',
-      expect.objectContaining({ requestId: 'req-log', extra: 2 }),
+      expect.objectContaining({ requestId: 'req-log', extra: { extra: 2 } }),
     );
     expect(noticeSpy).toHaveBeenCalledWith(
       'notice msg',
-      expect.objectContaining({ requestId: 'req-log', extra: 3 }),
+      expect.objectContaining({ requestId: 'req-log', extra: { extra: 3 } }),
     );
     expect(warningSpy).toHaveBeenCalledWith(
       'warning msg',
-      expect.objectContaining({ requestId: 'req-log', extra: 4 }),
+      expect.objectContaining({ requestId: 'req-log', extra: { extra: 4 } }),
     );
   });
 
@@ -642,7 +642,7 @@ describe('ContextLogger (ctx.log)', () => {
     expect(errorSpy).toHaveBeenCalledWith(
       'failed',
       boom,
-      expect.objectContaining({ requestId: 'req-err', detail: 'x' }),
+      expect.objectContaining({ requestId: 'req-err', extra: { detail: 'x' } }),
     );
   });
 
@@ -655,7 +655,7 @@ describe('ContextLogger (ctx.log)', () => {
 
     expect(errorSpy).toHaveBeenCalledWith(
       'failed without error object',
-      expect.objectContaining({ requestId: 'req-err-2', detail: 'y' }),
+      expect.objectContaining({ requestId: 'req-err-2', extra: { detail: 'y' } }),
     );
     // Exactly two arguments — the Error slot is omitted entirely, not passed
     // as an explicit `undefined` placeholder.

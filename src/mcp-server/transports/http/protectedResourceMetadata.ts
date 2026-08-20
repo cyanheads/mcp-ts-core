@@ -14,7 +14,7 @@ import type { Context } from 'hono';
 
 import { config } from '@/config/index.js';
 import { logger } from '@/utils/internal/logger.js';
-import { requestContextService } from '@/utils/internal/requestContext.js';
+import { requestContextService, withExtra } from '@/utils/internal/requestContext.js';
 
 /**
  * Hono route handler for the RFC 9728 Protected Resource Metadata endpoint.
@@ -46,11 +46,10 @@ export function protectedResourceMetadataHandler(c: Context): Response {
     metadata.resource_signing_alg_values_supported = ['RS256', 'ES256', 'PS256'];
   }
 
-  logger.debug('Serving Protected Resource Metadata.', {
-    ...context,
-    resource,
-    authMode: config.mcpAuthMode,
-  });
+  logger.debug(
+    'Serving Protected Resource Metadata.',
+    withExtra(context, { resource, authMode: config.mcpAuthMode }),
+  );
 
   c.header('Cache-Control', 'public, max-age=3600');
   return c.json(metadata);

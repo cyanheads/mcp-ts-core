@@ -15,15 +15,15 @@ import type {
 } from '@/utils/internal/error-handler/types.js';
 
 describe('ErrorContext', () => {
-  it('should accept a requestId and arbitrary keys', () => {
+  it('should accept the canonical fields plus an open `extra` bag', () => {
     const ctx: ErrorContext = {
       requestId: 'req-123',
       operation: 'test',
-      extra: 42,
+      extra: { attempt: 42 },
     };
 
     expect(ctx.requestId).toBe('req-123');
-    expect(ctx.extra).toBe(42);
+    expect(ctx.extra).toEqual({ attempt: 42 });
   });
 });
 

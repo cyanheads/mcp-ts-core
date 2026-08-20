@@ -160,11 +160,21 @@ const {
   });
 
   const mockRequestContextService = {
-    createRequestContext: vi.fn((params?: Record<string, unknown>) => ({
-      requestId: 'core-app-request',
-      timestamp: '2026-03-30T00:00:00.000Z',
-      ...params,
-    })),
+    createRequestContext: vi.fn(
+      (params?: {
+        additionalContext?: Record<string, unknown>;
+        operation?: string;
+        parentContext?: Record<string, unknown>;
+        tenantId?: string;
+      }) => ({
+        requestId: 'core-app-request',
+        timestamp: '2026-03-30T00:00:00.000Z',
+        ...params?.parentContext,
+        ...(params?.operation && { operation: params.operation }),
+        ...(params?.tenantId && { tenantId: params.tenantId }),
+        ...(params?.additionalContext && { extra: { ...params.additionalContext } }),
+      }),
+    ),
   };
 
   const mockSchedulerService = {
@@ -281,6 +291,10 @@ vi.mock('@/utils/internal/performance.js', () => ({
 }));
 
 vi.mock('@/utils/internal/requestContext.js', () => ({
+  withExtra: (ctx: { extra?: Record<string, unknown> }, fields: Record<string, unknown>) => ({
+    ...ctx,
+    extra: { ...ctx.extra, ...fields },
+  }),
   requestContextService: mockRequestContextService,
 }));
 
@@ -621,7 +635,7 @@ describe('core/app', () => {
       }),
       expect.objectContaining({
         operation: 'ServerShutdown',
-        triggerEvent: 'MANUAL',
+        extra: expect.objectContaining({ triggerEvent: 'MANUAL' }),
       }),
     );
     expect(mockShutdownOpenTelemetry).toHaveBeenCalledTimes(1);
@@ -685,12 +699,16 @@ describe('core/app', () => {
     expect(mockLogger.fatal).toHaveBeenCalledWith(
       'FATAL: Uncaught exception detected.',
       expect.objectContaining({ message: 'uncaught boom' }),
-      expect.objectContaining({ triggerEvent: 'uncaughtException' }),
+      expect.objectContaining({
+        extra: expect.objectContaining({ triggerEvent: 'uncaughtException' }),
+      }),
     );
     expect(mockLogger.fatal).toHaveBeenCalledWith(
       'FATAL: Unhandled promise rejection detected.',
       expect.objectContaining({ message: 'rejection boom' }),
-      expect.objectContaining({ triggerEvent: 'unhandledRejection' }),
+      expect.objectContaining({
+        extra: expect.objectContaining({ triggerEvent: 'unhandledRejection' }),
+      }),
     );
     expect(timeoutRefs).toHaveLength(2);
     expect(timeoutRefs[0]?.unref).toHaveBeenCalledTimes(1);
@@ -872,7 +890,10 @@ describe('core/app', () => {
     await handle.shutdown('SIGTERM');
 
     expect(canvasShutdown).toHaveBeenCalledWith(
-      expect.objectContaining({ operation: 'ServerShutdown', triggerEvent: 'SIGTERM' }),
+      expect.objectContaining({
+        operation: 'ServerShutdown',
+        extra: expect.objectContaining({ triggerEvent: 'SIGTERM' }),
+      }),
     );
     expect(mockLogger.info).toHaveBeenCalledWith(
       'Graceful shutdown completed successfully.',
@@ -891,7 +912,9 @@ describe('core/app', () => {
 
     expect(mockLogger.warning).toHaveBeenCalledWith(
       'Canvas shutdown raised — continuing.',
-      expect.objectContaining({ error: 'canvas shutdown boom' }),
+      expect.objectContaining({
+        extra: expect.objectContaining({ error: 'canvas shutdown boom' }),
+      }),
     );
     expect(mockLogger.info).toHaveBeenCalledWith(
       'Graceful shutdown completed successfully.',

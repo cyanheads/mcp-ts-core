@@ -88,11 +88,13 @@ describe('schedulerService', () => {
     await (job.task as unknown as { trigger: () => Promise<void> | void }).trigger();
 
     expect(handler).toHaveBeenCalledWith(
-      expect.objectContaining({ jobId: 'job-1', schedule: '* * * * *' }),
+      expect.objectContaining({
+        extra: expect.objectContaining({ jobId: 'job-1', schedule: '* * * * *' }),
+      }),
     );
     expect(infoSpy).toHaveBeenCalledWith(
       "Job 'job-1' completed successfully.",
-      expect.objectContaining({ jobId: 'job-1' }),
+      expect.objectContaining({ extra: expect.objectContaining({ jobId: 'job-1' }) }),
     );
     expect(job.isRunning).toBe(false);
   });
@@ -112,7 +114,7 @@ describe('schedulerService', () => {
       "Job 'job-overlap' is already running. Skipping this execution.",
       expect.objectContaining({
         operation: 'scheduler:job:job-overlap',
-        jobId: 'job-overlap',
+        extra: expect.objectContaining({ jobId: 'job-overlap' }),
       }),
     );
   });
@@ -133,7 +135,7 @@ describe('schedulerService', () => {
     expect(errorSpy).toHaveBeenCalledWith(
       "Job 'job-fail' failed.",
       failure,
-      expect.objectContaining({ jobId: 'job-fail' }),
+      expect.objectContaining({ extra: expect.objectContaining({ jobId: 'job-fail' }) }),
     );
     expect(job.isRunning).toBe(false);
   });
@@ -154,20 +156,29 @@ describe('schedulerService', () => {
     expect(task.start).toHaveBeenCalled();
     expect(infoSpy).toHaveBeenCalledWith(
       "Job 'job-control' started.",
-      expect.objectContaining({ operation: 'scheduler:start', jobId: 'job-control' }),
+      expect.objectContaining({
+        operation: 'scheduler:start',
+        extra: expect.objectContaining({ jobId: 'job-control' }),
+      }),
     );
 
     schedulerService.stop('job-control');
     expect(task.stop).toHaveBeenCalled();
     expect(infoSpy).toHaveBeenCalledWith(
       "Job 'job-control' stopped.",
-      expect.objectContaining({ operation: 'scheduler:stop', jobId: 'job-control' }),
+      expect.objectContaining({
+        operation: 'scheduler:stop',
+        extra: expect.objectContaining({ jobId: 'job-control' }),
+      }),
     );
 
     schedulerService.remove('job-control');
     expect(infoSpy).toHaveBeenCalledWith(
       "Job 'job-control' removed.",
-      expect.objectContaining({ operation: 'scheduler:remove', jobId: 'job-control' }),
+      expect.objectContaining({
+        operation: 'scheduler:remove',
+        extra: expect.objectContaining({ jobId: 'job-control' }),
+      }),
     );
     expect(
       (schedulerService as unknown as { jobs: Map<string, unknown> }).jobs.has('job-control'),
@@ -227,7 +238,7 @@ describe('schedulerService', () => {
     expect(errorSpy).toHaveBeenCalledWith(
       "Job 'job-throw-str' failed.",
       expect.any(Error),
-      expect.objectContaining({ jobId: 'job-throw-str' }),
+      expect.objectContaining({ extra: expect.objectContaining({ jobId: 'job-throw-str' }) }),
     );
   });
 });

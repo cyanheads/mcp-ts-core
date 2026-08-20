@@ -50,7 +50,11 @@ import {
 } from '@/mcp-server/transports/http/sessionStore.js';
 import type { FrameworkServerFactory } from '@/mcp-server/types.js';
 import { logger } from '@/utils/internal/logger.js';
-import { type RequestContext, requestContextService } from '@/utils/internal/requestContext.js';
+import {
+  type RequestContext,
+  requestContextService,
+  withExtra,
+} from '@/utils/internal/requestContext.js';
 import { createObservableGauge } from '@/utils/telemetry/metrics.js';
 
 /** Matches loopback origins (http(s)://localhost|127.0.0.1|[::1] with optional port).
@@ -239,13 +243,15 @@ export async function createHttpApp<TBindings extends object = HonoNodeBindings>
       if (!isAllowed) {
         const requestContext = requestContextService.createRequestContext({
           operation: 'HttpOriginGuard',
-          component: 'HttpTransport',
+          additionalContext: { component: 'HttpTransport' },
         });
-        logger.warning('Rejected request with invalid Origin header', {
-          ...requestContext,
-          origin,
-          allowedOrigins: explicitOrigins ?? 'loopback-only',
-        });
+        logger.warning(
+          'Rejected request with invalid Origin header',
+          withExtra(requestContext, {
+            origin,
+            allowedOrigins: explicitOrigins ?? 'loopback-only',
+          }),
+        );
         return c.json({ error: 'Invalid origin. DNS rebinding protection.' }, 403);
       }
     }
@@ -272,13 +278,12 @@ export async function createHttpApp<TBindings extends object = HonoNodeBindings>
       const rejectOversized = (bytes: number): Response => {
         const requestContext = requestContextService.createRequestContext({
           operation: 'HttpBodyLimit',
-          component: 'HttpTransport',
+          additionalContext: { component: 'HttpTransport' },
         });
-        logger.warning('Rejected request exceeding body size limit', {
-          ...requestContext,
-          bytes,
-          maxBodyBytes,
-        });
+        logger.warning(
+          'Rejected request exceeding body size limit',
+          withExtra(requestContext, { bytes, maxBodyBytes }),
+        );
         return c.json(
           {
             error: `Request body exceeds the ${maxBodyBytes}-byte limit (configurable via MCP_HTTP_MAX_BODY_BYTES).`,
@@ -469,7 +474,7 @@ export async function createHttpApp<TBindings extends object = HonoNodeBindings>
   app.delete(config.mcpHttpEndpointPath, async (c, next) => {
     const requestContext = requestContextService.createRequestContext({
       operation: 'HttpSessionTermination',
-      component: 'HttpTransport',
+      additionalContext: { component: 'HttpTransport' },
     });
     const sessionId = c.req.header('mcp-session-id');
 
@@ -603,13 +608,12 @@ export async function createHttpApp<TBindings extends object = HonoNodeBindings>
   app.all(config.mcpHttpEndpointPath, async (c) => {
     const requestContext = requestContextService.createRequestContext({
       operation: 'HttpRpcRequest',
-      component: 'HttpTransport',
+      additionalContext: { component: 'HttpTransport' },
     });
-    logger.debug('Handling MCP request.', {
-      ...requestContext,
-      path: c.req.path,
-      method: c.req.method,
-    });
+    logger.debug(
+      'Handling MCP request.',
+      withExtra(requestContext, { path: c.req.path, method: c.req.method }),
+    );
 
     const body = await readParsedBody(c);
     if (!body.ok) {

@@ -14,7 +14,7 @@ import type {
 import { decodeCursor, encodeCursor } from '@/storage/core/storageValidation.js';
 import { configurationError, JsonRpcErrorCode, McpError } from '@/types-global/errors.js';
 import { logger } from '@/utils/internal/logger.js';
-import type { RequestContext } from '@/utils/internal/requestContext.js';
+import { type RequestContext, withExtra } from '@/utils/internal/requestContext.js';
 
 const DEFAULT_LIST_LIMIT = 1000;
 const DEFAULT_MAX_ENTRIES = 10_000;
@@ -173,10 +173,10 @@ export class InMemoryProvider implements IStorageProvider {
     context: RequestContext,
     options?: ListOptions,
   ): Promise<ListResult> {
-    logger.debug(`[InMemoryProvider] Listing keys with prefix: ${prefix} for tenant: ${tenantId}`, {
-      ...context,
-      options,
-    });
+    logger.debug(
+      `[InMemoryProvider] Listing keys with prefix: ${prefix} for tenant: ${tenantId}`,
+      withExtra(context, { options }),
+    );
     // Authenticate tenant-bound cursors before an empty-namespace fast path.
     // Otherwise a cursor issued to another tenant is silently accepted whenever
     // the requested tenant has no entries.

@@ -23,7 +23,7 @@ import { createHmac, randomBytes, timingSafeEqual } from 'node:crypto';
 import { invalidParams, McpError, validationError } from '@/types-global/errors.js';
 import { base64ToString, stringToBase64 } from '@/utils/internal/encoding.js';
 import { logger } from '@/utils/internal/logger.js';
-import type { RequestContext } from '@/utils/internal/requestContext.js';
+import { type RequestContext, withExtra } from '@/utils/internal/requestContext.js';
 import type { ListOptions, StorageOptions } from './IStorageProvider.js';
 
 /**
@@ -467,9 +467,8 @@ export function decodeCursor(cursor: string, tenantId: string, context: RequestC
     }
     // Stack stays in the server log; McpError.data is wire-visible.
     logger.warning('Failed to decode cursor', {
-      ...context,
+      ...withExtra(context, { error: error instanceof Error ? error.stack : String(error) }),
       operation: 'decodeCursor',
-      error: error instanceof Error ? error.stack : String(error),
     });
     throw invalidParams('Failed to decode cursor. Cursor may be corrupted or invalid.', {
       ...context,

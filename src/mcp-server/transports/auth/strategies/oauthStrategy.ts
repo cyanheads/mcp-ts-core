@@ -15,7 +15,7 @@ import {
 import type { AuthStrategy } from '@/mcp-server/transports/auth/strategies/authStrategy.js';
 import { configurationError, forbidden, serviceUnavailable } from '@/types-global/errors.js';
 import type { logger as LoggerType } from '@/utils/internal/logger.js';
-import { requestContextService } from '@/utils/internal/requestContext.js';
+import { requestContextService, withExtra } from '@/utils/internal/requestContext.js';
 
 export class OauthStrategy implements AuthStrategy {
   private readonly jwks: ReturnType<typeof createRemoteJWKSet>;
@@ -59,10 +59,10 @@ export class OauthStrategy implements AuthStrategy {
       });
       this.logger.info(`JWKS client initialized for URL: ${jwksUrl.href}`, context);
     } catch (error: unknown) {
-      this.logger.fatal('Failed to initialize JWKS client.', {
-        ...context,
-        error: error instanceof Error ? error.message : String(error),
-      });
+      this.logger.fatal(
+        'Failed to initialize JWKS client.',
+        withExtra(context, { error: error instanceof Error ? error.message : String(error) }),
+      );
       throw serviceUnavailable('Could not initialize JWKS client for OAuth strategy.', {
         ...context,
         originalError: error instanceof Error ? error.message : 'Unknown',
@@ -82,16 +82,18 @@ export class OauthStrategy implements AuthStrategy {
         audience: this.audience,
         algorithms: ['RS256', 'ES256', 'PS256'],
       });
-      this.logger.debug('OAuth token signature verified successfully.', {
-        ...context,
-        claims: {
-          iss: payload.iss,
-          aud: payload.aud,
-          exp: payload.exp,
-          iat: payload.iat,
-          jti: payload.jti,
-        },
-      });
+      this.logger.debug(
+        'OAuth token signature verified successfully.',
+        withExtra(context, {
+          claims: {
+            iss: payload.iss,
+            aud: payload.aud,
+            exp: payload.exp,
+            iat: payload.iat,
+            jti: payload.jti,
+          },
+        }),
+      );
 
       // RFC 8707 Resource Indicators validation (MCP 2025-06-18 requirement)
       if (this.config.mcpServerResourceIdentifier) {
@@ -105,11 +107,10 @@ export class OauthStrategy implements AuthStrategy {
         if (!isResourceValid) {
           this.logger.warning(
             'Token resource indicator mismatch. Token was not issued for this MCP server.',
-            {
-              ...context,
+            withExtra(context, {
               expected: expectedResource,
               received: resourceClaim,
-            },
+            }),
           );
           throw forbidden(
             'Token was not issued for this MCP server. Resource indicator mismatch.',
@@ -120,26 +121,24 @@ export class OauthStrategy implements AuthStrategy {
           );
         }
 
-        this.logger.debug('RFC 8707 resource indicator validated successfully.', {
-          ...context,
-          resource: expectedResource,
-        });
+        this.logger.debug(
+          'RFC 8707 resource indicator validated successfully.',
+          withExtra(context, { resource: expectedResource }),
+        );
       }
 
       const authInfo = buildAuthInfoFromClaims(token, payload);
 
       this.logger.info('OAuth token verification successful.', {
-        ...context,
-        clientId: authInfo.clientId,
-        scopes: authInfo.scopes,
+        ...withExtra(context, { clientId: authInfo.clientId, scopes: authInfo.scopes }),
         ...(authInfo.tenantId ? { tenantId: authInfo.tenantId } : {}),
       });
       return authInfo;
     } catch (error: unknown) {
-      this.logger.warning('OAuth token verification failed.', {
-        ...context,
-        errorName: error instanceof Error ? error.name : 'Unknown',
-      });
+      this.logger.warning(
+        'OAuth token verification failed.',
+        withExtra(context, { errorName: error instanceof Error ? error.name : 'Unknown' }),
+      );
       handleJoseVerifyError(error, 'OAuth token verification failed.');
     }
   }

@@ -186,7 +186,6 @@ export function createResourceHandler(
         resourceName: def.name ?? def.uriTemplate,
         resourceUri,
         resourceHasQuery: uri.search.length > 0,
-        sessionId: sdkSessionId,
       },
     });
 

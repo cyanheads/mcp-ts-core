@@ -132,7 +132,9 @@ describe('Pagination Utilities', () => {
         expect(mcpError.message).toContain('Invalid pagination cursor');
         expect(warningSpy).toHaveBeenCalledWith(
           'Failed to decode pagination cursor',
-          expect.objectContaining({ cursor: invalidCursor }),
+          expect.objectContaining({
+            extra: expect.objectContaining({ cursor: invalidCursor }),
+          }),
         );
       }
     });
@@ -254,8 +256,10 @@ describe('Pagination Utilities', () => {
       expect(warningSpy).toHaveBeenCalledWith(
         'Failed to decode pagination cursor',
         expect.objectContaining({
-          cursor: invalidCursor,
-          error: expect.any(String),
+          extra: expect.objectContaining({
+            cursor: invalidCursor,
+            error: expect.any(String),
+          }),
         }),
       );
     });

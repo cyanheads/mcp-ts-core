@@ -22,7 +22,7 @@ import { requestContextService } from '@/utils/internal/requestContext.js';
 export function createAuthStrategy(): AuthStrategy | null {
   const context = requestContextService.createRequestContext({
     operation: 'createAuthStrategy',
-    authMode: config.mcpAuthMode,
+    additionalContext: { authMode: config.mcpAuthMode },
   });
   logger.info('Creating authentication strategy...', context);
 

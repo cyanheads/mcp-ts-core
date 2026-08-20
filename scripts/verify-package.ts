@@ -294,7 +294,6 @@ import type { CoreServices, SupabaseClientHandle } from '${pkg.name}';
 import type { ToolDefinition } from '${pkg.name}/tools';
 import type { ResourceDefinition } from '${pkg.name}/resources';
 import type { PromptDefinition } from '${pkg.name}/prompts';
-import type { TaskToolDefinition } from '${pkg.name}/tasks';
 import type { ErrorResponse } from '${pkg.name}/errors';
 import type { AppConfig } from '${pkg.name}/config';
 import { checkScopes } from '${pkg.name}/auth';
@@ -330,7 +329,6 @@ type PublicContracts = [
   ToolDefinition<typeof echo.input, typeof echo.output>,
   ResourceDefinition,
   PromptDefinition<typeof message.args>,
-  TaskToolDefinition<typeof echo.input, typeof echo.output>,
   ErrorResponse,
   AppConfig,
   StorageService,
@@ -421,6 +419,16 @@ void createApp<ExactClient>({
 
 function workerTypeConsumerSource(pkg: PackageJson): string {
   return `
+// The SDK ships one shared declaration chunk, so its stdio transport's
+// \`ReadBuffer.append(chunk: Buffer)\` is visible to a Worker consumer that has
+// no \`@types/node\`. Declaring the global here keeps this lane's
+// \`skipLibCheck: false\` — which exists to check OUR declarations — instead of
+// pulling in a Node type set that collides with @cloudflare/workers-types on
+// \`console\`, \`crypto\`, \`Event\`, and friends.
+declare global {
+  type Buffer = Uint8Array;
+}
+
 import * as Worker from '${pkg.name}/worker';
 import type { CloudflareBindings } from '${pkg.name}/worker';
 

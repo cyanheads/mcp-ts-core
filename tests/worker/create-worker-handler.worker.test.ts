@@ -300,8 +300,10 @@ describe('createWorkerHandler in the Workers runtime', () => {
         ([message]) => message === 'Processing Worker fetch request.',
       )?.[1];
       expect(context).toMatchObject({
-        url: 'https://example.com/healthz',
-        queryPresent: true,
+        extra: expect.objectContaining({
+          url: 'https://example.com/healthz',
+          queryPresent: true,
+        }),
       });
       expect(JSON.stringify(context)).not.toMatch(
         /userinfo-secret|password-secret|query-secret|fragment-secret/,
@@ -326,8 +328,10 @@ describe('createWorkerHandler in the Workers runtime', () => {
         ([message]) => message === 'Worker fetch handler error.',
       )?.[2];
       expect(context).toMatchObject({
-        url: 'https://example.com/healthz',
-        queryPresent: true,
+        extra: expect.objectContaining({
+          url: 'https://example.com/healthz',
+          queryPresent: true,
+        }),
       });
       expect(JSON.stringify(context)).not.toMatch(
         /userinfo-secret|password-secret|query-secret|fragment-secret/,

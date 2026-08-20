@@ -16,7 +16,7 @@ import {
 import type { AuthStrategy } from '@/mcp-server/transports/auth/strategies/authStrategy.js';
 import { configurationError } from '@/types-global/errors.js';
 import type { logger as LoggerType } from '@/utils/internal/logger.js';
-import { requestContextService } from '@/utils/internal/requestContext.js';
+import { requestContextService, withExtra } from '@/utils/internal/requestContext.js';
 
 export class JwtStrategy implements AuthStrategy {
   private readonly secretKey: Uint8Array | null;
@@ -83,31 +83,31 @@ export class JwtStrategy implements AuthStrategy {
       if (this.expectedAudience) verifyOptions.audience = this.expectedAudience;
 
       const { payload: decoded } = await jwtVerify(token, this.secretKey, verifyOptions);
-      this.logger.debug('JWT signature verified successfully.', {
-        ...context,
-        claims: {
-          iss: decoded.iss,
-          aud: decoded.aud,
-          exp: decoded.exp,
-          iat: decoded.iat,
-          jti: decoded.jti,
-        },
-      });
+      this.logger.debug(
+        'JWT signature verified successfully.',
+        withExtra(context, {
+          claims: {
+            iss: decoded.iss,
+            aud: decoded.aud,
+            exp: decoded.exp,
+            iat: decoded.iat,
+            jti: decoded.jti,
+          },
+        }),
+      );
 
       const authInfo = buildAuthInfoFromClaims(token, decoded);
 
       this.logger.info('JWT verification successful.', {
-        ...context,
-        clientId: authInfo.clientId,
-        scopes: authInfo.scopes,
+        ...withExtra(context, { clientId: authInfo.clientId, scopes: authInfo.scopes }),
         ...(authInfo.tenantId ? { tenantId: authInfo.tenantId } : {}),
       });
       return authInfo;
     } catch (error: unknown) {
-      this.logger.warning('JWT verification failed.', {
-        ...context,
-        errorName: error instanceof Error ? error.name : 'Unknown',
-      });
+      this.logger.warning(
+        'JWT verification failed.',
+        withExtra(context, { errorName: error instanceof Error ? error.name : 'Unknown' }),
+      );
       handleJoseVerifyError(error, 'Token verification failed.');
     }
   }

@@ -4,6 +4,7 @@
  */
 
 import type { JsonRpcErrorCode } from '@/types-global/errors.js';
+import type { RequestContext } from '@/utils/internal/requestContext.js';
 
 /**
  * Arbitrary key-value context attached to an error for logging and tracing.
@@ -22,19 +23,12 @@ import type { JsonRpcErrorCode } from '@/types-global/errors.js';
  * ErrorHandler.handleError(err, { operation: 'getUser', context: ctx });
  * ```
  */
-export interface ErrorContext {
+export interface ErrorContext extends Partial<RequestContext> {
   /**
    * A unique identifier for the request or operation during which the error occurred.
    * Used directly in log output if provided; auto-generated via `generateUUID` if absent.
    */
   requestId?: string;
-
-  /**
-   * Allows for arbitrary additional context information.
-   * Keys are strings, and values can be of any type.
-   */
-  // allow open-indexed-named: documented arbitrary additional context
-  [key: string]: unknown;
 }
 
 /**

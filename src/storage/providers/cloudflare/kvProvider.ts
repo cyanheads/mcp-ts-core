@@ -14,7 +14,7 @@ import { decodeCursor, encodeCursor } from '@/storage/core/storageValidation.js'
 import { configurationError, JsonRpcErrorCode, McpError } from '@/types-global/errors.js';
 import { ErrorHandler } from '@/utils/internal/error-handler/errorHandler.js';
 import { logger } from '@/utils/internal/logger.js';
-import type { RequestContext } from '@/utils/internal/requestContext.js';
+import { type RequestContext, withExtra } from '@/utils/internal/requestContext.js';
 
 const DEFAULT_LIST_LIMIT = 1000;
 
@@ -66,10 +66,7 @@ export class KvProvider implements IStorageProvider {
     const kvKey = this.getKvKey(tenantId, key);
     return await ErrorHandler.tryCatch(
       async () => {
-        logger.debug(`[KvProvider] Setting key: ${kvKey}`, {
-          ...context,
-          options,
-        });
+        logger.debug(`[KvProvider] Setting key: ${kvKey}`, withExtra(context, { options }));
         const valueToStore = JSON.stringify(value);
 
         const putOptions: import('@cloudflare/workers-types').KVNamespacePutOptions = {};
@@ -125,10 +122,10 @@ export class KvProvider implements IStorageProvider {
     const kvPrefix = this.getKvKey(tenantId, prefix);
     return await ErrorHandler.tryCatch(
       async () => {
-        logger.debug(`[KvProvider] Listing keys with prefix: ${kvPrefix}`, {
-          ...context,
-          options,
-        });
+        logger.debug(
+          `[KvProvider] Listing keys with prefix: ${kvPrefix}`,
+          withExtra(context, { options }),
+        );
 
         const limit = options?.limit ?? DEFAULT_LIST_LIMIT;
         const listOptions: import('@cloudflare/workers-types').KVNamespaceListOptions = {

@@ -114,7 +114,7 @@ export class ElevenLabsProvider implements ISpeechProvider {
   async textToSpeech(options: TextToSpeechOptions): Promise<TextToSpeechResult> {
     const context = requestContextService.createRequestContext({
       operation: 'elevenlabs-tts',
-      ...(options.context ?? {}),
+      ...(options.context && { parentContext: options.context }),
     });
     const voiceId = options.voice?.voiceId ?? this.defaultVoiceId;
     const modelId = options.modelId ?? this.defaultModelId;

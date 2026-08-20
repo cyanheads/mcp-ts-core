@@ -11,8 +11,8 @@ import { lazyImport } from '@/utils/internal/lazyImport.js';
 import { logger } from '@/utils/internal/logger.js';
 import {
   type RequestContext,
-  type RequestContextLike,
   requestContextService,
+  withExtra,
 } from '@/utils/internal/requestContext.js';
 import {
   assertBinaryInputBudget,
@@ -345,7 +345,7 @@ export class PdfParser {
    * const page = pdfParser.addPage(doc);
    * ```
    */
-  async createDocument(context?: RequestContextLike | RequestContext): Promise<PDFDocument> {
+  async createDocument(context?: RequestContext): Promise<PDFDocument> {
     const logContext =
       context ||
       requestContextService.createRequestContext({
@@ -359,10 +359,10 @@ export class PdfParser {
       return doc;
     } catch (e: unknown) {
       const error = e instanceof Error ? e : new Error(String(e));
-      logger.error('Failed to create PDF document.', {
-        ...logContext,
-        errorDetails: error.message,
-      });
+      logger.error(
+        'Failed to create PDF document.',
+        withExtra(logContext, { errorDetails: error.message }),
+      );
 
       throw pdfFailure(
         JsonRpcErrorCode.InternalError,
@@ -394,7 +394,7 @@ export class PdfParser {
    */
   async loadDocument(
     pdfBytes: Uint8Array | ArrayBuffer,
-    context?: RequestContextLike | RequestContext,
+    context?: RequestContext,
     budget?: ParserInputBudgetOptions,
   ): Promise<PDFDocument> {
     const byteLength = assertBinaryInputBudget(pdfBytes, budget);
@@ -406,19 +406,16 @@ export class PdfParser {
 
     try {
       const pdfLib = await getPdfLib();
-      logger.debug('Loading PDF document from bytes.', {
-        ...logContext,
-        byteLength,
-      });
+      logger.debug('Loading PDF document from bytes.', withExtra(logContext, { byteLength }));
 
       const doc = await pdfLib.PDFDocument.load(pdfBytes);
       return doc;
     } catch (e: unknown) {
       const error = e instanceof Error ? e : new Error(String(e));
-      logger.error('Failed to load PDF document.', {
-        ...logContext,
-        errorDetails: error.message,
-      });
+      logger.error(
+        'Failed to load PDF document.',
+        withExtra(logContext, { errorDetails: error.message }),
+      );
 
       throw pdfFailure(
         JsonRpcErrorCode.ValidationError,
@@ -470,7 +467,7 @@ export class PdfParser {
   async embedFont(
     doc: PDFDocument,
     fontName: string = 'Helvetica',
-    context?: RequestContextLike | RequestContext,
+    context?: RequestContext,
   ): Promise<PDFFont> {
     const logContext =
       context ||
@@ -480,20 +477,16 @@ export class PdfParser {
 
     try {
       const { StandardFonts } = await getPdfLib();
-      logger.debug('Embedding standard font.', {
-        ...logContext,
-        fontName,
-      });
+      logger.debug('Embedding standard font.', withExtra(logContext, { fontName }));
 
       const font = await doc.embedFont(StandardFonts[fontName as keyof typeof StandardFonts]);
       return font;
     } catch (e: unknown) {
       const error = e instanceof Error ? e : new Error(String(e));
-      logger.error('Failed to embed font.', {
-        ...logContext,
-        fontName,
-        errorDetails: error.message,
-      });
+      logger.error(
+        'Failed to embed font.',
+        withExtra(logContext, { fontName, errorDetails: error.message }),
+      );
 
       throw pdfFailure(
         JsonRpcErrorCode.InternalError,
@@ -528,7 +521,7 @@ export class PdfParser {
   async embedImage(
     doc: PDFDocument,
     options: EmbedImageOptions,
-    context?: RequestContextLike | RequestContext,
+    context?: RequestContext,
   ): Promise<PDFImage> {
     assertBinaryInputBudget(options.imageBytes, options);
     const logContext =
@@ -538,10 +531,7 @@ export class PdfParser {
       });
 
     try {
-      logger.debug('Embedding image into PDF.', {
-        ...logContext,
-        format: options.format,
-      });
+      logger.debug('Embedding image into PDF.', withExtra(logContext, { format: options.format }));
 
       const image =
         options.format === 'png'
@@ -551,11 +541,10 @@ export class PdfParser {
       return image;
     } catch (e: unknown) {
       const error = e instanceof Error ? e : new Error(String(e));
-      logger.error('Failed to embed image.', {
-        ...logContext,
-        format: options.format,
-        errorDetails: error.message,
-      });
+      logger.error(
+        'Failed to embed image.',
+        withExtra(logContext, { format: options.format, errorDetails: error.message }),
+      );
 
       throw pdfFailure(
         JsonRpcErrorCode.InternalError,
@@ -717,7 +706,7 @@ export class PdfParser {
    */
   async mergePdfs(
     pdfBytesArray: (Uint8Array | ArrayBuffer)[],
-    context?: RequestContextLike | RequestContext,
+    context?: RequestContext,
     budget?: ParserInputBudgetOptions,
   ): Promise<PDFDocument> {
     const presentInputs = pdfBytesArray.filter(Boolean);
@@ -731,10 +720,10 @@ export class PdfParser {
 
     try {
       const pdfLib = await getPdfLib();
-      logger.debug('Merging PDF documents.', {
-        ...logContext,
-        documentCount: pdfBytesArray.length,
-      });
+      logger.debug(
+        'Merging PDF documents.',
+        withExtra(logContext, { documentCount: pdfBytesArray.length }),
+      );
 
       const mergedPdf = await pdfLib.PDFDocument.create();
 
@@ -744,18 +733,18 @@ export class PdfParser {
         for (const page of copiedPages) mergedPdf.addPage(page);
       }
 
-      logger.debug('Successfully merged PDF documents.', {
-        ...logContext,
-        mergedPageCount: mergedPdf.getPageCount(),
-      });
+      logger.debug(
+        'Successfully merged PDF documents.',
+        withExtra(logContext, { mergedPageCount: mergedPdf.getPageCount() }),
+      );
 
       return mergedPdf;
     } catch (e: unknown) {
       const error = e instanceof Error ? e : new Error(String(e));
-      logger.error('Failed to merge PDF documents.', {
-        ...logContext,
-        errorDetails: error.message,
-      });
+      logger.error(
+        'Failed to merge PDF documents.',
+        withExtra(logContext, { errorDetails: error.message }),
+      );
 
       throw pdfFailure(
         JsonRpcErrorCode.InternalError,
@@ -794,7 +783,7 @@ export class PdfParser {
   async splitPdf(
     pdfBytes: Uint8Array | ArrayBuffer,
     ranges: PageRange[],
-    context?: RequestContextLike | RequestContext,
+    context?: RequestContext,
     budget?: ParserInputBudgetOptions,
   ): Promise<PDFDocument[]> {
     assertBinaryInputBudget(pdfBytes, budget);
@@ -806,10 +795,7 @@ export class PdfParser {
 
     try {
       const pdfLib = await getPdfLib();
-      logger.debug('Splitting PDF document.', {
-        ...logContext,
-        rangeCount: ranges.length,
-      });
+      logger.debug('Splitting PDF document.', withExtra(logContext, { rangeCount: ranges.length }));
 
       const sourcePdf = await pdfLib.PDFDocument.load(pdfBytes);
       const results: PDFDocument[] = [];
@@ -828,18 +814,18 @@ export class PdfParser {
         results.push(newPdf);
       }
 
-      logger.debug('Successfully split PDF document.', {
-        ...logContext,
-        resultCount: results.length,
-      });
+      logger.debug(
+        'Successfully split PDF document.',
+        withExtra(logContext, { resultCount: results.length }),
+      );
 
       return results;
     } catch (e: unknown) {
       const error = e instanceof Error ? e : new Error(String(e));
-      logger.error('Failed to split PDF document.', {
-        ...logContext,
-        errorDetails: error.message,
-      });
+      logger.error(
+        'Failed to split PDF document.',
+        withExtra(logContext, { errorDetails: error.message }),
+      );
 
       throw pdfFailure(
         JsonRpcErrorCode.InternalError,
@@ -875,11 +861,7 @@ export class PdfParser {
    * });
    * ```
    */
-  fillForm(
-    doc: PDFDocument,
-    options: FillFormOptions,
-    context?: RequestContextLike | RequestContext,
-  ): void {
+  fillForm(doc: PDFDocument, options: FillFormOptions, context?: RequestContext): void {
     const logContext =
       context ||
       requestContextService.createRequestContext({
@@ -887,11 +869,13 @@ export class PdfParser {
       });
 
     try {
-      logger.debug('Filling PDF form fields.', {
-        ...logContext,
-        fieldCount: Object.keys(options.fields).length,
-        flatten: options.flatten ?? false,
-      });
+      logger.debug(
+        'Filling PDF form fields.',
+        withExtra(logContext, {
+          fieldCount: Object.keys(options.fields).length,
+          flatten: options.flatten ?? false,
+        }),
+      );
 
       const form = doc.getForm();
 
@@ -921,11 +905,13 @@ export class PdfParser {
             }
           }
         } catch (fieldError: unknown) {
-          logger.warning('Failed to fill form field.', {
-            ...logContext,
-            fieldName,
-            fieldError: fieldError instanceof Error ? fieldError.message : String(fieldError),
-          });
+          logger.warning(
+            'Failed to fill form field.',
+            withExtra(logContext, {
+              fieldName,
+              fieldError: fieldError instanceof Error ? fieldError.message : String(fieldError),
+            }),
+          );
         }
       }
 
@@ -936,10 +922,10 @@ export class PdfParser {
       logger.debug('Successfully filled PDF form.', logContext);
     } catch (e: unknown) {
       const error = e instanceof Error ? e : new Error(String(e));
-      logger.error('Failed to fill PDF form.', {
-        ...logContext,
-        errorDetails: error.message,
-      });
+      logger.error(
+        'Failed to fill PDF form.',
+        withExtra(logContext, { errorDetails: error.message }),
+      );
 
       throw pdfFailure(
         JsonRpcErrorCode.InternalError,
@@ -1052,7 +1038,7 @@ export class PdfParser {
   async extractText(
     input: PDFDocument | Uint8Array | ArrayBuffer,
     options?: ExtractTextOptions,
-    context?: RequestContextLike | RequestContext,
+    context?: RequestContext,
   ): Promise<ExtractTextResult> {
     const logContext =
       context ||
@@ -1073,10 +1059,10 @@ export class PdfParser {
         rawBytes = await input.save();
       } catch (e: unknown) {
         const error = e instanceof Error ? e : new Error(String(e));
-        logger.error('Failed to extract text from PDF.', {
-          ...logContext,
-          errorDetails: error.message,
-        });
+        logger.error(
+          'Failed to extract text from PDF.',
+          withExtra(logContext, { errorDetails: error.message }),
+        );
         throw pdfFailure(
           JsonRpcErrorCode.InternalError,
           'Failed to extract text from PDF',
@@ -1089,11 +1075,10 @@ export class PdfParser {
     }
 
     try {
-      logger.debug('Extracting text from PDF using unpdf.', {
-        ...logContext,
-        mergePages,
-        inputKind: isBytes ? 'bytes' : 'document',
-      });
+      logger.debug(
+        'Extracting text from PDF using unpdf.',
+        withExtra(logContext, { mergePages, inputKind: isBytes ? 'bytes' : 'document' }),
+      );
 
       const { getDocumentProxy, extractText: unpdfExtractText } = await getUnpdf();
       const pdfProxy =
@@ -1105,13 +1090,15 @@ export class PdfParser {
         ? await unpdfExtractText(pdfProxy, { mergePages: true })
         : await unpdfExtractText(pdfProxy, { mergePages: false });
 
-      logger.debug('Successfully extracted text from PDF.', {
-        ...logContext,
-        totalPages: result.totalPages,
-        textLength: Array.isArray(result.text)
-          ? result.text.reduce((sum, t) => sum + t.length, 0)
-          : result.text.length,
-      });
+      logger.debug(
+        'Successfully extracted text from PDF.',
+        withExtra(logContext, {
+          totalPages: result.totalPages,
+          textLength: Array.isArray(result.text)
+            ? result.text.reduce((sum, t) => sum + t.length, 0)
+            : result.text.length,
+        }),
+      );
 
       return {
         totalPages: result.totalPages,
@@ -1119,10 +1106,10 @@ export class PdfParser {
       };
     } catch (e: unknown) {
       const error = e instanceof Error ? e : new Error(String(e));
-      logger.error('Failed to extract text from PDF.', {
-        ...logContext,
-        errorDetails: error.message,
-      });
+      logger.error(
+        'Failed to extract text from PDF.',
+        withExtra(logContext, { errorDetails: error.message }),
+      );
 
       throw pdfFailure(
         JsonRpcErrorCode.InternalError,
@@ -1151,10 +1138,7 @@ export class PdfParser {
    * await writeFile('output.pdf', pdfBytes);
    * ```
    */
-  async saveDocument(
-    doc: PDFDocument,
-    context?: RequestContextLike | RequestContext,
-  ): Promise<Uint8Array> {
+  async saveDocument(doc: PDFDocument, context?: RequestContext): Promise<Uint8Array> {
     const logContext =
       context ||
       requestContextService.createRequestContext({
@@ -1164,17 +1148,17 @@ export class PdfParser {
     try {
       logger.debug('Serializing PDF document to bytes.', logContext);
       const bytes = await doc.save();
-      logger.debug('Successfully serialized PDF document.', {
-        ...logContext,
-        byteLength: bytes.length,
-      });
+      logger.debug(
+        'Successfully serialized PDF document.',
+        withExtra(logContext, { byteLength: bytes.length }),
+      );
       return bytes;
     } catch (e: unknown) {
       const error = e instanceof Error ? e : new Error(String(e));
-      logger.error('Failed to serialize PDF document.', {
-        ...logContext,
-        errorDetails: error.message,
-      });
+      logger.error(
+        'Failed to serialize PDF document.',
+        withExtra(logContext, { errorDetails: error.message }),
+      );
 
       throw pdfFailure(
         JsonRpcErrorCode.InternalError,

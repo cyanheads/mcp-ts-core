@@ -18,8 +18,8 @@ const getDiff = lazyImport(
 
 import {
   type RequestContext,
-  type RequestContextLike,
   requestContextService,
+  withExtra,
 } from '@/utils/internal/requestContext.js';
 
 /**
@@ -116,7 +116,7 @@ export class DiffFormatter {
     oldText: string,
     newText: string,
     options?: DiffFormatterOptions,
-    context?: RequestContextLike | RequestContext,
+    context?: RequestContext,
   ): Promise<string> {
     const logContext =
       context ||
@@ -136,12 +136,14 @@ export class DiffFormatter {
     };
 
     try {
-      logger.debug('Generating diff', {
-        ...logContext,
-        oldLines: oldText.split('\n').length,
-        newLines: newText.split('\n').length,
-        format: opts.format,
-      });
+      logger.debug(
+        'Generating diff',
+        withExtra(logContext, {
+          oldLines: oldText.split('\n').length,
+          newLines: newText.split('\n').length,
+          format: opts.format,
+        }),
+      );
 
       // Generate diff using jsdiff library
       const Diff = await getDiff();
@@ -157,19 +159,16 @@ export class DiffFormatter {
       // Format based on selected format
       const result = this.formatDiff(patches, opts);
 
-      logger.debug('Diff generated successfully', {
-        ...logContext,
-        resultLength: result.length,
-      });
+      logger.debug(
+        'Diff generated successfully',
+        withExtra(logContext, { resultLength: result.length }),
+      );
 
       return result;
     } catch (error: unknown) {
       const message = error instanceof Error ? error.message : String(error);
       const stack = error instanceof Error ? error.stack : undefined;
-      logger.error('Failed to generate diff', {
-        ...logContext,
-        error: message,
-      });
+      logger.error('Failed to generate diff', withExtra(logContext, { error: message }));
 
       throw new McpError(JsonRpcErrorCode.InternalError, `Failed to generate diff: ${message}`, {
         ...logContext,
@@ -204,7 +203,7 @@ export class DiffFormatter {
     oldLines: string[],
     newLines: string[],
     options?: DiffFormatterOptions,
-    context?: RequestContextLike | RequestContext,
+    context?: RequestContext,
   ): Promise<string> {
     const logContext =
       context ||
@@ -250,11 +249,7 @@ export class DiffFormatter {
    * // => 'The [-quick-][+fast+] brown [-fox-][+dog+]'
    * ```
    */
-  async diffWords(
-    oldText: string,
-    newText: string,
-    context?: RequestContextLike | RequestContext,
-  ): Promise<string> {
+  async diffWords(oldText: string, newText: string, context?: RequestContext): Promise<string> {
     const logContext =
       context ||
       requestContextService.createRequestContext({
@@ -284,19 +279,16 @@ export class DiffFormatter {
         })
         .join('');
 
-      logger.debug('Word diff generated successfully', {
-        ...logContext,
-        changeCount: changes.length,
-      });
+      logger.debug(
+        'Word diff generated successfully',
+        withExtra(logContext, { changeCount: changes.length }),
+      );
 
       return result;
     } catch (error: unknown) {
       const message = error instanceof Error ? error.message : String(error);
       const stack = error instanceof Error ? error.stack : undefined;
-      logger.error('Failed to generate word diff', {
-        ...logContext,
-        error: message,
-      });
+      logger.error('Failed to generate word diff', withExtra(logContext, { error: message }));
 
       throw new McpError(
         JsonRpcErrorCode.InternalError,
@@ -420,7 +412,7 @@ export class DiffFormatter {
   async getStats(
     oldText: string,
     newText: string,
-    context?: RequestContextLike | RequestContext,
+    context?: RequestContext,
   ): Promise<{ additions: number; deletions: number; changes: number }> {
     const logContext =
       context ||

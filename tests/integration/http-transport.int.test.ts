@@ -55,6 +55,10 @@ vi.mock('@/utils/internal/requestContext.js', () => ({
       timestamp: new Date().toISOString(),
     })),
   },
+  withExtra: (context: any, fields: any) => ({
+    ...context,
+    extra: { ...context?.extra, ...fields },
+  }),
 }));
 
 vi.mock('@/utils/telemetry/metrics.js', () => ({

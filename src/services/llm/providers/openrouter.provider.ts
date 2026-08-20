@@ -21,7 +21,11 @@ import { ErrorHandler } from '@/utils/internal/error-handler/errorHandler.js';
 import { lazyImport } from '@/utils/internal/lazyImport.js';
 import type { logger as LoggerType } from '@/utils/internal/logger.js';
 import { nowMs } from '@/utils/internal/performance.js';
-import { type RequestContext, requestContextService } from '@/utils/internal/requestContext.js';
+import {
+  type RequestContext,
+  requestContextService,
+  withExtra,
+} from '@/utils/internal/requestContext.js';
 import type { RateLimiter } from '@/utils/security/rateLimiter.js';
 import { sanitization } from '@/utils/security/sanitization.js';
 import {
@@ -230,10 +234,10 @@ export class OpenRouterProvider implements ILlmProvider {
     } catch (e: unknown) {
       this.clientInitPromise = undefined;
       const error = e instanceof Error ? e : new Error(String(e));
-      this.logger.error('Failed to construct OpenRouter client', {
-        ...context,
-        error: error.message,
-      });
+      this.logger.error(
+        'Failed to construct OpenRouter client',
+        withExtra(context, { error: error.message }),
+      );
       throw configurationError(
         'Failed to construct OpenRouter client. Please check the configuration.',
         undefined,

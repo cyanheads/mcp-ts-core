@@ -120,11 +120,15 @@ describe('ErrorHandler', () => {
       if (!call) throw new Error('errorSpy was not called');
       const [errorMessage, logContext] = call;
       expect(errorMessage).toContain('Error in testOperation: Something failed');
+      // Diagnostic fields live in the context's `extra` bag; the logger
+      // flattens it, so the emitted line is unchanged.
       expect(logContext).toMatchObject({
         requestId: 'test-123',
         operation: 'testOperation',
-        input: { data: 'sample' },
-        errorCode: JsonRpcErrorCode.InternalError,
+        extra: expect.objectContaining({
+          input: { data: 'sample' },
+          errorCode: JsonRpcErrorCode.InternalError,
+        }),
       });
     });
 
@@ -240,7 +244,7 @@ describe('ErrorHandler', () => {
       expect(logContext).toMatchObject({
         requestId: 'try-123',
         operation: 'tryCatchFailure',
-        errorCode: JsonRpcErrorCode.InternalError,
+        extra: expect.objectContaining({ errorCode: JsonRpcErrorCode.InternalError }),
       });
     });
   });

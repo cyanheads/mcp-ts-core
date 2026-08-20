@@ -40,6 +40,10 @@ vi.mock('@/utils/internal/logger.js', () => ({
 }));
 
 vi.mock('@/utils/internal/requestContext.js', () => ({
+  withExtra: (ctx: { extra?: Record<string, unknown> }, fields: Record<string, unknown>) => ({
+    ...ctx,
+    extra: { ...ctx.extra, ...fields },
+  }),
   requestContextService: {
     createRequestContext: vi.fn(() => ({
       requestId: 'test-req-id',
@@ -399,7 +403,9 @@ describe('HTTP Error Handler', () => {
       expect(handleErrorSpy).not.toHaveBeenCalled();
       expect(logger.warning).toHaveBeenCalledWith(
         expect.stringContaining('Invalid token'),
-        expect.objectContaining({ errorCode: JsonRpcErrorCode.Unauthorized }),
+        expect.objectContaining({
+          extra: expect.objectContaining({ errorCode: JsonRpcErrorCode.Unauthorized }),
+        }),
       );
       expect(statusValue).toBe(401);
     });
@@ -412,7 +418,9 @@ describe('HTTP Error Handler', () => {
       expect(handleErrorSpy).not.toHaveBeenCalled();
       expect(logger.warning).toHaveBeenCalledWith(
         expect.stringContaining('Insufficient scopes'),
-        expect.objectContaining({ errorCode: JsonRpcErrorCode.Forbidden }),
+        expect.objectContaining({
+          extra: expect.objectContaining({ errorCode: JsonRpcErrorCode.Forbidden }),
+        }),
       );
       expect(statusValue).toBe(403);
     });
@@ -425,7 +433,9 @@ describe('HTTP Error Handler', () => {
       expect(handleErrorSpy).not.toHaveBeenCalled();
       expect(logger.warning).toHaveBeenCalledWith(
         expect.stringContaining('Bad input'),
-        expect.objectContaining({ errorCode: JsonRpcErrorCode.ValidationError }),
+        expect.objectContaining({
+          extra: expect.objectContaining({ errorCode: JsonRpcErrorCode.ValidationError }),
+        }),
       );
       expect(statusValue).toBe(400);
     });
@@ -438,7 +448,9 @@ describe('HTTP Error Handler', () => {
       expect(handleErrorSpy).not.toHaveBeenCalled();
       expect(logger.warning).toHaveBeenCalledWith(
         expect.stringContaining('Missing field'),
-        expect.objectContaining({ errorCode: JsonRpcErrorCode.InvalidRequest }),
+        expect.objectContaining({
+          extra: expect.objectContaining({ errorCode: JsonRpcErrorCode.InvalidRequest }),
+        }),
       );
       expect(statusValue).toBe(400);
     });
@@ -451,7 +463,9 @@ describe('HTTP Error Handler', () => {
       expect(handleErrorSpy).not.toHaveBeenCalled();
       expect(logger.warning).toHaveBeenCalledWith(
         expect.stringContaining('Session expired'),
-        expect.objectContaining({ errorCode: JsonRpcErrorCode.NotFound }),
+        expect.objectContaining({
+          extra: expect.objectContaining({ errorCode: JsonRpcErrorCode.NotFound }),
+        }),
       );
       expect(statusValue).toBe(404);
     });

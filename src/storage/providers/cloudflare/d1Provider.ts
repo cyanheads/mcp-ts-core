@@ -20,7 +20,7 @@ import {
 } from '@/types-global/errors.js';
 import { ErrorHandler } from '@/utils/internal/error-handler/errorHandler.js';
 import { logger } from '@/utils/internal/logger.js';
-import type { RequestContext } from '@/utils/internal/requestContext.js';
+import { type RequestContext, withExtra } from '@/utils/internal/requestContext.js';
 
 const DEFAULT_LIST_LIMIT = 1000;
 
@@ -154,10 +154,7 @@ export class D1Provider implements IStorageProvider {
   ): Promise<void> {
     return await ErrorHandler.tryCatch(
       async () => {
-        logger.debug(`[D1Provider] Setting key: ${key}`, {
-          ...context,
-          options,
-        });
+        logger.debug(`[D1Provider] Setting key: ${key}`, withExtra(context, { options }));
 
         const serializedValue = JSON.stringify(value);
         let expiresAt: number | null = null;
@@ -230,10 +227,10 @@ export class D1Provider implements IStorageProvider {
   ): Promise<ListResult> {
     return await ErrorHandler.tryCatch(
       async () => {
-        logger.debug(`[D1Provider] Listing keys with prefix: ${prefix}`, {
-          ...context,
-          options,
-        });
+        logger.debug(
+          `[D1Provider] Listing keys with prefix: ${prefix}`,
+          withExtra(context, { options }),
+        );
 
         const limit = options?.limit ?? DEFAULT_LIST_LIMIT;
         let lastKey: string | undefined;
@@ -387,10 +384,10 @@ export class D1Provider implements IStorageProvider {
           return;
         }
 
-        logger.debug(`[D1Provider] Setting ${entries.size} keys in batch`, {
-          ...context,
-          options,
-        });
+        logger.debug(
+          `[D1Provider] Setting ${entries.size} keys in batch`,
+          withExtra(context, { options }),
+        );
 
         let expiresAt: number | null = null;
         if (options?.ttl !== undefined) {

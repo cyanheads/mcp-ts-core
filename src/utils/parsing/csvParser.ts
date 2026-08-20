@@ -14,8 +14,8 @@ import { lazyImport } from '@/utils/internal/lazyImport.js';
 import { logger } from '@/utils/internal/logger.js';
 import {
   type RequestContext,
-  type RequestContextLike,
   requestContextService,
+  withExtra,
 } from '@/utils/internal/requestContext.js';
 import { thinkBlockRegex } from './thinkBlock.js';
 
@@ -82,7 +82,7 @@ export class CsvParser {
   async parse<T = unknown>(
     csvString: string,
     options?: Papa.ParseConfig,
-    context?: RequestContextLike | RequestContext,
+    context?: RequestContext,
   ): Promise<Papa.ParseResult<T>> {
     let stringToParse = csvString;
     const match = csvString.match(thinkBlockRegex);
@@ -97,10 +97,10 @@ export class CsvParser {
           operation: 'CsvParser.thinkBlock',
         });
       if (thinkContent) {
-        logger.debug('LLM <think> block detected and logged.', {
-          ...logContext,
-          thinkContent,
-        });
+        logger.debug(
+          'LLM <think> block detected and logged.',
+          withExtra(logContext, { thinkContent }),
+        );
       } else {
         logger.debug('Empty LLM <think> block detected.', logContext);
       }
@@ -125,11 +125,13 @@ export class CsvParser {
         requestContextService.createRequestContext({
           operation: 'CsvParser.parseError',
         });
-      logger.error('Failed to parse CSV content.', {
-        ...errorLogContext,
-        errors: result.errors,
-        contentAttempted: stringToParse.substring(0, 200),
-      });
+      logger.error(
+        'Failed to parse CSV content.',
+        withExtra(errorLogContext, {
+          errors: result.errors,
+          contentAttempted: stringToParse.substring(0, 200),
+        }),
+      );
 
       throw validationError(
         `Failed to parse CSV: ${result.errors.map((e) => e.message).join(', ')}`,

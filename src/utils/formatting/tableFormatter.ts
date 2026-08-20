@@ -9,8 +9,8 @@ import { JsonRpcErrorCode, McpError, validationError } from '@/types-global/erro
 import { logger } from '@/utils/internal/logger.js';
 import {
   type RequestContext,
-  type RequestContextLike,
   requestContextService,
+  withExtra,
 } from '@/utils/internal/requestContext.js';
 
 /**
@@ -180,7 +180,7 @@ export class TableFormatter {
   format<T extends Record<string, unknown>>(
     data: T[],
     options?: TableFormatterOptions,
-    context?: RequestContextLike | RequestContext,
+    context?: RequestContext,
   ): string {
     const logContext =
       context ||
@@ -204,11 +204,10 @@ export class TableFormatter {
     // Convert objects to 2D array
     const rows = data.map((obj) => headers.map((header) => this.stringify(obj[header])));
 
-    logger.debug('Formatting table from object array', {
-      ...logContext,
-      rowCount: rows.length,
-      columnCount: headers.length,
-    });
+    logger.debug(
+      'Formatting table from object array',
+      withExtra(logContext, { rowCount: rows.length, columnCount: headers.length }),
+    );
 
     return this.formatRaw(headers, rows, options, context);
   }
@@ -245,7 +244,7 @@ export class TableFormatter {
     headers: string[],
     rows: string[][],
     options?: TableFormatterOptions,
-    context?: RequestContextLike | RequestContext,
+    context?: RequestContext,
   ): string {
     const logContext =
       context ||
@@ -295,21 +294,20 @@ export class TableFormatter {
     try {
       const result = this.renderTable(columns, styledHeaders, rows, opts);
 
-      logger.debug('Table formatted successfully', {
-        ...logContext,
-        style: opts.style,
-        rows: rows.length,
-        columns: columns.length,
-      });
+      logger.debug(
+        'Table formatted successfully',
+        withExtra(logContext, {
+          style: opts.style,
+          rows: rows.length,
+          columns: columns.length,
+        }),
+      );
 
       return result;
     } catch (error: unknown) {
       const message = error instanceof Error ? error.message : String(error);
       const stack = error instanceof Error ? error.stack : undefined;
-      logger.error('Failed to render table', {
-        ...logContext,
-        error: message,
-      });
+      logger.error('Failed to render table', withExtra(logContext, { error: message }));
 
       throw new McpError(JsonRpcErrorCode.InternalError, `Failed to render table: ${message}`, {
         ...logContext,
@@ -361,10 +359,10 @@ export class TableFormatter {
       return { name: header, width, alignment };
     });
 
-    logger.debug('Calculated column widths', {
-      ...context,
-      columns: columns.map((c) => ({ name: c.name, width: c.width })),
-    });
+    logger.debug(
+      'Calculated column widths',
+      withExtra(context, { columns: columns.map((c) => ({ name: c.name, width: c.width })) }),
+    );
 
     return columns;
   }

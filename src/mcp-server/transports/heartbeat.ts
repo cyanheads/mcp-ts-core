@@ -10,7 +10,11 @@
  */
 
 import { logger } from '@/utils/internal/logger.js';
-import { type RequestContext, requestContextService } from '@/utils/internal/requestContext.js';
+import {
+  type RequestContext,
+  requestContextService,
+  withExtra,
+} from '@/utils/internal/requestContext.js';
 import { ATTR_MCP_CONNECTION_TRANSPORT } from '@/utils/telemetry/attributes.js';
 import { createCounter } from '@/utils/telemetry/metrics.js';
 
@@ -83,9 +87,8 @@ export class HeartbeatMonitor {
   constructor(opts: HeartbeatOptions, parentContext?: RequestContext) {
     this.opts = opts;
     this.context = requestContextService.createRequestContext({
-      ...parentContext,
-      component: 'HeartbeatMonitor',
-      transport: opts.transport,
+      ...(parentContext && { parentContext }),
+      additionalContext: { component: 'HeartbeatMonitor', transport: opts.transport },
     });
     this.attrs = { [ATTR_MCP_CONNECTION_TRANSPORT]: opts.transport };
   }
@@ -141,10 +144,7 @@ export class HeartbeatMonitor {
 
       logger.warning(
         `Heartbeat ping failed (${this.consecutiveFailures}/${this.opts.missThreshold})`,
-        {
-          ...this.context,
-          error: err instanceof Error ? err.message : String(err),
-        },
+        withExtra(this.context, { error: err instanceof Error ? err.message : String(err) }),
       );
 
       if (this.consecutiveFailures >= this.opts.missThreshold) {

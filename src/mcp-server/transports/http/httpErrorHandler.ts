@@ -15,7 +15,7 @@ import type { HonoNodeBindings } from '@/mcp-server/transports/http/httpTypes.js
 import { JsonRpcErrorCode, McpError } from '@/types-global/errors.js';
 import { ErrorHandler } from '@/utils/internal/error-handler/errorHandler.js';
 import { logger } from '@/utils/internal/logger.js';
-import { requestContextService } from '@/utils/internal/requestContext.js';
+import { requestContextService, withExtra } from '@/utils/internal/requestContext.js';
 import { getProperty } from '@/utils/types/guards.js';
 
 /**
@@ -87,10 +87,10 @@ export const httpErrorHandler = async <TBindings extends object = HonoNodeBindin
   const isExpectedClientError = EXPECTED_CLIENT_CODES.has(classified.code);
 
   if (isExpectedClientError) {
-    logger.warning(`Client error: ${classified.message}`, {
-      ...context,
-      errorCode: classified.code,
-    });
+    logger.warning(
+      `Client error: ${classified.message}`,
+      withExtra(context, { errorCode: classified.code }),
+    );
   } else {
     ErrorHandler.handleError(err, {
       operation: 'httpTransport',
@@ -116,10 +116,10 @@ export const httpErrorHandler = async <TBindings extends object = HonoNodeBindin
           'WWW-Authenticate',
           `Bearer realm="${config.mcpServerName}", resource_metadata="${resourceMetadataUrl}"`,
         );
-        logger.debug('Added WWW-Authenticate header for 401 response.', {
-          ...context,
-          resourceMetadataUrl,
-        });
+        logger.debug(
+          'Added WWW-Authenticate header for 401 response.',
+          withExtra(context, { resourceMetadataUrl }),
+        );
       }
       break;
     case JsonRpcErrorCode.Forbidden:
@@ -145,11 +145,10 @@ export const httpErrorHandler = async <TBindings extends object = HonoNodeBindin
     default:
       status = 500;
   }
-  logger.debug(`Mapping error to HTTP status ${status}.`, {
-    ...context,
-    status,
-    errorCode,
-  });
+  logger.debug(
+    `Mapping error to HTTP status ${status}.`,
+    withExtra(context, { status, errorCode }),
+  );
 
   // Attempt to get the request ID from the body, but don't fail if it's not there or unreadable.
   let requestId: string | number | null = null;
@@ -159,10 +158,10 @@ export const httpErrorHandler = async <TBindings extends object = HonoNodeBindin
       const body: unknown = await c.req.json();
       const id = getProperty(body, 'id');
       requestId = typeof id === 'string' || typeof id === 'number' ? id : null;
-      logger.debug('Extracted JSON-RPC request ID from body.', {
-        ...context,
-        jsonRpcId: requestId,
-      });
+      logger.debug(
+        'Extracted JSON-RPC request ID from body.',
+        withExtra(context, { jsonRpcId: requestId }),
+      );
     } catch {
       logger.warning('Could not parse request body to extract JSON-RPC ID.', context);
       // Ignore parsing errors, requestId will remain null
@@ -181,11 +180,9 @@ export const httpErrorHandler = async <TBindings extends object = HonoNodeBindin
     },
     id: requestId,
   };
-  logger.info(`Sending formatted error response for request.`, {
-    ...context,
-    status,
-    errorCode,
-    jsonRpcId: requestId,
-  });
+  logger.info(
+    `Sending formatted error response for request.`,
+    withExtra(context, { status, errorCode, jsonRpcId: requestId }),
+  );
   return c.json(errorResponse);
 };

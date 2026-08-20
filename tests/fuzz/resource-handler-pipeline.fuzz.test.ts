@@ -53,6 +53,10 @@ vi.mock('@/utils/internal/requestContext.js', () => ({
       ...(options.additionalContext ?? {}),
     })),
   },
+  withExtra: (context: any, fields: any) => ({
+    ...context,
+    extra: { ...context?.extra, ...fields },
+  }),
 }));
 
 vi.mock('@/utils/internal/performance.js', () => ({

@@ -12,8 +12,8 @@ import { lazyImport } from '@/utils/internal/lazyImport.js';
 import { logger } from '@/utils/internal/logger.js';
 import {
   type RequestContext,
-  type RequestContextLike,
   requestContextService,
+  withExtra,
 } from '@/utils/internal/requestContext.js';
 import { assertTextInputBudget, type ParserInputBudgetOptions } from './inputBudget.js';
 import { thinkBlockRegex } from './thinkBlock.js';
@@ -61,7 +61,7 @@ export class YamlParser {
    */
   async parse<T = unknown>(
     yamlString: string,
-    context?: RequestContextLike | RequestContext,
+    context?: RequestContext,
     budget?: ParserInputBudgetOptions,
   ): Promise<T> {
     assertTextInputBudget(yamlString, budget);
@@ -79,10 +79,10 @@ export class YamlParser {
           operation: 'YamlParser.thinkBlock',
         });
       if (thinkContent) {
-        logger.debug('LLM <think> block detected and logged.', {
-          ...logContext,
-          thinkContent,
-        });
+        logger.debug(
+          'LLM <think> block detected and logged.',
+          withExtra(logContext, { thinkContent }),
+        );
       } else {
         logger.debug('Empty LLM <think> block detected.', logContext);
       }
@@ -111,11 +111,13 @@ export class YamlParser {
         requestContextService.createRequestContext({
           operation: 'YamlParser.parseError',
         });
-      logger.error('Failed to parse YAML content.', {
-        ...errorLogContext,
-        errorDetails: error.message,
-        contentAttempted: stringToParse.substring(0, 200),
-      });
+      logger.error(
+        'Failed to parse YAML content.',
+        withExtra(errorLogContext, {
+          errorDetails: error.message,
+          contentAttempted: stringToParse.substring(0, 200),
+        }),
+      );
 
       throw validationError(
         `Failed to parse YAML content: ${error.message}`,

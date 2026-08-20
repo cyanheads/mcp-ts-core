@@ -22,7 +22,7 @@ import { normalizeLogLevelAlias } from '@/config/logLevelAlias.js';
 import { type CreateAppOptions, composeServices } from '@/core/app.js';
 import { createHttpApp } from '@/mcp-server/transports/http/httpTransport.js';
 import { logger, type McpLogLevel } from '@/utils/internal/logger.js';
-import { requestContextService } from '@/utils/internal/requestContext.js';
+import { requestContextService, withExtra } from '@/utils/internal/requestContext.js';
 
 /**
  * Cloudflare Worker Bindings with proper type safety.
@@ -238,14 +238,16 @@ export function createWorkerHandler(options: WorkerHandlerOptions = {}) {
 
         const workerContext = requestContextService.createRequestContext({
           operation: 'WorkerInitialization',
-          isServerless: true,
+          additionalContext: { isServerless: true },
         });
 
-        logger.info('Cloudflare Worker initializing...', {
-          ...workerContext,
-          environment: env.ENVIRONMENT ?? 'production',
-          storageProvider: env.STORAGE_PROVIDER_TYPE ?? 'in-memory',
-        });
+        logger.info(
+          'Cloudflare Worker initializing...',
+          withExtra(workerContext, {
+            environment: env.ENVIRONMENT ?? 'production',
+            storageProvider: env.STORAGE_PROVIDER_TYPE ?? 'in-memory',
+          }),
+        );
 
         const { app } = await createHttpApp<CloudflareBindings>(
           createServer,
@@ -254,20 +256,22 @@ export function createWorkerHandler(options: WorkerHandlerOptions = {}) {
         );
 
         const initDuration = Date.now() - initStartTime;
-        logger.info('Cloudflare Worker initialized successfully.', {
-          ...workerContext,
-          initDurationMs: initDuration,
-        });
+        logger.info(
+          'Cloudflare Worker initialized successfully.',
+          withExtra(workerContext, { initDurationMs: initDuration }),
+        );
 
         return app;
       } catch (error: unknown) {
         const initDuration = Date.now() - initStartTime;
         const errorContext = requestContextService.createRequestContext({
           operation: 'WorkerInitialization',
-          isServerless: true,
-          initDurationMs: initDuration,
-          error: error instanceof Error ? error.message : String(error),
-          stack: error instanceof Error ? error.stack : undefined,
+          additionalContext: {
+            isServerless: true,
+            initDurationMs: initDuration,
+            error: error instanceof Error ? error.message : String(error),
+            stack: error instanceof Error ? error.stack : undefined,
+          },
         });
 
         logger.crit(
@@ -302,31 +306,37 @@ export function createWorkerHandler(options: WorkerHandlerOptions = {}) {
 
         const requestContext = requestContextService.createRequestContext({
           operation: 'WorkerFetch',
-          requestId,
-          isServerless: true,
-          ...(cfProperties && {
-            colo: cfProperties.colo,
-            country: cfProperties.country,
-            city: cfProperties.city,
-          }),
+          parentContext: { requestId },
+          additionalContext: {
+            isServerless: true,
+            ...(cfProperties && {
+              colo: cfProperties.colo,
+              country: cfProperties.country,
+              city: cfProperties.city,
+            }),
+          },
         });
 
-        logger.debug('Processing Worker fetch request.', {
-          ...requestContext,
-          method: request.method,
-          ...requestUrlLogFields(request.url),
-          colo: cfProperties?.colo,
-        });
+        logger.debug(
+          'Processing Worker fetch request.',
+          withExtra(requestContext, {
+            method: request.method,
+            ...requestUrlLogFields(request.url),
+            colo: cfProperties?.colo,
+          }),
+        );
 
         return await app.fetch(request, env, ctx);
       } catch (error: unknown) {
         const requestId = request.headers.get('cf-ray');
         const errorContext = requestContextService.createRequestContext({
           operation: 'WorkerFetch',
-          isServerless: true,
-          method: request.method,
-          ...requestUrlLogFields(request.url),
-          ...(requestId && { requestId }),
+          ...(requestId && { parentContext: { requestId } }),
+          additionalContext: {
+            isServerless: true,
+            method: request.method,
+            ...requestUrlLogFields(request.url),
+          },
         });
 
         logger.error(
@@ -366,21 +376,21 @@ export function createWorkerHandler(options: WorkerHandlerOptions = {}) {
 
         const scheduledContext = requestContextService.createRequestContext({
           operation: 'WorkerScheduled',
-          isServerless: true,
-          cron: controller.cron,
+          additionalContext: { isServerless: true, cron: controller.cron },
         });
 
-        logger.info('Processing scheduled event.', {
-          ...scheduledContext,
-          scheduledTime: new Date(controller.scheduledTime).toISOString(),
-        });
+        logger.info(
+          'Processing scheduled event.',
+          withExtra(scheduledContext, {
+            scheduledTime: new Date(controller.scheduledTime).toISOString(),
+          }),
+        );
 
         logger.info('Scheduled event completed.', scheduledContext);
       } catch (error: unknown) {
         const errorContext = requestContextService.createRequestContext({
           operation: 'WorkerScheduled',
-          isServerless: true,
-          cron: controller.cron,
+          additionalContext: { isServerless: true, cron: controller.cron },
         });
 
         logger.error(

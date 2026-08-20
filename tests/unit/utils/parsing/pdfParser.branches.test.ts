@@ -38,7 +38,9 @@ describe('PdfParser branch boundaries', () => {
     expect(loaded.getPageCount()).toBe(1);
     expect(debug).toHaveBeenCalledWith(
       'Loading PDF document from bytes.',
-      expect.objectContaining({ byteLength: buffer.byteLength }),
+      expect.objectContaining({
+        extra: expect.objectContaining({ byteLength: buffer.byteLength }),
+      }),
     );
   });
 
@@ -148,7 +150,9 @@ describe('PdfParser branch boundaries', () => {
     expect(() => parser.fillForm(doc, { fields: { missing: 'value' } }, context)).not.toThrow();
     expect(warning).toHaveBeenCalledWith(
       'Failed to fill form field.',
-      expect.objectContaining({ fieldName: 'missing', fieldError: 'field lookup failed' }),
+      expect.objectContaining({
+        extra: expect.objectContaining({ fieldName: 'missing', fieldError: 'field lookup failed' }),
+      }),
     );
   });
 

@@ -54,6 +54,10 @@ vi.mock('@/utils/internal/requestContext.js', () => ({
       ...overrides,
     })),
   },
+  withExtra: (context: any, fields: any) => ({
+    ...context,
+    extra: { ...context?.extra, ...fields },
+  }),
 }));
 
 describe('Logger', () => {

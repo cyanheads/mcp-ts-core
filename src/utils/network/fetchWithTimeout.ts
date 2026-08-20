@@ -11,7 +11,7 @@ import {
   validationError,
 } from '@/types-global/errors.js';
 import { logger } from '@/utils/internal/logger.js';
-import type { RequestContext, RequestContextLike } from '@/utils/internal/requestContext.js';
+import { type RequestContext, withExtra } from '@/utils/internal/requestContext.js';
 import { runtimeCaps } from '@/utils/internal/runtime.js';
 import { httpStatusToErrorCode } from '@/utils/network/httpError.js';
 import { readBoundedResponseText } from '@/utils/network/responseBody.js';
@@ -35,16 +35,6 @@ const ERROR_BODY_SCAN_LIMIT = 16_384;
  * exactly this set, so these responses are returned untouched.
  */
 const NULL_BODY_STATUS = new Set([204, 205, 304]);
-
-/**
- * Reads the optional `operation` label off a context argument. It is an ad-hoc
- * field of the `RequestContext` bag, absent from both `RequestContextLike` and
- * the handler-facing `Context`.
- */
-function contextOperation(context: RequestContextLike | RequestContext): string | undefined {
-  const operation = (context as Record<string, unknown>).operation;
-  return typeof operation === 'string' ? operation : undefined;
-}
 
 let clientDurationHistogram: ReturnType<typeof createHistogram> | undefined;
 
@@ -530,7 +520,7 @@ function withBodyDeadline(
 export async function fetchWithTimeout(
   url: string | URL,
   timeoutMs: number,
-  context: RequestContextLike | RequestContext,
+  context: RequestContext,
   options?: FetchWithTimeoutOptions,
 ): Promise<Response> {
   const urlString = url.toString();
@@ -590,23 +580,23 @@ export async function fetchWithTimeout(
   let deadlineFollowsBody = false;
   const errorIdentity = {
     requestId: context.requestId,
-    operation: contextOperation(context),
+    operation: context.operation,
   };
   const timeoutFailure = (): McpError => {
-    logger.error(`${operationDescription} timed out after ${timeoutMs}ms.`, {
-      ...context,
-      errorSource: 'FetchTimeout',
-    });
+    logger.error(
+      `${operationDescription} timed out after ${timeoutMs}ms.`,
+      withExtra(context, { errorSource: 'FetchTimeout' }),
+    );
     return timeout(`${operationDescription} timed out.`, {
       ...errorIdentity,
       errorSource: 'FetchTimeout',
     });
   };
   const abortedFailure = (): McpError => {
-    logger.info(`${operationDescription} aborted by caller.`, {
-      ...context,
-      errorSource: 'FetchAborted',
-    });
+    logger.info(
+      `${operationDescription} aborted by caller.`,
+      withExtra(context, { errorSource: 'FetchAborted' }),
+    );
     return new McpError(JsonRpcErrorCode.InternalError, `${operationDescription} was aborted.`, {
       ...errorIdentity,
       errorSource: 'FetchAborted',
@@ -666,13 +656,12 @@ export async function fetchWithTimeout(
         // Callers that treat a status as expected (e.g. 404 → empty result) get a
         // debug line instead of error; the thrown McpError below is unchanged.
         const logMessage = `Fetch failed for ${redactUrl(currentUrl)} with status ${response.status}.`;
-        const logPayload = {
-          ...context,
+        const logPayload = withExtra(context, {
           statusCode: response.status,
           statusText: response.statusText,
           responseBody,
           errorSource: 'FetchHttpError',
-        };
+        });
         if (expectedStatuses?.includes(response.status)) {
           logger.debug(logMessage, logPayload);
         } else {
@@ -752,11 +741,13 @@ export async function fetchWithTimeout(
     }
 
     const errorMessage = error instanceof Error ? error.message : String(error);
-    logger.error(`Network error during ${operationDescription}: ${errorMessage}`, {
-      ...context,
-      originalErrorName: error instanceof Error ? error.name : 'UnknownError',
-      errorSource: 'FetchNetworkError',
-    });
+    logger.error(
+      `Network error during ${operationDescription}: ${errorMessage}`,
+      withExtra(context, {
+        originalErrorName: error instanceof Error ? error.name : 'UnknownError',
+        errorSource: 'FetchNetworkError',
+      }),
+    );
 
     if (error instanceof McpError) {
       throw error;

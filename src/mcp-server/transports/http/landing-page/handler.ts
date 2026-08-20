@@ -12,7 +12,7 @@ import type { Context } from 'hono';
 import type { ServerManifest } from '@/core/serverManifest.js';
 import type { AuthStrategy } from '@/mcp-server/transports/auth/strategies/authStrategy.js';
 import { logger } from '@/utils/internal/logger.js';
-import { requestContextService } from '@/utils/internal/requestContext.js';
+import { requestContextService, withExtra } from '@/utils/internal/requestContext.js';
 
 import { renderLandingPage } from './render.js';
 
@@ -94,10 +94,10 @@ export function createLandingPageHandler(
           await verifier.verify(token);
           isAuthenticated = true;
         } catch (err) {
-          logger.debug('Landing page bearer validation failed.', {
-            ...context,
-            error: err instanceof Error ? err.message : String(err),
-          });
+          logger.debug(
+            'Landing page bearer validation failed.',
+            withExtra(context, { error: err instanceof Error ? err.message : String(err) }),
+          );
         }
       }
     }
@@ -109,14 +109,16 @@ export function createLandingPageHandler(
         : precomputed.full
       : renderLandingPage(manifest, baseUrl, degraded);
 
-    logger.debug('Serving landing page.', {
-      ...context,
-      accept: c.req.header('accept'),
-      bytes: html.length,
-      requireAuth,
-      degraded,
-      cached: precomputed !== null,
-    });
+    logger.debug(
+      'Serving landing page.',
+      withExtra(context, {
+        accept: c.req.header('accept'),
+        bytes: html.length,
+        requireAuth,
+        degraded,
+        cached: precomputed !== null,
+      }),
+    );
 
     c.header('Content-Type', 'text/html; charset=utf-8');
     c.header('X-Content-Type-Options', 'nosniff');

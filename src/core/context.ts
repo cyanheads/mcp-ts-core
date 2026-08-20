@@ -24,7 +24,11 @@ import {
   McpError,
 } from '@/types-global/errors.js';
 import type { Logger } from '@/utils/internal/logger.js';
-import type { AuthContext, RequestContext } from '@/utils/internal/requestContext.js';
+import {
+  type AuthContext,
+  type RequestContext,
+  withExtra,
+} from '@/utils/internal/requestContext.js';
 
 // Re-export AuthContext so consumers can type against it from ./context
 export type { AuthContext };
@@ -161,9 +165,12 @@ export interface ContextState {
 
 /**
  * The unified object every tool and resource handler receives.
- * Replaces the split `appContext` + `sdkContext` pattern.
+ *
+ * Extends {@link RequestContext}, so a handler's `ctx` goes straight into any
+ * service, storage, or logger call that takes one — the identity and tracing
+ * fields are inherited rather than redeclared, and both types stay closed.
  */
-export interface Context {
+export interface Context extends RequestContext {
   /** Auth data when request is authenticated. */
   readonly auth?: AuthContext | undefined;
 
@@ -238,10 +245,6 @@ export interface Context {
    */
   recoveryFor(reason: string): { recovery: { hint: string } } | Record<string, never>;
 
-  // --- Identity & tracing ---
-  /** Unique request ID for log correlation. */
-  readonly requestId: string;
-
   // --- Multi-round-trip input (always present) ---
   /**
    * Suspend the handler and ask the caller for more input. Never returns —
@@ -269,8 +272,6 @@ export interface Context {
   // --- Cancellation ---
   /** AbortSignal for request cancellation. */
   readonly signal: AbortSignal;
-  /** OpenTelemetry span ID (auto-injected). */
-  readonly spanId?: string | undefined;
 
   // --- Tenant-scoped storage ---
   /** Key-value state scoped to the current tenant. Throws if tenantId is missing. */
@@ -283,10 +284,6 @@ export interface Context {
    *     (fail-closed: `ctx.state` will throw rather than silently share state)
    */
   readonly tenantId?: string | undefined;
-  /** ISO 8601 creation time. */
-  readonly timestamp: string;
-  /** OpenTelemetry trace ID (auto-injected). */
-  readonly traceId?: string | undefined;
 
   // --- Raw URI (present for resource handlers) ---
   /** The parsed resource URI. Only set in resource handler context. */
@@ -846,11 +843,11 @@ function createContextLogger(
   appContext: RequestContext,
   wireLog?: ((level: LoggingLevel, data: unknown) => Promise<void>) | undefined,
 ): ContextLogger {
-  // Build a RequestContext enriched with extra data for each log call.
-  // Our Logger accepts (msg, RequestContext?) — the extra data fields are
-  // spread into the context's index signature.
+  // Build a RequestContext carrying the call's extra data. `withExtra` merges
+  // into whatever the request context already accumulated rather than
+  // replacing it; the logger flattens `extra` into the emitted line.
   const enriched = (data?: Record<string, unknown>): RequestContext =>
-    data ? { ...appContext, ...data } : appContext;
+    data ? withExtra(appContext, data) : appContext;
 
   // Second sink: the MCP `notifications/message` stream. The framework
   // advertises the `logging` capability, so every `ctx.log` call must reach the

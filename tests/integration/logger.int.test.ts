@@ -86,7 +86,7 @@ describe('Logger Integration (Pino)', () => {
   it('should write an info message to the combined log but not the error log', async () => {
     await new Promise<void>((resolve) => {
       logger.info('This is a pino info message', {
-        testId: 'pino-info-test',
+        extra: { testId: 'pino-info-test' },
         requestId: 'test-pino-1',
         timestamp: new Date().toISOString(),
       });
@@ -110,7 +110,7 @@ describe('Logger Integration (Pino)', () => {
   it('should write an error message to both combined and error logs', async () => {
     await new Promise<void>((resolve) => {
       logger.error('This is a pino error message', new Error('test error'), {
-        testId: 'pino-error-test',
+        extra: { testId: 'pino-error-test' },
         requestId: 'test-pino-2',
         timestamp: new Date().toISOString(),
       });
@@ -138,7 +138,7 @@ describe('Logger Integration (Pino)', () => {
 
     logger.setLevel('info');
     logger.debug('This pino debug message should not be logged', {
-      testId: 'pino-debug-test',
+      extra: { testId: 'pino-debug-test' },
       requestId: 'test-pino-3',
       timestamp: new Date().toISOString(),
     });
@@ -156,7 +156,7 @@ describe('Logger Integration (Pino)', () => {
   it('should log emergency level messages', async () => {
     await new Promise<void>((resolve) => {
       logger.emerg('Emergency situation detected', {
-        testId: 'pino-emerg-test',
+        extra: { testId: 'pino-emerg-test' },
         requestId: 'test-pino-emerg',
         timestamp: new Date().toISOString(),
       });
@@ -176,7 +176,7 @@ describe('Logger Integration (Pino)', () => {
   it('should log critical level messages', async () => {
     await new Promise<void>((resolve) => {
       logger.crit('Critical error occurred', {
-        testId: 'pino-crit-test',
+        extra: { testId: 'pino-crit-test' },
         requestId: 'test-pino-crit',
         timestamp: new Date().toISOString(),
       });
@@ -196,7 +196,7 @@ describe('Logger Integration (Pino)', () => {
   it('should log alert level messages', async () => {
     await new Promise<void>((resolve) => {
       logger.alert('Alert condition triggered', {
-        testId: 'pino-alert-test',
+        extra: { testId: 'pino-alert-test' },
         requestId: 'test-pino-alert',
         timestamp: new Date().toISOString(),
       });
@@ -216,7 +216,7 @@ describe('Logger Integration (Pino)', () => {
   it('should log notice level messages', async () => {
     await new Promise<void>((resolve) => {
       logger.notice('Notice level message', {
-        testId: 'pino-notice-test',
+        extra: { testId: 'pino-notice-test' },
         requestId: 'test-pino-notice',
         timestamp: new Date().toISOString(),
       });
@@ -236,7 +236,7 @@ describe('Logger Integration (Pino)', () => {
   it('should log fatal level messages by delegating to emerg', async () => {
     await new Promise<void>((resolve) => {
       logger.fatal('Fatal condition encountered', {
-        testId: 'pino-fatal-test',
+        extra: { testId: 'pino-fatal-test' },
         requestId: 'test-pino-fatal',
         timestamp: new Date().toISOString(),
       });
@@ -262,7 +262,7 @@ describe('Logger Integration (Pino)', () => {
       requestId: 'ctx-like-1',
       timestamp: new Date().toISOString(),
       tenantId: 'default',
-      testId: 'context-like-test',
+      extra: { testId: 'context-like-test' },
       signal: controller.signal,
       log: { info: () => {}, error: () => {} },
       state: { get: async () => null, set: async () => {} },
@@ -299,7 +299,7 @@ describe('Logger Integration (Pino)', () => {
         timestamp: new Date().toISOString(),
         tenantId: 'default',
         operation: 'fetch-regression',
-        testId: 'fetch-ctx-like',
+        extra: { testId: 'fetch-ctx-like' },
         signal: controller.signal,
         log: { info: () => {}, error: () => {} },
         state: { get: async () => null },
@@ -333,7 +333,7 @@ describe('Logger Integration (Pino)', () => {
         timestamp: new Date().toISOString(),
         tenantId: 'default',
         operation: 'retry-regression',
-        testId: 'retry-ctx-like',
+        extra: { testId: 'retry-ctx-like' },
         signal: controller.signal,
         log: { info: () => {} },
       };
@@ -377,7 +377,7 @@ describe('Logger Integration (Pino)', () => {
       logger.info('Redaction with Context-like bindings', {
         requestId: 'redact-1',
         timestamp: new Date().toISOString(),
-        testId: 'redact-with-sanitize',
+        extra: { testId: 'redact-with-sanitize' },
         signal: new AbortController().signal,
         token: 'super-secret-token',
         nested: { apiKey: 'sk-abc123' },
@@ -403,7 +403,7 @@ describe('Logger Integration (Pino)', () => {
       logger.error('Error with cause chain', wrapped, {
         requestId: 'err-cause-1',
         timestamp: new Date().toISOString(),
-        testId: 'err-cause-chain',
+        extra: { testId: 'err-cause-chain' },
       });
 
       await vi.waitFor(
@@ -424,7 +424,7 @@ describe('Logger Integration (Pino)', () => {
   it('writes interaction events when an interaction logger is available', async () => {
     logger.logInteraction('test-interaction', {
       context: {
-        testId: 'interaction-test',
+        extra: { testId: 'interaction-test' },
         requestId: 'interaction-1',
         timestamp: new Date().toISOString(),
       },
@@ -524,7 +524,7 @@ describe('Logger Transport Mode Handling', () => {
 
     // Write a test message
     stdioLogger.info('STDIO transport test message', {
-      testId: 'stdio-ansi-test',
+      extra: { testId: 'stdio-ansi-test' },
       requestId: 'test-stdio-1',
       timestamp: new Date().toISOString(),
     });

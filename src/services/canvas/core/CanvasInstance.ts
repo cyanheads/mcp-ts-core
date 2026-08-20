@@ -5,7 +5,7 @@
  * @module src/services/canvas/core/CanvasInstance
  */
 
-import type { RequestContextLike } from '@/utils/internal/requestContext.js';
+import type { RequestContext } from '@/utils/internal/requestContext.js';
 import type {
   DescribeOptions,
   ExportOptions,
@@ -40,7 +40,7 @@ export class CanvasInstance {
     expiresAt: string,
     private readonly registry: CanvasRegistry,
     private readonly provider: IDataCanvasProvider,
-    private readonly context: RequestContextLike,
+    private readonly context: RequestContext,
   ) {
     this.isNew = isNew;
     this.expiresAt = expiresAt;

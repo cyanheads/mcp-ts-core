@@ -17,11 +17,21 @@ const { mockCounterAdd, mockCreateCounter, mockLogger, mockRequestContextService
       warning: vi.fn(),
     },
     mockRequestContextService: {
-      createRequestContext: vi.fn((params?: Record<string, unknown>) => ({
-        requestId: 'heartbeat-test-request',
-        timestamp: '2026-03-30T00:00:00.000Z',
-        ...params,
-      })),
+      createRequestContext: vi.fn(
+        (params?: {
+          additionalContext?: Record<string, unknown>;
+          operation?: string;
+          parentContext?: Record<string, unknown>;
+          tenantId?: string;
+        }) => ({
+          requestId: 'heartbeat-test-request',
+          timestamp: '2026-03-30T00:00:00.000Z',
+          ...params?.parentContext,
+          ...(params?.operation && { operation: params.operation }),
+          ...(params?.tenantId && { tenantId: params.tenantId }),
+          ...(params?.additionalContext && { extra: { ...params.additionalContext } }),
+        }),
+      ),
     },
   }),
 );
@@ -31,6 +41,10 @@ vi.mock('@/utils/internal/logger.js', () => ({
 }));
 
 vi.mock('@/utils/internal/requestContext.js', () => ({
+  withExtra: (ctx: { extra?: Record<string, unknown> }, fields: Record<string, unknown>) => ({
+    ...ctx,
+    extra: { ...ctx.extra, ...fields },
+  }),
   requestContextService: mockRequestContextService,
 }));
 
@@ -132,7 +146,7 @@ describe('HeartbeatMonitor', () => {
     expect(mockLogger.warning).toHaveBeenCalledWith(
       'Heartbeat ping failed (1/3)',
       expect.objectContaining({
-        error: 'first failure',
+        extra: expect.objectContaining({ error: 'first failure' }),
       }),
     );
     expect(mockLogger.debug).toHaveBeenCalledWith(

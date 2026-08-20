@@ -9,7 +9,7 @@ import { JsonRpcErrorCode } from '@/types-global/errors.js';
 import { ErrorHandler } from '@/utils/internal/error-handler/errorHandler.js';
 import { lazyImport } from '@/utils/internal/lazyImport.js';
 import { logger } from '@/utils/internal/logger.js';
-import type { RequestContext, RequestContextLike } from '@/utils/internal/requestContext.js';
+import { type RequestContext, withExtra } from '@/utils/internal/requestContext.js';
 
 const getChrono = lazyImport(
   () => import('chrono-node'),
@@ -36,7 +36,7 @@ const getChrono = lazyImport(
  */
 export async function parseDateString(
   text: string,
-  context: RequestContextLike | RequestContext,
+  context: RequestContext,
   refDate?: Date,
 ): Promise<Date | null> {
   // Resolve dependency outside ErrorHandler.tryCatch — a missing peer dep is a
@@ -45,7 +45,7 @@ export async function parseDateString(
   const chronoMod = await getChrono();
 
   const operation = 'parseDateString';
-  const logContext = { ...context, operation, inputText: text, refDate };
+  const logContext = { ...withExtra(context, { inputText: text, refDate }), operation };
   logger.debug(`Attempting to parse date string: "${text}"`, logContext);
 
   return await ErrorHandler.tryCatch(
@@ -93,13 +93,13 @@ export async function parseDateString(
  */
 export async function parseDateStringDetailed(
   text: string,
-  context: RequestContextLike | RequestContext,
+  context: RequestContext,
   refDate?: Date,
 ): Promise<chrono.ParsedResult[]> {
   const chronoMod = await getChrono();
 
   const operation = 'parseDateStringDetailed';
-  const logContext = { ...context, operation, inputText: text, refDate };
+  const logContext = { ...withExtra(context, { inputText: text, refDate }), operation };
   logger.debug(`Attempting detailed parse of date string: "${text}"`, logContext);
 
   return await ErrorHandler.tryCatch(

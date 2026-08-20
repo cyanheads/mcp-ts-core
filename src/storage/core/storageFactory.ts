@@ -19,7 +19,7 @@ import type { Database } from '@/storage/providers/supabase/supabase.types.js';
 import { SupabaseProvider } from '@/storage/providers/supabase/supabaseProvider.js';
 import { configurationError } from '@/types-global/errors.js';
 import { logger } from '@/utils/internal/logger.js';
-import { requestContextService } from '@/utils/internal/requestContext.js';
+import { type RequestContext, requestContextService } from '@/utils/internal/requestContext.js';
 
 /** Evaluated at call time (not module load) so worker.ts can set IS_SERVERLESS before first use. */
 function isServerless(): boolean {
@@ -46,10 +46,7 @@ export interface StorageFactoryDeps {
  * Retrieves a Cloudflare binding from globalThis by key.
  * Throws a ConfigurationError if the binding is not present.
  */
-function getGlobalBinding<T>(
-  key: string,
-  context: ReturnType<typeof requestContextService.createRequestContext>,
-): T {
+function getGlobalBinding<T>(key: string, context: RequestContext): T {
   const g = globalThis as Record<string, unknown>;
   if (!(key in g) || g[key] == null) {
     throw configurationError(
@@ -182,10 +179,9 @@ export function createStorageProvider(
       );
     default: {
       const exhaustiveCheck: never = providerType;
-      throw configurationError(
-        `Unhandled storage provider type: ${String(exhaustiveCheck)}`,
-        context,
-      );
+      throw configurationError(`Unhandled storage provider type: ${String(exhaustiveCheck)}`, {
+        ...context,
+      });
     }
   }
 }

@@ -19,7 +19,7 @@ import { decodeCursor, encodeCursor } from '@/storage/core/storageValidation.js'
 import { configurationError, JsonRpcErrorCode, McpError } from '@/types-global/errors.js';
 import { ErrorHandler } from '@/utils/internal/error-handler/errorHandler.js';
 import { logger } from '@/utils/internal/logger.js';
-import type { RequestContext } from '@/utils/internal/requestContext.js';
+import { type RequestContext, withExtra } from '@/utils/internal/requestContext.js';
 
 type R2Envelope = {
   __mcp: { v: 1; expiresAt?: number };
@@ -121,10 +121,7 @@ export class R2Provider implements IStorageProvider {
     const r2Key = this.getR2Key(tenantId, key);
     return await ErrorHandler.tryCatch(
       async () => {
-        logger.debug(`[R2Provider] Setting key: ${r2Key}`, {
-          ...context,
-          options,
-        });
+        logger.debug(`[R2Provider] Setting key: ${r2Key}`, withExtra(context, { options }));
         const envelope = this.buildEnvelope(value, options);
         const body = JSON.stringify(envelope);
         await this.bucket.put(r2Key, body);
@@ -172,10 +169,10 @@ export class R2Provider implements IStorageProvider {
     const r2Prefix = this.getR2Key(tenantId, prefix);
     return await ErrorHandler.tryCatch(
       async () => {
-        logger.debug(`[R2Provider] Listing keys with prefix: ${r2Prefix}`, {
-          ...context,
-          options,
-        });
+        logger.debug(
+          `[R2Provider] Listing keys with prefix: ${r2Prefix}`,
+          withExtra(context, { options }),
+        );
 
         const limit = options?.limit ?? DEFAULT_LIST_LIMIT;
         const listOptions: import('@cloudflare/workers-types').R2ListOptions = {

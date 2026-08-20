@@ -11,11 +11,21 @@ const { mockRuntimeCaps, mockLogger, mockRequestContextService } = vi.hoisted(()
     debug: vi.fn(),
   },
   mockRequestContextService: {
-    createRequestContext: vi.fn((params?: Record<string, unknown>) => ({
-      requestId: 'gc-pressure-test-request',
-      timestamp: '2026-05-22T00:00:00.000Z',
-      ...params,
-    })),
+    createRequestContext: vi.fn(
+      (params?: {
+        additionalContext?: Record<string, unknown>;
+        operation?: string;
+        parentContext?: Record<string, unknown>;
+        tenantId?: string;
+      }) => ({
+        requestId: 'gc-pressure-test-request',
+        timestamp: '2026-05-22T00:00:00.000Z',
+        ...params?.parentContext,
+        ...(params?.operation && { operation: params.operation }),
+        ...(params?.tenantId && { tenantId: params.tenantId }),
+        ...(params?.additionalContext && { extra: { ...params.additionalContext } }),
+      }),
+    ),
   },
 }));
 
@@ -28,6 +38,10 @@ vi.mock('@/utils/internal/logger.js', () => ({
 }));
 
 vi.mock('@/utils/internal/requestContext.js', () => ({
+  withExtra: (ctx: { extra?: Record<string, unknown> }, fields: Record<string, unknown>) => ({
+    ...ctx,
+    extra: { ...ctx.extra, ...fields },
+  }),
   requestContextService: mockRequestContextService,
 }));
 

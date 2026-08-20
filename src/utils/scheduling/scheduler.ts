@@ -171,8 +171,7 @@ export class SchedulerService {
       const job = this.jobs.get(id);
       const context = requestContextService.createRequestContext({
         operation: `scheduler:job:${id}`,
-        jobId: id,
-        schedule,
+        additionalContext: { jobId: id, schedule },
       });
 
       if (job?.isRunning) {
@@ -208,7 +207,7 @@ export class SchedulerService {
 
     const context = requestContextService.createRequestContext({
       operation: 'scheduler:schedule',
-      jobId: id,
+      additionalContext: { jobId: id },
     });
     this.jobs.set(id, newJob);
     logger.info(`Job '${id}' scheduled: ${description}`, context);
@@ -229,7 +228,7 @@ export class SchedulerService {
     void job.task.start();
     const context = requestContextService.createRequestContext({
       operation: 'scheduler:start',
-      jobId: id,
+      additionalContext: { jobId: id },
     });
     logger.info(`Job '${id}' started.`, context);
   }
@@ -249,7 +248,7 @@ export class SchedulerService {
     void job.task.stop();
     const context = requestContextService.createRequestContext({
       operation: 'scheduler:stop',
-      jobId: id,
+      additionalContext: { jobId: id },
     });
     logger.info(`Job '${id}' stopped.`, context);
   }
@@ -270,7 +269,7 @@ export class SchedulerService {
     this.jobs.delete(id);
     const context = requestContextService.createRequestContext({
       operation: 'scheduler:remove',
-      jobId: id,
+      additionalContext: { jobId: id },
     });
     logger.info(`Job '${id}' removed.`, context);
   }

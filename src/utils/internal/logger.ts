@@ -596,7 +596,10 @@ export class Logger {
 
     if (this.isRateLimited(level, msg)) return;
 
-    const logObject: Record<string, unknown> = { ...context };
+    // `extra` is flattened rather than nested so the emitted line keeps the
+    // shape callers had when `RequestContext` was an open bag.
+    const { extra, ...canonical } = context ?? {};
+    const logObject: Record<string, unknown> = { ...canonical, ...extra };
     // Pass the raw Error so pino's `err` serializer (default: `pino.stdSerializers.err`)
     // runs *after* our `formatters.log` sanitizer. Pre-serializing here would produce
     // an object whose prototype (`pinoErrProto`) trips the sanitizer's plain-object check.

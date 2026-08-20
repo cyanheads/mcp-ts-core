@@ -74,8 +74,8 @@ describe('measureToolExecution', () => {
     const call = infoSpy.mock.calls[0];
     if (!call) throw new Error('infoSpy was not called');
     const [, logMeta] = call;
-    expect((logMeta as any).metrics.isSuccess).toBe(true);
-    expect((logMeta as any).metrics.errorCode).toBeUndefined();
+    expect((logMeta as any).extra.metrics.isSuccess).toBe(true);
+    expect((logMeta as any).extra.metrics.errorCode).toBeUndefined();
     expect(span.setStatus).toHaveBeenCalledWith({ code: SpanStatusCode.OK });
     expect(span.setAttributes).toHaveBeenLastCalledWith(
       expect.objectContaining({
@@ -160,8 +160,8 @@ describe('measureToolExecution', () => {
     const call = infoSpy.mock.calls[0];
     if (!call) throw new Error('infoSpy was not called');
     const [, logMeta] = call;
-    expect((logMeta as any).metrics.isSuccess).toBe(false);
-    expect((logMeta as any).metrics.errorCode).toBe(String(JsonRpcErrorCode.InternalError));
+    expect((logMeta as any).extra.metrics.isSuccess).toBe(false);
+    expect((logMeta as any).extra.metrics.errorCode).toBe(String(JsonRpcErrorCode.InternalError));
   });
 
   it('handles generic errors and uses JSON length fallback when Buffer is unavailable', async () => {
@@ -206,8 +206,8 @@ describe('measureToolExecution', () => {
     const call = infoSpy.mock.calls[0];
     if (!call) throw new Error('infoSpy was not called');
     const [, logMeta] = call;
-    expect((logMeta as any).metrics.inputBytes).toBe(expectedBytes);
-    expect((logMeta as any).metrics.outputBytes).toBe(0);
+    expect((logMeta as any).extra.metrics.inputBytes).toBe(expectedBytes);
+    expect((logMeta as any).extra.metrics.outputBytes).toBe(0);
   });
 
   it('detects partial success when result contains a non-empty failed array', async () => {
@@ -238,9 +238,9 @@ describe('measureToolExecution', () => {
     const call = infoSpy.mock.calls[0];
     if (!call) throw new Error('infoSpy was not called');
     const [, logMeta] = call;
-    expect((logMeta as any).metrics.partialSuccess).toBe(true);
-    expect((logMeta as any).metrics.batchSucceeded).toBe(2);
-    expect((logMeta as any).metrics.batchFailed).toBe(1);
+    expect((logMeta as any).extra.metrics.partialSuccess).toBe(true);
+    expect((logMeta as any).extra.metrics.batchSucceeded).toBe(2);
+    expect((logMeta as any).extra.metrics.batchFailed).toBe(1);
   });
 
   it('does not set partial success when failed array is empty', async () => {
@@ -257,7 +257,7 @@ describe('measureToolExecution', () => {
     const call = infoSpy.mock.calls[0];
     if (!call) throw new Error('infoSpy was not called');
     const [, logMeta] = call;
-    expect((logMeta as any).metrics.partialSuccess).toBeUndefined();
+    expect((logMeta as any).extra.metrics.partialSuccess).toBeUndefined();
   });
 
   it('handles partial success without a succeeded array', async () => {
@@ -333,8 +333,8 @@ describe('measureToolExecution', () => {
       const call = localInfoSpy.mock.calls[0];
       if (!call) throw new Error('info logger was not called');
       const [, logMeta] = call;
-      expect((logMeta as any).metrics.isSuccess).toBe(true);
-      expect((logMeta as any).metrics.errorCode).toBeUndefined();
+      expect((logMeta as any).extra.metrics.isSuccess).toBe(true);
+      expect((logMeta as any).extra.metrics.errorCode).toBeUndefined();
     } finally {
       if (originalBuffer) mutableGlobal.Buffer = originalBuffer;
       else delete mutableGlobal.Buffer;
@@ -370,8 +370,8 @@ describe('measureToolExecution', () => {
     const call = infoSpy.mock.calls[0];
     if (!call) throw new Error('infoSpy was not called');
     const [, logMeta] = call;
-    expect((logMeta as any).metrics.inputBytes).toBeGreaterThan(0);
-    expect((logMeta as any).metrics.outputBytes).toBeGreaterThan(0);
+    expect((logMeta as any).extra.metrics.inputBytes).toBeGreaterThan(0);
+    expect((logMeta as any).extra.metrics.outputBytes).toBeGreaterThan(0);
   });
 
   it('returns zero bytes when both serialization and structural estimation fail', async () => {
@@ -393,8 +393,8 @@ describe('measureToolExecution', () => {
     const call = infoSpy.mock.calls[0];
     if (!call) throw new Error('infoSpy was not called');
     const [, logMeta] = call;
-    expect((logMeta as any).metrics.inputBytes).toBe(0);
-    expect((logMeta as any).metrics.outputBytes).toBe(0);
+    expect((logMeta as any).extra.metrics.inputBytes).toBe(0);
+    expect((logMeta as any).extra.metrics.outputBytes).toBe(0);
   });
 
   it('adds caller-provided success attributes and ignores array results for batch detection', async () => {
@@ -663,9 +663,9 @@ describe('measurePromptGeneration', () => {
     const call = infoSpy.mock.calls[0];
     if (!call) throw new Error('infoSpy was not called');
     const [, logMeta] = call;
-    expect((logMeta as any).metrics.isSuccess).toBe(true);
-    expect((logMeta as any).metrics.messageCount).toBe(2);
-    expect((logMeta as any).metrics.errorCode).toBeUndefined();
+    expect((logMeta as any).extra.metrics.isSuccess).toBe(true);
+    expect((logMeta as any).extra.metrics.messageCount).toBe(2);
+    expect((logMeta as any).extra.metrics.errorCode).toBeUndefined();
   });
 
   it('records OTel counter and histogram on success', async () => {

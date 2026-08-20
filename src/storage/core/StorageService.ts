@@ -24,7 +24,7 @@ import {
 import { JsonRpcErrorCode, McpError } from '@/types-global/errors.js';
 import { logger } from '@/utils/internal/logger.js';
 import { nowMs } from '@/utils/internal/performance.js';
-import type { RequestContext } from '@/utils/internal/requestContext.js';
+import { type RequestContext, withExtra } from '@/utils/internal/requestContext.js';
 import {
   ATTR_CODE_FUNCTION_NAME,
   ATTR_CODE_NAMESPACE,
@@ -137,10 +137,9 @@ export class StorageService {
     validateKey(key, context);
 
     logger.debug('[StorageService] get operation', {
-      ...context,
+      ...withExtra(context, { key }),
       operation: 'StorageService.get',
       tenantId,
-      key,
     });
 
     return await this.withStorageOp('get', () => this.provider.get<T>(tenantId, key, context));
@@ -157,12 +156,9 @@ export class StorageService {
     validateStorageOptions(options, context);
 
     logger.debug('[StorageService] set operation', {
-      ...context,
+      ...withExtra(context, { key, hasTTL: options?.ttl !== undefined, ttl: options?.ttl }),
       operation: 'StorageService.set',
       tenantId,
-      key,
-      hasTTL: options?.ttl !== undefined,
-      ttl: options?.ttl,
     });
 
     return await this.withStorageOp('set', () =>
@@ -175,10 +171,9 @@ export class StorageService {
     validateKey(key, context);
 
     logger.debug('[StorageService] delete operation', {
-      ...context,
+      ...withExtra(context, { key }),
       operation: 'StorageService.delete',
       tenantId,
-      key,
     });
 
     return await this.withStorageOp('delete', () => this.provider.delete(tenantId, key, context));
@@ -190,12 +185,9 @@ export class StorageService {
     validateListOptions(options, context);
 
     logger.debug('[StorageService] list operation', {
-      ...context,
+      ...withExtra(context, { prefix, limit: options?.limit, hasCursor: !!options?.cursor }),
       operation: 'StorageService.list',
       tenantId,
-      prefix,
-      limit: options?.limit,
-      hasCursor: !!options?.cursor,
     });
 
     return await this.withStorageOp('list', () =>
@@ -211,10 +203,9 @@ export class StorageService {
     }
 
     logger.debug('[StorageService] getMany operation', {
-      ...context,
+      ...withExtra(context, { keyCount: keys.length }),
       operation: 'StorageService.getMany',
       tenantId,
-      keyCount: keys.length,
     });
 
     return await this.withStorageOp(
@@ -237,12 +228,13 @@ export class StorageService {
     }
 
     logger.debug('[StorageService] setMany operation', {
-      ...context,
+      ...withExtra(context, {
+        entryCount: entries.size,
+        hasTTL: options?.ttl !== undefined,
+        ttl: options?.ttl,
+      }),
       operation: 'StorageService.setMany',
       tenantId,
-      entryCount: entries.size,
-      hasTTL: options?.ttl !== undefined,
-      ttl: options?.ttl,
     });
 
     return await this.withStorageOp(
@@ -262,10 +254,9 @@ export class StorageService {
     }
 
     logger.debug('[StorageService] deleteMany operation', {
-      ...context,
+      ...withExtra(context, { keyCount: keys.length }),
       operation: 'StorageService.deleteMany',
       tenantId,
-      keyCount: keys.length,
     });
 
     return await this.withStorageOp(

@@ -47,8 +47,10 @@ export {
   type AuthContext,
   type CreateRequestContextParams,
   type RequestContext,
+  /** @deprecated Use {@link RequestContext}. Kept as an alias for one minor. */
   type RequestContextLike,
   requestContextService,
+  withExtra,
 } from './internal/requestContext.js';
 // Runtime
 export { type RuntimeCapabilities, runtimeCaps } from './internal/runtime.js';

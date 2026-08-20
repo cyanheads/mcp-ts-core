@@ -15,7 +15,7 @@ describe('JsonParser', () => {
   beforeEach(() => {
     parser = new JsonParser();
     context = requestContextService.createRequestContext({
-      toolName: 'test-json-parser',
+      additionalContext: { toolName: 'test-json-parser' },
     });
   });
 
@@ -48,7 +48,9 @@ describe('JsonParser', () => {
     expect(result).toEqual({ key: 'value' });
     expect(debugSpy).toHaveBeenCalledWith(
       'LLM <think> block detected and logged.',
-      expect.objectContaining({ thinkContent: 'This is a thought.' }),
+      expect.objectContaining({
+        extra: expect.objectContaining({ thinkContent: 'This is a thought.' }),
+      }),
     );
   });
 

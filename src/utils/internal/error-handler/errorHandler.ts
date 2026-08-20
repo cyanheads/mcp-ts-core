@@ -248,21 +248,23 @@ export class ErrorHandler {
         : new Date().toISOString();
 
     const stack = finalError instanceof Error ? finalError.stack : originalStack;
+    const { extra: contextExtra, ...contextCanonical } = context;
     const logContext: RequestContext = {
+      operation,
+      ...contextCanonical,
       requestId: logRequestId,
       timestamp: logTimestamp,
-      operation,
-      input: sanitizedInput,
-      critical,
-      errorCode: loggedErrorCode,
-      originalErrorType: originalErrorName,
-      finalErrorType: getErrorName(finalError),
-      ...Object.fromEntries(
-        Object.entries(context).filter(([key]) => key !== 'requestId' && key !== 'timestamp'),
-      ),
-      errorData:
-        finalError instanceof McpError && finalError.data ? finalError.data : consolidatedData,
-      ...(includeStack && stack ? { stack } : {}),
+      extra: {
+        ...contextExtra,
+        input: sanitizedInput,
+        critical,
+        errorCode: loggedErrorCode,
+        originalErrorType: originalErrorName,
+        finalErrorType: getErrorName(finalError),
+        errorData:
+          finalError instanceof McpError && finalError.data ? finalError.data : consolidatedData,
+        ...(includeStack && stack ? { stack } : {}),
+      },
     };
 
     logger.error(

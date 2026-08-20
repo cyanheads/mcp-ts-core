@@ -8,7 +8,11 @@ import { config } from '@/config/index.js';
 import { authContext } from '@/mcp-server/transports/auth/lib/authContext.js';
 import { forbidden, unauthorized } from '@/types-global/errors.js';
 import { logger } from '@/utils/internal/logger.js';
-import { type RequestContext, requestContextService } from '@/utils/internal/requestContext.js';
+import {
+  type RequestContext,
+  requestContextService,
+  withExtra,
+} from '@/utils/internal/requestContext.js';
 
 /**
  * Checks if the current authentication context contains all the specified scopes.
@@ -25,11 +29,7 @@ import { type RequestContext, requestContextService } from '@/utils/internal/req
  */
 export function withRequiredScopes(requiredScopes: string[], parentContext?: RequestContext): void {
   const initialContext = parentContext
-    ? {
-        ...parentContext,
-        operation: 'withRequiredScopesCheck',
-        requiredScopes,
-      }
+    ? withExtra({ ...parentContext, operation: 'withRequiredScopesCheck' }, { requiredScopes })
     : requestContextService.createRequestContext({
         operation: 'withRequiredScopesCheck',
         additionalContext: { requiredScopes },
@@ -70,19 +70,18 @@ export function withRequiredScopes(requiredScopes: string[], parentContext?: Req
 
   const missingScopes = requiredScopes.filter((scope) => !grantedScopeSet.has(scope));
 
-  const finalContext = {
-    ...initialContext,
+  const finalContext = withExtra(initialContext, {
     grantedScopes,
     clientId,
     subject,
-  };
+  });
 
   if (missingScopes.length > 0) {
     // Log full details server-side (grantedScopes, clientId, subject stay in logs)
-    logger.warning('Authorization failed: Missing required scopes.', {
-      ...finalContext,
-      missingScopes,
-    });
+    logger.warning(
+      'Authorization failed: Missing required scopes.',
+      withExtra(finalContext, { missingScopes }),
+    );
     // Do not include scope names in the client-facing error data — prevents scope enumeration.
     // Full details (grantedScopes, missingScopes, clientId, subject) are in the server-side log above.
     throw forbidden('Insufficient permissions.');

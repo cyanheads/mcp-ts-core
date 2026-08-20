@@ -101,7 +101,9 @@ describe('PdfParser', () => {
       expect(debugSpy).toHaveBeenCalledWith(
         'Loading PDF document from bytes.',
         expect.objectContaining({
-          byteLength: samplePdfBytes.length,
+          extra: expect.objectContaining({
+            byteLength: samplePdfBytes.length,
+          }),
         }),
       );
     });
@@ -188,7 +190,9 @@ describe('PdfParser', () => {
       expect(debugSpy).toHaveBeenCalledWith(
         'Embedding standard font.',
         expect.objectContaining({
-          fontName: 'Helvetica',
+          extra: expect.objectContaining({
+            fontName: 'Helvetica',
+          }),
         }),
       );
     });
@@ -318,7 +322,9 @@ describe('PdfParser', () => {
       expect(debugSpy).toHaveBeenCalledWith(
         'Embedding image into PDF.',
         expect.objectContaining({
-          format: 'png',
+          extra: expect.objectContaining({
+            format: 'png',
+          }),
         }),
       );
     });
@@ -565,14 +571,18 @@ describe('PdfParser', () => {
       expect(debugSpy).toHaveBeenCalledWith(
         'Merging PDF documents.',
         expect.objectContaining({
-          documentCount: 2,
+          extra: expect.objectContaining({
+            documentCount: 2,
+          }),
         }),
       );
 
       expect(debugSpy).toHaveBeenCalledWith(
         'Successfully merged PDF documents.',
         expect.objectContaining({
-          mergedPageCount: 3,
+          extra: expect.objectContaining({
+            mergedPageCount: 3,
+          }),
         }),
       );
     });
@@ -658,14 +668,18 @@ describe('PdfParser', () => {
       expect(debugSpy).toHaveBeenCalledWith(
         'Splitting PDF document.',
         expect.objectContaining({
-          rangeCount: 2,
+          extra: expect.objectContaining({
+            rangeCount: 2,
+          }),
         }),
       );
 
       expect(debugSpy).toHaveBeenCalledWith(
         'Successfully split PDF document.',
         expect.objectContaining({
-          resultCount: 2,
+          extra: expect.objectContaining({
+            resultCount: 2,
+          }),
         }),
       );
     });
@@ -802,8 +816,10 @@ describe('PdfParser', () => {
       expect(debugSpy).toHaveBeenCalledWith(
         'Filling PDF form fields.',
         expect.objectContaining({
-          fieldCount: 2,
-          flatten: true,
+          extra: expect.objectContaining({
+            fieldCount: 2,
+            flatten: true,
+          }),
         }),
       );
 
@@ -822,7 +838,9 @@ describe('PdfParser', () => {
       expect(warningSpy).toHaveBeenCalledWith(
         'Failed to fill form field.',
         expect.objectContaining({
-          fieldName: 'NonExistentField',
+          extra: expect.objectContaining({
+            fieldName: 'NonExistentField',
+          }),
         }),
       );
     });
@@ -855,7 +873,9 @@ describe('PdfParser', () => {
       expect(errorSpy).toHaveBeenCalledWith(
         'Failed to fill PDF form.',
         expect.objectContaining({
-          errorDetails: 'no form available',
+          extra: expect.objectContaining({
+            errorDetails: 'no form available',
+          }),
         }),
       );
     });
@@ -1055,15 +1075,19 @@ describe('PdfParser', () => {
       expect(debugSpy).toHaveBeenCalledWith(
         'Extracting text from PDF using unpdf.',
         expect.objectContaining({
-          mergePages: false,
-          inputKind: 'document',
+          extra: expect.objectContaining({
+            mergePages: false,
+            inputKind: 'document',
+          }),
         }),
       );
 
       expect(debugSpy).toHaveBeenCalledWith(
         'Successfully extracted text from PDF.',
         expect.objectContaining({
-          totalPages: 3,
+          extra: expect.objectContaining({
+            totalPages: 3,
+          }),
         }),
       );
     });
@@ -1094,7 +1118,9 @@ describe('PdfParser', () => {
       expect(errorSpy).toHaveBeenCalledWith(
         'Failed to extract text from PDF.',
         expect.objectContaining({
-          errorDetails: 'Save failed',
+          extra: expect.objectContaining({
+            errorDetails: 'Save failed',
+          }),
         }),
       );
     });
@@ -1152,8 +1178,10 @@ describe('PdfParser', () => {
       expect(debugSpy).toHaveBeenCalledWith(
         'Extracting text from PDF using unpdf.',
         expect.objectContaining({
-          inputKind: 'bytes',
-          mergePages: false,
+          extra: expect.objectContaining({
+            inputKind: 'bytes',
+            mergePages: false,
+          }),
         }),
       );
     });
@@ -1201,7 +1229,9 @@ describe('PdfParser', () => {
       expect(debugSpy).toHaveBeenCalledWith(
         'Successfully serialized PDF document.',
         expect.objectContaining({
-          byteLength: expect.any(Number),
+          extra: expect.objectContaining({
+            byteLength: expect.any(Number),
+          }),
         }),
       );
     });

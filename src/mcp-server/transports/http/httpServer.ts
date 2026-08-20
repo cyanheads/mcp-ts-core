@@ -15,7 +15,7 @@ import { createHttpApp } from '@/mcp-server/transports/http/httpTransport.js';
 import type { HonoNodeBindings } from '@/mcp-server/transports/http/httpTypes.js';
 import type { FrameworkServerFactory } from '@/mcp-server/types.js';
 import { logger } from '@/utils/internal/logger.js';
-import type { RequestContext } from '@/utils/internal/requestContext.js';
+import { type RequestContext, withExtra } from '@/utils/internal/requestContext.js';
 import { logStartupBanner } from '@/utils/internal/startupBanner.js';
 
 /**
@@ -29,7 +29,7 @@ export interface HttpTransportHandle {
 }
 
 function isPortInUse(port: number, host: string, parentContext: RequestContext): Promise<boolean> {
-  const context = { ...parentContext, operation: 'isPortInUse', port, host };
+  const context = withExtra({ ...parentContext, operation: 'isPortInUse' }, { port, host });
   logger.debug(`Checking if port ${port} is in use...`, context);
   return new Promise((resolve) => {
     const tempServer = http.createServer();
@@ -61,18 +61,17 @@ function startHttpServerWithRetry<TBindings extends object = HonoNodeBindings>(
   const tryBind = (port: number, attempt: number) => {
     if (attempt > maxRetries + 1) {
       const error = new Error(`Failed to bind to any port after ${maxRetries} retries.`);
-      logger.fatal(error.message, { ...startContext, port, attempt });
+      logger.fatal(error.message, withExtra(startContext, { port, attempt }));
       return reject(error);
     }
 
-    isPortInUse(port, host, { ...startContext, port, attempt })
+    isPortInUse(port, host, withExtra(startContext, { attempt }))
       .then((inUse) => {
         if (inUse) {
-          logger.warning(`Port ${port} is in use, retrying...`, {
-            ...startContext,
-            port,
-            attempt,
-          });
+          logger.warning(
+            `Port ${port} is in use, retrying...`,
+            withExtra(startContext, { port, attempt }),
+          );
           setTimeout(() => tryBind(port + 1, attempt + 1), config.mcpHttpPortRetryDelayMs);
           return;
         }
@@ -80,21 +79,18 @@ function startHttpServerWithRetry<TBindings extends object = HonoNodeBindings>(
         try {
           const serverInstance = serve({ fetch: app.fetch, port, hostname: host }, (info) => {
             const serverAddress = `http://${info.address}:${info.port}${config.mcpHttpEndpointPath}`;
-            logger.info(`HTTP transport listening at ${serverAddress}`, {
-              ...startContext,
-              port,
-              address: serverAddress,
-            });
+            logger.info(
+              `HTTP transport listening at ${serverAddress}`,
+              withExtra(startContext, { port, address: serverAddress }),
+            );
             logStartupBanner(`\n🚀 MCP Server running at: ${serverAddress}`, 'http');
           });
           resolve(serverInstance);
         } catch (err: unknown) {
-          logger.warning(`Binding attempt failed for port ${port}, retrying...`, {
-            ...startContext,
-            port,
-            attempt,
-            error: String(err),
-          });
+          logger.warning(
+            `Binding attempt failed for port ${port}, retrying...`,
+            withExtra(startContext, { port, attempt, error: String(err) }),
+          );
           setTimeout(() => tryBind(port + 1, attempt + 1), config.mcpHttpPortRetryDelayMs);
         }
       })

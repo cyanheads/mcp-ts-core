@@ -62,8 +62,10 @@ describe('fetchWithTimeout', () => {
     expect(errorSpy).toHaveBeenCalledWith(
       'Fetch failed for https://example.com with status 503.',
       expect.objectContaining({
-        errorSource: 'FetchHttpError',
-        statusCode: 503,
+        extra: expect.objectContaining({
+          errorSource: 'FetchHttpError',
+          statusCode: 503,
+        }),
       }),
     );
   });
@@ -212,7 +214,7 @@ describe('fetchWithTimeout', () => {
 
     expect(errorSpy).toHaveBeenCalledWith(
       'fetch GET https://slow.example.com timed out after 5ms.',
-      expect.objectContaining({ errorSource: 'FetchTimeout' }),
+      expect.objectContaining({ extra: expect.objectContaining({ errorSource: 'FetchTimeout' }) }),
     );
   });
 
@@ -232,8 +234,10 @@ describe('fetchWithTimeout', () => {
     expect(errorSpy).toHaveBeenCalledWith(
       'Network error during fetch GET https://error.example.com: connection reset',
       expect.objectContaining({
-        errorSource: 'FetchNetworkError',
-        originalErrorName: 'Error',
+        extra: expect.objectContaining({
+          errorSource: 'FetchNetworkError',
+          originalErrorName: 'Error',
+        }),
       }),
     );
   });
@@ -249,8 +253,10 @@ describe('fetchWithTimeout', () => {
     expect(errorSpy).toHaveBeenCalledWith(
       'Network error during fetch GET https://error.example.com: upstream unavailable',
       expect.objectContaining({
-        errorSource: 'FetchNetworkError',
-        originalErrorName: 'McpError',
+        extra: expect.objectContaining({
+          errorSource: 'FetchNetworkError',
+          originalErrorName: 'McpError',
+        }),
       }),
     );
   });
@@ -284,8 +290,10 @@ describe('fetchWithTimeout', () => {
     expect(errorSpy).toHaveBeenCalledWith(
       'Fetch failed for https://bad-body.example.com with status 502.',
       expect.objectContaining({
-        responseBody: 'Could not read response body',
-        errorSource: 'FetchHttpError',
+        extra: expect.objectContaining({
+          responseBody: 'Could not read response body',
+          errorSource: 'FetchHttpError',
+        }),
       }),
     );
   });
@@ -329,8 +337,10 @@ describe('fetchWithTimeout', () => {
     expect(errorSpy).toHaveBeenCalledWith(
       'Network error during fetch GET https://string-error.example.com: catastrophic failure',
       expect.objectContaining({
-        originalErrorName: 'UnknownError',
-        errorSource: 'FetchNetworkError',
+        extra: expect.objectContaining({
+          originalErrorName: 'UnknownError',
+          errorSource: 'FetchNetworkError',
+        }),
       }),
     );
   });
@@ -362,7 +372,7 @@ describe('fetchWithTimeout', () => {
 
     expect(infoSpy).toHaveBeenCalledWith(
       expect.stringContaining('aborted by caller'),
-      expect.objectContaining({ errorSource: 'FetchAborted' }),
+      expect.objectContaining({ extra: expect.objectContaining({ errorSource: 'FetchAborted' }) }),
     );
   });
 
@@ -424,7 +434,9 @@ describe('fetchWithTimeout', () => {
       expect(errorSpy).not.toHaveBeenCalled();
       expect(debugSpy).toHaveBeenCalledWith(
         'Fetch failed for https://example.com with status 404.',
-        expect.objectContaining({ statusCode: 404, errorSource: 'FetchHttpError' }),
+        expect.objectContaining({
+          extra: expect.objectContaining({ statusCode: 404, errorSource: 'FetchHttpError' }),
+        }),
       );
     });
 
@@ -437,7 +449,9 @@ describe('fetchWithTimeout', () => {
 
       expect(errorSpy).toHaveBeenCalledWith(
         'Fetch failed for https://example.com with status 500.',
-        expect.objectContaining({ statusCode: 500, errorSource: 'FetchHttpError' }),
+        expect.objectContaining({
+          extra: expect.objectContaining({ statusCode: 500, errorSource: 'FetchHttpError' }),
+        }),
       );
     });
   });

@@ -235,7 +235,7 @@ describe('OpenTelemetry Tracing', () => {
 
       expect(result.operation).toBe('test-operation');
       expect(result.traceId).toBe(traceId);
-      expect(result.parentSpanId).toBe(spanId);
+      expect(result.extra?.parentSpanId).toBe(spanId);
     });
 
     test('should work with Web Headers', () => {
@@ -248,7 +248,7 @@ describe('OpenTelemetry Tracing', () => {
 
       expect(result.operation).toBe('web-request');
       expect(result.traceId).toBe(traceId);
-      expect(result.parentSpanId).toBe(spanId);
+      expect(result.extra?.parentSpanId).toBe(spanId);
     });
   });
 
@@ -522,7 +522,7 @@ describe('OpenTelemetry Tracing', () => {
       const childContext = traceUtils.createContextWithParentTrace(headers, 'child-operation');
 
       expect(childContext.traceId).toBe(parentTraceId);
-      expect(childContext.parentSpanId).toBe(parentSpanId);
+      expect(childContext.extra?.parentSpanId).toBe(parentSpanId);
       expect(childContext.operation).toBe('child-operation');
     });
   });

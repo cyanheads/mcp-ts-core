@@ -477,7 +477,7 @@ export function createToolHandler(
         ...(sdkSessionId ? { sessionId: sdkSessionId } : {}),
       },
       operation: 'HandleToolRequest',
-      additionalContext: { toolName: def.name, sessionId: sdkSessionId },
+      additionalContext: { toolName: def.name },
     });
 
     try {

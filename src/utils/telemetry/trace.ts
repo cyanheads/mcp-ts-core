@@ -14,7 +14,7 @@ import {
 } from '@opentelemetry/api';
 
 import { config } from '@/config/index.js';
-import type { RequestContext, RequestContextLike } from '@/utils/internal/requestContext.js';
+import type { RequestContext } from '@/utils/internal/requestContext.js';
 import { requestContextService } from '@/utils/internal/requestContext.js';
 
 /**
@@ -48,10 +48,9 @@ export interface TraceparentInfo {
  * }
  * ```
  */
-export function buildTraceparent(ctx?: RequestContextLike | RequestContext): string | undefined {
-  const traceId =
-    (ctx?.traceId as string | undefined) ?? trace.getActiveSpan()?.spanContext().traceId;
-  const spanId = (ctx?.spanId as string | undefined) ?? trace.getActiveSpan()?.spanContext().spanId;
+export function buildTraceparent(ctx?: RequestContext): string | undefined {
+  const traceId = ctx?.traceId ?? trace.getActiveSpan()?.spanContext().traceId;
+  const spanId = ctx?.spanId ?? trace.getActiveSpan()?.spanContext().spanId;
   if (!traceId || !spanId) return;
   // We do not currently read flags reliably from context; assume sampled
   return `00-${traceId}-${spanId}-01`;
@@ -120,8 +119,10 @@ export function createContextWithParentTrace(
   return requestContextService.createRequestContext({
     operation,
     ...(traceInfo && {
-      traceId: traceInfo.traceId,
-      parentSpanId: traceInfo.spanId,
+      // `traceId` rides in as a parent property so an active span still wins,
+      // matching the precedence createRequestContext applies to its own OTel read.
+      parentContext: { traceId: traceInfo.traceId },
+      additionalContext: { parentSpanId: traceInfo.spanId },
     }),
   });
 }
@@ -222,10 +223,7 @@ export async function withSpan<T>(
  * }, 1000);
  * ```
  */
-export function runInContext<T>(
-  ctx: RequestContextLike | RequestContext | undefined,
-  fn: () => T,
-): T {
+export function runInContext<T>(ctx: RequestContext | undefined, fn: () => T): T {
   // If no trace context, run directly
   if (!ctx?.traceId || !ctx?.spanId) {
     return fn();

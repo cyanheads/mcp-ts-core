@@ -53,6 +53,10 @@ vi.mock('@/utils/internal/logger.js', () => ({
 }));
 
 vi.mock('@/utils/internal/requestContext.js', () => ({
+  withExtra: (ctx: { extra?: Record<string, unknown> }, fields: Record<string, unknown>) => ({
+    ...ctx,
+    extra: { ...ctx.extra, ...fields },
+  }),
   requestContextService: {
     createRequestContext: vi.fn((opts: any) => ({
       requestId: 'test-req-id',
@@ -465,7 +469,6 @@ describe('createResourceHandler', () => {
 
       expect(requestContextService.createRequestContext).toHaveBeenCalledWith(
         expect.objectContaining({
-          additionalContext: expect.objectContaining({ sessionId: 'sess-r' }),
           parentContext: expect.objectContaining({ sessionId: 'sess-r' }),
         }),
       );

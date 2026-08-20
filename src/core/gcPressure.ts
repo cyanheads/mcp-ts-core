@@ -15,7 +15,7 @@
  */
 
 import { logger } from '@/utils/internal/logger.js';
-import { requestContextService } from '@/utils/internal/requestContext.js';
+import { requestContextService, withExtra } from '@/utils/internal/requestContext.js';
 import { runtimeCaps } from '@/utils/internal/runtime.js';
 
 type BunRuntime = {
@@ -64,10 +64,12 @@ export function startGcPressureLoop(intervalMs: number): () => void {
     try {
       gc(true);
     } catch (err) {
-      logger.debug('Bun.gc threw during GC pressure tick — continuing.', {
-        ...context,
-        error: err instanceof Error ? err.message : String(err),
-      });
+      logger.debug(
+        'Bun.gc threw during GC pressure tick — continuing.',
+        withExtra(context, {
+          error: err instanceof Error ? err.message : String(err),
+        }),
+      );
     }
   }, intervalMs);
   (timer as { unref?: () => void }).unref?.();

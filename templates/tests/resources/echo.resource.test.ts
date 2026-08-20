@@ -16,15 +16,22 @@ describe('echoResource', () => {
   });
 
   it('lists available resources', async () => {
-    // `list` receives the SDK's request-handler extra, not a Context, and may be
-    // async — a minimal literal is enough for a listing that ignores it.
-    const extra = {
-      signal: new AbortController().signal,
-      requestId: 'test',
-      sendNotification: () => Promise.resolve(),
-      sendRequest: () => Promise.resolve({} as never),
-    };
-    const listing = await echoResource.list!(extra);
+    // `list` receives the SDK's `ServerContext`, not a handler `Context`, and
+    // may be async — a minimal literal is enough for a listing that ignores it.
+    const serverContext = {
+      mcpReq: {
+        id: 'test',
+        method: 'resources/list',
+        signal: new AbortController().signal,
+        requestState: () => undefined,
+        send: () => Promise.resolve({} as never),
+        notify: () => Promise.resolve(),
+        log: () => Promise.resolve(),
+        elicitInput: () => Promise.resolve({ action: 'cancel' as const }),
+        requestSampling: () => Promise.reject(new Error('not supported')),
+      },
+    } as unknown as Parameters<NonNullable<typeof echoResource.list>>[0];
+    const listing = await echoResource.list!(serverContext);
     expect(listing.resources).toHaveLength(1);
     expect(listing.resources[0]).toMatchObject({
       uri: 'echo://hello',

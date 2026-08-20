@@ -405,7 +405,7 @@ describe('TreeFormatter', () => {
       expect(debugSpy).toHaveBeenCalledWith(
         'Formatting multiple tree structures',
         expect.objectContaining({
-          count: 2,
+          extra: expect.objectContaining({ count: 2 }),
         }),
       );
 

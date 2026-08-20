@@ -89,13 +89,17 @@ describe('HtmlExtractor', () => {
       expect(debugSpy).toHaveBeenCalledWith(
         'Extracting article content from HTML.',
         expect.objectContaining({
-          byteLength: new TextEncoder().encode(ARTICLE_HTML).byteLength,
-          format: 'markdown',
+          extra: expect.objectContaining({
+            byteLength: new TextEncoder().encode(ARTICLE_HTML).byteLength,
+            format: 'markdown',
+          }),
         }),
       );
       expect(debugSpy).toHaveBeenCalledWith(
         'Successfully extracted article.',
-        expect.objectContaining({ titlePresent: true }),
+        expect.objectContaining({
+          extra: expect.objectContaining({ titlePresent: true }),
+        }),
       );
     });
   });

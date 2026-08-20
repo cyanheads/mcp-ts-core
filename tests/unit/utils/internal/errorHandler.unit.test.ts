@@ -185,11 +185,13 @@ describe('ErrorHandler (unit)', () => {
       expect(ctx).toMatchObject({
         requestId: 'rid-1',
         operation: 'explicitCodeTest',
-        critical: true,
-        errorCode: JsonRpcErrorCode.ServiceUnavailable,
+        extra: {
+          critical: true,
+          errorCode: JsonRpcErrorCode.ServiceUnavailable,
+        },
       });
       // stack should be omitted in logContext
-      expect((ctx as Record<string, unknown>).stack).toBeUndefined();
+      expect((ctx as Record<string, any>).extra.stack).toBeUndefined();
     });
 
     it('preserves original McpError data and does not duplicate originalStack when already present', () => {
@@ -209,7 +211,7 @@ describe('ErrorHandler (unit)', () => {
       const call = errorSpy.mock.calls[0];
       if (!call) throw new Error('errorSpy was not called');
       const [, ctx] = call;
-      const data = (ctx as Record<string, any>).errorData;
+      const data = (ctx as Record<string, any>).extra.errorData;
       expect(data).toMatchObject({
         originalErrorName: 'McpError',
         originalMessage: 'oops',
@@ -228,7 +230,7 @@ describe('ErrorHandler (unit)', () => {
 
       const final = ErrorHandler.handleError(outer, {
         operation: 'rootCauseTest',
-        context: { extra: 'details' },
+        context: { extra: { detail: 'details' } },
         input: function sampleFn() {
           return 'noop';
         },
@@ -246,12 +248,12 @@ describe('ErrorHandler (unit)', () => {
       const call = errorSpy.mock.calls[0];
       if (!call) throw new Error('errorSpy was not called');
       const [, ctx] = call;
-      const errorData = (ctx as Record<string, any>).errorData;
+      const errorData = (ctx as Record<string, any>).extra.errorData;
       expect(errorData.rootCause).toEqual({
         name: 'Error',
         message: 'root-cause',
       });
-      const loggedInput = (ctx as Record<string, unknown>).input;
+      const loggedInput = (ctx as Record<string, any>).extra.input;
       expect(typeof loggedInput).toBe('function');
       expect((loggedInput as (...args: unknown[]) => unknown).name).toBe('sampleFn');
     });

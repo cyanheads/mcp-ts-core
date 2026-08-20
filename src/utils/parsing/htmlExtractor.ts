@@ -32,8 +32,8 @@ import { lazyImport } from '@/utils/internal/lazyImport.js';
 import { logger } from '@/utils/internal/logger.js';
 import {
   type RequestContext,
-  type RequestContextLike,
   requestContextService,
+  withExtra,
 } from '@/utils/internal/requestContext.js';
 import { assertTextInputBudget } from './inputBudget.js';
 
@@ -203,7 +203,7 @@ export class HtmlExtractor {
   async extract(
     html: string,
     options?: ExtractArticleOptions,
-    context?: RequestContextLike | RequestContext,
+    context?: RequestContext,
   ): Promise<ExtractArticleResult> {
     const byteLength = assertTextInputBudget(html, options);
     const logContext =
@@ -233,24 +233,28 @@ export class HtmlExtractor {
       ...(options?.language !== undefined && { language: options.language }),
     };
 
-    logger.debug('Extracting article content from HTML.', {
-      ...logContext,
-      byteLength,
-      format,
-      hasUrl: Boolean(options?.url),
-      hasContentSelector: Boolean(options?.contentSelector),
-    });
+    logger.debug(
+      'Extracting article content from HTML.',
+      withExtra(logContext, {
+        byteLength,
+        format,
+        hasUrl: Boolean(options?.url),
+        hasContentSelector: Boolean(options?.contentSelector),
+      }),
+    );
 
     try {
       const { document } = parseHTML(trimmed);
       const result = await Defuddle(document, options?.url, defuddleOptions);
 
-      logger.debug('Successfully extracted article.', {
-        ...logContext,
-        wordCount: result.wordCount,
-        titlePresent: Boolean(result.title),
-        parseTimeMs: result.parseTime,
-      });
+      logger.debug(
+        'Successfully extracted article.',
+        withExtra(logContext, {
+          wordCount: result.wordCount,
+          titlePresent: Boolean(result.title),
+          parseTimeMs: result.parseTime,
+        }),
+      );
 
       const out: ExtractArticleResult = { content: result.content ?? '' };
       if (result.title) out.title = result.title;
@@ -271,10 +275,10 @@ export class HtmlExtractor {
     } catch (e: unknown) {
       if (e instanceof McpError) throw e;
       const error = e instanceof Error ? e : new Error(String(e));
-      logger.error('Failed to extract article from HTML.', {
-        ...logContext,
-        errorDetails: error.message,
-      });
+      logger.error(
+        'Failed to extract article from HTML.',
+        withExtra(logContext, { errorDetails: error.message }),
+      );
       throw validationError(
         `Failed to extract article from HTML: ${error.message}`,
         { reason: 'html_extract_failed' },

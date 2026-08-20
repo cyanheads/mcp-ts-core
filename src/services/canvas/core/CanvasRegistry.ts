@@ -10,7 +10,11 @@
 
 import { conflict, type McpError, notFound, rateLimited } from '@/types-global/errors.js';
 import { logger } from '@/utils/internal/logger.js';
-import { type RequestContextLike, requestContextService } from '@/utils/internal/requestContext.js';
+import {
+  type RequestContext,
+  requestContextService,
+  withExtra,
+} from '@/utils/internal/requestContext.js';
 import { IdGenerator } from '@/utils/security/idGenerator.js';
 import type { AcquireOptions, TableInfo } from '../types.js';
 import type { IDataCanvasProvider } from './IDataCanvasProvider.js';
@@ -113,7 +117,7 @@ export class CanvasRegistry {
   async acquire(
     maybeId: string | undefined,
     tenantId: string,
-    context: RequestContextLike,
+    context: RequestContext,
     options?: AcquireOptions,
   ): Promise<AcquireResult> {
     options?.signal?.throwIfAborted();
@@ -161,10 +165,8 @@ export class CanvasRegistry {
     }
 
     logger.debug('Canvas created.', {
-      ...context,
-      canvasId,
+      ...withExtra(context, { canvasId, provider: this.provider.name }),
       tenantId,
-      provider: this.provider.name,
     });
 
     return {
@@ -284,7 +286,7 @@ export class CanvasRegistry {
    * Drop a canvas explicitly (e.g. tenant-initiated cleanup). Returns true
    * when the canvas existed and was destroyed.
    */
-  async drop(canvasId: string, tenantId: string, context: RequestContextLike): Promise<boolean> {
+  async drop(canvasId: string, tenantId: string, context: RequestContext): Promise<boolean> {
     const record = this.lookup(canvasId, tenantId);
     if (!record) return false;
     await this.destroy(record, context);
@@ -302,7 +304,7 @@ export class CanvasRegistry {
   }
 
   /** Stop the sweeper and tear down every active canvas. Idempotent. */
-  async shutdown(context: RequestContextLike): Promise<void> {
+  async shutdown(context: RequestContext): Promise<void> {
     if (this.isShuttingDown) return;
     this.isShuttingDown = true;
     if (this.sweeperTimer) {
@@ -361,19 +363,21 @@ export class CanvasRegistry {
         droppedTableCount += 1;
       } catch (err) {
         // Bookkeeping is kept so the next sweep pass retries the drop.
-        logger.warning('Provider drop failed during per-table sweep.', {
-          ...sweepContext,
-          canvasId,
-          tableName,
-          error: err instanceof Error ? err.message : String(err),
-        });
+        logger.warning(
+          'Provider drop failed during per-table sweep.',
+          withExtra(sweepContext, {
+            canvasId,
+            tableName,
+            error: err instanceof Error ? err.message : String(err),
+          }),
+        );
       }
     }
     if (droppedTableCount > 0) {
-      logger.debug('Canvas sweeper dropped expired tables.', {
-        ...sweepContext,
-        droppedTableCount,
-      });
+      logger.debug(
+        'Canvas sweeper dropped expired tables.',
+        withExtra(sweepContext, { droppedTableCount }),
+      );
     }
 
     // --- Pass 2: canvas-level expiry (unchanged semantics) ---
@@ -385,10 +389,10 @@ export class CanvasRegistry {
     }
     if (expired.length === 0) return;
     await Promise.allSettled(expired.map((r) => this.destroy(r, sweepContext)));
-    logger.debug('Canvas sweeper destroyed expired canvases.', {
-      ...sweepContext,
-      destroyedCount: expired.length,
-    });
+    logger.debug(
+      'Canvas sweeper destroyed expired canvases.',
+      withExtra(sweepContext, { destroyedCount: expired.length }),
+    );
   }
 
   // ---------------------------------------------------------------------
@@ -448,7 +452,7 @@ export class CanvasRegistry {
     set.add(canvasId);
   }
 
-  private async destroy(record: CanvasRecord, context: RequestContextLike): Promise<void> {
+  private async destroy(record: CanvasRecord, context: RequestContext): Promise<void> {
     this.canvases.delete(record.canvasId);
     // Clear per-table bookkeeping so stale entries don't survive a re-use.
     record.tableTtl.clear();
@@ -460,11 +464,13 @@ export class CanvasRegistry {
     try {
       await this.provider.destroyCanvas(record.canvasId, context);
     } catch (err) {
-      logger.warning('Provider destroyCanvas failed during canvas cleanup.', {
-        ...context,
-        canvasId: record.canvasId,
-        error: err instanceof Error ? err.message : String(err),
-      });
+      logger.warning(
+        'Provider destroyCanvas failed during canvas cleanup.',
+        withExtra(context, {
+          canvasId: record.canvasId,
+          error: err instanceof Error ? err.message : String(err),
+        }),
+      );
     }
   }
 }
