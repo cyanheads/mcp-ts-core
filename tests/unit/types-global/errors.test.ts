@@ -24,6 +24,7 @@ import {
   unauthorized,
   validationError,
 } from '@/types-global/errors.js';
+import type { RequestContext } from '@/utils/internal/requestContext.js';
 
 describe('Global Error Types', () => {
   describe('JsonRpcErrorCode', () => {
@@ -343,5 +344,41 @@ describe('Global Error Types', () => {
       const result = ErrorSchema.safeParse(errorResponse);
       expect(result.success).toBe(true);
     });
+  });
+});
+
+describe('McpError — auth is never carried in error data', () => {
+  it('drops `auth` from a RequestContext passed as data', () => {
+    const context: RequestContext = {
+      requestId: 'req-1',
+      timestamp: '2026-01-01T00:00:00.000Z',
+      operation: 'probe',
+      tenantId: 't1',
+      auth: { clientId: 'cid', scopes: ['a'], sub: 'sub', token: 'SECRET' },
+    };
+
+    const error = invalidParams('boom', context);
+
+    // `data` goes to the client on the wire and into every error log and span;
+    // `auth.token` is the raw bearer credential.
+    expect(error.data).toEqual({
+      requestId: 'req-1',
+      timestamp: '2026-01-01T00:00:00.000Z',
+      operation: 'probe',
+      tenantId: 't1',
+    });
+    expect(JSON.stringify(error.data)).not.toContain('SECRET');
+  });
+
+  it('drops a bare `auth` key from a plain data payload too', () => {
+    const error = internalError('boom', { auth: { token: 'SECRET' }, attempted: 3 });
+
+    expect(error.data).toEqual({ attempted: 3 });
+  });
+
+  it('leaves data without `auth` untouched', () => {
+    const error = notFound('missing', { uri: 'thing://1', reason: 'gone' });
+
+    expect(error.data).toEqual({ uri: 'thing://1', reason: 'gone' });
   });
 });
