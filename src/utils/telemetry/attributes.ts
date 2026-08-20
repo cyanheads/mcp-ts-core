@@ -38,8 +38,19 @@ export const ATTR_MCP_TOOL_OUTPUT_BYTES = 'mcp.tool.output_bytes';
 /** Wall-clock execution duration of the tool handler in milliseconds. */
 export const ATTR_MCP_TOOL_DURATION_MS = 'mcp.tool.duration_ms';
 
-/** Whether the tool handler completed successfully (`true`) or with an error (`false`). */
+/**
+ * Whether the tool handler completed successfully (`true`) or with an error (`false`).
+ * A round that ended in `input_required` counts as `true` — nothing failed — and is
+ * distinguished by `mcp.tool.input_required`.
+ */
 export const ATTR_MCP_TOOL_SUCCESS = 'mcp.tool.success';
+
+/**
+ * Whether the handler ended this round by requesting more input (`ctx.requestInput`)
+ * rather than producing a final result. Protocol control flow, not a failure — set so
+ * dashboards can separate incomplete rounds from completed calls.
+ */
+export const ATTR_MCP_TOOL_INPUT_REQUIRED = 'mcp.tool.input_required';
 
 /** JSON-RPC error code from the thrown `McpError`, present when `mcp.tool.success` is `false`. */
 export const ATTR_MCP_TOOL_ERROR_CODE = 'mcp.tool.error_code';
@@ -81,8 +92,14 @@ export const ATTR_MCP_RESOURCE_SIZE_BYTES = 'mcp.resource.size_bytes';
 /** Wall-clock duration of the resource handler in milliseconds. */
 export const ATTR_MCP_RESOURCE_DURATION_MS = 'mcp.resource.duration_ms';
 
-/** Whether the resource handler completed successfully. */
+/**
+ * Whether the resource handler completed successfully. A round that ended in
+ * `input_required` counts as `true`; see `mcp.resource.input_required`.
+ */
 export const ATTR_MCP_RESOURCE_SUCCESS = 'mcp.resource.success';
+
+/** Whether the handler ended this round by requesting more input rather than a final result. */
+export const ATTR_MCP_RESOURCE_INPUT_REQUIRED = 'mcp.resource.input_required';
 
 /** JSON-RPC error code from the thrown error, present when `mcp.resource.success` is `false`. */
 export const ATTR_MCP_RESOURCE_ERROR_CODE = 'mcp.resource.error_code';
@@ -106,8 +123,14 @@ export const ATTR_MCP_PROMPT_MESSAGE_COUNT = 'mcp.prompt.message_count';
 /** Wall-clock execution duration of the prompt's `generate` function in milliseconds. */
 export const ATTR_MCP_PROMPT_DURATION_MS = 'mcp.prompt.duration_ms';
 
-/** Whether the prompt generate function completed successfully. */
+/**
+ * Whether the prompt generate function completed successfully. A round that ended in
+ * `input_required` counts as `true`; see `mcp.prompt.input_required`.
+ */
 export const ATTR_MCP_PROMPT_SUCCESS = 'mcp.prompt.success';
+
+/** Whether generate ended this round by requesting more input rather than a final result. */
+export const ATTR_MCP_PROMPT_INPUT_REQUIRED = 'mcp.prompt.input_required';
 
 /** JSON-RPC error code from the thrown error, present when `mcp.prompt.success` is `false`. */
 export const ATTR_MCP_PROMPT_ERROR_CODE = 'mcp.prompt.error_code';

@@ -6,6 +6,7 @@
 import { SpanStatusCode, trace } from '@opentelemetry/api';
 import { afterEach, beforeEach, describe, expect, it, type MockInstance, vi } from 'vitest';
 
+import { InputRequiredSignal } from '../../../../src/mcp-server/inputRequired.js';
 import { JsonRpcErrorCode, McpError } from '../../../../src/types-global/errors.js';
 import { logger } from '../../../../src/utils/internal/logger.js';
 import {
@@ -826,5 +827,103 @@ describe('measurePromptGeneration', () => {
       'mcp.prompt.name': 'numeric-failure',
       'mcp.prompt.error_category': 'server',
     });
+  });
+});
+
+describe('input-required rounds are not failures', () => {
+  const span = {
+    setAttributes: vi.fn(),
+    setAttribute: vi.fn(),
+    setStatus: vi.fn(),
+    recordException: vi.fn(),
+    end: vi.fn(),
+  };
+  const tracer = {
+    startActiveSpan: vi.fn(async (_name, callback) => callback(span as never)),
+  };
+  let tracerSpy: MockInstance;
+  let infoSpy: MockInstance;
+  let errorSpy: MockInstance;
+
+  const signal = new InputRequiredSignal({
+    type: 'input_required',
+    requests: [],
+  } as never);
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    tracerSpy = vi.spyOn(trace, 'getTracer').mockReturnValue(tracer as never);
+    infoSpy = vi.spyOn(logger, 'info').mockImplementation(() => {});
+    errorSpy = vi.spyOn(logger, 'error').mockImplementation(() => {});
+  });
+
+  afterEach(() => {
+    tracerSpy.mockRestore();
+    infoSpy.mockRestore();
+    errorSpy.mockRestore();
+  });
+
+  const throwSignal = async (): Promise<never> => {
+    throw signal;
+  };
+
+  const lastMetrics = (spy: MockInstance): Record<string, unknown> => {
+    const call = spy.mock.calls.at(-1);
+    if (!call) throw new Error('logger was not called');
+    return (call[1] as { extra: { metrics: Record<string, unknown> } }).extra.metrics;
+  };
+
+  it('leaves tool failure telemetry untouched', async () => {
+    await expect(
+      measureToolExecution(
+        throwSignal,
+        { toolName: 'mrt-tool', requestId: 'req-i1', timestamp: new Date().toISOString() },
+        { query: 'x' },
+      ),
+    ).rejects.toBe(signal);
+
+    expect(span.recordException).not.toHaveBeenCalled();
+    expect(span.setStatus).toHaveBeenCalledWith({ code: SpanStatusCode.OK });
+    expect(span.setAttribute).toHaveBeenCalledWith('mcp.tool.input_required', true);
+    expect(span.setAttribute).not.toHaveBeenCalledWith('mcp.tool.error_code', expect.anything());
+    expect(mockErrorCounterAdd).not.toHaveBeenCalled();
+
+    const metrics = lastMetrics(infoSpy);
+    expect(metrics.isSuccess).toBe(true);
+    expect(metrics.inputRequired).toBe(true);
+    expect(metrics.errorCode).toBeUndefined();
+  });
+
+  it('leaves resource failure telemetry untouched', async () => {
+    await expect(
+      measureResourceExecution(
+        throwSignal,
+        { resourceName: 'mrt-res', requestId: 'req-i2', timestamp: new Date().toISOString() },
+        { uri: 'test://doc/1', mimeType: 'application/json' },
+      ),
+    ).rejects.toBe(signal);
+
+    expect(span.recordException).not.toHaveBeenCalled();
+    expect(span.setStatus).toHaveBeenCalledWith({ code: SpanStatusCode.OK });
+    expect(span.setAttribute).toHaveBeenCalledWith('mcp.resource.input_required', true);
+    expect(mockErrorCounterAdd).not.toHaveBeenCalled();
+    expect(lastMetrics(infoSpy).inputRequired).toBe(true);
+  });
+
+  it('leaves prompt failure telemetry untouched, and logs at info', async () => {
+    await expect(
+      measurePromptGeneration(
+        throwSignal,
+        { promptName: 'mrt-prompt', requestId: 'req-i3', timestamp: new Date().toISOString() },
+        { name: 'x' },
+      ),
+    ).rejects.toBe(signal);
+
+    expect(span.recordException).not.toHaveBeenCalled();
+    expect(span.setStatus).toHaveBeenCalledWith({ code: SpanStatusCode.OK });
+    expect(span.setAttribute).toHaveBeenCalledWith('mcp.prompt.input_required', true);
+    expect(mockErrorCounterAdd).not.toHaveBeenCalled();
+    expect(errorSpy).not.toHaveBeenCalled();
+    expect(lastMetrics(infoSpy).inputRequired).toBe(true);
   });
 });

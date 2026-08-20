@@ -9,6 +9,7 @@
 import { SpanStatusCode, trace } from '@opentelemetry/api';
 
 import { config } from '@/config/index.js';
+import { isInputRequiredSignal } from '@/mcp-server/inputRequired.js';
 import { McpError } from '@/types-global/errors.js';
 import { type ErrorCategory, getErrorCategory } from '@/utils/internal/error-handler/mappings.js';
 import { logger } from '@/utils/internal/logger.js';
@@ -21,12 +22,14 @@ import {
   ATTR_MCP_PROMPT_ERROR_CATEGORY,
   ATTR_MCP_PROMPT_ERROR_CODE,
   ATTR_MCP_PROMPT_INPUT_BYTES,
+  ATTR_MCP_PROMPT_INPUT_REQUIRED,
   ATTR_MCP_PROMPT_MESSAGE_COUNT,
   ATTR_MCP_PROMPT_NAME,
   ATTR_MCP_PROMPT_OUTPUT_BYTES,
   ATTR_MCP_PROMPT_SUCCESS,
   ATTR_MCP_RESOURCE_DURATION_MS,
   ATTR_MCP_RESOURCE_ERROR_CODE,
+  ATTR_MCP_RESOURCE_INPUT_REQUIRED,
   ATTR_MCP_RESOURCE_MIME_TYPE,
   ATTR_MCP_RESOURCE_NAME,
   ATTR_MCP_RESOURCE_SIZE_BYTES,
@@ -38,6 +41,7 @@ import {
   ATTR_MCP_TOOL_ERROR_CATEGORY,
   ATTR_MCP_TOOL_ERROR_CODE,
   ATTR_MCP_TOOL_INPUT_BYTES,
+  ATTR_MCP_TOOL_INPUT_REQUIRED,
   ATTR_MCP_TOOL_NAME,
   ATTR_MCP_TOOL_OUTPUT_BYTES,
   ATTR_MCP_TOOL_PARTIAL_SUCCESS,
@@ -264,6 +268,7 @@ export async function measureToolExecution<T>(
     });
 
     let ok = false;
+    let inputRequired = false;
     let errorCode: string | undefined;
     let errorCategory: ErrorCategory | undefined;
     let outputBytes = 0;
@@ -301,7 +306,20 @@ export async function measureToolExecution<T>(
         }
       }
       return result;
+      // `ctx.requestInput(...)` unwinds the handler as a thrown signal, but the
+      // round ended in `input_required` — protocol control flow, not a failure.
+      // Recording it as one would mark the span ERROR, increment the error
+      // counter, and log `isSuccess: false` for every legitimate
+      // multi-round-trip request.
     } catch (err) {
+      if (isInputRequiredSignal(err)) {
+        ok = true;
+        inputRequired = true;
+        span.setStatus({ code: SpanStatusCode.OK });
+        span.setAttribute(ATTR_MCP_TOOL_INPUT_REQUIRED, true);
+        throw err;
+      }
+
       if (err instanceof McpError) {
         errorCode = String(err.code);
         errorCategory = getErrorCategory(err.code);
@@ -335,7 +353,7 @@ export async function measureToolExecution<T>(
       m.toolCallCounter.add(1, metricAttrs);
       m.toolCallDuration.record(durationMs, metricAttrs);
       m.toolInputBytes.record(inputBytes, toolAttrs);
-      if (ok) m.toolOutputBytes.record(outputBytes, toolAttrs);
+      if (ok && !inputRequired) m.toolOutputBytes.record(outputBytes, toolAttrs);
       if (!ok) {
         m.toolCallErrors.add(1, {
           ...toolAttrs,
@@ -359,6 +377,7 @@ export async function measureToolExecution<T>(
             errorCode,
             inputBytes,
             outputBytes,
+            ...(inputRequired && { inputRequired }),
             ...(partialSuccess && { partialSuccess, batchSucceeded, batchFailed }),
           },
         }),
@@ -436,6 +455,7 @@ export async function measureResourceExecution<T>(
     });
 
     let ok = false;
+    let inputRequired = false;
     let errorCode: string | undefined;
     let outputBytes = 0;
 
@@ -446,7 +466,20 @@ export async function measureResourceExecution<T>(
       span.setStatus({ code: SpanStatusCode.OK });
       span.setAttribute(ATTR_MCP_RESOURCE_SIZE_BYTES, outputBytes);
       return result;
+      // `ctx.requestInput(...)` unwinds the handler as a thrown signal, but the
+      // round ended in `input_required` — protocol control flow, not a failure.
+      // Recording it as one would mark the span ERROR, increment the error
+      // counter, and log `isSuccess: false` for every legitimate
+      // multi-round-trip request.
     } catch (err) {
+      if (isInputRequiredSignal(err)) {
+        ok = true;
+        inputRequired = true;
+        span.setStatus({ code: SpanStatusCode.OK });
+        span.setAttribute(ATTR_MCP_RESOURCE_INPUT_REQUIRED, true);
+        throw err;
+      }
+
       if (err instanceof McpError) errorCode = String(err.code);
       else if (err instanceof Error) errorCode = 'UNHANDLED_ERROR';
       else errorCode = 'UNKNOWN_ERROR';
@@ -477,7 +510,7 @@ export async function measureResourceExecution<T>(
       const resourceAttrs = { [ATTR_MCP_RESOURCE_NAME]: resourceName };
       m.resourceReadCounter.add(1, metricAttrs);
       m.resourceReadDuration.record(durationMs, metricAttrs);
-      if (ok) m.resourceOutputBytes.record(outputBytes, resourceAttrs);
+      if (ok && !inputRequired) m.resourceOutputBytes.record(outputBytes, resourceAttrs);
       if (!ok) m.resourceReadErrors.add(1, resourceAttrs);
 
       logger.info(
@@ -488,6 +521,7 @@ export async function measureResourceExecution<T>(
             isSuccess: ok,
             errorCode,
             outputBytes,
+            ...(inputRequired && { inputRequired }),
             uri: meta.uri,
             mimeType: meta.mimeType,
           },
@@ -585,6 +619,7 @@ export async function measurePromptGeneration<T>(
     });
 
     let ok = false;
+    let inputRequired = false;
     let errorCode: string | undefined;
     let errorCategory: ErrorCategory | undefined;
     let outputBytes = 0;
@@ -600,7 +635,20 @@ export async function measurePromptGeneration<T>(
       span.setAttribute(ATTR_MCP_PROMPT_OUTPUT_BYTES, outputBytes);
       span.setAttribute(ATTR_MCP_PROMPT_MESSAGE_COUNT, messageCount);
       return result;
+      // `ctx.requestInput(...)` unwinds the handler as a thrown signal, but the
+      // round ended in `input_required` — protocol control flow, not a failure.
+      // Recording it as one would mark the span ERROR, increment the error
+      // counter, and log `isSuccess: false` for every legitimate
+      // multi-round-trip request.
     } catch (err) {
+      if (isInputRequiredSignal(err)) {
+        ok = true;
+        inputRequired = true;
+        span.setStatus({ code: SpanStatusCode.OK });
+        span.setAttribute(ATTR_MCP_PROMPT_INPUT_REQUIRED, true);
+        throw err;
+      }
+
       if (err instanceof McpError) {
         errorCode = String(err.code);
         errorCategory = getErrorCategory(err.code);
@@ -633,7 +681,7 @@ export async function measurePromptGeneration<T>(
       m.promptGenCounter.add(1, metricAttrs);
       m.promptGenDuration.record(durationMs, metricAttrs);
       m.promptInputBytes.record(inputBytes, promptAttrs);
-      if (ok) {
+      if (ok && !inputRequired) {
         m.promptOutputBytes.record(outputBytes, promptAttrs);
         m.promptMessageCount.record(messageCount, promptAttrs);
       }
@@ -659,6 +707,7 @@ export async function measurePromptGeneration<T>(
             inputBytes,
             outputBytes,
             messageCount,
+            ...(inputRequired && { inputRequired }),
           },
         }),
       );
