@@ -4,7 +4,7 @@ description: >
   Scaffold a new MCP tool definition. Use when the user asks to add a tool, create a new tool, or implement a new capability for the server.
 metadata:
   author: cyanheads
-  version: "2.17"
+  version: "2.18"
   audience: external
   type: reference
 ---
@@ -254,6 +254,10 @@ The reason is client-side validation. A failing tool returns `structuredContent:
 The root stays `type: 'object'` (a discriminated union would emit `anyOf` with no `type`, which the 2025-era legacy projection rewrites — breaking the success path to fix the error path). The `required` list that the object form drops is recovered by an `anyOf` refinement in schema metadata: a result must satisfy either the success branch (success fields present, no `error`) or the failure branch (`error` present).
 
 Practical consequence: **do not read the advertised schema as the contract your handler must satisfy.** `output` is still the contract. The widened form is emission only.
+
+`data.reason` inside that envelope stays an unconstrained string. An `errors[]` contract covers what the *handler* throws, but a service it calls can raise its own reason (the SQL gate's `denied_function`, a parser's `yaml_parse_failed`), and that reaches the wire verbatim — an enum of the declared reasons would reject precisely those envelopes, recreating the `-32602` the widening exists to prevent. The declared reasons are emitted as `examples` and spelled out in the description instead.
+
+**`error` is a reserved output field name.** `tool()` throws if `output` or `enrichment` declares one: on the wire a failure *is* `structuredContent.error`, so a success payload using the same key cannot be told apart from a failure. Rename it (`errorText`, `failureDetail`).
 
 ## Tool Response Design
 
