@@ -183,10 +183,14 @@ export function effectiveOutputSchema(def: AnyToolDefinition): ZodObject<ZodRawS
  * errors carry no `data` at all. A strict declaration would recreate on the
  * error path the very `-32602` this envelope exists to prevent (#241).
  *
- * When the definition declares an `errors[]` contract, `data.reason` is narrowed
- * to that tool's own reason literals, with each entry's `when` carried in the
- * description — the schema then documents which failures this specific tool can
- * actually produce.
+ * `data.reason` stays `type: 'string'` even when the definition declares an
+ * `errors[]` contract. The contract covers what the *handler* throws; a service
+ * it calls can throw its own `data.reason` (the SQL gate's `denied_function`,
+ * the parser's `yaml_parse_failed`), which reaches the wire verbatim. Narrowing
+ * to an enum would make a strict client reject exactly those envelopes with
+ * `-32602` — the failure #241 exists to prevent. The declared reasons are
+ * carried as `examples` plus their `when` text in the description instead:
+ * documented, not enforced.
  */
 function toolErrorEnvelopeSchema(def: AnyToolDefinition): ZodObject<ZodRawShape> {
   const contract = def.errors ?? [];
@@ -194,12 +198,13 @@ function toolErrorEnvelopeSchema(def: AnyToolDefinition): ZodObject<ZodRawShape>
   const reasonSchema =
     reasons.length > 0
       ? z
-          .enum(reasons as [string, ...string[]])
+          .string()
           .describe(
-            `Machine-readable failure mode. ${contract
+            `Machine-readable failure mode. Declared by this tool: ${contract
               .map((entry) => `\`${entry.reason}\`: ${entry.when}`)
-              .join(' ')}`,
+              .join(' ')} Other values are possible when a failure originates below the handler.`,
           )
+          .meta({ examples: reasons })
       : z.string().describe('Machine-readable failure mode.');
 
   return z.looseObject({

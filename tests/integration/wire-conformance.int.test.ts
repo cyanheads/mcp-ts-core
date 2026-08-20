@@ -21,7 +21,7 @@ import { tool } from '@/mcp-server/tools/utils/toolDefinition.js';
 import { MODERN_PROTOCOL_REVISION } from '@/mcp-server/types.js';
 import { StorageService } from '@/storage/core/StorageService.js';
 import { InMemoryProvider } from '@/storage/providers/inMemory/inMemoryProvider.js';
-import { JsonRpcErrorCode } from '@/types-global/errors.js';
+import { JsonRpcErrorCode, McpError } from '@/types-global/errors.js';
 import { logger } from '@/utils/internal/logger.js';
 
 const searchTool = tool('wire_search', {
@@ -44,6 +44,13 @@ const searchTool = tool('wire_search', {
   ],
   handler(input, ctx) {
     if (input.query === 'boom') throw ctx.fail('index_missing');
+    // Stands in for a service throwing below the handler — the SQL gate, a
+    // parser — with a `data.reason` the tool's own contract never declared.
+    if (input.query === 'gate') {
+      throw new McpError(JsonRpcErrorCode.ValidationError, 'Function not permitted.', {
+        reason: 'denied_function',
+      });
+    }
     ctx.log.info('searching', { query: input.query });
     return { hits: [input.query], total: 1 };
   },
@@ -197,18 +204,36 @@ describe('Phase 1 wire conformance', () => {
       ]);
     });
 
-    it('narrows data.reason to the definition’s declared reasons', async () => {
+    it('documents declared reasons on data.reason without constraining it', async () => {
       const client = await session();
       const { tools } = await client.listTools();
       const reason = (
         (tools[0] as { outputSchema?: Record<string, unknown> }).outputSchema as {
           properties: {
-            error: { properties: { data: { properties: { reason: { enum?: string[] } } } } };
+            error: {
+              properties: {
+                data: {
+                  properties: {
+                    reason: {
+                      description?: string;
+                      enum?: string[];
+                      examples?: string[];
+                      type?: string;
+                    };
+                  };
+                };
+              };
+            };
           };
         }
       ).properties.error.properties.data.properties.reason;
 
-      expect(reason.enum).toEqual(['index_missing']);
+      // An enum here would reject every failure raised below the handler —
+      // the `-32602` this widened schema exists to prevent.
+      expect(reason.enum).toBeUndefined();
+      expect(reason.type).toBe('string');
+      expect(reason.examples).toEqual(['index_missing']);
+      expect(reason.description).toContain('index_missing');
     });
 
     it('returns an error envelope that satisfies the advertised schema', async () => {
@@ -223,6 +248,19 @@ describe('Phase 1 wire conformance', () => {
       expect(result.isError).toBe(true);
       expect(result.structuredContent).toMatchObject({
         error: { code: JsonRpcErrorCode.NotFound, data: { reason: 'index_missing' } },
+      });
+    });
+
+    it('accepts a reason raised below the handler', async () => {
+      const client = await session();
+      const result = await client.callTool({
+        name: 'wire_search',
+        arguments: { query: 'gate' },
+      });
+
+      expect(result.isError).toBe(true);
+      expect(result.structuredContent).toMatchObject({
+        error: { code: JsonRpcErrorCode.ValidationError, data: { reason: 'denied_function' } },
       });
     });
   });

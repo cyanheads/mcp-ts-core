@@ -1099,13 +1099,33 @@ describe('createToolHandler', () => {
       expect(error.required).not.toContain('data');
     });
 
-    it("narrows data.reason to the definition's declared reason literals", () => {
+    it("documents the definition's declared reasons without constraining data.reason", () => {
       const reason = emitted(searchTool as AnyToolDefinition).properties.error.properties.data
         .properties.reason;
 
-      expect(reason.enum).toEqual(['no_match', 'rate_limited']);
+      // Annotations, not a constraint. An enum would reject every failure a
+      // service raises below the handler with its own `data.reason` — the very
+      // `-32602` the widened schema exists to prevent.
+      expect(reason.enum).toBeUndefined();
+      expect(reason.type).toBe('string');
+      expect(reason.examples).toEqual(['no_match', 'rate_limited']);
       expect(reason.description).toContain('no_match');
       expect(reason.description).toContain('No items match the query');
+    });
+
+    it('validates an envelope whose reason came from below the handler', () => {
+      const validate = new AjvJsonSchemaValidator().getValidator(
+        emitted(searchTool as AnyToolDefinition),
+      );
+      // What the SQL gate, the YAML parser, or any other service throws: a
+      // `data.reason` the tool's own `errors[]` never declared.
+      const envelope = buildToolErrorResult(
+        JsonRpcErrorCode.ValidationError,
+        'Function not permitted.',
+        { reason: 'denied_function' },
+      ).structuredContent;
+
+      expect(validate(envelope).valid).toBe(true);
     });
 
     it('leaves data.reason an open string when no contract is declared', () => {
