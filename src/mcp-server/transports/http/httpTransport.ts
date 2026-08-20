@@ -27,6 +27,7 @@ import {
   isJsonContentType,
   isLegacyRequest,
   type McpHttpHandler,
+  type ServerEventBus,
   WebStandardStreamableHTTPServerTransport,
 } from '@modelcontextprotocol/server';
 import { Hono } from 'hono';
@@ -37,6 +38,7 @@ import { createAuthStrategy } from '@/mcp-server/transports/auth/authFactory.js'
 import { createAuthMiddleware } from '@/mcp-server/transports/auth/authMiddleware.js';
 import { authContext } from '@/mcp-server/transports/auth/lib/authContext.js';
 import type { AuthInfo } from '@/mcp-server/transports/auth/lib/authTypes.js';
+import { createBoundedEventStore } from '@/mcp-server/transports/http/eventStore.js';
 import { httpErrorHandler } from '@/mcp-server/transports/http/httpErrorHandler.js';
 import type { HonoNodeBindings } from '@/mcp-server/transports/http/httpTypes.js';
 import { createLandingPageHandler } from '@/mcp-server/transports/http/landing-page/index.js';
@@ -119,12 +121,18 @@ async function readBodyWithinLimit(request: Request, maxBytes: number): Promise<
  * @template TBindings - The Hono binding type (must extend object, defaults to HonoNodeBindings for Node.js)
  * @param mcpServer - The MCP server instance
  * @param parentContext - Parent request context for logging
+ * @param bus - Change-event bus the modern leg's `subscriptions/listen` streams
+ *   subscribe to. Pass the one the app publishes on (`ComposedApp.bus`), or a
+ *   background emission reaches a different bus than the streams listen to and
+ *   is silently dropped (#193). Omitted, the handler creates its own — fine for
+ *   a test harness that never emits out of request.
  * @returns Configured Hono application with the specified binding type
  */
 export async function createHttpApp<TBindings extends object = HonoNodeBindings>(
   serverFactory: FrameworkServerFactory,
   parentContext: RequestContext,
   manifest: ServerManifest,
+  bus?: ServerEventBus,
 ): Promise<{
   app: Hono<{ Bindings: TBindings }>;
   /** Tears down the modern leg's in-flight exchanges and per-request instances. */
@@ -519,6 +527,7 @@ export async function createHttpApp<TBindings extends object = HonoNodeBindings>
   // 2025-era traffic per request (`legacy: 'stateless'`, the default); in
   // stateful mode it is strict and the sessionful arm below owns 2025.
   const handler = createMcpHandler(serverFactory, {
+    ...(bus && { bus }),
     ...(isStateful && { legacy: 'reject' as const }),
     onerror: (error) => {
       logger.debug(`MCP handler reported: ${error.message}`, transportContext);
@@ -567,13 +576,30 @@ export async function createHttpApp<TBindings extends object = HonoNodeBindings>
       ...(authInfo && { authInfo }),
       requestInfo: request,
     });
+    // One bounded event store per session, so a `Last-Event-ID` reconnect
+    // replays what the dropped stream missed and the buffer is released with
+    // the session that owns it (#215). Stateless serving and the 2026-07-28
+    // era have no session to resume, so neither reaches this path.
+    const eventStore = config.mcpHttpResumability
+      ? createBoundedEventStore({
+          maxEvents: config.mcpHttpResumabilityMaxEvents,
+          ttlMs: config.mcpHttpResumabilityTtlMs,
+        })
+      : undefined;
+
     const transport = new WebStandardStreamableHTTPServerTransport({
       sessionIdGenerator: generateSecureSessionId,
+      ...(eventStore && { eventStore }),
       onsessioninitialized: (sessionId) => {
         store.register(sessionId, { server, transport }, identity);
         logger.debug('Session initialized', { ...requestContext, sessionId });
       },
-      onsessionclosed: (sessionId) => store.terminate(sessionId),
+      onsessionclosed: (sessionId) => {
+        // Release the replay buffer at the DELETE itself. Every other way a
+        // session ends drops the store along with the transport holding it.
+        eventStore?.clear();
+        return store.terminate(sessionId);
+      },
     });
 
     await server.connect(transport);

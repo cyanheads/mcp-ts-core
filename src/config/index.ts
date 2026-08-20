@@ -77,13 +77,14 @@ const emptyStringAsUndefined = (val: unknown) => {
  * `Boolean("false") === true` makes a flag impossible to turn off through the
  * environment. Empty string and unset both fall through to the baked `false`
  * default; real booleans pass through for runtimes that inject typed env vars
- * (Cloudflare Workers `[vars]`). Field sites use `envBoolean` directly — the
- * default lives under the preprocess so empty strings resolve to it.
+ * (Cloudflare Workers `[vars]`). The default lives under the preprocess so
+ * empty strings resolve to it — field sites use `envBoolean` directly, or
+ * `envBooleanDefaulting(true)` for a flag that is on until switched off.
  */
-const envBoolean = z.preprocess(
-  emptyStringAsUndefined,
-  z.union([z.boolean(), z.stringbool()]).default(false),
-);
+const envBooleanDefaulting = (fallback: boolean) =>
+  z.preprocess(emptyStringAsUndefined, z.union([z.boolean(), z.stringbool()]).default(fallback));
+
+const envBoolean = envBooleanDefaulting(false);
 
 // --- Schema Definition ---
 const ConfigSchema = z
@@ -195,6 +196,19 @@ const ConfigSchema = z
     mcpHttpMaxPortRetries: z.coerce.number().default(15),
     mcpHttpPortRetryDelayMs: z.coerce.number().default(50),
     mcpStatefulSessionStaleTimeoutMs: z.coerce.number().default(1_800_000),
+    /**
+     * Kill switch for SSE stream replay under stateful HTTP. Replay is on by
+     * default there — selecting a session mode is the opt-in, and a session
+     * that survives a dropped connection but loses the in-flight stream is
+     * half a promise. Set `MCP_HTTP_RESUMABILITY=false` to disable it without
+     * changing session behavior. No effect on stateless mode or on protocol
+     * revision 2026-07-28, neither of which has a session to resume (#215).
+     */
+    mcpHttpResumability: envBooleanDefaulting(true),
+    /** Events retained per session for replay. Oldest are evicted first. */
+    mcpHttpResumabilityMaxEvents: z.coerce.number().int().min(1).default(512),
+    /** How long a retained event stays replayable, in milliseconds. */
+    mcpHttpResumabilityTtlMs: z.coerce.number().int().min(1).default(300_000),
     mcpHeartbeatIntervalMs: z.coerce.number().min(0).default(0),
     mcpHeartbeatMissThreshold: z.coerce.number().min(1).default(3),
     /**
@@ -481,6 +495,9 @@ const parseConfig = (envOverrides?: Record<string, string | undefined>) => {
     mcpHttpMaxPortRetries: env.MCP_HTTP_MAX_PORT_RETRIES,
     mcpHttpPortRetryDelayMs: env.MCP_HTTP_PORT_RETRY_DELAY_MS,
     mcpStatefulSessionStaleTimeoutMs: env.MCP_STATEFUL_SESSION_STALE_TIMEOUT_MS,
+    mcpHttpResumability: env.MCP_HTTP_RESUMABILITY,
+    mcpHttpResumabilityMaxEvents: env.MCP_HTTP_RESUMABILITY_MAX_EVENTS,
+    mcpHttpResumabilityTtlMs: env.MCP_HTTP_RESUMABILITY_TTL_MS,
     mcpHeartbeatIntervalMs: env.MCP_HEARTBEAT_INTERVAL_MS,
     mcpHeartbeatMissThreshold: env.MCP_HEARTBEAT_MISS_THRESHOLD,
     mcpGcPressureIntervalMs: env.MCP_GC_PRESSURE_INTERVAL_MS,

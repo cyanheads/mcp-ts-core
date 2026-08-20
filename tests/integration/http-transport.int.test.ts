@@ -445,3 +445,153 @@ describe('HTTP Transport Integration', () => {
     expect(exposedHeaders.toLowerCase()).toContain('mcp-session-id');
   });
 });
+
+// ---------------------------------------------------------------------------
+// SSE resumability under stateful HTTP (#215)
+// ---------------------------------------------------------------------------
+
+describe('stateful SSE resumability (#215)', () => {
+  const realFactory = () =>
+    vi.fn(
+      async (requestContext: McpRequestContext) =>
+        new McpServer(
+          { name: `resumability-test-${requestContext.era}`, version: '0.0.0' },
+          { capabilities: { tools: { listChanged: true } } },
+        ),
+    );
+
+  const mockContext: RequestContext = {
+    requestId: 'resumability-req-id',
+    timestamp: new Date().toISOString(),
+    operation: 'resumability-test',
+  };
+
+  const initialize = (id: number) => ({
+    jsonrpc: '2.0',
+    id,
+    method: 'initialize',
+    params: {
+      protocolVersion: '2025-06-18',
+      capabilities: {},
+      clientInfo: { name: 'test', version: '1.0.0' },
+    },
+  });
+
+  const post = (body: unknown, headers: Record<string, string> = {}) =>
+    new Request('http://localhost/mcp', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Accept: 'application/json, text/event-stream',
+        'MCP-Protocol-Version': '2025-06-18',
+        ...headers,
+      },
+      body: JSON.stringify(body),
+    });
+
+  afterEach(() => {
+    (config as any).mcpSessionMode = 'stateless';
+    (config as any).mcpHttpResumability = true;
+  });
+
+  /** The `id:` lines the SDK stamps on SSE frames — present only with a store. */
+  const eventIds = (body: string): string[] =>
+    body
+      .split('\n')
+      .filter((line) => line.startsWith('id:'))
+      .map((line) => line.slice(3).trim());
+
+  test('stamps SSE frames with event IDs so a Last-Event-ID reconnect can resume', async () => {
+    (config as any).mcpSessionMode = 'stateful';
+    (config as any).mcpHttpResumability = true;
+    (config as any).mcpHttpResumabilityMaxEvents = 512;
+    (config as any).mcpHttpResumabilityTtlMs = 300_000;
+
+    const { app, close } = await createHttpApp(realFactory(), mockContext, defaultMeta);
+    const res = await app.request(post(initialize(1)));
+    const body = await res.text();
+
+    expect(res.status).toBe(200);
+    expect(res.headers.get('mcp-session-id')).toBeTruthy();
+    // Without an event store the transport has no ID to stamp, so replay is
+    // impossible for a client that reconnects mid-stream.
+    expect(eventIds(body).length).toBeGreaterThan(0);
+
+    await close();
+  });
+
+  test('serves a Last-Event-ID reconnect off the session store', async () => {
+    (config as any).mcpSessionMode = 'stateful';
+    (config as any).mcpHttpResumability = true;
+
+    const { app, close } = await createHttpApp(realFactory(), mockContext, defaultMeta);
+    const init = await app.request(post(initialize(1)));
+    const sessionId = init.headers.get('mcp-session-id') ?? '';
+    const anchor = eventIds(await init.text())[0] ?? '';
+
+    expect(anchor).not.toBe('');
+
+    const reconnect = (lastEventId: string) =>
+      app.request(
+        new Request('http://localhost/mcp', {
+          method: 'GET',
+          headers: {
+            Accept: 'text/event-stream',
+            'MCP-Protocol-Version': '2025-06-18',
+            'mcp-session-id': sessionId,
+            'last-event-id': lastEventId,
+          },
+        }),
+      );
+
+    // A live anchor resumes its own stream rather than opening a fresh one.
+    const resumed = await reconnect(anchor);
+    expect(resumed.status).toBe(200);
+    expect(resumed.headers.get('content-type')).toContain('text/event-stream');
+    await resumed.body?.cancel();
+
+    // An anchor the store never held — aged out, or a fabricated ID — is
+    // rejected outright, so the client reconnects clean instead of silently
+    // resuming from a gap it cannot see.
+    const stale = await reconnect('s-does-not-exist_1');
+    expect(stale.status).toBe(400);
+
+    await close();
+  });
+
+  test('MCP_HTTP_RESUMABILITY=false disables replay without changing session behavior', async () => {
+    (config as any).mcpSessionMode = 'stateful';
+    (config as any).mcpHttpResumability = false;
+
+    const { app, close, sessionStore } = await createHttpApp(
+      realFactory(),
+      mockContext,
+      defaultMeta,
+    );
+    const res = await app.request(post(initialize(1)));
+    const body = await res.text();
+
+    expect(res.status).toBe(200);
+    // The session is still minted and tracked — only replay is off.
+    expect(res.headers.get('mcp-session-id')).toBeTruthy();
+    expect(sessionStore?.getSessionCount()).toBe(1);
+    expect(eventIds(body)).toEqual([]);
+
+    await close();
+  });
+
+  test('stateless serving stamps no event IDs — there is no session to resume', async () => {
+    const { app, close, sessionStore } = await createHttpApp(
+      realFactory(),
+      mockContext,
+      defaultMeta,
+    );
+    const res = await app.request(post(initialize(1)));
+    const body = await res.text();
+
+    expect(sessionStore).toBeNull();
+    expect(eventIds(body)).toEqual([]);
+
+    await close();
+  });
+});
