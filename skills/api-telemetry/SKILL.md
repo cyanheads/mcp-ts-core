@@ -4,14 +4,14 @@ description: >
   Catalog of OpenTelemetry instrumentation built into framework `@cyanheads/mcp-ts-core` — spans, metrics, completion logs, env config, runtime caveats, custom instrumentation patterns, and cardinality rules. Use when enabling OTel export, adding custom spans or metrics in services, debugging missing telemetry, looking up attribute names, or deciding what's safe to put on a metric attribute vs. a span.
 metadata:
   author: cyanheads
-  version: "1.2"
+  version: "1.3"
   audience: external
   type: reference
 ---
 
 ## Overview
 
-The framework auto-instruments every tool, resource, prompt, storage, LLM, speech, and graph call — each gets its own span and the standard counters/histograms. HTTP server requests pick up spans from `HttpInstrumentation` (all Node.js HTTP traffic, skips `/healthz`) plus `httpInstrumentationMiddleware` from `@hono/otel` on the MCP HTTP endpoint when installed (optional Tier 3 peer — `bun add @hono/otel`). On Bun, `HttpInstrumentation` silently no-ops and `@hono/otel` is the only HTTP coverage. Auth checks, session lifecycle, and task lifecycle are tracked as **metrics only** — auth decorates the active HTTP span with attributes, sessions and tasks emit counters.
+The framework auto-instruments every tool, resource, prompt, storage, LLM, speech, and graph call — each gets its own span and the standard counters/histograms. HTTP server requests pick up spans from `HttpInstrumentation` (all Node.js HTTP traffic, skips `/healthz`) plus `httpInstrumentationMiddleware` from `@hono/otel` on the MCP HTTP endpoint when installed (optional Tier 3 peer — `bun add @hono/otel`). On Bun, `HttpInstrumentation` silently no-ops and `@hono/otel` is the only HTTP coverage. Auth checks and session lifecycle are tracked as **metrics only** — auth decorates the active HTTP span with attributes, sessions emit counters.
 
 `requestId`, `traceId`, and `tenantId` correlate automatically across spans, metrics, and logs. Pino logs get `trace_id`/`span_id` injected when a span is active.
 
@@ -118,7 +118,7 @@ All custom metrics are namespaced `mcp.*` (or `process.*` / `http.client.*` wher
 | `mcp.graph.duration` | histogram | `ms` | `mcp.graph.operation`, `mcp.graph.success` |
 | `mcp.graph.errors` | counter | `{errors}` | `mcp.graph.operation` |
 
-### Transport, auth, sessions, tasks
+### Transport, auth, sessions
 
 | Metric | Type | Unit | Attributes |
 |:-------|:-----|:-----|:-----------|
@@ -128,12 +128,6 @@ All custom metrics are namespaced `mcp.*` (or `process.*` / `http.client.*` wher
 | `mcp.session.duration` | histogram | `s` | — |
 | `mcp.sessions.active` | observable gauge | `{sessions}` | — |
 | `mcp.heartbeat.failures` | counter | `{failures}` | `mcp.connection.transport` (`stdio`/`http`) |
-| `mcp.http.close_failures` | counter | `{failures}` | `surface` (`transport`/`server`), `trigger` (`success`/`error`/`sse-abort`) — per-request close threw or timed out |
-| `mcp.http.per_request.created` | counter | `{instances}` | `kind` (`server`/`transport`) — per-request `McpServer` and `McpSessionTransport` instances created |
-| `mcp.http.per_request.finalized` | counter | `{instances}` | `kind` (`server`/`transport`) — per-request instances reclaimed by GC; persistent gap vs `created` indicates a leak |
-| `mcp.tasks.created` | counter | `{tasks}` | `mcp.task.store_type` (`in-memory`/`storage`) |
-| `mcp.tasks.status_changes` | counter | `{transitions}` | `mcp.task.status`, `mcp.task.store_type` |
-| `mcp.tasks.active` | observable gauge | `{tasks}` | — (in-memory store only) |
 
 ### Errors, rate limits, HTTP client
 

@@ -4,7 +4,7 @@ description: >
   Testing patterns for MCP tool/resource handlers using `createMockContext` and Vitest. Covers mock context options, handler testing, McpError assertions, format testing, Vitest config setup, and test isolation conventions.
 metadata:
   author: cyanheads
-  version: "1.8"
+  version: "1.9"
   audience: external
   type: reference
 ---
@@ -134,8 +134,8 @@ import { createMockContext } from '@cyanheads/mcp-ts-core/testing';
 createMockContext()                                           // working ctx.state on tenant 'default'
 createMockContext({ tenantId: 'test-tenant' })               // explicit tenant scope for ctx.state
 createMockContext({ errors: myTool.errors })                 // attaches typed ctx.fail keyed by the contract reasons
-createMockContext({ elicit: vi.fn().mockResolvedValue(...) }) // with elicitation
-createMockContext({ progress: true })                        // with task progress (ctx.progress populated)
+createMockContext({ inputResponses: { confirm: { action: 'accept', content: { ok: true } } } }) // second round of a multi-round-trip handler
+createMockContext({ requestState: 'opaque-state' })          // seeds ctx.inputs.state()
 createMockContext({ requestId: 'my-id' })                    // override request ID (default: 'test-request-id')
 createMockContext({ notifyResourceListChanged: () => {} })   // with resource-list change notifier
 createMockContext({ notifyResourceUpdated: (_uri) => {} })   // with resource update notifier
@@ -149,15 +149,15 @@ createMockContext({ uri: new URL('myscheme://item/123') })   // for resource han
 ```ts
 interface MockContextOptions<TErrors extends readonly ErrorContract[] | undefined> {
   auth?: AuthContext;
-  elicit?: (message: string, schema: z.ZodObject<z.ZodRawShape>) => Promise<ElicitResult>;
   errors?: TErrors | undefined;
+  inputResponses?: InputResponses | Record<string, unknown>;
   notifyPromptListChanged?: () => void;
   notifyResourceListChanged?: () => void;
   notifyResourceUpdated?: (uri: string) => void;
   notifyToolListChanged?: () => void;
-  progress?: boolean;
-  sessionId?: string;
   requestId?: string;
+  requestState?: unknown;
+  sessionId?: string;
   signal?: AbortSignal;
   tenantId?: string;
   uri?: URL;
@@ -166,17 +166,17 @@ interface MockContextOptions<TErrors extends readonly ErrorContract[] | undefine
 
 | Option | Effect |
 |:-------|:-------|
-| _(none)_ | Working `ctx.state` on tenant `'default'`; `ctx.elicit`/`ctx.progress` are `undefined` |
+| _(none)_ | Working `ctx.state` on tenant `'default'`; `ctx.inputs` is empty (first round) |
 | `auth` | Sets `ctx.auth` for scope-checking tests |
-| `elicit` | Assigns a function to `ctx.elicit` for testing elicitation calls |
 | `errors` | Attaches a typed `ctx.fail` against the contract — same wiring the production handler factory uses. Pass `myTool.errors` directly; the return type narrows to `HandlerContext<ReasonOf<…>>`, so the context is assignable to that definition's handler parameter. |
+| `inputResponses` | Seeds `ctx.inputs` with the responses a retried request would carry, keyed by the identifiers the handler's `ctx.requestInput(...)` assigned (see below) |
 | `notifyPromptListChanged` | Assigns `ctx.notifyPromptListChanged` for prompt-list change notification tests |
 | `notifyResourceListChanged` | Assigns `ctx.notifyResourceListChanged` for resource notification tests |
 | `notifyResourceUpdated` | Assigns `ctx.notifyResourceUpdated` for resource update notification tests |
 | `notifyToolListChanged` | Assigns `ctx.notifyToolListChanged` for tool-list change notification tests |
-| `sessionId` | Sets `ctx.sessionId` for handlers that branch on session ID |
-| `progress` | Populates `ctx.progress` with real state-tracking implementation (see below) |
 | `requestId` | Overrides `ctx.requestId` (default: `'test-request-id'`) |
+| `requestState` | Seeds `ctx.inputs.state()` — the opaque state a prior round attached |
+| `sessionId` | Sets `ctx.sessionId` for handlers that branch on session ID |
 | `signal` | Overrides `ctx.signal` — useful for cancellation testing |
 | `tenantId` | Scopes `ctx.state` to a specific tenant. Defaults to `'default'` — the value stdio (and HTTP with `MCP_AUTH_MODE=none`) resolves |
 | `uri` | Sets `ctx.uri` for resource handler testing |
@@ -200,27 +200,53 @@ await expect(ctx.state.set('cache:v1:abc', {})).rejects.toThrow(McpError);
 
 Reach for `createInMemoryStorage()` when a service takes a `StorageService` directly — it builds the same pair.
 
-### Mock progress
+### Mock inputs
 
-When `progress: true`, `ctx.progress` is a real state-tracking object — not `vi.fn()` spies. It maintains internal state accessible via inspection properties:
+`ctx.requestInput` is the real implementation: it throws an `InputRequiredSignal` the production handler factories convert into an `input_required` result. In a unit test the handler is called directly, so that signal surfaces as a thrown value — which is exactly how you assert the first round.
 
 ```ts
-const ctx = createMockContext({ progress: true });
-// ctx.progress is typed as ContextProgress, but the mock exposes internal state:
-const progress = ctx.progress as ContextProgress & {
-  _total: number;
-  _completed: number;
-  _messages: string[];
-};
+import { isInputRequiredSignal } from '@cyanheads/mcp-ts-core';
 
-await ctx.progress!.setTotal(10);
-await ctx.progress!.increment(3);
-await ctx.progress!.update('step message');
-
-expect(progress._total).toBe(10);
-expect(progress._completed).toBe(3);
-expect(progress._messages).toContain('step message');
+it('asks for confirmation on the first round', async () => {
+  const ctx = createMockContext();
+  await expect(myTool.handler(myTool.input.parse({ path: '/tmp/x' }), ctx))
+    .rejects.toSatisfy(isInputRequiredSignal);
+});
 ```
+
+To assert on *what* was requested, catch it and read `error.result` — the `input_required` result the handler factory would have returned:
+
+```ts
+async function requestedInput(input: ToolInput, options: MockContextOptions = {}) {
+  try {
+    await myTool.handler(input, createMockContext(options));
+  } catch (error) {
+    if (isInputRequiredSignal(error)) return error.result;
+    throw error;
+  }
+  throw new Error('Expected the handler to request input.');
+}
+```
+
+`inputResponses` drives the second round. `ctx.inputs.accepted(key, schema)` and `.view(key)` read it with the same helpers production uses, so a wrong response shape fails in the test:
+
+```ts
+it('proceeds once the user accepts', async () => {
+  const ctx = createMockContext({
+    inputResponses: { confirm: { action: 'accept', content: { confirm: true } } },
+  });
+  await expect(myTool.handler(input, ctx)).resolves.toMatchObject({ deleted: '/tmp/x' });
+});
+
+it('stops when the user declines', async () => {
+  const ctx = createMockContext({
+    inputResponses: { confirm: { action: 'decline' } },
+  });
+  await expect(myTool.handler(input, ctx)).rejects.toThrow(McpError);
+});
+```
+
+`ctx.inputs.dropped` is always `[]` on a mock context — the drop only happens in the SDK's wire decoding, so cover it in an integration test rather than a unit one.
 
 ### Mock logger
 
@@ -270,31 +296,6 @@ describe('myTool', () => {
 ```
 
 Parse input through `myTool.input.parse(...)` to validate against the Zod schema and produce the typed input the handler expects. Call `myTool.handler(input, ctx)` directly, not through the MCP SDK or any framework wrapper. Assert on the return value for happy paths; use `.rejects.toThrow()` for error paths. Test `format` separately if the tool defines one — it's a pure function and needs no `ctx`. Verify the rendered text includes the fields the LLM needs, and for projection-style tools, add a case with non-default field selections.
-
----
-
-## Testing with optional capabilities
-
-```ts
-it('uses elicitation when available', async () => {
-  const elicit = vi.fn().mockResolvedValue({
-    action: 'accept',
-    content: { format: 'json' },
-  });
-  const ctx = createMockContext({ elicit });
-  const input = myTool.input.parse({ query: 'hello' });
-  await myTool.handler(input, ctx);
-  expect(elicit).toHaveBeenCalledOnce();
-});
-
-it('handles missing elicitation gracefully', async () => {
-  // ctx.elicit is undefined — handler must check before calling
-  const ctx = createMockContext();
-  const input = myTool.input.parse({ query: 'hello' });
-  // Should not throw even when ctx.elicit is absent
-  await expect(myTool.handler(input, ctx)).resolves.toBeDefined();
-});
-```
 
 ---
 

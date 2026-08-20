@@ -4,7 +4,7 @@ description: >
   MCP definition linter rules reference. Use when `bun run lint:mcp` or `bun run devcheck` reports a lint error or warning (`format-parity`, `schema-is-object`, `name-format`, `server-json-*`, etc.) and you need to understand the rule, its severity, and how to fix it. Every rule ID the linter emits has an entry in this doc.
 metadata:
   author: cyanheads
-  version: "1.9"
+  version: "1.10"
   audience: external
   type: reference
 ---
@@ -789,7 +789,7 @@ The diagnostic message includes the declared reason(s) for the code so you can c
 
 ## Enrichment rules
 
-Validate the `enrichment` block — the success-path counterpart to `errors[]`. Enrichment fields are merged into `structuredContent` and advertised as `output.extend(enrichment)`, so the linter guards the block's shape and its disjointness from `output`. See `api-context`'s `ctx.enrich` and `add-tool`'s **Tool Response Design**.
+Validate the `enrichment` block — the success-path counterpart to `errors[]`. Enrichment fields are merged into `structuredContent` and folded into the advertised `outputSchema`, so the linter guards the block's shape and its disjointness from `output`. See `api-context`'s `ctx.enrich` and `add-tool`'s **Tool Response Design**.
 
 ### enrichment-type
 

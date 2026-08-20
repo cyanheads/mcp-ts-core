@@ -4,7 +4,7 @@ description: >
   Reference for core and server configuration in `@cyanheads/mcp-ts-core`. Covers env var tables with defaults, priority order, server-specific Zod schema pattern, and Workers lazy-parsing requirement.
 metadata:
   author: cyanheads
-  version: "1.9"
+  version: "1.10"
   audience: external
   type: reference
 ---
@@ -174,16 +174,6 @@ Activated when both `SUPABASE_URL` and `SUPABASE_ANON_KEY` are set.
 | `OTEL_EXPORTER_OTLP_METRICS_ENDPOINT` | `openTelemetry.metricsEndpoint` | — | OTLP metrics endpoint URL |
 | `OTEL_TRACES_SAMPLER_ARG` | `openTelemetry.samplingRatio` | `1.0` | 0–1; fraction of traces to export |
 | `OTEL_LOG_LEVEL` | `openTelemetry.logLevel` | `INFO` | OTel SDK internal log level: `NONE` \| `ERROR` \| `WARN` \| `INFO` \| `DEBUG` \| `VERBOSE` \| `ALL` |
-
----
-
-### Tasks
-
-| Env Var | `AppConfig` field | Default | Notes |
-|:--------|:-----------------|:--------|:------|
-| `TASK_STORE_TYPE` | `tasks.storeType` | `in-memory` | `in-memory` \| `storage`; aliases: `mem`/`memory`→`in-memory`, `persistent`→`storage` |
-| `TASK_STORE_TENANT_ID` | `tasks.tenantId` | `system-tasks` | Tenant ID for task state storage |
-| `TASK_STORE_DEFAULT_TTL_MS` | `tasks.defaultTtlMs` | — | TTL for completed tasks (ms); null = no expiry |
 
 ---
 

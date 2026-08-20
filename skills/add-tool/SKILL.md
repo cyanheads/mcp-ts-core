@@ -4,7 +4,7 @@ description: >
   Scaffold a new MCP tool definition. Use when the user asks to add a tool, create a new tool, or implement a new capability for the server.
 metadata:
   author: cyanheads
-  version: "2.16"
+  version: "2.17"
   audience: external
   type: reference
 ---
@@ -16,8 +16,7 @@ Tools use the `tool()` builder from `@cyanheads/mcp-ts-core`. Each tool lives in
 ## Steps
 
 1. **Gather** the tool's name, purpose, and input/output shape from the user's request — ask only if genuinely absent
-2. **Determine if long-running** — if the tool involves streaming, polling, or
-   multi-step async work, it should use `task: true`
+2. **Determine if it needs input the caller may not supply** — a confirmation, a choice, the client's roots — which makes it a multi-round-trip handler (`ctx.requestInput` / `ctx.inputs`, see `api-context`)
 3. **Create the file** at `src/mcp-server/tools/definitions/{{tool-name}}.tool.ts`
 4. **Register** the tool in the project's existing `createApp()` tool list (directly in `src/index.ts` for fresh scaffolds, or via a barrel if the repo already has one)
 5. **Run `bun run devcheck`** to verify — if Biome reports formatting issues, run `bun run format` to auto-fix, then re-run devcheck
@@ -130,30 +129,47 @@ export const {{TOOL_EXPORT}} = tool('{{tool_name}}', {
 });
 ```
 
-### Task tool variant
+### Multi-round-trip variant
 
-Add `task: true` and use `ctx.progress` for long-running operations:
+A handler that needs something the caller didn't supply returns `ctx.requestInput(...)` and is re-entered with the answers on `ctx.inputs`. There is no mid-handler `await` for user input, and no capability check — the surface is always present, on every transport and both protocol eras.
 
 ```typescript
+import { inputRequired, tool, z } from '@cyanheads/mcp-ts-core';
+import { validationError } from '@cyanheads/mcp-ts-core/errors';
+
+const Confirm = z.object({ confirm: z.boolean().describe('Whether to proceed.') });
+
 export const {{TOOL_EXPORT}} = tool('{{tool_name}}', {
   description: '{{TOOL_DESCRIPTION}}',
-  task: true,
   input: z.object({ /* ... */ }),
   output: z.object({ /* ... */ }),
+  annotations: { destructiveHint: true },
 
-  async handler(input, ctx) {
-    // ctx.progress is guaranteed non-null when task: true — the ! assertion is safe here.
-    await ctx.progress!.setTotal(totalSteps);
-    for (const step of steps) {
-      if (ctx.signal.aborted) break;
-      await ctx.progress!.update(`Processing: ${step}`);
-      // ... do work ...
-      await ctx.progress!.increment();
+  handler(input, ctx) {
+    // Read what a prior round collected before asking for anything.
+    const answer = ctx.inputs.accepted('confirm', Confirm);
+    if (!answer) {
+      // A declined or cancelled prompt is a dead end — don't re-ask it.
+      const view = ctx.inputs.view('confirm');
+      if (view.kind === 'elicit' && view.action !== 'accept') {
+        throw validationError(`User ${view.action} the confirmation.`);
+      }
+      return ctx.requestInput({
+        inputRequests: {
+          confirm: inputRequired.elicit({
+            message: `Proceed with ${input.target}?`,
+            requestedSchema: Confirm,
+          }),
+        },
+      });
     }
+    // `answer` is narrowed here.
     return { /* output */ };
   },
 });
 ```
+
+Write it as `return ctx.requestInput(...)` — the `never` return type makes it valid in return position for any output, and it is what lets TypeScript narrow the line below. Full reference (`inputRequired.elicitUrl` / `.createMessage` / `.listRoots`, `requestState`, decline handling): `skills/api-context`.
 
 ### Registration
 
@@ -208,7 +224,36 @@ export const submitObservations = getServerConfig().enableWrites
 | `/.well-known/mcp.json` `definitions.tools` (Server Card) | **Yes**, with `disabled` field — discovery agents see them as present-but-uncallable |
 | `/` (HTML landing page) | **Yes**, in a 4th muted bucket after `read \| write \| destructive` |
 
-The wrapper composes with both standard and task tools, and preserves all original definition fields (handler, schemas, auth scopes, error contracts) — when re-enabled, the tool already conforms to every lint rule.
+The wrapper preserves all original definition fields (handler, schemas, auth scopes, error contracts) — when re-enabled, the tool already conforms to every lint rule.
+
+## Schemas: what the framework stores vs. what clients see
+
+`tool()` and the handler factory do not hand your Zod schemas to the SDK verbatim. Two deliberate transforms sit in between.
+
+### Input is strict
+
+`tool()` stores `input` with `.strict()` applied, and the advertised `inputSchema` carries `additionalProperties: false` to match. An unrecognized argument key is **rejected by name** before the handler runs:
+
+```text
+Input validation error: Invalid arguments for tool <name>: Unrecognized key: "querry"
+```
+
+That arrives as an `isError: true` result, not a JSON-RPC error, and produces no framework span or log. The alternative — silently stripping the key — turns a caller's typo into a wrong answer they cannot detect: the value vanishes before the handler runs and the call fails downstream pointing at the wrong problem.
+
+Two limits worth knowing when you write a schema:
+
+- **Root level only**, matching `.strict()` itself. A nested `z.object()` inside the input still strips unknown keys unless it is strict in its own right — mark the nested option objects you want guarded.
+- **An explicit opening wins.** A definition that declared `.passthrough()` or `.catchall(...)` asked for an open object, and `tool()` leaves it alone. Use that (deliberately) for tools that proxy arbitrary upstream query parameters.
+
+### The advertised `outputSchema` is widened
+
+The framework parses a successful result against the strict effective schema — `output`, extended with the `enrichment` block when one is declared — so a required field the handler never populated still fails loudly. What it *advertises* in `tools/list` is a widened projection of that schema: every success field optional, plus a declared `error` property describing the failure envelope.
+
+The reason is client-side validation. A failing tool returns `structuredContent: { error: … }`, which can never satisfy a success-only schema; clients whose SDK validates `structuredContent` without first checking `isError` reject that envelope with `-32602` before the error ever reaches the agent. Widening the advertised schema is the only fix a server can ship, because the validator runs in the caller.
+
+The root stays `type: 'object'` (a discriminated union would emit `anyOf` with no `type`, which the 2025-era legacy projection rewrites — breaking the success path to fix the error path). The `required` list that the object form drops is recovered by an `anyOf` refinement in schema metadata: a result must satisfy either the success branch (success fields present, no `error`) or the failure branch (`error` present).
+
+Practical consequence: **do not read the advertised schema as the contract your handler must satisfy.** `output` is still the contract. The widened form is emission only.
 
 ## Tool Response Design
 
@@ -218,7 +263,7 @@ Tool responses are the LLM's only window into what happened. Every response shou
 
 Empty-result notices, the query/filter as the server parsed it, pagination totals — the context an agent *reasons with*, as opposed to the domain payload itself — must reach **both** client surfaces: `structuredContent` (from `output`) and `content[]` (from `format()`). Hand-authored into `format()` text alone, this context reaches `content[]` but is invisible to `structuredContent`-only clients (Claude Code, MCP-SDK API callers).
 
-Declare it as an `enrichment` block — the success-path counterpart to `errors[]` — and populate it via `ctx.enrich(...)` (or the kind-tagged helpers `ctx.enrich.notice()` / `.total()` / `.echo()`). The framework merges enrichment into `structuredContent`, advertises `output.extend(enrichment)` as the tool's `outputSchema`, and mirrors it into a `content[]` trailer — both surfaces, no `format()` entry, never touched by `format-parity`. `ctx.enrich` lives on the base `Context` (like `ctx.log`), so the service layer can populate it too.
+Declare it as an `enrichment` block — the success-path counterpart to `errors[]` — and populate it via `ctx.enrich(...)` (or the kind-tagged helpers `ctx.enrich.notice()` / `.total()` / `.echo()`). The framework merges enrichment into `structuredContent`, folds the block into the tool's advertised `outputSchema` (see [Schemas](#schemas-what-the-framework-stores-vs-what-clients-see)), and mirrors it into a `content[]` trailer — both surfaces, no `format()` entry, never touched by `format-parity`. `ctx.enrich` lives on the base `Context` (like `ctx.log`), so the service layer can populate it too.
 
 ```typescript
 enrichment: {
@@ -673,8 +718,8 @@ return { items: hits };
 - [ ] `auth` scopes declared if the tool needs authorization
 - [ ] `errors: [...]` contract declared for the tool's domain-specific failure modes — or block deleted if no domain failures apply (baseline codes bubble freely)
 - [ ] Error contract declared inline on this tool — not imported from a shared module, even when other tools have near-identical entries
-- [ ] `task: true` added if the tool is long-running
-- [ ] If `task: true`: handler checks `ctx.signal.aborted` in its loop for cancellation support
+- [ ] Long loops check `ctx.signal.aborted` so a cancelled request (or a closed transport) stops the work
+- [ ] If the tool needs caller input it may not have been given: reads `ctx.inputs` first, requests only what is missing via `return ctx.requestInput(...)`, and treats a declined/cancelled response as terminal rather than re-asking
 - [ ] If tool returns unbounded arrays: pagination with total count, or `spillover()` / DataCanvas for *analytical* working sets (an agent would SQL them — not a discovery/search surface). If any tool emits a `canvas_id`, a `dataframe_query` tool is registered in the same server — a token with no query tool is dead output
 - [ ] If tool returns one large *document* (not a row set) that can overflow context: `outlineOnOverflow()` returns a `full | outline` union so the agent re-calls with `sections: [...]` — not one-sided truncation
 - [ ] If tool is feature-gated: evaluated whether `disabledTool()` wrapper is appropriate (present in manifest but uncallable)
