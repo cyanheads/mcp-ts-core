@@ -6,12 +6,19 @@
  * must resolve, and `notifications/resources/updated` must only reach clients
  * that actually subscribed to the URI (#354).
  *
+ * This is the **2025-era** mechanism, and it is installed only on instances
+ * serving that era. The 2026-07-28 revision has no `resources/subscribe` RPC —
+ * a client opts in through `subscriptions/listen`'s `resourceSubscriptions`
+ * filter, and the SDK's listen router owns delivery. Handing a modern instance
+ * this registry would leave it permanently empty and silently drop every
+ * `ctx.notifyResourceUpdated(uri)`, so `createMcpServerInstance` passes none
+ * and the notifiers emit unconditionally there.
+ *
  * Scope is the `McpServer` instance, which is also the connection: a persistent
  * instance per session on the sessionful legacy arm, one per request under
  * per-request serving. On the per-request arm a subscription cannot outlive the
  * request that created it, so a handler-time `ctx.notifyResourceUpdated(uri)`
- * only delivers when the same exchange subscribed first — background delivery
- * over the 2026-era `subscriptions/listen` bus is the durable path.
+ * only delivers when the same exchange subscribed first.
  *
  * @see {@link https://modelcontextprotocol.io/specification/2026-07-28/server/resources | MCP Resources}
  * @module src/mcp-server/resources/resourceSubscriptions

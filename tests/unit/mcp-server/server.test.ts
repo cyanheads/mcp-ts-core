@@ -122,6 +122,34 @@ describe('createMcpServerInstance', () => {
     );
   });
 
+  describe('resource-subscription mechanism by era (#354)', () => {
+    it('installs the 2025 registry for a legacy instance', async () => {
+      const server = await createMcpServerInstance({ ...deps, era: 'legacy' });
+      expect(mockToolRegistry.registerAll).toHaveBeenCalledWith(
+        server,
+        expect.objectContaining({ has: expect.any(Function) }),
+      );
+    });
+
+    it('passes no registry for a modern instance, so updates are not gated on it', async () => {
+      // `resources/subscribe` does not exist on 2026-07-28 — the client opts in
+      // through `subscriptions/listen`. Handing a modern instance the 2025
+      // registry leaves it permanently empty, and every
+      // `ctx.notifyResourceUpdated(uri)` is silently dropped.
+      const server = await createMcpServerInstance({ ...deps, era: 'modern' });
+      expect(mockToolRegistry.registerAll).toHaveBeenCalledWith(server, undefined);
+      expect(mockResourceRegistry.registerAll).toHaveBeenCalledWith(server, undefined);
+    });
+
+    it('defaults to the legacy registry when no era is supplied', async () => {
+      const server = await createMcpServerInstance(deps);
+      expect(mockToolRegistry.registerAll).toHaveBeenCalledWith(
+        server,
+        expect.objectContaining({ has: expect.any(Function) }),
+      );
+    });
+  });
+
   it('should call PromptRegistry.registerAll', async () => {
     await createMcpServerInstance(deps);
     expect(mockPromptRegistry.registerAll).toHaveBeenCalledTimes(1);

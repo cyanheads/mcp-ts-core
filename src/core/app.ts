@@ -354,9 +354,10 @@ export async function composeServices<TSupabaseClient extends object = SupabaseC
   });
   const promptRegistry = new PromptRegistry(prompts, logger);
 
-  const createServer: FrameworkServerFactory = () =>
+  const createServer: FrameworkServerFactory = (ctx) =>
     createMcpServerInstance({
       config,
+      era: ctx.era,
       ...(description && { description }),
       ...(extensions && { extensions }),
       ...(icons && { icons }),

@@ -31,6 +31,13 @@ export interface McpServerDeps {
    * Explicit option wins over `MCP_SERVER_DESCRIPTION` / `package.json`.
    */
   description?: string;
+  /**
+   * The protocol era this instance will serve, from the factory's
+   * {@link McpRequestContext}. Selects the resource-subscription mechanism —
+   * see {@link installResourceSubscriptions}. Defaults to `legacy` for direct
+   * callers that construct an instance outside the serving factories.
+   */
+  era?: 'legacy' | 'modern';
   /** SEP-2133 extensions to advertise in server capabilities. */
   extensions?: Record<string, object>;
   /** Server icon(s) forwarded to `new McpServer({ serverInfo })`. */
@@ -87,9 +94,11 @@ export async function createMcpServerInstance(deps: McpServerDeps): Promise<McpS
         // gates `notifications/message` on the client's chosen level; `ctx.log`
         // mirrors onto that stream.
         logging: {},
-        // `subscribe: true` is backed by real `resources/subscribe` handlers
-        // installed below, and gates the 2026-era `subscriptions/listen`
-        // filter's `resourceSubscriptions` field (#354).
+        // `subscribe: true` promises resource-specific update notifications
+        // in both eras (#354). A 2025 client opts in through
+        // `resources/subscribe`, installed below; a 2026 client through
+        // `subscriptions/listen`'s `resourceSubscriptions` filter, which the
+        // SDK's listen router owns.
         resources: { listChanged: true, subscribe: true },
         tools: { listChanged: true },
         prompts: { listChanged: true },
@@ -106,7 +115,14 @@ export async function createMcpServerInstance(deps: McpServerDeps): Promise<McpS
     },
   );
 
-  const subscriptions = installResourceSubscriptions(server);
+  // The `resources/subscribe` registry is a 2025-era mechanism: the method
+  // does not exist on 2026-07-28, where the client opts in through
+  // `subscriptions/listen` and the SDK filters delivery. Installing it on a
+  // modern instance would leave the registry permanently empty and silently
+  // drop every `ctx.notifyResourceUpdated(uri)` — the notifiers read `undefined`
+  // as "no subscription tracking on this connection" and emit unconditionally.
+  const subscriptions =
+    (deps.era ?? 'legacy') === 'legacy' ? installResourceSubscriptions(server) : undefined;
 
   try {
     logger.debug('Registering all MCP capabilities via registries...', context);

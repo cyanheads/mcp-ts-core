@@ -291,6 +291,22 @@ vi.mock('@/utils/internal/performance.js', () => ({
 }));
 
 vi.mock('@/utils/internal/requestContext.js', () => ({
+  toCanonicalContext: (context: Record<string, unknown>) =>
+    Object.fromEntries(
+      [
+        'auth',
+        'extra',
+        'operation',
+        'requestId',
+        'sessionId',
+        'spanId',
+        'tenantId',
+        'timestamp',
+        'traceId',
+      ]
+        .filter((k) => context[k] !== undefined)
+        .map((k) => [k, context[k]]),
+    ),
   withExtra: (ctx: { extra?: Record<string, unknown> }, fields: Record<string, unknown>) => ({
     ...ctx,
     extra: { ...ctx.extra, ...fields },
@@ -490,6 +506,9 @@ describe('core/app', () => {
 
     expect(mockCreateMcpServerInstance).toHaveBeenCalledWith({
       config: mockConfig,
+      // Forwarded from the factory's McpRequestContext — it selects the
+      // resource-subscription mechanism for the era being served (#354).
+      era: 'modern',
       promptRegistry: mockPromptRegistry.instance,
       resourceRegistry: mockResourceRegistry.instance,
       toolRegistry: mockToolRegistry.instance,
