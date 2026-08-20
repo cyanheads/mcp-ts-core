@@ -1,6 +1,6 @@
 # Observability — OpenTelemetry
 
-`@cyanheads/mcp-ts-core` ships full OpenTelemetry instrumentation out of the box. Tool, resource, prompt, storage, LLM, speech, and graph calls each get their own span; HTTP server requests pick up spans from `HttpInstrumentation` (or `@hono/otel` on the HTTP transport). Auth checks, session lifecycle, and task lifecycle are tracked as metrics only — auth decorates the active HTTP span with attributes, sessions and task transitions emit counters. Across all of it, `requestId`/`traceId`/`tenantId` correlate automatically, and logs emitted via the framework logger get `trace_id`/`span_id` injected so a single trace ID stitches traces, metrics, and logs together.
+`@cyanheads/mcp-ts-core` ships full OpenTelemetry instrumentation out of the box. Tool, resource, prompt, storage, LLM, speech, and graph calls each get their own span; HTTP server requests pick up spans from `HttpInstrumentation` (or `@hono/otel` on the HTTP transport). Auth checks and session lifecycle are tracked as metrics only — auth decorates the active HTTP span with attributes, sessions emit counters. Across all of it, `requestId`/`traceId`/`tenantId` correlate automatically, and logs emitted via the framework logger get `trace_id`/`span_id` injected so a single trace ID stitches traces, metrics, and logs together.
 
 This doc is the catalog of what's emitted and how to listen to it. For the API surface (`createCounter`, `withSpan`, attribute constants), see `src/utils/telemetry/`. For an example Grafana dashboard and vendor-agnostic query recipes (Datadog, New Relic, Honeycomb), see [`dashboards.md`](./dashboards.md).
 
@@ -65,9 +65,9 @@ Every handler call gets a span. Nested operations (storage, graph, LLM) become c
 
 | Span name | Source | Key attributes |
 |:----------|:-------|:---------------|
-| `tool_execution:<tool>` | every tool call | `mcp.tool.input_bytes`, `mcp.tool.output_bytes`, `mcp.tool.duration_ms`, `mcp.tool.success`, `mcp.tool.error_code`, `mcp.tool.partial_success`, `mcp.tool.batch.{succeeded,failed}_count` (tool name is in the span name + `code.function.name`) |
-| `resource_read:<resource>` | every resource handler | `mcp.resource.uri`, `mcp.resource.mime_type`, `mcp.resource.size_bytes`, `mcp.resource.duration_ms`, `mcp.resource.success`, `mcp.resource.error_code` |
-| `prompt_generation:<prompt>` | every prompt handler | `mcp.prompt.input_bytes`, `mcp.prompt.output_bytes`, `mcp.prompt.message_count`, `mcp.prompt.duration_ms`, `mcp.prompt.success`, `mcp.prompt.error_code` |
+| `tool_execution:<tool>` | every tool call | `mcp.tool.input_bytes`, `mcp.tool.output_bytes`, `mcp.tool.duration_ms`, `mcp.tool.success`, `mcp.tool.error_code`, `mcp.tool.input_required`, `mcp.tool.partial_success`, `mcp.tool.batch.{succeeded,failed}_count` (tool name is in the span name + `code.function.name`) |
+| `resource_read:<resource>` | every resource handler | `mcp.resource.uri`, `mcp.resource.mime_type`, `mcp.resource.size_bytes`, `mcp.resource.duration_ms`, `mcp.resource.success`, `mcp.resource.error_code`, `mcp.resource.input_required` |
+| `prompt_generation:<prompt>` | every prompt handler | `mcp.prompt.input_bytes`, `mcp.prompt.output_bytes`, `mcp.prompt.message_count`, `mcp.prompt.duration_ms`, `mcp.prompt.success`, `mcp.prompt.error_code`, `mcp.prompt.input_required` |
 | `storage:<op>` | `StorageService` (every call) | `mcp.storage.operation`, `mcp.storage.duration_ms`, `mcp.storage.success`, `mcp.storage.key_count` (batch ops) |
 | `graph:<op>` | `GraphService` (every call) | `mcp.graph.operation`, `mcp.graph.duration_ms`, `mcp.graph.success` |
 | `gen_ai.chat_completion` | OpenRouter LLM provider | `gen_ai.system=openrouter`, `gen_ai.request.model`, `gen_ai.request.{max_tokens,temperature,top_p,streaming}`, `gen_ai.response.model`, `gen_ai.usage.{input,output,total}_tokens` |
@@ -75,6 +75,8 @@ Every handler call gets a span. Nested operations (storage, graph, LLM) become c
 | `speech:stt` | Whisper provider | same as `speech:tts` |
 
 All spans also carry `code.function.name` and `code.namespace` for code-attribution. Errors are recorded via `span.recordException()` and `SpanStatusCode.ERROR`; `McpError` codes are surfaced as the `*.error_code` attribute.
+
+A handler that ends its round with `ctx.requestInput(...)` is not an error: the span closes `OK` with `mcp.*.input_required` set and no exception recorded, so multi-round-trip input does not inflate error rates. Split on that attribute to separate incomplete rounds from completed calls.
 
 Trace context propagates across boundaries via W3C `traceparent` headers. Helpers in `src/utils/telemetry/trace.ts`:
 
@@ -133,7 +135,7 @@ All custom metrics are namespaced `mcp.*` (or `process.*`/`http.client.*` where 
 | `mcp.graph.duration` | histogram | `ms` | `mcp.graph.operation`, `mcp.graph.success` |
 | `mcp.graph.errors` | counter | `{errors}` | `mcp.graph.operation` |
 
-### Transport, auth, sessions, tasks
+### Transport, auth, sessions
 
 | Metric | Type | Unit | Attributes |
 |:-------|:-----|:-----|:-----------|
@@ -143,12 +145,6 @@ All custom metrics are namespaced `mcp.*` (or `process.*`/`http.client.*` where 
 | `mcp.session.duration` | histogram | `s` | — |
 | `mcp.sessions.active` | observable gauge | `{sessions}` | — |
 | `mcp.heartbeat.failures` | counter | `{failures}` | `mcp.connection.transport` (`stdio`/`http`) |
-| `mcp.http.close_failures` | counter | `{failures}` | `surface` (`transport`/`server`), `trigger` (`success`/`error`/`sse-abort`) — per-request close threw or timed out |
-| `mcp.http.per_request.created` | counter | `{instances}` | `kind` (`server`/`transport`) — per-request `McpServer` and `McpSessionTransport` instances created |
-| `mcp.http.per_request.finalized` | counter | `{instances}` | `kind` (`server`/`transport`) — per-request instances reclaimed by GC; persistent gap vs `created` indicates a leak |
-| `mcp.tasks.created` | counter | `{tasks}` | `mcp.task.store_type` (`in-memory`/`storage`) |
-| `mcp.tasks.status_changes` | counter | `{transitions}` | `mcp.task.status`, `mcp.task.store_type` |
-| `mcp.tasks.active` | observable gauge | `{tasks}` | — (in-memory store only) |
 
 ### Errors, rate limits, HTTP client
 

@@ -47,9 +47,8 @@ Dots become underscores everywhere. Counters get `_total`. Histograms with physi
 | **Prompts** | Generation rate, p95 duration, error rate by category, and p95 message count. Useful for prompts that fan out — high message count is often the explanation for slow responses. |
 | **Storage / LLM / Speech / Graph** | Op rate and p95 latency for each service. LLM also shows tokens/sec by type (`input`/`output`) — multiply by your provider's $/Mtoken to see live cost. |
 | **HTTP server & client** | Server: req rate by method, p50/p95/p99 latency, status code distribution. Client: p95 duration by upstream `server_address`. |
-| **Sessions / Auth / Tasks** | Session events (`created`/`terminated`/`rejected`/`stale_cleanup`), heartbeat failures by transport, auth attempts and p95 by outcome (`success`/`failure`/`missing`), task transitions, active tasks (in-memory store only). |
+| **Sessions / Auth** | Session events (`created`/`terminated`/`rejected`/`stale_cleanup`), heartbeat failures by transport, auth attempts and p95 by outcome (`success`/`failure`/`missing`). |
 | **Errors & rate limits** | Classified errors keyed on JSON-RPC code (`-32603`, `-32001`, …), and rate-limit rejections by key. |
-| **Per-request leak detection** | Per-request `McpServer` and transport instances are created on every HTTP request and reclaimed by GC. The dashboard plots **created vs finalized** rate (should match under steady-state) and the **cumulative gap** (should be flat — a growing line is a leak). The `HTTP close failures` panel surfaces `surface`/`trigger` combinations where the per-request close threw. |
 | **Process health** | RSS / heap used / heap total, event loop p99 delay (thresholded 50/200 ms), event loop utilization (thresholded 0.7/0.9), and process uptime. |
 
 ---
@@ -80,7 +79,6 @@ OTel metrics flow through New Relic's OTLP endpoint. They land in the `Metric` e
 | `sum by (mcp_tool_name) (rate(mcp_tool_calls_total[5m]))` | `SELECT rate(sum(mcp.tool.calls), 1 second) FROM Metric FACET mcp.tool.name SINCE 1 hour ago TIMESERIES` |
 | `histogram_quantile(0.95, sum by (le) (rate(mcp_tool_duration_milliseconds_bucket[5m])))` | `SELECT percentile(mcp.tool.duration, 95) FROM Metric FACET mcp.tool.name SINCE 1 hour ago TIMESERIES` |
 | `sum(mcp_requests_active)` | `SELECT latest(mcp.requests.active) FROM Metric SINCE 5 minutes ago` |
-| Cumulative leak gap | `SELECT latest(mcp.http.per_request.created) - latest(mcp.http.per_request.finalized) FROM Metric FACET kind TIMESERIES` |
 
 Service filter: `WHERE service.name = 'mcp-ts-core'`.
 

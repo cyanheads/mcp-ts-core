@@ -97,7 +97,6 @@
       "options": { "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["mean", "max"] }, "tooltip": { "mode": "multi", "sort": "desc" } },
       "targets": [{ "datasource": { "type": "prometheus", "uid": "${datasource}" }, "expr": "sum by (mcp_tool_error_category) (rate(mcp_tool_errors_total{service_name=~\"(?:@[^/]+/)?(?:$service)\"}[$__rate_interval]))", "legendFormat": "{{mcp_tool_error_category}}", "refId": "A" }]
     },
-
     { "id": 10, "type": "row", "title": "Tools", "collapsed": false, "gridPos": { "h": 1, "w": 24, "x": 0, "y": 13 }, "panels": [] },
     {
       "id": 11, "type": "timeseries", "title": "Per-tool call rate",
@@ -131,7 +130,6 @@
       "options": { "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["mean", "max"] }, "tooltip": { "mode": "multi", "sort": "desc" } },
       "targets": [{ "datasource": { "type": "prometheus", "uid": "${datasource}" }, "expr": "histogram_quantile(0.95, sum by (mcp_tool_name, le) (rate(mcp_tool_output_bytes_bucket{service_name=~\"(?:@[^/]+/)?(?:$service)\"}[$__rate_interval])))", "legendFormat": "{{mcp_tool_name}}", "refId": "A" }]
     },
-
     { "id": 20, "type": "row", "title": "Resources", "collapsed": false, "gridPos": { "h": 1, "w": 24, "x": 0, "y": 30 }, "panels": [] },
     {
       "id": 21, "type": "timeseries", "title": "Resource reads / sec",
@@ -165,7 +163,6 @@
       "options": { "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["mean", "max"] }, "tooltip": { "mode": "multi", "sort": "desc" } },
       "targets": [{ "datasource": { "type": "prometheus", "uid": "${datasource}" }, "expr": "histogram_quantile(0.95, sum by (mcp_resource_name, le) (rate(mcp_resource_output_bytes_bucket{service_name=~\"(?:@[^/]+/)?(?:$service)\"}[$__rate_interval])))", "legendFormat": "{{mcp_resource_name}}", "refId": "A" }]
     },
-
     { "id": 30, "type": "row", "title": "Prompts", "collapsed": false, "gridPos": { "h": 1, "w": 24, "x": 0, "y": 47 }, "panels": [] },
     {
       "id": 31, "type": "timeseries", "title": "Prompt generations / sec",
@@ -199,7 +196,6 @@
       "options": { "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["mean", "max"] }, "tooltip": { "mode": "multi", "sort": "desc" } },
       "targets": [{ "datasource": { "type": "prometheus", "uid": "${datasource}" }, "expr": "histogram_quantile(0.95, sum by (mcp_prompt_name, le) (rate(mcp_prompt_message_count_bucket{service_name=~\"(?:@[^/]+/)?(?:$service)\"}[$__rate_interval])))", "legendFormat": "{{mcp_prompt_name}}", "refId": "A" }]
     },
-
     { "id": 40, "type": "row", "title": "Storage / LLM / Speech / Graph", "collapsed": false, "gridPos": { "h": 1, "w": 24, "x": 0, "y": 64 }, "panels": [] },
     {
       "id": 41, "type": "timeseries", "title": "Storage operations / sec",
@@ -257,7 +253,6 @@
       "options": { "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["mean", "max"] }, "tooltip": { "mode": "multi", "sort": "desc" } },
       "targets": [{ "datasource": { "type": "prometheus", "uid": "${datasource}" }, "expr": "sum by (mcp_graph_operation) (rate(mcp_graph_operations_total{service_name=~\"(?:@[^/]+/)?(?:$service)\"}[$__rate_interval]))", "legendFormat": "{{mcp_graph_operation}}", "refId": "A" }]
     },
-
     { "id": 50, "type": "row", "title": "HTTP server & client", "collapsed": false, "gridPos": { "h": 1, "w": 24, "x": 0, "y": 89 }, "panels": [] },
     {
       "id": 51, "type": "timeseries", "title": "HTTP server request rate",
@@ -296,8 +291,7 @@
       "options": { "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["mean", "max"] }, "tooltip": { "mode": "multi", "sort": "desc" } },
       "targets": [{ "datasource": { "type": "prometheus", "uid": "${datasource}" }, "expr": "histogram_quantile(0.95, sum by (server_address, le) (rate(http_client_request_duration_seconds_bucket{service_name=~\"(?:@[^/]+/)?(?:$service)\"}[$__rate_interval])))", "legendFormat": "{{server_address}}", "refId": "A" }]
     },
-
-    { "id": 60, "type": "row", "title": "Sessions / Auth / Tasks", "collapsed": false, "gridPos": { "h": 1, "w": 24, "x": 0, "y": 106 }, "panels": [] },
+    { "id": 60, "type": "row", "title": "Sessions / Auth", "collapsed": false, "gridPos": { "h": 1, "w": 24, "x": 0, "y": 106 }, "panels": [] },
     {
       "id": 61, "type": "timeseries", "title": "Session events / sec",
       "datasource": { "type": "prometheus", "uid": "${datasource}" },
@@ -330,28 +324,11 @@
       "options": { "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["mean", "max"] }, "tooltip": { "mode": "multi", "sort": "desc" } },
       "targets": [{ "datasource": { "type": "prometheus", "uid": "${datasource}" }, "expr": "histogram_quantile(0.95, sum by (mcp_auth_outcome, le) (rate(mcp_auth_duration_milliseconds_bucket{service_name=~\"(?:@[^/]+/)?(?:$service)\"}[$__rate_interval])))", "legendFormat": "{{mcp_auth_outcome}}", "refId": "A" }]
     },
-    {
-      "id": 65, "type": "timeseries", "title": "Tasks status transitions / sec",
-      "datasource": { "type": "prometheus", "uid": "${datasource}" },
-      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 123 },
-      "fieldConfig": { "defaults": { "unit": "cps", "custom": { "drawStyle": "line", "fillOpacity": 10, "lineInterpolation": "smooth", "lineWidth": 1, "stacking": { "mode": "normal", "group": "A" } }, "color": { "mode": "palette-classic" } } },
-      "options": { "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["mean", "max"] }, "tooltip": { "mode": "multi", "sort": "desc" } },
-      "targets": [{ "datasource": { "type": "prometheus", "uid": "${datasource}" }, "expr": "sum by (mcp_task_status) (rate(mcp_tasks_status_changes_total{service_name=~\"(?:@[^/]+/)?(?:$service)\"}[$__rate_interval]))", "legendFormat": "{{mcp_task_status}}", "refId": "A" }]
-    },
-    {
-      "id": 66, "type": "timeseries", "title": "Active tasks (in-memory store)",
-      "datasource": { "type": "prometheus", "uid": "${datasource}" },
-      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 123 },
-      "fieldConfig": { "defaults": { "unit": "short", "custom": { "drawStyle": "line", "fillOpacity": 10, "lineInterpolation": "smooth", "lineWidth": 1 }, "color": { "mode": "palette-classic" } } },
-      "options": { "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["mean", "max"] }, "tooltip": { "mode": "multi", "sort": "desc" } },
-      "targets": [{ "datasource": { "type": "prometheus", "uid": "${datasource}" }, "expr": "sum(mcp_tasks_active{service_name=~\"(?:@[^/]+/)?(?:$service)\"})", "legendFormat": "active", "refId": "A" }]
-    },
-
-    { "id": 70, "type": "row", "title": "Errors & rate limits", "collapsed": false, "gridPos": { "h": 1, "w": 24, "x": 0, "y": 131 }, "panels": [] },
+    { "id": 70, "type": "row", "title": "Errors & rate limits", "collapsed": false, "gridPos": { "h": 1, "w": 24, "x": 0, "y": 123 }, "panels": [] },
     {
       "id": 71, "type": "timeseries", "title": "Classified errors by JSON-RPC code",
       "datasource": { "type": "prometheus", "uid": "${datasource}" },
-      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 132 },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 124 },
       "fieldConfig": { "defaults": { "unit": "cps", "custom": { "drawStyle": "line", "fillOpacity": 10, "lineInterpolation": "smooth", "lineWidth": 1, "stacking": { "mode": "normal", "group": "A" } }, "color": { "mode": "palette-classic" } } },
       "options": { "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["mean", "max"] }, "tooltip": { "mode": "multi", "sort": "desc" } },
       "targets": [{ "datasource": { "type": "prometheus", "uid": "${datasource}" }, "expr": "sum by (mcp_error_classified_code) (rate(mcp_errors_classified_total{service_name=~\"(?:@[^/]+/)?(?:$service)\"}[$__rate_interval]))", "legendFormat": "{{mcp_error_classified_code}}", "refId": "A" }]
@@ -359,48 +336,16 @@
     {
       "id": 72, "type": "timeseries", "title": "Rate limit rejections / sec",
       "datasource": { "type": "prometheus", "uid": "${datasource}" },
-      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 132 },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 124 },
       "fieldConfig": { "defaults": { "unit": "cps", "custom": { "drawStyle": "line", "fillOpacity": 10, "lineInterpolation": "smooth", "lineWidth": 1 }, "color": { "mode": "palette-classic" } } },
       "options": { "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["mean", "max"] }, "tooltip": { "mode": "multi", "sort": "desc" } },
       "targets": [{ "datasource": { "type": "prometheus", "uid": "${datasource}" }, "expr": "sum by (mcp_rate_limit_key) (rate(mcp_ratelimit_rejections_total{service_name=~\"(?:@[^/]+/)?(?:$service)\"}[$__rate_interval]))", "legendFormat": "{{mcp_rate_limit_key}}", "refId": "A" }]
     },
-
-    { "id": 80, "type": "row", "title": "Per-request leak detection (HTTP transport)", "collapsed": false, "gridPos": { "h": 1, "w": 24, "x": 0, "y": 140 }, "panels": [] },
-    {
-      "id": 81, "type": "timeseries", "title": "Per-request created vs finalized",
-      "description": "Persistent gap between rates indicates per-request McpServer/transport instances are not being reclaimed.",
-      "datasource": { "type": "prometheus", "uid": "${datasource}" },
-      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 141 },
-      "fieldConfig": { "defaults": { "unit": "cps", "custom": { "drawStyle": "line", "fillOpacity": 5, "lineInterpolation": "smooth", "lineWidth": 1 }, "color": { "mode": "palette-classic" } } },
-      "options": { "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["mean", "max"] }, "tooltip": { "mode": "multi", "sort": "desc" } },
-      "targets": [
-        { "datasource": { "type": "prometheus", "uid": "${datasource}" }, "expr": "sum by (kind) (rate(mcp_http_per_request_created_total{service_name=~\"(?:@[^/]+/)?(?:$service)\"}[$__rate_interval]))", "legendFormat": "{{kind}} created", "refId": "A" },
-        { "datasource": { "type": "prometheus", "uid": "${datasource}" }, "expr": "sum by (kind) (rate(mcp_http_per_request_finalized_total{service_name=~\"(?:@[^/]+/)?(?:$service)\"}[$__rate_interval]))", "legendFormat": "{{kind}} finalized", "refId": "B" }
-      ]
-    },
-    {
-      "id": 82, "type": "timeseries", "title": "Cumulative leak gap (created − finalized)",
-      "description": "Growing line over time = leak. Should be flat under steady-state load.",
-      "datasource": { "type": "prometheus", "uid": "${datasource}" },
-      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 141 },
-      "fieldConfig": { "defaults": { "unit": "short", "custom": { "drawStyle": "line", "fillOpacity": 10, "lineInterpolation": "smooth", "lineWidth": 1 }, "color": { "mode": "palette-classic" } } },
-      "options": { "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["mean", "max"] }, "tooltip": { "mode": "multi", "sort": "desc" } },
-      "targets": [{ "datasource": { "type": "prometheus", "uid": "${datasource}" }, "expr": "sum by (kind) (mcp_http_per_request_created_total{service_name=~\"(?:@[^/]+/)?(?:$service)\"}) - sum by (kind) (mcp_http_per_request_finalized_total{service_name=~\"(?:@[^/]+/)?(?:$service)\"})", "legendFormat": "{{kind}}", "refId": "A" }]
-    },
-    {
-      "id": 83, "type": "timeseries", "title": "HTTP close failures / sec",
-      "datasource": { "type": "prometheus", "uid": "${datasource}" },
-      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 149 },
-      "fieldConfig": { "defaults": { "unit": "cps", "custom": { "drawStyle": "line", "fillOpacity": 10, "lineInterpolation": "smooth", "lineWidth": 1, "stacking": { "mode": "normal", "group": "A" } }, "color": { "mode": "palette-classic" } } },
-      "options": { "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["mean", "max"] }, "tooltip": { "mode": "multi", "sort": "desc" } },
-      "targets": [{ "datasource": { "type": "prometheus", "uid": "${datasource}" }, "expr": "sum by (surface, trigger) (rate(mcp_http_close_failures_total{service_name=~\"(?:@[^/]+/)?(?:$service)\"}[$__rate_interval]))", "legendFormat": "{{surface}} / {{trigger}}", "refId": "A" }]
-    },
-
-    { "id": 90, "type": "row", "title": "Process health", "collapsed": false, "gridPos": { "h": 1, "w": 24, "x": 0, "y": 157 }, "panels": [] },
+    { "id": 90, "type": "row", "title": "Process health", "collapsed": false, "gridPos": { "h": 1, "w": 24, "x": 0, "y": 132 }, "panels": [] },
     {
       "id": 91, "type": "timeseries", "title": "Memory",
       "datasource": { "type": "prometheus", "uid": "${datasource}" },
-      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 158 },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 133 },
       "fieldConfig": { "defaults": { "unit": "bytes", "custom": { "drawStyle": "line", "fillOpacity": 5, "lineInterpolation": "smooth", "lineWidth": 1 }, "color": { "mode": "palette-classic" } } },
       "options": { "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["mean", "max"] }, "tooltip": { "mode": "multi", "sort": "desc" } },
       "targets": [
@@ -412,7 +357,7 @@
     {
       "id": 92, "type": "timeseries", "title": "Event loop delay (p99)",
       "datasource": { "type": "prometheus", "uid": "${datasource}" },
-      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 158 },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 133 },
       "fieldConfig": { "defaults": { "unit": "ms", "custom": { "drawStyle": "line", "fillOpacity": 10, "lineInterpolation": "smooth", "lineWidth": 1 }, "color": { "mode": "palette-classic" }, "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }, { "color": "yellow", "value": 50 }, { "color": "red", "value": 200 }] } } },
       "options": { "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["mean", "max"] }, "tooltip": { "mode": "multi", "sort": "desc" } },
       "targets": [{ "datasource": { "type": "prometheus", "uid": "${datasource}" }, "expr": "max(process_event_loop_delay_milliseconds{service_name=~\"(?:@[^/]+/)?(?:$service)\"})", "legendFormat": "delay p99", "refId": "A" }]
@@ -421,7 +366,7 @@
       "id": 93, "type": "timeseries", "title": "Event loop utilization",
       "description": "0 = idle, 1 = saturated. If your collector emits the metric without a `_ratio` suffix, drop it.",
       "datasource": { "type": "prometheus", "uid": "${datasource}" },
-      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 166 },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 141 },
       "fieldConfig": { "defaults": { "unit": "percentunit", "min": 0, "max": 1, "custom": { "drawStyle": "line", "fillOpacity": 10, "lineInterpolation": "smooth", "lineWidth": 1 }, "color": { "mode": "palette-classic" }, "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }, { "color": "yellow", "value": 0.7 }, { "color": "red", "value": 0.9 }] } } },
       "options": { "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["mean", "max"] }, "tooltip": { "mode": "multi", "sort": "desc" } },
       "targets": [{ "datasource": { "type": "prometheus", "uid": "${datasource}" }, "expr": "max(process_event_loop_utilization_ratio{service_name=~\"(?:@[^/]+/)?(?:$service)\"})", "legendFormat": "utilization", "refId": "A" }]
@@ -429,7 +374,7 @@
     {
       "id": 94, "type": "stat", "title": "Process uptime",
       "datasource": { "type": "prometheus", "uid": "${datasource}" },
-      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 166 },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 141 },
       "fieldConfig": { "defaults": { "unit": "s", "color": { "mode": "thresholds" }, "thresholds": { "mode": "absolute", "steps": [{ "color": "blue", "value": null }] } } },
       "options": { "colorMode": "value", "graphMode": "area", "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false }, "textMode": "auto" },
       "targets": [{ "datasource": { "type": "prometheus", "uid": "${datasource}" }, "expr": "max(process_uptime_seconds{service_name=~\"(?:@[^/]+/)?(?:$service)\"})", "refId": "A" }]
