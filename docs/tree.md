@@ -1,6 +1,6 @@
 # mcp-ts-core - Directory Structure
 
-Generated on: 2026-08-20 05:23:39
+Generated on: 2026-08-20 18:02:27
 
 ```text
 mcp-ts-core/
@@ -312,6 +312,7 @@ mcp-ts-core/
 │   │   ├── tools/
 │   │   │   ├── utils/
 │   │   │   │   ├── disabled-tool.ts
+│   │   │   │   ├── schemaShape.ts
 │   │   │   │   ├── toolDefinition.ts
 │   │   │   │   └── toolHandlerFactory.ts
 │   │   │   └── tool-registration.ts
@@ -348,6 +349,7 @@ mcp-ts-core/
 │   │   │   │   │   ├── index.ts
 │   │   │   │   │   ├── primitives.ts
 │   │   │   │   │   └── render.ts
+│   │   │   │   ├── eventStore.ts
 │   │   │   │   ├── httpErrorHandler.ts
 │   │   │   │   ├── httpServer.ts
 │   │   │   │   ├── httpTransport.ts
@@ -608,12 +610,14 @@ mcp-ts-core/
 │   │   ├── http.test.ts
 │   │   ├── logger.int.test.ts
 │   │   ├── mcp-apps.int.test.ts
+│   │   ├── modern-notifications.int.test.ts
 │   │   ├── multi-round-trip.int.test.ts
 │   │   ├── oauth-jwks.int.test.ts
 │   │   ├── package-consumer.int.test.ts
 │   │   ├── public-api-contract.int.test.ts
 │   │   ├── setup.ts
 │   │   ├── stdio.test.ts
+│   │   ├── union-input.int.test.ts
 │   │   └── wire-conformance.int.test.ts
 │   ├── smoke/
 │   │   ├── prompts/
@@ -633,7 +637,7 @@ mcp-ts-core/
 │   │   ├── error-contract.test-d.ts
 │   │   ├── handler-context.test-d.ts
 │   │   ├── mock-context.test-d.ts
-│   │   ├── request-context-like.test-d.ts
+│   │   ├── request-context.test-d.ts
 │   │   ├── tool-builder.test-d.ts
 │   │   └── tool-contract-suite.test-d.ts
 │   ├── unit/
@@ -680,6 +684,7 @@ mcp-ts-core/
 │   │   │   │   └── resource-registration.test.ts
 │   │   │   ├── tools/
 │   │   │   │   ├── utils/
+│   │   │   │   │   ├── schemaShape.test.ts
 │   │   │   │   │   ├── toolDefinition.test.ts
 │   │   │   │   │   └── toolHandlerFactory.test.ts
 │   │   │   │   ├── content.test.ts
@@ -705,6 +710,7 @@ mcp-ts-core/
 │   │   │   │   │   ├── authMiddleware.metrics.test.ts
 │   │   │   │   │   └── authMiddleware.test.ts
 │   │   │   │   ├── http/
+│   │   │   │   │   ├── eventStore.test.ts
 │   │   │   │   │   ├── httpErrorHandler.test.ts
 │   │   │   │   │   ├── httpTransport.lifecycle.test.ts
 │   │   │   │   │   ├── httpTransport.test.ts
@@ -722,6 +728,7 @@ mcp-ts-core/
 │   │   │   │   ├── heartbeat.test.ts
 │   │   │   │   ├── ITransport.test.ts
 │   │   │   │   └── manager.test.ts
+│   │   │   ├── notifications.test.ts
 │   │   │   └── server.test.ts
 │   │   ├── packaging/
 │   │   │   ├── dockerfile.test.ts
@@ -827,6 +834,7 @@ mcp-ts-core/
 │   │   │   │   ├── encoding.test.ts
 │   │   │   │   ├── errorHandler.metrics.test.ts
 │   │   │   │   ├── errorHandler.unit.test.ts
+│   │   │   │   ├── execution-span-context.test.ts
 │   │   │   │   ├── health.test.ts
 │   │   │   │   ├── lazyImport.test.ts
 │   │   │   │   ├── logger.test.ts
