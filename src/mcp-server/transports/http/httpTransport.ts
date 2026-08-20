@@ -51,7 +51,7 @@ import {
   type SessionIdentity,
   SessionStore,
 } from '@/mcp-server/transports/http/sessionStore.js';
-import type { FrameworkServerFactory } from '@/mcp-server/types.js';
+import { type FrameworkServerFactory, resolveSessionMode } from '@/mcp-server/types.js';
 import { logger } from '@/utils/internal/logger.js';
 import {
   type RequestContext,
@@ -144,9 +144,10 @@ export async function createHttpApp<TBindings extends object = HonoNodeBindings>
   const app = new Hono<{ Bindings: TBindings }>();
   const transportContext = withExtra(parentContext, { component: 'HttpTransportSetup' });
 
-  // Initialize session store for stateful mode.
-  // 'auto' resolves to stateful for HTTP (per MCP spec conformance).
-  const isStateful = config.mcpSessionMode === 'stateful' || config.mcpSessionMode === 'auto';
+  // Initialize session store for stateful mode. `auto` is resolved by the
+  // shared resolution the manifest advertises, so what the server does and what
+  // it publishes can never disagree (#357).
+  const isStateful = resolveSessionMode(config.mcpSessionMode) === 'stateful';
   const sessionStore = isStateful
     ? new SessionStore(config.mcpStatefulSessionStaleTimeoutMs)
     : null;

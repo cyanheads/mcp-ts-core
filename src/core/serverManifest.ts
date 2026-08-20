@@ -29,7 +29,11 @@ import {
 } from '@/mcp-server/tools/utils/disabled-tool.js';
 import { inputVariants } from '@/mcp-server/tools/utils/schemaShape.js';
 import type { AnyToolDefinition } from '@/mcp-server/tools/utils/toolDefinition.js';
-import { MODERN_PROTOCOL_REVISION } from '@/mcp-server/types.js';
+import {
+  MODERN_PROTOCOL_REVISION,
+  type ResolvedSessionMode,
+  resolveSessionMode,
+} from '@/mcp-server/types.js';
 import { configurationError } from '@/types-global/errors.js';
 
 // ---------------------------------------------------------------------------
@@ -206,7 +210,11 @@ export interface ManifestTransport {
    * over `https://`.
    */
   publicUrl?: string;
-  sessionMode: string;
+  /**
+   * The mode the server actually runs in. `MCP_SESSION_MODE=auto` is resolved
+   * here, so a client reading the server card never has to resolve it itself.
+   */
+  sessionMode: ResolvedSessionMode;
   type: 'http' | 'stdio';
 }
 
@@ -659,7 +667,7 @@ export function buildServerManifest(input: BuildServerManifestInput): ServerMani
     transport: {
       type: config.mcpTransportType,
       endpointPath: config.mcpHttpEndpointPath,
-      sessionMode: config.mcpSessionMode,
+      sessionMode: resolveSessionMode(config.mcpSessionMode),
       ...(config.mcpPublicUrl && { publicUrl: config.mcpPublicUrl }),
     },
     protocol: {

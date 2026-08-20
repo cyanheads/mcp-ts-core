@@ -638,6 +638,21 @@ describe('HTTP Transport', () => {
       });
     });
 
+    // The default `MCP_SESSION_MODE=auto` serves sessions, which is what the
+    // manifest now advertises as `stateful` — both read `resolveSessionMode`
+    // (#357), so this pins the transport half of that agreement.
+    test('auto runs the stateful arm', async () => {
+      await withConfigOverrides({ mcpSessionMode: 'auto' }, async () => {
+        const { app, sessionStore } = await buildApp();
+        expect(sessionStore).not.toBeNull();
+
+        const sessionId = await initialize(app);
+
+        expect(sessionId).toMatch(/^[0-9a-f]{64}$/);
+        expect((sessionStore as SessionStore).getSessionCount()).toBe(1);
+      });
+    });
+
     test('mints a 64-hex session ID on initialize', async () => {
       await withStatefulMode(async () => {
         const { app, sessionStore } = await buildApp();

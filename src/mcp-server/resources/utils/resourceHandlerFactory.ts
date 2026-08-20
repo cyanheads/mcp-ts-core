@@ -22,6 +22,7 @@ import {
 import { type ResourceSubscriptions, selectNotifiers } from '@/mcp-server/notifications.js';
 import type { AnyResourceDefinition } from '@/mcp-server/resources/utils/resourceDefinition.js';
 import { withRequiredScopes } from '@/mcp-server/transports/auth/lib/authUtils.js';
+import { resolveSessionMode } from '@/mcp-server/types.js';
 import type { StorageService } from '@/storage/core/StorageService.js';
 import { McpError } from '@/types-global/errors.js';
 import { ErrorHandler } from '@/utils/internal/error-handler/errorHandler.js';
@@ -164,7 +165,7 @@ export function createResourceHandler(
     // pass it through only when the consumer opted in via
     // `createApp({ context: { exposeStatelessSessionId: true } })`. Stdio
     // gives no sessionId at the SDK layer, so the gate is moot there.
-    const isStatefulMode = config.mcpSessionMode === 'stateful' || config.mcpSessionMode === 'auto';
+    const isStatefulMode = resolveSessionMode(config.mcpSessionMode) === 'stateful';
     const handlerSessionId =
       sdkSessionId && (isStatefulMode || services.exposeStatelessSessionId === true)
         ? sdkSessionId

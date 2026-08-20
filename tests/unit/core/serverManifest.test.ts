@@ -1085,3 +1085,27 @@ describe('buildServerManifest — extensions and public URL passthrough', () => 
     });
   });
 });
+
+describe('buildServerManifest — transport.sessionMode resolution (#357)', () => {
+  const manifestFor = (mcpSessionMode: AppConfig['mcpSessionMode'], http = true) =>
+    buildServerManifest({
+      config: stubConfig({ mcpSessionMode, mcpTransportType: http ? 'http' : 'stdio' }),
+      tools: [],
+      resources: [],
+      prompts: [],
+    });
+
+  test('resolves auto to the mode the HTTP transport actually runs in', () => {
+    expect(manifestFor('auto').transport.sessionMode).toBe('stateful');
+  });
+
+  test('passes an explicitly configured mode through unchanged', () => {
+    expect(manifestFor('stateful').transport.sessionMode).toBe('stateful');
+    expect(manifestFor('stateless').transport.sessionMode).toBe('stateless');
+  });
+
+  test('never advertises auto under stdio either', () => {
+    expect(manifestFor('auto', false).transport.sessionMode).toBe('stateful');
+    expect(manifestFor('stateless', false).transport.sessionMode).toBe('stateless');
+  });
+});
