@@ -310,3 +310,50 @@ describe('tool() strict input (#232)', () => {
     ).toBeUndefined();
   });
 });
+
+describe('tool() reserved `error` output key', () => {
+  it('rejects an `error` field on the output schema', () => {
+    expect(() =>
+      tool('reserved_output_tool', {
+        description: 'Declares a reserved key.',
+        input: z.object({ query: z.string().describe('Search query') }),
+        output: z.object({ error: z.string().describe('Why it went wrong') }),
+        handler: () => ({ error: 'nope' }),
+      }),
+    ).toThrow(/reserved/);
+  });
+
+  it('rejects an `error` field on the enrichment block', () => {
+    expect(() =>
+      tool('reserved_enrichment_tool', {
+        description: 'Declares a reserved key.',
+        input: z.object({ query: z.string().describe('Search query') }),
+        output: z.object({ ok: z.boolean().describe('ok') }),
+        enrichment: { error: z.string().describe('Why it went wrong') },
+        handler: () => ({ ok: true }),
+      }),
+    ).toThrow(/reserved/);
+  });
+
+  it('names the offending schema so the author knows where to look', () => {
+    expect(() =>
+      tool('reserved_named_tool', {
+        description: 'Declares a reserved key.',
+        input: z.object({ query: z.string().describe('Search query') }),
+        output: z.object({ error: z.string().describe('Why it went wrong') }),
+        handler: () => ({ error: 'nope' }),
+      }),
+    ).toThrow(/'reserved_named_tool' declares an 'error' field in its output schema/);
+  });
+
+  it('leaves an unrelated field name alone', () => {
+    expect(() =>
+      tool('unreserved_tool', {
+        description: 'Declares a similar-but-distinct key.',
+        input: z.object({ query: z.string().describe('Search query') }),
+        output: z.object({ errorText: z.string().describe('Why it went wrong') }),
+        handler: () => ({ errorText: 'nope' }),
+      }),
+    ).not.toThrow();
+  });
+});

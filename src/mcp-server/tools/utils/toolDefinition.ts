@@ -297,7 +297,40 @@ export function tool<
   name: string,
   options: Omit<ToolDefinition<TInput, TOutput, TErrors, TEnrich>, 'name'>,
 ): ToolDefinition<TInput, TOutput, TErrors, TEnrich> {
+  assertErrorKeyUnreserved(name, options.output, options.enrichment);
   return { name, ...options, input: strictenInput(options.input) };
+}
+
+/**
+ * Rejects a definition whose success payload declares a field named `error`.
+ *
+ * `structuredContent.error` is the framework's failure envelope on the wire, so a
+ * success field of the same name cannot be told apart from a failure by any
+ * client. It also breaks the advertised schema outright: the envelope overwrites
+ * the declared field, while the success branch still requires — and forbids —
+ * the same key, leaving a branch no result can satisfy.
+ *
+ * Thrown at definition time, so the conflict surfaces at import rather than as a
+ * client-side validation failure against a schema nothing matches.
+ */
+function assertErrorKeyUnreserved(
+  name: string,
+  output: ZodObject<ZodRawShape>,
+  enrichment: ZodRawShape | undefined,
+): void {
+  const source =
+    'error' in output.shape
+      ? 'output'
+      : enrichment && 'error' in enrichment
+        ? 'enrichment'
+        : undefined;
+  if (!source) return;
+  throw new Error(
+    `Tool '${name}' declares an 'error' field in its ${source} schema. That key is ` +
+      'reserved: a failed call returns `structuredContent.error` ({ code, message, ' +
+      'data }), so a success payload using it is indistinguishable from a failure. ' +
+      "Rename the field (e.g. 'errorText', 'failureDetail').",
+  );
 }
 
 /**
