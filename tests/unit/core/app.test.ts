@@ -344,6 +344,8 @@ vi.mock('@/utils/telemetry/trace.js', () => ({
 }));
 
 import { composeServices, createApp } from '@/core/app.js';
+import { resource } from '@/mcp-server/resources/utils/resourceDefinition.js';
+import { JsonRpcErrorCode } from '@/types-global/errors.js';
 
 describe('core/app', () => {
   let originalEnv: NodeJS.ProcessEnv;
@@ -1047,5 +1049,102 @@ describe('core/app', () => {
 
     stderrWriteSpy.mockRestore();
     processExitSpy.mockRestore();
+  });
+  // -------------------------------------------------------------------------
+  // Cache hints (#359)
+  // -------------------------------------------------------------------------
+
+  describe('cache hints', () => {
+    /** A resource carrying whatever hint a case wants to put on the wire. */
+    const withHint = (cacheHint: { cacheScope?: 'public' | 'private'; ttlMs?: number }) =>
+      resource('hinted://doc', {
+        name: 'hinted_doc',
+        description: 'A hinted document.',
+        cacheHint,
+        handler: () => ({ ok: true }),
+      });
+
+    it('forwards the per-operation map to createMcpServerInstance', async () => {
+      const cacheHints = {
+        'tools/list': { ttlMs: 3_600_000, cacheScope: 'public' as const },
+        'resources/read': { ttlMs: 0 },
+      };
+
+      const composed = await composeServices({ cacheHints });
+      await composed.createServer({ era: 'modern' });
+
+      expect(mockCreateMcpServerInstance).toHaveBeenCalledWith(
+        expect.objectContaining({ cacheHints }),
+      );
+    });
+
+    it('omits the option entirely when no hints are configured', async () => {
+      const plain = resource('plain://doc', {
+        name: 'plain_doc',
+        description: 'A resource that declares no cache hint.',
+        handler: () => ({ ok: true }),
+      });
+
+      const composed = await composeServices({ resources: [plain] });
+      await composed.createServer({ era: 'modern' });
+
+      expect(mockCreateMcpServerInstance).toHaveBeenCalledWith(
+        expect.not.objectContaining({ cacheHints: expect.anything() }),
+      );
+    });
+
+    it.each([
+      ['negative', -1],
+      ['fractional', 1.5],
+      ['past the safe-integer range', Number.MAX_SAFE_INTEGER + 1],
+      ['not a number at all', Number.NaN],
+      ['infinite', Number.POSITIVE_INFINITY],
+    ])('rejects a %s per-operation ttlMs by name', async (_label, ttlMs) => {
+      // Without the framework's own check this resolves, and the bad value
+      // surfaces later as a bare SDK RangeError from the McpServer constructor.
+      const error = await composeServices({ cacheHints: { 'tools/list': { ttlMs } } }).then(
+        () => undefined,
+        (err: unknown) => err,
+      );
+
+      expect(error).toBeMcpError(JsonRpcErrorCode.ConfigurationError);
+      expect((error as Error).message).toContain("cacheHints['tools/list'].ttlMs");
+      expect((error as Error).message).toContain('non-negative safe integer');
+    });
+
+    it('rejects an invalid per-resource ttlMs by resource name', async () => {
+      const error = await composeServices({ resources: [withHint({ ttlMs: -5 })] }).then(
+        () => undefined,
+        (err: unknown) => err,
+      );
+
+      expect(error).toBeMcpError(JsonRpcErrorCode.ConfigurationError);
+      expect((error as Error).message).toContain("resource 'hinted_doc' cacheHint.ttlMs");
+    });
+
+    it('names an unnamed resource by its URI template', async () => {
+      const anonymous = resource('anon://{id}', {
+        description: 'A resource that never declared a name.',
+        cacheHint: { ttlMs: -1 },
+        handler: () => ({ ok: true }),
+      });
+
+      const error = await composeServices({ resources: [anonymous] }).then(
+        () => undefined,
+        (err: unknown) => err,
+      );
+
+      expect(error).toBeMcpError(JsonRpcErrorCode.ConfigurationError);
+      expect((error as Error).message).toContain("resource 'anon://{id}' cacheHint.ttlMs");
+    });
+
+    it('accepts the boundary values the spec allows', async () => {
+      await expect(
+        composeServices({
+          cacheHints: { 'tools/list': { ttlMs: 0 }, 'server/discover': { cacheScope: 'public' } },
+          resources: [withHint({ ttlMs: Number.MAX_SAFE_INTEGER })],
+        }),
+      ).resolves.toBeDefined();
+    });
   });
 });

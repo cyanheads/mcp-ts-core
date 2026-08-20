@@ -106,6 +106,9 @@ export class ResourceRegistry {
           description: def.description,
           mimeType,
           ...(def.size != null && { size: def.size }),
+          // 2026-07-28 cache hint. The SDK strips it from the advertised
+          // metadata and merges it over the server-level per-operation hint.
+          ...(def.cacheHint && { cacheHint: def.cacheHint }),
           ...(def.examples && { examples: def.examples }),
           ...(def.annotations && { annotations: def.annotations }),
           ...(def._meta && { _meta: def._meta }),

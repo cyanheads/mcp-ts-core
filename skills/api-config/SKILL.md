@@ -4,7 +4,7 @@ description: >
   Reference for core and server configuration in `@cyanheads/mcp-ts-core`. Covers env var tables with defaults, priority order, server-specific Zod schema pattern, and Workers lazy-parsing requirement.
 metadata:
   author: cyanheads
-  version: "1.11"
+  version: "1.12"
   audience: external
   type: reference
 ---
@@ -47,11 +47,35 @@ Managed by `@cyanheads/mcp-ts-core`. Validated via Zod from environment variable
 | `websiteUrl` | `string?` | Canonical homepage / repository URL |
 | `description` | `string?` | One-line description; wins over `MCP_SERVER_DESCRIPTION` when set |
 | `icons` | `Implementation['icons']?` | Array of icon objects: `{ src, mimeType?, sizes?: string[], theme?: 'light'\|'dark' }` |
+| `cacheHints` | `CacheHints?` | Cache hints for the 2026-07-28 cacheable results, keyed by operation — see below |
+
+#### Cache hints (`cacheHints`)
+
+API-only, no env var. Sets the `ttlMs` / `cacheScope` a client may cache a cacheable result for on protocol revision 2026-07-28. Keys are the closed set of cacheable operations: `tools/list`, `prompts/list`, `resources/list`, `resources/templates/list`, `resources/read`, `server/discover`.
+
+```ts
+await createApp({
+  cacheHints: {
+    'tools/list': { ttlMs: 3_600_000, cacheScope: 'public' },
+    'resources/read': { ttlMs: 60_000 },
+  },
+});
+```
+
+- `ttlMs` — cache lifetime in milliseconds; must be a non-negative safe integer. An invalid value fails at startup with a `ConfigurationError` naming the field.
+- `cacheScope` — `'private'` (only the requesting client may cache) or `'public'` (shared caches may too).
+- A resource's own `cacheHint` overrides the `resources/read` entry for that resource, field by field — see the `add-resource` skill.
+- Omitting a hint keeps the SDK defaults (`ttlMs: 0`, `cacheScope: 'private'`). Responses to 2025-era clients are never affected.
+
+---
+
+### Environment & logging
+
+| Env Var | `AppConfig` field | Default | Notes |
+|:--------|:-----------------|:--------|:------|
 | `NODE_ENV` | `environment` | `development` | Aliases: `dev`→`development`, `prod`→`production`, `test`→`testing` |
 | `MCP_LOG_LEVEL` | `logLevel` | `debug` | Aliases: `warn`→`warning`, `err`→`error`, `fatal`/`silent`→`emerg`, `trace`→`debug`, `information`→`info` |
 | `LOGS_DIR` | `logsPath` | `<project-root>/logs` | Node.js only; absolute or relative to project root |
-
----
 
 ### Transport
 

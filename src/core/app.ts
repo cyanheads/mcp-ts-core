@@ -21,6 +21,7 @@ import {
   type LandingConfig,
   type ServerManifest,
 } from '@/core/serverManifest.js';
+import { assertValidCacheHints, type CacheHints } from '@/mcp-server/cacheHints.js';
 import { notifierFor } from '@/mcp-server/notifications.js';
 import { PromptRegistry } from '@/mcp-server/prompts/prompt-registration.js';
 import type { AnyPromptDefinition } from '@/mcp-server/prompts/utils/promptDefinition.js';
@@ -98,6 +99,27 @@ export type SupabaseClientHandle = object;
 
 /** Options for {@link createApp}. All arrays default to empty. */
 export interface CreateAppOptions<TSupabaseClient extends object = SupabaseClientHandle> {
+  /**
+   * Cache hints for the cacheable results of protocol revision 2026-07-28,
+   * keyed by operation (`tools/list`, `prompts/list`, `resources/list`,
+   * `resources/templates/list`, `resources/read`, `server/discover`). Each
+   * entry sets the `ttlMs` / `cacheScope` a client may cache that operation's
+   * result for; `ttlMs` must be a non-negative safe integer.
+   *
+   * A resource's own `cacheHint` overrides the `resources/read` entry for that
+   * resource, field by field. Omitting a hint keeps the SDK's conservative
+   * defaults (`ttlMs: 0`, `cacheScope: 'private'`). 2025-era responses are
+   * never affected.
+   *
+   * @example
+   * ```ts
+   * cacheHints: {
+   *   'tools/list': { ttlMs: 3_600_000, cacheScope: 'public' },
+   *   'resources/read': { ttlMs: 60_000 },
+   * }
+   * ```
+   */
+  cacheHints?: CacheHints;
   /** Options affecting the `Context` object passed to handlers. */
   context?: ContextOptions;
   /**
@@ -258,6 +280,7 @@ export async function composeServices<TSupabaseClient extends object = SupabaseC
     tools = [],
     resources = [],
     prompts = [],
+    cacheHints,
     description,
     extensions,
     icons,
@@ -269,6 +292,11 @@ export async function composeServices<TSupabaseClient extends object = SupabaseC
     websiteUrl,
     context: contextOptions,
   } = options;
+
+  // Fail before any service is constructed: an invalid `ttlMs` would otherwise
+  // surface as a bare SDK `RangeError` from the McpServer constructor, with no
+  // indication of which option carries it.
+  assertValidCacheHints(cacheHints, resources);
 
   // Persist name/version overrides to process.env so they survive resetConfig()
   // and are visible to OTEL, logger, and transport throughout the process lifetime.
@@ -394,6 +422,7 @@ export async function composeServices<TSupabaseClient extends object = SupabaseC
       config,
       era: ctx.era,
       notifier: notify,
+      ...(cacheHints && { cacheHints }),
       ...(description && { description }),
       ...(extensions && { extensions }),
       ...(icons && { icons }),

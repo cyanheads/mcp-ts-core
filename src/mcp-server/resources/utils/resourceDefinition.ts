@@ -8,6 +8,7 @@
  */
 
 import type {
+  CacheHint,
   CompleteResourceTemplateCallback,
   ListResourcesResult,
   ReadResourceResult,
@@ -67,6 +68,19 @@ export interface ResourceDefinition<
   annotations?: ResourceAnnotations;
   /** Required auth scopes. */
   auth?: string[];
+  /**
+   * Cache hint applied to this resource's `resources/read` results on protocol
+   * revision 2026-07-28. Overrides the `resources/read` entry of
+   * `createApp({ cacheHints })` field by field — a field left unset here still
+   * falls back to that per-operation hint, and then to the SDK's conservative
+   * defaults (`ttlMs: 0`, `cacheScope: 'private'`).
+   *
+   * `ttlMs` must be a non-negative safe integer. 2025-era responses are
+   * unaffected either way.
+   *
+   * @example `cacheHint: { ttlMs: 300_000, cacheScope: 'public' }`
+   */
+  cacheHint?: CacheHint;
   /**
    * Per-variable completion callbacks for URI template variables. Forwarded to
    * the SDK's `ResourceTemplate` constructor so the SDK auto-installs

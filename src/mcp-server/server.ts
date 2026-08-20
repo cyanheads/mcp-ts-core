@@ -17,6 +17,7 @@ import {
 } from '@modelcontextprotocol/server';
 
 import type { AppConfig } from '@/config/index.js';
+import type { CacheHints } from '@/mcp-server/cacheHints.js';
 import type { PromptRegistry } from '@/mcp-server/prompts/prompt-registration.js';
 import type { ResourceRegistry } from '@/mcp-server/resources/resource-registration.js';
 import { installResourceSubscriptions } from '@/mcp-server/resources/resourceSubscriptions.js';
@@ -26,6 +27,12 @@ import { requestContextService } from '@/utils/internal/requestContext.js';
 
 /** Dependencies required to create an MCP server instance. */
 export interface McpServerDeps {
+  /**
+   * Per-operation cache hints for the 2026-07-28 cacheable results. A resource
+   * declaring its own `cacheHint` overrides the `resources/read` entry here
+   * for that resource, field by field.
+   */
+  cacheHints?: CacheHints;
   config: AppConfig;
   /**
    * One-line description forwarded to `new McpServer({ serverInfo })`.
@@ -115,6 +122,7 @@ export async function createMcpServerInstance(deps: McpServerDeps): Promise<McpS
           extensions: deps.extensions as ServerCapabilities['extensions'],
         }),
       },
+      ...(deps.cacheHints && { cacheHints: deps.cacheHints }),
       ...(deps.instructions && { instructions: deps.instructions }),
       // Multi-round-trip serving: `ctx.requestInput(...)` returns are fulfilled
       // by the client on 2026-era requests and by the SDK's legacy shim (real
