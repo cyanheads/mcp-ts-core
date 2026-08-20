@@ -52,6 +52,22 @@ vi.mock('@/utils/internal/logger.js', () => ({
 }));
 
 vi.mock('@/utils/internal/requestContext.js', () => ({
+  toCanonicalContext: (context: Record<string, unknown>) =>
+    Object.fromEntries(
+      [
+        'auth',
+        'extra',
+        'operation',
+        'requestId',
+        'sessionId',
+        'spanId',
+        'tenantId',
+        'timestamp',
+        'traceId',
+      ]
+        .filter((k) => context[k] !== undefined)
+        .map((k) => [k, context[k]]),
+    ),
   withExtra: (ctx: { extra?: Record<string, unknown> }, fields: Record<string, unknown>) => ({
     ...ctx,
     extra: { ...ctx.extra, ...fields },
@@ -1162,6 +1178,39 @@ describe('createToolHandler', () => {
       // `{}` — a handler that returned nothing — is what the success-only
       // schema never caught either.
       expect(validate({}).valid).toBe(false);
+    });
+
+    it.each([
+      [
+        'refine',
+        z
+          .object({ a: z.string().describe('a'), b: z.number().describe('b') })
+          .refine((v) => v.a.length > 0, 'a must be set'),
+      ],
+      [
+        'superRefine',
+        z
+          .object({ a: z.string().describe('a'), b: z.number().describe('b') })
+          .superRefine(() => {}),
+      ],
+    ])('widens an output schema carrying a .%s() check', (_label, output) => {
+      // `.refine()` / `.superRefine()` return a ZodObject, so `tool()` accepts
+      // them — and Zod rejects `.partial()` on one. Widening through `.partial()`
+      // therefore threw during registration and took the server down at startup.
+      const refinedTool = tool('refined_output_tool', {
+        description: 'Declares a refined output schema.',
+        input: z.object({ q: z.string().describe('q') }),
+        output: output as never,
+        handler: () => ({ a: 'x', b: 1 }) as never,
+      });
+
+      const emittedSchema = z.toJSONSchema(
+        advertisedOutputSchema(refinedTool as AnyToolDefinition),
+        { io: 'output' },
+      ) as { properties: Record<string, unknown>; required?: string[] };
+
+      expect(Object.keys(emittedSchema.properties).sort()).toEqual(['a', 'b', 'error']);
+      expect(emittedSchema.required).toBeUndefined();
     });
 
     it('leaves effectiveOutputSchema strict — the authoring check is unchanged', async () => {

@@ -257,7 +257,20 @@ export function advertisedOutputSchema(def: AnyToolDefinition): ZodObject<ZodRaw
     .filter(([, field]) => !(field as ZodType).safeParse(undefined).success)
     .map(([key]) => key);
 
-  const widened = success.partial().extend({
+  // Rebuilt field by field rather than via `success.partial()`: Zod rejects
+  // `.partial()` outright on an object carrying `.refine()` / `.superRefine()`
+  // checks, and `tool()` accepts those (both return a `ZodObject`), so calling
+  // it would throw at registration and take the whole server down at startup.
+  // Object-level refinements are dropped here on purpose — this schema is
+  // advertised, never parsed against, and JSON Schema cannot express them.
+  const optionalShape = Object.fromEntries(
+    Object.entries(success.shape).map(([key, field]) => [key, (field as ZodType).optional()]),
+  ) as ZodRawShape;
+  const catchall = (success as unknown as { _zod: { def: { catchall?: ZodType } } })._zod.def
+    .catchall;
+  const base =
+    catchall === undefined ? z.object(optionalShape) : z.object(optionalShape).catchall(catchall);
+  const widened = base.extend({
     error: toolErrorEnvelopeSchema(def)
       .optional()
       .describe('Present when the call failed. Absent on success.'),
