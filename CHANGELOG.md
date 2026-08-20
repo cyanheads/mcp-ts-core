@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.12.0](changelog/0.12.x/0.12.0.md) — 2026-08-19 · ⚠️ Breaking
+
+Adopts MCP SDK v2: every HTTP endpoint now serves protocol revision 2026-07-28 alongside the 2025 era, ctx.elicit is replaced by multi-round-trip input, the experimental tasks surface is removed, and the request-context types collapse into one.
+
 ## [0.11.5](changelog/0.11.x/0.11.5.md) — 2026-08-12
 
 Server-initiated requests survive the stateful HTTP request boundary, so ctx.elicit completes over Streamable HTTP instead of stranding the handler; init scaffolds the .github community-health files.

@@ -1,9 +1,9 @@
 # Developer Protocol
 
 **Package:** `@cyanheads/mcp-ts-core`
-**Version:** 0.11.5
+**Version:** 0.12.0
 **Engines:** Bun ≥1.3.0, Node ≥24.0.0
-**MCP SDK:** `@modelcontextprotocol/sdk` ^1.30.0
+**MCP SDK:** `@modelcontextprotocol/server` ^2.0.0 (protocol revisions 2026-07-28 and 2025-*)
 **Zod:** ^4.4.3
 **GitHub:** [cyanheads/mcp-ts-core](https://github.com/cyanheads/mcp-ts-core)
 **npm:** [@cyanheads/mcp-ts-core](https://www.npmjs.com/package/@cyanheads/mcp-ts-core)
@@ -30,12 +30,12 @@ Both paths share the same public API. Init copies starter `package.json`, config
 
 - **Logic throws, framework catches.** Pure, stateless `handler` functions, no `try/catch`. Plain `Error` works — framework catches, classifies, formats. Use `McpError(code, message, data, options?)` only when you need a specific JSON-RPC code or structured data; 4th arg `{ cause }` chains.
 - **Full-stack observability.** The framework automatically instruments every tool/resource call — OTel span, duration/payload/memory metrics, structured completion log. Use `ctx.log` for additional domain-specific logging within handlers (external API calls, multi-step operations, business events). `requestId`, `traceId`, `tenantId` auto-correlated. No `console` calls.
-- **Unified Context.** Handlers receive `ctx` with logging (`ctx.log`), tenant-scoped storage (`ctx.state`), optional protocol capabilities (`ctx.elicit`), and cancellation (`ctx.signal`).
+- **Unified Context.** Handlers receive `ctx` with logging (`ctx.log`), tenant-scoped storage (`ctx.state`), multi-round-trip input (`ctx.requestInput` / `ctx.inputs`), and cancellation (`ctx.signal`). `Context extends RequestContext`, so `ctx` goes straight into any service, storage, or logger call.
 - **Decoupled storage.** `ctx.state` for tenant-scoped KV. Never access persistence backends directly.
 - **Canvas tokens are capabilities, not tenant-scoped state.** A `canvasId` is a 10-char URL-safe token; possession grants full read/write/drop. Shareable between agents and across users in single-tenant deployments. Tools accept token in `input` (omit to create fresh) and return in `output`; collaboration is opt-in via token exchange.
 - **Runtime parity.** All features work across `stdio`/`http`/Worker. Guard non-portable deps via `runtimeCaps` from `/utils` (`isNode`, `isBun`, `isWorkerLike`, `hasBuffer`, `hasProcess`, etc.). Prefer runtime-agnostic abstractions (Hono, Fetch APIs).
 - **Definition linting is build-time only.** Run `bun run lint:mcp` (standalone) or `bun run devcheck` (gate). Not invoked at server startup — new lint rules are additive and never break deployed servers. Every diagnostic links to the rule reference in `api-linter` skill; see that skill for the full rule catalog.
-- **Elicitation for missing input.** Use `ctx.elicit` when the client supports it.
+- **Ask for missing input by returning, not awaiting.** `return ctx.requestInput({ inputRequests: … })` suspends the handler; it is re-entered with `ctx.inputs` populated. One handler serves both protocol eras.
 - **Close the loop on issues.** When implementing work tracked by a GitHub issue, comment on the issue with what landed and close it. Do both — a comment without a close leaves stale issues open; a close without a comment leaves no record of what shipped. The comment is for future readers — state the concrete changes, not the conversation that produced them.
 
 ---
@@ -49,7 +49,6 @@ Both paths share the same public API. Init copies starter `package.json`, config
 | `/tools` | `ToolDefinition`, `AnyToolDefinition`, `ToolAnnotations` | Tool definition types |
 | `/resources` | `ResourceDefinition`, `AnyResourceDefinition` | Resource definition types |
 | `/prompts` | `PromptDefinition` | Prompt definition type |
-| `/tasks` | `TaskToolDefinition`, `isTaskToolDefinition` | Task tool escape hatch |
 | `/errors` | `McpError`, `JsonRpcErrorCode`, `notFound`, `validationError`, `unauthorized`, ... | Error types, codes, and factory functions |
 | `/config` | `AppConfig`, `config`, `parseConfig`, `parseEnvConfig`, `resetConfig`, `ConfigSchema`, `FRAMEWORK_NAME`, `FRAMEWORK_VERSION` | Zod-validated config, framework identity, env-var helper |
 | `/auth` | `checkScopes` | Dynamic scope checking |
@@ -242,7 +241,9 @@ export const myTool = tool('my_tool', {
 
 **`enrichment`** (optional): The success-path counterpart to `errors[]` — a `ZodRawShape` of agent-facing context (empty-result notices, query/filter echo, pagination totals, truncation disclosure) that must reach both client surfaces. Populate via `ctx.enrich(...)` (or `ctx.enrich.notice()` / `.total()` / `.echo()` / `.truncated()`) in the handler or service layer. The framework merges it into `structuredContent`, advertises `output.extend(enrichment)` as `outputSchema`, and mirrors it into a `content[]` trailer — so it reaches `structuredContent`-only and `content[]`-only clients alike, with no `format()` entry. Keys must be disjoint from `output`; a required field never populated fails the effective-output parse. See `api-context`'s `ctx.enrich`.
 
-**Task tools:** Add `task: true` for long-running async operations. Framework manages lifecycle: creates task → returns ID immediately → runs handler in background with `ctx.progress` → stores result/error → `ctx.signal` for cancellation. See `add-tool` skill for full example.
+**Strict input:** `tool()` stores `input.strict()`, so an unrecognized argument key is rejected by name before the handler runs and `inputSchema` advertises `additionalProperties: false`. Root-level only — a nested `z.object()` still strips unless it is strict itself. An explicit `.passthrough()` / `.catchall()` is honored.
+
+**Advertised vs. parsed output:** `tools/list` advertises a widened schema (success fields optional, `error` declared) so an error envelope validates in strict clients; the framework still parses success results against the strict `output` (+ `enrichment`).
 
 ---
 
@@ -284,13 +285,13 @@ interface Context {
   readonly auth?: AuthContext;
   readonly log: ContextLogger;                // auto-correlated: requestId, traceId, tenantId
   readonly state: ContextState;               // tenant-scoped KV storage
-  readonly elicit?: ElicitFn;                 // form call (message, schema) + .url(message, url); present iff client advertises elicitation
+  readonly requestInput: RequestInputFn;      // (spec) => never — suspends and asks the caller for input
+  readonly inputs: ContextInputs;             // reader over a retried request's responses
   readonly notifyPromptListChanged?: (() => void) | undefined;     // prompt list changed
   readonly notifyResourceListChanged?: (() => void) | undefined;   // resource list changed
   readonly notifyResourceUpdated?: ((uri: string) => void) | undefined; // resource content changed
   readonly notifyToolListChanged?: (() => void) | undefined;       // tool list changed
-  readonly signal: AbortSignal;               // cancellation
-  readonly progress?: ContextProgress;        // present when task: true
+  readonly signal: AbortSignal;               // cancellation (also fires when the transport closes)
   readonly uri?: URL;                         // present for resource handlers
   readonly content: ContentCollect;           // media blocks → prepended to content[]; never in structuredContent
   readonly enrich: Enrich;                    // success-path agent context → structuredContent + content[]; typed on HandlerContext<R, E>
@@ -326,28 +327,32 @@ Throws `McpError(InvalidRequest)` if `tenantId` missing. Tenant ID resolution:
 | HTTP + `MCP_AUTH_MODE=none` | `'default'` (single-tenant by design) |
 | HTTP + `MCP_AUTH_MODE=jwt`/`oauth` | JWT `'tid'` claim — fail-closed if absent |
 
-### `ctx.elicit`
+### `ctx.requestInput` / `ctx.inputs`
 
-Check for presence before calling:
+Read what came back first, then request only what is still missing. Write it as
+`return ctx.requestInput(...)` — the `never` return narrows the read above it.
 
 ```ts
-if (ctx.elicit) {
-  const result = await ctx.elicit('What format?', z.object({
-    format: z.enum(['json', 'csv']).describe('Output format'),
-  }));
-  if (result.action === 'accept') useFormat(result.content.format);
+const Format = z.object({ format: z.enum(['json', 'csv']).describe('Output format') });
+
+const answer = ctx.inputs.accepted('format', Format);
+if (!answer) {
+  return ctx.requestInput({
+    inputRequests: {
+      format: inputRequired.elicit({ message: 'What format?', requestedSchema: Format }),
+    },
+  });
 }
+useFormat(answer.format);
 ```
 
-URL mode: `await ctx.elicit.url('Authorize access', 'https://example.com/authorize')` — hands the user an external link instead of a form. `elicitationId` is generated internally; `content` is absent, only `action` reports the outcome.
+`ctx.inputs.view(key)` discriminates `missing` / `elicit` / `sampling` / `roots` — a declined or
+cancelled prompt is terminal, not a round to retry. `inputRequired.elicitUrl({ message, url })`
+hands the user an external link instead of a form.
 
 ### `ctx.content`
 
 Accumulates non-text content blocks — image/audio bytes, embedded resources, resource links — onto the response: `ctx.content.image(data, mimeType)`, `ctx.content.audio(data, mimeType)`, or `ctx.content(block)` for a raw `ContentBlock`. Blocks are prepended to `content[]` after `format()` runs and never enter `structuredContent`, so a handler can emit media for the calling model without the base64 duplicating into typed output. Always present (no-op when unused); callable from handler and service layer.
-
-### `ctx.progress`
-
-Present when `task: true`. Methods: `setTotal(n)`, `increment(amount?)`, `update(message)`.
 
 See `api-context` skill for full details.
 
@@ -515,8 +520,7 @@ Skills live in `skills/<name>/SKILL.md`; the full list is discoverable via the a
 - **Builders:** `tool()`/`resource()`/`prompt()` with correct fields (`handler`, `input`, `output`, `format`, `auth`, `args`)
 - **`format()` completeness:** must carry the same data as `output` (parity is lint-enforced — see Adding a Tool)
 - **Auth:** via `auth: ['scope']` on definitions (not HOF wrapper)
-- **Presence checks:** `ctx.elicit` checked before use
-- **Task tools:** use `task: true` flag
+- **Missing input:** read `ctx.inputs` first, then `return ctx.requestInput(...)`
 - **Pagination:** large resource lists use `extractCursor`/`paginateArray`
 - **Registration:** definitions exported in `definitions/index.ts` barrel
 - **Tests:** `createMockContext()`, `.handler()` tested directly

@@ -1,6 +1,6 @@
 # mcp-ts-core - Directory Structure
 
-Generated on: 2026-08-12 12:36:07
+Generated on: 2026-08-20 05:23:39
 
 ```text
 mcp-ts-core/
@@ -22,6 +22,7 @@ mcp-ts-core/
 │   ├── 0.1.x/
 │   ├── 0.10.x/
 │   ├── 0.11.x/
+│   ├── 0.12.x/
 │   ├── 0.2.x/
 │   ├── 0.3.x/
 │   ├── 0.4.x/
@@ -138,7 +139,6 @@ mcp-ts-core/
 │   │   │       └── echo.resource.ts
 │   │   └── tools/
 │   │       └── definitions/
-│   │           ├── template-async-countdown.tool.ts
 │   │           ├── template-cat-fact.tool.ts
 │   │           ├── template-data-explorer.app-tool.ts
 │   │           ├── template-echo-message.tool.ts
@@ -307,16 +307,8 @@ mcp-ts-core/
 │   │   │   ├── utils/
 │   │   │   │   ├── resourceDefinition.ts
 │   │   │   │   └── resourceHandlerFactory.ts
-│   │   │   └── resource-registration.ts
-│   │   ├── tasks/
-│   │   │   ├── core/
-│   │   │   │   ├── evictingTaskMessageQueue.ts
-│   │   │   │   ├── sessionAwareTaskStore.ts
-│   │   │   │   ├── storageBackedTaskStore.ts
-│   │   │   │   ├── taskManager.ts
-│   │   │   │   └── taskTypes.ts
-│   │   │   └── utils/
-│   │   │       └── taskToolDefinition.ts
+│   │   │   ├── resource-registration.ts
+│   │   │   └── resourceSubscriptions.ts
 │   │   ├── tools/
 │   │   │   ├── utils/
 │   │   │   │   ├── disabled-tool.ts
@@ -370,10 +362,10 @@ mcp-ts-core/
 │   │   │   ├── heartbeat.ts
 │   │   │   ├── ITransport.ts
 │   │   │   └── manager.ts
-│   │   ├── elicitation.ts
+│   │   ├── inputRequired.ts
 │   │   ├── notifications.ts
-│   │   ├── protocolSession.ts
-│   │   └── server.ts
+│   │   ├── server.ts
+│   │   └── types.ts
 │   ├── services/
 │   │   ├── canvas/
 │   │   │   ├── core/
@@ -584,7 +576,6 @@ mcp-ts-core/
 │   │   ├── auth-scoped-server.js
 │   │   ├── http-protocol-session-server.js
 │   │   ├── mcp-app-server.js
-│   │   ├── task-protocol-server.js
 │   │   └── worker-runtime.fixture.ts
 │   ├── fuzz/
 │   │   ├── definition-fuzz.test.ts
@@ -601,11 +592,11 @@ mcp-ts-core/
 │   │   ├── index.ts
 │   │   ├── matchers.ts
 │   │   ├── oauth-jwks-fixture.ts
+│   │   ├── server-context.ts
 │   │   └── server-process.ts
 │   ├── integration/
 │   │   ├── completions.int.test.ts
 │   │   ├── config.int.test.ts
-│   │   ├── elicitation.int.test.ts
 │   │   ├── error-handler.int.test.ts
 │   │   ├── http-auth-sessions.test.ts
 │   │   ├── http-auth.test.ts
@@ -617,12 +608,13 @@ mcp-ts-core/
 │   │   ├── http.test.ts
 │   │   ├── logger.int.test.ts
 │   │   ├── mcp-apps.int.test.ts
+│   │   ├── multi-round-trip.int.test.ts
 │   │   ├── oauth-jwks.int.test.ts
 │   │   ├── package-consumer.int.test.ts
 │   │   ├── public-api-contract.int.test.ts
 │   │   ├── setup.ts
 │   │   ├── stdio.test.ts
-│   │   └── tasks-protocol.int.test.ts
+│   │   └── wire-conformance.int.test.ts
 │   ├── smoke/
 │   │   ├── prompts/
 │   │   │   └── code-review.prompt.test.ts
@@ -632,7 +624,6 @@ mcp-ts-core/
 │   │   ├── services/
 │   │   │   └── canvas-duckdb.test.ts
 │   │   └── tools/
-│   │       ├── template-async-countdown.tool.test.ts
 │   │       ├── template-data-explorer.app-tool.test.ts
 │   │       ├── template-echo-app.app-tool.test.ts
 │   │       ├── template-echo-message.tool.test.ts
@@ -687,15 +678,6 @@ mcp-ts-core/
 │   │   │   │   │   ├── resourceDefinition.test.ts
 │   │   │   │   │   └── resourceHandlerFactory.test.ts
 │   │   │   │   └── resource-registration.test.ts
-│   │   │   ├── tasks/
-│   │   │   │   ├── core/
-│   │   │   │   │   ├── evictingTaskMessageQueue.test.ts
-│   │   │   │   │   ├── sessionAwareTaskStore.test.ts
-│   │   │   │   │   ├── storageBackedTaskStore.test.ts
-│   │   │   │   │   └── taskManager.test.ts
-│   │   │   │   ├── utils/
-│   │   │   │   │   └── taskToolDefinition.test.ts
-│   │   │   │   └── taskManager.metrics.test.ts
 │   │   │   ├── tools/
 │   │   │   │   ├── utils/
 │   │   │   │   │   ├── toolDefinition.test.ts

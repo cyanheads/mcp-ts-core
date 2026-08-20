@@ -5,9 +5,9 @@
 
 <div align="center">
 
-[![Version](https://img.shields.io/badge/Version-0.11.5-blue.svg?style=flat-square)](./CHANGELOG.md) [![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg?style=flat-square)](./LICENSE) [![MCP Spec](https://img.shields.io/badge/MCP%20Spec-2025--11--25-8A2BE2.svg?style=flat-square)](https://github.com/modelcontextprotocol/modelcontextprotocol/blob/main/docs/specification/2025-11-25/changelog.mdx)
+[![Version](https://img.shields.io/badge/Version-0.12.0-blue.svg?style=flat-square)](./CHANGELOG.md) [![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg?style=flat-square)](./LICENSE) [![MCP Spec](https://img.shields.io/badge/MCP%20Spec-2026--07--28-8A2BE2.svg?style=flat-square)](https://modelcontextprotocol.io/specification/2026-07-28)
 
-[![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^1.30.0-green.svg?style=flat-square)](https://modelcontextprotocol.io/) [![TypeScript](https://img.shields.io/badge/TypeScript-^7.0.2-3178C6.svg?style=flat-square)](https://www.typescriptlang.org/) [![Bun](https://img.shields.io/badge/Bun-v1.3.0%2B-blueviolet.svg?style=flat-square)](https://bun.sh/)
+[![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^2.0.0-green.svg?style=flat-square)](https://modelcontextprotocol.io/) [![TypeScript](https://img.shields.io/badge/TypeScript-^7.0.2-3178C6.svg?style=flat-square)](https://www.typescriptlang.org/) [![Bun](https://img.shields.io/badge/Bun-v1.3.0%2B-blueviolet.svg?style=flat-square)](https://bun.sh/)
 
 [![Framework](https://img.shields.io/badge/Built%20on-@cyanheads/mcp--ts--core-67E8F9?style=flat-square)](https://www.npmjs.com/package/@cyanheads/mcp-ts-core)
 
@@ -143,9 +143,10 @@ It also works on Cloudflare Workers with `createWorkerHandler()` — same defini
 - **Declarative definitions** — `tool()`, `resource()`, `prompt()` builders with Zod schemas; `appTool()`/`appResource()` add interactive HTML UIs.
 - **Server-level orientation** — `instructions` on `createApp`/`createWorkerHandler` rides every `initialize` for the model. Cross-tool composition hints, regional notes, scope guidance — without leaking text into every tool description.
 - **Server identity** — optional `title`, `websiteUrl`, `description`, `icons` (SEP-973) on `createApp`/`createWorkerHandler` flow to `initialize` serverInfo, the `/.well-known/mcp.json` server card, and the landing page.
-- **Unified Context** — one `ctx` for logging, tenant-scoped storage, elicitation, cancellation, and task progress.
+- **Unified Context** — one `ctx` for logging, tenant-scoped storage, multi-round-trip input collection, and cancellation. `Context extends RequestContext`, so a handler's `ctx` goes straight into any service or storage call.
 - **Auth** — `auth: ['scope']` on definitions, checked before dispatch (no wrapper code). Modes: `none`, `jwt`, or `oauth` (local secret or JWKS).
-- **Task tools** — `task: true` for long-running ops; framework manages create/poll/progress/complete/cancel.
+- **Two protocol revisions, one handler** — HTTP serves both the 2026-07-28 revision (per-request `_meta` envelope, no session) and the `initialize`-negotiated 2025 era (sessionful, identity-bound). Handlers are written once; the SDK's legacy shim fulfils multi-round-trip input for 2025-era clients.
+- **Multi-round-trip input** — a handler `return`s `ctx.requestInput(...)` for a confirmation, a sampling call, or the client's roots, and is re-entered with the answers on `ctx.inputs`.
 - **Definition linter** — validates names, schemas, auth scopes, annotations, format-parity, and cross-vendor JSON Schema portability at build time. Run via `lint:mcp` or `devcheck` — not invoked at server startup.
 - **Typed error contracts** — declare `errors: [{ reason, code, when, recovery, retryable? }]` and handlers get a typed `ctx.fail(reason, …)`. Contracts publish in `tools/list` so clients preview failure modes; the linter cross-checks the handler. Factories (`notFound()`, `httpErrorFromResponse()`, …) cover ad-hoc throws; plain `Error` auto-classifies.
 - **Multi-backend storage** — `in-memory`, filesystem, Supabase, Cloudflare D1/KV/R2. Swap via env var; handlers don't change.
@@ -219,16 +220,16 @@ Handlers receive a unified `Context` object:
 
 | Property | Type | Description |
 |:---------|:-----|:------------|
-| `ctx.log` | `ContextLogger` | Request-scoped logger (auto-correlates requestId, traceId, tenantId) |
+| `ctx.log` | `ContextLogger` | Request-scoped logger (auto-correlates requestId, traceId, tenantId); also mirrored to the client as `notifications/message` |
 | `ctx.state` | `ContextState` | Tenant-scoped key-value storage |
-| `ctx.elicit` | `ElicitFn?` | Ask the user for input — form schema, or `.url()` for an external link (when client supports it) |
+| `ctx.requestInput` | `(spec) => never` | Suspend and ask the caller for more input; the handler is re-entered with the answers |
+| `ctx.inputs` | `ContextInputs` | Reader over a retried request's responses — `.accepted()`, `.view()`, `.state()`, `.dropped` |
 | `ctx.fail` | `(reason, msg?, data?) => McpError` | Typed error throw — reason checked against `errors[]` contract at compile time |
 | `ctx.signal` | `AbortSignal` | Cancellation signal |
 | `ctx.notifyResourceUpdated` | `Function?` | Notify subscribed clients a resource changed |
 | `ctx.notifyResourceListChanged` | `Function?` | Notify clients the resource list changed |
 | `ctx.notifyPromptListChanged` | `Function?` | Notify clients the prompt list changed |
 | `ctx.notifyToolListChanged` | `Function?` | Notify clients the tool list changed |
-| `ctx.progress` | `ContextProgress?` | Task progress reporting (when `task: true`) |
 | `ctx.requestId` | `string` | Unique request ID |
 | `ctx.tenantId` | `string?` | Tenant ID (JWT `tid` claim, or `'default'` for stdio and HTTP+`MCP_AUTH_MODE=none`) |
 
@@ -257,9 +258,8 @@ The `examples/` directory contains a reference server consuming core through pub
 |:-----|:--------|
 | `template_echo_message` | Basic tool with `format`, `auth` |
 | `template_cat_fact` | External API call, error factories |
-| `template_madlibs_elicitation` | `ctx.elicit` for interactive input |
+| `template_madlibs_elicitation` | `ctx.requestInput` / `ctx.inputs` for multi-round-trip input |
 | `template_image_test` | Image content blocks |
-| `template_async_countdown` | `task: true` with `ctx.progress` |
 | `template_data_explorer` | MCP Apps with linked UI resource via `appTool()`/`appResource()` builders |
 
 ## Testing
@@ -273,7 +273,7 @@ const input = myTool.input.parse({ query: 'test' });
 const result = await myTool.handler(input, ctx);
 ```
 
-`createMockContext()` provides a recording `log`, a working `state`, and a `signal`. State runs on a real `StorageService` over an in-memory provider — the same key validation and TTL expiry a deployed server applies — scoped to tenant `'default'` unless `{ tenantId }` says otherwise. Pass `{ errors: myTool.errors }` for a typed `ctx.fail` matching the definition's contract, `{ elicit }` for elicitation mocking, `{ progress: true }` for task tools.
+`createMockContext()` provides a recording `log`, a working `state`, and a `signal`. State runs on a real `StorageService` over an in-memory provider — the same key validation and TTL expiry a deployed server applies — scoped to tenant `'default'` unless `{ tenantId }` says otherwise. Pass `{ errors: myTool.errors }` for a typed `ctx.fail` matching the definition's contract, and `{ inputResponses, requestState }` to drive a multi-round-trip handler into its second round.
 
 `/testing` also exports `createMockSession()` for session-bound contexts, `createFetchMock()` for upstream HTTP boundaries, and `runToolContract()` to drive a definition through schema, handler, formatting, and error-envelope checks. `/testing/vitest` adds the `mcpTest` fixtures (`ctx`, `session`, `fetchMock`, `storage`) and `toolContractSuite()`.
 
