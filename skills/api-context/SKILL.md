@@ -4,7 +4,7 @@ description: >
   Canonical reference for the unified `Context` object passed to every tool and resource handler in `@cyanheads/mcp-ts-core`. Covers the full interface, its `RequestContext` base, all sub-APIs (`ctx.log`, `ctx.state`, `ctx.requestInput`, `ctx.inputs`, `ctx.enrich`, `ctx.content`), and when to use each.
 metadata:
   author: cyanheads
-  version: "2.0"
+  version: "2.1"
   audience: external
   type: reference
 ---
@@ -28,8 +28,8 @@ interface Context extends RequestContext {
   readonly timestamp: string;       // ISO 8601 request start time
   readonly tenantId?: string;       // JWT 'tid' claim; 'default' for stdio and HTTP+MCP_AUTH_MODE=none
   readonly sessionId?: string;      // Mcp-Session-Id (HTTP stateful/auto); undefined elsewhere unless opted in
-  readonly traceId?: string;        // OTEL trace ID (present when OTEL enabled)
-  readonly spanId?: string;         // OTEL span ID (present when OTEL enabled)
+  readonly traceId?: string;        // Trace containing this handler execution
+  readonly spanId?: string;         // The handler's own execution span
   readonly auth?: AuthContext;      // Parsed auth claims (clientId, scopes, sub)
   readonly operation?: string;      // Label for the operation this context belongs to
   readonly extra?: Readonly<Record<string, unknown>>;  // Correlation bag — the one open field
@@ -86,8 +86,8 @@ interface Context extends RequestContext {
 | `timestamp` | Yes | ISO 8601, request start |
 | `tenantId` | Stdio and HTTP+`MCP_AUTH_MODE=none` (as `'default'`); JWT `tid` claim in HTTP+`jwt`/`oauth` | JWT / single-tenant default |
 | `sessionId` | HTTP `stateful` / `auto` mode; undefined for stdio and stateless HTTP unless opted in | `Mcp-Session-Id` header (or server-minted) — see [§ `ctx.sessionId`](#ctxsessionid) |
-| `traceId` | When OTEL enabled | OTEL trace context |
-| `spanId` | When OTEL enabled | OTEL trace context |
+| `traceId` | When OTEL enabled | Trace containing this handler execution |
+| `spanId` | When OTEL enabled | The active `tool_execution:*` / `resource_read:*` span |
 | `auth` | When auth enabled | Parsed JWT claims |
 
 ---
@@ -255,6 +255,8 @@ Optional HTTP session identifier. Surfaced when the request carries a durable se
 | HTTP, `stateful` / `auto`, `MCP_AUTH_MODE=jwt` / `oauth` | session token, identity-bound — hijack mismatches are rejected by `SessionStore.isValidForIdentity` *before* the handler runs |
 
 In `stateful` / `auto` mode, the value mirrors the `Mcp-Session-Id` HTTP header (or a server-minted token for new sessions). Each subsequent request from the same client reuses it; reconnects after disconnect bind to the same session as long as it hasn't expired.
+
+The in-flight SSE stream is resumable too: stateful sessions carry a bounded event store, so a client reconnecting with `Last-Event-ID` gets the frames it missed replayed before the live stream resumes. On by default — selecting the session mode is the opt-in — with `MCP_HTTP_RESUMABILITY=false` as the kill switch and retention capped by both event count and TTL (`api-config` has the knobs). The buffer is released when its session is evicted.
 
 ### Stateless-mode opt-in
 
@@ -442,20 +444,50 @@ async handler(input, ctx) {
 
 ### Delivery
 
-A notification fired **from inside a handler** routes through that request's own channel (`relatedRequestId`), so it reaches the client on **every transport** — stdio, HTTP, and Workers — even though HTTP/Workers run a per-request `McpServer` with no long-lived notification channel.
+Which channel a notification takes depends on the protocol era the request is being served under, because the two eras opt a client in differently.
+
+| Era | Client opts in via | `ctx.notify*` routes to |
+|:----|:-------------------|:------------------------|
+| 2026-07-28 | a `subscriptions/listen` stream, whose filter names the types (and, for resources, the URIs) it wants | the change-event bus, where the SDK's listen router applies that filter |
+| 2025-era | `resources/subscribe`, for resource updates only | the request's own channel, stamped with `relatedRequestId` |
+
+The modern routing is not an optimization — the spec is explicit that a server MUST NOT send notification types the client has not requested, and that filter only sees what reaches the bus. A modern handler sending through its own request scope would deliver to a client that opened no stream at all.
 
 | Fired from | stdio | HTTP / Workers |
 |:-----------|:------|:---------------|
-| A tool / resource handler | ✅ delivered | ✅ delivered (on the request's SSE response stream) |
-| A `setup()` hook, cron job, or any non-request scope | ✅ delivered | ⚠️ dropped — no request scope to route through |
+| A tool / resource handler | ✅ delivered | ✅ delivered — on the listen stream (2026) or the request's SSE response stream (2025) |
+| A `setup()` hook, cron job, or any non-request scope | ✅ delivered | ✅ to 2026 clients, via `core.notify` — see below. ⚠️ still dropped for 2025 clients: there is no out-of-request channel on that era |
 
-The background-under-HTTP gap is a known limitation; a session-scoped notification bus would close it.
+### Emitting outside a request: `core.notify`
+
+Under HTTP there is no long-lived server instance a background emitter can send through, so `CoreServices.notify` publishes straight to the bus:
+
+```ts
+createApp({
+  tools,
+  setup(core) {
+    watchUpstream(() => core.notify.resourcesChanged());
+  },
+});
+```
+
+It is the same `ServerNotifier` the handler path publishes to, captured before serving starts; publishing while nothing is listening is a no-op, not an error. Delivery reaches 2026-07-28 clients with an open `subscriptions/listen` stream.
+
+**Supply your own bus on a multi-isolate runtime.** The default is in-process, which covers a single container. On Cloudflare Workers a background emission would otherwise reach only the isolate that produced it:
+
+```ts
+createApp({ tools, eventBus: myDurableObjectBackedBus });
+```
 
 ### `notifyResourceUpdated` is subscription-scoped
 
-The framework advertises `resources: { subscribe: true }` and backs it with real `resources/subscribe` / `resources/unsubscribe` handlers, so `notifyResourceUpdated(uri)` emits only for URIs the connected client actually subscribed to; an unsubscribed URI logs at debug and sends nothing. Both handlers are idempotent — re-subscribing is a no-op, and unsubscribing from a URI that was never subscribed succeeds.
+On both eras, but through different registries.
 
-The registry's scope is the `McpServer` instance, which is also the connection: one persistent instance per session on the 2025-era sessionful arm, one per request under per-request serving. On the per-request leg a subscription cannot outlive the request that created it, so a handler-time `ctx.notifyResourceUpdated(uri)` delivers only when that same exchange subscribed first.
+On 2025-era connections the framework advertises `resources: { subscribe: true }` and backs it with real `resources/subscribe` / `resources/unsubscribe` handlers, so `notifyResourceUpdated(uri)` emits only for URIs the connected client actually subscribed to; an unsubscribed URI logs at debug and sends nothing. Both handlers are idempotent — re-subscribing is a no-op, and unsubscribing from a URI that was never subscribed succeeds.
+
+That registry's scope is the `McpServer` instance, which is also the connection: one persistent instance per session on the sessionful arm, one per request under per-request serving. On the per-request leg a subscription cannot outlive the request that created it, so a handler-time `ctx.notifyResourceUpdated(uri)` delivers only when that same exchange subscribed first.
+
+On 2026-07-28 there is no `resources/subscribe` method and no registry. The URI ships with the published event, and the listen filter's `resourceSubscriptions` field decides who receives it — upstream's job, not the framework's.
 
 ---
 
@@ -761,8 +793,8 @@ Test content blocks with `getContentBlocks(ctx)` from `@cyanheads/mcp-ts-core/te
 | `ctx.timestamp` | `string` | Always |
 | `ctx.tenantId` | `string \| undefined` | Stdio (`'default'`); HTTP+`MCP_AUTH_MODE=none` (`'default'`); HTTP+`jwt`/`oauth` (JWT `tid` claim — undefined if absent) |
 | `ctx.sessionId` | `string \| undefined` | HTTP `stateful` / `auto` mode; stateless HTTP only when `createApp({ context: { exposeStatelessSessionId: true } })`; never in stdio or on the session-less 2026-07-28 leg |
-| `ctx.traceId` | `string \| undefined` | OTEL enabled |
-| `ctx.spanId` | `string \| undefined` | OTEL enabled |
+| `ctx.traceId` | `string \| undefined` | OTEL enabled — the trace containing this handler execution |
+| `ctx.spanId` | `string \| undefined` | OTEL enabled — the handler's own execution span, not the enclosing request span |
 | `ctx.auth` | `AuthContext \| undefined` | Auth enabled |
 | `ctx.operation` | `string \| undefined` | Set by the context that created it (`'HandleToolRequest'` for tool calls) |
 | `ctx.extra` | `Readonly<Record<string, unknown>> \| undefined` | When correlation data was attached — the one open bag on the closed shape |
@@ -774,9 +806,9 @@ Test content blocks with `getContentBlocks(ctx)` from `@cyanheads/mcp-ts-core/te
 | `ctx.requestInput` | `(spec) => never` | Always — suspends the handler and asks the caller for more input |
 | `ctx.inputs` | `ContextInputs` | Always; empty until the request is retried with responses |
 | `ctx.notifyResourceListChanged` | `function \| undefined` | Always in handler ctx; delivery request-scoped (see [§ list-changed notifications](#list-changed-notifications-ctxnotify)) |
-| `ctx.notifyResourceUpdated` | `function \| undefined` | Always in handler ctx; delivery request-scoped **and** limited to URIs the client subscribed to |
+| `ctx.notifyResourceUpdated` | `function \| undefined` | Always in handler ctx; limited to URIs the client subscribed to, through the listen filter (2026) or the subscribe registry (2025) |
 | `ctx.notifyPromptListChanged` | `function \| undefined` | Always in handler ctx; delivery request-scoped |
-| `ctx.notifyToolListChanged` | `function \| undefined` | Always in handler ctx; delivery request-scoped |
+| `ctx.notifyToolListChanged` | `function \| undefined` | Always in handler ctx; delivered on the client's listen stream (2026) or its own request scope (2025) |
 | `ctx.uri` | `URL \| undefined` | Resource handlers only |
 | `ctx.fail` | `(reason, msg?, data?, opts?) => McpError` | Definition declares `errors[]` contract |
 | `ctx.recoveryFor` | `(reason) => { recovery: { hint } } \| {}` | Always (no-op when no contract); strictly typed on `HandlerContext<R>` |

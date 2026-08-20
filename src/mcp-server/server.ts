@@ -13,6 +13,7 @@ import {
   type Implementation,
   McpServer,
   type ServerCapabilities,
+  type ServerNotifier,
 } from '@modelcontextprotocol/server';
 
 import type { AppConfig } from '@/config/index.js';
@@ -50,6 +51,14 @@ export interface McpServerDeps {
    * leaking that text into every tool description.
    */
   instructions?: string;
+  /**
+   * Publish facade for the `subscriptions/listen` bus. Supplied for `modern`
+   * instances only, where it is how `ctx.notify*` reaches a client: the SDK's
+   * listen router filters what the client opted into, and an out-of-request
+   * emit still finds open streams (#193). Legacy instances and stdio deliver
+   * over the live connection instead.
+   */
+  notifier?: ServerNotifier;
   promptRegistry: PromptRegistry;
   resourceRegistry: ResourceRegistry;
   /**
@@ -127,9 +136,14 @@ export async function createMcpServerInstance(deps: McpServerDeps): Promise<McpS
   try {
     logger.debug('Registering all MCP capabilities via registries...', context);
 
+    // The bus reaches a modern instance only. Passing it to a legacy one would
+    // route `ctx.notify*` away from the live session that can actually deliver
+    // it — the 2025 era has no `subscriptions/listen` stream to publish to.
+    const bus = (deps.era ?? 'legacy') === 'modern' ? deps.notifier : undefined;
+
     await Promise.all([
-      deps.toolRegistry.registerAll(server, subscriptions),
-      deps.resourceRegistry.registerAll(server, subscriptions),
+      deps.toolRegistry.registerAll(server, subscriptions, bus),
+      deps.resourceRegistry.registerAll(server, subscriptions, bus),
       deps.promptRegistry.registerAll(server),
     ]);
 

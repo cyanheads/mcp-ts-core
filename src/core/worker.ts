@@ -229,7 +229,7 @@ export function createWorkerHandler(options: WorkerHandlerOptions = {}) {
         const resolvedInstructions =
           typeof instructionsOption === 'function' ? instructionsOption(env) : instructionsOption;
 
-        const { createServer, manifest } = await composeServices({
+        const { bus, createServer, manifest } = await composeServices({
           ...appOptions,
           ...(resolvedInstructions && { instructions: resolvedInstructions }),
         });
@@ -253,6 +253,7 @@ export function createWorkerHandler(options: WorkerHandlerOptions = {}) {
           createServer,
           workerContext,
           manifest,
+          bus,
         );
 
         const initDuration = Date.now() - initStartTime;

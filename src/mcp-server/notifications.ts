@@ -12,10 +12,19 @@
  * `notifications/resources/updated` is subscription-scoped: it is emitted only
  * for URIs the client actually subscribed to via `resources/subscribe` (#354).
  *
+ * That request-scoped path is the **2025-era** one. On 2026-07-28 delivery
+ * belongs to the client's `subscriptions/listen` stream, so a modern instance
+ * publishes to the handler's event bus instead — see {@link buildBusNotifiers}
+ * (#193).
+ *
  * @module src/mcp-server/notifications
  */
 
-import type { ServerNotification } from '@modelcontextprotocol/server';
+import type {
+  ServerEventBus,
+  ServerNotification,
+  ServerNotifier,
+} from '@modelcontextprotocol/server';
 
 import { logger } from '@/utils/internal/logger.js';
 
@@ -41,6 +50,96 @@ export interface RequestScopedNotifiers {
 export interface ResourceSubscriptions {
   /** True when the connected client subscribed to this exact URI. */
   has: (uri: string) => boolean;
+}
+
+/**
+ * The same four closures, each optional — what a server-level notifier set
+ * offers and what {@link selectNotifiers} returns, since a fallback set may not
+ * carry all four.
+ */
+export interface OptionalNotifiers {
+  notifyPromptListChanged?: () => void;
+  notifyResourceListChanged?: () => void;
+  notifyResourceUpdated?: (uri: string) => void;
+  notifyToolListChanged?: () => void;
+}
+
+/** Every delivery path a handler factory can offer, in one bag. */
+export interface NotifierSources extends OptionalNotifiers {
+  /** Modern-era publish facade. Present only on `modern` instances. */
+  bus?: ServerNotifier;
+  /** Legacy-era `resources/subscribe` registry. */
+  subscriptions?: ResourceSubscriptions;
+}
+
+/**
+ * Picks the delivery path a handler's `ctx.notify*` should take, era-ordered.
+ *
+ * A modern instance publishes to the listen bus, where the SDK applies the
+ * client's subscription filter and an out-of-request emit still reaches open
+ * streams (#193). A legacy instance sends through the request's own scope so
+ * the message carries `relatedRequestId` (#135). The server-level closures are
+ * the fallback for scopes with no sender at all — stdio and test harnesses.
+ *
+ * Both handler factories route through here so the ordering is one decision
+ * rather than two copies that can drift apart.
+ */
+export function selectNotifiers(
+  sources: NotifierSources,
+  mcpReq: NotificationSender | undefined,
+): OptionalNotifiers {
+  return (
+    (sources.bus ? buildBusNotifiers(sources.bus) : undefined) ??
+    buildRequestScopedNotifiers(mcpReq ?? {}, sources.subscriptions) ??
+    sources
+  );
+}
+
+/**
+ * A {@link ServerNotifier} over an arbitrary {@link ServerEventBus}.
+ *
+ * `createMcpHandler` returns one bound to its own bus, but the framework builds
+ * the bus first — before any transport exists — so `setup()` can capture a
+ * publish handle that stays valid once serving starts. The names mirror the
+ * wire methods.
+ */
+export function notifierFor(bus: ServerEventBus): ServerNotifier {
+  return {
+    toolsChanged: () => bus.publish({ kind: 'tools_list_changed' }),
+    promptsChanged: () => bus.publish({ kind: 'prompts_list_changed' }),
+    resourcesChanged: () => bus.publish({ kind: 'resources_list_changed' }),
+    resourceUpdated: (uri: string) => bus.publish({ kind: 'resource_updated', uri }),
+  };
+}
+
+/**
+ * Builds notifier closures that publish onto the modern era's
+ * `subscriptions/listen` bus.
+ *
+ * On protocol revision 2026-07-28 a client opts into notification types by
+ * opening a `subscriptions/listen` stream, and the spec is explicit that a
+ * server MUST NOT send types the client has not requested. That filter lives in
+ * the SDK's listen router, which only sees what reaches the bus — so a modern
+ * handler firing through its own request scope bypasses it and delivers to
+ * clients that opened no stream at all.
+ *
+ * Publishing is also what makes *out-of-request* emission work: the bus is not
+ * request-scoped, so a background emitter reaches every open stream rather than
+ * dropping into a closed exchange.
+ *
+ * No subscription registry is consulted here — including for
+ * `resources/updated`. Per-URI routing is the listen filter's
+ * `resourceSubscriptions` field, which the SDK applies on publish; the
+ * `resources/subscribe` registry is the 2025-era mechanism and does not exist
+ * on this era.
+ */
+export function buildBusNotifiers(notify: ServerNotifier): RequestScopedNotifiers {
+  return {
+    notifyToolListChanged: () => notify.toolsChanged(),
+    notifyResourceListChanged: () => notify.resourcesChanged(),
+    notifyPromptListChanged: () => notify.promptsChanged(),
+    notifyResourceUpdated: (uri: string) => notify.resourceUpdated(uri),
+  };
 }
 
 /**

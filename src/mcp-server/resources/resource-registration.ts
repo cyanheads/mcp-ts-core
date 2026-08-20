@@ -2,7 +2,11 @@
  * @fileoverview Encapsulates the registration of all resource definitions with an McpServer.
  * @module src/mcp-server/resources/resource-registration
  */
-import { type McpServer, ResourceTemplate } from '@modelcontextprotocol/server';
+import {
+  type McpServer,
+  ResourceTemplate,
+  type ServerNotifier,
+} from '@modelcontextprotocol/server';
 
 import type { ResourceSubscriptions } from '@/mcp-server/notifications.js';
 import type { AnyResourceDefinition } from '@/mcp-server/resources/utils/resourceDefinition.js';
@@ -35,6 +39,7 @@ export class ResourceRegistry {
   public async registerAll(
     server: McpServer,
     subscriptions?: ResourceSubscriptions,
+    bus?: ServerNotifier,
   ): Promise<void> {
     this.registeredNames.clear();
 
@@ -48,6 +53,7 @@ export class ResourceRegistry {
       notifyResourceListChanged: () => server.sendResourceListChanged(),
       notifyToolListChanged: () => server.sendToolListChanged(),
       ...(subscriptions && { subscriptions }),
+      ...(bus && { bus }),
     };
 
     const context = requestContextService.createRequestContext({

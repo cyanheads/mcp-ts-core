@@ -110,6 +110,7 @@ describe('createMcpServerInstance', () => {
     expect(mockToolRegistry.registerAll).toHaveBeenCalledWith(
       server,
       expect.objectContaining({ has: expect.any(Function) }),
+      undefined,
     );
   });
 
@@ -119,6 +120,7 @@ describe('createMcpServerInstance', () => {
     expect(mockResourceRegistry.registerAll).toHaveBeenCalledWith(
       server,
       expect.objectContaining({ has: expect.any(Function) }),
+      undefined,
     );
   });
 
@@ -128,6 +130,7 @@ describe('createMcpServerInstance', () => {
       expect(mockToolRegistry.registerAll).toHaveBeenCalledWith(
         server,
         expect.objectContaining({ has: expect.any(Function) }),
+        undefined,
       );
     });
 
@@ -137,8 +140,8 @@ describe('createMcpServerInstance', () => {
       // registry leaves it permanently empty, and every
       // `ctx.notifyResourceUpdated(uri)` is silently dropped.
       const server = await createMcpServerInstance({ ...deps, era: 'modern' });
-      expect(mockToolRegistry.registerAll).toHaveBeenCalledWith(server, undefined);
-      expect(mockResourceRegistry.registerAll).toHaveBeenCalledWith(server, undefined);
+      expect(mockToolRegistry.registerAll).toHaveBeenCalledWith(server, undefined, undefined);
+      expect(mockResourceRegistry.registerAll).toHaveBeenCalledWith(server, undefined, undefined);
     });
 
     it('defaults to the legacy registry when no era is supplied', async () => {
@@ -146,6 +149,29 @@ describe('createMcpServerInstance', () => {
       expect(mockToolRegistry.registerAll).toHaveBeenCalledWith(
         server,
         expect.objectContaining({ has: expect.any(Function) }),
+        undefined,
+      );
+    });
+
+    it('hands the listen-bus notifier only to a modern instance (#193)', async () => {
+      // A legacy instance delivers over its live session; publishing to the
+      // 2026-era bus there would route `ctx.notify*` away from the only
+      // channel that can reach the client.
+      const notifier = {
+        toolsChanged: vi.fn(),
+        promptsChanged: vi.fn(),
+        resourcesChanged: vi.fn(),
+        resourceUpdated: vi.fn(),
+      };
+
+      const modern = await createMcpServerInstance({ ...deps, era: 'modern', notifier });
+      expect(mockToolRegistry.registerAll).toHaveBeenLastCalledWith(modern, undefined, notifier);
+
+      const legacy = await createMcpServerInstance({ ...deps, era: 'legacy', notifier });
+      expect(mockToolRegistry.registerAll).toHaveBeenLastCalledWith(
+        legacy,
+        expect.objectContaining({ has: expect.any(Function) }),
+        undefined,
       );
     });
   });

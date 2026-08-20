@@ -2,7 +2,7 @@
  * @fileoverview Encapsulates the registration of all tool definitions with an McpServer.
  * @module src/mcp-server/tools/tool-registration
  */
-import type { McpServer, ToolCallback } from '@modelcontextprotocol/server';
+import type { McpServer, ServerNotifier, ToolCallback } from '@modelcontextprotocol/server';
 
 import type { ResourceSubscriptions } from '@/mcp-server/notifications.js';
 import { getDisabledMetadata } from '@/mcp-server/tools/utils/disabled-tool.js';
@@ -39,6 +39,7 @@ export class ToolRegistry {
   public async registerAll(
     server: McpServer,
     subscriptions?: ResourceSubscriptions,
+    bus?: ServerNotifier,
   ): Promise<void> {
     // Reset per-server uniqueness tracking — registries are shared across
     // per-request McpServer instances under HTTP serving.
@@ -53,6 +54,7 @@ export class ToolRegistry {
       notifyResourceListChanged: () => server.sendResourceListChanged(),
       notifyToolListChanged: () => server.sendToolListChanged(),
       ...(subscriptions && { subscriptions }),
+      ...(bus && { bus }),
     };
 
     const context = requestContextService.createRequestContext({

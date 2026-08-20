@@ -2,7 +2,7 @@
  * @fileoverview Manages the lifecycle of the configured MCP transport.
  * @module src/mcp-server/transports/manager
  */
-import type { McpServer } from '@modelcontextprotocol/server';
+import type { McpServer, ServerEventBus } from '@modelcontextprotocol/server';
 
 import type { AppConfig as AppConfigType } from '@/config/index.js';
 import type { ServerManifest } from '@/core/serverManifest.js';
@@ -28,6 +28,8 @@ export class TransportManager {
     private logger: typeof LoggerType,
     private createMcpServer: FrameworkServerFactory,
     private manifest: ServerManifest,
+    /** The `subscriptions/listen` bus the HTTP handler is built over (#193). */
+    private bus?: ServerEventBus,
   ) {}
 
   async start(): Promise<void> {
@@ -39,7 +41,12 @@ export class TransportManager {
     this.logger.info(`Starting transport: ${this.config.mcpTransportType}`, context);
 
     if (this.config.mcpTransportType === 'http') {
-      const handle = await startHttpTransport(this.createMcpServer, context, this.manifest);
+      const handle = await startHttpTransport(
+        this.createMcpServer,
+        context,
+        this.manifest,
+        this.bus,
+      );
       this.serverInstance = handle.server;
       this.shutdown = (ctx) => handle.stop(ctx);
     } else if (this.config.mcpTransportType === 'stdio') {

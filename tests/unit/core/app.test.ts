@@ -509,6 +509,10 @@ describe('core/app', () => {
       // Forwarded from the factory's McpRequestContext — it selects the
       // resource-subscription mechanism for the era being served (#354).
       era: 'modern',
+      // The app owns the `subscriptions/listen` bus and hands every instance
+      // its publish facade; `createMcpServerInstance` drops it for the legacy
+      // era, which delivers over the live session instead (#193).
+      notifier: composed.coreServices.notify,
       promptRegistry: mockPromptRegistry.instance,
       resourceRegistry: mockResourceRegistry.instance,
       toolRegistry: mockToolRegistry.instance,
@@ -566,6 +570,9 @@ describe('core/app', () => {
         definitionCounts: { prompts: 0, resources: 0, tools: 0 },
         server: expect.objectContaining({ name: 'mock-server', version: '1.0.0' }),
       }),
+      // The `subscriptions/listen` bus, so the HTTP handler's listen streams
+      // subscribe to the same one background emitters publish on (#193).
+      expect.objectContaining({ publish: expect.any(Function), subscribe: expect.any(Function) }),
     );
     expect(mockTransportManager.instance.start).toHaveBeenCalledTimes(1);
     expect(mockCreateObservableGauge.mock.calls.map((call) => call[0])).toEqual(

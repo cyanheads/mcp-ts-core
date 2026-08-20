@@ -102,6 +102,7 @@ describe('TransportManager', () => {
         mockCreateMcpServer,
         expect.any(Object),
         defaultMeta,
+        undefined,
       );
     });
 

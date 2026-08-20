@@ -6,7 +6,12 @@
  * @module src/core/app
  */
 
-import type { Implementation } from '@modelcontextprotocol/server';
+import {
+  type Implementation,
+  InMemoryServerEventBus,
+  type ServerEventBus,
+  type ServerNotifier,
+} from '@modelcontextprotocol/server';
 import type { SupabaseClient } from '@supabase/supabase-js';
 import { z } from 'zod';
 import { config, resetConfig } from '@/config/index.js';
@@ -16,6 +21,7 @@ import {
   type LandingConfig,
   type ServerManifest,
 } from '@/core/serverManifest.js';
+import { notifierFor } from '@/mcp-server/notifications.js';
 import { PromptRegistry } from '@/mcp-server/prompts/prompt-registration.js';
 import type { AnyPromptDefinition } from '@/mcp-server/prompts/utils/promptDefinition.js';
 import { ResourceRegistry } from '@/mcp-server/resources/resource-registration.js';
@@ -103,6 +109,15 @@ export interface CreateAppOptions<TSupabaseClient extends object = SupabaseClien
    */
   description?: string;
   /**
+   * Change-event bus backing the modern era's `subscriptions/listen` streams.
+   *
+   * Defaults to an in-process bus, which covers a single-container deployment.
+   * Supply your own for a multi-isolate or multi-process runtime — Cloudflare
+   * Workers most of all, where a background emission would otherwise reach only
+   * the isolate that produced it (#193).
+   */
+  eventBus?: ServerEventBus;
+  /**
    * SEP-2133 extensions to advertise in server capabilities.
    * Keys are extension identifiers (`vendor-prefix/extension-name`).
    */
@@ -182,6 +197,17 @@ export interface CoreServices<TSupabaseClient extends object = SupabaseClientHan
   config: typeof config;
   llmProvider?: ILlmProvider;
   logger: typeof logger;
+  /**
+   * Publishes list-changed and resource-updated events to every open
+   * `subscriptions/listen` stream that opted in — the out-of-request emission
+   * path a cron, webhook, or any other background emitter needs, since under
+   * HTTP there is no long-lived server instance to send through (#193).
+   *
+   * Delivery reaches 2026-07-28 clients. A 2025-era client receives
+   * list-changed only from inside a handler, via `ctx.notify*`; publishing here
+   * while none of the former are connected is a no-op, not an error.
+   */
+  notify: ServerNotifier;
   rateLimiter: RateLimiter;
   speechService?: SpeechService;
   storage: StorageService;
@@ -207,6 +233,8 @@ export interface ServerHandle<TSupabaseClient extends object = SupabaseClientHan
 
 /** @internal Result of composeServices — used by createApp and createWorkerHandler. */
 export interface ComposedApp<TSupabaseClient extends object = SupabaseClientHandle> {
+  /** The `subscriptions/listen` bus the HTTP handler must be built over. */
+  bus: ServerEventBus;
   coreServices: CoreServices<TSupabaseClient>;
   createServer: FrameworkServerFactory;
   /**
@@ -234,6 +262,7 @@ export async function composeServices<TSupabaseClient extends object = SupabaseC
     extensions,
     icons,
     instructions,
+    eventBus,
     landing,
     setup,
     title,
@@ -302,9 +331,15 @@ export async function composeServices<TSupabaseClient extends object = SupabaseC
 
   const canvas = createCanvasService(config);
 
+  // Owned here rather than by the transport so `setup()` can capture `notify`
+  // before serving starts; publishing to an empty listener set is a no-op.
+  const bus = eventBus ?? new InMemoryServerEventBus();
+  const notify = notifierFor(bus);
+
   const coreServices: CoreServices<TSupabaseClient> = {
     config,
     logger,
+    notify,
     rateLimiter,
     storage: storageService,
     ...(canvas && { canvas }),
@@ -358,6 +393,7 @@ export async function composeServices<TSupabaseClient extends object = SupabaseC
     createMcpServerInstance({
       config,
       era: ctx.era,
+      notifier: notify,
       ...(description && { description }),
       ...(extensions && { extensions }),
       ...(icons && { icons }),
@@ -383,6 +419,7 @@ export async function composeServices<TSupabaseClient extends object = SupabaseC
   });
 
   return {
+    bus,
     coreServices,
     createServer,
     manifest,
@@ -470,7 +507,7 @@ export async function createApp<TSupabaseClient extends object = SupabaseClientH
     }
     throw err;
   }
-  const { coreServices, createServer, manifest } = composed;
+  const { bus, coreServices, createServer, manifest } = composed;
   const { definitionCounts } = manifest;
 
   // --- Initialize OTEL ---
@@ -576,7 +613,7 @@ export async function createApp<TSupabaseClient extends object = SupabaseClientH
   );
 
   // --- Transport ---
-  const transportManager = new TransportManager(config, logger, createServer, manifest);
+  const transportManager = new TransportManager(config, logger, createServer, manifest, bus);
 
   // --- Startup context ---
   const startupContext = requestContextService.createRequestContext({

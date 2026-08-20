@@ -8,6 +8,7 @@
 
 import http from 'node:http';
 import { type ServerType, serve } from '@hono/node-server';
+import type { ServerEventBus } from '@modelcontextprotocol/server';
 import type { Hono } from 'hono';
 import { config } from '@/config/index.js';
 import type { ServerManifest } from '@/core/serverManifest.js';
@@ -105,11 +106,12 @@ export async function startHttpTransport(
   serverFactory: FrameworkServerFactory,
   parentContext: RequestContext,
   manifest: ServerManifest,
+  bus?: ServerEventBus,
 ): Promise<HttpTransportHandle> {
   const transportContext = withExtra(parentContext, { component: 'HttpTransportStart' });
   logger.info('Starting HTTP transport.', transportContext);
 
-  const { app, close } = await createHttpApp(serverFactory, transportContext, manifest);
+  const { app, close } = await createHttpApp(serverFactory, transportContext, manifest, bus);
 
   const server = await startHttpServerWithRetry(
     app,
