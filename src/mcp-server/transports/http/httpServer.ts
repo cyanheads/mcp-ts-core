@@ -106,10 +106,7 @@ export async function startHttpTransport(
   parentContext: RequestContext,
   manifest: ServerManifest,
 ): Promise<HttpTransportHandle> {
-  const transportContext = {
-    ...parentContext,
-    component: 'HttpTransportStart',
-  };
+  const transportContext = withExtra(parentContext, { component: 'HttpTransportStart' });
   logger.info('Starting HTTP transport.', transportContext);
 
   const { app, close } = await createHttpApp(serverFactory, transportContext, manifest);
@@ -138,11 +135,10 @@ async function stopHttpTransport(
   closeApp: () => Promise<void>,
   parentContext: RequestContext,
 ): Promise<void> {
-  const operationContext = {
-    ...parentContext,
-    operation: 'stopHttpTransport',
-    transportType: 'Http',
-  };
+  const operationContext = withExtra(
+    { ...parentContext, operation: 'stopHttpTransport' },
+    { transportType: 'Http' },
+  );
   logger.info('Attempting to stop http transport...', operationContext);
 
   // Tear the MCP layer down first: aborts in-flight modern exchanges, closes

@@ -88,7 +88,7 @@ describe('Stdio Transport', () => {
         'Attempting to connect stdio transport...',
         expect.objectContaining({
           operation: 'connectStdioTransport',
-          transportType: 'Stdio',
+          extra: expect.objectContaining({ transportType: 'Stdio' }),
         }),
       );
       expect(logStartupBannerSpy).toHaveBeenCalled();
@@ -144,7 +144,7 @@ describe('Stdio Transport', () => {
         'Attempting to stop stdio transport...',
         expect.objectContaining({
           operation: 'stopStdioTransport',
-          transportType: 'Stdio',
+          extra: expect.objectContaining({ transportType: 'Stdio' }),
         }),
       );
       expect(loggerSpy.info).toHaveBeenCalledWith(
@@ -177,7 +177,7 @@ describe('Stdio Transport', () => {
         expect.any(String),
         expect.objectContaining({
           operation: 'stopStdioTransport',
-          transportType: 'Stdio',
+          extra: expect.objectContaining({ transportType: 'Stdio' }),
           requestId: mockContext.requestId,
         }),
       );

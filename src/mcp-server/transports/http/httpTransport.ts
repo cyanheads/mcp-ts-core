@@ -134,10 +134,7 @@ export async function createHttpApp<TBindings extends object = HonoNodeBindings>
   sessionStore: SessionStore | null;
 }> {
   const app = new Hono<{ Bindings: TBindings }>();
-  const transportContext = {
-    ...parentContext,
-    component: 'HttpTransportSetup',
-  };
+  const transportContext = withExtra(parentContext, { component: 'HttpTransportSetup' });
 
   // Initialize session store for stateful mode.
   // 'auto' resolves to stateful for HTTP (per MCP spec conformance).
@@ -515,20 +512,6 @@ export async function createHttpApp<TBindings extends object = HonoNodeBindings>
   // JSON-RPC over HTTP (Streamable)
   // -------------------------------------------------------------------------
 
-  /** Reads the POST body once, from the cache the body-limit guard may have
-   * seeded. Every downstream consumer takes it as `parsedBody` because the raw
-   * stream is not guaranteed re-readable after that guard runs. */
-  const readParsedBody = async (c: {
-    req: { method: string; json: () => Promise<unknown> };
-  }): Promise<{ ok: true; value: unknown } | { ok: false }> => {
-    if (c.req.method !== 'POST') return { ok: true, value: undefined };
-    try {
-      return { ok: true, value: await c.req.json() };
-    } catch {
-      return { ok: false };
-    }
-  };
-
   /** Validated auth info for pass-through to the SDK's `ctx.http.authInfo`. */
   const currentAuthInfo = (): AuthInfo | undefined => authContext.getStore()?.authInfo;
 
@@ -625,23 +608,30 @@ export async function createHttpApp<TBindings extends object = HonoNodeBindings>
       return await handler.fetch(c.req.raw, { ...(authInfo && { authInfo }) });
     }
 
-    const body = await readParsedBody(c);
-    if (!body.ok) {
-      // Malformed JSON never reaches classification — answer the spec's parse
-      // error directly rather than letting an unreadable body reach a transport.
-      return c.json(
-        { jsonrpc: '2.0', id: null, error: { code: -32700, message: 'Parse error' } },
-        400,
-      );
+    // Read the POST body once, from the cache the body-limit guard may have
+    // seeded. Every downstream consumer takes it as `parsedBody` because the raw
+    // stream is not guaranteed re-readable after that guard runs.
+    let parsedBody: unknown;
+    if (c.req.method === 'POST') {
+      try {
+        parsedBody = await c.req.json();
+      } catch {
+        // Malformed JSON never reaches classification — answer the spec's parse
+        // error directly rather than letting an unreadable body reach a transport.
+        return c.json(
+          { jsonrpc: '2.0', id: null, error: { code: -32700, message: 'Parse error' } },
+          400,
+        );
+      }
     }
 
-    if (sessionStore && (await isLegacyRequest(c.req.raw, body.value))) {
-      return await handleLegacySessionful(sessionStore, c.req.raw, body.value, requestContext);
+    if (sessionStore && (await isLegacyRequest(c.req.raw, parsedBody))) {
+      return await handleLegacySessionful(sessionStore, c.req.raw, parsedBody, requestContext);
     }
 
     const authInfo = currentAuthInfo();
     return await handler.fetch(c.req.raw, {
-      ...(body.value !== undefined && { parsedBody: body.value }),
+      ...(parsedBody !== undefined && { parsedBody }),
       ...(authInfo && { authInfo }),
     });
   });

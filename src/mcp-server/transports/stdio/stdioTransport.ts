@@ -21,7 +21,7 @@ import { type StdioServerHandle, serveStdio } from '@modelcontextprotocol/server
 
 import { ErrorHandler } from '@/utils/internal/error-handler/errorHandler.js';
 import { logger } from '@/utils/internal/logger.js';
-import type { RequestContext } from '@/utils/internal/requestContext.js';
+import { type RequestContext, withExtra } from '@/utils/internal/requestContext.js';
 import { logStartupBanner } from '@/utils/internal/startupBanner.js';
 
 /**
@@ -41,11 +41,10 @@ export function startStdioTransport(
   serverFactory: McpServerFactory,
   parentContext: RequestContext,
 ): StdioServerHandle {
-  const operationContext = {
-    ...parentContext,
-    operation: 'connectStdioTransport',
-    transportType: 'Stdio',
-  };
+  const operationContext = withExtra(
+    { ...parentContext, operation: 'connectStdioTransport' },
+    { transportType: 'Stdio' },
+  );
   logger.info('Attempting to connect stdio transport...', operationContext);
 
   try {
@@ -73,11 +72,10 @@ export async function stopStdioTransport(
   handle: StdioServerHandle,
   parentContext: RequestContext,
 ): Promise<void> {
-  const operationContext = {
-    ...parentContext,
-    operation: 'stopStdioTransport',
-    transportType: 'Stdio',
-  };
+  const operationContext = withExtra(
+    { ...parentContext, operation: 'stopStdioTransport' },
+    { transportType: 'Stdio' },
+  );
   logger.info('Attempting to stop stdio transport...', operationContext);
   await handle.close();
   logger.info('Stdio transport stopped successfully.', operationContext);
