@@ -24,6 +24,7 @@
 
 import {
   createMcpHandler,
+  isJsonContentType,
   isLegacyRequest,
   type McpHttpHandler,
   WebStandardStreamableHTTPServerTransport,
@@ -614,6 +615,15 @@ export async function createHttpApp<TBindings extends object = HonoNodeBindings>
       'Handling MCP request.',
       withExtra(requestContext, { path: c.req.path, method: c.req.method }),
     );
+
+    // Media type before body: a POST whose Content-Type is not JSON is a 415,
+    // not a parse error, and the SDK answers it that way. Parsing first turns
+    // even a well-formed body into a misleading `-32700`, so hand those
+    // straight to the handler and let it produce the canonical response.
+    if (c.req.method === 'POST' && !isJsonContentType(c.req.header('content-type'))) {
+      const authInfo = currentAuthInfo();
+      return await handler.fetch(c.req.raw, { ...(authInfo && { authInfo }) });
+    }
 
     const body = await readParsedBody(c);
     if (!body.ok) {

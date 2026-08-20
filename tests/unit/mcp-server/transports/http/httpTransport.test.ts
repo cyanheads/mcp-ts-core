@@ -549,6 +549,24 @@ describe('HTTP Transport', () => {
       expect(body.error).toMatchObject({ code: -32700, message: 'Parse error' });
       expect(factory).not.toHaveBeenCalled();
     });
+
+    test.each([
+      ['a malformed body', 'not json at all'],
+      ['a well-formed body', JSON.stringify({ jsonrpc: '2.0', method: 'tools/list', id: 1 })],
+    ])('answers a non-JSON Content-Type with 415, not a parse error (%s)', async (_label, body) => {
+      // The media type is the fault, not the bytes — parsing first reports
+      // `-32700` even when the JSON is perfectly valid, and diverges from the
+      // 415 the SDK produces for the same request.
+      const { app } = await buildApp();
+
+      const response = await app.request(ENDPOINT, {
+        method: 'POST',
+        headers: legacyHeaders({ 'content-type': 'text/plain' }),
+        body,
+      });
+
+      expect(response.status).toBe(415);
+    });
   });
 
   // -------------------------------------------------------------------------
