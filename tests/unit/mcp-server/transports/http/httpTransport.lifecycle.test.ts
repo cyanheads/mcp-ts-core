@@ -3,6 +3,7 @@
  * @module tests/mcp-server/transports/http/httpTransport.lifecycle
  */
 
+import { EventEmitter } from 'node:events';
 import type { McpServer } from '@modelcontextprotocol/server';
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
 
@@ -108,16 +109,69 @@ vi.mock('node:http', () => ({
   },
 }));
 
-vi.mock('@hono/node-server', () => ({
-  serve: serveSpy.mockImplementation((options, onListen) => {
-    const server = {
-      close: serverCloseSpy,
-      closeAllConnections: closeAllConnectionsSpy,
-    };
-    onListen({ address: options.hostname, port: options.port });
-    return server;
-  }),
-}));
+/**
+ * `serve()` hands back a real `node:http` server, so the double is a real
+ * EventEmitter: the bind path attaches an `'error'` listener to the returned
+ * instance, and the async cases below drive it by emitting on that emitter.
+ */
+vi.mock('@hono/node-server', () => ({ serve: serveSpy }));
+
+type FakeServer = EventEmitter & {
+  close: typeof serverCloseSpy;
+  closeAllConnections: typeof closeAllConnectionsSpy;
+};
+
+interface DeferredAttempt {
+  /** Fires the `serve()` listening callback, as a real bind would once bound. */
+  listen: () => void;
+  options: { port: number; hostname: string };
+  server: FakeServer;
+}
+
+function makeFakeServer(): FakeServer {
+  return Object.assign(new EventEmitter(), {
+    close: serverCloseSpy,
+    closeAllConnections: closeAllConnectionsSpy,
+  }) as FakeServer;
+}
+
+/** Reports `'listening'` synchronously — the baseline happy-path bind. */
+function defaultServe(
+  options: { port: number; hostname: string },
+  onListen: (info: unknown) => void,
+): FakeServer {
+  const server = makeFakeServer();
+  onListen({ address: options.hostname, port: options.port });
+  return server;
+}
+
+/**
+ * Queues `count` `serve()` calls that return an instance without reporting
+ * `'listening'` — the shape of a real bind whose outcome only arrives after
+ * `serve()` has handed the server back. Each captured attempt lets a test drive
+ * that outcome by emitting `'error'` or calling `listen()`.
+ */
+function deferServeAttempts(count: number): DeferredAttempt[] {
+  const attempts: DeferredAttempt[] = [];
+  for (let i = 0; i < count; i += 1) {
+    serveSpy.mockImplementationOnce(
+      (options: { port: number; hostname: string }, onListen: (info: unknown) => void) => {
+        const server = makeFakeServer();
+        attempts.push({
+          server,
+          options,
+          listen: () => onListen({ address: options.hostname, port: options.port }),
+        });
+        return server;
+      },
+    );
+  }
+  return attempts;
+}
+
+function bindError(code: string): NodeJS.ErrnoException {
+  return Object.assign(new Error(`bind failed: ${code}`), { code });
+}
 
 describe('HTTP Transport lifecycle', () => {
   const mockContext: RequestContext = {
@@ -131,6 +185,10 @@ describe('HTTP Transport lifecycle', () => {
     vi.resetModules();
     probeOutcomes.length = 0;
 
+    // mockClear leaves queued mockImplementationOnce entries in place, so a test
+    // that queues more bind attempts than it consumes would hand them to the next.
+    serveSpy.mockReset();
+    serveSpy.mockImplementation(defaultServe);
     serverCloseSpy.mockImplementation((callback?: (err?: Error) => void) => callback?.());
     closeAllConnectionsSpy.mockImplementation(() => {});
     destroySpy.mockResolvedValue(undefined);
@@ -215,6 +273,170 @@ describe('HTTP Transport lifecycle', () => {
 
     expect(serveSpy).toHaveBeenCalledTimes(2);
     expect(handle.server).toBeDefined();
+  });
+
+  test('retries when the real bind reports EADDRINUSE after serve() returns', async () => {
+    vi.useFakeTimers();
+    probeOutcomes.push('free', 'free');
+    const attempts = deferServeAttempts(1);
+
+    const { startHttpTransport } = await import('@/mcp-server/transports/http/httpServer.js');
+    const handlePromise = startHttpTransport(
+      () => Promise.resolve({} as McpServer),
+      mockContext,
+      defaultMeta,
+    );
+
+    await vi.advanceTimersByTimeAsync(1);
+    expect(attempts).toHaveLength(1);
+    expect(attempts[0]?.options.port).toBe(7000);
+    expect(startupBannerSpy).not.toHaveBeenCalled();
+
+    attempts[0]?.server.emit('error', bindError('EADDRINUSE'));
+    await vi.advanceTimersByTimeAsync(5);
+
+    const handle = await handlePromise;
+    expect(serveSpy).toHaveBeenCalledTimes(2);
+    expect(serveSpy).toHaveBeenLastCalledWith(
+      expect.objectContaining({ hostname: '127.0.0.1', port: 7001 }),
+      expect.any(Function),
+    );
+    expect(startupBannerSpy).toHaveBeenCalledExactlyOnceWith(
+      '\n🚀 MCP Server running at: http://127.0.0.1:7001/mcp',
+      'http',
+    );
+    expect(handle.server).not.toBe(attempts[0]?.server);
+  });
+
+  test('rejects with the cause when the real bind reports a non-retryable error', async () => {
+    vi.useFakeTimers();
+    probeOutcomes.push('free');
+    const attempts = deferServeAttempts(1);
+
+    const { logger } = await import('@/utils/internal/logger.js');
+    const infoSpy = vi.spyOn(logger, 'info');
+    const { startHttpTransport } = await import('@/mcp-server/transports/http/httpServer.js');
+    const settled = startHttpTransport(
+      () => Promise.resolve({} as McpServer),
+      mockContext,
+      defaultMeta,
+    ).catch((err: unknown) => err);
+
+    await vi.advanceTimersByTimeAsync(1);
+    const permissionDenied = bindError('EACCES');
+    attempts[0]?.server.emit('error', permissionDenied);
+    await vi.advanceTimersByTimeAsync(20);
+
+    const error = await settled;
+    expect(error).toBeInstanceOf(Error);
+    expect((error as Error).cause).toBe(permissionDenied);
+    // A privileged-port failure must not burn the ladder — port+1 fails the same way.
+    expect(serveSpy).toHaveBeenCalledTimes(1);
+    expect(startupBannerSpy).not.toHaveBeenCalled();
+    expect(infoSpy).not.toHaveBeenCalledWith(
+      'HTTP transport started successfully.',
+      expect.anything(),
+    );
+  });
+
+  test('reports no success when async bind errors exhaust the ladder', async () => {
+    vi.useFakeTimers();
+    probeOutcomes.push('free', 'free', 'free');
+    const attempts = deferServeAttempts(3);
+
+    const { logger } = await import('@/utils/internal/logger.js');
+    const infoSpy = vi.spyOn(logger, 'info');
+    const { startHttpTransport } = await import('@/mcp-server/transports/http/httpServer.js');
+    const settled = startHttpTransport(
+      () => Promise.resolve({} as McpServer),
+      mockContext,
+      defaultMeta,
+    ).catch((err: unknown) => err);
+
+    const lastError = bindError('EADDRINUSE');
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      await vi.advanceTimersByTimeAsync(5);
+      expect(attempts).toHaveLength(attempt + 1);
+      attempts[attempt]?.server.emit('error', attempt === 2 ? lastError : bindError('EADDRINUSE'));
+    }
+    await vi.advanceTimersByTimeAsync(5);
+
+    const error = await settled;
+    expect((error as Error).message).toBe('Failed to bind to any port after 2 retries.');
+    expect((error as Error).cause).toBe(lastError);
+    expect(attempts.map((a) => a.options.port)).toEqual([7000, 7001, 7002]);
+    expect(startupBannerSpy).not.toHaveBeenCalled();
+    expect(infoSpy).not.toHaveBeenCalledWith(
+      'HTTP transport started successfully.',
+      expect.anything(),
+    );
+  });
+
+  test('ignores bind events that arrive after an attempt has settled', async () => {
+    vi.useFakeTimers();
+    probeOutcomes.push('free', 'free');
+    const attempts = deferServeAttempts(2);
+
+    const { startHttpTransport } = await import('@/mcp-server/transports/http/httpServer.js');
+    const handlePromise = startHttpTransport(
+      () => Promise.resolve({} as McpServer),
+      mockContext,
+      defaultMeta,
+    );
+
+    await vi.advanceTimersByTimeAsync(1);
+    attempts[0]?.server.emit('error', bindError('EADDRINUSE'));
+    await vi.advanceTimersByTimeAsync(5);
+    attempts[1]?.listen();
+
+    const handle = await handlePromise;
+    expect(handle.server).toBe(attempts[1]?.server);
+    expect(startupBannerSpy).toHaveBeenCalledTimes(1);
+
+    // The abandoned attempt reporting 'listening' late must not resolve a second
+    // time, log a banner for its dead port, or advance the ladder.
+    attempts[0]?.listen();
+    // A duplicate 'listening' on the settled attempt must not re-announce either.
+    attempts[1]?.listen();
+    await vi.advanceTimersByTimeAsync(20);
+
+    expect(startupBannerSpy).toHaveBeenCalledExactlyOnceWith(
+      '\n🚀 MCP Server running at: http://127.0.0.1:7001/mcp',
+      'http',
+    );
+    expect(serveSpy).toHaveBeenCalledTimes(2);
+    await expect(handlePromise).resolves.toBe(handle);
+  });
+
+  test('leaves no bind listener attached on any attempt', async () => {
+    vi.useFakeTimers();
+    probeOutcomes.push('free', 'inUse', 'free');
+    const attempts = deferServeAttempts(2);
+
+    const { startHttpTransport } = await import('@/mcp-server/transports/http/httpServer.js');
+    const handlePromise = startHttpTransport(
+      () => Promise.resolve({} as McpServer),
+      mockContext,
+      defaultMeta,
+    );
+
+    await vi.advanceTimersByTimeAsync(1);
+    expect(attempts[0]?.server.listenerCount('error')).toBe(1);
+    attempts[0]?.server.emit('error', bindError('EADDRINUSE'));
+    // Probe reports 7001 busy, so the third attempt lands on 7002.
+    await vi.advanceTimersByTimeAsync(10);
+    expect(attempts).toHaveLength(2);
+    expect(attempts[1]?.options.port).toBe(7002);
+    expect(attempts[1]?.server.listenerCount('error')).toBe(1);
+    attempts[1]?.listen();
+
+    const handle = await handlePromise;
+    for (const attempt of attempts) {
+      expect(attempt.server.listenerCount('error')).toBe(0);
+    }
+    // The startup listener is detached once settled, so a later runtime 'error'
+    // on the handed-over server surfaces instead of being silently absorbed.
+    expect((handle.server as unknown as EventEmitter).listenerCount('error')).toBe(0);
   });
 
   test('stop destroys the session store and closes the server cleanly', async () => {
