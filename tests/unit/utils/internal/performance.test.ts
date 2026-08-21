@@ -57,6 +57,17 @@ describe('measureToolExecution', () => {
     infoSpy.mockRestore();
   });
 
+  /**
+   * Histogram records carrying the tool name alone — `mcp.tool.input_bytes`
+   * then `mcp.tool.output_bytes`, in emission order. `mcp.tool.duration` also
+   * carries the success attribute, so it never matches.
+   */
+  const byteRecords = (toolName: string): [number, Record<string, unknown>][] =>
+    mockHistogramRecord.mock.calls.filter(([, attrs]) => {
+      const map = attrs as Record<string, unknown>;
+      return map['mcp.tool.name'] === toolName && Object.keys(map).length === 1;
+    }) as [number, Record<string, unknown>][];
+
   it('records success metrics and returns the tool result', async () => {
     const byteLengthSpy = vi.spyOn(Buffer, 'byteLength');
 
@@ -209,6 +220,87 @@ describe('measureToolExecution', () => {
     const [, logMeta] = call;
     expect((logMeta as any).extra.metrics.inputBytes).toBe(expectedBytes);
     expect((logMeta as any).extra.metrics.outputBytes).toBe(0);
+  });
+
+  it('measures the callback return value when no output payload is designated', async () => {
+    const returned = { message: 'ok', items: [1, 2, 3] };
+
+    await measureToolExecution(
+      async () => returned,
+      { toolName: 'default-payload', requestId: 'req-d1', timestamp: new Date().toISOString() },
+      { input: 'value' },
+    );
+
+    const records = byteRecords('default-payload');
+    expect(records).toHaveLength(2);
+    expect(records[1]?.[0]).toBe(Buffer.byteLength(JSON.stringify(returned), 'utf8'));
+  });
+
+  it('measures the designated output payload rather than the callback return value', async () => {
+    const domain = { items: ['a', 'b'] };
+
+    await measureToolExecution(
+      async (_spanContext, recordOutput) => {
+        recordOutput(domain);
+        // What the callback returns is the assembled client result, which
+        // re-renders the domain payload into content[] — measuring it would
+        // double-count.
+        return { structuredContent: domain, content: [{ type: 'text', text: 'a, b' }] };
+      },
+      { toolName: 'designated-payload', requestId: 'req-d2', timestamp: new Date().toISOString() },
+      {},
+    );
+
+    const records = byteRecords('designated-payload');
+    expect(records).toHaveLength(2);
+    expect(records[1]?.[0]).toBe(Buffer.byteLength(JSON.stringify(domain), 'utf8'));
+  });
+
+  it('detects partial success from the designated payload', async () => {
+    await measureToolExecution(
+      async (_spanContext, recordOutput) => {
+        recordOutput({ succeeded: [{ id: '1' }], failed: [{ id: '2', error: 'nope' }] });
+        return { structuredContent: { ok: true }, content: [] };
+      },
+      { toolName: 'designated-batch', requestId: 'req-d3', timestamp: new Date().toISOString() },
+      {},
+    );
+
+    expect(span.setAttribute).toHaveBeenCalledWith('mcp.tool.partial_success', true);
+    expect(span.setAttribute).toHaveBeenCalledWith('mcp.tool.batch.failed_count', 1);
+    expect(span.setAttribute).toHaveBeenCalledWith('mcp.tool.batch.succeeded_count', 1);
+  });
+
+  it('records a failure and no output bytes when the callback throws after designating output', async () => {
+    await expect(
+      measureToolExecution(
+        async (_spanContext, recordOutput) => {
+          recordOutput({ value: 1 });
+          throw new Error('post-handler failure');
+        },
+        { toolName: 'post-handler', requestId: 'req-d4', timestamp: new Date().toISOString() },
+        {},
+      ),
+    ).rejects.toThrow('post-handler failure');
+
+    // Only `mcp.tool.input_bytes` — the output histogram stays untouched.
+    expect(byteRecords('post-handler')).toHaveLength(1);
+    expect(span.setStatus).toHaveBeenCalledWith({
+      code: SpanStatusCode.ERROR,
+      message: 'post-handler failure',
+    });
+    expect(mockCounterAdd).toHaveBeenCalledWith(1, {
+      'mcp.tool.name': 'post-handler',
+      'mcp.tool.success': false,
+    });
+    expect(mockErrorCounterAdd).toHaveBeenCalledWith(1, {
+      'mcp.tool.name': 'post-handler',
+      'mcp.tool.error_category': 'server',
+    });
+
+    const call = infoSpy.mock.calls[0];
+    if (!call) throw new Error('infoSpy was not called');
+    expect((call[1] as any).extra.metrics.isSuccess).toBe(false);
   });
 
   it('detects partial success when result contains a non-empty failed array', async () => {
@@ -510,6 +602,82 @@ describe('measureResourceExecution', () => {
     expect(mockHistogramRecord).toHaveBeenCalledWith(expect.any(Number), {
       'mcp.resource.name': 'bytes-resource',
     });
+  });
+
+  /** Histogram records carrying the resource name alone — `mcp.resource.output_bytes`. */
+  const sizeRecords = (resourceName: string): [number, Record<string, unknown>][] =>
+    mockHistogramRecord.mock.calls.filter(([, attrs]) => {
+      const map = attrs as Record<string, unknown>;
+      return map['mcp.resource.name'] === resourceName && Object.keys(map).length === 1;
+    }) as [number, Record<string, unknown>][];
+
+  it('measures the callback return value when no output payload is designated', async () => {
+    const returned = { items: [1, 2, 3] };
+
+    await measureResourceExecution(
+      async () => returned,
+      {
+        resourceName: 'default-payload-resource',
+        requestId: 'req-rd1',
+        timestamp: new Date().toISOString(),
+      },
+      { uri: 'test://items/d1', mimeType: 'application/json' },
+    );
+
+    const records = sizeRecords('default-payload-resource');
+    expect(records).toHaveLength(1);
+    expect(records[0]?.[0]).toBe(Buffer.byteLength(JSON.stringify(returned), 'utf8'));
+  });
+
+  it('measures the designated output payload rather than the callback return value', async () => {
+    const domain = { id: 'item-1', status: 'active' };
+
+    await measureResourceExecution(
+      async (_spanContext, recordOutput) => {
+        recordOutput(domain);
+        return { contents: [{ uri: 'test://items/d2', text: JSON.stringify(domain, null, 2) }] };
+      },
+      {
+        resourceName: 'designated-resource',
+        requestId: 'req-rd2',
+        timestamp: new Date().toISOString(),
+      },
+      { uri: 'test://items/d2', mimeType: 'application/json' },
+    );
+
+    const records = sizeRecords('designated-resource');
+    expect(records).toHaveLength(1);
+    expect(records[0]?.[0]).toBe(Buffer.byteLength(JSON.stringify(domain), 'utf8'));
+  });
+
+  it('records a failure and no output bytes when the callback throws after designating output', async () => {
+    await expect(
+      measureResourceExecution(
+        async (_spanContext, recordOutput) => {
+          recordOutput({ value: 1 });
+          throw new Error('post-handler resource failure');
+        },
+        {
+          resourceName: 'post-handler-resource',
+          requestId: 'req-rd3',
+          timestamp: new Date().toISOString(),
+        },
+        { uri: 'test://items/d3', mimeType: 'application/json' },
+      ),
+    ).rejects.toThrow('post-handler resource failure');
+
+    expect(sizeRecords('post-handler-resource')).toHaveLength(0);
+    expect(mockCounterAdd).toHaveBeenCalledWith(1, {
+      'mcp.resource.name': 'post-handler-resource',
+      'mcp.resource.success': false,
+    });
+    expect(mockErrorCounterAdd).toHaveBeenCalledWith(1, {
+      'mcp.resource.name': 'post-handler-resource',
+    });
+
+    const call = infoSpy.mock.calls[0];
+    if (!call) throw new Error('infoSpy was not called');
+    expect((call[1] as any).extra.metrics.isSuccess).toBe(false);
   });
 
   it('records OTel error counter on failure', async () => {

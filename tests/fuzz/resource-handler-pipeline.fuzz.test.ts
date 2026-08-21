@@ -15,6 +15,7 @@ import {
 } from '@/mcp-server/resources/utils/resourceHandlerFactory.js';
 import { adversarialObjectArbitrary, loadFc, zodToArbitrary } from '@/testing/fuzz.js';
 import { McpError } from '@/types-global/errors.js';
+import { measureResourceExecution } from '@/utils/internal/performance.js';
 import { makeServerContext } from '../helpers/server-context.js';
 
 const { mockLogger } = vi.hoisted(() => ({
@@ -77,9 +78,14 @@ vi.mock('@/utils/internal/requestContext.js', () => ({
 
 vi.mock('@/utils/internal/performance.js', () => ({
   // Passes the span-bound context through, as the real implementation does —
-  // the handler factory builds its `ctx` from that argument.
-  measureResourceExecution: vi.fn((fn: (spanContext: unknown) => unknown, context: unknown) =>
-    fn(context),
+  // the handler factory builds its `ctx` from that argument. The second
+  // argument designates the payload the output-size metrics measure; this stub
+  // records nothing.
+  measureResourceExecution: vi.fn(
+    (
+      fn: (spanContext: unknown, recordOutput: (payload: unknown) => void) => unknown,
+      context: unknown,
+    ) => fn(context, () => {}),
   ),
 }));
 
@@ -154,6 +160,53 @@ describe('resource handler pipeline fuzzing', () => {
       }),
       { numRuns: 60, seed: 20_260_803 },
     );
+  });
+
+  it('keeps post-handler failures inside the measured region (#346)', async () => {
+    /**
+     * Whether the callback handed to `measureResourceExecution` rejected. A
+     * post-handler failure that settles outside it is recorded as a successful
+     * read while the client is handed an error.
+     */
+    async function measuredCallbackRejected(): Promise<boolean> {
+      const last = vi.mocked(measureResourceExecution).mock.results.at(-1);
+      if (!last) throw new Error('measureResourceExecution was never called');
+      if (last.type === 'throw') return true;
+      return await Promise.resolve(last.value).then(
+        () => false,
+        () => true,
+      );
+    }
+
+    const brokenOutput = resource('fuzz://broken-output/{id}', {
+      description: 'Violates its declared output schema.',
+      params: z.object({ id: z.string().describe('Item ID') }),
+      output: z.object({ count: z.number().describe('A number the handler never returns') }),
+      handler: () => ({}) as { count: number },
+    });
+
+    const brokenFormat = resource('fuzz://broken-format/{id}', {
+      description: 'Formatter throws.',
+      params: z.object({ id: z.string().describe('Item ID') }),
+      handler: (params) => params,
+      format: () => {
+        throw new Error('formatter blew up');
+      },
+    });
+
+    for (const def of [brokenOutput, brokenFormat]) {
+      const handler = createResourceHandler(def as AnyResourceDefinition, services, {});
+
+      await fc.assert(
+        fc.asyncProperty(fc.string({ minLength: 1, maxLength: 40 }), async (id) => {
+          await expect(
+            handler(new URL('fuzz://broken/item'), { id }, serverContext()),
+          ).rejects.toBeInstanceOf(McpError);
+          expect(await measuredCallbackRejected()).toBe(true);
+        }),
+        { numRuns: 25, seed: 20_260_805 },
+      );
+    }
   });
 
   it('classifies arbitrary handler errors without exposing stack traces', async () => {

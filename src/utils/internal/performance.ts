@@ -221,6 +221,36 @@ const toBytes = (payload: unknown): number => {
   }
 };
 
+// ==========================================================================
+// Tool execution measurement
+// ==========================================================================
+
+/*
+ * Measured-region semantics, settled in #346 and shared by
+ * {@link measureToolExecution} and {@link measureResourceExecution}.
+ *
+ * The measured region spans everything that decides the client-visible
+ * outcome: the handler **and** the response pipeline that follows it
+ * (output-schema validation, `format()`, the enrichment merge and its trailer
+ * render). Telemetry that closed when the handler returned reported a
+ * successful call while the client was handed `isError: true`.
+ *
+ * Two consequences of that width:
+ *
+ * 1. `mcp.*.duration` covers validation, formatting, and the merge, not the
+ *    handler alone. It is time-to-produce-the-result, which is what the
+ *    caller waited for.
+ * 2. The callback's return value is the assembled client result, so it is no
+ *    longer what `mcp.*.output_bytes` should measure — `content[]` re-renders
+ *    the same data the structured payload carries, and counting both would
+ *    silently redefine an existing series. Callers therefore designate the
+ *    payload explicitly via the `recordOutput` argument, which also feeds
+ *    partial-success detection. `output_bytes` keeps measuring the handler's
+ *    returned domain value, unchanged from 0.12.2. When nothing is
+ *    designated, the callback's return value is measured — the single-value
+ *    form for callers with no assembly step.
+ */
+
 /**
  * Wraps a tool's logic function with observability: an OpenTelemetry span,
  * OTel metric counters/histogram, payload size capture, and structured log.
@@ -231,12 +261,17 @@ const toBytes = (payload: unknown): number => {
  * On success the resolved value is passed through transparently.
  * On failure the error is re-thrown after being recorded on the span and metrics;
  * `McpError` instances surface their numeric `code` as the error code attribute.
+ * A failure anywhere in the callback — handler or response pipeline — is
+ * recorded, and no output-size histogram is emitted for it.
  *
  * @template T - The resolved type of the tool's return value.
- * @param toolLogicFn - Async function containing the tool's business logic. Receives
- *   `context` re-bound to the execution span this function opens, so a handler
- *   context built from it correlates to the span the handler actually runs in
- *   rather than to the enclosing request span.
+ * @param toolLogicFn - Async function containing the tool's business logic and
+ *   the response assembly that follows it. Receives `context` re-bound to the
+ *   execution span this function opens, so a handler context built from it
+ *   correlates to the span the handler actually runs in rather than to the
+ *   enclosing request span, plus `recordOutput` — call it with the handler's
+ *   domain value to designate what `mcp.tool.output_bytes` and partial-success
+ *   detection measure. Without a call, the callback's return value is measured.
  * @param context - Request context extended with `toolName`; used for span/log correlation.
  * @param inputPayload - The raw input object passed to the tool, serialized to compute byte size.
  * @param successAttributes - Optional thunk evaluated after a successful run; its
@@ -246,7 +281,10 @@ const toBytes = (payload: unknown): number => {
  * @returns A promise that resolves with the tool's return value or rejects with the original error.
  */
 export async function measureToolExecution<T>(
-  toolLogicFn: (spanContext: RequestContext & { toolName: string }) => Promise<T>,
+  toolLogicFn: (
+    spanContext: RequestContext & { toolName: string },
+    recordOutput: (payload: unknown) => void,
+  ) => Promise<T>,
   context: RequestContext & { toolName: string },
   inputPayload: unknown,
   successAttributes?: () => Record<string, boolean | number | string>,
@@ -284,15 +322,27 @@ export async function measureToolExecution<T>(
     let batchSucceeded: number | undefined;
     let batchFailed: number | undefined;
 
-    try {
-      const result = await toolLogicFn(spanContext);
-      ok = true;
-      outputBytes = toBytes(result);
+    let designatedOutput: unknown;
+    let outputDesignated = false;
+    const recordOutput = (payload: unknown): void => {
+      designatedOutput = payload;
+      outputDesignated = true;
+    };
 
-      // Detect partial success: handler returned but result contains a non-empty `failed` array.
+    try {
+      const result = await toolLogicFn(spanContext, recordOutput);
+      ok = true;
+      const measuredOutput = outputDesignated ? designatedOutput : result;
+      outputBytes = toBytes(measuredOutput);
+
+      // Detect partial success: the measured payload contains a non-empty `failed` array.
       // Convention-based — matches the batch response pattern recommended by the design skill.
-      if (result != null && typeof result === 'object' && !Array.isArray(result)) {
-        const obj = result as Record<string, unknown>;
+      if (
+        measuredOutput != null &&
+        typeof measuredOutput === 'object' &&
+        !Array.isArray(measuredOutput)
+      ) {
+        const obj = measuredOutput as Record<string, unknown>;
         if (Array.isArray(obj.failed) && obj.failed.length > 0) {
           partialSuccess = true;
           batchFailed = obj.failed.length;
@@ -431,17 +481,24 @@ function getResourceMetrics() {
 
 /**
  * Wraps a resource handler with observability: OTel span, metric counters/histogram,
- * and a structured log. Mirrors {@link measureToolExecution} but tuned for resource reads.
+ * and a structured log. Mirrors {@link measureToolExecution} but tuned for resource reads,
+ * including the measured-region semantics documented there.
  *
  * @template T - The resolved type of the resource handler's return value.
- * @param resourceLogicFn - Async function containing the resource handler. Receives
- *   `context` re-bound to the execution span this function opens.
+ * @param resourceLogicFn - Async function containing the resource handler and the
+ *   response assembly that follows it. Receives `context` re-bound to the execution
+ *   span this function opens, plus `recordOutput` — call it with the handler's domain
+ *   value to designate what `mcp.resource.output_bytes` measures. Without a call, the
+ *   callback's return value is measured.
  * @param context - Request context extended with `resourceName`; used for span/log correlation.
  * @param meta - Resource metadata: URI and MIME type for span attributes.
  * @returns A promise that resolves with the handler's return value or rejects with the original error.
  */
 export async function measureResourceExecution<T>(
-  resourceLogicFn: (spanContext: RequestContext & { resourceName: string }) => Promise<T>,
+  resourceLogicFn: (
+    spanContext: RequestContext & { resourceName: string },
+    recordOutput: (payload: unknown) => void,
+  ) => Promise<T>,
   context: RequestContext & { resourceName: string },
   meta: { uri: string; mimeType: string },
 ): Promise<T> {
@@ -471,10 +528,17 @@ export async function measureResourceExecution<T>(
     let errorCode: string | undefined;
     let outputBytes = 0;
 
+    let designatedOutput: unknown;
+    let outputDesignated = false;
+    const recordOutput = (payload: unknown): void => {
+      designatedOutput = payload;
+      outputDesignated = true;
+    };
+
     try {
-      const result = await resourceLogicFn(spanContext);
+      const result = await resourceLogicFn(spanContext, recordOutput);
       ok = true;
-      outputBytes = toBytes(result);
+      outputBytes = toBytes(outputDesignated ? designatedOutput : result);
       span.setStatus({ code: SpanStatusCode.OK });
       span.setAttribute(ATTR_MCP_RESOURCE_SIZE_BYTES, outputBytes);
       return result;

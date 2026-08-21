@@ -96,6 +96,7 @@ import {
   type ResourceHandlerFactoryServices,
   type ResourceHandlerNotifiers,
 } from '@/mcp-server/resources/utils/resourceHandlerFactory.js';
+import { TELEMETRY_LOG_MESSAGES } from '@/utils/internal/telemetryMessages.js';
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -682,6 +683,67 @@ describe('createResourceHandler', () => {
         expect(err).toBeInstanceOf(McpError);
         expect((err as McpError).code).toBe(JsonRpcErrorCode.NotFound);
       }
+    });
+  });
+
+  // -----------------------------------------------------------------------
+  // Post-handler failure telemetry (#346)
+  // -----------------------------------------------------------------------
+
+  describe('post-handler failure telemetry (#346)', () => {
+    /** The `metrics` payload of the completion log the read emitted. */
+    function completionMetrics(): Record<string, unknown> {
+      const call = mockLogger.info.mock.calls.findLast(
+        ([message]) => message === TELEMETRY_LOG_MESSAGES.resourceReadFinished,
+      );
+      if (!call) throw new Error('No resource completion log was emitted');
+      return (call[1] as { extra: { metrics: Record<string, unknown> } }).extra.metrics;
+    }
+
+    it('reports a completed read as a success', async () => {
+      const def = resource('measured://ok', {
+        description: 'Returns a value matching its output contract.',
+        output: z.object({ value: z.number().describe('A number.') }),
+        handler: () => ({ value: 1 }),
+      });
+      const handler = createResourceHandler(def as AnyResourceDefinition, services, notifiers);
+
+      await handler(new URL('measured://ok'), {}, makeServerContext());
+
+      expect(completionMetrics()).toMatchObject({ isSuccess: true, errorCode: undefined });
+    });
+
+    it('reports an output-schema failure as a failed read', async () => {
+      const def = resource('broken://thing', {
+        description: 'Violates its declared output schema.',
+        output: z.object({ value: z.number().describe('A number the handler never returns.') }),
+        handler: () => ({}) as { value: number },
+      });
+      const handler = createResourceHandler(def as AnyResourceDefinition, services, notifiers);
+
+      await expect(
+        handler(new URL('broken://thing'), {}, makeServerContext()),
+      ).rejects.toBeInstanceOf(McpError);
+
+      expect(completionMetrics()).toMatchObject({ isSuccess: false });
+      expect(completionMetrics().outputBytes).toBe(0);
+    });
+
+    it('reports a formatter failure as a failed read', async () => {
+      const def = resource('broken://format', {
+        description: 'Formatter throws.',
+        handler: () => ({ value: 1 }),
+        format: () => {
+          throw new Error('formatter blew up');
+        },
+      });
+      const handler = createResourceHandler(def as AnyResourceDefinition, services, notifiers);
+
+      await expect(
+        handler(new URL('broken://format'), {}, makeServerContext()),
+      ).rejects.toBeInstanceOf(McpError);
+
+      expect(completionMetrics()).toMatchObject({ isSuccess: false });
     });
   });
 

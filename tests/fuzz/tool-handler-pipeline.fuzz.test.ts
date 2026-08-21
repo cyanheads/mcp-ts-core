@@ -81,9 +81,14 @@ vi.mock('@/utils/internal/requestContext.js', () => ({
 
 vi.mock('@/utils/internal/performance.js', () => ({
   // Passes the span-bound context through, as the real implementation does —
-  // the handler factory builds its `ctx` from that argument.
-  measureToolExecution: vi.fn((fn: (spanContext: unknown) => unknown, context: unknown) =>
-    fn(context),
+  // the handler factory builds its `ctx` from that argument. The second
+  // argument designates the payload the output-size metrics measure; this stub
+  // records nothing.
+  measureToolExecution: vi.fn(
+    (
+      fn: (spanContext: unknown, recordOutput: (payload: unknown) => void) => unknown,
+      context: unknown,
+    ) => fn(context, () => {}),
   ),
 }));
 
@@ -99,6 +104,7 @@ import {
   type HandlerFactoryServices,
   type HandlerNotifiers,
 } from '@/mcp-server/tools/utils/toolHandlerFactory.js';
+import { measureToolExecution } from '@/utils/internal/performance.js';
 import { Allow, jsonParser } from '@/utils/parsing/jsonParser.js';
 import { makeServerContext } from '../helpers/server-context.js';
 
@@ -172,6 +178,23 @@ const complexTool = tool('fuzz_complex', {
   }),
   output: z.object({ ok: z.boolean().describe('Success') }),
   handler: () => ({ ok: true }),
+});
+
+const brokenOutputTool = tool('fuzz_broken_output', {
+  description: 'Returns a value that fails its own output contract.',
+  input: z.object({ value: z.string().describe('A string value') }),
+  output: z.object({ count: z.number().describe('A number the handler never returns') }),
+  handler: () => ({}) as { count: number },
+});
+
+const brokenFormatTool = tool('fuzz_broken_format', {
+  description: 'Returns a valid value whose formatter throws.',
+  input: z.object({ value: z.string().describe('A string value') }),
+  output: z.object({ echo: z.string().describe('Echoed value') }),
+  handler: (input) => ({ echo: input.value }),
+  format: () => {
+    throw new Error('formatter blew up');
+  },
 });
 
 const optionalTool = tool('fuzz_optional', {
@@ -270,6 +293,44 @@ describe('Tool Handler Pipeline Fuzz Tests', () => {
             }
           }),
           { numRuns: 30 },
+        );
+      });
+    }
+  });
+
+  describe('Post-handler failure containment (#346)', () => {
+    /**
+     * Whether the callback handed to `measureToolExecution` rejected. A
+     * post-handler failure that settles outside it is recorded as a successful
+     * call while the client is handed `isError: true`.
+     */
+    async function measuredCallbackRejected(): Promise<boolean> {
+      const last = vi.mocked(measureToolExecution).mock.results.at(-1);
+      if (!last) throw new Error('measureToolExecution was never called');
+      if (last.type === 'throw') return true;
+      return await Promise.resolve(last.value).then(
+        () => false,
+        () => true,
+      );
+    }
+
+    const brokenDefs: [string, AnyToolDefinition][] = [
+      ['output-schema', brokenOutputTool as AnyToolDefinition],
+      ['formatter', brokenFormatTool as AnyToolDefinition],
+    ];
+
+    for (const [label, def] of brokenDefs) {
+      it(`${label} failures stay inside the measured region for generated inputs`, async () => {
+        const handler = createToolHandler(def, services, notifiers);
+        const arb = zodToArbitrary(def.input) as fc.Arbitrary<Record<string, unknown>>;
+
+        await fc.assert(
+          fc.asyncProperty(arb, async (input) => {
+            const result = await call(handler, input);
+            expect(result.isError).toBe(true);
+            expect(await measuredCallbackRejected()).toBe(true);
+          }),
+          { numRuns: 25 },
         );
       });
     }

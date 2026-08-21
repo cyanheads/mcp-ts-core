@@ -85,9 +85,14 @@ vi.mock('@/utils/internal/requestContext.js', () => ({
 
 vi.mock('@/utils/internal/performance.js', () => ({
   // Passes the span-bound context through, as the real implementation does —
-  // the handler factory builds its `ctx` from that argument.
-  measureToolExecution: vi.fn((fn: (spanContext: unknown) => unknown, context: unknown) =>
-    fn(context),
+  // the handler factory builds its `ctx` from that argument. The second
+  // argument designates the payload the output-size metrics measure; this stub
+  // records nothing.
+  measureToolExecution: vi.fn(
+    (
+      fn: (spanContext: unknown, recordOutput: (payload: unknown) => void) => unknown,
+      context: unknown,
+    ) => fn(context, () => {}),
   ),
 }));
 
@@ -106,6 +111,7 @@ import {
   type HandlerNotifiers,
 } from '@/mcp-server/tools/utils/toolHandlerFactory.js';
 import { ErrorHandler } from '@/utils/internal/error-handler/errorHandler.js';
+import { measureToolExecution } from '@/utils/internal/performance.js';
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -1241,6 +1247,103 @@ describe('createToolHandler', () => {
       const result = await handler({ q: 'x' }, makeServerContext());
 
       expect(result.isError).toBe(true);
+    });
+  });
+
+  // -----------------------------------------------------------------------
+  // Measured region coverage (#346)
+  // -----------------------------------------------------------------------
+
+  describe('post-handler failures stay inside the measured region (#346)', () => {
+    /**
+     * Whether the callback handed to `measureToolExecution` rejected. A
+     * post-handler failure that settles outside it leaves the callback
+     * resolved, so the call is recorded as a success while the client is told
+     * it failed.
+     */
+    async function measuredCallbackRejected(): Promise<boolean> {
+      const last = vi.mocked(measureToolExecution).mock.results.at(-1);
+      if (!last) throw new Error('measureToolExecution was never called');
+      if (last.type === 'throw') return true;
+      return await Promise.resolve(last.value).then(
+        () => false,
+        () => true,
+      );
+    }
+
+    const brokenOutput = tool('broken_output', {
+      description: 'Returns a value that fails its own output contract.',
+      input: z.object({}),
+      output: z.object({ value: z.number().describe('A number the handler never returns.') }),
+      handler: () => ({}) as { value: number },
+    });
+
+    const brokenFormat = tool('broken_format', {
+      description: 'Returns a valid value whose formatter throws.',
+      input: z.object({}),
+      output: z.object({ value: z.number().describe('A number.') }),
+      handler: () => ({ value: 1 }),
+      format: () => {
+        throw new Error('formatter blew up');
+      },
+    });
+
+    const brokenEnrichment = tool('broken_enrichment', {
+      description: 'Declares a required enrichment field the handler never populates.',
+      input: z.object({}),
+      output: z.object({ value: z.number().describe('A number.') }),
+      enrichment: { total: z.number().describe('Required enrichment field.') },
+      handler: (_input, ctx) => {
+        ctx.enrich({ other: 'populates a different key' } as never);
+        return { value: 1 };
+      },
+    });
+
+    const brokenTrailer = tool('broken_trailer', {
+      description: 'Declares a trailer renderer that throws.',
+      input: z.object({}),
+      output: z.object({ value: z.number().describe('A number.') }),
+      enrichment: { total: z.number().describe('Populated enrichment field.') },
+      enrichmentTrailer: {
+        total: {
+          render: () => {
+            throw new Error('trailer render blew up');
+          },
+        },
+      },
+      handler: (_input, ctx) => {
+        ctx.enrich({ total: 1 });
+        return { value: 1 };
+      },
+    });
+
+    it.each([
+      ['output-schema validation', brokenOutput],
+      ['format()', brokenFormat],
+      ['the enrichment merge', brokenEnrichment],
+      ['a trailer render()', brokenTrailer],
+    ])('measures a failure in %s', async (_surface, def) => {
+      const handler = createToolHandler(def as AnyToolDefinition, services, notifiers);
+
+      const result = await handler({}, makeServerContext());
+
+      expect(result.isError).toBe(true);
+      await expect(measuredCallbackRejected()).resolves.toBe(true);
+    });
+
+    it('leaves a successful call resolving through the measured region', async () => {
+      const def = tool('measured_success', {
+        description: 'Succeeds.',
+        input: z.object({}),
+        output: z.object({ ok: z.boolean().describe('ok') }),
+        handler: () => ({ ok: true }),
+      });
+      const handler = createToolHandler(def as AnyToolDefinition, services, notifiers);
+
+      const result = await handler({}, makeServerContext());
+
+      expect(result.structuredContent).toEqual({ ok: true });
+      await expect(measuredCallbackRejected()).resolves.toBe(false);
     });
   });
 });

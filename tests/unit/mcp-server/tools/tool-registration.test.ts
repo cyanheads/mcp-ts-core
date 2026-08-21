@@ -73,9 +73,14 @@ vi.mock('@/utils/internal/requestContext.js', () => ({
 
 vi.mock('@/utils/internal/performance.js', () => ({
   // Passes the span-bound context through, as the real implementation does —
-  // the handler factory builds its `ctx` from that argument.
-  measureToolExecution: vi.fn((fn: (spanContext: unknown) => unknown, context: unknown) =>
-    fn(context),
+  // the handler factory builds its `ctx` from that argument. The second
+  // argument designates the payload the output-size metrics measure; this stub
+  // records nothing.
+  measureToolExecution: vi.fn(
+    (
+      fn: (spanContext: unknown, recordOutput: (payload: unknown) => void) => unknown,
+      context: unknown,
+    ) => fn(context, () => {}),
   ),
 }));
 

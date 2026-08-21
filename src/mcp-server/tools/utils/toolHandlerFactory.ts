@@ -510,21 +510,25 @@ export function createToolHandler(
       // Validate input
       const validatedInput = def.input.parse(input);
 
-      // Construct Context with detected capabilities, from inside the execution
-      // span so `ctx.traceId` / `ctx.spanId` — and the child logger built from
-      // them — name the `tool_execution:*` span the handler runs in rather than
-      // the enclosing request span (#296). When the definition declares an error
-      // contract, `attachTypedFail` adds `ctx.fail` so handlers can
-      // `throw ctx.fail('reason', ...)`; otherwise ctx is unchanged.
-      // Assigned by the measured callback below and read after it settles, on
-      // both the success and error paths.
+      // Read by the success-attributes thunk below, which the measurement
+      // evaluates after the callback settles.
       let ctx: Context | undefined;
 
-      // Execute handler with performance measurement.
-      // Wrap with Promise.resolve — handler may return sync or async.
-      const result = await measureToolExecution(
-        (spanContext) => {
-          ctx = attachTypedFail(
+      // Execute the handler AND the success-response pipeline under one
+      // measurement. Output-schema validation, `format()`, the enrichment
+      // merge, and the trailer render all decide the client-visible outcome,
+      // so a failure in any of them is a failed call — closing the span when
+      // the handler returned recorded those as successes (#346).
+      return await measureToolExecution(
+        async (spanContext, recordOutput) => {
+          // Construct Context with detected capabilities, from inside the
+          // execution span so `ctx.traceId` / `ctx.spanId` — and the child
+          // logger built from them — name the `tool_execution:*` span the
+          // handler runs in rather than the enclosing request span (#296).
+          // When the definition declares an error contract, `attachTypedFail`
+          // adds `ctx.fail` so handlers can `throw ctx.fail('reason', ...)`;
+          // otherwise ctx is unchanged.
+          const handlerCtx = attachTypedFail(
             createContext({
               appContext: spanContext,
               logger: services.logger,
@@ -541,7 +545,45 @@ export function createToolHandler(
             }),
             def.errors,
           );
-          return Promise.resolve(def.handler(validatedInput, ctx));
+          ctx = handlerCtx;
+
+          // Handler may return sync or async.
+          const handlerResult = await def.handler(validatedInput, handlerCtx);
+
+          // The domain value is what `mcp.tool.output_bytes` and
+          // partial-success detection measure — not the assembled result this
+          // callback returns, which re-renders it into content[].
+          recordOutput(handlerResult);
+
+          const validatedResult = def.output.parse(handlerResult);
+
+          // Render content[] from the domain payload only (Resolution B). Isolate
+          // formatter errors from handler errors so they get classified correctly.
+          let domainContent: ContentBlock[];
+          try {
+            domainContent = formatter(validatedResult);
+          } catch (formatError) {
+            throw new Error(
+              `Output formatting failed: ${formatError instanceof Error ? formatError.message : String(formatError)}`,
+            );
+          }
+
+          // Prepend any blocks collected via `ctx.content` (image/audio bytes). They
+          // ride content[] only — never structuredContent — so a handler can surface
+          // media for the model without the base64 duplicating into the typed output.
+          // Empty for tools that never call ctx.content, leaving content[] unchanged.
+          const collected = readContentStore(handlerCtx)?.blocks;
+          if (collected && collected.length > 0) {
+            domainContent = [...collected, ...domainContent];
+          }
+
+          // Merge enrichment into structuredContent and append the content[] trailer.
+          return buildToolSuccessResult(
+            def,
+            handlerCtx,
+            validatedResult as Record<string, unknown>,
+            domainContent,
+          );
         },
         { ...appContext, toolName: def.name },
         validatedInput,
@@ -551,39 +593,6 @@ export function createToolHandler(
             ? { [ATTR_MCP_TOOL_ENRICHED]: true }
             : {};
         },
-      );
-
-      // Assigned by the measured callback above before the handler ran.
-      const handlerCtx = ctx as Context;
-
-      const validatedResult = def.output.parse(result);
-
-      // Render content[] from the domain payload only (Resolution B). Isolate
-      // formatter errors from handler errors so they get classified correctly.
-      let domainContent: ContentBlock[];
-      try {
-        domainContent = formatter(validatedResult);
-      } catch (formatError) {
-        throw new Error(
-          `Output formatting failed: ${formatError instanceof Error ? formatError.message : String(formatError)}`,
-        );
-      }
-
-      // Prepend any blocks collected via `ctx.content` (image/audio bytes). They
-      // ride content[] only — never structuredContent — so a handler can surface
-      // media for the model without the base64 duplicating into the typed output.
-      // Empty for tools that never call ctx.content, leaving content[] unchanged.
-      const collected = readContentStore(handlerCtx)?.blocks;
-      if (collected && collected.length > 0) {
-        domainContent = [...collected, ...domainContent];
-      }
-
-      // Merge enrichment into structuredContent and append the content[] trailer.
-      return buildToolSuccessResult(
-        def,
-        handlerCtx,
-        validatedResult as Record<string, unknown>,
-        domainContent,
       );
     } catch (error: unknown) {
       // `ctx.requestInput(...)` is protocol control flow, not a failure: return

@@ -201,14 +201,18 @@ export function createResourceHandler(
       // Validate params via schema if defined
       const validatedParams = def.params ? def.params.parse(variables) : variables;
 
-      // Execute handler with performance measurement. The context is built
-      // from inside the execution span so `ctx.traceId` / `ctx.spanId` — and
-      // the child logger built from them — name the `resource_read:*` span the
-      // handler runs in rather than the enclosing request span (#296).
-      // `attachTypedFail` adds `ctx.fail` when the definition declares an error
-      // contract; otherwise no-op.
-      const handlerResult = await measureResourceExecution(
-        (spanContext) => {
+      // Execute the handler AND the response pipeline under one measurement:
+      // output-schema validation and `format()` decide the client-visible
+      // outcome, so a failure in either is a failed read. Closing the span when
+      // the handler returned recorded those as successes (#346).
+      //
+      // The context is built from inside the execution span so `ctx.traceId` /
+      // `ctx.spanId` — and the child logger built from them — name the
+      // `resource_read:*` span the handler runs in rather than the enclosing
+      // request span (#296). `attachTypedFail` adds `ctx.fail` when the
+      // definition declares an error contract; otherwise no-op.
+      return await measureResourceExecution(
+        async (spanContext, recordOutput) => {
           const ctx = attachTypedFail(
             createContext({
               appContext: spanContext,
@@ -227,17 +231,22 @@ export function createResourceHandler(
             }),
             def.errors,
           );
-          return Promise.resolve(def.handler(validatedParams, ctx));
+
+          // Handler may return sync or async.
+          const handlerResult = await def.handler(validatedParams, ctx);
+
+          // The domain value is what `mcp.resource.output_bytes` measures — not
+          // the assembled `contents` this callback returns.
+          recordOutput(handlerResult);
+
+          // Validate output against schema when defined
+          const validatedResult = def.output ? def.output.parse(handlerResult) : handlerResult;
+
+          return { contents: formatter(validatedResult, { uri, mimeType }) };
         },
         { ...appContext, resourceName },
         { uri: resourceUri, mimeType },
       );
-
-      // Validate output against schema when defined
-      const validatedResult = def.output ? def.output.parse(handlerResult) : handlerResult;
-
-      const contents = formatter(validatedResult, { uri, mimeType });
-      return { contents };
     } catch (error: unknown) {
       // `ctx.requestInput(...)` is protocol control flow, not a failure —
       // `resources/read` honors `input_required` on the 2026-07-28 revision.
