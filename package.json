@@ -1,8 +1,8 @@
 {
   "name": "@cyanheads/mcp-ts-core",
-  "version": "0.12.2",
+  "version": "0.12.3",
   "mcpName": "io.github.cyanheads/mcp-ts-core",
-  "description": "Agent-native TypeScript framework for building MCP servers. Declarative definitions with auth, multi-backend storage, OpenTelemetry, and first-class support for Bun/Node/Cloudflare Workers.",
+  "description": "Agent-native TypeScript framework for building MCP servers. Build tools, not infrastructure. Declarative definitions with auth, multi-backend storage, OpenTelemetry, and first-class support for Bun/Node/Cloudflare Workers.",
   "files": [
     "changelog/",
     "dist/",
@@ -273,7 +273,7 @@
       "url": "https://www.buymeacoffee.com/cyanheads"
     }
   ],
-  "packageManager": "bun@1.3.14",
+  "packageManager": "bun@1.4.0",
   "engines": {
     "bun": ">=1.3.0",
     "node": ">=24.0.0"

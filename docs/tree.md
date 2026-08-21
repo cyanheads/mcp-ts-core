@@ -1,6 +1,6 @@
 # mcp-ts-core - Directory Structure
 
-Generated on: 2026-08-20 20:22:21
+Generated on: 2026-08-21 07:34:23
 
 ```text
 mcp-ts-core/
@@ -691,6 +691,7 @@ mcp-ts-core/
 │   │   │   │   │   ├── header-param.test.ts
 │   │   │   │   │   ├── schemaShape.test.ts
 │   │   │   │   │   ├── toolDefinition.test.ts
+│   │   │   │   │   ├── toolHandlerFactory.telemetry.test.ts
 │   │   │   │   │   └── toolHandlerFactory.test.ts
 │   │   │   │   ├── content.test.ts
 │   │   │   │   ├── disabled-tool.test.ts
@@ -898,6 +899,7 @@ mcp-ts-core/
 │   │   ├── create-worker-handler.worker.test.ts
 │   │   ├── encoding.worker.test.ts
 │   │   ├── fetch-with-timeout.worker.test.ts
+│   │   ├── logger-shutdown.worker.test.ts
 │   │   ├── storage-d1.worker.test.ts
 │   │   ├── storage-provider-compliance.worker.test.ts
 │   │   └── storage-r2.worker.test.ts

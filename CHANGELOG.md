@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.12.3](changelog/0.12.x/0.12.3.md) — 2026-08-21
+
+Telemetry records the outcome the client sees: a failure in output-schema validation, format(), or the enrichment merge is a failed call rather than a successful one. Stdin EOF runs the full shutdown before exiting, each logger flush is bounded, and an async HTTP bind failure reaches the retry ladder.
+
 ## [0.12.2](changelog/0.12.x/0.12.2.md) — 2026-08-20
 
 Cache hints and x-mcp-header input designation: a server or a resource declares what a client may cache on protocol revision 2026-07-28, and a tool input property can mirror onto an Mcp-Param request header. The advertised transport.sessionMode now resolves auto instead of publishing it.
