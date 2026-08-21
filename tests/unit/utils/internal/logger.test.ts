@@ -76,6 +76,14 @@ vi.mock('@/utils/internal/requestContext.js', () => ({
   }),
 }));
 
+/** The single mock pino instance every `pino()` call in this file returns. */
+async function getMockPinoLogger(): Promise<{ flush: ReturnType<typeof vi.fn> }> {
+  const pino = (await import('pino')).default as unknown as () => {
+    flush: ReturnType<typeof vi.fn>;
+  };
+  return pino();
+}
+
 describe('Logger', () => {
   let logger: Logger;
 
@@ -173,6 +181,47 @@ describe('Logger', () => {
     it('should be safe to call close when not initialized', async () => {
       await expect(logger.close()).resolves.toBeUndefined();
     });
+
+    it('resolves only after a completing flush callback fires', async () => {
+      await logger.initialize('info');
+      const mockPino = await getMockPinoLogger();
+
+      let flushCallback: ((err?: Error) => void) | undefined;
+      mockPino.flush.mockImplementationOnce((cb: (err?: Error) => void) => {
+        flushCallback = cb;
+      });
+
+      let closed = false;
+      const closing = logger.close().then(() => {
+        closed = true;
+      });
+
+      await Promise.resolve();
+      await Promise.resolve();
+      expect(closed).toBe(false);
+
+      flushCallback?.();
+      await closing;
+      expect(closed).toBe(true);
+    });
+
+    it('resolves once the drain bound elapses when the flush callback never fires', async () => {
+      await logger.initialize('info');
+      const mockPino = await getMockPinoLogger();
+      mockPino.flush.mockImplementationOnce(() => {
+        // A runtime whose pino instance never calls back (workerd — #342).
+      });
+
+      vi.useFakeTimers();
+      try {
+        const closing = logger.close();
+        await vi.advanceTimersByTimeAsync(30_000);
+        await expect(closing).resolves.toBeUndefined();
+      } finally {
+        vi.useRealTimers();
+      }
+      expect(logger.isInitialized()).toBe(false);
+    });
   });
 
   describe('rate limiting', () => {
@@ -237,6 +286,12 @@ describe('Logger', () => {
 
       const counts = (logger as any).messageCounts as Map<string, { firstSeen: number }>;
       expect(counts.size).toBeGreaterThanOrEqual(5);
+
+      // Hold the premise: earlier cases in this file share the singleton's
+      // counters, and a suppression carried in from one of them would make the
+      // sweep emit its "suppressed N occurrences" notice — a real entry, but
+      // not the case under test.
+      ((logger as any).suppressedMessages as Map<string, number>).clear();
 
       // Backdate the entries and the last sweep past the rate-limit window.
       const window = (logger as any).rateLimitWindow as number;

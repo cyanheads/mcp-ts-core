@@ -99,6 +99,17 @@ const MAX_SANITIZE_DEPTH = 4;
 const MAX_TRACKED_LOG_KEYS = 1000;
 
 /**
+ * How long {@link Logger.close} waits on one pino instance's drain.
+ *
+ * `flush(cb)` is unbounded by contract, and under workerd the callback never
+ * arrives at all — an unbounded await there hangs every shutdown path that
+ * reaches the logger (#342). Node and Bun call back in milliseconds, so this
+ * window is orders of magnitude past a real drain: it ends a hang, it never
+ * truncates a flush that is going to complete.
+ */
+const FLUSH_DRAIN_TIMEOUT_MS = 2_000;
+
+/**
  * Recursively sanitizes a value for pino consumption. Returns a JSON-safe
  * replacement, or `undefined` when the value is unsafe and should be dropped.
  *
@@ -418,12 +429,30 @@ export class Logger {
   }
 
   /**
+   * Reports a drain problem on the only channel available while the logger is
+   * shutting down — and only an interactive one. In stdio mode stderr carries
+   * the server's log stream, so a bare console line there is noise a host has
+   * to filter; the pino instance that would normally carry it is the thing that
+   * just failed.
+   */
+  private reportFlushProblem(message: string, detail?: unknown): void {
+    if (typeof process === 'undefined') return;
+    if (!process.stderr?.isTTY || this.transportType === 'stdio') return;
+    if (detail === undefined) console.error(message);
+    else console.error(message, detail);
+  }
+
+  /**
    * Flushes all pending log entries and shuts down transports gracefully.
    *
    * Flushes any outstanding suppressed message counts,
    * and waits for both the main Pino logger and the interaction logger to drain
    * before resolving. Safe to call multiple times — subsequent calls on an
    * already-closed logger resolve immediately.
+   *
+   * Each drain is bounded. A completing flush callback is awaited in full; a
+   * runtime whose pino instance never calls back (workerd — #342) releases the
+   * shutdown path after {@link FLUSH_DRAIN_TIMEOUT_MS} instead of hanging it.
    *
    * @returns Promise that resolves when all writes have completed.
    * @example
@@ -439,16 +468,19 @@ export class Logger {
     );
     this.flushSuppressedMessages();
 
-    // Wait for all pending writes to complete
+    // Wait for pending writes, but never longer than the drain window.
     const flushPino = (pinoInstance: PinoLogger | undefined, label: string) => {
       const { promise, resolve } = Promise.withResolvers<void>();
       if (pinoInstance != null) {
+        const drainTimeout = setTimeout(() => {
+          this.reportFlushProblem(
+            `Timed out flushing ${label} after ${FLUSH_DRAIN_TIMEOUT_MS}ms; continuing shutdown.`,
+          );
+          resolve();
+        }, FLUSH_DRAIN_TIMEOUT_MS);
         pinoInstance.flush((err) => {
-          // Only log to console if TTY AND not in STDIO mode
-          // In STDIO mode, stdout is reserved for MCP JSON-RPC, so avoid polluting stderr with shutdown noise
-          if (err && process.stderr?.isTTY && this.transportType !== 'stdio') {
-            console.error(`Error flushing ${label}:`, err);
-          }
+          clearTimeout(drainTimeout);
+          if (err) this.reportFlushProblem(`Error flushing ${label}:`, err);
           resolve();
         });
       } else {
