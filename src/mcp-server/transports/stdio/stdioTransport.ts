@@ -68,6 +68,58 @@ export function startStdioTransport(
   }
 }
 
+/** The slice of a readable stream {@link observeStdinEof} binds. */
+export interface StdinEofSource {
+  off(event: 'close' | 'end', listener: () => void): unknown;
+  on(event: 'close' | 'end', listener: () => void): unknown;
+}
+
+/** Options for {@link observeStdinEof}. */
+export interface ObserveStdinEofOptions {
+  /** Runs once, on the first of `end` / `close`. */
+  onEof: () => void;
+  /** Stream to watch. Defaults to `process.stdin`. */
+  stream?: StdinEofSource;
+}
+
+/**
+ * Reports the client closing the stdin pipe — the only observable signal that a
+ * stdio host has disconnected.
+ *
+ * `StdioServerTransport` registers `data` and `error` on stdin and nothing else,
+ * and `serveStdio` overwrites the transport's `onclose`, so the disconnect never
+ * reaches the caller through the SDK handle. Watching the stream directly is
+ * what makes EOF reachable by the shutdown path (#322).
+ *
+ * Both `end` and `close` are bound because a torn-down pipe can emit either
+ * first; `onEof` still runs at most once, and the listeners come off before it
+ * does so nothing can re-enter.
+ *
+ * @param options - The EOF callback and, for tests, the stream to watch.
+ * @returns Disposer removing both listeners. Safe to call more than once.
+ */
+export function observeStdinEof({
+  onEof,
+  stream = process.stdin,
+}: ObserveStdinEofOptions): () => void {
+  const dispose = (): void => {
+    stream.off('end', handleEof);
+    stream.off('close', handleEof);
+  };
+
+  let reported = false;
+  function handleEof(): void {
+    if (reported) return;
+    reported = true;
+    dispose();
+    onEof();
+  }
+
+  stream.on('end', handleEof);
+  stream.on('close', handleEof);
+  return dispose;
+}
+
 export async function stopStdioTransport(
   handle: StdioServerHandle,
   parentContext: RequestContext,

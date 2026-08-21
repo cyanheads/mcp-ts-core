@@ -8,9 +8,10 @@
  * shutdown.
  */
 
+import { EventEmitter } from 'node:events';
 import type { McpServer, McpServerFactory } from '@modelcontextprotocol/server';
 import type { StdioServerHandle } from '@modelcontextprotocol/server/stdio';
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, type Mock, vi } from 'vitest';
 import type { RequestContext } from '@/utils/internal/requestContext.js';
 
 const { handleCloseSpy, serveStdioSpy } = vi.hoisted(() => ({
@@ -181,6 +182,78 @@ describe('Stdio Transport', () => {
           requestId: mockContext.requestId,
         }),
       );
+    });
+  });
+
+  describe('observeStdinEof', () => {
+    /**
+     * Stands in for `process.stdin`. Never the real stream — an EOF listener on
+     * the test runner's own stdin would take the runner down with it.
+     */
+    let stdin: EventEmitter;
+    let onEof: Mock<() => void>;
+
+    beforeEach(() => {
+      stdin = new EventEmitter();
+      onEof = vi.fn<() => void>();
+    });
+
+    it('reports EOF when the pipe ends', async () => {
+      const { observeStdinEof } = await import('@/mcp-server/transports/stdio/stdioTransport.js');
+
+      observeStdinEof({ onEof, stream: stdin });
+      stdin.emit('end');
+
+      expect(onEof).toHaveBeenCalledTimes(1);
+    });
+
+    it('reports EOF when the pipe is torn down without ending', async () => {
+      const { observeStdinEof } = await import('@/mcp-server/transports/stdio/stdioTransport.js');
+
+      observeStdinEof({ onEof, stream: stdin });
+      stdin.emit('close');
+
+      expect(onEof).toHaveBeenCalledTimes(1);
+    });
+
+    it('reports EOF once when both end and close fire', async () => {
+      const { observeStdinEof } = await import('@/mcp-server/transports/stdio/stdioTransport.js');
+
+      observeStdinEof({ onEof, stream: stdin });
+      stdin.emit('end');
+      stdin.emit('close');
+
+      expect(onEof).toHaveBeenCalledTimes(1);
+      expect(stdin.listenerCount('end')).toBe(0);
+      expect(stdin.listenerCount('close')).toBe(0);
+    });
+
+    it('stops reporting once disposed', async () => {
+      const { observeStdinEof } = await import('@/mcp-server/transports/stdio/stdioTransport.js');
+
+      const dispose = observeStdinEof({ onEof, stream: stdin });
+      dispose();
+      dispose();
+      stdin.emit('end');
+
+      expect(onEof).not.toHaveBeenCalled();
+      expect(stdin.listenerCount('end')).toBe(0);
+      expect(stdin.listenerCount('close')).toBe(0);
+    });
+
+    it('observes process.stdin when no stream is supplied', async () => {
+      const { observeStdinEof } = await import('@/mcp-server/transports/stdio/stdioTransport.js');
+      const stdinSpy = vi
+        .spyOn(process, 'stdin', 'get')
+        .mockReturnValue(stdin as unknown as NodeJS.ReadStream & { fd: 0 });
+
+      const dispose = observeStdinEof({ onEof });
+      expect(stdin.listenerCount('end')).toBe(1);
+      stdin.emit('end');
+      dispose();
+
+      expect(onEof).toHaveBeenCalledTimes(1);
+      stdinSpy.mockRestore();
     });
   });
 });

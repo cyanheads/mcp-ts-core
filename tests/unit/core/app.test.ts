@@ -19,6 +19,8 @@ const {
   mockInitSessionMetrics,
   mockInitializeOpenTelemetry,
   mockLogger,
+  mockObserveStdinEof,
+  mockStopWatchingStdin,
   mockPromptRegistry,
   mockRateLimiter,
   mockRequestContextService,
@@ -181,6 +183,17 @@ const {
     destroyAll: vi.fn(),
   };
 
+  /**
+   * The stdin EOF watcher is mocked rather than exercised: the real one binds
+   * this process's stdin, and an EOF there would tear down the test runner
+   * along with the app under test. Its own behavior is covered in
+   * `tests/unit/mcp-server/transports/stdio/stdioTransport.test.ts`.
+   */
+  const mockStopWatchingStdin = vi.fn();
+  const mockObserveStdinEof = vi.fn(
+    (_options: { onEof: () => void }): (() => void) => mockStopWatchingStdin,
+  );
+
   return {
     mockConfig,
     mockCreateCanvasService,
@@ -195,6 +208,8 @@ const {
     mockInitSessionMetrics,
     mockInitializeOpenTelemetry,
     mockLogger,
+    mockObserveStdinEof,
+    mockStopWatchingStdin,
     mockPromptRegistry,
     mockRateLimiter,
     mockRequestContextService,
@@ -249,6 +264,10 @@ vi.mock('@/mcp-server/transports/http/sessionStore.js', () => ({
 
 vi.mock('@/mcp-server/transports/manager.js', () => ({
   TransportManager: MockTransportManager,
+}));
+
+vi.mock('@/mcp-server/transports/stdio/stdioTransport.js', () => ({
+  observeStdinEof: mockObserveStdinEof,
 }));
 
 vi.mock('@/services/canvas/core/canvasFactory.js', () => ({
@@ -1050,6 +1069,134 @@ describe('core/app', () => {
     stderrWriteSpy.mockRestore();
     processExitSpy.mockRestore();
   });
+  // -------------------------------------------------------------------------
+  // Stdin EOF (#322)
+  // -------------------------------------------------------------------------
+
+  describe('stdin EOF', () => {
+    let processExitSpy: ReturnType<typeof vi.spyOn>;
+
+    beforeEach(() => {
+      mockObserveStdinEof.mockReturnValue(mockStopWatchingStdin);
+      processExitSpy = vi
+        .spyOn(process, 'exit')
+        .mockImplementation(((_: number) => undefined as never) as typeof process.exit);
+    });
+
+    afterEach(() => {
+      processExitSpy.mockRestore();
+    });
+
+    /** The `onEof` callback the app handed the watcher. */
+    const getStdinEofHandler = (): (() => void) => {
+      const call = mockObserveStdinEof.mock.calls.at(-1);
+      expect(call).toBeDefined();
+      return call![0].onEof;
+    };
+
+    it('watches stdin under the stdio transport and leaves it alone under http', async () => {
+      const stdioHandle = await createApp();
+      expect(mockObserveStdinEof).toHaveBeenCalledTimes(1);
+      await stdioHandle.shutdown();
+
+      mockObserveStdinEof.mockClear();
+      mockConfig.mcpTransportType = 'http';
+
+      const httpHandle = await createApp();
+      expect(mockObserveStdinEof).not.toHaveBeenCalled();
+      await httpHandle.shutdown();
+    });
+
+    it('runs the same cleanup path a signal runs, then exits', async () => {
+      await createApp();
+
+      getStdinEofHandler()();
+      await flushAsyncWork();
+
+      expect(mockTransportManager.instance.stop).toHaveBeenCalledTimes(1);
+      expect(mockTransportManager.instance.stop).toHaveBeenCalledWith('STDIN_EOF');
+      expect(mockShutdownOpenTelemetry).toHaveBeenCalledTimes(1);
+      expect(mockLogger.close).toHaveBeenCalledTimes(1);
+      expect(processExitSpy).toHaveBeenCalledWith(0);
+    });
+
+    it('does not re-enter shutdown when a signal handler fires after EOF', async () => {
+      await createApp();
+      const onSigterm = getProcessHandler('SIGTERM') as () => void;
+
+      getStdinEofHandler()();
+      await flushAsyncWork();
+      onSigterm();
+      await flushAsyncWork();
+
+      expect(mockTransportManager.instance.stop).toHaveBeenCalledTimes(1);
+      expect(mockTransportManager.instance.stop).toHaveBeenCalledWith('STDIN_EOF');
+      expect(mockLogger.close).toHaveBeenCalledTimes(1);
+    });
+
+    it('stops watching stdin when shutdown runs, so EOF after a signal cannot fire', async () => {
+      const handle = await createApp();
+      expect(mockObserveStdinEof).toHaveBeenCalledTimes(1);
+
+      await handle.shutdown('SIGTERM');
+
+      expect(mockStopWatchingStdin).toHaveBeenCalledTimes(1);
+    });
+
+    it('exits only after cleanup has settled', async () => {
+      const { promise, resolve } = Promise.withResolvers<void>();
+      mockTransportManager.instance.stop.mockReturnValueOnce(promise);
+
+      await createApp();
+      getStdinEofHandler()();
+      await flushAsyncWork();
+
+      expect(mockLogger.close).not.toHaveBeenCalled();
+      expect(processExitSpy).not.toHaveBeenCalled();
+
+      resolve();
+      await flushAsyncWork();
+
+      expect(mockLogger.close).toHaveBeenCalledTimes(1);
+      expect(processExitSpy).toHaveBeenCalledWith(0);
+    });
+
+    it('terminates the process even when a cleanup step never settles', async () => {
+      mockTransportManager.instance.stop.mockReturnValueOnce(new Promise<void>(() => {}));
+
+      await createApp();
+
+      const backstops: Array<() => void> = [];
+      const handles: Array<{ unref: ReturnType<typeof vi.fn> }> = [];
+      const setTimeoutSpy = vi.spyOn(globalThis, 'setTimeout').mockImplementation(((
+        callback: Parameters<typeof setTimeout>[0],
+      ) => {
+        if (typeof callback === 'function') backstops.push(callback);
+        const handle = { unref: vi.fn() };
+        handles.push(handle);
+        return handle as unknown as ReturnType<typeof setTimeout>;
+      }) as typeof setTimeout);
+
+      getStdinEofHandler()();
+      await flushAsyncWork();
+
+      expect(processExitSpy).not.toHaveBeenCalled();
+      expect(backstops).toHaveLength(1);
+
+      /**
+       * Ref'd on purpose (#322), unlike `fatalShutdown`'s backstop: it holds the
+       * event loop open across the drain, so the stdin EOF that started this
+       * shutdown cannot drain-exit the process out from under the cleanup.
+       */
+      expect(handles[0]?.unref).not.toHaveBeenCalled();
+
+      backstops[0]?.();
+      expect(processExitSpy).toHaveBeenCalledWith(0);
+
+      setTimeoutSpy.mockRestore();
+    });
+  });
+
   // -------------------------------------------------------------------------
   // Cache hints (#359)
   // -------------------------------------------------------------------------

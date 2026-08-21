@@ -33,6 +33,7 @@ import { ToolRegistry } from '@/mcp-server/tools/tool-registration.js';
 import { initHeartbeatMetrics } from '@/mcp-server/transports/heartbeat.js';
 import { initSessionMetrics } from '@/mcp-server/transports/http/sessionStore.js';
 import { TransportManager } from '@/mcp-server/transports/manager.js';
+import { observeStdinEof } from '@/mcp-server/transports/stdio/stdioTransport.js';
 import type { FrameworkServerFactory } from '@/mcp-server/types.js';
 import { createCanvasService } from '@/services/canvas/core/canvasFactory.js';
 import type { DataCanvas } from '@/services/canvas/core/DataCanvas.js';
@@ -96,6 +97,12 @@ export interface ContextOptions {
  * ```
  */
 export type SupabaseClientHandle = object;
+
+/**
+ * Ceiling on a graceful shutdown that has to end in `process.exit`. A cleanup
+ * step that never settles must not leave the process resident forever.
+ */
+const SHUTDOWN_BACKSTOP_MS = 10_000;
 
 /** Options for {@link createApp}. All arrays default to empty. */
 export interface CreateAppOptions<TSupabaseClient extends object = SupabaseClientHandle> {
@@ -658,6 +665,7 @@ export async function createApp<TSupabaseClient extends object = SupabaseClientH
 
   // --- Shutdown ---
   let isShuttingDown = false;
+  let stopWatchingStdin: (() => void) | undefined;
 
   const flushTelemetryAndLogger = async (): Promise<void> => {
     try {
@@ -677,6 +685,8 @@ export async function createApp<TSupabaseClient extends object = SupabaseClientH
     process.removeListener('unhandledRejection', onUnhandledRejection);
     process.removeListener('SIGTERM', onSigterm);
     process.removeListener('SIGINT', onSigint);
+    stopWatchingStdin?.();
+    stopWatchingStdin = undefined;
 
     const shutdownContext = requestContextService.createRequestContext({
       operation: 'ServerShutdown',
@@ -748,10 +758,30 @@ export async function createApp<TSupabaseClient extends object = SupabaseClientH
   // --- Named signal/error handlers (stored for cleanup in shutdown) ---
 
   const fatalShutdown = (signal: string) => {
-    const backstop = setTimeout(() => process.exit(1), 10_000);
+    const backstop = setTimeout(() => process.exit(1), SHUTDOWN_BACKSTOP_MS);
     backstop.unref();
     void shutdown(signal).finally(() => process.exit(1));
   };
+
+  /**
+   * Stdin EOF is a stdio client hanging up — a transport disconnect, handled
+   * like a signal. Left unobserved, the process instead runs out of ref'd
+   * handles and drains: shutdown never runs, the OTel export never leaves, and
+   * a handle server code forgot to `unref()` keeps the server resident long
+   * after its client is gone (#322).
+   *
+   * The backstop is ref'd, unlike `fatalShutdown`'s. It holds the loop open for
+   * the duration — that same drain would otherwise exit mid-cleanup — and caps
+   * how long a step that never settles can hold the process.
+   */
+  const onStdinEof = () => {
+    const backstop = setTimeout(() => process.exit(0), SHUTDOWN_BACKSTOP_MS);
+    void shutdown('STDIN_EOF').finally(() => {
+      clearTimeout(backstop);
+      process.exit(0);
+    });
+  };
+
   const onUncaughtException = (error: Error) => {
     const fatalContext = requestContextService.createRequestContext({
       operation: 'FatalError',
@@ -805,6 +835,13 @@ export async function createApp<TSupabaseClient extends object = SupabaseClientH
     // back before preserving the original startup failure for the caller.
     await shutdown('STARTUP_FAILURE');
     throw error;
+  }
+
+  // Armed only once stdio is actually serving — before that there is no client
+  // whose disconnect it would report, and a startup failure has already run
+  // shutdown by this point.
+  if (config.mcpTransportType === 'stdio') {
+    stopWatchingStdin = observeStdinEof({ onEof: onStdinEof });
   }
 
   logger.info(`${config.mcpServerName} is now running and ready.`, startupContext);
