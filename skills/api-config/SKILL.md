@@ -4,7 +4,7 @@ description: >
   Reference for core and server configuration in `@cyanheads/mcp-ts-core`. Covers env var tables with defaults, priority order, server-specific Zod schema pattern, and Workers lazy-parsing requirement.
 metadata:
   author: cyanheads
-  version: "1.12"
+  version: "1.13"
   audience: external
   type: reference
 ---
@@ -86,7 +86,7 @@ await createApp({
 | `MCP_HTTP_HOST` | `mcpHttpHost` | `127.0.0.1` | Bind address |
 | `MCP_HTTP_ENDPOINT_PATH` | `mcpHttpEndpointPath` | `/mcp` | HTTP endpoint path |
 | `MCP_HTTP_MAX_BODY_BYTES` | `mcpHttpMaxBodyBytes` | `1048576` (1 MiB) | Max **inbound** JSON-RPC request body; oversized requests get `413` before per-request allocation. Does **not** cap upstream data staged into a canvas or response sizes. `0` disables (defer to runtime/proxy). |
-| `MCP_HTTP_MAX_PORT_RETRIES` | `mcpHttpMaxPortRetries` | `15` | Retry count if port is busy |
+| `MCP_HTTP_MAX_PORT_RETRIES` | `mcpHttpMaxPortRetries` | `15` | Rungs of the port ladder walked when a bind collides; each rung tries `port + 1`. See [Port binding](#port-binding) |
 | `MCP_HTTP_PORT_RETRY_DELAY_MS` | `mcpHttpPortRetryDelayMs` | `50` | Delay between port retries (ms) |
 | `MCP_SESSION_MODE` | `mcpSessionMode` | `auto` | `stateless` \| `stateful` \| `auto` |
 | `MCP_STATEFUL_SESSION_STALE_TIMEOUT_MS` | `mcpStatefulSessionStaleTimeoutMs` | `1800000` | 30 min; stale session eviction |
@@ -100,6 +100,14 @@ await createApp({
 | `MCP_HEARTBEAT_INTERVAL_MS` | `mcpHeartbeatIntervalMs` | `0` (disabled) | Heartbeat ping interval; 0 disables |
 | `MCP_HEARTBEAT_MISS_THRESHOLD` | `mcpHeartbeatMissThreshold` | `3` | Missed heartbeats before session is considered stale |
 | `MCP_GC_PRESSURE_INTERVAL_MS` | `mcpGcPressureIntervalMs` | `0` (disabled) | Bun-only opt-in forced GC loop for HTTP deployments with heap growth |
+
+#### Port binding
+
+`MCP_HTTP_PORT` is where the HTTP transport starts, not necessarily where it ends up. Startup walks a ladder: bind `MCP_HTTP_PORT`, and on a collision wait `MCP_HTTP_PORT_RETRY_DELAY_MS` and try the next port, up to `MCP_HTTP_MAX_PORT_RETRIES` times. Read the bound port off the `HTTP transport listening at …` log line or the startup banner — with the defaults the server may be anywhere in `3010`–`3025`. Pin the port by setting `MCP_HTTP_MAX_PORT_RETRIES=0`, which makes a collision a startup failure instead of a silent move.
+
+- **Startup resolves only once the server reports `'listening'`.** A bind failure arriving after the listen call — a collision the pre-bind probe could not see, because another process took the port in between — is routed to the ladder like any other, not reported as a successful start.
+- **A failure the ladder cannot clear rejects immediately.** Each rung only changes the port, so `EACCES` (privileged port, typically `<1024` as a non-root user) and `EADDRNOTAVAIL` (the `MCP_HTTP_HOST` address is not local to this machine) fail startup on the first attempt with the OS error as the rejection's `cause`, rather than burning every rung. Ladder exhaustion carries the last bind error as `cause` too, when a real bind attempt produced one.
+- **Runtime caveat:** Bun reports a permission-denied bind as `EADDRINUSE` where Node reports `EACCES`. On Bun a privileged port therefore reads as an ordinary collision and walks the whole ladder before failing with `Failed to bind to any port after N retries.` — on Node the same port fails on the first attempt, naming `EACCES`.
 
 ---
 

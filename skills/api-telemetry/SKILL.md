@@ -4,7 +4,7 @@ description: >
   Catalog of OpenTelemetry instrumentation built into framework `@cyanheads/mcp-ts-core` — spans, metrics, completion logs, env config, runtime caveats, custom instrumentation patterns, and cardinality rules. Use when enabling OTel export, adding custom spans or metrics in services, debugging missing telemetry, looking up attribute names, or deciding what's safe to put on a metric attribute vs. a span.
 metadata:
   author: cyanheads
-  version: "1.5"
+  version: "1.7"
   audience: external
   type: reference
 ---
@@ -57,6 +57,25 @@ Cloud platform detection auto-populates resource attributes:
 
 ---
 
+## Flush at exit
+
+Spans batch and metrics push on a 15-second cycle, so a process that exits between cycles takes its telemetry with it. `ServerHandle.shutdown()` is the drain: it stops the transport, then force-flushes traces and metrics through the OTLP exporters and closes the logger.
+
+| Trigger | Path |
+|:--------|:-----|
+| `SIGTERM` / `SIGINT` | `shutdown(signal)` |
+| `uncaughtException` / `unhandledRejection` | `shutdown(signal)`, then `process.exit(1)` |
+| stdin EOF, stdio transport | `shutdown('STDIN_EOF')`, then `process.exit(0)` |
+| `ServerHandle.shutdown()` called directly | the same drain, no exit |
+
+**Stdin EOF is a disconnect.** A stdio host closing the pipe runs the cleanup a signal runs, exactly once — the shutdown detaches the signal handlers and the EOF watcher as it starts, so neither can re-enter it — and the process then exits explicitly instead of waiting to run out of handles. Two things follow: the OTLP export leaves the process, and a `setInterval` a service registered without `unref()` can no longer keep the server resident after its client is gone. The path writes nothing to stdout.
+
+**The drain is bounded.** Shutdown-on-exit races a 10-second backstop, so a cleanup step that never settles still terminates the process. The logger bounds its own flush separately, per pino instance: a completing callback is awaited in full, and a runtime whose callback never arrives releases shutdown rather than hanging it.
+
+Workers has no `ServerHandle` and no `NodeSDK` — flush whatever exporter you wired there yourself, via `ctx.waitUntil()`.
+
+---
+
 ## Spans
 
 Every handler call gets a span. Nested operations (storage, graph, LLM) become child spans on the same trace. All spans carry `code.function.name` and `code.namespace` for code-attribution. Errors are recorded via `span.recordException()` and `SpanStatusCode.ERROR`; `McpError` codes surface as the `*.error_code` attribute.
@@ -74,6 +93,19 @@ Every handler call gets a span. Nested operations (storage, graph, LLM) become c
 
 A handler that ends its round with `ctx.requestInput(...)` closes its span `OK` with `mcp.*.input_required` set — no recorded exception, no error-counter increment. Multi-round-trip input is protocol control flow, so it never inflates error rates; split on that attribute to tell an incomplete round from a completed call.
 
+### The measured region
+
+A tool or resource call is measured from the start of the handler through the response pipeline that follows it: output-schema validation, `format()`, the enrichment merge, and the trailer render for tools; output-schema validation and `format()` for resources. Telemetry therefore records the outcome the client sees — a failure in any of those is an ERROR span, `success=false` counters, an error-counter increment, and `isSuccess: false` in the completion log, matching the `isError: true` the caller receives. Prompt generation has no post-handler pipeline, so its region is the generate function alone.
+
+Two consequences worth knowing when reading a dashboard:
+
+| Signal | What it covers |
+|:-------|:---------------|
+| `mcp.tool.duration` / `mcp.resource.duration` | The handler **plus** validation, formatting, and the enrichment merge — time to produce the result, not time spent in handler code. An expensive `format()` shows up here. |
+| `mcp.tool.output_bytes` / `mcp.resource.output_bytes` | The handler's returned domain value, not the assembled result. `content[]` re-renders the data the structured payload already carries, so measuring the assembly would double-count it. Nothing is recorded for a call that fails after the handler. |
+
+`mcp.tool.partial_success` and the `mcp.tool.batch.*` counts read the same domain value, so a batch envelope (`{ succeeded, failed }`) is still detected once the result has been assembled around it.
+
 Trace context propagates across boundaries via W3C `traceparent` headers. See `api-utils` → `telemetry/trace` for `withSpan`, `buildTraceparent`, `extractTraceparent`, `createContextWithParentTrace`, `injectCurrentContextInto`, `runInContext` signatures.
 
 ---
@@ -90,12 +122,12 @@ All custom metrics are namespaced `mcp.*` (or `process.*` / `http.client.*` wher
 | `mcp.tool.duration` | histogram | `ms` | `mcp.tool.name`, `mcp.tool.success` |
 | `mcp.tool.errors` | counter | `{errors}` | `mcp.tool.name`, `mcp.tool.error_category` (`upstream`/`server`/`client`) |
 | `mcp.tool.input_bytes` | histogram | `bytes` | `mcp.tool.name` |
-| `mcp.tool.output_bytes` | histogram | `bytes` | `mcp.tool.name` (success only) |
+| `mcp.tool.output_bytes` | histogram | `bytes` | `mcp.tool.name` (success only; the handler's returned value) |
 | `mcp.tool.param.usage` | counter | `{uses}` | `mcp.tool.name`, `mcp.tool.param` (top-level keys supplied by caller) |
 | `mcp.resource.reads` | counter | `{reads}` | `mcp.resource.name`, `mcp.resource.success` |
 | `mcp.resource.duration` | histogram | `ms` | `mcp.resource.name`, `mcp.resource.success` |
 | `mcp.resource.errors` | counter | `{errors}` | `mcp.resource.name` |
-| `mcp.resource.output_bytes` | histogram | `bytes` | `mcp.resource.name` (success only) |
+| `mcp.resource.output_bytes` | histogram | `bytes` | `mcp.resource.name` (success only; the handler's returned value) |
 | `mcp.prompt.generations` | counter | `{generations}` | `mcp.prompt.name`, `mcp.prompt.success` |
 | `mcp.prompt.duration` | histogram | `ms` | `mcp.prompt.name`, `mcp.prompt.success` |
 | `mcp.prompt.errors` | counter | `{errors}` | `mcp.prompt.name`, `mcp.prompt.error_category` |
