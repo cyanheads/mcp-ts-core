@@ -7,9 +7,7 @@
  *
  * @module src/config/index
  */
-import { readFileSync } from 'node:fs';
-import { dirname, isAbsolute, join } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { isAbsolute, join } from 'node:path';
 
 import dotenv from 'dotenv';
 import { z } from 'zod';
@@ -17,45 +15,14 @@ import { z } from 'zod';
 import packageJson from '../../package.json' with { type: 'json' };
 import { configurationError } from '../types-global/errors.js';
 import { runtimeCaps } from '../utils/internal/runtime.js';
+import { type PackageManifest, resolveAppRoot } from './appRoot.js';
 import { normalizeLogLevelAlias } from './logLevelAlias.js';
-
-type PackageManifest = {
-  name?: string;
-  version?: string;
-  description?: string;
-  keywords?: string[];
-};
 
 const frameworkPkg = packageJson as PackageManifest;
 
 /** Framework identity — sourced from the package's own package.json. */
 export const FRAMEWORK_NAME = '@cyanheads/mcp-ts-core';
 export const FRAMEWORK_VERSION = frameworkPkg.version ?? '0.0.0';
-
-/**
- * Lazily reads the consumer project's package.json from process.cwd().
- * Cached after first call — the consumer's identity doesn't change at runtime.
- * Returns an empty object in Workers or if the file can't be read.
- */
-let _consumerPkg: PackageManifest | null = null;
-function resolveConsumerPackage(): PackageManifest {
-  if (_consumerPkg !== null) return _consumerPkg;
-  const pkg: PackageManifest = {};
-  try {
-    const raw = readFileSync(join(process.cwd(), 'package.json'), 'utf-8');
-    const parsed = JSON.parse(raw) as Record<string, unknown>;
-    if (typeof parsed.name === 'string') pkg.name = parsed.name;
-    if (typeof parsed.version === 'string') pkg.version = parsed.version;
-    if (typeof parsed.description === 'string') pkg.description = parsed.description;
-    if (Array.isArray(parsed.keywords)) {
-      pkg.keywords = parsed.keywords.filter((k): k is string => typeof k === 'string');
-    }
-  } catch {
-    // No consumer package.json found — will fall through to framework defaults
-  }
-  _consumerPkg = pkg;
-  return pkg;
-}
 
 // Lazy dotenv loading — deferred to first parseConfig() call.
 // Top-level execution wastes a filesystem syscall in Workers and loads stale
@@ -466,7 +433,11 @@ const parseConfig = (envOverrides?: Record<string, string | undefined>) => {
   }
 
   const env = envOverrides ? { ...process.env, ...envOverrides } : process.env;
-  const consumerPkg = resolveConsumerPackage();
+  // Identity comes from the application root, never `process.cwd()`: a stdio
+  // client's working directory is arbitrary, and a manifest read from it makes
+  // the server report whatever project happens to sit there. Empty in Workers
+  // and when no manifest is reachable, so the framework defaults apply.
+  const consumerPkg: PackageManifest = resolveAppRoot()?.manifest ?? {};
 
   const rawConfig = {
     pkg: {
@@ -623,14 +594,12 @@ const parseConfig = (envOverrides?: Record<string, string | undefined>) => {
     logsPath:
       runtimeCaps.isNode && !runtimeCaps.isWorkerLike
         ? (() => {
-            // Bundled (dist/index.js) is one level deep; source (src/config/index.ts) is two.
-            // Detect bundle path to avoid overshooting the project root.
-            const depth = import.meta.url.includes('/dist/') ? '..' : '../..';
-            const thisFile = fileURLToPath(import.meta.url);
-            const root = join(dirname(thisFile), depth);
             const logsDir = rawConfig.logsPath ?? 'logs';
             if (isAbsolute(logsDir)) return logsDir;
-            return join(root, logsDir);
+            // Anchored on the consuming application, never on this file's own
+            // location: a path derived from the framework's install directory
+            // can only ever land inside node_modules.
+            return join(resolveAppRoot()?.dir ?? process.cwd(), logsDir);
           })()
         : undefined,
     mcpServerName: env.MCP_SERVER_NAME ?? parsedPkg.name,

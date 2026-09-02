@@ -1,7 +1,7 @@
 # Developer Protocol
 
 **Package:** `@cyanheads/mcp-ts-core`
-**Version:** 0.12.4
+**Version:** 0.12.5
 **Engines:** Bun ≥1.3.0, Node ≥24.0.0
 **MCP SDK:** `@modelcontextprotocol/server` ^2.0.0 (protocol revisions 2026-07-28 and 2025-*)
 **Zod:** ^4.5.4
@@ -435,7 +435,7 @@ Pick one convention per server and stay consistent. Verbs are typically `read`, 
 
 ### Core config
 
-Managed by `@cyanheads/mcp-ts-core`. Validated via Zod. Precedence: `createApp()` overrides > env vars > `package.json` (reads `name` → `MCP_SERVER_NAME`, `version` → `MCP_SERVER_VERSION`).
+Managed by `@cyanheads/mcp-ts-core`. Validated via Zod. Precedence: `createApp()` overrides > env vars > `package.json` (reads `name` → `MCP_SERVER_NAME`, `version` → `MCP_SERVER_VERSION`). That manifest is the one at the application root — the nearest `package.json` above the entry module — never the launching client's working directory, and relative `logsPath`/`LOGS_DIR` values resolve against the same root.
 
 | Category | Key Variables |
 |:---------|:-------------|
