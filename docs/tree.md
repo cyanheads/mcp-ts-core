@@ -1,6 +1,6 @@
 # mcp-ts-core - Directory Structure
 
-Generated on: 2026-08-21 07:34:23
+Generated on: 2026-09-02 23:10:33
 
 ```text
 mcp-ts-core/
@@ -147,6 +147,8 @@ mcp-ts-core/
 │   ├── duckdb-stub.ts
 │   ├── index.ts
 │   └── worker.ts
+├── handoffs/
+│   └── 2026-09-01-local-mcp-fabric.md
 ├── scripts/
 │   ├── audit-open-index-signatures.ts
 │   ├── build-changelog.ts
@@ -266,6 +268,7 @@ mcp-ts-core/
 │   ├── cli/
 │   │   └── init.ts
 │   ├── config/
+│   │   ├── appRoot.ts
 │   │   ├── index.ts
 │   │   ├── logLevelAlias.ts
 │   │   └── parseEnvConfig.ts
@@ -558,12 +561,12 @@ mcp-ts-core/
 │   ├── _.gitattributes
 │   ├── _.gitignore
 │   ├── _.mcpbignore
+│   ├── _bunfig.toml
 │   ├── _tsconfig.build.json
 │   ├── _tsconfig.json
 │   ├── .env.example
 │   ├── AGENTS.md
 │   ├── biome.template.json
-│   ├── bunfig.toml
 │   ├── CLAUDE.md
 │   ├── devcheck.config.json
 │   ├── Dockerfile
@@ -618,6 +621,7 @@ mcp-ts-core/
 │   │   ├── oauth-jwks.int.test.ts
 │   │   ├── package-consumer.int.test.ts
 │   │   ├── public-api-contract.int.test.ts
+│   │   ├── server-identity.int.test.ts
 │   │   ├── setup.ts
 │   │   ├── stdio.test.ts
 │   │   ├── union-input.int.test.ts
@@ -648,6 +652,8 @@ mcp-ts-core/
 │   │   ├── cli/
 │   │   │   └── init.test.ts
 │   │   ├── config/
+│   │   │   ├── appRoot.test.ts
+│   │   │   ├── consumerIdentity.test.ts
 │   │   │   ├── index.test.ts
 │   │   │   ├── logLevelAlias.test.ts
 │   │   │   └── parseEnvConfig.test.ts
@@ -843,6 +849,7 @@ mcp-ts-core/
 │   │   │   │   ├── execution-span-context.test.ts
 │   │   │   │   ├── health.test.ts
 │   │   │   │   ├── lazyImport.test.ts
+│   │   │   │   ├── logger.preInit.test.ts
 │   │   │   │   ├── logger.test.ts
 │   │   │   │   ├── performance.init.test.ts
 │   │   │   │   ├── performance.test.ts

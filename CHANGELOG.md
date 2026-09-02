@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.12.5](changelog/0.12.x/0.12.5.md) — 2026-09-02
+
+Server identity now resolves from the served package instead of process.cwd() or the framework's own install path, closing two independent bugs. A server's setup() logging is buffered and replayed instead of dropped, MarkdownBuilder.codeBlock sizes its fence to survive embedded backticks, and init ships bunfig.toml again.
+
 ## [0.12.4](changelog/0.12.x/0.12.4.md) — 2026-09-02 · 🛡️ Security
 
 Security: the SSRF DNS guard now queries both node:dns resolvers, closing a Bun 1.4 Linux bypass. A caller disconnect classifies as RequestCancelled (-32011) rather than InternalError, an upstream 500 retries as ServiceUnavailable, and the Docker build stage cross-compiles instead of emulating.
