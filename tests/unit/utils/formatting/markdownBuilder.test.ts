@@ -152,6 +152,57 @@ describe('MarkdownBuilder', () => {
       const result = markdown().text('Use ').inlineCode('npm install').text(' to install.').build();
       expect(result).toBe('Use `npm install` to install.');
     });
+
+    test('should keep a fenced payload inside the block', () => {
+      const upstream = 'before\n```\nfenced\n```\nafter';
+
+      const result = markdown().codeBlock(upstream, 'text').build();
+
+      expect(result).toBe(`\`\`\`\`text\n${upstream}\n\`\`\`\``);
+    });
+
+    test('should outgrow the longest backtick run in the payload', () => {
+      const upstream = 'a\n`````\nb\n````\nc';
+
+      const result = markdown().codeBlock(upstream).build();
+
+      expect(result).toBe(`\`\`\`\`\`\`\n${upstream}\n\`\`\`\`\`\``);
+    });
+
+    test('should leave short backtick runs on the default fence', () => {
+      const upstream = 'inline `code` and a ``double`` run';
+
+      const result = markdown().codeBlock(upstream, 'md').build();
+
+      expect(result).toBe(`\`\`\`md\n${upstream}\n\`\`\``);
+    });
+
+    test('should emit the payload byte-for-byte between the fences', () => {
+      const upstream = '```json\n{"a":1}\n```\ntrailing `` text';
+
+      const lines = markdown().codeBlock(upstream, 'text').build().split('\n');
+
+      expect(lines.slice(1, -1).join('\n')).toBe(upstream);
+    });
+
+    test('should size the fence for a payload made almost entirely of backtick runs', () => {
+      // 200k separate runs: spreading these into `Math.max` exceeds the engine's
+      // argument limit, and third-party text is exactly this method's input.
+      const upstream = '`x'.repeat(200_000);
+
+      const result = markdown().codeBlock(upstream).build();
+
+      expect(result.startsWith('```\n')).toBe(true);
+      expect(result.endsWith('\n```')).toBe(true);
+    });
+
+    test('should size a diff block for file content that is itself fenced', () => {
+      const result = markdown()
+        .diff({ additions: ['```ts'], deletions: ['```js'], context: ['# README'] })
+        .build();
+
+      expect(result).toBe('````diff\n  # README\n- ```js\n+ ```ts\n````');
+    });
   });
 
   describe('Paragraphs and text', () => {

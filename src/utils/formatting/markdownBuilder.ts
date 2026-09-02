@@ -183,6 +183,14 @@ export class MarkdownBuilder {
   /**
    * Add a fenced code block with optional syntax highlighting.
    *
+   * The fence is sized past the longest backtick run in `content`, per
+   * CommonMark's rule that a fenced block closes only on a run at least as long
+   * as the one that opened it. Content a tool did not author — an upstream
+   * response, a file excerpt, a user-supplied field — therefore cannot break out
+   * of its block and be reparsed as the tool's own output. Content is emitted
+   * byte-for-byte, so it keeps parity with `structuredContent`, and a payload
+   * with no three-backtick run renders exactly as it did before.
+   *
    * @param content - The code content placed verbatim inside the fence
    * @param language - Language identifier for syntax highlighting (e.g. `'typescript'`, `'json'`, `'diff'`); defaults to no language
    * @returns this builder for chaining
@@ -196,7 +204,13 @@ export class MarkdownBuilder {
    * ```
    */
   codeBlock(content: string, language = ''): this {
-    this.sections.push(`\`\`\`${language}\n${content}\n\`\`\`\n\n`);
+    // Iterated rather than collected: a payload that is mostly backticks yields
+    // as many runs as it has characters, and arbitrary third-party text is
+    // exactly the input this guards.
+    let longestRun = 0;
+    for (const [run] of content.matchAll(/`+/g)) longestRun = Math.max(longestRun, run.length);
+    const fence = '`'.repeat(Math.max(3, longestRun + 1));
+    this.sections.push(`${fence}${language}\n${content}\n${fence}\n\n`);
     return this;
   }
 
