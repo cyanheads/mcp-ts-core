@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.12.4](changelog/0.12.x/0.12.4.md) — 2026-09-02 · 🛡️ Security
+
+Security: the SSRF DNS guard now queries both node:dns resolvers, closing a Bun 1.4 Linux bypass. A caller disconnect classifies as RequestCancelled (-32011) rather than InternalError, an upstream 500 retries as ServiceUnavailable, and the Docker build stage cross-compiles instead of emulating.
+
 ## [0.12.3](changelog/0.12.x/0.12.3.md) — 2026-08-21
 
 Telemetry records the outcome the client sees: a failure in output-schema validation, format(), or the enrichment merge is a failed call rather than a successful one. Stdin EOF runs the full shutdown before exiting, each logger flush is bounded, and an async HTTP bind failure reaches the retry ladder.
