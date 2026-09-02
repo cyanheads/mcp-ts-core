@@ -79,6 +79,7 @@ const {
 
   const mockLogger = {
     close: vi.fn(async () => {}),
+    drainPendingToStderr: vi.fn(),
     error: vi.fn(),
     fatal: vi.fn(),
     info: vi.fn(),
@@ -1048,6 +1049,23 @@ describe('core/app', () => {
     expect(written).toContain('issues');
 
     stderrWriteSpy.mockRestore();
+    processExitSpy.mockRestore();
+  });
+
+  it('surfaces records held from before logger initialization when startup fails', async () => {
+    const processExitSpy = vi
+      .spyOn(process, 'exit')
+      .mockImplementation(((_: number) => undefined as never) as typeof process.exit);
+    const setup = () => {
+      throw new Error('mirror unreachable');
+    };
+
+    // Composition runs before the logger has sinks, so a `setup()` line
+    // describing the failure is still buffered when the process gives up.
+    await expect(createApp({ setup })).rejects.toThrow('mirror unreachable');
+
+    expect(mockLogger.drainPendingToStderr).toHaveBeenCalledTimes(1);
+
     processExitSpy.mockRestore();
   });
 

@@ -110,6 +110,21 @@ const MAX_TRACKED_LOG_KEYS = 1000;
 const FLUSH_DRAIN_TIMEOUT_MS = 2_000;
 
 /**
+ * How many records are held while the logger is still uninitialized. Startup
+ * emits a handful of lines; the cap exists so a runtime that never calls
+ * {@link Logger.initialize} cannot grow the buffer without bound.
+ */
+const PRE_INIT_BUFFER_LIMIT = 250;
+
+/** A record emitted before the sinks existed, replayed at initialization. */
+interface PendingRecord {
+  context?: RequestContext;
+  error?: Error;
+  level: McpLogLevel;
+  msg: string;
+}
+
+/**
  * Recursively sanitizes a value for pino consumption. Returns a JSON-safe
  * replacement, or `undefined` when the value is unsafe and should be dropped.
  *
@@ -178,6 +193,9 @@ export function sanitizeLogBindings(obj: Record<string, unknown>): Record<string
  *   timer-driven, so the bookkeeping stays bounded on serverless runtimes. The
  *   framework's per-call telemetry lines (see `telemetryMessages.ts`) bypass the
  *   limiter, since their repetition is request throughput rather than a storm.
+ * - Records emitted before {@link Logger.initialize} are held in a bounded buffer
+ *   and replayed once the sinks exist, so boot-time lines from service
+ *   composition and a consumer's `setup()` hook are not silently dropped.
  * - OpenTelemetry trace context is auto-injected via {@link RequestContext} fields.
  * - Serverless-safe: when `IS_SERVERLESS=true` or `process` is unavailable, falls
  *   back to minimal Pino config without file transports or Node.js APIs.
@@ -197,6 +215,9 @@ export class Logger {
   private messageCounts = new Map<string, { count: number; firstSeen: number }>();
   private suppressedMessages = new Map<string, number>();
   private lastSweep = Date.now();
+  private pendingRecords: PendingRecord[] = [];
+  private droppedPendingRecords = 0;
+  private everInitialized = false;
 
   private constructor() {
     // The constructor is now safe to call in a global scope.
@@ -379,10 +400,12 @@ export class Logger {
 
     this.lastSweep = Date.now();
     this.initialized = true;
+    this.everInitialized = true;
     this.info(
       `Logger initialized. MCP level: ${level}.`,
       requestContextService.createRequestContext({ operation: 'loggerInit' }),
     );
+    this.replayPendingRecords();
   }
 
   /**
@@ -613,8 +636,93 @@ export class Logger {
     }
   }
 
+  /**
+   * Holds a record emitted before {@link initialize} so it can reach a sink
+   * once one exists. Composition runs ahead of logger setup — a consumer's
+   * `setup()` hook is the common case — and a record dropped there is exactly
+   * the boot-time success announce or degrade-path warning an operator needs.
+   *
+   * Level filtering is deliberately deferred to the replay: the active level is
+   * not known until {@link initialize} receives it.
+   */
+  private holdPendingRecord(
+    level: McpLogLevel,
+    msg: string,
+    context?: RequestContext,
+    error?: Error,
+  ): void {
+    // After a `close()`, the sinks are gone for good — nothing to replay into.
+    if (this.everInitialized) return;
+    if (this.pendingRecords.length >= PRE_INIT_BUFFER_LIMIT) {
+      this.droppedPendingRecords++;
+      return;
+    }
+    this.pendingRecords.push({
+      level,
+      msg,
+      ...(context && { context }),
+      ...(error && { error }),
+    });
+  }
+
+  /** Replays held records through the now-live sinks, then reports any overflow. */
+  private replayPendingRecords(): void {
+    const pending = this.pendingRecords;
+    const dropped = this.droppedPendingRecords;
+    this.pendingRecords = [];
+    this.droppedPendingRecords = 0;
+
+    for (const record of pending) {
+      this.log(record.level, record.msg, record.context, record.error);
+    }
+
+    if (dropped > 0) {
+      this.warning(
+        `Dropped ${dropped} record(s) logged before initialization — the pre-init buffer holds ${PRE_INIT_BUFFER_LIMIT}.`,
+        requestContextService.createRequestContext({
+          operation: 'loggerPreInitOverflow',
+          additionalContext: { droppedRecords: dropped, bufferLimit: PRE_INIT_BUFFER_LIMIT },
+        }),
+      );
+    }
+  }
+
+  /**
+   * Writes any held pre-init records to stderr and clears them.
+   *
+   * For startup paths that end the process before {@link initialize} runs: the
+   * records describe what the failing boot was doing, so they are worth more on
+   * stderr than discarded. Never writes to stdout, which stdio transport owns.
+   *
+   * @example
+   * ```ts
+   * catch (err) { logger.drainPendingToStderr(); throw err; }
+   * ```
+   */
+  public drainPendingToStderr(): void {
+    if (this.pendingRecords.length === 0) return;
+    // Checked before the records are cleared: a runtime with no stderr keeps them.
+    if (typeof process === 'undefined' || typeof process.stderr?.write !== 'function') return;
+
+    const lines = this.pendingRecords.map(
+      (record) =>
+        `[pre-init ${record.level}] ${record.msg}${record.error ? ` — ${record.error.message}` : ''}`,
+    );
+    if (this.droppedPendingRecords > 0) {
+      lines.push(
+        `[pre-init] ${this.droppedPendingRecords} further record(s) dropped — buffer holds ${PRE_INIT_BUFFER_LIMIT}.`,
+      );
+    }
+    this.pendingRecords = [];
+    this.droppedPendingRecords = 0;
+    process.stderr.write(`${lines.join('\n')}\n`);
+  }
+
   private log(level: McpLogLevel, msg: string, context?: RequestContext, error?: Error): void {
-    if (!this.pinoLogger || !this.initialized) return;
+    if (!this.pinoLogger || !this.initialized) {
+      this.holdPendingRecord(level, msg, context, error);
+      return;
+    }
 
     const pinoLevel = mcpToPinoLevel[level] ?? 'info';
     const currentPinoLevel = mcpToPinoLevel[this.currentMcpLevel] ?? 'info';

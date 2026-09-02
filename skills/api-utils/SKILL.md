@@ -4,7 +4,7 @@ description: >
   API reference for all utilities exported from `@cyanheads/mcp-ts-core/utils`. Use when looking up utility method signatures, options, peer dependencies, or usage patterns.
 metadata:
   author: cyanheads
-  version: "2.7"
+  version: "2.8"
   audience: external
   type: reference
 ---
@@ -81,7 +81,7 @@ The `utils` export includes two type guards. The full set of guards lives in the
 | Export | API | Notes |
 |:-------|:----|:------|
 | `Logger` | Class | The `Logger` class itself. Use `Logger.getInstance()` if needed; most consumers use the `logger` singleton. |
-| `logger` | `Logger` instance (wraps Pino). `.debug(msg, ctx?)` `.info(msg, ctx?)` `.notice(msg, ctx?)` `.warning(msg, ctx?)` `.error(msg, errorOrCtx, ctx?)` `.crit(msg, errorOrCtx, ctx?)` `.alert(msg, errorOrCtx, ctx?)` `.emerg(msg, errorOrCtx, ctx?)` `.fatal(msg, errorOrCtx, ctx?)` | Global structured logger. Use `ctx.log` in handlers instead. `logger` is for lifecycle/background contexts (startup, shutdown, `setup()`). Auto-redacts sensitive fields. **Note:** `.error()` and higher accept `(msg, Error, ctx?)` or `(msg, ctx?)` — the second arg is overloaded. `.fatal()` is an alias for `.emerg()`. Full RFC 5424 severity set. |
+| `logger` | `Logger` instance (wraps Pino). `.debug(msg, ctx?)` `.info(msg, ctx?)` `.notice(msg, ctx?)` `.warning(msg, ctx?)` `.error(msg, errorOrCtx, ctx?)` `.crit(msg, errorOrCtx, ctx?)` `.alert(msg, errorOrCtx, ctx?)` `.emerg(msg, errorOrCtx, ctx?)` `.fatal(msg, errorOrCtx, ctx?)` | Global structured logger. Use `ctx.log` in handlers instead. `logger` is for lifecycle/background contexts (startup, shutdown, `setup()`). Auto-redacts sensitive fields. Records logged before the framework initializes the logger — anything in `setup()` — are held in a 250-record buffer and replayed once the sinks exist, filtered against the level the logger starts with. **Note:** `.error()` and higher accept `(msg, Error, ctx?)` or `(msg, ctx?)` — the second arg is overloaded. `.fatal()` is an alias for `.emerg()`. Full RFC 5424 severity set. |
 | `McpLogLevel` | Type | Log level union type for typing level variables. |
 
 ---

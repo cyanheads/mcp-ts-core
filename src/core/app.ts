@@ -537,6 +537,10 @@ export async function createApp<TSupabaseClient extends object = SupabaseClientH
   try {
     composed = await composeServices<TSupabaseClient>(options);
   } catch (err) {
+    // Composition runs before the logger has sinks, so anything it logged —
+    // including a consumer `setup()` line describing what failed — is still
+    // buffered. Surface it before the process ends.
+    logger.drainPendingToStderr();
     if (err instanceof McpError && err.code === JsonRpcErrorCode.ConfigurationError) {
       printStartupConfigError(err);
       process.exit(1);
