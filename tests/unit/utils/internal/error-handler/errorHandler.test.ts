@@ -4,10 +4,12 @@
  * @module tests/utils/internal/error-handler/errorHandler.test
  */
 
+import { SdkError, SdkErrorCode } from '@modelcontextprotocol/server';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { z } from 'zod';
 import { JsonRpcErrorCode, McpError } from '@/types-global/errors.js';
 import { ErrorHandler } from '@/utils/internal/error-handler/errorHandler.js';
+import { logger } from '@/utils/internal/logger.js';
 
 // Suppress logger output in tests
 vi.mock('@/utils/internal/logger.js', () => ({
@@ -143,6 +145,32 @@ describe('ErrorHandler', () => {
       );
     });
 
+    it('should classify a transport-closed SdkError as RequestCancelled (#386)', () => {
+      // The SDK rejects a request in flight when the transport closes. The
+      // caller went away — that is a cancellation, not a fault in this server.
+      const err = new SdkError(
+        SdkErrorCode.ConnectionClosed,
+        'Connection closed before a response was produced',
+      );
+      expect(ErrorHandler.determineErrorCode(err)).toBe(JsonRpcErrorCode.RequestCancelled);
+    });
+
+    it('classifies the pre-dispatch abort variant as RequestCancelled too (#386)', () => {
+      // Same code, different message — matched structurally, so the wording of
+      // either message is free to change upstream. This one would otherwise hit
+      // the generic `abort(ed)?` pattern and read as a Timeout.
+      const err = new SdkError(
+        SdkErrorCode.ConnectionClosed,
+        'The request was aborted before it could be handled',
+      );
+      expect(ErrorHandler.determineErrorCode(err)).toBe(JsonRpcErrorCode.RequestCancelled);
+    });
+
+    it('leaves a non-cancellation SdkError to the normal pattern ladder', () => {
+      const err = new SdkError(SdkErrorCode.RequestTimeout, 'Request timed out');
+      expect(ErrorHandler.determineErrorCode(err)).toBe(JsonRpcErrorCode.Timeout);
+    });
+
     it('should default unknown errors to InternalError', () => {
       expect(ErrorHandler.determineErrorCode(new Error('something weird'))).toBe(
         JsonRpcErrorCode.InternalError,
@@ -252,6 +280,65 @@ describe('ErrorHandler', () => {
       });
       expect(result).toBeInstanceOf(McpError);
       expect(result.message).toContain('string error');
+    });
+
+    it('logs a cancellation at info without a stack (#386)', () => {
+      const err = new SdkError(
+        SdkErrorCode.ConnectionClosed,
+        'Connection closed before a response was produced',
+      );
+
+      const result = ErrorHandler.handleError(err, { operation: 'tool:demo' }) as McpError;
+
+      expect(result.code).toBe(JsonRpcErrorCode.RequestCancelled);
+      expect(logger.error).not.toHaveBeenCalled();
+      expect(logger.info).toHaveBeenCalledWith(
+        expect.stringContaining('tool:demo'),
+        expect.objectContaining({
+          extra: expect.objectContaining({ errorCode: JsonRpcErrorCode.RequestCancelled }),
+        }),
+      );
+      const logged = vi.mocked(logger.info).mock.calls.at(-1)?.[1] as {
+        extra?: Record<string, unknown>;
+      };
+      expect(logged.extra).not.toHaveProperty('stack');
+    });
+
+    it('logs a cancelled fetch at info without a stack (#386)', () => {
+      // The other half of the same failure: `fetchWithTimeout`'s own abort error
+      // arrives here already carrying the cancellation code.
+      const err = new McpError(
+        JsonRpcErrorCode.RequestCancelled,
+        'fetch GET https://x was aborted.',
+      );
+
+      ErrorHandler.handleError(err, { operation: 'tool:demo' });
+
+      expect(logger.error).not.toHaveBeenCalled();
+      expect(logger.info).toHaveBeenCalledOnce();
+    });
+
+    it('still logs every other code at error, with the stack (#386 regression guard)', () => {
+      ErrorHandler.handleError(new Error('upstream exploded'), { operation: 'tool:demo' });
+
+      expect(logger.info).not.toHaveBeenCalled();
+      expect(logger.error).toHaveBeenCalledOnce();
+      const logged = vi.mocked(logger.error).mock.calls.at(-1)?.[1] as {
+        extra?: Record<string, unknown>;
+      };
+      expect(typeof logged.extra?.stack).toBe('string');
+    });
+
+    it('honors includeStack: false independently of the code', () => {
+      ErrorHandler.handleError(new Error('upstream exploded'), {
+        operation: 'tool:demo',
+        includeStack: false,
+      });
+
+      const logged = vi.mocked(logger.error).mock.calls.at(-1)?.[1] as {
+        extra?: Record<string, unknown>;
+      };
+      expect(logged.extra).not.toHaveProperty('stack');
     });
 
     it('should extract cause chain when error has a cause', () => {

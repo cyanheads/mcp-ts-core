@@ -294,6 +294,17 @@ describe('HTTP Error Handler', () => {
       expect(statusValue).toBe(503);
     });
 
+    test('should map RequestCancelled to 499 (#386)', async () => {
+      // Matches what the SDK's own handler answers for a closed connection, so
+      // a cancellation reports the same status wherever it is caught.
+      const error = new McpError(JsonRpcErrorCode.RequestCancelled, 'Connection closed');
+
+      await httpErrorHandler(error, mockContext as Context<{ Bindings: HonoNodeBindings }>);
+
+      expect(statusValue).toBe(499);
+      expect((jsonResponseData as any).error.code).toBe(JsonRpcErrorCode.RequestCancelled);
+    });
+
     test('should default to 500 for unknown error codes', async () => {
       const error = new McpError(-99999 as JsonRpcErrorCode, 'Unknown error');
 

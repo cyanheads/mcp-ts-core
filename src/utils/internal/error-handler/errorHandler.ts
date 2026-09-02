@@ -4,6 +4,7 @@
  * @module src/utils/internal/error-handler/errorHandler
  */
 
+import { SdkError, SdkErrorCode } from '@modelcontextprotocol/server';
 import { SpanStatusCode, trace } from '@opentelemetry/api';
 
 import { ZodError } from 'zod';
@@ -50,11 +51,12 @@ export class ErrorHandler {
    *
    * Resolution order:
    * 1. `McpError` instances — returns `error.code` directly.
-   * 2. Standard JS error constructor names via `ERROR_TYPE_MAPPINGS` (e.g. `TypeError` → `ValidationError`).
-   * 3. Provider-specific patterns (AWS, HTTP status codes, Supabase, OpenRouter) — checked before common patterns for specificity.
-   * 4. Common message/name patterns (auth, not-found, rate-limit, etc.).
-   * 5. `AbortError` name — mapped to `Timeout`.
-   * 6. Falls back to `JsonRpcErrorCode.InternalError`.
+   * 2. SDK `ConnectionClosed` rejections — mapped to `RequestCancelled`, ahead of the pattern ladder.
+   * 3. Standard JS error constructor names via `ERROR_TYPE_MAPPINGS` (e.g. `TypeError` → `ValidationError`).
+   * 4. Provider-specific patterns (AWS, HTTP status codes, Supabase, OpenRouter) — checked before common patterns for specificity.
+   * 5. Common message/name patterns (auth, not-found, rate-limit, etc.).
+   * 6. `AbortError` name — mapped to `Timeout`.
+   * 7. Falls back to `JsonRpcErrorCode.InternalError`.
    *
    * @param error - The error instance or value to classify.
    * @returns The most specific `JsonRpcErrorCode` that fits the error.
@@ -74,6 +76,17 @@ export class ErrorHandler {
   public static determineErrorCode(error: unknown): JsonRpcErrorCode {
     if (error instanceof McpError) {
       return error.code;
+    }
+
+    /**
+     * The SDK rejects every request still in flight when the transport closes,
+     * which is what a client disconnect looks like from in here. Matched on the
+     * code rather than the message: the SDK uses this same code for more than
+     * one wording, and the one that says "aborted" would otherwise be caught by
+     * the generic abort pattern below and read as a `Timeout`.
+     */
+    if (error instanceof SdkError && error.code === SdkErrorCode.ConnectionClosed) {
+      return JsonRpcErrorCode.RequestCancelled;
     }
 
     const errorName = getErrorName(error);
@@ -117,8 +130,10 @@ export class ErrorHandler {
    * 1. Records the exception on the active OTel span and sets span status to ERROR.
    * 2. Sanitizes `options.input` via `sanitizeInputForLogging` before including in logs.
    * 3. Extracts and consolidates error data, original stack, and the full cause chain.
-   * 4. Wraps non-`McpError` errors in a new `McpError` (or delegates to `options.errorMapper`).
-   * 5. Logs the result at `error` level via the global logger with full structured context.
+   * 4. Rebuilds the error as a new `McpError` carrying the consolidated data, preserving the
+   *    classified code (or delegates to `options.errorMapper`).
+   * 5. Logs the result via the global logger with full structured context — at `error` level,
+   *    or at `info` without a stack for `RequestCancelled`, which is a routine caller disconnect.
    * 6. Returns the processed error, or rethrows it if `options.rethrow` is `true`.
    *
    * @param error - The error instance or value that occurred.
@@ -171,8 +186,17 @@ export class ErrorHandler {
     const originalErrorMessage = getErrorMessage(error);
     const originalStack = error instanceof Error ? error.stack : undefined;
 
-    let finalError: Error;
-    let loggedErrorCode: JsonRpcErrorCode;
+    /**
+     * Classified before the record is assembled, because the code decides more
+     * than the wire response: a caller-abandoned request is a routine event, so
+     * it is logged at `info` and carries no stack. Attaching one invites triage
+     * to read a client hanging up as a fault in this server.
+     */
+    const loggedErrorCode: JsonRpcErrorCode =
+      error instanceof McpError
+        ? error.code
+        : explicitErrorCode || ErrorHandler.determineErrorCode(error);
+    const isCancellation = loggedErrorCode === JsonRpcErrorCode.RequestCancelled;
 
     const errorDataSeed =
       error instanceof McpError && typeof error.data === 'object' && error.data !== null
@@ -194,7 +218,11 @@ export class ErrorHandler {
       originalErrorName,
       originalMessage: originalErrorMessage,
     };
-    if (originalStack && !(error instanceof McpError && error.data?.originalStack)) {
+    if (
+      originalStack &&
+      !isCancellation &&
+      !(error instanceof McpError && error.data?.originalStack)
+    ) {
       consolidatedData.originalStack = originalStack;
     }
 
@@ -215,21 +243,9 @@ export class ErrorHandler {
       }
     }
 
-    if (error instanceof McpError) {
-      loggedErrorCode = error.code;
-      finalError = errorMapper
-        ? errorMapper(error)
-        : new McpError(error.code, error.message, consolidatedData, {
-            cause,
-          });
-    } else {
-      loggedErrorCode = explicitErrorCode || ErrorHandler.determineErrorCode(error);
-      finalError = errorMapper
-        ? errorMapper(error)
-        : new McpError(loggedErrorCode, originalErrorMessage, consolidatedData, {
-            cause,
-          });
-    }
+    const finalError: Error = errorMapper
+      ? errorMapper(error)
+      : new McpError(loggedErrorCode, originalErrorMessage, consolidatedData, { cause });
 
     // Record error classification metric
     getErrorMetrics().errorClassifiedCounter.add(1, {
@@ -273,14 +289,16 @@ export class ErrorHandler {
         finalErrorType: getErrorName(finalError),
         errorData:
           finalError instanceof McpError && finalError.data ? finalError.data : consolidatedData,
-        ...(includeStack && stack ? { stack } : {}),
+        ...(includeStack && stack && !isCancellation ? { stack } : {}),
       },
     };
 
-    logger.error(
-      `Error in ${operation}: ${finalError.message || originalErrorMessage}`,
-      logContext,
-    );
+    const logDescription = finalError.message || originalErrorMessage;
+    if (isCancellation) {
+      logger.info(`Cancelled ${operation}: ${logDescription}`, logContext);
+    } else {
+      logger.error(`Error in ${operation}: ${logDescription}`, logContext);
+    }
 
     if (rethrow) {
       throw finalError;

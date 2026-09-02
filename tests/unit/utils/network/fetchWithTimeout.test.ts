@@ -8,6 +8,35 @@ import { JsonRpcErrorCode, McpError } from '../../../../src/types-global/errors.
 import { logger } from '../../../../src/utils/internal/logger.js';
 import { fetchWithTimeout } from '../../../../src/utils/network/fetchWithTimeout.js';
 
+/**
+ * The SSRF guard resolves through `node:dns/promises`. Holding each function in
+ * a mutable slot behind a getter lets a test swap one out entirely — including
+ * removing `lookup`, which is how a runtime without it (Workers under
+ * `nodejs_compat`) presents.
+ */
+const dnsSlots = vi.hoisted(() => ({
+  resolve4: undefined as unknown,
+  resolve6: undefined as unknown,
+  lookup: undefined as unknown,
+}));
+
+vi.mock('node:dns/promises', () => ({
+  get resolve4() {
+    return dnsSlots.resolve4;
+  },
+  get resolve6() {
+    return dnsSlots.resolve6;
+  },
+  get lookup() {
+    return dnsSlots.lookup;
+  },
+}));
+
+/** The rejection a resolver raises for a name it cannot see. Never an SSRF signal. */
+function unresolvable(): Error & { code: string } {
+  return Object.assign(new Error('queryA ENOTFOUND'), { code: 'ENOTFOUND' });
+}
+
 describe('fetchWithTimeout', () => {
   const context = {
     requestId: 'ctx-1',
@@ -18,6 +47,11 @@ describe('fetchWithTimeout', () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
+    // Default: nothing resolves anywhere, so the guard stays silent and no unit
+    // test reaches the network for a name.
+    dnsSlots.resolve4 = vi.fn().mockRejectedValue(unresolvable());
+    dnsSlots.resolve6 = vi.fn().mockRejectedValue(unresolvable());
+    dnsSlots.lookup = vi.fn().mockRejectedValue(unresolvable());
     debugSpy = vi.spyOn(logger, 'debug').mockImplementation(() => {});
     errorSpy = vi.spyOn(logger, 'error').mockImplementation(() => {});
   });
@@ -79,7 +113,8 @@ describe('fetchWithTimeout', () => {
     [409, JsonRpcErrorCode.Conflict],
     [422, JsonRpcErrorCode.ValidationError],
     [429, JsonRpcErrorCode.RateLimited],
-    [500, JsonRpcErrorCode.InternalError],
+    [500, JsonRpcErrorCode.ServiceUnavailable],
+    [501, JsonRpcErrorCode.ServiceUnavailable],
     [502, JsonRpcErrorCode.ServiceUnavailable],
     [504, JsonRpcErrorCode.Timeout],
   ])('status %d maps to the right error code', (status, expectedCode) => {
@@ -89,6 +124,30 @@ describe('fetchWithTimeout', () => {
         code: expectedCode,
         data: { statusCode: status },
       });
+    });
+  });
+
+  describe('upstream 5xx retryability (#323)', () => {
+    it('leaves a 500 free to retry — no in-band opt-out on error.data', async () => {
+      vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response('boom', { status: 500 }));
+      const error = (await fetchWithTimeout('https://example.com', 1000, context).catch(
+        (e) => e,
+      )) as McpError;
+
+      expect(error.code).toBe(JsonRpcErrorCode.ServiceUnavailable);
+      expect(error.data).not.toHaveProperty('retryable');
+    });
+
+    it('opts a 501 out of retry in band while keeping the upstream classification', async () => {
+      vi.spyOn(globalThis, 'fetch').mockResolvedValue(
+        new Response('not implemented', { status: 501 }),
+      );
+      const error = (await fetchWithTimeout('https://example.com', 1000, context).catch(
+        (e) => e,
+      )) as McpError;
+
+      expect(error.code).toBe(JsonRpcErrorCode.ServiceUnavailable);
+      expect(error.data?.retryable).toBe(false);
     });
   });
 
@@ -366,7 +425,7 @@ describe('fetchWithTimeout', () => {
     externalController.abort('client disconnected');
 
     await expect(promise).rejects.toMatchObject({
-      code: JsonRpcErrorCode.InternalError,
+      code: JsonRpcErrorCode.RequestCancelled,
       data: expect.objectContaining({ errorSource: 'FetchAborted' }),
     });
 
@@ -397,7 +456,7 @@ describe('fetchWithTimeout', () => {
     externalController.abort(new DOMException('caller deadline', 'TimeoutError'));
 
     await expect(promise).rejects.toMatchObject({
-      code: JsonRpcErrorCode.InternalError,
+      code: JsonRpcErrorCode.RequestCancelled,
       data: expect.objectContaining({ errorSource: 'FetchAborted' }),
     });
   });
@@ -445,7 +504,7 @@ describe('fetchWithTimeout', () => {
 
       await expect(
         fetchWithTimeout('https://example.com', 1000, context, { expectedStatuses: [404] }),
-      ).rejects.toMatchObject({ code: JsonRpcErrorCode.InternalError });
+      ).rejects.toMatchObject({ code: JsonRpcErrorCode.ServiceUnavailable });
 
       expect(errorSpy).toHaveBeenCalledWith(
         'Fetch failed for https://example.com with status 500.',
@@ -715,6 +774,109 @@ describe('fetchWithTimeout', () => {
       });
     });
 
+    describe('DNS resolver split (#365)', () => {
+      const ssrfOpts = { rejectPrivateIPs: true };
+
+      it('queries the c-ares and system resolvers for the same name', async () => {
+        vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response('ok', { status: 200 }));
+
+        await fetchWithTimeout('https://public.example/', 1000, context, ssrfOpts);
+
+        expect(dnsSlots.resolve4).toHaveBeenCalledWith('public.example');
+        expect(dnsSlots.resolve6).toHaveBeenCalledWith('public.example');
+        expect(dnsSlots.lookup).toHaveBeenCalledWith('public.example', { all: true });
+      });
+
+      it('blocks a name only the system resolver can see (Bun 1.4 Linux split)', async () => {
+        // c-ares does not consult /etc/hosts or systemd-resolved, so `resolve4`
+        // fails while `getaddrinfo` — what the connection actually uses — answers
+        // with the internal address the guard exists to block.
+        dnsSlots.lookup = vi.fn().mockResolvedValue([{ address: '10.0.0.12', family: 4 }]);
+        const fetchMock = vi.spyOn(globalThis, 'fetch');
+
+        await expect(
+          fetchWithTimeout('http://internal.example/', 1000, context, ssrfOpts),
+        ).rejects.toMatchObject({
+          code: JsonRpcErrorCode.ValidationError,
+          message: expect.stringContaining('non-global IP 10.0.0.12'),
+        });
+        expect(fetchMock).not.toHaveBeenCalled();
+      });
+
+      it('blocks a non-global IPv6 answer from the system resolver', async () => {
+        dnsSlots.lookup = vi.fn().mockResolvedValue([{ address: 'fd00::1', family: 6 }]);
+
+        await expect(
+          fetchWithTimeout('http://internal.example/', 1000, context, ssrfOpts),
+        ).rejects.toMatchObject({
+          code: JsonRpcErrorCode.ValidationError,
+          message: expect.stringContaining('fd00::1'),
+        });
+      });
+
+      it('still blocks on a c-ares answer the system resolver disagrees with', async () => {
+        dnsSlots.resolve4 = vi.fn().mockResolvedValue(['192.168.1.5']);
+        dnsSlots.lookup = vi.fn().mockResolvedValue([{ address: '93.184.216.34', family: 4 }]);
+
+        await expect(
+          fetchWithTimeout('http://split.example/', 1000, context, ssrfOpts),
+        ).rejects.toMatchObject({
+          code: JsonRpcErrorCode.ValidationError,
+          message: expect.stringContaining('192.168.1.5'),
+        });
+      });
+
+      it('keeps the c-ares answer when lookup is absent from the runtime', async () => {
+        // Workers under `nodejs_compat` may not implement every dns function. A
+        // missing one must not swallow the answers that did arrive.
+        dnsSlots.lookup = undefined;
+        dnsSlots.resolve6 = vi.fn().mockResolvedValue(['fd00::99']);
+
+        await expect(
+          fetchWithTimeout('http://partial.example/', 1000, context, ssrfOpts),
+        ).rejects.toMatchObject({
+          code: JsonRpcErrorCode.ValidationError,
+          message: expect.stringContaining('fd00::99'),
+        });
+      });
+
+      it('keeps the c-ares answer when lookup throws synchronously', async () => {
+        dnsSlots.lookup = vi.fn(() => {
+          throw new TypeError('dns.lookup is not implemented');
+        });
+        dnsSlots.resolve4 = vi.fn().mockResolvedValue(['10.1.2.3']);
+
+        await expect(
+          fetchWithTimeout('http://partial.example/', 1000, context, ssrfOpts),
+        ).rejects.toMatchObject({
+          code: JsonRpcErrorCode.ValidationError,
+          message: expect.stringContaining('10.1.2.3'),
+        });
+      });
+
+      it('lets a name no resolver can see through to fetch', async () => {
+        // A resolution failure is not an SSRF signal — `fetch` reports it.
+        const fetchMock = vi
+          .spyOn(globalThis, 'fetch')
+          .mockResolvedValue(new Response('ok', { status: 200 }));
+
+        await expect(
+          fetchWithTimeout('https://nowhere.example/', 1000, context, ssrfOpts),
+        ).resolves.toMatchObject({ status: 200 });
+        expect(fetchMock).toHaveBeenCalledTimes(1);
+      });
+
+      it('allows a name both resolvers agree is public', async () => {
+        dnsSlots.resolve4 = vi.fn().mockResolvedValue(['93.184.216.34']);
+        dnsSlots.lookup = vi.fn().mockResolvedValue([{ address: '93.184.216.34', family: 4 }]);
+        vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response('ok', { status: 200 }));
+
+        await expect(
+          fetchWithTimeout('https://public.example/', 1000, context, ssrfOpts),
+        ).resolves.toMatchObject({ status: 200 });
+      });
+    });
+
     describe('redirect validation', () => {
       it('should reject a redirect to a non-HTTP scheme', async () => {
         const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(
@@ -833,6 +995,34 @@ describe('fetchWithTimeout', () => {
         });
         expect(result.status).toBe(200);
         expect(fetchMock).toHaveBeenCalledTimes(2);
+      });
+
+      it('re-runs the dual-resolver guard on every redirect hop (#365)', async () => {
+        // The first hop is clean; the second resolves — through the system
+        // resolver only — to internal space. A guard that ran once at the top
+        // would follow it.
+        dnsSlots.lookup = vi.fn(async (hostname: string) => {
+          if (hostname === 'hop-two.example') return [{ address: '10.0.0.5', family: 4 }];
+          throw unresolvable();
+        });
+        const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(
+          new Response(null, {
+            status: 302,
+            headers: { location: 'https://hop-two.example/inner' },
+          }),
+        );
+
+        await expect(
+          fetchWithTimeout('https://hop-one.example/', 1000, context, { rejectPrivateIPs: true }),
+        ).rejects.toMatchObject({
+          code: JsonRpcErrorCode.ValidationError,
+          message: expect.stringContaining('non-global IP 10.0.0.5'),
+        });
+
+        expect(dnsSlots.lookup).toHaveBeenCalledWith('hop-one.example', { all: true });
+        expect(dnsSlots.lookup).toHaveBeenCalledWith('hop-two.example', { all: true });
+        // The second hop was never requested — the guard stopped it.
+        expect(fetchMock).toHaveBeenCalledTimes(1);
       });
 
       it('should reject redirect missing Location header', async () => {

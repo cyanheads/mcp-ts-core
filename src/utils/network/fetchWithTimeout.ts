@@ -6,6 +6,7 @@
 import {
   JsonRpcErrorCode,
   McpError,
+  requestCancelled,
   serviceUnavailable,
   timeout,
   validationError,
@@ -13,7 +14,7 @@ import {
 import { logger } from '@/utils/internal/logger.js';
 import { type RequestContext, withExtra } from '@/utils/internal/requestContext.js';
 import { runtimeCaps } from '@/utils/internal/runtime.js';
-import { httpStatusToErrorCode } from '@/utils/network/httpError.js';
+import { httpStatusRetryability, httpStatusToErrorCode } from '@/utils/network/httpError.js';
 import { readBoundedResponseText } from '@/utils/network/responseBody.js';
 import { createHistogram } from '@/utils/telemetry/metrics.js';
 
@@ -115,9 +116,13 @@ export interface FetchWithTimeoutOptions extends Omit<RequestInit, 'signal'> {
    * protocol assignments, documentation/benchmarking ranges, multicast, reserved,
    * broadcast, and known internal hostnames (e.g., `metadata.google.internal`).
    *
-   * DNS is resolved (via `node:dns/promises`) and all A/AAAA records are
-   * validated against those ranges before the request is sent. Available in
-   * Node, Bun, and Cloudflare Workers under `nodejs_compat`.
+   * DNS is resolved (via `node:dns/promises`) and every answer is validated
+   * against those ranges before the request is sent. Both resolvers are queried
+   * — `resolve4`/`resolve6` and `lookup` — because runtimes differ in which one
+   * the connection itself uses; a non-global answer from either rejects the
+   * request, and a resolver missing from the runtime is skipped rather than
+   * fatal. See {@link assertDnsNotPrivate}. Available in Node, Bun, and
+   * Cloudflare Workers under `nodejs_compat`.
    *
    * When enabled, redirects are followed manually (up to {@link MAX_SSRF_REDIRECTS}
    * hops) with SSRF validation applied to each redirect target.
@@ -141,7 +146,8 @@ export interface FetchWithTimeoutOptions extends Omit<RequestInit, 'signal'> {
    * An optional external `AbortSignal` (e.g., `ctx.signal` from the request context)
    * to combine with the internal timeout signal. If this signal aborts before the
    * timeout fires, the fetch is cancelled immediately and a `McpError` with code
-   * `InternalError` is thrown.
+   * `RequestCancelled` is thrown — logged at `info`, and never retried by
+   * `withRetry`.
    */
   signal?: AbortSignal;
 }
@@ -303,8 +309,9 @@ function parseHttpUrl(urlString: string): URL {
  * Performs three checks in order:
  * 1. Known private hostnames (`localhost`, `metadata.google.internal`, etc.)
  * 2. Literal IPv4/IPv6 addresses in the URL hostname
- * 3. DNS resolution — resolves A and AAAA records and validates each
- *    (Node, Bun, Workers under `nodejs_compat`; skipped in pure-browser envs)
+ * 3. DNS resolution — resolves through both the c-ares and system resolvers and
+ *    validates every answer (Node, Bun, Workers under `nodejs_compat`; skipped
+ *    in pure-browser envs). See {@link assertDnsNotPrivate}.
  *
  * DNS resolution failures (ENOTFOUND, etc.) are swallowed and left for the native
  * `fetch` to handle; only confirmed private IPs cause rejection.
@@ -342,42 +349,62 @@ async function assertNotPrivateUrl(urlString: string): Promise<void> {
 }
 
 /**
- * Resolves DNS for a hostname (A and AAAA records in parallel) and confirms
- * that none of the resolved IP addresses fall within private or reserved ranges.
+ * Runs one DNS probe and reduces it to the addresses it produced. A probe that
+ * rejects — or that is absent from the runtime and throws synchronously on the
+ * call — yields no addresses rather than failing the whole check, so it cannot
+ * suppress the answers another resolver did return.
+ */
+async function probeAddresses(probe: () => Promise<Iterable<string>>): Promise<string[]> {
+  try {
+    return [...(await probe())];
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Resolves a hostname through **both** resolvers available to the runtime and
+ * confirms that no answer from either falls within private or reserved ranges.
  *
- * DNS resolution errors (e.g., `ENOTFOUND`) are silently swallowed — they are
- * not an SSRF signal and are better handled by the native `fetch` call.
+ * - `dns.resolve4` / `dns.resolve6` query DNS directly (c-ares).
+ * - `dns.lookup(hostname, { all: true })` goes through the system resolver
+ *   (`getaddrinfo`), which is what consults `/etc/hosts`, `systemd-resolved`
+ *   split DNS, and NSS modules.
+ *
+ * The two have different views of the namespace, and which one the connection
+ * itself uses is runtime-specific — Bun 1.4 moved `dns.lookup()` and
+ * `net.connect()` on Linux to `getaddrinfo` while leaving `dns.resolve*()` on
+ * c-ares. Check only one and the guard can resolve nothing, pass, and let the
+ * connection reach the internal address through the other. Each probe settles
+ * independently, so a resolver that is absent (Workers under `nodejs_compat`
+ * may not implement every `node:dns` function) or that fails for this name
+ * never masks another's answer; failure across the board is not an SSRF signal
+ * and is left for the native `fetch` to surface.
  *
  * **TOCTOU caveat:** the resolved addresses are not pinned to the subsequent
- * `fetch` connection — the native fetch performs its own resolution and may
- * receive a different answer (DNS rebinding, low-TTL race). This is a guard,
- * not a guarantee.
+ * `fetch` connection — the native fetch resolves again and may receive a
+ * different answer (DNS rebinding, low-TTL race). This is a guard, not a
+ * guarantee, and a distinct failure from the resolver split above.
  *
  * @param hostname - The bare hostname to resolve (no brackets, no port).
  * @throws {McpError} `ValidationError` if any resolved address is non-global.
  */
 async function assertDnsNotPrivate(hostname: string): Promise<void> {
-  try {
-    const dns = await import('node:dns/promises');
+  const dns = await import('node:dns/promises').catch(() => undefined);
+  if (!dns) return;
 
-    const [ipv4Results, ipv6Results] = await Promise.allSettled([
-      dns.resolve4(hostname),
-      dns.resolve6(hostname),
-    ]);
+  const resolved = await Promise.all([
+    probeAddresses(() => dns.resolve4(hostname)),
+    probeAddresses(() => dns.resolve6(hostname)),
+    probeAddresses(async () =>
+      (await dns.lookup(hostname, { all: true })).map((entry) => entry.address),
+    ),
+  ]);
 
-    const resolvedIPs: string[] = [
-      ...(ipv4Results.status === 'fulfilled' ? ipv4Results.value : []),
-      ...(ipv6Results.status === 'fulfilled' ? ipv6Results.value : []),
-    ];
-
-    for (const ip of resolvedIPs) {
-      if (isNonGlobalIP(ip)) {
-        throw validationError(`DNS resolved ${hostname} to non-global IP ${ip} — SSRF blocked`);
-      }
+  for (const ip of resolved.flat()) {
+    if (isNonGlobalIP(ip)) {
+      throw validationError(`DNS resolved ${hostname} to non-global IP ${ip} — SSRF blocked`);
     }
-  } catch (error) {
-    if (error instanceof McpError) throw error;
-    // DNS resolution failures (ENOTFOUND, etc.) are not SSRF — let fetch handle them
   }
 }
 
@@ -460,8 +487,9 @@ function withBodyDeadline(
  * context-window poisoning when an upstream returns an HTML error page, logged,
  * and wrapped in a `McpError` whose code is mapped from the HTTP status via
  * {@link httpStatusToErrorCode} (e.g. 400 → `InvalidParams`, 403 → `Forbidden`,
- * 404 → `NotFound`, 429 → `RateLimited`, 5xx →
- * `ServiceUnavailable`/`InternalError`/`Timeout`).
+ * 404 → `NotFound`, 429 → `RateLimited`, 5xx → `ServiceUnavailable`/`Timeout`).
+ * A 501 additionally carries `data.retryable: false`, so `withRetry` fails it
+ * fast instead of re-attempting a method the upstream does not implement.
  *
  * @param url - The URL to fetch (string or `URL` instance).
  * @param timeoutMs - Maximum duration in milliseconds before the exchange is aborted.
@@ -483,8 +511,9 @@ function withBodyDeadline(
  * @throws {McpError} `Timeout` if the exchange exceeds `timeoutMs`. Raised from the
  *   call itself when the deadline expires before headers, and from the body read
  *   when it expires during the stream.
- * @throws {McpError} `InternalError` if the request is cancelled via the external
+ * @throws {McpError} `RequestCancelled` if the request is cancelled via the external
  *   signal — likewise from the body read when the cancellation lands mid-stream.
+ *   Logged at `info` and outside `withRetry`'s transient set.
  * @throws {McpError} A status-mapped code (`InvalidParams`/`Unauthorized`/`Forbidden`/
  *   `NotFound`/`RateLimited`/`ServiceUnavailable`/...) if the server returns a non-2xx
  *   status. `error.data` carries `{ status, statusText, body, retryAfter? }` — plus the
@@ -597,7 +626,10 @@ export async function fetchWithTimeout(
       `${operationDescription} aborted by caller.`,
       withExtra(context, { errorSource: 'FetchAborted' }),
     );
-    return new McpError(JsonRpcErrorCode.InternalError, `${operationDescription} was aborted.`, {
+    // The caller went away — this server did nothing wrong, and there is nobody
+    // left to retry for. `RequestCancelled` is deliberately outside
+    // `withRetry`'s transient set.
+    return requestCancelled(`${operationDescription} was aborted.`, {
       ...errorIdentity,
       errorSource: 'FetchAborted',
     });
@@ -683,6 +715,7 @@ export async function fetchWithTimeout(
             statusCode: response.status,
             responseBody,
             ...(retryAfter !== null && { retryAfter }),
+            ...httpStatusRetryability(response.status),
             errorSource: 'FetchHttpError',
           },
         );

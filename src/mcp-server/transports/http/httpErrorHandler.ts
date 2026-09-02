@@ -8,7 +8,7 @@
 import { SpanStatusCode, trace } from '@opentelemetry/api';
 import type { Context } from 'hono';
 import { HTTPException } from 'hono/http-exception';
-import type { StatusCode } from 'hono/utils/http-status';
+import type { StatusCode, UnofficialStatusCode } from 'hono/utils/http-status';
 
 import { config } from '@/config/index.js';
 import type { HonoNodeBindings } from '@/mcp-server/transports/http/httpTypes.js';
@@ -141,6 +141,17 @@ export const httpErrorHandler = async <TBindings extends object = HonoNodeBindin
       break;
     case JsonRpcErrorCode.RateLimited:
       status = 429;
+      break;
+    /**
+     * 499 Client Closed Request — nginx's de-facto code for a caller that hung
+     * up mid-request, written for the access log since the response rarely
+     * reaches anyone. The standard alternatives both misreport: a 5xx blames
+     * this server for a disconnect it did not cause, and a 4xx tells the caller
+     * to fix a request that was fine. 499 sits outside Hono's IANA-derived
+     * union, hence the `UnofficialStatusCode` escape hatch Hono documents.
+     */
+    case JsonRpcErrorCode.RequestCancelled:
+      status = 499 as UnofficialStatusCode;
       break;
     default:
       status = 500;

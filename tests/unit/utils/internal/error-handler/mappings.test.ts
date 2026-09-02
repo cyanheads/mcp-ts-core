@@ -20,6 +20,9 @@ describe('Error Handler Mappings', () => {
       [JsonRpcErrorCode.Timeout, 'upstream'],
       [JsonRpcErrorCode.InternalError, 'server'],
       [JsonRpcErrorCode.InvalidParams, 'client'],
+      // The caller went away — neither a server fault nor an upstream one, so
+      // it must not land in the bucket dashboards read as "this server broke".
+      [JsonRpcErrorCode.RequestCancelled, 'client'],
     ] as const)('classifies %s as %s', (code, category) => {
       expect(getErrorCategory(code)).toBe(category);
     });

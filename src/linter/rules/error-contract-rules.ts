@@ -253,6 +253,7 @@ const FACTORY_TO_CODE: Readonly<Record<string, JsonRpcErrorCode>> = {
   internalError: JsonRpcErrorCode.InternalError,
   serializationError: JsonRpcErrorCode.SerializationError,
   databaseError: JsonRpcErrorCode.DatabaseError,
+  requestCancelled: JsonRpcErrorCode.RequestCancelled,
 };
 
 /**
@@ -270,6 +271,7 @@ const BASELINE_CONFORMANCE_CODES: ReadonlySet<JsonRpcErrorCode> = new Set([
   JsonRpcErrorCode.Timeout,
   JsonRpcErrorCode.ValidationError,
   JsonRpcErrorCode.SerializationError,
+  JsonRpcErrorCode.RequestCancelled,
 ]);
 
 /**
@@ -287,8 +289,8 @@ const BASELINE_CONFORMANCE_CODES: ReadonlySet<JsonRpcErrorCode> = new Set([
  *   observers see consistent `data.reason` values.
  *
  * **Baseline codes** (`InternalError`, `ServiceUnavailable`, `Timeout`,
- * `ValidationError`, `SerializationError`) are skipped — they bubble from
- * anywhere and don't need to be enumerated per-tool.
+ * `ValidationError`, `SerializationError`, `RequestCancelled`) are skipped —
+ * they bubble from anywhere and don't need to be enumerated per-tool.
  *
  * Heuristic only: scans handler source text for `new McpError(JsonRpcErrorCode.X)`
  * constructions and `throw factory()` calls — comparisons (`=== JsonRpcErrorCode.X`)
@@ -371,7 +373,8 @@ export function lintErrorContractConformance(
         `${undeclared.join(', ')}. Add them to the contract (with a stable reason) so ` +
         '`tools/list` accurately advertises this failure mode. ' +
         'Baseline codes (InternalError, ServiceUnavailable, Timeout, ValidationError, ' +
-        'SerializationError) are auto-allowed — only domain-specific codes need declaring.',
+        'SerializationError, RequestCancelled) are auto-allowed — only domain-specific ' +
+        'codes need declaring.',
       definitionType,
       definitionName,
     });

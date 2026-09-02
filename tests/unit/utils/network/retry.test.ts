@@ -7,6 +7,7 @@ import { afterEach, beforeEach, describe, expect, it, type MockInstance, vi } fr
 
 import { JsonRpcErrorCode, McpError } from '../../../../src/types-global/errors.js';
 import { logger } from '../../../../src/utils/internal/logger.js';
+import { fetchWithTimeout } from '../../../../src/utils/network/fetchWithTimeout.js';
 import { withRetry } from '../../../../src/utils/network/retry.js';
 
 describe('withRetry', () => {
@@ -433,5 +434,110 @@ describe('withRetry', () => {
       'Retry 1/1 for rateLimited: slow down — waiting 100ms',
       context,
     );
+  });
+});
+
+describe('withRetry over fetchWithTimeout — upstream 5xx policy (#323)', () => {
+  const context = {
+    requestId: 'retry-http-request',
+    timestamp: new Date().toISOString(),
+    operation: 'retry-http',
+  };
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    vi.spyOn(logger, 'debug').mockImplementation(() => {});
+    vi.spyOn(logger, 'error').mockImplementation(() => {});
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.restoreAllMocks();
+  });
+
+  it('re-attempts an upstream 500 through the full retry budget', async () => {
+    vi.useFakeTimers();
+    const fetchMock = vi
+      .spyOn(globalThis, 'fetch')
+      .mockResolvedValue(new Response('upstream boom', { status: 500 }));
+
+    const promise = withRetry(() => fetchWithTimeout('https://api.example.com/x', 1000, context), {
+      baseDelayMs: 10,
+      jitter: 0,
+      maxRetries: 3,
+      operation: 'fetchThing',
+      context,
+    }).catch((e: unknown) => e);
+
+    await vi.advanceTimersByTimeAsync(200);
+    const error = (await promise) as McpError;
+
+    // 1 initial attempt + 3 retries — a 500 that classified as InternalError
+    // never entered the loop at all.
+    expect(fetchMock).toHaveBeenCalledTimes(4);
+    expect(error.code).toBe(JsonRpcErrorCode.ServiceUnavailable);
+    expect(error.data?.retryAttempts).toBe(4);
+  });
+
+  it('recovers when the upstream 500 clears on a later attempt', async () => {
+    vi.useFakeTimers();
+    vi.spyOn(globalThis, 'fetch')
+      .mockResolvedValueOnce(new Response('boom', { status: 500 }))
+      .mockResolvedValueOnce(new Response('boom', { status: 500 }))
+      .mockResolvedValueOnce(new Response('ok', { status: 200 }));
+
+    const promise = withRetry(() => fetchWithTimeout('https://api.example.com/x', 1000, context), {
+      baseDelayMs: 10,
+      jitter: 0,
+      maxRetries: 3,
+      operation: 'fetchThing',
+      context,
+    });
+
+    await vi.advanceTimersByTimeAsync(200);
+    await expect(promise).resolves.toMatchObject({ status: 200 });
+  });
+
+  it('fails fast on an upstream 501 without burning an attempt', async () => {
+    const fetchMock = vi
+      .spyOn(globalThis, 'fetch')
+      .mockResolvedValue(new Response('not implemented', { status: 501 }));
+
+    const error = (await withRetry(
+      () => fetchWithTimeout('https://api.example.com/x', 1000, context),
+      { baseDelayMs: 10, jitter: 0, maxRetries: 3, operation: 'fetchThing', context },
+    ).catch((e: unknown) => e)) as McpError;
+
+    // A 501 shares ServiceUnavailable's transient code, so only the in-band
+    // `data.retryable: false` keeps it out of the loop.
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(error.code).toBe(JsonRpcErrorCode.ServiceUnavailable);
+    expect(error.data?.retryable).toBe(false);
+    expect(error.data).not.toHaveProperty('retryAttempts');
+  });
+
+  it('keeps a caller-initiated cancellation out of the retry loop', async () => {
+    vi.spyOn(logger, 'info').mockImplementation(() => {});
+    const controller = new AbortController();
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockImplementation(
+      (_url, init) =>
+        new Promise((_resolve, reject) => {
+          init?.signal?.addEventListener('abort', () => reject(init.signal?.reason));
+        }),
+    );
+
+    const promise = withRetry(
+      () =>
+        fetchWithTimeout('https://api.example.com/x', 30_000, context, {
+          signal: controller.signal,
+        }),
+      { baseDelayMs: 10, jitter: 0, maxRetries: 3, operation: 'fetchThing', context },
+    ).catch((e: unknown) => e);
+
+    controller.abort('client disconnected');
+    const error = (await promise) as McpError;
+
+    expect(error.code).toBe(JsonRpcErrorCode.RequestCancelled);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 });

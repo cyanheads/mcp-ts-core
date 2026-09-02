@@ -46,6 +46,7 @@ export enum JsonRpcErrorCode {
   ConfigurationError = -32008,
   InitializationFailed = -32009,
   DatabaseError = -32010,
+  RequestCancelled = -32011, // Caller abandoned the request (disconnect, abort signal)
   SerializationError = -32070, // Data serialization/deserialization failed
   UnknownError = -32099, // A generic fallback
 }
@@ -180,6 +181,17 @@ export const serializationError = (
 /** Create a DatabaseError (-32010) error. */
 export const databaseError = (message: string, data?: ErrorData, options?: ErrorFactoryOptions) =>
   new McpError(JsonRpcErrorCode.DatabaseError, message, data, options);
+
+/**
+ * Create a RequestCancelled (-32011) error — the caller abandoned the request
+ * (client disconnect, external abort signal). Not a server fault and never
+ * retryable: there is no longer anyone to answer.
+ */
+export const requestCancelled = (
+  message: string,
+  data?: ErrorData,
+  options?: ErrorFactoryOptions,
+) => new McpError(JsonRpcErrorCode.RequestCancelled, message, data, options);
 
 /**
  * Zod schema for validating error objects. This schema can be used for:

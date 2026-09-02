@@ -18,6 +18,7 @@ import {
   McpError,
   notFound,
   rateLimited,
+  requestCancelled,
   serializationError,
   serviceUnavailable,
   timeout,
@@ -48,6 +49,7 @@ describe('Global Error Types', () => {
       expect(JsonRpcErrorCode.ConfigurationError).toBe(-32008);
       expect(JsonRpcErrorCode.InitializationFailed).toBe(-32009);
       expect(JsonRpcErrorCode.DatabaseError).toBe(-32010);
+      expect(JsonRpcErrorCode.RequestCancelled).toBe(-32011);
       expect(JsonRpcErrorCode.SerializationError).toBe(-32070);
       expect(JsonRpcErrorCode.UnknownError).toBe(-32099);
     });
@@ -55,6 +57,13 @@ describe('Global Error Types', () => {
     it('should be a valid TypeScript enum', () => {
       expect(typeof JsonRpcErrorCode.ParseError).toBe('number');
       expect(JsonRpcErrorCode[JsonRpcErrorCode.ParseError]).toBe('ParseError');
+    });
+
+    it('assigns every code a distinct value', () => {
+      // A reused value would make the reverse mapping (and every switch keyed on
+      // the enum) silently resolve to the wrong member.
+      const values = Object.values(JsonRpcErrorCode).filter((v) => typeof v === 'number');
+      expect(new Set(values).size).toBe(values.length);
     });
   });
 
@@ -276,6 +285,11 @@ describe('Global Error Types', () => {
         code: JsonRpcErrorCode.SerializationError,
       },
       { fn: databaseError, name: 'databaseError', code: JsonRpcErrorCode.DatabaseError },
+      {
+        fn: requestCancelled,
+        name: 'requestCancelled',
+        code: JsonRpcErrorCode.RequestCancelled,
+      },
     ];
 
     for (const { fn, name, code } of factories) {

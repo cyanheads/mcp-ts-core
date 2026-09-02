@@ -46,6 +46,7 @@ export const PUBLIC_RUNTIME_EXPORTS = {
     'invalidRequest',
     'notFound',
     'rateLimited',
+    'requestCancelled',
     'serializationError',
     'serviceUnavailable',
     'timeout',

@@ -198,7 +198,7 @@ describe('fetchWithTimeout body deadline (issue #341)', () => {
     setTimeout(() => caller.abort('client disconnected'), DEADLINE_MS);
 
     await expect(response.text()).rejects.toMatchObject({
-      code: JsonRpcErrorCode.InternalError,
+      code: JsonRpcErrorCode.RequestCancelled,
       data: expect.objectContaining({ errorSource: 'FetchAborted' }),
     });
   });

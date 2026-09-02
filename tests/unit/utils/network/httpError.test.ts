@@ -6,7 +6,11 @@
 import { describe, expect, it } from 'vitest';
 
 import { JsonRpcErrorCode, McpError } from '@/types-global/errors.js';
-import { httpErrorFromResponse, httpStatusToErrorCode } from '@/utils/network/httpError.js';
+import {
+  httpErrorFromResponse,
+  httpStatusRetryability,
+  httpStatusToErrorCode,
+} from '@/utils/network/httpError.js';
 
 describe('httpStatusToErrorCode', () => {
   it.each([
@@ -29,8 +33,8 @@ describe('httpStatusToErrorCode', () => {
     [429, JsonRpcErrorCode.RateLimited],
     [451, JsonRpcErrorCode.InvalidRequest],
     [499, JsonRpcErrorCode.InvalidRequest],
-    [500, JsonRpcErrorCode.InternalError],
-    [501, JsonRpcErrorCode.InternalError],
+    [500, JsonRpcErrorCode.ServiceUnavailable],
+    [501, JsonRpcErrorCode.ServiceUnavailable],
     [502, JsonRpcErrorCode.ServiceUnavailable],
     [503, JsonRpcErrorCode.ServiceUnavailable],
     [504, JsonRpcErrorCode.Timeout],
@@ -38,6 +42,32 @@ describe('httpStatusToErrorCode', () => {
     [599, JsonRpcErrorCode.ServiceUnavailable],
   ])('maps status %i to %s', (status, expected) => {
     expect(httpStatusToErrorCode(status)).toBe(expected);
+  });
+
+  it('never classifies an upstream status as this server’s own InternalError (#323)', () => {
+    // `InternalError` means "this server has a bug". A remote status can never
+    // establish that, so no status may map to it.
+    const codes = Array.from({ length: 200 }, (_, i) => httpStatusToErrorCode(400 + i));
+    expect(codes).not.toContain(JsonRpcErrorCode.InternalError);
+  });
+});
+
+describe('httpStatusRetryability (#323)', () => {
+  it('marks 501 Not Implemented as permanently non-retryable', () => {
+    // The endpoint does not exist upstream; a second attempt cannot change that.
+    expect(httpStatusRetryability(501)).toEqual({ retryable: false });
+  });
+
+  it('has no opinion on 500, which is retryable under the default predicate', () => {
+    expect(httpStatusRetryability(500)).toBeUndefined();
+  });
+
+  it.each([400, 404, 429, 502, 503, 504, 599])('has no opinion on %i', (status) => {
+    expect(httpStatusRetryability(status)).toBeUndefined();
+  });
+
+  it('spreads to nothing when it has no opinion', () => {
+    expect({ ...httpStatusRetryability(500) }).toEqual({});
   });
 });
 
@@ -99,7 +129,29 @@ describe('httpErrorFromResponse', () => {
     const error = await httpErrorFromResponse(makeResponse(500));
 
     expect(error.message).toBe('Upstream returned HTTP 500.');
-    expect(error.code).toBe(JsonRpcErrorCode.InternalError);
+    expect(error.code).toBe(JsonRpcErrorCode.ServiceUnavailable);
+  });
+
+  it('classifies an upstream 500 as ServiceUnavailable and leaves it retryable (#323)', async () => {
+    const error = await httpErrorFromResponse(makeResponse(500), { service: 'NCBI' });
+
+    expect(error.code).toBe(JsonRpcErrorCode.ServiceUnavailable);
+    expect(error.data).not.toHaveProperty('retryable');
+  });
+
+  it('marks an upstream 501 non-retryable while keeping it ServiceUnavailable (#323)', async () => {
+    const error = await httpErrorFromResponse(makeResponse(501), { service: 'NCBI' });
+
+    expect(error.code).toBe(JsonRpcErrorCode.ServiceUnavailable);
+    expect(error.data?.retryable).toBe(false);
+  });
+
+  it('lets caller-supplied data override the 501 retryability default (#323)', async () => {
+    const error = await httpErrorFromResponse(makeResponse(501), {
+      data: { retryable: true },
+    });
+
+    expect(error.data?.retryable).toBe(true);
   });
 
   it('truncates large bodies to bodyLimit', async () => {

@@ -34,10 +34,15 @@ import { readBoundedResponseText } from '@/utils/network/responseBody.js';
  * | 429 | `RateLimited` |
  * | 431, 451 | `InvalidRequest` |
  * | 4xx (other) | `InvalidRequest` |
- * | 500, 501 | `InternalError` |
- * | 502, 503 | `ServiceUnavailable` |
  * | 504 | `Timeout` |
  * | 5xx (other) | `ServiceUnavailable` |
+ *
+ * No status maps to `InternalError` — that code means *this* server failed, and
+ * a remote status can never establish that. A 5xx is an upstream-origin failure,
+ * so it also picks up the default `withRetry` transient policy. The one 5xx that
+ * retry cannot help is 501 Not Implemented, which is permanent; that is expressed
+ * out of band via {@link httpStatusRetryability} rather than by giving it a
+ * non-transient code.
  */
 export function httpStatusToErrorCode(status: number): JsonRpcErrorCode | undefined {
   if (status < 400) return;
@@ -65,17 +70,27 @@ export function httpStatusToErrorCode(status: number): JsonRpcErrorCode | undefi
       return JsonRpcErrorCode.Timeout;
     case 429:
       return JsonRpcErrorCode.RateLimited;
-    case 500:
-    case 501:
-      return JsonRpcErrorCode.InternalError;
-    case 502:
-    case 503:
-      return JsonRpcErrorCode.ServiceUnavailable;
     case 504:
       return JsonRpcErrorCode.Timeout;
     default:
       return status >= 500 ? JsonRpcErrorCode.ServiceUnavailable : JsonRpcErrorCode.InvalidRequest;
   }
+}
+
+/**
+ * The retryability an HTTP status settles on its own, as a fragment to spread
+ * into an `McpError`'s `data`. `undefined` when the status carries no verdict,
+ * so the spread adds nothing and `withRetry`'s code-based classification decides.
+ *
+ * Only 501 Not Implemented qualifies: the upstream is declaring the method
+ * absent, so every retry returns the same answer. It still classifies as
+ * `ServiceUnavailable`, which is in `withRetry`'s transient set, so
+ * `data.retryable: false` is what keeps it out of the loop. A 500 gets no
+ * verdict — the upstream may well recover. Both HTTP helpers route through here
+ * so the two cannot drift apart.
+ */
+export function httpStatusRetryability(status: number): { retryable: false } | undefined {
+  return status === 501 ? { retryable: false } : undefined;
 }
 
 /** Configuration for {@link httpErrorFromResponse}. */
@@ -106,7 +121,9 @@ export interface HttpErrorFromResponseOptions {
    * `{ url, status, statusText, body? }` from the response itself, plus the
    * legacy aliases `statusCode` (= `status`) and `responseBody` (= `body`) for
    * consumers reading `fetchWithTimeout`'s shape — slated for consolidation in a
-   * future major. Fields passed here override the defaults on key collision.
+   * future major. A status whose failure is permanent also carries
+   * `retryable: false` (see {@link httpStatusRetryability}). Fields passed here
+   * override the defaults on key collision.
    */
   data?: Record<string, unknown>;
   /**
@@ -199,6 +216,7 @@ export async function httpErrorFromResponse(
     statusCode: response.status,
     ...(body !== undefined && { responseBody: body }),
     ...(retryAfter !== undefined && { retryAfter }),
+    ...httpStatusRetryability(response.status),
     ...extraData,
   };
 
