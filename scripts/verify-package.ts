@@ -91,6 +91,14 @@ const CONSUMER_SUPPORT_PACKAGES = [
  */
 const CHILD_TIMEOUT_MS = 300_000;
 
+/**
+ * Identity of the throwaway project the tarball is installed into. Deliberately
+ * unlike the framework's own name and version so a consumer-anchored config
+ * value is distinguishable from a framework-anchored one.
+ */
+const PACKED_CONSUMER_NAME = 'mcp-ts-core-packed-consumer';
+const PACKED_CONSUMER_VERSION = '0.0.0-packed-consumer';
+
 function run(command: string, args: string[], cwd: string): Promise<RunResult> {
   return new Promise((resolveResult, rejectResult) => {
     execFile(
@@ -249,6 +257,43 @@ function assertPacklist(pkg: PackageJson, entries: string[]): void {
   }
 }
 
+/**
+ * Publishing runs `bun publish`, which packs with Bun's own packer; this
+ * verifier packs with npm for install fidelity. The two disagree — Bun skips a
+ * path it reads as its own configuration, which is how `templates/bunfig.toml`
+ * shipped to every checkout but never to the registry — so the npm listing
+ * alone cannot prove what consumers receive. Compare both listings and name any
+ * path only npm would ship.
+ */
+async function assertPackerParity(bunBin: string, npmEntries: string[]): Promise<void> {
+  const bunPacked = await run(bunBin, ['pm', 'pack', '--dry-run', '--ignore-scripts'], ROOT);
+  assertSuccess(bunPacked, 'bun pm pack --dry-run');
+
+  const listed = new Set(
+    `${bunPacked.stdout}\n${bunPacked.stderr}`
+      .split(/\r?\n/)
+      .map((line) => /^packed\s+\S+\s+(.+)$/.exec(line.trim())?.[1])
+      .filter((path): path is string => Boolean(path)),
+  );
+  if (listed.size === 0) {
+    throw new Error('bun pm pack --dry-run produced no file listing to compare against npm pack.');
+  }
+
+  const missing = npmEntries
+    .filter((entry) => entry.startsWith('package/') && !entry.endsWith('/'))
+    .map((entry) => entry.slice('package/'.length))
+    .filter((path) => !listed.has(path))
+    .sort();
+
+  if (missing.length > 0) {
+    throw new Error(
+      `bun publish would omit ${missing.length} path(s) that npm pack ships: ${missing.join(', ')}. ` +
+        'Bun skips paths it treats as its own configuration — rename the file (an `_` prefix is stripped by `init`) ' +
+        'so the published tarball carries it.',
+    );
+  }
+}
+
 function dependencyVersion(pkg: PackageJson, name: string): string {
   const version =
     pkg.dependencies?.[name] ?? pkg.peerDependencies?.[name] ?? pkg.devDependencies?.[name];
@@ -275,6 +320,17 @@ for (const [specifier, expected] of Object.entries(contracts)) {
     throw new Error(specifier + ' runtime exports differ. Actual: ' + actual.join(', ') + ' Expected: ' + expected.join(', '));
   }
   loaded.push([specifier, resolved, actual.length]);
+}
+
+const { config } = await import('${publicSpecifier(pkg, './config')}');
+if (config.pkg.name !== ${JSON.stringify(PACKED_CONSUMER_NAME)} || config.pkg.version !== ${JSON.stringify(PACKED_CONSUMER_VERSION)}) {
+  throw new Error(
+    'Installed package resolved a foreign identity: ' + config.pkg.name + '@' + config.pkg.version +
+      ' (expected ' + ${JSON.stringify(`${PACKED_CONSUMER_NAME}@${PACKED_CONSUMER_VERSION}`)} + ')',
+  );
+}
+if (typeof config.logsPath !== 'string' || config.logsPath.includes('node_modules')) {
+  throw new Error('Installed package resolved logsPath inside its own install directory: ' + config.logsPath);
 }
 console.log('PACKAGE_RUNTIME_OK=' + JSON.stringify(loaded));
 `;
@@ -713,6 +769,7 @@ export async function verifyPublishedPackage(): Promise<PackageVerificationRepor
     assertSuccess(listed, 'tarball packlist read');
     const packEntries = listed.stdout.split(/\r?\n/).filter(Boolean);
     assertPacklist(pkg, packEntries);
+    await assertPackerParity(bunBin, packEntries);
 
     const dependencies = Object.fromEntries(
       CONSUMER_SUPPORT_PACKAGES.map((name) => [name, dependencyVersion(pkg, name)]),
@@ -722,7 +779,8 @@ export async function verifyPublishedPackage(): Promise<PackageVerificationRepor
       join(consumerDir, 'package.json'),
       `${JSON.stringify(
         {
-          name: 'mcp-ts-core-packed-consumer',
+          name: PACKED_CONSUMER_NAME,
+          version: PACKED_CONSUMER_VERSION,
           private: true,
           type: 'module',
           dependencies,

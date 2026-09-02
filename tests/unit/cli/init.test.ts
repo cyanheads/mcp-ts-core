@@ -137,6 +137,7 @@ describe('CLI init command', () => {
     expect(existsSync(join(dest, 'biome.json'))).toBe(true);
     expect(existsSync(join(dest, '.gitignore'))).toBe(true);
     expect(existsSync(join(dest, '.dockerignore'))).toBe(true);
+    expect(existsSync(join(dest, 'bunfig.toml'))).toBe(true);
     expect(existsSync(join(dest, 'tests', 'smoke', 'definitions.smoke.test.ts'))).toBe(true);
     expect(existsSync(join(dest, 'tests', 'integration', 'echo-contract.int.test.ts'))).toBe(true);
     expect(existsSync(join(dest, 'tests', 'fuzz', 'echo-tool.fuzz.test.ts'))).toBe(true);
@@ -144,6 +145,12 @@ describe('CLI init command', () => {
     const packageJson = readFileSync(join(dest, 'package.json'), 'utf-8');
     const claude = readFileSync(join(dest, 'CLAUDE.md'), 'utf-8');
     const vitestConfig = readFileSync(join(dest, 'vitest.config.ts'), 'utf-8');
+    const bunfig = readFileSync(join(dest, 'bunfig.toml'), 'utf-8');
+
+    // The template is stored `_`-prefixed because Bun's packer drops a path it
+    // reads as its own config, which kept it out of the published tarball.
+    expect(bunfig).toContain('minimumReleaseAge');
+    expect(bunfig).toContain('@socketsecurity/bun-security-scanner');
 
     expect(packageJson).toContain('"name": "demo-server"');
     expect(packageJson).not.toContain('{{PACKAGE_NAME}}');
