@@ -127,7 +127,7 @@ export class RateLimiter {
       }
     }
 
-    if (oldestKey) {
+    if (oldestKey !== null) {
       this.limits.delete(oldestKey);
       const logContext = requestContextService.createRequestContext({
         operation: 'RateLimiter.evictLRUEntry',

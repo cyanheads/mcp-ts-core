@@ -97,7 +97,7 @@ describe('RateLimiter', () => {
     RateLimiter = rateLimiterModule.RateLimiter;
 
     // Create a new limiter with the development config
-    const devRateLimiter = new RateLimiter(config, logger as never);
+    using devRateLimiter = new RateLimiter(config, logger as never);
     devRateLimiter.configure({
       windowMs: 1000,
       maxRequests: 1,
