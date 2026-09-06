@@ -1,7 +1,7 @@
 # Developer Protocol
 
 **Package:** `@cyanheads/mcp-ts-core`
-**Version:** 0.12.5
+**Version:** 0.12.6
 **Engines:** Bun ≥1.3.0, Node ≥24.0.0
 **MCP SDK:** `@modelcontextprotocol/server` ^2.0.0 (protocol revisions 2026-07-28 and 2025-*)
 **Zod:** ^4.5.4
@@ -59,7 +59,7 @@ Both paths share the same public API. Init copies starter `package.json`, config
 | `/utils` | formatting, encoding, network, pagination, overflow (`outlineOnOverflow`, `OUTLINE_VARIANT`, `selectSections`, `formatOutline`), logging, runtime, telemetry, token counting, parsers†, sanitization†, scheduling† | All utilities (†optional peer deps) |
 | `/services` | `OpenRouterProvider`, `SpeechService`, `createSpeechProvider`, `ElevenLabsProvider`, `WhisperProvider`, `GraphService`, provider interfaces and types | LLM, Speech (TTS/STT), Graph services |
 | `/linter` | `validateDefinitions`, `LintReport`, `LintDiagnostic`, `LintInput`, `LintSeverity` | Definition validation |
-| `/testing` | `createMockContext`, `createMockSession`, `createFetchMock`, `runToolContract`, `createMockLogger`, `getEnrichment`, `getContentBlocks`, `createInMemoryStorage` | Test kit for handlers and upstream HTTP boundaries |
+| `/testing` | `createMockContext`, `createMockSession`, `createFetchMock`, `runToolContract`, `createMockLogger`, `getEnrichment`, `getContentBlocks`, `createInMemoryStorage`, `expectInputRequired` | Test kit for handlers and upstream HTTP boundaries |
 | `/testing/fuzz` | `fuzzTool`, `fuzzResource`, `fuzzPrompt`, `zodToArbitrary`, `adversarialArbitrary`, `ADVERSARIAL_STRINGS` | Fuzz testing |
 | `/testing/vitest` | `mcpTest`, `toolContractSuite`, `McpTestFixtures` (+ re-exported `/testing` helpers) | Vitest fixtures and tool conformance suites (optional peer `vitest`) |
 
@@ -76,7 +76,7 @@ import { McpError, JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { getMyService } from '@/services/my-domain/my-service.js';
 ```
 
-Build configs exported for consumer extension: `tsconfig.json` extends `@cyanheads/mcp-ts-core/tsconfig.base.json`, `biome.json` extends `@cyanheads/mcp-ts-core/biome`, `vitest.config.ts` spreads from `@cyanheads/mcp-ts-core/vitest.config`.
+Build configs exported for consumer extension: `tsconfig.json` extends `@cyanheads/mcp-ts-core/tsconfig.base.json`, `biome.json` extends `@cyanheads/mcp-ts-core/biome`, `vitest.config.ts` folds in `@cyanheads/mcp-ts-core/vitest.config` via `mergeConfig`.
 
 ---
 
@@ -115,7 +115,7 @@ await createApp({
 
 **Identity fields** — Optional `title`, `websiteUrl`, `description`, `icons` (SEP-973) pass through to the SDK's `initialize` serverInfo and to the server manifest, keeping the `/.well-known/mcp.json` server card and landing page consistent with what `initialize` reports. Explicit `description` wins over `MCP_SERVER_DESCRIPTION`/package.json.
 
-**Also available** — `landing` (`LandingConfig`, HTTP transport only: landing-page config, all fields optional), `context: { exposeStatelessSessionId }` (populate `ctx.sessionId` from the SDK's per-request token in stateless HTTP mode; default `false`), and `cacheHints` (2026-07-28 `ttlMs`/`cacheScope` per cacheable operation — see Adding a Resource for the per-resource override).
+**Also available** — `landing` (`LandingConfig`, HTTP transport only: landing-page config, all fields optional), `context: { exposeStatelessSessionId }` (populate `ctx.sessionId` from the SDK's per-request token in stateless HTTP mode; default `false`), `eventBus` (the `ServerEventBus` backing `subscriptions/listen`; defaults to an in-process bus — supply one for a multi-isolate or multi-process runtime, Workers most of all), and `cacheHints` (2026-07-28 `ttlMs`/`cacheScope` per cacheable operation — see Adding a Resource for the per-resource override).
 
 ### Cloudflare Workers — `createWorkerHandler(options)`
 
@@ -146,6 +146,7 @@ interface CoreServices {
   logger: Logger;
   storage: StorageService;
   rateLimiter: RateLimiter;
+  notify: ServerNotifier;       // out-of-request list-changed / resource-updated publishing
   canvas?: DataCanvas;          // present when CANVAS_PROVIDER_TYPE=duckdb; never on Workers
   llmProvider?: ILlmProvider;
   speechService?: SpeechService;
@@ -299,7 +300,7 @@ interface Context {
   readonly uri?: URL;                         // present for resource handlers
   readonly content: ContentCollect;           // media blocks → prepended to content[]; never in structuredContent
   readonly enrich: Enrich;                    // success-path agent context → structuredContent + content[]; typed on HandlerContext<R, E>
-  recoveryFor(reason: string): { recovery: { hint: string } } | {};  // opt-in contract resolver
+  recoveryFor(reason: string): { recovery: { hint: string } } | Record<string, never>; // opt-in contract resolver
 }
 ```
 
@@ -388,7 +389,7 @@ async handler(input, ctx) {
 
 **`ctx.recoveryFor(reason)`** returns `{}` when no contract exists (spread-safe). Typed against the declared reason union on `HandlerContext<R>`. Works in services: `throw validationError(msg, { reason: 'X', ...ctx.recoveryFor('X') })`. Opt-in — author spreads explicitly.
 
-**Contracts are inline, per-tool.** Don't extract shared `errors[]` constants — locality is the point, and dynamic `recovery` hints need tool-specific context. Declare domain-specific failures only; **baseline codes** (`InternalError`, `ServiceUnavailable`, `Timeout`, `ValidationError`, `SerializationError`) are auto-allowed by conformance lint. The lint scans handler source only — service-layer throws still reach clients via auto-classification.
+**Contracts are inline, per-tool.** Don't extract shared `errors[]` constants — locality is the point, and dynamic `recovery` hints need tool-specific context. Declare domain-specific failures only; **baseline codes** (`InternalError`, `ServiceUnavailable`, `Timeout`, `ValidationError`, `SerializationError`, `RequestCancelled`) are auto-allowed by conformance lint. The lint scans handler source only — service-layer throws still reach clients via auto-classification.
 
 **Fallback for ad-hoc throws** (no contract entry fits, prototype tools, service-layer code): use error factories.
 
@@ -398,7 +399,7 @@ throw notFound('Item not found', { itemId: '123' });
 throw validationError('Missing required field: name', { field: 'name' });
 ```
 
-Available factories: `invalidParams`, `invalidRequest`, `notFound`, `forbidden`, `unauthorized`, `validationError`, `conflict`, `rateLimited`, `timeout`, `serviceUnavailable`, `configurationError`, `internalError`, `serializationError`, `databaseError`. All accept `(message, data?, options?)` where `options` is `{ cause?: unknown }`.
+Available factories: `invalidParams`, `invalidRequest`, `notFound`, `forbidden`, `unauthorized`, `validationError`, `conflict`, `rateLimited`, `timeout`, `serviceUnavailable`, `configurationError`, `internalError`, `serializationError`, `databaseError`, `requestCancelled`. All accept `(message, data?, options?)` where `options` is `{ cause?: unknown }`.
 
 For HTTP responses from upstream APIs, use `httpErrorFromResponse(response, { service, data })` from `/utils` — maps the full status table (401/403/408/422/429/5xx) and captures body + `Retry-After`.
 
@@ -467,7 +468,7 @@ describe('myTool', () => {
 });
 ```
 
-**`createMockContext` options:** `createMockContext()` (state included), `{ tenantId: 'test-tenant' }` (explicit tenant; defaults to `'default'`, as stdio resolves it), `{ errors: myTool.errors }` (typed `ctx.fail`), `{ elicit: vi.fn() }`, `{ progress: true }` (task progress).
+**`createMockContext` options:** `createMockContext()` (state included), `{ tenantId: 'test-tenant' }` (explicit tenant; defaults to `'default'`, as stdio resolves it), `{ errors: myTool.errors }` (typed `ctx.fail`), `{ inputResponses }` / `{ requestState }` (seed `ctx.inputs` to drive a multi-round-trip handler's second round directly), plus `auth`, `sessionId`, `signal`, `requestId`, `uri`, and the four `notify*` callbacks.
 
 **`ctx.state` in tests is the production path.** The mock backs it with a real `StorageService` over an `InMemoryProvider`, so key validation (`[a-zA-Z0-9_.\-/]+` — colons rejected) and TTL expiry behave exactly as they do in a deployment. Passing `errors` narrows the return type to `HandlerContext<ReasonOf<…>>`, which is what a definition declaring a contract types its handler's `ctx` as — so `definition.handler(input, ctx)` typechecks.
 
@@ -544,15 +545,25 @@ Skills live in `skills/<name>/SKILL.md`; the full list is discoverable via the a
 | `bun run lint:mcp` | Validate MCP definitions against spec |
 | `bun run format` | Auto-fix Biome lint/format issues (safe fixes only) |
 | `bun run format:unsafe` | Also apply Biome's unsafe autofixes — review the diff; they can change behavior, not just formatting |
-| `bun run test` | Unit/compliance/smoke/fuzz/typecheck suites (Bun runtime) |
-| `bun run test:all` | Release gate: `test:coverage` + `test:node` + `test:worker` + `test:integration` |
-| `bun run test:node` | Same suites + integration under real Node (bypasses the bun-node PATH shim) |
-| `bun run test:leaks` | Suites with Vitest async-leak detection (`--detect-async-leaks`) |
-| `bun run test:typecheck` | Typecheck project only — `.test-d.ts` contracts with `@ts-expect-error` negative cases |
+| `bun run tree` | Regenerate `docs/tree.md` after the directory structure changes |
+| `bun run test` | Every root project — unit, leak-gate, compliance, smoke, fuzz, typecheck (Bun runtime) |
+| `bun run test:unit` / `:smoke` / `:fuzz` / `:compliance` / `:typecheck` | One root project via `--project`. `test:typecheck` runs the `.test-d.ts` contracts, whose `@ts-expect-error` cases are the negative assertions |
+| `bun run test:leak-gate` | The retention gate's own sentinel suite. Each case spawns a full Vitest run, so it is excluded from the `unit` project |
+| `bun run test:coverage` | Root projects with coverage thresholds enforced |
+| `bun run test:integration` | Real server subprocesses over stdio and HTTP |
+| `bun run test:worker` | The framework under real `workerd`, then a standalone Worker bundle through the Wrangler toolchain — real Node on both legs |
+| `bun run test:package` | Rebuilds, packs the tarball, and consumes it as an external project would (exports, declarations, both runtimes) |
+| `bun run test:node` | Root projects + integration under real Node via `scripts/with-node.ts`, which bypasses Bun's `node` PATH shim |
+| `bun run test:order` | Root projects on real Node in shuffled file order under a pinned seed — catches inter-file state leakage |
+| `bun run test:leaks` | Real-Node root async-resource retention gate; [scope and evidence](tests/leaks/README.md) |
+| `bun run test:all` | Release gate: `rebuild` → `test:coverage` → `test:node` → `test:worker` → `test:integration`. `test:package` and `test:leaks` are separate lanes |
+| `bun run bench` / `bench:node` / `bench:io` / `bench:io:bun` | Microbenchmarks (`tests/benchmarks/micro`) and opt-in transport I/O measurements (`tests/benchmarks/io`) |
 | `bun run start:stdio` | Production mode (stdio, after build) |
 | `bun run start:http` | Production mode (HTTP, after build) |
 | `bun run changelog:build` | Regenerate `CHANGELOG.md` from `changelog/*.md` |
 | `bun run changelog:check` | Verify `CHANGELOG.md` is in sync with `changelog/` (used by devcheck) |
+
+Lane configs live in `tests/config/` (`vitest.integration.ts`, `vitest.worker.ts`, `vitest.worker-bundle.ts`, `vitest.package.ts`, `vitest.benchmark.ts`, `vitest.performance.ts`, `vitest.leaks.ts`, `vitest.leak-sentinels.ts`). Two configs stay at the repo root: `vitest.config.ts`, the root `projects` list a bare `vitest` invocation discovers, and `vitest.config.base.mjs`, the published `./vitest.config` export.
 
 After `bun update --latest`, run the `maintenance` skill to investigate changelogs, adopt upstream changes, and sync project skills.
 
@@ -591,7 +602,7 @@ security: false                                         # optional, default fals
 
 Badge order when both set: `· ⚠️ Breaking · 🛡️ Security`. Summary > 350 chars or malformed boolean fails `changelog:check`.
 
-**Section order** (Keep a Changelog): Added, Changed, Deprecated, Removed, Fixed, Security. Omit empty sections. Pre-release versions consolidate as sub-headers inside the final version's file — no separate files per pre-release.
+**Section order:** the Keep a Changelog sequence — Added, Changed, Deprecated, Removed, Fixed, Security — then `Dependencies` last. Omit empty sections. Pre-release versions consolidate as sub-headers inside the final version's file — no separate files per pre-release.
 
 ---
 

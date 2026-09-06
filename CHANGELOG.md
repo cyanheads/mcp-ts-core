@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.12.6](changelog/0.12.x/0.12.6.md) — 2026-09-06 · 🛡️ Security
+
+Five source fixes: detached storage writes after a capacity sweep, an unevictable empty rate-limit key, a module-load cursor key that broke standalone Worker startup, fuzz that never reached pattern-validated handlers, and a leaked shutdown deadline. The test suite trades type-only assertions for behavior and gains three lanes.
+
 ## [0.12.5](changelog/0.12.x/0.12.5.md) — 2026-09-02
 
 Server identity now resolves from the served package instead of process.cwd() or the framework's own install path, closing two independent bugs. A server's setup() logging is buffered and replayed instead of dropped, MarkdownBuilder.codeBlock sizes its fence to survive embedded backticks, and init ships bunfig.toml again.

@@ -1,6 +1,6 @@
 # mcp-ts-core - Directory Structure
 
-Generated on: 2026-09-02 23:10:33
+Generated on: 2026-09-06 06:36:05
 
 ```text
 mcp-ts-core/
@@ -173,7 +173,8 @@ mcp-ts-core/
 │   ├── split-changelog.ts
 │   ├── tree.ts
 │   ├── update-coverage.ts
-│   └── verify-package.ts
+│   ├── verify-package.ts
+│   └── with-node.ts
 ├── skills/
 │   ├── add-app-tool/
 │   │   └── SKILL.md
@@ -576,12 +577,45 @@ mcp-ts-core/
 │   ├── server.json
 │   └── vitest.config.ts
 ├── tests/
+│   ├── benchmarks/
+│   │   ├── harness/
+│   │   │   ├── environment.ts
+│   │   │   ├── options.ts
+│   │   │   ├── provenance.ts
+│   │   │   └── runner.ts
+│   │   ├── io/
+│   │   │   ├── harness/
+│   │   │   │   ├── mcp-request.ts
+│   │   │   │   ├── measure.ts
+│   │   │   │   ├── report.ts
+│   │   │   │   ├── setup.ts
+│   │   │   │   └── transport-workloads.ts
+│   │   │   ├── http.perf.test.ts
+│   │   │   ├── native.perf.test.ts
+│   │   │   └── worker.perf.test.ts
+│   │   ├── micro/
+│   │   │   ├── rate-limiter.bench.ts
+│   │   │   ├── storage.bench.ts
+│   │   │   └── tool-pipeline.bench.ts
+│   │   └── README.md
 │   ├── compliance/
 │   │   ├── storage-provider.test.ts
 │   │   └── storage-provider.ts
+│   ├── config/
+│   │   ├── vitest.benchmark.ts
+│   │   ├── vitest.integration.ts
+│   │   ├── vitest.leak-sentinels.ts
+│   │   ├── vitest.leaks.ts
+│   │   ├── vitest.package.ts
+│   │   ├── vitest.performance.ts
+│   │   ├── vitest.worker-bundle.ts
+│   │   └── vitest.worker.ts
 │   ├── fixtures/
 │   │   ├── auth-scoped-server.js
 │   │   ├── http-protocol-session-server.js
+│   │   ├── load-http-server.js
+│   │   ├── load-tools.js
+│   │   ├── load-worker.js
 │   │   ├── mcp-app-server.js
 │   │   └── worker-runtime.fixture.ts
 │   ├── fuzz/
@@ -600,7 +634,8 @@ mcp-ts-core/
 │   │   ├── matchers.ts
 │   │   ├── oauth-jwks-fixture.ts
 │   │   ├── server-context.ts
-│   │   └── server-process.ts
+│   │   ├── server-process.ts
+│   │   └── standalone-worker.ts
 │   ├── integration/
 │   │   ├── cache-hints.int.test.ts
 │   │   ├── completions.int.test.ts
@@ -612,6 +647,7 @@ mcp-ts-core/
 │   │   ├── http-protocol-session.int.test.ts
 │   │   ├── http-sessions.test.ts
 │   │   ├── http-sse-abort.int.test.ts
+│   │   ├── http-storage-security.int.test.ts
 │   │   ├── http-transport.int.test.ts
 │   │   ├── http.test.ts
 │   │   ├── logger.int.test.ts
@@ -627,6 +663,20 @@ mcp-ts-core/
 │   │   ├── union-input.int.test.ts
 │   │   ├── wire-conformance.int.test.ts
 │   │   └── x-mcp-header.int.test.ts
+│   ├── leaks/
+│   │   ├── harness/
+│   │   │   ├── evidence.ts
+│   │   │   ├── observer.ts
+│   │   │   ├── pool.ts
+│   │   │   ├── process.ts
+│   │   │   ├── reporter.ts
+│   │   │   └── runner.ts
+│   │   ├── probes/
+│   │   │   ├── descendant.mjs
+│   │   │   ├── native-lifetime.mjs
+│   │   │   └── sentinel.test.ts
+│   │   ├── README.md
+│   │   └── run.ts
 │   ├── smoke/
 │   │   ├── prompts/
 │   │   │   └── code-review.prompt.test.ts
@@ -659,6 +709,7 @@ mcp-ts-core/
 │   │   │   └── parseEnvConfig.test.ts
 │   │   ├── core/
 │   │   │   ├── app.test.ts
+│   │   │   ├── context-state-bounds.test.ts
 │   │   │   ├── context.test.ts
 │   │   │   ├── gcPressure.test.ts
 │   │   │   ├── serverManifest.test.ts
@@ -668,6 +719,7 @@ mcp-ts-core/
 │   │   ├── linter/
 │   │   │   ├── enrichment-rules.test.ts
 │   │   │   ├── error-contract-rules.test.ts
+│   │   │   ├── format-parity-enum.test.ts
 │   │   │   ├── format-parity-rules.test.ts
 │   │   │   ├── handler-body-rules.test.ts
 │   │   │   ├── landing-rules.test.ts
@@ -709,12 +761,10 @@ mcp-ts-core/
 │   │   │   │   ├── auth/
 │   │   │   │   │   ├── lib/
 │   │   │   │   │   │   ├── authContext.test.ts
-│   │   │   │   │   │   ├── authTypes.test.ts
 │   │   │   │   │   │   ├── authUtils.test.ts
 │   │   │   │   │   │   ├── checkScopes.test.ts
 │   │   │   │   │   │   └── claimParser.test.ts
 │   │   │   │   │   ├── strategies/
-│   │   │   │   │   │   ├── authStrategy.test.ts
 │   │   │   │   │   │   ├── jwtStrategy.mocked.test.ts
 │   │   │   │   │   │   ├── jwtStrategy.test.ts
 │   │   │   │   │   │   └── oauthStrategy.test.ts
@@ -726,7 +776,6 @@ mcp-ts-core/
 │   │   │   │   │   ├── httpErrorHandler.test.ts
 │   │   │   │   │   ├── httpTransport.lifecycle.test.ts
 │   │   │   │   │   ├── httpTransport.test.ts
-│   │   │   │   │   ├── httpTypes.test.ts
 │   │   │   │   │   ├── landing-page.test.ts
 │   │   │   │   │   ├── protectedResourceMetadata.test.ts
 │   │   │   │   │   ├── robotsTxt.test.ts
@@ -738,7 +787,6 @@ mcp-ts-core/
 │   │   │   │   ├── stdio/
 │   │   │   │   │   └── stdioTransport.test.ts
 │   │   │   │   ├── heartbeat.test.ts
-│   │   │   │   ├── ITransport.test.ts
 │   │   │   │   └── manager.test.ts
 │   │   │   ├── notifications.test.ts
 │   │   │   └── server.test.ts
@@ -754,6 +802,7 @@ mcp-ts-core/
 │   │   │   ├── check-skill-versions.test.ts
 │   │   │   ├── clean-mcpb.test.ts
 │   │   │   ├── devcheck-git-guard.test.ts
+│   │   │   ├── devcheck-packaging-gate.test.ts
 │   │   │   ├── devdocs.test.ts
 │   │   │   ├── lint-packaging.test.ts
 │   │   │   └── tree.test.ts
@@ -771,17 +820,14 @@ mcp-ts-core/
 │   │   │   │   ├── sqlGate.test.ts
 │   │   │   │   └── toBigInt.test.ts
 │   │   │   ├── graph/
-│   │   │   │   ├── core/
-│   │   │   │   │   ├── GraphService.metrics.test.ts
-│   │   │   │   │   └── GraphService.test.ts
-│   │   │   │   └── types.test.ts
+│   │   │   │   └── core/
+│   │   │   │       ├── GraphService.metrics.test.ts
+│   │   │   │       └── GraphService.test.ts
 │   │   │   ├── llm/
 │   │   │   │   ├── core/
-│   │   │   │   ├── providers/
-│   │   │   │   │   ├── openrouter.provider.metrics.test.ts
-│   │   │   │   │   ├── openrouter.provider.test.ts
-│   │   │   │   │   └── openrouter.provider.test.ts.disabled
-│   │   │   │   └── types.test.ts
+│   │   │   │   └── providers/
+│   │   │   │       ├── openrouter.provider.metrics.test.ts
+│   │   │   │       └── openrouter.provider.test.ts
 │   │   │   ├── mirror/
 │   │   │   │   ├── defineMirror.test.ts
 │   │   │   │   ├── handle.test.ts
@@ -793,14 +839,13 @@ mcp-ts-core/
 │   │   │       │   ├── ISpeechProvider.test.ts
 │   │   │       │   ├── speechMetrics.test.ts
 │   │   │       │   └── SpeechService.test.ts
-│   │   │       ├── providers/
-│   │   │       │   ├── elevenlabs.provider.test.ts
-│   │   │       │   └── whisper.provider.test.ts
-│   │   │       └── types.test.ts
+│   │   │       └── providers/
+│   │   │           ├── elevenlabs.provider.test.ts
+│   │   │           └── whisper.provider.test.ts
 │   │   ├── storage/
 │   │   │   ├── core/
-│   │   │   │   ├── IStorageProvider.test.ts
 │   │   │   │   ├── storageFactory.test.ts
+│   │   │   │   ├── storageValidation.lifecycle.test.ts
 │   │   │   │   └── storageValidation.test.ts
 │   │   │   ├── providers/
 │   │   │   │   ├── cloudflare/
@@ -812,7 +857,6 @@ mcp-ts-core/
 │   │   │   │   ├── inMemory/
 │   │   │   │   │   └── inMemoryProvider.test.ts
 │   │   │   │   └── supabase/
-│   │   │   │       ├── supabase.types.test.ts
 │   │   │   │       └── supabaseProvider.test.ts
 │   │   │   ├── StorageService.boundaries.test.ts
 │   │   │   ├── StorageService.metrics.test.ts
@@ -820,6 +864,10 @@ mcp-ts-core/
 │   │   ├── testing/
 │   │   │   ├── exports.test.ts
 │   │   │   ├── fuzz-branches.test.ts
+│   │   │   ├── fuzz-contract-regressions.test.ts
+│   │   │   ├── input-required.test.ts
+│   │   │   ├── io-measure.test.ts
+│   │   │   ├── leak-gate.test.ts
 │   │   │   ├── mockContext.test.ts
 │   │   │   ├── mockContextFidelity.test.ts
 │   │   │   ├── mockContextState.test.ts
@@ -841,8 +889,7 @@ mcp-ts-core/
 │   │   │   │   ├── error-handler/
 │   │   │   │   │   ├── errorHandler.test.ts
 │   │   │   │   │   ├── helpers.test.ts
-│   │   │   │   │   ├── mappings.test.ts
-│   │   │   │   │   └── types.test.ts
+│   │   │   │   │   └── mappings.test.ts
 │   │   │   │   ├── encoding.test.ts
 │   │   │   │   ├── errorHandler.metrics.test.ts
 │   │   │   │   ├── errorHandler.unit.test.ts
@@ -887,6 +934,7 @@ mcp-ts-core/
 │   │   │   │   └── scheduler.test.ts
 │   │   │   ├── security/
 │   │   │   │   ├── idGenerator.test.ts
+│   │   │   │   ├── rateLimiter.bounds.test.ts
 │   │   │   │   ├── rateLimiter.metrics.test.ts
 │   │   │   │   ├── rateLimiter.test.ts
 │   │   │   │   ├── sanitization.property.test.ts
@@ -895,21 +943,25 @@ mcp-ts-core/
 │   │   │   │   ├── attributes.test.ts
 │   │   │   │   ├── index.test.ts
 │   │   │   │   ├── instrumentation.lifecycle.test.ts
-│   │   │   │   ├── instrumentation.test.ts
 │   │   │   │   ├── metrics.test.ts
 │   │   │   │   └── trace.test.ts
 │   │   │   └── types/
 │   │   │       └── guards.test.ts
-│   │   ├── context.test.ts
 │   │   └── worker.test.ts
 │   ├── worker/
 │   │   ├── create-worker-handler.worker.test.ts
 │   │   ├── encoding.worker.test.ts
 │   │   ├── fetch-with-timeout.worker.test.ts
+│   │   ├── lifecycle-failures.worker.test.ts
 │   │   ├── logger-shutdown.worker.test.ts
 │   │   ├── storage-d1.worker.test.ts
+│   │   ├── storage-failures.worker.test.ts
 │   │   ├── storage-provider-compliance.worker.test.ts
-│   │   └── storage-r2.worker.test.ts
+│   │   ├── storage-r2.worker.test.ts
+│   │   ├── wire-contract.worker.test.ts
+│   │   └── wire-helpers.ts
+│   ├── worker-bundle/
+│   │   └── startup.test.ts
 │   └── setup.ts
 ├── .dockerignore
 ├── .env.example
@@ -939,9 +991,6 @@ mcp-ts-core/
 ├── typedoc.json
 ├── vitest.config.base.mjs
 ├── vitest.config.ts
-├── vitest.integration.ts
-├── vitest.package.ts
-├── vitest.worker.ts
 └── wrangler.jsonc
 ```
 
