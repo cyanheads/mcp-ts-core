@@ -1,7 +1,7 @@
 /**
  * @fileoverview Root Vitest config. Uses Vitest 4 `projects` so unit, smoke,
- * compliance, fuzz, and integration suites live in a single config and can be
- * run individually by filter (`--project unit`) or all at once.
+ * compliance, fuzz, leak-gate, and typecheck suites live in a single config and
+ * can be run individually by filter (`--project unit`) or all at once.
  * @module vitest.config
  */
 import { defineConfig } from 'vitest/config';
@@ -73,6 +73,19 @@ export default defineConfig({
           ...sharedUnit,
           name: 'unit',
           include: ['tests/unit/**/*.test.ts'],
+          exclude: ['node_modules/**', 'tests/unit/testing/leak-gate.test.ts'],
+        },
+      },
+      {
+        extends: true,
+        test: {
+          ...sharedUnit,
+          /**
+           * Each case spawns a full Vitest run, so this stays out of the unit
+           * lane and out of the leak gate's own project list.
+           */
+          name: 'leak-gate',
+          include: ['tests/unit/testing/leak-gate.test.ts'],
           exclude: ['node_modules/**'],
         },
       },
