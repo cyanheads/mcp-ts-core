@@ -1,6 +1,14 @@
+/**
+ * @fileoverview Integration lane: real server subprocesses over stdio and HTTP.
+ * @module tests/config/vitest.integration
+ */
+import { resolve } from 'node:path';
 import { defineConfig } from 'vitest/config';
 
+const repoRoot = resolve(import.meta.dirname, '../..');
+
 export default defineConfig({
+  root: repoRoot,
   resolve: { tsconfigPaths: true },
   ssr: {
     noExternal: ['zod'],
@@ -11,12 +19,8 @@ export default defineConfig({
     },
     globals: true,
     environment: 'node',
-    include: ['tests/integration/**/*.test.ts', 'tests/integration/**/*.int.test.ts'],
-    exclude: [
-      'tests/integration/package-consumer.int.test.ts',
-      // Source-barrel contract test — owned by the Package lane (vitest.package.ts).
-      'tests/integration/public-api-contract.int.test.ts',
-    ],
+    include: ['tests/integration/**/*.test.ts'],
+    exclude: ['tests/integration/package-consumer.int.test.ts'],
     setupFiles: ['./tests/integration/setup.ts'],
     pool: 'forks',
     maxWorkers: 1, // Sequential — shared server processes

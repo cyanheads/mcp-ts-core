@@ -1,6 +1,6 @@
 /**
  * @fileoverview Worker-runtime tests for `fetchWithTimeout`'s body-deadline
- * passthrough. Runs under `vitest.worker.ts` (Cloudflare workerd pool). The
+ * passthrough. Runs under `tests/config/vitest.worker.ts` (Cloudflare workerd pool). The
  * passthrough hands back a reconstructed `Response` and restores `url` /
  * `redirected` onto it, both of which are runtime-sensitive: workerd's
  * `Response` is a host object, so this suite pins that the wrapper is built and

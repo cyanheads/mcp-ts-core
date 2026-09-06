@@ -1,10 +1,14 @@
 /**
  * @fileoverview Dedicated published-package verification config.
- * @module vitest.package
+ * @module tests/config/vitest.package
  */
+import { resolve } from 'node:path';
 import { defineConfig } from 'vitest/config';
 
+const repoRoot = resolve(import.meta.dirname, '../..');
+
 export default defineConfig({
+  root: repoRoot,
   resolve: { tsconfigPaths: true },
   ssr: {
     noExternal: ['zod'],
@@ -14,10 +18,7 @@ export default defineConfig({
     expect: {
       requireAssertions: true,
     },
-    include: [
-      'tests/integration/package-consumer.int.test.ts',
-      'tests/integration/public-api-contract.int.test.ts',
-    ],
+    include: ['tests/integration/package-consumer.int.test.ts'],
     maxWorkers: 1,
     isolate: true,
     pool: 'forks',

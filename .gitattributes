@@ -127,8 +127,6 @@ scripts/ export-ignore
 biome.json export-ignore
 tsconfig.json export-ignore
 vitest.config.ts export-ignore
-vitest.integration.ts export-ignore
-vitest.worker.ts export-ignore
 bunfig.toml export-ignore
 wrangler.jsonc export-ignore
 Dockerfile export-ignore

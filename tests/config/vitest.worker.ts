@@ -1,9 +1,15 @@
+/**
+ * @fileoverview Worker lane: the framework under real workerd via @cloudflare/vitest-pool-workers.
+ * @module tests/config/vitest.worker
+ */
+import { resolve } from 'node:path';
 import { cloudflareTest } from '@cloudflare/vitest-pool-workers';
 import { defineConfig } from 'vitest/config';
 
+const repoRoot = resolve(import.meta.dirname, '../..');
+
 if (typeof process !== 'undefined' && process.stderr?.write) {
   const originalWrite = process.stderr.write.bind(process.stderr);
-  // biome-ignore lint/suspicious/noExplicitAny: stderr.write overload union
   process.stderr.write = ((chunk: any, ...args: any[]) => {
     if (
       typeof chunk === 'string' &&
@@ -13,11 +19,11 @@ if (typeof process !== 'undefined' && process.stderr?.write) {
       return true;
     }
     return originalWrite(chunk, ...args);
-    // biome-ignore lint/suspicious/noExplicitAny: matches Node's WriteStream signature
   }) as any;
 }
 
 export default defineConfig({
+  root: repoRoot,
   resolve: { tsconfigPaths: true },
   plugins: [
     cloudflareTest({
@@ -43,6 +49,14 @@ export default defineConfig({
       requireAssertions: true,
     },
     include: ['tests/worker/**/*.test.ts'],
+    coverage: {
+      enabled: true,
+      provider: 'istanbul',
+      reportsDirectory: 'reports/coverage-worker',
+      reporter: ['text', 'json', 'html'],
+      include: ['src/core/worker.ts', 'src/storage/providers/cloudflare/*.ts'],
+      thresholds: { lines: 94, functions: 94, statements: 94, branches: 87 },
+    },
     testTimeout: 30_000,
   },
 });

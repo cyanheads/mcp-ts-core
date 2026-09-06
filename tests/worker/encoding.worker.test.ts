@@ -1,6 +1,6 @@
 /**
  * @fileoverview Worker-runtime tests for the encoding utilities.
- * Runs under `vitest.worker.ts` (Cloudflare workerd pool via @cloudflare/vitest-pool-workers).
+ * Runs under `tests/config/vitest.worker.ts` (Cloudflare workerd pool via @cloudflare/vitest-pool-workers).
  * The pool enables `nodejs_compat`, which populates a global `Buffer`, so the
  * utils take the Buffer fast-path in this suite. These tests therefore assert
  * two things separately: (1) workerd ships the native `Uint8Array.toBase64()`
