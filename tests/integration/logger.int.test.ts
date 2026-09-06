@@ -76,180 +76,109 @@ describe('Logger Integration (Pino)', () => {
     delete process.env.ENABLE_TEST_LOGS;
   });
 
-  it('should create log files on initialization', async () => {
-    // Pino file transport creation is very fast, 100ms is sufficient
-    await new Promise((res) => setTimeout(res, 100));
-    expect(existsSync(COMBINED_LOG_PATH)).toBe(true);
-    expect(existsSync(ERROR_LOG_PATH)).toBe(true);
+  it('creates all file sinks after initialization', async () => {
+    // Pino opens file sinks asynchronously; observe readiness instead of assuming a startup duration.
+    await expect
+      .poll(() => [COMBINED_LOG_PATH, ERROR_LOG_PATH, INTERACTIONS_LOG_PATH].every(existsSync), {
+        timeout: 2000,
+      })
+      .toBe(true);
   });
 
-  it('should write an info message to the combined log but not the error log', async () => {
-    await new Promise<void>((resolve) => {
-      logger.info('This is a pino info message', {
-        extra: { testId: 'pino-info-test' },
-        requestId: 'test-pino-1',
-        timestamp: new Date().toISOString(),
-      });
-
-      // Give pino a moment to write to the file stream
-      setTimeout(() => {
-        const combinedLog = readJsonLog(COMBINED_LOG_PATH);
-        const infoLogEntry = combinedLog.find((log) => log.testId === 'pino-info-test');
-        expect(infoLogEntry).toBeDefined();
-        expect(infoLogEntry.msg).toBe('This is a pino info message');
-        expect(infoLogEntry.level).toBe(30); // Pino's level for info
-
-        const errorLog = readJsonLog(ERROR_LOG_PATH);
-        const errorLogEntry = errorLog.find((log) => log.testId === 'pino-info-test');
-        expect(errorLogEntry).toBeUndefined();
-        resolve();
-      }, 100);
-    });
-  });
-
-  it('should write an error message to both combined and error logs', async () => {
-    await new Promise<void>((resolve) => {
-      logger.error('This is a pino error message', new Error('test error'), {
-        extra: { testId: 'pino-error-test' },
-        requestId: 'test-pino-2',
-        timestamp: new Date().toISOString(),
-      });
-
-      setTimeout(() => {
-        const combinedLog = readJsonLog(COMBINED_LOG_PATH);
-        const combinedErrorEntry = combinedLog.find((log) => log.testId === 'pino-error-test');
-        expect(combinedErrorEntry).toBeDefined();
-        expect(combinedErrorEntry.msg).toBe('This is a pino error message');
-        expect(combinedErrorEntry.level).toBe(50); // Pino's level for error
-        expect(combinedErrorEntry.err.message).toBe('test error');
-
-        const errorLog = readJsonLog(ERROR_LOG_PATH);
-        const errorLogEntry = errorLog.find((log) => log.testId === 'pino-error-test');
-        expect(errorLogEntry).toBeDefined();
-        expect(errorLogEntry.msg).toBe('This is a pino error message');
-        resolve();
-      }, 100);
-    });
-  });
-
-  it('should respect the log level and not log debug messages if level is info', async () => {
-    // Read current log size to check for new entries later
-    const initialLog = readFileSync(COMBINED_LOG_PATH, 'utf-8');
-
-    logger.setLevel('info');
-    logger.debug('This pino debug message should not be logged', {
-      extra: { testId: 'pino-debug-test' },
-      requestId: 'test-pino-3',
+  it('writes info to the combined log and filters it from the error log', async () => {
+    logger.info('This is a pino info message', {
+      extra: { testId: 'pino-info-test' },
+      requestId: 'test-pino-1',
       timestamp: new Date().toISOString(),
     });
-
-    await new Promise((res) => setTimeout(res, 100));
-
-    const updatedLog = readFileSync(COMBINED_LOG_PATH, 'utf-8');
-    const newLogContent = updatedLog.substring(initialLog.length);
-    expect(newLogContent).not.toContain('pino-debug-test');
-
-    // Reset level for other tests
-    logger.setLevel('debug');
+    // This later record reaches both sinks, so the negative assertion follows a completed write.
+    logger.error('Info filtering barrier', {
+      extra: { testId: 'pino-info-barrier' },
+      requestId: 'test-pino-info-barrier',
+      timestamp: new Date().toISOString(),
+    });
+    await expect
+      .poll(
+        () => readJsonLog(ERROR_LOG_PATH).find((entry) => entry.testId === 'pino-info-barrier'),
+        { timeout: 2000 },
+      )
+      .toMatchObject({ level: 50 });
+    await expect
+      .poll(
+        () => readJsonLog(COMBINED_LOG_PATH).find((entry) => entry.testId === 'pino-info-test'),
+        { timeout: 2000 },
+      )
+      .toMatchObject({ msg: 'This is a pino info message', level: 30 });
+    expect(
+      readJsonLog(ERROR_LOG_PATH).find((entry) => entry.testId === 'pino-info-test'),
+    ).toBeUndefined();
   });
 
-  it('should log emergency level messages', async () => {
-    await new Promise<void>((resolve) => {
-      logger.emerg('Emergency situation detected', {
-        extra: { testId: 'pino-emerg-test' },
-        requestId: 'test-pino-emerg',
-        timestamp: new Date().toISOString(),
-      });
-
-      setTimeout(() => {
-        const combinedLog = readJsonLog(COMBINED_LOG_PATH);
-        const emergEntry = combinedLog.find((log) => log.testId === 'pino-emerg-test');
-        expect(emergEntry).toBeDefined();
-        expect(emergEntry.msg).toBe('Emergency situation detected');
-        // Pino fatal level is 60
-        expect(emergEntry.level).toBeGreaterThanOrEqual(50);
-        resolve();
-      }, 100);
+  it('writes an error and its serialized cause to both file sinks', async () => {
+    logger.error('This is a pino error message', new Error('test error'), {
+      extra: { testId: 'pino-error-test' },
+      requestId: 'test-pino-2',
+      timestamp: new Date().toISOString(),
     });
+    for (const filePath of [COMBINED_LOG_PATH, ERROR_LOG_PATH]) {
+      await expect
+        .poll(() => readJsonLog(filePath).find((entry) => entry.testId === 'pino-error-test'), {
+          timeout: 2000,
+        })
+        .toMatchObject({
+          msg: 'This is a pino error message',
+          level: 50,
+          err: { message: 'test error' },
+        });
+    }
   });
 
-  it('should log critical level messages', async () => {
-    await new Promise<void>((resolve) => {
-      logger.crit('Critical error occurred', {
-        extra: { testId: 'pino-crit-test' },
-        requestId: 'test-pino-crit',
+  it('filters debug messages at info level while still writing info', async () => {
+    logger.setLevel('info');
+    try {
+      logger.debug('This pino debug message should not be logged', {
+        extra: { testId: 'pino-debug-test' },
+        requestId: 'test-pino-3',
         timestamp: new Date().toISOString(),
       });
-
-      setTimeout(() => {
-        const combinedLog = readJsonLog(COMBINED_LOG_PATH);
-        const critEntry = combinedLog.find((log) => log.testId === 'pino-crit-test');
-        expect(critEntry).toBeDefined();
-        expect(critEntry.msg).toBe('Critical error occurred');
-        // Mapped to error level (50) in Pino
-        expect(critEntry.level).toBeGreaterThanOrEqual(50);
-        resolve();
-      }, 100);
-    });
+      logger.info('Debug filtering barrier', {
+        extra: { testId: 'pino-debug-barrier' },
+        requestId: 'test-pino-debug-barrier',
+        timestamp: new Date().toISOString(),
+      });
+      await expect
+        .poll(
+          () =>
+            readJsonLog(COMBINED_LOG_PATH).find((entry) => entry.testId === 'pino-debug-barrier'),
+          { timeout: 2000 },
+        )
+        .toMatchObject({ level: 30 });
+      expect(
+        readJsonLog(COMBINED_LOG_PATH).find((entry) => entry.testId === 'pino-debug-test'),
+      ).toBeUndefined();
+    } finally {
+      logger.setLevel('debug');
+    }
   });
 
-  it('should log alert level messages', async () => {
-    await new Promise<void>((resolve) => {
-      logger.alert('Alert condition triggered', {
-        extra: { testId: 'pino-alert-test' },
-        requestId: 'test-pino-alert',
-        timestamp: new Date().toISOString(),
-      });
-
-      setTimeout(() => {
-        const combinedLog = readJsonLog(COMBINED_LOG_PATH);
-        const alertEntry = combinedLog.find((log) => log.testId === 'pino-alert-test');
-        expect(alertEntry).toBeDefined();
-        expect(alertEntry.msg).toBe('Alert condition triggered');
-        // Mapped to error/fatal level in Pino
-        expect(alertEntry.level).toBeGreaterThanOrEqual(50);
-        resolve();
-      }, 100);
+  it.each([
+    ['emerg', 60],
+    ['crit', 50],
+    ['alert', 60],
+    ['notice', 30],
+    ['fatal', 60],
+  ] as const)('maps %s to Pino level %i', async (method, level) => {
+    const testId = `pino-${method}-test`;
+    logger[method](`Severity mapping: ${method}`, {
+      extra: { testId },
+      requestId: testId,
+      timestamp: new Date().toISOString(),
     });
-  });
-
-  it('should log notice level messages', async () => {
-    await new Promise<void>((resolve) => {
-      logger.notice('Notice level message', {
-        extra: { testId: 'pino-notice-test' },
-        requestId: 'test-pino-notice',
-        timestamp: new Date().toISOString(),
-      });
-
-      setTimeout(() => {
-        const combinedLog = readJsonLog(COMBINED_LOG_PATH);
-        const noticeEntry = combinedLog.find((log) => log.testId === 'pino-notice-test');
-        expect(noticeEntry).toBeDefined();
-        expect(noticeEntry.msg).toBe('Notice level message');
-        // Mapped to info level (30) in Pino
-        expect(noticeEntry.level).toBeGreaterThanOrEqual(30);
-        resolve();
-      }, 100);
-    });
-  });
-
-  it('should log fatal level messages by delegating to emerg', async () => {
-    await new Promise<void>((resolve) => {
-      logger.fatal('Fatal condition encountered', {
-        extra: { testId: 'pino-fatal-test' },
-        requestId: 'test-pino-fatal',
-        timestamp: new Date().toISOString(),
-      });
-
-      setTimeout(() => {
-        const combinedLog = readJsonLog(COMBINED_LOG_PATH);
-        const fatalEntry = combinedLog.find((log) => log.testId === 'pino-fatal-test');
-        expect(fatalEntry).toBeDefined();
-        expect(fatalEntry.msg).toBe('Fatal condition encountered');
-        expect(fatalEntry.level).toBeGreaterThanOrEqual(50);
-        resolve();
-      }, 100);
-    });
+    await expect
+      .poll(() => readJsonLog(COMBINED_LOG_PATH).find((entry) => entry.testId === testId), {
+        timeout: 2000,
+      })
+      .toMatchObject({ msg: `Severity mapping: ${method}`, level });
   });
 
   it('does not crash when logging a framework Context-like object (issue #32)', async () => {
@@ -489,103 +418,42 @@ describe('Logger Transport Mode Handling', () => {
     }
   });
 
-  it('should output plain JSON (no ANSI codes) to stderr when initialized with stdio transport', async () => {
-    // NOTE: This test verifies STDIO mode behavior by checking file output.
-    // Direct stderr capture is difficult with Pino's buffering, but we verify:
-    // 1. No ANSI codes in output (MCP spec requirement)
-    // 2. Valid JSON format (parseable by MCP clients)
-    // 3. Logger initializes with stdio transport mode
-    //
-    // The actual stderr routing (fd 2) is verified by the implementation:
-    // - Line 134 in logger.ts uses { destination: 2 } for STDIO mode
-    // - This ensures logs go to stderr, not stdout, per MCP specification
-
-    // CRITICAL: Enable test logs so logger doesn't run in silent mode
+  it('writes plain JSON files when initialized with stdio transport', async () => {
     const originalEnableTestLogs = process.env.ENABLE_TEST_LOGS;
-    process.env.ENABLE_TEST_LOGS = 'true';
-
+    const originalLogsPath = mockConfig.logsPath;
     const stdioLogger = Logger.getInstance();
-
-    // Close any existing logger state
-    if (stdioLogger.isInitialized()) {
-      await stdioLogger.close();
-    }
-
-    // Create a test log directory for this specific test
     const stdioTestLogDir = path.join(process.cwd(), 'logs', 'stdio-test');
     const stdioTestLogPath = path.join(stdioTestLogDir, 'combined.log');
-
-    // Temporarily override config for this test
-    const originalLogsPath = mockConfig.logsPath;
-    mockConfig.logsPath = stdioTestLogDir;
-
-    // Clean up old logs if they exist
-    if (existsSync(stdioTestLogDir)) {
+    try {
+      process.env.ENABLE_TEST_LOGS = 'true';
+      if (stdioLogger.isInitialized()) await stdioLogger.close();
+      mockConfig.logsPath = stdioTestLogDir;
       rmSync(stdioTestLogDir, { recursive: true, force: true });
-    }
-
-    // Initialize with STDIO transport mode
-    await stdioLogger.initialize('info', 'stdio');
-
-    // Wait for logger to initialize file transports
-    await new Promise((res) => setTimeout(res, 100));
-
-    // Write a test message
-    stdioLogger.info('STDIO transport test message', {
-      extra: { testId: 'stdio-ansi-test' },
-      requestId: 'test-stdio-1',
-      timestamp: new Date().toISOString(),
-    });
-
-    // Wait for log to be written
-    await new Promise((res) => setTimeout(res, 100));
-
-    // Read the log file to verify output format
-    expect(existsSync(stdioTestLogPath)).toBe(true);
-
-    const logContent = readFileSync(stdioTestLogPath, 'utf-8');
-
-    // CRITICAL: Check for ANSI escape codes (e.g., [35m, [39m, [32m, etc.)
-    // The MCP specification requires clean JSON output with no color codes
-    const ansiPattern = /\x1b\[\d+m/;
-    expect(ansiPattern.test(logContent)).toBe(false);
-
-    // Verify the log entry is valid JSON (MCP clients must be able to parse)
-    const logLines = logContent.split('\n').filter((line) => line.trim() !== '');
-
-    expect(logLines.length).toBeGreaterThan(0);
-
-    for (const line of logLines) {
-      expect(() => JSON.parse(line)).not.toThrow();
-    }
-
-    // Verify our test message was logged with correct content
-    const logs = logLines.map((line) => JSON.parse(line));
-    const testLog = logs.find((log) => log.testId === 'stdio-ansi-test');
-    expect(testLog).toBeDefined();
-    expect(testLog.msg).toBe('STDIO transport test message');
-
-    // Verify logger was initialized with stdio transport awareness
-    expect(stdioLogger.isInitialized()).toBe(true);
-
-    // Cleanup
-    await stdioLogger.close();
-    if (existsSync(stdioTestLogDir)) {
+      await stdioLogger.initialize('info', 'stdio');
+      stdioLogger.info('STDIO transport test message', {
+        extra: { testId: 'stdio-ansi-test' },
+        requestId: 'test-stdio-1',
+        timestamp: new Date().toISOString(),
+      });
+      await expect
+        .poll(
+          () => readJsonLog(stdioTestLogPath).find((entry) => entry.testId === 'stdio-ansi-test'),
+          { timeout: 2000 },
+        )
+        .toMatchObject({ msg: 'STDIO transport test message', level: 30 });
+      const logContent = readFileSync(stdioTestLogPath, 'utf8');
+      expect(logContent).not.toMatch(/\x1b\[\d+m/);
+      expect(stdioLogger.isInitialized()).toBe(true);
+    } finally {
+      await stdioLogger.close();
       rmSync(stdioTestLogDir, { recursive: true, force: true });
-    }
-
-    // Restore original config and environment
-    mockConfig.logsPath = originalLogsPath;
-    if (originalEnableTestLogs !== undefined) {
-      process.env.ENABLE_TEST_LOGS = originalEnableTestLogs;
-    } else {
-      delete process.env.ENABLE_TEST_LOGS;
+      mockConfig.logsPath = originalLogsPath;
+      if (originalEnableTestLogs === undefined) delete process.env.ENABLE_TEST_LOGS;
+      else process.env.ENABLE_TEST_LOGS = originalEnableTestLogs;
     }
   });
 
-  it('should allow colored output when initialized with http transport', async () => {
-    // This test ensures HTTP mode can use pino-pretty in development
-    // We just verify it doesn't throw an error during initialization
+  it('initializes with http transport', async () => {
     const httpLogger = Logger.getInstance();
 
     // Close any existing logger state

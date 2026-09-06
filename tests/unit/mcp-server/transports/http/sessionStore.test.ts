@@ -100,7 +100,7 @@ describe('SessionStore - Security & Tenant Isolation', () => {
   });
 
   describe('Capacity', () => {
-    it('throws ServiceUnavailable once at capacity, before any instance is built', () => {
+    it('throws ServiceUnavailable once at capacity, before any instance is built', async () => {
       const capped = new SessionStore(STALE_TIMEOUT, 1);
       capped.register(SESSION_1, createTestConnection());
 
@@ -112,6 +112,7 @@ describe('SessionStore - Security & Tenant Isolation', () => {
       }
       expect(() => capped.register(SESSION_2, createTestConnection())).toThrow(/capacity/);
       expect(capped.getSessionCount()).toBe(1);
+      await capped.destroy();
     });
 
     it('accepts a new session again after one is terminated', async () => {

@@ -1,8 +1,8 @@
 /**
  * @fileoverview Global test setup for Vitest.
  * Configures environment, pre-mocks heavy external modules, and registers
- * custom matchers. Only referenced by `vitest.config.ts` (unit suite) — the
- * integration suite has no setupFiles, so these mocks never apply there.
+ * custom matchers for the root runtime projects. The integration lane uses
+ * its own build-freshness setup, so these mocks never apply there.
  * @module tests/setup
  */
 import { vi } from 'vitest';

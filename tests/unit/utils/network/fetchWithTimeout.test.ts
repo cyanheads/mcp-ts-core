@@ -557,7 +557,7 @@ describe('fetchWithTimeout', () => {
 
     it('redacts the secret from the success debug log', async () => {
       vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response('ok', { status: 200 }));
-      await fetchWithTimeout(secretUrl, 1000, context);
+      await (await fetchWithTimeout(secretUrl, 1000, context)).text();
       const logged = String(
         debugSpy.mock.calls.find((c) => String(c[0]).includes('Successfully fetched'))?.[0],
       );
@@ -701,6 +701,7 @@ describe('fetchWithTimeout', () => {
         // 8.8.8.8 is a public IP — string check passes, DNS resolution skipped for literal IPs
         const result = await fetchWithTimeout('https://8.8.8.8', 1000, context, ssrfOpts);
         expect(result.status).toBe(200);
+        expect(await result.text()).toBe('ok');
       });
 
       it('should reject IPv6 ULA fc00::/7', async () => {
@@ -768,8 +769,8 @@ describe('fetchWithTimeout', () => {
         );
         for (const addr of ['2001:4860:4860::8888', '2606:4700:4700::1111']) {
           await expect(
-            fetchWithTimeout(`http://[${addr}]/`, 1000, context, ssrfOpts),
-          ).resolves.toMatchObject({ status: 200 });
+            (await fetchWithTimeout(`http://[${addr}]/`, 1000, context, ssrfOpts)).text(),
+          ).resolves.toBe('ok');
         }
       });
     });
@@ -780,7 +781,7 @@ describe('fetchWithTimeout', () => {
       it('queries the c-ares and system resolvers for the same name', async () => {
         vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response('ok', { status: 200 }));
 
-        await fetchWithTimeout('https://public.example/', 1000, context, ssrfOpts);
+        await (await fetchWithTimeout('https://public.example/', 1000, context, ssrfOpts)).text();
 
         expect(dnsSlots.resolve4).toHaveBeenCalledWith('public.example');
         expect(dnsSlots.resolve6).toHaveBeenCalledWith('public.example');
@@ -861,8 +862,8 @@ describe('fetchWithTimeout', () => {
           .mockResolvedValue(new Response('ok', { status: 200 }));
 
         await expect(
-          fetchWithTimeout('https://nowhere.example/', 1000, context, ssrfOpts),
-        ).resolves.toMatchObject({ status: 200 });
+          (await fetchWithTimeout('https://nowhere.example/', 1000, context, ssrfOpts)).text(),
+        ).resolves.toBe('ok');
         expect(fetchMock).toHaveBeenCalledTimes(1);
       });
 
@@ -872,8 +873,8 @@ describe('fetchWithTimeout', () => {
         vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response('ok', { status: 200 }));
 
         await expect(
-          fetchWithTimeout('https://public.example/', 1000, context, ssrfOpts),
-        ).resolves.toMatchObject({ status: 200 });
+          (await fetchWithTimeout('https://public.example/', 1000, context, ssrfOpts)).text(),
+        ).resolves.toBe('ok');
       });
     });
 
@@ -994,6 +995,7 @@ describe('fetchWithTimeout', () => {
           rejectPrivateIPs: true,
         });
         expect(result.status).toBe(200);
+        expect(await result.text()).toBe('ok');
         expect(fetchMock).toHaveBeenCalledTimes(2);
       });
 
@@ -1043,7 +1045,7 @@ describe('fetchWithTimeout', () => {
           .spyOn(globalThis, 'fetch')
           .mockResolvedValue(new Response('ok', { status: 200 }));
 
-        await fetchWithTimeout('https://example.com', 1000, context);
+        await (await fetchWithTimeout('https://example.com', 1000, context)).text();
 
         expect(fetchMock).toHaveBeenCalledWith(
           'https://example.com',
@@ -1056,7 +1058,9 @@ describe('fetchWithTimeout', () => {
           .spyOn(globalThis, 'fetch')
           .mockResolvedValue(new Response('ok', { status: 200 }));
 
-        await fetchWithTimeout('https://8.8.8.8', 1000, context, { rejectPrivateIPs: true });
+        await (
+          await fetchWithTimeout('https://8.8.8.8', 1000, context, { rejectPrivateIPs: true })
+        ).text();
 
         expect(fetchMock).toHaveBeenCalledWith(
           'https://8.8.8.8',

@@ -4,7 +4,7 @@
  * @module tests/unit/mcp-server/notifications.test
  */
 import type { ServerEvent, ServerNotifier } from '@modelcontextprotocol/server';
-import { describe, expect, it, vi } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import {
   buildBusNotifiers,
@@ -98,6 +98,7 @@ describe('buildRequestScopedNotifiers', () => {
 });
 
 describe('selectNotifiers (#193)', () => {
+  beforeEach(() => vi.clearAllMocks());
   const serverLevel = {
     notifyToolListChanged: vi.fn(),
     notifyResourceListChanged: vi.fn(),

@@ -82,7 +82,9 @@ describe('createFetchMock', () => {
     harness.install();
     harness.install();
     expect(globalThis.fetch).toBe(harness.fetch);
-    await globalThis.fetch('https://api.example.test/ok');
+    await expect(
+      globalThis.fetch('https://api.example.test/ok').then((response) => response.text()),
+    ).resolves.toBe('ok');
     expect(harness.calls).toHaveLength(1);
 
     harness.reset();

@@ -93,6 +93,10 @@ describe('openSqliteHandle', () => {
       expect(runtimeCaps.isBun).toBe(IS_BUN);
     });
 
+    /**
+     * Bun selects bun:sqlite and cannot exercise a missing better-sqlite3 import.
+     * The required test:node lane runs this failure-path assertion.
+     */
     it.skipIf(IS_BUN)(
       'rejects with ConfigurationError when the better-sqlite3 dependency cannot be imported',
       async () => {

@@ -79,17 +79,23 @@ function makeSync(src: FakeSource): SyncGenerator {
 describe('mirror runner / defineMirror', () => {
   let dir: string;
   let dbPath: string;
+  const mirrors = new Set<ReturnType<typeof defineMirror>>();
 
   beforeEach(async () => {
     dir = await mkdtemp(join(tmpdir(), 'mirror-runner-test-'));
     dbPath = join(dir, 'mirror.db');
   });
   afterEach(async () => {
-    await rm(dir, { recursive: true, force: true });
+    try {
+      await Promise.all([...mirrors].map((mirror) => mirror.close()));
+    } finally {
+      mirrors.clear();
+      await rm(dir, { recursive: true, force: true });
+    }
   });
 
-  const mirrorFor = (src: FakeSource) =>
-    defineMirror({
+  const mirrorFor = (src: FakeSource) => {
+    const mirror = defineMirror({
       name: 'test-mirror',
       store: sqliteMirrorStore({
         path: dbPath,
@@ -101,6 +107,9 @@ describe('mirror runner / defineMirror', () => {
       }),
       sync: makeSync(src),
     });
+    mirrors.add(mirror);
+    return mirror;
+  };
 
   it('runs a full init and reports ready with the high-water checkpoint', async () => {
     const src: FakeSource = { records: corpusOf(8), pageSize: 2, received: [] };

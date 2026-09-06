@@ -15,20 +15,14 @@ import { mcpTest } from '@/testing/vitest.js';
 // ---------------------------------------------------------------------------
 
 describe('mcpTest ctx fixture freshness', () => {
-  // Capture log calls from each test to assert cross-test isolation
-  const logCallCounts: number[] = [];
-
-  mcpTest('first: logs a message and captures count', async ({ ctx }) => {
-    ctx.log.info('first test message');
-    const calls = (ctx.log as MockContextLogger).calls;
-    logCallCounts.push(calls.length);
-    expect(calls).toHaveLength(1);
-  });
-
-  mcpTest('second: ctx is a fresh instance — no prior logs', async ({ ctx }) => {
-    // A shared ctx would have the log call from the first test above
+  mcpTest.for([1, 2])('ctx starts empty and remains local to case %s', async (_case, { ctx }) => {
     const calls = (ctx.log as MockContextLogger).calls;
     expect(calls).toHaveLength(0);
+    expect(await ctx.state.get('canary')).toBeNull();
+    ctx.log.info('local message');
+    await ctx.state.set('canary', { written: true });
+    expect(calls).toHaveLength(1);
+    expect(await ctx.state.get('canary')).toEqual({ written: true });
   });
 });
 
@@ -43,17 +37,14 @@ describe('mcpTest storage fixture freshness', () => {
     tenantId,
   });
 
-  mcpTest('first: writes a value to storage', async ({ storage }) => {
-    await storage.set('canary', { written: true }, rctx('t1'));
-    const val = await storage.get('canary', rctx('t1'));
-    expect(val).toEqual({ written: true });
-  });
-
-  mcpTest('second: storage is a fresh instance — canary key absent', async ({ storage }) => {
-    // A shared storage would still have the 'canary' key from the first test
-    const val = await storage.get('canary', rctx('t1'));
-    expect(val).toBeNull();
-  });
+  mcpTest.for([1, 2])(
+    'storage starts empty and remains local to case %s',
+    async (_case, { storage }) => {
+      expect(await storage.get('canary', rctx('t1'))).toBeNull();
+      await storage.set('canary', { written: true }, rctx('t1'));
+      expect(await storage.get('canary', rctx('t1'))).toEqual({ written: true });
+    },
+  );
 });
 
 // ---------------------------------------------------------------------------
@@ -97,15 +88,17 @@ describe('mcpTest.extend with function-form override', () => {
   });
 
   tenantTest('each override test still gets a fresh ctx', async ({ ctx }) => {
-    ctx.log.info('override test log');
     const calls = (ctx.log as MockContextLogger).calls;
+    expect(calls).toHaveLength(0);
+    ctx.log.info('override test log');
     expect(calls).toHaveLength(1);
   });
 
   tenantTest('another override test has zero prior logs', ({ ctx }) => {
-    // Fresh ctx — no logs from the previous override test
     const calls = (ctx.log as MockContextLogger).calls;
     expect(calls).toHaveLength(0);
+    ctx.log.info('another local message');
+    expect(calls).toHaveLength(1);
   });
 });
 

@@ -13,7 +13,6 @@ import { defaultServerManifest as defaultMeta } from '../../../../helpers/fixtur
 const {
   closeAllConnectionsSpy,
   createServerSpy,
-  destroySpy,
   probeOutcomes,
   serveSpy,
   serverCloseSpy,
@@ -21,7 +20,6 @@ const {
 } = vi.hoisted(() => ({
   closeAllConnectionsSpy: vi.fn(),
   createServerSpy: vi.fn(),
-  destroySpy: vi.fn(),
   probeOutcomes: [] as Array<'free' | 'inUse'>,
   serveSpy: vi.fn(),
   serverCloseSpy: vi.fn(),
@@ -191,11 +189,11 @@ describe('HTTP Transport lifecycle', () => {
     serveSpy.mockImplementation(defaultServe);
     serverCloseSpy.mockImplementation((callback?: (err?: Error) => void) => callback?.());
     closeAllConnectionsSpy.mockImplementation(() => {});
-    destroySpy.mockResolvedValue(undefined);
   });
 
   afterEach(() => {
     vi.useRealTimers();
+    vi.restoreAllMocks();
   });
 
   test('retries on EADDRINUSE and starts on the next port', async () => {
@@ -441,7 +439,7 @@ describe('HTTP Transport lifecycle', () => {
 
   test('stop destroys the session store and closes the server cleanly', async () => {
     const { SessionStore } = await import('@/mcp-server/transports/http/sessionStore.js');
-    vi.spyOn(SessionStore.prototype, 'destroy').mockImplementation(destroySpy);
+    const destroy = vi.spyOn(SessionStore.prototype, 'destroy');
 
     probeOutcomes.push('free');
 
@@ -455,7 +453,7 @@ describe('HTTP Transport lifecycle', () => {
 
     await handle.stop(mockContext);
 
-    expect(destroySpy).toHaveBeenCalledTimes(1);
+    expect(destroy).toHaveBeenCalledTimes(1);
     expect(serverCloseSpy).toHaveBeenCalledTimes(1);
     expect(closeAllConnectionsSpy).not.toHaveBeenCalled();
   });

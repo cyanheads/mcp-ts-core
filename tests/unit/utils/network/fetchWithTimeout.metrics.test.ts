@@ -51,7 +51,8 @@ describe('fetchWithTimeout – http.client.request.duration histogram', () => {
   it('records duration with method, host, and status code on 2xx success', async () => {
     vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response('ok', { status: 200 }));
 
-    await fetchWithTimeout('https://api.example.com/data', 5000, context);
+    const response = await fetchWithTimeout('https://api.example.com/data', 5000, context);
+    await response.text();
 
     expect(mockRecord).toHaveBeenCalledTimes(1);
     const [durationS, attrs] = mockRecord.mock.calls[0]!;
@@ -67,10 +68,11 @@ describe('fetchWithTimeout – http.client.request.duration histogram', () => {
   it('records duration with explicit POST method', async () => {
     vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response('created', { status: 201 }));
 
-    await fetchWithTimeout('https://api.example.com/items', 5000, context, {
+    const response = await fetchWithTimeout('https://api.example.com/items', 5000, context, {
       method: 'POST',
       body: '{}',
     });
+    await response.text();
 
     expect(mockRecord).toHaveBeenCalledTimes(1);
     const [, attrs] = mockRecord.mock.calls[0]!;
@@ -137,7 +139,8 @@ describe('fetchWithTimeout – http.client.request.duration histogram', () => {
   it('records duration in seconds (not milliseconds)', async () => {
     vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response('ok', { status: 200 }));
 
-    await fetchWithTimeout('https://example.com', 5000, context);
+    const response = await fetchWithTimeout('https://example.com', 5000, context);
+    await response.text();
 
     const [durationS] = mockRecord.mock.calls[0]!;
     // Duration should be well under 1 second for a mocked fetch

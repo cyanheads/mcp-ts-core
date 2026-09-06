@@ -1180,7 +1180,8 @@ describe('core/app', () => {
     });
 
     it('terminates the process even when a cleanup step never settles', async () => {
-      mockTransportManager.instance.stop.mockReturnValueOnce(new Promise<void>(() => {}));
+      const cleanup = Promise.withResolvers<void>();
+      mockTransportManager.instance.stop.mockReturnValueOnce(cleanup.promise);
 
       await createApp();
 
@@ -1212,6 +1213,8 @@ describe('core/app', () => {
       expect(processExitSpy).toHaveBeenCalledWith(0);
 
       setTimeoutSpy.mockRestore();
+      cleanup.resolve();
+      await flushAsyncWork();
     });
   });
 
