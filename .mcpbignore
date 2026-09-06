@@ -3,14 +3,14 @@
 
 # Credentials and agent-local state
 .mcpregistry_*
-.claude/
-.agents/
+/.claude/
+/.agents/
 
 # Source / dev surface
 docs/
 examples/
 templates/
-skills/
+/skills/
 agent-feedback/
 announcements/
 logs/

@@ -437,16 +437,18 @@ const ALL_CHECKS: Check[] = [
     flag: '--no-packaging',
     canFix: false,
     // Validates env var alignment between manifest.json (MCPB bundle) and
-    // server.json (MCP Registry), plus plugin marketplace manifests (#240).
-    // Runs when manifest.json OR any plugin manifest is present; skipped cleanly
-    // when none exist — consumers on an HTTP-only deploy are unaffected.
+    // server.json (MCP Registry), plus plugin marketplace manifests (#240), and
+    // the bundle-content guards on .mcpbignore (#343). Runs when any of those
+    // inputs is present; skipped cleanly when none exist — consumers on an
+    // HTTP-only deploy are unaffected.
     getCommand: () => {
       const hasManifest = existsSync(path.join(ROOT_DIR, 'manifest.json'));
       const hasPluginManifest =
         existsSync(path.join(ROOT_DIR, '.claude-plugin/plugin.json')) ||
         existsSync(path.join(ROOT_DIR, '.codex-plugin/plugin.json')) ||
         existsSync(path.join(ROOT_DIR, '.codex-plugin/mcp.json'));
-      if (!hasManifest && !hasPluginManifest) return null;
+      const hasMcpbIgnore = existsSync(path.join(ROOT_DIR, '.mcpbignore'));
+      if (!hasManifest && !hasPluginManifest && !hasMcpbIgnore) return null;
       return ['bun', 'run', 'scripts/lint-packaging.ts'];
     },
     tip: (c) =>
