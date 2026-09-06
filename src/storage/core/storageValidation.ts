@@ -28,9 +28,10 @@ import type { ListOptions, StorageOptions } from './IStorageProvider.js';
 
 /**
  * Per-process HMAC key for cursor integrity. Does not need to survive
- * restarts: cursors are ephemeral pagination tokens.
+ * restarts: cursors are ephemeral pagination tokens. Initialized on first use
+ * because Workers forbid random generation during module evaluation (#406).
  */
-const CURSOR_HMAC_KEY = randomBytes(32);
+let cursorHmacKey: Buffer | undefined;
 
 /**
  * Maximum length for tenant IDs and keys to prevent abuse.
@@ -378,7 +379,8 @@ const CURSOR_HMAC_BYTES = 16; // 128-bit truncated tag — sufficient for pagina
 
 /** Computes a truncated HMAC tag for the given payload string. */
 function signCursor(payload: string): string {
-  const mac = createHmac(CURSOR_HMAC_ALGO, CURSOR_HMAC_KEY)
+  cursorHmacKey ??= randomBytes(32);
+  const mac = createHmac(CURSOR_HMAC_ALGO, cursorHmacKey)
     .update(payload)
     .digest()
     .subarray(0, CURSOR_HMAC_BYTES);
