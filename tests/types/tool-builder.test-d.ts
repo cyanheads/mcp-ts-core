@@ -104,9 +104,7 @@ describe('tool() output inference', () => {
   });
 
   it('output type does not include fields outside the schema', () => {
-    // z.infer<typeof OUTPUT> is { items: string[]; total: number }
-    // Assert that 'extra' is NOT a key of the declared output type.
-    type OutputType = { items: string[]; total: number };
+    type OutputType = Awaited<ReturnType<ToolDefinition<typeof INPUT, typeof OUTPUT>['handler']>>;
     type HasExtra = 'extra' extends keyof OutputType ? true : false;
     expectTypeOf<HasExtra>().toEqualTypeOf<false>();
 

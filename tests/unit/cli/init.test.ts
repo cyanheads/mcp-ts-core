@@ -3,7 +3,7 @@
  * @module tests/unit/cli/init.test
  */
 
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -176,13 +176,20 @@ describe('CLI init command', () => {
 
     writeFileSync(join(tempRoot, 'package.json'), '{"name":"preexisting"}\n');
     writeFileSync(join(tempRoot, 'CLAUDE.md'), 'keep me\n');
+    mkdirSync(join(tempRoot, 'scripts'));
+    mkdirSync(join(tempRoot, 'skills', 'api-auth'), { recursive: true });
+    writeFileSync(join(tempRoot, 'scripts', 'build.ts'), '// custom build\n');
+    writeFileSync(join(tempRoot, 'skills', 'api-auth', 'SKILL.md'), 'custom auth instructions\n');
 
     await runCli(['init']);
 
     expect(readFileSync(join(tempRoot, 'package.json'), 'utf-8')).toBe('{"name":"preexisting"}\n');
     expect(readFileSync(join(tempRoot, 'CLAUDE.md'), 'utf-8')).toBe('keep me\n');
     expect(existsSync(join(tempRoot, 'scripts', 'build.ts'))).toBe(true);
-    expect(existsSync(join(tempRoot, 'skills', 'api-auth', 'SKILL.md'))).toBe(true);
+    expect(readFileSync(join(tempRoot, 'scripts', 'build.ts'), 'utf8')).toBe('// custom build\n');
+    expect(readFileSync(join(tempRoot, 'skills', 'api-auth', 'SKILL.md'), 'utf8')).toBe(
+      'custom auth instructions\n',
+    );
 
     const output = getLoggedOutput(logSpy);
     expect(output).toContain('Skipped (already exist):');

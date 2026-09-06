@@ -2,13 +2,12 @@
  * @fileoverview Full round-trip smoke test against a real DuckDB instance.
  * Exercises acquire → registerTable → query → export and the SQL gate's
  * fixture-pinned plan-walk allowlist (refinement #3 in issue #97). This test
- * loads the optional `@duckdb/node-api` peer dependency at runtime; it is
- * skipped automatically if the import fails (e.g. on platforms where DuckDB
- * native bindings are unavailable).
+ * requires the repo's `@duckdb/node-api` dev dependency and native bindings;
+ * a failed load is a failed smoke test.
  * @module tests/smoke/canvas-duckdb.test
  */
 
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -24,23 +23,13 @@ import { DuckdbProvider } from '@/services/canvas/providers/duckdb/DuckdbProvide
 import { McpError } from '@/types-global/errors.js';
 import type { RequestContext } from '@/utils/internal/requestContext.js';
 
-let duckdbAvailable = false;
-try {
-  await import('@duckdb/node-api');
-  duckdbAvailable = true;
-} catch {
-  // Skip the suite if DuckDB native bindings can't load.
-}
-
-const describeIf = duckdbAvailable ? describe : describe.skip;
-
 const ctx: RequestContext = {
   requestId: 'smoke-canvas',
   timestamp: '2026-01-01T00:00:00.000Z',
   tenantId: 'smoke-tenant',
 };
 
-describeIf('canvas · DuckDB round trip', () => {
+describe('canvas · DuckDB round trip', () => {
   let canvas: DataCanvas;
   let provider: DuckdbProvider;
   let exportRoot: string;
@@ -250,7 +239,10 @@ describeIf('canvas · DuckDB round trip', () => {
       path: 'export.csv',
     });
     expect(result.format).toBe('csv');
-    expect(result.path?.startsWith(exportRoot)).toBe(true);
+    expect(result.path).toBe(join(exportRoot, 'export.csv'));
+    const bytes = await readFile(join(exportRoot, 'export.csv'));
+    expect(bytes.toString()).toBe('id,label\n1,alpha\n2,beta\n');
+    expect(result.sizeBytes).toBe(bytes.byteLength);
     expect(result.rowCount).toBe(2);
     expect(result.sizeBytes).toBeGreaterThan(0);
   });

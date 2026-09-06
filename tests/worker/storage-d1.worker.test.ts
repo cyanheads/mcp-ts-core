@@ -18,6 +18,7 @@ import {
 import { env } from 'cloudflare:workers';
 import { afterEach, beforeAll, describe, expect, it } from 'vitest';
 import worker from '../fixtures/worker-runtime.fixture.js';
+import { jsonrpc, MCP_HEADERS, parseSseDataFrames } from './wire-helpers.js';
 
 declare global {
   namespace Cloudflare {
@@ -46,31 +47,6 @@ CREATE TABLE IF NOT EXISTS kv_store (
   PRIMARY KEY (tenant_id, key)
 )
 `;
-
-const MCP_HEADERS = {
-  Accept: 'application/json, text/event-stream',
-  'Content-Type': 'application/json',
-  Origin: 'http://example.com',
-} as const;
-
-function jsonrpc(id: number, method: string, params: Record<string, unknown> = {}): string {
-  return JSON.stringify({ jsonrpc: '2.0', id, method, params });
-}
-
-/** Parses SSE event frames into their JSON `data:` payloads. */
-function parseSseDataFrames(body: string): unknown[] {
-  return body
-    .split('\n\n')
-    .filter(Boolean)
-    .flatMap((block) => {
-      const dataLines = block
-        .split('\n')
-        .filter((line) => line.startsWith('data:'))
-        .map((line) => line.slice(5).trim());
-      if (dataLines.length === 0) return [];
-      return [JSON.parse(dataLines.join('\n'))];
-    });
-}
 
 type ToolCallResult = {
   jsonrpc: '2.0';

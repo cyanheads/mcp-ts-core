@@ -2,7 +2,7 @@
  * @fileoverview Unit tests for the unified Context construction, the error
  * contract helpers (createFail/createRecoveryFor/attachTypedFail), the
  * enrichment/content accumulators, and the request-scoped logger/state/
- * multi-round-trip-input wiring in src/core/context.ts.
+ * signal/multi-round-trip-input wiring in src/core/context.ts.
  * @module tests/unit/core/context.test
  */
 
@@ -261,6 +261,34 @@ describe('attachTypedFail', () => {
       recovery: { hint: 'Broaden the query and try again.' },
     });
   });
+
+  it('composes with ctx.fail via spread without overriding caller-supplied data (#174)', () => {
+    const ctx = attachTypedFail(createContext(buildDeps()), [
+      {
+        reason: 'rate_limited',
+        code: JsonRpcErrorCode.RateLimited,
+        when: 'Upstream throttled',
+        retryable: true,
+        recovery: 'Wait a few seconds before retrying.',
+      },
+    ]);
+    const withFail = ctx as unknown as {
+      fail: (reason: string, message?: string, data?: Record<string, unknown>) => McpError;
+      recoveryFor: (reason: string) => Record<string, unknown>;
+    };
+
+    const err = withFail.fail('rate_limited', 'Upstream slowed down', {
+      attempt: 3,
+      ...withFail.recoveryFor('rate_limited'),
+    });
+
+    expect(err.data).toEqual({
+      reason: 'rate_limited',
+      retryable: true,
+      attempt: 3,
+      recovery: { hint: 'Wait a few seconds before retrying.' },
+    });
+  });
 });
 
 describe('createEnrich', () => {
@@ -349,6 +377,18 @@ describe('createEnrich', () => {
 
     expect(store.values).toEqual({ a: 2, b: 3 });
   });
+
+  it('truncated() is last-wins across successive calls', () => {
+    const store = createEnrichmentStore();
+    const enrich = createEnrich(store);
+
+    enrich.truncated({ shown: 5, cap: 10, guidance: 'First.' });
+    enrich.truncated({ shown: 3, cap: 5, guidance: 'Second.' });
+
+    expect(store.values.notice).toBe('Second.');
+    expect(store.values.shown).toBe(3);
+    expect(store.values.cap).toBe(5);
+  });
 });
 
 describe('createContentCollect', () => {
@@ -420,6 +460,22 @@ describe('enrichment and content store stash/read', () => {
   it('returns undefined reading a content store from a context that never had one stashed', () => {
     const bareCtx = {} as Context;
     expect(readContentStore(bareCtx)).toBeUndefined();
+  });
+
+  it('wires ctx.enrich and ctx.content to the stashed stores rather than to detached copies', () => {
+    const ctx = createContext(buildDeps());
+
+    ctx.enrich.truncated({ shown: 2, cap: 5 });
+    ctx.content.image('base64data', 'image/png');
+
+    expect(readEnrichmentStore(ctx)?.values).toMatchObject({
+      truncated: true,
+      shown: 2,
+      cap: 5,
+    });
+    expect(readContentStore(ctx)?.blocks).toEqual([
+      { type: 'image', data: 'base64data', mimeType: 'image/png' },
+    ]);
   });
 
   it('stashes stores under non-enumerable symbol keys invisible to Object.keys/JSON.stringify', () => {
@@ -584,6 +640,20 @@ describe('createContext — field wiring', () => {
   });
 });
 
+describe('createContext — signal wiring', () => {
+  it('carries the provided AbortSignal by reference and reflects a later abort', () => {
+    const controller = new AbortController();
+    const ctx = createContext(buildDeps({ signal: controller.signal }));
+
+    expect(ctx.signal).toBe(controller.signal);
+    expect(ctx.signal.aborted).toBe(false);
+
+    controller.abort();
+
+    expect(ctx.signal.aborted).toBe(true);
+  });
+});
+
 describe('ContextLogger (ctx.log)', () => {
   it('debug/info/notice/warning forward to the singleton logger, enriched with call-site data', () => {
     const debugSpy = vi.spyOn(logger, 'debug').mockImplementation(() => {});
@@ -629,6 +699,19 @@ describe('ContextLogger (ctx.log)', () => {
     ctx.log.debug('no data');
 
     expect(debugSpy).toHaveBeenCalledWith('no data', appContext);
+  });
+
+  it('logs the auto-defaulted tenantId rather than the absent original', () => {
+    const infoSpy = vi.spyOn(logger, 'info').mockImplementation(() => {});
+    const ctx = createContext(buildDeps({ appContext: buildAppContext() }));
+
+    ctx.log.info('check tenant');
+
+    expect(ctx.tenantId).toBe('default');
+    expect(infoSpy).toHaveBeenCalledWith(
+      'check tenant',
+      expect.objectContaining({ tenantId: 'default' }),
+    );
   });
 
   it('error(msg, error, data) forwards the Error object and enriched data in the 3-arg form', () => {
@@ -698,6 +781,13 @@ describe('ContextState (ctx.state)', () => {
     await ctx.state.set('item-3', { count: 'not-a-number' });
 
     await expect(ctx.state.get('item-3', schema)).rejects.toThrow();
+  });
+
+  it('get returns null for a missing key even when a schema is supplied, without parsing null', async () => {
+    const ctx = createContext(buildDeps({ appContext: buildAppContext({ tenantId: 'tenant-a' }) }));
+    const schema = z.object({ count: z.number() });
+
+    await expect(ctx.state.get('never-written', schema)).resolves.toBeNull();
   });
 
   it('delete removes a key so a subsequent get returns null', async () => {
@@ -826,6 +916,83 @@ describe('ContextState (ctx.state)', () => {
     expect(getManyMock).toHaveBeenCalledWith(['k-1', 'k-2'], expect.anything());
     // k-2 has no value returned by getMany, so it is silently excluded.
     expect(page.items).toEqual([{ key: 'k-1', value: { v: 1 } }]);
+  });
+
+  it('scopes state by tenant so two contexts sharing one StorageService cannot read each other', async () => {
+    const storage = new StorageService(new InMemoryProvider());
+    const ctxA = createContext(
+      buildDeps({
+        appContext: buildAppContext({ requestId: 'r-a', tenantId: 'tenant-a' }),
+        storage,
+      }),
+    );
+    const ctxB = createContext(
+      buildDeps({
+        appContext: buildAppContext({ requestId: 'r-b', tenantId: 'tenant-b' }),
+        storage,
+      }),
+    );
+
+    await ctxA.state.set('shared-key', 'a-value');
+    await ctxB.state.set('shared-key', 'b-value');
+
+    expect(await ctxA.state.get('shared-key')).toBe('a-value');
+    expect(await ctxB.state.get('shared-key')).toBe('b-value');
+  });
+
+  it('operates under the auto-defaulted "default" tenant when appContext carries none', async () => {
+    const ctx = createContext(buildDeps({ appContext: buildAppContext() }));
+
+    expect(ctx.tenantId).toBe('default');
+    await ctx.state.set('key', 'val');
+
+    expect(await ctx.state.get('key')).toBe('val');
+  });
+
+  it('forwards a ttl to StorageService.set and passes no options when ttl is absent', async () => {
+    const storage = new StorageService(new InMemoryProvider());
+    const setSpy = vi.spyOn(storage, 'set');
+    const ctx = createContext(
+      buildDeps({ appContext: buildAppContext({ tenantId: 'tenant-a' }), storage }),
+    );
+
+    await ctx.state.set('ephemeral', 'data', { ttl: 3600 });
+    await ctx.state.set('permanent', 'data');
+
+    expect(setSpy).toHaveBeenNthCalledWith(
+      1,
+      'ephemeral',
+      'data',
+      expect.objectContaining({ tenantId: 'tenant-a' }),
+      { ttl: 3600 },
+    );
+    expect(setSpy).toHaveBeenNthCalledWith(
+      2,
+      'permanent',
+      'data',
+      expect.objectContaining({ tenantId: 'tenant-a' }),
+      undefined,
+    );
+  });
+
+  it('forwards a ttl to StorageService.setMany', async () => {
+    const storage = new StorageService(new InMemoryProvider());
+    const setManySpy = vi.spyOn(storage, 'setMany');
+    const ctx = createContext(
+      buildDeps({ appContext: buildAppContext({ tenantId: 'tenant-a' }), storage }),
+    );
+    const entries = new Map<string, unknown>([
+      ['a', 1],
+      ['b', 2],
+    ]);
+
+    await ctx.state.setMany(entries, { ttl: 600 });
+
+    expect(setManySpy).toHaveBeenCalledWith(
+      entries,
+      expect.objectContaining({ tenantId: 'tenant-a' }),
+      { ttl: 600 },
+    );
   });
 
   it('throws McpError(InvalidRequest) for any state operation when tenantId is missing (fail-closed)', async () => {

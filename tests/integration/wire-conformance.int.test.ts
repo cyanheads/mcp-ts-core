@@ -238,6 +238,7 @@ describe('Phase 1 wire conformance', () => {
 
     it('returns an error envelope that satisfies the advertised schema', async () => {
       const client = await session();
+      await client.listTools();
       // A strict client validates `structuredContent` against `outputSchema`;
       // this call is exactly the one that used to fail with `-32602`.
       const result = await client.callTool({
@@ -253,6 +254,7 @@ describe('Phase 1 wire conformance', () => {
 
     it('accepts a reason raised below the handler', async () => {
       const client = await session();
+      await client.listTools();
       const result = await client.callTool({
         name: 'wire_search',
         arguments: { query: 'gate' },
@@ -307,6 +309,38 @@ describe('Phase 1 wire conformance', () => {
     it('advertises no experimental tasks capability', async () => {
       const client = await session();
       expect(client.getServerCapabilities()?.tasks).toBeUndefined();
+    });
+  });
+
+  describe('resource and prompt execution', () => {
+    it('reads the registered URI template with its validated output', async () => {
+      const client = await session();
+      const templates = await client.listResourceTemplates();
+      expect(templates.resourceTemplates).toContainEqual(
+        expect.objectContaining({ uriTemplate: 'wire://doc/{id}' }),
+      );
+      const result = await client.readResource({ uri: 'wire://doc/42' });
+      expect(result.contents).toEqual([
+        {
+          uri: 'wire://doc/42',
+          mimeType: 'application/json',
+          text: JSON.stringify({ id: '42' }, null, 2),
+        },
+      ]);
+      await expect(client.readResource({ uri: 'unknown://missing' })).rejects.toMatchObject({
+        code: ProtocolErrorCode.InvalidParams,
+      });
+    });
+
+    it('applies prompt defaults and rejects missing required arguments', async () => {
+      const client = await session();
+      const result = await client.getPrompt({ name: 'wire_greet', arguments: { name: 'Ada' } });
+      expect(result.messages).toEqual([
+        { role: 'user', content: { type: 'text', text: 'Greet Ada (friendly)' } },
+      ]);
+      await expect(client.getPrompt({ name: 'wire_greet', arguments: {} })).rejects.toMatchObject({
+        code: ProtocolErrorCode.InvalidParams,
+      });
     });
   });
 

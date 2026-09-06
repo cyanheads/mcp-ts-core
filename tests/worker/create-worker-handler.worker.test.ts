@@ -22,6 +22,7 @@ import worker, {
   type WorkerLifecycleTestBindings,
   type WorkerLifecycleTestControl,
 } from '../fixtures/worker-runtime.fixture.js';
+import { jsonrpc, MCP_HEADERS, parseSseDataFrames } from './wire-helpers.js';
 
 declare global {
   namespace Cloudflare {
@@ -54,16 +55,6 @@ const runtimeGlobal = globalThis as typeof globalThis & {
   };
 };
 
-const MCP_HEADERS = {
-  Accept: 'application/json, text/event-stream',
-  'Content-Type': 'application/json',
-  Origin: 'http://example.com',
-} as const;
-
-function jsonrpc(id: number, method: string, params: Record<string, unknown> = {}): string {
-  return JSON.stringify({ jsonrpc: '2.0', id, method, params });
-}
-
 function initializeBody(id = 1): string {
   return jsonrpc(id, 'initialize', {
     protocolVersion: '2025-06-18',
@@ -82,21 +73,6 @@ function requestWithLoggedUrl(loggedUrl: string): Request {
   const request = new Request('https://example.com/healthz');
   Object.defineProperty(request, 'url', { configurable: true, value: loggedUrl });
   return request;
-}
-
-/** Parses SSE event frames into their JSON `data:` payloads. */
-function parseSseDataFrames(body: string): unknown[] {
-  return body
-    .split('\n\n')
-    .filter(Boolean)
-    .flatMap((block) => {
-      const dataLines = block
-        .split('\n')
-        .filter((line) => line.startsWith('data:'))
-        .map((line) => line.slice(5).trim());
-      if (dataLines.length === 0) return [];
-      return [JSON.parse(dataLines.join('\n'))];
-    });
 }
 
 describe('createWorkerHandler in the Workers runtime', () => {
