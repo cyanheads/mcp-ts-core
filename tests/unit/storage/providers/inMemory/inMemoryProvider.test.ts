@@ -183,6 +183,82 @@ describe('InMemoryProvider (unit)', () => {
       await expect(boundedProvider.get(tenantId, 'new-key', context)).resolves.toBe('v3');
     });
 
+    it('reattaches a tenant after a capacity sweep and releases its replacement normally (#403)', async () => {
+      const context = createTestContext();
+      const boundedProvider = new InMemoryProvider({ maxEntries: 1 });
+      await boundedProvider.set(tenantId, 'expired', 'old', context, { ttl: 1 });
+      now += 1_001;
+      await expect(
+        boundedProvider.set(tenantId, 'replacement', 'new', context),
+      ).resolves.toBeUndefined();
+      await expect(boundedProvider.get(tenantId, 'replacement', context)).resolves.toBe('new');
+      await expect(boundedProvider.list(tenantId, '', context)).resolves.toMatchObject({
+        keys: ['replacement'],
+      });
+      expect(boundedProvider.size).toBe(1);
+      expect(() => boundedProvider.set(tenantId, 'another', 'value', context)).toThrow(
+        'capacity exceeded',
+      );
+      await expect(boundedProvider.delete(tenantId, 'replacement', context)).resolves.toBe(true);
+      expect(boundedProvider.size).toBe(0);
+      await boundedProvider.set(tenantId, 'another', 'value', context);
+      await expect(boundedProvider.get(tenantId, 'another', context)).resolves.toBe('value');
+      await expect(boundedProvider.clear(tenantId, context)).resolves.toBe(1);
+      expect(boundedProvider.size).toBe(0);
+    });
+
+    it.each([false, true])(
+      'commits a batch after reclaiming expired target entries (live sibling: %s)',
+      async (liveSibling) => {
+        const context = createTestContext();
+        const boundedProvider = new InMemoryProvider({ maxEntries: liveSibling ? 3 : 2 });
+        await boundedProvider.set(tenantId, 'expired', 'old', context, { ttl: 1 });
+        if (liveSibling) await boundedProvider.set(tenantId, 'stable', 'stable', context);
+        now += 1_001;
+        const batch = new Map([
+          ['expired', 'replacement'],
+          ['new', 'new-value'],
+        ]);
+        await boundedProvider.setMany(tenantId, batch, context);
+        await expect(
+          boundedProvider.getMany(tenantId, [...batch.keys()], context),
+        ).resolves.toEqual(batch);
+        await expect(boundedProvider.list(tenantId, '', context)).resolves.toMatchObject({
+          keys: liveSibling ? ['expired', 'new', 'stable'] : ['expired', 'new'],
+        });
+        expect(boundedProvider.size).toBe(liveSibling ? 3 : 2);
+        expect(() => boundedProvider.set(tenantId, 'overflow', 'value', context)).toThrow(McpError);
+        await expect(boundedProvider.clear(tenantId, context)).resolves.toBe(liveSibling ? 3 : 2);
+        await boundedProvider.set(tenantId, 'after-clear', 'value', context);
+        expect(boundedProvider.size).toBe(1);
+      },
+    );
+
+    it.each([false, true])(
+      'keeps batch preflight atomic across a TTL boundary (live sibling: %s)',
+      async (liveSibling) => {
+        const context = createTestContext();
+        const boundedProvider = new InMemoryProvider({ maxEntries: liveSibling ? 2 : 1 });
+        now = 1_000;
+        await boundedProvider.set(tenantId, 'expiring', 'old', context, { ttl: 1 });
+        if (liveSibling) await boundedProvider.set(tenantId, 'stable', 'stable', context);
+        const batch = new Map([['new', 'new-value']]);
+        if (liveSibling) batch.set('expiring', 'replacement');
+        // #403: a second sweep at a later clock snapshot used to invalidate the preflight delta/map.
+        vi.mocked(Date.now).mockReturnValueOnce(1_999).mockReturnValue(2_001);
+        await expect(boundedProvider.setMany(tenantId, batch, context)).rejects.toThrow(McpError);
+        await expect(boundedProvider.get(tenantId, 'new', context)).resolves.toBeNull();
+        await expect(boundedProvider.get(tenantId, 'expiring', context)).resolves.toBeNull();
+        await expect(boundedProvider.list(tenantId, '', context)).resolves.toMatchObject({
+          keys: liveSibling ? ['stable'] : [],
+        });
+        expect(boundedProvider.size).toBe(liveSibling ? 1 : 0);
+        await boundedProvider.setMany(tenantId, new Map([['new', 'retry']]), context);
+        await expect(boundedProvider.get(tenantId, 'new', context)).resolves.toBe('retry');
+        expect(boundedProvider.size).toBe(liveSibling ? 2 : 1);
+      },
+    );
+
     it('still throws when the sweep reclaims nothing and capacity remains full', async () => {
       const context = createTestContext();
       const boundedProvider = new InMemoryProvider({ maxEntries: 2 });

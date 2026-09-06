@@ -86,14 +86,19 @@ export class InMemoryProvider implements IStorageProvider {
    * Ensures capacity for a new entry. If at limit, runs a TTL sweep first.
    * If still at capacity after sweep, throws.
    */
-  private ensureCapacity(additionalEntries = 1): void {
-    if (this.entryCount + additionalEntries <= this.maxEntries) return;
+  private ensureCapacity(): void {
+    if (this.entryCount < this.maxEntries) return;
 
     const reclaimed = this.sweepExpired();
     if (reclaimed > 0) {
       logger.debug(`[InMemoryProvider] TTL sweep reclaimed ${reclaimed} expired entries`);
     }
 
+    this.assertCapacity(1);
+  }
+
+  /** Check a capacity snapshot without sweeping or invalidating a batch delta. */
+  private assertCapacity(additionalEntries: number): void {
     if (this.entryCount + additionalEntries > this.maxEntries) {
       throw new McpError(
         JsonRpcErrorCode.InternalError,
@@ -137,12 +142,12 @@ export class InMemoryProvider implements IStorageProvider {
     options?: StorageOptions,
   ): Promise<void> {
     logger.debug(`[InMemoryProvider] Setting key: ${key} for tenant: ${tenantId}`, context);
-    let tenantStore = this.store.get(tenantId);
-    const isNew = !tenantStore?.has(key);
+    const isNew = !this.store.get(tenantId)?.has(key);
     if (isNew) {
       this.ensureCapacity();
     }
-    tenantStore ??= this.getOrCreateTenantStore(tenantId);
+    // A capacity sweep may have removed the target tenant’s last entry.
+    const tenantStore = this.getOrCreateTenantStore(tenantId);
     // Fix: Check for undefined instead of truthy to handle ttl=0 correctly
     const expiresAt = options?.ttl !== undefined ? Date.now() + options.ttl * 1000 : undefined;
     tenantStore.set(key, {
@@ -287,7 +292,7 @@ export class InMemoryProvider implements IStorageProvider {
       if (!tenantStore?.has(key)) newEntryCount++;
     }
     // Preflight the complete batch so capacity failures cannot partially commit.
-    this.ensureCapacity(newEntryCount);
+    this.assertCapacity(newEntryCount);
     tenantStore ??= this.getOrCreateTenantStore(tenantId);
 
     const expiresAt = options?.ttl !== undefined ? Date.now() + options.ttl * 1000 : undefined;

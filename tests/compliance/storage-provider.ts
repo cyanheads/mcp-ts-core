@@ -153,6 +153,53 @@ export function storageProviderTests(harness: StorageProviderHarness): void {
       await expect(storageA.deleteMany([], contextA)).resolves.toBe(0);
     });
 
+    it('isolates batch reads, overwrites, and deletes for colliding tenant keys', async () => {
+      await storageA.setMany(
+        new Map([
+          ['batch/shared', 'a'],
+          ['batch/private', 'a-only'],
+        ]),
+        contextA,
+      );
+      await storageB.setMany(
+        new Map([
+          ['batch/shared', 'b'],
+          ['batch/other', 'b-only'],
+        ]),
+        contextB,
+      );
+      await expect(storageB.getMany(['batch/shared', 'batch/private'], contextB)).resolves.toEqual(
+        new Map([['batch/shared', 'b']]),
+      );
+      await storageA.setMany(new Map([['batch/shared', 'a-updated']]), contextA);
+      await storageA.deleteMany(['batch/shared', 'batch/other'], contextA);
+      await expect(storageB.getMany(['batch/shared', 'batch/other'], contextB)).resolves.toEqual(
+        new Map([
+          ['batch/shared', 'b'],
+          ['batch/other', 'b-only'],
+        ]),
+      );
+      await expect(storageA.get('batch/private', contextA)).resolves.toBe('a-only');
+    });
+
+    it('validates the entire batch before writing or deleting any entry', async () => {
+      await storageA.set('preflight/stable', 'original', contextA);
+      await expect(
+        storageA.setMany(
+          new Map([
+            ['preflight/stable', 'changed'],
+            ['../invalid', 'invalid'],
+          ]),
+          contextA,
+        ),
+      ).rejects.toThrow();
+      await expect(storageA.get('preflight/stable', contextA)).resolves.toBe('original');
+      await expect(
+        storageA.deleteMany(['preflight/stable', '../invalid'], contextA),
+      ).rejects.toThrow();
+      await expect(storageA.get('preflight/stable', contextA)).resolves.toBe('original');
+    });
+
     it('lists in deterministic order with literal prefixes and tenant-bound cursors', async () => {
       await storageA.setMany(
         new Map<string, unknown>([
@@ -239,6 +286,33 @@ export function storageProviderTests(harness: StorageProviderHarness): void {
           await expect(storageA.list('ttl/', contextA)).resolves.toMatchObject({ keys: [] });
         }
       });
+
+      it.each(['set', 'setMany'] as const)(
+        'replaces and clears expiry when %s overwrites an entry',
+        async (operation) => {
+          const write = (value: string, ttl?: number) =>
+            operation === 'set'
+              ? storageA.set(
+                  'ttl/overwrite',
+                  value,
+                  contextA,
+                  ttl === undefined ? undefined : { ttl },
+                )
+              : storageA.setMany(
+                  new Map([['ttl/overwrite', value]]),
+                  contextA,
+                  ttl === undefined ? undefined : { ttl },
+                );
+          await write('initial', 1);
+          now += 500;
+          await write('refreshed', 2);
+          now += 501;
+          await expect(storageA.get('ttl/overwrite', contextA)).resolves.toBe('refreshed');
+          await write('permanent');
+          now += 3_000;
+          await expect(storageA.get('ttl/overwrite', contextA)).resolves.toBe('permanent');
+        },
+      );
 
       it('treats ttl=0 as immediate expiry rather than permanent storage', async () => {
         await storageA.set('ttl/zero', 'value', contextA, { ttl: 0 });
