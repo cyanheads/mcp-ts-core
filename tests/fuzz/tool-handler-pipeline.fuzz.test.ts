@@ -237,7 +237,7 @@ describe('Tool Handler Pipeline Fuzz Tests', () => {
             const result = await call(handler, input);
             expect(result.isError).toBeUndefined();
             expect(result.content).toBeDefined();
-            expect(result.structuredContent).toBeDefined();
+            expect(result.structuredContent).toEqual(expect.schemaMatching(def.output));
           }),
           { numRuns: 50 },
         );
@@ -276,6 +276,7 @@ describe('Tool Handler Pipeline Fuzz Tests', () => {
         await fc.assert(
           fc.asyncProperty(arb, async (input) => {
             const result = await call(handler, input);
+            expect(result.isError).toBe(def.input.safeParse(input).success ? undefined : true);
             if (result.isError) {
               // Error responses must have text content
               expect(result.content!.length).toBeGreaterThan(0);
@@ -450,7 +451,10 @@ describe('Tool Handler Pipeline Fuzz Tests', () => {
         const result = await call(handler, input);
         expect(result).toBeDefined();
         expect(result.content).toBeDefined();
-        // Most should be errors (Zod will reject non-objects)
+        expect(result.isError).toBe(true);
+        expect(result.structuredContent).toMatchObject({
+          error: { code: JsonRpcErrorCode.ValidationError },
+        });
       }
     });
   });
@@ -464,10 +468,8 @@ describe('Tool Handler Pipeline Fuzz Tests', () => {
         // All are valid string inputs, should succeed
         expect(result).toBeDefined();
         expect(result.content).toBeDefined();
-        if (!result.isError) {
-          expect(result.structuredContent).toBeDefined();
-          expect((result.structuredContent as any).echo).toBe(str);
-        }
+        expect(result.isError).toBeUndefined();
+        expect(result.structuredContent).toEqual({ echo: str });
       }
     });
   });
@@ -497,6 +499,8 @@ describe('Tool Handler Pipeline Fuzz Tests', () => {
       const result = await call(handler, largeInput);
       expect(result).toBeDefined();
       expect(result.content).toBeDefined();
+      expect(result.isError).toBeUndefined();
+      expect(result.structuredContent).toEqual({ echo: largeInput.value });
     });
 
     it('handles deeply nested objects gracefully', async () => {
@@ -508,7 +512,10 @@ describe('Tool Handler Pipeline Fuzz Tests', () => {
       }
 
       const result = await call(handler, deep);
-      expect(result).toBeDefined();
+      expect(result.isError).toBe(true);
+      expect(result.structuredContent).toMatchObject({
+        error: { code: JsonRpcErrorCode.ValidationError },
+      });
       // Strict input rejects the undeclared `nested` key; the pipeline still
       // answers with a shaped error result rather than throwing.
     });

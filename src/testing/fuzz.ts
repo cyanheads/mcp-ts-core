@@ -9,6 +9,7 @@
  * @module src/testing/fuzz
  */
 
+import { specTypeSchemas } from '@modelcontextprotocol/server';
 import type fc from 'fast-check';
 import {
   ZodArray,
@@ -29,6 +30,7 @@ import type {
   AnyToolDefinition,
   ToolInputSchema,
 } from '@/mcp-server/tools/utils/toolDefinition.js';
+import { buildToolSuccessResult } from '@/mcp-server/tools/utils/toolHandlerFactory.js';
 import { McpError } from '@/types-global/errors.js';
 import { createMockContext, type MockContextOptions } from './index.js';
 
@@ -265,6 +267,39 @@ function arrayLengthBounds(schema: unknown): { minLength: number; maxLength: num
 function arbitraryForZodString(schema: ZodString): fc.Arbitrary<string> {
   const f = getFc();
   const s = schema as any;
+  const patterns = (schema._zod.def.checks ?? []).flatMap((check) => {
+    const def = check._zod.def;
+    return def.check === 'string_format' &&
+      'format' in def &&
+      def.format === 'regex' &&
+      'pattern' in def &&
+      def.pattern instanceof RegExp
+      ? [def.pattern]
+      : [];
+  });
+  const regex = patterns[0];
+  if (regex) {
+    /** Generate without fast-check's unsupported i flag, then validate against the original patterns. */
+    const generatorPattern = new RegExp(regex.source, regex.flags.replace('i', ''));
+    /** Bound fast-check's synchronous filter retries for contradictory regex/length constraints. */
+    let rejected = 0;
+    return f.stringMatching(generatorPattern).filter((value) => {
+      const matches =
+        (schema.minLength === null || value.length >= schema.minLength) &&
+        (schema.maxLength === null || value.length <= schema.maxLength) &&
+        patterns.every((pattern) => {
+          pattern.lastIndex = 0;
+          return pattern.test(value);
+        });
+      if (matches) rejected = 0;
+      else if (++rejected >= 1000) {
+        throw new Error(
+          'Unable to generate a string satisfying the regex and length constraints after 1000 rejected candidates.',
+        );
+      }
+      return matches;
+    });
+  }
   const format: string | undefined = s.format;
   if (format === 'email') {
     // fc.emailAddress() can produce emails Zod 4 rejects (e.g. "!a@a.aa").
@@ -543,14 +578,13 @@ function recordLeak(report: FuzzReport, input: unknown, error: unknown): void {
 function recordHandlerError(report: FuzzReport, input: unknown, error: unknown): void {
   if (!(error instanceof McpError)) {
     report.crashes.push({ input, error });
-    return;
   }
 
   recordLeak(report, input, error);
 }
 
-function createToolFuzzContext(
-  def: AnyToolDefinition,
+function createDefinitionFuzzContext(
+  def: AnyToolDefinition | AnyResourceDefinition,
   options: FuzzOptions,
   overrides: MockContextOptions = {},
 ) {
@@ -660,10 +694,10 @@ export async function fuzzTool(
       report.totalRuns++;
       const parsed = def.input.safeParse(raw);
       if (!parsed.success) return;
-      const ctx = createToolFuzzContext(def, options);
+      const ctx = createDefinitionFuzzContext(def, options);
       try {
         const result = await withTimeout(def.handler(parsed.data, ctx), timeout);
-        def.output.parse(result);
+        buildToolSuccessResult(def, ctx, def.output.parse(result), []);
       } catch (err) {
         recordHandlerError(report, parsed.data, err);
       }
@@ -676,14 +710,14 @@ export async function fuzzTool(
   await f.assert(
     f.asyncProperty(advArb, async (input) => {
       report.totalRuns++;
-      const ctx = createToolFuzzContext(def, options);
+      const ctx = createDefinitionFuzzContext(def, options);
       try {
         const validated = def.input.safeParse(input);
         if (!validated.success) return;
         const result = await withTimeout(def.handler(validated.data, ctx), timeout);
-        def.output.parse(result);
+        buildToolSuccessResult(def, ctx, def.output.parse(result), []);
       } catch (err) {
-        recordLeak(report, input, err);
+        recordHandlerError(report, input, err);
       }
     }),
     { ...fcParams, numRuns: numAdversarial },
@@ -706,24 +740,28 @@ export async function fuzzTool(
     try {
       const validated = def.input.safeParse(input);
       if (!validated.success) continue;
-      const ctx = createToolFuzzContext(def, options);
-      await withTimeout(def.handler(validated.data, ctx), timeout);
-    } catch {
-      // Expected
+      const ctx = createDefinitionFuzzContext(def, options);
+      const result = await withTimeout(def.handler(validated.data, ctx), timeout);
+      buildToolSuccessResult(def, ctx, def.output.parse(result), []);
+    } catch (err) {
+      recordHandlerError(report, input, err);
     }
   }
 
   // Phase 4: Aborted signal
   report.totalRuns++;
+  const rawSample = f.sample(validArb, { ...fcParams, numRuns: 1 })[0];
+  const parsedSample = def.input.safeParse(rawSample);
   try {
     const controller = new AbortController();
     controller.abort();
-    const ctx = createToolFuzzContext(def, options, { signal: controller.signal });
-    const rawSample = generateOne(validArb);
-    const parsedSample = def.input.parse(rawSample);
-    await withTimeout(def.handler(parsedSample, ctx), timeout);
-  } catch {
-    // Expected
+    const ctx = createDefinitionFuzzContext(def, options, { signal: controller.signal });
+    if (parsedSample.success) {
+      await withTimeout(def.handler(parsedSample.data, ctx), timeout);
+    }
+  } catch (err) {
+    // Handlers may reject an aborted signal, but must still settle by the deadline.
+    if (err instanceof FuzzTimeoutError) recordHandlerError(report, rawSample, err);
   }
 
   protoGuard.check(report);
@@ -774,12 +812,12 @@ export async function fuzzResource(
         report.totalRuns++;
         const parsed = paramsSchema.safeParse(raw);
         if (!parsed.success) return;
-        const ctx = createMockContext({
-          ...options.ctx,
+        const ctx = createDefinitionFuzzContext(def, options, {
           uri: new URL(`fuzz://test/${encodeURIComponent(JSON.stringify(parsed.data))}`),
         });
         try {
-          await withTimeout(def.handler(parsed.data, ctx), timeout);
+          const result = await withTimeout(def.handler(parsed.data, ctx), timeout);
+          def.output?.parse(result);
         } catch (err) {
           recordHandlerError(report, parsed.data, err);
         }
@@ -792,28 +830,28 @@ export async function fuzzResource(
     await f.assert(
       f.asyncProperty(advArb, async (params) => {
         report.totalRuns++;
-        const ctx = createMockContext({
-          ...options.ctx,
+        const ctx = createDefinitionFuzzContext(def, options, {
           uri: new URL('fuzz://test/adversarial'),
         });
         try {
           const validated = paramsSchema.safeParse(params);
           if (!validated.success) return;
-          await withTimeout(def.handler(validated.data, ctx), timeout);
+          const result = await withTimeout(def.handler(validated.data, ctx), timeout);
+          def.output?.parse(result);
         } catch (err) {
-          recordLeak(report, params, err);
+          recordHandlerError(report, params, err);
         }
       }),
       { ...fcParams, numRuns: numAdversarial },
     );
   } else {
     report.totalRuns++;
-    const ctx = createMockContext({
-      ...options.ctx,
+    const ctx = createDefinitionFuzzContext(def, options, {
       uri: new URL('fuzz://test/no-params'),
     });
     try {
-      await withTimeout(def.handler({}, ctx), timeout);
+      const result = await withTimeout(def.handler({}, ctx), timeout);
+      def.output?.parse(result);
     } catch (err) {
       recordHandlerError(report, {}, err);
     }
@@ -868,12 +906,7 @@ export async function fuzzPrompt(
         if (!parsed.success) return;
         try {
           const messages = await withTimeout(def.generate(parsed.data), timeout);
-          if (!Array.isArray(messages)) {
-            report.crashes.push({
-              input: parsed.data,
-              error: new Error('generate() did not return array'),
-            });
-          }
+          validatePromptMessages(messages);
         } catch (err) {
           report.crashes.push({ input: parsed.data, error: err });
         }
@@ -888,9 +921,10 @@ export async function fuzzPrompt(
         try {
           const validated = argsSchema.safeParse(args);
           if (!validated.success) return;
-          await withTimeout(def.generate(validated.data), timeout);
-        } catch {
-          // Expected
+          const messages = await withTimeout(def.generate(validated.data), timeout);
+          validatePromptMessages(messages);
+        } catch (err) {
+          recordHandlerError(report, args, err);
         }
       }),
       { ...fcParams, numRuns: numAdversarial },
@@ -899,9 +933,7 @@ export async function fuzzPrompt(
     report.totalRuns++;
     try {
       const messages = await withTimeout(def.generate({} as any), timeout);
-      if (!Array.isArray(messages)) {
-        report.crashes.push({ input: {}, error: new Error('generate() did not return array') });
-      }
+      validatePromptMessages(messages);
     } catch (err) {
       report.crashes.push({ input: {}, error: err });
     }
@@ -915,25 +947,33 @@ export async function fuzzPrompt(
 // Helpers
 // ---------------------------------------------------------------------------
 
-function withTimeout<T>(promise: T | Promise<T>, ms: number): Promise<T> {
-  return Promise.race([
-    Promise.resolve(promise),
-    new Promise<never>((_, reject) =>
-      setTimeout(() => reject(new Error(`Fuzz timeout after ${ms}ms`)), ms),
-    ),
-  ]);
+function validatePromptMessages(messages: unknown): void {
+  if (!Array.isArray(messages)) throw new Error('generate() did not return array');
+  const result = specTypeSchemas.GetPromptResult['~standard'].validate({ messages });
+  if (result.issues)
+    throw new Error(
+      `generate() returned invalid prompt messages: ${JSON.stringify(result.issues)}`,
+    );
 }
 
-function generateOne<T>(arb: fc.Arbitrary<T>): T {
-  const f = getFc();
-  let value: T | undefined;
-  f.assert(
-    f.property(arb, (v) => {
-      value = v;
-      return false; // Stop after first
-    }),
-    { numRuns: 1, endOnFailure: true },
-  );
-  // biome-ignore lint/style/noNonNullAssertion: guaranteed set by fc.assert with numRuns:1
-  return value!;
+class FuzzTimeoutError extends Error {
+  constructor(ms: number) {
+    super(`Fuzz timeout after ${ms}ms`);
+  }
+}
+
+function withTimeout<T>(promise: T | Promise<T>, ms: number): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => reject(new FuzzTimeoutError(ms)), ms);
+    Promise.resolve(promise).then(
+      (value) => {
+        clearTimeout(timer);
+        resolve(value);
+      },
+      (error) => {
+        clearTimeout(timer);
+        reject(error);
+      },
+    );
+  });
 }

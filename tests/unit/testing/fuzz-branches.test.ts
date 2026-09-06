@@ -341,7 +341,7 @@ describe('fuzzTool failure accounting', () => {
     const report = await fuzzTool(definition, { numRuns: 1, numAdversarial: 0, seed: 45 });
 
     expect(report.crashes).toHaveLength(0);
-    expect(handler).toHaveBeenCalledTimes(3);
+    expect(handler).toHaveBeenCalledTimes(4);
     const calls = handler.mock.calls as unknown as Array<[Record<string, unknown>]>;
     expect(calls.some(([input]) => Object.hasOwn(input, 'constructor'))).toBe(true);
   });
@@ -400,7 +400,7 @@ describe('fuzzResource failure accounting', () => {
       params: z.object({
         value: z
           .string()
-          .regex(/^only$/)
+          .refine((value) => value === 'only')
           .describe('Exact value'),
       }),
       handler,
@@ -455,7 +455,7 @@ describe('fuzzPrompt failure accounting', () => {
       args: z.object({
         value: z
           .string()
-          .regex(/^only$/)
+          .refine((value) => value === 'only')
           .describe('Exact value'),
       }),
       generate,
