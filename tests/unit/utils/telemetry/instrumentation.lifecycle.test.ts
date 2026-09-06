@@ -3,7 +3,7 @@
  * @module tests/utils/telemetry/instrumentation.lifecycle.test
  */
 
-import { diag } from '@opentelemetry/api';
+import { DiagLogLevel, diag } from '@opentelemetry/api';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const otelState = vi.hoisted(() => ({
@@ -165,6 +165,7 @@ describe('OpenTelemetry instrumentation lifecycle', () => {
     mockConfig.openTelemetry.serviceVersion = '1.0.0';
     mockConfig.openTelemetry.tracesEndpoint = 'http://localhost:4318/v1/traces';
 
+    mockRuntimeCaps.isBun = false;
     mockRuntimeCaps.isNode = true;
     mockRuntimeCaps.isWorkerLike = false;
 
@@ -176,6 +177,7 @@ describe('OpenTelemetry instrumentation lifecycle', () => {
   });
 
   afterEach(() => {
+    vi.useRealTimers();
     vi.restoreAllMocks();
     for (const [key, value] of Object.entries(originalEnv)) {
       if (value === undefined) {
@@ -404,7 +406,8 @@ describe('OpenTelemetry instrumentation lifecycle', () => {
     expect(instrumentation.sdk).toBeNull();
   });
 
-  it('propagates shutdown failures and clears module state', async () => {
+  it('propagates shutdown failures and clears module state and deadline', async () => {
+    vi.useFakeTimers();
     const failure = new Error('shutdown failed');
     const errorSpy = vi.spyOn(diag, 'error').mockImplementation(() => true);
     const instrumentation = await import('@/utils/telemetry/instrumentation.js');
@@ -414,6 +417,7 @@ describe('OpenTelemetry instrumentation lifecycle', () => {
 
     await expect(instrumentation.shutdownOpenTelemetry(50)).rejects.toBe(failure);
     expect(errorSpy).toHaveBeenCalledWith('Error terminating OpenTelemetry SDK', failure);
+    expect(vi.getTimerCount()).toBe(0);
     expect(instrumentation.sdk).toBeNull();
   });
 
@@ -424,13 +428,47 @@ describe('OpenTelemetry instrumentation lifecycle', () => {
     expect(otelState.sdkShutdownSpy).not.toHaveBeenCalled();
   });
 
+  it('shares concurrent initialization and starts a fresh SDK after shutdown', async () => {
+    const instrumentation = await import('@/utils/telemetry/instrumentation.js');
+    await Promise.all(Array.from({ length: 8 }, () => instrumentation.initializeOpenTelemetry()));
+    expect(otelState.nodeSdkOptions).toHaveLength(1);
+    expect(otelState.sdkStartSpy).toHaveBeenCalledOnce();
+    const firstSdk = instrumentation.sdk;
+    await instrumentation.shutdownOpenTelemetry();
+    await instrumentation.initializeOpenTelemetry();
+    expect(otelState.sdkStartSpy).toHaveBeenCalledTimes(2);
+    expect(instrumentation.sdk).not.toBe(firstSdk);
+    await instrumentation.shutdownOpenTelemetry();
+  });
+
+  it('initializes NodeSDK under Bun when Node APIs are available', async () => {
+    mockRuntimeCaps.isBun = true;
+    const instrumentation = await import('@/utils/telemetry/instrumentation.js');
+    await instrumentation.initializeOpenTelemetry();
+    expect(otelState.sdkStartSpy).toHaveBeenCalledOnce();
+    expect(instrumentation.sdk).not.toBeNull();
+  });
+
+  it.each([
+    ['debug', DiagLogLevel.DEBUG],
+    ['WARN', DiagLogLevel.WARN],
+    ['not-a-level', DiagLogLevel.INFO],
+  ])('applies diagnostic level %s', async (configured, expected) => {
+    mockConfig.openTelemetry.logLevel = configured;
+    const setLogger = vi.spyOn(diag, 'setLogger').mockImplementation(() => true);
+    const { initializeOpenTelemetry } = await import('@/utils/telemetry/instrumentation.js');
+    await initializeOpenTelemetry();
+    expect(setLogger).toHaveBeenCalledWith(expect.any(Object), expected);
+  });
+
   it('times out long-running shutdown attempts', async () => {
     vi.useFakeTimers();
 
     const instrumentation = await import('@/utils/telemetry/instrumentation.js');
 
     await instrumentation.initializeOpenTelemetry();
-    otelState.sdkShutdownSpy.mockImplementationOnce(() => new Promise(() => {}));
+    const cleanup = Promise.withResolvers<void>();
+    otelState.sdkShutdownSpy.mockReturnValueOnce(cleanup.promise);
 
     const shutdownPromise = instrumentation.shutdownOpenTelemetry(25);
     const rejection = expect(shutdownPromise).rejects.toThrow('OpenTelemetry SDK shutdown timeout');
@@ -438,5 +476,7 @@ describe('OpenTelemetry instrumentation lifecycle', () => {
     await vi.advanceTimersByTimeAsync(25);
     await rejection;
     expect(instrumentation.sdk).toBeNull();
+    cleanup.resolve();
+    await cleanup.promise;
   });
 });

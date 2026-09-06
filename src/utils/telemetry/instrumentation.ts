@@ -254,24 +254,19 @@ export async function shutdownOpenTelemetry(timeoutMs = 5000): Promise<void> {
     return;
   }
 
+  let timer: ReturnType<typeof setTimeout> | undefined;
   try {
     const shutdownPromise = sdk.shutdown();
-    // Attach a no-op catch so the promise doesn't become an unhandled rejection
-    // if the timeout wins the race and sdk.shutdown() later rejects.
-    shutdownPromise.catch(() => {});
-    const { promise: timeoutPromise, reject } = Promise.withResolvers<never>();
-    const timer = setTimeout(
-      () => reject(new Error('OpenTelemetry SDK shutdown timeout')),
-      timeoutMs,
-    );
-
-    await Promise.race([shutdownPromise, timeoutPromise]);
-    clearTimeout(timer);
+    await new Promise<void>((resolve, reject) => {
+      timer = setTimeout(() => reject(new Error('OpenTelemetry SDK shutdown timeout')), timeoutMs);
+      shutdownPromise.then(resolve, reject);
+    });
     diag.info('OpenTelemetry SDK terminated successfully.');
   } catch (error) {
     diag.error('Error terminating OpenTelemetry SDK', error);
     throw error; // Propagate for caller handling
   } finally {
+    clearTimeout(timer);
     sdk = null;
     isOtelInitialized = false;
     initializationPromise = null;
