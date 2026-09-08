@@ -4,12 +4,14 @@
     "rootDir": ".",
     "tsBuildInfoFile": ".tsbuildinfo",
 
-    "types": [
-      "node",
-      "@cloudflare/workers-types",
-      "@cloudflare/vitest-pool-workers",
-      "@cloudflare/vitest-pool-workers/types"
-    ],
+    // Node globals only. `@cloudflare/workers-types` declares `Buffer` as an
+    // ambient `const … : any`, which collides with @types/node's and strips the
+    // encoding-aware `toString()` overloads off every Node Buffer in the
+    // program (#397). Worker types reach source through module imports —
+    // `import type { KVNamespace } from '@cloudflare/workers-types'` — which
+    // carry no globals; the workerd surface that genuinely needs the ambient
+    // set is checked by tsconfig.worker.json.
+    "types": ["node", "@cloudflare/vitest-pool-workers", "@cloudflare/vitest-pool-workers/types"],
 
     "paths": {
       "@/*": ["./src/*"],
@@ -17,5 +19,14 @@
     }
   },
   "include": ["src/**/*", "tests/**/*"],
-  "exclude": ["node_modules", "dist", "templates", "examples"]
+  // The workerd lane needs the ambient Cloudflare globals; tsconfig.worker.json
+  // checks it in its own program so those globals never reach this one.
+  "exclude": [
+    "node_modules",
+    "dist",
+    "templates",
+    "examples",
+    "tests/worker",
+    "tests/fixtures/worker-runtime.fixture.ts"
+  ]
 }

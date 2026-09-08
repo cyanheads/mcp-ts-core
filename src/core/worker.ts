@@ -13,6 +13,7 @@ import type {
   Ai,
   IncomingRequestCfProperties as CfProperties,
   D1Database,
+  ExecutionContext,
   KVNamespace,
   R2Bucket,
   ScheduledController,

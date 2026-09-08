@@ -140,8 +140,10 @@ export class WhisperProvider implements ISpeechProvider {
       throw invalidParams('Audio data is required', context);
     }
 
-    // Convert audio to Uint8Array if it's a base64 string
-    let audioBuffer: Uint8Array;
+    // Convert audio to Uint8Array if it's a base64 string. The view must be
+    // ArrayBuffer-backed to be a valid `BlobPart` below — a caller's array can
+    // be backed by a SharedArrayBuffer, so copy rather than adopt it.
+    let audioBuffer: Uint8Array<ArrayBuffer>;
     if (typeof options.audio === 'string') {
       try {
         audioBuffer = Uint8Array.fromBase64(options.audio);
@@ -149,7 +151,7 @@ export class WhisperProvider implements ISpeechProvider {
         throw invalidParams('Invalid base64 audio data', context);
       }
     } else {
-      audioBuffer = options.audio;
+      audioBuffer = Uint8Array.from(options.audio);
     }
 
     // Check file size (Whisper has a 25MB limit)

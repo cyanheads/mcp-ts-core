@@ -1,0 +1,33 @@
+{
+  // The workerd-side type environment, deliberately separate from the Node one
+  // (#397). `@cloudflare/workers-types` declares an ambient `Buffer` that
+  // collides with @types/node's when both load into one program, silently
+  // stripping the encoding-aware `toString()` overloads off every Node Buffer.
+  // Ambient globals are per-program, so separate programs are the fix: the root
+  // and build programs load Node globals, and this one loads the workerd
+  // globals the worker lane needs (`cloudflare:workers`, `KVNamespace`,
+  // `Fetcher`, `RequestInit.cf`), which exist only in that ambient file.
+  //
+  // `@/*` resolves to `dist/`, not `src/`: the worker tests consume the
+  // framework the way a deployed Worker does — through its published
+  // declarations — so no Node-typed source is recompiled under Cloudflare's
+  // globals. Build first; `bun run typecheck:worker` is the entry point.
+  "extends": "./tsconfig.base.json",
+  "compilerOptions": {
+    "rootDir": ".",
+    "noEmit": true,
+    "tsBuildInfoFile": ".tsbuildinfo.worker",
+    "types": [
+      "node",
+      "@cloudflare/workers-types",
+      "@cloudflare/vitest-pool-workers",
+      "@cloudflare/vitest-pool-workers/types"
+    ],
+    "paths": {
+      "@/*": ["./dist/*"],
+      "tests/*": ["./tests/*"]
+    }
+  },
+  "include": ["tests/worker/**/*", "tests/fixtures/worker-runtime.fixture.ts"],
+  "exclude": ["node_modules", "dist", "templates", "examples"]
+}

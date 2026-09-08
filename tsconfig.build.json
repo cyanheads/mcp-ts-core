@@ -2,7 +2,8 @@
   "extends": "./tsconfig.json",
   "compilerOptions": {
     "rootDir": "./src",
-    "types": ["node", "@cloudflare/workers-types"]
+    // Node globals only — see tsconfig.json's `types` note (#397).
+    "types": ["node"]
   },
   "include": ["src/**/*"],
   "exclude": ["node_modules", "dist", "templates", "examples", "src/**/*.test.ts"]

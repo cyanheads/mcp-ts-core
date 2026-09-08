@@ -24,7 +24,10 @@ if (typeof process !== 'undefined' && process.stderr?.write) {
 
 export default defineConfig({
   root: repoRoot,
-  resolve: { tsconfigPaths: true },
+  // This lane's sources are checked by tsconfig.worker.json (#397), where `@/`
+  // resolves to the built declarations — so the runtime alias to `src/` is
+  // stated here rather than inherited from whichever tsconfig includes them.
+  resolve: { alias: { '@/': `${repoRoot}/src/` }, tsconfigPaths: true },
   plugins: [
     cloudflareTest({
       main: './tests/fixtures/worker-runtime.fixture.ts',

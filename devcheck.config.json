@@ -18,6 +18,6 @@
     "ignorePatterns": ["examples"]
   },
   "outdated": {
-    "allowlist": ["@cloudflare/workers-types", "typescript-v6"]
+    "allowlist": ["typescript-v6"]
   }
 }
