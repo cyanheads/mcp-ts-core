@@ -4,7 +4,7 @@ description: >
   Land working-tree changes as logical commits — the work grouped by concern, topped by a release commit (version bump, changelog, regenerated artifacts) and an annotated tag. Verify, commit, tag. Stops at "committed and tagged locally" — no push, no publish. The release-and-publish skill picks up from here. Distilled from the git_wrapup_instructions protocol.
 metadata:
   author: cyanheads
-  version: "1.11"
+  version: "1.12"
   audience: external
   type: workflow
 ---
@@ -69,6 +69,7 @@ Every file that declares a version must be updated. Skip any file that doesn't e
 - `package.json` — `version`
 - `server.json` — top-level `version` AND every `packages[].version` entry
 - `manifest.json` (if present) — `version`. Verify `name` is the bare package name (e.g. `bls-mcp-server`, not `@cyanheads/bls-mcp-server`)
+- `.claude-plugin/plugin.json` and `.codex-plugin/plugin.json` (if present) — `version`. Packaging validation fails on a mismatch; `.codex-plugin/mcp.json` is connection config and carries none
 - `README.md` — version badge
 - `CLAUDE.md` / `AGENTS.md` — if they pin a version string
 - `Dockerfile` — OCI labels if they pin the version
@@ -129,7 +130,7 @@ bun run test:package       # only if the script exists — NOT part of test:all
 Do NOT `git add -A` into one commit. Group the working tree into a handful of logical commits — never one blob:
 
 1. **The work — one commit per concern.** A feature spanning multiple layers splits by layer: runtime/logic, linter/tooling, docs/skills. Unrelated changes (two separate fixes, an incidental doc tweak) are their own commits. Work commits do not carry the version.
-2. **The release commit — last, on top.** Version bumps (`package.json`, `server.json`, README badge, `CLAUDE.md`/`AGENTS.md`), the changelog entry, `CHANGELOG.md`, and `docs/tree.md` go in a single final commit that sits on top of the work stack — never mixed into a feature commit.
+2. **The release commit — last, on top.** Version bumps (`package.json`, `server.json`, `manifest.json`, the plugin manifests, README badge, `CLAUDE.md`/`AGENTS.md`), the changelog entry, `CHANGELOG.md`, and `docs/tree.md` go in a single final commit that sits on top of the work stack — never mixed into a feature commit.
 
 Stage each group explicitly, commit it, then move to the next — the release commit goes last:
 
@@ -230,7 +231,7 @@ If the working tree isn't clean or the tag doesn't point at HEAD, something went
 ## Checklist
 
 - [ ] Diff reviewed end-to-end before version bump
-- [ ] Version bumped in every declaring file (`package.json`, `server.json`, `manifest.json`, README badge, `CLAUDE.md`/`AGENTS.md` if they pin a version)
+- [ ] Version bumped in every declaring file (`package.json`, `server.json`, `manifest.json`, `.claude-plugin/plugin.json`, `.codex-plugin/plugin.json`, README badge, `CLAUDE.md`/`AGENTS.md` if they pin a version)
 - [ ] GH issues addressed by this work commented with what landed (if working from GH issues)
 - [ ] Docs updated for any new or changed features
 - [ ] Changelog authored at `changelog/<major.minor>.x/<version>.md`

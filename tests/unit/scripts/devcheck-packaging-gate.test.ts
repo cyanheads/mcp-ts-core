@@ -85,4 +85,37 @@ describe('devcheck Packaging gate (#343)', () => {
     expect(packagingLine(out)).not.toContain('SKIPPED');
     expect(out).toContain('Packaging alignment OK.');
   });
+
+  describe('plugin manifest as the only packaging input (#393)', () => {
+    /** Writes `.claude-plugin/plugin.json`; the scaffold's package.json is 0.0.0. */
+    const writePlugin = (version: string): void => {
+      mkdirSync(resolve(dir, '.claude-plugin'), { recursive: true });
+      writeFileSync(
+        resolve(dir, '.claude-plugin', 'plugin.json'),
+        `${JSON.stringify({
+          name: 'scaffold',
+          version,
+          description: 'A scaffolded server.',
+          mcpServers: { scaffold: { command: 'npx', args: ['-y', 'scaffold'] } },
+        })}\n`,
+      );
+    };
+
+    it('passes when the plugin version matches package.json', () => {
+      writePlugin('0.0.0');
+      const { code, out } = runPackagingCheck(dir);
+      expect(packagingLine(out)).not.toContain('SKIPPED');
+      expect(out).toContain('Packaging alignment OK.');
+      expect(code).toBe(0);
+    });
+
+    it('fails a plugin version left behind by a release', () => {
+      writePlugin('0.0.1');
+      const { code, out } = runPackagingCheck(dir);
+      expect(code).not.toBe(0);
+      expect(out).toContain('.claude-plugin/plugin.json');
+      expect(out).toContain('"0.0.1"');
+      expect(out).toContain('0.0.0');
+    });
+  });
 });

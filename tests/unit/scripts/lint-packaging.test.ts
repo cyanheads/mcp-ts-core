@@ -1,7 +1,8 @@
 /**
  * @fileoverview Tests for scripts/lint-packaging.ts — the `.mcpbignore` static
  * guards (checks 5–7, issues #172/#207), the post-bundle content check
- * (check 8, issues #230/#274), and the identity checks (check 9, issue #231).
+ * (check 8, issues #230/#274), the identity checks (check 9, issue #231), and
+ * the plugin marketplace manifests (check 10, issues #240/#393).
  * Imports the real implementation; no inline mirror.
  * @module tests/unit/scripts/lint-packaging.test
  */
@@ -289,14 +290,17 @@ describe('lint-packaging · manifest identity (check 9, manifest surface)', () =
 describe('lint-packaging · plugin marketplace manifests (check 10, #240)', () => {
   const UNSCOPED = 'pubmed-mcp-server';
   const FULL = '@cyanheads/pubmed-mcp-server';
+  const VERSION = '0.2.6';
 
   const validClaude = {
     name: UNSCOPED,
+    version: VERSION,
     description: 'Search and fetch PubMed articles.',
     mcpServers: { [UNSCOPED]: { command: 'npx', args: ['-y', FULL] } },
   };
   const validCodex = {
     name: UNSCOPED,
+    version: VERSION,
     description: 'Search and fetch PubMed articles.',
     mcpServers: './.codex-plugin/mcp.json',
     interface: {
@@ -312,12 +316,49 @@ describe('lint-packaging · plugin marketplace manifests (check 10, #240)', () =
       { claudePlugin: validClaude, codexPlugin: validCodex, codexMcp: validCodexMcp },
       UNSCOPED,
       FULL,
+      VERSION,
     );
     expect(errors).toEqual([]);
   });
 
   it('skips cleanly when no plugin manifests are present', () => {
-    expect(checkPluginManifests({}, UNSCOPED, FULL)).toEqual([]);
+    expect(checkPluginManifests({}, UNSCOPED, FULL, VERSION)).toEqual([]);
+  });
+
+  it('flags a plugin version left behind by a release (#393)', () => {
+    const errors = checkPluginManifests(
+      {
+        claudePlugin: { ...validClaude, version: '0.2.4' },
+        codexPlugin: { ...validCodex, version: '0.2.4' },
+      },
+      UNSCOPED,
+      FULL,
+      VERSION,
+    );
+    expect(errors).toHaveLength(2);
+    expect(errors[0]).toContain('.claude-plugin/plugin.json');
+    expect(errors[1]).toContain('.codex-plugin/plugin.json');
+    for (const error of errors) {
+      expect(error).toContain('"0.2.4"');
+      expect(error).toContain(VERSION);
+    }
+  });
+
+  it('flags a plugin manifest that declares no version', () => {
+    const { version: _omitted, ...noVersion } = validClaude;
+    const errors = checkPluginManifests({ claudePlugin: noVersion }, UNSCOPED, FULL, VERSION);
+    expect(errors).toHaveLength(1);
+    expect(errors[0]).toContain('has no "version"');
+    expect(errors[0]).toContain(VERSION);
+  });
+
+  it('skips version parity when package.json declares no version', () => {
+    const errors = checkPluginManifests(
+      { claudePlugin: { ...validClaude, version: '0.2.4' } },
+      UNSCOPED,
+      FULL,
+    );
+    expect(errors).toEqual([]);
   });
 
   it('flags an empty description in .claude-plugin/plugin.json', () => {
@@ -325,6 +366,7 @@ describe('lint-packaging · plugin marketplace manifests (check 10, #240)', () =
       { claudePlugin: { ...validClaude, description: '' } },
       UNSCOPED,
       FULL,
+      VERSION,
     );
     expect(errors).toHaveLength(1);
     expect(errors[0]).toContain('.claude-plugin/plugin.json');
@@ -341,6 +383,7 @@ describe('lint-packaging · plugin marketplace manifests (check 10, #240)', () =
       },
       UNSCOPED,
       FULL,
+      VERSION,
     );
     expect(errors.some((e) => e.includes('interface.shortDescription'))).toBe(true);
     expect(errors.some((e) => e.includes('interface.longDescription'))).toBe(true);
@@ -351,6 +394,7 @@ describe('lint-packaging · plugin marketplace manifests (check 10, #240)', () =
       { claudePlugin: { ...validClaude, mcpServers: { [UNSCOPED]: { args: ['-y', UNSCOPED] } } } },
       UNSCOPED,
       FULL,
+      VERSION,
     );
     expect(errors).toHaveLength(1);
     expect(errors[0]).toContain('install arg');
@@ -362,6 +406,7 @@ describe('lint-packaging · plugin marketplace manifests (check 10, #240)', () =
       { codexMcp: { [UNSCOPED]: { args: ['-y', UNSCOPED] } } },
       UNSCOPED,
       FULL,
+      VERSION,
     );
     expect(errors).toHaveLength(1);
     expect(errors[0]).toContain('.codex-plugin/mcp.json');
@@ -373,6 +418,7 @@ describe('lint-packaging · plugin marketplace manifests (check 10, #240)', () =
       { claudePlugin: { ...validClaude, name: FULL } },
       UNSCOPED,
       FULL,
+      VERSION,
     );
     expect(errors).toHaveLength(1);
     expect(errors[0]).toContain('"name"');
@@ -389,6 +435,7 @@ describe('lint-packaging · plugin marketplace manifests (check 10, #240)', () =
       },
       UNSCOPED,
       FULL,
+      VERSION,
     );
     expect(errors).toHaveLength(1);
     expect(errors[0]).toContain('interface.displayName');
@@ -399,6 +446,7 @@ describe('lint-packaging · plugin marketplace manifests (check 10, #240)', () =
       { codexMcp: { 'wrong-key': { args: ['-y', FULL] } } },
       UNSCOPED,
       FULL,
+      VERSION,
     );
     expect(errors.some((e) => e.includes('server key must be the unscoped'))).toBe(true);
   });
