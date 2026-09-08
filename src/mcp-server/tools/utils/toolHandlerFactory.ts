@@ -31,7 +31,7 @@ import { type ResourceSubscriptions, selectNotifiers } from '@/mcp-server/notifi
 import { withRequiredScopes } from '@/mcp-server/transports/auth/lib/authUtils.js';
 import { resolveSessionMode } from '@/mcp-server/types.js';
 import type { StorageService } from '@/storage/core/StorageService.js';
-import { type JsonRpcErrorCode, McpError } from '@/types-global/errors.js';
+import { JsonRpcErrorCode, McpError } from '@/types-global/errors.js';
 import { ErrorHandler } from '@/utils/internal/error-handler/errorHandler.js';
 import type { Logger } from '@/utils/internal/logger.js';
 import { measureToolExecution } from '@/utils/internal/performance.js';
@@ -141,6 +141,24 @@ export function buildToolErrorResult(
       },
     },
   };
+}
+
+/**
+ * Renders an argument-validation failure the way the MCP SDK renders its own,
+ * so the readable diagnostic — the offending key or field, and why it failed —
+ * is unchanged for clients that read `content[]` text. The framework owns this
+ * rejection (see `deferInputValidation`) purely so it can also carry
+ * `structuredContent.error`.
+ */
+export function formatInputValidationMessage(toolName: string, error: ZodError): string {
+  const detail = error.issues
+    .map((issue) =>
+      issue.path.length > 0
+        ? `${issue.path.map(String).join('.')}: ${issue.message}`
+        : issue.message,
+    )
+    .join(', ');
+  return `Input validation error: Invalid arguments for tool ${toolName}: ${detail}`;
 }
 
 /**
@@ -507,8 +525,19 @@ export function createToolHandler(
         withRequiredScopes(def.auth, appContext);
       }
 
-      // Validate input
-      const validatedInput = def.input.parse(input);
+      // Validate input. The SDK's own argument check is deliberately deferred
+      // to here (see `deferInputValidation`) so a rejection carries the
+      // structured error envelope; the message and `InvalidParams`
+      // classification match what the SDK produced before (#377).
+      const parsedInput = def.input.safeParse(input);
+      if (!parsedInput.success) {
+        throw new McpError(
+          JsonRpcErrorCode.InvalidParams,
+          formatInputValidationMessage(def.name, parsedInput.error),
+          { issues: parsedInput.error.issues },
+        );
+      }
+      const validatedInput = parsedInput.data;
 
       // Read by the success-attributes thunk below, which the measurement
       // evaluates after the callback settles.

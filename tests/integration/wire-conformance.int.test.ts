@@ -18,11 +18,15 @@ import { installResourceSubscriptions } from '@/mcp-server/resources/resourceSub
 import { resource } from '@/mcp-server/resources/utils/resourceDefinition.js';
 import { ToolRegistry } from '@/mcp-server/tools/tool-registration.js';
 import { tool } from '@/mcp-server/tools/utils/toolDefinition.js';
+import { advertisedOutputSchema } from '@/mcp-server/tools/utils/toolHandlerFactory.js';
 import { MODERN_PROTOCOL_REVISION } from '@/mcp-server/types.js';
 import { StorageService } from '@/storage/core/StorageService.js';
 import { InMemoryProvider } from '@/storage/providers/inMemory/inMemoryProvider.js';
 import { JsonRpcErrorCode, McpError } from '@/types-global/errors.js';
 import { logger } from '@/utils/internal/logger.js';
+
+/** Proves an argument rejection never reaches the handler (#377). */
+let handlerCalls = 0;
 
 const searchTool = tool('wire_search', {
   description: 'Searches for things.',
@@ -43,6 +47,7 @@ const searchTool = tool('wire_search', {
     },
   ],
   handler(input, ctx) {
+    handlerCalls++;
     if (input.query === 'boom') throw ctx.fail('index_missing');
     // Stands in for a service throwing below the handler — the SQL gate, a
     // parser — with a `data.reason` the tool's own contract never declared.
@@ -153,6 +158,69 @@ describe('Phase 1 wire conformance', () => {
       expect(result.isError).toBe(true);
       const text = (result.content as Array<{ text: string }>)[0]?.text ?? '';
       expect(text).toContain('Unrecognized key: "limt"');
+    });
+  });
+
+  describe('argument-validation error envelope (#377)', () => {
+    const rejections: Array<[label: string, args: Record<string, unknown>]> = [
+      ['an unknown root key', { query: 'ok', salt: true }],
+      ['a wrong argument type', { query: 123 }],
+      ['a missing required field', {}],
+      ['a failed constraint', { query: '' }],
+    ];
+
+    it.each(rejections)('carries a structured error for %s', async (_label, args) => {
+      const client = await session();
+      handlerCalls = 0;
+
+      const result = await client.callTool({ name: 'wire_search', arguments: args });
+
+      expect(result.isError).toBe(true);
+      const error = (result.structuredContent as { error?: { code?: number; message?: string } })
+        ?.error;
+      expect(error?.code).toBe(JsonRpcErrorCode.InvalidParams);
+      expect(error?.message?.length ?? 0).toBeGreaterThan(0);
+      // The rejection is the schema's, not the handler's — it never ran.
+      expect(handlerCalls).toBe(0);
+    });
+
+    it('keeps the readable diagnostic in content[] alongside the envelope', async () => {
+      const client = await session();
+      const result = await client.callTool({
+        name: 'wire_search',
+        arguments: { query: 'ok', salt: true },
+      });
+
+      const text = (result.content as Array<{ text: string }>)[0]?.text ?? '';
+      expect(text).toContain('Invalid arguments for tool wire_search');
+      expect(text).toContain('salt');
+    });
+
+    it('emits an envelope the advertised outputSchema accepts', async () => {
+      const client = await session();
+      const { tools } = await client.listTools();
+      const advertised = (tools[0] as { outputSchema?: Record<string, unknown> }).outputSchema;
+      // `tools/list` publishes the JSON Schema projection of this very schema,
+      // so parsing against the source is the same contract without pulling in
+      // a JSON Schema validator. wire_search declares domain error reasons, so
+      // this is the widened shape a contract-carrying tool advertises.
+      expect(advertised?.properties).toHaveProperty('error');
+
+      const result = await client.callTool({ name: 'wire_search', arguments: {} });
+      expect(advertisedOutputSchema(searchTool).safeParse(result.structuredContent).success).toBe(
+        true,
+      );
+    });
+
+    it('still parses valid arguments and applies declared defaults', async () => {
+      const client = await session();
+      handlerCalls = 0;
+
+      const result = await client.callTool({ name: 'wire_search', arguments: { query: 'ok' } });
+
+      expect(result.isError).not.toBe(true);
+      expect(result.structuredContent).toMatchObject({ hits: ['ok'], total: 1 });
+      expect(handlerCalls).toBe(1);
     });
   });
 

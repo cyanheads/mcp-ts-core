@@ -76,8 +76,10 @@ describe('modern wire contracts without initialize', () => {
     });
     expect(called.result.isError).toBe(true);
     expect(called.result.content[0].text).toContain('typo');
-    // #377: SDK input failures currently omit the framework's structured error envelope.
-    expect(called.result.structuredContent).toBeUndefined();
+    // #377: an argument rejection carries the framework's structured envelope,
+    // classified as InvalidParams, on this runtime as on every other.
+    expect(called.result.structuredContent.error).toMatchObject({ code: -32602 });
+    expect(called.result.structuredContent.error.message).toContain('typo');
   });
 
   it('lists and reads a resource through the Worker transport', async () => {

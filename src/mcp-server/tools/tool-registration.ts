@@ -5,6 +5,7 @@
 import type { McpServer, ServerNotifier, ToolCallback } from '@modelcontextprotocol/server';
 
 import type { ResourceSubscriptions } from '@/mcp-server/notifications.js';
+import { deferInputValidation } from '@/mcp-server/tools/utils/deferredInputSchema.js';
 import { getDisabledMetadata } from '@/mcp-server/tools/utils/disabled-tool.js';
 import type { AnyToolDefinition } from '@/mcp-server/tools/utils/toolDefinition.js';
 import {
@@ -132,13 +133,19 @@ export class ToolRegistry {
         const handler = createToolHandler(tool, this.services, notifiers);
         const title = tool.title ?? tool.annotations?.title ?? this.deriveTitleFromName(tool.name);
 
+        // Advertised verbatim; the same schema rejects the same arguments one
+        // layer down, where a rejection can carry the framework's structured
+        // error envelope (#377). The SDK reads it through `~standard` like any
+        // other Standard Schema, but types the parameter as Zod.
+        const inputSchema = deferInputValidation(tool.input) as unknown as typeof tool.input;
+
         // Type assertion required: SDK's conditional types don't resolve with erased generics
         server.registerTool(
           tool.name,
           {
             title,
             description: tool.description,
-            inputSchema: tool.input,
+            inputSchema,
             outputSchema: advertisedOutputSchema(tool),
             ...(tool.annotations && { annotations: tool.annotations }),
             ...(tool._meta && { _meta: tool._meta }),

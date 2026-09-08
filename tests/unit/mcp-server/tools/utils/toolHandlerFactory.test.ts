@@ -304,10 +304,13 @@ describe('createToolHandler', () => {
       expect(result.isError).toBe(true);
       // Input validation errors flow through the same error-shaping path:
       // structuredContent.error carries the code, message, and ZodError issues.
+      // Argument rejection classifies as InvalidParams — the framework runs the
+      // check the SDK used to, and keeps the SDK's classification (#377).
       const sc = result.structuredContent as {
-        error: { code: number; data?: { issues?: unknown[] } };
+        error: { code: number; data?: { issues?: unknown[] }; message: string };
       };
-      expect(sc.error.code).toBe(JsonRpcErrorCode.ValidationError);
+      expect(sc.error.code).toBe(JsonRpcErrorCode.InvalidParams);
+      expect(sc.error.message).toContain('Invalid arguments for tool');
       expect(sc.error.data?.issues).toBeDefined();
     });
 

@@ -453,7 +453,7 @@ describe('Tool Handler Pipeline Fuzz Tests', () => {
         expect(result.content).toBeDefined();
         expect(result.isError).toBe(true);
         expect(result.structuredContent).toMatchObject({
-          error: { code: JsonRpcErrorCode.ValidationError },
+          error: { code: JsonRpcErrorCode.InvalidParams },
         });
       }
     });
@@ -514,7 +514,7 @@ describe('Tool Handler Pipeline Fuzz Tests', () => {
       const result = await call(handler, deep);
       expect(result.isError).toBe(true);
       expect(result.structuredContent).toMatchObject({
-        error: { code: JsonRpcErrorCode.ValidationError },
+        error: { code: JsonRpcErrorCode.InvalidParams },
       });
       // Strict input rejects the undeclared `nested` key; the pipeline still
       // answers with a shaped error result rather than throwing.

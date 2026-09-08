@@ -10,6 +10,20 @@ import { tool } from '@/mcp-server/tools/utils/toolDefinition.js';
 import type { HandlerFactoryServices } from '@/mcp-server/tools/utils/toolHandlerFactory.js';
 import { JsonRpcErrorCode } from '@/types-global/errors.js';
 
+/**
+ * Input schemas reach `registerTool` through the validation-deferring wrapper
+ * (#377), so what they advertise is a JSON Schema projection rather than a Zod
+ * `.shape` — this reads it the way the SDK does.
+ */
+function advertisedInput(schema: unknown): Record<string, unknown> {
+  const standard = (
+    schema as {
+      '~standard': { jsonSchema: { input: (o: { target: string }) => Record<string, unknown> } };
+    }
+  )['~standard'];
+  return standard.jsonSchema.input({ target: 'draft-2020-12' });
+}
+
 // ---------------------------------------------------------------------------
 // Mocks
 // ---------------------------------------------------------------------------
@@ -312,7 +326,7 @@ describe('ToolRegistry', () => {
       const call = mockServer.registerTool.mock.calls[0];
       expect(call[1].inputSchema).toBeDefined();
       expect(call[1].outputSchema).toBeDefined();
-      expect(call[1].inputSchema.shape.name).toBeDefined();
+      expect(advertisedInput(call[1].inputSchema).properties).toHaveProperty('name');
       expect(call[1].outputSchema.shape.greeting).toBeDefined();
     });
 
@@ -558,8 +572,9 @@ describe('ToolRegistry', () => {
 
       expect(mockServer.registerTool).toHaveBeenCalledTimes(1);
       const call = mockServer.registerTool.mock.calls[0];
-      expect(call[1].inputSchema.shape.user).toBeDefined();
-      expect(call[1].inputSchema.shape.settings).toBeDefined();
+      const advertised = advertisedInput(call[1].inputSchema).properties;
+      expect(advertised).toHaveProperty('user');
+      expect(advertised).toHaveProperty('settings');
     });
   });
 });
