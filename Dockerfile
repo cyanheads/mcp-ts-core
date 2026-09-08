@@ -46,7 +46,7 @@ ENV NODE_ENV=production
 
 # OCI image metadata (https://github.com/opencontainers/image-spec/blob/main/annotations.md)
 LABEL org.opencontainers.image.title="mcp-ts-core"
-LABEL org.opencontainers.image.description="TypeScript framework for building MCP servers with declarative tools/resources, pluggable auth, multi-backend storage, OpenTelemetry observability, and Cloudflare Workers support."
+LABEL org.opencontainers.image.description="Agent-native TypeScript framework for MCP servers. Includes runtime infrastructure and agent skills for building, testing, and shipping servers."
 LABEL org.opencontainers.image.source="https://github.com/cyanheads/mcp-ts-core"
 LABEL org.opencontainers.image.licenses="Apache-2.0"
 LABEL io.modelcontextprotocol.server.name="io.github.cyanheads/mcp-ts-core"
