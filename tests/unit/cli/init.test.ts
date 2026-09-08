@@ -156,7 +156,14 @@ describe('CLI init command', () => {
     expect(packageJson).not.toContain('{{PACKAGE_NAME}}');
     expect(packageJson).not.toContain('{{FRAMEWORK_VERSION}}');
     expect(packageJson).toContain('"test:coverage": "vitest run --coverage"');
-    expect(packageJson).toContain('"@vitest/coverage-istanbul": "4.1.10"');
+    // devDependencies carry no placeholders; the scaffold must preserve the template's pins.
+    const templateDevDeps: Record<string, string> = JSON.parse(
+      readFileSync(
+        join(import.meta.dirname, '..', '..', '..', 'templates', 'package.json'),
+        'utf-8',
+      ),
+    ).devDependencies;
+    expect(JSON.parse(packageJson).devDependencies).toEqual(templateDevDeps);
     expect(vitestConfig).toContain("name: 'smoke'");
     expect(vitestConfig).toContain("name: 'integration'");
     expect(vitestConfig).toContain("name: 'fuzz'");
