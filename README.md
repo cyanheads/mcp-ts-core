@@ -18,11 +18,11 @@
 
 ## Build AI tools for anything you can describe.
 
-Connect an API, a dataset, or a workflow to an AI agent through the Model Context Protocol (MCP). `@cyanheads/mcp-ts-core` gives you and your agent the foundation to build that server, with auth, storage, logging, and deployment support & skills already available.
+Connect an API, a dataset, or a workflow to an AI agent through the Model Context Protocol (MCP). Your project holds the domain code; `@cyanheads/mcp-ts-core` provides the auth, storage, logging, and deployment underneath it.
 
 **Agent-native means your agent knows what to do.** Every scaffold includes framework documentation and Agent Skills: reusable workflows for designing tools, writing tests, reviewing security, and publishing releases. You decide what the server should do; your agent has the patterns and checks to help implement it.
 
-Your project holds the domain code. The framework stays a dependency, so infrastructure fixes arrive through package upgrades. Run the `maintenance` skill to have your agent update the framework, grab the latest skills, and integrate them into your project.
+**The framework stays a dependency.** Infrastructure fixes arrive through package upgrades — run the `maintenance` skill and your agent updates core, pulls the latest skills, and integrates them into your project.
 
 ## Quick start
 
@@ -172,7 +172,7 @@ export const itemData = resource('items://{itemId}', {
   params: z.object({
     itemId: z.string().describe('Item ID'),
   }),
-  async handler(params, ctx) {
+  async handler(params) {
     return await getItem(params.itemId);
   },
 });
@@ -274,7 +274,9 @@ Handlers receive a shared `Context`, with typed helpers for declared enrichment 
 | `ctx.requestInput` | `(spec) => never` | Suspend and ask the caller for more input; the handler is re-entered with the answers |
 | `ctx.inputs` | `ContextInputs` | Reader over a retried request's responses — `.accepted()`, `.view()`, `.state()`, `.dropped` |
 | `ctx.enrich` | `Enrich` / `TypedEnrich<E>` | Add declared result context to structured output and text content |
+| `ctx.content` | `ContentCollect` | Attach image/audio blocks to `content[]` — `content.image(data, mimeType)`, `content.audio(...)`, or a raw block |
 | `ctx.fail` | `(reason, msg?, data?) => McpError` | Creates an error for `throw ctx.fail(...)`; available with a declared `errors` contract |
+| `ctx.recoveryFor` | `(reason) => object` | Resolves a declared recovery hint to `{ recovery: { hint } }` — spread into `ctx.fail`'s data argument |
 | `ctx.signal` | `AbortSignal` | Cancellation signal |
 | `ctx.notifyResourceUpdated` | `Function?` | Notify subscribed clients a resource changed |
 | `ctx.notifyResourceListChanged` | `Function?` | Notify clients the resource list changed |
@@ -282,6 +284,9 @@ Handlers receive a shared `Context`, with typed helpers for declared enrichment 
 | `ctx.notifyToolListChanged` | `Function?` | Notify clients the tool list changed |
 | `ctx.requestId` | `string` | Unique request ID |
 | `ctx.tenantId` | `string?` | Tenant ID (JWT `tid` claim, or `'default'` for stdio and HTTP+`MCP_AUTH_MODE=none`) |
+| `ctx.auth` | `AuthContext?` | Token claims and scopes when the request is authenticated |
+| `ctx.sessionId` | `string?` | HTTP session ID in stateful/`auto` session mode — a scoping key, not an authorization principal |
+| `ctx.uri` | `URL?` | The parsed resource URI; set in resource handlers only |
 
 ### Subpath exports
 
@@ -295,6 +300,7 @@ import { OpenRouterProvider, GraphService } from '@cyanheads/mcp-ts-core/service
 import type { DataCanvas, CanvasInstance } from '@cyanheads/mcp-ts-core/canvas';
 import { validateDefinitions } from '@cyanheads/mcp-ts-core/linter';
 import { createMockContext } from '@cyanheads/mcp-ts-core/testing';
+import { mcpTest, toolContractSuite } from '@cyanheads/mcp-ts-core/testing/vitest';
 import { fuzzTool, fuzzResource, fuzzPrompt } from '@cyanheads/mcp-ts-core/testing/fuzz';
 ```
 
@@ -316,6 +322,7 @@ The `examples/` directory contains a reference server consuming core through pub
 
 ```ts
 import { createMockContext } from '@cyanheads/mcp-ts-core/testing';
+import { mcpTest, toolContractSuite } from '@cyanheads/mcp-ts-core/testing/vitest';
 import { myTool } from '@/mcp-server/tools/definitions/my-tool.tool.js';
 
 const ctx = createMockContext();
