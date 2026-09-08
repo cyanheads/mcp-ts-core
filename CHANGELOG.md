@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.12.7](changelog/0.12.x/0.12.7.md) — 2026-09-08
+
+Argument rejections now carry the structured error envelope, classified as InvalidParams, on every transport. The Node and workerd type environments are checked as separate TypeScript programs, which lifts the @cloudflare/workers-types hold.
+
 ## [0.12.6](changelog/0.12.x/0.12.6.md) — 2026-09-06 · 🛡️ Security
 
 Five source fixes: detached storage writes after a capacity sweep, an unevictable empty rate-limit key, a module-load cursor key that broke standalone Worker startup, fuzz that never reached pattern-validated handlers, and a leaked shutdown deadline. The test suite trades type-only assertions for behavior and gains three lanes.

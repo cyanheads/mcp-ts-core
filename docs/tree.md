@@ -1,6 +1,6 @@
 # mcp-ts-core - Directory Structure
 
-Generated on: 2026-09-06 06:36:05
+Generated on: 2026-09-08 09:58:03
 
 ```text
 mcp-ts-core/
@@ -315,6 +315,7 @@ mcp-ts-core/
 │   │   │   └── resourceSubscriptions.ts
 │   │   ├── tools/
 │   │   │   ├── utils/
+│   │   │   │   ├── deferredInputSchema.ts
 │   │   │   │   ├── disabled-tool.ts
 │   │   │   │   ├── headerParam.ts
 │   │   │   │   ├── schemaShape.ts
@@ -746,6 +747,7 @@ mcp-ts-core/
 │   │   │   │   └── resource-registration.test.ts
 │   │   │   ├── tools/
 │   │   │   │   ├── utils/
+│   │   │   │   │   ├── deferredInputSchema.test.ts
 │   │   │   │   │   ├── header-param.test.ts
 │   │   │   │   │   ├── schemaShape.test.ts
 │   │   │   │   │   ├── toolDefinition.test.ts
@@ -793,7 +795,8 @@ mcp-ts-core/
 │   │   ├── packaging/
 │   │   │   ├── dockerfile.test.ts
 │   │   │   ├── export-map.test.ts
-│   │   │   └── optional-peer-deps.test.ts
+│   │   │   ├── optional-peer-deps.test.ts
+│   │   │   └── type-environment-isolation.test.ts
 │   │   ├── public-api/
 │   │   │   └── type-contract.test.ts
 │   │   ├── scripts/
@@ -802,6 +805,7 @@ mcp-ts-core/
 │   │   │   ├── check-skill-versions.test.ts
 │   │   │   ├── clean-mcpb.test.ts
 │   │   │   ├── devcheck-git-guard.test.ts
+│   │   │   ├── devcheck-outdated-alias.test.ts
 │   │   │   ├── devcheck-packaging-gate.test.ts
 │   │   │   ├── devdocs.test.ts
 │   │   │   ├── lint-packaging.test.ts
@@ -842,6 +846,8 @@ mcp-ts-core/
 │   │   │       └── providers/
 │   │   │           ├── elevenlabs.provider.test.ts
 │   │   │           └── whisper.provider.test.ts
+│   │   ├── skills/
+│   │   │   └── field-test-helper.test.ts
 │   │   ├── storage/
 │   │   │   ├── core/
 │   │   │   │   ├── storageFactory.test.ts
@@ -987,6 +993,7 @@ mcp-ts-core/
 ├── tsconfig.build.json
 ├── tsconfig.json
 ├── tsconfig.scripts.json
+├── tsconfig.worker.json
 ├── tsdoc.json
 ├── typedoc.json
 ├── vitest.config.base.mjs
