@@ -11,6 +11,7 @@ import type {
   ListResult,
   StorageOptions,
 } from '@/storage/core/IStorageProvider.js';
+import { escapeLikePattern } from '@/storage/core/providerHelpers.js';
 import { decodeCursor, encodeCursor } from '@/storage/core/storageValidation.js';
 import type { Database, Json } from '@/storage/providers/supabase/supabase.types.js';
 import { ErrorHandler } from '@/utils/internal/error-handler/errorHandler.js';
@@ -19,11 +20,6 @@ import type { RequestContext } from '@/utils/internal/requestContext.js';
 
 const TABLE_NAME = 'kv_store';
 const DEFAULT_LIST_LIMIT = 1000;
-
-/** Escapes SQL LIKE wildcard characters (`%` and `_`) in a prefix string. */
-function escapeLikePattern(prefix: string): string {
-  return prefix.replace(/[%_\\]/g, '\\$&');
-}
 
 export class SupabaseProvider implements IStorageProvider {
   constructor(private readonly client: SupabaseClient<Database>) {}

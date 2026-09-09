@@ -11,6 +11,7 @@ import type {
   ListResult,
   StorageOptions,
 } from '@/storage/core/IStorageProvider.js';
+import { escapeLikePattern } from '@/storage/core/providerHelpers.js';
 import { decodeCursor, encodeCursor } from '@/storage/core/storageValidation.js';
 import {
   configurationError,
@@ -23,11 +24,6 @@ import { logger } from '@/utils/internal/logger.js';
 import { type RequestContext, withExtra } from '@/utils/internal/requestContext.js';
 
 const DEFAULT_LIST_LIMIT = 1000;
-
-/** Escapes SQL LIKE wildcard characters (`%` and `_`) in a prefix string. */
-function escapeLikePattern(prefix: string): string {
-  return prefix.replace(/[%_\\]/g, '\\$&');
-}
 
 /**
  * Cloudflare D1 storage provider implementation.

@@ -11,7 +11,12 @@ import type {
   ListResult,
   StorageOptions,
 } from '@/storage/core/IStorageProvider.js';
-import { decodeCursor, encodeCursor } from '@/storage/core/storageValidation.js';
+import {
+  deleteManyViaDelete,
+  getManyViaGet,
+  paginateSortedKeys,
+} from '@/storage/core/providerHelpers.js';
+import { decodeCursor } from '@/storage/core/storageValidation.js';
 import { configurationError, JsonRpcErrorCode, McpError } from '@/types-global/errors.js';
 import { logger } from '@/utils/internal/logger.js';
 import { type RequestContext, withExtra } from '@/utils/internal/requestContext.js';
@@ -206,34 +211,10 @@ export class InMemoryProvider implements IStorageProvider {
     }
     if (tenantStore.size === 0) this.store.delete(tenantId);
 
-    // Sort for consistent pagination
     allKeys.sort();
-
-    // Apply pagination with opaque cursors
-    const limit = options?.limit ?? DEFAULT_LIST_LIMIT;
-    let startIndex = 0;
-
-    if (lastKey) {
-      const cursorIndex = allKeys.indexOf(lastKey);
-      if (cursorIndex !== -1) {
-        startIndex = cursorIndex + 1;
-      } else {
-        // Key was deleted between pages; resume from the next key after it
-        const insertionPoint = allKeys.findIndex((k) => k > lastKey);
-        startIndex = insertionPoint === -1 ? allKeys.length : insertionPoint;
-      }
-    }
-
-    const paginatedKeys = allKeys.slice(startIndex, startIndex + limit);
-    const nextCursor =
-      startIndex + limit < allKeys.length && paginatedKeys.length > 0
-        ? encodeCursor(paginatedKeys[paginatedKeys.length - 1] as string, tenantId)
-        : undefined;
-
-    return Promise.resolve({
-      keys: paginatedKeys,
-      nextCursor,
-    });
+    return Promise.resolve(
+      paginateSortedKeys(allKeys, tenantId, lastKey, options?.limit ?? DEFAULT_LIST_LIMIT),
+    );
   }
 
   async getMany<T>(
@@ -247,17 +228,7 @@ export class InMemoryProvider implements IStorageProvider {
 
     logger.debug(`[InMemoryProvider] Getting ${keys.length} keys for tenant: ${tenantId}`, context);
 
-    // Parallel fetch for better performance
-    const promises = keys.map((key) => this.get<T>(tenantId, key, context));
-    const values = await Promise.all(promises);
-
-    const results = new Map<string, T>();
-    keys.forEach((key, i) => {
-      const value = values[i];
-      if (value !== null) {
-        results.set(key, value as T);
-      }
-    });
+    const results = await getManyViaGet(keys, (key) => this.get<T>(tenantId, key, context));
 
     logger.debug(
       `[InMemoryProvider] Retrieved ${results.size}/${keys.length} keys for tenant: ${tenantId}`,
@@ -320,10 +291,9 @@ export class InMemoryProvider implements IStorageProvider {
       context,
     );
 
-    // Parallel delete for better performance
-    const promises = keys.map((key) => this.delete(tenantId, key, context));
-    const results = await Promise.all(promises);
-    const deletedCount = results.filter((deleted) => deleted).length;
+    const deletedCount = await deleteManyViaDelete(keys, (key) =>
+      this.delete(tenantId, key, context),
+    );
 
     logger.debug(
       `[InMemoryProvider] Deleted ${deletedCount}/${keys.length} keys for tenant: ${tenantId}`,

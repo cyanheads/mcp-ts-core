@@ -19,7 +19,16 @@ import type {
   ListResult,
   StorageOptions,
 } from '@/storage/core/IStorageProvider.js';
-import { decodeCursor, encodeCursor, validateTenantId } from '@/storage/core/storageValidation.js';
+import {
+  type DecodedEnvelope,
+  decodeEnvelope,
+  deleteManyViaDelete,
+  encodeEnvelope,
+  getManyViaGet,
+  paginateSortedKeys,
+  setManyViaSet,
+} from '@/storage/core/providerHelpers.js';
+import { decodeCursor, validateTenantId } from '@/storage/core/storageValidation.js';
 import {
   configurationError,
   JsonRpcErrorCode,
@@ -32,13 +41,6 @@ import { sanitization } from '@/utils/security/sanitization.js';
 import { isErrorWithCode } from '@/utils/types/guards.js';
 
 const DEFAULT_LIST_LIMIT = 1000;
-
-type FileEnvelope = {
-  __mcp: { v: 1; expiresAt?: number };
-  value: unknown;
-};
-
-const FILE_ENVELOPE_VERSION = 1;
 
 export class FileSystemProvider implements IStorageProvider {
   private readonly storagePath: string;
@@ -85,18 +87,7 @@ export class FileSystemProvider implements IStorageProvider {
     return filePath;
   }
 
-  private buildEnvelope(value: unknown, options?: StorageOptions): FileEnvelope {
-    // Fix: Check for undefined instead of truthy to handle ttl=0 correctly
-    const expiresAt = options?.ttl !== undefined ? Date.now() + options.ttl * 1000 : undefined;
-    return {
-      __mcp: {
-        v: FILE_ENVELOPE_VERSION,
-        ...(expiresAt !== undefined ? { expiresAt } : {}),
-      },
-      value,
-    };
-  }
-
+  /** Decodes a stored envelope; an expired file is removed best-effort and reads as `null`. */
   private async parseAndValidate<T>(
     raw: string,
     tenantId: string,
@@ -104,25 +95,9 @@ export class FileSystemProvider implements IStorageProvider {
     filePath: string,
     context: RequestContext,
   ): Promise<T | null> {
+    let decoded: DecodedEnvelope<T>;
     try {
-      const parsed: unknown = JSON.parse(raw);
-      // Envelope-aware parsing
-      if (parsed && typeof parsed === 'object' && '__mcp' in parsed) {
-        const env = parsed as FileEnvelope;
-        const expiresAt = env.__mcp?.expiresAt;
-        if (expiresAt && Date.now() > expiresAt) {
-          // Expired: best-effort delete and return null
-          try {
-            await rm(filePath);
-          } catch {
-            // ignore
-          }
-          return null;
-        }
-        return env.value as T;
-      }
-      // Legacy: return parsed directly
-      return parsed as T;
+      decoded = decodeEnvelope<T>(raw);
     } catch (error: unknown) {
       throw new McpError(
         JsonRpcErrorCode.SerializationError,
@@ -130,6 +105,11 @@ export class FileSystemProvider implements IStorageProvider {
         { ...context, error },
       );
     }
+    if (decoded.kind === 'expired') {
+      await rm(filePath, { force: true }).catch(() => undefined);
+      return null;
+    }
+    return decoded.value;
   }
 
   async get<T>(tenantId: string, key: string, context: RequestContext): Promise<T | null> {
@@ -164,7 +144,7 @@ export class FileSystemProvider implements IStorageProvider {
     const filePath = this.getFilePath(tenantId, key, context);
     return await ErrorHandler.tryCatch(
       async () => {
-        const envelope = this.buildEnvelope(value, options);
+        const envelope = encodeEnvelope(value, options);
         const content = JSON.stringify(envelope, null, 2);
         mkdirSync(path.dirname(filePath), { recursive: true });
         await writeFile(filePath, content, 'utf-8');
@@ -244,31 +224,16 @@ export class FileSystemProvider implements IStorageProvider {
           } catch (_e) {}
         }
 
-        // Sort for consistent pagination
         validKeys.sort();
-
-        // Apply pagination with opaque cursors
-        const limit = options?.limit ?? DEFAULT_LIST_LIMIT;
-        let startIndex = 0;
-
-        if (options?.cursor) {
-          // Decode and validate cursor
-          const lastKey = decodeCursor(options.cursor, tenantId, context);
-          const cursorIndex = validKeys.indexOf(lastKey);
-          if (cursorIndex !== -1) {
-            startIndex = cursorIndex + 1;
-          } else {
-            // Key was deleted between pages; resume from the next key after it
-            const insertionPoint = validKeys.findIndex((k) => k > lastKey);
-            startIndex = insertionPoint === -1 ? validKeys.length : insertionPoint;
-          }
-        }
-
-        const paginatedKeys = validKeys.slice(startIndex, startIndex + limit);
-        const nextCursor =
-          startIndex + limit < validKeys.length && paginatedKeys.length > 0
-            ? encodeCursor(paginatedKeys[paginatedKeys.length - 1] as string, tenantId)
-            : undefined;
+        const lastKey = options?.cursor
+          ? decodeCursor(options.cursor, tenantId, context)
+          : undefined;
+        const { keys: paginatedKeys, nextCursor } = paginateSortedKeys(
+          validKeys,
+          tenantId,
+          lastKey,
+          options?.limit ?? DEFAULT_LIST_LIMIT,
+        );
 
         // Build a values map for the paginated slice only.
         const paginatedValues = new Map<string, unknown>();
@@ -297,24 +262,7 @@ export class FileSystemProvider implements IStorageProvider {
     context: RequestContext,
   ): Promise<Map<string, T>> {
     return await ErrorHandler.tryCatch(
-      async () => {
-        if (keys.length === 0) {
-          return new Map<string, T>();
-        }
-
-        // Parallel fetch for better performance
-        const promises = keys.map((key) => this.get<T>(tenantId, key, context));
-        const values = await Promise.all(promises);
-
-        const results = new Map<string, T>();
-        keys.forEach((key, i) => {
-          const value = values[i];
-          if (value !== null) {
-            results.set(key, value as T);
-          }
-        });
-        return results;
-      },
+      () => getManyViaGet(keys, (key) => this.get<T>(tenantId, key, context)),
       {
         operation: 'FileSystemProvider.getMany',
         context,
@@ -330,17 +278,8 @@ export class FileSystemProvider implements IStorageProvider {
     options?: StorageOptions,
   ): Promise<void> {
     return await ErrorHandler.tryCatch(
-      async () => {
-        if (entries.size === 0) {
-          return;
-        }
-
-        // Parallel set for better performance
-        const promises = Array.from(entries.entries()).map(([key, value]) =>
-          this.set(tenantId, key, value, context, options),
-        );
-        await Promise.all(promises);
-      },
+      () =>
+        setManyViaSet(entries, (key, value) => this.set(tenantId, key, value, context, options)),
       {
         operation: 'FileSystemProvider.setMany',
         context,
@@ -351,16 +290,7 @@ export class FileSystemProvider implements IStorageProvider {
 
   async deleteMany(tenantId: string, keys: string[], context: RequestContext): Promise<number> {
     return await ErrorHandler.tryCatch(
-      async () => {
-        if (keys.length === 0) {
-          return 0;
-        }
-
-        // Parallel delete for better performance
-        const promises = keys.map((key) => this.delete(tenantId, key, context));
-        const results = await Promise.all(promises);
-        return results.filter((deleted) => deleted).length;
-      },
+      () => deleteManyViaDelete(keys, (key) => this.delete(tenantId, key, context)),
       {
         operation: 'FileSystemProvider.deleteMany',
         context,

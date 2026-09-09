@@ -15,18 +15,19 @@ import type {
   ListResult,
   StorageOptions,
 } from '@/storage/core/IStorageProvider.js';
+import {
+  type DecodedEnvelope,
+  decodeEnvelope,
+  encodeEnvelope,
+  getManyViaGet,
+  setManyViaSet,
+} from '@/storage/core/providerHelpers.js';
 import { decodeCursor, encodeCursor } from '@/storage/core/storageValidation.js';
 import { configurationError, JsonRpcErrorCode, McpError } from '@/types-global/errors.js';
 import { ErrorHandler } from '@/utils/internal/error-handler/errorHandler.js';
 import { logger } from '@/utils/internal/logger.js';
 import { type RequestContext, withExtra } from '@/utils/internal/requestContext.js';
 
-type R2Envelope = {
-  __mcp: { v: 1; expiresAt?: number };
-  value: unknown;
-};
-
-const R2_ENVELOPE_VERSION = 1;
 const DEFAULT_LIST_LIMIT = 1000;
 /** R2 rejects `list()` limits above 1000, so the +1 page probe clamps here. */
 const R2_MAX_LIST_LIMIT = 1000;
@@ -45,37 +46,16 @@ export class R2Provider implements IStorageProvider {
     return `${tenantId}:${key}`;
   }
 
-  private buildEnvelope(value: unknown, options?: StorageOptions): R2Envelope {
-    // Fix: Check for undefined instead of truthy to handle ttl=0 correctly
-    const expiresAt = options?.ttl !== undefined ? Date.now() + options.ttl * 1000 : undefined;
-    return {
-      __mcp: {
-        v: R2_ENVELOPE_VERSION,
-        ...(expiresAt !== undefined ? { expiresAt } : {}),
-      },
-      value,
-    };
-  }
-
+  /** Decodes a stored envelope; `null` once its TTL has lapsed. */
   private parseAndValidate<T>(
     raw: string,
     tenantId: string,
     key: string,
     context: RequestContext,
   ): T | null {
+    let decoded: DecodedEnvelope<T>;
     try {
-      const parsed: unknown = JSON.parse(raw);
-      if (parsed && typeof parsed === 'object' && '__mcp' in parsed) {
-        const env = parsed as R2Envelope;
-        const expiresAt = env.__mcp?.expiresAt;
-        if (expiresAt && Date.now() > expiresAt) {
-          // expired
-          return null;
-        }
-        return env.value as T;
-      }
-      // legacy: direct value
-      return parsed as T;
+      decoded = decodeEnvelope<T>(raw);
     } catch (error: unknown) {
       throw new McpError(
         JsonRpcErrorCode.SerializationError,
@@ -83,6 +63,7 @@ export class R2Provider implements IStorageProvider {
         { ...context, error },
       );
     }
+    return decoded.kind === 'expired' ? null : decoded.value;
   }
 
   async get<T>(tenantId: string, key: string, context: RequestContext): Promise<T | null> {
@@ -122,7 +103,7 @@ export class R2Provider implements IStorageProvider {
     return await ErrorHandler.tryCatch(
       async () => {
         logger.debug(`[R2Provider] Setting key: ${r2Key}`, withExtra(context, { options }));
-        const envelope = this.buildEnvelope(value, options);
+        const envelope = encodeEnvelope(value, options);
         const body = JSON.stringify(envelope);
         await this.bucket.put(r2Key, body);
         logger.debug(`[R2Provider] Successfully set key: ${r2Key}`, context);
@@ -232,25 +213,7 @@ export class R2Provider implements IStorageProvider {
     context: RequestContext,
   ): Promise<Map<string, T>> {
     return await ErrorHandler.tryCatch(
-      async () => {
-        if (keys.length === 0) {
-          return new Map<string, T>();
-        }
-
-        const entries = await Promise.all(
-          keys.map(async (key) => {
-            const value = await this.get<T>(tenantId, key, context);
-            return [key, value] as const;
-          }),
-        );
-        const results = new Map<string, T>();
-        for (const [key, value] of entries) {
-          if (value !== null) {
-            results.set(key, value);
-          }
-        }
-        return results;
-      },
+      () => getManyViaGet(keys, (key) => this.get<T>(tenantId, key, context)),
       {
         operation: 'R2Provider.getMany',
         context,
@@ -266,16 +229,8 @@ export class R2Provider implements IStorageProvider {
     options?: StorageOptions,
   ): Promise<void> {
     return await ErrorHandler.tryCatch(
-      async () => {
-        if (entries.size === 0) {
-          return;
-        }
-
-        const promises = Array.from(entries.entries()).map(([key, value]) =>
-          this.set(tenantId, key, value, context, options),
-        );
-        await Promise.all(promises);
-      },
+      () =>
+        setManyViaSet(entries, (key, value) => this.set(tenantId, key, value, context, options)),
       {
         operation: 'R2Provider.setMany',
         context,

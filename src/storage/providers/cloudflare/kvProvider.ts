@@ -10,6 +10,11 @@ import type {
   ListResult,
   StorageOptions,
 } from '@/storage/core/IStorageProvider.js';
+import {
+  deleteManyViaDelete,
+  getManyViaGet,
+  setManyViaSet,
+} from '@/storage/core/providerHelpers.js';
 import { decodeCursor, encodeCursor } from '@/storage/core/storageValidation.js';
 import { configurationError, JsonRpcErrorCode, McpError } from '@/types-global/errors.js';
 import { ErrorHandler } from '@/utils/internal/error-handler/errorHandler.js';
@@ -171,25 +176,7 @@ export class KvProvider implements IStorageProvider {
     context: RequestContext,
   ): Promise<Map<string, T>> {
     return await ErrorHandler.tryCatch(
-      async () => {
-        if (keys.length === 0) {
-          return new Map<string, T>();
-        }
-
-        const entries = await Promise.all(
-          keys.map(async (key) => {
-            const value = await this.get<T>(tenantId, key, context);
-            return [key, value] as const;
-          }),
-        );
-        const results = new Map<string, T>();
-        for (const [key, value] of entries) {
-          if (value !== null) {
-            results.set(key, value);
-          }
-        }
-        return results;
-      },
+      () => getManyViaGet(keys, (key) => this.get<T>(tenantId, key, context)),
       {
         operation: 'KvProvider.getMany',
         context,
@@ -205,16 +192,8 @@ export class KvProvider implements IStorageProvider {
     options?: StorageOptions,
   ): Promise<void> {
     return await ErrorHandler.tryCatch(
-      async () => {
-        if (entries.size === 0) {
-          return;
-        }
-
-        const promises = Array.from(entries.entries()).map(([key, value]) =>
-          this.set(tenantId, key, value, context, options),
-        );
-        await Promise.all(promises);
-      },
+      () =>
+        setManyViaSet(entries, (key, value) => this.set(tenantId, key, value, context, options)),
       {
         operation: 'KvProvider.setMany',
         context,
@@ -225,15 +204,7 @@ export class KvProvider implements IStorageProvider {
 
   async deleteMany(tenantId: string, keys: string[], context: RequestContext): Promise<number> {
     return await ErrorHandler.tryCatch(
-      async () => {
-        if (keys.length === 0) {
-          return 0;
-        }
-
-        const promises = keys.map((key) => this.delete(tenantId, key, context));
-        const results = await Promise.all(promises);
-        return results.filter((deleted) => deleted).length;
-      },
+      () => deleteManyViaDelete(keys, (key) => this.delete(tenantId, key, context)),
       {
         operation: 'KvProvider.deleteMany',
         context,
