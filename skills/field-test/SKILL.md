@@ -1,10 +1,10 @@
 ---
 name: field-test
 description: >
-  Exercise tools, resources, and prompts against a live HTTP server via MCP JSON-RPC over curl. Starts the server, surfaces the catalog, runs real and adversarial inputs, and produces a tight report with concrete findings and numbered follow-up options. Use after adding or modifying definitions, or when the user asks to test, try out, or verify their MCP surface.
+  Exercise tools, resources, and prompts against a live HTTP server via MCP JSON-RPC over curl. Starts the server, surfaces the catalog, runs real and adversarial inputs, measures every call (bytes, token estimate, wall-clock) and weighs the catalog, and produces a tight report with concrete findings and numbered follow-up options. Use after adding or modifying definitions, or when the user asks to test, try out, or verify their MCP surface.
 metadata:
   author: cyanheads
-  version: "2.10"
+  version: "2.12"
   audience: external
   type: debug
 ---
@@ -45,7 +45,8 @@ cat > /tmp/<project-name>-field-test-9DJ73-K103L.sh <<'HELPER_EOF'
 #
 # Surfaces failures aggressively — field test is for finding things that fail,
 # so the helper auto-tails logs and prints HTTP status/body on errors instead
-# of swallowing them.
+# of swallowing them. It also measures: every mcp_call prints a one-line
+# size/latency reading on stderr, and mcp_catalog_size weighs tools/list.
 
 # Usage: mcp_start /path/to/server [startup-timeout-seconds]   (default: 30)
 # Builds, starts the HTTP server in the background, waits for the listen line,
@@ -107,7 +108,10 @@ _mcp_init_fail() {
 
 # Usage: mcp_init <url>
 # Runs `initialize`, sends `notifications/initialized`, prints:
-#   ready sid=<id-or-empty> protocol=<negotiated-version> requested=<want> (HTTP <code>)
+#   ready sid=<id-or-empty> protocol=<negotiated-version> requested=<want> instructions=<bytes>B (HTTP <code>)
+# `instructions=` is the byte size of the server's `instructions` string — it
+# loads into every client session alongside tools/list, so it is the other half
+# of the per-session context tax mcp_catalog_size weighs.
 # The initialize *result* is what decides success — a session ID is optional.
 # A server started with MCP_SESSION_MODE=stateless mints none, and the session
 # header is then omitted from every later request. Capture BOTH `sid` and
@@ -151,13 +155,44 @@ mcp_init() {
     _mcp_init_fail "initialize result declares no protocolVersion" "$body_file" "$hdr"
     return 1
   fi
+  local instr; instr=$(printf '%s' "$reply" | jq -r '.result.instructions // "" | utf8bytelength' 2>/dev/null || echo 0)
   local sid; sid=$(grep -i '^mcp-session-id:' "$hdr" | awk '{print $2}' | tr -d '\r\n')
   local init_headers=(-H "Content-Type: application/json" -H "Accept: application/json, text/event-stream" -H "MCP-Protocol-Version: $got")
   [ -n "$sid" ] && init_headers+=(-H "Mcp-Session-Id: $sid")
   curl -sS -X POST "$url" "${init_headers[@]}" \
     -d '{"jsonrpc":"2.0","method":"notifications/initialized"}' >/dev/null
   rm -f "$hdr" "$body_file"
-  echo "ready sid=$sid protocol=$got requested=$want (HTTP $code)"
+  echo "ready sid=$sid protocol=$got requested=$want instructions=${instr}B (HTTP $code)"
+}
+
+# Internal: one stderr line per call — reply bytes, the content/structured
+# split, a token estimate, wall-clock. Bytes are the reply as delivered (SSE
+# framing stripped). `content` is every text block's bytes, `structured` is
+# structuredContent serialized. The token figure is bytes/4 — an estimate, not
+# a tokenizer. Wall-clock is curl's time_total for the whole exchange.
+_mcp_measure() {
+  local method="$1"; local params="$2"; local reply="$3"; local code="$4"; local secs="$5"
+  local total; total=$(printf '%s' "$reply" | wc -c | tr -d ' ')
+  local ms; ms=$(awk -v s="$secs" 'BEGIN { printf "%d", s * 1000 }')
+  local label="$method"
+  local split=""
+  case "$method" in
+    tools/call)
+      local name; name=$(printf '%s' "$params" | jq -r '.name // empty' 2>/dev/null)
+      [ -n "$name" ] && label="$method $name"
+      split=$(printf '%s' "$reply" | jq -r '
+        (.result // {}) as $r
+        | ([$r.content[]? | select(.type == "text") | .text] | join("") | utf8bytelength) as $c
+        | (if $r.structuredContent == null then "none" else ($r.structuredContent | tojson | utf8bytelength | tostring) end) as $s
+        | "content \($c) · structured \($s)"' 2>/dev/null)
+      ;;
+    resources/read)
+      split=$(printf '%s' "$reply" | jq -r '
+        "text \([.result.contents[]? | .text // ""] | join("") | utf8bytelength)"' 2>/dev/null)
+      ;;
+  esac
+  local tok; tok=$(awk -v b="$total" 'BEGIN { if (b >= 1000) printf "~%.1fk", b / 4000; else printf "~%d", b / 4 }')
+  echo "⏱ $label · HTTP $code · ${total} B${split:+ ($split)} · $tok tok · ${ms} ms" >&2
 }
 
 # Usage: mcp_call <url> <sid> <method> [JSON_PARAMS] [protocol]
@@ -166,6 +201,9 @@ mcp_init() {
 # emitting every event would break `| jq .result`). A transport failure or an
 # HTTP >= 400 prints the details and returns non-zero — it never returns 0 with
 # empty output. Pipe to `jq`.
+# Every call also prints one measurement line on stderr, e.g.
+#   ⏱ tools/call gbif_search_species · HTTP 200 · 18412 B (content 9100 · structured 8900) · ~4.6k tok · 812 ms
+# Read it on every call — it is the size/latency evidence the report cites.
 # `sid` may be empty ('') for a stateless server; the session header is then
 # omitted. Pass the `protocol` mcp_init printed as the 5th arg — with no
 # session carrying the negotiation, MCP-Protocol-Version is what tells the
@@ -180,12 +218,13 @@ mcp_call() {
     body=$(printf '{"jsonrpc":"2.0","id":%d,"method":"%s","params":%s}' "$RANDOM" "$method" "$params")
   fi
   local resp_file; resp_file=$(mktemp)
-  local code curl_rc
+  local stats code secs curl_rc
   local headers=(-H "Content-Type: application/json" -H "Accept: application/json, text/event-stream")
   [ -n "$sid" ] && headers+=(-H "Mcp-Session-Id: $sid")
   [ -n "$protocol" ] && headers+=(-H "MCP-Protocol-Version: $protocol")
-  code=$(curl -sS -o "$resp_file" -w '%{http_code}' -X POST "$url" "${headers[@]}" -d "$body")
+  stats=$(curl -sS -o "$resp_file" -w '%{http_code} %{time_total}' -X POST "$url" "${headers[@]}" -d "$body")
   curl_rc=$?
+  read -r code secs <<< "$stats"
   if [ "$curl_rc" -ne 0 ] || [ -z "$code" ] || [ "$code" = "000" ]; then
     echo "TRANSPORT FAILURE calling $method — curl exit $curl_rc, http_code '${code:-none}'." >&2
     echo "Server not reachable at $url (check it is still running: mcp_log <log>)." >&2
@@ -198,14 +237,44 @@ mcp_call() {
     rm -f "$resp_file"
     return 1
   fi
+  local reply
   local sse; sse=$(sed -n 's/^data: //p' "$resp_file")
   if [ -n "$sse" ]; then
-    local reply; reply=$(printf '%s\n' "$sse" | grep -E '"(result|error)"')
-    printf '%s\n' "${reply:-$sse}"
+    reply=$(printf '%s\n' "$sse" | grep -E '"(result|error)"')
+    reply="${reply:-$sse}"
   else
-    cat "$resp_file"
+    reply=$(cat "$resp_file")
   fi
   rm -f "$resp_file"
+  _mcp_measure "$method" "$params" "$reply" "$code" "$secs"
+  printf '%s\n' "$reply"
+}
+
+# Usage: mcp_catalog_size <url> <sid> [protocol]
+# Weighs the catalog: the bytes of the tools/list reply — what every client
+# loads into context per session before a single call — then each tool's
+# serialized entry, largest first, split into description / inputSchema /
+# outputSchema so the row says WHERE the weight is. A fat outputSchema costs as
+# much as a fat description and is the usual surprise. Prints:
+#   catalog: 12 tools · 48210 B · ~12.1k tok
+#   <bytes>  <~tok>  <name>  desc <b> · input <b> · output <b|none>   (one row per tool)
+mcp_catalog_size() {
+  local url="$1"; local sid="$2"; local protocol="${3:-}"
+  [ -z "$url" ] && { echo "usage: mcp_catalog_size <url> <sid> [protocol]" >&2; return 1; }
+  local reply; reply=$(mcp_call "$url" "$sid" tools/list '' "$protocol") || return 1
+  printf '%s' "$reply" | jq -r '
+    def tok: if . >= 1000 then "~\(. / 4000 * 10 | round / 10)k" else "~\(. / 4 | floor)" end;
+    def bytes_or_none: if . == null then "none" else (tojson | utf8bytelength | tostring) end;
+    (.result.tools // []) as $t
+    | (. | tojson | utf8bytelength) as $total
+    | "catalog: \($t | length) tools · \($total) B · \($total | tok) tok",
+      ($t
+       | map({name, b: (tojson | utf8bytelength),
+              d: ((.description // "") | utf8bytelength),
+              i: (.inputSchema | bytes_or_none),
+              o: (.outputSchema | bytes_or_none)})
+       | sort_by(-.b) | .[]
+       | "\(.b)\t\(.b | tok)\t\(.name)\tdesc \(.d) · input \(.i) · output \(.o)")'
 }
 
 # Usage: mcp_log <server-log-path> [N]   (default: 50 lines)
@@ -273,7 +342,7 @@ Capture `pid`, `url`, `port`, `log` from the `mcp_start` output — every later 
 mcp_init <url-from-mcp_start>
 ```
 
-Runs `initialize`, sends `notifications/initialized`, prints the `sid` and `protocol` to capture for `mcp_call`. Success is decided by the initialize *result*, so a transport failure, a non-2xx status, a JSON-RPC error, a malformed body, or a result with no `protocolVersion` all fail loudly with the raw exchange.
+Runs `initialize`, sends `notifications/initialized`, prints the `sid` and `protocol` to capture for `mcp_call`, plus `instructions=` — the byte size of the server's `instructions` string, which every client loads per session alongside the catalog (record it with the catalog total in Step 3). Success is decided by the initialize *result*, so a transport failure, a non-2xx status, a JSON-RPC error, a malformed body, or a result with no `protocolVersion` all fail loudly with the raw exchange.
 
 The helper requests the newest `initialize`-negotiated revision the SDK supports (`2025-11-25`). **If `protocol=` comes back older than `requested=`, the server capped it** — every call after that exercises an older protocol than a current client would negotiate. Note it as a `bug` finding and check the pinned `@modelcontextprotocol/server` version; don't quietly test the downgraded surface. To deliberately test an older version, set `MCP_FIELD_TEST_PROTOCOL`.
 
@@ -294,7 +363,10 @@ Both modes exercise the **2025-era arm**: `initialize` negotiates the revision, 
 mcp_call <url> <sid> tools/list     | jq '.result.tools[]     | {name, description, inputSchema, outputSchema}'
 mcp_call <url> <sid> resources/list | jq '.result.resources[] | {uri, name, mimeType}'
 mcp_call <url> <sid> prompts/list   | jq '.result.prompts[]   | {name, description, arguments}'
+mcp_catalog_size <url> <sid> <protocol>
 ```
+
+**Weigh the catalog.** `mcp_catalog_size` prints the `tools/list` bytes — the context every client loads per session before a single call — and each tool's entry, largest first, split into description / `inputSchema` / `outputSchema`. Record the total alongside the `instructions=` bytes from Step 2; together they are the per-session tax. The split says where a heavy tool's weight lives: an `outputSchema` narrating every field of a 60-field record is the common surprise, an over-long description the obvious one. Hand the outliers to `tool-defs-analysis` (its length-outliers pass) rather than trimming blind.
 
 Present a compact catalog to the user: each definition's name + 1-line description. Flag vague or missing descriptions as you go — those feed into the report. Use this to build the test plan.
 
@@ -317,6 +389,7 @@ Treat any hit as a `ux` finding in the report. The authoring rule lives under *T
 | Happy path | One realistic input. Output shape matches schema. `content[]` text reads clearly to a human. |
 | `structuredContent` ↔ `content[]` parity | Dump the whole array (`jq '.result.content'`) and check every `structuredContent` field is surfaced *somewhere* in it — enrichment lands in its own trailing block, not in `content[0]`. Parity gap = client-specific blindness. |
 | Input error | One invalid input (wrong type or missing required). Error text says *what*, *why*, *how to fix*. |
+| Size & latency | Read the `⏱` line `mcp_call` prints on every call. A happy-path response over **24,000 B** (the framework's `DEFAULT_OUTLINE_BUDGET_BYTES` — the line at which it would outline a document itself) with no truncation disclosure and no retrieval path (cursor, offset, `sections`, canvas handle) is a `ux` finding: the agent pays the whole payload with no way to ask for less. `content` ≈ `structured` with the text starting `{` means the JSON is on the wire twice — a missing `format()`. A call over ~5 s on a happy-path input is worth a `mcp_log` look before calling it upstream latency. |
 
 **Situational — add only when triggered**
 
@@ -349,7 +422,7 @@ Treat any hit as a `ux` finding in the report. The authoring rule lives under *T
 
 Use `TaskCreate` — one task per definition. Mark complete as you go. Don't batch.
 
-For each call, capture: input sent, response (trim huge payloads to files), whether `isError: true` appeared, anything surprising (slow response, parity drift, unhelpful text, crash).
+For each call, capture: input sent, the `⏱` line (bytes, split, ms), response (trim huge payloads to files), whether `isError: true` appeared, anything surprising (slow response, parity drift, unhelpful text, crash).
 
 When a call surprises you — slow, hangs, returns terse output, surfaces an unhelpful error — run `. /tmp/<project-name>-field-test-<ID>.sh && mcp_log <log>` to tail the server log. The pino startup banner, request handler errors, upstream API call traces, and rate-limit warnings all land in the per-server log (read via `mcp_log`) rather than coming back through `mcp_call`. Don't guess at runtime behavior from response text alone.
 
@@ -374,11 +447,15 @@ Kills the background server and its port-holding child, removes the server log, 
 
 ### 7. Report
 
-Three sections. Tight. The user should be able to skim the summary, read details only for what matters, and act on numbered options.
+Four sections. Tight. The user should be able to skim the summary, scan the numbers, read details only for what matters, and act on numbered options.
 
 #### Summary (1 paragraph)
 
 One paragraph. How many definitions exercised, how many passed clean, how many have issues, and the single most important finding. No tables, no lists.
+
+#### Size & latency
+
+Per-session tax on its own line (`instructions` bytes + catalog bytes, with the heaviest tool named), then one row per tool exercised, sorted by happy-path bytes descending: tool · bytes · ~tok · ms. Over 15 tools, keep every row over 24,000 B plus the three slowest and fold the rest into one line ("N more under budget, median X B"). Numbers only — what they mean goes in Findings.
 
 #### Findings
 
@@ -421,6 +498,8 @@ End with:
 - [ ] HTTP server built and started; real port parsed from log
 - [ ] Session initialized (a stateless server returns an empty `sid` — still a pass); `notifications/initialized` sent; negotiated protocol version matches the requested one (a downgrade is a finding)
 - [ ] Catalog surfaced and presented; descriptions audited for leaks (implementation details, meta-coaching, consumer-aware phrasing)
+- [ ] Catalog weighed (`mcp_catalog_size`); total + `instructions=` bytes recorded for the report
+- [ ] Every call's `⏱` line read; any happy-path response over 24,000 B with no disclosure + retrieval path filed as `ux`
 - [ ] Universal battery run on every definition (happy path, parity against the full `content[]` array, input error)
 - [ ] Situational categories applied only when triggered
 - [ ] **If >15 tools:** sampled 30–40% for situational testing; skipped definitions listed in report
@@ -429,4 +508,4 @@ End with:
 - [ ] **If any tool truncates, caps, or spills its output:** truncation forced; disclosure + a retrieval path (cursor, offset, selector, canvas handle) verified
 - [ ] External-state / auth-gated tools handled explicitly (run, skip, or confirm)
 - [ ] Server stopped (port confirmed free); server log and helper script removed
-- [ ] Report: summary paragraph → grouped findings → numbered options
+- [ ] Report: summary paragraph → size & latency table → grouped findings → numbered options
