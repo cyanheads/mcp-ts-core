@@ -11,13 +11,8 @@ import { invalidDefinitionEntry, isDefinitionObject } from './definition-rules.j
 import { lintErrorContract, lintErrorContractConformance } from './error-contract-rules.js';
 import { lintHandlerBody } from './handler-body-rules.js';
 import { checkNameRequired } from './name-rules.js';
-import { lintSchemaPortability, type PortabilityOptions } from './portability-rules.js';
-import {
-  checkFieldDescriptions,
-  checkIsZodObject,
-  checkSchemaSatisfiable,
-  checkSchemaSerializable,
-} from './schema-rules.js';
+import type { PortabilityOptions } from './portability-rules.js';
+import { lintSchemaRoot } from './schema-rules.js';
 import { lintAuthScopes } from './tool-rules.js';
 
 /**
@@ -92,27 +87,13 @@ export function lintResourceDefinition(
 
   // Params schema (optional, but must be ZodObject when present)
   if (d?.params !== undefined) {
-    const paramsCheck = checkIsZodObject(d.params, 'params', 'resource', displayName);
-    if (paramsCheck) {
-      diagnostics.push(paramsCheck);
-    } else {
-      diagnostics.push(...checkFieldDescriptions(d.params, 'params', 'resource', displayName));
-      const paramsSerial = checkSchemaSerializable(d.params, 'params', 'resource', displayName);
-      if (paramsSerial) {
-        diagnostics.push(paramsSerial);
-      } else {
-        diagnostics.push(...checkSchemaSatisfiable(d.params, 'params', 'resource', displayName));
-        if (portability) {
-          diagnostics.push(
-            ...lintSchemaPortability(d.params, 'params', 'resource', displayName, portability),
-          );
-        }
-      }
-
-      // Cross-reference: template variables must match params schema keys
-      if (uriTemplate) {
-        diagnostics.push(...checkTemplateParamsAlignment(uriTemplate, d.params, displayName));
-      }
+    const paramsRoot = lintSchemaRoot(d.params, 'params', 'resource', displayName, {
+      portability,
+    });
+    diagnostics.push(...paramsRoot.diagnostics);
+    // Cross-reference: template variables must match params schema keys
+    if (paramsRoot.isObject && uriTemplate) {
+      diagnostics.push(...checkTemplateParamsAlignment(uriTemplate, d.params, displayName));
     }
   }
 
@@ -123,23 +104,9 @@ export function lintResourceDefinition(
 
   // Output schema (optional, but must be ZodObject when present)
   if (d?.output !== undefined) {
-    const outputCheck = checkIsZodObject(d.output, 'output', 'resource', displayName);
-    if (outputCheck) {
-      diagnostics.push(outputCheck);
-    } else {
-      diagnostics.push(...checkFieldDescriptions(d.output, 'output', 'resource', displayName));
-      const outputSerial = checkSchemaSerializable(d.output, 'output', 'resource', displayName);
-      if (outputSerial) {
-        diagnostics.push(outputSerial);
-      } else {
-        diagnostics.push(...checkSchemaSatisfiable(d.output, 'output', 'resource', displayName));
-        if (portability) {
-          diagnostics.push(
-            ...lintSchemaPortability(d.output, 'output', 'resource', displayName, portability),
-          );
-        }
-      }
-    }
+    diagnostics.push(
+      ...lintSchemaRoot(d.output, 'output', 'resource', displayName, { portability }).diagnostics,
+    );
   }
 
   // Handler body heuristic checks (error-handling anti-patterns)

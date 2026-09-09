@@ -16,8 +16,10 @@ import {
   inputVariants,
   isDiscriminatedUnionSchema,
   isZodObjectSchema,
+  zodDef,
 } from '@/mcp-server/tools/utils/schemaShape.js';
 import type { LintDiagnostic } from '../types.js';
+import { lintSchemaPortability, type PortabilityOptions } from './portability-rules.js';
 
 /**
  * Checks that a schema is a ZodObject (required for tool inputSchema).
@@ -52,6 +54,56 @@ export function checkIsZodObject(
     definitionType,
     definitionName,
   };
+}
+
+/** What {@link lintSchemaRoot} established about a declared schema root. */
+export interface SchemaRootResult {
+  diagnostics: LintDiagnostic[];
+  /** The root passed the object gate (`schema-is-object`). */
+  isObject: boolean;
+  /** …and converts to JSON Schema (`schema-serializable`), so JSON-Schema rules ran. */
+  serializable: boolean;
+}
+
+/**
+ * The checks every declared schema root runs, in dependency order: the object
+ * gate, field descriptions, JSON Schema serializability, then — only once it
+ * serializes — satisfiability and portability. Callers chain the rules that
+ * apply to one root only (header designations, format parity, template
+ * alignment) off `isObject` / `serializable`.
+ */
+export function lintSchemaRoot(
+  schema: unknown,
+  fieldName: string,
+  definitionType: LintDiagnostic['definitionType'],
+  definitionName: string,
+  options: {
+    allowDiscriminatedUnion?: boolean;
+    portability?: PortabilityOptions | undefined;
+  } = {},
+): SchemaRootResult {
+  const objectCheck = checkIsZodObject(schema, fieldName, definitionType, definitionName, {
+    ...(options.allowDiscriminatedUnion && { allowDiscriminatedUnion: true }),
+  });
+  if (objectCheck) return { diagnostics: [objectCheck], isObject: false, serializable: false };
+
+  const diagnostics = checkFieldDescriptions(schema, fieldName, definitionType, definitionName);
+  const serial = checkSchemaSerializable(schema, fieldName, definitionType, definitionName);
+  if (serial) return { diagnostics: [...diagnostics, serial], isObject: true, serializable: false };
+
+  diagnostics.push(...checkSchemaSatisfiable(schema, fieldName, definitionType, definitionName));
+  if (options.portability) {
+    diagnostics.push(
+      ...lintSchemaPortability(
+        schema,
+        fieldName,
+        definitionType,
+        definitionName,
+        options.portability,
+      ),
+    );
+  }
+  return { diagnostics, isObject: true, serializable: true };
 }
 
 /**
@@ -406,19 +458,14 @@ function isSchemaRoot(value: unknown): boolean {
   return isZodObjectSchema(value) || isDiscriminatedUnionSchema(value);
 }
 
-/** Reads a ZodObject's raw shape, defensively across Zod 4 / legacy internals. */
+/** Reads a ZodObject's raw shape from `.shape`, or `_zod.def.shape` on a partial object. */
 export function objectShape(schema: unknown): Record<string, unknown> | undefined {
   if (!schema || typeof schema !== 'object') return;
-  const s = schema as {
-    shape?: Record<string, unknown>;
-    _zod?: { def?: { shape?: Record<string, unknown> } };
-    _def?: { shape?: Record<string, unknown> };
-  };
-  const shape = s.shape ?? s._zod?.def?.shape ?? s._def?.shape;
+  const shape = (schema as { shape?: Record<string, unknown> }).shape ?? zodDef(schema)?.shape;
   return shape && typeof shape === 'object' ? shape : undefined;
 }
 
-/** Reads the top-level field names of a ZodObject, defensively across Zod 4 / legacy shapes. */
+/** Reads the top-level field names of a ZodObject. */
 export function objectShapeKeys(schema: unknown): string[] {
   const shape = objectShape(schema);
   return shape ? Object.keys(shape) : [];

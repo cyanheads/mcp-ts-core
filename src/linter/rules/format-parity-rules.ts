@@ -30,6 +30,7 @@
  * @module src/linter/rules/format-parity-rules
  */
 
+import { zodDef } from '@/mcp-server/tools/utils/schemaShape.js';
 import type { LintDiagnostic } from '../types.js';
 
 /** A single terminal leaf in the output schema and how to verify it's rendered. */
@@ -80,11 +81,9 @@ interface WalkContext {
  */
 const MAX_WALK_DEPTH = 8;
 
-/** Zod 4 stores the type discriminator at `_zod.def.type`. Falls back to `_def.type`. */
+/** Zod 4 stores the type discriminator at `_zod.def.type`. */
 function zodTypeOf(schema: unknown): string {
-  if (!schema || typeof schema !== 'object') return '';
-  const s = schema as { _zod?: { def?: { type?: string } }; _def?: { type?: string } };
-  return s._zod?.def?.type ?? s._def?.type ?? '';
+  return zodDef(schema)?.type ?? '';
 }
 
 /**
@@ -96,11 +95,7 @@ function unwrapSchema(schema: unknown): unknown {
   for (let i = 0; i < 10; i++) {
     const type = zodTypeOf(current);
     if (type !== 'optional' && type !== 'nullable' && type !== 'default') return current;
-    const c = current as {
-      _zod?: { def?: { innerType?: unknown } };
-      _def?: { innerType?: unknown };
-    };
-    const inner = c._zod?.def?.innerType ?? c._def?.innerType;
+    const inner = zodDef(current)?.innerType;
     if (!inner) return current;
     current = inner;
   }
@@ -283,47 +278,30 @@ function walkVariants(
 }
 
 function getDefOptions(node: Record<string, unknown>): unknown[] | undefined {
-  const zod = node._zod as
-    | { def?: { options?: unknown[]; entries?: Record<string, unknown> } }
-    | undefined;
-  const legacy = node._def as
-    | { options?: unknown[]; values?: unknown[]; entries?: Record<string, unknown> }
-    | undefined;
-  if (Array.isArray(zod?.def?.options)) return zod.def.options;
-  if (Array.isArray(legacy?.options)) return legacy.options;
-  if (Array.isArray(legacy?.values)) return legacy.values;
+  const def = zodDef(node);
+  if (Array.isArray(def?.options)) return def.options;
   // Zod 4 enum stores values in `entries` as { label: value }
-  const entries = zod?.def?.entries ?? legacy?.entries;
+  const entries = def?.entries;
   if (entries && typeof entries === 'object') return Object.values(entries);
   return;
 }
 
+/** A literal's first value; Zod 4 stores literals as a `values` list. */
 function getDefValue(node: Record<string, unknown>): unknown {
-  const zod = node._zod as { def?: { value?: unknown; values?: unknown[] } } | undefined;
-  const legacy = node._def as { value?: unknown; values?: unknown[] } | undefined;
-  if (zod?.def?.value !== undefined) return zod.def.value;
-  if (legacy?.value !== undefined) return legacy.value;
-  if (Array.isArray(zod?.def?.values) && zod.def.values.length > 0) return zod.def.values[0];
-  if (Array.isArray(legacy?.values) && legacy.values.length > 0) return legacy.values[0];
-  return '';
+  const values = zodDef(node)?.values;
+  return Array.isArray(values) && values.length > 0 ? values[0] : '';
 }
 
 function getDefElement(node: Record<string, unknown>): unknown {
-  const zod = node._zod as { def?: { element?: unknown } } | undefined;
-  const legacy = node._def as { element?: unknown; type?: unknown } | undefined;
-  return zod?.def?.element ?? legacy?.element ?? legacy?.type;
+  return zodDef(node)?.element;
 }
 
 function getDefValueType(node: Record<string, unknown>): unknown {
-  const zod = node._zod as { def?: { valueType?: unknown } } | undefined;
-  const legacy = node._def as { valueType?: unknown } | undefined;
-  return (node.valueType as unknown) ?? zod?.def?.valueType ?? legacy?.valueType;
+  return (node.valueType as unknown) ?? zodDef(node)?.valueType;
 }
 
 function getDefItems(node: Record<string, unknown>): unknown[] | undefined {
-  const zod = node._zod as { def?: { items?: unknown[] } } | undefined;
-  const legacy = node._def as { items?: unknown[] } | undefined;
-  return zod?.def?.items ?? legacy?.items;
+  return zodDef(node)?.items;
 }
 
 // ---------------------------------------------------------------------------

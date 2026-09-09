@@ -25,7 +25,7 @@ import {
 } from 'zod';
 import type { AnyPromptDefinition } from '@/mcp-server/prompts/utils/promptDefinition.js';
 import type { AnyResourceDefinition } from '@/mcp-server/resources/utils/resourceDefinition.js';
-import { inputVariants } from '@/mcp-server/tools/utils/schemaShape.js';
+import { inputVariants, zodDef } from '@/mcp-server/tools/utils/schemaShape.js';
 import type {
   AnyToolDefinition,
   ToolInputSchema,
@@ -85,12 +85,9 @@ const DEFAULTS = {
 // Zod type introspection (Zod 4 compatible)
 // ---------------------------------------------------------------------------
 
-/**
- * Returns the internal Zod type discriminator string.
- * Zod 4 uses `_def.type` (e.g. 'string', 'object', 'optional').
- */
+/** The Zod 4 type tag (`'string'`, `'object'`, `'optional'`, …), or `''`. */
 function zodTypeName(schema: unknown): string {
-  return (schema as any)?._def?.type ?? '';
+  return zodDef(schema)?.type ?? '';
 }
 
 // ---------------------------------------------------------------------------
@@ -157,18 +154,18 @@ function expandNode(
 ): fc.Arbitrary<unknown> | undefined {
   const f = getFc();
 
-  // Unwrap wrappers — cast through any to avoid Zod 4 $ZodType vs ZodType mismatch.
-  // A wrapper whose inner node cannot terminate collapses to the absence it permits.
+  // Unwrap wrappers. A wrapper whose inner node cannot terminate collapses to
+  // the absence it permits.
   if (schema instanceof ZodOptional) {
-    const inner = zodNodeToArbitrary((schema as any).unwrap(), path, depth);
+    const inner = zodNodeToArbitrary(schema.unwrap(), path, depth);
     return inner ? f.option(inner, { nil: undefined }) : f.constant(undefined);
   }
   if (schema instanceof ZodNullable) {
-    const inner = zodNodeToArbitrary((schema as any).unwrap(), path, depth);
+    const inner = zodNodeToArbitrary(schema.unwrap(), path, depth);
     return inner ? f.option(inner, { nil: null }) : f.constant(null);
   }
   if (schema instanceof ZodDefault) {
-    const inner = zodNodeToArbitrary((schema as any).removeDefault(), path, depth);
+    const inner = zodNodeToArbitrary(schema.removeDefault(), path, depth);
     return inner ? f.option(inner, { nil: undefined, freq: 5 }) : f.constant(undefined);
   }
 
@@ -185,17 +182,16 @@ function expandNode(
 
   // Enum / literal
   if (schema instanceof ZodEnum) {
-    const values = (schema as any).options as unknown[];
-    return f.constantFrom(...values);
+    return f.constantFrom(...schema.options);
   }
   if (schema instanceof ZodLiteral) {
-    return f.constant((schema as any).value);
+    return f.constant(schema.value);
   }
 
   // Array
   if (schema instanceof ZodArray) {
     const { minLength, maxLength } = arrayLengthBounds(schema);
-    const element = zodNodeToArbitrary((schema as any).element, path, depth + 1);
+    const element = zodNodeToArbitrary(schema.element, path, depth + 1);
     // A recursive element type terminates here — an empty array is the finite value.
     if (!element) return f.constant([]);
     return f.array(element, { minLength, maxLength });
@@ -203,16 +199,16 @@ function expandNode(
 
   // Union
   if (schema instanceof ZodUnion) {
-    const options = (schema as any)._def.options as unknown[];
-    const arbs = options
+    const arbs = schema.options
       .map((o) => zodNodeToArbitrary(o, path, depth + 1))
       .filter((arb): arb is fc.Arbitrary<unknown> => arb !== undefined);
     return arbs.length > 0 ? f.oneof(...arbs) : undefined;
   }
 
-  // Object — check by _def.type since instanceof ZodObject may have type issues
+  // Object — checked by type tag: the input root may be a `$ZodObject` rather
+  // than a classic `ZodObject` instance.
   if (zodTypeName(schema) === 'object') {
-    const shape = (schema as any).shape as Record<string, unknown> | undefined;
+    const shape = (schema as { shape?: Record<string, unknown> }).shape;
     if (!shape) return f.constant({});
     const entries = Object.entries(shape);
     if (entries.length === 0) return f.constant({});
@@ -237,15 +233,23 @@ function expandNode(
  *
  * Unlike ZodString, Zod 4's ZodArray exposes no `.minLength`/`.maxLength`
  * accessors — `.min()`, `.max()`, `.length()`, and `.nonempty()` all land in
- * `_def.checks`. Reading the absent accessor silently drops every one of them.
+ * `_zod.def.checks`. Reading the absent accessor silently drops every one of them.
  */
+/** The `_zod.def` of a `min_length` / `max_length` / `length_equals` check. */
+interface LengthCheckDef {
+  check?: string;
+  length?: number;
+  maximum?: number;
+  minimum?: number;
+}
+
 function arrayLengthBounds(schema: unknown): { minLength: number; maxLength: number } {
-  const checks = ((schema as any)?._def?.checks ?? []) as unknown[];
+  const checks = zodDef(schema)?.checks ?? [];
   let min = 0;
   let max: number | undefined;
 
   for (const check of checks) {
-    const def = (check as any)?._zod?.def;
+    const def = (check as { _zod?: { def?: LengthCheckDef } } | undefined)?._zod?.def;
     if (def?.check === 'min_length' && typeof def.minimum === 'number') {
       min = Math.max(min, def.minimum);
     } else if (def?.check === 'max_length' && typeof def.maximum === 'number') {
@@ -266,7 +270,6 @@ function arrayLengthBounds(schema: unknown): { minLength: number; maxLength: num
  */
 function arbitraryForZodString(schema: ZodString): fc.Arbitrary<string> {
   const f = getFc();
-  const s = schema as any;
   const patterns = (schema._zod.def.checks ?? []).flatMap((check) => {
     const def = check._zod.def;
     return def.check === 'string_format' &&
@@ -300,7 +303,7 @@ function arbitraryForZodString(schema: ZodString): fc.Arbitrary<string> {
       return matches;
     });
   }
-  const format: string | undefined = s.format;
+  const format = schema.format;
   if (format === 'email') {
     // fc.emailAddress() can produce emails Zod 4 rejects (e.g. "!a@a.aa").
     // Generate simple, spec-safe emails instead.
@@ -314,8 +317,8 @@ function arbitraryForZodString(schema: ZodString): fc.Arbitrary<string> {
   if (format === 'url' || format === 'uri') return f.webUrl();
   if (format === 'uuid') return f.uuid();
 
-  const minLen: number = typeof s.minLength === 'number' ? s.minLength : 0;
-  const maxLen: number = typeof s.maxLength === 'number' ? s.maxLength : 200;
+  const minLen = schema.minLength ?? 0;
+  const maxLen = schema.maxLength ?? 200;
 
   return f.string({ minLength: minLen, maxLength: Math.max(minLen, maxLen) });
 }
@@ -326,15 +329,13 @@ function arbitraryForZodString(schema: ZodString): fc.Arbitrary<string> {
  */
 function arbitraryForZodNumber(schema: ZodNumber): fc.Arbitrary<number> {
   const f = getFc();
-  const s = schema as any;
-  const isFiniteNum: boolean = s.isFinite !== false;
-  const rawMin: number = typeof s.minValue === 'number' ? s.minValue : -1_000_000;
-  const rawMax: number = typeof s.maxValue === 'number' ? s.maxValue : 1_000_000;
+  const isFiniteNum = schema.isFinite !== false;
+  const rawMin = schema.minValue ?? -1_000_000;
+  const rawMax = schema.maxValue ?? 1_000_000;
   const min = isFiniteNum && !Number.isFinite(rawMin) ? -1_000_000 : rawMin;
   const max = isFiniteNum && !Number.isFinite(rawMax) ? 1_000_000 : rawMax;
-  const isInt: boolean = s.isInt === true;
 
-  return isInt
+  return schema.isInt
     ? f.integer({ min, max })
     : f.double({ min, max, noNaN: true, noDefaultInfinity: true });
 }
@@ -611,7 +612,7 @@ function createProtoPollutionGuard(): {
       for (const key of Object.keys(Object.prototype)) {
         if (!before.has(key)) {
           report.prototypePollution = true;
-          delete (Object.prototype as any)[key];
+          delete (Object.prototype as Record<string, unknown>)[key];
         }
       }
     },
@@ -932,7 +933,7 @@ export async function fuzzPrompt(
   } else {
     report.totalRuns++;
     try {
-      const messages = await withTimeout(def.generate({} as any), timeout);
+      const messages = await withTimeout(def.generate({}), timeout);
       validatePromptMessages(messages);
     } catch (err) {
       report.crashes.push({ input: {}, error: err });

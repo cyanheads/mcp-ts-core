@@ -1109,34 +1109,7 @@ describe('lintFormatParity — snake_case key segment matching', () => {
 // ---------------------------------------------------------------------------
 
 describe('lintFormatParity — schema metadata compatibility', () => {
-  it('accepts complete formatters across legacy Zod metadata layouts', () => {
-    const legacyString = { _def: { type: 'string' } };
-    const legacyNumber = { _def: { type: 'number' } };
-    const output = {
-      _def: { type: 'object' },
-      shape: {
-        wrapped: { _def: { type: 'optional', innerType: legacyString } },
-        status: { _def: { type: 'enum', values: ['ready'] } },
-        kind: { _def: { type: 'literal', value: 'summary' } },
-        rows: { _def: { type: 'array', element: legacyString } },
-        choice: { _def: { type: 'union', options: [legacyString, legacyNumber] } },
-        scores: { _def: { type: 'record', valueType: legacyNumber } },
-        pair: { _def: { type: 'tuple', items: [legacyString, legacyNumber] } },
-      },
-    };
-
-    const diagnostics = lintFormatParity(
-      {
-        output,
-        format: (result: unknown) => [{ type: 'text', text: JSON.stringify(result) }],
-      },
-      'legacy_layout_tool',
-    );
-
-    expect(diagnostics).toHaveLength(0);
-  });
-
-  it('accepts complete formatters across nested _zod.def metadata layouts', () => {
+  it('accepts complete formatters across partial _zod.def metadata layouts', () => {
     const zodString = { _zod: { def: { type: 'string' } } };
     const zodNumber = { _zod: { def: { type: 'number' } } };
     const output = {
@@ -1164,13 +1137,13 @@ describe('lintFormatParity — schema metadata compatibility', () => {
 
   it('degrades safely when wrapper and collection metadata is incomplete', () => {
     const output = {
-      _def: { type: 'object' },
+      _zod: { def: { type: 'object' } },
       shape: {
-        brokenWrapper: { _def: { type: 'optional' } },
-        missingUnionOptions: { _def: { type: 'union' } },
-        missingRecordValue: { _def: { type: 'record' } },
-        missingTupleItems: { _def: { type: 'tuple' } },
-        missingObjectShape: { _def: { type: 'object' } },
+        brokenWrapper: { _zod: { def: { type: 'optional' } } },
+        missingUnionOptions: { _zod: { def: { type: 'union' } } },
+        missingRecordValue: { _zod: { def: { type: 'record' } } },
+        missingTupleItems: { _zod: { def: { type: 'tuple' } } },
+        missingObjectShape: { _zod: { def: { type: 'object' } } },
       },
     };
 
@@ -1189,7 +1162,7 @@ describe('lintFormatParity — schema metadata compatibility', () => {
     'warns instead of throwing when schema traversal fails with %s',
     (thrown) => {
       const output = {
-        _def: { type: 'object' },
+        _zod: { def: { type: 'object' } },
         get shape(): never {
           throw thrown;
         },

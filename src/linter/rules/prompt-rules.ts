@@ -7,13 +7,8 @@
 import type { LintDiagnostic } from '../types.js';
 import { invalidDefinitionEntry, isDefinitionObject } from './definition-rules.js';
 import { checkNameRequired } from './name-rules.js';
-import { lintSchemaPortability, type PortabilityOptions } from './portability-rules.js';
-import {
-  checkFieldDescriptions,
-  checkIsZodObject,
-  checkSchemaSatisfiable,
-  checkSchemaSerializable,
-} from './schema-rules.js';
+import type { PortabilityOptions } from './portability-rules.js';
+import { lintSchemaRoot } from './schema-rules.js';
 
 /**
  * Runs all lint rules against a single prompt definition.
@@ -56,23 +51,9 @@ export function lintPromptDefinition(
 
   // Args schema (optional, but must be ZodObject when present)
   if (d?.args !== undefined) {
-    const argsCheck = checkIsZodObject(d.args, 'args', 'prompt', displayName);
-    if (argsCheck) {
-      diagnostics.push(argsCheck);
-    } else {
-      diagnostics.push(...checkFieldDescriptions(d.args, 'args', 'prompt', displayName));
-      const argsSerial = checkSchemaSerializable(d.args, 'args', 'prompt', displayName);
-      if (argsSerial) {
-        diagnostics.push(argsSerial);
-      } else {
-        diagnostics.push(...checkSchemaSatisfiable(d.args, 'args', 'prompt', displayName));
-        if (portability) {
-          diagnostics.push(
-            ...lintSchemaPortability(d.args, 'args', 'prompt', displayName, portability),
-          );
-        }
-      }
-    }
+    diagnostics.push(
+      ...lintSchemaRoot(d.args, 'args', 'prompt', displayName, { portability }).diagnostics,
+    );
   }
 
   return diagnostics;

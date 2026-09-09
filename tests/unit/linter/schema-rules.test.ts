@@ -416,12 +416,7 @@ describe('objectShape', () => {
     expect(Object.keys(objectShape(fake) ?? {})).toEqual(['x']);
   });
 
-  it('falls back to legacy _def.shape when neither .shape nor _zod.def.shape is present', () => {
-    const fake = { _def: { shape: { y: z.string() } } };
-    expect(Object.keys(objectShape(fake) ?? {})).toEqual(['y']);
-  });
-
-  it('returns undefined when none of the three shape locations are present', () => {
+  it('returns undefined when neither shape location is present', () => {
     expect(objectShape({})).toBeUndefined();
   });
 

@@ -55,51 +55,37 @@ function resolvePortabilityOptions(input: LintInput): PortabilityOptions {
 }
 
 /**
- * Resolves the `canvas-consumer-missing` rule options. Programmatic
- * `input.canvasConsumers` takes precedence over `MCP_LINT_CANVAS_CONSUMERS`.
- * CSV env value; the literal `false` disables the rule.
+ * Resolves a name-list rule option: the programmatic value wins; otherwise a
+ * CSV env var, where the literal `false` disables the rule and an empty or
+ * unset value leaves the rule at its default.
  */
-function resolveCanvasOptions(input: LintInput): CanvasOptions {
-  if (input.canvasConsumers !== undefined) {
-    return { canvasConsumers: input.canvasConsumers };
-  }
-  if (typeof process !== 'undefined') {
-    const raw = process.env?.MCP_LINT_CANVAS_CONSUMERS;
-    if (raw === 'false') return { canvasConsumers: false };
-    if (raw && raw.length > 0) {
-      return {
-        canvasConsumers: raw
-          .split(',')
-          .map((s) => s.trim())
-          .filter(Boolean),
-      };
-    }
-  }
-  return {};
+function resolveNameList(
+  programmatic: readonly string[] | false | undefined,
+  envVar: 'MCP_LINT_CANVAS_CONSUMERS' | 'MCP_LINT_TRUNCATION_ALLOWLIST',
+): readonly string[] | false | undefined {
+  if (programmatic !== undefined) return programmatic;
+  const raw = typeof process !== 'undefined' ? process.env?.[envVar] : undefined;
+  if (raw === 'false') return false;
+  if (!raw) return undefined;
+  return raw
+    .split(',')
+    .map((s) => s.trim())
+    .filter(Boolean);
 }
 
-/**
- * Resolves the `capped-list-no-truncation` rule options. Programmatic
- * `input.truncationAllowlist` takes precedence over `MCP_LINT_TRUNCATION_ALLOWLIST`.
- * CSV env value; the literal `false` disables the rule.
- */
+/** `canvas-consumer-missing` rule options (`MCP_LINT_CANVAS_CONSUMERS`). */
+function resolveCanvasOptions(input: LintInput): CanvasOptions {
+  const canvasConsumers = resolveNameList(input.canvasConsumers, 'MCP_LINT_CANVAS_CONSUMERS');
+  return canvasConsumers === undefined ? {} : { canvasConsumers };
+}
+
+/** `capped-list-no-truncation` rule options (`MCP_LINT_TRUNCATION_ALLOWLIST`). */
 function resolveTruncationOptions(input: LintInput): TruncationOptions {
-  if (input.truncationAllowlist !== undefined) {
-    return { truncationAllowlist: input.truncationAllowlist };
-  }
-  if (typeof process !== 'undefined') {
-    const raw = process.env?.MCP_LINT_TRUNCATION_ALLOWLIST;
-    if (raw === 'false') return { truncationAllowlist: false };
-    if (raw && raw.length > 0) {
-      return {
-        truncationAllowlist: raw
-          .split(',')
-          .map((s) => s.trim())
-          .filter(Boolean),
-      };
-    }
-  }
-  return {};
+  const truncationAllowlist = resolveNameList(
+    input.truncationAllowlist,
+    'MCP_LINT_TRUNCATION_ALLOWLIST',
+  );
+  return truncationAllowlist === undefined ? {} : { truncationAllowlist };
 }
 
 /** Appends a "See: skills/api-linter/SKILL.md#<rule>" breadcrumb to the message. */

@@ -60,9 +60,9 @@ function isCapFieldName(key: string): boolean {
  */
 const META_FIELD_HINTS: ReadonlySet<string> = new Set(['notice', 'effectivequery', 'queryecho']);
 
-/** Heuristic: a value is a Zod schema if it carries the Zod 4 (`_zod`) or legacy (`_def`) marker. */
+/** Heuristic: a value is a Zod schema if it carries the Zod 4 `_zod` marker. */
 function isZodSchema(value: unknown): boolean {
-  return !!value && typeof value === 'object' && ('_zod' in value || '_def' in value);
+  return !!value && typeof value === 'object' && '_zod' in value;
 }
 
 /**

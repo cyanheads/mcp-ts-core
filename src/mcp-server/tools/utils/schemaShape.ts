@@ -9,15 +9,35 @@
 
 import type { ZodDiscriminatedUnion, ZodObject, ZodRawShape } from 'zod';
 
-/** The Zod 4 internals both checks read. */
-interface ZodInternals {
-  _zod?: { def?: { discriminator?: unknown; type?: string } };
+/**
+ * The Zod 4 definition fields the framework reads off a schema without going
+ * through the class API: the `type` tag every schema carries, plus the
+ * per-type payload (`shape`, `options`, `element`, …). Everything is optional
+ * because the linter also sees partial and hostile objects.
+ */
+export interface ZodDef {
+  checks?: unknown[];
+  discriminator?: unknown;
+  element?: unknown;
+  entries?: Record<string, unknown>;
+  innerType?: unknown;
+  items?: unknown[];
+  options?: unknown[];
+  shape?: Record<string, unknown>;
+  type?: string;
+  values?: unknown[];
+  valueType?: unknown;
+}
+
+/** Reads `_zod.def` from any value; `undefined` when it is not a Zod 4 schema. */
+export function zodDef(value: unknown): ZodDef | undefined {
+  if (!value || typeof value !== 'object') return undefined;
+  return (value as { _zod?: { def?: ZodDef } })._zod?.def;
 }
 
 /** True when `value` is a `z.object()`. */
 export function isZodObjectSchema(value: unknown): value is ZodObject<ZodRawShape> {
-  if (!value || typeof value !== 'object') return false;
-  return (value as ZodInternals)._zod?.def?.type === 'object';
+  return zodDef(value)?.type === 'object';
 }
 
 /**
@@ -31,8 +51,7 @@ export function isZodObjectSchema(value: unknown): value is ZodObject<ZodRawShap
 export function isDiscriminatedUnionSchema(
   value: unknown,
 ): value is ZodDiscriminatedUnion<readonly ZodObject<ZodRawShape>[]> {
-  if (!value || typeof value !== 'object') return false;
-  const def = (value as ZodInternals)._zod?.def;
+  const def = zodDef(value);
   return def?.type === 'union' && typeof def.discriminator === 'string';
 }
 

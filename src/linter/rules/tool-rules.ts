@@ -11,15 +11,8 @@ import { lintErrorContract, lintErrorContractConformance } from './error-contrac
 import { lintFormatParity } from './format-parity-rules.js';
 import { lintHandlerBody } from './handler-body-rules.js';
 import { checkNameRequired, checkToolNameFormat } from './name-rules.js';
-import { lintSchemaPortability, type PortabilityOptions } from './portability-rules.js';
-import {
-  checkFieldDescriptions,
-  checkHeaderDesignations,
-  checkIsZodObject,
-  checkSchemaSatisfiable,
-  checkSchemaSerializable,
-  objectShapeKeys,
-} from './schema-rules.js';
+import type { PortabilityOptions } from './portability-rules.js';
+import { checkHeaderDesignations, lintSchemaRoot, objectShapeKeys } from './schema-rules.js';
 
 /**
  * Runs all lint rules against a single tool definition.
@@ -68,49 +61,22 @@ export function lintToolDefinition(
 
   // Input schema: a ZodObject, or a discriminated union of them for a
   // multi-mode tool; serializable to JSON Schema either way.
-  const inputCheck = checkIsZodObject(d?.input, 'input', 'tool', displayName, {
+  const inputRoot = lintSchemaRoot(d?.input, 'input', 'tool', displayName, {
     allowDiscriminatedUnion: true,
+    portability,
   });
-  if (inputCheck) {
-    diagnostics.push(inputCheck);
-  } else {
-    diagnostics.push(...checkFieldDescriptions(d?.input, 'input', 'tool', displayName));
-    const inputSerial = checkSchemaSerializable(d?.input, 'input', 'tool', displayName);
-    if (inputSerial) {
-      diagnostics.push(inputSerial);
-    } else {
-      diagnostics.push(...checkSchemaSatisfiable(d?.input, 'input', 'tool', displayName));
-      const designations = checkHeaderDesignations(d?.input, 'input', 'tool', displayName);
-      if (designations) diagnostics.push(designations);
-      if (portability) {
-        diagnostics.push(
-          ...lintSchemaPortability(d?.input, 'input', 'tool', displayName, portability),
-        );
-      }
-    }
+  diagnostics.push(...inputRoot.diagnostics);
+  if (inputRoot.serializable) {
+    const designations = checkHeaderDesignations(d?.input, 'input', 'tool', displayName);
+    if (designations) diagnostics.push(designations);
   }
 
   // Output schema: must be ZodObject, serializable to JSON Schema
-  const outputCheck = checkIsZodObject(d?.output, 'output', 'tool', displayName);
-  if (outputCheck) {
-    diagnostics.push(outputCheck);
-  } else {
-    diagnostics.push(...checkFieldDescriptions(d?.output, 'output', 'tool', displayName));
-    const outputSerial = checkSchemaSerializable(d?.output, 'output', 'tool', displayName);
-    if (outputSerial) {
-      diagnostics.push(outputSerial);
-    } else {
-      diagnostics.push(...checkSchemaSatisfiable(d?.output, 'output', 'tool', displayName));
-      if (portability) {
-        diagnostics.push(
-          ...lintSchemaPortability(d?.output, 'output', 'tool', displayName, portability),
-        );
-      }
-    }
-    // Format parity: skip when output isn't serializable (synthetic sample may misbehave).
-    if (!outputSerial && typeof d?.format === 'function') {
-      diagnostics.push(...lintFormatParity(d, displayName));
-    }
+  const outputRoot = lintSchemaRoot(d?.output, 'output', 'tool', displayName, { portability });
+  diagnostics.push(...outputRoot.diagnostics);
+  // Format parity: skip when output isn't serializable (synthetic sample may misbehave).
+  if (outputRoot.serializable && typeof d?.format === 'function') {
+    diagnostics.push(...lintFormatParity(d, displayName));
   }
 
   // Enrichment block: shape, output-key collisions, and the advisory nudge for
