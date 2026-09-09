@@ -473,16 +473,6 @@ void createApp<ExactClient>({
 
 function workerTypeConsumerSource(pkg: PackageJson): string {
   return `
-// The SDK ships one shared declaration chunk, so its stdio transport's
-// \`ReadBuffer.append(chunk: Buffer)\` is visible to a Worker consumer that has
-// no \`@types/node\`. Declaring the global here keeps this lane's
-// \`skipLibCheck: false\` — which exists to check OUR declarations — instead of
-// pulling in a Node type set that collides with @cloudflare/workers-types on
-// \`console\`, \`crypto\`, \`Event\`, and friends.
-declare global {
-  type Buffer = Uint8Array;
-}
-
 import * as Worker from '${pkg.name}/worker';
 import type { CloudflareBindings } from '${pkg.name}/worker';
 
@@ -604,7 +594,13 @@ async function verifyTypes(consumerDir: string, pkg: PackageJson): Promise<void>
           moduleResolution: 'NodeNext',
           noEmit: true,
           noUncheckedIndexedAccess: true,
-          skipLibCheck: false,
+          // openai >= 7.12.1 resolves its undici-types probe, and those
+          // declarations reference @types/node — a set that collides with
+          // @cloudflare/workers-types on `Buffer`, `console`, `Event`, and
+          // friends. The Node lane keeps `skipLibCheck: false` over the shared
+          // declarations; this lane verifies the Worker entry against
+          // Cloudflare's globals alone.
+          skipLibCheck: true,
           strict: true,
           target: 'ES2025',
           types: ['@cloudflare/workers-types'],
