@@ -11,6 +11,7 @@ import type { Context } from 'hono';
 
 import type { ServerManifest } from '@/core/serverManifest.js';
 import type { AuthStrategy } from '@/mcp-server/transports/auth/strategies/authStrategy.js';
+import { resolvePublicOrigin } from '@/mcp-server/transports/http/publicOrigin.js';
 import { logger } from '@/utils/internal/logger.js';
 import { requestContextService, withExtra } from '@/utils/internal/requestContext.js';
 
@@ -80,7 +81,7 @@ export function createLandingPageHandler(
     const context = requestContextService.createRequestContext({
       operation: 'landingPageHandler',
     });
-    const baseUrl = publicUrl ?? new URL(c.req.url).origin;
+    const baseUrl = resolvePublicOrigin(publicUrl, c.req.url);
 
     let isAuthenticated = false;
     if (verifier) {

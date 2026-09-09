@@ -12,6 +12,7 @@ import type { StatusCode, UnofficialStatusCode } from 'hono/utils/http-status';
 
 import { config } from '@/config/index.js';
 import type { HonoNodeBindings } from '@/mcp-server/transports/http/httpTypes.js';
+import { resolvePublicOrigin } from '@/mcp-server/transports/http/publicOrigin.js';
 import { JsonRpcErrorCode, McpError } from '@/types-global/errors.js';
 import { ErrorHandler } from '@/utils/internal/error-handler/errorHandler.js';
 import { logger } from '@/utils/internal/logger.js';
@@ -110,7 +111,7 @@ export const httpErrorHandler = async <TBindings extends object = HonoNodeBindin
       // /.well-known/oauth-protected-resource is always mounted regardless of auth mode.
       // https://datatracker.ietf.org/doc/html/rfc9728#section-7
       {
-        const origin = (config.mcpPublicUrl ?? new URL(c.req.url).origin).replace(/\/$/, '');
+        const origin = resolvePublicOrigin(config.mcpPublicUrl, c.req.url);
         const resourceMetadataUrl = `${origin}/.well-known/oauth-protected-resource`;
         c.header(
           'WWW-Authenticate',

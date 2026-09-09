@@ -166,15 +166,6 @@ describe('TransportManager', () => {
       // HTTP transport receives factory — does NOT eagerly create an instance
       expect(mockCreateMcpServer).not.toHaveBeenCalled();
     });
-
-    it('should store server instance after successful start', async () => {
-      const manager = new TransportManager(config, logger, mockCreateMcpServer, defaultMeta);
-      await manager.start();
-
-      const server = manager.getServer();
-      expect(server).toBeDefined();
-      expect(server).not.toBeNull();
-    });
   });
 
   // -------------------------------------------------------------------------
@@ -301,30 +292,6 @@ describe('TransportManager', () => {
       const freshManager = new TransportManager(config, logger, mockCreateMcpServer, defaultMeta);
 
       await expect(freshManager.stop('SIGTERM')).resolves.toBeUndefined();
-    });
-
-    it('clears the stored server instance', async () => {
-      const manager = new TransportManager(config, logger, mockCreateMcpServer, defaultMeta);
-      await manager.start();
-      await manager.stop('SIGINT');
-
-      expect(manager.getServer()).toBeNull();
-    });
-  });
-
-  describe('getServer', () => {
-    it('should return null before start is called', () => {
-      const freshManager = new TransportManager(config, logger, mockCreateMcpServer, defaultMeta);
-
-      expect(freshManager.getServer()).toBeNull();
-    });
-
-    it('should return server instance after start', async () => {
-      const manager = new TransportManager(config, logger, mockCreateMcpServer, defaultMeta);
-      await manager.start();
-
-      const server = manager.getServer();
-      expect(server).not.toBeNull();
     });
   });
 });

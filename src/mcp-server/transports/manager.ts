@@ -8,7 +8,6 @@ import type { AppConfig as AppConfigType } from '@/config/index.js';
 import type { ServerManifest } from '@/core/serverManifest.js';
 import { HeartbeatMonitor } from '@/mcp-server/transports/heartbeat.js';
 import { startHttpTransport } from '@/mcp-server/transports/http/httpServer.js';
-import type { TransportServer } from '@/mcp-server/transports/ITransport.js';
 import {
   startStdioTransport,
   stopStdioTransport,
@@ -19,7 +18,6 @@ import type { RequestContext } from '@/utils/internal/requestContext.js';
 import { requestContextService } from '@/utils/internal/requestContext.js';
 
 export class TransportManager {
-  private serverInstance: TransportServer | null = null;
   private shutdown: ((context: RequestContext) => Promise<void>) | null = null;
   private heartbeat: HeartbeatMonitor | null = null;
 
@@ -47,7 +45,6 @@ export class TransportManager {
         this.manifest,
         this.bus,
       );
-      this.serverInstance = handle.server;
       this.shutdown = (ctx) => handle.stop(ctx);
     } else if (this.config.mcpTransportType === 'stdio') {
       // `serveStdio` owns the era decision and pins one instance for the
@@ -57,7 +54,6 @@ export class TransportManager {
         if (requestContext.era === 'legacy') this.startStdioHeartbeat(mcpServer, context);
         return mcpServer;
       }, context);
-      this.serverInstance = handle;
 
       this.shutdown = async (ctx) => {
         this.heartbeat?.stop();
@@ -111,11 +107,6 @@ export class TransportManager {
 
     await this.shutdown(context);
 
-    this.serverInstance = null;
     this.shutdown = null;
-  }
-
-  getServer(): TransportServer | null {
-    return this.serverInstance;
   }
 }

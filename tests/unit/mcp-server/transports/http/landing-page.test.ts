@@ -71,7 +71,6 @@ function stubConfig(overrides: Partial<AppConfig> = {}): AppConfig {
 function makeTool(name: string, extra: Partial<ManifestTool> = {}): ManifestTool {
   return {
     name,
-    title: name,
     description: `Description of ${name}`,
     isApp: false,
     requiredFields: [],
@@ -82,7 +81,6 @@ function makeTool(name: string, extra: Partial<ManifestTool> = {}): ManifestTool
 function makeResource(name: string, extra: Partial<ManifestResource> = {}): ManifestResource {
   return {
     name,
-    title: name,
     description: `Description of ${name}`,
     uriTemplate: `example://${name}/{id}`,
     ...extra,
@@ -92,7 +90,6 @@ function makeResource(name: string, extra: Partial<ManifestResource> = {}): Mani
 function makePrompt(name: string, extra: Partial<ManifestPrompt> = {}): ManifestPrompt {
   return {
     name,
-    title: name,
     description: `Description of ${name}`,
     args: [],
     ...extra,

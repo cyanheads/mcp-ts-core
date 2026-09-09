@@ -14,6 +14,7 @@
 import type { Context } from 'hono';
 
 import type { ServerManifest } from '@/core/serverManifest.js';
+import { resolvePublicOrigin } from '@/mcp-server/transports/http/publicOrigin.js';
 import { logger } from '@/utils/internal/logger.js';
 import { requestContextService, withExtra } from '@/utils/internal/requestContext.js';
 
@@ -123,7 +124,7 @@ export function createServerCardHandler(manifest: ServerManifest) {
       operation: 'serverCardHandler',
     });
 
-    const origin = manifest.transport.publicUrl ?? new URL(c.req.url).origin;
+    const origin = resolvePublicOrigin(manifest.transport.publicUrl, c.req.url);
     const card = buildServerCard(manifest, origin);
 
     logger.debug(

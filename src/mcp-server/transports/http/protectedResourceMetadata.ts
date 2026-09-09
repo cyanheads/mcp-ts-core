@@ -13,6 +13,7 @@
 import type { Context } from 'hono';
 
 import { config } from '@/config/index.js';
+import { resolvePublicOrigin } from '@/mcp-server/transports/http/publicOrigin.js';
 import { logger } from '@/utils/internal/logger.js';
 import { requestContextService, withExtra } from '@/utils/internal/requestContext.js';
 
@@ -33,7 +34,7 @@ export function protectedResourceMetadataHandler(c: Context): Response {
     operation: 'protectedResourceMetadataHandler',
   });
 
-  const origin = (config.mcpPublicUrl ?? new URL(c.req.url).origin).replace(/\/$/, '');
+  const origin = resolvePublicOrigin(config.mcpPublicUrl, c.req.url);
   const resource = config.mcpServerResourceIdentifier ?? config.oauthAudience ?? `${origin}/mcp`;
 
   const metadata: Record<string, unknown> = {
