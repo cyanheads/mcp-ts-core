@@ -1,6 +1,6 @@
 # mcp-ts-core - Directory Structure
 
-Generated on: 2026-09-08 09:58:03
+Generated on: 2026-09-09 06:33:12
 
 ```text
 mcp-ts-core/
@@ -250,6 +250,8 @@ mcp-ts-core/
 │   │   └── SKILL.md
 │   ├── release-and-publish/
 │   │   └── SKILL.md
+│   ├── release-pr-review/
+│   │   └── SKILL.md
 │   ├── report-issue-framework/
 │   │   └── SKILL.md
 │   ├── report-issue-local/
@@ -361,6 +363,7 @@ mcp-ts-core/
 │   │   │   │   ├── httpTransport.ts
 │   │   │   │   ├── httpTypes.ts
 │   │   │   │   ├── protectedResourceMetadata.ts
+│   │   │   │   ├── publicOrigin.ts
 │   │   │   │   ├── robotsTxt.ts
 │   │   │   │   ├── serverCard.ts
 │   │   │   │   ├── sessionIdUtils.ts
@@ -368,9 +371,9 @@ mcp-ts-core/
 │   │   │   ├── stdio/
 │   │   │   │   └── stdioTransport.ts
 │   │   │   ├── heartbeat.ts
-│   │   │   ├── ITransport.ts
 │   │   │   └── manager.ts
 │   │   ├── cacheHints.ts
+│   │   ├── handlerContext.ts
 │   │   ├── inputRequired.ts
 │   │   ├── notifications.ts
 │   │   ├── server.ts
@@ -401,9 +404,8 @@ mcp-ts-core/
 │   │   ├── llm/
 │   │   │   ├── core/
 │   │   │   │   └── ILlmProvider.ts
-│   │   │   ├── providers/
-│   │   │   │   └── openrouter.provider.ts
-│   │   │   └── types.ts
+│   │   │   └── providers/
+│   │   │       └── openrouter.provider.ts
 │   │   ├── mirror/
 │   │   │   ├── core/
 │   │   │   │   ├── defineMirror.ts
@@ -427,6 +429,7 @@ mcp-ts-core/
 │   ├── storage/
 │   │   ├── core/
 │   │   │   ├── IStorageProvider.ts
+│   │   │   ├── providerHelpers.ts
 │   │   │   ├── storageFactory.ts
 │   │   │   ├── StorageService.ts
 │   │   │   └── storageValidation.ts
@@ -464,7 +467,6 @@ mcp-ts-core/
 │   │   │   │   ├── mappings.ts
 │   │   │   │   └── types.ts
 │   │   │   ├── encoding.ts
-│   │   │   ├── health.ts
 │   │   │   ├── lazyImport.ts
 │   │   │   ├── logger.ts
 │   │   │   ├── performance.ts
@@ -501,7 +503,8 @@ mcp-ts-core/
 │   │   │   ├── idGenerator.ts
 │   │   │   ├── index.ts
 │   │   │   ├── rateLimiter.ts
-│   │   │   └── sanitization.ts
+│   │   │   ├── sanitization.ts
+│   │   │   └── sensitiveFields.ts
 │   │   ├── telemetry/
 │   │   │   ├── attributes.ts
 │   │   │   ├── index.ts
@@ -749,6 +752,7 @@ mcp-ts-core/
 │   │   │   │   ├── utils/
 │   │   │   │   │   ├── deferredInputSchema.test.ts
 │   │   │   │   │   ├── header-param.test.ts
+│   │   │   │   │   ├── renderToolContent.test.ts
 │   │   │   │   │   ├── schemaShape.test.ts
 │   │   │   │   │   ├── toolDefinition.test.ts
 │   │   │   │   │   ├── toolHandlerFactory.telemetry.test.ts
@@ -780,6 +784,7 @@ mcp-ts-core/
 │   │   │   │   │   ├── httpTransport.test.ts
 │   │   │   │   │   ├── landing-page.test.ts
 │   │   │   │   │   ├── protectedResourceMetadata.test.ts
+│   │   │   │   │   ├── publicOrigin.test.ts
 │   │   │   │   │   ├── robotsTxt.test.ts
 │   │   │   │   │   ├── serverCard.test.ts
 │   │   │   │   │   ├── sessionIdUtils.runtime.test.ts
@@ -840,7 +845,6 @@ mcp-ts-core/
 │   │   │   │   └── sqliteMirrorStore.test.ts
 │   │   │   └── speech/
 │   │   │       ├── core/
-│   │   │       │   ├── ISpeechProvider.test.ts
 │   │   │       │   ├── speechMetrics.test.ts
 │   │   │       │   └── SpeechService.test.ts
 │   │   │       └── providers/
@@ -850,6 +854,7 @@ mcp-ts-core/
 │   │   │   └── field-test-helper.test.ts
 │   │   ├── storage/
 │   │   │   ├── core/
+│   │   │   │   ├── providerHelpers.test.ts
 │   │   │   │   ├── storageFactory.test.ts
 │   │   │   │   ├── storageValidation.lifecycle.test.ts
 │   │   │   │   └── storageValidation.test.ts
@@ -900,11 +905,10 @@ mcp-ts-core/
 │   │   │   │   ├── errorHandler.metrics.test.ts
 │   │   │   │   ├── errorHandler.unit.test.ts
 │   │   │   │   ├── execution-span-context.test.ts
-│   │   │   │   ├── health.test.ts
 │   │   │   │   ├── lazyImport.test.ts
 │   │   │   │   ├── logger.preInit.test.ts
 │   │   │   │   ├── logger.test.ts
-│   │   │   │   ├── performance.init.test.ts
+│   │   │   │   ├── performance.nowMs.test.ts
 │   │   │   │   ├── performance.test.ts
 │   │   │   │   ├── requestContext.test.ts
 │   │   │   │   ├── runtime.test.ts
@@ -944,7 +948,8 @@ mcp-ts-core/
 │   │   │   │   ├── rateLimiter.metrics.test.ts
 │   │   │   │   ├── rateLimiter.test.ts
 │   │   │   │   ├── sanitization.property.test.ts
-│   │   │   │   └── sanitization.test.ts
+│   │   │   │   ├── sanitization.test.ts
+│   │   │   │   └── sensitiveFields.test.ts
 │   │   │   ├── telemetry/
 │   │   │   │   ├── attributes.test.ts
 │   │   │   │   ├── index.test.ts

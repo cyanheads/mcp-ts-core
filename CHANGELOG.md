@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.12.8](changelog/0.12.x/0.12.8.md) — 2026-09-09 · ⚠️ Breaking
+
+Releases run through a gated release PR, runInContext re-establishes the span it names, and the config, services, and utils surfaces drop fields that were parsed and never read — including MCP_RESPONSE_VERBOSITY and the OAUTH_PROXY_* block.
+
 ## [0.12.7](changelog/0.12.x/0.12.7.md) — 2026-09-08
 
 Argument rejections now carry the structured error envelope, classified as InvalidParams, on every transport. The Node and workerd type environments are checked as separate TypeScript programs, which lifts the @cloudflare/workers-types hold.
