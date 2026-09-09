@@ -596,6 +596,24 @@ describe('OpenTelemetry Tracing', () => {
       expect(traceUtils.runDetached(() => 'bound')).toBe('bound');
     });
 
+    test('runInContext re-establishes the span the context names, then restores the caller', () => {
+      const ctx: RequestContext = {
+        requestId: 'test',
+        timestamp: Date.now() as any,
+        operation: 'test',
+        traceId: fakeSpanContext.traceId,
+        spanId: fakeSpanContext.spanId,
+      };
+
+      traceUtils.runInContext(ctx, () => {
+        const active = trace.getActiveSpan()?.spanContext();
+        expect(active?.traceId).toBe(fakeSpanContext.traceId);
+        expect(active?.spanId).toBe(fakeSpanContext.spanId);
+      });
+
+      expect(trace.getActiveSpan()).toBeUndefined();
+    });
+
     /**
      * The regression case. Async work started inside an active span inherits it
      * through ALS — that is how binding a server inside the startup span pinned

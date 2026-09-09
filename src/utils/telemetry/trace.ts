@@ -9,7 +9,9 @@ import {
   propagation,
   ROOT_CONTEXT,
   type Span,
+  type SpanContext,
   SpanStatusCode,
+  TraceFlags,
   trace,
 } from '@opentelemetry/api';
 
@@ -200,16 +202,14 @@ export async function withSpan<T>(
 }
 
 /**
- * Runs a function within the currently active OpenTelemetry context.
- * Useful for carrying the active context across async boundaries (e.g., `setTimeout`, `queueMicrotask`).
+ * Runs a function with the span `ctx` names re-established as the active
+ * OpenTelemetry context, so spans opened inside `fn` after an async hop
+ * (`setTimeout`, `queueMicrotask`) parent to that span instead of starting a
+ * new trace. The span is not recreated — its `traceId`/`spanId` become the
+ * parent context. If `ctx` has no trace IDs, `fn` is called directly.
  *
- * **Limitation:** When `ctx` contains trace IDs, this function executes within the
- * current active context rather than restoring `ctx`'s specific span context.
- * Full span restoration would require span recreation, which this utility intentionally avoids.
- * If `ctx` has no trace IDs, `fn` is called directly without any context wrapping.
- *
- * @param ctx - RequestContext containing trace IDs; if missing or lacking IDs, `fn` runs directly
- * @param fn - Function to execute within the active OTel context
+ * @param ctx - RequestContext carrying `traceId` and `spanId`; if missing or lacking IDs, `fn` runs directly
+ * @param fn - Function to execute under the re-established span context
  * @returns Result of `fn`
  *
  * @example
@@ -224,15 +224,17 @@ export async function withSpan<T>(
  * ```
  */
 export function runInContext<T>(ctx: RequestContext | undefined, fn: () => T): T {
-  // If no trace context, run directly
-  if (!ctx?.traceId || !ctx?.spanId) {
-    return fn();
-  }
+  if (!ctx?.traceId || !ctx?.spanId) return fn();
 
-  // Execute within the active context
-  // Note: Full context restoration would require span recreation
-  // This simplified version maintains execution but doesn't create new spans
-  return otContext.with(otContext.active(), fn);
+  // Re-establish the span `ctx` names as the active one, so spans opened
+  // inside `fn` (after a `setTimeout`, in a queued task) parent to it rather
+  // than starting a new trace.
+  const spanContext: SpanContext = {
+    traceId: ctx.traceId,
+    spanId: ctx.spanId,
+    traceFlags: TraceFlags.SAMPLED,
+  };
+  return otContext.with(trace.setSpanContext(otContext.active(), spanContext), fn);
 }
 
 /**
