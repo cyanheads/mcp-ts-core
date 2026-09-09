@@ -852,27 +852,3 @@ export async function createApp<TSupabaseClient extends object = SupabaseClientH
 
   return { services: coreServices, shutdown };
 }
-
-// ---------------------------------------------------------------------------
-// Convenience re-exports from the main entry point
-// ---------------------------------------------------------------------------
-
-export { z } from 'zod';
-export type { Context, ContextInputs, ContextLogger, ContextState } from '@/core/context.js';
-export type { PromptDefinition } from '@/mcp-server/prompts/utils/promptDefinition.js';
-export { prompt } from '@/mcp-server/prompts/utils/promptDefinition.js';
-export type {
-  AnyResourceDefinition,
-  ResourceDefinition,
-} from '@/mcp-server/resources/utils/resourceDefinition.js';
-export { resource } from '@/mcp-server/resources/utils/resourceDefinition.js';
-export type {
-  AnyToolDefinition,
-  DisabledMetadata,
-  ToolAnnotations,
-  ToolDefinition,
-} from '@/mcp-server/tools/utils/toolDefinition.js';
-export {
-  disabledTool,
-  tool,
-} from '@/mcp-server/tools/utils/toolDefinition.js';

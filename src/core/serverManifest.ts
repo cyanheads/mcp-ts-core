@@ -296,17 +296,13 @@ export interface ManifestTool {
   requiredFields: string[];
   /** View-source URL; auto-derived from `landing.repoRoot` or per-definition override. */
   sourceUrl?: string;
-  title: string;
 }
 
 export interface ManifestResource {
-  annotations?: Record<string, unknown>;
-  auth?: string[];
   description: string;
   mimeType?: string;
   name: string;
   sourceUrl?: string;
-  title: string;
   uriTemplate: string;
 }
 
@@ -321,7 +317,6 @@ export interface ManifestPrompt {
   description: string;
   name: string;
   sourceUrl?: string;
-  title: string;
 }
 
 export interface ManifestDefinitions {
@@ -399,14 +394,6 @@ export function detectGitHubRepo(url: string | undefined): GitHubRepo | undefine
   const [, owner, repo] = match;
   if (!owner || !repo) return;
   return { url: `https://github.com/${owner}/${repo}`, owner, repo };
-}
-
-/** Converts snake_case or kebab-case to Title Case. */
-export function deriveTitleFromName(name: string): string {
-  return name
-    .replace(/[_-]/g, ' ')
-    .replace(/\b\w/g, (ch) => ch.toUpperCase())
-    .trim();
 }
 
 /** snake_case → kebab-case (for source-link path derivation). */
@@ -604,7 +591,6 @@ export function buildServerManifest(input: BuildServerManifestInput): ServerMani
 
     return {
       name,
-      title: d.title ?? d.annotations?.title ?? deriveTitleFromName(name),
       description: d.description ?? '',
       ...(d.annotations && { annotations: d.annotations as Record<string, unknown> }),
       isApp: isMcpAppTool(def),
@@ -623,12 +609,9 @@ export function buildServerManifest(input: BuildServerManifestInput): ServerMani
 
     return {
       name,
-      title: def.title ?? deriveTitleFromName(name),
       description: def.description ?? '',
       uriTemplate: def.uriTemplate ?? '',
       ...(def.mimeType && { mimeType: def.mimeType }),
-      ...(def.annotations && { annotations: def.annotations as Record<string, unknown> }),
-      ...(def.auth && def.auth.length > 0 && { auth: def.auth }),
       ...(sourceUrl && { sourceUrl }),
     };
   });
@@ -640,7 +623,6 @@ export function buildServerManifest(input: BuildServerManifestInput): ServerMani
 
     return {
       name,
-      title: deriveTitleFromName(name),
       description: def.description ?? '',
       args,
       ...(sourceUrl && { sourceUrl }),
@@ -774,20 +756,13 @@ function extractPromptArgs(schema: unknown): ManifestPromptArg[] {
   if (!schema || typeof schema !== 'object') return [];
   try {
     const asObj = schema as {
-      shape?: Record<
-        string,
-        {
-          isOptional?: () => boolean;
-          description?: string;
-          _def?: { description?: string };
-        }
-      >;
+      shape?: Record<string, { isOptional?: () => boolean; description?: string }>;
     };
     if (!asObj.shape) return [];
     const args: ManifestPromptArg[] = [];
     for (const [name, field] of Object.entries(asObj.shape)) {
       const required = typeof field?.isOptional === 'function' ? !field.isOptional() : true;
-      const description = field?.description ?? field?._def?.description;
+      const description = field?.description;
       args.push({ name, required, ...(description && { description }) });
     }
     return args;

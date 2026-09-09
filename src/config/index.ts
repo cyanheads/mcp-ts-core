@@ -124,10 +124,6 @@ const ConfigSchema = z
       emptyStringAsUndefined,
       z.enum(['stateless', 'stateful', 'auto']).default('auto'),
     ),
-    mcpResponseVerbosity: z.preprocess(
-      emptyStringAsUndefined,
-      z.enum(['minimal', 'standard', 'full']).default('standard'),
-    ),
     mcpHttpPort: z.coerce.number().min(0).max(65535).default(3010),
     mcpHttpHost: z.string().default('127.0.0.1'),
     mcpHttpEndpointPath: z.string().default('/mcp'),
@@ -226,20 +222,12 @@ const ConfigSchema = z
     llmDefaultMaxTokens: z.coerce.number().optional(),
     llmDefaultTopK: z.coerce.number().optional(),
     llmDefaultMinP: z.coerce.number().optional(),
-    oauthProxy: z
-      .object({
-        authorizationUrl: z.url().optional(),
-        tokenUrl: z.url().optional(),
-        revocationUrl: z.url().optional(),
-        issuerUrl: z.url().optional(),
-        serviceDocumentationUrl: z.url().optional(),
-        defaultClientRedirectUris: z.array(z.string()).optional(),
-      })
-      .optional(),
     supabase: z
       .object({
         url: z.url(),
-        anonKey: z.string(),
+        /** For a server's own public client; the framework's storage provider never reads it. */
+        anonKey: z.string().optional(),
+        /** Required by the `supabase` storage provider (admin client). */
         serviceRoleKey: z.string().optional(),
       })
       .optional(),
@@ -457,7 +445,6 @@ const parseConfig = (envOverrides?: Record<string, string | undefined>) => {
     environment: env.NODE_ENV,
     mcpTransportType: env.MCP_TRANSPORT_TYPE,
     mcpSessionMode: env.MCP_SESSION_MODE,
-    mcpResponseVerbosity: env.MCP_RESPONSE_VERBOSITY,
     mcpHttpPort: env.MCP_HTTP_PORT,
     mcpHttpHost: env.MCP_HTTP_HOST,
     mcpHttpEndpointPath: env.MCP_HTTP_ENDPOINT_PATH,
@@ -498,27 +485,13 @@ const parseConfig = (envOverrides?: Record<string, string | undefined>) => {
     llmDefaultMaxTokens: env.LLM_DEFAULT_MAX_TOKENS,
     llmDefaultTopK: env.LLM_DEFAULT_TOP_K,
     llmDefaultMinP: env.LLM_DEFAULT_MIN_P,
-    oauthProxy:
-      env.OAUTH_PROXY_AUTHORIZATION_URL || env.OAUTH_PROXY_TOKEN_URL
-        ? {
-            authorizationUrl: env.OAUTH_PROXY_AUTHORIZATION_URL,
-            tokenUrl: env.OAUTH_PROXY_TOKEN_URL,
-            revocationUrl: env.OAUTH_PROXY_REVOCATION_URL,
-            issuerUrl: env.OAUTH_PROXY_ISSUER_URL,
-            serviceDocumentationUrl: env.OAUTH_PROXY_SERVICE_DOCUMENTATION_URL,
-            defaultClientRedirectUris: env.OAUTH_PROXY_DEFAULT_CLIENT_REDIRECT_URIS?.split(',')
-              .map((uri) => uri.trim())
-              .filter(Boolean),
-          }
-        : undefined,
-    supabase:
-      env.SUPABASE_URL && env.SUPABASE_ANON_KEY
-        ? {
-            url: env.SUPABASE_URL,
-            anonKey: env.SUPABASE_ANON_KEY,
-            serviceRoleKey: env.SUPABASE_SERVICE_ROLE_KEY,
-          }
-        : undefined,
+    supabase: env.SUPABASE_URL
+      ? {
+          url: env.SUPABASE_URL,
+          anonKey: env.SUPABASE_ANON_KEY,
+          serviceRoleKey: env.SUPABASE_SERVICE_ROLE_KEY,
+        }
+      : undefined,
     storage: {
       providerType: env.STORAGE_PROVIDER_TYPE,
       filesystemPath: env.STORAGE_FILESYSTEM_PATH,

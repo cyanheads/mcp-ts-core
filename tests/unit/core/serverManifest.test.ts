@@ -9,7 +9,6 @@ import {
   buildServerManifest,
   classifyPreRelease,
   deriveSourceUrl,
-  deriveTitleFromName,
   detectGitHubRepo,
   GITHUB_REPO_ROOT_PATTERN,
   isSafeCssColor,
@@ -92,18 +91,6 @@ describe('classifyPreRelease', () => {
     const result = classifyPreRelease(version);
     expect(result.isPreRelease).toBe(expectedPre);
     expect(result.label).toBe(expectedLabel);
-  });
-});
-
-describe('deriveTitleFromName', () => {
-  test.each([
-    ['my_tool', 'My Tool'],
-    ['user_create_account', 'User Create Account'],
-    ['kebab-case-name', 'Kebab Case Name'],
-    ['simple', 'Simple'],
-    ['', ''],
-  ])('%s → %s', (input, expected) => {
-    expect(deriveTitleFromName(input)).toBe(expected);
   });
 });
 
@@ -310,18 +297,15 @@ describe('buildServerManifest — baseline', () => {
       prompts: [reviewPrompt],
     });
 
-    expect(manifest.definitions.resources[0]).toMatchObject({
+    expect(manifest.definitions.resources[0]).toEqual({
       name: 'inventory_item',
-      title: 'Inventory Item',
       description: 'Retrieve one inventory item.',
       uriTemplate: 'inventory://items/{itemId}',
       mimeType: 'application/json',
-      annotations: { priority: 0.9 },
-      auth: ['inventory:read'],
+      sourceUrl: expect.stringContaining('/resources/definitions/inventory-item.resource.ts'),
     });
     expect(manifest.definitions.prompts[0]).toMatchObject({
       name: 'code_review',
-      title: 'Code Review',
       description: 'Review a patch.',
       args: [
         { name: 'diff', required: true, description: 'Patch diff' },

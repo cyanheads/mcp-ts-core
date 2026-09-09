@@ -155,34 +155,8 @@ describe('Configuration Service', () => {
     expect(config.storage.filesystemPath).toBe('/tmp/test-storage');
   });
 
-  it('should build oauth proxy configuration when env values are provided', async () => {
-    process.env.OAUTH_PROXY_AUTHORIZATION_URL = 'https://auth.example.com';
-    process.env.OAUTH_PROXY_TOKEN_URL = 'https://token.example.com';
-    process.env.OAUTH_PROXY_REVOCATION_URL = 'https://revoke.example.com';
-    process.env.OAUTH_PROXY_ISSUER_URL = 'https://issuer.example.com';
-    process.env.OAUTH_PROXY_SERVICE_DOCUMENTATION_URL = 'https://docs.example.com';
-    process.env.OAUTH_PROXY_DEFAULT_CLIENT_REDIRECT_URIS =
-      ' https://app.example.com/callback , https://app.example.com/alt ';
-
-    const { parseConfig } = await import('../../src/config/index.js');
-    const config = parseConfig();
-
-    expect(config.oauthProxy).toEqual({
-      authorizationUrl: 'https://auth.example.com',
-      tokenUrl: 'https://token.example.com',
-      revocationUrl: 'https://revoke.example.com',
-      issuerUrl: 'https://issuer.example.com',
-      serviceDocumentationUrl: 'https://docs.example.com',
-      defaultClientRedirectUris: [
-        'https://app.example.com/callback',
-        'https://app.example.com/alt',
-      ],
-    });
-  });
-
-  it('should add supabase configuration when url and anon key are set', async () => {
+  it('adds supabase configuration when SUPABASE_URL is set', async () => {
     process.env.SUPABASE_URL = 'https://supabase.example.com';
-    process.env.SUPABASE_ANON_KEY = 'anon-key';
     process.env.SUPABASE_SERVICE_ROLE_KEY = 'service-role-key';
 
     const { parseConfig } = await import('../../src/config/index.js');
@@ -190,9 +164,29 @@ describe('Configuration Service', () => {
 
     expect(config.supabase).toEqual({
       url: 'https://supabase.example.com',
-      anonKey: 'anon-key',
       serviceRoleKey: 'service-role-key',
     });
+  });
+
+  it('carries the optional anon key through for a server-owned public client', async () => {
+    process.env.SUPABASE_URL = 'https://supabase.example.com';
+    process.env.SUPABASE_ANON_KEY = 'anon-key';
+
+    const { parseConfig } = await import('../../src/config/index.js');
+
+    expect(parseConfig().supabase).toEqual({
+      url: 'https://supabase.example.com',
+      anonKey: 'anon-key',
+    });
+  });
+
+  it('leaves supabase unset without SUPABASE_URL', async () => {
+    process.env.SUPABASE_ANON_KEY = 'anon-key';
+    process.env.SUPABASE_SERVICE_ROLE_KEY = 'service-role-key';
+
+    const { parseConfig } = await import('../../src/config/index.js');
+
+    expect(parseConfig().supabase).toBeUndefined();
   });
 
   it('should include speech configuration for enabled providers', async () => {
