@@ -5,18 +5,12 @@
 
 import { describe, expect, it } from 'vitest';
 import {
-  getNumberProperty,
   getProperty,
-  getStringProperty,
   hasProperty,
-  hasPropertyOfType,
   isAggregateError,
   isErrorWithCode,
-  isErrorWithStatus,
-  isNumber,
   isObject,
   isRecord,
-  isString,
 } from '@/utils/types/guards.js';
 
 describe('Type Guards', () => {
@@ -116,81 +110,6 @@ describe('Type Guards', () => {
     });
   });
 
-  describe('hasPropertyOfType', () => {
-    it('should return true when property exists and matches type', () => {
-      const obj = { name: 'test', count: 42 };
-      expect(hasPropertyOfType(obj, 'name', isString)).toBe(true);
-      expect(hasPropertyOfType(obj, 'count', isNumber)).toBe(true);
-    });
-
-    it('should return false when property exists but type does not match', () => {
-      const obj = { name: 'test', count: 42 };
-      expect(hasPropertyOfType(obj, 'name', isNumber)).toBe(false);
-      expect(hasPropertyOfType(obj, 'count', isString)).toBe(false);
-    });
-
-    it('should return false when property does not exist', () => {
-      const obj = { name: 'test' };
-      expect(hasPropertyOfType(obj, 'missing', isString)).toBe(false);
-    });
-
-    it('should return false for non-objects', () => {
-      expect(hasPropertyOfType(null, 'prop', isString)).toBe(false);
-      expect(hasPropertyOfType(undefined, 'prop', isString)).toBe(false);
-    });
-
-    it('should work with custom type guards', () => {
-      const isPositive = (v: unknown): v is number => typeof v === 'number' && v > 0;
-      const obj = { positive: 42, negative: -1 };
-      expect(hasPropertyOfType(obj, 'positive', isPositive)).toBe(true);
-      expect(hasPropertyOfType(obj, 'negative', isPositive)).toBe(false);
-    });
-  });
-
-  describe('isString', () => {
-    it('should return true for strings', () => {
-      expect(isString('hello')).toBe(true);
-      expect(isString('')).toBe(true);
-      expect(isString('123')).toBe(true);
-      expect(isString(String('test'))).toBe(true);
-    });
-
-    it('should return false for non-strings', () => {
-      expect(isString(123)).toBe(false);
-      expect(isString(true)).toBe(false);
-      expect(isString(null)).toBe(false);
-      expect(isString(undefined)).toBe(false);
-      expect(isString({})).toBe(false);
-      expect(isString([])).toBe(false);
-      expect(isString(Symbol('test'))).toBe(false);
-    });
-  });
-
-  describe('isNumber', () => {
-    it('should return true for numbers', () => {
-      expect(isNumber(0)).toBe(true);
-      expect(isNumber(42)).toBe(true);
-      expect(isNumber(-1)).toBe(true);
-      expect(isNumber(3.14)).toBe(true);
-      expect(isNumber(Infinity)).toBe(true);
-      expect(isNumber(-Infinity)).toBe(true);
-    });
-
-    it('should return false for NaN', () => {
-      expect(isNumber(Number.NaN)).toBe(false);
-      expect(isNumber(0 / 0)).toBe(false);
-    });
-
-    it('should return false for non-numbers', () => {
-      expect(isNumber('123')).toBe(false);
-      expect(isNumber(true)).toBe(false);
-      expect(isNumber(null)).toBe(false);
-      expect(isNumber(undefined)).toBe(false);
-      expect(isNumber({})).toBe(false);
-      expect(isNumber([])).toBe(false);
-    });
-  });
-
   describe('isAggregateError', () => {
     it('should return true for AggregateError', () => {
       const err = new AggregateError([new Error('1'), new Error('2')], 'Test');
@@ -253,31 +172,6 @@ describe('Type Guards', () => {
     });
   });
 
-  describe('isErrorWithStatus', () => {
-    it('should return true for Error with status property', () => {
-      const err = new Error('Test');
-      (err as any).status = 404;
-      expect(isErrorWithStatus(err)).toBe(true);
-    });
-
-    it('should return true for Error with string status', () => {
-      const err = new Error('Test');
-      (err as any).status = 'NOT_FOUND';
-      expect(isErrorWithStatus(err)).toBe(true);
-    });
-
-    it('should return false for regular Error without status', () => {
-      const err = new Error('Test');
-      expect(isErrorWithStatus(err)).toBe(false);
-    });
-
-    it('should return false for non-Error objects with status', () => {
-      expect(isErrorWithStatus({ status: 404 })).toBe(false);
-      expect(isErrorWithStatus(null)).toBe(false);
-      expect(isErrorWithStatus(undefined)).toBe(false);
-    });
-  });
-
   describe('getProperty', () => {
     it('should return property value when it exists', () => {
       const obj = { name: 'test', count: 42 };
@@ -311,75 +205,6 @@ describe('Type Guards', () => {
       const sym = Symbol('test');
       const obj = { [sym]: 'value' };
       expect(getProperty(obj, sym)).toBe('value');
-    });
-  });
-
-  describe('getStringProperty', () => {
-    it('should return string value when property exists and is string', () => {
-      const obj = { name: 'test', other: 'value' };
-      expect(getStringProperty(obj, 'name')).toBe('test');
-      expect(getStringProperty(obj, 'other')).toBe('value');
-    });
-
-    it('should return undefined when property is not a string', () => {
-      const obj = { count: 42, flag: true, data: { nested: 'value' } };
-      expect(getStringProperty(obj, 'count')).toBeUndefined();
-      expect(getStringProperty(obj, 'flag')).toBeUndefined();
-      expect(getStringProperty(obj, 'data')).toBeUndefined();
-    });
-
-    it('should return undefined when property does not exist', () => {
-      const obj = { name: 'test' };
-      expect(getStringProperty(obj, 'missing')).toBeUndefined();
-    });
-
-    it('should return undefined for non-objects', () => {
-      expect(getStringProperty(null, 'prop')).toBeUndefined();
-      expect(getStringProperty(undefined, 'prop')).toBeUndefined();
-      expect(getStringProperty(123, 'prop')).toBeUndefined();
-    });
-
-    it('should handle empty strings', () => {
-      const obj = { empty: '' };
-      expect(getStringProperty(obj, 'empty')).toBe('');
-    });
-  });
-
-  describe('getNumberProperty', () => {
-    it('should return number value when property exists and is number', () => {
-      const obj = { count: 42, value: 3.14, zero: 0 };
-      expect(getNumberProperty(obj, 'count')).toBe(42);
-      expect(getNumberProperty(obj, 'value')).toBe(3.14);
-      expect(getNumberProperty(obj, 'zero')).toBe(0);
-    });
-
-    it('should return undefined for NaN values', () => {
-      const obj = { invalid: Number.NaN };
-      expect(getNumberProperty(obj, 'invalid')).toBeUndefined();
-    });
-
-    it('should handle Infinity values', () => {
-      const obj = { inf: Infinity, negInf: -Infinity };
-      expect(getNumberProperty(obj, 'inf')).toBe(Infinity);
-      expect(getNumberProperty(obj, 'negInf')).toBe(-Infinity);
-    });
-
-    it('should return undefined when property is not a number', () => {
-      const obj = { name: 'test', flag: true, data: { nested: 'value' } };
-      expect(getNumberProperty(obj, 'name')).toBeUndefined();
-      expect(getNumberProperty(obj, 'flag')).toBeUndefined();
-      expect(getNumberProperty(obj, 'data')).toBeUndefined();
-    });
-
-    it('should return undefined when property does not exist', () => {
-      const obj = { count: 42 };
-      expect(getNumberProperty(obj, 'missing')).toBeUndefined();
-    });
-
-    it('should return undefined for non-objects', () => {
-      expect(getNumberProperty(null, 'prop')).toBeUndefined();
-      expect(getNumberProperty(undefined, 'prop')).toBeUndefined();
-      expect(getNumberProperty('string', 'prop')).toBeUndefined();
     });
   });
 });

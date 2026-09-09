@@ -6,7 +6,7 @@
  * @module src/utils/internal/performance
  */
 
-import { SpanStatusCode, trace } from '@opentelemetry/api';
+import { type Span, SpanStatusCode, trace } from '@opentelemetry/api';
 
 import { config } from '@/config/index.js';
 import { isInputRequiredSignal } from '@/mcp-server/inputRequired.js';
@@ -94,32 +94,6 @@ function getActiveRequestsGauge() {
     '{requests}',
   );
   return activeRequests;
-}
-
-/**
- * @deprecated No longer needed. `globalThis.performance.now` is universally
- * available on Node ≥24 and Bun ≥1.3. Kept as a no-op export to avoid a
- * breaking change for consumers that call it during startup.
- */
-export function loadPerfHooks(): Promise<{
-  performance: { now: () => number };
-}> {
-  // performance is an ambient global declared by @types/node (perf_hooks.d.ts)
-  // and available in all supported environments (Node ≥24, Bun ≥1.3, workerd).
-  return Promise.resolve({ performance });
-}
-
-/**
- * @deprecated No longer needed. `nowMs` now delegates directly to
- * `globalThis.performance.now()`, which is universally available on Node ≥24
- * and Bun ≥1.3. This function is a no-op and will be removed in a future
- * major release.
- *
- * @returns A promise that resolves immediately.
- */
-export function initHighResTimer(_perfLoader?: typeof loadPerfHooks): Promise<void> {
-  // No-op: globalThis.performance.now is guaranteed on all supported floors.
-  return Promise.resolve();
 }
 
 /**
@@ -222,12 +196,12 @@ const toBytes = (payload: unknown): number => {
 };
 
 // ==========================================================================
-// Tool execution measurement
+// Shared measurement skeleton
 // ==========================================================================
 
 /*
- * Measured-region semantics, settled in #346 and shared by
- * {@link measureToolExecution} and {@link measureResourceExecution}.
+ * Measured-region semantics, settled in #346 and shared by every
+ * `measure*` export below.
  *
  * The measured region spans everything that decides the client-visible
  * outcome: the handler **and** the response pipeline that follows it
@@ -251,18 +225,176 @@ const toBytes = (payload: unknown): number => {
  *    form for callers with no assembly step.
  */
 
+/** The span facts every kind records the same way, under its own attribute keys. */
+interface MeasuredKind {
+  attrs: { durationMs: string; errorCode: string; inputRequired: string; success: string };
+  namespace: 'mcp-tools' | 'mcp-resources' | 'mcp-prompts';
+  spanPrefix: 'tool_execution' | 'resource_read' | 'prompt_generation';
+}
+
+/** How a measured run ended, for the kind-specific metrics and completion log. */
+interface MeasuredOutcome {
+  durationMs: number;
+  errorCategory: ErrorCategory | undefined;
+  errorCode: string | undefined;
+  /** The run ended in `input_required`: counted as a success, no output measured. */
+  inputRequired: boolean;
+  /** The domain value designated via `recordOutput`, else the callback's return value. */
+  measuredOutput: unknown;
+  ok: boolean;
+  outputBytes: number;
+}
+
+interface MeasureHooks<TContext> {
+  /** Metrics and the completion log, once the span has closed — on every outcome. */
+  onSettled: (spanContext: TContext, outcome: MeasuredOutcome) => void;
+  /** Kind-specific span attributes for a successful run, set before the span closes. */
+  onSuccess: (span: Span, outcome: MeasuredOutcome) => void;
+}
+
+/**
+ * Opens `<spanPrefix>:<name>`, runs `logic` inside it with `context` re-bound
+ * to that span, and settles the outcome the same way for every kind: an
+ * `input_required` signal is protocol control flow and counts as success
+ * (recording it as a failure would mark the span ERROR, count an error, and
+ * log `isSuccess: false` for every legitimate multi-round-trip request); an
+ * `McpError` surfaces its numeric code; anything else is `UNHANDLED_ERROR` or
+ * `UNKNOWN_ERROR`. The in-flight gauge and duration bracket the whole run.
+ */
+async function measure<TContext extends RequestContext, T>(
+  kind: MeasuredKind,
+  name: string,
+  context: TContext,
+  startAttributes: Record<string, number | string>,
+  logic: (spanContext: TContext, recordOutput: (payload: unknown) => void) => Promise<T>,
+  hooks: MeasureHooks<TContext>,
+): Promise<T> {
+  const tracer = trace.getTracer(
+    config.openTelemetry.serviceName,
+    config.openTelemetry.serviceVersion,
+  );
+
+  return await tracer.startActiveSpan(`${kind.spanPrefix}:${name}`, async (span) => {
+    // The span is active from here down, so everything below — the handler
+    // context the logic function builds and the completion log — correlates
+    // to this span rather than to whatever was active when the caller built
+    // `context`.
+    const spanContext = withActiveSpan(context);
+    const activeGauge = getActiveRequestsGauge();
+    activeGauge.add(1);
+    const t0 = nowMs();
+
+    span.setAttributes({
+      [ATTR_CODE_FUNCTION_NAME]: name,
+      [ATTR_CODE_NAMESPACE]: kind.namespace,
+      ...startAttributes,
+    });
+
+    const outcome: MeasuredOutcome = {
+      durationMs: 0,
+      errorCategory: undefined,
+      errorCode: undefined,
+      inputRequired: false,
+      measuredOutput: undefined,
+      ok: false,
+      outputBytes: 0,
+    };
+    let designatedOutput: unknown;
+    let outputDesignated = false;
+    const recordOutput = (payload: unknown): void => {
+      designatedOutput = payload;
+      outputDesignated = true;
+    };
+
+    try {
+      const result = await logic(spanContext, recordOutput);
+      outcome.ok = true;
+      outcome.measuredOutput = outputDesignated ? designatedOutput : result;
+      outcome.outputBytes = toBytes(outcome.measuredOutput);
+      span.setStatus({ code: SpanStatusCode.OK });
+      hooks.onSuccess(span, outcome);
+      return result;
+    } catch (err) {
+      if (isInputRequiredSignal(err)) {
+        outcome.ok = true;
+        outcome.inputRequired = true;
+        span.setStatus({ code: SpanStatusCode.OK });
+        span.setAttribute(kind.attrs.inputRequired, true);
+        throw err;
+      }
+
+      if (err instanceof McpError) {
+        outcome.errorCode = String(err.code);
+        outcome.errorCategory = getErrorCategory(err.code);
+      } else {
+        outcome.errorCode = err instanceof Error ? 'UNHANDLED_ERROR' : 'UNKNOWN_ERROR';
+        outcome.errorCategory = 'server';
+      }
+
+      if (err instanceof Error) span.recordException(err);
+      span.setStatus({
+        code: SpanStatusCode.ERROR,
+        message: err instanceof Error ? err.message : String(err),
+      });
+      throw err;
+    } finally {
+      activeGauge.add(-1);
+      outcome.durationMs = Math.round((nowMs() - t0) * 100) / 100;
+
+      span.setAttributes({
+        [kind.attrs.durationMs]: outcome.durationMs,
+        [kind.attrs.success]: outcome.ok,
+      });
+      if (outcome.errorCode) span.setAttribute(kind.attrs.errorCode, outcome.errorCode);
+      span.end();
+
+      hooks.onSettled(spanContext, outcome);
+    }
+  });
+}
+
+// ==========================================================================
+// Tool execution measurement
+// ==========================================================================
+
+const TOOL_KIND: MeasuredKind = {
+  attrs: {
+    durationMs: ATTR_MCP_TOOL_DURATION_MS,
+    errorCode: ATTR_MCP_TOOL_ERROR_CODE,
+    inputRequired: ATTR_MCP_TOOL_INPUT_REQUIRED,
+    success: ATTR_MCP_TOOL_SUCCESS,
+  },
+  namespace: 'mcp-tools',
+  spanPrefix: 'tool_execution',
+};
+
+/**
+ * Convention-based partial-success detection: a measured payload carrying a
+ * non-empty `failed` array — the batch response shape the design skill
+ * recommends. `batchSucceeded` is reported only when a `succeeded` array sits
+ * beside it.
+ */
+function detectPartialSuccess(
+  output: unknown,
+): { batchFailed: number; batchSucceeded: number | undefined } | undefined {
+  if (output == null || typeof output !== 'object' || Array.isArray(output)) return undefined;
+  const { failed, succeeded } = output as Record<string, unknown>;
+  if (!Array.isArray(failed) || failed.length === 0) return undefined;
+  return {
+    batchFailed: failed.length,
+    batchSucceeded: Array.isArray(succeeded) ? succeeded.length : undefined,
+  };
+}
+
 /**
  * Wraps a tool's logic function with observability: an OpenTelemetry span,
  * OTel metric counters/histogram, payload size capture, and structured log.
  *
- * The caller supplies the raw tool logic as `toolLogicFn`; this function handles
- * all instrumentation so tool handlers stay free of telemetry boilerplate.
- *
- * On success the resolved value is passed through transparently.
- * On failure the error is re-thrown after being recorded on the span and metrics;
- * `McpError` instances surface their numeric `code` as the error code attribute.
- * A failure anywhere in the callback — handler or response pipeline — is
- * recorded, and no output-size histogram is emitted for it.
+ * On success the resolved value is passed through transparently. On failure
+ * the error is re-thrown after being recorded on the span and metrics;
+ * `McpError` instances surface their numeric `code` as the error code
+ * attribute. A failure anywhere in the callback — handler or response
+ * pipeline — is recorded, and no output-size histogram is emitted for it.
  *
  * @template T - The resolved type of the tool's return value.
  * @param toolLogicFn - Async function containing the tool's business logic and
@@ -289,160 +421,78 @@ export async function measureToolExecution<T>(
   inputPayload: unknown,
   successAttributes?: () => Record<string, boolean | number | string>,
 ): Promise<T> {
-  const tracer = trace.getTracer(
-    config.openTelemetry.serviceName,
-    config.openTelemetry.serviceVersion,
-  );
-
   const { toolName } = context;
+  const inputBytes = toBytes(inputPayload);
+  let partial: ReturnType<typeof detectPartialSuccess>;
 
-  return await tracer.startActiveSpan(`tool_execution:${toolName}` as const, async (span) => {
-    // The span is active from here down, so everything below — the handler
-    // context the logic function builds and this function's own completion log
-    // — correlates to `tool_execution:*` rather than to whatever was active
-    // when the caller built `context`.
-    const spanContext = withActiveSpan(context);
-    const activeGauge = getActiveRequestsGauge();
-    activeGauge.add(1);
-
-    const t0 = nowMs();
-    const inputBytes = toBytes(inputPayload);
-    span.setAttributes({
-      [ATTR_CODE_FUNCTION_NAME]: toolName,
-      [ATTR_CODE_NAMESPACE]: 'mcp-tools',
-      [ATTR_MCP_TOOL_INPUT_BYTES]: inputBytes,
-    });
-
-    let ok = false;
-    let inputRequired = false;
-    let errorCode: string | undefined;
-    let errorCategory: ErrorCategory | undefined;
-    let outputBytes = 0;
-    let partialSuccess = false;
-    let batchSucceeded: number | undefined;
-    let batchFailed: number | undefined;
-
-    let designatedOutput: unknown;
-    let outputDesignated = false;
-    const recordOutput = (payload: unknown): void => {
-      designatedOutput = payload;
-      outputDesignated = true;
-    };
-
-    try {
-      const result = await toolLogicFn(spanContext, recordOutput);
-      ok = true;
-      const measuredOutput = outputDesignated ? designatedOutput : result;
-      outputBytes = toBytes(measuredOutput);
-
-      // Detect partial success: the measured payload contains a non-empty `failed` array.
-      // Convention-based — matches the batch response pattern recommended by the design skill.
-      if (
-        measuredOutput != null &&
-        typeof measuredOutput === 'object' &&
-        !Array.isArray(measuredOutput)
-      ) {
-        const obj = measuredOutput as Record<string, unknown>;
-        if (Array.isArray(obj.failed) && obj.failed.length > 0) {
-          partialSuccess = true;
-          batchFailed = obj.failed.length;
-          if (Array.isArray(obj.succeeded)) batchSucceeded = obj.succeeded.length;
+  return await measure(
+    TOOL_KIND,
+    toolName,
+    context,
+    { [ATTR_MCP_TOOL_INPUT_BYTES]: inputBytes },
+    toolLogicFn,
+    {
+      onSuccess: (span, outcome) => {
+        span.setAttribute(ATTR_MCP_TOOL_OUTPUT_BYTES, outcome.outputBytes);
+        partial = detectPartialSuccess(outcome.measuredOutput);
+        if (partial) {
+          span.setAttribute(ATTR_MCP_TOOL_PARTIAL_SUCCESS, true);
+          span.setAttribute(ATTR_MCP_TOOL_BATCH_FAILED, partial.batchFailed);
+          if (partial.batchSucceeded !== undefined) {
+            span.setAttribute(ATTR_MCP_TOOL_BATCH_SUCCEEDED, partial.batchSucceeded);
+          }
         }
-      }
-
-      span.setStatus({ code: SpanStatusCode.OK });
-      span.setAttribute(ATTR_MCP_TOOL_OUTPUT_BYTES, outputBytes);
-      if (partialSuccess) {
-        span.setAttribute(ATTR_MCP_TOOL_PARTIAL_SUCCESS, true);
-        if (batchFailed !== undefined) span.setAttribute(ATTR_MCP_TOOL_BATCH_FAILED, batchFailed);
-        if (batchSucceeded !== undefined)
-          span.setAttribute(ATTR_MCP_TOOL_BATCH_SUCCEEDED, batchSucceeded);
-      }
-      if (successAttributes) {
-        for (const [key, value] of Object.entries(successAttributes())) {
-          span.setAttribute(key, value);
+        if (successAttributes) {
+          for (const [key, value] of Object.entries(successAttributes())) {
+            span.setAttribute(key, value);
+          }
         }
-      }
-      return result;
-      // `ctx.requestInput(...)` unwinds the handler as a thrown signal, but the
-      // round ended in `input_required` — protocol control flow, not a failure.
-      // Recording it as one would mark the span ERROR, increment the error
-      // counter, and log `isSuccess: false` for every legitimate
-      // multi-round-trip request.
-    } catch (err) {
-      if (isInputRequiredSignal(err)) {
-        ok = true;
-        inputRequired = true;
-        span.setStatus({ code: SpanStatusCode.OK });
-        span.setAttribute(ATTR_MCP_TOOL_INPUT_REQUIRED, true);
-        throw err;
-      }
-
-      if (err instanceof McpError) {
-        errorCode = String(err.code);
-        errorCategory = getErrorCategory(err.code);
-      } else {
-        errorCode = err instanceof Error ? 'UNHANDLED_ERROR' : 'UNKNOWN_ERROR';
-        errorCategory = 'server';
-      }
-
-      if (err instanceof Error) span.recordException(err);
-      span.setStatus({
-        code: SpanStatusCode.ERROR,
-        message: err instanceof Error ? err.message : String(err),
-      });
-      throw err;
-    } finally {
-      activeGauge.add(-1);
-      const t1 = nowMs();
-      const durationMs = Math.round((t1 - t0) * 100) / 100;
-
-      span.setAttributes({
-        [ATTR_MCP_TOOL_DURATION_MS]: durationMs,
-        [ATTR_MCP_TOOL_SUCCESS]: ok,
-      });
-      if (errorCode) span.setAttribute(ATTR_MCP_TOOL_ERROR_CODE, errorCode);
-      span.end();
-
-      // Record to OTel metric instruments (durable across restarts)
-      const m = getToolMetrics();
-      const metricAttrs = { [ATTR_MCP_TOOL_NAME]: toolName, [ATTR_MCP_TOOL_SUCCESS]: ok };
-      const toolAttrs = { [ATTR_MCP_TOOL_NAME]: toolName };
-      m.toolCallCounter.add(1, metricAttrs);
-      m.toolCallDuration.record(durationMs, metricAttrs);
-      m.toolInputBytes.record(inputBytes, toolAttrs);
-      if (ok && !inputRequired) m.toolOutputBytes.record(outputBytes, toolAttrs);
-      if (!ok) {
-        m.toolCallErrors.add(1, {
-          ...toolAttrs,
-          ...(errorCategory && { [ATTR_MCP_TOOL_ERROR_CATEGORY]: errorCategory }),
-        });
-      }
-
-      // Record which parameters were supplied (top-level keys only)
-      if (inputPayload && typeof inputPayload === 'object') {
-        for (const param of Object.keys(inputPayload as Record<string, unknown>)) {
-          m.toolParamUsage.add(1, { [ATTR_MCP_TOOL_NAME]: toolName, 'mcp.tool.param': param });
+      },
+      onSettled: (spanContext, outcome) => {
+        const { durationMs, errorCategory, errorCode, inputRequired, ok, outputBytes } = outcome;
+        const m = getToolMetrics();
+        const metricAttrs = { [ATTR_MCP_TOOL_NAME]: toolName, [ATTR_MCP_TOOL_SUCCESS]: ok };
+        const toolAttrs = { [ATTR_MCP_TOOL_NAME]: toolName };
+        m.toolCallCounter.add(1, metricAttrs);
+        m.toolCallDuration.record(durationMs, metricAttrs);
+        m.toolInputBytes.record(inputBytes, toolAttrs);
+        if (ok && !inputRequired) m.toolOutputBytes.record(outputBytes, toolAttrs);
+        if (!ok) {
+          m.toolCallErrors.add(1, {
+            ...toolAttrs,
+            ...(errorCategory && { [ATTR_MCP_TOOL_ERROR_CATEGORY]: errorCategory }),
+          });
         }
-      }
 
-      logger.info(
-        TELEMETRY_LOG_MESSAGES.toolExecutionFinished,
-        withExtra(spanContext, {
-          toolName,
-          metrics: {
-            durationMs,
-            isSuccess: ok,
-            errorCode,
-            inputBytes,
-            outputBytes,
-            ...(inputRequired && { inputRequired }),
-            ...(partialSuccess && { partialSuccess, batchSucceeded, batchFailed }),
-          },
-        }),
-      );
-    }
-  });
+        // Record which parameters were supplied (top-level keys only)
+        if (inputPayload && typeof inputPayload === 'object') {
+          for (const param of Object.keys(inputPayload as Record<string, unknown>)) {
+            m.toolParamUsage.add(1, { [ATTR_MCP_TOOL_NAME]: toolName, 'mcp.tool.param': param });
+          }
+        }
+
+        logger.info(
+          TELEMETRY_LOG_MESSAGES.toolExecutionFinished,
+          withExtra(spanContext, {
+            toolName,
+            metrics: {
+              durationMs,
+              isSuccess: ok,
+              errorCode,
+              inputBytes,
+              outputBytes,
+              ...(inputRequired && { inputRequired }),
+              ...(partial && {
+                partialSuccess: true,
+                batchSucceeded: partial.batchSucceeded,
+                batchFailed: partial.batchFailed,
+              }),
+            },
+          }),
+        );
+      },
+    },
+  );
 }
 
 // ==========================================================================
@@ -479,10 +529,21 @@ function getResourceMetrics() {
   return { resourceReadCounter, resourceReadDuration, resourceReadErrors, resourceOutputBytes };
 }
 
+const RESOURCE_KIND: MeasuredKind = {
+  attrs: {
+    durationMs: ATTR_MCP_RESOURCE_DURATION_MS,
+    errorCode: ATTR_MCP_RESOURCE_ERROR_CODE,
+    inputRequired: ATTR_MCP_RESOURCE_INPUT_REQUIRED,
+    success: ATTR_MCP_RESOURCE_SUCCESS,
+  },
+  namespace: 'mcp-resources',
+  spanPrefix: 'resource_read',
+};
+
 /**
  * Wraps a resource handler with observability: OTel span, metric counters/histogram,
  * and a structured log. Mirrors {@link measureToolExecution} but tuned for resource reads,
- * including the measured-region semantics documented there.
+ * including the measured-region semantics documented above.
  *
  * @template T - The resolved type of the resource handler's return value.
  * @param resourceLogicFn - Async function containing the resource handler and the
@@ -502,110 +563,49 @@ export async function measureResourceExecution<T>(
   context: RequestContext & { resourceName: string },
   meta: { uri: string; mimeType: string },
 ): Promise<T> {
-  const tracer = trace.getTracer(
-    config.openTelemetry.serviceName,
-    config.openTelemetry.serviceVersion,
-  );
-
   const { resourceName } = context;
 
-  return await tracer.startActiveSpan(`resource_read:${resourceName}` as const, async (span) => {
-    // Active from here down — see the note in `measureToolExecution`.
-    const spanContext = withActiveSpan(context);
-    const activeGauge = getActiveRequestsGauge();
-    activeGauge.add(1);
-    const t0 = nowMs();
+  return await measure(
+    RESOURCE_KIND,
+    resourceName,
+    context,
+    { [ATTR_MCP_RESOURCE_URI]: meta.uri, [ATTR_MCP_RESOURCE_MIME_TYPE]: meta.mimeType },
+    resourceLogicFn,
+    {
+      onSuccess: (span, outcome) => {
+        span.setAttribute(ATTR_MCP_RESOURCE_SIZE_BYTES, outcome.outputBytes);
+      },
+      onSettled: (spanContext, outcome) => {
+        const { durationMs, errorCode, inputRequired, ok, outputBytes } = outcome;
+        const m = getResourceMetrics();
+        const metricAttrs = {
+          [ATTR_MCP_RESOURCE_NAME]: resourceName,
+          [ATTR_MCP_RESOURCE_SUCCESS]: ok,
+        };
+        const resourceAttrs = { [ATTR_MCP_RESOURCE_NAME]: resourceName };
+        m.resourceReadCounter.add(1, metricAttrs);
+        m.resourceReadDuration.record(durationMs, metricAttrs);
+        if (ok && !inputRequired) m.resourceOutputBytes.record(outputBytes, resourceAttrs);
+        if (!ok) m.resourceReadErrors.add(1, resourceAttrs);
 
-    span.setAttributes({
-      [ATTR_CODE_FUNCTION_NAME]: resourceName,
-      [ATTR_CODE_NAMESPACE]: 'mcp-resources',
-      [ATTR_MCP_RESOURCE_URI]: meta.uri,
-      [ATTR_MCP_RESOURCE_MIME_TYPE]: meta.mimeType,
-    });
-
-    let ok = false;
-    let inputRequired = false;
-    let errorCode: string | undefined;
-    let outputBytes = 0;
-
-    let designatedOutput: unknown;
-    let outputDesignated = false;
-    const recordOutput = (payload: unknown): void => {
-      designatedOutput = payload;
-      outputDesignated = true;
-    };
-
-    try {
-      const result = await resourceLogicFn(spanContext, recordOutput);
-      ok = true;
-      outputBytes = toBytes(outputDesignated ? designatedOutput : result);
-      span.setStatus({ code: SpanStatusCode.OK });
-      span.setAttribute(ATTR_MCP_RESOURCE_SIZE_BYTES, outputBytes);
-      return result;
-      // `ctx.requestInput(...)` unwinds the handler as a thrown signal, but the
-      // round ended in `input_required` — protocol control flow, not a failure.
-      // Recording it as one would mark the span ERROR, increment the error
-      // counter, and log `isSuccess: false` for every legitimate
-      // multi-round-trip request.
-    } catch (err) {
-      if (isInputRequiredSignal(err)) {
-        ok = true;
-        inputRequired = true;
-        span.setStatus({ code: SpanStatusCode.OK });
-        span.setAttribute(ATTR_MCP_RESOURCE_INPUT_REQUIRED, true);
-        throw err;
-      }
-
-      if (err instanceof McpError) errorCode = String(err.code);
-      else if (err instanceof Error) errorCode = 'UNHANDLED_ERROR';
-      else errorCode = 'UNKNOWN_ERROR';
-
-      if (err instanceof Error) span.recordException(err);
-      span.setStatus({
-        code: SpanStatusCode.ERROR,
-        message: err instanceof Error ? err.message : String(err),
-      });
-      throw err;
-    } finally {
-      activeGauge.add(-1);
-      const t1 = nowMs();
-      const durationMs = Math.round((t1 - t0) * 100) / 100;
-
-      span.setAttributes({
-        [ATTR_MCP_RESOURCE_DURATION_MS]: durationMs,
-        [ATTR_MCP_RESOURCE_SUCCESS]: ok,
-      });
-      if (errorCode) span.setAttribute(ATTR_MCP_RESOURCE_ERROR_CODE, errorCode);
-      span.end();
-
-      const m = getResourceMetrics();
-      const metricAttrs = {
-        [ATTR_MCP_RESOURCE_NAME]: resourceName,
-        [ATTR_MCP_RESOURCE_SUCCESS]: ok,
-      };
-      const resourceAttrs = { [ATTR_MCP_RESOURCE_NAME]: resourceName };
-      m.resourceReadCounter.add(1, metricAttrs);
-      m.resourceReadDuration.record(durationMs, metricAttrs);
-      if (ok && !inputRequired) m.resourceOutputBytes.record(outputBytes, resourceAttrs);
-      if (!ok) m.resourceReadErrors.add(1, resourceAttrs);
-
-      logger.info(
-        TELEMETRY_LOG_MESSAGES.resourceReadFinished,
-        withExtra(spanContext, {
-          resourceName,
-          metrics: {
-            durationMs,
-            isSuccess: ok,
-            errorCode,
-            outputBytes,
-            ...(inputRequired && { inputRequired }),
-            uri: meta.uri,
-            mimeType: meta.mimeType,
-          },
-        }),
-      );
-    }
-  });
+        logger.info(
+          TELEMETRY_LOG_MESSAGES.resourceReadFinished,
+          withExtra(spanContext, {
+            resourceName,
+            metrics: {
+              durationMs,
+              isSuccess: ok,
+              errorCode,
+              outputBytes,
+              ...(inputRequired && { inputRequired }),
+              uri: meta.uri,
+              mimeType: meta.mimeType,
+            },
+          }),
+        );
+      },
+    },
+  );
 }
 
 // ==========================================================================
@@ -656,14 +656,24 @@ function getPromptMetrics() {
   };
 }
 
+const PROMPT_KIND: MeasuredKind = {
+  attrs: {
+    durationMs: ATTR_MCP_PROMPT_DURATION_MS,
+    errorCode: ATTR_MCP_PROMPT_ERROR_CODE,
+    inputRequired: ATTR_MCP_PROMPT_INPUT_REQUIRED,
+    success: ATTR_MCP_PROMPT_SUCCESS,
+  },
+  namespace: 'mcp-prompts',
+  spanPrefix: 'prompt_generation',
+};
+
 /**
  * Wraps a prompt generate function with observability: an OpenTelemetry span,
  * OTel metric counters/histograms, payload size capture, and structured log.
  *
- * Prompts can now perform meaningful work (conditional logic, async data fetches,
+ * Prompts can perform meaningful work (conditional logic, async data fetches,
  * multi-message assembly), so they get the same instrumentation depth as tools
- * and resources. Kept symmetric to {@link measureToolExecution} and
- * {@link measureResourceExecution}.
+ * and resources.
  *
  * @template T - The resolved type of the prompt generate function's return value.
  * @param promptLogicFn - Zero-argument async function containing the prompt's generate logic.
@@ -676,123 +686,61 @@ export async function measurePromptGeneration<T>(
   context: RequestContext & { promptName: string },
   inputPayload: unknown,
 ): Promise<T> {
-  const tracer = trace.getTracer(
-    config.openTelemetry.serviceName,
-    config.openTelemetry.serviceVersion,
-  );
-
   const { promptName } = context;
+  const inputBytes = toBytes(inputPayload);
+  let messageCount = 0;
 
-  return await tracer.startActiveSpan(`prompt_generation:${promptName}` as const, async (span) => {
-    // Active from here down — see the note in `measureToolExecution`. Prompt
-    // generators take no handler context, so this only re-binds the completion
-    // log below.
-    const spanContext = withActiveSpan(context);
-    const activeGauge = getActiveRequestsGauge();
-    activeGauge.add(1);
+  return await measure(
+    PROMPT_KIND,
+    promptName,
+    context,
+    { [ATTR_MCP_PROMPT_INPUT_BYTES]: inputBytes },
+    promptLogicFn,
+    {
+      onSuccess: (span, outcome) => {
+        if (Array.isArray(outcome.measuredOutput)) messageCount = outcome.measuredOutput.length;
+        span.setAttribute(ATTR_MCP_PROMPT_OUTPUT_BYTES, outcome.outputBytes);
+        span.setAttribute(ATTR_MCP_PROMPT_MESSAGE_COUNT, messageCount);
+      },
+      onSettled: (spanContext, outcome) => {
+        const { durationMs, errorCategory, errorCode, inputRequired, ok, outputBytes } = outcome;
+        const m = getPromptMetrics();
+        const metricAttrs = { [ATTR_MCP_PROMPT_NAME]: promptName, [ATTR_MCP_PROMPT_SUCCESS]: ok };
+        const promptAttrs = { [ATTR_MCP_PROMPT_NAME]: promptName };
+        m.promptGenCounter.add(1, metricAttrs);
+        m.promptGenDuration.record(durationMs, metricAttrs);
+        m.promptInputBytes.record(inputBytes, promptAttrs);
+        if (ok && !inputRequired) {
+          m.promptOutputBytes.record(outputBytes, promptAttrs);
+          m.promptMessageCount.record(messageCount, promptAttrs);
+        }
+        if (!ok) {
+          m.promptGenErrors.add(1, {
+            ...promptAttrs,
+            ...(errorCategory && { [ATTR_MCP_PROMPT_ERROR_CATEGORY]: errorCategory }),
+          });
+        }
 
-    const t0 = nowMs();
-    const inputBytes = toBytes(inputPayload);
-    span.setAttributes({
-      [ATTR_CODE_FUNCTION_NAME]: promptName,
-      [ATTR_CODE_NAMESPACE]: 'mcp-prompts',
-      [ATTR_MCP_PROMPT_INPUT_BYTES]: inputBytes,
-    });
-
-    let ok = false;
-    let inputRequired = false;
-    let errorCode: string | undefined;
-    let errorCategory: ErrorCategory | undefined;
-    let outputBytes = 0;
-    let messageCount = 0;
-
-    try {
-      const result = await promptLogicFn();
-      ok = true;
-      outputBytes = toBytes(result);
-      if (Array.isArray(result)) messageCount = result.length;
-
-      span.setStatus({ code: SpanStatusCode.OK });
-      span.setAttribute(ATTR_MCP_PROMPT_OUTPUT_BYTES, outputBytes);
-      span.setAttribute(ATTR_MCP_PROMPT_MESSAGE_COUNT, messageCount);
-      return result;
-      // `ctx.requestInput(...)` unwinds the handler as a thrown signal, but the
-      // round ended in `input_required` — protocol control flow, not a failure.
-      // Recording it as one would mark the span ERROR, increment the error
-      // counter, and log `isSuccess: false` for every legitimate
-      // multi-round-trip request.
-    } catch (err) {
-      if (isInputRequiredSignal(err)) {
-        ok = true;
-        inputRequired = true;
-        span.setStatus({ code: SpanStatusCode.OK });
-        span.setAttribute(ATTR_MCP_PROMPT_INPUT_REQUIRED, true);
-        throw err;
-      }
-
-      if (err instanceof McpError) {
-        errorCode = String(err.code);
-        errorCategory = getErrorCategory(err.code);
-      } else {
-        errorCode = err instanceof Error ? 'UNHANDLED_ERROR' : 'UNKNOWN_ERROR';
-        errorCategory = 'server';
-      }
-
-      if (err instanceof Error) span.recordException(err);
-      span.setStatus({
-        code: SpanStatusCode.ERROR,
-        message: err instanceof Error ? err.message : String(err),
-      });
-      throw err;
-    } finally {
-      activeGauge.add(-1);
-      const t1 = nowMs();
-      const durationMs = Math.round((t1 - t0) * 100) / 100;
-
-      span.setAttributes({
-        [ATTR_MCP_PROMPT_DURATION_MS]: durationMs,
-        [ATTR_MCP_PROMPT_SUCCESS]: ok,
-      });
-      if (errorCode) span.setAttribute(ATTR_MCP_PROMPT_ERROR_CODE, errorCode);
-      span.end();
-
-      const m = getPromptMetrics();
-      const metricAttrs = { [ATTR_MCP_PROMPT_NAME]: promptName, [ATTR_MCP_PROMPT_SUCCESS]: ok };
-      const promptAttrs = { [ATTR_MCP_PROMPT_NAME]: promptName };
-      m.promptGenCounter.add(1, metricAttrs);
-      m.promptGenDuration.record(durationMs, metricAttrs);
-      m.promptInputBytes.record(inputBytes, promptAttrs);
-      if (ok && !inputRequired) {
-        m.promptOutputBytes.record(outputBytes, promptAttrs);
-        m.promptMessageCount.record(messageCount, promptAttrs);
-      }
-      if (!ok) {
-        m.promptGenErrors.add(1, {
-          ...promptAttrs,
-          ...(errorCategory && { [ATTR_MCP_PROMPT_ERROR_CATEGORY]: errorCategory }),
-        });
-      }
-
-      const logFn = ok ? logger.info : logger.error;
-      const promptMessage = ok
-        ? TELEMETRY_LOG_MESSAGES.promptGenerationFinished
-        : TELEMETRY_LOG_MESSAGES.promptGenerationFailed;
-      logFn.call(
-        logger,
-        promptMessage,
-        withExtra(spanContext, {
-          promptName,
-          metrics: {
-            durationMs,
-            isSuccess: ok,
-            errorCode,
-            inputBytes,
-            outputBytes,
-            messageCount,
-            ...(inputRequired && { inputRequired }),
-          },
-        }),
-      );
-    }
-  });
+        const logFn = ok ? logger.info : logger.error;
+        logFn.call(
+          logger,
+          ok
+            ? TELEMETRY_LOG_MESSAGES.promptGenerationFinished
+            : TELEMETRY_LOG_MESSAGES.promptGenerationFailed,
+          withExtra(spanContext, {
+            promptName,
+            metrics: {
+              durationMs,
+              isSuccess: ok,
+              errorCode,
+              inputBytes,
+              outputBytes,
+              messageCount,
+              ...(inputRequired && { inputRequired }),
+            },
+          }),
+        );
+      },
+    },
+  );
 }

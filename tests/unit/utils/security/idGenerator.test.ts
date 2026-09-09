@@ -47,6 +47,13 @@ describe('IdGenerator and UUID', () => {
       expect(randomStr).toMatch(/^[a-c]{10}$/);
     });
 
+    it('stays within the charset across refills when rejection sampling discards bytes', () => {
+      // 256 % 3 !== 0, so byte 255 is rejected and the draw loop has to refill.
+      const randomStr = idGenerator.generateRandomString(5000, 'abc');
+      expect(randomStr).toHaveLength(5000);
+      expect(randomStr).toMatch(/^[a-c]+$/);
+    });
+
     it('should generate a simple ID without a prefix', () => {
       const id = idGenerator.generate();
       expect(id).toHaveLength(6);

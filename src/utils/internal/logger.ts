@@ -15,6 +15,7 @@ import {
   toCanonicalContext,
 } from '@/utils/internal/requestContext.js';
 import { UNTHROTTLED_MESSAGES } from '@/utils/internal/telemetryMessages.js';
+import { DEFAULT_SENSITIVE_FIELDS, toPinoRedactPaths } from '@/utils/security/sensitiveFields.js';
 
 /**
  * RFC 5424 severity levels supported by the MCP logger, ordered from least to most severe.
@@ -65,22 +66,7 @@ function isServerless(): boolean {
 }
 
 /** Pino redact paths for sensitive fields (top-level, one-deep, two-deep). */
-const SENSITIVE_PINO_FIELDS: string[] = [
-  'password',
-  'token',
-  'secret',
-  'apiKey',
-  'credential',
-  'jwt',
-  'ssn',
-  'cvv',
-  'authorization',
-  'cookie',
-  'clientsecret',
-  'client_secret',
-  'private_key',
-  'privatekey',
-].flatMap((field) => [field, `*.${field}`, `*.*.${field}`]);
+const SENSITIVE_PINO_FIELDS = toPinoRedactPaths(DEFAULT_SENSITIVE_FIELDS);
 
 /**
  * Depth cap for {@link sanitizeLogBindings}. Matches the deepest path pino-redact

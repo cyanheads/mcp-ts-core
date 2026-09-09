@@ -68,69 +68,6 @@ export function hasProperty<K extends PropertyKey>(
 }
 
 /**
- * Type guard to check if an object has a property of a specific type.
- *
- * @param obj - Object to check
- * @param key - Property key to look for
- * @param typeGuard - Type guard function for the property value
- * @returns True if object has the property and it matches the type
- *
- * @example
- * ```typescript
- * if (hasPropertyOfType(obj, 'count', (v): v is number => typeof v === 'number')) {
- *   // obj.count is now typed as number
- *   console.log(obj.count + 1);
- * }
- * ```
- */
-export function hasPropertyOfType<K extends PropertyKey, T>(
-  obj: unknown,
-  key: K,
-  typeGuard: (value: unknown) => value is T,
-): obj is Record<K, T> {
-  return hasProperty(obj, key) && typeGuard(obj[key]);
-}
-
-/**
- * Type guard to check if a value is a string.
- *
- * @param value - Value to check
- * @returns True if value is a string
- *
- * @example
- * ```typescript
- * if (isString(value)) {
- *   // value is now typed as string
- *   console.log(value.toUpperCase());
- * }
- * ```
- */
-export function isString(value: unknown): value is string {
-  return typeof value === 'string';
-}
-
-/**
- * Type guard to check if a value is a number.
- *
- * `NaN` is explicitly excluded — `typeof NaN === 'number'` is true in JavaScript,
- * but `NaN` is almost never a valid value in the contexts where this guard is used.
- *
- * @param value - Value to check
- * @returns True if value is a finite or infinite number (excluding NaN)
- *
- * @example
- * ```typescript
- * if (isNumber(value)) {
- *   // value is now typed as number (NaN excluded)
- *   console.log(value.toFixed(2));
- * }
- * ```
- */
-export function isNumber(value: unknown): value is number {
-  return typeof value === 'number' && !Number.isNaN(value);
-}
-
-/**
  * Type guard to check if an error is an AggregateError.
  *
  * AggregateError contains multiple errors in an 'errors' array property.
@@ -169,23 +106,6 @@ export function isErrorWithCode(error: unknown): error is Error & { code: unknow
 }
 
 /**
- * Type guard to check if an error has a status property.
- *
- * @param error - Error to check
- * @returns True if error has a status property
- *
- * @example
- * ```typescript
- * if (isErrorWithStatus(error)) {
- *   console.log(`HTTP status: ${error.status}`);
- * }
- * ```
- */
-export function isErrorWithStatus(error: unknown): error is Error & { status: unknown } {
-  return error instanceof Error && hasProperty(error, 'status');
-}
-
-/**
  * Safely get a property from an object if it exists.
  *
  * @param obj - Object to get property from
@@ -200,48 +120,4 @@ export function isErrorWithStatus(error: unknown): error is Error & { status: un
  */
 export function getProperty<K extends PropertyKey>(obj: unknown, key: K): unknown {
   return hasProperty(obj, key) ? obj[key] : undefined;
-}
-
-/**
- * Safely get a string property from an object.
- *
- * @param obj - Object to get property from
- * @param key - Property key
- * @returns String value or undefined if property doesn't exist or is not a string
- *
- * @example
- * ```typescript
- * const traceId = getStringProperty(context, 'traceId');
- * if (traceId) {
- *   // traceId is typed as string
- *   console.log(traceId.toUpperCase());
- * }
- * ```
- */
-export function getStringProperty<K extends PropertyKey>(obj: unknown, key: K): string | undefined {
-  const value = getProperty(obj, key);
-  return isString(value) ? value : undefined;
-}
-
-/**
- * Safely get a number property from an object.
- *
- * Returns `undefined` if the property is absent, not a number, or is `NaN`.
- *
- * @param obj - Object to get property from
- * @param key - Property key
- * @returns Number value or undefined if property doesn't exist, is not a number, or is NaN
- *
- * @example
- * ```typescript
- * const retries = getNumberProperty(config, 'maxRetries');
- * if (retries !== undefined) {
- *   // retries is typed as number
- *   console.log(`Max retries: ${retries}`);
- * }
- * ```
- */
-export function getNumberProperty<K extends PropertyKey>(obj: unknown, key: K): number | undefined {
-  const value = getProperty(obj, key);
-  return isNumber(value) ? value : undefined;
 }

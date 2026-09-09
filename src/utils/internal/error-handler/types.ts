@@ -124,11 +124,6 @@ export interface BaseErrorMapping {
   errorCode: JsonRpcErrorCode;
 
   /**
-   * An optional custom message template for the mapped error.
-   */
-  messageTemplate?: string;
-
-  /**
    * A string or regular expression to match against the error message.
    * If a string is provided, it's used for substring matching (case-insensitive).
    */

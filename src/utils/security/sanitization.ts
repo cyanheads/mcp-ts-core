@@ -23,6 +23,7 @@ import {
 import { logger } from '@/utils/internal/logger.js';
 import { requestContextService } from '@/utils/internal/requestContext.js';
 import { runtimeCaps } from '@/utils/internal/runtime.js';
+import { DEFAULT_SENSITIVE_FIELDS, toPinoRedactPaths } from '@/utils/security/sensitiveFields.js';
 import { isRecord } from '@/utils/types/guards.js';
 
 let _sanitizeHtmlFn: typeof sanitizeHtml | undefined;
@@ -163,22 +164,7 @@ export class Sanitization {
   /** @private */
   private static instance: Sanitization;
 
-  private sensitiveFields: string[] = [
-    'password',
-    'token',
-    'secret',
-    'apiKey',
-    'credential',
-    'jwt',
-    'ssn',
-    'cvv',
-    'authorization',
-    'cookie',
-    'clientsecret',
-    'client_secret',
-    'private_key',
-    'privatekey',
-  ];
+  private sensitiveFields: string[] = [...DEFAULT_SENSITIVE_FIELDS];
 
   /**
    * Default configuration for HTML sanitization.
@@ -335,11 +321,7 @@ export class Sanitization {
    * ```
    */
   public getSensitivePinoFields(): string[] {
-    return this.sensitiveFields.flatMap((field) => [
-      field, // top-level: { password: '...' }
-      `*.${field}`, // one level deep: { auth: { token: '...' } }
-      `*.*.${field}`, // two levels deep: { context: { auth: { secret: '...' } } }
-    ]);
+    return toPinoRedactPaths(this.sensitiveFields);
   }
 
   /**
@@ -440,7 +422,7 @@ export class Sanitization {
           config.allowedTags = options.allowedTags;
         }
         if (options.allowedAttributes) {
-          config.allowedAttributes = this.convertAttributesFormat(options.allowedAttributes);
+          config.allowedAttributes = options.allowedAttributes;
         }
         return await this.sanitizeHtml(input, config);
       }
@@ -484,18 +466,6 @@ export class Sanitization {
         return sanitizeHtmlFn(input, { allowedTags: [], allowedAttributes: {} });
       }
     }
-  }
-
-  /**
-   * Converts attribute format for `sanitizeHtml`.
-   * @param attrs - Attributes in `{ tagName: ['attr1'] }` format.
-   * @returns Attributes in `sanitize-html` expected format.
-   * @private
-   */
-  private convertAttributesFormat(
-    attrs: Record<string, string[]>,
-  ): sanitizeHtml.IOptions['allowedAttributes'] {
-    return attrs;
   }
 
   /**

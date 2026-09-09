@@ -24,6 +24,27 @@ function getRandomBytes(count: number): Uint8Array {
 }
 
 /**
+ * Builds a random string of `length` characters drawn uniformly from `charset`.
+ *
+ * Rejection sampling: a byte is used only when it falls below the largest
+ * multiple of `charset.length` that fits in 256, so `byte % charset.length`
+ * never biases toward the low characters. Bytes are drawn in over-sized chunks
+ * rather than one at a time, so a typical ID costs one `getRandomValues` call.
+ */
+function randomStringFromCharset(length: number, charset: string): string {
+  const maxValidByteValue = Math.floor(256 / charset.length) * charset.length;
+  let result = '';
+  while (result.length < length) {
+    for (const byte of getRandomBytes((length - result.length) * 2)) {
+      if (byte >= maxValidByteValue) continue;
+      result += charset.charAt(byte % charset.length);
+      if (result.length === length) break;
+    }
+  }
+  return result;
+}
+
+/**
  * Defines the structure for configuring entity prefixes.
  * Keys are entity type names (e.g., "project", "task"), and values are their corresponding ID prefixes (e.g., "PROJ", "TASK").
  */
@@ -119,26 +140,7 @@ export class IdGenerator {
     length: number = IdGenerator.DEFAULT_LENGTH,
     charset: string = IdGenerator.DEFAULT_CHARSET,
   ): string {
-    let result = '';
-    // Determine the largest multiple of charset.length that is less than or equal to 256
-    // This is the threshold for rejection sampling to avoid bias.
-    const maxValidByteValue = Math.floor(256 / charset.length) * charset.length;
-
-    while (result.length < length) {
-      const byteBuffer = getRandomBytes(1);
-      const byte = byteBuffer[0];
-
-      // If the byte is within the valid range (i.e., it won't introduce bias),
-      // use it to select a character from the charset. Otherwise, discard and try again.
-      if (byte !== undefined && byte < maxValidByteValue) {
-        const charIndex = byte % charset.length;
-        const char = charset[charIndex];
-        if (char) {
-          result += char;
-        }
-      }
-    }
-    return result;
+    return randomStringFromCharset(length, charset);
   }
 
   /**
@@ -335,33 +337,6 @@ export const generateUUID = (): string => crypto.randomUUID();
  * ```
  */
 export const generateRequestContextId = (): string => {
-  /**
-   * Generates a cryptographically secure random string of a given length from a given charset.
-   * @param length The desired length of the string.
-   * @param charset The characters to use for generation.
-   * @returns The generated random string.
-   */
-  const generateSecureRandomString = (length: number, charset: string): string => {
-    let result = '';
-    const maxValidByteValue = Math.floor(256 / charset.length) * charset.length;
-
-    while (result.length < length) {
-      const byteBuffer = getRandomBytes(1);
-      const byte = byteBuffer[0];
-
-      if (byte !== undefined && byte < maxValidByteValue) {
-        const charIndex = byte % charset.length;
-        const char = charset[charIndex];
-        if (char) {
-          result += char;
-        }
-      }
-    }
-    return result;
-  };
-
   const charset = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
-  const part1 = generateSecureRandomString(5, charset);
-  const part2 = generateSecureRandomString(5, charset);
-  return `${part1}-${part2}`;
+  return `${randomStringFromCharset(5, charset)}-${randomStringFromCharset(5, charset)}`;
 };
