@@ -77,12 +77,12 @@ import type { ResourceSubscriptions } from '@/mcp-server/notifications.js';
 import { ToolRegistry } from '@/mcp-server/tools/tool-registration.js';
 import { tool } from '@/mcp-server/tools/utils/toolDefinition.js';
 import type {
-  HandlerFactoryServices,
-  HandlerNotifiers,
+  HandlerServices,
+  NotifierSources,
 } from '@/mcp-server/tools/utils/toolHandlerFactory.js';
 
 describe('ToolRegistry registration wiring', () => {
-  let services: HandlerFactoryServices;
+  let services: HandlerServices;
   let mockServer: {
     registerTool: ReturnType<typeof vi.fn>;
     sendPromptListChanged: ReturnType<typeof vi.fn>;
@@ -114,11 +114,11 @@ describe('ToolRegistry registration wiring', () => {
     mockCreateToolHandler.mockReturnValue(vi.fn());
   });
 
-  /** The `HandlerNotifiers` the registry passed to the handler factory. */
-  function notifiersFromFactory(): HandlerNotifiers {
+  /** The `NotifierSources` the registry passed to the handler factory. */
+  function notifiersFromFactory(): NotifierSources {
     const call = mockCreateToolHandler.mock.calls[0];
     expect(call).toBeDefined();
-    return call![2] as HandlerNotifiers;
+    return call![2] as NotifierSources;
   }
 
   it('binds per-server notifiers for each registration and forwards _meta during tool registration', async () => {
@@ -225,20 +225,5 @@ describe('ToolRegistry registration wiring', () => {
     await registry.registerAll(mockServer as never);
 
     expect(mockServer.registerTool).toHaveBeenCalledTimes(2);
-  });
-
-  it('throws when registering a tool without handler factory services', async () => {
-    const standardTool = tool('missing_services_tool', {
-      description: 'No services',
-      input: z.object({}),
-      output: z.object({ ok: z.boolean().describe('Whether it worked') }),
-      handler: () => ({ ok: true }),
-    });
-
-    const registry = new ToolRegistry([standardTool]);
-
-    await expect(registry.registerAll(mockServer as never)).rejects.toThrow(
-      "Cannot register tool 'missing_services_tool': HandlerFactoryServices not provided",
-    );
   });
 });

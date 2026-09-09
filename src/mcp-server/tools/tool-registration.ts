@@ -11,8 +11,8 @@ import type { AnyToolDefinition } from '@/mcp-server/tools/utils/toolDefinition.
 import {
   advertisedOutputSchema,
   createToolHandler,
-  type HandlerFactoryServices,
-  type HandlerNotifiers,
+  type HandlerServices,
+  type NotifierSources,
 } from '@/mcp-server/tools/utils/toolHandlerFactory.js';
 import { JsonRpcErrorCode } from '@/types-global/errors.js';
 import { ErrorHandler } from '@/utils/internal/error-handler/errorHandler.js';
@@ -27,13 +27,21 @@ import { requestContextService } from '@/utils/internal/requestContext.js';
  */
 export type AnyToolDef = AnyToolDefinition;
 
+/** The advertised `title` when a definition declares none: snake_case or kebab-case → Title Case. */
+function deriveTitleFromName(name: string): string {
+  return name
+    .replace(/[_-]/g, ' ')
+    .replace(/\b\w/g, (ch) => ch.toUpperCase())
+    .trim();
+}
+
 export class ToolRegistry {
   /** Tracks registered tool names to detect duplicates at startup. */
   private readonly registeredNames = new Set<string>();
 
   constructor(
-    private toolDefs: AnyToolDef[],
-    private services?: HandlerFactoryServices,
+    private readonly toolDefs: AnyToolDef[],
+    private readonly services: HandlerServices,
   ) {}
 
   /** Registers all tool definitions with the provided McpServer instance. */
@@ -50,7 +58,7 @@ export class ToolRegistry {
     // once per registerAll() call — never mutated on a shared services object
     // (which would race under concurrent HTTP requests). The handler factory
     // prefers request-scoped notifiers (#135) and falls back to these.
-    const notifiers: HandlerNotifiers = {
+    const notifiers: NotifierSources = {
       notifyPromptListChanged: () => server.sendPromptListChanged(),
       notifyResourceListChanged: () => server.sendResourceListChanged(),
       notifyToolListChanged: () => server.sendToolListChanged(),
@@ -100,18 +108,11 @@ export class ToolRegistry {
     this.registeredNames.add(name);
   }
 
-  private deriveTitleFromName(name: string): string {
-    return name.replace(/_/g, ' ').replace(/\b\w/g, (char) => char.toUpperCase());
-  }
-
-  /**
-   * Registers a standard tool definition.
-   * Requires `services` to have been passed to the constructor for Context creation.
-   */
+  /** Registers a standard tool definition. */
   private async registerTool(
     server: McpServer,
     tool: AnyToolDefinition,
-    notifiers: HandlerNotifiers,
+    notifiers: NotifierSources,
   ): Promise<void> {
     const registrationContext = requestContextService.createRequestContext({
       operation: 'ToolRegistry.registerTool',
@@ -124,14 +125,8 @@ export class ToolRegistry {
 
     await ErrorHandler.tryCatch(
       () => {
-        if (!this.services) {
-          throw new Error(
-            `Cannot register tool '${tool.name}': HandlerFactoryServices not provided to ToolRegistry`,
-          );
-        }
-
         const handler = createToolHandler(tool, this.services, notifiers);
-        const title = tool.title ?? tool.annotations?.title ?? this.deriveTitleFromName(tool.name);
+        const title = tool.title ?? tool.annotations?.title ?? deriveTitleFromName(tool.name);
 
         // Advertised verbatim; the same schema rejects the same arguments one
         // layer down, where a rejection can carry the framework's structured

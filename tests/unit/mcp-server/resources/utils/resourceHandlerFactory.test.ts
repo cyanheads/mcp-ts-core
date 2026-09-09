@@ -93,8 +93,8 @@ import type { AnyResourceDefinition } from '@/mcp-server/resources/utils/resourc
 import { resource } from '@/mcp-server/resources/utils/resourceDefinition.js';
 import {
   createResourceHandler,
-  type ResourceHandlerFactoryServices,
-  type ResourceHandlerNotifiers,
+  type HandlerServices,
+  type NotifierSources,
 } from '@/mcp-server/resources/utils/resourceHandlerFactory.js';
 import { TELEMETRY_LOG_MESSAGES } from '@/utils/internal/telemetryMessages.js';
 
@@ -122,12 +122,12 @@ const mockStorage = {
   getMany: vi.fn(async () => new Map()),
 };
 
-const services: ResourceHandlerFactoryServices = {
+const services: HandlerServices = {
   logger: mockLogger as any,
   storage: mockStorage as any,
 };
 
-const notifiers: ResourceHandlerNotifiers = {};
+const notifiers: NotifierSources = {};
 
 // ---------------------------------------------------------------------------
 // Tests
@@ -554,7 +554,7 @@ describe('createResourceHandler', () => {
 
     it('surfaces ctx.sessionId in stateless mode when exposeStatelessSessionId is true', async () => {
       mockConfig.mcpSessionMode = 'stateless';
-      const optInServices: ResourceHandlerFactoryServices = {
+      const optInServices: HandlerServices = {
         ...services,
         exposeStatelessSessionId: true,
       };
@@ -824,7 +824,7 @@ describe('createResourceHandler', () => {
     });
 
     it('falls back to the server-level notifiers when the request scope exposes no sender', async () => {
-      const serverNotifiers: ResourceHandlerNotifiers = {
+      const serverNotifiers: NotifierSources = {
         notifyToolListChanged: vi.fn(),
         notifyResourceListChanged: vi.fn(),
         notifyPromptListChanged: vi.fn(),

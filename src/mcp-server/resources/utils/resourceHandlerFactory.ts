@@ -8,25 +8,21 @@ import type {
   InputRequiredResult,
   ReadResourceResult,
   ServerContext,
-  ServerNotifier,
   Variables,
 } from '@modelcontextprotocol/server';
 
-import { config } from '@/config/index.js';
-import { attachTypedFail, createContext } from '@/core/context.js';
 import {
-  createContextInputs,
-  createRequestInput,
-  isInputRequiredSignal,
-} from '@/mcp-server/inputRequired.js';
-import { type ResourceSubscriptions, selectNotifiers } from '@/mcp-server/notifications.js';
+  buildHandlerContext,
+  type HandlerServices,
+  handlerParentContext,
+  resolveHandlerRequest,
+} from '@/mcp-server/handlerContext.js';
+import { isInputRequiredSignal } from '@/mcp-server/inputRequired.js';
+import type { NotifierSources } from '@/mcp-server/notifications.js';
 import type { AnyResourceDefinition } from '@/mcp-server/resources/utils/resourceDefinition.js';
 import { withRequiredScopes } from '@/mcp-server/transports/auth/lib/authUtils.js';
-import { resolveSessionMode } from '@/mcp-server/types.js';
-import type { StorageService } from '@/storage/core/StorageService.js';
 import { McpError } from '@/types-global/errors.js';
 import { ErrorHandler } from '@/utils/internal/error-handler/errorHandler.js';
-import type { Logger } from '@/utils/internal/logger.js';
 import { measureResourceExecution } from '@/utils/internal/performance.js';
 import { requestContextService } from '@/utils/internal/requestContext.js';
 
@@ -34,47 +30,9 @@ import { requestContextService } from '@/utils/internal/requestContext.js';
 // Types
 // ---------------------------------------------------------------------------
 
-/** Services required by the handler factory to construct Context. */
-export interface ResourceHandlerFactoryServices {
-  /**
-   * When true, surface `ctx.sessionId` even in stateless HTTP mode (per-request
-   * generated token). Wired from `createApp({ context: { exposeStatelessSessionId } })`.
-   * Default false — `ctx.sessionId` is only set when the session has
-   * request-spanning lifetime (HTTP `stateful` / `auto` mode).
-   */
-  exposeStatelessSessionId?: boolean;
-  logger: Logger;
-  storage: StorageService;
-}
-
-/**
- * Per-server notifier closures bound at registration time, targeting
- * `server.send*ListChanged()`.
- *
- * Split from {@link ResourceHandlerFactoryServices} so each per-request
- * McpServer gets its own notifier closures — preventing a concurrent
- * registerAll() from overwriting an in-flight handler's notifier target.
- *
- * The resource handler factory picks a delivery path per era via
- * {@link selectNotifiers}, and uses these closures only as a fallback for
- * scopes with neither a bus nor a request sender (stdio, test harnesses).
- */
-export interface ResourceHandlerNotifiers {
-  /**
-   * Publish facade for the modern era's `subscriptions/listen` bus, supplied
-   * only for `modern` instances. Takes precedence over the request-scoped path:
-   * on 2026-07-28 the client opts into notification types through its listen
-   * stream, and only what reaches the bus is filtered against that opt-in
-   * (#193).
-   */
-  bus?: ServerNotifier;
-  notifyPromptListChanged?: () => void;
-  notifyResourceListChanged?: () => void;
-  notifyResourceUpdated?: (uri: string) => void;
-  notifyToolListChanged?: () => void;
-  /** Per-connection `resources/subscribe` registry (#354). Legacy era only. */
-  subscriptions?: ResourceSubscriptions;
-}
+/** The factory's own contract, shared with the tool factory. */
+export type { HandlerServices } from '@/mcp-server/handlerContext.js';
+export type { NotifierSources } from '@/mcp-server/notifications.js';
 
 // ---------------------------------------------------------------------------
 // Default formatter
@@ -91,7 +49,12 @@ function formatResourceText(result: unknown, mimeType: string): string {
     : JSON.stringify(result, null, 2);
 }
 
-function defaultResponseFormatter(
+/**
+ * Default `resources/read` contents when a definition declares no `format`:
+ * a string result is passed through for text MIME types, anything else is
+ * pretty-printed JSON. Also the fallback `appResource()` mirrors UI meta into.
+ */
+export function defaultResponseFormatter(
   result: unknown,
   meta: { uri: URL; mimeType: string },
 ): ReadResourceResult['contents'] {
@@ -135,8 +98,8 @@ function observableResourceUri(uri: URL): string {
  */
 export function createResourceHandler(
   def: AnyResourceDefinition,
-  services: ResourceHandlerFactoryServices,
-  notifiers: ResourceHandlerNotifiers,
+  services: HandlerServices,
+  notifiers: NotifierSources,
 ): (
   uri: URL,
   variables: Variables,
@@ -151,39 +114,13 @@ export function createResourceHandler(
     variables,
     serverContext,
   ): Promise<ReadResourceResult | InputRequiredResult> => {
-    const mcpReq = serverContext?.mcpReq;
-    const signal = mcpReq?.signal ?? new AbortController().signal;
-
-    const effectiveNotifiers = selectNotifiers(notifiers, mcpReq);
-
-    const sdkSessionId =
-      typeof serverContext?.sessionId === 'string' ? serverContext.sessionId : undefined;
-
-    // Surface sessionId on `Context` only when it has request-spanning
-    // lifetime — stateful HTTP (or `auto`, which resolves to stateful for
-    // HTTP). In stateless mode the SDK still hands us a per-request token;
-    // pass it through only when the consumer opted in via
-    // `createApp({ context: { exposeStatelessSessionId: true } })`. Stdio
-    // gives no sessionId at the SDK layer, so the gate is moot there.
-    const isStatefulMode = resolveSessionMode(config.mcpSessionMode) === 'stateful';
-    const handlerSessionId =
-      sdkSessionId && (isStatefulMode || services.exposeStatelessSessionId === true)
-        ? sdkSessionId
-        : undefined;
+    const request = resolveHandlerRequest(serverContext, services, notifiers);
     const resourceUri = observableResourceUri(uri);
 
-    // Raw `inputParams` is intentionally excluded from the context — it flows
-    // into the completion log via context spread and can contain caller data.
     // The URI template already captures the named segments; anything else is
     // query-string / caller-supplied and belongs in metrics, not logs.
-    // Log correlation always uses the raw SDK sessionId — useful even in
-    // stateless mode for tracing the SDK's per-request token through events.
-    const requestId = mcpReq?.id;
     const appContext = requestContextService.createRequestContext({
-      parentContext: {
-        ...(typeof requestId === 'string' ? { requestId } : {}),
-        ...(sdkSessionId ? { sessionId: sdkSessionId } : {}),
-      },
+      parentContext: handlerParentContext(request),
       operation: 'HandleResourceRead',
       additionalContext: {
         resourceName,
@@ -205,32 +142,9 @@ export function createResourceHandler(
       // output-schema validation and `format()` decide the client-visible
       // outcome, so a failure in either is a failed read. Closing the span when
       // the handler returned recorded those as successes (#346).
-      //
-      // The context is built from inside the execution span so `ctx.traceId` /
-      // `ctx.spanId` — and the child logger built from them — name the
-      // `resource_read:*` span the handler runs in rather than the enclosing
-      // request span (#296). `attachTypedFail` adds `ctx.fail` when the
-      // definition declares an error contract; otherwise no-op.
       return await measureResourceExecution(
         async (spanContext, recordOutput) => {
-          const ctx = attachTypedFail(
-            createContext({
-              appContext: spanContext,
-              logger: services.logger,
-              storage: services.storage,
-              signal,
-              sessionId: handlerSessionId,
-              inputs: createContextInputs(mcpReq),
-              requestInput: createRequestInput(),
-              ...(mcpReq?.log && { wireLog: mcpReq.log }),
-              notifyPromptListChanged: effectiveNotifiers.notifyPromptListChanged,
-              notifyResourceListChanged: effectiveNotifiers.notifyResourceListChanged,
-              notifyResourceUpdated: effectiveNotifiers.notifyResourceUpdated,
-              notifyToolListChanged: effectiveNotifiers.notifyToolListChanged,
-              uri,
-            }),
-            def.errors,
-          );
+          const ctx = buildHandlerContext(request, services, spanContext, def.errors, uri);
 
           // Handler may return sync or async.
           const handlerResult = await def.handler(validatedParams, ctx);

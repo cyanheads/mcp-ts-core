@@ -101,8 +101,8 @@ import { tool } from '@/mcp-server/tools/utils/toolDefinition.js';
 import {
   createToolHandler,
   effectiveOutputSchema,
-  type HandlerFactoryServices,
-  type HandlerNotifiers,
+  type HandlerServices,
+  type NotifierSources,
 } from '@/mcp-server/tools/utils/toolHandlerFactory.js';
 import { createMockContext, getEnrichment } from '@/testing/index.js';
 
@@ -110,7 +110,7 @@ import { createMockContext, getEnrichment } from '@/testing/index.js';
 // Helpers
 // ---------------------------------------------------------------------------
 
-const services: HandlerFactoryServices = {
+const services: HandlerServices = {
   logger: mockLogger as any,
   storage: {
     get: vi.fn(async () => null),
@@ -121,7 +121,7 @@ const services: HandlerFactoryServices = {
   } as any,
 };
 
-const notifiers: HandlerNotifiers = {};
+const notifiers: NotifierSources = {};
 
 /**
  * `content[]` of a completed tool result. Narrows off the `input_required`

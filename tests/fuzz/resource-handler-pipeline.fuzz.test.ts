@@ -11,7 +11,7 @@ import type { AnyResourceDefinition } from '@/mcp-server/resources/utils/resourc
 import { resource } from '@/mcp-server/resources/utils/resourceDefinition.js';
 import {
   createResourceHandler,
-  type ResourceHandlerFactoryServices,
+  type HandlerServices,
 } from '@/mcp-server/resources/utils/resourceHandlerFactory.js';
 import { adversarialObjectArbitrary, loadFc, zodToArbitrary } from '@/testing/fuzz.js';
 import { McpError } from '@/types-global/errors.js';
@@ -93,7 +93,7 @@ function serverContext() {
   return makeServerContext({ requestId: 'resource-fuzz-sdk', method: 'resources/read' });
 }
 
-const services: ResourceHandlerFactoryServices = {
+const services: HandlerServices = {
   logger: mockLogger as never,
   storage: {
     get: vi.fn(async () => null),

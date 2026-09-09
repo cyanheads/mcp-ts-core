@@ -18,7 +18,7 @@ import { PromptRegistry } from '@/mcp-server/prompts/prompt-registration.js';
 import { prompt } from '@/mcp-server/prompts/utils/promptDefinition.js';
 import { ResourceRegistry } from '@/mcp-server/resources/resource-registration.js';
 import { resource } from '@/mcp-server/resources/utils/resourceDefinition.js';
-import type { ResourceHandlerFactoryServices } from '@/mcp-server/resources/utils/resourceHandlerFactory.js';
+import type { HandlerServices } from '@/mcp-server/resources/utils/resourceHandlerFactory.js';
 import { StorageService } from '@/storage/core/StorageService.js';
 import { InMemoryProvider } from '@/storage/providers/inMemory/inMemoryProvider.js';
 import { logger } from '@/utils/internal/logger.js';
@@ -76,7 +76,7 @@ async function connectPair() {
     { capabilities: { prompts: { listChanged: true }, resources: { listChanged: true } } },
   );
 
-  const services: ResourceHandlerFactoryServices = {
+  const services: HandlerServices = {
     logger,
     storage: new StorageService(new InMemoryProvider()),
   };

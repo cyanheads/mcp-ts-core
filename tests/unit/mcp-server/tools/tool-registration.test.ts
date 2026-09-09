@@ -7,7 +7,7 @@ import { z } from 'zod';
 import { ToolRegistry } from '@/mcp-server/tools/tool-registration.js';
 import { disabledTool } from '@/mcp-server/tools/utils/disabled-tool.js';
 import { tool } from '@/mcp-server/tools/utils/toolDefinition.js';
-import type { HandlerFactoryServices } from '@/mcp-server/tools/utils/toolHandlerFactory.js';
+import type { HandlerServices } from '@/mcp-server/tools/utils/toolHandlerFactory.js';
 import { JsonRpcErrorCode } from '@/types-global/errors.js';
 
 /**
@@ -110,7 +110,7 @@ const mockStorage = {
   getMany: vi.fn(async () => new Map()),
 };
 
-const services: HandlerFactoryServices = {
+const services: HandlerServices = {
   logger: mockLogger as any,
   storage: mockStorage as any,
 };

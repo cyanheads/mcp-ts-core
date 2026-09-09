@@ -12,6 +12,7 @@ import type { ZodObject, ZodRawShape } from 'zod';
 
 import type { ResourceDefinition } from '@/mcp-server/resources/utils/resourceDefinition.js';
 import { resource } from '@/mcp-server/resources/utils/resourceDefinition.js';
+import { defaultResponseFormatter } from '@/mcp-server/resources/utils/resourceHandlerFactory.js';
 import type { ToolDefinition } from '@/mcp-server/tools/utils/toolDefinition.js';
 import { tool } from '@/mcp-server/tools/utils/toolDefinition.js';
 import type { ErrorContract } from '@/types-global/errors.js';
@@ -37,17 +38,6 @@ type AppResourceFormat = ResourceDefinition<
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
-}
-
-function isJsonMimeType(mimeType: string): boolean {
-  const normalizedMimeType = mimeType.split(';', 1)[0]?.trim().toLowerCase() ?? '';
-  return normalizedMimeType === 'application/json' || normalizedMimeType.endsWith('+json');
-}
-
-function formatResourceText(result: unknown, mimeType: string): string {
-  return typeof result === 'string' && !isJsonMimeType(mimeType)
-    ? result
-    : JSON.stringify(result, null, 2);
 }
 
 function mergeNestedRecords(
@@ -92,13 +82,7 @@ function createAppResourceFormat(
   if (!defaultUiMeta) return format;
 
   return (result, meta) => {
-    const contents = format?.(result, meta) ?? [
-      {
-        uri: meta.uri.href,
-        text: formatResourceText(result, meta.mimeType),
-        mimeType: meta.mimeType,
-      },
-    ];
+    const contents = format?.(result, meta) ?? defaultResponseFormatter(result, meta);
 
     return mirrorUiMetaIntoContents(contents, defaultUiMeta);
   };

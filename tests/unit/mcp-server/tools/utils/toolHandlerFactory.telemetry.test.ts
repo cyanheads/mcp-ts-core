@@ -73,8 +73,8 @@ import type { AnyToolDefinition } from '@/mcp-server/tools/utils/toolDefinition.
 import { tool } from '@/mcp-server/tools/utils/toolDefinition.js';
 import {
   createToolHandler,
-  type HandlerFactoryServices,
-  type HandlerNotifiers,
+  type HandlerServices,
+  type NotifierSources,
 } from '@/mcp-server/tools/utils/toolHandlerFactory.js';
 import { TELEMETRY_LOG_MESSAGES } from '@/utils/internal/telemetryMessages.js';
 
@@ -82,7 +82,7 @@ import { TELEMETRY_LOG_MESSAGES } from '@/utils/internal/telemetryMessages.js';
 // Harness
 // ---------------------------------------------------------------------------
 
-const services: HandlerFactoryServices = {
+const services: HandlerServices = {
   logger: mockLogger as never,
   storage: {
     get: vi.fn(async () => null),
@@ -93,7 +93,7 @@ const services: HandlerFactoryServices = {
   } as never,
 };
 
-const notifiers: HandlerNotifiers = {};
+const notifiers: NotifierSources = {};
 
 const span = {
   setAttributes: vi.fn(),

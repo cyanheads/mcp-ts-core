@@ -9,31 +9,23 @@ import type {
   ContentBlock,
   InputRequiredResult,
   ServerContext,
-  ServerNotifier,
 } from '@modelcontextprotocol/server';
 
 import { ZodError, type ZodObject, type ZodRawShape, type ZodType, z } from 'zod';
 
-import { config } from '@/config/index.js';
 import type { Context, EnrichmentStore } from '@/core/context.js';
+import { readContentStore, readEnrichmentStore } from '@/core/context.js';
 import {
-  attachTypedFail,
-  createContext,
-  readContentStore,
-  readEnrichmentStore,
-} from '@/core/context.js';
-import {
-  createContextInputs,
-  createRequestInput,
-  isInputRequiredSignal,
-} from '@/mcp-server/inputRequired.js';
-import { type ResourceSubscriptions, selectNotifiers } from '@/mcp-server/notifications.js';
+  buildHandlerContext,
+  type HandlerServices,
+  handlerParentContext,
+  resolveHandlerRequest,
+} from '@/mcp-server/handlerContext.js';
+import { isInputRequiredSignal } from '@/mcp-server/inputRequired.js';
+import type { NotifierSources } from '@/mcp-server/notifications.js';
 import { withRequiredScopes } from '@/mcp-server/transports/auth/lib/authUtils.js';
-import { resolveSessionMode } from '@/mcp-server/types.js';
-import type { StorageService } from '@/storage/core/StorageService.js';
-import { JsonRpcErrorCode, McpError } from '@/types-global/errors.js';
+import { internalError, JsonRpcErrorCode, McpError } from '@/types-global/errors.js';
 import { ErrorHandler } from '@/utils/internal/error-handler/errorHandler.js';
-import type { Logger } from '@/utils/internal/logger.js';
 import { measureToolExecution } from '@/utils/internal/performance.js';
 import { requestContextService } from '@/utils/internal/requestContext.js';
 import { ATTR_MCP_TOOL_ENRICHED } from '@/utils/telemetry/attributes.js';
@@ -43,48 +35,9 @@ import type { AnyToolDefinition } from './toolDefinition.js';
 // Types
 // ---------------------------------------------------------------------------
 
-/** Services required by the handler factory to construct Context. */
-export interface HandlerFactoryServices {
-  /**
-   * When true, surface `ctx.sessionId` even in stateless HTTP mode (per-request
-   * generated token). Wired from `createApp({ context: { exposeStatelessSessionId } })`.
-   * Default false — `ctx.sessionId` is only set when the session has
-   * request-spanning lifetime (HTTP `stateful` / `auto` mode).
-   */
-  exposeStatelessSessionId?: boolean;
-  logger: Logger;
-  storage: StorageService;
-}
-
-/**
- * Per-server notifier closures bound at registration time, targeting
- * `server.send*ListChanged()`.
- *
- * Split from {@link HandlerFactoryServices} so each per-request McpServer gets
- * its own notifier closures — preventing a concurrent registerAll() from
- * overwriting an in-flight handler's notifier target (and potentially
- * notifying the wrong server).
- *
- * The handler factory picks a delivery path per era via
- * {@link selectNotifiers}, and uses these closures only as a fallback for
- * scopes with neither a bus nor a request sender (stdio, test harnesses).
- */
-export interface HandlerNotifiers {
-  /**
-   * Publish facade for the modern era's `subscriptions/listen` bus, supplied
-   * only for `modern` instances. Takes precedence over the request-scoped path:
-   * on 2026-07-28 the client opts into notification types through its listen
-   * stream, and only what reaches the bus is filtered against that opt-in
-   * (#193).
-   */
-  bus?: ServerNotifier;
-  notifyPromptListChanged?: () => void;
-  notifyResourceListChanged?: () => void;
-  notifyResourceUpdated?: (uri: string) => void;
-  notifyToolListChanged?: () => void;
-  /** Per-connection `resources/subscribe` registry (#354). Legacy era only. */
-  subscriptions?: ResourceSubscriptions;
-}
+/** The factory's own contract, shared with the resource factory. */
+export type { HandlerServices } from '@/mcp-server/handlerContext.js';
+export type { NotifierSources } from '@/mcp-server/notifications.js';
 
 // ---------------------------------------------------------------------------
 // Default formatter
@@ -93,6 +46,35 @@ export interface HandlerNotifiers {
 const defaultResponseFormatter = (result: unknown): ContentBlock[] => [
   { type: 'text', text: JSON.stringify(result, null, 2) },
 ];
+
+/**
+ * Renders `content[]` for a validated tool result: `format()` (or the JSON
+ * default) over the domain payload, with any blocks collected via
+ * `ctx.content` (image/audio bytes) prepended. Collected blocks ride
+ * `content[]` only — never `structuredContent` — so a handler can surface
+ * media for the model without the base64 duplicating into the typed output.
+ *
+ * A formatter failure is isolated from handler failures so it classifies as
+ * an internal error, carrying the formatter's own error as `cause`.
+ */
+export function renderToolContent(
+  def: AnyToolDefinition,
+  validatedOutput: Record<string, unknown>,
+  ctx: Context,
+): ContentBlock[] {
+  let content: ContentBlock[];
+  try {
+    content = (def.format ?? defaultResponseFormatter)(validatedOutput);
+  } catch (formatError) {
+    throw internalError(
+      `Output formatting failed: ${formatError instanceof Error ? formatError.message : String(formatError)}`,
+      undefined,
+      { cause: formatError },
+    );
+  }
+  const collected = readContentStore(ctx)?.blocks;
+  return collected && collected.length > 0 ? [...collected, ...content] : content;
+}
 
 // ---------------------------------------------------------------------------
 // Error response shaping
@@ -473,48 +455,16 @@ export function buildToolSuccessResult(
  */
 export function createToolHandler(
   def: AnyToolDefinition,
-  services: HandlerFactoryServices,
-  notifiers: HandlerNotifiers,
+  services: HandlerServices,
+  notifiers: NotifierSources,
 ): (
   input: Record<string, unknown>,
   ctx: ServerContext,
 ) => Promise<CallToolResult | InputRequiredResult> {
-  const formatter = def.format ?? defaultResponseFormatter;
-
   return async (input, serverContext): Promise<CallToolResult | InputRequiredResult> => {
-    const mcpReq = serverContext?.mcpReq;
-    const signal = mcpReq?.signal ?? new AbortController().signal;
-
-    const effectiveNotifiers = selectNotifiers(notifiers, mcpReq);
-
-    const sdkSessionId =
-      typeof serverContext?.sessionId === 'string' ? serverContext.sessionId : undefined;
-
-    // Surface sessionId on `Context` only when it has request-spanning
-    // lifetime — stateful HTTP (or `auto`, which resolves to stateful for
-    // HTTP). In stateless mode the SDK still hands us a per-request token;
-    // pass it through only when the consumer opted in via
-    // `createApp({ context: { exposeStatelessSessionId: true } })`. Stdio
-    // gives no sessionId at the SDK layer, so the gate is moot there.
-    const isStatefulMode = resolveSessionMode(config.mcpSessionMode) === 'stateful';
-    const handlerSessionId =
-      sdkSessionId && (isStatefulMode || services.exposeStatelessSessionId === true)
-        ? sdkSessionId
-        : undefined;
-
-    const requestId = mcpReq?.id;
-
-    // Create internal RequestContext for tracing. Raw `input` is intentionally
-    // excluded — it flows into the completion log via context spread and can
-    // contain caller PII or secrets. Input size and top-level parameter names
-    // are captured as OTel metric attributes in measureToolExecution instead.
-    // Log correlation always uses the raw SDK sessionId — useful even in
-    // stateless mode for tracing the SDK's per-request token through events.
+    const request = resolveHandlerRequest(serverContext, services, notifiers);
     const appContext = requestContextService.createRequestContext({
-      parentContext: {
-        ...(typeof requestId === 'string' ? { requestId } : {}),
-        ...(sdkSessionId ? { sessionId: sdkSessionId } : {}),
-      },
+      parentContext: handlerParentContext(request),
       operation: 'HandleToolRequest',
       additionalContext: { toolName: def.name },
     });
@@ -550,30 +500,7 @@ export function createToolHandler(
       // the handler returned recorded those as successes (#346).
       return await measureToolExecution(
         async (spanContext, recordOutput) => {
-          // Construct Context with detected capabilities, from inside the
-          // execution span so `ctx.traceId` / `ctx.spanId` — and the child
-          // logger built from them — name the `tool_execution:*` span the
-          // handler runs in rather than the enclosing request span (#296).
-          // When the definition declares an error contract, `attachTypedFail`
-          // adds `ctx.fail` so handlers can `throw ctx.fail('reason', ...)`;
-          // otherwise ctx is unchanged.
-          const handlerCtx = attachTypedFail(
-            createContext({
-              appContext: spanContext,
-              logger: services.logger,
-              storage: services.storage,
-              signal,
-              sessionId: handlerSessionId,
-              inputs: createContextInputs(mcpReq),
-              requestInput: createRequestInput(),
-              ...(mcpReq?.log && { wireLog: mcpReq.log }),
-              notifyPromptListChanged: effectiveNotifiers.notifyPromptListChanged,
-              notifyResourceListChanged: effectiveNotifiers.notifyResourceListChanged,
-              notifyResourceUpdated: effectiveNotifiers.notifyResourceUpdated,
-              notifyToolListChanged: effectiveNotifiers.notifyToolListChanged,
-            }),
-            def.errors,
-          );
+          const handlerCtx = buildHandlerContext(request, services, spanContext, def.errors);
           ctx = handlerCtx;
 
           // Handler may return sync or async.
@@ -584,34 +511,14 @@ export function createToolHandler(
           // callback returns, which re-renders it into content[].
           recordOutput(handlerResult);
 
-          const validatedResult = def.output.parse(handlerResult);
-
-          // Render content[] from the domain payload only (Resolution B). Isolate
-          // formatter errors from handler errors so they get classified correctly.
-          let domainContent: ContentBlock[];
-          try {
-            domainContent = formatter(validatedResult);
-          } catch (formatError) {
-            throw new Error(
-              `Output formatting failed: ${formatError instanceof Error ? formatError.message : String(formatError)}`,
-            );
-          }
-
-          // Prepend any blocks collected via `ctx.content` (image/audio bytes). They
-          // ride content[] only — never structuredContent — so a handler can surface
-          // media for the model without the base64 duplicating into the typed output.
-          // Empty for tools that never call ctx.content, leaving content[] unchanged.
-          const collected = readContentStore(handlerCtx)?.blocks;
-          if (collected && collected.length > 0) {
-            domainContent = [...collected, ...domainContent];
-          }
-
-          // Merge enrichment into structuredContent and append the content[] trailer.
+          // Render content[] from the domain payload only (Resolution B), then
+          // merge enrichment into structuredContent and append the content[] trailer.
+          const validatedResult = def.output.parse(handlerResult) as Record<string, unknown>;
           return buildToolSuccessResult(
             def,
             handlerCtx,
-            validatedResult as Record<string, unknown>,
-            domainContent,
+            validatedResult,
+            renderToolContent(def, validatedResult, handlerCtx),
           );
         },
         { ...appContext, toolName: def.name },

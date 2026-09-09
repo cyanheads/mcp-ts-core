@@ -8,7 +8,7 @@ import { z } from 'zod';
 import type { ResourceSubscriptions } from '@/mcp-server/notifications.js';
 import { ResourceRegistry } from '@/mcp-server/resources/resource-registration.js';
 import { resource } from '@/mcp-server/resources/utils/resourceDefinition.js';
-import type { ResourceHandlerFactoryServices } from '@/mcp-server/resources/utils/resourceHandlerFactory.js';
+import type { HandlerServices } from '@/mcp-server/resources/utils/resourceHandlerFactory.js';
 import { JsonRpcErrorCode } from '@/types-global/errors.js';
 import { makeSenderlessServerContext, makeServerContext } from '../../../helpers/server-context.js';
 
@@ -86,7 +86,7 @@ const mockStorage = {
   getMany: vi.fn(async () => new Map()),
 };
 
-const services: ResourceHandlerFactoryServices = {
+const services: HandlerServices = {
   logger: mockLogger as any,
   storage: mockStorage as any,
 };

@@ -11,9 +11,7 @@ import type {
   ContentBlock,
   InputRequiredResult,
   InputResponses,
-  InputResponseView,
 } from '@modelcontextprotocol/server';
-import { acceptedContent, inputResponse } from '@modelcontextprotocol/server';
 import type { z } from 'zod';
 import type {
   AuthContext,
@@ -35,11 +33,16 @@ import {
   stashContentStore,
   stashEnrichmentStore,
 } from '@/core/context.js';
-import { createRequestInput, isInputRequiredSignal } from '@/mcp-server/inputRequired.js';
+import {
+  contextInputsFrom,
+  createRequestInput,
+  isInputRequiredSignal,
+} from '@/mcp-server/inputRequired.js';
 import type { AnyToolDefinition } from '@/mcp-server/tools/utils/toolDefinition.js';
 import {
   buildToolSuccessResult,
   classifyAndBuildToolErrorResult,
+  renderToolContent,
 } from '@/mcp-server/tools/utils/toolHandlerFactory.js';
 import { StorageService } from '@/storage/core/StorageService.js';
 import {
@@ -158,18 +161,7 @@ function createMockInputs(
   responses: InputResponses | Record<string, unknown> | undefined,
   requestState: unknown,
 ): ContextInputs {
-  const accepted = ((key: string, schema?: Parameters<typeof acceptedContent>[2]) =>
-    schema === undefined
-      ? acceptedContent(responses, key)
-      : acceptedContent(responses, key, schema)) as ContextInputs['accepted'];
-
-  return {
-    accepted,
-    dropped: [],
-    responses,
-    state: <T>(): T | undefined => requestState as T | undefined,
-    view: (key: string): InputResponseView => inputResponse(responses, key),
-  };
+  return contextInputsFrom(responses, [], <T>(): T | undefined => requestState as T | undefined);
 }
 
 // ---------------------------------------------------------------------------
@@ -505,21 +497,12 @@ export async function runToolContract<TDefinition extends AnyToolDefinition>(
     const validatedInput = definition.input.parse(input);
     const output = await definition.handler(validatedInput, ctx);
     const validatedOutput = definition.output.parse(output) as Record<string, unknown>;
-
-    let content: ContentBlock[];
-    try {
-      content = definition.format
-        ? definition.format(validatedOutput)
-        : [{ type: 'text', text: JSON.stringify(validatedOutput, null, 2) }];
-    } catch (error) {
-      throw new Error(
-        `Output formatting failed: ${error instanceof Error ? error.message : String(error)}`,
-      );
-    }
-
-    const collected = getContentBlocks(ctx);
-    if (collected.length > 0) content = [...collected, ...content];
-    return buildToolSuccessResult(definition, ctx, validatedOutput, content);
+    return buildToolSuccessResult(
+      definition,
+      ctx,
+      validatedOutput,
+      renderToolContent(definition, validatedOutput, ctx),
+    );
   } catch (error) {
     return classifyAndBuildToolErrorResult(error);
   }

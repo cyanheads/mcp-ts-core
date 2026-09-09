@@ -107,8 +107,8 @@ import {
   buildToolErrorResult,
   createToolHandler,
   effectiveOutputSchema,
-  type HandlerFactoryServices,
-  type HandlerNotifiers,
+  type HandlerServices,
+  type NotifierSources,
 } from '@/mcp-server/tools/utils/toolHandlerFactory.js';
 import { ErrorHandler } from '@/utils/internal/error-handler/errorHandler.js';
 import { measureToolExecution } from '@/utils/internal/performance.js';
@@ -146,12 +146,12 @@ const mockStorage = {
   getMany: vi.fn(async () => new Map()),
 };
 
-const services: HandlerFactoryServices = {
+const services: HandlerServices = {
   logger: mockLogger as any,
   storage: mockStorage as any,
 };
 
-const notifiers: HandlerNotifiers = {};
+const notifiers: NotifierSources = {};
 
 // ---------------------------------------------------------------------------
 // Tests
@@ -644,7 +644,7 @@ describe('createToolHandler', () => {
 
     it('surfaces ctx.sessionId in stateless mode when exposeStatelessSessionId is true', async () => {
       mockConfig.mcpSessionMode = 'stateless';
-      const optInServices: HandlerFactoryServices = {
+      const optInServices: HandlerServices = {
         ...services,
         exposeStatelessSessionId: true,
       };
@@ -729,7 +729,7 @@ describe('createToolHandler', () => {
     });
 
     it('falls back to the server-level notifiers when the request scope exposes no sender', async () => {
-      const serverNotifiers: HandlerNotifiers = {
+      const serverNotifiers: NotifierSources = {
         notifyToolListChanged: vi.fn(),
         notifyResourceListChanged: vi.fn(),
         notifyPromptListChanged: vi.fn(),

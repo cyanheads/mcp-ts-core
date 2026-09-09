@@ -78,7 +78,23 @@ export function createRequestInput(): (spec: InputRequiredSpec) => never {
  * schema to `accepted()` wherever the content matters.
  */
 export function createContextInputs(mcpReq: ServerContext['mcpReq'] | undefined): ContextInputs {
-  const responses = mcpReq?.inputResponses;
+  return contextInputsFrom(
+    mcpReq?.inputResponses,
+    mcpReq?.droppedInputResponseKeys ?? [],
+    <T = string>(): T | undefined => mcpReq?.requestState<T>(),
+  );
+}
+
+/**
+ * The `ctx.inputs` reader over an explicit set of responses — what
+ * {@link createContextInputs} builds from the SDK request, and what the test
+ * kit builds from seeded `inputResponses` / `requestState`.
+ */
+export function contextInputsFrom(
+  responses: Parameters<typeof acceptedContent>[0],
+  dropped: string[],
+  state: ContextInputs['state'],
+): ContextInputs {
   const accepted = ((key: string, schema?: StandardSchemaV1) =>
     schema === undefined
       ? acceptedContent(responses, key)
@@ -86,9 +102,9 @@ export function createContextInputs(mcpReq: ServerContext['mcpReq'] | undefined)
 
   return {
     accepted,
-    dropped: mcpReq?.droppedInputResponseKeys ?? [],
+    dropped,
     responses,
-    state: <T = string>(): T | undefined => mcpReq?.requestState<T>(),
+    state,
     view: (key: string): InputResponseView => inputResponse(responses, key),
   };
 }

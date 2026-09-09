@@ -12,8 +12,8 @@ import type { ResourceSubscriptions } from '@/mcp-server/notifications.js';
 import type { AnyResourceDefinition } from '@/mcp-server/resources/utils/resourceDefinition.js';
 import {
   createResourceHandler,
-  type ResourceHandlerFactoryServices,
-  type ResourceHandlerNotifiers,
+  type HandlerServices,
+  type NotifierSources,
 } from '@/mcp-server/resources/utils/resourceHandlerFactory.js';
 import { JsonRpcErrorCode } from '@/types-global/errors.js';
 import { ErrorHandler } from '@/utils/internal/error-handler/errorHandler.js';
@@ -30,7 +30,7 @@ export class ResourceRegistry {
 
   constructor(
     private resourceDefs: AnyResourceDefinition[],
-    private services: ResourceHandlerFactoryServices,
+    private services: HandlerServices,
   ) {}
 
   /**
@@ -48,7 +48,7 @@ export class ResourceRegistry {
     // (which would race under concurrent HTTP requests). The resource handler
     // factory prefers request-scoped notifiers (#135) and falls back to these
     // only when a request has no notification sender.
-    const notifiers: ResourceHandlerNotifiers = {
+    const notifiers: NotifierSources = {
       notifyPromptListChanged: () => server.sendPromptListChanged(),
       notifyResourceListChanged: () => server.sendResourceListChanged(),
       notifyToolListChanged: () => server.sendToolListChanged(),
@@ -84,7 +84,7 @@ export class ResourceRegistry {
   private async registerResource(
     server: McpServer,
     def: AnyResourceDefinition,
-    notifiers: ResourceHandlerNotifiers,
+    notifiers: NotifierSources,
   ): Promise<void> {
     const resourceName = def.name ?? def.uriTemplate;
     const registrationContext = requestContextService.createRequestContext({
