@@ -115,6 +115,25 @@ describe('ElevenLabsProvider', () => {
       expect((body.voice_settings as Record<string, unknown>).stability).toBe(0.8);
     });
 
+    it('forwards voice.speed to voice_settings and omits it when unset', async () => {
+      mockFetch.mockResolvedValue({
+        ok: true,
+        arrayBuffer: () => Promise.resolve(new Uint8Array([1]).buffer),
+      } as unknown as Response);
+      const sentVoiceSettings = (call: number): Record<string, unknown> =>
+        (
+          JSON.parse((mockFetch.mock.calls[call]?.[3] as RequestInit)?.body as string) as {
+            voice_settings: Record<string, unknown>;
+          }
+        ).voice_settings;
+
+      await provider.textToSpeech({ text: 'Hi', voice: { speed: 1.1 } });
+      expect(sentVoiceSettings(0).speed).toBe(1.1);
+
+      await provider.textToSpeech({ text: 'Hi' });
+      expect(sentVoiceSettings(1)).not.toHaveProperty('speed');
+    });
+
     it('should throw on API error response', async () => {
       // fetchWithTimeout throws McpError on non-ok responses
       mockFetch.mockRejectedValue(

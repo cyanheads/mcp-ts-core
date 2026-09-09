@@ -26,6 +26,7 @@ import {
   withExtra,
 } from '@/utils/internal/requestContext.js';
 
+import { canvasNotFound } from '../../core/CanvasRegistry.js';
 import type { IDataCanvasProvider } from '../../core/IDataCanvasProvider.js';
 import { sniffSchema } from '../../core/schemaSniffer.js';
 import {
@@ -316,81 +317,61 @@ export class DuckdbProvider implements IDataCanvasProvider {
     const duck = await importDuckDB();
     await this.assertReadOnlySql(record, sql, duck, options);
 
-    // Per-query connection so cancellation interrupts only this call.
-    const conn = await record.instance.connect();
-    let cancelled = false;
-    const onAbort = () => {
-      cancelled = true;
-      try {
-        conn.interrupt();
-      } catch {
-        /* interrupt is best-effort; closeSync still cleans up. */
-      }
-    };
-    options?.signal?.addEventListener('abort', onAbort, { once: true });
+    return await this.withConnection(
+      record,
+      options?.signal,
+      'Canvas query was cancelled.',
+      async (conn) => {
+        let registeredAs: string | undefined;
+        let rowsToReturn: Record<string, unknown>[] = [];
+        let columns: string[] = [];
+        let totalRowCount = 0;
+        let truncated: boolean | undefined;
 
-    try {
-      let registeredAs: string | undefined;
-      let rowsToReturn: Record<string, unknown>[] = [];
-      let columns: string[] = [];
-      let totalRowCount = 0;
-      let truncated: boolean | undefined;
-
-      if (options?.registerAs) {
-        assertValidIdentifier(options.registerAs, 'table');
-        await ensureTableMissing(record.controlConnection, options.registerAs);
-        const ctas = `CREATE TABLE ${quoteIdentifier(options.registerAs)} AS ${sql}`;
-        await conn.run(ctas);
-        registeredAs = options.registerAs;
-        const reader = await conn.runAndReadUntil(
-          `SELECT * FROM ${quoteIdentifier(options.registerAs)} LIMIT ${preview}`,
-          preview,
-        );
-        rowsToReturn = reader.getRowObjectsJson() as Record<string, unknown>[];
-        columns = reader.columnNames();
-        totalRowCount = await this.countRows(conn, options.registerAs);
-        // truncated is false on the registerAs path — rowCount is exact.
-      } else {
-        // Use streamAndReadUntil to keep the engine pipeline lazy: reads at
-        // most rowLimit+1 rows without materializing the full result in JS.
-        const reader = await conn.streamAndReadUntil(sql, rowLimit + 1);
-        const fetched = reader.getRowObjectsJson() as Record<string, unknown>[];
-        columns = reader.columnNames();
-        if (fetched.length > rowLimit) {
-          // More rows exist beyond the cap.
-          rowsToReturn = fetched.slice(0, rowLimit);
-          totalRowCount = rowLimit;
-          truncated = true;
+        if (options?.registerAs) {
+          assertValidIdentifier(options.registerAs, 'table');
+          await ensureTableMissing(record.controlConnection, options.registerAs);
+          const ctas = `CREATE TABLE ${quoteIdentifier(options.registerAs)} AS ${sql}`;
+          await conn.run(ctas);
+          registeredAs = options.registerAs;
+          const reader = await conn.runAndReadUntil(
+            `SELECT * FROM ${quoteIdentifier(options.registerAs)} LIMIT ${preview}`,
+            preview,
+          );
+          rowsToReturn = reader.getRowObjectsJson() as Record<string, unknown>[];
+          columns = reader.columnNames();
+          totalRowCount = await this.countRows(conn, options.registerAs);
+          // truncated is false on the registerAs path — rowCount is exact.
         } else {
-          rowsToReturn = fetched;
-          totalRowCount = fetched.length;
+          // Use streamAndReadUntil to keep the engine pipeline lazy: reads at
+          // most rowLimit+1 rows without materializing the full result in JS.
+          const reader = await conn.streamAndReadUntil(sql, rowLimit + 1);
+          const fetched = reader.getRowObjectsJson() as Record<string, unknown>[];
+          columns = reader.columnNames();
+          if (fetched.length > rowLimit) {
+            // More rows exist beyond the cap.
+            rowsToReturn = fetched.slice(0, rowLimit);
+            totalRowCount = rowLimit;
+            truncated = true;
+          } else {
+            rowsToReturn = fetched;
+            totalRowCount = fetched.length;
+          }
+          // Apply preview cap (may be smaller than rowLimit when caller requests a smaller slice).
+          if (rowsToReturn.length > preview) {
+            rowsToReturn = rowsToReturn.slice(0, preview);
+          }
         }
-        // Apply preview cap (may be smaller than rowLimit when caller requests a smaller slice).
-        if (rowsToReturn.length > preview) {
-          rowsToReturn = rowsToReturn.slice(0, preview);
-        }
-      }
 
-      return {
-        rows: rowsToReturn,
-        columns,
-        rowCount: totalRowCount,
-        ...(truncated && { truncated }),
-        ...(registeredAs && { tableName: registeredAs }),
-      };
-    } catch (err) {
-      if (cancelled) {
-        throw timeout('Canvas query was cancelled.', { reason: 'cancelled' }, { cause: err });
-      }
-      throw classifyDuckdbError(err);
-    } finally {
-      options?.signal?.removeEventListener('abort', onAbort);
-      try {
-        conn.closeSync();
-      } catch {
-        /* Connection may already be torn down by interrupt. */
-      }
-    }
+        return {
+          rows: rowsToReturn,
+          columns,
+          rowCount: totalRowCount,
+          ...(truncated && { truncated }),
+          ...(registeredAs && { tableName: registeredAs }),
+        };
+      },
+    );
   }
 
   async export(
@@ -405,66 +386,47 @@ export class DuckdbProvider implements IDataCanvasProvider {
     options?.signal?.throwIfAborted();
 
     const formatClause = copyFormatClause(target.format);
-    const conn = await record.instance.connect();
-    let cancelled = false;
-    const onAbort = () => {
-      cancelled = true;
-      try {
-        conn.interrupt();
-      } catch {
-        /* interrupt is best-effort. */
-      }
-    };
-    options?.signal?.addEventListener('abort', onAbort, { once: true });
+    return await this.withConnection(
+      record,
+      options?.signal,
+      'Canvas export was cancelled.',
+      async (conn) => {
+        const rowCount = await this.countRows(conn, tableName);
 
-    try {
-      const rowCount = await this.countRows(conn, tableName);
+        if (isPathTarget(target)) {
+          const absolutePath = await resolveExportPath(this.options.exportRootPath, target.path);
+          await conn.run(
+            `COPY ${quoteIdentifier(tableName)} TO '${escapeSqlString(absolutePath)}' ${formatClause}`,
+          );
+          const sizeBytes = await safeSizeBytes(absolutePath);
+          return {
+            format: target.format,
+            path: absolutePath,
+            sizeBytes,
+            rowCount,
+          };
+        }
 
-      if (isPathTarget(target)) {
-        const absolutePath = await resolveExportPath(this.options.exportRootPath, target.path);
-        await conn.run(
-          `COPY ${quoteIdentifier(tableName)} TO '${escapeSqlString(absolutePath)}' ${formatClause}`,
-        );
-        const sizeBytes = await safeSizeBytes(absolutePath);
+        // Stream branch: COPY to a scratch file, pipe to the caller's stream,
+        // then unlink. pipeFileToStream owns cleanup once invoked; if the COPY
+        // itself fails we must unlink here before re-throwing.
+        const tempPath = await tempFilePathFor(await this.ensureTempRoot(), target.format);
+        try {
+          await conn.run(
+            `COPY ${quoteIdentifier(tableName)} TO '${escapeSqlString(tempPath)}' ${formatClause}`,
+          );
+        } catch (copyErr) {
+          await unlink(tempPath).catch(() => {});
+          throw copyErr;
+        }
+        const { sizeBytes } = await pipeFileToStream(tempPath, target.stream);
         return {
           format: target.format,
-          path: absolutePath,
           sizeBytes,
           rowCount,
         };
-      }
-
-      // Stream branch: COPY to a scratch file, pipe to the caller's stream,
-      // then unlink. pipeFileToStream owns cleanup once invoked; if the COPY
-      // itself fails we must unlink here before re-throwing.
-      const tempPath = await tempFilePathFor(await this.ensureTempRoot(), target.format);
-      try {
-        await conn.run(
-          `COPY ${quoteIdentifier(tableName)} TO '${escapeSqlString(tempPath)}' ${formatClause}`,
-        );
-      } catch (copyErr) {
-        await unlink(tempPath).catch(() => {});
-        throw copyErr;
-      }
-      const { sizeBytes } = await pipeFileToStream(tempPath, target.stream);
-      return {
-        format: target.format,
-        sizeBytes,
-        rowCount,
-      };
-    } catch (err) {
-      if (cancelled) {
-        throw timeout('Canvas export was cancelled.', { reason: 'cancelled' }, { cause: err });
-      }
-      throw classifyDuckdbError(err);
-    } finally {
-      options?.signal?.removeEventListener('abort', onAbort);
-      try {
-        conn.closeSync();
-      } catch {
-        /* Already torn down by interrupt. */
-      }
-    }
+      },
+    );
   }
 
   async registerView(
@@ -504,16 +466,7 @@ export class DuckdbProvider implements IDataCanvasProvider {
       throw classifyDuckdbError(err);
     }
 
-    const colReader = await record.controlConnection.runAndReadAll(
-      `SELECT column_name FROM information_schema.columns ` +
-        `WHERE table_schema = 'main' AND table_name = '${escapeSqlString(name)}' ` +
-        `ORDER BY ordinal_position`,
-    );
-    const columns = (colReader.getRowObjectsJson() as { column_name: string }[]).map(
-      (r) => r.column_name,
-    );
-
-    return { viewName: name, columns };
+    return { viewName: name, columns: await this.columnNames(record.controlConnection, name) };
   }
 
   async importFrom(
@@ -597,17 +550,10 @@ export class DuckdbProvider implements IDataCanvasProvider {
       await unlink(tempPath).catch(() => {});
     }
 
-    const [colReader, rowCount] = await Promise.all([
-      target.controlConnection.runAndReadAll(
-        `SELECT column_name FROM information_schema.columns ` +
-          `WHERE table_schema = 'main' AND table_name = '${escapeSqlString(asName)}' ` +
-          `ORDER BY ordinal_position`,
-      ),
+    const [columns, rowCount] = await Promise.all([
+      this.columnNames(target.controlConnection, asName),
       this.countRows(target.controlConnection, asName),
     ]);
-    const columns = (colReader.getRowObjectsJson() as { column_name: string }[]).map(
-      (r) => r.column_name,
-    );
 
     return { tableName: asName, rowCount, columns };
   }
@@ -672,19 +618,10 @@ export class DuckdbProvider implements IDataCanvasProvider {
     kind: CanvasObjectKind,
     approxSizeBytes?: number,
   ): Promise<TableInfo> {
-    const [colReader, rowCount] = await Promise.all([
-      connection.runAndReadAll(
-        `SELECT column_name, data_type, is_nullable FROM information_schema.columns ` +
-          `WHERE table_schema = 'main' AND table_name = '${escapeSqlString(tableName)}' ` +
-          `ORDER BY ordinal_position`,
-      ),
+    const [colRows, rowCount] = await Promise.all([
+      this.columnRows(connection, tableName),
       this.countRows(connection, tableName),
     ]);
-    const colRows = colReader.getRowObjectsJson() as {
-      column_name: string;
-      data_type: string;
-      is_nullable: string;
-    }[];
     const columns: ColumnSchema[] = colRows.map((c) => ({
       name: c.column_name,
       type: dataTypeToColumnType(c.data_type),
@@ -735,19 +672,90 @@ export class DuckdbProvider implements IDataCanvasProvider {
 
   private requireCanvas(canvasId: string): CanvasRecord {
     const record = this.canvases.get(canvasId);
-    if (!record) {
-      // Defensive — CanvasInstance touches the registry first, which throws
-      // the same structured canvas_not_found shape before the provider is
-      // reached (#261). Kept identical for consistency.
-      throw notFound('Canvas not found in DuckDB provider.', {
-        reason: 'canvas_not_found',
-        canvasId,
-        recovery: {
-          hint: 'Re-run the tool that produced this canvas_id to stage fresh data, or verify the id was copied correctly.',
-        },
+    // Defensive — CanvasInstance touches the registry first, which throws the
+    // same structured canvas_not_found before the provider is reached (#261).
+    if (!record) throw canvasNotFound(canvasId);
+    return record;
+  }
+
+  /**
+   * Runs `fn` on a connection of its own, so an abort interrupts only this
+   * call. A failure after the abort surfaces as `Timeout` (cancelled); any
+   * other failure is classified from the engine error. The connection is
+   * always closed, even when the interrupt already tore it down.
+   */
+  private async withConnection<T>(
+    record: CanvasRecord,
+    signal: AbortSignal | undefined,
+    cancelledMessage: string,
+    fn: (conn: DuckDBConnection) => Promise<T>,
+  ): Promise<T> {
+    const conn = await record.instance.connect();
+    let cancelled = false;
+    const onAbort = () => {
+      cancelled = true;
+      try {
+        conn.interrupt();
+      } catch {
+        /* interrupt is best-effort; closeSync still cleans up. */
+      }
+    };
+    signal?.addEventListener('abort', onAbort, { once: true });
+
+    try {
+      return await fn(conn);
+    } catch (err) {
+      if (cancelled) throw timeout(cancelledMessage, { reason: 'cancelled' }, { cause: err });
+      throw classifyDuckdbError(err);
+    } finally {
+      signal?.removeEventListener('abort', onAbort);
+      try {
+        conn.closeSync();
+      } catch {
+        /* Connection may already be torn down by interrupt. */
+      }
+    }
+  }
+
+  /** `information_schema.columns` rows for `tableName`, in declaration order. */
+  private async columnRows(
+    connection: DuckDBConnection,
+    tableName: string,
+  ): Promise<{ column_name: string; data_type: string; is_nullable: string }[]> {
+    const reader = await connection.runAndReadAll(
+      `SELECT column_name, data_type, is_nullable FROM information_schema.columns ` +
+        `WHERE table_schema = 'main' AND table_name = '${escapeSqlString(tableName)}' ` +
+        `ORDER BY ordinal_position`,
+    );
+    return reader.getRowObjectsJson() as {
+      column_name: string;
+      data_type: string;
+      is_nullable: string;
+    }[];
+  }
+
+  private async columnNames(connection: DuckDBConnection, tableName: string): Promise<string[]> {
+    return (await this.columnRows(connection, tableName)).map((c) => c.column_name);
+  }
+
+  /**
+   * The rejection for a statement that failed to parse or prepare: a
+   * SELECT-shaped statement surfaces the sanitized binder message (the SQL
+   * itself is probably wrong), anything else is rejected as non-SELECT.
+   */
+  private prepareFailure(sql: string, err: unknown): McpError {
+    if (isSelectShaped(sql) && err instanceof Error) {
+      const binderMessage = sanitizeBinderMessage(err.message, this.options.exportRootPath);
+      return validationError(`Canvas query failed to prepare: ${binderMessage}`, {
+        reason: SQL_GATE_REASONS.invalidSql,
+        statementType: 'UNKNOWN',
+        binderMessage,
       });
     }
-    return record;
+    return validationError(
+      'Canvas query must be SELECT; the statement could not be parsed or prepared.',
+      { reason: SQL_GATE_REASONS.nonSelectStatement, statementType: 'UNKNOWN' },
+    );
   }
 
   /**
@@ -808,21 +816,7 @@ export class DuckdbProvider implements IDataCanvasProvider {
               );
             }
           }
-          if (isSelectShaped(sql) && prepErr instanceof Error) {
-            const binderMessage = sanitizeBinderMessage(
-              prepErr.message,
-              this.options.exportRootPath,
-            );
-            throw validationError(`Canvas query failed to prepare: ${binderMessage}`, {
-              reason: SQL_GATE_REASONS.invalidSql,
-              statementType: 'UNKNOWN',
-              binderMessage,
-            });
-          }
-          throw validationError(
-            'Canvas query must be SELECT; the statement could not be parsed or prepared.',
-            { reason: SQL_GATE_REASONS.nonSelectStatement, statementType: 'UNKNOWN' },
-          );
+          throw this.prepareFailure(sql, prepErr);
         } finally {
           prepared?.destroySync();
         }
@@ -835,18 +829,7 @@ export class DuckdbProvider implements IDataCanvasProvider {
       // instanceof McpError, not a loose `'code' in err` — engine/Node errors
       // can carry errno-style `code` props and must not escape the gate raw.
       if (err instanceof McpError) throw err;
-      if (isSelectShaped(sql) && err instanceof Error) {
-        const binderMessage = sanitizeBinderMessage(err.message, this.options.exportRootPath);
-        throw validationError(`Canvas query failed to prepare: ${binderMessage}`, {
-          reason: SQL_GATE_REASONS.invalidSql,
-          statementType: 'UNKNOWN',
-          binderMessage,
-        });
-      }
-      throw validationError(
-        'Canvas query must be SELECT; the statement could not be parsed or prepared.',
-        { reason: SQL_GATE_REASONS.nonSelectStatement, statementType: 'UNKNOWN' },
-      );
+      throw this.prepareFailure(sql, err);
     }
     assertSelectOnly({ statementCount, statementType });
 

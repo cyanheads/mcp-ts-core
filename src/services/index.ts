@@ -9,12 +9,8 @@ export type { IGraphProvider } from './graph/core/IGraphProvider.js';
 export type {
   Edge,
   GraphPath,
-  GraphPattern,
-  GraphProviderType,
-  GraphServiceConfig,
   GraphStats,
   PathOptions,
-  PatternMatchResult,
   RelateOptions,
   TraversalDirection,
   TraversalOptions,
@@ -29,7 +25,6 @@ export {
 } from './llm/providers/openrouter.provider.js';
 // Speech
 export type { ISpeechProvider } from './speech/core/ISpeechProvider.js';
-export { supportsSTT, supportsTTS } from './speech/core/ISpeechProvider.js';
 export { createSpeechProvider, SpeechService } from './speech/core/SpeechService.js';
 export { ElevenLabsProvider } from './speech/providers/elevenlabs.provider.js';
 export { WhisperProvider } from './speech/providers/whisper.provider.js';

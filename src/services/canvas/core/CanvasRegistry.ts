@@ -484,13 +484,14 @@ export class CanvasRegistry {
  * `reason: 'canvas_not_found'` plus a default `recovery.hint` so consumer
  * tools that declare a `canvas_not_found` error contract surface the reason
  * and recovery on the wire — the throw happens inside the framework, before
- * handler code runs, so this is the only place the fields can originate (#261).
+ * handler code runs, so this is where the fields originate; the DuckDB
+ * provider's own guard reuses it (#261).
  * The hint deliberately avoids suggesting omission of `canvas_id`: omission
  * mints a fresh, empty canvas — rarely what a describe/query-style tool wants
  * with a stale id — and a tool that requires the parameter would reject the
  * retry, looping the agent.
  */
-function canvasNotFound(canvasId: string): McpError {
+export function canvasNotFound(canvasId: string): McpError {
   return notFound('Canvas not found or expired.', {
     reason: 'canvas_not_found',
     canvasId,

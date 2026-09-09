@@ -53,10 +53,10 @@ function getGraphMetrics() {
  *
  * @example
  * ```ts
- * import { GraphService } from './GraphService.js';
- * import { MockGraphProvider } from '../providers/mock/MockGraphProvider.js';
+ * import { GraphService } from '@cyanheads/mcp-ts-core/services';
+ * import { MyGraphProvider } from './my-graph-provider.js'; // implements IGraphProvider
  *
- * const graphService = new GraphService(new MockGraphProvider());
+ * const graphService = new GraphService(new MyGraphProvider());
  *
  * // Create a relationship
  * const edge = await graphService.relate(

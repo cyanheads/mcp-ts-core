@@ -51,34 +51,44 @@ export interface OpenHandleOptions {
 const BUN_SQLITE_SPECIFIER: string = 'bun:sqlite';
 const BETTER_SQLITE3_SPECIFIER: string = 'better-sqlite3';
 
-interface BunDatabaseCtor {
-  new (
-    path: string,
-    options?: { create?: boolean; readwrite?: boolean },
-  ): {
-    close(): void;
-    exec(sql: string): void;
-    prepare(sql: string): {
-      all(...p: unknown[]): unknown[];
-      get(...p: unknown[]): unknown;
-      run(...p: unknown[]): { changes: number; lastInsertRowid: number | bigint };
-    };
-    transaction<T>(fn: () => T): () => T;
+/** The surface `bun:sqlite` and `better-sqlite3` share, as far as the mirror store uses it. */
+interface SqliteDriver {
+  close(): void;
+  exec(sql: string): void;
+  prepare(sql: string): {
+    all(...p: unknown[]): unknown[];
+    get(...p: unknown[]): unknown;
+    run(...p: unknown[]): { changes: number; lastInsertRowid: number | bigint };
   };
+  transaction<T>(fn: () => T): () => T;
+}
+
+interface BunDatabaseCtor {
+  new (path: string, options?: { create?: boolean; readwrite?: boolean }): SqliteDriver;
 }
 
 interface BetterSqlite3Ctor {
-  new (
-    path: string,
-  ): {
-    close(): void;
-    exec(sql: string): void;
-    prepare(sql: string): {
-      all(...p: unknown[]): unknown[];
-      get(...p: unknown[]): unknown;
-      run(...p: unknown[]): { changes: number; lastInsertRowid: number | bigint };
-    };
-    transaction<T>(fn: () => T): () => T;
+  new (path: string): SqliteDriver;
+}
+
+/** Adapts a driver to the runtime-neutral {@link SqliteHandle}. */
+function wrapDriver(db: SqliteDriver): SqliteHandle {
+  return {
+    close: () => {
+      db.close();
+    },
+    exec: (sql) => {
+      db.exec(sql);
+    },
+    prepare: <TRow>(sql: string): SqliteStatement<TRow> => {
+      const stmt = db.prepare(sql);
+      return {
+        all: (...params) => stmt.all(...(params as unknown[])) as TRow[],
+        get: (...params) => stmt.get(...(params as unknown[])) as TRow | undefined,
+        run: (...params) => stmt.run(...(params as unknown[])),
+      };
+    },
+    transaction: <T>(fn: () => T): T => db.transaction(fn)(),
   };
 }
 
@@ -122,24 +132,7 @@ export async function openSqliteHandle(
 /* istanbul ignore next -- Bun-only driver; the test suite runs Vitest workers under Node */
 async function openBunHandle(path: string): Promise<SqliteHandle> {
   const mod = (await import(BUN_SQLITE_SPECIFIER)) as unknown as { Database: BunDatabaseCtor };
-  const db = new mod.Database(path, { create: true });
-  return {
-    close: () => {
-      db.close();
-    },
-    exec: (sql) => {
-      db.exec(sql);
-    },
-    prepare: <TRow>(sql: string): SqliteStatement<TRow> => {
-      const stmt = db.prepare(sql);
-      return {
-        all: (...params) => stmt.all(...(params as unknown[])) as TRow[],
-        get: (...params) => stmt.get(...(params as unknown[])) as TRow | undefined,
-        run: (...params) => stmt.run(...(params as unknown[])),
-      };
-    },
-    transaction: <T>(fn: () => T): T => db.transaction(fn)(),
-  };
+  return wrapDriver(new mod.Database(path, { create: true }));
 }
 
 async function openBetterSqlite3Handle(path: string): Promise<SqliteHandle> {
@@ -154,22 +147,5 @@ async function openBetterSqlite3Handle(path: string): Promise<SqliteHandle> {
       { cause: err },
     );
   }
-  const db = new mod.default(path);
-  return {
-    close: () => {
-      db.close();
-    },
-    exec: (sql) => {
-      db.exec(sql);
-    },
-    prepare: <TRow>(sql: string): SqliteStatement<TRow> => {
-      const stmt = db.prepare(sql);
-      return {
-        all: (...params) => stmt.all(...(params as unknown[])) as TRow[],
-        get: (...params) => stmt.get(...(params as unknown[])) as TRow | undefined,
-        run: (...params) => stmt.run(...(params as unknown[])),
-      };
-    },
-    transaction: <T>(fn: () => T): T => db.transaction(fn)(),
-  };
+  return wrapDriver(new mod.default(path));
 }

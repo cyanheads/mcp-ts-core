@@ -79,33 +79,3 @@ export interface ISpeechProvider {
    */
   textToSpeech(options: TextToSpeechOptions): Promise<TextToSpeechResult>;
 }
-
-/**
- * Type guard — returns `true` if the provider supports text-to-speech synthesis.
- *
- * @param provider - Any `ISpeechProvider` instance.
- * @returns `true` when `provider.supportsTTS` is set, narrowing the type for callers.
- *
- * @example
- * if (supportsTTS(provider)) {
- *   const result = await provider.textToSpeech({ text: 'Hello' });
- * }
- */
-export function supportsTTS(provider: ISpeechProvider): provider is ISpeechProvider {
-  return provider.supportsTTS;
-}
-
-/**
- * Type guard — returns `true` if the provider supports speech-to-text transcription.
- *
- * @param provider - Any `ISpeechProvider` instance.
- * @returns `true` when `provider.supportsSTT` is set, narrowing the type for callers.
- *
- * @example
- * if (supportsSTT(provider)) {
- *   const result = await provider.speechToText({ audio: buffer });
- * }
- */
-export function supportsSTT(provider: ISpeechProvider): provider is ISpeechProvider {
-  return provider.supportsSTT;
-}

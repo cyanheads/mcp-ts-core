@@ -243,8 +243,6 @@ export const PUBLIC_RUNTIME_EXPORTS = {
     'SpeechService',
     'WhisperProvider',
     'createSpeechProvider',
-    'supportsSTT',
-    'supportsTTS',
   ],
   './linter': ['validateDefinitions'],
   './testing': [

@@ -145,6 +145,7 @@ export class ElevenLabsProvider implements ISpeechProvider {
           similarity_boost: options.voice?.similarityBoost ?? 0.75,
           style: options.voice?.style ?? 0.0,
           use_speaker_boost: true,
+          ...(options.voice?.speed !== undefined && { speed: options.voice.speed }),
         };
 
         const requestBody = {

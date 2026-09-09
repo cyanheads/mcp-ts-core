@@ -56,10 +56,6 @@ describe('createSpeechProvider', () => {
     expect(provider.supportsSTT).toBe(true);
   });
 
-  it('should throw for mock provider (not implemented)', () => {
-    expect(() => createSpeechProvider({ provider: 'mock' })).toThrow(McpError);
-  });
-
   it('should throw for unknown provider', () => {
     expect(() =>
       createSpeechProvider({

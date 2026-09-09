@@ -37,9 +37,6 @@ export function createSpeechProvider(config: SpeechProviderConfig): ISpeechProvi
     case 'openai-whisper':
       return new WhisperProvider(config);
 
-    case 'mock':
-      throw invalidParams('Mock provider not yet implemented');
-
     default: {
       const _exhaustive: never = config.provider;
       throw invalidParams(`Unknown speech provider: ${String(_exhaustive)}`);
@@ -147,12 +144,10 @@ export class SpeechService {
     tts: boolean;
     stt: boolean;
   }> {
-    const ttsHealth = this.ttsProvider ? await this.ttsProvider.healthCheck() : false;
-    const sttHealth = this.sttProvider ? await this.sttProvider.healthCheck() : false;
-
-    return {
-      tts: ttsHealth,
-      stt: sttHealth,
-    };
+    const [tts, stt] = await Promise.all([
+      this.ttsProvider?.healthCheck() ?? false,
+      this.sttProvider?.healthCheck() ?? false,
+    ]);
+    return { tts, stt };
   }
 }

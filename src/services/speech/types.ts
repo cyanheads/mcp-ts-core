@@ -20,11 +20,9 @@ export type AudioFormat = 'mp3' | 'wav' | 'ogg' | 'flac' | 'pcm' | 'webm';
  * Voice settings for text-to-speech synthesis.
  */
 export interface VoiceSettings {
-  /** Voice pitch (-20.0 to 20.0, where 0 is normal) */
-  pitch?: number;
   /** Similarity boost (0.0 to 1.0, provider-specific) */
   similarityBoost?: number;
-  /** Speech rate/speed (0.5 to 2.0, where 1.0 is normal) */
+  /** Speech rate (ElevenLabs accepts 0.7 to 1.2, where 1.0 is normal) */
   speed?: number;
   /** Stability setting (0.0 to 1.0, provider-specific) */
   stability?: number;
@@ -32,8 +30,6 @@ export interface VoiceSettings {
   style?: number;
   /** Voice ID or name (provider-specific) */
   voiceId?: string;
-  /** Volume level (0.0 to 1.0) */
-  volume?: number;
 }
 
 /**
@@ -46,10 +42,6 @@ export interface TextToSpeechOptions {
     traceId?: string;
     tenantId?: string;
   };
-  /** Output audio format */
-  format?: AudioFormat;
-  /** Language code (e.g., 'en-US', 'es-ES') */
-  language?: string;
   /** Model ID (provider-specific) */
   modelId?: string;
   /** Text to convert to speech */
@@ -104,8 +96,6 @@ export interface SpeechToTextOptions {
  * Word-level timestamp information.
  */
 export interface WordTimestamp {
-  /** Confidence score (0.0 to 1.0) */
-  confidence?: number;
   /** End time in seconds */
   end: number;
   /** Start time in seconds */
@@ -118,8 +108,6 @@ export interface WordTimestamp {
  * Result from speech-to-text transcription.
  */
 export interface SpeechToTextResult {
-  /** Overall confidence score (0.0 to 1.0) */
-  confidence?: number;
   /** Duration in seconds */
   duration?: number;
   /** Detected language code */
@@ -144,8 +132,6 @@ export interface Voice {
   gender?: 'male' | 'female' | 'neutral';
   /** Voice ID */
   id: string;
-  /** Language codes supported */
-  languages?: string[];
   /** Provider-specific metadata */
   metadata?: Record<string, unknown>;
   /** Voice name */
@@ -167,15 +153,12 @@ export interface SpeechProviderConfig {
   defaultModelId?: string;
   /** Default voice ID for TTS when none is specified per-request */
   defaultVoiceId?: string;
-  /** Additional provider-specific options passed through as-is */
-  options?: Record<string, unknown>;
   /**
    * Provider implementation to use.
    * - `'elevenlabs'` — ElevenLabs TTS (no STT)
    * - `'openai-whisper'` — OpenAI Whisper STT (no TTS)
-   * - `'mock'` — Not yet implemented; throws on instantiation
    */
-  provider: 'elevenlabs' | 'openai-whisper' | 'mock';
+  provider: 'elevenlabs' | 'openai-whisper';
   /** Request timeout in milliseconds (provider defaults vary) */
   timeout?: number;
 }
