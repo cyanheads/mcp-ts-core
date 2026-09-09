@@ -87,7 +87,7 @@ Trace context propagates across boundaries via W3C `traceparent` headers. Helper
 | `extractTraceparent(headers)` | Parse an incoming `traceparent`. |
 | `createContextWithParentTrace(headers, op)` | Continue a distributed trace from incoming HTTP. |
 | `injectCurrentContextInto(carrier)` | Inject context into outgoing headers (uses `propagation.inject`). |
-| `runInContext(ctx, fn)` | Carry the active OTel context across async boundaries. |
+| `runInContext(ctx, fn)` | Re-establish the span `ctx` names as active across async boundaries. |
 
 ---
 

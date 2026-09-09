@@ -4,7 +4,7 @@ description: >
   Add a new storage or service provider to the core package. Use when implementing a new backend for StorageService (e.g., a new database) or a new service provider (e.g., a new LLM backend).
 metadata:
   author: cyanheads
-  version: "1.0"
+  version: "1.1"
   audience: internal
   type: reference
 ---
@@ -53,7 +53,20 @@ Provider file location and naming differ by domain:
 1. **Identify the provider interface** — read the interface file for the target domain
    (see table above).
 2. **Create the provider file** following the file convention for its domain (see above).
-3. **Implement the interface** — all methods must be implemented.
+3. **Implement the interface** — all methods must be implemented. Storage providers build
+   on `src/storage/core/providerHelpers.ts` rather than re-deriving what the existing
+   providers share:
+
+   - `getManyViaGet` / `setManyViaSet` / `deleteManyViaDelete` — the batch methods as a
+     parallel fan-out over the single-key methods, for backends with no native batch API.
+   - `encodeEnvelope` / `decodeEnvelope` — the TTL envelope for backends with no TTL of their
+     own (R2, filesystem). `decodeEnvelope` returns `{ kind: 'expired' }` so the provider can
+     delete on read, returns pre-envelope JSON as a plain value, and throws `SyntaxError` on
+     invalid JSON so the provider can attach the key to the error it raises.
+   - `paginateSortedKeys` — one `list()` page over an already-sorted key set, with the cursor
+     for the page that follows.
+   - `escapeLikePattern` — escapes `%`, `_`, and `\` in a prefix before a SQL `LIKE`.
+
 4. **Lazy-load dependencies** if Tier 3:
 
    ```typescript
@@ -94,7 +107,7 @@ Provider file location and naming differ by domain:
    `isServerless()` guard:
 
    ```typescript
-   // src/storage/core/storageFactory.ts ~line 112
+   // src/storage/core/storageFactory.ts
    !['in-memory', 'cloudflare-r2', 'cloudflare-kv', 'cloudflare-d1'].includes(providerType)
    ```
 
@@ -115,9 +128,10 @@ Provider file location and naming differ by domain:
 - [ ] Registered in the correct factory for the domain (see Step 5)
 - [ ] Storage: provider string added to `z.enum` in `src/config/index.ts`
 - [ ] Storage: Worker-compatible array in `storageFactory.ts` updated if applicable
+- [ ] Storage: batch, TTL envelope, paging, and `LIKE` escaping come from `providerHelpers.ts`, not a local copy
 - [ ] Speech: `provider` literal added to `SpeechProviderConfig` union in `types.ts`
 - [ ] LLM: `src/core/app.ts` instantiation logic updated if adding a second LLM provider
 - [ ] Optional peer dependency added to both `peerDependencies` and `peerDependenciesMeta` in `package.json` if Tier 3
 - [ ] `bun run rebuild` succeeds
 - [ ] `bun run devcheck` passes
-- [ ] Test file created at `src/storage/providers/{{name}}/{{name}}Provider.test.ts` (or equivalent path for the domain) and `bun run test` passes
+- [ ] Tests added under `tests/unit/storage/providers/{{providerName}}/` (storage) or `tests/unit/services/{{domain}}/providers/{{provider-name}}.provider.test.ts` (LLM / speech), and `bun run test` passes
