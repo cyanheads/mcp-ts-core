@@ -4,6 +4,7 @@
  * and raw HTTP endpoint behavior.
  * @module tests/integration/http
  */
+import { spawnSync } from 'node:child_process';
 import { Client, StreamableHTTPClientTransport } from '@modelcontextprotocol/client';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
@@ -14,8 +15,18 @@ import {
   expectDefaultServerProtocolErrors,
   expectDefaultServerSubscriptionSurface,
 } from '../helpers/default-server-mcp.js';
-import { initializeBody, MCP_HEADERS } from '../helpers/http-helpers.js';
+import { initializeBody, MCP_HEADERS, parseSSEEvents } from '../helpers/http-helpers.js';
 import { assertServerBuilt, type ServerHandle, startServer } from '../helpers/server-process.js';
+
+/** Reverses the landing page's HTML escaping (the five entity characters). */
+function unescapeHtml(value: string): string {
+  return value
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'")
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&amp;/g, '&');
+}
 
 describe('HTTP transport integration', () => {
   let handle: ServerHandle;
@@ -98,6 +109,39 @@ describe('HTTP transport integration', () => {
       expect(body.status).toBe('ok');
       expect(body.server?.name).toBeTruthy();
       expect(body.server?.version).toBeTruthy();
+    });
+
+    it('runs the landing page curl snippet verbatim and gets a negotiated initialize result', async () => {
+      // Copy-paste is the contract: the tab's snippet is executed as a shell
+      // command, not re-derived, so a quoting or header mistake fails here.
+      const page = await fetch(`http://localhost:${handle.port}/`);
+      expect(page.status).toBe(200);
+      const match = (await page.text()).match(
+        /<pre id="connect-snippet-curl"><code><!--email_off-->([\s\S]*?)<!--\/email_off--><\/code><\/pre>/,
+      );
+      expect(match).not.toBeNull();
+      const snippet = unescapeHtml(match?.[1] ?? '');
+      expect(snippet.startsWith('curl -X POST ')).toBe(true);
+
+      const run = spawnSync('sh', ['-c', `${snippet} -sS -w '\\n%{http_code}'`], {
+        encoding: 'utf-8',
+      });
+      expect(run.stderr).toBe('');
+      const lines = run.stdout.trimEnd().split('\n');
+      expect(lines.pop()).toBe('200');
+      const body = lines.join('\n');
+      // The transport may answer JSON or a one-event SSE stream; both carry the result.
+      const payload = body.trimStart().startsWith('{')
+        ? body
+        : (parseSSEEvents(body).find((event) => event.data.includes('"result"'))?.data ?? '');
+      const reply = JSON.parse(payload) as {
+        id: number;
+        result?: { protocolVersion?: string };
+        error?: unknown;
+      };
+      expect(reply.id).toBe(1);
+      expect(reply.error).toBeUndefined();
+      expect(reply.result?.protocolVersion).toMatch(/^\d{4}-\d{2}-\d{2}$/);
     });
 
     it('rejects an unsupported MCP-Protocol-Version on a post-initialize request', async () => {

@@ -6,6 +6,7 @@
  * @module tests/mcp-server/transports/http/landing-page.test
  */
 
+import { LATEST_PROTOCOL_VERSION, SUPPORTED_PROTOCOL_VERSIONS } from '@modelcontextprotocol/server';
 import { Hono } from 'hono';
 import { beforeEach, describe, expect, test, vi } from 'vitest';
 import { z } from 'zod';
@@ -21,6 +22,7 @@ import {
   createLandingPageHandler,
   renderLandingPage,
 } from '@/mcp-server/transports/http/landing-page/index.js';
+import { MODERN_PROTOCOL_REVISION } from '@/mcp-server/types.js';
 import { ADVERSARIAL_STRINGS } from '@/testing/fuzz.js';
 import { logger } from '@/utils/internal/logger.js';
 import { defaultServerManifest } from '../../../../helpers/fixtures.js';
@@ -298,6 +300,35 @@ describe('renderLandingPage — connect snippets', () => {
       'gemini mcp add --transport http test-mcp-server https://example.com/mcp',
     );
     expect(gemini).not.toContain('bunx');
+  });
+
+  test('curl tab sends a legacy initialize handshake, never the modern per-request revision', () => {
+    // What the real manifest advertises: the modern revision leads the ladder
+    // and is `latestVersion`, but `initialize` does not accept it.
+    const manifest: ServerManifest = {
+      ...defaultServerManifest,
+      protocol: {
+        supportedVersions: [MODERN_PROTOCOL_REVISION, ...SUPPORTED_PROTOCOL_VERSIONS],
+        latestVersion: MODERN_PROTOCOL_REVISION,
+      },
+    };
+    const curl = extractSnippet(renderLandingPage(manifest, 'https://example.com'), 'curl');
+    expect(curl).toContain('curl -X POST https://example.com/mcp');
+    expect(curl).toContain('-H &quot;Accept: application/json, text/event-stream&quot;');
+    expect(curl).toContain(`&quot;protocolVersion&quot;:&quot;${LATEST_PROTOCOL_VERSION}&quot;`);
+    expect(SUPPORTED_PROTOCOL_VERSIONS).toContain(LATEST_PROTOCOL_VERSION);
+    expect(curl).not.toContain(MODERN_PROTOCOL_REVISION);
+    expect(curl).not.toContain('MCP-Protocol-Version');
+  });
+
+  test('honors a curl connectSnippets override', () => {
+    const manifest: ServerManifest = {
+      ...defaultServerManifest,
+      landing: { ...defaultServerManifest.landing, connectSnippets: { curl: 'curl-custom' } },
+    };
+    const curl = extractSnippet(renderLandingPage(manifest, 'https://example.com'), 'curl');
+    expect(curl).toContain('curl-custom');
+    expect(curl).not.toContain('initialize');
   });
 
   test('honors codex/cursor/gemini connectSnippets overrides', () => {

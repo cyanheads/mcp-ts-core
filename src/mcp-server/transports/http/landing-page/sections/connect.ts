@@ -16,6 +16,7 @@
  * @module src/mcp-server/transports/http/landing-page/sections/connect
  */
 
+import { LATEST_PROTOCOL_VERSION } from '@modelcontextprotocol/server';
 import type { ServerManifest } from '@/core/serverManifest.js';
 import { html, type SafeHtml } from '@/utils/formatting/html.js';
 
@@ -83,13 +84,19 @@ export function renderConnectSnippets(manifest: ServerManifest, baseUrl: string)
   const cursorConfig = overrides.cursor ?? buildCursorHttpConfig(shortName, endpoint);
   const geminiCmd = overrides.gemini ?? buildGeminiHttpCmd(shortName, endpoint);
 
+  // curl: a legacy `initialize` handshake pinned to the newest negotiable
+  // revision. `manifest.protocol.latestVersion` is the 2026-07-28 revision,
+  // which `initialize` does not accept — and which needs the `_meta` envelope
+  // plus a method-matching `Mcp-Method` header on every request, too much for
+  // a paste tab. No `MCP-Protocol-Version` header: it is only meaningful after
+  // negotiation. The transport requires both accept types.
   const curl =
     overrides.curl ??
     [
       `curl -X POST ${endpoint} \\`,
       `  -H "Content-Type: application/json" \\`,
-      `  -H "MCP-Protocol-Version: ${manifest.protocol.latestVersion}" \\`,
-      `  -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"${manifest.protocol.latestVersion}","capabilities":{},"clientInfo":{"name":"curl","version":"1.0.0"}}}'`,
+      `  -H "Accept: application/json, text/event-stream" \\`,
+      `  -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"${LATEST_PROTOCOL_VERSION}","capabilities":{},"clientInfo":{"name":"curl","version":"1.0.0"}}}'`,
     ].join('\n');
 
   // Chrome label — npm package when published, else the HTTP endpoint (trimmed).
