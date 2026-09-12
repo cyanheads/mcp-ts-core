@@ -4,7 +4,7 @@ description: >
   Exercise tools, resources, and prompts against a live HTTP server via MCP JSON-RPC over curl. Starts the server, surfaces the catalog, runs real and adversarial inputs, measures every call (bytes, token estimate, wall-clock) and weighs the catalog, and produces a tight report with concrete findings and numbered follow-up options. Use after adding or modifying definitions, or when the user asks to test, try out, or verify their MCP surface.
 metadata:
   author: cyanheads
-  version: "2.12"
+  version: "2.14"
   audience: external
   type: debug
 ---
@@ -19,7 +19,7 @@ Unit tests (`add-test` skill) verify handler logic with mocked context. Field te
 
 This skill drives an HTTP server because curl + JSON-RPC is the most reliable harness for shell-based agents. The same handlers run on both transports — only the framing differs — so HTTP exercises the full functional surface. Both HTTP session modes are covered: a durable `Mcp-Session-Id` session, and the sessionless initialization a `MCP_SESSION_MODE=stateless` server performs.
 
-**Stdio coverage is a boot check only — run this before Step 1.** Run `bun run rebuild && bun run start:stdio`, confirm the startup logs look clean (banner, expected tool/resource counts, no errors/warnings, no missing-config gripes), then kill it. Pino logs go to stderr in stdio mode (stdout is reserved for JSON-RPC), so they print straight to the terminal when you run interactively. No need to call tools over stdio — the HTTP pass already covered handler behavior.
+**Stdio coverage is a boot check only — run this before Step 1.** Run `bun run rebuild && bun run start:stdio < /dev/null`, and confirm the startup logs look clean (banner, expected tool/resource counts, no errors/warnings, no missing-config gripes). Redirecting stdin is what ends the run: the server treats EOF as a shutdown signal, boots fully, then exits on its own, so the log also shows the graceful-shutdown path. Do not background it and reach for `pkill` — a pattern like `pkill -f dist/index.js` matches every other stdio MCP server on the machine, including the ones the calling agent's own session is connected to. Pino logs go to stderr in stdio mode (stdout is reserved for JSON-RPC), so they print straight to the terminal when you run interactively. No need to call tools over stdio — the HTTP pass already covered handler behavior.
 
 ---
 
@@ -140,7 +140,10 @@ mcp_init() {
   # Unwrap SSE framing when present; a plain JSON body is used as-is.
   local payload; payload=$(sed -n 's/^data: //p' "$body_file")
   [ -z "$payload" ] && payload=$(cat "$body_file")
-  local reply; reply=$(printf '%s\n' "$payload" | grep -E '"(result|error)"' | head -1)
+  # Pick the reply frame by structure, not by substring: a server that logs to the
+  # client emits `notifications/message` frames first, and a `"level":"error"` or a
+  # log string containing `result` matches a text grep and gets read as the reply.
+  local reply; reply=$(printf '%s\n' "$payload" | jq -c 'select(type=="object" and (has("result") or has("error")))' 2>/dev/null | tail -1)
   [ -z "$reply" ] && reply="$payload"
   if printf '%s' "$reply" | grep -q '"error"'; then
     _mcp_init_fail "server returned a JSON-RPC error" "$body_file" "$hdr"
@@ -240,7 +243,9 @@ mcp_call() {
   local reply
   local sse; sse=$(sed -n 's/^data: //p' "$resp_file")
   if [ -n "$sse" ]; then
-    reply=$(printf '%s\n' "$sse" | grep -E '"(result|error)"')
+    # Structural pick, same reason as in mcp_init: log-notification frames precede
+    # the reply and can carry the literal tokens a text grep keys on.
+    reply=$(printf '%s\n' "$sse" | jq -c 'select(type=="object" and (has("result") or has("error")))' 2>/dev/null | tail -1)
     reply="${reply:-$sse}"
   else
     reply=$(cat "$resp_file")
@@ -494,7 +499,7 @@ End with:
 
 ## Checklist
 
-- [ ] Stdio boot check completed — `bun run rebuild && bun run start:stdio` shows clean startup (banner, expected counts, no errors)
+- [ ] Stdio boot check completed — `bun run rebuild && bun run start:stdio < /dev/null` shows clean startup (banner, expected counts, no errors) and a graceful shutdown on EOF
 - [ ] HTTP server built and started; real port parsed from log
 - [ ] Session initialized (a stateless server returns an empty `sid` — still a pass); `notifications/initialized` sent; negotiated protocol version matches the requested one (a downgrade is a finding)
 - [ ] Catalog surfaced and presented; descriptions audited for leaks (implementation details, meta-coaching, consumer-aware phrasing)
