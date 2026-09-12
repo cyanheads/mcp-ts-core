@@ -4,7 +4,7 @@ description: >
   McpError constructor, JsonRpcErrorCode reference, and error handling patterns for `@cyanheads/mcp-ts-core`. Use when looking up error codes, understanding where errors should be thrown vs. caught, or using ErrorHandler.tryCatch in services.
 metadata:
   author: cyanheads
-  version: "1.9"
+  version: "1.10"
   audience: external
   type: reference
 ---
@@ -363,6 +363,7 @@ Important properties:
 - **`data` propagation is restricted** to explicitly-thrown `McpError.data` and `ZodError.issues`. Auto-classified plain errors (`TypeError`, network errors, etc.) emit `code` + `message` only — no `data` — so internal classification context never leaks to clients.
 - **Recovery hint mirroring is automatic.** When the thrown `McpError` carries `data.recovery.hint`, the handler factory appends it to the `content[]` text so the markdown surface matches the JSON surface. Authors don't need to format the hint manually.
 - **Argument-schema rejection is a tool error with the same envelope.** An unknown root key, a wrong type, a missing required field, or a failed constraint returns `isError: true` with `structuredContent.error.code = -32602` (`InvalidParams`) and the readable `Invalid arguments for tool <name>: …` diagnostic in `content[]`. The handler never runs. Two neighbouring failures keep the protocol error path instead, arriving as a JSON-RPC error rather than a tool result: an unknown or disabled tool name, and a malformed request envelope.
+- **A schema constraint cannot carry a declared reason.** Because the handler never runs, a rejection by `.max()`, `.regex()`, `.min()`, or any other Zod refinement bypasses `errors[]` entirely: it arrives as `InvalidParams` with `data.issues` and no `data.reason`, so a caller has nothing to branch on and gets no recovery hint. Decide per constraint which surface it belongs on. A bound that is purely structural — the input is the wrong shape and no guidance beyond the diagnostic would help — belongs on the schema, where it also advertises itself in `inputSchema`. A bound a caller is expected to recover from belongs in the handler as `ctx.fail('reason', message, ctx.recoveryFor('reason'))` against a declared `errors[]` entry, with the limit restated in the field's `.describe()` so it is still visible before the call. Enforcing the same bound in both places is the trap: the schema wins, and the contract entry becomes unreachable while still reading as covered.
 
 **Handler — throw freely, no try/catch:**
 
