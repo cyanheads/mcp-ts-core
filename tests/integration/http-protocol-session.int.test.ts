@@ -15,6 +15,7 @@ import {
 } from '@modelcontextprotocol/client';
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
 
+import { initializeBody, MCP_HEADERS, parseSSEEvents } from '../helpers/http-helpers.js';
 import { type ServerHandle, startServerFromEntrypoint } from '../helpers/server-process.js';
 
 const FIXTURE = resolve(process.cwd(), 'tests/fixtures/http-protocol-session-server.js');
@@ -258,5 +259,165 @@ describe('stateful HTTP protocol sessions', () => {
       before.resourceCancellations,
     );
     expect(after.resourceActive).toBe(0);
+  });
+
+  /**
+   * Raw-wire cases (#401). The SDK client tears down its own side of the
+   * original POST when it cancels, so the server-side stream a cancellation
+   * leaves behind is only observable by holding that POST open on one
+   * connection and sending the cancellation on another.
+   */
+  describe('per-request stream release on cancellation', () => {
+    type Frame = { id?: number; result?: { structuredContent?: unknown } };
+
+    const endpoint = () => `http://127.0.0.1:${server.port}/mcp`;
+    const callTool = (id: number, name: string, args: Record<string, unknown>) =>
+      JSON.stringify({
+        jsonrpc: '2.0',
+        id,
+        method: 'tools/call',
+        params: { name, arguments: args },
+      });
+    const cancelled = (requestId: number) =>
+      JSON.stringify({
+        jsonrpc: '2.0',
+        method: 'notifications/cancelled',
+        params: { requestId, reason: 'raw-wire probe' },
+      });
+
+    async function openRawSession(protocolVersion: string): Promise<Record<string, string>> {
+      const init = await fetch(endpoint(), {
+        body: initializeBody(1, protocolVersion),
+        headers: MCP_HEADERS,
+        method: 'POST',
+      });
+      expect(init.status).toBe(200);
+      const sessionId = init.headers.get('mcp-session-id');
+      if (!sessionId) throw new Error('initialize returned no Mcp-Session-Id');
+      await init.text();
+      const headers = {
+        ...MCP_HEADERS,
+        'Mcp-Session-Id': sessionId,
+        'MCP-Protocol-Version': protocolVersion,
+      };
+      const ack = await fetch(endpoint(), {
+        body: JSON.stringify({ jsonrpc: '2.0', method: 'notifications/initialized' }),
+        headers,
+        method: 'POST',
+      });
+      expect(ack.status).toBe(202);
+      return headers;
+    }
+
+    async function post(headers: Record<string, string>, body: string): Promise<Response> {
+      return fetch(endpoint(), { body, headers, method: 'POST' });
+    }
+
+    /**
+     * Reads SSE text from `reader` until the stream ends, `until` matches, or
+     * `timeoutMs` elapses. `ended` is true only when the server closed the stream.
+     */
+    async function read(
+      reader: ReadableStreamDefaultReader<Uint8Array>,
+      timeoutMs: number,
+      until?: (text: string) => boolean,
+    ): Promise<{ ended: boolean; text: string }> {
+      const decoder = new TextDecoder();
+      const deadline = Date.now() + timeoutMs;
+      let text = '';
+      while (Date.now() < deadline) {
+        let timer: ReturnType<typeof setTimeout> | undefined;
+        const timeout = new Promise<'timeout'>((resolveTimeout) => {
+          timer = setTimeout(() => resolveTimeout('timeout'), deadline - Date.now());
+        });
+        const next = await Promise.race([reader.read(), timeout]);
+        clearTimeout(timer);
+        if (next === 'timeout') break;
+        if (next.done) return { ended: true, text };
+        text += decoder.decode(next.value, { stream: true });
+        if (until?.(text)) break;
+      }
+      return { ended: false, text };
+    }
+
+    /** The complete JSON-RPC frames in `text`; the priming event's empty `data:` is skipped. */
+    function frames(text: string): Frame[] {
+      const complete = text.lastIndexOf('\n\n');
+      if (complete < 0) return [];
+      return parseSSEEvents(text.slice(0, complete + 2))
+        .filter((event) => event.data.startsWith('{'))
+        .map((event) => JSON.parse(event.data) as Frame);
+    }
+
+    async function rawObservations(headers: Record<string, string>): Promise<Observations> {
+      const response = await post(headers, callTool(900, 'session_observations', {}));
+      const { text } = await read(response.body!.getReader(), 5_000);
+      const frame = frames(text).find((candidate) => candidate.id === 900);
+      return frame?.result?.structuredContent as Observations;
+    }
+
+    it('closes the cancelled request stream instead of holding it open to the keep-alive', async () => {
+      const headers = await openRawSession('2025-11-25');
+      const before = await rawObservations(headers);
+      const pending = await post(
+        headers,
+        callTool(77, 'session_cancellable_tool', { label: 'raw' }),
+      );
+      expect(pending.status).toBe(200);
+      expect(pending.headers.get('content-type')).toContain('text/event-stream');
+
+      const deadline = Date.now() + 5_000;
+      while ((await rawObservations(headers)).toolStarts === before.toolStarts) {
+        if (Date.now() > deadline) throw new Error('handler did not start within 5000ms');
+      }
+      const ack = await post(headers, cancelled(77));
+      expect(ack.status).toBe(202);
+
+      // The transport's keep-alive comment lands at 15s; a released stream ends long before.
+      const { ended, text } = await read(pending.body!.getReader(), 5_000);
+      expect(ended).toBe(true);
+      expect(text).not.toContain(': keepalive');
+      expect(frames(text).some((frame) => frame.id === 77)).toBe(false);
+      expect((await rawObservations(headers)).toolCancellations).toBe(before.toolCancellations + 1);
+    });
+
+    it('answers a cancellation for an unknown id with 202 and leaves other streams alone', async () => {
+      const headers = await openRawSession('2025-11-25');
+      const pending = await post(headers, callTool(10, 'session_delay', { ms: 400 }));
+      expect(pending.status).toBe(200);
+
+      const stray = await post(headers, cancelled(999));
+      expect(stray.status).toBe(202);
+
+      const { ended, text } = await read(pending.body!.getReader(), 5_000);
+      expect(ended).toBe(true);
+      const result = frames(text).find((frame) => frame.id === 10);
+      expect(result?.result?.structuredContent).toEqual({ completed: true });
+    });
+
+    it('leaves a batched request stream open so a sibling response still arrives', async () => {
+      // Batching exists only on the two oldest revisions; the sessionful arm still serves it.
+      const headers = await openRawSession('2025-03-26');
+      const pending = await post(
+        headers,
+        `[${callTool(1, 'session_cancellable_tool', { label: 'batch' })},${callTool(2, 'session_delay', { ms: 300 })}]`,
+      );
+      expect(pending.status).toBe(200);
+      const ack = await post(headers, cancelled(1));
+      expect(ack.status).toBe(202);
+
+      const reader = pending.body!.getReader();
+      const first = await read(reader, 5_000, (text) =>
+        frames(text).some((frame) => frame.id === 2),
+      );
+      const sibling = frames(first.text).find((frame) => frame.id === 2);
+      expect(sibling?.result?.structuredContent).toEqual({ completed: true });
+      expect(frames(first.text).some((frame) => frame.id === 1)).toBe(false);
+
+      // The shared stream is not closed on the cancelled id's behalf.
+      const rest = await read(reader, 500);
+      expect(rest.ended).toBe(false);
+      await reader.cancel();
+    });
   });
 });

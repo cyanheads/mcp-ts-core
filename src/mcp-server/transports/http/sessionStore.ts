@@ -17,6 +17,7 @@
 
 import type {
   McpServer,
+  RequestId,
   WebStandardStreamableHTTPServerTransport,
 } from '@modelcontextprotocol/server';
 
@@ -69,6 +70,14 @@ export interface SessionIdentity {
  */
 export interface SessionConnection {
   server: McpServer;
+  /**
+   * Ids of in-flight requests that each arrived as a single-request POST. Such
+   * a request is the sole occupant of the per-POST SSE stream the transport
+   * opened for it, so the stream can be closed when the request is cancelled
+   * without dropping anyone else's response (#401). An id leaves the set when
+   * its stream ends.
+   */
+  singleRequestIds: Set<RequestId>;
   transport: WebStandardStreamableHTTPServerTransport;
 }
 
@@ -358,7 +367,9 @@ export class SessionStore {
 }
 
 /** Closes a session's server and transport, tolerating either one throwing. */
-export async function closeConnection(connection: SessionConnection): Promise<void> {
+export async function closeConnection(
+  connection: Pick<SessionConnection, 'server' | 'transport'>,
+): Promise<void> {
   const results = await Promise.allSettled([
     connection.transport.close(),
     connection.server.close(),

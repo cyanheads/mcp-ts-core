@@ -27,6 +27,7 @@ import {
   isJsonContentType,
   isLegacyRequest,
   type McpHttpHandler,
+  type RequestId,
   type ServerEventBus,
   WebStandardStreamableHTTPServerTransport,
 } from '@modelcontextprotocol/server';
@@ -106,6 +107,65 @@ async function readBodyWithinLimit(request: Request, maxBytes: number): Promise<
     offset += chunk.byteLength;
   }
   return { exceeded: false, body: body.buffer };
+}
+
+const asRequestId = (value: unknown): RequestId | undefined =>
+  typeof value === 'string' || typeof value === 'number' ? value : undefined;
+
+/** The id of a POST body that is exactly one JSON-RPC request, else undefined. */
+function singleRequestId(body: unknown): RequestId | undefined {
+  if (Array.isArray(body) || typeof body !== 'object' || body === null) return undefined;
+  const message = body as { id?: unknown; method?: unknown };
+  return typeof message.method === 'string' ? asRequestId(message.id) : undefined;
+}
+
+/** Request ids named by the `notifications/cancelled` messages in a POST body. */
+function cancelledRequestIds(body: unknown): RequestId[] {
+  const messages: unknown[] = Array.isArray(body) ? body : [body];
+  return messages.flatMap((message) => {
+    const { method, params } = (message ?? {}) as {
+      method?: unknown;
+      params?: { requestId?: unknown };
+    };
+    const id = method === 'notifications/cancelled' ? asRequestId(params?.requestId) : undefined;
+    return id === undefined ? [] : [id];
+  });
+}
+
+/**
+ * Re-streams an SSE response so `onEnd` runs once its stream is over — after
+ * the transport writes the response and closes it, when the client
+ * disconnects, or when the sessionful arm's cancellation shim closes it.
+ */
+function onStreamEnd(response: Response, onEnd: () => void): Response {
+  const reader = response.body?.getReader();
+  if (!reader) {
+    onEnd();
+    return response;
+  }
+  const body = new ReadableStream<Uint8Array>({
+    async pull(controller) {
+      const next = await reader.read().catch((error: unknown) => {
+        onEnd();
+        throw error;
+      });
+      if (next.done) {
+        onEnd();
+        controller.close();
+        return;
+      }
+      controller.enqueue(next.value);
+    },
+    cancel(reason) {
+      onEnd();
+      return reader.cancel(reason);
+    },
+  });
+  return new Response(body, {
+    status: response.status,
+    statusText: response.statusText,
+    headers: response.headers,
+  });
 }
 
 /**
@@ -564,7 +624,23 @@ export async function createHttpApp<TBindings extends object = HonoNodeBindings>
       if (!connection) {
         return Response.json({ error: 'Session not found or expired' }, { status: 404 });
       }
-      return await connection.transport.handleRequest(request, options);
+      const response = await connection.transport.handleRequest(request, options);
+
+      // The SDK transport never frees the per-POST SSE stream of a request
+      // whose response `Protocol` suppressed after a cancellation, so the
+      // stream and its keep-alive timer would live until the session closes
+      // (#401). Close it here when the cancelled id arrived as a single-request
+      // POST and is still in flight: that request is the stream's only
+      // occupant, so no other response is lost. An id from a batched POST
+      // shares its stream with its siblings and is left to the SDK.
+      for (const id of cancelledRequestIds(parsedBody)) {
+        if (connection.singleRequestIds.has(id)) connection.transport.closeSSEStream(id);
+      }
+
+      const requestId = singleRequestId(parsedBody);
+      if (requestId === undefined || response.status !== 200) return response;
+      connection.singleRequestIds.add(requestId);
+      return onStreamEnd(response, () => connection.singleRequestIds.delete(requestId));
     }
 
     // No session yet: this is an `initialize` (anything else is rejected by the
@@ -592,7 +668,7 @@ export async function createHttpApp<TBindings extends object = HonoNodeBindings>
       sessionIdGenerator: generateSecureSessionId,
       ...(eventStore && { eventStore }),
       onsessioninitialized: (sessionId) => {
-        store.register(sessionId, { server, transport }, identity);
+        store.register(sessionId, { server, singleRequestIds: new Set(), transport }, identity);
         logger.debug('Session initialized', { ...requestContext, sessionId });
       },
       onsessionclosed: (sessionId) => {

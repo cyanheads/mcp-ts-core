@@ -97,6 +97,19 @@ const cancellableTool = tool('session_cancellable_tool', {
   },
 });
 
+const delayTool = tool('session_delay', {
+  description:
+    'Returns after a delay, so a response can be observed arriving after a sibling request was cancelled.',
+  input: z.object({
+    ms: z.number().int().min(0).max(5000).describe('Milliseconds to wait before returning.'),
+  }),
+  output: z.object({ completed: z.boolean().describe('Whether the wait completed normally.') }),
+  async handler(input) {
+    await new Promise((resolve) => setTimeout(resolve, input.ms));
+    return { completed: true };
+  },
+});
+
 const cancellableResource = resource('session-test://wait/{id}', {
   name: 'session-cancellable-resource',
   description: 'Waits until an ordinary resource cancellation reaches its handler signal.',
@@ -137,6 +150,6 @@ const sessionProbe = tool('session_observations', {
 await createApp({
   name: 'http-protocol-session-fixture',
   version: '0.0.0-test',
-  tools: [elicitationProbe, cancellableTool, sessionProbe],
+  tools: [elicitationProbe, cancellableTool, delayTool, sessionProbe],
   resources: [cancellableResource],
 });

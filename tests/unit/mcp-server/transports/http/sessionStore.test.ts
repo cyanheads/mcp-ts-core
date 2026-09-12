@@ -34,6 +34,7 @@ function createTestConnection(): SessionConnection & {
         closes.server++;
       }),
     } as unknown as SessionConnection['server'],
+    singleRequestIds: new Set(),
     transport: {
       close: vi.fn(async () => {
         closes.transport++;
