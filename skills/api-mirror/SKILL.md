@@ -4,7 +4,7 @@ description: >
   Stand up a persistent, self-refreshing local mirror of a bulk upstream dataset with the MirrorService (@cyanheads/mcp-ts-core/mirror). Use when a server wraps a large or slow API and should query a synced local index (embedded SQLite + FTS5) instead of paginating the live API per request.
 metadata:
   author: cyanheads
-  version: "1.1"
+  version: "1.2"
   audience: external
   type: reference
 ---
@@ -80,6 +80,8 @@ Why they can't merge: during a from-scratch init the records aren't ordered by t
 - `sort` — `{ column, direction }` or `'relevance'` (FTS bm25; requires `match`). Defaults to insertion order.
 
 For access paths the generic query can't express — junction tables for index-backed multi-value filtering, denormalized counters, bespoke `bm25` weighting — use the **raw handle**: `const db = await mirror.raw();` then run prepared statements against your own auxiliary tables (declare them via a migration). Add the auxiliary DDL in a `migrations` step; maintain it from your `sync` mapping or SQL triggers.
+
+A migration runs identically on first creation and on upgrade: a fresh database runs every migration up to `version` right after the declarative DDL, an existing one runs only those above its stored version. So `up()` must tolerate a database that already has the current declarative shape — `CREATE TABLE IF NOT EXISTS` for auxiliary objects, never an `ALTER` that assumes an older layout of a declared column.
 
 ## Readiness — key off the completion marker, not live status
 

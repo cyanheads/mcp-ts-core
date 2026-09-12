@@ -175,7 +175,11 @@ export interface QueryResult {
 
 /** A schema migration: bump `version` and apply `up` on open when the stored version is lower. */
 export interface Migration {
-  /** Apply the migration. Runs inside the open handle; should be idempotent. */
+  /**
+   * Apply the migration. Runs inside the open handle, on first creation as well
+   * as on upgrade, so it must be idempotent and tolerate a database that already
+   * has the current declarative schema.
+   */
   up(handle: SqliteHandle): void;
   /** Target schema version this migration produces. */
   version: number;

@@ -320,6 +320,15 @@ describe('sqliteMirrorStore', () => {
     expect(row?.n).toBe(1);
   });
 
+  it('close() finalizes statements prepared through the raw handle', async () => {
+    const handle = await store.raw();
+    const insert = handle.prepare(`INSERT INTO papers (id) VALUES (?)`);
+    insert.run('before-close');
+    await store.close();
+    // A statement kept across close() must not keep writing to the file.
+    expect(() => insert.run('after-close')).toThrow();
+  });
+
   it('passes an integrity check', async () => {
     await store.applyBatch([rec('1')], []);
     const { ok } = await store.integrityCheck();
@@ -354,9 +363,74 @@ describe('sqliteMirrorStore migrations', () => {
     return handle.prepare<{ n: number }>(`SELECT COUNT(*) AS n FROM mig_log`).get()?.n ?? 0;
   };
 
-  it('stamps a fresh database to the target version without running migrations', async () => {
+  it('runs every migration in ascending order on a fresh database, then stamps the target', async () => {
     const path = join(dir, 'fresh.db');
+    const ran: number[] = [];
     const store = sqliteMirrorStore(
+      specFor(path, {
+        version: 3,
+        // Declared out of order: the runner sorts by version.
+        migrations: [
+          {
+            version: 3,
+            up: (h) => {
+              ran.push(3);
+              h.exec('INSERT INTO mig_log VALUES (3);');
+            },
+          },
+          {
+            version: 2,
+            up: (h) => {
+              ran.push(2);
+              h.exec('CREATE TABLE mig_log(x); INSERT INTO mig_log VALUES (1);');
+            },
+          },
+        ],
+      }),
+    );
+    await store.count(); // trigger open
+    expect(ran).toEqual([2, 3]);
+    expect(await schemaVersion(store)).toBe(3);
+    expect(await migLogCount(store)).toBe(2);
+    await store.close();
+
+    // Reopening at the same version must not re-run anything.
+    const again = sqliteMirrorStore(specFor(path, { version: 3 }));
+    await again.count();
+    expect(await schemaVersion(again)).toBe(3);
+    expect(await migLogCount(again)).toBe(2);
+    await again.close();
+  });
+
+  it('stamps a fresh database at the spec version when no migrations are declared', async () => {
+    const store = sqliteMirrorStore(specFor(join(dir, 'plain.db'), { version: 4 }));
+    await store.count();
+    expect(await schemaVersion(store)).toBe(4);
+    expect(await migLogCount(store)).toBe(-1);
+    await store.close();
+  });
+
+  it('leaves no version stamp for a migration that throws', async () => {
+    const path = join(dir, 'failing.db');
+    const failing = sqliteMirrorStore(
+      specFor(path, {
+        version: 2,
+        migrations: [
+          {
+            version: 2,
+            up: () => {
+              throw new Error('migration exploded');
+            },
+          },
+        ],
+      }),
+    );
+    await expect(failing.count()).rejects.toThrow(/Failed to initialize mirror store/);
+    await failing.close();
+
+    // The failed open stamped nothing, so a working migration for the same
+    // version still runs on the next open instead of being skipped as applied.
+    const repaired = sqliteMirrorStore(
       specFor(path, {
         version: 2,
         migrations: [
@@ -367,10 +441,10 @@ describe('sqliteMirrorStore migrations', () => {
         ],
       }),
     );
-    await store.count(); // trigger open
-    expect(await schemaVersion(store)).toBe(2);
-    expect(await migLogCount(store)).toBe(-1); // migration skipped on fresh DB
-    await store.close();
+    await repaired.count();
+    expect(await schemaVersion(repaired)).toBe(2);
+    expect(await migLogCount(repaired)).toBe(1);
+    await repaired.close();
   });
 
   it('runs a pending migration once when upgrading an existing database', async () => {

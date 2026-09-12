@@ -457,21 +457,19 @@ function writeSyncState(handle: SqliteHandle, state: SyncState): void {
 // ---------------------------------------------------------------------------
 
 /**
- * Apply pending migrations. A brand-new database (no `schema_version` row) was
- * just built at the current schema by the DDL, so it is stamped to `target`
- * without running migrations (there is no older data to transform). An existing
- * database at a lower version runs each migration with `stored < version <=
- * target`, in order, stamping the version after each.
+ * Apply pending migrations: each one with `stored < version <= target`, in
+ * ascending order, in its own transaction and stamped as it completes, then a
+ * final stamp to `target`. A brand-new database (no `schema_version` row) is at
+ * version 0 and takes the same path, so a migration that owns auxiliary objects
+ * the declarative DDL knows nothing about (junction tables, denormalized
+ * counters) creates them on first open as well as on upgrade. `Migration.up`
+ * therefore runs against a database that already has the current declarative
+ * shape and must tolerate it.
  */
 function runMigrations(handle: SqliteHandle, target: number, migrations: Migration[]): void {
   const stored =
     handle.prepare<{ version: number }>(`SELECT MAX(version) AS version FROM schema_version`).get()
       ?.version ?? 0;
-
-  if (stored === 0) {
-    stampVersion(handle, target);
-    return;
-  }
   if (stored >= target) return;
 
   const pending = migrations
