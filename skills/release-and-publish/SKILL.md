@@ -4,7 +4,7 @@ description: >
   Ship a release end-to-end across every registry the project targets (npm, MCP Registry, GitHub Releases for `.mcpb` bundles, GHCR). Runs the final verification gate, fast-forwards `main` when the release rode a release PR, creates the annotated tag on the commit `main` now points at, pushes commits and tags, then publishes to each applicable destination. Assumes git wrapup (version bumps, changelog, commit stack — and in release PR mode, the pushed branch and open PR) is already complete — this skill is the post-wrapup merge + tag + publish workflow. Retries transient network failures on publish steps; halts with a partial-state report when retries are exhausted or the failure is terminal.
 metadata:
   author: cyanheads
-  version: "2.14"
+  version: "2.16"
   audience: external
   type: workflow
 ---
@@ -138,6 +138,7 @@ Format — a **headline digest**, never a section-by-section changelog mirror:
 (` · release PR #<N>` only in release PR mode; without a PR the line ends at the changelog link.)
 
 **Rules:**
+- **Subject line is ONE short theme, at most ~60 characters, no semicolons, no clauses** — it becomes the GitHub Release title after `v<VERSION>: `. The digest lives in the bullets; a subject that summarizes each change is wrong even when every word is accurate. In release PR mode the PR body's opening paragraph is NOT the subject — write the theme fresh (the release commit's subject after the version and dash is usually it)
 - Subject line omits the version number (GitHub prepends `v<VERSION>:` to the release title)
 - **Flat bullets only — never Keep-a-Changelog section headers.** `Added:`/`Changed:`/`Fixed:`/`Dependency bumps:` belong in the changelog file; a tag that mirrors the changelog's structure is wrong even when every line is accurate
 - **Complete at headline granularity** — every changelog-worthy change stays visible: notable changes get their own bullet, minor/internal items (build config, repo hygiene, metadata) share ONE grouped compact bullet. Nothing silently dropped, nothing expanded — the changelog carries the depth, the tag carries the existence
@@ -170,6 +171,8 @@ Push `main` first, then the tag. If the remote rejects either push, halt.
 **Release PR mode, after both pushes:** confirm `gh pr view <N> --json state` reports `MERGED`, then delete the remote branch — `git push origin --delete release/<version>` — and the local one — `git branch -d release/<version>`. A PR that reports `CLOSED` or `OPEN` instead means the pushed `main` does not contain the PR's head commit — stop and report before publishing anything.
 
 ### 6. Publish to npm
+
+Before publishing, inspect `bun publish --dry-run`. A resumed run may leave `dist/*.mcpb` in a package whose `files` allowlist includes `dist/`, adding the desktop bundle and its dependencies to npm. If listed, move the bundle outside the package directory, publish npm, then restore the bundle for the GitHub Release.
 
 ```bash
 bun publish --access public

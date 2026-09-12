@@ -4,7 +4,7 @@ description: >
   Land working-tree changes as logical commits — the work grouped by concern, topped by a release commit (version bump, changelog, regenerated artifacts). Verify, commit. Stops at "committed locally on main" — or, when the project releases through a release PR, at "release branch pushed, PR open". No tag, no push to main, no publish: the release-and-publish skill merges, tags, and ships from here. Distilled from the git_wrapup_instructions protocol.
 metadata:
   author: cyanheads
-  version: "1.13"
+  version: "1.16"
   audience: external
   type: workflow
 ---
@@ -116,6 +116,8 @@ security: false    # true ONLY for a security fix in this server's own source �
 
 **Tone:** Terse, fact-dense. Bullet = **symbol** + what changed + at most one consumer-facing caveat; one sentence by default, two max — a bullet past ~40 words or three sentences is wrong. The linked issue carries the why and the commit diff the how; the changelog names what changed and what a consumer does about it. Cut: history/justification narration, design-rationale defense, "X unchanged" clauses (short parenthetical only where a misread is likely), edge-case inventories. **Verified ≠ included** — the diff-is-source-of-truth rule bounds the truth of what you write, never the amount. Model length on `changelog/template.md`'s authoring guide, never on the previous entry (entries modeled on entries compound). `agent-notes` carries adoption steps only, never a second rendering of the body; a consequence shared by many bullets is stated once, not per bullet. Full conventions: the authoring guide in `changelog/template.md`.
 
+**Re-read the entry file after writing it, then sweep for harness markup:** `grep -rlF -e '</invoke>' -e '</content>' changelog/` must print nothing. A stray closing tag at EOF is the authoring tool's own syntax bleeding into the file; `changelog/` is in `package.json` `files`, so it ships inside the npm tarball, and `changelog:check` cannot catch it — the rollup drops the trailing line, so a clean `CHANGELOG.md` proves nothing about the entry.
+
 ### 5. Regenerate derived artifacts
 
 ```bash
@@ -161,7 +163,7 @@ git commit -m "<subject>"
 # repeat per concern; version + changelog + tree are the final commit
 ```
 
-**The file is the atomic boundary:** NEVER split a single file's changes across commits. When one file serves two concerns, it ships whole in the commit of its dominant concern.
+**The file is the atomic boundary:** NEVER split a single file's working-tree changes across commits, regardless of mechanism — not `git add -p`, not an index-only patch (`git apply --cached`), not editing the file between commits to remove-then-re-add a hunk. When one file serves two concerns, it ships whole in the commit of its dominant concern; a later commit may touch the file again only for changes made AFTER the first commit (a version badge bumped after the fix landed).
 
 **Subject format:** Conventional Commits.
 - Work commits (no version): `feat: hosted server endpoint`, `fix: handle empty SPARQL result sets`, `feat(linter): enrichment contract rules`, `docs: document the enrichment block`
@@ -267,7 +269,7 @@ If the working tree isn't clean or the release commit isn't at HEAD, something w
 ## Checklist
 
 - [ ] Diff reviewed end-to-end before version bump
-- [ ] Version bumped in every declaring file (`package.json`, `server.json`, `manifest.json`, `.claude-plugin/plugin.json`, `.codex-plugin/plugin.json`, README badge, `CLAUDE.md`/`AGENTS.md` if they pin a version)
+- [ ] Version bumped in every declaring file (`package.json`, `server.json`, `manifest.json`, `.claude-plugin/plugin.json`, `.codex-plugin/plugin.json`, README badge, `CLAUDE.md`/`AGENTS.md` if they pin a version) — verify by command, not by eye: `v=$(jq -r .version package.json); grep -rl "$v" package.json server.json manifest.json .claude-plugin/plugin.json .codex-plugin/plugin.json README.md | wc -l` must equal the count of files that exist, and `grep -c "Version-$v-" README.md` must print `1`. The README badge is the one no lint reads, so it is the one that ships stale
 - [ ] GH issues addressed by this work commented with what landed (if working from GH issues)
 - [ ] Docs updated for any new or changed features
 - [ ] Changelog authored at `changelog/<major.minor>.x/<version>.md`
