@@ -100,14 +100,14 @@ function getActiveRequestsGauge() {
  * Returns the current time in milliseconds using `globalThis.performance.now()`.
  *
  * Sub-millisecond resolution is guaranteed on all supported engine floors
- * (Node ≥24, Bun ≥1.3, Cloudflare Workers). The returned value is suitable for
+ * (Node ≥24, Bun ≥1.4, Cloudflare Workers). The returned value is suitable for
  * computing durations but its epoch origin is implementation-defined — do not
  * treat it as a wall-clock timestamp.
  *
  * @returns Current time in milliseconds.
  */
 // performance is an ambient global declared by @types/node (perf_hooks.d.ts)
-// and available in all supported environments (Node ≥24, Bun ≥1.3, workerd).
+// and available in all supported environments (Node ≥24, Bun ≥1.4, workerd).
 export const nowMs = (): number => performance.now();
 
 // Module-level TextEncoder singleton (stateless, safe to reuse)

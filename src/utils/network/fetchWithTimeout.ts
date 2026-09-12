@@ -597,7 +597,7 @@ export async function fetchWithTimeout(
   const timeoutId = setTimeout(() => controller.abort(timeoutReason), timeoutMs);
 
   // Compose the timeout signal with any caller-supplied signal. AbortSignal.any
-  // is available on all supported floors (Node ≥24, Bun ≥1.3, workerd).
+  // is available on all supported floors (Node ≥24, Bun ≥1.4, workerd).
   const fetchSignal = externalSignal
     ? AbortSignal.any([controller.signal, externalSignal])
     : controller.signal;

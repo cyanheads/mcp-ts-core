@@ -3,7 +3,7 @@
 **Server:** {{PACKAGE_NAME}}
 **Version:** 0.1.0
 **Framework:** [@cyanheads/mcp-ts-core](https://www.npmjs.com/package/@cyanheads/mcp-ts-core) `^{{FRAMEWORK_VERSION}}`
-**Engines:** Bun ≥1.3.0, Node ≥24.0.0
+**Engines:** Bun ≥1.4.0, Node ≥24.0.0
 **MCP SDK:** `@modelcontextprotocol/server` {{MCP_SDK_VERSION}}
 **Zod:** {{ZOD_VERSION}}
 

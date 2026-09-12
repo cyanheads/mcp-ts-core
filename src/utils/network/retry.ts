@@ -315,7 +315,7 @@ function sleep(ms: number, signal?: AbortSignal): Promise<void> {
     }
 
     const controller = new AbortController();
-    // AbortSignal.any is available on all supported floors (Node ≥24, Bun ≥1.3, workerd).
+    // AbortSignal.any is available on all supported floors (Node ≥24, Bun ≥1.4, workerd).
     const combined = signal ? AbortSignal.any([controller.signal, signal]) : controller.signal;
 
     const timer = setTimeout(() => {

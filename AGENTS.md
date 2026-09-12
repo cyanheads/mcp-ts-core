@@ -2,9 +2,9 @@
 
 **Package:** `@cyanheads/mcp-ts-core`
 **Version:** 0.12.8
-**Engines:** Bun ≥1.3.0, Node ≥24.0.0
+**Engines:** Bun ≥1.4.0, Node ≥24.0.0
 **MCP SDK:** `@modelcontextprotocol/server` ^2.0.0 (protocol revisions 2026-07-28 and 2025-*)
-**Zod:** ^4.5.4
+**Zod:** ^4.6.0
 **GitHub:** [cyanheads/mcp-ts-core](https://github.com/cyanheads/mcp-ts-core)
 **npm:** [@cyanheads/mcp-ts-core](https://www.npmjs.com/package/@cyanheads/mcp-ts-core)
 **Docker:** [ghcr.io/cyanheads/mcp-ts-core](https://ghcr.io/cyanheads/mcp-ts-core)
