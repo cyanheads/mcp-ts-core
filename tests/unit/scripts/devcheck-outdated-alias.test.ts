@@ -217,6 +217,25 @@ describe('devcheck outdated attribution for aliased dependencies (#398)', () => 
     expect(out).not.toContain('attribution is ambiguous');
   });
 
+  it('attributes an unmarked row to the prod block when a peer declares the same target', () => {
+    // `bun outdated` prints the prod row bare and the peer row as `(peer)`;
+    // the bare row must not be read as "any block" and reported ambiguous.
+    const { code, out } = runOutdatedCheck(
+      scaffold(
+        { dependencies: { zod: '^4.5.4' }, peerDependencies: { zod: '^4.0.0' } },
+        ['zod'],
+        [
+          ['zod', '4.5.4', '4.6.0', '4.6.0'],
+          ['zod (peer)', '4.5.4', '4.6.0', '4.6.0'],
+        ],
+      ),
+    );
+
+    expect(summaryLine(out)).toContain('PASSED');
+    expect(code).toBe(0);
+    expect(out).not.toContain('attribution is ambiguous');
+  });
+
   it('preserves peer exclusion, range holds, and unallowlisted findings', () => {
     const held = scaffold(
       {
