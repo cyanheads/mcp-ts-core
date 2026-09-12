@@ -23,6 +23,9 @@ function getRandomBytes(count: number): Uint8Array {
   return bytes;
 }
 
+/** Largest charset the byte-wise rejection sampler below can draw from. */
+const MAX_CHARSET_LENGTH = 256;
+
 /**
  * Builds a random string of `length` characters drawn uniformly from `charset`.
  *
@@ -30,6 +33,10 @@ function getRandomBytes(count: number): Uint8Array {
  * multiple of `charset.length` that fits in 256, so `byte % charset.length`
  * never biases toward the low characters. Bytes are drawn in over-sized chunks
  * rather than one at a time, so a typical ID costs one `getRandomValues` call.
+ *
+ * `charset` must hold 1 to {@link MAX_CHARSET_LENGTH} characters: an empty
+ * charset never grows `result`, and a longer one rejects every byte, so either
+ * would spin here forever. Public callers validate before reaching this.
  */
 function randomStringFromCharset(length: number, charset: string): string {
   const maxValidByteValue = Math.floor(256 / charset.length) * charset.length;
@@ -133,13 +140,21 @@ export class IdGenerator {
   /**
    * Generates a cryptographically secure random string.
    * @param length - The desired length of the random string. Defaults to `IdGenerator.DEFAULT_LENGTH`.
-   * @param charset - The character set to use. Defaults to `IdGenerator.DEFAULT_CHARSET`.
+   * @param charset - The character set to use, 1 to 256 characters. Defaults to `IdGenerator.DEFAULT_CHARSET`.
    * @returns The generated random string.
+   * @throws {McpError} With {@link JsonRpcErrorCode.ValidationError} when `charset` is empty
+   *   or longer than 256 characters — the sampler cannot terminate on either.
    */
   public generateRandomString(
     length: number = IdGenerator.DEFAULT_LENGTH,
     charset: string = IdGenerator.DEFAULT_CHARSET,
   ): string {
+    if (charset.length === 0 || charset.length > MAX_CHARSET_LENGTH) {
+      throw validationError(
+        `Charset must contain between 1 and ${MAX_CHARSET_LENGTH} characters; received ${charset.length}.`,
+        { charsetLength: charset.length, max: MAX_CHARSET_LENGTH },
+      );
+    }
     return randomStringFromCharset(length, charset);
   }
 

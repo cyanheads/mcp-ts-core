@@ -54,6 +54,26 @@ describe('IdGenerator and UUID', () => {
       expect(randomStr).toMatch(/^[a-c]+$/);
     });
 
+    it('draws from a 1-character charset and from the 256-character ceiling', () => {
+      expect(idGenerator.generateRandomString(8, 'x')).toBe('xxxxxxxx');
+      const full = String.fromCharCode(...Array.from({ length: 256 }, (_, i) => i));
+      expect(idGenerator.generateRandomString(8, full)).toHaveLength(8);
+    });
+
+    it.each([
+      ['an empty charset', ''],
+      ['a charset longer than 256 characters', 'x'.repeat(257)],
+    ])('rejects %s instead of sampling forever', (_label, charset) => {
+      // The sampler cannot terminate on either bound, so this must throw synchronously.
+      expect(() => idGenerator.generateRandomString(8, charset)).toThrow(McpError);
+      expect(() => idGenerator.generateRandomString(8, charset)).toThrow(
+        expect.objectContaining({ code: JsonRpcErrorCode.ValidationError }),
+      );
+      expect(() => idGenerator.generate('PFX', { charset })).toThrow(
+        expect.objectContaining({ code: JsonRpcErrorCode.ValidationError }),
+      );
+    });
+
     it('should generate a simple ID without a prefix', () => {
       const id = idGenerator.generate();
       expect(id).toHaveLength(6);
