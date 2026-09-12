@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.12.9](changelog/0.12.x/0.12.9.md) — 2026-09-12 · ⚠️ Breaking
+
+The Bun engines floor rises to >=1.4.0 for the mirror's sqlite close(true) fix, and a cancelled HTTP request's SSE stream now closes immediately instead of waiting for keep-alive. MirrorStore migrations also run on a fresh database now, so an up() that assumes an older table shape has to change.
+
 ## [0.12.8](changelog/0.12.x/0.12.8.md) — 2026-09-09 · ⚠️ Breaking
 
 Releases run through a gated release PR, runInContext re-establishes the span it names, and the config, services, and utils surfaces drop fields that were parsed and never read — including MCP_RESPONSE_VERBOSITY and the OAUTH_PROXY_* block.

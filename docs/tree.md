@@ -1,6 +1,6 @@
 # mcp-ts-core - Directory Structure
 
-Generated on: 2026-09-09 06:33:12
+Generated on: 2026-09-12 20:00:33
 
 ```text
 mcp-ts-core/
@@ -809,6 +809,7 @@ mcp-ts-core/
 │   │   │   ├── check-dependency-specifiers.test.ts
 │   │   │   ├── check-skill-versions.test.ts
 │   │   │   ├── clean-mcpb.test.ts
+│   │   │   ├── devcheck-audit-classifier.test.ts
 │   │   │   ├── devcheck-git-guard.test.ts
 │   │   │   ├── devcheck-outdated-alias.test.ts
 │   │   │   ├── devcheck-packaging-gate.test.ts
