@@ -4,7 +4,7 @@ description: >
   Review an MCP server for common security gaps: LLM-facing surfaces as injection vector (tools, resources, prompts, descriptions), scope blast radius, destructive ops without consent, upstream auth shape, input sinks (URL / path / roots / shell / schema strictness / ReDoS), tenant isolation, leakage through errors and telemetry, unbounded resources, and HTTP-mode deployment surface. Use before a release, after a batch of handler changes, or when the user asks for a security review, audit, or hardening pass. Produces grouped findings and a numbered options list.
 metadata:
   author: cyanheads
-  version: "1.7"
+  version: "1.8"
   audience: external
   type: audit
 ---
@@ -257,7 +257,7 @@ grep -rn "JSON.parse\b" src/
 
 DataCanvas is opt-in and deliberately trades isolation for cross-agent token-shareable working sets — designed for public-data tabular servers (BrAPI, OpenAlex, etc.) where session-pinning isn't desired. The trade only holds when the deployment matches that assumption. Skip this axis entirely when canvas is disabled (`CANVAS_PROVIDER_TYPE=none`, the default).
 
-**Look in:** `src/config/server-config.ts`, every tool reading `ctx.core.canvas?`, deployment config (wrangler / Dockerfile / proxy).
+**Look in:** `src/config/server-config.ts`, the `setCanvas(core.canvas)` wiring in `setup()` and every tool reading the canvas accessor, deployment config (wrangler / Dockerfile / proxy).
 
 **Check:**
 
