@@ -7,9 +7,10 @@
  *
  * Runtime note: this suite runs under two configs with different SQLite drivers.
  * `bunx vitest` (pool: 'forks') executes under Node with `better-sqlite3`, while
- * `bun run test:all` (test:coverage) executes under Bun with `bun:sqlite`. The two
- * drivers differ in low-level behavior (no-match get() → undefined vs null, and
- * parameter-mismatch error text), so assertions here stay driver-agnostic and the
+ * `bun run test:all` (test:coverage) executes under Bun with `bun:sqlite` — so the
+ * Bun driver branch is exercised on the release gate. The two drivers differ in
+ * low-level behavior (no-match get() → undefined vs null, and parameter-mismatch
+ * error text), so assertions here stay driver-agnostic and the
  * better-sqlite3-only driver-selection branches are gated to the Node runtime.
  * @module tests/unit/services/mirror/handle
  */
@@ -253,6 +254,20 @@ describe('openSqliteHandle', () => {
       const handle = await openSqliteHandle(join(dir, 'closed-prepare.db'));
       handle.close();
       expect(() => handle.prepare('SELECT 1')).toThrow();
+    });
+
+    it('finalizes a statement prepared before close() so it can no longer write', async () => {
+      // bun:sqlite's bare close() leaves prepare()d statements live — a
+      // pre-close statement could still insert into the "closed" database. The
+      // handle closes with close(true) there; better-sqlite3 invalidates
+      // statements on close already, so the contract holds on both drivers.
+      const handle = await openSqliteHandle(join(dir, 'closed-statement.db'));
+      handle.exec('CREATE TABLE t (id TEXT PRIMARY KEY)');
+      const insert = handle.prepare('INSERT INTO t (id) VALUES (?)');
+      insert.run('1');
+      handle.close();
+      expect(() => insert.run('2')).toThrow();
+      expect(() => insert.all()).toThrow();
     });
   });
 });

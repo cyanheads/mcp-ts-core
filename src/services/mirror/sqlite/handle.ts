@@ -53,7 +53,6 @@ const BETTER_SQLITE3_SPECIFIER: string = 'better-sqlite3';
 
 /** The surface `bun:sqlite` and `better-sqlite3` share, as far as the mirror store uses it. */
 interface SqliteDriver {
-  close(): void;
   exec(sql: string): void;
   prepare(sql: string): {
     all(...p: unknown[]): unknown[];
@@ -64,19 +63,28 @@ interface SqliteDriver {
 }
 
 interface BunDatabaseCtor {
-  new (path: string, options?: { create?: boolean; readwrite?: boolean }): SqliteDriver;
+  new (
+    path: string,
+    options?: { create?: boolean; readwrite?: boolean },
+  ): SqliteDriver & {
+    /**
+     * `close(true)` finalizes every outstanding statement and releases the
+     * connection at once; bare `close()` leaves `prepare()`-created statements
+     * live, holding the file open until they are garbage collected.
+     */
+    close(throwOnError?: boolean): void;
+  };
 }
 
 interface BetterSqlite3Ctor {
-  new (path: string): SqliteDriver;
+  /** `close()` invalidates every statement created from the connection. */
+  new (path: string): SqliteDriver & { close(): void };
 }
 
-/** Adapts a driver to the runtime-neutral {@link SqliteHandle}. */
-function wrapDriver(db: SqliteDriver): SqliteHandle {
+/** Adapts a driver to the runtime-neutral {@link SqliteHandle}; `close` is driver-specific. */
+function wrapDriver(db: SqliteDriver, close: () => void): SqliteHandle {
   return {
-    close: () => {
-      db.close();
-    },
+    close,
     exec: (sql) => {
       db.exec(sql);
     },
@@ -110,10 +118,7 @@ export async function openSqliteHandle(
 
   let handle: SqliteHandle;
   try {
-    handle = runtimeCaps.isBun
-      ? /* istanbul ignore next -- Bun branch; the test suite runs Vitest workers under Node */
-        await openBunHandle(path)
-      : await openBetterSqlite3Handle(path);
+    handle = runtimeCaps.isBun ? await openBunHandle(path) : await openBetterSqlite3Handle(path);
   } catch (err) {
     // The Node path throws a ConfigurationError when better-sqlite3 is absent —
     // preserve it rather than masking it as a generic open failure.
@@ -129,10 +134,16 @@ export async function openSqliteHandle(
   return handle;
 }
 
-/* istanbul ignore next -- Bun-only driver; the test suite runs Vitest workers under Node */
+/**
+ * Bun driver. Closes with `close(true)` so statements the store still holds
+ * (`applyBatch`'s per-call upsert/remove) are finalized with the connection
+ * rather than keeping the file open until garbage collection. Bun 1.4 is the
+ * floor for that call: earlier versions threw `database is locked` instead.
+ */
 async function openBunHandle(path: string): Promise<SqliteHandle> {
   const mod = (await import(BUN_SQLITE_SPECIFIER)) as unknown as { Database: BunDatabaseCtor };
-  return wrapDriver(new mod.Database(path, { create: true }));
+  const db = new mod.Database(path, { create: true });
+  return wrapDriver(db, () => db.close(true));
 }
 
 async function openBetterSqlite3Handle(path: string): Promise<SqliteHandle> {
@@ -147,5 +158,6 @@ async function openBetterSqlite3Handle(path: string): Promise<SqliteHandle> {
       { cause: err },
     );
   }
-  return wrapDriver(new mod.default(path));
+  const db = new mod.default(path);
+  return wrapDriver(db, () => db.close());
 }
