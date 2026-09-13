@@ -4,14 +4,14 @@ description: >
   Post-init orientation for an MCP server built on @cyanheads/mcp-ts-core. Use after running `@cyanheads/mcp-ts-core init` to understand the project structure, conventions, and skill sync model. Also use when onboarding to an existing project for the first time.
 metadata:
   author: cyanheads
-  version: "1.10"
+  version: "1.11"
   audience: external
   type: workflow
 ---
 
 ## Context
 
-This skill assumes `bunx @cyanheads/mcp-ts-core init [name]` has already run. The CLI created the project's `CLAUDE.md` and `AGENTS.md` for different agents, copied external skills to `skills/`, and scaffolded the directory structure with echo definitions as starting points. This skill covers what was created and what to do next.
+This skill assumes `bunx @cyanheads/mcp-ts-core init [name]` has already run. The CLI created the project's `CLAUDE.md` and `AGENTS.md` for different agents, copied external skills to `framework-skills/`, and scaffolded the directory structure with echo definitions as starting points. This skill covers what was created and what to do next.
 
 ## Agent Protocol File
 
@@ -41,7 +41,7 @@ Dockerfile                                      # Starter multi-stage image
 server.json                                     # MCP Registry publishing metadata
 changelog/template.md                           # Format reference for per-version changelog files
 scripts/                                        # build, clean, devcheck, lint-mcp, list-skills, build-changelog, tree, check-docs-sync
-skills/                                         # External skills copied from the package (source of truth)
+framework-skills/                               # External skills copied from the package (source of truth)
 src/
   index.ts                                      # createApp() entry point
   mcp-server/
@@ -108,14 +108,14 @@ See the `add-tool`, `add-app-tool`, `add-resource`, `add-prompt`, `add-service`,
 
 ## Skill Sync
 
-Copy all project skills into your agent's skill directory so they're available as context. `skills/` is the source of truth.
+Copy all project skills into your agent's skill directory so they're available as context. `framework-skills/` is the source of truth. It is deliberately not `skills/`: Claude Code and Codex auto-load a plugin's root `skills/`, and these are development skills, not skills for the agents that install the server — leave `skills/` for those.
 
-**Don't edit `skills/*/SKILL.md` or `skills/*/references/*`.** These are external skill files synced from `@cyanheads/mcp-ts-core` — the `maintenance` skill overwrites them on package updates, so local edits get lost. Project-specific agent context belongs in `CLAUDE.md` / `AGENTS.md`.
+**Don't edit `framework-skills/*/SKILL.md` or `framework-skills/*/references/*`.** These are external skill files synced from `@cyanheads/mcp-ts-core` — the `maintenance` skill overwrites them on package updates, so local edits get lost. Project-specific agent context belongs in `CLAUDE.md` / `AGENTS.md`.
 
 **For Claude Code:**
 
 ```bash
-mkdir -p .claude/skills && cp -R skills/* .claude/skills/
+mkdir -p .claude/skills && cp -R framework-skills/* .claude/skills/
 ```
 
 **For other agents** (Codex, Cursor, Windsurf, etc.) — copy to the equivalent directory (e.g., `.codex/skills/`, `.cursor/skills/`).
@@ -138,7 +138,9 @@ Complete these one-time setup tasks:
    | `.claude-plugin/plugin.json` | `description` | `lint:packaging` |
    | `.codex-plugin/plugin.json` | `description`, `interface.shortDescription`, `interface.longDescription` | `lint:packaging` |
 
-   Fill the rest of the same blocks while you are in them — `package.json` `description` and `repository.url`, both plugin manifests' `author` / `homepage` / `repository`, the Codex manifest's `interface.developerName` / `category` / `websiteURL`, and `manifest.json` `description` / `author.name`. Nothing gates them, and every install surface reads them.
+   Fill the rest of the same blocks while you are in them — `package.json` `description` and `repository.url`, both plugin manifests' `author` / `homepage` / `repository` / `keywords`, the Codex manifest's `interface.developerName` / `category` / `websiteURL`, and `manifest.json` `description` / `author.name`. Nothing gates them, and every install surface reads them.
+
+   When the server takes a user-supplied value (an API key, a contact email, an instance URL), wire it into the plugin manifests the way each client delivers it — never as `"KEY": ""` in `env`, which `lint:packaging` rejects because the empty value replaces the user's exported key and is read as unset. In `.claude-plugin/plugin.json`, declare the option under `userConfig` (`type`, `title`, `description`; `sensitive: true` for keys and tokens; `required: true` or `default: ""`) and set `"KEY": "${user_config.<option>}"` in `env`. In `.codex-plugin/mcp.json`, list the variable name in `env_vars`. Mirror the `user_config` block you write in `manifest.json`.
 
    A server that will never be published or installed as a plugin can drop the plugin-manifest gate instead — set `"packaging": { "pluginManifests": false }` in `devcheck.config.json`.
 6. **Verify the scaffold builds clean** — `bun run devcheck`. Fix any issues before starting real work.
@@ -172,7 +174,7 @@ Skip or reorder as the project calls for it. The agent protocol's "What's Next?"
 - [ ] Publishing identity populated (`server.json`, `package.json`, plugin manifests, `manifest.json`) — or the plugin-manifest gate opted out
 - [ ] Framework docs read (`node_modules/@cyanheads/mcp-ts-core/CLAUDE.md` or `AGENTS.md`)
 - [ ] Unused echo definitions cleaned up (and unregistered from `src/index.ts`)
-- [ ] Skills copied to agent directory (`cp -R skills/* .claude/skills/` or equivalent)
+- [ ] Skills copied to agent directory (`cp -R framework-skills/* .claude/skills/` or equivalent)
 - [ ] Project structure understood (definitions directories, entry point)
 - [ ] `bun run devcheck` passes
 - [ ] Next: if new server, move on to `design-mcp-server` to plan the tool surface

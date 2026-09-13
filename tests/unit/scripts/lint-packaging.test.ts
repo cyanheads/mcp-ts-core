@@ -18,6 +18,7 @@ import {
   checkBundleEntries,
   checkEntrypointIdentity,
   checkManifestIdentity,
+  checkManifestUserConfigWiring,
   checkPluginManifests,
   NATIVE_BINDING_ENTRY,
 } from '../../../scripts/lint-packaging.js';
@@ -25,7 +26,8 @@ import {
 describe('lint-packaging · bundle-content guard (checks 5–7)', () => {
   describe('dev-dir exclusion (check 5)', () => {
     it('passes with anchored root patterns', async () => {
-      const content = '/skills/\n/.agents/\n/.claude/\n/scripts/\n/tests/\n/Dockerfile\n/bun.lock';
+      const content =
+        '/framework-skills/\n/.agents/\n/.claude/\n/scripts/\n/tests/\n/Dockerfile\n/bun.lock';
       const errors = await checkBundleContent(content);
       expect(errors.filter((e) => e.includes('does not exclude'))).toHaveLength(0);
     });
@@ -33,34 +35,36 @@ describe('lint-packaging · bundle-content guard (checks 5–7)', () => {
     it('flags a dev dir that is entirely missing from the ignore file', async () => {
       const content = '/.agents/\n/.claude/\n/scripts/\n/tests/';
       const errors = await checkBundleContent(content);
-      expect(errors.some((e) => e.includes('does not exclude root dev directory "skills/"'))).toBe(
-        true,
-      );
+      expect(
+        errors.some((e) => e.includes('does not exclude root dev directory "framework-skills/"')),
+      ).toBe(true);
       expect(errors.some((e) => e.includes('".agents/"'))).toBe(false);
     });
   });
 
   describe('unanchored pattern strips runtime paths (check 6)', () => {
     it('passes with anchored patterns — no runtime path stripping', async () => {
-      const content = '/skills/\n/.agents/\n/.claude/\n/scripts/\n/tests/';
+      const content = '/framework-skills/\n/.agents/\n/.claude/\n/scripts/\n/tests/';
       const errors = await checkBundleContent(content);
       expect(errors.filter((e) => e.includes('unanchored'))).toHaveLength(0);
     });
 
-    it('flags unanchored skills/ pattern that also strips node_modules/x/skills/', async () => {
-      const content = 'skills/\n/.agents/\n/.claude/\n/scripts/\n/tests/';
+    it('flags unanchored framework-skills/ pattern that also strips node_modules/x/framework-skills/', async () => {
+      const content = 'framework-skills/\n/.agents/\n/.claude/\n/scripts/\n/tests/';
       const errors = await checkBundleContent(content);
-      expect(errors.some((e) => e.includes('unanchored') && e.includes('skills/'))).toBe(true);
+      expect(errors.some((e) => e.includes('unanchored') && e.includes('framework-skills/'))).toBe(
+        true,
+      );
     });
 
     it('flags all three unanchored dev-dir patterns', async () => {
-      const content = 'skills/\n.agents/\n.claude/';
+      const content = 'framework-skills/\n.agents/\n.claude/';
       const errors = await checkBundleContent(content);
       expect(errors.filter((e) => e.includes('unanchored'))).toHaveLength(3);
     });
 
     it('flags a mix of anchored and unanchored entries', async () => {
-      const content = '/skills/\n.agents/\n/.claude/';
+      const content = '/framework-skills/\n.agents/\n/.claude/';
       const errors = await checkBundleContent(content);
       const unanchored = errors.filter((e) => e.includes('unanchored'));
       expect(unanchored).toHaveLength(1);
@@ -70,19 +74,19 @@ describe('lint-packaging · bundle-content guard (checks 5–7)', () => {
 
   describe('critical-runtime-path protection (check 7)', () => {
     it('passes when no runtime paths are stripped', async () => {
-      const content = '/skills/\n/.agents/\n/.claude/';
+      const content = '/framework-skills/\n/.agents/\n/.claude/';
       const errors = await checkBundleContent(content);
       expect(errors.filter((e) => e.includes('critical runtime path'))).toHaveLength(0);
     });
 
     it('flags a pattern that strips all node_modules paths', async () => {
-      const content = 'node_modules/**\n/skills/';
+      const content = 'node_modules/**\n/framework-skills/';
       const errors = await checkBundleContent(content);
       expect(errors.some((e) => e.includes('@opentelemetry'))).toBe(true);
     });
 
     it('flags a pattern that strips dist/', async () => {
-      const content = 'dist/\n/skills/';
+      const content = 'dist/\n/framework-skills/';
       const errors = await checkBundleContent(content);
       expect(errors.some((e) => e.includes('dist/index.js'))).toBe(true);
     });
@@ -90,7 +94,8 @@ describe('lint-packaging · bundle-content guard (checks 5–7)', () => {
 
   describe('edge cases', () => {
     it('ignores comment lines', async () => {
-      const content = '# this is a comment\n/skills/\n/.agents/\n/.claude/\n/scripts/\n/tests/';
+      const content =
+        '# this is a comment\n/framework-skills/\n/.agents/\n/.claude/\n/scripts/\n/tests/';
       const errors = await checkBundleContent(content);
       expect(errors).toHaveLength(0);
     });
@@ -121,8 +126,8 @@ describe('lint-packaging · post-bundle content check (check 8)', () => {
   it('flags agent-doc entries with a count and sample', () => {
     const entries = [
       'dist/index.js',
-      'node_modules/@cyanheads/mcp-ts-core/skills/add-tool/SKILL.md',
-      'node_modules/dotenv/skills/dotenv/SKILL.md',
+      'node_modules/@cyanheads/mcp-ts-core/framework-skills/add-tool/SKILL.md',
+      'node_modules/dotenv/framework-skills/dotenv/SKILL.md',
       'node_modules/resolve/.claude/settings.json',
     ];
     const errors = checkBundleEntries(entries, 'dist/test.mcpb');
@@ -161,7 +166,7 @@ describe('lint-packaging · post-bundle content check (check 8)', () => {
 
   it('reports agent-doc and native-binding classes as separate errors', () => {
     const entries = [
-      'node_modules/dotenv/skills/dotenv/SKILL.md',
+      'node_modules/dotenv/framework-skills/dotenv/SKILL.md',
       'node_modules/@duckdb/node-bindings-linux-x64/libduckdb.so',
     ];
     expect(checkBundleEntries(entries, 'dist/test.mcpb')).toHaveLength(2);
@@ -284,6 +289,75 @@ describe('lint-packaging · manifest identity (check 9, manifest surface)', () =
   it('skips when display_name is absent or not a string', () => {
     expect(checkManifestIdentity({}, 'pubmed-mcp-server')).toEqual([]);
     expect(checkManifestIdentity({ display_name: 42 }, 'pubmed-mcp-server')).toEqual([]);
+  });
+});
+
+describe('lint-packaging · manifest user_config wiring (check 11)', () => {
+  const ref = (id: string) => ['$', `{user_config.${id}}`].join('');
+  const wired = {
+    name: 'pubmed-mcp-server',
+    server: {
+      mcp_config: {
+        args: [['$', '{__dirname}/dist/index.js'].join('')],
+        env: { MCP_TRANSPORT_TYPE: 'stdio', NCBI_API_KEY: ref('ncbi_api_key') },
+      },
+    },
+    user_config: {
+      ncbi_api_key: { type: 'string', title: 'NCBI API key', required: false, default: '' },
+    },
+  };
+
+  it('accepts a fully wired manifest', () => {
+    expect(checkManifestUserConfigWiring(wired)).toEqual([]);
+  });
+
+  it('flags a non-MCPB placeholder that the host would deliver literally', () => {
+    const m = {
+      ...wired,
+      server: { mcp_config: { env: { NCBI_API_KEY: ['$', '{NCBI_API_KEY}'].join('') } } },
+      user_config: { NCBI_API_KEY: { type: 'string', title: 'NCBI API key', required: true } },
+    };
+    const errors = checkManifestUserConfigWiring(m);
+    expect(errors.some((e) => e.includes('literal string'))).toBe(true);
+    expect(errors.some((e) => e.includes('never referenced'))).toBe(true);
+  });
+
+  it('flags a declared option that mcp_config never references', () => {
+    const m = { ...wired, server: { mcp_config: { env: { MCP_TRANSPORT_TYPE: 'stdio' } } } };
+    const errors = checkManifestUserConfigWiring(m);
+    expect(errors).toHaveLength(1);
+    expect(errors[0]).toContain('user_config["ncbi_api_key"] is never referenced');
+  });
+
+  it('flags a reference to an undeclared option', () => {
+    const m = { ...wired, user_config: {} };
+    const errors = checkManifestUserConfigWiring(m);
+    expect(errors).toHaveLength(1);
+    expect(errors[0]).toContain('user_config["ncbi_api_key"] is not declared');
+  });
+
+  it('flags an optional string option with no default', () => {
+    const m = {
+      ...wired,
+      user_config: { ncbi_api_key: { type: 'string', title: 'NCBI API key' } },
+    };
+    const errors = checkManifestUserConfigWiring(m);
+    expect(errors).toHaveLength(1);
+    expect(errors[0]).toContain('no "default"');
+  });
+
+  it('does not require a default on required or non-string options', () => {
+    const m = {
+      ...wired,
+      server: {
+        mcp_config: { env: { A: ref('a'), B: ref('b') } },
+      },
+      user_config: {
+        a: { type: 'string', title: 'A', required: true },
+        b: { type: 'boolean', title: 'B' },
+      },
+    };
+    expect(checkManifestUserConfigWiring(m)).toEqual([]);
   });
 });
 
@@ -449,5 +523,76 @@ describe('lint-packaging · plugin marketplace manifests (check 10, #240)', () =
       VERSION,
     );
     expect(errors.some((e) => e.includes('server key must be the unscoped'))).toBe(true);
+  });
+
+  it('flags an empty-string env placeholder in .claude-plugin/plugin.json', () => {
+    const claude = {
+      ...validClaude,
+      mcpServers: {
+        [UNSCOPED]: { command: 'npx', args: ['-y', FULL], env: { NCBI_API_KEY: '' } },
+      },
+    };
+    const errors = checkPluginManifests({ claudePlugin: claude }, UNSCOPED, FULL, VERSION);
+    expect(errors).toHaveLength(1);
+    expect(errors[0]).toContain('env.NCBI_API_KEY is ""');
+    expect(errors[0]).toContain('userConfig');
+  });
+
+  /** `${user_config.<id>}` as a plain string, built so Biome's template-placeholder rule stays quiet. */
+  const userConfigRef = (id: string) => ['$', `{user_config.${id}}`].join('');
+
+  it('flags a user_config reference with no matching userConfig option', () => {
+    const claude = {
+      ...validClaude,
+      mcpServers: {
+        [UNSCOPED]: {
+          command: 'npx',
+          args: ['-y', FULL],
+          env: { NCBI_API_KEY: userConfigRef('ncbi_api_key') },
+        },
+      },
+    };
+    const errors = checkPluginManifests({ claudePlugin: claude }, UNSCOPED, FULL, VERSION);
+    expect(errors).toHaveLength(1);
+    expect(errors[0]).toContain('"userConfig.ncbi_api_key" is not declared');
+  });
+
+  it('accepts a declared userConfig option referenced from env', () => {
+    const claude = {
+      ...validClaude,
+      userConfig: {
+        ncbi_api_key: { type: 'string', title: 'NCBI API key', description: 'Optional.' },
+      },
+      mcpServers: {
+        [UNSCOPED]: {
+          command: 'npx',
+          args: ['-y', FULL],
+          env: { MCP_TRANSPORT_TYPE: 'stdio', NCBI_API_KEY: userConfigRef('ncbi_api_key') },
+        },
+      },
+    };
+    expect(checkPluginManifests({ claudePlugin: claude }, UNSCOPED, FULL, VERSION)).toEqual([]);
+  });
+
+  it('flags an empty-string env placeholder in .codex-plugin/mcp.json', () => {
+    const codexMcp = {
+      [UNSCOPED]: { command: 'npx', args: ['-y', FULL], env: { NCBI_API_KEY: '' } },
+    };
+    const errors = checkPluginManifests({ codexMcp }, UNSCOPED, FULL, VERSION);
+    expect(errors).toHaveLength(1);
+    expect(errors[0]).toContain('env.NCBI_API_KEY is ""');
+    expect(errors[0]).toContain('env_vars');
+  });
+
+  it('accepts env_vars forwarding in .codex-plugin/mcp.json', () => {
+    const codexMcp = {
+      [UNSCOPED]: {
+        command: 'npx',
+        args: ['-y', FULL],
+        env: { MCP_TRANSPORT_TYPE: 'stdio' },
+        env_vars: ['NCBI_API_KEY'],
+      },
+    };
+    expect(checkPluginManifests({ codexMcp }, UNSCOPED, FULL, VERSION)).toEqual([]);
   });
 });
