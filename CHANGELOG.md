@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.13.1](changelog/0.13.x/0.13.1.md) — 2026-09-13 · 🛡️ Security
+
+Five polynomial-time regexes become linear scans, two of them on client-supplied input. createApp gains a sessionMode option and a teardown hook, and SIGTERM/SIGINT now end the process explicitly instead of waiting for the event loop to drain.
+
 ## [0.13.0](changelog/0.13.x/0.13.0.md) — 2026-09-13 · ⚠️ Breaking
 
 The framework's skill tree moves from skills/ to framework-skills/, so a server that ships a plugin manifest no longer hands its development skills to every installing agent; consumers migrate with a git mv plus path updates. Empty and unsubstituted ${…} env values now read as unset on both config paths.

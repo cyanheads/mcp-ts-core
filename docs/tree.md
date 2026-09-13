@@ -1,6 +1,6 @@
 # mcp-ts-core - Directory Structure
 
-Generated on: 2026-09-13 17:07:22
+Generated on: 2026-09-13 20:37:17
 
 ```text
 mcp-ts-core/
@@ -33,6 +33,11 @@ mcp-ts-core/
 │   ├── 0.8.x/
 │   ├── 0.9.x/
 │   └── template.md
+├── config/
+│   ├── tsconfig.base.json
+│   ├── tsconfig.build.json
+│   ├── tsconfig.scripts.json
+│   └── tsconfig.worker.json
 ├── docs/
 │   ├── mcp-specification/
 │   │   ├── 2025-06-18/
@@ -623,6 +628,8 @@ mcp-ts-core/
 │   │   ├── load-tools.js
 │   │   ├── load-worker.js
 │   │   ├── mcp-app-server.js
+│   │   ├── session-mode-server.js
+│   │   ├── teardown-server.js
 │   │   └── worker-runtime.fixture.ts
 │   ├── fuzz/
 │   │   ├── definition-fuzz.test.ts
@@ -664,6 +671,7 @@ mcp-ts-core/
 │   │   ├── package-consumer.int.test.ts
 │   │   ├── public-api-contract.int.test.ts
 │   │   ├── server-identity.int.test.ts
+│   │   ├── session-mode-option.int.test.ts
 │   │   ├── setup.ts
 │   │   ├── stdio.test.ts
 │   │   ├── union-input.int.test.ts
@@ -714,6 +722,7 @@ mcp-ts-core/
 │   │   │   ├── logLevelAlias.test.ts
 │   │   │   └── parseEnvConfig.test.ts
 │   │   ├── core/
+│   │   │   ├── app.sessionMode.test.ts
 │   │   │   ├── app.test.ts
 │   │   │   ├── context-state-bounds.test.ts
 │   │   │   ├── context.test.ts
@@ -998,11 +1007,7 @@ mcp-ts-core/
 ├── README.md
 ├── repomix.config.json
 ├── server.json
-├── tsconfig.base.json
-├── tsconfig.build.json
 ├── tsconfig.json
-├── tsconfig.scripts.json
-├── tsconfig.worker.json
 ├── tsdoc.json
 ├── typedoc.json
 ├── vitest.config.base.mjs
