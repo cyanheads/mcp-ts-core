@@ -1,5 +1,8 @@
 blank_issues_enabled: true
 contact_links:
+  - name: Report a security vulnerability
+    url: https://github.com/cyanheads/mcp-ts-core/security/advisories/new
+    about: Private report — please don't file vulnerabilities as public issues
   - name: Discussions
     url: https://github.com/cyanheads/mcp-ts-core/discussions
     about: Questions, ideas, and general discussion

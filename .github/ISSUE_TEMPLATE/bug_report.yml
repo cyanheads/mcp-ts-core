@@ -6,7 +6,7 @@ body:
   - type: markdown
     attributes:
       value: |
-        Thanks for reporting a bug. Please confirm this is a framework issue, not a server-specific bug — if you're unsure, see the [triage guide](https://github.com/cyanheads/mcp-ts-core/blob/main/skills/report-issue-framework/SKILL.md#before-filing).
+        Thanks for reporting a bug. Please confirm this is a framework issue, not a server-specific bug — if you're unsure, see the [triage guide](https://github.com/cyanheads/mcp-ts-core/blob/main/framework-skills/report-issue-framework/SKILL.md#before-filing).
 
         **Do not include secrets, credentials, API keys, tokens, PII, or other sensitive data.** Redact env vars, auth headers, user-identifying information, and internal URLs from all code snippets, logs, and stack traces before submitting. GitHub issues are public and permanent.
 
@@ -21,7 +21,7 @@ body:
     id: version
     attributes:
       label: mcp-ts-core version
-      placeholder: "0.1.29"
+      placeholder: "0.x.y"
     validations:
       required: true
 
@@ -40,7 +40,7 @@ body:
     id: runtime-version
     attributes:
       label: Runtime version
-      placeholder: "Bun 1.2.x / Node 22.x"
+      placeholder: "Bun 1.4.x / Node 24.x"
     validations:
       required: true
 
