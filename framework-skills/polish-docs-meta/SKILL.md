@@ -4,7 +4,7 @@ description: >
   Finalize documentation and project metadata for a ship-ready MCP server. Use after implementation is complete, tests pass, and devcheck is clean. Safe to run at any stage — each step checks current state and only acts on what still needs work.
 metadata:
   author: cyanheads
-  version: "2.13"
+  version: "2.15"
   audience: external
   type: workflow
 ---
@@ -48,13 +48,17 @@ Capture: tool count, resource count, prompt count, service count, required env v
 
 ### 2. README.md
 
-Read `references/readme.md` for structure and conventions. If `README.md` doesn't exist, create it from scratch. If it exists, diff the current content against the audit — update tool/resource/prompt tables, env var lists, and descriptions to match the actual surface area. Don't rewrite sections that are already accurate.
+**Read the gold standard first: the `pubmed-mcp-server` README** — https://github.com/cyanheads/pubmed-mcp-server/blob/main/README.md (or `../pubmed-mcp-server/README.md` when that repo is checked out beside this one). Mirror its structure, section order, heading forms, and density. Reuse its non-server-specific content as-is — the framework line under Features, and the Getting started / Configuration / Running the server / Development guide / Contributing boilerplate — and tune only what is server-specific: the header, the Overview description, the primitives and their Capability reference entries, the domain-specific and agent-friendly bullets, env vars, project structure. Then read `references/readme.md` for the conventions spelled out; where it and the pubmed README disagree, the README wins — note the discrepancy in your report rather than editing the reference.
+
+If `README.md` doesn't exist, create it from scratch. If it exists, diff the current content against the audit — update tool/resource/prompt tables, env var lists, and descriptions to match the actual surface area. Don't restructure sections that are already accurate and already in the gold-standard shape.
+
+**Every run is also a concision pass.** READMEs accrete: each release adds a bullet, and nobody removes one. Accurate is not the same as done — on every run, tighten what is already there, especially the Capability reference. Read `references/readme.md` § *Concision* for what to keep and what to cut. The bar is natural prose a human reads once, that still carries every fact a caller needs before the first call, and where every retained claim has been checked against the definition it describes.
 
 The bold header tagline (the `<b>` text inside the first `<p>`) must match the `package.json` `description`. The surface count is a nested `<div>` inside the same `<p>`, separated by `•`.
 
 ### 3. Agent Protocol (CLAUDE.md / AGENTS.md)
 
-Update the project's agent protocol file to reflect the actual server. Scope is the project-root `CLAUDE.md` / `AGENTS.md` only — **do not edit `skills/*/SKILL.md` or their `references/` files**. Those are external skill files synced from `@cyanheads/mcp-ts-core` and get overwritten on the next `maintenance` refresh.
+Update the project's agent protocol file to reflect the actual server. Scope is the project-root `CLAUDE.md` / `AGENTS.md` only — **do not edit `framework-skills/*/SKILL.md` or their `references/` files**. Those are external skill files synced from `@cyanheads/mcp-ts-core` and get overwritten on the next `maintenance` refresh.
 
 Read `references/agent-protocol.md` for the full update checklist, then review the current file and address what's stale or missing:
 
@@ -169,7 +173,9 @@ Never hand-edit `CHANGELOG.md` when using this pattern — it's a build artifact
 
 ### 10. Plugin Metadata (Codex / Claude Code)
 
-`lint:packaging` (run by `devcheck`) now enforces the high-value subset automatically when these manifests are present: non-empty descriptions, and identity/install correctness — display fields (`name`, server key, `interface.displayName`) must be the **unscoped** machine name, while the `npx -y` install arg must be the full `package.json` `name` (scoped if scoped). Opt out per project with `"packaging": { "pluginManifests": false }` in `devcheck.config.json`. The checks below cover the fields the gate doesn't (version / repository / license sync, category, env vars).
+`lint:packaging` (run by `devcheck`) now enforces the high-value subset automatically when these manifests are present: non-empty descriptions, identity/install correctness — display fields (`name`, server key, `interface.displayName`) must be the **unscoped** machine name, while the `npx -y` install arg must be the full `package.json` `name` (scoped if scoped) — and the env contract below (no `""` values; every `${user_config.*}` reference declared). Opt out per project with `"packaging": { "pluginManifests": false }` in `devcheck.config.json`. The checks below cover the fields the gate doesn't (version / repository / license sync, category, the wording of each option).
+
+**How user-supplied values reach the server.** Neither client passes the user's shell environment through untouched, so an env entry of `"KEY": ""` is not a hint — it is the value the server receives, and the framework reads an empty string as unset. Claude Code prompts for values declared under `userConfig` at enable time and substitutes `${user_config.<option>}` into `env` (sensitive values go to the Keychain). Codex starts stdio servers with a whitelisted environment and forwards only the host variables named in `env_vars`. Mirror `manifest.json`'s `user_config` block: same options, same titles and descriptions.
 
 If `.codex-plugin/plugin.json` exists, verify it's populated and in sync with `package.json` and `server.json`:
 
@@ -182,9 +188,9 @@ If `.codex-plugin/plugin.json` exists, verify it's populated and in sync with `p
 - `interface.shortDescription` matches `package.json` `description`
 - `interface.category` is set to a meaningful category
 
-If `.codex-plugin/mcp.json` exists, verify the server-name key is the unscoped `package.json` `name`, the `npx -y` install arg is the full `package.json` `name`, and env vars include any required API keys from the server config schema.
+If `.codex-plugin/mcp.json` exists, verify the server-name key is the unscoped `package.json` `name`, the `npx -y` install arg is the full `package.json` `name`, `env` carries only fixed values (`MCP_TRANSPORT_TYPE`), and `env_vars` lists every user-supplied variable from the server config schema (API keys, contact emails, instance URLs) so Codex forwards it from the user's environment.
 
-If `.claude-plugin/plugin.json` exists, apply the same checks: `name` (unscoped), `version`, `description`, `repository`, `license` from `package.json`. Verify the inline `mcpServers` entry key is the unscoped name, its `npx -y` install arg is the full `package.json` `name`, and env vars include any required API keys.
+If `.claude-plugin/plugin.json` exists, apply the same checks: `name` (unscoped), `version`, `description`, `author`, `repository`, `license`, `keywords` from `package.json`, `$schema` set to `https://json.schemastore.org/claude-code-plugin-manifest.json`. Verify the inline `mcpServers` entry key is the unscoped name and its `npx -y` install arg is the full `package.json` `name`. Every user-supplied variable is declared under `userConfig` — `type: "string"`, `title`, `description`, `sensitive: true` for keys and tokens, and either `required: true` or `default: ""` so a blank answer reaches the server as empty rather than as the literal placeholder — and referenced from `env` as `"KEY": "${user_config.<option>}"`. Run `claude plugin validate .` after editing; the CLAUDE.md-at-root warning is expected, anything else is not.
 
 ### 11. MCPB Bundling Artifacts
 
@@ -207,7 +213,8 @@ If the project ships as an `.mcpb` bundle for Claude Desktop (check for `manifes
 - `manifest.json` `name` matches `package.json` name **without the npm scope prefix** (e.g. `bls-mcp-server`, not `@cyanheads/bls-mcp-server`); `description` matches `package.json`
 - `manifest.json` `author` is the full person object — `{ "name", "email", "url" }` — carrying the same identity as `package.json` `author` (name matches the LICENSE copyright holder, url is the author's site)
 - `manifest.json` `user_config` entries must include `title` and `type` fields — `mcpb pack` validates these
-- For each `user_config` entry referenced as `${user_config.X}` in `mcp_config.env`: if it's not `required: true`, set `"default": ""`. MCPB hosts (Claude Desktop included) pass the literal placeholder string through to the process when an optional field is left blank without a default — strict consumer validators (`z.email()`, `z.url()`, `.regex()`) then crash at lazy config load, exiting silently after `initialize`. Server-side: pair every optional env-backed strict-validator field with a `z.preprocess` that strips `${...}` placeholders to `undefined`.
+- Every `user_config` entry is referenced from `mcp_config.env` as `"X": "${user_config.X}"`, and `mcp_config` carries no other `${…}` besides MCPB's own path placeholders (`${__dirname}`, `${HOME}`, …). The host substitutes nothing else: a declared option that is never referenced is collected and dropped, and `"X": "${X}"` reaches the server as that literal string. `lint:packaging` enforces both
+- For each `user_config` entry referenced as `${user_config.X}` in `mcp_config.env`: if it's not `required: true`, set `"default": ""`. MCPB hosts (Claude Desktop included) pass the literal placeholder string through to the process when an optional field is left blank without a default — the `default` keeps that string out of the process. Server-side, the framework already treats a whole-value `${…}` placeholder the same as an empty string — unset — in both its own config and `parseEnvConfig`, so an optional field falls through to its default and a required one fails as missing rather than as a format error; a per-field `z.preprocess` guard for placeholders is redundant and can be dropped.
 - `server.json` env var `isRequired` must match the upstream API's actual requirement — if the API works without the value (rate-limited, DEMO_KEY fallback, polite pool), mark `isRequired: false` and describe the tradeoff in the description
 - Server description aligned across all surfaces: `package.json`, `manifest.json`, `server.json` (condensed, hard 100-char limit), README header `<p><b>`, and GitHub repo description (`gh repo edit --description`)
 - `package.json` `keywords` include baseline terms: `mcp`, `mcp-server`, `model-context-protocol`, `typescript`, `bun`, `stdio`, `streamable-http`, plus data-domain terms. GitHub repo topics (`gh repo edit --add-topic`) should match.
@@ -257,7 +264,8 @@ Both must pass clean.
 ## Checklist
 
 - [ ] Surface area audited — tool/resource/prompt/service inventory built
-- [ ] `README.md` accurate — tool/resource tables, config, descriptions match actual code
+- [ ] `README.md` accurate — mirrors the `pubmed-mcp-server` gold-standard structure; Overview tables, Capability reference entries, config, and descriptions match actual code
+- [ ] `README.md` concise — Capability reference entries are contract-shaped and within the bullet budget; nothing narrates mechanism the schema already carries; every retained claim verified against its definition
 - [ ] Agent protocol file accurate — no stale template content, real examples, structure matches reality
 - [ ] `.env.example` in sync with server config schema
 - [ ] `package.json` metadata complete (`description`, `mcpName`, `repository`, `author`, `keywords`, `engines`, `packageManager`)
@@ -266,8 +274,8 @@ Both must pass clean.
 - [ ] `bunfig.toml` present
 - [ ] Changelog current — either monolithic `CHANGELOG.md` (hand-edited, Keep a Changelog) or directory-based (`changelog/<minor>.x/<version>.md` + rollup regenerated and in sync)
 - [ ] `.codex-plugin/plugin.json` populated and in sync with `package.json` (if present)
-- [ ] `.codex-plugin/mcp.json` server name and env vars current (if present)
-- [ ] `.claude-plugin/plugin.json` populated and in sync with `package.json` (if present)
+- [ ] `.codex-plugin/mcp.json` server name current; user-supplied variables in `env_vars`, none as `""` in `env` (if present)
+- [ ] `.claude-plugin/plugin.json` populated and in sync with `package.json`; every user-supplied variable declared in `userConfig` and referenced as `${user_config.<option>}`, none as `""` in `env` (if present)
 - [ ] MCPB artifacts consistent (if `manifest.json` present) — version synced, env vars match `server.json`, `bundle` + `lint:packaging` scripts exist, README install badges present
 - [ ] `LICENSE` file present
 - [ ] `Dockerfile` OCI labels and runtime config accurate (if present)
