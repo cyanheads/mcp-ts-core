@@ -67,7 +67,7 @@ const APP_HTML = `<!DOCTYPE html>
       applyDocumentTheme,
       applyHostFonts,
       applyHostStyleVariables,
-    } from "https://unpkg.com/@modelcontextprotocol/ext-apps@1/app-with-deps";
+    } from "https://unpkg.com/@modelcontextprotocol/ext-apps@2/app-with-deps";
 
     const app = new App({ name: "Echo App", version: "1.0.0" });
     const messageEl = document.getElementById("message");

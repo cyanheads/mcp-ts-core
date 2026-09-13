@@ -4,7 +4,7 @@ description: >
   Scaffold an MCP App tool + UI resource pair. Use when the user asks to add a tool with interactive UI, create an MCP App, or build a visual/interactive tool.
 metadata:
   author: cyanheads
-  version: "1.4"
+  version: "1.5"
   audience: external
   type: reference
 ---
@@ -117,7 +117,7 @@ const APP_HTML = `<!DOCTYPE html>
       applyDocumentTheme,
       applyHostFonts,
       applyHostStyleVariables,
-    } from "https://unpkg.com/@modelcontextprotocol/ext-apps@1/app-with-deps";
+    } from "https://unpkg.com/@modelcontextprotocol/ext-apps@2/app-with-deps";
 
     const app = new App({ name: "{{TOOL_TITLE}}", version: "1.0.0" });
 

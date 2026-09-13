@@ -27,7 +27,7 @@ const echoAppUiResource = appResource('ui://template-echo-app/app.html', {
 
   handler(_params, ctx) {
     ctx.log.debug('Serving echo app UI.', { resourceUri: ctx.uri?.href });
-    return '<!DOCTYPE html><html lang="en"><head><title>Echo App</title></head><body><h1>Echo App</h1><script type="module">import{App,applyDocumentTheme,applyHostFonts,applyHostStyleVariables}from"https://unpkg.com/@modelcontextprotocol/ext-apps@1/app-with-deps";const app=new App({name:"Echo App",version:"1.0.0"});function applyHostContext(ctx){if(ctx?.theme){applyDocumentTheme(ctx.theme)}if(ctx?.styles?.variables){applyHostStyleVariables(ctx.styles.variables)}if(ctx?.styles?.css?.fonts){applyHostFonts(ctx.styles.css.fonts)}}app.ontoolresult=(r)=>{};app.onhostcontextchanged=applyHostContext;app.connect().then(()=>{const ctx=app.getHostContext();if(ctx)applyHostContext(ctx)})</script></body></html>';
+    return '<!DOCTYPE html><html lang="en"><head><title>Echo App</title></head><body><h1>Echo App</h1><script type="module">import{App,applyDocumentTheme,applyHostFonts,applyHostStyleVariables}from"https://unpkg.com/@modelcontextprotocol/ext-apps@2/app-with-deps";const app=new App({name:"Echo App",version:"1.0.0"});function applyHostContext(ctx){if(ctx?.theme){applyDocumentTheme(ctx.theme)}if(ctx?.styles?.variables){applyHostStyleVariables(ctx.styles.variables)}if(ctx?.styles?.css?.fonts){applyHostFonts(ctx.styles.css.fonts)}}app.ontoolresult=(r)=>{};app.onhostcontextchanged=applyHostContext;app.connect().then(()=>{const ctx=app.getHostContext();if(ctx)applyHostContext(ctx)})</script></body></html>';
   },
 });
 
