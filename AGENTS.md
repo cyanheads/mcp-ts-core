@@ -4,7 +4,7 @@
 **Version:** 0.12.9
 **Engines:** Bun ≥1.4.0, Node ≥24.0.0
 **MCP SDK:** `@modelcontextprotocol/server` ^2.0.0 (protocol revisions 2026-07-28 and 2025-*)
-**Zod:** ^4.6.0
+**Zod:** ^4.6.1
 **GitHub:** [cyanheads/mcp-ts-core](https://github.com/cyanheads/mcp-ts-core)
 **npm:** [@cyanheads/mcp-ts-core](https://www.npmjs.com/package/@cyanheads/mcp-ts-core)
 **Docker:** [ghcr.io/cyanheads/mcp-ts-core](https://ghcr.io/cyanheads/mcp-ts-core)
@@ -22,7 +22,7 @@ This package serves two consumer paths. When making changes, know which audience
 | **Direct package import** — existing project pulls in the package | `bun add @cyanheads/mcp-ts-core` → `import { createApp, tool, z } from '@cyanheads/mcp-ts-core'` | Public API surface (`src/`) — existing consumers feel changes immediately on upgrade |
 | **Init-scaffolded server** — fresh project bootstrapped from this repo's templates | `bunx @cyanheads/mcp-ts-core init [name]` copies `templates/` into the new directory | `templates/` — only affects newly scaffolded servers, not existing ones |
 
-Both paths share the same public API. Init copies starter `package.json`, configs (`tsconfig`, `biome.json`, `vitest.config.ts`, `devcheck.config.json`, `bunfig.toml`), `.env.example`, `Dockerfile`, `LICENSE`, `.gitattributes`, `CLAUDE.md`/`AGENTS.md`, `.github/` (issue forms, `CONTRIBUTING.md`, `CODE_OF_CONDUCT.md`, `SECURITY.md`), example definitions and tests, framework `scripts/`, and external-audience `skills/`. `_`-prefixed files (e.g. `_.gitignore`) drop the prefix on copy. Existing files are never overwritten; `init` without a name scaffolds in place (upgrade flow). After init, consult the `setup` skill.
+Both paths share the same public API. Init copies starter `package.json`, configs (`tsconfig`, `biome.json`, `vitest.config.ts`, `devcheck.config.json`, `bunfig.toml`), `.env.example`, `Dockerfile`, `LICENSE`, `.gitattributes`, `CLAUDE.md`/`AGENTS.md`, `.github/` (issue forms, `CONTRIBUTING.md`, `CODE_OF_CONDUCT.md`, `SECURITY.md`), example definitions and tests, framework `scripts/`, and external-audience `framework-skills/`. `_`-prefixed files (e.g. `_.gitignore`) drop the prefix on copy. Existing files are never overwritten; `init` without a name scaffolds in place (upgrade flow). After init, consult the `setup` skill.
 
 ---
 
@@ -45,7 +45,7 @@ Both paths share the same public API. Init copies starter `package.json`, config
 
 | Subpath | Key Exports | Purpose |
 |:--------|:------------|:--------|
-| `@cyanheads/mcp-ts-core` | `createApp`, `tool`, `resource`, `prompt`, `appTool`, `appResource`, `APP_RESOURCE_MIME_TYPE`, `headerParam`, `Context`, `createFail`, `createRecoveryFor`, `TypedFail`, `TypedRecoveryFor`, `ReasonOf`, `HandlerContext`, `Enrich`, `EnrichHelpers`, `TypedEnrich`, `ContentCollect`, `ContentBlock`, `z`, `completable`, `isCompletable`, `CompleteCallback`, `CompleteResourceTemplateCallback`, `CacheHint`, `CacheHints`, `CacheScope` | Main entry point |
+| `@cyanheads/mcp-ts-core` | `createApp`, `tool`, `resource`, `prompt`, `appTool`, `appResource`, `APP_RESOURCE_MIME_TYPE`, `headerParam`, `Context`, `createFail`, `createRecoveryFor`, `TypedFail`, `TypedRecoveryFor`, `ReasonOf`, `HandlerContext`, `Enrich`, `EnrichHelpers`, `TypedEnrich`, `ContentCollect`, `ContentBlock`, `z`, `inputRequired`, `completable`, `isCompletable`, `CompleteCallback`, `CompleteResourceTemplateCallback`, `CacheHint`, `CacheHints`, `CacheScope` | Main entry point |
 | `/worker` | `createWorkerHandler`, `CloudflareBindings` | Cloudflare Workers entry |
 | `/tools` | `ToolDefinition`, `AnyToolDefinition`, `ToolAnnotations` | Tool definition types |
 | `/resources` | `ResourceDefinition`, `AnyResourceDefinition` | Resource definition types |
@@ -151,7 +151,7 @@ interface CoreServices {
   canvas?: DataCanvas;          // present when CANVAS_PROVIDER_TYPE=duckdb; never on Workers
   llmProvider?: ILlmProvider;
   speechService?: SpeechService;
-  supabase?: SupabaseClient;
+  supabase?: SupabaseClientHandle;
 }
 
 interface ServerHandle {
@@ -404,7 +404,7 @@ Available factories: `invalidParams`, `invalidRequest`, `notFound`, `forbidden`,
 
 For HTTP responses from upstream APIs, use `httpErrorFromResponse(response, { service, data })` from `/utils` — maps the full status table (401/403/408/422/429/5xx) and captures body + `Retry-After`.
 
-**Auto-classification.** Plain `Error`, `ZodError`, and any other thrown value are caught and classified automatically. Resolution order: `McpError` code (preserved as-is) → JS constructor name (`TypeError` → `ValidationError`) → provider patterns (HTTP status codes, AWS errors, DB errors) → common message patterns → `AbortError` name → `InternalError` fallback.
+**Auto-classification.** Plain `Error`, `ZodError`, and any other thrown value are caught and classified automatically. Resolution order: `McpError` code (preserved as-is) → SDK `ConnectionClosed` (→ `RequestCancelled`) → JS constructor name (`TypeError` → `ValidationError`) → provider patterns (HTTP status codes, AWS errors, DB errors) → common message patterns → `AbortError` name (→ `Timeout`) → `InternalError` fallback.
 
 **Error-path parity.** Tool errors: `content[]` carries markdown with `data.recovery.hint`; `structuredContent.error` carries `{ code, message, data? }`. No `_meta.error`. Resources re-throw via JSON-RPC error envelope.
 
@@ -506,11 +506,11 @@ Detailed method signatures, options, and examples live in skill files. Read the 
 
 ### Skill versioning
 
-Each `skills/<name>/SKILL.md` carries `metadata.version` in frontmatter. The `maintenance` skill's Phase A uses this to sync consumer copies — replaces the **entire skill directory** as one unit. Without a version bump, Phase A skips the skill (content-hash backstop catches drift, but noisier).
+Each `framework-skills/<name>/SKILL.md` carries `metadata.version` in frontmatter. The `maintenance` skill's Phase A uses this to sync consumer copies — replaces the **entire skill directory** as one unit. Without a version bump, Phase A skips the skill (content-hash backstop catches drift, but noisier).
 
-**Policy:** Bump `metadata.version` when changing any file under `skills/<name>/` — SKILL.md is the single version knob for the directory. Typo/whitespace fixes exempt. One bump per release cycle suffices. Enforced by `bun run devcheck` (`scripts/check-skill-versions.ts`): a SKILL.md body change vs `HEAD` without a `metadata.version` bump surfaces as a warning; whitespace-only edits never trigger it, and a genuine typo fix opts out via `devcheck.config.json` `skillVersions.ignore`.
+**Policy:** Bump `metadata.version` when changing any file under `framework-skills/<name>/` — SKILL.md is the single version knob for the directory. Typo/whitespace fixes exempt. One bump per release cycle suffices. Enforced by `bun run devcheck` (`scripts/check-skill-versions.ts`): a SKILL.md body change vs `HEAD` without a `metadata.version` bump surfaces as a warning; whitespace-only edits never trigger it, and a genuine typo fix opts out via `devcheck.config.json` `skillVersions.ignore`.
 
-Skills live in `skills/<name>/SKILL.md`; the full list is discoverable via the agent's skill registry at session start.
+Skills live in `framework-skills/<name>/SKILL.md`; the full list is discoverable via the agent's skill registry at session start. The directory is deliberately not `skills/`: Claude Code and Codex auto-load a plugin's root `skills/`, and these are development-time skills, not skills for the agents that use a server. `skills/` stays free for that second kind.
 
 ---
 
@@ -542,7 +542,8 @@ Skills live in `skills/<name>/SKILL.md`; the full list is discoverable via the a
 | `bun run build` | Build library output (`scripts/build.ts`) |
 | `bun run rebuild` | Clean and rebuild (`scripts/clean.ts` + `build`) |
 | `bun run devcheck` | **Use often.** Biome lint/format, typecheck, MCP definition + packaging lint, docs/skills/changelog sync checks, secrets + antipattern scans, `bun audit`, `bun outdated` |
-| `bun run audit:refresh` | Delete `bun.lock`, reinstall, re-audit. Use when `devcheck` flags a transitive advisory — stale lockfile can mask already-patched deps. If advisory survives, it's real. |
+| `bun run audit:fix` | `bun audit fix` — upgrade vulnerable packages to the lowest safe version within existing ranges (`--dry-run` previews, `--latest` rewrites ranges). First response to a transitive advisory; then `bun update <name>`, then `bun dedupe` |
+| `bun run audit:refresh` | Delete `bun.lock` and reinstall. Last resort after `audit:fix`, `bun update <name>`, and `bun dedupe` — re-resolves every ranged dep and rewrites the lockfile as `lockfileVersion: 2` |
 | `bun run lint:mcp` | Validate MCP definitions against spec |
 | `bun run format` | Auto-fix Biome lint/format issues (safe fixes only) |
 | `bun run format:unsafe` | Also apply Biome's unsafe autofixes — review the diff; they can change behavior, not just formatting |
