@@ -656,5 +656,13 @@ const config = new Proxy({} as AppConfig, {
  */
 export type AppConfig = z.infer<typeof ConfigSchema>;
 
+/**
+ * The normalization `parseConfig` applies to every environment value before
+ * schema validation. Exported so a caller deciding whether a variable carries
+ * configuration reaches the same verdict this module does — an empty string and
+ * an unsubstituted `${…}` placeholder both read as unset — instead of
+ * re-implementing those rules and disagreeing with the parser.
+ */
+export { normalizeEnv } from './envValue.js';
 export { parseEnvConfig } from './parseEnvConfig.js';
 export { ConfigSchema, config, parseConfig, resetConfig };

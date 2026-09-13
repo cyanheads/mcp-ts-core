@@ -58,6 +58,7 @@ export const PUBLIC_RUNTIME_EXPORTS = {
     'FRAMEWORK_NAME',
     'FRAMEWORK_VERSION',
     'config',
+    'normalizeEnv',
     'parseConfig',
     'parseEnvConfig',
     'resetConfig',

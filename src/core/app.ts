@@ -14,7 +14,7 @@ import {
 } from '@modelcontextprotocol/server';
 import type { SupabaseClient } from '@supabase/supabase-js';
 import { z } from 'zod';
-import { config, resetConfig } from '@/config/index.js';
+import { config, normalizeEnv, resetConfig } from '@/config/index.js';
 import { startGcPressureLoop } from '@/core/gcPressure.js';
 import {
   buildServerManifest,
@@ -34,7 +34,11 @@ import { initHeartbeatMetrics } from '@/mcp-server/transports/heartbeat.js';
 import { initSessionMetrics } from '@/mcp-server/transports/http/sessionStore.js';
 import { TransportManager } from '@/mcp-server/transports/manager.js';
 import { observeStdinEof } from '@/mcp-server/transports/stdio/stdioTransport.js';
-import type { FrameworkServerFactory } from '@/mcp-server/types.js';
+import {
+  type FrameworkServerFactory,
+  resolveSessionMode,
+  type SessionMode,
+} from '@/mcp-server/types.js';
 import { createCanvasService } from '@/services/canvas/core/canvasFactory.js';
 import type { DataCanvas } from '@/services/canvas/core/DataCanvas.js';
 import type { ILlmProvider } from '@/services/llm/core/ILlmProvider.js';
@@ -101,6 +105,12 @@ export type SupabaseClientHandle = object;
 /**
  * Ceiling on a graceful shutdown that has to end in `process.exit`. A cleanup
  * step that never settles must not leave the process resident forever.
+ *
+ * Shared by every exit-bearing path — `SIGTERM`, `SIGINT`, stdin EOF, and the
+ * fatal-error handlers. It bounds the shutdown as a whole, not any single
+ * await, so a step that settles inside it is never truncated and only one that
+ * stops settling is cut. The exit code belongs to the path that armed the
+ * timer, not to the timer: 1 on a signal or a fatal error, 0 on stdin EOF.
  */
 const SHUTDOWN_BACKSTOP_MS = 10_000;
 
@@ -190,8 +200,75 @@ export interface CreateAppOptions<TSupabaseClient extends object = SupabaseClien
   prompts?: AnyPromptDefinition[];
   /** Resource definitions. */
   resources?: AnyResourceDefinition[];
+  /**
+   * Session posture declared in code rather than left to a deployment's
+   * `MCP_SESSION_MODE`. The bare string form is shorthand for `{ default }`.
+   *
+   * `default` seeds the session mode when the environment does not set one.
+   * `MCP_SESSION_MODE` still wins whenever it carries a meaningful value —
+   * and only a meaningful value: an empty string and a whole-value
+   * unsubstituted `${…}` placeholder read as unset on the config path, so both
+   * fall through to this option rather than to the schema default.
+   *
+   * `require: 'stateful'` declares that the server cannot serve its purpose
+   * without a live session, and startup fails with a `ConfigurationError` when
+   * the resolved HTTP mode is `stateless`. Declare it when a handler gates a
+   * destructive action behind `ctx.requestInput` / `inputRequired.elicit`:
+   * under `stateless`, a 2025-era request is served by an instance that never
+   * processed `initialize`, so the SDK's legacy shim has an empty
+   * client-capability view and its gate refuses — fail-closed, but
+   * unconditionally, which removes the tool for that whole class of clients.
+   * There is no `require: 'stateless'`; nothing needs statelessness to work.
+   *
+   * HTTP only. `MCP_SESSION_MODE` has no effect on stdio, so a declared
+   * requirement never refuses a stdio start.
+   *
+   * Cloudflare Workers are outside this contract: `MCP_SESSION_MODE` is not in
+   * `CORE_ENV_BINDINGS`, so a `[vars]` entry reaches `process.env` only through
+   * `extraEnvBindings`.
+   *
+   * @example
+   * ```ts
+   * await createApp({ sessionMode: 'stateless', tools });                     // default only
+   * await createApp({ sessionMode: { default: 'stateful', require: 'stateful' }, tools });
+   * ```
+   */
+  sessionMode?: SessionMode | { default?: SessionMode; require?: 'stateful' };
   /** Runs after core services are constructed, before transport starts. */
   setup?: (core: CoreServices<TSupabaseClient>) => void | Promise<void>;
+  /**
+   * The counterpart to {@link CreateAppOptions.setup} — releases what setup
+   * allocated. Awaited inside `shutdown()` once the transport has stopped
+   * accepting requests and before core services are disposed and the logger
+   * closes, so the hook can still log and still reach `core.storage`,
+   * `core.canvas`, and the rest.
+   *
+   * Runs exactly once per shutdown, on every path: a signal, stdin EOF, and a
+   * direct {@link ServerHandle.shutdown} call alike. An error it raises is
+   * logged and never blocks the rest of the shutdown or the exit. On the
+   * signal and EOF paths it is bounded by the same ceiling as every other
+   * step — a hook that never settles is cut and the process exits, 1 on a
+   * signal and 0 on EOF.
+   *
+   * Register anything the framework cannot see: a `fs.watch`, an open socket,
+   * a `setInterval` that is not `unref()`'d. A ref'd handle left behind no
+   * longer keeps the process resident (the backstop covers it), but it is cut
+   * rather than closed, so an in-flight write can be lost.
+   *
+   * Node/Bun only. Cloudflare Workers have no shutdown lifecycle — an isolate
+   * is evicted without notice — so `createWorkerHandler` does not accept this
+   * option.
+   *
+   * @example
+   * ```ts
+   * let watcher: MyWatcher;
+   * await createApp({
+   *   setup(core) { watcher = startWatcher(core.config); },
+   *   async teardown() { await watcher.close(); },
+   * });
+   * ```
+   */
+  teardown?: (core: CoreServices<TSupabaseClient>) => void | Promise<void>;
   /**
    * Human-readable display name shown in client listings and consent UIs.
    * Supplements `name` (which is the machine identifier). Forwarded to the
@@ -252,7 +329,17 @@ export interface CoreServices<TSupabaseClient extends object = SupabaseClientHan
 export interface ServerHandle<TSupabaseClient extends object = SupabaseClientHandle> {
   /** Read-only access to core services for integration testing or embedding. */
   readonly services: CoreServices<TSupabaseClient>;
-  /** Initiates graceful shutdown (stops transport, flushes OTEL, closes logger). */
+  /**
+   * Initiates graceful shutdown: stops the transport, runs
+   * {@link CreateAppOptions.teardown}, disposes core services, flushes OTEL,
+   * and closes the logger. Idempotent — a second call is a no-op.
+   *
+   * Exit-free by contract. It also serves the startup-failure rollback and
+   * direct calls from embedders and tests, so ending the process is the
+   * signal and EOF handlers' business, never this method's. Nothing bounds it
+   * either: a `teardown` hook that never settles leaves this promise pending,
+   * where on a signal the shutdown ceiling would have cut it.
+   */
   shutdown(signal?: string): Promise<void>;
 }
 
@@ -272,6 +359,59 @@ export interface ComposedApp<TSupabaseClient extends object = SupabaseClientHand
    * page at `/`.
    */
   manifest: ServerManifest;
+}
+
+/**
+ * Widens the shorthand `sessionMode: 'stateless'` to its object form so both
+ * halves of the option are read the same way.
+ */
+function normalizeSessionModeOption(option: CreateAppOptions['sessionMode']): {
+  default?: SessionMode;
+  require?: 'stateful';
+} {
+  return typeof option === 'string' ? { default: option } : (option ?? {});
+}
+
+/**
+ * Reads `MCP_SESSION_MODE` the way `parseConfig` does. An empty string and an
+ * unsubstituted `${…}` placeholder are *defined* `process.env` values that the
+ * config path treats as unset, so `??=` would refuse to seed in exactly the two
+ * deployment shapes — a blank compose line, a host placeholder nothing
+ * substituted — where an author most expects the code-level option to hold.
+ */
+function meaningfulSessionModeEnv(): string | undefined {
+  if (typeof process === 'undefined' || !process.env) return undefined;
+  return normalizeEnv({ MCP_SESSION_MODE: process.env.MCP_SESSION_MODE }).MCP_SESSION_MODE;
+}
+
+/**
+ * Refuses startup when a server declaring `sessionMode.require: 'stateful'`
+ * would run stateless, so the incompatibility surfaces at boot instead of at
+ * the first refused confirmation.
+ *
+ * HTTP only: `MCP_SESSION_MODE` has no effect on stdio, so a requirement
+ * conflict there is not a conflict at all.
+ */
+function assertSessionModeRequirement(
+  require: 'stateful' | undefined,
+  seededFromOption: boolean,
+): void {
+  if (require !== 'stateful' || config.mcpTransportType !== 'http') return;
+  if (resolveSessionMode(config.mcpSessionMode) === 'stateful') return;
+
+  // The remedy depends on where the stateless value came from: the deployment's
+  // environment, or the option's own `default` contradicting its `require`.
+  const remedy = seededFromOption
+    ? `sessionMode.default: '${config.mcpSessionMode}' contradicts the requirement — drop the default or set it to 'stateful'.`
+    : `Set MCP_SESSION_MODE=stateful or unset it.`;
+
+  throw configurationError(
+    `Server declares sessionMode.require: 'stateful' but the resolved HTTP session mode is ` +
+      `'stateless' (MCP_SESSION_MODE=${config.mcpSessionMode}). This server issues ` +
+      `server-initiated input requests, which a 2025-era client cannot answer without a live ` +
+      `session. ${remedy}`,
+    { mcpSessionMode: config.mcpSessionMode, required: 'stateful', seededFromOption },
+  );
 }
 
 /**
@@ -305,9 +445,15 @@ export async function composeServices<TSupabaseClient extends object = SupabaseC
   // indication of which option carries it.
   assertValidCacheHints(cacheHints, resources);
 
-  // Persist name/version overrides to process.env so they survive resetConfig()
-  // and are visible to OTEL, logger, and transport throughout the process lifetime.
-  if (options.name || options.version) {
+  const sessionMode = normalizeSessionModeOption(options.sessionMode);
+  // The option is a default, so it applies only where the environment supplies
+  // nothing meaningful; an explicit MCP_SESSION_MODE always wins.
+  const seedsSessionMode = !!sessionMode.default && meaningfulSessionModeEnv() === undefined;
+
+  // Persist name/version/session-mode overrides to process.env so they survive
+  // a later bare resetConfig() and are visible to OTEL, logger, and transport
+  // throughout the process lifetime.
+  if (options.name || options.version || seedsSessionMode) {
     if (typeof process !== 'undefined' && process.env) {
       if (options.name) {
         process.env.MCP_SERVER_NAME = options.name;
@@ -317,9 +463,16 @@ export async function composeServices<TSupabaseClient extends object = SupabaseC
         process.env.MCP_SERVER_VERSION = options.version;
         process.env.OTEL_SERVICE_VERSION ??= options.version;
       }
+      if (seedsSessionMode) {
+        process.env.MCP_SESSION_MODE = sessionMode.default;
+      }
     }
     resetConfig();
   }
+
+  // Fail before any service is constructed, on the parsed config the server
+  // will actually run with.
+  assertSessionModeRequirement(sessionMode.require, seedsSessionMode);
 
   // --- Core services ---
 
@@ -668,13 +821,23 @@ export async function createApp<TSupabaseClient extends object = SupabaseClientH
   logger.info(`Starting ${config.mcpServerName} (v${config.mcpServerVersion})...`, startupContext);
 
   // --- Shutdown ---
+  const { teardown } = options;
   let isShuttingDown = false;
   let stopWatchingStdin: (() => void) | undefined;
+  /**
+   * The cleanup step currently in flight. Read only by the shutdown backstop,
+   * which names it in the warning it logs before exiting 1 — otherwise a
+   * ceiling firing says nothing about which step stopped settling.
+   */
+  let activeShutdownStep = 'not-started';
 
   const flushTelemetryAndLogger = async (): Promise<void> => {
     try {
+      activeShutdownStep = 'telemetry-flush';
       await shutdownOpenTelemetry();
+      activeShutdownStep = 'logger-close';
       await logger.close();
+      activeShutdownStep = 'complete';
     } catch {
       // Ignore errors during final cleanup
     }
@@ -708,6 +871,7 @@ export async function createApp<TSupabaseClient extends object = SupabaseClientH
           step: string,
           cleanup: () => Promise<void> | void,
         ): Promise<void> => {
+          activeShutdownStep = step;
           try {
             await cleanup();
           } catch (error) {
@@ -730,11 +894,30 @@ export async function createApp<TSupabaseClient extends object = SupabaseClientH
           });
         });
 
+        // Consumer teardown sits between the transport stopping and the
+        // framework disposing its own services: no request can still be in
+        // flight, and everything the hook might reach is still alive.
+        if (teardown) {
+          activeShutdownStep = 'teardown';
+          try {
+            await withSpan('mcp.server.shutdown.teardown', async () => {
+              await teardown(coreServices);
+            });
+          } catch (error) {
+            logger.error(
+              'teardown() raised — continuing shutdown.',
+              error instanceof Error ? error : new Error(String(error)),
+              shutdownContext,
+            );
+          }
+        }
+
         await attemptCleanup('rate-limiter', () => coreServices.rateLimiter.dispose());
         await attemptCleanup('scheduler', () => schedulerService.destroyAll());
         await attemptCleanup('gc-pressure', stopGcPressure);
 
         if (coreServices.canvas) {
+          activeShutdownStep = 'canvas';
           await coreServices.canvas.shutdown(shutdownContext).catch((err) => {
             logger.warning(
               'Canvas shutdown raised — continuing.',
@@ -803,8 +986,50 @@ export async function createApp<TSupabaseClient extends object = SupabaseClientH
     logger.fatal('FATAL: Unhandled promise rejection detected.', err, fatalContext);
     fatalShutdown('unhandledRejection');
   };
-  const onSigterm = () => void shutdown('SIGTERM');
-  const onSigint = () => void shutdown('SIGINT');
+  /**
+   * A signal ends the process — so the framework ends it, rather than hoping
+   * the event loop drains. Exit-on-drain is not a guarantee it can make: one
+   * ref'd handle registered outside framework teardown (a recursive
+   * `fs.watch`, a `setInterval` nobody `unref()`'d) keeps the server resident
+   * long after every framework resource is released (#435).
+   *
+   * Shaped like {@link onStdinEof}, which has had the guarantee since #322. The
+   * backstop is ref'd: it holds the loop open for the duration — that same
+   * drain would otherwise exit mid-cleanup — and caps how long a step that
+   * never settles can hold the process. It bounds the shutdown as a whole, so
+   * a flush that settles inside the ceiling finishes rather than being cut.
+   *
+   * Exit codes: 0 once shutdown settles, matching the EOF path; 1 when the
+   * ceiling fires, after a warning naming the step that never settled. A
+   * second signal arriving mid-shutdown is not handled here at all —
+   * `shutdown()` detaches these listeners as it starts, restoring the default
+   * disposition so the process terminates (143 / 130). That is the operator's
+   * force-kill escape hatch.
+   */
+  const onSignal = (signal: 'SIGINT' | 'SIGTERM') => {
+    const backstop = setTimeout(() => {
+      logger.warning(
+        `Shutdown did not settle within ${SHUTDOWN_BACKSTOP_MS}ms — exiting.`,
+        requestContextService.createRequestContext({
+          operation: 'ServerShutdownBackstop',
+          additionalContext: {
+            triggerEvent: signal,
+            cleanupStep: activeShutdownStep,
+            backstopMs: SHUTDOWN_BACKSTOP_MS,
+          },
+        }),
+      );
+      process.exit(1);
+    }, SHUTDOWN_BACKSTOP_MS);
+
+    void shutdown(signal).finally(() => {
+      clearTimeout(backstop);
+      process.exit(0);
+    });
+  };
+
+  const onSigterm = () => onSignal('SIGTERM');
+  const onSigint = () => onSignal('SIGINT');
 
   // --- Register error/signal handlers (before transport start so a SIGTERM
   //     during HTTP bind still triggers graceful shutdown) ---

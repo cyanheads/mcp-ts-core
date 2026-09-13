@@ -3,7 +3,7 @@
  * subprocess and drives it via the official MCP SDK client over stdio pipes.
  * @module tests/integration/stdio
  */
-import { spawn } from 'node:child_process';
+import { type ChildProcess, spawn } from 'node:child_process';
 import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
@@ -86,8 +86,8 @@ describe('Stdio transport integration', () => {
   });
 });
 
-/** Outcome of a server run terminated by closing the child's stdin. */
-interface StdinEofRun {
+/** Outcome of a server run ended by stdin EOF or by a signal. */
+interface TerminatedRun {
   code: number | null;
   signal: NodeJS.Signals | null;
   stderr: string;
@@ -100,13 +100,32 @@ const READY_LINE = 'is now running and ready';
 const READY_TIMEOUT_MS = 15_000;
 const EXIT_TIMEOUT_MS = 10_000;
 
+/** How a booted server is told to stop. */
+type Terminator = (child: ChildProcess) => void;
+
+/** Closes the child's stdin — a host that stops talking without signalling. */
+const closeStdin: Terminator = (child) => child.stdin?.end();
+
+/** Sends a signal, leaving stdin open so the EOF path cannot fire first. */
+const sendSignal =
+  (signal: NodeJS.Signals): Terminator =>
+  (child) => {
+    child.kill(signal);
+  };
+
 /**
- * Boots `dist/index.js` over piped stdio, waits for the ready line, then closes
- * the child's stdin — the disconnect a host produces when it stops talking to
- * the server without signalling it.
+ * Boots a server entry point over piped stdio, waits for the ready line, then
+ * terminates it and reports how the process ended.
+ *
+ * Deliberately not routed through `tests/helpers/server-process.ts`: its
+ * `killProcess` escalates to `SIGKILL` three seconds after `SIGTERM`, which is
+ * exactly the failure these cases have to be able to observe (#435).
  */
-async function runUntilStdinEof(nodeArgs: readonly string[] = []): Promise<StdinEofRun> {
-  const child = spawn('node', [...nodeArgs, DIST_INDEX], {
+async function runUntilTerminated(
+  terminate: Terminator,
+  { entry = DIST_INDEX, nodeArgs = [] }: { entry?: string; nodeArgs?: readonly string[] } = {},
+): Promise<TerminatedRun> {
+  const child = spawn('node', [...nodeArgs, entry], {
     stdio: ['pipe', 'pipe', 'pipe'],
     env: {
       ...process.env,
@@ -145,7 +164,7 @@ async function runUntilStdinEof(nodeArgs: readonly string[] = []): Promise<Stdin
       });
     });
 
-    child.stdin.end();
+    terminate(child);
 
     const exit = await new Promise<{ code: number | null; signal: NodeJS.Signals | null } | null>(
       (settle) => {
@@ -171,7 +190,7 @@ async function runUntilStdinEof(nodeArgs: readonly string[] = []): Promise<Stdin
 
 describe('Stdio transport stdin EOF', () => {
   it('runs the graceful shutdown path and exits when the client closes stdin', async () => {
-    const run = await runUntilStdinEof();
+    const run = await runUntilTerminated(closeStdin);
 
     expect(run.stillAlive).toBe(false);
     expect(run.code).toBe(0);
@@ -189,7 +208,9 @@ describe('Stdio transport stdin EOF', () => {
     await writeFile(preload, 'setInterval(() => {}, 60_000);\n', 'utf8');
 
     try {
-      const run = await runUntilStdinEof(['--import', pathToFileURL(preload).href]);
+      const run = await runUntilTerminated(closeStdin, {
+        nodeArgs: ['--import', pathToFileURL(preload).href],
+      });
 
       expect(run.stillAlive).toBe(false);
       expect(run.code).toBe(0);
@@ -197,5 +218,58 @@ describe('Stdio transport stdin EOF', () => {
     } finally {
       await rm(dir, { force: true, recursive: true });
     }
+  });
+});
+
+describe('Stdio transport signal shutdown (#435)', () => {
+  it('runs the graceful shutdown path and exits 0 on SIGTERM', async () => {
+    const run = await runUntilTerminated(sendSignal('SIGTERM'));
+
+    expect(run.stillAlive).toBe(false);
+    expect(run.code).toBe(0);
+    expect(run.signal).toBeNull();
+    expect(run.stderr).toContain('Initiating graceful shutdown');
+    expect(run.stderr).toContain('Graceful shutdown completed successfully.');
+    expect(run.stderr).not.toContain('did not settle');
+    expect(run.stdout).toBe('');
+  });
+
+  it('exits on SIGTERM even with a non-unref()ed handle registered', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'mcp-stdio-signal-'));
+    const preload = join(dir, 'ref-timer.mjs');
+    await writeFile(preload, 'setInterval(() => {}, 60_000);\n', 'utf8');
+
+    try {
+      const run = await runUntilTerminated(sendSignal('SIGTERM'), {
+        nodeArgs: ['--import', pathToFileURL(preload).href],
+      });
+
+      expect(run.stillAlive).toBe(false);
+      expect(run.code).toBe(0);
+      expect(run.stderr).toContain('Graceful shutdown completed successfully.');
+      expect(run.stderr).not.toContain('did not settle');
+    } finally {
+      await rm(dir, { force: true, recursive: true });
+    }
+  });
+
+  it('releases a setup()-owned handle through teardown() and exits without the ceiling firing', async () => {
+    const run = await runUntilTerminated(sendSignal('SIGTERM'), {
+      entry: resolve(process.cwd(), 'tests/fixtures/teardown-server.js'),
+    });
+
+    expect(run.stillAlive).toBe(false);
+    expect(run.code).toBe(0);
+    expect(run.stderr).toContain('teardown fixture released its handle.');
+    expect(run.stderr).toContain('Graceful shutdown completed successfully.');
+    expect(run.stderr).not.toContain('did not settle');
+  });
+
+  it('exits 0 on SIGINT', async () => {
+    const run = await runUntilTerminated(sendSignal('SIGINT'));
+
+    expect(run.stillAlive).toBe(false);
+    expect(run.code).toBe(0);
+    expect(run.stderr).toContain('Graceful shutdown completed successfully.');
   });
 });

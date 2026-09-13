@@ -29,6 +29,13 @@ export type FrameworkServerFactory = (ctx: McpRequestContext) => Promise<McpServ
 export const MODERN_PROTOCOL_REVISION = '2026-07-28';
 
 /**
+ * A configured session mode: what `MCP_SESSION_MODE` and the `createApp`
+ * `sessionMode` option accept. `auto` is an input, not a running state — see
+ * {@link resolveSessionMode}.
+ */
+export type SessionMode = AppConfig['mcpSessionMode'];
+
+/**
  * The session mode a server actually runs in. `MCP_SESSION_MODE=auto` is a
  * configuration input, never a running state — see {@link resolveSessionMode}.
  */
@@ -41,9 +48,10 @@ export type ResolvedSessionMode = 'stateful' | 'stateless';
  * for the SDK's multi-round-trip shim, and MCP spec conformance expects a
  * session-bearing HTTP server by default. Every consumer of the distinction —
  * the HTTP transport's session store, the handler factories' `ctx.sessionId`
- * gate, and the advertised `transport.sessionMode` on the manifest — reads this
- * one function, so the resolution can never differ between what a server does
- * and what it publishes (#357).
+ * gate, the advertised `transport.sessionMode` on the manifest, and the
+ * `createApp` `sessionMode` requirement check — reads this one function, so the
+ * resolution can never differ between what a server does and what it publishes
+ * (#357).
  */
 export function resolveSessionMode(mode: AppConfig['mcpSessionMode']): ResolvedSessionMode {
   return mode === 'auto' ? 'stateful' : mode;

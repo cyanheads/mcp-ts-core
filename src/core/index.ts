@@ -32,6 +32,12 @@ export type { LandingConfig, LandingLink } from '@/core/serverManifest.js';
 export type { CacheableResultMethod, CacheHints } from '@/mcp-server/cacheHints.js';
 
 // ---------------------------------------------------------------------------
+// Session mode
+// ---------------------------------------------------------------------------
+
+export type { ResolvedSessionMode, SessionMode } from '@/mcp-server/types.js';
+
+// ---------------------------------------------------------------------------
 // Zod re-export (consumers use the framework's copy, no separate zod dep)
 // ---------------------------------------------------------------------------
 

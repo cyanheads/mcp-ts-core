@@ -775,6 +775,10 @@ describe('core/app', () => {
   });
 
   it('registered signal handlers delegate to graceful shutdown', async () => {
+    const processExitSpy = vi
+      .spyOn(process, 'exit')
+      .mockImplementation(((_: number) => undefined as never) as typeof process.exit);
+
     await createApp();
 
     const onSigterm = getProcessHandler('SIGTERM') as () => void;
@@ -795,6 +799,8 @@ describe('core/app', () => {
     await flushAsyncWork();
 
     expect(mockTransportManager.instance.stop).toHaveBeenCalledWith('SIGINT');
+
+    processExitSpy.mockRestore();
   });
 
   it('continues startup when OpenTelemetry initialization fails', async () => {
@@ -1214,6 +1220,238 @@ describe('core/app', () => {
 
       setTimeoutSpy.mockRestore();
       cleanup.resolve();
+      await flushAsyncWork();
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // Signal shutdown and the teardown hook (#435)
+  // -------------------------------------------------------------------------
+
+  /** Captures every backstop timer a shutdown handler arms, without running it. */
+  const captureBackstops = () => {
+    const callbacks: Array<() => void> = [];
+    const handles: Array<{ unref: ReturnType<typeof vi.fn> }> = [];
+    const spy = vi.spyOn(globalThis, 'setTimeout').mockImplementation(((
+      callback: Parameters<typeof setTimeout>[0],
+    ) => {
+      if (typeof callback === 'function') callbacks.push(callback);
+      const handle = { unref: vi.fn() };
+      handles.push(handle);
+      return handle as unknown as ReturnType<typeof setTimeout>;
+    }) as typeof setTimeout);
+    return { callbacks, handles, restore: () => spy.mockRestore() };
+  };
+
+  describe('signal shutdown', () => {
+    let processExitSpy: ReturnType<typeof vi.spyOn>;
+
+    beforeEach(() => {
+      processExitSpy = vi
+        .spyOn(process, 'exit')
+        .mockImplementation(((_: number) => undefined as never) as typeof process.exit);
+    });
+
+    afterEach(() => {
+      processExitSpy.mockRestore();
+    });
+
+    it.each(['SIGTERM', 'SIGINT'] as const)(
+      '%s runs the cleanup path once and then exits 0',
+      async (signal) => {
+        await createApp();
+
+        (getProcessHandler(signal) as () => void)();
+        await flushAsyncWork();
+
+        expect(mockTransportManager.instance.stop).toHaveBeenCalledTimes(1);
+        expect(mockTransportManager.instance.stop).toHaveBeenCalledWith(signal);
+        expect(mockShutdownOpenTelemetry).toHaveBeenCalledTimes(1);
+        expect(mockLogger.close).toHaveBeenCalledTimes(1);
+        expect(processExitSpy).toHaveBeenCalledWith(0);
+        expect(processExitSpy).toHaveBeenCalledTimes(1);
+      },
+    );
+
+    it('detaches its own listeners so a second signal keeps the default disposition', async () => {
+      await createApp();
+      const onSigterm = getProcessHandler('SIGTERM') as () => void;
+
+      onSigterm();
+
+      // Synchronously, before the handler yields: a signal arriving in the
+      // window between `isShuttingDown = true` and the first await would
+      // otherwise hit the re-entry guard and be swallowed instead of killing.
+      expect(processRemoveListenerSpy).toHaveBeenCalledWith('SIGTERM', onSigterm);
+      expect(processRemoveListenerSpy).toHaveBeenCalledWith('SIGINT', expect.any(Function));
+
+      await flushAsyncWork();
+
+      // Re-entry is a no-op regardless — the OS default is what kills a
+      // second time, and this handler never gets it.
+      onSigterm();
+      await flushAsyncWork();
+      expect(mockTransportManager.instance.stop).toHaveBeenCalledTimes(1);
+    });
+
+    it('does not cut off a cleanup step that is still progressing', async () => {
+      const cleanup = Promise.withResolvers<void>();
+      mockTransportManager.instance.stop.mockReturnValueOnce(cleanup.promise);
+      const backstop = captureBackstops();
+
+      await createApp();
+      (getProcessHandler('SIGTERM') as () => void)();
+      await flushAsyncWork();
+
+      // Ceiling armed but not fired: nothing exits, and the flush has not run.
+      expect(backstop.callbacks).toHaveLength(1);
+      expect(mockShutdownOpenTelemetry).not.toHaveBeenCalled();
+      expect(mockLogger.close).not.toHaveBeenCalled();
+      expect(processExitSpy).not.toHaveBeenCalled();
+
+      cleanup.resolve();
+      await flushAsyncWork();
+
+      expect(mockShutdownOpenTelemetry).toHaveBeenCalledTimes(1);
+      expect(mockLogger.close).toHaveBeenCalledTimes(1);
+      expect(processExitSpy).toHaveBeenCalledWith(0);
+      expect(mockLogger.warning).not.toHaveBeenCalledWith(
+        expect.stringContaining('did not settle'),
+        expect.anything(),
+      );
+
+      backstop.restore();
+    });
+
+    it("arms a ref'd ceiling that exits 1 and names the step that never settled", async () => {
+      const stuck = Promise.withResolvers<void>();
+      mockTransportManager.instance.stop.mockReturnValueOnce(stuck.promise);
+      const backstop = captureBackstops();
+
+      await createApp();
+      (getProcessHandler('SIGTERM') as () => void)();
+      await flushAsyncWork();
+
+      // Ref'd, like the EOF path's: the loop must stay open across the drain.
+      expect(backstop.handles[0]?.unref).not.toHaveBeenCalled();
+
+      backstop.callbacks[0]?.();
+
+      expect(mockLogger.warning).toHaveBeenCalledWith(
+        expect.stringContaining('did not settle'),
+        expect.objectContaining({
+          extra: expect.objectContaining({ cleanupStep: 'transport', triggerEvent: 'SIGTERM' }),
+        }),
+      );
+      expect(processExitSpy).toHaveBeenCalledWith(1);
+
+      backstop.restore();
+      stuck.resolve();
+      await flushAsyncWork();
+    });
+
+    it('leaves a direct shutdown() call and the startup-failure path exit-free', async () => {
+      const handle = await createApp();
+      await handle.shutdown();
+      expect(processExitSpy).not.toHaveBeenCalled();
+
+      vi.clearAllMocks();
+      mockInitializeOpenTelemetry.mockResolvedValue(undefined);
+      mockTransportManager.instance.start.mockRejectedValueOnce(new Error('bind failed'));
+
+      await expect(createApp()).rejects.toThrow('bind failed');
+      expect(mockTransportManager.instance.stop).toHaveBeenCalledWith('STARTUP_FAILURE');
+      expect(processExitSpy).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('teardown hook', () => {
+    let processExitSpy: ReturnType<typeof vi.spyOn>;
+
+    beforeEach(() => {
+      mockObserveStdinEof.mockReturnValue(mockStopWatchingStdin);
+      processExitSpy = vi
+        .spyOn(process, 'exit')
+        .mockImplementation(((_: number) => undefined as never) as typeof process.exit);
+    });
+
+    afterEach(() => {
+      processExitSpy.mockRestore();
+    });
+
+    it('runs once, after the transport stops and before the logger closes', async () => {
+      const teardown = vi.fn();
+      const handle = await createApp({ teardown });
+
+      await handle.shutdown('SIGTERM');
+
+      expect(teardown).toHaveBeenCalledTimes(1);
+      expect(teardown).toHaveBeenCalledWith(handle.services);
+      const [stopOrder] = mockTransportManager.instance.stop.mock.invocationCallOrder;
+      const [teardownOrder] = teardown.mock.invocationCallOrder;
+      const [closeOrder] = mockLogger.close.mock.invocationCallOrder;
+      expect(stopOrder).toBeLessThan(teardownOrder as number);
+      expect(teardownOrder).toBeLessThan(closeOrder as number);
+    });
+
+    it('runs on the signal path and on the stdin EOF path', async () => {
+      const signalTeardown = vi.fn();
+      await createApp({ teardown: signalTeardown });
+      (getProcessHandler('SIGTERM') as () => void)();
+      await flushAsyncWork();
+      expect(signalTeardown).toHaveBeenCalledTimes(1);
+      expect(processExitSpy).toHaveBeenCalledWith(0);
+
+      vi.clearAllMocks();
+      mockInitializeOpenTelemetry.mockResolvedValue(undefined);
+      mockObserveStdinEof.mockReturnValue(mockStopWatchingStdin);
+
+      const eofTeardown = vi.fn();
+      await createApp({ teardown: eofTeardown });
+      mockObserveStdinEof.mock.calls.at(-1)?.[0].onEof();
+      await flushAsyncWork();
+      expect(eofTeardown).toHaveBeenCalledTimes(1);
+    });
+
+    it('logs a throwing hook and completes the shutdown anyway', async () => {
+      const boom = new Error('watcher close failed');
+      await createApp({
+        teardown: () => {
+          throw boom;
+        },
+      });
+
+      (getProcessHandler('SIGTERM') as () => void)();
+      await flushAsyncWork();
+
+      expect(mockLogger.error).toHaveBeenCalledWith(
+        'teardown() raised — continuing shutdown.',
+        boom,
+        expect.anything(),
+      );
+      expect(mockLogger.close).toHaveBeenCalledTimes(1);
+      expect(processExitSpy).toHaveBeenCalledWith(0);
+    });
+
+    it('is cut by the ceiling with exit code 1 when it never settles', async () => {
+      const stuck = Promise.withResolvers<void>();
+      const backstop = captureBackstops();
+
+      await createApp({ teardown: () => stuck.promise });
+      (getProcessHandler('SIGTERM') as () => void)();
+      await flushAsyncWork();
+
+      expect(mockLogger.close).not.toHaveBeenCalled();
+      backstop.callbacks[0]?.();
+
+      expect(mockLogger.warning).toHaveBeenCalledWith(
+        expect.stringContaining('did not settle'),
+        expect.objectContaining({ extra: expect.objectContaining({ cleanupStep: 'teardown' }) }),
+      );
+      expect(processExitSpy).toHaveBeenCalledWith(1);
+
+      backstop.restore();
+      stuck.resolve();
       await flushAsyncWork();
     });
   });

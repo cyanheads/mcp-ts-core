@@ -174,6 +174,22 @@ await createApp({
 
 `instructions` is optional server-level orientation, sent on every `initialize` as session-level context. Use it for deployment guidance (connection aliases, regional notes, scope hints) instead of repeating the same context across tool descriptions. Client adoption is uneven, but there's no downside when set.
 
+### Session posture and shutdown
+
+Two more `createApp()` options shape how the server runs rather than how it presents itself:
+
+```ts
+await createApp({
+  sessionMode: 'stateless',          // or { default: 'stateful', require: 'stateful' }
+  setup(core) { startMyWatcher(core.config); },
+  async teardown() { await stopMyWatcher(); },
+});
+```
+
+`sessionMode` declares the HTTP session posture in `src/` instead of leaving it to a deployment's `MCP_SESSION_MODE`, which still wins whenever it carries a meaningful value (an empty string and an unsubstituted `${…}` placeholder read as unset and fall through to the option). Add `require: 'stateful'` when a tool asks the caller for input mid-handler via `ctx.requestInput`: startup then fails with a `ConfigurationError` rather than serving a mode in which a 2025-era client can never answer the prompt. Stdio is never refused.
+
+`teardown(core)` is the `setup()` counterpart — release a watcher, socket, or non-`unref()`'d timer there. It runs after the transport stops and before the logger closes, on every shutdown path, and a signal-triggered shutdown then exits the process explicitly (0, or 1 if a step never settles within the framework's 10 s ceiling).
+
 ---
 
 ## Context

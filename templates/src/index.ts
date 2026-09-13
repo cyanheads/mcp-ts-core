@@ -20,4 +20,14 @@ await createApp({
   // instructions: 'Server-level orientation forwarded to the model on every initialize.\n' +
   //   '- Use shortcut `X` for the most common case\n' +
   //   '- Tools require auth via the `inventory:read` scope',
+
+  // Session posture in code rather than in a Dockerfile. MCP_SESSION_MODE still
+  // wins when it is set. Add `require: 'stateful'` — `{ default: 'stateful',
+  // require: 'stateful' }` — when a tool asks the caller for input mid-handler,
+  // so a stateless deployment fails at startup instead of losing that tool.
+  // sessionMode: 'stateless',
+
+  // Release what setup() allocated: a watcher, a socket, a timer the framework
+  // cannot see. Runs after the transport stops and before the logger closes.
+  // teardown(core) { core.logger.info('bye', { requestId: 'shutdown', timestamp: new Date().toISOString() }); },
 });

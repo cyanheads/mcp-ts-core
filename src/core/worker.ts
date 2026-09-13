@@ -72,8 +72,13 @@ export interface CloudflareBindings {
  * without eager top-level env reads. The resolver is invoked during
  * single-flight init the first time `fetch` is called, after binding
  * injection. A plain string is also accepted (same semantics as `createApp`).
+ *
+ * `CreateAppOptions.teardown` is omitted: a Worker isolate is evicted without
+ * notice, so there is no shutdown lifecycle to hang the hook on and no point
+ * at which the framework could call it. Release per-request resources inside
+ * the handler instead.
  */
-export interface WorkerHandlerOptions extends Omit<CreateAppOptions, 'instructions'> {
+export interface WorkerHandlerOptions extends Omit<CreateAppOptions, 'instructions' | 'teardown'> {
   /** Extra string CF bindings to inject into process.env (beyond the core set). */
   extraEnvBindings?: Array<[string, string]>;
   /** Extra object CF bindings (KV, R2, D1, etc.) to store on globalThis. */

@@ -45,13 +45,13 @@ Both paths share the same public API. Init copies starter `package.json`, config
 
 | Subpath | Key Exports | Purpose |
 |:--------|:------------|:--------|
-| `@cyanheads/mcp-ts-core` | `createApp`, `tool`, `resource`, `prompt`, `appTool`, `appResource`, `APP_RESOURCE_MIME_TYPE`, `headerParam`, `Context`, `createFail`, `createRecoveryFor`, `TypedFail`, `TypedRecoveryFor`, `ReasonOf`, `HandlerContext`, `Enrich`, `EnrichHelpers`, `TypedEnrich`, `ContentCollect`, `ContentBlock`, `z`, `inputRequired`, `completable`, `isCompletable`, `CompleteCallback`, `CompleteResourceTemplateCallback`, `CacheHint`, `CacheHints`, `CacheScope` | Main entry point |
+| `@cyanheads/mcp-ts-core` | `createApp`, `tool`, `resource`, `prompt`, `appTool`, `appResource`, `APP_RESOURCE_MIME_TYPE`, `headerParam`, `Context`, `createFail`, `createRecoveryFor`, `TypedFail`, `TypedRecoveryFor`, `ReasonOf`, `HandlerContext`, `Enrich`, `EnrichHelpers`, `TypedEnrich`, `ContentCollect`, `ContentBlock`, `z`, `inputRequired`, `completable`, `isCompletable`, `CompleteCallback`, `CompleteResourceTemplateCallback`, `CacheHint`, `CacheHints`, `CacheScope`, `SessionMode`, `ResolvedSessionMode` | Main entry point |
 | `/worker` | `createWorkerHandler`, `CloudflareBindings` | Cloudflare Workers entry |
 | `/tools` | `ToolDefinition`, `AnyToolDefinition`, `ToolAnnotations` | Tool definition types |
 | `/resources` | `ResourceDefinition`, `AnyResourceDefinition` | Resource definition types |
 | `/prompts` | `PromptDefinition` | Prompt definition type |
 | `/errors` | `McpError`, `JsonRpcErrorCode`, `notFound`, `validationError`, `unauthorized`, ... | Error types, codes, and factory functions |
-| `/config` | `AppConfig`, `config`, `parseConfig`, `parseEnvConfig`, `resetConfig`, `ConfigSchema`, `FRAMEWORK_NAME`, `FRAMEWORK_VERSION` | Zod-validated config, framework identity, env-var helper |
+| `/config` | `AppConfig`, `config`, `parseConfig`, `parseEnvConfig`, `resetConfig`, `normalizeEnv`, `ConfigSchema`, `FRAMEWORK_NAME`, `FRAMEWORK_VERSION` | Zod-validated config, framework identity, env-var helpers |
 | `/auth` | `checkScopes` | Dynamic scope checking |
 | `/storage` | `StorageService` | Storage abstraction |
 | `/storage/types` | `IStorageProvider` | Provider interface |
@@ -106,8 +106,12 @@ await createApp({
   extensions: {                     // SEP-2133 extensions advertised in capabilities
     'vendor/my-extension': { /* extension config */ },
   },
+  sessionMode: 'stateless',         // session posture in code, not in a Dockerfile
   setup(core) {                     // runs after core services init, before transport starts
     initMyService(core.config, core.storage);
+  },
+  async teardown(core) {            // the setup() counterpart — runs on every shutdown path
+    await closeMyService();
   },
 });
 ```
@@ -115,6 +119,10 @@ await createApp({
 **`instructions`** — Optional server-level orientation, surfaced on every `initialize` response as session-level system context. Use for deployment-specific guidance (connection aliases, regional notes, scope hints) instead of repeating in tool descriptions. Client adoption uneven but no downside when set.
 
 **Identity fields** — Optional `title`, `websiteUrl`, `description`, `icons` (SEP-973) pass through to the SDK's `initialize` serverInfo and to the server manifest, keeping the `/.well-known/mcp.json` server card and landing page consistent with what `initialize` reports. Explicit `description` wins over `MCP_SERVER_DESCRIPTION`/package.json.
+
+**`sessionMode`** — `SessionMode | { default?: SessionMode; require?: 'stateful' }`; the bare string is shorthand for `{ default }`. Declares the HTTP session posture in `src/` instead of leaving it to a deployment's `MCP_SESSION_MODE`, which still wins whenever it carries a meaningful value — an empty string and a whole-value unsubstituted `${…}` placeholder read as unset, so both fall through to the option rather than to the schema default (`auto`). `require: 'stateful'` fails startup with a `ConfigurationError` when the resolved HTTP mode is `stateless`: declare it on a server whose tools ask the caller for input mid-handler, since under `stateless` a 2025-era client's round trip is refused unconditionally and the tool is unusable rather than merely guarded. Never refuses a stdio start. Workers are outside this contract (`MCP_SESSION_MODE` is not in `CORE_ENV_BINDINGS`).
+
+**`teardown(core)`** — the `setup()` counterpart, awaited inside `shutdown()` after the transport stops accepting requests and before core services are disposed and the logger closes, so the hook can still log and still reach `core.storage`. Runs exactly once per shutdown, on the signal path, the stdin-EOF path, and a direct `ServerHandle.shutdown()` alike; an error it raises is logged and never blocks the exit, and on the signal and EOF paths a hook that never settles is cut by the shutdown ceiling (exit 1 on a signal, 0 on EOF). Register whatever the framework cannot see — a `fs.watch`, an open socket, a `setInterval` nobody `unref()`'d. Node/Bun only; `createWorkerHandler` does not accept it, because an isolate is evicted without notice.
 
 **Also available** — `landing` (`LandingConfig`, HTTP transport only: landing-page config, all fields optional), `context: { exposeStatelessSessionId }` (populate `ctx.sessionId` from the SDK's per-request token in stateless HTTP mode; default `false`), `eventBus` (the `ServerEventBus` backing `subscriptions/listen`; defaults to an in-process bus — supply one for a multi-isolate or multi-process runtime, Workers most of all), and `cacheHints` (2026-07-28 `ttlMs`/`cacheScope` per cacheable operation — see Adding a Resource for the per-resource override).
 
@@ -159,6 +167,8 @@ interface ServerHandle {
   readonly services: CoreServices;
 }
 ```
+
+**Exit contract.** `shutdown()` is exit-free and unbounded: it also serves the startup-failure rollback and direct calls from embedders and tests, so ending the process belongs to the handlers. `SIGTERM`, `SIGINT`, and stdin EOF each run that same shutdown and then exit explicitly. A signal exits 0 once the shutdown settles and 1 when the 10 s ceiling fires, after a warning naming the step that never settled; stdin EOF exits 0 either way, unchanged. The ceiling bounds the shutdown as a whole rather than any single await, so a step that settles inside it is never truncated. A second signal mid-shutdown reaches no handler (shutdown detaches them as it starts) and terminates on the OS default, 143 / 130 — the operator's force-kill escape hatch. `uncaughtException` / `unhandledRejection` exit 1.
 
 ---
 
