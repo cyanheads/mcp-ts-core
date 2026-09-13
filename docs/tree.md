@@ -1,6 +1,6 @@
 # mcp-ts-core - Directory Structure
 
-Generated on: 2026-09-12 20:00:33
+Generated on: 2026-09-13 17:07:22
 
 ```text
 mcp-ts-core/
@@ -23,6 +23,7 @@ mcp-ts-core/
 │   ├── 0.10.x/
 │   ├── 0.11.x/
 │   ├── 0.12.x/
+│   ├── 0.13.x/
 │   ├── 0.2.x/
 │   ├── 0.3.x/
 │   ├── 0.4.x/
@@ -147,35 +148,7 @@ mcp-ts-core/
 │   ├── duckdb-stub.ts
 │   ├── index.ts
 │   └── worker.ts
-├── handoffs/
-│   └── 2026-09-01-local-mcp-fabric.md
-├── scripts/
-│   ├── audit-open-index-signatures.ts
-│   ├── build-changelog.ts
-│   ├── build-inputs.ts
-│   ├── build.ts
-│   ├── check-dependency-specifiers.ts
-│   ├── check-docs-sync.ts
-│   ├── check-framework-antipatterns.ts
-│   ├── check-skill-versions.ts
-│   ├── check-skills-sync.ts
-│   ├── clean-mcpb.ts
-│   ├── clean.ts
-│   ├── devcheck.ts
-│   ├── devdocs.ts
-│   ├── fetch-openapi-spec.ts
-│   ├── lint-mcp.ts
-│   ├── lint-packaging.ts
-│   ├── list-skills.ts
-│   ├── public-api-contract-update.ts
-│   ├── public-api-contract.ts
-│   ├── release-github.ts
-│   ├── split-changelog.ts
-│   ├── tree.ts
-│   ├── update-coverage.ts
-│   ├── verify-package.ts
-│   └── with-node.ts
-├── skills/
+├── framework-skills/
 │   ├── add-app-tool/
 │   │   └── SKILL.md
 │   ├── add-export/
@@ -267,11 +240,40 @@ mcp-ts-core/
 │   ├── tool-defs-analysis/
 │   │   └── SKILL.md
 │   └── README.md
+├── handoffs/
+│   └── 2026-09-01-local-mcp-fabric.md
+├── scripts/
+│   ├── audit-open-index-signatures.ts
+│   ├── build-changelog.ts
+│   ├── build-inputs.ts
+│   ├── build.ts
+│   ├── check-dependency-specifiers.ts
+│   ├── check-docs-sync.ts
+│   ├── check-framework-antipatterns.ts
+│   ├── check-skill-versions.ts
+│   ├── check-skills-sync.ts
+│   ├── clean-mcpb.ts
+│   ├── clean.ts
+│   ├── devcheck.ts
+│   ├── devdocs.ts
+│   ├── fetch-openapi-spec.ts
+│   ├── lint-mcp.ts
+│   ├── lint-packaging.ts
+│   ├── list-skills.ts
+│   ├── public-api-contract-update.ts
+│   ├── public-api-contract.ts
+│   ├── release-github.ts
+│   ├── split-changelog.ts
+│   ├── tree.ts
+│   ├── update-coverage.ts
+│   ├── verify-package.ts
+│   └── with-node.ts
 ├── src/
 │   ├── cli/
 │   │   └── init.ts
 │   ├── config/
 │   │   ├── appRoot.ts
+│   │   ├── envValue.ts
 │   │   ├── index.ts
 │   │   ├── logLevelAlias.ts
 │   │   └── parseEnvConfig.ts
@@ -808,6 +810,7 @@ mcp-ts-core/
 │   │   │   ├── build-changelog.test.ts
 │   │   │   ├── check-dependency-specifiers.test.ts
 │   │   │   ├── check-skill-versions.test.ts
+│   │   │   ├── check-skills-sync.test.ts
 │   │   │   ├── clean-mcpb.test.ts
 │   │   │   ├── devcheck-audit-classifier.test.ts
 │   │   │   ├── devcheck-git-guard.test.ts

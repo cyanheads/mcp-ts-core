@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.13.0](changelog/0.13.x/0.13.0.md) — 2026-09-13 · ⚠️ Breaking
+
+The framework's skill tree moves from skills/ to framework-skills/, so a server that ships a plugin manifest no longer hands its development skills to every installing agent; consumers migrate with a git mv plus path updates. Empty and unsubstituted ${…} env values now read as unset on both config paths.
+
 ## [0.12.9](changelog/0.12.x/0.12.9.md) — 2026-09-12 · ⚠️ Breaking
 
 The Bun engines floor rises to >=1.4.0 for the mirror's sqlite close(true) fix, and a cancelled HTTP request's SSE stream now closes immediately instead of waiting for keep-alive. MirrorStore migrations also run on a fresh database now, so an up() that assumes an older table shape has to change.
