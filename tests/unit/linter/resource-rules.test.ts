@@ -256,3 +256,45 @@ describe('lintResourceDefinition', () => {
     });
   });
 });
+
+// ---------------------------------------------------------------------------
+// extractTemplateVariables — non-nesting expression match (#431)
+// ---------------------------------------------------------------------------
+
+/**
+ * Variable extraction is module-private; `template-params-align` fires on every
+ * extracted name missing from the params shape, so the diagnostics are the
+ * observable pin on what was extracted.
+ */
+describe('lintResourceDefinition · template variable extraction (#431)', () => {
+  /** Names `template-params-align` reports as absent from an empty params shape. */
+  const extracted = (uriTemplate: string): string[] =>
+    lintResourceDefinition({
+      uriTemplate,
+      name: 'probe',
+      description: 'Probe template variable extraction.',
+      params: z.object({}),
+      handler,
+    })
+      .filter((d) => d.rule === 'template-params-align')
+      .map((d) => /variable '\{([^}]+)\}'/.exec(d.message)?.[1] ?? d.message);
+
+  it.each([
+    ['probe://{id}', ['id']],
+    ['probe://{a}{b}', ['a', 'b']],
+    ['probe://{a}/{b}', ['a', 'b']],
+    ['probe://{+path}', ['path']],
+    ['probe://{#frag}', ['frag']],
+    ['probe://{.ext}', ['ext']],
+    ['probe://{/segs}', ['segs']],
+    ['probe://{;p}', ['p']],
+    ['probe://{?q}', ['q']],
+    ['probe://{&r}', ['r']],
+    ['probe://{a,b}', ['a', 'b']],
+    ['probe://{a:3}', ['a']],
+    ['probe://{a*}', ['a']],
+    ['probe://{unclosed', []],
+  ])('extracts %s as %j', (uriTemplate, expected) => {
+    expect(extracted(uriTemplate as string)).toEqual(expected);
+  });
+});

@@ -14,14 +14,92 @@ import {
 import { assertTextInputBudget, type ParserInputBudgetOptions } from './inputBudget.js';
 import { yamlParser } from './yamlParser.js';
 
+/** The `---` fence that opens and closes a frontmatter block. */
+const DELIMITER = '---';
+
+/** Single-character `\s` test — no quantifier, so no backtracking. */
+const WHITESPACE = /\s/;
+
 /**
- * Regular expression to extract frontmatter from markdown.
- * Matches YAML content between --- delimiters at the start of the document.
- * - Group 1: YAML content between delimiters
- * - Group 2: Remaining markdown content
- * @private
+ * Positions a regex `^` matches under the `m` flag: the start of input, and
+ * anything immediately after a LineTerminator (LF, CR, LS, PS).
  */
-const frontmatterRegex = /^---\s*\n([\s\S]*?)^---\s*([\s\S]*)$/m;
+function isLineTerminator(char: string): boolean {
+  return char === '\n' || char === '\r' || char === '\u2028' || char === '\u2029';
+}
+
+/** Index just past the next line terminator at or after `from`, or `-1`. */
+function nextLineStart(text: string, from: number): number {
+  for (let i = from; i < text.length; i++) {
+    if (isLineTerminator(text.charAt(i))) return i + 1;
+  }
+  return -1;
+}
+
+/**
+ * End of an opening `---` fence — the index just past the last newline in the
+ * whitespace run that follows it, or `-1` when that run carries no newline.
+ * Mirrors greedy `\s*` backtracking to the final `\n` it can leave for the
+ * literal `\n` that follows.
+ */
+function endOfOpeningFence(text: string, from: number): number {
+  let lastNewline = -1;
+  for (let i = from; i < text.length && WHITESPACE.test(text.charAt(i)); i++) {
+    if (text.charAt(i) === '\n') lastNewline = i;
+  }
+  return lastNewline === -1 ? -1 : lastNewline + 1;
+}
+
+/** Index of the next line-initial `---` at or after `from`, or `-1`. */
+function findClosingFence(text: string, from: number): number {
+  for (let i = from; i >= 0 && i <= text.length; i = nextLineStart(text, i)) {
+    if (text.startsWith(DELIMITER, i)) return i;
+  }
+  return -1;
+}
+
+/**
+ * Splits a markdown document into its YAML frontmatter block and the content
+ * after it, or returns `null` when no complete block is present.
+ *
+ * A linear-time index walk replacing the equivalent
+ * `/^---\s*\n([\s\S]*?)^---\s*([\s\S]*)$/m`, whose lazy `[\s\S]*?` between two
+ * line-anchored fences takes time quadratic in the input when the closing fence
+ * is absent — reachable whenever a server hands this parser markdown it
+ * received over the wire (CodeQL `js/polynomial-redos`).
+ *
+ * Behavior is preserved exactly, including the shapes the regex decided
+ * implicitly: the opening fence is the first line-initial `---` followed by a
+ * whitespace run containing a newline (not necessarily the document's first
+ * line); the closing fence is the next line-initial `---`, so a `----` line
+ * closes the block and leaves its fourth dash on the content, and a `---`
+ * inside the YAML that is not line-initial does not; and the whitespace after
+ * the closing fence belongs to neither half.
+ *
+ * @param markdown - Document to split.
+ * @returns The YAML source and the content that follows it, or `null`.
+ */
+function splitFrontmatter(markdown: string): { content: string; yaml: string } | null {
+  for (let open = 0; open >= 0 && open <= markdown.length; open = nextLineStart(markdown, open)) {
+    if (!markdown.startsWith(DELIMITER, open)) continue;
+
+    const yamlStart = endOfOpeningFence(markdown, open + DELIMITER.length);
+    if (yamlStart === -1) continue;
+
+    const close = findClosingFence(markdown, yamlStart);
+    // No closing fence after the earliest viable opening fence means none after
+    // a later one either — every later search window is a subset of this one.
+    if (close === -1) return null;
+
+    let contentStart = close + DELIMITER.length;
+    while (contentStart < markdown.length && WHITESPACE.test(markdown.charAt(contentStart))) {
+      contentStart++;
+    }
+
+    return { yaml: markdown.slice(yamlStart, close), content: markdown.slice(contentStart) };
+  }
+  return null;
+}
 
 /**
  * Result of parsing markdown with frontmatter.
@@ -52,11 +130,12 @@ export class FrontmatterParser {
   /**
    * Extracts and parses YAML frontmatter from a markdown string.
    *
-   * Looks for a `---`-delimited block at the very start of the document. If
-   * found, the YAML inside is parsed via {@link yamlParser} and the remaining
-   * markdown is returned separately. An empty `---\n---` block is accepted and
-   * returns `frontmatter: {}` with `hasFrontmatter: true`. If no frontmatter
-   * block is present, the original string is returned unchanged.
+   * Looks for a `---`-delimited block opening on the first line that starts
+   * with `---`. If found, the YAML inside is parsed via {@link yamlParser} and
+   * the markdown after the closing fence is returned separately. An empty
+   * `---\n---` block is accepted and returns `frontmatter: {}` with
+   * `hasFrontmatter: true`. If no complete block is present, the original
+   * string is returned unchanged.
    *
    * @template T - The expected shape of the parsed frontmatter object. Defaults to `unknown`.
    * @param markdown - The markdown string that may contain a frontmatter block.
@@ -72,7 +151,7 @@ export class FrontmatterParser {
    * const md = `---\ntitle: Hello\ntags: [a, b]\n---\n\n# Body`;
    * const result = await frontmatterParser.parse<{ title: string; tags: string[] }>(md);
    * // result.frontmatter → { title: 'Hello', tags: ['a', 'b'] }
-   * // result.content     → '\n# Body'
+   * // result.content     → '# Body'
    * // result.hasFrontmatter → true
    * ```
    */
@@ -83,7 +162,7 @@ export class FrontmatterParser {
   ): Promise<FrontmatterResult<T>> {
     assertTextInputBudget(markdown, budget);
 
-    const match = markdown.match(frontmatterRegex);
+    const match = splitFrontmatter(markdown);
 
     if (!match) {
       // No frontmatter found - return original content
@@ -101,8 +180,8 @@ export class FrontmatterParser {
       };
     }
 
-    const yamlContent = match[1] ?? '';
-    const markdownContent = match[2] ?? '';
+    const yamlContent = match.yaml;
+    const markdownContent = match.content;
 
     const logContext =
       context ||
@@ -205,7 +284,7 @@ export class FrontmatterParser {
  *
  * const result = await frontmatterParser.parse(markdown, context);
  * console.log(result.frontmatter);    // { title: 'My Note', tags: [...], date: '2025-01-15' }
- * console.log(result.content);        // '\n# Note Content\nThis is the actual note.'
+ * console.log(result.content);        // '# Note Content\nThis is the actual note.'
  * console.log(result.hasFrontmatter); // true
  *
  * // Markdown without frontmatter

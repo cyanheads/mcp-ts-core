@@ -327,7 +327,10 @@ export function lintAppToolResourcePairing(
 function uriTemplateToRegex(template: string): RegExp {
   // Split on template expressions first, then escape only the literal parts.
   // This avoids escaping operator characters (e.g. +) inside expressions.
-  const parts = template.split(/(\{[^}]+\})/);
+  // The expression body excludes `{` as well as `}`: RFC 6570 has no nested
+  // expressions, and admitting `{` lets a run of them backtrack quadratically
+  // (CodeQL `js/polynomial-redos`).
+  const parts = template.split(/(\{[^{}]+\})/);
   let pattern = '';
   for (const part of parts) {
     if (part.startsWith('{') && part.endsWith('}')) {

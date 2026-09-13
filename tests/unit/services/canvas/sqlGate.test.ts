@@ -760,3 +760,61 @@ describe('sqlGate · assertNoDeniedFunctions reports the first match by position
     expect(data.function).toBe('read_csv');
   });
 });
+
+// ---------------------------------------------------------------------------
+// Comment stripping — linear-time scanner (#431)
+// ---------------------------------------------------------------------------
+
+/**
+ * `stripSqlComments` is module-private; the deny-list scan runs over its output,
+ * so whether a `read_json(` call survives stripping is the observable pin on
+ * what the stripper did. Each case below is a shape where a different stripping
+ * rule would flip the outcome.
+ */
+describe('sqlGate · comment stripping (#431)', () => {
+  const denied = (sql: string) => () => assertNoDeniedFunctions(sql);
+
+  it('closes a block comment at the first terminator, not the last', () => {
+    // Lazy, not greedy: two separate comments, so the call between them survives.
+    expect(denied("SELECT 1 /* a */ read_json('/x') /* b */ FROM t")).toThrow(
+      /disallowed table function/,
+    );
+  });
+
+  it('treats a nested opener as ordinary comment text', () => {
+    expect(denied("SELECT 1 /* a /* read_json('/x') */ FROM t")).not.toThrow();
+  });
+
+  it('leaves an unterminated block comment — and everything after it — in place', () => {
+    expect(denied("SELECT 1 /* unterminated read_json('/x')")).toThrow(/disallowed table function/);
+  });
+
+  it('strips block comments before line comments, so `--` inside a block is gone with it', () => {
+    // Line-comment-first would swallow the block terminator and hide the call.
+    expect(denied("SELECT 1 /* -- */ read_json('/x') FROM t")).toThrow(/disallowed table function/);
+  });
+
+  it('does not open a block comment from an opener inside a line comment', () => {
+    expect(denied("SELECT 1 -- /* read_json('/x')\nFROM t")).not.toThrow();
+  });
+
+  it('leaves a block terminator with no opener untouched', () => {
+    expect(denied("SELECT 1 */ read_json('/x') FROM t")).toThrow(/disallowed table function/);
+  });
+
+  it('accepts an empty statement', () => {
+    expect(denied('')).not.toThrow();
+    expect(() => assertNoSystemCatalogs('')).not.toThrow();
+  });
+
+  it('scans a 1 MiB unterminated-comment payload in bounded time', () => {
+    // The issue's reproduction at the default MCP_HTTP_MAX_BODY_BYTES cap.
+    const sql = `/*${'a/*'.repeat(Math.floor((1024 * 1024 - 2) / 3))}`;
+    expect(sql.length).toBeGreaterThan(1_000_000);
+
+    const started = performance.now();
+    assertNoDeniedFunctions(sql);
+    assertNoSystemCatalogs(sql);
+    expect(performance.now() - started).toBeLessThan(2_000);
+  });
+});

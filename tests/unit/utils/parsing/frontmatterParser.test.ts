@@ -207,18 +207,6 @@ Content here.`;
       expect(result.frontmatter).toEqual({});
       expect(result.content).toBe('Content here.');
     });
-
-    it('defaults absent regex capture groups to empty strings', async () => {
-      const markdownLike = {
-        match: () => ['---'],
-      };
-
-      await expect(frontmatterParser.parse(markdownLike as unknown as string)).resolves.toEqual({
-        frontmatter: {},
-        content: '',
-        hasFrontmatter: true,
-      });
-    });
   });
 
   describe('error handling', () => {
@@ -432,5 +420,87 @@ Content`;
       expect(frontmatterParser).toBeDefined();
       expect(typeof frontmatterParser.parse).toBe('function');
     });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Delimiter scanning — linear-time split (#431)
+// ---------------------------------------------------------------------------
+
+/**
+ * Pins every shape where the block split could diverge from the lazy,
+ * line-anchored regex it replaces. Expected values are the regex's own output
+ * on the same inputs.
+ */
+describe('frontmatterParser · delimiter scanning (#431)', () => {
+  it('drops the whitespace that follows a closing delimiter', async () => {
+    const result = await frontmatterParser.parse<{ title: string }>(
+      '---\ntitle: a\n---   \n\n# Body',
+    );
+    expect(result.hasFrontmatter).toBe(true);
+    expect(result.frontmatter.title).toBe('a');
+    expect(result.content).toBe('# Body');
+  });
+
+  it('handles CRLF line endings', async () => {
+    const result = await frontmatterParser.parse<{ title: string }>(
+      '---\r\ntitle: a\r\n---\r\n\r\n# Body',
+    );
+    expect(result.hasFrontmatter).toBe(true);
+    expect(result.frontmatter.title).toBe('a');
+    expect(result.content).toBe('# Body');
+  });
+
+  it('closes on a `----` line and leaves the extra dash on the content', async () => {
+    const result = await frontmatterParser.parse<{ title: string }>('---\ntitle: a\n----\nbody');
+    expect(result.hasFrontmatter).toBe(true);
+    expect(result.frontmatter.title).toBe('a');
+    expect(result.content).toBe('-\nbody');
+  });
+
+  it('ignores a `---` inside the YAML that does not start its line', async () => {
+    const result = await frontmatterParser.parse<{ title: string; x: number }>(
+      '---\ntitle: a --- b\nx: 1\n---\nbody',
+    );
+    expect(result.frontmatter).toEqual({ title: 'a --- b', x: 1 });
+    expect(result.content).toBe('body');
+  });
+
+  it('returns the document unchanged when there is no closing delimiter', async () => {
+    const markdown = '---\ntitle: a\nbody';
+    const result = await frontmatterParser.parse(markdown);
+    expect(result.hasFrontmatter).toBe(false);
+    expect(result.frontmatter).toEqual({});
+    expect(result.content).toBe(markdown);
+  });
+
+  it('opens on the first line-initial `---`, not only on the first line', async () => {
+    const result = await frontmatterParser.parse<{ a: number }>('# Heading\n---\na: 1\n---\nbody');
+    expect(result.hasFrontmatter).toBe(true);
+    expect(result.frontmatter).toEqual({ a: 1 });
+    expect(result.content).toBe('body');
+  });
+
+  it('consumes the whole whitespace run after the opening delimiter', async () => {
+    const result = await frontmatterParser.parse<{ a: number }>('---   \n\n  a: 1\n---\nbody');
+    expect(result.frontmatter).toEqual({ a: 1 });
+    expect(result.content).toBe('body');
+  });
+
+  it('treats an empty document as having no frontmatter', async () => {
+    const result = await frontmatterParser.parse('');
+    expect(result.hasFrontmatter).toBe(false);
+    expect(result.content).toBe('');
+  });
+
+  it('splits a 1 MiB unterminated-block payload in bounded time', async () => {
+    // The issue's reproduction at the default MCP_HTTP_MAX_BODY_BYTES cap.
+    const markdown = `---\n${'\n '.repeat(Math.floor((1024 * 1024 - 4) / 2))}`;
+    expect(markdown.length).toBeGreaterThan(1_000_000);
+
+    const started = performance.now();
+    const result = await frontmatterParser.parse(markdown);
+    expect(performance.now() - started).toBeLessThan(2_000);
+    expect(result.hasFrontmatter).toBe(false);
   });
 });

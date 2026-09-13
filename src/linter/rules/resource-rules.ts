@@ -127,10 +127,17 @@ export function lintResourceDefinition(
   return diagnostics;
 }
 
-/** Extracts variable names from an RFC 6570 URI template (strips operators like +, #, ?, &, etc.). */
+/**
+ * Extracts variable names from an RFC 6570 URI template (strips operators like
+ * +, #, ?, &, etc.).
+ *
+ * The expression body excludes `{` as well as `}`: RFC 6570 has no nested
+ * expressions, and admitting `{` lets a run of them backtrack quadratically
+ * (CodeQL `js/polynomial-redos`).
+ */
 function extractTemplateVariables(template: string): string[] {
   const vars: string[] = [];
-  for (const match of template.matchAll(/\{(?:[+#./;?&]?)([^}]+)\}/g)) {
+  for (const match of template.matchAll(/\{(?:[+#./;?&]?)([^{}]+)\}/g)) {
     // match[1] contains comma-separated variable names, each optionally with :maxLength or *
     const varList = match[1] ?? '';
     for (const part of varList.split(',')) {

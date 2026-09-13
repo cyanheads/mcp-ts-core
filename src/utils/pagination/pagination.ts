@@ -68,10 +68,13 @@ export function encodeCursor(state: PaginationState): string {
   try {
     const jsonString = JSON.stringify(state);
     // Use cross-platform encoding, then convert standard base64 to base64url
+    // `={1,2}$` rather than `=+$`: base64 padding is never longer than two
+    // characters, and the unbounded quantifier is quadratic on a long run of
+    // `=` (CodeQL `js/polynomial-redos`).
     const base64 = stringToBase64(jsonString)
       .replace(/\+/g, '-')
       .replace(/\//g, '_')
-      .replace(/=+$/, '');
+      .replace(/={1,2}$/, '');
     return base64;
   } catch (error: unknown) {
     throw new McpError(JsonRpcErrorCode.InternalError, 'Failed to encode pagination cursor', {

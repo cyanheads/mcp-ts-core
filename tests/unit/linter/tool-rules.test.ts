@@ -478,3 +478,39 @@ describe('header-param-designation', () => {
     expect(diagnostic?.message).toContain('input.rows[].region');
   });
 });
+
+// ---------------------------------------------------------------------------
+// uriTemplateToRegex — non-nesting expression split (#431)
+// ---------------------------------------------------------------------------
+
+/**
+ * The template→regex compiler is module-private; whether a concrete
+ * `resourceUri` pairs with a registered template is the observable pin on what
+ * it compiled. Cases cover every RFC 6570 operator the resource rules document,
+ * adjacent expressions, and an unclosed brace.
+ */
+describe('lintAppToolResourcePairing · template compilation (#431)', () => {
+  const pairs = (uriTemplate: string, resourceUri: string) =>
+    lintAppToolResourcePairing([validTool({ _meta: { ui: { resourceUri } } })], [{ uriTemplate }])
+      .length === 0;
+
+  it.each([
+    ['ui://app/{page}', 'ui://app/dashboard', true],
+    ['ui://app/{page}', 'ui://app/nested/page', false],
+    ['ui://app/{+path}', 'ui://app/nested/page', true],
+    ['ui://app{/segments}', 'ui://app/nested/page', true],
+    ['ui://app/{#frag}', 'ui://app/x', true],
+    ['ui://app/{.ext}', 'ui://app/x', true],
+    ['ui://app/{;param}', 'ui://app/x', true],
+    ['ui://app/{?query}', 'ui://app/x', true],
+    ['ui://app/{&extra}', 'ui://app/x', true],
+    ['ui://app/{a,b}', 'ui://app/x', true],
+    ['ui://app/{a:3}', 'ui://app/x', true],
+    ['ui://app/{a*}', 'ui://app/x', true],
+    ['ui://app/{a}{b}', 'ui://app/xy', true],
+    ['ui://app/{unclosed', 'ui://app/x', false],
+    ['ui://app/{unclosed', 'ui://app/{unclosed', true],
+  ])('%s vs %s pairs: %s', (uriTemplate, resourceUri, expected) => {
+    expect(pairs(uriTemplate as string, resourceUri as string)).toBe(expected);
+  });
+});

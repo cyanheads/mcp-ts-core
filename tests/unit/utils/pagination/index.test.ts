@@ -591,4 +591,22 @@ describe('Pagination Utilities', () => {
       );
     });
   });
+
+  /**
+   * Padding stripping moved from `=+$` to `={1,2}$` (#431). base64 never emits
+   * more than two padding characters, so the bounded quantifier is equivalent —
+   * these pin one state per padding length.
+   */
+  describe('encodeCursor padding (#431)', () => {
+    it.each([
+      [{ offset: 50, limit: 25 }, 'eyJvZmZzZXQiOjUwLCJsaW1pdCI6MjV9'],
+      [{ offset: 0, limit: 1, ab: 1 }, 'eyJvZmZzZXQiOjAsImxpbWl0IjoxLCJhYiI6MX0'],
+      [{ offset: 0, limit: 1, a: 1 }, 'eyJvZmZzZXQiOjAsImxpbWl0IjoxLCJhIjoxfQ'],
+    ])('encodes %j to a padding-free, round-trippable cursor', (state, expected) => {
+      const cursor = encodeCursor(state as PaginationState);
+      expect(cursor).toBe(expected);
+      expect(cursor).not.toContain('=');
+      expect(decodeCursor(cursor, context)).toEqual(state);
+    });
+  });
 });

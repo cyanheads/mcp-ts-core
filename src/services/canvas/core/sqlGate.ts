@@ -242,9 +242,32 @@ const FUNCTION_METADATA_KEYS: ReadonlySet<string> = new Set([
   'source',
 ]);
 
-/** Strip SQL block and line comments. */
+/**
+ * Strip SQL block and line comments.
+ *
+ * The block-comment pass is an index walk rather than a lazy-quantifier
+ * replace. `/\/\*[\s\S]*?\*\//g` takes time quadratic in the input on an
+ * unterminated block opener followed by many further openers, and the SQL
+ * reaching this gate is client-supplied (CodeQL `js/polynomial-redos`).
+ *
+ * Semantics are unchanged: the first block terminator after each opener closes
+ * it, an unterminated opener is left in place along with everything after it,
+ * and line comments are stripped in a second pass rather than interleaved — so
+ * a `--` inside a block comment disappears with the block, and a block opener
+ * inside a line comment never opens one.
+ */
 function stripSqlComments(sql: string): string {
-  return sql.replace(/\/\*[\s\S]*?\*\//g, ' ').replace(/--[^\n]*/g, '');
+  let stripped = '';
+  let cursor = 0;
+  for (;;) {
+    const open = sql.indexOf('/*', cursor);
+    if (open === -1) break;
+    const close = sql.indexOf('*/', open + 2);
+    if (close === -1) break;
+    stripped += `${sql.slice(cursor, open)} `;
+    cursor = close + 2;
+  }
+  return `${stripped}${sql.slice(cursor)}`.replace(/--[^\n]*/g, '');
 }
 
 /**
