@@ -4,7 +4,7 @@ description: >
   File a bug or feature request against this MCP server's own repo. Use for server-specific issues — tool logic, service integrations, config problems, or domain bugs that aren't caused by the framework.
 metadata:
   author: cyanheads
-  version: "1.8"
+  version: "1.9"
   audience: external
   type: workflow
 ---
@@ -165,7 +165,11 @@ Every issue needs exactly one primary label. Stack secondary labels on top when 
 | `performance` | Memory, CPU, latency, or resource usage |
 | `security` | Vulnerability, CVE, or hardening work |
 | `breaking-change` | Change will break public API; requires a major bump |
+| `blocked-by-framework` | Fix requires a released change in `@cyanheads/mcp-ts-core`; pairs with a `Depends on: cyanheads/mcp-ts-core#N` line in the body |
+| `blocked-by-sdk` | Fix requires changes in `@modelcontextprotocol/sdk` |
 | `surplus-token-idea` | Worth exploring when token budget allows |
+
+`blocked-by-framework` comes off when this server adopts the release that ships the fix. An issue blocked on the SDK *through* the framework takes `blocked-by-framework`, not `blocked-by-sdk` — the server's own unblock is still a framework release.
 
 Combine labels: `--label "bug" --label "regression"`.
 
@@ -176,6 +180,8 @@ gh label create regression --color e99695 --description "Worked before, broken a
 gh label create performance --color 5319e7 --description "Memory, CPU, latency, or resource usage"
 gh label create security --color b60205 --description "Vulnerability, CVE, or hardening work"
 gh label create breaking-change --color d93f0b --description "Change will break public API; requires a major bump"
+gh label create blocked-by-framework --color fbca04 --description "Fix requires a released change in @cyanheads/mcp-ts-core"
+gh label create blocked-by-sdk --color c5def5 --description "Fix requires changes in @modelcontextprotocol/sdk"
 gh label create surplus-token-idea --color FF10F0 --description "Worth exploring when token budget allows"
 ```
 
