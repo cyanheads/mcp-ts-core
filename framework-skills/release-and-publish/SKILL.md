@@ -4,7 +4,7 @@ description: >
   Ship a release end-to-end across every registry the project targets (npm, MCP Registry, GitHub Releases for `.mcpb` bundles, GHCR). Runs the final verification gate, fast-forwards `main` when the release rode a release PR, creates the annotated tag on the commit `main` now points at, pushes commits and tags, then publishes to each applicable destination. Assumes git wrapup (version bumps, changelog, commit stack — and in release PR mode, the pushed branch and open PR) is already complete — this skill is the post-wrapup merge + tag + publish workflow. Retries transient network failures on publish steps; halts with a partial-state report when retries are exhausted or the failure is terminal.
 metadata:
   author: cyanheads
-  version: "2.16"
+  version: "2.17"
   audience: external
   type: workflow
 ---
@@ -111,12 +111,15 @@ If `--ff-only` refuses, `main` moved underneath the release branch. Halt and rep
 The tag goes on HEAD. In release PR mode that is `main`'s tip after step 3 — the commit the PR's `headRefOid` names — so the tag is created on the branch it stays reachable from.
 
 ```bash
-git tag -a v<version> --cleanup=whitespace -m "<tag message with embedded newlines>"
+cat > /tmp/tag-v<version>.md <<'TAG'
+<tag message>
+TAG
+git tag -a v<version> --cleanup=whitespace -F /tmp/tag-v<version>.md
 ```
 
 If `v<version>` already exists and points at HEAD, a prior run created it — proceed. If it exists and points anywhere else, **halt and report the conflict** with the version string, the existing tag SHA, and HEAD. Never delete or move a tag without explicit authorization.
 
-Use `-m` with embedded newlines in the string (plain `-m` only — no heredoc, no command substitution). The tag message renders as the GitHub Release body via `--notes-from-tag`. It must be structured markdown, not a flat string.
+Write the message to a file through a quoted-delimiter heredoc and pass it with `-F`, never inline with `-m`: the body carries backticks, which a double-quoted string runs as command substitution and silently deletes, and apostrophes, which end a single-quoted string. The tag message renders as the GitHub Release body via `--notes-from-tag`. It must be structured markdown, not a flat string.
 
 **Release PR mode: the tag body is the PR body's `## Changes` bullets plus its final changelog link, verbatim** — `gh pr view <N> --json body -q .body` (`<N>` from step 1 — on `main` there is no branch for `gh` to infer it from), take the theme line as the subject, the bullets under `## Changes`, and the last line; drop `## Gates` and the headers. That digest was authored at wrapup and reviewed on the PR; re-authoring it here would publish unreviewed words. The one addition: append ` · release PR #<N>` to that final line, so the GitHub Release points at its audit trail (GitHub autolinks the bare `#<N>`). Without a PR, author it from the changelog entry at `changelog/<major.minor>.x/<version>.md` — every claim in the tag must appear in that file, and the file's `summary:` line is the tag's theme.
 
@@ -193,9 +196,15 @@ Halt on publish error other than "version already exists" (which means this step
 
 Only if `server.json` exists at the repo root (otherwise skip). Note: `server.json` (MCP Registry metadata) and `manifest.json` (MCPB bundle manifest, step 8) are independent — a project may have either, both, or neither.
 
+The registry checks that the npm version exists before it registers, and npm's read endpoint can lag `bun publish` by several minutes. Wait for the version to be served before publishing; a publisher error saying the npm version was not found is this lag, not a terminal failure:
+
 ```bash
+curl -sf --retry 30 --retry-delay 30 --retry-all-errors -o /dev/null \
+  "https://registry.npmjs.org/<package-name>/<version>"
 bun run publish-mcp
 ```
+
+Step 8 depends only on the pushed tag, so it may run while this wait is in progress.
 
 If `publish-mcp` isn't defined in `package.json`, add it permanently (one-time setup, macOS):
 
