@@ -4,7 +4,7 @@ description: >
   Reference for core and server configuration in `@cyanheads/mcp-ts-core`. Covers env var tables with defaults, priority order, server-specific Zod schema pattern, and Workers lazy-parsing requirement.
 metadata:
   author: cyanheads
-  version: "1.16"
+  version: "1.17"
   audience: external
   type: reference
 ---
@@ -261,6 +261,8 @@ export function getServerConfig(): ServerConfig {
 ```
 
 **Env booleans — use `z.stringbool()`, never `z.coerce.boolean()`.** `z.coerce.boolean()` runs `Boolean(value)`, so `"false"`, `"0"`, and `"no"` all coerce to `true` — the flag becomes impossible to disable through the environment except by omitting it entirely. `z.stringbool()` parses `true/false/1/0/yes/no/on/off` (case-insensitive) and rejects anything else, so `MY_VERBOSE_LOGGING=false` actually disables and a typo fails loudly at startup instead of silently coercing. Empty string and unset both fall through to `.default()`.
+
+**Unset means unset.** `parseEnvConfig` and the framework's own config both treat an empty string and a whole-value `${…}` placeholder — what an MCPB or plugin host forwards when a user leaves an option blank and nothing substitutes it — as the variable being absent: an optional field stays `undefined`, a defaulted field takes its default, and a required field fails as missing rather than as a format error against the literal text. A value that merely contains `${…}` is kept. No per-field `z.preprocess` guard is needed for either case.
 
 **Why `parseEnvConfig`?** It maps Zod schema paths to env var names so validation errors name the actual variable at fault. A missing `MY_API_KEY` produces:
 

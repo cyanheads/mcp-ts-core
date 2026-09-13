@@ -8,12 +8,20 @@
 import type { z } from 'zod';
 
 import { configurationError } from '../types-global/errors.js';
+import { emptyStringAsUndefined } from './envValue.js';
 
 /**
  * Parses environment variables against a Zod schema using an explicit mapping
  * from schema paths to env var names. On validation failure, throws a
  * {@link configurationError} whose message names the actual environment
  * variable(s) — not the internal Zod path.
+ *
+ * An empty string and a whole-value `${…}` placeholder (what an MCPB or plugin
+ * host forwards when a user leaves an option blank and nothing substitutes it)
+ * both read as the variable being absent: an optional field stays `undefined`,
+ * a defaulted field takes its default, and a required field fails as missing
+ * rather than as a format error against the literal text. A value that merely
+ * contains `${…}` is kept.
  *
  * @example
  * ```ts
@@ -59,7 +67,7 @@ export function parseEnvConfig<T extends z.ZodType>(
 ): z.infer<T> {
   const input: Record<string, unknown> = {};
   for (const [key, envVar] of Object.entries(envMap)) {
-    input[key] = env[envVar];
+    input[key] = emptyStringAsUndefined(env[envVar]);
   }
 
   const result = schema.safeParse(input);

@@ -221,6 +221,49 @@ describe('config parsing', () => {
     expect(parseConfig().mcpPublicUrl).toBeUndefined();
   });
 
+  describe('unsubstituted placeholders read as unset', () => {
+    // An install-time host (MCPB, a plugin manifest) that never substitutes a
+    // placeholder hands the server the literal `${…}` text. Built without a
+    // template-literal-shaped string so Biome's noTemplateCurlyInString stays quiet.
+    const placeholder = (name: string) => ['$', '{', name, '}'].join('');
+
+    it('leaves an optional URL field undefined instead of failing z.url()', () => {
+      process.env.MCP_PUBLIC_URL = placeholder('user_config.public_url');
+      expect(parseConfig().mcpPublicUrl).toBeUndefined();
+    });
+
+    it('reports a placeholder secret in jwt mode as the key being missing', () => {
+      process.env.NODE_ENV = 'development';
+      process.env.MCP_AUTH_MODE = 'jwt';
+      process.env.MCP_AUTH_SECRET_KEY = placeholder('MCP_AUTH_SECRET_KEY');
+      delete process.env.DEV_MCP_AUTH_BYPASS;
+      const consoleSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+      let thrown: unknown;
+      try {
+        parseConfig();
+      } catch (error) {
+        thrown = error;
+      }
+      consoleSpy.mockRestore();
+
+      expect(thrown).toBeInstanceOf(McpError);
+      const fieldErrors = (thrown as McpError).data?.validationErrors as Record<string, string[]>;
+      expect(fieldErrors.mcpAuthSecretKey?.[0]).toContain('MCP_AUTH_SECRET_KEY is required');
+    });
+
+    it('falls through to the enum default', () => {
+      process.env.MCP_SESSION_MODE = placeholder('user_config.session_mode');
+      expect(parseConfig().mcpSessionMode).toBe('auto');
+    });
+
+    it('keeps a value that merely contains a placeholder', () => {
+      const path = `/srv/${placeholder('TENANT')}/logs`;
+      process.env.LOGS_DIR = path;
+      expect(parseConfig().logsPath).toBe(path);
+    });
+  });
+
   it('rejects MCP_PUBLIC_URL that is not a valid URL', () => {
     process.env.MCP_PUBLIC_URL = 'not-a-url';
     const consoleSpy = vi.spyOn(console, 'error').mockImplementation(() => {});

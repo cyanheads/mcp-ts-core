@@ -16,6 +16,7 @@ import packageJson from '../../package.json' with { type: 'json' };
 import { configurationError } from '../types-global/errors.js';
 import { runtimeCaps } from '../utils/internal/runtime.js';
 import { type PackageManifest, resolveAppRoot } from './appRoot.js';
+import { emptyStringAsUndefined, normalizeEnv } from './envValue.js';
 import { normalizeLogLevelAlias } from './logLevelAlias.js';
 
 const frameworkPkg = packageJson as PackageManifest;
@@ -30,13 +31,6 @@ export const FRAMEWORK_VERSION = frameworkPkg.version ?? '0.0.0';
 let _dotenvLoaded = false;
 
 // --- Helper Functions ---
-const emptyStringAsUndefined = (val: unknown) => {
-  if (typeof val === 'string' && val.trim() === '') {
-    return;
-  }
-  return val;
-};
-
 /**
  * Boolean env flag parser. Uses Zod's `stringbool` — accepts `true/false/1/0/
  * yes/no/on/off` (case-insensitive) and rejects anything else, so `"false"`
@@ -420,7 +414,10 @@ const parseConfig = (envOverrides?: Record<string, string | undefined>) => {
     _dotenvLoaded = true;
   }
 
-  const env = envOverrides ? { ...process.env, ...envOverrides } : process.env;
+  // Empty strings and unsubstituted `${…}` placeholders read as unset for
+  // every field, so a blank `.env` line or a host-forwarded placeholder falls
+  // through to the default instead of failing a format validator.
+  const env = normalizeEnv(envOverrides ? { ...process.env, ...envOverrides } : process.env);
   // Identity comes from the application root, never `process.cwd()`: a stdio
   // client's working directory is arbitrary, and a manifest read from it makes
   // the server report whatever project happens to sit there. Empty in Workers

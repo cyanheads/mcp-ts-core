@@ -95,6 +95,51 @@ describe('parseEnvConfig', () => {
     }
   });
 
+  describe('values that mean "not provided"', () => {
+    // Built without a template-literal-shaped string so Biome's
+    // noTemplateCurlyInString does not flag a deliberate placeholder.
+    const placeholder = (name: string) => ['$', '{', name, '}'].join('');
+
+    it('treats an unsubstituted placeholder on a required field as missing', () => {
+      const env = { MY_API_KEY: placeholder('user_config.api_key') };
+      try {
+        parseEnvConfig(Schema, envMap, env);
+        expect.fail('should have thrown');
+      } catch (err) {
+        const mcpErr = err as McpError;
+        expect(mcpErr.code).toBe(JsonRpcErrorCode.ConfigurationError);
+        expect(mcpErr.message).toContain('MY_API_KEY');
+        expect(mcpErr.message).not.toContain('user_config');
+      }
+    });
+
+    it('treats an unsubstituted placeholder on an optional field as unset', () => {
+      const Optional = z.object({ email: z.email().optional() });
+      const result = parseEnvConfig(
+        Optional,
+        { email: 'MY_EMAIL' },
+        { MY_EMAIL: placeholder('MY_EMAIL') },
+      );
+      expect(result.email).toBeUndefined();
+    });
+
+    it('lets a placeholder fall through to the field default', () => {
+      const env = { MY_API_KEY: 'sk-123', MY_MAX_RESULTS: placeholder('user_config.max') };
+      expect(parseEnvConfig(Schema, envMap, env).maxResults).toBe(100);
+    });
+
+    it('treats an empty string as unset', () => {
+      const env = { MY_API_KEY: 'sk-123', MY_MAX_RESULTS: '' };
+      expect(parseEnvConfig(Schema, envMap, env).maxResults).toBe(100);
+    });
+
+    it('passes a value that merely contains a placeholder through unchanged', () => {
+      const inner = `prefix-${placeholder('x')}-suffix`;
+      const env = { MY_API_KEY: inner };
+      expect(parseEnvConfig(Schema, envMap, env).apiKey).toBe(inner);
+    });
+  });
+
   it('defaults to process.env when env argument is omitted', () => {
     const prev = process.env.MY_API_KEY;
     process.env.MY_API_KEY = 'from-process';
