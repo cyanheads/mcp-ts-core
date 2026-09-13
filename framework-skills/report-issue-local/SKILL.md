@@ -4,7 +4,7 @@ description: >
   File a bug or feature request against this MCP server's own repo. Use for server-specific issues — tool logic, service integrations, config problems, or domain bugs that aren't caused by the framework.
 metadata:
   author: cyanheads
-  version: "1.7"
+  version: "1.8"
   audience: external
   type: workflow
 ---
@@ -207,7 +207,7 @@ gh issue create --template "Feature Request" --web
 
 ### CLI (non-interactive)
 
-Template below demonstrates the richer structure. Omit sections you don't need — simple requests don't require Flow / Design / Dependencies blocks.
+The first three headings are the Feature Request form's own fields, in its order — `Use case` and `Proposed behavior` are required by the form, so a body without them does not satisfy it. Everything after `Alternatives considered` is supplemental; omit what you don't need — simple requests don't require Flow / Design / Dependencies blocks.
 
 ````bash
 gh issue create \
@@ -215,21 +215,34 @@ gh issue create \
   --label "enhancement" \
   --assignee "@me" \
   --body "$(cat <<'ISSUE'
-Concrete statement of what's currently missing or broken. Name the specific tool, service, resource, or domain area. Two or three sentences — the reader should know the gap before the end of the paragraph.
+### Use case
+
+One or two sentences: who hits this gap and why it matters. Name the specific tool, service, resource, or domain area. Kept short on purpose — a field that invites a paragraph gets padded with background and skipped by the next reader.
 
 Related: #N
 
-## Proposal
-
-What you want the server to do, in one paragraph. Link external libraries or services on first mention: [lib name](https://github.com/owner/repo). Include a short justification — what this gives users that they don't have today.
-
 ### Proposed behavior
 
-Describe the new behavior or surface. For tool/resource changes, show example input/output or the new schema fields:
+What you want the server to do, then the new behavior or surface. For tool/resource changes, show example input/output or the new schema fields. Link external libraries or services on first mention: [lib name](https://github.com/owner/repo).
 
 ```ts
 // Example: new input field or output shape
 ```
+
+### Alternatives considered
+
+What you tried or evaluated instead, and why it didn't fit.
+
+### Scope
+
+- Files or modules touched
+- New env vars, config keys, or service integrations
+- New or modified tools / resources / prompts
+
+### Out of scope
+
+- What we're deliberately not doing
+- Adjacent work that belongs in a separate issue
 
 ### Flow (optional)
 
@@ -244,25 +257,10 @@ Philosophy: **one-line principle in bold.**
 | A | ... | ... |
 | B | ... | ... |
 
-### Scope
-
-- Files or modules touched
-- New env vars, config keys, or service integrations
-- New or modified tools / resources / prompts
-
-### Out of scope
-
-- What we're deliberately not doing
-- Adjacent work that belongs in a separate issue
-
 ### Dependencies (optional)
 
 - Depends on: cyanheads/mcp-ts-core#N (upstream framework change)
 - Depends on: owner/repo#N (other server work)
-
-### Alternatives considered
-
-What you tried or evaluated instead, and why it didn't fit.
 ISSUE
 )"
 ````
@@ -306,4 +304,4 @@ gh issue close <number> --reason completed --comment "Fixed in <commit or PR>"
 - [ ] Title follows `type(scope): description` format
 - [ ] Primary label assigned (`bug` / `enhancement` / `documentation`)
 - [ ] If bug: version, runtime, repro steps, actual vs expected behavior included
-- [ ] If feature: Proposal and Scope sections present; Out of scope defined
+- [ ] If feature: `Use case` and `Proposed behavior` present (the form's required fields), `Alternatives considered` third; Out of scope defined

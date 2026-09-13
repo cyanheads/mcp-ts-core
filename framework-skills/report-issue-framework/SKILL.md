@@ -4,7 +4,7 @@ description: >
   File a bug or feature request against @cyanheads/mcp-ts-core when you hit a framework issue. Use when a builder, utility, context method, or config behaves contrary to the documented API — not for server-specific application bugs.
 metadata:
   author: cyanheads
-  version: "1.9"
+  version: "1.10"
   audience: external
   type: workflow
 ---
@@ -38,7 +38,7 @@ gh api 'repos/cyanheads/mcp-ts-core/issues/<number>/timeline' --paginate \
   --jq '.[] | select(.event=="cross-referenced") | .source.issue | "\(.repository.full_name)#\(.number) — \(.title)"'
 ```
 
-5. **For documentation- or contract-shaped requests, audit all three doc layers first** — proposals to add reference docs, public-API conventions, attribute/event catalogs, or stability commitments often duplicate surface that already exists. Check `src/` for behavior, `docs/` for human-facing reference, and `skills/` for agent-facing reference. Skill files marked `audience: external` are the framework's public contract — treat them as authoritative when evaluating whether a documentation gap exists. Also verify the constants or types you'd reference aren't already exported from `@cyanheads/mcp-ts-core` or one of its subpaths.
+5. **For documentation- or contract-shaped requests, audit all three doc layers first** — proposals to add reference docs, public-API conventions, attribute/event catalogs, or stability commitments often duplicate surface that already exists. Check `src/` for behavior, `docs/` for human-facing reference, and `framework-skills/` for agent-facing reference. Skill files marked `audience: external` are the framework's public contract — treat them as authoritative when evaluating whether a documentation gap exists. Also verify the constants or types you'd reference aren't already exported from `@cyanheads/mcp-ts-core` or one of its subpaths.
 
 ## Writing Well-Structured Issues
 
@@ -213,7 +213,7 @@ gh issue create -R cyanheads/mcp-ts-core --template "Feature Request" --web
 
 ### CLI (non-interactive)
 
-Template below demonstrates the richer structure. Omit sections you don't need — simple requests don't require Flow / Design / Dependencies blocks.
+The first three headings are the Feature Request form's own fields, in its order — `Use case` and `Proposed API` are required by the form, so a body without them does not satisfy it. Everything after `Alternatives considered` is supplemental; omit what you don't need — simple requests don't require Flow / Design / Dependencies blocks.
 
 ````bash
 gh issue create -R cyanheads/mcp-ts-core \
@@ -221,15 +221,15 @@ gh issue create -R cyanheads/mcp-ts-core \
   --label "enhancement" \
   --assignee "@me" \
   --body "$(cat <<'ISSUE'
-Concrete statement of what's currently missing or broken in the framework. Name the specific builder, utility, context method, or config field. Two or three sentences — the reader should know the gap before the end of the paragraph.
+### Use case
+
+One or two sentences: who hits this gap in the framework and why it matters. Name the specific builder, utility, context method, or config field. Kept short on purpose — a field that invites a paragraph gets padded with background and skipped by the next reader.
 
 Related: #N
 
-## Proposal
-
-What you want the framework to do, in one paragraph. Link external libraries on first mention: [lib name](https://github.com/owner/repo). Include a short justification — what this gives us that we don't have today.
-
 ### Proposed API
+
+What you want the framework to do, then the API as a consumer would call it. Link external libraries on first mention: [lib name](https://github.com/owner/repo).
 
 ```ts
 import { withRetry } from '@cyanheads/mcp-ts-core/utils';
@@ -239,6 +239,21 @@ const result = await withRetry(() => fetchExternal(url), {
   backoff: 'exponential',
 });
 ```
+
+### Alternatives considered
+
+What you tried or evaluated instead, and why it didn't fit.
+
+### Scope
+
+- Files or modules touched
+- New exports, env vars, or config keys
+- Tier (Tier 1 core / Tier 2 standard / Tier 3 optional peer dep)
+
+### Out of scope
+
+- What we're deliberately not doing
+- Adjacent work that belongs in a separate issue
 
 ### Flow (optional)
 
@@ -253,24 +268,9 @@ Philosophy: **one-line principle in bold.**
 | A | ... | ... |
 | B | ... | ... |
 
-### Scope
-
-- Files or modules touched
-- New exports, env vars, or config keys
-- Tier (Tier 1 core / Tier 2 standard / Tier 3 optional peer dep)
-
-### Out of scope
-
-- What we're deliberately not doing
-- Adjacent work that belongs in a separate issue
-
 ### Dependencies (optional)
 
 - Depends on: owner/repo#N
-
-### Alternatives considered
-
-What you tried or evaluated instead, and why it didn't fit.
 ISSUE
 )"
 ````
@@ -293,8 +293,8 @@ gh issue list -R cyanheads/mcp-ts-core --author @me
 - [ ] Confirmed bug is in `@cyanheads/mcp-ts-core`, not server code
 - [ ] Running latest (or documented) framework version
 - [ ] Searched existing issues — no duplicate found
-- [ ] If documentation or contract enhancement: confirmed `src/`, `docs/`, `skills/`, and public exports don't already cover the surface
+- [ ] If documentation or contract enhancement: confirmed `src/`, `docs/`, `framework-skills/`, and public exports don't already cover the surface
 - [ ] All secrets, credentials, and tokens redacted
 - [ ] Primary label assigned (`bug` / `enhancement` / `documentation`)
 - [ ] If bug: version, runtime, repro code, actual vs expected behavior included
-- [ ] If feature: Proposal and Scope sections present; Out of scope defined
+- [ ] If feature: `Use case` and `Proposed API` present (the form's required fields), `Alternatives considered` third; Out of scope defined
