@@ -25,10 +25,10 @@ Use after reading `../SKILL.md`. Drives maintenance, adoption verification, wrap
 
 | Phase | Tier 1 skill(s) |
 |:---|:---|
-| Maintenance | `skills/maintenance/SKILL.md` |
-| Double-check | `skills/polish-docs-meta/SKILL.md` (the cross-file consistency reference is the most commonly missed surface) |
-| Wrap-up | `skills/git-wrapup/SKILL.md` |
-| Release | `skills/release-and-publish/SKILL.md` |
+| Maintenance | `framework-skills/maintenance/SKILL.md` |
+| Double-check | `framework-skills/polish-docs-meta/SKILL.md` (the cross-file consistency reference is the most commonly missed surface) |
+| Wrap-up | `framework-skills/git-wrapup/SKILL.md` |
+| Release | `framework-skills/release-and-publish/SKILL.md` |
 
 ## Pre-flight
 
@@ -58,25 +58,25 @@ Phase 4 combines wrap-up and release in one sub-agent because the work is sequen
 ## Phase notes
 
 ### Phase 1: Maintenance
-Each sub-agent runs `skills/maintenance/SKILL.md` Mode A — the full flow from `bun outdated` through verification.
+Each sub-agent runs `framework-skills/maintenance/SKILL.md` Mode A — the full flow from `bun outdated` through verification.
 
 **Prompt phrasing matters.** Generic "run the maintenance skill" prompts cause sub-agents to stop at changelog analysis without executing. Include explicit steps in the prompt body:
 1. `bun outdated` — capture the list
 2. `bun update --latest` — apply, capturing the `↑ package old → new` lines for Step 3
 3. Invoke the `changelog` skill for each updated package (or read `node_modules/<pkg>/CHANGELOG.md` directly if the skill isn't synced yet)
 4. If `@cyanheads/mcp-ts-core` updated, do the deeper framework review per the maintenance skill's Step 4
-5. Run Step 5 skill/script sync — Phase A (package → project `skills/`), Phase B (project `skills/` → agent dirs), Phase C (package scripts + pristine references → project)
+5. Run Step 5 skill/script sync — Phase A (package → project `framework-skills/`), Phase B (project `framework-skills/` → agent dirs), Phase C (package scripts + pristine references → project)
 6. Adopt changes per Step 6 — framework changes are auto-adopt at every applicable site in this pass; third-party libs are cost/benefit
 7. `bun run rebuild` → `bun run devcheck` → `bun run test`
 8. Produce the Step 8 numbered summary
 
-**Skill-version paradox.** If `node_modules/@cyanheads/mcp-ts-core/skills/maintenance/SKILL.md` version is newer than the synced project copy, feature-adoption rows added in the new version don't surface. Sub-agent prompt instructs: after Phase A sync completes, re-read the synced `maintenance` SKILL.md and continue from Step 5 with the new version.
+**Skill-version paradox.** If `node_modules/@cyanheads/mcp-ts-core/framework-skills/maintenance/SKILL.md` version is newer than the synced project copy, feature-adoption rows added in the new version don't surface. Sub-agent prompt instructs: after Phase A sync completes, re-read the synced `maintenance` SKILL.md and continue from Step 5 with the new version.
 
-**Skill audience compliance.** Only sync skills with `metadata.audience: external` into project `skills/`. Sub-agents miss this under context pressure — restate explicitly.
+**Skill audience compliance.** Only sync skills with `metadata.audience: external` into project `framework-skills/`. Sub-agents miss this under context pressure — restate explicitly.
 
 **Constraints to restate verbatim:**
 - No commits, tags, pushes — leave working tree dirty for orchestrator review
-- Read-only git allowed and expected — `git diff skills/` after Phase A surfaces adoption signal
+- Read-only git allowed and expected — `git diff framework-skills/` after Phase A surfaces adoption signal
 - Halt and report verbatim if `bun run devcheck` can't be made green; `bun audit` failures from a transitive dep with no patch are note-not-halt
 - Output the Step 8 numbered summary at the end — the orchestrator parses it
 
@@ -88,7 +88,7 @@ Independent maintenance sub-agents diverge on incidental choices and miss adopti
 Audit categories (sub-agent prompt enumerates):
 
 - **Adoption gaps** — features the updated skills say to do that weren't applied (error code semantic audit, missing scaffolding files like `manifest.json`/`.mcpbignore`, `publish-mcp` script)
-- **Audience compliance** — only skills with `metadata.audience: external` belong in project `skills/`; agents sometimes sync `internal`-audience skills
+- **Audience compliance** — only skills with `metadata.audience: external` belong in project `framework-skills/`; agents sometimes sync `internal`-audience skills
 - **Content accuracy** — `isRequired` flags in `server.json` match the upstream API's reality (does the API work without the key?); `manifest.json` `name` doesn't include the npm scope prefix; `user_config` entries have required `title` and `type` fields
 - **Cross-target consistency** — if a feature shows up in 3 of 5 Phase 1 summaries, the other 2 likely missed it
 - **Error code semantics** — `InvalidParams` only for malformed JSON-RPC params shape; `ValidationError` for domain validation; `NotFound` for missing entities
@@ -117,7 +117,7 @@ The orchestrator collects Phase 1 + Phase 2 reports and produces:
 If a target's diff suggests minor-or-above, **pause that target and surface to the user during roll-up** — unaffected targets proceed to Phase 4 at patch.
 
 ### Phase 4: Wrap-up + release
-Each sub-agent reads BOTH `skills/git-wrapup/SKILL.md` AND `skills/release-and-publish/SKILL.md`. Runs wrap-up (version bump, changelog authoring, commit stack), then release (annotated tag, push, npm publish, MCP Registry, GH release, Docker).
+Each sub-agent reads BOTH `framework-skills/git-wrapup/SKILL.md` AND `framework-skills/release-and-publish/SKILL.md`. Runs wrap-up (version bump, changelog authoring, commit stack), then release (annotated tag, push, npm publish, MCP Registry, GH release, Docker).
 
 **Release PR mode.** When the target declares it (see "Release PR mode" in `../SKILL.md`), Phase 4 runs as three serial sub-agents — wrap-up (halts at the open PR) → `release-pr-review` → release — with an orchestrator check of the PR between each. Everything below is unchanged; the PR wraps it.
 
@@ -153,7 +153,7 @@ For targets with hosted instances behind an auto-pull tool, trigger the refresh 
 | 3 | Per-target adoption divergence is expected — projects on different starting framework versions adopt different things | Don't try to normalize. Surface divergence as informational in Phase 3 roll-up. |
 | 4 | The `changelog` skill may not exist in a target's skill directory yet | Sub-agent falls back to direct `node_modules/<pkg>/CHANGELOG.md` reading |
 | 5 | Sub-agent runs write git commands despite instruction | Restate the no-write-git list + no-`stash` rule in prompt body; verify via `git log --oneline -1` per target after Phase 1 — should show no new commits |
-| 6 | Sub-agent syncs `internal`-audience skills into project `skills/` | Restate "Only sync skills with `metadata.audience: external`" — sub-agents miss this under context pressure |
+| 6 | Sub-agent syncs `internal`-audience skills into project `framework-skills/` | Restate "Only sync skills with `metadata.audience: external`" — sub-agents miss this under context pressure |
 | 7 | `manifest.json` scaffolded with scoped name from `package.json` (e.g. `@scope/server-name`) — renders in mcpb install dialog | Phase 2 verifies `manifest.json` `name` doesn't contain `/` |
 | 8 | `manifest.json` `user_config` entries missing required `title`/`type` — `mcpb pack` fails at release time | Phase 2 verifies required fields |
 | 9 | `server.json` `isRequired` doesn't match upstream API reality | Phase 2 verifies against actual API behavior |

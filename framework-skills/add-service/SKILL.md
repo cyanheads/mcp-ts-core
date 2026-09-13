@@ -4,7 +4,7 @@ description: >
   Scaffold a new service integration. Use when the user asks to add a service, integrate an external API, or create a reusable domain module with its own initialization and state.
 metadata:
   author: cyanheads
-  version: "1.9"
+  version: "1.10"
   audience: external
   type: reference
 ---
@@ -95,7 +95,7 @@ handler: async (input, ctx) => {
 
 ## Resilience (External API Services)
 
-When a service wraps an external API, apply these patterns. For the framework retry contract, see `skills/api-utils/SKILL.md`.
+When a service wraps an external API, apply these patterns. For the framework retry contract, see `framework-skills/api-utils/SKILL.md`.
 
 ### Retry wraps the full pipeline
 

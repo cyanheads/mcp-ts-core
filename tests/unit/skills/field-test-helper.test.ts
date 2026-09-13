@@ -1,6 +1,6 @@
 /**
  * @fileoverview Regression coverage for the shell helper embedded in
- * `skills/field-test/SKILL.md` (issue #391). `mcp_init` used to treat a missing
+ * `framework-skills/field-test/SKILL.md` (issue #391). `mcp_init` used to treat a missing
  * `Mcp-Session-Id` header as fatal, so a server running under
  * `MCP_SESSION_MODE=stateless` — which completes a valid 2025-era
  * initialization without minting a session — could not be field-tested at all,
@@ -23,7 +23,7 @@ import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
 
 const SKILL_PATH = resolve(
   dirname(fileURLToPath(import.meta.url)),
-  '../../../skills/field-test/SKILL.md',
+  '../../../framework-skills/field-test/SKILL.md',
 );
 
 const PROTOCOL = '2025-11-25';

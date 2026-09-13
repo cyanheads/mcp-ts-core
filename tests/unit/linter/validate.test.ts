@@ -910,7 +910,9 @@ describe('validateDefinitions', () => {
     it('appends a rule-anchor breadcrumb to every diagnostic message', () => {
       const report = validateDefinitions({ tools: [validTool({ name: '' })] });
       const nameError = report.errors.find((e) => e.rule === 'name-required');
-      expect(nameError?.message).toContain('See: skills/api-linter/SKILL.md#name-required');
+      expect(nameError?.message).toContain(
+        'See: framework-skills/api-linter/SKILL.md#name-required',
+      );
     });
   });
 
@@ -955,7 +957,9 @@ describe('validateDefinitions', () => {
       const report = validateDefinitions({ serverJson: validServerJson({ name: '' }) });
       const nameError = report.errors.find((e) => e.rule === 'server-json-name-required');
       expect(nameError).toBeDefined();
-      expect(nameError?.message).toContain('See: skills/api-linter/SKILL.md#server-json-rules');
+      expect(nameError?.message).toContain(
+        'See: framework-skills/api-linter/SKILL.md#server-json-rules',
+      );
     });
 
     it('warns on a version mismatch against packageJson.version', () => {
@@ -1002,7 +1006,7 @@ describe('validateDefinitions', () => {
       const taglineError = report.errors.find((e) => e.rule === 'landing-tagline-length');
       expect(taglineError).toBeDefined();
       expect(taglineError?.message).toContain(
-        'See: skills/api-linter/SKILL.md#landing-tagline-length',
+        'See: framework-skills/api-linter/SKILL.md#landing-tagline-length',
       );
     });
   });

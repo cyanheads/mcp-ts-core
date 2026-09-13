@@ -37,11 +37,11 @@ For unsourced QA — where the bugs are unknown until you test — use `field-te
 
 | Phase | Tier 1 skill(s) |
 |:---|:---|
-| Validate (handoff input only) | `skills/field-test/SKILL.md` + `skills/report-issue-local/SKILL.md` + `.github/ISSUE_TEMPLATE/` |
+| Validate (handoff input only) | `framework-skills/field-test/SKILL.md` + `framework-skills/report-issue-local/SKILL.md` + `.github/ISSUE_TEMPLATE/` |
 | Fix | (No single skill — sub-agent reads issues, validates, fixes) |
-| Verify | `skills/field-test/SKILL.md` (live verification) + `skills/code-simplifier/SKILL.md` (optional) |
-| Wrap-up | `skills/git-wrapup/SKILL.md` |
-| Release | `skills/release-and-publish/SKILL.md` |
+| Verify | `framework-skills/field-test/SKILL.md` (live verification) + `framework-skills/code-simplifier/SKILL.md` (optional) |
+| Wrap-up | `framework-skills/git-wrapup/SKILL.md` |
+| Release | `framework-skills/release-and-publish/SKILL.md` |
 
 ## Pre-flight
 
@@ -112,7 +112,7 @@ Fresh sub-agent per target, reads the full `git diff` cold. Two passes:
 Exit gate: `bun run devcheck && bun run rebuild && bun run test`.
 
 ### Phase 3: Wrap-up + release
-Each sub-agent reads BOTH `skills/git-wrapup/SKILL.md` AND `skills/release-and-publish/SKILL.md`.
+Each sub-agent reads BOTH `framework-skills/git-wrapup/SKILL.md` AND `framework-skills/release-and-publish/SKILL.md`.
 
 **Release PR mode.** When the target declares it (see "Release PR mode" in `../SKILL.md`), Phase 3 runs as three serial sub-agents — wrap-up (halts at the open PR) → `release-pr-review` → release — with an orchestrator check of the PR between each. The commit structure, version bump, and tag rules below are unchanged; the PR wraps them.
 

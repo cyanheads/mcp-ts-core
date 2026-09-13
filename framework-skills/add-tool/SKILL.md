@@ -4,7 +4,7 @@ description: >
   Scaffold a new MCP tool definition. Use when the user asks to add a tool, create a new tool, or implement a new capability for the server.
 metadata:
   author: cyanheads
-  version: "2.23"
+  version: "2.24"
   audience: external
   type: reference
 ---
@@ -169,7 +169,7 @@ export const {{TOOL_EXPORT}} = tool('{{tool_name}}', {
 });
 ```
 
-Write it as `return ctx.requestInput(...)` — the `never` return type makes it valid in return position for any output, and it is what lets TypeScript narrow the line below. Full reference (`inputRequired.elicitUrl` / `.createMessage` / `.listRoots`, `requestState`, decline handling): `skills/api-context`.
+Write it as `return ctx.requestInput(...)` — the `never` return type makes it valid in return position for any output, and it is what lets TypeScript narrow the line below. Full reference (`inputRequired.elicitUrl` / `.createMessage` / `.listRoots`, `requestState`, decline handling): `framework-skills/api-context`.
 
 ### Registration
 
@@ -413,7 +413,7 @@ async handler(input, ctx) {
 },
 ```
 
-The alternative — declaring `previewData: z.string()` in `output` and emitting the block from `format()` — ships the bytes twice (once in `structuredContent`, once in the block). Reserve `output` for data the agent reasons over; route raw media through `ctx.content`. Test with `getContentBlocks(ctx)`. Full reference: `skills/api-context` § `ctx.content`.
+The alternative — declaring `previewData: z.string()` in `output` and emitting the block from `format()` — ships the bytes twice (once in `structuredContent`, once in the block). Reserve `output` for data the agent reasons over; route raw media through `ctx.content`. Test with `getContentBlocks(ctx)`. Full reference: `framework-skills/api-context` § `ctx.content`.
 
 ### Capped lists must disclose truncation
 
@@ -714,7 +714,7 @@ throw invalidParams(
 );
 ```
 
-**Error messages are recovery instructions.** Name what went wrong, why, and what action to take. The message is the agent's only signal — a bare "Not found" is a dead end. See `skills/api-errors/SKILL.md` for the full contract pattern, factories list, auto-classification table, and error-path parity (how `data.recovery.hint` reaches both client surfaces).
+**Error messages are recovery instructions.** Name what went wrong, why, and what action to take. The message is the agent's only signal — a bare "Not found" is a dead end. See `framework-skills/api-errors/SKILL.md` for the full contract pattern, factories list, auto-classification table, and error-path parity (how `data.recovery.hint` reaches both client surfaces).
 
 ### Include operational metadata
 

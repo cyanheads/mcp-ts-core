@@ -285,7 +285,7 @@ Identifier metadata still matters. Producers should declare namespaces such as `
 - `src/services/canvas/core/IDataCanvasProvider.ts` — current provider boundary
 - `src/services/canvas/providers/duckdb/DuckdbProvider.ts` — Parquet export and same-process `importFrom()` implementation
 - `src/services/canvas/types.ts` — current operation and result types
-- `skills/api-canvas/SKILL.md` — current integration and token-sharing model
+- `framework-skills/api-canvas/SKILL.md` — current integration and token-sharing model
 - `src/core/app.ts` — setup, capability extensions, core services, and shutdown lifecycle
 - [MCP architecture](https://modelcontextprotocol.io/specification/2026-07-28/architecture)
 - [Tailcat](https://tailscale.com/blog/tailcat)

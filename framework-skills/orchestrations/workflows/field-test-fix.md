@@ -25,13 +25,13 @@ For known work (issues already tracked, handoff documents) where the discovery p
 
 | Phase | Tier 1 skill(s) |
 |:---|:---|
-| Field-test | `skills/field-test/SKILL.md` |
-| Issue filing | `skills/report-issue-local/SKILL.md` + `.github/ISSUE_TEMPLATE/` |
-| Tool definition quality (informs field-test framing) | `skills/tool-defs-analysis/SKILL.md` |
+| Field-test | `framework-skills/field-test/SKILL.md` |
+| Issue filing | `framework-skills/report-issue-local/SKILL.md` + `.github/ISSUE_TEMPLATE/` |
+| Tool definition quality (informs field-test framing) | `framework-skills/tool-defs-analysis/SKILL.md` |
 | Fix | (No single skill — sub-agent reads issues, validates, fixes) |
-| Code simplify (optional) | `skills/code-simplifier/SKILL.md` |
-| Wrap-up | `skills/git-wrapup/SKILL.md` |
-| Release | `skills/release-and-publish/SKILL.md` |
+| Code simplify (optional) | `framework-skills/code-simplifier/SKILL.md` |
+| Wrap-up | `framework-skills/git-wrapup/SKILL.md` |
+| Release | `framework-skills/release-and-publish/SKILL.md` |
 
 ## Pre-flight
 
@@ -83,7 +83,7 @@ Phase 6 is optional — stop earlier if release isn't authorized. Phase 7 only r
 - **Do NOT file against `@cyanheads/mcp-ts-core`** unless the bug is clearly in the framework — file against the server's own repo
 - **Redact secrets** — API keys, tokens, etc.
 
-Sub-agent reads `skills/tool-defs-analysis/SKILL.md` as a primer — field-testing evaluates the agent-facing surface during live use, not just statically.
+Sub-agent reads `framework-skills/tool-defs-analysis/SKILL.md` as a primer — field-testing evaluates the agent-facing surface during live use, not just statically.
 
 ### Phase 2: Issue triage
 Orchestrator verifies filed issues exist via `gh issue list -R <owner>/<repo>` per target. Reconciles sub-agent reports against actual GH state (sub-agents sometimes report filing but hit errors). Produces a per-target issue count and severity breakdown. If all sub-agents found 0 issues, skip to Phase 6 (or end the workflow if no release authorized).
@@ -128,7 +128,7 @@ The orchestrator makes this call based on evidence — don't defer when the data
 If looping: respawn Phase 1 + Phase 3 for targets that had fixes applied; skip targets that passed clean. Diminishing returns after 2 cycles.
 
 ### Phase 6: Wrap-up + release (optional)
-Each sub-agent reads both `skills/git-wrapup/SKILL.md` and `skills/release-and-publish/SKILL.md`.
+Each sub-agent reads both `framework-skills/git-wrapup/SKILL.md` and `framework-skills/release-and-publish/SKILL.md`.
 
 **Release PR mode.** When the target declares it (see "Release PR mode" in `../SKILL.md`), Phase 6 runs as three serial sub-agents — wrap-up (halts at the open PR) → `release-pr-review` → release — with an orchestrator check of the PR between each. Everything below is unchanged; the PR wraps it.
 

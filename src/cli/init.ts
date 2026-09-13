@@ -11,7 +11,7 @@ import { fileURLToPath } from 'node:url';
 
 const PACKAGE_ROOT = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
 const TEMPLATES_DIR = join(PACKAGE_ROOT, 'templates');
-const SKILLS_DIR = join(PACKAGE_ROOT, 'skills');
+const SKILLS_DIR = join(PACKAGE_ROOT, 'framework-skills');
 const SCRIPTS_DIR = join(PACKAGE_ROOT, 'scripts');
 const PACKAGE_JSON = JSON.parse(readFileSync(join(PACKAGE_ROOT, 'package.json'), 'utf-8')) as {
   version: string;
@@ -194,7 +194,11 @@ function copyExternalSkills(dest: string, created: string[], skipped: string[]):
     const skillFiles = walkDir(join(SKILLS_DIR, dir.name));
 
     for (const srcPath of skillFiles) {
-      const relPath = join('skills', dir.name, relative(join(SKILLS_DIR, dir.name), srcPath));
+      const relPath = join(
+        'framework-skills',
+        dir.name,
+        relative(join(SKILLS_DIR, dir.name), srcPath),
+      );
       const destPath = join(dest, relPath);
 
       copyIfAbsent(srcPath, destPath, relPath, created, skipped);

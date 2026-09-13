@@ -8,9 +8,9 @@ import { describe, expect, it } from 'vitest';
 import { AGENT_DOC_ENTRY, filterAgentDocEntries } from '../../../scripts/clean-mcpb.js';
 
 describe('clean-mcpb · agent-doc entry filter', () => {
-  it('matches dependency-shipped skills/, .claude/, .agents/ trees and SKILL.md files', () => {
+  it('matches dependency-shipped framework-skills/, .claude/, .agents/ trees and SKILL.md files', () => {
     const entries = [
-      'node_modules/@cyanheads/mcp-ts-core/skills/add-tool/SKILL.md',
+      'node_modules/@cyanheads/mcp-ts-core/framework-skills/add-tool/SKILL.md',
       'node_modules/dotenv/skills/dotenv/SKILL.md',
       'node_modules/resolve/.claude/settings.json',
       'node_modules/nanoid/.agents/notes.md',
@@ -41,7 +41,7 @@ describe('clean-mcpb · agent-doc entry filter', () => {
   it('does not match near-miss names', () => {
     const entries = [
       // Root-level dev dirs are .mcpbignore territory, not the nested strip's.
-      'skills/add-tool/SKILL.md',
+      'framework-skills/add-tool/SKILL.md',
       '.claude/settings.json',
       // Segment names must match exactly.
       'node_modules/foo/skillsets/index.js',

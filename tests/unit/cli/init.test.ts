@@ -130,8 +130,10 @@ describe('CLI init command', () => {
     expect(existsSync(join(dest, 'scripts', 'devcheck.ts'))).toBe(true);
     expect(existsSync(join(dest, 'scripts', 'check-framework-antipatterns.ts'))).toBe(true);
     expect(existsSync(join(dest, 'scripts', 'check-dependency-specifiers.ts'))).toBe(true);
-    expect(existsSync(join(dest, 'skills', 'add-tool', 'SKILL.md'))).toBe(true);
-    expect(existsSync(join(dest, 'skills', 'README.md'))).toBe(false);
+    expect(existsSync(join(dest, 'framework-skills', 'add-tool', 'SKILL.md'))).toBe(true);
+    expect(existsSync(join(dest, 'framework-skills', 'README.md'))).toBe(false);
+    // Plugin hosts auto-load a root skills/ — the scaffold must never create one.
+    expect(existsSync(join(dest, 'skills'))).toBe(false);
     expect(existsSync(join(dest, 'tsconfig.json'))).toBe(true);
     expect(existsSync(join(dest, 'tsconfig.build.json'))).toBe(true);
     expect(existsSync(join(dest, 'biome.json'))).toBe(true);
@@ -184,9 +186,12 @@ describe('CLI init command', () => {
     writeFileSync(join(tempRoot, 'package.json'), '{"name":"preexisting"}\n');
     writeFileSync(join(tempRoot, 'CLAUDE.md'), 'keep me\n');
     mkdirSync(join(tempRoot, 'scripts'));
-    mkdirSync(join(tempRoot, 'skills', 'api-auth'), { recursive: true });
+    mkdirSync(join(tempRoot, 'framework-skills', 'api-auth'), { recursive: true });
     writeFileSync(join(tempRoot, 'scripts', 'build.ts'), '// custom build\n');
-    writeFileSync(join(tempRoot, 'skills', 'api-auth', 'SKILL.md'), 'custom auth instructions\n');
+    writeFileSync(
+      join(tempRoot, 'framework-skills', 'api-auth', 'SKILL.md'),
+      'custom auth instructions\n',
+    );
 
     await runCli(['init']);
 
@@ -194,7 +199,7 @@ describe('CLI init command', () => {
     expect(readFileSync(join(tempRoot, 'CLAUDE.md'), 'utf-8')).toBe('keep me\n');
     expect(existsSync(join(tempRoot, 'scripts', 'build.ts'))).toBe(true);
     expect(readFileSync(join(tempRoot, 'scripts', 'build.ts'), 'utf8')).toBe('// custom build\n');
-    expect(readFileSync(join(tempRoot, 'skills', 'api-auth', 'SKILL.md'), 'utf8')).toBe(
+    expect(readFileSync(join(tempRoot, 'framework-skills', 'api-auth', 'SKILL.md'), 'utf8')).toBe(
       'custom auth instructions\n',
     );
 

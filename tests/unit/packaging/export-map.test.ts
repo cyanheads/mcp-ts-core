@@ -96,7 +96,7 @@ describe('package export map', () => {
     expect(pkg.files).toEqual(
       expect.arrayContaining([
         'dist/',
-        'skills/',
+        'framework-skills/',
         'templates/',
         'tsconfig.base.json',
         'vitest.config.base.mjs',

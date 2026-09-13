@@ -4,7 +4,7 @@ description: >
   Pick and run a multi-phase workflow that chains foundational task skills (`git-wrapup`, `release-and-publish`, `maintenance`, `field-test`, `setup`, etc.) end-to-end. Routes user intent to a workflow file under `workflows/` — greenfield builds, maintenance + release, field-test + fix, or known-work + release. Single source for the universal rules (no commits without authorization, no destructive git, no marketing language), the orchestrator posture (own the goal, ground sub-agents in primary sources, verify against the goal), and the sub-agent strategy (orient block, parallel fanout, isolation, normalization) that apply across every workflow. Sub-agents are an optional capability — workflows run linearly when fanout isn't available.
 metadata:
   author: cyanheads
-  version: "1.8"
+  version: "1.9"
   audience: external
   type: workflow
 ---
@@ -28,7 +28,7 @@ Single-skill work — running just `maintenance`, just `git-wrapup`, just `relea
 | **2** | Orchestration workflows | The four files under `workflows/` | Orchestrator only |
 | **3** | Router | This `SKILL.md` | Orchestrator only |
 
-Workflows in Tier 2 sequence Tier 1 skills with gates and verification. They never duplicate Tier 1 content — they direct to it. A workflow file says "Phase N: agent reads and runs `skills/git-wrapup/SKILL.md`," not "here's how to wrap up a release."
+Workflows in Tier 2 sequence Tier 1 skills with gates and verification. They never duplicate Tier 1 content — they direct to it. A workflow file says "Phase N: agent reads and runs `framework-skills/git-wrapup/SKILL.md`," not "here's how to wrap up a release."
 
 The orchestrator is the agent driving the workflow — the one reading this SKILL.md. Sub-agents the orchestrator spawns receive prompts pointing at Tier 1 skills directly; they do not receive this skill or the workflow file. That boundary prevents recursive sub-agent spawning.
 

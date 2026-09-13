@@ -4,7 +4,7 @@ description: >
   Investigate, adopt, and verify dependency updates — with special handling for `@cyanheads/mcp-ts-core`. Captures what changed, understands why, cross-references against the codebase, adopts framework improvements, syncs project skills, and runs final checks. Supports two entry modes: run the full flow end-to-end, or review updates you already applied.
 metadata:
   author: cyanheads
-  version: "2.6"
+  version: "2.7"
   audience: external
   type: workflow
 ---
@@ -52,7 +52,7 @@ Do not redo this investigation inline — the `changelog` skill handles tag-form
 
 ### 4. Framework review (`@cyanheads/mcp-ts-core`)
 
-**Skill-version paradox.** If `node_modules/@cyanheads/mcp-ts-core/skills/maintenance/SKILL.md`'s `version` exceeds the one running, run Step 5 Phase A first and re-invoke `maintenance` — otherwise feature-adoption rows added in the new version silently don't surface. After Phase A, confirm the running skill version matches the package before continuing. If the session still has the old skill loaded, exit and restart.
+**Skill-version paradox.** If `node_modules/@cyanheads/mcp-ts-core/framework-skills/maintenance/SKILL.md`'s `version` exceeds the one running, run Step 5 Phase A first and re-invoke `maintenance` — otherwise feature-adoption rows added in the new version silently don't surface. After Phase A, confirm the running skill version matches the package before continuing. If the session still has the old skill loaded, exit and restart.
 
 If `@cyanheads/mcp-ts-core` was updated, do a deeper pass beyond what the `changelog` skill covers. The framework ships a **directory-based changelog** grouped by minor series (`.x` semver-wildcard convention) — one file per released version at `node_modules/@cyanheads/mcp-ts-core/changelog/<major.minor>.x/<version>.md`. Read only the files between old and new rather than scanning a monolithic file.
 
@@ -77,8 +77,8 @@ Scan specifically for:
 | Deprecations | Migrate now, before the next breaking release |
 | Config changes | New env vars, renamed keys, changed defaults |
 | Linter rules | New definition-lint rules that may now flag existing tools/resources |
-| New or materially-changed skills | Note new skills or workflow changes (renamed steps, new checklist items) worth surfacing at end-of-run. Don't auto-invoke — some skills (e.g. `security-pass`) are user-triggered. The per-version changelog entries (e.g. 0.6.14 calling out `skills/security-pass/ (v1.0)`) name what changed. |
-| New template-scaffolded files | Compare `templates/` in the package against the project root. Files that `init` would create for a new project but don't exist in this project are adoption candidates — create them with project-specific values (version, name, description, env vars from `server.json`). Examples: `manifest.json`, `.mcpbignore`, `.codex-plugin/`, `.claude-plugin/`. Skip files the project has intentionally opted out of (documented in CLAUDE.md/AGENTS.md or a code comment). |
+| New or materially-changed skills | Note new skills or workflow changes (renamed steps, new checklist items) worth surfacing at end-of-run. Don't auto-invoke — some skills (e.g. `security-pass`) are user-triggered. The per-version changelog entries (e.g. one calling out `security-pass` v1.0) name what changed. |
+| New template-scaffolded files | Compare `templates/` in the package against the project root. Files that `init` would create for a new project but don't exist in this project are adoption candidates — create them with project-specific values (version, name, description; user-supplied variables from `server.json` go into `userConfig` + `${user_config.<option>}` for `.claude-plugin/` and into `env_vars` for `.codex-plugin/mcp.json`, never as `""` in `env`). Examples: `manifest.json`, `.mcpbignore`, `.codex-plugin/`, `.claude-plugin/`. Skip files the project has intentionally opted out of (documented in CLAUDE.md/AGENTS.md or a code comment). |
 | Changelog `agent-notes` | Read `agent-notes` frontmatter from each new per-version changelog file — these carry release-specific adoption instructions for downstream consumers (new files to create, fields to populate, one-time migration steps). Apply them alongside other adoption work in Step 6. |
 
 Cross-reference each finding against the server's code. Collect adoption opportunities for Step 6.
@@ -89,29 +89,31 @@ Read the upstream template end-to-end, mentally comparing against the current `C
 
 ### 5. Sync project skills and scripts
 
-Skills flow in two hops: package → project `skills/` → agent directories. Framework scripts flow in one: package → project `scripts/`. Both drift silently unless resynced.
+Skills flow in two hops: package → project `framework-skills/` → agent directories. Framework scripts flow in one: package → project `scripts/`. Both drift silently unless resynced.
 
-**Phase A — Package → Project `skills/`**
+**Phase A — Package → Project `framework-skills/`**
 
-1. **Package** — `node_modules/@cyanheads/mcp-ts-core/skills/` (canonical source)
-2. **Project** — `skills/` at project root (working copy; may contain local overrides or server-specific skills)
+1. **Package** — `node_modules/@cyanheads/mcp-ts-core/framework-skills/` (canonical source)
+2. **Project** — `framework-skills/` at project root (working copy; may contain local overrides or server-specific skills)
+
+**One-time migration from `skills/` (framework 0.13.0).** Earlier releases scaffolded this tree at `skills/`. Claude Code and Codex auto-load a plugin's root `skills/`, so a server shipping `.claude-plugin/` or `.codex-plugin/` handed its development skills to every agent that installed it. If the project has `skills/` and no `framework-skills/`: `git mv skills framework-skills`, then update every path reference — `CLAUDE.md`/`AGENTS.md`, `.mcpbignore` (`/skills/` → `/framework-skills/`), `.github/CONTRIBUTING.md` — regenerate `docs/tree.md`, and continue below. `bun run devcheck` reports an unmigrated tree until this is done. The agent mirrors (`.claude/skills/`, `.agents/skills/`) keep their names; plugin hosts do not scan them.
 
 Procedure:
 
-1. List all skill directories in `node_modules/@cyanheads/mcp-ts-core/skills/`
+1. List all skill directories in `node_modules/@cyanheads/mcp-ts-core/framework-skills/`
 2. For each skill with `metadata.audience: external` in its `SKILL.md` frontmatter:
-   - If missing in project `skills/`, copy the full directory
+   - If missing in project `framework-skills/`, copy the full directory
    - If present, compare `metadata.version` — replace if the package version is newer
    - If the local version is equal or newer, skip (local override)
    - **Report every skip.** List each skipped skill with both versions in the pass output. The rule trusts a downstream stamp it cannot verify, so a stamp that ever moves backwards upstream makes the skip permanent and silent — the local copy outranks the package copy forever and no future edit reaches it. A skip you can see is a skip you can question; compare the two bodies whenever one looks unexpected.
-3. Leave skills in `skills/` that lack `metadata.audience: external` untouched — they're server-specific or sourced elsewhere, not framework-managed.
-4. **Prune framework skills deleted upstream.** A skill in `skills/` that *carries* `metadata.audience: external` but is **absent** from the package was removed upstream (e.g. `migrate-mcp-ts-template`, removed in 0.9.12) and lingers because sync was previously add/update-only. Delete it from `skills/` (and from the agent mirrors in Phase B). The `audience: external` marker is the provenance: it scopes the prune to framework-managed skills, so a server's own skills — which never carry it — are never touched. Before deleting, scan the skill for local edits worth keeping; if any exist, reconcile or surface them rather than discarding silently.
+3. Leave skills in `framework-skills/` that lack `metadata.audience: external` untouched — they're server-specific or sourced elsewhere, not framework-managed.
+4. **Prune framework skills deleted upstream.** A skill in `framework-skills/` that *carries* `metadata.audience: external` but is **absent** from the package was removed upstream (e.g. `migrate-mcp-ts-template`, removed in 0.9.12) and lingers because sync was previously add/update-only. Delete it from `framework-skills/` (and from the agent mirrors in Phase B). The `audience: external` marker is the provenance: it scopes the prune to framework-managed skills, so a server's own skills — which never carry it — are never touched. Before deleting, scan the skill for local edits worth keeping; if any exist, reconcile or surface them rather than discarding silently.
 
-**Skill diffs are adoption signal, not just sync output.** After replacing files in `skills/`, run `git diff skills/` to read what changed. Updated skill bodies describe new patterns, refined workflows, or new conventions — apply them to the codebase in Step 6 the same way you'd apply a framework API addition. The file copy is the *trigger*, not the work. The work is what the updated skill now says to do.
+**Skill diffs are adoption signal, not just sync output.** After replacing files in `framework-skills/`, run `git diff framework-skills/` to read what changed. Updated skill bodies describe new patterns, refined workflows, or new conventions — apply them to the codebase in Step 6 the same way you'd apply a framework API addition. The file copy is the *trigger*, not the work. The work is what the updated skill now says to do.
 
-**Phase B — Project `skills/` → Agent directories**
+**Phase B — Project `framework-skills/` → Agent directories**
 
-The `setup` skill instructs consumers to copy `skills/*` into their agent's skill directory at init time. Those copies go stale unless re-synced. Detect which agent directories exist and propagate:
+The `setup` skill instructs consumers to copy `framework-skills/*` into their agent's skill directory at init time. Those copies go stale unless re-synced. Detect which agent directories exist and propagate:
 
 | Agent | Directory |
 |:------|:----------|
@@ -123,8 +125,8 @@ The `setup` skill instructs consumers to copy `skills/*` into their agent's skil
 
 For each agent directory that exists:
 
-1. For every directory in project `skills/`, copy it into the agent dir (overwrite on match, add if missing)
-2. Do **not** delete skills in the agent dir that aren't in project `skills/` — they may be general-purpose skills sourced elsewhere (e.g., `code-security`, `cloudflare`, `changelog`). **Exception:** a framework skill pruned in Phase A step 4 — delete that same-named directory from each agent dir too. Match by the specific name you just removed, never by a blanket "absent from `skills/`" sweep (which would catch the externally-sourced skills above).
+1. For every directory in project `framework-skills/`, copy it into the agent dir (overwrite on match, add if missing)
+2. Do **not** delete skills in the agent dir that aren't in project `framework-skills/` — they may be general-purpose skills sourced elsewhere (e.g., `code-security`, `cloudflare`, `changelog`). **Exception:** a framework skill pruned in Phase A step 4 — delete that same-named directory from each agent dir too. Match by the specific name you just removed, never by a blanket "absent from `framework-skills/`" sweep (which would catch the externally-sourced skills above).
 
 If no agent directory exists, skip Phase B — the project hasn't opted in to per-agent skill copies.
 
@@ -170,7 +172,7 @@ Apply the findings from Steps 3 and 4. Framework changes and third-party library
 
 The consumer opted into the framework; its templates, skills, scripts, linter rules, conventions, and new APIs that supersede local code are authoritative. Adopt them now — not as a follow-up.
 
-- **Synced skill content from Phase A** — `git diff skills/` for every skill that was updated. Each updated body is new framework guidance; apply it to matching surfaces in this server. Examples: `add-tool` gains a section on output formatting → audit existing tool definitions against that section; `api-errors` documents a new contract pattern → adopt across error surfaces; `security-pass` adds a new check → run it against the surface. Skill updates aren't metadata.
+- **Synced skill content from Phase A** — `git diff framework-skills/` for every skill that was updated. Each updated body is new framework guidance; apply it to matching surfaces in this server. Examples: `add-tool` gains a section on output formatting → audit existing tool definitions against that section; `api-errors` documents a new contract pattern → adopt across error surfaces; `security-pass` adds a new check → run it against the surface. Skill updates aren't metadata.
 - **Breaking changes** — fix call sites. Not optional.
 - **Deprecations** — migrate now, while context is fresh.
 - **New linter rules** — if the rule now flags existing code, fix the code; don't silence the rule.
@@ -212,7 +214,14 @@ In **Mode B**, the user already ran rebuild + test before invoking this skill, b
 
 Fix anything that fails. Re-run until clean.
 
-**Transitive advisory triage.** If `bun audit` (inside devcheck) reports a vulnerability in a transitive dep, run `bun run audit:refresh` before treating it as real. Bun's `bun update` is sticky on transitive resolutions — it keeps lockfile entries even when a parent's range allows a newer patched version. `audit:refresh` deletes `bun.lock`, reinstalls, and re-audits; if the advisory disappears, it was a stale-lockfile false positive (commit the refreshed lockfile). If it survives, it's real — patch via `package.json` `overrides` or nudge upstream.
+**Transitive advisory triage.** When `bun audit` (inside devcheck) reports a vulnerability in a transitive dependency, fix it in place, most surgical option first:
+
+1. `bun run audit:fix` (`bun audit fix`) — upgrades the vulnerable package to the lowest safe version that still satisfies every dependent's range; `package.json` changes only when an exact pin has to move. `bun audit fix --dry-run` previews; `--latest` also applies fixes the declared ranges exclude and rewrites `package.json` — the escalation, not the default.
+2. `bun update <name>` — bumps that one package wherever it appears in the lockfile, transitive entries included, when the advisory names a version `audit fix` left alone.
+3. `bun dedupe` — collapses duplicate versions of a package in the lockfile without touching `package.json` (`bun dedupe --check` lists them); the fix when the advisory sits on a stale extra copy rather than on the version the ranges resolve to.
+4. `bun run audit:refresh` — deletes `bun.lock` and reinstalls. Last resort only: every `^`-ranged dependency re-resolves to latest-in-range, so an advisory check becomes an unreviewed dependency bump, and on Bun 1.4 the fresh lockfile is written as `lockfileVersion: 2`.
+
+If the advisory survives all four, it is real — pin the patched version in `package.json` `overrides` or nudge upstream.
 
 ### 8. Summary
 
@@ -234,8 +243,8 @@ Present a concise numbered summary to the user:
 - [ ] Framework CHANGELOG reviewed if `@cyanheads/mcp-ts-core` was updated
 - [ ] Framework `CLAUDE.md`/`AGENTS.md` template reviewed; applicable updates applied or conflicts surfaced
 - [ ] Step 6 complete — all applicable framework adoption sites updated; third-party adoption decisions recorded
-- [ ] Project `skills/` synced from package (Phase A), with a change report
-- [ ] Agent skill directories (`.claude/skills/`, `.agents/skills/`, etc.) refreshed from project `skills/` (Phase B)
+- [ ] Project `framework-skills/` synced from package (Phase A), with a change report
+- [ ] Agent skill directories (`.claude/skills/`, `.agents/skills/`, etc.) refreshed from project `framework-skills/` (Phase B)
 - [ ] Framework `scripts/` and pristine reference files resynced from package via content-hash compare (Phase C), with a change report; diffs reviewed before committing
 - [ ] `bun run rebuild` succeeds (re-run after Step 6, even in Mode B)
 - [ ] `bun run devcheck` passes (includes audit + outdated)

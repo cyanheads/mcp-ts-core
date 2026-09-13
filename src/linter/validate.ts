@@ -22,7 +22,7 @@ import {
 import type { LintDiagnostic, LintInput, LintReport } from './types.js';
 
 /** Where the rule reference lives. Appended to every diagnostic message. */
-const SKILL_REFERENCE_PATH = 'skills/api-linter/SKILL.md';
+const SKILL_REFERENCE_PATH = 'framework-skills/api-linter/SKILL.md';
 
 /**
  * Maps a rule ID to its anchor in the api-linter skill doc. Most rules have
@@ -88,7 +88,7 @@ function resolveTruncationOptions(input: LintInput): TruncationOptions {
   return truncationAllowlist === undefined ? {} : { truncationAllowlist };
 }
 
-/** Appends a "See: skills/api-linter/SKILL.md#<rule>" breadcrumb to the message. */
+/** Appends a "See: framework-skills/api-linter/SKILL.md#<rule>" breadcrumb to the message. */
 function withBreadcrumb(diagnostic: LintDiagnostic): LintDiagnostic {
   return {
     ...diagnostic,

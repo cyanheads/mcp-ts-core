@@ -71,7 +71,7 @@ describe('devcheck Packaging gate (#343)', () => {
   });
 
   it('runs on an .mcpbignore alone and fails an unanchored dev-dir pattern', () => {
-    writeFileSync(resolve(dir, '.mcpbignore'), 'skills/\n');
+    writeFileSync(resolve(dir, '.mcpbignore'), 'framework-skills/\n');
     const { code, out } = runPackagingCheck(dir);
     expect(code).not.toBe(0);
     expect(packagingLine(out)).not.toContain('SKIPPED');
@@ -79,7 +79,7 @@ describe('devcheck Packaging gate (#343)', () => {
   });
 
   it('passes on an .mcpbignore whose dev-dir patterns are root-anchored', () => {
-    writeFileSync(resolve(dir, '.mcpbignore'), '/skills/\n/.claude/\n/.agents/\n');
+    writeFileSync(resolve(dir, '.mcpbignore'), '/framework-skills/\n/.claude/\n/.agents/\n');
     const { code, out } = runPackagingCheck(dir);
     expect(code).toBe(0);
     expect(packagingLine(out)).not.toContain('SKIPPED');

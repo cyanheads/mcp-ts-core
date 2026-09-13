@@ -30,7 +30,7 @@ A few things that save a round-trip:
 
 Use one of the two forms and do the triage first. The free-form path is for humans thinking out loud, not for skipping the checklist — an unverified report costs more to read than it saves to file.
 
-The full workflow ships in the package: [`skills/report-issue-framework/SKILL.md`](../skills/report-issue-framework/SKILL.md) — triage checklist, `gh` invocations with bodies that match the issue forms, title scopes, and label conventions. Read it before filing on a user's behalf.
+The full workflow ships in the package: [`framework-skills/report-issue-framework/SKILL.md`](../framework-skills/report-issue-framework/SKILL.md) — triage checklist, `gh` invocations with bodies that match the issue forms, title scopes, and label conventions. Read it before filing on a user's behalf.
 
 ## Security
 

@@ -35,18 +35,18 @@ Everything stays at **v0.1.0** through the build. Intermediate commits don't bum
 
 | Phase | Tier 1 skill(s) |
 |:---|:---|
-| Scaffold (1) | `skills/setup/SKILL.md` |
-| Initial commit, design commit, build commit, pre-launch commit (2, 5, 10, 16) | `skills/git-wrapup/SKILL.md` (commit + tag, no push) |
-| Design + validation (3, 4) | `skills/design-mcp-server/SKILL.md` |
-| Build (6) | `skills/add-tool/SKILL.md`, `skills/add-app-tool/SKILL.md`, `skills/add-resource/SKILL.md`, `skills/add-prompt/SKILL.md`, `skills/add-service/SKILL.md` |
-| Tool-def audit (7) | `skills/tool-defs-analysis/SKILL.md` |
-| Test coverage (8) | `skills/add-test/SKILL.md` |
+| Scaffold (1) | `framework-skills/setup/SKILL.md` |
+| Initial commit, design commit, build commit, pre-launch commit (2, 5, 10, 16) | `framework-skills/git-wrapup/SKILL.md` (commit + tag, no push) |
+| Design + validation (3, 4) | `framework-skills/design-mcp-server/SKILL.md` |
+| Build (6) | `framework-skills/add-tool/SKILL.md`, `framework-skills/add-app-tool/SKILL.md`, `framework-skills/add-resource/SKILL.md`, `framework-skills/add-prompt/SKILL.md`, `framework-skills/add-service/SKILL.md` |
+| Tool-def audit (7) | `framework-skills/tool-defs-analysis/SKILL.md` |
+| Test coverage (8) | `framework-skills/add-test/SKILL.md` |
 | Field-test loop (11) | → `workflows/field-test-fix.md` as a sub-loop (see Phase 11 note) |
-| Simplify (12) | `skills/code-simplifier/SKILL.md` |
-| Polish docs/meta (13) | `skills/polish-docs-meta/SKILL.md` |
-| Security pass (14) | `skills/security-pass/SKILL.md` |
-| Final wrap-up (17) | `skills/git-wrapup/SKILL.md` |
-| Release (18) | `skills/release-and-publish/SKILL.md` |
+| Simplify (12) | `framework-skills/code-simplifier/SKILL.md` |
+| Polish docs/meta (13) | `framework-skills/polish-docs-meta/SKILL.md` |
+| Security pass (14) | `framework-skills/security-pass/SKILL.md` |
+| Final wrap-up (17) | `framework-skills/git-wrapup/SKILL.md` |
+| Release (18) | `framework-skills/release-and-publish/SKILL.md` |
 
 ## Phases
 

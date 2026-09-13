@@ -30,9 +30,9 @@ function git(cwd: string, args: string[]): void {
 }
 
 function writeSkill(dir: string, name: string, version: string, body: string): void {
-  mkdirSync(resolve(dir, 'skills', name), { recursive: true });
+  mkdirSync(resolve(dir, 'framework-skills', name), { recursive: true });
   writeFileSync(
-    resolve(dir, 'skills', name, 'SKILL.md'),
+    resolve(dir, 'framework-skills', name, 'SKILL.md'),
     `---\nname: ${name}\nmetadata:\n  version: "${version}"\n---\n\n${body}\n`,
   );
 }
@@ -64,7 +64,7 @@ describe('check-skill-versions · worktree-deleted skill (#237)', () => {
     git(dir, ['commit', '-m', 'seed skills']);
 
     // Mirror the maintenance-skill prune: remove a tracked skill from the worktree.
-    git(dir, ['rm', 'skills/doomed/SKILL.md']);
+    git(dir, ['rm', 'framework-skills/doomed/SKILL.md']);
 
     const { code, stdout } = runCheck(dir);
 
@@ -81,14 +81,14 @@ describe('check-skill-versions · worktree-deleted skill (#237)', () => {
     git(dir, ['commit', '-m', 'seed skills']);
 
     // Delete one (the guarded path) and change another's body without bumping.
-    git(dir, ['rm', 'skills/doomed/SKILL.md']);
+    git(dir, ['rm', 'framework-skills/doomed/SKILL.md']);
     writeSkill(dir, 'kept', '1.0', 'Changed body, version not bumped.');
 
     const { code, stdout } = runCheck(dir);
 
     expect(code).toBe(1);
-    expect(stdout).toContain('skills/kept/SKILL.md');
-    expect(stdout).not.toContain('skills/doomed/SKILL.md');
+    expect(stdout).toContain('framework-skills/kept/SKILL.md');
+    expect(stdout).not.toContain('framework-skills/doomed/SKILL.md');
     expect(stdout).not.toContain('ENOENT');
   });
 });

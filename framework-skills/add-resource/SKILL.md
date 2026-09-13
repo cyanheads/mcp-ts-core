@@ -4,7 +4,7 @@ description: >
   Scaffold a new MCP resource definition. Use when the user asks to add a resource, expose data via URI, or create a readable endpoint.
 metadata:
   author: cyanheads
-  version: "1.5"
+  version: "1.6"
   audience: external
   type: reference
 ---
@@ -139,7 +139,7 @@ export const articleResource = resource('article://{pmid}', {
 });
 ```
 
-Without `errors[]`, the handler receives plain `Context` (no `fail` method) and throws via error factories (`notFound`, `serviceUnavailable`, …) directly. The contract is opt-in. See `skills/api-errors/SKILL.md` for the full pattern, baseline codes, and conformance rules.
+Without `errors[]`, the handler receives plain `Context` (no `fail` method) and throws via error factories (`notFound`, `serviceUnavailable`, …) directly. The contract is opt-in. See `framework-skills/api-errors/SKILL.md` for the full pattern, baseline codes, and conformance rules.
 
 ### URI template variable completion
 

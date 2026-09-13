@@ -54,7 +54,7 @@ If the server has a `server-config.ts`, check whether the Patterns section still
 
 ### 6. Update the Skills Table
 
-Check for server-specific skills added to `skills/` that aren't in the table yet. Add any missing entries. Remove framework skills the server doesn't use (rare — most are useful).
+Check for server-specific skills added to `framework-skills/` that aren't in the table yet. Add any missing entries. Remove framework skills the server doesn't use (rare — most are useful).
 
 ### 7. Update the Commands Table
 

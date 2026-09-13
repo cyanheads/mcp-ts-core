@@ -4,7 +4,7 @@ description: >
   MCP definition linter rules reference. Use when `bun run lint:mcp` or `bun run devcheck` reports a lint error or warning (`format-parity`, `schema-is-object`, `name-format`, `server-json-*`, etc.) and you need to understand the rule, its severity, and how to fix it. Every rule ID the linter emits has an entry in this doc.
 metadata:
   author: cyanheads
-  version: "1.13"
+  version: "1.14"
   audience: external
   type: reference
 ---
@@ -18,7 +18,7 @@ The linter validates tool, resource, and prompt definitions against the MCP spec
 | `bun run lint:mcp` | Manual or CI | Prints errors + warnings, exits non-zero on errors. |
 | `bun run devcheck` | Pre-commit workflow | Wraps `lint:mcp` alongside typecheck, format, `bun audit`, `bun outdated`. |
 
-Both surface the same `LintReport` from `validateDefinitions()` (exported from `@cyanheads/mcp-ts-core/linter`). Each diagnostic has a stable `rule` ID — that's the anchor you land on via the `See: skills/api-linter/SKILL.md#<rule>` breadcrumb appended to every message.
+Both surface the same `LintReport` from `validateDefinitions()` (exported from `@cyanheads/mcp-ts-core/linter`). Each diagnostic has a stable `rule` ID — that's the anchor you land on via the `See: framework-skills/api-linter/SKILL.md#<rule>` breadcrumb appended to every message.
 
 **Severity:**
 - **error** — MUST-level spec violation; blocks `devcheck`.
@@ -615,7 +615,7 @@ Validate the `landing` config passed to `createApp()` (the config object that dr
 | `landing-theme-accent` | error | `theme.accent` is present but not a string |
 | `landing-theme-accent-format` | error | `theme.accent` doesn't match the expected color format |
 
-Diagnostic anchors for these rules are the rule ID — e.g. `skills/api-linter/SKILL.md#landing-shape`. Pass `landing` to `validateDefinitions({ landing, tools, resources, prompts })` to opt in.
+Diagnostic anchors for these rules are the rule ID — e.g. `framework-skills/api-linter/SKILL.md#landing-shape`. Pass `landing` to `validateDefinitions({ landing, tools, resources, prompts })` to opt in.
 
 ---
 
@@ -692,7 +692,7 @@ throw serviceUnavailable('Upstream failed', { upstreamError: e }, { cause: e });
 
 Validate the optional `errors[]` declarative contract on tool/resource definitions. Structural rules check the shape of contract entries; conformance rules cross-check the handler body against the declared codes.
 
-When a contract is declared, the handler receives a typed `ctx.fail(reason, …)` keyed by the declared reason union. See `skills/api-errors/SKILL.md` for runtime semantics.
+When a contract is declared, the handler receives a typed `ctx.fail(reason, …)` keyed by the declared reason union. See `framework-skills/api-errors/SKILL.md` for runtime semantics.
 
 ### error-contract-type
 

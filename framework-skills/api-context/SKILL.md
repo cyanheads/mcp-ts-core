@@ -4,7 +4,7 @@ description: >
   Canonical reference for the unified `Context` object passed to every tool and resource handler in `@cyanheads/mcp-ts-core`. Covers the full interface, its `RequestContext` base, all sub-APIs (`ctx.log`, `ctx.state`, `ctx.requestInput`, `ctx.inputs`, `ctx.enrich`, `ctx.content`), and when to use each.
 metadata:
   author: cyanheads
-  version: "2.2"
+  version: "2.3"
   audience: external
   type: reference
 ---
@@ -594,7 +594,7 @@ async handler(input, ctx) {
 }
 ```
 
-The contract is opt-in. See `skills/api-errors/SKILL.md` for the full type-driven pattern, lint rules, and baseline-codes guidance.
+The contract is opt-in. See `framework-skills/api-errors/SKILL.md` for the full type-driven pattern, lint rules, and baseline-codes guidance.
 
 ---
 
@@ -737,7 +737,7 @@ async handler(input, ctx) {
 
 The `capped-list-no-truncation` lint rule fires when a cap-like input + array output shape is present without any of: `truncated` or `totalCount` in the declared `enrichment`, or `truncated` or `totalCount` in `output`. Using `ctx.enrich.total(n)` (writes `totalCount`) is also recognized as honest disclosure.
 
-See `add-tool`'s **Tool Response Design** and `skills/api-linter` (`enrichment-*` rules) for the full pattern. Test enrichment with `getEnrichment(ctx)` from `@cyanheads/mcp-ts-core/testing`.
+See `add-tool`'s **Tool Response Design** and `framework-skills/api-linter` (`enrichment-*` rules) for the full pattern. Test enrichment with `getEnrichment(ctx)` from `@cyanheads/mcp-ts-core/testing`.
 
 ---
 

@@ -696,7 +696,7 @@ const ALL_CHECKS: Check[] = [
     canFix: false,
     getCommand: () => ['bun', 'run', 'scripts/lint-mcp.ts'],
     tip: (c) =>
-      `Fix definition errors above — each diagnostic links to its rule in ${c.bold('skills/api-linter/SKILL.md')}.`,
+      `Fix definition errors above — each diagnostic links to its rule in ${c.bold('framework-skills/api-linter/SKILL.md')}.`,
   },
   {
     name: 'Packaging',
@@ -771,16 +771,19 @@ const ALL_CHECKS: Check[] = [
     name: 'Skills Sync',
     flag: '--no-skills-sync',
     canFix: false,
-    // Compares canonical skills/ against local mirrors (.agents/skills, .claude/skills).
-    // Skipped when skills/ or both mirrors are absent (non-mirrored projects).
-    // Drift is demoted to a warning via isSuccess — intentional ignores live in
-    // devcheck.config.json `skillsSync.ignore`.
+    // Compares canonical framework-skills/ against local mirrors (.agents/skills, .claude/skills).
+    // Skipped when framework-skills/ or both mirrors are absent (non-mirrored projects),
+    // except that a pre-0.13 `skills/` tree always runs — absent or alongside
+    // `framework-skills/` — so the script's migration message surfaces. Drift is demoted to
+    // a warning via isSuccess — intentional ignores live in devcheck.config.json
+    // `skillsSync.ignore`.
     getCommand: () => {
-      const hasSkills = existsSync(path.join(ROOT_DIR, 'skills'));
+      const hasSkills = existsSync(path.join(ROOT_DIR, 'framework-skills'));
+      const hasLegacySkills = existsSync(path.join(ROOT_DIR, 'skills'));
       const hasMirrors =
         existsSync(path.join(ROOT_DIR, '.agents/skills')) ||
         existsSync(path.join(ROOT_DIR, '.claude/skills'));
-      if (!hasSkills || !hasMirrors) return null;
+      if (!hasLegacySkills && (!hasSkills || !hasMirrors)) return null;
       return ['bun', 'run', 'scripts/check-skills-sync.ts'];
     },
     isSuccess: (result) => {
@@ -789,18 +792,18 @@ const ALL_CHECKS: Check[] = [
       return { success: true, warning: firstLine };
     },
     tip: (c) =>
-      `Propagate ${c.bold('skills/')} to ${c.bold('.agents/skills/')} and ${c.bold('.claude/skills/')}, or add entries to ${c.bold('devcheck.config.json')} ${c.bold('skillsSync.ignore')}.`,
+      `Propagate ${c.bold('framework-skills/')} to ${c.bold('.agents/skills/')} and ${c.bold('.claude/skills/')}, or add entries to ${c.bold('devcheck.config.json')} ${c.bold('skillsSync.ignore')}.`,
   },
   {
     name: 'Skill Versions',
     flag: '--no-skill-versions',
     canFix: false,
-    // Flags skills/<name>/SKILL.md body changes (vs HEAD) that lack a metadata.version
-    // bump (#99). Skipped when skills/ is absent. Drift is demoted to a warning via
+    // Flags framework-skills/<name>/SKILL.md body changes (vs HEAD) that lack a metadata.version
+    // bump (#99). Skipped when framework-skills/ is absent. Drift is demoted to a warning via
     // isSuccess — the typo/whitespace carve-out lives in devcheck.config.json
     // `skillVersions.ignore`.
     getCommand: () => {
-      if (!existsSync(path.join(ROOT_DIR, 'skills'))) return null;
+      if (!existsSync(path.join(ROOT_DIR, 'framework-skills'))) return null;
       return ['bun', 'run', 'scripts/check-skill-versions.ts'];
     },
     isSuccess: (result) => {
@@ -903,7 +906,7 @@ const ALL_CHECKS: Check[] = [
   {
     name: 'Security Audit',
     flag: '--no-audit',
-    canFix: false, // audit --fix exists but often requires manual review.
+    canFix: false, // `audit fix` exists but often requires manual review.
     slowCheck: true,
     getCommand: () => [PM_CMD, 'audit'],
     isSuccess: (result, _mode) => {
@@ -951,7 +954,7 @@ const ALL_CHECKS: Check[] = [
       return true;
     },
     tip: (c) =>
-      `Direct dependency vulnerabilities found. Run ${c.bold(`${PM_CMD} update`)} or ${c.bold(`${PM_CMD} audit --fix`)} to resolve.`,
+      `Direct dependency vulnerabilities found. Run ${c.bold(`${PM_CMD} audit fix`)} or ${c.bold(`${PM_CMD} update <pkg>`)} to resolve.`,
   },
   {
     name: 'Dependencies (Outdated)',

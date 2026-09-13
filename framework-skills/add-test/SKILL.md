@@ -4,7 +4,7 @@ description: >
   Scaffold a test file for an existing tool, resource, or service. Use when the user asks to add tests, improve coverage, or when a definition exists without a matching test file.
 metadata:
   author: cyanheads
-  version: "1.6"
+  version: "1.7"
   audience: external
   type: reference
 ---
@@ -15,7 +15,7 @@ Tests use Vitest and `createMockContext` from `@cyanheads/mcp-ts-core/testing`. 
 
 For the full `createMockContext` API and testing patterns, read:
 
-    skills/api-testing/SKILL.md
+    framework-skills/api-testing/SKILL.md
 
 ## Steps
 
