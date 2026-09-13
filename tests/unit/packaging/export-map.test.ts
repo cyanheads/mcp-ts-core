@@ -98,7 +98,7 @@ describe('package export map', () => {
         'dist/',
         'framework-skills/',
         'templates/',
-        'tsconfig.base.json',
+        'config/tsconfig.base.json',
         'vitest.config.base.mjs',
         'biome.json',
       ]),

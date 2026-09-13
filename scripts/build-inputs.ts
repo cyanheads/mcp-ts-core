@@ -12,6 +12,6 @@ export const BUILD_INPUT_PATHS = [
   'package.json',
   'scripts/build.ts',
   'tsconfig.json',
-  'tsconfig.base.json',
-  'tsconfig.build.json',
+  'config/tsconfig.base.json',
+  'config/tsconfig.build.json',
 ] as const;

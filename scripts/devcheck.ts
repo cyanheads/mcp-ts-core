@@ -866,12 +866,12 @@ const ALL_CHECKS: Check[] = [
     // globals cannot share one with @types/node's (#397). It reads the built
     // declarations, so it only has something to check after a build.
     getCommand: (ctx) => {
-      if (!existsSync(path.join(ctx.rootDir, 'tsconfig.worker.json'))) return null;
+      if (!existsSync(path.join(ctx.rootDir, 'config', 'tsconfig.worker.json'))) return null;
       if (!existsSync(path.join(ctx.rootDir, 'dist'))) return null;
       return [
         path.join(ctx.rootDir, 'node_modules', '.bin', 'tsc'),
         '--project',
-        'tsconfig.worker.json',
+        'config/tsconfig.worker.json',
         '--noEmit',
       ];
     },

@@ -1,0 +1,20 @@
+{
+  "extends": "../tsconfig.json",
+  "compilerOptions": {
+    "rootDir": "../src",
+    // Node globals only — see tsconfig.json's `types` note (#397).
+    "types": ["node"],
+
+    // Restated, not inherited. tsc resolves a relative `paths` entry against the
+    // file that declares it — `../tsconfig.json`, at the repo root — while
+    // tsc-alias resolves the flattened value against the entry config's own
+    // directory. Inheriting the root's `./src/*` therefore points tsc-alias at
+    // `config/src/`, it matches nothing, and the emitted `@/…` specifiers ship
+    // unrewritten. Declaring the mapping here keeps both resolvers on `src/`.
+    "paths": {
+      "@/*": ["../src/*"]
+    }
+  },
+  "include": ["../src/**/*"],
+  "exclude": ["../node_modules", "../dist", "../templates", "../examples", "../src/**/*.test.ts"]
+}

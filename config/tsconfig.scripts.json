@@ -1,5 +1,5 @@
 {
-  "extends": "./tsconfig.json",
+  "extends": "../tsconfig.json",
   "compilerOptions": {
     // Scripts don't need to emit code - they run directly with bun/tsx
     "noEmit": true,
@@ -17,6 +17,6 @@
     "allowSyntheticDefaultImports": true,
     "skipLibCheck": true
   },
-  "include": ["scripts/**/*.ts"],
-  "exclude": ["node_modules", "dist"]
+  "include": ["../scripts/**/*.ts"],
+  "exclude": ["../node_modules", "../dist"]
 }

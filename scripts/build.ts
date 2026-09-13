@@ -95,8 +95,8 @@ async function main() {
   const projectIdx = process.argv.indexOf('--project');
   const project =
     projectIdx !== -1
-      ? (process.argv[projectIdx + 1] ?? 'tsconfig.build.json')
-      : 'tsconfig.build.json';
+      ? (process.argv[projectIdx + 1] ?? 'config/tsconfig.build.json')
+      : 'config/tsconfig.build.json';
 
   console.log(`\x1b[1mBuilding ${pkg.name}@${pkg.version}\x1b[0m`);
   console.log(`\x1b[2m  tsconfig: ${project}\x1b[0m`);

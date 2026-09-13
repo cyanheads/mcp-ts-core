@@ -87,7 +87,7 @@ describe('Node/workerd type-environment isolation (#397)', () => {
   });
 
   it('keeps the ambient Cloudflare globals out of every Node-side program', () => {
-    for (const config of ['tsconfig.json', 'tsconfig.build.json']) {
+    for (const config of ['tsconfig.json', 'config/tsconfig.build.json']) {
       const types = JSON.parse(
         readFileSync(join(ROOT, config), 'utf-8').replace(/^\s*\/\/.*$/gm, ''),
       ).compilerOptions.types as string[];
@@ -98,10 +98,14 @@ describe('Node/workerd type-environment isolation (#397)', () => {
 
   it('keeps a program that does load them, so Worker coverage is not dropped', () => {
     const worker = JSON.parse(
-      readFileSync(join(ROOT, 'tsconfig.worker.json'), 'utf-8').replace(/^\s*\/\/.*$/gm, ''),
+      readFileSync(join(ROOT, 'config', 'tsconfig.worker.json'), 'utf-8').replace(
+        /^\s*\/\/.*$/gm,
+        '',
+      ),
     );
     expect(worker.compilerOptions.types).toContain('@cloudflare/workers-types');
     // It reads built declarations, so no Node-typed source is recompiled there.
-    expect(worker.compilerOptions.paths['@/*']).toEqual(['./dist/*']);
+    // The path is relative to config/, where the file now lives.
+    expect(worker.compilerOptions.paths['@/*']).toEqual(['../dist/*']);
   });
 });

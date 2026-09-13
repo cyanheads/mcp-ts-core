@@ -25,7 +25,7 @@
     "templates/",
     "AGENTS.md",
     "CLAUDE.md",
-    "tsconfig.base.json",
+    "config/tsconfig.base.json",
     "vitest.config.base.mjs",
     "biome.json"
   ],
@@ -123,7 +123,7 @@
       "import": "./dist/testing/vitest.js",
       "default": "./dist/testing/vitest.js"
     },
-    "./tsconfig.base.json": "./tsconfig.base.json",
+    "./tsconfig.base.json": "./config/tsconfig.base.json",
     "./vitest.config": "./vitest.config.base.mjs",
     "./biome": "./biome.json",
     "./package.json": "./package.json"
@@ -163,8 +163,8 @@
     "format": "biome check --write .",
     "format:unsafe": "biome check --write --unsafe .",
     "typecheck": "bunx tsc --noEmit",
-    "typecheck:scripts": "bunx tsc --project tsconfig.scripts.json --noEmit",
-    "typecheck:worker": "bunx tsc --project tsconfig.worker.json --noEmit",
+    "typecheck:scripts": "bunx tsc --project config/tsconfig.scripts.json --noEmit",
+    "typecheck:worker": "bunx tsc --project config/tsconfig.worker.json --noEmit",
     "list-skills": "bun run scripts/list-skills.ts",
     "tree": "bun run scripts/tree.ts",
     "fetch-spec": "bun run scripts/fetch-openapi-spec.ts",
@@ -234,7 +234,7 @@
     "js-yaml": "^5.4.1",
     "linkedom": "^0.18.13",
     "node-cron": "^4.6.0",
-    "openai": "^7.10.0",
+    "openai": "^7.15.0",
     "papaparse": "^5.7.0",
     "partial-json": "^0.1.7",
     "pdf-lib": "^1.17.1",

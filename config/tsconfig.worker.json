@@ -14,7 +14,7 @@
   // globals. Build first; `bun run typecheck:worker` is the entry point.
   "extends": "./tsconfig.base.json",
   "compilerOptions": {
-    "rootDir": ".",
+    "rootDir": "..",
     "noEmit": true,
     "tsBuildInfoFile": ".tsbuildinfo.worker",
     "types": [
@@ -24,10 +24,10 @@
       "@cloudflare/vitest-pool-workers/types"
     ],
     "paths": {
-      "@/*": ["./dist/*"],
-      "tests/*": ["./tests/*"]
+      "@/*": ["../dist/*"],
+      "tests/*": ["../tests/*"]
     }
   },
-  "include": ["tests/worker/**/*", "tests/fixtures/worker-runtime.fixture.ts"],
-  "exclude": ["node_modules", "dist", "templates", "examples"]
+  "include": ["../tests/worker/**/*", "../tests/fixtures/worker-runtime.fixture.ts"],
+  "exclude": ["../node_modules", "../dist", "../templates", "../examples"]
 }

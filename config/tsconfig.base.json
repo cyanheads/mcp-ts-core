@@ -14,7 +14,7 @@
 
     "esModuleInterop": true,
 
-    "outDir": "./dist",
+    "outDir": "../dist",
     "declaration": true,
     "declarationMap": true,
     "sourceMap": true,
@@ -34,7 +34,7 @@
     "allowJs": false,
 
     "paths": {
-      "@/*": ["./src/*"]
+      "@/*": ["../src/*"]
     }
   }
 }
