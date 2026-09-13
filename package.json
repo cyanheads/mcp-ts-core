@@ -21,7 +21,7 @@
     "scripts/list-skills.ts",
     "scripts/release-github.ts",
     "scripts/tree.ts",
-    "skills/",
+    "framework-skills/",
     "templates/",
     "AGENTS.md",
     "CLAUDE.md",
@@ -189,7 +189,7 @@
     "test:ui": "bunx vitest --ui",
     "test:coverage": "bunx vitest run --coverage",
     "audit": "bun audit",
-    "audit:fix": "bun audit --fix",
+    "audit:fix": "bun audit fix",
     "audit:refresh": "rm -f bun.lock && bun install && bun audit",
     "changelog:build": "bun run scripts/build-changelog.ts",
     "changelog:check": "bun run scripts/build-changelog.ts --check",
@@ -197,9 +197,9 @@
     "publish-mcp": "mcp-publisher login github -token \"$(security find-generic-password -a \"$USER\" -s mcp-publisher-github-pat -w)\" && mcp-publisher publish"
   },
   "devDependencies": {
-    "@biomejs/biome": "2.5.12",
+    "@biomejs/biome": "2.5.13",
     "@cloudflare/vitest-pool-workers": "^0.22.0",
-    "@cloudflare/workers-types": "5.20260905.1",
+    "@cloudflare/workers-types": "5.20260910.1",
     "@duckdb/node-api": "^1.5.5-r.4",
     "@hono/otel": "^1.1.2",
     "@opentelemetry/exporter-metrics-otlp-http": "^0.222.0",
@@ -214,7 +214,7 @@
     "@socketsecurity/bun-security-scanner": "^1.1.2",
     "@supabase/supabase-js": "^2.116.0",
     "@types/bun": "^1.4.2",
-    "@types/node": "26.4.0",
+    "@types/node": "26.5.1",
     "@types/papaparse": "^5.5.2",
     "@types/sanitize-html": "^2.16.1",
     "@types/validator": "^13.15.10",
@@ -247,7 +247,7 @@
     "typescript-v6": "npm:typescript@^6.0.3",
     "unpdf": "^1.8.1",
     "validator": "^13.15.35",
-    "vite": "8.2.2",
+    "vite": "8.3.0",
     "vitest": "^4.1.11"
   },
   "keywords": [
@@ -309,7 +309,7 @@
     "hono": "^4.13.7",
     "jose": "^6.2.12",
     "pino": "^10.3.1",
-    "zod": "^4.6.0"
+    "zod": "^4.6.1"
   },
   "peerDependencies": {
     "@duckdb/node-api": "^1.5.5-r.1",

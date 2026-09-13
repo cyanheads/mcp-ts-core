@@ -24,6 +24,7 @@
     "rebuild": "bun run scripts/clean.ts && bun run scripts/build.ts",
     "clean": "bun run scripts/clean.ts",
     "devcheck": "bun run scripts/devcheck.ts",
+    "audit:fix": "bun audit fix",
     "audit:refresh": "rm -f bun.lock && bun install && bun audit",
     "tree": "bun run scripts/tree.ts",
     "list-skills": "bun run scripts/list-skills.ts",
@@ -65,9 +66,9 @@
     "zod": "{{ZOD_VERSION}}"
   },
   "devDependencies": {
-    "@biomejs/biome": "2.5.12",
+    "@biomejs/biome": "2.5.13",
     "@socketsecurity/bun-security-scanner": "^1.1.2",
-    "@types/node": "26.4.0",
+    "@types/node": "26.5.1",
     "@vitest/coverage-istanbul": "4.1.11",
     "depcheck": "^1.4.7",
     "fast-check": "^4.9.0",
