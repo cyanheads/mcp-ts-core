@@ -4,7 +4,7 @@ description: >
   Land working-tree changes as logical commits — the work grouped by concern, topped by a release commit (version bump, changelog, regenerated artifacts). Verify, commit. Stops at "committed locally on main" — or, when the project releases through a release PR, at "release branch pushed, PR open". No tag, no push to main, no publish: the release-and-publish skill merges, tags, and ships from here. Distilled from the git_wrapup_instructions protocol.
 metadata:
   author: cyanheads
-  version: "1.16"
+  version: "1.17"
   audience: external
   type: workflow
 ---
@@ -82,7 +82,7 @@ Every file that declares a version must be updated. Skip any file that doesn't e
 - `server.json` — top-level `version` AND every `packages[].version` entry
 - `manifest.json` (if present) — `version`. Verify `name` is the bare package name (e.g. `bls-mcp-server`, not `@cyanheads/bls-mcp-server`)
 - `.claude-plugin/plugin.json` and `.codex-plugin/plugin.json` (if present) — `version`. Packaging validation fails on a mismatch; `.codex-plugin/mcp.json` is connection config and carries none
-- `README.md` — version badge
+- `README.md` — version badge. Packaging validation fails on a mismatch with `package.json`; a literal `-` in a prerelease is escaped as `--` (`Version-0.14.0--rc.1-`)
 - `CLAUDE.md` / `AGENTS.md` — if they pin a version string
 - `Dockerfile` — OCI labels if they pin the version
 
@@ -269,7 +269,7 @@ If the working tree isn't clean or the release commit isn't at HEAD, something w
 ## Checklist
 
 - [ ] Diff reviewed end-to-end before version bump
-- [ ] Version bumped in every declaring file (`package.json`, `server.json`, `manifest.json`, `.claude-plugin/plugin.json`, `.codex-plugin/plugin.json`, README badge, `CLAUDE.md`/`AGENTS.md` if they pin a version) — verify by command, not by eye: `v=$(jq -r .version package.json); grep -rl "$v" package.json server.json manifest.json .claude-plugin/plugin.json .codex-plugin/plugin.json README.md | wc -l` must equal the count of files that exist, and `grep -c "Version-$v-" README.md` must print `1`. The README badge is the one no lint reads, so it is the one that ships stale
+- [ ] Version bumped in every declaring file (`package.json`, `server.json`, `manifest.json`, `.claude-plugin/plugin.json`, `.codex-plugin/plugin.json`, README badge, `CLAUDE.md`/`AGENTS.md` if they pin a version) — verify by command, not by eye: `v=$(jq -r .version package.json); grep -rl "$v" package.json server.json manifest.json .claude-plugin/plugin.json .codex-plugin/plugin.json README.md | wc -l` must equal the count of files that exist, and `grep -c "Version-$v-" README.md` must print `1`. `lint:packaging` checks the README badge against `package.json`, so a stale badge now fails `devcheck` instead of shipping unnoticed — the grep still catches a badge written in a shape the check skips
 - [ ] GH issues addressed by this work commented with what landed (if working from GH issues)
 - [ ] Docs updated for any new or changed features
 - [ ] Changelog authored at `changelog/<major.minor>.x/<version>.md`

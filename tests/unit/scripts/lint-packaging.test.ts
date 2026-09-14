@@ -20,6 +20,7 @@ import {
   checkManifestIdentity,
   checkManifestUserConfigWiring,
   checkPluginManifests,
+  checkReadmeVersionBadge,
   NATIVE_BINDING_ENTRY,
 } from '../../../scripts/lint-packaging.js';
 
@@ -594,5 +595,90 @@ describe('lint-packaging · plugin marketplace manifests (check 10, #240)', () =
       },
     };
     expect(checkPluginManifests({ codexMcp }, UNSCOPED, FULL, VERSION)).toEqual([]);
+  });
+});
+
+describe('lint-packaging · README version badge (check 12, #418)', () => {
+  /** The badge as a README carries it, in the two suffix forms in use. */
+  const badge = (segment: string, suffix = 'blue.svg?style=flat-square'): string =>
+    `# Server\n\n[![Version](https://img.shields.io/badge/Version-${segment}-${suffix})](./CHANGELOG.md)\n`;
+
+  it('passes when the badge equals the package version', () => {
+    expect(checkReadmeVersionBadge(badge('0.13.1'), '0.13.1')).toEqual([]);
+    expect(checkReadmeVersionBadge(badge('0.13.1', 'blue.svg'), '0.13.1')).toEqual([]);
+  });
+
+  it('fails a badge left one version behind, naming both values', () => {
+    const errors = checkReadmeVersionBadge(badge('0.13.0'), '0.13.1');
+    expect(errors).toHaveLength(1);
+    expect(errors[0]).toContain('"0.13.0"');
+    expect(errors[0]).toContain('"0.13.1"');
+    expect(errors[0]).toContain('README.md');
+  });
+
+  it('skips a README with no version badge at all', () => {
+    expect(checkReadmeVersionBadge('# Server\n\nSome prose.\n', '0.13.1')).toEqual([]);
+  });
+
+  it('skips a README carrying only a live npm/v badge, which cannot drift', () => {
+    const readme =
+      '# Server\n\n[![npm](https://img.shields.io/npm/v/@cyanheads/pubmed-mcp-server)](https://npmjs.com/)\n';
+    expect(checkReadmeVersionBadge(readme, '0.13.1')).toEqual([]);
+  });
+
+  it('skips an absent README — the caller passes empty content', () => {
+    expect(checkReadmeVersionBadge('', '0.13.1')).toEqual([]);
+  });
+
+  it('skips when package.json declares no version, matching the plugin-manifest fail-safe', () => {
+    expect(checkReadmeVersionBadge(badge('0.13.0'), undefined)).toEqual([]);
+    expect(checkReadmeVersionBadge(badge('0.13.0'), '')).toEqual([]);
+  });
+
+  it('decodes the shields.io `--` escape so a prerelease badge matches', () => {
+    expect(checkReadmeVersionBadge(badge('0.14.0--rc.1'), '0.14.0-rc.1')).toEqual([]);
+  });
+
+  it('fails a prerelease badge that is genuinely behind', () => {
+    const errors = checkReadmeVersionBadge(badge('0.14.0--rc.1'), '0.14.0-rc.2');
+    expect(errors).toHaveLength(1);
+    expect(errors[0]).toContain('"0.14.0-rc.1"');
+  });
+
+  it('fails an unparseable badge segment rather than skipping it', () => {
+    for (const segment of ['', 'latest']) {
+      const errors = checkReadmeVersionBadge(badge(segment), '0.13.1');
+      expect(errors).toHaveLength(1);
+      expect(errors[0]).toContain('README.md');
+      expect(errors[0]).toMatch(/version badge/);
+    }
+  });
+
+  it('ignores other shields badges that carry an escaped `-`', () => {
+    const readme = `${badge('0.13.1')}\n[![MCP Spec](https://img.shields.io/badge/MCP%20Spec-2026--07--28-8A2BE2.svg)](https://modelcontextprotocol.io/)\n`;
+    expect(checkReadmeVersionBadge(readme, '0.13.1')).toEqual([]);
+  });
+
+  it('accepts a prerelease and build segment together', () => {
+    expect(
+      checkReadmeVersionBadge(badge('1.2.3--alpha.1+build.5'), '1.2.3-alpha.1+build.5'),
+    ).toEqual([]);
+  });
+
+  it('rejects a dash-run segment in bounded time', () => {
+    // A semver core followed by a long run of escaped dashes and a character
+    // no segment admits: unreadable either way, but a repeated `(?:[-+]…)*`
+    // splits the run two ways per dash and backtracks through every split
+    // before saying so. V8 runs that to completion — the `node` lane is where
+    // this case goes red; JSC abandons the search early, so under Bun it only
+    // pins that the segment is still rejected.
+    const readme = badge(`0.0.0+${'--'.repeat(40)}!`);
+
+    const started = performance.now();
+    const errors = checkReadmeVersionBadge(readme, '0.13.1');
+    expect(performance.now() - started).toBeLessThan(2_000);
+
+    expect(errors).toHaveLength(1);
+    expect(errors[0]).toMatch(/not a readable version/);
   });
 });

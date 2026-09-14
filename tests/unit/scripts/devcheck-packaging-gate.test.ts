@@ -64,10 +64,45 @@ describe('devcheck Packaging gate (#343)', () => {
     rmSync(dir, { recursive: true, force: true });
   });
 
-  it('skips cleanly with no manifest, plugin manifest, or .mcpbignore', () => {
+  it('skips cleanly with no manifest, plugin manifest, .mcpbignore, or README', () => {
     const { code, out } = runPackagingCheck(dir);
     expect(code).toBe(0);
     expect(packagingLine(out)).toContain('SKIPPED');
+  });
+
+  describe('README as the only packaging input (#418)', () => {
+    /** Writes a README carrying a static version badge; the scaffold's package.json is 0.0.0. */
+    const writeReadme = (version: string): void => {
+      writeFileSync(
+        resolve(dir, 'README.md'),
+        `# scaffold\n\n[![Version](https://img.shields.io/badge/Version-${version}-blue.svg)](./CHANGELOG.md)\n`,
+      );
+    };
+
+    it('runs on a README alone and passes a badge that matches package.json', () => {
+      writeReadme('0.0.0');
+      const { code, out } = runPackagingCheck(dir);
+      expect(packagingLine(out)).not.toContain('SKIPPED');
+      expect(out).toContain('Packaging alignment OK.');
+      expect(code).toBe(0);
+    });
+
+    it('fails a version badge left behind by a release', () => {
+      writeReadme('0.0.1');
+      const { code, out } = runPackagingCheck(dir);
+      expect(code).not.toBe(0);
+      expect(out).toContain('README.md version badge');
+      expect(out).toContain('"0.0.1"');
+      expect(out).toContain('0.0.0');
+    });
+
+    it('still skips a README carrying no version badge', () => {
+      writeFileSync(resolve(dir, 'README.md'), '# scaffold\n\nSome prose.\n');
+      const { code, out } = runPackagingCheck(dir);
+      expect(packagingLine(out)).not.toContain('SKIPPED');
+      expect(out).toContain('Packaging alignment OK.');
+      expect(code).toBe(0);
+    });
   });
 
   it('runs on an .mcpbignore alone and fails an unanchored dev-dir pattern', () => {

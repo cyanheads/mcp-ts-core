@@ -708,12 +708,15 @@ async function verifyCli(
   const typecheck = await run(tsc, ['--project', 'tsconfig.json', '--pretty', 'false'], projectDir);
   assertSuccess(typecheck, 'installed CLI scaffold typecheck (src + tests)');
 
-  const build = await run(
-    tsc,
-    ['--project', 'tsconfig.build.json', '--pretty', 'false'],
-    projectDir,
-  );
-  assertSuccess(build, 'installed CLI scaffold build config');
+  // Build through the scaffold's own `build` script — `scripts/build.ts`, which
+  // ships in the package and resolves its tsconfig itself. Invoking
+  // `tsc --project tsconfig.build.json` here instead would verify the
+  // scaffold's config while leaving the shipped script's default path
+  // unexercised, which is how a default matching only this repo's layout
+  // reached a release (#440).
+  const build = await run(bunBin, ['run', 'build'], projectDir);
+  assertSuccess(build, 'installed CLI scaffold build (scripts/build.ts)');
+  await access(join(projectDir, 'dist', 'index.js'), constants.R_OK);
 
   const vitest = join(projectDir, 'node_modules', 'vitest', 'vitest.mjs');
   const tests = await run(bunBin, [vitest, 'run', '--config', 'vitest.config.ts'], projectDir);
