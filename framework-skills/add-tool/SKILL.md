@@ -4,7 +4,7 @@ description: >
   Scaffold a new MCP tool definition. Use when the user asks to add a tool, create a new tool, or implement a new capability for the server.
 metadata:
   author: cyanheads
-  version: "2.25"
+  version: "2.26"
   audience: external
   type: reference
 ---
@@ -221,8 +221,8 @@ export const submitObservations = getServerConfig().enableWrites
 | Surface | Disabled tools? |
 |:---|:---|
 | `tools/list` (MCP protocol — what clients call) | **No** — disabled tools are skipped at registration |
-| `/.well-known/mcp.json` `definitions.tools` (Server Card) | **Yes**, with `disabled` field — discovery agents see them as present-but-uncallable |
-| `/` (HTML landing page) | **Yes**, in a 4th muted bucket after `read \| write \| destructive` |
+| `/.well-known/mcp.json` (Server Card) | **No** — the card carries no per-tool entries at all, so a discovery agent reading it cannot see a disabled tool |
+| `/` (HTML landing page) | **Yes**, in a 4th muted bucket after `read \| write \| destructive` — the only surface where a disabled tool is visible |
 
 The wrapper preserves all original definition fields (handler, schemas, auth scopes, error contracts) — when re-enabled, the tool already conforms to every lint rule.
 
