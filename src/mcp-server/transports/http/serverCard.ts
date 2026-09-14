@@ -18,8 +18,32 @@ import { resolvePublicOrigin } from '@/mcp-server/transports/http/publicOrigin.j
 import { logger } from '@/utils/internal/logger.js';
 import { requestContextService, withExtra } from '@/utils/internal/requestContext.js';
 
+/**
+ * Reverse-DNS key carrying the resolved HTTP session posture in the card's
+ * `_meta`. Namespaced to this framework because the value is an extension,
+ * not a spec field.
+ */
+export const SESSION_MODE_META_KEY = 'io.github.cyanheads.mcp-ts-core/sessionMode';
+
 /** Shape of the SEP-1649 Server Card document. */
 export interface ServerCard {
+  /**
+   * Extension data, keyed by reverse-DNS namespace.
+   *
+   * Carries {@link SESSION_MODE_META_KEY} — the session mode the server
+   * actually runs in, `stateful` or `stateless`, already resolved so `auto`
+   * never appears. A client reading only this document can decide whether to
+   * hold an `Mcp-Session-Id`.
+   *
+   * `_meta` because SEP-2127 closes the card's top-level field set
+   * (`$schema`, `name`, `version`, `description`, `title?`, `websiteUrl?`,
+   * `repository?`, `icons?`, `remotes?`, `_meta?`) and sanctions `_meta` as
+   * the one extension point. The SEP's rationale reserves `_meta` against
+   * advertising MCP capabilities or negotiated extension support; session
+   * posture is neither — it is a property of how this deployment is run,
+   * fixed before any client connects.
+   */
+  _meta?: Record<string, unknown>;
   /** JSON Schema identifier — hint to validators. */
   $schema?: string;
   authentication: ServerCardAuth;
@@ -82,6 +106,7 @@ export function buildServerCard(manifest: ServerManifest, origin: string): Serve
     ...(manifest.extensions && { extensions: manifest.extensions }),
     ...(manifest.server.homepage && { documentation: manifest.server.homepage }),
     generated_at: manifest.builtAt,
+    _meta: { [SESSION_MODE_META_KEY]: manifest.transport.sessionMode },
   };
 
   return card;

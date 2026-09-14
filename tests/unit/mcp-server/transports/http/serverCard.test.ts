@@ -128,6 +128,41 @@ describe('buildServerCard', () => {
     expect(card.extensions).toEqual({ 'vendor/ext': { enabled: true } });
   });
 
+  test('publishes the resolved stateless session mode under the namespaced _meta key', () => {
+    const card = buildServerCard(defaultServerManifest, 'https://example.com');
+    expect(card._meta).toEqual({
+      'io.github.cyanheads.mcp-ts-core/sessionMode': 'stateless',
+    });
+  });
+
+  test('publishes the resolved stateful session mode under the namespaced _meta key', () => {
+    const manifest: ServerManifest = {
+      ...defaultServerManifest,
+      transport: { ...defaultServerManifest.transport, sessionMode: 'stateful' },
+    };
+    const card = buildServerCard(manifest, 'https://example.com');
+    expect(card._meta).toEqual({
+      'io.github.cyanheads.mcp-ts-core/sessionMode': 'stateful',
+    });
+  });
+
+  test('adds the session mode without disturbing any field the card already emitted', () => {
+    const { _meta, ...rest } = buildServerCard(defaultServerManifest, 'https://example.com');
+
+    // Characterization: every pre-existing field, pinned in full.
+    expect(rest).toEqual({
+      mcp_version: defaultServerManifest.protocol.latestVersion,
+      server_name: 'test-mcp-server',
+      server_version: '1.0.0',
+      server_description: 'Test MCP Server',
+      endpoints: { streamable_http: 'https://example.com/mcp' },
+      capabilities: { tools: true, resources: true, prompts: true, logging: true },
+      authentication: { required: false, type: 'none' },
+      generated_at: defaultServerManifest.builtAt,
+    });
+    expect(_meta).toBeDefined();
+  });
+
   test('forwards documentation from homepage', () => {
     const manifest: ServerManifest = {
       ...defaultServerManifest,
