@@ -144,6 +144,34 @@ export function formatInputValidationMessage(toolName: string, error: ZodError):
 }
 
 /**
+ * Validates raw tool arguments against the definition's `input` schema, or
+ * throws the rejection a client receives on the wire: `InvalidParams`
+ * (`-32602`), the message {@link formatInputValidationMessage} renders, and the
+ * Zod issues as `data.issues`.
+ *
+ * The single argument-rejection path. {@link createToolHandler} and the
+ * `runToolContract` test helper both route through it, so a test written to
+ * the helper pins the code, message, and `content[]` text a deployment
+ * actually produces (#416). Anything that classifies a `ZodError` as
+ * `ValidationError` — a handler's own validation, the output-schema parse —
+ * is a different failure and does not come through here.
+ */
+export function parseToolArguments<TDefinition extends AnyToolDefinition>(
+  def: TDefinition,
+  input: unknown,
+): z.infer<TDefinition['input']> {
+  const parsed = def.input.safeParse(input);
+  if (!parsed.success) {
+    throw new McpError(
+      JsonRpcErrorCode.InvalidParams,
+      formatInputValidationMessage(def.name, parsed.error),
+      { issues: parsed.error.issues },
+    );
+  }
+  return parsed.data as z.infer<TDefinition['input']>;
+}
+
+/**
  * Builds an error `CallToolResult` from a raw thrown value. Classifies via
  * {@link ErrorHandler.classifyOnly} when the value isn't already an
  * `McpError`. Only propagates data from `McpError` (its declared `data`) or
@@ -479,15 +507,7 @@ export function createToolHandler(
       // to here (see `deferInputValidation`) so a rejection carries the
       // structured error envelope; the message and `InvalidParams`
       // classification match what the SDK produced before (#377).
-      const parsedInput = def.input.safeParse(input);
-      if (!parsedInput.success) {
-        throw new McpError(
-          JsonRpcErrorCode.InvalidParams,
-          formatInputValidationMessage(def.name, parsedInput.error),
-          { issues: parsedInput.error.issues },
-        );
-      }
-      const validatedInput = parsedInput.data;
+      const validatedInput = parseToolArguments(def, input);
 
       // Read by the success-attributes thunk below, which the measurement
       // evaluates after the callback settles.

@@ -42,6 +42,7 @@ import type { AnyToolDefinition } from '@/mcp-server/tools/utils/toolDefinition.
 import {
   buildToolSuccessResult,
   classifyAndBuildToolErrorResult,
+  parseToolArguments,
   renderToolContent,
 } from '@/mcp-server/tools/utils/toolHandlerFactory.js';
 import { StorageService } from '@/storage/core/StorageService.js';
@@ -482,6 +483,11 @@ export interface RunToolContractOptions {
  * applies `format()`, enrichment, and collected content, and converts thrown
  * values to the same dual-surface error envelope used by the production tool
  * pipeline. It intentionally skips transport auth and telemetry.
+ *
+ * Arguments that fail the `input` schema are rejected through
+ * `parseToolArguments` — the same call the production handler factory makes —
+ * so the envelope is `InvalidParams` (`-32602`) with the tool-naming message a
+ * client receives, not a `ValidationError` the wire never carries.
  */
 export async function runToolContract<TDefinition extends AnyToolDefinition>(
   definition: TDefinition,
@@ -494,7 +500,7 @@ export async function runToolContract<TDefinition extends AnyToolDefinition>(
   });
 
   try {
-    const validatedInput = definition.input.parse(input);
+    const validatedInput = parseToolArguments(definition, input);
     const output = await definition.handler(validatedInput, ctx);
     const validatedOutput = definition.output.parse(output) as Record<string, unknown>;
     return buildToolSuccessResult(
