@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.13.2](changelog/0.13.x/0.13.2.md) — 2026-09-13
+
+A fresh init scaffold builds again — the shipped build scripts resolve both tsconfig layouts — and devcheck gains a README version-badge check. runToolContract rejects out-of-schema arguments with the InvalidParams envelope a client actually receives.
+
 ## [0.13.1](changelog/0.13.x/0.13.1.md) — 2026-09-13 · 🛡️ Security
 
 Five polynomial-time regexes become linear scans, two of them on client-supplied input. createApp gains a sessionMode option and a teardown hook, and SIGTERM/SIGINT now end the process explicitly instead of waiting for the event loop to drain.

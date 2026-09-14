@@ -1,6 +1,6 @@
 # mcp-ts-core - Directory Structure
 
-Generated on: 2026-09-13 20:37:17
+Generated on: 2026-09-14 02:04:43
 
 ```text
 mcp-ts-core/
@@ -817,14 +817,18 @@ mcp-ts-core/
 │   │   │   └── type-contract.test.ts
 │   │   ├── scripts/
 │   │   │   ├── build-changelog.test.ts
+│   │   │   ├── build-project-resolution.test.ts
 │   │   │   ├── check-dependency-specifiers.test.ts
 │   │   │   ├── check-skill-versions.test.ts
 │   │   │   ├── check-skills-sync.test.ts
+│   │   │   ├── clean-buildinfo.test.ts
 │   │   │   ├── clean-mcpb.test.ts
 │   │   │   ├── devcheck-audit-classifier.test.ts
 │   │   │   ├── devcheck-git-guard.test.ts
 │   │   │   ├── devcheck-outdated-alias.test.ts
 │   │   │   ├── devcheck-packaging-gate.test.ts
+│   │   │   ├── devcheck-warning-rendering.test.ts
+│   │   │   ├── devcheck-worker-tsconfig.test.ts
 │   │   │   ├── devdocs.test.ts
 │   │   │   ├── lint-packaging.test.ts
 │   │   │   └── tree.test.ts
@@ -895,6 +899,7 @@ mcp-ts-core/
 │   │   │   ├── mockContext.test.ts
 │   │   │   ├── mockContextFidelity.test.ts
 │   │   │   ├── mockContextState.test.ts
+│   │   │   ├── run-tool-contract-parity.test.ts
 │   │   │   ├── test-kit.test.ts
 │   │   │   ├── tool-contract-suite.test.ts
 │   │   │   └── vitest.test.ts

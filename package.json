@@ -1,6 +1,6 @@
 {
   "name": "@cyanheads/mcp-ts-core",
-  "version": "0.13.1",
+  "version": "0.13.2",
   "mcpName": "io.github.cyanheads/mcp-ts-core",
   "description": "Agent-native TypeScript framework for MCP servers. Includes runtime infrastructure and agent skills for building, testing, and shipping servers.",
   "files": [
@@ -309,7 +309,7 @@
     "hono": "^4.13.7",
     "jose": "^6.2.12",
     "pino": "^10.3.1",
-    "zod": "^4.6.1"
+    "zod": "^4.6.2"
   },
   "peerDependencies": {
     "@duckdb/node-api": "^1.5.5-r.1",
