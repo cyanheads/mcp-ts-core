@@ -1,6 +1,6 @@
 # mcp-ts-core - Directory Structure
 
-Generated on: 2026-09-14 02:04:43
+Generated on: 2026-09-15 19:58:49
 
 ```text
 mcp-ts-core/
@@ -245,8 +245,6 @@ mcp-ts-core/
 │   ├── tool-defs-analysis/
 │   │   └── SKILL.md
 │   └── README.md
-├── handoffs/
-│   └── 2026-09-01-local-mcp-fabric.md
 ├── scripts/
 │   ├── audit-open-index-signatures.ts
 │   ├── build-changelog.ts
