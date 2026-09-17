@@ -1,6 +1,6 @@
 <div align="center">
   <h1>@cyanheads/mcp-ts-core</h1>
-  <p><b>Agent-native TypeScript framework for MCP servers. Includes runtime infrastructure and agent skills for building, testing, and shipping servers.</b></p>
+  <p><b>Agent-native TypeScript framework for building MCP servers. Includes runtime infrastructure and agent skills for building, testing, and shipping servers.</b></p>
   <p>Give your agent the infrastructure, patterns, and skills to build and ship your server.</p>
 </div>
 
