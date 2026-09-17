@@ -114,6 +114,15 @@ function readContents(
   return (result as ReadResourceResult).contents;
 }
 
+/** The `metrics` payload of the completion log the most recent read emitted. */
+function completionMetrics(): Record<string, unknown> {
+  const call = mockLogger.info.mock.calls.findLast(
+    ([message]) => message === TELEMETRY_LOG_MESSAGES.resourceReadFinished,
+  );
+  if (!call) throw new Error('No resource completion log was emitted');
+  return (call[1] as { extra: { metrics: Record<string, unknown> } }).extra.metrics;
+}
+
 const mockStorage = {
   get: vi.fn(async () => null),
   set: vi.fn(async () => {}),
@@ -687,19 +696,89 @@ describe('createResourceHandler', () => {
   });
 
   // -----------------------------------------------------------------------
+  // Cancellation precedence (#421)
+  // -----------------------------------------------------------------------
+
+  describe('cancellation precedence (#421)', () => {
+    /** Drives a read whose handler throws `thrown`, with `signal` as the request's. */
+    async function codeOfThrow(
+      uriTemplate: string,
+      thrown: unknown,
+      signal?: AbortSignal,
+    ): Promise<number> {
+      const def = resource(uriTemplate, {
+        description: 'Throws, so the catch path can be observed.',
+        handler: () => {
+          throw thrown;
+        },
+      });
+      const handler = createResourceHandler(def as AnyResourceDefinition, services, notifiers);
+      const rejection = await handler(
+        new URL(uriTemplate),
+        {},
+        makeServerContext(signal ? { signal } : {}),
+      ).then(
+        () => undefined,
+        (err: unknown) => err,
+      );
+      expect(rejection).toBeInstanceOf(McpError);
+      return (rejection as McpError).code;
+    }
+
+    /** The reason a `notifications/cancelled` carrying no `reason` leaves on the signal. */
+    const abortException = () => new DOMException('The operation was aborted.', 'AbortError');
+
+    it('classifies a thrown string as InternalError while the signal is live', async () => {
+      expect(await codeOfThrow('live://string', 'probe')).toBe(JsonRpcErrorCode.InternalError);
+    });
+
+    it('classifies a DOMException named AbortError as Timeout while the signal is live', async () => {
+      expect(await codeOfThrow('live://abort', abortException())).toBe(JsonRpcErrorCode.Timeout);
+    });
+
+    it("keeps an McpError's own code while the signal is live", async () => {
+      const thrown = new McpError(JsonRpcErrorCode.NotFound, 'Item not found');
+
+      expect(await codeOfThrow('live://mcperr', thrown)).toBe(JsonRpcErrorCode.NotFound);
+    });
+
+    it('classifies a rethrown cancellation reason string as RequestCancelled', async () => {
+      expect(await codeOfThrow('cancelled://string', 'probe', AbortSignal.abort('probe'))).toBe(
+        JsonRpcErrorCode.RequestCancelled,
+      );
+    });
+
+    it('classifies a DOMException named AbortError as RequestCancelled, not Timeout', async () => {
+      const reason = abortException();
+
+      expect(await codeOfThrow('cancelled://abort', reason, AbortSignal.abort(reason))).toBe(
+        JsonRpcErrorCode.RequestCancelled,
+      );
+    });
+
+    it("overrides an explicit McpError's own code", async () => {
+      const thrown = new McpError(JsonRpcErrorCode.InternalError, 'Overpass request failed');
+
+      expect(await codeOfThrow('cancelled://mcperr', thrown, AbortSignal.abort('probe'))).toBe(
+        JsonRpcErrorCode.RequestCancelled,
+      );
+    });
+
+    it('carries the cancellation code into the completion log', async () => {
+      await codeOfThrow('cancelled://metrics', 'probe', AbortSignal.abort('probe'));
+
+      expect(completionMetrics()).toMatchObject({
+        errorCode: String(JsonRpcErrorCode.RequestCancelled),
+        isSuccess: false,
+      });
+    });
+  });
+
+  // -----------------------------------------------------------------------
   // Post-handler failure telemetry (#346)
   // -----------------------------------------------------------------------
 
   describe('post-handler failure telemetry (#346)', () => {
-    /** The `metrics` payload of the completion log the read emitted. */
-    function completionMetrics(): Record<string, unknown> {
-      const call = mockLogger.info.mock.calls.findLast(
-        ([message]) => message === TELEMETRY_LOG_MESSAGES.resourceReadFinished,
-      );
-      if (!call) throw new Error('No resource completion log was emitted');
-      return (call[1] as { extra: { metrics: Record<string, unknown> } }).extra.metrics;
-    }
-
     it('reports a completed read as a success', async () => {
       const def = resource('measured://ok', {
         description: 'Returns a value matching its output contract.',

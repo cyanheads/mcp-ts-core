@@ -25,10 +25,11 @@ import { isInputRequiredSignal } from '@/mcp-server/inputRequired.js';
 import type { NotifierSources } from '@/mcp-server/notifications.js';
 import { withRequiredScopes } from '@/mcp-server/transports/auth/lib/authUtils.js';
 import { internalError, JsonRpcErrorCode, McpError } from '@/types-global/errors.js';
-import { ErrorHandler } from '@/utils/internal/error-handler/errorHandler.js';
+import { asRequestCancelled, ErrorHandler } from '@/utils/internal/error-handler/errorHandler.js';
 import { measureToolExecution } from '@/utils/internal/performance.js';
 import { requestContextService } from '@/utils/internal/requestContext.js';
 import { ATTR_MCP_TOOL_ENRICHED } from '@/utils/telemetry/attributes.js';
+import { isZodObjectSchema } from './schemaShape.js';
 import type { AnyToolDefinition } from './toolDefinition.js';
 
 // ---------------------------------------------------------------------------
@@ -125,29 +126,220 @@ export function buildToolErrorResult(
   };
 }
 
+/** One entry of a `ZodError`'s issue list. */
+type ArgumentIssue = ZodError['issues'][number];
+
+/** The framework-owned `data.reason` on every argument rejection (#445). */
+const INVALID_ARGUMENTS_REASON = 'invalid_arguments';
+
+/** What {@link readArgumentAt} returns when the raw arguments carry no value there. */
+const ABSENT = Symbol('absent');
+
+/**
+ * The value the raw arguments carry at `path`, or {@link ABSENT}.
+ *
+ * The one resolver behind #378's missing-vs-wrong rendering and #445's
+ * missing-required hint, which ask the same question of the same arguments.
+ * Zod's `invalid_value` issue names an expected set and nothing else, so an
+ * omitted field and a wrong choice are otherwise indistinguishable. Resolving
+ * it here keeps the caller's value in-process: only the absent/present bit and
+ * the arriving *type* reach a rendered sentence, unlike Zod's `reportInput`
+ * option, which would copy every rejected value onto `data.issues`.
+ *
+ * A key present with an explicit `null` is present — the caller supplied a
+ * value, it was the wrong one. A key present with `undefined` is absent, which
+ * is how Zod itself reads it.
+ */
+function readArgumentAt(args: unknown, path: ReadonlyArray<PropertyKey>): unknown {
+  let cursor = args;
+  for (const segment of path) {
+    if (cursor === null || typeof cursor !== 'object') return ABSENT;
+    if (!Object.hasOwn(cursor, segment)) return ABSENT;
+    cursor = (cursor as Record<PropertyKey, unknown>)[segment];
+  }
+  return cursor === undefined ? ABSENT : cursor;
+}
+
+/** The accepted-value half of an `invalid_value` sentence, from the issue's own values. */
+function expectedValuesText(values: readonly unknown[]): string {
+  const rendered = values.map((value) => JSON.stringify(value)).join('|');
+  return values.length === 1 ? `Expected ${rendered}` : `Expected one of ${rendered}`;
+}
+
+/**
+ * The union branches worth rendering: every branch except one whose only issue
+ * is a single-valued `invalid_value`.
+ *
+ * That shape is the `z.literal('')` blank-field sentinel of the form-client
+ * convention — never the branch that says what would have been accepted. The
+ * filter reads issue shape only, never message text, so a one-entry
+ * `z.enum([...])` (which Zod reports identically) is filtered too and the
+ * caller falls back to the union's own message.
+ */
+function selectUnionBranches(
+  branches: ReadonlyArray<readonly ArgumentIssue[]>,
+): ReadonlyArray<readonly ArgumentIssue[]> {
+  return branches.filter((branch) => {
+    const only = branch.length === 1 ? branch[0] : undefined;
+    return !(only?.code === 'invalid_value' && only.values.length === 1);
+  });
+}
+
+/**
+ * The readable half of one issue's rendered line.
+ *
+ * Two rewrites, both keeping `data.issues` and the envelope shape untouched:
+ *
+ * - **#417** — Zod reports a union whose every branch aborted as one
+ *   `invalid_union` issue whose own message is the placeholder `Invalid input`;
+ *   what would have been accepted lives on the nested branch issues. Render the
+ *   selected branches instead, joined by ` or `. (When exactly one branch
+ *   matched the base type and failed only a check, Zod returns that branch's
+ *   issues directly and this never fires.)
+ * - **#378** — an `invalid_value` issue (`z.enum`, `z.literal`) names an
+ *   expected set without naming what arrived, so an omitted field and a wrong
+ *   choice render identically. When the key is `absent`, say so and keep the
+ *   expected set, which is the guidance a caller needs to fill the field in on
+ *   one retry.
+ *
+ * On a required union field both compose: the branch is selected first, then
+ * the absence check decides how that branch's message renders.
+ */
+function renderIssueMessage(issue: ArgumentIssue, absent: boolean): string {
+  if (issue.code === 'invalid_union') {
+    const branches = selectUnionBranches(issue.errors);
+    if (branches.length === 0) return issue.message;
+    const rendered = branches.map((branch) =>
+      branch.map((branchIssue) => renderIssueMessage(branchIssue, absent)).join(', '),
+    );
+    return [...new Set(rendered)].join(' or ');
+  }
+  if (absent && issue.code === 'invalid_value') {
+    return `Missing required field. ${expectedValuesText(issue.values)}`;
+  }
+  return issue.message;
+}
+
 /**
  * Renders an argument-validation failure the way the MCP SDK renders its own,
  * so the readable diagnostic — the offending key or field, and why it failed —
  * is unchanged for clients that read `content[]` text. The framework owns this
  * rejection (see `deferInputValidation`) purely so it can also carry
  * `structuredContent.error`.
+ *
+ * `args` are the caller's raw arguments, read only through
+ * {@link readArgumentAt}; see {@link renderIssueMessage} for what that decides.
  */
-export function formatInputValidationMessage(toolName: string, error: ZodError): string {
+export function formatInputValidationMessage(
+  toolName: string,
+  error: ZodError,
+  args: unknown,
+): string {
   const detail = error.issues
-    .map((issue) =>
-      issue.path.length > 0
-        ? `${issue.path.map(String).join('.')}: ${issue.message}`
-        : issue.message,
-    )
+    .map((issue) => {
+      const message = renderIssueMessage(issue, readArgumentAt(args, issue.path) === ABSENT);
+      return issue.path.length > 0 ? `${issue.path.map(String).join('.')}: ${message}` : message;
+    })
     .join(', ');
   return `Input validation error: Invalid arguments for tool ${toolName}: ${detail}`;
+}
+
+/** `a number`, `an array` — the indefinite article a type name reads with. */
+function withArticle(typeName: string): string {
+  return `${/^[aeiou]/.test(typeName) ? 'an' : 'a'} ${typeName}`;
+}
+
+/** How a raw argument's JS type reads in the wrong-type sentence. */
+function arrivedTypeText(value: unknown): string {
+  if (value === null) return 'null';
+  return withArticle(Array.isArray(value) ? 'array' : typeof value);
+}
+
+/** `lat`, `lat and lon`, `lat, lon and alt`. */
+function joinNames(names: readonly string[]): string {
+  if (names.length < 2) return names.join('');
+  return `${names.slice(0, -1).join(', ')} and ${names.at(-1)}`;
+}
+
+/**
+ * The root property names a tool advertises, in schema order — the accepted-key
+ * list of an unknown-key hint.
+ *
+ * Empty for a `z.discriminatedUnion()` root: `strictenInput` strictens each
+ * variant, so `unrecognized_keys` does fire there, but the issue carries no way
+ * to know which variant matched, and the union of every variant's keys would
+ * claim the tool accepts a set no single call does.
+ */
+function rootPropertyNames(input: AnyToolDefinition['input']): readonly string[] {
+  return isZodObjectSchema(input) ? Object.keys(input.shape) : [];
+}
+
+/**
+ * Synthesizes `data.recovery.hint` from the Zod issues, the raw arguments, and
+ * the root schema (#445) — so the one failure a weaker model hits most often
+ * carries the same next step every handler-thrown error does, instead of
+ * costing a round trip for the schema.
+ *
+ * One sentence per issue, joined into a single hint, except that every missing
+ * required field collapses into one `Provide …` sentence at the first of their
+ * positions. An issue no bucket claims contributes its rendered message
+ * unchanged, which keeps the hint nonempty for any rejection Zod can produce.
+ */
+function buildArgumentRecoveryHint(def: AnyToolDefinition, error: ZodError, args: unknown): string {
+  const sentences: string[] = [];
+  const missing: string[] = [];
+  let missingSlot = -1;
+
+  for (const issue of error.issues) {
+    const path = issue.path.map(String).join('.');
+    const arrived = readArgumentAt(args, issue.path);
+
+    if (issue.code === 'unrecognized_keys') {
+      const label = issue.keys.length === 1 ? 'Unknown key' : 'Unknown keys';
+      const accepted = rootPropertyNames(def.input);
+      sentences.push(
+        accepted.length > 0
+          ? `${label} ${issue.keys.join(', ')}. This tool accepts: ${accepted.join(', ')}.`
+          : `${label} ${issue.keys.join(', ')}.`,
+      );
+      continue;
+    }
+
+    if (path.length > 0 && arrived === ABSENT) {
+      if (missingSlot < 0) {
+        missingSlot = sentences.length;
+        sentences.push('');
+      }
+      missing.push(path);
+      continue;
+    }
+
+    if (issue.code === 'invalid_type') {
+      const subject = path.length > 0 ? path : 'the arguments';
+      const expected = withArticle(issue.expected);
+      sentences.push(
+        arrived === ABSENT
+          ? `Send ${subject} as ${expected}.`
+          : `Send ${subject} as ${expected}, not ${arrivedTypeText(arrived)}.`,
+      );
+      continue;
+    }
+
+    sentences.push(renderIssueMessage(issue, false));
+  }
+
+  if (missingSlot >= 0) sentences[missingSlot] = `Provide ${joinNames(missing)}.`;
+  return sentences.join(' ');
 }
 
 /**
  * Validates raw tool arguments against the definition's `input` schema, or
  * throws the rejection a client receives on the wire: `InvalidParams`
- * (`-32602`), the message {@link formatInputValidationMessage} renders, and the
- * Zod issues as `data.issues`.
+ * (`-32602`), the message {@link formatInputValidationMessage} renders, the Zod
+ * issues as `data.issues`, and — as with any other declared failure —
+ * `data.reason` plus a `data.recovery.hint` {@link buildArgumentRecoveryHint}
+ * synthesizes (#445). {@link buildToolErrorResult} mirrors that hint into
+ * `content[]`, so it reaches format()-only clients with no extra work.
  *
  * The single argument-rejection path. {@link createToolHandler} and the
  * `runToolContract` test helper both route through it, so a test written to
@@ -164,8 +356,12 @@ export function parseToolArguments<TDefinition extends AnyToolDefinition>(
   if (!parsed.success) {
     throw new McpError(
       JsonRpcErrorCode.InvalidParams,
-      formatInputValidationMessage(def.name, parsed.error),
-      { issues: parsed.error.issues },
+      formatInputValidationMessage(def.name, parsed.error, input),
+      {
+        issues: parsed.error.issues,
+        reason: INVALID_ARGUMENTS_REASON,
+        recovery: { hint: buildArgumentRecoveryHint(def, parsed.error, input) },
+      },
     );
   }
   return parsed.data as z.infer<TDefinition['input']>;
@@ -523,23 +719,30 @@ export function createToolHandler(
           const handlerCtx = buildHandlerContext(request, services, spanContext, def.errors);
           ctx = handlerCtx;
 
-          // Handler may return sync or async.
-          const handlerResult = await def.handler(validatedInput, handlerCtx);
+          try {
+            // Handler may return sync or async.
+            const handlerResult = await def.handler(validatedInput, handlerCtx);
 
-          // The domain value is what `mcp.tool.output_bytes` and
-          // partial-success detection measure — not the assembled result this
-          // callback returns, which re-renders it into content[].
-          recordOutput(handlerResult);
+            // The domain value is what `mcp.tool.output_bytes` and
+            // partial-success detection measure — not the assembled result this
+            // callback returns, which re-renders it into content[].
+            recordOutput(handlerResult);
 
-          // Render content[] from the domain payload only (Resolution B), then
-          // merge enrichment into structuredContent and append the content[] trailer.
-          const validatedResult = def.output.parse(handlerResult) as Record<string, unknown>;
-          return buildToolSuccessResult(
-            def,
-            handlerCtx,
-            validatedResult,
-            renderToolContent(def, validatedResult, handlerCtx),
-          );
+            // Render content[] from the domain payload only (Resolution B), then
+            // merge enrichment into structuredContent and append the content[] trailer.
+            const validatedResult = def.output.parse(handlerResult) as Record<string, unknown>;
+            return buildToolSuccessResult(
+              def,
+              handlerCtx,
+              validatedResult,
+              renderToolContent(def, validatedResult, handlerCtx),
+            );
+          } catch (error) {
+            // Inside the measurement on purpose: the completion log's
+            // `metrics.errorCode` and the span's error-code attribute are
+            // derived from what leaves this callback (#421).
+            throw asRequestCancelled(error, request.signal);
+          }
         },
         { ...appContext, toolName: def.name },
         validatedInput,

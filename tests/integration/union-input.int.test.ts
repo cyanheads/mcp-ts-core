@@ -174,6 +174,15 @@ describe('discriminated-union tool input (#142)', () => {
       expect(result.isError).toBe(true);
       const text = (result.content as Array<{ text: string }>)[0]?.text ?? '';
       expect(text).toContain('Unrecognized key: "idd"');
+      // A union root exposes no single `shape`, and the union of every
+      // variant's keys would claim the tool accepts a set no one call does —
+      // so the hint names the unknown key and stops there (#445).
+      expect(
+        (result.structuredContent as { error: { data?: Record<string, unknown> } }).error.data,
+      ).toMatchObject({
+        reason: 'invalid_arguments',
+        recovery: { hint: 'Unknown key idd.' },
+      });
     });
 
     it('rejects an unknown discriminator value', async () => {

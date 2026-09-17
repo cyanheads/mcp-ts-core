@@ -4,7 +4,7 @@ description: >
   McpError constructor, JsonRpcErrorCode reference, and error handling patterns for `@cyanheads/mcp-ts-core`. Use when looking up error codes, understanding where errors should be thrown vs. caught, or using ErrorHandler.tryCatch in services.
 metadata:
   author: cyanheads
-  version: "1.10"
+  version: "1.12"
   audience: external
   type: reference
 ---
@@ -272,13 +272,16 @@ Use factories or `McpError` directly when the code must be exact — auto-classi
 
 The framework applies these steps in order — first match wins:
 
-1. **`McpError` instance** — `error.code` is preserved as-is; no classification needed.
-2. **SDK transport-closed rejection** — an `SdkError` carrying `SdkErrorCode.ConnectionClosed` → `RequestCancelled`. The SDK rejects every in-flight request when the transport closes, which is what a client disconnect looks like from inside a handler. Matched on the code, not the message: one of its wordings says "aborted" and would otherwise be caught by the generic abort pattern in step 5 and read as a `Timeout`.
-3. **JS constructor name** — matched against a fixed table (e.g. `ZodError` → `ValidationError`, `SyntaxError` → `ValidationError`). Note: `TypeError` is intentionally excluded — runtime TypeErrors are programmer errors, not validation failures.
-4. **Provider-specific patterns** — HTTP status codes, AWS exception names, Supabase, OpenRouter. Checked before common patterns because they are more specific (e.g. `status code 429` beats the generic `rate limit` pattern).
-5. **Common message/name patterns** — broad keyword patterns covering auth, not-found, validation, etc. First match wins; order matters.
-6. **`AbortError` name** — `error.name === 'AbortError'` → `Timeout`.
-7. **Fallback** — `InternalError`.
+1. **Request signal aborted** — `ctx.signal.aborted` is `true` when the handler unwinds → `RequestCancelled`. Resolved by the tool and resource handler factories before the thrown value is classified at all, so it outranks every step below, `McpError` included: the caller withdrew the request, and what the handler threw on the way out does not change that. Covers every shape an abort leaves behind — a `notifications/cancelled` `reason` string, the `DOMException` named `AbortError` a reason-less cancellation produces, a service's own `McpError`, and the SDK's `SdkError(ConnectionClosed)` on transport close. The accepted cost is that an unrelated fault raised after the abort is recorded as a cancellation too; it is bounded, because the SDK writes no response for a request whose signal it aborted. A handler that throws while the signal is live is untouched by this step.
+2. **`McpError` instance** — `error.code` is preserved as-is; no classification needed.
+3. **SDK transport-closed rejection** — an `SdkError` carrying `SdkErrorCode.ConnectionClosed` → `RequestCancelled`. The SDK rejects every in-flight request when the transport closes, which is what a client disconnect looks like from inside a handler. Matched on the code, not the message: one of its wordings says "aborted" and would otherwise be caught by the generic abort pattern in step 6 and read as a `Timeout`. Still the rule for a throw raised where no request signal is in scope — a service, an outbound leg, a background task.
+4. **JS constructor name** — matched against a fixed table (e.g. `ZodError` → `ValidationError`, `SyntaxError` → `ValidationError`). Note: `TypeError` is intentionally excluded — runtime TypeErrors are programmer errors, not validation failures.
+5. **Provider-specific patterns** — HTTP status codes, AWS exception names, Supabase, OpenRouter. Checked before common patterns because they are more specific (e.g. `status code 429` beats the generic `rate limit` pattern).
+6. **Common message/name patterns** — broad keyword patterns covering auth, not-found, validation, etc. First match wins; order matters.
+7. **`AbortError` name** — `error.name === 'AbortError'` → `Timeout`.
+8. **Fallback** — `InternalError`.
+
+However it is reached, a `RequestCancelled` is logged at `info` with no stack — neither the thrown value's own nor one reached through its cause chain — and the completion log carries `metrics.errorCode: "-32011"` alongside `isSuccess: false`.
 
 ### JS Constructor Name Mappings
 
@@ -363,7 +366,9 @@ Important properties:
 - **`data` propagation is restricted** to explicitly-thrown `McpError.data` and `ZodError.issues`. Auto-classified plain errors (`TypeError`, network errors, etc.) emit `code` + `message` only — no `data` — so internal classification context never leaks to clients.
 - **Recovery hint mirroring is automatic.** When the thrown `McpError` carries `data.recovery.hint`, the handler factory appends it to the `content[]` text so the markdown surface matches the JSON surface. Authors don't need to format the hint manually.
 - **Argument-schema rejection is a tool error with the same envelope.** An unknown root key, a wrong type, a missing required field, or a failed constraint returns `isError: true` with `structuredContent.error.code = -32602` (`InvalidParams`) and the readable `Invalid arguments for tool <name>: …` diagnostic in `content[]`. The handler never runs. Two neighbouring failures keep the protocol error path instead, arriving as a JSON-RPC error rather than a tool result: an unknown or disabled tool name, and a malformed request envelope.
-- **A schema constraint cannot carry a declared reason.** Because the handler never runs, a rejection by `.max()`, `.regex()`, `.min()`, or any other Zod refinement bypasses `errors[]` entirely: it arrives as `InvalidParams` with `data.issues` and no `data.reason`, so a caller has nothing to branch on and gets no recovery hint. Decide per constraint which surface it belongs on. A bound that is purely structural — the input is the wrong shape and no guidance beyond the diagnostic would help — belongs on the schema, where it also advertises itself in `inputSchema`. A bound a caller is expected to recover from belongs in the handler as `ctx.fail('reason', message, ctx.recoveryFor('reason'))` against a declared `errors[]` entry, with the limit restated in the field's `.describe()` so it is still visible before the call. Enforcing the same bound in both places is the trap: the schema wins, and the contract entry becomes unreachable while still reading as covered.
+- **`invalid_arguments` is the framework-owned reason on every argument rejection.** The rejection carries `data.reason: "invalid_arguments"` and a `data.recovery.hint` the framework synthesizes from the Zod issues, the arguments as sent, and the root schema — an unknown key names the root properties the tool does accept, a wrong type names the type to send instead, missing fields collapse into one `Provide …` sentence, and anything else carries its own diagnostic. The hint rides `content[]` as `Recovery: …` like any other, so format-only clients see it too. Authors declare nothing for this: the rejection happens before the handler and the hint is derived from the schema.
+- **A schema constraint cannot carry a *declared* reason.** Because the handler never runs, a rejection by `.max()`, `.regex()`, `.min()`, or any other Zod refinement bypasses `errors[]` entirely: it arrives as `InvalidParams` with `data.issues` under the framework's `invalid_arguments`, never the `reason` and authored `recovery` of a contract entry — so a caller has nothing tool-specific to branch on and gets only the schema-derived hint. Decide per constraint which surface it belongs on. A bound that is purely structural — the input is the wrong shape and no guidance beyond the diagnostic would help — belongs on the schema, where it also advertises itself in `inputSchema`. A bound a caller is expected to recover from belongs in the handler as `ctx.fail('reason', message, ctx.recoveryFor('reason'))` against a declared `errors[]` entry, with the limit restated in the field's `.describe()` so it is still visible before the call. Enforcing the same bound in both places is the trap: the schema wins, and the contract entry becomes unreachable while still reading as covered.
+- **A rejected value never reaches the client.** The rendered sentence distinguishes an omitted field from a wrong one (`what: Missing required field. Expected one of "os"|"cpu"` rather than the invalid-option text), and a union renders the branch that says what would have been accepted instead of Zod's `Invalid input` placeholder. Both read the arguments in-process for the absent/present bit and the arriving type only — `data.issues` ships the Zod issues as-is, and no value the caller sent is copied onto them.
 
 **Handler — throw freely, no try/catch:**
 

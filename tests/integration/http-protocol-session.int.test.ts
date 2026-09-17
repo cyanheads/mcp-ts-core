@@ -6,7 +6,9 @@
  * @module tests/integration/http-protocol-session.int.test
  */
 
-import { resolve } from 'node:path';
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join, resolve } from 'node:path';
 import {
   Client,
   ProtocolError,
@@ -33,10 +35,15 @@ type Observations = {
 describe('stateful HTTP protocol sessions', () => {
   let server: ServerHandle;
   const clients: Client[] = [];
+  // The fixture's own log sink, so the cancellation's two log lines are
+  // readable rather than inferred (#421).
+  const logsDir = mkdtempSync(join(tmpdir(), 'mcp-ts-core-protocol-session-'));
 
   beforeAll(async () => {
     server = await startServerFromEntrypoint(FIXTURE, 'http', {
+      LOGS_DIR: logsDir,
       MCP_HEARTBEAT_INTERVAL_MS: '0',
+      MCP_LOG_LEVEL: 'info',
       MCP_SESSION_MODE: 'stateful',
     });
   });
@@ -47,7 +54,22 @@ describe('stateful HTTP protocol sessions', () => {
 
   afterAll(async () => {
     await server?.kill();
+    rmSync(logsDir, { force: true, recursive: true });
   });
+
+  /** Every structured log record the fixture has written so far. */
+  function logRecords(): Array<Record<string, unknown>> {
+    let raw: string;
+    try {
+      raw = readFileSync(join(logsDir, 'combined.log'), 'utf8');
+    } catch {
+      return [];
+    }
+    return raw
+      .split('\n')
+      .filter((line) => line.startsWith('{'))
+      .map((line) => JSON.parse(line) as Record<string, unknown>);
+  }
 
   async function connect(
     options?: ClientOptions,
@@ -379,6 +401,58 @@ describe('stateful HTTP protocol sessions', () => {
       expect(text).not.toContain(': keepalive');
       expect(frames(text).some((frame) => frame.id === 77)).toBe(false);
       expect((await rawObservations(headers)).toolCancellations).toBe(before.toolCancellations + 1);
+    });
+
+    it('records the cancelled call as a cancellation in both log lines (#421)', async () => {
+      const headers = await openRawSession('2025-11-25');
+      const before = await rawObservations(headers);
+      const written = logRecords().length;
+      const pending = await post(
+        headers,
+        callTool(78, 'session_cancellable_tool', { label: 'logged' }),
+      );
+      expect(pending.status).toBe(200);
+
+      const deadline = Date.now() + 5_000;
+      while ((await rawObservations(headers)).toolStarts === before.toolStarts) {
+        if (Date.now() > deadline) throw new Error('handler did not start within 5000ms');
+      }
+      // The fixture's handler rejects with `ctx.signal.reason` — for a
+      // `notifications/cancelled` carrying `reason`, a bare string.
+      expect((await post(headers, cancelled(78))).status).toBe(202);
+      await read(pending.body!.getReader(), 5_000);
+
+      const logged = await (async () => {
+        const logDeadline = Date.now() + 5_000;
+        while (Date.now() < logDeadline) {
+          const fresh = logRecords().slice(written);
+          const completion = fresh.find(
+            (record) =>
+              record.msg === 'Tool execution finished.' &&
+              record.toolName === 'session_cancellable_tool',
+          );
+          const classification = fresh.find((record) =>
+            String(record.msg).startsWith('Cancelled tool:session_cancellable_tool'),
+          );
+          if (completion && classification) return { classification, completion };
+          await new Promise((resolveDelay) => setTimeout(resolveDelay, 50));
+        }
+        throw new Error('the cancellation log lines did not arrive within 5000ms');
+      })();
+
+      expect(logged.completion).toMatchObject({
+        level: 30,
+        metrics: { errorCode: '-32011', isSuccess: false },
+        toolName: 'session_cancellable_tool',
+      });
+      expect(logged.classification).toMatchObject({
+        errorCode: -32011,
+        level: 30,
+        // The rethrown `ctx.signal.reason` survives as the message, so triage
+        // still reads why the call ended.
+        msg: 'Cancelled tool:session_cancellable_tool: raw-wire probe',
+      });
+      expect(logged.classification).not.toHaveProperty('stack');
     });
 
     it('answers a cancellation for an unknown id with 202 and leaves other streams alone', async () => {

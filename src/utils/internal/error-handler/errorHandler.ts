@@ -9,7 +9,8 @@ import { SpanStatusCode, trace } from '@opentelemetry/api';
 
 import { ZodError } from 'zod';
 
-import { JsonRpcErrorCode, McpError } from '@/types-global/errors.js';
+import { isInputRequiredSignal } from '@/mcp-server/inputRequired.js';
+import { JsonRpcErrorCode, McpError, requestCancelled } from '@/types-global/errors.js';
 import { logger } from '@/utils/internal/logger.js';
 import { type RequestContext, toCanonicalContext } from '@/utils/internal/requestContext.js';
 import { generateUUID } from '@/utils/security/idGenerator.js';
@@ -42,12 +43,50 @@ export function initErrorMetrics(): void {
 }
 
 /**
+ * The value a handler unwound with, resolved against its request's cancellation.
+ *
+ * Once the request's signal has fired, the unwind *is* the cancellation,
+ * whatever the handler threw on the way out. A `notifications/cancelled`
+ * leaves its `reason` string on the signal — or a `DOMException` named
+ * `AbortError` when the notification carried none — a service that noticed the
+ * abort may raise its own `McpError`, and the SDK aborts with an
+ * `SdkError(ConnectionClosed)` when the transport closes. Classifying by the
+ * shape of that value reads a routine caller action as a server fault: an
+ * `error`-level log with a stack, and `InternalError` or `Timeout` on the
+ * completion log, for every cancelled call (#421).
+ *
+ * So the cancellation outranks the thrown value's own code, `McpError`
+ * included. The accepted cost is that an unrelated fault raised after the abort
+ * is recorded as a cancellation too; it is bounded, because the SDK writes no
+ * response for a request whose signal it aborted, so the client-visible
+ * envelope is the same either way.
+ *
+ * Applied inside the measured region by both handler factories, so the
+ * completion log's `metrics.errorCode` and the execution span's error-code
+ * attribute carry `-32011` alongside the classified envelope.
+ *
+ * Returns the value unchanged while the signal is live, for an `input_required`
+ * signal (protocol control flow, never a failure), and for an error already
+ * carrying `RequestCancelled`.
+ */
+export function asRequestCancelled(error: unknown, signal: AbortSignal): unknown {
+  if (!signal.aborted || isInputRequiredSignal(error)) return error;
+  if (error instanceof McpError && error.code === JsonRpcErrorCode.RequestCancelled) return error;
+  return requestCancelled(getErrorMessage(error), undefined, { cause: error });
+}
+
+/**
  * A utility class providing static methods for comprehensive error handling.
  */
 // biome-ignore lint/complexity/noStaticOnlyClass: public API surface — preserving class for namespace semantics
 export class ErrorHandler {
   /**
    * Determines an appropriate `JsonRpcErrorCode` for a given error.
+   *
+   * Classifies the thrown value alone. A handler unwinding after its request's
+   * abort signal fired is settled before this runs — see
+   * {@link asRequestCancelled}, which the handler factories apply first and
+   * which outranks every step below.
    *
    * Resolution order:
    * 1. `McpError` instances — returns `error.code` directly.
@@ -228,8 +267,10 @@ export class ErrorHandler {
 
     const cause = error instanceof Error ? error : undefined;
 
-    // Extract cause chain only when the error actually has a cause
-    if (error instanceof Error && error.cause) {
+    // Extract cause chain only when the error actually has a cause — and never
+    // for a cancellation, whose every node would carry a stack and reintroduce
+    // the triage noise the `originalStack` gate above exists to keep out.
+    if (!isCancellation && error instanceof Error && error.cause) {
       const causeChain = extractErrorCauseChain(error);
       if (causeChain.length > 0) {
         const rootCause = causeChain[causeChain.length - 1];

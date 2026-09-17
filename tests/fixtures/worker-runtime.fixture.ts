@@ -172,6 +172,25 @@ const echoTool = tool('echo', {
   format: (result) => [{ type: 'text', text: result.echoed }],
 });
 
+/**
+ * A required enum and an optional blank-or-enum union — the argument shapes
+ * whose rejection text the flat formatter rewrites (#378, #417), so the
+ * rendering can be pinned under real workerd.
+ */
+const facetTool = tool('facet', {
+  description: 'Reads one facet, optionally scoped to a court.',
+  input: z.object({
+    what: z.enum(['os', 'cpu', 'memory']).describe('Facet to read'),
+    court: z
+      .union([z.literal(''), z.enum(['CJEU', 'GC'])])
+      .optional()
+      .describe('Court, or blank for any'),
+  }),
+  output: z.object({ facet: z.string().describe('The facet that was read') }),
+  handler: (input) => ({ facet: input.what }),
+  format: (result) => [{ type: 'text', text: result.facet }],
+});
+
 const runtimeResource = resource('worker-runtime://caps', {
   description: 'Returns runtime capability flags as observed inside the isolate.',
   mimeType: 'application/json',
@@ -191,7 +210,7 @@ const greetingPrompt = prompt('worker_hello', {
 export default createWorkerHandler({
   name: 'worker-runtime-fixture',
   version: '0.0.0-test',
-  tools: [echoTool, storageSetTool, storageGetTool, storageDeleteTool, storageListTool],
+  tools: [echoTool, facetTool, storageSetTool, storageGetTool, storageDeleteTool, storageListTool],
   resources: [runtimeResource],
   prompts: [greetingPrompt],
   // Exercises the (env) => string resolver for `instructions` (#91).

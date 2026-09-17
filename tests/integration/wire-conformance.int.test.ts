@@ -61,6 +61,23 @@ const searchTool = tool('wire_search', {
   },
 });
 
+/**
+ * A required enum and an optional blank-or-enum union — the two argument shapes
+ * whose rejection text the flat formatter rewrites (#378, #417).
+ */
+const facetTool = tool('wire_facet', {
+  description: 'Reads one facet, optionally scoped to a court.',
+  input: z.object({
+    what: z.enum(['os', 'cpu', 'memory']).describe('Facet to read.'),
+    court: z
+      .union([z.literal(''), z.enum(['CJEU', 'GC'])])
+      .optional()
+      .describe('Court, or blank for any.'),
+  }),
+  output: z.object({ facet: z.string().describe('The facet that was read.') }),
+  handler: (input) => ({ facet: input.what }),
+});
+
 const docResource = resource('wire://doc/{id}', {
   name: 'wire_doc',
   description: 'A document.',
@@ -94,7 +111,8 @@ async function connect() {
   );
   const subscriptions = installResourceSubscriptions(server);
   const services = { logger, storage: new StorageService(new InMemoryProvider()) };
-  await new ToolRegistry([searchTool], services).registerAll(server, subscriptions);
+  // `searchTool` stays first: the schema assertions below read `tools[0]`.
+  await new ToolRegistry([searchTool, facetTool], services).registerAll(server, subscriptions);
   await new ResourceRegistry([docResource], services).registerAll(server, subscriptions);
   await new PromptRegistry([greetPrompt], logger).registerAll(server);
 
@@ -176,10 +194,21 @@ describe('Phase 1 wire conformance', () => {
       const result = await client.callTool({ name: 'wire_search', arguments: args });
 
       expect(result.isError).toBe(true);
-      const error = (result.structuredContent as { error?: { code?: number; message?: string } })
-        ?.error;
+      const error = (
+        result.structuredContent as {
+          error?: {
+            code?: number;
+            data?: { reason?: string; recovery?: { hint?: string } };
+            message?: string;
+          };
+        }
+      )?.error;
       expect(error?.code).toBe(JsonRpcErrorCode.InvalidParams);
       expect(error?.message?.length ?? 0).toBeGreaterThan(0);
+      // #445: an argument rejection is a declared failure mode with a next
+      // step, the same as any handler error.
+      expect(error?.data?.reason).toBe('invalid_arguments');
+      expect(error?.data?.recovery?.hint?.length ?? 0).toBeGreaterThan(0);
       // The rejection is the schema's, not the handler's — it never ran.
       expect(handlerCalls).toBe(0);
     });
@@ -194,6 +223,9 @@ describe('Phase 1 wire conformance', () => {
       const text = (result.content as Array<{ text: string }>)[0]?.text ?? '';
       expect(text).toContain('Invalid arguments for tool wire_search');
       expect(text).toContain('salt');
+      // The existing hint mirror carries the accepted-key list to format-only
+      // clients with no extra work (#445).
+      expect(text).toContain('Recovery: Unknown key salt. This tool accepts: query, limit.');
     });
 
     it('emits an envelope the advertised outputSchema accepts', async () => {
@@ -221,6 +253,52 @@ describe('Phase 1 wire conformance', () => {
       expect(result.isError).not.toBe(true);
       expect(result.structuredContent).toMatchObject({ hits: ['ok'], total: 1 });
       expect(handlerCalls).toBe(1);
+    });
+  });
+
+  describe('missing-vs-wrong and union rendering (#378, #417)', () => {
+    /** The `content[]` diagnostic a client reads for a rejected call. */
+    const rejectionText = async (args: Record<string, unknown>) => {
+      const client = await session();
+      const result = await client.callTool({ name: 'wire_facet', arguments: args });
+      expect(result.isError).toBe(true);
+      return (result.content as Array<{ text: string }>)[0]?.text ?? '';
+    };
+
+    it('renders an omitted required enum as missing, not as a wrong choice (#378)', async () => {
+      expect(await rejectionText({})).toContain(
+        'what: Missing required field. Expected one of "os"|"cpu"|"memory"',
+      );
+    });
+
+    it('keeps the invalid-option sentence for a value outside the set (#378)', async () => {
+      expect(await rejectionText({ what: 'bogus' })).toContain(
+        'what: Invalid option: expected one of "os"|"cpu"|"memory"',
+      );
+    });
+
+    it("renders a union's branch message rather than its placeholder (#417)", async () => {
+      const text = await rejectionText({ what: 'os', court: 'bogus' });
+
+      expect(text).toContain('court: Invalid option: expected one of "CJEU"|"GC"');
+      expect(text).not.toContain('court: Invalid input');
+    });
+
+    it('emits an envelope the advertised outputSchema accepts', async () => {
+      const client = await session();
+      const result = await client.callTool({ name: 'wire_facet', arguments: {} });
+
+      expect(advertisedOutputSchema(facetTool).safeParse(result.structuredContent).success).toBe(
+        true,
+      );
+      expect(result.structuredContent).toMatchObject({
+        error: {
+          data: {
+            reason: 'invalid_arguments',
+            recovery: { hint: 'Provide what.' },
+          },
+        },
+      });
     });
   });
 

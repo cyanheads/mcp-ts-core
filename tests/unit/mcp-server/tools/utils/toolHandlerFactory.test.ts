@@ -7,7 +7,7 @@
  */
 
 import type { CallToolResult, ContentBlock } from '@modelcontextprotocol/server';
-import { inputRequired } from '@modelcontextprotocol/server';
+import { inputRequired, SdkError, SdkErrorCode } from '@modelcontextprotocol/server';
 import { AjvJsonSchemaValidator } from '@modelcontextprotocol/server/validators/ajv';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { z } from 'zod';
@@ -126,6 +126,16 @@ type HandlerResult = Awaited<ReturnType<ReturnType<typeof createToolHandler>>>;
  */
 function firstBlock(result: HandlerResult): ContentBlock {
   return (result as CallToolResult).content![0]!;
+}
+
+/** The error envelope a failed call put on `structuredContent`. */
+function envelope(result: HandlerResult): {
+  code: number;
+  data?: { issues?: unknown[]; reason?: string; recovery?: { hint?: string } };
+  message: string;
+} {
+  return ((result as CallToolResult).structuredContent as { error: ReturnType<typeof envelope> })
+    .error;
 }
 
 /**
@@ -331,6 +341,411 @@ describe('createToolHandler', () => {
   });
 
   // -----------------------------------------------------------------------
+  // Argument-rejection rendering (#378, #417, #445)
+  // -----------------------------------------------------------------------
+
+  describe('argument-rejection rendering (#378, #417, #445)', () => {
+    const ok = z.object({ ok: z.boolean().describe('ok') });
+    const pass = () => ({ ok: true });
+
+    const facet = tool('facet_tool', {
+      description: 'Reads one system facet.',
+      input: z.object({ what: z.enum(['os', 'cpu', 'memory']).describe('Facet.') }),
+      output: ok,
+      handler: pass,
+    });
+
+    const nestedFacet = tool('nested_facet_tool', {
+      description: 'Reads a nested facet.',
+      input: z.object({
+        outer: z.object({ inner: z.enum(['a', 'b']).describe('Inner facet.') }).describe('Outer.'),
+      }),
+      output: ok,
+      handler: pass,
+    });
+
+    const literalTool = tool('literal_tool', {
+      description: 'Requires a fixed literal.',
+      input: z.object({ k: z.literal('fixed').describe('The only accepted value.') }),
+      output: ok,
+      handler: pass,
+    });
+
+    const optionalCourt = tool('optional_court_tool', {
+      description: 'Optional blank-or-enum court filter.',
+      input: z.object({
+        court: z
+          .union([z.literal(''), z.enum(['CJEU', 'GC'])])
+          .optional()
+          .describe('Court, or blank for any.'),
+      }),
+      output: ok,
+      handler: pass,
+    });
+
+    const requiredCourt = tool('required_court_tool', {
+      description: 'Required blank-or-enum court filter.',
+      input: z.object({
+        court: z.union([z.literal(''), z.enum(['CJEU', 'GC'])]).describe('Court, or blank.'),
+      }),
+      output: ok,
+      handler: pass,
+    });
+
+    const threeBranch = tool('three_branch_tool', {
+      description: 'Blank, enum, or integer.',
+      input: z.object({
+        v: z.union([z.literal(''), z.enum(['a', 'b']), z.number().int()]).describe('Value.'),
+      }),
+      output: ok,
+      handler: pass,
+    });
+
+    const singleValueBranches = tool('single_value_union_tool', {
+      description: 'Blank or a one-value enum — every branch is single-valued.',
+      input: z.object({ v: z.union([z.literal(''), z.enum(['only'])]).describe('Value.') }),
+      output: ok,
+      handler: pass,
+    });
+
+    const regexUnion = tool('regex_union_tool', {
+      description: 'Blank or an ECLI identifier.',
+      input: z.object({
+        e: z
+          .union([z.literal(''), z.string().regex(/^ECLI:/, 'Must start with ECLI:')])
+          .describe('ECLI, or blank.'),
+      }),
+      output: ok,
+      handler: pass,
+    });
+
+    const search = tool('search_tool', {
+      description: 'Searches.',
+      input: z.object({
+        query: z.string().min(1).describe('Search query.'),
+        limit: z.number().optional().describe('Maximum results.'),
+      }),
+      output: ok,
+      handler: pass,
+    });
+
+    const point = tool('point_tool', {
+      description: 'Takes a coordinate.',
+      input: z.object({
+        lat: z.number().describe('Latitude.'),
+        lon: z.number().describe('Longitude.'),
+      }),
+      output: ok,
+      handler: pass,
+    });
+
+    const unionRoot = tool('union_root_tool', {
+      description: 'Looks a record up by exactly one key.',
+      input: z.discriminatedUnion('mode', [
+        z.object({
+          mode: z.literal('byId').describe('By ID.'),
+          id: z.string().describe('Record ID.'),
+        }),
+        z.object({
+          mode: z.literal('byName').describe('By name.'),
+          name: z.string().describe('Name.'),
+        }),
+      ]),
+      output: ok,
+      handler: pass,
+    });
+
+    const catchallRoot = tool('catchall_root_tool', {
+      description: 'Open root validating unknown keys against a catchall.',
+      input: z.object({ a: z.string().describe('A.') }).catchall(z.number()),
+      output: ok,
+      handler: pass,
+    });
+
+    const passthroughRoot = tool('passthrough_root_tool', {
+      description: 'Open root accepting unknown keys outright.',
+      input: z.object({ a: z.string().describe('A.') }).passthrough(),
+      output: ok,
+      handler: pass,
+    });
+
+    /** Drives a definition through the production factory with raw arguments. */
+    async function reject(def: unknown, args: Record<string, unknown>) {
+      const handler = createToolHandler(def as AnyToolDefinition, services, notifiers);
+      return await handler(args, makeServerContext());
+    }
+
+    /** The rendered detail — everything after the `Invalid arguments` preamble. */
+    function detail(result: HandlerResult, toolName: string): string {
+      return envelope(result).message.replace(
+        `Input validation error: Invalid arguments for tool ${toolName}: `,
+        '',
+      );
+    }
+
+    function hint(result: HandlerResult): string | undefined {
+      return envelope(result).data?.recovery?.hint;
+    }
+
+    // ---------------------------------------------------------------------
+    // Characterization — rendering that must not move
+    // ---------------------------------------------------------------------
+
+    describe('rendering that must not move', () => {
+      it('keeps a missing required non-enum field on the Zod invalid_type sentence', async () => {
+        const result = await reject(search, {});
+
+        expect(detail(result, 'search_tool')).toBe(
+          'query: Invalid input: expected string, received undefined',
+        );
+      });
+
+      it('keeps the unrecognized-key diagnostic as the first line', async () => {
+        const result = await reject(search, { query: 'ok', salt: true });
+
+        expect(envelope(result).message).toBe(
+          'Input validation error: Invalid arguments for tool search_tool: Unrecognized key: "salt"',
+        );
+      });
+
+      it('joins several issues with a comma, one `path: message` each', async () => {
+        const result = await reject(point, { lat: 'x', lon: 'y' });
+
+        expect(detail(result, 'point_tool')).toBe(
+          'lat: Invalid input: expected number, received string, ' +
+            'lon: Invalid input: expected number, received string',
+        );
+      });
+
+      it('keeps a failed constraint on its own Zod message', async () => {
+        const result = await reject(search, { query: '' });
+
+        expect(detail(result, 'search_tool')).toBe(
+          'query: Too small: expected string to have >=1 characters',
+        );
+      });
+
+      it('keeps the discriminator sentence for a union root', async () => {
+        const result = await reject(unionRoot, { mode: 'byEmail' });
+
+        expect(detail(result, 'union_root_tool')).toBe(
+          "mode: Invalid discriminator value. Expected 'byId' | 'byName'",
+        );
+      });
+
+      it('keeps a catchall root on the unknown key’s own invalid_type sentence', async () => {
+        const result = await reject(catchallRoot, { a: 'x', extra: 'not-a-number' });
+
+        expect(detail(result, 'catchall_root_tool')).toBe(
+          'extra: Invalid input: expected number, received string',
+        );
+      });
+
+      it('accepts an unknown key outright on a passthrough root', async () => {
+        const result = await reject(passthroughRoot, { a: 'x', extra: 'anything' });
+
+        expect((result as CallToolResult).isError).toBeUndefined();
+      });
+
+      it('keeps a union branch that already reports specifically', async () => {
+        // Exactly one branch matched the base type and failed only a check, so
+        // Zod returns that branch's issues directly — never `Invalid input`.
+        const result = await reject(regexUnion, { e: 'abc' });
+
+        expect(detail(result, 'regex_union_tool')).toBe('e: Must start with ECLI:');
+      });
+    });
+
+    // ---------------------------------------------------------------------
+    // #378 — missing renders as missing, not as a wrong choice
+    // ---------------------------------------------------------------------
+
+    describe('missing vs. wrong rendering (#378)', () => {
+      it('renders an omitted required enum as missing, keeping the expected set', async () => {
+        const result = await reject(facet, {});
+
+        expect(detail(result, 'facet_tool')).toBe(
+          'what: Missing required field. Expected one of "os"|"cpu"|"memory"',
+        );
+      });
+
+      it('keeps the invalid-option sentence for a value outside the set', async () => {
+        const result = await reject(facet, { what: 'bogus' });
+
+        expect(detail(result, 'facet_tool')).toBe(
+          'what: Invalid option: expected one of "os"|"cpu"|"memory"',
+        );
+      });
+
+      it('treats an explicit null as present with a wrong value', async () => {
+        const result = await reject(facet, { what: null });
+
+        expect(detail(result, 'facet_tool')).toBe(
+          'what: Invalid option: expected one of "os"|"cpu"|"memory"',
+        );
+      });
+
+      it('resolves absence along a nested path', async () => {
+        const missing = await reject(nestedFacet, { outer: {} });
+        const wrong = await reject(nestedFacet, { outer: { inner: 'z' } });
+
+        expect(detail(missing, 'nested_facet_tool')).toBe(
+          'outer.inner: Missing required field. Expected one of "a"|"b"',
+        );
+        expect(detail(wrong, 'nested_facet_tool')).toBe(
+          'outer.inner: Invalid option: expected one of "a"|"b"',
+        );
+      });
+
+      it('renders a single accepted value without the "one of" phrasing', async () => {
+        const result = await reject(literalTool, {});
+
+        expect(detail(result, 'literal_tool')).toBe('k: Missing required field. Expected "fixed"');
+      });
+    });
+
+    // ---------------------------------------------------------------------
+    // #417 — a union renders its branch message, not the placeholder
+    // ---------------------------------------------------------------------
+
+    describe('union branch rendering (#417)', () => {
+      it('renders the enum branch rather than the union placeholder', async () => {
+        const result = await reject(optionalCourt, { court: 'bogus' });
+
+        expect(detail(result, 'optional_court_tool')).toBe(
+          'court: Invalid option: expected one of "CJEU"|"GC"',
+        );
+      });
+
+      it('joins the remaining branches of a three-branch union with " or "', async () => {
+        const result = await reject(threeBranch, { v: true });
+
+        expect(detail(result, 'three_branch_tool')).toBe(
+          'v: Invalid option: expected one of "a"|"b" or ' +
+            'Invalid input: expected number, received boolean',
+        );
+      });
+
+      it("falls back to the union's own message when every branch is filtered out", async () => {
+        const result = await reject(singleValueBranches, { v: 'bogus' });
+
+        expect(detail(result, 'single_value_union_tool')).toBe('v: Invalid input');
+      });
+
+      it('selects the branch first, then renders an omitted required union as missing', async () => {
+        const omitted = await reject(requiredCourt, {});
+        const wrong = await reject(requiredCourt, { court: 'bogus' });
+
+        expect(detail(omitted, 'required_court_tool')).toBe(
+          'court: Missing required field. Expected one of "CJEU"|"GC"',
+        );
+        expect(detail(wrong, 'required_court_tool')).toBe(
+          'court: Invalid option: expected one of "CJEU"|"GC"',
+        );
+      });
+    });
+
+    // ---------------------------------------------------------------------
+    // #445 — reason + synthesized recovery hint
+    // ---------------------------------------------------------------------
+
+    describe('reason and recovery hint (#445)', () => {
+      it.each([
+        ['an unknown root key', search, { query: 'ok', salt: true }],
+        ['a wrong argument type', point, { lat: '1', lon: 2 }],
+        ['a missing required field', point, {}],
+        ['a failed constraint', search, { query: '' }],
+      ])('carries reason and a nonempty hint for %s', async (_label, def, args) => {
+        const result = await reject(def, args);
+
+        expect(envelope(result).code).toBe(JsonRpcErrorCode.InvalidParams);
+        expect(envelope(result).data?.reason).toBe('invalid_arguments');
+        expect(hint(result)?.length ?? 0).toBeGreaterThan(0);
+        // The Zod issues still ship verbatim; nothing carries the rejected value.
+        expect(envelope(result).data?.issues).toBeDefined();
+        expect(JSON.stringify(envelope(result).data?.issues)).not.toContain('"input"');
+      });
+
+      it('names the unknown key and every accepted root property, in schema order', async () => {
+        const result = await reject(search, { query: 'ok', salt: true });
+
+        expect(hint(result)).toBe('Unknown key salt. This tool accepts: query, limit.');
+      });
+
+      it('pluralizes and lists several unknown keys', async () => {
+        const result = await reject(search, { query: 'ok', bbox: 1, extra: 2 });
+
+        expect(hint(result)).toBe('Unknown keys bbox, extra. This tool accepts: query, limit.');
+      });
+
+      it('omits the accepted list on a discriminated-union root', async () => {
+        const result = await reject(unionRoot, { mode: 'byId', id: 'x', idd: 'typo' });
+
+        expect(hint(result)).toBe('Unknown key idd.');
+      });
+
+      it('names the arriving type on a wrong-type argument', async () => {
+        const result = await reject(point, { lat: '1', lon: 2 });
+
+        expect(hint(result)).toBe('Send lat as a number, not a string.');
+      });
+
+      it('names the arguments themselves when the root is not an object', async () => {
+        const result = await reject(point, 'lat=1' as unknown as Record<string, unknown>);
+
+        expect(hint(result)).toBe('Send the arguments as an object, not a string.');
+      });
+
+      it('asks for the arguments when the call carries none', async () => {
+        const result = await reject(point, undefined as unknown as Record<string, unknown>);
+
+        expect(hint(result)).toBe('Send the arguments as an object.');
+      });
+
+      it('asks for every missing field in one sentence', async () => {
+        const result = await reject(point, {});
+
+        expect(hint(result)).toBe('Provide lat and lon.');
+      });
+
+      it('leaves a constraint failure on the issue message', async () => {
+        const result = await reject(search, { query: '' });
+
+        expect(hint(result)).toBe('Too small: expected string to have >=1 characters');
+      });
+
+      it('joins several issues into one hint, one sentence per issue', async () => {
+        const result = await reject(point, { lat: 'x' });
+
+        expect(hint(result)).toBe('Send lat as a number, not a string. Provide lon.');
+      });
+
+      it('reaches the catchall root through invalid_type, never the accepted-key branch', async () => {
+        const result = await reject(catchallRoot, { a: 'x', extra: 'not-a-number' });
+
+        expect(hint(result)).toBe('Send extra as a number, not a string.');
+        expect(hint(result)).not.toContain('This tool accepts');
+      });
+
+      it('carries a selected union branch into the hint', async () => {
+        const result = await reject(optionalCourt, { court: 'bogus' });
+
+        expect(hint(result)).toBe('Invalid option: expected one of "CJEU"|"GC"');
+      });
+
+      it('mirrors the hint into content[] after the diagnostic line', async () => {
+        const result = await reject(search, { query: 'ok', salt: true });
+
+        expect((firstBlock(result) as { text: string }).text).toBe(
+          'Error: Input validation error: Invalid arguments for tool search_tool: ' +
+            'Unrecognized key: "salt"\n\nRecovery: Unknown key salt. ' +
+            'This tool accepts: query, limit.',
+        );
+      });
+    });
+  });
+
+  // -----------------------------------------------------------------------
   // Error handling
   // -----------------------------------------------------------------------
 
@@ -514,6 +929,172 @@ describe('createToolHandler', () => {
 
       const text = (firstBlock(result) as { text: string }).text;
       expect(text).toBe('Error: Boom');
+    });
+  });
+
+  // -----------------------------------------------------------------------
+  // Cancellation precedence (#421)
+  // -----------------------------------------------------------------------
+
+  describe('cancellation precedence (#421)', () => {
+    /** Drives a handler that throws `thrown`, with `signal` as the request's. */
+    async function runThrowing(
+      name: string,
+      thrown: unknown,
+      signal?: AbortSignal,
+    ): Promise<HandlerResult> {
+      const def = tool(name, {
+        description: 'Throws, so the catch path can be observed.',
+        input: z.object({}),
+        output: z.object({ ok: z.boolean().describe('Never returned.') }),
+        handler: () => {
+          throw thrown;
+        },
+      });
+      const handler = createToolHandler(def as AnyToolDefinition, services, notifiers);
+      return await handler({}, makeServerContext(signal ? { signal } : {}));
+    }
+
+    /** The reason a `notifications/cancelled` carrying no `reason` leaves on the signal. */
+    const abortException = () => new DOMException('The operation was aborted.', 'AbortError');
+
+    describe('signal not aborted — the existing ladder, unchanged', () => {
+      it('classifies a thrown string as InternalError', async () => {
+        const result = await runThrowing('live_string_tool', 'probe');
+
+        expect(envelope(result).code).toBe(JsonRpcErrorCode.InternalError);
+      });
+
+      it('classifies a plain Error as InternalError', async () => {
+        const result = await runThrowing('live_error_tool', new Error('something broke'));
+
+        expect(envelope(result).code).toBe(JsonRpcErrorCode.InternalError);
+      });
+
+      it('classifies a DOMException named AbortError as Timeout', async () => {
+        const result = await runThrowing('live_abort_tool', abortException());
+
+        expect(envelope(result).code).toBe(JsonRpcErrorCode.Timeout);
+      });
+
+      it("keeps an McpError's own code", async () => {
+        const result = await runThrowing(
+          'live_mcp_error_tool',
+          new McpError(JsonRpcErrorCode.NotFound, 'Item not found'),
+        );
+
+        expect(envelope(result).code).toBe(JsonRpcErrorCode.NotFound);
+      });
+    });
+
+    describe('signal aborted — the cancellation outranks the thrown value', () => {
+      it('classifies a rethrown cancellation reason string as RequestCancelled', async () => {
+        const result = await runThrowing(
+          'cancelled_string_tool',
+          'probe',
+          AbortSignal.abort('probe'),
+        );
+
+        expect(envelope(result).code).toBe(JsonRpcErrorCode.RequestCancelled);
+      });
+
+      it('classifies a plain Error as RequestCancelled', async () => {
+        const result = await runThrowing(
+          'cancelled_error_tool',
+          new Error('something broke'),
+          AbortSignal.abort('probe'),
+        );
+
+        expect(envelope(result).code).toBe(JsonRpcErrorCode.RequestCancelled);
+      });
+
+      it('classifies a DOMException named AbortError as RequestCancelled, not Timeout', async () => {
+        const reason = abortException();
+        const result = await runThrowing('cancelled_abort_tool', reason, AbortSignal.abort(reason));
+
+        expect(envelope(result).code).toBe(JsonRpcErrorCode.RequestCancelled);
+      });
+
+      it("overrides an explicit McpError's own code", async () => {
+        const result = await runThrowing(
+          'cancelled_mcp_error_tool',
+          new McpError(JsonRpcErrorCode.InternalError, 'Overpass request failed'),
+          AbortSignal.abort('probe'),
+        );
+
+        expect(envelope(result).code).toBe(JsonRpcErrorCode.RequestCancelled);
+      });
+
+      it("classifies the SDK's own abort shape as RequestCancelled", async () => {
+        const reason = new SdkError(SdkErrorCode.ConnectionClosed, 'Connection closed');
+        const result = await runThrowing('cancelled_sdk_tool', reason, AbortSignal.abort(reason));
+
+        expect(envelope(result).code).toBe(JsonRpcErrorCode.RequestCancelled);
+      });
+
+      it('keeps the thrown value’s message for triage', async () => {
+        const result = await runThrowing(
+          'cancelled_message_tool',
+          'probe',
+          AbortSignal.abort('probe'),
+        );
+
+        expect(envelope(result).message).toBe('probe');
+      });
+
+      it('logs at info with no stack instead of error', async () => {
+        await runThrowing('cancelled_log_tool', new Error('probe'), AbortSignal.abort('probe'));
+
+        expect(mockLogger.error).not.toHaveBeenCalled();
+        const logged = mockLogger.info.mock.calls.findLast((call) =>
+          String(call[0]).startsWith('Cancelled tool:cancelled_log_tool'),
+        );
+        expect(logged).toBeDefined();
+        const record = logged?.[1] as { extra: Record<string, unknown> };
+        expect(record.extra.errorCode).toBe(JsonRpcErrorCode.RequestCancelled);
+        expect(record.extra).not.toHaveProperty('stack');
+        // The classification chains the original throw as `cause`; no stack of
+        // it reaches the record through the cause chain either.
+        expect(JSON.stringify(record.extra)).not.toContain('stack');
+      });
+
+      it('leaves a handler that completed after the abort a success', async () => {
+        const def = tool('cancelled_success_tool', {
+          description: 'Returns normally even though the request was cancelled.',
+          input: z.object({}),
+          output: z.object({ ok: z.boolean().describe('Always true.') }),
+          handler: () => ({ ok: true }),
+        });
+        const handler = createToolHandler(def as AnyToolDefinition, services, notifiers);
+
+        const result = await handler({}, makeServerContext({ signal: AbortSignal.abort('probe') }));
+
+        expect(result.isError).toBeUndefined();
+        expect((result as CallToolResult).structuredContent).toEqual({ ok: true });
+      });
+
+      it('leaves an input_required signal raised after the abort as control flow', async () => {
+        const def = tool('cancelled_input_tool', {
+          description: 'Asks for input even though the request was cancelled.',
+          input: z.object({}),
+          output: z.object({ ok: z.boolean().describe('Never returned.') }),
+          handler: (_input, ctx) =>
+            ctx.requestInput({
+              inputRequests: {
+                confirm: inputRequired.elicit({
+                  message: 'Confirm?',
+                  requestedSchema: z.object({ confirm: z.boolean().describe('confirm') }),
+                }),
+              },
+            }),
+        });
+        const handler = createToolHandler(def as AnyToolDefinition, services, notifiers);
+
+        const result = await handler({}, makeServerContext({ signal: AbortSignal.abort('probe') }));
+
+        expect(result).toHaveProperty('inputRequests');
+        expect(result).not.toHaveProperty('isError');
+      });
     });
   });
 

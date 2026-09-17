@@ -22,7 +22,7 @@ import type { NotifierSources } from '@/mcp-server/notifications.js';
 import type { AnyResourceDefinition } from '@/mcp-server/resources/utils/resourceDefinition.js';
 import { withRequiredScopes } from '@/mcp-server/transports/auth/lib/authUtils.js';
 import { McpError } from '@/types-global/errors.js';
-import { ErrorHandler } from '@/utils/internal/error-handler/errorHandler.js';
+import { asRequestCancelled, ErrorHandler } from '@/utils/internal/error-handler/errorHandler.js';
 import { measureResourceExecution } from '@/utils/internal/performance.js';
 import { requestContextService } from '@/utils/internal/requestContext.js';
 
@@ -146,17 +146,24 @@ export function createResourceHandler(
         async (spanContext, recordOutput) => {
           const ctx = buildHandlerContext(request, services, spanContext, def.errors, uri);
 
-          // Handler may return sync or async.
-          const handlerResult = await def.handler(validatedParams, ctx);
+          try {
+            // Handler may return sync or async.
+            const handlerResult = await def.handler(validatedParams, ctx);
 
-          // The domain value is what `mcp.resource.output_bytes` measures — not
-          // the assembled `contents` this callback returns.
-          recordOutput(handlerResult);
+            // The domain value is what `mcp.resource.output_bytes` measures — not
+            // the assembled `contents` this callback returns.
+            recordOutput(handlerResult);
 
-          // Validate output against schema when defined
-          const validatedResult = def.output ? def.output.parse(handlerResult) : handlerResult;
+            // Validate output against schema when defined
+            const validatedResult = def.output ? def.output.parse(handlerResult) : handlerResult;
 
-          return { contents: formatter(validatedResult, { uri, mimeType }) };
+            return { contents: formatter(validatedResult, { uri, mimeType }) };
+          } catch (error) {
+            // Inside the measurement on purpose: the completion log's
+            // `metrics.errorCode` and the span's error-code attribute are
+            // derived from what leaves this callback (#421).
+            throw asRequestCancelled(error, request.signal);
+          }
         },
         { ...appContext, resourceName },
         { uri: resourceUri, mimeType },
