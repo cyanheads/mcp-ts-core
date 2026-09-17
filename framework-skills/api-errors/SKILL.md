@@ -281,7 +281,7 @@ The framework applies these steps in order — first match wins:
 7. **`AbortError` name** — `error.name === 'AbortError'` → `Timeout`.
 8. **Fallback** — `InternalError`.
 
-However it is reached, a `RequestCancelled` is logged at `info` with no stack — neither the thrown value's own nor one reached through its cause chain — and the completion log carries `metrics.errorCode: "-32011"` alongside `isSuccess: false`.
+However it is reached, a `RequestCancelled` is logged at `info` with no stack — neither the thrown value's own nor one reached through its cause chain. Step 1 settles the completion log too, which carries `metrics.errorCode: "-32011"` alongside `isSuccess: false`; a raw `SdkError` that reaches the code through step 3 alone is not an `McpError`, so that log still reads `UNHANDLED_ERROR`.
 
 ### JS Constructor Name Mappings
 
