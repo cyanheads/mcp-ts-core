@@ -4,7 +4,7 @@ description: >
   Review pass on an open release PR (`release/<version>` → `main`) — the step between `git-wrapup` and `release-and-publish` when a project releases in gated release PR mode. Reads the PR's commit range through the `code-simplifier` lens plus a correctness review, verifies whatever an automated reviewer left on the PR, lands fixes as fixup commits autosquashed back into the stack, force-with-lease pushes the release branch, keeps the PR body in sync with what ships, and leaves one summary comment. The only agent role that both edits and commits — and it never tags, merges, touches `main`, or publishes.
 metadata:
   author: cyanheads
-  version: "1.1"
+  version: "1.2"
   audience: external
   type: workflow
 ---
@@ -74,11 +74,11 @@ Every fix rides into the commit it corrects, so the reviewed stack keeps the sam
 
 ```bash
 git add <paths>
-git commit --fixup=<sha-of-the-concern-commit>     # code/test fixes → the work commit they correct
-git commit --fixup=<sha-of-the-release-commit>     # changelog, version, regenerated artifacts → the release commit
+git commit --only <paths> --fixup=<sha-of-the-concern-commit>     # code/test fixes → the work commit they correct
+git commit --only <paths> --fixup=<sha-of-the-release-commit>     # changelog, version, regenerated artifacts → the release commit
 ```
 
-A review fix corrects something already in the stack, so it always has a target commit; pick the nearest concern. When one fix touches files from two concern commits, split it at the file boundary — a file never spans two commits.
+`--only` commits the named paths and nothing else in the index, so a stray staged change — a hook's output, a concurrent stage — cannot ride into a fixup and, after autosquash, into the stack commit it targeted. A review fix corrects something already in the stack, so it always has a target commit; pick the nearest concern. When one fix touches files from two concern commits, split it at the file boundary — a file never spans two commits.
 
 When every fix is in:
 

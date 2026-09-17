@@ -4,7 +4,7 @@ description: >
   Land working-tree changes as logical commits — the work grouped by concern, topped by a release commit (version bump, changelog, regenerated artifacts). Verify, commit. Stops at "committed locally on main" — or, when the project releases through a release PR, at "release branch pushed, PR open". No tag, no push to main, no publish: the release-and-publish skill merges, tags, and ships from here. Distilled from the git_wrapup_instructions protocol.
 metadata:
   author: cyanheads
-  version: "1.17"
+  version: "1.18"
   audience: external
   type: workflow
 ---
@@ -56,9 +56,11 @@ Understand what's about to ship before touching version numbers:
 ```bash
 git status
 git log v<latest-tag>..HEAD --oneline    # commits since last release
-git diff --stat                           # uncommitted changes
-git diff                                  # review the actual content
+git diff HEAD --stat                      # every uncommitted change, staged or not
+git diff HEAD                             # review the actual content
 ```
+
+Diff against `HEAD`, not the index: plain `git diff` omits staged changes entirely, so a group already staged before wrap-up began — a `git mv` from a migration step, a hook's output — shows up in `git status` as a line to scroll past and nowhere in the diff review. Whatever is staged is part of what ships and gets grouped in step 7 like everything else.
 
 If the working tree is clean AND there are no commits since the last tag, halt — nothing to wrap up.
 
@@ -155,13 +157,15 @@ Do NOT `git add -A` into one commit. Group the working tree into a handful of lo
 1. **The work — one commit per concern.** A feature spanning multiple layers splits by layer: runtime/logic, linter/tooling, docs/skills. Unrelated changes (two separate fixes, an incidental doc tweak) are their own commits. Work commits do not carry the version.
 2. **The release commit — last, on top.** Version bumps (`package.json`, `server.json`, `manifest.json`, the plugin manifests, README badge, `CLAUDE.md`/`AGENTS.md`), the changelog entry, `CHANGELOG.md`, and `docs/tree.md` go in a single final commit that sits on top of the work stack — never mixed into a feature commit.
 
-Stage each group explicitly, commit it, then move to the next — the release commit goes last:
+Stage each group explicitly, commit it by pathspec, then move to the next — the release commit goes last:
 
 ```bash
 git add <paths-for-this-concern>
-git commit -m "<subject>"
+git commit --only <paths-for-this-concern> -m "<subject>"
 # repeat per concern; version + changelog + tree are the final commit
 ```
+
+**Commit by pathspec, never the bare index.** A bare `git commit` commits everything staged, not the paths just added, so anything staged before wrap-up began — a `git mv` left by a migration step, a concurrent stage from a second session or a hook — rides into the first concern's commit. `--only` takes the named paths' working-tree content and disregards the rest of the index, so a pre-staged group never rides along; it stays staged, to be committed as its own concern (`chore(skills): move the skill tree to framework-skills/`) or reported. Anything still staged when the release commit lands then fails step 9's clean-tree check instead of shipping silently.
 
 **The file is the atomic boundary:** NEVER split a single file's working-tree changes across commits, regardless of mechanism — not `git add -p`, not an index-only patch (`git apply --cached`), not editing the file between commits to remove-then-re-add a hunk. When one file serves two concerns, it ships whole in the commit of its dominant concern; a later commit may touch the file again only for changes made AFTER the first commit (a version badge bumped after the fix landed).
 
