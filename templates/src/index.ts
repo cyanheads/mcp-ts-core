@@ -17,9 +17,10 @@ await createApp({
   tools: [echoTool, echoAppTool],
   resources: [echoResource, echoAppUiResource],
   prompts: [echoPrompt],
-  // instructions: 'Server-level orientation forwarded to the model on every initialize.\n' +
-  //   '- Use shortcut `X` for the most common case\n' +
-  //   '- Tools require auth via the `inventory:read` scope',
+  // Server-level orientation forwarded to the model on every initialize: two to three
+  // cohesive sentences in one string literal, written for the calling agent (which tool
+  // opens a workflow, what chains into what). Operator configuration stays in the README.
+  // instructions: 'Resolve a name to an id with example_search, then pass that id to example_get for the full record. Results are paged; follow nextOffset until it is absent.',
 
   // Session posture in code rather than in a Dockerfile. MCP_SESSION_MODE still
   // wins when it is set. Add `require: 'stateful'` — `{ default: 'stateful',
