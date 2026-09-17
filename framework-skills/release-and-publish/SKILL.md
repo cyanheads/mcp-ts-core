@@ -4,7 +4,7 @@ description: >
   Ship a release end-to-end across every registry the project targets (npm, MCP Registry, GitHub Releases for `.mcpb` bundles, GHCR). Runs the final verification gate, fast-forwards `main` when the release rode a release PR, creates the annotated tag on the commit `main` now points at, pushes commits and tags, then publishes to each applicable destination. Assumes git wrapup (version bumps, changelog, commit stack — and in release PR mode, the pushed branch and open PR) is already complete — this skill is the post-wrapup merge + tag + publish workflow. Retries transient network failures on publish steps; halts with a partial-state report when retries are exhausted or the failure is terminal.
 metadata:
   author: cyanheads
-  version: "2.17"
+  version: "2.18"
   audience: external
   type: workflow
 ---
@@ -18,7 +18,7 @@ This skill runs **after** git wrapup. By the time it's invoked:
 - `changelog/<major.minor>.x/<version>.md` is authored
 - `CHANGELOG.md` is regenerated
 - README and every version-bearing file is in sync
-- Release commit (`chore(release): <version> — <theme>`) is at HEAD
+- Release commit (`chore(release): <version> — <theme>`) is at HEAD — or, in gated release PR mode, reachable from HEAD with only the review pass's commits above it
 - No tag exists yet — this skill creates it (step 4)
 - Working tree is clean
 - Release PR mode (see `git-wrapup`'s "Release PR mode"): HEAD is on `release/<version>`, the branch is pushed, the PR is open, and — in gated mode — the caller has confirmed the review pass is finished. Without that confirmation, halt: this skill never decides on its own that a review is done.
@@ -68,11 +68,11 @@ The user fixes locally and re-invokes. On re-invocation, already-published desti
 Read `package.json` → capture `version`. Then use your git tools to verify:
 
 - **Working tree is clean** — no uncommitted changes
-- **HEAD is the release commit** — `git log -1 --format=%s` starts with `chore(release): <version>`
+- **The release commit is in the stack** — `git log -1 --format=%s` starts with `chore(release): <version>`, or, in gated release PR mode, `git log main..HEAD --format=%s` contains it with only the review pass's own commits above it (`release-pr-review` lands fixes as ordinary commits on top; the tag still goes on the tip). Any other commit above the release commit — new work, a second version — is a halt.
 - **Current branch** — `main`, or `release/<version>` in release PR mode. Anything else, halt.
 - **Release PR mode:** `gh pr view --json number,state,headRefOid` shows the PR `OPEN` with `headRefOid` equal to local HEAD. A mismatch means the branch has commits the PR doesn't (or the reverse) — halt and report both SHAs. Keep `number` and `headRefOid`: the merge check (step 3) and the tag body (step 4) need them after the checkout has moved to `main`.
 
-If working tree is dirty or HEAD isn't the release commit, halt.
+If the working tree is dirty or the release commit isn't in the stack as described, halt.
 
 ### 2. Run the verification gate
 
@@ -156,7 +156,7 @@ Format — a **headline digest**, never a section-by-section changelog mirror:
 Verify before moving on:
 
 ```bash
-git show v<version> --stat | head -20   # tag points at HEAD (the release commit)
+git show v<version> --stat | head -20   # tag points at HEAD (the release commit, or the last review commit above it)
 git tag -l v<version> --format='%(if)%(contents:signature)%(then)signed%(else)unsigned%(end)'   # with tag signing enabled, must print "signed"
 ```
 
@@ -307,7 +307,7 @@ If any check fails, halt and report which destination is unreachable. A successf
 
 ## Checklist
 
-- [ ] Working tree clean; release commit at HEAD; on `main` or `release/<version>`; release PR mode: PR head equals local HEAD and the review pass is confirmed finished
+- [ ] Working tree clean; release commit at HEAD (gated mode: in the stack, with only review commits above it); on `main` or `release/<version>`; release PR mode: PR head equals local HEAD and the review pass is confirmed finished
 - [ ] `bun run devcheck` passes
 - [ ] `bun run rebuild` succeeds
 - [ ] `bun run test:all` (or `test`) passes
