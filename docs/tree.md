@@ -1,6 +1,6 @@
 # mcp-ts-core - Directory Structure
 
-Generated on: 2026-09-15 19:58:49
+Generated on: 2026-09-16 19:48:35
 
 ```text
 mcp-ts-core/
@@ -9,6 +9,8 @@ mcp-ts-core/
 │   │   ├── bug_report.yml
 │   │   ├── config.yml
 │   │   └── feature_request.yml
+│   ├── workflows/
+│   │   └── codeql.yml
 │   ├── CODE_OF_CONDUCT.md
 │   ├── CONTRIBUTING.md
 │   ├── FUNDING.yml
@@ -532,6 +534,8 @@ mcp-ts-core/
 │   │   │   ├── bug_report.yml
 │   │   │   ├── config.yml
 │   │   │   └── feature_request.yml
+│   │   ├── workflows/
+│   │   │   └── codeql.yml
 │   │   ├── CODE_OF_CONDUCT.md
 │   │   ├── CONTRIBUTING.md
 │   │   └── SECURITY.md

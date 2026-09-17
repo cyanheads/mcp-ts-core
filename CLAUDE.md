@@ -1,10 +1,10 @@
 # Developer Protocol
 
 **Package:** `@cyanheads/mcp-ts-core`
-**Version:** 0.13.2
+**Version:** 0.13.3
 **Engines:** Bun ≥1.4.0, Node ≥24.0.0
 **MCP SDK:** `@modelcontextprotocol/server` ^2.0.0 (protocol revisions 2026-07-28 and 2025-*)
-**Zod:** ^4.6.2
+**Zod:** ^4.6.5
 **GitHub:** [cyanheads/mcp-ts-core](https://github.com/cyanheads/mcp-ts-core)
 **npm:** [@cyanheads/mcp-ts-core](https://www.npmjs.com/package/@cyanheads/mcp-ts-core)
 **Docker:** [ghcr.io/cyanheads/mcp-ts-core](https://ghcr.io/cyanheads/mcp-ts-core)
@@ -22,7 +22,7 @@ This package serves two consumer paths. When making changes, know which audience
 | **Direct package import** — existing project pulls in the package | `bun add @cyanheads/mcp-ts-core` → `import { createApp, tool, z } from '@cyanheads/mcp-ts-core'` | Public API surface (`src/`) — existing consumers feel changes immediately on upgrade |
 | **Init-scaffolded server** — fresh project bootstrapped from this repo's templates | `bunx @cyanheads/mcp-ts-core init [name]` copies `templates/` into the new directory | `templates/` — only affects newly scaffolded servers, not existing ones |
 
-Both paths share the same public API. Init copies starter `package.json`, configs (`tsconfig`, `biome.json`, `vitest.config.ts`, `devcheck.config.json`, `bunfig.toml`), `.env.example`, `Dockerfile`, `LICENSE`, `.gitattributes`, `CLAUDE.md`/`AGENTS.md`, `.github/` (issue forms, `CONTRIBUTING.md`, `CODE_OF_CONDUCT.md`, `SECURITY.md`), example definitions and tests, framework `scripts/`, and external-audience `framework-skills/`. `_`-prefixed files (e.g. `_.gitignore`) drop the prefix on copy. Existing files are never overwritten; `init` without a name scaffolds in place (upgrade flow). After init, consult the `setup` skill.
+Both paths share the same public API. Init copies starter `package.json`, configs (`tsconfig`, `biome.json`, `vitest.config.ts`, `devcheck.config.json`, `bunfig.toml`), `.env.example`, `Dockerfile`, `LICENSE`, `.gitattributes`, `CLAUDE.md`/`AGENTS.md`, `.github/` (issue forms, `CONTRIBUTING.md`, `CODE_OF_CONDUCT.md`, `SECURITY.md`, `workflows/codeql.yml`), example definitions and tests, framework `scripts/`, and external-audience `framework-skills/`. `_`-prefixed files (e.g. `_.gitignore`) drop the prefix on copy. Existing files are never overwritten; `init` without a name scaffolds in place (upgrade flow). After init, consult the `setup` skill.
 
 ---
 
@@ -414,9 +414,9 @@ Available factories: `invalidParams`, `invalidRequest`, `notFound`, `forbidden`,
 
 For HTTP responses from upstream APIs, use `httpErrorFromResponse(response, { service, data })` from `/utils` — maps the full status table (401/403/408/422/429/5xx) and captures body + `Retry-After`.
 
-**Auto-classification.** Plain `Error`, `ZodError`, and any other thrown value are caught and classified automatically. Resolution order: `McpError` code (preserved as-is) → SDK `ConnectionClosed` (→ `RequestCancelled`) → JS constructor name (`TypeError` → `ValidationError`) → provider patterns (HTTP status codes, AWS errors, DB errors) → common message patterns → `AbortError` name (→ `Timeout`) → `InternalError` fallback.
+**Auto-classification.** Plain `Error`, `ZodError`, and any other thrown value are caught and classified automatically. Resolution order: request signal already aborted (→ `RequestCancelled`, outranking the thrown value's own code, `McpError` included) → `McpError` code (preserved as-is) → SDK `ConnectionClosed` (→ `RequestCancelled`) → JS constructor name (`TypeError` → `ValidationError`) → provider patterns (HTTP status codes, AWS errors, DB errors) → common message patterns → `AbortError` name (→ `Timeout`) → `InternalError` fallback.
 
-**Error-path parity.** Tool errors: `content[]` carries markdown with `data.recovery.hint`; `structuredContent.error` carries `{ code, message, data? }`. No `_meta.error`. Resources re-throw via JSON-RPC error envelope.
+**Error-path parity.** Tool errors: `content[]` carries markdown with `data.recovery.hint`; `structuredContent.error` carries `{ code, message, data? }`. No `_meta.error`. Resources re-throw via JSON-RPC error envelope. An argument rejection is one of them: `-32602` with `data.issues`, plus `data.reason: 'invalid_arguments'` and a hint synthesized from the issues and the root schema — never a tool-declared `reason`, since the handler never ran.
 
 **Lint rules** (all warnings, surfaced in `devcheck`): `prefer-mcp-error-in-handler`, `prefer-error-factory`, `preserve-cause-on-rethrow`, `no-stringify-upstream-error`, `error-contract-conformance`, `error-contract-prefer-fail`. See `api-linter` skill.
 

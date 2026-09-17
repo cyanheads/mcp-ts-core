@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.13.3](changelog/0.13.x/0.13.3.md) — 2026-09-17
+
+Argument rejections carry a reason and a schema-derived recovery hint, and render an omitted required field as missing rather than as a wrong choice. A handler unwound after its request was cancelled classifies RequestCancelled whatever it threw.
+
 ## [0.13.2](changelog/0.13.x/0.13.2.md) — 2026-09-13
 
 A fresh init scaffold builds again — the shipped build scripts resolve both tsconfig layouts — and devcheck gains a README version-badge check. runToolContract rejects out-of-schema arguments with the InvalidParams envelope a client actually receives.
