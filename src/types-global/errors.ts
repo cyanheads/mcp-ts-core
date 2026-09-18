@@ -100,12 +100,13 @@ export class McpError extends Error {
     }
     this.name = 'McpError';
 
-    // Maintain a proper prototype chain.
-    Object.setPrototypeOf(this, McpError.prototype);
+    // `new.target`, not `McpError`: pinning the base prototype strips a subclass
+    // of its identity and its own methods.
+    Object.setPrototypeOf(this, new.target.prototype);
 
     // Capture the stack trace, excluding the constructor call from it, if available.
     if (Error.captureStackTrace) {
-      Error.captureStackTrace(this, McpError);
+      Error.captureStackTrace(this, new.target);
     }
   }
 }

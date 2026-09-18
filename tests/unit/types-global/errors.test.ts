@@ -396,3 +396,40 @@ describe('McpError — auth is never carried in error data', () => {
     expect(error.data).toEqual({ uri: 'thing://1', reason: 'gone' });
   });
 });
+
+describe('McpError — subclassing', () => {
+  class QuotaError extends McpError {
+    constructor(readonly quota: number) {
+      super(JsonRpcErrorCode.RateLimited, 'quota spent', { quota });
+    }
+
+    remaining(): number {
+      return 0;
+    }
+  }
+
+  class DailyQuotaError extends QuotaError {}
+
+  it('keeps the subclass identity and its own methods', () => {
+    const error = new QuotaError(5);
+
+    expect(error).toBeInstanceOf(QuotaError);
+    expect(error).toBeInstanceOf(McpError);
+    expect(error).toBeInstanceOf(Error);
+    expect(error.remaining()).toBe(0);
+    expect(error.quota).toBe(5);
+  });
+
+  it('keeps identity past the first level of inheritance', () => {
+    const error = new DailyQuotaError(1);
+
+    expect(error).toBeInstanceOf(DailyQuotaError);
+    expect(error).toBeInstanceOf(QuotaError);
+    expect(error).toBeInstanceOf(McpError);
+  });
+
+  it('leaves a directly constructed McpError and the factories as McpError', () => {
+    expect(new McpError(JsonRpcErrorCode.InternalError, 'x')).toBeInstanceOf(McpError);
+    expect(Object.getPrototypeOf(notFound('gone'))).toBe(McpError.prototype);
+  });
+});
