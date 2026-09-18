@@ -68,7 +68,20 @@ export {
   httpErrorFromResponse,
   httpStatusToErrorCode,
 } from './network/httpError.js';
-export { type RetryOptions, withRetry } from './network/retry.js';
+export {
+  createPacer,
+  type Pacer,
+  type PacerCooldownOptions,
+  type PacerLimit,
+  type PacerOptions,
+  type PacerRunOptions,
+} from './network/pacer.js';
+export {
+  defaultIsTransient,
+  type RetryAttempt,
+  type RetryOptions,
+  withRetry,
+} from './network/retry.js';
 // Overflow (outline-on-overflow — issue #204)
 export {
   DEFAULT_OUTLINE_BUDGET_BYTES,
@@ -214,6 +227,7 @@ export {
 export {
   createCounter,
   createHistogram,
+  createObservableGauge,
   createUpDownCounter,
   getMeter,
 } from './telemetry/metrics.js';
