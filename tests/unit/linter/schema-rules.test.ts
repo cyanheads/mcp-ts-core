@@ -21,7 +21,9 @@ import {
   objectShapeKeys,
   unwrapWrappers,
 } from '@/linter/rules/schema-rules.js';
+import { lintToolDefinition } from '@/linter/rules/tool-rules.js';
 import { headerParam } from '@/mcp-server/tools/utils/headerParam.js';
+import { tool } from '@/mcp-server/tools/utils/toolDefinition.js';
 
 // ---------------------------------------------------------------------------
 // checkIsZodObject
@@ -652,5 +654,153 @@ describe('checkHeaderDesignations', () => {
       r: headerParam(z.string(), 'Bad Name').describe('R.'),
     });
     expect(checkHeaderDesignations(schema, 'input', 'tool', 't')).toBeNull();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// checkStrictenedRootMeta (#358, #394)
+// ---------------------------------------------------------------------------
+
+describe('checkStrictenedRootMeta', () => {
+  const ok = z.object({ ok: z.boolean().describe('OK.') });
+  const pass = () => ({ ok: true });
+
+  /** The `schema-root-meta-discarded` messages a built definition produces. */
+  function discarded(name: string, input: unknown): string[] {
+    const def = tool(name, {
+      description: 'Minimal repro.',
+      input: input as never,
+      output: ok,
+      handler: pass,
+    });
+    return lintToolDefinition(def)
+      .filter((d) => d.rule === 'schema-root-meta-discarded')
+      .map((d) => d.message);
+  }
+
+  it('fires for a described object root, naming the key and the fix', () => {
+    const [message] = discarded(
+      'lint_described_root',
+      z.object({ x: z.string().describe('x') }).describe('An object root.'),
+    );
+
+    expect(message).toContain("Tool 'lint_described_root' input declares 'description'");
+    expect(message).toContain('.strict().describe(…)');
+  });
+
+  it('fires for a root carrying .meta(), naming the metadata keys', () => {
+    const [message] = discarded(
+      'lint_meta_root',
+      z
+        .object({ a: z.string().optional().describe('a') })
+        .meta({ anyOf: [{ type: 'object', required: ['a'] }] }),
+    );
+
+    expect(message).toContain("declares 'anyOf'");
+    expect(message).toContain('.strict().meta(…)');
+  });
+
+  it('fires once for a union root and once for each described variant', () => {
+    const messages = discarded(
+      'lint_union_root',
+      z
+        .discriminatedUnion('mode', [
+          z
+            .object({ mode: z.literal('a').describe('m'), a: z.string().describe('a') })
+            .describe('Branch A.'),
+          z.object({ mode: z.literal('b').describe('m'), b: z.string().describe('b') }),
+        ])
+        .describe('A union root.'),
+    );
+
+    expect(messages).toHaveLength(2);
+    expect(messages[0]).toContain("'lint_union_root' input declares");
+    expect(messages[1]).toContain("'lint_union_root' input|0 declares");
+  });
+
+  it('warns rather than errors', () => {
+    const def = tool('lint_severity_root', {
+      description: 'Minimal repro.',
+      input: z.object({ x: z.string().describe('x') }).describe('An object root.'),
+      output: ok,
+      handler: pass,
+    });
+    const diagnostics = lintToolDefinition(def).filter(
+      (d) => d.rule === 'schema-root-meta-discarded',
+    );
+
+    expect(diagnostics[0]?.severity).toBe('warning');
+  });
+
+  it.each([
+    [
+      'strict',
+      z
+        .object({ x: z.string().describe('x') })
+        .strict()
+        .describe('Kept.'),
+    ],
+    [
+      'passthrough',
+      z
+        .object({ x: z.string().describe('x') })
+        .passthrough()
+        .describe('Kept.'),
+    ],
+    [
+      'catchall',
+      z
+        .object({ x: z.string().describe('x') })
+        .catchall(z.string())
+        .describe('Kept.'),
+    ],
+  ])(
+    'stays silent for an explicit %s root, which advertises the description today',
+    (label, input) => {
+      expect(discarded(`lint_${label}_root`, input)).toHaveLength(0);
+    },
+  );
+
+  it('stays silent when every union variant already declares a catchall', () => {
+    const messages = discarded(
+      'lint_strict_union_root',
+      z
+        .discriminatedUnion('mode', [
+          z.object({ mode: z.literal('a').describe('m'), a: z.string().describe('a') }).strict(),
+          z.object({ mode: z.literal('b').describe('m'), b: z.string().describe('b') }).strict(),
+        ])
+        .describe('A union root.'),
+    );
+
+    expect(messages).toHaveLength(0);
+  });
+
+  it('stays silent for a root that declared nothing', () => {
+    expect(discarded('lint_plain_root', z.object({ x: z.string().describe('x') }))).toHaveLength(0);
+  });
+
+  it('stays silent for a definition assembled without the builder', () => {
+    const diagnostics = lintToolDefinition({
+      name: 'lint_handmade',
+      description: 'Assembled by hand.',
+      input: z.object({ x: z.string().describe('x') }).describe('An object root.'),
+      output: ok,
+      handler: pass,
+    });
+
+    expect(diagnostics.filter((d) => d.rule === 'schema-root-meta-discarded')).toHaveLength(0);
+  });
+
+  it('leaves describe-on-fields asking nothing of a root', () => {
+    const diagnostics = lintToolDefinition(
+      tool('lint_describe_on_fields', {
+        description: 'Minimal repro.',
+        input: z.object({ x: z.string().describe('x') }),
+        output: ok,
+        handler: pass,
+      }),
+    );
+
+    expect(diagnostics.filter((d) => d.rule === 'describe-on-fields')).toHaveLength(0);
   });
 });

@@ -15,6 +15,7 @@ import type { HandlerContext, ReasonOf } from '@/core/context.js';
 import type { ErrorContract } from '@/types-global/errors.js';
 import { assertHeaderDesignations } from './headerParam.js';
 import { isDiscriminatedUnionSchema } from './schemaShape.js';
+import { recordStrictenDiscard, type StrictenDiscard } from './strictenRecord.js';
 
 export { type DisabledMetadata, disabledTool } from './disabled-tool.js';
 export { headerParam } from './headerParam.js';
@@ -241,6 +242,33 @@ export interface ToolDefinition<
    * multi-mode tool — see {@link ToolInputSchema}.
    */
   input: TInput;
+  /**
+   * Root-level argument-name aliases, `{ <alias>: <declared key> }`. A call
+   * naming a parameter by an alias reaches the handler under the canonical key
+   * instead of being rejected by strict input.
+   *
+   * Declare one where the meaning is certain and the mapping is one-to-one — a
+   * sibling tool's spelling for the same concept, a name the upstream API uses,
+   * a shorthand weaker models reach for. It is not fuzzy matching: an
+   * undeclared key that matches nothing is still rejected by name.
+   *
+   * ```ts
+   * input: z.object({ drug: z.string().describe('…') }),
+   * inputAliases: { drug_name: 'drug', name: 'drug' },
+   * ```
+   *
+   * Aliases are not advertised — `inputSchema` is byte-identical with or
+   * without them, so the canonical key keeps its place in `required` and the
+   * model is still told to use it. A rewrite applies only when the target key
+   * is absent; with both present the call fails as it does today. Case-style
+   * variants of a declared key (`max_results` for `maxResults`) are rewritten
+   * without any declaration — see `createApp({ input: { caseStyleAliases } })`.
+   *
+   * Root level only, matching `.strict()` itself. `lint:mcp` rejects an alias
+   * that shadows a declared key, names a target that does not exist, or is
+   * ambiguous against another alias or key.
+   */
+  inputAliases?: Record<string, string>;
   /** Programmatic unique name (snake_case). */
   name: string;
   /** Zod schema for output validation. All fields need `.describe()`. */
@@ -326,9 +354,11 @@ export function tool<
   options: Omit<ToolDefinition<TInput, TOutput, TErrors, TEnrich>, 'name'>,
 ): ToolDefinition<TInput, TOutput, TErrors, TEnrich> {
   assertErrorKeyUnreserved(name, options.output, options.enrichment);
-  const input = strictenInput(options.input);
+  const { discards, input } = strictenInput(options.input);
   assertHeaderDesignations(name, input);
-  return { name, ...options, input };
+  const definition = { name, ...options, input };
+  if (discards.length > 0) recordStrictenDiscard(definition, discards);
+  return definition;
 }
 
 /**
@@ -385,16 +415,45 @@ function assertErrorKeyUnreserved(
  *
  * Root-level only, matching `.strict()` itself: a nested `z.object()` inside
  * the input still strips unless it is strict in its own right.
+ *
+ * Every replacement here loses the replaced instance's `z.globalRegistry` entry
+ * — a root `.describe()` (#358) or `.meta()` (#394) — because `.strict()` clones
+ * without a `_zod.parent` link. That is the held half; what this returns
+ * alongside the schema is the *record* of what went, so `lint:mcp` can report it
+ * (see `strictenRecord`). Declaring `.strict()` before `.describe()` / `.meta()`
+ * keeps the entry, since an already-strict schema is returned untouched.
  */
-function strictenInput<TInput extends ToolInputSchema>(input: TInput): TInput {
+function strictenInput<TInput extends ToolInputSchema>(
+  input: TInput,
+): { discards: StrictenDiscard[]; input: TInput } {
+  const discards: StrictenDiscard[] = [];
+  const noteDiscard = (schema: unknown, scope: string): void => {
+    const keys = Object.keys(z.globalRegistry.get(schema as never) ?? {});
+    if (keys.length > 0) discards.push({ keys, scope });
+  };
+
   if (isDiscriminatedUnionSchema(input)) {
     const options = input.options as readonly ZodObject<ZodRawShape>[];
     const strictened = options.map((option) =>
       option.def.catchall === undefined ? option.strict() : option,
     );
-    if (strictened.every((option, i) => option === options[i])) return input;
-    return z.discriminatedUnion(input.def.discriminator, strictened as never) as unknown as TInput;
+    if (strictened.every((option, i) => option === options[i])) return { discards, input };
+    // The union is rebuilt from the strictened options, so its own entry goes
+    // too — along with each variant's, for the variants that were replaced.
+    noteDiscard(input, 'input');
+    options.forEach((option, i) => {
+      if (strictened[i] !== option) noteDiscard(option, `input|${i}`);
+    });
+    return {
+      discards,
+      input: z.discriminatedUnion(
+        input.def.discriminator,
+        strictened as never,
+      ) as unknown as TInput,
+    };
   }
-  const declaresCatchall = input.def.catchall !== undefined;
-  return declaresCatchall ? input : (input.strict() as TInput);
+
+  if (input.def.catchall !== undefined) return { discards, input };
+  noteDiscard(input, 'input');
+  return { discards, input: input.strict() as TInput };
 }

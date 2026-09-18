@@ -5,6 +5,7 @@
 
 import { describe, expect, it } from 'vitest';
 import { z } from 'zod';
+import { readStrictenDiscard } from '@/mcp-server/tools/utils/strictenRecord.js';
 import type {
   AnyToolDefinition,
   ToolAnnotations,
@@ -428,5 +429,144 @@ describe('tool() reserved `error` output key', () => {
         handler: () => ({ errorText: 'nope' }),
       }),
     ).not.toThrow();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Discarded root metadata (#358, #394)
+// ---------------------------------------------------------------------------
+
+describe('strictening records what it discarded', () => {
+  const ok = z.object({ ok: z.boolean().describe('OK.') });
+  const pass = () => ({ ok: true });
+
+  it('records a root .describe() the strictening dropped', () => {
+    const def = tool('discard_described_root', {
+      description: 'Minimal repro.',
+      input: z.object({ x: z.string().describe('x') }).describe('An object root.'),
+      output: ok,
+      handler: pass,
+    });
+
+    expect(readStrictenDiscard(def)).toEqual([{ keys: ['description'], scope: 'input' }]);
+  });
+
+  it('records a root .meta() the strictening dropped', () => {
+    const def = tool('discard_meta_root', {
+      description: 'Minimal repro.',
+      input: z
+        .object({
+          a: z.string().optional().describe('a'),
+          b: z.string().optional().describe('b'),
+        })
+        .meta({ anyOf: [{ type: 'object', required: ['a'] }] }),
+      output: ok,
+      handler: pass,
+    });
+
+    expect(readStrictenDiscard(def)).toEqual([{ keys: ['anyOf'], scope: 'input' }]);
+  });
+
+  it('records the union root and each rebuilt variant that carried an entry', () => {
+    const def = tool('discard_union_root', {
+      description: 'Minimal repro.',
+      input: z
+        .discriminatedUnion('mode', [
+          z
+            .object({ mode: z.literal('a').describe('m'), a: z.string().describe('a') })
+            .describe('Branch A.'),
+          z.object({ mode: z.literal('b').describe('m'), b: z.string().describe('b') }),
+        ])
+        .describe('A union root.'),
+      output: ok,
+      handler: pass,
+    });
+
+    expect(readStrictenDiscard(def)).toEqual([
+      { keys: ['description'], scope: 'input' },
+      { keys: ['description'], scope: 'input|0' },
+    ]);
+  });
+
+  it('records nothing for an undescribed root', () => {
+    const def = tool('discard_plain_root', {
+      description: 'Minimal repro.',
+      input: z.object({ x: z.string().describe('x') }),
+      output: ok,
+      handler: pass,
+    });
+
+    expect(readStrictenDiscard(def)).toBeUndefined();
+  });
+
+  it.each([
+    [
+      'strict',
+      z
+        .object({ x: z.string().describe('x') })
+        .strict()
+        .describe('Kept.'),
+    ],
+    [
+      'passthrough',
+      z
+        .object({ x: z.string().describe('x') })
+        .passthrough()
+        .describe('Kept.'),
+    ],
+    [
+      'catchall',
+      z
+        .object({ x: z.string().describe('x') })
+        .catchall(z.string())
+        .describe('Kept.'),
+    ],
+  ])('records nothing for an explicit %s root', (label, input) => {
+    const def = tool(`discard_${label}_root`, {
+      description: 'Minimal repro.',
+      input: input as never,
+      output: ok,
+      handler: pass,
+    });
+
+    expect(readStrictenDiscard(def)).toBeUndefined();
+    expect(z.globalRegistry.get(def.input as never)).toEqual({ description: 'Kept.' });
+  });
+
+  it('records nothing when every union variant already declares a catchall', () => {
+    const def = tool('discard_strict_union_root', {
+      description: 'Minimal repro.',
+      input: z
+        .discriminatedUnion('mode', [
+          z.object({ mode: z.literal('a').describe('m'), a: z.string().describe('a') }).strict(),
+          z.object({ mode: z.literal('b').describe('m'), b: z.string().describe('b') }).strict(),
+        ])
+        .describe('A union root.'),
+      output: ok,
+      handler: pass,
+    });
+
+    expect(readStrictenDiscard(def)).toBeUndefined();
+  });
+
+  it('keeps the record off every enumerable surface of the definition', () => {
+    const def = tool('discard_invisible', {
+      description: 'Minimal repro.',
+      input: z.object({ x: z.string().describe('x') }).describe('An object root.'),
+      output: ok,
+      handler: pass,
+    });
+    const plain = tool('discard_invisible_plain', {
+      description: 'Minimal repro.',
+      input: z.object({ x: z.string().describe('x') }),
+      output: ok,
+      handler: pass,
+    });
+
+    expect(Object.keys(def)).toEqual(Object.keys(plain));
+    expect(JSON.stringify(def)).toBe(
+      JSON.stringify(plain).replace('discard_invisible_plain', 'discard_invisible'),
+    );
+    expect(Object.keys({ ...def })).toEqual(Object.keys(plain));
   });
 });

@@ -253,6 +253,98 @@ describe('discriminated-union tool input (#142)', () => {
     });
   });
 
+  // A root `.describe()` / `.meta()` is discarded by strictening (#358, #394).
+  // Recording that discard at build time must not move a single advertised byte.
+  describe('discarded root metadata (#358, #394)', () => {
+    const described = tool('described_root', {
+      description: 'Object root carrying a description.',
+      input: z.object({ id: z.string().describe('Record ID.') }).describe('An object root.'),
+      output: z.object({ ok: z.boolean().describe('OK.') }),
+      handler: () => ({ ok: true }),
+    });
+
+    const undescribed = tool('undescribed_root', {
+      description: 'The same object root, undescribed.',
+      input: z.object({ id: z.string().describe('Record ID.') }),
+      output: z.object({ ok: z.boolean().describe('OK.') }),
+      handler: () => ({ ok: true }),
+    });
+
+    const describedUnion = tool('described_union_root', {
+      description: 'Union root carrying a description on the root and on a variant.',
+      input: z
+        .discriminatedUnion('mode', [
+          z
+            .object({
+              mode: z.literal('byId').describe('Look up by exact ID.'),
+              id: z.string().min(1).describe('Record ID.'),
+            })
+            .describe('Branch A.'),
+          z.object({
+            mode: z.literal('byName').describe('Search by name.'),
+            name: z.string().min(1).describe('Name fragment.'),
+          }),
+        ])
+        .describe('A union root.'),
+      output: z.object({ ok: z.boolean().describe('OK.') }),
+      handler: () => ({ ok: true }),
+    });
+
+    const undescribedUnion = tool('undescribed_union_root', {
+      description: 'The same union root, undescribed.',
+      input: z.discriminatedUnion('mode', [
+        z.object({
+          mode: z.literal('byId').describe('Look up by exact ID.'),
+          id: z.string().min(1).describe('Record ID.'),
+        }),
+        z.object({
+          mode: z.literal('byName').describe('Search by name.'),
+          name: z.string().min(1).describe('Name fragment.'),
+        }),
+      ]),
+      output: z.object({ ok: z.boolean().describe('OK.') }),
+      handler: () => ({ ok: true }),
+    });
+
+    const defs = [described, undescribed, describedUnion, undescribedUnion] as AnyToolDefinition[];
+
+    it('advertises the same inputSchema whether or not the root was described', async () => {
+      const server = new McpServer(
+        { name: 'discarded-root-meta', version: '0.0.0' },
+        { capabilities: { tools: { listChanged: true } } },
+      );
+      const services = { logger, storage: new StorageService(new InMemoryProvider()) };
+      await new ToolRegistry(defs, services).registerAll(server, undefined);
+      const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+      const client = new Client({ name: 'discarded-root-client', version: '0.0.0' });
+      await server.connect(serverTransport);
+      await client.connect(clientTransport);
+      open.push({ client, server });
+
+      const { tools } = await client.listTools();
+      const schemaOf = (name: string) => tools.find((entry) => entry.name === name)?.inputSchema;
+
+      expect(schemaOf('described_root')).toEqual(schemaOf('undescribed_root'));
+      expect(schemaOf('described_union_root')).toEqual(schemaOf('undescribed_union_root'));
+      expect(JSON.stringify(tools)).not.toContain('An object root.');
+      expect(JSON.stringify(tools)).not.toContain('Branch A.');
+    });
+
+    it('reports the same manifest bytes either way', () => {
+      const manifest = buildServerManifest({ config, tools: defs, resources: [], prompts: [] });
+      const entryOf = (name: string) =>
+        manifest.definitions.tools.find((entry) => entry.name === name);
+
+      expect(entryOf('described_root')?.inputSchema).toEqual(
+        entryOf('undescribed_root')?.inputSchema,
+      );
+      expect(entryOf('described_union_root')?.inputSchema).toEqual(
+        entryOf('undescribed_union_root')?.inputSchema,
+      );
+      expect(JSON.stringify(manifest)).not.toContain('A union root.');
+    });
+  });
+
   describe('server manifest', () => {
     it('reports only the fields required on every branch', () => {
       const manifest = buildServerManifest({

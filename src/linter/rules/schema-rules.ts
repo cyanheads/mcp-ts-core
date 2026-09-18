@@ -18,6 +18,7 @@ import {
   isZodObjectSchema,
   zodDef,
 } from '@/mcp-server/tools/utils/schemaShape.js';
+import { readStrictenDiscard } from '@/mcp-server/tools/utils/strictenRecord.js';
 import type { LintDiagnostic } from '../types.js';
 import { lintSchemaPortability, type PortabilityOptions } from './portability-rules.js';
 
@@ -370,6 +371,46 @@ export function checkHeaderDesignations(
     definitionType,
     definitionName,
   };
+}
+
+/**
+ * Reports a root `.describe()` or `.meta()` that `tool()` discarded when it
+ * strictened the input (#358, #394).
+ *
+ * Zod 4 keys both calls to the schema **instance**; `.strict()` clones without
+ * a `_zod.parent` link, so the stored schema inherits neither. The loss is
+ * otherwise silent in every direction: the advertised `inputSchema` simply has
+ * no `description` / `anyOf`, `describe-on-fields` never asks a root to
+ * describe itself, and `schema-anyof-needs-type` reports on the metadata that
+ * *survived*, so a dropped `anyOf` reads as no `anyOf` at all. The registry
+ * entry is one record and both calls write to it, so one rule covers both.
+ *
+ * Reads the record `tool()` left on the definition rather than the schema:
+ * by lint time the definition holds the strictened clone, which carries no
+ * registry entry, no `description`, and no link back to the authored schema.
+ * A definition assembled without the builder carries no record and is silent
+ * here — nothing strictened it, so nothing was discarded.
+ */
+export function checkStrictenedRootMeta(
+  definition: unknown,
+  definitionName: string,
+): LintDiagnostic[] {
+  const discards = readStrictenDiscard(definition);
+  if (!discards || discards.length === 0) return [];
+
+  return discards.map((discard) => ({
+    rule: 'schema-root-meta-discarded' as const,
+    severity: 'warning' as const,
+    message:
+      `Tool '${definitionName}' ${discard.scope} declares ${discard.keys
+        .map((key) => `'${key}'`)
+        .join(', ')} on its root, which strictening discarded — the advertised inputSchema ` +
+      'does not carry it. Zod keys .describe() / .meta() to the schema instance and .strict() ' +
+      'clones without it, so declare .strict() first: ' +
+      `z.object({ … }).strict().${discard.keys.includes('description') ? 'describe' : 'meta'}(…).`,
+    definitionType: 'tool' as const,
+    definitionName,
+  }));
 }
 
 /** True when a JSON Schema node's own keywords admit no value at all. */
