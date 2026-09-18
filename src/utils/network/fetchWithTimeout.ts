@@ -14,7 +14,11 @@ import {
 import { logger } from '@/utils/internal/logger.js';
 import { type RequestContext, withExtra } from '@/utils/internal/requestContext.js';
 import { runtimeCaps } from '@/utils/internal/runtime.js';
-import { httpStatusRetryability, httpStatusToErrorCode } from '@/utils/network/httpError.js';
+import {
+  httpStatusRetryability,
+  httpStatusToErrorCode,
+  selectErrorHeaders,
+} from '@/utils/network/httpError.js';
 import { readBoundedResponseText } from '@/utils/network/responseBody.js';
 import { createHistogram } from '@/utils/telemetry/metrics.js';
 
@@ -97,6 +101,23 @@ export interface FetchWithTimeoutOptions extends Omit<RequestInit, 'signal'> {
    * window (a verbose HTML or XML fault wrapper). Default: `500`.
    */
   errorBodyLimit?: number;
+  /**
+   * Response headers to copy onto `error.data.headers` under lowercase keys on a
+   * non-2xx — provider budget headers (`x-ratelimit-remaining-usd`), a quota
+   * reset, a request ID. Omitted or empty, no `headers` key is emitted.
+   * `set-cookie` is never captured. Selection semantics are shared with
+   * `httpErrorFromResponse`; see {@link selectErrorHeaders}.
+   *
+   * Every selected value reaches the client alongside the rest of `error.data`,
+   * so never name a header that carries a credential — and note that a
+   * `Location` can itself carry a sensitive path, query, or token.
+   *
+   * `location` is selectable under `redirect: 'manual'`, which is how a caller
+   * validates a redirect target before re-issuing. It does not compose with
+   * {@link FetchWithTimeoutOptions.rejectPrivateIPs}: that mode consumes the 3xx
+   * in the per-hop branch below, so the throw path never sees it.
+   */
+  errorHeaders?: string[];
   /**
    * HTTP status codes the caller treats as an *expected* outcome rather than a
    * failure — e.g. a service that maps `404` to an empty result set. A non-2xx
@@ -489,7 +510,9 @@ function withBodyDeadline(
  * {@link httpStatusToErrorCode} (e.g. 400 → `InvalidParams`, 403 → `Forbidden`,
  * 404 → `NotFound`, 429 → `RateLimited`, 5xx → `ServiceUnavailable`/`Timeout`).
  * A 501 additionally carries `data.retryable: false`, so `withRetry` fails it
- * fast instead of re-attempting a method the upstream does not implement.
+ * fast instead of re-attempting a method the upstream does not implement. A 3xx
+ * reaches this path only under `redirect: 'manual'` and maps to `InvalidRequest`,
+ * which `withRetry` does not retry.
  *
  * @param url - The URL to fetch (string or `URL` instance).
  * @param timeoutMs - Maximum duration in milliseconds before the exchange is aborted.
@@ -501,6 +524,7 @@ function withBodyDeadline(
  *   - `rejectPrivateIPs`: Block requests to private/internal IP space (SSRF protection).
  *   - `signal`: External `AbortSignal` to cancel the request independently of the timeout.
  *   - `errorBodyLimit`: Bytes of a non-2xx body captured into `error.data.body`.
+ *   - `errorHeaders`: Response headers copied onto `error.data.headers` on a non-2xx.
  *   - All other standard `RequestInit` fields (method, headers, body, etc.) are forwarded.
  * @returns A promise resolving to the `Response` object on HTTP 2xx. On a response
  *   carrying a body this is a wrapper around the original: status, statusText,
@@ -516,9 +540,9 @@ function withBodyDeadline(
  *   Logged at `info` and outside `withRetry`'s transient set.
  * @throws {McpError} A status-mapped code (`InvalidParams`/`Unauthorized`/`Forbidden`/
  *   `NotFound`/`RateLimited`/`ServiceUnavailable`/...) if the server returns a non-2xx
- *   status. `error.data` carries `{ status, statusText, body, retryAfter? }` — plus the
- *   legacy aliases `statusCode` (= `status`) and `responseBody` (= `body`), kept for
- *   existing consumers and slated for consolidation in a future major. List a status in
+ *   status. `error.data` carries `{ status, statusText, body, retryAfter?, headers? }` —
+ *   plus the legacy aliases `statusCode` (= `status`) and `responseBody` (= `body`), kept
+ *   for existing consumers and slated for consolidation in a future major. List a status in
  *   `options.expectedStatuses` to log it at `debug` rather than `error` (still thrown).
  * @throws {McpError} `ServiceUnavailable` if a network-level error occurs.
  * @example
@@ -570,6 +594,7 @@ export async function fetchWithTimeout(
     signal: externalSignal,
     expectedStatuses,
     errorBodyLimit = ERROR_BODY_LIMIT,
+    errorHeaders,
     ...fetchInit
   } = options ?? {};
 
@@ -716,6 +741,7 @@ export async function fetchWithTimeout(
             responseBody,
             ...(retryAfter !== null && { retryAfter }),
             ...httpStatusRetryability(response.status),
+            ...selectErrorHeaders(response.headers, errorHeaders),
             errorSource: 'FetchHttpError',
           },
         );

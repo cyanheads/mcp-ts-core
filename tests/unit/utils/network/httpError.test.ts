@@ -11,11 +11,12 @@ import {
   httpStatusRetryability,
   httpStatusToErrorCode,
 } from '@/utils/network/httpError.js';
+import { defaultIsTransient } from '@/utils/network/retry.js';
 
 describe('httpStatusToErrorCode', () => {
   it.each([
     [200, undefined],
-    [301, undefined],
+    [301, JsonRpcErrorCode.InvalidRequest],
     [400, JsonRpcErrorCode.InvalidParams],
     [401, JsonRpcErrorCode.Unauthorized],
     [402, JsonRpcErrorCode.Forbidden],
@@ -49,6 +50,34 @@ describe('httpStatusToErrorCode', () => {
     // establish that, so no status may map to it.
     const codes = Array.from({ length: 200 }, (_, i) => httpStatusToErrorCode(400 + i));
     expect(codes).not.toContain(JsonRpcErrorCode.InternalError);
+  });
+});
+
+describe('redirect classification (#460)', () => {
+  it.each([300, 301, 302, 303, 304, 307, 308, 399])(
+    'maps redirect status %i to InvalidRequest',
+    (status) => {
+      // A 3xx reaching error mapping means the request as sent cannot be served
+      // at this URL — an upstream-origin outcome, not a fault in this server.
+      expect(httpStatusToErrorCode(status)).toBe(JsonRpcErrorCode.InvalidRequest);
+    },
+  );
+
+  it.each([100, 101, 200, 204, 299])('leaves non-error status %i unmapped', (status) => {
+    expect(httpStatusToErrorCode(status)).toBeUndefined();
+  });
+
+  it('never classifies a redirect as this server’s own InternalError', () => {
+    const codes = Array.from({ length: 100 }, (_, i) => httpStatusToErrorCode(300 + i));
+    expect(codes).not.toContain(JsonRpcErrorCode.InternalError);
+  });
+
+  it('keeps a 3xx out of withRetry’s transient set', () => {
+    // `InvalidRequest` is deliberately outside TRANSIENT_CODES: re-issuing the
+    // same request to the same URL returns the same redirect.
+    const code = httpStatusToErrorCode(302);
+    expect(code).toBe(JsonRpcErrorCode.InvalidRequest);
+    expect(defaultIsTransient(new McpError(code as JsonRpcErrorCode, 'redirect'))).toBe(false);
   });
 });
 
@@ -165,6 +194,125 @@ describe('httpErrorFromResponse', () => {
 
       expect(error.message).toBe('api.example.com returned HTTP 503.');
       expect(error.data).not.toHaveProperty('url');
+    });
+  });
+
+  describe('selected error headers (#302)', () => {
+    // Every selected value reaches the MCP client verbatim, so capture is opt-in
+    // and never widens to headers the caller did not name.
+    const headers = {
+      'x-ratelimit-remaining-usd': '0.42',
+      'x-request-id': 'req-7',
+      'x-empty': '',
+      'set-cookie': 'session=secret; HttpOnly',
+    };
+
+    it('emits no headers key when the selector is omitted or empty', async () => {
+      for (const errorHeaders of [undefined, []]) {
+        const error = await httpErrorFromResponse(makeResponse(429, { headers }), {
+          ...(errorHeaders && { errorHeaders }),
+        });
+
+        expect(error.data).not.toHaveProperty('headers');
+      }
+    });
+
+    it('leaves the rest of error.data byte-identical to a capture-free error', async () => {
+      const baseline = await httpErrorFromResponse(
+        makeResponse(429, { body: 'slow down', headers, statusText: 'Too Many Requests' }),
+        { service: 'Example' },
+      );
+      const selected = await httpErrorFromResponse(
+        makeResponse(429, { body: 'slow down', headers, statusText: 'Too Many Requests' }),
+        { service: 'Example', errorHeaders: ['x-request-id'] },
+      );
+      const { headers: captured, ...rest } = selected.data as Record<string, unknown>;
+
+      expect(captured).toEqual({ 'x-request-id': 'req-7' });
+      expect(rest).toEqual(baseline.data);
+      expect(selected.code).toBe(baseline.code);
+      expect(selected.message).toBe(baseline.message);
+    });
+
+    it('selects case-insensitively and lowercases the keys', async () => {
+      const error = await httpErrorFromResponse(makeResponse(429, { headers }), {
+        errorHeaders: ['X-Request-Id', 'X-RateLimit-Remaining-USD'],
+      });
+
+      expect(error.data?.headers).toEqual({
+        'x-request-id': 'req-7',
+        'x-ratelimit-remaining-usd': '0.42',
+      });
+    });
+
+    it('collapses selector entries that differ only in case', async () => {
+      const error = await httpErrorFromResponse(makeResponse(429, { headers }), {
+        errorHeaders: ['x-request-id', 'X-Request-Id', 'X-REQUEST-ID'],
+      });
+
+      expect(Object.keys(error.data?.headers as Record<string, string>)).toEqual(['x-request-id']);
+    });
+
+    it('adds no key for a selected header the response does not carry', async () => {
+      const error = await httpErrorFromResponse(makeResponse(429, { headers }), {
+        errorHeaders: ['x-request-id', 'x-absent'],
+      });
+
+      expect(error.data?.headers).toEqual({ 'x-request-id': 'req-7' });
+    });
+
+    it('captures a present-but-empty header as an empty string', async () => {
+      // Presence follows `Headers.has()`, not truthiness of the value.
+      const error = await httpErrorFromResponse(makeResponse(429, { headers }), {
+        errorHeaders: ['x-empty'],
+      });
+
+      expect(error.data?.headers).toEqual({ 'x-empty': '' });
+    });
+
+    it('captures a multi-valued field comma-joined, as Headers.get returns it', async () => {
+      const response = new Response(null, { status: 429 });
+      response.headers.append('x-multi', 'one');
+      response.headers.append('x-multi', 'two');
+
+      const error = await httpErrorFromResponse(response, { errorHeaders: ['x-multi'] });
+
+      expect(error.data?.headers).toEqual({ 'x-multi': 'one, two' });
+    });
+
+    it('never captures set-cookie, whatever the selector says', async () => {
+      const error = await httpErrorFromResponse(makeResponse(429, { headers }), {
+        errorHeaders: ['Set-Cookie', 'x-request-id'],
+      });
+
+      expect(error.data?.headers).toEqual({ 'x-request-id': 'req-7' });
+      expect(JSON.stringify(error.data)).not.toContain('session=secret');
+    });
+
+    it('emits no headers key when set-cookie is the only selected header', async () => {
+      const error = await httpErrorFromResponse(makeResponse(429, { headers }), {
+        errorHeaders: ['set-cookie'],
+      });
+
+      expect(error.data).not.toHaveProperty('headers');
+    });
+
+    it('lets caller-supplied data.headers win on key collision', async () => {
+      const error = await httpErrorFromResponse(makeResponse(429, { headers }), {
+        errorHeaders: ['x-request-id'],
+        data: { headers: { 'x-request-id': 'caller-owned' } },
+      });
+
+      expect(error.data?.headers).toEqual({ 'x-request-id': 'caller-owned' });
+    });
+
+    it('selects location on a redirect the caller chose to see', async () => {
+      const error = await httpErrorFromResponse(
+        makeResponse(302, { headers: { location: 'https://elsewhere.example/moved' } }),
+        { errorHeaders: ['location'] },
+      );
+
+      expect(error.data?.headers).toEqual({ location: 'https://elsewhere.example/moved' });
     });
   });
 
@@ -286,11 +434,22 @@ describe('httpErrorFromResponse', () => {
   });
 
   it('returns InternalError fallback for non-error status codes', async () => {
-    // Defensive: 1xx/2xx/3xx shouldn't reach this helper, but if they do
+    // Defensive: 1xx/2xx shouldn't reach this helper, but if they do
     // we get a sane code instead of `undefined`.
     const error = await httpErrorFromResponse(makeResponse(204));
 
     expect(error.code).toBe(JsonRpcErrorCode.InternalError);
+  });
+
+  it('classifies a redirect as InvalidRequest rather than InternalError (#460)', async () => {
+    // Reachable: a caller using `redirect: 'manual'` gets the 3xx back and maps it.
+    const error = await httpErrorFromResponse(
+      makeResponse(302, { headers: { location: 'https://elsewhere.example/moved' } }),
+      { service: 'Example' },
+    );
+
+    expect(error.code).toBe(JsonRpcErrorCode.InvalidRequest);
+    expect(error.data).toMatchObject({ status: 302, statusCode: 302 });
   });
 
   it('emits both status/body and legacy statusCode/responseBody with equal values (#279)', async () => {

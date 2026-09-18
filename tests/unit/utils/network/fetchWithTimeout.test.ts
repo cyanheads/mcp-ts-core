@@ -7,6 +7,8 @@ import { afterEach, beforeEach, describe, expect, it, type MockInstance, vi } fr
 import { JsonRpcErrorCode, McpError } from '../../../../src/types-global/errors.js';
 import { logger } from '../../../../src/utils/internal/logger.js';
 import { fetchWithTimeout } from '../../../../src/utils/network/fetchWithTimeout.js';
+import { httpErrorFromResponse } from '../../../../src/utils/network/httpError.js';
+import { withRetry } from '../../../../src/utils/network/retry.js';
 
 /**
  * The SSRF guard resolves through `node:dns/promises`. Holding each function in
@@ -512,6 +514,170 @@ describe('fetchWithTimeout', () => {
           extra: expect.objectContaining({ statusCode: 500, errorSource: 'FetchHttpError' }),
         }),
       );
+    });
+  });
+
+  describe("3xx under redirect: 'manual' (#460)", () => {
+    /** The 3xx `fetch` hands back when the caller opts out of following it. */
+    function movedResponse(): Response {
+      return new Response(null, {
+        status: 302,
+        statusText: 'Found',
+        headers: { location: 'https://elsewhere.example/moved' },
+      });
+    }
+
+    it('classifies the redirect as InvalidRequest rather than InternalError', async () => {
+      vi.spyOn(globalThis, 'fetch').mockResolvedValue(movedResponse());
+
+      await expect(
+        fetchWithTimeout('https://example.com', 1000, context, { redirect: 'manual' }),
+      ).rejects.toMatchObject({
+        code: JsonRpcErrorCode.InvalidRequest,
+        data: { status: 302, statusCode: 302, statusText: 'Found' },
+      });
+    });
+
+    it('is not retried by the real withRetry ladder', async () => {
+      const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValue(movedResponse());
+
+      const error = (await withRetry(
+        () => fetchWithTimeout('https://example.com', 1000, context, { redirect: 'manual' }),
+        { maxRetries: 3, baseDelayMs: 1, jitter: 0 },
+      ).catch((e) => e)) as McpError;
+
+      expect(error.code).toBe(JsonRpcErrorCode.InvalidRequest);
+      expect(error.data).not.toHaveProperty('retryAttempts');
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+    });
+
+    it('still climbs the ladder for a transient upstream failure', async () => {
+      // Non-vacuity for the assertion above: this harness does retry when the
+      // classified code is transient.
+      const fetchMock = vi
+        .spyOn(globalThis, 'fetch')
+        .mockResolvedValue(new Response('boom', { status: 503 }));
+
+      const error = (await withRetry(() => fetchWithTimeout('https://example.com', 1000, context), {
+        maxRetries: 2,
+        baseDelayMs: 1,
+        jitter: 0,
+      }).catch((e) => e)) as McpError;
+
+      expect(error.code).toBe(JsonRpcErrorCode.ServiceUnavailable);
+      expect(error.data?.retryAttempts).toBe(3);
+      expect(fetchMock).toHaveBeenCalledTimes(3);
+    });
+  });
+
+  describe('selected error headers (#302)', () => {
+    /** Non-2xx carrying both a diagnostic header and a credential-bearing one. */
+    function throttledResponse(): Response {
+      return new Response('slow down', {
+        status: 429,
+        statusText: 'Too Many Requests',
+        headers: {
+          'x-ratelimit-remaining-usd': '0.42',
+          'x-request-id': 'req-7',
+          'set-cookie': 'session=secret; HttpOnly',
+        },
+      });
+    }
+
+    it('emits no headers key when the selector is omitted', async () => {
+      vi.spyOn(globalThis, 'fetch').mockResolvedValue(throttledResponse());
+
+      const error = (await fetchWithTimeout('https://example.com', 1000, context).catch(
+        (e) => e,
+      )) as McpError;
+
+      expect(error.data).not.toHaveProperty('headers');
+      expect(error.data?.retryAfter).toBeUndefined();
+    });
+
+    it('captures the selected headers case-insensitively under lowercase keys', async () => {
+      vi.spyOn(globalThis, 'fetch').mockResolvedValue(throttledResponse());
+
+      const error = (await fetchWithTimeout('https://example.com', 1000, context, {
+        errorHeaders: ['X-RateLimit-Remaining-USD', 'x-request-id', 'x-absent'],
+      }).catch((e) => e)) as McpError;
+
+      expect(error.code).toBe(JsonRpcErrorCode.RateLimited);
+      expect(error.data?.headers).toEqual({
+        'x-ratelimit-remaining-usd': '0.42',
+        'x-request-id': 'req-7',
+      });
+    });
+
+    it('never captures set-cookie, whatever the selector says', async () => {
+      vi.spyOn(globalThis, 'fetch').mockResolvedValue(throttledResponse());
+
+      const error = (await fetchWithTimeout('https://example.com', 1000, context, {
+        errorHeaders: ['set-cookie'],
+      }).catch((e) => e)) as McpError;
+
+      expect(error.data).not.toHaveProperty('headers');
+      expect(JSON.stringify(error.data)).not.toContain('session=secret');
+    });
+
+    it('strips errorHeaders from the RequestInit handed to native fetch', async () => {
+      const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValue(throttledResponse());
+
+      await fetchWithTimeout('https://example.com', 1000, context, {
+        errorHeaders: ['x-request-id'],
+      }).catch(() => undefined);
+
+      expect(fetchMock).toHaveBeenCalledWith(
+        'https://example.com',
+        expect.not.objectContaining({ errorHeaders: expect.anything() }),
+      );
+    });
+
+    it('produces the same headers record as httpErrorFromResponse for one response', async () => {
+      const errorHeaders = ['X-Request-Id', 'x-ratelimit-remaining-usd', 'set-cookie', 'x-absent'];
+      vi.spyOn(globalThis, 'fetch').mockResolvedValue(throttledResponse());
+
+      const fromFetch = (await fetchWithTimeout('https://example.com', 1000, context, {
+        errorHeaders,
+      }).catch((e) => e)) as McpError;
+      const fromResponse = await httpErrorFromResponse(throttledResponse(), { errorHeaders });
+
+      expect(fromFetch.data?.headers).toEqual(fromResponse.data?.headers);
+    });
+
+    it("selects location on a 3xx the caller sees via redirect: 'manual'", async () => {
+      vi.spyOn(globalThis, 'fetch').mockResolvedValue(
+        new Response(null, {
+          status: 302,
+          headers: { location: 'https://elsewhere.example/moved' },
+        }),
+      );
+
+      const error = (await fetchWithTimeout('https://example.com', 1000, context, {
+        redirect: 'manual',
+        errorHeaders: ['location'],
+      }).catch((e) => e)) as McpError;
+
+      expect(error.code).toBe(JsonRpcErrorCode.InvalidRequest);
+      expect(error.data?.headers).toEqual({ location: 'https://elsewhere.example/moved' });
+    });
+
+    it('captures nothing from a 3xx that rejectPrivateIPs consumes first', async () => {
+      // The SSRF branch handles the redirect before the non-ok throw, so the
+      // selector never sees it — the two options do not compose.
+      vi.spyOn(globalThis, 'fetch').mockResolvedValue(
+        new Response(null, { status: 302, headers: { location: 'https://example.com/loop' } }),
+      );
+
+      const error = (await fetchWithTimeout('https://loop.example.com', 1000, context, {
+        rejectPrivateIPs: true,
+        errorHeaders: ['location'],
+      }).catch((e) => e)) as McpError;
+
+      expect(error.code).toBe(JsonRpcErrorCode.ValidationError);
+      expect(error.message).toContain('Too many redirects');
+      expect(error.data?.errorSource).not.toBe('FetchHttpError');
+      expect(error.data ?? {}).not.toHaveProperty('headers');
     });
   });
 

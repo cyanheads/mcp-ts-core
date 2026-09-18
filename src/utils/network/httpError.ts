@@ -13,11 +13,18 @@ import { readBoundedResponseText } from '@/utils/network/responseBody.js';
  * 4xx/5xx range, with specific mappings for the codes most upstream APIs use to
  * signal authoritative outcomes (auth failures, conflicts, validation, rate limits).
  *
- * Returns `undefined` when the status is in the 1xx/2xx/3xx range — those are not
+ * Returns `undefined` when the status is in the 1xx/2xx range — those are not
  * errors and the caller should not be invoking error mapping on them.
+ *
+ * A 3xx does reach error mapping: under `redirect: 'manual'` the caller gets the
+ * redirect back rather than the followed response, and `!response.ok` throws. It
+ * maps like an unlisted 4xx — the request as sent cannot be served at this URL —
+ * which also keeps it out of `withRetry`'s transient set, since re-issuing it
+ * returns the same redirect.
  *
  * | Status | Code |
  * |:-------|:-----|
+ * | 3xx | `InvalidRequest` |
  * | 400 | `InvalidParams` |
  * | 401 | `Unauthorized` |
  * | 402 | `Forbidden` (payment-required, treated as access denial) |
@@ -45,7 +52,8 @@ import { readBoundedResponseText } from '@/utils/network/responseBody.js';
  * non-transient code.
  */
 export function httpStatusToErrorCode(status: number): JsonRpcErrorCode | undefined {
-  if (status < 400) return;
+  if (status < 300) return;
+  if (status < 400) return JsonRpcErrorCode.InvalidRequest;
 
   switch (status) {
     case 400:
@@ -93,6 +101,47 @@ export function httpStatusRetryability(status: number): { retryable: false } | u
   return status === 501 ? { retryable: false } : undefined;
 }
 
+/**
+ * Response headers no selector can reach. `set-cookie` is credential-bearing,
+ * and `Headers.get()` joins its values into a string that is not a valid
+ * reconstruction of the field, so capturing it would leak a secret and misreport
+ * it at the same time.
+ */
+const NEVER_CAPTURED_HEADERS = new Set(['set-cookie']);
+
+/**
+ * The selected response headers as a fragment to spread into an `McpError`'s
+ * `data`, mirroring {@link httpStatusRetryability}'s shape: `undefined` when
+ * nothing was captured, so the spread adds no `headers` key at all.
+ *
+ * Selection is case-insensitive and keys are lowercased, so `['X-Request-Id']`
+ * and `['x-request-id']` collapse to one `headers['x-request-id']` entry.
+ * Presence follows `Headers.has()` — a header carried with an empty value is
+ * captured as `''`, one the response does not carry adds no key — and a
+ * multi-valued field is captured comma-joined, as `Headers.get()` returns it.
+ *
+ * Every captured value reaches the MCP client as `structuredContent.error.data`,
+ * which is why capture is an explicit allowlist rather than a redacted copy of
+ * every header: an arbitrary upstream header name can carry a secret, so no
+ * field-name redactor can make the default safe. Both HTTP helpers route through
+ * here so the two cannot drift apart.
+ */
+export function selectErrorHeaders(
+  headers: Headers,
+  selector: readonly string[] | undefined,
+): { headers: Record<string, string> } | undefined {
+  if (!selector?.length) return;
+
+  const captured: Record<string, string> = {};
+  for (const name of selector) {
+    const key = name.toLowerCase();
+    if (NEVER_CAPTURED_HEADERS.has(key) || !headers.has(key)) continue;
+    captured[key] = headers.get(key) ?? '';
+  }
+
+  return Object.keys(captured).length > 0 ? { headers: captured } : undefined;
+}
+
 /** Configuration for {@link httpErrorFromResponse}. */
 export interface HttpErrorFromResponseOptions {
   /**
@@ -130,6 +179,17 @@ export interface HttpErrorFromResponseOptions {
    */
   data?: Record<string, unknown>;
   /**
+   * Response headers to copy onto `error.data.headers` under lowercase keys —
+   * provider budget headers (`x-ratelimit-remaining-usd`), a quota reset, a
+   * request ID. Omitted or empty, no `headers` key is emitted. `set-cookie` is
+   * never captured. See {@link selectErrorHeaders} for the selection semantics.
+   *
+   * Every selected value reaches the client alongside the rest of `error.data`,
+   * so never name a header that carries a credential — and note that a
+   * `Location` can itself carry a sensitive path, query, or token.
+   */
+  errorHeaders?: string[];
+  /**
    * Put the full `response.url` — path and query string included — on
    * `error.data.url`. Default: `false`, because `error.data` reaches the client
    * and an upstream request URL routinely carries user input, internal
@@ -154,9 +214,10 @@ const DEFAULT_BODY_LIMIT = 500;
  * Reads the response body (consuming it) when `captureBody` is true, so callers
  * must `response.clone()` first if they intend to read the body elsewhere.
  *
- * Always returns an `McpError` even for 1xx/2xx/3xx — the caller is expected to
- * have verified `!response.ok` first, but the helper falls back to a sensible
- * code (`InternalError`) instead of silently producing nothing.
+ * Always returns an `McpError` even for 1xx/2xx — the caller is expected to have
+ * verified `!response.ok` first, but the helper falls back to a sensible code
+ * (`InternalError`) instead of silently producing nothing. A 3xx is a real
+ * outcome here rather than a fallback: see {@link httpStatusToErrorCode}.
  *
  * @example
  * ```ts
@@ -195,6 +256,7 @@ export async function httpErrorFromResponse(
     data: extraData,
     cause,
     codeOverride,
+    errorHeaders,
   } = options;
 
   const code =
@@ -231,6 +293,7 @@ export async function httpErrorFromResponse(
     ...(body !== undefined && { responseBody: body }),
     ...(retryAfter !== undefined && { retryAfter }),
     ...httpStatusRetryability(response.status),
+    ...selectErrorHeaders(response.headers, errorHeaders),
     ...extraData,
   };
 
