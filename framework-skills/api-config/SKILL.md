@@ -4,7 +4,7 @@ description: >
   Reference for core and server configuration in `@cyanheads/mcp-ts-core`. Covers env var tables with defaults, priority order, server-specific Zod schema pattern, and Workers lazy-parsing requirement.
 metadata:
   author: cyanheads
-  version: "1.18"
+  version: "1.19"
   audience: external
   type: reference
 ---
@@ -28,7 +28,7 @@ Managed by `@cyanheads/mcp-ts-core`. Validated via Zod from environment variable
 3. `sessionMode.default` passed to `createApp()` — a default, so it sits *below* the env var it seeds, unlike the identity options above
 4. `package.json` fields
 
-**Where `package.json` is read from:** the application root — the nearest `package.json` at or above the process entry module (`process.argv[1]`), which is the served package on every launch path (`npx`, `.mcpb`, a client config naming `dist/index.js`), none of which run from the package root. The launching client's working directory is never the anchor: a stdio client starts the server from wherever it happens to be, so reading identity from there makes a server report a foreign project's name and version. When the entry module is a tool installed under the project's own `node_modules` and the process runs from that project — a test runner is the usual case — the project's manifest wins. With no manifest reachable, the framework's own identity is the fallback.
+**Where `package.json` is read from:** the application root — the nearest `package.json` at or above the process entry module (`process.argv[1]`), which is the served package on every launch path (`npx`, `.mcpb`, a client config naming `dist/index.js`), none of which run from the package root. The launching client's working directory is never the anchor: a stdio client starts the server from wherever it happens to be, so reading identity from there makes a server report a foreign project's name and version. When the entry module is a tool installed under a `node_modules` tree and the process runs from the directory owning that tree — a test runner is the usual case — the nearest manifest at or above the working directory wins instead. That also covers a workspace monorepo, where the runner is hoisted to the repo root while the process runs from a package directory: an owner that is a strict *ancestor* of the working directory qualifies only when it declares a workspace (a `workspaces` field in its manifest, or a `pnpm-workspace.yaml` beside it), which is what keeps a cache prefix or a plain project root — equally ancestors of a working directory inside them — from overriding an installed package's own identity. The owner is the outermost `node_modules` boundary, so a transitively-installed runner and a pnpm isolated layout resolve the same way. With no manifest reachable, the framework's own identity is the fallback.
 
 ---
 
@@ -276,7 +276,7 @@ export function getServerConfig(): ServerConfig {
 }
 ```
 
-**Env booleans — use `z.stringbool()`, never `z.coerce.boolean()`.** `z.coerce.boolean()` runs `Boolean(value)`, so `"false"`, `"0"`, and `"no"` all coerce to `true` — the flag becomes impossible to disable through the environment except by omitting it entirely. `z.stringbool()` parses `true/false/1/0/yes/no/on/off` (case-insensitive) and rejects anything else, so `MY_VERBOSE_LOGGING=false` actually disables and a typo fails loudly at startup instead of silently coercing. Empty string and unset both fall through to `.default()`.
+**Env booleans — use `z.stringbool()`, never `z.coerce.boolean()`.** `z.coerce.boolean()` runs `Boolean(value)`, so `"false"`, `"0"`, and `"no"` all coerce to `true` — the flag becomes impossible to disable through the environment except by omitting it entirely. `z.stringbool()` parses `true/false/1/0/yes/no/on/off` (case-insensitive) and rejects anything else, so `MY_VERBOSE_LOGGING=false` actually disables and a typo fails loudly at startup instead of silently coercing. An empty string is not in that accepted set — `z.stringbool()` rejects `''` with `Invalid option`. What makes a blank `.env` line take the default is the normalization layer described under **Unset means unset** below, not the schema type.
 
 **Unset means unset.** `parseEnvConfig` and the framework's own config both treat an empty string and a whole-value `${…}` placeholder — what an MCPB or plugin host forwards when a user leaves an option blank and nothing substitutes it — as the variable being absent: an optional field stays `undefined`, a defaulted field takes its default, and a required field fails as missing rather than as a format error against the literal text. A value that merely contains `${…}` is kept. No per-field `z.preprocess` guard is needed for either case.
 
@@ -289,6 +289,6 @@ Server config validation failed:
 
 Instead of a raw `ZodError` dump at startup. The framework catches the resulting `ConfigurationError` and prints a clean banner (full stack behind `DEBUG=true`).
 
-Direct `ServerConfigSchema.parse(...)` still works — the framework intercepts raw `ZodError` thrown from `setup()` and converts it — but error messages won't know about env var names, so they show the Zod path (`apiKey`) instead of the variable name (`MY_API_KEY`).
+Direct `ServerConfigSchema.parse(...)` still works — the framework intercepts raw `ZodError` thrown from `setup()` and converts it — but error messages won't know about env var names, so they show the Zod path (`apiKey`) instead of the variable name (`MY_API_KEY`). No normalization runs on that path either, so a blank `MY_FLAG=` arrives as `''` and fails validation. `normalizeEnv` is exported from `/config` for exactly that case: normalize the values first, then parse.
 
 **Workers:** Do not parse `process.env` at module top-level. In Workers, env bindings are injected at request time via `injectEnvVars()`, after all static imports. Lazy parsing is required.

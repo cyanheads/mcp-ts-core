@@ -107,6 +107,102 @@ describe('resolveAppRoot', () => {
     expect(root?.manifest.name).toBe('the-project');
   });
 
+  describe('workspace and cache topologies (#399)', () => {
+    /**
+     * A workspace repo with one package and a runner installed at the repo root.
+     * `entry` is where the runner's worker file goes, relative to the repo.
+     */
+    function makeWorkspace(entry: string[], declaration: 'workspaces' | 'pnpm' = 'workspaces') {
+      const repo = makePackage(
+        join(tempRoot, 'repo'),
+        declaration === 'workspaces'
+          ? { name: 'the-monorepo', version: '1.0.0', workspaces: ['packages/*'] }
+          : { name: 'the-monorepo', version: '1.0.0' },
+      );
+      if (declaration === 'pnpm') {
+        writeFileSync(join(repo, 'pnpm-workspace.yaml'), "packages:\n  - 'packages/*'\n");
+      }
+      const pkg = makePackage(join(repo, 'packages', 'my-server'), {
+        name: 'my-server',
+        version: '0.2.0',
+      });
+      setEntry(join(repo, ...entry));
+      process.chdir(pkg);
+      return { pkg, repo };
+    }
+
+    it('resolves the workspace package when the runner is hoisted to the repo root', () => {
+      makeWorkspace(['node_modules', 'test-runner', 'dist', 'workers', 'forks.js']);
+      makePackage(join(tempRoot, 'repo', 'node_modules', 'test-runner'), {
+        name: 'test-runner',
+        version: '4.1.11',
+      });
+
+      expect(resolveAppRoot()?.manifest.name).toBe('my-server');
+    });
+
+    it('resolves the workspace package when the runner entry sits under a nested node_modules', () => {
+      const nested = ['node_modules', 'test-runner', 'node_modules', 'worker-lib'];
+      makeWorkspace([...nested, 'dist', 'index.js']);
+      makePackage(join(tempRoot, 'repo', ...nested), { name: 'worker-lib', version: '2.0.0' });
+
+      expect(resolveAppRoot()?.manifest.name).toBe('my-server');
+    });
+
+    it('resolves the workspace package through a pnpm isolated layout', () => {
+      const isolated = [
+        'node_modules',
+        '.pnpm',
+        'test-runner@4.1.11',
+        'node_modules',
+        'test-runner',
+      ];
+      makeWorkspace([...isolated, 'dist', 'workers', 'forks.js'], 'pnpm');
+      makePackage(join(tempRoot, 'repo', ...isolated), {
+        name: 'test-runner',
+        version: '4.1.11',
+      });
+
+      expect(resolveAppRoot()?.manifest.name).toBe('my-server');
+    });
+
+    it('keeps the installed package when the working directory sits under a cache prefix', () => {
+      const cache = join(tempRoot, 'npx-cache');
+      const installed = makePackage(join(cache, 'node_modules', 'some-server'), {
+        name: 'some-server',
+        version: '4.0.1',
+      });
+      setEntry(join(installed, 'dist', 'index.js'));
+      // The cache root is an ancestor of the cwd, but declares no workspace.
+      makePackage(cache, { name: 'cache-root', version: '0.0.0' });
+      process.chdir(
+        makePackage(join(cache, 'node_modules', 'cache-neighbour'), {
+          name: 'cache-neighbour',
+          version: '9.9.9',
+        }),
+      );
+
+      expect(resolveAppRoot()?.manifest.name).toBe('some-server');
+    });
+
+    it('keeps its own identity as a plain dependency run from a subdirectory of the project', () => {
+      const project = makePackage(join(tempRoot, 'project'), {
+        name: 'the-project',
+        version: '0.4.2',
+      });
+      const tool = makePackage(join(project, 'node_modules', 'some-server'), {
+        name: 'some-server',
+        version: '3.3.3',
+      });
+      setEntry(join(tool, 'dist', 'index.js'));
+      const src = join(project, 'src');
+      mkdirSync(src, { recursive: true });
+      process.chdir(src);
+
+      expect(resolveAppRoot()?.manifest.name).toBe('some-server');
+    });
+  });
+
   it('keeps the installed package when the process does not run from the installing project', () => {
     const project = makePackage(join(tempRoot, 'project'), {
       name: 'the-project',

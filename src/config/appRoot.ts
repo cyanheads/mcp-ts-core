@@ -6,7 +6,7 @@
  * directory the launching client happened to be in.
  * @module src/config/appRoot
  */
-import { readFileSync, realpathSync, statSync } from 'node:fs';
+import { existsSync, readFileSync, realpathSync, statSync } from 'node:fs';
 import { dirname, resolve, sep } from 'node:path';
 
 import { runtimeCaps } from '../utils/internal/runtime.js';
@@ -27,17 +27,22 @@ export interface AppRoot {
   manifest: PackageManifest;
 }
 
-/** Reads the identity fields of `<dir>/package.json`, or `undefined` if absent/unreadable. */
-function readManifest(dir: string): PackageManifest | undefined {
-  let parsed: Record<string, unknown>;
+/** Parses `<dir>/package.json`, or `undefined` if absent/unreadable/unparseable. */
+function readPackageJson(dir: string): Record<string, unknown> | undefined {
   try {
-    parsed = JSON.parse(readFileSync(resolve(dir, 'package.json'), 'utf-8')) as Record<
+    return JSON.parse(readFileSync(resolve(dir, 'package.json'), 'utf-8')) as Record<
       string,
       unknown
     >;
   } catch {
     return undefined;
   }
+}
+
+/** Reads the identity fields of `<dir>/package.json`, or `undefined` if absent/unreadable. */
+function readManifest(dir: string): PackageManifest | undefined {
+  const parsed = readPackageJson(dir);
+  if (parsed === undefined) return undefined;
   const manifest: PackageManifest = {};
   if (typeof parsed.name === 'string') manifest.name = parsed.name;
   if (typeof parsed.version === 'string') manifest.version = parsed.version;
@@ -61,14 +66,38 @@ function findManifestUpward(startDir: string): AppRoot | undefined {
 }
 
 /**
- * Returns the directory that owns the `node_modules` tree containing `dir`,
- * or `undefined` when `dir` is not inside one.
+ * Returns the directory that owns the outermost `node_modules` tree containing
+ * `dir`, or `undefined` when `dir` is not inside one.
+ *
+ * The *first* segment is the one that matters: a transitive dependency
+ * (`…/node_modules/a/node_modules/b`) and every pnpm isolated layout
+ * (`…/node_modules/.pnpm/<pkg>@<v>/node_modules/<pkg>`) nest, and the innermost
+ * owner is itself inside `node_modules` — never the installing project.
  */
 function nodeModulesOwner(dir: string): string | undefined {
   const segments = dir.split(sep);
-  const index = segments.lastIndexOf('node_modules');
+  const index = segments.indexOf('node_modules');
   if (index <= 0) return undefined;
   return segments.slice(0, index).join(sep) || sep;
+}
+
+/**
+ * True when `dir` declares a package workspace — a `workspaces` field in its
+ * manifest (npm, Bun, Yarn) or a `pnpm-workspace.yaml` beside it.
+ *
+ * This is the discriminator that separates "the process runs from a package of
+ * this workspace" from "the process happens to run somewhere under this
+ * directory": a cache prefix and a plain project root are both ancestors of a
+ * working directory inside them, exactly as a workspace root is.
+ */
+function declaresWorkspace(dir: string): boolean {
+  if (existsSync(resolve(dir, 'pnpm-workspace.yaml'))) return true;
+  return readPackageJson(dir)?.workspaces !== undefined;
+}
+
+/** True when `ancestor` strictly contains `dir`. */
+function contains(ancestor: string, dir: string): boolean {
+  return dir.startsWith(ancestor.endsWith(sep) ? ancestor : `${ancestor}${sep}`);
 }
 
 /** Absolute, symlink-resolved path, or `undefined` when it cannot be read. */
@@ -106,10 +135,14 @@ function entryDirectory(): string | undefined {
  *    This is the installed server's own package on every stdio launch path —
  *    `npx`, `.mcpb` bundles, a client config naming `dist/index.js` — none of
  *    which run from the package root.
- * 2. When that manifest belongs to a tool installed under the application's own
- *    `node_modules` and the process runs from the directory owning it — a test
- *    runner spawning the process is the common case — the owning directory's
- *    manifest wins. A dependency's manifest is never the application's identity.
+ * 2. When that manifest belongs to a tool installed under a `node_modules` tree
+ *    and the process runs from the owning directory — or from a package of a
+ *    workspace that directory declares, which is where a hoisted runner puts a
+ *    monorepo — the nearest manifest at or above the working directory wins. A
+ *    test runner spawning the process is the common case, and a dependency's
+ *    manifest is never the application's identity. The workspace declaration is
+ *    what keeps a cache prefix or a plain project root, both equally ancestors of
+ *    the working directory, from claiming an installed package's identity.
  * 3. The nearest `package.json` at or above `process.cwd()`, when there is no
  *    entry module to anchor on (`node -e`, an embedded host).
  */
@@ -122,9 +155,9 @@ function computeAppRoot(): AppRoot | undefined {
   if (!fromEntry) return cwd ? findManifestUpward(cwd) : undefined;
 
   const owner = nodeModulesOwner(fromEntry.dir);
-  if (owner && owner === cwd) {
-    const manifest = readManifest(owner);
-    if (manifest) return { dir: owner, manifest };
+  if (cwd && owner && (owner === cwd || (contains(owner, cwd) && declaresWorkspace(owner)))) {
+    const fromCwd = findManifestUpward(cwd);
+    if (fromCwd) return fromCwd;
   }
   return fromEntry;
 }
