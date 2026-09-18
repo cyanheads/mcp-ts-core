@@ -4,7 +4,7 @@ description: >
   Exercise tools, resources, and prompts against a live HTTP server via MCP JSON-RPC over curl. Starts the server, surfaces the catalog, runs real and adversarial inputs, measures every call (bytes, token estimate, wall-clock) and weighs the catalog, and produces a tight report with concrete findings and numbered follow-up options. Use after adding or modifying definitions, or when the user asks to test, try out, or verify their MCP surface.
 metadata:
   author: cyanheads
-  version: "2.14"
+  version: "2.15"
   audience: external
   type: debug
 ---
@@ -402,6 +402,7 @@ Treat any hit as a `ux` finding in the report. The authoring rule lives under *T
 |:------------------------------------------------|:-------------|
 | `include` / `fields` / `expand` / `view` / `projection` parameter | Field selection: non-default value renders requested fields |
 | Array return with `query` / `filter` inputs | Empty result: does response explain *why* (echo criteria, suggest broadening)? |
+| Identifier, code, or enum-ish input (an ID format, a classification code, a unit, a place name, a list the docs say may be comma-joined) | Value-variant tolerance: re-send the happy-path call with each obvious variant of that value — lowercase, the bare leaf of a hierarchical code, a common domain alias, a delimiter-joined list where an array is accepted, the spelled-out form of an abbreviated name. Pass is either outcome: the call succeeds, or it fails with an error naming the expected shape. A miss or a bare validation failure on a variant that maps one-to-one onto a valid value is a `ux` finding. Probe **values** — variants of the argument *key* name, and a JSON-stringified array as a value, are handled by the framework, not the server. |
 | Batch / bulk input (arrays of IDs, multi-item ops) | Partial success: mix valid + invalid items |
 | `annotations.readOnlyHint: true` | Confirm no mutation happened |
 | `annotations.idempotentHint: true` | Call twice with same input — safe? |
@@ -507,6 +508,7 @@ End with:
 - [ ] Every call's `⏱` line read; any happy-path response over 24,000 B with no disclosure + retrieval path filed as `ux`
 - [ ] Universal battery run on every definition (happy path, parity against the full `content[]` array, input error)
 - [ ] Situational categories applied only when triggered
+- [ ] **If a tool takes an identifier, code, or enum-ish input:** that value probed with its obvious variants (lowercase, bare leaf, common alias, delimiter-joined list, spelled-out name); each either succeeded or failed with an error naming the expected shape
 - [ ] **If >15 tools:** sampled 30–40% for situational testing; skipped definitions listed in report
 - [ ] **If a tool declared an `errors: [...]` contract:** ≥1 declared failure mode triggered; `result.structuredContent.error.code` and `data.reason` verified against the contract entry
 - [ ] **If a resource declared an `errors: [...]` contract:** ≥1 declared failure mode triggered; top-level JSON-RPC `error.code` and `error.data.reason` verified against the contract entry

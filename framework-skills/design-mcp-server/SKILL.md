@@ -4,7 +4,7 @@ description: >
   Design the tool surface, resources, and service layer for a new MCP server. Use when starting a new server, planning a major feature expansion, or when the user describes a domain/API they want to expose via MCP. Produces a design doc at docs/design.md that drives implementation.
 metadata:
   author: cyanheads
-  version: "2.26"
+  version: "2.27"
   audience: external
   type: workflow
 ---
@@ -307,6 +307,20 @@ nctIds: z.union([z.string(), z.array(z.string()).max(5)])
   .describe('A single NCT ID (e.g., "NCT12345678") or an array of up to 5 NCT IDs to fetch.'),
 ```
 
+**Input-edge normalization.** For every identifier, code, or enum-ish input, enumerate at design time the variants a caller will plausibly send, and decide per variant: normalize, or error. The rule is **normalize what is certain, error on what is ambiguous.** A variant is certain when the mapping is unambiguous, one-to-one, and preserves the submitted meaning exactly — then the call succeeds instead of returning a miss for a value the server could resolve. Everything short of that is an error naming the expected shape, with a `recovery` routing to the reference tool. Never fuzzy-match a value, broaden a query, swap one entity for another, or drop a filter to make a call succeed: plausible-looking rows from a guessed input are worse than a rejection the agent can act on.
+
+| Class | Example | Handling |
+|:---|:---|:---|
+| Case or bare-leaf shorthand of a code | `ACS5`, `acs5` → `acs/acs5` | Normalize before lookup |
+| Domain value alias | `mph` → `m/h`, `kph` → `km/h` | Alias table at the input edge |
+| Composite identifier completed by context | `part: "52"` + `section: "21"` → `52.21` | Try as-given first, retry the composed form on a miss — never rewrite unconditionally, since the bare form can be legitimate |
+| Delimiter-joined list where an array is accepted | `"US,JP,KR"` → `["US","JP","KR"]` | Split on the documented separator |
+| Spelled-out vs. abbreviated name | `"Houston, Texas"` → `"Houston, TX"` | Normalize against the bundled name table |
+
+These are **value**-level, and the mappings are domain knowledge — settle them per input in the design doc's param table. Argument **key** names are not: the framework drops client-added root keys and rewrites declared and case-style key aliases before the schema sees the arguments, and repairs a JSON-stringified array against the tool's own schema after a failed parse. Don't re-implement any of that per server — see `add-tool` § *Three things the framework fixes before the schema sees the arguments*.
+
+This resolves one submitted value to one canonical value, and does not loosen the strict token match in [MCP-side list filtering](#mcp-side-list-filtering), which scores a query against many candidate names.
+
 #### Output design
 
 The output schema and `format` function control what the LLM reads back. Design for the agent's *next decision*, not for a UI or an API consumer. See the `add-tool` skill's **Tool Response Design** section for implementation-level patterns (partial success, empty results, metadata, context budget).
@@ -407,7 +421,7 @@ Errors are part of the tool's interface — design them during the design phase,
 | **Auth/permissions** | Insufficient scopes, expired token | `Forbidden` / `Unauthorized` | Maybe — escalate or re-auth |
 | **Server internal** | Parse failure, missing config, unexpected state | `InternalError` | No — server-side issue |
 
-(`InvalidParams` also exists — the SDK emits it when input fails Zod schema validation before the handler runs. Anything the handler itself throws about inputs uses `ValidationError`.)
+(`InvalidParams` also exists — the framework's `parseToolArguments` emits it when input fails Zod schema validation before the handler runs. Anything the handler itself throws about inputs uses `ValidationError`.)
 
 The framework auto-classifies many of these at runtime (HTTP status codes, JS error types, common patterns), but explicit classification in the handler gives better error messages. For declared contract failures, throw via `ctx.fail('reason', …)`. For ad-hoc throws outside the contract, use error factories (`notFound()`, `validationError()`, etc.) when the code matters; plain `throw new Error()` when the framework's auto-classification is good enough.
 
@@ -647,6 +661,7 @@ Items without an `If …:` prefix apply to every design. Conditional items only 
 - [ ] Tool descriptions are imperative present tense, concrete, and include operational guidance where non-obvious
 - [ ] Parameter `.describe()` text explains what the value is, what it affects, and tradeoffs
 - [ ] Input schemas use constrained types (enums, literals, regex) over free strings
+- [ ] **If an input is an identifier, code, or enum-ish value:** the variants callers will plausibly send are enumerated per input — the unambiguous, one-to-one, meaning-preserving ones normalized before lookup; the rest rejected with a `recovery` naming the expected shape; any composite form tried as-given before a composed retry
 - [ ] Output schemas designed for LLM's next action — chaining IDs, post-write state, filtering communicated
 - [ ] `format()` renders all data the LLM needs — different clients forward different surfaces (Claude Code → `structuredContent`, Claude Desktop → `content[]`); both must carry the same data, not just a count or title
 - [ ] Error messages guide recovery — name what went wrong and the next tool call (no dead ends)
