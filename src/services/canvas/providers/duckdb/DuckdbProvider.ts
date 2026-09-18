@@ -35,6 +35,7 @@ import {
   assertPlanReadOnly,
   assertSelectOnly,
   assertValidIdentifier,
+  gateRecovery,
   quoteIdentifier,
   SQL_GATE_REASONS,
 } from '../../core/sqlGate.js';
@@ -479,11 +480,11 @@ export class DuckdbProvider implements IDataCanvasProvider {
   ): Promise<RegisterTableResult> {
     if (sourceCanvasId === targetCanvasId) {
       throw validationError(
-        'Source and target canvases must differ. Use registerAs in query() to materialize within a single canvas.',
+        'Source and target canvases must differ. Importing copies a table between two canvases.',
         {
           reason: 'import_same_canvas',
           recovery: {
-            hint: 'Import between two different canvases, or use registerAs in query() to materialize a table within a single canvas.',
+            hint: 'Pass the canvas id of a different canvas as the source — the table is already on this one.',
           },
         },
       );
@@ -503,7 +504,7 @@ export class DuckdbProvider implements IDataCanvasProvider {
         sourceCanvasId,
         sourceTableName,
         recovery: {
-          hint: 'Re-check the source table name, or call describe() on the source canvas to see the tables and views currently staged.',
+          hint: "Re-check the source table name, or list the tables staged on the source canvas with this server's dataframe-describe tool.",
         },
       });
     }
@@ -516,7 +517,7 @@ export class DuckdbProvider implements IDataCanvasProvider {
           reason: 'import_view_clash',
           asName,
           recovery: {
-            hint: 'Drop the existing view with drop(), or choose a different asName for the imported table.',
+            hint: 'Drop the existing view first, or choose a different destination name for the imported table.',
           },
         },
       );
@@ -567,11 +568,10 @@ export class DuckdbProvider implements IDataCanvasProvider {
     if (options?.tableName !== undefined) {
       assertValidIdentifier(options.tableName, 'table');
     }
-    // Qualify every pushed filter with the `t` alias: both `information_schema.tables t`
-    // and `duckdb_tables() dt` expose `table_name`, so an unqualified `table_name`
-    // predicate raises a Binder Error (ambiguous column). `table_schema`/`table_type`
-    // are unambiguous today (duckdb_tables() exposes `schema_name`, not `table_schema`,
-    // and no `table_type`), but qualify them too for consistency and latent safety.
+    // Every pushed filter stays qualified with the `t` alias. The join that
+    // made an unqualified `table_name` ambiguous is gone (#324), but keeping
+    // the qualification means re-introducing a second source here cannot
+    // silently resurrect the Binder Error of #235.
     const filters = [`t.table_schema = 'main'`];
     if (options?.tableName) {
       filters.push(`t.table_name = '${escapeSqlString(options.tableName)}'`);
@@ -582,22 +582,19 @@ export class DuckdbProvider implements IDataCanvasProvider {
       filters.push(`t.table_type <> 'VIEW'`);
     }
 
-    // Fetch table list and size estimates in one pass. duckdb_tables() returns
-    // estimated_size (BIGINT) for base tables — not available for views, which
-    // have no row in duckdb_tables(). LEFT JOIN so views still appear.
-    // estimated_size arrives as a JSON string for BIGINT; coerce via Number().
+    // No join against duckdb_tables(): its `estimated_size` is an estimated row
+    // count, not a byte footprint, so reporting it as `approxSizeBytes` sent a
+    // caller choosing an eviction victim after the wrong table. DuckDB exposes
+    // no per-table byte column at all (#324), so describe() reports none.
     const reader = await record.controlConnection.runAndReadAll(
-      `SELECT t.table_name, t.table_type, dt.estimated_size
+      `SELECT t.table_name, t.table_type
        FROM information_schema.tables t
-       LEFT JOIN duckdb_tables() dt
-         ON dt.schema_name = 'main' AND dt.table_name = t.table_name
        WHERE ${filters.join(' AND ')}
        ORDER BY t.table_name`,
     );
     const tableRows = reader.getRowObjectsJson() as {
       table_name: string;
       table_type: string;
-      estimated_size: string | number | null;
     }[];
 
     return await Promise.all(
@@ -606,7 +603,6 @@ export class DuckdbProvider implements IDataCanvasProvider {
           record.controlConnection,
           row.table_name,
           row.table_type === 'VIEW' ? 'view' : 'table',
-          row.estimated_size != null ? Number(row.estimated_size) : undefined,
         ),
       ),
     );
@@ -616,7 +612,6 @@ export class DuckdbProvider implements IDataCanvasProvider {
     connection: DuckDBConnection,
     tableName: string,
     kind: CanvasObjectKind,
-    approxSizeBytes?: number,
   ): Promise<TableInfo> {
     const [colRows, rowCount] = await Promise.all([
       this.columnRows(connection, tableName),
@@ -632,7 +627,6 @@ export class DuckdbProvider implements IDataCanvasProvider {
       kind,
       rowCount,
       columns,
-      ...(approxSizeBytes !== undefined && { approxSizeBytes }),
     };
   }
 
@@ -750,11 +744,16 @@ export class DuckdbProvider implements IDataCanvasProvider {
         reason: SQL_GATE_REASONS.invalidSql,
         statementType: 'UNKNOWN',
         binderMessage,
+        ...gateRecovery(SQL_GATE_REASONS.invalidSql),
       });
     }
     return validationError(
       'Canvas query must be SELECT; the statement could not be parsed or prepared.',
-      { reason: SQL_GATE_REASONS.nonSelectStatement, statementType: 'UNKNOWN' },
+      {
+        reason: SQL_GATE_REASONS.nonSelectStatement,
+        statementType: 'UNKNOWN',
+        ...gateRecovery(SQL_GATE_REASONS.nonSelectStatement),
+      },
     );
   }
 
@@ -805,12 +804,12 @@ export class DuckdbProvider implements IDataCanvasProvider {
             if (tableNameMatch) {
               const tableName = tableNameMatch[1] ?? tableNameMatch[2];
               throw notFound(
-                `Canvas table ${tableName ? `"${tableName}"` : '(unknown)'} does not exist. The table may have expired or been dropped — re-stage it or call describe() to inspect the canvas.`,
+                `Canvas table ${tableName ? `"${tableName}"` : '(unknown)'} does not exist. The table may have expired, been dropped, or the name may be mistyped.`,
                 {
                   reason: 'missing_table',
                   ...(tableName && { tableName }),
                   recovery: {
-                    hint: 'Re-stage the table via registerTable() or call describe() to see what tables are currently available.',
+                    hint: "Re-run the tool that produced this table to stage it again, or list the currently staged tables with this server's dataframe-describe tool.",
                   },
                 },
               );
@@ -845,6 +844,7 @@ export class DuckdbProvider implements IDataCanvasProvider {
       throw validationError('Canvas query must be SELECT; the statement could not be explained.', {
         reason: SQL_GATE_REASONS.nonSelectStatement,
         statementType,
+        ...gateRecovery(SQL_GATE_REASONS.nonSelectStatement),
       });
     }
     assertPlanReadOnly(planJson);
@@ -1147,33 +1147,91 @@ async function ensureTableMissing(connection: DuckDBConnection, tableName: strin
 }
 
 /**
+ * Reason codes {@link classifyDuckdbError} sets on `data.reason`. Exported
+ * alongside {@link SQL_GATE_REASONS} so a canvas-consuming tool can map an
+ * engine failure onto an `errors[]` entry without duplicating the strings.
+ */
+export const DUCKDB_ERROR_REASONS = {
+  /** SQL the engine could not parse. */
+  sqlParseError: 'sql_parse_error',
+  /** A write the engine refused, or a permission it denied. */
+  sqlReadOnly: 'sql_read_only',
+  /** A gated SELECT that prepared cleanly and then failed on the staged data. */
+  sqlExecutionError: 'sql_execution_error',
+} as const;
+
+/** Union of the engine-error reason strings — see {@link DUCKDB_ERROR_REASONS}. */
+export type DuckdbErrorReason = (typeof DUCKDB_ERROR_REASONS)[keyof typeof DUCKDB_ERROR_REASONS];
+
+/** Recovery hint per engine-error reason, phrased as the caller's next move. */
+const DUCKDB_ERROR_RECOVERY: Record<DuckdbErrorReason, string> = {
+  [DUCKDB_ERROR_REASONS.sqlParseError]:
+    'Fix the SQL syntax the message names and send a single read-only SELECT.',
+  [DUCKDB_ERROR_REASONS.sqlReadOnly]:
+    'Send a read-only SELECT — this surface cannot create, alter, or drop anything.',
+  [DUCKDB_ERROR_REASONS.sqlExecutionError]:
+    'Wrap the cast in TRY_CAST, or filter out the rows the message names before converting them.',
+};
+
+/**
+ * DuckDB's execution-error classes, the split its own `Exception::
+ * IsExecutionError` makes: CONVERSION, INVALID_INPUT, OUT_OF_RANGE. The SQL
+ * prepared, so the fault is in the data the caller asked the engine to
+ * process, not in the engine.
+ *
+ * `@duckdb/node-api` surfaces a bare `Error` — no `errorType`, no `code` — and
+ * `@duckdb/node-bindings` binds neither `duckdb_error_data_error_type` nor
+ * `duckdb_result_error_type`, so the leading class prefix is the only
+ * discriminator available in process. It is anchored at the start on purpose:
+ * `Out of Range Error` and `Out of Memory Error` land on opposite sides of the
+ * split and diverge only after `Out of `, and an engine fault whose message
+ * merely quotes a data-error class mid-sentence is still an engine fault.
+ */
+const DUCKDB_EXECUTION_ERROR_PREFIX = /^(?:Conversion|Invalid Input|Out of Range) Error\b/;
+
+/**
  * Map a DuckDB-thrown error to a framework error class. Classification is for
  * raw engine errors only — an already-structured `McpError` passes through
  * unchanged (#254): structured throws from inside the provider's try blocks
  * (`ensureTableMissing`'s `register_as_clash`, `resolveExportPath`'s path
  * validations) must keep their code and `data.reason` instead of being
  * reclassified as `DatabaseError`.
+ *
+ * The three caller-side classes are `ValidationError`; everything else — I/O,
+ * internal, out-of-memory, transaction, interrupt — stays `DatabaseError`,
+ * which is what an export or Parquet round-trip failing on the filesystem
+ * must remain.
  * @internal Exported for unit testing.
  */
 export function classifyDuckdbError(err: unknown): Error {
   if (err instanceof McpError) return err;
   if (err instanceof Error) {
     const msg = err.message;
-    if (/parser error|syntax/i.test(msg)) {
-      return validationError(
-        `Canvas SQL rejected: ${msg}`,
-        { reason: 'sql_parse_error' },
-        { cause: err },
+    // Checked first: the anchored class prefix is a stronger signal than the
+    // loose word matches below, which a data-error message can also satisfy.
+    if (DUCKDB_EXECUTION_ERROR_PREFIX.test(msg)) {
+      return engineFailure(
+        DUCKDB_ERROR_REASONS.sqlExecutionError,
+        `Canvas query failed: ${msg}`,
+        err,
       );
     }
+    if (/parser error|syntax/i.test(msg)) {
+      return engineFailure(DUCKDB_ERROR_REASONS.sqlParseError, `Canvas SQL rejected: ${msg}`, err);
+    }
     if (/permission|read.?only/i.test(msg)) {
-      return validationError(
-        `Canvas SQL rejected: ${msg}`,
-        { reason: 'sql_read_only' },
-        { cause: err },
-      );
+      return engineFailure(DUCKDB_ERROR_REASONS.sqlReadOnly, `Canvas SQL rejected: ${msg}`, err);
     }
     return databaseError(msg, undefined, { cause: err });
   }
   return databaseError('DuckDB threw a non-Error value.', { value: String(err) });
+}
+
+/** A caller-side engine failure: reason, contract recovery, and the engine error chained. */
+function engineFailure(reason: DuckdbErrorReason, message: string, cause: Error): McpError {
+  return validationError(
+    message,
+    { reason, recovery: { hint: DUCKDB_ERROR_RECOVERY[reason] } },
+    { cause },
+  );
 }

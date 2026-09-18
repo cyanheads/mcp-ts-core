@@ -19,7 +19,9 @@
  *    `EXPLAIN (FORMAT JSON)` tree; reject any operator outside the allowlist
  *    or any string field referencing a deny-listed function.
  *
- * Rejection paths throw `ValidationError` with a structured `data.reason`.
+ * Rejection paths throw `ValidationError` with a structured `data.reason` and a
+ * `data.recovery.hint` phrased for a caller that can only reach the canvas
+ * through a consuming server's tools.
  *
  * @module src/services/canvas/core/sqlGate
  */
@@ -57,6 +59,48 @@ export const SQL_GATE_REASONS = {
 
 /** Union of all gate reason strings — see {@link SQL_GATE_REASONS}. */
 export type SqlGateReason = (typeof SQL_GATE_REASONS)[keyof typeof SQL_GATE_REASONS];
+
+/**
+ * Recovery hint per gate reason.
+ *
+ * A gate rejection is read by a model that can only call the consuming
+ * server's tools, so each hint names a capability rather than the framework
+ * method behind it: the caller cannot invoke `registerTable` or `describe`, and
+ * naming them invites a hallucinated tool call. The `Record` is exhaustive by
+ * type, so a new reason cannot ship without one.
+ */
+const SQL_GATE_RECOVERY: Record<SqlGateReason, string> = {
+  [SQL_GATE_REASONS.multiStatement]:
+    'Send exactly one SELECT statement; split multi-statement SQL into separate calls.',
+  [SQL_GATE_REASONS.nonSelectStatement]:
+    'Rewrite as a single SELECT — this surface is read-only and cannot create, alter, or drop tables.',
+  [SQL_GATE_REASONS.invalidSql]:
+    "Correct the column or function the message names; list the staged columns with this server's dataframe-describe tool.",
+  [SQL_GATE_REASONS.planOperatorNotAllowed]:
+    'Rewrite using read-only SELECT constructs — joins, aggregates, window functions, and CTEs are supported.',
+  [SQL_GATE_REASONS.deniedFunction]:
+    'Remove the file-reading or external-data function — only the staged tables are queryable.',
+  [SQL_GATE_REASONS.deniedFunctionInPlan]:
+    'Remove the file-reading or external-data function — only the staged tables are queryable.',
+  [SQL_GATE_REASONS.identifierEmpty]:
+    'Use a name of letters, digits, and underscores starting with a letter or underscore, 63 characters or fewer.',
+  [SQL_GATE_REASONS.identifierShape]:
+    'Use a name of letters, digits, and underscores starting with a letter or underscore, 63 characters or fewer.',
+  [SQL_GATE_REASONS.identifierReserved]:
+    'Choose a name that is not a SQL keyword — for example, prefix it with the dataset name.',
+  [SQL_GATE_REASONS.systemCatalogAccess]:
+    "Query only the staged dataframe tables; use this server's dataframe-describe tool to list them.",
+};
+
+/**
+ * The wire-shaped recovery for a gate reason, ready to spread into an error's
+ * `data`. The framework mirrors `data.recovery.hint` into `content[]`, so
+ * spreading this is what puts a `Recovery:` line in front of a format()-only
+ * client.
+ */
+export function gateRecovery(reason: SqlGateReason): { recovery: { hint: string } } {
+  return { recovery: { hint: SQL_GATE_RECOVERY[reason] } };
+}
 
 /**
  * Allowlist of read-only operator names that can appear in an EXPLAIN plan.
@@ -293,7 +337,11 @@ export function assertNoDeniedFunctions(sql: string): void {
     const fn = match[1].toLowerCase();
     throw validationError(
       `Canvas query references disallowed table function: ${fn}. File-reading and external-data functions are not permitted.`,
-      { reason: SQL_GATE_REASONS.deniedFunction, function: fn },
+      {
+        reason: SQL_GATE_REASONS.deniedFunction,
+        function: fn,
+        ...gateRecovery(SQL_GATE_REASONS.deniedFunction),
+      },
     );
   }
   // Deny pragma_* table function calls (whole namespace, not just known names).
@@ -303,7 +351,11 @@ export function assertNoDeniedFunctions(sql: string): void {
     const fn = pragmaMatch[1].toLowerCase();
     throw validationError(
       `Canvas query references disallowed table function: ${fn}. PRAGMA metadata functions are not permitted.`,
-      { reason: SQL_GATE_REASONS.deniedFunction, function: fn },
+      {
+        reason: SQL_GATE_REASONS.deniedFunction,
+        function: fn,
+        ...gateRecovery(SQL_GATE_REASONS.deniedFunction),
+      },
     );
   }
 }
@@ -346,8 +398,12 @@ export function assertNoSystemCatalogs(sql: string): void {
   if (match) {
     const name = (match[1] ?? match[2] ?? match[0]).toLowerCase();
     throw validationError(
-      `Canvas query references a system catalog: ${name}. System catalogs are not permitted when denySystemCatalogs is enabled.`,
-      { reason: SQL_GATE_REASONS.systemCatalogAccess, catalog: name },
+      `Canvas query references a system catalog: ${name}. System catalogs are not permitted.`,
+      {
+        reason: SQL_GATE_REASONS.systemCatalogAccess,
+        catalog: name,
+        ...gateRecovery(SQL_GATE_REASONS.systemCatalogAccess),
+      },
     );
   }
 }
@@ -381,13 +437,15 @@ export function assertSelectOnly(input: {
     throw validationError('Canvas query must contain exactly one SQL statement.', {
       reason: SQL_GATE_REASONS.multiStatement,
       statementCount: input.statementCount,
+      ...gateRecovery(SQL_GATE_REASONS.multiStatement),
     });
   }
   if (!ALLOWED_STATEMENT_TYPES.has(input.statementType)) {
-    throw validationError(
-      `Canvas query must be SELECT; got ${input.statementType}. Mutations must use registerTable, drop, or clear.`,
-      { reason: SQL_GATE_REASONS.nonSelectStatement, statementType: input.statementType },
-    );
+    throw validationError(`Canvas query must be SELECT; got ${input.statementType}.`, {
+      reason: SQL_GATE_REASONS.nonSelectStatement,
+      statementType: input.statementType,
+      ...gateRecovery(SQL_GATE_REASONS.nonSelectStatement),
+    });
   }
 }
 
@@ -403,6 +461,7 @@ export function assertPlanReadOnly(planJson: unknown): void {
       {
         reason: SQL_GATE_REASONS.deniedFunctionInPlan,
         functions: [...deniedFunctions].sort(),
+        ...gateRecovery(SQL_GATE_REASONS.deniedFunctionInPlan),
       },
     );
   }
@@ -412,6 +471,7 @@ export function assertPlanReadOnly(planJson: unknown): void {
       {
         reason: SQL_GATE_REASONS.planOperatorNotAllowed,
         operators: [...offending].sort(),
+        ...gateRecovery(SQL_GATE_REASONS.planOperatorNotAllowed),
       },
     );
   }
@@ -553,18 +613,29 @@ export function assertValidIdentifier(value: string, kind: 'table' | 'column'): 
     throw validationError(`Canvas ${kind} name must be a non-empty string.`, {
       reason: SQL_GATE_REASONS.identifierEmpty,
       kind,
+      ...gateRecovery(SQL_GATE_REASONS.identifierEmpty),
     });
   }
   if (!CANVAS_IDENTIFIER_REGEX.test(value)) {
     throw validationError(
       `Canvas ${kind} name "${value}" is invalid. Use letters, digits, and underscores; must start with a letter or underscore; max 63 chars.`,
-      { reason: SQL_GATE_REASONS.identifierShape, kind, value },
+      {
+        reason: SQL_GATE_REASONS.identifierShape,
+        kind,
+        value,
+        ...gateRecovery(SQL_GATE_REASONS.identifierShape),
+      },
     );
   }
   if (RESERVED_IDENTIFIERS.has(value.toLowerCase())) {
     throw validationError(
       `Canvas ${kind} name "${value}" is a reserved SQL keyword. Choose another name.`,
-      { reason: SQL_GATE_REASONS.identifierReserved, kind, value },
+      {
+        reason: SQL_GATE_REASONS.identifierReserved,
+        kind,
+        value,
+        ...gateRecovery(SQL_GATE_REASONS.identifierReserved),
+      },
     );
   }
 }

@@ -21,6 +21,7 @@ import {
   DENIED_TABLE_FUNCTIONS,
   quoteIdentifier,
   SQL_GATE_REASONS,
+  type SqlGateReason,
 } from '@/services/canvas/core/sqlGate.js';
 import { McpError } from '@/types-global/errors.js';
 
@@ -816,5 +817,104 @@ describe('sqlGate · comment stripping (#431)', () => {
     assertNoDeniedFunctions(sql);
     assertNoSystemCatalogs(sql);
     expect(performance.now() - started).toBeLessThan(2_000);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Recovery hints (#299)
+// ---------------------------------------------------------------------------
+
+/** Run a gate assertion expected to reject, and hand back the thrown McpError. */
+function gateRejection(trigger: () => void): McpError {
+  try {
+    trigger();
+  } catch (err) {
+    if (err instanceof McpError) return err;
+    throw err;
+  }
+  throw new Error('Expected the gate to reject.');
+}
+
+/**
+ * One case per reason the gate itself throws, pinning the exact hint text. The
+ * hint is what a model reads and acts on, so it is behavior: a reword here is a
+ * wire change, not a cosmetic one. `invalid_sql` is absent because its only
+ * throw site is the DuckDB provider's prepare-failure branch — the smoke suites
+ * cover it end to end.
+ */
+const GATE_HINT_CASES: [SqlGateReason, () => void, string][] = [
+  [
+    SQL_GATE_REASONS.multiStatement,
+    () => assertSelectOnly({ statementCount: 2, statementType: 'SELECT' }),
+    'Send exactly one SELECT statement; split multi-statement SQL into separate calls.',
+  ],
+  [
+    SQL_GATE_REASONS.nonSelectStatement,
+    () => assertSelectOnly({ statementCount: 1, statementType: 'DROP' }),
+    'Rewrite as a single SELECT — this surface is read-only and cannot create, alter, or drop tables.',
+  ],
+  [
+    SQL_GATE_REASONS.planOperatorNotAllowed,
+    () => assertPlanReadOnly({ name: 'PROJECTION', children: [{ name: 'INSERT' }] }),
+    'Rewrite using read-only SELECT constructs — joins, aggregates, window functions, and CTEs are supported.',
+  ],
+  [
+    SQL_GATE_REASONS.deniedFunction,
+    () => assertNoDeniedFunctions("SELECT * FROM read_json('/etc/passwd')"),
+    'Remove the file-reading or external-data function — only the staged tables are queryable.',
+  ],
+  [
+    SQL_GATE_REASONS.deniedFunctionInPlan,
+    () => assertPlanReadOnly({ name: 'SEQ_SCAN', function: 'read_parquet' }),
+    'Remove the file-reading or external-data function — only the staged tables are queryable.',
+  ],
+  [
+    SQL_GATE_REASONS.identifierEmpty,
+    () => assertValidIdentifier('', 'table'),
+    'Use a name of letters, digits, and underscores starting with a letter or underscore, 63 characters or fewer.',
+  ],
+  [
+    SQL_GATE_REASONS.identifierShape,
+    () => assertValidIdentifier('bad-name!', 'table'),
+    'Use a name of letters, digits, and underscores starting with a letter or underscore, 63 characters or fewer.',
+  ],
+  [
+    SQL_GATE_REASONS.identifierReserved,
+    () => assertValidIdentifier('select', 'table'),
+    'Choose a name that is not a SQL keyword — for example, prefix it with the dataset name.',
+  ],
+  [
+    SQL_GATE_REASONS.systemCatalogAccess,
+    () => assertNoSystemCatalogs('SELECT * FROM information_schema.tables'),
+    "Query only the staged dataframe tables; use this server's dataframe-describe tool to list them.",
+  ],
+];
+
+describe('sqlGate · recovery hints (#299)', () => {
+  it.each(GATE_HINT_CASES)(
+    '%s carries its recovery hint on the wire',
+    (reason, trigger, expectedHint) => {
+      const err = gateRejection(trigger);
+      const data = err.data as { reason?: string; recovery?: { hint?: string } };
+      expect(data.reason).toBe(reason);
+      expect(data.recovery?.hint).toBe(expectedHint);
+    },
+  );
+
+  it('covers every gate-thrown reason, leaving only provider-thrown invalid_sql', () => {
+    const covered = new Set<string>(GATE_HINT_CASES.map(([reason]) => reason));
+    covered.add(SQL_GATE_REASONS.invalidSql);
+    expect([...covered].sort()).toEqual([...Object.values(SQL_GATE_REASONS)].sort());
+  });
+
+  it('drops the unobservable denySystemCatalogs flag from the catalog message', () => {
+    const err = gateRejection(() => assertNoSystemCatalogs('SELECT * FROM duckdb_tables()'));
+    expect(err.message).toMatch(/references a system catalog/i);
+    expect(err.message).not.toMatch(/denySystemCatalogs/);
+  });
+
+  it('drops the framework-method remedy from the non-SELECT message', () => {
+    const err = gateRejection(() => assertSelectOnly({ statementCount: 1, statementType: 'DROP' }));
+    expect(err.message).toBe('Canvas query must be SELECT; got DROP.');
   });
 });

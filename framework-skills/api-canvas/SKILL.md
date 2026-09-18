@@ -4,7 +4,7 @@ description: >
   DataCanvas primitive reference — a Tier 3 SQL/analytical workspace for tabular MCP servers, backed by DuckDB. Use when registering tables from upstream APIs, running ad-hoc SQL across them, and exporting results. Covers the acquire → register → query → export flow, per-table TTL, the token-sharing pattern for multi-agent collaboration, env config, and Cloudflare Workers fail-closed behavior.
 metadata:
   author: cyanheads
-  version: "2.1"
+  version: "2.2"
   audience: external
   type: reference
 ---
@@ -148,9 +148,13 @@ await instance.registerTable('recent_fetch', rows, { ttlMs: 30 * 60 * 1000 });
 
 Run SQL across registered tables. Returns at most `rowLimit` rows (default 10 000). When the result exceeds `rowLimit`, the response carries `truncated: true` and `rowCount` reflects the number of materialized rows (not the full result set). For full result sets and exact counts, pass `registerAs` — the result is materialized as a new canvas table; the response carries a `preview` slice and the exact `rowCount`.
 
-Querying a table that does not exist throws `NotFound` (`data.reason: 'missing_table'`) with a recovery hint to re-stage the table or call `describe()`. This happens when a table has expired (per-table TTL), been dropped, or the name is mistyped. The error is `NotFound`, not `ValidationError` — agents should re-stage, not fix the SQL shape. An unknown or expired `canvas_id` fails the same way (`data.reason: 'canvas_not_found'`, with its own recovery hint) — thrown by `acquire()` and every canvas operation.
+Querying a table that does not exist throws `NotFound` (`data.reason: 'missing_table'`) with a recovery hint to re-run the tool that staged the table or list what is currently staged. This happens when a table has expired (per-table TTL), been dropped, or the name is mistyped. The error is `NotFound`, not `ValidationError` — agents should re-stage, not fix the SQL shape. An unknown or expired `canvas_id` fails the same way (`data.reason: 'canvas_not_found'`, with its own recovery hint) — thrown by `acquire()` and every canvas operation.
 
 A `SELECT` that parses but fails to prepare for any other reason — a mistyped column, an unknown function, an invalid expression — throws `ValidationError` (`data.reason: 'invalid_sql'`) and preserves the DuckDB binder detail in `data.binderMessage` (e.g. `Referenced column "x" not found...`, often with a candidate suggestion). This is distinct from `non_select_statement`, reserved for statements that genuinely aren't `SELECT`s — here the shape is fine, so the agent should fix the named column or function.
+
+A `SELECT` that prepares and then fails on the staged data throws `ValidationError` (`data.reason: 'sql_execution_error'`) with the engine message preserved and a hint pointing at `TRY_CAST` or filtering the offending rows. The split follows DuckDB's own execution-error classes — `Conversion Error`, `Invalid Input Error`, `Out of Range Error` — matched on the message prefix. Engine faults (`IO Error`, `INTERNAL Error`, `Out of Memory Error`, and anything unmatched) stay `DatabaseError`, so an export or import failing on I/O is never reported to the caller as bad SQL. `DUCKDB_ERROR_REASONS` exports these alongside `SQL_GATE_REASONS`.
+
+**Every gate and engine rejection carries `data.recovery.hint`**, which the framework mirrors into `content[]` as a `Recovery:` line — so the guidance reaches `structuredContent`-only and `content[]`-only clients alike. The hints name a capability, never a framework method: an MCP client sees only the consuming server's tool names, so `registerTable()` or `describe()` in a hint is guidance it cannot follow. Write your own hints the same way (see `api-errors`).
 
 ```ts
 const result = await instance.query(`
@@ -230,7 +234,7 @@ await instance.export('g_with_obs', { format: 'csv', stream: writableStream });
 
 ```ts
 const tables = await instance.describe();
-// [{ name: 'germplasm', kind: 'table', rowCount: 200, approxSizeBytes: 8192, columns: [...] }, ...]
+// [{ name: 'germplasm', kind: 'table', rowCount: 200, columns: [...] }, ...]
 
 // Filter by kind ('table' | 'view').
 const onlyViews = await instance.describe({ kind: 'view' });
@@ -241,7 +245,7 @@ await instance.clear();                  // returns count dropped (drops views b
 
 `TableInfo.kind` discriminates `'table'` vs `'view'`. For views, `rowCount` is materialized at describe time via `COUNT(*)` — not free; treat as an approximation if the view is expensive.
 
-`TableInfo.approxSizeBytes` is set for base tables (DuckDB's `estimated_size` from `duckdb_tables()`). It is `undefined` for views — views have no entry in `duckdb_tables()`. Use it to decide what to drop when a canvas approaches its memory limit.
+`TableInfo.approxSizeBytes` is `@deprecated` and never populated. DuckDB exposes no per-table byte footprint, so there is no size figure to report and no size-based eviction heuristic to build on; `rowCount` and the canvas memory limit are what `describe()` gives you. The member stays on the type so existing readers compile, and goes away in a future major.
 
 ### Cancellation
 

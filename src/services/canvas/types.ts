@@ -36,7 +36,12 @@ export type CanvasObjectKind = 'table' | 'view';
 
 /** Metadata returned by {@link CanvasInstance.describe}. */
 export interface TableInfo {
-  /** Approximate in-memory footprint in bytes (engine-specific estimate). */
+  /**
+   * @deprecated Never populated. No byte estimate is available: DuckDB exposes
+   * no per-table byte footprint, and the `duckdb_tables().estimated_size` this
+   * once carried is an estimated row count, not a size. Retained so existing
+   * readers still compile; slated for removal in a future major.
+   */
   approxSizeBytes?: number;
   /** Resolved schema for the table or view. */
   columns: ColumnSchema[];

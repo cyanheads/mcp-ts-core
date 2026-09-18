@@ -39,6 +39,8 @@ export {
   type SqlGateReason,
 } from './core/sqlGate.js';
 export {
+  DUCKDB_ERROR_REASONS,
+  type DuckdbErrorReason,
   DuckdbProvider,
   type DuckdbProviderOptions,
 } from './providers/duckdb/DuckdbProvider.js';

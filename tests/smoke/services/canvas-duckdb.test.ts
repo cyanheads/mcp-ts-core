@@ -432,7 +432,11 @@ describe('canvas · DuckDB round trip', () => {
     expect(mcpErr.message).toMatch(/does not contain a table or view/i);
     const data = mcpErr.data as { reason?: string; recovery?: { hint?: string } };
     expect(data.reason).toBe('missing_table');
-    expect(typeof data.recovery?.hint).toBe('string');
+    // Issue #299 — the hint names a capability the caller can reach through the
+    // consuming server's tools, never a framework method.
+    expect(data.recovery?.hint).toBe(
+      "Re-check the source table name, or list the tables staged on the source canvas with this server's dataframe-describe tool.",
+    );
   });
 
   it('importFrom rejects when source and target are the same canvas', async () => {
@@ -655,7 +659,14 @@ describe('canvas · DuckDB round trip', () => {
     const mcpErr = caught as McpError;
     // Must be NotFound (-32001), not ValidationError (-32007).
     expect(mcpErr.code).toBe(-32001);
-    expect((mcpErr.data as { reason?: string })?.reason).toBe('missing_table');
+    const data = mcpErr.data as { reason?: string; recovery?: { hint?: string } };
+    expect(data.reason).toBe('missing_table');
+    // Issue #299 — the prepare-time site is the second missing_table throw; its
+    // hint and message stay inside what the caller can act on.
+    expect(data.recovery?.hint).toBe(
+      "Re-run the tool that produced this table to stage it again, or list the currently staged tables with this server's dataframe-describe tool.",
+    );
+    expect(mcpErr.message).not.toMatch(/registerTable|describe\(\)/);
   });
 
   // Issue #236 — a SELECT-shaped statement that fails to prepare for a reason
@@ -741,10 +752,13 @@ describe('canvas · DuckDB round trip', () => {
     ).rejects.toMatchObject({ data: { reason: 'system_catalog_access' } });
   });
 
-  // Issue #226 — approxSizeBytes populated for tables, undefined for views.
-  it('issue #226 — describe() sets approxSizeBytes for tables, undefined for views', async () => {
+  // Issue #324 — `duckdb_tables().estimated_size` is a row estimate, not a byte
+  // footprint, so describe() no longer reports it. Row width is the pin: two
+  // tables with identical row counts and wildly different payload sizes would
+  // both have reported the same "bytes".
+  it('issue #324 — describe() reports no approxSizeBytes for tables or views', async () => {
     const instance = await canvas.acquire(undefined, ctx);
-    const rows = Array.from({ length: 100 }, (_, i) => ({ id: i, label: `row_${i}` }));
+    const rows = Array.from({ length: 100 }, (_, i) => ({ id: i, payload: 'x'.repeat(4_096) }));
     await instance.registerTable('sized_table', rows);
     await instance.registerView('sized_view', 'SELECT id FROM sized_table');
 
@@ -752,9 +766,10 @@ describe('canvas · DuckDB round trip', () => {
     const tableInfo = tables.find((t) => t.name === 'sized_table');
     const viewInfo = tables.find((t) => t.name === 'sized_view');
 
-    expect(typeof tableInfo?.approxSizeBytes).toBe('number');
-    expect((tableInfo?.approxSizeBytes ?? 0) > 0).toBe(true);
+    expect(tableInfo?.rowCount).toBe(100);
+    expect(tableInfo?.approxSizeBytes).toBeUndefined();
     expect(viewInfo?.approxSizeBytes).toBeUndefined();
+    expect(Object.hasOwn(tableInfo as object, 'approxSizeBytes')).toBe(false);
   });
 
   // Issue #140 — per-table TTL: register table with ttlMs, advance clock, verify
@@ -963,5 +978,49 @@ describe('canvas · DuckDB round trip', () => {
     await expect(instance.query('SELECT 1 AS x', options)).rejects.toMatchObject({
       data: { reason: 'invalid_query_bounds' },
     });
+  });
+
+  // Issue #451 — a SELECT that passes the gate and then fails on the staged
+  // data is the caller's SQL to fix, not a server fault. The engine message is
+  // preserved so the agent can see which value and column broke.
+  it('issue #451 — an execution-time conversion failure is a caller-side ValidationError', async () => {
+    const instance = await canvas.acquire(undefined, ctx);
+    await instance.registerTable('df_convert', [{ amount: '12' }, { amount: 'n/a' }]);
+
+    let caught: unknown;
+    try {
+      await instance.query('SELECT CAST(amount AS INTEGER) AS n FROM df_convert');
+    } catch (err) {
+      caught = err;
+    }
+    expect(caught).toBeInstanceOf(McpError);
+    const mcpErr = caught as McpError;
+    // ValidationError (-32007), not DatabaseError (-32010).
+    expect(mcpErr.code).toBe(-32007);
+    const data = mcpErr.data as { reason?: string; recovery?: { hint?: string } };
+    expect(data.reason).toBe('sql_execution_error');
+    expect(data.recovery?.hint).toMatch(/TRY_CAST/);
+    expect(mcpErr.message).toMatch(/Conversion Error/);
+  });
+
+  // Issue #451, negative arm — classifyDuckdbError is also reached from
+  // export/registerView/importFrom. An I/O fault on the export path must stay a
+  // DatabaseError rather than being reported to the caller as bad SQL.
+  it('issue #451 — an export-path I/O failure stays a DatabaseError', async () => {
+    const instance = await canvas.acquire(undefined, ctx);
+    await instance.registerTable('df_export_io', [{ x: 1 }]);
+
+    let caught: unknown;
+    try {
+      // Inside the sandbox, but the intermediate directory does not exist —
+      // DuckDB's COPY raises an IO Error the provider must not reclassify.
+      await instance.export('df_export_io', { format: 'csv', path: 'no_such_dir/out.csv' });
+    } catch (err) {
+      caught = err;
+    }
+    expect(caught).toBeInstanceOf(McpError);
+    const mcpErr = caught as McpError;
+    expect(mcpErr.code).toBe(-32010);
+    expect((mcpErr.data as { reason?: string } | undefined)?.reason).toBeUndefined();
   });
 });

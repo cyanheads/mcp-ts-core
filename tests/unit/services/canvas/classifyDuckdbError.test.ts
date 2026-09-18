@@ -118,3 +118,73 @@ describe('classifyDuckdbError', () => {
     expect((result as McpError).data?.value).toBe('42');
   });
 });
+
+// ---------------------------------------------------------------------------
+// Execution-time data errors (#451)
+// ---------------------------------------------------------------------------
+
+/**
+ * DuckDB's own `Exception::IsExecutionError` is exactly CONVERSION,
+ * INVALID_INPUT, and OUT_OF_RANGE. `@duckdb/node-api` surfaces a bare `Error`
+ * with no `errorType`, so the leading class prefix is the only discriminator
+ * in process — and it has to be anchored, since `Out of Range Error` and
+ * `Out of Memory Error` sit on opposite sides of the split.
+ */
+describe('classifyDuckdbError · execution-time data errors (#451)', () => {
+  const EXECUTION_MESSAGES = [
+    "Conversion Error: Could not convert string 'n/a' to INT32 when casting from source column amount",
+    'Invalid Input Error: Malformed JSON in the staged column payload',
+    'Out of Range Error: Overflow in multiplication of INT64',
+  ];
+
+  it.each(EXECUTION_MESSAGES)(
+    'classifies %s as a caller-side ValidationError with recovery',
+    (message) => {
+      const original = new Error(message);
+      const result = classifyDuckdbError(original);
+      expect(result).toBeInstanceOf(McpError);
+      const mcp = result as McpError;
+      expect(mcp.code).toBe(JsonRpcErrorCode.ValidationError);
+      expect(mcp.data?.reason).toBe('sql_execution_error');
+      expect(mcp.message).toContain(message);
+      expect((mcp.data as { recovery?: { hint?: string } }).recovery?.hint).toMatch(/TRY_CAST/);
+      expect(mcp.cause).toBe(original);
+    },
+  );
+
+  it.each([
+    'Out of Memory Error: failed to allocate block of 262144 bytes',
+    'IO Error: Cannot open file "/tmp/x.parquet": No such file or directory',
+    'INTERNAL Error: Attempted to access index 3 within vector of size 2',
+    'Constraint Error: NOT NULL constraint failed',
+  ])('keeps %s on the engine-fault side as DatabaseError', (message) => {
+    const result = classifyDuckdbError(new Error(message));
+    expect((result as McpError).code).toBe(JsonRpcErrorCode.DatabaseError);
+    expect((result as McpError).data?.reason).toBeUndefined();
+  });
+
+  it('matches the class prefix only at the start of the message', () => {
+    // An engine message that merely mentions a data-error class mid-sentence is
+    // not one — anchoring is what keeps an export-path I/O fault out of the
+    // caller-side bucket.
+    const result = classifyDuckdbError(
+      new Error('IO Error: write failed while handling Conversion Error: cast overflow'),
+    );
+    expect((result as McpError).code).toBe(JsonRpcErrorCode.DatabaseError);
+  });
+
+  it('gives the sibling parse and read-only branches their own recovery hints', () => {
+    const parse = classifyDuckdbError(
+      new Error('Parser Error: syntax error at or near "FROM"'),
+    ) as McpError;
+    expect((parse.data as { recovery?: { hint?: string } }).recovery?.hint).toEqual(
+      expect.any(String),
+    );
+    expect((parse.data as { recovery: { hint: string } }).recovery.hint.length).toBeGreaterThan(0);
+
+    const readOnly = classifyDuckdbError(new Error('database is read-only')) as McpError;
+    expect((readOnly.data as { recovery: { hint: string } }).recovery.hint.length).toBeGreaterThan(
+      0,
+    );
+  });
+});
