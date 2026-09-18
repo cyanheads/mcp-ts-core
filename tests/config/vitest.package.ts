@@ -22,7 +22,7 @@ export default defineConfig({
     maxWorkers: 1,
     isolate: true,
     pool: 'forks',
-    /** A cold run packs the tarball, installs ~16 support packages, and runs two runtimes plus six `tsc` invocations — two of them over the whole public declaration graph with `skipLibCheck: false`. */
+    /** A cold run packs the tarball and installs it into two consumer roots — a Node one with ~15 support packages and a `@types/node`-free Worker one — then runs two runtimes plus six `tsc` invocations, four of them over the public declaration graph with `skipLibCheck: false`. */
     testTimeout: 600_000,
   },
 });

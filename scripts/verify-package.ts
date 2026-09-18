@@ -66,7 +66,6 @@ const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const BUILD_INPUTS = BUILD_INPUT_PATHS.map((path) => join(ROOT, path));
 
 const CONSUMER_SUPPORT_PACKAGES = [
-  '@cloudflare/workers-types',
   '@opentelemetry/sdk-node',
   '@supabase/supabase-js',
   '@types/node',
@@ -82,6 +81,23 @@ const CONSUMER_SUPPORT_PACKAGES = [
   'typescript',
   'typescript-v6',
   'vitest',
+] as const;
+
+/**
+ * The Worker consumer installs separately, and deliberately declares no
+ * `@types/node`. `undici-types` is hoisted as a dependency of that package and
+ * six of its declaration files carry `/// <reference types="node" />`, so any
+ * program that resolves openai's relative `undici-types` probe pulls Node's
+ * globals in — which collide with `@cloudflare/workers-types` on `Buffer`,
+ * `console`, and friends. Without the package installed the probe resolves to
+ * nothing behind openai's own suppression comment, which is what lets this lane
+ * run `skipLibCheck: false` and actually check `dist/core/worker.d.ts` (#411).
+ */
+const WORKER_CONSUMER_PACKAGES = [
+  '@cloudflare/workers-types',
+  'openai',
+  'typescript',
+  'typescript-v6',
 ] as const;
 
 /**
@@ -482,6 +498,18 @@ void [Worker, bindings];
 `;
 }
 
+/**
+ * `@modelcontextprotocol/server` uses `Buffer` in type position, and
+ * `@cloudflare/workers-types` declares it as a value only. A real Worker
+ * consumer closes that the same way, and it keeps `@types/node` out of the
+ * program.
+ */
+const WORKER_BUFFER_GLOBAL_SOURCE = `export {};
+declare global {
+  type Buffer = Uint8Array;
+}
+`;
+
 async function verifyRuntimeImports(
   consumerDir: string,
   pkg: PackageJson,
@@ -539,7 +567,6 @@ test('loads the published testing/vitest subpath in its required host context', 
 async function verifyTypes(consumerDir: string, pkg: PackageJson): Promise<void> {
   await writeFile(join(consumerDir, 'consumer-node.ts'), nodeTypeConsumerSource(pkg));
   await writeFile(join(consumerDir, 'consumer-supabase.ts'), supabaseTypeConsumerSource(pkg));
-  await writeFile(join(consumerDir, 'consumer-worker.ts'), workerTypeConsumerSource(pkg));
   await writeFile(
     join(consumerDir, 'tsconfig.node.json'),
     `${JSON.stringify(
@@ -584,33 +611,6 @@ async function verifyTypes(consumerDir: string, pkg: PackageJson): Promise<void>
       2,
     )}\n`,
   );
-  await writeFile(
-    join(consumerDir, 'tsconfig.worker.json'),
-    `${JSON.stringify(
-      {
-        compilerOptions: {
-          lib: ['ES2025', 'ESNext.Disposable', 'ESNext.TypedArrays'],
-          module: 'NodeNext',
-          moduleResolution: 'NodeNext',
-          noEmit: true,
-          noUncheckedIndexedAccess: true,
-          // openai >= 7.12.1 resolves its undici-types probe, and those
-          // declarations reference @types/node — a set that collides with
-          // @cloudflare/workers-types on `Buffer`, `console`, `Event`, and
-          // friends. The Node lane keeps `skipLibCheck: false` over the shared
-          // declarations; this lane verifies the Worker entry against
-          // Cloudflare's globals alone.
-          skipLibCheck: true,
-          strict: true,
-          target: 'ES2025',
-          types: ['@cloudflare/workers-types'],
-        },
-        include: ['./consumer-worker.ts'],
-      },
-      null,
-      2,
-    )}\n`,
-  );
 
   const compilers = [
     ['TypeScript 7', join(consumerDir, 'node_modules', 'typescript', 'bin', 'tsc')],
@@ -626,10 +626,64 @@ async function verifyTypes(consumerDir: string, pkg: PackageJson): Promise<void>
     if (nodeResult.stdout.includes('/@supabase/')) {
       throw new Error(`${compiler} default public declaration graph unexpectedly loaded Supabase.`);
     }
-    const workerResult = await run(tsc, ['--project', 'tsconfig.worker.json'], consumerDir);
-    assertSuccess(workerResult, `${compiler} strict Worker consumer typecheck`);
     const supabaseResult = await run(tsc, ['--project', 'tsconfig.supabase.json'], consumerDir);
     assertSuccess(supabaseResult, `${compiler} explicit Supabase client type opt-in`);
+  }
+}
+
+/**
+ * Typechecks the published Worker entry from an install root that carries no
+ * `@types/node`, with `skipLibCheck: false` — so `dist/core/worker.d.ts` and
+ * everything only it reaches are actually checked against Cloudflare's globals,
+ * the way the Node lane checks the rest against `@types/node` (#411). Isolation
+ * is what holds the lane green: put `@types/node` back in this fixture's
+ * dependencies and it fails.
+ */
+async function verifyWorkerTypes(workerDir: string, pkg: PackageJson): Promise<void> {
+  await writeFile(join(workerDir, 'consumer-worker.ts'), workerTypeConsumerSource(pkg));
+  await writeFile(join(workerDir, 'buffer-global.d.ts'), WORKER_BUFFER_GLOBAL_SOURCE);
+  await writeFile(
+    join(workerDir, 'tsconfig.worker.json'),
+    `${JSON.stringify(
+      {
+        compilerOptions: {
+          lib: ['ES2025', 'ESNext.Disposable', 'ESNext.TypedArrays'],
+          module: 'NodeNext',
+          moduleResolution: 'NodeNext',
+          noEmit: true,
+          noUncheckedIndexedAccess: true,
+          skipLibCheck: false,
+          strict: true,
+          target: 'ES2025',
+          types: ['@cloudflare/workers-types'],
+        },
+        include: ['./consumer-worker.ts', './buffer-global.d.ts'],
+      },
+      null,
+      2,
+    )}\n`,
+  );
+
+  const compilers = [
+    ['TypeScript 7', join(workerDir, 'node_modules', 'typescript', 'bin', 'tsc')],
+    ['TypeScript 6', join(workerDir, 'node_modules', 'typescript-v6', 'bin', 'tsc')],
+  ] as const;
+  for (const [compiler, tsc] of compilers) {
+    const result = await run(tsc, ['--project', 'tsconfig.worker.json', '--listFiles'], workerDir);
+    assertSuccess(result, `${compiler} strict Worker consumer typecheck`);
+
+    const files = result.stdout.split(/\r?\n/).filter(Boolean);
+    if (!files.some((file) => file.endsWith('/dist/core/worker.d.ts'))) {
+      throw new Error(
+        `${compiler} Worker consumer program did not include dist/core/worker.d.ts — the lane is not checking what it claims to.`,
+      );
+    }
+    const nodeTypes = files.filter((file) => file.includes('/@types/node/'));
+    if (nodeTypes.length > 0) {
+      throw new Error(
+        `${compiler} Worker consumer program loaded ${nodeTypes.length} @types/node declaration(s): ${nodeTypes[0]}`,
+      );
+    }
   }
 }
 
@@ -742,8 +796,10 @@ export async function verifyPublishedPackage(): Promise<PackageVerificationRepor
   try {
     const packDir = join(tempRoot, 'pack');
     const consumerDir = join(tempRoot, 'consumer');
+    const workerConsumerDir = join(tempRoot, 'consumer-worker');
     await mkdir(packDir);
     await mkdir(consumerDir);
+    await mkdir(workerConsumerDir);
 
     const [bunBin, nodeBin, npmBin] = await Promise.all([
       findCommand('bun'),
@@ -789,12 +845,38 @@ export async function verifyPublishedPackage(): Promise<PackageVerificationRepor
       )}\n`,
     );
 
-    const installed = await run(
-      bunBin,
-      ['install', '--production', '--ignore-scripts', '--backend=copyfile', '--no-progress'],
-      consumerDir,
+    const workerDependencies = Object.fromEntries(
+      WORKER_CONSUMER_PACKAGES.map((name) => [name, dependencyVersion(pkg, name)]),
     );
+    workerDependencies[pkg.name] = `file:${tarball}`;
+    await writeFile(
+      join(workerConsumerDir, 'package.json'),
+      `${JSON.stringify(
+        {
+          name: `${PACKED_CONSUMER_NAME}-worker`,
+          version: PACKED_CONSUMER_VERSION,
+          private: true,
+          type: 'module',
+          dependencies: workerDependencies,
+        },
+        null,
+        2,
+      )}\n`,
+    );
+
+    const installArgs = [
+      'install',
+      '--production',
+      '--ignore-scripts',
+      '--backend=copyfile',
+      '--no-progress',
+    ];
+    const [installed, workerInstalled] = await Promise.all([
+      run(bunBin, installArgs, consumerDir),
+      run(bunBin, installArgs, workerConsumerDir),
+    ]);
     assertSuccess(installed, 'production-only tarball install');
+    assertSuccess(workerInstalled, 'Worker consumer tarball install');
 
     const packageDir = join(consumerDir, 'node_modules', '@cyanheads', 'mcp-ts-core');
     const packageMetadata = await lstat(packageDir);
@@ -818,6 +900,7 @@ export async function verifyPublishedPackage(): Promise<PackageVerificationRepor
 
     await verifyRuntimeImports(consumerDir, installedPkg, nodeBin, bunBin);
     await verifyTypes(consumerDir, installedPkg);
+    await verifyWorkerTypes(workerConsumerDir, installedPkg);
     const cliProject = await verifyCli(
       consumerDir,
       installedPackageDir,
