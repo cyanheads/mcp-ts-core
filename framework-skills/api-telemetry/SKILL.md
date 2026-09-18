@@ -4,7 +4,7 @@ description: >
   Catalog of OpenTelemetry instrumentation built into framework `@cyanheads/mcp-ts-core` — spans, metrics, completion logs, env config, runtime caveats, custom instrumentation patterns, and cardinality rules. Use when enabling OTel export, adding custom spans or metrics in services, debugging missing telemetry, looking up attribute names, or deciding what's safe to put on a metric attribute vs. a span.
 metadata:
   author: cyanheads
-  version: "1.11"
+  version: "1.12"
   audience: external
   type: reference
 ---
@@ -123,7 +123,7 @@ All custom metrics are namespaced `mcp.*` (or `process.*` / `http.client.*` wher
 |:-------|:-----|:-----|:-----------|
 | `mcp.tool.calls` | counter | `{calls}` | `mcp.tool.name`, `mcp.tool.success` |
 | `mcp.tool.duration` | histogram | `ms` | `mcp.tool.name`, `mcp.tool.success` |
-| `mcp.tool.errors` | counter | `{errors}` | `mcp.tool.name`, `mcp.tool.error_category` (`upstream`/`server`/`client`) |
+| `mcp.tool.errors` | counter | `{errors}` | `mcp.tool.name`, `mcp.tool.error_category` (`upstream`/`server`/`client`) — see [Error category](#error-category) |
 | `mcp.tool.input_bytes` | histogram | `bytes` | `mcp.tool.name` |
 | `mcp.tool.output_bytes` | histogram | `bytes` | `mcp.tool.name` (success only; the handler's returned value) |
 | `mcp.tool.param.usage` | counter | `{uses}` | `mcp.tool.name`, `mcp.tool.param` (top-level keys supplied by caller) |
@@ -192,11 +192,26 @@ Read together: `queue_depth` rising while `wait` climbs means the configured rat
 | `mcp.sessions.active` | observable gauge | `{sessions}` | — |
 | `mcp.heartbeat.failures` | counter | `{failures}` | `mcp.connection.transport` (`stdio`/`http`) |
 
+### Error category
+
+`mcp.tool.error_category` and `mcp.prompt.error_category` bucket a failure as `upstream` (an external dependency refused or timed out), `server` (a bug or this process's own infrastructure), or `client` (the request itself). The bucket comes from the classified JSON-RPC code, with one refinement: `RateLimited` (`-32003`) legitimately carries two sources, so the canvas tenant-cap refusal — which names itself with `data.reason: 'canvas_capacity_exhausted'` — files under `server`, and every other `-32003` stays `upstream`. Retry semantics and the HTTP 429 mapping are the same for both, which is why the code is shared and the stable `reason` discriminator does the separating.
+
+A dashboard reading `error_category` alone therefore no longer needs to special-case one server's capacity limit as an upstream outage. `reason` itself is not on the metric — it is unbounded across a fleet, so it lives on the span and in the log.
+
+### Declared error severity
+
+A definition may put `severity` on an `errors[]` entry — `debug`, `info`, `notice`, or `warning` — for an outcome it models rather than suffers. Two things move, and nothing else:
+
+- The `Error in tool:<name>` log record is emitted at that level instead of `error`, with the same message and structured fields.
+- `mcp.errors.classified` gains `mcp.error.severity` on that record. It is set only when a declared severity resolved, so a server that declares none emits exactly the series it did before.
+
+The call still failed: the execution span keeps `SpanStatusCode.ERROR` and its recorded exception, `mcp.tool.calls` / `mcp.tool.duration` / `mcp.tool.errors` record the same values, and the completion log still reads `isSuccess: false`. Splitting those series on an authoring decision would redefine what an error rate means. Tools only — resources re-throw for the SDK to log. A cancelled request keeps its own `info`, stack-free path whatever the contract declares. See `api-errors`.
+
 ### Errors, rate limits, HTTP client
 
 | Metric | Type | Unit | Attributes |
 |:-------|:-----|:-----|:-----------|
-| `mcp.errors.classified` | counter | `{errors}` | `mcp.error.classified_code` (JSON-RPC code), `operation` |
+| `mcp.errors.classified` | counter | `{errors}` | `mcp.error.classified_code` (JSON-RPC code), `operation`, and `mcp.error.severity` when the failure's declared severity resolved |
 | `mcp.ratelimit.rejections` | counter | `{rejections}` | — (the rate-limit key is caller-supplied and typically per-client, so it would materialize an unbounded series in the meter; per-key attribution lives on the span instead) |
 | `http.client.request.duration` | histogram | `s` | `http.request.method`, `server.address`, `http.response.status_code` (when > 0; absent on network errors before a response is received) |
 

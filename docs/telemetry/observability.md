@@ -117,6 +117,8 @@ All custom metrics are namespaced `mcp.*` (or `process.*`/`http.client.*` where 
 | `mcp.prompt.message_count` | histogram | `{messages}` | `mcp.prompt.name` |
 | `mcp.requests.active` | up/down counter | `{requests}` | — (in-flight handler executions, all three types) |
 
+`error_category` comes from the classified JSON-RPC error code, with one refinement: `RateLimited` (`-32003`) carries two sources, so the canvas tenant-cap refusal — identified by `data.reason: 'canvas_capacity_exhausted'` — files under `server`, while every other `-32003` stays `upstream`. `reason` itself never becomes a metric attribute.
+
 ### Storage, LLM, speech, graph
 
 | Metric | Type | Unit | Attributes |
@@ -150,7 +152,7 @@ All custom metrics are namespaced `mcp.*` (or `process.*`/`http.client.*` where 
 
 | Metric | Type | Unit | Attributes |
 |:-------|:-----|:-----|:-----------|
-| `mcp.errors.classified` | counter | `{errors}` | `mcp.error.classified_code` (JSON-RPC code), `operation` |
+| `mcp.errors.classified` | counter | `{errors}` | `mcp.error.classified_code` (JSON-RPC code), `operation`, and `mcp.error.severity` when the failure's `errors[]` entry declared one |
 | `mcp.ratelimit.rejections` | counter | `{rejections}` | `mcp.rate_limit.key` |
 | `http.client.request.duration` | histogram | `s` | `http.request.method`, `server.address`, `http.response.status_code` (when > 0; absent on network errors before a response is received) |
 
