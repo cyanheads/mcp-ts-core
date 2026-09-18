@@ -1,6 +1,6 @@
 # mcp-ts-core - Directory Structure
 
-Generated on: 2026-09-16 19:48:35
+Generated on: 2026-09-18 09:49:24
 
 ```text
 mcp-ts-core/
@@ -327,7 +327,9 @@ mcp-ts-core/
 │   │   │   │   ├── deferredInputSchema.ts
 │   │   │   │   ├── disabled-tool.ts
 │   │   │   │   ├── headerParam.ts
+│   │   │   │   ├── inputPrevalidation.ts
 │   │   │   │   ├── schemaShape.ts
+│   │   │   │   ├── strictenRecord.ts
 │   │   │   │   ├── toolDefinition.ts
 │   │   │   │   └── toolHandlerFactory.ts
 │   │   │   └── tool-registration.ts
@@ -486,6 +488,7 @@ mcp-ts-core/
 │   │   ├── network/
 │   │   │   ├── fetchWithTimeout.ts
 │   │   │   ├── httpError.ts
+│   │   │   ├── pacer.ts
 │   │   │   ├── responseBody.ts
 │   │   │   └── retry.ts
 │   │   ├── overflow/
@@ -665,6 +668,7 @@ mcp-ts-core/
 │   │   ├── http-storage-security.int.test.ts
 │   │   ├── http-transport.int.test.ts
 │   │   ├── http.test.ts
+│   │   ├── input-prevalidation.int.test.ts
 │   │   ├── logger.int.test.ts
 │   │   ├── mcp-apps.int.test.ts
 │   │   ├── modern-notifications.int.test.ts
@@ -700,7 +704,8 @@ mcp-ts-core/
 │   │   │   ├── echo-app-ui.app-resource.test.ts
 │   │   │   └── echo.resource.test.ts
 │   │   ├── services/
-│   │   │   └── canvas-duckdb.test.ts
+│   │   │   ├── canvas-duckdb.test.ts
+│   │   │   └── canvas-error-surfaces.test.ts
 │   │   └── tools/
 │   │       ├── template-data-explorer.app-tool.test.ts
 │   │       ├── template-echo-app.app-tool.test.ts
@@ -712,6 +717,7 @@ mcp-ts-core/
 │   │   ├── handler-context.test-d.ts
 │   │   ├── mock-context.test-d.ts
 │   │   ├── request-context.test-d.ts
+│   │   ├── retry.test-d.ts
 │   │   ├── tool-builder.test-d.ts
 │   │   └── tool-contract-suite.test-d.ts
 │   ├── unit/
@@ -765,6 +771,7 @@ mcp-ts-core/
 │   │   │   │   ├── utils/
 │   │   │   │   │   ├── deferredInputSchema.test.ts
 │   │   │   │   │   ├── header-param.test.ts
+│   │   │   │   │   ├── inputPrevalidation.test.ts
 │   │   │   │   │   ├── renderToolContent.test.ts
 │   │   │   │   │   ├── schemaShape.test.ts
 │   │   │   │   │   ├── toolDefinition.test.ts
@@ -940,6 +947,7 @@ mcp-ts-core/
 │   │   │   │   ├── fetchWithTimeout.metrics.test.ts
 │   │   │   │   ├── fetchWithTimeout.test.ts
 │   │   │   │   ├── httpError.test.ts
+│   │   │   │   ├── pacer.test.ts
 │   │   │   │   └── retry.test.ts
 │   │   │   ├── overflow/
 │   │   │   │   └── outlineOnOverflow.test.ts

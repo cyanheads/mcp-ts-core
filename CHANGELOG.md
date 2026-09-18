@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.13.4](changelog/0.13.x/0.13.4.md) — 2026-09-18 · ⚠️ Breaking · 🛡️ Security
+
+Tool arguments pass an ordered pre-validation step — client-added keys dropped, key aliases rewritten, a stringified array repaired after a failed parse — and httpErrorFromResponse no longer puts the upstream request URL on client-facing error.data by default.
+
 ## [0.13.3](changelog/0.13.x/0.13.3.md) — 2026-09-17
 
 Argument rejections carry a reason and a schema-derived recovery hint, and render an omitted required field as missing rather than as a wrong choice. A handler unwound after its request was cancelled classifies RequestCancelled whatever it threw.
