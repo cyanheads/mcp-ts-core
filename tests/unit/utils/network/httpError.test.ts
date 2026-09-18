@@ -108,11 +108,63 @@ describe('httpErrorFromResponse', () => {
     expect(error.code).toBe(JsonRpcErrorCode.RateLimited);
     expect(error.message).toBe('NCBI returned HTTP 429 Too Many Requests.');
     expect(error.data).toMatchObject({
-      url: 'https://api.example.com/foo',
       status: 429,
       statusText: 'Too Many Requests',
       body: 'slow down',
       retryAfter: '30',
+    });
+  });
+
+  describe('upstream URL exposure (#307)', () => {
+    // `error.data` is forwarded to the client verbatim, and an upstream request
+    // URL routinely carries user input or an API key in its query string.
+    const secretUrl = 'https://api.example.com/v1/search?q=secret-term&api_key=REDACTED';
+
+    it('omits the upstream URL from error.data by default', async () => {
+      const error = await httpErrorFromResponse(makeResponse(400, { url: secretUrl }), {
+        service: 'Example',
+        captureBody: false,
+      });
+
+      expect(Object.keys(error.data as Record<string, unknown>)).not.toContain('url');
+      expect(JSON.stringify(error.data)).not.toContain('secret-term');
+    });
+
+    it('omits the URL at every status, not only the ones that carry a body', async () => {
+      for (const status of [400, 401, 403, 404, 422, 429, 500, 503]) {
+        const error = await httpErrorFromResponse(makeResponse(status, { url: secretUrl }));
+        expect(error.data).not.toHaveProperty('url');
+      }
+    });
+
+    it('puts the full URL on data.url when includeUrl is set', async () => {
+      const error = await httpErrorFromResponse(makeResponse(400, { url: secretUrl }), {
+        includeUrl: true,
+      });
+
+      expect(error.data?.url).toBe(secretUrl);
+    });
+
+    it('adds no url key when response.url is empty, with or without includeUrl', async () => {
+      for (const includeUrl of [false, true]) {
+        const error = await httpErrorFromResponse(makeResponse(500), { includeUrl });
+        expect(Object.keys(error.data as Record<string, unknown>)).not.toContain('url');
+      }
+    });
+
+    it('still lets a caller put its own url on error.data', async () => {
+      const error = await httpErrorFromResponse(makeResponse(500, { url: secretUrl }), {
+        data: { url: 'https://api.example.com/v1/search' },
+      });
+
+      expect(error.data?.url).toBe('https://api.example.com/v1/search');
+    });
+
+    it('keeps the host in the message even though the URL is dropped from data', async () => {
+      const error = await httpErrorFromResponse(makeResponse(503, { url: secretUrl }));
+
+      expect(error.message).toBe('api.example.com returned HTTP 503.');
+      expect(error.data).not.toHaveProperty('url');
     });
   });
 

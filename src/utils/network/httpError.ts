@@ -118,14 +118,25 @@ export interface HttpErrorFromResponseOptions {
   codeOverride?: (status: number) => JsonRpcErrorCode | undefined;
   /**
    * Additional fields merged into `error.data`. Always includes
-   * `{ url, status, statusText, body? }` from the response itself, plus the
-   * legacy aliases `statusCode` (= `status`) and `responseBody` (= `body`) for
+   * `{ status, statusText, body? }` from the response itself, plus the legacy
+   * aliases `statusCode` (= `status`) and `responseBody` (= `body`) for
    * consumers reading `fetchWithTimeout`'s shape — slated for consolidation in a
    * future major. A status whose failure is permanent also carries
    * `retryable: false` (see {@link httpStatusRetryability}). Fields passed here
    * override the defaults on key collision.
+   *
+   * `error.data` is forwarded to the client as `structuredContent.error.data`,
+   * so treat everything put here as client-visible.
    */
   data?: Record<string, unknown>;
+  /**
+   * Put the full `response.url` — path and query string included — on
+   * `error.data.url`. Default: `false`, because `error.data` reaches the client
+   * and an upstream request URL routinely carries user input, internal
+   * identifiers, or an API key in its query string. The error message still
+   * names the host either way. No key is added when `response.url` is empty.
+   */
+  includeUrl?: boolean;
   /**
    * Logical service name included in the error message
    * (e.g., `'NCBI'` → `"NCBI returned HTTP 429"`). When omitted, the message
@@ -179,6 +190,7 @@ export async function httpErrorFromResponse(
   const {
     captureBody = true,
     bodyLimit = DEFAULT_BODY_LIMIT,
+    includeUrl = false,
     service,
     data: extraData,
     cause,
@@ -205,7 +217,9 @@ export async function httpErrorFromResponse(
   const retryAfter = response.headers.get('retry-after') ?? undefined;
 
   const data: Record<string, unknown> = {
-    url: response.url || undefined,
+    // The full URL is opt-in: `error.data` reaches the client, and a request URL
+    // routinely carries user input or an API key in its query string.
+    ...(includeUrl && response.url && { url: response.url }),
     // Canonical (Fetch `Response`-aligned) field names.
     status: response.status,
     statusText: response.statusText || undefined,
