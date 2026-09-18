@@ -16,7 +16,7 @@ body:
     id: use-case
     attributes:
       label: Use case
-      description: What problem does this solve? Who benefits?
+      description: What problem does this solve? Who benefits? Two or three sentences.
       placeholder: "When building tools that call flaky external APIs, there's no built-in way to retry with backoff..."
     validations:
       required: true
@@ -49,6 +49,6 @@ body:
     id: context
     attributes:
       label: Additional context
-      description: Related issues, prior art, links, or anything else relevant.
+      description: Only what the reader needs to act — related issues, prior art, a link.
     validations:
       required: false

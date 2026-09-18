@@ -67,7 +67,7 @@ body:
     id: description
     attributes:
       label: Description
-      description: What happened and what you expected instead.
+      description: What happened and what you expected instead — two or three sentences.
       placeholder: "Omitting an optional output field causes a validation error, but it should pass."
     validations:
       required: true
@@ -116,6 +116,6 @@ body:
     id: context
     attributes:
       label: Additional context
-      description: Workarounds, related issues, logs, or anything else relevant.
+      description: Only what changes the fix — a workaround, a related issue, the one log line that matters.
     validations:
       required: false
