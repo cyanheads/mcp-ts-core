@@ -7,12 +7,12 @@
  * @module tests/mcp-server/tools/utils/toolHandlerFactory.telemetry.test
  */
 
-import type { CallToolResult } from '@modelcontextprotocol/server';
+import type { CallToolResult, ClientCapabilities } from '@modelcontextprotocol/server';
 import { inputRequired } from '@modelcontextprotocol/server';
 import { SpanStatusCode, trace } from '@opentelemetry/api';
 import { afterEach, beforeEach, describe, expect, it, type MockInstance, vi } from 'vitest';
 import { z } from 'zod';
-import { JsonRpcErrorCode } from '@/types-global/errors.js';
+import { JsonRpcErrorCode, McpError } from '@/types-global/errors.js';
 import { makeServerContext } from '../../../../helpers/server-context.js';
 
 // ---------------------------------------------------------------------------
@@ -20,35 +20,48 @@ import { makeServerContext } from '../../../../helpers/server-context.js';
 // ---------------------------------------------------------------------------
 
 const {
+  counterAddFor,
+  mockClassifiedCounterAdd,
   mockConfig,
   mockCounterAdd,
   mockErrorCounterAdd,
   mockHistogramRecord,
   mockLogger,
   mockUpDownCounterAdd,
-} = vi.hoisted(() => ({
-  mockConfig: {
-    environment: 'testing',
-    mcpServerVersion: '1.0.0-test',
-    mcpAuthMode: 'none',
-    mcpSessionMode: 'auto' as const,
-    openTelemetry: { serviceName: 'test', serviceVersion: '0.0.0' },
-  },
-  mockCounterAdd: vi.fn(),
-  mockErrorCounterAdd: vi.fn(),
-  mockHistogramRecord: vi.fn(),
-  mockLogger: {
-    debug: vi.fn(),
-    info: vi.fn(),
-    notice: vi.fn(),
-    warning: vi.fn(),
-    error: vi.fn(),
-    crit: vi.fn(),
-    emerg: vi.fn(),
-    child: vi.fn(),
-  },
-  mockUpDownCounterAdd: vi.fn(),
-}));
+} = vi.hoisted(() => {
+  const classified = vi.fn();
+  const toolErrors = vi.fn();
+  const other = vi.fn();
+  const byName: Record<string, typeof other> = {
+    'mcp.errors.classified': classified,
+    'mcp.tool.errors': toolErrors,
+  };
+  return {
+    counterAddFor: (name: string) => byName[name] ?? other,
+    mockClassifiedCounterAdd: classified,
+    mockCounterAdd: other,
+    mockErrorCounterAdd: toolErrors,
+    mockConfig: {
+      environment: 'testing',
+      mcpServerVersion: '1.0.0-test',
+      mcpAuthMode: 'none',
+      mcpSessionMode: 'auto' as const,
+      openTelemetry: { serviceName: 'test', serviceVersion: '0.0.0' },
+    },
+    mockHistogramRecord: vi.fn(),
+    mockLogger: {
+      debug: vi.fn(),
+      info: vi.fn(),
+      notice: vi.fn(),
+      warning: vi.fn(),
+      error: vi.fn(),
+      crit: vi.fn(),
+      emerg: vi.fn(),
+      child: vi.fn(),
+    },
+    mockUpDownCounterAdd: vi.fn(),
+  };
+});
 
 vi.mock('@/config/index.js', () => ({ config: mockConfig }));
 
@@ -58,9 +71,7 @@ vi.mock('@/utils/internal/logger.js', () => ({
 }));
 
 vi.mock('@/utils/telemetry/metrics.js', () => ({
-  createCounter: vi.fn((name: string) => ({
-    add: name === 'mcp.tool.errors' ? mockErrorCounterAdd : mockCounterAdd,
-  })),
+  createCounter: vi.fn((name: string) => ({ add: counterAddFor(name) })),
   createHistogram: vi.fn(() => ({ record: mockHistogramRecord })),
   createUpDownCounter: vi.fn(() => ({ add: mockUpDownCounterAdd })),
 }));
@@ -69,6 +80,7 @@ vi.mock('@/utils/telemetry/metrics.js', () => ({
 // Imports (after mocks)
 // ---------------------------------------------------------------------------
 
+import { createInputRequiredGate } from '@/mcp-server/inputRequired.js';
 import type { AnyToolDefinition } from '@/mcp-server/tools/utils/toolDefinition.js';
 import { tool } from '@/mcp-server/tools/utils/toolDefinition.js';
 import {
@@ -133,6 +145,17 @@ function byteRecords(toolName: string): [number, Record<string, unknown>][] {
 async function callTool(def: unknown, input: Record<string, unknown> = {}) {
   const handler = createToolHandler(def as AnyToolDefinition, services, notifiers);
   return (await handler(input, makeServerContext())) as CallToolResult;
+}
+
+/** The same call behind the 2025-era capability gate over `declared` (#379). */
+async function callGatedTool(def: unknown, declared: ClientCapabilities) {
+  const handler = createToolHandler(
+    def as AnyToolDefinition,
+    services,
+    notifiers,
+    createInputRequiredGate(() => declared),
+  );
+  return (await handler({}, makeServerContext())) as CallToolResult;
 }
 
 // ---------------------------------------------------------------------------
@@ -332,6 +355,165 @@ describe('tool telemetry records the terminal outcome (#346)', () => {
       expect(completionMetrics()).toMatchObject({ isSuccess: true, inputRequired: true });
       // No output payload was produced, so nothing is recorded for it.
       expect(byteRecords('telemetry_confirm')).toHaveLength(1);
+    });
+
+    it('stays a success when the connection declares the capability', async () => {
+      // The regression pin for the gate: a fulfillable round is measured
+      // exactly as it is without one.
+      const result = (await callGatedTool(confirmingTool, {
+        elicitation: { form: {} },
+      })) as unknown as { resultType: string };
+
+      expect(result.resultType).toBe('input_required');
+      expect(span.setStatus).toHaveBeenCalledWith({ code: SpanStatusCode.OK });
+      expect(span.setAttribute).toHaveBeenCalledWith('mcp.tool.input_required', true);
+      expect(mockErrorCounterAdd).not.toHaveBeenCalled();
+      expect(completionMetrics()).toMatchObject({ isSuccess: true, inputRequired: true });
+    });
+
+    it('records a capability-refused round as a failed call (#379)', async () => {
+      // The client receives `isError: true`; the span, the metrics, and the
+      // completion log have to say the same thing. A refusal resolved after
+      // the measured region closes is recorded as a successful input-required
+      // round, and telemetry then contradicts the wire.
+      const result = (await callGatedTool(confirmingTool, {})) as CallToolResult;
+
+      expect(result.isError).toBe(true);
+      expect(span.setStatus).toHaveBeenCalledWith(
+        expect.objectContaining({ code: SpanStatusCode.ERROR }),
+      );
+      expect(span.setAttributes).toHaveBeenLastCalledWith(
+        expect.objectContaining({ 'mcp.tool.success': false }),
+      );
+      expect(span.setAttribute).toHaveBeenCalledWith(
+        'mcp.tool.error_code',
+        String(JsonRpcErrorCode.InvalidRequest),
+      );
+      expect(span.setAttribute).not.toHaveBeenCalledWith('mcp.tool.input_required', true);
+      expect(mockErrorCounterAdd).toHaveBeenCalledWith(1, {
+        'mcp.tool.name': 'telemetry_confirm',
+        'mcp.tool.error_category': 'client',
+      });
+      expect(mockCounterAdd).toHaveBeenCalledWith(1, {
+        'mcp.tool.name': 'telemetry_confirm',
+        'mcp.tool.success': false,
+      });
+      expect(completionMetrics()).toMatchObject({
+        isSuccess: false,
+        errorCode: String(JsonRpcErrorCode.InvalidRequest),
+      });
+    });
+  });
+
+  // Issue #380 — a declared severity is a logging decision. Every counter, the
+  // span status, and the completion log record the call exactly as they did.
+  describe('a failure whose reason declares a severity (#380)', () => {
+    const consentContract = [
+      {
+        reason: 'consent_declined',
+        code: JsonRpcErrorCode.InvalidRequest,
+        when: 'The caller declined the confirmation prompt.',
+        severity: 'notice',
+        recovery: 'Re-run the tool and confirm the prompt to proceed with the change.',
+      },
+    ] as const;
+
+    /** A tool that fails with `reason`, under a contract that declares one severity. */
+    function decliner(name: string, reason: string) {
+      return tool(name, {
+        description: 'Fails with a declared reason.',
+        input: z.object({}),
+        output: z.object({ ok: z.boolean().describe('ok') }),
+        errors: consentContract as never,
+        handler: () => {
+          throw new McpError(JsonRpcErrorCode.InvalidRequest, 'Declined.', { reason });
+        },
+      });
+    }
+
+    /** Attributes of the last `mcp.errors.classified` increment. */
+    function classifiedAttributes(): Record<string, unknown> {
+      const call = mockClassifiedCounterAdd.mock.calls.at(-1);
+      if (!call) throw new Error('mcp.errors.classified was never incremented');
+      return call[1] as Record<string, unknown>;
+    }
+
+    it('records mcp.error.severity on the classified counter', async () => {
+      await callTool(decliner('severity_counted', 'consent_declined'));
+
+      expect(classifiedAttributes()).toEqual({
+        'mcp.error.classified_code': String(JsonRpcErrorCode.InvalidRequest),
+        'mcp.error.severity': 'notice',
+        operation: 'tool:severity_counted',
+      });
+    });
+
+    it.each([
+      ['a reason the contract never declared', 'undeclared_below_handler'],
+      ['a reason declared without a severity', 'consent_declined'],
+    ])('adds no attribute for %s', async (_label, reason) => {
+      const def =
+        reason === 'consent_declined'
+          ? tool('severity_uncounted', {
+              description: 'Fails under a contract that declares no severity.',
+              input: z.object({}),
+              output: z.object({ ok: z.boolean().describe('ok') }),
+              errors: [{ ...consentContract[0], severity: undefined }] as never,
+              handler: () => {
+                throw new McpError(JsonRpcErrorCode.InvalidRequest, 'Declined.', { reason });
+              },
+            })
+          : decliner('severity_uncounted', reason);
+
+      await callTool(def);
+
+      expect(classifiedAttributes()).toEqual({
+        'mcp.error.classified_code': String(JsonRpcErrorCode.InvalidRequest),
+        operation: 'tool:severity_uncounted',
+      });
+    });
+
+    it('never puts the reason string on a metric', async () => {
+      await callTool(decliner('severity_cardinality', 'consent_declined'));
+
+      for (const [, attributes] of [
+        ...mockClassifiedCounterAdd.mock.calls,
+        ...mockErrorCounterAdd.mock.calls,
+        ...mockCounterAdd.mock.calls,
+        ...mockHistogramRecord.mock.calls,
+      ]) {
+        expect(Object.values((attributes ?? {}) as Record<string, unknown>)).not.toContain(
+          'consent_declined',
+        );
+      }
+    });
+
+    it('still marks the span ERROR and counts the call as a failure', async () => {
+      const result = await callTool(decliner('severity_still_failed', 'consent_declined'));
+
+      expect(result.isError).toBe(true);
+      expect(span.setStatus).toHaveBeenCalledWith(
+        expect.objectContaining({ code: SpanStatusCode.ERROR }),
+      );
+      expect(span.setAttributes).toHaveBeenLastCalledWith(
+        expect.objectContaining({ 'mcp.tool.success': false }),
+      );
+      expect(mockCounterAdd).toHaveBeenCalledWith(1, {
+        'mcp.tool.name': 'severity_still_failed',
+        'mcp.tool.success': false,
+      });
+      expect(mockHistogramRecord).toHaveBeenCalledWith(expect.any(Number), {
+        'mcp.tool.name': 'severity_still_failed',
+        'mcp.tool.success': false,
+      });
+      expect(mockErrorCounterAdd).toHaveBeenCalledWith(1, {
+        'mcp.tool.name': 'severity_still_failed',
+        'mcp.tool.error_category': 'client',
+      });
+      expect(completionMetrics()).toMatchObject({
+        isSuccess: false,
+        errorCode: String(JsonRpcErrorCode.InvalidRequest),
+      });
     });
   });
 

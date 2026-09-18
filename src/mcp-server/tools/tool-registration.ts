@@ -4,6 +4,7 @@
  */
 import type { McpServer, ServerNotifier, ToolCallback } from '@modelcontextprotocol/server';
 
+import type { InputRequiredGate } from '@/mcp-server/inputRequired.js';
 import type { ResourceSubscriptions } from '@/mcp-server/notifications.js';
 import { deferInputValidation } from '@/mcp-server/tools/utils/deferredInputSchema.js';
 import { getDisabledMetadata } from '@/mcp-server/tools/utils/disabled-tool.js';
@@ -49,6 +50,7 @@ export class ToolRegistry {
     server: McpServer,
     subscriptions?: ResourceSubscriptions,
     bus?: ServerNotifier,
+    inputGate?: InputRequiredGate,
   ): Promise<void> {
     // Reset per-server uniqueness tracking — registries are shared across
     // per-request McpServer instances under HTTP serving.
@@ -93,7 +95,7 @@ export class ToolRegistry {
     // `tools` capability, so a server with every tool disabled still answers
     // `tools/list` with an empty array rather than `-32601`.
     for (const toolDef of tools) {
-      await this.registerTool(server, toolDef, notifiers);
+      await this.registerTool(server, toolDef, notifiers, inputGate);
     }
   }
 
@@ -113,6 +115,7 @@ export class ToolRegistry {
     server: McpServer,
     tool: AnyToolDefinition,
     notifiers: NotifierSources,
+    inputGate?: InputRequiredGate,
   ): Promise<void> {
     const registrationContext = requestContextService.createRequestContext({
       operation: 'ToolRegistry.registerTool',
@@ -125,7 +128,7 @@ export class ToolRegistry {
 
     await ErrorHandler.tryCatch(
       () => {
-        const handler = createToolHandler(tool, this.services, notifiers);
+        const handler = createToolHandler(tool, this.services, notifiers, inputGate);
         const title = tool.title ?? tool.annotations?.title ?? deriveTitleFromName(tool.name);
 
         // Advertised verbatim; the same schema rejects the same arguments one

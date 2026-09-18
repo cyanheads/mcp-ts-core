@@ -17,7 +17,7 @@ import {
   handlerParentContext,
   resolveHandlerRequest,
 } from '@/mcp-server/handlerContext.js';
-import { isInputRequiredSignal } from '@/mcp-server/inputRequired.js';
+import { type InputRequiredGate, isInputRequiredSignal } from '@/mcp-server/inputRequired.js';
 import type { NotifierSources } from '@/mcp-server/notifications.js';
 import type { AnyResourceDefinition } from '@/mcp-server/resources/utils/resourceDefinition.js';
 import { withRequiredScopes } from '@/mcp-server/transports/auth/lib/authUtils.js';
@@ -100,6 +100,7 @@ export function createResourceHandler(
   def: AnyResourceDefinition,
   services: HandlerServices,
   notifiers: NotifierSources,
+  inputGate?: InputRequiredGate,
 ): (
   uri: URL,
   variables: Variables,
@@ -144,7 +145,14 @@ export function createResourceHandler(
       // the handler returned recorded those as successes (#346).
       return await measureResourceExecution(
         async (spanContext, recordOutput) => {
-          const ctx = buildHandlerContext(request, services, spanContext, def.errors, uri);
+          const ctx = buildHandlerContext(
+            request,
+            services,
+            spanContext,
+            def.errors,
+            inputGate,
+            uri,
+          );
 
           try {
             // Handler may return sync or async.
@@ -171,6 +179,9 @@ export function createResourceHandler(
     } catch (error: unknown) {
       // `ctx.requestInput(...)` is protocol control flow, not a failure —
       // `resources/read` honors `input_required` on the 2026-07-28 revision.
+      // A request this connection cannot serve never reaches here as a signal:
+      // `ctx.requestInput` throws the refusal instead, and it arrives below as
+      // an `McpError` carrying the reason and hint (#379).
       if (isInputRequiredSignal(error)) return error.result;
 
       // Classify without logging — the SDK logs when it catches the thrown error.

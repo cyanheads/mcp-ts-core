@@ -15,10 +15,11 @@ import { Client, type ElicitResult } from '@modelcontextprotocol/client';
 import { InMemoryTransport, inputRequired, McpServer } from '@modelcontextprotocol/server';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { z } from 'zod';
-
+import { createInputRequiredGate } from '@/mcp-server/inputRequired.js';
 import { ResourceRegistry } from '@/mcp-server/resources/resource-registration.js';
 import { resource } from '@/mcp-server/resources/utils/resourceDefinition.js';
 import { ToolRegistry } from '@/mcp-server/tools/tool-registration.js';
+import type { AnyToolDefinition } from '@/mcp-server/tools/utils/toolDefinition.js';
 import { tool } from '@/mcp-server/tools/utils/toolDefinition.js';
 import { StorageService } from '@/storage/core/StorageService.js';
 import { InMemoryProvider } from '@/storage/providers/inMemory/inMemoryProvider.js';
@@ -97,6 +98,52 @@ const strictColor = tool('strict_color', {
   },
 });
 
+/**
+ * Asks for elicitation first and for sampling on the round after, so the gate
+ * is exercised past the first round of a multi-round handler.
+ */
+const summarizeColor = tool('summarize_color', {
+  description: 'Asks for a color, then asks the client model to describe it.',
+  input: z.object({}),
+  output: z.object({ summary: z.string().describe('The model summary.') }),
+  handler(_input, ctx) {
+    const color = ctx.inputs.accepted('color', ColorAnswer);
+    if (!color) {
+      return ctx.requestInput({
+        inputRequests: {
+          color: inputRequired.elicit({ message: 'Pick a color', requestedSchema: ColorAnswer }),
+        },
+      });
+    }
+    const summary = ctx.inputs.view('summary');
+    if (summary.kind !== 'sampling') {
+      return ctx.requestInput({
+        inputRequests: {
+          summary: inputRequired.createMessage({
+            maxTokens: 64,
+            messages: [
+              { role: 'user', content: { type: 'text', text: `Describe ${color.color}` } },
+            ],
+          }),
+        },
+      });
+    }
+    return { summary: 'done' };
+  },
+});
+
+/** Returns `requestState` with no embedded requests — nothing for the gate to check. */
+const stateOnly = tool('state_only', {
+  description: 'Carries state across a round without asking the client for anything.',
+  input: z.object({}),
+  output: z.object({ round: z.string().describe('The state this round carried.') }),
+  handler(_input, ctx) {
+    const state = ctx.inputs.state<string>();
+    if (!state) return ctx.requestInput({ requestState: 'round-1' });
+    return { round: state };
+  },
+});
+
 const gatedDoc = resource('gated://doc', {
   name: 'gated_doc',
   description: 'A document that asks for a passphrase before it is read.',
@@ -126,7 +173,13 @@ type ElicitHandler = (params: {
   requestedSchema?: Record<string, unknown>;
 }) => ElicitResult;
 
-async function connectPair(options: { advertiseElicitation?: boolean; onElicit?: ElicitHandler }) {
+async function connectPair(options: {
+  advertiseElicitation?: boolean;
+  /** Client capabilities to declare; overrides the elicitation default. */
+  capabilities?: Record<string, object>;
+  extraTools?: AnyToolDefinition[];
+  onElicit?: ElicitHandler;
+}) {
   const server = new McpServer(
     { name: 'mrtr-int-test', version: '0.0.0' },
     {
@@ -138,15 +191,33 @@ async function connectPair(options: { advertiseElicitation?: boolean; onElicit?:
     },
   );
   const services = { logger, storage: new StorageService(new InMemoryProvider()) };
-  await new ToolRegistry([pickColor, confirmOrGiveUp, strictColor], services).registerAll(server);
-  await new ResourceRegistry([gatedDoc], services).registerAll(server);
+  // The gate `createMcpServerInstance` binds for a 2025-era instance (#379).
+  const inputGate = createInputRequiredGate(() => server.server.getClientCapabilities());
+  await new ToolRegistry(
+    [
+      pickColor,
+      confirmOrGiveUp,
+      strictColor,
+      summarizeColor,
+      stateOnly,
+      ...(options.extraTools ?? []),
+    ] as AnyToolDefinition[],
+    services,
+  ).registerAll(server, undefined, undefined, inputGate);
+  await new ResourceRegistry([gatedDoc], services).registerAll(
+    server,
+    undefined,
+    undefined,
+    inputGate,
+  );
 
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+  const declared =
+    options.capabilities ??
+    (options.advertiseElicitation === false ? undefined : { elicitation: { form: {}, url: {} } });
   const client = new Client(
     { name: 'mrtr-int-client', version: '0.0.0' },
-    options.advertiseElicitation === false
-      ? undefined
-      : { capabilities: { elicitation: { form: {}, url: {} } } },
+    declared ? { capabilities: declared } : undefined,
   );
 
   const received: { message: string; requestedSchema?: Record<string, unknown> }[] = [];
@@ -296,10 +367,118 @@ describe('Multi-round-trip input integration', () => {
   it('fails the call cleanly when the client cannot fulfil the request', async () => {
     // No elicitation capability and no handler: the shim has nowhere to send
     // the embedded request, so the call fails rather than hanging.
-    const { client } = track(await connectPair({ advertiseElicitation: false }));
+    const { client, received } = track(await connectPair({ advertiseElicitation: false }));
 
     const result = await client.callTool({ name: 'pick_color', arguments: {} });
 
     expect(result.isError).toBe(true);
+    // The refusal is a tool error like every other (#379): a caller can read
+    // the code and branch on the reason instead of parsing the message.
+    const error = (
+      result.structuredContent as {
+        error?: {
+          code?: number;
+          data?: { reason?: string; recovery?: { hint?: string } };
+          message?: string;
+        };
+      }
+    )?.error;
+    expect(error?.code).toBe(JsonRpcErrorCode.InvalidRequest);
+    expect(error?.data?.reason).toBe('client_capability_missing');
+    expect(error?.data?.recovery?.hint).toContain('elicitation.form');
+    const text = (result.content as Array<{ text: string }>)[0]?.text ?? '';
+    expect(text).toBe(
+      `Error: ${error?.message}\n\nRecovery: ${error?.data?.recovery?.hint}` +
+        '\n\n(reason client_capability_missing)',
+    );
+    // The refusal precedes any wire traffic — no elicitation/create is sent.
+    expect(received).toHaveLength(0);
+  });
+
+  describe('capability-less refusal (#379)', () => {
+    /** The error envelope a refused tool call puts on `structuredContent`. */
+    const refusal = (result: {
+      structuredContent?: unknown;
+    }): { code?: number; data?: { reason?: string; recovery?: { hint?: string } } } =>
+      (result.structuredContent as { error: ReturnType<typeof refusal> }).error;
+
+    it('gates round two of a multi-round handler on its own capability', async () => {
+      // The client declares elicitation but not sampling: round one completes
+      // over the wire, round two is refused with the same envelope.
+      const { client, received } = track(
+        await connectPair({
+          capabilities: { elicitation: { form: {} } },
+          onElicit: () => ({ action: 'accept', content: { color: 'teal' } }),
+        }),
+      );
+
+      const result = await client.callTool({ name: 'summarize_color', arguments: {} });
+
+      expect(received).toHaveLength(1);
+      expect(result.isError).toBe(true);
+      expect(refusal(result).code).toBe(JsonRpcErrorCode.InvalidRequest);
+      expect(refusal(result).data?.reason).toBe('client_capability_missing');
+      expect(refusal(result).data?.recovery?.hint).toContain('sampling');
+    });
+
+    it('gates a roots request on the roots capability', async () => {
+      const rootsProbe = tool('roots_probe', {
+        description: 'Asks the client for its filesystem roots.',
+        input: z.object({}),
+        output: z.object({ count: z.number().describe('Root count.') }),
+        handler: (_input, ctx) =>
+          ctx.requestInput({ inputRequests: { roots: inputRequired.listRoots() } }),
+      });
+      const { client } = track(
+        await connectPair({
+          capabilities: { elicitation: { form: {} } },
+          extraTools: [rootsProbe],
+        }),
+      );
+
+      const result = await client.callTool({ name: 'roots_probe', arguments: {} });
+
+      expect(refusal(result).data?.reason).toBe('client_capability_missing');
+      expect(refusal(result).data?.recovery?.hint).toContain('`roots`');
+    });
+
+    it('accepts a bare elicitation declaration as form mode', async () => {
+      // The pre-mode (2025) meaning of `elicitation: {}` — still a declaration.
+      const { client } = track(
+        await connectPair({
+          capabilities: { elicitation: {} },
+          onElicit: () => ({ action: 'accept', content: { color: 'teal' } }),
+        }),
+      );
+
+      const result = await client.callTool({ name: 'pick_color', arguments: {} });
+
+      expect(result.isError).toBeFalsy();
+      expect(result.structuredContent).toMatchObject({ color: 'teal' });
+    });
+
+    it('leaves a requestState-only return untouched', async () => {
+      // Nothing is asked of the client, so there is no capability to check.
+      const { client } = track(await connectPair({ advertiseElicitation: false }));
+
+      const result = await client.callTool({ name: 'state_only', arguments: {} });
+
+      expect(result.isError).toBeFalsy();
+      expect(result.structuredContent).toMatchObject({ round: 'round-1' });
+    });
+
+    it('fails a resource read with a JSON-RPC error carrying the reason and hint', async () => {
+      const { client } = track(await connectPair({ advertiseElicitation: false }));
+
+      const error = await client.readResource({ uri: 'gated://doc' }).catch((e: unknown) => e);
+
+      expect(error).toMatchObject({
+        code: JsonRpcErrorCode.InvalidRequest,
+        data: {
+          reason: 'client_capability_missing',
+          recovery: { hint: expect.stringContaining('elicitation.form') },
+        },
+      });
+    });
   });
 });

@@ -50,6 +50,35 @@ describe('stripCommentsAndStrings', () => {
     expect(stripped).not.toContain('tail');
   });
 
+  // The error-contract rules match call sites in the stripped text and then
+  // read the reason literal out of the raw source at the same offset, so the
+  // alignment this asserts is load-bearing, not incidental.
+  describe('index alignment with the source (#290)', () => {
+    it.each([
+      ['a line comment', 'const a = 1;\n// throw ctx.fail("x")\nconst b = 2;'],
+      ['a block comment', 'const a = 1; /* ctx.fail("x") */ const b = 2;'],
+      ['escaped characters', String.raw`const msg = "a \"quoted\" word";`],
+      // biome-ignore lint/suspicious/noTemplateCurlyInString: source text under test, not an interpolation.
+      ['a template interpolation', 'const m = `a ${f("x")} b`;'],
+      ['an unterminated block comment', 'const a = 1; /* unterminated'],
+      ['an unterminated string', 'const a = "unterminated'],
+      ['adjacent literals', `f('one', "two", 'three')`],
+      ['an empty source', ''],
+    ])('preserves length across %s', (_label, source) => {
+      expect(stripCommentsAndStrings(source)).toHaveLength(source.length);
+    });
+
+    it('leaves a literal addressable at its own offsets', () => {
+      const source = `throw ctx.fail('site_not_found', 'x');`;
+      const stripped = stripCommentsAndStrings(source);
+      const open = stripped.indexOf("'");
+      const close = stripped.indexOf("'", open + 1);
+
+      expect(source.slice(open + 1, close)).toBe('site_not_found');
+      expect(stripped.slice(open + 1, close)).toBe(' '.repeat('site_not_found'.length));
+    });
+  });
+
   it('handles unterminated block comments and strings without throwing', () => {
     expect(() => stripCommentsAndStrings('const a = 1; /* unterminated')).not.toThrow();
     expect(() => stripCommentsAndStrings('const a = "unterminated')).not.toThrow();

@@ -1,8 +1,9 @@
 /**
  * @fileoverview Lint rules for the declarative `errors[]` contract on tool and
- * resource definitions. Validates structure (codes, reasons), uniqueness,
- * and (when a contract is present) cross-checks handler bodies for thrown
- * codes that aren't declared.
+ * resource definitions. Validates structure (codes, reasons, severity),
+ * uniqueness, and — when a contract is present — cross-checks the handler body
+ * in both directions: codes thrown but not declared, and reasons declared but
+ * never thrown.
  * @module src/linter/rules/error-contract-rules
  */
 
@@ -24,6 +25,14 @@ const REASON_RE = /^[a-z][a-z0-9_]*$/;
 const RECOVERY_MIN_WORDS = 5;
 
 /**
+ * Levels a contract entry's `severity` may declare, mirroring the
+ * `ErrorContractSeverity` union. `error` is the default and is expressed by
+ * omitting the field, so declaring it is a no-op the author probably did not
+ * mean.
+ */
+const VALID_SEVERITIES: ReadonlySet<string> = new Set(['debug', 'info', 'notice', 'warning']);
+
+/**
  * Validates the `errors[]` contract on a tool/resource definition.
  * Checks:
  *   - `errors` is an array
@@ -33,6 +42,7 @@ const RECOVERY_MIN_WORDS = 5;
  *   - `recovery` is non-empty and ≥ 5 words (forcing function for thoughtful
  *     agent guidance — placeholders like "Try again." get flagged)
  *   - `retryable` (when present) is a boolean
+ *   - `severity` (when present) is one of the four levels below `error`
  */
 export function lintErrorContract(
   errors: unknown,
@@ -210,6 +220,21 @@ export function lintErrorContract(
         rule: 'error-contract-retryable-type',
         severity: 'warning',
         message: `${definitionType} '${definitionName}' ${path}.retryable should be a boolean when present.`,
+        definitionType,
+        definitionName,
+      });
+    }
+
+    // severity (optional) — selects a logger method at runtime, so an
+    // unrecognized value is a hard failure rather than inert metadata.
+    if (e.severity !== undefined && !VALID_SEVERITIES.has(e.severity as string)) {
+      diagnostics.push({
+        rule: 'error-contract-severity-unknown',
+        severity: 'error',
+        message:
+          `${definitionType} '${definitionName}' ${path}.severity is ${JSON.stringify(e.severity)}. ` +
+          `Use one of: ${[...VALID_SEVERITIES].join(', ')}. ` +
+          'Omit the field for the default `error` level.',
         definitionType,
         definitionName,
       });
@@ -398,6 +423,150 @@ export function lintErrorContractConformance(
     });
   }
 
+  return diagnostics;
+}
+
+// ---------------------------------------------------------------------------
+// Literal reason call sites
+// ---------------------------------------------------------------------------
+
+/** One literal `ctx.fail('<reason>', …)` (or `ctx.recoveryFor`) call site. */
+export interface ReasonCallSite {
+  /** Source offset just past the site's closing `)`. */
+  end: number;
+  /** The reason named by the site's first argument, read from the raw source. */
+  reason: string;
+  /** Source offset of the site's opening `(`. */
+  start: number;
+}
+
+/** What {@link scanReasonCalls} found for one callee in a handler's source. */
+export interface ReasonCallScan {
+  /**
+   * True when some call site took a non-literal first argument — a variable, a
+   * template literal, a map lookup. The set of reasons in play is then unknown.
+   */
+  indeterminate: boolean;
+  /** Every literal call site found, in source order. */
+  sites: ReasonCallSite[];
+}
+
+/**
+ * Finds every `<callee>('<literal>', …)` site in a handler's source, one record
+ * per site.
+ *
+ * Matching runs over the comment- and string-stripped text, which already
+ * excludes a call written inside a comment or nested in another literal. That
+ * transform blanks literal *contents* and keeps the quotes, so the reason
+ * survives only in the raw source — and it is length-preserving, so the same
+ * offsets address both. `tests/unit/linter/source-text.test.ts` asserts that
+ * alignment directly, since this rule depends on it.
+ *
+ * The span is carried so a rule that needs a site's arguments — not just which
+ * reason it names — can read them without rescanning.
+ */
+export function scanReasonCalls(source: string, callee: string): ReasonCallScan {
+  const cleaned = stripCommentsAndStrings(source);
+  const calleeRe = new RegExp(String.raw`\b${callee.replaceAll('.', '\\.')}\s*\(`, 'g');
+  const sites: ReasonCallSite[] = [];
+  let indeterminate = false;
+
+  for (const match of cleaned.matchAll(calleeRe)) {
+    const open = match.index + match[0].length - 1;
+    let cursor = open + 1;
+    while (cursor < cleaned.length && /\s/.test(cleaned[cursor] as string)) cursor += 1;
+
+    const quote = cleaned[cursor];
+    if (quote !== "'" && quote !== '"') {
+      indeterminate = true;
+      continue;
+    }
+    const closingQuote = cleaned.indexOf(quote, cursor + 1);
+    const end = matchingParen(cleaned, open);
+    if (closingQuote < 0 || end < 0) {
+      indeterminate = true;
+      continue;
+    }
+    sites.push({ reason: source.slice(cursor + 1, closingQuote), start: open, end });
+  }
+
+  return { indeterminate, sites };
+}
+
+/** Offset just past the `)` matching the `(` at `open`, or `-1` when unbalanced. */
+function matchingParen(cleaned: string, open: number): number {
+  let depth = 0;
+  for (let i = open; i < cleaned.length; i += 1) {
+    if (cleaned[i] === '(') depth += 1;
+    else if (cleaned[i] === ')') {
+      depth -= 1;
+      if (depth === 0) return i + 1;
+    }
+  }
+  return -1;
+}
+
+/**
+ * Flags a declared `errors[]` reason that no code path in the handler can
+ * produce — the inverse of {@link lintErrorContractConformance}, which only
+ * catches codes thrown but not declared.
+ *
+ * A dead entry compiles, lints clean, and stays in the contract indefinitely;
+ * the typed `ctx.fail` union accepts the reason, so nothing downstream objects.
+ * The cost lands on the client, which plans for a failure mode the tool cannot
+ * produce while the mode it does produce goes undocumented.
+ *
+ * **Trigger.** Only when the handler holds at least one literal `ctx.fail(`. A
+ * handler with none produces its reasons somewhere the scan cannot reach, and
+ * firing there would warn on every service-layer definition. A `ctx.fail(` whose
+ * first argument is not a string literal makes the thrown set unknowable, so the
+ * whole definition is skipped rather than guessed at.
+ *
+ * **Warning, never error.** A reason produced outside the handler closure is
+ * invisible to any `toString()` scan, so the rule can never prove absence.
+ * Silent blind spots under the trigger above: a service that throws a factory
+ * error carrying `data: { reason }`, a `createFail(errors)` resolver built
+ * outside the handler, and an aliased `const fail = ctx.fail`.
+ */
+export function lintErrorContractUnthrown(
+  def: { handler?: unknown; errors?: unknown },
+  definitionType: LintDefinitionType,
+  definitionName: string,
+): LintDiagnostic[] {
+  if (!Array.isArray(def.errors) || def.errors.length === 0) return [];
+  if (typeof def.handler !== 'function') return [];
+
+  let source: string;
+  try {
+    source = def.handler.toString();
+  } catch {
+    return [];
+  }
+
+  const failScan = scanReasonCalls(source, 'ctx.fail');
+  if (failScan.indeterminate || failScan.sites.length === 0) return [];
+
+  // `ctx.recoveryFor('<reason>')` counts too: it is how a handler opts a
+  // service-thrown reason onto the wire, and naming it there is all the scan
+  // can ask for.
+  const named = new Set(failScan.sites.map((site) => site.reason));
+  for (const site of scanReasonCalls(source, 'ctx.recoveryFor').sites) named.add(site.reason);
+
+  const diagnostics: LintDiagnostic[] = [];
+  for (const entry of def.errors as ErrorContract[]) {
+    const reason = entry?.reason;
+    if (typeof reason !== 'string' || reason.length === 0 || named.has(reason)) continue;
+    diagnostics.push({
+      rule: 'error-contract-unthrown',
+      severity: 'warning',
+      message:
+        `${definitionType} '${definitionName}' declares reason '${reason}' in errors[], but no ` +
+        `ctx.fail('${reason}', …) appears in the handler. Wire the throw, or drop the entry — ` +
+        'clients plan around the advertised failure surface.',
+      definitionType,
+      definitionName,
+    });
+  }
   return diagnostics;
 }
 

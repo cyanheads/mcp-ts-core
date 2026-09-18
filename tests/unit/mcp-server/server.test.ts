@@ -42,6 +42,7 @@ vi.mock('@/utils/internal/requestContext.js', async (importOriginal) => {
 import type { ResourceSubscriptionRegistry } from '@/mcp-server/resources/resourceSubscriptions.js';
 import { installResourceSubscriptions } from '@/mcp-server/resources/resourceSubscriptions.js';
 import { createMcpServerInstance, type McpServerDeps } from '@/mcp-server/server.js';
+import { McpError } from '@/types-global/errors.js';
 import { logger } from '@/utils/internal/logger.js';
 
 /** Teardown for every connected client/server pair a test opened. */
@@ -111,6 +112,7 @@ describe('createMcpServerInstance', () => {
       server,
       expect.objectContaining({ has: expect.any(Function) }),
       undefined,
+      expect.any(Function),
     );
   });
 
@@ -121,6 +123,7 @@ describe('createMcpServerInstance', () => {
       server,
       expect.objectContaining({ has: expect.any(Function) }),
       undefined,
+      expect.any(Function),
     );
   });
 
@@ -131,6 +134,7 @@ describe('createMcpServerInstance', () => {
         server,
         expect.objectContaining({ has: expect.any(Function) }),
         undefined,
+        expect.any(Function),
       );
     });
 
@@ -140,8 +144,18 @@ describe('createMcpServerInstance', () => {
       // registry leaves it permanently empty, and every
       // `ctx.notifyResourceUpdated(uri)` is silently dropped.
       const server = await createMcpServerInstance({ ...deps, era: 'modern' });
-      expect(mockToolRegistry.registerAll).toHaveBeenCalledWith(server, undefined, undefined);
-      expect(mockResourceRegistry.registerAll).toHaveBeenCalledWith(server, undefined, undefined);
+      expect(mockToolRegistry.registerAll).toHaveBeenCalledWith(
+        server,
+        undefined,
+        undefined,
+        undefined,
+      );
+      expect(mockResourceRegistry.registerAll).toHaveBeenCalledWith(
+        server,
+        undefined,
+        undefined,
+        undefined,
+      );
     });
 
     it('defaults to the legacy registry when no era is supplied', async () => {
@@ -150,6 +164,7 @@ describe('createMcpServerInstance', () => {
         server,
         expect.objectContaining({ has: expect.any(Function) }),
         undefined,
+        expect.any(Function),
       );
     });
 
@@ -165,14 +180,64 @@ describe('createMcpServerInstance', () => {
       };
 
       const modern = await createMcpServerInstance({ ...deps, era: 'modern', notifier });
-      expect(mockToolRegistry.registerAll).toHaveBeenLastCalledWith(modern, undefined, notifier);
+      expect(mockToolRegistry.registerAll).toHaveBeenLastCalledWith(
+        modern,
+        undefined,
+        notifier,
+        undefined,
+      );
 
       const legacy = await createMcpServerInstance({ ...deps, era: 'legacy', notifier });
       expect(mockToolRegistry.registerAll).toHaveBeenLastCalledWith(
         legacy,
         expect.objectContaining({ has: expect.any(Function) }),
         undefined,
+        expect.any(Function),
       );
+    });
+  });
+
+  describe('input_required capability gate by era (#379)', () => {
+    it('binds a gate on a legacy instance and none on a modern one', async () => {
+      // The 2025-era shim refuses above the handler callback, where nothing can
+      // shape the failure; a modern instance is gated by the SDK itself, which
+      // raises `MissingRequiredClientCapabilityError` (-32021).
+      const legacy = await createMcpServerInstance({ ...deps, era: 'legacy' });
+      expect(mockToolRegistry.registerAll).toHaveBeenLastCalledWith(
+        legacy,
+        expect.anything(),
+        undefined,
+        expect.any(Function),
+      );
+
+      const modern = await createMcpServerInstance({ ...deps, era: 'modern' });
+      expect(mockToolRegistry.registerAll).toHaveBeenLastCalledWith(
+        modern,
+        undefined,
+        undefined,
+        undefined,
+      );
+    });
+
+    it('reads the connection capabilities through the instance, not a snapshot', async () => {
+      // Bound once per registerAll, but evaluated per call — an `initialize`
+      // that lands after registration still has to be visible to the gate.
+      const server = await createMcpServerInstance({ ...deps, era: 'legacy' });
+      const gate = mockToolRegistry.registerAll.mock.calls[0]?.[3] as (
+        result: unknown,
+      ) => unknown | undefined;
+      const request = {
+        inputRequests: {
+          who: { method: 'elicitation/create', params: { message: 'Who?', mode: 'form' } },
+        },
+      };
+
+      expect(gate(request)).toBeInstanceOf(McpError);
+
+      vi.spyOn(server.server, 'getClientCapabilities').mockReturnValue({
+        elicitation: { form: {} },
+      });
+      expect(gate(request)).toBeUndefined();
     });
   });
 

@@ -21,10 +21,15 @@ import {
   handlerParentContext,
   resolveHandlerRequest,
 } from '@/mcp-server/handlerContext.js';
-import { isInputRequiredSignal } from '@/mcp-server/inputRequired.js';
+import { type InputRequiredGate, isInputRequiredSignal } from '@/mcp-server/inputRequired.js';
 import type { NotifierSources } from '@/mcp-server/notifications.js';
 import { withRequiredScopes } from '@/mcp-server/transports/auth/lib/authUtils.js';
-import { internalError, JsonRpcErrorCode, McpError } from '@/types-global/errors.js';
+import {
+  type ErrorContractSeverity,
+  internalError,
+  JsonRpcErrorCode,
+  McpError,
+} from '@/types-global/errors.js';
 import { asRequestCancelled, ErrorHandler } from '@/utils/internal/error-handler/errorHandler.js';
 import { measureToolExecution } from '@/utils/internal/performance.js';
 import { type RequestContext, requestContextService } from '@/utils/internal/requestContext.js';
@@ -100,14 +105,47 @@ function extractRecoveryHint(data: Record<string, unknown> | undefined): string 
 }
 
 /**
+ * The compact trailing line carrying the two `data` fields a caller branches
+ * on — `reason`, the stable identifier, and `retryable`, whether a retry can
+ * succeed (#458). Both reach `structuredContent.error.data`; without this line
+ * neither reaches the text surface, so a model that just failed cannot tell a
+ * deterministic rejection from a transient one.
+ *
+ * Returns `undefined` when `data` carries neither — a classified plain
+ * `Error`, an `McpError` with no `data` — leaving the text as it was. The
+ * numeric `code` and `data.issues` stay JSON-only on purpose: the code is the
+ * one envelope field a model cannot act on, and the message already renders
+ * each issue as a sentence.
+ */
+function renderBranchableTerms(data: Record<string, unknown> | undefined): string | undefined {
+  const terms: string[] = [];
+  if (typeof data?.reason === 'string' && data.reason.length > 0) {
+    terms.push(`reason ${data.reason}`);
+  }
+  if (typeof data?.retryable === 'boolean') {
+    terms.push(data.retryable ? 'retryable' : 'not retryable');
+  }
+  return terms.length > 0 ? `(${terms.join(' · ')})` : undefined;
+}
+
+/**
  * Shapes a `CallToolResult` for a tool error response with parity across both
  * surfaces clients forward to the agent:
  * - `content[]` — read by clients like Claude Desktop (markdown)
  * - `structuredContent.error` — read by clients like Claude Code (JSON)
  *
- * Both surfaces carry the same payload. When `data.recovery.hint` is present,
- * it is also mirrored into the `content[]` text so format()-only clients see
- * the recovery guidance.
+ * The text carries the message, the `data.recovery.hint` when it adds
+ * something, and the branchable `reason` / `retryable` terms
+ * {@link renderBranchableTerms} renders; the numeric `code` and `data.issues`
+ * stay JSON-only.
+ *
+ * The `Recovery:` line is dropped when the message already contains the hint
+ * verbatim (#459) — `buildArgumentRecoveryHint` falls back to an issue's own
+ * message for a constraint or refinement, and repeating that sentence costs
+ * the reader without adding a next step. Containment, not equality: the
+ * argument-rejection preamble and a field-path prefix both leave the hint's
+ * whole text on screen. `structuredContent.error.data.recovery.hint` stays
+ * populated either way, so #445's guarantee holds on the JSON surface.
  *
  * Note: `_meta.error` is intentionally NOT emitted — the error code, message,
  * and data live on `structuredContent.error` instead, mirroring the success
@@ -119,7 +157,11 @@ export function buildToolErrorResult(
   data: Record<string, unknown> | undefined,
 ): CallToolResult {
   const hint = extractRecoveryHint(data);
-  const text = hint ? `Error: ${message}\n\nRecovery: ${hint}` : `Error: ${message}`;
+  const blocks = [`Error: ${message}`];
+  if (hint !== undefined && !message.trim().includes(hint.trim())) blocks.push(`Recovery: ${hint}`);
+  const terms = renderBranchableTerms(data);
+  if (terms !== undefined) blocks.push(terms);
+  const text = blocks.join('\n\n');
   return {
     isError: true,
     content: [{ type: 'text', text }],
@@ -462,6 +504,18 @@ export function effectiveOutputSchema(def: AnyToolDefinition): ZodObject<ZodRawS
 }
 
 /**
+ * A contract entry's `when` text, terminated so the entry that follows it —
+ * and the description's own trailing sentence — starts a new one (#389).
+ * Nothing validates a punctuation convention on `when`, and an entry authored
+ * as a fragment otherwise runs into whatever comes next. Punctuating at the
+ * join leaves the authored text alone, terminator or not.
+ */
+function terminateWhen(when: string): string {
+  const text = when.trim();
+  return /[.?!]$/.test(text) ? text : `${text}.`;
+}
+
+/**
  * The error envelope a tool can put on `structuredContent` when it fails,
  * mirroring {@link buildToolErrorResult}'s runtime shape.
  *
@@ -488,7 +542,7 @@ function toolErrorEnvelopeSchema(def: AnyToolDefinition): ZodType {
           .string()
           .describe(
             `Machine-readable failure mode. Declared by this tool: ${contract
-              .map((entry) => `\`${entry.reason}\`: ${entry.when}`)
+              .map((entry) => `\`${entry.reason}\`: ${terminateWhen(entry.when)}`)
               .join(' ')} Other values are possible when a failure originates below the handler.`,
           )
           .meta({ examples: reasons })
@@ -721,6 +775,29 @@ export function buildToolSuccessResult(
 // ---------------------------------------------------------------------------
 
 /**
+ * The log level the definition declared for the failure that just unwound, or
+ * `undefined` to keep `error` (#380).
+ *
+ * The outer catch is the one place holding both the definition and the thrown
+ * error, so the reason-to-entry lookup happens here rather than inside
+ * `ErrorHandler`, which sees neither. Resolution is deliberately narrow: an
+ * `McpError` whose `data.reason` names a contract entry that declared a
+ * severity. A plain `Error`, a reason thrown below the handler that the
+ * contract never declared, and an entry with no severity all fall through to
+ * today's behavior. A cancellation is settled earlier — `asRequestCancelled`
+ * replaces the thrown value, so no declared reason reaches this point.
+ */
+function declaredSeverity(
+  def: AnyToolDefinition,
+  error: unknown,
+): ErrorContractSeverity | undefined {
+  if (!(error instanceof McpError)) return undefined;
+  const reason = error.data?.reason;
+  if (typeof reason !== 'string') return undefined;
+  return def.errors?.find((entry) => entry.reason === reason)?.severity;
+}
+
+/**
  * Creates an MCP tool handler from a tool definition.
  * The returned function is compatible with the MCP SDK's ToolCallback type.
  *
@@ -737,6 +814,7 @@ export function createToolHandler(
   def: AnyToolDefinition,
   services: HandlerServices,
   notifiers: NotifierSources,
+  inputGate?: InputRequiredGate,
 ): (
   input: Record<string, unknown>,
   ctx: ServerContext,
@@ -775,7 +853,13 @@ export function createToolHandler(
       // the handler returned recorded those as successes (#346).
       return await measureToolExecution(
         async (spanContext, recordOutput) => {
-          const handlerCtx = buildHandlerContext(request, services, spanContext, def.errors);
+          const handlerCtx = buildHandlerContext(
+            request,
+            services,
+            spanContext,
+            def.errors,
+            inputGate,
+          );
           ctx = handlerCtx;
 
           try {
@@ -816,12 +900,16 @@ export function createToolHandler(
       // `ctx.requestInput(...)` is protocol control flow, not a failure: return
       // the `input_required` result untouched, with no span, log, or
       // classification. The client (2026 era) or the SDK's legacy shim (2025
-      // era) fulfils it and re-invokes this handler.
+      // era) fulfils it and re-invokes this handler. A request this connection
+      // cannot serve never reaches here as a signal — `ctx.requestInput`
+      // throws the refusal instead, and it arrives below as an `McpError`.
       if (isInputRequiredSignal(error)) return error.result;
 
+      const severity = declaredSeverity(def, error);
       ErrorHandler.handleError(error, {
         operation: `tool:${def.name}`,
         context: appContext,
+        ...(severity !== undefined && { severity }),
       });
       return classifyAndBuildToolErrorResult(error);
     }

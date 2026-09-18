@@ -226,6 +226,20 @@ describe('Phase 1 wire conformance', () => {
       // The existing hint mirror carries the accepted-key list to format-only
       // clients with no extra work (#445).
       expect(text).toContain('Recovery: Unknown key salt. This tool accepts: query, limit.');
+      // #458: the branchable reason rides the same text; the numeric code does not.
+      expect(text.endsWith('\n\n(reason invalid_arguments)')).toBe(true);
+      expect(text).not.toContain('-32602');
+    });
+
+    it('renders a declared reason on the text surface (#458)', async () => {
+      // The contract entry declares no `retryable`, so no key is injected and
+      // no retryable term renders.
+      const client = await session();
+
+      const result = await client.callTool({ name: 'wire_search', arguments: { query: 'boom' } });
+
+      const text = (result.content as Array<{ text: string }>)[0]?.text ?? '';
+      expect(text).toBe('Error: The search index has not been built.\n\n(reason index_missing)');
     });
 
     it('emits an envelope the advertised outputSchema accepts', async () => {

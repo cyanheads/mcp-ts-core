@@ -3,7 +3,7 @@
  * @module src/utils/internal/error-handler/types
  */
 
-import type { JsonRpcErrorCode } from '@/types-global/errors.js';
+import type { ErrorContractSeverity, JsonRpcErrorCode } from '@/types-global/errors.js';
 import type { RequestContext } from '@/utils/internal/requestContext.js';
 
 /**
@@ -101,6 +101,18 @@ export interface ErrorHandlerOptions {
    * Defaults to `false`.
    */
   rethrow?: boolean;
+
+  /**
+   * Level to emit this failure's log record at, in place of `error`.
+   *
+   * Set by the tool handler factory when the thrown error's `data.reason` names
+   * a contract entry declaring one (#380). It moves the level of that one record
+   * and adds `mcp.error.severity` to the `mcp.errors.classified` increment;
+   * everything else the handler does — the span status, the rebuilt `McpError`,
+   * the structured fields — is unchanged. A `RequestCancelled` keeps its own
+   * `info`, stack-free path and ignores this.
+   */
+  severity?: ErrorContractSeverity;
 }
 
 /**

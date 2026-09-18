@@ -107,6 +107,16 @@ describe('modern wire contracts without initialize', () => {
       recovery: { hint: 'Provide what.' },
     });
     expect(missing.result.content[0].text).toContain('Recovery: Provide what.');
+    // #458: the branchable reason reaches the text surface here too, and the
+    // numeric code stays JSON-only.
+    expect(missing.result.content[0].text.endsWith('\n\n(reason invalid_arguments)')).toBe(true);
+    expect(missing.result.content[0].text).not.toContain('-32602');
+    // #459: a union-branch hint restates its own message, so its line is
+    // dropped from the text while `structuredContent` keeps the hint.
+    expect(union.result.content[0].text).not.toContain('Recovery:');
+    expect(union.result.structuredContent.error.data.recovery.hint).toBe(
+      'Invalid option: expected one of "CJEU"|"GC"',
+    );
   });
 
   it('lists and reads a resource through the Worker transport', async () => {

@@ -16,6 +16,7 @@ vi.mock('@/utils/internal/logger.js', () => ({
   logger: {
     info: vi.fn(),
     debug: vi.fn(),
+    notice: vi.fn(),
     warning: vi.fn(),
     error: vi.fn(),
     crit: vi.fn(),
@@ -327,6 +328,86 @@ describe('ErrorHandler', () => {
         extra?: Record<string, unknown>;
       };
       expect(typeof logged.extra?.stack).toBe('string');
+    });
+
+    // Issue #380 — a failure a definition declared in its `errors[]` contract
+    // is a modeled result, not an incident. `severity` moves the level of that
+    // one record and nothing else.
+    describe('declared severity (#380)', () => {
+      it.each(['debug', 'info', 'notice', 'warning'] as const)(
+        'emits the record at %s instead of error',
+        (severity) => {
+          ErrorHandler.handleError(
+            new McpError(JsonRpcErrorCode.InvalidRequest, 'The delete was not confirmed.', {
+              reason: 'consent_declined',
+            }),
+            { operation: 'tool:delete_thing', severity },
+          );
+
+          expect(logger.error).not.toHaveBeenCalled();
+          expect(logger[severity]).toHaveBeenCalledWith(
+            'Error in tool:delete_thing: The delete was not confirmed.',
+            expect.objectContaining({
+              operation: 'tool:delete_thing',
+              extra: expect.objectContaining({ errorCode: JsonRpcErrorCode.InvalidRequest }),
+            }),
+          );
+        },
+      );
+
+      it('changes the level and nothing else about the record', () => {
+        const thrown = new McpError(JsonRpcErrorCode.InvalidRequest, 'Declined.', {
+          reason: 'consent_declined',
+        });
+        // `includeStack: false` on both legs: the record's own `stack` is the
+        // handler's rebuilt error, whose frames name the call site, so the two
+        // legs differ there for a reason that has nothing to do with severity.
+        const shared = {
+          operation: 'tool:demo',
+          context: { requestId: 'req-severity', timestamp: '2026-01-01T00:00:00.000Z' },
+          includeStack: false,
+        };
+
+        ErrorHandler.handleError(thrown, { ...shared, severity: 'notice' });
+        const noticed = vi.mocked(logger.notice).mock.calls.at(-1);
+
+        vi.clearAllMocks();
+        ErrorHandler.handleError(thrown, shared);
+        const errored = vi.mocked(logger.error).mock.calls.at(-1);
+
+        expect(noticed?.[0]).toBe(errored?.[0]);
+        expect(noticed?.[1]).toEqual(errored?.[1]);
+      });
+
+      it('returns the same McpError it would without a severity', () => {
+        const thrown = new McpError(JsonRpcErrorCode.InvalidRequest, 'Declined.', {
+          reason: 'consent_declined',
+        });
+
+        const quiet = ErrorHandler.handleError(thrown, {
+          operation: 'tool:demo',
+          severity: 'notice',
+        }) as McpError;
+        const loud = ErrorHandler.handleError(thrown, { operation: 'tool:demo' }) as McpError;
+
+        expect(quiet.code).toBe(loud.code);
+        expect(quiet.message).toBe(loud.message);
+        expect(quiet.data).toEqual(loud.data);
+      });
+
+      it('never outranks the cancellation path', () => {
+        // A caller who withdrew the request is logged at info with no stack
+        // whatever the contract says about the reason.
+        ErrorHandler.handleError(
+          new McpError(JsonRpcErrorCode.RequestCancelled, 'Caller went away.'),
+          { operation: 'tool:demo', severity: 'warning' },
+        );
+
+        expect(logger.warning).not.toHaveBeenCalled();
+        expect(logger.error).not.toHaveBeenCalled();
+        expect(logger.info).toHaveBeenCalledOnce();
+        expect(vi.mocked(logger.info).mock.calls.at(-1)?.[0]).toContain('Cancelled tool:demo');
+      });
     });
 
     it('honors includeStack: false independently of the code', () => {

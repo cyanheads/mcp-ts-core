@@ -8,6 +8,7 @@ import {
   type ServerNotifier,
 } from '@modelcontextprotocol/server';
 
+import type { InputRequiredGate } from '@/mcp-server/inputRequired.js';
 import type { ResourceSubscriptions } from '@/mcp-server/notifications.js';
 import type { AnyResourceDefinition } from '@/mcp-server/resources/utils/resourceDefinition.js';
 import {
@@ -40,6 +41,7 @@ export class ResourceRegistry {
     server: McpServer,
     subscriptions?: ResourceSubscriptions,
     bus?: ServerNotifier,
+    inputGate?: InputRequiredGate,
   ): Promise<void> {
     this.registeredNames.clear();
 
@@ -66,7 +68,7 @@ export class ResourceRegistry {
     // declared `resources` capability, so a server with no resources still
     // answers `resources/list` with an empty array rather than `-32601`.
     for (const resourceDef of this.resourceDefs) {
-      await this.registerResource(server, resourceDef, notifiers);
+      await this.registerResource(server, resourceDef, notifiers, inputGate);
     }
   }
 
@@ -85,6 +87,7 @@ export class ResourceRegistry {
     server: McpServer,
     def: AnyResourceDefinition,
     notifiers: NotifierSources,
+    inputGate?: InputRequiredGate,
   ): Promise<void> {
     const resourceName = def.name ?? def.uriTemplate;
     const registrationContext = requestContextService.createRequestContext({
@@ -98,7 +101,7 @@ export class ResourceRegistry {
 
     await ErrorHandler.tryCatch(
       () => {
-        const handler = createResourceHandler(def, this.services, notifiers);
+        const handler = createResourceHandler(def, this.services, notifiers, inputGate);
         const title = def.title ?? resourceName;
         const mimeType = def.mimeType ?? 'application/json';
         const metadata = {

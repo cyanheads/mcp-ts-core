@@ -18,6 +18,7 @@ import {
 
 import type { AppConfig } from '@/config/index.js';
 import type { CacheHints } from '@/mcp-server/cacheHints.js';
+import { createInputRequiredGate } from '@/mcp-server/inputRequired.js';
 import type { PromptRegistry } from '@/mcp-server/prompts/prompt-registration.js';
 import type { ResourceRegistry } from '@/mcp-server/resources/resource-registration.js';
 import { installResourceSubscriptions } from '@/mcp-server/resources/resourceSubscriptions.js';
@@ -141,6 +142,16 @@ export async function createMcpServerInstance(deps: McpServerDeps): Promise<McpS
   const subscriptions =
     (deps.era ?? 'legacy') === 'legacy' ? installResourceSubscriptions(server) : undefined;
 
+  // The capability gate on `ctx.requestInput(...)` is a 2025-era mechanism too:
+  // there the refusal comes from the SDK's legacy shim, above the handler
+  // callback, where a factory can no longer shape it into an error envelope
+  // (#379). A modern instance is gated by the SDK itself, before any result
+  // leaves, so it takes no gate.
+  const inputGate =
+    (deps.era ?? 'legacy') === 'legacy'
+      ? createInputRequiredGate(() => server.server.getClientCapabilities())
+      : undefined;
+
   try {
     logger.debug('Registering all MCP capabilities via registries...', context);
 
@@ -150,8 +161,8 @@ export async function createMcpServerInstance(deps: McpServerDeps): Promise<McpS
     const bus = (deps.era ?? 'legacy') === 'modern' ? deps.notifier : undefined;
 
     await Promise.all([
-      deps.toolRegistry.registerAll(server, subscriptions, bus),
-      deps.resourceRegistry.registerAll(server, subscriptions, bus),
+      deps.toolRegistry.registerAll(server, subscriptions, bus, inputGate),
+      deps.resourceRegistry.registerAll(server, subscriptions, bus, inputGate),
       deps.promptRegistry.registerAll(server),
     ]);
 

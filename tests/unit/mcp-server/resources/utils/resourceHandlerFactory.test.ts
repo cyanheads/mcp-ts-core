@@ -11,6 +11,7 @@ import {
   inputRequired,
   type ReadResourceResult,
 } from '@modelcontextprotocol/server';
+import { SpanStatusCode, trace } from '@opentelemetry/api';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { z } from 'zod';
 import { JsonRpcErrorCode, McpError } from '@/types-global/errors.js';
@@ -88,6 +89,7 @@ vi.mock('@/utils/internal/requestContext.js', () => ({
 // Imports (after mocks)
 // ---------------------------------------------------------------------------
 
+import { createInputRequiredGate } from '@/mcp-server/inputRequired.js';
 import type { ResourceSubscriptions } from '@/mcp-server/notifications.js';
 import type { AnyResourceDefinition } from '@/mcp-server/resources/utils/resourceDefinition.js';
 import { resource } from '@/mcp-server/resources/utils/resourceDefinition.js';
@@ -431,6 +433,93 @@ describe('createResourceHandler', () => {
       });
     });
 
+    it('refuses with a JSON-RPC error when the connection declares no capability (#379)', async () => {
+      // The 2025-era shim's own refusal is a bare `-32603` above the callback;
+      // gating before the signal is returned keeps the reason and hint.
+      const handler = createResourceHandler(
+        confirmingResource as AnyResourceDefinition,
+        services,
+        notifiers,
+        createInputRequiredGate(() => ({})),
+      );
+
+      const error = await handler(
+        new URL('confirm://item-1'),
+        { id: 'item-1' },
+        makeServerContext(),
+      ).catch((e: unknown) => e);
+
+      expect(error).toBeInstanceOf(McpError);
+      expect(error).toMatchObject({
+        code: JsonRpcErrorCode.InvalidRequest,
+        data: {
+          reason: 'client_capability_missing',
+          recovery: { hint: expect.stringContaining('`elicitation.form`') },
+        },
+      });
+    });
+
+    it('records a refused read as a failed measurement, not an input-required one (#379)', async () => {
+      // `ctx.requestInput` throws the refusal from inside the handler, so the
+      // measured region sees an `McpError`. Resolved any later — in the
+      // factory's catch, after the span closed — the read would be recorded as
+      // a successful input-required round while the caller gets a JSON-RPC
+      // error.
+      const span = {
+        setAttributes: vi.fn(),
+        setAttribute: vi.fn(),
+        setStatus: vi.fn(),
+        recordException: vi.fn(),
+        end: vi.fn(),
+      };
+      const tracerSpy = vi.spyOn(trace, 'getTracer').mockReturnValue({
+        startActiveSpan: (_name: string, cb: (s: unknown) => unknown) => cb(span),
+      } as never);
+
+      try {
+        const handler = createResourceHandler(
+          confirmingResource as AnyResourceDefinition,
+          services,
+          notifiers,
+          createInputRequiredGate(() => ({})),
+        );
+        await handler(new URL('confirm://item-1'), { id: 'item-1' }, makeServerContext()).catch(
+          (e: unknown) => e,
+        );
+
+        expect(span.setStatus).toHaveBeenCalledWith(
+          expect.objectContaining({ code: SpanStatusCode.ERROR }),
+        );
+        expect(span.setAttributes).toHaveBeenLastCalledWith(
+          expect.objectContaining({ 'mcp.resource.success': false }),
+        );
+        expect(span.setAttribute).toHaveBeenCalledWith(
+          'mcp.resource.error_code',
+          String(JsonRpcErrorCode.InvalidRequest),
+        );
+        expect(span.setAttribute).not.toHaveBeenCalledWith('mcp.resource.input_required', true);
+      } finally {
+        tracerSpy.mockRestore();
+      }
+    });
+
+    it('lets the signal through when the capability is declared (#379)', async () => {
+      const handler = createResourceHandler(
+        confirmingResource as AnyResourceDefinition,
+        services,
+        notifiers,
+        createInputRequiredGate(() => ({ elicitation: { form: {} } })),
+      );
+
+      const result = await handler(
+        new URL('confirm://item-1'),
+        { id: 'item-1' },
+        makeServerContext(),
+      );
+
+      expect(result).toMatchObject({ resultType: 'input_required' });
+    });
+
     it('exposes the round state and dropped response keys on ctx.inputs', async () => {
       let capturedState: string | undefined;
       let capturedDropped: readonly string[] | undefined;
@@ -692,6 +781,42 @@ describe('createResourceHandler', () => {
         expect(err).toBeInstanceOf(McpError);
         expect((err as McpError).code).toBe(JsonRpcErrorCode.NotFound);
       }
+    });
+
+    it('leaves a declared severity inert on the resource path (#380)', async () => {
+      // Resources re-throw after `classifyOnly` and the SDK owns the log, so
+      // there is no `handleError` call for a severity to move. The field is
+      // accepted on the contract and changes nothing here.
+      const def = resource('sev://{id}', {
+        description: 'Declines a read.',
+        params: z.object({ id: z.string().describe('id') }),
+        errors: [
+          {
+            reason: 'consent_declined',
+            code: JsonRpcErrorCode.InvalidRequest,
+            when: 'The caller declined the confirmation prompt.',
+            severity: 'notice',
+            recovery: 'Re-run the read and confirm the prompt to proceed.',
+          },
+        ],
+        handler: (_params, ctx) => {
+          throw ctx.fail('consent_declined', 'Declined.');
+        },
+      });
+
+      const handler = createResourceHandler(def as AnyResourceDefinition, services, notifiers);
+
+      await expect(
+        handler(new URL('sev://x'), { id: 'x' }, makeServerContext()),
+      ).rejects.toMatchObject({ code: JsonRpcErrorCode.InvalidRequest });
+      expect(mockLogger.notice).not.toHaveBeenCalledWith(
+        expect.stringContaining('Error in'),
+        expect.anything(),
+      );
+      expect(mockLogger.error).not.toHaveBeenCalledWith(
+        expect.stringContaining('Error in'),
+        expect.anything(),
+      );
     });
   });
 

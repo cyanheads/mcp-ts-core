@@ -9,7 +9,11 @@ import type { ServerContext } from '@modelcontextprotocol/server';
 
 import { config } from '@/config/index.js';
 import { attachTypedFail, type Context, createContext } from '@/core/context.js';
-import { createContextInputs, createRequestInput } from '@/mcp-server/inputRequired.js';
+import {
+  createContextInputs,
+  createRequestInput,
+  type InputRequiredGate,
+} from '@/mcp-server/inputRequired.js';
 import {
   type NotifierSources,
   type OptionalNotifiers,
@@ -107,13 +111,16 @@ export function handlerParentContext(
  * `ctx.traceId` / `ctx.spanId` — and the child logger built from them — name
  * the span the handler runs in rather than the enclosing request span (#296).
  * `attachTypedFail` adds `ctx.fail` when the definition declares an error
- * contract; otherwise the context is unchanged.
+ * contract; otherwise the context is unchanged. `inputGate` is the
+ * connection's client-capability check, which `ctx.requestInput` runs on the
+ * result it builds (#379); the context is unchanged without one.
  */
 export function buildHandlerContext(
   request: HandlerRequest,
   services: HandlerServices,
   spanContext: RequestContext,
   errors: readonly ErrorContract[] | undefined,
+  inputGate?: InputRequiredGate,
   uri?: URL,
 ): Context {
   const { mcpReq, notifiers } = request;
@@ -125,7 +132,7 @@ export function buildHandlerContext(
       signal: request.signal,
       sessionId: request.sessionId,
       inputs: createContextInputs(mcpReq),
-      requestInput: createRequestInput(),
+      requestInput: createRequestInput(inputGate),
       ...(mcpReq?.log && { wireLog: mcpReq.log }),
       notifyPromptListChanged: notifiers.notifyPromptListChanged,
       notifyResourceListChanged: notifiers.notifyResourceListChanged,

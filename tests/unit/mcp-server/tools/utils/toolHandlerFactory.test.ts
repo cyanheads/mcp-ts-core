@@ -6,7 +6,11 @@
  * @module tests/mcp-server/tools/utils/toolHandlerFactory.test
  */
 
-import type { CallToolResult, ContentBlock } from '@modelcontextprotocol/server';
+import type {
+  CallToolResult,
+  ClientCapabilities,
+  ContentBlock,
+} from '@modelcontextprotocol/server';
 import { inputRequired, SdkError, SdkErrorCode } from '@modelcontextprotocol/server';
 import { AjvJsonSchemaValidator } from '@modelcontextprotocol/server/validators/ajv';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
@@ -100,6 +104,7 @@ vi.mock('@/utils/internal/performance.js', () => ({
 // Imports (after mocks)
 // ---------------------------------------------------------------------------
 
+import { createInputRequiredGate } from '@/mcp-server/inputRequired.js';
 import type { AnyToolDefinition } from '@/mcp-server/tools/utils/toolDefinition.js';
 import { tool } from '@/mcp-server/tools/utils/toolDefinition.js';
 import {
@@ -891,7 +896,7 @@ describe('createToolHandler', () => {
         expect((firstBlock(result) as { text: string }).text).toBe(
           'Error: Input validation error: Invalid arguments for tool search_tool: ' +
             'Unrecognized key: "salt"\n\nRecovery: Unknown key salt. ' +
-            'This tool accepts: query, limit.',
+            'This tool accepts: query, limit.\n\n(reason invalid_arguments)',
         );
       });
     });
@@ -1060,7 +1065,9 @@ describe('createToolHandler', () => {
       const result = await handler({}, makeServerContext());
 
       const text = (firstBlock(result) as { text: string }).text;
-      expect(text).toBe('Error: Boom');
+      // The declared reason still renders its own line (#458); only the
+      // `Recovery:` line is absent.
+      expect(text).toBe('Error: Boom\n\n(reason boom)');
       expect(text).not.toContain('Recovery:');
     });
 
@@ -1081,6 +1088,469 @@ describe('createToolHandler', () => {
 
       const text = (firstBlock(result) as { text: string }).text;
       expect(text).toBe('Error: Boom');
+    });
+  });
+
+  // -----------------------------------------------------------------------
+  // content[] error text — branchable terms (#458) and hint repeats (#459)
+  // -----------------------------------------------------------------------
+
+  describe('content[] error text (#458, #459)', () => {
+    /** The rendered `content[]` text of an error result. */
+    const rendered = (result: CallToolResult): string =>
+      ((result.content as ContentBlock[])[0] as { text: string }).text;
+
+    /** Drives a handler that throws `thrown` through the production factory. */
+    async function throwing(thrown: unknown): Promise<HandlerResult> {
+      const def = tool('text_probe', {
+        description: 'Throws a supplied value.',
+        input: z.object({}),
+        output: z.object({ ok: z.boolean().describe('ok') }),
+        handler: () => {
+          throw thrown;
+        },
+      });
+      const handler = createToolHandler(def as AnyToolDefinition, services, notifiers);
+      return await handler({}, makeServerContext());
+    }
+
+    describe('branchable terms (#458)', () => {
+      it('renders reason and retryable after the message and the Recovery line', () => {
+        const text = rendered(
+          buildToolErrorResult(
+            JsonRpcErrorCode.ValidationError,
+            'Invalid id element "12,34" — send one identifier per element.',
+            {
+              reason: 'malformed_id',
+              retryable: false,
+              recovery: { hint: 'Submit one identifier per `ids` element.' },
+            },
+          ),
+        );
+
+        expect(text).toBe(
+          'Error: Invalid id element "12,34" — send one identifier per element.\n\n' +
+            'Recovery: Submit one identifier per `ids` element.\n\n' +
+            '(reason malformed_id · not retryable)',
+        );
+      });
+
+      it('renders a retryable contract entry as `retryable`', () => {
+        const text = rendered(
+          buildToolErrorResult(JsonRpcErrorCode.RateLimited, 'Queue at capacity.', {
+            reason: 'queue_full',
+            retryable: true,
+          }),
+        );
+
+        expect(text).toBe('Error: Queue at capacity.\n\n(reason queue_full · retryable)');
+      });
+
+      it.each([
+        ['a reason with no retryable', { reason: 'no_match' }, '(reason no_match)'],
+        ['a bare retryable true', { retryable: true }, '(retryable)'],
+        ['a bare retryable false', { retryable: false }, '(not retryable)'],
+      ])('renders %s', (_label, data, expected) => {
+        expect(rendered(buildToolErrorResult(JsonRpcErrorCode.NotFound, 'Boom', data))).toBe(
+          `Error: Boom\n\n${expected}`,
+        );
+      });
+
+      it.each([
+        ['no data at all', undefined],
+        ['data carrying neither field', { itemId: '123' }],
+        ['a non-boolean retryable', { retryable: 'yes' }],
+        ['an empty-string reason', { reason: '' }],
+      ])('appends no line for %s', async (_label, data) => {
+        expect(
+          rendered(
+            buildToolErrorResult(
+              JsonRpcErrorCode.InternalError,
+              'Boom',
+              data as Record<string, unknown> | undefined,
+            ),
+          ),
+        ).toBe('Error: Boom');
+      });
+
+      it('appends no line for a classified plain Error', async () => {
+        const result = await throwing(new Error('something broke'));
+
+        expect(rendered(result as CallToolResult)).toBe('Error: something broke');
+        expect((result as CallToolResult).structuredContent).toEqual({
+          error: { code: JsonRpcErrorCode.InternalError, message: 'something broke' },
+        });
+      });
+
+      it('renders the framework reason on an argument rejection, with no retryable term', async () => {
+        const def = tool('reason_reject_tool', {
+          description: 'Rejects unknown keys.',
+          input: z.object({ query: z.string().describe('Search query.') }),
+          output: z.object({ ok: z.boolean().describe('ok') }),
+          handler: () => ({ ok: true }),
+        });
+        const handler = createToolHandler(def as AnyToolDefinition, services, notifiers);
+
+        const result = await handler({ query: 'ok', salt: true }, makeServerContext());
+        const text = rendered(result as CallToolResult);
+
+        expect(text.endsWith('\n\n(reason invalid_arguments)')).toBe(true);
+        expect(text).not.toContain('retryable');
+      });
+
+      it('keeps the numeric code and data.issues out of content[]', async () => {
+        const def = tool('code_free_tool', {
+          description: 'Rejects a wrong type.',
+          input: z.object({ lat: z.number().describe('Latitude.') }),
+          output: z.object({ ok: z.boolean().describe('ok') }),
+          handler: () => ({ ok: true }),
+        });
+        const handler = createToolHandler(def as AnyToolDefinition, services, notifiers);
+
+        const result = await handler({ lat: 'x' }, makeServerContext());
+        const text = rendered(result as CallToolResult);
+
+        expect(text).not.toContain('-32602');
+        expect(text).not.toContain('"code"');
+        expect(text).not.toContain('invalid_type');
+        expect(envelope(result).code).toBe(JsonRpcErrorCode.InvalidParams);
+        expect(envelope(result).data?.issues).toBeDefined();
+      });
+
+      it('leaves structuredContent byte-identical to the thrown envelope', async () => {
+        const data = { reason: 'no_match', retryable: false, recovery: { hint: 'Broaden it.' } };
+        const result = await throwing(new McpError(JsonRpcErrorCode.NotFound, 'Nothing.', data));
+
+        expect((result as CallToolResult).structuredContent).toEqual({
+          error: { code: JsonRpcErrorCode.NotFound, message: 'Nothing.', data },
+        });
+      });
+    });
+
+    describe('hint repeats (#459)', () => {
+      const ok = z.object({ ok: z.boolean().describe('ok') });
+
+      const exclusiveProbe = tool('exclusive_probe', {
+        description: 'Accepts exactly one identifier list.',
+        input: z
+          .object({
+            pmcids: z.array(z.string()).optional().describe('PMC identifiers.'),
+            pmids: z.array(z.string()).optional().describe('PubMed identifiers.'),
+          })
+          .refine(
+            (value) => [value.pmcids, value.pmids].filter(Boolean).length === 1,
+            'Provide exactly one of `pmcids` or `pmids` (not zero, not more).',
+          ),
+        output: ok,
+        handler: () => ({ ok: true }),
+      });
+
+      const tokenProbe = tool('token_probe', {
+        description: 'Accepts a single-token query.',
+        input: z.object({
+          query: z
+            .string()
+            .refine((v) => !v.includes(' '), 'Use a single token; spaces are not supported.')
+            .describe('Search query.'),
+        }),
+        output: ok,
+        handler: () => ({ ok: true }),
+      });
+
+      async function reject(def: unknown, args: Record<string, unknown>): Promise<HandlerResult> {
+        const handler = createToolHandler(def as AnyToolDefinition, services, notifiers);
+        return await handler(args, makeServerContext());
+      }
+
+      it('drops the line when a root refinement hint repeats its own message', async () => {
+        const result = await reject(exclusiveProbe, { pmcids: ['a'], pmids: ['b'] });
+
+        expect(rendered(result as CallToolResult)).toBe(
+          'Error: Input validation error: Invalid arguments for tool exclusive_probe: ' +
+            'Provide exactly one of `pmcids` or `pmids` (not zero, not more).\n\n' +
+            '(reason invalid_arguments)',
+        );
+        expect(envelope(result).data?.recovery?.hint).toBe(
+          'Provide exactly one of `pmcids` or `pmids` (not zero, not more).',
+        );
+      });
+
+      it('drops the line when the message only adds the field path the hint lacks', async () => {
+        const result = await reject(tokenProbe, { query: 'two words' });
+
+        expect(rendered(result as CallToolResult)).not.toContain('Recovery:');
+        expect(envelope(result).message).toContain(
+          'query: Use a single token; spaces are not supported.',
+        );
+        expect(envelope(result).data?.recovery?.hint).toBe(
+          'Use a single token; spaces are not supported.',
+        );
+      });
+
+      it('drops the line when a handler hint restates its message', async () => {
+        const result = await throwing(
+          new McpError(JsonRpcErrorCode.NotFound, 'No such record.', {
+            recovery: { hint: 'No such record.' },
+          }),
+        );
+
+        expect(rendered(result as CallToolResult)).toBe('Error: No such record.');
+        expect((result as CallToolResult).structuredContent).toEqual({
+          error: {
+            code: JsonRpcErrorCode.NotFound,
+            message: 'No such record.',
+            data: { recovery: { hint: 'No such record.' } },
+          },
+        });
+      });
+
+      it('keeps a hint the message matches only case-insensitively', async () => {
+        const result = await throwing(
+          new McpError(JsonRpcErrorCode.NotFound, 'No such record.', {
+            recovery: { hint: 'no such record.' },
+          }),
+        );
+
+        expect(rendered(result as CallToolResult)).toBe(
+          'Error: No such record.\n\nRecovery: no such record.',
+        );
+      });
+
+      it.each([
+        [
+          'an unknown key',
+          { query: 'ok', salt: true },
+          'Unknown key salt. This tool accepts: query, limit.',
+        ],
+        ['a missing required field', {}, 'Provide query.'],
+        ['a wrong type', { query: 1 }, 'Send query as a string, not a number.'],
+      ])('keeps the line for %s', async (_label, args, hint) => {
+        const keeper = tool('keeper_tool', {
+          description: 'Searches.',
+          input: z.object({
+            query: z.string().describe('Search query.'),
+            limit: z.number().optional().describe('Maximum results.'),
+          }),
+          output: ok,
+          handler: () => ({ ok: true }),
+        });
+
+        const result = await reject(keeper, args as Record<string, unknown>);
+
+        expect(rendered(result as CallToolResult)).toContain(`\n\nRecovery: ${hint}\n\n`);
+      });
+
+      it('keeps the line for a multi-issue rejection, whose hint joins with spaces', async () => {
+        const point = tool('multi_issue_tool', {
+          description: 'Takes a coordinate.',
+          input: z.object({
+            lat: z.number().describe('Latitude.'),
+            lon: z.number().describe('Longitude.'),
+          }),
+          output: ok,
+          handler: () => ({ ok: true }),
+        });
+
+        const result = await reject(point, { lat: 'x' });
+
+        expect(rendered(result as CallToolResult)).toContain(
+          '\n\nRecovery: Send lat as a number, not a string. Provide lon.\n\n',
+        );
+      });
+
+      it('drops the line for a union-branch rejection, whose hint is the message minus the path', async () => {
+        // Same shape as the field-level refinement above: the hint is the
+        // branch sentence, the message is that sentence behind `court: `.
+        const courts = tool('union_branch_tool', {
+          description: 'Blank or a court code.',
+          input: z.object({
+            court: z
+              .union([z.literal(''), z.enum(['CJEU', 'GC'])])
+              .optional()
+              .describe('Court, or blank for any.'),
+          }),
+          output: ok,
+          handler: () => ({ ok: true }),
+        });
+
+        const result = await reject(courts, { court: 'bogus' });
+
+        expect(rendered(result as CallToolResult)).toBe(
+          'Error: Input validation error: Invalid arguments for tool union_branch_tool: ' +
+            'court: Invalid option: expected one of "CJEU"|"GC"\n\n(reason invalid_arguments)',
+        );
+        expect(envelope(result).data?.recovery?.hint).toBe(
+          'Invalid option: expected one of "CJEU"|"GC"',
+        );
+      });
+
+      it('keeps the line when a union branch is one of several issues', async () => {
+        const courts = tool('union_multi_tool', {
+          description: 'A required facet plus an optional court code.',
+          input: z.object({
+            what: z.enum(['os', 'cpu']).describe('Facet to read.'),
+            court: z
+              .union([z.literal(''), z.enum(['CJEU', 'GC'])])
+              .optional()
+              .describe('Court, or blank for any.'),
+          }),
+          output: ok,
+          handler: () => ({ ok: true }),
+        });
+
+        const result = await reject(courts, { court: 'bogus' });
+
+        expect(rendered(result as CallToolResult)).toContain(
+          '\n\nRecovery: Provide what. Invalid option: expected one of "CJEU"|"GC"\n\n',
+        );
+      });
+    });
+  });
+
+  // -----------------------------------------------------------------------
+  // Declared error severity (#380)
+  // -----------------------------------------------------------------------
+
+  describe('declared error severity (#380)', () => {
+    const consentContract = [
+      {
+        reason: 'consent_declined',
+        code: JsonRpcErrorCode.InvalidRequest,
+        when: 'The caller declined the confirmation prompt.',
+        severity: 'notice',
+        recovery: 'Re-run the tool and confirm the prompt to proceed with the change.',
+      },
+      {
+        reason: 'target_missing',
+        code: JsonRpcErrorCode.NotFound,
+        when: 'The named target does not exist.',
+        recovery: 'List the available targets and call again with one of them.',
+      },
+    ] as const;
+
+    /** Runs a tool whose handler throws `thrown`, optionally under a contract. */
+    async function run(
+      name: string,
+      thrown: unknown,
+      errors?: readonly unknown[],
+    ): Promise<HandlerResult> {
+      const def = tool(name, {
+        description: 'Throws a supplied value.',
+        input: z.object({}),
+        output: z.object({ ok: z.boolean().describe('ok') }),
+        ...(errors && { errors: errors as never }),
+        handler: () => {
+          throw thrown;
+        },
+      });
+      const handler = createToolHandler(def as AnyToolDefinition, services, notifiers);
+      return await handler({}, makeServerContext());
+    }
+
+    /** The `Error in tool:…` record, whichever level it was emitted at. */
+    function failureRecord(): { level: string; message: string } {
+      for (const level of ['debug', 'info', 'notice', 'warning', 'error'] as const) {
+        const call = vi
+          .mocked(mockLogger[level])
+          .mock.calls.findLast(([message]) => String(message).startsWith('Error in tool:'));
+        if (call) return { level, message: String(call[0]) };
+      }
+      throw new Error('No tool failure record was emitted');
+    }
+
+    it('logs a declared severity at that level, keeping the message', async () => {
+      await run(
+        'severity_declared',
+        new McpError(JsonRpcErrorCode.InvalidRequest, 'The delete of /tmp/x was not confirmed.', {
+          reason: 'consent_declined',
+        }),
+        consentContract,
+      );
+
+      expect(failureRecord()).toEqual({
+        level: 'notice',
+        message: 'Error in tool:severity_declared: The delete of /tmp/x was not confirmed.',
+      });
+      expect(mockLogger.error).not.toHaveBeenCalled();
+    });
+
+    it.each([
+      [
+        'a contract entry that declares no severity',
+        new McpError(JsonRpcErrorCode.NotFound, 'Boom.', { reason: 'target_missing' }),
+        consentContract,
+      ],
+      [
+        'a reason the contract never declared',
+        new McpError(JsonRpcErrorCode.NotFound, 'Boom.', { reason: 'undeclared_below_handler' }),
+        consentContract,
+      ],
+      [
+        'an McpError carrying no reason at all',
+        new McpError(JsonRpcErrorCode.NotFound, 'Boom.'),
+        consentContract,
+      ],
+      ['a non-McpError throw', new Error('Boom.'), consentContract],
+      [
+        'a tool with no errors[] at all',
+        new McpError(JsonRpcErrorCode.InvalidRequest, 'Boom.', { reason: 'consent_declined' }),
+        undefined,
+      ],
+    ])('keeps the error level for %s', async (_label, thrown, errors) => {
+      await run('severity_default', thrown, errors);
+
+      expect(failureRecord().level).toBe('error');
+    });
+
+    it('leaves both client surfaces byte-identical to the undeclared case', async () => {
+      const data = { reason: 'consent_declined', recovery: { hint: 'Confirm the prompt.' } };
+      const thrown = new McpError(JsonRpcErrorCode.InvalidRequest, 'Declined.', data);
+
+      const declared = await run('severity_wire_a', thrown, consentContract);
+      const undeclared = await run('severity_wire_b', thrown, [
+        { ...consentContract[1] },
+        { ...consentContract[0], severity: undefined },
+      ]);
+
+      expect((declared as CallToolResult).isError).toBe(true);
+      expect((declared as CallToolResult).content).toEqual((undeclared as CallToolResult).content);
+      expect((declared as CallToolResult).structuredContent).toEqual(
+        (undeclared as CallToolResult).structuredContent,
+      );
+      expect(envelope(declared)).toEqual({
+        code: JsonRpcErrorCode.InvalidRequest,
+        message: 'Declined.',
+        data,
+      });
+    });
+
+    it('keeps the cancellation path at info whatever the contract declares', async () => {
+      // `asRequestCancelled` replaces the thrown value once the signal has
+      // fired, so no declared reason survives to resolve a severity against.
+      const controller = new AbortController();
+      const def = tool('severity_cancelled', {
+        description: 'Declines after the caller went away.',
+        input: z.object({}),
+        output: z.object({ ok: z.boolean().describe('ok') }),
+        errors: consentContract as never,
+        handler: () => {
+          controller.abort();
+          throw new McpError(JsonRpcErrorCode.InvalidRequest, 'Declined.', {
+            reason: 'consent_declined',
+          });
+        },
+      });
+      const handler = createToolHandler(def as AnyToolDefinition, services, notifiers);
+
+      await handler({}, makeServerContext({ signal: controller.signal }));
+
+      expect(mockLogger.notice).not.toHaveBeenCalled();
+      expect(mockLogger.error).not.toHaveBeenCalled();
+      expect(
+        vi
+          .mocked(mockLogger.info)
+          .mock.calls.some(([message]) => String(message).startsWith('Cancelled tool:')),
+      ).toBe(true);
     });
   });
 
@@ -1618,6 +2088,157 @@ describe('createToolHandler', () => {
       expect(result.structuredContent).toEqual({ confirmed: true });
       expect(result.isError).toBeUndefined();
     });
+
+    // ---------------------------------------------------------------------
+    // Client-capability gate (#379)
+    // ---------------------------------------------------------------------
+
+    describe('client-capability gate (#379)', () => {
+      /** Drives `confirmingTool` behind a gate over the given declared capabilities. */
+      async function gated(declared: ClientCapabilities | undefined): Promise<HandlerResult> {
+        const handler = createToolHandler(
+          confirmingTool as AnyToolDefinition,
+          services,
+          notifiers,
+          createInputRequiredGate(() => declared),
+        );
+        return await handler({ path: '/tmp/x' }, makeServerContext());
+      }
+
+      it('shapes the refusal as a tool error carrying the reserved reason', async () => {
+        const result = await gated({});
+
+        expect((result as CallToolResult).isError).toBe(true);
+        expect(envelope(result).code).toBe(JsonRpcErrorCode.InvalidRequest);
+        expect(envelope(result).data?.reason).toBe('client_capability_missing');
+        expect(envelope(result).data?.recovery?.hint).toContain('`elicitation.form`');
+        expect((firstBlock(result) as { text: string }).text).toBe(
+          `Error: ${envelope(result).message}\n\nRecovery: ${envelope(result).data?.recovery?.hint}` +
+            '\n\n(reason client_capability_missing)',
+        );
+      });
+
+      it('distinguishes the per-request case with no capability view at all', async () => {
+        const result = await gated(undefined);
+
+        expect(envelope(result).code).toBe(JsonRpcErrorCode.InvalidRequest);
+        expect(envelope(result).data?.reason).toBe('client_capability_missing');
+        expect(envelope(result).message).toContain('served per-request');
+        expect(envelope(result).data?.recovery?.hint).toContain('stateful session');
+      });
+
+      it.each([
+        ['a declared form mode', { elicitation: { form: {} } }],
+        ['a bare pre-mode declaration', { elicitation: {} }],
+      ])('lets the signal through for %s', async (_label, declared) => {
+        const result = await gated(declared as ClientCapabilities);
+
+        expect(result as Record<string, unknown>).toMatchObject({
+          resultType: 'input_required',
+          requestState: 'round-1',
+        });
+      });
+
+      it('refuses a form-mode request when only url mode is declared', async () => {
+        const result = await gated({ elicitation: { url: {} } } as ClientCapabilities);
+
+        expect(envelope(result).data?.reason).toBe('client_capability_missing');
+        expect(envelope(result).message).toContain('`elicitation.form`');
+      });
+
+      it.each([
+        [
+          'a sampling request',
+          { ask: inputRequired.createMessage({ maxTokens: 8, messages: [] }) },
+          '`sampling`',
+        ],
+        ['a roots request', { ask: inputRequired.listRoots() }, '`roots`'],
+      ])('gates %s on its own capability', async (_label, inputRequests, path) => {
+        const def = tool('kind_probe', {
+          description: 'Asks for a non-elicitation input.',
+          input: z.object({}),
+          output: z.object({ ok: z.boolean().describe('ok') }),
+          handler: (_input, ctx) => ctx.requestInput({ inputRequests }),
+        });
+        const handler = createToolHandler(
+          def as AnyToolDefinition,
+          services,
+          notifiers,
+          createInputRequiredGate(() => ({ elicitation: { form: {} } }) as ClientCapabilities),
+        );
+
+        const result = await handler({}, makeServerContext());
+
+        expect(envelope(result).data?.reason).toBe('client_capability_missing');
+        expect(envelope(result).message).toContain(path);
+      });
+
+      it('leaves a requestState-only return untouched', async () => {
+        const def = tool('state_only_tool', {
+          description: 'Carries state without asking for anything.',
+          input: z.object({}),
+          output: z.object({ ok: z.boolean().describe('ok') }),
+          handler: (_input, ctx) => ctx.requestInput({ requestState: 'round-1' }),
+        });
+        const handler = createToolHandler(
+          def as AnyToolDefinition,
+          services,
+          notifiers,
+          createInputRequiredGate(() => undefined),
+        );
+
+        const result = await handler({}, makeServerContext());
+
+        expect(result as Record<string, unknown>).toMatchObject({
+          resultType: 'input_required',
+          requestState: 'round-1',
+        });
+      });
+
+      it('gates round two of a multi-round handler on its own capability', async () => {
+        const def = tool('two_round_tool', {
+          description: 'Elicits first, then samples.',
+          input: z.object({}),
+          output: z.object({ ok: z.boolean().describe('ok') }),
+          handler: (_input, ctx) =>
+            ctx.inputs.accepted('confirm', confirmSchema)
+              ? ctx.requestInput({
+                  inputRequests: {
+                    summary: inputRequired.createMessage({ maxTokens: 8, messages: [] }),
+                  },
+                })
+              : ctx.requestInput({
+                  inputRequests: {
+                    confirm: inputRequired.elicit({
+                      message: 'Go ahead?',
+                      requestedSchema: confirmSchema,
+                    }),
+                  },
+                }),
+        });
+        const handler = createToolHandler(
+          def as AnyToolDefinition,
+          services,
+          notifiers,
+          createInputRequiredGate(() => ({ elicitation: { form: {} } }) as ClientCapabilities),
+        );
+
+        // Round one is servable and passes through untouched.
+        const first = await handler({}, makeServerContext());
+        expect(first as Record<string, unknown>).toMatchObject({ resultType: 'input_required' });
+
+        // Round two asks for a capability the client never declared.
+        const second = await handler(
+          {},
+          makeServerContext({
+            inputResponses: { confirm: { action: 'accept', content: { confirm: true } } },
+          }),
+        );
+
+        expect(envelope(second).data?.reason).toBe('client_capability_missing');
+        expect(envelope(second).message).toContain('`sampling`');
+      });
+    });
   });
 
   describe('ctx.inputs', () => {
@@ -1889,6 +2510,110 @@ describe('createToolHandler', () => {
       ).structuredContent;
 
       expect(validate(envelope).valid).toBe(true);
+    });
+
+    describe('declared-reason description punctuation (#389)', () => {
+      /** The advertised `error.data.reason` description for a contract of these `when` texts. */
+      function reasonDescription(...whens: string[]): string {
+        const def = tool('reason_punctuation_tool', {
+          description: 'Declares a contract whose `when` texts vary in punctuation.',
+          input: z.object({ q: z.string().describe('q') }),
+          output: z.object({ ok: z.boolean().describe('ok') }),
+          errors: whens.map((when, index) => ({
+            reason: `reason_${index}`,
+            code: JsonRpcErrorCode.NotFound,
+            when,
+            recovery: 'Correct the identifier and call the tool again.',
+          })),
+          handler: () => ({ ok: true }),
+        });
+        return emitted(def as AnyToolDefinition).properties.error.properties.data.properties.reason
+          .description;
+      }
+
+      const trailer = 'Other values are possible when a failure originates below the handler.';
+
+      it('terminates an unpunctuated `when` before the trailing sentence', () => {
+        expect(
+          reasonDescription('Single-candidate lookup by candidate_id returned no record'),
+        ).toBe(
+          'Machine-readable failure mode. Declared by this tool: `reason_0`: ' +
+            `Single-candidate lookup by candidate_id returned no record. ${trailer}`,
+        );
+      });
+
+      it.each(['.', '?', '!'])('adds no second terminator after a trailing `%s`', (mark) => {
+        expect(reasonDescription(`The lookup returned no record${mark}`)).toBe(
+          'Machine-readable failure mode. Declared by this tool: `reason_0`: ' +
+            `The lookup returned no record${mark} ${trailer}`,
+        );
+      });
+
+      it.each([
+        ['a closing backtick', 'No record for the supplied `candidate_id`'],
+        ['a closing parenthesis', 'No record matched (for the current tenant)'],
+      ])('puts the period after %s', (_label, when) => {
+        expect(reasonDescription(when)).toBe(
+          `Machine-readable failure mode. Declared by this tool: \`reason_0\`: ${when}. ${trailer}`,
+        );
+      });
+
+      it('trims trailing whitespace before deciding on a terminator', () => {
+        expect(reasonDescription('The lookup returned no record.   ')).toBe(
+          'Machine-readable failure mode. Declared by this tool: `reason_0`: ' +
+            `The lookup returned no record. ${trailer}`,
+        );
+      });
+
+      it('terminates every entry of a three-reason contract', () => {
+        expect(
+          reasonDescription(
+            'Called without any scoping filter at all',
+            'min_date or max_date given without both a type and a date_kind',
+            'The requested date_kind is not a date this document type records',
+          ),
+        ).toBe(
+          'Machine-readable failure mode. Declared by this tool: ' +
+            '`reason_0`: Called without any scoping filter at all. ' +
+            '`reason_1`: min_date or max_date given without both a type and a date_kind. ' +
+            '`reason_2`: The requested date_kind is not a date this document type records. ' +
+            trailer,
+        );
+      });
+
+      it('leaves the bare description in place when nothing is declared', () => {
+        const empty = tool('empty_contract_tool', {
+          description: 'Declares an empty contract.',
+          input: z.object({ q: z.string().describe('q') }),
+          output: z.object({ ok: z.boolean().describe('ok') }),
+          errors: [],
+          handler: () => ({ ok: true }),
+        });
+
+        expect(
+          emitted(plainTool as AnyToolDefinition).properties.error.properties.data.properties.reason
+            .description,
+        ).toBe('Machine-readable failure mode.');
+        expect(
+          emitted(empty as AnyToolDefinition).properties.error.properties.data.properties.reason
+            .description,
+        ).toBe('Machine-readable failure mode.');
+      });
+
+      it('changes nothing else about the advertised envelope', () => {
+        const schema = emitted(searchTool as AnyToolDefinition);
+        const data = schema.properties.error.properties.data;
+
+        expect(data.properties.reason.type).toBe('string');
+        expect(data.properties.reason.examples).toEqual(['no_match', 'rate_limited']);
+        expect(data.properties.reason.enum).toBeUndefined();
+        expect(schema.properties.error.required).toEqual(['code', 'message']);
+        expect(schema.properties.error.additionalProperties).toEqual({});
+        expect(schema.anyOf).toEqual([
+          { not: { required: ['error'] }, required: ['items', 'totalCount'] },
+          { required: ['error'] },
+        ]);
+      });
     });
 
     it('leaves data.reason an open string when no contract is declared', () => {

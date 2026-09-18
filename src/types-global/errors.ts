@@ -245,6 +245,13 @@ export type ErrorResponse = z.infer<typeof ErrorSchema>;
 // ---------------------------------------------------------------------------
 
 /**
+ * Log level a declared failure mode is emitted at, drawn from the logger's own
+ * level names below `error`. Omitting the field keeps `error`, which is what
+ * every failure has always been logged at.
+ */
+export type ErrorContractSeverity = 'debug' | 'info' | 'notice' | 'warning';
+
+/**
  * Declarative entry in a tool or resource's `errors[]` contract.
  *
  * Lets a definition advertise what it can fail with — the JSON-RPC code, a
@@ -340,6 +347,30 @@ export interface ErrorContract {
    * `data` — callers can still infer from the code.
    */
   retryable?: boolean;
+  /**
+   * Log level for this failure mode, when `error` overstates it.
+   *
+   * An outcome a tool declares here is a modeled result, not an incident: a
+   * caller who answers no to a confirmation prompt, a lookup whose miss is an
+   * ordinary answer. Logging those identically to an upstream fault leaves the
+   * error stream unreadable at the level log-based alerting works on, and the
+   * alternative — dropping `ctx.fail` for them — forfeits the typed contract,
+   * the recovery hint, and the wire envelope.
+   *
+   * **Tools only, and logging only.** Resolved in the tool handler factory
+   * against the thrown error's `data.reason`; resources re-throw for the SDK to
+   * log and never reach the resolution site. Nothing client-visible moves —
+   * `isError`, the JSON-RPC code, `structuredContent.error`, and the `content[]`
+   * text are built from the thrown error and are byte-identical either way. The
+   * span still closes ERROR and `mcp.tool.calls` / `mcp.tool.errors` still count
+   * the call: splitting those series would redefine what an error rate means.
+   * The one metric that reflects it is an `mcp.error.severity` attribute on
+   * `mcp.errors.classified`.
+   *
+   * A cancelled request keeps its own `info`, stack-free path regardless.
+   * Omitted, the record is exactly what it is today.
+   */
+  severity?: ErrorContractSeverity;
   /**
    * Human-readable description of when this error occurs. Surfaced to LLMs and
    * UI clients via `tools/list`. Type-level, not per-occurrence — different

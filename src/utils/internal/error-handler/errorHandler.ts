@@ -15,7 +15,10 @@ import { logger } from '@/utils/internal/logger.js';
 import { type RequestContext, toCanonicalContext } from '@/utils/internal/requestContext.js';
 import { generateUUID } from '@/utils/security/idGenerator.js';
 import { sanitizeInputForLogging } from '@/utils/security/sanitization.js';
-import { ATTR_MCP_ERROR_CLASSIFIED_CODE } from '@/utils/telemetry/attributes.js';
+import {
+  ATTR_MCP_ERROR_CLASSIFIED_CODE,
+  ATTR_MCP_ERROR_SEVERITY,
+} from '@/utils/telemetry/attributes.js';
 import { createCounter } from '@/utils/telemetry/metrics.js';
 import { extractErrorCauseChain, getErrorMessage, getErrorName } from './helpers.js';
 import {
@@ -218,6 +221,7 @@ export class ErrorHandler {
       includeStack = true,
       critical = false,
       errorMapper,
+      severity,
     } = options;
 
     const sanitizedInput = input !== undefined ? sanitizeInputForLogging(input) : undefined;
@@ -288,10 +292,15 @@ export class ErrorHandler {
       ? errorMapper(error)
       : new McpError(loggedErrorCode, originalErrorMessage, consolidatedData, { cause });
 
-    // Record error classification metric
+    // Record error classification metric. The declared severity is a bounded
+    // dimension and rides as an attribute; it is present only when one
+    // resolved, so a server that declares none keeps exactly its old series.
+    // The `reason` behind it never becomes a metric attribute — unbounded
+    // across a fleet, so it belongs on the span and in the log.
     getErrorMetrics().errorClassifiedCounter.add(1, {
       [ATTR_MCP_ERROR_CLASSIFIED_CODE]: String(loggedErrorCode),
       operation,
+      ...(severity !== undefined && { [ATTR_MCP_ERROR_SEVERITY]: severity }),
     });
 
     if (
@@ -337,6 +346,10 @@ export class ErrorHandler {
     const logDescription = finalError.message || originalErrorMessage;
     if (isCancellation) {
       logger.info(`Cancelled ${operation}: ${logDescription}`, logContext);
+    } else if (severity !== undefined) {
+      // A modeled outcome the definition declared. Same message, same
+      // structured fields — only the level moves (#380).
+      logger[severity](`Error in ${operation}: ${logDescription}`, logContext);
     } else {
       logger.error(`Error in ${operation}: ${logDescription}`, logContext);
     }

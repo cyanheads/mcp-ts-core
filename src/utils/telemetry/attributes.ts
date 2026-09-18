@@ -314,3 +314,12 @@ export const ATTR_MCP_CONNECTION_TRANSPORT = 'mcp.connection.transport';
 
 /** Classified JSON-RPC error code from ErrorHandler (e.g., `-32001`, `-32602`). */
 export const ATTR_MCP_ERROR_CLASSIFIED_CODE = 'mcp.error.classified_code';
+
+/**
+ * Log level a definition declared for this failure mode: `debug`, `info`,
+ * `notice`, or `warning`. Set only on a record whose declared severity
+ * resolved, so a server that declares none emits exactly the series it did
+ * before. The `reason` itself is unbounded across a fleet and stays on the
+ * span and in the log.
+ */
+export const ATTR_MCP_ERROR_SEVERITY = 'mcp.error.severity';

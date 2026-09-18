@@ -188,7 +188,7 @@ describe('runToolContract', () => {
 
     expect(result).toMatchObject({
       isError: true,
-      content: [{ type: 'text', text: 'Error: The item is missing.' }],
+      content: [{ type: 'text', text: 'Error: The item is missing.\n\n(reason missing_item)' }],
       structuredContent: {
         error: {
           code: JsonRpcErrorCode.NotFound,

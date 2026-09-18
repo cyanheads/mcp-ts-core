@@ -4,7 +4,11 @@
  */
 
 export { lintCappedListTruncation, lintEnrichmentContract } from './enrichment-rules.js';
-export { lintErrorContract, lintErrorContractConformance } from './error-contract-rules.js';
+export {
+  lintErrorContract,
+  lintErrorContractConformance,
+  lintErrorContractUnthrown,
+} from './error-contract-rules.js';
 export { lintHandlerBody } from './handler-body-rules.js';
 export { checkDuplicateNames, checkNameRequired, checkToolNameFormat } from './name-rules.js';
 export {

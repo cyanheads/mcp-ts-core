@@ -9,7 +9,11 @@ import { inputVariants } from '@/mcp-server/tools/utils/schemaShape.js';
 import type { LintDiagnostic } from '../types.js';
 import { invalidDefinitionEntry, isDefinitionObject } from './definition-rules.js';
 import { lintEnrichmentContract } from './enrichment-rules.js';
-import { lintErrorContract, lintErrorContractConformance } from './error-contract-rules.js';
+import {
+  lintErrorContract,
+  lintErrorContractConformance,
+  lintErrorContractUnthrown,
+} from './error-contract-rules.js';
 import { lintFormatParity } from './format-parity-rules.js';
 import { lintHandlerBody } from './handler-body-rules.js';
 import { checkNameRequired, checkToolNameFormat } from './name-rules.js';
@@ -125,14 +129,10 @@ export function lintToolDefinition(
 
   // Declarative error contract validation
   if (d?.errors !== undefined) {
+    const contractDef = d as { handler?: unknown; errors?: unknown };
     diagnostics.push(...lintErrorContract(d.errors, 'tool', displayName));
-    diagnostics.push(
-      ...lintErrorContractConformance(
-        d as { handler?: unknown; errors?: unknown },
-        'tool',
-        displayName,
-      ),
-    );
+    diagnostics.push(...lintErrorContractConformance(contractDef, 'tool', displayName));
+    diagnostics.push(...lintErrorContractUnthrown(contractDef, 'tool', displayName));
   }
 
   return diagnostics;

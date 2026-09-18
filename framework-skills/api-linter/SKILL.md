@@ -4,7 +4,7 @@ description: >
   MCP definition linter rules reference. Use when `bun run lint:mcp` or `bun run devcheck` reports a lint error or warning (`format-parity`, `schema-is-object`, `name-format`, `server-json-*`, etc.) and you need to understand the rule, its severity, and how to fix it. Every rule ID the linter emits has an entry in this doc.
 metadata:
   author: cyanheads
-  version: "1.15"
+  version: "1.16"
   audience: external
   type: reference
 ---
@@ -52,8 +52,8 @@ Grouped by family. Jump to any rule ID via its anchor.
 | Landing | `landing-*` (23 rules — shape, tagline, logo, links, repo, envExample, connectSnippets, theme) | [Landing config rules](#landing-config-rules) |
 | Prompts | `generate-required` | [Prompt rules](#prompt-rules) |
 | Handler body | `prefer-mcp-error-in-handler`, `prefer-error-factory`, `preserve-cause-on-rethrow`, `no-stringify-upstream-error` | [Handler body rules](#handler-body-rules) |
-| Error contract (structural) | `error-contract-type`, `error-contract-empty`, `error-contract-entry-type`, `error-contract-code-type`, `error-contract-code-unknown`, `error-contract-code-unknown-error`, `error-contract-reason-required`, `error-contract-reason-format`, `error-contract-reason-unique`, `error-contract-when-required`, `error-contract-retryable-type`, `error-contract-recovery-required`, `error-contract-recovery-empty`, `error-contract-recovery-min-words` | [Error contract rules](#error-contract-rules) |
-| Error contract (conformance) | `error-contract-conformance`, `error-contract-prefer-fail` | [Error contract rules](#error-contract-rules) |
+| Error contract (structural) | `error-contract-type`, `error-contract-empty`, `error-contract-entry-type`, `error-contract-code-type`, `error-contract-code-unknown`, `error-contract-code-unknown-error`, `error-contract-reason-required`, `error-contract-reason-format`, `error-contract-reason-unique`, `error-contract-when-required`, `error-contract-retryable-type`, `error-contract-severity-unknown`, `error-contract-recovery-required`, `error-contract-recovery-empty`, `error-contract-recovery-min-words` | [Error contract rules](#error-contract-rules) |
+| Error contract (conformance) | `error-contract-conformance`, `error-contract-prefer-fail`, `error-contract-unthrown` | [Error contract rules](#error-contract-rules) |
 | Enrichment | `enrichment-type`, `enrichment-empty`, `enrichment-field-type`, `enrichment-output-collision`, `enrichment-prefer-block`, `enrichment-trailer-render`, `enrichment-trailer-orphan`, `enrichment-trailer-unknown-field`, `capped-list-no-truncation` | [Enrichment rules](#enrichment-rules) |
 | server.json | ~40 rules prefixed `server-json-*` | [server.json rules](#server-json-rules) |
 
@@ -815,6 +815,23 @@ Fires when an entry's `when` field is missing or empty. `when` is the human-read
 
 Fires when an entry's optional `retryable` field is present but isn't a boolean. Only `true` or `false` is meaningful — drop the field if you can't commit to either.
 
+### error-contract-severity-unknown
+
+**Severity:** error
+
+Fires when an entry's optional `severity` field is present but isn't one of `debug`, `info`, `notice`, or `warning`. Unlike `retryable`, this field is not inert metadata — it selects the logger method the failure's record is emitted through, so an unrecognized value has no runtime meaning.
+
+`error` is not accepted: it is the default, expressed by omitting the field. Nor are the pino spellings (`warn`) or other cases (`WARNING`) — the values are the framework logger's own level names.
+
+**Fix:** use one of the four levels, or drop the field.
+
+```ts
+// instead of:
+{ reason: 'consent_declined', code: JsonRpcErrorCode.InvalidRequest, when: '…', severity: 'warn', recovery: '…' }
+// use:
+{ reason: 'consent_declined', code: JsonRpcErrorCode.InvalidRequest, when: '…', severity: 'warning', recovery: '…' }
+```
+
 ### error-contract-recovery-required
 
 **Severity:** error
@@ -865,6 +882,31 @@ throw ctx.fail('no_match', 'No items match');
 ```
 
 The diagnostic message includes the declared reason(s) for the code so you can copy-paste.
+
+### error-contract-unthrown
+
+**Severity:** warning
+
+The inverse of `error-contract-conformance`. Fires when a declared `reason` has no literal `ctx.fail('<reason>'` and no literal `ctx.recoveryFor('<reason>'` anywhere in the handler — a contract entry no code path can produce.
+
+A dead entry compiles and lints clean: the typed `ctx.fail` union accepts the reason, so nothing downstream objects. The cost lands on the client, which plans around the advertised failure surface — an agent prepares for a mode the tool cannot produce, while the mode it *does* produce goes undocumented.
+
+**Fix:** wire the missing throw, or drop the entry. Which one is right is the author's call, so the rule surfaces and does not auto-remove.
+
+```ts
+errors: [
+  { reason: 'no_match',       code: JsonRpcErrorCode.NotFound, when: '…', recovery: '…' },
+  { reason: 'site_not_found', code: JsonRpcErrorCode.NotFound, when: '…', recovery: '…' },
+],
+async handler(input, ctx) {
+  if (rows.length === 0) throw ctx.fail('no_match', 'No rows in range');
+}
+// warning  error-contract-unthrown — 'site_not_found' is declared but never thrown.
+```
+
+**Trigger.** Only when the handler holds at least one literal `ctx.fail(`. A handler with none produces its reasons somewhere the scan cannot reach, so firing there would warn on every service-layer definition. A `ctx.fail(` whose first argument is not a string literal — a variable, a template literal, a map lookup — makes the thrown set unknowable, and the whole definition is skipped rather than guessed at.
+
+**Heuristic limitations:** the scan reads `handler.toString()` and matches call sites in the comment- and string-stripped text, so a `ctx.fail('…')` written inside a comment or nested in another literal does not count as thrown. A reason produced outside the handler closure is invisible to any `toString()` scan, which is why the rule can never prove absence and stays a warning. Silent under the trigger above: a service that throws a factory error carrying `data: { reason }`, a `createFail(errors)` resolver built outside the handler, and an aliased `const fail = ctx.fail`.
 
 ---
 
