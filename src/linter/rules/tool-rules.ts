@@ -4,6 +4,8 @@
  * @module src/linter/rules/tool-rules
  */
 
+import { foldArgumentKey } from '@/mcp-server/tools/utils/inputPrevalidation.js';
+import { inputVariants } from '@/mcp-server/tools/utils/schemaShape.js';
 import type { LintDiagnostic } from '../types.js';
 import { invalidDefinitionEntry, isDefinitionObject } from './definition-rules.js';
 import { lintEnrichmentContract } from './enrichment-rules.js';
@@ -12,7 +14,12 @@ import { lintFormatParity } from './format-parity-rules.js';
 import { lintHandlerBody } from './handler-body-rules.js';
 import { checkNameRequired, checkToolNameFormat } from './name-rules.js';
 import type { PortabilityOptions } from './portability-rules.js';
-import { checkHeaderDesignations, lintSchemaRoot, objectShapeKeys } from './schema-rules.js';
+import {
+  checkHeaderDesignations,
+  checkStrictenedRootMeta,
+  lintSchemaRoot,
+  objectShapeKeys,
+} from './schema-rules.js';
 
 /**
  * Runs all lint rules against a single tool definition.
@@ -71,6 +78,15 @@ export function lintToolDefinition(
     if (designations) diagnostics.push(designations);
   }
 
+  // Root `.describe()` / `.meta()` that strictening discarded — read off the
+  // record `tool()` left, since the stored schema no longer carries it.
+  diagnostics.push(...checkStrictenedRootMeta(def, displayName));
+
+  // Declared argument aliases must resolve to exactly one declared key.
+  if (d?.inputAliases !== undefined) {
+    diagnostics.push(...lintInputAliases(d.inputAliases, d?.input, displayName));
+  }
+
   // Output schema: must be ZodObject, serializable to JSON Schema
   const outputRoot = lintSchemaRoot(d?.output, 'output', 'tool', displayName, { portability });
   diagnostics.push(...outputRoot.diagnostics);
@@ -117,6 +133,134 @@ export function lintToolDefinition(
         displayName,
       ),
     );
+  }
+
+  return diagnostics;
+}
+
+/**
+ * Validates a tool's `inputAliases` against the declared input keys.
+ *
+ * An alias is a one-to-one mapping fixed ahead of time — the whole reason it is
+ * accepted where nearest-key matching is not — so an alias that resolves to
+ * more than one key, or to none, is a definition error rather than a runtime
+ * one. The runtime declines an ambiguous rewrite silently and the caller sees
+ * the ordinary strict rejection, which reads as the alias simply not working;
+ * every condition below is decidable from the definition, so it is decided
+ * here instead.
+ *
+ * Case-folding uses {@link foldArgumentKey}, the same fold the rewrite applies.
+ * On a discriminated-union root, every variant's keys count as declared: a
+ * rewrite resolves against the selected variant, so an alias naming a key no
+ * variant declares can never fire.
+ */
+export function lintInputAliases(
+  aliases: unknown,
+  input: unknown,
+  definitionName: string,
+): LintDiagnostic[] {
+  const diagnostic = (message: string): LintDiagnostic => ({
+    rule: 'input-alias-conflict',
+    severity: 'error',
+    message,
+    definitionType: 'tool',
+    definitionName,
+  });
+
+  if (aliases === null || typeof aliases !== 'object' || Array.isArray(aliases)) {
+    return [
+      diagnostic(
+        `Tool '${definitionName}' inputAliases must be an object mapping each alias to the ` +
+          `declared input key it stands for, e.g. { drug_name: 'drug' }.`,
+      ),
+    ];
+  }
+
+  const declared = new Set<string>();
+  for (const variant of inputVariants(input)) {
+    for (const key of Object.keys(variant.shape)) declared.add(key);
+  }
+
+  const diagnostics: LintDiagnostic[] = [];
+
+  // A declared key that case-folds onto another leaves the case-style half with
+  // no single target, so it rewrites nothing and the alias silently never fires.
+  const declaredByFold = new Map<string, string[]>();
+  for (const key of declared) {
+    const fold = foldArgumentKey(key);
+    declaredByFold.set(fold, [...(declaredByFold.get(fold) ?? []), key]);
+  }
+  for (const keys of declaredByFold.values()) {
+    if (keys.length > 1) {
+      diagnostics.push(
+        diagnostic(
+          `Tool '${definitionName}' declares ${keys.join(' and ')}, which differ only in case ` +
+            `style. No alias can resolve between them — rename one, or drop the other and ` +
+            `declare it as an alias of the one you keep.`,
+        ),
+      );
+    }
+  }
+
+  const aliasesByFold = new Map<string, Array<{ alias: string; target: string }>>();
+  for (const [alias, target] of Object.entries(aliases as Record<string, unknown>)) {
+    if (typeof target !== 'string' || target.length === 0) {
+      diagnostics.push(
+        diagnostic(
+          `Tool '${definitionName}' inputAliases['${alias}'] must name a declared input key as ` +
+            `a non-empty string.`,
+        ),
+      );
+      continue;
+    }
+
+    if (declared.has(alias)) {
+      diagnostics.push(
+        diagnostic(
+          `Tool '${definitionName}' declares '${alias}' as both an input key and an alias for ` +
+            `'${target}'. A declared key is never rewritten, so the alias can never fire — ` +
+            `remove it, or rename the input key.`,
+        ),
+      );
+    }
+
+    if (!declared.has(target)) {
+      diagnostics.push(
+        diagnostic(
+          `Tool '${definitionName}' aliases '${alias}' to '${target}', which is not a declared ` +
+            `input key${declared.size > 0 ? ` (declared: ${[...declared].join(', ')})` : ''}. ` +
+            `Point the alias at an existing key.`,
+        ),
+      );
+    }
+
+    const fold = foldArgumentKey(alias);
+    const shadowed = (declaredByFold.get(fold) ?? []).filter((key) => key !== target);
+    if (shadowed.length > 0) {
+      diagnostics.push(
+        diagnostic(
+          `Tool '${definitionName}' aliases '${alias}' to '${target}', but '${alias}' is a case-` +
+            `style variant of ${shadowed.join(' and ')}. Alias it to the key it spells, or ` +
+            `rename it so the two readings cannot disagree.`,
+        ),
+      );
+    }
+
+    aliasesByFold.set(fold, [...(aliasesByFold.get(fold) ?? []), { alias, target }]);
+  }
+
+  for (const entries of aliasesByFold.values()) {
+    const targets = new Set(entries.map((entry) => entry.target));
+    if (entries.length > 1 && targets.size > 1) {
+      diagnostics.push(
+        diagnostic(
+          `Tool '${definitionName}' aliases ${entries
+            .map((entry) => `'${entry.alias}' → '${entry.target}'`)
+            .join(' and ')}, which differ only in case style but name different keys. Pick one ` +
+            `target, or spell the aliases so they are distinguishable.`,
+        ),
+      );
+    }
   }
 
   return diagnostics;

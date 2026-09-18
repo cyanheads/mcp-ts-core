@@ -469,6 +469,78 @@ describe('createToolHandler', () => {
       handler: pass,
     });
 
+    const objUnion = tool('obj_union_tool', {
+      description: 'Two-object union.',
+      input: z.object({
+        spec: z
+          .union([
+            z.object({ kind: z.enum(['x', 'y']).describe('Kind.'), n: z.number().describe('N.') }),
+            z.object({ other: z.string().describe('Other.') }),
+          ])
+          .describe('Spec.'),
+      }),
+      output: ok,
+      handler: pass,
+    });
+
+    const mixedUnion = tool('mixed_union_tool', {
+      description: 'A scalar branch beside an object branch.',
+      input: z.object({
+        spec: z
+          .union([
+            z.enum(['x', 'y']).describe('A bare choice.'),
+            z.object({ other: z.string().describe('Other.') }),
+          ])
+          .describe('Spec.'),
+      }),
+      output: ok,
+      handler: pass,
+    });
+
+    const nestedBranchUnion = tool('nested_branch_union_tool', {
+      description: 'A union branch whose issue sits two segments deep.',
+      input: z.object({
+        spec: z
+          .union([
+            z.object({
+              inner: z.object({ deep: z.number().describe('Deep.') }).describe('Inner.'),
+            }),
+            z.object({ other: z.string().describe('Other.') }),
+          ])
+          .describe('Spec.'),
+      }),
+      output: ok,
+      handler: pass,
+    });
+
+    const dupUnion = tool('dup_union_tool', {
+      description: 'Two branches, same message, different field.',
+      input: z.object({
+        spec: z
+          .union([
+            z.object({ a: z.number().describe('A.') }),
+            z.object({ b: z.number().describe('B.') }),
+          ])
+          .describe('Spec.'),
+      }),
+      output: ok,
+      handler: pass,
+    });
+
+    const sameLineUnion = tool('same_line_union_tool', {
+      description: 'Two branches whose rendered line is identical once the path is included.',
+      input: z.object({
+        spec: z
+          .union([
+            z.object({ a: z.number().describe('A.') }),
+            z.object({ a: z.number().min(2).describe('A, at least two.') }),
+          ])
+          .describe('Spec.'),
+      }),
+      output: ok,
+      handler: pass,
+    });
+
     /** Drives a definition through the production factory with raw arguments. */
     async function reject(def: unknown, args: Record<string, unknown>) {
       const handler = createToolHandler(def as AnyToolDefinition, services, notifiers);
@@ -641,6 +713,86 @@ describe('createToolHandler', () => {
         );
         expect(detail(wrong, 'required_court_tool')).toBe(
           'court: Invalid option: expected one of "CJEU"|"GC"',
+        );
+      });
+    });
+
+    // ---------------------------------------------------------------------
+    // #447 — an object branch names the field its issue is about
+    // ---------------------------------------------------------------------
+
+    describe('union branch paths (#447)', () => {
+      it('prefixes each branch issue with its own path, joining within a branch differently', async () => {
+        const result = await reject(objUnion, { spec: {} });
+
+        expect(detail(result, 'obj_union_tool')).toBe(
+          'spec: kind: Invalid option: expected one of "x"|"y"; ' +
+            'n: Invalid input: expected number, received undefined or ' +
+            'other: Invalid input: expected string, received undefined',
+        );
+      });
+
+      it('leaves a scalar branch unprefixed beside a prefixed object branch', async () => {
+        const result = await reject(mixedUnion, { spec: {} });
+
+        expect(detail(result, 'mixed_union_tool')).toBe(
+          'spec: Invalid option: expected one of "x"|"y" or ' +
+            'other: Invalid input: expected string, received undefined',
+        );
+      });
+
+      it('renders every segment of a multi-segment branch path', async () => {
+        const result = await reject(nestedBranchUnion, { spec: { inner: { deep: 'x' } } });
+
+        expect(detail(result, 'nested_branch_union_tool')).toBe(
+          'spec: inner.deep: Invalid input: expected number, received string or ' +
+            'other: Invalid input: expected string, received undefined',
+        );
+      });
+
+      it('keeps both alternatives when they differ only by the field they name', async () => {
+        const result = await reject(dupUnion, { spec: {} });
+
+        expect(detail(result, 'dup_union_tool')).toBe(
+          'spec: a: Invalid input: expected number, received undefined or ' +
+            'b: Invalid input: expected number, received undefined',
+        );
+      });
+
+      it('still collapses two branches whose rendered line is identical with the path', async () => {
+        const result = await reject(sameLineUnion, { spec: {} });
+
+        expect(detail(result, 'same_line_union_tool')).toBe(
+          'spec: a: Invalid input: expected number, received undefined',
+        );
+      });
+
+      it('carries the prefixed text into data.recovery.hint', async () => {
+        const result = await reject(objUnion, { spec: {} });
+
+        expect(hint(result)).toBe(
+          'kind: Invalid option: expected one of "x"|"y"; ' +
+            'n: Invalid input: expected number, received undefined or ' +
+            'other: Invalid input: expected string, received undefined',
+        );
+      });
+
+      it('leaves data.issues the raw nested Zod issues', async () => {
+        const result = await reject(objUnion, { spec: {} });
+        const issues = envelope(result).data?.issues as Array<{
+          code: string;
+          errors: Array<Array<{ path: string[] }>>;
+        }>;
+
+        expect(issues[0]?.code).toBe('invalid_union');
+        expect(issues[0]?.errors[0]?.[0]?.path).toEqual(['kind']);
+      });
+
+      it('reports an omitted union field as a plain invalid_type at the outer path', async () => {
+        const result = await reject(objUnion, {});
+
+        expect(detail(result, 'obj_union_tool')).toBe(
+          'spec: Invalid input: expected object, received undefined',
         );
       });
     });

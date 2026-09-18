@@ -81,6 +81,7 @@ export type {
 export { resource } from '@/mcp-server/resources/utils/resourceDefinition.js';
 /** The accepted tool definition shape. */
 export type { AnyToolDef } from '@/mcp-server/tools/tool-registration.js';
+export type { InputHandlingOptions } from '@/mcp-server/tools/utils/inputPrevalidation.js';
 export type {
   AnyToolDefinition,
   DisabledMetadata,

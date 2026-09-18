@@ -4,7 +4,7 @@ description: >
   McpError constructor, JsonRpcErrorCode reference, and error handling patterns for `@cyanheads/mcp-ts-core`. Use when looking up error codes, understanding where errors should be thrown vs. caught, or using ErrorHandler.tryCatch in services.
 metadata:
   author: cyanheads
-  version: "1.12"
+  version: "1.13"
   audience: external
   type: reference
 ---
@@ -115,6 +115,8 @@ throw ctx.fail('no_match', `No item ${id}`, {
   recovery: { hint: `No item ${id}; try IDs 1-100 instead.` },
 });
 ```
+
+> **A recovery hint names a capability, never an internal method.** The reader is a model whose only reachable surface is this server's tool names — it cannot call a TypeScript method, set a library option, or re-run an internal function. `Re-stage the table via registerTable()` is unfollowable and invites a hallucinated tool call; `Re-run the tool that produced this table to stage it again, or list the currently staged tables with this server's dataframe-describe tool` is actionable from where the reader sits. Name a condition the caller cannot observe — an option flag they never set — and the hint is noise for the same reason. The framework holds its own throws to this rule: the canvas SQL gate's rejections point at the dataframe-query and dataframe-describe capabilities rather than the provider methods behind them.
 
 `ctx.recoveryFor` is the first member of a planned **family of opt-in resolution helpers**. Future contract-bound fields (`troubleshootingFor`, `userMessageFor`, …) follow the same shape: single-purpose, spreadable wire-shape, `{}` fallback when not applicable.
 
@@ -369,6 +371,8 @@ Important properties:
 - **`invalid_arguments` is the framework-owned reason on every argument rejection.** The rejection carries `data.reason: "invalid_arguments"` and a `data.recovery.hint` the framework synthesizes from the Zod issues, the arguments as sent, and the root schema — an unknown key names the root properties the tool does accept, a wrong type names the type to send instead, missing fields collapse into one `Provide …` sentence, and anything else carries its own diagnostic. The hint rides `content[]` as `Recovery: …` like any other, so format-only clients see it too. Authors declare nothing for this: the rejection happens before the handler and the hint is derived from the schema.
 - **A schema constraint cannot carry a *declared* reason.** Because the handler never runs, a rejection by `.max()`, `.regex()`, `.min()`, or any other Zod refinement bypasses `errors[]` entirely: it arrives as `InvalidParams` with `data.issues` under the framework's `invalid_arguments`, never the `reason` and authored `recovery` of a contract entry — so a caller has nothing tool-specific to branch on and gets only the schema-derived hint. Decide per constraint which surface it belongs on. A bound that is purely structural — the input is the wrong shape and no guidance beyond the diagnostic would help — belongs on the schema, where it also advertises itself in `inputSchema`. A bound a caller is expected to recover from belongs in the handler as `ctx.fail('reason', message, ctx.recoveryFor('reason'))` against a declared `errors[]` entry, with the limit restated in the field's `.describe()` so it is still visible before the call. Enforcing the same bound in both places is the trap: the schema wins, and the contract entry becomes unreachable while still reading as covered.
 - **A rejected value never reaches the client.** The rendered sentence distinguishes an omitted field from a wrong one (`what: Missing required field. Expected one of "os"|"cpu"` rather than the invalid-option text), and a union renders the branch that says what would have been accepted instead of Zod's `Invalid input` placeholder. Both read the arguments in-process for the absent/present bit and the arriving type only — `data.issues` ships the Zod issues as-is, and no value the caller sent is copied onto them.
+- **A union branch names its own field.** Each branch issue is prefixed with the path it names relative to that branch, so two alternatives differing only in which field they require stay distinguishable: `spec: kind: Invalid option: expected one of "x"|"y"; n: Invalid input: expected number, received undefined or other: Invalid input: expected string, received undefined`. Issues *within* one branch join on `; `, across branches on ` or `, and top-level issues on `, ` — three nestings, three separators. A scalar branch carries no path and renders as before. `data.issues` still ships the raw nested Zod issues, and `data.recovery.hint` carries the same prefixed text.
+- **Some rejections never happen at all.** An ordered pre-validation step wraps the parse: a client-added root key is dropped, a declared or case-style key alias is rewritten to its canonical name, and — only after a failed parse — a JSON-stringified array is repaired and the arguments parsed once more. A call the step rescues succeeds outright and produces no error envelope; a call it cannot rescue throws the rejection above verbatim, same code, message, `data.issues`, and `data.recovery.hint`. See the `add-tool` skill for the boundaries and the per-server switches.
 
 **Handler — throw freely, no try/catch:**
 
@@ -450,7 +454,7 @@ if (!response.ok) {
 
 Captures the response body (truncated, configurable limit) and `Retry-After` header (stored as `data.retryAfter`) into `error.data`. The codes it produces line up with `withRetry`'s transient-code set, so retryable responses are retried automatically.
 
-> **Body reaches the client.** `error.data` is forwarded to the MCP client as `structuredContent.error.data` (tool errors) or JSON-RPC `error.data` (resource errors). Upstream 401/403/422 responses sometimes echo token claims, internal user IDs, or schema validation hints — that text becomes client-visible. For sensitive endpoints, pass `captureBody: false` (or `bodyLimit: 0`) so the body stays out of `data`. Defaults remain `captureBody: true` because most upstreams return useful diagnostic text and silent dropping helps no one debug.
+> **`error.data` reaches the client.** It is forwarded to the MCP client as `structuredContent.error.data` (tool errors) or JSON-RPC `error.data` (resource errors). Upstream 401/403/422 responses sometimes echo token claims, internal user IDs, or schema validation hints — that text becomes client-visible. For sensitive endpoints, pass `captureBody: false` (or `bodyLimit: 0`) so the body stays out of `data`. Defaults remain `captureBody: true` because most upstreams return useful diagnostic text and silent dropping helps no one debug. The upstream **URL** defaults the other way and is omitted, since a request URL routinely carries user input, internal identifiers, or an API key in its query string; `includeUrl: true` puts the full `response.url` on `data.url`. The message names the host either way.
 
 Full status table:
 

@@ -13,6 +13,7 @@ import {
   lintCanvasConsumerPairing,
   lintToolDefinition,
 } from '@/linter/rules/tool-rules.js';
+import { validateDefinitions } from '@/linter/validate.js';
 import { headerParam } from '@/mcp-server/tools/utils/headerParam.js';
 
 // ---------------------------------------------------------------------------
@@ -512,5 +513,116 @@ describe('lintAppToolResourcePairing · template compilation (#431)', () => {
     ['ui://app/{unclosed', 'ui://app/{unclosed', true],
   ])('%s vs %s pairs: %s', (uriTemplate, resourceUri, expected) => {
     expect(pairs(uriTemplate as string, resourceUri as string)).toBe(expected);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// lintToolDefinition — inputAliases (#452)
+// ---------------------------------------------------------------------------
+
+describe('lintToolDefinition — inputAliases', () => {
+  /** The `input-alias-conflict` diagnostics a definition produces. */
+  function conflicts(overrides: Record<string, unknown>): string[] {
+    return lintToolDefinition(validTool(overrides))
+      .filter((d) => d.rule === 'input-alias-conflict')
+      .map((d) => d.message);
+  }
+
+  it('is silent when no aliases are declared', () => {
+    expect(conflicts({})).toHaveLength(0);
+  });
+
+  it('is silent for aliases that resolve to exactly one declared key', () => {
+    expect(conflicts({ inputAliases: { search_query: 'query', q: 'query' } })).toHaveLength(0);
+  });
+
+  it('is silent on a union root when the target exists on one variant', () => {
+    const diagnostics = conflicts({
+      input: z.discriminatedUnion('mode', [
+        z.object({
+          mode: z.literal('byId').describe('By ID.'),
+          recordId: z.string().describe('Record ID.'),
+        }),
+        z.object({
+          mode: z.literal('byName').describe('By name.'),
+          fullName: z.string().describe('Name.'),
+        }),
+      ]),
+      inputAliases: { id: 'recordId' },
+    });
+
+    expect(diagnostics).toHaveLength(0);
+  });
+
+  it('errors when an alias equals a declared key', () => {
+    const [message] = conflicts({
+      input: z.object({
+        query: z.string().describe('Search query'),
+        q: z.string().optional().describe('Short query'),
+      }),
+      inputAliases: { q: 'query' },
+    });
+
+    expect(message).toContain("declares 'q' as both an input key and an alias");
+  });
+
+  it('errors when an alias target does not exist', () => {
+    const [message] = conflicts({ inputAliases: { q: 'searchQuery' } });
+
+    expect(message).toContain("'searchQuery', which is not a declared input key");
+    expect(message).toContain('declared: query');
+  });
+
+  it('errors when two declared keys case-fold to one name', () => {
+    const messages = conflicts({
+      input: z.object({
+        maxResults: z.number().optional().describe('Maximum results'),
+        max_results: z.number().optional().describe('Legacy maximum results'),
+        query: z.string().describe('Search query'),
+      }),
+      inputAliases: { limit: 'query' },
+    });
+
+    expect(messages.some((m) => m.includes('differ only in case style'))).toBe(true);
+  });
+
+  it('errors when an alias case-folds to a declared key other than its target', () => {
+    const messages = conflicts({
+      input: z.object({
+        query: z.string().describe('Search query'),
+        maxResults: z.number().optional().describe('Maximum results'),
+      }),
+      inputAliases: { max_results: 'query' },
+    });
+
+    expect(messages.some((m) => m.includes('is a case-style variant of maxResults'))).toBe(true);
+  });
+
+  it('errors when two aliases case-fold to one name with different targets', () => {
+    const messages = conflicts({
+      input: z.object({
+        query: z.string().describe('Search query'),
+        maxResults: z.number().optional().describe('Maximum results'),
+      }),
+      inputAliases: { 'search-term': 'query', search_term: 'maxResults' },
+    });
+
+    expect(
+      messages.some((m) => m.includes('differ only in case style but name different keys')),
+    ).toBe(true);
+  });
+
+  it('errors when inputAliases is not an object of string targets', () => {
+    expect(conflicts({ inputAliases: ['query'] })[0]).toContain('must be an object mapping');
+    expect(conflicts({ inputAliases: { q: 7 } })[0]).toContain('must name a declared input key');
+  });
+
+  it('links every diagnostic to the rule reference', () => {
+    const report = validateDefinitions({ tools: [validTool({ inputAliases: { q: 'nope' } })] });
+
+    expect(report.passed).toBe(false);
+    expect(
+      report.errors.some((d) => d.message.includes('api-linter/SKILL.md#input-alias-conflict')),
+    ).toBe(true);
   });
 });

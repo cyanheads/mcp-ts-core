@@ -71,6 +71,44 @@ export const ATTR_MCP_TOOL_BATCH_SUCCEEDED = 'mcp.tool.batch.succeeded_count';
 export const ATTR_MCP_TOOL_BATCH_FAILED = 'mcp.tool.batch.failed_count';
 
 // ============================================================================
+// MCP Tool Input Pre-validation Attributes
+// ============================================================================
+
+// Every value below is author- or framework-defined, never the caller's own
+// text. A caller-supplied key would mint a permanent time series per spelling a
+// client invents — the unbounded-label leak #114 removed from the rate-limiter
+// counter. The raw key and alias ride the debug log instead, which is where an
+// operator looks for a new client artifact and where cardinality costs nothing.
+
+/**
+ * Why a root argument key was dropped: the ignore-list entry that matched
+ * (built-in, or a server's own `input.ignoreKeys`), or `underscore_prefix` for
+ * the heuristic. Bounded by the ignore list's length plus one.
+ */
+export const ATTR_MCP_INPUT_IGNORE_RULE = 'mcp.input.ignore_rule';
+
+/** The declared input key a rewrite resolved to — one of the tool's own properties. */
+export const ATTR_MCP_INPUT_TARGET = 'mcp.input.target';
+
+/** Which half of the alias stage fired: `declared` or `case_style`. */
+export const ATTR_MCP_INPUT_ALIAS_KIND = 'mcp.input.alias_kind';
+
+/** Which representation repair earned validity (`stringified_array`). */
+export const ATTR_MCP_INPUT_COERCION = 'mcp.input.coercion';
+
+// ============================================================================
+// MCP Outbound Pacer Attributes
+// ============================================================================
+
+/**
+ * Author-set label of the outbound pacer a queue metric belongs to
+ * (`createPacer({ name })`). The only attribute the four `mcp.pacer.*`
+ * instruments carry — bounded by the server's own configuration, never by
+ * anything a caller supplies, for the cardinality reason stated above.
+ */
+export const ATTR_MCP_PACER_NAME = 'mcp.pacer.name';
+
+// ============================================================================
 // MCP Resource Attributes
 // ============================================================================
 

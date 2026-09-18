@@ -27,8 +27,14 @@ import { withRequiredScopes } from '@/mcp-server/transports/auth/lib/authUtils.j
 import { internalError, JsonRpcErrorCode, McpError } from '@/types-global/errors.js';
 import { asRequestCancelled, ErrorHandler } from '@/utils/internal/error-handler/errorHandler.js';
 import { measureToolExecution } from '@/utils/internal/performance.js';
-import { requestContextService } from '@/utils/internal/requestContext.js';
+import { type RequestContext, requestContextService } from '@/utils/internal/requestContext.js';
 import { ATTR_MCP_TOOL_ENRICHED } from '@/utils/telemetry/attributes.js';
+import {
+  countCoerced,
+  type InputHandlingOptions,
+  prevalidateToolArguments,
+  repairRepresentations,
+} from './inputPrevalidation.js';
 import { isZodObjectSchema } from './schemaShape.js';
 import type { AnyToolDefinition } from './toolDefinition.js';
 
@@ -39,6 +45,7 @@ import type { AnyToolDefinition } from './toolDefinition.js';
 /** The factory's own contract, shared with the resource factory. */
 export type { HandlerServices } from '@/mcp-server/handlerContext.js';
 export type { NotifierSources } from '@/mcp-server/notifications.js';
+export type { InputHandlingOptions } from './inputPrevalidation.js';
 
 // ---------------------------------------------------------------------------
 // Default formatter
@@ -196,6 +203,11 @@ function selectUnionBranches(
  *   selected branches instead, joined by ` or `. (When exactly one branch
  *   matched the base type and failed only a check, Zod returns that branch's
  *   issues directly and this never fires.)
+ * - **#447** — an object branch's issues carry their own branch-relative path,
+ *   so {@link renderBranchIssue} prefixes each one with it and no alternative
+ *   goes unnamed. Issues *within* a branch join on `; ` rather than the `, `
+ *   that {@link formatInputValidationMessage} joins top-level issues with, so a
+ *   reader can tell the two nestings apart.
  * - **#378** — an `invalid_value` issue (`z.enum`, `z.literal`) names an
  *   expected set without naming what arrived, so an omitted field and a wrong
  *   choice render identically. When the key is `absent`, say so and keep the
@@ -210,7 +222,7 @@ function renderIssueMessage(issue: ArgumentIssue, absent: boolean): string {
     const branches = selectUnionBranches(issue.errors);
     if (branches.length === 0) return issue.message;
     const rendered = branches.map((branch) =>
-      branch.map((branchIssue) => renderIssueMessage(branchIssue, absent)).join(', '),
+      branch.map((branchIssue) => renderBranchIssue(branchIssue, absent)).join('; '),
     );
     return [...new Set(rendered)].join(' or ');
   }
@@ -218,6 +230,22 @@ function renderIssueMessage(issue: ArgumentIssue, absent: boolean): string {
     return `Missing required field. ${expectedValuesText(issue.values)}`;
   }
   return issue.message;
+}
+
+/**
+ * One issue of a union branch, prefixed with the branch-relative path it names.
+ *
+ * A scalar branch carries `path: []` and renders exactly as before; an object
+ * branch's issues each name a field of that branch, and without the prefix two
+ * alternatives that differ only in which field they require read as one
+ * unattributed sentence — or collapse outright, since the caller dedupes
+ * rendered branches. The outer path stays where
+ * {@link formatInputValidationMessage} puts it; only the branch-relative
+ * segments are added here.
+ */
+function renderBranchIssue(issue: ArgumentIssue, absent: boolean): string {
+  const message = renderIssueMessage(issue, absent);
+  return issue.path.length > 0 ? `${issue.path.map(String).join('.')}: ${message}` : message;
 }
 
 /**
@@ -332,6 +360,14 @@ function buildArgumentRecoveryHint(def: AnyToolDefinition, error: ZodError, args
   return sentences.join(' ');
 }
 
+/** What {@link parseToolArguments} needs beyond the definition and the arguments. */
+export interface ParseToolArgumentsOptions {
+  /** Request context the pre-validation step's debug logs correlate to. */
+  context?: RequestContext;
+  /** Server-level pre-validation switches, from `createApp({ input })`. */
+  input?: InputHandlingOptions;
+}
+
 /**
  * Validates raw tool arguments against the definition's `input` schema, or
  * throws the rejection a client receives on the wire: `InvalidParams`
@@ -340,6 +376,14 @@ function buildArgumentRecoveryHint(def: AnyToolDefinition, error: ZodError, args
  * `data.reason` plus a `data.recovery.hint` {@link buildArgumentRecoveryHint}
  * synthesizes (#445). {@link buildToolErrorResult} mirrors that hint into
  * `content[]`, so it reaches format()-only clients with no extra work.
+ *
+ * An ordered pre-validation step wraps the parse. Before it,
+ * {@link prevalidateToolArguments} drops client-added keys (#453) and rewrites
+ * key aliases (#452); after a failure — and only then —
+ * {@link repairRepresentations} undoes a stringified array and the arguments
+ * are parsed once more (#234), the repair kept only if the author's own schema
+ * now accepts it. When nothing validates, the *original* rejection is thrown
+ * verbatim, built from the arguments that produced it.
  *
  * The single argument-rejection path. {@link createToolHandler} and the
  * `runToolContract` test helper both route through it, so a test written to
@@ -351,20 +395,32 @@ function buildArgumentRecoveryHint(def: AnyToolDefinition, error: ZodError, args
 export function parseToolArguments<TDefinition extends AnyToolDefinition>(
   def: TDefinition,
   input: unknown,
+  options: ParseToolArgumentsOptions = {},
 ): z.infer<TDefinition['input']> {
-  const parsed = def.input.safeParse(input);
-  if (!parsed.success) {
-    throw new McpError(
-      JsonRpcErrorCode.InvalidParams,
-      formatInputValidationMessage(def.name, parsed.error, input),
-      {
-        issues: parsed.error.issues,
-        reason: INVALID_ARGUMENTS_REASON,
-        recovery: { hint: buildArgumentRecoveryHint(def, parsed.error, input) },
-      },
-    );
+  const prepared = prevalidateToolArguments(def, input, options.input, options.context);
+  const parsed = def.input.safeParse(prepared);
+  if (parsed.success) return parsed.data as z.infer<TDefinition['input']>;
+
+  if (options.input?.coerce !== false) {
+    const repaired = repairRepresentations(prepared, parsed.error.issues);
+    if (repaired !== prepared) {
+      const retried = def.input.safeParse(repaired);
+      if (retried.success) {
+        countCoerced(def.name, options.context);
+        return retried.data as z.infer<TDefinition['input']>;
+      }
+    }
   }
-  return parsed.data as z.infer<TDefinition['input']>;
+
+  throw new McpError(
+    JsonRpcErrorCode.InvalidParams,
+    formatInputValidationMessage(def.name, parsed.error, prepared),
+    {
+      issues: parsed.error.issues,
+      reason: INVALID_ARGUMENTS_REASON,
+      recovery: { hint: buildArgumentRecoveryHint(def, parsed.error, prepared) },
+    },
+  );
 }
 
 /**
@@ -703,7 +759,10 @@ export function createToolHandler(
       // to here (see `deferInputValidation`) so a rejection carries the
       // structured error envelope; the message and `InvalidParams`
       // classification match what the SDK produced before (#377).
-      const validatedInput = parseToolArguments(def, input);
+      const validatedInput = parseToolArguments(def, input, {
+        context: appContext,
+        ...(services.input && { input: services.input }),
+      });
 
       // Read by the success-attributes thunk below, which the measurement
       // evaluates after the callback settles.

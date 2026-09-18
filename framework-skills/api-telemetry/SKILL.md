@@ -4,7 +4,7 @@ description: >
   Catalog of OpenTelemetry instrumentation built into framework `@cyanheads/mcp-ts-core` — spans, metrics, completion logs, env config, runtime caveats, custom instrumentation patterns, and cardinality rules. Use when enabling OTel export, adding custom spans or metrics in services, debugging missing telemetry, looking up attribute names, or deciding what's safe to put on a metric attribute vs. a span.
 metadata:
   author: cyanheads
-  version: "1.9"
+  version: "1.11"
   audience: external
   type: reference
 ---
@@ -127,6 +127,9 @@ All custom metrics are namespaced `mcp.*` (or `process.*` / `http.client.*` wher
 | `mcp.tool.input_bytes` | histogram | `bytes` | `mcp.tool.name` |
 | `mcp.tool.output_bytes` | histogram | `bytes` | `mcp.tool.name` (success only; the handler's returned value) |
 | `mcp.tool.param.usage` | counter | `{uses}` | `mcp.tool.name`, `mcp.tool.param` (top-level keys supplied by caller) |
+| `mcp.input.ignored_key` | counter | `{keys}` | `mcp.tool.name`, `mcp.input.ignore_rule` (the ignore-list entry that matched, or `underscore_prefix`) |
+| `mcp.input.aliased` | counter | `{keys}` | `mcp.tool.name`, `mcp.input.target` (the declared key), `mcp.input.alias_kind` (`declared`/`case_style`) |
+| `mcp.input.coerced` | counter | `{calls}` | `mcp.tool.name`, `mcp.input.coercion` (`stringified_array`) |
 | `mcp.resource.reads` | counter | `{reads}` | `mcp.resource.name`, `mcp.resource.success` |
 | `mcp.resource.duration` | histogram | `ms` | `mcp.resource.name`, `mcp.resource.success` |
 | `mcp.resource.errors` | counter | `{errors}` | `mcp.resource.name` |
@@ -138,6 +141,27 @@ All custom metrics are namespaced `mcp.*` (or `process.*` / `http.client.*` wher
 | `mcp.prompt.output_bytes` | histogram | `bytes` | `mcp.prompt.name` (success only) |
 | `mcp.prompt.message_count` | histogram | `{messages}` | `mcp.prompt.name` |
 | `mcp.requests.active` | up/down counter | `{requests}` | — (in-flight handler executions, all three types) |
+
+The three `mcp.input.*` counters are the only trace of the pre-validation step a tool call leaves. Each marks a call the strict `input` schema would otherwise have rejected: a client-added root key dropped, a key rewritten to its canonical spelling, or a stringified array repaired after the parse failed (one increment per repaired call, not per repaired value). Nothing about any of them reaches the response, so a client artifact spreading across a fleet shows up here first. All three are lazy: a server whose callers never trip a stage emits no series at all.
+
+**Every label is author- or framework-defined — the caller's own key text is never one.** `mcp.input.ignore_rule` is the ignore-list entry that matched or the fixed `underscore_prefix`, bounded by the list's length plus one. `mcp.input.aliased` is labelled by the canonical `mcp.input.target` (a declared property of the tool) and `mcp.input.alias_kind`, not by the alias the caller sent — the case-style half accepts every `-`/`_`/case permutation of a declared key, so labelling the alias would put a caller-controlled set on a permanent series. That is the unbounded-label leak removed from the rate-limiter counter in 0.9.0: a metric attribute set lives until process restart, so anything the caller names belongs on a span or in a log, never on a counter.
+
+**To find the raw key, read the debug log**, which carries `ignoredKey` / `alias` alongside the bounded rule and target. The counter tells you a client artifact exists and how often; the log tells you what it is called, which is what you need before extending `input.ignoreKeys`, declaring an `inputAliases` entry, or renaming a parameter.
+
+### Outbound pacer
+
+`createPacer` (`/utils`) emits four instruments, all lazy — a server that never queues against an upstream emits no series at all.
+
+| Metric | Type | Unit | Attributes |
+|:-------|:-----|:-----|:-----------|
+| `mcp.pacer.queue_depth` | up/down counter | `{requests}` | `mcp.pacer.name` |
+| `mcp.pacer.wait` | histogram | `ms` | `mcp.pacer.name` (enqueue → dispatch, not task duration) |
+| `mcp.pacer.sheds` | counter | `{requests}` | `mcp.pacer.name` (rejected before dispatch — wait budget or queue depth) |
+| `mcp.pacer.cooldowns` | counter | `{cooldowns}` | `mcp.pacer.name` (gate closed by an upstream rate limit) |
+
+`mcp.pacer.name` is the **only** attribute on all four — `createPacer({ name })`, set by the server author and bounded by its own configuration. Nothing a caller supplies reaches these series, for the reason above; which upstream call was shed belongs on a span or in a log.
+
+Read together: `queue_depth` rising while `wait` climbs means the configured rate is below demand; `sheds` rising against a flat `queue_depth` means callers' `maxWaitMs` budgets are tighter than the window; `cooldowns` rising at all means the upstream is answering 429, so the configured `limits` sit above what it actually grants.
 
 ### Storage, LLM, speech, graph
 
@@ -173,7 +197,7 @@ All custom metrics are namespaced `mcp.*` (or `process.*` / `http.client.*` wher
 | Metric | Type | Unit | Attributes |
 |:-------|:-----|:-----|:-----------|
 | `mcp.errors.classified` | counter | `{errors}` | `mcp.error.classified_code` (JSON-RPC code), `operation` |
-| `mcp.ratelimit.rejections` | counter | `{rejections}` | `mcp.rate_limit.key` |
+| `mcp.ratelimit.rejections` | counter | `{rejections}` | — (the rate-limit key is caller-supplied and typically per-client, so it would materialize an unbounded series in the meter; per-key attribution lives on the span instead) |
 | `http.client.request.duration` | histogram | `s` | `http.request.method`, `server.address`, `http.response.status_code` (when > 0; absent on network errors before a response is received) |
 
 ### Process

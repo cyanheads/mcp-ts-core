@@ -4,7 +4,7 @@ description: >
   Scaffold a new MCP tool definition. Use when the user asks to add a tool, create a new tool, or implement a new capability for the server.
 metadata:
   author: cyanheads
-  version: "2.26"
+  version: "2.27"
   audience: external
   type: reference
 ---
@@ -276,6 +276,45 @@ Two limits worth knowing when you write a schema:
 - **Root level only**, matching `.strict()` itself. A nested `z.object()` inside the input still strips unknown keys unless it is strict in its own right — mark the nested option objects you want guarded.
 - **An explicit opening wins.** A definition that declared `.passthrough()` or `.catchall(...)` asked for an open object, and `tool()` leaves it alone. Use that (deliberately) for tools that proxy arbitrary upstream query parameters.
 - **A union root is strictened per variant.** See below — the branch is where the properties live, so that is where `additionalProperties: false` lands.
+
+**Declare `.strict()` before `.describe()` / `.meta()` on the root.** Zod keys both to the schema *instance*, and `.strict()` clones without it — so `z.object({…}).describe('…')` loses the description when `tool()` strictens, and the advertised `inputSchema` carries none. `z.object({…}).strict().describe('…')` keeps it, because an already-strict schema is returned untouched. `lint:mcp` reports the loss as `schema-root-meta-discarded`. It bites the root only (and each variant of a union root); field- and nested-level describes are unaffected.
+
+### Three things the framework fixes before the schema sees the arguments
+
+Strict input is right for a misspelling the caller can fix, and wrong when the arguments the model wrote were correct and something between the model and the schema was not. An ordered step inside `parseToolArguments` covers those cases: **drop client-added keys → key aliases → parse → on failure, repair and one re-parse.** All three stages are on by default, none changes what `tools/list` advertises, and none appears in a response — each emits a debug log and a counter (`mcp.input.ignored_key`, `mcp.input.aliased`, `mcp.input.coerced`) instead, so a new client artifact surfaces in telemetry rather than as a failed call.
+
+**1. Client-added root keys are dropped.** Some clients put their own keys inside `arguments`: a placeholder when the model sends none, a call description, a call id, or a `_meta` block that belongs on `params`. The model never wrote them and cannot remove them, so the retry fails identically. An undeclared root key is dropped when it is underscore-prefixed or on the built-in list (`_meta`, `tool_call_description`, `toolCallId`). Three boundaries: a declared key is never dropped (on a union root, that means every variant's keys); an author-opened root is left alone; and a tool declaring any underscore-prefixed key of its own switches the underscore rule off — otherwise a misspelled `_cursor` would vanish silently, which is the failure strict input exists to prevent.
+
+**2. A key alias reaches the handler under the canonical name.** Declare the mappings you know:
+
+```ts
+export const drugProfile = tool('drug_profile', {
+  input: z.object({ drug: z.string().describe('Generic or brand name.') }),
+  inputAliases: { drug_name: 'drug', substance: 'drug' },
+  // …
+});
+```
+
+Alongside those, an undeclared key whose case-folded form (`-`/`_` stripped, lowercased) names exactly one declared key is rewritten too — `max_results`, `Max-Results`, and `MAXRESULTS` all reach a declared `maxResults`, with nothing declared. Neither half advertises anything: `inputSchema` is byte-identical with or without `inputAliases`, so the canonical key keeps its place in `required` and the model is still told to use it.
+
+Declare an alias where the meaning is certain and the mapping is one-to-one — a sibling tool's spelling for the same concept, the upstream API's own name, a shorthand weaker models reach for. It is not fuzzy matching: a key matching no alias and no declared key is still rejected by name, with the accepted-key hint. Four boundaries: a rewrite applies only when the target key is absent (alias *and* target present fails exactly as it does today); an author-opened root is never rewritten; a union root resolves against the variant the discriminator selects, and rewrites nothing when the discriminator is absent or unrecognized; and a `headerParam`-designated target is never rewritten *to* — the SDK cross-checks the `Mcp-Param-<Name>` header against the raw body before dispatch, so a later rewrite would hand your handler a value no intermediary attested. `lint:mcp` rejects an alias that shadows a declared key, names a target that does not exist, or is ambiguous against another alias or key (`input-alias-conflict`).
+
+**3. A stringified array is repaired after the parse fails.** `statusFilter: "[\"RECRUITING\"]"` against `z.array(z.string())` is a serialization slip the server can undo with certainty — `JSON.parse` is the exact inverse of the `JSON.stringify` that produced it, which is what separates it from the nearest-key guessing strict input refuses. The repair runs *only* on the failure branch, *only* at the paths the rejection's own issues name, and is kept only if the repaired arguments then pass your schema. So it cannot touch a value that was already valid — a free-text field legitimately holding `"[1,2,3]"` is not in the issue list, so it survives untouched even when the same call carries a genuine stringified array in another field. It walks values only: no key is added, dropped, or renamed. When nothing validates, the original rejection is thrown verbatim: same code, message, `data.issues`, and `data.recovery.hint`.
+
+Turn any stage off per server — there is no per-tool switch:
+
+```ts
+await createApp({
+  input: {
+    ignoreKeys: ['some_client_field'], // adds to the built-in list; `false` disables the stage
+    caseStyleAliases: false,           // declared `inputAliases` only
+    coerce: false,                     // never retry a failed parse
+  },
+  tools: allToolDefinitions,
+});
+```
+
+Those three stages are the whole of the framework's input edge: argument **key** names, and one **value** shape — a JSON-stringified array, which `JSON.parse` inverts with certainty. Every other value normalization is domain knowledge and belongs to the tool: the case or bare-leaf form of a code, a unit or vocabulary alias, a composite identifier assembled from two arguments, a delimiter-joined list, a spelled-out name. Which variants a given input accepts is decided per input at design time (`design-mcp-server` § *Parameter descriptions*) and applied at the head of the handler, on the unambiguous mappings only.
 
 ### Multi-mode tools take a discriminated-union input
 
@@ -594,6 +633,8 @@ format: (result) => [{
 }],
 ```
 
+**A parsed value is the same problem one step later.** `Number(raw)` over an absent or non-numeric upstream field yields `NaN`; a missing nested path yields `null` or `undefined`. Against a required `z.number()` / `z.string()` each of those fails the effective-output parse, and the agent gets an internal error in place of a record the tool otherwise had. Guard where the value is parsed, not at the schema: when a documented-sparse feed supplies nothing usable for a field, omit it (declare it `.optional()`, render it `Not available`) rather than passing a `NaN`, a `null`, or a coerced `0` into the return. Decide per field which upstream absences are expected — the honesty rule above, applied to values the server computes rather than copies.
+
 ### Error classification and messaging
 
 **Recommended: declare an `errors[]` contract.** A typed contract surfaces in `tools/list` and gives the handler a typed `ctx.fail(reason, …)` keyed by the declared reason union — TypeScript catches `ctx.fail('typo')` at compile time, `data.reason` is auto-populated and tamper-proof, and the linter enforces conformance against the handler body.
@@ -818,7 +859,7 @@ return { items: hits };
 - [ ] `handler(input, ctx)` is pure — throws on failure, no try/catch (exception: batch tools with per-item isolation use try/catch inside the loop — that's intentional, don't remove it)
 - [ ] `format()` renders every field in the output schema — enforced at lint time via sentinel injection, startup fails with `format-parity` errors otherwise. Different clients forward different surfaces (Claude Code → `structuredContent`, Claude Desktop → `content[]`); both must carry the same data. Primary fix: render the missing field in `format()` (use `z.discriminatedUnion` for list/detail variants). Escape hatch: if the output schema was over-typed for a genuinely dynamic upstream API, relax it (`z.object({}).passthrough()`) rather than maintaining aspirational typing
 - [ ] Agent-facing context (empty-result notices, query/filter echo, pagination totals) declared in an `enrichment` block and populated via `ctx.enrich(...)` — reaches both `structuredContent` and `content[]` automatically, not authored solely in `format()` text. Enrichment keys disjoint from `output` keys
-- [ ] If wrapping external API: output schema and `format()` preserve uncertainty from sparse upstream payloads instead of inventing concrete values
+- [ ] If wrapping external API: output schema and `format()` preserve uncertainty from sparse upstream payloads instead of inventing concrete values, and a parsed `NaN`/`null` is dropped at the parse site rather than passed to a required output field
 - [ ] `auth` scopes declared if the tool needs authorization
 - [ ] `errors: [...]` contract declared for the tool's domain-specific failure modes — or block deleted if no domain failures apply (baseline codes bubble freely)
 - [ ] Error contract declared inline on this tool — not imported from a shared module, even when other tools have near-identical entries

@@ -30,6 +30,7 @@ import type { AnyResourceDefinition } from '@/mcp-server/resources/utils/resourc
 import { createMcpServerInstance } from '@/mcp-server/server.js';
 import type { AnyToolDef } from '@/mcp-server/tools/tool-registration.js';
 import { ToolRegistry } from '@/mcp-server/tools/tool-registration.js';
+import type { InputHandlingOptions } from '@/mcp-server/tools/utils/inputPrevalidation.js';
 import { initHeartbeatMetrics } from '@/mcp-server/transports/heartbeat.js';
 import { initSessionMetrics } from '@/mcp-server/transports/http/sessionStore.js';
 import { TransportManager } from '@/mcp-server/transports/manager.js';
@@ -172,6 +173,25 @@ export interface CreateAppOptions<TSupabaseClient extends object = SupabaseClien
    * ```
    */
   icons?: Implementation['icons'];
+  /**
+   * Switches for the pre-validation step every `tools/call` argument object
+   * passes through: dropping client-added root keys, rewriting key aliases, and
+   * repairing a stringified array after a failed parse.
+   *
+   * Every stage is on with no configuration. An entry here either extends a
+   * stage or turns it off for the whole server; nothing about the advertised
+   * `inputSchema` changes either way.
+   *
+   * @example
+   * ```ts
+   * input: {
+   *   ignoreKeys: ['some_client_field'], // adds to the built-in list; `false` disables the stage
+   *   caseStyleAliases: false,           // declared `inputAliases` only
+   *   coerce: false,                     // never retry a failed parse
+   * }
+   * ```
+   */
+  input?: InputHandlingOptions;
   /**
    * Server-level orientation text included on every `initialize` response.
    * Spec-compliant clients SHOULD forward this to the model as session-level
@@ -569,6 +589,7 @@ export async function composeServices<TSupabaseClient extends object = SupabaseC
     logger,
     storage: storageService,
     exposeStatelessSessionId,
+    ...(options.input && { input: options.input }),
   });
   const resourceRegistry = new ResourceRegistry(resources, {
     logger,

@@ -15,6 +15,7 @@ import {
   type OptionalNotifiers,
   selectNotifiers,
 } from '@/mcp-server/notifications.js';
+import type { InputHandlingOptions } from '@/mcp-server/tools/utils/inputPrevalidation.js';
 import { resolveSessionMode } from '@/mcp-server/types.js';
 import type { StorageService } from '@/storage/core/StorageService.js';
 import type { ErrorContract } from '@/types-global/errors.js';
@@ -30,6 +31,11 @@ export interface HandlerServices {
    * request-spanning lifetime (HTTP `stateful` / `auto` mode).
    */
   exposeStatelessSessionId?: boolean;
+  /**
+   * Server-level switches for the tool-argument pre-validation step. Wired from
+   * `createApp({ input })`; every stage is on when this is absent. Tools only.
+   */
+  input?: InputHandlingOptions;
   logger: Logger;
   storage: StorageService;
 }
