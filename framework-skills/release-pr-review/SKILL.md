@@ -4,7 +4,7 @@ description: >
   Review pass on an open release PR (`release/<version>` → `main`) — the step between `git-wrapup` and `release-and-publish` when a project releases in gated release PR mode. Reads the PR's commit range through the `code-simplifier` lens plus a correctness review, verifies whatever an automated reviewer left on the PR, lands fixes as ordinary commits on top of the release branch and pushes it, keeps the PR body in sync with what ships, and leaves one summary comment. The only agent role that both edits and commits — and it never rewrites pushed history, tags, merges, touches `main`, or publishes.
 metadata:
   author: cyanheads
-  version: "1.3"
+  version: "1.4"
   audience: external
   type: workflow
 ---
@@ -53,7 +53,7 @@ Two lenses over the range. Skip a dimension that does not apply; do not run any 
 - **Over-engineering.** Abstractions with one caller, options nothing sets, guards for states the framework already prevents, flexibility for a hypothetical. Cut what does not earn its place.
 - **Tests that cannot fail.** A test authored after the fix that never went red, an assertion on a mocked value, a `toBeDefined()` where a shape was meant. Tighten or replace.
 - **Changelog vs diff.** Every claim in the changelog entry and its `summary:` line exists in the diff — a path, an identifier, a field list, a mechanism. A claim the diff does not support is fixed in the changelog, never argued for. Changes in the diff the changelog omits get a bullet.
-- **PR body vs changelog.** The body's theme line is the entry's `summary:`; its `## Changes` bullets are the entry at headline granularity under the tag rules (`release-and-publish` step 4) — nothing in the entry silently missing, nothing in the body the entry lacks. This body becomes the tag verbatim at release, so it is reviewed to that standard: flat bullets, one grouped minor bullet, deps one line, backlinks, no closing keywords, no marketing adjectives, changelog link last.
+- **PR body vs changelog.** The body's theme line is the entry's `summary:`; its `## Changes` bullets are the entry at headline granularity under the tag rules (`release-and-publish` step 4) — nothing in the entry silently missing, nothing in the body the entry lacks. Those bullets and the changelog link become the tag body verbatim at release, so they are reviewed to that standard: flat bullets, one grouped minor bullet, deps one line, backlinks, no closing keywords, no marketing adjectives, changelog link last. The tag's subject is not lifted from this body — it is written fresh at release time.
 - **Version-bearing files.** The version string is consistent across `package.json`, `server.json`, `manifest.json`, the plugin manifests, the README badge, and any doc that pins it (`grep -rn "<version>" . --exclude-dir=node_modules --exclude-dir=.git --exclude-dir=changelog` catches stragglers).
 - **Stack shape.** Every commit carries a one- or two-line body, no closing keywords anywhere, the release commit is on top and carries only release artifacts.
 
@@ -77,7 +77,7 @@ git add <paths>
 git commit --only <paths> -m "<subject>" -m "<one- or two-line body>"
 ```
 
-`--only` commits the named paths and nothing else in the index, so a stray staged change — a hook's output, a concurrent stage — cannot ride into a review commit. Group the fixes the way `git-wrapup` step 7 groups the work: one commit per concern, a Conventional Commits subject, a one- or two-line body, and the file as the atomic boundary. Name the commit for the fix itself, not for the commit it corrects.
+`--only` commits the named paths and nothing else in the index, so a stray staged change — a hook's output, a concurrent stage — cannot ride into a review commit. Group the fixes the way `git-wrapup` step 3 groups the work: one commit per concern, a Conventional Commits subject, a one- or two-line body, and the file as the atomic boundary. Name the commit for the fix itself, not for the commit it corrects.
 
 When every fix is in, re-run the full gate — `bun run devcheck`, `bun run rebuild`, `bun run test:all` (or `test`), `bun run test:package` where defined. Then, and only then:
 
@@ -92,7 +92,7 @@ If the review changes nothing, skip this step: no commit, no push.
 
 ### 6. Sync the PR body
 
-The PR body is the release digest — theme line, `## Changes`, `## Gates`, changelog link (`git-wrapup` step 8) — and `release-and-publish` lifts `## Changes` plus the link into the tag verbatim. It must describe what ships *now*:
+The PR body is the release digest — theme line, `## Changes`, `## Gates`, changelog link (`git-wrapup` step 9) — and `release-and-publish` lifts `## Changes` plus the link into the tag verbatim. It must describe what ships *now*:
 
 - What ships changed in step 5 (a fix altered behavior, a bullet was wrong or missing, the changelog entry changed) → edit `## Changes` and the theme line surgically. Fetch the body with `gh pr view --json body -q .body > <scratch-file>`, edit that file, write it back with `gh pr edit <N> --body-file <scratch-file>`. Never an inline `--body` string.
 - Gates re-ran in step 5 → replace the `## Gates` results with the new ones.
@@ -134,7 +134,7 @@ Then report back to the caller: PR number, new head SHA, whether the body change
 - [ ] Changelog entry and `summary:` reconciled to the diff; version strings consistent
 - [ ] Fixes landed as ordinary commits by pathspec on top of the stack; nothing already pushed rewritten
 - [ ] Full gate green before `git push origin release/<version>`
-- [ ] PR body reviewed as the future tag (theme = `summary:`, `## Changes` in tag rules); synced only where what ships changed; `## Gates` refreshed if gates re-ran
+- [ ] PR body reviewed as the future tag (theme = `summary:`, `## Changes` and changelog link in tag rules); synced only where what ships changed; `## Gates` refreshed if gates re-ran
 - [ ] Out-of-scope findings filed as issues
 - [ ] One summary comment on the PR; report to the caller with the new head SHA
 - [ ] Nothing tagged, nothing merged, `main` untouched

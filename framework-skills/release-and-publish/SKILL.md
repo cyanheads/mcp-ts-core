@@ -4,7 +4,7 @@ description: >
   Ship a release end-to-end across every registry the project targets (npm, MCP Registry, GitHub Releases for `.mcpb` bundles, GHCR). Runs the final verification gate, fast-forwards `main` when the release rode a release PR, creates the annotated tag on the commit `main` now points at, pushes commits and tags, then publishes to each applicable destination. Assumes git wrapup (version bumps, changelog, commit stack — and in release PR mode, the pushed branch and open PR) is already complete — this skill is the post-wrapup merge + tag + publish workflow. Retries transient network failures on publish steps; halts with a partial-state report when retries are exhausted or the failure is terminal.
 metadata:
   author: cyanheads
-  version: "2.18"
+  version: "2.19"
   audience: external
   type: workflow
 ---
@@ -121,14 +121,14 @@ If `v<version>` already exists and points at HEAD, a prior run created it — pr
 
 Write the message to a file through a quoted-delimiter heredoc and pass it with `-F`, never inline with `-m`: the body carries backticks, which a double-quoted string runs as command substitution and silently deletes, and apostrophes, which end a single-quoted string. The tag message renders as the GitHub Release body via `--notes-from-tag`. It must be structured markdown, not a flat string.
 
-**Release PR mode: the tag body is the PR body's `## Changes` bullets plus its final changelog link, verbatim** — `gh pr view <N> --json body -q .body` (`<N>` from step 1 — on `main` there is no branch for `gh` to infer it from), take the theme line as the subject, the bullets under `## Changes`, and the last line; drop `## Gates` and the headers. That digest was authored at wrapup and reviewed on the PR; re-authoring it here would publish unreviewed words. The one addition: append ` · release PR #<N>` to that final line, so the GitHub Release points at its audit trail (GitHub autolinks the bare `#<N>`). Without a PR, author it from the changelog entry at `changelog/<major.minor>.x/<version>.md` — every claim in the tag must appear in that file, and the file's `summary:` line is the tag's theme.
+**Release PR mode: the tag body is the PR body's `## Changes` bullets plus its final changelog link, verbatim** — `gh pr view <N> --json body -q .body` (`<N>` from step 1 — on `main` there is no branch for `gh` to infer it from), take the bullets under `## Changes` and the last line; drop the PR's opening theme line, `## Gates`, and the headers. That digest was authored at wrapup and reviewed on the PR; re-authoring it here would publish unreviewed words. The subject is the one part not lifted — write it fresh, per the rules below. The one addition to the digest: append ` · release PR #<N>` to that final line, so the GitHub Release points at its audit trail (GitHub autolinks the bare `#<N>`). Without a PR, author the bullets from the changelog entry at `changelog/<major.minor>.x/<version>.md` — every claim in the tag must appear in that file.
 
 `--cleanup=whitespace` is load-bearing. The default cleanup (`strip`) deletes `#`-leading lines as comments, so markdown headers silently vanish from the tag body. `--cleanup=verbatim` is worse: it skips end-of-message normalization, so with tag signing enabled the signature is appended flush against the message's last character — git then can't parse its own signature (the tag reads as unsigned) and the whole `-----BEGIN SSH SIGNATURE-----` block publishes verbatim into the GitHub Release body.
 
 Format — a **headline digest**, never a section-by-section changelog mirror:
 
 ```
-<theme — omit version number, GitHub prepends v<VERSION>:>
+<subject — one short theme written for this tag, ~60 chars; omit the version number, GitHub prepends v<VERSION>:>
 
 - <notable user-facing change> (#N)
 - <notable user-facing change> (#N)
@@ -141,7 +141,7 @@ Format — a **headline digest**, never a section-by-section changelog mirror:
 (` · release PR #<N>` only in release PR mode; without a PR the line ends at the changelog link.)
 
 **Rules:**
-- **Subject line is ONE short theme, at most ~60 characters, no semicolons, no clauses** — it becomes the GitHub Release title after `v<VERSION>: `. The digest lives in the bullets; a subject that summarizes each change is wrong even when every word is accurate. In release PR mode the PR body's opening paragraph is NOT the subject — write the theme fresh (the release commit's subject after the version and dash is usually it)
+- **Subject line is ONE short theme, at most ~60 characters, no semicolons, no clauses** — it becomes the GitHub Release title after `v<VERSION>: `. The digest lives in the bullets; a subject that summarizes each change is wrong even when every word is accurate. **It is written for this tag, never lifted** — not from the changelog entry's `summary:`, which has a 350-character budget for a different surface, and not from the PR body's opening paragraph, which is that same line. The release commit's subject after the version and dash is usually the theme already
 - Subject line omits the version number (GitHub prepends `v<VERSION>:` to the release title)
 - **Flat bullets only — never Keep-a-Changelog section headers.** `Added:`/`Changed:`/`Fixed:`/`Dependency bumps:` belong in the changelog file; a tag that mirrors the changelog's structure is wrong even when every line is accurate
 - **Complete at headline granularity** — every changelog-worthy change stays visible: notable changes get their own bullet, minor/internal items (build config, repo hygiene, metadata) share ONE grouped compact bullet. Nothing silently dropped, nothing expanded — the changelog carries the depth, the tag carries the existence
@@ -313,7 +313,7 @@ If any check fails, halt and report which destination is unreachable. A successf
 - [ ] `bun run test:all` (or `test`) passes
 - [ ] `bun run test:package` passes, when the project defines it
 - [ ] Release PR mode: `git merge --ff-only` onto `main` locally — never the GitHub merge button; HEAD equals the PR's `headRefOid` afterwards
-- [ ] Annotated tag `v<version>` created on HEAD (`main`'s tip in release PR mode) with `--cleanup=whitespace`, headline-digest body, changelog link as final line, signature parses
+- [ ] Annotated tag `v<version>` created on HEAD (`main`'s tip in release PR mode) with `--cleanup=whitespace`, a subject written fresh at ~60 characters without the version, headline-digest body, changelog link as final line, signature parses
 - [ ] `main` pushed, then the tag pushed
 - [ ] Release PR mode: PR reports `MERGED`; remote and local `release/<version>` deleted
 - [ ] `bun publish --access public` succeeds
