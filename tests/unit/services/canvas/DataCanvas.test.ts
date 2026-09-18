@@ -207,8 +207,14 @@ describe('DataCanvas · drop / countForTenant / healthCheck / shutdown', () => {
 // read as "not found or expired" before, which is advice no caller can act on
 // for a value no tool ever minted.
 describe('caller-supplied ids · malformed vs missing (#327)', () => {
-  /** Pins the ValidationError contract a malformed id produces. */
-  function expectMalformed(caught: unknown): void {
+  /**
+   * Pins the ValidationError contract a malformed id produces, taking the call
+   * rather than a caught value: a handler attached with `.catch` never runs when
+   * the call resolves, and resolving is exactly what `drop` did for a malformed
+   * id before this — so the assertion has to see the settled outcome either way.
+   */
+  async function expectMalformed(call: Promise<unknown>): Promise<void> {
+    const caught = await call.catch((err: unknown) => err);
     expect(caught).toBeInstanceOf(McpError);
     const err = caught as McpError;
     expect(err.code).toBe(JsonRpcErrorCode.ValidationError);
@@ -220,7 +226,7 @@ describe('caller-supplied ids · malformed vs missing (#327)', () => {
     const registry = new CanvasRegistry(provider, makeOptions());
     const canvas = new DataCanvas(provider, registry);
 
-    await canvas.acquire('x', ctxWithTenant).catch(expectMalformed);
+    await expectMalformed(canvas.acquire('x', ctxWithTenant));
     await expect(canvas.acquire('AAAAAAAAAA', ctxWithTenant)).rejects.toMatchObject({
       code: JsonRpcErrorCode.NotFound,
     });
@@ -232,7 +238,7 @@ describe('caller-supplied ids · malformed vs missing (#327)', () => {
     const registry = new CanvasRegistry(provider, makeOptions());
     const canvas = new DataCanvas(provider, registry);
 
-    await canvas.drop('x', ctxWithTenant).catch(expectMalformed);
+    await expectMalformed(canvas.drop('x', ctxWithTenant));
     // A well-formed id that simply is not there stays a `false`, not a throw.
     await expect(canvas.drop('AAAAAAAAAA', ctxWithTenant)).resolves.toBe(false);
     await registry.shutdown(ctxWithTenant);
@@ -244,7 +250,7 @@ describe('caller-supplied ids · malformed vs missing (#327)', () => {
     const canvas = new DataCanvas(provider, registry);
     const dest = await canvas.acquire(undefined, ctxWithTenant);
 
-    await dest.importFrom('x', 'rows').catch(expectMalformed);
+    await expectMalformed(dest.importFrom('x', 'rows'));
     expect(provider.importFrom).not.toHaveBeenCalled();
     await registry.shutdown(ctxWithTenant);
   });
