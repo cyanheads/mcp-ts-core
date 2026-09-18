@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.13.5](changelog/0.13.x/0.13.5.md) — 2026-09-18
+
+Tool error text closes with the reason and retryable terms a caller branches on, a ctx.requestInput no 2025-era client capability can serve is refused with a real error envelope, an errors[] entry can declare a log severity below error, and a malformed canvas_id is an input error rather than an expired canvas.
+
 ## [0.13.4](changelog/0.13.x/0.13.4.md) — 2026-09-18 · ⚠️ Breaking · 🛡️ Security
 
 Tool arguments pass an ordered pre-validation step — client-added keys dropped, key aliases rewritten, a stringified array repaired after a failed parse — and httpErrorFromResponse no longer puts the upstream request URL on client-facing error.data by default.
