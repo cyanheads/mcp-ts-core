@@ -86,7 +86,9 @@ export class RateLimiter {
    * - 5-minute cleanup interval
    * - Up to 10,000 tracked keys (LRU eviction beyond that)
    *
-   * Call {@link configure} to override any of these defaults before first use.
+   * Call {@link configure} to override any of these defaults, at construction or at
+   * runtime. A runtime reduction of `maxTrackedKeys` is enforced during that call —
+   * see {@link configure} for the trim order.
    *
    * @param config - Application config, used to check `environment` when `skipInDevelopment` is set.
    * @param logger - Logger instance for debug output on cleanup and eviction events.
@@ -141,6 +143,45 @@ export class RateLimiter {
   }
 
   /**
+   * Reduces the tracked-key map to `maxTrackedKeys` in one pass, dropping expired
+   * windows before live ones and taking live entries in least-recently-used order.
+   * Survivors keep their `count`, `resetTime`, and `lastAccess` untouched.
+   *
+   * Separate from {@link evictLRUEntry}, which rescans the whole map to remove a
+   * single entry: looping that to shed thousands of keys would be quadratic.
+   * @private
+   */
+  private trimToCapacity(): void {
+    const maxKeys = this.effectiveConfig.maxTrackedKeys;
+    // Zero and negative caps have their own semantics (#405) and are not a trim.
+    if (maxKeys === undefined || maxKeys <= 0) return;
+    const surplus = this.limits.size - maxKeys;
+    if (surplus <= 0) return;
+
+    const now = Date.now();
+    const ordered = [...this.limits.entries()].map(([key, entry]) => ({
+      expired: now >= entry.resetTime,
+      key,
+      lastAccess: entry.lastAccess,
+    }));
+    // Stable sort, so equal recency falls back to insertion order — the same
+    // tie-break `evictLRUEntry` gets from the map's own iteration order.
+    ordered.sort((a, b) =>
+      a.expired === b.expired ? a.lastAccess - b.lastAccess : a.expired ? -1 : 1,
+    );
+    for (const { key } of ordered.slice(0, surplus)) this.limits.delete(key);
+
+    const logContext = requestContextService.createRequestContext({
+      operation: 'RateLimiter.trimToCapacity',
+      additionalContext: {
+        removedCount: surplus,
+        totalRemainingAfterTrim: this.limits.size,
+      },
+    });
+    this.logger.debug(`Trimmed ${surplus} rate limit entries to the reduced capacity`, logContext);
+  }
+
+  /**
    * Starts (or restarts) the periodic cleanup interval using the current `cleanupInterval` config.
    * Clears any existing timer first. The timer is unref'd so it does not prevent Node.js from exiting.
    * No-ops if `cleanupInterval` is 0 or unset.
@@ -191,6 +232,12 @@ export class RateLimiter {
    * Merges the provided partial config into the current effective configuration.
    * If `cleanupInterval` is included, the background timer is restarted with the new interval.
    *
+   * Lowering `maxTrackedKeys` below the current tracked-key count enforces the new
+   * ceiling synchronously, before this call returns: the map is trimmed in one pass,
+   * expired windows first and then live entries in least-recently-used order.
+   * Survivors keep their counts and reset times. Raising the cap, or restating a
+   * value at or above the current size, trims nothing.
+   *
    * @param config - Partial {@link RateLimitConfig} fields to apply.
    *
    * @example
@@ -202,6 +249,9 @@ export class RateLimiter {
     Object.assign(this.effectiveConfig, config);
     if (config.cleanupInterval !== undefined) {
       this.startCleanupTimer();
+    }
+    if (config.maxTrackedKeys !== undefined) {
+      this.trimToCapacity();
     }
   }
 
