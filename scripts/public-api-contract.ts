@@ -70,6 +70,7 @@ export const PUBLIC_RUNTIME_EXPORTS = {
     'ALLOWED_PLAN_OPERATORS',
     'ALLOWED_STATEMENT_TYPES',
     'CANVAS_IDENTIFIER_REGEX',
+    'CanvasIdSchema',
     'CanvasInstance',
     'CanvasRegistry',
     'DEFAULT_CANVAS_REGISTRY_OPTIONS',

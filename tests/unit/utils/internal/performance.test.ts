@@ -143,6 +143,41 @@ describe('measureToolExecution', () => {
     });
   });
 
+  // Issue #275 — the single `getErrorCategory` call site. It already holds the
+  // error data inside the `McpError` branch, so the canvas capacity refusal is
+  // separable from upstream throttling without a new code or counter.
+  describe('error_category reads the error data alongside the code (#275)', () => {
+    /** Runs a failing tool call and returns the `mcp.tool.errors` attributes. */
+    async function categoryFor(
+      data: Record<string, unknown> | undefined,
+    ): Promise<string | undefined> {
+      await expect(
+        measureToolExecution(
+          async () => {
+            throw new McpError(JsonRpcErrorCode.RateLimited, 'capped', data);
+          },
+          { toolName: 'cap-tool', requestId: 'req-cap', timestamp: new Date().toISOString() },
+          {},
+        ),
+      ).rejects.toThrow();
+      const call = mockErrorCounterAdd.mock.calls.at(-1);
+      return (call?.[1] as Record<string, string> | undefined)?.['mcp.tool.error_category'];
+    }
+
+    it('files the canvas capacity refusal under server', async () => {
+      expect(await categoryFor({ reason: 'canvas_capacity_exhausted', retryable: true })).toBe(
+        'server',
+      );
+    });
+
+    it.each([
+      ['an unrelated reason', { reason: 'ncbi_throttled' }],
+      ['no data at all', undefined],
+    ])('leaves every other RateLimited upstream — %s', async (_label, data) => {
+      expect(await categoryFor(data)).toBe('upstream');
+    });
+  });
+
   it('captures error metadata and rethrows the original McpError', async () => {
     const failure = new McpError(JsonRpcErrorCode.InternalError, 'boom');
 

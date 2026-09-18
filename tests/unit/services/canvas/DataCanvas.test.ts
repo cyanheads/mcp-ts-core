@@ -203,6 +203,104 @@ describe('DataCanvas · drop / countForTenant / healthCheck / shutdown', () => {
   });
 });
 
+// Issue #327 — the three entry points that take a caller-supplied id. Each one
+// read as "not found or expired" before, which is advice no caller can act on
+// for a value no tool ever minted.
+describe('caller-supplied ids · malformed vs missing (#327)', () => {
+  /** Pins the ValidationError contract a malformed id produces. */
+  function expectMalformed(caught: unknown): void {
+    expect(caught).toBeInstanceOf(McpError);
+    const err = caught as McpError;
+    expect(err.code).toBe(JsonRpcErrorCode.ValidationError);
+    expect((err.data as { reason?: string }).reason).toBe('canvas_id_malformed');
+  }
+
+  it('acquire rejects a malformed id and keeps NotFound for a missing one', async () => {
+    const provider = makeStubProvider();
+    const registry = new CanvasRegistry(provider, makeOptions());
+    const canvas = new DataCanvas(provider, registry);
+
+    await canvas.acquire('x', ctxWithTenant).catch(expectMalformed);
+    await expect(canvas.acquire('AAAAAAAAAA', ctxWithTenant)).rejects.toMatchObject({
+      code: JsonRpcErrorCode.NotFound,
+    });
+    await registry.shutdown(ctxWithTenant);
+  });
+
+  it('drop rejects a malformed id instead of reporting a silent miss', async () => {
+    const provider = makeStubProvider();
+    const registry = new CanvasRegistry(provider, makeOptions());
+    const canvas = new DataCanvas(provider, registry);
+
+    await canvas.drop('x', ctxWithTenant).catch(expectMalformed);
+    // A well-formed id that simply is not there stays a `false`, not a throw.
+    await expect(canvas.drop('AAAAAAAAAA', ctxWithTenant)).resolves.toBe(false);
+    await registry.shutdown(ctxWithTenant);
+  });
+
+  it('importFrom rejects a malformed source id before the provider is reached', async () => {
+    const provider = makeStubProvider();
+    const registry = new CanvasRegistry(provider, makeOptions());
+    const canvas = new DataCanvas(provider, registry);
+    const dest = await canvas.acquire(undefined, ctxWithTenant);
+
+    await dest.importFrom('x', 'rows').catch(expectMalformed);
+    expect(provider.importFrom).not.toHaveBeenCalled();
+    await registry.shutdown(ctxWithTenant);
+  });
+
+  /** Asserts `importFrom` reports a lookup miss on a live destination canvas. */
+  async function expectSourceNotFound(dest: CanvasInstance, sourceId: string): Promise<void> {
+    let caught: unknown;
+    try {
+      await dest.importFrom(sourceId, 'rows');
+    } catch (err) {
+      caught = err;
+    }
+    expect(caught).toBeInstanceOf(McpError);
+    expect((caught as McpError).code).toBe(JsonRpcErrorCode.NotFound);
+    expect(((caught as McpError).data as { reason?: string }).reason).toBe('canvas_not_found');
+  }
+
+  it('importFrom keeps NotFound for a well-formed source id that was never minted', async () => {
+    const provider = makeStubProvider();
+    const registry = new CanvasRegistry(provider, makeOptions());
+    const canvas = new DataCanvas(provider, registry);
+    const dest = await canvas.acquire(undefined, ctxWithTenant);
+
+    await expectSourceNotFound(dest, 'AAAAAAAAAA');
+    await registry.shutdown(ctxWithTenant);
+  });
+
+  it('importFrom keeps NotFound for an expired source id', async () => {
+    const provider = makeStubProvider();
+    const clock = vi.fn(() => 1_000_000);
+    const registry = new CanvasRegistry(provider, makeOptions(), clock);
+    const canvas = new DataCanvas(provider, registry);
+
+    // The source is minted half a TTL ahead of the destination, so the clock
+    // can pass the source's window while the destination is still live.
+    const source = await canvas.acquire(undefined, ctxWithTenant);
+    clock.mockReturnValue(1_000_000 + TTL / 2);
+    const dest = await canvas.acquire(undefined, ctxWithTenant);
+    clock.mockReturnValue(1_000_000 + TTL + 1);
+
+    await expectSourceNotFound(dest, source.canvasId);
+    await registry.shutdown(ctxWithTenant);
+  });
+
+  it('importFrom keeps NotFound for a source id owned by another tenant', async () => {
+    const provider = makeStubProvider();
+    const registry = new CanvasRegistry(provider, makeOptions());
+    const canvas = new DataCanvas(provider, registry);
+    const foreign = await canvas.acquire(undefined, { ...ctxWithTenant, tenantId: 'tenant-b' });
+    const dest = await canvas.acquire(undefined, ctxWithTenant);
+
+    await expectSourceNotFound(dest, foreign.canvasId);
+    await registry.shutdown(ctxWithTenant);
+  });
+});
+
 describe('CanvasInstance · per-table TTL', () => {
   it('registerTable with ttlMs: describe returns expiresAt for that table', async () => {
     const clock = vi.fn(() => 1_000_000);

@@ -21,7 +21,7 @@ import type {
   RegisterViewResult,
   TableInfo,
 } from '../types.js';
-import type { CanvasRegistry } from './CanvasRegistry.js';
+import { assertCanvasIdShape, type CanvasRegistry } from './CanvasRegistry.js';
 import type { IDataCanvasProvider } from './IDataCanvasProvider.js';
 
 /** Handle bound to a single canvas. Returned from {@link DataCanvas.acquire}. */
@@ -88,12 +88,16 @@ export class CanvasInstance {
    * Copy a table from another canvas the caller controls. The source canvas
    * must belong to the caller's tenant — the registry validates that before
    * the provider sees either id. Defaults `asName` to the source name.
+   *
+   * The source id is the one caller-supplied value here, so a malformed one is
+   * rejected as input rather than reported as an expired canvas (#327).
    */
   async importFrom(
     sourceCanvasId: string,
     sourceTableName: string,
     options?: ImportFromOptions,
   ): Promise<RegisterTableResult> {
+    assertCanvasIdShape(sourceCanvasId);
     this.expiresAt = this.registry.touchOrThrow(this.canvasId, this.tenantId);
     this.registry.touchWithTable(sourceCanvasId, this.tenantId, sourceTableName);
     const asName = options?.asName ?? sourceTableName;

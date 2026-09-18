@@ -7,6 +7,7 @@
 import { describe, expect, it } from 'vitest';
 import { JsonRpcErrorCode } from '@/types-global/errors.js';
 import {
+  CANVAS_CAPACITY_EXHAUSTED_REASON,
   COMPILED_ERROR_PATTERNS,
   COMPILED_PROVIDER_PATTERNS,
   ERROR_TYPE_MAPPINGS,
@@ -25,6 +26,38 @@ describe('Error Handler Mappings', () => {
       [JsonRpcErrorCode.RequestCancelled, 'client'],
     ] as const)('classifies %s as %s', (code, category) => {
       expect(getErrorCategory(code)).toBe(category);
+    });
+
+    // Issue #275 — one numeric code carries two sources. `RateLimited` is
+    // upstream throttling everywhere except the canvas tenant cap, which is a
+    // local capacity decision and says so through `data.reason`.
+    describe('local capacity under RateLimited (#275)', () => {
+      it('files the canvas capacity reason as server', () => {
+        expect(
+          getErrorCategory(JsonRpcErrorCode.RateLimited, {
+            reason: CANVAS_CAPACITY_EXHAUSTED_REASON,
+          }),
+        ).toBe('server');
+      });
+
+      it.each([
+        ['no data at all', undefined],
+        ['data carrying no reason', { tenantId: 'default' }],
+        ['an unrelated reason', { reason: 'upstream_quota_exceeded' }],
+        ['a non-string reason', { reason: 42 }],
+      ])('leaves RateLimited upstream for %s', (_label, data) => {
+        expect(getErrorCategory(JsonRpcErrorCode.RateLimited, data)).toBe('upstream');
+      });
+
+      it('does not move a different code that carries the same reason', () => {
+        // The reason is scoped to the code it disambiguates; nothing else
+        // should shift bucket because a throw happens to reuse the string.
+        expect(
+          getErrorCategory(JsonRpcErrorCode.NotFound, {
+            reason: CANVAS_CAPACITY_EXHAUSTED_REASON,
+          }),
+        ).toBe('client');
+      });
     });
   });
 

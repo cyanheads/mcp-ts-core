@@ -14,6 +14,7 @@
 export { CanvasInstance } from './core/CanvasInstance.js';
 export {
   type AcquireResult,
+  CanvasIdSchema,
   CanvasRegistry,
   type CanvasRegistryOptions,
   DEFAULT_CANVAS_REGISTRY_OPTIONS,

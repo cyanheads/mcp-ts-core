@@ -325,7 +325,10 @@ async function measure<TContext extends RequestContext, T>(
 
       if (err instanceof McpError) {
         outcome.errorCode = String(err.code);
-        outcome.errorCategory = getErrorCategory(err.code);
+        // `data` rides along so a code shared by two sources — a local capacity
+        // refusal and upstream throttling both answer `-32003` — lands in the
+        // right `error_category` bucket (#275).
+        outcome.errorCategory = getErrorCategory(err.code, err.data);
       } else {
         outcome.errorCode = err instanceof Error ? 'UNHANDLED_ERROR' : 'UNKNOWN_ERROR';
         outcome.errorCategory = 'server';

@@ -287,13 +287,35 @@ const SERVER_CODES: ReadonlySet<JsonRpcErrorCode> = new Set([
 ]);
 
 /**
+ * `data.reason` on the canvas tenant-cap refusal thrown by
+ * `CanvasRegistry.enforceTenantCap`. Declared here because this module is what
+ * reads it; the registry imports it so the two spellings cannot drift.
+ */
+export const CANVAS_CAPACITY_EXHAUSTED_REASON = 'canvas_capacity_exhausted';
+
+/**
  * Maps a classified JSON-RPC error code to a broad error category.
  *
  * - `upstream` — external API failures: service unavailable, rate-limited, timeout.
  * - `server` — internal bugs or infrastructure issues.
  * - `client` — bad input, auth failures, not-found: problems with the request itself.
+ *
+ * `data` refines the one code that legitimately carries two sources: `-32003`
+ * is upstream throttling everywhere except the canvas tenant cap, which is a
+ * decision this process made about its own resources (#275). Retry semantics
+ * and the HTTP 429 mapping are right for both, so the code stays put and the
+ * stable `data.reason` discriminator separates the buckets. Called with the
+ * code alone, resolution is exactly what it was.
  */
-export function getErrorCategory(code: JsonRpcErrorCode): ErrorCategory {
+export function getErrorCategory(
+  code: JsonRpcErrorCode,
+  data?: Record<string, unknown>,
+): ErrorCategory {
+  // The one local-capacity reason carried on `-32003`; everything else under
+  // that code is upstream throttling.
+  if (code === JsonRpcErrorCode.RateLimited && data?.reason === CANVAS_CAPACITY_EXHAUSTED_REASON) {
+    return 'server';
+  }
   if (UPSTREAM_CODES.has(code)) return 'upstream';
   if (SERVER_CODES.has(code)) return 'server';
   return 'client';

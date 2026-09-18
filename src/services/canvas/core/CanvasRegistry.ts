@@ -8,7 +8,16 @@
  * @module src/services/canvas/core/CanvasRegistry
  */
 
-import { conflict, type McpError, notFound, rateLimited } from '@/types-global/errors.js';
+import { z } from 'zod';
+
+import {
+  conflict,
+  type McpError,
+  notFound,
+  rateLimited,
+  validationError,
+} from '@/types-global/errors.js';
+import { CANVAS_CAPACITY_EXHAUSTED_REASON } from '@/utils/internal/error-handler/mappings.js';
 import { logger } from '@/utils/internal/logger.js';
 import {
   type RequestContext,
@@ -26,6 +35,23 @@ import type { IDataCanvasProvider } from './IDataCanvasProvider.js';
 const CANVAS_ID_CHARSET = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_';
 const CANVAS_ID_LENGTH = 10;
 const CANVAS_ID_REGEX = /^[A-Za-z0-9_-]{10}$/;
+
+/**
+ * The advertised shape of a `canvas_id`, matching what {@link CanvasRegistry}
+ * mints. A consuming tool that declares its `canvas_id` field with this schema
+ * rejects an impossible value at argument validation — with the pattern in
+ * `inputSchema`, so a model sees the constraint before it calls — instead of
+ * discovering it inside the handler after a registry lookup.
+ *
+ * The `.describe()` is load-bearing: a schema rejection's synthesized hint
+ * carries only the pattern, which says nothing about where an id comes from.
+ */
+export const CanvasIdSchema = z
+  .string()
+  .regex(CANVAS_ID_REGEX)
+  .describe(
+    'Canvas ID as an earlier response on this server returned it — exactly 10 characters of letters, digits, hyphens, and underscores.',
+  );
 
 /** Per-table expiry bookkeeping entry (only present for tables registered with `ttlMs`). */
 interface TableExpiryRecord {
@@ -109,6 +135,8 @@ export class CanvasRegistry {
    * or the supplied id is unknown for the caller's tenant.
    *
    * - Omitted id → create fresh, return `isNew: true`.
+   * - Malformed id → throw `ValidationError` (`reason: 'canvas_id_malformed'`),
+   *   before any lookup.
    * - Unknown id → throw `NotFound` (`reason: 'canvas_not_found'` + recovery hint).
    * - Known id under wrong tenant → throw `NotFound` (uniform with unknown
    *   to avoid leaking existence across tenants).
@@ -126,6 +154,7 @@ export class CanvasRegistry {
     }
 
     if (maybeId !== undefined) {
+      assertCanvasIdShape(maybeId);
       const record = this.lookup(maybeId, tenantId);
       if (!record) {
         throw canvasNotFound(maybeId);
@@ -284,9 +313,12 @@ export class CanvasRegistry {
 
   /**
    * Drop a canvas explicitly (e.g. tenant-initiated cleanup). Returns true
-   * when the canvas existed and was destroyed.
+   * when the canvas existed and was destroyed, false when a well-formed id
+   * names nothing the caller can reach. A malformed id throws instead —
+   * `false` would report a value that can never be an id as a lookup miss.
    */
   async drop(canvasId: string, tenantId: string, context: RequestContext): Promise<boolean> {
+    assertCanvasIdShape(canvasId);
     const record = this.lookup(canvasId, tenantId);
     if (!record) return false;
     await this.destroy(record, context);
@@ -399,6 +431,12 @@ export class CanvasRegistry {
   // Internals
   // ---------------------------------------------------------------------
 
+  /**
+   * Resolve a live canvas the tenant owns, or `undefined`. Every caller-supplied
+   * id has already cleared {@link assertCanvasIdShape} by the time it gets here,
+   * so a shape mismatch means an internally-held id, which is a lookup miss like
+   * any other.
+   */
   private lookup(canvasId: string, tenantId: string): CanvasRecord | undefined {
     if (!CANVAS_ID_REGEX.test(canvasId)) return;
     const record = this.canvases.get(canvasId);
@@ -425,12 +463,34 @@ export class CanvasRegistry {
     entry.expiresAt = this.clock() + entry.ttlMs;
   }
 
+  /**
+   * Refuse a mint once the tenant holds `maxCanvasesPerTenant` canvases.
+   *
+   * Keeps `RateLimited` — the retry semantics and the HTTP 429 mapping are
+   * right — and carries `reason: 'canvas_capacity_exhausted'` so observers can
+   * tell this local capacity decision from upstream throttling (#275).
+   *
+   * The hint leads with reusing a held id because that is the one reclaim path
+   * present in every configuration: under `MCP_AUTH_MODE=none` the tenant
+   * collapses to `default`, so the occupied slots may belong to other callers,
+   * and a consumer's dataframe-drop tool is off by default. The cap is reached
+   * only on the mint path, when `canvas_id` was omitted.
+   */
   private enforceTenantCap(tenantId: string): void {
     const count = this.byTenant.get(tenantId)?.size ?? 0;
     if (count >= this.options.maxCanvasesPerTenant) {
       throw rateLimited(
-        `Tenant has reached the active canvas cap (${this.options.maxCanvasesPerTenant}). Drop unused canvases or wait for the sliding TTL to expire them.`,
-        { tenantId, activeCount: count, cap: this.options.maxCanvasesPerTenant },
+        `Tenant has reached the active canvas cap (${this.options.maxCanvasesPerTenant}).`,
+        {
+          reason: CANVAS_CAPACITY_EXHAUSTED_REASON,
+          retryable: true,
+          tenantId,
+          activeCount: count,
+          cap: this.options.maxCanvasesPerTenant,
+          recovery: {
+            hint: "Pass a canvas_id you already hold instead of omitting it to create another, free a slot with this server's canvas-drop tool if it exposes one, or retry once idle canvases pass their TTL.",
+          },
+        },
       );
     }
   }
@@ -497,6 +557,32 @@ export function canvasNotFound(canvasId: string): McpError {
     canvasId,
     recovery: {
       hint: 'Re-run the tool that produced this canvas_id to stage fresh data, or verify the id was copied correctly.',
+    },
+  });
+}
+
+/**
+ * Reject a caller-supplied canvas id that could never have been minted, before
+ * any registry lookup. Applied at the three entry points that accept one:
+ * `acquire`, `drop`, and `CanvasInstance.importFrom`'s source id.
+ *
+ * A value that cannot be an id is an input error; only a well-formed id that is
+ * absent is a lookup miss (#327). Reporting the two the same way hands the
+ * caller unfollowable advice — no tool produced `x`, so re-running one cannot
+ * correct it.
+ *
+ * The hint names the format, since that is the only thing the caller can act
+ * on, and steers toward copying the id an earlier response returned rather than
+ * omitting the parameter: omission mints a fresh, empty canvas, and a tool that
+ * requires the id would reject the retry.
+ */
+export function assertCanvasIdShape(canvasId: string): void {
+  if (CANVAS_ID_REGEX.test(canvasId)) return;
+  throw validationError('Canvas id is malformed.', {
+    reason: 'canvas_id_malformed',
+    canvasId,
+    recovery: {
+      hint: 'Send the canvas_id exactly as an earlier response returned it — 10 characters of letters, digits, hyphens, and underscores.',
     },
   });
 }

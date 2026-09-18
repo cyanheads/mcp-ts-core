@@ -6,13 +6,17 @@
  */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { z } from 'zod';
 
+import { validateDefinitions } from '@/linter/validate.js';
+import { tool } from '@/mcp-server/tools/utils/toolDefinition.js';
 import {
+  CanvasIdSchema,
   CanvasRegistry,
   type CanvasRegistryOptions,
 } from '@/services/canvas/core/CanvasRegistry.js';
 import type { IDataCanvasProvider } from '@/services/canvas/core/IDataCanvasProvider.js';
-import { McpError } from '@/types-global/errors.js';
+import { JsonRpcErrorCode, McpError } from '@/types-global/errors.js';
 import type { RequestContext } from '@/utils/internal/requestContext.js';
 import { IdGenerator } from '@/utils/security/idGenerator.js';
 
@@ -172,18 +176,140 @@ describe('CanvasRegistry · acquire (existing)', () => {
     );
     await registry.shutdown(baseContext);
   });
+});
 
-  it('throws NotFound for malformed IDs (does not leak shape vs existence)', async () => {
+// Issue #327 — a value that cannot be an id is an input error; only a
+// well-formed id that is absent is a lookup miss. "Re-run the tool that
+// produced this canvas_id" is unfollowable advice for an id no tool minted.
+describe('CanvasRegistry · malformed vs missing ids (#327)', () => {
+  /** Ids that fail the 10-char URL-safe format check. */
+  const MALFORMED = ['x', 'not a real id', 'AAAAAAAAAAA', 'AAAAAAAA!!', ''] as const;
+
+  /** Pins the structured malformed-input contract. */
+  function expectMalformedShape(caught: unknown, canvasId: string): void {
+    expect(caught).toBeInstanceOf(McpError);
+    const err = caught as McpError;
+    expect(err.code).toBe(JsonRpcErrorCode.ValidationError);
+    expect(err.message).not.toMatch(/not found or expired/i);
+    const data = err.data as {
+      canvasId?: string;
+      reason?: string;
+      recovery?: { hint?: string };
+    };
+    expect(data.reason).toBe('canvas_id_malformed');
+    expect(data.canvasId).toBe(canvasId);
+    // The hint has to name the format, since re-running the producing tool
+    // cannot correct a value that tool never produced.
+    expect(data.recovery?.hint).toMatch(/10/);
+  }
+
+  it.each(MALFORMED)('acquire() rejects %o before any registry lookup', async (canvasId) => {
     const provider = makeStubProvider();
     const registry = new CanvasRegistry(provider, makeOptions());
     let caught: unknown;
     try {
-      await registry.acquire('not a real id', 'tenant-a', baseContext);
+      await registry.acquire(canvasId, 'tenant-a', baseContext);
+    } catch (err) {
+      caught = err;
+    }
+    expectMalformedShape(caught, canvasId);
+    // The mint path never ran — no canvas was created for the bad id.
+    expect(provider.initCalls).toEqual([]);
+    expect(registry.countForTenant('tenant-a')).toBe(0);
+    await registry.shutdown(baseContext);
+  });
+
+  it.each(MALFORMED)('drop() throws on %o instead of returning false', async (canvasId) => {
+    const provider = makeStubProvider();
+    const registry = new CanvasRegistry(provider, makeOptions());
+    let caught: unknown;
+    try {
+      await registry.drop(canvasId, 'tenant-a', baseContext);
+    } catch (err) {
+      caught = err;
+    }
+    expectMalformedShape(caught, canvasId);
+    await registry.shutdown(baseContext);
+  });
+
+  it('drop() still returns false for a well-formed id that is simply absent', async () => {
+    const provider = makeStubProvider();
+    const registry = new CanvasRegistry(provider, makeOptions());
+    await expect(registry.drop('AAAAAAAAAA', 'tenant-a', baseContext)).resolves.toBe(false);
+    await registry.shutdown(baseContext);
+  });
+
+  it.each([
+    ['missing', 'AAAAAAAAAA'],
+    ['expired', 'expired'],
+    ['cross-tenant', 'cross-tenant'],
+  ])('acquire() keeps canvas_not_found for a well-formed but %s id', async (kind, seed) => {
+    const provider = makeStubProvider();
+    const clock = vi.fn(() => 1_000_000);
+    const registry = new CanvasRegistry(provider, makeOptions(), clock);
+
+    let canvasId = seed;
+    let tenant = 'tenant-a';
+    if (kind === 'expired') {
+      canvasId = (await registry.acquire(undefined, 'tenant-a', baseContext)).canvasId;
+      clock.mockReturnValue(1_000_000 + TTL + 1);
+    } else if (kind === 'cross-tenant') {
+      canvasId = (await registry.acquire(undefined, 'tenant-a', baseContext)).canvasId;
+      tenant = 'tenant-b';
+    }
+
+    let caught: unknown;
+    try {
+      await registry.acquire(canvasId, tenant, baseContext);
     } catch (err) {
       caught = err;
     }
     expect(caught).toBeInstanceOf(McpError);
+    const err = caught as McpError;
+    expect(err.code).toBe(JsonRpcErrorCode.NotFound);
+    expect(err.message).toMatch(/not found or expired/i);
+    expect((err.data as { reason?: string }).reason).toBe('canvas_not_found');
     await registry.shutdown(baseContext);
+  });
+});
+
+describe('CanvasIdSchema (#327)', () => {
+  it('accepts every id mintId() produces and rejects malformed values', async () => {
+    const provider = makeStubProvider();
+    const registry = new CanvasRegistry(provider, makeOptions());
+    for (let i = 0; i < 50; i += 1) {
+      const { canvasId } = await registry.acquire(undefined, `tenant-${i}`, baseContext);
+      expect(CanvasIdSchema.safeParse(canvasId).success).toBe(true);
+    }
+    for (const bad of ['x', 'AAAAAAAAAAA', 'AAAAAAAA!!', '']) {
+      expect(CanvasIdSchema.safeParse(bad).success).toBe(false);
+    }
+    await registry.shutdown(baseContext);
+  });
+
+  it('emits the advertised string pattern through toJSONSchema', () => {
+    expect(z.toJSONSchema(CanvasIdSchema)).toMatchObject({
+      type: 'string',
+      pattern: '^[A-Za-z0-9_-]{10}$',
+    });
+    // The pattern alone reads as noise to a model; the description is what
+    // makes a schema-level rejection actionable.
+    expect(z.toJSONSchema(CanvasIdSchema).description).toEqual(expect.any(String));
+  });
+
+  it('passes schema-serializable inside a tool input', () => {
+    const consumer = tool('canvas_consumer', {
+      description: 'Accepts a canvas id shaped by the exported schema.',
+      input: z.object({ canvas_id: CanvasIdSchema.optional() }),
+      output: z.object({ ok: z.boolean().describe('Always true.') }),
+      handler: () => ({ ok: true }),
+    });
+
+    const report = validateDefinitions({ tools: [consumer] });
+    expect(
+      [...report.errors, ...report.warnings].filter((d) => d.rule === 'schema-serializable'),
+    ).toEqual([]);
+    expect(report.passed).toBe(true);
   });
 });
 
@@ -372,6 +498,59 @@ describe('CanvasRegistry · per-tenant cap', () => {
     expect(registry.countForTenant('tenant-a')).toBe(2);
     expect(registry.totalActive()).toBe(2);
     await registry.shutdown(baseContext);
+  });
+
+  // Issue #275 — the cap is a local capacity decision that shares -32003 with
+  // upstream throttling. `data.reason` is what separates the two, on the wire
+  // and in `mcp.tool.error_category`.
+  describe('capacity refusal shape (#275)', () => {
+    /** The cap refusal thrown after `maxCanvasesPerTenant` is reached. */
+    async function refusal(): Promise<McpError> {
+      const provider = makeStubProvider();
+      const registry = new CanvasRegistry(provider, makeOptions({ maxCanvasesPerTenant: 2 }));
+      await registry.acquire(undefined, 'tenant-a', baseContext);
+      await registry.acquire(undefined, 'tenant-a', baseContext);
+      let caught: unknown;
+      try {
+        await registry.acquire(undefined, 'tenant-a', baseContext);
+      } catch (err) {
+        caught = err;
+      }
+      await registry.shutdown(baseContext);
+      expect(caught).toBeInstanceOf(McpError);
+      return caught as McpError;
+    }
+
+    it('keeps RateLimited and carries reason, retryable, and the occupancy counts', async () => {
+      const err = await refusal();
+
+      expect(err.code).toBe(JsonRpcErrorCode.RateLimited);
+      expect(err.data).toMatchObject({
+        reason: 'canvas_capacity_exhausted',
+        retryable: true,
+        tenantId: 'tenant-a',
+        activeCount: 2,
+        cap: 2,
+      });
+    });
+
+    it('recovers through reuse, which is the one path open under MCP_AUTH_MODE=none', async () => {
+      const hint = (await refusal()).data?.recovery as { hint?: string } | undefined;
+
+      // Under the collapsed `default` tenant the occupied slots may belong to
+      // other callers and a consumer's drop tool is off by default, so the hint
+      // has to lead with passing back an id the caller already holds.
+      expect(hint?.hint).toBe(
+        "Pass a canvas_id you already hold instead of omitting it to create another, free a slot with this server's canvas-drop tool if it exposes one, or retry once idle canvases pass their TTL.",
+      );
+    });
+
+    it('carries no advice in the message that the hint contradicts', async () => {
+      const err = await refusal();
+
+      expect(err.message).toBe('Tenant has reached the active canvas cap (2).');
+      expect(err.message).not.toMatch(/drop unused canvases/i);
+    });
   });
 });
 
