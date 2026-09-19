@@ -15,6 +15,7 @@ import {
 } from '@/linter/rules/tool-rules.js';
 import { validateDefinitions } from '@/linter/validate.js';
 import { headerParam } from '@/mcp-server/tools/utils/headerParam.js';
+import { JsonRpcErrorCode } from '@/types-global/errors.js';
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -155,6 +156,54 @@ describe('lintToolDefinition — _meta.ui', () => {
     // Should only get the required error, not the scheme warning
     const schemeWarnings = diagnostics.filter((d) => d.rule === 'meta-ui-resource-uri-scheme');
     expect(schemeWarnings).toHaveLength(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// lintToolDefinition — declarative error contract wiring
+// ---------------------------------------------------------------------------
+
+describe('lintToolDefinition — error contract', () => {
+  /** A contract whose one reason the handler below throws. */
+  const errors = [
+    {
+      code: JsonRpcErrorCode.NotFound,
+      reason: 'no_match',
+      when: 'Nothing matched the query.',
+      recovery: 'Broaden the query and call the tool again.',
+    },
+  ];
+
+  it('reports a fail site that does not forward the declared recovery', () => {
+    const diagnostics = lintToolDefinition(
+      validTool({
+        errors,
+        handler: async (_input: unknown, ctx: { fail: (reason: string) => Error }) => {
+          throw ctx.fail('no_match');
+        },
+      }),
+    );
+
+    expect(diagnostics.map((d) => d.rule)).toContain('error-contract-recovery-unforwarded');
+  });
+
+  it('stays silent once the site forwards it', () => {
+    const diagnostics = lintToolDefinition(
+      validTool({
+        errors,
+        handler: async (
+          _input: unknown,
+          ctx: {
+            fail: (reason: string, message: string, data: unknown) => Error;
+            recoveryFor: (reason: string) => object;
+          },
+        ) => {
+          throw ctx.fail('no_match', 'Nothing matched', { ...ctx.recoveryFor('no_match') });
+        },
+      }),
+    );
+
+    expect(diagnostics).toEqual([]);
   });
 });
 

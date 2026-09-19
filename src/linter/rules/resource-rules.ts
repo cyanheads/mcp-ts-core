@@ -11,6 +11,7 @@ import { invalidDefinitionEntry, isDefinitionObject } from './definition-rules.j
 import {
   lintErrorContract,
   lintErrorContractConformance,
+  lintErrorContractRecoveryUnforwarded,
   lintErrorContractUnthrown,
 } from './error-contract-rules.js';
 import { lintHandlerBody } from './handler-body-rules.js';
@@ -122,6 +123,7 @@ export function lintResourceDefinition(
     diagnostics.push(...lintErrorContract(d.errors, 'resource', displayName));
     diagnostics.push(...lintErrorContractConformance(contractDef, 'resource', displayName));
     diagnostics.push(...lintErrorContractUnthrown(contractDef, 'resource', displayName));
+    diagnostics.push(...lintErrorContractRecoveryUnforwarded(contractDef, 'resource', displayName));
   }
 
   return diagnostics;

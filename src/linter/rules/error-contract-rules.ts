@@ -1,9 +1,9 @@
 /**
  * @fileoverview Lint rules for the declarative `errors[]` contract on tool and
  * resource definitions. Validates structure (codes, reasons, severity),
- * uniqueness, and — when a contract is present — cross-checks the handler body
- * in both directions: codes thrown but not declared, and reasons declared but
- * never thrown.
+ * uniqueness, and — when a contract is present — cross-checks the handler body:
+ * codes thrown but not declared, reasons declared but never thrown, and throw
+ * sites that never put the declared `recovery` on the wire.
  * @module src/linter/rules/error-contract-rules
  */
 
@@ -493,6 +493,52 @@ export function scanReasonCalls(source: string, callee: string): ReasonCallScan 
   return { indeterminate, sites };
 }
 
+/** Both reason-carrying scans over one handler's source, plus the source itself. */
+interface ContractHandlerScan {
+  /** Every literal `ctx.fail('<reason>', …)` site, in source order. */
+  fail: ReasonCallSite[];
+  /** Every literal `ctx.recoveryFor('<reason>')` site, in source order. */
+  recoveryFor: ReasonCallSite[];
+  /** The handler source both scans addressed, for slicing a site's arguments. */
+  source: string;
+}
+
+/**
+ * Reads a contract-carrying definition's handler source and scans both
+ * reason-carrying callees.
+ *
+ * Returns `undefined` when there is nothing to check — no contract, no handler,
+ * an unreadable `toString()` — or when either callee took a non-literal first
+ * argument. A variable, a template literal, or a map lookup puts unknown reasons
+ * in play, and every rule reading these scans bails on the whole definition
+ * rather than guess at the set.
+ */
+function scanContractHandler(def: {
+  handler?: unknown;
+  errors?: unknown;
+}): ContractHandlerScan | undefined {
+  if (!Array.isArray(def.errors) || def.errors.length === 0) return undefined;
+  if (typeof def.handler !== 'function') return undefined;
+
+  let source: string;
+  try {
+    source = def.handler.toString();
+  } catch {
+    return undefined;
+  }
+
+  const fail = scanReasonCalls(source, 'ctx.fail');
+  const recoveryFor = scanReasonCalls(source, 'ctx.recoveryFor');
+  if (fail.indeterminate || recoveryFor.indeterminate) return undefined;
+
+  return { fail: fail.sites, recoveryFor: recoveryFor.sites, source };
+}
+
+/** Whether `inner` falls inside `outer`'s argument list. */
+function within(inner: ReasonCallSite, outer: ReasonCallSite): boolean {
+  return inner.start > outer.start && inner.end <= outer.end;
+}
+
 /** Offset just past the `)` matching the `(` at `open`, or `-1` when unbalanced. */
 function matchingParen(cleaned: string, open: number): number {
   let depth = 0;
@@ -518,51 +564,183 @@ function matchingParen(cleaned: string, open: number): number {
  *
  * **Trigger.** Only when the handler holds at least one literal `ctx.fail(`. A
  * handler with none produces its reasons somewhere the scan cannot reach, and
- * firing there would warn on every service-layer definition. A `ctx.fail(` whose
- * first argument is not a string literal makes the thrown set unknowable, so the
- * whole definition is skipped rather than guessed at.
+ * firing there would warn on every service-layer definition. A `ctx.fail(` or
+ * `ctx.recoveryFor(` whose first argument is not a string literal makes the
+ * named set unknowable, so the whole definition is skipped rather than guessed
+ * at.
  *
  * **Warning, never error.** A reason produced outside the handler closure is
- * invisible to any `toString()` scan, so the rule can never prove absence.
- * Silent blind spots under the trigger above: a service that throws a factory
- * error carrying `data: { reason }`, a `createFail(errors)` resolver built
- * outside the handler, and an aliased `const fail = ctx.fail`.
+ * invisible to any `toString()` scan, so the rule can never prove absence. An
+ * entry the service layer produces says so with `thrownBy: 'service'` and is
+ * skipped while the handler's own reasons keep being checked. Still silent
+ * without a marker: a `createFail(errors)` resolver built outside the handler,
+ * and an aliased `const fail = ctx.fail`.
  */
 export function lintErrorContractUnthrown(
   def: { handler?: unknown; errors?: unknown },
   definitionType: LintDefinitionType,
   definitionName: string,
 ): LintDiagnostic[] {
-  if (!Array.isArray(def.errors) || def.errors.length === 0) return [];
-  if (typeof def.handler !== 'function') return [];
-
-  let source: string;
-  try {
-    source = def.handler.toString();
-  } catch {
-    return [];
-  }
-
-  const failScan = scanReasonCalls(source, 'ctx.fail');
-  if (failScan.indeterminate || failScan.sites.length === 0) return [];
+  const scan = scanContractHandler(def);
+  if (!scan || scan.fail.length === 0) return [];
 
   // `ctx.recoveryFor('<reason>')` counts too: it is how a handler opts a
   // service-thrown reason onto the wire, and naming it there is all the scan
   // can ask for.
-  const named = new Set(failScan.sites.map((site) => site.reason));
-  for (const site of scanReasonCalls(source, 'ctx.recoveryFor').sites) named.add(site.reason);
+  const named = new Set(scan.fail.map((site) => site.reason));
+  for (const site of scan.recoveryFor) named.add(site.reason);
 
   const diagnostics: LintDiagnostic[] = [];
   for (const entry of def.errors as ErrorContract[]) {
     const reason = entry?.reason;
     if (typeof reason !== 'string' || reason.length === 0 || named.has(reason)) continue;
+    if (entry.thrownBy === 'service') continue;
     diagnostics.push({
       rule: 'error-contract-unthrown',
       severity: 'warning',
       message:
         `${definitionType} '${definitionName}' declares reason '${reason}' in errors[], but no ` +
-        `ctx.fail('${reason}', …) appears in the handler. Wire the throw, or drop the entry — ` +
-        'clients plan around the advertised failure surface.',
+        `ctx.fail('${reason}', …) appears in the handler. Wire the throw, drop the entry, or mark ` +
+        "it `thrownBy: 'service'` when the service layer produces it — clients plan around the " +
+        'advertised failure surface.',
+      definitionType,
+      definitionName,
+    });
+  }
+  return diagnostics;
+}
+
+/** Matches text that opens with a `ctx.recoveryFor(` call. */
+const RESOLVER_CALL_RE = /^ctx\.recoveryFor\s*\(/;
+
+/**
+ * Splits a bracketed list — an argument list or an object literal body,
+ * brackets included — into its top-level entries, as `[start, end)` offsets
+ * into that text. Empty entries (a trailing comma) are dropped.
+ *
+ * Reads the comment- and string-stripped text, where a literal's contents are
+ * blanked, so a comma inside a string cannot split an entry.
+ */
+function splitTopLevel(cleaned: string): [number, number][] {
+  const entries: [number, number][] = [];
+  const close = cleaned.length - 1;
+  let depth = 0;
+  let start = 1;
+
+  for (let i = 1; i < close; i += 1) {
+    const ch = cleaned[i];
+    if (ch === '(' || ch === '[' || ch === '{') depth += 1;
+    else if (ch === ')' || ch === ']' || ch === '}') depth -= 1;
+    else if (ch === ',' && depth === 0) {
+      entries.push([start, i]);
+      start = i + 1;
+    }
+  }
+  entries.push([start, close]);
+
+  return entries.filter(([from, to]) => cleaned.slice(from, to).trim().length > 0);
+}
+
+/**
+ * What a `ctx.fail` site's data argument tells the scan about recovery, or
+ * `undefined` when it cannot be read.
+ *
+ * Readable means every part of the argument is accounted for: a bare
+ * `ctx.recoveryFor(…)` call, or an object literal whose only spreads are
+ * resolver calls. An identifier, a call that is not the resolver, and a literal
+ * spreading anything else may each carry `recovery` already, so the site is
+ * left alone rather than guessed at.
+ */
+function readDataArgument(cleaned: string): { carriesRecovery: boolean } | undefined {
+  const text = cleaned.trim();
+  if (RESOLVER_CALL_RE.test(text)) return { carriesRecovery: false };
+  if (!text.startsWith('{') || !text.endsWith('}')) return undefined;
+
+  let carriesRecovery = false;
+  for (const [from, to] of splitTopLevel(text)) {
+    const entry = text.slice(from, to).trim();
+    if (entry.startsWith('...')) {
+      if (!RESOLVER_CALL_RE.test(entry.slice(3).trim())) return undefined;
+      continue;
+    }
+    if (/^recovery\b/.test(entry)) carriesRecovery = true;
+  }
+  return { carriesRecovery };
+}
+
+/**
+ * Flags a literal `ctx.fail('<reason>', …)` site that does not put the
+ * contract's `recovery` on the wire.
+ *
+ * An `errors[]` entry must declare `recovery`, but reaching the client with it
+ * is opt-in: the throw site forwards `ctx.recoveryFor('<reason>')`, or passes
+ * its own `recovery` key. A site that does neither ships `reason` and
+ * `retryable` with no hint — and because the framework mirrors
+ * `data.recovery.hint` into the error `content[]`, both client surfaces lose it
+ * together. The declared guidance is right there in the contract and reaches
+ * nobody; an error-path test asserting `code` and `reason` passes either way.
+ *
+ * **Per site, not per reason.** A handler wiring one of six throws is covered
+ * at one of them, so each site is judged on its own argument list. Two sites
+ * naming one reason, one forwarding and one bare, produce exactly one
+ * diagnostic.
+ *
+ * **Accepted forms.** `{ ...ctx.recoveryFor('<reason>') }` spread into the data
+ * object, `ctx.recoveryFor('<reason>')` passed as the data argument, and an
+ * explicit `recovery` key carrying a runtime-interpolated hint.
+ *
+ * **Bails.** A non-literal first argument on either callee skips the whole
+ * definition — the reasons in play are unknown. A resolver sitting outside
+ * every fail span (a hoisted `const hint = ctx.recoveryFor('x')`) skips that
+ * reason, since the binding is assembled where the scan cannot follow it. A
+ * data argument the scan cannot read skips that one site.
+ *
+ * **Warning, never error.** A failure thrown below the handler is invisible to
+ * a `handler.toString()` scan, so the rule speaks only for the sites it sees.
+ */
+export function lintErrorContractRecoveryUnforwarded(
+  def: { handler?: unknown; errors?: unknown },
+  definitionType: LintDefinitionType,
+  definitionName: string,
+): LintDiagnostic[] {
+  const scan = scanContractHandler(def);
+  if (!scan) return [];
+
+  const cleaned = stripCommentsAndStrings(scan.source);
+  const hoisted = new Set(
+    scan.recoveryFor
+      .filter((resolver) => !scan.fail.some((site) => within(resolver, site)))
+      .map((resolver) => resolver.reason),
+  );
+
+  const diagnostics: LintDiagnostic[] = [];
+  for (const site of scan.fail) {
+    if (hoisted.has(site.reason)) continue;
+
+    const resolved = scan.recoveryFor.filter((resolver) => within(resolver, site));
+    if (resolved.some((resolver) => resolver.reason === site.reason)) continue;
+
+    const args = splitTopLevel(cleaned.slice(site.start, site.end));
+    const dataArg = args[2];
+    if (dataArg) {
+      const data = readDataArgument(
+        cleaned.slice(site.start + dataArg[0], site.start + dataArg[1]),
+      );
+      if (!data || data.carriesRecovery) continue;
+    }
+
+    const mismatch = resolved.map((resolver) => `'${resolver.reason}'`).join(' / ');
+    diagnostics.push({
+      rule: 'error-contract-recovery-unforwarded',
+      severity: 'warning',
+      message:
+        `${definitionType} '${definitionName}' throws ctx.fail('${site.reason}', …) ` +
+        (mismatch.length > 0
+          ? `forwarding recovery for ${mismatch} instead, so the caller gets another failure mode's guidance. `
+          : "without forwarding its declared recovery, so the contract's hint reaches neither " +
+            'client surface. ') +
+        `Spread \`...ctx.recoveryFor('${site.reason}')\` into the data argument, or pass an ` +
+        'explicit `recovery: { hint }` when the hint needs runtime context.',
       definitionType,
       definitionName,
     });

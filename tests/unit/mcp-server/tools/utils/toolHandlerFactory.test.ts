@@ -2695,6 +2695,46 @@ describe('createToolHandler', () => {
       expect(strict.safeParse({ error: { code: -32001, message: 'x' } }).success).toBe(false);
     });
 
+    it("advertises the same schemas whether or not an entry is marked thrownBy: 'service' (#462)", () => {
+      // The marker is lint-only metadata — nothing that builds a wire schema
+      // reads it, so a client sees a marked tool exactly as an unmarked one.
+      const marked = tool('advertised_search_marked', {
+        description: 'Search with a declared error contract.',
+        input: z.object({ q: z.string().describe('q') }),
+        output: z.object({
+          items: z.array(z.string()).describe('matches'),
+          cursor: z.string().optional().describe('next page cursor'),
+        }),
+        enrichment: { totalCount: z.number().describe('total before limit') },
+        errors: [
+          {
+            reason: 'no_match',
+            code: JsonRpcErrorCode.NotFound,
+            when: 'No items match the query',
+            recovery: 'Broaden the query and try again.',
+            thrownBy: 'service',
+          },
+          {
+            reason: 'rate_limited',
+            code: JsonRpcErrorCode.RateLimited,
+            when: 'Upstream rate limit hit',
+            retryable: true,
+            recovery: 'Wait a few seconds before retrying.',
+            thrownBy: 'service',
+          },
+        ],
+        handler: (_input, ctx) => {
+          ctx.enrich.total(0);
+          return { items: [] };
+        },
+      });
+
+      expect(emitted(marked as AnyToolDefinition)).toEqual(
+        emitted(searchTool as AnyToolDefinition),
+      );
+      expect(z.toJSONSchema(marked.input)).toEqual(z.toJSONSchema(searchTool.input));
+    });
+
     it('still fails the call when a required enrichment field is never populated', async () => {
       const forgetful = tool('forgets_enrichment', {
         description: 'Declares enrichment but never populates it.',

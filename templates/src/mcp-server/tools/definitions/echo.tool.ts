@@ -42,7 +42,13 @@ export const echoTool = tool('template_echo_message', {
 
   handler(input, ctx) {
     if (input.message.trim().length === 0) {
-      throw ctx.fail('empty_message', 'Message must contain at least one non-whitespace character.');
+      // Spreading ctx.recoveryFor puts the declared recovery on the wire. Without
+      // it the hint reaches neither structuredContent nor content[].
+      throw ctx.fail(
+        'empty_message',
+        'Message must contain at least one non-whitespace character.',
+        { ...ctx.recoveryFor('empty_message') },
+      );
     }
     // Reaches both client surfaces with no format() plumbing.
     ctx.enrich({ characterCount: input.message.length });

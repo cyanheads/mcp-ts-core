@@ -10,6 +10,7 @@ import { describe, expect, it } from 'vitest';
 import { z } from 'zod';
 
 import { lintResourceDefinition } from '@/linter/rules/resource-rules.js';
+import { JsonRpcErrorCode } from '@/types-global/errors.js';
 
 const handler = async () => ({});
 
@@ -235,6 +236,28 @@ describe('lintResourceDefinition', () => {
       expect(
         rules({ uriTemplate: 'widget://x', name: 'w', description: 'x', handler, errors: 'nope' }),
       ).toContain('error-contract-type');
+    });
+
+    it('reports a fail site that does not forward the declared recovery', () => {
+      expect(
+        rules({
+          uriTemplate: 'widget://{id}',
+          name: 'w',
+          description: 'x',
+          params: z.object({ id: z.string().describe('Widget identifier') }),
+          handler: async (_params: unknown, ctx: { fail: (reason: string) => Error }) => {
+            throw ctx.fail('no_match');
+          },
+          errors: [
+            {
+              code: JsonRpcErrorCode.NotFound,
+              reason: 'no_match',
+              when: 'No widget carries that id.',
+              recovery: 'List the widgets and retry with a known id.',
+            },
+          ],
+        }),
+      ).toContain('error-contract-recovery-unforwarded');
     });
   });
 

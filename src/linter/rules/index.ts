@@ -7,6 +7,7 @@ export { lintCappedListTruncation, lintEnrichmentContract } from './enrichment-r
 export {
   lintErrorContract,
   lintErrorContractConformance,
+  lintErrorContractRecoveryUnforwarded,
   lintErrorContractUnthrown,
 } from './error-contract-rules.js';
 export { lintHandlerBody } from './handler-body-rules.js';

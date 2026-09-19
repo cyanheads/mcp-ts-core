@@ -178,3 +178,58 @@ describe('tool() handler — compile-time negative cases', () => {
     });
   });
 });
+
+// ---------------------------------------------------------------------------
+// thrownBy — lint-only marker, inert at the type level (#462)
+// ---------------------------------------------------------------------------
+
+describe("thrownBy: 'service'", () => {
+  const MARKED_CONTRACT = [
+    {
+      reason: 'query_too_broad',
+      code: JsonRpcErrorCode.ValidationError,
+      when: 'The query is a bare wildcard.',
+      recovery: 'Add at least one search term and retry.',
+    },
+    {
+      reason: 'item_not_found',
+      code: JsonRpcErrorCode.NotFound,
+      when: 'No item matches the query.',
+      recovery: 'Broaden the query and search again.',
+      thrownBy: 'service',
+    },
+  ] as const satisfies readonly ErrorContract[];
+
+  it('keeps a marked reason in the declared union', () => {
+    type R = ReasonOf<typeof MARKED_CONTRACT>;
+    expectTypeOf<R>().toEqualTypeOf<'query_too_broad' | 'item_not_found'>();
+  });
+
+  it('leaves ctx.fail and ctx.recoveryFor typed against the marked reason', () => {
+    tool('demo_marked', {
+      description: 'demo',
+      input: z.object({ q: z.string().describe('query') }),
+      output: z.object({ r: z.string().describe('result') }),
+      errors: MARKED_CONTRACT,
+      async handler(_input, ctx) {
+        expectTypeOf(ctx.fail).parameter(0).toEqualTypeOf<'query_too_broad' | 'item_not_found'>();
+        ctx.recoveryFor('item_not_found');
+        return { r: 'ok' };
+      },
+    });
+  });
+
+  it('rejects a thrownBy value other than service', () => {
+    const bad = [
+      {
+        reason: 'item_not_found',
+        code: JsonRpcErrorCode.NotFound,
+        when: 'No item matches the query.',
+        recovery: 'Broaden the query and search again.',
+        // @ts-expect-error — 'handler' is not a thrownBy value
+        thrownBy: 'handler',
+      },
+    ] as const satisfies readonly ErrorContract[];
+    expectTypeOf(bad).toBeObject();
+  });
+});

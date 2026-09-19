@@ -8,6 +8,7 @@ import { describe, expect, it } from 'vitest';
 import {
   lintErrorContract,
   lintErrorContractConformance,
+  lintErrorContractRecoveryUnforwarded,
   lintErrorContractUnthrown,
 } from '@/linter/rules/error-contract-rules.js';
 import { JsonRpcErrorCode } from '@/types-global/errors.js';
@@ -742,5 +743,384 @@ describe('lintErrorContractUnthrown', () => {
     expect(d).toHaveLength(1);
     expect(d[0]?.definitionType).toBe('resource');
     expect(d[0]?.message).toContain("resource 'item://{id}'");
+  });
+
+  // Issue #462 — the trigger switches the rule on for the whole definition, so a
+  // handler mixing one local precondition with service-produced reasons drew one
+  // warning per service reason, with no way to clear it.
+  describe("thrownBy: 'service' (#462)", () => {
+    /** One local precondition, then delegation — the shape the marker exists for. */
+    const MIXED = `(input, ctx) => {
+      if (input.query === '*') throw ctx.fail('query_too_broad', 'Wildcard query');
+      return getItemService().search(input, ctx);
+    }`;
+
+    /** Messages flagged for the mixed handler with `marked` reasons carrying the field. */
+    function flagged(marked: readonly string[]): string[] {
+      return lintErrorContractUnthrown(
+        {
+          handler: handlerOf(MIXED),
+          errors: ['query_too_broad', 'item_not_found', 'bad_cursor'].map((reason) => ({
+            code: JsonRpcErrorCode.NotFound,
+            reason,
+            when: 'w',
+            recovery: 'Broaden the query and search again.',
+            ...(marked.includes(reason) ? { thrownBy: 'service' as const } : {}),
+          })),
+        },
+        'tool',
+        'search_items',
+      ).map((x) => x.message);
+    }
+
+    it('flags both service-produced reasons when neither is marked', () => {
+      const messages = flagged([]);
+      expect(messages).toHaveLength(2);
+      expect(messages.join('\n')).toContain("'item_not_found'");
+      expect(messages.join('\n')).toContain("'bad_cursor'");
+    });
+
+    it('stays silent on a marked entry no literal call names', () => {
+      expect(flagged(['item_not_found', 'bad_cursor'])).toEqual([]);
+    });
+
+    it('keeps flagging an unmarked dead entry beside a marked one', () => {
+      const messages = flagged(['item_not_found']);
+      expect(messages).toHaveLength(1);
+      expect(messages[0]).toContain("'bad_cursor'");
+      expect(messages[0]).not.toContain("'item_not_found'");
+    });
+
+    it('names all three fixes', () => {
+      const [message] = flagged([]);
+      expect(message).toMatch(/wire the throw/i);
+      expect(message).toMatch(/drop the entry/i);
+      expect(message).toContain("thrownBy: 'service'");
+    });
+
+    it('marks entries on resources too', () => {
+      expect(
+        lintErrorContractUnthrown(
+          {
+            handler: handlerOf(`(params, ctx) => { throw ctx.fail('no_match', 'x'); }`),
+            errors: [
+              { code: JsonRpcErrorCode.NotFound, reason: 'no_match', when: 'w' },
+              { code: JsonRpcErrorCode.NotFound, reason: 'stale', when: 'w', thrownBy: 'service' },
+            ],
+          },
+          'resource',
+          'item://{id}',
+        ),
+      ).toEqual([]);
+    });
+  });
+
+  // Issue #462 — a non-literal `ctx.recoveryFor(` puts unknown reasons in play
+  // exactly as a non-literal `ctx.fail(` does; only the fail scan was consulted.
+  describe('an unreadable ctx.recoveryFor bails the definition (#462)', () => {
+    it.each([
+      [
+        'a variable',
+        `(input, ctx) => { throw ctx.fail('no_match', 'x', { ...ctx.recoveryFor(err.data.reason) }); }`,
+      ],
+      [
+        'a template literal',
+        // biome-ignore lint/suspicious/noTemplateCurlyInString: handler source under test, not an interpolation.
+        "(input, ctx) => { throw ctx.fail('no_match', 'x', { ...ctx.recoveryFor(`no_${kind}`) }); }",
+      ],
+      [
+        'a map lookup',
+        `(input, ctx) => { throw ctx.fail('no_match', 'x', { ...ctx.recoveryFor(REASONS[kind]) }); }`,
+      ],
+    ])('stays silent when a ctx.recoveryFor takes %s as its first argument', (_label, body) => {
+      expect(unthrownReasons(body, ['no_match', 'site_not_found'])).toEqual([]);
+    });
+  });
+});
+
+// Issue #255 — a contract `recovery` string reaches the wire only when the
+// throw site forwards it. A site that omits the forward lints clean today and
+// error-path tests asserting `code` and `reason` pass with the hint absent.
+describe('lintErrorContractRecoveryUnforwarded', () => {
+  /** A handler function compiled from source text, as the linter sees it. */
+  const handlerOf = (body: string) => new Function(`return async ${body}`)();
+
+  /** Every reason the fixtures below throw, so the contract covers all of them. */
+  const REASONS = ['rate_limited', 'no_match', 'bad_cursor'] as const;
+
+  /** Diagnostics for a handler body against a contract declaring every fixture reason. */
+  function diagnose(
+    body: string,
+    definitionType: 'tool' | 'resource' = 'tool',
+    definitionName = 'search_items',
+  ) {
+    const d = lintErrorContractRecoveryUnforwarded(
+      {
+        handler: handlerOf(body),
+        errors: REASONS.map((reason) => ({
+          code: JsonRpcErrorCode.RateLimited,
+          reason,
+          when: 'w',
+          recovery: 'Wait 30 seconds before retrying or reduce the batch size.',
+        })),
+      },
+      definitionType,
+      definitionName,
+    );
+    for (const diagnostic of d) {
+      expect(diagnostic.rule).toBe('error-contract-recovery-unforwarded');
+      expect(diagnostic.severity).toBe('warning');
+    }
+    return d;
+  }
+
+  /** Diagnostic messages for a handler body. */
+  const messages = (body: string) => diagnose(body).map((x) => x.message);
+
+  describe('sites that omit the forward', () => {
+    it('flags a two-argument site and names the correction', () => {
+      const [message, ...rest] = messages(
+        `(input, ctx) => { throw ctx.fail('rate_limited', 'Upstream rate limit exceeded'); }`,
+      );
+
+      expect(rest).toEqual([]);
+      expect(message).toContain("tool 'search_items'");
+      expect(message).toContain("'rate_limited'");
+      expect(message).toContain("ctx.recoveryFor('rate_limited')");
+    });
+
+    it('flags a site that passes only the reason', () => {
+      expect(messages(`(input, ctx) => { throw ctx.fail('rate_limited'); }`)).toHaveLength(1);
+    });
+
+    it('flags a data object whose keys carry no recovery', () => {
+      expect(
+        messages(`(input, ctx) => { throw ctx.fail('rate_limited', 'slow', { attempts: 3 }); }`),
+      ).toHaveLength(1);
+    });
+
+    it('flags one site of a handler that wires the other', () => {
+      const [message, ...rest] = messages(
+        `(input, ctx) => {
+          if (a) throw ctx.fail('no_match', 'x', { ...ctx.recoveryFor('no_match') });
+          throw ctx.fail('rate_limited', 'y');
+        }`,
+      );
+
+      expect(rest).toEqual([]);
+      expect(message).toContain("'rate_limited'");
+      expect(message).not.toContain("'no_match'");
+    });
+
+    it('flags only the bare one of two sites naming the same reason', () => {
+      expect(
+        messages(
+          `(input, ctx) => {
+            if (a) throw ctx.fail('no_match', 'x', { ...ctx.recoveryFor('no_match') });
+            if (b) throw ctx.fail('no_match', 'y');
+          }`,
+        ),
+      ).toHaveLength(1);
+    });
+
+    it('applies to resources too', () => {
+      const d = diagnose(
+        `(params, ctx) => { throw ctx.fail('no_match', 'x'); }`,
+        'resource',
+        'item://{id}',
+      );
+
+      expect(d).toHaveLength(1);
+      expect(d[0]?.definitionType).toBe('resource');
+      expect(d[0]?.message).toContain("resource 'item://{id}'");
+    });
+  });
+
+  describe('a resolver naming another reason', () => {
+    it('warns naming both reasons when spread into the data object', () => {
+      const [message, ...rest] = messages(
+        `(input, ctx) => { throw ctx.fail('rate_limited', 'x', { ...ctx.recoveryFor('no_match') }); }`,
+      );
+
+      expect(rest).toEqual([]);
+      expect(message).toContain("'rate_limited'");
+      expect(message).toContain("'no_match'");
+    });
+
+    it('warns naming both reasons when passed as the data argument', () => {
+      const [message] = messages(
+        `(input, ctx) => { throw ctx.fail('rate_limited', 'x', ctx.recoveryFor('no_match')); }`,
+      );
+
+      expect(message).toContain("'rate_limited'");
+      expect(message).toContain("'no_match'");
+    });
+  });
+
+  describe('accepted forwarding forms', () => {
+    it.each([
+      [
+        'spread into the data object',
+        `(input, ctx) => { throw ctx.fail('rate_limited', 'x', { ...ctx.recoveryFor('rate_limited') }); }`,
+      ],
+      [
+        'passed as the data argument',
+        `(input, ctx) => { throw ctx.fail('rate_limited', 'x', ctx.recoveryFor('rate_limited')); }`,
+      ],
+      [
+        'an explicit recovery key',
+        `(input, ctx) => { throw ctx.fail('rate_limited', 'x', { recovery: { hint: 'Retry in ' + n + 's.' } }); }`,
+      ],
+      [
+        'spread alongside other keys',
+        `(input, ctx) => { throw ctx.fail('rate_limited', 'x', { attempts: 3, ...ctx.recoveryFor('rate_limited') }); }`,
+      ],
+    ])('stays silent for a resolver %s', (_label, body) => {
+      expect(messages(body)).toEqual([]);
+    });
+
+    it('reads past a nested object and a comma inside a nested call', () => {
+      // The data argument is the third top-level argument, not the third comma.
+      expect(
+        messages(
+          `(input, ctx) => {
+            throw ctx.fail('rate_limited', renderMessage(input.query, retries), {
+              meta: { retries, window: { seconds: 30 } },
+              ...ctx.recoveryFor('rate_limited'),
+            });
+          }`,
+        ),
+      ).toEqual([]);
+    });
+
+    it('checks a site nested inside a closure', () => {
+      expect(
+        messages(
+          `(input, ctx) => {
+            return input.ids.map((id) => {
+              if (!lookup(id)) throw ctx.fail('no_match', 'missing ' + id);
+              return id;
+            });
+          }`,
+        ),
+      ).toHaveLength(1);
+    });
+  });
+
+  describe('bails — the scan cannot tell what the site carries', () => {
+    it.each([
+      ['an identifier', `(input, ctx) => { throw ctx.fail('rate_limited', 'x', data); }`],
+      [
+        'a call other than the resolver',
+        `(input, ctx) => { throw ctx.fail('rate_limited', 'x', buildErrorData(input)); }`,
+      ],
+      [
+        'an object literal spreading another value',
+        `(input, ctx) => { throw ctx.fail('rate_limited', 'x', { ...details }); }`,
+      ],
+    ])('stays silent for a data argument that is %s', (_label, body) => {
+      expect(messages(body)).toEqual([]);
+    });
+
+    it.each([
+      ['ctx.fail', `(input, ctx) => { throw ctx.fail(reason, 'x'); }`],
+      [
+        'ctx.recoveryFor',
+        `(input, ctx) => {
+          throw ctx.fail('rate_limited', 'x', { ...ctx.recoveryFor(err.data.reason) });
+        }`,
+      ],
+    ])(
+      'stays silent on the whole definition when %s takes a non-literal reason',
+      (_label, body) => {
+        expect(messages(body)).toEqual([]);
+      },
+    );
+
+    it('stays silent for a reason whose resolver is hoisted above the throw', () => {
+      expect(
+        messages(
+          `(input, ctx) => {
+            const hint = ctx.recoveryFor('rate_limited');
+            throw ctx.fail('rate_limited', 'x', { ...hint });
+          }`,
+        ),
+      ).toEqual([]);
+    });
+
+    it('stays silent when the handler holds no literal ctx.fail', () => {
+      expect(messages(`(input, ctx) => { return getItemService().search(input, ctx); }`)).toEqual(
+        [],
+      );
+    });
+
+    it('skips a definition with no contract', () => {
+      expect(
+        lintErrorContractRecoveryUnforwarded(
+          { handler: handlerOf(`(input, ctx) => { throw ctx.fail('rate_limited', 'x'); }`) },
+          'tool',
+          'search_items',
+        ),
+      ).toEqual([]);
+    });
+
+    it('skips a definition with no handler', () => {
+      expect(
+        lintErrorContractRecoveryUnforwarded(
+          { errors: [{ code: JsonRpcErrorCode.NotFound, reason: 'no_match', when: 'w' }] },
+          'tool',
+          'search_items',
+        ),
+      ).toEqual([]);
+    });
+  });
+
+  describe('a call inside a comment or another literal is not a site', () => {
+    it('does not count a ctx.fail written inside a line comment', () => {
+      expect(
+        messages(
+          `(input, ctx) => {
+            // once this lands: throw ctx.fail('bad_cursor', 'x');
+            throw ctx.fail('no_match', 'y', { ...ctx.recoveryFor('no_match') });
+          }`,
+        ),
+      ).toEqual([]);
+    });
+
+    it('does not count a ctx.recoveryFor written inside another string', () => {
+      // The forward is quoted, not called — the site is still bare.
+      expect(
+        messages(
+          `(input, ctx) => {
+            log("{ ...ctx.recoveryFor('no_match') }");
+            throw ctx.fail('no_match', 'y');
+          }`,
+        ),
+      ).toHaveLength(1);
+    });
+  });
+
+  it("checks a thrownBy: 'service' entry the handler also throws locally", () => {
+    // The marker takes an entry out of `error-contract-unthrown`'s reach; it
+    // says nothing about a site that does exist.
+    const d = lintErrorContractRecoveryUnforwarded(
+      {
+        handler: handlerOf(`(input, ctx) => { throw ctx.fail('no_match', 'x'); }`),
+        errors: [
+          {
+            code: JsonRpcErrorCode.NotFound,
+            reason: 'no_match',
+            when: 'w',
+            recovery: 'Broaden the query and search again.',
+            thrownBy: 'service',
+          },
+        ],
+      },
+      'tool',
+      'search_items',
+    );
+
+    expect(d).toHaveLength(1);
+    expect(d[0]?.message).toContain("'no_match'");
   });
 });

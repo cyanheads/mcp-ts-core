@@ -372,6 +372,24 @@ export interface ErrorContract {
    */
   severity?: ErrorContractSeverity;
   /**
+   * Marks the entry as produced below the handler — a service that throws a
+   * factory error carrying `data: { reason }`, rather than a `ctx.fail` the
+   * handler body names.
+   *
+   * **Lint-only metadata.** Nothing at runtime reads it: `ctx.fail` resolves
+   * `code` and `retryable`, `ctx.recoveryFor` resolves `recovery`, the tool
+   * handler factory resolves `severity`, and the advertised error envelope
+   * carries `reason` and `when`. A marked entry is advertised, typed, and
+   * thrown exactly as an unmarked one, and stays in the `ctx.fail` /
+   * `ctx.recoveryFor` reason union.
+   *
+   * What it changes is `error-contract-unthrown`, whose scan reads only the
+   * handler source: a marked entry is skipped, while every other entry in the
+   * same handler keeps being checked. Mark the entries the service produces
+   * rather than moving the handler's own throws out of scan range.
+   */
+  thrownBy?: 'service';
+  /**
    * Human-readable description of when this error occurs. Surfaced to LLMs and
    * UI clients via `tools/list`. Type-level, not per-occurrence — different
    * from the actual `error.message` thrown at runtime.
