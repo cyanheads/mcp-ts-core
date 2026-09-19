@@ -4,7 +4,7 @@ description: >
   Scaffold a new MCP tool definition. Use when the user asks to add a tool, create a new tool, or implement a new capability for the server.
 metadata:
   author: cyanheads
-  version: "2.28"
+  version: "2.29"
   audience: external
   type: reference
 ---
@@ -719,6 +719,8 @@ export const fetchArticles = tool('fetch_articles', {
 
 `ctx.recoveryFor` returns `{}` when the calling tool has no contract or the reason isn't declared, so the spread is always safe — services don't have to know which tool called them.
 
+Add `thrownBy: 'service'` to a contract entry the service produces once the handler also throws one of its own. `error-contract-unthrown` reads the handler body alone: as soon as one literal `ctx.fail(` appears there, every declared reason the body does not name is flagged, and the marker is what tells the rule this one is thrown a layer down. Lint-only metadata — the entry stays typed, advertised, and thrown exactly as an unmarked one.
+
 See `add-service` for the full pattern.
 
 #### Ad-hoc factory throws (fallback)
@@ -860,7 +862,7 @@ return { items: hits };
 - [ ] Optional nested objects guarded for empty inner values from form-based clients (check `?.field` truthiness, not just object presence)
 - [ ] No `console` calls — use `ctx.log` for handler logging
 - [ ] `handler(input, ctx)` is pure — throws on failure, no try/catch (exception: batch tools with per-item isolation use try/catch inside the loop — that's intentional, don't remove it)
-- [ ] `format()` renders every field in the output schema — enforced at lint time via sentinel injection, startup fails with `format-parity` errors otherwise. Different clients forward different surfaces (Claude Code → `structuredContent`, Claude Desktop → `content[]`); both must carry the same data. Primary fix: render the missing field in `format()` (use `z.discriminatedUnion` for list/detail variants). Escape hatch: if the output schema was over-typed for a genuinely dynamic upstream API, relax it (`z.object({}).passthrough()`) rather than maintaining aspirational typing
+- [ ] `format()` renders every field in the output schema — enforced at lint time via sentinel injection, startup fails with `format-parity` errors otherwise. Different clients forward different surfaces (Claude Code → `structuredContent`, Claude Desktop → `content[]`); both must carry the same data. Primary fix: render the missing field in `format()` (for list/detail variants, one flat `z.object` with a `kind` discriminator and presence-based optional arms rendered by independent `if` blocks — `tool()` rejects a `z.discriminatedUnion` output). Escape hatch: if the output schema was over-typed for a genuinely dynamic upstream API, relax it (`z.object({}).passthrough()`) rather than maintaining aspirational typing
 - [ ] Agent-facing context (empty-result notices, query/filter echo, pagination totals) declared in an `enrichment` block and populated via `ctx.enrich(...)` — reaches both `structuredContent` and `content[]` automatically, not authored solely in `format()` text. Enrichment keys disjoint from `output` keys
 - [ ] If wrapping external API: output schema and `format()` preserve uncertainty from sparse upstream payloads instead of inventing concrete values, and a parsed `NaN`/`null` is dropped at the parse site rather than passed to a required output field
 - [ ] `auth` scopes declared if the tool needs authorization

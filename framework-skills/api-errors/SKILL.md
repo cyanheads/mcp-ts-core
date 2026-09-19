@@ -4,7 +4,7 @@ description: >
   McpError constructor, JsonRpcErrorCode reference, and error handling patterns for `@cyanheads/mcp-ts-core`. Use when looking up error codes, understanding where errors should be thrown vs. caught, or using ErrorHandler.tryCatch in services.
 metadata:
   author: cyanheads
-  version: "1.14"
+  version: "1.15"
   audience: external
   type: reference
 ---
@@ -65,13 +65,15 @@ export const fetchTool = tool('fetch_articles', {
 | Compile time | `ctx.fail('typo')` is a TS error. Auto-completes declared reasons. |
 | Runtime | `ctx.fail(reason, msg?, data?, options?)` builds an `McpError(contract.code, msg, { ...data, reason }, options)` — `data.reason` is auto-populated from the contract and cannot be overridden by caller-supplied data (spread first, then `reason` written last), so observers see a stable identifier. `options` accepts `{ cause }` for ES2022 error chaining. |
 | Lint (devcheck) | Each `code` validated against `JsonRpcErrorCode`. Reasons validated as snake_case + unique within contract. `recovery` validated as non-empty and ≥ 5 words. Build-time only — not invoked at server startup. |
-| Lint (conformance) | If the handler `throw new McpError(JsonRpcErrorCode.X)` outside `ctx.fail`, conformance check warns when X isn't declared. The inverse is checked too: a declared reason no `ctx.fail` in the handler names warns as `error-contract-unthrown`. |
+| Lint (conformance) | If the handler `throw new McpError(JsonRpcErrorCode.X)` outside `ctx.fail`, conformance check warns when X isn't declared. The inverse is checked too: a declared reason no `ctx.fail` in the handler names warns as `error-contract-unthrown` (mark it `thrownBy: 'service'` when the service layer produces it), and a `ctx.fail` site that never forwards the declared `recovery` warns as `error-contract-recovery-unforwarded`. |
 
 > **`recovery` is opt-in resolution, not auto-population.** The contract `recovery` is required metadata documenting the agent's next move when this failure mode fires (a forcing function for thoughtful guidance — placeholders like "Try again." get flagged by the linter). It does **not** automatically appear in runtime `data.recovery.hint` — the framework never injects it without an explicit signal at the throw site. Authors opt in by spreading `ctx.recoveryFor('reason')` into the `data` argument, the same way `ctx.fail('reason')` opts into resolving the contract `code`. What the author types at the throw site is what flows to the wire, with no hidden transformation; the resolver is just a typed lookup keyed by the same `reason` the author already typed.
 
 #### `ctx.recoveryFor` — opt-in contract resolution
 
 `ctx.recoveryFor(reason)` returns `{ recovery: { hint: <contract.recovery> } }` for a declared reason, ready to spread into `data`. Always available on `Context` (returns `{}` when no contract is attached or the reason is unknown — spread-safe with no optional chaining). On `HandlerContext<R>` it tightens to a typed signature constrained to the declared reason union.
+
+Spreading it into the data object and passing it as the data argument are the same call — `ctx.fail` spreads whatever `data` it receives. Spread when the site carries other keys, pass it directly when it carries nothing else. **Forwarding is lint-enforced per throw site:** a `ctx.fail` site that carries neither the resolver nor its own `recovery` key warns as `error-contract-recovery-unforwarded`, because the declared hint then reaches neither client surface and an error-path test asserting `code` and `reason` still passes.
 
 ```ts
 export const calculateTool = tool('calculate', {
@@ -172,6 +174,19 @@ errors: [
 ```
 
 The handler doesn't catch and re-throw — letting service errors bubble unchanged keeps "logic throws, framework catches" intact. The wire payload still carries `code` + `data.reason`, and clients can switch on reason without parsing message text. What's lost is lint-time enforcement that every reason is reachable; compensate with one wire-shape test per reason.
+
+**Mark the entries the service produces.** `error-contract-unthrown` reads the handler body alone, so in a handler that mixes one local precondition with service-thrown reasons it flags each service reason as dead. Add `thrownBy: 'service'` to those entries:
+
+```ts
+errors: [
+  { reason: 'empty_expression',   code: JsonRpcErrorCode.ValidationError,
+    when: 'Input is empty.',
+    recovery: 'Provide a non-empty expression to evaluate.',
+    thrownBy: 'service' },
+]
+```
+
+The field is lint-only metadata — nothing at runtime reads it, so the entry is typed, advertised, and thrown exactly as an unmarked one, and its reason stays in the `ctx.fail` / `ctx.recoveryFor` union. It suppresses the one rule that cannot see below the handler, and only for the entries it marks; the handler's own reasons keep being checked.
 
 To carry the contract `recovery` from a service throw, accept `ctx` and spread the resolver:
 
@@ -544,7 +559,8 @@ The linter validates the structure of `errors[]` and (when present) cross-checks
 |:-----|:---------|:--------|
 | `error-contract-conformance` | warning | Handler throws a non-baseline code that isn't in the contract. Suggests adding it to `errors[]` so the contract is the canonical source of truth for declared failure modes. |
 | `error-contract-prefer-fail` | warning | Handler throws a code that **is** in the contract directly (via factory or `new McpError`) instead of through `ctx.fail(reason, …)`. Encourages routing through the typed helper so observers see consistent `data.reason` values. |
-| `error-contract-unthrown` | warning | A declared `reason` that no literal `ctx.fail('<reason>'` or `ctx.recoveryFor('<reason>'` in the handler names. Fires only when the handler already holds at least one literal `ctx.fail(`, and skips the definition entirely when any of them takes a non-literal first argument. Wire the throw, or drop the entry. |
+| `error-contract-unthrown` | warning | A declared `reason` that no literal `ctx.fail('<reason>'` or `ctx.recoveryFor('<reason>'` in the handler names. Fires only when the handler already holds at least one literal `ctx.fail(`, and skips the definition entirely when either callee takes a non-literal first argument. Wire the throw, drop the entry, or mark it `thrownBy: 'service'`. |
+| `error-contract-recovery-unforwarded` | warning | A literal `ctx.fail('<reason>', …)` site carrying neither `ctx.recoveryFor('<reason>')` nor its own `recovery` key, so the declared hint reaches neither client surface. One diagnostic per site; skips a site whose data argument the scan cannot read. |
 
 ### Baseline codes (auto-allowed)
 

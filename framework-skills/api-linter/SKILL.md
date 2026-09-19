@@ -4,7 +4,7 @@ description: >
   MCP definition linter rules reference. Use when `bun run lint:mcp` or `bun run devcheck` reports a lint error or warning (`format-parity`, `schema-is-object`, `name-format`, `server-json-*`, etc.) and you need to understand the rule, its severity, and how to fix it. Every rule ID the linter emits has an entry in this doc.
 metadata:
   author: cyanheads
-  version: "1.16"
+  version: "1.17"
   audience: external
   type: reference
 ---
@@ -53,7 +53,7 @@ Grouped by family. Jump to any rule ID via its anchor.
 | Prompts | `generate-required` | [Prompt rules](#prompt-rules) |
 | Handler body | `prefer-mcp-error-in-handler`, `prefer-error-factory`, `preserve-cause-on-rethrow`, `no-stringify-upstream-error` | [Handler body rules](#handler-body-rules) |
 | Error contract (structural) | `error-contract-type`, `error-contract-empty`, `error-contract-entry-type`, `error-contract-code-type`, `error-contract-code-unknown`, `error-contract-code-unknown-error`, `error-contract-reason-required`, `error-contract-reason-format`, `error-contract-reason-unique`, `error-contract-when-required`, `error-contract-retryable-type`, `error-contract-severity-unknown`, `error-contract-recovery-required`, `error-contract-recovery-empty`, `error-contract-recovery-min-words` | [Error contract rules](#error-contract-rules) |
-| Error contract (conformance) | `error-contract-conformance`, `error-contract-prefer-fail`, `error-contract-unthrown` | [Error contract rules](#error-contract-rules) |
+| Error contract (conformance) | `error-contract-conformance`, `error-contract-prefer-fail`, `error-contract-unthrown`, `error-contract-recovery-unforwarded` | [Error contract rules](#error-contract-rules) |
 | Enrichment | `enrichment-type`, `enrichment-empty`, `enrichment-field-type`, `enrichment-output-collision`, `enrichment-prefer-block`, `enrichment-trailer-render`, `enrichment-trailer-orphan`, `enrichment-trailer-unknown-field`, `capped-list-no-truncation` | [Enrichment rules](#enrichment-rules) |
 | server.json | ~40 rules prefixed `server-json-*` | [server.json rules](#server-json-rules) |
 
@@ -94,19 +94,26 @@ Two consequences worth knowing when writing a `format()`:
 
 Fires when `format()` does not render a field present in `output`. Emitted once per missing field; large schemas can produce many `format-parity` diagnostics from a single tool.
 
-**Primary fix:** render the missing field in `format()`. For tools that return either a summary list or a detail view, use `z.discriminatedUnion` so each branch is walked separately:
+**Primary fix:** render the missing field in `format()`. For tools that return either a summary list or a detail view, declare **one flat `z.object`** with a `kind` discriminator and presence-based optional arms — `tool()` rejects a `z.discriminatedUnion` output root, and it does so before any lint rule runs, with a `TypeError` naming a field you never declared. Render each arm on presence, with **independent `if` blocks, never `else if`**: a flat object yields one synthetic sample with every arm populated at once, so a mutually exclusive formatter leaves the untaken arm's leaves unrendered and fails parity on each of them.
 
 ```ts
-output: z.discriminatedUnion('mode', [
-  z.object({ mode: z.literal('list'), items: z.array(ItemSchema) }),
-  z.object({ mode: z.literal('detail'), item: ItemSchema, history: z.array(HistoryEntry) }),
-]),
+output: z.object({
+  kind: z.enum(['list', 'detail']).describe('Which arm this result carries'),
+  items: z.array(ItemSchema).optional().describe('Matching items — present when kind is "list"'),
+  item: ItemSchema.optional().describe('The item — present when kind is "detail"'),
+  history: z.array(HistoryEntry).optional().describe('Change history — present when kind is "detail"'),
+}),
 
 format: (result) => {
-  if (result.mode === 'list') return renderList(result.items);
-  return renderDetail(result.item, result.history);
+  const lines = [`Kind: ${result.kind}`];
+  if (result.items) for (const i of result.items) lines.push(`- ${i.id} — ${i.name}`);
+  if (result.item) lines.push(`Item: ${result.item.id} — ${result.item.name}`);
+  if (result.history) for (const h of result.history) lines.push(`  ${h.at}: ${h.note}`);
+  return [{ type: 'text', text: lines.join('\n') }];
 }
 ```
+
+A union nested *below* the root is fine — the walker does produce one sample per branch there. The constraint is the output root alone.
 
 **Escape hatch:** if the output schema was over-typed for a genuinely dynamic upstream API (e.g., a third-party JSON blob whose shape you can't nail down), relax it:
 
@@ -145,6 +152,8 @@ Fires when the linter cannot walk the output schema to build a synthetic sample 
 **Severity:** warning
 
 Fires when an output field is nested deeper than the sentinel walker's depth limit (8). Everything at and below that path was **not evaluated** — parity for the subtree is unknown, not verified. Four array hops from the output root is enough to reach the limit, so it turns up on ordinary shapes, not just pathological ones.
+
+**A hop is not a path segment.** The walker counts every descent, and a `union` / `discriminated_union` dispatch descends into each branch at `depth + 1` while keeping the parent's path unchanged. So a union nested in the output shape spends a level that the reported path never shows, and a warned path can read as exactly 8 hops rather than 9. Count the unions when you are working out which field to flatten.
 
 The bound exists because every array / union / record hop multiplies the variant set, and a self-referential schema would otherwise recurse forever. What changed is the reporting: an unevaluated subtree used to be indistinguishable from a field that resolved to nothing, so it read as a pass.
 
@@ -891,7 +900,7 @@ The inverse of `error-contract-conformance`. Fires when a declared `reason` has 
 
 A dead entry compiles and lints clean: the typed `ctx.fail` union accepts the reason, so nothing downstream objects. The cost lands on the client, which plans around the advertised failure surface — an agent prepares for a mode the tool cannot produce, while the mode it *does* produce goes undocumented.
 
-**Fix:** wire the missing throw, or drop the entry. Which one is right is the author's call, so the rule surfaces and does not auto-remove.
+**Fix:** wire the missing throw, drop the entry, or — when the service layer produces the failure — mark the entry `thrownBy: 'service'`. Which one is right is the author's call, so the rule surfaces and does not auto-remove.
 
 ```ts
 errors: [
@@ -904,9 +913,51 @@ async handler(input, ctx) {
 // warning  error-contract-unthrown — 'site_not_found' is declared but never thrown.
 ```
 
-**Trigger.** Only when the handler holds at least one literal `ctx.fail(`. A handler with none produces its reasons somewhere the scan cannot reach, so firing there would warn on every service-layer definition. A `ctx.fail(` whose first argument is not a string literal — a variable, a template literal, a map lookup — makes the thrown set unknowable, and the whole definition is skipped rather than guessed at.
+**`thrownBy: 'service'`.** A handler that mixes one local precondition with reasons its service layer throws — the factory-error-plus-`data: { reason }` pattern — draws one diagnostic per service reason, since the scan sees only the handler body. Mark those entries and they are skipped while the handler's own reasons keep being checked:
 
-**Heuristic limitations:** the scan reads `handler.toString()` and matches call sites in the comment- and string-stripped text, so a `ctx.fail('…')` written inside a comment or nested in another literal does not count as thrown. A reason produced outside the handler closure is invisible to any `toString()` scan, which is why the rule can never prove absence and stays a warning. Silent under the trigger above: a service that throws a factory error carrying `data: { reason }`, a `createFail(errors)` resolver built outside the handler, and an aliased `const fail = ctx.fail`.
+```ts
+errors: [
+  { reason: 'query_too_broad', code: JsonRpcErrorCode.ValidationError, when: '…', recovery: '…' },
+  { reason: 'item_not_found',  code: JsonRpcErrorCode.NotFound,        when: '…', recovery: '…',
+    thrownBy: 'service' },
+],
+async handler(input, ctx) {
+  if (input.query === '*') throw ctx.fail('query_too_broad', 'Wildcard query');
+  return getItemService().search(input, ctx);   // throws item_not_found
+}
+```
+
+The field is lint-only metadata: `ctx.fail`, `ctx.recoveryFor`, the `severity` lookup, and the advertised error envelope never read it, so a marked entry is typed, advertised, and thrown exactly as an unmarked one. Prefer it over the workarounds that also silence the rule — moving the literal `ctx.fail` into a module-level helper turns the whole tool off, handler-local reasons included.
+
+**Trigger.** Only when the handler holds at least one literal `ctx.fail(`. A handler with none produces its reasons somewhere the scan cannot reach, so firing there would warn on every service-layer definition. A `ctx.fail(` or `ctx.recoveryFor(` whose first argument is not a string literal — a variable, a template literal, a map lookup — makes the named set unknowable, and the whole definition is skipped rather than guessed at.
+
+**Heuristic limitations:** the scan reads `handler.toString()` and matches call sites in the comment- and string-stripped text, so a `ctx.fail('…')` written inside a comment or nested in another literal does not count as thrown. A reason produced outside the handler closure is invisible to any `toString()` scan, which is why the rule can never prove absence and stays a warning. Still silent without a marker: a `createFail(errors)` resolver built outside the handler, and an aliased `const fail = ctx.fail`.
+
+### error-contract-recovery-unforwarded
+
+**Severity:** warning
+
+Fires per literal `ctx.fail('<reason>', …)` site that does not put the contract's `recovery` on the wire.
+
+`recovery` is required on every `errors[]` entry, but reaching the client with it is opt-in — the throw site forwards `ctx.recoveryFor('<reason>')`, or passes its own `recovery` key. A site that does neither ships `reason` and `retryable` with no hint, and since the framework mirrors `data.recovery.hint` into the error `content[]`, both client surfaces lose it together. Nothing else catches this: the contract is declared, `lint:mcp` passes, and an error-path test asserting `code` and `reason` passes with the hint absent.
+
+**Fix:** forward the resolver at the site named in the diagnostic.
+
+```ts
+// warns
+throw ctx.fail('rate_limited', 'Upstream rate limit exceeded');
+
+// clean — any of
+throw ctx.fail('rate_limited', msg, { ...ctx.recoveryFor('rate_limited') });
+throw ctx.fail('rate_limited', msg, ctx.recoveryFor('rate_limited'));
+throw ctx.fail('rate_limited', msg, { recovery: { hint: `Retry in ${waitSeconds}s.` } });
+```
+
+**Per site, not per reason.** A handler wiring one of six throws is covered at one of them, so each site is judged on its own argument list. Two sites naming one reason, one forwarding and one bare, produce exactly one diagnostic. A site whose only resolver names a *different* reason warns too, naming both — the caller would otherwise get another failure mode's guidance.
+
+**Bails.** A non-literal first argument on either `ctx.fail(` or `ctx.recoveryFor(` skips the whole definition, as it does for `error-contract-unthrown`. A resolver sitting outside every fail span — a hoisted `const hint = ctx.recoveryFor('x')` — skips that reason, since the binding is assembled where the scan cannot follow it. A data argument the scan cannot read skips that one site: an identifier (`ctx.fail('r', msg, data)`), a call other than the resolver, or an object literal spreading another value (`{ ...details }`), any of which may carry `recovery` already. An object literal of plain keys carrying no `recovery` still warns.
+
+**Heuristic limitations:** same `handler.toString()` scan as `error-contract-unthrown`, so a call written inside a comment or nested in another literal is not a site, and a failure thrown below the handler is invisible. The rule speaks only for the sites it sees, which is why it stays a warning.
 
 ---
 
@@ -985,7 +1036,8 @@ Fires when an `enrichmentTrailer` key doesn't match any declared `enrichment` fi
 Fires when a tool:
 1. has a depth-0 input field whose name is cap-*shaped*, AND
 2. has at least one depth-0 array-typed `output` field, AND
-3. declares no truncation disclosure.
+3. the cap plausibly bounds that list, AND
+4. declares no truncation disclosure.
 
 Cap-shaped means, after normalizing camelCase to snake_case (so `maxRecords` and `max_records` are one case):
 
@@ -997,7 +1049,14 @@ Cap-shaped means, after normalizing camelCase to snake_case (so `maxRecords` and
 
 Matched by shape rather than an enumerated list, so a new cap noun is covered on arrival instead of silently disabling the rule for that tool. Deliberately not matched: bare `count`, `size`, `n`, `rows`, `records`, and words that merely begin with the letters (`maximum`).
 
-The shape does not distinguish a cap on *how many* from an upper bound on a *value*, so a range filter written as `max_<noun>` — `max_magnitude`, `max_depth_km`, `maxLat`, `max_date` — matches too. On a tool that also returns an array and discloses nothing, that reads as a warning about truncation the tool does not perform. Disclose `totalCount` if the array is paged at all (which silences it honestly), or exempt the tool via `truncationAllowlist` / `MCP_LINT_TRUNCATION_ALLOWLIST`.
+**The `max_` arm is narrowed by what the noun counts.** `limit`, `<noun>_limit`, and the page-size idioms say what they bound in the name, so they always qualify. `max_<noun>` does not — the same spelling carries value bounds (`max_depth_km`, `maxLat`, `max_date`, `max_magnitude`) and budgets on secondary work (`max_court_lookups`, `maxCharacters`, `max_tokens`), none of which slice the array. So the counted noun has to name something the tool returns:
+
+- **it correlates with a depth-0 array in `output`** — plural-insensitive, with a trailing `_count` stripped first: `max_articles` → `articles`, `max_result_count` → `results`, `maxComments` → `comments`; or
+- **it is a generic result container** — `results`, `records`, `items`, `rows`, `hits`, `entries`, `matches`, `count`, `page`, `docs` — which keeps `maxRecords` firing against an `articles` array whatever the domain called its list.
+
+Singularization covers only the bounded suffixes above (`ies` → `y`, `ses`/`xes`/`ches`/`shes`, trailing `s`); it is not a general English pluralizer.
+
+**Accepted false negative:** a domain cap naming neither an array nor a container — `max_studies` returning `documents` — goes silent. Nothing in the declaration separates it from a value bound, and the allowlist only suppresses, so it cannot bring the warning back. Declaring `truncated` / `totalCount` is the outcome the rule is chasing anyway.
 
 **Disclosure-present (rule silent) when** any of the following is true:
 - The declared `enrichment` shape has a `truncated` or `totalCount` key (`ctx.enrich.truncated()` and `ctx.enrich.total()` satisfy this).
@@ -1039,7 +1098,21 @@ validateDefinitions({ tools, truncationAllowlist: ['my_search_tool'] });
 validateDefinitions({ tools, truncationAllowlist: false });
 ```
 
-**Env var:** `MCP_LINT_TRUNCATION_ALLOWLIST` — comma-separated tool names; the literal `false` disables. A programmatic `LintInput.truncationAllowlist` takes precedence.
+**Project config:** `scripts/lint-mcp.ts` — the CLI behind `bun run lint:mcp` and devcheck's MCP Definitions step — reads `lint.truncationAllowlist` from the project's `devcheck.config.json` and forwards it as `LintInput.truncationAllowlist`. One declaration covers every entrypoint that shells out to the linter, and it survives framework sync (the script itself does not — a scaffold's copy is replaced on the next maintenance pass).
+
+```json
+{
+  "lint": {
+    "truncationAllowlist": ["my_search_tool"]
+  }
+}
+```
+
+`"truncationAllowlist": false` disables the rule, matching the `LintInput` and env-var forms. The file is parsed with `JSON.parse`, so the key takes no inline comment; a value that is neither `false` nor an array of tool names is reported and ignored.
+
+**Env var:** `MCP_LINT_TRUNCATION_ALLOWLIST` — comma-separated tool names; the literal `false` disables.
+
+**Precedence:** an explicit `LintInput.truncationAllowlist` wins, then `devcheck.config.json`, then the env var. A config file that declares no `truncationAllowlist` passes nothing through, so the env var still applies — the var is the escape hatch for a project that declares nothing, not an override for one that does.
 
 ---
 
