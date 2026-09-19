@@ -23,13 +23,61 @@ import { getCoreDefType, objectShape, objectShapeKeys, unwrapWrappers } from './
 const CAP_FIELD_EXACT: ReadonlySet<string> = new Set(['limit', 'per_page', 'page_size']);
 
 /**
- * True for a depth-0 input field name that caps how many items come back.
+ * Nouns that name a generic result container whatever the array is called, so a
+ * `max_<noun>` built on one of them caps the list even when nothing in `output`
+ * carries the same name — `maxRecords` against an `articles` array. Stored
+ * singular; the counted noun is singularized before the lookup, so the plural
+ * spellings (`results`, `records`, `items`, `rows`, `hits`, `entries`,
+ * `matches`, `docs`) resolve here too.
+ */
+const RESULT_CONTAINER_NOUNS: ReadonlySet<string> = new Set([
+  'count',
+  'doc',
+  'entry',
+  'hit',
+  'item',
+  'match',
+  'page',
+  'record',
+  'result',
+  'row',
+]);
+
+/** camelCase → snake_case, lowercased, so `maxRecords` and `max_records` are one case. */
+function snakeCase(key: string): string {
+  return key.replace(/([a-z0-9])([A-Z])/g, '$1_$2').toLowerCase();
+}
+
+/**
+ * Singularizes on a bounded suffix set — `articles` → `article`, `studies` →
+ * `study`, `matches` → `match`. Not a general English pluralizer: it only has to
+ * make an input's counted noun and an output array's name meet in the middle.
+ */
+function singularize(noun: string): string {
+  if (noun.endsWith('ies')) return `${noun.slice(0, -3)}y`;
+  if (/(?:s|x|ch|sh)es$/.test(noun)) return noun.slice(0, -2);
+  if (noun.endsWith('s') && !noun.endsWith('ss')) return noun.slice(0, -1);
+  return noun;
+}
+
+/**
+ * The noun a `max_*` field counts: the name minus the `max_` prefix, minus a
+ * trailing `_count` (`max_result_count` → `result`), reduced to its last
+ * underscore segment and singularized.
+ */
+function countedNoun(key: string): string {
+  const stem = snakeCase(key)
+    .replace(/^max_/, '')
+    .replace(/_count$/, '');
+  return singularize(stem.split('_').pop() ?? stem);
+}
+
+/**
+ * True for a depth-0 input field name that is cap-*shaped*.
  *
  * Matched by shape, not by an enumeration: an allowlist turns every new cap noun
  * (`maxRecords`, `maxRows`, `resultLimit`) into a silent gap where the rule never
- * runs at all, which is the same defect class the rule exists to catch. Both
- * naming conventions normalize to the same snake form first, so `maxRecords` and
- * `max_records` are one case.
+ * runs at all, which is the same defect class the rule exists to catch.
  *
  *   - `limit`, and any `<noun>_limit` / `<noun>Limit`
  *   - any `max_<noun>` / `max<Noun>`
@@ -38,18 +86,37 @@ const CAP_FIELD_EXACT: ReadonlySet<string> = new Set(['limit', 'per_page', 'page
  * Deliberately NOT matched: bare `count`, `size`, `n`, `rows`, `records`, and
  * words that merely start with the letters (`maximum`).
  *
- * The shape cannot separate a cap on *how many* from an upper bound on a *value*,
- * so a range filter spelled `max_<noun>` (`max_magnitude`, `maxLat`, `max_date`)
- * matches as well. The rule still has to clear its other two conditions before it
- * says anything, and `truncationAllowlist` exempts a tool that trips it anyway.
+ * Shape alone cannot separate a cap on *how many* from an upper bound on a
+ * *value* or a budget on work done, so the `max_` arm is narrowed further by
+ * `capsTheList`.
  */
 function isCapFieldName(key: string): boolean {
-  const normalized = key.replace(/([a-z0-9])([A-Z])/g, '$1_$2').toLowerCase();
+  const normalized = snakeCase(key);
   return (
     CAP_FIELD_EXACT.has(normalized) ||
     normalized.startsWith('max_') ||
     normalized.endsWith('_limit')
   );
+}
+
+/**
+ * True when a cap-shaped input field plausibly caps the returned list.
+ *
+ * `limit` / `<noun>_limit` / the page-size idioms say what they bound in the
+ * name itself and always qualify. `max_<noun>` does not: the same spelling
+ * carries value bounds (`max_depth_km`, `maxLat`, `max_date`) and budgets on
+ * secondary work (`max_court_lookups`, `maxCharacters`), none of which slice the
+ * array. So the counted noun has to name something the tool returns — a depth-0
+ * array in `output`, or a generic result container.
+ *
+ * Accepted false negative: a domain cap naming neither, `max_studies` against a
+ * `documents` array, goes silent. Nothing in the declaration separates it from a
+ * value bound, and `truncationAllowlist` only suppresses — it cannot re-enable.
+ */
+function capsTheList(key: string, arrayNouns: ReadonlySet<string>): boolean {
+  if (!snakeCase(key).startsWith('max_')) return true;
+  const noun = countedNoun(key);
+  return RESULT_CONTAINER_NOUNS.has(noun) || arrayNouns.has(noun);
 }
 
 /**
@@ -268,10 +335,11 @@ export interface TruncationOptions {
 
 /**
  * Warns when a tool takes a cap-like input field (`limit`, `per_page`,
- * `maxRecords`, … — see `isCapFieldName`) and returns an array output, but
- * declares no truncation disclosure — neither a
- * `truncated` key in its declared `enrichment` shape, nor `totalCount` in enrichment,
- * nor `truncated` or `totalCount` as top-level `output` keys.
+ * `maxRecords`, … — see `isCapFieldName`) that plausibly caps the returned list
+ * (see `capsTheList`) and returns an array output, but declares no truncation
+ * disclosure — neither a `truncated` key in its declared `enrichment` shape, nor
+ * `totalCount` in enrichment, nor `truncated` or `totalCount` as top-level
+ * `output` keys.
  *
  * The established `enrich.total()` convention (`totalCount`) and bespoke output fields
  * count as honest disclosure — the rule fires only on a genuinely silent cap.
@@ -298,12 +366,16 @@ export function lintCappedListTruncation(
   // per variant, so a cap in any branch counts — the rule asks whether the tool
   // can be capped at all, not whether every branch caps.
   const inputKeys = inputVariants(def.input).flatMap((variant) => objectShapeKeys(variant));
-  const capKeys = inputKeys.filter(isCapFieldName);
-  if (capKeys.length === 0) return [];
+  const capShapedKeys = inputKeys.filter(isCapFieldName);
+  if (capShapedKeys.length === 0) return [];
 
-  // Check output for at least one array-typed field
-  const hasArrayOutput = hasTopLevelArray(def.output);
-  if (!hasArrayOutput) return [];
+  // Check output for at least one array-typed field. The array names are also
+  // what a `max_<noun>` cap has to correlate with to count as a list cap.
+  const arrayNouns = topLevelArrayNouns(def.output);
+  if (arrayNouns.size === 0) return [];
+
+  const capKeys = capShapedKeys.filter((key) => capsTheList(key, arrayNouns));
+  if (capKeys.length === 0) return [];
 
   // Check for truncation disclosure:
   // 1. Declared enrichment has `truncated` or `totalCount`
@@ -328,11 +400,19 @@ export function lintCappedListTruncation(
   ];
 }
 
-/** True when the schema has at least one depth-0 field whose core Zod type is `array`. */
-function hasTopLevelArray(schema: unknown): boolean {
+/**
+ * The singularized names of every depth-0 field whose core Zod type is `array`.
+ * Empty means the tool returns no list at all, which is the rule's array
+ * precondition; non-empty is also what a `max_<noun>` cap correlates against.
+ */
+function topLevelArrayNouns(schema: unknown): ReadonlySet<string> {
   const shape = objectShape(schema);
-  if (!shape) return false;
-  return Object.values(shape).some((field) => getCoreDefType(unwrapWrappers(field)) === 'array');
+  if (!shape) return new Set();
+  return new Set(
+    Object.entries(shape)
+      .filter(([, field]) => getCoreDefType(unwrapWrappers(field)) === 'array')
+      .map(([key]) => singularize(snakeCase(key).split('_').pop() ?? key)),
+  );
 }
 
 /**

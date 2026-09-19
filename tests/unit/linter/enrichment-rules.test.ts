@@ -317,6 +317,136 @@ describe('lintCappedListTruncation', () => {
       const d = lintCappedListTruncation(def);
       expect(d).toHaveLength(1);
     });
+
+    it('fires for a container-noun cap whatever the array is named', () => {
+      // The generic result containers always count: a cap named for one of them
+      // caps the list no matter what the domain called the array.
+      for (const [capField, arrayName] of [
+        ['maxRecords', 'articles'],
+        ['maxResults', 'stops'],
+        ['maxRows', 'observations'],
+        ['max_hits', 'papers'],
+        ['max_items', 'products'],
+        ['maxCount', 'stops'],
+        ['max_entries', 'logs'],
+        ['max_matches', 'clusters'],
+        ['max_docs', 'filings'],
+        ['max_pages', 'sections'],
+      ] as const) {
+        const def = {
+          name: 'tool',
+          input: z.object({ [capField]: z.number().describe('cap') }),
+          output: z.object({ [arrayName]: z.array(z.string()).describe('rows') }),
+        };
+        expect(
+          lintCappedListTruncation(def).map((x) => x.rule),
+          `${capField} / ${arrayName}`,
+        ).toContain('capped-list-no-truncation');
+      }
+    });
+
+    it('fires for a domain-noun cap that names a depth-0 array output', () => {
+      for (const [capField, arrayName] of [
+        ['max_articles', 'articles'],
+        ['maxComments', 'comments'],
+        ['max_studies', 'studies'],
+        ['max_result_count', 'results'],
+        ['max_matches', 'matches'],
+      ] as const) {
+        const def = {
+          name: 'tool',
+          input: z.object({ [capField]: z.number().describe('cap') }),
+          output: z.object({ [arrayName]: z.array(z.string()).describe('rows') }),
+        };
+        expect(
+          lintCappedListTruncation(def).map((x) => x.rule),
+          `${capField} / ${arrayName}`,
+        ).toContain('capped-list-no-truncation');
+      }
+    });
+
+    it('matches a cap declared in one branch of a discriminated-union input root', () => {
+      const def = {
+        name: 'multi_mode',
+        input: z.discriminatedUnion('mode', [
+          z.object({
+            mode: z.literal('search').describe('mode'),
+            maxResults: z.number().describe('cap'),
+          }),
+          z.object({ mode: z.literal('get').describe('mode'), id: z.string().describe('id') }),
+        ]),
+        output: z.object({ items: z.array(z.string()).describe('items') }),
+      };
+      expect(lintCappedListTruncation(def).map((x) => x.rule)).toContain(
+        'capped-list-no-truncation',
+      );
+    });
+  });
+
+  describe('does not fire for a max_ input that bounds something other than the list', () => {
+    it('stays silent for value bounds and secondary budgets', () => {
+      // `max_<noun>` is a bound on a value or on work done, not on how many
+      // rows come back — the counted noun names neither a returned array nor a
+      // generic result container.
+      for (const [capField, arrayName] of [
+        ['max_depth_km', 'nodes'],
+        ['maxLat', 'nodes'],
+        ['max_date', 'filings'],
+        ['max_magnitude', 'events'],
+        ['max_upload_mbps', 'providers'],
+        ['max_ma', 'occurrences'],
+        ['max_amount', 'receipts'],
+        ['max_phase', 'molecules'],
+        ['max_court_lookups', 'matches'],
+        ['maxCharacters', 'articles'],
+        ['max_tokens', 'proposals'],
+      ] as const) {
+        const def = {
+          name: 'tool',
+          input: z.object({ [capField]: z.number().describe('bound') }),
+          output: z.object({ [arrayName]: z.array(z.string()).describe('rows') }),
+        };
+        expect(lintCappedListTruncation(def), `${capField} / ${arrayName}`).toHaveLength(0);
+      }
+    });
+
+    it('accepted false negative: a domain cap naming neither an array nor a container', () => {
+      // `max_studies` returning `documents` goes silent — nothing in the
+      // declaration separates it from `max_depth_km`. The allowlist suppresses,
+      // it never enables, so this one is a cost, not a knob.
+      const def = {
+        name: 'search_studies',
+        input: z.object({ max_studies: z.number().describe('cap') }),
+        output: z.object({ documents: z.array(z.string()).describe('documents') }),
+      };
+      expect(lintCappedListTruncation(def)).toHaveLength(0);
+    });
+
+    it('names only the qualifying cap fields in the message', () => {
+      const def = {
+        name: 'search_nodes',
+        input: z.object({
+          max_depth_km: z.number().describe('bound'),
+          max_results: z.number().describe('cap'),
+        }),
+        output: z.object({ nodes: z.array(z.string()).describe('nodes') }),
+      };
+      const message = lintCappedListTruncation(def)[0]?.message ?? '';
+      expect(message).toContain('max_results');
+      expect(message).not.toContain('max_depth_km');
+    });
+
+    it('an unqualified max_ input alongside disclosure stays silent', () => {
+      const def = {
+        name: 'search_nodes',
+        input: z.object({ max_depth_km: z.number().describe('bound') }),
+        output: z.object({
+          nodes: z.array(z.string()).describe('nodes'),
+          totalCount: z.number().describe('total'),
+        }),
+      };
+      expect(lintCappedListTruncation(def)).toHaveLength(0);
+    });
   });
 
   describe('silent when disclosure is present', () => {

@@ -1149,6 +1149,36 @@ describe('validateDefinitions', () => {
       });
       expect(report.warnings.filter((w) => w.rule === 'capped-list-no-truncation')).toHaveLength(0);
     });
+
+    it('stays silent for a max_ input that bounds a value rather than the list', () => {
+      const report = validateDefinitions({
+        tools: [
+          cappedTool({
+            name: 'search_nodes',
+            input: z.object({ max_depth_km: z.number().describe('Maximum depth filter') }),
+            output: z.object({ nodes: z.array(z.string()).describe('Matching nodes') }),
+            handler: async () => ({ nodes: [] }),
+          }),
+        ],
+      });
+      expect(report.warnings.filter((w) => w.rule === 'capped-list-no-truncation')).toHaveLength(0);
+    });
+
+    it('still warns for a container-noun cap against a differently named array', () => {
+      const report = validateDefinitions({
+        tools: [
+          cappedTool({
+            name: 'search_articles',
+            input: z.object({ maxRecords: z.number().describe('Maximum records returned') }),
+            output: z.object({ articles: z.array(z.string()).describe('Matching articles') }),
+            handler: async () => ({ articles: [] }),
+          }),
+        ],
+      });
+      expect(report.warnings).toContainEqual(
+        expect.objectContaining({ rule: 'capped-list-no-truncation' }),
+      );
+    });
   });
 
   // -------------------------------------------------------------------------
