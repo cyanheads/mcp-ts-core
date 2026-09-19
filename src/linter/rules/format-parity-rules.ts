@@ -544,7 +544,7 @@ export function lintFormatParity(def: unknown, displayName: string): LintDiagnos
           '  • structuredContent (from `output`)   — forwarded by clients like Claude Code\n' +
           '  • content[] (from `format()`)         — forwarded by clients like Claude Desktop\n' +
           'format() is the markdown-rendered twin of structuredContent, not a separate payload. Parity failure means one set of clients sees less than another.\n' +
-          'Primary fix: render the field in format(). For list/detail variants, use z.discriminatedUnion (the linter walks each branch separately).\n' +
+          'Primary fix: render the field in format(). For list/detail variants, declare one flat z.object with a `kind` discriminator and optional arms — tool() rejects a z.discriminatedUnion output — and render each arm on presence with independent if-blocks, never else-if, since the synthetic sample populates every arm at once.\n' +
           'Escape hatch: if the output schema was over-typed for a genuinely dynamic upstream API, relax it (z.object({}).passthrough()) rather than maintaining aspirational typing — passthrough still flows data to structuredContent without declaring each field.',
         definitionType: 'tool',
         definitionName: displayName,

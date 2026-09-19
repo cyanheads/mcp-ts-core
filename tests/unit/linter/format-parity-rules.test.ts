@@ -1221,3 +1221,84 @@ describe('lintFormatParity — schema metadata compatibility', () => {
     expect(lintFormatParity({ output: 'object', format }, 'primitive_output')).toHaveLength(0);
   });
 });
+
+// ---------------------------------------------------------------------------
+// The shape the diagnostic's "Primary fix" line points authors at (issue #268)
+// ---------------------------------------------------------------------------
+
+describe('list/detail guidance', () => {
+  const Item = z.object({
+    id: z.string().describe('Item ID'),
+    name: z.string().describe('Item name'),
+  });
+  const HistoryEntry = z.object({
+    at: z.string().describe('ISO 8601 timestamp'),
+    note: z.string().describe('What changed'),
+  });
+  const listDetailOutput = z.object({
+    kind: z.enum(['list', 'detail']).describe('Which arm this result carries'),
+    items: z.array(Item).optional().describe('Matching items — present when kind is "list"'),
+    item: Item.optional().describe('The item — present when kind is "detail"'),
+    history: z
+      .array(HistoryEntry)
+      .optional()
+      .describe('Change history — present when kind is "detail"'),
+  });
+
+  it('passes for a flat object with presence-based arms and a total format()', () => {
+    const def = tool({
+      name: 'list_detail_total',
+      output: listDetailOutput,
+      format: (result) => {
+        const r = result as z.infer<typeof listDetailOutput>;
+        const lines = [`Kind: ${r.kind}`];
+        if (r.items) for (const i of r.items) lines.push(`- ${i.id} — ${i.name}`);
+        if (r.item) lines.push(`Item: ${r.item.id} — ${r.item.name}`);
+        if (r.history) for (const h of r.history) lines.push(`  ${h.at}: ${h.note}`);
+        return [{ type: 'text', text: lines.join('\n') }];
+      },
+    });
+
+    expect(parityErrors(def)).toHaveLength(0);
+  });
+
+  it('fails for the same output with a mutually exclusive formatter', () => {
+    // One flat object yields one synthetic sample with every arm populated at
+    // once, so an `else if` leaves the untaken arm's leaves unrendered — which
+    // is why the guidance has to say the formatter must be total.
+    const def = tool({
+      name: 'list_detail_branching',
+      output: listDetailOutput,
+      format: (result) => {
+        const r = result as z.infer<typeof listDetailOutput>;
+        return r.kind === 'list'
+          ? [{ type: 'text', text: `List: ${JSON.stringify(r.items)}` }]
+          : [{ type: 'text', text: `Detail: ${JSON.stringify(r.item)}` }];
+      },
+    });
+
+    expect(parityErrors(def).map((d) => d.message.match(/output field '([^']+)'/)?.[1])).toEqual([
+      'kind',
+      'item.id',
+      'item.name',
+      'history[].at',
+      'history[].note',
+    ]);
+  });
+
+  it('does not point authors at a z.discriminatedUnion output, which tool() rejects', () => {
+    const def = tool({
+      name: 'unrendered_tool',
+      output: z.object({ value: z.string().describe('Value') }),
+      format: () => [{ type: 'text', text: 'nothing rendered' }],
+    });
+    const message = parityErrors(def)[0]?.message ?? '';
+
+    expect(message).toContain('Primary fix');
+    expect(message).toContain('flat z.object');
+    expect(message).toContain('`kind` discriminator');
+    // The union is named only as the shape tool() refuses, never as the fix.
+    expect(message).toMatch(/rejects a z\.discriminatedUnion output/);
+    expect(message).not.toMatch(/use z\.discriminatedUnion/);
+  });
+});
