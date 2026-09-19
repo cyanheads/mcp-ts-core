@@ -197,7 +197,7 @@
     "publish-mcp": "mcp-publisher login github -token \"$(security find-generic-password -a \"$USER\" -s mcp-publisher-github-pat -w)\" && mcp-publisher publish"
   },
   "devDependencies": {
-    "@biomejs/biome": "2.5.13",
+    "@biomejs/biome": "2.5.14",
     "@cloudflare/vitest-pool-workers": "^0.22.0",
     "@cloudflare/workers-types": "5.20260910.1",
     "@duckdb/node-api": "^1.5.5-r.5",
@@ -228,7 +228,7 @@
     "depcheck": "^1.4.7",
     "diff": "^9.0.0",
     "execa": "^10.0.1",
-    "fast-check": "^4.10.0",
+    "fast-check": "^4.10.1",
     "fast-xml-parser": "^5.11.1",
     "ignore": "^7.0.9",
     "js-yaml": "^5.4.2",
