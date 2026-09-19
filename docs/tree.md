@@ -1,6 +1,6 @@
 # mcp-ts-core - Directory Structure
 
-Generated on: 2026-09-18 09:49:24
+Generated on: 2026-09-19 13:53:42
 
 ```text
 mcp-ts-core/
@@ -839,6 +839,7 @@ mcp-ts-core/
 │   │   │   ├── devcheck-warning-rendering.test.ts
 │   │   │   ├── devcheck-worker-tsconfig.test.ts
 │   │   │   ├── devdocs.test.ts
+│   │   │   ├── lint-mcp.test.ts
 │   │   │   ├── lint-packaging.test.ts
 │   │   │   └── tree.test.ts
 │   │   ├── services/

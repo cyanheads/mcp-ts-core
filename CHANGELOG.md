@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.13.6](changelog/0.13.x/0.13.6.md) — 2026-09-19
+
+A ctx.fail site that never forwards its declared recovery now warns, an errors[] entry can mark itself thrownBy: 'service' so the unthrown rule skips it, capped-list-no-truncation stops firing on value bounds like max_depth_km, and devcheck.config.json can carry the truncation allowlist.
+
 ## [0.13.5](changelog/0.13.x/0.13.5.md) — 2026-09-18
 
 Tool error text closes with the reason and retryable terms a caller branches on, a ctx.requestInput no 2025-era client capability can serve is refused with a real error envelope, an errors[] entry can declare a log severity below error, and a malformed canvas_id is an input error rather than an expired canvas.
