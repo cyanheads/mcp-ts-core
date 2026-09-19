@@ -37,9 +37,13 @@ describe('Sanitization Property-Based Tests', () => {
       await fc.assert(
         fc.asyncProperty(fc.string(), async (input) => {
           const result = await sanitization.sanitizeHtml(input);
-          expect(result.toLowerCase()).not.toMatch(/\bon\w+\s*=/);
+          /**
+           * Inside a tag only — `on0=` as text content is inert, and a literal
+           * `<` in text leaves the sanitizer as `&lt;`.
+           */
+          expect(result.toLowerCase()).not.toMatch(/<[^>]*\son\w+\s*=/);
         }),
-        { numRuns: 200 },
+        { numRuns: 200, examples: [['on0='], ['<p>onclick=1</p>']] },
       );
     });
 
