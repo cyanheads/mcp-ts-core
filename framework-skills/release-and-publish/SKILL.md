@@ -4,7 +4,7 @@ description: >
   Ship a release end-to-end across every registry the project targets (npm, MCP Registry, GitHub Releases for `.mcpb` bundles, GHCR). Runs the final verification gate, fast-forwards `main` when the release rode a release PR, creates the annotated tag on the commit `main` now points at, pushes commits and tags, then publishes to each applicable destination. Assumes git wrapup (version bumps, changelog, commit stack — and in release PR mode, the pushed branch and open PR) is already complete — this skill is the post-wrapup merge + tag + publish workflow. Retries transient network failures on publish steps; halts with a partial-state report when retries are exhausted or the failure is terminal.
 metadata:
   author: cyanheads
-  version: "2.19"
+  version: "2.20"
   audience: external
   type: workflow
 ---
@@ -196,11 +196,13 @@ Halt on publish error other than "version already exists" (which means this step
 
 Only if `server.json` exists at the repo root (otherwise skip). Note: `server.json` (MCP Registry metadata) and `manifest.json` (MCPB bundle manifest, step 8) are independent — a project may have either, both, or neither.
 
-The registry checks that the npm version exists before it registers, and npm's read endpoint can lag `bun publish` by several minutes. Wait for the version to be served before publishing; a publisher error saying the npm version was not found is this lag, not a terminal failure:
+The registry checks that the npm version exists before it registers, and npm's read endpoint can lag `bun publish` by several minutes. Wait for the version to be served before publishing; a publisher error saying the npm version was not found is this lag, not a terminal failure. Keep each wait inside one foreground shell call: every request carries its own timeout and the loop is bounded well under the agent's command timeout, so the harness never moves the wait to the background. If the loop ends unserved, run it again.
 
 ```bash
-curl -sf --retry 30 --retry-delay 30 --retry-all-errors -o /dev/null \
-  "https://registry.npmjs.org/<package-name>/<version>"
+for i in $(seq 1 15); do
+  curl -sf -m 15 -o /dev/null "https://registry.npmjs.org/<package-name>/<version>" && echo served && break
+  sleep 20
+done
 bun run publish-mcp
 ```
 

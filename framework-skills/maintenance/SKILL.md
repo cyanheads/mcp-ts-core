@@ -4,7 +4,7 @@ description: >
   Investigate, adopt, and verify dependency updates — with special handling for `@cyanheads/mcp-ts-core`. Captures what changed, understands why, cross-references against the codebase, adopts framework improvements, syncs project skills, and runs final checks. Supports two entry modes: run the full flow end-to-end, or review updates you already applied.
 metadata:
   author: cyanheads
-  version: "2.8"
+  version: "2.9"
   audience: external
   type: workflow
 ---
@@ -85,7 +85,7 @@ Cross-reference each finding against the server's code. Collect adoption opportu
 
 **Template review.** The framework also ships `templates/CLAUDE.md` and `templates/AGENTS.md` as scaffolding for consumer agent protocol files. The consumer's `CLAUDE.md`/`AGENTS.md` was copied at init time and has since diverged (local customizations, echo replacements, server-specific sections). Read the upstream template fresh at `node_modules/@cyanheads/mcp-ts-core/templates/CLAUDE.md`.
 
-Read the upstream template end-to-end, mentally comparing against the current `CLAUDE.md`/`AGENTS.md`. Apply framework-authored updates directly — new skill references in the skills table, new entries in the "What's Next?" section, updated convention callouts, clarified patterns. These are factual updates, not taste decisions; the consumer's agent protocol file is meant to track the framework's. Only surface a decision when a template change conflicts with a section the consumer has intentionally customized — a section is "intentionally customized" when it contains server-specific domain context, bespoke checklists, or content that doesn't originate from the template. In that case, note the conflict and ask.
+Read the upstream template end-to-end and compare it against the current `CLAUDE.md`/`AGENTS.md` section by section — the skills table row by row, since a row whose wording changed (a skill's described behavior) drifts as silently as a missing one. Apply framework-authored updates directly — new or reworded skill references in the skills table, new entries in the "What's Next?" section, updated convention callouts, clarified patterns. These are factual updates, not taste decisions; the consumer's agent protocol file is meant to track the framework's. Only surface a decision when a template change conflicts with a section the consumer has intentionally customized — a section is "intentionally customized" when it contains server-specific domain context, bespoke checklists, or content that doesn't originate from the template. In that case, note the conflict and ask.
 
 ### 5. Sync project skills and scripts
 

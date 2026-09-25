@@ -4,7 +4,7 @@ description: >
   Land working-tree changes as logical commits — the work grouped by concern, topped by a release commit (version bump, changelog, regenerated artifacts). The work commits land first, then the version bump, verification, and the release commit on top. Stops at "committed locally on main" — or, when the project releases through a release PR, at "release branch pushed, PR open". No tag, no push to main, no publish: the release-and-publish skill merges, tags, and ships from here. Distilled from the git_wrapup_instructions protocol.
 metadata:
   author: cyanheads
-  version: "1.19"
+  version: "1.25"
   audience: external
   type: workflow
 ---
@@ -28,7 +28,7 @@ A project can route every release through a pull request — one PR per version,
 | **gated** | commit stack on `release/<version>`, branch pushed, PR open | a review pass on the PR (`release-pr-review` skill), then a separate `release-and-publish` run fast-forwards `main`, tags, and ships |
 | **straight-through** | same as gated | the same agent continues straight into `release-and-publish` |
 
-The branch is created at wrapup time, never before: work happens on `main` until the version is known, then the uncommitted tree moves to `release/<version>` in one step (step 3), ahead of the first commit. The commit stack, the release commit, and the tag format are identical in every mode — the PR adds an artifact around them, it does not change them.
+The branch is created at wrapup time, never before — its name carries the version, so it cannot exist until step 2 has settled one. The moment that number is known, the uncommitted tree moves to `release/<version>` (end of step 2), and every commit in the run lands there. **No commit in these two modes ever reaches `main`, including the first one:** a stack committed on `main` and then branched is a rewrite to undo, and once it is pushed there is no undo, because force-push is banned. The commit stack, the release commit, and the tag format are identical in every mode — the PR adds an artifact around them, it does not change them.
 
 ## Pre-wrapup gate checklist
 
@@ -37,7 +37,7 @@ Every item must be true before starting wrapup. Committing means releasing — a
 - [ ] **Changes exist** — uncommitted files or commits since the last tag
 - [ ] **Work is complete** — no half-finished features, no "I'll add the test later," no TODO placeholders. The diff represents a shippable unit.
 - [ ] **Code simplified** — if the diff spans more than ~50 changed lines or touches 3+ source files, the `code-simplifier` skill has been run across the changes
-- [ ] **`bun run devcheck` passes** — typecheck + lint clean
+- [ ] **`bun run devcheck` is clean — exit-0 AND zero warnings.** Biome/lint warnings exit 0 (non-blocking to the tool) but are a HARD BLOCK to shipping — pre-existing warnings in untouched code included: fix them behavior-preserving, or get the maintainer's explicit waiver in the maintainer's own words — never your own adjudication. A documented alternative remedy in a skill (`lint:mcp`'s "or verify by hand that `format()` renders it") is a way to UNDERSTAND a warning, never a licence to ship it; hand-verifying it and filing a follow-up issue is still shipping dirty. Nor is a pinned version a reason to defer the real fix: when the correct fix crosses the minor floor, the VERSION yields, not the gate — take the minor and say so. Two things that look dirty but aren't: (1) **`info` is not `warning`** — Biome's unsafe-fix suggestions ("Skipped N suggested fixes", `useLiteralKeys` and friends) print at info severity with the step still ✅; not the block. (2) **The Security Audit step's transitive warn** — a DIRECT-dep advisory is a hard failure, an all-transitive one is `⚠️ WARNING` with the run still ✅; confirm from the `bun audit` dependency path (`pkg › child` = transitive), then ship it. Never force a gate green with a `resolutions`/`overrides` hack, and never run `audit:refresh` to silence it (it re-resolves the `^`-ranged framework pin off its hold). The exception is a deliberate, maintainer-directed `overrides` block as its own dependency-hygiene pass — mcp-ts-core carries one as of 0.11.0: leave it in place, pre-authorize it by name in implement/release briefs (or agents burn a phase chasing it), pin entries to the lowest patched version *inside the consumer's existing major*, and verify the installed tree rather than assuming a pin applied (bun skips resolutions its range can't satisfy). Read the severity label and the failing step before calling a green run dirty — filtering devcheck's output strips exactly the context that separates the tiers.
 - [ ] **`bun run rebuild` succeeds** — full clean build from scratch
 - [ ] **All tests pass** — `bun run test:all` (or `bun run test`), plus `bun run test:package` where the project defines one: it guards the public-export manifest and is not part of `test:all`. New tests and regression tests added as needed for the changes being shipped.
 - [ ] **Fixes verified** — bug fixes validated, generally via `bun run rebuild` and field-testing. Not just written — confirmed to resolve the described behavior.
@@ -64,7 +64,7 @@ Diff against `HEAD`, not the index: plain `git diff` omits staged changes entire
 
 If the working tree is clean AND there are no commits since the last tag, halt — nothing to wrap up.
 
-### 2. Determine the new version
+### 2. Determine the new version — and, in release PR mode, create its branch
 
 Read the current version from `package.json`. Apply the intended bump:
 
@@ -76,16 +76,18 @@ Read the current version from `package.json`. Apply the intended bump:
 
 Default to **patch** unless the diff clearly warrants minor or major.
 
-### 3. Commit the work — one commit per concern
-
-**Release PR mode only — move to the release branch first, before the first commit:**
+**In `gated` or `straight-through` mode, create the branch now, before going on to step 3** — the version you just settled is its name, and step 3 opens by committing:
 
 ```bash
 git branch --show-current                 # must be main
 git switch -c release/<version>           # uncommitted work rides along
 ```
 
-Commits never land on `main` in this mode. If a `release/*` branch already exists locally, a prior release PR was never merged — halt and report it rather than stacking a second release on top.
+Do not defer this to "just before the first commit". Step 3 is where committing starts, so a branch not created here is a branch created too late. If `git branch --no-merged main --list 'release/*'` prints a branch, a prior release PR was never merged — halt and report it rather than stacking a second release on top. A `release/*` branch already merged into `main` is a leftover from a finished release, not a blocker: delete it with `git branch -d` and continue.
+
+### 3. Commit the work — one commit per concern
+
+**Release PR mode: `git branch --show-current` must print `release/<version>` before you run the first `git commit`.** If it prints `main`, step 2's branch step was skipped — go back and do it. The uncommitted tree moves with you, so nothing is lost by branching late, but a commit already on `main` has to be unwound.
 
 **The work is committed before the version is bumped.** Work concerns routinely share a file with the version — a dependency refresh edits `package.json`, a doc edit lands in a `CLAUDE.md`/`AGENTS.md` that pins a version string — and the file is the atomic boundary, so whichever commit comes first takes the file whole. Committing the work first leaves the version hunk (step 4) as the only thing those files carry into the release commit.
 
@@ -102,6 +104,8 @@ git commit --only <paths-for-this-concern> -m "<subject>" -m "<body>"
 **Commit by pathspec, never the bare index.** A bare `git commit` commits everything staged, not the paths just added, so anything staged before wrap-up began — a `git mv` left by a migration step, a concurrent stage from a second session or a hook — rides into the first concern's commit. `--only` takes the named paths' working-tree content and disregards the rest of the index, so a pre-staged group never rides along; it stays staged, to be committed as its own concern (`chore(skills): move the skill tree to framework-skills/`) or reported. Anything still staged when the release commit lands then fails step 10's clean-tree check instead of shipping silently.
 
 **The file is the atomic boundary:** NEVER split a single file's working-tree changes across commits, regardless of mechanism — not `git add -p`, not an index-only patch (`git apply --cached`), not editing the file between commits to remove-then-re-add a hunk. When one file serves two concerns, it ships whole in the commit of its dominant concern; a later commit may touch the file again only for changes made AFTER the first commit (the version bump applied in step 4).
+
+**Every commit builds on its own.** When a concern changes an exported contract — a service method's return type, a shared helper's signature — the files that consume it ride in the same commit, even when they also carry other concerns. Grouping the contract change into one commit and each consumer into its own later commit leaves pushed commits that fail typecheck alone, and pushed history is never rewritten to repair them.
 
 **Subject format:** Conventional Commits, no version in the subject — `feat: hosted server endpoint`, `fix: handle empty SPARQL result sets`, `feat(linter): enrichment contract rules`, `docs: document the enrichment block`, `chore(deps): refresh dev dependencies`.
 
@@ -175,7 +179,7 @@ security: false    # true ONLY for a security fix in this server's own source �
 
 **Tone:** Terse, fact-dense. Bullet = **symbol** + what changed + at most one consumer-facing caveat; one sentence by default, two max — a bullet past ~40 words or three sentences is wrong. The linked issue carries the why and the commit diff the how; the changelog names what changed and what a consumer does about it. Cut: history/justification narration, design-rationale defense, "X unchanged" clauses (short parenthetical only where a misread is likely), edge-case inventories. **Verified ≠ included** — the diff-is-source-of-truth rule bounds the truth of what you write, never the amount. Model length on `changelog/template.md`'s authoring guide, never on the previous entry (entries modeled on entries compound). `agent-notes` carries adoption steps only, never a second rendering of the body; a consequence shared by many bullets is stated once, not per bullet. Full conventions: the authoring guide in `changelog/template.md`.
 
-**Re-read the entry file after writing it, then sweep for harness markup:** `grep -rlF -e '</invoke>' -e '</content>' changelog/` must print nothing. A stray closing tag at EOF is the authoring tool's own syntax bleeding into the file; `changelog/` is in `package.json` `files`, so it ships inside the npm tarball, and `changelog:check` cannot catch it — the rollup drops the trailing line, so a clean `CHANGELOG.md` proves nothing about the entry.
+**Re-read the entry file after writing it, then sweep for harness markup:** `grep -rlF -e '</invoke>' -e '</content>' changelog/` must print nothing. The sweep covers the whole directory: a hit in an older entry gets deleted and ships in this release's commit, never left as out of scope, because every entry ships in every tarball. A stray closing tag at EOF is the authoring tool's own syntax bleeding into the file; `changelog/` is in `package.json` `files`, so it ships inside the npm tarball, and `changelog:check` cannot catch it — the rollup drops the trailing line, so a clean `CHANGELOG.md` proves nothing about the entry.
 
 ### 6. Regenerate derived artifacts
 
@@ -221,10 +225,12 @@ Skip this step entirely when the project has no release PR mode — go to step 1
 
 ```bash
 git push -u origin release/<version>
-gh pr create --base main --head release/<version> --title "<release commit subject>" --body-file <path-to-body.md>
+gh pr create --base main --head release/<version> --title "<release commit subject>" --assignee @me --body-file <path-to-body.md>
 ```
 
 **Title:** the release commit's subject, verbatim — `chore(release): <version> — <theme>`.
+
+**Assignee:** `--assignee @me` on every release PR, so it lands in the maintainer's assigned queue like a filed issue. A reviewer is not set: GitHub drops a review request aimed at the PR's own author and refuses a self-approval, so on a self-authored release PR the reviewer field stays empty by design — the review record is the summary comment `release-pr-review` leaves.
 
 **Body — always via `--body-file`, never an inline `--body` string** (backticks inside a double-quoted argument are command substitution and silently vanish). Write the file to a scratch location, not into the repo.
 
