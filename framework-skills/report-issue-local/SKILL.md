@@ -4,7 +4,7 @@ description: >
   File a bug or feature request against this MCP server's own repo. Use for server-specific issues — tool logic, service integrations, config problems, or domain bugs that aren't caused by the framework.
 metadata:
   author: cyanheads
-  version: "1.10"
+  version: "1.11"
   audience: external
   type: workflow
 ---
@@ -158,7 +158,7 @@ Every issue needs exactly one primary label. Stack secondary labels on top when 
 | `regression` | Worked before, broken after a change |
 | `performance` | Memory, CPU, latency, or resource usage |
 | `security` | Vulnerability, CVE, or hardening work |
-| `breaking-change` | Change will break public API; requires a major bump |
+| `breaking-change` | Change will break public API or an existing tool contract |
 | `blocked-by-framework` | Fix requires a released change in `@cyanheads/mcp-ts-core`; pairs with a `Depends on: cyanheads/mcp-ts-core#N` line in the body |
 | `blocked-by-sdk` | Fix requires changes in `@modelcontextprotocol/sdk` |
 | `surplus-token-idea` | Worth exploring when token budget allows |
@@ -173,7 +173,7 @@ Secondary labels are not GitHub defaults — if `gh issue create --label "regres
 gh label create regression --color e99695 --description "Worked before, broken after a change"
 gh label create performance --color 5319e7 --description "Memory, CPU, latency, or resource usage"
 gh label create security --color b60205 --description "Vulnerability, CVE, or hardening work"
-gh label create breaking-change --color d93f0b --description "Change will break public API; requires a major bump"
+gh label create breaking-change --color d93f0b --description "Change will break public API or an existing tool contract"
 gh label create blocked-by-framework --color fbca04 --description "Fix requires a released change in @cyanheads/mcp-ts-core"
 gh label create blocked-by-sdk --color c5def5 --description "Fix requires changes in @modelcontextprotocol/sdk"
 gh label create surplus-token-idea --color FF10F0 --description "Worth exploring when token budget allows"

@@ -4,7 +4,7 @@ description: >
   File a bug or feature request against @cyanheads/mcp-ts-core when you hit a framework issue. Use when a builder, utility, context method, or config behaves contrary to the documented API — not for server-specific application bugs.
 metadata:
   author: cyanheads
-  version: "1.12"
+  version: "1.13"
   audience: external
   type: workflow
 ---
@@ -174,7 +174,7 @@ Every issue needs exactly one primary label. Stack secondary labels on top when 
 | `regression` | Worked before, broken after an update |
 | `performance` | Memory, CPU, latency, or resource usage |
 | `security` | Vulnerability, CVE, or hardening work |
-| `breaking-change` | Fix/feature will break public API; requires a major bump |
+| `breaking-change` | Fix/feature will break public API |
 | `blocked-by-sdk` | Fix requires changes in `@modelcontextprotocol/sdk` |
 | `surplus-token-idea` | Worth exploring when token budget allows |
 
