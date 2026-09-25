@@ -100,13 +100,21 @@ export class PromptRegistry {
               // revision.
               if (isInputRequiredSignal(error)) return error.result;
 
+              /**
+               * `handleError` logs the stack and cause chain; the client gets
+               * the classified code and message, plus only the `data` a thrown
+               * `McpError` declared — the same wire shape as tools and resources.
+               */
               const handled = ErrorHandler.handleError(error, {
                 operation: `prompt:${promptDef.name}`,
                 context,
               });
-              throw handled instanceof McpError
-                ? handled
-                : new McpError(JsonRpcErrorCode.InternalError, handled.message);
+              throw new McpError(
+                handled instanceof McpError ? handled.code : JsonRpcErrorCode.InternalError,
+                handled.message,
+                error instanceof McpError ? error.data : undefined,
+                { cause: error },
+              );
             }
           },
         );

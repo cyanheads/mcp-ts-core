@@ -94,7 +94,7 @@ export class ErrorHandler {
    * Resolution order:
    * 1. `McpError` instances — returns `error.code` directly.
    * 2. SDK `ConnectionClosed` rejections — mapped to `RequestCancelled`, ahead of the pattern ladder.
-   * 3. Standard JS error constructor names via `ERROR_TYPE_MAPPINGS` (e.g. `TypeError` → `ValidationError`).
+   * 3. Standard JS error constructor names via `ERROR_TYPE_MAPPINGS` (e.g. `SyntaxError` → `ValidationError`).
    * 4. Provider-specific patterns (AWS, HTTP status codes, Supabase, OpenRouter) — checked before common patterns for specificity.
    * 5. Common message/name patterns (auth, not-found, rate-limit, etc.).
    * 6. `AbortError` name — mapped to `Timeout`.
@@ -173,7 +173,9 @@ export class ErrorHandler {
    * 2. Sanitizes `options.input` via `sanitizeInputForLogging` before including in logs.
    * 3. Extracts and consolidates error data, original stack, and the full cause chain.
    * 4. Rebuilds the error as a new `McpError` carrying the consolidated data, preserving the
-   *    classified code (or delegates to `options.errorMapper`).
+   *    classified code (or delegates to `options.errorMapper`). That `data` is client-visible
+   *    once the error is thrown toward a handler, so it carries no stack: `originalStack` and
+   *    `causeChain` ride the log record only.
    * 5. Logs the result via the global logger with full structured context — at `error` level,
    *    or at `info` without a stack for `RequestCancelled`, which is a routine caller disconnect.
    * 6. Returns the processed error, or rethrows it if `options.rethrow` is `true`.
@@ -261,30 +263,31 @@ export class ErrorHandler {
       originalErrorName,
       originalMessage: originalErrorMessage,
     };
+
+    /**
+     * Stack-bearing diagnostics go to the log record only, never into the
+     * returned error's `data`: `tryCatch` throws that error, and tools and
+     * resources forward an `McpError`'s `data` to the client verbatim (#519).
+     * A cancellation carries neither — its every node would hold a stack and
+     * invite triage to read a caller hanging up as a fault in this server.
+     */
+    const diagnostics: Record<string, unknown> = {};
     if (
       originalStack &&
       !isCancellation &&
       !(error instanceof McpError && error.data?.originalStack)
     ) {
-      consolidatedData.originalStack = originalStack;
+      diagnostics.originalStack = originalStack;
     }
 
     const cause = error instanceof Error ? error : undefined;
 
-    // Extract cause chain only when the error actually has a cause — and never
-    // for a cancellation, whose every node would carry a stack and reintroduce
-    // the triage noise the `originalStack` gate above exists to keep out.
     if (!isCancellation && error instanceof Error && error.cause) {
       const causeChain = extractErrorCauseChain(error);
-      if (causeChain.length > 0) {
-        const rootCause = causeChain[causeChain.length - 1];
-        if (rootCause) {
-          consolidatedData.rootCause = {
-            name: rootCause.name,
-            message: rootCause.message,
-          };
-        }
-        consolidatedData.causeChain = causeChain;
+      const rootCause = causeChain.at(-1);
+      if (rootCause) {
+        consolidatedData.rootCause = { name: rootCause.name, message: rootCause.message };
+        diagnostics.causeChain = causeChain;
       }
     }
 
@@ -337,8 +340,12 @@ export class ErrorHandler {
         errorCode: loggedErrorCode,
         originalErrorType: originalErrorName,
         finalErrorType: getErrorName(finalError),
-        errorData:
-          finalError instanceof McpError && finalError.data ? finalError.data : consolidatedData,
+        errorData: {
+          ...(finalError instanceof McpError && finalError.data
+            ? finalError.data
+            : consolidatedData),
+          ...diagnostics,
+        },
         ...(includeStack && stack && !isCancellation ? { stack } : {}),
       },
     };
@@ -489,6 +496,10 @@ export class ErrorHandler {
    * The processed `McpError` (or custom-mapped error) is always thrown — this method never swallows errors.
    * Use this in service code where you want structured logging and OTel integration without duplicating
    * error-handling boilerplate.
+   *
+   * The thrown error's `data` reaches the client when a tool or resource handler lets it propagate,
+   * so it carries `originalErrorName`, `originalMessage`, `rootCause`, and `options.context`'s canonical
+   * fields and `extra`, but no stack; the throw-site stack and cause chain are logged.
    *
    * @template T The expected return type of `fn`.
    * @param fn - The function to execute. May be synchronous or return a `Promise`.

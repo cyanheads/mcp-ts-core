@@ -85,6 +85,7 @@ interface CompiledErrorMapping extends BaseErrorMapping {
  * | `ReferenceError` | `InternalError` |
  * | `EvalError` | `InternalError` |
  * | `AggregateError` | `InternalError` |
+ * | `ZodError` | `ValidationError` |
  *
  * Note: `TypeError` is intentionally excluded. Runtime TypeErrors (e.g. "Cannot read
  * properties of undefined") are programming errors, not validation failures. Letting them

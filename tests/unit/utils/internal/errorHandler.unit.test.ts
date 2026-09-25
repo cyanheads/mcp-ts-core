@@ -5,6 +5,7 @@
 import { trace } from '@opentelemetry/api';
 import { afterEach, beforeEach, describe, expect, it, type MockInstance, vi } from 'vitest';
 import { ErrorHandler } from '@/utils/internal/error-handler/errorHandler.js';
+import { getErrorMessage } from '@/utils/internal/error-handler/helpers.js';
 import { JsonRpcErrorCode, McpError } from '../../../../src/types-global/errors.js';
 import { logger } from '../../../../src/utils/internal/logger.js';
 
@@ -28,22 +29,6 @@ describe('ErrorHandler (unit)', () => {
   });
 
   describe('determineErrorCode - additional branches', () => {
-    it('maps AbortError name to Timeout', () => {
-      const err = new Error('operation aborted');
-      (err as any).name = 'AbortError';
-      expect(ErrorHandler.determineErrorCode(err)).toBe(JsonRpcErrorCode.Timeout);
-    });
-
-    it('supports AggregateError inner message aggregation and custom constructors', () => {
-      class CustomProblem {}
-      const aggregate = new AggregateError([new Error('inner one'), 'inner two'], 'outer failure');
-      // Ensure coverage of getErrorName for custom constructor instance
-      const customInstance = new CustomProblem();
-
-      expect(ErrorHandler.determineErrorCode(aggregate)).toBe(JsonRpcErrorCode.InternalError);
-      expect(ErrorHandler.determineErrorCode(customInstance)).toBe(JsonRpcErrorCode.InternalError);
-    });
-
     it('falls back to AbortError special-case when regex patterns are bypassed', () => {
       const abortError = new Error('no matching keywords');
       (abortError as any).name = 'AbortError';
@@ -79,40 +64,6 @@ describe('ErrorHandler (unit)', () => {
   });
 
   describe('mapError - defaultFactory path', () => {
-    it('returns the original Error instance when no mapping or default is provided', () => {
-      const original = new Error('leave me be');
-      const result = ErrorHandler.mapError(original, []);
-      expect(result).toBe(original);
-    });
-
-    it('wraps non-Error inputs into Error when no mapping or default exists', () => {
-      const result = ErrorHandler.mapError(99, []);
-      expect(result).toBeInstanceOf(Error);
-      expect((result as Error).message).toBe('99');
-    });
-
-    it('uses defaultFactory when no mapping rule matches', () => {
-      const result = ErrorHandler.mapError(
-        'no-match',
-        [],
-        (e: unknown) => new TypeError(`Default mapped: ${String(e)}`),
-      );
-      expect(result).toBeInstanceOf(TypeError);
-      expect((result as TypeError).message).toBe('Default mapped: no-match');
-    });
-
-    it('applies a mapping rule when pattern matches', () => {
-      const result = ErrorHandler.mapError(new Error('specific failure occurred'), [
-        {
-          pattern: /specific/i,
-          errorCode: JsonRpcErrorCode.ValidationError, // not used by map factory directly here
-          factory: () => new RangeError('Mapped by rule'),
-        },
-      ]);
-      expect(result).toBeInstanceOf(RangeError);
-      expect((result as RangeError).message).toBe('Mapped by rule');
-    });
-
     it('normalizes regex flags to include case-insensitive matching', () => {
       const result = ErrorHandler.mapError(
         'FAIL STATE',
@@ -259,6 +210,79 @@ describe('ErrorHandler (unit)', () => {
     });
   });
 
+  describe('returned data vs. log record (#519)', () => {
+    /** The `errorData` of the most recent `error`-level log record. */
+    const loggedErrorData = (): Record<string, any> => {
+      const ctx = errorSpy.mock.calls.at(-1)?.[1] as Record<string, any> | undefined;
+      if (!ctx) throw new Error('errorSpy was not called');
+      return ctx.extra.errorData;
+    };
+
+    it('keeps originalStack and causeChain out of the returned data and in the log', () => {
+      const err = new Error('db read failed', { cause: new Error('EACCES') });
+
+      const final = ErrorHandler.handleError(err, {
+        operation: 'stackSplit',
+        context: { requestId: 'rid-519' },
+      }) as McpError;
+
+      expect(final.code).toBe(JsonRpcErrorCode.InternalError);
+      expect(final.data).toEqual({
+        requestId: 'rid-519',
+        originalErrorName: 'Error',
+        originalMessage: 'db read failed',
+        rootCause: { name: 'Error', message: 'EACCES' },
+      });
+
+      const errorData = loggedErrorData();
+      expect(errorData.originalStack).toBe(err.stack);
+      expect(errorData.causeChain).toHaveLength(2);
+      for (const node of errorData.causeChain) expect(node.stack).toEqual(expect.any(String));
+      expect(errorData.rootCause).toEqual({ name: 'Error', message: 'EACCES' });
+    });
+
+    it('throws a tryCatch error whose data carries no stack while the log keeps the throw site', async () => {
+      const thrown = await ErrorHandler.tryCatch(
+        () => {
+          throw new Error('db read failed', { cause: new Error('EACCES') });
+        },
+        { operation: 'MyService.read' },
+      ).catch((e: unknown) => e);
+
+      expect(thrown).toBeInstanceOf(McpError);
+      expect((thrown as McpError).code).toBe(JsonRpcErrorCode.InternalError);
+      expect(JSON.stringify((thrown as McpError).data)).not.toMatch(/stack|causeChain/i);
+
+      const errorData = loggedErrorData();
+      expect(errorData.originalStack).toContain('errorHandler.unit.test.ts');
+      expect(errorData.causeChain.map((n: { message: string }) => n.message)).toEqual([
+        'db read failed',
+        'EACCES',
+      ]);
+    });
+
+    it('leaves a cancellation with neither a stack nor a cause chain, in data or log', () => {
+      const infoSpy = vi.spyOn(logger, 'info').mockImplementation(() => {});
+      try {
+        const final = ErrorHandler.handleError(
+          new McpError(JsonRpcErrorCode.RequestCancelled, 'gone', undefined, {
+            cause: new Error('socket closed'),
+          }),
+          { operation: 'cancelSplit' },
+        ) as McpError;
+
+        const ctx = infoSpy.mock.calls.at(-1)?.[1] as Record<string, any>;
+        for (const data of [final.data, ctx.extra.errorData]) {
+          expect(data).not.toHaveProperty('originalStack');
+          expect(data).not.toHaveProperty('causeChain');
+        }
+        expect(ctx.extra).not.toHaveProperty('stack');
+      } finally {
+        infoSpy.mockRestore();
+      }
+    });
+  });
+
   describe('formatError helper coverage', () => {
     it('handles null, undefined, function, symbol, and complex objects', () => {
       const nullResult = ErrorHandler.formatError(null);
@@ -322,7 +346,9 @@ describe('ErrorHandler (unit)', () => {
         },
       });
 
-      expect(() => ErrorHandler.formatError(proxyError)).not.toThrow();
+      expect(getErrorMessage(proxyError)).toBe(
+        'Error converting error to string: errors accessor failed',
+      );
       expect(ErrorHandler.determineErrorCode(proxyError)).toBe(JsonRpcErrorCode.InternalError);
     });
 

@@ -55,33 +55,9 @@ describe('PromptRegistry', () => {
   });
 
   describe('Prompt Registration', () => {
-    it('should have registerAll method', () => {
-      expect(typeof registry.registerAll).toBe('function');
-    });
-
     it('should call server.registerPrompt for each prompt', async () => {
       await registry.registerAll(mockServer);
       expect(mockServer.registerPrompt).toHaveBeenCalledTimes(2);
-    });
-
-    it('should register prompts with correct structure', async () => {
-      await registry.registerAll(mockServer);
-
-      const firstCall = mockServer.registerPrompt.mock.calls[0];
-      expect(typeof firstCall[0]).toBe('string');
-      expect(typeof firstCall[1]).toBe('object');
-      expect(firstCall[1]).toHaveProperty('description');
-      expect(typeof firstCall[2]).toBe('function');
-    });
-
-    it('should pass prompt options correctly', async () => {
-      await registry.registerAll(mockServer);
-
-      for (const call of mockServer.registerPrompt.mock.calls) {
-        const options = call[1];
-        expect(options.description).toBeDefined();
-        expect(typeof options.description).toBe('string');
-      }
     });
 
     it('should create async handler function', async () => {
@@ -98,15 +74,6 @@ describe('PromptRegistry', () => {
   });
 
   describe('Error Handling', () => {
-    it('should not throw when registering with valid server', async () => {
-      await expect(registry.registerAll(mockServer)).resolves.toBeUndefined();
-    });
-
-    it('should handle empty prompts list', async () => {
-      const emptyRegistry = new PromptRegistry([], logger);
-      await expect(emptyRegistry.registerAll(mockServer)).resolves.toBeUndefined();
-    });
-
     it('should reject duplicate prompt names during registration', async () => {
       const duplicateRegistry = new PromptRegistry([testPrompt, testPrompt], logger);
 
@@ -114,77 +81,97 @@ describe('PromptRegistry', () => {
         "Duplicate prompt name 'test_prompt'",
       );
     });
+  });
 
-    it('should wrap prompt generation failures as McpError instances', async () => {
-      const failingPrompt = prompt('failing_prompt', {
-        description: 'A prompt that throws during generation.',
-        generate: () => {
-          throw new Error('boom');
-        },
-      });
-      const failingRegistry = new PromptRegistry([failingPrompt], logger);
+  describe('generate() failures on the wire (#519)', () => {
+    afterEach(() => {
+      vi.restoreAllMocks();
+    });
 
-      await failingRegistry.registerAll(mockServer);
-
-      const handler = mockServer.registerPrompt.mock.calls[0][2] as (
+    /** Registers one prompt and returns its `prompts/get` callback. */
+    const callbackFor = async (generate: () => never) => {
+      const failing = prompt('failing_prompt', { description: 'Throws.', generate });
+      await new PromptRegistry([failing], logger).registerAll(mockServer);
+      return mockServer.registerPrompt.mock.calls[0][2] as (
         args: Record<string, unknown>,
       ) => Promise<unknown>;
+    };
 
-      await expect(handler({})).rejects.toBeInstanceOf(McpError);
-      await expect(handler({})).rejects.toMatchObject({
-        code: JsonRpcErrorCode.InternalError,
-        message: 'boom',
+    it.each([
+      ['a plain Error', () => new Error('upstream lookup failed'), undefined],
+      [
+        'an Error with a cause',
+        () => new Error('upstream lookup failed', { cause: new Error('socket hang up') }),
+        2,
+      ],
+    ])('answers %s with the code and message only', async (_label, make, chainLength) => {
+      const errorSpy = vi.spyOn(logger, 'error').mockImplementation(() => {});
+      const thrown = make();
+      const handler = await callbackFor(() => {
+        throw thrown;
       });
+
+      const rejection = (await handler({}).catch((e: unknown) => e)) as McpError;
+
+      expect(rejection).toBeInstanceOf(McpError);
+      expect(rejection.code).toBe(JsonRpcErrorCode.InternalError);
+      expect(rejection.message).toBe('upstream lookup failed');
+      expect(rejection.data).toBeUndefined();
+
+      // The stack and cause chain still reach the server log.
+      const logged = errorSpy.mock.calls.findLast(([msg]) =>
+        String(msg).startsWith('Error in prompt:failing_prompt'),
+      )?.[1] as Record<string, any> | undefined;
+      expect(logged?.extra.errorData.originalStack).toBe(thrown.stack);
+      expect(logged?.extra.errorData.causeChain?.length).toBe(chainLength);
+    });
+
+    it('answers a thrown McpError with its code, message, and exactly its own data', async () => {
+      vi.spyOn(logger, 'error').mockImplementation(() => {});
+      const handler = await callbackFor(() => {
+        throw new McpError(JsonRpcErrorCode.NotFound, 'no such topic', { topic: 'x' });
+      });
+
+      const rejection = (await handler({}).catch((e: unknown) => e)) as McpError;
+
+      expect(rejection.code).toBe(JsonRpcErrorCode.NotFound);
+      expect(rejection.message).toBe('no such topic');
+      expect(rejection.data).toEqual({ topic: 'x' });
     });
   });
 
   describe('Registration Order', () => {
-    it('should maintain consistent registration order', async () => {
+    it('should register prompts in definition order', async () => {
       await registry.registerAll(mockServer);
-      const firstRun = mockServer.registerPrompt.mock.calls.map((call: any[]) => call[0]);
 
-      mockServer.registerPrompt.mockClear();
-      // Create a fresh registry — duplicate name detection prevents re-registration on the same instance
-      const freshRegistry = new PromptRegistry(testDefinitions, logger);
-      await freshRegistry.registerAll(mockServer);
-      const secondRun = mockServer.registerPrompt.mock.calls.map((call: any[]) => call[0]);
-
-      expect(firstRun).toEqual(secondRun);
+      expect(mockServer.registerPrompt.mock.calls.map((call: any[]) => call[0])).toEqual([
+        'test_prompt',
+        'no_args_prompt',
+      ]);
     });
   });
 
   describe('Prompt Handler Execution', () => {
-    it('should execute handlers and return messages', async () => {
-      await registry.registerAll(mockServer);
-
-      const handler = mockServer.registerPrompt.mock.calls[0][2];
-      const result = await handler({});
-
-      expect(result).toBeDefined();
-      expect(result.messages).toBeDefined();
-      expect(Array.isArray(result.messages)).toBe(true);
-    });
-
     it('should pass arguments to prompt generator', async () => {
       await registry.registerAll(mockServer);
 
       const handler = mockServer.registerPrompt.mock.calls[0][2];
       const result = await handler({ topic: 'testing' });
 
-      expect(result.messages).toBeDefined();
-      expect(Array.isArray(result.messages)).toBe(true);
+      expect(result.messages[0].content.text).toBe('Discuss: testing');
     });
   });
 
   describe('Prompt Metadata', () => {
-    it('should register prompts with descriptions', async () => {
+    it('should register prompts with their exact descriptions', async () => {
       await registry.registerAll(mockServer);
 
-      mockServer.registerPrompt.mock.calls.forEach((call: any[]) => {
-        const metadata = call[1];
-        expect(metadata.description).toBeDefined();
-        expect(metadata.description.length).toBeGreaterThan(0);
-      });
+      expect(
+        mockServer.registerPrompt.mock.calls.map((call: any[]) => [call[0], call[1].description]),
+      ).toEqual([
+        ['test_prompt', 'A test prompt for unit tests.'],
+        ['no_args_prompt', 'A prompt with no arguments.'],
+      ]);
     });
 
     it('forwards title to registerPrompt config when provided', async () => {

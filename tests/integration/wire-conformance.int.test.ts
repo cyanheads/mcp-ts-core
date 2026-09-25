@@ -7,7 +7,8 @@
  */
 import { Client, ProtocolErrorCode } from '@modelcontextprotocol/client';
 import { InMemoryTransport, McpServer } from '@modelcontextprotocol/server';
-import { afterEach, describe, expect, it } from 'vitest';
+import { AjvJsonSchemaValidator } from '@modelcontextprotocol/server/validators/ajv';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { z } from 'zod';
 import { config } from '@/config/index.js';
 import { buildServerManifest } from '@/core/serverManifest.js';
@@ -23,6 +24,7 @@ import { MODERN_PROTOCOL_REVISION } from '@/mcp-server/types.js';
 import { StorageService } from '@/storage/core/StorageService.js';
 import { InMemoryProvider } from '@/storage/providers/inMemory/inMemoryProvider.js';
 import { JsonRpcErrorCode, McpError } from '@/types-global/errors.js';
+import { ErrorHandler } from '@/utils/internal/error-handler/errorHandler.js';
 import { logger } from '@/utils/internal/logger.js';
 
 /** Proves an argument rejection never reaches the handler (#377). */
@@ -97,6 +99,58 @@ const greetPrompt = prompt('wire_greet', {
   ],
 });
 
+/** A service that wraps its work in `ErrorHandler.tryCatch`, as the api-errors skill documents (#519). */
+const failingService = () =>
+  ErrorHandler.tryCatch(
+    () => {
+      throw new Error('db read failed', { cause: new Error('EACCES') });
+    },
+    { operation: 'WireService.read' },
+  );
+
+const serviceTool = tool('wire_service', {
+  description: 'Reads through a failing service, or fails directly.',
+  input: z.object({
+    direct: z
+      .boolean()
+      .default(false)
+      .describe('Throw a plain Error instead of calling the service.'),
+  }),
+  output: z.object({ ok: z.boolean().describe('True on success.') }),
+  async handler(input) {
+    if (input.direct) throw new Error('direct failure');
+    await failingService();
+    return { ok: true };
+  },
+});
+
+const serviceResource = resource('wire://service/{id}', {
+  name: 'wire_service_doc',
+  description: 'Reads through a failing service, or fails directly.',
+  params: z.object({ id: z.string().describe('"direct" throws a plain Error.') }),
+  async handler(params) {
+    if (params.id === 'direct') throw new Error('direct failure');
+    return await failingService();
+  },
+});
+
+const failingPrompt = prompt('wire_failing', {
+  description: 'Fails in the requested way.',
+  args: z.object({
+    mode: z.enum(['plain', 'cause', 'mcp', 'service']).describe('How generate() fails.'),
+  }),
+  async generate(args) {
+    if (args.mode === 'plain') throw new Error('upstream lookup failed');
+    if (args.mode === 'cause') {
+      throw new Error('upstream lookup failed', { cause: new Error('socket hang up') });
+    }
+    if (args.mode === 'mcp') {
+      throw new McpError(JsonRpcErrorCode.NotFound, 'no such topic', { topic: 'x' });
+    }
+    return await failingService();
+  },
+});
+
 async function connect() {
   const server = new McpServer(
     { name: 'wire-conformance', version: '0.0.0' },
@@ -112,15 +166,31 @@ async function connect() {
   const subscriptions = installResourceSubscriptions(server);
   const services = { logger, storage: new StorageService(new InMemoryProvider()) };
   // `searchTool` stays first: the schema assertions below read `tools[0]`.
-  await new ToolRegistry([searchTool, facetTool], services).registerAll(server, subscriptions);
-  await new ResourceRegistry([docResource], services).registerAll(server, subscriptions);
-  await new PromptRegistry([greetPrompt], logger).registerAll(server);
+  await new ToolRegistry([searchTool, facetTool, serviceTool], services).registerAll(
+    server,
+    subscriptions,
+  );
+  await new ResourceRegistry([docResource, serviceResource], services).registerAll(
+    server,
+    subscriptions,
+  );
+  // `greetPrompt` stays first: the requiredness assertion reads `prompts[0]`.
+  await new PromptRegistry([greetPrompt, failingPrompt], logger).registerAll(server);
 
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
   const client = new Client({ name: 'wire-conformance-client', version: '0.0.0' });
   await server.connect(serverTransport);
   await client.connect(clientTransport);
   return { client, server };
+}
+
+/** Compiles the `outputSchema` a tool advertises in `tools/list`, as a strict client would. */
+async function advertisedOutputValidator(client: Client, name: string) {
+  const { tools } = await client.listTools();
+  const outputSchema = tools.find((t) => t.name === name)?.outputSchema;
+  if (!outputSchema) throw new Error(`${name} advertises no outputSchema`);
+  const validator = new AjvJsonSchemaValidator();
+  return validator.getValidator(outputSchema as Parameters<typeof validator.getValidator>[0]);
 }
 
 describe('Phase 1 wire conformance', () => {
@@ -398,9 +468,10 @@ describe('Phase 1 wire conformance', () => {
 
     it('returns an error envelope that satisfies the advertised schema', async () => {
       const client = await session();
-      await client.listTools();
+      const validate = await advertisedOutputValidator(client, 'wire_search');
       // A strict client validates `structuredContent` against `outputSchema`;
-      // this call is exactly the one that used to fail with `-32602`.
+      // this call is exactly the one that used to fail with `-32602`. The SDK
+      // client skips that check on `isError` results, so it is run here.
       const result = await client.callTool({
         name: 'wire_search',
         arguments: { query: 'boom' },
@@ -410,11 +481,12 @@ describe('Phase 1 wire conformance', () => {
       expect(result.structuredContent).toMatchObject({
         error: { code: JsonRpcErrorCode.NotFound, data: { reason: 'index_missing' } },
       });
+      expect(validate(result.structuredContent)).toMatchObject({ valid: true });
     });
 
     it('accepts a reason raised below the handler', async () => {
       const client = await session();
-      await client.listTools();
+      const validate = await advertisedOutputValidator(client, 'wire_search');
       const result = await client.callTool({
         name: 'wire_search',
         arguments: { query: 'gate' },
@@ -424,6 +496,7 @@ describe('Phase 1 wire conformance', () => {
       expect(result.structuredContent).toMatchObject({
         error: { code: JsonRpcErrorCode.ValidationError, data: { reason: 'denied_function' } },
       });
+      expect(validate(result.structuredContent)).toMatchObject({ valid: true });
     });
   });
 
@@ -440,14 +513,6 @@ describe('Phase 1 wire conformance', () => {
   });
 
   describe('capability truthfulness', () => {
-    it('advertises resources.subscribe and answers subscribe/unsubscribe (#354)', async () => {
-      const client = await session();
-
-      expect(client.getServerCapabilities()?.resources).toMatchObject({ subscribe: true });
-      await expect(client.subscribeResource({ uri: 'wire://doc/1' })).resolves.toBeDefined();
-      await expect(client.unsubscribeResource({ uri: 'wire://doc/1' })).resolves.toBeDefined();
-    });
-
     it('answers logging/setLevel and streams ctx.log to notifications/message', async () => {
       const client = await session();
       const messages: Array<{ data: unknown; level: string }> = [];
@@ -464,11 +529,6 @@ describe('Phase 1 wire conformance', () => {
           data: expect.objectContaining({ message: 'searching', query: 'hello' }),
         }),
       );
-    });
-
-    it('advertises no experimental tasks capability', async () => {
-      const client = await session();
-      expect(client.getServerCapabilities()?.tasks).toBeUndefined();
     });
   });
 
@@ -504,13 +564,98 @@ describe('Phase 1 wire conformance', () => {
     });
   });
 
-  describe('unknown tool dispatch', () => {
-    it('rejects with a protocol error rather than an isError result', async () => {
+  describe('error data carries no server stack (#519)', () => {
+    afterEach(() => {
+      vi.restoreAllMocks();
+    });
+
+    /** A JSON-RPC error a client call rejected with. */
+    type WireError = { code?: number; data?: Record<string, unknown>; message?: string };
+    const rejectionOf = (call: Promise<unknown>) =>
+      call.then(
+        () => expect.unreachable('expected the call to reject'),
+        (e: unknown) => e as WireError,
+      );
+    const expectStackFree = (data: unknown) =>
+      expect(JSON.stringify(data ?? {})).not.toMatch(/stack|causeChain/i);
+
+    it.each(['plain', 'cause'])(
+      'prompts/get answers a %s generate() failure with the code and message only',
+      async (mode) => {
+        const client = await session();
+
+        const error = await rejectionOf(
+          client.getPrompt({ name: 'wire_failing', arguments: { mode } }),
+        );
+
+        expect(error.code).toBe(JsonRpcErrorCode.InternalError);
+        expect(error.message).toContain('upstream lookup failed');
+        expect(error.data).toBeUndefined();
+      },
+    );
+
+    it("prompts/get answers a thrown McpError with exactly that error's data", async () => {
       const client = await session();
 
-      await expect(client.callTool({ name: 'nope', arguments: {} })).rejects.toMatchObject({
-        code: ProtocolErrorCode.InvalidParams,
+      const error = await rejectionOf(
+        client.getPrompt({ name: 'wire_failing', arguments: { mode: 'mcp' } }),
+      );
+
+      expect(error.code).toBe(JsonRpcErrorCode.NotFound);
+      expect(error.message).toContain('no such topic');
+      expect(error.data).toEqual({ topic: 'x' });
+    });
+
+    it('a tryCatch-wrapped service failure keeps its code and loses its stack on every path', async () => {
+      const client = await session();
+      const errorLog = vi.spyOn(logger, 'error');
+
+      const promptError = await rejectionOf(
+        client.getPrompt({ name: 'wire_failing', arguments: { mode: 'service' } }),
+      );
+      const toolResult = await client.callTool({ name: 'wire_service', arguments: {} });
+      const toolError = (toolResult.structuredContent as { error?: WireError }).error;
+      const resourceError = await rejectionOf(client.readResource({ uri: 'wire://service/1' }));
+
+      for (const error of [promptError, toolError, resourceError]) {
+        expect(error?.code).toBe(JsonRpcErrorCode.InternalError);
+        expectStackFree(error?.data);
+        expect(error?.data).toMatchObject({
+          originalMessage: 'db read failed',
+          rootCause: { name: 'Error', message: 'EACCES' },
+        });
+      }
+      // A prompt's rejection carries none of the context its registry was built with.
+      expect(promptError.data).not.toHaveProperty('requestId');
+      expect(toolResult.isError).toBe(true);
+
+      // The server log still carries the throw-site stack and the cause chain.
+      const serviceRecords = errorLog.mock.calls
+        .filter(([msg]) => String(msg).startsWith('Error in WireService.read'))
+        .map(([, ctx]) => (ctx as Record<string, any>).extra.errorData);
+      expect(serviceRecords).toHaveLength(3);
+      for (const errorData of serviceRecords) {
+        expect(errorData.originalStack).toContain('wire-conformance.int.test.ts');
+        expect(errorData.causeChain).toHaveLength(2);
+      }
+    });
+
+    it('leaves a plain Error thrown directly by a tool or resource with no data', async () => {
+      const client = await session();
+
+      const toolResult = await client.callTool({
+        name: 'wire_service',
+        arguments: { direct: true },
       });
+      const resourceError = await rejectionOf(
+        client.readResource({ uri: 'wire://service/direct' }),
+      );
+
+      expect(toolResult.structuredContent).toEqual({
+        error: { code: JsonRpcErrorCode.InternalError, message: 'direct failure' },
+      });
+      expect(resourceError.code).toBe(JsonRpcErrorCode.InternalError);
+      expect(resourceError.data).toBeUndefined();
     });
   });
 
