@@ -8,6 +8,7 @@
  */
 
 import { execFile } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { constants } from 'node:fs';
 import {
   access,
@@ -687,6 +688,75 @@ async function verifyWorkerTypes(workerDir: string, pkg: PackageJson): Promise<v
   }
 }
 
+/** Digest of every file path and its contents under `dir`, to detect any write into it. */
+async function directoryDigest(dir: string): Promise<string> {
+  const hash = createHash('sha256');
+  const entries = (await readdir(dir, { recursive: true })).sort();
+  for (const entry of entries) {
+    const path = join(dir, entry);
+    if (!(await stat(path)).isFile()) continue;
+    hash
+      .update(entry)
+      .update('\0')
+      .update(await readFile(path))
+      .update('\0');
+  }
+  return hash.digest('hex');
+}
+
+/**
+ * Builds a consumer that extends the shipped `tsconfig.base.json` and restates
+ * nothing but `rootDir` and `include`. Its output, build info, and `@/` alias
+ * must all resolve inside the consumer, and the installed package must come
+ * out byte-identical: a relative path in the base resolves against the
+ * package's own directory and compiles into its `dist/` (#521).
+ */
+async function verifyBaseConfigConsumer(
+  consumerDir: string,
+  installedPackageDir: string,
+  pkg: PackageJson,
+): Promise<void> {
+  const projectDir = join(consumerDir, 'base-config-consumer');
+  await mkdir(join(projectDir, 'src'), { recursive: true });
+  await writeFile(
+    join(projectDir, 'tsconfig.json'),
+    `${JSON.stringify(
+      {
+        extends: `${pkg.name}/tsconfig.base.json`,
+        compilerOptions: { rootDir: 'src' },
+        include: ['src'],
+      },
+      null,
+      2,
+    )}\n`,
+  );
+  await writeFile(join(projectDir, 'src', 'value.ts'), `export const value = 'mine';\n`);
+  await writeFile(
+    join(projectDir, 'src', 'index.ts'),
+    `import { value } from '@/value.js';\n\nexport const consumer = value;\n`,
+  );
+
+  const packageDigest = await directoryDigest(installedPackageDir);
+  const compilers = [
+    ['TypeScript 7', join(consumerDir, 'node_modules', 'typescript', 'bin', 'tsc')],
+    ['TypeScript 6', join(consumerDir, 'node_modules', 'typescript-v6', 'bin', 'tsc')],
+  ] as const;
+  for (const [compiler, tsc] of compilers) {
+    await rm(join(projectDir, 'dist'), { force: true, recursive: true });
+    await rm(join(projectDir, 'tsconfig.tsbuildinfo'), { force: true });
+
+    const build = await run(tsc, ['--project', 'tsconfig.json', '--pretty', 'false'], projectDir);
+    assertSuccess(build, `${compiler} build of a consumer extending tsconfig.base.json`);
+    await access(join(projectDir, 'dist', 'index.js'), constants.R_OK);
+    await access(join(projectDir, 'tsconfig.tsbuildinfo'), constants.R_OK);
+    if ((await directoryDigest(installedPackageDir)) !== packageDigest) {
+      throw new Error(
+        `${compiler} build of a consumer extending tsconfig.base.json wrote into the installed package.`,
+      );
+    }
+  }
+}
+
 async function verifyCli(
   consumerDir: string,
   installedPackageDir: string,
@@ -734,9 +804,11 @@ async function verifyCli(
 
   // Preserve the generated manifest long enough to assert its published
   // dependency contract above, then point only this temporary verifier copy at
-  // the tarball. An offline install gives the scaffold its own dependency tree:
+  // the tarball. Installing in the scaffold gives it its own dependency tree:
   // undeclared template imports cannot resolve through the repository or the
-  // parent consumer, and the registry cannot mask a broken packed artifact.
+  // parent consumer, and the framework resolves only from the packed artifact.
+  // `--prefer-offline`, not `--offline`: cached manifests expire, and a strict
+  // offline install fails on any metadata the cache no longer holds.
   await writeFile(
     join(projectDir, 'package.json'),
     `${JSON.stringify(
@@ -753,14 +825,17 @@ async function verifyCli(
   );
   const install = await run(
     bunBin,
-    ['install', '--offline', '--ignore-scripts', '--backend=copyfile', '--no-progress'],
+    ['install', '--prefer-offline', '--ignore-scripts', '--backend=copyfile', '--no-progress'],
     projectDir,
   );
-  assertSuccess(install, 'installed CLI scaffold offline install');
+  assertSuccess(install, 'installed CLI scaffold install');
 
   const tsc = join(projectDir, 'node_modules', 'typescript', 'bin', 'tsc');
   const typecheck = await run(tsc, ['--project', 'tsconfig.json', '--pretty', 'false'], projectDir);
   assertSuccess(typecheck, 'installed CLI scaffold typecheck (src + tests)');
+  // The scaffold sets `tsBuildInfoFile` and inherits `incremental` from the
+  // shipped base; without it, tsc exits 0 and silently writes no build info.
+  await access(join(projectDir, '.tsbuildinfo'), constants.R_OK);
 
   // Build through the scaffold's own `build` script — `scripts/build.ts`, which
   // ships in the package and resolves its tsconfig itself. Invoking
@@ -901,6 +976,7 @@ export async function verifyPublishedPackage(): Promise<PackageVerificationRepor
     await verifyRuntimeImports(consumerDir, installedPkg, nodeBin, bunBin);
     await verifyTypes(consumerDir, installedPkg);
     await verifyWorkerTypes(workerConsumerDir, installedPkg);
+    await verifyBaseConfigConsumer(consumerDir, installedPackageDir, installedPkg);
     const cliProject = await verifyCli(
       consumerDir,
       installedPackageDir,

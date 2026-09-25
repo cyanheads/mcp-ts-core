@@ -2,6 +2,9 @@
   "extends": "../tsconfig.json",
   "compilerOptions": {
     "rootDir": "../src",
+    // The shipped base resolves `outDir` against `${configDir}` — this file's
+    // directory, `config/` — so the build restates the repo-root `dist/`.
+    "outDir": "../dist",
     // Node globals only — see tsconfig.json's `types` note (#397).
     "types": ["node"],
 
