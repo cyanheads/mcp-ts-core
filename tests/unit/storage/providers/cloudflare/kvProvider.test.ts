@@ -48,13 +48,6 @@ describe('KvProvider', () => {
       expect(mockKv.get).toHaveBeenCalledWith('tenant-1:key-1', 'json');
     });
 
-    it('should return parsed JSON object if found', async () => {
-      const storedObject = { data: 'test-data' };
-      mockKv.get.mockResolvedValue(storedObject);
-      const result = await kvProvider.get<{ data: string }>('tenant-1', 'key-1', context);
-      expect(result).toEqual(storedObject);
-    });
-
     it('should throw McpError on JSON parsing error', async () => {
       const parsingError = new Error('Invalid JSON');
       mockKv.get.mockRejectedValue(parsingError);
@@ -64,12 +57,12 @@ describe('KvProvider', () => {
   });
 
   describe('set', () => {
-    it('should call put with correct key and value', async () => {
+    it('should call put with correct key and value, and no expirationTtl without a ttl', async () => {
       const value = { data: 'test-data' };
       await kvProvider.set('tenant-1', 'key-1', value, context);
-      expect(mockKv.put).toHaveBeenCalledWith('tenant-1:key-1', JSON.stringify(value), {
-        expirationTtl: undefined,
-      });
+      expect(mockKv.put).toHaveBeenCalledOnce();
+      // toStrictEqual: toHaveBeenCalledWith treats `{ expirationTtl: undefined }` as equal to `{}`.
+      expect(mockKv.put.mock.calls[0]).toStrictEqual(['tenant-1:key-1', JSON.stringify(value), {}]);
     });
 
     it('should include expirationTtl if ttl is provided', async () => {
@@ -94,6 +87,25 @@ describe('KvProvider', () => {
       await expect(kvProvider.set('tenant-1', 'key-1', { data: 'test' }, context)).rejects.toThrow(
         McpError,
       );
+    });
+
+    it.each([
+      ['undefined', undefined],
+      ['function', () => 1],
+      ['symbol', Symbol('s')],
+    ])('should reject a top-level %s without calling put', async (_label, value) => {
+      await expect(kvProvider.set('tenant-1', 'key-1', value, context)).rejects.toThrow(McpError);
+      await expect(
+        kvProvider.setMany(
+          'tenant-1',
+          new Map<string, unknown>([
+            ['good', 1],
+            ['bad', value],
+          ]),
+          context,
+        ),
+      ).rejects.toThrow(McpError);
+      expect(mockKv.put).not.toHaveBeenCalled();
     });
   });
 
@@ -177,22 +189,20 @@ describe('KvProvider', () => {
   });
 
   describe('batch operations', () => {
-    it('getMany should aggregate non-null values', async () => {
-      const getSpy = vi
-        .spyOn(kvProvider, 'get')
-        .mockResolvedValueOnce('value-1' as never)
-        .mockResolvedValueOnce(null as never)
-        .mockResolvedValueOnce('value-3' as never);
+    it('getMany should read each tenant-prefixed key and omit misses', async () => {
+      mockKv.get.mockImplementation(async (kvKey: string) =>
+        kvKey === 'tenant-1:b' ? null : `value-of-${kvKey}`,
+      );
 
       const result = await kvProvider.getMany<string>('tenant-1', ['a', 'b', 'c'], context);
 
-      expect(result).toBeInstanceOf(Map);
-      expect(Array.from(result.entries())).toEqual([
-        ['a', 'value-1'],
-        ['c', 'value-3'],
-      ]);
-      expect(getSpy).toHaveBeenCalledTimes(3);
-      getSpy.mockRestore();
+      expect(result).toEqual(
+        new Map([
+          ['a', 'value-of-tenant-1:a'],
+          ['c', 'value-of-tenant-1:c'],
+        ]),
+      );
+      expect(mockKv.get).toHaveBeenCalledWith('tenant-1:b', 'json');
     });
 
     it('setMany should delegate writes with provided options', async () => {
@@ -212,17 +222,11 @@ describe('KvProvider', () => {
       });
     });
 
-    it('deleteMany should return count of deleted keys', async () => {
-      const deleteSpy = vi
-        .spyOn(kvProvider, 'delete')
-        .mockResolvedValueOnce(true)
-        .mockResolvedValueOnce(false)
-        .mockResolvedValueOnce(true);
+    it('deleteMany should delete each tenant-prefixed key and count every idempotent delete', async () => {
+      mockKv.delete.mockResolvedValue(undefined);
 
-      const deleted = await kvProvider.deleteMany('tenant-1', ['a', 'b', 'c'], context);
-
-      expect(deleted).toBe(2);
-      deleteSpy.mockRestore();
+      await expect(kvProvider.deleteMany('tenant-1', ['a', 'b'], context)).resolves.toBe(2);
+      expect(mockKv.delete.mock.calls).toEqual([['tenant-1:a'], ['tenant-1:b']]);
     });
 
     it('clear should iterate through pages and delete all keys', async () => {
@@ -252,21 +256,6 @@ describe('KvProvider', () => {
         limit: 1000,
         cursor: 'cursor-1',
       });
-    });
-
-    it('getMany should return an empty map when no keys are requested', async () => {
-      const result = await kvProvider.getMany('tenant-1', [], context);
-      expect(result.size).toBe(0);
-    });
-
-    it('setMany should be a no-op for an empty entries map', async () => {
-      await kvProvider.setMany('tenant-1', new Map(), context);
-      expect(mockKv.put).not.toHaveBeenCalled();
-    });
-
-    it('deleteMany should return 0 for an empty key list', async () => {
-      const deleted = await kvProvider.deleteMany('tenant-1', [], context);
-      expect(deleted).toBe(0);
     });
   });
 });

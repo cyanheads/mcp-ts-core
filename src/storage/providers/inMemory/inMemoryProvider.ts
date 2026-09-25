@@ -3,6 +3,11 @@
  * Ideal for development, testing, or scenarios where persistence is not required.
  * Supports TTL (Time-To-Live) for entries and a configurable maximum entry count
  * to prevent unbounded memory growth.
+ *
+ * Values are held as JSON text and parsed on every read, so the provider accepts
+ * and returns exactly what a persistent backend does: a `Date` reads back as its
+ * ISO string, a `Map` as `{}`, and neither the caller's object nor a returned one
+ * shares identity with what is stored.
  * @module src/storage/providers/inMemory/inMemoryProvider
  */
 import type {
@@ -13,8 +18,10 @@ import type {
 } from '@/storage/core/IStorageProvider.js';
 import {
   deleteManyViaDelete,
+  encodeEntries,
   getManyViaGet,
   paginateSortedKeys,
+  serializeValue,
 } from '@/storage/core/providerHelpers.js';
 import { decodeCursor } from '@/storage/core/storageValidation.js';
 import { configurationError, JsonRpcErrorCode, McpError } from '@/types-global/errors.js';
@@ -39,7 +46,7 @@ export interface InMemoryProviderOptions {
 
 interface InMemoryStoreEntry {
   expiresAt?: number;
-  value: unknown;
+  json: string;
 }
 
 export class InMemoryProvider implements IStorageProvider {
@@ -136,7 +143,7 @@ export class InMemoryProvider implements IStorageProvider {
       return Promise.resolve(null);
     }
 
-    return Promise.resolve(entry.value as T);
+    return Promise.resolve(JSON.parse(entry.json) as T);
   }
 
   set(
@@ -147,6 +154,8 @@ export class InMemoryProvider implements IStorageProvider {
     options?: StorageOptions,
   ): Promise<void> {
     logger.debug(`[InMemoryProvider] Setting key: ${key} for tenant: ${tenantId}`, context);
+    // Encode before the capacity sweep, so a rejected value leaves the store untouched.
+    const json = serializeValue(key, value);
     const isNew = !this.store.get(tenantId)?.has(key);
     if (isNew) {
       this.ensureCapacity();
@@ -156,7 +165,7 @@ export class InMemoryProvider implements IStorageProvider {
     // Fix: Check for undefined instead of truthy to handle ttl=0 correctly
     const expiresAt = options?.ttl !== undefined ? Date.now() + options.ttl * 1000 : undefined;
     tenantStore.set(key, {
-      value,
+      json,
       ...(expiresAt !== undefined && { expiresAt }),
     });
     if (isNew) {
@@ -253,6 +262,9 @@ export class InMemoryProvider implements IStorageProvider {
       context,
     );
 
+    // Encode the whole batch first: one unencodable value rejects it untouched.
+    const encoded = encodeEntries(entries);
+
     // Expired entries must be removed before computing the batch delta. If an
     // expired key is present in this batch, counting it as an overwrite and
     // sweeping it later can undercount additions and exceed maxEntries.
@@ -267,9 +279,9 @@ export class InMemoryProvider implements IStorageProvider {
     tenantStore ??= this.getOrCreateTenantStore(tenantId);
 
     const expiresAt = options?.ttl !== undefined ? Date.now() + options.ttl * 1000 : undefined;
-    for (const [key, value] of entries) {
+    for (const [key, json] of encoded) {
       tenantStore.set(key, {
-        value,
+        json,
         ...(expiresAt !== undefined && { expiresAt }),
       });
     }

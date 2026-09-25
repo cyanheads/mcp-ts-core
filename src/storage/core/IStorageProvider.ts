@@ -160,7 +160,9 @@ export interface IStorageProvider {
   /**
    * Stores a value in the storage.
    * @param key The unique key for the item.
-   * @param value The value to store. Can be any serializable object.
+   * @param value The value to store. Must be JSON-serializable, and reads return its JSON form
+   *   (a `Date` comes back as its ISO string). A `bigint`, a cyclic reference, or a top-level
+   *   `undefined`, function, or symbol is rejected before anything is written.
    * @param context The request context for logging and tracing.
    * @param options Optional settings like TTL.
    * @returns A promise that resolves when the operation is complete.
@@ -184,7 +186,8 @@ export interface IStorageProvider {
    * - FileSystem: Parallel file writes (I/O bound, benefits from concurrency)
    *
    * @param tenantId The unique identifier for the tenant.
-   * @param entries Map of key-value pairs to store. Empty map is a no-op.
+   * @param entries Map of key-value pairs to store. Empty map is a no-op. Values follow the
+   *   `set()` rules; one value JSON cannot represent rejects the batch before any entry is written.
    * @param context The request context for logging and tracing.
    * @param options Optional settings like TTL (applied to all entries).
    * @returns A promise that resolves when all operations are complete.

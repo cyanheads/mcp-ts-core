@@ -1,12 +1,14 @@
 /**
- * @fileoverview Unit and compliance tests for the InMemoryProvider implementation.
+ * @fileoverview Unit tests for InMemoryProvider-specific behavior (capacity bounds,
+ * namespace cleanup, JSON round-trip edges). The shared provider contract runs in
+ * `tests/compliance/storage-provider.test.ts`.
  * @module tests/storage/providers/inMemory/inMemoryProvider.test
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-import { encodeCursor } from '@/storage/core/storageValidation.js';
 import { InMemoryProvider } from '@/storage/providers/inMemory/inMemoryProvider.js';
-import { McpError } from '@/types-global/errors.js';
+import { createMockContext } from '@/testing/index.js';
+import { JsonRpcErrorCode, McpError } from '@/types-global/errors.js';
 import { requestContextService } from '@/utils/internal/requestContext.js';
 
 const createTestContext = () =>
@@ -29,75 +31,6 @@ describe('InMemoryProvider (unit)', () => {
 
   afterEach(() => {
     nowSpy?.mockRestore();
-  });
-
-  it('evicts entries that have passed their ttl', async () => {
-    const context = createTestContext();
-    await provider.set(tenantId, 'ephemeral', 'value', context, { ttl: 1 });
-
-    const immediate = await provider.get(tenantId, 'ephemeral', context);
-    expect(immediate).toBe('value');
-
-    now += 1_100;
-    const afterExpiry = await provider.get(tenantId, 'ephemeral', context);
-    expect(afterExpiry).toBeNull();
-  });
-
-  it('removes expired entries lazily during list operations', async () => {
-    const context = createTestContext();
-    await provider.set(tenantId, 'prefix:active', 'active', context, {
-      ttl: 5,
-    });
-    await provider.set(tenantId, 'prefix:expired', 'expired', context, {
-      ttl: 1,
-    });
-
-    now += 1_100;
-    const result = await provider.list(tenantId, 'prefix:', context);
-    expect(result.keys).toEqual(['prefix:active']);
-
-    const expiredValue = await provider.get(tenantId, 'prefix:expired', context);
-    expect(expiredValue).toBeNull();
-  });
-
-  it('isolates data between tenants', async () => {
-    const context = createTestContext();
-    await provider.set('tenant-a', 'shared-key', 'value-a', context);
-    await provider.set('tenant-b', 'shared-key', 'value-b', context);
-
-    const tenantAValue = await provider.get('tenant-a', 'shared-key', context);
-    const tenantBValue = await provider.get('tenant-b', 'shared-key', context);
-
-    expect(tenantAValue).toBe('value-a');
-    expect(tenantBValue).toBe('value-b');
-  });
-
-  it('stores ttl=0 as an immediately-expiring entry rather than a permanent one', async () => {
-    const context = createTestContext();
-    await provider.set(tenantId, 'immediate', 'value', context, { ttl: 0 });
-
-    now += 1;
-    const result = await provider.get(tenantId, 'immediate', context);
-    expect(result).toBeNull();
-  });
-
-  it('resumes after the next surviving key when a list cursor key no longer exists', async () => {
-    const context = createTestContext();
-    await provider.set(tenantId, 'alpha', 1, context);
-    await provider.set(tenantId, 'charlie', 3, context);
-    const staleCursor = encodeCursor('bravo', tenantId);
-
-    const result = await provider.list(tenantId, '', context, { cursor: staleCursor });
-
-    expect(result.keys).toEqual(['charlie']);
-  });
-
-  it('getMany, setMany, and deleteMany no-op on empty input', async () => {
-    const context = createTestContext();
-
-    await expect(provider.getMany(tenantId, [], context)).resolves.toEqual(new Map());
-    await expect(provider.setMany(tenantId, new Map(), context)).resolves.toBeUndefined();
-    await expect(provider.deleteMany(tenantId, [], context)).resolves.toBe(0);
   });
 
   it('does not retain empty tenant namespaces after read misses or cleanup', async () => {
@@ -126,6 +59,66 @@ describe('InMemoryProvider (unit)', () => {
     const internalStore = (provider as unknown as { store: Map<string, unknown> }).store;
     expect(internalStore.size).toBe(0);
     expect(provider.size).toBe(0);
+  });
+
+  describe('JSON round-trip', () => {
+    it('returns the JSON form through ctx.state and rejects values JSON cannot encode', async () => {
+      const ctx = createMockContext();
+      const item = { at: new Date(now), tags: new Map([['a', 1]]), n: 1 };
+      await ctx.state.set('item/1', item);
+      item.n = 2;
+
+      const got = await ctx.state.get<typeof item>('item/1');
+      expect([got === item, got?.at instanceof Date, got?.tags instanceof Map, got?.n]).toEqual([
+        false,
+        false,
+        false,
+        1,
+      ]);
+      expect(got).toEqual({ at: new Date(now).toISOString(), tags: {}, n: 1 });
+
+      const cyclic: Record<string, unknown> = {};
+      cyclic.self = cyclic;
+      for (const value of [{ big: 10n }, cyclic]) {
+        await expect(ctx.state.set('item/2', value)).rejects.toMatchObject({
+          code: JsonRpcErrorCode.SerializationError,
+        });
+      }
+      await expect(ctx.state.get('item/2')).resolves.toBeNull();
+    });
+
+    it('keeps the prior value and TTL when a set over an existing key is rejected', async () => {
+      const context = createTestContext();
+      await provider.set(tenantId, 'item', 'original', context, { ttl: 5 });
+
+      expect(() => provider.set(tenantId, 'item', { big: 10n }, context)).toThrow(McpError);
+
+      now += 4_000;
+      await expect(provider.get(tenantId, 'item', context)).resolves.toBe('original');
+      now += 1_001;
+      await expect(provider.get(tenantId, 'item', context)).resolves.toBeNull();
+    });
+
+    it('rejects a setMany batch with one unencodable entry and commits none of it', async () => {
+      const context = createTestContext();
+      await provider.set(tenantId, 'existing', 'original', context);
+
+      await expect(
+        provider.setMany(
+          tenantId,
+          new Map<string, unknown>([
+            ['existing', 'changed'],
+            ['fresh', 'value'],
+            ['bad', undefined],
+          ]),
+          context,
+        ),
+      ).rejects.toThrow(McpError);
+
+      await expect(provider.get(tenantId, 'existing', context)).resolves.toBe('original');
+      await expect(provider.get(tenantId, 'fresh', context)).resolves.toBeNull();
+      expect(provider.size).toBe(1);
+    });
   });
 
   describe('capacity management', () => {
@@ -258,17 +251,6 @@ describe('InMemoryProvider (unit)', () => {
         expect(boundedProvider.size).toBe(liveSibling ? 2 : 1);
       },
     );
-
-    it('still throws when the sweep reclaims nothing and capacity remains full', async () => {
-      const context = createTestContext();
-      const boundedProvider = new InMemoryProvider({ maxEntries: 2 });
-      await boundedProvider.set(tenantId, 'key1', 'v1', context);
-      await boundedProvider.set(tenantId, 'key2', 'v2', context);
-
-      // Neither entry has a TTL, so the sweep reclaims 0 and the write must fail
-      // synchronously (set() is not declared `async`).
-      expect(() => boundedProvider.set(tenantId, 'key3', 'v3', context)).toThrow(McpError);
-    });
 
     it('preflights setMany capacity so a rejected batch commits no partial entries', async () => {
       const context = createTestContext();

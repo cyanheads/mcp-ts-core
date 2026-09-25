@@ -323,7 +323,7 @@ Opt-in domain-specific logging. Methods: `debug`, `info`, `notice`, `warning`, `
 
 ### `ctx.state`
 
-Tenant-scoped KV. Accepts any serializable value — no manual `JSON.stringify`/`JSON.parse` needed.
+Tenant-scoped KV. Accepts any JSON-serializable value — no manual `JSON.stringify`/`JSON.parse` needed — and reads return its JSON form (a `Date` comes back as its ISO string, a `Map` as `{}`), never the object that was written. A `bigint`, a cyclic reference, or a top-level `undefined`, function, or symbol rejects with `McpError(SerializationError)` before anything is written.
 
 ```ts
 await ctx.state.set('item/123', { name: 'Widget', count: 42 });
@@ -483,7 +483,7 @@ describe('myTool', () => {
 
 **`createMockContext` options:** `createMockContext()` (state included), `{ tenantId: 'test-tenant' }` (explicit tenant; defaults to `'default'`, as stdio resolves it), `{ errors: myTool.errors }` (typed `ctx.fail`), `{ inputResponses }` / `{ requestState }` (seed `ctx.inputs` to drive a multi-round-trip handler's second round directly), plus `auth`, `sessionId`, `signal`, `requestId`, `uri`, and the four `notify*` callbacks.
 
-**`ctx.state` in tests is the production path.** The mock backs it with a real `StorageService` over an `InMemoryProvider`, so key validation (`[a-zA-Z0-9_.\-/]+` — colons rejected) and TTL expiry behave exactly as they do in a deployment. Passing `errors` narrows the return type to `HandlerContext<ReasonOf<…>>`, which is what a definition declaring a contract types its handler's `ctx` as — so `definition.handler(input, ctx)` typechecks.
+**`ctx.state` in tests is the production path.** The mock backs it with a real `StorageService` over an `InMemoryProvider`, so key validation (`[a-zA-Z0-9_.\-/]+` — colons rejected), the JSON round-trip of every value, and TTL expiry behave exactly as they do in a deployment. Passing `errors` narrows the return type to `HandlerContext<ReasonOf<…>>`, which is what a definition declaring a contract types its handler's `ctx` as — so `definition.handler(input, ctx)` typechecks.
 
 **HTTP/session fixtures:** `createFetchMock(routes)` provides a strict fetch-compatible fake with ordered routes, captured `Request` objects, one-shot responses, and optional global install/restore. `createMockSession(options)` returns `{ sessionId, tenantId, ctx }` for handlers that branch on durable HTTP session identity.
 

@@ -121,6 +121,30 @@ describe('SupabaseProvider', () => {
     });
   });
 
+  it.each([
+    ['undefined', undefined],
+    ['function', () => 1],
+    ['symbol', Symbol('s')],
+  ])('rejects a top-level %s on set and setMany without upserting', async (_label, value) => {
+    const builder = createQueryBuilder({ error: null });
+    const provider = new SupabaseProvider(createClient(builder) as never);
+
+    await expect(provider.set('tenant-1', 'key-1', value, context)).rejects.toMatchObject({
+      code: JsonRpcErrorCode.SerializationError,
+    });
+    await expect(
+      provider.setMany(
+        'tenant-1',
+        new Map<string, unknown>([
+          ['good', 1],
+          ['bad', value],
+        ]),
+        context,
+      ),
+    ).rejects.toBeInstanceOf(McpError);
+    expect(builder.upsert).not.toHaveBeenCalled();
+  });
+
   it('reports whether delete removed a row', async () => {
     const builder = createQueryBuilder({ count: 0, error: null });
     const provider = new SupabaseProvider(createClient(builder) as never);

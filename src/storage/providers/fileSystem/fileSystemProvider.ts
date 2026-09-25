@@ -23,9 +23,11 @@ import {
   type DecodedEnvelope,
   decodeEnvelope,
   deleteManyViaDelete,
+  encodeEntries,
   encodeEnvelope,
   getManyViaGet,
   paginateSortedKeys,
+  serializeValue,
   setManyViaSet,
 } from '@/storage/core/providerHelpers.js';
 import { decodeCursor, validateTenantId } from '@/storage/core/storageValidation.js';
@@ -112,6 +114,11 @@ export class FileSystemProvider implements IStorageProvider {
     return decoded.value;
   }
 
+  private async writeDocument(filePath: string, document: string): Promise<void> {
+    mkdirSync(path.dirname(filePath), { recursive: true });
+    await writeFile(filePath, document, 'utf-8');
+  }
+
   async get<T>(tenantId: string, key: string, context: RequestContext): Promise<T | null> {
     const filePath = this.getFilePath(tenantId, key, context);
     return await ErrorHandler.tryCatch(
@@ -143,12 +150,7 @@ export class FileSystemProvider implements IStorageProvider {
   ): Promise<void> {
     const filePath = this.getFilePath(tenantId, key, context);
     return await ErrorHandler.tryCatch(
-      async () => {
-        const envelope = encodeEnvelope(value, options);
-        const content = JSON.stringify(envelope, null, 2);
-        mkdirSync(path.dirname(filePath), { recursive: true });
-        await writeFile(filePath, content, 'utf-8');
-      },
+      () => this.writeDocument(filePath, encodeEnvelope(serializeValue(key, value), options)),
       {
         operation: 'FileSystemProvider.set',
         context,
@@ -278,8 +280,14 @@ export class FileSystemProvider implements IStorageProvider {
     options?: StorageOptions,
   ): Promise<void> {
     return await ErrorHandler.tryCatch(
-      () =>
-        setManyViaSet(entries, (key, value) => this.set(tenantId, key, value, context, options)),
+      () => {
+        const documents = encodeEntries(entries, (key, value) =>
+          encodeEnvelope(serializeValue(key, value), options),
+        );
+        return setManyViaSet(documents, (key, document) =>
+          this.writeDocument(this.getFilePath(tenantId, key, context), document),
+        );
+      },
       {
         operation: 'FileSystemProvider.setMany',
         context,

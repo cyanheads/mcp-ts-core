@@ -18,8 +18,10 @@ import type {
 import {
   type DecodedEnvelope,
   decodeEnvelope,
+  encodeEntries,
   encodeEnvelope,
   getManyViaGet,
+  serializeValue,
   setManyViaSet,
 } from '@/storage/core/providerHelpers.js';
 import { decodeCursor, encodeCursor } from '@/storage/core/storageValidation.js';
@@ -103,9 +105,7 @@ export class R2Provider implements IStorageProvider {
     return await ErrorHandler.tryCatch(
       async () => {
         logger.debug(`[R2Provider] Setting key: ${r2Key}`, withExtra(context, { options }));
-        const envelope = encodeEnvelope(value, options);
-        const body = JSON.stringify(envelope);
-        await this.bucket.put(r2Key, body);
+        await this.bucket.put(r2Key, encodeEnvelope(serializeValue(key, value), options));
         logger.debug(`[R2Provider] Successfully set key: ${r2Key}`, context);
       },
       {
@@ -229,8 +229,14 @@ export class R2Provider implements IStorageProvider {
     options?: StorageOptions,
   ): Promise<void> {
     return await ErrorHandler.tryCatch(
-      () =>
-        setManyViaSet(entries, (key, value) => this.set(tenantId, key, value, context, options)),
+      () => {
+        const documents = encodeEntries(entries, (key, value) =>
+          encodeEnvelope(serializeValue(key, value), options),
+        );
+        return setManyViaSet(documents, async (key, body) => {
+          await this.bucket.put(this.getR2Key(tenantId, key), body);
+        });
+      },
       {
         operation: 'R2Provider.setMany',
         context,

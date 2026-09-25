@@ -1,13 +1,59 @@
 /**
- * @fileoverview Building blocks shared by storage providers whose backend has
- * no native batch, TTL, or page primitive: batch operations as parallel
- * fan-out over the single-key methods, the TTL envelope the blob-style
- * providers store, one page of a sorted key list, and the SQL `LIKE` escape.
+ * @fileoverview Building blocks shared by storage providers: the JSON encoding
+ * guard every provider runs before it writes, and — for backends with no
+ * native batch, TTL, or page primitive — batch operations as parallel fan-out
+ * over the single-key methods, the TTL envelope the blob-style providers
+ * store, one page of a sorted key list, and the SQL `LIKE` escape.
  * @module src/storage/core/providerHelpers
  */
 
 import type { StorageOptions } from '@/storage/core/IStorageProvider.js';
 import { encodeCursor } from '@/storage/core/storageValidation.js';
+import { serializationError } from '@/types-global/errors.js';
+
+// ---------------------------------------------------------------------------
+// Value encoding
+// ---------------------------------------------------------------------------
+
+/**
+ * JSON-encodes the value stored under `key`: the guard every provider runs
+ * before it writes, so all of them accept and reject the same values. Throws
+ * `McpError(SerializationError)` for what JSON cannot represent — a `bigint`
+ * or cyclic reference anywhere in the value (`JSON.stringify` throws), and a
+ * top-level `undefined`, function, or symbol (`JSON.stringify` returns
+ * `undefined`, which no backend can store and read back).
+ */
+export function serializeValue(key: string, value: unknown): string {
+  let json: string | undefined;
+  try {
+    json = JSON.stringify(value);
+  } catch (error: unknown) {
+    const reason = error instanceof Error ? error.message : String(error);
+    throw serializationError(
+      `Value for key "${key}" is not JSON-serializable: ${reason}`,
+      { key },
+      { cause: error },
+    );
+  }
+  if (json === undefined) {
+    throw serializationError(
+      `Value for key "${key}" has no JSON representation (top-level ${typeof value}). Store a JSON value such as null or an object instead.`,
+      { key },
+    );
+  }
+  return json;
+}
+
+/**
+ * Encodes every entry of a batch before any is written, so one unencodable
+ * value rejects the whole batch and nothing reaches the backend.
+ */
+export function encodeEntries(
+  entries: ReadonlyMap<string, unknown>,
+  encode: (key: string, value: unknown) => string = serializeValue,
+): Map<string, string> {
+  return new Map(Array.from(entries, ([key, value]) => [key, encode(key, value)]));
+}
 
 // ---------------------------------------------------------------------------
 // Batch operations over single-key methods
@@ -28,10 +74,13 @@ export async function getManyViaGet<T>(
   return results;
 }
 
-/** `setMany` as a parallel `set` per entry. */
-export async function setManyViaSet(
-  entries: ReadonlyMap<string, unknown>,
-  set: (key: string, value: unknown) => Promise<void>,
+/**
+ * `setMany` as a parallel single-key write per entry. Pass entries already run
+ * through {@link encodeEntries} so an unencodable value fails before any write.
+ */
+export async function setManyViaSet<V>(
+  entries: ReadonlyMap<string, V>,
+  set: (key: string, value: V) => Promise<void>,
 ): Promise<void> {
   if (entries.size === 0) return;
   await Promise.all(Array.from(entries, ([key, value]) => set(key, value)));
@@ -61,13 +110,14 @@ export interface StorageEnvelope {
   value: unknown;
 }
 
-/** Wraps `value` for storage; `options.ttl` (seconds, `0` included) sets `expiresAt`. */
-export function encodeEnvelope(value: unknown, options?: StorageOptions): StorageEnvelope {
+/**
+ * The stored document for a value already encoded by {@link serializeValue};
+ * `options.ttl` (seconds, `0` included) sets `expiresAt`.
+ */
+export function encodeEnvelope(json: string, options?: StorageOptions): string {
   const expiresAt = options?.ttl !== undefined ? Date.now() + options.ttl * 1000 : undefined;
-  return {
-    __mcp: { v: 1, ...(expiresAt !== undefined && { expiresAt }) },
-    value,
-  };
+  const marker: StorageEnvelope['__mcp'] = { v: 1, ...(expiresAt !== undefined && { expiresAt }) };
+  return `{"__mcp":${JSON.stringify(marker)},"value":${json}}`;
 }
 
 export type DecodedEnvelope<T> = { kind: 'value'; value: T } | { kind: 'expired' };

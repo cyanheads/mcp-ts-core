@@ -8,14 +8,78 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   decodeEnvelope,
   deleteManyViaDelete,
+  encodeEntries,
   encodeEnvelope,
   escapeLikePattern,
   getManyViaGet,
   paginateSortedKeys,
+  serializeValue,
   setManyViaSet,
 } from '@/storage/core/providerHelpers.js';
 import { decodeCursor } from '@/storage/core/storageValidation.js';
+import { JsonRpcErrorCode, McpError } from '@/types-global/errors.js';
 import { requestContextService } from '@/utils/internal/requestContext.js';
+
+function cyclicValue(): Record<string, unknown> {
+  const cyclic: Record<string, unknown> = {};
+  cyclic.self = cyclic;
+  return cyclic;
+}
+
+describe('value encoding', () => {
+  it('serializeValue returns the JSON text of an encodable value', () => {
+    expect(serializeValue('k', { at: new Date('2026-01-01T00:00:00.000Z'), n: 1 })).toBe(
+      '{"at":"2026-01-01T00:00:00.000Z","n":1}',
+    );
+    expect(serializeValue('k', null)).toBe('null');
+  });
+
+  it.each([
+    ['a bigint', { big: 10n }],
+    ['a cyclic reference', cyclicValue()],
+    ['a top-level undefined', undefined],
+    ['a top-level function', () => 1],
+    ['a top-level symbol', Symbol('s')],
+    ['a toJSON that returns undefined', { toJSON: () => undefined }],
+  ])('serializeValue rejects %s with a SerializationError naming the key', (_label, value) => {
+    let thrown: unknown;
+    try {
+      serializeValue('item/1', value);
+    } catch (error) {
+      thrown = error;
+    }
+    expect(thrown).toBeInstanceOf(McpError);
+    expect((thrown as McpError).code).toBe(JsonRpcErrorCode.SerializationError);
+    expect((thrown as McpError).message).toContain('"item/1"');
+  });
+
+  it('encodeEntries encodes the whole batch, or throws before returning any of it', () => {
+    expect(
+      encodeEntries(
+        new Map<string, unknown>([
+          ['a', 1],
+          ['b', { n: 2 }],
+        ]),
+      ),
+    ).toEqual(
+      new Map([
+        ['a', '1'],
+        ['b', '{"n":2}'],
+      ]),
+    );
+    const encode = vi.fn(serializeValue);
+    expect(() =>
+      encodeEntries(
+        new Map<string, unknown>([
+          ['bad', undefined],
+          ['good', 1],
+        ]),
+        encode,
+      ),
+    ).toThrow(McpError);
+    expect(encode).toHaveBeenCalledTimes(1);
+  });
+});
 
 describe('batch operations over single-key methods', () => {
   it('getManyViaGet fans out in parallel and omits misses', async () => {
@@ -55,6 +119,12 @@ describe('batch operations over single-key methods', () => {
     ]);
   });
 
+  it('setManyViaSet short-circuits an empty entry map', async () => {
+    const set = vi.fn(() => Promise.resolve());
+    await expect(setManyViaSet(new Map(), set)).resolves.toBeUndefined();
+    expect(set).not.toHaveBeenCalled();
+  });
+
   it('deleteManyViaDelete counts only confirmed deletions', async () => {
     const del = (key: string) => Promise.resolve(key !== 'missing');
     expect(await deleteManyViaDelete(['a', 'missing', 'b'], del)).toBe(2);
@@ -68,14 +138,14 @@ describe('TTL envelope', () => {
   });
 
   it('round-trips a value without a TTL', () => {
-    const raw = JSON.stringify(encodeEnvelope({ n: 1 }));
-    expect(JSON.parse(raw)).toEqual({ __mcp: { v: 1 }, value: { n: 1 } });
+    const raw = encodeEnvelope('{"n":1}');
+    expect(raw).toBe(JSON.stringify({ __mcp: { v: 1 }, value: { n: 1 } }));
     expect(decodeEnvelope(raw)).toEqual({ kind: 'value', value: { n: 1 } });
   });
 
   it('treats ttl: 0 as an expiry, not as "no TTL"', () => {
     vi.useFakeTimers({ now: 1_000 });
-    const raw = JSON.stringify(encodeEnvelope('v', { ttl: 0 }));
+    const raw = encodeEnvelope('"v"', { ttl: 0 });
     expect(JSON.parse(raw).__mcp.expiresAt).toBe(1_000);
     vi.setSystemTime(1_001);
     expect(decodeEnvelope(raw)).toEqual({ kind: 'expired' });
@@ -83,7 +153,7 @@ describe('TTL envelope', () => {
 
   it('reports a lapsed TTL and honours one still in the future', () => {
     vi.useFakeTimers({ now: 10_000 });
-    const raw = JSON.stringify(encodeEnvelope('v', { ttl: 5 }));
+    const raw = encodeEnvelope('"v"', { ttl: 5 });
     expect(decodeEnvelope(raw)).toEqual({ kind: 'value', value: 'v' });
     vi.setSystemTime(15_001);
     expect(decodeEnvelope(raw)).toEqual({ kind: 'expired' });

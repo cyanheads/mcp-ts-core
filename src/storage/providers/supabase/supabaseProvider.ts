@@ -11,7 +11,11 @@ import type {
   ListResult,
   StorageOptions,
 } from '@/storage/core/IStorageProvider.js';
-import { escapeLikePattern } from '@/storage/core/providerHelpers.js';
+import {
+  encodeEntries,
+  escapeLikePattern,
+  serializeValue,
+} from '@/storage/core/providerHelpers.js';
 import { decodeCursor, encodeCursor } from '@/storage/core/storageValidation.js';
 import type { Database, Json } from '@/storage/providers/supabase/supabase.types.js';
 import { ErrorHandler } from '@/utils/internal/error-handler/errorHandler.js';
@@ -74,6 +78,8 @@ export class SupabaseProvider implements IStorageProvider {
   ): Promise<void> {
     return await ErrorHandler.tryCatch(
       async () => {
+        // The shared encoding guard; PostgREST serializes the jsonb body itself.
+        serializeValue(key, value);
         // Fix: Check for undefined instead of truthy to handle ttl=0 correctly
         const expires_at =
           options?.ttl !== undefined
@@ -222,6 +228,8 @@ export class SupabaseProvider implements IStorageProvider {
           return;
         }
 
+        // The shared encoding guard, over the whole batch before the upsert.
+        encodeEntries(entries);
         // Fix: Check for undefined instead of truthy to handle ttl=0 correctly
         const expires_at =
           options?.ttl !== undefined

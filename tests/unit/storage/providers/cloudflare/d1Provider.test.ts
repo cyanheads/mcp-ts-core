@@ -89,7 +89,8 @@ describe('D1Provider', () => {
     });
 
     it('should return null and lazy-delete expired entries', async () => {
-      const stmt = mockDb.prepare().bind();
+      const prepared = mockDb.prepare();
+      const stmt = prepared.bind();
       stmt.first.mockResolvedValue({
         value: JSON.stringify({ data: 'stale' }),
         expires_at: Date.now() - 1000,
@@ -98,6 +99,11 @@ describe('D1Provider', () => {
 
       const result = await d1Provider.get('tenant-1', 'key-1', context);
       expect(result).toBeNull();
+      expect(mockDb.prepare).toHaveBeenLastCalledWith(
+        'DELETE FROM kv_store WHERE tenant_id = ? AND key = ?',
+      );
+      expect(prepared.bind).toHaveBeenLastCalledWith('tenant-1', 'key-1');
+      expect(stmt.run).toHaveBeenCalledOnce();
     });
 
     it('should throw McpError on JSON parse failure', async () => {
@@ -119,26 +125,6 @@ describe('D1Provider', () => {
   });
 
   describe('set', () => {
-    it('should call run with correct parameters', async () => {
-      const stmt = mockDb.prepare().bind();
-      stmt.run.mockResolvedValue({ meta: { changes: 1 } });
-
-      await d1Provider.set('tenant-1', 'key-1', { data: 'test' }, context);
-
-      expect(mockDb.prepare).toHaveBeenCalled();
-    });
-
-    it('should include expires_at when TTL is provided', async () => {
-      const stmt = mockDb.prepare().bind();
-      stmt.run.mockResolvedValue({ meta: { changes: 1 } });
-
-      await d1Provider.set('tenant-1', 'key-1', { data: 'test' }, context, {
-        ttl: 3600,
-      });
-
-      expect(mockDb.prepare).toHaveBeenCalled();
-    });
-
     it('should bind a null expires_at when no TTL is provided', async () => {
       const stmt = mockDb.prepare().bind();
       stmt.run.mockResolvedValue({ meta: { changes: 1 } });
@@ -214,50 +200,51 @@ describe('D1Provider', () => {
   });
 
   describe('list', () => {
-    it('should return keys matching prefix with pagination', async () => {
-      const stmt = mockDb.prepare().bind();
-      stmt.all.mockResolvedValue({
-        results: [{ key: 'key-1' }, { key: 'key-2' }],
-      });
+    it('should return matching keys, binding the escaped prefix and the default limit + 1 probe', async () => {
+      const prepared = mockDb.prepare();
+      prepared.bind().all.mockResolvedValue({ results: [{ key: 'key_1' }, { key: 'key_2' }] });
 
-      const result = await d1Provider.list('tenant-1', 'key', context, {
-        limit: 10,
-      });
+      const result = await d1Provider.list('tenant-1', 'key_', context);
 
-      expect(result.keys).toEqual(['key-1', 'key-2']);
+      expect(result.keys).toEqual(['key_1', 'key_2']);
       expect(result.nextCursor).toBeUndefined();
+      expect(prepared.bind).toHaveBeenLastCalledWith(
+        'tenant-1',
+        'key\\_%',
+        expect.any(Number),
+        1001,
+      );
     });
 
-    it('should use the default limit when no options are given', async () => {
-      const stmt = mockDb.prepare().bind();
-      stmt.all.mockResolvedValue({ results: [{ key: 'only-key' }] });
-
-      const result = await d1Provider.list('tenant-1', '', context);
-
-      expect(result.keys).toEqual(['only-key']);
-      expect(result.nextCursor).toBeUndefined();
-    });
-
-    it('should indicate more results and return a next cursor when hasMore', async () => {
-      const stmt = mockDb.prepare().bind();
-      stmt.all.mockResolvedValue({
+    it('should return a cursor on the last shown key when the limit + 1 probe finds more', async () => {
+      const prepared = mockDb.prepare();
+      prepared.bind().all.mockResolvedValue({
         results: [{ key: 'a' }, { key: 'b' }, { key: 'c' }],
       });
 
       const result = await d1Provider.list('tenant-1', '', context, { limit: 2 });
 
       expect(result.keys).toEqual(['a', 'b']);
-      expect(result.nextCursor).toBeDefined();
+      expect(result.nextCursor).toBe(encodeCursor('b', 'tenant-1'));
+      expect(prepared.bind).toHaveBeenLastCalledWith('tenant-1', '%', expect.any(Number), 3);
     });
 
-    it('should paginate using a previously issued cursor', async () => {
-      const stmt = mockDb.prepare().bind();
-      stmt.all.mockResolvedValue({ results: [{ key: 'key-2' }, { key: 'key-3' }] });
+    it('should paginate after the decoded cursor key', async () => {
+      const prepared = mockDb.prepare();
+      prepared.bind().all.mockResolvedValue({ results: [{ key: 'key-2' }, { key: 'key-3' }] });
       const cursor = encodeCursor('key-1', 'tenant-1');
 
       const result = await d1Provider.list('tenant-1', 'key', context, { cursor, limit: 10 });
 
       expect(result.keys).toEqual(['key-2', 'key-3']);
+      expect(mockDb.prepare).toHaveBeenLastCalledWith(expect.stringContaining('AND key > ?'));
+      expect(prepared.bind).toHaveBeenLastCalledWith(
+        'tenant-1',
+        'key%',
+        'key-1',
+        expect.any(Number),
+        11,
+      );
     });
 
     it('should reject a cursor issued for a different tenant', async () => {
@@ -303,6 +290,24 @@ describe('D1Provider', () => {
     it('setMany should be a no-op for empty entries', async () => {
       await d1Provider.setMany('tenant-1', new Map(), context);
 
+      expect(mockDb.batch).not.toHaveBeenCalled();
+    });
+
+    it('set and setMany should reject an unencodable value with a SerializationError before anything is written', async () => {
+      await expect(d1Provider.set('tenant-1', 'k1', undefined, context)).rejects.toMatchObject({
+        code: JsonRpcErrorCode.SerializationError,
+      });
+      expect(mockDb.prepare).not.toHaveBeenCalled();
+      await expect(
+        d1Provider.setMany(
+          'tenant-1',
+          new Map<string, unknown>([
+            ['k1', 1],
+            ['k2', () => 1],
+          ]),
+          context,
+        ),
+      ).rejects.toMatchObject({ code: JsonRpcErrorCode.SerializationError });
       expect(mockDb.batch).not.toHaveBeenCalled();
     });
 

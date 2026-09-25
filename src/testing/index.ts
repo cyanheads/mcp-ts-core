@@ -176,8 +176,9 @@ const DEFAULT_MOCK_TENANT_ID = 'default';
  * Creates a mock Context for testing tool and resource handlers.
  *
  * `ctx.state` runs on a real `StorageService` over an `InMemoryProvider`, so a
- * test sees the same key validation, TTL expiry, and pagination a deployed
- * server does — an invalid key fails in the test rather than in the field.
+ * test sees the same key validation, TTL expiry, pagination, and JSON
+ * round-trip of stored values a deployed server does — an invalid key or an
+ * unencodable value fails in the test rather than in the field.
  *
  * When `errors` is supplied, the return type narrows to
  * `HandlerContext<ReasonOf<TErrors>>`: the context carries a typed `ctx.fail`
@@ -523,8 +524,9 @@ export async function runToolContract<TDefinition extends AnyToolDefinition>(
  * unit-testing services that accept a `StorageService` dependency.
  *
  * Because this uses the production `StorageService` + `InMemoryProvider`, the
- * behavior (tenant isolation, TTL, validation, list pagination) matches what
- * you'd see in a running server — no hand-rolled fake required.
+ * behavior (tenant isolation, TTL, validation, list pagination, values stored
+ * and read back as JSON) matches what you'd see in a running server — no
+ * hand-rolled fake required.
  *
  * @example
  * ```ts

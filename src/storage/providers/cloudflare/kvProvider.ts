@@ -12,7 +12,9 @@ import type {
 } from '@/storage/core/IStorageProvider.js';
 import {
   deleteManyViaDelete,
+  encodeEntries,
   getManyViaGet,
+  serializeValue,
   setManyViaSet,
 } from '@/storage/core/providerHelpers.js';
 import { decodeCursor, encodeCursor } from '@/storage/core/storageValidation.js';
@@ -35,6 +37,15 @@ export class KvProvider implements IStorageProvider {
 
   private getKvKey(tenantId: string, key: string): string {
     return `${tenantId}:${key}`;
+  }
+
+  /** Writes an already-encoded value; Cloudflare KV requires `expirationTtl` >= 60 seconds. */
+  private async put(kvKey: string, json: string, options?: StorageOptions): Promise<void> {
+    const putOptions: import('@cloudflare/workers-types').KVNamespacePutOptions = {};
+    if (options?.ttl !== undefined) {
+      putOptions.expirationTtl = Math.max(options.ttl, 60);
+    }
+    await this.kv.put(kvKey, json, putOptions);
   }
 
   async get<T>(tenantId: string, key: string, context: RequestContext): Promise<T | null> {
@@ -72,15 +83,7 @@ export class KvProvider implements IStorageProvider {
     return await ErrorHandler.tryCatch(
       async () => {
         logger.debug(`[KvProvider] Setting key: ${kvKey}`, withExtra(context, { options }));
-        const valueToStore = JSON.stringify(value);
-
-        const putOptions: import('@cloudflare/workers-types').KVNamespacePutOptions = {};
-        if (options?.ttl !== undefined) {
-          // Cloudflare KV requires expirationTtl >= 60 seconds
-          putOptions.expirationTtl = Math.max(options.ttl, 60);
-        }
-
-        await this.kv.put(kvKey, valueToStore, putOptions);
+        await this.put(kvKey, serializeValue(key, value), options);
         logger.debug(`[KvProvider] Successfully set key: ${kvKey}`, context);
       },
       {
@@ -193,7 +196,9 @@ export class KvProvider implements IStorageProvider {
   ): Promise<void> {
     return await ErrorHandler.tryCatch(
       () =>
-        setManyViaSet(entries, (key, value) => this.set(tenantId, key, value, context, options)),
+        setManyViaSet(encodeEntries(entries), (key, json) =>
+          this.put(this.getKvKey(tenantId, key), json, options),
+        ),
       {
         operation: 'KvProvider.setMany',
         context,

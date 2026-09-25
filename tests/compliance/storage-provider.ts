@@ -6,6 +6,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import type { IStorageProvider } from '@/storage/core/IStorageProvider.js';
 import { StorageService } from '@/storage/core/StorageService.js';
+import { JsonRpcErrorCode, McpError } from '@/types-global/errors.js';
 import type { RequestContext } from '@/utils/internal/requestContext.js';
 import { requestContextService } from '@/utils/internal/requestContext.js';
 
@@ -192,11 +193,11 @@ export function storageProviderTests(harness: StorageProviderHarness): void {
           ]),
           contextA,
         ),
-      ).rejects.toThrow();
+      ).rejects.toMatchObject({ name: 'McpError', code: JsonRpcErrorCode.ValidationError });
       await expect(storageA.get('preflight/stable', contextA)).resolves.toBe('original');
       await expect(
         storageA.deleteMany(['preflight/stable', '../invalid'], contextA),
-      ).rejects.toThrow();
+      ).rejects.toMatchObject({ name: 'McpError', code: JsonRpcErrorCode.ValidationError });
       await expect(storageA.get('preflight/stable', contextA)).resolves.toBe('original');
     });
 
@@ -224,10 +225,13 @@ export function storageProviderTests(harness: StorageProviderHarness): void {
       expect(second).toEqual(expect.objectContaining({ keys: ['order/c'] }));
       expect(second.nextCursor).toBeUndefined();
 
-      await expect(storageB.list('order/', contextB, { cursor, limit: 2 })).rejects.toThrow();
+      await expect(storageB.list('order/', contextB, { cursor, limit: 2 })).rejects.toMatchObject({
+        name: 'McpError',
+        code: JsonRpcErrorCode.InvalidParams,
+      });
       await expect(
         storageA.list('order/', contextA, { cursor: `${cursor}x`, limit: 2 }),
-      ).rejects.toThrow();
+      ).rejects.toMatchObject({ name: 'McpError', code: JsonRpcErrorCode.InvalidParams });
       await expect(storageA.list('order-literal/', contextA)).resolves.toMatchObject({
         keys: ['order-literal/a'],
       });
@@ -342,6 +346,62 @@ export function storageProviderTests(harness: StorageProviderHarness): void {
       expect(tenantBValues).toEqual(new Map());
     });
 
+    it('stores the JSON form of a value, not a reference to it', async () => {
+      const stored = { at: '2026-01-01T00:00:00.000Z', n: 1, tags: ['a'] };
+      const single = { at: new Date(stored.at), n: 1, tags: ['a'] };
+      const batched = { at: new Date(stored.at), n: 1, tags: ['a'] };
+      await storageA.set('json/single', single, contextA);
+      await storageA.setMany(new Map([['json/batched', batched]]), contextA);
+      single.n = 2;
+      single.tags.push('b');
+      batched.n = 2;
+
+      const read = await storageA.get<typeof stored>('json/single', contextA);
+      expect(read).toEqual(stored);
+      if (read) {
+        read.n = 3;
+        read.tags.push('c');
+      }
+      await expect(storageA.get('json/single', contextA)).resolves.toEqual(stored);
+      await expect(storageA.getMany(['json/batched'], contextA)).resolves.toEqual(
+        new Map([['json/batched', stored]]),
+      );
+    });
+
+    it.each([
+      ['undefined', undefined],
+      ['function', () => 1],
+      ['symbol', Symbol('unencodable')],
+    ])('rejects a top-level %s on set and setMany without writing', async (_label, value) => {
+      await storageA.set('unencodable/existing', 'original', contextA);
+      await expect(storageA.set('unencodable/existing', value, contextA)).rejects.toBeInstanceOf(
+        McpError,
+      );
+      await expect(storageA.set('unencodable/new', value, contextA)).rejects.toBeInstanceOf(
+        McpError,
+      );
+      await expect(
+        storageA.setMany(
+          new Map<string, unknown>([
+            ['unencodable/batch-good', 'value'],
+            ['unencodable/batch-bad', value],
+          ]),
+          contextA,
+        ),
+      ).rejects.toBeInstanceOf(McpError);
+
+      await expect(storageA.get('unencodable/existing', contextA)).resolves.toBe('original');
+      await expect(
+        storageA.getMany(
+          ['unencodable/new', 'unencodable/batch-good', 'unencodable/batch-bad'],
+          contextA,
+        ),
+      ).resolves.toEqual(new Map());
+      await expect(storageA.list('unencodable/', contextA)).resolves.toMatchObject({
+        keys: ['unencodable/existing'],
+      });
+    });
+
     if (capabilities.rejectsUnserializableValues) {
       it('rejects unserializable batches, preserves documented atomicity, and remains usable', async () => {
         const entries = new Map<string, unknown>([
@@ -360,9 +420,16 @@ export function storageProviderTests(harness: StorageProviderHarness): void {
 
     it('rejects malformed cursors and unsafe list limits without touching another tenant', async () => {
       await storageB.set('sentinel/value', 'tenant-b', contextB);
-      await expect(storageA.list('', contextA, { cursor: 'not-a-cursor' })).rejects.toThrow();
-      await expect(storageA.list('', contextA, { limit: 0 })).rejects.toThrow();
-      await expect(storageA.list('', contextA, { limit: 10_001 })).rejects.toThrow();
+      const invalidListOption = { name: 'McpError', code: JsonRpcErrorCode.ValidationError };
+      await expect(storageA.list('', contextA, { cursor: 'not-a-cursor' })).rejects.toMatchObject(
+        invalidListOption,
+      );
+      await expect(storageA.list('', contextA, { limit: 0 })).rejects.toMatchObject(
+        invalidListOption,
+      );
+      await expect(storageA.list('', contextA, { limit: 10_001 })).rejects.toMatchObject(
+        invalidListOption,
+      );
       await expect(storageB.get('sentinel/value', contextB)).resolves.toBe('tenant-b');
     });
   });

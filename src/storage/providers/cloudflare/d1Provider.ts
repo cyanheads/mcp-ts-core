@@ -11,7 +11,7 @@ import type {
   ListResult,
   StorageOptions,
 } from '@/storage/core/IStorageProvider.js';
-import { escapeLikePattern } from '@/storage/core/providerHelpers.js';
+import { escapeLikePattern, serializeValue } from '@/storage/core/providerHelpers.js';
 import { decodeCursor, encodeCursor } from '@/storage/core/storageValidation.js';
 import {
   configurationError,
@@ -152,7 +152,7 @@ export class D1Provider implements IStorageProvider {
       async () => {
         logger.debug(`[D1Provider] Setting key: ${key}`, withExtra(context, { options }));
 
-        const serializedValue = JSON.stringify(value);
+        const serializedValue = serializeValue(key, value);
         let expiresAt: number | null = null;
 
         // Handle TTL (including ttl=0 for immediate expiration)
@@ -390,9 +390,9 @@ export class D1Provider implements IStorageProvider {
           expiresAt = this.getNow() + options.ttl * 1000;
         }
 
-        // Prepare batch statements
+        // Prepare batch statements; every value is encoded before the batch runs
         const statements = Array.from(entries.entries()).map(([key, value]) => {
-          const serializedValue = JSON.stringify(value);
+          const serializedValue = serializeValue(key, value);
           return this.db
             .prepare(
               `INSERT OR REPLACE INTO ${this.tableName} (tenant_id, key, value, expires_at) VALUES (?, ?, ?, ?)`,

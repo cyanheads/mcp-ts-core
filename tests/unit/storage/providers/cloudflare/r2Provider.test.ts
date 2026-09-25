@@ -86,17 +86,6 @@ describe('R2Provider', () => {
       expect(mockBucket.delete).toHaveBeenCalledWith('tenant-1:key-1');
     });
 
-    it('should return a legacy value stored without an envelope', async () => {
-      const mockR2Object = {
-        text: async () => JSON.stringify({ legacy: true }),
-      };
-      mockBucket.get.mockResolvedValue(mockR2Object);
-
-      const result = await r2Provider.get('tenant-1', 'key-1', context);
-
-      expect(result).toEqual({ legacy: true });
-    });
-
     it('should propagate errors from the underlying get call', async () => {
       mockBucket.get.mockRejectedValue(new Error('R2 unavailable'));
 
@@ -222,31 +211,28 @@ describe('R2Provider', () => {
   });
 
   describe('getMany', () => {
-    it('should aggregate non-null values into a map', async () => {
-      const spy = vi
-        .spyOn(r2Provider, 'get')
-        .mockResolvedValueOnce({ payload: 1 })
-        .mockResolvedValueOnce(null)
-        .mockResolvedValueOnce({ payload: 3 });
+    it('should read each tenant-prefixed object and omit misses', async () => {
+      mockBucket.get.mockImplementation(async (r2Key: string) =>
+        r2Key === 'tenant-1:key-2'
+          ? null
+          : { text: async () => JSON.stringify({ __mcp: { v: 1 }, value: { from: r2Key } }) },
+      );
 
       const result = await r2Provider.getMany('tenant-1', ['key-1', 'key-2', 'key-3'], context);
 
-      expect(result.size).toBe(2);
-      expect(result.get('key-1')).toEqual({ payload: 1 });
-      expect(result.get('key-3')).toEqual({ payload: 3 });
-      expect(result.has('key-2')).toBe(false);
-      expect(spy).toHaveBeenCalledTimes(3);
-    });
-
-    it('should return an empty map when no keys are requested', async () => {
-      const result = await r2Provider.getMany('tenant-1', [], context);
-      expect(result.size).toBe(0);
+      expect(result).toEqual(
+        new Map([
+          ['key-1', { from: 'tenant-1:key-1' }],
+          ['key-3', { from: 'tenant-1:key-3' }],
+        ]),
+      );
+      expect(mockBucket.get).toHaveBeenCalledWith('tenant-1:key-2');
     });
   });
 
   describe('setMany', () => {
-    it('should delegate to set for each entry and preserve options', async () => {
-      const spy = vi.spyOn(r2Provider, 'set').mockResolvedValue();
+    it('should write one envelope per entry with the shared TTL', async () => {
+      const now = Date.now();
       const entries = new Map<string, unknown>([
         ['key-1', { data: 1 }],
         ['key-2', { data: 2 }],
@@ -254,21 +240,25 @@ describe('R2Provider', () => {
 
       await r2Provider.setMany('tenant-1', entries, context, { ttl: 10 });
 
-      expect(spy).toHaveBeenCalledTimes(2);
-      expect(spy).toHaveBeenNthCalledWith(1, 'tenant-1', 'key-1', { data: 1 }, context, {
-        ttl: 10,
-      });
-      expect(spy).toHaveBeenNthCalledWith(2, 'tenant-1', 'key-2', { data: 2 }, context, {
-        ttl: 10,
-      });
+      expect(mockBucket.put).toHaveBeenCalledTimes(2);
+      const written = new Map(
+        mockBucket.put.mock.calls.map(([key, body]) => [key, JSON.parse(body as string)]),
+      );
+      expect(written.get('tenant-1:key-1').value).toEqual({ data: 1 });
+      expect(written.get('tenant-1:key-2').value).toEqual({ data: 2 });
+      for (const envelope of written.values()) {
+        expect(envelope.__mcp.expiresAt).toBeGreaterThanOrEqual(now + 10_000);
+      }
     });
 
-    it('should be a no-op for an empty entries map', async () => {
-      const spy = vi.spyOn(r2Provider, 'set');
+    it('should reject a batch holding an unencodable value before writing any entry', async () => {
+      const entries = new Map<string, unknown>([
+        ['key-1', { data: 1 }],
+        ['key-2', undefined],
+      ]);
 
-      await r2Provider.setMany('tenant-1', new Map(), context);
-
-      expect(spy).not.toHaveBeenCalled();
+      await expect(r2Provider.setMany('tenant-1', entries, context)).rejects.toThrow(McpError);
+      expect(mockBucket.put).not.toHaveBeenCalled();
     });
   });
 
