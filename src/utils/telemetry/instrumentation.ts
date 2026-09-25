@@ -95,8 +95,12 @@ function detectCloudResource(): Record<string, string> {
  * Worker bundle failures.
  *
  * Configures:
- * - OTLP trace exporter + `BatchSpanProcessor` (when `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` is set)
- * - OTLP metrics exporter + `PeriodicExportingMetricReader` at 15 s intervals (when `OTEL_EXPORTER_OTLP_METRICS_ENDPOINT` is set)
+ * - OTLP trace exporter + `BatchSpanProcessor` (when a traces endpoint resolves:
+ *   `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT`, else `OTEL_EXPORTER_OTLP_ENDPOINT` + `v1/traces`)
+ * - OTLP metrics exporter + `PeriodicExportingMetricReader` at 15 s intervals (when a metrics
+ *   endpoint resolves: `OTEL_EXPORTER_OTLP_METRICS_ENDPOINT`, else the base + `v1/metrics`)
+ * - No log record processors, and no metric reader when no metrics endpoint resolves — so
+ *   `NodeSDK`'s env-driven defaults never export anything the framework config did not ask for
  * - `TraceIdRatioBasedSampler` using `config.openTelemetry.samplingRatio`
  * - Node auto-instrumentations (HTTP enabled, FS disabled)
  * - Pino instrumentation that injects `trace_id`/`span_id` into log records
@@ -169,7 +173,7 @@ export async function initializeOpenTelemetry(): Promise<void> {
 
       if (!tracesEndpoint && !metricsEndpoint) {
         diag.warn(
-          'OTEL_ENABLED is true, but no OTLP endpoint for traces or metrics is configured. OpenTelemetry will not export any telemetry.',
+          'OTEL_ENABLED is true, but no OTLP endpoint for traces or metrics is configured. OpenTelemetry will not export any telemetry. Set OTEL_EXPORTER_OTLP_ENDPOINT, or the signal-specific OTEL_EXPORTER_OTLP_TRACES_ENDPOINT / OTEL_EXPORTER_OTLP_METRICS_ENDPOINT.',
         );
       }
 
@@ -189,17 +193,29 @@ export async function initializeOpenTelemetry(): Promise<void> {
         diag.info('No OTLP traces endpoint configured. Traces will not be exported.');
       }
 
-      const metricReader = metricsEndpoint
-        ? new PeriodicExportingMetricReader({
+      const metricReaders: InstanceType<typeof PeriodicExportingMetricReader>[] = [];
+      if (metricsEndpoint) {
+        diag.info(`Using OTLP exporter for metrics, endpoint: ${metricsEndpoint}`);
+        metricReaders.push(
+          new PeriodicExportingMetricReader({
             exporter: new OTLPMetricExporter({ url: metricsEndpoint }),
             exportIntervalMillis: 15000,
-          })
-        : undefined;
+          }),
+        );
+      } else {
+        diag.info('No OTLP metrics endpoint configured. Metrics will not be exported.');
+      }
 
+      /**
+       * All three lists are passed explicitly, empty or not: an omitted one
+       * makes `NodeSDK` build its own OTLP exporter from `OTEL_*` env vars
+       * (defaulting to localhost:4318), exporting outside the framework config.
+       */
       sdk = new NodeSDK({
         resource,
         spanProcessors,
-        ...(metricReader && { metricReaders: [metricReader] }),
+        metricReaders,
+        logRecordProcessors: [],
         sampler: new TraceIdRatioBasedSampler(config.openTelemetry.samplingRatio),
         instrumentations: [
           new HttpInstrumentation({

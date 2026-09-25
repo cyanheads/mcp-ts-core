@@ -251,6 +251,7 @@ describe('OpenTelemetry instrumentation lifecycle', () => {
 
     const [nodeSdkOptions] = otelState.nodeSdkOptions;
     expect(nodeSdkOptions).toMatchObject({
+      logRecordProcessors: [],
       metricReaders: [expect.any(Object)],
       resource: {
         attrs: expect.objectContaining({
@@ -314,14 +315,63 @@ describe('OpenTelemetry instrumentation lifecycle', () => {
     await initializeOpenTelemetry();
 
     expect(warnSpy).toHaveBeenCalledWith(
-      'OTEL_ENABLED is true, but no OTLP endpoint for traces or metrics is configured. OpenTelemetry will not export any telemetry.',
+      expect.stringContaining(
+        'OTEL_ENABLED is true, but no OTLP endpoint for traces or metrics is configured.',
+      ),
     );
     expect(infoSpy).toHaveBeenCalledWith(
       'No OTLP traces endpoint configured. Traces will not be exported.',
     );
+    expect(infoSpy).toHaveBeenCalledWith(
+      'No OTLP metrics endpoint configured. Metrics will not be exported.',
+    );
     expect(otelState.traceExporterOptions).toHaveLength(0);
     expect(otelState.metricExporterOptions).toHaveLength(0);
     expect(otelState.metricReaderOptions).toHaveLength(0);
+    // Every list is explicit and empty, so NodeSDK builds no env-default exporter.
+    expect(otelState.nodeSdkOptions[0]).toMatchObject({
+      logRecordProcessors: [],
+      metricReaders: [],
+      spanProcessors: [],
+    });
+  });
+
+  it('passes an empty metric reader list when only a traces endpoint resolves', async () => {
+    mockConfig.openTelemetry.metricsEndpoint = '';
+
+    const warnSpy = vi.spyOn(diag, 'warn').mockImplementation(() => true);
+    const { initializeOpenTelemetry } = await import('@/utils/telemetry/instrumentation.js');
+
+    await initializeOpenTelemetry();
+
+    expect(warnSpy).not.toHaveBeenCalled();
+    expect(otelState.traceExporterOptions).toEqual([{ url: 'http://localhost:4318/v1/traces' }]);
+    expect(otelState.nodeSdkOptions[0]).toMatchObject({
+      logRecordProcessors: [],
+      metricReaders: [],
+      spanProcessors: [expect.any(Object)],
+    });
+  });
+
+  it('reports only the signal that exports nothing', async () => {
+    mockConfig.openTelemetry.tracesEndpoint = '';
+
+    const infoSpy = vi.spyOn(diag, 'info').mockImplementation(() => true);
+    const warnSpy = vi.spyOn(diag, 'warn').mockImplementation(() => true);
+    const { initializeOpenTelemetry } = await import('@/utils/telemetry/instrumentation.js');
+
+    await initializeOpenTelemetry();
+
+    expect(warnSpy).not.toHaveBeenCalled();
+    expect(infoSpy).toHaveBeenCalledWith(
+      'No OTLP traces endpoint configured. Traces will not be exported.',
+    );
+    expect(infoSpy).toHaveBeenCalledWith(
+      'Using OTLP exporter for metrics, endpoint: http://localhost:4318/v1/metrics',
+    );
+    expect(infoSpy).not.toHaveBeenCalledWith(
+      'No OTLP metrics endpoint configured. Metrics will not be exported.',
+    );
   });
 
   it('falls back to lightweight mode under nodejs_compat in Workers', async () => {
