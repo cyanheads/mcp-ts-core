@@ -10,11 +10,10 @@
  * @module examples/mcp-server/tools/definitions/template-data-explorer.app-tool
  */
 
-import { RESOURCE_URI_META_KEY } from '@modelcontextprotocol/ext-apps/server';
-import { tool, z } from '@cyanheads/mcp-ts-core';
+import { appTool, z } from '@cyanheads/mcp-ts-core';
 
-/** The UI Resource URI that hosts will fetch and render as a sandboxed iframe. */
-const UI_RESOURCE_URI = 'ui://template-data-explorer/app.html';
+/** The UI resource URI that hosts fetch and render as a sandboxed iframe. */
+export const UI_RESOURCE_URI = 'ui://template-data-explorer/app.html';
 
 const InputSchema = z.object({
   rowCount: z
@@ -32,7 +31,7 @@ const SaleRowSchema = z
     region: z.string().describe('Sales region name.'),
     product: z.string().describe('Product name.'),
     units: z.number().int().describe('Units sold.'),
-    revenue: z.number().describe('Revenue in USD.'),
+    revenueInUsd: z.number().describe('Revenue in US dollars.'),
     date: z.string().describe('Sale date (YYYY-MM-DD).'),
   })
   .describe('A single generated sales record.');
@@ -43,7 +42,7 @@ const OutputSchema = z.object({
   summary: z
     .object({
       totalRows: z.number().int().describe('Total number of rows.'),
-      totalRevenue: z.number().describe('Sum of all revenue.'),
+      totalRevenueInUsd: z.number().describe('Sum of all revenue, in US dollars.'),
       totalUnits: z.number().int().describe('Sum of all units sold.'),
     })
     .describe('Aggregate summary of the dataset.'),
@@ -65,58 +64,56 @@ function generateSalesData(rowCount: number): DataExplorerOutput {
       region: REGIONS[Math.floor(Math.random() * REGIONS.length)] as string,
       product: PRODUCTS[Math.floor(Math.random() * PRODUCTS.length)] as string,
       units,
-      revenue: units * pricePerUnit,
+      revenueInUsd: units * pricePerUnit,
       date: `${new Date().getFullYear()}-${month}-${day}`,
     };
   });
 
-  const totalRevenue = rows.reduce((sum, r) => sum + r.revenue, 0);
+  const totalRevenueInUsd = rows.reduce((sum, r) => sum + r.revenueInUsd, 0);
   const totalUnits = rows.reduce((sum, r) => sum + r.units, 0);
 
   return {
     rows,
     generatedAt: new Date().toISOString(),
-    summary: { totalRows: rows.length, totalRevenue, totalUnits },
+    summary: { totalRows: rows.length, totalRevenueInUsd, totalUnits },
   };
 }
 
-export const dataExplorerAppTool = tool('template_data_explorer', {
+export const dataExplorerAppTool = appTool('template_data_explorer', {
+  resourceUri: UI_RESOURCE_URI,
   title: 'Data Explorer',
   description:
     'Generate sample sales data and render an interactive table. Users can sort columns, filter rows, and select entries from the UI. Falls back to a plain text table where interactive UI is not available.',
   input: InputSchema,
   output: OutputSchema,
-  auth: ['tool:data-explorer:read'],
+  auth: ['tool:template_data_explorer:read'],
   annotations: {
     readOnlyHint: true,
     openWorldHint: false,
   },
-  _meta: {
-    ui: { resourceUri: UI_RESOURCE_URI },
-    [RESOURCE_URI_META_KEY]: UI_RESOURCE_URI,
-  },
 
-  handler(input, ctx) {
-    ctx.log.debug('Generating sample sales data.', { rowCount: input.rowCount });
+  handler(input) {
     return generateSalesData(input.rowCount);
   },
 
   format(result) {
-    // First block: JSON for MCP Apps UI (loadData parses the first text block)
+    // First block: JSON for the MCP Apps UI (loadData parses the first text block)
     const jsonBlock = JSON.stringify(result);
 
-    // Second block: human-readable table for non-app hosts / LLM context
+    // Second block: content-complete text table for non-app hosts and LLM context
     const header = 'ID  | Region           | Product        | Units | Revenue    | Date';
     const sep = '----|------------------|----------------|-------|------------|----------';
     const rows = result.rows.map(
       (r) =>
-        `${String(r.id).padStart(3)} | ${r.region.padEnd(16)} | ${r.product.padEnd(14)} | ${String(r.units).padStart(5)} | $${r.revenue.toLocaleString('en-US').padStart(9)} | ${r.date}`,
+        `${String(r.id).padStart(3)} | ${r.region.padEnd(16)} | ${r.product.padEnd(14)} | ${String(r.units).padStart(5)} | $${r.revenueInUsd.toLocaleString('en-US').padStart(9)} | ${r.date}`,
     );
-    const summary = `\nTotal: ${result.summary.totalRows} rows | ${result.summary.totalUnits.toLocaleString()} units | $${result.summary.totalRevenue.toLocaleString('en-US')} revenue`;
+    const { totalRows, totalUnits, totalRevenueInUsd } = result.summary;
+    const summary = `\nTotal: ${totalRows} rows | ${totalUnits.toLocaleString('en-US')} units | $${totalRevenueInUsd.toLocaleString('en-US')} revenue`;
+    const generated = `Generated: ${result.generatedAt}`;
 
     return [
       { type: 'text', text: jsonBlock },
-      { type: 'text', text: [header, sep, ...rows, summary].join('\n') },
+      { type: 'text', text: [header, sep, ...rows, summary, generated].join('\n') },
     ];
   },
 });

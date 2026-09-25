@@ -2,20 +2,21 @@
  * @fileoverview Template Mad Libs tool — demonstrates multi-round-trip input.
  *
  * The handler asks the caller for whatever parts of speech the input omitted by
- * returning `input_required` via `ctx.requestInput(...)`, then reads the
+ * returning `input_required` via `return ctx.requestInput(...)`, then reads the
  * answers off `ctx.inputs` when it is re-entered. One code path serves both
  * protocol eras: a 2026-07-28 client fulfils the embedded requests directly,
  * and the SDK's legacy shim fulfils them for a 2025-era session by issuing real
- * `elicitation/create` requests.
+ * `elicitation/create` requests. That legacy leg needs a live session, so a
+ * server hosting this tool declares `sessionMode: { require: 'stateful' }`.
+ *
+ * A declined or cancelled prompt ends the call through the `input_declined`
+ * contract entry, logged at `notice` rather than `error` via its `severity`.
  *
  * @module examples/mcp-server/tools/definitions/template-madlibs-elicitation.tool
  */
 
 import { inputRequired, tool, z } from '@cyanheads/mcp-ts-core';
-import { validationError } from '@cyanheads/mcp-ts-core/errors';
-
-const MISSING_PARTS_HINT =
-  'Provide `noun`, `verb`, and `adjective` directly in the input — this client cannot prompt the user mid-call.';
+import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 
 /** The parts of speech the story needs, in the order they are asked for. */
 const PARTS = ['noun', 'verb', 'adjective'] as const;
@@ -45,19 +46,29 @@ export const madlibsElicitationTool = tool('template_madlibs_elicitation', {
     'Combine a noun, verb, and adjective into a one-line Mad Libs story. Any parts of speech omitted from the input are requested from the user during execution.',
   input: InputSchema,
   output: OutputSchema,
-  auth: ['tool:madlibs:play'],
+  auth: ['tool:template_madlibs_elicitation:read'],
   annotations: {
     readOnlyHint: true,
     openWorldHint: false,
   },
+  errors: [
+    {
+      reason: 'input_declined',
+      code: JsonRpcErrorCode.InvalidRequest,
+      when: 'The user declined or cancelled the prompt for a missing part of speech.',
+      severity: 'notice',
+      recovery:
+        'Call again with noun, verb, and adjective supplied in the input, or accept the prompt when it appears.',
+      retryable: false,
+    },
+  ],
 
   handler(input, ctx) {
-    ctx.log.debug('Processing Mad Libs', { toolInput: input });
-
     const words: Partial<Record<Part, string>> = {};
     const missing: Part[] = [];
 
     for (const part of PARTS) {
+      // An empty string from a form-based client counts as not supplied.
       const supplied = input[part];
       if (supplied) {
         words[part] = supplied;
@@ -68,10 +79,10 @@ export const madlibsElicitationTool = tool('template_madlibs_elicitation', {
       // asking again would loop until the round budget runs out.
       const answer = ctx.inputs.view(part);
       if (answer.kind === 'elicit' && answer.action !== 'accept') {
-        throw validationError(`User ${answer.action} the ${part} prompt.`, {
+        throw ctx.fail('input_declined', `User ${answer.action} the ${part} prompt.`, {
           partOfSpeech: part,
           action: answer.action,
-          recovery: { hint: MISSING_PARTS_HINT },
+          ...ctx.recoveryFor('input_declined'),
         });
       }
 
@@ -83,7 +94,7 @@ export const madlibsElicitationTool = tool('template_madlibs_elicitation', {
     }
 
     if (missing.length > 0) {
-      ctx.requestInput({
+      return ctx.requestInput({
         inputRequests: Object.fromEntries(
           missing.map((part) => [
             part,
@@ -96,20 +107,22 @@ export const madlibsElicitationTool = tool('template_madlibs_elicitation', {
       });
     }
 
+    // Every part was supplied or accepted once `missing` is empty.
     const { noun, verb, adjective } = words as Record<Part, string>;
     return { story: `The ${adjective} ${noun} ${verb} over the lazy dog.`, noun, verb, adjective };
   },
 
   format(result) {
     return [
-      { type: 'text', text: result.story },
       {
         type: 'text',
-        text: JSON.stringify(
-          { noun: result.noun, verb: result.verb, adjective: result.adjective },
-          null,
-          2,
-        ),
+        text: [
+          result.story,
+          '',
+          `**Noun:** ${result.noun}`,
+          `**Verb:** ${result.verb}`,
+          `**Adjective:** ${result.adjective}`,
+        ].join('\n'),
       },
     ];
   },

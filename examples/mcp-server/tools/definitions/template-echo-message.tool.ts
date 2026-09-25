@@ -1,10 +1,12 @@
 /**
  * @fileoverview Template echo tool — demonstrates the `tool()` builder API.
- * Echoes a message back with optional formatting and repetition.
+ * Echoes a message back with optional formatting and repetition, declares a
+ * typed `errors[]` contract, and accepts a key alias for its required field.
  * @module examples/mcp-server/tools/definitions/template-echo-message.tool
  */
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
+import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { markdown } from '@cyanheads/mcp-ts-core/utils';
 
 /** Special input which deliberately triggers a failure for testing. */
@@ -44,7 +46,9 @@ const OutputSchema = z.object({
   timestamp: z.iso
     .datetime()
     .optional()
-    .describe('ISO 8601 timestamp of when the response was generated. Present when `includeTimestamp` is true.'),
+    .describe(
+      'ISO 8601 timestamp of when the response was generated. Present when `includeTimestamp` is true.',
+    ),
 });
 
 export const echoTool = tool('template_echo_message', {
@@ -52,17 +56,25 @@ export const echoTool = tool('template_echo_message', {
   description: 'Echo a message back with optional formatting and repetition.',
   input: InputSchema,
   output: OutputSchema,
-  auth: ['tool:echo:read'],
+  inputAliases: { text: 'message' },
+  auth: ['tool:template_echo_message:read'],
   annotations: {
     readOnlyHint: true,
     openWorldHint: false,
   },
+  errors: [
+    {
+      reason: 'reserved_message',
+      code: JsonRpcErrorCode.ValidationError,
+      when: 'The message is the reserved TRIGGER_ERROR phrase, which exists to exercise the error path.',
+      recovery: 'Send any message other than TRIGGER_ERROR to receive a normal echo.',
+      retryable: false,
+    },
+  ],
 
   handler(input, ctx) {
-    ctx.log.debug('Processing echo message', { toolInput: input });
-
     if (input.message === TEST_ERROR_TRIGGER_MESSAGE) {
-      throw new Error('Deliberate failure triggered.');
+      throw ctx.fail('reserved_message', undefined, { ...ctx.recoveryFor('reserved_message') });
     }
 
     const formattedMessage =
@@ -85,22 +97,15 @@ export const echoTool = tool('template_echo_message', {
   },
 
   format(result) {
-    const preview =
-      result.repeatedMessage.length > 200
-        ? `${result.repeatedMessage.slice(0, 197)}…`
-        : result.repeatedMessage;
-
     const md = markdown()
       .keyValue('mode', result.mode)
       .keyValue('repeatCount', result.repeatCount)
       .keyValue('originalMessage', result.originalMessage)
       .keyValue('formattedMessage', result.formattedMessage)
       .blankLine()
-      .text(preview);
+      .text(result.repeatedMessage);
 
-    md.when(!!result.timestamp, () => {
-      md.blankLine().keyValue('timestamp', result.timestamp ?? '');
-    });
+    if (result.timestamp) md.blankLine().keyValue('timestamp', result.timestamp);
 
     return [{ type: 'text', text: md.build() }];
   },

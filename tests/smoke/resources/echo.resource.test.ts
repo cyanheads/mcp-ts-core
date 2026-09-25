@@ -1,6 +1,6 @@
 /**
  * @fileoverview Tests for the echo resource.
- * @module tests/examples/resources/echo.resource.test
+ * @module tests/smoke/resources/echo.resource.test
  */
 
 import { createMockContext } from '@cyanheads/mcp-ts-core/testing';
@@ -9,26 +9,18 @@ import { echoResourceDefinition } from '../../../examples/mcp-server/resources/d
 import { makeServerContext } from '../../helpers/server-context.js';
 
 describe('echoResourceDefinition', () => {
-  it('echoes message from URI hostname', async () => {
+  it('echoes the message bound from the URI template', async () => {
     const ctx = createMockContext({ uri: new URL('echo://hello') });
-    const params = echoResourceDefinition.params!.parse({});
+    const params = echoResourceDefinition.params!.parse({ message: 'hello' });
     const result = await echoResourceDefinition.handler(params, ctx);
     expect(result.message).toBe('hello');
-    expect(result.requestUri).toBe('echo://hello');
   });
 
-  it('uses params.message over URI', async () => {
-    const ctx = createMockContext({ uri: new URL('echo://fallback') });
-    const params = echoResourceDefinition.params!.parse({ message: 'override' });
-    const result = await echoResourceDefinition.handler(params, ctx);
-    expect(result.message).toBe('override');
-  });
-
-  it('includes timestamp', async () => {
+  it('returns output matching the declared schema, timestamp included', async () => {
     const ctx = createMockContext({ uri: new URL('echo://test') });
-    const params = echoResourceDefinition.params!.parse({});
+    const params = echoResourceDefinition.params!.parse({ message: 'test' });
     const result = await echoResourceDefinition.handler(params, ctx);
-    expect(() => new Date(result.timestamp).toISOString()).not.toThrow();
+    expect(result).toEqual(expect.schemaMatching(echoResourceDefinition.output!));
   });
 
   it('lists default resources', async () => {

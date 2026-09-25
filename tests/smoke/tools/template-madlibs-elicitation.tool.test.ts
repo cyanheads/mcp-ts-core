@@ -1,13 +1,15 @@
 /**
  * @fileoverview Tests for the Mad Libs multi-round-trip input tool.
- * @module tests/examples/tools/template-madlibs-elicitation.tool.test
+ * @module tests/smoke/tools/template-madlibs-elicitation.tool.test
  */
 
 import { JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
-import { createMockContext, type MockContextOptions } from '@cyanheads/mcp-ts-core/testing';
-import type { InputRequiredResult } from '@modelcontextprotocol/server';
+import {
+  createMockContext,
+  expectInputRequired,
+  type MockContextOptions,
+} from '@cyanheads/mcp-ts-core/testing';
 import { describe, expect, it } from 'vitest';
-import { isInputRequiredSignal } from '@/mcp-server/inputRequired.js';
 import { madlibsElicitationTool } from '../../../examples/mcp-server/tools/definitions/template-madlibs-elicitation.tool.js';
 
 type ToolInput = Parameters<typeof madlibsElicitationTool.handler>[0];
@@ -15,35 +17,10 @@ type ToolInput = Parameters<typeof madlibsElicitationTool.handler>[0];
 /** An accepted `elicitation/create` response as a retried request carries it. */
 const accepted = (value: string) => ({ action: 'accept', content: { value } });
 
-async function runHandler(input: ToolInput, options: MockContextOptions = {}) {
-  return await madlibsElicitationTool.handler(input, createMockContext(options));
-}
-
-/**
- * Runs the handler expecting it to ask for more input, and returns the
- * `input_required` result the handler factory would send back to the client.
- */
-async function requestedInput(
-  input: ToolInput,
-  options: MockContextOptions = {},
-): Promise<InputRequiredResult> {
-  try {
-    await runHandler(input, options);
-  } catch (error) {
-    if (isInputRequiredSignal(error)) return error.result;
-    throw error;
-  }
-  throw new Error('Expected the handler to request input.');
-}
-
-/** Runs the handler expecting a domain failure, and returns the thrown error. */
-async function thrownError(input: ToolInput, options: MockContextOptions = {}): Promise<unknown> {
-  try {
-    await runHandler(input, options);
-  } catch (error) {
-    return error;
-  }
-  throw new Error('Expected the handler to throw.');
+/** Invokes the handler with a context typed against the tool's `errors[]` contract. */
+async function runHandler(input: ToolInput, options: Omit<MockContextOptions, 'errors'> = {}) {
+  const ctx = createMockContext({ ...options, errors: madlibsElicitationTool.errors });
+  return await madlibsElicitationTool.handler(input, ctx);
 }
 
 describe('madlibsElicitationTool', () => {
@@ -62,7 +39,7 @@ describe('madlibsElicitationTool', () => {
 
   it('requests every missing part on the first round', async () => {
     const input = madlibsElicitationTool.input.parse({});
-    const result = await requestedInput(input);
+    const result = await expectInputRequired(() => runHandler(input));
 
     expect(result.resultType).toBe('input_required');
     expect(Object.keys(result.inputRequests ?? {})).toEqual(['noun', 'verb', 'adjective']);
@@ -82,8 +59,14 @@ describe('madlibsElicitationTool', () => {
 
   it('requests only the parts the input omitted', async () => {
     const input = madlibsElicitationTool.input.parse({ noun: 'cat' });
-    const result = await requestedInput(input);
+    const result = await expectInputRequired(() => runHandler(input));
     expect(Object.keys(result.inputRequests ?? {})).toEqual(['verb', 'adjective']);
+  });
+
+  it('treats an empty string from a form-based client as not supplied', async () => {
+    const input = madlibsElicitationTool.input.parse({ noun: '', verb: 'ran', adjective: 'big' });
+    const result = await expectInputRequired(() => runHandler(input));
+    expect(Object.keys(result.inputRequests ?? {})).toEqual(['noun']);
   });
 
   it('completes the story from the responses carried by the retried request', async () => {
@@ -103,38 +86,44 @@ describe('madlibsElicitationTool', () => {
   it('re-requests a part whose response failed the answer schema', async () => {
     const input = madlibsElicitationTool.input.parse({ verb: 'ran', adjective: 'big' });
     // `value` is `.min(1)`, so an empty string is not usable content.
-    const result = await requestedInput(input, {
-      inputResponses: { noun: accepted('') },
-    });
+    const result = await expectInputRequired(() =>
+      runHandler(input, { inputResponses: { noun: accepted('') } }),
+    );
     expect(Object.keys(result.inputRequests ?? {})).toEqual(['noun']);
   });
 
-  it('throws ValidationError when the user declines a prompt', async () => {
+  it('fails with input_declined when the user declines a prompt', async () => {
     const input = madlibsElicitationTool.input.parse({});
-    const error = await thrownError(input, { inputResponses: { noun: { action: 'decline' } } });
+    const run = runHandler(input, { inputResponses: { noun: { action: 'decline' } } });
 
-    expect(error).toBeInstanceOf(McpError);
-    expect(error).toMatchObject({
-      code: JsonRpcErrorCode.ValidationError,
-      data: { partOfSpeech: 'noun', action: 'decline' },
-    });
-  });
-
-  it('throws ValidationError when the user cancels a prompt', async () => {
-    const input = madlibsElicitationTool.input.parse({ noun: 'cat' });
-    const error = await thrownError(input, { inputResponses: { verb: { action: 'cancel' } } });
-
-    expect(error).toMatchObject({
-      code: JsonRpcErrorCode.ValidationError,
+    await expect(run).rejects.toBeInstanceOf(McpError);
+    await expect(run).rejects.toMatchObject({
+      code: JsonRpcErrorCode.InvalidRequest,
       data: {
-        partOfSpeech: 'verb',
-        action: 'cancel',
-        recovery: { hint: expect.stringContaining('cannot prompt the user mid-call') },
+        reason: 'input_declined',
+        partOfSpeech: 'noun',
+        action: 'decline',
+        recovery: { hint: expect.stringContaining('accept the prompt') },
       },
     });
   });
 
-  it('formats output as story and JSON', () => {
+  it('fails with input_declined when the user cancels a prompt', async () => {
+    const input = madlibsElicitationTool.input.parse({ noun: 'cat' });
+    await expect(
+      runHandler(input, { inputResponses: { verb: { action: 'cancel' } } }),
+    ).rejects.toMatchObject({
+      code: JsonRpcErrorCode.InvalidRequest,
+      data: {
+        reason: 'input_declined',
+        partOfSpeech: 'verb',
+        action: 'cancel',
+        recovery: { hint: expect.stringContaining('accept the prompt') },
+      },
+    });
+  });
+
+  it('formats the story and every word as markdown', () => {
     const result = {
       story: 'The big dog ran over the lazy dog.',
       noun: 'dog',
@@ -142,8 +131,11 @@ describe('madlibsElicitationTool', () => {
       adjective: 'big',
     };
     const blocks = madlibsElicitationTool.format!(result);
-    expect(blocks).toHaveLength(2);
-    expect((blocks[0] as { text: string }).text).toBe(result.story);
-    expect((blocks[1] as { text: string }).text).toContain('"noun": "dog"');
+    expect(blocks).toHaveLength(1);
+    const text = (blocks[0] as { text: string }).text;
+    expect(text).toContain(result.story);
+    expect(text).toContain('**Noun:** dog');
+    expect(text).toContain('**Verb:** ran');
+    expect(text).toContain('**Adjective:** big');
   });
 });

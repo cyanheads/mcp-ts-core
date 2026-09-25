@@ -18,14 +18,13 @@
       "tests/*": ["./tests/*"]
     }
   },
-  "include": ["src/**/*", "tests/**/*"],
+  "include": ["src/**/*", "tests/**/*", "examples/**/*"],
   // The workerd lane needs the ambient Cloudflare globals; tsconfig.worker.json
   // checks it in its own program so those globals never reach this one.
   "exclude": [
     "node_modules",
     "dist",
     "templates",
-    "examples",
     "tests/worker",
     "tests/fixtures/worker-runtime.fixture.ts"
   ]
