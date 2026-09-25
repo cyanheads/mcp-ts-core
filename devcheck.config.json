@@ -4,7 +4,6 @@
       "@types/*",
       "pino-pretty",
       "typescript",
-      "bun-types",
       "@vitest/coverage-istanbul",
       "repomix",
       "bun",
