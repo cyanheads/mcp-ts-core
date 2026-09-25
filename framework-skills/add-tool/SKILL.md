@@ -4,7 +4,7 @@ description: >
   Scaffold a new MCP tool definition. Use when the user asks to add a tool, create a new tool, or implement a new capability for the server.
 metadata:
   author: cyanheads
-  version: "2.29"
+  version: "2.30"
   audience: external
   type: reference
 ---
@@ -24,13 +24,13 @@ Tools use the `tool()` builder from `@cyanheads/mcp-ts-core`. Each tool lives in
 
 ## Naming
 
-Tools use lowercase snake_case with a canonical server/domain prefix: `{server}_{verb}_{noun}` — 3 words.
+Tools use lowercase snake_case with a canonical server/domain prefix, `{server}_{verb}_{noun}` by default. Drop the noun only when the verb is a complete action on its own (`git_pull`, `git_status`): if `{server}_{verb}` leaves "…what?" unanswered — `search` what? `connect` to what? — the noun is missing. The full rule is the Name row of the `design-mcp-server` Design table.
 
 Examples: `pubmed_search_articles`, `pubmed_fetch_fulltext`, `clinicaltrials_find_eligible`.
 
 The server prefix is judged on clarity, not length: the brand name or the plain well-known word for the domain both pass (`pubmed_`, `patents_`); an abbreviation fails only when it reads as something else out of context (`loc_`, `ct_`). A fourth segment is fine when the noun is inherently two words (`openfda_search_device_clearances`). When a name resists the schema — can't pick a verb, noun feels generic, the *verb* wants a second word — that's usually a signal the scope is fuzzy; split the tool, rename, or reconsider.
 
-For shape selection (Workflow or Instruction variants — standard single-action tools are the default), see the `design-mcp-server` skill's Tool shapes section.
+For shape selection (Workflow, Instruction, or Reference variants — standard single-action tools are the default), see the `design-mcp-server` skill's Tool shapes section.
 
 ## Template
 
@@ -243,7 +243,7 @@ const { enableWrites } = getServerConfig();
 
 // The suggestion is emitted only under the config that registers its target.
 const nextToolSuggestions = enableWrites
-  ? [{ toolName: 'brapi_submit_observations', args: { studyDbId } }]
+  ? [{ toolName: 'brapi_submit_observations', reason: 'Record the observations collected for this study.', args: { studyDbId } }]
   : [];
 
 return {
@@ -344,11 +344,11 @@ The handler dispatches on the discriminator and TypeScript narrows `input` to th
 
 What reaches the wire is `{"type": "object", "oneOf": [<branch>, …]}`: branches intact, each with its own `required` list and a `const`-tagged discriminator, `additionalProperties: false` on every one. Identical bytes on a 2025-11-25 and a 2026-07-28 connection — the legacy projection inspects `outputSchema` alone and never rewrites an input root.
 
-Three constraints:
+Four constraints:
 
 - **The union must be discriminated.** A bare `z.union(...)` is rejected: with no literal-tagged key the model has nothing to choose a branch by, and every variant's `required` would read as applying at once.
 - **`output` stays a flat `z.object`** — see the widening section below for why a non-object output root breaks the success path. When the *result* shape varies by mode, use a `kind` discriminator with presence-based optional fields and render each arm on field presence in `format()`.
-- **Portability is unmeasured at the parameter root.** `schema-root-oneof-portability` (strict mode only) says so; for Anthropic clients the union is the better shape, and flattening is the escape hatch if you target the widest vendor matrix.
+- **Claude clients flatten the union root.** The Anthropic Messages API rejects a top-level `oneOf` in `input_schema`, so Claude clients rewrite the root before the model sees it — and the rewrite keeps only the first branch's properties, with `required: []`. A tool that must work in Claude clients takes a flat `z.object()` with an enum discriminator, optional per-mode fields, each mode's required fields named in the discriminator's `.describe()`, and the combination checked in the handler. `schema-root-oneof-portability` (strict mode only) flags the union root. Tracked in [#510](https://github.com/cyanheads/mcp-ts-core/issues/510).
 - **A union root rules out `headerParam`.** See below — the branches sit under `oneOf`, which the reachability rule excludes.
 
 ### `headerParam` mirrors an argument into a request header
@@ -539,7 +539,7 @@ async handler(input, ctx) {
 
 Single-item tools don't need this — they either succeed or throw. The partial success question only arises with array inputs.
 
-**Telemetry:** The framework automatically detects this pattern — when a handler result contains a non-empty `failed` array, the span gets `mcp.tool.partial_success`, `mcp.tool.batch.succeeded_count`, and `mcp.tool.batch.failed_count` attributes. No manual instrumentation needed.
+**Telemetry:** The framework automatically detects this pattern — when a handler result contains a non-empty `failed` array, the span gets `mcp.tool.partial_success`, `mcp.tool.batch.succeeded_count` (from the `succeeded` array), and `mcp.tool.batch.failed_count` attributes. No manual instrumentation needed. An `output` built with `partialResultSchema()` from `/utils` is read under its own `failedKey`/`succeededKey` instead — also after `.extend()`, `.pick()`, `.omit()`, or a `.shape` spread. `.partial()` and `.required()` rebuild the fields, so a schema derived that way falls back to the literal keys.
 
 ### Empty results need context
 
@@ -810,6 +810,21 @@ async handler(input, ctx) {
 ```
 
 The same applies to optional arrays — use `?.length` guards so empty arrays are skipped, not passed through.
+
+When an optional string field carries a validator (`.regex()` for a date, `.min(1)` for a cursor), a permissive schema would drop the validator and a strict one would reject the blank. Keep both by mapping the blank to `undefined` *before* the validator runs:
+
+```typescript
+/** A blank from a form client is "unset", never a value to validate. */
+const blankAsUnset = <T extends z.ZodType>(schema: T) =>
+  z.preprocess((value) => (value === '' ? undefined : value), schema);
+
+input: z.object({
+  d1: blankAsUnset(z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional()).describe('Earliest date, YYYY-MM-DD.'),
+  cursor: blankAsUnset(z.string().regex(/^[1-9]\d*$/).optional()).describe('Opaque continuation from the previous page.'),
+}),
+```
+
+`toJSONSchema` emits only the inner schema for a preprocess pipe in both `io` modes, so the advertised `pattern` is unchanged; `''` parses to an absent key, a real value still hits the validator, and the handler needs no extra guard.
 
 **Required fields are different.** If a string field is required and must be non-empty to be meaningful, `.min(1)` is correct — the client shouldn't have submitted the form without filling it in.
 

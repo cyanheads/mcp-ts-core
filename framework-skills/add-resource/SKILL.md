@@ -4,7 +4,7 @@ description: >
   Scaffold a new MCP resource definition. Use when the user asks to add a resource, expose data via URI, or create a readable endpoint.
 metadata:
   author: cyanheads
-  version: "1.6"
+  version: "1.7"
   audience: external
   type: reference
 ---
@@ -63,12 +63,12 @@ export const {{RESOURCE_EXPORT}} = resource('{{scheme}}://{{{paramName}}}/data',
 
 ### With pagination
 
-For resources that return large result sets, include `cursor` in the URI template params and use opaque cursor pagination in the `handler`. The cursor arrives as a validated URI param. `paginateArray` requires a `RequestContext` for logging — create one from `requestContextService`:
+For resources that return large result sets, use opaque cursor pagination in the `handler`. `resources/read` carries no cursor of its own, so the cursor must be a URI template variable — it arrives as a validated URI param. Make it a path segment: a `{?cursor}` query expansion is mandatory in the SDK's template matcher, so the bare URI (no `?cursor=`) stops matching. Serve the first page from an unpaged sibling resource that returns `nextCursor`, or disclose truncation in the body and point callers at a tool that pages. `paginateArray` requires a `RequestContext` for logging — create one from `requestContextService`:
 
 ```typescript
 import { extractCursor, paginateArray, requestContextService } from '@cyanheads/mcp-ts-core/utils';
 
-// URI template: '{{scheme}}://{{{paramName}}}/items'
+// URI template: '{{scheme}}://{{{paramName}}}/items/{cursor}'
 params: z.object({
   {{paramName}}: z.string().describe('{{PARAM_DESCRIPTION}}'),
   cursor: z.string().optional().describe('Opaque pagination cursor'),

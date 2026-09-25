@@ -4,7 +4,7 @@ description: >
   DataCanvas primitive reference — a Tier 3 SQL/analytical workspace for tabular MCP servers, backed by DuckDB. Use when registering tables from upstream APIs, running ad-hoc SQL across them, and exporting results. Covers the acquire → register → query → export flow, per-table TTL, the token-sharing pattern for multi-agent collaboration, env config, and Cloudflare Workers fail-closed behavior.
 metadata:
   author: cyanheads
-  version: "2.3"
+  version: "2.4"
   audience: external
   type: reference
 ---
@@ -511,7 +511,7 @@ The merged iterable streams — the helper does not double-buffer the full sourc
 | Sync or async | Caller-supplied | Forwarded to `registerTable` as-is |
 | Sync or async | Omitted | Helper infers via `inferSchemaFromRows` over preview buffer + sentinel |
 
-When the preview budget is small (single-digit rows) and the sniff window matters, pass `schema` explicitly — the helper's window is only as large as the preview budget allows.
+Pass `schema` explicitly whenever a column's type can't be read off the first rows — a fractional column whose leading values are all `0` or `null` sniffs as `BIGINT` (or `VARCHAR`), and the appender then truncates or stringifies every later value without an error. The sniff window is only as large as the preview budget, so shrinking `previewChars` widens the exposure; the same applies to `registerTable` called without a schema. Derive the schema from the row type once and pass it to both calls.
 
 ### Cancellation and partial state
 

@@ -4,7 +4,7 @@ description: >
   Review an MCP server for common security gaps: LLM-facing surfaces as injection vector (tools, resources, prompts, descriptions), scope blast radius, destructive ops without consent, upstream auth shape, input sinks (URL / path / roots / shell / schema strictness / ReDoS), tenant isolation, leakage through errors and telemetry, unbounded resources, and HTTP-mode deployment surface. Use before a release, after a batch of handler changes, or when the user asks for a security review, audit, or hardening pass. Produces grouped findings and a numbered options list.
 metadata:
   author: cyanheads
-  version: "1.8"
+  version: "1.10"
   audience: external
   type: audit
 ---
@@ -126,6 +126,7 @@ grep -rn "ctx.requestInput\|ctx.inputs" src/mcp-server/tools/definitions/
 - A **declined or cancelled** response is terminal — checked via `ctx.inputs.view(key)` and thrown on, never re-asked (a re-ask loops until the round budget runs out) and never treated as consent.
 - Consent is scoped to the specific target (e.g., record ID rendered in the message), not a generic "proceed?"
 - Any `requestState` carried across rounds is integrity-protected if it influences authorization, resource access, or which target gets mutated. It round-trips through the client and comes back attacker-controlled; the SDK does not sign or verify it.
+- **A consent gate's state is server-issued and single-use.** A client can send `inputResponses` plus a `requestState` of its own on the very FIRST call — honored on 2025-era connections, even from a client that declared no `elicitation` — so a handler that only *compares* client-carried state against a fresh resolution deletes on a forged "accepted" answer without ever prompting. A signed state closes forgery but not replay within its TTL. Keep the confirmed target (plus a content hash, so a same-path swap is caught) in a server-side record keyed by a random id, send only the id, redeem it before anything else in the handler, and refuse an unknown, used, or expired id.
 - **The weak point is answerability, not availability.** `ctx.requestInput` is present on every transport and both protocol eras — the 2025-era shim issues the real `elicitation/create` round trip, the 2026-07-28 client fulfils the embedded request directly. A client that never retries simply leaves the destructive step un-run, which fails safe. Keep `destructiveHint: true` so client-side approval flows still surface the risk, and do not accept "proceed anyway when the round is unavailable" as a fallback — there is no such state to detect.
 
 **Smell:** `destructiveHint: true` file with no `ctx.requestInput` in it. Or `ctx.inputs.accepted('confirm')` with no schema argument — the content could be anything. Or a handler that re-issues the same request after a `decline`.
@@ -164,23 +165,30 @@ grep -rnE "\b(exec|spawn|execSync|spawnSync)\b" src/
 # Merges — prototype pollution
 grep -rn "Object.assign\b\|structuredClone" src/
 
+# Lookups — prototype chain read through an object literal
+grep -rnE "\[[a-zA-Z_$][a-zA-Z0-9_$.]*\] *\?\? |\[[a-zA-Z_$][a-zA-Z0-9_$.]*\] *\|\| " src/
+
 # Roots — client-shared filesystem
 grep -rn "roots/list\|ctx.roots" src/
 
 # Schema laxity — fields sneaking past validation
-grep -rn "\.passthrough()\|\.catchall(" src/mcp-server/
+grep -rn "\.passthrough()\|\.loose()\|looseObject(\|\.catchall(" src/mcp-server/
 ```
 
 **Check:**
 
 - URL-taking tools block private IPs, `file://`, `ftp://`, `localhost`, DNS rebind?
 - Path-taking tools canonicalize (`path.resolve` + assert `startsWith(root + sep)`)?
+- **Upstream URL paths built from caller segments refuse `.` and `..`?** `encodeURIComponent` leaves dots untouched, and the URL parser resolves dot segments, so a file key or archive-member input of `../../me` retargets the request (credentials attached) at another endpoint on the same host. Redirects on authenticated requests should follow only within the upstream origin.
+- **Caller text spliced into an upstream query language next to server-built filter clauses stays well-formed?** Some search backends fall back to plain-text matching when they can't parse a query. An unclosed quote or a trailing `\` from the caller then silently drops every filter clause while the tool still reports them as applied.
 - Roots-derived paths: resolved result stays within *one* declared root (iterate and assert), not assumed-safe because "the client said so"?
 - Shell-using tools use an allowlist (never string-concat)?
 - Regex / glob / filter inputs bounded (length cap, complexity limits, execution timeout) — ReDoS-safe?
+- **The server's own patterns are linear-time on hostile input?** Every `.regex()` in an input schema, and every regex a handler or normalizer runs over caller text, sees attacker-length strings before any length cap applies. Loose "raw" patterns that admit un-normalized input (`\s*` runs, optional quotes and separators around a repeated group) are the usual source of polynomial backtracking. Time each one against a long adversarial string (thousands of spaces, then a character that forces failure). Milliseconds is fine; seconds is a finding.
 - User-JSON merges reject `__proto__`, `constructor`, `prototype` keys?
+- **Lookup tables keyed by input-derived text are a `Map`, not an object literal?** The read direction of the same defect: `TABLE[key] ?? fallback` walks the prototype chain, so a key of `constructor` (or `toString`, `valueOf`) returns a function the `??` does not catch — it is not nullish — and string coercion then emits `function Object() { [native code] }` into the output. Lowercasing the key masks the camelCase members and leaves `constructor` reachable, so it is not a fix. A `Map` has no prototype chain; `Object.create(null)` works too.
 - **Input schemas `.strict()`** — unknown fields rejected, not silently passed to downstream code that destructures with `...rest`?
-- **Output schemas without `.passthrough()` / `.catchall()`** — no accidental exfiltration of fields your schema didn't declare?
+- **Output schemas without `.passthrough()` / `.loose()` / `.catchall()`** — no accidental exfiltration of fields your schema didn't declare?
 **Smell:** `z.string().url()` with no allowlist; `readFile(input.path)` with no canonicalization.
 
 #### Axis 6 — Tenant isolation

@@ -4,7 +4,7 @@ description: >
   Scaffold a new MCP prompt template. Use when the user asks to add a prompt, create a reusable message template, or define a prompt for LLM interactions.
 metadata:
   author: cyanheads
-  version: "1.3"
+  version: "1.4"
   audience: external
   type: reference
 ---
@@ -120,6 +120,8 @@ export const codeReview = prompt('code_review', {
 ```
 
 `completable()` is transparent to the linter — it does not affect `describe-on-fields` or `schema-serializable` rules. All completable-wrapped fields still require `.describe()` on the underlying schema.
+
+For an optional argument, wrap the inner schema and apply `.optional()` outside: `completable(z.string().describe('…'), cb).optional()`. The SDK unwraps `.optional()` before checking for a completer, so `completable(z.string().optional(), cb)` type-checks but never completes.
 
 ## Checklist
 

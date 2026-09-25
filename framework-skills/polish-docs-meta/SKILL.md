@@ -4,7 +4,7 @@ description: >
   Finalize documentation and project metadata for a ship-ready MCP server. Use after implementation is complete, tests pass, and devcheck is clean. Safe to run at any stage — each step checks current state and only acts on what still needs work.
 metadata:
   author: cyanheads
-  version: "2.17"
+  version: "2.18"
   audience: external
   type: workflow
 ---
@@ -211,7 +211,7 @@ If the project ships as an `.mcpb` bundle for Claude Desktop (check for `manifes
 - `manifest.json` version matches `package.json` version
 - Env var names in `manifest.json` (`mcp_config.env` + `user_config`) match `server.json` `environmentVariables` — `lint:packaging` enforces this, but verify the set is complete
 - `manifest.json` `name` matches `package.json` name **without the npm scope prefix** (e.g. `bls-mcp-server`, not `@cyanheads/bls-mcp-server`); `description` matches `package.json`
-- `manifest.json` `author` is the full person object — `{ "name", "email", "url" }` — carrying the same identity as `package.json` `author` (name matches the LICENSE copyright holder, url is the author's site)
+- `manifest.json` `author` is `{ "name": "<publisher handle>" }` — the same handle as the `.claude-plugin` / `.codex-plugin` `author.name` and the GitHub owner (e.g. `{ "name": "cyanheads" }`), not the LICENSE copyright holder's person object; `package.json` `author` is where the full `Name <email> (url)` identity lives
 - `manifest.json` `user_config` entries must include `title` and `type` fields — `mcpb pack` validates these
 - Every `user_config` entry is referenced from `mcp_config.env` as `"X": "${user_config.X}"`, and `mcp_config` carries no other `${…}` besides MCPB's own path placeholders (`${__dirname}`, `${HOME}`, …). The host substitutes nothing else: a declared option that is never referenced is collected and dropped, and `"X": "${X}"` reaches the server as that literal string. `lint:packaging` enforces both
 - For each `user_config` entry referenced as `${user_config.X}` in `mcp_config.env`: if it's not `required: true`, set `"default": ""`. MCPB hosts (Claude Desktop included) pass the literal placeholder string through to the process when an optional field is left blank without a default — the `default` keeps that string out of the process. Server-side, the framework already treats a whole-value `${…}` placeholder the same as an empty string — unset — in both its own config and `parseEnvConfig`, so an optional field falls through to its default and a required one fails as missing rather than as a format error; a per-field `z.preprocess` guard for placeholders is redundant and can be dropped.

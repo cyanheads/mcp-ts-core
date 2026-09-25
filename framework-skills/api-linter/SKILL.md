@@ -4,7 +4,7 @@ description: >
   MCP definition linter rules reference. Use when `bun run lint:mcp` or `bun run devcheck` reports a lint error or warning (`format-parity`, `schema-is-object`, `name-format`, `server-json-*`, etc.) and you need to understand the rule, its severity, and how to fix it. Every rule ID the linter emits has an entry in this doc.
 metadata:
   author: cyanheads
-  version: "1.17"
+  version: "1.18"
   audience: external
   type: reference
 ---
@@ -85,7 +85,7 @@ Why this family exists: different MCP clients forward different surfaces of a to
 
 Two consequences worth knowing when writing a `format()`:
 
-- **The string sentinel is alphanumeric so escaping does not break it.** `content[]` is markdown carrying upstream text you do not control, so escaping `_`, `*`, `` ` ``, `[`, `<` at the render boundary is correct — and it leaves an alphanumeric probe byte-identical. Markdown escaping, HTML escaping, and URL encoding all pass. You never need to carve an exception into your escape set to keep `lint:mcp` green.
+- **The string sentinel is alphanumeric so escaping does not break it.** `content[]` is markdown carrying upstream text you do not control, so escaping at the render boundary is correct — and it leaves an alphanumeric probe byte-identical. Escape a character only where it would change rendering, per CommonMark/GFM rules: intraword `_` (`snake_case`), a `<` that cannot open a tag (`p<0.05`), and a `[` that cannot form a link all stay raw. Agents read `content[]` as text and copy spans out of it, so a blanket escape set turns into backslash noise in their output. Markdown escaping, HTML escaping, and URL encoding all pass. You never need to carve an exception into your escape set to keep `lint:mcp` green.
 - **Schema-dictated values must render as their own token.** A required `kind: z.enum(['full', 'outline'])` that `format()` never renders is not satisfied by the letters `full` appearing inside a longer word elsewhere in the output — `case_name_full`, `inactive`, `listing`. Render the field, or render its key name as a label.
 
 ### format-parity
@@ -373,9 +373,9 @@ Fires when emitted output contains `$defs` or `$ref`. Gemini rejects these (`400
 
 **Severity:** warning (only when `portability: 'strict'`)
 
-Fires when a tool's advertised `inputSchema` has a root-level `oneOf` — that is, when `input` is a `z.discriminatedUnion(...)`. The emitted shape is valid 2020-12, every branch is a typed object, and the bytes are identical on both MCP protocol revisions. What is unmeasured is vendor handling of a `oneOf` at the *parameter* root: a client that reads only `type` and `properties` would see a parameterless tool and drop the constraint silently rather than erroring. Opt-in, because for Anthropic clients the union is the better shape.
+Fires when a tool's advertised `inputSchema` has a root-level `oneOf` — that is, when `input` is a `z.discriminatedUnion(...)`. The emitted shape is valid 2020-12, every branch is a typed object, and the bytes are identical on both MCP protocol revisions. Vendor handling of a `oneOf` at the *parameter* root varies: a client that reads only `type` and `properties` sees a parameterless tool and drops the constraint silently rather than erroring, and Claude clients — the Anthropic Messages API rejects a top-level `oneOf` — rewrite the root to its first branch's properties, hiding every other mode from the model. Opt-in for now; whether it warns by default is tracked in [#510](https://github.com/cyanheads/mcp-ts-core/issues/510).
 
-**Fix (only if you need the widest vendor reach):** flatten to a single `z.object()` with a discriminator field and optional per-mode fields, and validate the combination in the handler.
+**Fix (for any tool that must work in Claude clients):** flatten to a single `z.object()` with a discriminator field and optional per-mode fields, and validate the combination in the handler.
 
 ### schema-dialect-tag
 
@@ -1065,11 +1065,11 @@ Singularization covers only the bounded suffixes above (`ies` → `y`, `ses`/`xe
 A silently capped list leaves the agent unaware that results were cut off — it may treat a partial set as complete. Use `ctx.enrich.truncated({ shown, cap })` for the one-liner:
 
 ```ts
-// In the enrichment block:
+// In the enrichment block — optional, since truncated() fires only on a capped page:
 enrichment: {
-  truncated: z.boolean().describe('True when the list was capped at the limit.'),
-  shown: z.number().describe('Number of items returned.'),
-  cap: z.number().describe('The limit applied.'),
+  truncated: z.boolean().optional().describe('True when the list was capped at the limit.'),
+  shown: z.number().optional().describe('Number of items returned.'),
+  cap: z.number().optional().describe('The limit applied.'),
 },
 
 // In the handler:
