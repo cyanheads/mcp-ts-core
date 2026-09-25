@@ -1,6 +1,6 @@
 # mcp-ts-core - Directory Structure
 
-Generated on: 2026-09-19 13:53:42
+Generated on: 2026-09-25 14:48:31
 
 ```text
 mcp-ts-core/
@@ -140,18 +140,22 @@ mcp-ts-core/
 │   ├── mcp-server/
 │   │   ├── prompts/
 │   │   │   └── definitions/
-│   │   │       └── code-review.prompt.ts
+│   │   │       ├── code-review.prompt.ts
+│   │   │       └── index.ts
 │   │   ├── resources/
 │   │   │   └── definitions/
 │   │   │       ├── data-explorer-ui.app-resource.ts
-│   │   │       └── echo.resource.ts
-│   │   └── tools/
-│   │       └── definitions/
-│   │           ├── template-cat-fact.tool.ts
-│   │           ├── template-data-explorer.app-tool.ts
-│   │           ├── template-echo-message.tool.ts
-│   │           ├── template-image-test.tool.ts
-│   │           └── template-madlibs-elicitation.tool.ts
+│   │   │       ├── echo.resource.ts
+│   │   │       └── index.ts
+│   │   ├── tools/
+│   │   │   └── definitions/
+│   │   │       ├── index.ts
+│   │   │       ├── template-cat-fact.tool.ts
+│   │   │       ├── template-data-explorer.app-tool.ts
+│   │   │       ├── template-echo-message.tool.ts
+│   │   │       ├── template-image-test.tool.ts
+│   │   │       └── template-madlibs-elicitation.tool.ts
+│   │   └── server-instructions.ts
 │   ├── duckdb-stub.ts
 │   ├── index.ts
 │   └── worker.ts
@@ -517,7 +521,6 @@ mcp-ts-core/
 │   │   │   └── sensitiveFields.ts
 │   │   ├── telemetry/
 │   │   │   ├── attributes.ts
-│   │   │   ├── index.ts
 │   │   │   ├── instrumentation.ts
 │   │   │   ├── metrics.ts
 │   │   │   └── trace.ts
@@ -657,11 +660,10 @@ mcp-ts-core/
 │   ├── integration/
 │   │   ├── cache-hints.int.test.ts
 │   │   ├── completions.int.test.ts
-│   │   ├── config.int.test.ts
-│   │   ├── error-handler.int.test.ts
 │   │   ├── http-auth-sessions.test.ts
 │   │   ├── http-auth.test.ts
 │   │   ├── http-authz.e2e.test.ts
+│   │   ├── http-body-disconnect.int.test.ts
 │   │   ├── http-protocol-session.int.test.ts
 │   │   ├── http-sessions.test.ts
 │   │   ├── http-sse-abort.int.test.ts
@@ -701,16 +703,18 @@ mcp-ts-core/
 │   │   ├── prompts/
 │   │   │   └── code-review.prompt.test.ts
 │   │   ├── resources/
-│   │   │   ├── echo-app-ui.app-resource.test.ts
+│   │   │   ├── data-explorer-ui.app-resource.test.ts
 │   │   │   └── echo.resource.test.ts
 │   │   ├── services/
 │   │   │   ├── canvas-duckdb.test.ts
 │   │   │   └── canvas-error-surfaces.test.ts
-│   │   └── tools/
-│   │       ├── template-data-explorer.app-tool.test.ts
-│   │       ├── template-echo-app.app-tool.test.ts
-│   │       ├── template-echo-message.tool.test.ts
-│   │       └── template-madlibs-elicitation.tool.test.ts
+│   │   ├── tools/
+│   │   │   ├── template-cat-fact.tool.test.ts
+│   │   │   ├── template-data-explorer.app-tool.test.ts
+│   │   │   ├── template-echo-message.tool.test.ts
+│   │   │   ├── template-image-test.tool.test.ts
+│   │   │   └── template-madlibs-elicitation.tool.test.ts
+│   │   └── examples-registry.test.ts
 │   ├── types/
 │   │   ├── context-helpers.test-d.ts
 │   │   ├── error-contract.test-d.ts
@@ -735,8 +739,7 @@ mcp-ts-core/
 │   │   │   ├── context-state-bounds.test.ts
 │   │   │   ├── context.test.ts
 │   │   │   ├── gcPressure.test.ts
-│   │   │   ├── serverManifest.test.ts
-│   │   │   └── typed-fail.test.ts
+│   │   │   └── serverManifest.test.ts
 │   │   ├── helpers/
 │   │   │   └── matchers.test.ts
 │   │   ├── linter/
@@ -781,12 +784,10 @@ mcp-ts-core/
 │   │   │   │   ├── disabled-tool.test.ts
 │   │   │   │   ├── enrichment.test.ts
 │   │   │   │   ├── tool-registration.lifecycle.test.ts
-│   │   │   │   ├── tool-registration.test.ts
-│   │   │   │   └── typed-error-contract.test.ts
+│   │   │   │   └── tool-registration.test.ts
 │   │   │   ├── transports/
 │   │   │   │   ├── auth/
 │   │   │   │   │   ├── lib/
-│   │   │   │   │   │   ├── authContext.test.ts
 │   │   │   │   │   │   ├── authUtils.test.ts
 │   │   │   │   │   │   ├── checkScopes.test.ts
 │   │   │   │   │   │   └── claimParser.test.ts
@@ -815,12 +816,15 @@ mcp-ts-core/
 │   │   │   │   │   └── stdioTransport.test.ts
 │   │   │   │   ├── heartbeat.test.ts
 │   │   │   │   └── manager.test.ts
+│   │   │   ├── handlerContext.test.ts
 │   │   │   ├── notifications.test.ts
 │   │   │   └── server.test.ts
 │   │   ├── packaging/
+│   │   │   ├── dependency-ranges.test.ts
 │   │   │   ├── dockerfile.test.ts
 │   │   │   ├── export-map.test.ts
 │   │   │   ├── optional-peer-deps.test.ts
+│   │   │   ├── tsconfig-base.test.ts
 │   │   │   └── type-environment-isolation.test.ts
 │   │   ├── public-api/
 │   │   │   └── type-contract.test.ts
@@ -981,7 +985,6 @@ mcp-ts-core/
 │   │   │   │   └── sensitiveFields.test.ts
 │   │   │   ├── telemetry/
 │   │   │   │   ├── attributes.test.ts
-│   │   │   │   ├── index.test.ts
 │   │   │   │   ├── instrumentation.lifecycle.test.ts
 │   │   │   │   ├── metrics.test.ts
 │   │   │   │   └── trace.test.ts
@@ -998,6 +1001,7 @@ mcp-ts-core/
 │   │   ├── storage-failures.worker.test.ts
 │   │   ├── storage-provider-compliance.worker.test.ts
 │   │   ├── storage-r2.worker.test.ts
+│   │   ├── tenant-default.worker.test.ts
 │   │   ├── wire-contract.worker.test.ts
 │   │   └── wire-helpers.ts
 │   ├── worker-bundle/

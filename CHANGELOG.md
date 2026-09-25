@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.13.7](changelog/0.13.x/0.13.7.md) — 2026-09-25 · ⚠️ Breaking · 🛡️ Security
+
+Server stack traces no longer reach clients through McpError.data, in-memory storage round-trips values as JSON like every other provider, OTEL_EXPORTER_OTLP_ENDPOINT is honored, and the unused MCP client, ext-apps, and dotenv dependencies are gone.
+
 ## [0.13.6](changelog/0.13.x/0.13.6.md) — 2026-09-19
 
 A ctx.fail site that never forwards its declared recovery now warns, an errors[] entry can mark itself thrownBy: 'service' so the unthrown rule skips it, capped-list-no-truncation stops firing on value bounds like max_depth_km, and devcheck.config.json can carry the truncation allowlist.
