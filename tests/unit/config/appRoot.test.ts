@@ -185,7 +185,7 @@ describe('resolveAppRoot', () => {
       expect(resolveAppRoot()?.manifest.name).toBe('some-server');
     });
 
-    it('keeps its own identity as a plain dependency run from a subdirectory of the project', () => {
+    it('keeps its own identity as a plain dependency run from a project subdirectory or from outside the project', () => {
       const project = makePackage(join(tempRoot, 'project'), {
         name: 'the-project',
         version: '0.4.2',
@@ -200,22 +200,12 @@ describe('resolveAppRoot', () => {
       process.chdir(src);
 
       expect(resolveAppRoot()?.manifest.name).toBe('some-server');
-    });
-  });
 
-  it('keeps the installed package when the process does not run from the installing project', () => {
-    const project = makePackage(join(tempRoot, 'project'), {
-      name: 'the-project',
-      version: '0.4.2',
-    });
-    const tool = makePackage(join(project, 'node_modules', 'some-server'), {
-      name: 'some-server',
-      version: '3.3.3',
-    });
-    setEntry(join(tool, 'dist', 'index.js'));
-    process.chdir(makePackage(join(tempRoot, 'elsewhere'), { name: 'elsewhere', version: '1' }));
+      resetAppRootCache();
+      process.chdir(makePackage(join(tempRoot, 'elsewhere'), { name: 'elsewhere', version: '1' }));
 
-    expect(resolveAppRoot()?.manifest.name).toBe('some-server');
+      expect(resolveAppRoot()?.manifest.name).toBe('some-server');
+    });
   });
 
   it('follows a symlinked bin shim to the real package', () => {

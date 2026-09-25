@@ -127,13 +127,13 @@ describe('ErrorHandler Fuzz Tests', () => {
   });
 
   describe('handleError', () => {
-    it('always returns an Error instance for random thrown values', () => {
+    it('always returns an McpError for random thrown values', () => {
       fc.assert(
         fc.property(fc.string(), (message) => {
           const result = ErrorHandler.handleError(new Error(message), {
             operation: 'fuzz-test',
           });
-          expect(result).toBeInstanceOf(Error);
+          expect(result).toBeInstanceOf(McpError);
           expect(typeof result.message).toBe('string');
         }),
         { numRuns: 100 },
@@ -157,7 +157,7 @@ describe('ErrorHandler Fuzz Tests', () => {
         const result = ErrorHandler.handleError(value, {
           operation: 'fuzz-test',
         });
-        expect(result).toBeInstanceOf(Error);
+        expect(result).toBeInstanceOf(McpError);
       }
     });
 
@@ -204,7 +204,7 @@ describe('ErrorHandler Fuzz Tests', () => {
       for (const throwFn of exoticThrows) {
         await expect(
           ErrorHandler.tryCatch(async () => throwFn(), { operation: 'fuzz-test' }),
-        ).rejects.toBeInstanceOf(Error);
+        ).rejects.toBeInstanceOf(McpError);
       }
     });
   });

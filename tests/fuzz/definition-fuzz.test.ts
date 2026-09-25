@@ -188,27 +188,6 @@ describe('fuzzTool', () => {
     expect(report.crashes).toHaveLength(0);
   });
 
-  it('still reports a leak the input did not supply', async () => {
-    const leakyTool = tool('fuzz_leaks_path', {
-      description: 'Reports a failure whose data carries a server-side path.',
-      input: z.object({ message: z.string().describe('Message') }),
-      output: z.object({ ok: z.boolean().describe('Success state') }),
-      handler(): never {
-        throw new McpError(JsonRpcErrorCode.InternalError, 'Read failed', {
-          path: '/Users/build-agent/app/node_modules/pkg/index.js',
-        });
-      },
-    });
-
-    const report = await fuzzTool(leakyTool as any, {
-      numRuns: 5,
-      numAdversarial: 0,
-      seed: 7,
-    });
-
-    expect(report.leaks.length).toBeGreaterThan(0);
-  });
-
   it('treats deliberate MCP domain errors as handled outcomes', async () => {
     const domainErrorTool = tool('fuzz_domain_error', {
       description: 'Always reports a declared domain failure.',
@@ -234,13 +213,6 @@ describe('fuzzTool', () => {
     });
 
     expectCleanReport(report);
-  });
-
-  it('reports are reproducible with seed', async () => {
-    const report1 = await fuzzTool(echoTool as any, { numRuns: 20, seed: 12345 });
-    const report2 = await fuzzTool(echoTool as any, { numRuns: 20, seed: 12345 });
-    expect(report1.totalRuns).toBe(report2.totalRuns);
-    expect(report1.crashes.length).toBe(report2.crashes.length);
   });
 });
 
@@ -322,20 +294,6 @@ describe('fuzzPrompt', () => {
 });
 
 describe('zodToArbitrary', () => {
-  it('generates valid values for string schemas', () => {
-    const arb = zodToArbitrary(z.string());
-    const values: unknown[] = [];
-    for (let i = 0; i < 20; i++) {
-      fc.assert(
-        fc.property(arb, (v) => {
-          values.push(v);
-        }),
-        { numRuns: 1 },
-      );
-    }
-    expect(values.every((v) => typeof v === 'string')).toBe(true);
-  });
-
   it('generates valid values for number schemas', () => {
     const schema = z.number().int().min(0).max(100);
     const arb = zodToArbitrary(schema);

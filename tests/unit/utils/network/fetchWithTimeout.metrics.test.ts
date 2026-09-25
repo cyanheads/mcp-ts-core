@@ -138,12 +138,12 @@ describe('fetchWithTimeout – http.client.request.duration histogram', () => {
 
   it('records duration in seconds (not milliseconds)', async () => {
     vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response('ok', { status: 200 }));
+    vi.spyOn(performance, 'now').mockReturnValueOnce(1000).mockReturnValue(2500);
 
     const response = await fetchWithTimeout('https://example.com', 5000, context);
     await response.text();
 
     const [durationS] = mockRecord.mock.calls[0]!;
-    // Duration should be well under 1 second for a mocked fetch
-    expect(durationS).toBeLessThan(1);
+    expect(durationS).toBe(1.5);
   });
 });

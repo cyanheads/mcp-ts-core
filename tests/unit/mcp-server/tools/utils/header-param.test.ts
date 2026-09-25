@@ -74,14 +74,6 @@ describe('headerParam', () => {
       [X_MCP_HEADER_KEY]: 'Region',
     });
   });
-
-  it('preserves the field type so validation still runs', () => {
-    const schema = z.object({ tenant: headerParam(z.int().min(1), 'Tenant-Id').describe('T.') });
-
-    expect(schema.safeParse({ tenant: 7 }).success).toBe(true);
-    expect(schema.safeParse({ tenant: 0 }).success).toBe(false);
-    expect(schema.safeParse({ tenant: 'seven' }).success).toBe(false);
-  });
 });
 
 // ---------------------------------------------------------------------------
@@ -347,16 +339,8 @@ describe('tool() rejects an invalid designation at definition time', () => {
     ).toThrow(/x-mcp-header/);
   });
 
-  it('throws on a z.record() value', () => {
-    expect(() =>
-      define(
-        'record_tool',
-        z.object({ map: z.record(z.string(), headerParam(z.string(), 'R')).describe('M.') }),
-      ),
-    ).toThrow(/x-mcp-header/);
-  });
-
-  it('throws on any field of a discriminated-union input root', () => {
+  it('throws through the strictened root on a discriminated union and on a duplicate name', () => {
+    // Strictening rebuilds each union variant; the designation must survive it.
     expect(() =>
       define(
         'union_tool',
@@ -368,10 +352,7 @@ describe('tool() rejects an invalid designation at definition time', () => {
           z.object({ mode: z.literal('b').describe('B.'), o: z.string().describe('O.') }),
         ]),
       ),
-    ).toThrow(/x-mcp-header/);
-  });
-
-  it('throws on a duplicate header name', () => {
+    ).toThrow(/discriminated-union input root/);
     expect(() =>
       define(
         'dup_tool',

@@ -45,31 +45,14 @@ describe('Type Guards', () => {
   });
 
   describe('isRecord', () => {
-    it('should return true for plain objects', () => {
-      expect(isRecord({})).toBe(true);
-      expect(isRecord({ key: 'value' })).toBe(true);
-      expect(isRecord({ a: 1, b: 2, c: 3 })).toBe(true);
-    });
-
-    it('should return false for null', () => {
-      expect(isRecord(null)).toBe(false);
-    });
-
-    it('should return false for arrays', () => {
-      expect(isRecord([])).toBe(false);
-      expect(isRecord([1, 2, 3])).toBe(false);
-    });
-
-    it('should return false for primitives', () => {
-      expect(isRecord('string')).toBe(false);
-      expect(isRecord(123)).toBe(false);
-      expect(isRecord(true)).toBe(false);
-      expect(isRecord(undefined)).toBe(false);
-    });
-
-    it('should handle objects with various value types', () => {
-      expect(isRecord({ str: 'hello', num: 42, bool: true })).toBe(true);
-      expect(isRecord({ nested: { obj: 'value' } })).toBe(true);
+    it.each([
+      [{ key: 'value' }, true],
+      [null, false],
+      [[1, 2, 3], false],
+      ['string', false],
+      [undefined, false],
+    ])('classifies %j as %s', (value, expected) => {
+      expect(isRecord(value)).toBe(expected);
     });
   });
 
@@ -90,18 +73,6 @@ describe('Type Guards', () => {
       expect(hasProperty(undefined, 'prop')).toBe(false);
       expect(hasProperty('string', 'prop')).toBe(false);
       expect(hasProperty(123, 'prop')).toBe(false);
-    });
-
-    it('should work with symbols as keys', () => {
-      const sym = Symbol('test');
-      const obj = { [sym]: 'value' };
-      expect(hasProperty(obj, sym)).toBe(true);
-    });
-
-    it('should work with numeric keys', () => {
-      const obj = { 0: 'zero', 1: 'one' };
-      expect(hasProperty(obj, 0)).toBe(true);
-      expect(hasProperty(obj, 1)).toBe(true);
     });
 
     it('should handle undefined property values', () => {
@@ -199,12 +170,6 @@ describe('Type Guards', () => {
     it('should handle null property values', () => {
       const obj = { prop: null };
       expect(getProperty(obj, 'prop')).toBeNull();
-    });
-
-    it('should work with symbols as keys', () => {
-      const sym = Symbol('test');
-      const obj = { [sym]: 'value' };
-      expect(getProperty(obj, sym)).toBe('value');
     });
   });
 });

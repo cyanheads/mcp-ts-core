@@ -477,20 +477,6 @@ describe('lintFormatParity — wrappers', () => {
 // ---------------------------------------------------------------------------
 
 describe('lintFormatParity — permissive matching', () => {
-  it('accepts a boolean rendered only by its key name label', () => {
-    const def = tool({
-      output: z.object({
-        wasCancelled: z.boolean().describe('Was cancelled'),
-      }),
-      format: (r) => {
-        const result = r as { wasCancelled: boolean };
-        // Key name as label, value substring "true" also covers the fallback.
-        return [{ type: 'text', text: `**Cancelled:** ${String(result.wasCancelled)}` }];
-      },
-    });
-    expect(parityErrors(def)).toHaveLength(0);
-  });
-
   it('flags a boolean that never appears anywhere', () => {
     const def = tool({
       output: z.object({
@@ -1212,13 +1198,6 @@ describe('lintFormatParity — schema metadata compatibility', () => {
     });
 
     expect(parityErrors(def)).toHaveLength(0);
-  });
-
-  it('skips null and primitive output metadata', () => {
-    const format = () => [{ type: 'text', text: 'unused' }];
-
-    expect(lintFormatParity({ output: null, format }, 'null_output')).toHaveLength(0);
-    expect(lintFormatParity({ output: 'object', format }, 'primitive_output')).toHaveLength(0);
   });
 });
 

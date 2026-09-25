@@ -25,19 +25,6 @@ describe('logStartupBanner', () => {
     restoreIsTTY();
   });
 
-  it('logs the banner via console.log when stdout is a TTY (no transport)', () => {
-    Object.defineProperty(process.stdout, 'isTTY', {
-      configurable: true,
-      value: true,
-    });
-
-    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
-
-    logStartupBanner('Test banner');
-
-    expect(logSpy).toHaveBeenCalledWith('Test banner');
-  });
-
   it('does not log when stdout is not a TTY', () => {
     Object.defineProperty(process.stdout, 'isTTY', {
       configurable: true,
@@ -80,19 +67,6 @@ describe('logStartupBanner', () => {
     logStartupBanner('HTTP banner', 'http');
 
     expect(logSpy).toHaveBeenCalledWith('HTTP banner');
-    expect(errorSpy).not.toHaveBeenCalled();
-  });
-
-  it('does not log stdio transport when not a TTY', () => {
-    Object.defineProperty(process.stdout, 'isTTY', {
-      configurable: true,
-      value: false,
-    });
-
-    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
-
-    logStartupBanner('Should not appear', 'stdio');
-
     expect(errorSpy).not.toHaveBeenCalled();
   });
 });

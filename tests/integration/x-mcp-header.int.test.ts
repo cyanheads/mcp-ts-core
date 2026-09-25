@@ -236,10 +236,6 @@ describe('x-mcp-header input designation (#360)', () => {
   });
 
   describe('agreement with the SDK scan', () => {
-    it('registers a designated tool without an SDK warning', async () => {
-      expect(await sdkRejects(designated as AnyToolDefinition)).toBe(false);
-    });
-
     it.each([
       [
         'nested object property',
@@ -341,6 +337,12 @@ describe('x-mcp-header input designation (#360)', () => {
       });
 
       expect(result.isError).toBe(true);
+      expect(
+        (result.structuredContent as { error: { data?: Record<string, unknown> } }).error.data,
+      ).toMatchObject({
+        reason: 'invalid_arguments',
+        issues: [expect.objectContaining({ code: 'invalid_type', path: ['routing', 'shard'] })],
+      });
     });
   });
 });

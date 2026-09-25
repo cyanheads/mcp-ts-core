@@ -6,9 +6,9 @@
  * @module tests/unit/canvas/exportWriter.test
  */
 
-import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, stat, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { isAbsolute, join, sep } from 'node:path';
+import { join, sep } from 'node:path';
 
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
@@ -58,7 +58,8 @@ describe('resolveExportPath', () => {
   it('creates the sandbox root directory if missing', async () => {
     const ephemeralRoot = join(root, 'auto-created');
     const resolved = await resolveExportPath(ephemeralRoot, 'output.csv');
-    expect(isAbsolute(resolved)).toBe(true);
+    expect(resolved).toBe(join(ephemeralRoot, 'output.csv'));
+    expect((await stat(ephemeralRoot)).isDirectory()).toBe(true);
   });
 
   it('canonicalizes valid `./` and same-folder paths', async () => {
@@ -95,15 +96,12 @@ describe('resolveExportPath', () => {
 });
 
 describe('copyFormatClause', () => {
-  it('emits CSV with HEADER true', () => {
-    expect(copyFormatClause('csv')).toMatch(/csv/);
-    expect(copyFormatClause('csv')).toMatch(/HEADER true/);
-  });
-  it('emits parquet', () => {
-    expect(copyFormatClause('parquet')).toMatch(/parquet/);
-  });
-  it('emits json', () => {
-    expect(copyFormatClause('json')).toMatch(/json/);
+  it.each([
+    ['csv', "(FORMAT 'csv', HEADER true)"],
+    ['parquet', "(FORMAT 'parquet')"],
+    ['json', "(FORMAT 'json')"],
+  ] as const)('emits the COPY format clause for %s', (format, clause) => {
+    expect(copyFormatClause(format)).toBe(clause);
   });
 });
 

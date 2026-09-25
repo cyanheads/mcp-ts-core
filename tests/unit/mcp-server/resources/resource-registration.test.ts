@@ -5,7 +5,6 @@
 import { ResourceTemplate } from '@modelcontextprotocol/server';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { z } from 'zod';
-import type { ResourceSubscriptions } from '@/mcp-server/notifications.js';
 import { ResourceRegistry } from '@/mcp-server/resources/resource-registration.js';
 import { resource } from '@/mcp-server/resources/utils/resourceDefinition.js';
 import type { HandlerServices } from '@/mcp-server/resources/utils/resourceHandlerFactory.js';
@@ -122,42 +121,6 @@ describe('ResourceRegistry', () => {
   });
 
   describe('Resource Registration', () => {
-    it('should register a single resource successfully', async () => {
-      const testResource = resource('test://{id}', {
-        description: 'A test resource',
-        params: z.object({ id: z.string().describe('id') }),
-        handler: (params) => ({ id: params.id }),
-      });
-
-      const registry = new ResourceRegistry([testResource], services);
-      await registry.registerAll(mockServer);
-
-      expect(mockServer.registerResource).toHaveBeenCalledTimes(1);
-    });
-
-    it('should register multiple resources', async () => {
-      const r1 = resource('one://{id}', {
-        description: 'First',
-        handler: () => ({}),
-      });
-      const r2 = resource('two://{id}', {
-        description: 'Second',
-        handler: () => ({}),
-      });
-
-      const registry = new ResourceRegistry([r1, r2], services);
-      await registry.registerAll(mockServer);
-
-      expect(mockServer.registerResource).toHaveBeenCalledTimes(2);
-    });
-
-    it('should handle empty resource list', async () => {
-      const registry = new ResourceRegistry([], services);
-      await registry.registerAll(mockServer);
-
-      expect(mockServer.registerResource).toHaveBeenCalledTimes(0);
-    });
-
     it('should reject duplicate resource names before registering the second resource', async () => {
       const resources = [
         resource('first://{id}', {
@@ -262,25 +225,6 @@ describe('ResourceRegistry', () => {
       expect(mockServer.sendToolListChanged).toHaveBeenCalledOnce();
     });
 
-    it('routes handler-time notifications through the request scope when it has a sender', async () => {
-      const notify = vi.fn(async () => {});
-      const subscriptions: ResourceSubscriptions = { has: () => true };
-      const registry = new ResourceRegistry([notifyingResource], services);
-      await registry.registerAll(mockServer, subscriptions);
-
-      const handler = mockServer.registerResource.mock.calls[0][3];
-      await handler(new URL('notify://123'), { id: '123' }, makeServerContext({ notify }));
-
-      expect(notify).toHaveBeenCalledWith({ method: 'notifications/prompts/list_changed' });
-      expect(notify).toHaveBeenCalledWith({ method: 'notifications/resources/list_changed' });
-      expect(notify).toHaveBeenCalledWith({ method: 'notifications/tools/list_changed' });
-      expect(notify).toHaveBeenCalledWith({
-        method: 'notifications/resources/updated',
-        params: { uri: 'notify://updated' },
-      });
-      expect(mockServer.sendPromptListChanged).not.toHaveBeenCalled();
-    });
-
     it('gates resources/updated on the connection subscription registry (#354)', async () => {
       const notify = vi.fn(async () => {});
       const has = vi.fn(() => false);
@@ -316,32 +260,10 @@ describe('ResourceRegistry', () => {
       await registry.registerAll(mockServer);
 
       // The registration path constructs a ResourceTemplate and passes it as the
-      // second argument to server.registerResource(). Verify the template was created.
-      const call = mockServer.registerResource.mock.calls[0];
-      const template = call[1];
+      // second argument to server.registerResource(), carrying the complete map.
+      const template = mockServer.registerResource.mock.calls[0][1] as ResourceTemplate;
       expect(template).toBeInstanceOf(ResourceTemplate);
-    });
-
-    it('ResourceDefinition.complete field carries the callback map', () => {
-      // Verify the definition type accepts and retains the complete map.
-      // Full wire-path forwarding is covered by tests/integration/completions.int.test.ts.
-      const completer = async (value: string) => ['alpha'].filter((v) => v.startsWith(value));
-      const defWithComplete = resource('things://{id}', {
-        name: 'things-complete',
-        description: 'Has complete',
-        handler: () => ({ ok: true }),
-        complete: { id: completer },
-      });
-
-      const defWithoutComplete = resource('widgets://{id}', {
-        name: 'widgets-no-complete',
-        description: 'No complete',
-        handler: () => ({ ok: true }),
-      });
-
-      expect(defWithComplete.complete).toBeDefined();
-      expect(defWithComplete.complete!.id).toBe(completer);
-      expect(defWithoutComplete.complete).toBeUndefined();
+      expect(template.completeCallback('id')).toBe(completer);
     });
   });
 

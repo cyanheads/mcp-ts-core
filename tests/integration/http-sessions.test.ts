@@ -6,8 +6,8 @@
  */
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
-import { initializeBody, jsonrpc, MCP_HEADERS } from '../helpers/http-helpers.js';
-import { assertServerBuilt, type ServerHandle, startServer } from '../helpers/server-process.js';
+import { initializeBody, jsonrpc, MCP_HEADERS, parseSSEEvents } from '../helpers/http-helpers.js';
+import { type ServerHandle, startServer } from '../helpers/server-process.js';
 
 const PROTOCOL_VERSION = '2025-06-18';
 
@@ -15,7 +15,6 @@ describe('HTTP session management integration', () => {
   let handle: ServerHandle;
 
   beforeAll(async () => {
-    assertServerBuilt();
     handle = await startServer('http', {
       MCP_SESSION_MODE: 'stateful',
     });
@@ -67,7 +66,7 @@ describe('HTTP session management integration', () => {
     expect(sessionId).toBeTruthy();
 
     // Step 2: Send initialized notification (required by protocol before requests)
-    await fetch(`http://localhost:${handle.port}/mcp`, {
+    const notifyRes = await fetch(`http://localhost:${handle.port}/mcp`, {
       body: JSON.stringify({
         jsonrpc: '2.0',
         method: 'notifications/initialized',
@@ -79,6 +78,7 @@ describe('HTTP session management integration', () => {
       },
       method: 'POST',
     });
+    expect(notifyRes.status).toBe(202);
 
     // Step 3: Use the session for a tools/list request
     const listRes = await fetch(`http://localhost:${handle.port}/mcp`, {
@@ -92,6 +92,12 @@ describe('HTTP session management integration', () => {
     });
 
     expect(listRes.status).toBe(200);
+    // The transport may answer JSON or a one-event SSE stream; both carry the result.
+    const body = await listRes.text();
+    const payload = body.trimStart().startsWith('{')
+      ? body
+      : (parseSSEEvents(body).find((event) => event.data.includes('"result"'))?.data ?? '');
+    expect(JSON.parse(payload)).toEqual({ jsonrpc: '2.0', id: 2, result: { tools: [] } });
   });
 
   it('rejects non-initialize requests without a session ID with 400', async () => {
@@ -122,17 +128,6 @@ describe('HTTP session management integration', () => {
     });
 
     expect(res.status).toBe(400);
-  });
-
-  it('allows initialize requests without a session ID', async () => {
-    const res = await fetch(`http://localhost:${handle.port}/mcp`, {
-      body: initializeBody(),
-      headers: { ...MCP_HEADERS },
-      method: 'POST',
-    });
-
-    expect(res.status).toBe(200);
-    expect(res.headers.get('mcp-session-id')).toBeTruthy();
   });
 
   it('rejects requests with an invalid session ID with 404', async () => {

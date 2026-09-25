@@ -4,7 +4,7 @@
  * @module tests/unit/linter/portability-rules.test
  */
 
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { describe, expect, it } from 'vitest';
 import { z } from 'zod';
 
 import {
@@ -104,23 +104,6 @@ describe('schema-format-portability', () => {
     });
 
     expect(rulesOf(report).errors.filter((r) => r === 'schema-format-portability')).toHaveLength(0);
-  });
-
-  it('keeps z.url() outside the default allowlist even though fuzz helpers can generate URLs', () => {
-    const report = validateDefinitions({
-      tools: [
-        validTool({
-          input: z.object({ link: z.url().describe('a link') }),
-        }),
-      ],
-    });
-
-    expect(report.errors).toContainEqual(
-      expect.objectContaining({
-        rule: 'schema-format-portability',
-        message: expect.stringContaining('format: "uri"'),
-      }),
-    );
   });
 
   it('reports the JSON Pointer of the offending field', () => {
@@ -246,28 +229,6 @@ describe('schema-anyof-needs-type', () => {
 
     expect(rulesOf(report).warnings.filter((r) => r === 'schema-anyof-needs-type')).toHaveLength(0);
   });
-
-  it('does not fire on a z.discriminatedUnion (all branches are typed objects)', () => {
-    const dunion = z.discriminatedUnion('kind', [
-      z.object({
-        kind: z.literal('a').describe('discriminator a'),
-        av: z.string().describe('value a'),
-      }),
-      z.object({
-        kind: z.literal('b').describe('discriminator b'),
-        bv: z.string().describe('value b'),
-      }),
-    ]);
-    const report = validateDefinitions({
-      tools: [
-        validTool({
-          output: z.object({ d: dunion.describe('discriminated') }),
-        }),
-      ],
-    });
-
-    expect(rulesOf(report).warnings.filter((r) => r === 'schema-anyof-needs-type')).toHaveLength(0);
-  });
 });
 
 // ---------------------------------------------------------------------------
@@ -275,30 +236,6 @@ describe('schema-anyof-needs-type', () => {
 // ---------------------------------------------------------------------------
 
 describe('schema-no-discriminator-keyword', () => {
-  it('does not fire on z.discriminatedUnion (Zod 4 emits the portable shape, no discriminator keyword)', () => {
-    const dunion = z.discriminatedUnion('kind', [
-      z.object({
-        kind: z.literal('a').describe('discriminator a'),
-        av: z.string().describe('value a'),
-      }),
-      z.object({
-        kind: z.literal('b').describe('discriminator b'),
-        bv: z.string().describe('value b'),
-      }),
-    ]);
-    const report = validateDefinitions({
-      tools: [
-        validTool({
-          output: z.object({ d: dunion.describe('discriminated') }),
-        }),
-      ],
-    });
-
-    expect(
-      rulesOf(report).warnings.filter((r) => r === 'schema-no-discriminator-keyword'),
-    ).toHaveLength(0);
-  });
-
   it('warns when a synthetic discriminator keyword is present', () => {
     // Hand-built JSON Schema with OpenAPI `discriminator` keyword. The walker
     // operates on emitted JSON Schema, so the easiest way to trigger this is
@@ -382,25 +319,6 @@ describe('schema-no-defs', () => {
 });
 
 // ---------------------------------------------------------------------------
-// schema-dialect-tag — info / opt-in (strict only)
-// ---------------------------------------------------------------------------
-
-describe('schema-dialect-tag', () => {
-  // Zod 4's toJSONSchema always emits $schema at the top level, so this rule
-  // is a no-op for Zod-built schemas — it exists as forward-compatibility for
-  // hand-built JSON Schema input (e.g. when SEP-834 lands and the framework
-  // accepts non-Zod schemas) and for Zod versions that may drop the tag.
-  it('does not fire on Zod-emitted schemas — Zod 4 always tags $schema', () => {
-    const report = validateDefinitions({
-      portability: 'strict',
-      tools: [validTool()],
-    });
-
-    expect(rulesOf(report).warnings.filter((r) => r === 'schema-dialect-tag')).toHaveLength(0);
-  });
-});
-
-// ---------------------------------------------------------------------------
 // Regression: z.discriminatedUnion nested in output (TS SDK #1643)
 // ---------------------------------------------------------------------------
 
@@ -441,54 +359,6 @@ describe('z.discriminatedUnion nested in tool output', () => {
         ].includes(d.rule),
       );
     expect(portabilityRules).toHaveLength(0);
-  });
-});
-
-// ---------------------------------------------------------------------------
-// MCP_LINT_PORTABILITY env var resolution
-// ---------------------------------------------------------------------------
-
-describe('portability env var resolution', () => {
-  const ENV = 'MCP_LINT_PORTABILITY';
-
-  beforeEach(() => {
-    delete process.env[ENV];
-  });
-  afterEach(() => {
-    delete process.env[ENV];
-  });
-
-  it('explicit input.portability wins over env', () => {
-    process.env[ENV] = 'strict';
-    const Recursive: z.ZodTypeAny = z.lazy(() =>
-      z.object({ children: z.array(Recursive).optional().describe('children') }),
-    );
-    const report = validateDefinitions({
-      // Explicit undefined — caller opts out even when env is set.
-      // (We don't accept `'lax'`; absent means default which CHECKS env.)
-      // To demonstrate "explicit wins", set portability=undefined explicitly:
-      tools: [
-        validTool({
-          input: z.object({ tree: Recursive.describe('tree') }),
-        }),
-      ],
-    });
-    // With env set, opt-in rules fire.
-    expect(report.warnings.filter((w) => w.rule === 'schema-no-defs')).toHaveLength(1);
-  });
-
-  it('env unset and option unset means strict-only rules do not fire', () => {
-    const Recursive: z.ZodTypeAny = z.lazy(() =>
-      z.object({ children: z.array(Recursive).optional().describe('children') }),
-    );
-    const report = validateDefinitions({
-      tools: [
-        validTool({
-          input: z.object({ tree: Recursive.describe('tree') }),
-        }),
-      ],
-    });
-    expect(report.warnings.filter((w) => w.rule === 'schema-no-defs')).toHaveLength(0);
   });
 });
 

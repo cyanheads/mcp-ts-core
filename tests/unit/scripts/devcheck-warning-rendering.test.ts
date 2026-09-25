@@ -115,16 +115,10 @@ describe('devcheck running-log rendering of a warning-demoted step (#344)', () =
     expect(line.startsWith('⚠')).toBe(true);
   });
 
-  it('carries the warning message in the running log, not only in the summary', () => {
+  it('carries the warning message in the running log, leaving the demotion and exit code alone', () => {
     dir = skillVersionsScaffold({ code: 1, message: WARNING_MESSAGE });
-    const { out, lines } = runCheck('Skill Versions');
+    const { code, out, lines } = runCheck('Skill Versions');
     expect(runningLog(out)).toContain(WARNING_MESSAGE);
-    expect(summaryRow(lines, 'Skill Versions')).toContain('WARNING');
-  });
-
-  it('leaves the demotion policy and the exit code alone', () => {
-    dir = skillVersionsScaffold({ code: 1, message: WARNING_MESSAGE });
-    const { code, lines } = runCheck('Skill Versions');
     expect(summaryRow(lines, 'Skill Versions')).toContain('WARNING');
     expect(code).toBe(0);
   });

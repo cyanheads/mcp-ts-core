@@ -183,11 +183,6 @@ describe('SessionStore - Security & Tenant Isolation', () => {
       ).toBe(true);
     });
 
-    it('registers without identity (no-auth mode)', () => {
-      register(SESSION_1);
-      expect(store.isValidForIdentity(SESSION_1)).toBe(true);
-    });
-
     it('lazy-binds identity on the first authenticated request', () => {
       register(SESSION_1);
 
@@ -205,11 +200,6 @@ describe('SessionStore - Security & Tenant Isolation', () => {
   });
 
   describe('Tenant Isolation - Security', () => {
-    it('accepts the bound tenant', () => {
-      register(SESSION_1, { tenantId: 'tenant-a' });
-      expect(store.isValidForIdentity(SESSION_1, { tenantId: 'tenant-a' })).toBe(true);
-    });
-
     it('REJECTS session reuse across different tenants (CRITICAL)', () => {
       register(SESSION_1, { tenantId: 'tenant-a', clientId: 'client-1' });
 

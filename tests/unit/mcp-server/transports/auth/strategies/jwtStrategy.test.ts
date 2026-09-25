@@ -43,29 +43,11 @@ describe('JwtStrategy', () => {
   });
 
   describe('constructor', () => {
-    it('should initialize successfully with valid secret key', () => {
-      mockConfig.mcpAuthSecretKey = testSecret;
-
-      strategy = new JwtStrategy(mockConfig as never, logger);
-
-      expect(strategy).toBeInstanceOf(JwtStrategy);
-    });
-
     it('should throw error in production without secret key', () => {
       mockConfig.environment = 'production';
       mockConfig.mcpAuthSecretKey = undefined;
 
       expect(() => new JwtStrategy(mockConfig as never, logger)).toThrow(McpError);
-    });
-
-    it('should allow missing secret key when devMcpAuthBypass is true', () => {
-      mockConfig.environment = 'development';
-      mockConfig.mcpAuthSecretKey = undefined;
-      mockConfig.devMcpAuthBypass = true;
-
-      strategy = new JwtStrategy(mockConfig as never, logger);
-
-      expect(strategy).toBeInstanceOf(JwtStrategy);
     });
   });
 
@@ -91,51 +73,6 @@ describe('JwtStrategy', () => {
       expect(authInfo.token).toBe(token);
     });
 
-    it('should verify valid JWT token with client_id claim', async () => {
-      const token = await new SignJWT({
-        client_id: 'test-client-id',
-        scope: 'tool:read resource:write',
-      })
-        .setProtectedHeader({ alg: 'HS256' })
-        .setExpirationTime('1h')
-        .sign(testSecretBytes);
-
-      const authInfo = await strategy.verify(token);
-
-      expect(authInfo.clientId).toBe('test-client-id');
-      expect(authInfo.scopes).toEqual(['tool:read', 'resource:write']);
-    });
-
-    it('should extract tenant ID from tid claim', async () => {
-      const token = await new SignJWT({
-        cid: 'test-client',
-        scp: ['tool:read'],
-        tid: 'tenant-123',
-      })
-        .setProtectedHeader({ alg: 'HS256' })
-        .setExpirationTime('1h')
-        .sign(testSecretBytes);
-
-      const authInfo = await strategy.verify(token);
-
-      expect(authInfo.tenantId).toBe('tenant-123');
-    });
-
-    it('should extract subject from sub claim', async () => {
-      const token = await new SignJWT({
-        cid: 'test-client',
-        scp: ['tool:read'],
-        sub: 'user-456',
-      })
-        .setProtectedHeader({ alg: 'HS256' })
-        .setExpirationTime('1h')
-        .sign(testSecretBytes);
-
-      const authInfo = await strategy.verify(token);
-
-      expect(authInfo.subject).toBe('user-456');
-    });
-
     it('should throw error for missing client ID claim', async () => {
       const token = await new SignJWT({
         scp: ['tool:read'],
@@ -146,18 +83,6 @@ describe('JwtStrategy', () => {
 
       await expect(strategy.verify(token)).rejects.toThrow(McpError);
       await expect(strategy.verify(token)).rejects.toThrow(/missing 'cid' or 'client_id'/);
-    });
-
-    it('should throw error for missing scopes claim', async () => {
-      const token = await new SignJWT({
-        cid: 'test-client',
-      })
-        .setProtectedHeader({ alg: 'HS256' })
-        .setExpirationTime('1h')
-        .sign(testSecretBytes);
-
-      await expect(strategy.verify(token)).rejects.toThrow(McpError);
-      await expect(strategy.verify(token)).rejects.toThrow(/non-empty scopes/);
     });
 
     it('should throw error for expired token', async () => {
@@ -204,46 +129,6 @@ describe('JwtStrategy', () => {
       expect(authInfo.token).toBe('dev-mode-placeholder-token');
     });
 
-    it('should handle space-separated scope string', async () => {
-      const token = await new SignJWT({
-        cid: 'test-client',
-        scope: '  tool:read   resource:write  tool:execute  ',
-      })
-        .setProtectedHeader({ alg: 'HS256' })
-        .setExpirationTime('1h')
-        .sign(testSecretBytes);
-
-      const authInfo = await strategy.verify(token);
-
-      expect(authInfo.scopes).toEqual(['tool:read', 'resource:write', 'tool:execute']);
-    });
-
-    it('should throw error for empty scope array', async () => {
-      const token = await new SignJWT({
-        cid: 'test-client',
-        scp: [],
-      })
-        .setProtectedHeader({ alg: 'HS256' })
-        .setExpirationTime('1h')
-        .sign(testSecretBytes);
-
-      await expect(strategy.verify(token)).rejects.toThrow(McpError);
-      await expect(strategy.verify(token)).rejects.toThrow(/non-empty scopes/);
-    });
-
-    it('should throw error for whitespace-only scope string', async () => {
-      const token = await new SignJWT({
-        cid: 'test-client',
-        scope: '   ',
-      })
-        .setProtectedHeader({ alg: 'HS256' })
-        .setExpirationTime('1h')
-        .sign(testSecretBytes);
-
-      await expect(strategy.verify(token)).rejects.toThrow(McpError);
-      await expect(strategy.verify(token)).rejects.toThrow(/non-empty scopes/);
-    });
-
     it('should verify issuer and audience when configured', async () => {
       mockConfig.mcpJwtExpectedIssuer = 'https://issuer.example.com';
       mockConfig.mcpJwtExpectedAudience = 'mcp-ts-core-tests';
@@ -281,24 +166,6 @@ describe('JwtStrategy', () => {
         .sign(testSecretBytes);
 
       await expect(strategy.verify(token)).rejects.toThrow(McpError);
-    });
-
-    it('should populate expiresAt from the JWT exp claim', async () => {
-      const beforeSign = Math.floor(Date.now() / 1000);
-      const token = await new SignJWT({
-        cid: 'test-client',
-        scp: ['tool:read'],
-      })
-        .setProtectedHeader({ alg: 'HS256' })
-        .setExpirationTime('1h')
-        .sign(testSecretBytes);
-
-      const authInfo = await strategy.verify(token);
-
-      expect(typeof authInfo.expiresAt).toBe('number');
-      // exp should be ~1 hour from now (3600s), well above current time
-      expect(authInfo.expiresAt).toBeGreaterThan(beforeSign);
-      expect(authInfo.expiresAt).toBeLessThanOrEqual(beforeSign + 3601);
     });
 
     describe('algorithm and claim security', () => {

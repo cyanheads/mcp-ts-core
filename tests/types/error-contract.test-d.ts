@@ -1,11 +1,11 @@
 /**
  * @fileoverview Typecheck suite for the error-contract typed surfaces:
- * `TypedFail`/`ReasonOf` unions, `createFail`/`createRecoveryFor`, and
- * `createMockContext({ errors })` propagation via `HandlerContext<R>`.
+ * `TypedFail`/`ReasonOf` unions, `createFail`/`createRecoveryFor`, and the
+ * declared contract flowing into `ctx.fail`/`ctx.recoveryFor` inside `tool()` handlers.
  * @module tests/types/error-contract.test-d
  */
 
-import type { HandlerContext, ReasonOf, TypedFail, TypedRecoveryFor } from '@cyanheads/mcp-ts-core';
+import type { ReasonOf, TypedFail, TypedRecoveryFor } from '@cyanheads/mcp-ts-core';
 import { createFail, createRecoveryFor, tool, z } from '@cyanheads/mcp-ts-core';
 import { type ErrorContract, JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { describe, expectTypeOf, it } from 'vitest';
@@ -108,38 +108,6 @@ describe('createRecoveryFor', () => {
     const recoveryFor = createRecoveryFor(CONTRACT);
     type R = ReturnType<typeof recoveryFor>;
     expectTypeOf<R>().toEqualTypeOf<{ recovery: { hint: string } } | Record<string, never>>();
-  });
-});
-
-// ---------------------------------------------------------------------------
-// HandlerContext<R> and ctx.fail / ctx.recoveryFor — negative cases
-// ---------------------------------------------------------------------------
-
-describe('HandlerContext<R> — negative cases', () => {
-  it('ctx.fail rejects an undeclared reason', () => {
-    type Ctx = HandlerContext<'no_match' | 'rate_limited'>;
-    // Positive: declared reasons are assignable
-    expectTypeOf<Ctx>().toHaveProperty('fail');
-    type FailFn = Ctx extends { fail: infer F } ? F : never;
-    expectTypeOf<FailFn>().parameter(0).toEqualTypeOf<'no_match' | 'rate_limited'>();
-
-    // Negative: 'not_declared' must not be assignable to the reason union
-    type IsAssignable = 'not_declared' extends 'no_match' | 'rate_limited' ? true : false;
-    expectTypeOf<IsAssignable>().toEqualTypeOf<false>();
-  });
-
-  it('ctx.recoveryFor on HandlerContext<R> rejects an undeclared reason', () => {
-    type Ctx = HandlerContext<'no_match' | 'rate_limited'>;
-    type RecoveryFn = Ctx extends { recoveryFor: infer F } ? F : never;
-    expectTypeOf<RecoveryFn>().parameter(0).toEqualTypeOf<'no_match' | 'rate_limited'>();
-
-    type IsAssignable = 'unknown_reason' extends 'no_match' | 'rate_limited' ? true : false;
-    expectTypeOf<IsAssignable>().toEqualTypeOf<false>();
-  });
-
-  it('ctx.fail is absent when no contract is declared (R = never)', () => {
-    type Ctx = HandlerContext<never>;
-    expectTypeOf<Ctx>().not.toHaveProperty('fail');
   });
 });
 

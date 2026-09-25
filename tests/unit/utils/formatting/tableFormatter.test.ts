@@ -16,14 +16,6 @@ describe('TableFormatter', () => {
     { name: 'Charlie', age: 35, role: 'Manager' },
   ];
 
-  describe('Singleton instance', () => {
-    it('should export a singleton instance', () => {
-      expect(tableFormatter).toBeInstanceOf(TableFormatter);
-      expect(tableFormatter.format).toBeInstanceOf(Function);
-      expect(tableFormatter.formatRaw).toBeInstanceOf(Function);
-    });
-  });
-
   describe('format() with object arrays', () => {
     it('should format simple data in markdown style (default)', () => {
       const result = tableFormatter.format(sampleData);
@@ -43,14 +35,6 @@ describe('TableFormatter', () => {
       expect(result).toContain('┐');
       expect(result).toContain('│');
       expect(result).toContain('Alice');
-    });
-
-    it('should handle single-row data', () => {
-      const singleRow = [{ name: 'Alice', age: 30 }];
-      const result = tableFormatter.format(singleRow);
-
-      expect(result).toContain('Alice');
-      expect(result).toContain('30');
     });
 
     it('should handle various data types', () => {
@@ -183,8 +167,7 @@ describe('TableFormatter', () => {
         style: 'compact',
       });
 
-      const lines = result.split('\n');
-      expect(lines.length).toBeGreaterThan(0);
+      expect(result).toBe('Name   Age  Score\nAlice  30   95   \nBob    25   88   ');
     });
 
     it('should render right-alignment indicators in markdown separators', () => {
@@ -211,21 +194,6 @@ describe('TableFormatter', () => {
       expect(separatorLine).toMatch(/:-+:/);
       expect(result).toContain('Alice');
       expect(result).toContain('Bob');
-    });
-
-    it('should support mixed alignment', () => {
-      const result = tableFormatter.formatRaw(headers, rows, {
-        style: 'grid',
-        alignment: {
-          Name: 'left',
-          Age: 'center',
-          Score: 'right',
-        },
-      });
-
-      expect(result).toContain('Alice');
-      expect(result).toContain('30');
-      expect(result).toContain('95');
     });
 
     it('should support alignment by column index string', () => {
@@ -262,7 +230,7 @@ describe('TableFormatter', () => {
       expect(result).not.toContain('that exceeds limits');
     });
 
-    it('should respect maxWidth setting', () => {
+    it('should cap the column at maxWidth and truncate the overflow', () => {
       const data = [{ col: 'A'.repeat(100) }];
 
       const result = tableFormatter.format(data, {
@@ -270,18 +238,20 @@ describe('TableFormatter', () => {
         truncate: true,
       });
 
-      const lines = result.split('\n');
-      expect(lines.some((line) => line.length < 150)).toBe(true); // Truncated
+      expect(result).toBe(
+        `| col                  |\n| -------------------- |\n| ${'A'.repeat(17)}... |`,
+      );
     });
 
-    it('should handle truncate: false', () => {
+    it('should keep content wider than maxWidth intact when truncate is false', () => {
       const data = [{ text: 'Short text' }];
 
       const result = tableFormatter.format(data, {
+        maxWidth: 5,
         truncate: false,
       });
 
-      expect(result).toContain('Short text');
+      expect(result).toBe('| text  |\n| ----- |\n| Short text |');
     });
   });
 
@@ -298,15 +268,6 @@ describe('TableFormatter', () => {
       expect(result).toContain('AGE');
       expect(result).not.toContain('Name');
       expect(result).not.toContain('Age');
-    });
-
-    it('should apply none header style (default)', () => {
-      const result = tableFormatter.formatRaw(headers, rows, {
-        headerStyle: 'none',
-      });
-
-      expect(result).toContain('Name');
-      expect(result).toContain('Age');
     });
 
     it('should apply bold header style (markdown wrapping)', () => {
@@ -330,29 +291,25 @@ describe('TableFormatter', () => {
       expect(result).toBe('');
     });
 
-    it('should handle single column data', () => {
-      const data = [{ name: 'Alice' }, { name: 'Bob' }];
-      const result = tableFormatter.format(data);
-
-      expect(result).toContain('Alice');
-      expect(result).toContain('Bob');
-    });
-
-    it('should handle wide content with compact style', () => {
+    it('should pad wide content at the default maxWidth with compact style', () => {
       const data = [
         { a: 'A'.repeat(50), b: 'B'.repeat(50) },
         { a: 'Short', b: 'Text' },
       ];
 
       const result = tableFormatter.format(data, { style: 'compact' });
-      expect(result).toBeTruthy();
+      expect(result.split('\n')).toEqual([
+        `${'a'.padEnd(50)}  ${'b'.padEnd(50)}`,
+        `${'A'.repeat(50)}  ${'B'.repeat(50)}`,
+        `${'Short'.padEnd(50)}  ${'Text'.padEnd(50)}`,
+      ]);
     });
 
-    it('should handle special characters in content', () => {
+    it('should embed newline and tab characters in content verbatim', () => {
       const data = [{ text: 'Hello\nWorld' }, { text: 'Foo\tBar' }];
       const result = tableFormatter.format(data);
 
-      expect(result).toBeTruthy();
+      expect(result).toBe('| text        |\n| ----------- |\n| Hello\nWorld |\n| Foo\tBar     |');
     });
 
     it('should log debug messages for empty data', () => {
@@ -504,39 +461,6 @@ describe('TableFormatter', () => {
       );
 
       debugSpy.mockRestore();
-    });
-  });
-
-  describe('Styling variations', () => {
-    const headers = ['Col1', 'Col2'];
-    const rows = [
-      ['A', 'B'],
-      ['C', 'D'],
-    ];
-
-    it('should produce different outputs for each style', () => {
-      const markdown = tableFormatter.formatRaw(headers, rows, {
-        style: 'markdown',
-      });
-      const ascii = tableFormatter.formatRaw(headers, rows, { style: 'ascii' });
-      const grid = tableFormatter.formatRaw(headers, rows, { style: 'grid' });
-      const compact = tableFormatter.formatRaw(headers, rows, {
-        style: 'compact',
-      });
-
-      // All should contain data
-      [markdown, ascii, grid, compact].forEach((result) => {
-        expect(result).toContain('A');
-        expect(result).toContain('B');
-        expect(result).toContain('C');
-        expect(result).toContain('D');
-      });
-
-      // Each should be unique
-      expect(markdown).not.toBe(ascii);
-      expect(markdown).not.toBe(grid);
-      expect(markdown).not.toBe(compact);
-      expect(ascii).not.toBe(grid);
     });
   });
 

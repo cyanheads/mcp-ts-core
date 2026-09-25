@@ -20,6 +20,9 @@ import { fetchWithTimeout } from '@/utils/network/fetchWithTimeout.js';
 
 const mockFetch = vi.mocked(fetchWithTimeout);
 
+/** The multipart body of the Nth fetchWithTimeout call. */
+const sentForm = (call = 0): FormData => mockFetch.mock.calls[call]?.[3]?.body as FormData;
+
 describe('WhisperProvider', () => {
   let provider: WhisperProvider;
 
@@ -48,13 +51,22 @@ describe('WhisperProvider', () => {
       expect(provider.supportsSTT).toBe(true);
     });
 
-    it('should use default values when not specified', () => {
+    it('should use default base URL, model, and timeout when not specified', async () => {
       const p = new WhisperProvider({
         provider: 'openai-whisper',
         apiKey: 'key',
       });
+      mockFetch.mockResolvedValue({
+        ok: true,
+        json: () => Promise.resolve({ text: 'ok' }),
+      } as unknown as Response);
 
-      expect(p.name).toBe('openai-whisper');
+      await p.speechToText({ audio: Buffer.from('audio') });
+
+      const [url, timeout] = mockFetch.mock.calls[0] ?? [];
+      expect(url).toBe('https://api.openai.com/v1/audio/transcriptions');
+      expect(timeout).toBe(60000);
+      expect(sentForm().get('model')).toBe('whisper-1');
     });
   });
 
@@ -109,6 +121,10 @@ describe('WhisperProvider', () => {
       });
 
       expect(result.text).toBe('Decoded audio');
+      const file = sentForm().get('file') as File;
+      expect(await file.text()).toBe('fake-audio');
+      expect(file.name).toBe('audio.mp3');
+      expect(file.type).toBe('audio/mpeg');
     });
 
     it('should throw when audio is missing', async () => {
@@ -150,6 +166,8 @@ describe('WhisperProvider', () => {
         start: 0.0,
         end: 0.5,
       });
+      expect(sentForm().get('response_format')).toBe('verbose_json');
+      expect(sentForm().get('timestamp_granularities[]')).toBe('word');
     });
 
     it('should pass language and temperature options', async () => {
@@ -166,25 +184,28 @@ describe('WhisperProvider', () => {
       });
 
       expect(mockFetch).toHaveBeenCalledTimes(1);
-      // Verify FormData was passed (body is a FormData object)
-      const callArgs = mockFetch.mock.calls[0];
-      const requestInit = callArgs?.[3] as RequestInit;
-      expect(requestInit.method).toBe('POST');
-      expect(requestInit.body).toBeInstanceOf(FormData);
+      const [url, timeout, , requestInit] = mockFetch.mock.calls[0] ?? [];
+      expect(url).toBe('https://api.openai.test/v1/audio/transcriptions');
+      expect(timeout).toBe(10000);
+      expect(requestInit?.method).toBe('POST');
+      const form = sentForm();
+      expect(form.get('model')).toBe('whisper-1');
+      expect(form.get('language')).toBe('es');
+      expect(form.get('temperature')).toBe('0.3');
+      expect(form.get('prompt')).toBe('Spanish transcript');
+      expect(form.get('response_format')).toBe('json');
+      expect(form.has('timestamp_granularities[]')).toBe(false);
     });
 
-    it('should throw on API error response', async () => {
+    it('should rethrow McpError from the API call unchanged', async () => {
       // fetchWithTimeout throws McpError on non-ok responses
-      mockFetch.mockRejectedValue(
-        new McpError(
-          -32003,
-          'Fetch failed for https://api.openai.test/v1/audio/transcriptions. Status: 400',
-        ),
+      const apiError = new McpError(
+        -32003,
+        'Fetch failed for https://api.openai.test/v1/audio/transcriptions. Status: 400',
       );
+      mockFetch.mockRejectedValue(apiError);
 
-      await expect(provider.speechToText({ audio: Buffer.from('audio') })).rejects.toThrow(
-        'Fetch failed',
-      );
+      await expect(provider.speechToText({ audio: Buffer.from('audio') })).rejects.toBe(apiError);
     });
 
     it('should wrap network errors in McpError', async () => {

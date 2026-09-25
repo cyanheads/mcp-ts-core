@@ -8,12 +8,7 @@ import { Client, StreamableHTTPClientTransport } from '@modelcontextprotocol/cli
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
 import { generateTestJwt } from '../helpers/http-helpers.js';
-import {
-  assertServerBuilt,
-  assertServerEntrypoint,
-  type ServerHandle,
-  startServerFromEntrypoint,
-} from '../helpers/server-process.js';
+import { type ServerHandle, startServerFromEntrypoint } from '../helpers/server-process.js';
 
 const FIXTURE_ENTRYPOINT = 'tests/fixtures/auth-scoped-server.js';
 const AUTH_SECRET = 'test-secret-key-for-conformance!';
@@ -82,8 +77,6 @@ describe('HTTP auth authorization e2e', () => {
   let handle: ServerHandle;
 
   beforeAll(async () => {
-    assertServerBuilt();
-    assertServerEntrypoint(FIXTURE_ENTRYPOINT);
     handle = await startServerFromEntrypoint(FIXTURE_ENTRYPOINT, 'http', {
       MCP_AUTH_MODE: 'jwt',
       MCP_AUTH_SECRET_KEY: AUTH_SECRET,
@@ -167,9 +160,19 @@ describe('HTTP auth authorization e2e', () => {
       const token = createOidcToken(); // no mcp_tool_scopes
 
       await withClient(handle.port!, token, async (client) => {
+        const publicResult = await client.callTool({
+          name: 'open_echo',
+          arguments: { message: 'public-with-default-oidc-scopes' },
+        });
         const protectedResult = await client.callTool({
           name: 'scoped_echo',
           arguments: { message: 'blocked-by-default-oidc-scopes' },
+        });
+
+        expect(publicResult.isError).toBeUndefined();
+        expect(publicResult.structuredContent).toEqual({
+          echoed: 'public-with-default-oidc-scopes',
+          visibility: 'public',
         });
 
         expect(protectedResult.isError).toBe(true);
@@ -182,56 +185,28 @@ describe('HTTP auth authorization e2e', () => {
       });
     });
 
-    it('grants the per-tool scope when injected via mcp_tool_scopes (string form)', async () => {
-      const token = createOidcToken('tool:scoped_echo:read tool:other:read');
+    it.each([
+      ['string', 'tool:scoped_echo:read tool:other:read'],
+      ['array', ['tool:scoped_echo:read', 'tool:other:read']],
+    ])(
+      'grants the per-tool scope when injected via mcp_tool_scopes (%s form)',
+      async (form, claim) => {
+        const token = createOidcToken(claim);
 
-      await withClient(handle.port!, token, async (client) => {
-        const protectedResult = await client.callTool({
-          name: 'scoped_echo',
-          arguments: { message: 'allowed-via-custom-claim-string' },
+        await withClient(handle.port!, token, async (client) => {
+          const protectedResult = await client.callTool({
+            name: 'scoped_echo',
+            arguments: { message: `allowed-via-custom-claim-${form}` },
+          });
+
+          expect(protectedResult.isError).toBeUndefined();
+          expect(protectedResult.structuredContent).toEqual({
+            echoed: `allowed-via-custom-claim-${form}`,
+            visibility: 'protected',
+          });
         });
-
-        expect(protectedResult.isError).toBeUndefined();
-        expect(protectedResult.structuredContent).toEqual({
-          echoed: 'allowed-via-custom-claim-string',
-          visibility: 'protected',
-        });
-      });
-    });
-
-    it('grants the per-tool scope when injected via mcp_tool_scopes (array form)', async () => {
-      const token = createOidcToken(['tool:scoped_echo:read', 'tool:other:read']);
-
-      await withClient(handle.port!, token, async (client) => {
-        const protectedResult = await client.callTool({
-          name: 'scoped_echo',
-          arguments: { message: 'allowed-via-custom-claim-array' },
-        });
-
-        expect(protectedResult.isError).toBeUndefined();
-        expect(protectedResult.structuredContent).toEqual({
-          echoed: 'allowed-via-custom-claim-array',
-          visibility: 'protected',
-        });
-      });
-    });
-
-    it('still permits the public tool with default OIDC scopes only', async () => {
-      const token = createOidcToken();
-
-      await withClient(handle.port!, token, async (client) => {
-        const publicResult = await client.callTool({
-          name: 'open_echo',
-          arguments: { message: 'public-with-default-oidc-scopes' },
-        });
-
-        expect(publicResult.isError).toBeUndefined();
-        expect(publicResult.structuredContent).toEqual({
-          echoed: 'public-with-default-oidc-scopes',
-          visibility: 'public',
-        });
-      });
-    });
+      },
+    );
   });
 });
 
@@ -239,8 +214,6 @@ describe('HTTP auth authorization e2e — MCP_AUTH_DISABLE_SCOPE_CHECKS bypass',
   let handle: ServerHandle;
 
   beforeAll(async () => {
-    assertServerBuilt();
-    assertServerEntrypoint(FIXTURE_ENTRYPOINT);
     handle = await startServerFromEntrypoint(FIXTURE_ENTRYPOINT, 'http', {
       MCP_AUTH_MODE: 'jwt',
       MCP_AUTH_SECRET_KEY: AUTH_SECRET,

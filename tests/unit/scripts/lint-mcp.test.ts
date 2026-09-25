@@ -97,16 +97,6 @@ describe('lint-mcp · readLintOptions', () => {
 });
 
 describe('lint-mcp · truncationAllowlist precedence', () => {
-  it('suppresses by name when the config declares the tool', () => {
-    const path = writeConfig('{ "lint": { "truncationAllowlist": ["search_results"] } }');
-    expect(truncationWarnings(readLintOptions(path))).toBe(0);
-  });
-
-  it('disables the rule when the config declares false', () => {
-    const path = writeConfig('{ "lint": { "truncationAllowlist": false } }');
-    expect(truncationWarnings(readLintOptions(path))).toBe(0);
-  });
-
   it('config beats the env var', () => {
     process.env[ENV] = 'unrelated_tool';
     const path = writeConfig('{ "lint": { "truncationAllowlist": ["search_results"] } }');

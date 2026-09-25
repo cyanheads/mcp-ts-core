@@ -66,23 +66,15 @@ describe('prefer-error-factory', () => {
     expect(factory?.message).toContain('notFound');
   });
 
-  it('flags ServiceUnavailable → serviceUnavailable', () => {
+  it.each([
+    ['ServiceUnavailable', 'serviceUnavailable'],
+    ['SerializationError', 'serializationError'],
+  ])('flags %s → %s', (code, factory) => {
     const handler = new Function(
-      'return async () => { throw new McpError(JsonRpcErrorCode.ServiceUnavailable, "x"); }',
+      `return async () => { throw new McpError(JsonRpcErrorCode.${code}, "x"); }`,
     )();
     const d = lint(handler);
-    const factory = d.find((x) => x.rule === 'prefer-error-factory');
-    expect(factory?.message).toContain('serviceUnavailable');
-  });
-
-  it('does not flag SerializationError (no factory existed historically — but we added one)', () => {
-    const handler = new Function(
-      'return async () => { throw new McpError(JsonRpcErrorCode.SerializationError, "x"); }',
-    )();
-    const d = lint(handler);
-    expect(d.find((x) => x.rule === 'prefer-error-factory')?.message).toContain(
-      'serializationError',
-    );
+    expect(d.find((x) => x.rule === 'prefer-error-factory')?.message).toContain(factory);
   });
 });
 

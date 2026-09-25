@@ -151,12 +151,20 @@ describe('resource handler pipeline fuzzing', () => {
 
     await fc.assert(
       fc.asyncProperty(arbitrary, async (variables) => {
-        try {
-          await handler(new URL('fuzz://adversarial'), variables as never, serverContext());
-        } catch (error) {
-          expect(error).toBeInstanceOf(McpError);
-          expect((error as McpError).message).not.toMatch(/node_modules|\/Users\/|\/home\//);
+        const read = handler(new URL('fuzz://adversarial'), variables as never, serverContext());
+        const parsed = paramsSchema.safeParse(variables);
+        if (parsed.success) {
+          const result = (await read) as ReadResourceResult;
+          const content = result.contents[0] as { text: string };
+          expect(JSON.parse(content.text)).toEqual(parsed.data);
+          return;
         }
+        const error = await read.then(
+          () => undefined,
+          (rejection: unknown) => rejection,
+        );
+        expect(error).toBeInstanceOf(McpError);
+        expect((error as McpError).message).not.toMatch(/node_modules|\/Users\/|\/home\//);
       }),
       { numRuns: 60, seed: 20_260_803 },
     );

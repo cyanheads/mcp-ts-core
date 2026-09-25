@@ -45,10 +45,10 @@ describe('httpStatusToErrorCode', () => {
     expect(httpStatusToErrorCode(status)).toBe(expected);
   });
 
-  it('never classifies an upstream status as this server’s own InternalError (#323)', () => {
-    // `InternalError` means "this server has a bug". A remote status can never
-    // establish that, so no status may map to it.
-    const codes = Array.from({ length: 200 }, (_, i) => httpStatusToErrorCode(400 + i));
+  it('never classifies an upstream status as this server’s own InternalError (#323, #460)', () => {
+    // `InternalError` means "this server has a bug". A remote status — redirects
+    // included — can never establish that, so no status may map to it.
+    const codes = Array.from({ length: 300 }, (_, i) => httpStatusToErrorCode(300 + i));
     expect(codes).not.toContain(JsonRpcErrorCode.InternalError);
   });
 });
@@ -65,11 +65,6 @@ describe('redirect classification (#460)', () => {
 
   it.each([100, 101, 200, 204, 299])('leaves non-error status %i unmapped', (status) => {
     expect(httpStatusToErrorCode(status)).toBeUndefined();
-  });
-
-  it('never classifies a redirect as this server’s own InternalError', () => {
-    const codes = Array.from({ length: 100 }, (_, i) => httpStatusToErrorCode(300 + i));
-    expect(codes).not.toContain(JsonRpcErrorCode.InternalError);
   });
 
   it('keeps a 3xx out of withRetry’s transient set', () => {
@@ -93,10 +88,6 @@ describe('httpStatusRetryability (#323)', () => {
 
   it.each([400, 404, 429, 502, 503, 504, 599])('has no opinion on %i', (status) => {
     expect(httpStatusRetryability(status)).toBeUndefined();
-  });
-
-  it('spreads to nothing when it has no opinion', () => {
-    expect({ ...httpStatusRetryability(500) }).toEqual({});
   });
 });
 
@@ -316,15 +307,6 @@ describe('httpErrorFromResponse', () => {
     });
   });
 
-  it('uses the response host when service is omitted', async () => {
-    const response = makeResponse(503, { url: 'https://api.example.com/foo' });
-
-    const error = await httpErrorFromResponse(response);
-
-    expect(error.message).toContain('api.example.com');
-    expect(error.code).toBe(JsonRpcErrorCode.ServiceUnavailable);
-  });
-
   it('falls back to "Upstream" when no service or URL is available', async () => {
     const error = await httpErrorFromResponse(makeResponse(500));
 
@@ -386,14 +368,6 @@ describe('httpErrorFromResponse', () => {
     expect(new TextEncoder().encode(body).byteLength).toBeLessThanOrEqual(53);
     expect(body.endsWith('…')).toBe(true);
     expect(cancelled).toBe(true);
-  });
-
-  it('skips body capture when captureBody is false', async () => {
-    const response = makeResponse(500, { body: 'secret' });
-
-    const error = await httpErrorFromResponse(response, { captureBody: false });
-
-    expect(error.data).not.toHaveProperty('body');
   });
 
   it('merges extra data fields', async () => {

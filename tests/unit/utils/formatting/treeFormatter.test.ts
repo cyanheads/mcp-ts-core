@@ -22,14 +22,6 @@ describe('TreeFormatter', () => {
     ],
   };
 
-  describe('Singleton instance', () => {
-    it('should export a singleton instance', () => {
-      expect(treeFormatter).toBeInstanceOf(TreeFormatter);
-      expect(treeFormatter.format).toBeInstanceOf(Function);
-      expect(treeFormatter.formatMultiple).toBeInstanceOf(Function);
-    });
-  });
-
   describe('format() method', () => {
     it('should format a simple tree with unicode style (default)', () => {
       const result = treeFormatter.format(simpleTree);
@@ -154,17 +146,14 @@ describe('TreeFormatter', () => {
       expect(lines.some((line) => line.startsWith('    '))).toBe(true);
     });
 
-    it('should handle single-character indent', () => {
+    it('should pad the vertical connector to nothing for a single-character indent', () => {
       const tree: TreeNode = {
         name: 'root',
         children: [{ name: 'a', children: [{ name: 'b' }] }, { name: 'c' }],
       };
 
       const result = treeFormatter.format(tree, { indent: ' ', style: 'unicode' });
-      expect(result).toContain('root');
-      expect(result).toContain('a');
-      expect(result).toContain('b');
-      expect(result).toContain('c');
+      expect(result).toBe('root\n├── a\n│└── b\n└── c');
     });
   });
 
@@ -213,37 +202,14 @@ describe('TreeFormatter', () => {
       expect(result).toContain('child');
     });
 
-    it('should handle self-referencing nodes', () => {
-      const self: TreeNode = { name: 'self', children: [] };
-      self.children = [self];
-
-      const result = treeFormatter.format(self);
-
-      expect(result).toContain('[Circular Reference]');
-    });
-
-    it('should detect circular references with ascii style', () => {
-      const parent: TreeNode = { name: 'parent', children: [] };
-      const child: TreeNode = { name: 'child', children: [parent] };
-      parent.children = [child];
-
-      const result = treeFormatter.format(parent, { style: 'ascii' });
-
-      expect(result).toContain('[Circular Reference]');
-      expect(result).toContain('parent');
-      expect(result).toContain('child');
-    });
-
-    it('should detect circular references with compact style', () => {
+    it('should render a connector-free circular marker with compact style', () => {
       const parent: TreeNode = { name: 'parent', children: [] };
       const child: TreeNode = { name: 'child', children: [parent] };
       parent.children = [child];
 
       const result = treeFormatter.format(parent, { style: 'compact' });
 
-      expect(result).toContain('[Circular Reference]');
-      expect(result).toContain('parent');
-      expect(result).toContain('child');
+      expect(result).toBe('parent\nchild\n     [Circular Reference]');
     });
 
     it('uses a tee connector when a circular reference is not the last child', () => {
@@ -421,31 +387,6 @@ describe('TreeFormatter', () => {
       expect(result).toBe('root');
     });
 
-    it('should handle very deep trees', () => {
-      // Create a tree with depth of 10
-      let current: TreeNode = { name: 'level10' };
-      for (let i = 9; i >= 0; i--) {
-        current = { name: `level${i}`, children: [current] };
-      }
-
-      const result = treeFormatter.format(current);
-      expect(result).toContain('level0');
-      expect(result).toContain('level10');
-    });
-
-    it('should handle nodes with special characters in names', () => {
-      const tree: TreeNode = {
-        name: 'root/path',
-        children: [{ name: 'file name.txt' }, { name: 'special@#$%' }, { name: 'unicode: 你好' }],
-      };
-
-      const result = treeFormatter.format(tree);
-      expect(result).toContain('root/path');
-      expect(result).toContain('file name.txt');
-      expect(result).toContain('special@#$%');
-      expect(result).toContain('unicode: 你好');
-    });
-
     it('should handle metadata with various types', () => {
       const tree: TreeNode = {
         name: 'root',
@@ -488,56 +429,9 @@ describe('TreeFormatter', () => {
       // Empty metadata should not add parentheses
       expect(result).not.toContain('(');
     });
-
-    it('should handle tree with only one branch', () => {
-      const linearTree: TreeNode = {
-        name: 'a',
-        children: [
-          {
-            name: 'b',
-            children: [
-              {
-                name: 'c',
-                children: [{ name: 'd' }],
-              },
-            ],
-          },
-        ],
-      };
-
-      const result = treeFormatter.format(linearTree);
-      expect(result).toContain('a');
-      expect(result).toContain('b');
-      expect(result).toContain('c');
-      expect(result).toContain('d');
-    });
   });
 
   describe('Style variations', () => {
-    it('should produce different outputs for each style', () => {
-      const unicode = treeFormatter.format(simpleTree, { style: 'unicode' });
-      const ascii = treeFormatter.format(simpleTree, { style: 'ascii' });
-      const compact = treeFormatter.format(simpleTree, { style: 'compact' });
-
-      // All should contain the same nodes
-      [unicode, ascii, compact].forEach((result) => {
-        expect(result).toContain('root');
-        expect(result).toContain('child1');
-        expect(result).toContain('parent');
-      });
-
-      // Each should be unique
-      expect(unicode).not.toBe(ascii);
-      expect(unicode).not.toBe(compact);
-      expect(ascii).not.toBe(compact);
-
-      // Style-specific checks
-      expect(unicode).toContain('├');
-      expect(ascii).toContain('+');
-      expect(compact).not.toContain('├');
-      expect(compact).not.toContain('+');
-    });
-
     it('keeps ASCII vertical connectors for a non-last branch', () => {
       const result = treeFormatter.format(
         {

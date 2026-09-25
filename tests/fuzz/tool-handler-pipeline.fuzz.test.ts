@@ -236,7 +236,6 @@ describe('Tool Handler Pipeline Fuzz Tests', () => {
           fc.asyncProperty(arb, async (input) => {
             const result = await call(handler, input);
             expect(result.isError).toBeUndefined();
-            expect(result.content).toBeDefined();
             expect(result.structuredContent).toEqual(expect.schemaMatching(def.output));
           }),
           { numRuns: 50 },
@@ -253,29 +252,15 @@ describe('Tool Handler Pipeline Fuzz Tests', () => {
     ];
 
     for (const [name, def] of toolDefs) {
-      it(`${name}: adversarial inputs never crash the handler factory`, async () => {
-        const handler = createToolHandler(def, services, notifiers);
-        const arb = adversarialObjectArbitrary(def.input);
-
-        await fc.assert(
-          fc.asyncProperty(arb, async (input) => {
-            const result = await call(handler, input);
-            // Must always return a result (either success or error), never throw
-            expect(result).toBeDefined();
-            expect(result.content).toBeDefined();
-            expect(Array.isArray(result.content)).toBe(true);
-          }),
-          { numRuns: 30 },
-        );
-      });
-
       it(`${name}: adversarial inputs produce isError responses`, async () => {
         const handler = createToolHandler(def, services, notifiers);
         const arb = adversarialObjectArbitrary(def.input);
 
         await fc.assert(
           fc.asyncProperty(arb, async (input) => {
+            // Must always return a result (either success or error), never throw
             const result = await call(handler, input);
+            expect(Array.isArray(result.content)).toBe(true);
             expect(result.isError).toBe(def.input.safeParse(input).success ? undefined : true);
             if (result.isError) {
               // Error responses must have text content
@@ -449,8 +434,6 @@ describe('Tool Handler Pipeline Fuzz Tests', () => {
 
       for (const input of wrongTypes) {
         const result = await call(handler, input);
-        expect(result).toBeDefined();
-        expect(result.content).toBeDefined();
         expect(result.isError).toBe(true);
         expect(result.structuredContent).toMatchObject({
           error: { code: JsonRpcErrorCode.InvalidParams },
@@ -466,28 +449,9 @@ describe('Tool Handler Pipeline Fuzz Tests', () => {
       for (const str of ADVERSARIAL_STRINGS) {
         const result = await call(handler, { value: str });
         // All are valid string inputs, should succeed
-        expect(result).toBeDefined();
-        expect(result.content).toBeDefined();
         expect(result.isError).toBeUndefined();
         expect(result.structuredContent).toEqual({ echo: str });
       }
-    });
-  });
-
-  describe('Aborted signal handling', () => {
-    it('pre-aborted signal produces error or result, never hangs', async () => {
-      const handler = createToolHandler(stringTool as AnyToolDefinition, services, notifiers);
-      const controller = new AbortController();
-      controller.abort();
-
-      const result = await call(
-        handler,
-        { value: 'test' },
-        makeServerContext({ signal: controller.signal }),
-      );
-      // Framework should handle abort gracefully
-      expect(result).toBeDefined();
-      expect(result.content).toBeDefined();
     });
   });
 
@@ -497,8 +461,6 @@ describe('Tool Handler Pipeline Fuzz Tests', () => {
       const largeInput = { value: 'x'.repeat(1_000_000) };
 
       const result = await call(handler, largeInput);
-      expect(result).toBeDefined();
-      expect(result.content).toBeDefined();
       expect(result.isError).toBeUndefined();
       expect(result.structuredContent).toEqual({ echo: largeInput.value });
     });

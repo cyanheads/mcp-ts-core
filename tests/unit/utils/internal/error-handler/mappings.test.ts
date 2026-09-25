@@ -98,52 +98,22 @@ describe('Error Handler Mappings', () => {
   // ─── ERROR_TYPE_MAPPINGS ─────────────────────────────────────────────────────
 
   describe('ERROR_TYPE_MAPPINGS', () => {
-    it('should map SyntaxError to ValidationError', () => {
-      expect(ERROR_TYPE_MAPPINGS.SyntaxError).toBe(JsonRpcErrorCode.ValidationError);
-    });
-
-    it('should not map TypeError (falls through to message patterns or InternalError)', () => {
-      expect(ERROR_TYPE_MAPPINGS.TypeError).toBeUndefined();
-    });
-
-    it('should map RangeError to ValidationError', () => {
-      expect(ERROR_TYPE_MAPPINGS.RangeError).toBe(JsonRpcErrorCode.ValidationError);
-    });
-
-    it('should map URIError to ValidationError', () => {
-      expect(ERROR_TYPE_MAPPINGS.URIError).toBe(JsonRpcErrorCode.ValidationError);
-    });
-
-    it('should map EvalError to InternalError', () => {
-      expect(ERROR_TYPE_MAPPINGS.EvalError).toBe(JsonRpcErrorCode.InternalError);
-    });
-
-    it('should map ReferenceError to InternalError', () => {
-      expect(ERROR_TYPE_MAPPINGS.ReferenceError).toBe(JsonRpcErrorCode.InternalError);
-    });
-
-    it('should map AggregateError to InternalError', () => {
-      expect(ERROR_TYPE_MAPPINGS.AggregateError).toBe(JsonRpcErrorCode.InternalError);
-    });
-
-    it('should map ZodError to ValidationError', () => {
-      expect(ERROR_TYPE_MAPPINGS.ZodError).toBe(JsonRpcErrorCode.ValidationError);
-    });
-
-    it('should have exactly 7 entries', () => {
-      expect(Object.keys(ERROR_TYPE_MAPPINGS)).toHaveLength(7);
+    it('maps exactly these constructor names, leaving TypeError to the message patterns', () => {
+      expect(ERROR_TYPE_MAPPINGS).toEqual({
+        SyntaxError: JsonRpcErrorCode.ValidationError,
+        RangeError: JsonRpcErrorCode.ValidationError,
+        URIError: JsonRpcErrorCode.ValidationError,
+        ZodError: JsonRpcErrorCode.ValidationError,
+        EvalError: JsonRpcErrorCode.InternalError,
+        ReferenceError: JsonRpcErrorCode.InternalError,
+        AggregateError: JsonRpcErrorCode.InternalError,
+      });
     });
   });
 
   // ─── COMPILED_ERROR_PATTERNS ─────────────────────────────────────────────────
 
   describe('COMPILED_ERROR_PATTERNS', () => {
-    it('should have compiledPattern on every entry', () => {
-      for (const entry of COMPILED_ERROR_PATTERNS) {
-        expect(entry.compiledPattern).toBeInstanceOf(RegExp);
-      }
-    });
-
     it('should match "unauthorized" as Unauthorized', () => {
       const match = COMPILED_ERROR_PATTERNS.find((p) => p.compiledPattern.test('unauthorized'));
       expect(match?.errorCode).toBe(JsonRpcErrorCode.Unauthorized);
@@ -160,82 +130,6 @@ describe('Error Handler Mappings', () => {
       expect(match?.errorCode).not.toBe(JsonRpcErrorCode.Unauthorized);
     });
 
-    it('should classify "Invalid auth token format" as ValidationError not Unauthorized', () => {
-      // Simulates the full resolution chain: first match wins across all patterns
-      const msg = 'Invalid auth token format';
-      let matchedCode: JsonRpcErrorCode | undefined;
-      for (const p of COMPILED_ERROR_PATTERNS) {
-        if (p.compiledPattern.test(msg)) {
-          matchedCode = p.errorCode;
-          break;
-        }
-      }
-      expect(matchedCode).toBe(JsonRpcErrorCode.ValidationError);
-    });
-
-    it('should match "permission denied" as Forbidden', () => {
-      const match = COMPILED_ERROR_PATTERNS.find((p) =>
-        p.compiledPattern.test('permission denied'),
-      );
-      expect(match?.errorCode).toBe(JsonRpcErrorCode.Forbidden);
-    });
-
-    it('should match "access denied" as Forbidden', () => {
-      const match = COMPILED_ERROR_PATTERNS.find((p) => p.compiledPattern.test('access denied'));
-      expect(match?.errorCode).toBe(JsonRpcErrorCode.Forbidden);
-    });
-
-    it('should match "not found" as NotFound', () => {
-      const match = COMPILED_ERROR_PATTERNS.find((p) => p.compiledPattern.test('not found'));
-      expect(match?.errorCode).toBe(JsonRpcErrorCode.NotFound);
-    });
-
-    it('should classify "missing required field" as ValidationError not NotFound', () => {
-      const msg = 'missing required field: name';
-      let matchedCode: JsonRpcErrorCode | undefined;
-      for (const p of COMPILED_ERROR_PATTERNS) {
-        if (p.compiledPattern.test(msg)) {
-          matchedCode = p.errorCode;
-          break;
-        }
-      }
-      expect(matchedCode).toBe(JsonRpcErrorCode.ValidationError);
-    });
-
-    it('should match "invalid input" as ValidationError', () => {
-      const match = COMPILED_ERROR_PATTERNS.find((p) =>
-        p.compiledPattern.test('invalid input format'),
-      );
-      expect(match?.errorCode).toBe(JsonRpcErrorCode.ValidationError);
-    });
-
-    it('should match "already exists" as Conflict', () => {
-      const match = COMPILED_ERROR_PATTERNS.find((p) => p.compiledPattern.test('already exists'));
-      expect(match?.errorCode).toBe(JsonRpcErrorCode.Conflict);
-    });
-
-    it('should match "rate limit" as RateLimited', () => {
-      const match = COMPILED_ERROR_PATTERNS.find((p) => p.compiledPattern.test('rate limit'));
-      expect(match?.errorCode).toBe(JsonRpcErrorCode.RateLimited);
-    });
-
-    it('should match "timed out" as Timeout', () => {
-      const match = COMPILED_ERROR_PATTERNS.find((p) => p.compiledPattern.test('timed out'));
-      expect(match?.errorCode).toBe(JsonRpcErrorCode.Timeout);
-    });
-
-    it('should match "cancelled" as Timeout', () => {
-      const match = COMPILED_ERROR_PATTERNS.find((p) => p.compiledPattern.test('cancelled'));
-      expect(match?.errorCode).toBe(JsonRpcErrorCode.Timeout);
-    });
-
-    it('should match "service unavailable" as ServiceUnavailable', () => {
-      const match = COMPILED_ERROR_PATTERNS.find((p) =>
-        p.compiledPattern.test('service unavailable'),
-      );
-      expect(match?.errorCode).toBe(JsonRpcErrorCode.ServiceUnavailable);
-    });
-
     it('should match "zoderror" as ValidationError', () => {
       const match = COMPILED_ERROR_PATTERNS.find((p) => p.compiledPattern.test('zoderror'));
       expect(match?.errorCode).toBe(JsonRpcErrorCode.ValidationError);
@@ -245,20 +139,7 @@ describe('Error Handler Mappings', () => {
   // ─── COMPILED_PROVIDER_PATTERNS ──────────────────────────────────────────────
 
   describe('COMPILED_PROVIDER_PATTERNS', () => {
-    it('should have compiledPattern on every entry', () => {
-      for (const entry of COMPILED_PROVIDER_PATTERNS) {
-        expect(entry.compiledPattern).toBeInstanceOf(RegExp);
-      }
-    });
-
     // AWS patterns
-    it('should match AWS ThrottlingException as RateLimited', () => {
-      const match = COMPILED_PROVIDER_PATTERNS.find((p) =>
-        p.compiledPattern.test('ThrottlingException'),
-      );
-      expect(match?.errorCode).toBe(JsonRpcErrorCode.RateLimited);
-    });
-
     it('should match AWS AccessDenied as Forbidden', () => {
       const match = COMPILED_PROVIDER_PATTERNS.find((p) => p.compiledPattern.test('AccessDenied'));
       expect(match?.errorCode).toBe(JsonRpcErrorCode.Forbidden);
@@ -272,13 +153,6 @@ describe('Error Handler Mappings', () => {
     });
 
     // HTTP status patterns
-    it('should match status code 401 as Unauthorized', () => {
-      const match = COMPILED_PROVIDER_PATTERNS.find((p) =>
-        p.compiledPattern.test('status code 401'),
-      );
-      expect(match?.errorCode).toBe(JsonRpcErrorCode.Unauthorized);
-    });
-
     it('should match status code 403 as Forbidden', () => {
       const match = COMPILED_PROVIDER_PATTERNS.find((p) =>
         p.compiledPattern.test('status code 403'),
@@ -308,11 +182,6 @@ describe('Error Handler Mappings', () => {
     });
 
     // Database patterns
-    it('should match ECONNREFUSED as ServiceUnavailable', () => {
-      const match = COMPILED_PROVIDER_PATTERNS.find((p) => p.compiledPattern.test('ECONNREFUSED'));
-      expect(match?.errorCode).toBe(JsonRpcErrorCode.ServiceUnavailable);
-    });
-
     it('should match ETIMEDOUT as Timeout', () => {
       const match = COMPILED_PROVIDER_PATTERNS.find((p) => p.compiledPattern.test('ETIMEDOUT'));
       expect(match?.errorCode).toBe(JsonRpcErrorCode.Timeout);

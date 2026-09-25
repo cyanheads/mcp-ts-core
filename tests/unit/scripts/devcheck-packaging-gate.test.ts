@@ -96,7 +96,7 @@ describe('devcheck Packaging gate (#343)', () => {
       expect(out).toContain('0.0.0');
     });
 
-    it('still skips a README carrying no version badge', () => {
+    it('runs on a README carrying no version badge and passes it', () => {
       writeFileSync(resolve(dir, 'README.md'), '# scaffold\n\nSome prose.\n');
       const { code, out } = runPackagingCheck(dir);
       expect(packagingLine(out)).not.toContain('SKIPPED');

@@ -115,6 +115,12 @@ describe('stateful HTTP protocol sessions', () => {
     });
 
     expect(result.isError).toBe(true);
+    expect(result.structuredContent).toMatchObject({
+      error: {
+        code: ProtocolErrorCode.InvalidRequest,
+        data: { reason: 'client_capability_missing' },
+      },
+    });
   });
 
   it('completes a form input round trip across stateful HTTP requests', async () => {
@@ -173,13 +179,14 @@ describe('stateful HTTP protocol sessions', () => {
     // Neither era re-validates accepted content, so the handler's
     // `ctx.inputs.accepted(key, schema)` is what catches it — and the retry
     // budget is what stops the loop.
+    let elicitations = 0;
     const client = await connect(
       { capabilities: { elicitation: { form: {}, url: {} } } },
       (configuredClient) => {
-        configuredClient.setRequestHandler('elicitation/create', () => ({
-          action: 'accept',
-          content: { value: 42 },
-        }));
+        configuredClient.setRequestHandler('elicitation/create', () => {
+          elicitations++;
+          return { action: 'accept', content: { value: 42 } };
+        });
       },
     );
 
@@ -188,7 +195,13 @@ describe('stateful HTTP protocol sessions', () => {
       { timeout: 10_000 },
     );
 
-    expect(result.isError).toBe(true);
+    expect(elicitations).toBeGreaterThan(1);
+    expect(result).toMatchObject({
+      isError: true,
+      content: [
+        { type: 'text', text: expect.stringMatching(/still required input after \d+ rounds/) },
+      ],
+    });
   });
 
   it('surfaces a client error response to the originating handler', async () => {
@@ -209,7 +222,12 @@ describe('stateful HTTP protocol sessions', () => {
       { timeout: 5_000 },
     );
 
-    expect(result.isError).toBe(true);
+    expect(result).toMatchObject({
+      isError: true,
+      content: [
+        { type: 'text', text: expect.stringContaining('Client refused the elicitation request.') },
+      ],
+    });
   });
 
   it('correlates concurrent input responses in reverse completion order', async () => {

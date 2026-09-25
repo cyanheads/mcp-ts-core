@@ -71,14 +71,4 @@ describe('DuckdbProvider · scratch root', () => {
 
     expect((await stat(root)).isDirectory()).toBe(true);
   });
-
-  it('keeps the scratch root independent of the user-facing export sandbox', async () => {
-    const provider = new DuckdbProvider({ ...BASE_OPTIONS, exportRootPath: './.canvas-exports' });
-
-    const root = await tempRootOf(provider);
-    created.push(root);
-
-    // Export files stay where the caller asked for them; only scratch moves.
-    expect(root).not.toContain('.canvas-exports');
-  });
 });

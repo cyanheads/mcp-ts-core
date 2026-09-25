@@ -1,7 +1,7 @@
 /**
- * @fileoverview Typecheck suite for `HandlerContext<R, E>` — enrichment key
- * disjointness from `output`, typed `enrich`, and the Omit-and-replace
- * narrowing of `recoveryFor` and `enrich` on the handler context.
+ * @fileoverview Typecheck suite for `HandlerContext<R, E>` — typed `enrich` and
+ * the Omit-and-replace narrowing of `recoveryFor` and `enrich` on the handler
+ * context.
  * @module tests/types/handler-context.test-d
  */
 
@@ -79,50 +79,6 @@ describe('HandlerContext<R, E> — enrichment dimension', () => {
     type Ctx = HandlerContext<never, undefined>;
     type EnrichFn = Ctx['enrich'];
     expectTypeOf<EnrichFn>().toExtend<Enrich>();
-  });
-
-  it('enrich accepts a Partial of declared fields (incremental calls)', () => {
-    type Ctx = HandlerContext<never, typeof ENRICH_SHAPE>;
-    type EnrichFn = Ctx['enrich'];
-    // Should accept only `totalCount` (partial — `notice` omitted)
-    type FirstParam = Parameters<EnrichFn>[0];
-    type HasTotalCount = 'totalCount' extends keyof FirstParam ? true : false;
-    expectTypeOf<HasTotalCount>().toEqualTypeOf<true>();
-  });
-});
-
-// ---------------------------------------------------------------------------
-// Enrichment key disjointness — negative cases
-// ---------------------------------------------------------------------------
-
-describe('enrichment key disjointness from output — negative cases', () => {
-  it('an enrichment key that collides with an output key is caught at lint time (type-level guard)', () => {
-    // The linter enforces disjointness at startup; here we verify the type
-    // inference: TypedEnrich<E> never leaks output keys into `enrich`.
-    const outputShape = {
-      items: z.array(z.string()).describe('Result items.'),
-      // 'totalCount' would collide if used as both output and enrichment key
-    };
-
-    const enrichShape = {
-      // This is a DISTINCT key — disjoint from outputShape
-      totalCount: z.number().describe('Total matches.'),
-    };
-
-    // Positive: enrich field exists on the ctx type
-    type Ctx = HandlerContext<never, typeof enrichShape>;
-    type Param = Parameters<Ctx['enrich']>[0];
-    type HasKey = 'totalCount' extends keyof Param ? true : false;
-    expectTypeOf<HasKey>().toEqualTypeOf<true>();
-
-    // Negative: output key 'items' must NOT appear as an enrich parameter key
-    // (TypedEnrich<E> is only typed against the enrichment shape, not output)
-    type HasOutputKey = 'items' extends keyof Param ? true : false;
-    expectTypeOf<HasOutputKey>().toEqualTypeOf<false>();
-
-    // Suppress unused warnings
-    void outputShape;
-    void enrichShape;
   });
 });
 

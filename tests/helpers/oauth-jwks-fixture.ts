@@ -31,11 +31,9 @@ type FixtureMode = 'healthy' | 'outage' | 'timeout';
 export interface OAuthJwksFixture {
   close: () => Promise<void>;
   createSigningKey: (alg: OAuthSigningKey['alg'], kid: string) => Promise<OAuthSigningKey>;
-  discoveryUrl: string;
   getJwksRequestCount: () => number;
   issuer: string;
   issueToken: (key: OAuthSigningKey, options?: OAuthTokenOptions) => Promise<string>;
-  jwksUrl: string;
   resetJwksRequestCount: () => void;
   setDelay: (delayMs: number) => void;
   setJwks: (keys: OAuthSigningKey[]) => void;
@@ -115,8 +113,6 @@ export async function createOAuthJwksFixture(): Promise<OAuthJwksFixture> {
 
   return {
     issuer,
-    discoveryUrl: `${issuer}/.well-known/openid-configuration`,
-    jwksUrl: `${issuer}/.well-known/jwks.json`,
     async createSigningKey(alg, kid) {
       const { privateKey, publicKey } = await generateKeyPair(alg, { extractable: true });
       const publicJwk = await exportJWK(publicKey);

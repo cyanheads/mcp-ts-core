@@ -8,44 +8,7 @@
 
 import { describe, expect, it } from 'vitest';
 
-/**
- * Since matchesPattern is not exported from devdocs.ts, we'll test it
- * via a local implementation that matches the fixed version.
- * In a real scenario, you might want to export it or use a test-specific export.
- */
-
-/**
- * Matches file path against glob-like patterns with security-hardened regex escaping.
- * This is a copy of the fixed implementation for testing purposes.
- */
-const matchesPattern = (filePath: string, patterns: string[]): boolean => {
-  if (patterns.length === 0) return false;
-
-  for (const pattern of patterns) {
-    // Security: Properly escape regex chars while preserving glob wildcards
-    const regexPattern = pattern
-      // Step 1: Temporarily mark glob patterns with placeholders
-      .replace(/\*\*/g, '\x00DOUBLESTAR\x00')
-      .replace(/\*/g, '\x00STAR\x00')
-      // Step 2: Escape all regex special chars (except the placeholders)
-      .replace(/[.+^${}()|[\]\\]/g, '\\$&')
-      // Step 3: Convert glob * to regex [^/]* (matches any characters except /)
-      .replace(/\x00STAR\x00/g, '[^/]*')
-      // Step 4: Handle **/ pattern specially - matches zero or more path segments
-      .replace(/\x00DOUBLESTAR\x00\//g, '(?:.*/)?')
-      // Step 5: Handle /** pattern at end
-      .replace(/\/\x00DOUBLESTAR\x00$/g, '/.*')
-      // Step 6: Handle remaining ** (not preceded/followed by /)
-      .replace(/\x00DOUBLESTAR\x00/g, '.*');
-
-    const regex = new RegExp(`^${regexPattern}$`);
-
-    if (regex.test(filePath) || filePath.includes(pattern)) {
-      return true;
-    }
-  }
-  return false;
-};
+import { matchesPattern } from '../../../scripts/devdocs.js';
 
 describe('devdocs.ts - matchesPattern', () => {
   describe('Basic glob pattern matching', () => {
@@ -73,6 +36,19 @@ describe('devdocs.ts - matchesPattern', () => {
 
     it('should return false for empty patterns array', () => {
       expect(matchesPattern('any/file.ts', [])).toBe(false);
+    });
+
+    it('should match ? as exactly one non-slash character', () => {
+      expect(matchesPattern('test1.ts', ['test?.ts'])).toBe(true);
+      expect(matchesPattern('test.ts', ['test?.ts'])).toBe(false);
+      expect(matchesPattern('test12.ts', ['test?.ts'])).toBe(false);
+      expect(matchesPattern('a/b.ts', ['a?b.ts'])).toBe(false);
+    });
+
+    it('should strip leading ./ from both path and pattern', () => {
+      expect(matchesPattern('./src/index.ts', ['src/*.ts'])).toBe(true);
+      expect(matchesPattern('src/index.ts', ['./src/*.ts'])).toBe(true);
+      expect(matchesPattern('././src/index.ts', ['./././src/**'])).toBe(true);
     });
 
     it('should match if ANY pattern matches (OR logic)', () => {
@@ -178,7 +154,8 @@ describe('devdocs.ts - matchesPattern', () => {
   describe('Edge cases', () => {
     it('should handle empty strings', () => {
       expect(matchesPattern('', ['*.ts'])).toBe(false);
-      expect(matchesPattern('test.ts', [''])).toBe(true); // includes check passes
+      expect(matchesPattern('test.ts', [''])).toBe(false);
+      expect(matchesPattern('', [''])).toBe(true);
     });
 
     it('should handle patterns with no wildcards', () => {
@@ -202,9 +179,9 @@ describe('devdocs.ts - matchesPattern', () => {
       expect(matchesPattern('test.ts', ['**/**/*.ts'])).toBe(true);
     });
 
-    it('should leverage fallback string.includes() check', () => {
-      // Even if regex doesn't match, includes() might still return true
-      expect(matchesPattern('path/to/some/file.ts', ['some'])).toBe(true);
+    it('should require a full-path match (no substring matching)', () => {
+      expect(matchesPattern('path/to/some/file.ts', ['some'])).toBe(false);
+      expect(matchesPattern('path/to/some/file.ts', ['**/some/**'])).toBe(true);
     });
   });
 
@@ -246,8 +223,9 @@ describe('devdocs.ts - matchesPattern', () => {
   describe('Security regression tests', () => {
     it('should not allow regex injection via backslash escapes', () => {
       // Attempt to inject regex patterns - should match literally, not as regex
-      expect(matchesPattern('anything.ts', ['.*'])).toBe(false); // Not matched by regex
-      expect(matchesPattern('.*', ['.*'])).toBe(true); // Matched by includes
+      // '.' is literal; '*' stays a glob wildcard
+      expect(matchesPattern('anything.ts', ['.*'])).toBe(false);
+      expect(matchesPattern('.env', ['.*'])).toBe(true);
       expect(matchesPattern('test123.ts', ['\\d+'])).toBe(false);
     });
 

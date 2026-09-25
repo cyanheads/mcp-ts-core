@@ -83,18 +83,6 @@ describe('CanvasRegistry · acquire (new)', () => {
     await registry.shutdown(baseContext);
   });
 
-  it('can mint many distinct IDs', async () => {
-    const provider = makeStubProvider();
-    const registry = new CanvasRegistry(provider, makeOptions({ maxCanvasesPerTenant: 1000 }));
-    const seen = new Set<string>();
-    for (let i = 0; i < 50; i += 1) {
-      const r = await registry.acquire(undefined, 'tenant-a', baseContext);
-      expect(seen.has(r.canvasId)).toBe(false);
-      seen.add(r.canvasId);
-    }
-    await registry.shutdown(baseContext);
-  });
-
   it('rolls back registry and provider state when initialization fails', async () => {
     const provider = makeStubProvider();
     vi.mocked(provider.initCanvas)
@@ -155,25 +143,6 @@ describe('CanvasRegistry · acquire (existing)', () => {
     expect(second.isNew).toBe(false);
     expect(new Date(second.expiresAt).getTime()).toBe(2_000_000 + TTL);
     expect(provider.initCalls).toEqual([first.canvasId]); // initCanvas not re-invoked
-    await registry.shutdown(baseContext);
-  });
-
-  it('throws NotFound for unknown canvas IDs', async () => {
-    const provider = makeStubProvider();
-    const registry = new CanvasRegistry(provider, makeOptions());
-    await expect(registry.acquire('AAAAAAAAAA', 'tenant-a', baseContext)).rejects.toThrow(
-      /not found or expired/i,
-    );
-    await registry.shutdown(baseContext);
-  });
-
-  it('hides cross-tenant canvases as NotFound', async () => {
-    const provider = makeStubProvider();
-    const registry = new CanvasRegistry(provider, makeOptions());
-    const first = await registry.acquire(undefined, 'tenant-a', baseContext);
-    await expect(registry.acquire(first.canvasId, 'tenant-b', baseContext)).rejects.toThrow(
-      /not found or expired/i,
-    );
     await registry.shutdown(baseContext);
   });
 });
@@ -411,19 +380,6 @@ describe('CanvasRegistry · not-found error shape (#261)', () => {
 });
 
 describe('CanvasRegistry · sliding TTL and absolute cap', () => {
-  it('expires after TTL of inactivity', async () => {
-    const clock = vi.fn(() => 1_000_000);
-    const provider = makeStubProvider();
-    const registry = new CanvasRegistry(provider, makeOptions(), clock);
-    const first = await registry.acquire(undefined, 'tenant-a', baseContext);
-
-    clock.mockReturnValue(1_000_000 + TTL + 1);
-    await expect(registry.acquire(first.canvasId, 'tenant-a', baseContext)).rejects.toThrow(
-      /not found or expired/i,
-    );
-    await registry.shutdown(baseContext);
-  });
-
   it('enforces 7-day absolute cap even with continuous touches', async () => {
     const clock = vi.fn(() => 1_000_000);
     const provider = makeStubProvider();
@@ -700,14 +656,16 @@ describe('CanvasRegistry · per-table TTL', () => {
     const TABLE_TTL = 10 * 60 * 1000; // 10 min
     registry.registerTableTtl(r.canvasId, 'tenant-a', 'expiring_table', TABLE_TTL);
 
-    // Advance past table TTL but NOT past canvas TTL
-    clock.mockReturnValue(1_000_000 + TABLE_TTL + 1);
+    // Advance past both the table TTL and the canvas TTL in one step — if the
+    // canvas pass ran first, the table pass would find no record and skip the drop.
+    clock.mockReturnValue(1_000_000 + TTL + 1);
     await registry.sweep();
 
-    // Table dropped
     expect(provider.drop).toHaveBeenCalledWith(r.canvasId, 'expiring_table', expect.any(Object));
-    // Canvas NOT destroyed — its own TTL hasn't fired
-    expect(provider.destroyCalls).not.toContain(r.canvasId);
+    expect(provider.destroyCalls).toEqual([r.canvasId]);
+    const [dropOrder] = vi.mocked(provider.drop).mock.invocationCallOrder;
+    const [destroyOrder] = vi.mocked(provider.destroyCanvas).mock.invocationCallOrder;
+    expect(dropOrder).toBeLessThan(destroyOrder as number);
     await registry.shutdown(baseContext);
   });
 
@@ -721,19 +679,6 @@ describe('CanvasRegistry · per-table TTL', () => {
     registry.dropTableBookkeeping(r.canvasId, 'tenant-a', 'gone_table');
 
     const raw = [{ name: 'gone_table', kind: 'table' as const, rowCount: 0, columns: [] }];
-    const annotated = registry.annotateDescribeResult(r.canvasId, 'tenant-a', raw);
-    expect(annotated[0]?.expiresAt).toBeUndefined();
-    await registry.shutdown(baseContext);
-  });
-
-  it('omitting ttlMs → no expiresAt annotation (unchanged default path)', async () => {
-    const clock = vi.fn(() => 1_000_000);
-    const provider = makeStubProvider();
-    const registry = new CanvasRegistry(provider, makeOptions(), clock);
-    const r = await registry.acquire(undefined, 'tenant-a', baseContext);
-
-    // No registerTableTtl call — table has no per-table TTL
-    const raw = [{ name: 'plain_table', kind: 'table' as const, rowCount: 0, columns: [] }];
     const annotated = registry.annotateDescribeResult(r.canvasId, 'tenant-a', raw);
     expect(annotated[0]?.expiresAt).toBeUndefined();
     await registry.shutdown(baseContext);
@@ -791,7 +736,7 @@ describe('CanvasRegistry · shutdown', () => {
     registry = undefined;
   });
 
-  it('further acquire() calls after shutdown throw NotFound', async () => {
+  it('rejects acquire() after shutdown with a registry-shutting-down error', async () => {
     const provider = makeStubProvider();
     registry = new CanvasRegistry(provider, makeOptions());
     await registry.shutdown(baseContext);

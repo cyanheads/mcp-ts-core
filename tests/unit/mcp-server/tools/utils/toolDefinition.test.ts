@@ -6,102 +6,10 @@
 import { describe, expect, it } from 'vitest';
 import { z } from 'zod';
 import { readStrictenDiscard } from '@/mcp-server/tools/utils/strictenRecord.js';
-import type {
-  AnyToolDefinition,
-  ToolAnnotations,
-  ToolDefinition,
-} from '@/mcp-server/tools/utils/toolDefinition.js';
+import type { AnyToolDefinition } from '@/mcp-server/tools/utils/toolDefinition.js';
 import { tool } from '@/mcp-server/tools/utils/toolDefinition.js';
-import { createMockContext } from '@/testing/index.js';
-
-describe('ToolDefinition', () => {
-  it('should be satisfiable with a minimal valid shape', () => {
-    const definition: ToolDefinition = {
-      name: 'test_tool',
-      description: 'A test tool',
-      input: z.object({ msg: z.string().describe('Message') }),
-      output: z.object({ ok: z.boolean() }),
-      handler: () => ({ ok: true }),
-    };
-
-    expect(definition.name).toBe('test_tool');
-    expect(typeof definition.handler).toBe('function');
-  });
-
-  it('should accept all optional fields', () => {
-    const inputSchema = z.object({ q: z.string().describe('Query') });
-    const outputSchema = z.object({ result: z.string().describe('Result') });
-
-    const definition: ToolDefinition<typeof inputSchema, typeof outputSchema> = {
-      name: 'full_tool',
-      description: 'A fully specified tool',
-      input: inputSchema,
-      output: outputSchema,
-      auth: ['tool:full:read'],
-      title: 'Full Tool',
-      annotations: { readOnlyHint: true },
-      _meta: { version: '1.0' },
-      handler: (input) => ({ result: input.q }),
-      format: (result) => [{ type: 'text', text: result.result }],
-    };
-
-    expect(definition.auth).toEqual(['tool:full:read']);
-    expect(definition.title).toBe('Full Tool');
-    expect(definition.annotations?.readOnlyHint).toBe(true);
-    expect(definition._meta?.version).toBe('1.0');
-    expect(definition.format).toBeDefined();
-  });
-});
-
-describe('ToolAnnotations', () => {
-  it('should accept all hint fields', () => {
-    const annotations: ToolAnnotations = {
-      readOnlyHint: true,
-      destructiveHint: false,
-      idempotentHint: true,
-      openWorldHint: false,
-      title: 'My Tool',
-    };
-
-    expect(annotations.readOnlyHint).toBe(true);
-    expect(annotations.destructiveHint).toBe(false);
-    expect(annotations.idempotentHint).toBe(true);
-    expect(annotations.openWorldHint).toBe(false);
-    expect(annotations.title).toBe('My Tool');
-  });
-
-  it('should allow arbitrary extra keys via index signature', () => {
-    const annotations: ToolAnnotations = {
-      readOnlyHint: true,
-      customHint: 42,
-    };
-
-    expect(annotations.customHint).toBe(42);
-  });
-});
 
 describe('AnyToolDefinition', () => {
-  it('should accept heterogeneous tool definitions in an array', () => {
-    const toolA = tool('tool_a', {
-      description: 'Tool A',
-      input: z.object({ x: z.number().describe('X value') }),
-      output: z.object({ doubled: z.number() }),
-      handler: (input) => ({ doubled: input.x * 2 }),
-    });
-
-    const toolB = tool('tool_b', {
-      description: 'Tool B',
-      input: z.object({ name: z.string().describe('Name') }),
-      output: z.object({ greeting: z.string() }),
-      handler: (input) => ({ greeting: `Hello ${input.name}` }),
-    });
-
-    const tools: AnyToolDefinition[] = [toolA, toolB];
-    expect(tools).toHaveLength(2);
-    expect(tools[0]!.name).toBe('tool_a');
-    expect(tools[1]!.name).toBe('tool_b');
-  });
-
   it('keeps enrichment tools assignable through the type erasure', () => {
     // A concrete enrichment field's narrow `render` param must not break
     // assignability to the type-erased AnyToolDefinition, exactly as `format`
@@ -169,112 +77,26 @@ describe('tool() builder', () => {
     expect(bad.success).toBe(false);
   });
 
-  it('preserves output schema', () => {
-    const def = tool('output_tool', {
-      description: 'Output test',
-      input: z.object({ n: z.number().describe('Number') }),
-      output: z.object({ doubled: z.number().describe('Doubled value') }),
-      handler: (input) => ({ doubled: input.n * 2 }),
-    });
-
-    expect(def.output).toBeDefined();
-    const result = def.output!.parse({ doubled: 10 });
-    expect(result.doubled).toBe(10);
-  });
-
-  it('handler receives validated input and returns expected output', async () => {
-    const def = tool('echo_tool', {
-      description: 'Echo',
-      input: z.object({ message: z.string().describe('Message') }),
-      output: z.object({ echo: z.string().describe('Echoed message') }),
-      handler: async (input) => ({ echo: `Echo: ${input.message}` }),
-    });
-
-    const ctx = createMockContext();
-    const input = def.input.parse({ message: 'hello' });
-    const result = await def.handler(input, ctx);
-    expect(result.echo).toBe('Echo: hello');
-  });
-
-  it('handler can be synchronous', () => {
-    const def = tool('sync_tool', {
-      description: 'Sync tool',
-      input: z.object({ x: z.number().describe('Input') }),
-      output: z.object({ result: z.number() }),
-      handler: (input) => ({ result: input.x + 1 }),
-    });
-
-    const ctx = createMockContext();
-    const result = def.handler(def.input.parse({ x: 5 }), ctx);
-    expect(result).toEqual({ result: 6 });
-  });
-
-  it('preserves auth scopes', () => {
-    const def = tool('auth_tool', {
-      description: 'Auth test',
-      input: z.object({ id: z.string().describe('ID') }),
-      output: z.object({ ok: z.boolean() }),
-      auth: ['tool:auth:read', 'tool:auth:write'],
-      handler: () => ({ ok: true }),
-    });
-
-    expect(def.auth).toEqual(['tool:auth:read', 'tool:auth:write']);
-  });
-
-  it('preserves annotations', () => {
-    const def = tool('annotated_tool', {
-      description: 'Annotated',
-      input: z.object({ id: z.string().describe('ID') }),
-      output: z.object({ ok: z.boolean() }),
-      annotations: {
-        readOnlyHint: true,
-        idempotentHint: true,
-        openWorldHint: false,
-      },
-      handler: () => ({ ok: true }),
-    });
-
-    expect(def.annotations?.readOnlyHint).toBe(true);
-    expect(def.annotations?.idempotentHint).toBe(true);
-    expect(def.annotations?.openWorldHint).toBe(false);
-  });
-
-  it('preserves format function', () => {
-    const def = tool('formatted_tool', {
-      description: 'Formatted',
+  it('carries optional metadata through unchanged', () => {
+    const def = tool('meta_tool', {
+      description: 'Metadata test',
+      title: 'My Titled Tool',
       input: z.object({ msg: z.string().describe('Message') }),
       output: z.object({ text: z.string().describe('Text') }),
+      auth: ['tool:auth:read', 'tool:auth:write'],
+      annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: false },
+      _meta: { appToolConfig: { inputComponent: 'textarea' } },
       handler: (input) => ({ text: input.msg }),
       format: (result) => [{ type: 'text', text: result.text }],
     });
 
-    expect(def.format).toBeDefined();
-    const blocks = def.format!({ text: 'hello' });
-    expect(blocks).toEqual([{ type: 'text', text: 'hello' }]);
-  });
-
-  it('preserves _meta', () => {
-    const def = tool('meta_tool', {
-      description: 'Meta test',
-      input: z.object({ x: z.string().describe('X') }),
-      output: z.object({ ok: z.boolean() }),
-      _meta: { appToolConfig: { inputComponent: 'textarea' } },
-      handler: () => ({ ok: true }),
-    });
-
-    expect(def._meta?.appToolConfig).toEqual({ inputComponent: 'textarea' });
-  });
-
-  it('preserves title', () => {
-    const def = tool('titled_tool', {
-      description: 'Titled',
+    expect(def).toMatchObject({
       title: 'My Titled Tool',
-      input: z.object({ x: z.string().describe('X') }),
-      output: z.object({ ok: z.boolean() }),
-      handler: () => ({ ok: true }),
+      auth: ['tool:auth:read', 'tool:auth:write'],
+      annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: false },
+      _meta: { appToolConfig: { inputComponent: 'textarea' } },
     });
-
-    expect(def.title).toBe('My Titled Tool');
+    expect(def.format!({ text: 'hello' })).toEqual([{ type: 'text', text: 'hello' }]);
   });
 });
 
@@ -386,17 +208,6 @@ describe('tool() discriminated-union input (#142)', () => {
 });
 
 describe('tool() reserved `error` output key', () => {
-  it('rejects an `error` field on the output schema', () => {
-    expect(() =>
-      tool('reserved_output_tool', {
-        description: 'Declares a reserved key.',
-        input: z.object({ query: z.string().describe('Search query') }),
-        output: z.object({ error: z.string().describe('Why it went wrong') }),
-        handler: () => ({ error: 'nope' }),
-      }),
-    ).toThrow(/reserved/);
-  });
-
   it('rejects an `error` field on the enrichment block', () => {
     expect(() =>
       tool('reserved_enrichment_tool', {

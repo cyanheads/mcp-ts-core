@@ -21,6 +21,7 @@ import { prompt } from '@/mcp-server/prompts/utils/promptDefinition.js';
 import { resource } from '@/mcp-server/resources/utils/resourceDefinition.js';
 import { disabledTool } from '@/mcp-server/tools/utils/disabled-tool.js';
 import { tool } from '@/mcp-server/tools/utils/toolDefinition.js';
+import { JsonRpcErrorCode } from '@/types-global/errors.js';
 
 /**
  * Minimal AppConfig stub — only the fields `buildServerManifest` reads.
@@ -505,16 +506,6 @@ describe('buildServerManifest — landing requireAuth default (issue #156)', () 
     expect(manifest.landing.requireAuth).toBe(true);
   });
 
-  test('defaults requireAuth=false when auth mode is none', () => {
-    const manifest = buildServerManifest({
-      config: stubConfig({ mcpAuthMode: 'none' }),
-      tools: [],
-      resources: [],
-      prompts: [],
-    });
-    expect(manifest.landing.requireAuth).toBe(false);
-  });
-
   test('explicit requireAuth=false overrides the auth-enabled default (public catalog)', () => {
     const manifest = buildServerManifest({
       config: stubConfig({ mcpAuthMode: 'jwt' }),
@@ -761,27 +752,54 @@ describe('isSafeCssColor', () => {
 });
 
 describe('buildServerManifest — theme.accent safety', () => {
-  test('throws a configurationError when theme.accent contains unsafe characters', () => {
-    expect(() =>
-      buildServerManifest({
-        config: stubConfig(),
-        tools: [],
-        resources: [],
-        prompts: [],
-        landing: { theme: { accent: 'red; } body { background: url(evil)' } },
-      }),
-    ).toThrow(/unsafe to interpolate into CSS/);
-  });
-
-  test('accepts a custom safe accent value in functional color notation', () => {
-    const manifest = buildServerManifest({
+  const withAccent = (accent: string) =>
+    buildServerManifest({
       config: stubConfig(),
       tools: [],
       resources: [],
       prompts: [],
-      landing: { theme: { accent: 'oklch(0.7 0.2 280)' } },
+      landing: { theme: { accent } },
     });
-    expect(manifest.landing.theme.accent).toBe('oklch(0.7 0.2 280)');
+
+  test.each([
+    ['hex (short)', '#fff'],
+    ['hex (long)', '#6366f1'],
+    ['hex with alpha', '#6366f1cc'],
+    ['named color', 'indigo'],
+    ['rgb()', 'rgb(99, 102, 241)'],
+    ['rgb() with spaces', 'rgb(99 102 241)'],
+    ['hsl() with slash-alpha', 'hsl(180 50% 50% / 0.5)'],
+    ['oklch()', 'oklch(0.7 0.2 280)'],
+    ['oklab()', 'oklab(0.7 0.1 0.1)'],
+    ['currentcolor', 'currentcolor'],
+  ])('accepts %s and publishes it unchanged: %s', (_label, accent) => {
+    expect(withAccent(accent).landing.theme.accent).toBe(accent);
+  });
+
+  test.each([
+    ['semicolon breakout', 'red; } body { background: url(evil)'],
+    ['brace injection', 'red) } body { color: red'],
+    ['angle brackets', '<script>alert(1)</script>'],
+    ['block comment open', 'red /* attack'],
+    ['block comment close', 'red */ x'],
+    ['backslash escape', 'red\\00003b'],
+    ['leading digit', '123'],
+    ['leading at-rule', '@import url(x)'],
+    ['empty string', ''],
+    ['whitespace-only', '   '],
+    ['over the 128-character cap', `#${'a'.repeat(200)}`],
+  ])('rejects %s as a ConfigurationError naming the field', (_label, accent) => {
+    let thrown: unknown;
+    try {
+      withAccent(accent);
+    } catch (error) {
+      thrown = error;
+    }
+
+    expect(thrown).toBeMcpError(JsonRpcErrorCode.ConfigurationError);
+    expect((thrown as Error).message).toMatch(
+      /^landing\.theme\.accent ".*" contains characters that are unsafe to interpolate into CSS\./s,
+    );
   });
 });
 
@@ -799,8 +817,16 @@ describe('buildServerManifest — schema conversion edge cases', () => {
       resources: [],
       prompts: [],
     });
-    expect(manifest.definitions.tools[0]?.inputSchema).toBeDefined();
-    expect(manifest.definitions.tools[0]?.outputSchema).toBeDefined();
+    expect(manifest.definitions.tools[0]?.inputSchema).toMatchObject({
+      type: 'object',
+      properties: { q: { type: 'string', description: 'query' } },
+      required: ['q'],
+    });
+    expect(manifest.definitions.tools[0]?.outputSchema).toMatchObject({
+      type: 'object',
+      properties: { r: { type: 'string', description: 'result' } },
+      required: ['r'],
+    });
   });
 
   test('omits inputSchema/outputSchema and reports no required fields when the schema is not a real Zod object', () => {

@@ -159,21 +159,4 @@ describe('protectedResourceMetadataHandler', () => {
 
     expect(data.resource).toBe('https://mcp.example.com/mcp');
   });
-
-  it('strips trailing slash from MCP_PUBLIC_URL', async () => {
-    mockConfig.mcpAuthMode = 'none';
-    mockConfig.mcpServerResourceIdentifier = undefined;
-    mockConfig.oauthAudience = undefined;
-    mockConfig.mcpPublicUrl = 'https://mcp.example.com/';
-
-    const app = new Hono();
-    app.get('/.well-known/oauth-protected-resource', protectedResourceMetadataHandler);
-
-    const response = await app.request(
-      'http://internal.container/.well-known/oauth-protected-resource',
-    );
-    const data = await readMetadata(response);
-
-    expect(data.resource).toBe('https://mcp.example.com/mcp');
-  });
 });

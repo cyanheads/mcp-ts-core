@@ -1,14 +1,8 @@
 /**
- * @fileoverview Shared test fixtures and factory functions.
- * Consolidates common test setup patterns used across the suite.
+ * @fileoverview Shared test fixtures used across the suite.
  * @module tests/fixtures
  */
 import type { ServerManifest } from '@/core/serverManifest.js';
-import {
-  type CreateRequestContextParams,
-  type RequestContext,
-  requestContextService,
-} from '@/utils/internal/requestContext.js';
 
 /** Default server manifest for tests that need a {@link ServerManifest} value. */
 export const defaultServerManifest: ServerManifest = {
@@ -64,17 +58,3 @@ export const defaultServerManifest: ServerManifest = {
   },
   builtAt: new Date(0).toISOString(),
 };
-
-/**
- * Create a test RequestContext with sensible defaults.
- * Wraps `requestContextService.createRequestContext` with common test values.
- */
-export function createTestAppContext(
-  overrides: Partial<CreateRequestContextParams> = {},
-): RequestContext {
-  return requestContextService.createRequestContext({
-    operation: 'test-operation',
-    tenantId: 'test-tenant',
-    ...overrides,
-  });
-}

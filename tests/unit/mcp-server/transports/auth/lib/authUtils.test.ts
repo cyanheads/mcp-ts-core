@@ -114,19 +114,6 @@ describe('withRequiredScopes', () => {
       });
     });
 
-    it('bypasses missing-scope enforcement under oauth mode when auth context is present', () => {
-      mockConfig.mcpAuthMode = 'oauth';
-      mockConfig.mcpAuthDisableScopeChecks = true;
-      authContext.run(
-        { authInfo: createAuthInfo(['openid', 'email', 'profile', 'offline_access']) },
-        () => {
-          expect(() =>
-            withRequiredScopes(['tool:obsidian_list_notes:read', 'team:abc:write']),
-          ).not.toThrow();
-        },
-      );
-    });
-
     it('does not affect MCP_AUTH_MODE=none behavior', () => {
       mockConfig.mcpAuthMode = 'none';
       mockConfig.mcpAuthDisableScopeChecks = true;

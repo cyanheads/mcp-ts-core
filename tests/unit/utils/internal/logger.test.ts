@@ -133,34 +133,42 @@ describe('Logger', () => {
   });
 
   describe('level mapping (RFC5424 → Pino)', () => {
-    it('should not throw for any MCP log level', async () => {
-      const levels: McpLogLevel[] = [
-        'debug',
-        'info',
-        'notice',
-        'warning',
-        'error',
-        'crit',
-        'alert',
-        'emerg',
-      ];
+    it.each([
+      ['debug', 'debug'],
+      ['info', 'info'],
+      ['notice', 'info'],
+      ['warning', 'warn'],
+      ['error', 'error'],
+      ['crit', 'error'],
+      ['alert', 'fatal'],
+      ['emerg', 'fatal'],
+    ] as const satisfies ReadonlyArray<readonly [McpLogLevel, string]>)(
+      'creates the pino logger at %s → %s',
+      async (level, pinoLevel) => {
+        const pino = (await import('pino')).default;
 
-      for (const level of levels) {
-        // Reset
-        if (logger.isInitialized()) await logger.close();
         await logger.initialize(level);
-        expect(logger.isInitialized()).toBe(true);
-        await logger.close();
-      }
-    });
+
+        expect(pino).toHaveBeenCalledWith(expect.objectContaining({ level: pinoLevel }));
+      },
+    );
   });
 
   describe('setLevel', () => {
     it('should change log level after initialization', async () => {
       await logger.initialize('info');
-      logger.setLevel('debug');
+      const pino = (await import('pino')).default;
+      const mockLogger = pino() as any;
 
-      expect(() => logger.debug('test debug after level change')).not.toThrow();
+      logger.debug('filtered before level change');
+      logger.setLevel('debug');
+      logger.debug('test debug after level change');
+
+      expect(mockLogger.debug).toHaveBeenCalledTimes(1);
+      expect(mockLogger.debug).toHaveBeenCalledWith(
+        expect.any(Object),
+        'test debug after level change',
+      );
     });
 
     it('should not throw when not initialized', () => {
@@ -225,22 +233,6 @@ describe('Logger', () => {
   });
 
   describe('rate limiting', () => {
-    it('should allow messages under the threshold', async () => {
-      await logger.initialize('info');
-
-      // Rate limit threshold is 10 within 60s window.
-      // First 10 calls should not be rate-limited.
-      for (let i = 0; i < 10; i++) {
-        logger.info('repeated message');
-      }
-
-      // Access the internal pino logger to check call count
-      const pino = (await import('pino')).default;
-      const mockLogger = pino() as any;
-      // The info method should have been called (includes init messages + our 10)
-      expect(mockLogger.info.mock.calls.length).toBeGreaterThanOrEqual(10);
-    });
-
     it('should suppress messages over the threshold', async () => {
       await logger.initialize('info');
 
@@ -255,7 +247,7 @@ describe('Logger', () => {
 
       const callsAfter = mockLogger.info.mock.calls.length - initialCallCount;
       // Should have logged 10 (threshold), not 15
-      expect(callsAfter).toBeLessThanOrEqual(10);
+      expect(callsAfter).toBe(10);
     });
 
     it('should not rate-limit different messages independently', async () => {
@@ -454,56 +446,37 @@ describe('Logger', () => {
   });
 
   describe('error-level methods', () => {
-    it('error() should accept Error object as second arg', async () => {
+    it.each([
+      ['error', 'error'],
+      ['crit', 'error'],
+      ['alert', 'fatal'],
+      ['emerg', 'fatal'],
+    ] as const)('%s() emits at pino %s with (Error, ctx) and (ctx)', async (method, pinoLevel) => {
       await logger.initialize('info');
+      const pino = (await import('pino')).default;
+      const mockLogger = pino() as any;
+      const err = new Error(`${method} boom`);
+      const ctx = { requestId: `r-${method}`, timestamp: '2026-01-01T00:00:00.000Z' };
+      const msg = `${method} condition`;
+
+      logger[method](msg, err, ctx);
+      logger[method](msg, ctx);
+
+      expect(mockLogger[pinoLevel].mock.calls).toEqual([
+        [{ ...ctx, err }, msg],
+        [ctx, msg],
+      ]);
+    });
+
+    it('error() with only an Error attaches it without context', async () => {
+      await logger.initialize('info');
+      const pino = (await import('pino')).default;
+      const mockLogger = pino() as any;
       const err = new Error('test error');
 
-      expect(() => logger.error('Something failed', err)).not.toThrow();
-    });
+      logger.error('Something failed', err);
 
-    it('error() should accept context as second arg', async () => {
-      await logger.initialize('info');
-      const ctx = { requestId: 'r1', timestamp: new Date().toISOString() };
-
-      expect(() => logger.error('Something failed', ctx as any)).not.toThrow();
-    });
-
-    it('crit() should accept Error + context', async () => {
-      await logger.initialize('info');
-      const err = new Error('critical');
-      const ctx = { requestId: 'r2', timestamp: new Date().toISOString() };
-
-      expect(() => logger.crit('Critical failure', err, ctx as any)).not.toThrow();
-    });
-
-    it('alert() should accept Error + context', async () => {
-      await logger.initialize('info');
-      const err = new Error('alert-level');
-      const ctx = { requestId: 'r-alert', timestamp: new Date().toISOString() };
-
-      expect(() => logger.alert('Alert condition', err, ctx as any)).not.toThrow();
-    });
-
-    it('alert() should accept context as second arg', async () => {
-      await logger.initialize('info');
-      const ctx = { requestId: 'r-alert-ctx', timestamp: new Date().toISOString() };
-
-      expect(() => logger.alert('Alert condition', ctx as any)).not.toThrow();
-    });
-
-    it('emerg() should accept Error + context', async () => {
-      await logger.initialize('info');
-      const err = new Error('emergency');
-      const ctx = { requestId: 'r-emerg', timestamp: new Date().toISOString() };
-
-      expect(() => logger.emerg('Emergency', err, ctx as any)).not.toThrow();
-    });
-
-    it('emerg() should accept context as second arg', async () => {
-      await logger.initialize('info');
-      const ctx = { requestId: 'r-emerg-ctx', timestamp: new Date().toISOString() };
-
-      expect(() => logger.emerg('Emergency', ctx as any)).not.toThrow();
+      expect(mockLogger.error).toHaveBeenCalledWith({ err }, 'Something failed');
     });
 
     it('fatal() should delegate to emerg()', async () => {
@@ -535,7 +508,10 @@ describe('Logger', () => {
 
       // In testing env without logsPath, interactionLogger is undefined
       // so it should warn
-      expect(spy).toHaveBeenCalled();
+      expect(spy).toHaveBeenCalledWith(
+        'Interaction logger not available.',
+        expect.objectContaining({ requestId: 'int-1' }),
+      );
       spy.mockRestore();
     });
   });

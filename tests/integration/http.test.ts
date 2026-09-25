@@ -5,6 +5,8 @@
  * @module tests/integration/http
  */
 import { spawnSync } from 'node:child_process';
+import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
 import { Client, StreamableHTTPClientTransport } from '@modelcontextprotocol/client';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
@@ -16,7 +18,7 @@ import {
   expectDefaultServerSubscriptionSurface,
 } from '../helpers/default-server-mcp.js';
 import { initializeBody, MCP_HEADERS, parseSSEEvents } from '../helpers/http-helpers.js';
-import { assertServerBuilt, type ServerHandle, startServer } from '../helpers/server-process.js';
+import { type ServerHandle, startServer } from '../helpers/server-process.js';
 
 /** Reverses the landing page's HTML escaping (the five entity characters). */
 function unescapeHtml(value: string): string {
@@ -28,11 +30,16 @@ function unescapeHtml(value: string): string {
     .replace(/&amp;/g, '&');
 }
 
+/** The server reports the manifest of the application root it runs from. */
+const pkg = JSON.parse(readFileSync(resolve(process.cwd(), 'package.json'), 'utf8')) as {
+  name: string;
+  version: string;
+};
+
 describe('HTTP transport integration', () => {
   let handle: ServerHandle;
 
   beforeAll(async () => {
-    assertServerBuilt();
     handle = await startServer('http', { MCP_ALLOWED_ORIGINS: 'http://example.com' });
   });
 
@@ -60,15 +67,7 @@ describe('HTTP transport integration', () => {
     });
 
     it('completes the MCP handshake over HTTP', () => {
-      const version = client.getServerVersion();
-      expect(version).toBeDefined();
-      expect(version?.name).toBeTruthy();
-    });
-
-    it('responds to ping', async () => {
-      // Core server has no tools — just verify the transport is functional
-      const result = await client.ping();
-      expect(result).toBeDefined();
+      expect(client.getServerVersion()).toMatchObject({ name: pkg.name, version: pkg.version });
     });
 
     it('advertises the expected MCP capabilities', () => {
@@ -107,8 +106,7 @@ describe('HTTP transport integration', () => {
         status?: string | undefined;
       };
       expect(body.status).toBe('ok');
-      expect(body.server?.name).toBeTruthy();
-      expect(body.server?.version).toBeTruthy();
+      expect(body.server).toMatchObject({ name: pkg.name, version: pkg.version });
     });
 
     it('runs the landing page curl snippet verbatim and gets a negotiated initialize result', async () => {
@@ -201,7 +199,7 @@ describe('HTTP transport integration', () => {
 
       // Hono CORS middleware returns 204 for preflight
       expect(res.status).toBe(204);
-      expect(res.headers.get('access-control-allow-origin')).toBeTruthy();
+      expect(res.headers.get('access-control-allow-origin')).toBe('http://example.com');
       expect(res.headers.get('access-control-allow-methods')).toContain('POST');
 
       const exposedHeaders = res.headers.get('access-control-expose-headers') ?? '';

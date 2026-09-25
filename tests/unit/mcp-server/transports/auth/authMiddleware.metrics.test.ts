@@ -167,6 +167,7 @@ describe('Auth Middleware — mcp.auth.attempts counter & mcp.auth.duration hist
     expect(mockCounterAdd).toHaveBeenCalledWith(1, {
       'mcp.auth.outcome': 'success',
     });
+    expect(mockCounterAdd.mock.calls[0]?.[1]).not.toHaveProperty('mcp.auth.failure_reason');
     expect(mockHistogramRecord).toHaveBeenCalledWith(5, {
       'mcp.auth.outcome': 'success',
     });
@@ -193,19 +194,6 @@ describe('Auth Middleware — mcp.auth.attempts counter & mcp.auth.duration hist
     expect(mockHistogramRecord).toHaveBeenCalledWith(10, {
       'mcp.auth.outcome': 'failure',
     });
-  });
-
-  it('does not include failure_reason attribute on success', async () => {
-    const middleware = createAuthMiddleware(mockStrategy);
-    const ctx = createMockHonoContext('Bearer valid-token');
-
-    await middleware(ctx, mockNext);
-
-    const successCall = mockCounterAdd.mock.calls.find(
-      (call: unknown[]) => (call[1] as Record<string, string>)['mcp.auth.outcome'] === 'success',
-    );
-    expect(successCall).toBeDefined();
-    expect(successCall![1]).not.toHaveProperty('mcp.auth.failure_reason');
   });
 
   it('records identity attributes on the active span and falls back when tenant and subject are absent', async () => {

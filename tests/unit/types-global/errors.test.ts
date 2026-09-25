@@ -8,7 +8,6 @@ import {
   configurationError,
   conflict,
   databaseError,
-  type ErrorResponse,
   ErrorSchema,
   forbidden,
   internalError,
@@ -52,11 +51,6 @@ describe('Global Error Types', () => {
       expect(JsonRpcErrorCode.RequestCancelled).toBe(-32011);
       expect(JsonRpcErrorCode.SerializationError).toBe(-32070);
       expect(JsonRpcErrorCode.UnknownError).toBe(-32099);
-    });
-
-    it('should be a valid TypeScript enum', () => {
-      expect(typeof JsonRpcErrorCode.ParseError).toBe('number');
-      expect(JsonRpcErrorCode[JsonRpcErrorCode.ParseError]).toBe('ParseError');
     });
 
     it('assigns every code a distinct value', () => {
@@ -105,47 +99,11 @@ describe('Global Error Types', () => {
       expect(error.cause).toBe(cause);
     });
 
-    it('should maintain proper prototype chain', () => {
-      const error = new McpError(JsonRpcErrorCode.NotFound, 'Not found');
-
-      expect(Object.getPrototypeOf(error)).toBe(McpError.prototype);
-      expect(error instanceof McpError).toBe(true);
-      expect(error instanceof Error).toBe(true);
-    });
-
     it('should capture stack trace', () => {
       const error = new McpError(JsonRpcErrorCode.InternalError, 'Test error');
 
       expect(error.stack).toBeDefined();
       expect(error.stack).toContain('McpError');
-    });
-
-    it('should set name to "McpError"', () => {
-      const error = new McpError(JsonRpcErrorCode.Timeout, 'Request timeout');
-
-      expect(error.name).toBe('McpError');
-    });
-
-    it('should handle empty data object', () => {
-      const error = new McpError(JsonRpcErrorCode.InvalidRequest, 'Invalid', {});
-
-      expect(error.data).toEqual({});
-    });
-
-    it('should handle complex nested data', () => {
-      const complexData = {
-        nested: { field: 'value' },
-        array: [1, 2, 3],
-        null: null,
-        number: 42,
-      };
-      const error = new McpError(
-        JsonRpcErrorCode.ValidationError,
-        'Complex validation error',
-        complexData,
-      );
-
-      expect(error.data).toEqual(complexData);
     });
   });
 
@@ -228,33 +186,6 @@ describe('Global Error Types', () => {
       const result = ErrorSchema.safeParse(invalidError);
       expect(result.success).toBe(false);
     });
-
-    it('should allow optional data field', () => {
-      const errorWithoutData = {
-        code: JsonRpcErrorCode.NotFound,
-        message: 'Resource not found',
-      };
-
-      const result = ErrorSchema.safeParse(errorWithoutData);
-      expect(result.success).toBe(true);
-      if (result.success) {
-        expect(result.data.data).toBeUndefined();
-      }
-    });
-
-    it('should validate data as a record', () => {
-      const errorWithComplexData = {
-        code: JsonRpcErrorCode.ValidationError,
-        message: 'Complex validation',
-        data: {
-          errors: [{ field: 'name' }, { field: 'email' }],
-          count: 2,
-        },
-      };
-
-      const result = ErrorSchema.safeParse(errorWithComplexData);
-      expect(result.success).toBe(true);
-    });
   });
 
   describe('Error factory functions', () => {
@@ -307,12 +238,6 @@ describe('Global Error Types', () => {
       });
     }
 
-    it('should be throwable and catchable as McpError', () => {
-      expect(() => {
-        throw notFound('Item not found', { itemId: '123' });
-      }).toThrow(McpError);
-    });
-
     it('should pass through cause option', () => {
       const cause = new Error('upstream failure');
       const err = serviceUnavailable('API down', { url: '/foo' }, { cause });
@@ -325,38 +250,6 @@ describe('Global Error Types', () => {
       const err = timeout('Request timed out', undefined, { cause });
       expect(err.cause).toBe(cause);
       expect(err.data).toBeUndefined();
-    });
-  });
-
-  describe('ErrorResponse type', () => {
-    it('should correctly type valid error responses', () => {
-      const errorResponse: ErrorResponse = {
-        code: JsonRpcErrorCode.Forbidden,
-        message: 'Access denied',
-      };
-
-      expect(errorResponse.code).toBe(JsonRpcErrorCode.Forbidden);
-      expect(errorResponse.message).toBe('Access denied');
-    });
-
-    it('should correctly type error responses with data', () => {
-      const errorResponse: ErrorResponse = {
-        code: JsonRpcErrorCode.RateLimited,
-        message: 'Too many requests',
-        data: { retryAfter: 60 },
-      };
-
-      expect(errorResponse.data).toEqual({ retryAfter: 60 });
-    });
-
-    it('should be compatible with ErrorSchema', () => {
-      const errorResponse: ErrorResponse = {
-        code: JsonRpcErrorCode.Timeout,
-        message: 'Request timeout',
-      };
-
-      const result = ErrorSchema.safeParse(errorResponse);
-      expect(result.success).toBe(true);
     });
   });
 });

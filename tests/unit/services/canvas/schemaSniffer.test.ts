@@ -68,9 +68,9 @@ describe('sniffSchema · ambiguous columns', () => {
     expect(schema[0]?.type).toBe('VARCHAR');
   });
 
-  it('marks columns nullable when null is observed', () => {
-    const { schema } = sniffSchema([{ x: 'a' }, { x: null }], 100);
-    expect(schema[0]).toMatchObject({ type: 'VARCHAR', nullable: true });
+  it('ignores null and undefined values when picking the column type', () => {
+    const { schema } = sniffSchema([{ x: 1 }, { x: null }, { x: undefined }], 100);
+    expect(schema[0]).toMatchObject({ type: 'BIGINT', nullable: true });
   });
 
   it('falls back to VARCHAR when only nulls are observed', () => {
@@ -89,25 +89,6 @@ describe('sniffSchema · column ordering and missing keys', () => {
       100,
     );
     expect(schema.map((c) => c.name)).toEqual(['a', 'b', 'c']);
-  });
-
-  it('treats missing keys as nullable across rows', () => {
-    const { schema } = sniffSchema([{ a: 1, b: 'x' }, { a: 2 }], 100);
-    expect(schema.find((c) => c.name === 'b')?.nullable).toBe(true);
-  });
-
-  it('marks late-introduced columns nullable', () => {
-    // Column `b` appears for the first time at row 2; row 1 didn't have it.
-    // The pre-fix sniffer marked `b` as nullable=false because the missing-
-    // key loop only ran for columns already in columnOrder at each row.
-    const { schema } = sniffSchema([{ a: 1 }, { a: 2, b: 'x' }], 100);
-    const b = schema.find((c) => c.name === 'b');
-    expect(b?.nullable).toBe(true);
-  });
-
-  it('marks columns nullable when missing in the middle of the stream', () => {
-    const { schema } = sniffSchema([{ a: 1, b: 'x' }, { a: 2 }, { a: 3, b: 'y' }], 100);
-    expect(schema.find((c) => c.name === 'b')?.nullable).toBe(true);
   });
 });
 
@@ -154,12 +135,6 @@ describe('sniffSchema · continuation iterator', () => {
 });
 
 describe('sniffSchema · sniff window', () => {
-  it('honors sniffRowCount — only buffers up to N rows', () => {
-    const rows = Array.from({ length: 1000 }, (_, i) => ({ x: i }));
-    const result = sniffSchema(rows, 50);
-    expect(result.sniffedRows.length).toBe(50);
-  });
-
   it('returns the buffered prefix so callers can append without re-iterating', () => {
     const rows = [{ a: 1 }, { a: 2 }, { a: 3 }];
     const result = sniffSchema(rows, 100);
@@ -184,14 +159,6 @@ describe('sniffSchema · always-nullable inference (issue #221)', () => {
     expect(schema[0]?.nullable).toBe(true);
   });
 
-  it('emits nullable: true even when every sampled row has a value', () => {
-    const { schema } = sniffSchema(
-      [{ ticker: 'AAPL' }, { ticker: 'MSFT' }, { ticker: 'GOOG' }],
-      100,
-    );
-    expect(schema[0]?.nullable).toBe(true);
-  });
-
   it('inferSchemaFromRows never emits nullable: false', () => {
     const rows = Array.from({ length: 50 }, (_, i) => ({
       id: i,
@@ -206,11 +173,6 @@ describe('sniffSchema · always-nullable inference (issue #221)', () => {
 });
 
 describe('classify() · undefined is equivalent to null', () => {
-  it('treats undefined the same as null when mixed with a populated column', () => {
-    const { schema } = sniffSchema([{ x: 'a' }, { x: undefined }], 100);
-    expect(schema[0]).toMatchObject({ type: 'VARCHAR', nullable: true });
-  });
-
   it('falls back to VARCHAR when only undefined values are observed', () => {
     const { schema } = sniffSchema([{ x: undefined }, { x: undefined }], 100);
     expect(schema[0]).toMatchObject({ type: 'VARCHAR', nullable: true });

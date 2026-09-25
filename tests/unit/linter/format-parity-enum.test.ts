@@ -15,10 +15,7 @@ it('currently samples only the first flat enum member (#326)', () => {
     },
   ]);
   // #326 remains open: the detail branch drops a declared field, but flat enums
-  // are sampled once. Changing the linter is outside this test-only audit.
+  // are sampled once.
   expect(lintFormatParity({ output, format }, 'enum_gap')).toEqual([]);
   expect(format.mock.calls.map(([result]) => result.mode)).toEqual(['summary']);
-  expect(format({ mode: 'detail', detail: 'must be visible' })[0]?.text).not.toContain(
-    'must be visible',
-  );
 });

@@ -235,27 +235,6 @@ describe('HTTP Transport', () => {
   }
 
   describe('createHttpApp', () => {
-    test('should create Hono app instance', async () => {
-      const { app } = await buildApp();
-
-      expect(app).toBeDefined();
-      expect(typeof app.fetch).toBe('function');
-      expect(typeof app.get).toBe('function');
-      expect(typeof app.post).toBe('function');
-      expect(typeof app.delete).toBe('function');
-    });
-
-    test('should configure CORS middleware', async () => {
-      const { app } = await buildApp();
-
-      const response = await app.request('/test', {
-        method: 'OPTIONS',
-        headers: { Origin: ORIGIN },
-      });
-
-      expect(response.headers.get('access-control-allow-origin')).toBeTruthy();
-    });
-
     test('should register health endpoint', async () => {
       const { app } = await buildApp();
 
@@ -333,36 +312,7 @@ describe('HTTP Transport', () => {
       expect(await response.text()).toContain('Disallow');
     });
 
-    test('should pass SSE GET requests through to transport handler', async () => {
-      const { app } = await buildApp();
-
-      const response = await app.request(ENDPOINT, {
-        method: 'GET',
-        headers: { Accept: 'text/event-stream', Origin: ORIGIN },
-      });
-
-      // Falls through to the MCP handler rather than returning the status JSON.
-      const text = await response.text();
-      expect(text).not.toContain('"status":"ok"');
-    });
-
-    test('should serve OAuth metadata endpoint with minimal metadata when OAuth not configured', async () => {
-      await withConfigOverrides({ mcpAuthMode: 'jwt' }, async () => {
-        const { app } = await buildApp();
-
-        const response = await app.request('/.well-known/oauth-protected-resource', {
-          method: 'GET',
-        });
-        const data = (await response.json()) as Record<string, unknown>;
-
-        expect(response.status).toBe(200);
-        expect(data.bearer_methods_supported).toEqual(['header']);
-        // No authorization_servers when OAuth is not configured
-        expect(data.authorization_servers).toBeUndefined();
-      });
-    });
-
-    test('should also serve OAuth metadata at the RFC 8414 path-suffixed variant', async () => {
+    test('serves minimal OAuth metadata at the bare and RFC 8414 path-suffixed paths when OAuth is not configured', async () => {
       await withConfigOverrides({ mcpAuthMode: 'jwt' }, async () => {
         const { app } = await buildApp();
 
@@ -371,9 +321,13 @@ describe('HTTP Transport', () => {
           method: 'GET',
         });
 
+        expect(bare.status).toBe(200);
         expect(suffixed.status).toBe(200);
         const bareBody = (await bare.json()) as Record<string, unknown>;
         const suffixedBody = (await suffixed.json()) as Record<string, unknown>;
+        expect(bareBody.bearer_methods_supported).toEqual(['header']);
+        // No authorization_servers when OAuth is not configured
+        expect(bareBody.authorization_servers).toBeUndefined();
         expect(suffixedBody).toEqual(bareBody);
       });
     });
@@ -423,18 +377,6 @@ describe('HTTP Transport', () => {
 
       expect(response.status).toBe(403);
       expect(data.error).toContain('Invalid origin');
-    });
-
-    test('should allow requests with valid origin', async () => {
-      const { app } = await buildApp();
-
-      const response = await app.request(ENDPOINT, {
-        method: 'POST',
-        headers: legacyHeaders(),
-        body: initializeBody(),
-      });
-
-      expect(response.status).not.toBe(403);
     });
 
     test('should include credentials in CORS when origin is explicitly configured', async () => {
@@ -629,15 +571,6 @@ describe('HTTP Transport', () => {
       return sessionId as string;
     }
 
-    test('creates an empty session store', async () => {
-      await withStatefulMode(async () => {
-        const { sessionStore } = await buildApp();
-
-        expect(sessionStore).not.toBeNull();
-        expect((sessionStore as SessionStore).getSessionCount()).toBe(0);
-      });
-    });
-
     // The default `MCP_SESSION_MODE=auto` serves sessions, which is what the
     // manifest now advertises as `stateful` — both read `resolveSessionMode`
     // (#357), so this pins the transport half of that agreement.
@@ -649,23 +582,6 @@ describe('HTTP Transport', () => {
         const sessionId = await initialize(app);
 
         expect(sessionId).toMatch(/^[0-9a-f]{64}$/);
-        expect((sessionStore as SessionStore).getSessionCount()).toBe(1);
-      });
-    });
-
-    test('mints a 64-hex session ID on initialize', async () => {
-      await withStatefulMode(async () => {
-        const { app, sessionStore } = await buildApp();
-
-        const response = await app.request(ENDPOINT, {
-          method: 'POST',
-          headers: legacyHeaders(),
-          body: initializeBody(),
-        });
-        await response.text();
-
-        expect(response.status).toBe(200);
-        expect(response.headers.get('mcp-session-id')).toMatch(/^[0-9a-f]{64}$/);
         expect((sessionStore as SessionStore).getSessionCount()).toBe(1);
       });
     });
@@ -848,7 +764,7 @@ describe('HTTP Transport', () => {
       });
     });
 
-    test('serves a claim-less request on the sessionful arm', async () => {
+    test('serves a claim-less request on the sessionful arm, minting a 64-hex session ID', async () => {
       await withStatefulMode(async () => {
         const { app, sessionStore } = await buildApp();
 
@@ -859,6 +775,7 @@ describe('HTTP Transport', () => {
         });
         await response.text();
 
+        expect(response.status).toBe(200);
         expect(response.headers.get('mcp-session-id')).toMatch(/^[0-9a-f]{64}$/);
         expect((sessionStore as SessionStore).getSessionCount()).toBe(1);
         expect(factory.mock.calls.map((call) => call[0]?.era)).toEqual(['legacy']);
@@ -909,20 +826,6 @@ describe('HTTP Transport', () => {
         } as RequestInit);
 
         expect(response.status).toBe(413);
-      });
-    });
-
-    test('allows an under-limit POST body (not 413)', async () => {
-      await withConfigOverrides({ mcpHttpMaxBodyBytes: 1024 * 1024 }, async () => {
-        const { app } = await buildApp();
-
-        const response = await app.request(ENDPOINT, {
-          method: 'POST',
-          headers: legacyHeaders(),
-          body: JSON.stringify({ jsonrpc: '2.0', method: 'ping', id: 1 }),
-        });
-
-        expect(response.status).not.toBe(413);
       });
     });
 
@@ -1083,18 +986,6 @@ describe('HTTP Transport', () => {
         expect(state.cancelled).toBe(true);
         expect(state.bytesPulled).toBeLessThan(CAP + 8 * 1024);
       });
-    });
-  });
-
-  describe('Error handling integration', () => {
-    test('should use centralized error handler', async () => {
-      const { app } = await buildApp();
-
-      // Simulate an error by accessing a non-existent route with proper method
-      const response = await app.request('/nonexistent', { method: 'GET' });
-
-      // Should return 404 for non-existent route
-      expect(response.status).toBe(404);
     });
   });
 

@@ -14,18 +14,6 @@ import { InMemoryProvider } from '@/storage/providers/inMemory/inMemoryProvider.
 import { SupabaseProvider } from '@/storage/providers/supabase/supabaseProvider.js';
 import { McpError } from '@/types-global/errors.js';
 
-// Mock Supabase client
-vi.mock('@supabase/supabase-js', () => ({
-  createClient: vi.fn().mockReturnValue({
-    from: vi.fn().mockReturnValue({
-      select: vi.fn().mockReturnThis(),
-      insert: vi.fn().mockReturnThis(),
-      update: vi.fn().mockReturnThis(),
-      delete: vi.fn().mockReturnThis(),
-    }),
-  }),
-}));
-
 const originalIsServerless = process.env.IS_SERVERLESS;
 
 afterEach(() => {
@@ -43,23 +31,6 @@ afterEach(() => {
 describe('createStorageProvider', () => {
   describe('in-memory provider', () => {
     it('should create InMemoryProvider when configured', () => {
-      const mockConfig = {
-        storage: {
-          providerType: 'in-memory' as const,
-        },
-      } as AppConfig;
-
-      const provider = createStorageProvider(mockConfig);
-
-      expect(provider).toBeInstanceOf(InMemoryProvider);
-    });
-
-    it('should force in-memory provider for non-serverless-compatible types', () => {
-      // Note: isServerless is evaluated at module load time, so we can't easily test
-      // the actual serverless detection. Instead, we verify the allowed provider types
-      // for serverless environments by checking the implementation logic.
-      // This test documents that in-memory is the fallback for incompatible types.
-
       const mockConfig = {
         storage: {
           providerType: 'in-memory' as const,
@@ -333,105 +304,7 @@ describe('createStorageProvider', () => {
     });
   });
 
-  describe('dependency injection', () => {
-    it('should use provided Supabase client when available', () => {
-      const mockConfig = {
-        storage: {
-          providerType: 'supabase' as const,
-        },
-        supabase: {
-          url: 'https://test.supabase.co',
-          serviceRoleKey: 'test-key',
-        },
-      } as AppConfig;
-
-      const mockClient = {
-        from: vi.fn().mockReturnValue({
-          select: vi.fn(),
-        }),
-      };
-
-      const provider = createStorageProvider(mockConfig, {
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        supabaseClient: mockClient as any,
-      });
-
-      expect(provider).toBeInstanceOf(SupabaseProvider);
-    });
-  });
-
   describe('edge cases', () => {
-    it('should handle in-memory provider creation consistently', () => {
-      // Test that in-memory provider is always created correctly
-      const mockConfig = {
-        storage: {
-          providerType: 'in-memory' as const,
-        },
-      } as AppConfig;
-
-      const provider = createStorageProvider(mockConfig);
-
-      expect(provider).toBeInstanceOf(InMemoryProvider);
-    });
-
-    it('should handle filesystem provider with various path formats', () => {
-      const testPaths = ['/tmp/test-storage-1', '/tmp/test-storage-2', '/tmp/test-storage-3'];
-
-      for (const path of testPaths) {
-        const mockConfig = {
-          storage: {
-            providerType: 'filesystem' as const,
-            filesystemPath: path,
-          },
-        } as AppConfig;
-
-        const provider = createStorageProvider(mockConfig);
-        expect(provider).toBeInstanceOf(FileSystemProvider);
-      }
-    });
-
-    it('should handle empty filesystem path as missing', () => {
-      const mockConfig = {
-        storage: {
-          providerType: 'filesystem' as const,
-          filesystemPath: '',
-        },
-      } as AppConfig;
-
-      expect(() => createStorageProvider(mockConfig)).toThrow(McpError);
-      expect(() => createStorageProvider(mockConfig)).toThrow(
-        /STORAGE_FILESYSTEM_PATH must be set/,
-      );
-    });
-
-    it('should handle missing Supabase URL with present service role key', () => {
-      const mockConfig = {
-        storage: {
-          providerType: 'supabase' as const,
-        },
-        supabase: {
-          url: '',
-          serviceRoleKey: 'test-key',
-        },
-      } as AppConfig;
-
-      expect(() => createStorageProvider(mockConfig)).toThrow(McpError);
-    });
-
-    it('should handle missing Supabase service role key with present URL', () => {
-      const mockConfig = {
-        storage: {
-          providerType: 'supabase' as const,
-        },
-        supabase: {
-          url: 'https://test.supabase.co',
-          serviceRoleKey: '',
-        },
-      } as AppConfig;
-
-      expect(() => createStorageProvider(mockConfig)).toThrow(McpError);
-    });
-
     it('should reject filesystem provider in serverless mode before path validation', () => {
       process.env.IS_SERVERLESS = 'true';
 

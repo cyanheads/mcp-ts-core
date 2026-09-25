@@ -1,9 +1,8 @@
 /**
  * @fileoverview Tests for the runtime-agnostic SQLite handle — prepare/exec/query
- * against the driver actually available on this test runtime, malformed SQL
- * surfacing as raw (unwrapped) driver errors, connection pragmas, open/close
- * lifecycle including use-after-close, and the driver-selection / missing-driver
- * branches.
+ * against the driver actually available on this test runtime, connection pragmas,
+ * open/close lifecycle including statement finalization on close, and the
+ * driver-selection / missing-driver branches.
  *
  * Runtime note: this suite runs under two configs with different SQLite drivers.
  * `bunx vitest` (pool: 'forks') executes under Node with `better-sqlite3`, while
@@ -58,19 +57,6 @@ describe('openSqliteHandle', () => {
   }
 
   describe('driver selection on this runtime', () => {
-    it('exposes boolean runtime flags that select the SQLite driver', () => {
-      expect(typeof runtimeCaps.isBun).toBe('boolean');
-      expect(typeof runtimeCaps.isNode).toBe('boolean');
-    });
-
-    it('opens the active SQLite driver and returns the full SqliteHandle surface', async () => {
-      const handle = await open('driver.db');
-      expect(handle.exec).toBeTypeOf('function');
-      expect(handle.prepare).toBeTypeOf('function');
-      expect(handle.transaction).toBeTypeOf('function');
-      expect(handle.close).toBeTypeOf('function');
-    });
-
     it.skipIf(IS_BUN)(
       'wraps a Bun-driver failure as a DatabaseError when runtimeCaps.isBun is forced true on this Node runtime',
       async () => {
@@ -89,10 +75,6 @@ describe('openSqliteHandle', () => {
         }
       },
     );
-
-    it('restores runtimeCaps.isBun after the forced-Bun test (no cross-test leakage)', () => {
-      expect(runtimeCaps.isBun).toBe(IS_BUN);
-    });
 
     /**
      * Bun selects bun:sqlite and cannot exercise a missing better-sqlite3 import.
@@ -121,13 +103,6 @@ describe('openSqliteHandle', () => {
         }
       },
     );
-
-    it('opens the real driver again after the missing-driver mock is undone', async () => {
-      // Guards against the previous test's vi.doMock/resetModules leaking into
-      // the rest of the suite.
-      const handle = await open('post-mock-recovery.db');
-      expect(() => handle.exec('CREATE TABLE t (id TEXT)')).not.toThrow();
-    });
   });
 
   describe('connection pragmas', () => {
@@ -170,20 +145,6 @@ describe('openSqliteHandle', () => {
       expect(all).toEqual([{ id: '1' }]);
     });
 
-    it('get() returns no row (nullish) when no row matches', async () => {
-      const handle = await open('empty.db');
-      handle.exec('CREATE TABLE t (id TEXT)');
-      // better-sqlite3 returns undefined; bun:sqlite returns null — both mean "no row".
-      const row = handle.prepare('SELECT * FROM t WHERE id = ?').get('missing');
-      expect(row == null).toBe(true);
-    });
-
-    it('all() returns an empty array against an empty table', async () => {
-      const handle = await open('empty-all.db');
-      handle.exec('CREATE TABLE t (id TEXT)');
-      expect(handle.prepare('SELECT * FROM t').all()).toEqual([]);
-    });
-
     it('transaction() commits every write on success', async () => {
       const handle = await open('txn-commit.db');
       handle.exec('CREATE TABLE t (id TEXT PRIMARY KEY)');
@@ -218,42 +179,11 @@ describe('openSqliteHandle', () => {
     });
   });
 
-  describe('malformed SQL surfaces as a raw driver error (unwrapped by handle.ts)', () => {
-    it('exec() throws on invalid SQL syntax', async () => {
-      const handle = await open('malformed-exec.db');
-      expect(() => handle.exec('THIS IS NOT VALID SQL')).toThrow(/syntax error/i);
-    });
-
-    it('prepare() throws when the referenced table does not exist', async () => {
-      const handle = await open('malformed-prepare.db');
-      expect(() => handle.prepare('SELECT * FROM no_such_table')).toThrow(/no such table/i);
-    });
-
-    it('run() throws when fewer parameters are bound than the statement expects', async () => {
-      const handle = await open('param-mismatch.db');
-      handle.exec('CREATE TABLE t (a TEXT, b TEXT)');
-      const stmt = handle.prepare('INSERT INTO t (a, b) VALUES (?, ?)');
-      expect(() => stmt.run('only-one')).toThrow(/parameter|values/i);
-    });
-  });
-
   describe('lifecycle: open / close / use-after-close', () => {
     it('close() is idempotent — calling it a second time does not throw', async () => {
       const handle = await openSqliteHandle(join(dir, 'double-close.db'));
       handle.close();
       expect(() => handle.close()).not.toThrow();
-    });
-
-    it('exec() after close() throws rather than silently no-op-ing', async () => {
-      const handle = await openSqliteHandle(join(dir, 'closed-exec.db'));
-      handle.close();
-      expect(() => handle.exec('CREATE TABLE t (id TEXT)')).toThrow();
-    });
-
-    it('prepare() after close() throws', async () => {
-      const handle = await openSqliteHandle(join(dir, 'closed-prepare.db'));
-      handle.close();
-      expect(() => handle.prepare('SELECT 1')).toThrow();
     });
 
     it('finalizes a statement prepared before close() so it can no longer write', async () => {

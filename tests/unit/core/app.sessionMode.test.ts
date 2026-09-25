@@ -92,21 +92,17 @@ describe('createApp sessionMode (#376)', () => {
     });
 
     it.each([
-      [undefined, undefined],
-      ['stateless' as const, undefined],
-      ['stateful' as const, undefined],
       ['auto' as const, undefined],
       [undefined, 'auto'],
       ['stateless' as const, 'auto'],
-      ['auto' as const, 'stateful'],
-    ])('never advertises `auto` (option %s, env %s)', async (option, env) => {
+    ])('advertises a resolved `auto` as stateful (option %s, env %s)', async (option, env) => {
       if (env === undefined) delete process.env.MCP_SESSION_MODE;
       else process.env.MCP_SESSION_MODE = env;
       resetConfig();
 
       const { manifest } = await compose(option ? { sessionMode: option } : {});
 
-      expect(['stateful', 'stateless']).toContain(manifest.transport.sessionMode);
+      expect(manifest.transport.sessionMode).toBe('stateful');
     });
   });
 
@@ -165,15 +161,18 @@ describe('createApp sessionMode (#376)', () => {
       process.env.MCP_SESSION_MODE = 'stateless';
       let setupRan = false;
 
-      await expect(
-        composeServices({
-          sessionMode: { require: 'stateful' },
-          setup: () => {
-            setupRan = true;
-          },
-        }),
-      ).rejects.toBeDefined();
+      const error = await composeServices({
+        sessionMode: { require: 'stateful' },
+        setup: () => {
+          setupRan = true;
+        },
+      }).then(
+        () => undefined,
+        (err: unknown) => err,
+      );
 
+      expect(error).toBeMcpError(JsonRpcErrorCode.ConfigurationError);
+      expect((error as Error).message).toContain("sessionMode.require: 'stateful'");
       expect(setupRan).toBe(false);
     });
   });

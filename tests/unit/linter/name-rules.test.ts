@@ -34,11 +34,8 @@ describe('checkNameRequired', () => {
     expect(checkNameRequired('', 'resource', '')).toMatchObject({ rule: 'name-required' });
   });
 
-  it('errors when name is a non-string type (e.g. a number)', () => {
+  it('errors when name is a non-string type (number or null)', () => {
     expect(checkNameRequired(42, 'prompt', '')).toMatchObject({ rule: 'name-required' });
-  });
-
-  it('errors when name is null', () => {
     expect(checkNameRequired(null, 'tool', '')).toMatchObject({ rule: 'name-required' });
   });
 

@@ -20,7 +20,7 @@ if (typeof process !== 'undefined' && process.env && !process.env.NODE_ENV) {
 // of nesting, and nested calls produce warnings (future errors).
 //
 // If you encounter "getStore is not a function" errors with AsyncLocalStorage,
-// ensure poolOptions.forks.isolate = true in vitest.config.ts.
+// ensure `isolate: true` (with `pool: 'forks'`) stays set in vitest.config.ts.
 // See: https://github.com/vitest-dev/vitest/issues/5858
 
 // The SDK is no longer globally mocked. v2 collapses the server surface onto a

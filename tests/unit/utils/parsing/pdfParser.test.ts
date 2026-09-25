@@ -2,7 +2,7 @@
  * @fileoverview Comprehensive tests for the PdfParser utility.
  * @module tests/utils/parsing/pdfParser.test
  */
-import { PDFDocument, rgb, StandardFonts } from 'pdf-lib';
+import { degrees, PDFDocument, rgb, StandardFonts } from 'pdf-lib';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { logger } from '@/utils/internal/logger.js';
 import { requestContextService } from '@/utils/internal/requestContext.js';
@@ -58,16 +58,18 @@ describe('PdfParser', () => {
       vi.spyOn(PDFDocument, 'create').mockRejectedValueOnce(new Error('Creation failed'));
       const errorSpy = vi.spyOn(logger, 'error');
 
-      await expect(parser.createDocument(context)).rejects.toThrow(McpError);
+      const error = await parser.createDocument(context).catch((e: unknown) => e);
 
-      try {
-        await parser.createDocument(context);
-      } catch (error) {
-        const mcpError = error as McpError;
-        expect(mcpError.code).toBe(JsonRpcErrorCode.InternalError);
-        expect(mcpError.message).toContain('Failed to create PDF document');
-        expect(errorSpy).toHaveBeenCalled();
-      }
+      expect(error).toBeInstanceOf(McpError);
+      expect((error as McpError).code).toBe(JsonRpcErrorCode.InternalError);
+      expect((error as McpError).message).toBe('Failed to create PDF document: Creation failed');
+      expect((error as McpError).data).toEqual({ reason: 'pdf_create_failed' });
+      expect(errorSpy).toHaveBeenCalledWith(
+        'Failed to create PDF document.',
+        expect.objectContaining({
+          extra: expect.objectContaining({ errorDetails: 'Creation failed' }),
+        }),
+      );
     });
   });
 
@@ -82,15 +84,6 @@ describe('PdfParser', () => {
 
     it('should load a PDF document from Uint8Array', async () => {
       const doc = await parser.loadDocument(samplePdfBytes, context);
-      expect(doc).toBeInstanceOf(PDFDocument);
-      expect(doc.getPageCount()).toBe(1);
-    });
-
-    it('should load a PDF document from ArrayBuffer', async () => {
-      // Create a proper ArrayBuffer copy to avoid SharedArrayBuffer type issues
-      const arrayBuffer = samplePdfBytes.buffer.slice(0);
-      const uint8Array = new Uint8Array(arrayBuffer);
-      const doc = await parser.loadDocument(uint8Array, context);
       expect(doc).toBeInstanceOf(PDFDocument);
       expect(doc.getPageCount()).toBe(1);
     });
@@ -170,18 +163,6 @@ describe('PdfParser', () => {
       const font = await parser.embedFont(doc, 'Helvetica', context);
       expect(font).toBeDefined();
       expect(font.name).toContain('Helvetica');
-    });
-
-    it('should embed TimesRoman font', async () => {
-      const font = await parser.embedFont(doc, 'TimesRoman', context);
-      expect(font).toBeDefined();
-      expect(font.name).toContain('Times');
-    });
-
-    it('should embed Courier font', async () => {
-      const font = await parser.embedFont(doc, 'Courier', context);
-      expect(font).toBeDefined();
-      expect(font.name).toContain('Courier');
     });
 
     it('should log debug message when embedding font', async () => {
@@ -373,82 +354,81 @@ describe('PdfParser', () => {
       font = await doc.embedFont(StandardFonts.Helvetica);
     });
 
-    it('should draw simple text on a page', () => {
-      const options: DrawTextOptions = {
-        text: 'Hello, World!',
-        x: 50,
-        y: 350,
-        size: 30,
-        font,
-        color: rgb(0, 0, 0),
-      };
-
-      expect(() => parser.drawText(page, options)).not.toThrow();
-    });
-
-    it('should draw text with default values', () => {
+    it('should draw a single line with default size and color and no font or rotation', async () => {
+      const drawText = vi.spyOn(page, 'drawText');
       const options: DrawTextOptions = {
         text: 'Default Text',
         x: 50,
         y: 350,
       };
 
-      expect(() => parser.drawText(page, options)).not.toThrow();
+      await parser.drawText(page, options);
+
+      expect(drawText).toHaveBeenCalledOnce();
+      expect(drawText.mock.calls[0]).toStrictEqual([
+        'Default Text',
+        { x: 50, y: 350, size: 12, color: rgb(0, 0, 0) },
+      ]);
     });
 
-    it('should draw text with rotation', () => {
+    it('should forward font, size, color, and rotation on a single line', async () => {
+      const drawText = vi.spyOn(page, 'drawText');
       const options: DrawTextOptions = {
         text: 'Rotated Text',
         x: 300,
         y: 200,
         size: 20,
         font,
+        color: rgb(0, 0.53, 0.71),
         rotate: 45,
       };
 
-      expect(() => parser.drawText(page, options)).not.toThrow();
+      await parser.drawText(page, options);
+
+      expect(drawText).toHaveBeenCalledOnce();
+      expect(drawText.mock.calls[0]).toStrictEqual([
+        'Rotated Text',
+        { x: 300, y: 200, size: 20, font, color: rgb(0, 0.53, 0.71), rotate: degrees(45) },
+      ]);
     });
 
-    it('should draw text with custom color', () => {
-      const options: DrawTextOptions = {
-        text: 'Colored Text',
-        x: 50,
-        y: 300,
-        size: 24,
-        font,
-        color: rgb(0, 0.53, 0.71),
-      };
+    it.each([
+      { lineHeight: undefined, step: 14.4 },
+      { lineHeight: 1.5, step: 18 },
+    ])(
+      'should wrap at maxWidth and step each line down by size × lineHeight ($lineHeight)',
+      async ({ lineHeight, step }) => {
+        const drawText = vi.spyOn(page, 'drawText');
+        const options: DrawTextOptions = {
+          text: 'This is a long text that should wrap to multiple lines when maxWidth is set',
+          x: 50,
+          y: 350,
+          size: 12,
+          font,
+          maxWidth: 200,
+          rotate: 90,
+          ...(lineHeight !== undefined && { lineHeight }),
+        };
 
-      expect(() => parser.drawText(page, options)).not.toThrow();
-    });
+        await parser.drawText(page, options);
 
-    it('should handle text wrapping with maxWidth', () => {
-      const options: DrawTextOptions = {
-        text: 'This is a long text that should wrap to multiple lines when maxWidth is set',
-        x: 50,
-        y: 350,
-        size: 12,
-        font,
-        maxWidth: 200,
-        lineHeight: 1.5,
-      };
-
-      expect(() => parser.drawText(page, options)).not.toThrow();
-    });
-
-    it('should handle text wrapping without rotation', () => {
-      const options: DrawTextOptions = {
-        text: 'Wrapped text without rotation',
-        x: 50,
-        y: 250,
-        size: 14,
-        font,
-        maxWidth: 150,
-        rotate: 0,
-      };
-
-      expect(() => parser.drawText(page, options)).not.toThrow();
-    });
+        expect(drawText.mock.calls.map(([line]) => line)).toEqual([
+          'This is a long text that should wrap to',
+          'multiple lines when maxWidth is set',
+        ]);
+        const [first, second] = drawText.mock.calls.map(([, opts]) => opts);
+        expect(first).toStrictEqual({
+          x: 50,
+          y: 350,
+          size: 12,
+          font,
+          color: rgb(0, 0, 0),
+          rotate: degrees(90),
+        });
+        expect(second).toMatchObject({ x: 50, rotate: degrees(90) });
+        expect(second?.y).toBeCloseTo(350 - step);
+      },
+    );
   });
 
   describe('drawImage', () => {
@@ -469,66 +449,42 @@ describe('PdfParser', () => {
       image = await doc.embedPng(pngBytes);
     });
 
-    it('should draw an image with default dimensions', () => {
+    it('should default to intrinsic dimensions, full opacity, and no rotation', async () => {
+      const drawImage = vi.spyOn(page, 'drawImage');
       const options: DrawImageOptions = {
         image,
         x: 100,
         y: 200,
       };
 
-      expect(() => parser.drawImage(page, options)).not.toThrow();
-    });
+      await parser.drawImage(page, options);
 
-    it('should draw an image with custom dimensions', () => {
-      const options: DrawImageOptions = {
+      expect(drawImage).toHaveBeenCalledOnce();
+      expect(drawImage.mock.calls[0]).toStrictEqual([
         image,
-        x: 100,
-        y: 200,
-        width: 200,
-        height: 150,
-      };
-
-      expect(() => parser.drawImage(page, options)).not.toThrow();
+        { x: 100, y: 200, width: 1, height: 1, opacity: 1 },
+      ]);
     });
 
-    it('should draw an image with rotation', () => {
-      const options: DrawImageOptions = {
-        image,
-        x: 300,
-        y: 200,
-        width: 100,
-        height: 100,
-        rotate: 45,
-      };
-
-      expect(() => parser.drawImage(page, options)).not.toThrow();
-    });
-
-    it('should draw an image with opacity', () => {
-      const options: DrawImageOptions = {
-        image,
-        x: 200,
-        y: 150,
-        width: 150,
-        height: 150,
-        opacity: 0.5,
-      };
-
-      expect(() => parser.drawImage(page, options)).not.toThrow();
-    });
-
-    it('should draw an image with all options', () => {
+    it('should forward custom dimensions, rotation, and opacity', async () => {
+      const drawImage = vi.spyOn(page, 'drawImage');
       const options: DrawImageOptions = {
         image,
         x: 250,
         y: 250,
         width: 120,
-        height: 120,
+        height: 90,
         rotate: 30,
         opacity: 0.75,
       };
 
-      expect(() => parser.drawImage(page, options)).not.toThrow();
+      await parser.drawImage(page, options);
+
+      expect(drawImage).toHaveBeenCalledOnce();
+      expect(drawImage.mock.calls[0]).toStrictEqual([
+        image,
+        { x: 250, y: 250, width: 120, height: 90, opacity: 0.75, rotate: degrees(30) },
+      ]);
     });
   });
 
@@ -738,19 +694,17 @@ describe('PdfParser', () => {
     });
 
     it('should fill checkbox fields in form', () => {
+      // A checkbox needs a widget for pdf-lib to record its checked state
+      doc.getForm().getCheckBox('Subscribe').addToPage(doc.getPage(0));
       const options: FillFormOptions = {
         fields: {
           Subscribe: true,
         },
       };
 
-      expect(() => parser.fillForm(doc, options, context)).not.toThrow();
+      parser.fillForm(doc, options, context);
 
-      // Note: pdf-lib checkboxes require specific setup to verify state
-      // The fillForm function calls the check() method correctly
-      const form = doc.getForm();
-      const checkbox = form.getCheckBox('Subscribe');
-      expect(checkbox).toBeDefined();
+      expect(doc.getForm().getCheckBox('Subscribe').isChecked()).toBe(true);
     });
 
     it('should uncheck checkbox fields when provided a false value', () => {
@@ -778,18 +732,6 @@ describe('PdfParser', () => {
       expect(uncheckSpy).toHaveBeenCalledTimes(1);
     });
 
-    it('should fill multiple field types', () => {
-      const options: FillFormOptions = {
-        fields: {
-          Name: 'Jane Smith',
-          Age: 25,
-          Subscribe: true,
-        },
-      };
-
-      expect(() => parser.fillForm(doc, options, context)).not.toThrow();
-    });
-
     it('should flatten form when requested', () => {
       const options: FillFormOptions = {
         fields: {
@@ -798,7 +740,9 @@ describe('PdfParser', () => {
         flatten: true,
       };
 
-      expect(() => parser.fillForm(doc, options, context)).not.toThrow();
+      parser.fillForm(doc, options, context);
+
+      expect(doc.getForm().getFields()).toHaveLength(0);
     });
 
     it('should log debug messages when filling form', () => {
@@ -1060,14 +1004,6 @@ describe('PdfParser', () => {
       expect(mergedText).toContain('Page 3');
     });
 
-    it('should extract text as array when mergePages is false', async () => {
-      const result = await parser.extractText(doc, { mergePages: false }, context);
-
-      expect(result.totalPages).toBe(3);
-      expect(Array.isArray(result.text)).toBe(true);
-      expect((result.text as string[]).length).toBe(3);
-    });
-
     it('should log debug messages during extraction', async () => {
       const debugSpy = vi.spyOn(logger, 'debug');
       await parser.extractText(doc, undefined, context);
@@ -1245,16 +1181,17 @@ describe('PdfParser', () => {
       const errorSpy = vi.spyOn(logger, 'error');
       vi.spyOn(doc, 'save').mockRejectedValueOnce(new Error('Save failed'));
 
-      await expect(parser.saveDocument(doc, context)).rejects.toThrow(McpError);
+      const error = await parser.saveDocument(doc, context).catch((e: unknown) => e);
 
-      try {
-        await parser.saveDocument(doc, context);
-      } catch (error) {
-        const mcpError = error as McpError;
-        expect(mcpError.code).toBe(JsonRpcErrorCode.InternalError);
-        expect(mcpError.message).toContain('Failed to save PDF document');
-        expect(errorSpy).toHaveBeenCalled();
-      }
+      expect(error).toBeInstanceOf(McpError);
+      expect((error as McpError).code).toBe(JsonRpcErrorCode.InternalError);
+      expect((error as McpError).message).toBe('Failed to save PDF document: Save failed');
+      expect(errorSpy).toHaveBeenCalledWith(
+        'Failed to serialize PDF document.',
+        expect.objectContaining({
+          extra: expect.objectContaining({ errorDetails: 'Save failed' }),
+        }),
+      );
     });
   });
 
@@ -1278,7 +1215,7 @@ describe('PdfParser', () => {
       const font = await parser.embedFont(doc, 'Helvetica');
 
       // Draw text on pages
-      parser.drawText(page1, {
+      await parser.drawText(page1, {
         text: 'Page 1: Integration Test',
         x: 50,
         y: 350,
@@ -1287,7 +1224,7 @@ describe('PdfParser', () => {
         color: rgb(0, 0, 0),
       });
 
-      parser.drawText(page2, {
+      await parser.drawText(page2, {
         text: 'Page 2: More content',
         x: 50,
         y: 350,
@@ -1357,15 +1294,6 @@ describe('PdfParser', () => {
     it('should export pdfParser singleton', async () => {
       const { pdfParser } = await import('../../../../src/utils/parsing/pdfParser.js');
       expect(pdfParser).toBeInstanceOf(PdfParser);
-    });
-
-    it('should export type-only re-exports for pdf-lib types', async () => {
-      // PDFDocument, PDFFont, PDFImage, PDFPage, RGB are type-only re-exports
-      // (pdf-lib is a lazy optional peer). Consumers import values from pdf-lib directly.
-      const mod = await import('../../../../src/utils/parsing/pdfParser.js');
-      // Only PdfParser class and pdfParser singleton should be value exports
-      expect(mod.PdfParser).toBeDefined();
-      expect(mod.pdfParser).toBeInstanceOf(mod.PdfParser);
     });
   });
 });

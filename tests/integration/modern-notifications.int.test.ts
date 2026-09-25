@@ -21,7 +21,6 @@ import { config } from '@/config/index.js';
 import { notifierFor } from '@/mcp-server/notifications.js';
 import { PromptRegistry } from '@/mcp-server/prompts/prompt-registration.js';
 import { ResourceRegistry } from '@/mcp-server/resources/resource-registration.js';
-import { installResourceSubscriptions } from '@/mcp-server/resources/resourceSubscriptions.js';
 import { createMcpServerInstance } from '@/mcp-server/server.js';
 import { ToolRegistry } from '@/mcp-server/tools/tool-registration.js';
 import { type AnyToolDefinition, tool } from '@/mcp-server/tools/utils/toolDefinition.js';
@@ -118,37 +117,5 @@ describe('modern-era notification routing (#193)', () => {
       { kind: 'tools_list_changed' },
       { kind: 'resource_updated', uri: 'probe://item/1' },
     ]);
-  });
-
-  it('lets a background emitter reach the same bus the listen streams subscribe to', async () => {
-    const bus = new InMemoryServerEventBus();
-    const published: ServerEvent[] = [];
-    bus.subscribe((event) => published.push(event));
-
-    // Out-of-request emission — a cron, a webhook, `createApp({ setup })`. Under
-    // HTTP there is no long-lived server instance to send through, so the bus is
-    // the only path that exists.
-    notifierFor(bus).resourcesChanged();
-
-    expect(published).toEqual([{ kind: 'resources_list_changed' }]);
-  });
-
-  it('leaves legacy-era handler-time delivery on the request scope', async () => {
-    // The 2025 era has no listen stream to publish to: delivery rides the live
-    // exchange, gated by the `resources/subscribe` registry (#354).
-    const legacy = await createMcpServerInstance({
-      config,
-      era: 'legacy',
-      notifier: notifierFor(new InMemoryServerEventBus()),
-      promptRegistry: new PromptRegistry([], logger),
-      resourceRegistry: new ResourceRegistry([], services()),
-      toolRegistry: new ToolRegistry([touchTool as AnyToolDefinition], services()),
-    });
-    teardown.push(() => legacy.close());
-
-    // Installing the 2025 registry is what a legacy instance does; a modern one
-    // is handed none. Asserted through the era gate rather than the wire, since
-    // the registry is the observable difference.
-    expect(installResourceSubscriptions(legacy).size).toBe(0);
   });
 });

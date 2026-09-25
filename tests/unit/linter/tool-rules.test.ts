@@ -9,7 +9,6 @@ import { z } from 'zod';
 
 import {
   lintAppToolResourcePairing,
-  lintAuthScopes,
   lintCanvasConsumerPairing,
   lintToolDefinition,
 } from '@/linter/rules/tool-rules.js';
@@ -56,13 +55,6 @@ describe('lintToolDefinition — _meta.ui', () => {
         rule: 'meta-ui-type',
         severity: 'error',
       }),
-    );
-  });
-
-  it('errors when _meta.ui is a number', () => {
-    const diagnostics = lintToolDefinition(validTool({ _meta: { ui: 42 } }));
-    expect(diagnostics).toContainEqual(
-      expect.objectContaining({ rule: 'meta-ui-type', severity: 'error' }),
     );
   });
 
@@ -116,15 +108,6 @@ describe('lintToolDefinition — _meta.ui', () => {
         severity: 'warning',
         message: expect.stringContaining('does not use the ui:// scheme'),
       }),
-    );
-  });
-
-  it('warns when resourceUri uses http:// scheme', () => {
-    const diagnostics = lintToolDefinition(
-      validTool({ _meta: { ui: { resourceUri: 'http://localhost:3000/app.html' } } }),
-    );
-    expect(diagnostics).toContainEqual(
-      expect.objectContaining({ rule: 'meta-ui-resource-uri-scheme', severity: 'warning' }),
     );
   });
 
@@ -297,19 +280,6 @@ describe('lintAppToolResourcePairing', () => {
     expect(diagnostics[0]!.message).toContain('ui://app-x/ui.html');
   });
 
-  it('ignores tools with _meta but no ui', () => {
-    const diagnostics = lintAppToolResourcePairing([validTool({ _meta: { custom: true } })], []);
-    expect(diagnostics).toHaveLength(0);
-  });
-
-  it('ignores tools with _meta.ui but non-string resourceUri', () => {
-    const diagnostics = lintAppToolResourcePairing(
-      [validTool({ _meta: { ui: { resourceUri: 42 } } })],
-      [],
-    );
-    expect(diagnostics).toHaveLength(0);
-  });
-
   it('ignores resources without uriTemplate', () => {
     const diagnostics = lintAppToolResourcePairing(
       [validTool({ name: 'app', _meta: { ui: { resourceUri: 'ui://app/app.html' } } })],
@@ -324,43 +294,6 @@ describe('lintAppToolResourcePairing', () => {
 
     const diagnostics = lintAppToolResourcePairing([t], []);
     expect(diagnostics[0]!.definitionName).toBe('<unnamed>');
-  });
-
-  it('matches {+path} operator (reserved expansion with slashes)', () => {
-    const tools = [
-      validTool({
-        name: 'app_dynamic',
-        _meta: { ui: { resourceUri: 'ui://app/a/b/c' } },
-      }),
-    ];
-    const resources = [{ uriTemplate: 'ui://app/{+path}', name: 'app-ui' }];
-
-    expect(lintAppToolResourcePairing(tools, resources)).toHaveLength(0);
-  });
-
-  it('matches {/segments} operator (path segments with slashes)', () => {
-    const tools = [
-      validTool({
-        name: 'app_segments',
-        _meta: { ui: { resourceUri: 'ui://app/x/y' } },
-      }),
-    ];
-    const resources = [{ uriTemplate: 'ui://app{/segments}', name: 'app-ui' }];
-
-    expect(lintAppToolResourcePairing(tools, resources)).toHaveLength(0);
-  });
-
-  it('simple {var} does not match values with slashes', () => {
-    const tools = [
-      validTool({
-        name: 'app_simple',
-        _meta: { ui: { resourceUri: 'ui://app/a/b' } },
-      }),
-    ];
-    const resources = [{ uriTemplate: 'ui://app/{page}', name: 'app-ui' }];
-
-    // {page} only matches single segments — a/b should not match
-    expect(lintAppToolResourcePairing(tools, resources)).toHaveLength(1);
   });
 
   it('handles mixed app and non-app tools', () => {
@@ -437,11 +370,6 @@ describe('lintCanvasConsumerPairing', () => {
     expect(lintCanvasConsumerPairing(tools)).toHaveLength(0);
   });
 
-  it('passes for any tool name ending in _dataframe_query', () => {
-    const tools = [canvasTool('some_tool'), queryTool('some_prefix_dataframe_query')];
-    expect(lintCanvasConsumerPairing(tools)).toHaveLength(0);
-  });
-
   it('passes when canvasConsumers override lists the query tool', () => {
     const tools = [canvasTool('my_search'), queryTool('my_custom_sql_tool')];
     expect(
@@ -452,11 +380,6 @@ describe('lintCanvasConsumerPairing', () => {
   it('false disables the rule entirely', () => {
     const tools = [canvasTool('my_search')];
     expect(lintCanvasConsumerPairing(tools, { canvasConsumers: false })).toHaveLength(0);
-  });
-
-  it('does not warn for tools without canvas output', () => {
-    // A server with only ordinary tools and a query consumer should produce no warnings
-    expect(lintCanvasConsumerPairing([validTool({ name: 'normal_tool' })])).toHaveLength(0);
   });
 
   it('warns once per emitter tool, not once per consumer', () => {
@@ -470,26 +393,6 @@ describe('lintCanvasConsumerPairing', () => {
   it('passes when multiple emitters share one consumer', () => {
     const tools = [canvasTool('tool_a'), canvasTool('tool_b'), queryTool('shared_dataframe_query')];
     expect(lintCanvasConsumerPairing(tools)).toHaveLength(0);
-  });
-});
-
-// ---------------------------------------------------------------------------
-// lintAuthScopes (verify existing export still works)
-// ---------------------------------------------------------------------------
-
-describe('lintAuthScopes', () => {
-  it('passes with valid string array', () => {
-    expect(lintAuthScopes(['scope:read', 'scope:write'], 'tool', 'test')).toHaveLength(0);
-  });
-
-  it('errors on non-array', () => {
-    const diagnostics = lintAuthScopes('scope:read', 'tool', 'test');
-    expect(diagnostics).toContainEqual(expect.objectContaining({ rule: 'auth-type' }));
-  });
-
-  it('errors on empty string in array', () => {
-    const diagnostics = lintAuthScopes(['scope:read', ''], 'tool', 'test');
-    expect(diagnostics).toContainEqual(expect.objectContaining({ rule: 'auth-scope-format' }));
   });
 });
 

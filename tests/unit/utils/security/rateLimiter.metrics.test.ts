@@ -114,20 +114,12 @@ describe('RateLimiter metrics', () => {
     // Third call exceeds maxRequests=2
     expect(() => limiter.check('user:2')).toThrow();
 
-    expect(mockCounterAdd).toHaveBeenCalledTimes(1);
-    expect(mockCounterAdd).toHaveBeenCalledWith(1);
-  });
-
-  it('does not attach the per-key attribute to the rejection counter', () => {
-    // Unbounded cardinality fix — the rejection counter is intentionally
-    // unlabelled. Per-key attribution lives on the span (verified below).
-    limiter.check('my-key');
-    limiter.check('my-key');
-    expect(() => limiter.check('my-key')).toThrow();
-
-    // No 2nd argument means no attributes — verifies the label was dropped.
-    const firstCall = mockCounterAdd.mock.calls[0];
-    expect(firstCall).toEqual([1]);
+    /**
+     * Exactly one call with no 2nd argument: the counter is intentionally
+     * unlabelled (unbounded key cardinality). Per-key attribution lives on the
+     * span (verified below).
+     */
+    expect(mockCounterAdd.mock.calls).toEqual([[1]]);
   });
 
   it('still records the key on the active span for per-request attribution', () => {

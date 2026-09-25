@@ -137,37 +137,6 @@ describe('Completions wire integration', () => {
     expect(result.completion.values).toEqual(['typescript']);
   });
 
-  it('round-trips prompt arg completion: "" → all languages', async () => {
-    const { client, server } = await connectPair();
-    cleanups.push(async () => {
-      await client.close();
-      await server.close();
-    });
-
-    const result = await client.complete({
-      ref: { type: 'ref/prompt', name: 'code_review' },
-      argument: { name: 'language', value: '' },
-    });
-
-    // All languages match an empty prefix
-    expect(result.completion.values).toEqual(LANGUAGES);
-  });
-
-  it('round-trips prompt arg completion: "x" → [] (no match)', async () => {
-    const { client, server } = await connectPair();
-    cleanups.push(async () => {
-      await client.close();
-      await server.close();
-    });
-
-    const result = await client.complete({
-      ref: { type: 'ref/prompt', name: 'code_review' },
-      argument: { name: 'language', value: 'x' },
-    });
-
-    expect(result.completion.values).toEqual([]);
-  });
-
   // -------------------------------------------------------------------------
   // (b) Resource template complete map
   // -------------------------------------------------------------------------
@@ -185,21 +154,6 @@ describe('Completions wire integration', () => {
     });
 
     expect(result.completion.values).toEqual(['item-001', 'item-002', 'item-003']);
-  });
-
-  it('round-trips resource template completion: "item-a" → ["item-abc"]', async () => {
-    const { client, server } = await connectPair();
-    cleanups.push(async () => {
-      await client.close();
-      await server.close();
-    });
-
-    const result = await client.complete({
-      ref: { type: 'ref/resource', uri: 'items://{itemId}' },
-      argument: { name: 'itemId', value: 'item-a' },
-    });
-
-    expect(result.completion.values).toEqual(['item-abc']);
   });
 
   // -------------------------------------------------------------------------

@@ -1,11 +1,16 @@
 /**
  * @fileoverview Typecheck suite for the `tool()` builder — handler input/output
- * inference from the Zod schemas, error contract flow-through, and the
- * `AnyToolDefinition` type-erased form.
+ * inference from the Zod schemas and the `ToolDefinition` structural types.
+ * Error contract flow-through into `ctx` is covered by `error-contract.test-d.ts`.
  * @module tests/types/tool-builder.test-d
  */
 
-import type { HandlerContext, ReasonOf, ToolDefinition } from '@cyanheads/mcp-ts-core';
+import type {
+  ContentBlock,
+  HandlerContext,
+  ReasonOf,
+  ToolDefinition,
+} from '@cyanheads/mcp-ts-core';
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { type ErrorContract, JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { describe, expectTypeOf, it } from 'vitest';
@@ -79,86 +84,20 @@ describe('tool() input inference', () => {
 // ---------------------------------------------------------------------------
 
 describe('tool() output inference', () => {
-  it('handler return type is inferred from the output Zod schema', () => {
-    tool('demo', {
-      description: 'demo',
-      input: INPUT,
-      output: OUTPUT,
-      async handler(_input, _ctx) {
-        // Correct return shape — type-checks cleanly
-        return { items: ['a', 'b'], total: 2 };
-      },
-    });
-  });
-
   it('handler rejects a return value missing a required output field', () => {
-    tool('demo', {
+    const demo = tool('demo', {
       description: 'demo',
       input: INPUT,
       output: OUTPUT,
-      // @ts-expect-error — 'total' is required but missing
       async handler(_input, _ctx) {
-        return { items: [] };
-      },
-    });
-  });
-
-  it('output type does not include fields outside the schema', () => {
-    type OutputType = Awaited<ReturnType<ToolDefinition<typeof INPUT, typeof OUTPUT>['handler']>>;
-    type HasExtra = 'extra' extends keyof OutputType ? true : false;
-    expectTypeOf<HasExtra>().toEqualTypeOf<false>();
-
-    // Negative: excess property check — direct object literal to typed variable
-    // triggers TS excess property checking (unlike return from a handler).
-    // @ts-expect-error — Object literal may only specify known properties; 'extra' not in OutputType
-    const _bad: OutputType = { items: [], total: 0, extra: 'oops' };
-    void _bad;
-  });
-});
-
-// ---------------------------------------------------------------------------
-// tool() error contract flow-through
-// ---------------------------------------------------------------------------
-
-describe('tool() error contract flow-through', () => {
-  it('ctx.fail is typed to the declared reason union', () => {
-    tool('demo', {
-      description: 'demo',
-      input: INPUT,
-      output: OUTPUT,
-      errors: ERRORS,
-      async handler(_input, ctx) {
-        expectTypeOf(ctx.fail).parameter(0).toEqualTypeOf<'no_match' | 'upstream_error'>();
         return { items: [], total: 0 };
       },
     });
-  });
+    type Handler = (typeof demo)['handler'];
 
-  it('ctx.fail rejects a reason not in the declared contract', () => {
-    tool('demo', {
-      description: 'demo',
-      input: INPUT,
-      output: OUTPUT,
-      errors: ERRORS,
-      async handler(_input, ctx) {
-        // @ts-expect-error — 'typo_reason' is not in the contract
-        ctx.fail('typo_reason');
-        return { items: [], total: 0 };
-      },
-    });
-  });
-
-  it('ctx has no fail when no error contract is declared', () => {
-    tool('demo', {
-      description: 'demo',
-      input: INPUT,
-      output: OUTPUT,
-      async handler(_input, ctx) {
-        // ctx is plain Context — no fail method
-        expectTypeOf(ctx).not.toHaveProperty('fail');
-        return { items: [], total: 0 };
-      },
-    });
+    expectTypeOf<() => Promise<{ items: string[]; total: number }>>().toExtend<Handler>();
+    // 'total' is required by the output schema
+    expectTypeOf<() => Promise<{ items: string[] }>>().not.toExtend<Handler>();
   });
 });
 
@@ -184,6 +123,14 @@ describe('ToolDefinition structural types', () => {
     type MyTool = ToolDefinition<typeof INPUT, typeof OUTPUT, undefined, undefined>;
     type RetType = Awaited<ReturnType<MyTool['handler']>>;
     expectTypeOf<RetType>().toEqualTypeOf<{ items: string[]; total: number }>();
+  });
+
+  it('format() returns the root-exported ContentBlock type', () => {
+    type FormatReturn = ReturnType<
+      NonNullable<ToolDefinition<typeof INPUT, typeof OUTPUT>['format']>
+    >;
+    expectTypeOf<FormatReturn>().toEqualTypeOf<ContentBlock[]>();
+    expectTypeOf<{ type: 'text'; text: string }>().toExtend<ContentBlock>();
   });
 
   it('format() receives z.infer<TOutput> when declared', () => {

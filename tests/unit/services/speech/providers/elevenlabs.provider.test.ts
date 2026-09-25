@@ -43,7 +43,7 @@ describe('ElevenLabsProvider', () => {
       );
     });
 
-    it('should use default values when not specified', () => {
+    it('should use default values when not specified', async () => {
       const p = new ElevenLabsProvider({
         provider: 'elevenlabs',
         apiKey: 'key',
@@ -52,6 +52,26 @@ describe('ElevenLabsProvider', () => {
       expect(p.name).toBe('elevenlabs');
       expect(p.supportsTTS).toBe(true);
       expect(p.supportsSTT).toBe(false);
+
+      mockFetch.mockResolvedValue({
+        ok: true,
+        arrayBuffer: () => Promise.resolve(new Uint8Array([1]).buffer),
+      } as unknown as Response);
+      await p.textToSpeech({ text: 'Hi' });
+
+      const [url, timeout, , init] = mockFetch.mock.calls[0] ?? [];
+      expect(url).toBe('https://api.elevenlabs.io/v1/text-to-speech/EXAVITQu4vr4xnSDxMaL');
+      expect(timeout).toBe(30000);
+      expect(JSON.parse(init?.body as string)).toEqual({
+        text: 'Hi',
+        model_id: 'eleven_monolingual_v1',
+        voice_settings: {
+          stability: 0.5,
+          similarity_boost: 0.75,
+          style: 0,
+          use_speaker_boost: true,
+        },
+      });
     });
   });
 
@@ -134,16 +154,15 @@ describe('ElevenLabsProvider', () => {
       expect(sentVoiceSettings(1)).not.toHaveProperty('speed');
     });
 
-    it('should throw on API error response', async () => {
+    it('should rethrow McpError from the API call unchanged', async () => {
       // fetchWithTimeout throws McpError on non-ok responses
-      mockFetch.mockRejectedValue(
-        new McpError(
-          -32003,
-          'Fetch failed for https://api.elevenlabs.test/v1/text-to-speech/voice-123. Status: 401',
-        ),
+      const apiError = new McpError(
+        -32003,
+        'Fetch failed for https://api.elevenlabs.test/v1/text-to-speech/voice-123. Status: 401',
       );
+      mockFetch.mockRejectedValue(apiError);
 
-      await expect(provider.textToSpeech({ text: 'Hello' })).rejects.toThrow('Fetch failed');
+      await expect(provider.textToSpeech({ text: 'Hello' })).rejects.toBe(apiError);
     });
 
     it('should wrap network errors in McpError', async () => {
@@ -203,13 +222,15 @@ describe('ElevenLabsProvider', () => {
       expect(voices[1]?.gender).toBe('male');
     });
 
-    it('should throw on API error', async () => {
+    it('should rethrow McpError from the API call unchanged', async () => {
       // fetchWithTimeout throws McpError on non-ok responses
-      mockFetch.mockRejectedValue(
-        new McpError(-32003, 'Fetch failed for https://api.elevenlabs.test/v1/voices. Status: 500'),
+      const apiError = new McpError(
+        -32003,
+        'Fetch failed for https://api.elevenlabs.test/v1/voices. Status: 500',
       );
+      mockFetch.mockRejectedValue(apiError);
 
-      await expect(provider.getVoices()).rejects.toThrow(McpError);
+      await expect(provider.getVoices()).rejects.toBe(apiError);
     });
   });
 

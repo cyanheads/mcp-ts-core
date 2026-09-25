@@ -50,21 +50,6 @@ describe('recordSpeechOp', () => {
     });
   });
 
-  it('records counter and duration histogram on STT success', () => {
-    const span = createMockSpan();
-    recordSpeechOp(span, 100, true, 'stt', 'openai-whisper');
-
-    expect(mockAdd).toHaveBeenCalledWith(1, {
-      'mcp.speech.operation': 'stt',
-      'mcp.speech.provider': 'openai-whisper',
-      'mcp.speech.success': true,
-    });
-    expect(mockRecord).toHaveBeenCalledWith(50, {
-      'mcp.speech.operation': 'stt',
-      'mcp.speech.provider': 'openai-whisper',
-    });
-  });
-
   it('records error counter on failure', () => {
     const span = createMockSpan();
     recordSpeechOp(span, 100, false, 'tts', 'elevenlabs');

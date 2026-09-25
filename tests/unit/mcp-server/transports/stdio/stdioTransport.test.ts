@@ -146,6 +146,7 @@ describe('Stdio Transport', () => {
         expect.objectContaining({
           operation: 'stopStdioTransport',
           extra: expect.objectContaining({ transportType: 'Stdio' }),
+          requestId: mockContext.requestId,
         }),
       );
       expect(loggerSpy.info).toHaveBeenCalledWith(
@@ -164,23 +165,6 @@ describe('Stdio Transport', () => {
       expect(loggerSpy.info).not.toHaveBeenCalledWith(
         'Stdio transport stopped successfully.',
         expect.any(Object),
-      );
-    });
-
-    it('should log context with correct operation', async () => {
-      const { stopStdioTransport } = await import(
-        '@/mcp-server/transports/stdio/stdioTransport.js'
-      );
-
-      await stopStdioTransport(handle, mockContext);
-
-      expect(loggerSpy.info).toHaveBeenCalledWith(
-        expect.any(String),
-        expect.objectContaining({
-          operation: 'stopStdioTransport',
-          extra: expect.objectContaining({ transportType: 'Stdio' }),
-          requestId: mockContext.requestId,
-        }),
       );
     });
   });

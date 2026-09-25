@@ -35,14 +35,14 @@ describe('classifyDuckdbError', () => {
     expect(mcp.data?.reason).toBe('sql_read_only');
   });
 
-  it('matches the read-only pattern with hyphen and without', () => {
-    expect((classifyDuckdbError(new Error('database is read-only')) as McpError).data?.reason).toBe(
-      'sql_read_only',
-    );
-    expect((classifyDuckdbError(new Error('database is readonly')) as McpError).data?.reason).toBe(
-      'sql_read_only',
-    );
-  });
+  it.each(['read-only', 'readonly', 'read only'])(
+    'matches the read-only pattern for "%s"',
+    (phrase) => {
+      expect(
+        (classifyDuckdbError(new Error(`database is ${phrase}`)) as McpError).data?.reason,
+      ).toBe('sql_read_only');
+    },
+  );
 
   it('classifies unmatched Error instances as DatabaseError preserving the cause', () => {
     const original = new Error('Out of memory');
@@ -54,14 +54,22 @@ describe('classifyDuckdbError', () => {
     expect(mcp.cause).toBe(original);
   });
 
-  it('classifies non-Error throws as DatabaseError with the stringified value in data', () => {
-    const result = classifyDuckdbError('weird string thrown');
-    expect(result).toBeInstanceOf(McpError);
-    const mcp = result as McpError;
-    expect(mcp.code).toBe(JsonRpcErrorCode.DatabaseError);
-    expect(mcp.message).toMatch(/non-Error value/);
-    expect(mcp.data?.value).toBe('weird string thrown');
-  });
+  it.each([
+    ['a string', 'weird string thrown', 'weird string thrown'],
+    ['null', null, 'null'],
+    ['a plain object', { code: 42, detail: 'x' }, '[object Object]'],
+    ['a number', 42, '42'],
+  ])(
+    'classifies a thrown %s as DatabaseError with the stringified value in data',
+    (_label, thrown, expected) => {
+      const result = classifyDuckdbError(thrown);
+      expect(result).toBeInstanceOf(McpError);
+      const mcp = result as McpError;
+      expect(mcp.code).toBe(JsonRpcErrorCode.DatabaseError);
+      expect(mcp.message).toMatch(/non-Error value/);
+      expect(mcp.data?.value).toBe(expected);
+    },
+  );
 
   // Issue #254 — classification is for raw engine errors only. A structured
   // McpError thrown inside a provider try block (ensureTableMissing's
@@ -86,36 +94,6 @@ describe('classifyDuckdbError', () => {
     // classified — it must not be re-tagged sql_parse_error.
     const original = notFound('syntax detail: table gone', { reason: 'missing_table' });
     expect(classifyDuckdbError(original)).toBe(original);
-  });
-
-  it('matches "read only" with a plain space separator, not just a hyphen', () => {
-    // The regex uses `.?` (any single char, optional) between "read" and
-    // "only" — a space must match just as well as a hyphen or no separator.
-    expect((classifyDuckdbError(new Error('database is read only')) as McpError).data?.reason).toBe(
-      'sql_read_only',
-    );
-  });
-
-  it('classifies a thrown null as DatabaseError with the stringified value', () => {
-    const result = classifyDuckdbError(null);
-    expect(result).toBeInstanceOf(McpError);
-    const mcp = result as McpError;
-    expect(mcp.code).toBe(JsonRpcErrorCode.DatabaseError);
-    expect(mcp.message).toMatch(/non-Error value/);
-    expect(mcp.data?.value).toBe('null');
-  });
-
-  it('classifies a thrown plain object as DatabaseError with the stringified value', () => {
-    const result = classifyDuckdbError({ code: 42, detail: 'x' });
-    expect(result).toBeInstanceOf(McpError);
-    const mcp = result as McpError;
-    expect(mcp.code).toBe(JsonRpcErrorCode.DatabaseError);
-    expect(mcp.data?.value).toBe('[object Object]');
-  });
-
-  it('classifies a thrown number as DatabaseError with the stringified value', () => {
-    const result = classifyDuckdbError(42);
-    expect((result as McpError).data?.value).toBe('42');
   });
 });
 

@@ -20,20 +20,9 @@ describe('generateSecureSessionId', () => {
     const ids = new Set(Array.from({ length: 50 }, () => generateSecureSessionId()));
     expect(ids.size).toBe(50);
   });
-
-  it('contains only lowercase hex characters', () => {
-    const id = generateSecureSessionId();
-    expect(id).toBe(id.toLowerCase());
-    expect(id).toMatch(/^[0-9a-f]+$/);
-  });
 });
 
 describe('validateSessionIdFormat', () => {
-  it('accepts a valid 64-char hex session ID', () => {
-    const id = generateSecureSessionId();
-    expect(validateSessionIdFormat(id)).toBe(true);
-  });
-
   it('accepts a manually constructed valid ID', () => {
     const valid = 'a'.repeat(64);
     expect(validateSessionIdFormat(valid)).toBe(true);

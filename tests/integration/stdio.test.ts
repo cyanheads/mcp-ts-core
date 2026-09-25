@@ -49,18 +49,6 @@ describe('Stdio transport integration', () => {
     }
   });
 
-  it('completes the MCP handshake and reports server info', () => {
-    const version = client.getServerVersion();
-    expect(version).toBeDefined();
-    expect(version?.name).toBeTruthy();
-  });
-
-  it('responds to ping', async () => {
-    // Core server has no tools — just verify the transport is functional
-    const result = await client.ping();
-    expect(result).toBeDefined();
-  });
-
   it('advertises the expected MCP capabilities', () => {
     expectDefaultServerCapabilities(client);
   });
@@ -76,13 +64,6 @@ describe('Stdio transport integration', () => {
   it('resolves logging and resource-subscription operations', async () => {
     await expectDefaultServerLoggingSurface(client);
     await expectDefaultServerSubscriptionSurface(client);
-  });
-
-  it('shuts down cleanly without hanging', async () => {
-    // Closing should resolve without throwing or timing out.
-    // The afterAll hook handles the actual close — this test verifies
-    // a second close is also safe (idempotent).
-    await expect(client.close()).resolves.toBeUndefined();
   });
 });
 

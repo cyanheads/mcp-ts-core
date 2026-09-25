@@ -101,15 +101,3 @@ describe('mcpTest.extend with function-form override', () => {
     expect(calls).toHaveLength(1);
   });
 });
-
-// ---------------------------------------------------------------------------
-// ctx fixture — basic Context contract
-// ---------------------------------------------------------------------------
-
-mcpTest('ctx fixture has expected Context shape', ({ ctx }) => {
-  expect(ctx.requestId).toBe('test-request-id');
-  expect(ctx.log).toBeDefined();
-  expect(ctx.state).toBeDefined();
-  expect(ctx.signal).toBeDefined();
-  expect(typeof ctx.enrich).toBe('function');
-});

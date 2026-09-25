@@ -14,12 +14,6 @@ describe('Runtime Capabilities', () => {
     expect(runtimeCaps.hasBuffer).toBe(true);
   });
 
-  it('should detect Bun runtime via process.versions.bun', () => {
-    // In Node (vitest), isBun should be false since process.versions.bun is not set
-    const isBun = typeof process?.versions?.bun === 'string';
-    expect(runtimeCaps.isBun).toBe(isBun);
-  });
-
   it('should correctly identify not being a worker or browser', () => {
     expect(runtimeCaps.isWorkerLike).toBe(false);
     expect(runtimeCaps.isBrowserLike).toBe(false);
@@ -31,17 +25,6 @@ describe('Runtime Capabilities', () => {
 
   it('should detect performance.now availability', () => {
     expect(runtimeCaps.hasPerformanceNow).toBe(true);
-  });
-
-  it('should export a valid RuntimeCapabilities object', () => {
-    expect(runtimeCaps).toHaveProperty('isNode');
-    expect(runtimeCaps).toHaveProperty('isBun');
-    expect(runtimeCaps).toHaveProperty('isWorkerLike');
-    expect(runtimeCaps).toHaveProperty('isBrowserLike');
-    expect(runtimeCaps).toHaveProperty('hasProcess');
-    expect(runtimeCaps).toHaveProperty('hasBuffer');
-    expect(runtimeCaps).toHaveProperty('hasTextEncoder');
-    expect(runtimeCaps).toHaveProperty('hasPerformanceNow');
   });
 });
 

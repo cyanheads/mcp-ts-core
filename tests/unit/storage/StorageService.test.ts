@@ -22,46 +22,17 @@ describe('StorageService - Tenant ID Validation', () => {
   });
 
   describe('Valid Tenant IDs', () => {
-    it('should accept simple alphanumeric tenant ID', async () => {
-      const context = { ...baseContext, tenantId: 'tenant123' };
-      await expect(storageService.set('test-key', 'test-value', context)).resolves.toBeUndefined();
-    });
-
-    it('should accept tenant ID with hyphens', async () => {
-      const context = { ...baseContext, tenantId: 'tenant-123' };
-      await expect(storageService.set('test-key', 'test-value', context)).resolves.toBeUndefined();
-    });
-
-    it('should accept tenant ID with underscores', async () => {
-      const context = { ...baseContext, tenantId: 'tenant_123' };
-      await expect(storageService.set('test-key', 'test-value', context)).resolves.toBeUndefined();
-    });
-
-    it('should accept tenant ID with dots', async () => {
-      const context = { ...baseContext, tenantId: 'tenant.123' };
-      await expect(storageService.set('test-key', 'test-value', context)).resolves.toBeUndefined();
-    });
-
-    it('should accept tenant ID with mixed valid characters', async () => {
-      const context = { ...baseContext, tenantId: 'tenant-123_abc.xyz' };
-      await expect(storageService.set('test-key', 'test-value', context)).resolves.toBeUndefined();
-    });
-
-    it('should accept maximum length tenant ID (128 characters)', async () => {
-      const context = {
-        ...baseContext,
-        tenantId: 'a'.repeat(128),
-      };
-      await expect(storageService.set('test-key', 'test-value', context)).resolves.toBeUndefined();
-    });
-
-    it('should accept single character tenant ID', async () => {
-      const context = { ...baseContext, tenantId: 'a' };
-      await expect(storageService.set('test-key', 'test-value', context)).resolves.toBeUndefined();
-    });
-
-    it('should accept two character tenant ID', async () => {
-      const context = { ...baseContext, tenantId: 'ab' };
+    it.each([
+      ['simple alphanumeric', 'tenant123'],
+      ['hyphens', 'tenant-123'],
+      ['underscores', 'tenant_123'],
+      ['dots', 'tenant.123'],
+      ['mixed valid characters', 'tenant-123_abc.xyz'],
+      ['maximum length (128 characters)', 'a'.repeat(128)],
+      ['a single character', 'a'],
+      ['two characters', 'ab'],
+    ])('should accept a tenant ID with %s', async (_label, tenantId) => {
+      const context = { ...baseContext, tenantId };
       await expect(storageService.set('test-key', 'test-value', context)).resolves.toBeUndefined();
     });
 
@@ -125,162 +96,6 @@ describe('StorageService - Tenant ID Validation', () => {
       const mcpError = thrown as McpError;
       expect(mcpError.code).toBe(JsonRpcErrorCode.InvalidParams);
       expect(mcpError.message).toContain('cannot be an empty string');
-    });
-  });
-
-  describe('Invalid Tenant IDs - Length Constraints', () => {
-    it('should reject tenant ID exceeding 128 characters', async () => {
-      const context = {
-        ...baseContext,
-        tenantId: 'a'.repeat(129),
-      };
-
-      let thrown: Error | null = null;
-      try {
-        await storageService.set('test-key', 'test-value', context);
-      } catch (error) {
-        thrown = error as Error;
-      }
-
-      expect(thrown).toBeInstanceOf(McpError);
-      const mcpError = thrown as McpError;
-      expect(mcpError.code).toBe(JsonRpcErrorCode.InvalidParams);
-      expect(mcpError.message).toContain('exceeds maximum length');
-    });
-  });
-
-  describe('Invalid Tenant IDs - Path Traversal Attacks', () => {
-    it('should reject tenant ID with ../ path traversal', async () => {
-      const context = { ...baseContext, tenantId: '../etc/passwd' };
-
-      let thrown: Error | null = null;
-      try {
-        await storageService.set('test-key', 'test-value', context);
-      } catch (error) {
-        thrown = error as Error;
-      }
-
-      expect(thrown).toBeInstanceOf(McpError);
-      const mcpError = thrown as McpError;
-      expect(mcpError.code).toBe(JsonRpcErrorCode.InvalidParams);
-      expect(mcpError.message).toMatch(/invalid characters|path traversal/i);
-    });
-
-    it('should reject tenant ID with ..\\ path traversal', async () => {
-      const context = { ...baseContext, tenantId: '..\\windows\\system32' };
-
-      let thrown: Error | null = null;
-      try {
-        await storageService.set('test-key', 'test-value', context);
-      } catch (error) {
-        thrown = error as Error;
-      }
-
-      expect(thrown).toBeInstanceOf(McpError);
-      const mcpError = thrown as McpError;
-      expect(mcpError.code).toBe(JsonRpcErrorCode.InvalidParams);
-      expect(mcpError.message).toMatch(/invalid characters|path traversal/i);
-    });
-
-    it('should reject tenant ID with consecutive dots', async () => {
-      const context = { ...baseContext, tenantId: 'tenant..id' };
-
-      let thrown: Error | null = null;
-      try {
-        await storageService.set('test-key', 'test-value', context);
-      } catch (error) {
-        thrown = error as Error;
-      }
-
-      expect(thrown).toBeInstanceOf(McpError);
-      const mcpError = thrown as McpError;
-      expect(mcpError.code).toBe(JsonRpcErrorCode.InvalidParams);
-      expect(mcpError.message).toContain('consecutive dots');
-    });
-  });
-
-  describe('Invalid Tenant IDs - Special Characters', () => {
-    it('should reject tenant ID with forward slash', async () => {
-      const context = { ...baseContext, tenantId: 'tenant/123' };
-
-      let thrown: Error | null = null;
-      try {
-        await storageService.set('test-key', 'test-value', context);
-      } catch (error) {
-        thrown = error as Error;
-      }
-
-      expect(thrown).toBeInstanceOf(McpError);
-      const mcpError = thrown as McpError;
-      expect(mcpError.code).toBe(JsonRpcErrorCode.InvalidParams);
-      expect(mcpError.message).toContain('invalid characters');
-    });
-
-    it('should reject tenant ID with backslash', async () => {
-      const context = { ...baseContext, tenantId: 'tenant\\123' };
-
-      let thrown: Error | null = null;
-      try {
-        await storageService.set('test-key', 'test-value', context);
-      } catch (error) {
-        thrown = error as Error;
-      }
-
-      expect(thrown).toBeInstanceOf(McpError);
-      const mcpError = thrown as McpError;
-      expect(mcpError.code).toBe(JsonRpcErrorCode.InvalidParams);
-      expect(mcpError.message).toContain('invalid characters');
-    });
-
-    it('should reject tenant ID with special characters (!@#$%)', async () => {
-      const invalidChars = ['!', '@', '#', '$', '%'];
-      for (const char of invalidChars) {
-        const context = { ...baseContext, tenantId: `tenant${char}123` };
-
-        let thrown: Error | null = null;
-        try {
-          await storageService.set('test-key', 'test-value', context);
-        } catch (error) {
-          thrown = error as Error;
-        }
-
-        expect(thrown).toBeInstanceOf(McpError);
-        const mcpError = thrown as McpError;
-        expect(mcpError.code).toBe(JsonRpcErrorCode.InvalidParams);
-        expect(mcpError.message).toContain('invalid characters');
-      }
-    });
-
-    it('should reject tenant ID starting with hyphen', async () => {
-      const context = { ...baseContext, tenantId: '-tenant123' };
-
-      let thrown: Error | null = null;
-      try {
-        await storageService.set('test-key', 'test-value', context);
-      } catch (error) {
-        thrown = error as Error;
-      }
-
-      expect(thrown).toBeInstanceOf(McpError);
-      const mcpError = thrown as McpError;
-      expect(mcpError.code).toBe(JsonRpcErrorCode.InvalidParams);
-      expect(mcpError.message).toContain('invalid characters');
-    });
-
-    it('should reject tenant ID ending with dot', async () => {
-      const context = { ...baseContext, tenantId: 'tenant123.' };
-
-      let thrown: Error | null = null;
-      try {
-        await storageService.set('test-key', 'test-value', context);
-      } catch (error) {
-        thrown = error as Error;
-      }
-
-      expect(thrown).toBeInstanceOf(McpError);
-      const mcpError = thrown as McpError;
-      expect(mcpError.code).toBe(JsonRpcErrorCode.InvalidParams);
-      expect(mcpError.message).toContain('invalid characters');
     });
   });
 

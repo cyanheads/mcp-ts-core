@@ -623,7 +623,11 @@ describe('tool argument pre-validation', () => {
       expect(envelope(truncated).data?.recovery?.hint).toBe(
         'Send statusFilter as an array, not a string.',
       );
-      expect(envelope(plain).data?.issues).toBeDefined();
+      // An unrelated invalid field rides along: every original issue is reported.
+      expect(envelope(plain).data?.issues).toEqual([
+        expect.objectContaining({ path: ['statusFilter'] }),
+        expect.objectContaining({ path: ['note'] }),
+      ]);
     });
 
     it('bubbles the original rejection when a parseable repair still fails the schema', async () => {
@@ -697,13 +701,17 @@ describe('tool argument pre-validation', () => {
 
     it('restores the single-parse behavior under coerce: false', async () => {
       const off = await call(listy, { statusFilter: '["RECRUITING"]' }, { coerce: false });
-      const on = await call(listy, { statusFilter: '["RECRUITING"', note: 'x' });
 
       expect(envelope(off).message).toBe(
         'Input validation error: Invalid arguments for tool prevalidation_list: ' +
           'statusFilter: Invalid input: expected array, received string',
       );
-      expect(envelope(on).code).toBe(JsonRpcErrorCode.InvalidParams);
+
+      // The same call repairs when coercion is left on.
+      const on = await call(listy, { statusFilter: '["RECRUITING"]' });
+
+      expect(on.isError).toBeUndefined();
+      expect(seen).toEqual({ statusFilter: ['RECRUITING'] });
     });
 
     it('emits one counter increment and one debug log per repaired call, not per value', async () => {

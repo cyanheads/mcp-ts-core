@@ -104,23 +104,8 @@ describe('TransportManager', () => {
         defaultMeta,
         undefined,
       );
-    });
-
-    it('should start stdio transport when configured', async () => {
-      const manager = new TransportManager(
-        fakeConfig('stdio'),
-        logger,
-        mockCreateMcpServer,
-        defaultMeta,
-      );
-
-      await manager.start();
-
-      const { startStdioTransport } = await import(
-        '@/mcp-server/transports/stdio/stdioTransport.js'
-      );
-      expect(startStdioTransport).toHaveBeenCalledTimes(1);
-      expect(startStdioTransport).toHaveBeenCalledWith(expect.any(Function), expect.any(Object));
+      // HTTP transport receives the factory — no instance is created eagerly.
+      expect(mockCreateMcpServer).not.toHaveBeenCalled();
     });
 
     it('should throw error for unsupported transport type', async () => {
@@ -152,19 +137,6 @@ describe('TransportManager', () => {
       await expect(factory({ era: 'legacy' })).resolves.toBe(mockMcpServer);
       expect(mockCreateMcpServer).toHaveBeenCalledTimes(1);
       expect(mockCreateMcpServer).toHaveBeenCalledWith({ era: 'legacy' });
-    });
-
-    it('should pass factory (not instance) for HTTP transport', async () => {
-      const manager = new TransportManager(
-        fakeConfig('http'),
-        logger,
-        mockCreateMcpServer,
-        defaultMeta,
-      );
-
-      await manager.start();
-      // HTTP transport receives factory — does NOT eagerly create an instance
-      expect(mockCreateMcpServer).not.toHaveBeenCalled();
     });
   });
 

@@ -90,14 +90,6 @@ describe('html tagged template', () => {
     const out = html`<p>${a} & ${b}</p>`;
     expect(out.toString()).toBe('<p>Alice & Bob</p>');
   });
-
-  test('escapes prototype-pollution attempts in keys', () => {
-    // Not prototype pollution per se, but user-influenced attribute names
-    // should still be escaped when dropped into attribute value context.
-    const name = '__proto__';
-    const out = html`<div data-key="${name}">x</div>`;
-    expect(out.toString()).toBe('<div data-key="__proto__">x</div>');
-  });
 });
 
 describe('unsafeRaw', () => {
@@ -105,11 +97,6 @@ describe('unsafeRaw', () => {
     const raw = unsafeRaw('<svg><path/></svg>');
     expect(raw).toBeInstanceOf(SafeHtml);
     expect(raw.toString()).toBe('<svg><path/></svg>');
-  });
-
-  test('composes with html tag', () => {
-    const raw = unsafeRaw('<em>raw</em>');
-    expect(html`<p>${raw}</p>`.toString()).toBe('<p><em>raw</em></p>');
   });
 });
 

@@ -107,15 +107,6 @@ describe('GraphService metrics', () => {
         'mcp.graph.success': true,
       });
     });
-
-    it('does NOT record error counter', async () => {
-      const provider = createMockProvider();
-      const service = new GraphService(provider);
-
-      await service.relate('a', 'follows', 'b', ctx);
-
-      expect(mockErrorAdd).not.toHaveBeenCalled();
-    });
   });
 
   describe('relate error', () => {

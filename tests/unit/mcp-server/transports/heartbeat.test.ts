@@ -126,6 +126,8 @@ describe('HeartbeatMonitor', () => {
       transport: 'http',
     });
 
+    // Stopping before start has no timer to clear; start then re-arms it.
+    monitor.stop();
     monitor.start();
     monitor.stop();
     monitor.stop();
@@ -200,23 +202,5 @@ describe('HeartbeatMonitor', () => {
       expect.any(Error),
       expect.any(Object),
     );
-  });
-
-  it('returns early from tick when already stopped before execution begins', async () => {
-    const { HeartbeatMonitor } = await import('@/mcp-server/transports/heartbeat.js');
-    const sendPing = vi.fn().mockResolvedValue(undefined);
-
-    const monitor = new HeartbeatMonitor({
-      intervalMs: 5,
-      missThreshold: 1,
-      onDead: vi.fn(),
-      sendPing,
-      transport: 'stdio',
-    });
-
-    monitor.stop();
-    await (monitor as any).tick();
-
-    expect(sendPing).not.toHaveBeenCalled();
   });
 });

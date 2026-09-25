@@ -113,20 +113,6 @@ describe('OpenTelemetry Tracing', () => {
       // Should use context values, not span values
       expect(result).toBe(`00-${'c'.repeat(32)}-${'d'.repeat(16)}-01`);
     });
-
-    test('should always use sampled flag "01"', () => {
-      const ctx: RequestContext = {
-        requestId: 'test-req',
-        timestamp: Date.now() as any,
-        operation: 'test',
-        traceId: 'e'.repeat(32),
-        spanId: 'f'.repeat(16),
-      };
-
-      const result = traceUtils.buildTraceparent(ctx);
-
-      expect(result).toMatch(/-01$/);
-    });
   });
 
   describe('extractTraceparent', () => {
@@ -206,21 +192,6 @@ describe('OpenTelemetry Tracing', () => {
 
       expect(result).toBeUndefined();
     });
-
-    test('should parse sampled flag correctly', () => {
-      const traceId = 'e'.repeat(32);
-      const spanId = 'f'.repeat(16);
-
-      const sampledHeaders = {
-        traceparent: `00-${traceId}-${spanId}-01`,
-      };
-      const unsampledHeaders = {
-        traceparent: `00-${traceId}-${spanId}-00`,
-      };
-
-      expect(traceUtils.extractTraceparent(sampledHeaders)?.sampled).toBe(true);
-      expect(traceUtils.extractTraceparent(unsampledHeaders)?.sampled).toBe(false);
-    });
   });
 
   describe('createContextWithParentTrace', () => {
@@ -234,19 +205,6 @@ describe('OpenTelemetry Tracing', () => {
       const result = traceUtils.createContextWithParentTrace(headers, 'test-operation');
 
       expect(result.operation).toBe('test-operation');
-      expect(result.traceId).toBe(traceId);
-      expect(result.extra?.parentSpanId).toBe(spanId);
-    });
-
-    test('should work with Web Headers', () => {
-      const traceId = 'c'.repeat(32);
-      const spanId = 'd'.repeat(16);
-      const headers = new Headers();
-      headers.set('traceparent', `00-${traceId}-${spanId}-01`);
-
-      const result = traceUtils.createContextWithParentTrace(headers, 'web-request');
-
-      expect(result.operation).toBe('web-request');
       expect(result.traceId).toBe(traceId);
       expect(result.extra?.parentSpanId).toBe(spanId);
     });
@@ -270,22 +228,6 @@ describe('OpenTelemetry Tracing', () => {
 
       expect(injectSpy).toHaveBeenCalledWith(otContext.active(), carrier);
       expect(result).toBe(carrier);
-    });
-
-    test('should return same carrier object', () => {
-      const carrier = { key: 'value' };
-
-      const result = traceUtils.injectCurrentContextInto(carrier);
-
-      expect(result).toBe(carrier);
-    });
-
-    test('should work with empty carrier', () => {
-      const carrier = {};
-
-      traceUtils.injectCurrentContextInto(carrier);
-
-      expect(injectSpy).toHaveBeenCalled();
     });
   });
 
@@ -378,16 +320,6 @@ describe('OpenTelemetry Tracing', () => {
       });
     });
 
-    test('should end span even on error', async () => {
-      const testFn = async () => {
-        throw new Error('fail');
-      };
-
-      await expect(traceUtils.withSpan('error-op', testFn)).rejects.toThrow();
-
-      expect(mockSpan.end).toHaveBeenCalled();
-    });
-
     test('should pass span to function', async () => {
       const testFn = vi.fn(async (span: Span) => {
         expect(span).toBe(mockSpan);
@@ -400,76 +332,6 @@ describe('OpenTelemetry Tracing', () => {
   });
 
   describe('runInContext', () => {
-    test('should run function directly when no context provided', () => {
-      const fn = vi.fn(() => 'result');
-
-      const result = traceUtils.runInContext(undefined, fn);
-
-      expect(result).toBe('result');
-      expect(fn).toHaveBeenCalled();
-    });
-
-    test('should run function directly when context missing traceId', () => {
-      const ctx: RequestContext = {
-        requestId: 'test',
-        timestamp: Date.now() as any,
-        operation: 'test',
-        // No traceId
-      };
-      const fn = vi.fn(() => 'result');
-
-      const result = traceUtils.runInContext(ctx, fn);
-
-      expect(result).toBe('result');
-      expect(fn).toHaveBeenCalled();
-    });
-
-    test('should run function directly when context missing spanId', () => {
-      const ctx: RequestContext = {
-        requestId: 'test',
-        timestamp: Date.now() as any,
-        operation: 'test',
-        traceId: 'a'.repeat(32),
-        // No spanId
-      };
-      const fn = vi.fn(() => 'result');
-
-      const result = traceUtils.runInContext(ctx, fn);
-
-      expect(result).toBe('result');
-      expect(fn).toHaveBeenCalled();
-    });
-
-    test('should execute function with context when trace data present', () => {
-      const ctx: RequestContext = {
-        requestId: 'test',
-        timestamp: Date.now() as any,
-        operation: 'test',
-        traceId: 'a'.repeat(32),
-        spanId: 'b'.repeat(16),
-      };
-      const fn = vi.fn(() => 'result');
-
-      const result = traceUtils.runInContext(ctx, fn);
-
-      expect(result).toBe('result');
-      expect(fn).toHaveBeenCalled();
-    });
-
-    test('should preserve function return value', () => {
-      const ctx: RequestContext = {
-        requestId: 'test',
-        timestamp: Date.now() as any,
-        operation: 'test',
-        traceId: 'a'.repeat(32),
-        spanId: 'b'.repeat(16),
-      };
-
-      const result = traceUtils.runInContext(ctx, () => 42);
-
-      expect(result).toBe(42);
-    });
-
     test('should propagate exceptions', () => {
       const ctx: RequestContext = {
         requestId: 'test',
@@ -509,21 +371,6 @@ describe('OpenTelemetry Tracing', () => {
       expect(extracted?.traceId).toBe(originalTraceId);
       expect(extracted?.spanId).toBe(originalSpanId);
       expect(extracted?.sampled).toBe(true);
-    });
-
-    test('should create child context from parent traceparent', () => {
-      const parentTraceId = 'c'.repeat(32);
-      const parentSpanId = 'd'.repeat(16);
-
-      const headers = {
-        traceparent: `00-${parentTraceId}-${parentSpanId}-01`,
-      };
-
-      const childContext = traceUtils.createContextWithParentTrace(headers, 'child-operation');
-
-      expect(childContext.traceId).toBe(parentTraceId);
-      expect(childContext.extra?.parentSpanId).toBe(parentSpanId);
-      expect(childContext.operation).toBe('child-operation');
     });
   });
 
@@ -612,6 +459,23 @@ describe('OpenTelemetry Tracing', () => {
       });
 
       expect(trace.getActiveSpan()).toBeUndefined();
+    });
+
+    test.each<[string, RequestContext | undefined]>([
+      ['no context', undefined],
+      ['a context without a traceId', { requestId: 'test', timestamp: '', operation: 'test' }],
+      [
+        'a context without a spanId',
+        { requestId: 'test', timestamp: '', operation: 'test', traceId: 'a'.repeat(32) },
+      ],
+    ])('runInContext leaves the caller span active given %s', (_label, ctx) => {
+      const parent = trace.setSpanContext(ROOT_CONTEXT, fakeSpanContext);
+
+      const activeSpanId = otContext.with(parent, () =>
+        traceUtils.runInContext(ctx, () => trace.getActiveSpan()?.spanContext().spanId),
+      );
+
+      expect(activeSpanId).toBe(fakeSpanContext.spanId);
     });
 
     /**

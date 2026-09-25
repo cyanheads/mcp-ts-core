@@ -80,17 +80,6 @@ describe('ErrorHandler — mcp.errors.classified counter', () => {
     });
   });
 
-  it('records classified counter with pattern-matched code for rate-limit error', () => {
-    const error = new Error('status code 429');
-
-    ErrorHandler.handleError(error, { operation: 'callApi' });
-
-    expect(mockCounterAdd).toHaveBeenCalledWith(1, {
-      'mcp.error.classified_code': String(JsonRpcErrorCode.RateLimited),
-      operation: 'callApi',
-    });
-  });
-
   it('increments counter exactly once per handleError call', () => {
     ErrorHandler.handleError(new Error('fail'), { operation: 'op1' });
     ErrorHandler.handleError(new Error('fail again'), { operation: 'op2' });

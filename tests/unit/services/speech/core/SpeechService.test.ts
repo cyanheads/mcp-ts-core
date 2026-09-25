@@ -93,16 +93,6 @@ describe('SpeechService', () => {
       expect(service.hasTTS()).toBe(false);
       expect(service.hasSTT()).toBe(true);
     });
-
-    it('should initialize with both TTS and STT providers', () => {
-      const service = new SpeechService(
-        { provider: 'elevenlabs', apiKey: 'tts-key' },
-        { provider: 'openai-whisper', apiKey: 'stt-key' },
-      );
-
-      expect(service.hasTTS()).toBe(true);
-      expect(service.hasSTT()).toBe(true);
-    });
   });
 
   describe('getTTSProvider', () => {
@@ -162,18 +152,6 @@ describe('SpeechService', () => {
       const health = await service.healthCheck();
 
       expect(health.tts).toBe(false);
-      expect(health.stt).toBe(false);
-    });
-
-    it('should report partial health when only TTS is configured', async () => {
-      const service = new SpeechService({
-        provider: 'elevenlabs',
-        apiKey: 'tts-key',
-      });
-
-      const health = await service.healthCheck();
-
-      expect(health.tts).toBe(true);
       expect(health.stt).toBe(false);
     });
   });

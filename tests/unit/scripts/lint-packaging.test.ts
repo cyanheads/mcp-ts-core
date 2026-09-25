@@ -44,12 +44,6 @@ describe('lint-packaging · bundle-content guard (checks 5–7)', () => {
   });
 
   describe('unanchored pattern strips runtime paths (check 6)', () => {
-    it('passes with anchored patterns — no runtime path stripping', async () => {
-      const content = '/framework-skills/\n/.agents/\n/.claude/\n/scripts/\n/tests/';
-      const errors = await checkBundleContent(content);
-      expect(errors.filter((e) => e.includes('unanchored'))).toHaveLength(0);
-    });
-
     it('flags unanchored framework-skills/ pattern that also strips node_modules/x/framework-skills/', async () => {
       const content = 'framework-skills/\n/.agents/\n/.claude/\n/scripts/\n/tests/';
       const errors = await checkBundleContent(content);
@@ -74,12 +68,6 @@ describe('lint-packaging · bundle-content guard (checks 5–7)', () => {
   });
 
   describe('critical-runtime-path protection (check 7)', () => {
-    it('passes when no runtime paths are stripped', async () => {
-      const content = '/framework-skills/\n/.agents/\n/.claude/';
-      const errors = await checkBundleContent(content);
-      expect(errors.filter((e) => e.includes('critical runtime path'))).toHaveLength(0);
-    });
-
     it('flags a pattern that strips all node_modules paths', async () => {
       const content = 'node_modules/**\n/framework-skills/';
       const errors = await checkBundleContent(content);

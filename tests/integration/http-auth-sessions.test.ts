@@ -4,7 +4,7 @@
  */
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { generateTestJwt, initializeBody, jsonrpc, MCP_HEADERS } from '../helpers/http-helpers.js';
-import { assertServerBuilt, type ServerHandle, startServer } from '../helpers/server-process.js';
+import { type ServerHandle, startServer } from '../helpers/server-process.js';
 
 const AUTH_SECRET = 'test-secret-key-for-conformance!';
 const PROTOCOL_VERSION = '2025-06-18';
@@ -25,7 +25,6 @@ function createToken(overrides: Record<string, unknown> = {}): string {
 describe('HTTP auth session integration', () => {
   let handle: ServerHandle;
   beforeAll(async () => {
-    assertServerBuilt();
     handle = await startServer('http', {
       MCP_AUTH_MODE: 'jwt',
       MCP_AUTH_SECRET_KEY: AUTH_SECRET,

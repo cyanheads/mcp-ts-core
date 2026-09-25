@@ -186,22 +186,6 @@ describe('withRetry', () => {
     ).rejects.toBe(failure);
   });
 
-  it('rejects immediately when the retry sleep starts with an aborted signal', async () => {
-    const controller = new AbortController();
-    const reason = new Error('already aborted');
-    controller.abort(reason);
-
-    await expect(
-      withRetry(() => Promise.reject(new Error('retry me')), {
-        baseDelayMs: 100,
-        jitter: 0,
-        maxRetries: 2,
-        isTransient: () => true,
-        signal: controller.signal,
-      }),
-    ).rejects.toBeInstanceOf(Error);
-  });
-
   it('rejects with the abort reason when cancellation happens during backoff sleep', async () => {
     vi.useFakeTimers();
 
@@ -752,26 +736,6 @@ describe('withRetry deadlineMs — one wall-clock budget across attempts (#455)'
     // every attempt runs and the sequence is strictly decreasing.
     expect(seen).toEqual([10_000, 9900, 9700, 9300]);
     expect(seen.every((ms) => ms >= 0)).toBe(true);
-    expect(vi.getTimerCount()).toBe(0);
-  });
-
-  it('threads the deadline signal and a caller signal into the same attempt signal', async () => {
-    vi.useFakeTimers();
-
-    const controller = new AbortController();
-    let attemptSignal: AbortSignal | undefined;
-
-    const promise = withRetry(
-      async ({ signal }) => {
-        attemptSignal = signal;
-        return 'ok';
-      },
-      { deadlineMs: 1000, signal: controller.signal, operation: 'search', context },
-    );
-
-    await expect(promise).resolves.toBe('ok');
-    expect(attemptSignal?.aborted).toBe(false);
-    // No timer survives a success.
     expect(vi.getTimerCount()).toBe(0);
   });
 

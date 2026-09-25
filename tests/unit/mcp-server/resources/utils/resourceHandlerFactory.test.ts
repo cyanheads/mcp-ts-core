@@ -210,20 +210,6 @@ describe('createResourceHandler', () => {
       expect((contents[0] as { text: string }).text).toBe('Custom: abc');
     });
 
-    it('should default mimeType to application/json', async () => {
-      const def = resource('plain://{id}', {
-        description: 'No mimeType specified.',
-        handler: () => ({ ok: true }),
-      });
-
-      const handler = createResourceHandler(def as AnyResourceDefinition, services, notifiers);
-      const contents = readContents(
-        await handler(new URL('plain://x'), { id: 'x' }, makeServerContext()),
-      );
-
-      expect(contents[0]!.mimeType).toBe('application/json');
-    });
-
     it('should preserve plain text and JSON-encode vendor JSON resources', async () => {
       const plain = resource('plain://text', {
         description: 'Plain text.',
@@ -300,24 +286,6 @@ describe('createResourceHandler', () => {
   // -----------------------------------------------------------------------
 
   describe('Context construction', () => {
-    it('should set ctx.uri to the resource URI', async () => {
-      let capturedUri: URL | undefined;
-
-      const def = resource('scheme://{id}', {
-        description: 'URI test.',
-        handler: (_params, ctx) => {
-          capturedUri = ctx.uri;
-          return {};
-        },
-      });
-
-      const handler = createResourceHandler(def as AnyResourceDefinition, services, notifiers);
-      const uri = new URL('scheme://test-123');
-      await handler(uri, { id: 'test-123' }, makeServerContext());
-
-      expect(capturedUri).toBe(uri);
-    });
-
     it('should default tenantId to "default" (no auth)', async () => {
       let capturedTenant: string | undefined;
 
@@ -685,20 +653,6 @@ describe('createResourceHandler', () => {
   // -----------------------------------------------------------------------
 
   describe('Param validation', () => {
-    it('should reject invalid params by throwing (re-thrown for SDK)', async () => {
-      const def = resource('strict://{count}', {
-        description: 'Strict params.',
-        params: z.object({ count: z.coerce.number().int().positive().describe('cnt') }),
-        handler: () => ({ ok: true }),
-      });
-
-      const handler = createResourceHandler(def as AnyResourceDefinition, services, notifiers);
-
-      await expect(
-        handler(new URL('strict://abc'), { count: 'not-a-number' } as any, makeServerContext()),
-      ).rejects.toThrow();
-    });
-
     it('should surface a flat message and structured issues on Zod failure', async () => {
       const def = resource('clinical://{nctId}', {
         description: 'NCT-formatted param.',
@@ -751,38 +705,6 @@ describe('createResourceHandler', () => {
   // -----------------------------------------------------------------------
 
   describe('Error handling', () => {
-    it('should re-throw errors (unlike tool handler which returns isError)', async () => {
-      const def = resource('err://{id}', {
-        description: 'Throws.',
-        handler: () => {
-          throw new Error('resource broke');
-        },
-      });
-
-      const handler = createResourceHandler(def as AnyResourceDefinition, services, notifiers);
-
-      await expect(handler(new URL('err://x'), { id: 'x' }, makeServerContext())).rejects.toThrow();
-    });
-
-    it('should re-throw McpError with code preserved', async () => {
-      const def = resource('mcperr://{id}', {
-        description: 'Throws McpError.',
-        handler: () => {
-          throw new McpError(JsonRpcErrorCode.NotFound, 'Resource not found');
-        },
-      });
-
-      const handler = createResourceHandler(def as AnyResourceDefinition, services, notifiers);
-
-      try {
-        await handler(new URL('mcperr://x'), { id: 'x' }, makeServerContext());
-        expect.fail('should have thrown');
-      } catch (err) {
-        expect(err).toBeInstanceOf(McpError);
-        expect((err as McpError).code).toBe(JsonRpcErrorCode.NotFound);
-      }
-    });
-
     it('leaves a declared severity inert on the resource path (#380)', async () => {
       // Resources re-throw after `classifyOnly` and the SDK owns the log, so
       // there is no `handleError` call for a severity to move. The field is

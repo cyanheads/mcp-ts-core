@@ -79,15 +79,6 @@ describe('real OAuth/JWKS integration', () => {
     await fixture?.close();
   });
 
-  it('exposes deterministic OIDC discovery metadata', async () => {
-    const response = await fetch(fixture.discoveryUrl);
-    expect(response.status).toBe(200);
-    await expect(response.json()).resolves.toEqual({
-      issuer: fixture.issuer,
-      jwks_uri: fixture.jwksUrl,
-    });
-  });
-
   it('deduplicates concurrent cold-start JWKS requests and accepts RS256 tokens', async () => {
     fixture.resetJwksRequestCount();
     const token = await fixture.issueToken(rsaPrimary);

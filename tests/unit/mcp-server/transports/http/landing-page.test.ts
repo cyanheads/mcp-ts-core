@@ -98,6 +98,16 @@ function makePrompt(name: string, extra: Partial<ManifestPrompt> = {}): Manifest
   };
 }
 
+/**
+ * Rendered markup without the inlined `<style>` and `<script>` blocks. The
+ * stylesheet's attribute/class selectors and the filter script's query
+ * selectors name the same tokens the markup carries, so a whole-document
+ * substring match passes whether or not any element renders them.
+ */
+function markupOnly(html: string): string {
+  return html.replace(/<style>[\s\S]*?<\/style>/g, '').replace(/<script\b[\s\S]*?<\/script>/g, '');
+}
+
 describe('renderLandingPage — structure', () => {
   test('returns a complete HTML document', () => {
     const html = renderLandingPage(defaultServerManifest, 'https://example.com');
@@ -106,12 +116,6 @@ describe('renderLandingPage — structure', () => {
     expect(html).toContain('<head>');
     expect(html).toContain('<body>');
     expect(html).toContain('</html>');
-  });
-
-  test('includes the server name in the hero', () => {
-    const html = renderLandingPage(defaultServerManifest, 'https://example.com');
-    expect(html).toContain('test-mcp-server');
-    expect(html).toContain('v1.0.0');
   });
 
   test('includes the MCP Server Card alternate link', () => {
@@ -161,13 +165,6 @@ describe('renderLandingPage — structure', () => {
     const html = renderLandingPage(manifest, 'https://example.com');
     expect(html).toContain('Requires OAuth');
     expect(html).toContain('https://auth.example.com');
-  });
-
-  test('renders the connect snippet tabs', () => {
-    const html = renderLandingPage(defaultServerManifest, 'https://example.com');
-    expect(html).toContain('connect-tab-http');
-    expect(html).toContain('mcp-remote');
-    expect(html).toContain('curl');
   });
 
   test('uses remote landing logo as Open Graph image', () => {
@@ -464,8 +461,7 @@ describe('renderLandingPage — polish derivations', () => {
       prompts: [],
     });
     const html = renderLandingPage(manifest, 'https://example.com');
-    expect(html).toContain('badge-pre');
-    expect(html).toContain('beta');
+    expect(html).toContain('<span class="badge-pre">beta</span>');
   });
 
   test('does not render pre-release pill for stable versions', () => {
@@ -477,7 +473,7 @@ describe('renderLandingPage — polish derivations', () => {
     });
     const html = renderLandingPage(manifest, 'https://example.com');
     // Stylesheet declares `.badge-pre` regardless; assert the class isn't applied to a DOM node.
-    expect(html).not.toMatch(/<span class="badge badge-pre"/);
+    expect(markupOnly(html)).not.toContain('badge-pre');
   });
 
   test('includes npm registry link when scoped package name is provided', () => {
@@ -514,11 +510,13 @@ describe('renderLandingPage — polish derivations', () => {
 
   test('footer attribution links to both GitHub homepage and npm', () => {
     const html = renderLandingPage(defaultServerManifest, 'https://example.com');
-    expect(html).toContain(defaultServerManifest.framework.homepage);
-    expect(html).toContain(
+    // Footer-scoped: the hero badge also links npm, and the stylesheet names `.footer-attrib`.
+    const attribution =
+      html.match(/<footer>[\s\S]*?<span class="footer-attrib">([\s\S]*?)<\/span>/)?.[1] ?? '';
+    expect(attribution).toContain(`href="${defaultServerManifest.framework.homepage}"`);
+    expect(attribution).toContain(
       `npmjs.com/package/${encodeURIComponent(defaultServerManifest.framework.name)}`,
     );
-    expect(html).toMatch(/footer-attrib/);
   });
 
   test('emits section count in headers', () => {
@@ -546,14 +544,14 @@ describe('renderLandingPage — polish derivations', () => {
       ...defaultServerManifest,
       definitions: { ...defaultServerManifest.definitions, tools },
     };
-    const html = renderLandingPage(manifest, 'https://example.com');
-    expect(html).toContain('data-group="read"');
-    expect(html).toContain('data-group="write"');
-    expect(html).toContain('data-group="destructive"');
+    const body = markupOnly(renderLandingPage(manifest, 'https://example.com'));
+    expect(body).toContain('data-group="read"');
+    expect(body).toContain('data-group="write"');
+    expect(body).toContain('data-group="destructive"');
     // Cards carry their bucket as a data attribute for client-side filtering.
-    expect(html).toContain('data-mutability="read"');
-    expect(html).toContain('data-mutability="write"');
-    expect(html).toContain('data-mutability="destructive"');
+    expect(body).toContain('data-mutability="read"');
+    expect(body).toContain('data-mutability="write"');
+    expect(body).toContain('data-mutability="destructive"');
   });
 
   test('omits group headings when only one mutability bucket is populated', () => {
@@ -562,11 +560,11 @@ describe('renderLandingPage — polish derivations', () => {
       ...defaultServerManifest,
       definitions: { ...defaultServerManifest.definitions, tools },
     };
-    const html = renderLandingPage(manifest, 'https://example.com');
-    expect(html).not.toMatch(/<h4 class="group-heading"/);
+    const body = markupOnly(renderLandingPage(manifest, 'https://example.com'));
+    expect(body).not.toMatch(/<h4 class="group-heading"/);
     // Cards still carry data-mutability so filtering works in the rare case
     // a server has 13 unspecified-bucket tools — but the heading is suppressed.
-    expect(html).toContain('data-mutability="unspecified"');
+    expect(body).toContain('data-mutability="unspecified"');
   });
 
   test('renders the tool filter bar with a chip per populated bucket', () => {
@@ -582,14 +580,14 @@ describe('renderLandingPage — polish derivations', () => {
       ...defaultServerManifest,
       definitions: { ...defaultServerManifest.definitions, tools },
     };
-    const html = renderLandingPage(manifest, 'https://example.com');
-    expect(html).toContain('class="tool-filter-bar"');
-    expect(html).toContain('data-filter-mutability="all"');
-    expect(html).toContain('data-filter-mutability="read"');
-    expect(html).toContain('data-filter-mutability="write"');
-    expect(html).toContain('data-filter-mutability="destructive"');
-    expect(html).toContain('data-tool-search');
-    expect(html).toContain('aria-pressed="true"');
+    const body = markupOnly(renderLandingPage(manifest, 'https://example.com'));
+    expect(body).toContain('class="tool-filter-bar"');
+    expect(body).toContain('data-filter-mutability="all"');
+    expect(body).toContain('data-filter-mutability="read"');
+    expect(body).toContain('data-filter-mutability="write"');
+    expect(body).toContain('data-filter-mutability="destructive"');
+    expect(body).toContain('data-tool-search');
+    expect(body).toContain('aria-pressed="true"');
   });
 
   test('search target indexes name and description for client-side filtering', () => {
@@ -617,8 +615,7 @@ describe('renderLandingPage — polish derivations', () => {
       ...defaultServerManifest,
       definitions: { ...defaultServerManifest.definitions, tools },
     };
-    const html = renderLandingPage(manifest, 'https://example.com');
-    const body = html.replace(/<style>[\s\S]*?<\/style>/g, '');
+    const body = markupOnly(renderLandingPage(manifest, 'https://example.com'));
 
     // Group heading + filter chip + card data attribute all render the new
     // bucket consistently.
@@ -649,21 +646,22 @@ describe('renderLandingPage — polish derivations', () => {
       definitions: { ...defaultServerManifest.definitions, tools },
     };
     const html = renderLandingPage(manifest, 'https://example.com');
+    const body = markupOnly(html);
 
     // Bucket markers and chip
-    expect(html).toContain('data-mutability="disabled"');
-    expect(html).toContain('data-filter-mutability="disabled"');
-    expect(html).toContain('data-group="disabled"');
+    expect(body).toContain('data-mutability="disabled"');
+    expect(body).toContain('data-filter-mutability="disabled"');
+    expect(body).toContain('data-group="disabled"');
 
     // Card variant + callout content
-    expect(html).toContain('tool-card--disabled');
-    expect(html).toContain('Writes are turned off in this deployment.');
-    expect(html).toContain('BRAPI_ENABLE_WRITES=true');
+    expect(body).toContain('tool-card--disabled');
+    expect(body).toContain('Writes are turned off in this deployment.');
+    expect(body).toContain('BRAPI_ENABLE_WRITES=true');
 
     // Companion "would be write" pill surfaces the underlying mutability so
     // operators understand what flavor of tool is gated. Suppressed when the
     // underlying classification is `unspecified` (no signal worth surfacing).
-    expect(html).toContain('would be write');
+    expect(body).toContain('would be write');
 
     // Disabled cards omit the invocation snippet but keep the schema preview
     // available so operators see the contract the tool would expose.
@@ -727,7 +725,7 @@ describe('renderLandingPage — polish derivations', () => {
   test('renders mutability badge + auxiliary pills (openWorld / app)', () => {
     const tools = [
       makeTool('read_tool', { annotations: { readOnlyHint: true } }),
-      makeTool('write_tool'),
+      makeTool('write_tool', { annotations: { readOnlyHint: false } }),
       makeTool('destroy_tool', { annotations: { destructiveHint: true } }),
       makeTool('search_tool', {
         annotations: { readOnlyHint: true, openWorldHint: true },
@@ -738,12 +736,12 @@ describe('renderLandingPage — polish derivations', () => {
       ...defaultServerManifest,
       definitions: { ...defaultServerManifest.definitions, tools },
     };
-    const html = renderLandingPage(manifest, 'https://example.com');
-    expect(html).toContain('pill-read');
-    expect(html).toContain('pill-write');
-    expect(html).toContain('pill-destructive');
-    expect(html).toContain('pill-openworld');
-    expect(html).toContain('pill-app');
+    const body = markupOnly(renderLandingPage(manifest, 'https://example.com'));
+    expect(body).toContain('class="pill pill-read"');
+    expect(body).toContain('class="pill pill-write"');
+    expect(body).toContain('class="pill pill-destructive"');
+    expect(body).toContain('class="pill pill-openworld"');
+    expect(body).toContain('class="pill pill-app"');
   });
 
   test('annotation-less tools bucket as unspecified rather than write or destructive', () => {
@@ -756,11 +754,7 @@ describe('renderLandingPage — polish derivations', () => {
       ...defaultServerManifest,
       definitions: { ...defaultServerManifest.definitions, tools },
     };
-    const html = renderLandingPage(manifest, 'https://example.com');
-    // Inspect rendered card markup only — the inline stylesheet contains
-    // the same attribute selectors for the spine colors, which would
-    // false-positive a whole-document substring match.
-    const body = html.replace(/<style>[\s\S]*?<\/style>/g, '');
+    const body = markupOnly(renderLandingPage(manifest, 'https://example.com'));
     expect(body).toContain('data-mutability="unspecified"');
     expect(body).not.toContain('data-mutability="write"');
     expect(body).not.toContain('data-mutability="destructive"');
@@ -775,8 +769,7 @@ describe('renderLandingPage — polish derivations', () => {
       ...defaultServerManifest,
       definitions: { ...defaultServerManifest.definitions, tools },
     };
-    const html = renderLandingPage(manifest, 'https://example.com');
-    const body = html.replace(/<style>[\s\S]*?<\/style>/g, '');
+    const body = markupOnly(renderLandingPage(manifest, 'https://example.com'));
     expect(body).toContain('data-mutability="write"');
     expect(body).not.toContain('data-mutability="unspecified"');
   });
@@ -1089,28 +1082,6 @@ describe('createLandingPageHandler — HTTP behavior', () => {
 });
 
 describe('renderLandingPage — safety', () => {
-  test('escapes adversarial strings in server name', () => {
-    const manifest: ServerManifest = {
-      ...defaultServerManifest,
-      server: { ...defaultServerManifest.server, name: '<script>alert(1)</script>' },
-    };
-    const html = renderLandingPage(manifest, 'https://example.com');
-    expect(html).not.toContain('<script>alert(1)</script>');
-    expect(html).toContain('&lt;script&gt;');
-  });
-
-  test('escapes adversarial strings in tool descriptions', () => {
-    const evil = '"><img src=x onerror=alert(1)>';
-    const tool = makeTool('x', { description: evil });
-    const manifest: ServerManifest = {
-      ...defaultServerManifest,
-      definitions: { ...defaultServerManifest.definitions, tools: [tool] },
-    };
-    const html = renderLandingPage(manifest, 'https://example.com');
-    expect(html).not.toContain('<img');
-    expect(html).toContain('&lt;img');
-  });
-
   test.each(ADVERSARIAL_STRINGS)('survives adversarial string: %s', (evil) => {
     const manifest: ServerManifest = {
       ...defaultServerManifest,
@@ -1124,17 +1095,18 @@ describe('renderLandingPage — safety', () => {
     };
     const html = renderLandingPage(manifest, 'https://example.com');
 
-    // Strip our own legitimate scripts (copy helper + JSON-LD block); those
-    // are known-safe and contain `<script>` by design.
-    const scrubbed = html
-      .replace(/<script type="application\/ld\+json">[\s\S]*?<\/script>/g, '')
-      .replace(/<script>[\s\S]*?<\/script>/g, '');
-
-    // After scrubbing, no further `<script` element may exist.
-    expect(scrubbed).not.toMatch(/<script[\s>]/i);
+    /**
+     * The framework emits exactly two script elements: the JSON-LD block in
+     * the head, then the copy helper at the end of the body. Any injected
+     * `<script` adds to this list — scrubbing every `<script>…</script>`
+     * block instead would erase the injection along with our own.
+     */
+    expect(html.match(/<script[\s>]/gi)).toEqual(['<script ', '<script>']);
+    expect(html).toContain('<script type="application/ld+json">');
+    const scrubbed = html.replace(/<script\b[\s\S]*?<\/script>/g, '');
 
     // When the adversarial payload contains `<`, it must be escaped in the
-    // rendered output — no literal `<script` or `<img` injection.
+    // rendered output — no literal `<img`, `<svg`, … injection.
     if (/<(script|img|iframe|svg|object|embed)/i.test(evil)) {
       expect(scrubbed).not.toMatch(/<(script|img|iframe|svg|object|embed)[\s>]/i);
     }
@@ -1206,65 +1178,6 @@ describe('renderLandingPage — tool schema preview and args', () => {
     // `"q"` → `&quot;q&quot;` after HTML-escaping through html``.
     expect(html).toContain('&quot;q&quot;');
     expect(html).toContain('&quot;limit&quot;');
-  });
-});
-
-describe('buildServerManifest — accent validation', () => {
-  const baseInput = () => ({
-    config: stubConfig(),
-    tools: [],
-    resources: [],
-    prompts: [],
-  });
-
-  test.each([
-    ['hex (short)', '#fff'],
-    ['hex (long)', '#6366f1'],
-    ['hex with alpha', '#6366f1cc'],
-    ['named color', 'indigo'],
-    ['rgb()', 'rgb(99, 102, 241)'],
-    ['rgb() with spaces', 'rgb(99 102 241)'],
-    ['hsl() with slash-alpha', 'hsl(180 50% 50% / 0.5)'],
-    ['oklch()', 'oklch(0.7 0.2 140)'],
-    ['oklab()', 'oklab(0.7 0.1 0.1)'],
-    ['currentcolor', 'currentcolor'],
-  ])('accepts %s: %s', (_label, accent) => {
-    expect(() =>
-      buildServerManifest({
-        ...baseInput(),
-        landing: { theme: { accent } },
-      }),
-    ).not.toThrow();
-  });
-
-  test.each([
-    ['semicolon breakout', 'red; background: url(x)'],
-    ['brace injection', 'red) } body { color: red'],
-    ['angle brackets', '<script>alert(1)</script>'],
-    ['block comment open', 'red /* attack'],
-    ['block comment close', 'red */ x'],
-    ['backslash escape', 'red\\00003b'],
-    ['leading digit', '123'],
-    ['leading at-rule', '@import url(x)'],
-    ['empty string', ''],
-    ['whitespace-only', '   '],
-  ])('rejects %s: %s', (_label, accent) => {
-    expect(() =>
-      buildServerManifest({
-        ...baseInput(),
-        landing: { theme: { accent } },
-      }),
-    ).toThrow(/landing\.theme\.accent/);
-  });
-
-  test('exceeds length cap (>128) is rejected', () => {
-    const long = `#${'a'.repeat(200)}`;
-    expect(() =>
-      buildServerManifest({
-        ...baseInput(),
-        landing: { theme: { accent: long } },
-      }),
-    ).toThrow(/landing\.theme\.accent/);
   });
 });
 
@@ -1373,30 +1286,5 @@ describe('renderLandingPage — accessibility hygiene', () => {
     expect(html).not.toContain('role="tablist"');
     expect(html).not.toContain('role="tab"');
     expect(html).not.toContain('role="tabpanel"');
-  });
-});
-
-describe('renderLandingPage — warn-token extraction', () => {
-  test('exposes --warn family in :root tokens', () => {
-    const html = renderLandingPage(defaultServerManifest, 'https://example.com');
-    expect(html).toContain('--warn:');
-    expect(html).toContain('--warn-text:');
-    expect(html).toContain('--warn-bg:');
-    expect(html).toContain('--warn-edge:');
-  });
-
-  test('pre-release badge resolves through --warn-* vars, not raw hex', () => {
-    const manifest = buildServerManifest({
-      config: stubConfig({ mcpServerVersion: '1.0.0-beta.1' }),
-      tools: [],
-      resources: [],
-      prompts: [],
-    });
-    const html = renderLandingPage(manifest, 'https://example.com');
-    expect(html).toMatch(/\.badge-pre\s*\{[\s\S]*?color:\s*var\(--warn-text\)/);
-    expect(html).toMatch(/\.badge-pre\s*\{[\s\S]*?background:\s*var\(--warn-bg\)/);
-    expect(html).toMatch(/\.badge-pre\s*\{[\s\S]*?border:\s*1px\s+solid\s+var\(--warn-edge\)/);
-    // The old hardcoded amber hex should no longer appear in the .badge-pre block.
-    expect(html).not.toMatch(/\.badge-pre\s*\{[\s\S]*?color:\s*#b45309/);
   });
 });

@@ -5,7 +5,8 @@
  */
 
 import { SdkError, SdkErrorCode } from '@modelcontextprotocol/server';
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { SpanStatusCode, trace } from '@opentelemetry/api';
+import { afterEach, beforeEach, describe, expect, it, type MockInstance, vi } from 'vitest';
 import { z } from 'zod';
 import { JsonRpcErrorCode, McpError } from '@/types-global/errors.js';
 import { ErrorHandler } from '@/utils/internal/error-handler/errorHandler.js';
@@ -36,7 +37,7 @@ describe('ErrorHandler', () => {
       expect(ErrorHandler.determineErrorCode(err)).toBe(JsonRpcErrorCode.Forbidden);
     });
 
-    it('should map TypeError to ValidationError', () => {
+    it('should leave TypeError unmapped (InternalError)', () => {
       expect(ErrorHandler.determineErrorCode(new TypeError('bad'))).toBe(
         JsonRpcErrorCode.InternalError,
       );
@@ -120,6 +121,13 @@ describe('ErrorHandler', () => {
       expect(ErrorHandler.determineErrorCode(new Error('service unavailable'))).toBe(
         JsonRpcErrorCode.ServiceUnavailable,
       );
+    });
+
+    it.each([
+      ['access denied', JsonRpcErrorCode.Forbidden],
+      ['operation cancelled', JsonRpcErrorCode.Timeout],
+    ])('should classify "%s" by its pattern alternation', (message, code) => {
+      expect(ErrorHandler.determineErrorCode(new Error(message))).toBe(code);
     });
 
     it('should classify AbortError special case as Timeout', () => {
@@ -220,17 +228,6 @@ describe('ErrorHandler', () => {
   // ─── handleError ─────────────────────────────────────────────────────────────
 
   describe('handleError', () => {
-    it('should preserve McpError code and return McpError', () => {
-      const original = new McpError(JsonRpcErrorCode.NotFound, 'not here', {
-        key: 'val',
-      });
-      const result = ErrorHandler.handleError(original, {
-        operation: 'test',
-      });
-      expect(result).toBeInstanceOf(McpError);
-      expect((result as McpError).code).toBe(JsonRpcErrorCode.NotFound);
-    });
-
     it('should wrap generic Error as McpError preserving original message', () => {
       const result = ErrorHandler.handleError(new Error('generic'), {
         operation: 'testOp',
@@ -248,22 +245,6 @@ describe('ErrorHandler', () => {
           rethrow: true,
         }),
       ).toThrow();
-    });
-
-    it('should return error without throwing when rethrow is false', () => {
-      const result = ErrorHandler.handleError(new Error('safe'), {
-        operation: 'test',
-        rethrow: false,
-      });
-      expect(result).toBeInstanceOf(Error);
-    });
-
-    it('should use explicit errorCode when provided', () => {
-      const result = ErrorHandler.handleError(new Error('test'), {
-        operation: 'op',
-        errorCode: JsonRpcErrorCode.Timeout,
-      });
-      expect((result as McpError).code).toBe(JsonRpcErrorCode.Timeout);
     });
 
     it('should use custom errorMapper when provided', () => {
@@ -422,16 +403,52 @@ describe('ErrorHandler', () => {
       expect(logged.extra).not.toHaveProperty('stack');
     });
 
-    it('should extract cause chain when error has a cause', () => {
-      const root = new Error('root cause');
-      const outer = new Error('outer', { cause: root });
-      const result = ErrorHandler.handleError(outer, {
-        operation: 'op',
-      }) as McpError;
-      expect(result.data).toBeDefined();
-      expect(result.data?.rootCause).toEqual({
-        name: 'Error',
-        message: 'root cause',
+    describe('OpenTelemetry span recording', () => {
+      const span = {
+        recordException: vi.fn(),
+        setStatus: vi.fn(),
+        isRecording: vi.fn(),
+      };
+      let getActiveSpanSpy: MockInstance;
+
+      beforeEach(() => {
+        span.isRecording.mockReturnValue(true);
+        getActiveSpanSpy = vi.spyOn(trace, 'getActiveSpan').mockReturnValue(span as never);
+      });
+
+      afterEach(() => {
+        getActiveSpanSpy.mockRestore();
+      });
+
+      it('records the exception and an ERROR status on the active span', () => {
+        const error = new Error('Telemetry test');
+        ErrorHandler.handleError(error, { operation: 'otelTest' });
+
+        expect(span.recordException).toHaveBeenCalledWith(error);
+        expect(span.setStatus).toHaveBeenCalledWith({
+          code: SpanStatusCode.ERROR,
+          message: 'Telemetry test',
+        });
+      });
+
+      it('sets a stringified ERROR status without recordException for a non-Error value', () => {
+        ErrorHandler.handleError('plain failure', { operation: 'otelTest' });
+
+        expect(span.recordException).not.toHaveBeenCalled();
+        expect(span.setStatus).toHaveBeenCalledWith({
+          code: SpanStatusCode.ERROR,
+          message: 'plain failure',
+        });
+      });
+
+      it('skips the span write when the active span is no longer recording (#93)', () => {
+        // measure*Execution already recorded and ended the span before re-throwing;
+        // writing again triggers "Cannot execute the operation on ended Span".
+        span.isRecording.mockReturnValue(false);
+        ErrorHandler.handleError(new Error('post-end write'), { operation: 'endedSpanTest' });
+
+        expect(span.recordException).not.toHaveBeenCalled();
+        expect(span.setStatus).not.toHaveBeenCalled();
       });
     });
   });
@@ -459,40 +476,11 @@ describe('ErrorHandler', () => {
         data: { errorType: 'TypeError' },
       });
     });
-
-    it('should format non-Error values', () => {
-      const formatted = ErrorHandler.formatError('raw');
-      expect(formatted.code).toBe(JsonRpcErrorCode.UnknownError);
-      expect(formatted.message).toBe('raw');
-    });
-
-    it('should format null value', () => {
-      const formatted = ErrorHandler.formatError(null);
-      expect(formatted.code).toBe(JsonRpcErrorCode.UnknownError);
-    });
   });
 
   // ─── tryCatch ────────────────────────────────────────────────────────────────
 
   describe('tryCatch', () => {
-    it('should return value on success', async () => {
-      const result = await ErrorHandler.tryCatch(() => Promise.resolve(42), {
-        operation: 'test',
-      });
-      expect(result).toBe(42);
-    });
-
-    it('should throw McpError on failure', async () => {
-      await expect(
-        ErrorHandler.tryCatch(
-          () => {
-            throw new Error('fail');
-          },
-          { operation: 'test' },
-        ),
-      ).rejects.toThrow(McpError);
-    });
-
     it('should handle sync functions', async () => {
       const result = await ErrorHandler.tryCatch(() => 'sync', {
         operation: 'test',

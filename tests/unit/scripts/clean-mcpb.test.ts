@@ -5,7 +5,7 @@
  */
 
 import { describe, expect, it } from 'vitest';
-import { AGENT_DOC_ENTRY, filterAgentDocEntries } from '../../../scripts/clean-mcpb.js';
+import { filterAgentDocEntries } from '../../../scripts/clean-mcpb.js';
 
 describe('clean-mcpb · agent-doc entry filter', () => {
   it('matches dependency-shipped framework-skills/, .claude/, .agents/ trees and SKILL.md files', () => {
@@ -61,10 +61,5 @@ describe('clean-mcpb · agent-doc entry filter', () => {
       'node_modules/a/skills/one.md',
       'node_modules/b/.agents/two.md',
     ]);
-  });
-
-  it('exposes the filter regex for cross-script sync', () => {
-    expect(AGENT_DOC_ENTRY).toBeInstanceOf(RegExp);
-    expect(AGENT_DOC_ENTRY.source.startsWith('^node_modules')).toBe(true);
   });
 });

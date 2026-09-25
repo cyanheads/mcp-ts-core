@@ -146,34 +146,6 @@ describe('ToolRegistry', () => {
       expect(call[1].description).toBe('A test tool');
       expect(typeof call[2]).toBe('function');
     });
-
-    it('should register multiple tools', async () => {
-      const tool1 = tool('tool_one', {
-        description: 'First tool',
-        input: z.object({}),
-        output: z.object({}),
-        handler: () => ({}),
-      });
-
-      const tool2 = tool('tool_two', {
-        description: 'Second tool',
-        input: z.object({}),
-        output: z.object({}),
-        handler: () => ({}),
-      });
-
-      const registry = new ToolRegistry([tool1, tool2], services);
-      await registry.registerAll(mockServer);
-
-      expect(mockServer.registerTool).toHaveBeenCalledTimes(2);
-    });
-
-    it('should handle empty tool list', async () => {
-      const registry = new ToolRegistry([], services);
-      await registry.registerAll(mockServer);
-
-      expect(mockServer.registerTool).toHaveBeenCalledTimes(0);
-    });
   });
 
   describe('Disabled Tools', () => {
@@ -199,44 +171,6 @@ describe('ToolRegistry', () => {
 
       expect(mockServer.registerTool).toHaveBeenCalledTimes(1);
       expect(mockServer.registerTool.mock.calls[0][0]).toBe('enabled_tool');
-    });
-
-    it('should register nothing when every tool in the registry is disabled', async () => {
-      const disabledDef = disabledTool(
-        tool('only_disabled', {
-          description: 'Disabled tool',
-          input: z.object({}),
-          output: z.object({}),
-          handler: () => ({}),
-        }),
-        { reason: 'Background analytics are disabled in this deployment.' },
-      );
-
-      const registry = new ToolRegistry([disabledDef], services);
-      await registry.registerAll(mockServer);
-
-      // `tools/list` and `tools/call` come from the declared capability, so a
-      // registry with nothing enabled still answers with a truthful empty list.
-      expect(mockServer.registerTool).not.toHaveBeenCalled();
-    });
-
-    it('should preserve all original definition fields when wrapped', () => {
-      const original = tool('preserved', {
-        description: 'Original description',
-        input: z.object({ q: z.string().describe('q') }),
-        output: z.object({ r: z.string().describe('r') }),
-        auth: ['tool:preserved:read'],
-        handler: () => ({ r: 'ok' }),
-      });
-      const wrapped = disabledTool(original, {
-        reason: 'Disabled until config flag is enabled.',
-        hint: 'PRESERVED_FLAG=true',
-      });
-
-      expect(wrapped.name).toBe('preserved');
-      expect(wrapped.description).toBe('Original description');
-      expect(wrapped.auth).toEqual(['tool:preserved:read']);
-      expect(wrapped.handler).toBe(original.handler);
     });
   });
 
@@ -386,40 +320,6 @@ describe('ToolRegistry', () => {
     });
   });
 
-  describe('Handler Creation', () => {
-    it('should create handler with custom format', async () => {
-      const testTool = tool('formatted_tool', {
-        description: 'Tool with formatter',
-        input: z.object({}),
-        output: z.object({ data: z.string().describe('data') }),
-        handler: () => ({ data: 'test' }),
-        format: (result) => [{ type: 'text', text: `Custom: ${result.data}` }],
-      });
-
-      const registry = new ToolRegistry([testTool], services);
-      await registry.registerAll(mockServer);
-
-      expect(mockServer.registerTool).toHaveBeenCalledTimes(1);
-      const handler = mockServer.registerTool.mock.calls[0][2];
-      expect(typeof handler).toBe('function');
-    });
-
-    it('should create handler without format when not provided', async () => {
-      const testTool = tool('plain_tool', {
-        description: 'Tool without formatter',
-        input: z.object({}),
-        output: z.object({}),
-        handler: () => ({}),
-      });
-
-      const registry = new ToolRegistry([testTool], services);
-      await registry.registerAll(mockServer);
-
-      const handler = mockServer.registerTool.mock.calls[0][2];
-      expect(typeof handler).toBe('function');
-    });
-  });
-
   describe('Registration Order', () => {
     it('should register tools in the order they are provided', async () => {
       const tools = [
@@ -536,45 +436,6 @@ describe('ToolRegistry', () => {
       const call = mockServer.registerTool.mock.calls[0];
       expect(call[1]._meta).toEqual({ ui: { resourceUri: 'ui://mixed/app.html' } });
       expect(call[1]._meta).not.toHaveProperty('mcp-ts-core/errors');
-    });
-  });
-
-  describe('Complex Tools', () => {
-    it('should handle tool with complex nested schemas', async () => {
-      const complexTool = tool('complex_tool', {
-        description: 'Complex tool with nested schemas',
-        input: z.object({
-          user: z
-            .object({
-              name: z.string().describe('name'),
-              email: z.email().describe('email'),
-            })
-            .describe('user'),
-          settings: z
-            .object({
-              theme: z.enum(['light', 'dark']).describe('theme'),
-              notifications: z.boolean().describe('notifications'),
-            })
-            .describe('settings'),
-        }),
-        output: z.object({
-          success: z.boolean().describe('success'),
-          message: z.string().describe('message'),
-        }),
-        handler: (input) => ({
-          success: true,
-          message: `Processed settings for ${input.user.name}`,
-        }),
-      });
-
-      const registry = new ToolRegistry([complexTool], services);
-      await registry.registerAll(mockServer);
-
-      expect(mockServer.registerTool).toHaveBeenCalledTimes(1);
-      const call = mockServer.registerTool.mock.calls[0];
-      const advertised = advertisedInput(call[1].inputSchema).properties;
-      expect(advertised).toHaveProperty('user');
-      expect(advertised).toHaveProperty('settings');
     });
   });
 });

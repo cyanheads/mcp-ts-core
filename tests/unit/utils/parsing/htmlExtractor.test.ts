@@ -78,11 +78,6 @@ describe('HtmlExtractor', () => {
       expect(result.description).toBe('A short essay about testing software.');
     });
 
-    it('returns schema.org data when present', async () => {
-      const result = await htmlExtractor.extract(ARTICLE_HTML);
-      expect(result.schemaOrgData).toBeDefined();
-    });
-
     it('logs debug messages around extraction', async () => {
       await htmlExtractor.extract(ARTICLE_HTML);
 
@@ -117,15 +112,6 @@ describe('HtmlExtractor', () => {
     });
   });
 
-  describe('contentSelector option', () => {
-    it('forwards contentSelector to defuddle', async () => {
-      const result = await htmlExtractor.extract(ARTICLE_HTML, {
-        contentSelector: 'article',
-      });
-      expect(result.content).toContain('Testing is the discipline');
-    });
-  });
-
   describe('removeImages option', () => {
     it('strips images when removeImages is true', async () => {
       const htmlWithImage = ARTICLE_HTML.replace(
@@ -141,15 +127,15 @@ describe('HtmlExtractor', () => {
   });
 
   describe('edge cases', () => {
-    it('throws ValidationError on empty input', async () => {
-      await expect(htmlExtractor.extract('')).rejects.toThrow(McpError);
-      try {
-        await htmlExtractor.extract('   \n  ');
-      } catch (e) {
-        const err = e as McpError;
-        expect(err.code).toBe(JsonRpcErrorCode.ValidationError);
-        expect(err.message).toContain('empty');
-      }
+    it.each([
+      ['empty', ''],
+      ['whitespace-only', '   \n  '],
+    ])('throws ValidationError on %s input', async (_label, html) => {
+      const error = await htmlExtractor.extract(html).catch((e: unknown) => e);
+
+      expect(error).toBeInstanceOf(McpError);
+      expect((error as McpError).code).toBe(JsonRpcErrorCode.ValidationError);
+      expect((error as McpError).message).toBe('HTML string is empty.');
     });
 
     it('handles SPA shells with minimal content without crashing', async () => {
@@ -177,12 +163,6 @@ describe('HtmlExtractor', () => {
         'Extracting article content from HTML.',
         expect.objectContaining({ operation: 'test-html-extractor' }),
       );
-    });
-  });
-
-  describe('singleton export', () => {
-    it('exports an htmlExtractor singleton', () => {
-      expect(htmlExtractor).toBeInstanceOf(HtmlExtractor);
     });
   });
 });

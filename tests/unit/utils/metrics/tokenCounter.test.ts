@@ -50,7 +50,7 @@ describe('tokenCounter', () => {
         },
       ];
       const tokenCount = await countChatTokens(messages);
-      expect(tokenCount).toBeGreaterThan(10);
+      expect(tokenCount).toBe(33);
     });
 
     it('should handle tool calls in assistant messages', async () => {
@@ -71,7 +71,7 @@ describe('tokenCounter', () => {
         },
       ];
       const tokenCount = await countChatTokens(messages);
-      expect(tokenCount).toBeGreaterThan(5);
+      expect(tokenCount).toBe(17);
     });
 
     it('should handle multi-part user messages', async () => {
@@ -88,7 +88,7 @@ describe('tokenCounter', () => {
         },
       ];
       const tokenCount = await countChatTokens(messages);
-      expect(tokenCount).toBeGreaterThan(5);
+      expect(tokenCount).toBe(13);
     });
 
     it('should include name overhead when a message defines name', async () => {

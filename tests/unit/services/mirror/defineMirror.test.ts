@@ -189,15 +189,6 @@ describe('defineMirror — status() and ready() derive from store.readState()', 
       checkpoint: '2024-01-01',
     });
   });
-
-  it('ready() is false when completedAt has never been set, even mid-progress', async () => {
-    const mirror = defineMirror({
-      name: 'm',
-      store: makeFakeStore({ status: 'in_progress', cursor: 'tok-1' }),
-      sync: emptySync,
-    });
-    expect(await mirror.ready()).toBe(false);
-  });
 });
 
 describe('defineMirror — runSync() option wiring', () => {
@@ -223,14 +214,6 @@ describe('defineMirror — runSync() option wiring', () => {
     const mirror = defineMirror({ name: 'm', store: makeFakeStore(), sync });
     await mirror.runSync({ mode: 'init', signal: controller.signal });
     expect(seenSignal).toBe(controller.signal);
-  });
-
-  it('does not throw when onProgress is omitted', async () => {
-    const sync: SyncGenerator = async function* (): AsyncGenerator<SyncPage> {
-      yield { records: [{ id: '1' }] };
-    };
-    const mirror = defineMirror({ name: 'm', store: makeFakeStore(), sync });
-    await expect(mirror.runSync({ mode: 'init' })).resolves.toMatchObject({ recordsApplied: 1 });
   });
 
   it('invokes a provided onProgress callback once per yielded page, with running totals', async () => {
@@ -306,11 +289,6 @@ describe('defineMirror — edge-shaped sync definitions', () => {
     const result = await mirror.runSync({ mode: 'init' });
     expect(result).toEqual({ pagesFetched: 1, recordsApplied: 0, tombstonesApplied: 0, total: 0 });
   });
-
-  it('does not validate definition.name — an empty string is accepted as-is', () => {
-    const mirror = defineMirror({ name: '', store: makeFakeStore(), sync: emptySync });
-    expect(mirror.name).toBe('');
-  });
 });
 
 describe('defineMirror — logger wiring', () => {
@@ -342,23 +320,6 @@ describe('defineMirror — logger wiring', () => {
     await expect(mirror.runSync({ mode: 'init' })).rejects.toThrow('boom');
     expect(calls).toEqual([{ level: 'error', message: 'Mirror sync failed' }]);
   });
-
-  it('completes a successful sync without a custom logger (falls through to the framework default logger)', async () => {
-    const sync: SyncGenerator = async function* (): AsyncGenerator<SyncPage> {
-      yield { records: [{ id: '1' }] };
-    };
-    const mirror = defineMirror({ name: 'm', store: makeFakeStore(), sync }); // no `logger` passed
-    await expect(mirror.runSync({ mode: 'init' })).resolves.toMatchObject({ recordsApplied: 1 });
-  });
-
-  it('completes a failing sync without a custom logger (exercises the default logger error path)', async () => {
-    // biome-ignore lint/correctness/useYield: deliberately throws before ever yielding — that failure-before-any-page case is what this test covers.
-    const sync: SyncGenerator = async function* (): AsyncGenerator<SyncPage> {
-      throw new Error('boom-no-logger');
-    };
-    const mirror = defineMirror({ name: 'm', store: makeFakeStore(), sync }); // no `logger` passed
-    await expect(mirror.runSync({ mode: 'init' })).rejects.toThrow('boom-no-logger');
-  });
 });
 
 describe('defineMirror — error surfacing', () => {
@@ -377,15 +338,6 @@ describe('defineMirror — error surfacing', () => {
         sync: emptySync,
       }),
     ).toThrow(/primaryKey/);
-  });
-
-  it('propagates a synchronous throw from the sync generator through runSync()', async () => {
-    // biome-ignore lint/correctness/useYield: deliberately throws before ever yielding — that failure-before-any-page case is what this test covers.
-    const sync: SyncGenerator = async function* (): AsyncGenerator<SyncPage> {
-      throw new Error('sync generator exploded before yielding anything');
-    };
-    const mirror = defineMirror({ name: 'm', store: makeFakeStore(), sync });
-    await expect(mirror.runSync({ mode: 'init' })).rejects.toThrow(/exploded before yielding/);
   });
 
   it('leaves the store in an error state with the thrown message recorded after a failed run', async () => {

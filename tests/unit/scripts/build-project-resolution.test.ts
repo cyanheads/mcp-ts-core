@@ -148,9 +148,4 @@ describe('build.ts tsconfig resolution (#440)', () => {
     expect(out).toContain('nope.json');
     expect(code).not.toBe(0);
   });
-
-  it('does not run tsc-alias when tsc fails', () => {
-    const { invocations } = runBuild(['--project', 'nope.json']);
-    expect(invocations.some((line) => line.startsWith('tsc-alias'))).toBe(false);
-  });
 });

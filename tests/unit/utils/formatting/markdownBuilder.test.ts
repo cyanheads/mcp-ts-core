@@ -4,23 +4,9 @@
  */
 import { describe, expect, test } from 'vitest';
 
-import { MarkdownBuilder, markdown } from '@/utils/formatting/markdownBuilder.js';
+import { markdown } from '@/utils/formatting/markdownBuilder.js';
 
 describe('MarkdownBuilder', () => {
-  describe('Basic instantiation', () => {
-    test('should create instance via constructor', () => {
-      const md = new MarkdownBuilder();
-      expect(md).toBeInstanceOf(MarkdownBuilder);
-      expect(md.build()).toBe('');
-    });
-
-    test('should create instance via helper function', () => {
-      const md = markdown();
-      expect(md).toBeInstanceOf(MarkdownBuilder);
-      expect(md.build()).toBe('');
-    });
-  });
-
   describe('Headings', () => {
     test('should create h1 heading', () => {
       const result = markdown().h1('Title').build();
@@ -74,16 +60,6 @@ describe('MarkdownBuilder', () => {
       expect(result).toBe('**Name:** John Doe');
     });
 
-    test('should handle numeric values', () => {
-      const result = markdown().keyValue('Count', 42).build();
-      expect(result).toBe('**Count:** 42');
-    });
-
-    test('should handle boolean values', () => {
-      const result = markdown().keyValue('Enabled', true).build();
-      expect(result).toBe('**Enabled:** true');
-    });
-
     test('should handle null values', () => {
       const result = markdown().keyValue('Value', null).build();
       expect(result).toBe('**Value:** null');
@@ -92,16 +68,6 @@ describe('MarkdownBuilder', () => {
     test('should create plain key-value pair', () => {
       const result = markdown().keyValuePlain('Status', 'active').build();
       expect(result).toBe('Status: active');
-    });
-
-    test('should handle numeric values in plain key-value', () => {
-      const result = markdown().keyValuePlain('Count', 42).build();
-      expect(result).toBe('Count: 42');
-    });
-
-    test('should handle boolean values in plain key-value', () => {
-      const result = markdown().keyValuePlain('Enabled', false).build();
-      expect(result).toBe('Enabled: false');
     });
 
     test('should handle null values in plain key-value', () => {
@@ -129,11 +95,6 @@ describe('MarkdownBuilder', () => {
     test('should handle empty list', () => {
       const result = markdown().list([]).build();
       expect(result).toBe('');
-    });
-
-    test('should handle single item', () => {
-      const result = markdown().list(['Single']).build();
-      expect(result).toBe('- Single');
     });
   });
 
@@ -352,18 +313,6 @@ describe('MarkdownBuilder', () => {
   });
 
   describe('Conditional content', () => {
-    test('should add content when condition is true', () => {
-      const hasTimestamp = true;
-      const result = markdown()
-        .h1('Report')
-        .when(hasTimestamp, () => {
-          markdown().keyValue('Timestamp', '2024-01-01');
-        })
-        .build();
-      // Note: The when callback should use the same instance
-      expect(result).toContain('# Report');
-    });
-
     test('should not add content when condition is false', () => {
       const md = markdown();
       const result = md
@@ -404,95 +353,16 @@ describe('MarkdownBuilder', () => {
     });
   });
 
-  describe('Complex compositions', () => {
-    test('should build complex document', () => {
-      const md = markdown();
-      const result = md
-        .h1('Commit Summary', '✅')
-        .keyValue('Hash', 'abc123')
-        .keyValue('Author', 'John Doe')
-        .keyValue('Date', '2024-01-01')
-        .blankLine()
-        .section('Files Changed', 2, () => {
-          md.list(['src/file1.ts', 'src/file2.ts', 'tests/file1.test.ts']);
-        })
-        .section('Changes', 2, () => {
-          md.codeBlock('+  new line\n-  old line', 'diff');
-        })
-        .build();
-
-      expect(result).toContain('# ✅ Commit Summary');
-      expect(result).toContain('**Hash:** abc123');
-      expect(result).toContain('## Files Changed');
-      expect(result).toContain('- src/file1.ts');
-      expect(result).toContain('## Changes');
-      expect(result).toContain('```diff');
-    });
-
-    test('should build tool response format', () => {
-      const md = markdown();
-      const timestamp = '2024-01-01T12:00:00Z';
-      const result = md
-        .paragraph('Echo (mode=uppercase, repeat=2)')
-        .paragraph('HELLO WORLD HELLO WORLD')
-        .when(!!timestamp, () => {
-          md.keyValuePlain('timestamp', timestamp);
-        })
-        .build();
-
-      expect(result).toContain('Echo (mode=uppercase, repeat=2)');
-      expect(result).toContain('HELLO WORLD HELLO WORLD');
-      expect(result).toContain('timestamp: 2024-01-01T12:00:00Z');
-    });
-  });
-
-  describe('Chaining', () => {
-    test('should support fluent chaining', () => {
-      const result = markdown()
-        .h1('Title')
-        .paragraph('Text')
-        .list(['a', 'b'])
-        .hr()
-        .keyValue('Key', 'Value')
-        .build();
-
-      expect(result).toContain('# Title');
-      expect(result).toContain('Text');
-      expect(result).toContain('- a');
-      expect(result).toContain('---');
-      expect(result).toContain('**Key:** Value');
-    });
-  });
-
   describe('Alert boxes', () => {
-    test('should create note alert', () => {
-      const result = markdown().alert('note', 'This is a note').build();
-      expect(result).toContain('> [!NOTE]');
-      expect(result).toContain('> This is a note');
-    });
-
-    test('should create tip alert', () => {
-      const result = markdown().alert('tip', 'This is a helpful tip').build();
-      expect(result).toContain('> [!TIP]');
-      expect(result).toContain('> This is a helpful tip');
-    });
-
-    test('should create important alert', () => {
-      const result = markdown().alert('important', 'This is important').build();
-      expect(result).toContain('> [!IMPORTANT]');
-      expect(result).toContain('> This is important');
-    });
-
-    test('should create warning alert', () => {
-      const result = markdown().alert('warning', 'This is a warning').build();
-      expect(result).toContain('> [!WARNING]');
-      expect(result).toContain('> This is a warning');
-    });
-
-    test('should create caution alert', () => {
-      const result = markdown().alert('caution', 'This is dangerous').build();
-      expect(result).toContain('> [!CAUTION]');
-      expect(result).toContain('> This is dangerous');
+    test.each([
+      ['note', 'NOTE'],
+      ['tip', 'TIP'],
+      ['important', 'IMPORTANT'],
+      ['warning', 'WARNING'],
+      ['caution', 'CAUTION'],
+    ] as const)('should create %s alert', (type, marker) => {
+      const result = markdown().alert(type, 'Alert body').build();
+      expect(result).toBe(`> [!${marker}]\n> Alert body`);
     });
 
     test('should handle multi-line alert content', () => {
@@ -652,66 +522,6 @@ describe('MarkdownBuilder', () => {
       const result = markdown().badge('test coverage', '95%', 'green').build();
       expect(result).toContain('test%20coverage');
       expect(result).toContain('95%25');
-    });
-  });
-
-  describe('Enhanced examples', () => {
-    test('should build PR summary with new features', () => {
-      const md = markdown();
-      const result = md
-        .h1('Pull Request Summary', '🔀')
-        .alert('important', 'This PR introduces breaking changes')
-        .blankLine()
-        .h2('Changes')
-        .taskList([
-          { checked: true, text: 'Update API endpoints' },
-          { checked: true, text: 'Add tests' },
-          { checked: false, text: 'Update documentation' },
-        ])
-        .blankLine()
-        .h2('Diff Preview')
-        .diff({
-          context: ['function oldFunction() {'],
-          deletions: ['  return "old";'],
-          additions: ['  return "new";'],
-        })
-        .blankLine()
-        .badge('tests', 'passing', 'green')
-        .text(' ')
-        .badge('coverage', '95%', 'brightgreen')
-        .build();
-
-      expect(result).toContain('# 🔀 Pull Request Summary');
-      expect(result).toContain('> [!IMPORTANT]');
-      expect(result).toContain('- [x] Update API endpoints');
-      expect(result).toContain('- [ ] Update documentation');
-      expect(result).toContain('```diff');
-      expect(result).toContain('![tests: passing]');
-      expect(result).toContain('![coverage: 95%]');
-    });
-
-    test('should build deployment report', () => {
-      const md = markdown();
-      const result = md
-        .h1('Deployment Report', '🚀')
-        .keyValue('Environment', 'Production')
-        .keyValue('Version', '2.1.0')
-        .keyValue('Timestamp', '2024-01-01T12:00:00Z')
-        .blankLine()
-        .alert('tip', 'Deployment completed successfully in 3m 45s')
-        .blankLine()
-        .h2('Services Updated')
-        .taskList([
-          { checked: true, text: 'API Server' },
-          { checked: true, text: 'Web Frontend' },
-          { checked: true, text: 'Background Workers' },
-        ])
-        .build();
-
-      expect(result).toContain('# 🚀 Deployment Report');
-      expect(result).toContain('**Environment:** Production');
-      expect(result).toContain('> [!TIP]');
-      expect(result).toContain('- [x] API Server');
     });
   });
 });

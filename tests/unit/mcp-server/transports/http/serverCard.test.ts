@@ -49,20 +49,6 @@ vi.mock('@/utils/internal/requestContext.js', () => ({
 }));
 
 describe('buildServerCard', () => {
-  test('produces the required SEP-1649 fields', () => {
-    const card = buildServerCard(defaultServerManifest, 'https://example.com');
-    expect(card).toMatchObject({
-      mcp_version: defaultServerManifest.protocol.latestVersion,
-      server_name: 'test-mcp-server',
-      server_version: '1.0.0',
-      server_description: 'Test MCP Server',
-      endpoints: { streamable_http: 'https://example.com/mcp' },
-      capabilities: { tools: true, resources: true, prompts: true, logging: true },
-      authentication: { required: false, type: 'none' },
-      generated_at: defaultServerManifest.builtAt,
-    });
-  });
-
   test('builds streamable_http URL from endpoint path + origin', () => {
     const manifest: ServerManifest = {
       ...defaultServerManifest,

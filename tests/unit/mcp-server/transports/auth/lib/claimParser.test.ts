@@ -60,6 +60,15 @@ describe('buildAuthInfoFromClaims', () => {
       expect(result.scopes).toEqual(['read', 'write']);
     });
 
+    it('drops leading, trailing, and repeated spaces from the scope string', () => {
+      const payload: JWTPayload = {
+        cid: 'client',
+        scope: '  tool:read   resource:write  tool:execute  ',
+      };
+      const result = buildAuthInfoFromClaims(RAW_TOKEN, payload);
+      expect(result.scopes).toEqual(['tool:read', 'resource:write', 'tool:execute']);
+    });
+
     it('unions scp array and scope string when both are present', () => {
       const payload: JWTPayload = { cid: 'client', scp: ['scp-scope'], scope: 'scope-string' };
       const result = buildAuthInfoFromClaims(RAW_TOKEN, payload);
@@ -234,21 +243,6 @@ describe('buildAuthInfoFromClaims', () => {
       const result = buildAuthInfoFromClaims(RAW_TOKEN, payload);
       expect(result.expiresAt).toBeUndefined();
     });
-
-    it('extracts all optional claims together', () => {
-      const exp = Math.floor(Date.now() / 1000) + 7200;
-      const payload: JWTPayload = {
-        cid: 'client',
-        scp: ['read', 'write'],
-        sub: 'user-456',
-        tid: 'tenant-xyz',
-        exp,
-      };
-      const result = buildAuthInfoFromClaims(RAW_TOKEN, payload);
-      expect(result.subject).toBe('user-456');
-      expect(result.tenantId).toBe('tenant-xyz');
-      expect(result.expiresAt).toBe(exp);
-    });
   });
 
   describe('token passthrough', () => {
@@ -256,13 +250,6 @@ describe('buildAuthInfoFromClaims', () => {
       const payload: JWTPayload = { cid: 'client', scp: ['read'] };
       const result = buildAuthInfoFromClaims(RAW_TOKEN, payload);
       expect(result.token).toBe(RAW_TOKEN);
-    });
-
-    it('preserves the exact token string without modification', () => {
-      const complexToken = 'eyJhbGciOiJSUzI1NiJ9.eyJzdWIiOiJ1c2VyIn0.signature';
-      const payload: JWTPayload = { cid: 'client', scp: ['read'] };
-      const result = buildAuthInfoFromClaims(complexToken, payload);
-      expect(result.token).toBe(complexToken);
     });
   });
 });
@@ -274,6 +261,7 @@ describe('handleJoseVerifyError', () => {
   });
 
   it('maps JWTExpired errors to "Token has expired."', () => {
+    expect.assertions(3);
     const expired = new Error('jwt expired');
     expired.name = 'JWTExpired';
     try {
@@ -287,6 +275,7 @@ describe('handleJoseVerifyError', () => {
   });
 
   it('uses fallback message for non-expired jose errors', () => {
+    expect.assertions(3);
     const sigError = new Error('signature verification failed');
     sigError.name = 'JWSSignatureVerificationFailed';
     try {
@@ -300,6 +289,7 @@ describe('handleJoseVerifyError', () => {
   });
 
   it('uses fallback message for non-Error values', () => {
+    expect.assertions(3);
     try {
       handleJoseVerifyError('string error', 'Unknown failure.');
     } catch (error) {
@@ -308,9 +298,5 @@ describe('handleJoseVerifyError', () => {
       expect(mcpError.code).toBe(JsonRpcErrorCode.Unauthorized);
       expect(mcpError.message).toBe('Unknown failure.');
     }
-  });
-
-  it('always throws (return type is never)', () => {
-    expect(() => handleJoseVerifyError(new Error('any'), 'fallback')).toThrow();
   });
 });

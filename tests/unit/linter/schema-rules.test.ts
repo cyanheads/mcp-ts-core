@@ -665,7 +665,7 @@ describe('checkStrictenedRootMeta', () => {
   const ok = z.object({ ok: z.boolean().describe('OK.') });
   const pass = () => ({ ok: true });
 
-  /** The `schema-root-meta-discarded` messages a built definition produces. */
+  /** The `schema-root-meta-discarded` messages a built definition produces; each must be a warning. */
   function discarded(name: string, input: unknown): string[] {
     const def = tool(name, {
       description: 'Minimal repro.',
@@ -673,9 +673,11 @@ describe('checkStrictenedRootMeta', () => {
       output: ok,
       handler: pass,
     });
-    return lintToolDefinition(def)
-      .filter((d) => d.rule === 'schema-root-meta-discarded')
-      .map((d) => d.message);
+    const diagnostics = lintToolDefinition(def).filter(
+      (d) => d.rule === 'schema-root-meta-discarded',
+    );
+    for (const d of diagnostics) expect(d.severity).toBe('warning');
+    return diagnostics.map((d) => d.message);
   }
 
   it('fires for a described object root, naming the key and the fix', () => {
@@ -716,20 +718,6 @@ describe('checkStrictenedRootMeta', () => {
     expect(messages).toHaveLength(2);
     expect(messages[0]).toContain("'lint_union_root' input declares");
     expect(messages[1]).toContain("'lint_union_root' input|0 declares");
-  });
-
-  it('warns rather than errors', () => {
-    const def = tool('lint_severity_root', {
-      description: 'Minimal repro.',
-      input: z.object({ x: z.string().describe('x') }).describe('An object root.'),
-      output: ok,
-      handler: pass,
-    });
-    const diagnostics = lintToolDefinition(def).filter(
-      (d) => d.rule === 'schema-root-meta-discarded',
-    );
-
-    expect(diagnostics[0]?.severity).toBe('warning');
   });
 
   it.each([

@@ -396,7 +396,7 @@ const normalizePath = (p: string): string => {
  * glob patterns to regex, preventing regex injection and ReDoS attacks from
  * user-provided patterns (CLI args or config files).
  */
-const matchesPattern = (filePath: string, patterns: string[]): boolean => {
+export const matchesPattern = (filePath: string, patterns: string[]): boolean => {
   if (patterns.length === 0) return false;
 
   const normalizedPath = normalizePath(filePath);
@@ -1107,8 +1107,10 @@ const main = async () => {
   UI.printFooter(true, displayPath, !args.values['no-clipboard']);
 };
 
-// Entry point
-main().catch((error) => {
-  UI.printFatalError(error);
-  process.exit(1);
-});
+// Entry point — skipped when imported (tests import matchesPattern)
+if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  main().catch((error) => {
+    UI.printFatalError(error);
+    process.exit(1);
+  });
+}

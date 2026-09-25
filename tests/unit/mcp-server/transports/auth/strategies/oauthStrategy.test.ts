@@ -59,13 +59,6 @@ describe('OAuth Strategy', () => {
   });
 
   describe('constructor', () => {
-    it('should initialize successfully with valid OAuth config', () => {
-      strategy = new OauthStrategy(mockConfig as any, logger);
-
-      expect(strategy).toBeInstanceOf(OauthStrategy);
-      expect(mockCreateRemoteJWKSet).toHaveBeenCalled();
-    });
-
     it('should throw error when auth mode is not oauth', () => {
       mockConfig.mcpAuthMode = 'jwt';
 
@@ -196,96 +189,6 @@ describe('OAuth Strategy', () => {
       expect(authInfo.token).toBe('test-token');
     });
 
-    it('should extract client_id from payload', async () => {
-      mockJwtVerify.mockResolvedValue({
-        payload: {
-          client_id: 'oauth-client-id',
-          scope: 'read write',
-        },
-        protectedHeader: { alg: 'RS256' },
-        key: {} as any,
-      } as any);
-
-      const authInfo = await strategy.verify('token');
-
-      expect(authInfo.clientId).toBe('oauth-client-id');
-    });
-
-    it('should extract clientId from cid claim', async () => {
-      mockJwtVerify.mockResolvedValue({
-        payload: {
-          cid: 'okta-client',
-          scope: 'read write',
-        },
-        protectedHeader: { alg: 'RS256' },
-        key: {} as any,
-      } as any);
-
-      const authInfo = await strategy.verify('token');
-      expect(authInfo.clientId).toBe('okta-client');
-    });
-
-    it('should extract scopes from space-separated string', async () => {
-      mockJwtVerify.mockResolvedValue({
-        payload: {
-          client_id: 'test-client',
-          scope: 'tool:read tool:write resource:list',
-        },
-        protectedHeader: { alg: 'RS256' },
-        key: {} as any,
-      } as any);
-
-      const authInfo = await strategy.verify('token');
-
-      expect(authInfo.scopes).toEqual(['tool:read', 'tool:write', 'resource:list']);
-    });
-
-    it('should extract scopes from scp array claim', async () => {
-      mockJwtVerify.mockResolvedValue({
-        payload: {
-          client_id: 'test-client',
-          scp: ['tool:read', 'tool:write'],
-        },
-        protectedHeader: { alg: 'RS256' },
-        key: {} as any,
-      } as any);
-
-      const authInfo = await strategy.verify('token');
-      expect(authInfo.scopes).toEqual(['tool:read', 'tool:write']);
-    });
-
-    it('should handle optional subject and tenantId', async () => {
-      mockJwtVerify.mockResolvedValue({
-        payload: {
-          client_id: 'test-client',
-          scope: 'read',
-        },
-        protectedHeader: { alg: 'RS256' },
-        key: {} as any,
-      } as any);
-
-      const authInfo = await strategy.verify('token');
-
-      expect(authInfo.subject).toBeUndefined();
-      expect(authInfo.tenantId).toBeUndefined();
-    });
-
-    it('should populate expiresAt from exp claim', async () => {
-      const futureExp = Math.floor(Date.now() / 1000) + 3600;
-      mockJwtVerify.mockResolvedValue({
-        payload: {
-          client_id: 'test-client',
-          scope: 'read',
-          exp: futureExp,
-        },
-        protectedHeader: { alg: 'RS256' },
-        key: {} as any,
-      } as any);
-
-      const authInfo = await strategy.verify('token');
-      expect(authInfo.expiresAt).toBe(futureExp);
-    });
-
     it('should validate resource indicator when configured', async () => {
       mockConfig.mcpServerResourceIdentifier = 'https://mcp.example.com';
 
@@ -379,48 +282,6 @@ describe('OAuth Strategy', () => {
       const authInfo = await strategy.verify('token');
 
       expect(authInfo.clientId).toBe('test-client');
-    });
-
-    it('should throw Unauthorized for missing client_id claim', async () => {
-      mockJwtVerify.mockResolvedValue({
-        payload: {
-          scope: 'read write',
-        },
-        protectedHeader: { alg: 'RS256' },
-        key: {} as any,
-      } as any);
-
-      await expect(strategy.verify('token')).rejects.toThrow(McpError);
-      await expect(strategy.verify('token')).rejects.toThrow(/missing 'cid' or 'client_id'/);
-    });
-
-    it('should throw Unauthorized for missing scope claim', async () => {
-      mockJwtVerify.mockResolvedValue({
-        payload: {
-          client_id: 'test-client',
-        },
-        protectedHeader: { alg: 'RS256' },
-        key: {} as any,
-      } as any);
-
-      await expect(strategy.verify('token')).rejects.toThrow(McpError);
-      await expect(strategy.verify('token')).rejects.toThrow(
-        /must contain valid, non-empty scopes/,
-      );
-    });
-
-    it('should reject empty scope string', async () => {
-      mockJwtVerify.mockResolvedValue({
-        payload: {
-          client_id: 'test-client',
-          scope: '',
-        },
-        protectedHeader: { alg: 'RS256' },
-        key: {} as any,
-      } as any);
-
-      await expect(strategy.verify('token')).rejects.toThrow(McpError);
-      await expect(strategy.verify('token')).rejects.toThrow(/non-empty scopes/);
     });
 
     it('should throw Unauthorized for expired token', async () => {

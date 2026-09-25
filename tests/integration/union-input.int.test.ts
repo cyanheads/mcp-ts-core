@@ -162,6 +162,14 @@ describe('discriminated-union tool input (#142)', () => {
       });
 
       expect(result.isError).toBe(true);
+      // Validated against the `byId` branch alone: its own field is missing and
+      // the other branch's field is an unknown key there.
+      expect(
+        (result.structuredContent as { error: { data?: Record<string, unknown> } }).error.data,
+      ).toMatchObject({
+        reason: 'invalid_arguments',
+        recovery: { hint: 'Provide id. Unknown key name.' },
+      });
     });
 
     it('rejects an unrecognized key by name inside a branch', async () => {
@@ -193,6 +201,12 @@ describe('discriminated-union tool input (#142)', () => {
       });
 
       expect(result.isError).toBe(true);
+      expect(
+        (result.structuredContent as { error: { data?: Record<string, unknown> } }).error.data,
+      ).toMatchObject({
+        reason: 'invalid_arguments',
+        recovery: { hint: "Invalid discriminator value. Expected 'byId' | 'byName'" },
+      });
     });
   });
 

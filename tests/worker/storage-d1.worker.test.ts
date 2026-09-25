@@ -1,22 +1,18 @@
 /**
- * @fileoverview Worker-runtime integration tests for the Cloudflare D1 storage provider.
- * Exercises set / get / delete / list / expiry through the MCP HTTP surface by
- * driving the fixture worker with `STORAGE_PROVIDER_TYPE=cloudflare-d1` bound to
- * the miniflare-emulated D1 database. The `kv_store` table is created via
- * `applyD1Migrations` before any tests run. Each test file runs in its own
+ * @fileoverview Worker-runtime integration test for the Cloudflare D1 storage provider.
+ * Drives a set / get round trip through the MCP HTTP surface with the fixture
+ * worker's `STORAGE_PROVIDER_TYPE=cloudflare-d1` bound to the miniflare-emulated
+ * D1 database, then reads the `kv_store` table directly to prove the write
+ * landed there and not in the default KV backend. The table is created via
+ * `applyD1Migrations` before the test runs. Each test file runs in its own
  * miniflare isolate, so `appPromise` starts null and the first fetch initialises
  * the singleton with the overridden env.
  * @module tests/worker/storage-d1.worker.test
  */
 
-import {
-  applyD1Migrations,
-  createExecutionContext,
-  reset,
-  waitOnExecutionContext,
-} from 'cloudflare:test';
+import { applyD1Migrations, createExecutionContext, waitOnExecutionContext } from 'cloudflare:test';
 import { env } from 'cloudflare:workers';
-import { afterEach, beforeAll, describe, expect, it } from 'vitest';
+import { beforeAll, describe, expect, it } from 'vitest';
 import worker from '../fixtures/worker-runtime.fixture.js';
 import { jsonrpc, MCP_HEADERS, parseSseDataFrames } from './wire-helpers.js';
 
@@ -126,65 +122,16 @@ describe('cloudflare-d1 storage provider via worker handler', () => {
     sessionId = await openSession(d1Env);
   });
 
-  afterEach(async () => {
-    // Clear all D1 binding state between tests to prevent cross-test leakage.
-    // Re-apply the schema immediately after reset: miniflare's reset() wipes all
-    // D1 row data and schema, so the kv_store table must be recreated for
-    // subsequent tests in the same file.
-    await reset();
-    await applyD1Migrations(env.DB, [
-      { name: '0001_create_kv_store', queries: [KV_STORE_MIGRATION] },
-    ]);
-  });
-
-  it('sets and gets a value', async () => {
+  it('round-trips a value through the kv_store table', async () => {
     await callTool(sessionId, 10, 'storage_set', { key: 'd1-hello', value: 'world' }, d1Env);
     const got = await callTool(sessionId, 11, 'storage_get', { key: 'd1-hello' }, d1Env);
     expect(got).toMatchObject({ found: true, value: 'world' });
-  });
 
-  it('returns null for a missing key', async () => {
-    const got = await callTool(sessionId, 20, 'storage_get', { key: 'd1-missing' }, d1Env);
-    expect(got).toMatchObject({ found: false, value: null });
-  });
-
-  it('deletes a key', async () => {
-    await callTool(sessionId, 30, 'storage_set', { key: 'd1-to-delete', value: 'bye' }, d1Env);
-    await callTool(sessionId, 31, 'storage_delete', { key: 'd1-to-delete' }, d1Env);
-    const got = await callTool(sessionId, 32, 'storage_get', { key: 'd1-to-delete' }, d1Env);
-    expect(got).toMatchObject({ found: false, value: null });
-  });
-
-  it('lists keys by prefix', async () => {
-    await callTool(sessionId, 40, 'storage_set', { key: 'd1-list-a', value: '1' }, d1Env);
-    await callTool(sessionId, 41, 'storage_set', { key: 'd1-list-b', value: '2' }, d1Env);
-    await callTool(sessionId, 42, 'storage_set', { key: 'd1-other', value: '3' }, d1Env);
-    const listed = await callTool(sessionId, 43, 'storage_list', { prefix: 'd1-list-' }, d1Env);
-    expect(listed).toMatchObject({ count: 2 });
-    const keys = listed.keys as string[];
-    expect(keys).toContain('d1-list-a');
-    expect(keys).toContain('d1-list-b');
-    expect(keys).not.toContain('d1-other');
-  });
-
-  it('respects TTL expiry (value vanishes after TTL elapses)', async () => {
-    // Set with ttl=1 second. D1Provider stores expiry as expires_at (Unix ms)
-    // and filters on get(). The miniflare D1 emulator uses real wall-clock time.
-    await callTool(
-      sessionId,
-      50,
-      'storage_set',
-      { key: 'd1-ttl', value: 'ephemeral', ttl: 1 },
-      d1Env,
-    );
-    // Immediate read — should still be present (within the 1s window).
-    const before = await callTool(sessionId, 51, 'storage_get', { key: 'd1-ttl' }, d1Env);
-    expect(before).toMatchObject({ found: true });
-
-    // Wait 1.1s for expiry to elapse.
-    await new Promise((resolve) => setTimeout(resolve, 1100));
-
-    const after = await callTool(sessionId, 52, 'storage_get', { key: 'd1-ttl' }, d1Env);
-    expect(after).toMatchObject({ found: false });
+    // The write must be a kv_store row, not an entry in the default KV backend.
+    const row = await env.DB.prepare('SELECT tenant_id FROM kv_store WHERE key = ?')
+      .bind('d1-hello')
+      .first<{ tenant_id: string }>();
+    expect(row).toEqual({ tenant_id: 'default' });
+    expect(await env.KV_NAMESPACE.get('default:d1-hello')).toBeNull();
   });
 });

@@ -3,7 +3,8 @@
  * @module tests/storage/core/storageValidation.test
  */
 
-import { describe, expect, it } from 'vitest';
+import { createHmac } from 'node:crypto';
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import {
   decodeCursor,
   encodeCursor,
@@ -31,40 +32,30 @@ describe('Storage Validation', () => {
       expect(() => validateTenantId('a1b2c3', context)).not.toThrow();
     });
 
-    it('should reject empty tenant ID', () => {
-      expect(() => validateTenantId('', context)).toThrow(McpError);
-      expect(() => validateTenantId('', context)).toThrow(/Tenant ID cannot be an empty string/);
-    });
-
-    it('should reject tenant ID with path traversal', () => {
-      expect(() => validateTenantId('../malicious', context)).toThrow(McpError);
-      expect(() => validateTenantId('..\\malicious', context)).toThrow(McpError);
-    });
-
-    it('should reject tenant ID with consecutive dots', () => {
-      expect(() => validateTenantId('tenant..id', context)).toThrow(McpError);
-    });
-
-    it('should reject tenant ID that is too long', () => {
-      const longId = 'a'.repeat(129);
-      expect(() => validateTenantId(longId, context)).toThrow(McpError);
-    });
-
-    it('should reject tenant ID with invalid characters', () => {
-      expect(() => validateTenantId('tenant@id', context)).toThrow(McpError);
-      expect(() => validateTenantId('tenant id', context)).toThrow(McpError);
-      expect(() => validateTenantId('tenant/id', context)).toThrow(McpError);
-    });
-
-    it('should throw McpError with InvalidParams code', () => {
-      expect(() => validateTenantId('', context)).toThrow(McpError);
-
-      try {
-        validateTenantId('', context);
-      } catch (error) {
-        expect(error).toBeInstanceOf(McpError);
-        expect((error as McpError).code).toBe(JsonRpcErrorCode.InvalidParams);
-      }
+    it.each<[string, string, string]>([
+      ['an empty string', '', 'cannot be an empty string'],
+      ['whitespace only', '   ', 'cannot be an empty string'],
+      ['more than 128 characters', 'a'.repeat(129), 'exceeds maximum length'],
+      ['../ path traversal', '../malicious', 'invalid characters'],
+      ['..\\ path traversal', '..\\malicious', 'invalid characters'],
+      ['consecutive dots', 'tenant..id', 'consecutive dots'],
+      ['a forward slash', 'tenant/id', 'invalid characters'],
+      ['a backslash', 'tenant\\id', 'invalid characters'],
+      ['a space', 'tenant id', 'invalid characters'],
+      ['"!"', 'tenant!id', 'invalid characters'],
+      ['"@"', 'tenant@id', 'invalid characters'],
+      ['"#"', 'tenant#id', 'invalid characters'],
+      ['"$"', 'tenant$id', 'invalid characters'],
+      ['"%"', 'tenant%id', 'invalid characters'],
+      ['a leading hyphen', '-tenant123', 'invalid characters'],
+      ['a trailing dot', 'tenant123.', 'invalid characters'],
+    ])('rejects a tenant ID with %s as InvalidParams', (_label, tenantId, message) => {
+      expect(() => validateTenantId(tenantId, context)).toThrow(
+        expect.objectContaining({
+          code: JsonRpcErrorCode.InvalidParams,
+          message: expect.stringContaining(message),
+        }),
+      );
     });
   });
 
@@ -120,10 +111,6 @@ describe('Storage Validation', () => {
       expect(() => validatePrefix('', context)).not.toThrow();
       expect(() => validatePrefix('namespace/', context)).not.toThrow();
       expect(() => validatePrefix('data-prefix', context)).not.toThrow();
-    });
-
-    it('should accept empty prefix', () => {
-      expect(() => validatePrefix('', context)).not.toThrow();
     });
 
     it('should reject prefix that is not a string', () => {
@@ -277,13 +264,6 @@ describe('Storage Validation', () => {
   });
 
   describe('encodeCursor', () => {
-    it('should encode cursor with lastKey and tenantId', () => {
-      const cursor = encodeCursor('last-key', 'tenant-123');
-      expect(cursor).toBeDefined();
-      expect(typeof cursor).toBe('string');
-      expect(cursor.length).toBeGreaterThan(0);
-    });
-
     it('should produce different cursors for different inputs', () => {
       const cursor1 = encodeCursor('key1', 'tenant1');
       const cursor2 = encodeCursor('key2', 'tenant1');
@@ -302,101 +282,16 @@ describe('Storage Validation', () => {
 
       expect(decoded).toBe(lastKey);
     });
-
-    it('should handle keys with special characters', () => {
-      const specialKeys = [
-        'key/with/slashes',
-        'key-with-hyphens',
-        'key_with_underscores',
-        'key.with.dots',
-      ];
-
-      for (const key of specialKeys) {
-        const cursor = encodeCursor(key, 'tenant');
-        const decoded = decodeCursor(cursor, 'tenant', context);
-        expect(decoded).toBe(key);
-      }
-    });
-
-    it('should handle very long keys', () => {
-      const longKey = 'k'.repeat(1000);
-      const cursor = encodeCursor(longKey, 'tenant');
-      const decoded = decodeCursor(cursor, 'tenant', context);
-      expect(decoded).toBe(longKey);
-    });
-
-    it('should handle empty keys', () => {
-      const cursor = encodeCursor('', 'tenant');
-      const decoded = decodeCursor(cursor, 'tenant', context);
-      expect(decoded).toBe('');
-    });
   });
 
   describe('decodeCursor', () => {
-    it('should decode valid cursor', () => {
-      const cursor = encodeCursor('my-key', 'my-tenant');
-      const decoded = decodeCursor(cursor, 'my-tenant', context);
-
-      expect(decoded).toBe('my-key');
-    });
-
-    it('should reject cursor for different tenant', () => {
-      const cursor = encodeCursor('key', 'tenant1');
-
-      expect(() => decodeCursor(cursor, 'tenant2', context)).toThrow(McpError);
-    });
-
-    it('should reject invalid cursor format', () => {
-      expect(() => decodeCursor('invalid-cursor', 'tenant', context)).toThrow(McpError);
-    });
-
-    it('should reject malformed JSON in cursor', () => {
-      // Create a base64-encoded invalid JSON
-      const invalidJson = Buffer.from('{invalid json}').toString('base64');
-      expect(() => decodeCursor(invalidJson, 'tenant', context)).toThrow(McpError);
-    });
-
-    it('should reject cursor with missing fields', () => {
-      // Cursor missing 'k' field
-      const missingK = Buffer.from(JSON.stringify({ t: 'tenant' })).toString('base64');
-      expect(() => decodeCursor(missingK, 'tenant', context)).toThrow(McpError);
-
-      // Cursor missing 't' field
-      const missingT = Buffer.from(JSON.stringify({ k: 'key' })).toString('base64');
-      expect(() => decodeCursor(missingT, 'tenant', context)).toThrow(McpError);
-
-      // Cursor with neither field
-      const missingBoth = Buffer.from(JSON.stringify({})).toString('base64');
-      expect(() => decodeCursor(missingBoth, 'tenant', context)).toThrow(McpError);
-    });
-
-    it('should reject cursor that is not a valid object', () => {
-      // Cursor that decodes to a string instead of an object
-      const notObject = Buffer.from(JSON.stringify('string')).toString('base64');
-      expect(() => decodeCursor(notObject, 'tenant', context)).toThrow(McpError);
-
-      // Cursor that decodes to null
-      const nullCursor = Buffer.from(JSON.stringify(null)).toString('base64');
-      expect(() => decodeCursor(nullCursor, 'tenant', context)).toThrow(McpError);
-
-      // Cursor that decodes to a number
-      const numberCursor = Buffer.from(JSON.stringify(123)).toString('base64');
-      expect(() => decodeCursor(numberCursor, 'tenant', context)).toThrow(McpError);
-    });
-
-    it('should reject cursor that is not valid base64', () => {
-      expect(() => decodeCursor('not-base64!', 'tenant', context)).toThrow(McpError);
-    });
-
-    it('should throw McpError with InvalidParams code for invalid cursor', () => {
-      expect(() => decodeCursor('invalid', 'tenant', context)).toThrow(McpError);
-
-      try {
-        decodeCursor('invalid', 'tenant', context);
-      } catch (error) {
-        expect(error).toBeInstanceOf(McpError);
-        expect((error as McpError).code).toBe(JsonRpcErrorCode.InvalidParams);
-      }
+    it('rejects a cursor with no signature separator as InvalidParams', () => {
+      expect(() => decodeCursor('invalid-cursor', 'tenant', context)).toThrow(
+        expect.objectContaining({
+          code: JsonRpcErrorCode.InvalidParams,
+          message: expect.stringContaining('missing signature'),
+        }),
+      );
     });
 
     it('should throw McpError with InvalidParams code for tenant mismatch', () => {
@@ -429,53 +324,75 @@ describe('Storage Validation', () => {
         expect((error as McpError).code).toBe(JsonRpcErrorCode.InvalidParams);
       }
     });
-
-    it('should not leak the internal error stack into McpError.data (issue #71)', () => {
-      // Trigger the catch-all branch — JSON.parse throws on a base64-decoded
-      // payload that isn't valid JSON. The pre-fix code would put the parser's
-      // stack on `data.rawError`, which the framework forwards to clients via
-      // structuredContent.error.data (tools) / JSON-RPC error.data (resources).
-      const malformedPayload = stringToBase64('not-json{');
-      const malformedCursor = encodeCursor('seed', 'tenant');
-      // Splice the bad payload before the signature dot to hit the JSON.parse path
-      const dotIndex = malformedCursor.lastIndexOf('.');
-      const forged = `${malformedPayload}${malformedCursor.substring(dotIndex)}`;
-
-      try {
-        decodeCursor(forged, 'tenant', context);
-        throw new Error('decodeCursor should have thrown');
-      } catch (error) {
-        expect(error).toBeInstanceOf(McpError);
-        const data = (error as McpError).data ?? {};
-        expect(data).not.toHaveProperty('rawError');
-        // Sanity — public surface stays minimal: operation + request context only
-        expect(Object.keys(data)).toEqual(expect.arrayContaining(['operation']));
-      }
-    });
   });
 
-  describe('Function Export Verification', () => {
-    it('should export all validation functions', () => {
-      expect(validateTenantId).toBeDefined();
-      expect(typeof validateTenantId).toBe('function');
+  /**
+   * A correctly signed cursor is the only way past the signature check, so the
+   * payload branches (JSON parse, shape check, catch-all) are reached by pinning
+   * the per-process HMAC key and signing malformed payloads with it.
+   */
+  describe('decodeCursor payload validation (pinned HMAC key)', () => {
+    const hmacKey = Buffer.alloc(32, 7);
+    let pinnedDecode: typeof decodeCursor;
 
-      expect(validateKey).toBeDefined();
-      expect(typeof validateKey).toBe('function');
+    /** Signs a raw payload exactly as `signCursor` does, under the pinned key. */
+    const signed = (payloadText: string): string => {
+      const payload = stringToBase64(payloadText);
+      const mac = createHmac('sha256', hmacKey).update(payload).digest().subarray(0, 16);
+      return `${payload}.${stringToBase64(mac.toString('binary'))}`;
+    };
 
-      expect(validatePrefix).toBeDefined();
-      expect(typeof validatePrefix).toBe('function');
+    beforeAll(async () => {
+      vi.resetModules();
+      const actual = await vi.importActual<typeof import('node:crypto')>('node:crypto');
+      vi.doMock('node:crypto', () => ({ ...actual, randomBytes: () => hmacKey }));
+      ({ decodeCursor: pinnedDecode } = await import('@/storage/core/storageValidation.js'));
+    });
 
-      expect(validateStorageOptions).toBeDefined();
-      expect(typeof validateStorageOptions).toBe('function');
+    afterAll(() => {
+      vi.doUnmock('node:crypto');
+      vi.resetModules();
+    });
 
-      expect(validateListOptions).toBeDefined();
-      expect(typeof validateListOptions).toBe('function');
+    it('accepts a well-formed payload signed with the pinned key', () => {
+      expect(
+        pinnedDecode(signed(JSON.stringify({ k: 'key-1', t: 'tenant' })), 'tenant', context),
+      ).toBe('key-1');
+    });
 
-      expect(encodeCursor).toBeDefined();
-      expect(typeof encodeCursor).toBe('function');
+    it.each([
+      ['missing k', { t: 'tenant' }],
+      ['missing t', { k: 'key' }],
+      ['an empty object', {}],
+      ['a string', 'string'],
+      ['null', null],
+      ['a number', 123],
+    ])('rejects a signed payload that decodes to %s as an invalid shape', (_label, value) => {
+      expect(() => pinnedDecode(signed(JSON.stringify(value)), 'tenant', context)).toThrow(
+        expect.objectContaining({
+          code: JsonRpcErrorCode.InvalidParams,
+          message: 'Invalid cursor format.',
+        }),
+      );
+    });
 
-      expect(decodeCursor).toBeDefined();
-      expect(typeof decodeCursor).toBe('function');
+    it('rejects a signed non-JSON payload without leaking the parser error into data (issue #71)', () => {
+      // The catch-all branch: JSON.parse throws on the verified payload. The
+      // pre-fix code put the parser's stack on `data.rawError`, which the
+      // framework forwards to clients via structuredContent.error.data (tools)
+      // and JSON-RPC error.data (resources).
+      let thrown: unknown;
+      try {
+        pinnedDecode(signed('not-json{'), 'tenant', context);
+      } catch (error) {
+        thrown = error;
+      }
+
+      expect(thrown).toMatchObject({
+        code: JsonRpcErrorCode.InvalidParams,
+        message: expect.stringContaining('Failed to decode cursor'),
+      });
+      expect((thrown as McpError).data).toEqual({ ...context, operation: 'decodeCursor' });
     });
   });
 });

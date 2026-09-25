@@ -267,7 +267,10 @@ describe('field-test helper · mcp_call (#391)', () => {
   });
 
   it('still rejects a missing url or method', async () => {
-    expect((await run(`mcp_call '' '' tools/list`)).code).not.toBe(0);
-    expect((await run(`mcp_call http://127.0.0.1:1/mcp '' ''`)).code).not.toBe(0);
+    for (const args of [`'' '' tools/list`, `http://127.0.0.1:1/mcp '' ''`]) {
+      const { code, stderr } = await run(`mcp_call ${args}`);
+      expect(code).not.toBe(0);
+      expect(stderr).toContain('usage: mcp_call');
+    }
   });
 });

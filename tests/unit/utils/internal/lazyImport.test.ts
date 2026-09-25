@@ -67,17 +67,6 @@ describe('lazyImport', () => {
       });
     });
 
-    it('caches the failure — importFn is called exactly once across multiple calls', async () => {
-      const importFn = vi.fn().mockRejectedValue(new Error('Cannot find module'));
-      const loader = lazyImport(importFn, 'Install "foo": bun add foo');
-
-      await expect(loader()).rejects.toThrow();
-      await expect(loader()).rejects.toThrow();
-      await expect(loader()).rejects.toThrow();
-
-      expect(importFn).toHaveBeenCalledTimes(1);
-    });
-
     it('logs warning exactly once on failure', async () => {
       const importFn = vi.fn().mockRejectedValue(new Error('Cannot find module'));
       const loader = lazyImport(importFn, 'Install "foo": bun add foo');

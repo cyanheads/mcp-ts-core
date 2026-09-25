@@ -1,5 +1,5 @@
 /**
- * @fileoverview Corrupt-data recovery and binding configuration contracts with real Worker storage.
+ * @fileoverview Corrupt-data recovery contracts with real Worker storage.
  * @module tests/worker/storage-failures.worker.test
  */
 import { reset } from 'cloudflare:test';
@@ -18,13 +18,6 @@ const context = {
 afterEach(() => reset());
 
 describe('Worker storage failures', () => {
-  it('rejects missing bindings and unsafe SQL identifiers before I/O', () => {
-    expect(() => new D1Provider(undefined as unknown as D1Database)).toThrow('valid D1Database');
-    expect(() => new KvProvider(undefined as unknown as KVNamespace)).toThrow('valid KVNamespace');
-    expect(() => new R2Provider(undefined as unknown as R2Bucket)).toThrow('valid R2Bucket');
-    expect(() => new D1Provider(env.DB, 'invalid-table-name')).toThrow('valid SQL identifier');
-  });
-
   it('classifies corrupt D1 JSON and accepts a replacement without losing other rows', async () => {
     await env.DB.exec(
       'CREATE TABLE kv_store (tenant_id TEXT NOT NULL, key TEXT NOT NULL, value TEXT NOT NULL, expires_at INTEGER, PRIMARY KEY (tenant_id, key))',

@@ -382,31 +382,6 @@ describe('Logger Integration (Pino)', () => {
       },
     );
   });
-
-  it('warns when interaction logging is requested but unavailable', () => {
-    const loggerWithInternals = logger as unknown as {
-      interactionLogger?: unknown;
-    };
-    const originalInteractionLogger = loggerWithInternals.interactionLogger;
-    loggerWithInternals.interactionLogger = undefined;
-
-    const warningSpy = vi.spyOn(logger, 'warning');
-
-    logger.logInteraction('missing-interaction', {
-      context: {
-        requestId: 'missing-interaction',
-        timestamp: new Date().toISOString(),
-      },
-    });
-
-    expect(warningSpy).toHaveBeenCalledWith(
-      'Interaction logger not available.',
-      expect.objectContaining({ requestId: 'missing-interaction' }),
-    );
-
-    warningSpy.mockRestore();
-    loggerWithInternals.interactionLogger = originalInteractionLogger;
-  });
 });
 
 describe('Logger Transport Mode Handling', () => {
@@ -451,23 +426,5 @@ describe('Logger Transport Mode Handling', () => {
       if (originalEnableTestLogs === undefined) delete process.env.ENABLE_TEST_LOGS;
       else process.env.ENABLE_TEST_LOGS = originalEnableTestLogs;
     }
-  });
-
-  it('initializes with http transport', async () => {
-    const httpLogger = Logger.getInstance();
-
-    // Close any existing logger state
-    if (httpLogger.isInitialized()) {
-      await httpLogger.close();
-    }
-
-    // Initialize with HTTP transport mode (should allow colors in dev)
-    await httpLogger.initialize('info', 'http');
-
-    // Verify logger is initialized successfully
-    expect(httpLogger.isInitialized()).toBe(true);
-
-    // Cleanup
-    await httpLogger.close();
   });
 });

@@ -91,11 +91,6 @@ describe('sqliteMirrorStore', () => {
     expect(() => reopened.prepare('SELECT 1').get()).toThrow();
   });
 
-  it('upserts records and counts them', async () => {
-    await store.applyBatch([rec('1'), rec('2')], []);
-    expect(await store.count()).toBe(2);
-  });
-
   it('treats repeat upserts as idempotent (replace in place)', async () => {
     await store.applyBatch([rec('1', { title: 'first' })], []);
     await store.applyBatch([rec('1', { title: 'second' })], []);

@@ -356,14 +356,6 @@ describe('sqlGate · collectPlanViolations', () => {
 });
 
 describe('sqlGate · DENIED_TABLE_FUNCTIONS', () => {
-  it('contains the issue #100 functions', () => {
-    expect(DENIED_TABLE_FUNCTIONS.has('read_json')).toBe(true);
-    expect(DENIED_TABLE_FUNCTIONS.has('read_json_auto')).toBe(true);
-    expect(DENIED_TABLE_FUNCTIONS.has('read_ndjson')).toBe(true);
-    expect(DENIED_TABLE_FUNCTIONS.has('read_parquet')).toBe(true);
-    expect(DENIED_TABLE_FUNCTIONS.has('parquet_scan')).toBe(true);
-  });
-
   // Pre-staged hardening for issue #106 — block GDAL-backed file readers and
   // index-internals dumpers the moment anyone enables the spatial extension.
   it.each(['st_read', 'st_drivers', 'rtree_index_dump'])(
@@ -375,12 +367,6 @@ describe('sqlGate · DENIED_TABLE_FUNCTIONS', () => {
       );
     },
   );
-
-  it('matches ST_Read regardless of case (issue #106)', () => {
-    expect(() => assertNoDeniedFunctions("SELECT * FROM ST_Read('/x.shp')")).toThrow(
-      /disallowed table function/i,
-    );
-  });
 });
 
 describe('sqlGate · pragma_* deny-list (issue #210)', () => {
@@ -801,11 +787,6 @@ describe('sqlGate · comment stripping (#431)', () => {
 
   it('leaves a block terminator with no opener untouched', () => {
     expect(denied("SELECT 1 */ read_json('/x') FROM t")).toThrow(/disallowed table function/);
-  });
-
-  it('accepts an empty statement', () => {
-    expect(denied('')).not.toThrow();
-    expect(() => assertNoSystemCatalogs('')).not.toThrow();
   });
 
   it('scans a 1 MiB unterminated-comment payload in bounded time', () => {

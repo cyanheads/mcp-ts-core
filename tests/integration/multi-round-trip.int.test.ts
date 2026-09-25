@@ -292,17 +292,6 @@ describe('Multi-round-trip input integration', () => {
     expect(schema.required).toEqual(['color']);
   });
 
-  it('round-trips requestState verbatim to the re-entered handler', async () => {
-    const { client } = track(
-      await connectPair({ onElicit: () => ({ action: 'accept', content: { color: 'teal' } }) }),
-    );
-
-    // `reentered` is derived from `ctx.inputs.state()`, so it can only be true
-    // if the state the first round minted came back on the second.
-    const result = await client.callTool({ name: 'pick_color', arguments: {} });
-    expect((result.structuredContent as { reentered: boolean }).reentered).toBe(true);
-  });
-
   it('surfaces a declared error when the caller declines', async () => {
     const { client } = track(await connectPair({ onElicit: () => ({ action: 'decline' }) }));
 

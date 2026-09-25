@@ -106,26 +106,15 @@ describe('fetchWithTimeout', () => {
     );
   });
 
-  describe.each([
-    [400, JsonRpcErrorCode.InvalidParams],
-    [401, JsonRpcErrorCode.Unauthorized],
-    [403, JsonRpcErrorCode.Forbidden],
+  // The full status table is pinned in httpError.test.ts; these rows prove the wiring.
+  it.each([
     [404, JsonRpcErrorCode.NotFound],
-    [408, JsonRpcErrorCode.Timeout],
-    [409, JsonRpcErrorCode.Conflict],
-    [422, JsonRpcErrorCode.ValidationError],
-    [429, JsonRpcErrorCode.RateLimited],
-    [500, JsonRpcErrorCode.ServiceUnavailable],
-    [501, JsonRpcErrorCode.ServiceUnavailable],
-    [502, JsonRpcErrorCode.ServiceUnavailable],
-    [504, JsonRpcErrorCode.Timeout],
-  ])('status %d maps to the right error code', (status, expectedCode) => {
-    it(`throws with code ${expectedCode}`, async () => {
-      vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response('err', { status }));
-      await expect(fetchWithTimeout('https://example.com', 1000, context)).rejects.toMatchObject({
-        code: expectedCode,
-        data: { statusCode: status },
-      });
+    [410, JsonRpcErrorCode.InvalidRequest],
+  ])('maps status %d through httpStatusToErrorCode to code %d', async (status, expectedCode) => {
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response('err', { status }));
+    await expect(fetchWithTimeout('https://example.com', 1000, context)).rejects.toMatchObject({
+      code: expectedCode,
+      data: { statusCode: status },
     });
   });
 
@@ -150,22 +139,6 @@ describe('fetchWithTimeout', () => {
 
       expect(error.code).toBe(JsonRpcErrorCode.ServiceUnavailable);
       expect(error.data?.retryable).toBe(false);
-    });
-  });
-
-  it('falls through to InvalidRequest for unmapped 4xx codes', async () => {
-    vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response('gone', { status: 410 }));
-    await expect(fetchWithTimeout('https://example.com', 1000, context)).rejects.toMatchObject({
-      code: JsonRpcErrorCode.InvalidRequest,
-      data: { statusCode: 410 },
-    });
-  });
-
-  it('falls through to ServiceUnavailable for unmapped 5xx codes', async () => {
-    vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response('weird', { status: 599 }));
-    await expect(fetchWithTimeout('https://example.com', 1000, context)).rejects.toMatchObject({
-      code: JsonRpcErrorCode.ServiceUnavailable,
-      data: { statusCode: 599 },
     });
   });
 

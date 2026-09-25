@@ -21,7 +21,7 @@ import type {
   RegisterTableOptions,
   RegisterTableResult,
 } from '@/services/canvas/types.js';
-import { McpError } from '@/types-global/errors.js';
+import { JsonRpcErrorCode, McpError } from '@/types-global/errors.js';
 import type { RequestContext } from '@/utils/internal/requestContext.js';
 
 type Row = Record<string, unknown>;
@@ -149,6 +149,7 @@ describe('spillover · fit path', () => {
       canvas,
       source: [{ a: 1 }, { a: 2 }, { a: 3 }],
       previewChars: 1_000,
+      ttlMs: 30_000, // no effect on the fit path — nothing is registered
     });
     expect(result.spilled).toBe(false);
     expect(result.previewRows).toEqual([{ a: 1 }, { a: 2 }, { a: 3 }]);
@@ -295,7 +296,7 @@ describe('spillover · signal.abort()', () => {
     }
     await expect(
       spillover({ canvas, source: gen(), previewChars: 1_000_000, signal: ctrl.signal }),
-    ).rejects.toThrow();
+    ).rejects.toMatchObject({ name: 'AbortError' });
     expect(harness.provider.registerTable).not.toHaveBeenCalled();
     await shutdown();
   });
@@ -322,7 +323,7 @@ describe('spillover · signal.abort()', () => {
     ctrl.abort();
     await expect(
       spillover({ canvas, source: [{ a: 1 }], previewChars: 100, signal: ctrl.signal }),
-    ).rejects.toThrow();
+    ).rejects.toMatchObject({ name: 'AbortError' });
     expect(harness.provider.registerTable).not.toHaveBeenCalled();
     await shutdown();
   });
@@ -416,7 +417,7 @@ describe('spillover · tableName', () => {
     }
     await expect(
       spillover({ canvas, source: gen(), previewChars: 100, tableName: '1bad-name' }),
-    ).rejects.toThrow();
+    ).rejects.toThrow(/table name "1bad-name" is invalid/);
     expect(pulled).toBe(0);
     expect(harness.provider.registerTable).not.toHaveBeenCalled();
     await shutdown();
@@ -448,19 +449,6 @@ describe('spillover · ttlMs', () => {
     expect(callOptions?.ttlMs).toBeUndefined();
     await shutdown();
   });
-
-  it('does not call registerTable when source fits (ttlMs has no effect on fit path)', async () => {
-    const { canvas, harness, shutdown } = await freshCanvas();
-    const result = await spillover({
-      canvas,
-      source: [{ a: 1 }],
-      previewChars: 10_000,
-      ttlMs: 30_000,
-    });
-    expect(result.spilled).toBe(false);
-    expect(harness.provider.registerTable).not.toHaveBeenCalled();
-    await shutdown();
-  });
 });
 
 // ---------------------------------------------------------------------
@@ -469,27 +457,20 @@ describe('spillover · ttlMs', () => {
 
 describe('spillover · previewChars validation', () => {
   it.each([0, -1, 1.5, Number.NaN, Number.POSITIVE_INFINITY])(
-    'rejects previewChars=%s',
+    'rejects previewChars=%s with an McpError validation error',
     async (value) => {
       const { canvas, shutdown } = await freshCanvas();
-      await expect(spillover({ canvas, source: [{ a: 1 }], previewChars: value })).rejects.toThrow(
-        /previewChars/,
+      const caught = await spillover({ canvas, source: [{ a: 1 }], previewChars: value }).catch(
+        (err: unknown) => err,
       );
+      expect(caught).toBeInstanceOf(McpError);
+      expect(caught).toMatchObject({
+        code: JsonRpcErrorCode.ValidationError,
+        message: expect.stringMatching(/previewChars/),
+      });
       await shutdown();
     },
   );
-
-  it('throws an McpError validation error for invalid previewChars', async () => {
-    const { canvas, shutdown } = await freshCanvas();
-    let caught: unknown;
-    try {
-      await spillover({ canvas, source: [{ a: 1 }], previewChars: 0 });
-    } catch (err) {
-      caught = err;
-    }
-    expect(caught).toBeInstanceOf(McpError);
-    await shutdown();
-  });
 });
 
 // ---------------------------------------------------------------------
@@ -547,7 +528,7 @@ describe('spillover · abort during the spill phase', () => {
         signal: ctrl.signal,
         tableName: 'abort_mid_spill',
       }),
-    ).rejects.toThrow();
+    ).rejects.toMatchObject({ name: 'AbortError' });
     // Unlike a preview-phase abort, the overflow was detected early (small
     // previewChars) so registerTable had already begun draining the merged
     // rows before the abort was observed mid-stream.

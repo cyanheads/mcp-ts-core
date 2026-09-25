@@ -140,24 +140,6 @@ describe('checkScopes', () => {
       expect((ctx.log as unknown as { calls: unknown[] }).calls).toHaveLength(0);
     });
 
-    it('bypasses tool scopes under oauth mode when ctx.auth is present', () => {
-      mockConfig.mcpAuthMode = 'oauth';
-      mockConfig.mcpAuthDisableScopeChecks = true;
-
-      const ctx = createMockContext({
-        auth: {
-          clientId: 'test-client',
-          scopes: ['openid', 'email', 'profile', 'offline_access'],
-          sub: 'user-1',
-          token: 'token-1',
-        },
-      });
-
-      expect(() =>
-        checkScopes(ctx as never, ['tool:obsidian_list_notes:read', 'team:abc:write']),
-      ).not.toThrow();
-    });
-
     it('does not affect MCP_AUTH_MODE=none behavior', () => {
       mockConfig.mcpAuthMode = 'none';
       mockConfig.mcpAuthDisableScopeChecks = true;

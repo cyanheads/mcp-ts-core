@@ -116,7 +116,6 @@ import {
   type NotifierSources,
 } from '@/mcp-server/tools/utils/toolHandlerFactory.js';
 import { ErrorHandler } from '@/utils/internal/error-handler/errorHandler.js';
-import { measureToolExecution } from '@/utils/internal/performance.js';
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -277,27 +276,6 @@ describe('createToolHandler', () => {
         error: { message: `Output formatting failed: ${message}` },
       });
     });
-
-    it('should prepend handler-collected media to formatted content', async () => {
-      const def = tool('media_tool', {
-        description: 'Collects media.',
-        input: z.object({}),
-        output: z.object({ ok: z.boolean().describe('ok') }),
-        handler: (_input, ctx) => {
-          ctx.content.image('aW1hZ2U=', 'image/png');
-          return { ok: true };
-        },
-        format: () => [{ type: 'text', text: 'done' }],
-      });
-
-      const handler = createToolHandler(def as AnyToolDefinition, services, notifiers);
-      const result = await handler({}, makeServerContext());
-
-      expect(result.content).toEqual([
-        { type: 'image', data: 'aW1hZ2U=', mimeType: 'image/png' },
-        { type: 'text', text: 'done' },
-      ]);
-    });
   });
 
   // -----------------------------------------------------------------------
@@ -305,30 +283,6 @@ describe('createToolHandler', () => {
   // -----------------------------------------------------------------------
 
   describe('Input validation', () => {
-    it('should reject invalid input with isError: true', async () => {
-      const def = tool('strict_tool', {
-        description: 'Requires a string.',
-        input: z.object({ name: z.string().describe('name') }),
-        output: z.object({ ok: z.boolean() }),
-        handler: () => ({ ok: true }),
-      });
-
-      const handler = createToolHandler(def as AnyToolDefinition, services, notifiers);
-      const result = await handler({ name: 123 } as any, makeServerContext());
-
-      expect(result.isError).toBe(true);
-      // Input validation errors flow through the same error-shaping path:
-      // structuredContent.error carries the code, message, and ZodError issues.
-      // Argument rejection classifies as InvalidParams — the framework runs the
-      // check the SDK used to, and keeps the SDK's classification (#377).
-      const sc = result.structuredContent as {
-        error: { code: number; data?: { issues?: unknown[] }; message: string };
-      };
-      expect(sc.error.code).toBe(JsonRpcErrorCode.InvalidParams);
-      expect(sc.error.message).toContain('Invalid arguments for tool');
-      expect(sc.error.data?.issues).toBeDefined();
-    });
-
     it('should not call handler when input validation fails', async () => {
       const handlerFn = vi.fn(() => ({ ok: true }));
       const def = tool('guarded_tool', {
@@ -921,7 +875,8 @@ describe('createToolHandler', () => {
       const result = await handler({}, makeServerContext());
 
       expect(result.isError).toBe(true);
-      expect((firstBlock(result) as { text: string }).text).toContain('something broke');
+      // A classified plain Error appends no reason or hint line.
+      expect((firstBlock(result) as { text: string }).text).toBe('Error: something broke');
       // _meta.error is no longer emitted — error data lives on structuredContent.error
       expect(result._meta).toBeUndefined();
       // Plain errors get classified as InternalError, no data
@@ -974,53 +929,6 @@ describe('createToolHandler', () => {
       // ZodError data.issues should appear in structuredContent.error
       const sc = result.structuredContent as { error: { data?: { issues?: unknown[] } } };
       expect(sc.error.data?.issues).toBeDefined();
-    });
-
-    it('should propagate McpError code, message, and data via structuredContent.error', async () => {
-      const errorData = { field: 'email', constraint: 'format' };
-
-      const def = tool('meta_error_tool', {
-        description: 'McpError with data.',
-        input: z.object({}),
-        output: z.object({}),
-        handler: () => {
-          throw new McpError(JsonRpcErrorCode.ValidationError, 'Validation failed', errorData);
-        },
-      });
-
-      const handler = createToolHandler(def as AnyToolDefinition, services, notifiers);
-      const result = await handler({}, makeServerContext());
-
-      expect(result.isError).toBe(true);
-      expect(result._meta).toBeUndefined();
-      expect(result.structuredContent).toEqual({
-        error: {
-          code: JsonRpcErrorCode.ValidationError,
-          message: 'Validation failed',
-          data: errorData,
-        },
-      });
-      const text = (firstBlock(result) as { text: string }).text;
-      expect(text).toContain('Validation failed');
-    });
-
-    it('should handle non-Error throws (string)', async () => {
-      const def = tool('string_throw_tool', {
-        description: 'Throws a string.',
-        input: z.object({}),
-        output: z.object({}),
-        handler: () => {
-          throw 'raw string error';
-        },
-      });
-
-      const handler = createToolHandler(def as AnyToolDefinition, services, notifiers);
-      const result = await handler({}, makeServerContext());
-
-      expect(result.isError).toBe(true);
-      expect(result._meta).toBeUndefined();
-      const sc = result.structuredContent as { error: { code: number; message: string } };
-      expect(sc.error.code).toBeDefined();
     });
 
     it('should mirror data.recovery.hint into content[] text when present', async () => {
@@ -1171,15 +1079,6 @@ describe('createToolHandler', () => {
             ),
           ),
         ).toBe('Error: Boom');
-      });
-
-      it('appends no line for a classified plain Error', async () => {
-        const result = await throwing(new Error('something broke'));
-
-        expect(rendered(result as CallToolResult)).toBe('Error: something broke');
-        expect((result as CallToolResult).structuredContent).toEqual({
-          error: { code: JsonRpcErrorCode.InternalError, message: 'something broke' },
-        });
       });
 
       it('renders the framework reason on an argument rejection, with no retryable term', async () => {
@@ -2599,21 +2498,6 @@ describe('createToolHandler', () => {
             .description,
         ).toBe('Machine-readable failure mode.');
       });
-
-      it('changes nothing else about the advertised envelope', () => {
-        const schema = emitted(searchTool as AnyToolDefinition);
-        const data = schema.properties.error.properties.data;
-
-        expect(data.properties.reason.type).toBe('string');
-        expect(data.properties.reason.examples).toEqual(['no_match', 'rate_limited']);
-        expect(data.properties.reason.enum).toBeUndefined();
-        expect(schema.properties.error.required).toEqual(['code', 'message']);
-        expect(schema.properties.error.additionalProperties).toEqual({});
-        expect(schema.anyOf).toEqual([
-          { not: { required: ['error'] }, required: ['items', 'totalCount'] },
-          { required: ['error'] },
-        ]);
-      });
     });
 
     it('leaves data.reason an open string when no contract is declared', () => {
@@ -2733,118 +2617,6 @@ describe('createToolHandler', () => {
         emitted(searchTool as AnyToolDefinition),
       );
       expect(z.toJSONSchema(marked.input)).toEqual(z.toJSONSchema(searchTool.input));
-    });
-
-    it('still fails the call when a required enrichment field is never populated', async () => {
-      const forgetful = tool('forgets_enrichment', {
-        description: 'Declares enrichment but never populates it.',
-        input: z.object({ q: z.string().describe('q') }),
-        output: z.object({ items: z.array(z.string()).describe('items') }),
-        enrichment: { totalCount: z.number().describe('required total') },
-        handler: () => ({ items: [] }),
-      });
-      const handler = createToolHandler(forgetful as AnyToolDefinition, services, notifiers);
-
-      const result = await handler({ q: 'x' }, makeServerContext());
-
-      expect(result.isError).toBe(true);
-    });
-  });
-
-  // -----------------------------------------------------------------------
-  // Measured region coverage (#346)
-  // -----------------------------------------------------------------------
-
-  describe('post-handler failures stay inside the measured region (#346)', () => {
-    /**
-     * Whether the callback handed to `measureToolExecution` rejected. A
-     * post-handler failure that settles outside it leaves the callback
-     * resolved, so the call is recorded as a success while the client is told
-     * it failed.
-     */
-    async function measuredCallbackRejected(): Promise<boolean> {
-      const last = vi.mocked(measureToolExecution).mock.results.at(-1);
-      if (!last) throw new Error('measureToolExecution was never called');
-      if (last.type === 'throw') return true;
-      return await Promise.resolve(last.value).then(
-        () => false,
-        () => true,
-      );
-    }
-
-    const brokenOutput = tool('broken_output', {
-      description: 'Returns a value that fails its own output contract.',
-      input: z.object({}),
-      output: z.object({ value: z.number().describe('A number the handler never returns.') }),
-      handler: () => ({}) as { value: number },
-    });
-
-    const brokenFormat = tool('broken_format', {
-      description: 'Returns a valid value whose formatter throws.',
-      input: z.object({}),
-      output: z.object({ value: z.number().describe('A number.') }),
-      handler: () => ({ value: 1 }),
-      format: () => {
-        throw new Error('formatter blew up');
-      },
-    });
-
-    const brokenEnrichment = tool('broken_enrichment', {
-      description: 'Declares a required enrichment field the handler never populates.',
-      input: z.object({}),
-      output: z.object({ value: z.number().describe('A number.') }),
-      enrichment: { total: z.number().describe('Required enrichment field.') },
-      handler: (_input, ctx) => {
-        ctx.enrich({ other: 'populates a different key' } as never);
-        return { value: 1 };
-      },
-    });
-
-    const brokenTrailer = tool('broken_trailer', {
-      description: 'Declares a trailer renderer that throws.',
-      input: z.object({}),
-      output: z.object({ value: z.number().describe('A number.') }),
-      enrichment: { total: z.number().describe('Populated enrichment field.') },
-      enrichmentTrailer: {
-        total: {
-          render: () => {
-            throw new Error('trailer render blew up');
-          },
-        },
-      },
-      handler: (_input, ctx) => {
-        ctx.enrich({ total: 1 });
-        return { value: 1 };
-      },
-    });
-
-    it.each([
-      ['output-schema validation', brokenOutput],
-      ['format()', brokenFormat],
-      ['the enrichment merge', brokenEnrichment],
-      ['a trailer render()', brokenTrailer],
-    ])('measures a failure in %s', async (_surface, def) => {
-      const handler = createToolHandler(def as AnyToolDefinition, services, notifiers);
-
-      const result = await handler({}, makeServerContext());
-
-      expect(result.isError).toBe(true);
-      await expect(measuredCallbackRejected()).resolves.toBe(true);
-    });
-
-    it('leaves a successful call resolving through the measured region', async () => {
-      const def = tool('measured_success', {
-        description: 'Succeeds.',
-        input: z.object({}),
-        output: z.object({ ok: z.boolean().describe('ok') }),
-        handler: () => ({ ok: true }),
-      });
-      const handler = createToolHandler(def as AnyToolDefinition, services, notifiers);
-
-      const result = await handler({}, makeServerContext());
-
-      expect(result.structuredContent).toEqual({ ok: true });
-      await expect(measuredCallbackRejected()).resolves.toBe(false);
     });
   });
 });

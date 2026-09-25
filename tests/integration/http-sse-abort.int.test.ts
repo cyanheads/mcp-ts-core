@@ -13,7 +13,7 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
 import { initializeBody, MCP_HEADERS } from '../helpers/http-helpers.js';
-import { assertServerBuilt, type ServerHandle, startServer } from '../helpers/server-process.js';
+import { type ServerHandle, startServer } from '../helpers/server-process.js';
 
 const PROTOCOL_VERSION = '2025-06-18';
 
@@ -76,7 +76,6 @@ describe('HTTP SSE abort cleanup (issue #50)', () => {
   let serverOutput = '';
 
   beforeAll(async () => {
-    assertServerBuilt();
     handle = await startServer('http', {
       MCP_SESSION_MODE: 'stateful',
       // Keep log noise low but allow warnings (close failures log at warning).

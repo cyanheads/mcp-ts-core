@@ -5,7 +5,7 @@
 import { describe, expect, it, vi } from 'vitest';
 
 import { JsonRpcErrorCode, McpError } from '@/types-global/errors.js';
-import { DiffFormatter, diffFormatter } from '@/utils/formatting/diffFormatter.js';
+import { diffFormatter } from '@/utils/formatting/diffFormatter.js';
 import { logger } from '@/utils/internal/logger.js';
 import { requestContextService } from '@/utils/internal/requestContext.js';
 
@@ -18,16 +18,6 @@ describe('DiffFormatter', () => {
   console.log(\`Hello, \${name}!\`);
 }`;
 
-  describe('Singleton instance', () => {
-    it('should export a singleton instance', () => {
-      expect(diffFormatter).toBeInstanceOf(DiffFormatter);
-      expect(diffFormatter.diff).toBeInstanceOf(Function);
-      expect(diffFormatter.diffLines).toBeInstanceOf(Function);
-      expect(diffFormatter.diffWords).toBeInstanceOf(Function);
-      expect(diffFormatter.getStats).toBeInstanceOf(Function);
-    });
-  });
-
   describe('diff() method', () => {
     it('should generate a unified diff for changed text', async () => {
       const result = await diffFormatter.diff(oldText, newText);
@@ -38,21 +28,17 @@ describe('DiffFormatter', () => {
       expect(result).toContain('+'); // Additions
     });
 
-    it('should return minimal output for identical text', async () => {
-      const result = await diffFormatter.diff('same text', 'same text');
-
-      // Library still returns headers even with no changes
-      expect(result).toBeTruthy();
-      expect(result).not.toContain('@@'); // No hunks for identical content
-    });
-
-    it('should handle empty strings', async () => {
-      const result = await diffFormatter.diff('', '');
-
-      // Library returns headers even for empty content
-      expect(result).toBeTruthy();
-      expect(result).not.toContain('@@'); // No hunks for identical empty strings
-    });
+    it.each([
+      ['identical text', 'same text'],
+      ['empty strings', ''],
+    ])(
+      'returns the raw header-only patch for %s (stripHeaders finds no @@)',
+      async (_label, text) => {
+        await expect(diffFormatter.diff(text, text, { format: 'unified' })).resolves.toBe(
+          'Index: a/file\n===================================================================\n--- a/file\told\n+++ a/file\tnew\n',
+        );
+      },
+    );
 
     it('should show additions when adding to empty text', async () => {
       const result = await diffFormatter.diff('', 'new content');
@@ -115,13 +101,13 @@ describe('DiffFormatter', () => {
       expect(result).not.toContain('+++');
     });
 
-    it('should handle identical text with unified format (stripHeaders no @@ found)', async () => {
-      const result = await diffFormatter.diff('same text', 'same text', {
-        format: 'unified',
-      });
+    it('should use visual markers and no raw diff headers in inline format', async () => {
+      const inline = await diffFormatter.diff(oldText, newText, { format: 'inline' });
 
-      // stripHeaders returns raw patch when no @@ marker is found
-      expect(result).not.toContain('@@');
+      expect(inline).not.toContain('@@');
+      expect(inline).not.toContain('---');
+      expect(inline).toContain('[-');
+      expect(inline).toContain('[+');
     });
   });
 
@@ -334,70 +320,7 @@ describe('DiffFormatter', () => {
     });
   });
 
-  describe('Edge cases', () => {
-    it('should handle text with special characters', async () => {
-      const old = 'Hello\nWorld\t!';
-      const new_ = 'Hello\nUniverse\t!';
-
-      const result = await diffFormatter.diff(old, new_);
-      expect(result).toBeTruthy();
-    });
-
-    it('should handle very long lines', async () => {
-      const longLine = 'A'.repeat(10000);
-      const modifiedLine = `${'A'.repeat(9999)}B`;
-
-      const result = await diffFormatter.diff(longLine, modifiedLine);
-      expect(result).toBeTruthy();
-    });
-
-    it('should handle multiline text with various line endings', async () => {
-      const old = 'line1\nline2\nline3';
-      const new_ = 'line1\r\nline2\r\nmodified3';
-
-      const result = await diffFormatter.diff(old, new_);
-      expect(result).toBeTruthy();
-    });
-
-    it('should handle text with only whitespace changes', async () => {
-      const old = 'word1  word2';
-      const new_ = 'word1 word2';
-
-      const result = await diffFormatter.diff(old, new_);
-      expect(result).toBeTruthy();
-    });
-  });
-
   describe('Format options', () => {
-    it('should produce different outputs for different formats', async () => {
-      const unified = await diffFormatter.diff(oldText, newText, {
-        format: 'unified',
-      });
-
-      const patch = await diffFormatter.diff(oldText, newText, {
-        format: 'patch',
-        includeHeaders: true,
-      });
-
-      const inline = await diffFormatter.diff(oldText, newText, {
-        format: 'inline',
-      });
-
-      // Patch should include headers, unified should not
-      expect(patch).toContain('---');
-      expect(unified).not.toContain('---');
-
-      // Inline should use visual markers, not raw diff prefixes
-      expect(inline).not.toContain('@@');
-      expect(inline).not.toContain('---');
-      expect(inline).toContain('[-');
-      expect(inline).toContain('[+');
-
-      // All should contain some diff content
-      expect(unified).toBeTruthy();
-      expect(inline).toBeTruthy();
-    });
-
     it('should allow custom file paths in headers', async () => {
       const result = await diffFormatter.diff(oldText, newText, {
         format: 'patch',

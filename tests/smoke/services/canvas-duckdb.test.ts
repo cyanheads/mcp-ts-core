@@ -140,17 +140,12 @@ describe('canvas · DuckDB round trip', () => {
     );
   });
 
-  it('rejects file-reading scans (READ_CSV) via the plan-walk allowlist', async () => {
-    const instance = await canvas.acquire(undefined, ctx);
-    // Without an existing table, this attempts to plan a READ_CSV which is
-    // not in the allowlist. The gate or the planner itself will refuse it.
-    await expect(instance.query("SELECT * FROM read_csv('/etc/passwd')")).rejects.toThrow();
-  });
-
   // Issue #100 — read_json/read_parquet bypass. These functions lower into
   // generic scan operators that previously passed the allowlist; the SQL
   // pre-scan and plan-walk rescan should now reject them by name.
   it.each([
+    ['read_csv', "SELECT * FROM read_csv('/etc/passwd')"],
+    ['read_csv_auto', "SELECT * FROM read_csv_auto('/etc/passwd')"],
     ['read_json', "SELECT * FROM read_json('/etc/passwd')"],
     ['read_json_auto', "SELECT * FROM read_json_auto('/etc/hostname')"],
     ['read_json_objects', "SELECT * FROM read_json_objects('/etc/x.json')"],
@@ -710,8 +705,8 @@ describe('canvas · DuckDB round trip', () => {
 
   // Issue #224 — denySystemCatalogs: when set, the gate rejects catalog
   // references at the text-scan layer (system_catalog_access). Without the
-  // flag, catalog queries may still fail at a later layer (plan-walk), but with
-  // a different reason — the text-scan layer is the early-exit for this guard.
+  // flag, catalog queries still fail at the plan walk, but with a different
+  // reason — the text-scan layer is the early-exit for this guard.
   it('issue #224 — denySystemCatalogs emits system_catalog_access when set', async () => {
     const instance = await canvas.acquire(undefined, ctx);
     await instance.registerTable('t', [{ x: 1 }]);
@@ -729,17 +724,11 @@ describe('canvas · DuckDB round trip', () => {
     expect(caught).toBeInstanceOf(McpError);
     expect((caught as McpError).data?.reason).toBe('system_catalog_access');
 
-    // Without the flag: a different reason (from a later gate layer), NOT system_catalog_access.
-    let caughtDefault: unknown;
-    try {
-      await instance.query('SELECT * FROM information_schema.tables');
-    } catch (err) {
-      caughtDefault = err;
-    }
-    // May fail (plan-walk), but must not carry the system_catalog_access reason.
-    if (caughtDefault instanceof McpError) {
-      expect(caughtDefault.data?.reason).not.toBe('system_catalog_access');
-    }
+    // Without the flag the text-scan layer stays quiet and the plan walk
+    // rejects the catalog operators instead.
+    await expect(instance.query('SELECT * FROM information_schema.tables')).rejects.toMatchObject({
+      data: { reason: 'plan_operator_not_allowed' },
+    });
   });
 
   it('issue #224 — denySystemCatalogs also applies to registerView', async () => {

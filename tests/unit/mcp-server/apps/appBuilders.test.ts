@@ -9,7 +9,6 @@ import { describe, expect, expectTypeOf, it } from 'vitest';
 import { z } from 'zod';
 
 import { APP_RESOURCE_MIME_TYPE, appResource, appTool } from '@/mcp-server/apps/appBuilders.js';
-import { createMockContext } from '@/testing/index.js';
 import { JsonRpcErrorCode } from '@/types-global/errors.js';
 
 // ---------------------------------------------------------------------------
@@ -34,30 +33,6 @@ describe('appTool()', () => {
     });
 
     expect(def.name).toBe('my_app_tool');
-  });
-
-  it('populates _meta.ui.resourceUri', () => {
-    const def = appTool('app_tool', {
-      resourceUri: 'ui://my-app/app.html',
-      description: 'Test',
-      input: minimalInput,
-      output: minimalOutput,
-      handler: () => ({ result: 'ok' }),
-    });
-
-    expect(def._meta?.ui).toEqual({ resourceUri: 'ui://my-app/app.html' });
-  });
-
-  it('populates the backwards-compat "ui/resourceUri" key', () => {
-    const def = appTool('app_tool', {
-      resourceUri: 'ui://my-app/app.html',
-      description: 'Test',
-      input: minimalInput,
-      output: minimalOutput,
-      handler: () => ({ result: 'ok' }),
-    });
-
-    expect(def._meta?.['ui/resourceUri']).toBe('ui://my-app/app.html');
   });
 
   it('merges extraMeta into _meta', () => {
@@ -125,110 +100,30 @@ describe('appTool()', () => {
     expect(ui.resourceUri).toBe('ui://my-app/app.html');
   });
 
-  it('preserves description', () => {
+  it('passes standard tool fields through unchanged', () => {
+    const output = z.object({ doubled: z.number().describe('Doubled') });
     const def = appTool('app_tool', {
       resourceUri: 'ui://my-app/app.html',
       description: 'Interactive widget',
-      input: minimalInput,
-      output: minimalOutput,
-      handler: () => ({ result: 'ok' }),
-    });
-
-    expect(def.description).toBe('Interactive widget');
-  });
-
-  it('preserves input and output schemas', () => {
-    const input = z.object({ x: z.number().describe('X value') });
-    const output = z.object({ doubled: z.number().describe('Doubled') });
-
-    const def = appTool('app_tool', {
-      resourceUri: 'ui://my-app/app.html',
-      description: 'Test',
-      input,
+      title: 'My App Tool',
+      input: z.object({ x: z.number().describe('X value') }),
       output,
+      annotations: { readOnlyHint: true, openWorldHint: false },
+      auth: ['tool:app_tool:read'],
       handler: (i) => ({ doubled: i.x * 2 }),
     });
 
+    expect(def).toMatchObject({
+      description: 'Interactive widget',
+      title: 'My App Tool',
+      annotations: { readOnlyHint: true, openWorldHint: false },
+      auth: ['tool:app_tool:read'],
+    });
     // `tool()` stores `input.strict()`, so the stored schema is a new object
     // carrying the same shape — identity holds only for `output`.
-    expect(Object.keys(def.input.shape)).toEqual(['x']);
     expect(def.output).toBe(output);
-    const parsed = def.input.parse({ x: 5 });
-    expect(parsed.x).toBe(5);
+    expect(def.input.parse({ x: 5 })).toEqual({ x: 5 });
     expect(() => def.input.parse({ x: 5, rogue: true })).toThrow();
-  });
-
-  it('preserves handler and it works', async () => {
-    const def = appTool('app_tool', {
-      resourceUri: 'ui://my-app/app.html',
-      description: 'Test',
-      input: z.object({ msg: z.string().describe('Message') }),
-      output: z.object({ echo: z.string().describe('Echo') }),
-      handler: (input) => ({ echo: `Echo: ${input.msg}` }),
-    });
-
-    const ctx = createMockContext();
-    const result = await def.handler(def.input.parse({ msg: 'hello' }), ctx);
-    expect(result.echo).toBe('Echo: hello');
-  });
-
-  it('preserves annotations', () => {
-    const def = appTool('app_tool', {
-      resourceUri: 'ui://my-app/app.html',
-      description: 'Test',
-      input: minimalInput,
-      output: minimalOutput,
-      annotations: { readOnlyHint: true, openWorldHint: false },
-      handler: () => ({ result: 'ok' }),
-    });
-
-    expect(def.annotations?.readOnlyHint).toBe(true);
-    expect(def.annotations?.openWorldHint).toBe(false);
-  });
-
-  it('preserves auth scopes', () => {
-    const def = appTool('app_tool', {
-      resourceUri: 'ui://my-app/app.html',
-      description: 'Test',
-      input: minimalInput,
-      output: minimalOutput,
-      auth: ['tool:app_tool:read'],
-      handler: () => ({ result: 'ok' }),
-    });
-
-    expect(def.auth).toEqual(['tool:app_tool:read']);
-  });
-
-  it('preserves format function', () => {
-    const def = appTool('app_tool', {
-      resourceUri: 'ui://my-app/app.html',
-      description: 'Test',
-      input: minimalInput,
-      output: minimalOutput,
-      handler: () => ({ result: 'data' }),
-      format: (r) => [
-        { type: 'text', text: JSON.stringify(r) },
-        { type: 'text', text: `Result: ${r.result}` },
-      ],
-    });
-
-    const blocks = def.format!({ result: 'data' });
-    expect(blocks).toHaveLength(2);
-    expect(JSON.parse((blocks[0] as { text: string }).text)).toEqual({ result: 'data' });
-    expect((blocks[1] as { text: string }).text).toBe('Result: data');
-  });
-
-  it('preserves title', () => {
-    const def = appTool('app_tool', {
-      resourceUri: 'ui://my-app/app.html',
-      description: 'Test',
-      title: 'My App Tool',
-      input: minimalInput,
-      output: minimalOutput,
-      handler: () => ({ result: 'ok' }),
-    });
-
-    expect(def.title).toBe('My App Tool');
   });
 
   it('does not leak resourceUri or extraMeta as top-level fields', () => {
@@ -343,90 +238,24 @@ describe('appResource()', () => {
     expect(def.annotations?.priority).toBe(0.9);
   });
 
-  it('preserves description', () => {
-    const def = appResource('ui://my-app/app.html', {
-      description: 'Interactive UI for my app tool.',
-      handler: () => '<html></html>',
-    });
-
-    expect(def.description).toBe('Interactive UI for my app tool.');
-  });
-
-  it('preserves name', () => {
-    const def = appResource('ui://my-app/app.html', {
-      name: 'my-app-ui',
-      description: 'App UI',
-      handler: () => '<html></html>',
-    });
-
-    expect(def.name).toBe('my-app-ui');
-  });
-
-  it('preserves title', () => {
-    const def = appResource('ui://my-app/app.html', {
-      title: 'My App UI',
-      description: 'App UI',
-      handler: () => '<html></html>',
-    });
-
-    expect(def.title).toBe('My App UI');
-  });
-
-  it('preserves params schema', () => {
+  it('passes standard resource fields through unchanged', () => {
     const params = z.object({ theme: z.string().describe('Theme name') });
     const def = appResource('ui://my-app/app.html', {
-      description: 'App UI',
+      name: 'my-app-ui',
+      title: 'My App UI',
+      description: 'Interactive UI for my app tool.',
       params,
-      handler: () => '<html></html>',
-    });
-
-    expect(def.params).toBe(params);
-    expect(def.params!.parse({ theme: 'dark' })).toEqual({ theme: 'dark' });
-  });
-
-  it('preserves auth scopes', () => {
-    const def = appResource('ui://my-app/app.html', {
-      description: 'App UI',
       auth: ['resource:my-app-ui:read'],
       handler: () => '<html></html>',
     });
 
-    expect(def.auth).toEqual(['resource:my-app-ui:read']);
-  });
-
-  it('preserves handler and it works', () => {
-    const html = '<!DOCTYPE html><html><body>Hello</body></html>';
-    const def = appResource('ui://my-app/app.html', {
-      description: 'App UI',
-      handler: () => html,
+    expect(def).toMatchObject({
+      name: 'my-app-ui',
+      title: 'My App UI',
+      description: 'Interactive UI for my app tool.',
+      auth: ['resource:my-app-ui:read'],
     });
-
-    const result = def.handler({}, {} as any);
-    expect(result).toBe(html);
-  });
-
-  it('preserves async handler', async () => {
-    const def = appResource('ui://my-app/app.html', {
-      description: 'App UI',
-      handler: async () => '<html>async</html>',
-    });
-
-    const result = await def.handler({}, {} as any);
-    expect(result).toBe('<html>async</html>');
-  });
-
-  it('preserves list function', async () => {
-    const def = appResource('ui://my-app/app.html', {
-      description: 'App UI',
-      handler: () => '<html></html>',
-      list: () => ({
-        resources: [{ uri: 'ui://my-app/app.html', name: 'My App' }],
-      }),
-    });
-
-    const listing = await def.list!({} as any);
-    expect(listing.resources).toHaveLength(1);
-    expect(listing.resources[0]!.uri).toBe('ui://my-app/app.html');
+    expect(def.params).toBe(params);
   });
 
   it('preserves definition _meta and mirrors _meta.ui into read content items', () => {
@@ -529,19 +358,6 @@ describe('appResource()', () => {
     });
 
     expect(def.format).toBeUndefined();
-  });
-
-  it('does not leak mimeType override into a second field', () => {
-    const def = appResource('ui://my-app/app.html', {
-      description: 'App UI',
-      mimeType: 'text/html',
-      handler: () => '<html></html>',
-    });
-
-    // Only one mimeType field, no duplication
-    expect(def.mimeType).toBe('text/html');
-    const keys = Object.keys(def).filter((k) => k === 'mimeType');
-    expect(keys).toHaveLength(1);
   });
 
   // ── Regression: TErrors generic on appResource ────────────────────────────

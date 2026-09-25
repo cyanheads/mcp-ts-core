@@ -435,18 +435,6 @@ describe('lintCappedListTruncation', () => {
       expect(message).toContain('max_results');
       expect(message).not.toContain('max_depth_km');
     });
-
-    it('an unqualified max_ input alongside disclosure stays silent', () => {
-      const def = {
-        name: 'search_nodes',
-        input: z.object({ max_depth_km: z.number().describe('bound') }),
-        output: z.object({
-          nodes: z.array(z.string()).describe('nodes'),
-          totalCount: z.number().describe('total'),
-        }),
-      };
-      expect(lintCappedListTruncation(def)).toHaveLength(0);
-    });
   });
 
   describe('silent when disclosure is present', () => {

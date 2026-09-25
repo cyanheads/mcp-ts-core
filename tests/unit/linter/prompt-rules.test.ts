@@ -154,18 +154,10 @@ describe('lintPromptDefinition', () => {
         }),
         generate,
       });
-      expect(rules({ ...diagnostics })).not.toContain('schema-is-object');
+      expect(diagnostics.map((d) => d.rule)).not.toContain('schema-is-object');
       // The underlying z.string() has no .describe(), so describe-on-fields must fire
       const describeWarn = diagnostics.find((d) => d.rule === 'describe-on-fields');
       expect(describeWarn).toBeDefined();
-    });
-
-    it('validates from src/core/index.ts re-export — completable is accessible', async () => {
-      // Smoke: completable from the framework entry works the same way
-      const { completable: completableFromCore } = await import('@/core/index.js');
-      const schema = completableFromCore(z.string().describe('lang'), async () => ['ts']);
-      const { isCompletable: isCompletableFromCore } = await import('@/core/index.js');
-      expect(isCompletableFromCore(schema)).toBe(true);
     });
   });
 });

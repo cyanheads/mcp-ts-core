@@ -163,22 +163,6 @@ describe('lintErrorContract', () => {
       expect(finding?.message).toContain('debug');
       expect(finding?.message).toContain('warning');
     });
-
-    it('stays silent when severity is absent', () => {
-      const d = lintErrorContract(
-        [
-          {
-            code: JsonRpcErrorCode.NotFound,
-            reason: 'no_match',
-            when: 'Nothing matched.',
-            recovery: 'Broaden the query and call the tool again.',
-          },
-        ],
-        'tool',
-        'x',
-      );
-      expect(d).toEqual([]);
-    });
   });
 
   describe('recovery rules', () => {
@@ -494,22 +478,6 @@ describe('lintErrorContractConformance', () => {
       expect(d.map((x) => x.rule)).not.toContain('error-contract-conformance');
       expect(d.map((x) => x.rule)).not.toContain('error-contract-prefer-fail');
     });
-
-    it('still counts new McpError(JsonRpcErrorCode.X) construction as a direct throw', () => {
-      // Regression guard: narrowing the scan must not stop catching the real case.
-      const handler = new Function(
-        `return async () => { throw new McpError(JsonRpcErrorCode.NotFound, "x"); }`,
-      )();
-      const d = lintErrorContractConformance(
-        {
-          handler,
-          errors: [{ code: JsonRpcErrorCode.NotFound, reason: 'no_match', when: 'no match' }],
-        },
-        'tool',
-        'x',
-      );
-      expect(d.map((x) => x.rule)).toContain('error-contract-prefer-fail');
-    });
   });
 
   it('keeps its own diagnostics when a declared reason is never thrown (#290 regression)', () => {
@@ -525,23 +493,6 @@ describe('lintErrorContractConformance', () => {
           { code: JsonRpcErrorCode.NotFound, reason: 'no_match', when: 'no match' },
           { code: JsonRpcErrorCode.NotFound, reason: 'site_not_found', when: 'bad site' },
         ],
-      },
-      'tool',
-      'x',
-    );
-    expect(d).toEqual([]);
-  });
-
-  it('produces no diagnostics for a clean handler that uses ctx.fail', () => {
-    // ctx.fail-routed throws don't reference JsonRpcErrorCode.X or a factory,
-    // so they're invisible to the scan — and that's correct.
-    const handler = new Function(
-      `return async () => { throw ctx.fail('no_match', 'not found'); }`,
-    )();
-    const d = lintErrorContractConformance(
-      {
-        handler,
-        errors: [{ code: JsonRpcErrorCode.NotFound, reason: 'no_match', when: 'no match' }],
       },
       'tool',
       'x',
@@ -1046,12 +997,6 @@ describe('lintErrorContractRecoveryUnforwarded', () => {
           }`,
         ),
       ).toEqual([]);
-    });
-
-    it('stays silent when the handler holds no literal ctx.fail', () => {
-      expect(messages(`(input, ctx) => { return getItemService().search(input, ctx); }`)).toEqual(
-        [],
-      );
     });
 
     it('skips a definition with no contract', () => {

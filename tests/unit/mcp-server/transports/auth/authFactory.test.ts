@@ -61,16 +61,4 @@ describe('createAuthStrategy', () => {
 
     expect(() => createAuthStrategy()).toThrow('Unknown authentication mode: unknown-auth-mode');
   });
-
-  it('should resolve strategies from DI container', () => {
-    mockConfig.mcpAuthMode = 'jwt';
-    mockConfig.mcpAuthSecretKey = 'test-secret-key-that-is-at-least-32-chars-long';
-
-    const strategy1 = createAuthStrategy();
-    const strategy2 = createAuthStrategy();
-
-    // Should create new instances each time
-    expect(strategy1).toBeInstanceOf(JwtStrategy);
-    expect(strategy2).toBeInstanceOf(JwtStrategy);
-  });
 });

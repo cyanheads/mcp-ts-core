@@ -303,6 +303,7 @@ describe('caller-supplied ids · malformed vs missing (#327)', () => {
     const dest = await canvas.acquire(undefined, ctxWithTenant);
 
     await expectSourceNotFound(dest, foreign.canvasId);
+    expect(provider.importFrom).not.toHaveBeenCalled();
     await registry.shutdown(ctxWithTenant);
   });
 });
@@ -554,23 +555,6 @@ describe('CanvasInstance · touch-or-throw + delegation', () => {
       { asName: 'renamed' },
     );
 
-    await registry.shutdown(ctxWithTenant);
-  });
-
-  it('importFrom rejects when the source canvas belongs to another tenant', async () => {
-    const provider = makeStubProvider();
-    const registry = new CanvasRegistry(provider, makeOptions());
-    const canvas = new DataCanvas(provider, registry);
-    const target = await canvas.acquire(undefined, ctxWithTenant);
-    const stranger = await canvas.acquire(undefined, {
-      ...ctxWithTenant,
-      tenantId: 'tenant-b',
-    });
-
-    await expect(target.importFrom(stranger.canvasId, 'src')).rejects.toThrow(
-      /not found or expired/i,
-    );
-    expect(provider.importFrom).not.toHaveBeenCalled();
     await registry.shutdown(ctxWithTenant);
   });
 

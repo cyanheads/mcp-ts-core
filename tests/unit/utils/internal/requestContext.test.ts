@@ -122,13 +122,6 @@ describe('requestContextService', () => {
     });
   });
 
-  it('creates a context with defaults when called with no arguments', () => {
-    const context = requestContextService.createRequestContext();
-    expect(context.requestId).toBe('CTX-TEST-ID');
-    expect(context.timestamp).toBeDefined();
-    expect(typeof context.timestamp).toBe('string');
-  });
-
   it('routes ad-hoc properties into the extra bag and inherits declared fields', () => {
     const context = requestContextService.createRequestContext({
       operation: 'test',
@@ -220,16 +213,6 @@ describe('requestContextService', () => {
       expect(context.auth?.clientId).toBe('client-abc');
       expect(context.auth?.tenantId).toBe('tenant-1');
       expect(context.auth?.token).toBe('jwt-token-xyz');
-    });
-
-    it('forwards the bearer token so handlers can relay it upstream', () => {
-      const context = requestContextService.withAuthInfo({
-        scopes: ['read'],
-        clientId: 'c',
-        token: 'bearer-abc',
-      });
-
-      expect(context.auth?.token).toBe('bearer-abc');
     });
 
     it('omits token from auth when AuthInfo carries no token', () => {

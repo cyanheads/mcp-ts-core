@@ -22,17 +22,6 @@ describe('Error Handler Helpers', () => {
       expect(getErrorName(new Error('test'))).toBe('Error');
     });
 
-    it('should return name from TypeError', () => {
-      expect(getErrorName(new TypeError('bad'))).toBe('TypeError');
-    });
-
-    it('should return name from custom Error subclass', () => {
-      class CustomError extends Error {
-        override name = 'CustomError';
-      }
-      expect(getErrorName(new CustomError('custom'))).toBe('CustomError');
-    });
-
     it('should return NullValueEncountered for null', () => {
       expect(getErrorName(null)).toBe('NullValueEncountered');
     });
@@ -48,18 +37,6 @@ describe('Error Handler Helpers', () => {
 
     it('should return typeof for plain object', () => {
       expect(getErrorName({})).toBe('objectEncountered');
-    });
-
-    it('should return typeof for string value', () => {
-      expect(getErrorName('hello')).toBe('stringEncountered');
-    });
-
-    it('should return typeof for number value', () => {
-      expect(getErrorName(42)).toBe('numberEncountered');
-    });
-
-    it('should return typeof for boolean value', () => {
-      expect(getErrorName(true)).toBe('booleanEncountered');
     });
   });
 
@@ -103,14 +80,6 @@ describe('Error Handler Helpers', () => {
       expect(getErrorMessage('direct string')).toBe('direct string');
     });
 
-    it('should stringify number', () => {
-      expect(getErrorMessage(42)).toBe('42');
-    });
-
-    it('should stringify boolean', () => {
-      expect(getErrorMessage(false)).toBe('false');
-    });
-
     it('should stringify bigint', () => {
       expect(getErrorMessage(BigInt(123))).toBe('123');
     });
@@ -121,7 +90,7 @@ describe('Error Handler Helpers', () => {
     });
 
     it('should format anonymous function', () => {
-      expect(getErrorMessage(() => {})).toContain('[function');
+      expect(getErrorMessage(() => {})).toBe('[function anonymous]');
     });
 
     it('should format symbol', () => {
@@ -249,7 +218,7 @@ describe('Error Handler Helpers', () => {
       Object.defineProperty(err, 'cause', { value: { code: 500 } });
       const chain = extractErrorCauseChain(err);
       expect(chain).toHaveLength(2);
-      expect(chain[1]?.depth).toBe(1);
+      expect(chain[1]).toEqual({ name: 'objectEncountered', message: '{"code":500}', depth: 1 });
     });
 
     it('should return empty chain for falsy input', () => {

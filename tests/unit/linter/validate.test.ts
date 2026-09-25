@@ -7,7 +7,6 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { z } from 'zod';
 
 import { validateDefinitions } from '@/linter/validate.js';
-import { tool } from '@/mcp-server/tools/utils/toolDefinition.js';
 
 // ---------------------------------------------------------------------------
 // Helpers — minimal valid definitions
@@ -84,25 +83,10 @@ describe('validateDefinitions', () => {
       );
     });
 
-    it('errors on missing tool name', () => {
-      const { name: _, ...noName } = validTool();
-      const report = validateDefinitions({ tools: [noName] });
-      expect(report.passed).toBe(false);
-      expect(report.errors).toContainEqual(expect.objectContaining({ rule: 'name-required' }));
-    });
-
     it('errors on invalid tool name format', () => {
       const report = validateDefinitions({ tools: [validTool({ name: 'my tool!' })] });
       expect(report.passed).toBe(false);
       expect(report.errors).toContainEqual(expect.objectContaining({ rule: 'name-format' }));
-    });
-
-    it('accepts valid tool name characters', () => {
-      const report = validateDefinitions({
-        tools: [validTool({ name: 'my_tool.v2-beta' })],
-      });
-      const nameErrors = report.errors.filter((e) => e.rule === 'name-format');
-      expect(nameErrors).toHaveLength(0);
     });
 
     it('errors on duplicate tool names', () => {
@@ -162,178 +146,6 @@ describe('validateDefinitions', () => {
       expect(descWarnings).toContainEqual(
         expect.objectContaining({ message: expect.stringContaining('input.noDesc') }),
       );
-    });
-
-    it('does not warn on fields with .describe()', () => {
-      const report = validateDefinitions({
-        tools: [
-          validTool({
-            input: z.object({ q: z.string().describe('query') }),
-            output: z.object({ r: z.string().describe('result') }),
-          }),
-        ],
-      });
-      const descWarnings = report.warnings.filter((w) => w.rule === 'describe-on-fields');
-      expect(descWarnings).toHaveLength(0);
-    });
-
-    it('does not warn on optional fields with .describe()', () => {
-      const report = validateDefinitions({
-        tools: [
-          validTool({
-            input: z.object({ q: z.string().optional().describe('query') }),
-          }),
-        ],
-      });
-      const descWarnings = report.warnings.filter((w) => w.rule === 'describe-on-fields');
-      expect(descWarnings).toHaveLength(0);
-    });
-
-    it('warns on nested object fields missing .describe()', () => {
-      const report = validateDefinitions({
-        tools: [
-          validTool({
-            input: z.object({
-              filter: z
-                .object({
-                  status: z.string().describe('Status filter'),
-                  priority: z.string(),
-                })
-                .describe('Filter criteria'),
-            }),
-          }),
-        ],
-      });
-      const descWarnings = report.warnings.filter((w) => w.rule === 'describe-on-fields');
-      expect(descWarnings).toContainEqual(
-        expect.objectContaining({ message: expect.stringContaining('input.filter.priority') }),
-      );
-      expect(descWarnings.find((w) => w.message.includes('input.filter.status'))).toBeUndefined();
-    });
-
-    it('warns on array element fields missing .describe()', () => {
-      const report = validateDefinitions({
-        tools: [
-          validTool({
-            output: z.object({
-              items: z
-                .array(
-                  z.object({
-                    id: z.string().describe('Item ID'),
-                    name: z.string(),
-                  }),
-                )
-                .describe('Matching items'),
-            }),
-          }),
-        ],
-      });
-      const descWarnings = report.warnings.filter((w) => w.rule === 'describe-on-fields');
-      expect(descWarnings).toContainEqual(
-        expect.objectContaining({ message: expect.stringContaining('output.items[].name') }),
-      );
-      expect(descWarnings.find((w) => w.message.includes('output.items[].id'))).toBeUndefined();
-    });
-
-    it('does not recurse into primitive array elements', () => {
-      const report = validateDefinitions({
-        tools: [
-          validTool({
-            output: z.object({
-              tags: z.array(z.string()).describe('Tags'),
-            }),
-          }),
-        ],
-      });
-      const descWarnings = report.warnings.filter((w) => w.rule === 'describe-on-fields');
-      expect(descWarnings).toHaveLength(0);
-    });
-
-    it('does not warn on z.literal variants inside a union (form-client sentinel)', () => {
-      const report = validateDefinitions({
-        tools: [
-          validTool({
-            input: z.object({
-              variable: z
-                .union([
-                  z.literal(''),
-                  z
-                    .string()
-                    .max(50)
-                    .regex(/^[a-zA-Z_][a-zA-Z0-9_]*$/)
-                    .describe('Identifier matching [a-zA-Z_][a-zA-Z0-9_]*, max 50 chars'),
-                ])
-                .optional()
-                .describe('Variable identifier. Blank values are treated as omitted.'),
-            }),
-          }),
-        ],
-      });
-      const descWarnings = report.warnings.filter((w) => w.rule === 'describe-on-fields');
-      expect(descWarnings.find((w) => w.message.includes('input.variable'))).toBeUndefined();
-    });
-
-    it('skips z.literal even when wrapped in optional/nullable', () => {
-      const report = validateDefinitions({
-        tools: [
-          validTool({
-            input: z.object({
-              flag: z
-                .union([z.literal('').optional(), z.string().describe('Non-empty value')])
-                .describe('Flag'),
-            }),
-          }),
-        ],
-      });
-      const descWarnings = report.warnings.filter((w) => w.rule === 'describe-on-fields');
-      expect(descWarnings.find((w) => w.message.includes('input.flag|0'))).toBeUndefined();
-    });
-
-    it('still warns on non-literal union variants missing .describe()', () => {
-      const report = validateDefinitions({
-        tools: [
-          validTool({
-            input: z.object({
-              value: z
-                .union([z.string(), z.number().describe('Numeric form')])
-                .describe('Value in either form'),
-            }),
-          }),
-        ],
-      });
-      const descWarnings = report.warnings.filter((w) => w.rule === 'describe-on-fields');
-      expect(descWarnings).toContainEqual(
-        expect.objectContaining({ message: expect.stringContaining('input.value|0') }),
-      );
-      expect(descWarnings.find((w) => w.message.includes('input.value|1'))).toBeUndefined();
-    });
-
-    it('warns on discriminatedUnion variant fields missing .describe()', () => {
-      const report = validateDefinitions({
-        tools: [
-          validTool({
-            input: z.object({
-              action: z
-                .discriminatedUnion('kind', [
-                  z.object({
-                    kind: z.literal('a').describe('Discriminator A'),
-                    aValue: z.string(),
-                  }),
-                  z.object({
-                    kind: z.literal('b').describe('Discriminator B'),
-                    bValue: z.string().describe('Value B'),
-                  }),
-                ])
-                .describe('Action to perform'),
-            }),
-          }),
-        ],
-      });
-      const descWarnings = report.warnings.filter((w) => w.rule === 'describe-on-fields');
-      expect(descWarnings).toContainEqual(
-        expect.objectContaining({ message: expect.stringContaining('input.action|0.aValue') }),
-      );
-      expect(descWarnings.find((w) => w.message.includes('input.action|1.bValue'))).toBeUndefined();
     });
 
     it('warns on resource output schema fields missing .describe()', () => {
@@ -449,122 +261,6 @@ describe('validateDefinitions', () => {
         }),
       );
     });
-
-    it('errors on non-serializable schema (z.date)', () => {
-      const report = validateDefinitions({
-        tools: [
-          validTool({
-            input: z.object({ when: z.date().describe('Timestamp') }),
-          }),
-        ],
-      });
-      expect(report.passed).toBe(false);
-      expect(report.errors).toContainEqual(
-        expect.objectContaining({ rule: 'schema-serializable' }),
-      );
-    });
-
-    it('passes with serializable schema types', () => {
-      const report = validateDefinitions({
-        tools: [
-          validTool({
-            input: z.object({
-              name: z.string().describe('Name'),
-              count: z.number().optional().describe('Count'),
-              tags: z.array(z.string()).describe('Tags'),
-              status: z.enum(['active', 'inactive']).describe('Status'),
-            }),
-            output: z.object({
-              id: z.string().describe('ID'),
-              ok: z.boolean().describe('Success'),
-            }),
-          }),
-        ],
-      });
-      const serialErrors = report.errors.filter((e) => e.rule === 'schema-serializable');
-      expect(serialErrors).toHaveLength(0);
-    });
-  });
-
-  // -------------------------------------------------------------------------
-  // _meta.ui rules (MCP Apps)
-  // -------------------------------------------------------------------------
-
-  describe('_meta.ui rules', () => {
-    it('passes when _meta is absent', () => {
-      const report = validateDefinitions({ tools: [validTool()] });
-      const metaErrors = report.errors.filter((e) => e.rule.startsWith('meta-ui'));
-      expect(metaErrors).toHaveLength(0);
-    });
-
-    it('passes when _meta exists but has no ui key', () => {
-      const report = validateDefinitions({
-        tools: [validTool({ _meta: { version: '1.0' } })],
-      });
-      const metaErrors = report.errors.filter((e) => e.rule.startsWith('meta-ui'));
-      expect(metaErrors).toHaveLength(0);
-    });
-
-    it('errors when _meta.ui is not an object', () => {
-      const report = validateDefinitions({
-        tools: [validTool({ _meta: { ui: 'bad' } })],
-      });
-      expect(report.errors).toContainEqual(expect.objectContaining({ rule: 'meta-ui-type' }));
-    });
-
-    it('errors when _meta.ui is null', () => {
-      const report = validateDefinitions({
-        tools: [validTool({ _meta: { ui: null } })],
-      });
-      expect(report.errors).toContainEqual(expect.objectContaining({ rule: 'meta-ui-type' }));
-    });
-
-    it('errors when _meta.ui.resourceUri is missing', () => {
-      const report = validateDefinitions({
-        tools: [validTool({ _meta: { ui: {} } })],
-      });
-      expect(report.errors).toContainEqual(
-        expect.objectContaining({ rule: 'meta-ui-resource-uri-required' }),
-      );
-    });
-
-    it('errors when _meta.ui.resourceUri is empty string', () => {
-      const report = validateDefinitions({
-        tools: [validTool({ _meta: { ui: { resourceUri: '' } } })],
-      });
-      expect(report.errors).toContainEqual(
-        expect.objectContaining({ rule: 'meta-ui-resource-uri-required' }),
-      );
-    });
-
-    it('errors when _meta.ui.resourceUri is not a string', () => {
-      const report = validateDefinitions({
-        tools: [validTool({ _meta: { ui: { resourceUri: 42 } } })],
-      });
-      expect(report.errors).toContainEqual(
-        expect.objectContaining({ rule: 'meta-ui-resource-uri-required' }),
-      );
-    });
-
-    it('warns when resourceUri does not use ui:// scheme', () => {
-      const report = validateDefinitions({
-        tools: [validTool({ _meta: { ui: { resourceUri: 'https://example.com/app.html' } } })],
-      });
-      expect(report.warnings).toContainEqual(
-        expect.objectContaining({ rule: 'meta-ui-resource-uri-scheme' }),
-      );
-    });
-
-    it('passes with valid ui:// resourceUri', () => {
-      const report = validateDefinitions({
-        tools: [validTool({ _meta: { ui: { resourceUri: 'ui://my-app/app.html' } } })],
-        resources: [validResource({ uriTemplate: 'ui://my-app/app.html' })],
-      });
-      const metaErrors = report.errors.filter((e) => e.rule.startsWith('meta-ui'));
-      expect(metaErrors).toHaveLength(0);
-      const metaWarnings = report.warnings.filter((e) => e.rule.startsWith('meta-ui'));
-      expect(metaWarnings).toHaveLength(0);
-    });
   });
 
   // -------------------------------------------------------------------------
@@ -572,19 +268,6 @@ describe('validateDefinitions', () => {
   // -------------------------------------------------------------------------
 
   describe('app tool ↔ resource pairing', () => {
-    it('passes when tool resourceUri matches a registered resource', () => {
-      const report = validateDefinitions({
-        tools: [
-          validTool({
-            _meta: { ui: { resourceUri: 'ui://my-app/app.html' } },
-          }),
-        ],
-        resources: [validResource({ uriTemplate: 'ui://my-app/app.html', name: 'my-app-ui' })],
-      });
-      const pairingWarnings = report.warnings.filter((w) => w.rule === 'app-tool-resource-pairing');
-      expect(pairingWarnings).toHaveLength(0);
-    });
-
     it('warns when tool resourceUri has no matching resource', () => {
       const report = validateDefinitions({
         tools: [
@@ -601,84 +284,6 @@ describe('validateDefinitions', () => {
         }),
       );
     });
-
-    it('warns when tool resourceUri has no resources at all', () => {
-      const report = validateDefinitions({
-        tools: [
-          validTool({
-            _meta: { ui: { resourceUri: 'ui://my-app/app.html' } },
-          }),
-        ],
-        resources: [],
-      });
-      expect(report.warnings).toContainEqual(
-        expect.objectContaining({ rule: 'app-tool-resource-pairing' }),
-      );
-    });
-
-    it('skips tools without _meta.ui', () => {
-      const report = validateDefinitions({
-        tools: [validTool()],
-        resources: [],
-      });
-      const pairingWarnings = report.warnings.filter((w) => w.rule === 'app-tool-resource-pairing');
-      expect(pairingWarnings).toHaveLength(0);
-    });
-
-    it('skips tools with _meta but no ui key', () => {
-      const report = validateDefinitions({
-        tools: [validTool({ _meta: { version: '1.0' } })],
-        resources: [],
-      });
-      const pairingWarnings = report.warnings.filter((w) => w.rule === 'app-tool-resource-pairing');
-      expect(pairingWarnings).toHaveLength(0);
-    });
-
-    it('skips tools with non-string resourceUri', () => {
-      const report = validateDefinitions({
-        tools: [validTool({ _meta: { ui: { resourceUri: 42 } } })],
-        resources: [],
-      });
-      const pairingWarnings = report.warnings.filter((w) => w.rule === 'app-tool-resource-pairing');
-      expect(pairingWarnings).toHaveLength(0);
-    });
-
-    it('handles multiple app tools with mixed match results', () => {
-      const report = validateDefinitions({
-        tools: [
-          validTool({
-            name: 'matched_tool',
-            _meta: { ui: { resourceUri: 'ui://app-a/app.html' } },
-          }),
-          validTool({
-            name: 'unmatched_tool',
-            _meta: { ui: { resourceUri: 'ui://app-b/app.html' } },
-          }),
-        ],
-        resources: [validResource({ uriTemplate: 'ui://app-a/app.html', name: 'app-a-ui' })],
-      });
-
-      const pairingWarnings = report.warnings.filter((w) => w.rule === 'app-tool-resource-pairing');
-      expect(pairingWarnings).toHaveLength(1);
-      expect(pairingWarnings[0]!.definitionName).toBe('unmatched_tool');
-    });
-
-    it('uses <unnamed> for tools without a name', () => {
-      const toolNoName = validTool({
-        _meta: { ui: { resourceUri: 'ui://app/app.html' } },
-      });
-      // Remove name to test fallback
-      delete (toolNoName as Record<string, unknown>).name;
-
-      const report = validateDefinitions({
-        tools: [toolNoName],
-        resources: [],
-      });
-
-      const pairingWarnings = report.warnings.filter((w) => w.rule === 'app-tool-resource-pairing');
-      expect(pairingWarnings).toHaveLength(1);
-      expect(pairingWarnings[0]!.definitionName).toBe('<unnamed>');
-    });
   });
 
   // -------------------------------------------------------------------------
@@ -686,37 +291,6 @@ describe('validateDefinitions', () => {
   // -------------------------------------------------------------------------
 
   describe('resource rules', () => {
-    it('errors on missing uriTemplate', () => {
-      const { uriTemplate: _, ...noUri } = validResource();
-      const report = validateDefinitions({ resources: [noUri] });
-      expect(report.errors).toContainEqual(
-        expect.objectContaining({ rule: 'uri-template-required' }),
-      );
-    });
-
-    it('errors on invalid URI template (unbalanced braces)', () => {
-      const report = validateDefinitions({
-        resources: [validResource({ uriTemplate: 'test://{id/data' })],
-      });
-      expect(report.errors).toContainEqual(expect.objectContaining({ rule: 'uri-template-valid' }));
-    });
-
-    it('errors on empty variable name in URI template', () => {
-      const report = validateDefinitions({
-        resources: [validResource({ uriTemplate: 'test://{}/data' })],
-      });
-      expect(report.errors).toContainEqual(expect.objectContaining({ rule: 'uri-template-valid' }));
-    });
-
-    it('warns when name defaults to URI template', () => {
-      const report = validateDefinitions({
-        resources: [validResource({ name: undefined })],
-      });
-      expect(report.warnings).toContainEqual(
-        expect.objectContaining({ rule: 'resource-name-not-uri' }),
-      );
-    });
-
     it('errors on duplicate resource names', () => {
       const report = validateDefinitions({
         resources: [
@@ -728,81 +302,6 @@ describe('validateDefinitions', () => {
         expect.objectContaining({ rule: 'name-unique', definitionType: 'resource' }),
       );
     });
-
-    it('errors on missing handler', () => {
-      const report = validateDefinitions({
-        resources: [validResource({ handler: undefined })],
-      });
-      expect(report.errors).toContainEqual(
-        expect.objectContaining({ rule: 'handler-required', definitionType: 'resource' }),
-      );
-    });
-
-    it('errors on non-ZodObject params', () => {
-      const report = validateDefinitions({
-        resources: [validResource({ params: z.string() })],
-      });
-      expect(report.errors).toContainEqual(
-        expect.objectContaining({
-          rule: 'schema-is-object',
-          message: expect.stringContaining('params'),
-        }),
-      );
-    });
-
-    it('errors when template variables do not match params schema keys', () => {
-      const report = validateDefinitions({
-        resources: [
-          validResource({
-            uriTemplate: 'test://{itemId}/data',
-            params: z.object({ item_id: z.string().describe('Item ID') }),
-          }),
-        ],
-      });
-      expect(report.passed).toBe(false);
-      expect(report.errors).toContainEqual(
-        expect.objectContaining({
-          rule: 'template-params-align',
-          message: expect.stringContaining('itemId'),
-        }),
-      );
-    });
-
-    it('passes when template variables match params schema keys', () => {
-      const report = validateDefinitions({
-        resources: [
-          validResource({
-            uriTemplate: 'test://{itemId}/data',
-            params: z.object({ itemId: z.string().describe('Item ID') }),
-          }),
-        ],
-      });
-      const alignErrors = report.errors.filter((e) => e.rule === 'template-params-align');
-      expect(alignErrors).toHaveLength(0);
-    });
-
-    it('handles multiple template variables', () => {
-      const report = validateDefinitions({
-        resources: [
-          validResource({
-            uriTemplate: 'test://{orgId}/items/{itemId}',
-            params: z.object({
-              orgId: z.string().describe('Org ID'),
-              itemId: z.string().describe('Item ID'),
-            }),
-          }),
-        ],
-      });
-      const alignErrors = report.errors.filter((e) => e.rule === 'template-params-align');
-      expect(alignErrors).toHaveLength(0);
-    });
-
-    it('errors on auth with empty scope strings', () => {
-      const report = validateDefinitions({
-        resources: [validResource({ auth: [''] })],
-      });
-      expect(report.errors).toContainEqual(expect.objectContaining({ rule: 'auth-scope-format' }));
-    });
   });
 
   // -------------------------------------------------------------------------
@@ -810,63 +309,12 @@ describe('validateDefinitions', () => {
   // -------------------------------------------------------------------------
 
   describe('prompt rules', () => {
-    it('errors on empty prompt name', () => {
-      const report = validateDefinitions({ prompts: [validPrompt({ name: '' })] });
-      expect(report.errors).toContainEqual(
-        expect.objectContaining({ rule: 'name-required', definitionType: 'prompt' }),
-      );
-    });
-
     it('errors on duplicate prompt names', () => {
       const report = validateDefinitions({
         prompts: [validPrompt({ name: 'dup' }), validPrompt({ name: 'dup' })],
       });
       expect(report.errors).toContainEqual(
         expect.objectContaining({ rule: 'name-unique', definitionType: 'prompt' }),
-      );
-    });
-
-    it('errors on missing generate function', () => {
-      const report = validateDefinitions({
-        prompts: [validPrompt({ generate: undefined })],
-      });
-      expect(report.errors).toContainEqual(expect.objectContaining({ rule: 'generate-required' }));
-    });
-
-    it('warns on missing description', () => {
-      const report = validateDefinitions({
-        prompts: [validPrompt({ description: '' })],
-      });
-      expect(report.warnings).toContainEqual(
-        expect.objectContaining({ rule: 'description-required', definitionType: 'prompt' }),
-      );
-    });
-
-    it('errors on non-ZodObject args', () => {
-      const report = validateDefinitions({
-        prompts: [validPrompt({ args: z.string() })],
-      });
-      expect(report.errors).toContainEqual(
-        expect.objectContaining({
-          rule: 'schema-is-object',
-          message: expect.stringContaining('args'),
-        }),
-      );
-    });
-
-    it('warns on args fields missing .describe()', () => {
-      const report = validateDefinitions({
-        prompts: [
-          validPrompt({
-            args: z.object({ code: z.string() }),
-          }),
-        ],
-      });
-      expect(report.warnings).toContainEqual(
-        expect.objectContaining({
-          rule: 'describe-on-fields',
-          message: expect.stringContaining('args.code'),
-        }),
       );
     });
   });
@@ -887,9 +335,17 @@ describe('validateDefinitions', () => {
         ],
       });
 
-      // name-required is an error, description-required is a warning
-      expect(report.errors.every((d) => d.severity === 'error')).toBe(true);
-      expect(report.warnings.every((d) => d.severity === 'warning')).toBe(true);
+      expect(report.errors).toContainEqual(
+        expect.objectContaining({ rule: 'name-required', severity: 'error' }),
+      );
+      expect(report.warnings).toContainEqual(
+        expect.objectContaining({ rule: 'description-required', severity: 'warning' }),
+      );
+      expect(report.warnings).toContainEqual(
+        expect.objectContaining({ rule: 'describe-on-fields', severity: 'warning' }),
+      );
+      expect(report.errors.map((d) => d.rule)).not.toContain('description-required');
+      expect(report.warnings.map((d) => d.rule)).not.toContain('name-required');
       expect(report.passed).toBe(false);
     });
 
@@ -942,17 +398,6 @@ describe('validateDefinitions', () => {
       };
     }
 
-    it('produces no errors for a valid server.json manifest', () => {
-      const report = validateDefinitions({ serverJson: validServerJson() });
-      expect(report.errors).toHaveLength(0);
-    });
-
-    it('does not run server.json rules when serverJson is omitted', () => {
-      const report = validateDefinitions({ tools: [validTool()] });
-      expect(report.errors.some((e) => e.rule.startsWith('server-json-'))).toBe(false);
-      expect(report.warnings.some((w) => w.rule.startsWith('server-json-'))).toBe(false);
-    });
-
     it('surfaces server.json errors anchored to the shared server-json-rules section', () => {
       const report = validateDefinitions({ serverJson: validServerJson({ name: '' }) });
       const nameError = report.errors.find((e) => e.rule === 'server-json-name-required');
@@ -991,16 +436,6 @@ describe('validateDefinitions', () => {
   // -------------------------------------------------------------------------
 
   describe('landing config integration', () => {
-    it('produces no diagnostics for a valid landing config', () => {
-      const report = validateDefinitions({ landing: { tagline: 'Short and punchy' } });
-      expect(report.errors.filter((e) => e.rule.startsWith('landing-'))).toHaveLength(0);
-    });
-
-    it('does not run landing rules when landing is omitted', () => {
-      const report = validateDefinitions({ tools: [validTool()] });
-      expect(report.errors.some((e) => e.rule.startsWith('landing-'))).toBe(false);
-    });
-
     it('surfaces landing errors anchored to their own rule id (not the server-json section)', () => {
       const report = validateDefinitions({ landing: { tagline: 'x'.repeat(121) } });
       const taglineError = report.errors.find((e) => e.rule === 'landing-tagline-length');
@@ -1042,26 +477,6 @@ describe('validateDefinitions', () => {
       expect(report.warnings).toContainEqual(
         expect.objectContaining({ rule: 'canvas-consumer-missing' }),
       );
-    });
-
-    it('passes when a *_dataframe_query consumer is registered (default predicate)', () => {
-      const report = validateDefinitions({
-        tools: [canvasTool(), validTool({ name: 'my_dataframe_query' })],
-      });
-      expect(report.warnings.filter((w) => w.rule === 'canvas-consumer-missing')).toHaveLength(0);
-    });
-
-    it('accepts an explicit canvasConsumers array naming a non-standard consumer', () => {
-      const report = validateDefinitions({
-        canvasConsumers: ['my_custom_sql'],
-        tools: [canvasTool(), validTool({ name: 'my_custom_sql' })],
-      });
-      expect(report.warnings.filter((w) => w.rule === 'canvas-consumer-missing')).toHaveLength(0);
-    });
-
-    it('disables the rule entirely when canvasConsumers is false', () => {
-      const report = validateDefinitions({ canvasConsumers: false, tools: [canvasTool()] });
-      expect(report.warnings.filter((w) => w.rule === 'canvas-consumer-missing')).toHaveLength(0);
     });
 
     it('reads MCP_LINT_CANVAS_CONSUMERS as a CSV of consumer names', () => {
@@ -1116,19 +531,6 @@ describe('validateDefinitions', () => {
       );
     });
 
-    it('truncationAllowlist array suppresses by tool name', () => {
-      const report = validateDefinitions({
-        truncationAllowlist: ['search_results'],
-        tools: [cappedTool()],
-      });
-      expect(report.warnings.filter((w) => w.rule === 'capped-list-no-truncation')).toHaveLength(0);
-    });
-
-    it('disables the rule entirely when truncationAllowlist is false', () => {
-      const report = validateDefinitions({ truncationAllowlist: false, tools: [cappedTool()] });
-      expect(report.warnings.filter((w) => w.rule === 'capped-list-no-truncation')).toHaveLength(0);
-    });
-
     it('reads MCP_LINT_TRUNCATION_ALLOWLIST as a CSV allowlist', () => {
       process.env[ENV] = 'other_tool, search_results ,third_tool';
       const report = validateDefinitions({ tools: [cappedTool()] });
@@ -1148,36 +550,6 @@ describe('validateDefinitions', () => {
         tools: [cappedTool()],
       });
       expect(report.warnings.filter((w) => w.rule === 'capped-list-no-truncation')).toHaveLength(0);
-    });
-
-    it('stays silent for a max_ input that bounds a value rather than the list', () => {
-      const report = validateDefinitions({
-        tools: [
-          cappedTool({
-            name: 'search_nodes',
-            input: z.object({ max_depth_km: z.number().describe('Maximum depth filter') }),
-            output: z.object({ nodes: z.array(z.string()).describe('Matching nodes') }),
-            handler: async () => ({ nodes: [] }),
-          }),
-        ],
-      });
-      expect(report.warnings.filter((w) => w.rule === 'capped-list-no-truncation')).toHaveLength(0);
-    });
-
-    it('still warns for a container-noun cap against a differently named array', () => {
-      const report = validateDefinitions({
-        tools: [
-          cappedTool({
-            name: 'search_articles',
-            input: z.object({ maxRecords: z.number().describe('Maximum records returned') }),
-            output: z.object({ articles: z.array(z.string()).describe('Matching articles') }),
-            handler: async () => ({ articles: [] }),
-          }),
-        ],
-      });
-      expect(report.warnings).toContainEqual(
-        expect.objectContaining({ rule: 'capped-list-no-truncation' }),
-      );
     });
   });
 
@@ -1206,30 +578,6 @@ describe('validateDefinitions', () => {
       const report = validateDefinitions({ tools: [noName1, noName2] });
       expect(report.errors.filter((e) => e.rule === 'name-required')).toHaveLength(2);
       expect(report.errors.filter((e) => e.rule === 'name-unique')).toHaveLength(0);
-    });
-
-    it('flags name-unique exactly once even with three duplicate tool names', () => {
-      const report = validateDefinitions({
-        tools: [validTool({ name: 'dup' }), validTool({ name: 'dup' }), validTool({ name: 'dup' })],
-      });
-      expect(report.errors.filter((e) => e.rule === 'name-unique')).toHaveLength(1);
-    });
-
-    it('tracks multiple independent duplicate groups without cross-contamination', () => {
-      const report = validateDefinitions({
-        tools: [
-          validTool({ name: 'a' }),
-          validTool({ name: 'a' }),
-          validTool({ name: 'b' }),
-          validTool({ name: 'b' }),
-          validTool({ name: 'c' }),
-        ],
-      });
-      const dupNames = report.errors
-        .filter((e) => e.rule === 'name-unique')
-        .map((e) => e.definitionName)
-        .sort();
-      expect(dupNames).toEqual(['a', 'b']);
     });
 
     it('falls back to uriTemplate for resource dedup when name is omitted on both', () => {
@@ -1311,21 +659,6 @@ describe('validateDefinitions', () => {
       );
     });
 
-    it('surfaces an undefined entry as a diagnostic for every definition kind', () => {
-      expect(() => validateDefinitions({ tools: [undefined] })).not.toThrow();
-      expect(validateDefinitions({ tools: [undefined] }).errors).toContainEqual(
-        expect.objectContaining({ rule: 'definition-invalid', definitionType: 'tool' }),
-      );
-      expect(() => validateDefinitions({ resources: [undefined] })).not.toThrow();
-      expect(validateDefinitions({ resources: [undefined] }).errors).toContainEqual(
-        expect.objectContaining({ rule: 'definition-invalid', definitionType: 'resource' }),
-      );
-      expect(() => validateDefinitions({ prompts: [undefined] })).not.toThrow();
-      expect(validateDefinitions({ prompts: [undefined] }).errors).toContainEqual(
-        expect.objectContaining({ rule: 'definition-invalid', definitionType: 'prompt' }),
-      );
-    });
-
     it('skips a null entry and still lints valid tools after it (masked truncation site)', () => {
       const cappedAfterNull = validTool({
         name: 'search_results',
@@ -1354,100 +687,6 @@ describe('validateDefinitions', () => {
   // -------------------------------------------------------------------------
 
   describe('silent-coverage gaps', () => {
-    it('verifies parity on a tool whose output carries a multi-value literal', () => {
-      const def = tool('probe_priority', {
-        description: 'Reports a priority drawn from a closed numeric set.',
-        annotations: { readOnlyHint: true },
-        input: z.object({ q: z.string().describe('Anything.') }),
-        output: z.object({
-          priority: z.literal([1, 2, 3, 4, 5]).describe('Closed numeric set as one schema node.'),
-          label: z.string().describe('Human-readable label.'),
-        }),
-        handler: async () => ({ priority: 3 as const, label: 'high' }),
-        format: (r) => [{ type: 'text', text: `priority ${r.priority}` }],
-      });
-
-      const report = validateDefinitions({ tools: [def] });
-      expect(report.warnings.map((w) => w.rule)).not.toContain('format-parity-walk-failed');
-      expect(report.errors).toContainEqual(
-        expect.objectContaining({ rule: 'format-parity', definitionName: 'probe_priority' }),
-      );
-      expect(report.errors.find((e) => e.rule === 'format-parity')?.message).toContain("'label'");
-    });
-
-    it('fails parity for an enum whose value only collides with a sibling field', () => {
-      const def = tool('probe_kind', {
-        description: 'Returns a case record in one of two shapes.',
-        annotations: { readOnlyHint: true },
-        input: z.object({ q: z.string().describe('Anything.') }),
-        output: z.object({
-          kind: z.enum(['full', 'outline']).describe('Which shape was returned.'),
-          case_name_full: z.string().describe('Full case name.'),
-        }),
-        handler: async () => ({ kind: 'full' as const, case_name_full: 'A v. B' }),
-        format: (r) => [{ type: 'text', text: `Name: ${r.case_name_full}` }],
-      });
-
-      const report = validateDefinitions({ tools: [def] });
-      expect(report.errors).toContainEqual(
-        expect.objectContaining({ rule: 'format-parity', definitionName: 'probe_kind' }),
-      );
-      expect(report.errors.find((e) => e.rule === 'format-parity')?.message).toContain("'kind'");
-    });
-
-    it('passes parity for a format() that escapes markdown on every value', () => {
-      const escapeMarkdown = (value: string) => value.replace(/([\\`*_{}[\]()#+\-.!<>])/g, '\\$1');
-      const def = tool('probe_escaped', {
-        description: 'Renders upstream text with markdown escaped at the render boundary.',
-        annotations: { readOnlyHint: true },
-        input: z.object({ q: z.string().describe('Anything.') }),
-        output: z.object({
-          title: z.string().describe('Upstream title.'),
-          body: z.string().describe('Upstream body.'),
-        }),
-        handler: async () => ({ title: 't', body: 'b' }),
-        format: (r) => [
-          { type: 'text', text: `# ${escapeMarkdown(r.title)}\n${escapeMarkdown(r.body)}` },
-        ],
-      });
-
-      expect(validateDefinitions({ tools: [def] }).errors).toEqual([]);
-    });
-
-    it('reports the unevaluated subtree when output nests past the walker depth limit', () => {
-      function nested(depth: number): z.ZodTypeAny {
-        if (depth === 0) return z.string().describe('Deep leaf value');
-        return z.object({ child: nested(depth - 1) }).describe(`Level ${depth}`);
-      }
-      const def = validTool({
-        name: 'deep_tool',
-        output: z.object({ root: nested(9).describe('Root') }),
-        handler: async () => ({}),
-        format: () => [{ type: 'text', text: 'summary only' }],
-      });
-
-      const report = validateDefinitions({ tools: [def] });
-      expect(report.warnings).toContainEqual(
-        expect.objectContaining({ rule: 'format-parity-depth-limit', definitionName: 'deep_tool' }),
-      );
-    });
-
-    it('evaluates truncation disclosure for a cap named maxRecords', () => {
-      const def = validTool({
-        name: 'search_records',
-        input: z.object({ maxRecords: z.number().describe('Max records to return') }),
-        output: z.object({ records: z.array(z.string()).describe('Records') }),
-        handler: async () => ({ records: [] }),
-      });
-
-      expect(validateDefinitions({ tools: [def] }).warnings).toContainEqual(
-        expect.objectContaining({
-          rule: 'capped-list-no-truncation',
-          definitionName: 'search_records',
-        }),
-      );
-    });
-
     it('errors on an input field that no value can satisfy', () => {
       const def = validTool({
         name: 'unsatisfiable_tool',

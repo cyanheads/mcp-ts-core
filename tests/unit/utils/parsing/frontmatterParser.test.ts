@@ -143,18 +143,6 @@ More content after the separator.`;
       expect(result.content).toBe(markdown);
     });
 
-    it('handles markdown with only opening --- delimiter', async () => {
-      const markdown = `---
-title: Test
-# Missing closing delimiter`;
-
-      const result = await frontmatterParser.parse(markdown);
-
-      expect(result.hasFrontmatter).toBe(false);
-      expect(result.frontmatter).toEqual({});
-      expect(result.content).toBe(markdown);
-    });
-
     it('creates auto-generated context when none is provided', async () => {
       const debugSpy = vi.spyOn(logger, 'debug');
       const markdown = 'No frontmatter here';
@@ -266,24 +254,6 @@ Content`;
       errorSpy.mockRestore();
     });
 
-    it('includes YAML content sample in error details', async () => {
-      const context = createContext();
-      const markdown = `---
-${'x: invalid\n'.repeat(100)}
----
-
-Content`;
-
-      try {
-        await frontmatterParser.parse(markdown, context);
-      } catch (error) {
-        const mcpError = error as McpError;
-        expect(mcpError.message).toContain('Failed to parse YAML');
-        // Error should include content sample
-        expect(String(error)).toBeTruthy();
-      }
-    });
-
     it('normalizes a non-Error YAML parser failure', async () => {
       vi.spyOn(yamlParser, 'parse').mockRejectedValueOnce('mapping values are not allowed here');
       const markdown = '---\ntitle: Test\n---\nContent';
@@ -314,14 +284,6 @@ Content`;
   });
 
   describe('edge cases', () => {
-    it('handles empty string input', async () => {
-      const result = await frontmatterParser.parse('');
-
-      expect(result.hasFrontmatter).toBe(false);
-      expect(result.frontmatter).toEqual({});
-      expect(result.content).toBe('');
-    });
-
     it('handles frontmatter with no content after', async () => {
       const markdown = `---
 title: Test
@@ -387,38 +349,6 @@ Content`;
 
       expect(result.frontmatter).toEqual(expected);
       expect(result.hasFrontmatter).toBe(true);
-    });
-  });
-
-  describe('type safety', () => {
-    it('supports generic type parameter for frontmatter', async () => {
-      interface NoteFrontmatter {
-        published: boolean;
-        tags: string[];
-        title: string;
-      }
-
-      const markdown = `---
-title: TypeScript Note
-tags: [typescript, testing]
-published: true
----
-
-Content`;
-
-      const result = await frontmatterParser.parse<NoteFrontmatter>(markdown);
-
-      // TypeScript should recognize these properties
-      expect(result.frontmatter.title).toBe('TypeScript Note');
-      expect(result.frontmatter.tags).toEqual(['typescript', 'testing']);
-      expect(result.frontmatter.published).toBe(true);
-    });
-  });
-
-  describe('singleton instance', () => {
-    it('exports a singleton instance', () => {
-      expect(frontmatterParser).toBeDefined();
-      expect(typeof frontmatterParser.parse).toBe('function');
     });
   });
 });
@@ -490,6 +420,7 @@ describe('frontmatterParser · delimiter scanning (#431)', () => {
   it('treats an empty document as having no frontmatter', async () => {
     const result = await frontmatterParser.parse('');
     expect(result.hasFrontmatter).toBe(false);
+    expect(result.frontmatter).toEqual({});
     expect(result.content).toBe('');
   });
 

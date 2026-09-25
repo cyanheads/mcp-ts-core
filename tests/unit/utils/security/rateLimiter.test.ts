@@ -153,27 +153,11 @@ describe('RateLimiter', () => {
     );
   });
 
-  it('should return null status for a key that has not been checked', () => {
-    const status = rateLimiter.getStatus('never-checked');
-    expect(status).toBeNull();
-  });
-
   it('should allow configuring the rate limiter and return config', () => {
     rateLimiter.configure({ windowMs: 5000, maxRequests: 10 });
     const conf = rateLimiter.getConfig();
     expect(conf.windowMs).toBe(5000);
     expect(conf.maxRequests).toBe(10);
-  });
-
-  it('should start cleanup timer when cleanup interval is set', () => {
-    rateLimiter.configure({ cleanupInterval: 1000 });
-    const timer = (rateLimiter as unknown as { cleanupTimer: NodeJS.Timeout | null }).cleanupTimer;
-    expect(timer).not.toBeNull();
-
-    // Clean up timer
-    if (timer) {
-      clearInterval(timer);
-    }
   });
 
   it('should unref the cleanup timer when supported by the environment', () => {

@@ -10,7 +10,6 @@ import {
   APP_RESOURCE_MIME_TYPE,
   appResource,
   appTool,
-  type ContentBlock,
   type CreateAppOptions,
   createFail,
   type PromptDefinition,
@@ -147,10 +146,5 @@ describe('public API type contract', () => {
     expect(typedUi.resourceUri).toBe('ui://typed/app.html');
     expect(options.tools).toHaveLength(1);
     expect(options.resources).toHaveLength(1);
-  });
-
-  it('re-exports MCP content block types from the root entry point', () => {
-    const block: ContentBlock = { type: 'text', text: 'ok' };
-    expect(block).toEqual({ type: 'text', text: 'ok' });
   });
 });

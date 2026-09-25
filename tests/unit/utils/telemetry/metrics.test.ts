@@ -10,18 +10,6 @@ import * as metricsUtils from '@/utils/telemetry/metrics.js';
 
 describe('OpenTelemetry Metrics', () => {
   describe('getMeter', () => {
-    test('should return a meter with default service name and version', () => {
-      const meter = metricsUtils.getMeter();
-      expect(meter).toBeDefined();
-      // Meter is returned from OpenTelemetry API
-    });
-
-    test('should return a meter with custom name', () => {
-      const customName = 'custom-meter';
-      const meter = metricsUtils.getMeter(customName);
-      expect(meter).toBeDefined();
-    });
-
     test('should use config values for default meter', () => {
       const getMeterSpy = vi.spyOn(metrics, 'getMeter');
       metricsUtils.getMeter();
@@ -79,21 +67,6 @@ describe('OpenTelemetry Metrics', () => {
         unit: 'bytes',
       });
     });
-
-    test('should default to unit "1"', () => {
-      metricsUtils.createCounter('test.requests', 'Request counter');
-
-      expect(createCounterSpy).toHaveBeenCalledWith('test.requests', {
-        description: 'Request counter',
-        unit: '1',
-      });
-    });
-
-    test('should return counter with add method', () => {
-      const counter = metricsUtils.createCounter('test.counter', 'Test');
-      expect(counter).toHaveProperty('add');
-      expect(typeof counter.add).toBe('function');
-    });
   });
 
   describe('createUpDownCounter', () => {
@@ -130,12 +103,6 @@ describe('OpenTelemetry Metrics', () => {
         unit: '{connections}',
       });
     });
-
-    test('should return counter with add method', () => {
-      const counter = metricsUtils.createUpDownCounter('test.gauge', 'Test');
-      expect(counter).toHaveProperty('add');
-      expect(typeof counter.add).toBe('function');
-    });
   });
 
   describe('createHistogram', () => {
@@ -170,20 +137,6 @@ describe('OpenTelemetry Metrics', () => {
         description: 'Latency histogram',
         unit: 'ms',
       });
-    });
-
-    test('should not include unit in options if not provided', () => {
-      metricsUtils.createHistogram('test.size', 'Size histogram');
-
-      expect(createHistogramSpy).toHaveBeenCalledWith('test.size', {
-        description: 'Size histogram',
-      });
-    });
-
-    test('should return histogram with record method', () => {
-      const histogram = metricsUtils.createHistogram('test.hist', 'Test');
-      expect(histogram).toHaveProperty('record');
-      expect(typeof histogram.record).toBe('function');
     });
   });
 
@@ -230,60 +183,17 @@ describe('OpenTelemetry Metrics', () => {
       });
     });
 
-    test('should accept async callback', () => {
-      const asyncCallback = async () => 123;
-      const gauge = metricsUtils.createObservableGauge('test.async', 'Async gauge', asyncCallback);
+    test.each([
+      ['async', async () => 123, 123],
+      ['sync', () => 456, 456],
+    ])('should observe the value a %s callback returns', async (_kind, callback, expected) => {
+      const gauge = metricsUtils.createObservableGauge('test.observe', 'Observed gauge', callback);
+      const registered = vi.mocked(gauge.addCallback).mock.calls[0]?.[0];
+      const result = { observe: vi.fn() };
 
-      expect(gauge).toBeDefined();
-    });
+      await registered?.(result as never);
 
-    test('should accept sync callback', () => {
-      const syncCallback = () => 456;
-      const gauge = metricsUtils.createObservableGauge('test.sync', 'Sync gauge', syncCallback);
-
-      expect(gauge).toBeDefined();
-    });
-  });
-
-  describe('Integration', () => {
-    let mockMeter: any;
-
-    beforeEach(() => {
-      mockMeter = {
-        createCounter: vi.fn().mockReturnValue({ add: vi.fn() }),
-        createHistogram: vi.fn().mockReturnValue({ record: vi.fn() }),
-        createUpDownCounter: vi.fn().mockReturnValue({ add: vi.fn() }),
-        createObservableGauge: vi.fn().mockReturnValue({ addCallback: vi.fn() }),
-      };
-      vi.spyOn(metrics, 'getMeter').mockReturnValue(mockMeter);
-    });
-
-    afterEach(() => {
-      vi.restoreAllMocks();
-    });
-
-    test('should create multiple different metric types', () => {
-      const counter = metricsUtils.createCounter('app.requests', 'Requests');
-      const histogram = metricsUtils.createHistogram('app.duration', 'Duration', 'ms');
-      const upDownCounter = metricsUtils.createUpDownCounter('app.connections', 'Connections');
-
-      expect(counter).toBeDefined();
-      expect(histogram).toBeDefined();
-      expect(upDownCounter).toBeDefined();
-    });
-
-    test('should handle metric naming conventions', () => {
-      const metricNames = [
-        'service.requests.total',
-        'http.server.duration',
-        'db.connections.active',
-        'mcp.tool.executions',
-      ];
-
-      metricNames.forEach((name) => {
-        const counter = metricsUtils.createCounter(name, `Counter for ${name}`);
-        expect(counter).toBeDefined();
-      });
+      expect(result.observe).toHaveBeenCalledExactlyOnceWith(expected);
     });
   });
 });

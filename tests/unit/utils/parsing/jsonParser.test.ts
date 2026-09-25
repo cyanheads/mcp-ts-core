@@ -72,36 +72,15 @@ describe('JsonParser', () => {
     );
   });
 
-  it('should throw an McpError if the string is empty after removing the <think> block', async () => {
-    const stringWithOnlyThinkBlock = '<think>some thoughts</think>';
-    await expect(parser.parse(stringWithOnlyThinkBlock, Allow.ALL, context)).rejects.toThrow(
-      McpError,
-    );
-    try {
-      await parser.parse(stringWithOnlyThinkBlock, Allow.ALL, context);
-    } catch (error) {
-      const mcpError = error as McpError;
-      expect(mcpError.code).toBe(JsonRpcErrorCode.ValidationError);
-      expect(mcpError.message).toContain('JSON string is empty');
-    }
-  });
+  it.each([
+    ['nothing', '<think>some thoughts</think>'],
+    ['only whitespace', '<think>thoughts</think>   '],
+  ])('should throw an McpError when %s follows the <think> block', async (_label, input) => {
+    const error = await parser.parse(input, Allow.ALL, context).catch((e: unknown) => e);
 
-  it('should correctly parse an incomplete JSON object with a partial string value', async () => {
-    const partialJson = '{"key": "value"';
-    const result = await parser.parse(partialJson, Allow.ALL, context);
-    expect(result).toEqual({ key: 'value' });
-  });
-
-  it('should throw an McpError if the string contains only whitespace after the <think> block', async () => {
-    const stringWithWhitespace = '<think>thoughts</think>   ';
-    try {
-      await parser.parse(stringWithWhitespace, Allow.ALL, context);
-      expect.unreachable('Expected McpError to be thrown');
-    } catch (error) {
-      const mcpError = error as McpError;
-      expect(mcpError.code).toBe(JsonRpcErrorCode.ValidationError);
-      expect(mcpError.message).toContain('JSON string is empty');
-    }
+    expect(error).toBeInstanceOf(McpError);
+    expect((error as McpError).code).toBe(JsonRpcErrorCode.ValidationError);
+    expect((error as McpError).message).toContain('JSON string is empty');
   });
 
   it('should handle leading/trailing whitespace in the JSON string', async () => {
@@ -151,13 +130,6 @@ describe('JsonParser', () => {
       expect.objectContaining({ operation: 'JsonParser.parseError' }),
     );
     errorSpy.mockRestore();
-  });
-
-  it('should create a default context when none is provided', async () => {
-    const jsonString = '{"test": "value"}';
-    await expect(parser.parse(jsonString, Allow.ALL)).resolves.not.toThrow();
-    const result = await parser.parse(jsonString, Allow.ALL);
-    expect(result).toEqual({ test: 'value' });
   });
 
   it('provides a singleton instance that can parse JSON without explicit options', async () => {
