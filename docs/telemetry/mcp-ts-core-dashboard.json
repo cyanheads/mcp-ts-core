@@ -339,7 +339,7 @@
       "gridPos": { "h": 8, "w": 12, "x": 12, "y": 124 },
       "fieldConfig": { "defaults": { "unit": "cps", "custom": { "drawStyle": "line", "fillOpacity": 10, "lineInterpolation": "smooth", "lineWidth": 1 }, "color": { "mode": "palette-classic" } } },
       "options": { "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["mean", "max"] }, "tooltip": { "mode": "multi", "sort": "desc" } },
-      "targets": [{ "datasource": { "type": "prometheus", "uid": "${datasource}" }, "expr": "sum by (mcp_rate_limit_key) (rate(mcp_ratelimit_rejections_total{service_name=~\"(?:@[^/]+/)?(?:$service)\"}[$__rate_interval]))", "legendFormat": "{{mcp_rate_limit_key}}", "refId": "A" }]
+      "targets": [{ "datasource": { "type": "prometheus", "uid": "${datasource}" }, "expr": "sum(rate(mcp_ratelimit_rejections_total{service_name=~\"(?:@[^/]+/)?(?:$service)\"}[$__rate_interval]))", "legendFormat": "rejections", "refId": "A" }]
     },
     { "id": 90, "type": "row", "title": "Process health", "collapsed": false, "gridPos": { "h": 1, "w": 24, "x": 0, "y": 132 }, "panels": [] },
     {

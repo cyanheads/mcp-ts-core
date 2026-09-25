@@ -48,7 +48,7 @@ Dots become underscores everywhere. Counters get `_total`. Histograms with physi
 | **Storage / LLM / Speech / Graph** | Op rate and p95 latency for each service. LLM also shows tokens/sec by type (`input`/`output`) — multiply by your provider's $/Mtoken to see live cost. |
 | **HTTP server & client** | Server: req rate by method, p50/p95/p99 latency, status code distribution. Client: p95 duration by upstream `server_address`. |
 | **Sessions / Auth** | Session events (`created`/`terminated`/`rejected`/`stale_cleanup`), heartbeat failures by transport, auth attempts and p95 by outcome (`success`/`failure`/`missing`). |
-| **Errors & rate limits** | Classified errors keyed on JSON-RPC code (`-32603`, `-32001`, …), and rate-limit rejections by key. |
+| **Errors & rate limits** | Classified errors keyed on JSON-RPC code (`-32603`, `-32001`, …), and the rate-limit rejection rate (one series; the limiter key is not a label). |
 | **Process health** | RSS / heap used / heap total, event loop p99 delay (thresholded 50/200 ms), event loop utilization (thresholded 0.7/0.9), and process uptime. |
 
 ---
@@ -69,6 +69,8 @@ Datadog ingests OTel metrics natively or via the OTel Collector's `datadog` expo
 | `sum(rate(mcp_tool_errors_total[5m])) / sum(rate(mcp_tool_calls_total[5m]))` | `sum:mcp.tool.errors{*}.as_rate() / sum:mcp.tool.calls{*}.as_rate()` |
 
 Service filter: `service:mcp-ts-core` (Datadog populates `service` from `service.name`).
+
+The error-rate ratio, here and in the dashboard's "Tool error rate" stat, is failures inside the handler over calls that reached it. A call rejected at argument validation (`-32602`) is in neither series; count those from `mcp.errors.classified` when the caller-facing failure rate is the question.
 
 ### New Relic (NRQL)
 

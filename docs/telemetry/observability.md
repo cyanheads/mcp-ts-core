@@ -13,14 +13,17 @@ OTel is **off by default**. Setting `OTEL_ENABLED=true` alone does nothing — y
 | Env var | Default | Purpose |
 |:--------|:--------|:--------|
 | `OTEL_ENABLED` | `false` | Master switch. Must be `true` to start the SDK. |
-| `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` | — | OTLP/HTTP traces endpoint (e.g. `http://localhost:4318/v1/traces`). |
-| `OTEL_EXPORTER_OTLP_METRICS_ENDPOINT` | — | OTLP/HTTP metrics endpoint (e.g. `http://localhost:4318/v1/metrics`). |
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | — | OTLP/HTTP base URL (e.g. `http://localhost:4318`). Traces go to `<base>/v1/traces`, metrics to `<base>/v1/metrics`; a path prefix is kept. |
+| `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` | — | OTLP/HTTP traces endpoint (e.g. `http://localhost:4318/v1/traces`). Overrides the base for traces; used as-is. |
+| `OTEL_EXPORTER_OTLP_METRICS_ENDPOINT` | — | OTLP/HTTP metrics endpoint (e.g. `http://localhost:4318/v1/metrics`). Overrides the base for metrics; used as-is. |
 | `OTEL_SERVICE_NAME` | `createApp` `name` → `package.json` `name` | `service.name` resource attribute. Seeded from `createApp({ name })` when unset; an env value set before startup wins. |
 | `OTEL_SERVICE_VERSION` | `package.json` `version` | `service.version` resource attribute. |
 | `OTEL_TRACES_SAMPLER_ARG` | `1.0` | Trace sampling ratio (0–1) for `TraceIdRatioBasedSampler`. |
 | `OTEL_LOG_LEVEL` | `INFO` | OTel diagnostic logger level (`NONE`/`ERROR`/`WARN`/`INFO`/`DEBUG`/`VERBOSE`/`ALL`). |
 
 Metrics are pushed via `PeriodicExportingMetricReader` every **15 seconds**. Traces use `BatchSpanProcessor`.
+
+Endpoint resolution follows the [OTLP exporter spec](https://opentelemetry.io/docs/specs/otel/protocol/exporter/#endpoint-urls-for-otlphttp), and those two exporters are the only export path: a signal with no resolved endpoint exports nothing, and OTel log records are never exported. `NodeSDK`'s own env-driven exporters (`OTEL_METRICS_EXPORTER`, `OTEL_LOGS_EXPORTER`) are not consulted.
 
 ### Quick local stack
 
@@ -31,8 +34,7 @@ docker run --rm -p 4318:4318 -p 16686:16686 \
 
 # .env
 OTEL_ENABLED=true
-OTEL_EXPORTER_OTLP_TRACES_ENDPOINT=http://localhost:4318/v1/traces
-OTEL_EXPORTER_OTLP_METRICS_ENDPOINT=http://localhost:4318/v1/metrics
+OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4318
 ```
 
 Open Jaeger at `http://localhost:16686`, pick the service, see traces.
@@ -117,7 +119,23 @@ All custom metrics are namespaced `mcp.*` (or `process.*`/`http.client.*` where 
 | `mcp.prompt.message_count` | histogram | `{messages}` | `mcp.prompt.name` |
 | `mcp.requests.active` | up/down counter | `{requests}` | — (in-flight handler executions, all three types) |
 
-`error_category` comes from the classified JSON-RPC error code, with one refinement: `RateLimited` (`-32003`) carries two sources, so the canvas tenant-cap refusal — identified by `data.reason: 'canvas_capacity_exhausted'` — files under `server`, while every other `-32003` stays `upstream`. `reason` itself never becomes a metric attribute.
+`error_category` comes from the thrown `McpError`'s code, with one refinement: `RateLimited` (`-32003`) carries two sources, so the canvas tenant-cap refusal — identified by `data.reason: 'canvas_capacity_exhausted'` — files under `server`, while every other `-32003` stays `upstream`. `reason` itself never becomes a metric attribute. A handler that throws anything other than an `McpError` is filed under `server` without classification; `mcp.errors.classified` for the same call carries the code the error handler pattern-matched, which can decode to `client` (#480).
+
+`mcp.tool.errors` counts failures inside the measured region — the handler and its response pipeline. A call rejected before the handler runs (argument validation, `-32602`; an inline `auth` scope refusal) is absent from it and from `mcp.tool.calls`, and appears only in `mcp.errors.classified`.
+
+### Input pre-validation, outbound pacer
+
+| Metric | Type | Unit | Attributes |
+|:-------|:-----|:-----|:-----------|
+| `mcp.input.ignored_key` | counter | `{keys}` | `mcp.tool.name`, `mcp.input.ignore_rule` (the ignore-list entry that matched, or `underscore_prefix`) |
+| `mcp.input.aliased` | counter | `{keys}` | `mcp.tool.name`, `mcp.input.target` (the declared key), `mcp.input.alias_kind` (`declared`/`case_style`) |
+| `mcp.input.coerced` | counter | `{calls}` | `mcp.tool.name`, `mcp.input.coercion` (`stringified_array`) |
+| `mcp.pacer.cooldowns` | counter | `{cooldowns}` | `mcp.pacer.name` |
+| `mcp.pacer.queue_depth` | up/down counter | `{requests}` | `mcp.pacer.name` |
+| `mcp.pacer.sheds` | counter | `{requests}` | `mcp.pacer.name` |
+| `mcp.pacer.wait` | histogram | `ms` | `mcp.pacer.name` |
+
+Every value above is author- or framework-defined; the caller's own key text never becomes an attribute (it rides the debug log instead).
 
 ### Storage, LLM, speech, graph
 
@@ -153,8 +171,10 @@ All custom metrics are namespaced `mcp.*` (or `process.*`/`http.client.*` where 
 | Metric | Type | Unit | Attributes |
 |:-------|:-----|:-----|:-----------|
 | `mcp.errors.classified` | counter | `{errors}` | `mcp.error.classified_code` (JSON-RPC code), `operation`, and `mcp.error.severity` when the failure's `errors[]` entry declared one |
-| `mcp.ratelimit.rejections` | counter | `{rejections}` | `mcp.rate_limit.key` |
+| `mcp.ratelimit.rejections` | counter | `{rejections}` | — (the limiter key is per caller and stays off the metric) |
 | `http.client.request.duration` | histogram | `s` | `http.request.method`, `server.address`, `http.response.status_code` (when > 0; absent on network errors before a response is received) |
+
+`mcp.errors.classified` increments once per `ErrorHandler.handleError` call, so its scope differs from the per-surface error counters: it includes tool calls rejected before the handler ran (`operation` is `tool:<name>` either way), prompt failures (`prompt:<name>`), transport faults (`httpTransport`), and any service that routes through `ErrorHandler.tryCatch` under its own `operation`; one failed call can therefore count more than once, and a resource failure never counts here because the resource factory classifies without the handler. Its origin is recoverable only from the code, which cannot see `data.reason` (#481).
 
 ### Process
 
