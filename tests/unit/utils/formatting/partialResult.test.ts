@@ -10,6 +10,7 @@ import {
   failureEntrySchema,
   partialResult,
   partialResultSchema,
+  resolvePartialResultKeys,
 } from '@/utils/formatting/partialResult.js';
 
 describe('failureEntrySchema', () => {
@@ -73,38 +74,100 @@ describe('partialResultSchema', () => {
     });
     expect((withFailures as { unavailable: unknown[] }).unavailable).toHaveLength(1);
   });
+});
 
-  it('rejects unknown reason enums', () => {
-    const schema = partialResultSchema({
-      succeededKey: 'articles',
-      succeededSchema: itemSchema,
-      failedKey: 'unavailable',
-      idKey: 'pmid',
-      reason,
-    });
-
-    expect(() =>
-      schema.parse({
-        articles: [],
-        totalSucceeded: 0,
-        unavailable: [{ pmid: '1', reason: 'bogus' }],
-      }),
-    ).toThrow();
+// Issue #524 — partial-success telemetry reads the author's keys, resolved from
+// the output shape.
+describe('resolvePartialResultKeys', () => {
+  const itemSchema = z.object({ id: z.string().describe('Item ID') });
+  const reason = z.enum(['not_found', 'withdrawn']).describe('Why it failed');
+  const Out = partialResultSchema({
+    succeededKey: 'articles',
+    succeededSchema: itemSchema,
+    failedKey: 'unavailable',
+    idKey: 'pmid',
+    reason,
   });
 
-  it('serializes to JSON Schema for tools/list compatibility', () => {
-    const schema = partialResultSchema({
+  it('names the arrays partialResultSchema built', () => {
+    expect(resolvePartialResultKeys(Out.shape)).toEqual({
+      failed: 'unavailable',
+      succeeded: 'articles',
+    });
+  });
+
+  it.each([
+    ['.extend()', () => Out.extend({ note: z.string().describe('Note') }).shape],
+    ['.pick()', () => Out.pick({ articles: true, unavailable: true }).shape],
+    ['.omit()', () => Out.omit({ totalSucceeded: true }).shape],
+    ['a .shape spread', () => z.object({ ...Out.shape }).shape],
+  ])('follows the fields through %s', (_label, shape) => {
+    expect(resolvePartialResultKeys(shape())).toEqual({
+      failed: 'unavailable',
+      succeeded: 'articles',
+    });
+  });
+
+  it('reads the key a field sits under, not the key it was built with', () => {
+    const renamed = { items: Out.shape.articles, misses: Out.shape.unavailable };
+    expect(resolvePartialResultKeys(renamed)).toEqual({ failed: 'misses', succeeded: 'items' });
+  });
+
+  it('falls back to the literal key for a role no helper field claims', () => {
+    const literalFailed = partialResultSchema({
       succeededKey: 'articles',
       succeededSchema: itemSchema,
-      failedKey: 'unavailable',
+      failedKey: 'failed',
       idKey: 'pmid',
       reason,
     });
+    expect(resolvePartialResultKeys(literalFailed.shape)).toEqual({
+      failed: 'failed',
+      succeeded: 'articles',
+    });
+    expect(resolvePartialResultKeys(Out.pick({ unavailable: true }).shape)).toEqual({
+      failed: 'unavailable',
+      succeeded: 'succeeded',
+    });
+  });
 
-    // Sanity check — must be json-schema-serializable (no z.custom, z.transform, etc.)
-    const jsonSchema = z.toJSONSchema(schema);
-    expect(jsonSchema).toBeDefined();
-    expect(jsonSchema).toMatchObject({ type: 'object' });
+  it.each([
+    [
+      'hand-written arrays',
+      {
+        articles: z.array(itemSchema).describe('Found'),
+        unavailable: z.array(itemSchema).describe('Missing'),
+      },
+    ],
+    ['a .partial() derivation, which rebuilds the fields', Out.partial().shape],
+  ])('resolves the literal keys for %s', (_label, shape) => {
+    expect(resolvePartialResultKeys(shape)).toEqual({ failed: 'failed', succeeded: 'succeeded' });
+  });
+
+  it('leaves the JSON Schema identical to the same shape built by hand', () => {
+    const failure = z.object({
+      pmid: z.string().describe('Identifier (pmid)'),
+      reason,
+      detail: z.string().optional().describe('Additional human-readable context, when available'),
+    });
+    const byHand = z.object({
+      articles: z.array(itemSchema).describe('Successful items (articles)'),
+      totalSucceeded: z
+        .number()
+        .int()
+        .nonnegative()
+        .describe("Number of successful items in 'articles'"),
+      unavailable: z
+        .array(failure)
+        .optional()
+        .describe(
+          'Per-input explanations for inputs that could not be returned. Absent when nothing failed.',
+        ),
+    });
+
+    expect(JSON.stringify(z.toJSONSchema(Out, { io: 'output' }))).toBe(
+      JSON.stringify(z.toJSONSchema(byHand, { io: 'output' })),
+    );
   });
 });
 

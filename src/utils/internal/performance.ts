@@ -11,6 +11,10 @@ import { type Span, SpanStatusCode, trace } from '@opentelemetry/api';
 import { config } from '@/config/index.js';
 import { isInputRequiredSignal } from '@/mcp-server/inputRequired.js';
 import { McpError } from '@/types-global/errors.js';
+import {
+  DEFAULT_PARTIAL_RESULT_KEYS,
+  type PartialResultKeys,
+} from '@/utils/formatting/partialResult.js';
 import { type ErrorCategory, getErrorCategory } from '@/utils/internal/error-handler/mappings.js';
 import { logger } from '@/utils/internal/logger.js';
 import { type RequestContext, withActiveSpan, withExtra } from '@/utils/internal/requestContext.js';
@@ -372,16 +376,18 @@ const TOOL_KIND: MeasuredKind = {
 };
 
 /**
- * Convention-based partial-success detection: a measured payload carrying a
- * non-empty `failed` array — the batch response shape the design skill
- * recommends. `batchSucceeded` is reported only when a `succeeded` array sits
- * beside it.
+ * Batch partial-success detection: a measured payload carrying a non-empty
+ * array under `keys.failed`. `batchSucceeded` is reported only when an array
+ * sits under `keys.succeeded` beside it.
  */
 function detectPartialSuccess(
   output: unknown,
+  keys: PartialResultKeys,
 ): { batchFailed: number; batchSucceeded: number | undefined } | undefined {
   if (output == null || typeof output !== 'object' || Array.isArray(output)) return undefined;
-  const { failed, succeeded } = output as Record<string, unknown>;
+  const record = output as Record<string, unknown>;
+  const failed = record[keys.failed];
+  const succeeded = record[keys.succeeded];
   if (!Array.isArray(failed) || failed.length === 0) return undefined;
   return {
     batchFailed: failed.length,
@@ -413,6 +419,9 @@ function detectPartialSuccess(
  *   returned key/value map is set on the span as extra attributes. Lets callers
  *   attach post-hoc signals (e.g. `mcp.tool.enriched`) without coupling this
  *   function to their domain. Not called on the error path.
+ * @param partialResultKeys - The measured payload's failed/succeeded array keys
+ *   for partial-success detection — what `resolvePartialResultKeys` reads off the
+ *   tool's output schema. Defaults to the literal `failed`/`succeeded` envelope.
  * @returns A promise that resolves with the tool's return value or rejects with the original error.
  */
 export async function measureToolExecution<T>(
@@ -423,6 +432,7 @@ export async function measureToolExecution<T>(
   context: RequestContext & { toolName: string },
   inputPayload: unknown,
   successAttributes?: () => Record<string, boolean | number | string>,
+  partialResultKeys: PartialResultKeys = DEFAULT_PARTIAL_RESULT_KEYS,
 ): Promise<T> {
   const { toolName } = context;
   const inputBytes = toBytes(inputPayload);
@@ -437,7 +447,7 @@ export async function measureToolExecution<T>(
     {
       onSuccess: (span, outcome) => {
         span.setAttribute(ATTR_MCP_TOOL_OUTPUT_BYTES, outcome.outputBytes);
-        partial = detectPartialSuccess(outcome.measuredOutput);
+        partial = detectPartialSuccess(outcome.measuredOutput, partialResultKeys);
         if (partial) {
           span.setAttribute(ATTR_MCP_TOOL_PARTIAL_SUCCESS, true);
           span.setAttribute(ATTR_MCP_TOOL_BATCH_FAILED, partial.batchFailed);

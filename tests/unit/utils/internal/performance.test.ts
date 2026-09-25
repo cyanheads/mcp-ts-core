@@ -403,6 +403,45 @@ describe('measureToolExecution', () => {
     );
   });
 
+  it('reads the failed and succeeded arrays under the keys it is given (#524)', async () => {
+    await measureToolExecution(
+      async () => ({
+        articles: [{ pmid: '1' }, { pmid: '3' }],
+        unavailable: [{ pmid: '2', reason: 'not_found' }],
+      }),
+      { toolName: 'keyed-batch', requestId: 'req-ps5', timestamp: new Date().toISOString() },
+      {},
+      undefined,
+      { failed: 'unavailable', succeeded: 'articles' },
+    );
+
+    expect(span.setAttribute).toHaveBeenCalledWith('mcp.tool.partial_success', true);
+    expect(span.setAttribute).toHaveBeenCalledWith('mcp.tool.batch.failed_count', 1);
+    expect(span.setAttribute).toHaveBeenCalledWith('mcp.tool.batch.succeeded_count', 2);
+    const call = infoSpy.mock.calls[0];
+    if (!call) throw new Error('infoSpy was not called');
+    expect((call[1] as any).extra.metrics).toMatchObject({
+      partialSuccess: true,
+      batchFailed: 1,
+      batchSucceeded: 2,
+    });
+  });
+
+  it('ignores the literal failed key when given other keys', async () => {
+    await measureToolExecution(
+      async () => ({ articles: [], failed: [{ pmid: '2' }] }),
+      { toolName: 'keyed-literal', requestId: 'req-ps6', timestamp: new Date().toISOString() },
+      {},
+      undefined,
+      { failed: 'unavailable', succeeded: 'articles' },
+    );
+
+    expect(span.setAttribute).not.toHaveBeenCalledWith(
+      'mcp.tool.partial_success',
+      expect.anything(),
+    );
+  });
+
   it('does not detect partial success on non-object results', async () => {
     await measureToolExecution(
       async () => 'plain string',
@@ -498,8 +537,10 @@ describe('measureToolExecution', () => {
     const call = infoSpy.mock.calls[0];
     if (!call) throw new Error('infoSpy was not called');
     const [, logMeta] = call;
-    expect((logMeta as any).extra.metrics.inputBytes).toBeGreaterThan(0);
-    expect((logMeta as any).extra.metrics.outputBytes).toBeGreaterThan(0);
+    // Structural estimate: 11 bytes of braces/commas + 81 of `"key":` + 52 of
+    // values (the function contributes 0); `{"output":2}` estimates to 12.
+    expect((logMeta as any).extra.metrics.inputBytes).toBe(144);
+    expect((logMeta as any).extra.metrics.outputBytes).toBe(12);
   });
 
   it('returns zero bytes when both serialization and structural estimation fail', async () => {
@@ -624,19 +665,6 @@ describe('measureResourceExecution', () => {
       'mcp.resource.success': true,
     });
     expect(mockErrorCounterAdd).not.toHaveBeenCalled();
-  });
-
-  it('records output bytes histogram on success', async () => {
-    await measureResourceExecution(
-      async () => ({ items: [1, 2, 3] }),
-      { resourceName: 'bytes-resource', requestId: 'req-r3', timestamp: new Date().toISOString() },
-      { uri: 'test://items/3', mimeType: 'application/json' },
-    );
-
-    // Output bytes histogram should be recorded (at least one call with resource name attr)
-    expect(mockHistogramRecord).toHaveBeenCalledWith(expect.any(Number), {
-      'mcp.resource.name': 'bytes-resource',
-    });
   });
 
   /** Histogram records carrying the resource name alone — `mcp.resource.output_bytes`. */
@@ -897,9 +925,15 @@ describe('measurePromptGeneration', () => {
       { topic: 'x' },
     );
 
-    expect(mockHistogramRecord).toHaveBeenCalledWith(expect.any(Number), {
-      'mcp.prompt.name': 'bytes-prompt',
-    });
+    // input_bytes, output_bytes, message_count — the records carrying the name alone.
+    const nameOnly = { 'mcp.prompt.name': 'bytes-prompt' };
+    expect(
+      mockHistogramRecord.mock.calls.filter(([, attrs]) => Object.keys(attrs).length === 1),
+    ).toEqual([
+      [Buffer.byteLength(JSON.stringify({ topic: 'x' }), 'utf8'), nameOnly],
+      [Buffer.byteLength(JSON.stringify(messages), 'utf8'), nameOnly],
+      [2, nameOnly],
+    ]);
   });
 
   it('records OTel error counter and logs via logger.error on failure', async () => {

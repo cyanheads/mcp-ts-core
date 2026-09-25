@@ -9,6 +9,52 @@
 import { z } from 'zod';
 
 /**
+ * The two output keys batch partial-success telemetry reads: the array of
+ * failed entries and the array of succeeded items.
+ */
+export interface PartialResultKeys {
+  failed: string;
+  succeeded: string;
+}
+
+/** The keys read when the output schema names no others: a `{ succeeded, failed }` envelope. */
+export const DEFAULT_PARTIAL_RESULT_KEYS: Readonly<PartialResultKeys> = Object.freeze({
+  failed: 'failed',
+  succeeded: 'succeeded',
+});
+
+/**
+ * The role of each array field {@link partialResultSchema} builds, keyed on the
+ * field instance. `.extend()`, `.pick()`, `.omit()`, and a `.shape` spread all
+ * reuse field instances, so the role survives them; a side table rather than
+ * `.meta()` keeps the advertised JSON Schema unchanged.
+ */
+const partialResultFieldRoles = new WeakMap<object, keyof PartialResultKeys>();
+
+/**
+ * Resolves the keys partial-success telemetry reads from a tool's output shape:
+ * the key of each array field {@link partialResultSchema} built, by role, with
+ * {@link DEFAULT_PARTIAL_RESULT_KEYS} filling any role no such field claims.
+ *
+ * Keyed on field instances, so a derivation that rebuilds a field — `.partial()`,
+ * `.required()`, re-describing the field itself — falls back to the default key
+ * for that role.
+ */
+export function resolvePartialResultKeys(shape: z.ZodRawShape): PartialResultKeys {
+  let failed: string | undefined;
+  let succeeded: string | undefined;
+  for (const [key, field] of Object.entries(shape)) {
+    const role = partialResultFieldRoles.get(field);
+    if (role === 'failed') failed ??= key;
+    else if (role === 'succeeded') succeeded ??= key;
+  }
+  return {
+    failed: failed ?? DEFAULT_PARTIAL_RESULT_KEYS.failed,
+    succeeded: succeeded ?? DEFAULT_PARTIAL_RESULT_KEYS.succeeded,
+  };
+}
+
+/**
  * Builds a Zod schema for one entry in a partial-failure list.
  *
  * The shape is `{ [idKey]: string; reason: TReason; detail?: string }` —
@@ -76,6 +122,11 @@ export function failureEntrySchema<TIdKey extends string, TReason extends z.ZodT
  * stable reason codes. Wraps `failureEntrySchema` so callers don't have to
  * compose three things.
  *
+ * Partial-success telemetry (`mcp.tool.partial_success`, `mcp.tool.batch.*`)
+ * reads the two arrays under `succeededKey` and `failedKey`, including after
+ * `.extend()`, `.pick()`, `.omit()`, or a `.shape` spread. See
+ * {@link resolvePartialResultKeys} for the derivations it does not follow.
+ *
  * @example
  * ```ts
  * const ArticleSchema = z.object({ pmid: z.string(), title: z.string() });
@@ -89,8 +140,9 @@ export function failureEntrySchema<TIdKey extends string, TReason extends z.ZodT
  *     idKey: 'pmid',
  *     reason: z.enum(['not_found', 'withdrawn']),
  *   }),
- *   // → { articles: ArticleSchema[], totalReturned: number,
- *   //     unavailable?: [{pmid, reason, detail?}], totalFailed?: number }
+ *   // → { articles: ArticleSchema[], totalSucceeded: number,
+ *   //     unavailable?: [{pmid, reason, detail?}] }
+ *   //   plus totalFailed?: number with includeTotalFailed: true
  * });
  * ```
  */
@@ -143,6 +195,9 @@ export function partialResultSchema<
     .describe(
       `Per-input explanations for inputs that could not be returned. Absent when nothing failed.`,
     );
+
+  partialResultFieldRoles.set(succeededField, 'succeeded');
+  partialResultFieldRoles.set(failedField, 'failed');
 
   const baseShape = {
     [opts.succeededKey]: succeededField,

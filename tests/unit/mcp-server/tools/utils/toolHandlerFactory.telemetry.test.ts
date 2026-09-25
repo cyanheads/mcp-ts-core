@@ -88,6 +88,7 @@ import {
   type HandlerServices,
   type NotifierSources,
 } from '@/mcp-server/tools/utils/toolHandlerFactory.js';
+import { partialResult, partialResultSchema } from '@/utils/formatting/partialResult.js';
 import { TELEMETRY_LOG_MESSAGES } from '@/utils/internal/telemetryMessages.js';
 
 // ---------------------------------------------------------------------------
@@ -324,6 +325,112 @@ describe('tool telemetry records the terminal outcome (#346)', () => {
 
       expect(span.setAttribute).toHaveBeenCalledWith('mcp.tool.partial_success', true);
       expect(completionMetrics()).toMatchObject({ partialSuccess: true });
+    });
+  });
+
+  // Issue #524 — a partialResultSchema output reports under the author's keys.
+  describe('a partialResultSchema batch', () => {
+    const Item = z.object({ pmid: z.string().describe('PMID') });
+    const Reason = z.enum(['not_found']).describe('Why it failed');
+    const schemaFor = (succeededKey: string, failedKey: string) =>
+      partialResultSchema({
+        succeededKey,
+        succeededSchema: Item,
+        failedKey,
+        idKey: 'pmid',
+        reason: Reason,
+      });
+    const Out = schemaFor('articles', 'unavailable');
+    const batch = {
+      articles: [{ pmid: '1' }, { pmid: '3' }],
+      unavailable: [{ pmid: '2', reason: 'not_found' }],
+    };
+
+    /** A tool over `output` whose handler returns `result`. */
+    const batchTool = (output: unknown, result: unknown) =>
+      tool('telemetry_partial', {
+        description: 'Returns a partial batch result.',
+        input: z.object({}),
+        output: output as typeof Out,
+        handler: () => result as z.infer<typeof Out>,
+      });
+
+    function expectPartial(batchSucceeded: number, batchFailed: number): void {
+      expect(span.setAttribute).toHaveBeenCalledWith('mcp.tool.partial_success', true);
+      expect(span.setAttribute).toHaveBeenCalledWith('mcp.tool.batch.failed_count', batchFailed);
+      expect(span.setAttribute).toHaveBeenCalledWith(
+        'mcp.tool.batch.succeeded_count',
+        batchSucceeded,
+      );
+      expect(completionMetrics()).toMatchObject({
+        partialSuccess: true,
+        batchFailed,
+        batchSucceeded,
+      });
+    }
+
+    function expectNoPartial(): void {
+      expect(span.setAttribute).not.toHaveBeenCalledWith(
+        'mcp.tool.partial_success',
+        expect.anything(),
+      );
+      expect(completionMetrics().partialSuccess).toBeUndefined();
+    }
+
+    it.each([
+      ['as built', Out, { ...batch, totalSucceeded: 2 }],
+      [
+        'after .extend()',
+        Out.extend({ note: z.string().describe('Note') }),
+        { ...batch, totalSucceeded: 2, note: 'x' },
+      ],
+      ['after .pick()', Out.pick({ articles: true, unavailable: true }), batch],
+      ['after .omit()', Out.omit({ totalSucceeded: true }), batch],
+      ['after a .shape spread', z.object({ ...Out.shape }), { ...batch, totalSucceeded: 2 }],
+    ])('reports articles/unavailable %s', async (_label, output, result) => {
+      const call = await callTool(batchTool(output, result));
+
+      expect(call.isError).toBeUndefined();
+      expectPartial(2, 1);
+    });
+
+    it('reports batchSucceeded when only the succeeded key is custom', async () => {
+      const result = partialResult({
+        succeededKey: 'articles',
+        succeeded: batch.articles,
+        failedKey: 'failed',
+        failed: batch.unavailable,
+      });
+
+      await callTool(batchTool(schemaFor('articles', 'failed'), result));
+
+      expectPartial(2, 1);
+    });
+
+    it('reports nothing when the failed array is absent', async () => {
+      const result = partialResult({
+        succeededKey: 'articles',
+        succeeded: batch.articles,
+        failedKey: 'unavailable',
+        failed: [],
+      });
+
+      await callTool(batchTool(Out, result));
+
+      expectNoPartial();
+    });
+
+    it('reports nothing for hand-written arrays under other names', async () => {
+      const output = z.object({
+        articles: z.array(Item).describe('Found'),
+        unavailable: z.array(Item).describe('Missing'),
+      });
+
+      await callTool(
+        batchTool(output, { articles: [{ pmid: '1' }], unavailable: [{ pmid: '2' }] }),
+      );
+
+      expectNoPartial();
     });
   });
 

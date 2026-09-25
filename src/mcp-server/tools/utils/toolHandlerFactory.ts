@@ -30,6 +30,7 @@ import {
   JsonRpcErrorCode,
   McpError,
 } from '@/types-global/errors.js';
+import { resolvePartialResultKeys } from '@/utils/formatting/partialResult.js';
 import { asRequestCancelled, ErrorHandler } from '@/utils/internal/error-handler/errorHandler.js';
 import { measureToolExecution } from '@/utils/internal/performance.js';
 import { type RequestContext, requestContextService } from '@/utils/internal/requestContext.js';
@@ -819,6 +820,10 @@ export function createToolHandler(
   input: Record<string, unknown>,
   ctx: ServerContext,
 ) => Promise<CallToolResult | InputRequiredResult> {
+  // The handler's return value carries no marker, so the arrays partial-success
+  // telemetry reads are named by the output schema — resolved once here (#524).
+  const partialResultKeys = resolvePartialResultKeys(def.output.shape);
+
   return async (input, serverContext): Promise<CallToolResult | InputRequiredResult> => {
     const request = resolveHandlerRequest(serverContext, services, notifiers);
     const appContext = requestContextService.createRequestContext({
@@ -895,6 +900,7 @@ export function createToolHandler(
             ? { [ATTR_MCP_TOOL_ENRICHED]: true }
             : {};
         },
+        partialResultKeys,
       );
     } catch (error: unknown) {
       // `ctx.requestInput(...)` is protocol control flow, not a failure: return
