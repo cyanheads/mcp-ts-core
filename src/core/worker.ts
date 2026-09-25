@@ -227,7 +227,13 @@ export function createWorkerHandler(options: WorkerHandlerOptions = {}) {
       try {
         if (typeof process !== 'undefined' && process.env) {
           process.env.IS_SERVERLESS = 'true';
-          process.env.MCP_TRANSPORT_TYPE = 'http'; // Workers are always HTTP — context.ts reads this for tenant isolation
+          /**
+           * Workers are always HTTP. `MCP_TRANSPORT_TYPE` is not a core binding, so this
+           * write is what makes `config.mcpTransportType` read `http` — without it the
+           * tenant default would resolve as stdio and give a tid-less jwt/oauth token
+           * the shared 'default' tenant.
+           */
+          process.env.MCP_TRANSPORT_TYPE = 'http';
         } else {
           Object.assign(globalThis, { IS_SERVERLESS: true });
         }

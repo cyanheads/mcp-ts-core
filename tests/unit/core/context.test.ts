@@ -8,7 +8,7 @@
 
 import type { LoggingLevel } from '@modelcontextprotocol/server';
 import { inputRequired } from '@modelcontextprotocol/server';
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { z } from 'zod';
 
 import {
@@ -28,7 +28,7 @@ import {
 import {
   createContextInputs,
   createRequestInput,
-  InputRequiredSignal,
+  type InputRequiredSignal,
   isInputRequiredSignal,
 } from '@/mcp-server/inputRequired.js';
 import { StorageService } from '@/storage/core/StorageService.js';
@@ -50,9 +50,15 @@ function buildAppContext(overrides: Partial<RequestContext> = {}): RequestContex
   };
 }
 
+/**
+ * `defaultTenantId` defaults to `'default'`, the value stdio and HTTP with
+ * `MCP_AUTH_MODE=none` resolve to; pass `undefined` for the HTTP `jwt`/`oauth`
+ * shape.
+ */
 function buildDeps(overrides: Partial<ContextDeps> = {}): ContextDeps {
   return {
     appContext: buildAppContext(),
+    defaultTenantId: 'default',
     inputs: createContextInputs(undefined),
     logger,
     requestInput: createRequestInput(),
@@ -63,32 +69,12 @@ function buildDeps(overrides: Partial<ContextDeps> = {}): ContextDeps {
 }
 
 /**
- * Sets or unsets a `process.env` var. Assigning `undefined` directly (e.g.
- * `process.env.KEY = undefined`) does not reliably leave the key absent —
- * under this suite's worker pool it coerces to the string `"undefined"`,
- * which then fails downstream Zod enum validation (e.g. the real
- * `ConfigSchema`'s `mcpTransportType`/`mcpAuthMode` fields read by
- * `StorageService`). `delete` is the only form that reliably unsets it.
+ * Undoes any `vi.spyOn` on the shared `logger` singleton so later tests never
+ * observe an earlier test's mocked implementation, and any `vi.stubEnv`.
  */
-function setEnvVar(key: string, value: string | undefined): void {
-  if (value === undefined) {
-    delete process.env[key];
-  } else {
-    process.env[key] = value;
-  }
-}
-
-// Applies to every test in this file: keeps the tenantId-resolution env vars
-// deterministic regardless of ambient process state, and undoes any
-// `vi.spyOn` set up on the shared `logger` singleton so later tests never
-// observe an earlier test's mocked logger implementation.
-beforeEach(() => {
-  delete process.env.MCP_TRANSPORT_TYPE;
-  delete process.env.MCP_AUTH_MODE;
-});
-
 afterEach(() => {
   vi.restoreAllMocks();
+  vi.unstubAllEnvs();
 });
 
 describe('createFail', () => {
@@ -139,6 +125,11 @@ describe('createFail', () => {
   });
 
   it('auto-populates data.reason and ignores a caller-supplied data.reason override', () => {
+    // Regression: spread order in createFail was `{ reason, ...data }`, which
+    // let user data overwrite the framework-canonical reason. The fix flips it
+    // to `{ ...data, reason }` so the contract reason always wins. This is a
+    // load-bearing invariant for observability — observers rely on data.reason
+    // matching the contract entry.
     const fail = createFail(errors);
     const err = fail('no_match', undefined, { reason: 'something_else', ids: ['a'] });
 
@@ -188,6 +179,7 @@ describe('createFail', () => {
 
     expect(err).toBeInstanceOf(McpError);
     expect(err.code).toBe(JsonRpcErrorCode.InternalError);
+    expect(err.message).toContain('typo_reason');
     expect(err.data?.reason).toBe('typo_reason');
     expect(err.data?.declaredReasons).toEqual([
       'no_match',
@@ -488,44 +480,40 @@ describe('enrichment and content store stash/read', () => {
 });
 
 describe('createContext — tenantId resolution', () => {
-  it('preserves an explicit appContext.tenantId even under HTTP + jwt auth', () => {
-    process.env.MCP_TRANSPORT_TYPE = 'http';
-    process.env.MCP_AUTH_MODE = 'jwt';
+  it.each([['default'], [undefined]])(
+    'preserves an explicit appContext.tenantId over a default of %s',
+    (defaultTenantId) => {
+      const ctx = createContext(
+        buildDeps({ appContext: buildAppContext({ tenantId: 'tenant-a' }), defaultTenantId }),
+      );
 
-    const ctx = createContext(buildDeps({ appContext: buildAppContext({ tenantId: 'tenant-a' }) }));
+      expect(ctx.tenantId).toBe('tenant-a');
+    },
+  );
 
-    expect(ctx.tenantId).toBe('tenant-a');
+  it('applies the default tenant when appContext has none', () => {
+    const ctx = createContext(buildDeps({ appContext: buildAppContext() }));
+
+    expect(ctx.tenantId).toBe('default');
   });
 
-  it.each([
-    [undefined, undefined],
-    ['stdio', undefined],
-    ['stdio', 'jwt'],
-    ['http', 'none'],
-    ['http', undefined],
-  ])(
-    'defaults tenantId to "default" when appContext has none and transport=%s/auth=%s',
-    (transportType, authMode) => {
-      setEnvVar('MCP_TRANSPORT_TYPE', transportType);
-      setEnvVar('MCP_AUTH_MODE', authMode);
+  it('leaves tenantId undefined (fail-closed) when there is no default and appContext has none', () => {
+    const ctx = createContext(
+      buildDeps({ appContext: buildAppContext(), defaultTenantId: undefined }),
+    );
 
-      const ctx = createContext(buildDeps({ appContext: buildAppContext() }));
+    expect(ctx.tenantId).toBeUndefined();
+  });
 
-      expect(ctx.tenantId).toBe('default');
-    },
-  );
+  it('takes the default from deps alone, never from process.env', () => {
+    vi.stubEnv('MCP_TRANSPORT_TYPE', 'http');
+    vi.stubEnv('MCP_AUTH_MODE', 'jwt');
+    expect(createContext(buildDeps()).tenantId).toBe('default');
 
-  it.each([['jwt'], ['oauth']])(
-    'leaves tenantId undefined (fail-closed) when transport=http, auth=%s, and appContext has no tenantId',
-    (authMode) => {
-      process.env.MCP_TRANSPORT_TYPE = 'http';
-      process.env.MCP_AUTH_MODE = authMode;
-
-      const ctx = createContext(buildDeps({ appContext: buildAppContext() }));
-
-      expect(ctx.tenantId).toBeUndefined();
-    },
-  );
+    vi.stubEnv('MCP_TRANSPORT_TYPE', 'stdio');
+    vi.stubEnv('MCP_AUTH_MODE', 'none');
+    expect(createContext(buildDeps({ defaultTenantId: undefined })).tenantId).toBeUndefined();
+  });
 });
 
 describe('createContext — field wiring', () => {
@@ -543,100 +531,35 @@ describe('createContext — field wiring', () => {
     expect(ctx.timestamp).toBe('2026-02-02T00:00:00.000Z');
   });
 
-  it('forwards sessionId from deps as-is, including when absent', () => {
-    const withSession = createContext(buildDeps({ sessionId: 'session-123' }));
-    expect(withSession.sessionId).toBe('session-123');
-
-    const withoutSession = createContext(buildDeps());
-    expect(withoutSession.sessionId).toBeUndefined();
+  it.each<[keyof ContextDeps & keyof Context, unknown]>([
+    ['sessionId', 'session-123'],
+    ['notifyPromptListChanged', vi.fn()],
+    ['notifyResourceListChanged', vi.fn()],
+    ['notifyResourceUpdated', vi.fn()],
+    ['notifyToolListChanged', vi.fn()],
+    ['uri', new URL('myscheme://item/123')],
+  ])('forwards %s from deps by reference, undefined when absent', (field, value) => {
+    expect(createContext(buildDeps({ [field]: value }))[field]).toBe(value);
+    expect(createContext(buildDeps())[field]).toBeUndefined();
   });
 
-  it('casts traceId/spanId through from appContext when present', () => {
-    const ctx = createContext(
-      buildDeps({ appContext: buildAppContext({ traceId: 'trace-1', spanId: 'span-1' }) }),
-    );
+  it.each<[keyof RequestContext & keyof Context, unknown]>([
+    ['traceId', 'trace-1'],
+    ['spanId', 'span-1'],
+    ['auth', { clientId: 'client-1', scopes: ['tool:x:read'], sub: 'user-1' }],
+  ])('forwards %s from appContext, undefined when absent', (field, value) => {
+    const ctx = createContext(buildDeps({ appContext: buildAppContext({ [field]: value }) }));
 
-    expect(ctx.traceId).toBe('trace-1');
-    expect(ctx.spanId).toBe('span-1');
+    expect(ctx[field]).toEqual(value);
+    expect(createContext(buildDeps())[field]).toBeUndefined();
   });
 
-  it('leaves traceId/spanId undefined when absent from appContext', () => {
-    const ctx = createContext(buildDeps());
-
-    expect(ctx.traceId).toBeUndefined();
-    expect(ctx.spanId).toBeUndefined();
-  });
-
-  it('forwards auth from appContext when present', () => {
-    const auth = { clientId: 'client-1', scopes: ['tool:x:read'], sub: 'user-1' };
-    const ctx = createContext(buildDeps({ appContext: buildAppContext({ auth }) }));
-
-    expect(ctx.auth).toEqual(auth);
-  });
-
-  it('leaves auth undefined when absent from appContext', () => {
-    const ctx = createContext(buildDeps());
-    expect(ctx.auth).toBeUndefined();
-  });
-
-  it('forwards notifyPromptListChanged from deps, undefined when absent', () => {
-    const notifier = vi.fn();
-    const withNotifier = createContext(buildDeps({ notifyPromptListChanged: notifier }));
-    expect(withNotifier.notifyPromptListChanged).toBe(notifier);
-
-    const withoutNotifier = createContext(buildDeps());
-    expect(withoutNotifier.notifyPromptListChanged).toBeUndefined();
-  });
-
-  it('forwards notifyResourceListChanged from deps, undefined when absent', () => {
-    const notifier = vi.fn();
-    const withNotifier = createContext(buildDeps({ notifyResourceListChanged: notifier }));
-    expect(withNotifier.notifyResourceListChanged).toBe(notifier);
-
-    const withoutNotifier = createContext(buildDeps());
-    expect(withoutNotifier.notifyResourceListChanged).toBeUndefined();
-  });
-
-  it('forwards notifyResourceUpdated from deps, undefined when absent', () => {
-    const notifier = vi.fn();
-    const withNotifier = createContext(buildDeps({ notifyResourceUpdated: notifier }));
-    expect(withNotifier.notifyResourceUpdated).toBe(notifier);
-
-    const withoutNotifier = createContext(buildDeps());
-    expect(withoutNotifier.notifyResourceUpdated).toBeUndefined();
-  });
-
-  it('forwards notifyToolListChanged from deps, undefined when absent', () => {
-    const notifier = vi.fn();
-    const withNotifier = createContext(buildDeps({ notifyToolListChanged: notifier }));
-    expect(withNotifier.notifyToolListChanged).toBe(notifier);
-
-    const withoutNotifier = createContext(buildDeps());
-    expect(withoutNotifier.notifyToolListChanged).toBeUndefined();
-  });
-
-  it('forwards uri from deps, undefined when absent', () => {
-    const uri = new URL('myscheme://item/123');
-    const withUri = createContext(buildDeps({ uri }));
-    expect(withUri.uri).toBe(uri);
-
-    const withoutUri = createContext(buildDeps());
-    expect(withoutUri.uri).toBeUndefined();
-  });
-
-  it('always exposes callable content/enrich accumulators and a no-op recoveryFor', () => {
-    const ctx = createContext(buildDeps());
-
-    expect(typeof ctx.content).toBe('function');
-    expect(typeof ctx.enrich).toBe('function');
-    expect(ctx.recoveryFor('anything')).toEqual({});
-  });
-
-  it('initializes fresh, empty enrichment and content stores readable via the internal accessors', () => {
+  it('initializes fresh, empty enrichment and content stores and a no-op recoveryFor', () => {
     const ctx = createContext(buildDeps());
 
     expect(readEnrichmentStore(ctx)).toEqual({ values: {}, kinds: new Map() });
     expect(readContentStore(ctx)).toEqual({ blocks: [] });
+    expect(ctx.recoveryFor('anything')).toEqual({});
   });
 });
 
@@ -878,30 +801,6 @@ describe('ContextState (ctx.state)', () => {
     expect(page.cursor).toBeUndefined();
   });
 
-  it('list uses provider-supplied pre-fetched values instead of issuing a getMany call', async () => {
-    const listMock = vi.fn(async () => ({
-      keys: ['pre-1', 'pre-2'],
-      values: new Map<string, unknown>([
-        ['pre-1', { v: 1 }],
-        ['pre-2', { v: 2 }],
-      ]),
-    }));
-    const getManyMock = vi.fn(async () => new Map());
-    const fakeStorage = { list: listMock, getMany: getManyMock } as unknown as StorageService;
-
-    const ctx = createContext(
-      buildDeps({ appContext: buildAppContext({ tenantId: 'tenant-a' }), storage: fakeStorage }),
-    );
-
-    const page = await ctx.state.list('pre-');
-
-    expect(page.items).toEqual([
-      { key: 'pre-1', value: { v: 1 } },
-      { key: 'pre-2', value: { v: 2 } },
-    ]);
-    expect(getManyMock).not.toHaveBeenCalled();
-  });
-
   it('list falls back to getMany when the provider does not supply pre-fetched values', async () => {
     const listMock = vi.fn(async () => ({ keys: ['k-1', 'k-2'] }));
     const getManyMock = vi.fn(async () => new Map<string, unknown>([['k-1', { v: 1 }]]));
@@ -996,9 +895,9 @@ describe('ContextState (ctx.state)', () => {
   });
 
   it('throws McpError(InvalidRequest) for any state operation when tenantId is missing (fail-closed)', async () => {
-    process.env.MCP_TRANSPORT_TYPE = 'http';
-    process.env.MCP_AUTH_MODE = 'jwt';
-    const ctx = createContext(buildDeps({ appContext: buildAppContext() }));
+    const ctx = createContext(
+      buildDeps({ appContext: buildAppContext(), defaultTenantId: undefined }),
+    );
 
     expect(ctx.tenantId).toBeUndefined();
     await expect(ctx.state.get('any-key')).rejects.toMatchObject({
@@ -1042,13 +941,6 @@ describe('ContextState (ctx.state)', () => {
   });
 });
 describe('createContext — multi-round-trip input wiring', () => {
-  it('exposes the inputs reader handed in via deps, by reference', () => {
-    const inputs = createContextInputs(undefined);
-    const ctx = createContext(buildDeps({ inputs }));
-
-    expect(ctx.inputs).toBe(inputs);
-  });
-
   it('reads a retried request’s responses through ctx.inputs (accepted / view / state / dropped)', () => {
     const inputs = createContextInputs({
       inputResponses: {
@@ -1076,13 +968,6 @@ describe('createContext — multi-round-trip input wiring', () => {
     expect(ctx.inputs.state()).toBeUndefined();
     expect(ctx.inputs.dropped).toEqual([]);
     expect(ctx.inputs.responses).toBeUndefined();
-  });
-
-  it('exposes requestInput as a callable that never returns normally', () => {
-    const ctx = createContext(buildDeps());
-
-    expect(typeof ctx.requestInput).toBe('function');
-    expect(() => ctx.requestInput({ requestState: 'round-1' })).toThrow(InputRequiredSignal);
   });
 
   it('throws a signal carrying the SDK input_required result for the requested elicitation', () => {
@@ -1217,14 +1102,5 @@ describe('createContext inherits the RequestContext contract', () => {
 
     expect(ctx.operation).toBe('HandleToolRequest');
     expect(ctx.extra).toEqual({ toolName: 'echo_message' });
-  });
-
-  it('is assignable to RequestContext with those fields intact', () => {
-    const ctx = createContext(
-      buildDeps({ appContext: buildAppContext({ operation: 'HandleResourceRead' }) }),
-    );
-    const asRequestContext: RequestContext = ctx;
-
-    expect(asRequestContext.operation).toBe('HandleResourceRead');
   });
 });

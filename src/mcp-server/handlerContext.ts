@@ -46,6 +46,12 @@ export interface HandlerServices {
 
 /** What a factory derives once per request from the SDK's `ServerContext`. */
 export interface HandlerRequest {
+  /**
+   * Tenant for a request whose auth pipeline supplied none: `'default'` on
+   * stdio and on HTTP with `MCP_AUTH_MODE=none`, `undefined` under HTTP
+   * `jwt`/`oauth` so a token without a `tid` claim fails closed on `ctx.state`.
+   */
+  defaultTenantId: string | undefined;
   mcpReq: ServerContext['mcpReq'] | undefined;
   /** The delivery path `ctx.notify*` takes for this request's era. */
   notifiers: OptionalNotifiers;
@@ -77,7 +83,9 @@ export function resolveHandlerRequest(
   const sdkSessionId =
     typeof serverContext?.sessionId === 'string' ? serverContext.sessionId : undefined;
   const isStatefulMode = resolveSessionMode(config.mcpSessionMode) === 'stateful';
+  const hasNoAuthPipeline = config.mcpTransportType === 'stdio' || config.mcpAuthMode === 'none';
   return {
+    defaultTenantId: hasNoAuthPipeline ? 'default' : undefined,
     mcpReq,
     notifiers: selectNotifiers(notifiers, mcpReq),
     sdkSessionId,
@@ -127,6 +135,7 @@ export function buildHandlerContext(
   return attachTypedFail(
     createContext({
       appContext: spanContext,
+      defaultTenantId: request.defaultTenantId,
       logger: services.logger,
       storage: services.storage,
       signal: request.signal,

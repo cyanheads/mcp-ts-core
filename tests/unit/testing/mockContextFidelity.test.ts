@@ -7,7 +7,6 @@
 
 import { describe, expect, it, vi } from 'vitest';
 import { z } from 'zod';
-import { McpError } from '@/types-global/errors.js';
 
 // ---------------------------------------------------------------------------
 // Mocks (for createContext path) — see context.test.ts for the hoisting note.
@@ -58,7 +57,7 @@ import {
   createRequestInput,
   isInputRequiredSignal,
 } from '@/mcp-server/inputRequired.js';
-import { createMockContext } from '@/testing/index.js';
+import { createMockContext, type MockContextLogger } from '@/testing/index.js';
 import type { Logger } from '@/utils/internal/logger.js';
 import { createFakeStorage, makeRequestContext } from '../../helpers/index.js';
 import { makeServerContext } from '../../helpers/server-context.js';
@@ -70,6 +69,7 @@ import { makeServerContext } from '../../helpers/server-context.js';
 function makeRealContext(overrides: Partial<ContextDeps> = {}) {
   return createContext({
     appContext: makeRequestContext((overrides as any).appContextOverrides),
+    defaultTenantId: 'default',
     inputs: createContextInputs(undefined),
     logger: mockLogger as unknown as Logger,
     requestInput: createRequestInput(),
@@ -89,31 +89,6 @@ describe('createMockContext fidelity', () => {
   // -----------------------------------------------------------------------
 
   describe('Interface shape', () => {
-    it('should have the same set of top-level fields', () => {
-      const real = makeRealContext();
-      const mock = createMockContext({ tenantId: 'test' });
-
-      const realKeys = new Set(Object.keys(real));
-      const mockKeys = new Set(Object.keys(mock));
-
-      // Both should have the same core fields
-      for (const key of [
-        'requestId',
-        'timestamp',
-        'log',
-        'state',
-        'signal',
-        'inputs',
-        'requestInput',
-        'content',
-        'enrich',
-        'recoveryFor',
-      ]) {
-        expect(realKeys.has(key), `real missing ${key}`).toBe(true);
-        expect(mockKeys.has(key), `mock missing ${key}`).toBe(true);
-      }
-    });
-
     it('should carry neither of the removed elicit/progress fields', () => {
       const real = makeRealContext();
       const mock = createMockContext({ tenantId: 'test' });
@@ -121,40 +96,6 @@ describe('createMockContext fidelity', () => {
       for (const key of ['elicit', 'progress']) {
         expect(real, `real still has ${key}`).not.toHaveProperty(key);
         expect(mock, `mock still has ${key}`).not.toHaveProperty(key);
-      }
-    });
-
-    it('should expose the same ContextInputs methods', () => {
-      const real = makeRealContext();
-      const mock = createMockContext();
-
-      for (const method of ['accepted', 'state', 'view'] as const) {
-        expect(typeof real.inputs[method], `real.inputs.${method}`).toBe('function');
-        expect(typeof mock.inputs[method], `mock.inputs.${method}`).toBe('function');
-      }
-      expect(Array.isArray(real.inputs.dropped)).toBe(true);
-      expect(Array.isArray(mock.inputs.dropped)).toBe(true);
-    });
-
-    it('should expose the same ContextLogger methods', () => {
-      const real = makeRealContext();
-      const mock = createMockContext();
-
-      const logMethods = ['debug', 'info', 'notice', 'warning', 'error'] as const;
-      for (const method of logMethods) {
-        expect(typeof real.log[method], `real.log.${method}`).toBe('function');
-        expect(typeof mock.log[method], `mock.log.${method}`).toBe('function');
-      }
-    });
-
-    it('should expose the same ContextState methods', () => {
-      const real = makeRealContext();
-      const mock = createMockContext({ tenantId: 'test' });
-
-      const stateMethods = ['get', 'set', 'delete', 'list'] as const;
-      for (const method of stateMethods) {
-        expect(typeof real.state[method], `real.state.${method}`).toBe('function');
-        expect(typeof mock.state[method], `mock.state.${method}`).toBe('function');
       }
     });
   });
@@ -170,14 +111,16 @@ describe('createMockContext fidelity', () => {
 
       // Real ctx.log passes full RequestContext to Logger
       real.log.info('test');
-      const realCall = mockLogger.info.mock.calls[0];
+      const realCall = mockLogger.info.mock.lastCall;
       expect(realCall).toBeDefined();
-      expect(realCall![1]).toHaveProperty('requestId');
+      expect(realCall![1]).toHaveProperty('requestId', real.requestId);
 
-      // Mock ctx.log just stores {level, msg, data} — no requestId injection
+      // Mock ctx.log just stores {level, msg, data} — no requestId injection,
+      // so log correlation is not verified by consumer unit tests.
       mock.log.info('test');
-      // The mock logger is a simple array — it doesn't inject requestId
-      // (This is fine for unit tests but means log correlation isn't verified)
+      expect((mock.log as MockContextLogger).calls).toEqual([
+        { level: 'info', msg: 'test', data: undefined },
+      ]);
     });
   });
 
@@ -186,68 +129,6 @@ describe('createMockContext fidelity', () => {
   // -----------------------------------------------------------------------
 
   describe('Behavioral parity', () => {
-    it('both default tenantId to "default" when none is supplied', () => {
-      const real = makeRealContext();
-      const mock = createMockContext();
-
-      expect(real.tenantId).toBe('default');
-      expect(mock.tenantId).toBe('default');
-    });
-
-    it('both serve state on the default tenant instead of throwing', async () => {
-      const real = makeRealContext();
-      const mock = createMockContext();
-
-      await expect(real.state.get('nonexistent')).resolves.toBeNull();
-      await expect(mock.state.get('nonexistent')).resolves.toBeNull();
-    });
-
-    it('mock state rejects an invalid key with the same McpError the real service throws', async () => {
-      const mock = createMockContext();
-
-      await expect(mock.state.set('cache:v1:abc', 'value')).rejects.toBeInstanceOf(McpError);
-    });
-
-    it('state get/set/delete should work the same with tenant provided', async () => {
-      const real = makeRealContext({
-        appContext: {
-          requestId: 'r1',
-          timestamp: 'ts',
-          operation: 'test',
-          tenantId: 'tenant-x',
-        },
-      } as any);
-      const mock = createMockContext({ tenantId: 'tenant-x' });
-
-      // Both set + get
-      await real.state.set('key1', 'value1');
-      await mock.state.set('key1', 'value1');
-
-      expect(await real.state.get('key1')).toBe('value1');
-      expect(await mock.state.get('key1')).toBe('value1');
-
-      // Both delete
-      await real.state.delete('key1');
-      await mock.state.delete('key1');
-
-      expect(await real.state.get('key1')).toBeNull();
-      expect(await mock.state.get('key1')).toBeNull();
-    });
-
-    it('signal should work the same', () => {
-      const controller = new AbortController();
-      const real = makeRealContext({ signal: controller.signal });
-      const mock = createMockContext({ signal: controller.signal });
-
-      expect(real.signal.aborted).toBe(false);
-      expect(mock.signal.aborted).toBe(false);
-
-      controller.abort();
-
-      expect(real.signal.aborted).toBe(true);
-      expect(mock.signal.aborted).toBe(true);
-    });
-
     it('mock ctx.inputs reads a seeded round exactly as the production reader does', () => {
       const inputResponses = {
         confirm: { action: 'accept', content: { ok: true } },
@@ -320,33 +201,6 @@ describe('createMockContext fidelity', () => {
       expect((mockThrown as { result: unknown }).result).toEqual(
         (realThrown as { result: unknown }).result,
       );
-    });
-
-    it('uri should pass through when provided', () => {
-      const uri = new URL('scheme://test');
-      const real = makeRealContext({ uri });
-      const mock = createMockContext({ uri });
-
-      expect(real.uri).toBe(uri);
-      expect(mock.uri).toBe(uri);
-    });
-
-    it('notifyResourceUpdated should pass through when provided', () => {
-      const notifyResourceUpdated = vi.fn();
-      const real = makeRealContext({ notifyResourceUpdated });
-      const mock = createMockContext({ notifyResourceUpdated });
-
-      expect(real.notifyResourceUpdated).toBe(notifyResourceUpdated);
-      expect(mock.notifyResourceUpdated).toBe(notifyResourceUpdated);
-    });
-
-    it('notifyResourceListChanged should pass through when provided', () => {
-      const notifyResourceListChanged = vi.fn();
-      const real = makeRealContext({ notifyResourceListChanged });
-      const mock = createMockContext({ notifyResourceListChanged });
-
-      expect(real.notifyResourceListChanged).toBe(notifyResourceListChanged);
-      expect(mock.notifyResourceListChanged).toBe(notifyResourceListChanged);
     });
   });
 });

@@ -153,7 +153,7 @@ export interface ContextState {
     items: Array<{ key: string; value: unknown }>;
     cursor?: string;
   }>;
-  /** Store a value. Accepts any serializable value. */
+  /** Store a value. Accepts any JSON-serializable value; reads return its JSON form. */
   set(key: string, value: unknown, opts?: { ttl?: number }): Promise<void>;
   /** Store multiple values. */
   setMany(entries: Map<string, unknown>, opts?: { ttl?: number }): Promise<void>;
@@ -740,6 +740,14 @@ export function readContentStore(ctx: Context): ContentStore | undefined {
 /** @internal */
 export interface ContextDeps {
   appContext: RequestContext;
+  /**
+   * Tenant used when `appContext` carries none (no `tid` claim). The caller
+   * resolves it from parsed config: `'default'` where no auth pipeline can
+   * supply a tenant (stdio, or HTTP with `MCP_AUTH_MODE=none`), `undefined`
+   * under HTTP `jwt`/`oauth`, so a token without `tid` fails closed on
+   * `ctx.state` instead of sharing state across callers.
+   */
+  defaultTenantId: string | undefined;
   inputs: ContextInputs;
   logger: Logger;
   notifyPromptListChanged?: Context['notifyPromptListChanged'];
@@ -770,21 +778,13 @@ export interface ContextDeps {
  * @internal
  */
 export function createContext(deps: ContextDeps): Context {
-  const { appContext, logger: pinoLogger, storage, signal } = deps;
+  const { appContext, defaultTenantId, logger: pinoLogger, storage, signal } = deps;
 
-  // Default tenantId to 'default' when no auth pipeline is expected to populate it:
-  //   - stdio: single-client by nature, no auth middleware runs
-  //   - HTTP + MCP_AUTH_MODE=none: single-tenant by design (auth=none means
-  //     "no identity check, sharing is intentional")
-  // Preserves fail-closed for HTTP + jwt/oauth: a token missing the `tid` claim
-  // must NOT silently share state across distinct authenticated callers.
-  const isStdio = process.env.MCP_TRANSPORT_TYPE?.toLowerCase() !== 'http';
-  const isAuthDisabled = (process.env.MCP_AUTH_MODE ?? 'none').toLowerCase() === 'none';
-  const effectiveContext = appContext.tenantId
-    ? appContext
-    : isStdio || isAuthDisabled
-      ? { ...appContext, tenantId: 'default' }
-      : appContext;
+  // A tenant from the auth pipeline wins; otherwise the caller's default applies.
+  const effectiveContext =
+    appContext.tenantId || defaultTenantId === undefined
+      ? appContext
+      : { ...appContext, tenantId: defaultTenantId };
 
   const log = createContextLogger(pinoLogger, effectiveContext, deps.wireLog);
   const state = createContextState(storage, effectiveContext, signal);
