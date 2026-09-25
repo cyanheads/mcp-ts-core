@@ -14,7 +14,7 @@
 # output. A stage that compiles a native addon needs the target-arch toolchain
 # and cannot cross-compile this way — drop the flag there.
 # ==============================================================================
-FROM --platform=$BUILDPLATFORM oven/bun:1.4.0 AS build
+FROM --platform=$BUILDPLATFORM oven/bun:1.4.2 AS build
 
 WORKDIR /usr/src/app
 
@@ -40,7 +40,7 @@ RUN bun run build
 # application. It uses a slim base image and only includes production
 # dependencies and build artifacts.
 # ==============================================================================
-FROM oven/bun:1.4.0-slim AS production
+FROM oven/bun:1.4.2-slim AS production
 
 WORKDIR /usr/src/app
 
@@ -70,8 +70,8 @@ RUN --mount=type=cache,target=/root/.bun/install/cache \
     bun install --production --omit=peer --frozen-lockfile --ignore-scripts
 
 # Conditionally install OpenTelemetry optional peer dependencies (Tier 3).
-# These are not bundled by default to keep the base image lean. Enable at build time
-# with: docker build --build-arg OTEL_ENABLED=true
+# Installed by default. Omit them for a leaner image at build time
+# with: docker build --build-arg OTEL_ENABLED=false
 ARG OTEL_ENABLED=true
 RUN --mount=type=cache,target=/root/.bun/install/cache \
     if [ "$OTEL_ENABLED" = "true" ]; then \

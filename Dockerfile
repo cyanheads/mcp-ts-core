@@ -10,7 +10,7 @@
 # `--platform linux/amd64,linux/arm64` build runs under QEMU, where bun >= 1.4
 # aborts with a JavaScriptCore allocator assertion and fails the multi-arch push.
 # ==============================================================================
-FROM --platform=$BUILDPLATFORM oven/bun:1.4.0 AS build
+FROM --platform=$BUILDPLATFORM oven/bun:1.4.2 AS build
 
 WORKDIR /usr/src/app
 
@@ -36,7 +36,7 @@ RUN bun run build
 # application. It uses a slim base image and only includes production
 # dependencies and build artifacts.
 # ==============================================================================
-FROM oven/bun:1.4.0-slim AS production
+FROM oven/bun:1.4.2-slim AS production
 
 WORKDIR /usr/src/app
 
@@ -60,11 +60,8 @@ COPY package.json bun.lock ./
 # parsers); every package the runtime actually loads is a direct dependency.
 # The OTEL step below carries the same flag — without it, that install
 # re-resolves the graph and pulls every optional peer back in.
-# Remove platform-specific bun/rollup binaries pulled as optionalDependencies
-# by @modelcontextprotocol/ext-apps — only needed for its build toolchain, not runtime.
 RUN --mount=type=cache,target=/root/.bun/install/cache \
-    bun install --production --omit=peer --frozen-lockfile --ignore-scripts \
-    && rm -rf node_modules/@oven node_modules/@rollup
+    bun install --production --omit=peer --frozen-lockfile --ignore-scripts
 
 # Conditionally install OpenTelemetry optional peer dependencies (Tier 3).
 # These are not bundled by default to keep the base image lean. Enable at build time

@@ -156,7 +156,6 @@
     "devcheck": "bun run scripts/devcheck.ts",
     "rebuild": "bun run scripts/clean.ts && bun run build",
     "docs:generate": "bunx typedoc",
-    "depcheck": "bunx depcheck",
     "lint": "biome check",
     "lint:mcp": "bun run scripts/lint-mcp.ts",
     "lint:packaging": "bun run scripts/lint-packaging.ts",
@@ -199,9 +198,10 @@
   "devDependencies": {
     "@biomejs/biome": "2.5.14",
     "@cloudflare/vitest-pool-workers": "^0.22.0",
-    "@cloudflare/workers-types": "5.20260910.1",
+    "@cloudflare/workers-types": "5.20260922.1",
     "@duckdb/node-api": "^1.5.5-r.5",
     "@hono/otel": "^1.1.2",
+    "@modelcontextprotocol/client": "^2.0.0",
     "@opentelemetry/exporter-metrics-otlp-http": "^0.222.0",
     "@opentelemetry/exporter-trace-otlp-http": "^0.222.0",
     "@opentelemetry/instrumentation-http": "^0.222.0",
@@ -211,42 +211,39 @@
     "@opentelemetry/sdk-node": "^0.222.0",
     "@opentelemetry/sdk-trace-node": "^2.11.0",
     "@opentelemetry/semantic-conventions": "^1.43.0",
-    "@socketsecurity/bun-security-scanner": "^1.1.2",
-    "@supabase/supabase-js": "^2.116.0",
+    "@socketsecurity/bun-security-scanner": "^1.1.3",
+    "@supabase/supabase-js": "^2.117.0",
     "@types/bun": "^1.4.2",
-    "@types/node": "26.5.1",
+    "@types/node": "26.6.2",
     "@types/papaparse": "^5.5.2",
     "@types/sanitize-html": "^2.16.1",
-    "@types/validator": "^13.15.10",
     "@vitest/coverage-istanbul": "4.1.11",
     "@vitest/ui": "4.1.11",
     "better-sqlite3": "^13.0.3",
-    "bun-types": "^1.4.2",
     "chrono-node": "^2.10.1",
     "clipboardy": "^5.3.2",
-    "defuddle": "^0.19.3",
+    "defuddle": "^0.19.4",
     "depcheck": "^1.4.7",
     "diff": "^9.0.0",
     "execa": "^10.0.1",
-    "fast-check": "^4.10.1",
+    "fast-check": "^4.10.2",
     "fast-xml-parser": "^5.11.1",
     "ignore": "^7.0.9",
     "js-yaml": "^5.4.2",
     "linkedom": "^0.18.13",
     "node-cron": "^4.6.0",
-    "openai": "^7.15.0",
+    "openai": "^7.21.0",
     "papaparse": "^5.7.0",
     "partial-json": "^0.1.7",
     "pdf-lib": "^1.17.1",
     "pino-pretty": "^13.1.3",
-    "repomix": "^1.18.0",
+    "repomix": "^1.18.1",
     "sanitize-html": "^2.17.7",
     "tsc-alias": "^1.9.5",
     "typedoc": "^0.28.20",
     "typescript": "^7.0.2",
     "typescript-v6": "npm:typescript@^6.0.3",
     "unpdf": "^1.8.1",
-    "validator": "^13.15.35",
     "vite": "8.3.0",
     "vitest": "^4.1.11"
   },
@@ -280,32 +277,18 @@
       "url": "https://www.buymeacoffee.com/cyanheads"
     }
   ],
-  "packageManager": "bun@1.4.0",
+  "packageManager": "bun@1.4.2",
   "engines": {
     "bun": ">=1.4.0",
     "node": ">=24.0.0"
-  },
-  "depcheck": {
-    "ignores": [
-      "bun",
-      "repomix",
-      "tsc-alias",
-      "@cyanheads/mcp-ts-core",
-      "@modelcontextprotocol/ext-apps",
-      "@socketsecurity/bun-security-scanner"
-    ],
-    "ignorePatterns": ["examples"]
   },
   "publishConfig": {
     "access": "public"
   },
   "dependencies": {
     "@hono/node-server": "^2.1.1",
-    "@modelcontextprotocol/client": "^2.0.0",
-    "@modelcontextprotocol/ext-apps": "^2.0.0",
     "@modelcontextprotocol/server": "^2.0.0",
     "@opentelemetry/api": "^1.9.1",
-    "dotenv": "^17.4.2",
     "hono": "^4.13.8",
     "jose": "^6.2.12",
     "pino": "^10.3.1",
@@ -314,9 +297,9 @@
   "peerDependencies": {
     "@duckdb/node-api": "^1.5.5-r.1",
     "@hono/otel": "^1.1.2",
-    "@opentelemetry/instrumentation-http": "^0.222.0",
     "@opentelemetry/exporter-metrics-otlp-http": "^0.222.0",
     "@opentelemetry/exporter-trace-otlp-http": "^0.222.0",
+    "@opentelemetry/instrumentation-http": "^0.222.0",
     "@opentelemetry/instrumentation-pino": "^0.68.0",
     "@opentelemetry/resources": "^2.10.0",
     "@opentelemetry/sdk-metrics": "^2.10.0",
@@ -329,7 +312,6 @@
     "defuddle": "^0.19.2",
     "diff": "^9.0.0",
     "fast-check": "^4.9.0",
-    "vitest": ">=4.0.0",
     "fast-xml-parser": "^5.10.1",
     "js-yaml": "^5.2.2",
     "linkedom": "^0.18.13",
@@ -340,8 +322,8 @@
     "pdf-lib": "^1.17.1",
     "sanitize-html": "^2.17.6",
     "unpdf": "^1.6.2",
-    "validator": "^13.15.35",
-    "zod": "^4.4.3"
+    "vitest": ">=4.0.0",
+    "zod": "^4.6.5"
   },
   "peerDependenciesMeta": {
     "@duckdb/node-api": {
@@ -423,9 +405,6 @@
       "optional": true
     },
     "unpdf": {
-      "optional": true
-    },
-    "validator": {
       "optional": true
     },
     "vitest": {

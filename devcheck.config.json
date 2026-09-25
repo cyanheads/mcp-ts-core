@@ -8,9 +8,9 @@
       "@vitest/coverage-istanbul",
       "repomix",
       "bun",
+      "depcheck",
       "tsc-alias",
       "@cyanheads/mcp-ts-core",
-      "@modelcontextprotocol/ext-apps",
       "@socketsecurity/bun-security-scanner",
       "typedoc",
       "cloudflare:*"

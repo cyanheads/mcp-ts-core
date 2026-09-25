@@ -28,6 +28,7 @@ describe.each(['Dockerfile', 'templates/Dockerfile'])('%s production installs', 
 
     expect(productionInstall).toHaveLength(1);
     expect(productionInstall[0]).toContain('--omit=peer');
+    expect(productionInstall[0]).not.toContain('rm -rf');
     expect(otelAdd).toHaveLength(1);
     expect(otelAdd[0]).toContain('--omit=peer');
   });
