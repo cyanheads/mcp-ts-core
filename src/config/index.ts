@@ -9,7 +9,6 @@
  */
 import { isAbsolute, join } from 'node:path';
 
-import dotenv from 'dotenv';
 import { z } from 'zod';
 
 import packageJson from '../../package.json' with { type: 'json' };
@@ -25,10 +24,29 @@ const frameworkPkg = packageJson as PackageManifest;
 export const FRAMEWORK_NAME = '@cyanheads/mcp-ts-core';
 export const FRAMEWORK_VERSION = frameworkPkg.version ?? '0.0.0';
 
-// Lazy dotenv loading — deferred to first parseConfig() call.
-// Top-level execution wastes a filesystem syscall in Workers and loads stale
-// .env before test setup can configure the environment.
-let _dotenvLoaded = false;
+// Lazy .env loading — deferred to first parseConfig() call.
+// Top-level execution loads a stale .env before test setup can configure the
+// environment.
+let _envFileLoaded = false;
+
+/**
+ * Loads `./.env` (relative to the working directory) into `process.env` via
+ * Node's native `process.loadEnvFile()`. Variables already set are never
+ * overridden. A missing file is the normal case and is ignored; any other read
+ * failure is surfaced rather than silently leaving the server unconfigured.
+ */
+function loadEnvFile(): void {
+  try {
+    process.loadEnvFile();
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return;
+    throw configurationError(
+      'Failed to load .env from the working directory.',
+      { cwd: process.cwd() },
+      { cause: error },
+    );
+  }
+}
 
 // --- Helper Functions ---
 /**
@@ -46,6 +64,23 @@ const envBooleanDefaulting = (fallback: boolean) =>
   z.preprocess(emptyStringAsUndefined, z.union([z.boolean(), z.stringbool()]).default(fallback));
 
 const envBoolean = envBooleanDefaulting(false);
+
+/**
+ * One signal's OTLP/HTTP endpoint, per the OTLP exporter spec: the
+ * signal-specific variable is used as-is; otherwise `OTEL_EXPORTER_OTLP_ENDPOINT`
+ * is the base and the signal path is appended to it, keeping any path prefix
+ * and never doubling the slash. Undefined when neither is set.
+ * @see https://opentelemetry.io/docs/specs/otel/protocol/exporter/#endpoint-urls-for-otlphttp
+ */
+const otlpSignalEndpoint = (
+  signalEndpoint: string | undefined,
+  baseEndpoint: string | undefined,
+  signalPath: 'v1/traces' | 'v1/metrics',
+): string | undefined => {
+  if (signalEndpoint !== undefined) return signalEndpoint;
+  if (baseEndpoint === undefined) return undefined;
+  return `${baseEndpoint.endsWith('/') ? baseEndpoint : `${baseEndpoint}/`}${signalPath}`;
+};
 
 // --- Schema Definition ---
 const ConfigSchema = z
@@ -311,7 +346,9 @@ const ConfigSchema = z
       enabled: envBoolean,
       serviceName: z.string(),
       serviceVersion: z.string(),
+      /** Effective OTLP traces URL — the signal variable, else the base endpoint + `v1/traces`. */
       tracesEndpoint: z.url().optional(),
+      /** Effective OTLP metrics URL — the signal variable, else the base endpoint + `v1/metrics`. */
       metricsEndpoint: z.url().optional(),
       samplingRatio: z.coerce.number().min(0).max(1).default(1.0),
       logLevel: z
@@ -408,10 +445,10 @@ const ConfigSchema = z
 
 // --- Parsing Logic ---
 const parseConfig = (envOverrides?: Record<string, string | undefined>) => {
-  // Lazy dotenv loading — only in Node.js, only once, only when not using overrides
-  if (!_dotenvLoaded && runtimeCaps.isNode && !envOverrides) {
-    dotenv.config({ quiet: true });
-    _dotenvLoaded = true;
+  // Lazy .env loading — only in a real Node/Bun process, only once, only when not using overrides
+  if (!_envFileLoaded && runtimeCaps.isNode && !runtimeCaps.isWorkerLike && !envOverrides) {
+    loadEnvFile();
+    _envFileLoaded = true;
   }
 
   // Empty strings and unsubstituted `${…}` placeholders read as unset for
@@ -509,8 +546,16 @@ const parseConfig = (envOverrides?: Record<string, string | undefined>) => {
       enabled: env.OTEL_ENABLED,
       serviceName: env.OTEL_SERVICE_NAME,
       serviceVersion: env.OTEL_SERVICE_VERSION,
-      tracesEndpoint: env.OTEL_EXPORTER_OTLP_TRACES_ENDPOINT,
-      metricsEndpoint: env.OTEL_EXPORTER_OTLP_METRICS_ENDPOINT,
+      tracesEndpoint: otlpSignalEndpoint(
+        env.OTEL_EXPORTER_OTLP_TRACES_ENDPOINT,
+        env.OTEL_EXPORTER_OTLP_ENDPOINT,
+        'v1/traces',
+      ),
+      metricsEndpoint: otlpSignalEndpoint(
+        env.OTEL_EXPORTER_OTLP_METRICS_ENDPOINT,
+        env.OTEL_EXPORTER_OTLP_ENDPOINT,
+        'v1/metrics',
+      ),
       samplingRatio: env.OTEL_TRACES_SAMPLER_ARG,
       logLevel: env.OTEL_LOG_LEVEL,
     },
