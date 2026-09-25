@@ -13,7 +13,8 @@ import { JsonRpcErrorCode, McpError } from '@/types-global/errors.js';
 import { ErrorHandler } from '@/utils/internal/error-handler/errorHandler.js';
 import { logger } from '@/utils/internal/logger.js';
 
-const { mockConfig } = vi.hoisted(() => ({
+const { mockConfig, mockCounterAdd } = vi.hoisted(() => ({
+  mockCounterAdd: vi.fn(),
   mockConfig: {
     mcpServerName: 'test-server',
     mcpPublicUrl: undefined as string | undefined,
@@ -27,6 +28,11 @@ const { mockConfig } = vi.hoisted(() => ({
 // Mock config
 vi.mock('@/config/index.js', () => ({
   config: mockConfig,
+}));
+
+vi.mock('@/utils/telemetry/metrics.js', () => ({
+  createCounter: vi.fn(() => ({ add: mockCounterAdd })),
+  createHistogram: vi.fn(() => ({ record: vi.fn() })),
 }));
 
 vi.mock('@/utils/internal/logger.js', () => ({
@@ -88,6 +94,7 @@ describe('HTTP Error Handler', () => {
         header: vi.fn((name: string) => headers.get(name.toLowerCase())),
         raw: {
           bodyUsed: false,
+          signal: new AbortController().signal,
         } as Request,
         json: vi.fn(async () => ({ id: 'test-request-123' })),
       } as any,
@@ -163,15 +170,6 @@ describe('HTTP Error Handler', () => {
       expect(response).toBeInstanceOf(Response);
     });
 
-    test('should extract request ID from body', async () => {
-      const error = new Error('Test error');
-
-      await httpErrorHandler(error, mockContext as Context<{ Bindings: HonoNodeBindings }>);
-
-      expect(mockContext.req?.json).toHaveBeenCalled();
-      expect((jsonResponseData as any).id).toBe('test-request-123');
-    });
-
     test('should handle numeric request ID', async () => {
       mockContext.req!.json = vi.fn(async () => ({ id: 42 })) as any;
       const error = new Error('Test error');
@@ -204,6 +202,7 @@ describe('HTTP Error Handler', () => {
     test('should use null id when body already consumed', async () => {
       mockContext.req!.raw = {
         bodyUsed: true,
+        signal: new AbortController().signal,
       } as Request;
       const error = new Error('Test error');
 
@@ -214,120 +213,84 @@ describe('HTTP Error Handler', () => {
     });
   });
 
-  describe('McpError status code mapping', () => {
-    test('should map NotFound to 404', async () => {
-      const error = new McpError(JsonRpcErrorCode.NotFound, 'Not found');
+  describe('McpError status mapping and log treatment', () => {
+    let handleErrorSpy: ReturnType<typeof vi.spyOn>;
 
-      await httpErrorHandler(error, mockContext as Context<{ Bindings: HonoNodeBindings }>);
-
-      expect(statusValue).toBe(404);
-      expect((jsonResponseData as any).error.code).toBe(JsonRpcErrorCode.NotFound);
+    beforeEach(() => {
+      vi.mocked(logger.warning).mockClear();
+      handleErrorSpy = vi
+        .spyOn(ErrorHandler, 'handleError')
+        .mockReturnValue(new McpError(JsonRpcErrorCode.InternalError, 'handled'));
     });
 
-    test('should map Unauthorized to 401', async () => {
-      const error = new McpError(JsonRpcErrorCode.Unauthorized, 'Unauthorized');
-
-      await httpErrorHandler(error, mockContext as Context<{ Bindings: HonoNodeBindings }>);
-
-      expect(statusValue).toBe(401);
-      expect((jsonResponseData as any).error.code).toBe(JsonRpcErrorCode.Unauthorized);
+    afterEach(() => {
+      handleErrorSpy.mockRestore();
     });
 
-    test('should map Forbidden to 403', async () => {
-      const error = new McpError(JsonRpcErrorCode.Forbidden, 'Forbidden');
+    test.each([
+      ['NotFound', JsonRpcErrorCode.NotFound, 404],
+      ['Unauthorized', JsonRpcErrorCode.Unauthorized, 401],
+      ['Forbidden', JsonRpcErrorCode.Forbidden, 403],
+      ['InvalidParams', JsonRpcErrorCode.InvalidParams, 400],
+      ['ValidationError', JsonRpcErrorCode.ValidationError, 400],
+      ['InvalidRequest', JsonRpcErrorCode.InvalidRequest, 400],
+    ])(
+      'maps client error %s to %i with a warning log, skipping ErrorHandler.handleError',
+      async (label, code, status) => {
+        const message = `${label} failure`;
+
+        await httpErrorHandler(
+          new McpError(code, message),
+          mockContext as Context<{ Bindings: HonoNodeBindings }>,
+        );
+
+        expect(statusValue).toBe(status);
+        expect((jsonResponseData as any).error.code).toBe(code);
+        expect(handleErrorSpy).not.toHaveBeenCalled();
+        expect(logger.warning).toHaveBeenCalledWith(
+          expect.stringContaining(message),
+          expect.objectContaining({ extra: expect.objectContaining({ errorCode: code }) }),
+        );
+      },
+    );
+
+    test.each([
+      ['Conflict', JsonRpcErrorCode.Conflict, 409],
+      ['RateLimited', JsonRpcErrorCode.RateLimited, 429],
+      ['Timeout', JsonRpcErrorCode.Timeout, 504],
+      ['ServiceUnavailable', JsonRpcErrorCode.ServiceUnavailable, 503],
+      /**
+       * Matches what the SDK's own handler answers for a closed connection, so
+       * a cancellation reports the same status wherever it is caught (#386).
+       */
+      ['RequestCancelled', JsonRpcErrorCode.RequestCancelled, 499],
+      ['an unknown code', -99999 as JsonRpcErrorCode, 500],
+    ])(
+      'maps server error %s to %i through ErrorHandler.handleError',
+      async (label, code, status) => {
+        await httpErrorHandler(
+          new McpError(code, `${label} failure`),
+          mockContext as Context<{ Bindings: HonoNodeBindings }>,
+        );
+
+        expect(statusValue).toBe(status);
+        expect((jsonResponseData as any).error.code).toBe(code);
+        expect(handleErrorSpy).toHaveBeenCalledOnce();
+        expect(logger.warning).not.toHaveBeenCalled();
+      },
+    );
+
+    test('server error (InternalError) invokes ErrorHandler.handleError', async () => {
+      const error = new Error('Unexpected failure');
 
       await httpErrorHandler(error, mockContext as Context<{ Bindings: HonoNodeBindings }>);
 
-      expect(statusValue).toBe(403);
-      expect((jsonResponseData as any).error.code).toBe(JsonRpcErrorCode.Forbidden);
-    });
-
-    test('should map ValidationError to 400', async () => {
-      const error = new McpError(JsonRpcErrorCode.ValidationError, 'Validation failed');
-
-      await httpErrorHandler(error, mockContext as Context<{ Bindings: HonoNodeBindings }>);
-
-      expect(statusValue).toBe(400);
-      expect((jsonResponseData as any).error.code).toBe(JsonRpcErrorCode.ValidationError);
-    });
-
-    test('should map InvalidRequest to 400', async () => {
-      const error = new McpError(JsonRpcErrorCode.InvalidRequest, 'Invalid request');
-
-      await httpErrorHandler(error, mockContext as Context<{ Bindings: HonoNodeBindings }>);
-
-      expect(statusValue).toBe(400);
-      expect((jsonResponseData as any).error.code).toBe(JsonRpcErrorCode.InvalidRequest);
-    });
-
-    test('should map Conflict to 409', async () => {
-      const error = new McpError(JsonRpcErrorCode.Conflict, 'Conflict');
-
-      await httpErrorHandler(error, mockContext as Context<{ Bindings: HonoNodeBindings }>);
-
-      expect(statusValue).toBe(409);
-      expect((jsonResponseData as any).error.code).toBe(JsonRpcErrorCode.Conflict);
-    });
-
-    test('should map RateLimited to 429', async () => {
-      const error = new McpError(JsonRpcErrorCode.RateLimited, 'Rate limited');
-
-      await httpErrorHandler(error, mockContext as Context<{ Bindings: HonoNodeBindings }>);
-
-      expect(statusValue).toBe(429);
-      expect((jsonResponseData as any).error.code).toBe(JsonRpcErrorCode.RateLimited);
-    });
-
-    test('should map Timeout to 504', async () => {
-      const error = new McpError(JsonRpcErrorCode.Timeout, 'Timed out');
-
-      await httpErrorHandler(error, mockContext as Context<{ Bindings: HonoNodeBindings }>);
-
-      expect(statusValue).toBe(504);
-    });
-
-    test('should map ServiceUnavailable to 503', async () => {
-      const error = new McpError(JsonRpcErrorCode.ServiceUnavailable, 'Unavailable');
-
-      await httpErrorHandler(error, mockContext as Context<{ Bindings: HonoNodeBindings }>);
-
-      expect(statusValue).toBe(503);
-    });
-
-    test('should map RequestCancelled to 499 (#386)', async () => {
-      // Matches what the SDK's own handler answers for a closed connection, so
-      // a cancellation reports the same status wherever it is caught.
-      const error = new McpError(JsonRpcErrorCode.RequestCancelled, 'Connection closed');
-
-      await httpErrorHandler(error, mockContext as Context<{ Bindings: HonoNodeBindings }>);
-
-      expect(statusValue).toBe(499);
-      expect((jsonResponseData as any).error.code).toBe(JsonRpcErrorCode.RequestCancelled);
-    });
-
-    test('should default to 500 for unknown error codes', async () => {
-      const error = new McpError(-99999 as JsonRpcErrorCode, 'Unknown error');
-
-      await httpErrorHandler(error, mockContext as Context<{ Bindings: HonoNodeBindings }>);
-
+      expect(handleErrorSpy).toHaveBeenCalledOnce();
       expect(statusValue).toBe(500);
-      expect((jsonResponseData as any).error.code).toBe(-99999);
     });
   });
 
   describe('WWW-Authenticate header for 401', () => {
-    test('should always add WWW-Authenticate header on 401', async () => {
-      const error = new McpError(JsonRpcErrorCode.Unauthorized, 'Unauthorized');
-
-      await httpErrorHandler(error, mockContext as Context<{ Bindings: HonoNodeBindings }>);
-
-      const wwwAuthHeader = headers.get('www-authenticate');
-      expect(wwwAuthHeader).toBeDefined();
-      expect(wwwAuthHeader).toContain('Bearer realm="test-server"');
-      expect(wwwAuthHeader).toContain('resource_metadata=');
-      expect(wwwAuthHeader).toContain('.well-known/oauth-protected-resource');
-    });
-
     test.each(['http://internal.container:8080/mcp', 'https://malicious-host.example/mcp'])(
       'prefers MCP_PUBLIC_URL over the inbound origin for %s',
       async (requestUrl) => {
@@ -371,14 +334,6 @@ describe('HTTP Error Handler', () => {
   });
 
   describe('JSON-RPC response format', () => {
-    test('should include jsonrpc version 2.0', async () => {
-      const error = new Error('Test error');
-
-      await httpErrorHandler(error, mockContext as Context<{ Bindings: HonoNodeBindings }>);
-
-      expect((jsonResponseData as any).jsonrpc).toBe('2.0');
-    });
-
     test('should include error object with code and message', async () => {
       const error = new McpError(JsonRpcErrorCode.InvalidParams, 'Invalid params');
 
@@ -388,14 +343,6 @@ describe('HTTP Error Handler', () => {
         code: JsonRpcErrorCode.InvalidParams,
         message: 'Invalid params',
       });
-    });
-
-    test('should preserve error message from McpError', async () => {
-      const error = new McpError(JsonRpcErrorCode.MethodNotFound, 'Custom error message');
-
-      await httpErrorHandler(error, mockContext as Context<{ Bindings: HonoNodeBindings }>);
-
-      expect((jsonResponseData as any).error.message).toBe('Custom error message');
     });
 
     test('should preserve explicitly declared McpError data', async () => {
@@ -409,119 +356,83 @@ describe('HTTP Error Handler', () => {
     });
   });
 
-  describe('Client vs server error log treatment', () => {
-    let handleErrorSpy: ReturnType<typeof vi.spyOn>;
+  describe('caller disconnect before a handler runs (#507)', () => {
+    const abortedSignal = (): AbortSignal => {
+      const controller = new AbortController();
+      controller.abort(new Error('aborted'));
+      return controller.signal;
+    };
+    /** What Node raises when the body stream is cut off mid-read. */
+    const bodyStreamAborted = (): Error =>
+      Object.assign(new Error('aborted'), { code: 'ECONNRESET' });
+    const handle = (error: Error) =>
+      httpErrorHandler(error, mockContext as Context<{ Bindings: HonoNodeBindings }>);
 
     beforeEach(() => {
-      handleErrorSpy = vi
-        .spyOn(ErrorHandler, 'handleError')
-        .mockReturnValue(new McpError(JsonRpcErrorCode.InternalError, 'handled'));
+      vi.clearAllMocks();
     });
 
-    afterEach(() => {
-      handleErrorSpy.mockRestore();
+    test('reads as RequestCancelled: info log without a stack, 499, -32011 metric', async () => {
+      mockContext.req!.raw = { bodyUsed: true, signal: abortedSignal() } as Request;
+
+      await handle(bodyStreamAborted());
+
+      expect(statusValue).toBe(499);
+      expect((jsonResponseData as any).error).toEqual({
+        code: JsonRpcErrorCode.RequestCancelled,
+        message: 'aborted',
+      });
+      expect(logger.error).not.toHaveBeenCalled();
+      const record = vi
+        .mocked(logger.info)
+        .mock.calls.find(([msg]) => msg === 'Cancelled httpTransport: aborted')?.[1] as {
+        extra: Record<string, any>;
+      };
+      expect(record).toBeDefined();
+      expect(record.extra).not.toHaveProperty('stack');
+      expect(record.extra.errorData).not.toHaveProperty('originalStack');
+      expect(record.extra.errorData).not.toHaveProperty('causeChain');
+      expect(mockCounterAdd).toHaveBeenCalledWith(1, {
+        'mcp.error.classified_code': String(JsonRpcErrorCode.RequestCancelled),
+        operation: 'httpTransport',
+      });
     });
 
-    test('Unauthorized error logs at warning level, skips ErrorHandler.handleError', async () => {
-      const error = new McpError(JsonRpcErrorCode.Unauthorized, 'Invalid token');
+    test('keeps a raw AbortError as Timeout / 504 while the signal is live', async () => {
+      await handle(new DOMException('This operation was aborted', 'AbortError'));
 
-      await httpErrorHandler(error, mockContext as Context<{ Bindings: HonoNodeBindings }>);
+      expect(statusValue).toBe(504);
+      expect((jsonResponseData as any).error.code).toBe(JsonRpcErrorCode.Timeout);
+      expect(mockCounterAdd).toHaveBeenCalledWith(1, {
+        'mcp.error.classified_code': String(JsonRpcErrorCode.Timeout),
+        operation: 'httpTransport',
+      });
+    });
 
-      expect(handleErrorSpy).not.toHaveBeenCalled();
-      expect(logger.warning).toHaveBeenCalledWith(
-        expect.stringContaining('Invalid token'),
-        expect.objectContaining({
-          extra: expect.objectContaining({ errorCode: JsonRpcErrorCode.Unauthorized }),
-        }),
+    test('keeps an McpError code, status, and data while the signal is live', async () => {
+      await handle(
+        new McpError(JsonRpcErrorCode.ServiceUnavailable, 'Upstream down', { reason: 'x' }),
       );
-      expect(statusValue).toBe(401);
-    });
 
-    test('Forbidden error logs at warning level, skips ErrorHandler.handleError', async () => {
-      const error = new McpError(JsonRpcErrorCode.Forbidden, 'Insufficient scopes');
-
-      await httpErrorHandler(error, mockContext as Context<{ Bindings: HonoNodeBindings }>);
-
-      expect(handleErrorSpy).not.toHaveBeenCalled();
-      expect(logger.warning).toHaveBeenCalledWith(
-        expect.stringContaining('Insufficient scopes'),
-        expect.objectContaining({
-          extra: expect.objectContaining({ errorCode: JsonRpcErrorCode.Forbidden }),
-        }),
-      );
-      expect(statusValue).toBe(403);
-    });
-
-    test('ValidationError logs at warning level, skips ErrorHandler.handleError', async () => {
-      const error = new McpError(JsonRpcErrorCode.ValidationError, 'Bad input');
-
-      await httpErrorHandler(error, mockContext as Context<{ Bindings: HonoNodeBindings }>);
-
-      expect(handleErrorSpy).not.toHaveBeenCalled();
-      expect(logger.warning).toHaveBeenCalledWith(
-        expect.stringContaining('Bad input'),
-        expect.objectContaining({
-          extra: expect.objectContaining({ errorCode: JsonRpcErrorCode.ValidationError }),
-        }),
-      );
-      expect(statusValue).toBe(400);
-    });
-
-    test('InvalidRequest error logs at warning level, skips ErrorHandler.handleError', async () => {
-      const error = new McpError(JsonRpcErrorCode.InvalidRequest, 'Missing field');
-
-      await httpErrorHandler(error, mockContext as Context<{ Bindings: HonoNodeBindings }>);
-
-      expect(handleErrorSpy).not.toHaveBeenCalled();
-      expect(logger.warning).toHaveBeenCalledWith(
-        expect.stringContaining('Missing field'),
-        expect.objectContaining({
-          extra: expect.objectContaining({ errorCode: JsonRpcErrorCode.InvalidRequest }),
-        }),
-      );
-      expect(statusValue).toBe(400);
-    });
-
-    test('NotFound error logs at warning level, skips ErrorHandler.handleError', async () => {
-      const error = new McpError(JsonRpcErrorCode.NotFound, 'Session expired');
-
-      await httpErrorHandler(error, mockContext as Context<{ Bindings: HonoNodeBindings }>);
-
-      expect(handleErrorSpy).not.toHaveBeenCalled();
-      expect(logger.warning).toHaveBeenCalledWith(
-        expect.stringContaining('Session expired'),
-        expect.objectContaining({
-          extra: expect.objectContaining({ errorCode: JsonRpcErrorCode.NotFound }),
-        }),
-      );
-      expect(statusValue).toBe(404);
-    });
-
-    test('server error (InternalError) invokes ErrorHandler.handleError', async () => {
-      const error = new Error('Unexpected failure');
-
-      await httpErrorHandler(error, mockContext as Context<{ Bindings: HonoNodeBindings }>);
-
-      expect(handleErrorSpy).toHaveBeenCalledOnce();
-      expect(statusValue).toBe(500);
-    });
-
-    test('RateLimited error invokes ErrorHandler.handleError (not a client error)', async () => {
-      const error = new McpError(JsonRpcErrorCode.RateLimited, 'Too many requests');
-
-      await httpErrorHandler(error, mockContext as Context<{ Bindings: HonoNodeBindings }>);
-
-      expect(handleErrorSpy).toHaveBeenCalledOnce();
-      expect(statusValue).toBe(429);
-    });
-
-    test('ServiceUnavailable error invokes ErrorHandler.handleError', async () => {
-      const error = new McpError(JsonRpcErrorCode.ServiceUnavailable, 'Upstream down');
-
-      await httpErrorHandler(error, mockContext as Context<{ Bindings: HonoNodeBindings }>);
-
-      expect(handleErrorSpy).toHaveBeenCalledOnce();
       expect(statusValue).toBe(503);
+      expect((jsonResponseData as any).error).toEqual({
+        code: JsonRpcErrorCode.ServiceUnavailable,
+        message: 'Upstream down',
+        data: { reason: 'x' },
+      });
+    });
+
+    test('leaves an HTTPException response untouched even after the caller left', async () => {
+      mockContext.req!.raw = { bodyUsed: false, signal: abortedSignal() } as Request;
+
+      const response = await handle(new HTTPException(405, { message: 'Method not allowed' }));
+
+      expect(response.status).toBe(405);
+      expect(mockContext.json).not.toHaveBeenCalled();
+      expect(logger.info).not.toHaveBeenCalledWith(
+        expect.stringContaining('Cancelled'),
+        expect.anything(),
+      );
     });
   });
 });

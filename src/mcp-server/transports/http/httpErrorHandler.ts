@@ -14,7 +14,7 @@ import { config } from '@/config/index.js';
 import type { HonoNodeBindings } from '@/mcp-server/transports/http/httpTypes.js';
 import { resolvePublicOrigin } from '@/mcp-server/transports/http/publicOrigin.js';
 import { JsonRpcErrorCode, McpError } from '@/types-global/errors.js';
-import { ErrorHandler } from '@/utils/internal/error-handler/errorHandler.js';
+import { asRequestCancelled, ErrorHandler } from '@/utils/internal/error-handler/errorHandler.js';
 import { logger } from '@/utils/internal/logger.js';
 import { requestContextService, withExtra } from '@/utils/internal/requestContext.js';
 import { getProperty } from '@/utils/types/guards.js';
@@ -67,14 +67,25 @@ export const httpErrorHandler = async <TBindings extends object = HonoNodeBindin
   });
   logger.debug('HTTP error handler invoked.', context);
 
+  /**
+   * A caller that hangs up mid-request — most often while its body is still
+   * arriving, which rejects the body-limit guard's stream read with Node's
+   * `Error: aborted` — has already aborted the inbound request's signal by
+   * the time Hono routes the throw here. Resolve against that signal first,
+   * as the tool and resource handler factories do, so the disconnect reads as
+   * `RequestCancelled` (info log, no stack, 499) rather than the `Timeout` the
+   * classifier's generic abort pattern would pick for the same value (#507).
+   */
+  const error = asRequestCancelled(err, c.req.raw.signal);
+
   // Capture original McpError data before enrichment — handleError adds internal
-  // details (stack traces, cause chains, operation context) that must not leak.
-  const originalData = err instanceof McpError ? err.data : undefined;
+  // details (operation context, classification fields) that must not leak.
+  const originalData = error instanceof McpError ? error.data : undefined;
 
   // Pre-classify to split expected client errors (4xx) from unexpected server
   // errors (5xx). Client errors get a compact warning log without stack traces;
   // server errors go through the full ErrorHandler pipeline with stacks + OTel.
-  const classified = ErrorHandler.classifyOnly(err);
+  const classified = ErrorHandler.classifyOnly(error);
 
   const EXPECTED_CLIENT_CODES: ReadonlySet<number> = new Set([
     JsonRpcErrorCode.Unauthorized,
@@ -93,7 +104,7 @@ export const httpErrorHandler = async <TBindings extends object = HonoNodeBindin
       withExtra(context, { errorCode: classified.code }),
     );
   } else {
-    ErrorHandler.handleError(err, {
+    ErrorHandler.handleError(error, {
       operation: 'httpTransport',
       context,
     });
