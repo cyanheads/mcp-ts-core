@@ -9,7 +9,7 @@ import { resource, z } from '@cyanheads/mcp-ts-core';
 // Like tools, prefix names with your server name: template-echo, tasks-status, etc.
 export const echoResource = resource('echo://{message}', {
   name: 'template-echo-resource',
-  description: 'Echoes a message from the URI. Replace this with your first real resource.',
+  description: 'Echo a message from the URI. Replace this with your first real resource.',
   mimeType: 'application/json',
   params: z.object({
     message: z.string().describe('The message to echo back.'),

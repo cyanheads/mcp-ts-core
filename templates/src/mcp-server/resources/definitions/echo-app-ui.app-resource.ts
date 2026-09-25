@@ -18,31 +18,69 @@ const APP_HTML = `<!DOCTYPE html>
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>Echo App</title>
   <style>
+    /*
+     * Local tokens are the pre-connect baseline: light by default, dark when the
+     * OS prefers it, and pinned by the data-theme attribute applyDocumentTheme sets.
+     * Every rule reads the host's variable first (installed by applyHostStyleVariables)
+     * and falls back to the local token until host context arrives.
+     */
+    :root {
+      color-scheme: light dark;
+      --bg: #ffffff; --surface: #f8fafc; --fg: #0f172a; --muted: #64748b;
+      --border: #e2e8f0; --accent: #2563eb; --accent-fg: #ffffff;
+    }
+    @media (prefers-color-scheme: dark) {
+      :root:not([data-theme="light"]) {
+        --bg: #0f172a; --surface: #1e293b; --fg: #e2e8f0; --muted: #94a3b8;
+        --border: #334155; --accent: #3b82f6; --accent-fg: #ffffff;
+      }
+    }
+    :root[data-theme="dark"] {
+      --bg: #0f172a; --surface: #1e293b; --fg: #e2e8f0; --muted: #94a3b8;
+      --border: #334155; --accent: #3b82f6; --accent-fg: #ffffff;
+    }
     * { margin: 0; padding: 0; box-sizing: border-box; }
     body {
-      font-family: system-ui, -apple-system, sans-serif;
-      background: #0f172a; color: #e2e8f0;
+      font-family: var(--font-sans, system-ui, -apple-system, sans-serif);
+      background: var(--color-background-primary, var(--bg));
+      color: var(--color-text-primary, var(--fg));
       padding: 1.5rem; min-height: 100vh;
       display: flex; flex-direction: column; align-items: center; gap: 1rem;
     }
-    h1 { font-size: 1.25rem; font-weight: 600; }
+    h1 {
+      font-size: var(--font-heading-sm-size, 1.25rem);
+      font-weight: var(--font-weight-semibold, 600);
+    }
     .card {
-      background: #1e293b; border: 1px solid #334155; border-radius: 0.5rem;
+      background: var(--color-background-secondary, var(--surface));
+      border: 1px solid var(--color-border-primary, var(--border));
+      border-radius: var(--border-radius-lg, 0.5rem);
       padding: 1rem 1.25rem; width: 100%; max-width: 480px;
     }
-    .label { font-size: 0.75rem; color: #94a3b8; text-transform: uppercase; letter-spacing: 0.05em; }
-    .value { font-size: 1rem; margin-top: 0.25rem; word-break: break-word; }
+    .label {
+      font-size: var(--font-text-xs-size, 0.75rem);
+      color: var(--color-text-secondary, var(--muted));
+      text-transform: uppercase; letter-spacing: 0.05em;
+    }
+    .value { font-size: var(--font-text-md-size, 1rem); margin-top: 0.25rem; word-break: break-word; }
     .controls { display: flex; gap: 0.5rem; width: 100%; max-width: 480px; }
     input[type="text"] {
-      flex: 1; padding: 0.5rem 0.75rem; background: #1e293b; border: 1px solid #334155;
-      border-radius: 0.375rem; color: #e2e8f0; font-size: 0.875rem; outline: none;
+      flex: 1; padding: 0.5rem 0.75rem;
+      background: var(--color-background-secondary, var(--surface));
+      border: 1px solid var(--color-border-primary, var(--border));
+      border-radius: var(--border-radius-md, 0.375rem);
+      color: var(--color-text-primary, var(--fg));
+      font: inherit; font-size: var(--font-text-sm-size, 0.875rem); outline: none;
     }
-    input[type="text"]:focus { border-color: #3b82f6; }
+    input[type="text"]:focus { border-color: var(--color-ring-primary, var(--accent)); }
     button {
-      padding: 0.5rem 1rem; background: #3b82f6; color: #fff; border: none;
-      border-radius: 0.375rem; font-size: 0.875rem; cursor: pointer;
+      padding: 0.5rem 1rem; border: none;
+      background: var(--color-background-inverse, var(--accent));
+      color: var(--color-text-inverse, var(--accent-fg));
+      border-radius: var(--border-radius-md, 0.375rem);
+      font: inherit; font-size: var(--font-text-sm-size, 0.875rem); cursor: pointer;
     }
-    button:hover { background: #2563eb; }
+    button:hover { opacity: 0.9; }
     button:disabled { opacity: 0.5; cursor: not-allowed; }
   </style>
 </head>
@@ -138,8 +176,7 @@ export const echoAppUiResource = appResource('ui://template-echo-app/app.html', 
   name: 'echo-app-ui',
   title: 'Echo App UI',
   description:
-    'Interactive HTML app for the echo app tool. Displayed as a sandboxed iframe ' +
-    'by MCP Apps-capable hosts.',
+    'Interactive HTML app for the echo app tool. Displayed as a sandboxed iframe by MCP Apps-capable hosts.',
   params: ParamsSchema,
   auth: ['resource:echo-app-ui:read'],
   _meta: {

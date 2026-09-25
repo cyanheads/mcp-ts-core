@@ -9,7 +9,7 @@ import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 // Tool names are snake_case, prefixed with your server name to avoid collisions across servers.
 // e.g. for a "tasks" server: tasks_fetch_list, tasks_create_item.
 export const echoTool = tool('template_echo_message', {
-  description: 'Echoes a message back. Replace this with your first real tool.',
+  description: 'Echo a message back. Replace this with your first real tool.',
   annotations: { readOnlyHint: true },
   input: z.object({
     message: z.string().describe('The message to echo back.'),

@@ -15,15 +15,14 @@ export const echoAppTool = appTool('template_echo_app', {
   resourceUri: UI_RESOURCE_URI,
   title: 'Echo App',
   description:
-    'Echoes a message with an interactive UI. Demonstrates MCP Apps — hosts that support ' +
-    'the extension render an HTML interface; others receive a text fallback.',
+    'Echo a message back with an interactive UI. Hosts that support MCP Apps render an HTML interface; other hosts receive a text fallback.',
   annotations: { readOnlyHint: true },
   input: z.object({
     message: z.string().describe('The message to echo.'),
   }),
   output: z.object({
     message: z.string().describe('The echoed message.'),
-    timestamp: z.string().describe('ISO 8601 timestamp of the echo.'),
+    timestamp: z.iso.datetime().describe('ISO 8601 timestamp of the echo.'),
   }),
 
   handler(input, ctx) {
