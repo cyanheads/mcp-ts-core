@@ -4,7 +4,7 @@ description: >
   Canonical reference for the unified `Context` object passed to every tool and resource handler in `@cyanheads/mcp-ts-core`. Covers the full interface, its `RequestContext` base, all sub-APIs (`ctx.log`, `ctx.state`, `ctx.requestInput`, `ctx.inputs`, `ctx.enrich`, `ctx.content`), and when to use each.
 metadata:
   author: cyanheads
-  version: "2.5"
+  version: "2.6"
   audience: external
   type: reference
 ---
@@ -210,7 +210,7 @@ interface ContextState {
 ### Usage
 
 ```ts
-// Store — accepts any serializable value, no manual JSON.stringify needed
+// Store — accepts any JSON-serializable value, no manual JSON.stringify needed
 await ctx.state.set('item/123', { name: 'Widget', count: 42 });
 await ctx.state.set('session/xyz', token, { ttl: 3600 }); // TTL in seconds
 
@@ -236,6 +236,7 @@ if (page.cursor) { /* more pages available */ }
 
 - Throws `McpError(InvalidRequest)` if `tenantId` is missing. Won't happen in stdio (any auth mode) or HTTP+`MCP_AUTH_MODE=none` — both default to `'default'`. Can happen in HTTP+`MCP_AUTH_MODE=jwt`/`oauth` when the token lacks a `tid` claim (intentional fail-closed: distinct authenticated callers must not silently share state).
 - Keys are tenant-prefixed internally; handlers never need to namespace manually.
+- **Values round-trip as JSON** on every provider, `in-memory` included: reads return the JSON form, so a `Date` comes back as its ISO string, a `Map` as `{}`, and a returned object never shares identity with the one written. Validate reads with a schema that matches the stored form (`z.string()` for a date, not `z.date()`). A `bigint`, a cyclic reference, or a top-level `undefined`, function, or symbol throws `McpError(SerializationError)` before anything is written; in `setMany`, one such value rejects the whole batch.
 - **Key charset:** `^[a-zA-Z0-9_.\-/]+$`, 1024 chars max, no `..`. Slashes are the namespace separator — a colon (`item:123`) throws `McpError(ValidationError)` on every call. The rule covers `list` prefixes and every key in a batch operation. `createMockContext().state` enforces it identically, so an illegal key fails in the test rather than in a deployment.
 - **Workers persistence:** The `in-memory` provider loses data on cold starts. Use `cloudflare-kv`, `cloudflare-r2`, or `cloudflare-d1` for durable storage in Workers.
 
@@ -712,9 +713,11 @@ For tools that cap a list (i.e. have a `limit`/`per_page`/`page_size`/`max_resul
 
 ```ts
 enrichment: {
-  truncated: z.boolean().describe('True when the list was capped.'),
-  shown: z.number().describe('Number of items returned.'),
-  cap: z.number().describe('The limit that was applied.'),
+  // Optional: truncated() writes these only when the cap is hit, and a required
+  // enrichment field left unset fails the effective-output parse on every complete result.
+  truncated: z.boolean().optional().describe('True when the list was capped.'),
+  shown: z.number().optional().describe('Number of items returned.'),
+  cap: z.number().optional().describe('The limit that was applied.'),
   truncationCeiling: z.number().optional().describe('Upper bound for omitted items (threshold bound).'),
 },
 async handler(input, ctx) {

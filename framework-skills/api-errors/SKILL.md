@@ -4,7 +4,7 @@ description: >
   McpError constructor, JsonRpcErrorCode reference, and error handling patterns for `@cyanheads/mcp-ts-core`. Use when looking up error codes, understanding where errors should be thrown vs. caught, or using ErrorHandler.tryCatch in services.
 metadata:
   author: cyanheads
-  version: "1.15"
+  version: "1.16"
   audience: external
   type: reference
 ---
@@ -205,6 +205,8 @@ throw validationError(message, {
 
 Throw when the server has authoritative classification — auth failure, rate limit, schema violation, upstream 5xx, missing required input. Don't throw when "this looks wrong" depends on intent the server can't see. For mutators, surface raw pre- and post-mutation observable state in the response and let the agent decide whether it matches intent — the server can detect that the file shrunk, but only the agent knows whether it was supposed to. Tell: defensive code justified as a free rider on other work — audit it standalone, and it usually doesn't earn its keep.
 
+A best-effort call that catches and degrades must still rethrow on `ctx.signal?.aborted`: `catch (err) { if (ctx.signal?.aborted) throw err; return degraded(); }`. One example is an enrichment lookup whose failure should return the primary result with a notice. The factory maps a cancelled handler to `RequestCancelled` only when the handler throws. A catch-all degrade turns the caller's cancellation into a "successful" response and logs a false failure warning.
+
 ---
 
 ## Error Factories (fallback)
@@ -312,7 +314,7 @@ Use factories or `McpError` directly when the code must be exact — auto-classi
 
 The framework applies these steps in order — first match wins:
 
-1. **Request signal aborted** — `ctx.signal.aborted` is `true` when the handler unwinds → `RequestCancelled`. Resolved by the tool and resource handler factories before the thrown value is classified at all, so it outranks every step below, `McpError` included: the caller withdrew the request, and what the handler threw on the way out does not change that. Covers every shape an abort leaves behind — a `notifications/cancelled` `reason` string, the `DOMException` named `AbortError` a reason-less cancellation produces, a service's own `McpError`, and the SDK's `SdkError(ConnectionClosed)` on transport close. The accepted cost is that an unrelated fault raised after the abort is recorded as a cancellation too; it is bounded, because the SDK writes no response for a request whose signal it aborted. A handler that throws while the signal is live is untouched by this step.
+1. **Request signal aborted** — `ctx.signal.aborted` is `true` when the handler unwinds → `RequestCancelled`. Resolved before the thrown value is classified at all — by the tool and resource handler factories, and by the HTTP transport's error handler against the inbound request's signal, which catches a caller that hangs up before any handler runs (mid-body, say) and answers it 499 — so it outranks every step below, `McpError` included: the caller withdrew the request, and what the handler threw on the way out does not change that. Covers every shape an abort leaves behind — a `notifications/cancelled` `reason` string, the `DOMException` named `AbortError` a reason-less cancellation produces, a service's own `McpError`, and the SDK's `SdkError(ConnectionClosed)` on transport close. The accepted cost is that an unrelated fault raised after the abort is recorded as a cancellation too; it is bounded, because the SDK writes no response for a request whose signal it aborted. A handler that throws while the signal is live is untouched by this step.
 2. **`McpError` instance** — `error.code` is preserved as-is; no classification needed.
 3. **SDK transport-closed rejection** — an `SdkError` carrying `SdkErrorCode.ConnectionClosed` → `RequestCancelled`. The SDK rejects every in-flight request when the transport closes, which is what a client disconnect looks like from inside a handler. Matched on the code, not the message: one of its wordings says "aborted" and would otherwise be caught by the generic abort pattern in step 6 and read as a `Timeout`. Still the rule for a throw raised where no request signal is in scope — a service, an outbound leg, a background task.
 4. **JS constructor name** — matched against a fixed table (e.g. `ZodError` → `ValidationError`, `SyntaxError` → `ValidationError`). Note: `TypeError` is intentionally excluded — runtime TypeErrors are programmer errors, not validation failures.
@@ -462,12 +464,14 @@ const parsed = await ErrorHandler.tryCatch(
 
 `tryCatch` always logs and rethrows — it never swallows errors. The `fn` argument may be synchronous or return a `Promise`; both are handled via `Promise.resolve(fn())`.
 
+**The thrown error's `data` is wire-visible.** A handler that lets it propagate forwards it as `structuredContent.error.data` (tools) or JSON-RPC `error.data` (resources, prompts). It carries `originalErrorName`, `originalMessage`, `rootCause` (`{ name, message }`), and the canonical fields and `extra` of `context`, but never a stack: `originalStack` and the full `causeChain` go to the log record only.
+
 **Options** (`Omit<ErrorHandlerOptions, 'rethrow'>`):
 
 | Option | Type | Required | Purpose |
 |:-------|:-----|:--------:|:--------|
 | `operation` | `string` | Yes | Name logged with the error |
-| `context` | `ErrorContext` | No | Extra structured fields merged into the log record; `requestId` and `timestamp` receive special treatment |
+| `context` | `ErrorContext` | No | Structured fields merged into the log record and the thrown error's client-visible `data`; `requestId` and `timestamp` receive special treatment |
 | `errorCode` | `JsonRpcErrorCode` | No | Code used if the caught error is not already an `McpError` |
 | `input` | `unknown` | No | Input value sanitized and logged alongside the error |
 | `critical` | `boolean` | No | Marks the error as critical in logs (default `false`) |

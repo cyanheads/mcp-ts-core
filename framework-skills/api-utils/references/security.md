@@ -8,16 +8,16 @@ import { sanitization, RateLimiter, IdGenerator, idGenerator, generateUUID, gene
 
 ## `sanitization`
 
-Pre-constructed singleton of `Sanitization`. Tier 3 peers: `sanitize-html`, `validator` (install as needed per method).
+Pre-constructed singleton of `Sanitization`. Tier 3 peer: `sanitize-html` (HTML handling only); URL and number validation are built in.
 
 ### Methods
 
 | Method | Async | Peer dep | Signature |
 |:-------|:------|:---------|:----------|
 | `sanitizeHtml` | yes | `sanitize-html` | `(input, config?) -> Promise<string>` |
-| `sanitizeString` | yes | `sanitize-html` / `validator` | `(input, options?) -> Promise<string>` |
-| `sanitizeUrl` | yes | `validator` | `(input, allowedProtocols?) -> Promise<string>` |
-| `sanitizeNumber` | yes | `validator` (string input) | `(input, min?, max?) -> Promise<number>` |
+| `sanitizeString` | yes | `sanitize-html` (`'text'`, `'html'`, `'attribute'` contexts) | `(input, options?) -> Promise<string>` |
+| `sanitizeUrl` | yes | none | `(input, allowedProtocols?) -> Promise<string>` |
+| `sanitizeNumber` | yes | none | `(input, min?, max?) -> Promise<number>` |
 | `sanitizePath` | **no** | Node.js only | `(input, options?) -> SanitizedPathInfo` |
 | `sanitizeJson` | **no** | none | `<T>(input, maxSize?) -> T` |
 | `sanitizeForLogging` | **no** | none | `(input) -> unknown` |
@@ -59,7 +59,8 @@ interface SanitizedPathInfo {
 
 - `sanitizeHtml`: returns `''` for falsy input; `<a>` tags get `rel="noopener noreferrer"` by default
 - `sanitizeString`: `'javascript'` context always throws `McpError(ValidationError)` — no JavaScript allowed
-- `sanitizeUrl`: default protocols `['http', 'https']`; always blocks `javascript:`, `data:`, `vbscript:`
+- `sanitizeUrl`: default protocols `['http', 'https']`; requires a host (domain, single-label name such as `localhost`, IPv4 dotted quad, or bracketed IPv6), so host-less schemes like `mailto:` never pass; rejects whitespace, `<`, `>`, and URLs over 2084 characters; always blocks `javascript:`, `data:`, `vbscript:`
+- `sanitizeNumber`: string input must be a plain decimal — optional sign and fraction, no exponent (`1e5`) or separators (`1,000`)
 - `sanitizePath`: **Node-only** — throws `McpError(InternalError)` in Workers. Throws `McpError(ValidationError)` on path traversal or null bytes.
 - `sanitizeJson`: `maxSize` is bytes (UTF-8); uses `Buffer.byteLength` / `TextEncoder` / `string.length` fallback chain
 - `sanitizeNumber`: `NaN`/`Infinity` always rejected; out-of-range values silently clamped with debug log
@@ -81,7 +82,7 @@ const clean = await sanitization.sanitizeHtml(userHtml, {
 });
 
 // URL validation
-const safeUrl = await sanitization.sanitizeUrl(userUrl, ['http', 'https', 'mailto']);
+const safeUrl = await sanitization.sanitizeUrl(userUrl, ['http', 'https', 'ftp']);
 
 // Path sanitization (Node-only)
 const info = sanitization.sanitizePath(userPath, { rootDir: '/app/data', allowAbsolute: false });

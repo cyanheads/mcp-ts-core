@@ -4,7 +4,7 @@ description: >
   Reference for core and server configuration in `@cyanheads/mcp-ts-core`. Covers env var tables with defaults, priority order, server-specific Zod schema pattern, and Workers lazy-parsing requirement.
 metadata:
   author: cyanheads
-  version: "1.19"
+  version: "1.20"
   audience: external
   type: reference
 ---
@@ -209,8 +209,9 @@ Activated when `SUPABASE_URL` is set.
 | `OTEL_ENABLED` | `openTelemetry.enabled` | `false` | Enable OpenTelemetry export |
 | `OTEL_SERVICE_NAME` | `openTelemetry.serviceName` | `createApp` `name` → `package.json` `name` | Seeded from `createApp({ name })` when unset; an env value wins |
 | `OTEL_SERVICE_VERSION` | `openTelemetry.serviceVersion` | `package.json` `version` | |
-| `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` | `openTelemetry.tracesEndpoint` | — | OTLP traces endpoint URL |
-| `OTEL_EXPORTER_OTLP_METRICS_ENDPOINT` | `openTelemetry.metricsEndpoint` | — | OTLP metrics endpoint URL |
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | — | — | OTLP/HTTP base URL; resolves `tracesEndpoint` to `<base>/v1/traces` and `metricsEndpoint` to `<base>/v1/metrics` (path prefix kept) when the signal-specific variable is unset |
+| `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` | `openTelemetry.tracesEndpoint` | — | OTLP traces endpoint URL; overrides the base, used as-is |
+| `OTEL_EXPORTER_OTLP_METRICS_ENDPOINT` | `openTelemetry.metricsEndpoint` | — | OTLP metrics endpoint URL; overrides the base, used as-is |
 | `OTEL_TRACES_SAMPLER_ARG` | `openTelemetry.samplingRatio` | `1.0` | 0–1; fraction of traces to export |
 | `OTEL_LOG_LEVEL` | `openTelemetry.logLevel` | `INFO` | OTel SDK internal log level: `NONE` \| `ERROR` \| `WARN` \| `INFO` \| `DEBUG` \| `VERBOSE` \| `ALL` |
 

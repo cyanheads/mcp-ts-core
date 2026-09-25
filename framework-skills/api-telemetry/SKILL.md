@@ -4,7 +4,7 @@ description: >
   Catalog of OpenTelemetry instrumentation built into framework `@cyanheads/mcp-ts-core` — spans, metrics, completion logs, env config, runtime caveats, custom instrumentation patterns, and cardinality rules. Use when enabling OTel export, adding custom spans or metrics in services, debugging missing telemetry, looking up attribute names, or deciding what's safe to put on a metric attribute vs. a span.
 metadata:
   author: cyanheads
-  version: "1.12"
+  version: "1.13"
   audience: external
   type: reference
 ---
@@ -28,14 +28,17 @@ OTel is **off by default**. `OTEL_ENABLED=true` alone does nothing — you also 
 | Env var | Default | Purpose |
 |:--------|:--------|:--------|
 | `OTEL_ENABLED` | `false` | Master switch. Must be `true` to start the SDK. |
-| `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` | — | OTLP/HTTP traces endpoint (e.g. `http://localhost:4318/v1/traces`). |
-| `OTEL_EXPORTER_OTLP_METRICS_ENDPOINT` | — | OTLP/HTTP metrics endpoint (e.g. `http://localhost:4318/v1/metrics`). |
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | — | OTLP/HTTP base URL (e.g. `http://localhost:4318`). Traces go to `<base>/v1/traces`, metrics to `<base>/v1/metrics`; a path prefix is kept. |
+| `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` | — | OTLP/HTTP traces endpoint (e.g. `http://localhost:4318/v1/traces`). Overrides the base for traces; used as-is. |
+| `OTEL_EXPORTER_OTLP_METRICS_ENDPOINT` | — | OTLP/HTTP metrics endpoint (e.g. `http://localhost:4318/v1/metrics`). Overrides the base for metrics; used as-is. |
 | `OTEL_SERVICE_NAME` | `createApp` `name` → `package.json` `name` | `service.name` resource attribute. Seeded from `createApp({ name })` when unset; an env value wins. |
 | `OTEL_SERVICE_VERSION` | `package.json` `version` | `service.version` resource attribute. |
 | `OTEL_TRACES_SAMPLER_ARG` | `1.0` | Trace sampling ratio (0–1) for `TraceIdRatioBasedSampler`. |
 | `OTEL_LOG_LEVEL` | `INFO` | OTel diagnostic logger level (`NONE`/`ERROR`/`WARN`/`INFO`/`DEBUG`/`VERBOSE`/`ALL`). |
 
 Metrics push via `PeriodicExportingMetricReader` every **15 seconds**. Traces use `BatchSpanProcessor`.
+
+Endpoints resolve per the [OTLP exporter spec](https://opentelemetry.io/docs/specs/otel/protocol/exporter/#endpoint-urls-for-otlphttp): the signal-specific variable as-is, else the base plus the signal path. Those two exporters are the only export path. A signal with no resolved endpoint exports nothing, OTel log records are never exported, and `NodeSDK`'s own `OTEL_METRICS_EXPORTER` / `OTEL_LOGS_EXPORTER` defaults are not consulted.
 
 ---
 
@@ -60,6 +63,8 @@ Cloud platform detection auto-populates resource attributes:
 ## Flush at exit
 
 Spans batch and metrics push on a 15-second cycle, so a process that exits between cycles takes its telemetry with it. `ServerHandle.shutdown()` is the drain: it stops the transport, runs the `teardown` hook, then force-flushes traces and metrics through the OTLP exporters and closes the logger.
+
+A failed flush is logged as a warning and the logger still closes, so the final log lines survive. The usual cause is an exporter that can't reach its collector and hits the 5 s OTel shutdown ceiling.
 
 | Trigger | Path | Exit |
 |:--------|:-----|:-----|
@@ -107,7 +112,7 @@ Two consequences worth knowing when reading a dashboard:
 | `mcp.tool.duration` / `mcp.resource.duration` | The handler **plus** validation, formatting, and the enrichment merge — time to produce the result, not time spent in handler code. An expensive `format()` shows up here. |
 | `mcp.tool.output_bytes` / `mcp.resource.output_bytes` | The handler's returned domain value, not the assembled result. `content[]` re-renders the data the structured payload already carries, so measuring the assembly would double-count it. Nothing is recorded for a call that fails after the handler. |
 
-`mcp.tool.partial_success` and the `mcp.tool.batch.*` counts read the same domain value, so a batch envelope (`{ succeeded, failed }`) is still detected once the result has been assembled around it.
+`mcp.tool.partial_success` and the `mcp.tool.batch.*` counts read the same domain value, so a batch envelope (`{ succeeded, failed }`) is still detected once the result has been assembled around it. For an `output` built with `partialResultSchema()`, the arrays are read under its `failedKey`/`succeededKey`, resolved once per definition from the output schema.
 
 Trace context propagates across boundaries via W3C `traceparent` headers. See `api-utils` → `telemetry/trace` for `withSpan`, `buildTraceparent`, `extractTraceparent`, `createContextWithParentTrace`, `injectCurrentContextInto`, `runInContext` signatures.
 
