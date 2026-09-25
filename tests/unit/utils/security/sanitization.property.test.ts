@@ -10,15 +10,46 @@ import { describe, expect, it } from 'vitest';
 import { McpError } from '@/types-global/errors.js';
 import { sanitization } from '@/utils/security/sanitization.js';
 
+/**
+ * Markup built from script-tag fragments, including split and nested forms
+ * (`<scr<script>ipt>`) that only reassemble after a naive strip. `fc.string()`
+ * alone never produces `<script`.
+ */
+const scriptMarkup = fc.oneof(
+  fc.string(),
+  fc
+    .array(
+      fc.oneof(
+        fc.constantFrom(
+          '<script>',
+          '<SCRIPT src="x">',
+          '</script>',
+          '<scr',
+          'ipt>',
+          'alert(1)',
+          '<p>',
+          '</p>',
+        ),
+        fc.string({ maxLength: 4 }),
+      ),
+      { minLength: 1, maxLength: 12 },
+    )
+    .map((parts) => parts.join('')),
+);
+
 describe('Sanitization Property-Based Tests', () => {
   describe('sanitizeHtml', () => {
     it('output should never contain <script> tags', async () => {
       await fc.assert(
-        fc.asyncProperty(fc.string(), async (input) => {
+        fc.asyncProperty(scriptMarkup, async (input) => {
           const result = await sanitization.sanitizeHtml(input);
+          expect(typeof result).toBe('string');
           expect(result.toLowerCase()).not.toContain('<script');
         }),
-        { numRuns: 200 },
+        {
+          numRuns: 200,
+          examples: [['<script>alert(1)</script>'], ['<scr<script>ipt>alert(1)</script>']],
+        },
       );
     });
 
@@ -44,16 +75,6 @@ describe('Sanitization Property-Based Tests', () => {
           expect(result.toLowerCase()).not.toMatch(/<[^>]*\son\w+\s*=/);
         }),
         { numRuns: 200, examples: [['on0='], ['<p>onclick=1</p>']] },
-      );
-    });
-
-    it('should return string for any input', async () => {
-      await fc.assert(
-        fc.asyncProperty(fc.string(), async (input) => {
-          const result = await sanitization.sanitizeHtml(input);
-          expect(typeof result).toBe('string');
-        }),
-        { numRuns: 200 },
       );
     });
   });
@@ -98,9 +119,10 @@ describe('Sanitization Property-Based Tests', () => {
       await fc.assert(
         fc.asyncProperty(
           fc.string().filter((s) => {
-            // Keep only strings that are clearly not valid http(s) URLs
+            // Keep only strings that are clearly not valid http(s) URLs — `http:host`
+            // without slashes is a valid special-scheme URL, so the scheme alone disqualifies
             const t = s.trim().toLowerCase();
-            return !t.startsWith('http://') && !t.startsWith('https://');
+            return !t.startsWith('http:') && !t.startsWith('https:');
           }),
           async (input) => {
             await expect(sanitization.sanitizeUrl(input)).rejects.toThrow(McpError);
@@ -115,9 +137,7 @@ describe('Sanitization Property-Based Tests', () => {
         fc.asyncProperty(
           fc.webUrl({ withFragments: true, withQueryParameters: true }),
           async (url) => {
-            const result = await sanitization.sanitizeUrl(url);
-            expect(result.length).toBeGreaterThan(0);
-            expect(typeof result).toBe('string');
+            expect(await sanitization.sanitizeUrl(url)).toBe(url);
           },
         ),
         { numRuns: 100 },
@@ -232,7 +252,7 @@ describe('Sanitization Property-Based Tests', () => {
       );
     });
 
-    it('should handle primitive values without throwing', () => {
+    it('should return primitive values unchanged', () => {
       fc.assert(
         fc.property(
           fc.oneof(
@@ -243,19 +263,9 @@ describe('Sanitization Property-Based Tests', () => {
             fc.constant(undefined),
           ),
           (value) => {
-            expect(() => sanitization.sanitizeForLogging(value)).not.toThrow();
+            expect(sanitization.sanitizeForLogging(value)).toBe(value);
           },
         ),
-        { numRuns: 100 },
-      );
-    });
-
-    it('should return primitive values unchanged', () => {
-      fc.assert(
-        fc.property(fc.oneof(fc.string(), fc.integer(), fc.boolean()), (value) => {
-          const result = sanitization.sanitizeForLogging(value);
-          expect(result).toBe(value);
-        }),
         { numRuns: 100 },
       );
     });

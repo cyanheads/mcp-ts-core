@@ -4,9 +4,9 @@
  * and numbers, as well as redacting sensitive fields from data intended for logging.
  *
  * Several methods (`sanitizeHtml`, `sanitizeString`, `sanitizeUrl`, `sanitizeNumber`) are
- * **async** because they lazy-load optional peer dependencies (`sanitize-html`, `validator`)
- * on first use. If a required peer dependency is not installed, these methods throw a
- * `McpError` with `JsonRpcErrorCode.ConfigurationError`.
+ * **async**. HTML handling lazy-loads the optional `sanitize-html` peer on first use and throws
+ * a `McpError` with `JsonRpcErrorCode.ConfigurationError` when it is not installed; URL and
+ * number validation are built in.
  *
  * Path sanitization (`sanitizePath`) is synchronous but only available in Node.js environments.
  *
@@ -38,15 +38,42 @@ async function loadSanitizeHtml() {
   return _sanitizeHtmlFn;
 }
 
-let _validator: typeof import('validator').default | undefined;
-async function loadValidator() {
-  _validator ??= (
-    await import('validator').catch(() => {
-      throw configurationError('Install "validator" to use input validation: bun add validator');
-    })
-  ).default;
-  return _validator;
+const URL_MAX_LENGTH = 2084;
+const URL_FORBIDDEN_CHARS = /[\s<>]/;
+const URL_AUTHORITY = /^[a-z][a-z0-9+.-]*:(?:\/\/)?([^/?#]*)/i;
+const URL_HOST_LABEL = String.raw`[\p{L}\p{N}_](?:[\p{L}\p{M}\p{N}_-]*[\p{L}\p{M}\p{N}_])?`;
+const URL_HOST = new RegExp(
+  String.raw`^(?:${URL_HOST_LABEL}(?:\.${URL_HOST_LABEL})*\.?|\[[0-9a-f:.]+\])$`,
+  'iu',
+);
+const IPV4_HOST = /^\d+\.\d+\.\d+\.\d+$/;
+
+/**
+ * Validates `input` as an absolute URL with a host, using a scheme from `protocols`.
+ *
+ * Rejects whitespace, `<`, or `>` anywhere, inputs over 2084 characters, and hosts outside
+ * letters, digits, `_`, and non-edge `-` labels (or a bracketed IPv6 literal). The host is
+ * checked as written and must match the host the WHATWG parser resolves, so inputs that read
+ * as one host but fetch another (a backslash before `@`, an obfuscated IPv4 form such as
+ * `2130706433` or `127.1`) are refused. Single-label hosts such as `localhost` are accepted.
+ */
+function isAllowedUrl(input: string, protocols: readonly string[]): boolean {
+  if (!input || input.length > URL_MAX_LENGTH || URL_FORBIDDEN_CHARS.test(input)) return false;
+  const url = URL.parse(input);
+  if (!url || !protocols.some((protocol) => `${protocol.toLowerCase()}:` === url.protocol)) {
+    return false;
+  }
+  const authority = URL_AUTHORITY.exec(input)?.[1] ?? '';
+  const host = authority.slice(authority.lastIndexOf('@') + 1).replace(/:\d*$/, '');
+  if (!URL_HOST.test(host)) return false;
+  // The host as written must be the host the parser resolved — `http://evil.com\@good.com`
+  // reads as good.com but parses (and fetches) as evil.com.
+  if (URL.parse(`${url.protocol}//${host}`)?.hostname !== url.hostname) return false;
+  return !IPV4_HOST.test(url.hostname) || url.hostname === host;
 }
+
+/** A plain decimal: optional sign, optional fraction, no exponent or separators. */
+const NUMERIC_STRING = /^[+-]?([0-9]*\.)?[0-9]+$/;
 
 // Dynamically import 'path' only in Node.js environments.
 // Top-level await ensures the module is loaded before any sanitizePath call.
@@ -382,22 +409,21 @@ export class Sanitization {
   /**
    * Sanitizes a string according to its intended usage context.
    *
-   * This method is **async** because it lazy-loads `sanitize-html` and/or `validator`
-   * depending on the requested context.
+   * This method is **async** because the HTML-stripping contexts lazy-load `sanitize-html`.
    *
    * | `context`      | Behavior |
    * |----------------|----------|
    * | `'text'`       | Strips all HTML tags and attributes (default). |
    * | `'html'`       | Runs full HTML sanitization via `sanitizeHtml` (respects `allowedTags`/`allowedAttributes`). |
    * | `'attribute'`  | Strips all tags and attributes — safe for use inside an HTML attribute value. |
-   * | `'url'`        | Validates the URL with `validator.isURL` (http/https only); returns `''` if invalid. |
+   * | `'url'`        | Validates the URL as `sanitizeUrl` does (http/https only); returns `''` if invalid. |
    * | `'javascript'` | **Disallowed.** Always throws `McpError`. |
    *
    * @param input - The string to sanitize. Returns `''` immediately if falsy.
    * @param options - Context and optional allowlist overrides.
    * @returns Promise resolving to the sanitized string, or `''` for invalid URLs.
    * @throws {McpError} With `ValidationError` if `context` is `'javascript'`.
-   * @throws {McpError} With `ConfigurationError` if a required peer dep is not installed.
+   * @throws {McpError} With `ConfigurationError` if `sanitize-html` is needed and not installed.
    * @example
    * ```ts
    * await sanitization.sanitizeString('<b>hello</b>', { context: 'text' });
@@ -431,14 +457,7 @@ export class Sanitization {
         return sanitizeHtmlFn(input, { allowedTags: [], allowedAttributes: {} });
       }
       case 'url': {
-        const v = await loadValidator();
-        if (
-          !v.isURL(input, {
-            protocols: ['http', 'https'],
-            require_protocol: true,
-            require_host: true,
-          })
-        ) {
+        if (!isAllowedUrl(input, ['http', 'https'])) {
           logger.warning(
             'Potentially invalid URL detected during string sanitization (context: url)',
             requestContextService.createRequestContext({
@@ -448,7 +467,7 @@ export class Sanitization {
           );
           return '';
         }
-        return v.trim(input);
+        return input.trim();
       }
       case 'javascript':
         logger.error(
@@ -471,17 +490,19 @@ export class Sanitization {
   /**
    * Validates and sanitizes a URL string.
    *
-   * This method is **async** because it lazy-loads the `validator` peer dependency on first call.
+   * Async for API stability; validation is built in and needs no peer dependency.
    *
-   * Validation requires a protocol and host. Even if a protocol appears in `allowedProtocols`,
-   * the pseudo-protocols `javascript:`, `data:`, and `vbscript:` are always rejected.
+   * Validation requires a protocol and host. Hosts may be domains, single-label names such as
+   * `localhost`, IPv4 dotted quads, or bracketed IPv6 literals. Whitespace, `<`, and `>` are
+   * rejected anywhere, as are URLs over 2084 characters. Even if a protocol appears in
+   * `allowedProtocols`, the pseudo-protocols `javascript:`, `data:`, and `vbscript:` are always
+   * rejected.
    *
    * @param input - The URL string to sanitize. Leading/trailing whitespace is trimmed.
    * @param allowedProtocols - URL schemes that are permitted. Defaults to `['http', 'https']`.
    * @returns Promise resolving to the trimmed, validated URL string.
    * @throws {McpError} With `ValidationError` if the URL is invalid, uses a disallowed protocol,
    *   or uses a blocked pseudo-protocol (`javascript:`, `data:`, `vbscript:`).
-   * @throws {McpError} With `ConfigurationError` if `validator` is not installed.
    * @example
    * ```ts
    * await sanitization.sanitizeUrl('https://example.com/path');
@@ -494,37 +515,32 @@ export class Sanitization {
    * // throws McpError (ValidationError)
    * ```
    */
-  public async sanitizeUrl(
+  public sanitizeUrl(
     input: string,
     allowedProtocols: string[] = ['http', 'https'],
   ): Promise<string> {
-    try {
-      const v = await loadValidator();
-      const trimmedInput = input.trim();
-      if (
-        !v.isURL(trimmedInput, {
-          protocols: allowedProtocols,
-          require_protocol: true,
-          require_host: true,
-        })
-      ) {
-        throw new Error('Invalid URL format or protocol not in allowed list.');
+    return Promise.try(() => {
+      try {
+        const trimmedInput = input.trim();
+        if (!isAllowedUrl(trimmedInput, allowedProtocols)) {
+          throw new Error('Invalid URL format or protocol not in allowed list.');
+        }
+        const lowercasedInput = trimmedInput.toLowerCase();
+        if (
+          lowercasedInput.startsWith('javascript:') ||
+          lowercasedInput.startsWith('data:') ||
+          lowercasedInput.startsWith('vbscript:')
+        ) {
+          throw new Error('Disallowed pseudo-protocol (javascript:, data:, or vbscript:) in URL.');
+        }
+        return trimmedInput;
+      } catch (error: unknown) {
+        throw validationError(
+          error instanceof Error ? error.message : 'Invalid or unsafe URL provided.',
+          { input },
+        );
       }
-      const lowercasedInput = trimmedInput.toLowerCase();
-      if (
-        lowercasedInput.startsWith('javascript:') ||
-        lowercasedInput.startsWith('data:') ||
-        lowercasedInput.startsWith('vbscript:')
-      ) {
-        throw new Error('Disallowed pseudo-protocol (javascript:, data:, or vbscript:) in URL.');
-      }
-      return trimmedInput;
-    } catch (error: unknown) {
-      throw validationError(
-        error instanceof Error ? error.message : 'Invalid or unsafe URL provided.',
-        { input },
-      );
-    }
+    });
   }
 
   /**
@@ -714,10 +730,10 @@ export class Sanitization {
   /**
    * Validates a numeric input and optionally clamps it to a range.
    *
-   * This method is **async** because string inputs are validated using the `validator` peer
-   * dependency, which is lazy-loaded on first call. Numeric inputs bypass the lazy load.
+   * Async for API stability; validation is built in and needs no peer dependency.
    *
-   * - String inputs: trimmed and checked with `validator.isNumeric`, then parsed with `parseFloat`.
+   * - String inputs: trimmed, required to be a plain decimal (optional sign and fraction, no
+   *   exponent or separators), then parsed with `parseFloat`.
    * - Number inputs: used directly.
    * - `NaN` and `Infinity` are always rejected.
    * - If `min` or `max` are provided, the value is silently clamped (a debug log is emitted).
@@ -727,7 +743,6 @@ export class Sanitization {
    * @param max - Inclusive upper bound. If the value is above this, it is clamped to `max`.
    * @returns Promise resolving to the validated (and potentially clamped) number.
    * @throws {McpError} With `ValidationError` if the input is not numeric, is `NaN`, or is `Infinity`.
-   * @throws {McpError} With `ConfigurationError` if `validator` is not installed (string input only).
    * @example
    * ```ts
    * await sanitization.sanitizeNumber('42.5');
@@ -740,53 +755,54 @@ export class Sanitization {
    * // throws McpError (ValidationError)
    * ```
    */
-  public async sanitizeNumber(input: number | string, min?: number, max?: number): Promise<number> {
-    let value: number;
-    if (typeof input === 'string') {
-      const v = await loadValidator();
-      const trimmedInput = input.trim();
-      if (trimmedInput === '' || !v.isNumeric(trimmedInput)) {
-        throw validationError('Invalid number format: input is empty or not numeric.', { input });
+  public sanitizeNumber(input: number | string, min?: number, max?: number): Promise<number> {
+    return Promise.try(() => {
+      let value: number;
+      if (typeof input === 'string') {
+        const trimmedInput = input.trim();
+        if (!NUMERIC_STRING.test(trimmedInput)) {
+          throw validationError('Invalid number format: input is empty or not numeric.', { input });
+        }
+        value = parseFloat(trimmedInput);
+      } else if (typeof input === 'number') {
+        value = input;
+      } else {
+        throw validationError('Invalid input type: expected number or string.', {
+          input: String(input),
+        });
       }
-      value = parseFloat(trimmedInput);
-    } else if (typeof input === 'number') {
-      value = input;
-    } else {
-      throw validationError('Invalid input type: expected number or string.', {
-        input: String(input),
-      });
-    }
 
-    if (Number.isNaN(value) || !Number.isFinite(value)) {
-      throw validationError('Invalid number value (NaN or Infinity).', { input });
-    }
+      if (Number.isNaN(value) || !Number.isFinite(value)) {
+        throw validationError('Invalid number value (NaN or Infinity).', { input });
+      }
 
-    let clamped = false;
-    const originalValueForLog = value;
-    if (min !== undefined && value < min) {
-      value = min;
-      clamped = true;
-    }
-    if (max !== undefined && value > max) {
-      value = max;
-      clamped = true;
-    }
-    if (clamped) {
-      logger.debug(
-        'Number clamped to range.',
-        requestContextService.createRequestContext({
-          operation: 'Sanitization.sanitizeNumber.clamped',
-          additionalContext: {
-            originalInput: String(input),
-            parsedValue: originalValueForLog,
-            minValue: min,
-            maxValue: max,
-            clampedValue: value,
-          },
-        }),
-      );
-    }
-    return value;
+      let clamped = false;
+      const originalValueForLog = value;
+      if (min !== undefined && value < min) {
+        value = min;
+        clamped = true;
+      }
+      if (max !== undefined && value > max) {
+        value = max;
+        clamped = true;
+      }
+      if (clamped) {
+        logger.debug(
+          'Number clamped to range.',
+          requestContextService.createRequestContext({
+            operation: 'Sanitization.sanitizeNumber.clamped',
+            additionalContext: {
+              originalInput: String(input),
+              parsedValue: originalValueForLog,
+              minValue: min,
+              maxValue: max,
+              clampedValue: value,
+            },
+          }),
+        );
+      }
+      return value;
+    });
   }
 
   /**

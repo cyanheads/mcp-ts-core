@@ -184,14 +184,15 @@ describe('Sanitization Utility', () => {
         },
         nonSensitive: 'data',
       };
-      const sanitized = sanitization.sanitizeForLogging(sensitiveObject) as Record<string, unknown>;
-      expect(sanitized).toBeDefined();
-      if (sanitized && typeof sanitized === 'object' && 'credentials' in sanitized) {
-        const creds = sanitized.credentials as Record<string, unknown>;
-        expect(creds.password).toBe('[REDACTED]');
-        expect(creds.session_token).toBe('[REDACTED]');
-      }
-      expect((sanitized as Record<string, unknown>).nonSensitive).toBe('data');
+      const sanitized = sanitization.sanitizeForLogging(sensitiveObject);
+      expect(sanitized).toEqual({
+        user: 'casey',
+        credentials: {
+          password: '[REDACTED]',
+          session_token: '[REDACTED]',
+        },
+        nonSensitive: 'data',
+      });
     });
 
     it('should not modify non-sensitive keys', () => {
@@ -233,16 +234,6 @@ describe('Sanitization Utility', () => {
       expect(sanitized[1]).toBe(1);
       expect(sanitized[2]).toEqual(date);
     });
-
-    it('should handle edge case where nested property is undefined', () => {
-      const sensitiveObject = {
-        user: 'casey',
-        nonSensitive: 'data',
-      };
-      const sanitized = sanitization.sanitizeForLogging(sensitiveObject) as Record<string, unknown>;
-      expect(sanitized).toBeDefined();
-      expect((sanitized as Record<string, unknown>).nonSensitive).toBe('data');
-    });
   });
 
   // Adding tests for other public methods to ensure full coverage
@@ -260,6 +251,40 @@ describe('Sanitization Utility', () => {
     it('should throw for disallowed protocols', async () => {
       const url = 'ftp://example.com';
       await expect(sanitization.sanitizeUrl(url)).rejects.toThrow(McpError);
+    });
+
+    it.each([
+      'http://localhost:3000/mcp',
+      'http://intranet/path',
+      'http://127.0.0.1:8080',
+      'http://[::1]:3010/',
+      'https://user:pass@example.com/a?b=c#d',
+      'https://müller.de',
+      'HTTPS://EXAMPLE.COM',
+    ])('accepts %s', async (url) => {
+      expect(await sanitization.sanitizeUrl(url)).toBe(url);
+    });
+
+    it.each([
+      ['a quote in the host', 'http://ex"ample.com'],
+      ['a backslash in the authority', 'http://evil.com\\@good.com'],
+      ['a decimal-integer IPv4 host', 'http://2130706433'],
+      ['a shorthand IPv4 host', 'http://127.1'],
+      ['an angle bracket', 'https://example.com/<script>'],
+      ['embedded whitespace', 'https://exa mple.com'],
+      ['a host-less scheme', 'mailto:someone@example.com'],
+      ['a missing host', 'http:///path'],
+      ['a URL over 2084 characters', `https://example.com/${'a'.repeat(2100)}`],
+    ])('rejects %s', async (_label, url) => {
+      await expect(sanitization.sanitizeUrl(url, ['http', 'https', 'mailto'])).rejects.toThrow(
+        McpError,
+      );
+    });
+
+    it('matches allowed protocols case-insensitively', async () => {
+      expect(await sanitization.sanitizeUrl('sftp://files.example.com', ['SFTP'])).toBe(
+        'sftp://files.example.com',
+      );
     });
   });
 
@@ -319,6 +344,22 @@ describe('Sanitization Utility', () => {
       await expect(sanitization.sanitizeNumber('abc')).rejects.toThrow(McpError);
     });
 
+    it.each([
+      ['+1.5', 1.5],
+      ['-2', -2],
+      ['.5', 0.5],
+      ['  42  ', 42],
+    ])('parses the plain decimal %j', async (input, expected) => {
+      expect(await sanitization.sanitizeNumber(input)).toBe(expected);
+    });
+
+    it.each(['', '1e5', '1,000', '1.', '0x10', '1.2.3', '--1'])(
+      'rejects the non-decimal string %j',
+      async (input) => {
+        await expect(sanitization.sanitizeNumber(input)).rejects.toThrow(McpError);
+      },
+    );
+
     it('should clamp number to min/max range', async () => {
       expect(await sanitization.sanitizeNumber(5, 10, 20)).toBe(10);
       expect(await sanitization.sanitizeNumber(25, 10, 20)).toBe(20);
@@ -337,19 +378,6 @@ describe('Sanitization Utility', () => {
       expect(updatedFields).toContain('customsecret');
       expect(updatedFields).toContain('customtoken');
       expect(updatedFields.length).toBeGreaterThan(initialFields.length);
-    });
-
-    it('should return pino-compliant wildcard redact paths', () => {
-      const pinoFields = sanitization.getSensitivePinoFields();
-      expect(Array.isArray(pinoFields)).toBe(true);
-      // Each sensitive field should generate three paths for nested matching
-      const baseFields = sanitization.getSensitiveFields();
-      for (const field of baseFields) {
-        expect(pinoFields).toContain(field); // top-level
-        expect(pinoFields).toContain(`*.${field}`); // one level deep
-        expect(pinoFields).toContain(`*.*.${field}`); // two levels deep
-      }
-      expect(pinoFields.length).toBe(baseFields.length * 3);
     });
   });
 
