@@ -852,16 +852,35 @@ export async function createApp<TSupabaseClient extends object = SupabaseClientH
    */
   let activeShutdownStep = 'not-started';
 
+  /**
+   * Final cleanup. The logger closes whether or not the telemetry flush
+   * succeeds — an exporter that cannot reach its collector rejects on the
+   * flush timeout, and skipping the close would drop the buffered log lines,
+   * including the failure itself.
+   */
   const flushTelemetryAndLogger = async (): Promise<void> => {
+    activeShutdownStep = 'telemetry-flush';
     try {
-      activeShutdownStep = 'telemetry-flush';
       await shutdownOpenTelemetry();
-      activeShutdownStep = 'logger-close';
-      await logger.close();
-      activeShutdownStep = 'complete';
-    } catch {
-      // Ignore errors during final cleanup
+    } catch (error) {
+      logger.warning(
+        'OpenTelemetry flush failed during shutdown; buffered telemetry may be lost.',
+        requestContextService.createRequestContext({
+          operation: 'ServerShutdown',
+          additionalContext: {
+            cleanupStep: 'telemetry-flush',
+            error: error instanceof Error ? error.message : String(error),
+          },
+        }),
+      );
     }
+    activeShutdownStep = 'logger-close';
+    try {
+      await logger.close();
+    } catch {
+      // Nothing left to report a failed close to.
+    }
+    activeShutdownStep = 'complete';
   };
 
   const shutdown = async (signal = 'SHUTDOWN'): Promise<void> => {

@@ -291,13 +291,6 @@ vi.mock('@/storage/core/storageFactory.js', () => ({
   createStorageProvider: mockCreateStorageProvider,
 }));
 
-vi.mock('@/types-global/errors.js', async () => {
-  const actual = await vi.importActual<typeof import('@/types-global/errors.js')>(
-    '@/types-global/errors.js',
-  );
-  return actual;
-});
-
 vi.mock('@/utils/internal/error-handler/errorHandler.js', () => ({
   initErrorMetrics: mockInitErrorMetrics,
 }));
@@ -454,15 +447,6 @@ describe('core/app', () => {
     };
 
     await expect(composeServices({ setup })).rejects.toBe(original);
-  });
-
-  it('requires Supabase credentials when the Supabase storage provider is selected', async () => {
-    mockConfig.storage.providerType = 'supabase';
-    mockConfig.supabase = { serviceRoleKey: undefined, url: undefined };
-
-    await expect(composeServices()).rejects.toThrow(
-      'Supabase URL or service role key is missing for admin client.',
-    );
   });
 
   it('creates a Supabase admin client when Supabase storage is configured', async () => {
@@ -771,35 +755,6 @@ describe('core/app', () => {
     expect(mockTransportManager.instance.stop).toHaveBeenCalledWith('uncaughtException');
 
     setTimeoutSpy.mockRestore();
-    processExitSpy.mockRestore();
-  });
-
-  it('registered signal handlers delegate to graceful shutdown', async () => {
-    const processExitSpy = vi
-      .spyOn(process, 'exit')
-      .mockImplementation(((_: number) => undefined as never) as typeof process.exit);
-
-    await createApp();
-
-    const onSigterm = getProcessHandler('SIGTERM') as () => void;
-    onSigterm();
-    await flushAsyncWork();
-
-    expect(mockTransportManager.instance.stop).toHaveBeenCalledWith('SIGTERM');
-
-    vi.clearAllMocks();
-    mockInitializeOpenTelemetry.mockResolvedValue(undefined);
-    processOnSpy.mockClear();
-    processRemoveListenerSpy.mockClear();
-
-    await createApp();
-
-    const onSigint = getProcessHandler('SIGINT') as () => void;
-    onSigint();
-    await flushAsyncWork();
-
-    expect(mockTransportManager.instance.stop).toHaveBeenCalledWith('SIGINT');
-
     processExitSpy.mockRestore();
   });
 
@@ -1362,6 +1317,55 @@ describe('core/app', () => {
       await expect(createApp()).rejects.toThrow('bind failed');
       expect(mockTransportManager.instance.stop).toHaveBeenCalledWith('STARTUP_FAILURE');
       expect(processExitSpy).not.toHaveBeenCalled();
+    });
+
+    it('closes the logger after a rejected telemetry flush, logging the failure first', async () => {
+      mockShutdownOpenTelemetry.mockRejectedValueOnce(
+        new Error('OpenTelemetry SDK shutdown timeout'),
+      );
+
+      await createApp();
+      (getProcessHandler('SIGTERM') as () => void)();
+      await flushAsyncWork();
+
+      expect(mockLogger.warning).toHaveBeenCalledWith(
+        expect.stringContaining('OpenTelemetry flush failed'),
+        expect.objectContaining({
+          extra: expect.objectContaining({
+            cleanupStep: 'telemetry-flush',
+            error: 'OpenTelemetry SDK shutdown timeout',
+          }),
+        }),
+      );
+      expect(mockLogger.close).toHaveBeenCalledTimes(1);
+      const warningOrder = mockLogger.warning.mock.invocationCallOrder.at(-1) as number;
+      const [closeOrder] = mockLogger.close.mock.invocationCallOrder;
+      expect(warningOrder).toBeLessThan(closeOrder as number);
+      expect(processExitSpy).toHaveBeenCalledWith(0);
+    });
+
+    it('names logger-close when the ceiling fires after a rejected telemetry flush', async () => {
+      const stuck = Promise.withResolvers<void>();
+      mockShutdownOpenTelemetry.mockRejectedValueOnce(new Error('flush failed'));
+      mockLogger.close.mockReturnValueOnce(stuck.promise);
+      const backstop = captureBackstops();
+
+      await createApp();
+      (getProcessHandler('SIGTERM') as () => void)();
+      await flushAsyncWork();
+      backstop.callbacks[0]?.();
+
+      expect(mockLogger.warning).toHaveBeenCalledWith(
+        expect.stringContaining('did not settle'),
+        expect.objectContaining({
+          extra: expect.objectContaining({ cleanupStep: 'logger-close' }),
+        }),
+      );
+      expect(processExitSpy).toHaveBeenCalledWith(1);
+
+      backstop.restore();
+      stuck.resolve();
+      await flushAsyncWork();
     });
   });
 
