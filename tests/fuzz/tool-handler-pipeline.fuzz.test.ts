@@ -98,7 +98,10 @@ vi.mock('@/utils/internal/performance.js', () => ({
 // ---------------------------------------------------------------------------
 
 import type { CallToolResult } from '@modelcontextprotocol/server';
-import { prevalidateToolArguments } from '@/mcp-server/tools/utils/inputPrevalidation.js';
+import {
+  prevalidateAliasFirst,
+  prevalidateToolArguments,
+} from '@/mcp-server/tools/utils/inputPrevalidation.js';
 import type { AnyToolDefinition } from '@/mcp-server/tools/utils/toolDefinition.js';
 import { tool } from '@/mcp-server/tools/utils/toolDefinition.js';
 import {
@@ -381,7 +384,7 @@ describe('Tool Handler Pipeline Fuzz Tests', () => {
       );
     });
 
-    it('rejects a call no order validates with the drop-first rejection', () => {
+    it('rejects a call no order validates with the last order tried', () => {
       fc.assert(
         fc.property(argumentsArb, (args) => {
           const { first, parsed } = dropFirst(args);
@@ -392,9 +395,20 @@ describe('Tool Handler Pipeline Fuzz Tests', () => {
             thrown = error;
           }
           fc.pre(thrown instanceof McpError);
+          // The alias-first retry runs only when it changes the arguments; when
+          // it does, the keys the drop discarded reach their targets there, and
+          // its rejection is the one reported.
+          const retry = prevalidateAliasFirst(
+            keyOrderTool as AnyToolDefinition,
+            args,
+            first,
+            undefined,
+          );
+          const reported = retry ?? first;
+          const reparsed = retry ? keyOrderTool.input.safeParse(retry.args) : parsed;
           const data = (thrown as McpError).data as { input?: unknown; issues?: unknown };
-          expect(data.issues).toEqual(parsed.error?.issues);
-          expect(data.input).toEqual(first.report);
+          expect(data.issues).toEqual(reparsed.error?.issues);
+          expect(data.input).toEqual(reported.report);
         }),
         { numRuns: 300 },
       );
