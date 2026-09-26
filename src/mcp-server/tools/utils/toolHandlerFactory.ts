@@ -661,11 +661,14 @@ export interface ParseToolArgumentsOptions {
  * parse-then-repair runs on the result, kept only if it validates (#563).
  * {@link recordPrevalidation} then counts and logs the attempt the handler
  * receives, so a call the first attempt validates is untouched by the retry.
- * When nothing validates, the first attempt's *original* rejection is thrown,
- * built from the arguments that produced it — identical to the one the same
- * call gets under `input: { coerce: false }`. It carries the rewrites and
- * underscore-rule drops that attempt made as `data.input`, and as sentences
- * closing the hint (#468); a call with neither gains no `data.input`.
+ * When nothing validates, the *original* rejection of the last attempt is
+ * thrown — the retry's when it ran, since there every key the drop discarded
+ * reached its target and the issues name what is wrong with the value it
+ * carried — built from the arguments that produced it, identical to the one
+ * the same call gets under `input: { coerce: false }`. It carries the rewrites
+ * and underscore-rule drops that attempt made as `data.input`, and as
+ * sentences closing the hint (#468); a call with neither gains no
+ * `data.input`.
  *
  * The single argument-rejection path. {@link createToolHandler} and the
  * `runToolContract` test helper both route through it, so a test written to
@@ -684,22 +687,25 @@ export function parseToolArguments<TDefinition extends AnyToolDefinition>(
   const parsed = parseAttempt(def, first.args, options.input);
   if (parsed.success) return accept(def, first, parsed, options.context);
 
+  let rejected = { attempt: first, error: parsed.error };
   const retry = prevalidateAliasFirst(def, input, first, options.input);
   if (retry) {
     const retried = parseAttempt(def, retry.args, options.input);
     if (retried.success) return accept(def, retry, retried, options.context);
+    rejected = { attempt: retry, error: retried.error };
   }
 
-  recordPrevalidation(def, first, options.context);
-  const { report } = first;
+  const { attempt, error } = rejected;
+  recordPrevalidation(def, attempt, options.context);
+  const { report } = attempt;
   throw new McpError(
     JsonRpcErrorCode.InvalidParams,
-    formatInputValidationMessage(def.name, parsed.error, first.args),
+    formatInputValidationMessage(def.name, error, attempt.args),
     {
-      issues: parsed.error.issues,
+      issues: error.issues,
       reason: INVALID_ARGUMENTS_REASON,
       ...(report && { input: report }),
-      recovery: { hint: buildArgumentRecoveryHint(def, parsed.error, first.args, report) },
+      recovery: { hint: buildArgumentRecoveryHint(def, error, attempt.args, report) },
     },
   );
 }

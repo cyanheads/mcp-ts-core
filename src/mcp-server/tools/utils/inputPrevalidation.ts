@@ -26,8 +26,11 @@
  * then fail, repair included, the two stages run once more with the alias
  * stage first, and that retry — with its own repair — is kept only if it
  * validates (#563). A call the first order validates never reaches the retry,
- * and a call neither order validates carries the first order's rejection, so
- * the retry only ever turns a rejection into a success.
+ * so the retry never changes which calls validate. A call neither order
+ * validates carries the retry's rejection, where the discarded keys reached
+ * their targets: a declared `_q` alias with a bad value is reported as
+ * validated under `query`, with the value's own failure, not as a dropped key
+ * beside a missing field.
  *
  * All three are on by default and each has a server-level switch on
  * `createApp({ input })` / `createWorkerHandler({ input })`. None of them
@@ -35,8 +38,8 @@
  * about them in its response: a drop, a rewrite, and a repair each emit one
  * debug log and one counter increment instead — for the attempt whose
  * arguments the handler receives, never one the parse discarded. A call they
- * cannot rescue is rejected with its first attempt's rewrites and
- * underscore-rule drops reported (#468), since without them the caller cannot
+ * cannot rescue is rejected with the rewrites and underscore-rule drops of the
+ * attempt whose rejection it carries reported (#468), since without them the caller cannot
  * tell a bad value from a key that was moved or discarded; a repair the
  * re-parse discarded leaves no trace there.
  *

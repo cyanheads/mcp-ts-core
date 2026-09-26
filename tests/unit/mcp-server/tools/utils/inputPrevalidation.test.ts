@@ -336,6 +336,14 @@ const underscoreAliased = tool('prevalidation_underscore_alias', {
   handler: record,
 });
 
+const underscoreFloor = tool('prevalidation_underscore_floor', {
+  description: 'Declares an underscore-prefixed alias onto a key with a length floor.',
+  input: z.object({ query: z.string().min(3).describe('Search query.') }),
+  inputAliases: { _q: 'query' },
+  output: ok,
+  handler: record,
+});
+
 const underscoreKeyed = tool('prevalidation_underscore_keyed', {
   description: 'Declares a key spelled like an underscore alias.',
   input: z.object({
@@ -1088,26 +1096,94 @@ describe('tool argument pre-validation', () => {
       expect(adds('mcp.input.ignored_key')).toEqual([]);
     });
 
-    it('rejects a call neither order validates with the drop-first rejection', async () => {
+    it('rejects a call neither order validates as the alias-first retry saw it', async () => {
       const result = await expectOriginalRejection(underscoreAliased, { _q: true });
 
       expect(envelope(result).message).toBe(
         'Input validation error: Invalid arguments for tool prevalidation_underscore_alias: ' +
-          'query: Invalid input: expected string, received undefined',
+          'query: Invalid input: expected string, received boolean',
       );
-      expect(envelope(result).data?.input).toEqual({ aliased: [], ignored: ['_q'] });
+      expect(envelope(result).data?.input).toEqual({
+        aliased: [{ alias: '_q', target: 'query' }],
+        ignored: [],
+      });
       expect(envelope(result).data?.recovery?.hint).toBe(
-        'Provide query. Dropped undeclared key _q.',
+        'Send query as a string, not a boolean. Validated _q as query.',
       );
       // Telemetry follows the attempt the rejection reports.
-      expect(adds('mcp.input.ignored_key')).toEqual(
+      expect(adds('mcp.input.ignored_key')).toEqual([]);
+      expect(adds('mcp.input.aliased')).toHaveLength(2);
+      expect(debugLines('dropped client-added argument key')).toEqual([]);
+    });
+
+    it('keeps the drop-first rejection when the alias-first order changes nothing', async () => {
+      const result = await expectOriginalRejection(search, { _search: 'x' });
+
+      expect(envelope(result).data?.input).toEqual({ aliased: [], ignored: ['_search'] });
+      expect(envelope(result).data?.recovery?.hint).toBe(
+        'Provide query. Dropped undeclared key _search.',
+      );
+    });
+
+    it("reports a declared underscore alias as validated, with its value's own failure", async () => {
+      const result = await expectOriginalRejection(underscoreFloor, { _q: 'ab' });
+
+      expect(envelope(result).message).toBe(
+        'Input validation error: Invalid arguments for tool prevalidation_underscore_floor: ' +
+          'query: Too small: expected string to have >=3 characters',
+      );
+      expect(envelope(result).data?.issues).toEqual([
+        expect.objectContaining({ code: 'too_small', path: ['query'] }),
+      ]);
+      expect(envelope(result).data?.input).toEqual({
+        aliased: [{ alias: '_q', target: 'query' }],
+        ignored: [],
+      });
+      expect(envelope(result).data?.recovery?.hint).toBe(
+        'query: Too small: expected string to have >=3 characters. Validated _q as query.',
+      );
+      expect(text(result)).toBe(
+        'Error: Input validation error: Invalid arguments for tool prevalidation_underscore_floor: ' +
+          'query: Too small: expected string to have >=3 characters\n\n' +
+          'Recovery: query: Too small: expected string to have >=3 characters. ' +
+          'Validated _q as query.\n\n' +
+          '(reason invalid_arguments)',
+      );
+      // Telemetry follows the attempt the rejection reports: the rewrite, no drop.
+      expect(adds('mcp.input.ignored_key')).toEqual([]);
+      expect(adds('mcp.input.aliased')).toEqual(
         Array.from({ length: 2 }, () => ({
-          'mcp.tool.name': 'prevalidation_underscore_alias',
-          'mcp.input.ignore_rule': 'underscore_prefix',
+          'mcp.tool.name': 'prevalidation_underscore_floor',
+          'mcp.input.target': 'query',
+          'mcp.input.alias_kind': 'declared',
         })),
       );
-      expect(adds('mcp.input.aliased')).toEqual([]);
-      expect(debugLines('rewrote argument key')).toEqual([]);
+    });
+
+    it('still reports an underscore key the alias-first retry cannot resolve beside one it did', async () => {
+      const result = await expectOriginalRejection(underscoreFloor, { _q: 'ab', _page: 2 });
+
+      expect(envelope(result).data?.input).toEqual({
+        aliased: [{ alias: '_q', target: 'query' }],
+        ignored: ['_page'],
+      });
+      expect(envelope(result).data?.recovery?.hint).toBe(
+        'query: Too small: expected string to have >=3 characters. ' +
+          'Validated _q as query. Dropped undeclared key _page.',
+      );
+    });
+
+    it('reports an undeclared underscore case-style variant under its target when both orders fail', async () => {
+      const result = await expectOriginalRejection(minTarget, { _target_query: 'ab' });
+
+      expect(envelope(result).data?.input).toEqual({
+        aliased: [{ alias: '_target_query', target: 'targetQuery' }],
+        ignored: [],
+      });
+      expect(envelope(result).data?.recovery?.hint).toBe(
+        'targetQuery: Too small: expected string to have >=3 characters. ' +
+          'Validated _target_query as targetQuery.',
+      );
     });
 
     it('parses a second time only when the alias-first order changes the arguments', async () => {
@@ -1778,6 +1854,7 @@ describe('tool argument pre-validation', () => {
       ['a discarded object repair (#479)', objecty, { target: '{"type":"path"}' }],
       ['a discarded integer repair (#487)', numericIds, { recall: 2001 }],
       ['a refused number branch (#487)', numericIds, { positiveOrText: -1 }],
+      ['a declared underscore alias both orders reject (#563)', underscoreFloor, { _q: 'ab' }],
     ])('publishes the production envelope for %s', async (_label, def, args) => {
       const production = await call(def, args as Record<string, unknown>);
       const helper = await runToolContract(def as AnyToolDefinition, args as never);
