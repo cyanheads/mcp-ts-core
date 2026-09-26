@@ -4,7 +4,7 @@ description: >
   Investigate, adopt, and verify dependency updates — with special handling for `@cyanheads/mcp-ts-core`. Captures what changed, understands why, cross-references against the codebase, adopts framework improvements, syncs project skills, and runs final checks. Supports two entry modes: run the full flow end-to-end, or review updates you already applied.
 metadata:
   author: cyanheads
-  version: "2.9"
+  version: "2.10"
   audience: external
   type: workflow
 ---
@@ -177,7 +177,7 @@ The consumer opted into the framework; its templates, skills, scripts, linter ru
 - **Deprecations** — migrate now, while context is fresh.
 - **New linter rules** — if the rule now flags existing code, fix the code; don't silence the rule.
 - **New utilities that supersede local code** — swap them in. The point of the framework is to centralize. This applies even when the local helper has richer messages or branch handling — port the domain detail onto the framework path; don't leave the local helper as-is. (E.g., `httpErrorFromResponse` replacing a project-local `throwForStatus`: keep the per-route message map, but route it through the framework utility.)
-- **New conventions** (template changes, new config keys, renamed env vars) — adopt and update `.env.example`, server config schema, `server.json`, and README if user-facing.
+- **New conventions** (template changes, new config keys, renamed env vars) — adopt and update `.env.example`, server config schema, `server.json`, and README if user-facing. A new Bun pin (the template's `packageManager`) moves three places together: `package.json` `packageManager`, the Dockerfile `oven/bun` base tags, and the README Bun badge.
 - **New patterns that match existing surfaces** — refactor *every* matching site in this pass. Examples: typed error contracts (`errors[]` + `ctx.fail`) on tools that already throw domain-specific failures; factory adoption (`notFound()`, `validationError()`, …) replacing ad-hoc `new McpError(...)`; new logging/observability hooks supplanting bespoke logging. If the framework added a pattern that fits N tools/services, do all N — partial adoption fragments the surface and rots faster.
 - **New framework features that don't match existing use cases** — skip. These are for future features, not retroactive refactors. "Don't match" means *the surface doesn't exist in this server* (e.g., a new Speech API in a non-speech server) — not "I'd have to touch a few files."
 
