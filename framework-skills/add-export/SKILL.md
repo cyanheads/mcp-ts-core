@@ -4,7 +4,7 @@ description: >
   Add a new subpath export to the @cyanheads/mcp-ts-core package. Use when creating a new public API surface that consumers import from a dedicated subpath (e.g., @cyanheads/mcp-ts-core/newutil).
 metadata:
   author: cyanheads
-  version: "1.1"
+  version: "1.2"
   audience: internal
   type: reference
 ---
@@ -29,18 +29,8 @@ The build uses `tsconfig.build.json` (not `tsconfig.json`) with `rootDir: ./src`
    ```
 
 3. **Update the exports catalog** in both `CLAUDE.md` and `AGENTS.md` — add a row to the table. These files must stay byte-identical; the simplest approach is `cp CLAUDE.md AGENTS.md` after editing
-4. **Build** with `bun run build` to generate `dist/` output
-5. **Verify the export** resolves through the package's `exports` map:
-
-   ```bash
-   # Confirm the compiled file exists at the expected dist path
-   ls dist/utils/new-util.js
-
-   # Confirm the subpath export resolves correctly (tests the exports map, not just the dist file)
-   bun -e "import('@cyanheads/mcp-ts-core/newutil').then(m => console.log(Object.keys(m)))"
-   ```
-
-6. **Run `bun run devcheck`** to verify
+4. **Regenerate the public API manifest** — `bun run scripts/public-api-contract-update.ts` rewrites `PUBLIC_RUNTIME_EXPORTS` in `scripts/public-api-contract.ts` from the live barrels; never edit it by hand
+5. **Verify** with `bun run devcheck` and `bun run test:package` — the package lane builds, packs, installs, and imports every subpath in the manifest, so a wrong `dist/` path or a missing export fails there
 
 ## Naming conventions
 
@@ -56,7 +46,6 @@ The build uses `tsconfig.build.json` (not `tsconfig.json`) with `rootDir: ./src`
 - [ ] Subpath added to `package.json` `exports` with `types` and `import` conditions
 - [ ] Exports catalog updated in both `CLAUDE.md` and `AGENTS.md` (must be byte-identical)
 - [ ] If the new export has optional peer dependencies: entries added to both `peerDependencies` and `peerDependenciesMeta` in `package.json`
-- [ ] `bun run build` succeeds
-- [ ] Compiled file exists at expected `dist/` path and subpath import resolves correctly
-- [ ] Integration test at `tests/integration/package-consumer.int.test.ts` updated: new subpath added to the import spec list and `toHaveLength` count incremented
+- [ ] Public API manifest regenerated with `bun run scripts/public-api-contract-update.ts`
 - [ ] `bun run devcheck` passes
+- [ ] `bun run test:package` passes

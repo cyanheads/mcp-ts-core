@@ -116,7 +116,7 @@ grep -rn "auth: \[" src/mcp-server/tools/definitions/
 
 ```bash
 grep -rn "destructiveHint" src/mcp-server/tools/definitions/
-grep -rn "ctx.requestInput\|ctx.inputs" src/mcp-server/tools/definitions/
+grep -rnE "ctx\.requestInput|ctx\.inputs" src/mcp-server/tools/definitions/
 ```
 
 **Check:**
@@ -157,22 +157,22 @@ LLM-supplied inputs feel internal but aren't. Classic sinks apply, amplified. Sa
 grep -rn "z.string().url()" src/
 
 # Path sinks — traversal
-grep -rn "readFile\|writeFile\|readdirSync\|createReadStream\|statSync" src/
+grep -rnE "readFile|writeFile|readdirSync|createReadStream|statSync" src/
 
 # Shell sinks — command injection
 grep -rnE "\b(exec|spawn|execSync|spawnSync)\b" src/
 
 # Merges — prototype pollution
-grep -rn "Object.assign\b\|structuredClone" src/
+grep -rnE "Object\.assign\b|structuredClone" src/
 
 # Lookups — prototype chain read through an object literal
 grep -rnE "\[[a-zA-Z_$][a-zA-Z0-9_$.]*\] *\?\? |\[[a-zA-Z_$][a-zA-Z0-9_$.]*\] *\|\| " src/
 
 # Roots — client-shared filesystem
-grep -rn "roots/list\|ctx.roots" src/
+grep -rnE "roots/list|ctx\.roots" src/
 
 # Schema laxity — fields sneaking past validation
-grep -rn "\.passthrough()\|\.loose()\|looseObject(\|\.catchall(" src/mcp-server/
+grep -rnE "\.passthrough\(\)|\.loose\(\)|looseObject\(|\.catchall\(" src/mcp-server/
 ```
 
 **Check:**
@@ -245,7 +245,7 @@ Unbounded = DoS of self, upstream, or the LLM's context window (billing-DoS is r
 
 ```bash
 grep -rnE "while\s*\(|for\s*\(.*of" src/mcp-server/tools/definitions/
-grep -rn "cursor\|nextPage\|paginate" src/
+grep -rnE "cursor|nextPage|paginate" src/
 grep -rn "JSON.parse\b" src/
 ```
 

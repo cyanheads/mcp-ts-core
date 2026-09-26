@@ -572,7 +572,7 @@ Pass `schema` explicitly whenever a column's type can't be read off the first ro
 - [ ] Accessor wired in `setup()` callback via `setCanvas(core.canvas)`
 - [ ] Handler guards for canvas availability (`if (!canvas) throw ...`)
 - [ ] `canvas_id` accepted as optional input, returned in output
-- [ ] A `dataframe_query` tool is registered in this server whenever any tool emits a `canvas_id` — a token with no query tool is dead output. Register `dataframe_describe` too (lets the agent discover staged table/column names)
+- [ ] A `dataframe_query` tool is registered in this server whenever any tool emits a `canvas_id` — a token with no query tool is dead output. Register `dataframe_describe` too (lets the agent discover staged table/column names), and `dataframe_drop` behind its opt-in env flag — wrapped in `disabledTool()` while the flag is off
 - [ ] Canvas earns its keep: the staged data is analytical (an agent would SQL it), not a discovery/search surface of categorical metadata
 - [ ] SQL queries are read-only (enforced by the four-layer gate, but don't attempt writes)
 - [ ] Testing: mock the module-level `getCanvas()` accessor with `vi.spyOn` or a test setup that calls `setCanvas(mockCanvas)`
