@@ -1,6 +1,6 @@
 # mcp-ts-core - Directory Structure
 
-Generated on: 2026-09-25 14:48:31
+Generated on: 2026-09-25 19:15:33
 
 ```text
 mcp-ts-core/
@@ -389,6 +389,7 @@ mcp-ts-core/
 │   │   ├── handlerContext.ts
 │   │   ├── inputRequired.ts
 │   │   ├── notifications.ts
+│   │   ├── outputContract.ts
 │   │   ├── server.ts
 │   │   └── types.ts
 │   ├── services/
@@ -466,6 +467,7 @@ mcp-ts-core/
 │   │   └── errors.ts
 │   ├── utils/
 │   │   ├── formatting/
+│   │   │   ├── codeSpan.ts
 │   │   │   ├── diffFormatter.ts
 │   │   │   ├── html.ts
 │   │   │   ├── index.ts
@@ -631,12 +633,15 @@ mcp-ts-core/
 │   │   └── vitest.worker.ts
 │   ├── fixtures/
 │   │   ├── auth-scoped-server.js
+│   │   ├── failure-payload-server.js
 │   │   ├── http-protocol-session-server.js
 │   │   ├── load-http-server.js
 │   │   ├── load-tools.js
 │   │   ├── load-worker.js
+│   │   ├── logger-levels.js
 │   │   ├── mcp-app-server.js
 │   │   ├── session-mode-server.js
+│   │   ├── stdio-log-server.js
 │   │   ├── teardown-server.js
 │   │   └── worker-runtime.fixture.ts
 │   ├── fuzz/
@@ -656,7 +661,8 @@ mcp-ts-core/
 │   │   ├── oauth-jwks-fixture.ts
 │   │   ├── server-context.ts
 │   │   ├── server-process.ts
-│   │   └── standalone-worker.ts
+│   │   ├── standalone-worker.ts
+│   │   └── stdio-session.ts
 │   ├── integration/
 │   │   ├── cache-hints.int.test.ts
 │   │   ├── completions.int.test.ts
@@ -671,17 +677,20 @@ mcp-ts-core/
 │   │   ├── http-transport.int.test.ts
 │   │   ├── http.test.ts
 │   │   ├── input-prevalidation.int.test.ts
+│   │   ├── logger-sinks.int.test.ts
 │   │   ├── logger.int.test.ts
 │   │   ├── mcp-apps.int.test.ts
 │   │   ├── modern-notifications.int.test.ts
 │   │   ├── multi-round-trip.int.test.ts
 │   │   ├── oauth-jwks.int.test.ts
+│   │   ├── otel-stdio.int.test.ts
 │   │   ├── package-consumer.int.test.ts
 │   │   ├── public-api-contract.int.test.ts
 │   │   ├── server-identity.int.test.ts
 │   │   ├── session-mode-option.int.test.ts
 │   │   ├── setup.ts
 │   │   ├── stdio.test.ts
+│   │   ├── tool-failure-payload.int.test.ts
 │   │   ├── union-input.int.test.ts
 │   │   ├── wire-conformance.int.test.ts
 │   │   └── x-mcp-header.int.test.ts
@@ -778,11 +787,13 @@ mcp-ts-core/
 │   │   │   │   │   ├── renderToolContent.test.ts
 │   │   │   │   │   ├── schemaShape.test.ts
 │   │   │   │   │   ├── toolDefinition.test.ts
+│   │   │   │   │   ├── toolHandlerFactory.failurePayload.test.ts
 │   │   │   │   │   ├── toolHandlerFactory.telemetry.test.ts
 │   │   │   │   │   └── toolHandlerFactory.test.ts
 │   │   │   │   ├── content.test.ts
 │   │   │   │   ├── disabled-tool.test.ts
 │   │   │   │   ├── enrichment.test.ts
+│   │   │   │   ├── error-data-context.test.ts
 │   │   │   │   ├── tool-registration.lifecycle.test.ts
 │   │   │   │   └── tool-registration.test.ts
 │   │   │   ├── transports/
@@ -843,6 +854,7 @@ mcp-ts-core/
 │   │   │   ├── devcheck-warning-rendering.test.ts
 │   │   │   ├── devcheck-worker-tsconfig.test.ts
 │   │   │   ├── devdocs.test.ts
+│   │   │   ├── husky-pre-commit.test.ts
 │   │   │   ├── lint-mcp.test.ts
 │   │   │   ├── lint-packaging.test.ts
 │   │   │   └── tree.test.ts
@@ -938,6 +950,7 @@ mcp-ts-core/
 │   │   │   │   ├── errorHandler.unit.test.ts
 │   │   │   │   ├── execution-span-context.test.ts
 │   │   │   │   ├── lazyImport.test.ts
+│   │   │   │   ├── logger.fileSinks.test.ts
 │   │   │   │   ├── logger.preInit.test.ts
 │   │   │   │   ├── logger.test.ts
 │   │   │   │   ├── performance.nowMs.test.ts
@@ -1002,6 +1015,7 @@ mcp-ts-core/
 │   │   ├── storage-provider-compliance.worker.test.ts
 │   │   ├── storage-r2.worker.test.ts
 │   │   ├── tenant-default.worker.test.ts
+│   │   ├── tool-failure-payload.worker.test.ts
 │   │   ├── wire-contract.worker.test.ts
 │   │   └── wire-helpers.ts
 │   ├── worker-bundle/

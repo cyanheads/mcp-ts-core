@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.13.8](changelog/0.13.x/0.13.8.md) — 2026-09-26 · ⚠️ Breaking · 🛡️ Security
+
+Request context and elicited answers no longer reach client error data, error counters and wire codes agree per failure, and OTLP log export and failed-call payload logging arrive as opt-ins.
+
 ## [0.13.7](changelog/0.13.x/0.13.7.md) — 2026-09-25 · ⚠️ Breaking · 🛡️ Security
 
 Server stack traces no longer reach clients through McpError.data, in-memory storage round-trips values as JSON like every other provider, OTEL_EXPORTER_OTLP_ENDPOINT is honored, and the unused MCP client, ext-apps, and dotenv dependencies are gone.
