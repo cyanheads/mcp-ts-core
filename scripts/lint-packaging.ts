@@ -65,6 +65,16 @@
  *      so without the entry a release that bundles before publishing ships the
  *      server and its production dependencies inside the npm tarball
  *      (issue #469). Skipped when `manifest.json` or `files` is absent.
+ *  14. manifest.json version parity: `version` must equal `package.json`'s, the
+ *      same rule check 10 applies to the plugin manifests — the bundle's install
+ *      dialog shows it. Skipped when `manifest.json` or the package version is
+ *      absent.
+ *  15. Dockerfile build platform: every stage that runs `bun run build` must
+ *      start `FROM --platform=$BUILDPLATFORM`. Without it the non-native leg of
+ *      a multi-arch `docker buildx` build runs under QEMU, where bun >= 1.4
+ *      aborts inside the build and no image publishes for either architecture —
+ *      and the image publishes last, after npm and the MCP Registry. Skipped
+ *      when there is no `Dockerfile` or no stage builds.
  *
  * Every check skips cleanly when its input is absent — consumers who deleted
  * `manifest.json` for an HTTP-only deploy, or who haven't built a bundle,
@@ -103,6 +113,7 @@ interface Manifest {
   name?: string;
   server?: { mcp_config?: { args?: unknown[]; env?: Record<string, string> } };
   user_config?: Record<string, ManifestUserConfigEntry>;
+  version?: unknown;
 }
 
 const USER_CONFIG_REF = /^\$\{user_config\.([\w-]+)\}$/;
@@ -775,6 +786,49 @@ export function checkBundleExcludedFromFiles(files: unknown): string[] {
   ];
 }
 
+/**
+ * Check 14: manifest.json `version` must equal `package.json`'s. Skipped when
+ * the package version is absent — the same fail-safe as checks 10 and 12.
+ */
+export function checkManifestVersion(manifest: Manifest, packageVersion?: string): string[] {
+  if (!packageVersion || manifest.version === packageVersion) return [];
+  return [
+    manifest.version === undefined
+      ? `manifest.json has no "version" — must declare the package.json version "${packageVersion}"`
+      : `manifest.json "version" is "${String(manifest.version)}" — must equal the package.json version "${packageVersion}"`,
+  ];
+}
+
+const DOCKERFILE_FROM = /^\s*FROM\s/i;
+const DOCKERFILE_BUILD_PLATFORM = /--platform=\$\{?BUILDPLATFORM\}?(?:\s|$)/;
+const DOCKERFILE_BUILD_STEP = /\bbun run (?:re)?build\b/;
+
+/**
+ * Check 15: every Dockerfile stage that runs `bun run build` must be pinned to
+ * the build platform. Stages are split at `FROM` lines; comment lines are
+ * ignored so a note mentioning the build does not count as one.
+ */
+export function checkDockerfileBuildPlatform(dockerfile: string): string[] {
+  const stages: { from: string; line: number; builds: boolean }[] = [];
+  for (const [index, line] of dockerfile.split('\n').entries()) {
+    if (DOCKERFILE_FROM.test(line)) {
+      stages.push({ from: line.trim(), line: index + 1, builds: false });
+    } else if (!line.trimStart().startsWith('#') && DOCKERFILE_BUILD_STEP.test(line)) {
+      const stage = stages.at(-1);
+      if (stage) stage.builds = true;
+    }
+  }
+
+  return stages
+    .filter((stage) => stage.builds && !DOCKERFILE_BUILD_PLATFORM.test(stage.from))
+    .map(
+      (stage) =>
+        `Dockerfile:${stage.line} "${stage.from}" runs \`bun run build\` without --platform=$BUILDPLATFORM — ` +
+        `a multi-arch buildx build then runs it under QEMU, where bun aborts and no image publishes; ` +
+        `start the build stage with "FROM --platform=$BUILDPLATFORM" and copy dist/ into a separate runtime stage`,
+    );
+}
+
 /** Read `packaging.pluginManifests` from devcheck.config.json; default on. */
 function pluginManifestsEnabled(): boolean {
   const cfg = tryReadJson<{ packaging?: { pluginManifests?: boolean } }>(
@@ -862,6 +916,7 @@ async function main(): Promise<void> {
       errors.push(...checkManifestIdentity(manifest, unscopedName));
     }
 
+    errors.push(...checkManifestVersion(manifest, pkg?.version));
     errors.push(...checkBundleExcludedFromFiles(pkg?.files));
   } else {
     notes.push('No manifest.json — skipping manifest/server.json alignment checks.');
@@ -909,6 +964,12 @@ async function main(): Promise<void> {
       errors.push(...result.errors);
       warnings.push(...result.warnings);
     }
+  }
+
+  // ── Dockerfile build platform (check 15) ──
+  const dockerfilePath = resolve('Dockerfile');
+  if (existsSync(dockerfilePath)) {
+    errors.push(...checkDockerfileBuildPlatform(readFileSync(dockerfilePath, 'utf-8')));
   }
 
   // ── README version badge (check 12) ──

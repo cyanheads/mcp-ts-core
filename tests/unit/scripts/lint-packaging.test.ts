@@ -3,7 +3,8 @@
  * guards (checks 5–7, issues #172/#207), the post-bundle content check
  * (check 8, issues #230/#274), the identity checks (check 9, issue #231), and
  * the plugin marketplace manifests (check 10, issues #240/#393), and the
- * npm `files` exclusion of the built bundle (check 13, issue #469).
+ * npm `files` exclusion of the built bundle (check 13, issue #469), manifest.json
+ * version parity (check 14), and the Dockerfile build platform (check 15).
  * Imports the real implementation; no inline mirror.
  * @module tests/unit/scripts/lint-packaging.test
  */
@@ -22,9 +23,11 @@ import {
   checkBundleContent,
   checkBundleEntries,
   checkBundleExcludedFromFiles,
+  checkDockerfileBuildPlatform,
   checkEntrypointIdentity,
   checkManifestIdentity,
   checkManifestUserConfigWiring,
+  checkManifestVersion,
   checkPluginManifests,
   checkReadmeVersionBadge,
   NATIVE_BINDING_ENTRY,
@@ -730,7 +733,10 @@ describe('lint-packaging · npm files exclude the built bundle (check 13, #469)'
         JSON.stringify({ name: 'probe-mcp-server', version: '0.1.0', files }),
       );
       if (withManifest) {
-        writeFileSync(join(dir, 'manifest.json'), JSON.stringify({ name: 'probe-mcp-server' }));
+        writeFileSync(
+          join(dir, 'manifest.json'),
+          JSON.stringify({ name: 'probe-mcp-server', version: '0.1.0' }),
+        );
       }
       return dir;
     }
@@ -757,5 +763,76 @@ describe('lint-packaging · npm files exclude the built bundle (check 13, #469)'
       expect(out).not.toContain('!dist/*.mcpb');
       expect(code).toBe(0);
     });
+  });
+});
+
+describe('lint-packaging · manifest.json version (check 14)', () => {
+  it('passes when the manifest version equals the package version', () => {
+    expect(checkManifestVersion({ version: '0.13.1' }, '0.13.1')).toEqual([]);
+  });
+
+  it('fails a stale manifest version, naming both values', () => {
+    const errors = checkManifestVersion({ version: '0.13.0' }, '0.13.1');
+    expect(errors).toHaveLength(1);
+    expect(errors[0]).toContain('"0.13.0"');
+    expect(errors[0]).toContain('"0.13.1"');
+  });
+
+  it('fails a manifest that declares no version', () => {
+    expect(checkManifestVersion({ name: 'probe-mcp-server' }, '0.13.1')[0]).toContain(
+      'has no "version"',
+    );
+  });
+
+  it('skips when package.json declares no version', () => {
+    expect(checkManifestVersion({ version: '0.13.0' }, undefined)).toEqual([]);
+  });
+});
+
+describe('lint-packaging · Dockerfile build platform (check 15)', () => {
+  const REPO_ROOT = join(import.meta.dirname, '..', '..', '..');
+
+  it('passes the scaffold template Dockerfile', () => {
+    const dockerfile = readFileSync(join(REPO_ROOT, 'templates/Dockerfile'), 'utf8');
+    expect(checkDockerfileBuildPlatform(dockerfile)).toEqual([]);
+  });
+
+  it('fails a build stage without --platform=$BUILDPLATFORM, naming its line', () => {
+    const dockerfile = [
+      'FROM oven/bun:1.4.2 AS build',
+      'RUN bun install',
+      'RUN bun run build',
+      'FROM oven/bun:1.4.2-slim AS production',
+      'COPY --from=build /app/dist ./dist',
+    ].join('\n');
+    const errors = checkDockerfileBuildPlatform(dockerfile);
+    expect(errors).toHaveLength(1);
+    expect(errors[0]).toContain('Dockerfile:1');
+    expect(errors[0]).toContain('--platform=$BUILDPLATFORM');
+  });
+
+  it('accepts the braced BUILDPLATFORM form and a build on a continuation line', () => {
+    const dockerfile = [
+      `FROM --platform=\${BUILDPLATFORM} oven/bun:1.4.2 AS build`,
+      'RUN --mount=type=cache,target=/root/.bun/install/cache \\',
+      '    bun install && bun run build',
+      'FROM oven/bun:1.4.2-slim',
+    ].join('\n');
+    expect(checkDockerfileBuildPlatform(dockerfile)).toEqual([]);
+  });
+
+  it('fails a single-stage Dockerfile that builds in place', () => {
+    const dockerfile =
+      'FROM oven/bun:1.4.2\nCOPY . .\nRUN bun run build\nCMD ["bun", "dist/index.js"]';
+    expect(checkDockerfileBuildPlatform(dockerfile)).toHaveLength(1);
+  });
+
+  it('ignores stages that do not build and comments that mention the build', () => {
+    const dockerfile = [
+      '# The build stage runs `bun run build` on the build platform',
+      'FROM oven/bun:1.4.2-slim',
+      'COPY dist ./dist',
+    ].join('\n');
+    expect(checkDockerfileBuildPlatform(dockerfile)).toEqual([]);
   });
 });

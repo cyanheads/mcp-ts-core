@@ -64,7 +64,7 @@ describe('devcheck Packaging gate (#343)', () => {
     rmSync(dir, { recursive: true, force: true });
   });
 
-  it('skips cleanly with no manifest, plugin manifest, .mcpbignore, or README', () => {
+  it('skips cleanly with no manifest, plugin manifest, .mcpbignore, README, or Dockerfile', () => {
     const { code, out } = runPackagingCheck(dir);
     expect(code).toBe(0);
     expect(packagingLine(out)).toContain('SKIPPED');
@@ -119,6 +119,14 @@ describe('devcheck Packaging gate (#343)', () => {
     expect(code).toBe(0);
     expect(packagingLine(out)).not.toContain('SKIPPED');
     expect(out).toContain('Packaging alignment OK.');
+  });
+
+  it('runs on a Dockerfile alone and fails a build stage off the build platform', () => {
+    writeFileSync(resolve(dir, 'Dockerfile'), 'FROM oven/bun:1.4.2\nRUN bun run build\n');
+    const { code, out } = runPackagingCheck(dir);
+    expect(code).not.toBe(0);
+    expect(packagingLine(out)).not.toContain('SKIPPED');
+    expect(out).toContain('--platform=$BUILDPLATFORM');
   });
 
   describe('plugin manifest as the only packaging input (#393)', () => {

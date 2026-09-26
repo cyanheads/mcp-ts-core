@@ -711,12 +711,12 @@ const ALL_CHECKS: Check[] = [
     canFix: false,
     // Validates env var alignment between manifest.json (MCPB bundle) and
     // server.json (MCP Registry), plus plugin marketplace manifests (#240), the
-    // bundle-content guards on .mcpbignore (#343), and the README version badge
-    // (#418). Runs when any of those inputs is present; skipped cleanly when
-    // none exist — consumers on an HTTP-only deploy are unaffected. README.md is
-    // a trigger in its own right: the badge check must gate a project that
-    // carries no bundle or plugin metadata at all, which the other three inputs
-    // only covered incidentally.
+    // bundle-content guards on .mcpbignore (#343), the README version badge
+    // (#418), and the Dockerfile build platform. Runs when any of those inputs
+    // is present; skipped cleanly when none exist — consumers on an HTTP-only
+    // deploy are unaffected. README.md and Dockerfile are triggers in their own
+    // right: each check must gate a project that carries no bundle or plugin
+    // metadata at all, which the other inputs only covered incidentally.
     getCommand: () => {
       const inputs = [
         'manifest.json',
@@ -725,6 +725,7 @@ const ALL_CHECKS: Check[] = [
         '.codex-plugin/mcp.json',
         '.mcpbignore',
         'README.md',
+        'Dockerfile',
       ];
       if (!inputs.some((input) => existsSync(path.join(ROOT_DIR, input)))) return null;
       return ['bun', 'run', 'scripts/lint-packaging.ts'];
