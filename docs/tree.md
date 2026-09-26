@@ -1,6 +1,6 @@
 # mcp-ts-core - Directory Structure
 
-Generated on: 2026-09-25 19:15:33
+Generated on: 2026-09-26 18:10:49
 
 ```text
 mcp-ts-core/
@@ -641,6 +641,7 @@ mcp-ts-core/
 │   │   ├── logger-levels.js
 │   │   ├── mcp-app-server.js
 │   │   ├── session-mode-server.js
+│   │   ├── stdio-inflight-server.js
 │   │   ├── stdio-log-server.js
 │   │   ├── teardown-server.js
 │   │   └── worker-runtime.fixture.ts
@@ -658,6 +659,7 @@ mcp-ts-core/
 │   │   ├── http-helpers.ts
 │   │   ├── index.ts
 │   │   ├── matchers.ts
+│   │   ├── node-http.ts
 │   │   ├── oauth-jwks-fixture.ts
 │   │   ├── server-context.ts
 │   │   ├── server-process.ts
@@ -716,7 +718,8 @@ mcp-ts-core/
 │   │   │   └── echo.resource.test.ts
 │   │   ├── services/
 │   │   │   ├── canvas-duckdb.test.ts
-│   │   │   └── canvas-error-surfaces.test.ts
+│   │   │   ├── canvas-error-surfaces.test.ts
+│   │   │   └── canvas-scratch.test.ts
 │   │   ├── tools/
 │   │   │   ├── template-cat-fact.tool.test.ts
 │   │   │   ├── template-data-explorer.app-tool.test.ts

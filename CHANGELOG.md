@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.13.9](changelog/0.13.x/0.13.9.md) — 2026-09-26 · 🛡️ Security
+
+Canvas scratch files move into a private directory, a JSON-stringified object or an integer sent for a string is repaired before the schema rejects it, and argument rejections name the field paths and key rewrites behind them.
+
 ## [0.13.8](changelog/0.13.x/0.13.8.md) — 2026-09-26 · ⚠️ Breaking · 🛡️ Security
 
 Request context and elicited answers no longer reach client error data, error counters and wire codes agree per failure, and OTLP log export and failed-call payload logging arrive as opt-ins.
