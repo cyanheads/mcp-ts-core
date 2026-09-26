@@ -4,7 +4,7 @@ description: >
   Testing patterns for MCP tool/resource handlers using `createMockContext` and Vitest. Covers mock context options, handler testing, McpError assertions, format testing, Vitest config setup, and test isolation conventions.
 metadata:
   author: cyanheads
-  version: "1.11"
+  version: "1.12"
   audience: external
   type: reference
 ---
@@ -99,7 +99,7 @@ try {
 }
 ```
 
-Routes match in registration order. `match` accepts an exact URL, `RegExp`, or request predicate; `respond` accepts a clonable `Response` or response factory. Set `once: true` for one-shot behavior. Unmatched requests throw unless `onUnhandled` is provided.
+Routes match in registration order. `match` accepts an exact URL, `RegExp`, or request predicate; `respond` accepts a static `Response` or a response factory. A static response's body is read once, on the route's first match, and every call is served a fresh `Response` over those bytes with the same `status`, `statusText`, and headers — so a consumer that cancels the body, or an error-body reader like `httpErrorFromResponse` that stops past its cap, settles on Node as on Bun. Set `once: true` for one-shot behavior. Unmatched requests throw unless `onUnhandled` is provided.
 
 **A request predicate routes on the URL's origin, never a prefix.** `req.url.startsWith(BASE_URL)` also matches a lookalike host (`https://api.example.test.evil.com/...`), which CodeQL reports as high-severity incomplete URL substring sanitization — it scans test files as readily as `src/`, so a suite that is green locally still fails the security check on a pull request. Parse the URL and compare origins, matching the path separately:
 
@@ -133,7 +133,9 @@ toolContractSuite(searchTool, {
 
 Use `runToolContract(definition, input, { context })` from `/testing` when a custom test runner or an imperative assertion is a better fit. It intentionally skips transport auth and telemetry; those belong in transport/integration tests.
 
-Arguments that fail the `input` schema are rejected the way the production handler factory rejects them: `InvalidParams` (`-32602`), with a message naming the tool and every failing field. That is the code a client sees on the wire, so assert it — not `ValidationError` (`-32007`), which stays the classification for a `ZodError` a handler throws itself and for an output-schema rejection.
+Arguments that fail the `input` schema are rejected the way the production handler factory rejects them: `InvalidParams` (`-32602`), with a message naming the tool and every failing field. That is the code a client sees on the wire, so assert it — not `ValidationError` (`-32007`), which stays the classification for a `ZodError` a handler throws itself. A result that breaks the tool's own `output` or `enrichment` schema is the definition's bug, so it returns `InternalError` (`-32603`) with a message naming that contract, exactly as in production.
+
+Cancellation settles as it does in production. Pass `context: { signal }` and abort it: once the signal has fired, whatever the handler — or the output validation, `format()`, and enrichment after it — throws comes back as `RequestCancelled` (`-32011`), whether that is the signal's `AbortError`, its reason string, a `withRetry` backoff that stopped, or an `McpError` of the handler's own. A throw while the signal is still live keeps its own classification, and argument parsing stays outside the settle, so schema-invalid arguments on an aborted signal still return `InvalidParams`. A `toolContractSuite` error case with an aborted `context.signal` asserts `code: JsonRpcErrorCode.RequestCancelled` the same way.
 
 ---
 

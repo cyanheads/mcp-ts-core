@@ -4,7 +4,7 @@ description: >
   Reference for core and server configuration in `@cyanheads/mcp-ts-core`. Covers env var tables with defaults, priority order, server-specific Zod schema pattern, and Workers lazy-parsing requirement.
 metadata:
   author: cyanheads
-  version: "1.20"
+  version: "1.21"
   audience: external
   type: reference
 ---
@@ -93,7 +93,9 @@ await createApp({ sessionMode: { default: 'stateful', require: 'stateful' } }); 
 |:--------|:-----------------|:--------|:------|
 | `NODE_ENV` | `environment` | `development` | Aliases: `dev`→`development`, `prod`→`production`, `test`→`testing` |
 | `MCP_LOG_LEVEL` | `logLevel` | `debug` | Aliases: `warn`→`warning`, `err`→`error`, `fatal`/`silent`→`emerg`, `trace`→`debug`, `information`→`info` |
-| `LOGS_DIR` | `logsPath` | `<app-root>/logs` | Node.js only; absolute paths are used verbatim, relative ones resolve against the application root (see Core config) — never the framework's install directory |
+| `LOGS_DIR` | `logsPath` | `<app-root>/logs` | Node.js only; absolute paths are used verbatim, relative ones resolve against the application root (see Core config) — never the framework's install directory. A file under it that cannot be opened (read-only mount, another user's directory) is dropped at startup with one `warning` naming it and the error code; stderr and the other files keep logging |
+| `LOG_TOOL_FAILURE_PAYLOADS` | `logToolFailurePayloads` | `false` | Opt-in. Each failed tool call also writes a `Tool failure payload: <tool>` record carrying `toolInput` (the arguments as sent) and `toolResult` (the `CallToolResult` returned) as redacted JSON strings, at the call's error-record level. Reaches every log destination — stderr, `combined.log`, and OTLP when `OTEL_EXPORTER_OTLP_LOGS_ENDPOINT` is set. Redaction is by key name only, so a secret inside a free-form value (a query, a message) is logged. Record shape: `api-telemetry` Logs |
+| `LOG_TOOL_FAILURE_PAYLOAD_MAX_BYTES` | `logToolFailurePayloadMaxBytes` | `16384` | Cap per payload, in UTF-8 bytes. A longer one is cut on a character boundary and flagged with `toolInputTruncated` / `toolResultTruncated` |
 
 ### Transport
 
@@ -212,8 +214,9 @@ Activated when `SUPABASE_URL` is set.
 | `OTEL_EXPORTER_OTLP_ENDPOINT` | — | — | OTLP/HTTP base URL; resolves `tracesEndpoint` to `<base>/v1/traces` and `metricsEndpoint` to `<base>/v1/metrics` (path prefix kept) when the signal-specific variable is unset |
 | `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` | `openTelemetry.tracesEndpoint` | — | OTLP traces endpoint URL; overrides the base, used as-is |
 | `OTEL_EXPORTER_OTLP_METRICS_ENDPOINT` | `openTelemetry.metricsEndpoint` | — | OTLP metrics endpoint URL; overrides the base, used as-is |
+| `OTEL_EXPORTER_OTLP_LOGS_ENDPOINT` | `openTelemetry.logsEndpoint` | — | OTLP logs endpoint URL; the only switch for log record export, never derived from the base. Needs the optional peers `@opentelemetry/sdk-logs`, `@opentelemetry/exporter-logs-otlp-http`, `@opentelemetry/api-logs` |
 | `OTEL_TRACES_SAMPLER_ARG` | `openTelemetry.samplingRatio` | `1.0` | 0–1; fraction of traces to export |
-| `OTEL_LOG_LEVEL` | `openTelemetry.logLevel` | `INFO` | OTel SDK internal log level: `NONE` \| `ERROR` \| `WARN` \| `INFO` \| `DEBUG` \| `VERBOSE` \| `ALL` |
+| `OTEL_LOG_LEVEL` | `openTelemetry.logLevel` | `INFO` | OTel SDK internal log level: `NONE` \| `ERROR` \| `WARN` \| `INFO` \| `DEBUG` \| `VERBOSE` \| `ALL`; aliases `warning`→`WARN`, `err`→`ERROR`, `information`→`INFO`. Diag output goes to stderr at every level |
 
 ---
 

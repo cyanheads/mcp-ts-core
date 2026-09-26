@@ -4,7 +4,7 @@ description: >
   McpError constructor, JsonRpcErrorCode reference, and error handling patterns for `@cyanheads/mcp-ts-core`. Use when looking up error codes, understanding where errors should be thrown vs. caught, or using ErrorHandler.tryCatch in services.
 metadata:
   author: cyanheads
-  version: "1.16"
+  version: "1.17"
   audience: external
   type: reference
 ---
@@ -256,7 +256,7 @@ throw new McpError(code, message?, data?, options?)
 
 - `code` — a `JsonRpcErrorCode` enum value
 - `message` — optional human-readable description of the failure
-- `data` — optional structured context (plain object)
+- `data` — optional structured data (plain object), returned to the client verbatim. Pass the explicit fields the caller acts on (the rejected key, a limit, a `reason`), never `ctx` or another request context: a handler `ctx` carries request metadata and, after an elicitation round, what the user typed. Framework helpers follow the same rule — a storage, parser, or formatter failure carries only its offending field or a `reason`, whatever context you pass them.
 - `options` — optional `{ cause?: unknown }` for error chaining
 
 **Example:**
@@ -316,21 +316,26 @@ The framework applies these steps in order — first match wins:
 
 1. **Request signal aborted** — `ctx.signal.aborted` is `true` when the handler unwinds → `RequestCancelled`. Resolved before the thrown value is classified at all — by the tool and resource handler factories, and by the HTTP transport's error handler against the inbound request's signal, which catches a caller that hangs up before any handler runs (mid-body, say) and answers it 499 — so it outranks every step below, `McpError` included: the caller withdrew the request, and what the handler threw on the way out does not change that. Covers every shape an abort leaves behind — a `notifications/cancelled` `reason` string, the `DOMException` named `AbortError` a reason-less cancellation produces, a service's own `McpError`, and the SDK's `SdkError(ConnectionClosed)` on transport close. The accepted cost is that an unrelated fault raised after the abort is recorded as a cancellation too; it is bounded, because the SDK writes no response for a request whose signal it aborted. A handler that throws while the signal is live is untouched by this step.
 2. **`McpError` instance** — `error.code` is preserved as-is; no classification needed.
-3. **SDK transport-closed rejection** — an `SdkError` carrying `SdkErrorCode.ConnectionClosed` → `RequestCancelled`. The SDK rejects every in-flight request when the transport closes, which is what a client disconnect looks like from inside a handler. Matched on the code, not the message: one of its wordings says "aborted" and would otherwise be caught by the generic abort pattern in step 6 and read as a `Timeout`. Still the rule for a throw raised where no request signal is in scope — a service, an outbound leg, a background task.
-4. **JS constructor name** — matched against a fixed table (e.g. `ZodError` → `ValidationError`, `SyntaxError` → `ValidationError`). Note: `TypeError` is intentionally excluded — runtime TypeErrors are programmer errors, not validation failures.
-5. **Provider-specific patterns** — HTTP status codes, AWS exception names, Supabase, OpenRouter. Checked before common patterns because they are more specific (e.g. `status code 429` beats the generic `rate limit` pattern).
-6. **Common message/name patterns** — broad keyword patterns covering auth, not-found, validation, etc. First match wins; order matters.
-7. **`AbortError` name** — `error.name === 'AbortError'` → `Timeout`.
-8. **Fallback** — `InternalError`.
+3. **SDK transport-closed rejection** — an `SdkError` carrying `SdkErrorCode.ConnectionClosed` → `RequestCancelled`. The SDK rejects every in-flight request when the transport closes, which is what a client disconnect looks like from inside a handler. Matched on the code, not the message: one of its wordings says "aborted" and would otherwise be caught by the generic abort pattern in step 7 and read as a `Timeout`. Still the rule for a throw raised where no request signal is in scope — a service, an outbound leg, a background task.
+4. **Engine resource limit** — a `RangeError` whose **whole** message is one the engine raises when it runs out of a resource → `InternalError`: `Maximum call stack size exceeded` (JavaScriptCore adds a trailing period) and the maximum string size (V8 `Invalid string length`, JavaScriptCore `Out of memory`). A handler that recurses without bound names nothing a caller can change, so it is a server fault. Every other `RangeError` — `new Array(-1)`, `(1).toFixed(101)`, an invalid date, `1n / 0n`, or one whose message merely contains a limit text — continues to step 5.
+5. **JS constructor name** — matched against a fixed table (e.g. `ZodError` → `ValidationError`, `SyntaxError` → `ValidationError`). Note: `TypeError` is intentionally excluded — runtime TypeErrors are programmer errors, not validation failures.
+6. **Provider-specific patterns** — HTTP status codes, AWS exception names, Supabase, OpenRouter. Checked before common patterns because they are more specific (e.g. `status code 429` beats the generic `rate limit` pattern).
+7. **Common message/name patterns** — broad keyword patterns covering auth, not-found, validation, etc. First match wins; order matters.
+8. **`AbortError` name** — `error.name === 'AbortError'` → `Timeout`.
+9. **Fallback** — `InternalError`.
 
 However it is reached, a `RequestCancelled` is logged at `info` with no stack — neither the thrown value's own nor one reached through its cause chain. Step 1 settles the completion log too, which carries `metrics.errorCode: "-32011"` alongside `isSuccess: false`; a raw `SdkError` that reaches the code through step 3 alone is not an `McpError`, so that log still reads `UNHANDLED_ERROR`.
+
+The code this ladder picks is the one the caller receives, and it is also the origin every error counter records: `mcp.tool.error_category`, `mcp.prompt.error_category`, and `mcp.error.category` on `mcp.errors.classified` all bucket that same code, so a plain `Error('Request timed out')` files as `upstream` everywhere, never `server` on one counter and `upstream` on another. See `api-telemetry`'s Error category.
+
+**The framework's own output-contract parses are not caller errors.** A result that breaks the definition's `output` schema (tools and resources) or its `enrichment` block fails as `InternalError` (`-32603`), with a message naming the definition and the contract — `Tool my_tool returned output that does not match its output schema: items.0.id: …` — and no `data`. It is the handler's bug, so it files as `server`, not the `ValidationError` a raw `ZodError` would get. A `ZodError` the handler throws from its own validation keeps `ValidationError`.
 
 ### JS Constructor Name Mappings
 
 | Constructor | Mapped Code |
 |:------------|:------------|
 | `SyntaxError` | `ValidationError` |
-| `RangeError` | `ValidationError` |
+| `RangeError` | `ValidationError` (an engine resource limit is settled first, as `InternalError` — step 4) |
 | `URIError` | `ValidationError` |
 | `ZodError` | `ValidationError` |
 | `ReferenceError` | `InternalError` |
@@ -464,14 +469,14 @@ const parsed = await ErrorHandler.tryCatch(
 
 `tryCatch` always logs and rethrows — it never swallows errors. The `fn` argument may be synchronous or return a `Promise`; both are handled via `Promise.resolve(fn())`.
 
-**The thrown error's `data` is wire-visible.** A handler that lets it propagate forwards it as `structuredContent.error.data` (tools) or JSON-RPC `error.data` (resources, prompts). It carries `originalErrorName`, `originalMessage`, `rootCause` (`{ name, message }`), and the canonical fields and `extra` of `context`, but never a stack: `originalStack` and the full `causeChain` go to the log record only.
+**The thrown error's `data` is wire-visible.** A handler that lets it propagate forwards it as `structuredContent.error.data` (tools) or JSON-RPC `error.data` (resources, prompts). It carries the caught `McpError`'s own `data`, `originalErrorName`, `originalMessage`, and `rootCause` (`{ name, message }`) — never a stack and never `context`: `originalStack`, the full `causeChain`, and every `context` field (`requestId`, `sessionId`, `traceId`, `tenantId`, `extra`, …) go to the log record only. A field the caller should act on belongs in the thrown `McpError`'s `data`, not in `context`.
 
 **Options** (`Omit<ErrorHandlerOptions, 'rethrow'>`):
 
 | Option | Type | Required | Purpose |
 |:-------|:-----|:--------:|:--------|
 | `operation` | `string` | Yes | Name logged with the error |
-| `context` | `ErrorContext` | No | Structured fields merged into the log record and the thrown error's client-visible `data`; `requestId` and `timestamp` receive special treatment |
+| `context` | `ErrorContext` | No | Structured fields merged into the log record only — never the thrown error's client-visible `data`; `requestId` and `timestamp` receive special treatment |
 | `errorCode` | `JsonRpcErrorCode` | No | Code used if the caught error is not already an `McpError` |
 | `input` | `unknown` | No | Input value sanitized and logged alongside the error |
 | `critical` | `boolean` | No | Marks the error as critical in logs (default `false`) |

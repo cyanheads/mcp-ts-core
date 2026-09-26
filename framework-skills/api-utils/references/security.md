@@ -21,7 +21,7 @@ Pre-constructed singleton of `Sanitization`. Tier 3 peer: `sanitize-html` (HTML 
 | `sanitizePath` | **no** | Node.js only | `(input, options?) -> SanitizedPathInfo` |
 | `sanitizeJson` | **no** | none | `<T>(input, maxSize?) -> T` |
 | `sanitizeForLogging` | **no** | none | `(input) -> unknown` |
-| `redactSensitiveFields` | **no** | none | `(data, fields?, ctx?) -> unknown` |
+| `serializeForLogging` | **no** | none | `(value, maxBytes) -> { text: string; truncated: boolean }` |
 | `getSensitivePinoFields` | **no** | none | `() -> string[]` |
 
 ### Option types
@@ -65,6 +65,8 @@ interface SanitizedPathInfo {
 - `sanitizeJson`: `maxSize` is bytes (UTF-8); uses `Buffer.byteLength` / `TextEncoder` / `string.length` fallback chain
 - `sanitizeNumber`: `NaN`/`Infinity` always rejected; out-of-range values silently clamped with debug log
 - `sanitizeForLogging`: deep clones via `structuredClone`; returns `'[Log Sanitization Failed]'` on clone error
+- **Rejection reasons.** Every `ValidationError` carries `data.reason`, and a `data.recovery.hint` wherever the caller can change the input: `invalid_url` (`sanitizeUrl`; the hint names the allowed schemes), `invalid_path` / `path_traversal` / `absolute_path_disallowed` (`sanitizePath`), `invalid_json` / `json_too_large` (`sanitizeJson`; the latter names the byte cap), `invalid_number` (`sanitizeNumber`), and `unsupported_sanitize_context` (`sanitizeString`'s `'javascript'` context, which has no hint — it is a server-code choice)
+- `serializeForLogging`: `sanitizeForLogging`, then `JSON.stringify`, then a cut to at most `maxBytes` UTF-8 bytes on a character boundary — redaction first, so a cut never keeps part of a secret. A truncated `text` is a prefix of the whole serialization and no longer valid JSON; `truncated` says so. Returns a string so a deep payload survives the logger's four-level field depth. A value `JSON.stringify` rejects (a `bigint`) yields `'[Log Serialization Failed]'`. Backs the failed-call payload record (`LOG_TOOL_FAILURE_PAYLOADS`)
 
 ### Sensitive fields
 
@@ -191,10 +193,10 @@ interface IdGenerationOptions {
 | Method | Signature | Notes |
 |:-------|:----------|:------|
 | `generate` | `(prefix?, options?) -> string` | `PREFIX_XXXXXX` or just `XXXXXX` if no prefix |
-| `generateForEntity` | `(entityType, options?) -> string` | Uses registered prefix; throws `McpError(ValidationError)` if type unknown |
-| `generateRandomString` | `(length?, charset?) -> string` | Raw random string; defaults: length 6, charset `A-Z0-9` |
+| `generateForEntity` | `(entityType, options?) -> string` | Uses registered prefix; throws `McpError(ValidationError)` with `data.reason: 'unknown_entity_type'` if type unknown |
+| `generateRandomString` | `(length?, charset?) -> string` | Raw random string; defaults: length 6, charset `A-Z0-9`. A charset outside 1–256 characters throws `ValidationError` with `data.reason: 'invalid_charset'` |
 | `isValid` | `(id, entityType, options?) -> boolean` | Regex-validates format against prefix + separator + charset{length} |
-| `getEntityType` | `(id, separator?) -> string` | Resolves entity type from prefix; throws `McpError(ValidationError)` if unknown |
+| `getEntityType` | `(id, separator?) -> string` | Resolves entity type from prefix; throws `McpError(ValidationError)` — `data.reason: 'invalid_id_format'` when the ID has no `PREFIX<sep>` part, `'unknown_entity_type'` when the prefix is unregistered, each with a `recovery.hint` (the latter lists the registered prefixes) |
 | `normalize` | `(id, separator?) -> string` | Canonical prefix casing + uppercase random part |
 | `stripPrefix` | `(id, separator?) -> string` | Returns random part; returns original if separator not found |
 | `setEntityPrefixes` | `(config) -> void` | Replaces all prefixes and rebuilds reverse lookup |

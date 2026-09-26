@@ -4,7 +4,7 @@ description: >
   Ship a release end-to-end across every registry the project targets (npm, MCP Registry, GitHub Releases for `.mcpb` bundles, GHCR). Runs the final verification gate, fast-forwards `main` when the release rode a release PR, creates the annotated tag on the commit `main` now points at, pushes commits and tags, then publishes to each applicable destination. Assumes git wrapup (version bumps, changelog, commit stack — and in release PR mode, the pushed branch and open PR) is already complete — this skill is the post-wrapup merge + tag + publish workflow. Retries transient network failures on publish steps; halts with a partial-state report when retries are exhausted or the failure is terminal.
 metadata:
   author: cyanheads
-  version: "2.20"
+  version: "2.21"
   audience: external
   type: workflow
 ---
@@ -175,7 +175,7 @@ Push `main` first, then the tag. If the remote rejects either push, halt.
 
 ### 6. Publish to npm
 
-Before publishing, inspect `bun publish --dry-run`. A resumed run may leave `dist/*.mcpb` in a package whose `files` allowlist includes `dist/`, adding the desktop bundle and its dependencies to npm. If listed, move the bundle outside the package directory, publish npm, then restore the bundle for the GitHub Release.
+A `dist/*.mcpb` already built for step 8 stays out of the tarball: the `files` allowlist carries `"!dist/*.mcpb"`, and `lint:packaging` fails a project with `manifest.json` that lacks it.
 
 ```bash
 bun publish --access public

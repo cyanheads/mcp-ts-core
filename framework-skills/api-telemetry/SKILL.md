@@ -4,7 +4,7 @@ description: >
   Catalog of OpenTelemetry instrumentation built into framework `@cyanheads/mcp-ts-core` — spans, metrics, completion logs, env config, runtime caveats, custom instrumentation patterns, and cardinality rules. Use when enabling OTel export, adding custom spans or metrics in services, debugging missing telemetry, looking up attribute names, or deciding what's safe to put on a metric attribute vs. a span.
 metadata:
   author: cyanheads
-  version: "1.13"
+  version: "1.14"
   audience: external
   type: reference
 ---
@@ -13,7 +13,7 @@ metadata:
 
 The framework auto-instruments every tool, resource, prompt, storage, LLM, speech, and graph call — each gets its own span and the standard counters/histograms. HTTP server requests pick up spans from `HttpInstrumentation` (all Node.js HTTP traffic, skips `/healthz`) plus `httpInstrumentationMiddleware` from `@hono/otel` on the MCP HTTP endpoint when installed (optional Tier 3 peer — `bun add @hono/otel`). On Bun, `HttpInstrumentation` silently no-ops and `@hono/otel` is the only HTTP coverage. Auth checks and session lifecycle are tracked as **metrics only** — auth decorates the active HTTP span with attributes, sessions emit counters.
 
-`requestId`, `traceId`, and `tenantId` correlate automatically across spans, metrics, and logs. Pino logs get `trace_id`/`span_id` injected when a span is active.
+`requestId`, `traceId`, and `tenantId` correlate automatically across spans, metrics, and logs. Framework log records carry `traceId`/`spanId` from the request context.
 
 A handler's `ctx.traceId` / `ctx.spanId` name the execution span it runs in — `tool_execution:<name>` or `resource_read:<name>` — not the enclosing HTTP request span. Under HTTP the trace ID is the request's, so handler logs join to the request; the span ID is the child execution's, so they join to that span's attributes and duration. On stdio, where no transport span exists, both are still populated from the execution span the framework opens. Both are `undefined` when telemetry is disabled: the non-recording span a disabled pipeline produces carries all-zero IDs, and the framework reports no correlation rather than IDs that correlate to nothing.
 
@@ -31,14 +31,17 @@ OTel is **off by default**. `OTEL_ENABLED=true` alone does nothing — you also 
 | `OTEL_EXPORTER_OTLP_ENDPOINT` | — | OTLP/HTTP base URL (e.g. `http://localhost:4318`). Traces go to `<base>/v1/traces`, metrics to `<base>/v1/metrics`; a path prefix is kept. |
 | `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` | — | OTLP/HTTP traces endpoint (e.g. `http://localhost:4318/v1/traces`). Overrides the base for traces; used as-is. |
 | `OTEL_EXPORTER_OTLP_METRICS_ENDPOINT` | — | OTLP/HTTP metrics endpoint (e.g. `http://localhost:4318/v1/metrics`). Overrides the base for metrics; used as-is. |
+| `OTEL_EXPORTER_OTLP_LOGS_ENDPOINT` | — | OTLP/HTTP logs endpoint (e.g. `http://localhost:4318/v1/logs`). Opt-in log export; used as-is and never derived from the base. |
 | `OTEL_SERVICE_NAME` | `createApp` `name` → `package.json` `name` | `service.name` resource attribute. Seeded from `createApp({ name })` when unset; an env value wins. |
 | `OTEL_SERVICE_VERSION` | `package.json` `version` | `service.version` resource attribute. |
 | `OTEL_TRACES_SAMPLER_ARG` | `1.0` | Trace sampling ratio (0–1) for `TraceIdRatioBasedSampler`. |
-| `OTEL_LOG_LEVEL` | `INFO` | OTel diagnostic logger level (`NONE`/`ERROR`/`WARN`/`INFO`/`DEBUG`/`VERBOSE`/`ALL`). |
+| `OTEL_LOG_LEVEL` | `INFO` | OTel diagnostic logger level (`NONE`/`ERROR`/`WARN`/`INFO`/`DEBUG`/`VERBOSE`/`ALL`; `warning`/`err`/`information` accepted). Diag output goes to stderr at every level, never stdout. |
 
 Metrics push via `PeriodicExportingMetricReader` every **15 seconds**. Traces use `BatchSpanProcessor`.
 
-Endpoints resolve per the [OTLP exporter spec](https://opentelemetry.io/docs/specs/otel/protocol/exporter/#endpoint-urls-for-otlphttp): the signal-specific variable as-is, else the base plus the signal path. Those two exporters are the only export path. A signal with no resolved endpoint exports nothing, OTel log records are never exported, and `NodeSDK`'s own `OTEL_METRICS_EXPORTER` / `OTEL_LOGS_EXPORTER` defaults are not consulted.
+Traces and metrics endpoints resolve per the [OTLP exporter spec](https://opentelemetry.io/docs/specs/otel/protocol/exporter/#endpoint-urls-for-otlphttp): the signal-specific variable as-is, else the base plus the signal path. A signal with no resolved endpoint exports nothing, and `NodeSDK`'s own `OTEL_METRICS_EXPORTER` / `OTEL_LOGS_EXPORTER` defaults are not consulted.
+
+Log records export only when `OTEL_EXPORTER_OTLP_LOGS_ENDPOINT` is set. The base endpoint alone never turns it on, so a deployment exporting traces and metrics keeps its logs local until it opts in. When set, every record the framework logger writes — after the `MCP_LOG_LEVEL` filter and the rate limit, with the same field redaction as the pino output — is also sent through a `BatchLogRecordProcessor`, with its MCP level as the severity and the active span's trace context (a handler's `ctx.log` record joins its `tool_execution:*` span). `interactions.log` transcripts are never exported. Log export needs three more optional peers: `bun add @opentelemetry/sdk-logs @opentelemetry/exporter-logs-otlp-http @opentelemetry/api-logs`.
 
 ---
 
@@ -46,7 +49,7 @@ Endpoints resolve per the [OTLP exporter spec](https://opentelemetry.io/docs/spe
 
 | Runtime | Behavior |
 |:--------|:---------|
-| **Node.js / Bun** | Full `NodeSDK`. Auto-instrumentations: HTTP server (Node http hooks; skips `/healthz`), Pino logs (`trace_id`/`span_id` injection). On the HTTP transport, when OTel is enabled and `@hono/otel` is installed, `httpInstrumentationMiddleware` is also wired onto the MCP endpoint — fills the gap on Bun, where the Node http auto-instrumentation silently no-ops. Manual spans, custom metrics, and OTLP export work on Bun regardless. |
+| **Node.js / Bun** | Full `NodeSDK`. Auto-instrumentations: HTTP server (Node http hooks; skips `/healthz`), and Pino, which patches only a `pino` loaded after the SDK starts — never the framework logger's, imported first. On the HTTP transport, when OTel is enabled and `@hono/otel` is installed, `httpInstrumentationMiddleware` is also wired onto the MCP endpoint — fills the gap on Bun, where the Node http auto-instrumentation silently no-ops. Manual spans, custom metrics, and OTLP export work on Bun regardless. |
 | **Cloudflare Workers / V8 isolates** | `NodeSDK` is unavailable. SDK init no-ops silently. `createCounter`/`createHistogram`/`withSpan` calls still work via the global OTel API but produce no output unless you wire a Worker-compatible exporter and `ctx.waitUntil()` for flush. |
 
 Cloud platform detection auto-populates resource attributes:
@@ -126,9 +129,10 @@ All custom metrics are namespaced `mcp.*` (or `process.*` / `http.client.*` wher
 
 | Metric | Type | Unit | Attributes |
 |:-------|:-----|:-----|:-----------|
-| `mcp.tool.calls` | counter | `{calls}` | `mcp.tool.name`, `mcp.tool.success` |
+| `mcp.tool.calls` | counter | `{calls}` | `mcp.tool.name`, `mcp.tool.success`, `mcp.tool.outcome` (`ok`/`error`/`cancelled`) |
 | `mcp.tool.duration` | histogram | `ms` | `mcp.tool.name`, `mcp.tool.success` |
-| `mcp.tool.errors` | counter | `{errors}` | `mcp.tool.name`, `mcp.tool.error_category` (`upstream`/`server`/`client`) — see [Error category](#error-category) |
+| `mcp.tool.errors` | counter | `{errors}` | `mcp.tool.name`, `mcp.tool.error_category` (`upstream`/`server`/`client`) — see [Error category](#error-category) — and `mcp.tool.outcome` (`error`/`cancelled`) |
+| `mcp.tool.rejections` | counter | `{calls}` | `mcp.tool.name`, `mcp.tool.error_code`, `mcp.tool.error_category` — once per call rejected before the handler ran |
 | `mcp.tool.input_bytes` | histogram | `bytes` | `mcp.tool.name` |
 | `mcp.tool.output_bytes` | histogram | `bytes` | `mcp.tool.name` (success only; the handler's returned value) |
 | `mcp.tool.param.usage` | counter | `{uses}` | `mcp.tool.name`, `mcp.tool.param` (top-level keys supplied by caller) |
@@ -146,6 +150,8 @@ All custom metrics are namespaced `mcp.*` (or `process.*` / `http.client.*` wher
 | `mcp.prompt.output_bytes` | histogram | `bytes` | `mcp.prompt.name` (success only) |
 | `mcp.prompt.message_count` | histogram | `{messages}` | `mcp.prompt.name` |
 | `mcp.requests.active` | up/down counter | `{requests}` | — (in-flight handler executions, all three types) |
+
+**Rejections and cancellations.** A call refused before the handler runs — argument validation (`-32602`) or the inline `auth` check (`-32005` missing scope, `-32006` no auth context) — never reaches the measured region, so it is absent from `mcp.tool.calls`, `mcp.tool.duration`, and `mcp.tool.errors` and counts once on `mcp.tool.rejections` instead, labelled with the code and category the caller received. `mcp.tool.outcome` separates a caller hang-up from a failure: `cancelled` for a `RequestCancelled` (`-32011`, always paired with `error_category="client"`), `error` for any other failure, `ok` for a success or an `input_required` round. `mcp.tool.success` and `error_category` keep their meaning, so existing `sum()` queries are unchanged. An error rate that excludes hang-ups filters on `mcp.tool.outcome!="cancelled"`; the failure rate a caller sees is `(errors + rejections) / (calls + rejections)`. Resources and prompts carry neither split.
 
 The three `mcp.input.*` counters are the only trace of the pre-validation step a tool call leaves. Each marks a call the strict `input` schema would otherwise have rejected: a client-added root key dropped, a key rewritten to its canonical spelling, or a stringified array repaired after the parse failed (one increment per repaired call, not per repaired value). Nothing about any of them reaches the response, so a client artifact spreading across a fleet shows up here first. All three are lazy: a server whose callers never trip a stage emits no series at all.
 
@@ -199,9 +205,9 @@ Read together: `queue_depth` rising while `wait` climbs means the configured rat
 
 ### Error category
 
-`mcp.tool.error_category` and `mcp.prompt.error_category` bucket a failure as `upstream` (an external dependency refused or timed out), `server` (a bug or this process's own infrastructure), or `client` (the request itself). The bucket comes from the classified JSON-RPC code, with one refinement: `RateLimited` (`-32003`) legitimately carries two sources, so the canvas tenant-cap refusal — which names itself with `data.reason: 'canvas_capacity_exhausted'` — files under `server`, and every other `-32003` stays `upstream`. Retry semantics and the HTTP 429 mapping are the same for both, which is why the code is shared and the stable `reason` discriminator does the separating.
+`mcp.tool.error_category`, `mcp.prompt.error_category`, and `mcp.error.category` on `mcp.errors.classified` bucket a failure as `upstream` (an external dependency refused or timed out), `server` (a bug or this process's own infrastructure), or `client` (the request itself). The bucket comes from the JSON-RPC code the caller receives — for a thrown value that is not an `McpError`, the code the auto-classifier assigns, so `Error('Request timed out')` is `upstream` and a handler-thrown `ZodError` is `client` on every counter, and all three agree per failure. The span's and completion log's error code for such a value stays `UNHANDLED_ERROR` / `UNKNOWN_ERROR`. The one refinement: `RateLimited` (`-32003`) legitimately carries two sources, so the canvas tenant-cap refusal — which names itself with `data.reason: 'canvas_capacity_exhausted'` — files under `server`, and every other `-32003` stays `upstream`. Retry semantics and the HTTP 429 mapping are the same for both, which is why the code is shared and the stable `reason` discriminator does the separating.
 
-A dashboard reading `error_category` alone therefore no longer needs to special-case one server's capacity limit as an upstream outage. `reason` itself is not on the metric — it is unbounded across a fleet, so it lives on the span and in the log.
+A dashboard reading `error_category` alone therefore no longer needs to special-case one server's capacity limit as an upstream outage, and one grouping `mcp.errors.classified` by origin reads `mcp.error.category` rather than decoding the code with its own copy of the table — the code cannot see `data.reason`. `reason` itself is not on the metric — it is unbounded across a fleet, so it lives on the span and in the log.
 
 ### Declared error severity
 
@@ -216,7 +222,7 @@ The call still failed: the execution span keeps `SpanStatusCode.ERROR` and its r
 
 | Metric | Type | Unit | Attributes |
 |:-------|:-----|:-----|:-----------|
-| `mcp.errors.classified` | counter | `{errors}` | `mcp.error.classified_code` (JSON-RPC code), `operation`, and `mcp.error.severity` when the failure's declared severity resolved |
+| `mcp.errors.classified` | counter | `{errors}` | `mcp.error.classified_code` (JSON-RPC code), `mcp.error.category` (`upstream`/`server`/`client`, as in [Error category](#error-category)), `operation`, and `mcp.error.severity` when the failure's declared severity resolved |
 | `mcp.ratelimit.rejections` | counter | `{rejections}` | — (the rate-limit key is caller-supplied and typically per-client, so it would materialize an unbounded series in the meter; per-key attribution lives on the span instead) |
 | `http.client.request.duration` | histogram | `s` | `http.request.method`, `server.address`, `http.response.status_code` (when > 0; absent on network errors before a response is received) |
 
@@ -237,7 +243,7 @@ Auto-registered when `process.memoryUsage` / `process.uptime` / `perf_hooks` are
 
 ## Logs
 
-Pino logs are auto-instrumented by `@opentelemetry/instrumentation-pino`. When a span is active, `trace_id` and `span_id` are injected into the record. Combined with the framework logger's automatic `requestId`/`tenantId` correlation, every log line is searchable by trace.
+Every framework log record carries `requestId`, `traceId`, `spanId`, and `tenantId` from the request context, so every log line is searchable by trace. `@opentelemetry/instrumentation-pino` does not touch these records: it patches only a `pino` loaded after the SDK starts. To ship the records to the same backend as traces, set `OTEL_EXPORTER_OTLP_LOGS_ENDPOINT` (see Enabling export).
 
 For domain logging inside handlers, use `ctx.log` (`debug`/`info`/`notice`/`warning`/`error`) — auto-includes `requestId`, `traceId`, `tenantId`, `spanId`. The completion log emitted at the end of every handler carries a `metrics` payload, with fields tuned to each surface:
 
@@ -246,6 +252,20 @@ For domain logging inside handlers, use `ctx.log` (`debug`/`info`/`notice`/`warn
 | Tool | `Tool execution finished.` | `durationMs`, `isSuccess`, `errorCode`, `inputBytes`, `outputBytes`, plus `partialSuccess` / `batchSucceeded` / `batchFailed` when the result is a partial-success batch |
 | Resource | `Resource read finished.` | `durationMs`, `isSuccess`, `errorCode`, `outputBytes`, `uri`, `mimeType` |
 | Prompt | `Prompt generation finished.` (or `failed.`) | `durationMs`, `isSuccess`, `errorCode`, `inputBytes`, `outputBytes`, `messageCount` |
+
+### Failed-call payloads
+
+Off by default. With `LOG_TOOL_FAILURE_PAYLOADS=true`, a failed tool call writes one more record right after its `Error in tool:<name>` record: message `Tool failure payload: <name>`, the same request context (`requestId`, `traceId`, `spanId`, `toolName`), and the same level, a declared `severity` included.
+
+| Field | Content |
+|:------|:--------|
+| `toolInput` | The arguments as the caller sent them, before pre-validation drops or renames a key |
+| `toolResult` | The `CallToolResult` the tool returned. On 2026-07-28 the SDK adds `resultType` and `_meta` serverInfo on the wire after the record is written |
+| `toolInputTruncated` / `toolResultTruncated` | Whether that payload was cut at `LOG_TOOL_FAILURE_PAYLOAD_MAX_BYTES` (default `16384`) |
+
+Each payload is redacted with `sanitization.sanitizeForLogging`, serialized, then cut on a UTF-8 character boundary, each on its own. They are strings, not objects, because the logger drops values nested deeper than four levels. Covered: `auth` refusals, argument rejections (`-32602`), handler throws, and output/enrichment contract failures. Nothing is written for a success, a `RequestCancelled`, or an `input_required` return, nor for resource and prompt failures.
+
+The record goes wherever the error record goes: stderr, `combined.log`, and OTLP when `OTEL_EXPORTER_OTLP_LOGS_ENDPOINT` is set. On Workers, where no file sink exists, set the flag as a Worker binding. It passes the `MCP_LOG_LEVEL` filter and the rate limit like any record, and its message is constant per tool, so when one tool fails more than `MCP_LOG_RATE_LIMIT_THRESHOLD` times in a window, only the first payloads are kept. **Redaction matches key names only.** A secret inside a free-form value, such as a token pasted into a `query` or a connection string in an error message, is written as-is. Enable it only where the log store is trusted with caller data.
 
 ---
 

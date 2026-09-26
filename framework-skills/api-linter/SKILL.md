@@ -4,7 +4,7 @@ description: >
   MCP definition linter rules reference. Use when `bun run lint:mcp` or `bun run devcheck` reports a lint error or warning (`format-parity`, `schema-is-object`, `name-format`, `server-json-*`, etc.) and you need to understand the rule, its severity, and how to fix it. Every rule ID the linter emits has an entry in this doc.
 metadata:
   author: cyanheads
-  version: "1.18"
+  version: "1.19"
   audience: external
   type: reference
 ---
@@ -200,6 +200,8 @@ Every field in `input`, `output`, `params`, or `args` needs a `.describe('...')`
 | `z.union([a, b, ...])` non-literal option | Yes | Yes, on each option |
 | `z.union([..., z.literal(X), ...])` literal option | **No** | No — outer union describe is sufficient |
 | A tool `input` root that is a `z.discriminatedUnion(...)` — its variant objects | Yes, their **fields** | No, not on the variant itself — it is a root, and roots carry no describe |
+
+A self-referential schema — a Zod 4 getter that returns the schema itself (`get children() { return z.array(Node) }`) — is walked once. The walk tracks the schemas on its current path and stops when one re-enters, so a missing `.describe()` inside the recursive schema is reported at its first occurrence, not once per level. The guard is per path: a non-recursive schema reused at two sibling paths is reported at both.
 
 The asymmetry that catches agents: inside `z.union([z.string(), z.array(z.string())])`, the outer `z.string()` option **does** need a describe (unions walk non-literal options), but the `z.string()` inside the inner array does **not** (arrays don't walk primitive elements). If the linter didn't flag a path, don't add a describe there — the redundant describe ships to the JSON Schema as clutter.
 
@@ -681,7 +683,7 @@ Heuristic source-text checks that scan `handler.toString()` for common error-han
 
 **Severity:** warning
 
-Fires when a handler contains `throw new Error(...)`. Plain `Error` doesn't carry a JSON-RPC code — the framework's auto-classifier degrades to `InternalError`, hiding the actual failure mode.
+Fires when a handler contains `throw new Error(...)`, or `throw Error(...)` — the spelling Bun's transpiler prints for the same code, since it drops `new` from built-in error constructors. Plain `Error` doesn't carry a JSON-RPC code — the framework's auto-classifier degrades to `InternalError`, hiding the actual failure mode. Other built-ins (`TypeError`, `RangeError`) are not flagged in either spelling.
 
 Plain `Error` is acceptable for "don't care" cases where the specific code doesn't matter (per CLAUDE.md/AGENTS.md: "plain `Error` for don't-care cases"). This rule targets domain-specific failures that deserve a concrete code — upgrade those to factories or `ctx.fail`, and accept the warning for the rest.
 
@@ -713,7 +715,7 @@ throw notFound('Item missing');
 
 **Severity:** warning
 
-Fires when a `catch (e)` block throws a structured `McpError` (or factory) without passing `{ cause: e }`. Dropping the cause loses the original stack trace — observability platforms and `pino-pretty` rely on it to render error chains.
+Fires when a `catch (e)` block throws a structured `McpError` (or factory) without passing `{ cause: e }`. Dropping the cause loses the original stack trace — observability platforms and `pino-pretty` rely on it to render error chains. When the catch binding is itself named `cause`, the `{ cause }` shorthand satisfies the rule — it is also how Bun's transpiler prints `{ cause: cause }`.
 
 **Fix:** thread the cause through the 4th `McpError` argument or factory options:
 
@@ -1002,6 +1004,8 @@ Fires when an enrichment key matches an `output` key. The effective output schem
 **Severity:** warning
 
 Advisory. Fires when a tool has **no** `enrichment` block but an `output` field whose name strongly signals agent-facing context (`notice`, `effectiveQuery`, `queryEcho`) rather than domain payload.
+
+**Exempt:** a `notice` in an `output` that also declares a `sections` array — the outline-on-overflow arm (`OUTLINE_VARIANT`, see the `techniques` skill). There the notice is the re-call instruction that replaces the document, main-body payload by design, and enrichment can only add to a payload, never replace it.
 
 **Fix:** move the field into an `enrichment` block and populate it via `ctx.enrich(...)` — it reaches both client surfaces without a `format()` entry. Ignore if the field is genuinely domain data. Deliberately conservative — common domain fields like `totalCount` are not flagged.
 

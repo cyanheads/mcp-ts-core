@@ -4,7 +4,7 @@ description: >
   Authentication, authorization, and multi-tenancy patterns for `@cyanheads/mcp-ts-core`. Use when implementing auth scopes on tools/resources, configuring auth modes (none/jwt/oauth), working with JWT/OAuth env vars, or understanding how tenantId flows through ctx.state.
 metadata:
   author: cyanheads
-  version: "1.3"
+  version: "1.4"
   audience: external
   type: reference
 ---
@@ -33,6 +33,8 @@ const myTool = tool('my_tool', {
 ```
 
 When `MCP_AUTH_MODE=none`, auth checks are skipped and defaults are allowed.
+
+A failed check returns `Forbidden` (-32005, `Insufficient permissions.`) or, when auth is enabled but the request carries no auth context, `Unauthorized` (-32006). Neither carries `data`: the required, granted, and missing scope names stay in the server log, so a caller cannot enumerate scopes from the error.
 
 ---
 

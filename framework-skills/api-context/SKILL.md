@@ -4,7 +4,7 @@ description: >
   Canonical reference for the unified `Context` object passed to every tool and resource handler in `@cyanheads/mcp-ts-core`. Covers the full interface, its `RequestContext` base, all sub-APIs (`ctx.log`, `ctx.state`, `ctx.requestInput`, `ctx.inputs`, `ctx.enrich`, `ctx.content`), and when to use each.
 metadata:
   author: cyanheads
-  version: "2.6"
+  version: "2.7"
   audience: external
   type: reference
 ---
@@ -109,7 +109,7 @@ await fetchUser('123', ctx);   // ctx is a Context — no conversion
 
 `RequestContext` has **no index signature**. Its fields are exactly: `auth`, `extra`, `operation`, `requestId`, `sessionId`, `spanId`, `tenantId`, `timestamp`, `traceId`. A misspelled canonical field (`tenatId`) is a compile error instead of a silently-ignored key.
 
-Operation-specific correlation data goes in **`extra`** — the one deliberate open bag (`Readonly<Record<string, unknown>>`). The logger flattens `extra` into the emitted line, so log output looks the same as a top-level spread.
+Operation-specific correlation data goes in **`extra`** — the one deliberate open bag (`Readonly<Record<string, unknown>>`). The logger flattens `extra` into the emitted line, so log output looks the same as a top-level spread — except that an `extra` key named like a canonical field the context sets never replaces it.
 
 ### Adding correlation data
 
@@ -149,7 +149,7 @@ Never re-open the shape to get past a type error: no index signature, no widenin
 
 Request-scoped structured logger. Every log line is automatically annotated with `requestId`, `traceId`, and `tenantId` — no manual spreading needed.
 
-**Dual-sink.** Each call writes to Pino *and* mirrors onto the MCP wire as a `notifications/message` (the framework advertises the `logging` capability, and the SDK filters by the level the client set via `logging/setLevel`). The wire payload is `{ message, ...data }`; `ctx.log.error` adds `error: <message>`. Delivery is fire-and-forget — a client that never upgraded to SSE, set a higher level, or already disconnected drops the notification, and a failed send never fails the handler. Treat `ctx.log` as client-visible: it is no longer a server-only sink, so don't log anything there you wouldn't put in a tool result.
+**Dual-sink.** Each call writes to Pino *and* mirrors onto the MCP wire as a `notifications/message` (the framework advertises the `logging` capability, and the SDK filters by the level the client set via `logging/setLevel`). The wire payload is `{ message, ...data }`; `ctx.log.error` adds `error: <message>`. `message` and `error` are reserved wire keys, written after `data`: a `message` in `data` never replaces the log line on the wire, and on `ctx.log.error` with an `Error` the `error` key is always that error's message. The process log line still carries the caller's own fields, except one reusing a canonical name the context already sets (`requestId`, `traceId`, `spanId`, `tenantId`, …) — there the context's value wins, so the line stays correlated to its request. Delivery is fire-and-forget — a client that never upgraded to SSE, set a higher level, or already disconnected drops the notification, and a failed send never fails the handler. Treat `ctx.log` as client-visible: it is no longer a server-only sink, so don't log anything there you wouldn't put in a tool result.
 
 ### Methods
 
