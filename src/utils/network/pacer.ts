@@ -1,8 +1,9 @@
 /**
  * @fileoverview Outbound request pacer — a FIFO queue in front of a rate-limited
  * upstream. Holds work back until every configured window, the minimum start gap,
- * and the concurrency cap allow it; sheds callers whose wait budget cannot be met;
- * and closes a shared cooldown gate when the upstream answers 429.
+ * and the concurrency cap allow it; sheds callers the queue cannot hold or whose
+ * wait budget cannot be met; and closes a shared cooldown gate when the upstream
+ * answers 429.
  *
  * The inbound `RateLimiter` (`utils/security`) is the mirror image: it is keyed
  * per caller and rejects synchronously, so it cannot queue work against an
@@ -37,10 +38,32 @@ export interface PacerCooldownOptions {
   baseMs: number;
   /**
    * Ceiling for both the doubling and an honored `Retry-After`, so a pathological
-   * upstream value cannot park the queue.
+   * upstream value cannot park the queue. Also the streak's lifetime: once the
+   * gate has stood open this long, the next rate limit starts over at `baseMs`.
    */
   maxMs: number;
 }
+
+/** The shared cooldown gate as {@link Pacer.cooldown} samples it. */
+export interface PacerCooldownState {
+  /**
+   * Rate limits in the current streak — the count the next one doubles from.
+   * 0 after a success, and from the instant the gate has stood open for
+   * `cooldown.maxMs`.
+   */
+  consecutive: number;
+  /** Milliseconds until the shared gate reopens; 0 while it is open. */
+  remainingMs: number;
+}
+
+/**
+ * Why {@link Pacer.run} shed a call, carried as `data.shedKind`:
+ * - `queue_full` — the call could not start at once and `maxQueueDepth`
+ *   callers were already waiting.
+ * - `wait_projected` — at enqueue, the projected wait already exceeded `maxWaitMs`.
+ * - `wait_elapsed` — `maxWaitMs` ran out while the call was queued.
+ */
+export type PacerShedKind = 'queue_full' | 'wait_elapsed' | 'wait_projected';
 
 /** Configuration for {@link createPacer}. */
 export interface PacerOptions {
@@ -52,7 +75,10 @@ export interface PacerOptions {
   maxConcurrent?: number;
   /**
    * Absolute backpressure on queue length, for callers that pass no
-   * `maxWaitMs`. An arrival past it is shed at once.
+   * `maxWaitMs`. It bounds waiters only: an arrival whose slot is open that
+   * instant starts without joining the queue, so `0` means "run when a slot is
+   * free, never wait". An arrival that would wait behind this many is shed at
+   * once.
    */
   maxQueueDepth?: number;
   /**
@@ -74,7 +100,7 @@ export interface PacerRunOptions {
   /**
    * Ceiling on queue time — not on the task, which bounds itself. Enqueue
    * rejects when the projected wait already exceeds it, and a still-queued entry
-   * rejects when it elapses.
+   * rejects when it elapses, unless its slot opens that same instant.
    */
   maxWaitMs?: number;
   /**
@@ -88,6 +114,14 @@ export interface PacerRunOptions {
 /** A queue in front of one upstream. Process-local; timers and `AbortSignal` only. */
 export interface Pacer extends Disposable {
   /**
+   * The shared cooldown gate, sampled when read. `remainingMs` is the gate every
+   * queued caller waits on, not the wait one rate limit computed — rate limits
+   * that land together close one gate at the later of their instants — so read
+   * in a task's rejection handler it is the wait a client can act on. Both fields
+   * stay 0 without a `cooldown` option. The pacer never writes to a task's error.
+   */
+  readonly cooldown: PacerCooldownState;
+  /**
    * Clears the dispatch timer and rejects every queued waiter with
    * `RequestCancelled`. In-flight tasks are left to finish. Idempotent; wire it
    * through `createApp({ teardown })`.
@@ -96,8 +130,10 @@ export interface Pacer extends Disposable {
   /**
    * Queues `task` and runs it once a slot opens, handing it the caller's signal.
    *
-   * @throws {McpError} `RateLimited` with `data.reason: 'pacer_shed'` when no
-   *   slot fits the caller's wait budget or the queue is at capacity.
+   * @throws {McpError} `RateLimited` with `data: { reason: 'pacer_shed',
+   *   shedKind, retryAfter, queueDepth }` when the call must wait behind a full
+   *   queue, its projected wait exceeds `maxWaitMs`, or `maxWaitMs` runs out
+   *   while it is queued — see {@link PacerShedKind}.
    */
   run<T>(task: (signal: AbortSignal) => Promise<T>, options?: PacerRunOptions): Promise<T>;
 }
@@ -112,6 +148,16 @@ interface QueueEntry {
   shedTimer?: ReturnType<typeof setTimeout> | undefined;
   signal?: AbortSignal | undefined;
 }
+
+/**
+ * The caller-facing message for each shed kind. A `queue_full` shed names the
+ * full queue, not a wait budget the caller may never have set.
+ */
+const shedMessages: Record<PacerShedKind, (name: string) => string> = {
+  queue_full: (name) => `No ${name} request slot is open and the wait queue is full.`,
+  wait_elapsed: (name) => `The caller's wait budget ran out before a ${name} request slot opened.`,
+  wait_projected: (name) => `No ${name} request slot available within the caller's wait budget.`,
+};
 
 let instruments:
   | {
@@ -140,7 +186,7 @@ function getPacerMetrics() {
     ),
     sheds: createCounter(
       'mcp.pacer.sheds',
-      'Requests shed before dispatch because no slot fit the wait budget',
+      'Requests shed before dispatch: the wait queue was full, or no slot fit the wait budget',
       '{requests}',
     ),
     wait: createHistogram('mcp.pacer.wait', 'Time a request spent waiting for a pacer slot', 'ms'),
@@ -249,22 +295,54 @@ export function createPacer(options: PacerOptions): Pacer {
     return at;
   }
 
-  /** Seconds until a slot opens, for the shed error's `retryAfter`. */
-  function secondsUntilSlot(now: number, ahead: number): number {
-    return Math.ceil(Math.max(0, projectedStart(now, ahead) - now) / 1000);
+  function atCapacity(): boolean {
+    return maxConcurrent !== undefined && active >= maxConcurrent;
+  }
+
+  /** Whether an arrival at `now` would start at once rather than wait. */
+  function canStartNow(now: number): boolean {
+    return queue.length === 0 && !atCapacity() && earliestStart(starts, now) <= now;
   }
 
   /**
-   * The shed error. `rateLimited` with no `retryable: false`: to the calling
-   * agent this is an ordinary rate limit — wait `retryAfter`, call again — and
-   * that flag would tell them the opposite. `withRetry`'s default predicate
-   * reads `reason` instead, so an enclosing retry fails fast rather than
-   * sleeping past the deadline the shed exists to enforce.
+   * Rate limits in the current streak, as the next one doubles from them. The
+   * streak lapses once the gate has stood open for `cooldown.maxMs` — one full
+   * capped cooldown with no rate limit — and is keyed to the gate rather than
+   * to the last rate limit, so continuous demand under a sustained limit, every
+   * attempt landing as the gate reopens, keeps its capped backoff.
    */
-  function shed(retryAfter: number, queueDepth: number): McpError {
+  function streak(now: number): number {
+    return cooldown && now - gateOpensAt < cooldown.maxMs ? consecutiveRateLimits : 0;
+  }
+
+  /**
+   * The shed error, for a caller that enqueued at `enqueuedAt` — `now` when shed
+   * on arrival — and has already left the queue. `retryAfter` projects a caller
+   * joining behind every remaining waiter. That projection cannot see a
+   * concurrency slot freeing, so while `maxConcurrent` is saturated it is floored
+   * at the longest wait of any queued caller, the shed one included, and never
+   * below 1s: the slots have been held at least that long.
+   *
+   * `rateLimited` with no `retryable: false`: to the calling agent this is an
+   * ordinary rate limit — wait `retryAfter`, call again — and that flag would
+   * tell them the opposite. `withRetry`'s default predicate reads `reason`
+   * instead, so an enclosing retry fails fast rather than sleeping past the
+   * deadline the shed exists to enforce.
+   */
+  function shed(shedKind: PacerShedKind, enqueuedAt: number): McpError {
     getPacerMetrics().sheds.add(1, attributes);
-    return rateLimited(`No ${name} request slot available within the caller's wait budget.`, {
+
+    const now = Date.now();
+    const queueDepth = queue.length;
+    let retryAfter = Math.ceil(Math.max(0, projectedStart(now, queueDepth) - now) / 1000);
+    if (atCapacity()) {
+      const oldest = Math.min(enqueuedAt, queue[0]?.enqueuedAt ?? enqueuedAt);
+      retryAfter = Math.max(retryAfter, Math.ceil((now - oldest) / 1000), 1);
+    }
+
+    return rateLimited(shedMessages[shedKind](name), {
       reason: 'pacer_shed',
+      shedKind,
       retryAfter,
       queueDepth,
     });
@@ -311,7 +389,7 @@ export function createPacer(options: PacerOptions): Pacer {
   function pump(): void {
     clearDispatchTimer();
     while (queue.length > 0) {
-      if (maxConcurrent !== undefined && active >= maxConcurrent) return;
+      if (atCapacity()) return;
 
       const now = Date.now();
       const earliest = earliestStart(starts, now);
@@ -338,19 +416,29 @@ export function createPacer(options: PacerOptions): Pacer {
   /**
    * Closes the shared gate on an upstream rate limit:
    * `min(max(baseMs · 2^(consecutive−1), retryAfter), maxMs)`, as an absolute
-   * instant. Any other error leaves it open; the first success resets the count.
+   * instant. Any other error leaves it open and the count untouched; the first
+   * success resets the count, and so does a gate left open for `maxMs`.
+   *
+   * A shed (`data.reason: 'pacer_shed'`) is excluded: raised by a pacer nested
+   * inside this task, it is local backpressure, and no upstream answered.
    */
   function noteRateLimit(error: unknown): void {
     if (!cooldown) return;
     if (!(error instanceof McpError) || error.code !== JsonRpcErrorCode.RateLimited) return;
+    if (error.data?.reason === 'pacer_shed') return;
 
-    consecutiveRateLimits++;
-    const doubled = cooldown.baseMs * 2 ** (consecutiveRateLimits - 1);
+    const now = Date.now();
+    consecutiveRateLimits = streak(now) + 1;
+    // The exponent is bounded so the product stays finite: past 2^1024 it is
+    // Infinity, and `baseMs: 0` would make it `0 · Infinity` — NaN, which sticks
+    // in `gateOpensAt` and stops every window and gap from binding. A positive
+    // `baseMs · 2^52` still exceeds any practical `maxMs`, so it clamps as before.
+    const doubled = cooldown.baseMs * 2 ** Math.min(consecutiveRateLimits - 1, 52);
     // An absent or unparseable hint contributes nothing, leaving the doubling.
     const honored = parseRetryAfterMs(error) ?? 0;
     const waitMs = Math.min(Math.max(doubled, honored), cooldown.maxMs);
 
-    gateOpensAt = Math.max(gateOpensAt, Date.now() + waitMs);
+    gateOpensAt = Math.max(gateOpensAt, now + waitMs);
     getPacerMetrics().cooldowns.add(1, attributes);
   }
 
@@ -365,15 +453,20 @@ export function createPacer(options: PacerOptions): Pacer {
     }
     if (signal?.aborted) return Promise.reject(signal.reason);
 
+    // Start whoever is already due before judging this arrival: a dispatch
+    // timer running late (event-loop lag) leaves a waiter whose slot is open
+    // counted against `maxQueueDepth`, and would shed this call with a
+    // `retryAfter` of 0.
+    pump();
     const now = Date.now();
-    const ahead = queue.length;
 
-    // Absolute backpressure first, so it rejects without arming a timer.
-    if (maxQueueDepth !== undefined && ahead >= maxQueueDepth) {
-      return Promise.reject(shed(secondsUntilSlot(now, ahead), ahead));
+    // Absolute backpressure first, so it rejects without arming a timer. It
+    // bounds waiters, so an arrival that can start this instant never counts.
+    if (maxQueueDepth !== undefined && queue.length >= maxQueueDepth && !canStartNow(now)) {
+      return Promise.reject(shed('queue_full', now));
     }
-    if (maxWaitMs !== undefined && projectedStart(now, ahead) - now > maxWaitMs) {
-      return Promise.reject(shed(secondsUntilSlot(now, ahead), ahead));
+    if (maxWaitMs !== undefined && projectedStart(now, queue.length) - now > maxWaitMs) {
+      return Promise.reject(shed('wait_projected', now));
     }
 
     return new Promise<T>((resolve, reject) => {
@@ -406,8 +499,12 @@ export function createPacer(options: PacerOptions): Pacer {
       if (maxWaitMs !== undefined) {
         entry.shedTimer = setTimeout(() => {
           entry.shedTimer = undefined;
+          // This can fire ahead of a dispatch timer due the same instant, so
+          // drain what is due first: a slot opening as the budget ends
+          // dispatches the entry rather than shedding it.
+          pump();
           if (!remove(entry)) return;
-          reject(shed(secondsUntilSlot(Date.now(), 0), queue.length));
+          reject(shed('wait_elapsed', entry.enqueuedAt));
           // The shed entry is gone; whoever is behind it should not wait on it.
           pump();
         }, maxWaitMs);
@@ -440,6 +537,10 @@ export function createPacer(options: PacerOptions): Pacer {
   }
 
   return {
+    get cooldown(): PacerCooldownState {
+      const now = Date.now();
+      return { remainingMs: Math.max(0, gateOpensAt - now), consecutive: streak(now) };
+    },
     dispose,
     run,
     [Symbol.dispose]: dispose,

@@ -72,9 +72,11 @@ export {
   createPacer,
   type Pacer,
   type PacerCooldownOptions,
+  type PacerCooldownState,
   type PacerLimit,
   type PacerOptions,
   type PacerRunOptions,
+  type PacerShedKind,
 } from './network/pacer.js';
 export {
   defaultIsTransient,
