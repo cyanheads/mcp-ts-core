@@ -37,7 +37,7 @@ export interface InMemoryProviderOptions {
    * Maximum number of entries across all tenants before the provider
    * rejects new writes. When capacity is reached, a TTL sweep runs first
    * to reclaim expired entries. If still at capacity after the sweep, `set()`
-   * throws `McpError(InternalError)`.
+   * rejects with `McpError(InternalError)`.
    *
    * @default 10_000
    */
@@ -146,7 +146,8 @@ export class InMemoryProvider implements IStorageProvider {
     return Promise.resolve(JSON.parse(entry.json) as T);
   }
 
-  set(
+  // biome-ignore lint/suspicious/useAwait: async makes the encode and capacity guards reject rather than throw before a promise exists (#544).
+  async set(
     tenantId: string,
     key: string,
     value: unknown,
@@ -171,7 +172,6 @@ export class InMemoryProvider implements IStorageProvider {
     if (isNew) {
       this.entryCount++;
     }
-    return Promise.resolve();
   }
 
   delete(tenantId: string, key: string, context: RequestContext): Promise<boolean> {
@@ -186,7 +186,8 @@ export class InMemoryProvider implements IStorageProvider {
     return Promise.resolve(deleted);
   }
 
-  list(
+  // biome-ignore lint/suspicious/useAwait: async makes a cursor rejection a rejected promise rather than a synchronous throw (#544).
+  async list(
     tenantId: string,
     prefix: string,
     context: RequestContext,
@@ -202,7 +203,7 @@ export class InMemoryProvider implements IStorageProvider {
     const lastKey = options?.cursor ? decodeCursor(options.cursor, tenantId, context) : undefined;
     const tenantStore = this.store.get(tenantId);
     if (!tenantStore) {
-      return Promise.resolve({ keys: [], nextCursor: undefined });
+      return { keys: [], nextCursor: undefined };
     }
     const now = Date.now();
     const allKeys: string[] = [];
@@ -221,9 +222,7 @@ export class InMemoryProvider implements IStorageProvider {
     if (tenantStore.size === 0) this.store.delete(tenantId);
 
     allKeys.sort();
-    return Promise.resolve(
-      paginateSortedKeys(allKeys, tenantId, lastKey, options?.limit ?? DEFAULT_LIST_LIMIT),
-    );
+    return paginateSortedKeys(allKeys, tenantId, lastKey, options?.limit ?? DEFAULT_LIST_LIMIT);
   }
 
   async getMany<T>(

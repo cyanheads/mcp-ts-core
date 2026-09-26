@@ -61,6 +61,75 @@ describe('InMemoryProvider (unit)', () => {
     expect(provider.size).toBe(0);
   });
 
+  // #544 — set() and list() failures surface as rejected promises, like every
+  // other provider and the IStorageProvider contract, so `.catch()` and
+  // `Promise.allSettled` observe them instead of a throw escaping first.
+  describe('failures reject rather than throw synchronously', () => {
+    /** Calls `fn`, failing the test if it throws before returning a promise. */
+    function call<T>(fn: () => Promise<T>): Promise<T> {
+      let pending: Promise<T> | undefined;
+      expect(() => {
+        pending = fn();
+      }).not.toThrow();
+      expect(pending).toBeInstanceOf(Promise);
+      return pending as Promise<T>;
+    }
+
+    it.each([
+      ['a bigint value', { big: 10n }],
+      ['a top-level undefined', undefined],
+    ])('set() with %s rejects with SerializationError', async (_label, value) => {
+      const context = createTestContext();
+      await expect(
+        call(() => provider.set(tenantId, 'item', value, context)),
+      ).rejects.toMatchObject({ code: JsonRpcErrorCode.SerializationError });
+    });
+
+    it('set() of a new key at maxEntries rejects with the capacity error', async () => {
+      const context = createTestContext();
+      const boundedProvider = new InMemoryProvider({ maxEntries: 1 });
+      await boundedProvider.set(tenantId, 'key1', 'v1', context);
+
+      await expect(
+        call(() => boundedProvider.set(tenantId, 'key2', 'v2', context)),
+      ).rejects.toMatchObject({
+        code: JsonRpcErrorCode.InternalError,
+        message: expect.stringContaining('capacity exceeded'),
+      });
+    });
+
+    it('Promise.allSettled settles a rejected set() alongside a successful one', async () => {
+      const context = createTestContext();
+      const results = await Promise.allSettled([
+        provider.set(tenantId, 'bad', { big: 10n }, context),
+        provider.set(tenantId, 'good', 'value', context),
+      ]);
+
+      expect(results.map((r) => r.status)).toEqual(['rejected', 'fulfilled']);
+      await expect(provider.get(tenantId, 'good', context)).resolves.toBe('value');
+    });
+
+    it('list() with a malformed cursor rejects with InvalidParams', async () => {
+      const context = createTestContext();
+      await provider.set(tenantId, 'a', 1, context);
+
+      await expect(
+        call(() => provider.list(tenantId, '', context, { cursor: 'garbage' })),
+      ).rejects.toMatchObject({ code: JsonRpcErrorCode.InvalidParams });
+    });
+
+    it('list() with a cursor issued to another tenant rejects with InvalidParams', async () => {
+      const context = createTestContext();
+      for (const key of ['a', 'b', 'c']) await provider.set('tenant-b', key, key, context);
+      const { nextCursor } = await provider.list('tenant-b', '', context, { limit: 1 });
+      expect(nextCursor).toBeTypeOf('string');
+
+      await expect(
+        call(() => provider.list(tenantId, '', context, { cursor: nextCursor as string })),
+      ).rejects.toMatchObject({ code: JsonRpcErrorCode.InvalidParams });
+    });
+  });
+
   describe('JSON round-trip', () => {
     it('returns the JSON form through ctx.state and rejects values JSON cannot encode', async () => {
       const ctx = createMockContext();
@@ -91,7 +160,7 @@ describe('InMemoryProvider (unit)', () => {
       const context = createTestContext();
       await provider.set(tenantId, 'item', 'original', context, { ttl: 5 });
 
-      expect(() => provider.set(tenantId, 'item', { big: 10n }, context)).toThrow(McpError);
+      await expect(provider.set(tenantId, 'item', { big: 10n }, context)).rejects.toThrow(McpError);
 
       now += 4_000;
       await expect(provider.get(tenantId, 'item', context)).resolves.toBe('original');
@@ -129,10 +198,12 @@ describe('InMemoryProvider (unit)', () => {
       },
     );
 
-    it('supports a zero-entry provider that rejects writes without retaining a tenant', () => {
+    it('supports a zero-entry provider that rejects writes without retaining a tenant', async () => {
       const context = createTestContext();
       const boundedProvider = new InMemoryProvider({ maxEntries: 0 });
-      expect(() => boundedProvider.set(tenantId, 'key', 'value', context)).toThrow(McpError);
+      await expect(boundedProvider.set(tenantId, 'key', 'value', context)).rejects.toThrow(
+        McpError,
+      );
       const internalStore = (boundedProvider as unknown as { store: Map<string, unknown> }).store;
       expect(internalStore.size).toBe(0);
     });
@@ -143,9 +214,7 @@ describe('InMemoryProvider (unit)', () => {
       await boundedProvider.set(tenantId, 'key1', 'v1', context);
       await boundedProvider.set(tenantId, 'key2', 'v2', context);
 
-      // set() is not declared `async`, so the capacity guard throws
-      // synchronously rather than returning a rejected promise.
-      expect(() => boundedProvider.set(tenantId, 'key3', 'v3', context)).toThrow(McpError);
+      await expect(boundedProvider.set(tenantId, 'key3', 'v3', context)).rejects.toThrow(McpError);
     });
 
     it('allows overwriting an existing key at capacity without throwing', async () => {
@@ -189,7 +258,7 @@ describe('InMemoryProvider (unit)', () => {
         keys: ['replacement'],
       });
       expect(boundedProvider.size).toBe(1);
-      expect(() => boundedProvider.set(tenantId, 'another', 'value', context)).toThrow(
+      await expect(boundedProvider.set(tenantId, 'another', 'value', context)).rejects.toThrow(
         'capacity exceeded',
       );
       await expect(boundedProvider.delete(tenantId, 'replacement', context)).resolves.toBe(true);
@@ -220,7 +289,9 @@ describe('InMemoryProvider (unit)', () => {
           keys: liveSibling ? ['expired', 'new', 'stable'] : ['expired', 'new'],
         });
         expect(boundedProvider.size).toBe(liveSibling ? 3 : 2);
-        expect(() => boundedProvider.set(tenantId, 'overflow', 'value', context)).toThrow(McpError);
+        await expect(boundedProvider.set(tenantId, 'overflow', 'value', context)).rejects.toThrow(
+          McpError,
+        );
         await expect(boundedProvider.clear(tenantId, context)).resolves.toBe(liveSibling ? 3 : 2);
         await boundedProvider.set(tenantId, 'after-clear', 'value', context);
         expect(boundedProvider.size).toBe(1);
