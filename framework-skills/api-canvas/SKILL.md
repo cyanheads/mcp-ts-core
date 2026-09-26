@@ -4,7 +4,7 @@ description: >
   DataCanvas primitive reference — a Tier 3 SQL/analytical workspace for tabular MCP servers, backed by DuckDB. Use when registering tables from upstream APIs, running ad-hoc SQL across them, and exporting results. Covers the acquire → register → query → export flow, per-table TTL, the token-sharing pattern for multi-agent collaboration, env config, and Cloudflare Workers fail-closed behavior.
 metadata:
   author: cyanheads
-  version: "2.5"
+  version: "2.6"
   audience: external
   type: reference
 ---
@@ -88,7 +88,7 @@ That collapse is also why the capacity hint reads the way it does: under `defaul
 
 ### Advertising the id shape
 
-`CanvasIdSchema` is exported from `@cyanheads/mcp-ts-core/canvas` — `z.string().regex(/^[A-Za-z0-9_-]{10}$/)` with a `.describe()` naming where an id comes from. A tool that declares its `canvas_id` field with it advertises the constraint in `inputSchema`, so a model sees the shape before it calls and an impossible value is rejected at argument validation rather than inside the handler:
+`CanvasIdSchema` is exported from `@cyanheads/mcp-ts-core/canvas` — `z.string().regex(/^[A-Za-z0-9_-]{10}$/, message)` with a `.describe()` naming where an id comes from. A tool that declares its `canvas_id` field with it advertises the constraint in `inputSchema`, so a model sees the shape before it calls and an impossible value is rejected at argument validation rather than inside the handler:
 
 ```ts
 import { CanvasIdSchema } from '@cyanheads/mcp-ts-core/canvas';
@@ -100,7 +100,7 @@ input: z.object({
 }),
 ```
 
-The two halves are independent. On a tool that adopts the shape, `"x"` fails as `InvalidParams` (-32602) with the framework's own `reason: 'invalid_arguments'` and a schema-derived hint, and the handler never runs — so `canvas_id_malformed` never fires there. It covers tools that have not adopted it and ids the registry receives from somewhere other than a validated argument, `importFrom`'s source id in particular. Adopting the shape does not change any existing server's advertised schema until that server adopts it.
+The two halves are independent. On a tool that adopts the shape, `"x"` or a table name like `"df_abc123"` fails as `InvalidParams` (-32602) with the framework's own `reason: 'invalid_arguments'`, and the handler never runs — so `canvas_id_malformed` never fires there. The rejection's message, `data.issues[0].message`, and recovery hint carry the schema's own sentence rather than the bare pattern: *Expected a canvas ID exactly as an earlier response on this server returned it: 10 characters of letters, digits, hyphens, and underscores. A table name is not a canvas ID.* A check message is not part of the emitted JSON Schema, so the advertised `inputSchema` stays `pattern` plus `description`. It covers tools that have not adopted it and ids the registry receives from somewhere other than a validated argument, `importFrom`'s source id in particular. Adopting the shape does not change any existing server's advertised schema until that server adopts it.
 
 ---
 
@@ -115,6 +115,15 @@ The two halves are independent. On a tool that adopts the shape, `"x"` fails as 
 | Persistence | In-memory only | — (v1; restart drops all canvases) |
 
 The sweeper runs as an `unref`'d `setInterval` — does not keep the event loop alive on its own. Shutdown via `core.canvas.shutdown(ctx)` (called automatically from `ServerHandle.shutdown()`) stops the sweeper and tears down every active DuckDB instance.
+
+### Scratch directory
+
+On first use the DuckDB provider creates one private directory, `mcp-canvas-XXXXXX`, under `CANVAS_TEMP_PATH` (the OS temp directory when unset) with `mkdtemp` — mode `0700` on POSIX; on Windows it inherits the parent's ACL, so there the parent must not grant other users access. All scratch I/O stays inside it:
+
+- **Spills.** Each canvas gets its own DuckDB `temp_directory` there. DuckDB names spill files by block size alone, so canvases sharing one directory would overwrite each other's evicted blocks once two of them spill past `memory_limit` at the same time.
+- **Staging.** Stream exports and `importFrom` write their transient files directly in it, under `crypto.randomUUID()` names, and unlink them once consumed. The directory's mode is the boundary, not the name.
+
+Dropping or expiring a canvas removes its spill directory once the calls still running on it settle, without waiting for them, since those calls can still be reading back the blocks it spilled. `shutdown()` removes the whole private directory once the calls still running against it settle, and does not wait for them: until then the directory stays in place and private, so no other local user can re-create its name and receive what those calls still write. A canvas whose creation straddles the shutdown is refused with `ServiceUnavailable` (-32000). A provider used again afterwards makes a fresh directory. After a crash or `SIGKILL` the directory stays behind, still private, and the next start does not sweep it — remove stale `mcp-canvas-*` directories by hand. A configured `CANVAS_TEMP_PATH` is created if missing and gets no ownership or mode check, so it must not be a directory another local user controls. When the private directory cannot be created, canvas creation fails with `ConfigurationError` (-32008) and the next attempt retries.
 
 ---
 
@@ -172,7 +181,7 @@ Querying a table that does not exist throws `NotFound` (`data.reason: 'missing_t
 
 A `SELECT` that parses but fails to prepare for any other reason — a mistyped column, an unknown scalar or table function, type, or collation, a schema the canvas does not have, an invalid expression — throws `ValidationError` (`data.reason: 'invalid_sql'`) and preserves the DuckDB binder detail in `data.binderMessage` (e.g. `Referenced column "x" not found...`, often with a candidate suggestion). This is distinct from `non_select_statement`, reserved for statements that genuinely aren't `SELECT`s — here the shape is fine, so the agent should fix the named column or function. DuckDB's FROM-first form (`FROM t`, `FROM t SELECT a`) is a `SELECT`: it passes the gate, and one that fails to prepare is classified the same way.
 
-A `SELECT` that prepares and then fails on the staged data throws `ValidationError` (`data.reason: 'sql_execution_error'`) with the engine message preserved and a hint pointing at `TRY_CAST` or filtering the offending rows. The split follows DuckDB's own execution-error classes — `Conversion Error`, `Invalid Input Error`, `Out of Range Error` — matched on the message prefix. Engine faults (`IO Error`, `INTERNAL Error`, `Out of Memory Error`, and anything unmatched) stay `DatabaseError`, so an export or import failing on I/O is never reported to the caller as bad SQL. `DUCKDB_ERROR_REASONS` exports these alongside `SQL_GATE_REASONS`.
+A `SELECT` that prepares and then fails on the staged data throws `ValidationError` (`data.reason: 'sql_execution_error'`) with the engine message preserved and a hint pointing at `TRY_CAST` or filtering the offending rows. The split follows DuckDB's own execution-error classes — `Conversion Error`, `Invalid Input Error`, `Out of Range Error` — matched on the message prefix. `sql_read_only` and `sql_parse_error` are matched the same way: DuckDB's `Permission Error` or a write refused in `read-only mode`, and `Parser Error`. Engine faults (`IO Error`, `INTERNAL Error`, `Out of Memory Error`, and anything unmatched) stay `DatabaseError` whatever their text says, so an export, import, or spill failing on I/O — `Permission denied`, `Read-only file system` — is never reported to the caller as bad SQL. Every engine message the provider throws has the export root and the [scratch directory](#scratch-directory) replaced with `[path]`, leaving only the part below them (the caller's own export name); the raw engine error stays on `cause` for logs. `DUCKDB_ERROR_REASONS` exports these alongside `SQL_GATE_REASONS`.
 
 **Every gate and engine rejection carries `data.recovery.hint`**, which the framework mirrors into `content[]` as a `Recovery:` line — so the guidance reaches `structuredContent`-only and `content[]`-only clients alike. The hints name a capability, never a framework method: an MCP client sees only the consuming server's tool names, so `registerTable()` or `describe()` in a hint is guidance it cannot follow. Write your own hints the same way (see `api-errors`).
 
@@ -229,7 +238,7 @@ const result = await instance.query("SELECT total FROM sales_by_region WHERE reg
 
 ### `instance.importFrom(sourceCanvasId, sourceTableName, options?)`
 
-Copy a table from another canvas the caller controls into this one. The lifecycle wrapper validates tenancy on both ids before the provider sees either. Round-trips through a Parquet file under the scratch root (`CANVAS_TEMP_PATH`) so `TIMESTAMP`/`DATE`/`BLOB` columns survive losslessly.
+Copy a table from another canvas the caller controls into this one. The lifecycle wrapper validates tenancy on both ids before the provider sees either. Round-trips through a Parquet file in the provider's [scratch directory](#scratch-directory) so `TIMESTAMP`/`DATE`/`BLOB` columns survive losslessly.
 
 ```ts
 const imported = await target.importFrom(source.canvasId, 'orders', { asName: 'orders_copy' });
@@ -246,7 +255,7 @@ Export a canvas table. Path-based exports are sandboxed to `CANVAS_EXPORT_PATH` 
 // Path target — written inside the sandbox.
 await instance.export('g_with_obs', { format: 'parquet', path: 'observations.parquet' });
 
-// Stream target — copied to a file under the scratch root, piped to the stream, unlinked.
+// Stream target — copied to a file in the provider's scratch directory, piped to the stream, unlinked.
 await instance.export('g_with_obs', { format: 'csv', stream: writableStream });
 ```
 
@@ -298,7 +307,7 @@ If your tool surfaces row data via `structuredContent`, the JSON-safe shape flow
 | `CANVAS_PROVIDER_TYPE` | `canvas.providerType` | `none` (also: `duckdb`) |
 | `CANVAS_DEFAULT_MEMORY_LIMIT_MB` | `canvas.defaultMemoryLimitMb` | `1024` |
 | `CANVAS_EXPORT_PATH` | `canvas.exportRootPath` | `./.canvas-exports` |
-| `CANVAS_TEMP_PATH` | `canvas.tempRootPath` | `<os.tmpdir()>/mcp-canvas` |
+| `CANVAS_TEMP_PATH` | `canvas.tempRootPath` | `os.tmpdir()` — parent of the private [scratch directory](#scratch-directory) |
 | `CANVAS_MAX_CANVASES_PER_TENANT` | `canvas.maxCanvasesPerTenant` | `100` |
 | `CANVAS_TTL_MS` | `canvas.ttlMs` | `86_400_000` (24 h) |
 | `CANVAS_ABSOLUTE_CAP_MS` | `canvas.absoluteCapMs` | `604_800_000` (7 d) |

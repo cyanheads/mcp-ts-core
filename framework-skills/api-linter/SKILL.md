@@ -4,7 +4,7 @@ description: >
   MCP definition linter rules reference. Use when `bun run lint:mcp` or `bun run devcheck` reports a lint error or warning (`format-parity`, `schema-is-object`, `name-format`, `server-json-*`, etc.) and you need to understand the rule, its severity, and how to fix it. Every rule ID the linter emits has an entry in this doc.
 metadata:
   author: cyanheads
-  version: "1.19"
+  version: "1.20"
   audience: external
   type: reference
 ---
@@ -15,10 +15,10 @@ The linter validates tool, resource, and prompt definitions against the MCP spec
 
 | Entry point | When | On failure |
 |:------------|:-----|:-----------|
-| `bun run lint:mcp` | Manual or CI | Prints errors + warnings, exits non-zero on errors. |
+| `bun run lint:mcp` | Manual or CI | Imports every definition file, prints errors + warnings, exits non-zero on errors. A file that fails to import is an error ([`definition-import-failed`](#definition-import-failed)), never a skip. |
 | `bun run devcheck` | Pre-commit workflow | Wraps `lint:mcp` alongside typecheck, format, `bun audit`, `bun outdated`. |
 
-Both surface the same `LintReport` from `validateDefinitions()` (exported from `@cyanheads/mcp-ts-core/linter`). Each diagnostic has a stable `rule` ID — that's the anchor you land on via the `See: framework-skills/api-linter/SKILL.md#<rule>` breadcrumb appended to every message.
+Both surface the same `LintReport` from `validateDefinitions()` (exported from `@cyanheads/mcp-ts-core/linter`), plus two load errors the CLI raises itself, because `validateDefinitions()` only receives what already loaded: `definition-import-failed` and `server-json-parse`. Each diagnostic has a stable `rule` ID — that's the anchor you land on via the `See: framework-skills/api-linter/SKILL.md#<rule>` breadcrumb appended to every message.
 
 **Severity:**
 - **error** — MUST-level spec violation; blocks `devcheck`.
@@ -42,7 +42,7 @@ Grouped by family. Jump to any rule ID via its anchor.
 
 | Family | Rules | Section |
 |:-------|:------|:--------|
-| Definition | `definition-invalid` | [Definition rules](#definition-rules) |
+| Definition | `definition-invalid`, `definition-import-failed` | [Definition rules](#definition-rules) |
 | Format parity | `format-parity`, `format-parity-threw`, `format-parity-walk-failed`, `format-parity-depth-limit` | [Format parity](#format-parity) |
 | Schema | `schema-is-object`, `describe-on-fields`, `schema-serializable`, `schema-unsatisfiable`, `header-param-designation`, `schema-root-meta-discarded` | [Schema rules](#schema-rules) |
 | Portability | `schema-format-portability`, `schema-anyof-needs-type`, `schema-no-discriminator-keyword`, `schema-no-defs`, `schema-root-oneof-portability`, `schema-dialect-tag` | [Portability rules](#portability-rules) |
@@ -68,6 +68,23 @@ Grouped by family. Jump to any rule ID via its anchor.
 Fires when a `tools`, `resources`, or `prompts` array passed to `validateDefinitions()` contains a `null`/`undefined` entry (or any non-object value) instead of a definition object — e.g. a stray import or a conditional that yields `undefined`/`false`. The bad entry is reported as this diagnostic and skipped, rather than crashing the whole lint run.
 
 **Fix:** remove the empty slot, or ensure every element of the array is a real definition object (e.g. `[makeFooTool(), enabled ? makeBarTool() : null].filter(Boolean)`).
+
+### definition-import-failed
+
+**Severity:** error
+
+Fires when a discovered definition file (`*.tool.ts`, `*.resource.ts`, `*.prompt.ts`, `*.app-tool.ts`, `*.app-resource.ts` under `src/mcp-server/` or `examples/mcp-server/`) rejects on `import()`: a package that the file, or anything it imports, needs cannot be resolved, the file has a syntax error, or code throws at module load. None of that file's definitions can be checked, so the run fails rather than passing without them. The other files are still imported and linted, so one run reports every import failure alongside the rule diagnostics. The `lint:mcp` CLI (`scripts/lint-mcp.ts`) raises it; `validateDefinitions()` never does, since a programmatic caller does its own imports.
+
+```text
+  ✗ [definition-import-failed] src/mcp-server/tools/definitions/query.tool.ts: Cannot find package '@duckdb/node-api' imported from …
+```
+
+**Fix**, by cause:
+
+- **An optional peer dependency** imported at the top of the definition or of a service it imports: install the peer wherever `lint:mcp` and `devcheck` run (a `devDependency` is enough), or make the import lazy — `await import('<pkg>')` inside the handler or service method that uses it, so loading the definition never touches the package. The framework's own Tier 3 subpaths already lazy-load their peers; importing them from a definition needs nothing installed.
+- **A throw at module load** — reading config, constructing a client, or awaiting a network call at top level: move the work into `setup()`, a service's init, or the handler. Definitions must import without side effects.
+- **A syntax error**: fix it. `devcheck`'s typecheck reports the same file with a location.
+- **Running the script under plain `node`**: Node's type stripping does not rewrite a relative `./x.js` specifier to `x.ts`, so a definition that imports a sibling module fails to load. Run it under Bun — `bun run lint:mcp`, as `devcheck` does.
 
 ---
 
@@ -472,19 +489,20 @@ Catches `readOnlyHint: true` with **any** explicit `destructiveHint` value (even
 
 Fires when a tool's `inputAliases` cannot resolve to exactly one declared input key. An alias is a one-to-one mapping fixed ahead of time — the reason it is accepted where nearest-key matching is not — so an alias resolving to none or to more than one is a definition error, not a runtime one. The runtime declines an ambiguous rewrite silently and the caller sees the ordinary strict rejection, which reads as the alias simply not working.
 
-Five conditions, all decidable from the definition:
+Six conditions, all decidable from the definition:
 
 | Condition | Example |
 |:--|:--|
 | An alias must not equal a declared key | `input: z.object({ q, query })` with `inputAliases: { q: 'query' }` — a declared key is never rewritten, so the alias can never fire |
 | An alias's target must be a declared key | `inputAliases: { q: 'searchQuery' }` when the schema declares `query` |
+| An alias's target must not be `headerParam`-designated | `inputAliases: { region: 'regionCode' }` with `regionCode: headerParam(z.string(), 'Region')` — the rewrite never targets a header-mirrored field, since the SDK checks the `Mcp-Param-Region` header against the body the caller sent, so the caller gets `Unknown key region` |
 | Two declared keys must not case-fold to one name | `z.object({ maxResults, max_results })` — no alias can resolve between them |
 | An alias must not case-fold to a declared key other than its target | `inputAliases: { max_results: 'query' }` alongside a declared `maxResults` |
 | Two aliases must not case-fold to one name with different targets | `inputAliases: { 'search-term': 'query', search_term: 'maxResults' }` |
 
-Case-folding strips `-` and `_` and lowercases — the same fold the runtime rewrite applies, so the rule and the runtime cannot disagree. On a discriminated-union root, every variant's keys count as declared: a rewrite resolves against the selected variant, so an alias naming a key no variant declares can never fire.
+Case-folding strips `-` and `_` and lowercases — the same fold the runtime rewrite applies, so the rule and the runtime cannot disagree. On a discriminated-union root, every variant's keys count as declared: a rewrite resolves against the selected variant, so an alias naming a key no variant declares can never fire. The header check reads each variant's own designations, so an alias onto a designated field inside one variant is reported beside that variant's `header-param-designation` error; a designation deeper than the root never blocks an alias, which only ever names a root key.
 
-**Fix:** point the alias at an existing key, rename the key it shadows, or drop the alias. Also fires when `inputAliases` is not an object of non-empty string targets.
+**Fix:** point the alias at an existing key, rename the key it shadows, or drop the alias. For a header target, drop the alias or the `headerParam` designation — the field cannot be both. Also fires when `inputAliases` is not an object of non-empty string targets.
 
 Silent when no `inputAliases` is declared — the case-style half needs no declaration and declines ambiguity on its own.
 
@@ -596,6 +614,7 @@ Validates the `server.json` manifest at project root against the [MCP server man
 
 | Rule ID | Severity | What it checks |
 |:--------|:---------|:---------------|
+| `server-json-parse` | error | `server.json` exists but does not parse as JSON, so none of the rules below can run. Raised by the `lint:mcp` CLI, which reads the file; a missing `server.json` is skipped |
 | `server-json-type` | error | `server.json` must be a JSON object, not an array or primitive |
 | `server-json-name-required` | error | `name` must be present and non-empty |
 | `server-json-name-length` | error | `name` length 3–200 characters |

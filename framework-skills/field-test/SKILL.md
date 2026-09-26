@@ -4,7 +4,7 @@ description: >
   Exercise tools, resources, and prompts against a live HTTP server via MCP JSON-RPC over curl. Starts the server, surfaces the catalog, runs real and adversarial inputs, measures every call (bytes, token estimate, wall-clock) and weighs the catalog, and produces a tight report with concrete findings and numbered follow-up options. Use after adding or modifying definitions, or when the user asks to test, try out, or verify their MCP surface.
 metadata:
   author: cyanheads
-  version: "2.16"
+  version: "2.17"
   audience: external
   type: debug
 ---
@@ -402,7 +402,7 @@ Treat any hit as a `ux` finding in the report. The authoring rule lives under *T
 |:------------------------------------------------|:-------------|
 | `include` / `fields` / `expand` / `view` / `projection` parameter | Field selection: non-default value renders requested fields |
 | Array return with `query` / `filter` inputs | Empty result: does response explain *why* (echo criteria, suggest broadening)? |
-| Identifier, code, or enum-ish input (an ID format, a classification code, a unit, a place name, a list the docs say may be comma-joined) | Value-variant tolerance: re-send the happy-path call with each obvious variant of that value — lowercase, the bare leaf of a hierarchical code, a common domain alias, a delimiter-joined list where an array is accepted, the spelled-out form of an abbreviated name. Pass is either outcome: the call succeeds, or it fails with an error naming the expected shape. A miss or a bare validation failure on a variant that maps one-to-one onto a valid value is a `ux` finding. Probe **values** — variants of the argument *key* name, and a JSON-stringified array as a value, are handled by the framework, not the server. |
+| Identifier, code, or enum-ish input (an ID format, a classification code, a unit, a place name, a list the docs say may be comma-joined) | Value-variant tolerance: re-send the happy-path call with each obvious variant of that value — lowercase, the bare leaf of a hierarchical code, a common domain alias, a delimiter-joined list where an array is accepted, the spelled-out form of an abbreviated name. Pass is either outcome: the call succeeds, or it fails with an error naming the expected shape. A miss or a bare validation failure on a variant that maps one-to-one onto a valid value is a `ux` finding. Probe **values** — variants of the argument *key* name, and a JSON-stringified array or object or an integer sent for a string as a value, are handled by the framework, not the server. |
 | Batch / bulk input (arrays of IDs, multi-item ops) | Partial success: mix valid + invalid items |
 | `annotations.readOnlyHint: true` | Confirm no mutation happened |
 | `annotations.idempotentHint: true` | Call twice with same input — safe? |

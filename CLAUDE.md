@@ -3,7 +3,7 @@
 **Package:** `@cyanheads/mcp-ts-core`
 **Version:** 0.13.8
 **Engines:** Bun ≥1.4.0, Node ≥24.0.0
-**MCP SDK:** `@modelcontextprotocol/server` ^2.0.0 (protocol revisions 2026-07-28 and 2025-*)
+**MCP SDK:** `@modelcontextprotocol/server` ^2.1.0 (protocol revisions 2026-07-28 and 2025-*)
 **Zod:** ^4.6.5
 **GitHub:** [cyanheads/mcp-ts-core](https://github.com/cyanheads/mcp-ts-core)
 **npm:** [@cyanheads/mcp-ts-core](https://www.npmjs.com/package/@cyanheads/mcp-ts-core)
@@ -168,7 +168,7 @@ interface ServerHandle {
 }
 ```
 
-**Exit contract.** `shutdown()` is exit-free and unbounded: it also serves the startup-failure rollback and direct calls from embedders and tests, so ending the process belongs to the handlers. `SIGTERM`, `SIGINT`, and stdin EOF each run that same shutdown and then exit explicitly. A signal exits 0 once the shutdown settles and 1 when the 10 s ceiling fires, after a warning naming the step that never settled; stdin EOF exits 0 either way, unchanged. The ceiling bounds the shutdown as a whole rather than any single await, so a step that settles inside it is never truncated. A second signal mid-shutdown reaches no handler (shutdown detaches them as it starts) and terminates on the OS default, 143 / 130 — the operator's force-kill escape hatch. `uncaughtException` / `unhandledRejection` exit 1.
+**Exit contract.** `shutdown()` is exit-free and unbounded: it also serves the startup-failure rollback and direct calls from embedders and tests, so ending the process belongs to the handlers. `SIGTERM`, `SIGINT`, and stdin EOF each run that same shutdown and then exit explicitly. On stdin EOF the SDK transport has already closed itself, so a request still in flight is aborted (its `ctx.signal` fires) and never answered — the client has hung up. A signal exits 0 once the shutdown settles and 1 when the 10 s ceiling fires, after a warning naming the step that never settled; stdin EOF exits 0 either way, unchanged. The ceiling bounds the shutdown as a whole rather than any single await, so a step that settles inside it is never truncated. A second signal mid-shutdown reaches no handler (shutdown detaches them as it starts) and terminates on the OS default, 143 / 130 — the operator's force-kill escape hatch. `uncaughtException` / `unhandledRejection` exit 1.
 
 ---
 
@@ -255,7 +255,7 @@ export const myTool = tool('my_tool', {
 
 **Strict input:** `tool()` stores `input.strict()`, so an unrecognized argument key is rejected by name before the handler runs and `inputSchema` advertises `additionalProperties: false`. Root-level only — a nested `z.object()` still strips unless it is strict itself. An explicit `.passthrough()` / `.catchall()` is honored. Declare `.strict()` **before** `.describe()` / `.meta()` on the root: Zod keys both to the schema instance and `.strict()` clones without it, so a root describe declared after is discarded and never advertised — `lint:mcp` reports that as `schema-root-meta-discarded`.
 
-**Pre-validation:** an ordered step inside `parseToolArguments` rescues calls strict input would otherwise reject — drop client-added root keys (`_meta`, `tool_call_description`, `toolCallId`, any undeclared `_`-prefixed key) → rewrite key aliases (declared `inputAliases`, plus any undeclared key whose case-folded form names exactly one declared key) → parse → on failure, repair a JSON-stringified array and re-parse once, keeping it only if the schema then accepts it. All on by default; nothing changes the advertised `inputSchema`, and a call that still fails throws the identical rejection. A declared key, an author-opened root, and a `headerParam` target are never touched. Server-level switches: `createApp({ input: { ignoreKeys, caseStyleAliases, coerce } })`. Counters: `mcp.input.ignored_key`, `mcp.input.aliased`, `mcp.input.coerced`. Lint: `input-alias-conflict`. See `add-tool` skill.
+**Pre-validation:** an ordered step inside `parseToolArguments` rescues calls strict input would otherwise reject — drop client-added root keys (`_meta`, `tool_call_description`, `toolCallId`, any undeclared `_`-prefixed key) → rewrite key aliases (declared `inputAliases`, plus any undeclared key whose case-folded form names exactly one declared key) → parse → on failure, repair a JSON-stringified array or object, or a safe integer where a string is expected (`8654467` → `"8654467"`), and re-parse once, keeping the repair only if the schema then accepts it. If that still fails and the drop discarded a key, the stages rerun alias-first so `_query` or a declared `_q` alias reaches its target, and the retry (repair included) is kept only if it validates — a call the first order validates resolves exactly as it would without the retry. All on by default, and nothing changes the advertised `inputSchema`. A call that still fails throws the first order's rejection, the one it gets under `coerce: false`, reporting its rewrites and underscore-rule drops as `data.input` and in the hint. A declared key, an author-opened root, and a `headerParam` target are never touched. Server-level switches: `createApp({ input: { ignoreKeys, caseStyleAliases, coerce } })`. Counters, for the attempt the handler receives: `mcp.input.ignored_key`, `mcp.input.aliased`, `mcp.input.coerced` (once per repair kind). Lint: `input-alias-conflict`. See `add-tool` skill.
 
 **Header-mirrored input (2026-07-28):** `headerParam(z.string(), 'Region')` designates an input property with `x-mcp-header`, so its value also rides an `Mcp-Param-Region` request header and an intermediary can read it without parsing the body. Mirroring, not relocation — the handler still reads the argument from the body, and nothing else about the field changes. Only a primitive-typed (`string`/`integer`/`number`/`boolean`) property statically reachable through a chain of `properties` keys qualifies: an array element, a `z.record()` value, and every field of a discriminated-union input root are unreachable, and header names must be RFC 9110 tokens, case-insensitively unique per schema. `tool()` rejects a violation at definition time naming the field path — the SDK only warns, then conforming Streamable HTTP clients drop the tool. Lint rule: `header-param-designation`.
 
@@ -303,7 +303,7 @@ interface Context {
   readonly auth?: AuthContext;
   readonly log: ContextLogger;                // auto-correlated: requestId, traceId, tenantId
   readonly state: ContextState;               // tenant-scoped KV storage
-  readonly requestInput: RequestInputFn;      // (spec) => never — suspends and asks the caller for input
+  readonly requestInput: RequestInputFn;      // (spec, options?) => never — suspends and asks the caller for input
   readonly inputs: ContextInputs;             // reader over a retried request's responses
   readonly notifyPromptListChanged?: (() => void) | undefined;     // prompt list changed
   readonly notifyResourceListChanged?: (() => void) | undefined;   // resource list changed
@@ -368,6 +368,11 @@ useFormat(answer.format);
 cancelled prompt is terminal, not a round to retry. `inputRequired.elicitUrl({ message, url })`
 hands the user an external link instead of a form.
 
+A 2025-era client that declared no matching capability is refused as `client_capability_missing`,
+with a hint that ends at reconnecting. When the tool's own arguments can stand in for the answer,
+say so per call — `ctx.requestInput(spec, { fallbackHint: 'Or call again with noun supplied.' })` —
+and the sentence is appended to that hint. A consent gate passes none: it has no such field.
+
 ### `ctx.content`
 
 Accumulates non-text content blocks — image/audio bytes, embedded resources, resource links — onto the response: `ctx.content.image(data, mimeType)`, `ctx.content.audio(data, mimeType)`, or `ctx.content(block)` for a raw `ContentBlock`. Blocks are prepended to `content[]` after `format()` runs and never enter `structuredContent`, so a handler can emit media for the calling model without the base64 duplicating into typed output. Always present (no-op when unused); callable from handler and service layer.
@@ -418,7 +423,7 @@ For HTTP responses from upstream APIs, use `httpErrorFromResponse(response, { se
 
 **Auto-classification.** Plain `Error`, `ZodError`, and any other thrown value are caught and classified automatically. Resolution order: request signal already aborted (→ `RequestCancelled`, outranking the thrown value's own code, `McpError` included) → `McpError` code (preserved as-is) → SDK `ConnectionClosed` (→ `RequestCancelled`) → engine resource-limit `RangeError` by whole message — stack overflow, maximum string size (→ `InternalError`) → JS constructor name (`SyntaxError` → `ValidationError`; `TypeError` is excluded) → provider patterns (HTTP status codes, AWS errors, DB errors) → common message patterns → `AbortError` name (→ `Timeout`) → `InternalError` fallback. A result that breaks the definition's own `output` or `enrichment` schema fails as `InternalError` naming that contract, not `ValidationError`.
 
-**Error-path parity.** Tool errors: `content[]` carries `Error: <message>`, then `Recovery: <hint>` when the hint says something the message does not already contain, then a closing `(reason … · not retryable)` for whichever of `data.reason` / `data.retryable` is present; the numeric code and `data.issues` stay JSON-only. `structuredContent.error` carries `{ code, message, data? }`. No `_meta.error`. Resources re-throw via JSON-RPC error envelope. An argument rejection is one of them: `-32602` with `data.issues`, plus `data.reason: 'invalid_arguments'` and a hint synthesized from the issues and the root schema — never a tool-declared `reason`, since the handler never ran. `client_capability_missing` is the second framework-owned reason: a `ctx.requestInput` return a 2025-era connection cannot serve is refused before any wire traffic as `-32600` carrying that reason and a hint naming the capability.
+**Error-path parity.** Tool errors: `content[]` carries `Error: <message>`, then `Recovery: <hint>` when the hint says something the message does not already contain, then a closing `(reason … · not retryable)` for whichever of `data.reason` / `data.retryable` is present; the numeric code and `data.issues` stay JSON-only. `structuredContent.error` carries `{ code, message, data? }`. No `_meta.error`. Resources re-throw via JSON-RPC error envelope. An argument rejection is one of them: `-32602` with `data.issues`, plus `data.reason: 'invalid_arguments'` and a hint synthesized from the issues and the root schema — never a tool-declared `reason`, since the handler never ran. When pre-validation rewrote or dropped a key the caller wrote, `data.input` (`{ aliased: [{ alias, target }], ignored }`) names it and the hint closes with `Validated … as ….` / `Dropped undeclared key ….`; an ignore-list drop is never reported. `client_capability_missing` is the second framework-owned reason: a `ctx.requestInput` return a 2025-era connection cannot serve is refused before any wire traffic as `-32600` carrying that reason and a hint naming the capability.
 
 **Lint rules** (all warnings, surfaced in `devcheck`): `prefer-mcp-error-in-handler`, `prefer-error-factory`, `preserve-cause-on-rethrow`, `no-stringify-upstream-error`, `error-contract-conformance`, `error-contract-prefer-fail`, `error-contract-unthrown` (a declared reason no literal `ctx.fail`/`ctx.recoveryFor` in the handler names, unless marked `thrownBy: 'service'`), `error-contract-recovery-unforwarded` (a `ctx.fail` site carrying neither `ctx.recoveryFor('<reason>')` nor its own `recovery` key, so the declared hint reaches neither client surface). See `api-linter` skill.
 
@@ -566,7 +571,7 @@ Skills live in `framework-skills/<name>/SKILL.md`; the full list is discoverable
 | `bun run test:leak-gate` | The retention gate's own sentinel suite. Each case spawns a full Vitest run, so it is excluded from the `unit` project |
 | `bun run test:coverage` | Root projects with coverage thresholds enforced |
 | `bun run test:integration` | Real server subprocesses over stdio and HTTP |
-| `bun run test:worker` | The framework under real `workerd`, then a standalone Worker bundle through the Wrangler toolchain — real Node on both legs |
+| `bun run test:worker` | The framework under real `workerd`, then a standalone Worker bundle through the Wrangler toolchain — real Node on both legs. The `workerd` leg enforces its own coverage thresholds over the Worker entry and Cloudflare storage providers, reported to `reports/coverage-worker/` |
 | `bun run test:package` | Rebuilds, packs the tarball, and consumes it as an external project would (exports, declarations, both runtimes) |
 | `bun run test:node` | Root projects + integration under real Node via `scripts/with-node.ts`, which bypasses Bun's `node` PATH shim |
 | `bun run test:order` | Root projects on real Node in shuffled file order under a pinned seed — catches inter-file state leakage |

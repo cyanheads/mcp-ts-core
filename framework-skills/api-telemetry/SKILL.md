@@ -4,7 +4,7 @@ description: >
   Catalog of OpenTelemetry instrumentation built into framework `@cyanheads/mcp-ts-core` — spans, metrics, completion logs, env config, runtime caveats, custom instrumentation patterns, and cardinality rules. Use when enabling OTel export, adding custom spans or metrics in services, debugging missing telemetry, looking up attribute names, or deciding what's safe to put on a metric attribute vs. a span.
 metadata:
   author: cyanheads
-  version: "1.14"
+  version: "1.15"
   audience: external
   type: reference
 ---
@@ -73,7 +73,7 @@ A failed flush is logged as a warning and the logger still closes, so the final 
 |:--------|:-----|:-----|
 | `SIGTERM` / `SIGINT` | `shutdown(signal)`, then an explicit exit | `0`, or `1` when the backstop fires |
 | `uncaughtException` / `unhandledRejection` | `shutdown(signal)`, then an explicit exit | `1` |
-| stdin EOF, stdio transport | `shutdown('STDIN_EOF')`, then an explicit exit | `0`, backstop or not |
+| stdin EOF, stdio transport | the SDK transport closes itself, aborting in-flight requests unanswered; then `shutdown('STDIN_EOF')` and an explicit exit | `0`, backstop or not |
 | a second signal during shutdown | none — the handlers are already detached | the OS default (`143` / `130`) |
 | `ServerHandle.shutdown()` called directly | the same drain | none — exit-free by contract |
 
@@ -138,7 +138,7 @@ All custom metrics are namespaced `mcp.*` (or `process.*` / `http.client.*` wher
 | `mcp.tool.param.usage` | counter | `{uses}` | `mcp.tool.name`, `mcp.tool.param` (top-level keys supplied by caller) |
 | `mcp.input.ignored_key` | counter | `{keys}` | `mcp.tool.name`, `mcp.input.ignore_rule` (the ignore-list entry that matched, or `underscore_prefix`) |
 | `mcp.input.aliased` | counter | `{keys}` | `mcp.tool.name`, `mcp.input.target` (the declared key), `mcp.input.alias_kind` (`declared`/`case_style`) |
-| `mcp.input.coerced` | counter | `{calls}` | `mcp.tool.name`, `mcp.input.coercion` (`stringified_array`) |
+| `mcp.input.coerced` | counter | `{calls}` | `mcp.tool.name`, `mcp.input.coercion` (`stringified_array`/`stringified_object`/`integer_as_string`) |
 | `mcp.resource.reads` | counter | `{reads}` | `mcp.resource.name`, `mcp.resource.success` |
 | `mcp.resource.duration` | histogram | `ms` | `mcp.resource.name`, `mcp.resource.success` |
 | `mcp.resource.errors` | counter | `{errors}` | `mcp.resource.name` |
@@ -153,7 +153,7 @@ All custom metrics are namespaced `mcp.*` (or `process.*` / `http.client.*` wher
 
 **Rejections and cancellations.** A call refused before the handler runs — argument validation (`-32602`) or the inline `auth` check (`-32005` missing scope, `-32006` no auth context) — never reaches the measured region, so it is absent from `mcp.tool.calls`, `mcp.tool.duration`, and `mcp.tool.errors` and counts once on `mcp.tool.rejections` instead, labelled with the code and category the caller received. `mcp.tool.outcome` separates a caller hang-up from a failure: `cancelled` for a `RequestCancelled` (`-32011`, always paired with `error_category="client"`), `error` for any other failure, `ok` for a success or an `input_required` round. `mcp.tool.success` and `error_category` keep their meaning, so existing `sum()` queries are unchanged. An error rate that excludes hang-ups filters on `mcp.tool.outcome!="cancelled"`; the failure rate a caller sees is `(errors + rejections) / (calls + rejections)`. Resources and prompts carry neither split.
 
-The three `mcp.input.*` counters are the only trace of the pre-validation step a tool call leaves. Each marks a call the strict `input` schema would otherwise have rejected: a client-added root key dropped, a key rewritten to its canonical spelling, or a stringified array repaired after the parse failed (one increment per repaired call, not per repaired value). Nothing about any of them reaches the response, so a client artifact spreading across a fleet shows up here first. All three are lazy: a server whose callers never trip a stage emits no series at all.
+The three `mcp.input.*` counters are the pre-validation step's metrics. Each marks a call the strict `input` schema would otherwise have rejected: a key rewritten to its canonical spelling, a client-added root key dropped, or a value repaired after the parse failed — a stringified array or object, or an integer sent for a string. `mcp.input.coerced` adds one per repaired call per kind, not per repaired value: a call repairing an array and an object adds one to each `mcp.input.coercion` series, and a call repairing three arrays adds one. A call the step rescues carries nothing about it in its response, so a client artifact spreading across a fleet shows up here first. The counters describe the arguments the handler receives: when a call is retried with the alias stage first (see `add-tool`), the key the retry rewrote counts on `mcp.input.aliased` and never also on `mcp.input.ignored_key`, and a rejected call counts its first attempt, the one its rejection reports. The counters are not the only record: every stage writes a debug log naming the key or the repair kinds, the opt-in failure-payload record ([below](#failed-call-payloads)) keeps a failed call's arguments as the caller sent them, and a rejected call reports its rewrites and underscore-rule drops to the caller as `data.input` (see `api-errors`). All three are lazy: a server whose callers never trip a stage emits no series at all.
 
 **Every label is author- or framework-defined — the caller's own key text is never one.** `mcp.input.ignore_rule` is the ignore-list entry that matched or the fixed `underscore_prefix`, bounded by the list's length plus one. `mcp.input.aliased` is labelled by the canonical `mcp.input.target` (a declared property of the tool) and `mcp.input.alias_kind`, not by the alias the caller sent — the case-style half accepts every `-`/`_`/case permutation of a declared key, so labelling the alias would put a caller-controlled set on a permanent series. That is the unbounded-label leak removed from the rate-limiter counter in 0.9.0: a metric attribute set lives until process restart, so anything the caller names belongs on a span or in a log, never on a counter.
 

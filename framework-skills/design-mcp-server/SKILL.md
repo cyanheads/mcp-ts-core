@@ -4,7 +4,7 @@ description: >
   Design the tool surface, resources, and service layer for a new MCP server. Use when starting a new server, planning a major feature expansion, or when the user describes a domain/API they want to expose via MCP. Produces a design doc at docs/design.md that drives implementation.
 metadata:
   author: cyanheads
-  version: "2.29"
+  version: "2.30"
   audience: external
   type: workflow
 ---
@@ -332,7 +332,7 @@ nctIds: z.union([z.string(), z.array(z.string()).max(5)])
 | Delimiter-joined list where an array is accepted | `"US,JP,KR"` → `["US","JP","KR"]` | Split on the documented separator |
 | Spelled-out vs. abbreviated name | `"Houston, Texas"` → `"Houston, TX"` | Normalize against the bundled name table |
 
-These are **value**-level, and the mappings are domain knowledge — settle them per input in the design doc's param table. Argument **key** names are not: the framework drops client-added root keys and rewrites declared and case-style key aliases before the schema sees the arguments, and repairs a JSON-stringified array against the tool's own schema after a failed parse. Don't re-implement any of that per server — see `add-tool` § *Three things the framework fixes before the schema sees the arguments*.
+These are **value**-level, and the mappings are domain knowledge — settle them per input in the design doc's param table. Argument **key** names are not: the framework rewrites declared and case-style key aliases and drops client-added root keys before the schema sees the arguments, and repairs a JSON-stringified array or object, or an integer sent for a string, against the tool's own schema after a failed parse — so an ID field stays `z.string()`, never a `string | number` union. Don't re-implement any of that per server — see `add-tool` § *Three things the framework fixes before the schema sees the arguments*.
 
 This resolves one submitted value to one canonical value, and does not loosen the strict token match in [MCP-side list filtering](#mcp-side-list-filtering), which scores a query against many candidate names.
 

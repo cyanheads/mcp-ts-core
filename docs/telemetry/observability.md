@@ -133,13 +133,13 @@ All custom metrics are namespaced `mcp.*` (or `process.*`/`http.client.*` where 
 |:-------|:-----|:-----|:-----------|
 | `mcp.input.ignored_key` | counter | `{keys}` | `mcp.tool.name`, `mcp.input.ignore_rule` (the ignore-list entry that matched, or `underscore_prefix`) |
 | `mcp.input.aliased` | counter | `{keys}` | `mcp.tool.name`, `mcp.input.target` (the declared key), `mcp.input.alias_kind` (`declared`/`case_style`) |
-| `mcp.input.coerced` | counter | `{calls}` | `mcp.tool.name`, `mcp.input.coercion` (`stringified_array`) |
+| `mcp.input.coerced` | counter | `{calls}` | `mcp.tool.name`, `mcp.input.coercion` (`stringified_array`/`stringified_object`/`integer_as_string`) |
 | `mcp.pacer.cooldowns` | counter | `{cooldowns}` | `mcp.pacer.name` |
 | `mcp.pacer.queue_depth` | up/down counter | `{requests}` | `mcp.pacer.name` |
 | `mcp.pacer.sheds` | counter | `{requests}` | `mcp.pacer.name` |
 | `mcp.pacer.wait` | histogram | `ms` | `mcp.pacer.name` |
 
-Every value above is author- or framework-defined; the caller's own key text never becomes an attribute (it rides the debug log instead).
+Every value above is author- or framework-defined; the caller's own key text never becomes an attribute (it rides the debug log instead). `mcp.input.coerced` adds one per repaired call per kind, not per repaired value: a call repairing an array and an object adds one to each `mcp.input.coercion` series. The three `mcp.input.*` counters describe the arguments the handler receives — a key the alias-first retry rewrote counts as aliased, never also as ignored — and a rejected call counts its first attempt.
 
 ### Storage, LLM, speech, graph
 
