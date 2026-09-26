@@ -93,7 +93,9 @@ export function encodeCursor(state: PaginationState): string {
  * @param context - Request context used to correlate warning log entries
  * @returns Validated `PaginationState` decoded from the cursor
  * @throws {McpError} With code `InvalidParams` (-32602) if the cursor is malformed,
- *   base64-invalid, not valid JSON, or has an invalid `offset`/`limit` structure
+ *   base64-invalid, not valid JSON, or has an invalid `offset`/`limit` structure.
+ *   `data` carries the rejected `cursor`, `reason: 'invalid_cursor'`, and a
+ *   `recovery.hint`, so a tool surfaces it like any other classified failure.
  * @example
  * const state = decodeCursor(req.params.cursor, ctx);
  * // state.offset and state.limit are safe to use directly
@@ -126,7 +128,13 @@ export function decodeCursor(cursor: string, context: RequestContext): Paginatio
     );
     throw invalidParams(
       'Invalid pagination cursor. The cursor may be expired, corrupted, or from a different request.',
-      { cursor },
+      {
+        cursor,
+        reason: 'invalid_cursor',
+        recovery: {
+          hint: 'Omit `cursor` to start from the first page, or pass the `nextCursor` from the previous response unchanged.',
+        },
+      },
     );
   }
 }

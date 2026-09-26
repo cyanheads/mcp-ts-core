@@ -4,6 +4,9 @@
  * @module tests/utils/pagination/index.test
  */
 import { afterEach, beforeEach, describe, expect, it, type MockInstance, vi } from 'vitest';
+import { z } from 'zod';
+import { tool } from '@/mcp-server/tools/utils/toolDefinition.js';
+import { runToolContract } from '@/testing/index.js';
 import { logger } from '@/utils/internal/logger.js';
 import { type RequestContext, requestContextService } from '@/utils/internal/requestContext.js';
 import { JsonRpcErrorCode, McpError } from '../../../../src/types-global/errors.js';
@@ -107,6 +110,91 @@ describe('Pagination Utilities', () => {
           message: expect.stringContaining('Invalid pagination cursor'),
         }),
       );
+    });
+
+    // #504 — the rejection carries a reason and recovery hint like every other
+    // classified failure, so it renders the `Recovery:` line and reason trailer.
+    it.each([
+      ['non-base64 text', 'not-a-cursor!!!'],
+      ['base64 that is not JSON', Buffer.from('not json', 'utf-8').toString('base64url')],
+      ['a negative offset', Buffer.from('{"offset":-1,"limit":5}').toString('base64url')],
+      ['a zero limit', Buffer.from('{"offset":0,"limit":0}').toString('base64url')],
+      ['JSON missing offset and limit', Buffer.from('{"page":2}').toString('base64url')],
+      ['JSON null', Buffer.from('null').toString('base64url')],
+    ])(
+      'tags a cursor built from %s with reason invalid_cursor and a recovery hint',
+      (_label, cursor) => {
+        let caught: unknown;
+        try {
+          decodeCursor(cursor, context);
+        } catch (error) {
+          caught = error;
+        }
+
+        expect(caught).toBeInstanceOf(McpError);
+        const mcpError = caught as McpError;
+        expect(mcpError.code).toBe(JsonRpcErrorCode.InvalidParams);
+        expect(mcpError.message).toBe(
+          'Invalid pagination cursor. The cursor may be expired, corrupted, or from a different request.',
+        );
+        expect(mcpError.data).toEqual({
+          cursor,
+          reason: 'invalid_cursor',
+          recovery: {
+            hint: 'Omit `cursor` to start from the first page, or pass the `nextCursor` from the previous response unchanged.',
+          },
+        });
+      },
+    );
+
+    it('decodes a cursor produced by encodeCursor unchanged', () => {
+      const state = { offset: 40, limit: 20, filter: 'x' };
+      expect(decodeCursor(encodeCursor(state), context)).toEqual(state);
+    });
+  });
+
+  describe('invalid cursor on a tool surface (#504)', () => {
+    const pagedTool = tool('paged_items', {
+      description: 'Lists items a page at a time.',
+      input: z.object({ cursor: z.string().optional().describe('Opaque page cursor') }),
+      output: z.object({
+        items: z.array(z.string().describe('Item')).describe('Page of items'),
+        nextCursor: z.string().optional().describe('Cursor for the next page'),
+      }),
+      handler: (input, ctx) => {
+        const page = paginateArray(['a', 'b', 'c'], input.cursor, 2, 10, ctx);
+        return { items: page.items, ...(page.nextCursor && { nextCursor: page.nextCursor }) };
+      },
+    });
+
+    it('renders the Recovery line and reason trailer in content[] and the reason on structuredContent', async () => {
+      const result = await runToolContract(pagedTool, { cursor: 'not-a-cursor' });
+
+      expect(result.isError).toBe(true);
+      const error = (result.structuredContent as { error: McpError }).error;
+      expect(error.code).toBe(JsonRpcErrorCode.InvalidParams);
+      expect(error.data).toMatchObject({
+        cursor: 'not-a-cursor',
+        reason: 'invalid_cursor',
+        recovery: { hint: expect.stringContaining('Omit `cursor`') },
+      });
+      const block = result.content?.[0];
+      expect(block?.type).toBe('text');
+      const text = block?.type === 'text' ? block.text : '';
+      expect(text).toContain('Error: Invalid pagination cursor.');
+      expect(text).toContain(
+        'Recovery: Omit `cursor` to start from the first page, or pass the `nextCursor` from the previous response unchanged.',
+      );
+      expect(text).toContain('(reason invalid_cursor)');
+    });
+
+    it('pages normally with a cursor the tool itself issued', async () => {
+      const first = await runToolContract(pagedTool, {});
+      const nextCursor = (first.structuredContent as { nextCursor?: string }).nextCursor;
+      expect(nextCursor).toBeTypeOf('string');
+
+      const second = await runToolContract(pagedTool, { cursor: nextCursor });
+      expect(second.structuredContent).toEqual({ items: ['c'] });
     });
   });
 
