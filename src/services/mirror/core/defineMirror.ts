@@ -82,6 +82,7 @@ function ctxFrom(meta?: Readonly<Record<string, unknown>>) {
  *   name: 'arxiv-papers',
  *   store: sqliteMirrorStore({
  *     path: config.mirrorPath,
+ *     table: 'papers',
  *     primaryKey: 'id',
  *     columns: { id: 'TEXT', title: 'TEXT', abstract: 'TEXT', updated: 'TEXT' },
  *     fts: ['title', 'abstract'],

@@ -4,7 +4,7 @@ description: >
   Stand up a persistent, self-refreshing local mirror of a bulk upstream dataset with the MirrorService (@cyanheads/mcp-ts-core/mirror). Use when a server wraps a large or slow API and should query a synced local index (embedded SQLite + FTS5) instead of paginating the live API per request.
 metadata:
   author: cyanheads
-  version: "1.2"
+  version: "1.3"
   audience: external
   type: reference
 ---
@@ -24,6 +24,7 @@ const papers = defineMirror({
   name: 'arxiv-papers',
   store: sqliteMirrorStore({
     path: config.mirrorPath,
+    table: 'papers',                                 // primary table; FTS index is `papers_fts`
     primaryKey: 'id',
     columns: { id: 'TEXT', title: 'TEXT', authors: 'TEXT', abstract: 'TEXT', updated: 'TEXT' },
     fts: ['title', 'authors', 'abstract'],          // opt-in FTS5 external-content index
