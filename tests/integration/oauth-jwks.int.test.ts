@@ -60,7 +60,10 @@ describe('real OAuth/JWKS integration', () => {
       fixture.createSigningKey('RS256', 'rsa-timeout'),
     ]);
     fixture.setJwks([rsaPrimary, ecPrimary]);
-    fixture.setDelay(50);
+    // The delay holds the cold-start fetch open so the concurrent requests
+    // overlap it; the timeout leaves 1.35 s over the delay for a loaded machine,
+    // and is also how long the stalled-fetch case waits.
+    fixture.setDelay(150);
 
     handle = await startServer('http', {
       MCP_AUTH_MODE: 'oauth',
@@ -70,7 +73,7 @@ describe('real OAuth/JWKS integration', () => {
       OAUTH_AUDIENCE: 'mcp-audience',
       OAUTH_ISSUER_URL: fixture.issuer,
       OAUTH_JWKS_COOLDOWN_MS: '0',
-      OAUTH_JWKS_TIMEOUT_MS: '150',
+      OAUTH_JWKS_TIMEOUT_MS: '1500',
     });
   });
 

@@ -8,65 +8,93 @@
  * `McpServer` and transport now live for the session and are closed by
  * `SessionStore.terminate`. The abort traffic still has to leave the server
  * usable, which is what these cases pin.
+ *
+ * Every request goes out over `node:http` on a socket of its own rather than
+ * global `fetch`: under real Node, undici can throw an uncatchable
+ * `setTypeOfService EINVAL` when a write lands on a socket torn down by an
+ * earlier abort — see `tests/helpers/node-http.ts`.
  * @module tests/integration/http-sse-abort
  */
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
 import { initializeBody, MCP_HEADERS } from '../helpers/http-helpers.js';
+import { exchange, openRequest } from '../helpers/node-http.js';
 import { type ServerHandle, startServer } from '../helpers/server-process.js';
 
 const PROTOCOL_VERSION = '2025-06-18';
 
 /** Initialize a fresh stateful session and return its session id. */
 async function newSession(port: number): Promise<string> {
-  const res = await fetch(`http://localhost:${port}/mcp`, {
+  const init = await exchange(port, {
     method: 'POST',
+    path: '/mcp',
     headers: MCP_HEADERS,
     body: initializeBody(),
   });
-  if (!res.ok) throw new Error(`init failed: ${res.status} ${await res.text()}`);
-  const sid = res.headers.get('mcp-session-id');
-  await res.body?.cancel();
-  if (!sid) throw new Error('no mcp-session-id on initialize response');
+  if (init.status !== 200) throw new Error(`init failed: ${init.status} ${init.body}`);
+  const sid = init.headers['mcp-session-id'];
+  if (typeof sid !== 'string') throw new Error('no mcp-session-id on initialize response');
 
   // Required notifications/initialized handshake.
-  const notifyRes = await fetch(`http://localhost:${port}/mcp`, {
+  await exchange(port, {
     method: 'POST',
+    path: '/mcp',
     headers: { ...MCP_HEADERS, 'Mcp-Session-Id': sid, 'MCP-Protocol-Version': PROTOCOL_VERSION },
     body: JSON.stringify({ jsonrpc: '2.0', method: 'notifications/initialized' }),
   });
-  await notifyRes.body?.cancel();
   return sid;
 }
 
+/** Terminates a session with DELETE and returns the status. */
+async function deleteSession(port: number, sessionId: string): Promise<number> {
+  const response = await exchange(port, {
+    method: 'DELETE',
+    path: '/mcp',
+    headers: { 'Mcp-Session-Id': sessionId, 'MCP-Protocol-Version': PROTOCOL_VERSION },
+  });
+  return response.status;
+}
+
+/** GET /healthz. */
+const health = (port: number) => exchange(port, { method: 'GET', path: '/healthz' });
+
 /** Open an SSE GET, wait until response headers, then abort the request. */
-async function openAndAbortSse(
+function openAndAbortSse(
   port: number,
   sessionId: string,
   holdMs = 50,
 ): Promise<{ status: number; contentType: string | null }> {
-  const ctrl = new AbortController();
-  const fetchPromise = fetch(`http://localhost:${port}/mcp`, {
-    method: 'GET',
-    headers: {
-      Accept: 'text/event-stream',
-      'Mcp-Session-Id': sessionId,
-      'MCP-Protocol-Version': PROTOCOL_VERSION,
-    },
-    signal: ctrl.signal,
+  return new Promise((resolve, reject) => {
+    openRequest(
+      port,
+      {
+        method: 'GET',
+        path: '/mcp',
+        headers: {
+          Accept: 'text/event-stream',
+          'Mcp-Session-Id': sessionId,
+          'MCP-Protocol-Version': PROTOCOL_VERSION,
+        },
+      },
+      (response, request) => {
+        const result = {
+          status: response.statusCode ?? 0,
+          contentType: response.headers['content-type'] ?? null,
+        };
+        // The abort below surfaces on the response as an expected `aborted` error.
+        response.on('error', () => {});
+        response.resume();
+        // Hold the stream briefly so the server actually sets up the SSE
+        // handler, then ungracefully abort — matching real-client disconnect
+        // behavior.
+        setTimeout(() => {
+          request.destroy();
+          resolve(result);
+        }, holdMs);
+      },
+      reject,
+    );
   });
-
-  const res = await fetchPromise;
-  const result = { status: res.status, contentType: res.headers.get('content-type') };
-
-  // Hold the stream briefly so the server actually sets up the SSE handler,
-  // then ungracefully abort — matching real-client disconnect behavior.
-  await new Promise((r) => setTimeout(r, holdMs));
-  ctrl.abort();
-
-  // Drain the body to release the underlying response (if not already aborted).
-  await res.body?.cancel().catch(() => {});
-  return result;
 }
 
 describe('HTTP SSE abort cleanup (issue #50)', () => {
@@ -101,8 +129,7 @@ describe('HTTP SSE abort cleanup (issue #50)', () => {
     expect(abortResult.status).toBe(200);
     expect(abortResult.contentType).toContain('text/event-stream');
 
-    const health = await fetch(`http://localhost:${port}/healthz`);
-    expect(health.status).toBe(200);
+    expect((await health(port)).status).toBe(200);
   });
 
   it('handles 50 SSE GET-abort cycles without breaking the server', async () => {
@@ -116,9 +143,9 @@ describe('HTTP SSE abort cleanup (issue #50)', () => {
       expect(result.contentType).toContain('text/event-stream');
     }
 
-    const health = await fetch(`http://localhost:${port}/healthz`);
-    expect(health.status).toBe(200);
-    expect(((await health.json()) as { status: string }).status).toBe('ok');
+    const healthz = await health(port);
+    expect(healthz.status).toBe(200);
+    expect((JSON.parse(healthz.body) as { status: string }).status).toBe('ok');
   });
 
   it('logs no close failures or unhandled rejections during abort cycles', async () => {
@@ -141,32 +168,24 @@ describe('HTTP SSE abort cleanup (issue #50)', () => {
     expect(sid).toBeTruthy();
 
     // DELETE path still functions after all the abort traffic.
-    const del = await fetch(`http://localhost:${port}/mcp`, {
-      method: 'DELETE',
-      headers: { 'Mcp-Session-Id': sid, 'MCP-Protocol-Version': PROTOCOL_VERSION },
-    });
-    expect(del.status).toBe(200);
-    await del.body?.cancel().catch(() => {});
+    expect(await deleteSession(port, sid)).toBe(200);
   });
 
   it('aborting a GET against an unknown session fails-closed', async () => {
     // Stateful + unknown session id: framework returns 404 before the transport
     // sees the GET (sessionStore.isValidForIdentity check). Server stays up.
-    const ctrl = new AbortController();
-    const res = await fetch(`http://localhost:${port}/mcp`, {
+    const res = await exchange(port, {
       method: 'GET',
+      path: '/mcp',
       headers: {
         Accept: 'text/event-stream',
         'Mcp-Session-Id': `not-a-real-session-${Date.now()}`,
         'MCP-Protocol-Version': PROTOCOL_VERSION,
       },
-      signal: ctrl.signal,
     });
     expect(res.status).toBe(404);
-    await res.body?.cancel().catch(() => {});
 
-    const health = await fetch(`http://localhost:${port}/healthz`);
-    expect(health.status).toBe(200);
+    expect((await health(port)).status).toBe(200);
   });
 
   it('concurrent SSE aborts on different sessions do not cross-contaminate', async () => {
@@ -180,17 +199,7 @@ describe('HTTP SSE abort cleanup (issue #50)', () => {
     }
 
     // All 10 sessions can still be cleanly DELETEd post-abort.
-    const deletes = await Promise.all(
-      sessions.map((sid) =>
-        fetch(`http://localhost:${port}/mcp`, {
-          method: 'DELETE',
-          headers: { 'Mcp-Session-Id': sid, 'MCP-Protocol-Version': PROTOCOL_VERSION },
-        }),
-      ),
-    );
-    for (const d of deletes) {
-      expect(d.status).toBe(200);
-      await d.body?.cancel().catch(() => {});
-    }
+    const deletes = await Promise.all(sessions.map((sid) => deleteSession(port, sid)));
+    expect(deletes).toEqual(sessions.map(() => 200));
   });
 });

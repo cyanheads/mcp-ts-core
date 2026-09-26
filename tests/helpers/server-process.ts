@@ -14,6 +14,7 @@ import { existsSync, readdirSync, statSync } from 'node:fs';
 import { createServer } from 'node:net';
 import { resolve } from 'node:path';
 import { BUILD_INPUT_PATHS } from '../../scripts/build-inputs.js';
+import { exchange } from './node-http.js';
 
 export interface ServerHandle {
   kill: () => Promise<void>;
@@ -146,11 +147,13 @@ export async function startServerFromEntrypoint(
 
 /**
  * Polls the server's /healthz endpoint until it responds 200 or the timeout expires.
- * Much more reliable than scraping log output for the port number.
+ * Much more reliable than scraping log output for the port number. Polls over
+ * `node:http`, not global `fetch`: a poll landing on a booting child is exactly
+ * the socket undici's uncatchable `setTypeOfService EINVAL` fires on under Node
+ * (see `node-http.ts`).
  */
 async function waitForHealthy(port: number, proc: ChildProcess, timeoutMs = 15_000): Promise<void> {
   const deadline = Date.now() + timeoutMs;
-  const url = `http://127.0.0.1:${port}/healthz`;
 
   // Capture output for error diagnostics
   let output = '';
@@ -172,7 +175,10 @@ async function waitForHealthy(port: number, proc: ChildProcess, timeoutMs = 15_0
   });
 
   while (Date.now() < deadline) {
-    const res = await Promise.race([fetch(url).catch(() => null), exitPromise]);
+    const res = await Promise.race([
+      exchange(port, { method: 'GET', path: '/healthz' }).catch(() => null),
+      exitPromise,
+    ]);
     if (res && res.status === 200) return;
     await new Promise((r) => setTimeout(r, 100));
   }
