@@ -34,7 +34,8 @@ import { logStartupBanner } from '@/utils/internal/startupBanner.js';
  * @param serverFactory - Produces the `McpServer` pinned to the connection.
  * @param parentContext - The logging and tracing context from the caller.
  * @returns The connection handle, whose `close()` tears down the pinned
- *   instance and the underlying transport.
+ *   instance and the underlying transport — a no-op once stdin EOF has
+ *   already closed them.
  * @throws {Error} If the connection fails during setup.
  */
 export function startStdioTransport(
@@ -86,10 +87,13 @@ export interface ObserveStdinEofOptions {
  * Reports the client closing the stdin pipe — the only observable signal that a
  * stdio host has disconnected.
  *
- * `StdioServerTransport` registers `data` and `error` on stdin and nothing else,
- * and `serveStdio` overwrites the transport's `onclose`, so the disconnect never
- * reaches the caller through the SDK handle. Watching the stream directly is
- * what makes EOF reachable by the shutdown path (#322).
+ * `StdioServerTransport` closes itself on the same `end` / `close`, and
+ * `serveStdio` tears the pinned instance down through the transport's `onclose`
+ * — aborting any request still in flight, which is never answered. That covers
+ * the connection only: the handle exposes nothing but `close()`, so the
+ * disconnect never reaches the caller through it. Watching the stream directly
+ * is what makes EOF reachable by the shutdown path (#322), whose transport stop
+ * then finds the connection already closed.
  *
  * Both `end` and `close` are bound because a torn-down pipe can emit either
  * first; `onEof` still runs at most once, and the listeners come off before it

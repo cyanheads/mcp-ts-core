@@ -201,7 +201,7 @@
     "@cloudflare/workers-types": "5.20260922.1",
     "@duckdb/node-api": "^1.5.5-r.5",
     "@hono/otel": "^1.1.2",
-    "@modelcontextprotocol/client": "^2.0.0",
+    "@modelcontextprotocol/client": "^2.1.0",
     "@opentelemetry/api-logs": "^0.222.0",
     "@opentelemetry/exporter-logs-otlp-http": "^0.222.0",
     "@opentelemetry/exporter-metrics-otlp-http": "^0.222.0",
@@ -290,7 +290,7 @@
   },
   "dependencies": {
     "@hono/node-server": "^2.1.1",
-    "@modelcontextprotocol/server": "^2.0.0",
+    "@modelcontextprotocol/server": "^2.1.0",
     "@opentelemetry/api": "^1.9.1",
     "hono": "^4.13.8",
     "jose": "^6.2.12",

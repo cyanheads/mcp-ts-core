@@ -19,6 +19,7 @@ import {
   expectDefaultServerProtocolErrors,
   expectDefaultServerSubscriptionSurface,
 } from '../helpers/default-server-mcp.js';
+import { parseLogLines } from '../helpers/stdio-session.js';
 
 const DIST_INDEX = resolve(process.cwd(), 'dist/index.js');
 
@@ -198,6 +199,106 @@ describe('Stdio transport stdin EOF', () => {
       expect(run.stderr).toContain('Graceful shutdown completed successfully.');
     } finally {
       await rm(dir, { force: true, recursive: true });
+    }
+  });
+});
+
+/**
+ * Stdin EOF while a request is still running. The client has hung up, so the
+ * request is aborted rather than answered, and the transport closing itself on
+ * EOF must not start a second shutdown or report the already-closed connection
+ * as a failure.
+ */
+describe('Stdio transport stdin EOF with a request in flight', () => {
+  const INFLIGHT_ENTRY = resolve(process.cwd(), 'tests/fixtures/stdio-inflight-server.js');
+
+  it('aborts the handler, writes no response for it, and shuts down exactly once', async () => {
+    const child = spawn('node', [INFLIGHT_ENTRY], {
+      stdio: ['pipe', 'pipe', 'pipe'],
+      env: {
+        ...process.env,
+        MCP_LOG_LEVEL: 'debug',
+        MCP_TRANSPORT_TYPE: 'stdio',
+        NODE_ENV: 'development',
+      },
+    });
+    child.stdout.setEncoding('utf8');
+    child.stderr.setEncoding('utf8');
+    let stdout = '';
+    let stderr = '';
+    child.stdout.on('data', (chunk: string) => {
+      stdout += chunk;
+    });
+    child.stderr.on('data', (chunk: string) => {
+      stderr += chunk;
+    });
+    const exited = new Promise<{ code: number | null; signal: NodeJS.Signals | null }>((settle) => {
+      child.once('exit', (code, signal) => settle({ code, signal }));
+    });
+
+    /** Resolves once `seen()` holds, polling the collected output. */
+    const waitFor = async (what: string, seen: () => boolean): Promise<void> => {
+      const deadline = Date.now() + READY_TIMEOUT_MS;
+      while (!seen()) {
+        if (Date.now() > deadline || child.exitCode !== null) {
+          throw new Error(`never saw ${what}:\n${stderr}`);
+        }
+        await new Promise((tick) => setTimeout(tick, 20));
+      }
+    };
+    const send = (message: Record<string, unknown>): void => {
+      child.stdin.write(`${JSON.stringify({ jsonrpc: '2.0', ...message })}\n`);
+    };
+    const stdoutMessages = (): Array<{ id?: unknown }> =>
+      stdout
+        .split('\n')
+        .filter(Boolean)
+        .map((line) => JSON.parse(line) as { id?: unknown });
+
+    try {
+      await waitFor('the ready line', () => stderr.includes(READY_LINE));
+      send({
+        id: 1,
+        method: 'initialize',
+        params: {
+          protocolVersion: '2025-06-18',
+          capabilities: {},
+          clientInfo: { name: 'stdio-inflight', version: '1.0.0' },
+        },
+      });
+      await waitFor('the initialize result', () => stdoutMessages().some((m) => m.id === 1));
+      send({ method: 'notifications/initialized' });
+      send({ id: 2, method: 'tools/call', params: { name: 'wait_for_abort', arguments: {} } });
+      await waitFor('the handler start', () => stderr.includes('wait_for_abort started'));
+
+      child.stdin.end();
+      const exit = await Promise.race([
+        exited,
+        new Promise<null>((settle) => setTimeout(() => settle(null), EXIT_TIMEOUT_MS)),
+      ]);
+
+      const records = parseLogLines(stderr);
+      const count = (msg: string): number => records.filter((record) => record.msg === msg).length;
+
+      expect(exit).toEqual({ code: 0, signal: null });
+      // The handler saw the abort; the wire carried no answer to the abandoned call.
+      expect(records).toContainEqual(
+        expect.objectContaining({ msg: 'wait_for_abort observed abort', aborted: true }),
+      );
+      const responseIds = stdoutMessages()
+        .filter((message) => 'id' in message)
+        .map((message) => message.id);
+      expect(responseIds).toEqual([1]);
+      // One shutdown, one transport stop, and nothing reported as a failure.
+      expect(count('Received STDIN_EOF. Initiating graceful shutdown...')).toBe(1);
+      expect(count('Stdio transport stopped successfully.')).toBe(1);
+      expect(count('Graceful shutdown completed successfully.')).toBe(1);
+      expect(records.filter((record) => Number(record.level) >= 40)).toEqual([]);
+      expect(
+        records.filter((record) => String(record.msg).startsWith('Stdio transport reported')),
+      ).toEqual([]);
+    } finally {
+      if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL');
     }
   });
 });
