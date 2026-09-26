@@ -92,10 +92,9 @@ export class YamlParser {
     stringToParse = stringToParse.trim();
 
     if (!stringToParse) {
-      throw validationError(
-        'YAML string is empty after removing <think> block and trimming.',
-        context,
-      );
+      throw validationError('YAML string is empty after removing <think> block and trimming.', {
+        reason: 'parser_input_empty',
+      });
     }
 
     try {

@@ -64,5 +64,7 @@ describe('createCanvasService', () => {
     expect((caught as McpError).code).toBe(JsonRpcErrorCode.ConfigurationError);
     expect((caught as McpError).message).toMatch(/DuckDB canvas requires Node\.js or Bun/);
     expect((caught as McpError).message).toMatch(/CANVAS_PROVIDER_TYPE=none/);
+    // #548 — the startup context is log metadata, not error data.
+    expect((caught as McpError).data).toBeUndefined();
   });
 });

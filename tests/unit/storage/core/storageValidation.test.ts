@@ -24,6 +24,57 @@ describe('Storage Validation', () => {
     timestamp: new Date().toISOString(),
   };
 
+  // #548 — `data` reaches the client verbatim, so a validation failure carries
+  // only the offending field, never the caller's context.
+  describe('error data carries only the offending field', () => {
+    const handlerShaped = {
+      ...context,
+      operation: 'HandleToolRequest',
+      tenantId: 'tenant-1',
+      sessionId: 'session-1',
+      inputs: { responses: { pass: { content: { passphrase: 'hunter2' } } } },
+    } as RequestContext;
+
+    it.each<[string, () => void, Record<string, unknown> | undefined]>([
+      ['validateKey', () => validateKey('a:b', handlerShaped), { key: 'a:b' }],
+      ['validatePrefix', () => validatePrefix('a..b', handlerShaped), { prefix: 'a..b' }],
+      [
+        'validateStorageOptions',
+        () => validateStorageOptions({ ttl: -1 }, handlerShaped),
+        { ttl: -1 },
+      ],
+      [
+        'validateListOptions limit',
+        () => validateListOptions({ limit: 0 }, handlerShaped),
+        { limit: 0 },
+      ],
+      [
+        'validateListOptions cursor',
+        () => validateListOptions({ cursor: 'bad cursor!' }, handlerShaped),
+        undefined,
+      ],
+      // The tenant comes from the request context (a token's `tid` claim), so
+      // it stays in the log, not the client-visible data.
+      ['validateTenantId', () => validateTenantId('bad/tenant', handlerShaped), undefined],
+      [
+        'validateTenantId length',
+        () => validateTenantId('a'.repeat(129), handlerShaped),
+        undefined,
+      ],
+      ['decodeCursor', () => decodeCursor('no-signature', 'tenant-1', handlerShaped), undefined],
+    ])('%s', (_label, run, expected) => {
+      let thrown: unknown;
+      try {
+        run();
+      } catch (error) {
+        thrown = error;
+      }
+
+      expect(thrown).toBeInstanceOf(McpError);
+      expect((thrown as McpError).data).toEqual(expected);
+    });
+  });
+
   describe('validateTenantId', () => {
     it('should accept valid tenant IDs', () => {
       expect(() => validateTenantId('tenant-123', context)).not.toThrow();
@@ -392,7 +443,8 @@ describe('Storage Validation', () => {
         code: JsonRpcErrorCode.InvalidParams,
         message: expect.stringContaining('Failed to decode cursor'),
       });
-      expect((thrown as McpError).data).toEqual({ ...context, operation: 'decodeCursor' });
+      // Nor the caller's context (#548): the log keeps it, the wire does not.
+      expect((thrown as McpError).data).toBeUndefined();
     });
   });
 });

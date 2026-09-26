@@ -46,6 +46,10 @@ describe('MCP OpenTelemetry Attribute Keys', () => {
       expect(attributes.ATTR_MCP_TOOL_ERROR_CATEGORY).toBe('mcp.tool.error_category');
     });
 
+    test('should export MCP tool outcome attribute', () => {
+      expect(attributes.ATTR_MCP_TOOL_OUTCOME).toBe('mcp.tool.outcome');
+    });
+
     test('should export MCP tool partial success attribute', () => {
       expect(attributes.ATTR_MCP_TOOL_PARTIAL_SUCCESS).toBe('mcp.tool.partial_success');
     });
@@ -80,6 +84,16 @@ describe('MCP OpenTelemetry Attribute Keys', () => {
 
     test('should export MCP client ID attribute', () => {
       expect(attributes.ATTR_MCP_CLIENT_ID).toBe('mcp.client.id');
+    });
+  });
+
+  describe('MCP Error Classification Attributes', () => {
+    test('should export the classified error code attribute', () => {
+      expect(attributes.ATTR_MCP_ERROR_CLASSIFIED_CODE).toBe('mcp.error.classified_code');
+    });
+
+    test('should export the classified error category attribute', () => {
+      expect(attributes.ATTR_MCP_ERROR_CATEGORY).toBe('mcp.error.category');
     });
   });
 

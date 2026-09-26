@@ -860,9 +860,23 @@ function createContextLogger(
   // client that asked for it — not just the process logger. Fire-and-forget:
   // the client may have set a higher level (the SDK filters), may not have
   // upgraded to SSE, or may already be gone.
-  const toWire = (level: LoggingLevel, msg: string, data?: Record<string, unknown>): void => {
+  //
+  // `message` and `error` are framework-owned wire keys, written after the
+  // call-site data so a caller's own `message` (an error-shaped object spread
+  // into the log data) cannot replace the log line. Assigning over the spread
+  // keeps `message` first, so a payload without a collision serializes exactly
+  // as `{ message, ...data }`. The process logger still gets the caller's field.
+  const toWire = (
+    level: LoggingLevel,
+    msg: string,
+    data?: Record<string, unknown>,
+    error?: Error,
+  ): void => {
     if (!wireLog) return;
-    void wireLog(level, data ? { message: msg, ...data } : { message: msg }).catch(() => {
+    const payload: Record<string, unknown> = { message: msg, ...data };
+    payload.message = msg;
+    if (error) payload.error = error.message;
+    void wireLog(level, payload).catch(() => {
       // A log that cannot be delivered must never fail the request.
     });
   };
@@ -890,7 +904,7 @@ function createContextLogger(
       } else {
         appLogger.error(msg, enriched(data));
       }
-      toWire('error', msg, error ? { ...data, error: error.message } : data);
+      toWire('error', msg, data, error);
     },
   };
 }

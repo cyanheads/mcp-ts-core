@@ -218,6 +218,46 @@ describe('config parsing', () => {
     consoleSpy.mockRestore();
   });
 
+  describe('failed-call payload logging (#291)', () => {
+    it('is off with a 16 KiB cap when unset or blank', () => {
+      const unset = parseConfig({
+        LOG_TOOL_FAILURE_PAYLOADS: undefined,
+        LOG_TOOL_FAILURE_PAYLOAD_MAX_BYTES: undefined,
+      });
+      const blank = parseConfig({
+        LOG_TOOL_FAILURE_PAYLOADS: '',
+        LOG_TOOL_FAILURE_PAYLOAD_MAX_BYTES: '',
+      });
+
+      for (const parsed of [unset, blank]) {
+        expect(parsed.logToolFailurePayloads).toBe(false);
+        expect(parsed.logToolFailurePayloadMaxBytes).toBe(16_384);
+      }
+    });
+
+    it('reads the flag as an env boolean and the cap as an integer', () => {
+      const parsed = parseConfig({
+        LOG_TOOL_FAILURE_PAYLOADS: 'true',
+        LOG_TOOL_FAILURE_PAYLOAD_MAX_BYTES: '4096',
+      });
+
+      expect(parsed.logToolFailurePayloads).toBe(true);
+      expect(parsed.logToolFailurePayloadMaxBytes).toBe(4096);
+      expect(parseConfig({ LOG_TOOL_FAILURE_PAYLOADS: 'false' }).logToolFailurePayloads).toBe(
+        false,
+      );
+    });
+
+    it.each(['0', '-1', '1.5', 'lots'])(
+      'rejects LOG_TOOL_FAILURE_PAYLOAD_MAX_BYTES=%s',
+      (value) => {
+        const consoleSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+        expect(() => parseConfig({ LOG_TOOL_FAILURE_PAYLOAD_MAX_BYTES: value })).toThrow(McpError);
+        consoleSpy.mockRestore();
+      },
+    );
+  });
+
   it('parses MCP_PUBLIC_URL when set, defaults to undefined', () => {
     expect(parseConfig().mcpPublicUrl).toBeUndefined();
 
@@ -435,9 +475,31 @@ describe('config parsing', () => {
     });
 
     it('resolves no endpoint when none is set', () => {
-      const { tracesEndpoint, metricsEndpoint } = otlp({});
+      const { tracesEndpoint, metricsEndpoint, logsEndpoint } = otlp({});
       expect(tracesEndpoint).toBeUndefined();
       expect(metricsEndpoint).toBeUndefined();
+      expect(logsEndpoint).toBeUndefined();
+    });
+
+    it('reads the logs endpoint from its signal variable as-is', () => {
+      const { logsEndpoint } = otlp({
+        OTEL_EXPORTER_OTLP_LOGS_ENDPOINT: 'https://logs.example.com/ingest',
+      });
+      expect(logsEndpoint).toBe('https://logs.example.com/ingest');
+    });
+
+    it('never derives a logs endpoint from the base endpoint', () => {
+      const { logsEndpoint, tracesEndpoint } = otlp({
+        OTEL_EXPORTER_OTLP_ENDPOINT: 'http://collector:4318',
+      });
+      expect(tracesEndpoint).toBe('http://collector:4318/v1/traces');
+      expect(logsEndpoint).toBeUndefined();
+    });
+
+    it('rejects a logs endpoint that is not a URL', () => {
+      const consoleSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+      expect(() => otlp({ OTEL_EXPORTER_OTLP_LOGS_ENDPOINT: 'not a url' })).toThrow(McpError);
+      consoleSpy.mockRestore();
     });
   });
 

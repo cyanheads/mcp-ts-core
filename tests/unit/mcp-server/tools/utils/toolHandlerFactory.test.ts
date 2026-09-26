@@ -98,6 +98,7 @@ vi.mock('@/utils/internal/performance.js', () => ({
       context: unknown,
     ) => fn(context, () => {}),
   ),
+  recordToolRejection: vi.fn(),
 }));
 
 // ---------------------------------------------------------------------------
@@ -116,6 +117,7 @@ import {
   type NotifierSources,
 } from '@/mcp-server/tools/utils/toolHandlerFactory.js';
 import { ErrorHandler } from '@/utils/internal/error-handler/errorHandler.js';
+import { fetchWithTimeout } from '@/utils/network/fetchWithTimeout.js';
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -1617,6 +1619,66 @@ describe('createToolHandler', () => {
         expect(result).not.toHaveProperty('isError');
       });
     });
+
+    /**
+     * A handler bounding its upstream call with its own deadline composes the
+     * request signal with a timeout. The two ways that composed signal fires
+     * must reach the caller as different codes: the handler's deadline is a
+     * Timeout, the caller withdrawing the request is a cancellation.
+     */
+    describe('fetchWithTimeout under a request signal composed with a deadline', () => {
+      async function runDeadlineFetch(
+        name: string,
+        requestSignal: AbortSignal,
+        deadlineMs: number,
+      ) {
+        const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(
+          (_url, init) =>
+            new Promise((_resolve, reject) => {
+              const signal = init?.signal;
+              signal?.addEventListener('abort', () => reject(signal.reason));
+            }),
+        );
+        const def = tool(name, {
+          description: 'Fetches upstream under its own deadline.',
+          input: z.object({}),
+          output: z.object({ ok: z.boolean().describe('Never returned.') }),
+          handler: async (_input, ctx) => {
+            await fetchWithTimeout('https://upstream.example.com/data', 30_000, ctx, {
+              signal: AbortSignal.any([ctx.signal, AbortSignal.timeout(deadlineMs)]),
+            });
+            return { ok: true };
+          },
+        });
+        const handler = createToolHandler(def as AnyToolDefinition, services, notifiers);
+        try {
+          return await handler({}, makeServerContext({ signal: requestSignal }));
+        } finally {
+          fetchSpy.mockRestore();
+        }
+      }
+
+      it("reports the handler's own deadline as Timeout while the request is live", async () => {
+        const request = new AbortController();
+
+        const result = await runDeadlineFetch('deadline_fetch_tool', request.signal, 10);
+
+        expect(request.signal.aborted).toBe(false);
+        expect(envelope(result).code).toBe(JsonRpcErrorCode.Timeout);
+        expect(firstBlock(result)).toMatchObject({
+          text: expect.stringContaining("timed out on the caller's signal"),
+        });
+      });
+
+      it('reports the request being cancelled as RequestCancelled', async () => {
+        const request = new AbortController();
+        setTimeout(() => request.abort('client disconnected'), 5);
+
+        const result = await runDeadlineFetch('cancelled_fetch_tool', request.signal, 30_000);
+
+        expect(envelope(result).code).toBe(JsonRpcErrorCode.RequestCancelled);
+      });
+    });
   });
 
   // -----------------------------------------------------------------------
@@ -2271,6 +2333,33 @@ describe('createToolHandler', () => {
       const { log } = await logOnce((ctx) => ctx.log.error('failed', new Error('boom'), { k: 1 }));
 
       expect(log).toHaveBeenCalledWith('error', { message: 'failed', k: 1, error: 'boom' });
+    });
+
+    // #502 — a caller's `message` key must not replace the framework-owned
+    // wire keys.
+    it('keeps the log line when data carries a message key on a non-error level', async () => {
+      const { log } = await logOnce((ctx) =>
+        ctx.log.warning('fallback failed; answering from cache', {
+          message: 'upstream quota reached',
+          reason: 'quota_exceeded',
+        }),
+      );
+
+      expect(log).toHaveBeenCalledWith('warning', {
+        message: 'fallback failed; answering from cache',
+        reason: 'quota_exceeded',
+      });
+    });
+
+    it('keeps the log line and the Error message when data collides on the error level', async () => {
+      const { log } = await logOnce((ctx) =>
+        ctx.log.error('fetch failed', new Error('socket hang up'), { message: 'upstream said no' }),
+      );
+
+      expect(log).toHaveBeenCalledWith('error', {
+        message: 'fetch failed',
+        error: 'socket hang up',
+      });
     });
 
     it('sends the message alone when the call carried no data payload', async () => {

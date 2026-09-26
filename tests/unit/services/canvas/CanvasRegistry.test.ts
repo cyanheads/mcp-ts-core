@@ -743,6 +743,10 @@ describe('CanvasRegistry · shutdown', () => {
     await expect(registry.acquire(undefined, 'tenant-a', baseContext)).rejects.toThrow(
       /shutting down/i,
     );
+    // #548 — the request's tenant is log context, not client-visible data.
+    await expect(registry.acquire(undefined, 'tenant-a', baseContext)).rejects.toMatchObject({
+      data: undefined,
+    });
     registry = undefined;
   });
 

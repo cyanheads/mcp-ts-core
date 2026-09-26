@@ -10,7 +10,12 @@
  * Security Model:
  * - Defense in depth: validation at service layer AND provider layer
  * - Fail closed: invalid input throws McpError, never coerced
- * - Audit trail: all validation failures logged with context
+ * - Client-safe data: a failure's `data` carries only the offending field
+ *   (`key`, `prefix`, `limit`, `ttl`), never the caller's context — the
+ *   tenant ID included, since it comes from the context.
+ *   `data` is returned to the client verbatim, and a handler `ctx` passed as
+ *   the context carries request metadata and elicited user input (#548). The
+ *   context reaches the server log through the caller's error path instead.
  * - Immutable: validation functions are pure (no side effects)
  *
  * All validation functions are synchronous and throw McpError on failure.
@@ -78,65 +83,51 @@ const VALID_KEY_PATTERN = /^[a-zA-Z0-9_.\-/]+$/;
  * - Cannot start or end with special characters
  *
  * @param tenantId The tenant ID to validate.
- * @param context The request context for error reporting.
+ * @param _context The caller's request context. Never copied into the error's `data`, which reaches the client.
  * @throws {McpError} JsonRpcErrorCode.InvalidParams - If tenant ID is not a string, empty, too long, contains invalid characters, or has path traversal sequences.
  */
-export function validateTenantId(tenantId: string, context: RequestContext): void {
+export function validateTenantId(tenantId: string, _context: RequestContext): void {
+  // No data on any branch: the tenant comes from the request context (a
+  // token's `tid` claim, or the transport default), so it belongs in the log
+  // the caller's error path writes, not in client-visible data (#548).
   if (typeof tenantId !== 'string') {
-    throw invalidParams('Tenant ID must be a string.', {
-      ...context,
-      tenantId,
-    });
+    throw invalidParams('Tenant ID must be a string.');
   }
 
   const trimmedTenantId = tenantId.trim();
 
   if (trimmedTenantId.length === 0) {
-    throw invalidParams('Tenant ID cannot be an empty string.', {
-      ...context,
-      tenantId,
-    });
+    throw invalidParams('Tenant ID cannot be an empty string.');
   }
 
   if (trimmedTenantId.length > MAX_TENANT_ID_LENGTH) {
-    throw invalidParams(`Tenant ID exceeds maximum length of ${MAX_TENANT_ID_LENGTH} characters.`, {
-      ...context,
-      tenantIdLength: trimmedTenantId.length,
-    });
+    throw invalidParams(`Tenant ID exceeds maximum length of ${MAX_TENANT_ID_LENGTH} characters.`);
   }
 
   if (!VALID_TENANT_ID_PATTERN.test(trimmedTenantId)) {
     throw invalidParams(
       'Tenant ID contains invalid characters. Only alphanumeric characters, hyphens, underscores, and dots are allowed. Must start and end with alphanumeric characters.',
-      { ...context, tenantId: trimmedTenantId },
     );
   }
 
   if (trimmedTenantId.includes('..')) {
-    throw invalidParams('Tenant ID contains consecutive dots, which are not allowed.', {
-      ...context,
-      tenantId: trimmedTenantId,
-    });
+    throw invalidParams('Tenant ID contains consecutive dots, which are not allowed.');
   }
 }
 
 /**
  * Validates a storage key.
  * @param key The key to validate.
- * @param context The request context for error reporting.
+ * @param _context The caller's request context. Never copied into the error's `data`, which reaches the client.
  * @throws {McpError} JsonRpcErrorCode.ValidationError - If key is not a non-empty string, too long, contains invalid characters, or has path traversal sequences.
  */
-export function validateKey(key: string, context: RequestContext): void {
+export function validateKey(key: string, _context: RequestContext): void {
   if (!key || typeof key !== 'string') {
-    throw validationError('Key must be a non-empty string.', {
-      ...context,
-      key,
-    });
+    throw validationError('Key must be a non-empty string.', { key });
   }
 
   if (key.length > MAX_KEY_LENGTH) {
     throw validationError(`Key exceeds maximum length of ${MAX_KEY_LENGTH} characters.`, {
-      ...context,
       key: `${key.substring(0, 50)}...`,
     });
   }
@@ -144,15 +135,12 @@ export function validateKey(key: string, context: RequestContext): void {
   if (!VALID_KEY_PATTERN.test(key)) {
     throw validationError(
       'Key contains invalid characters. Only alphanumeric, hyphens, underscores, dots, and slashes are allowed.',
-      { ...context, key },
+      { key },
     );
   }
 
   if (key.includes('..')) {
-    throw validationError('Key must not contain ".." (path traversal attempt).', {
-      ...context,
-      key,
-    });
+    throw validationError('Key must not contain ".." (path traversal attempt).', { key });
   }
 }
 
@@ -166,16 +154,12 @@ export function validateKey(key: string, context: RequestContext): void {
  * - Only valid path characters allowed
  *
  * @param prefix The prefix to validate (empty string is valid).
- * @param context The request context for error reporting.
+ * @param _context The caller's request context. Never copied into the error's `data`, which reaches the client.
  * @throws {McpError} JsonRpcErrorCode.ValidationError - If prefix is not a string, too long, contains invalid characters, or has path traversal sequences.
  */
-export function validatePrefix(prefix: string, context: RequestContext): void {
+export function validatePrefix(prefix: string, _context: RequestContext): void {
   if (typeof prefix !== 'string') {
-    throw validationError('Prefix must be a string.', {
-      ...context,
-      operation: 'validatePrefix',
-      prefix,
-    });
+    throw validationError('Prefix must be a string.', { prefix });
   }
 
   // Empty prefix is valid (matches all keys)
@@ -185,8 +169,6 @@ export function validatePrefix(prefix: string, context: RequestContext): void {
 
   if (prefix.length > MAX_PREFIX_LENGTH) {
     throw validationError(`Prefix exceeds maximum length of ${MAX_PREFIX_LENGTH} characters.`, {
-      ...context,
-      operation: 'validatePrefix',
       prefix: `${prefix.substring(0, 50)}...`,
     });
   }
@@ -195,32 +177,24 @@ export function validatePrefix(prefix: string, context: RequestContext): void {
   if (!VALID_KEY_PATTERN.test(prefix)) {
     throw validationError(
       'Prefix contains invalid characters. Only alphanumeric, hyphens, underscores, dots, and slashes are allowed.',
-      {
-        ...context,
-        operation: 'validatePrefix',
-        prefix: prefix.length > 50 ? `${prefix.substring(0, 50)}...` : prefix,
-      },
+      { prefix: prefix.length > 50 ? `${prefix.substring(0, 50)}...` : prefix },
     );
   }
 
   if (prefix.includes('..')) {
-    throw validationError('Prefix must not contain ".." (path traversal attempt).', {
-      ...context,
-      operation: 'validatePrefix',
-      prefix,
-    });
+    throw validationError('Prefix must not contain ".." (path traversal attempt).', { prefix });
   }
 }
 
 /**
  * Validates storage options.
  * @param options The storage options to validate.
- * @param context The request context for error reporting.
+ * @param _context The caller's request context. Never copied into the error's `data`, which reaches the client.
  * @throws {McpError} JsonRpcErrorCode.ValidationError - If TTL is not a number, negative, or not finite.
  */
 export function validateStorageOptions(
   options: StorageOptions | undefined,
-  context: RequestContext,
+  _context: RequestContext,
 ): void {
   if (!options) {
     return;
@@ -228,24 +202,17 @@ export function validateStorageOptions(
 
   if (options.ttl !== undefined) {
     if (typeof options.ttl !== 'number') {
-      throw validationError('TTL must be a number (seconds).', {
-        ...context,
-        ttl: options.ttl,
-      });
+      throw validationError('TTL must be a number (seconds).', { ttl: options.ttl });
     }
 
     if (options.ttl < 0) {
       throw validationError('TTL must be a non-negative number. Use 0 for immediate expiration.', {
-        ...context,
         ttl: options.ttl,
       });
     }
 
     if (!Number.isFinite(options.ttl)) {
-      throw validationError('TTL must be a finite number.', {
-        ...context,
-        ttl: options.ttl,
-      });
+      throw validationError('TTL must be a finite number.', { ttl: options.ttl });
     }
   }
 }
@@ -258,26 +225,20 @@ export function validateStorageOptions(
 export function validateBatchKeys(
   keys: unknown,
   operation: 'deleteMany' | 'getMany',
-  context: RequestContext,
+  _context: RequestContext,
 ): asserts keys is string[] {
   if (!Array.isArray(keys)) {
-    throw validationError(`${operation} keys must be an array.`, {
-      ...context,
-      operation: `validateBatchKeys.${operation}`,
-    });
+    throw validationError(`${operation} keys must be an array.`);
   }
 }
 
 /** Validates the shape of a setMany entry set. Batch size is left to the caller. */
 export function validateBatchEntries(
   entries: unknown,
-  context: RequestContext,
+  _context: RequestContext,
 ): asserts entries is Map<string, unknown> {
   if (!(entries instanceof Map)) {
-    throw validationError('setMany entries must be a Map.', {
-      ...context,
-      operation: 'validateBatchEntries.setMany',
-    });
+    throw validationError('setMany entries must be a Map.');
   }
 }
 
@@ -290,12 +251,12 @@ export function validateBatchEntries(
  * - Prevents memory exhaustion via oversized page requests
  *
  * @param options The list options to validate.
- * @param context The request context for error reporting.
+ * @param _context The caller's request context. Never copied into the error's `data`, which reaches the client.
  * @throws {McpError} If the options are invalid.
  */
 export function validateListOptions(
   options: ListOptions | undefined,
-  context: RequestContext,
+  _context: RequestContext,
 ): void {
   if (!options) {
     return;
@@ -303,33 +264,19 @@ export function validateListOptions(
 
   if (options.limit !== undefined) {
     if (typeof options.limit !== 'number') {
-      throw validationError('List limit must be a number.', {
-        ...context,
-        operation: 'validateListOptions',
-        limit: options.limit,
-      });
+      throw validationError('List limit must be a number.', { limit: options.limit });
     }
 
     if (!Number.isInteger(options.limit)) {
-      throw validationError('List limit must be an integer.', {
-        ...context,
-        operation: 'validateListOptions',
-        limit: options.limit,
-      });
+      throw validationError('List limit must be an integer.', { limit: options.limit });
     }
 
     if (options.limit < 1) {
-      throw validationError('List limit must be at least 1.', {
-        ...context,
-        operation: 'validateListOptions',
-        limit: options.limit,
-      });
+      throw validationError('List limit must be at least 1.', { limit: options.limit });
     }
 
     if (options.limit > MAX_LIST_LIMIT) {
       throw validationError(`List limit exceeds maximum of ${MAX_LIST_LIMIT}.`, {
-        ...context,
-        operation: 'validateListOptions',
         limit: options.limit,
       });
     }
@@ -337,26 +284,17 @@ export function validateListOptions(
 
   if (options.cursor !== undefined) {
     if (typeof options.cursor !== 'string') {
-      throw validationError('Cursor must be a string.', {
-        ...context,
-        operation: 'validateListOptions',
-      });
+      throw validationError('Cursor must be a string.');
     }
 
     if (options.cursor.trim() === '') {
-      throw validationError('Cursor must not be an empty string.', {
-        ...context,
-        operation: 'validateListOptions',
-      });
+      throw validationError('Cursor must not be an empty string.');
     }
 
     // Basic format validation: base64 chars plus '.' separator (payload.signature)
     // More thorough HMAC verification happens in decodeCursor
     if (!/^[A-Za-z0-9+/=.]+$/.test(options.cursor)) {
-      throw validationError('Cursor contains invalid characters.', {
-        ...context,
-        operation: 'validateListOptions',
-      });
+      throw validationError('Cursor contains invalid characters.');
     }
   }
 }
@@ -418,7 +356,7 @@ export function encodeCursor(lastKey: string, tenantId: string): string {
  * Decodes and validates an opaque, HMAC-signed cursor string.
  * @param cursor The cursor string to decode.
  * @param tenantId The expected tenant ID for validation.
- * @param context The request context for error reporting.
+ * @param context The caller's request context, for the server-side log of a decode failure. Never copied into the error's `data`, which reaches the client.
  * @returns The last key from the cursor.
  * @throws {McpError} If the cursor is invalid, tampered with, or has a bad signature.
  */
@@ -426,10 +364,7 @@ export function decodeCursor(cursor: string, tenantId: string, context: RequestC
   try {
     const dotIndex = cursor.lastIndexOf('.');
     if (dotIndex === -1) {
-      throw invalidParams('Invalid cursor format: missing signature.', {
-        ...context,
-        operation: 'decodeCursor',
-      });
+      throw invalidParams('Invalid cursor format: missing signature.');
     }
 
     const payload = cursor.substring(0, dotIndex);
@@ -438,10 +373,6 @@ export function decodeCursor(cursor: string, tenantId: string, context: RequestC
     if (!verifyCursorSignature(payload, signature)) {
       throw invalidParams(
         'Cursor signature verification failed. The cursor may be expired (e.g. server restart or isolate change) or tampered with.',
-        {
-          ...context,
-          operation: 'decodeCursor',
-        },
       );
     }
 
@@ -449,17 +380,11 @@ export function decodeCursor(cursor: string, tenantId: string, context: RequestC
     const data = JSON.parse(decoded) as CursorData;
 
     if (!data || typeof data !== 'object' || !('k' in data) || !('t' in data)) {
-      throw invalidParams('Invalid cursor format.', {
-        ...context,
-        operation: 'decodeCursor',
-      });
+      throw invalidParams('Invalid cursor format.');
     }
 
     if (data.t !== tenantId) {
-      throw invalidParams('Cursor tenant ID mismatch. Cursor may have been tampered with.', {
-        ...context,
-        operation: 'decodeCursor',
-      });
+      throw invalidParams('Cursor tenant ID mismatch. Cursor may have been tampered with.');
     }
 
     return data.k;
@@ -467,14 +392,11 @@ export function decodeCursor(cursor: string, tenantId: string, context: RequestC
     if (error instanceof McpError) {
       throw error;
     }
-    // Stack stays in the server log; McpError.data is wire-visible.
+    // Stack and context stay in the server log; McpError.data is wire-visible.
     logger.warning('Failed to decode cursor', {
       ...withExtra(context, { error: error instanceof Error ? error.stack : String(error) }),
       operation: 'decodeCursor',
     });
-    throw invalidParams('Failed to decode cursor. Cursor may be corrupted or invalid.', {
-      ...context,
-      operation: 'decodeCursor',
-    });
+    throw invalidParams('Failed to decode cursor. Cursor may be corrupted or invalid.');
   }
 }

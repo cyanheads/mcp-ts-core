@@ -19,7 +19,7 @@ import type { Database } from '@/storage/providers/supabase/supabase.types.js';
 import { SupabaseProvider } from '@/storage/providers/supabase/supabaseProvider.js';
 import { configurationError } from '@/types-global/errors.js';
 import { logger } from '@/utils/internal/logger.js';
-import { type RequestContext, requestContextService } from '@/utils/internal/requestContext.js';
+import { requestContextService } from '@/utils/internal/requestContext.js';
 
 /** Evaluated at call time (not module load) so worker.ts can set IS_SERVERLESS before first use. */
 function isServerless(): boolean {
@@ -46,12 +46,11 @@ export interface StorageFactoryDeps {
  * Retrieves a Cloudflare binding from globalThis by key.
  * Throws a ConfigurationError if the binding is not present.
  */
-function getGlobalBinding<T>(key: string, context: RequestContext): T {
+function getGlobalBinding<T>(key: string): T {
   const g = globalThis as Record<string, unknown>;
   if (!(key in g) || g[key] == null) {
     throw configurationError(
       `${key} binding not available in globalThis. Ensure wrangler.toml is configured correctly.`,
-      context,
     );
   }
   return g[key] as T;
@@ -123,7 +122,6 @@ export function createStorageProvider(
       if (!config.storage.filesystemPath) {
         throw configurationError(
           'STORAGE_FILESYSTEM_PATH must be set for the filesystem storage provider.',
-          context,
         );
       }
       return new FileSystemProvider(config.storage.filesystemPath);
@@ -131,13 +129,11 @@ export function createStorageProvider(
       if (!config.supabase?.url || !config.supabase?.serviceRoleKey) {
         throw configurationError(
           'SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY must be set for the supabase storage provider.',
-          context,
         );
       }
       if (!deps.supabaseClient) {
         throw configurationError(
           'Supabase client must be provided via deps for the supabase storage provider.',
-          context,
         );
       }
       return new SupabaseProvider(deps.supabaseClient);
@@ -146,43 +142,34 @@ export function createStorageProvider(
         if (deps.r2Bucket) {
           return new R2Provider(deps.r2Bucket);
         }
-        const r2Binding = getGlobalBinding<R2Bucket>('R2_BUCKET', context);
-        return new R2Provider(r2Binding);
+        return new R2Provider(getGlobalBinding<R2Bucket>('R2_BUCKET'));
       }
       throw configurationError(
         'Cloudflare R2 storage is only available in a Cloudflare Worker environment.',
-        context,
       );
     case 'cloudflare-kv':
       if (isServerless()) {
         if (deps.kvNamespace) {
           return new KvProvider(deps.kvNamespace);
         }
-        const kvBinding = getGlobalBinding<KVNamespace>('KV_NAMESPACE', context);
-        return new KvProvider(kvBinding);
+        return new KvProvider(getGlobalBinding<KVNamespace>('KV_NAMESPACE'));
       }
       throw configurationError(
         'Cloudflare KV storage is only available in a Cloudflare Worker environment.',
-        context,
       );
     case 'cloudflare-d1':
       if (isServerless()) {
         if (deps.d1Database) {
           return new D1Provider(deps.d1Database);
         }
-        const d1Binding = getGlobalBinding<D1Database>('DB', context);
-        return new D1Provider(d1Binding);
+        return new D1Provider(getGlobalBinding<D1Database>('DB'));
       }
       throw configurationError(
         'Cloudflare D1 storage is only available in a Cloudflare Worker environment.',
-        context,
       );
     default: {
       const exhaustiveCheck: never = providerType;
-      throw configurationError(
-        `Unhandled storage provider type: ${String(exhaustiveCheck)}`,
-        context,
-      );
+      throw configurationError(`Unhandled storage provider type: ${String(exhaustiveCheck)}`);
     }
   }
 }

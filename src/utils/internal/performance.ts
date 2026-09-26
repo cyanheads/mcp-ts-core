@@ -10,11 +10,12 @@ import { type Span, SpanStatusCode, trace } from '@opentelemetry/api';
 
 import { config } from '@/config/index.js';
 import { isInputRequiredSignal } from '@/mcp-server/inputRequired.js';
-import { McpError } from '@/types-global/errors.js';
+import { JsonRpcErrorCode, McpError } from '@/types-global/errors.js';
 import {
   DEFAULT_PARTIAL_RESULT_KEYS,
   type PartialResultKeys,
 } from '@/utils/formatting/partialResult.js';
+import { ErrorHandler } from '@/utils/internal/error-handler/errorHandler.js';
 import { type ErrorCategory, getErrorCategory } from '@/utils/internal/error-handler/mappings.js';
 import { logger } from '@/utils/internal/logger.js';
 import { type RequestContext, withActiveSpan, withExtra } from '@/utils/internal/requestContext.js';
@@ -47,6 +48,7 @@ import {
   ATTR_MCP_TOOL_INPUT_BYTES,
   ATTR_MCP_TOOL_INPUT_REQUIRED,
   ATTR_MCP_TOOL_NAME,
+  ATTR_MCP_TOOL_OUTCOME,
   ATTR_MCP_TOOL_OUTPUT_BYTES,
   ATTR_MCP_TOOL_PARTIAL_SUCCESS,
   ATTR_MCP_TOOL_SUCCESS,
@@ -57,6 +59,7 @@ import { createCounter, createHistogram, createUpDownCounter } from '@/utils/tel
 let toolCallCounter: ReturnType<typeof createCounter> | undefined;
 let toolCallDuration: ReturnType<typeof createHistogram> | undefined;
 let toolCallErrors: ReturnType<typeof createCounter> | undefined;
+let toolRejections: ReturnType<typeof createCounter> | undefined;
 let toolInputBytes: ReturnType<typeof createHistogram> | undefined;
 let toolOutputBytes: ReturnType<typeof createHistogram> | undefined;
 let toolParamUsage: ReturnType<typeof createCounter> | undefined;
@@ -66,6 +69,11 @@ function getToolMetrics() {
   toolCallCounter ??= createCounter('mcp.tool.calls', 'Total MCP tool invocations', '{calls}');
   toolCallDuration ??= createHistogram('mcp.tool.duration', 'MCP tool execution duration', 'ms');
   toolCallErrors ??= createCounter('mcp.tool.errors', 'Total MCP tool errors', '{errors}');
+  toolRejections ??= createCounter(
+    'mcp.tool.rejections',
+    'MCP tool calls rejected before the handler ran',
+    '{calls}',
+  );
   toolInputBytes ??= createHistogram('mcp.tool.input_bytes', 'Tool input payload size', 'bytes');
   toolOutputBytes ??= createHistogram('mcp.tool.output_bytes', 'Tool output payload size', 'bytes');
   toolParamUsage ??= createCounter(
@@ -77,6 +85,7 @@ function getToolMetrics() {
     toolCallCounter,
     toolCallDuration,
     toolCallErrors,
+    toolRejections,
     toolInputBytes,
     toolOutputBytes,
     toolParamUsage,
@@ -238,8 +247,11 @@ interface MeasuredKind {
 
 /** How a measured run ended, for the kind-specific metrics and completion log. */
 interface MeasuredOutcome {
+  /** The JSON-RPC code the caller receives for a failed run. */
+  classifiedCode: JsonRpcErrorCode | undefined;
   durationMs: number;
   errorCategory: ErrorCategory | undefined;
+  /** The span / completion-log code: a numeric `McpError` code, else `UNHANDLED_ERROR` / `UNKNOWN_ERROR`. */
   errorCode: string | undefined;
   /** The run ended in `input_required`: counted as a success, no output measured. */
   inputRequired: boolean;
@@ -264,6 +276,12 @@ interface MeasureHooks<TContext> {
  * log `isSuccess: false` for every legitimate multi-round-trip request); an
  * `McpError` surfaces its numeric code; anything else is `UNHANDLED_ERROR` or
  * `UNKNOWN_ERROR`. The in-flight gauge and duration bracket the whole run.
+ *
+ * The error category is the origin of the code the caller receives, whatever
+ * was thrown: a non-`McpError` is classified with
+ * `ErrorHandler.determineErrorCode`, the same call the wire response and
+ * `mcp.errors.classified` make, so the counters agree per failure (#480). The
+ * span and completion-log code stay unclassified for it.
  */
 async function measure<TContext extends RequestContext, T>(
   kind: MeasuredKind,
@@ -295,6 +313,7 @@ async function measure<TContext extends RequestContext, T>(
     });
 
     const outcome: MeasuredOutcome = {
+      classifiedCode: undefined,
       durationMs: 0,
       errorCategory: undefined,
       errorCode: undefined,
@@ -327,16 +346,16 @@ async function measure<TContext extends RequestContext, T>(
         throw err;
       }
 
-      if (err instanceof McpError) {
-        outcome.errorCode = String(err.code);
-        // `data` rides along so a code shared by two sources — a local capacity
-        // refusal and upstream throttling both answer `-32003` — lands in the
-        // right `error_category` bucket (#275).
-        outcome.errorCategory = getErrorCategory(err.code, err.data);
-      } else {
-        outcome.errorCode = err instanceof Error ? 'UNHANDLED_ERROR' : 'UNKNOWN_ERROR';
-        outcome.errorCategory = 'server';
-      }
+      // An `McpError` keeps its own code; `data` rides along so a code shared by
+      // two sources — a local capacity refusal and upstream throttling both
+      // answer `-32003` — lands in the right `error_category` bucket (#275).
+      outcome.classifiedCode = ErrorHandler.determineErrorCode(err);
+      outcome.errorCategory = getErrorCategory(
+        outcome.classifiedCode,
+        err instanceof McpError ? err.data : undefined,
+      );
+      if (err instanceof McpError) outcome.errorCode = String(err.code);
+      else outcome.errorCode = err instanceof Error ? 'UNHANDLED_ERROR' : 'UNKNOWN_ERROR';
 
       if (err instanceof Error) span.recordException(err);
       span.setStatus({
@@ -466,7 +485,13 @@ export async function measureToolExecution<T>(
         const m = getToolMetrics();
         const metricAttrs = { [ATTR_MCP_TOOL_NAME]: toolName, [ATTR_MCP_TOOL_SUCCESS]: ok };
         const toolAttrs = { [ATTR_MCP_TOOL_NAME]: toolName };
-        m.toolCallCounter.add(1, metricAttrs);
+        // Calls and errors only: `mcp.tool.duration` keeps its series (#546).
+        const toolOutcome = ok
+          ? 'ok'
+          : outcome.classifiedCode === JsonRpcErrorCode.RequestCancelled
+            ? 'cancelled'
+            : 'error';
+        m.toolCallCounter.add(1, { ...metricAttrs, [ATTR_MCP_TOOL_OUTCOME]: toolOutcome });
         m.toolCallDuration.record(durationMs, metricAttrs);
         m.toolInputBytes.record(inputBytes, toolAttrs);
         if (ok && !inputRequired) m.toolOutputBytes.record(outputBytes, toolAttrs);
@@ -474,6 +499,7 @@ export async function measureToolExecution<T>(
           m.toolCallErrors.add(1, {
             ...toolAttrs,
             ...(errorCategory && { [ATTR_MCP_TOOL_ERROR_CATEGORY]: errorCategory }),
+            [ATTR_MCP_TOOL_OUTCOME]: toolOutcome,
           });
         }
 
@@ -506,6 +532,28 @@ export async function measureToolExecution<T>(
       },
     },
   );
+}
+
+/**
+ * Counts a tool call rejected before {@link measureToolExecution} started — the
+ * inline `auth` scope check or argument validation — on `mcp.tool.rejections`
+ * (#546). Such a call never reaches `mcp.tool.calls`, `mcp.tool.duration`, or
+ * `mcp.tool.errors`, so this is the only per-tool trace it leaves; the code and
+ * category are the ones the caller receives.
+ *
+ * @param toolName - Registered name of the rejected tool.
+ * @param error - The value the rejection threw.
+ */
+export function recordToolRejection(toolName: string, error: unknown): void {
+  const code = ErrorHandler.determineErrorCode(error);
+  getToolMetrics().toolRejections.add(1, {
+    [ATTR_MCP_TOOL_NAME]: toolName,
+    [ATTR_MCP_TOOL_ERROR_CODE]: String(code),
+    [ATTR_MCP_TOOL_ERROR_CATEGORY]: getErrorCategory(
+      code,
+      error instanceof McpError ? error.data : undefined,
+    ),
+  });
 }
 
 // ==========================================================================

@@ -5,6 +5,7 @@
 
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { WhisperProvider } from '@/services/speech/providers/whisper.provider.js';
+import { createMockContext } from '@/testing/index.js';
 import { McpError } from '@/types-global/errors.js';
 
 // Mock fetchWithTimeout
@@ -140,6 +141,37 @@ describe('WhisperProvider', () => {
       await expect(provider.speechToText({ audio: largeBuffer })).rejects.toThrow(
         'Audio file exceeds maximum size of 25MB',
       );
+    });
+
+    // #548 — a caller's context (a handler ctx after an elicitation round) must
+    // not come back as error data: it reaches structuredContent.error.data.
+    it.each([
+      ['missing audio', () => undefined, { audio: undefined as never }],
+      ['invalid base64', () => undefined, { audio: 'not base64!!' }],
+      ['oversized audio', () => undefined, { audio: Buffer.alloc(26 * 1024 * 1024) }],
+      [
+        'an upstream failure',
+        () => mockFetch.mockRejectedValue(new Error('socket hang up')),
+        { audio: Buffer.from('fake-audio') },
+      ],
+    ])('keeps the caller context out of the error data on %s', async (_label, arrange, options) => {
+      arrange();
+      const ctx = createMockContext({
+        inputResponses: { pass: { action: 'accept', content: { passphrase: 'hunter2' } } },
+      });
+
+      // The option's narrow type rejects a handler ctx only under
+      // exactOptionalPropertyTypes; at runtime the whole object is accepted.
+      const error = await provider
+        .speechToText({ ...options, context: ctx as never })
+        .catch((e: unknown) => e);
+
+      expect(error).toBeInstanceOf(McpError);
+      const data = (error as McpError).data ?? {};
+      expect(JSON.stringify(data)).not.toContain('hunter2');
+      for (const key of ['inputs', 'requestId', 'timestamp', 'operation', 'tenantId', 'state']) {
+        expect(data).not.toHaveProperty(key);
+      }
     });
 
     it('should include word timestamps when requested', async () => {

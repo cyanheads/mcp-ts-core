@@ -55,6 +55,75 @@ describe('ErrorHandler', () => {
       );
     });
 
+    // Issue #482 — the engine's resource-limit errors are RangeErrors too, but
+    // name nothing a caller can change.
+    describe('engine resource-limit RangeErrors (#482)', () => {
+      /** The value `run` throws, for classifying what this engine actually raises. */
+      function thrownBy(run: () => unknown): unknown {
+        try {
+          run();
+        } catch (error) {
+          return error;
+        }
+        throw new Error('expected the probe to throw');
+      }
+
+      it.each([
+        'Maximum call stack size exceeded', // V8
+        'Maximum call stack size exceeded.', // JavaScriptCore
+        'Invalid string length', // V8 string-size limit
+        'Out of memory', // JavaScriptCore string-size limit
+      ])('maps a RangeError reading "%s" to InternalError', (message) => {
+        expect(ErrorHandler.determineErrorCode(new RangeError(message))).toBe(
+          JsonRpcErrorCode.InternalError,
+        );
+      });
+
+      it('maps the stack overflow this engine raises to InternalError', () => {
+        const recurse = (): number => recurse() + 1;
+        const overflow = thrownBy(recurse);
+
+        expect(overflow).toBeInstanceOf(RangeError);
+        expect(ErrorHandler.determineErrorCode(overflow)).toBe(JsonRpcErrorCode.InternalError);
+      });
+
+      it.each([
+        ['new Array(-1)', () => new Array(-1)],
+        ['(1).toFixed(101)', () => (1).toFixed(101)],
+        ['new Date(NaN).toISOString()', () => new Date(Number.NaN).toISOString()],
+        ['1n / 0n', () => 1n / BigInt(0)],
+      ])('keeps the RangeError from %s on ValidationError', (_label, run) => {
+        const error = thrownBy(run);
+
+        expect(error).toBeInstanceOf(RangeError);
+        expect(ErrorHandler.determineErrorCode(error)).toBe(JsonRpcErrorCode.ValidationError);
+      });
+
+      it.each([
+        'Invalid array length', // V8, new Array(-1)
+        'Array length must be a positive integer of safe magnitude.', // JavaScriptCore
+        'Division by zero', // V8, 1n / 0n
+        '0 is an invalid divisor value.', // JavaScriptCore
+        'Invalid time value', // V8, Invalid Date
+        'Invalid Date', // JavaScriptCore
+        'Wrapped: Maximum call stack size exceeded',
+        'Maximum call stack size exceeded while parsing',
+      ])('keeps a RangeError reading "%s" on ValidationError', (message) => {
+        expect(ErrorHandler.determineErrorCode(new RangeError(message))).toBe(
+          JsonRpcErrorCode.ValidationError,
+        );
+      });
+
+      it('leaves a non-RangeError carrying a limit text to the ladder', () => {
+        expect(ErrorHandler.determineErrorCode(new Error('Out of memory'))).toBe(
+          JsonRpcErrorCode.InternalError,
+        );
+        expect(ErrorHandler.determineErrorCode(new SyntaxError('Invalid string length'))).toBe(
+          JsonRpcErrorCode.ValidationError,
+        );
+      });
+    });
+
     it('should map ReferenceError to InternalError', () => {
       expect(ErrorHandler.determineErrorCode(new ReferenceError('undef'))).toBe(
         JsonRpcErrorCode.InternalError,
@@ -584,17 +653,57 @@ describe('ErrorHandler context projection', () => {
     expect(data).not.toHaveProperty('auth');
   });
 
-  it('preserves the declared correlation fields, extra flattened', () => {
-    const handled = ErrorHandler.handleError(new Error('upstream failed'), {
-      operation: 'svc',
-      context: handlerShapedContext as never,
-    });
+  // #548 — the context goes to the log record only. `data` is client-visible
+  // and `extra` carries whatever additionalContext a server attached.
+  it('keeps the correlation fields and extra out of data and in the log record', () => {
+    const withSession = {
+      ...handlerShapedContext,
+      sessionId: 'session-1',
+      traceId: 'a'.repeat(32),
+      spanId: 'b'.repeat(16),
+      extra: { toolName: 'leaky_tool', requiredScopes: ['tool:secret:write'] },
+    };
+    const handled = ErrorHandler.handleError(
+      new McpError(JsonRpcErrorCode.NotFound, 'no such item', { itemId: 'x-1', reason: 'no_item' }),
+      { operation: 'svc', context: withSession as never },
+    );
 
-    expect((handled as McpError).data).toMatchObject({
-      requestId: 'req-leak',
-      operation: 'HandleToolRequest',
-      tenantId: 'tenant-1',
-      toolName: 'leaky_tool',
+    const data = (handled as McpError).data as Record<string, unknown>;
+    expect(data).toEqual({
+      itemId: 'x-1',
+      reason: 'no_item',
+      originalErrorName: 'McpError',
+      originalMessage: 'no such item',
+    });
+    expect(JSON.stringify(data)).not.toContain('tool:secret:write');
+
+    expect(logger.error).toHaveBeenCalledWith(
+      'Error in svc: no such item',
+      expect.objectContaining({
+        requestId: 'req-leak',
+        operation: 'HandleToolRequest',
+        tenantId: 'tenant-1',
+        sessionId: 'session-1',
+        traceId: 'a'.repeat(32),
+        extra: expect.objectContaining({
+          toolName: 'leaky_tool',
+          requiredScopes: ['tool:secret:write'],
+          errorData: expect.objectContaining({ itemId: 'x-1' }),
+        }),
+      }),
+    );
+  });
+
+  it('carries rootCause on data for a chained error, but no context', () => {
+    const handled = ErrorHandler.handleError(
+      new Error('wrapper', { cause: new TypeError('inner boom') }),
+      { operation: 'svc', context: handlerShapedContext as never },
+    );
+
+    expect((handled as McpError).data).toEqual({
+      originalErrorName: 'Error',
+      originalMessage: 'wrapper',
+      rootCause: { name: 'TypeError', message: 'inner boom' },
     });
   });
 });

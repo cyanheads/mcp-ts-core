@@ -11,7 +11,7 @@ import {
   type SessionIdentity,
   SessionStore,
 } from '@/mcp-server/transports/http/sessionStore.js';
-import { JsonRpcErrorCode } from '@/types-global/errors.js';
+import { JsonRpcErrorCode, type McpError } from '@/types-global/errors.js';
 
 /**
  * Helper to create valid 64-character hex session IDs for testing.
@@ -113,6 +113,29 @@ describe('SessionStore - Security & Tenant Isolation', () => {
       }
       expect(() => capped.register(SESSION_2, createTestConnection())).toThrow(/capacity/);
       expect(capped.getSessionCount()).toBe(1);
+      await capped.destroy();
+    });
+
+    // #548 — these rejections reach the HTTP client; the request context they
+    // were built from stays in the warning log.
+    it('returns no request context as error data on the capacity and session-ID rejections', async () => {
+      const capped = new SessionStore(STALE_TIMEOUT, 1);
+      capped.register(SESSION_1, createTestConnection());
+
+      const failures: unknown[] = [];
+      for (const run of [
+        () => capped.assertCapacity(),
+        () => capped.register('not-a-session-id', createTestConnection()),
+      ]) {
+        try {
+          run();
+        } catch (error) {
+          failures.push(error);
+        }
+      }
+
+      expect(failures).toHaveLength(2);
+      for (const failure of failures) expect((failure as McpError).data).toBeUndefined();
       await capped.destroy();
     });
 

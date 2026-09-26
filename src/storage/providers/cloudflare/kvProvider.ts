@@ -60,7 +60,8 @@ export class KvProvider implements IStorageProvider {
           throw new McpError(
             JsonRpcErrorCode.SerializationError,
             `[KvProvider] Failed to parse JSON for key: ${kvKey}`,
-            { ...context, error },
+            undefined,
+            { cause: error },
           );
         }
       },

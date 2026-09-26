@@ -1,5 +1,8 @@
 import { describe, expect, it, vi } from 'vitest';
+import { z } from 'zod';
 
+import { tool } from '../../../../src/mcp-server/tools/utils/toolDefinition.js';
+import { runToolContract } from '../../../../src/testing/index.js';
 import { JsonRpcErrorCode, McpError } from '../../../../src/types-global/errors.js';
 import { runtimeCaps } from '../../../../src/utils/internal/runtime.js';
 import { Sanitization, sanitization } from '../../../../src/utils/security/sanitization.js';
@@ -233,6 +236,93 @@ describe('Sanitization Utility', () => {
       expect(sanitized[0]).toBeNull();
       expect(sanitized[1]).toBe(1);
       expect(sanitized[2]).toEqual(date);
+    });
+  });
+
+  describe('serializeForLogging', () => {
+    const bytes = (text: string) => new TextEncoder().encode(text).length;
+
+    it('returns the redacted JSON whole when it fits the cap', () => {
+      const value = { query: 'q', auth: { apiKey: 'sk-1' } };
+
+      expect(sanitization.serializeForLogging(value, 1024)).toEqual({
+        text: '{"query":"q","auth":{"apiKey":"[REDACTED]"}}',
+        truncated: false,
+      });
+      expect(value.auth.apiKey).toBe('sk-1');
+    });
+
+    it('redacts sensitive keys nested past the first levels, inside arrays', () => {
+      const value = {
+        a: { b: { c: { d: [{ e: { token: 't-1', clientSecret: 'cs-1', kept: 'v' } }] } } },
+      };
+
+      const { text } = sanitization.serializeForLogging(value, 4096);
+
+      expect(JSON.parse(text)).toEqual({
+        a: {
+          b: { c: { d: [{ e: { token: '[REDACTED]', clientSecret: '[REDACTED]', kept: 'v' } }] } },
+        },
+      });
+    });
+
+    it('redacts before truncating, so no prefix of a secret survives the cut', () => {
+      // Unredacted, `password` would straddle the 40-byte cut: a truncate-first
+      // implementation keeps `{"padding":"xxxxxxxx","password":"hunter`.
+      const value = { padding: 'xxxxxxxx', password: 'hunter2-hunter2-hunter2' };
+
+      const { text, truncated } = sanitization.serializeForLogging(value, 40);
+
+      expect(truncated).toBe(true);
+      expect(text).toBe('{"padding":"xxxxxxxx","password":"[REDAC');
+      expect(text).not.toContain('hunt');
+    });
+
+    it('keeps a payload of exactly the cap and truncates one byte over', () => {
+      const text = JSON.stringify({ v: 'abc' });
+
+      expect(sanitization.serializeForLogging({ v: 'abc' }, bytes(text))).toEqual({
+        text,
+        truncated: false,
+      });
+      expect(sanitization.serializeForLogging({ v: 'abc' }, bytes(text) - 1)).toEqual({
+        text: text.slice(0, -1),
+        truncated: true,
+      });
+    });
+
+    it.each([
+      ['a 2-byte', 'é'],
+      ['a 3-byte', '€'],
+      ['a 4-byte (surrogate pair)', '😀'],
+    ])('never cuts inside %s character', (_label, char) => {
+      const full = JSON.stringify({ s: char.repeat(50) });
+      const width = bytes(char);
+      // Every cap from the start of one character to just before the next.
+      for (let cap = 8; cap < 8 + 2 * width; cap++) {
+        const { text, truncated } = sanitization.serializeForLogging({ s: char.repeat(50) }, cap);
+
+        expect(truncated).toBe(true);
+        expect(bytes(text)).toBeLessThanOrEqual(cap);
+        expect(bytes(text)).toBeGreaterThan(cap - width);
+        expect(text.isWellFormed()).toBe(true);
+        expect(full.startsWith(text)).toBe(true);
+      }
+    });
+
+    it('serializes an empty object and a primitive', () => {
+      expect(sanitization.serializeForLogging({}, 16)).toEqual({ text: '{}', truncated: false });
+      expect(sanitization.serializeForLogging('plain', 16)).toEqual({
+        text: '"plain"',
+        truncated: false,
+      });
+    });
+
+    it('returns a placeholder rather than throwing for a value JSON cannot represent', () => {
+      expect(sanitization.serializeForLogging({ n: 1n }, 1024)).toEqual({
+        text: '[Log Serialization Failed]',
+        truncated: false,
+      });
     });
   });
 
@@ -497,6 +587,157 @@ describe('Sanitization Utility', () => {
       expect(redacted.cookie).toBe('[REDACTED]');
       expect((redacted.headers as Record<string, unknown>).Authorization).toBe('[REDACTED]');
       expect(redacted.safe).toBe('visible');
+    });
+  });
+
+  /**
+   * Every rejection carries a stable `data.reason` a caller can branch on, and —
+   * where the caller can change the input — a `data.recovery.hint`.
+   */
+  describe('failure reasons', () => {
+    /** The McpError a sync call or a rejected promise produced. */
+    async function failureOf(run: () => unknown): Promise<McpError> {
+      let caught: unknown;
+      try {
+        await run();
+      } catch (error) {
+        caught = error;
+      }
+      expect(caught).toBeInstanceOf(McpError);
+      return caught as McpError;
+    }
+
+    it.each([
+      ['a non-http scheme', 'ftp://files.example.com'],
+      ['a host-less string', 'not a url'],
+      ['javascript:', 'javascript:alert(1)'],
+    ])('sanitizeUrl rejects %s as invalid_url with the allowed schemes', async (_label, url) => {
+      const error = await failureOf(() => sanitization.sanitizeUrl(url));
+
+      expect(error.code).toBe(JsonRpcErrorCode.ValidationError);
+      expect(error.data).toMatchObject({
+        input: url,
+        reason: 'invalid_url',
+        recovery: { hint: expect.stringContaining('http, https') },
+      });
+    });
+
+    it('sanitizeUrl names a custom allow-list in its hint', async () => {
+      const error = await failureOf(() => sanitization.sanitizeUrl('https://x.example', ['ftp']));
+
+      expect(error.data?.recovery).toEqual({ hint: expect.stringContaining('ftp') });
+    });
+
+    it('sanitizeUrl still rejects an allow-listed pseudo-protocol as invalid_url', async () => {
+      const error = await failureOf(() => sanitization.sanitizeUrl('data://example.com', ['data']));
+
+      expect(error.data).toMatchObject({ reason: 'invalid_url' });
+    });
+
+    it('sanitizeString rejects the javascript context as unsupported_sanitize_context', async () => {
+      const error = await failureOf(() =>
+        sanitization.sanitizeString('alert(1)', { context: 'javascript' }),
+      );
+
+      expect(error.code).toBe(JsonRpcErrorCode.ValidationError);
+      expect(error.data).toEqual({ reason: 'unsupported_sanitize_context' });
+    });
+
+    it.each([
+      ['an empty path', ''],
+      ['a null byte', 'a\0b'],
+    ])('sanitizePath rejects %s as invalid_path', async (_label, input) => {
+      const error = await failureOf(() => sanitization.sanitizePath(input));
+
+      expect(error.code).toBe(JsonRpcErrorCode.ValidationError);
+      expect(error.data).toMatchObject({
+        input,
+        reason: 'invalid_path',
+        recovery: { hint: expect.any(String) },
+      });
+    });
+
+    it.each([
+      ['escaping rootDir', '../../etc/passwd', { rootDir: '/app/data' }],
+      ['escaping the working directory', '../../../../outside', {}],
+    ])('sanitizePath rejects a path %s as path_traversal', async (_label, input, options) => {
+      const error = await failureOf(() => sanitization.sanitizePath(input, options));
+
+      expect(error.data).toMatchObject({
+        input,
+        reason: 'path_traversal',
+        recovery: { hint: expect.stringContaining('relative path') },
+      });
+    });
+
+    it('sanitizePath rejects an absolute path as absolute_path_disallowed', async () => {
+      const error = await failureOf(() => sanitization.sanitizePath('/etc/passwd'));
+
+      expect(error.data).toMatchObject({
+        input: '/etc/passwd',
+        reason: 'absolute_path_disallowed',
+        recovery: { hint: expect.stringContaining('relative path') },
+      });
+    });
+
+    it('sanitizeJson rejects an oversized payload as json_too_large, naming the cap', async () => {
+      const error = await failureOf(() => sanitization.sanitizeJson('{"big":"value"}', 5));
+
+      expect(error.data).toMatchObject({
+        actualSize: 15,
+        maxSize: 5,
+        reason: 'json_too_large',
+        recovery: { hint: expect.stringContaining('5 bytes') },
+      });
+    });
+
+    it.each([
+      ['malformed JSON', '{bad json}'],
+      ['a non-string', 42 as unknown as string],
+    ])('sanitizeJson rejects %s as invalid_json', async (_label, input) => {
+      const error = await failureOf(() => sanitization.sanitizeJson(input));
+
+      expect(error.code).toBe(JsonRpcErrorCode.ValidationError);
+      expect(error.data).toMatchObject({
+        reason: 'invalid_json',
+        recovery: { hint: expect.any(String) },
+      });
+    });
+
+    it.each([
+      ['a non-numeric string', 'abc'],
+      ['an exponent', '1e5'],
+      ['a wrong type', { value: 1 } as unknown as string],
+      ['Infinity', Number.POSITIVE_INFINITY],
+      ['NaN', Number.NaN],
+    ])('sanitizeNumber rejects %s as invalid_number', async (_label, input) => {
+      const error = await failureOf(() => sanitization.sanitizeNumber(input));
+
+      expect(error.code).toBe(JsonRpcErrorCode.ValidationError);
+      expect(error.data).toMatchObject({
+        reason: 'invalid_number',
+        recovery: { hint: expect.stringContaining('finite decimal number') },
+      });
+    });
+
+    it('reaches both tool surfaces: structuredContent.error.data and the content[] trailer', async () => {
+      const definition = tool('sanitize_url_probe', {
+        description: 'Echoes a sanitized URL.',
+        input: z.object({ url: z.string().describe('URL to sanitize') }),
+        output: z.object({ url: z.string().describe('The sanitized URL') }),
+        handler: async (input) => ({ url: await sanitization.sanitizeUrl(input.url) }),
+      });
+
+      const result = await runToolContract(definition, { url: 'ftp://files.example.com' });
+
+      expect(result.isError).toBe(true);
+      const envelope = (result.structuredContent as { error: { code: number; data: unknown } })
+        .error;
+      expect(envelope.code).toBe(JsonRpcErrorCode.ValidationError);
+      expect(envelope.data).toMatchObject({ reason: 'invalid_url' });
+      const text = (result.content[0] as { text: string }).text;
+      expect(text).toContain('Recovery: Provide an absolute URL');
+      expect(text).toContain('(reason invalid_url)');
     });
   });
 });

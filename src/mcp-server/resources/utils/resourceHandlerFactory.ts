@@ -19,6 +19,7 @@ import {
 } from '@/mcp-server/handlerContext.js';
 import { type InputRequiredGate, isInputRequiredSignal } from '@/mcp-server/inputRequired.js';
 import type { NotifierSources } from '@/mcp-server/notifications.js';
+import { parseOutputContract } from '@/mcp-server/outputContract.js';
 import type { AnyResourceDefinition } from '@/mcp-server/resources/utils/resourceDefinition.js';
 import { withRequiredScopes } from '@/mcp-server/transports/auth/lib/authUtils.js';
 import { McpError } from '@/types-global/errors.js';
@@ -162,8 +163,15 @@ export function createResourceHandler(
             // the assembled `contents` this callback returns.
             recordOutput(handlerResult);
 
-            // Validate output against schema when defined
-            const validatedResult = def.output ? def.output.parse(handlerResult) : handlerResult;
+            // Validate output against schema when defined; a violation is a
+            // server fault, `InternalError` naming the contract (#480).
+            const validatedResult = def.output
+              ? parseOutputContract(def.output, handlerResult, {
+                  kind: 'Resource',
+                  name: resourceName,
+                  contract: 'output',
+                })
+              : handlerResult;
 
             return { contents: formatter(validatedResult, { uri, mimeType }) };
           } catch (error) {

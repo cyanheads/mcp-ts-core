@@ -5,6 +5,7 @@
 
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { ElevenLabsProvider } from '@/services/speech/providers/elevenlabs.provider.js';
+import { createMockContext } from '@/testing/index.js';
 import { McpError } from '@/types-global/errors.js';
 
 // Mock fetchWithTimeout
@@ -95,6 +96,36 @@ describe('ElevenLabsProvider', () => {
     it('should throw when text is empty', async () => {
       await expect(provider.textToSpeech({ text: '' })).rejects.toThrow(McpError);
       await expect(provider.textToSpeech({ text: '   ' })).rejects.toThrow('Text cannot be empty');
+    });
+
+    // #548 — a caller's context (a handler ctx after an elicitation round) must
+    // not come back as error data: it reaches structuredContent.error.data.
+    it.each([
+      ['empty text', () => undefined, { text: ' ' }],
+      ['text over the limit', () => undefined, { text: 'a'.repeat(5001) }],
+      [
+        'an upstream failure',
+        () => mockFetch.mockRejectedValue(new Error('socket hang up')),
+        { text: 'Hello' },
+      ],
+    ])('keeps the caller context out of the error data on %s', async (_label, arrange, options) => {
+      arrange();
+      const ctx = createMockContext({
+        inputResponses: { pass: { action: 'accept', content: { passphrase: 'hunter2' } } },
+      });
+
+      // The option's narrow type rejects a handler ctx only under
+      // exactOptionalPropertyTypes; at runtime the whole object is accepted.
+      const error = await provider
+        .textToSpeech({ ...options, context: ctx as never })
+        .catch((e: unknown) => e);
+
+      expect(error).toBeInstanceOf(McpError);
+      const data = (error as McpError).data ?? {};
+      expect(JSON.stringify(data)).not.toContain('hunter2');
+      for (const key of ['inputs', 'requestId', 'timestamp', 'operation', 'tenantId', 'state']) {
+        expect(data).not.toHaveProperty(key);
+      }
     });
 
     it('should throw when text exceeds 5000 characters', async () => {

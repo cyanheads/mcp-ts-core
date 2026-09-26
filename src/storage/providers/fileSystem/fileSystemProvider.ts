@@ -95,7 +95,6 @@ export class FileSystemProvider implements IStorageProvider {
     tenantId: string,
     key: string,
     filePath: string,
-    context: RequestContext,
   ): Promise<T | null> {
     let decoded: DecodedEnvelope<T>;
     try {
@@ -104,7 +103,8 @@ export class FileSystemProvider implements IStorageProvider {
       throw new McpError(
         JsonRpcErrorCode.SerializationError,
         `Failed to parse stored JSON for key "${key}" (tenant "${tenantId}").`,
-        { ...context, error },
+        undefined,
+        { cause: error },
       );
     }
     if (decoded.kind === 'expired') {
@@ -125,7 +125,7 @@ export class FileSystemProvider implements IStorageProvider {
       async () => {
         try {
           const data = await readFile(filePath, 'utf-8');
-          return this.parseAndValidate<T>(data, tenantId, key, filePath, context);
+          return this.parseAndValidate<T>(data, tenantId, key, filePath);
         } catch (error: unknown) {
           if (isErrorWithCode(error) && error.code === 'ENOENT') {
             return null; // File not found
@@ -218,7 +218,7 @@ export class FileSystemProvider implements IStorageProvider {
           const filePath = this.getFilePath(tenantId, k, context);
           try {
             const raw = await readFile(filePath, 'utf-8');
-            const value = await this.parseAndValidate<unknown>(raw, tenantId, k, filePath, context);
+            const value = await this.parseAndValidate<unknown>(raw, tenantId, k, filePath);
             if (value !== null) {
               validKeys.push(k);
               validValues.set(k, value);

@@ -110,10 +110,9 @@ export class CsvParser {
     stringToParse = stringToParse.trim();
 
     if (!stringToParse) {
-      throw validationError(
-        'CSV string is empty after removing <think> block and trimming.',
-        context,
-      );
+      throw validationError('CSV string is empty after removing <think> block and trimming.', {
+        reason: 'parser_input_empty',
+      });
     }
 
     const papa = await getPapa();
@@ -136,7 +135,7 @@ export class CsvParser {
       throw validationError(
         `Failed to parse CSV: ${result.errors.map((e) => e.message).join(', ')}`,
         {
-          ...context,
+          reason: 'csv_parse_failed',
           errors: result.errors,
           originalContentSample:
             stringToParse.substring(0, 200) + (stringToParse.length > 200 ? '...' : ''),

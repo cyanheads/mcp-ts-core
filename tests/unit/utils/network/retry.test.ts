@@ -206,6 +206,28 @@ describe('withRetry', () => {
     expect(debugSpy).toHaveBeenCalledTimes(1);
   });
 
+  it('rejects with the AbortError a reason-less abort leaves when it lands during backoff', async () => {
+    vi.useFakeTimers();
+
+    const controller = new AbortController();
+    const failure = new McpError(JsonRpcErrorCode.Timeout, 'slow upstream');
+    const promise = withRetry(() => Promise.reject(failure), {
+      baseDelayMs: 100,
+      jitter: 0,
+      maxRetries: 2,
+      signal: controller.signal,
+    }).catch((e: unknown) => e);
+
+    await Promise.resolve();
+    controller.abort();
+
+    const rejection = await promise;
+    // Neither the attempt's error nor an McpError: the signal's own reason.
+    expect(rejection).toBe(controller.signal.reason);
+    expect(rejection).not.toBeInstanceOf(McpError);
+    expect((rejection as DOMException).name).toBe('AbortError');
+  });
+
   it('rethrows non-Error values unchanged after retry exhaustion', async () => {
     vi.useFakeTimers();
 
@@ -602,8 +624,8 @@ describe('withRetry deadlineMs — one wall-clock budget across attempts (#455)'
     await vi.advanceTimersByTimeAsync(1);
     const error = (await tracked) as McpError;
 
-    // fetchWithTimeout classifies an external-signal abort as RequestCancelled;
-    // the deadline normalization is what keeps that off the wire.
+    // fetchWithTimeout classifies the clock's TimeoutError abort as a
+    // per-attempt Timeout; the normalization gives the ladder its one shape.
     expect(error).toBeInstanceOf(McpError);
     expect(error.code).toBe(JsonRpcErrorCode.Timeout);
     expect(error.data?.reason).toBe('retry_deadline_exceeded');
@@ -614,7 +636,8 @@ describe('withRetry deadlineMs — one wall-clock budget across attempts (#455)'
     expect(error.data).not.toHaveProperty('attempt');
     // The overshoot this guards: the attempt is aborted, never waited out.
     expect(fetchMock).toHaveBeenCalledTimes(1);
-    expect((error.cause as McpError).code).toBe(JsonRpcErrorCode.RequestCancelled);
+    expect((error.cause as McpError).code).toBe(JsonRpcErrorCode.Timeout);
+    expect((error.cause as McpError).data?.errorSource).toBe('FetchSignalTimeout');
     expect(vi.getTimerCount()).toBe(0);
   });
 

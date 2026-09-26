@@ -5,6 +5,7 @@
 
 import { SpanStatusCode, trace } from '@opentelemetry/api';
 import { afterEach, beforeEach, describe, expect, it, type MockInstance, vi } from 'vitest';
+import { z } from 'zod';
 
 import { InputRequiredSignal } from '../../../../src/mcp-server/inputRequired.js';
 import { JsonRpcErrorCode, McpError } from '../../../../src/types-global/errors.js';
@@ -110,6 +111,7 @@ describe('measureToolExecution', () => {
     expect(mockCounterAdd).toHaveBeenCalledWith(1, {
       'mcp.tool.name': 'metric-tool',
       'mcp.tool.success': true,
+      'mcp.tool.outcome': 'ok',
     });
     expect(mockHistogramRecord).toHaveBeenCalledWith(expect.any(Number), {
       'mcp.tool.name': 'metric-tool',
@@ -132,6 +134,7 @@ describe('measureToolExecution', () => {
     expect(mockCounterAdd).toHaveBeenCalledWith(1, {
       'mcp.tool.name': 'err-tool',
       'mcp.tool.success': false,
+      'mcp.tool.outcome': 'error',
     });
     expect(mockHistogramRecord).toHaveBeenCalledWith(expect.any(Number), {
       'mcp.tool.name': 'err-tool',
@@ -140,6 +143,7 @@ describe('measureToolExecution', () => {
     expect(mockErrorCounterAdd).toHaveBeenCalledWith(1, {
       'mcp.tool.name': 'err-tool',
       'mcp.tool.error_category': 'server',
+      'mcp.tool.outcome': 'error',
     });
   });
 
@@ -175,6 +179,130 @@ describe('measureToolExecution', () => {
       ['no data at all', undefined],
     ])('leaves every other RateLimited upstream — %s', async (_label, data) => {
       expect(await categoryFor(data)).toBe('upstream');
+    });
+  });
+
+  // Issue #546 — `mcp.tool.outcome` separates a caller hang-up from a failure
+  // on the call and error counters; `mcp.tool.duration` keeps its attributes.
+  describe('mcp.tool.outcome on calls and errors (#546)', () => {
+    const run = (name: string, logic: () => Promise<unknown>) =>
+      measureToolExecution(
+        logic,
+        { toolName: name, requestId: 'req-o', timestamp: new Date().toISOString() },
+        {},
+      );
+
+    it('records ok for a success, on calls only', async () => {
+      await run('outcome-ok', async () => ({ ok: true }));
+
+      expect(mockCounterAdd).toHaveBeenCalledWith(1, {
+        'mcp.tool.name': 'outcome-ok',
+        'mcp.tool.success': true,
+        'mcp.tool.outcome': 'ok',
+      });
+      expect(mockHistogramRecord).toHaveBeenCalledWith(expect.any(Number), {
+        'mcp.tool.name': 'outcome-ok',
+        'mcp.tool.success': true,
+      });
+      expect(mockErrorCounterAdd).not.toHaveBeenCalled();
+    });
+
+    it('records error for a failure, on calls and errors', async () => {
+      await expect(
+        run('outcome-error', async () => {
+          throw new McpError(JsonRpcErrorCode.NotFound, 'gone');
+        }),
+      ).rejects.toThrow('gone');
+
+      expect(mockCounterAdd).toHaveBeenCalledWith(1, {
+        'mcp.tool.name': 'outcome-error',
+        'mcp.tool.success': false,
+        'mcp.tool.outcome': 'error',
+      });
+      expect(mockHistogramRecord).toHaveBeenCalledWith(expect.any(Number), {
+        'mcp.tool.name': 'outcome-error',
+        'mcp.tool.success': false,
+      });
+      expect(mockErrorCounterAdd).toHaveBeenCalledWith(1, {
+        'mcp.tool.name': 'outcome-error',
+        'mcp.tool.error_category': 'client',
+        'mcp.tool.outcome': 'error',
+      });
+    });
+
+    it('records cancelled for a RequestCancelled, paired with client', async () => {
+      await expect(
+        run('outcome-cancelled', async () => {
+          throw new McpError(JsonRpcErrorCode.RequestCancelled, 'caller went away');
+        }),
+      ).rejects.toThrow('caller went away');
+
+      expect(mockCounterAdd).toHaveBeenCalledWith(1, {
+        'mcp.tool.name': 'outcome-cancelled',
+        'mcp.tool.success': false,
+        'mcp.tool.outcome': 'cancelled',
+      });
+      expect(mockErrorCounterAdd).toHaveBeenCalledWith(1, {
+        'mcp.tool.name': 'outcome-cancelled',
+        'mcp.tool.error_category': 'client',
+        'mcp.tool.outcome': 'cancelled',
+      });
+    });
+
+    it('records ok for an input_required round', async () => {
+      const signal = new InputRequiredSignal({ type: 'input_required', requests: [] } as never);
+      await expect(
+        run('outcome-input', async () => {
+          throw signal;
+        }),
+      ).rejects.toBe(signal);
+
+      expect(mockCounterAdd).toHaveBeenCalledWith(1, {
+        'mcp.tool.name': 'outcome-input',
+        'mcp.tool.success': true,
+        'mcp.tool.outcome': 'ok',
+      });
+      expect(mockErrorCounterAdd).not.toHaveBeenCalled();
+    });
+  });
+
+  // Issue #480 — a non-McpError is filed under the category of the code the
+  // caller receives, the one `mcp.errors.classified` records for the same call.
+  describe('error_category classifies a non-McpError the way the wire does (#480)', () => {
+    /** Runs a tool whose logic throws `thrown` and returns the `mcp.tool.errors` attributes. */
+    async function errorAttributesFor(thrown: unknown): Promise<Record<string, unknown>> {
+      await expect(
+        measureToolExecution(
+          async () => {
+            throw thrown;
+          },
+          { toolName: 'classify-tool', requestId: 'req-c', timestamp: new Date().toISOString() },
+          {},
+        ),
+      ).rejects.toBe(thrown);
+      const call = mockErrorCounterAdd.mock.calls.at(-1);
+      if (!call) throw new Error('mcp.tool.errors was never incremented');
+      return call[1] as Record<string, unknown>;
+    }
+
+    it.each([
+      ['Error("boom")', new Error('boom'), 'server'],
+      ['Error("Request timed out")', new Error('Request timed out'), 'upstream'],
+      ['Error("status code 503")', new Error('status code 503'), 'upstream'],
+      ['a handler-thrown ZodError', z.number().safeParse('x').error, 'client'],
+      ['a stack overflow RangeError', new RangeError('Maximum call stack size exceeded'), 'server'],
+      ['a thrown string', 'string failure', 'server'],
+    ])('files %s under its wire category', async (_label, thrown, category) => {
+      expect((await errorAttributesFor(thrown))['mcp.tool.error_category']).toBe(category);
+    });
+
+    it('keeps the span and completion-log error code unclassified', async () => {
+      await errorAttributesFor(new Error('Request timed out'));
+
+      expect(span.setAttribute).toHaveBeenCalledWith('mcp.tool.error_code', 'UNHANDLED_ERROR');
+      const call = infoSpy.mock.calls.at(-1);
+      if (!call) throw new Error('infoSpy was not called');
+      expect((call[1] as any).extra.metrics.errorCode).toBe('UNHANDLED_ERROR');
     });
   });
 
@@ -327,10 +455,12 @@ describe('measureToolExecution', () => {
     expect(mockCounterAdd).toHaveBeenCalledWith(1, {
       'mcp.tool.name': 'post-handler',
       'mcp.tool.success': false,
+      'mcp.tool.outcome': 'error',
     });
     expect(mockErrorCounterAdd).toHaveBeenCalledWith(1, {
       'mcp.tool.name': 'post-handler',
       'mcp.tool.error_category': 'server',
+      'mcp.tool.outcome': 'error',
     });
 
     const call = infoSpy.mock.calls[0];
@@ -602,6 +732,7 @@ describe('measureToolExecution', () => {
     expect(mockErrorCounterAdd).toHaveBeenCalledWith(1, {
       'mcp.tool.name': 'string-failure',
       'mcp.tool.error_category': 'server',
+      'mcp.tool.outcome': 'error',
     });
   });
 });
@@ -1005,6 +1136,35 @@ describe('measurePromptGeneration', () => {
       'mcp.prompt.error_category': 'server',
     });
   });
+
+  it.each([
+    ['Error("boom")', new Error('boom'), 'server'],
+    ['Error("Request timed out")', new Error('Request timed out'), 'upstream'],
+    ['Error("status code 503")', new Error('status code 503'), 'upstream'],
+    ['a ZodError', z.number().safeParse('x').error, 'client'],
+  ])(
+    'files a generate() that throws %s under its wire category (#480)',
+    async (_label, thrown, category) => {
+      await expect(
+        measurePromptGeneration(
+          async () => {
+            throw thrown;
+          },
+          {
+            promptName: 'classify-prompt',
+            requestId: 'req-pc',
+            timestamp: new Date().toISOString(),
+          },
+          {},
+        ),
+      ).rejects.toBe(thrown);
+
+      expect(mockErrorCounterAdd).toHaveBeenCalledWith(1, {
+        'mcp.prompt.name': 'classify-prompt',
+        'mcp.prompt.error_category': category,
+      });
+    },
+  );
 
   it('increments and decrements active requests gauge', async () => {
     await measurePromptGeneration(

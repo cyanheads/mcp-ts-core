@@ -122,10 +122,15 @@ export interface RetryOptions {
 
   /**
    * Optional AbortSignal. When aborted, the retry loop exits immediately
-   * without further attempts, rethrowing unchanged — this is the caller-abort
-   * passthrough and it outranks a {@link deadlineMs} expiry, so a cancelled
-   * request is never relabelled as one that ran out of budget. Also composed
-   * into {@link RetryAttempt.signal}.
+   * without further attempts. An abort that lands during an attempt rethrows
+   * that attempt's error unchanged; one that lands during a backoff wait
+   * rejects with `signal.reason` itself — the caller's string, `Error`, or the
+   * `AbortError` `DOMException` a reason-less `abort()` leaves — not an
+   * `McpError`. This caller-abort passthrough outranks a {@link deadlineMs}
+   * expiry, so a cancelled request is never relabelled as one that ran out of
+   * budget. Inside a tool or resource handler whose request signal is the one
+   * that fired, the handler factory reports either shape as `RequestCancelled`
+   * (-32011). Also composed into {@link RetryAttempt.signal}.
    */
   signal?: AbortSignal;
 }
@@ -264,9 +269,9 @@ interface DeadlineClock {
  *
  * `withRetry` cannot tell the three clocks apart from a caught error alone — a
  * deadline abort reaching `fetchWithTimeout` on its external signal arrives as
- * `RequestCancelled`, and one landing mid-backoff arrives as the raw abort
- * reason — so both normalize through {@link DeadlineClock.exceeded} and the
- * caller matches one shape.
+ * a per-attempt `Timeout` (`errorSource: 'FetchSignalTimeout'`), and one
+ * landing mid-backoff arrives as the raw abort reason — so both normalize
+ * through {@link DeadlineClock.exceeded} and the caller matches one shape.
  *
  * The expiry carries no `retryable` flag: a narrower call can still succeed, and
  * that flag is {@link defaultIsTransient}'s in-band opt-out rather than a
@@ -357,10 +362,9 @@ function enrichExhaustedError(error: unknown, totalAttempts: number, operation?:
  * by one in-flight request. A backoff that would consume the remaining budget
  * fails fast rather than sleeping into a certain timeout, and expiry rejects with
  * a single `Timeout` error carrying `data.reason: 'retry_deadline_exceeded'` —
- * the `RequestCancelled` that an external-signal abort produces inside
- * `fetchWithTimeout` normalizes to it. A caller abort on `options.signal` keeps
- * precedence and is never relabelled. Without `deadlineMs`, behavior is
- * unchanged.
+ * the per-attempt `Timeout` the clock's abort produces inside `fetchWithTimeout`
+ * normalizes to it. A caller abort on `options.signal` keeps precedence and is
+ * never relabelled. Without `deadlineMs`, behavior is unchanged.
  *
  * When retries exhaust, the final error is enriched with attempt count in both
  * the message and structured data, so callers know retries were already attempted.
@@ -437,7 +441,7 @@ export async function withRetry<T>(
         }
 
         // The deadline fired inside the attempt. Whatever shape it took on the
-        // way back (RequestCancelled from an external-signal abort, a raw abort
+        // way back (a per-attempt Timeout from `fetchWithTimeout`, a raw abort
         // reason), the caller sees one error.
         if (clock?.expired()) {
           throw clock.exceeded(error, attempt + 1);

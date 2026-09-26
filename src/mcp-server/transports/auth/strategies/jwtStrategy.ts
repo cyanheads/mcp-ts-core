@@ -46,7 +46,6 @@ export class JwtStrategy implements AuthStrategy {
       );
       throw configurationError(
         'MCP_AUTH_SECRET_KEY must be set for JWT auth (or set DEV_MCP_AUTH_BYPASS=true).',
-        context,
       );
     } else if (!secretKey) {
       // devMcpAuthBypass is explicitly true — opt-in dev bypass

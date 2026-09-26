@@ -80,7 +80,7 @@ interface CompiledErrorMapping extends BaseErrorMapping {
  * | Constructor | Mapped Code |
  * |-------------|-------------|
  * | `SyntaxError` | `ValidationError` |
- * | `RangeError` | `ValidationError` |
+ * | `RangeError` | `ValidationError` (except an engine resource limit — see below) |
  * | `URIError` | `ValidationError` |
  * | `ReferenceError` | `InternalError` |
  * | `EvalError` | `InternalError` |
@@ -90,6 +90,9 @@ interface CompiledErrorMapping extends BaseErrorMapping {
  * Note: `TypeError` is intentionally excluded. Runtime TypeErrors (e.g. "Cannot read
  * properties of undefined") are programming errors, not validation failures. Letting them
  * fall through to message-pattern matching or the `InternalError` fallback is more accurate.
+ *
+ * A `RangeError` whose whole message is in {@link ENGINE_RESOURCE_LIMIT_MESSAGES} never
+ * reaches this table: `determineErrorCode` maps it to `InternalError` first (#482).
  *
  * @example
  * ```ts
@@ -105,6 +108,25 @@ export const ERROR_TYPE_MAPPINGS: Readonly<Record<string, JsonRpcErrorCode>> = {
   AggregateError: JsonRpcErrorCode.InternalError,
   ZodError: JsonRpcErrorCode.ValidationError,
 };
+
+/**
+ * The whole messages V8 and JavaScriptCore give the `RangeError` they raise when the
+ * engine itself runs out of a resource: the call stack (JavaScriptCore adds a trailing
+ * period) and the maximum string size (V8's `Invalid string length`, JavaScriptCore's
+ * `Out of memory`).
+ *
+ * `ErrorHandler.determineErrorCode` maps a `RangeError` carrying one of these to
+ * `InternalError` ahead of {@link ERROR_TYPE_MAPPINGS}: it names nothing a caller can
+ * change, so it is a server fault, not the `ValidationError` every other `RangeError` is
+ * (#482). Matched by whole message, so a `RangeError` that merely mentions one keeps
+ * `ValidationError`.
+ */
+export const ENGINE_RESOURCE_LIMIT_MESSAGES: ReadonlySet<string> = new Set([
+  'Maximum call stack size exceeded',
+  'Maximum call stack size exceeded.',
+  'Invalid string length',
+  'Out of memory',
+]);
 
 /**
  * Common error patterns for classifying errors by message/name.

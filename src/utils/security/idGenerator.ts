@@ -152,7 +152,7 @@ export class IdGenerator {
     if (charset.length === 0 || charset.length > MAX_CHARSET_LENGTH) {
       throw validationError(
         `Charset must contain between 1 and ${MAX_CHARSET_LENGTH} characters; received ${charset.length}.`,
-        { charsetLength: charset.length, max: MAX_CHARSET_LENGTH },
+        { charsetLength: charset.length, max: MAX_CHARSET_LENGTH, reason: 'invalid_charset' },
       );
     }
     return randomStringFromCharset(length, charset);
@@ -187,7 +187,10 @@ export class IdGenerator {
   public generateForEntity(entityType: string, options: IdGenerationOptions = {}): string {
     const prefix = this.entityPrefixes[entityType];
     if (!prefix) {
-      throw validationError(`Unknown entity type: ${entityType}. No prefix registered.`);
+      throw validationError(`Unknown entity type: ${entityType}. No prefix registered.`, {
+        entityType,
+        reason: 'unknown_entity_type',
+      });
     }
     return this.generate(prefix, options);
   }
@@ -268,6 +271,13 @@ export class IdGenerator {
     if (parts.length < 2 || !parts[0]) {
       throw validationError(
         `Invalid ID format: ${id}. Expected format like: PREFIX${separator}RANDOMPART`,
+        {
+          id,
+          reason: 'invalid_id_format',
+          recovery: {
+            hint: `Pass an ID of the form PREFIX${separator}RANDOMPART, as this server returned it.`,
+          },
+        },
       );
     }
 
@@ -275,7 +285,14 @@ export class IdGenerator {
     const entityType = this.prefixToEntityType[prefix.toLowerCase()];
 
     if (!entityType) {
-      throw validationError(`Unknown entity type for prefix: ${prefix}`);
+      const registered = Object.values(this.entityPrefixes);
+      throw validationError(`Unknown entity type for prefix: ${prefix}`, {
+        prefix,
+        reason: 'unknown_entity_type',
+        ...(registered.length > 0 && {
+          recovery: { hint: `Use an ID whose prefix is one of: ${registered.join(', ')}.` },
+        }),
+      });
     }
     return entityType;
   }

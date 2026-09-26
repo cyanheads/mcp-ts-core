@@ -227,8 +227,8 @@ describe('ErrorHandler (unit)', () => {
       }) as McpError;
 
       expect(final.code).toBe(JsonRpcErrorCode.InternalError);
+      // No `requestId`: the context rides the log record only (#548).
       expect(final.data).toEqual({
-        requestId: 'rid-519',
         originalErrorName: 'Error',
         originalMessage: 'db read failed',
         rootCause: { name: 'Error', message: 'EACCES' },

@@ -75,6 +75,24 @@ function isAllowedUrl(input: string, protocols: readonly string[]): boolean {
 /** A plain decimal: optional sign, optional fraction, no exponent or separators. */
 const NUMERIC_STRING = /^[+-]?([0-9]*\.)?[0-9]+$/;
 
+/** `data.reason` + recovery shared by every `sanitizeNumber` rejection. */
+const INVALID_NUMBER = {
+  reason: 'invalid_number',
+  recovery: {
+    hint: 'Provide a finite decimal number, such as 42 or -3.5, without an exponent or thousands separators.',
+  },
+} as const;
+
+/** The `data.reason` values `sanitizePath` rejects with. */
+type PathRejectionReason = 'invalid_path' | 'path_traversal' | 'absolute_path_disallowed';
+
+const PATH_REJECTION_HINTS: Record<PathRejectionReason, string> = {
+  invalid_path: 'Provide a non-empty path string that contains no null bytes.',
+  path_traversal:
+    'Provide a relative path that stays inside the permitted directory, with no `..` segments climbing out of it.',
+  absolute_path_disallowed: 'Provide a relative path instead of an absolute one.',
+};
+
 // Dynamically import 'path' only in Node.js environments.
 // Top-level await ensures the module is loaded before any sanitizePath call.
 let pathModule: typeof import('node:path') | undefined;
@@ -479,6 +497,7 @@ export class Sanitization {
         );
         throw validationError(
           'JavaScript sanitization is not supported through sanitizeString due to security risks.',
+          { reason: 'unsupported_sanitize_context' },
         );
       default: {
         const sanitizeHtmlFn = await loadSanitizeHtml();
@@ -537,7 +556,13 @@ export class Sanitization {
       } catch (error: unknown) {
         throw validationError(
           error instanceof Error ? error.message : 'Invalid or unsafe URL provided.',
-          { input },
+          {
+            input,
+            reason: 'invalid_url',
+            recovery: {
+              hint: `Provide an absolute URL with a host and no whitespace or angle brackets, using one of these schemes: ${allowedProtocols.join(', ')}.`,
+            },
+          },
         );
       }
     });
@@ -590,11 +615,18 @@ export class Sanitization {
     };
 
     let wasAbsoluteInitially = false;
+    const rejectPath = (message: string, reason: PathRejectionReason): McpError =>
+      validationError(message, {
+        input: originalInput,
+        reason,
+        recovery: { hint: PATH_REJECTION_HINTS[reason] },
+      });
 
     try {
       if (!input || typeof input !== 'string')
-        throw new Error('Invalid path input: must be a non-empty string.');
-      if (input.includes('\0')) throw new Error('Path contains null byte, which is disallowed.');
+        throw rejectPath('Invalid path input: must be a non-empty string.', 'invalid_path');
+      if (input.includes('\0'))
+        throw rejectPath('Path contains null byte, which is disallowed.', 'invalid_path');
 
       let normalized = path.normalize(input);
       wasAbsoluteInitially = path.isAbsolute(normalized);
@@ -608,21 +640,26 @@ export class Sanitization {
       if (resolvedRootDir) {
         const fullPath = path.resolve(resolvedRootDir, normalized);
         if (!fullPath.startsWith(resolvedRootDir + path.sep) && fullPath !== resolvedRootDir) {
-          throw new Error(
+          throw rejectPath(
             'Path traversal detected: attempts to escape the defined root directory.',
+            'path_traversal',
           );
         }
         finalSanitizedPath = path.relative(resolvedRootDir, fullPath);
         finalSanitizedPath = finalSanitizedPath === '' ? '.' : finalSanitizedPath;
         if (path.isAbsolute(finalSanitizedPath) && !effectiveOptions.allowAbsolute) {
-          throw new Error(
+          throw rejectPath(
             'Path resolved to absolute outside root when absolute paths are disallowed.',
+            'path_traversal',
           );
         }
       } else {
         if (path.isAbsolute(normalized)) {
           if (!effectiveOptions.allowAbsolute) {
-            throw new Error('Absolute paths are disallowed by current options.');
+            throw rejectPath(
+              'Absolute paths are disallowed by current options.',
+              'absolute_path_disallowed',
+            );
           } else {
             finalSanitizedPath = normalized;
           }
@@ -633,8 +670,9 @@ export class Sanitization {
             !resolvedAgainstCwd.startsWith(currentWorkingDir + path.sep) &&
             resolvedAgainstCwd !== currentWorkingDir
           ) {
-            throw new Error(
+            throw rejectPath(
               'Relative path traversal detected (escapes current working directory context).',
+              'path_traversal',
             );
           }
           finalSanitizedPath = normalized;
@@ -663,9 +701,10 @@ export class Sanitization {
           },
         }),
       );
-      throw validationError(
+      if (error instanceof McpError) throw error;
+      throw rejectPath(
         error instanceof Error ? error.message : 'Invalid or unsafe path provided.',
-        { input: originalInput },
+        'invalid_path',
       );
     }
   }
@@ -715,6 +754,8 @@ export class Sanitization {
         throw validationError(`JSON string exceeds maximum allowed size of ${maxSize} bytes.`, {
           actualSize: computeBytes(input),
           maxSize,
+          reason: 'json_too_large',
+          recovery: { hint: `Send a JSON payload of at most ${maxSize} bytes.` },
         });
       }
 
@@ -723,6 +764,8 @@ export class Sanitization {
       if (error instanceof McpError) throw error;
       throw validationError(error instanceof Error ? error.message : 'Invalid JSON format.', {
         inputPreview: input.length > 100 ? `${input.substring(0, 100)}...` : input,
+        reason: 'invalid_json',
+        recovery: { hint: 'Send the value as a well-formed JSON string.' },
       });
     }
   }
@@ -761,7 +804,10 @@ export class Sanitization {
       if (typeof input === 'string') {
         const trimmedInput = input.trim();
         if (!NUMERIC_STRING.test(trimmedInput)) {
-          throw validationError('Invalid number format: input is empty or not numeric.', { input });
+          throw validationError('Invalid number format: input is empty or not numeric.', {
+            input,
+            ...INVALID_NUMBER,
+          });
         }
         value = parseFloat(trimmedInput);
       } else if (typeof input === 'number') {
@@ -769,11 +815,15 @@ export class Sanitization {
       } else {
         throw validationError('Invalid input type: expected number or string.', {
           input: String(input),
+          ...INVALID_NUMBER,
         });
       }
 
       if (Number.isNaN(value) || !Number.isFinite(value)) {
-        throw validationError('Invalid number value (NaN or Infinity).', { input });
+        throw validationError('Invalid number value (NaN or Infinity).', {
+          input,
+          ...INVALID_NUMBER,
+        });
       }
 
       let clamped = false;
@@ -850,6 +900,58 @@ export class Sanitization {
       );
       return '[Log Sanitization Failed]';
     }
+  }
+
+  /**
+   * Redacts, serializes, and caps a value for a log field: {@link sanitizeForLogging},
+   * then `JSON.stringify`, then truncation to at most `maxBytes` UTF-8 bytes.
+   *
+   * Redaction runs first, so a cut can never keep the prefix of a secret the
+   * redactor would have replaced. The cut lands on a character boundary — never
+   * inside a multi-byte sequence or between the halves of a surrogate pair — so
+   * the result is always well-formed. It is a prefix of the whole serialization,
+   * so a truncated payload is no longer valid JSON; `truncated` says so.
+   *
+   * Returned as a string rather than an object because the logger drops values
+   * nested past its sanitize depth, which would silently strip the deep parts of
+   * a payload. A value `JSON.stringify` rejects (a `bigint`) yields
+   * `'[Log Serialization Failed]'` rather than throwing into the caller's path.
+   *
+   * Key-name redaction only: a secret inside a free-form string value (a query,
+   * a message) is serialized as-is.
+   *
+   * @param value - The value to serialize.
+   * @param maxBytes - Maximum UTF-8 byte length of `text`.
+   * @returns `text`, the serialized and possibly truncated payload, and `truncated`.
+   * @example
+   * ```ts
+   * sanitization.serializeForLogging({ query: 'q', apiKey: 'sk-1' }, 16_384);
+   * // => { text: '{"query":"q","apiKey":"[REDACTED]"}', truncated: false }
+   * ```
+   */
+  public serializeForLogging(
+    value: unknown,
+    maxBytes: number,
+  ): { text: string; truncated: boolean } {
+    let json: string;
+    try {
+      json = JSON.stringify(this.sanitizeForLogging(value)) ?? 'undefined';
+    } catch {
+      return { text: '[Log Serialization Failed]', truncated: false };
+    }
+    // Counted by hand rather than with `TextEncoder.encodeInto`, whose fill of a
+    // short buffer differs by runtime (Node stops up to two bytes early). A
+    // high surrogate starts a 4-byte pair and is sliced only with its partner;
+    // `JSON.stringify` escapes lone surrogates, so none reach here.
+    let bytes = 0;
+    for (let i = 0; i < json.length; i++) {
+      const unit = json.charCodeAt(i);
+      const width = unit < 0x80 ? 1 : unit < 0x800 ? 2 : unit >= 0xd800 && unit < 0xdc00 ? 4 : 3;
+      if (bytes + width > maxBytes) return { text: json.slice(0, i), truncated: true };
+      bytes += width;
+      if (width === 4) i++;
+    }
+    return { text: json, truncated: false };
   }
 
   /**

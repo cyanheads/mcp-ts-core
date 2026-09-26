@@ -125,7 +125,8 @@ export class D1Provider implements IStorageProvider {
           throw new McpError(
             JsonRpcErrorCode.SerializationError,
             `[D1Provider] Failed to parse JSON for key: ${key}`,
-            { ...context, error },
+            undefined,
+            { cause: error },
           );
         }
       },
@@ -236,7 +237,9 @@ export class D1Provider implements IStorageProvider {
           try {
             lastKey = decodeCursor(options.cursor, tenantId, context);
           } catch (error: unknown) {
-            throw invalidParams('Invalid cursor format or tenant mismatch', { ...context, error });
+            throw invalidParams('Invalid cursor format or tenant mismatch', undefined, {
+              cause: error,
+            });
           }
         }
 
@@ -348,7 +351,8 @@ export class D1Provider implements IStorageProvider {
             throw new McpError(
               JsonRpcErrorCode.SerializationError,
               `[D1Provider] Failed to parse JSON for key: ${row.key}`,
-              { ...context, error },
+              undefined,
+              { cause: error },
             );
           }
         }

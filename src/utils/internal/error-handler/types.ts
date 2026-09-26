@@ -53,6 +53,8 @@ export interface ErrorHandlerOptions {
   /**
    * The context of the operation that caused the error.
    * This can include `requestId` and other relevant debugging information.
+   * It reaches the log record only, never the returned error's client-visible
+   * `data`; put caller-actionable fields in the thrown `McpError`'s `data`.
    */
   context?: ErrorContext;
 

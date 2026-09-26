@@ -137,5 +137,61 @@ describe('IdGenerator and UUID', () => {
       expect(customGenerator.stripPrefix(id, '-')).not.toContain('-');
       expect(customGenerator.getEntityType(id, '-')).toBe('test');
     });
+
+    describe('failure reasons', () => {
+      /** The McpError `run` throws. */
+      function failureOf(run: () => unknown): McpError {
+        try {
+          run();
+        } catch (error) {
+          expect(error).toBeInstanceOf(McpError);
+          return error as McpError;
+        }
+        throw new Error('expected the call to throw');
+      }
+
+      it('rejects an out-of-range charset as invalid_charset', () => {
+        const error = failureOf(() => idGenerator.generateRandomString(8, ''));
+
+        expect(error.data).toEqual({ charsetLength: 0, max: 256, reason: 'invalid_charset' });
+      });
+
+      it('rejects an unregistered entity type as unknown_entity_type', () => {
+        const error = failureOf(() => idGenerator.generateForEntity('unknown'));
+
+        expect(error.code).toBe(JsonRpcErrorCode.ValidationError);
+        expect(error.data).toEqual({ entityType: 'unknown', reason: 'unknown_entity_type' });
+      });
+
+      it.each([
+        ['no separator', 'NOSEPARATOR'],
+        ['an empty prefix', '_ABC123'],
+      ])('rejects an ID with %s as invalid_id_format, naming the expected shape', (_label, id) => {
+        const error = failureOf(() => idGenerator.getEntityType(id));
+
+        expect(error.code).toBe(JsonRpcErrorCode.ValidationError);
+        expect(error.data).toMatchObject({
+          id,
+          reason: 'invalid_id_format',
+          recovery: { hint: expect.stringContaining('PREFIX_RANDOMPART') },
+        });
+      });
+
+      it('rejects an unknown ID prefix as unknown_entity_type, naming the registered prefixes', () => {
+        const error = failureOf(() => idGenerator.getEntityType('UNK_123'));
+
+        expect(error.data).toEqual({
+          prefix: 'UNK',
+          reason: 'unknown_entity_type',
+          recovery: { hint: 'Use an ID whose prefix is one of: USR, PROJ.' },
+        });
+      });
+
+      it('carries the same reason through normalize', () => {
+        expect(failureOf(() => idGenerator.normalize('UNK_123')).data?.reason).toBe(
+          'unknown_entity_type',
+        );
+      });
+    });
   });
 });

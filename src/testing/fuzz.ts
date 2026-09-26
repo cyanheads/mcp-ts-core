@@ -23,6 +23,7 @@ import {
   ZodString,
   ZodUnion,
 } from 'zod';
+import { isOutputContractViolation } from '@/mcp-server/outputContract.js';
 import type { AnyPromptDefinition } from '@/mcp-server/prompts/utils/promptDefinition.js';
 import type { AnyResourceDefinition } from '@/mcp-server/resources/utils/resourceDefinition.js';
 import { inputVariants, zodDef } from '@/mcp-server/tools/utils/schemaShape.js';
@@ -576,8 +577,13 @@ function recordLeak(report: FuzzReport, input: unknown, error: unknown): void {
   }
 }
 
+/**
+ * A crash is any throw that is not a well-formed `McpError` — plus a broken
+ * output or enrichment contract, which the framework now raises as an
+ * `McpError` (`InternalError`) but which is still the definition's bug.
+ */
 function recordHandlerError(report: FuzzReport, input: unknown, error: unknown): void {
-  if (!(error instanceof McpError)) {
+  if (!(error instanceof McpError) || isOutputContractViolation(error)) {
     report.crashes.push({ input, error });
   }
 

@@ -3,19 +3,25 @@
  * @module tests/utils/telemetry/instrumentation.lifecycle.test
  */
 
-import { DiagLogLevel, diag } from '@opentelemetry/api';
+import { type DiagLogger, DiagLogLevel, diag } from '@opentelemetry/api';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const otelState = vi.hoisted(() => ({
+  batchLogProcessorOptions: [] as Array<Record<string, unknown>>,
   batchSpanProcessorArgs: [] as unknown[],
+  getLoggerSpy: vi.fn((name: string, version?: string) => ({ emit: vi.fn(), name, version })),
   httpInstrumentationOptions: [] as Array<Record<string, unknown>>,
+  logExporterOptions: [] as Array<Record<string, unknown>>,
+  logModulesLoaded: [] as string[],
   metricExporterOptions: [] as Array<Record<string, unknown>>,
   metricReaderOptions: [] as Array<Record<string, unknown>>,
+  nodeSdkEnvLogLevel: [] as Array<string | undefined>,
   nodeSdkOptions: [] as Array<Record<string, unknown>>,
   pinoInstrumentationOptions: [] as Array<Record<string, unknown>>,
   resourceFromAttributesSpy: vi.fn((attrs: Record<string, unknown>) => ({ attrs })),
   sdkShutdownSpy: vi.fn().mockResolvedValue(undefined),
   sdkStartSpy: vi.fn(),
+  setOtelLogSinkSpy: vi.fn(),
   traceExporterOptions: [] as Array<Record<string, unknown>>,
   traceIdSamplerRatios: [] as number[],
 }));
@@ -25,6 +31,7 @@ const mockConfig = vi.hoisted(() => ({
   openTelemetry: {
     enabled: true,
     logLevel: 'info',
+    logsEndpoint: undefined as string | undefined,
     metricsEndpoint: 'http://localhost:4318/v1/metrics',
     samplingRatio: 0.5,
     serviceName: 'test-service',
@@ -51,6 +58,37 @@ vi.mock('@/config/index.js', () => ({
 vi.mock('@/utils/internal/runtime.js', () => ({
   runtimeCaps: mockRuntimeCaps,
 }));
+
+vi.mock('@/utils/internal/logger.js', () => ({
+  logger: { setOtelLogSink: otelState.setOtelLogSinkSpy },
+}));
+
+vi.mock('@opentelemetry/sdk-logs', () => {
+  otelState.logModulesLoaded.push('@opentelemetry/sdk-logs');
+  return {
+    BatchLogRecordProcessor: class BatchLogRecordProcessor {
+      constructor(options: Record<string, unknown>) {
+        otelState.batchLogProcessorOptions.push(options);
+      }
+    },
+  };
+});
+
+vi.mock('@opentelemetry/exporter-logs-otlp-http', () => {
+  otelState.logModulesLoaded.push('@opentelemetry/exporter-logs-otlp-http');
+  return {
+    OTLPLogExporter: class OTLPLogExporter {
+      constructor(options: Record<string, unknown>) {
+        otelState.logExporterOptions.push(options);
+      }
+    },
+  };
+});
+
+vi.mock('@opentelemetry/api-logs', () => {
+  otelState.logModulesLoaded.push('@opentelemetry/api-logs');
+  return { logs: { getLogger: otelState.getLoggerSpy } };
+});
 
 vi.mock('@opentelemetry/instrumentation-http', () => ({
   HttpInstrumentation: class HttpInstrumentation {
@@ -100,6 +138,7 @@ vi.mock('@opentelemetry/sdk-node', () => ({
   NodeSDK: class NodeSDK {
     constructor(options: Record<string, unknown>) {
       otelState.nodeSdkOptions.push(options);
+      otelState.nodeSdkEnvLogLevel.push(process.env.OTEL_LOG_LEVEL);
     }
 
     shutdown() {
@@ -138,17 +177,24 @@ describe('OpenTelemetry instrumentation lifecycle', () => {
     FUNCTION_TARGET: process.env.FUNCTION_TARGET,
     GCP_REGION: process.env.GCP_REGION,
     K_SERVICE: process.env.K_SERVICE,
+    OTEL_LOG_LEVEL: process.env.OTEL_LOG_LEVEL,
   };
 
   beforeEach(() => {
     vi.resetModules();
     vi.clearAllMocks();
     vi.useRealTimers();
+    // The framework's diag logger writes straight to stderr; keep it out of the test output.
+    vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
 
+    otelState.batchLogProcessorOptions.length = 0;
     otelState.batchSpanProcessorArgs.length = 0;
     otelState.httpInstrumentationOptions.length = 0;
+    otelState.logExporterOptions.length = 0;
+    otelState.logModulesLoaded.length = 0;
     otelState.metricExporterOptions.length = 0;
     otelState.metricReaderOptions.length = 0;
+    otelState.nodeSdkEnvLogLevel.length = 0;
     otelState.nodeSdkOptions.length = 0;
     otelState.pinoInstrumentationOptions.length = 0;
     otelState.traceExporterOptions.length = 0;
@@ -159,6 +205,7 @@ describe('OpenTelemetry instrumentation lifecycle', () => {
     mockConfig.environment = 'test';
     mockConfig.openTelemetry.enabled = true;
     mockConfig.openTelemetry.logLevel = 'info';
+    mockConfig.openTelemetry.logsEndpoint = undefined;
     mockConfig.openTelemetry.metricsEndpoint = 'http://localhost:4318/v1/metrics';
     mockConfig.openTelemetry.samplingRatio = 0.5;
     mockConfig.openTelemetry.serviceName = 'test-service';
@@ -232,10 +279,12 @@ describe('OpenTelemetry instrumentation lifecycle', () => {
     expect(setLoggerSpy).toHaveBeenCalledOnce();
     expect(otelState.traceExporterOptions).toEqual([{ url: 'http://localhost:4318/v1/traces' }]);
     expect(otelState.metricExporterOptions).toEqual([{ url: 'http://localhost:4318/v1/metrics' }]);
+    // A timeout within the interval, so the reader has nothing to clamp and no boot notice to print.
     expect(otelState.metricReaderOptions).toEqual([
       {
         exporter: expect.any(Object),
         exportIntervalMillis: 15000,
+        exportTimeoutMillis: 15000,
       },
     ]);
     expect(otelState.traceIdSamplerRatios).toEqual([0.5]);
@@ -316,7 +365,7 @@ describe('OpenTelemetry instrumentation lifecycle', () => {
 
     expect(warnSpy).toHaveBeenCalledWith(
       expect.stringContaining(
-        'OTEL_ENABLED is true, but no OTLP endpoint for traces or metrics is configured.',
+        'OTEL_ENABLED is true, but no OTLP endpoint for traces, metrics, or logs is configured.',
       ),
     );
     expect(infoSpy).toHaveBeenCalledWith(
@@ -508,7 +557,106 @@ describe('OpenTelemetry instrumentation lifecycle', () => {
     const setLogger = vi.spyOn(diag, 'setLogger').mockImplementation(() => true);
     const { initializeOpenTelemetry } = await import('@/utils/telemetry/instrumentation.js');
     await initializeOpenTelemetry();
-    expect(setLogger).toHaveBeenCalledWith(expect.any(Object), expected);
+    expect(setLogger).toHaveBeenCalledWith(expect.any(Object), {
+      logLevel: expected,
+      suppressOverrideMessage: true,
+    });
+  });
+
+  it('registers one diag logger that writes every level to stderr, never stdout', async () => {
+    const setLogger = vi.spyOn(diag, 'setLogger').mockImplementation(() => true);
+    const stdoutWrite = vi.spyOn(process.stdout, 'write').mockImplementation(() => true);
+    const stderrWrite = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+    const { initializeOpenTelemetry } = await import('@/utils/telemetry/instrumentation.js');
+
+    await initializeOpenTelemetry();
+
+    expect(setLogger).toHaveBeenCalledOnce();
+    const diagLogger = setLogger.mock.calls[0]?.[0] as DiagLogger;
+    for (const level of ['verbose', 'debug', 'info', 'warn', 'error'] as const) {
+      diagLogger[level](`diag ${level} line`);
+      expect(stderrWrite).toHaveBeenLastCalledWith(`diag ${level} line\n`);
+    }
+    expect(stdoutWrite).not.toHaveBeenCalled();
+  });
+
+  it('hides OTEL_LOG_LEVEL from the NodeSDK constructor and restores it afterwards', async () => {
+    process.env.OTEL_LOG_LEVEL = 'warning';
+    const { initializeOpenTelemetry } = await import('@/utils/telemetry/instrumentation.js');
+
+    await initializeOpenTelemetry();
+
+    expect(otelState.nodeSdkEnvLogLevel).toEqual([undefined]);
+    expect(process.env.OTEL_LOG_LEVEL).toBe('warning');
+  });
+
+  it('leaves OTEL_LOG_LEVEL unset when it was never set', async () => {
+    delete process.env.OTEL_LOG_LEVEL;
+    const { initializeOpenTelemetry } = await import('@/utils/telemetry/instrumentation.js');
+
+    await initializeOpenTelemetry();
+
+    expect('OTEL_LOG_LEVEL' in process.env).toBe(false);
+  });
+
+  describe('OTLP log export', () => {
+    it('attaches a batch log processor and the logger sink when the logs endpoint is set', async () => {
+      mockConfig.openTelemetry.logsEndpoint = 'http://collector:4318/v1/logs';
+      const infoSpy = vi.spyOn(diag, 'info').mockImplementation(() => true);
+      const { initializeOpenTelemetry } = await import('@/utils/telemetry/instrumentation.js');
+
+      await initializeOpenTelemetry();
+
+      expect(otelState.logExporterOptions).toEqual([{ url: 'http://collector:4318/v1/logs' }]);
+      expect(otelState.batchLogProcessorOptions).toEqual([{ exporter: expect.any(Object) }]);
+      expect(otelState.nodeSdkOptions[0]).toMatchObject({
+        logRecordProcessors: [expect.any(Object)],
+      });
+      expect(otelState.getLoggerSpy).toHaveBeenCalledWith('test-service', '1.0.0');
+      expect(otelState.setOtelLogSinkSpy).toHaveBeenCalledWith(
+        expect.objectContaining({ name: 'test-service', version: '1.0.0' }),
+      );
+      expect(infoSpy).toHaveBeenCalledWith(
+        'Using OTLP exporter for logs, endpoint: http://collector:4318/v1/logs',
+      );
+    });
+
+    it('never loads the log packages or attaches a sink when the logs endpoint is unset', async () => {
+      const { initializeOpenTelemetry } = await import('@/utils/telemetry/instrumentation.js');
+
+      await initializeOpenTelemetry();
+
+      expect(otelState.logModulesLoaded).toEqual([]);
+      expect(otelState.setOtelLogSinkSpy).not.toHaveBeenCalled();
+      expect(otelState.nodeSdkOptions[0]).toMatchObject({ logRecordProcessors: [] });
+    });
+
+    it('does not warn about missing endpoints when only the logs endpoint is set', async () => {
+      mockConfig.openTelemetry.tracesEndpoint = '';
+      mockConfig.openTelemetry.metricsEndpoint = '';
+      mockConfig.openTelemetry.logsEndpoint = 'http://collector:4318/v1/logs';
+      const warnSpy = vi.spyOn(diag, 'warn').mockImplementation(() => true);
+      const { initializeOpenTelemetry } = await import('@/utils/telemetry/instrumentation.js');
+
+      await initializeOpenTelemetry();
+
+      expect(warnSpy).not.toHaveBeenCalled();
+      expect(otelState.nodeSdkOptions[0]).toMatchObject({
+        logRecordProcessors: [expect.any(Object)],
+        metricReaders: [],
+        spanProcessors: [],
+      });
+    });
+
+    it('detaches the logger sink on shutdown', async () => {
+      mockConfig.openTelemetry.logsEndpoint = 'http://collector:4318/v1/logs';
+      const instrumentation = await import('@/utils/telemetry/instrumentation.js');
+
+      await instrumentation.initializeOpenTelemetry();
+      await instrumentation.shutdownOpenTelemetry(50);
+
+      expect(otelState.setOtelLogSinkSpy).toHaveBeenLastCalledWith(undefined);
+    });
   });
 
   it('times out long-running shutdown attempts', async () => {

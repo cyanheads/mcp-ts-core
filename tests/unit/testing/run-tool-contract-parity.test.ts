@@ -19,7 +19,8 @@ import {
   type NotifierSources,
 } from '@/mcp-server/tools/utils/toolHandlerFactory.js';
 import { runToolContract } from '@/testing/index.js';
-import { JsonRpcErrorCode } from '@/types-global/errors.js';
+import { JsonRpcErrorCode, McpError } from '@/types-global/errors.js';
+import { withRetry } from '@/utils/network/retry.js';
 import { makeServerContext } from '../../helpers/server-context.js';
 
 const services = {} as HandlerServices;
@@ -138,21 +139,166 @@ describe('runToolContract classification that must not move', () => {
     expect(envelope(helper).message).toBe(envelope(production).message);
     expect(envelope(helper).data).toEqual(envelope(production).data);
   });
+});
 
-  it('keeps an output-schema rejection on ValidationError', async () => {
-    const definition = tool('parity_bad_output', {
-      description: 'Returns output that does not match its schema.',
-      input: z.object({}),
-      output: z.object({ ok: z.boolean().describe('Success') }),
-      handler: () => ({ ok: 'wrong' }) as never,
-    }) as AnyToolDefinition;
-
+// Issue #480 — the framework's own output-contract parses fail as the server
+// fault they are, in the helper exactly as in production.
+describe('runToolContract output-contract violations', () => {
+  it.each([
+    [
+      'an output-schema violation',
+      tool('parity_bad_output', {
+        description: 'Returns output that does not match its schema.',
+        input: z.object({}),
+        output: z.object({ ok: z.boolean().describe('Success') }),
+        handler: () => ({ ok: 'wrong' }) as never,
+      }) as AnyToolDefinition,
+      'Tool parity_bad_output returned output that does not match its output schema: ok: ',
+    ],
+    [
+      'an unpopulated required enrichment field',
+      tool('parity_bad_enrichment', {
+        description: 'Declares a required enrichment field it never populates.',
+        input: z.object({}),
+        output: z.object({ ok: z.boolean().describe('Success') }),
+        enrichment: { total: z.number().describe('Required total') },
+        handler: () => ({ ok: true }),
+      }) as AnyToolDefinition,
+      'Tool parity_bad_enrichment returned enrichment that does not match its enrichment schema: total: ',
+    ],
+  ])('publishes %s as the production InternalError', async (_label, definition, prefix) => {
     const production = await viaFactory(definition, {});
     const helper = await runToolContract(definition, {} as never);
 
-    expect(envelope(production).code).toBe(JsonRpcErrorCode.ValidationError);
-    expect(envelope(helper).code).toBe(envelope(production).code);
-    expect(envelope(helper).message).toBe(envelope(production).message);
-    expect(envelope(helper).data).toEqual(envelope(production).data);
+    expect(envelope(production).code).toBe(JsonRpcErrorCode.InternalError);
+    expect(envelope(production).message.startsWith(prefix)).toBe(true);
+    expect(helper).toEqual(production);
+  });
+});
+
+// Issue #513 — a cancellation settles as `RequestCancelled` in the helper the
+// way `asRequestCancelled` settles it in the factory.
+describe('runToolContract cancellation', () => {
+  /** A tool that waits for its signal to fire, then rejects with `thrown(signal)`. */
+  const waitingTool = (thrown: (signal: AbortSignal) => unknown) =>
+    tool('parity_cancel', {
+      description: 'Waits until the request is cancelled.',
+      input: z.object({}),
+      output: z.object({ ok: z.boolean().describe('Never returned.') }),
+      handler: (_input, ctx) =>
+        new Promise<{ ok: boolean }>((_resolve, reject) => {
+          ctx.signal.addEventListener('abort', () => reject(thrown(ctx.signal)), { once: true });
+        }),
+    }) as AnyToolDefinition;
+
+  /** Runs both paths with a signal aborted `abort` after the handler starts. */
+  async function bothAborted(
+    definition: AnyToolDefinition,
+    abort: (controller: AbortController) => void,
+  ): Promise<{ helper: CallToolResult; production: CallToolResult }> {
+    const factoryController = new AbortController();
+    const productionRun = createToolHandler(
+      definition,
+      services,
+      notifiers,
+    )({}, makeServerContext({ signal: factoryController.signal }));
+    const helperController = new AbortController();
+    const helperRun = runToolContract(definition, {} as never, {
+      context: { signal: helperController.signal },
+    });
+    await Promise.resolve();
+    abort(factoryController);
+    abort(helperController);
+    return {
+      helper: await helperRun,
+      production: (await productionRun) as CallToolResult,
+    };
+  }
+
+  it.each([
+    ['a DOMException AbortError', (c: AbortController) => c.abort(), (s: AbortSignal) => s.reason],
+    [
+      'the reason string',
+      (c: AbortController) => c.abort('client disconnected'),
+      (s: AbortSignal) => s.reason,
+    ],
+    ['an unrelated Error', (c: AbortController) => c.abort(), () => new Error('upstream gave up')],
+    [
+      'an McpError of its own',
+      (c: AbortController) => c.abort(),
+      () => new McpError(JsonRpcErrorCode.NotFound, 'gone'),
+    ],
+  ])('settles %s thrown after the abort as RequestCancelled', async (_label, abort, thrown) => {
+    const { helper, production } = await bothAborted(waitingTool(thrown), abort);
+
+    expect(envelope(production).code).toBe(JsonRpcErrorCode.RequestCancelled);
+    expect(helper).toEqual(production);
+  });
+
+  it('settles a withRetry backoff aborted by ctx.signal as RequestCancelled', async () => {
+    const definition = tool('parity_retry', {
+      description: 'Retries a failing upstream until cancelled.',
+      input: z.object({}),
+      output: z.object({ ok: z.boolean().describe('Never returned.') }),
+      handler: (_input, ctx) =>
+        withRetry(
+          () => {
+            throw new McpError(JsonRpcErrorCode.ServiceUnavailable, 'upstream down');
+          },
+          { operation: 'parity_retry', context: ctx, signal: ctx.signal, baseDelayMs: 60_000 },
+        ),
+    }) as AnyToolDefinition;
+
+    const controller = new AbortController();
+    const run = runToolContract(definition, {} as never, {
+      context: { signal: controller.signal },
+    });
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    controller.abort();
+
+    expect(envelope(await run).code).toBe(JsonRpcErrorCode.RequestCancelled);
+  });
+
+  it.each([
+    ['a DOMException AbortError', () => new DOMException('aborted', 'AbortError'), -32004],
+    ['a thrown string', () => 'client disconnected', -32603],
+  ])(
+    'keeps %s thrown while the signal is live on its own classification',
+    async (_label, thrown, code) => {
+      const definition = tool('parity_live', {
+        description: 'Fails without being cancelled.',
+        input: z.object({}),
+        output: z.object({ ok: z.boolean().describe('Never returned.') }),
+        handler: () => {
+          throw thrown();
+        },
+      }) as AnyToolDefinition;
+
+      const production = await viaFactory(definition, {});
+      const helper = await runToolContract(definition, {} as never, {
+        context: { signal: new AbortController().signal },
+      });
+
+      expect(envelope(helper).code).toBe(code);
+      expect(helper).toEqual(production);
+    },
+  );
+
+  it('rejects schema-invalid arguments on a pre-aborted signal as InvalidParams', async () => {
+    const controller = new AbortController();
+    controller.abort();
+
+    const production = (await createToolHandler(
+      typed,
+      services,
+      notifiers,
+    )({ name: 123 }, makeServerContext({ signal: controller.signal }))) as CallToolResult;
+    const helper = await runToolContract(typed, { name: 123 } as never, {
+      context: { signal: controller.signal },
+    });
+
+    expect(envelope(helper).code).toBe(JsonRpcErrorCode.InvalidParams);
+    expect(envelope(helper).data?.reason).toBe('invalid_arguments');
+    expect(helper).toEqual(production);
   });
 });

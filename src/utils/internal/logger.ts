@@ -1,7 +1,7 @@
 /**
  * @fileoverview Pino-backed singleton logger with environment-adaptive output.
- * Implements RFC5424 level mapping, structured context, automatic trace injection via
- * OpenTelemetry, and graceful shutdown. In a serverless environment (like Cloudflare
+ * Implements RFC5424 level mapping, structured context carrying the request's OpenTelemetry
+ * `traceId`/`spanId`, and graceful shutdown. In a serverless environment (like Cloudflare
  * Workers), it uses a lightweight console-based logger.
  * @module src/utils/internal/logger
  */
@@ -54,6 +54,97 @@ const pinoToMcpLevelSeverity: Record<string, number> = {
   info: 6,
   debug: 7,
 };
+
+/**
+ * OTel `SeverityNumber` per MCP level. Each RFC 5424 level sharing a pino level
+ * with a milder one takes the next step inside the same OTel range, so export
+ * keeps the ordering pino collapses.
+ */
+const mcpToOtelSeverity: Record<McpLogLevel, number> = {
+  debug: 5, // DEBUG
+  info: 9, // INFO
+  notice: 10, // INFO2
+  warning: 13, // WARN
+  error: 17, // ERROR
+  crit: 18, // ERROR2
+  alert: 21, // FATAL
+  emerg: 22, // FATAL2
+};
+
+/**
+ * Level every non-error sink is built with: the lowest the framework emits.
+ * A transport target without its own `level` defaults to `info`, and target
+ * levels are fixed when the transport is built, so anything higher would
+ * filter records the logger's active level — the only intended gate — admits,
+ * at startup and after {@link Logger.setLevel} alike.
+ */
+const ALL_RECORDS_LEVEL: LevelWithSilent = 'debug';
+
+/** A `pino/file` transport target writing to a file path or file descriptor. */
+function fileTarget(
+  destination: string | number,
+  level: LevelWithSilent = ALL_RECORDS_LEVEL,
+): pino.TransportTargetOptions {
+  return { level, target: 'pino/file', options: { destination } };
+}
+
+/** The three file sinks under `logsPath`. */
+const FILE_SINK_NAMES = ['combined.log', 'error.log', 'interactions.log'] as const;
+
+type FileSinkName = (typeof FILE_SINK_NAMES)[number];
+
+/** A file sink the startup probe could not open, with the error code that stopped it. */
+interface DroppedFileSink {
+  code: string;
+  name: FileSinkName;
+  path: string;
+}
+
+/** Outcome of {@link probeFileSinks}: the openable destinations by name, and the rest. */
+interface FileSinkProbe {
+  dropped: DroppedFileSink[];
+  writable: Partial<Record<FileSinkName, string>>;
+}
+
+/**
+ * Opens each file sink under `dir` for append and closes it again,
+ * synchronously, before any transport exists. `pino/file` opens its
+ * destination inside the transport worker, where a failure surfaces as an
+ * unhandled `'error'` that ends the process and takes the stderr sink sharing
+ * that worker with it — so an unwritable destination has to be found here and
+ * left out, not discovered there.
+ *
+ * A directory that cannot be created drops every sink under it with the
+ * `mkdir` error code.
+ *
+ * @internal Exported only for unit testing. Not part of the public API.
+ */
+export async function probeFileSinks(dir: string): Promise<FileSinkProbe> {
+  const { default: fs } = await import('node:fs');
+  const { default: path } = await import('node:path');
+  const probe: FileSinkProbe = { dropped: [], writable: {} };
+  const codeOf = (err: unknown) =>
+    (err as NodeJS.ErrnoException).code ?? (err instanceof Error ? err.message : String(err));
+
+  try {
+    fs.mkdirSync(dir, { recursive: true });
+  } catch (err) {
+    const code = codeOf(err);
+    probe.dropped = FILE_SINK_NAMES.map((name) => ({ code, name, path: path.join(dir, name) }));
+    return probe;
+  }
+
+  for (const name of FILE_SINK_NAMES) {
+    const destination = path.join(dir, name);
+    try {
+      fs.closeSync(fs.openSync(destination, 'a'));
+      probe.writable[name] = destination;
+    } catch (err) {
+      probe.dropped.push({ code: codeOf(err), name, path: destination });
+    }
+  }
+  return probe;
+}
 
 /**
  * Evaluated at call time (not module load) so worker.ts can set
@@ -164,13 +255,106 @@ export function sanitizeLogBindings(obj: Record<string, unknown>): Record<string
 }
 
 /**
+ * The record shape an OTel Logs API `Logger` accepts, narrowed to the fields
+ * the framework sets. Declared here rather than imported so this module's
+ * public types never require the optional `@opentelemetry/api-logs` peer.
+ *
+ * @internal Exported only for tests that capture records. Not part of the public API.
+ */
+export interface OtelLogRecord {
+  attributes: Record<string, OtelAttributeValue>;
+  body: string;
+  severityNumber: number;
+  severityText: McpLogLevel;
+}
+
+/** An attribute value as the OTel Logs API `AnyValue` accepts it. */
+type OtelAttributeValue =
+  | string
+  | number
+  | boolean
+  | Uint8Array
+  | null
+  | undefined
+  | OtelAttributeValue[]
+  | { [key: string]: OtelAttributeValue };
+
+/** The one method of an OTel Logs API `Logger` the framework logger calls. */
+interface OtelLogSink {
+  emit(record: OtelLogRecord): void;
+}
+
+const SENSITIVE_FIELD_NAMES: ReadonlySet<string> = new Set(DEFAULT_SENSITIVE_FIELDS);
+
+/**
+ * Converts one sanitized binding into an attribute value: an `Error` becomes
+ * the `type`/`message`/`stack` object pino's serializer would have written, and
+ * a primitive JSON has no form for becomes its string.
+ */
+function toExportValue(value: unknown): OtelAttributeValue {
+  if (value instanceof Error)
+    return { message: value.message, stack: value.stack, type: value.name };
+  if (Array.isArray(value)) return value.map(toExportValue);
+  if (value !== null && typeof value === 'object') {
+    return toExportAttributes(value as Record<string, unknown>);
+  }
+  if (typeof value === 'bigint' || typeof value === 'symbol') return String(value);
+  return value as OtelAttributeValue;
+}
+
+/**
+ * Builds exported attributes from sanitized bindings, replacing every field
+ * named in {@link DEFAULT_SENSITIVE_FIELDS} at any depth. OTel records bypass
+ * pino's `redact`, so without this a value kept out of every file and stream
+ * would leave the process in the clear.
+ */
+function toExportAttributes(fields: Record<string, unknown>): Record<string, OtelAttributeValue> {
+  const out: Record<string, OtelAttributeValue> = {};
+  for (const [key, field] of Object.entries(fields)) {
+    out[key] = SENSITIVE_FIELD_NAMES.has(key) ? '[REDACTED]' : toExportValue(field);
+  }
+  return out;
+}
+
+/**
+ * Builds the OTel record for one framework log line: the message as the body,
+ * the sanitized and redacted bindings as attributes, and an `Error` as the
+ * `exception.*` semantic-convention attributes. Trace context is left to the
+ * Logs API, which takes it from the active context at emit time.
+ */
+function toOtelLogRecord(
+  level: McpLogLevel,
+  msg: string,
+  bindings: Record<string, unknown>,
+  error?: Error,
+): OtelLogRecord {
+  const attributes = toExportAttributes(sanitizeLogBindings(bindings));
+  if (error) {
+    attributes['exception.type'] = error.name;
+    attributes['exception.message'] = error.message;
+    if (error.stack) attributes['exception.stacktrace'] = error.stack;
+  }
+  return {
+    attributes,
+    body: msg,
+    severityNumber: mcpToOtelSeverity[level],
+    severityText: level,
+  };
+}
+
+/**
  * Singleton structured logger backed by Pino with RFC 5424 level semantics.
  *
  * Features:
  * - Environment-adaptive output: pretty-printed (pino-pretty) in HTTP development mode,
  *   JSON to stderr in stdio/production mode (MCP spec requires clean stdout).
- * - Optional file sinks: `combined.log` at the configured log level, `error.log` for
- *   errors and above, and `interactions.log` for structured interaction records.
+ * - Optional file sinks: `combined.log` with every record the active level admits,
+ *   `error.log` for errors and above, and `interactions.log` for structured
+ *   interaction records. A file sink that cannot be opened at startup is dropped
+ *   with one `warning` naming it; the process and the remaining sinks carry on.
+ * - Optional OTel log export: once `initializeOpenTelemetry` attaches a Logs API
+ *   sink, every record that passes the level filter and rate limit is also emitted
+ *   there, redacted like the pino output.
  * - Sensitive field redaction via Pino's `redact` option.
  * - Rate limiting per level + message to suppress log storms, configurable via
  *   `MCP_LOG_RATE_LIMIT_THRESHOLD` (0 disables) and `MCP_LOG_RATE_LIMIT_WINDOW_MS`.
@@ -204,6 +388,9 @@ export class Logger {
   private pendingRecords: PendingRecord[] = [];
   private droppedPendingRecords = 0;
   private everInitialized = false;
+  private otelLogSink: OtelLogSink | undefined;
+  /** Set when the startup probe dropped `interactions.log`, which the startup warning already reported. */
+  private interactionSinkDropped = false;
 
   private constructor() {
     // The constructor is now safe to call in a global scope.
@@ -227,7 +414,8 @@ export class Logger {
 
   private async createPinoLogger(
     level: McpLogLevel,
-    transportType?: 'stdio' | 'http',
+    transportType: 'stdio' | 'http' | undefined,
+    fileSinks: FileSinkProbe['writable'],
   ): Promise<PinoLogger> {
     const pinoLevel = mcpToPinoLevel[level] ?? 'info';
 
@@ -251,10 +439,6 @@ export class Logger {
       return pino(pinoOptions);
     }
 
-    // Node.js specific transports
-    const { default: fs } = await import('node:fs');
-    const { default: path } = await import('node:path');
-
     const transports: pino.TransportTargetOptions[] = [];
     const isDevelopment = config.environment === 'development';
     const isTest = config.environment === 'testing';
@@ -274,6 +458,7 @@ export class Logger {
         const require = createRequire(import.meta.url);
         const prettyTarget = require.resolve('pino-pretty');
         transports.push({
+          level: ALL_RECORDS_LEVEL,
           target: prettyTarget,
           options: { colorize: true, translateTime: 'yyyy-mm-dd HH:MM:ss' },
         });
@@ -284,53 +469,24 @@ export class Logger {
             `[Logger Init] Pretty transport unavailable (${err instanceof Error ? err.message : String(err)}); falling back to stdout JSON.`,
           );
         }
-        transports.push({ target: 'pino/file', options: { destination: 1 } });
+        transports.push(fileTarget(1));
       }
     } else if (!isTest) {
       // CRITICAL: For STDIO transport, logs MUST go to stderr (fd 2), NOT stdout (fd 1).
       // The MCP specification requires only JSON-RPC messages on stdout.
       // For HTTP transport or production, we also use stderr to avoid polluting stdout.
-      transports.push({ target: 'pino/file', options: { destination: 2 } });
+      transports.push(fileTarget(2));
     }
 
-    if (config.logsPath) {
-      try {
-        if (!fs.existsSync(config.logsPath)) {
-          fs.mkdirSync(config.logsPath, { recursive: true });
-        }
-        transports.push({
-          level: pinoLevel,
-          target: 'pino/file',
-          options: {
-            destination: path.join(config.logsPath, 'combined.log'),
-            mkdir: true,
-          },
-        });
-        transports.push({
-          level: 'error',
-          target: 'pino/file',
-          options: {
-            destination: path.join(config.logsPath, 'error.log'),
-            mkdir: true,
-          },
-        });
-      } catch (err) {
-        // Only log to console if TTY to avoid polluting stderr in STDIO mode
-        if (process.stderr?.isTTY) {
-          console.error(
-            `[Logger Init] Failed to configure file logging: ${err instanceof Error ? err.message : String(err)}`,
-          );
-        }
-      }
-    }
+    if (fileSinks['combined.log']) transports.push(fileTarget(fileSinks['combined.log']));
+    if (fileSinks['error.log']) transports.push(fileTarget(fileSinks['error.log'], 'error'));
 
     return pino({ ...pinoOptions, transport: { targets: transports } });
   }
 
-  private async createInteractionLogger(): Promise<PinoLogger | undefined> {
-    if (isServerless() || !config.logsPath) return;
+  private createInteractionLogger(destination: string | undefined): PinoLogger | undefined {
+    if (!destination) return;
 
-    const { default: path } = await import('node:path');
     return pino({
       redact: {
         paths: SENSITIVE_PINO_FIELDS,
@@ -341,10 +497,7 @@ export class Logger {
       },
       transport: {
         target: 'pino/file',
-        options: {
-          destination: path.join(config.logsPath, 'interactions.log'),
-          mkdir: true,
-        },
+        options: { destination },
       },
     });
   }
@@ -381,8 +534,15 @@ export class Logger {
     }
     this.currentMcpLevel = level;
     this.transportType = transportType;
-    this.pinoLogger = await this.createPinoLogger(level, transportType);
-    this.interactionLogger = await this.createInteractionLogger();
+    const fileSinks: FileSinkProbe =
+      !isServerless() && config.logsPath
+        ? await probeFileSinks(config.logsPath)
+        : { dropped: [], writable: {} };
+    this.pinoLogger = await this.createPinoLogger(level, transportType, fileSinks.writable);
+    this.interactionLogger = this.createInteractionLogger(fileSinks.writable['interactions.log']);
+    this.interactionSinkDropped = fileSinks.dropped.some(
+      (sink) => sink.name === 'interactions.log',
+    );
 
     this.lastSweep = Date.now();
     this.initialized = true;
@@ -391,7 +551,33 @@ export class Logger {
       `Logger initialized. MCP level: ${level}.`,
       requestContextService.createRequestContext({ operation: 'loggerInit' }),
     );
+    this.reportDroppedFileSinks(fileSinks.dropped);
     this.replayPendingRecords();
+  }
+
+  /** Emits the one warning that names every file sink the startup probe dropped. */
+  private reportDroppedFileSinks(dropped: readonly DroppedFileSink[]): void {
+    if (dropped.length === 0) return;
+    const detail = dropped.map((sink) => `${sink.path} (${sink.code})`).join(', ');
+    this.warning(
+      `File logging disabled for ${dropped.length} sink(s): ${detail}. Point LOGS_DIR at a writable directory to restore them.`,
+      requestContextService.createRequestContext({
+        operation: 'loggerInit',
+        additionalContext: { droppedLogFiles: dropped },
+      }),
+    );
+  }
+
+  /**
+   * Attaches (or, with `undefined`, detaches) the OTel Logs API sink that every
+   * record passing the level filter and rate limit is also emitted to.
+   * `initializeOpenTelemetry` attaches it when OTLP log export is configured
+   * and `shutdownOpenTelemetry` detaches it.
+   *
+   * @internal Called by the telemetry lifecycle. Not part of the public API.
+   */
+  public setOtelLogSink(sink: OtelLogSink | undefined): void {
+    this.otelLogSink = sink;
   }
 
   /**
@@ -731,16 +917,18 @@ export class Logger {
     // runs first: `logger.info(msg, ctx)` with a handler context is a documented
     // call, and that object carries live request machinery and the user-entered
     // content in `inputs.responses` — none of which belongs in a log line.
+    // The canonical fields are spread again after `extra`, so a caller's key
+    // reusing a canonical name (`requestId`, `traceId`, …) never replaces the
+    // context's value — the first spread only keeps them leading the line.
     const { extra, ...canonical } = toCanonicalContext(
       (context ?? {}) as Readonly<Record<string, unknown>>,
     );
-    const logObject: Record<string, unknown> = { ...canonical, ...extra };
+    const bindings: Record<string, unknown> = { ...canonical, ...extra, ...canonical };
     // Pass the raw Error so pino's `err` serializer (default: `pino.stdSerializers.err`)
     // runs *after* our `formatters.log` sanitizer. Pre-serializing here would produce
     // an object whose prototype (`pinoErrProto`) trips the sanitizer's plain-object check.
-    if (error) logObject.err = error;
-
-    this.pinoLogger[pinoLevel](logObject, msg);
+    this.pinoLogger[pinoLevel](error ? { ...bindings, err: error } : bindings, msg);
+    this.otelLogSink?.emit(toOtelLogRecord(level, msg, bindings, error));
   }
 
   private logWithError(
@@ -945,7 +1133,7 @@ export class Logger {
    */
   public logInteraction(interactionName: string, data: Record<string, unknown>): void {
     if (!this.interactionLogger) {
-      if (!isServerless())
+      if (!isServerless() && !this.interactionSinkDropped)
         this.warning('Interaction logger not available.', (data.context || {}) as RequestContext);
       return;
     }
@@ -958,7 +1146,8 @@ export class Logger {
  * `Logger.getInstance()` in most contexts.
  *
  * Must be initialized once at startup via `logger.initialize()` before any log methods
- * will produce output. Log calls made before initialization are silently dropped.
+ * will produce output. Log calls made before initialization are held in a bounded
+ * buffer and replayed once the sinks exist.
  *
  * @example
  * ```ts

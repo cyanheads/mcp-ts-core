@@ -150,7 +150,7 @@ export class CanvasRegistry {
   ): Promise<AcquireResult> {
     options?.signal?.throwIfAborted();
     if (this.isShuttingDown) {
-      throw notFound('Canvas registry is shutting down.', { tenantId });
+      throw notFound('Canvas registry is shutting down.');
     }
 
     if (maybeId !== undefined) {

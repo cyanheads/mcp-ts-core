@@ -17,6 +17,7 @@ vi.mock('@/config/index.js', () => ({ config: mockConfig }));
 
 // Must import after vi.mock so the mock is in place.
 const { withRequiredScopes } = await import('@/mcp-server/transports/auth/lib/authUtils.js');
+const { logger } = await import('@/utils/internal/logger.js');
 
 describe('withRequiredScopes', () => {
   const createAuthInfo = (scopes: string[]): AuthInfo => ({
@@ -47,6 +48,41 @@ describe('withRequiredScopes', () => {
         expect(mcpError.code).toBe(JsonRpcErrorCode.Unauthorized);
         expect(mcpError.message).toContain('Authentication required');
       }
+    });
+
+    // #548 — the -32006 branch returned its whole context as data, including
+    // the required scope names the -32005 branch withholds.
+    it('returns no scope names or request metadata on Unauthorized; the log keeps them', () => {
+      mockConfig.mcpAuthMode = 'jwt';
+      mockConfig.mcpAuthDisableScopeChecks = false;
+      const warningSpy = vi.spyOn(logger, 'warning').mockImplementation(() => {});
+      const parentContext = {
+        operation: 'HandleToolRequest',
+        requestId: 'req-scope-leak',
+        timestamp: '2026-09-25T00:00:00.000Z',
+        tenantId: 'tenant-1',
+      };
+
+      let caught: unknown;
+      try {
+        withRequiredScopes(['tool:secret_admin:write'], parentContext);
+      } catch (error) {
+        caught = error;
+      }
+
+      expect(caught).toBeInstanceOf(McpError);
+      const mcpError = caught as McpError;
+      expect(mcpError.code).toBe(JsonRpcErrorCode.Unauthorized);
+      expect(JSON.stringify(mcpError.data ?? {})).not.toContain('tool:secret_admin:write');
+      expect(mcpError.data).toBeUndefined();
+      expect(warningSpy).toHaveBeenCalledWith(
+        'Auth enabled but no authentication context found. Denying request.',
+        expect.objectContaining({
+          requestId: 'req-scope-leak',
+          extra: expect.objectContaining({ requiredScopes: ['tool:secret_admin:write'] }),
+        }),
+      );
+      warningSpy.mockRestore();
     });
 
     it('passes when the auth context satisfies all required scopes', () => {

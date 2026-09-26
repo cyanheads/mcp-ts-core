@@ -203,6 +203,17 @@ describe('fetchWithTimeout body deadline (issue #341)', () => {
     });
   });
 
+  it('classifies a caller deadline that fires mid-body as Timeout, not a cancellation', async () => {
+    const response = await fetchWithTimeout(`${origin}/stall`, 30_000, context, {
+      signal: AbortSignal.timeout(DEADLINE_MS),
+    });
+
+    await expect(response.text()).rejects.toMatchObject({
+      code: JsonRpcErrorCode.Timeout,
+      data: { errorSource: 'FetchSignalTimeout' },
+    });
+  });
+
   it('reports the timeout once, from the body read', async () => {
     const response = await fetchWithTimeout(`${origin}/stall`, DEADLINE_MS, context);
     await response.text().catch(() => undefined);

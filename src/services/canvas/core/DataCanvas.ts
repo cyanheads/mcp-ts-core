@@ -14,13 +14,14 @@ import type { CanvasRegistry } from './CanvasRegistry.js';
 import type { IDataCanvasProvider } from './IDataCanvasProvider.js';
 
 /** Resolve the effective tenant ID; throw when absent. */
-function requireTenantId(context: RequestContext, operation: string): string {
+function requireTenantId(context: RequestContext): string {
   const tenantId = context.tenantId;
   if (tenantId === undefined || tenantId === null || tenantId === '') {
+    // No data: nothing here is caller-actionable, and the handler's error path
+    // logs the request context (#548).
     throw new McpError(
       JsonRpcErrorCode.InternalError,
       'Tenant ID is required for canvas operations but was not found in the request context.',
-      { operation, requestId: context.requestId },
     );
   }
   return tenantId;
@@ -56,7 +57,7 @@ export class DataCanvas {
     context: RequestContext,
     options?: AcquireOptions,
   ): Promise<CanvasInstance> {
-    const tenantId = requireTenantId(context, 'DataCanvas.acquire');
+    const tenantId = requireTenantId(context);
     const result = await this.registry.acquire(maybeId, tenantId, context, options);
     logger.debug('Canvas acquired.', {
       ...withExtra(context, { canvasId: result.canvasId, isNew: result.isNew }),
@@ -78,13 +79,13 @@ export class DataCanvas {
    * destroyed.
    */
   async drop(canvasId: string, context: RequestContext): Promise<boolean> {
-    const tenantId = requireTenantId(context, 'DataCanvas.drop');
+    const tenantId = requireTenantId(context);
     return await this.registry.drop(canvasId, tenantId, context);
   }
 
   /** Active canvas count for the calling tenant. */
   countForTenant(context: RequestContext): number {
-    const tenantId = requireTenantId(context, 'DataCanvas.countForTenant');
+    const tenantId = requireTenantId(context);
     return this.registry.countForTenant(tenantId);
   }
 

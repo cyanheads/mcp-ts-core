@@ -225,7 +225,7 @@ export class TreeFormatter {
 
     // Validate input
     if (!root || typeof root.name !== 'string') {
-      throw validationError('Root node must have a name property', logContext);
+      throw validationError('Root node must have a name property');
     }
 
     const opts = {
@@ -259,13 +259,14 @@ export class TreeFormatter {
       }
 
       const message = error instanceof Error ? error.message : String(error);
-      const stack = error instanceof Error ? error.stack : undefined;
       logger.error('Failed to format tree', withExtra(logContext, { error: message }));
 
-      throw new McpError(JsonRpcErrorCode.InternalError, `Failed to format tree: ${message}`, {
-        ...logContext,
-        originalError: stack,
-      });
+      throw new McpError(
+        JsonRpcErrorCode.InternalError,
+        `Failed to format tree: ${message}`,
+        undefined,
+        { cause: error },
+      );
     }
   }
 
@@ -313,7 +314,7 @@ export class TreeFormatter {
       });
 
     if (!Array.isArray(roots) || roots.length === 0) {
-      throw validationError('Roots must be a non-empty array', logContext);
+      throw validationError('Roots must be a non-empty array');
     }
 
     try {
@@ -331,11 +332,13 @@ export class TreeFormatter {
       }
 
       const message = error instanceof Error ? error.message : String(error);
-      const stack = error instanceof Error ? error.stack : undefined;
+      logger.error('Failed to format multiple trees', withExtra(logContext, { error: message }));
+
       throw new McpError(
         JsonRpcErrorCode.InternalError,
         `Failed to format multiple trees: ${message}`,
-        { ...logContext, originalError: stack },
+        undefined,
+        { cause: error },
       );
     }
   }

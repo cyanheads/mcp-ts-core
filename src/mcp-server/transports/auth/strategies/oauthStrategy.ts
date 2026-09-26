@@ -39,10 +39,7 @@ export class OauthStrategy implements AuthStrategy {
         'CRITICAL: OAUTH_ISSUER_URL and OAUTH_AUDIENCE must be set for OAuth mode.',
         context,
       );
-      throw configurationError(
-        'OAUTH_ISSUER_URL and OAUTH_AUDIENCE must be set for OAuth mode.',
-        context,
-      );
+      throw configurationError('OAUTH_ISSUER_URL and OAUTH_AUDIENCE must be set for OAuth mode.');
     }
 
     // Store validated config — no casts needed after the guard above
@@ -63,10 +60,11 @@ export class OauthStrategy implements AuthStrategy {
         'Failed to initialize JWKS client.',
         withExtra(context, { error: error instanceof Error ? error.message : String(error) }),
       );
-      throw serviceUnavailable('Could not initialize JWKS client for OAuth strategy.', {
-        ...context,
-        originalError: error instanceof Error ? error.message : 'Unknown',
-      });
+      throw serviceUnavailable(
+        'Could not initialize JWKS client for OAuth strategy.',
+        { originalError: error instanceof Error ? error.message : 'Unknown' },
+        { cause: error },
+      );
     }
   }
 

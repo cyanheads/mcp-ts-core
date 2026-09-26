@@ -394,6 +394,7 @@ describe('HTTP Error Handler', () => {
       expect(record.extra.errorData).not.toHaveProperty('causeChain');
       expect(mockCounterAdd).toHaveBeenCalledWith(1, {
         'mcp.error.classified_code': String(JsonRpcErrorCode.RequestCancelled),
+        'mcp.error.category': 'client',
         operation: 'httpTransport',
       });
     });
@@ -405,6 +406,7 @@ describe('HTTP Error Handler', () => {
       expect((jsonResponseData as any).error.code).toBe(JsonRpcErrorCode.Timeout);
       expect(mockCounterAdd).toHaveBeenCalledWith(1, {
         'mcp.error.classified_code': String(JsonRpcErrorCode.Timeout),
+        'mcp.error.category': 'upstream',
         operation: 'httpTransport',
       });
     });

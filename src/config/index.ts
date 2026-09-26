@@ -118,6 +118,16 @@ const ConfigSchema = z
      */
     logLlmInteractions: envBoolean,
     /**
+     * When `true`, every failed tool call also writes one `Tool failure payload`
+     * record carrying the arguments as sent and the `CallToolResult` returned,
+     * each redacted by key name and capped at `logToolFailurePayloadMaxBytes`.
+     * Default `false` — arguments are caller data, and key-name redaction does
+     * not reach a secret inside a free-form value.
+     */
+    logToolFailurePayloads: envBoolean,
+    /** Per-payload cap, in UTF-8 bytes, on the `toolInput` and `toolResult` strings. */
+    logToolFailurePayloadMaxBytes: z.coerce.number().int().positive().default(16_384),
+    /**
      * Maximum times a given level + message pair is emitted per
      * `logRateLimitWindowMs` before further occurrences are suppressed.
      * Guards against log storms from a repeated error. Set to `0` to disable
@@ -350,6 +360,12 @@ const ConfigSchema = z
       tracesEndpoint: z.url().optional(),
       /** Effective OTLP metrics URL — the signal variable, else the base endpoint + `v1/metrics`. */
       metricsEndpoint: z.url().optional(),
+      /**
+       * OTLP logs URL, from `OTEL_EXPORTER_OTLP_LOGS_ENDPOINT` only. Deliberately
+       * never derived from the base endpoint: a deployment that set only the base
+       * for traces and metrics must not start exporting log records on upgrade.
+       */
+      logsEndpoint: z.url().optional(),
       samplingRatio: z.coerce.number().min(0).max(1).default(1.0),
       logLevel: z
         .preprocess(
@@ -474,6 +490,8 @@ const parseConfig = (envOverrides?: Record<string, string | undefined>) => {
     logLevel: env.MCP_LOG_LEVEL,
     logsPath: env.LOGS_DIR,
     logLlmInteractions: env.LOG_LLM_INTERACTIONS,
+    logToolFailurePayloads: env.LOG_TOOL_FAILURE_PAYLOADS,
+    logToolFailurePayloadMaxBytes: env.LOG_TOOL_FAILURE_PAYLOAD_MAX_BYTES,
     logRateLimitThreshold: env.MCP_LOG_RATE_LIMIT_THRESHOLD,
     logRateLimitWindowMs: env.MCP_LOG_RATE_LIMIT_WINDOW_MS,
     environment: env.NODE_ENV,
@@ -556,6 +574,7 @@ const parseConfig = (envOverrides?: Record<string, string | undefined>) => {
         env.OTEL_EXPORTER_OTLP_ENDPOINT,
         'v1/metrics',
       ),
+      logsEndpoint: env.OTEL_EXPORTER_OTLP_LOGS_ENDPOINT,
       samplingRatio: env.OTEL_TRACES_SAMPLER_ARG,
       logLevel: env.OTEL_LOG_LEVEL,
     },

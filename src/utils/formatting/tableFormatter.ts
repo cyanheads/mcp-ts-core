@@ -189,7 +189,7 @@ export class TableFormatter {
       });
 
     if (!Array.isArray(data)) {
-      throw validationError('Data must be an array', logContext);
+      throw validationError('Data must be an array');
     }
 
     if (data.length === 0) {
@@ -254,11 +254,11 @@ export class TableFormatter {
 
     // Validate inputs
     if (!Array.isArray(headers) || headers.length === 0) {
-      throw validationError('Headers must be a non-empty array', logContext);
+      throw validationError('Headers must be a non-empty array');
     }
 
     if (!Array.isArray(rows)) {
-      throw validationError('Rows must be an array', logContext);
+      throw validationError('Rows must be an array');
     }
 
     if (rows.length === 0) {
@@ -272,7 +272,7 @@ export class TableFormatter {
       if (rows[i]?.length !== columnCount) {
         throw validationError(
           `Row ${i} has ${rows[i]?.length} columns but expected ${columnCount}`,
-          { ...logContext, rowIndex: i, expectedColumns: columnCount },
+          { rowIndex: i, expectedColumns: columnCount },
         );
       }
     }
@@ -306,13 +306,14 @@ export class TableFormatter {
       return result;
     } catch (error: unknown) {
       const message = error instanceof Error ? error.message : String(error);
-      const stack = error instanceof Error ? error.stack : undefined;
       logger.error('Failed to render table', withExtra(logContext, { error: message }));
 
-      throw new McpError(JsonRpcErrorCode.InternalError, `Failed to render table: ${message}`, {
-        ...logContext,
-        originalError: stack,
-      });
+      throw new McpError(
+        JsonRpcErrorCode.InternalError,
+        `Failed to render table: ${message}`,
+        undefined,
+        { cause: error },
+      );
     }
   }
 

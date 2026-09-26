@@ -110,10 +110,9 @@ export class XmlParser {
     stringToParse = stringToParse.trim();
 
     if (!stringToParse) {
-      throw validationError(
-        'XML string is empty after removing <think> block and trimming.',
-        context,
-      );
+      throw validationError('XML string is empty after removing <think> block and trimming.', {
+        reason: 'parser_input_empty',
+      });
     }
 
     try {

@@ -96,6 +96,7 @@ vi.mock('@/utils/internal/performance.js', () => ({
       context: unknown,
     ) => fn(context, () => {}),
   ),
+  recordToolRejection: vi.fn(),
 }));
 
 // ---------------------------------------------------------------------------

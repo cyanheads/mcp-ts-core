@@ -214,7 +214,7 @@ export class HtmlExtractor {
 
     const trimmed = html.trim();
     if (!trimmed) {
-      throw validationError('HTML string is empty.', context);
+      throw validationError('HTML string is empty.', { reason: 'parser_input_empty' });
     }
 
     const [{ Defuddle }, { parseHTML }] = await Promise.all([getDefuddle(), getLinkedom()]);

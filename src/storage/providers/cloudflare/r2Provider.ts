@@ -49,12 +49,7 @@ export class R2Provider implements IStorageProvider {
   }
 
   /** Decodes a stored envelope; `null` once its TTL has lapsed. */
-  private parseAndValidate<T>(
-    raw: string,
-    tenantId: string,
-    key: string,
-    context: RequestContext,
-  ): T | null {
+  private parseAndValidate<T>(raw: string, tenantId: string, key: string): T | null {
     let decoded: DecodedEnvelope<T>;
     try {
       decoded = decodeEnvelope<T>(raw);
@@ -62,7 +57,8 @@ export class R2Provider implements IStorageProvider {
       throw new McpError(
         JsonRpcErrorCode.SerializationError,
         `[R2Provider] Failed to parse JSON for key: ${this.getR2Key(tenantId, key)}`,
-        { ...context, error },
+        undefined,
+        { cause: error },
       );
     }
     return decoded.kind === 'expired' ? null : decoded.value;
@@ -78,7 +74,7 @@ export class R2Provider implements IStorageProvider {
           return null;
         }
         const text = await object.text();
-        const value = this.parseAndValidate<T>(text, tenantId, key, context);
+        const value = this.parseAndValidate<T>(text, tenantId, key);
         if (value === null) {
           // best-effort cleanup if expired
           await this.bucket.delete(r2Key).catch(() => {});

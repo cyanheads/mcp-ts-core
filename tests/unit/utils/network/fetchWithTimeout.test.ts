@@ -410,29 +410,101 @@ describe('fetchWithTimeout', () => {
     );
   });
 
-  it('keeps a caller TimeoutError classified as FetchAborted, not FetchTimeout', async () => {
-    vi.spyOn(logger, 'info').mockImplementation(() => {});
-    const externalController = new AbortController();
+  describe('a caller signal aborted by a deadline', () => {
+    /** A fetch that settles only when its signal aborts, rejecting with the reason. */
+    function hangUntilAborted() {
+      return vi.spyOn(globalThis, 'fetch').mockImplementation(
+        (_url, init) =>
+          new Promise((_resolve, reject) => {
+            const signal = init?.signal;
+            signal?.addEventListener('abort', () => reject(signal.reason));
+          }),
+      );
+    }
 
-    vi.spyOn(globalThis, 'fetch').mockImplementation(
-      (_url, init) =>
-        new Promise((_resolve, reject) => {
-          const signal = init?.signal;
-          signal?.addEventListener('abort', () => reject(signal.reason));
+    it('reports a TimeoutError abort reason as Timeout, distinct from the helper’s own timeout', async () => {
+      const infoSpy = vi.spyOn(logger, 'info').mockImplementation(() => {});
+      hangUntilAborted();
+      const externalController = new AbortController();
+
+      const promise = fetchWithTimeout('https://example.com', 30_000, context, {
+        signal: externalController.signal,
+      });
+
+      // The caller's own deadline — not this helper's `timeoutMs`, so it keeps
+      // an errorSource of its own rather than the internal FetchTimeout.
+      externalController.abort(new DOMException('caller deadline', 'TimeoutError'));
+
+      const error = (await promise.catch((e: unknown) => e)) as McpError;
+      expect(error).toBeInstanceOf(McpError);
+      expect(error.code).toBe(JsonRpcErrorCode.Timeout);
+      expect(error.data).toEqual({ errorSource: 'FetchSignalTimeout' });
+      expect(errorSpy).toHaveBeenCalledWith(
+        expect.stringContaining("timed out on the caller's signal"),
+        expect.objectContaining({
+          extra: expect.objectContaining({ errorSource: 'FetchSignalTimeout' }),
         }),
-    );
-
-    const promise = fetchWithTimeout('https://example.com', 30_000, context, {
-      signal: externalController.signal,
+      );
+      expect(infoSpy).not.toHaveBeenCalledWith(
+        expect.stringContaining('aborted by caller'),
+        expect.anything(),
+      );
     });
 
-    // A caller may abort with a TimeoutError of its own — matching on the name
-    // alone would misattribute that to this helper's internal timeout.
-    externalController.abort(new DOMException('caller deadline', 'TimeoutError'));
+    it('reports an AbortSignal.timeout() signal as Timeout', async () => {
+      hangUntilAborted();
 
-    await expect(promise).rejects.toMatchObject({
-      code: JsonRpcErrorCode.RequestCancelled,
-      data: expect.objectContaining({ errorSource: 'FetchAborted' }),
+      const error = (await fetchWithTimeout('https://example.com', 30_000, context, {
+        signal: AbortSignal.timeout(10),
+      }).catch((e: unknown) => e)) as McpError;
+
+      expect(error.code).toBe(JsonRpcErrorCode.Timeout);
+      expect(error.data?.errorSource).toBe('FetchSignalTimeout');
+    });
+
+    it('reports a composed AbortSignal.any whose timeout fired as Timeout', async () => {
+      hangUntilAborted();
+      const request = new AbortController();
+
+      const error = (await fetchWithTimeout('https://example.com', 30_000, context, {
+        signal: AbortSignal.any([request.signal, AbortSignal.timeout(10)]),
+      }).catch((e: unknown) => e)) as McpError;
+
+      expect(request.signal.aborted).toBe(false);
+      expect(error.code).toBe(JsonRpcErrorCode.Timeout);
+      expect(error.data?.errorSource).toBe('FetchSignalTimeout');
+    });
+
+    it('keeps a composed AbortSignal.any cancelled by its other member as RequestCancelled', async () => {
+      vi.spyOn(logger, 'info').mockImplementation(() => {});
+      hangUntilAborted();
+      const request = new AbortController();
+
+      const promise = fetchWithTimeout('https://example.com', 30_000, context, {
+        signal: AbortSignal.any([request.signal, AbortSignal.timeout(30_000)]),
+      });
+      request.abort('client disconnected');
+
+      await expect(promise).rejects.toMatchObject({
+        code: JsonRpcErrorCode.RequestCancelled,
+        data: { errorSource: 'FetchAborted' },
+      });
+    });
+
+    it('keeps an AbortError reason as RequestCancelled', async () => {
+      vi.spyOn(logger, 'info').mockImplementation(() => {});
+      hangUntilAborted();
+      const request = new AbortController();
+
+      const promise = fetchWithTimeout('https://example.com', 30_000, context, {
+        signal: request.signal,
+      });
+      request.abort();
+
+      await expect(promise).rejects.toMatchObject({
+        code: JsonRpcErrorCode.RequestCancelled,
+        data: { errorSource: 'FetchAborted' },
+      });
     });
   });
 
@@ -1205,6 +1277,103 @@ describe('fetchWithTimeout', () => {
           'https://8.8.8.8',
           expect.objectContaining({ redirect: 'manual' }),
         );
+      });
+    });
+  });
+
+  /**
+   * Every validation rejection carries a stable `data.reason` and a recovery
+   * hint, so a caller can branch on it and the hint reaches both tool surfaces.
+   */
+  describe('validation failure reasons', () => {
+    const ssrfOpts = { rejectPrivateIPs: true };
+
+    async function failureOf(run: () => Promise<unknown>): Promise<McpError> {
+      const error = await run().catch((e: unknown) => e);
+      expect(error).toBeInstanceOf(McpError);
+      return error as McpError;
+    }
+
+    it.each([
+      ['an unparseable URL', 'not a url'],
+      ['a non-HTTP scheme', 'ftp://example.com/archive'],
+    ])('rejects %s as invalid_url', async (_label, url) => {
+      const error = await failureOf(() => fetchWithTimeout(url, 1000, context));
+
+      expect(error.code).toBe(JsonRpcErrorCode.ValidationError);
+      expect(error.data).toEqual({
+        reason: 'invalid_url',
+        recovery: { hint: 'Pass an absolute http:// or https:// URL.' },
+      });
+    });
+
+    it('rejects a redirect to a non-HTTP scheme as invalid_url', async () => {
+      vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(
+        new Response(null, { status: 302, headers: { location: 'file:///etc/passwd' } }),
+      );
+
+      const error = await failureOf(() =>
+        fetchWithTimeout('https://public.example.com', 1000, context, ssrfOpts),
+      );
+
+      expect(error.data?.reason).toBe('invalid_url');
+    });
+
+    it.each([
+      ['a private hostname', 'http://localhost/secrets'],
+      ['a non-global literal IP', 'http://10.0.0.1/internal'],
+      ['a cloud metadata address', 'http://169.254.169.254/latest'],
+    ])('rejects %s as private_address_blocked', async (_label, url) => {
+      const error = await failureOf(() => fetchWithTimeout(url, 1000, context, ssrfOpts));
+
+      expect(error.code).toBe(JsonRpcErrorCode.ValidationError);
+      expect(error.data).toEqual({
+        reason: 'private_address_blocked',
+        recovery: {
+          hint: 'Use a publicly routable host — private, loopback, link-local, and cloud-metadata addresses are blocked.',
+        },
+      });
+    });
+
+    it('rejects a name that resolves to a private address as private_address_blocked', async () => {
+      dnsSlots.resolve4 = vi.fn().mockResolvedValue(['10.1.2.3']);
+
+      const error = await failureOf(() =>
+        fetchWithTimeout('https://sneaky.example.com', 1000, context, ssrfOpts),
+      );
+
+      expect(error.message).toContain('SSRF blocked');
+      expect(error.data?.reason).toBe('private_address_blocked');
+    });
+
+    it('rejects a redirect to a private address as private_address_blocked', async () => {
+      vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(
+        new Response(null, { status: 302, headers: { location: 'http://127.0.0.1/admin' } }),
+      );
+
+      const error = await failureOf(() =>
+        fetchWithTimeout('https://public.example.com', 1000, context, ssrfOpts),
+      );
+
+      expect(error.data?.reason).toBe('private_address_blocked');
+    });
+
+    it('rejects a redirect chain past the cap as too_many_redirects', async () => {
+      vi.spyOn(globalThis, 'fetch').mockResolvedValue(
+        new Response(null, { status: 302, headers: { location: 'https://example.com/loop' } }),
+      );
+
+      const error = await failureOf(() =>
+        fetchWithTimeout('https://loop.example.com', 1000, context, ssrfOpts),
+      );
+
+      expect(error.code).toBe(JsonRpcErrorCode.ValidationError);
+      expect(error.data).toEqual({
+        maxRedirects: 5,
+        reason: 'too_many_redirects',
+        recovery: {
+          hint: 'Request the final URL directly instead of one that redirects more than 5 times.',
+        },
       });
     });
   });

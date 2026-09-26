@@ -144,10 +144,9 @@ export class JsonParser {
     stringToParse = stringToParse.trim();
 
     if (!stringToParse) {
-      throw validationError(
-        'JSON string is empty after removing <think> block and trimming.',
-        context,
-      );
+      throw validationError('JSON string is empty after removing <think> block and trimming.', {
+        reason: 'parser_input_empty',
+      });
     }
 
     try {

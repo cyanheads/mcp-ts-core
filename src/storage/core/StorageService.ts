@@ -54,15 +54,11 @@ function requireTenantId(context: RequestContext): string {
 
   // Check if tenant ID is missing (undefined or null)
   if (tenantId === undefined || tenantId === null) {
+    // No data: request metadata is not something the caller acts on, and the
+    // handler's error path logs it with the full context (#548).
     throw new McpError(
       JsonRpcErrorCode.InternalError,
       'Tenant ID is required for storage operations but was not found in the request context.',
-      {
-        operation: context.operation || 'StorageService.requireTenantId',
-        requestId: context.requestId,
-        // Include call stack hint for debugging
-        calledFrom: 'StorageService',
-      },
     );
   }
 

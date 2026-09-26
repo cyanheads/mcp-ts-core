@@ -855,6 +855,36 @@ describe('createResourceHandler', () => {
       expect(completionMetrics().outputBytes).toBe(0);
     });
 
+    it('fails an output-schema violation as an InternalError naming the contract (#480)', async () => {
+      const def = resource('broken://contract', {
+        name: 'broken-contract',
+        description: 'Violates its declared output schema.',
+        output: z.object({ value: z.number().describe('A number the handler never returns.') }),
+        handler: () => ({}) as { value: number },
+      });
+      const handler = createResourceHandler(def as AnyResourceDefinition, services, notifiers);
+
+      const rejection = await handler(new URL('broken://contract'), {}, makeServerContext()).then(
+        () => {
+          throw new Error('expected the read to fail');
+        },
+        (error: unknown) => error,
+      );
+
+      expect(rejection).toBeInstanceOf(McpError);
+      expect(rejection).toMatchObject({
+        code: JsonRpcErrorCode.InternalError,
+        message: expect.stringMatching(
+          /^Resource broken-contract returned output that does not match its output schema: value: /,
+        ),
+      });
+      expect((rejection as McpError).data).toBeUndefined();
+      expect(completionMetrics()).toMatchObject({
+        isSuccess: false,
+        errorCode: String(JsonRpcErrorCode.InternalError),
+      });
+    });
+
     it('reports a formatter failure as a failed read', async () => {
       const def = resource('broken://format', {
         description: 'Formatter throws.',

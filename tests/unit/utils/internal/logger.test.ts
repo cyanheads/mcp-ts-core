@@ -495,6 +495,90 @@ describe('Logger', () => {
     });
   });
 
+  describe('canonical record fields', () => {
+    /** The framework-owned fields a record carries from its request context. */
+    const canonical = {
+      operation: 'canonicalOp',
+      requestId: 'req-canonical',
+      sessionId: 'session-canonical',
+      spanId: 'b'.repeat(16),
+      tenantId: 'tenant-canonical',
+      timestamp: '2026-09-26T00:00:00.000Z',
+      traceId: 'a'.repeat(32),
+    };
+    /** A caller's `extra` bag reusing every canonical name, plus one field of its own. */
+    const colliding = {
+      operation: 'callerOp',
+      requestId: 'req-caller',
+      sessionId: 'session-caller',
+      spanId: 'caller-span',
+      tenantId: 'tenant-caller',
+      timestamp: 'caller-timestamp',
+      traceId: 'caller-trace',
+      itemId: 'item-1',
+    };
+    const sink = { emit: vi.fn() };
+
+    afterEach(() => {
+      logger.setOtelLogSink(undefined);
+    });
+
+    it('keeps every canonical value in the pino record when extra reuses the name', async () => {
+      await logger.initialize('info');
+      const mockLogger = (await import('pino')).default() as any;
+
+      logger.info('canonical: collision', { ...canonical, extra: colliding } as any);
+
+      expect(mockLogger.info).toHaveBeenLastCalledWith(
+        { ...canonical, itemId: 'item-1' },
+        'canonical: collision',
+      );
+    });
+
+    it('keeps every canonical value alongside an Error on the error path', async () => {
+      await logger.initialize('info');
+      const mockLogger = (await import('pino')).default() as any;
+      const err = new Error('boom');
+
+      logger.error('canonical: failure', err, { ...canonical, extra: colliding } as any);
+
+      expect(mockLogger.error).toHaveBeenLastCalledWith(
+        { ...canonical, itemId: 'item-1', err },
+        'canonical: failure',
+      );
+    });
+
+    it('keeps every canonical value in the exported OTel record', async () => {
+      await logger.initialize('info');
+      logger.setOtelLogSink(sink);
+
+      logger.info('canonical: exported', { ...canonical, extra: colliding } as any);
+
+      const record = sink.emit.mock.calls
+        .map(([emitted]) => emitted)
+        .find((emitted) => emitted.body === 'canonical: exported');
+      expect(record?.attributes).toEqual({ ...canonical, itemId: 'item-1' });
+    });
+
+    it('keeps a caller value for a canonical name the context leaves unset', async () => {
+      await logger.initialize('info');
+      const mockLogger = (await import('pino')).default() as any;
+      const bare = { requestId: 'req-bare', timestamp: '2026-09-26T00:00:00.000Z' };
+
+      logger.info('canonical: unset', {
+        ...bare,
+        extra: { traceId: 'upstream-trace', requestId: 'req-caller' },
+      } as any);
+
+      // `requestId` is always set, so the context's wins; `traceId` was never
+      // set, so the caller's value replaces nothing and stays.
+      expect(mockLogger.info).toHaveBeenLastCalledWith(
+        { ...bare, traceId: 'upstream-trace' },
+        'canonical: unset',
+      );
+    });
+  });
+
   describe('logInteraction', () => {
     it('should warn when interaction logger is not available', async () => {
       await logger.initialize('info');
@@ -542,6 +626,133 @@ describe('Logger', () => {
       } as any);
 
       expect(mockLogger.error.mock.calls.length).toBeGreaterThan(initialErrorCalls);
+    });
+  });
+
+  describe('OTel log sink', () => {
+    const sink = { emit: vi.fn() };
+    const context = (extra?: Record<string, unknown>) =>
+      ({
+        requestId: 'otel-req',
+        timestamp: '2026-09-25T00:00:00.000Z',
+        ...(extra && { extra }),
+      }) as any;
+    /** Records emitted after `initialize`'s own startup line. */
+    const emitted = () =>
+      sink.emit.mock.calls
+        .map(([record]) => record)
+        .filter((record) => !String(record.body).startsWith('Logger initialized'));
+
+    afterEach(() => {
+      logger.setOtelLogSink(undefined);
+    });
+
+    it('emits the message, MCP severity, and bindings of each written record', async () => {
+      await logger.initialize('info');
+      logger.setOtelLogSink(sink);
+
+      logger.info('otel: plain record', context({ itemId: 'a-1', count: 3 }));
+
+      expect(emitted()).toEqual([
+        {
+          attributes: {
+            count: 3,
+            itemId: 'a-1',
+            requestId: 'otel-req',
+            timestamp: '2026-09-25T00:00:00.000Z',
+          },
+          body: 'otel: plain record',
+          severityNumber: 9,
+          severityText: 'info',
+        },
+      ]);
+    });
+
+    it.each([
+      ['debug', 5],
+      ['info', 9],
+      ['notice', 10],
+      ['warning', 13],
+      ['error', 17],
+      ['crit', 18],
+      ['alert', 21],
+      ['emerg', 22],
+    ] as const)('maps %s to OTel severity number %i', async (level, severityNumber) => {
+      await logger.initialize('debug');
+      logger.setOtelLogSink(sink);
+
+      logger[level](`otel: ${level}`, context());
+
+      expect(emitted()).toEqual([
+        expect.objectContaining({ body: `otel: ${level}`, severityNumber, severityText: level }),
+      ]);
+    });
+
+    it('redacts sensitive fields at every depth, as the pino output does', async () => {
+      await logger.initialize('info');
+      logger.setOtelLogSink(sink);
+
+      logger.info(
+        'otel: secrets',
+        context({
+          token: 'top-secret',
+          nested: { apiKey: 'sk-1', deeper: { password: 'hunter2', kept: 'visible' } },
+          list: [{ secret: 's' }],
+        }),
+      );
+
+      expect(emitted()[0]?.attributes).toMatchObject({
+        token: '[REDACTED]',
+        nested: { apiKey: '[REDACTED]', deeper: { password: '[REDACTED]', kept: 'visible' } },
+        list: [{ secret: '[REDACTED]' }],
+      });
+    });
+
+    it('carries an Error as exception.* attributes rather than an err binding', async () => {
+      await logger.initialize('info');
+      logger.setOtelLogSink(sink);
+      const failure = new TypeError('boom');
+
+      logger.error('otel: failure', failure, context());
+
+      const [record] = emitted();
+      expect(record?.attributes).toMatchObject({
+        'exception.message': 'boom',
+        'exception.stacktrace': expect.stringContaining('TypeError: boom'),
+        'exception.type': 'TypeError',
+      });
+      expect(record?.attributes).not.toHaveProperty('err');
+    });
+
+    it('does not emit records the active level filters out', async () => {
+      await logger.initialize('warning');
+      logger.setOtelLogSink(sink);
+
+      logger.info('otel: below the level', context());
+      logger.debug('otel: far below the level', context());
+      logger.warning('otel: at the level', context());
+
+      expect(emitted().map((record) => record.body)).toEqual(['otel: at the level']);
+    });
+
+    it('does not emit records the rate limiter suppresses', async () => {
+      await logger.initialize('info');
+      logger.setOtelLogSink(sink);
+
+      for (let i = 0; i < 15; i++) logger.info('otel: storm', context());
+
+      // Threshold is 10 in this suite's config.
+      expect(emitted().filter((record) => record.body === 'otel: storm')).toHaveLength(10);
+    });
+
+    it('stops emitting once the sink is detached', async () => {
+      await logger.initialize('info');
+      logger.setOtelLogSink(sink);
+      logger.setOtelLogSink(undefined);
+
+      logger.info('otel: after detach', context());
+
+      expect(emitted()).toEqual([]);
     });
   });
 });

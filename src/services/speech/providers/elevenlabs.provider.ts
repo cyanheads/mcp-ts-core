@@ -122,11 +122,11 @@ export class ElevenLabsProvider implements ISpeechProvider {
     logger.debug('Converting text to speech with ElevenLabs', context);
 
     if (!options.text || options.text.trim().length === 0) {
-      throw invalidParams('Text cannot be empty', context);
+      throw invalidParams('Text cannot be empty');
     }
 
     if (options.text.length > 5000) {
-      throw invalidParams('Text exceeds maximum length of 5000 characters', context);
+      throw invalidParams('Text exceeds maximum length of 5000 characters');
     }
 
     const inputBytes = new TextEncoder().encode(options.text).length;
@@ -198,7 +198,7 @@ export class ElevenLabsProvider implements ISpeechProvider {
 
           throw serviceUnavailable(
             `Failed to convert text to speech: ${error instanceof Error ? error.message : 'Unknown error'}`,
-            context,
+            undefined,
             { cause: error },
           );
         } finally {

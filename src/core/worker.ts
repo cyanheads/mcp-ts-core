@@ -42,6 +42,8 @@ export interface CloudflareBindings {
   ENVIRONMENT?: string;
   KV_NAMESPACE?: KVNamespace;
   LOG_LEVEL?: string;
+  LOG_TOOL_FAILURE_PAYLOAD_MAX_BYTES?: string;
+  LOG_TOOL_FAILURE_PAYLOADS?: string;
   MCP_ALLOWED_ORIGINS?: string;
   MCP_AUTH_MODE?: string;
   MCP_AUTH_SECRET_KEY?: string;
@@ -105,6 +107,8 @@ type WorkerEnv = { Bindings: CloudflareBindings };
 const CORE_ENV_BINDINGS: ReadonlyArray<[keyof CloudflareBindings, string]> = [
   ['ENVIRONMENT', 'NODE_ENV'],
   ['LOG_LEVEL', 'MCP_LOG_LEVEL'],
+  ['LOG_TOOL_FAILURE_PAYLOADS', 'LOG_TOOL_FAILURE_PAYLOADS'],
+  ['LOG_TOOL_FAILURE_PAYLOAD_MAX_BYTES', 'LOG_TOOL_FAILURE_PAYLOAD_MAX_BYTES'],
   ['MCP_AUTH_MODE', 'MCP_AUTH_MODE'],
   ['MCP_AUTH_SECRET_KEY', 'MCP_AUTH_SECRET_KEY'],
   ['MCP_PUBLIC_URL', 'MCP_PUBLIC_URL'],

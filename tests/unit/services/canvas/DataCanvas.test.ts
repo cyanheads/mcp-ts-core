@@ -87,6 +87,8 @@ describe('DataCanvas · acquire', () => {
     expect(caught).toBeInstanceOf(McpError);
     expect((caught as McpError).code).toBe(JsonRpcErrorCode.InternalError);
     expect((caught as McpError).message).toMatch(/Tenant ID is required/);
+    // #548 — request metadata stays out of the client-visible data.
+    expect((caught as McpError).data).toBeUndefined();
     await registry.shutdown(ctxWithTenant);
   });
 

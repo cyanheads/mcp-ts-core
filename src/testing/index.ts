@@ -43,6 +43,7 @@ import {
   buildToolSuccessResult,
   classifyAndBuildToolErrorResult,
   parseToolArguments,
+  parseToolOutput,
   renderToolContent,
 } from '@/mcp-server/tools/utils/toolHandlerFactory.js';
 import { StorageService } from '@/storage/core/StorageService.js';
@@ -51,6 +52,7 @@ import {
   type InMemoryProviderOptions,
 } from '@/storage/providers/inMemory/inMemoryProvider.js';
 import type { ErrorContract } from '@/types-global/errors.js';
+import { asRequestCancelled } from '@/utils/internal/error-handler/errorHandler.js';
 
 // ---------------------------------------------------------------------------
 // Options
@@ -345,7 +347,11 @@ export interface FetchMockRoute {
   method?: string;
   /** Remove the route after its first matching request. */
   once?: boolean;
-  /** Static response (cloned per call) or response factory. */
+  /**
+   * Static response or response factory. A static response's body is read once,
+   * on the route's first match, and each call gets a fresh `Response` over those
+   * bytes with the same `status`, `statusText`, and headers.
+   */
   respond: FetchMockResponder;
 }
 
@@ -380,6 +386,34 @@ export interface FetchMockHarness {
   restore(): void;
   /** Add one or more routes. */
   route(...routes: FetchMockRoute[]): FetchMockHarness;
+}
+
+/** Each static route's body bytes, read on its first match and shared by every call. */
+const staticRouteBodies = new WeakMap<Response, Promise<ArrayBuffer>>();
+
+/**
+ * A fresh copy of a static route's response.
+ *
+ * Not `clone()`: that tees the body, and under the WHATWG Streams tee a
+ * cancelled branch settles only once its sibling is cancelled or drained — the
+ * registered original never is. On Node, which follows the spec there, a
+ * consumer's `body.cancel()` then never resolves, and neither do the
+ * framework's error-body readers that cancel past their cap (#503). A null body
+ * or a network-error response has no tee to hang, and `new Response` rejects
+ * the status-0 error response, so both keep `clone()`.
+ */
+async function serveStaticResponse(response: Response): Promise<Response> {
+  if (response.body === null || response.type === 'error') return response.clone();
+  let body = staticRouteBodies.get(response);
+  if (!body) {
+    body = response.arrayBuffer();
+    staticRouteBodies.set(response, body);
+  }
+  return new Response(await body, {
+    headers: response.headers,
+    status: response.status,
+    statusText: response.statusText,
+  });
 }
 
 function matchesFetchRoute(route: FetchMockRoute, request: Request): boolean {
@@ -437,9 +471,9 @@ export function createFetchMock(
 
     calls.push({ request: request.clone(), route });
     if (route.once) routes.splice(routes.indexOf(route), 1);
-    return Promise.resolve(
-      route.respond instanceof Response ? route.respond.clone() : route.respond(request),
-    );
+    return route.respond instanceof Response
+      ? serveStaticResponse(route.respond)
+      : Promise.resolve(route.respond(request));
   };
 
   const harness: FetchMockHarness = {
@@ -488,7 +522,16 @@ export interface RunToolContractOptions {
  * Arguments that fail the `input` schema are rejected through
  * `parseToolArguments` — the same call the production handler factory makes —
  * so the envelope is `InvalidParams` (`-32602`) with the tool-naming message a
- * client receives, not a `ValidationError` the wire never carries.
+ * client receives, not a `ValidationError` the wire never carries. An output
+ * that breaks the `output` or `enrichment` schema fails as the factory's
+ * `InternalError` (`-32603`) naming that contract.
+ *
+ * A cancellation settles as it does in production: once `context.signal` has
+ * fired, anything the handler or the success pipeline after it throws
+ * (output validation, `format()`, enrichment) becomes `RequestCancelled`
+ * (`-32011`), whatever its own shape. Argument parsing stays outside that
+ * settle, so schema-invalid arguments on an aborted signal still return
+ * `InvalidParams`.
  */
 export async function runToolContract<TDefinition extends AnyToolDefinition>(
   definition: TDefinition,
@@ -500,10 +543,16 @@ export async function runToolContract<TDefinition extends AnyToolDefinition>(
     ...(definition.errors && { errors: definition.errors }),
   });
 
+  let validatedInput: z.infer<TDefinition['input']>;
   try {
-    const validatedInput = parseToolArguments(definition, input);
+    validatedInput = parseToolArguments(definition, input);
+  } catch (error) {
+    return classifyAndBuildToolErrorResult(error);
+  }
+
+  try {
     const output = await definition.handler(validatedInput, ctx);
-    const validatedOutput = definition.output.parse(output) as Record<string, unknown>;
+    const validatedOutput = parseToolOutput(definition, output);
     return buildToolSuccessResult(
       definition,
       ctx,
@@ -511,7 +560,7 @@ export async function runToolContract<TDefinition extends AnyToolDefinition>(
       renderToolContent(definition, validatedOutput, ctx),
     );
   } catch (error) {
-    return classifyAndBuildToolErrorResult(error);
+    return classifyAndBuildToolErrorResult(asRequestCancelled(error, ctx.signal));
   }
 }
 

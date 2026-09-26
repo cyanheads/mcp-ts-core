@@ -166,9 +166,11 @@ export interface FetchWithTimeoutOptions extends Omit<RequestInit, 'signal'> {
   /**
    * An optional external `AbortSignal` (e.g., `ctx.signal` from the request context)
    * to combine with the internal timeout signal. If this signal aborts before the
-   * timeout fires, the fetch is cancelled immediately and a `McpError` with code
-   * `RequestCancelled` is thrown — logged at `info`, and never retried by
-   * `withRetry`.
+   * timeout fires, the fetch is cancelled immediately. An abort whose reason is a
+   * `TimeoutError` — `AbortSignal.timeout()`, or an `AbortSignal.any` whose timeout
+   * member fired — throws `Timeout` with `data.errorSource: 'FetchSignalTimeout'`,
+   * logged at `error`. Any other abort is the caller going away and throws
+   * `RequestCancelled` — logged at `info`, and never retried by `withRetry`.
    */
   signal?: AbortSignal;
 }
@@ -271,6 +273,20 @@ const PRIVATE_HOSTNAMES = new Set(['localhost', 'metadata.google.internal', 'met
 /** Maximum number of redirects to follow when rejectPrivateIPs is enabled. */
 const MAX_SSRF_REDIRECTS = 5;
 
+/** `data` for a target that is not an absolute `http:`/`https:` URL. */
+const INVALID_URL_DATA = {
+  reason: 'invalid_url',
+  recovery: { hint: 'Pass an absolute http:// or https:// URL.' },
+};
+
+/** `data` for a target the SSRF guard refused — by name, literal IP, or DNS answer. */
+const PRIVATE_ADDRESS_DATA = {
+  reason: 'private_address_blocked',
+  recovery: {
+    hint: 'Use a publicly routable host — private, loopback, link-local, and cloud-metadata addresses are blocked.',
+  },
+};
+
 /**
  * Extracts the embedded IPv4 from an IPv4-mapped IPv6 address. Accepts both
  * the dotted-decimal form (`::ffff:127.0.0.1`) and the all-hex form
@@ -316,10 +332,10 @@ function parseHttpUrl(urlString: string): URL {
     parsed = new URL(urlString);
   } catch {
     // Don't echo the raw string — it failed to parse and may carry a secret query.
-    throw validationError('Invalid URL: could not be parsed.');
+    throw validationError('Invalid URL: could not be parsed.', INVALID_URL_DATA);
   }
   if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
-    throw validationError('Only HTTP and HTTPS URLs are allowed.');
+    throw validationError('Only HTTP and HTTPS URLs are allowed.', INVALID_URL_DATA);
   }
   return parsed;
 }
@@ -354,12 +370,18 @@ async function assertNotPrivateUrl(urlString: string): Promise<void> {
 
   // Check known private hostnames
   if (PRIVATE_HOSTNAMES.has(hostname.toLowerCase())) {
-    throw validationError(`Request to private/internal hostname blocked: ${hostname}`);
+    throw validationError(
+      `Request to private/internal hostname blocked: ${hostname}`,
+      PRIVATE_ADDRESS_DATA,
+    );
   }
 
   // Check literal IP (v4, v6, or IPv4-mapped IPv6)
   if (isNonGlobalIP(hostname)) {
-    throw validationError(`Request to non-global/reserved IP blocked: ${hostname}`);
+    throw validationError(
+      `Request to non-global/reserved IP blocked: ${hostname}`,
+      PRIVATE_ADDRESS_DATA,
+    );
   }
 
   // `node:dns/promises` is available in Node, Bun, and Workers under
@@ -424,7 +446,10 @@ async function assertDnsNotPrivate(hostname: string): Promise<void> {
 
   for (const ip of resolved.flat()) {
     if (isNonGlobalIP(ip)) {
-      throw validationError(`DNS resolved ${hostname} to non-global IP ${ip} — SSRF blocked`);
+      throw validationError(
+        `DNS resolved ${hostname} to non-global IP ${ip} — SSRF blocked`,
+        PRIVATE_ADDRESS_DATA,
+      );
     }
   }
 }
@@ -535,9 +560,11 @@ function withBodyDeadline(
  * @throws {McpError} `Timeout` if the exchange exceeds `timeoutMs`. Raised from the
  *   call itself when the deadline expires before headers, and from the body read
  *   when it expires during the stream.
+ * @throws {McpError} `Timeout` with `data.errorSource: 'FetchSignalTimeout'` if the
+ *   external signal aborts with a `TimeoutError` reason (a caller-side deadline).
  * @throws {McpError} `RequestCancelled` if the request is cancelled via the external
- *   signal — likewise from the body read when the cancellation lands mid-stream.
- *   Logged at `info` and outside `withRetry`'s transient set.
+ *   signal for any other reason — likewise from the body read when the cancellation
+ *   lands mid-stream. Logged at `info` and outside `withRetry`'s transient set.
  * @throws {McpError} A status-mapped code (`InvalidParams`/`Unauthorized`/`Forbidden`/
  *   `NotFound`/`RateLimited`/`ServiceUnavailable`/...) if the server returns a non-2xx
  *   status. `error.data` carries `{ status, statusText, body, retryAfter?, headers? }` —
@@ -613,7 +640,8 @@ export async function fetchWithTimeout(
    * the generic network-error wrapper. A `TimeoutError` DOMException is what
    * `AbortSignal.timeout()` itself raises, and holding the instance lets the
    * catch block identity-match it: a caller signal that aborts with its own
-   * `TimeoutError` stays classified as a caller abort, not our timeout.
+   * `TimeoutError` is the caller's deadline (`FetchSignalTimeout`), never
+   * mistaken for this helper's `timeoutMs` (`FetchTimeout`).
    */
   const timeoutReason = new DOMException(
     `${operationDescription} timed out after ${timeoutMs}ms.`,
@@ -632,21 +660,31 @@ export async function fetchWithTimeout(
    * below leaves it armed for the caller's read instead of disarming it at return.
    */
   let deadlineFollowsBody = false;
-  const errorIdentity = {
-    requestId: context.requestId,
-    operation: context.operation,
-  };
+  // Every failure below logs `context`; its thrown `data` is client-visible and
+  // carries no request metadata (#548).
   const timeoutFailure = (): McpError => {
     logger.error(
       `${operationDescription} timed out after ${timeoutMs}ms.`,
       withExtra(context, { errorSource: 'FetchTimeout' }),
     );
-    return timeout(`${operationDescription} timed out.`, {
-      ...errorIdentity,
-      errorSource: 'FetchTimeout',
-    });
+    return timeout(`${operationDescription} timed out.`, { errorSource: 'FetchTimeout' });
   };
   const abortedFailure = (): McpError => {
+    /**
+     * A caller signal carrying a `TimeoutError` reason — `AbortSignal.timeout()`,
+     * or an `AbortSignal.any` one of whose members is — fired on a deadline, not
+     * because anyone withdrew the request. The name is matched rather than
+     * `instanceof DOMException`, which a cross-realm reason can fail.
+     */
+    if ((externalSignal?.reason as { name?: unknown } | undefined)?.name === 'TimeoutError') {
+      logger.error(
+        `${operationDescription} timed out on the caller's signal.`,
+        withExtra(context, { errorSource: 'FetchSignalTimeout' }),
+      );
+      return timeout(`${operationDescription} timed out on the caller's signal.`, {
+        errorSource: 'FetchSignalTimeout',
+      });
+    }
     logger.info(
       `${operationDescription} aborted by caller.`,
       withExtra(context, { errorSource: 'FetchAborted' }),
@@ -655,7 +693,6 @@ export async function fetchWithTimeout(
     // left to retry for. `RequestCancelled` is deliberately outside
     // `withRetry`'s transient set.
     return requestCancelled(`${operationDescription} was aborted.`, {
-      ...errorIdentity,
       errorSource: 'FetchAborted',
     });
   };
@@ -687,6 +724,13 @@ export async function fetchWithTimeout(
         if (redirectCount > MAX_SSRF_REDIRECTS) {
           throw validationError(
             `Too many redirects (${MAX_SSRF_REDIRECTS}) — possible SSRF redirect loop`,
+            {
+              maxRedirects: MAX_SSRF_REDIRECTS,
+              reason: 'too_many_redirects',
+              recovery: {
+                hint: `Request the final URL directly instead of one that redirects more than ${MAX_SSRF_REDIRECTS} times.`,
+              },
+            },
           );
         }
 
@@ -730,7 +774,6 @@ export async function fetchWithTimeout(
           code,
           `Fetch failed for ${redactUrl(currentUrl)}. Status: ${response.status}`,
           {
-            ...errorIdentity,
             // Canonical (Fetch `Response`-aligned) field names.
             status: response.status,
             statusText: response.statusText,
@@ -792,9 +835,10 @@ export async function fetchWithTimeout(
       throw timeoutFailure();
     }
 
-    // External signal abort (e.g. client disconnect) — not a timeout. The
-    // `AbortError` fallback covers an abort raised somewhere other than the
-    // two signals composed here, such as a response body stream.
+    // External signal abort — a client disconnect, or a caller deadline, which
+    // `abortedFailure` tells apart by the reason. The `AbortError` fallback
+    // covers an abort raised somewhere other than the two signals composed
+    // here, such as a response body stream.
     if (fetchSignal.aborted || (error instanceof Error && error.name === 'AbortError')) {
       throw abortedFailure();
     }
@@ -813,7 +857,6 @@ export async function fetchWithTimeout(
     }
 
     throw serviceUnavailable(`Network error during ${operationDescription}: ${errorMessage}`, {
-      ...errorIdentity,
       originalErrorName: error instanceof Error ? error.name : 'UnknownError',
       errorSource: 'FetchNetworkErrorWrapper',
     });

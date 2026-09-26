@@ -9,7 +9,7 @@ import { prompt } from '@/mcp-server/prompts/utils/promptDefinition.js';
 import { resource } from '@/mcp-server/resources/utils/resourceDefinition.js';
 import { tool } from '@/mcp-server/tools/utils/toolDefinition.js';
 import { fuzzPrompt, fuzzResource, fuzzTool, loadFc, zodToArbitrary } from '@/testing/fuzz.js';
-import { JsonRpcErrorCode } from '@/types-global/errors.js';
+import { JsonRpcErrorCode, McpError } from '@/types-global/errors.js';
 
 beforeAll(() => loadFc());
 afterEach(() => vi.useRealTimers());
@@ -206,6 +206,30 @@ describe('fuzz output contracts', () => {
       expect(report.crashes.length).toBe(mode === 'valid' ? 0 : 2);
     },
   );
+
+  it('reports a tool output-schema violation as a crash', async () => {
+    const definition = tool('fuzz_bad_output', {
+      description: 'Returns output that violates its schema.',
+      input: z.object({ value: z.any().describe('Value') }),
+      output,
+      handler: () => JSON.parse('{"ok":"invalid"}'),
+    });
+    const report = await fuzzTool(definition, { ...options, numRuns: 1, numAdversarial: 1 });
+    expect(report.crashes).toHaveLength(2);
+  });
+
+  it('keeps a declared handler McpError out of the crash list', async () => {
+    const definition = tool('fuzz_declared_failure', {
+      description: 'Fails with an InternalError of its own.',
+      input: z.object({ value: z.any().describe('Value') }),
+      output,
+      handler: () => {
+        throw new McpError(JsonRpcErrorCode.InternalError, 'handled');
+      },
+    });
+    const report = await fuzzTool(definition, { ...options, numRuns: 1, numAdversarial: 1 });
+    expect(report.crashes).toEqual([]);
+  });
 
   it.each(['valid', 'adversarial', 'no-params'] as const)(
     'validates declared resource output in the %s phase',

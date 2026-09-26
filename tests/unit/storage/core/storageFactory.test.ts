@@ -69,6 +69,10 @@ describe('createStorageProvider', () => {
       expect(() => createStorageProvider(mockConfig)).toThrow(
         /STORAGE_FILESYSTEM_PATH must be set/,
       );
+      // #548 — the startup context is log metadata, not error data.
+      expect(() => createStorageProvider(mockConfig)).toThrow(
+        expect.objectContaining({ data: undefined }),
+      );
     });
   });
 

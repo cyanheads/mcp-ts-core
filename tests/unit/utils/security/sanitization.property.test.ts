@@ -270,4 +270,33 @@ describe('Sanitization Property-Based Tests', () => {
       );
     });
   });
+
+  describe('serializeForLogging', () => {
+    const bytes = (text: string) => new TextEncoder().encode(text).length;
+
+    it('caps at the byte limit on a character boundary, as a prefix of the whole payload', () => {
+      fc.assert(
+        fc.property(
+          // `binary` strings include lone surrogates and every plane.
+          fc.jsonValue({ maxDepth: 4, stringUnit: 'binary' }),
+          fc.integer({ min: 1, max: 256 }),
+          (value, cap) => {
+            const whole = sanitization.serializeForLogging(value, Number.MAX_SAFE_INTEGER).text;
+            const { text, truncated } = sanitization.serializeForLogging(value, cap);
+
+            expect(truncated).toBe(bytes(whole) > cap);
+            expect(bytes(text)).toBeLessThanOrEqual(cap);
+            expect(text.isWellFormed()).toBe(true);
+            expect(whole.startsWith(text)).toBe(true);
+            // Whole characters only: the next one would have crossed the cap.
+            if (truncated) {
+              const next = String.fromCodePoint(whole.codePointAt(text.length) ?? 0);
+              expect(bytes(text) + bytes(next)).toBeGreaterThan(cap);
+            }
+          },
+        ),
+        { numRuns: 300 },
+      );
+    });
+  });
 });

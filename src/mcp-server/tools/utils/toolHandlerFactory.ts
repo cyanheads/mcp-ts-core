@@ -13,6 +13,7 @@ import type {
 
 import { ZodError, type ZodObject, type ZodRawShape, type ZodType, z } from 'zod';
 
+import { config } from '@/config/index.js';
 import type { Context, EnrichmentStore } from '@/core/context.js';
 import { readContentStore, readEnrichmentStore } from '@/core/context.js';
 import {
@@ -23,6 +24,7 @@ import {
 } from '@/mcp-server/handlerContext.js';
 import { type InputRequiredGate, isInputRequiredSignal } from '@/mcp-server/inputRequired.js';
 import type { NotifierSources } from '@/mcp-server/notifications.js';
+import { parseOutputContract } from '@/mcp-server/outputContract.js';
 import { withRequiredScopes } from '@/mcp-server/transports/auth/lib/authUtils.js';
 import {
   type ErrorContractSeverity,
@@ -32,8 +34,13 @@ import {
 } from '@/types-global/errors.js';
 import { resolvePartialResultKeys } from '@/utils/formatting/partialResult.js';
 import { asRequestCancelled, ErrorHandler } from '@/utils/internal/error-handler/errorHandler.js';
-import { measureToolExecution } from '@/utils/internal/performance.js';
-import { type RequestContext, requestContextService } from '@/utils/internal/requestContext.js';
+import { measureToolExecution, recordToolRejection } from '@/utils/internal/performance.js';
+import {
+  type RequestContext,
+  requestContextService,
+  withExtra,
+} from '@/utils/internal/requestContext.js';
+import { sanitization } from '@/utils/security/sanitization.js';
 import { ATTR_MCP_TOOL_ENRICHED } from '@/utils/telemetry/attributes.js';
 import {
   countCoerced,
@@ -431,9 +438,10 @@ export interface ParseToolArgumentsOptions {
  * The single argument-rejection path. {@link createToolHandler} and the
  * `runToolContract` test helper both route through it, so a test written to
  * the helper pins the code, message, and `content[]` text a deployment
- * actually produces (#416). Anything that classifies a `ZodError` as
- * `ValidationError` — a handler's own validation, the output-schema parse —
- * is a different failure and does not come through here.
+ * actually produces (#416). A `ZodError` a handler throws from its own
+ * validation classifies as `ValidationError` and does not come through here;
+ * nor does the output-schema parse, which fails as `InternalError`
+ * ({@link parseToolOutput}).
  */
 export function parseToolArguments<TDefinition extends AnyToolDefinition>(
   def: TDefinition,
@@ -502,6 +510,21 @@ export function classifyAndBuildToolErrorResult(error: unknown): CallToolResult 
 export function effectiveOutputSchema(def: AnyToolDefinition): ZodObject<ZodRawShape> {
   if (!def.enrichment) return def.output;
   return def.output.extend(def.enrichment) as ZodObject<ZodRawShape>;
+}
+
+/**
+ * Parses a handler's returned value against the tool's `output` schema. A value
+ * that breaks it fails as `InternalError` naming the tool and the output
+ * contract — a server fault, never the caller's `ValidationError` (#480).
+ * {@link createToolHandler} and the `runToolContract` test helper both route
+ * through it.
+ */
+export function parseToolOutput(def: AnyToolDefinition, value: unknown): Record<string, unknown> {
+  return parseOutputContract(def.output, value, {
+    kind: 'Tool',
+    name: def.name,
+    contract: 'output',
+  }) as Record<string, unknown>;
 }
 
 /**
@@ -744,7 +767,8 @@ function renderEnrichmentTrailer(
  *   merged object — keeps enrichment out of the JSON blob and avoids double-render.
  *
  * A required enrichment field the handler never populated fails the parse here,
- * surfacing the authoring bug as a loud error rather than dropping it silently.
+ * surfacing the authoring bug as a loud `InternalError` naming the enrichment
+ * contract rather than dropping it silently (#480).
  */
 export function buildToolSuccessResult(
   def: AnyToolDefinition,
@@ -757,10 +781,11 @@ export function buildToolSuccessResult(
   }
   const store = readEnrichmentStore(ctx);
   const values = store?.values ?? {};
-  const structuredContent = effectiveOutputSchema(def).parse({
-    ...domainValidated,
-    ...values,
-  }) as Record<string, unknown>;
+  const structuredContent = parseOutputContract(
+    effectiveOutputSchema(def),
+    { ...domainValidated, ...values },
+    { kind: 'Tool', name: def.name, contract: 'enrichment' },
+  ) as Record<string, unknown>;
   const trailer =
     store && Object.keys(values).length > 0
       ? renderEnrichmentTrailer(store, def.enrichmentTrailer, structuredContent)
@@ -809,7 +834,8 @@ function declaredSeverity(
  * - Validates input via Zod schema
  * - Measures execution time
  * - Formats response via `format` or JSON default
- * - Catches errors and returns `isError: true`
+ * - Catches errors and returns `isError: true`, counting one raised before the
+ *   measured region (the scope check, argument validation) on `mcp.tool.rejections`
  */
 export function createToolHandler(
   def: AnyToolDefinition,
@@ -831,6 +857,9 @@ export function createToolHandler(
       operation: 'HandleToolRequest',
       additionalContext: { toolName: def.name },
     });
+    // Set once the call reaches the measured region; a failure before it is a
+    // rejection the call and error counters never see (#546).
+    let measured = false;
 
     try {
       // Check inline auth scopes
@@ -856,6 +885,7 @@ export function createToolHandler(
       // merge, and the trailer render all decide the client-visible outcome,
       // so a failure in any of them is a failed call — closing the span when
       // the handler returned recorded those as successes (#346).
+      measured = true;
       return await measureToolExecution(
         async (spanContext, recordOutput) => {
           const handlerCtx = buildHandlerContext(
@@ -878,7 +908,7 @@ export function createToolHandler(
 
             // Render content[] from the domain payload only (Resolution B), then
             // merge enrichment into structuredContent and append the content[] trailer.
-            const validatedResult = def.output.parse(handlerResult) as Record<string, unknown>;
+            const validatedResult = parseToolOutput(def, handlerResult);
             return buildToolSuccessResult(
               def,
               handlerCtx,
@@ -917,7 +947,48 @@ export function createToolHandler(
         context: appContext,
         ...(severity !== undefined && { severity }),
       });
-      return classifyAndBuildToolErrorResult(error);
+      if (!measured) recordToolRejection(def.name, error);
+      const result = classifyAndBuildToolErrorResult(error);
+      if (config.logToolFailurePayloads) {
+        logFailurePayload(services.logger, def.name, appContext, input, result, severity);
+      }
+      return result;
     }
   };
+}
+
+/**
+ * Writes the opt-in failed-call payload record (#291): the arguments as the
+ * caller sent them — before pre-validation drops or renames a key — and the
+ * `CallToolResult` the client receives, each redacted, serialized, and capped
+ * on its own by `sanitization.serializeForLogging`.
+ *
+ * Logged at the level of the call's own error record and with the same request
+ * context, so the two filter and correlate together. A cancellation writes
+ * nothing: its error record is a routine `info` line, and the caller that would
+ * have read the result is gone.
+ */
+function logFailurePayload(
+  log: HandlerServices['logger'],
+  toolName: string,
+  context: RequestContext,
+  input: unknown,
+  result: CallToolResult,
+  severity: ErrorContractSeverity | undefined,
+): void {
+  const { code } = (result.structuredContent as { error: { code: JsonRpcErrorCode } }).error;
+  if (code === JsonRpcErrorCode.RequestCancelled) return;
+
+  const maxBytes = config.logToolFailurePayloadMaxBytes;
+  const toolInput = sanitization.serializeForLogging(input, maxBytes);
+  const toolResult = sanitization.serializeForLogging(result, maxBytes);
+  log[severity ?? 'error'](
+    `Tool failure payload: ${toolName}`,
+    withExtra(context, {
+      toolInput: toolInput.text,
+      toolInputTruncated: toolInput.truncated,
+      toolResult: toolResult.text,
+      toolResultTruncated: toolResult.truncated,
+    }),
+  );
 }

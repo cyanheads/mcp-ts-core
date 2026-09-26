@@ -12,10 +12,11 @@ import { ZodError } from 'zod';
 import { isInputRequiredSignal } from '@/mcp-server/inputRequired.js';
 import { JsonRpcErrorCode, McpError, requestCancelled } from '@/types-global/errors.js';
 import { logger } from '@/utils/internal/logger.js';
-import { type RequestContext, toCanonicalContext } from '@/utils/internal/requestContext.js';
+import type { RequestContext } from '@/utils/internal/requestContext.js';
 import { generateUUID } from '@/utils/security/idGenerator.js';
 import { sanitizeInputForLogging } from '@/utils/security/sanitization.js';
 import {
+  ATTR_MCP_ERROR_CATEGORY,
   ATTR_MCP_ERROR_CLASSIFIED_CODE,
   ATTR_MCP_ERROR_SEVERITY,
 } from '@/utils/telemetry/attributes.js';
@@ -24,8 +25,10 @@ import { extractErrorCauseChain, getErrorMessage, getErrorName } from './helpers
 import {
   COMPILED_ERROR_PATTERNS,
   COMPILED_PROVIDER_PATTERNS,
+  ENGINE_RESOURCE_LIMIT_MESSAGES,
   ERROR_TYPE_MAPPINGS,
   getCompiledPattern,
+  getErrorCategory,
 } from './mappings.js';
 import type { ErrorHandlerOptions, ErrorMapping } from './types.js';
 
@@ -66,7 +69,11 @@ export function initErrorMetrics(): void {
  *
  * Applied inside the measured region by both handler factories, so the
  * completion log's `metrics.errorCode` and the execution span's error-code
- * attribute carry `-32011` alongside the classified envelope.
+ * attribute carry `-32011` alongside the classified envelope. The HTTP
+ * transport's error handler applies it against the inbound request's signal,
+ * and `runToolContract` against the mock context's, over the handler and the
+ * success pipeline after it, so a contract test of cancellation sees the
+ * envelope the factory emits (#513).
  *
  * Returns the value unchanged while the signal is live, for an `input_required`
  * signal (protocol control flow, never a failure), and for an error already
@@ -94,11 +101,13 @@ export class ErrorHandler {
    * Resolution order:
    * 1. `McpError` instances — returns `error.code` directly.
    * 2. SDK `ConnectionClosed` rejections — mapped to `RequestCancelled`, ahead of the pattern ladder.
-   * 3. Standard JS error constructor names via `ERROR_TYPE_MAPPINGS` (e.g. `SyntaxError` → `ValidationError`).
-   * 4. Provider-specific patterns (AWS, HTTP status codes, Supabase, OpenRouter) — checked before common patterns for specificity.
-   * 5. Common message/name patterns (auth, not-found, rate-limit, etc.).
-   * 6. `AbortError` name — mapped to `Timeout`.
-   * 7. Falls back to `JsonRpcErrorCode.InternalError`.
+   * 3. Engine resource-limit `RangeError`s — a whole message in `ENGINE_RESOURCE_LIMIT_MESSAGES`
+   *    (stack overflow, maximum string size) maps to `InternalError` (#482).
+   * 4. Standard JS error constructor names via `ERROR_TYPE_MAPPINGS` (e.g. `SyntaxError` → `ValidationError`).
+   * 5. Provider-specific patterns (AWS, HTTP status codes, Supabase, OpenRouter) — checked before common patterns for specificity.
+   * 6. Common message/name patterns (auth, not-found, rate-limit, etc.).
+   * 7. `AbortError` name — mapped to `Timeout`.
+   * 8. Falls back to `JsonRpcErrorCode.InternalError`.
    *
    * @param error - The error instance or value to classify.
    * @returns The most specific `JsonRpcErrorCode` that fits the error.
@@ -133,6 +142,16 @@ export class ErrorHandler {
 
     const errorName = getErrorName(error);
     const errorMessage = getErrorMessage(error);
+
+    /**
+     * The engine's own resource limits — a runaway recursion, a string past the
+     * maximum size — surface as `RangeError`s whose text names nothing a caller
+     * can change. Matched by whole message ahead of the constructor table, which
+     * files every other `RangeError` as a caller's `ValidationError`.
+     */
+    if (errorName === 'RangeError' && ENGINE_RESOURCE_LIMIT_MESSAGES.has(errorMessage)) {
+      return JsonRpcErrorCode.InternalError;
+    }
 
     // Check against standard JavaScript error types
     const mappedFromType = (ERROR_TYPE_MAPPINGS as Record<string, JsonRpcErrorCode>)[errorName];
@@ -172,10 +191,11 @@ export class ErrorHandler {
    * 1. Records the exception on the active OTel span and sets span status to ERROR.
    * 2. Sanitizes `options.input` via `sanitizeInputForLogging` before including in logs.
    * 3. Extracts and consolidates error data, original stack, and the full cause chain.
-   * 4. Rebuilds the error as a new `McpError` carrying the consolidated data, preserving the
-   *    classified code (or delegates to `options.errorMapper`). That `data` is client-visible
-   *    once the error is thrown toward a handler, so it carries no stack: `originalStack` and
-   *    `causeChain` ride the log record only.
+   * 4. Rebuilds the error as a new `McpError` carrying the consolidated data — the thrown
+   *    error's own `data`, `originalErrorName`, `originalMessage`, and `rootCause` — preserving
+   *    the classified code (or delegates to `options.errorMapper`). That `data` is client-visible
+   *    once the error is thrown toward a handler, so it carries no stack and no `context`:
+   *    `originalStack`, `causeChain`, and the context ride the log record only.
    * 5. Logs the result via the global logger with full structured context — at `error` level,
    *    or at `info` without a stack for `RequestCancelled`, which is a routine caller disconnect.
    * 6. Returns the processed error, or rethrows it if `options.rethrow` is `true`.
@@ -248,18 +268,16 @@ export class ErrorHandler {
         ? { ...error.data }
         : {};
 
-    // `consolidatedData` becomes `McpError.data`, which the tool handler puts on
-    // `structuredContent.error.data`. A service handed the handler `ctx` (the
-    // documented `{ context: ctx }` pattern) would otherwise publish that whole
-    // object — `inputs.responses` carries whatever the user typed into an
-    // elicitation prompt. Project to the declared contract first.
-    const { extra, ...canonicalContext } = toCanonicalContext(
-      context as Readonly<Record<string, unknown>>,
-    );
+    /**
+     * `consolidatedData` becomes `McpError.data`, which the tool handler puts on
+     * `structuredContent.error.data`. It carries the thrown error's own data and
+     * its classification, never `context`: a service handed the handler `ctx`
+     * (the documented `{ context: ctx }` pattern) would otherwise publish
+     * request metadata, and `extra` holds whatever a server attached — scope
+     * names, identifiers, input. The context reaches the log record below (#548).
+     */
     const consolidatedData: Record<string, unknown> = {
       ...errorDataSeed,
-      ...canonicalContext,
-      ...extra,
       originalErrorName,
       originalMessage: originalErrorMessage,
     };
@@ -295,13 +313,22 @@ export class ErrorHandler {
       ? errorMapper(error)
       : new McpError(loggedErrorCode, originalErrorMessage, consolidatedData, { cause });
 
-    // Record error classification metric. The declared severity is a bounded
-    // dimension and rides as an attribute; it is present only when one
-    // resolved, so a server that declares none keeps exactly its old series.
-    // The `reason` behind it never becomes a metric attribute — unbounded
-    // across a fleet, so it belongs on the span and in the log.
+    /**
+     * Record error classification metric. The category is the same
+     * `getErrorCategory` answer the per-surface error counters carry, handed
+     * the thrown `McpError`'s `data` so the canvas tenant-cap refusal files
+     * under `server` rather than upstream throttling (#481). The declared
+     * severity is a bounded dimension and rides as an attribute; it is present
+     * only when one resolved, so a server that declares none keeps exactly its
+     * old series. The `reason` behind either never becomes a metric attribute —
+     * unbounded across a fleet, so it belongs on the span and in the log.
+     */
     getErrorMetrics().errorClassifiedCounter.add(1, {
       [ATTR_MCP_ERROR_CLASSIFIED_CODE]: String(loggedErrorCode),
+      [ATTR_MCP_ERROR_CATEGORY]: getErrorCategory(
+        loggedErrorCode,
+        error instanceof McpError ? error.data : undefined,
+      ),
       operation,
       ...(severity !== undefined && { [ATTR_MCP_ERROR_SEVERITY]: severity }),
     });

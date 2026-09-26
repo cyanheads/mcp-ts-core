@@ -5,11 +5,21 @@
  * @module src/utils/telemetry/instrumentation
  */
 
-import { DiagConsoleLogger, DiagLogLevel, diag } from '@opentelemetry/api';
+import { type DiagLogger, DiagLogLevel, diag } from '@opentelemetry/api';
+import type { LoggerProvider } from '@opentelemetry/api-logs';
+import type { LogRecordProcessor } from '@opentelemetry/sdk-logs';
 import type { NodeSDK } from '@opentelemetry/sdk-node';
 import { config } from '@/config/index.js';
 
+import { logger } from '@/utils/internal/logger.js';
 import { runtimeCaps } from '@/utils/internal/runtime.js';
+
+/**
+ * Metric export cadence, and the per-export timeout. The reader clamps a
+ * timeout longer than its interval down to it and logs a notice on every boot
+ * saying so, so the timeout is set to the interval outright.
+ */
+const METRIC_EXPORT_INTERVAL_MS = 15_000;
 
 /**
  * The active OpenTelemetry `NodeSDK` instance, or `null` when telemetry is disabled,
@@ -85,6 +95,36 @@ function detectCloudResource(): Record<string, string> {
 }
 
 /**
+ * A diag logger that writes every level to stderr. `DiagConsoleLogger` sends
+ * `info` and `debug` to stdout, which the stdio transport reserves for JSON-RPC.
+ */
+function createStderrDiagLogger(format: (...args: unknown[]) => string): DiagLogger {
+  const write = (message: string, ...args: unknown[]) => {
+    process.stderr.write(`${format(message, ...args)}\n`);
+  };
+  return { debug: write, error: write, info: write, verbose: write, warn: write };
+}
+
+/**
+ * Runs `construct` with `OTEL_LOG_LEVEL` absent from `process.env`, restoring
+ * it afterwards. `NodeSDK`'s constructor registers a `DiagConsoleLogger` of its
+ * own whenever the variable is set: it parses the raw value, so the
+ * framework's aliases (`warning`, `err`) read as unknown; it writes info and
+ * debug to stdout; and at `DEBUG` it announces its own registration there
+ * before anything could replace it. The framework's diag logger already
+ * carries the configured level, so the constructor never needs to see it.
+ */
+function withoutOtelLogLevelEnv<T>(construct: () => T): T {
+  const level = process.env.OTEL_LOG_LEVEL;
+  delete process.env.OTEL_LOG_LEVEL;
+  try {
+    return construct();
+  } finally {
+    if (level !== undefined) process.env.OTEL_LOG_LEVEL = level;
+  }
+}
+
+/**
  * Initializes the OpenTelemetry SDK with runtime-appropriate configuration.
  * Idempotent — safe to call multiple times; subsequent calls return the existing promise or resolve immediately.
  * No-ops silently when telemetry is disabled (`OTEL_ENABLED=false`) or when running in a
@@ -99,12 +139,18 @@ function detectCloudResource(): Record<string, string> {
  *   `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT`, else `OTEL_EXPORTER_OTLP_ENDPOINT` + `v1/traces`)
  * - OTLP metrics exporter + `PeriodicExportingMetricReader` at 15 s intervals (when a metrics
  *   endpoint resolves: `OTEL_EXPORTER_OTLP_METRICS_ENDPOINT`, else the base + `v1/metrics`)
- * - No log record processors, and no metric reader when no metrics endpoint resolves — so
- *   `NodeSDK`'s env-driven defaults never export anything the framework config did not ask for
+ * - OTLP log exporter + `BatchLogRecordProcessor` only when `OTEL_EXPORTER_OTLP_LOGS_ENDPOINT`
+ *   is set (never derived from the base), with the framework logger attached to the Logs API;
+ *   otherwise no log record processors. Every list is passed explicitly, so `NodeSDK`'s
+ *   env-driven defaults never export anything the framework config did not ask for
  * - `TraceIdRatioBasedSampler` using `config.openTelemetry.samplingRatio`
  * - Node auto-instrumentations (HTTP enabled, FS disabled)
- * - Pino instrumentation that injects `trace_id`/`span_id` into log records
+ * - Pino instrumentation, which reaches only a `pino` loaded after `start()` — the framework
+ *   logger's records carry `traceId`/`spanId` from the request context instead
  * - Cloud resource attributes via `detectCloudResource()`
+ * - One diag logger: the framework's, writing every level to stderr at
+ *   `config.openTelemetry.logLevel` (aliases resolved). `NodeSDK` would register a console
+ *   logger of its own when `OTEL_LOG_LEVEL` is set, so its constructor never sees the variable.
  *
  * @returns Promise that resolves when initialization is complete (or was already complete)
  * @throws Error if `NodeSDK.start()` or any lazy import fails; re-thrown after resetting `sdk` to `null`
@@ -151,6 +197,7 @@ export async function initializeOpenTelemetry(): Promise<void> {
         { NodeSDK },
         { BatchSpanProcessor, TraceIdRatioBasedSampler },
         { ATTR_DEPLOYMENT_ENVIRONMENT_NAME, ATTR_SERVICE_NAME, ATTR_SERVICE_VERSION },
+        { format },
       ] = await Promise.all([
         import('@opentelemetry/instrumentation-http'),
         import('@opentelemetry/exporter-metrics-otlp-http'),
@@ -161,19 +208,25 @@ export async function initializeOpenTelemetry(): Promise<void> {
         import('@opentelemetry/sdk-node'),
         import('@opentelemetry/sdk-trace-node'),
         import('@opentelemetry/semantic-conventions'),
+        import('node:util'),
       ]);
 
       const otelLogLevelString =
         config.openTelemetry.logLevel.toUpperCase() as keyof typeof DiagLogLevel;
-      const otelLogLevel = DiagLogLevel[otelLogLevelString] ?? DiagLogLevel.INFO;
-      diag.setLogger(new DiagConsoleLogger(), otelLogLevel);
+      diag.setLogger(createStderrDiagLogger(format), {
+        logLevel: DiagLogLevel[otelLogLevelString] ?? DiagLogLevel.INFO,
+        // The framework owns diag once OTel is on; replacing an earlier registration
+        // (a re-initialization after shutdown included) is not worth a stack trace.
+        suppressOverrideMessage: true,
+      });
 
       const tracesEndpoint = config.openTelemetry.tracesEndpoint;
       const metricsEndpoint = config.openTelemetry.metricsEndpoint;
+      const logsEndpoint = config.openTelemetry.logsEndpoint;
 
-      if (!tracesEndpoint && !metricsEndpoint) {
+      if (!tracesEndpoint && !metricsEndpoint && !logsEndpoint) {
         diag.warn(
-          'OTEL_ENABLED is true, but no OTLP endpoint for traces or metrics is configured. OpenTelemetry will not export any telemetry. Set OTEL_EXPORTER_OTLP_ENDPOINT, or the signal-specific OTEL_EXPORTER_OTLP_TRACES_ENDPOINT / OTEL_EXPORTER_OTLP_METRICS_ENDPOINT.',
+          'OTEL_ENABLED is true, but no OTLP endpoint for traces, metrics, or logs is configured. OpenTelemetry will not export any telemetry. Set OTEL_EXPORTER_OTLP_ENDPOINT, or the signal-specific OTEL_EXPORTER_OTLP_TRACES_ENDPOINT / OTEL_EXPORTER_OTLP_METRICS_ENDPOINT / OTEL_EXPORTER_OTLP_LOGS_ENDPOINT.',
         );
       }
 
@@ -199,7 +252,8 @@ export async function initializeOpenTelemetry(): Promise<void> {
         metricReaders.push(
           new PeriodicExportingMetricReader({
             exporter: new OTLPMetricExporter({ url: metricsEndpoint }),
-            exportIntervalMillis: 15000,
+            exportIntervalMillis: METRIC_EXPORT_INTERVAL_MS,
+            exportTimeoutMillis: METRIC_EXPORT_INTERVAL_MS,
           }),
         );
       } else {
@@ -207,30 +261,62 @@ export async function initializeOpenTelemetry(): Promise<void> {
       }
 
       /**
+       * The log packages are optional peers loaded only when log export is
+       * asked for, so a deployment without them never reaches these imports.
+       */
+      const logRecordProcessors: LogRecordProcessor[] = [];
+      let loggerProvider: LoggerProvider | undefined;
+      if (logsEndpoint) {
+        const [{ BatchLogRecordProcessor }, { OTLPLogExporter }, { logs }] = await Promise.all([
+          import('@opentelemetry/sdk-logs'),
+          import('@opentelemetry/exporter-logs-otlp-http'),
+          import('@opentelemetry/api-logs'),
+        ]);
+        diag.info(`Using OTLP exporter for logs, endpoint: ${logsEndpoint}`);
+        logRecordProcessors.push(
+          new BatchLogRecordProcessor({ exporter: new OTLPLogExporter({ url: logsEndpoint }) }),
+        );
+        loggerProvider = logs;
+      }
+
+      /**
        * All three lists are passed explicitly, empty or not: an omitted one
        * makes `NodeSDK` build its own OTLP exporter from `OTEL_*` env vars
        * (defaulting to localhost:4318), exporting outside the framework config.
        */
-      sdk = new NodeSDK({
-        resource,
-        spanProcessors,
-        metricReaders,
-        logRecordProcessors: [],
-        sampler: new TraceIdRatioBasedSampler(config.openTelemetry.samplingRatio),
-        instrumentations: [
-          new HttpInstrumentation({
-            ignoreIncomingRequestHook: (req) => req.url === '/healthz',
+      sdk = withoutOtelLogLevelEnv(
+        () =>
+          new NodeSDK({
+            resource,
+            spanProcessors,
+            metricReaders,
+            logRecordProcessors,
+            sampler: new TraceIdRatioBasedSampler(config.openTelemetry.samplingRatio),
+            instrumentations: [
+              new HttpInstrumentation({
+                ignoreIncomingRequestHook: (req) => req.url === '/healthz',
+              }),
+              new PinoInstrumentation({
+                logHook: (_span, record) => {
+                  record.trace_id = _span.spanContext().traceId;
+                  record.span_id = _span.spanContext().spanId;
+                },
+              }),
+            ],
           }),
-          new PinoInstrumentation({
-            logHook: (_span, record) => {
-              record.trace_id = _span.spanContext().traceId;
-              record.span_id = _span.spanContext().spanId;
-            },
-          }),
-        ],
-      });
+      );
 
       sdk.start();
+      // `PinoInstrumentation` never sees the framework's `pino` (imported at module
+      // load, before `start()`), so the logger forwards its records to the Logs API itself.
+      if (loggerProvider) {
+        logger.setOtelLogSink(
+          loggerProvider.getLogger(
+            config.openTelemetry.serviceName,
+            config.openTelemetry.serviceVersion,
+          ),
+        );
+      }
       isOtelInitialized = true;
       diag.info(
         `OpenTelemetry NodeSDK initialized for ${config.openTelemetry.serviceName} v${config.openTelemetry.serviceVersion}`,
@@ -271,6 +357,7 @@ export async function shutdownOpenTelemetry(timeoutMs = 5000): Promise<void> {
   }
 
   let timer: ReturnType<typeof setTimeout> | undefined;
+  logger.setOtelLogSink(undefined);
   try {
     const shutdownPromise = sdk.shutdown();
     await new Promise<void>((resolve, reject) => {

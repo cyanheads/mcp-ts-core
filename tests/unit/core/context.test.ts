@@ -1055,6 +1055,65 @@ describe('ContextLogger — wire sink (ctx.mcpReq.log mirror)', () => {
     expect(wireLog).toHaveBeenCalledWith('error', { message: 'failed', detail: 'y' });
   });
 
+  it('serializes a payload with no reserved key exactly as { message, ...data }', () => {
+    const { ctx, wireLog } = buildWireCtx();
+
+    ctx.log.warning('hello', { step: 1, reason: 'r' });
+    ctx.log.error('failed', new Error('boom'), { detail: 'x' });
+
+    // Key order is part of what a client sees on the wire, not just the key set.
+    const payloads = (wireLog.mock.calls as unknown[][]).map((call) => JSON.stringify(call[1]));
+    expect(payloads).toEqual([
+      '{"message":"hello","step":1,"reason":"r"}',
+      '{"message":"failed","detail":"x","error":"boom"}',
+    ]);
+  });
+
+  // #502 — a `message` key in call-site data replaced the log line on the wire.
+  it('keeps the log line as the wire message when data carries its own message key', () => {
+    const { ctx, wireLog } = buildWireCtx();
+    const warningSpy = vi.spyOn(logger, 'warning').mockImplementation(() => {});
+
+    ctx.log.warning('fallback failed; answering from cache', {
+      message: 'upstream quota reached',
+      reason: 'quota_exceeded',
+    });
+
+    expect(wireLog).toHaveBeenCalledWith('warning', {
+      message: 'fallback failed; answering from cache',
+      reason: 'quota_exceeded',
+    });
+    // The process logger still receives the caller's own field.
+    expect(warningSpy).toHaveBeenCalledWith(
+      'fallback failed; answering from cache',
+      expect.objectContaining({
+        extra: expect.objectContaining({ message: 'upstream quota reached' }),
+      }),
+    );
+  });
+
+  it('keeps the log line and the Error message on ctx.log.error when data collides with both', () => {
+    const { ctx, wireLog } = buildWireCtx();
+    const errorSpy = vi.spyOn(logger, 'error').mockImplementation(() => {});
+
+    ctx.log.error('fetch failed', new Error('socket hang up'), {
+      message: 'upstream said no',
+      error: 'caller error text',
+    });
+
+    expect(wireLog).toHaveBeenCalledWith('error', {
+      message: 'fetch failed',
+      error: 'socket hang up',
+    });
+    expect(errorSpy).toHaveBeenCalledWith(
+      'fetch failed',
+      expect.any(Error),
+      expect.objectContaining({
+        extra: expect.objectContaining({ message: 'upstream said no' }),
+      }),
+    );
+  });
+
   it('swallows a rejecting wire sink — a log that cannot flush never fails the handler', async () => {
     const wireLog = vi.fn(async () => {
       throw new Error('transport gone');

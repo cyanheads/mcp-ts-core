@@ -49,10 +49,10 @@ export function withRequiredScopes(requiredScopes: string[], parentContext?: Req
       'Auth enabled but no authentication context found. Denying request.',
       initialContext,
     );
-    throw unauthorized(
-      'Authentication required but no auth context was established.',
-      initialContext,
-    );
+    // No data: the context carries `extra.requiredScopes`, the scope names the
+    // Forbidden branch below withholds to prevent enumeration. The log line
+    // above keeps them.
+    throw unauthorized('Authentication required but no auth context was established.');
   }
 
   if (config.mcpAuthDisableScopeChecks) {

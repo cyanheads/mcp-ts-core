@@ -52,11 +52,21 @@ export const ATTR_MCP_TOOL_SUCCESS = 'mcp.tool.success';
  */
 export const ATTR_MCP_TOOL_INPUT_REQUIRED = 'mcp.tool.input_required';
 
-/** JSON-RPC error code from the thrown `McpError`, present when `mcp.tool.success` is `false`. */
+/**
+ * JSON-RPC error code from the thrown `McpError`, present when `mcp.tool.success` is `false`.
+ * Also the code label on `mcp.tool.rejections`, where it is the code the caller received.
+ */
 export const ATTR_MCP_TOOL_ERROR_CODE = 'mcp.tool.error_code';
 
 /** Broad error category: 'upstream' (external API), 'server' (internal bug), or 'client' (bad input). */
 export const ATTR_MCP_TOOL_ERROR_CATEGORY = 'mcp.tool.error_category';
+
+/**
+ * How a measured tool call ended, on `mcp.tool.calls` and `mcp.tool.errors`: `ok` (a result
+ * or an `input_required` round), `error`, or `cancelled` (`RequestCancelled`, -32011 — the
+ * caller hung up). Separates a hang-up from a failure without moving `mcp.tool.success`.
+ */
+export const ATTR_MCP_TOOL_OUTCOME = 'mcp.tool.outcome';
 
 /** Whether the tool returned a result containing partial failures (non-empty `failed` array). */
 export const ATTR_MCP_TOOL_PARTIAL_SUCCESS = 'mcp.tool.partial_success';
@@ -314,6 +324,13 @@ export const ATTR_MCP_CONNECTION_TRANSPORT = 'mcp.connection.transport';
 
 /** Classified JSON-RPC error code from ErrorHandler (e.g., `-32001`, `-32602`). */
 export const ATTR_MCP_ERROR_CLASSIFIED_CODE = 'mcp.error.classified_code';
+
+/**
+ * Origin bucket of the classified code — `upstream`, `server`, or `client` — from the same
+ * `getErrorCategory` that fills `mcp.tool.error_category` and `mcp.prompt.error_category`,
+ * so it separates the canvas tenant-cap refusal (`server`) from upstream throttling on `-32003`.
+ */
+export const ATTR_MCP_ERROR_CATEGORY = 'mcp.error.category';
 
 /**
  * Log level a definition declared for this failure mode: `debug`, `info`,

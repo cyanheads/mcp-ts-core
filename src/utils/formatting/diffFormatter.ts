@@ -126,7 +126,7 @@ export class DiffFormatter {
 
     // Validate inputs
     if (typeof oldText !== 'string' || typeof newText !== 'string') {
-      throw validationError('Both oldText and newText must be strings', logContext);
+      throw validationError('Both oldText and newText must be strings');
     }
 
     const opts: Required<Omit<DiffFormatterOptions, 'oldPath' | 'newPath'>> &
@@ -167,13 +167,14 @@ export class DiffFormatter {
       return result;
     } catch (error: unknown) {
       const message = error instanceof Error ? error.message : String(error);
-      const stack = error instanceof Error ? error.stack : undefined;
       logger.error('Failed to generate diff', withExtra(logContext, { error: message }));
 
-      throw new McpError(JsonRpcErrorCode.InternalError, `Failed to generate diff: ${message}`, {
-        ...logContext,
-        originalError: stack,
-      });
+      throw new McpError(
+        JsonRpcErrorCode.InternalError,
+        `Failed to generate diff: ${message}`,
+        undefined,
+        { cause: error },
+      );
     }
   }
 
@@ -213,7 +214,7 @@ export class DiffFormatter {
 
     // Validate inputs
     if (!Array.isArray(oldLines) || !Array.isArray(newLines)) {
-      throw validationError('Both oldLines and newLines must be arrays', logContext);
+      throw validationError('Both oldLines and newLines must be arrays');
     }
 
     // Join arrays back into text and use main diff method
@@ -258,7 +259,7 @@ export class DiffFormatter {
 
     // Validate inputs
     if (typeof oldText !== 'string' || typeof newText !== 'string') {
-      throw validationError('Both oldText and newText must be strings', logContext);
+      throw validationError('Both oldText and newText must be strings');
     }
 
     try {
@@ -287,13 +288,13 @@ export class DiffFormatter {
       return result;
     } catch (error: unknown) {
       const message = error instanceof Error ? error.message : String(error);
-      const stack = error instanceof Error ? error.stack : undefined;
       logger.error('Failed to generate word diff', withExtra(logContext, { error: message }));
 
       throw new McpError(
         JsonRpcErrorCode.InternalError,
         `Failed to generate word diff: ${message}`,
-        { ...logContext, originalError: stack },
+        undefined,
+        { cause: error },
       );
     }
   }
@@ -439,11 +440,14 @@ export class DiffFormatter {
       return { ...stats, changes: stats.additions + stats.deletions };
     } catch (error: unknown) {
       const message = error instanceof Error ? error.message : String(error);
-      const stack = error instanceof Error ? error.stack : undefined;
-      throw new McpError(JsonRpcErrorCode.InternalError, `Failed to get diff stats: ${message}`, {
-        ...logContext,
-        originalError: stack,
-      });
+      logger.error('Failed to get diff stats', withExtra(logContext, { error: message }));
+
+      throw new McpError(
+        JsonRpcErrorCode.InternalError,
+        `Failed to get diff stats: ${message}`,
+        undefined,
+        { cause: error },
+      );
     }
   }
 }

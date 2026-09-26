@@ -7,7 +7,9 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { z } from 'zod';
 import { tool } from '@/mcp-server/tools/utils/toolDefinition.js';
 import { createFetchMock, createMockSession, runToolContract } from '@/testing/index.js';
-import { JsonRpcErrorCode } from '@/types-global/errors.js';
+import { JsonRpcErrorCode, McpError } from '@/types-global/errors.js';
+import { fetchWithTimeout } from '@/utils/network/fetchWithTimeout.js';
+import { httpErrorFromResponse } from '@/utils/network/httpError.js';
 
 const installedHarnesses: Array<ReturnType<typeof createFetchMock>> = [];
 
@@ -96,6 +98,136 @@ describe('createFetchMock', () => {
     harness.restore();
     harness.restore();
     expect(globalThis.fetch).toBe(originalFetch);
+  });
+
+  // Issue #503 — a static route must not serve a tee branch: on Node, a
+  // cancelled branch settles only once its sibling is drained, and the
+  // registered original never is. Only the Node lane can observe the hang.
+  describe('static responses survive a cancelled body (#503)', () => {
+    /** Rejects instead of hanging when `promise` never settles. */
+    function settles<T>(promise: Promise<T>, label: string): Promise<T> {
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const deadline = new Promise<never>((_resolve, reject) => {
+        timer = setTimeout(() => reject(new Error(`${label} never settled`)), 1_000);
+      });
+      return Promise.race([promise, deadline]).finally(() => clearTimeout(timer));
+    }
+
+    const url = 'https://api.example.test/e';
+
+    it('resolves body.cancel() on a served response', async () => {
+      const harness = createFetchMock([{ match: url, respond: Response.json({ a: 1 }) }]);
+
+      const response = await harness.fetch(url);
+
+      await expect(settles(response.body?.cancel() ?? Promise.resolve(), 'cancel')).resolves.toBe(
+        undefined,
+      );
+    });
+
+    it('settles httpErrorFromResponse past its body limit', async () => {
+      const harness = createFetchMock([
+        { match: url, respond: new Response('x'.repeat(501), { status: 502 }) },
+      ]);
+
+      const response = await harness.fetch(url);
+      const error = await settles(
+        httpErrorFromResponse(response, { service: 'example' }),
+        'httpErrorFromResponse',
+      );
+
+      expect(error).toBeInstanceOf(McpError);
+      expect(error.code).toBe(JsonRpcErrorCode.ServiceUnavailable);
+    });
+
+    it('settles fetchWithTimeout past its error-body scan limit', async () => {
+      const harness = createFetchMock([
+        { match: url, respond: new Response('x'.repeat(16_385), { status: 404 }) },
+      ]);
+      installedHarnesses.push(harness);
+      harness.install();
+
+      const failure = await settles(
+        fetchWithTimeout(url, 5_000, {
+          requestId: 'fetch-mock-503',
+          timestamp: new Date().toISOString(),
+        }).then(
+          () => {
+            throw new Error('expected fetchWithTimeout to reject');
+          },
+          (error: unknown) => error,
+        ),
+        'fetchWithTimeout',
+      );
+
+      expect(failure).toBeInstanceOf(McpError);
+      expect((failure as McpError).code).toBe(JsonRpcErrorCode.NotFound);
+    });
+
+    it('serves identical responses on repeat and concurrent first calls', async () => {
+      const routes = [
+        {
+          match: `${url}/json`,
+          respond: Response.json({ id: '42' }, { status: 201, statusText: 'Created' }),
+        },
+        {
+          match: `${url}/text`,
+          respond: new Response('plain body', {
+            status: 418,
+            statusText: 'Teapot',
+            headers: { 'x-trace': 'abc' },
+          }),
+        },
+      ];
+      const harness = createFetchMock(routes);
+
+      /** Everything a caller can observe about a served response. */
+      const snapshot = async (response: Response) => ({
+        body: await response.text(),
+        headers: [...response.headers.entries()],
+        status: response.status,
+        statusText: response.statusText,
+      });
+
+      for (const path of ['json', 'text']) {
+        const [first, second] = await Promise.all([
+          harness.fetch(`${url}/${path}`),
+          harness.fetch(`${url}/${path}`),
+        ]);
+        const third = await harness.fetch(`${url}/${path}`);
+        const expected = await snapshot(first);
+
+        expect(await snapshot(second)).toEqual(expected);
+        expect(await snapshot(third)).toEqual(expected);
+      }
+
+      const json = await harness.fetch(`${url}/json`);
+      expect(json.headers.get('content-type')).toMatch(/^application\/json/);
+      expect(json.status).toBe(201);
+      expect(json.statusText).toBe('Created');
+      await expect(json.json()).resolves.toEqual({ id: '42' });
+
+      const text = await harness.fetch(`${url}/text`);
+      expect(text.headers.get('x-trace')).toBe('abc');
+      await expect(text.text()).resolves.toBe('plain body');
+    });
+
+    it('still serves null-body and network-error static responses', async () => {
+      const harness = createFetchMock([
+        { match: `${url}/empty`, respond: new Response(null, { status: 204 }) },
+        { match: `${url}/error`, respond: Response.error() },
+      ]);
+
+      for (let call = 0; call < 2; call++) {
+        const empty = await settles(harness.fetch(`${url}/empty`), 'null-body route');
+        expect(empty.status).toBe(204);
+        expect(empty.body).toBeNull();
+
+        const failed = await settles(harness.fetch(`${url}/error`), 'error route');
+        expect(failed.type).toBe('error');
+        expect(failed.status).toBe(0);
+      }
+    });
   });
 });
 

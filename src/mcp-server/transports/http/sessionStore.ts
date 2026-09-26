@@ -140,7 +140,6 @@ export class SessionStore {
     logger.warning('Session capacity reached, rejecting new session', context);
     throw serviceUnavailable(
       `Maximum session capacity reached (${this.maxSessions}). Try again later.`,
-      context,
     );
   }
 
@@ -160,7 +159,6 @@ export class SessionStore {
       logger.warning('Invalid session ID format rejected', context);
       throw invalidParams(
         'Invalid session ID format. Session IDs must be 64 hexadecimal characters.',
-        context,
       );
     }
     this.assertCapacity();

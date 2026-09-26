@@ -168,7 +168,7 @@ export class OpenRouterProvider implements ILlmProvider {
         'OpenRouter API key is not configured. Please set OPENROUTER_API_KEY.',
         context,
       );
-      throw configurationError('OpenRouter API key is not configured.', context);
+      throw configurationError('OpenRouter API key is not configured.');
     }
 
     this.defaultParams = {

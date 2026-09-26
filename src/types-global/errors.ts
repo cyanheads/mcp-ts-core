@@ -12,11 +12,14 @@ import type { RequestContext } from '@/utils/internal/requestContext.js';
 /**
  * Structured payload for an error's JSON-RPC `data` field.
  *
- * Accepts a {@link RequestContext} directly — passing the operation's context
- * as diagnostic data is the established pattern across the framework, and
- * `RequestContext` is a closed interface, so it is not assignable to a bare
- * `Record<string, unknown>`.
+ * `data` reaches the client verbatim — a tool returns it as
+ * `structuredContent.error.data` — so pass the explicit fields the caller acts
+ * on (the rejected key, a limit, a `reason`), never a request context. A
+ * handler `ctx` carries request metadata and, after an elicitation round, what
+ * the user typed (`ctx.inputs.responses`); the context belongs in the log.
  *
+ * {@link RequestContext} stays in the union for existing callers: it is a
+ * closed interface, so it is not assignable to a bare `Record<string, unknown>`.
  * `auth` is dropped by {@link McpError} before the payload is stored; see the
  * constructor.
  */

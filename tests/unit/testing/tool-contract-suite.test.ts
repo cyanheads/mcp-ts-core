@@ -61,3 +61,30 @@ toolContractSuite(definition, {
     },
   ],
 });
+
+// Issue #513 — the suite inherits `runToolContract`'s cancellation settle, so a
+// case run on an aborted signal asserts the envelope production emits.
+const cancelledController = new AbortController();
+cancelledController.abort();
+
+const cancellable = tool('suite_cancellable', {
+  description: 'Stops as soon as the request is cancelled.',
+  input: z.object({}),
+  output: z.object({ ok: z.boolean().describe('Never returned.') }),
+  handler(_input, ctx) {
+    ctx.signal.throwIfAborted();
+    return { ok: true };
+  },
+});
+
+toolContractSuite(cancellable, {
+  success: [{ name: 'completes while the signal is live', input: {} }],
+  errors: [
+    {
+      name: 'settles an aborted signal as RequestCancelled',
+      input: {},
+      context: { signal: cancelledController.signal },
+      code: JsonRpcErrorCode.RequestCancelled,
+    },
+  ],
+});

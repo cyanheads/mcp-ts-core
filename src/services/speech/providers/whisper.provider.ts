@@ -137,7 +137,7 @@ export class WhisperProvider implements ISpeechProvider {
 
     // Validate audio input
     if (!options.audio) {
-      throw invalidParams('Audio data is required', context);
+      throw invalidParams('Audio data is required');
     }
 
     // Convert audio to Uint8Array if it's a base64 string. The view must be
@@ -147,8 +147,8 @@ export class WhisperProvider implements ISpeechProvider {
     if (typeof options.audio === 'string') {
       try {
         audioBuffer = Uint8Array.fromBase64(options.audio);
-      } catch (_error) {
-        throw invalidParams('Invalid base64 audio data', context);
+      } catch (error) {
+        throw invalidParams('Invalid base64 audio data', undefined, { cause: error });
       }
     } else {
       audioBuffer = Uint8Array.from(options.audio);
@@ -159,7 +159,6 @@ export class WhisperProvider implements ISpeechProvider {
     if (audioBuffer.length > maxSize) {
       throw invalidParams(
         `Audio file exceeds maximum size of 25MB (got ${Math.round(audioBuffer.length / 1024 / 1024)}MB)`,
-        context,
       );
     }
 
@@ -254,7 +253,7 @@ export class WhisperProvider implements ISpeechProvider {
 
           throw serviceUnavailable(
             `Failed to transcribe audio: ${error instanceof Error ? error.message : 'Unknown error'}`,
-            context,
+            undefined,
             { cause: error },
           );
         } finally {

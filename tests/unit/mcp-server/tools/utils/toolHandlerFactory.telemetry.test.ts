@@ -27,24 +27,28 @@ const {
   mockErrorCounterAdd,
   mockHistogramRecord,
   mockLogger,
+  mockRejectionCounterAdd,
   mockUpDownCounterAdd,
 } = vi.hoisted(() => {
   const classified = vi.fn();
   const toolErrors = vi.fn();
+  const rejections = vi.fn();
   const other = vi.fn();
   const byName: Record<string, typeof other> = {
     'mcp.errors.classified': classified,
     'mcp.tool.errors': toolErrors,
+    'mcp.tool.rejections': rejections,
   };
   return {
     counterAddFor: (name: string) => byName[name] ?? other,
     mockClassifiedCounterAdd: classified,
     mockCounterAdd: other,
     mockErrorCounterAdd: toolErrors,
+    mockRejectionCounterAdd: rejections,
     mockConfig: {
       environment: 'testing',
       mcpServerVersion: '1.0.0-test',
-      mcpAuthMode: 'none',
+      mcpAuthMode: 'none' as string,
       mcpSessionMode: 'auto' as const,
       openTelemetry: { serviceName: 'test', serviceVersion: '0.0.0' },
     },
@@ -88,6 +92,7 @@ import {
   type HandlerServices,
   type NotifierSources,
 } from '@/mcp-server/tools/utils/toolHandlerFactory.js';
+import { authContext } from '@/mcp-server/transports/auth/lib/authContext.js';
 import { partialResult, partialResultSchema } from '@/utils/formatting/partialResult.js';
 import { TELEMETRY_LOG_MESSAGES } from '@/utils/internal/telemetryMessages.js';
 
@@ -244,10 +249,12 @@ describe('tool telemetry records the terminal outcome (#346)', () => {
       expect(mockCounterAdd).toHaveBeenCalledWith(1, {
         'mcp.tool.name': toolName,
         'mcp.tool.success': false,
+        'mcp.tool.outcome': 'error',
       });
       expect(mockErrorCounterAdd).toHaveBeenCalledWith(1, {
         'mcp.tool.name': toolName,
         'mcp.tool.error_category': 'server',
+        'mcp.tool.outcome': 'error',
       });
     });
 
@@ -294,6 +301,7 @@ describe('tool telemetry records the terminal outcome (#346)', () => {
       expect(mockCounterAdd).toHaveBeenCalledWith(1, {
         'mcp.tool.name': 'telemetry_search',
         'mcp.tool.success': true,
+        'mcp.tool.outcome': 'ok',
       });
       expect(mockErrorCounterAdd).not.toHaveBeenCalled();
       expect(completionMetrics()).toMatchObject({ isSuccess: true });
@@ -500,10 +508,12 @@ describe('tool telemetry records the terminal outcome (#346)', () => {
       expect(mockErrorCounterAdd).toHaveBeenCalledWith(1, {
         'mcp.tool.name': 'telemetry_confirm',
         'mcp.tool.error_category': 'client',
+        'mcp.tool.outcome': 'error',
       });
       expect(mockCounterAdd).toHaveBeenCalledWith(1, {
         'mcp.tool.name': 'telemetry_confirm',
         'mcp.tool.success': false,
+        'mcp.tool.outcome': 'error',
       });
       expect(completionMetrics()).toMatchObject({
         isSuccess: false,
@@ -550,6 +560,7 @@ describe('tool telemetry records the terminal outcome (#346)', () => {
 
       expect(classifiedAttributes()).toEqual({
         'mcp.error.classified_code': String(JsonRpcErrorCode.InvalidRequest),
+        'mcp.error.category': 'client',
         'mcp.error.severity': 'notice',
         operation: 'tool:severity_counted',
       });
@@ -576,6 +587,7 @@ describe('tool telemetry records the terminal outcome (#346)', () => {
 
       expect(classifiedAttributes()).toEqual({
         'mcp.error.classified_code': String(JsonRpcErrorCode.InvalidRequest),
+        'mcp.error.category': 'client',
         operation: 'tool:severity_uncounted',
       });
     });
@@ -608,6 +620,7 @@ describe('tool telemetry records the terminal outcome (#346)', () => {
       expect(mockCounterAdd).toHaveBeenCalledWith(1, {
         'mcp.tool.name': 'severity_still_failed',
         'mcp.tool.success': false,
+        'mcp.tool.outcome': 'error',
       });
       expect(mockHistogramRecord).toHaveBeenCalledWith(expect.any(Number), {
         'mcp.tool.name': 'severity_still_failed',
@@ -616,6 +629,7 @@ describe('tool telemetry records the terminal outcome (#346)', () => {
       expect(mockErrorCounterAdd).toHaveBeenCalledWith(1, {
         'mcp.tool.name': 'severity_still_failed',
         'mcp.tool.error_category': 'client',
+        'mcp.tool.outcome': 'error',
       });
       expect(completionMetrics()).toMatchObject({
         isSuccess: false,
@@ -645,7 +659,291 @@ describe('tool telemetry records the terminal outcome (#346)', () => {
       expect(mockErrorCounterAdd).toHaveBeenCalledWith(1, {
         'mcp.tool.name': 'telemetry_throws',
         'mcp.tool.error_category': 'server',
+        'mcp.tool.outcome': 'error',
       });
+    });
+  });
+
+  // Issues #480, #481, #482 — one origin per failure: the wire code, the
+  // category on `mcp.tool.errors`, and the category on `mcp.errors.classified`
+  // all describe the same code.
+  describe('the wire code and both error counters agree', () => {
+    /** The single `mcp.errors.classified` increment this call made. */
+    function classifiedAttributes(): Record<string, unknown> {
+      expect(mockClassifiedCounterAdd).toHaveBeenCalledTimes(1);
+      return mockClassifiedCounterAdd.mock.calls[0]?.[1] as Record<string, unknown>;
+    }
+
+    /** The single `mcp.tool.errors` increment this call made. */
+    function toolErrorAttributes(): Record<string, unknown> {
+      expect(mockErrorCounterAdd).toHaveBeenCalledTimes(1);
+      return mockErrorCounterAdd.mock.calls[0]?.[1] as Record<string, unknown>;
+    }
+
+    /** A tool whose handler runs `run`. */
+    const throwing = (name: string, run: () => unknown) =>
+      tool(name, {
+        description: 'Fails from the handler.',
+        input: z.object({}),
+        output: z.object({ ok: z.boolean().describe('ok') }),
+        handler: () => run() as { ok: boolean },
+      });
+
+    it.each([
+      ['Error("boom")', () => new Error('boom'), JsonRpcErrorCode.InternalError, 'server'],
+      [
+        'Error("Request timed out")',
+        () => new Error('Request timed out'),
+        JsonRpcErrorCode.Timeout,
+        'upstream',
+      ],
+      [
+        'Error("status code 503")',
+        () => new Error('status code 503'),
+        JsonRpcErrorCode.ServiceUnavailable,
+        'upstream',
+      ],
+      [
+        'a handler-thrown ZodError',
+        () => z.number().safeParse('x').error,
+        JsonRpcErrorCode.ValidationError,
+        'client',
+      ],
+    ])('for %s', async (_label, makeError, code, category) => {
+      const result = await callTool(
+        throwing('agree_tool', () => {
+          throw makeError();
+        }),
+      );
+
+      expect((result.structuredContent as { error: { code: number } }).error.code).toBe(code);
+      expect(toolErrorAttributes()).toEqual({
+        'mcp.tool.name': 'agree_tool',
+        'mcp.tool.error_category': category,
+        'mcp.tool.outcome': 'error',
+      });
+      expect(classifiedAttributes()).toEqual({
+        'mcp.error.classified_code': String(code),
+        'mcp.error.category': category,
+        operation: 'tool:agree_tool',
+      });
+    });
+
+    it('returns -32603 for a handler that recurses without bound (#482)', async () => {
+      const recurse = (): number => recurse() + 1;
+      const result = await callTool(throwing('overflow_tool', () => ({ ok: recurse() > 0 })));
+
+      expect(result.structuredContent).toEqual({
+        error: {
+          code: JsonRpcErrorCode.InternalError,
+          message: expect.stringMatching(/^Maximum call stack size exceeded\.?$/),
+        },
+      });
+      expect(toolErrorAttributes()['mcp.tool.error_category']).toBe('server');
+      expect(classifiedAttributes()).toEqual({
+        'mcp.error.classified_code': String(JsonRpcErrorCode.InternalError),
+        'mcp.error.category': 'server',
+        operation: 'tool:overflow_tool',
+      });
+    });
+
+    it.each([
+      [
+        'an output-schema violation',
+        brokenOutput,
+        'broken_output',
+        /^Tool broken_output returned output that does not match its output schema: value: /,
+      ],
+      [
+        'an unpopulated required enrichment field',
+        brokenEnrichment,
+        'broken_enrichment',
+        /^Tool broken_enrichment returned enrichment that does not match its enrichment schema: total: /,
+      ],
+    ])(
+      'files %s as an InternalError naming the contract (#480)',
+      async (_label, def, name, message) => {
+        const result = await callTool(def);
+
+        expect(result.isError).toBe(true);
+        expect(result.structuredContent).toEqual({
+          error: { code: JsonRpcErrorCode.InternalError, message: expect.stringMatching(message) },
+        });
+        expect(result.content).toEqual([
+          {
+            type: 'text',
+            text: expect.stringMatching(new RegExp(`^Error: ${message.source.slice(1)}`)),
+          },
+        ]);
+        expect(toolErrorAttributes()['mcp.tool.error_category']).toBe('server');
+        expect(classifiedAttributes()).toEqual({
+          'mcp.error.classified_code': String(JsonRpcErrorCode.InternalError),
+          'mcp.error.category': 'server',
+          operation: `tool:${name}`,
+        });
+      },
+    );
+
+    it.each([
+      [
+        'the canvas tenant-cap refusal',
+        { reason: 'canvas_capacity_exhausted' },
+        JsonRpcErrorCode.RateLimited,
+        'server',
+      ],
+      [
+        'any other RateLimited',
+        { reason: 'upstream_throttled' },
+        JsonRpcErrorCode.RateLimited,
+        'upstream',
+      ],
+    ])('keeps %s on its McpError category', async (_label, data, code, category) => {
+      await callTool(
+        throwing('mcp_error_tool', () => {
+          throw new McpError(code, 'refused', data);
+        }),
+      );
+
+      expect(toolErrorAttributes()['mcp.tool.error_category']).toBe(category);
+      expect(classifiedAttributes()['mcp.error.category']).toBe(category);
+    });
+  });
+
+  // Issue #546 — calls rejected before the measured region, and cancellations.
+  describe('pre-handler rejections and cancellation (#546)', () => {
+    const guarded = tool('guarded_tool', {
+      description: 'Requires a scope and a name.',
+      input: z.object({ name: z.string().describe('A name') }),
+      output: z.object({ name: z.string().describe('The name') }),
+      auth: ['tool:guarded_tool:read'],
+      handler: ({ name }) => ({ name }),
+    });
+
+    afterEach(() => {
+      mockConfig.mcpAuthMode = 'none';
+    });
+
+    /** Asserts the call counted only as a rejection with `code`. */
+    function expectRejectionOnly(code: number, category: string): void {
+      expect(mockRejectionCounterAdd).toHaveBeenCalledTimes(1);
+      expect(mockRejectionCounterAdd).toHaveBeenCalledWith(1, {
+        'mcp.tool.name': 'guarded_tool',
+        'mcp.tool.error_code': String(code),
+        'mcp.tool.error_category': category,
+      });
+      expect(mockCounterAdd).not.toHaveBeenCalledWith(
+        1,
+        expect.objectContaining({ 'mcp.tool.name': 'guarded_tool' }),
+      );
+      expect(mockHistogramRecord).not.toHaveBeenCalled();
+      expect(mockErrorCounterAdd).not.toHaveBeenCalled();
+      expect(mockClassifiedCounterAdd).toHaveBeenCalledTimes(1);
+    }
+
+    it('counts an argument rejection once, outside the call metrics', async () => {
+      const result = await callTool(guarded, { name: 42 });
+
+      expect((result.structuredContent as { error: { code: number } }).error.code).toBe(
+        JsonRpcErrorCode.InvalidParams,
+      );
+      expectRejectionOnly(JsonRpcErrorCode.InvalidParams, 'client');
+    });
+
+    it('counts a missing scope as a rejection', async () => {
+      mockConfig.mcpAuthMode = 'jwt';
+      const authInfo = { token: 't', clientId: 'c', scopes: [] };
+
+      const result = await authContext.run({ authInfo } as never, () =>
+        callTool(guarded, { name: 'x' }),
+      );
+
+      expect((result.structuredContent as { error: { code: number } }).error.code).toBe(
+        JsonRpcErrorCode.Forbidden,
+      );
+      expectRejectionOnly(JsonRpcErrorCode.Forbidden, 'client');
+    });
+
+    it('counts a missing auth context as a rejection', async () => {
+      mockConfig.mcpAuthMode = 'jwt';
+
+      const result = await callTool(guarded, { name: 'x' });
+
+      expect((result.structuredContent as { error: { code: number } }).error.code).toBe(
+        JsonRpcErrorCode.Unauthorized,
+      );
+      expectRejectionOnly(JsonRpcErrorCode.Unauthorized, 'client');
+    });
+
+    it('records a cancelled call as cancelled on calls and errors', async () => {
+      const controller = new AbortController();
+      const waiting = tool('cancelled_tool', {
+        description: 'Waits for the caller to hang up.',
+        input: z.object({}),
+        output: z.object({ ok: z.boolean().describe('ok') }),
+        handler: (_input, ctx) =>
+          new Promise<{ ok: boolean }>((_resolve, reject) => {
+            ctx.signal.addEventListener('abort', () => reject(new Error('upstream gave up')), {
+              once: true,
+            });
+            controller.abort('client disconnected');
+          }),
+      });
+
+      const handler = createToolHandler(waiting as AnyToolDefinition, services, notifiers);
+      const result = (await handler(
+        {},
+        makeServerContext({ signal: controller.signal }),
+      )) as CallToolResult;
+
+      expect((result.structuredContent as { error: { code: number } }).error.code).toBe(
+        JsonRpcErrorCode.RequestCancelled,
+      );
+      expect(mockCounterAdd).toHaveBeenCalledWith(1, {
+        'mcp.tool.name': 'cancelled_tool',
+        'mcp.tool.success': false,
+        'mcp.tool.outcome': 'cancelled',
+      });
+      expect(mockErrorCounterAdd).toHaveBeenCalledWith(1, {
+        'mcp.tool.name': 'cancelled_tool',
+        'mcp.tool.error_category': 'client',
+        'mcp.tool.outcome': 'cancelled',
+      });
+      expect(mockHistogramRecord).toHaveBeenCalledWith(expect.any(Number), {
+        'mcp.tool.name': 'cancelled_tool',
+        'mcp.tool.success': false,
+      });
+      expect(mockRejectionCounterAdd).not.toHaveBeenCalled();
+      expect(mockClassifiedCounterAdd.mock.calls[0]?.[1]).toEqual({
+        'mcp.error.classified_code': String(JsonRpcErrorCode.RequestCancelled),
+        'mcp.error.category': 'client',
+        operation: 'tool:cancelled_tool',
+      });
+    });
+
+    it('records an input_required round as ok', async () => {
+      const confirming = tool('ok_input_tool', {
+        description: 'Requests confirmation.',
+        input: z.object({}),
+        output: z.object({ confirmed: z.boolean().describe('confirmed') }),
+        handler: (_input, ctx) =>
+          ctx.requestInput({
+            inputRequests: {
+              confirm: inputRequired.elicit({
+                message: 'Proceed?',
+                requestedSchema: z.object({ confirm: z.boolean().describe('confirm') }),
+              }),
+            },
+          }),
+      });
+
+      await callTool(confirming);
+
+      expect(mockCounterAdd).toHaveBeenCalledWith(1, {
+        'mcp.tool.name': 'ok_input_tool',
+        'mcp.tool.success': true,
+        'mcp.tool.outcome': 'ok',
+      });
+      expect(mockRejectionCounterAdd).not.toHaveBeenCalled();
     });
   });
 });
