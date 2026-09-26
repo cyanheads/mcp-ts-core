@@ -158,6 +158,28 @@ describe('check-skill-versions · one step per release', () => {
     expect(stdout).toContain('"1.2"');
   });
 
+  it('lets a later edit share the bump an earlier commit in the cycle made', () => {
+    seedRelease('@cyanheads/mcp-ts-core');
+    writeSkill(dir, 'kept', '1.1', 'First edit.');
+    git(dir, ['commit', '-am', 'docs: first edit']);
+    writeSkill(dir, 'kept', '1.1', 'Second edit, same release.');
+
+    const { code, stdout } = runCheck(dir);
+
+    expect(code).toBe(0);
+    expect(stdout).toContain('Skill versions are in step with body changes.');
+  });
+
+  it('still flags an unbumped edit when the skill has not moved since the tag', () => {
+    seedRelease('@cyanheads/mcp-ts-core');
+    writeSkill(dir, 'kept', '1.0', 'Edited body, no bump.');
+
+    const { code, stdout } = runCheck(dir);
+
+    expect(code).toBe(1);
+    expect(stdout).toContain('metadata.version is still "1.0"');
+  });
+
   it('lets a consumer repo take a multi-step jump from a skill sync', () => {
     seedRelease('some-mcp-server');
     writeSkill(dir, 'kept', '1.5', 'Synced from a newer framework release.');

@@ -20,8 +20,9 @@
  *
  * A bare name (`add-tool`) and the file path (`add-tool/SKILL.md`) both match.
  *
- * Diffing against `HEAD` keeps the per-release-cycle carve-out automatic: once the
- * version line is bumped, later commits in the same cycle no longer re-trigger.
+ * In the framework repo, a skill whose version already moved since the last `v*`
+ * release tag — or that is new since it — is covered: a later body edit in the
+ * same cycle shares that bump instead of needing another.
  *
  * The inverse also holds: a skill moves at most one step per release. In the
  * framework repo itself, each skill's version is compared with its version at the
@@ -149,6 +150,20 @@ if (!existsSync(resolve(ROOT, 'framework-skills'))) {
 }
 
 const ignore = loadIgnorePatterns();
+const tag = isFrameworkRepo() ? lastReleaseTag() : null;
+
+/**
+ * True when the skill's current version already differs from its version at the
+ * release tag — or the skill is new since it — so this cycle's one step is taken
+ * and a further body edit shares it rather than needing another bump.
+ */
+function bumpedThisRelease(file: string, version: string | null): boolean {
+  if (tag === null) return false;
+  const released = contentAt(tag, file);
+  if (released === null) return true;
+  const releasedVersion = extractVersion(released);
+  return releasedVersion !== null && releasedVersion !== version;
+}
 
 const missing: { file: string; version: string }[] = [];
 for (const file of changedSkillFiles('HEAD').filter((f) => !isIgnored(f, ignore))) {
@@ -161,13 +176,12 @@ for (const file of changedSkillFiles('HEAD').filter((f) => !isIgnored(f, ignore)
 
   const oldVersion = extractVersion(oldContent);
   const newVersion = extractVersion(newContent);
-  if (oldVersion !== null && oldVersion === newVersion) {
+  if (oldVersion !== null && oldVersion === newVersion && !bumpedThisRelease(file, newVersion)) {
     missing.push({ file, version: oldVersion });
   }
 }
 
 const overshot: { file: string; tag: string; released: string; version: string }[] = [];
-const tag = isFrameworkRepo() ? lastReleaseTag() : null;
 if (tag !== null) {
   for (const file of changedSkillFiles(tag)) {
     const released = contentAt(tag, file);
