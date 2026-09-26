@@ -4,6 +4,7 @@
  */
 import { describe, expect, it } from 'vitest';
 import { z } from 'zod';
+import { JsonRpcErrorCode, McpError } from '@/types-global/errors.js';
 import {
   DEFAULT_OUTLINE_BUDGET_BYTES,
   formatOutline,
@@ -207,8 +208,68 @@ describe('selectSections', () => {
     });
   });
 
-  it('ignores requested keys that are absent', () => {
-    expect(selectSections(doc, ['a', 'missing'])).toEqual({ a: 1 });
+  it('returns a present-but-empty section as-is', () => {
+    expect(selectSections({ ...doc, notes: '' }, ['notes'])).toEqual({ notes: '' });
+  });
+
+  it('returns only the alwaysKeep keys for an empty request', () => {
+    expect(selectSections(doc, [], { alwaysKeep: ['id'] })).toEqual({ id: 'x' });
+  });
+
+  it('ignores an alwaysKeep key the document does not carry', () => {
+    expect(selectSections(doc, ['a'], { alwaysKeep: ['id', 'not_in_doc'] })).toEqual({
+      a: 1,
+      id: 'x',
+    });
+  });
+
+  // #477 — an unmatched name is a stale or hallucinated section; rejecting it
+  // tells the caller, where a silent drop reads as a successful narrow slice.
+  describe('rejects a requested name the document does not carry', () => {
+    const country = { id: '1', name: 'Afghanistan', profileOverview: 'long text' };
+
+    function rejection(want: string[], alwaysKeep?: string[]): McpError {
+      try {
+        selectSections(country, want, alwaysKeep ? { alwaysKeep } : undefined);
+      } catch (error) {
+        return error as McpError;
+      }
+      throw new Error('expected selectSections to throw');
+    }
+
+    it('throws InvalidParams naming the unmatched name and the available keys', () => {
+      const error = rejection(['overview'], ['id', 'name']);
+
+      expect(error).toBeInstanceOf(McpError);
+      expect(error.code).toBe(JsonRpcErrorCode.InvalidParams);
+      expect(error.message).toBe(
+        'Unknown section: overview. Available sections: id, name, profileOverview.',
+      );
+      expect(error.data).toEqual({
+        unmatched: ['overview'],
+        available: ['id', 'name', 'profileOverview'],
+      });
+    });
+
+    it('names only the misses in a mixed request', () => {
+      const error = rejection(['profileOverview', 'overveiw', 'nope']);
+
+      expect(error.message).toBe(
+        'Unknown sections: overveiw, nope. Available sections: id, name, profileOverview.',
+      );
+      expect(error.data).toEqual({
+        unmatched: ['overveiw', 'nope'],
+        available: ['id', 'name', 'profileOverview'],
+      });
+    });
+
+    it('names a repeated miss once', () => {
+      expect(rejection(['nope', 'nope']).data).toMatchObject({ unmatched: ['nope'] });
+    });
+
+    it('does not match an inherited property name', () => {
+      expect(rejection(['toString']).data).toMatchObject({ unmatched: ['toString'] });
+    });
   });
 });
 
@@ -230,6 +291,56 @@ describe('formatOutline', () => {
     expect(text).toContain('4000');
     expect(text).toContain('dosage');
     expect(text).toContain('Re-call with sections:[...].');
+  });
+
+  it('renders a plain section name as a single-backtick span', () => {
+    const [block] = formatOutline({
+      kind: 'outline',
+      sections: [{ name: 'warnings', bytes: 4000 }],
+      notice: 'n',
+    });
+
+    expect(block?.type === 'text' && block.text.split('\n')[2]).toBe('- `warnings` — 4000 bytes');
+  });
+
+  // #505 — a backtick in a section name closed the hand-written span early, so
+  // the rest rendered as live markdown and the name no longer read back intact.
+  it('keeps a backtick-bearing section name inside one code span', () => {
+    const [block] = formatOutline({
+      kind: 'outline',
+      sections: [{ name: 'a`b [x](https://example.com)', bytes: 12 }],
+      notice: 'n',
+    });
+
+    expect(block?.type === 'text' && block.text.split('\n')[2]).toBe(
+      '- ``a`b [x](https://example.com)`` — 12 bytes',
+    );
+  });
+});
+
+/**
+ * What `tools/list` advertises for a tool that folds these arms into its
+ * `output`. A change here reaches every existing client, so it is pinned:
+ * `notice` must not move, and the `sections` item carries no description of its
+ * own yet (#271 holds that addition for a breaking window).
+ */
+describe('OUTLINE_VARIANT advertised JSON Schema', () => {
+  it('advertises notice as a described string', () => {
+    expect(z.toJSONSchema(OUTLINE_VARIANT.shape.notice)).toEqual({
+      $schema: 'https://json-schema.org/draft/2020-12/schema',
+      type: 'string',
+      description: 'How to re-call the tool for specific sections',
+    });
+  });
+
+  it('advertises sections as a described array of undescribed section objects', () => {
+    const json = z.toJSONSchema(OUTLINE_VARIANT.shape.sections) as {
+      description?: string;
+      items?: { description?: string; required?: string[] };
+    };
+    expect(json.description).toBe('Available sections, largest first');
+    expect(json.items?.required).toEqual(['name', 'bytes']);
+    expect(json.items).not.toHaveProperty('description');
   });
 });
 

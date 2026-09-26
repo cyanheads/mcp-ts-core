@@ -15,6 +15,9 @@
 import type { ContentBlock } from '@modelcontextprotocol/server';
 import { z } from 'zod';
 
+import { invalidParams } from '@/types-global/errors.js';
+import { codeSpan } from '@/utils/formatting/codeSpan.js';
+
 /** Default serialized-byte budget. Over this, a document overflows to an outline. */
 export const DEFAULT_OUTLINE_BUDGET_BYTES = 24_000;
 
@@ -35,12 +38,19 @@ export interface SectionMeta {
  *
  * ```ts
  * output: z.object({
- *   kind: z.enum(['full', 'outline']),
+ *   kind: z.enum(['full', 'outline']).describe('Whether the full record or a section outline was returned'),
  *   // full-mode arms (present when kind === 'full') — each .optional()
- *   sections: OUTLINE_VARIANT.shape.sections.optional(),   // outline-mode arms
+ *   sections: z                                             // outline-mode arms
+ *     .array(OUTLINE_VARIANT.shape.sections.element.describe('One section of the record'))
+ *     .optional()
+ *     .describe('Available sections, largest first'),
  *   notice: OUTLINE_VARIANT.shape.notice.optional(),
  * }),
  * ```
+ *
+ * The section item is described in place because `describe-on-fields` asks every
+ * array-of-object element for a description and this schema's item carries none.
+ * `notice` beside a `sections` array is exempt from `enrichment-prefer-block`.
  */
 export const OUTLINE_VARIANT = z.object({
   kind: z.literal('outline'),
@@ -172,15 +182,34 @@ export function outlineOnOverflow<T extends Record<string, unknown>>(
  * for. Pure top-level key projection; supply a custom selector when "section"
  * means something other than a top-level key.
  *
+ * A requested name that is not a key of `doc` is rejected rather than dropped:
+ * it is a stale or mistyped name, and a projection missing it would read as a
+ * successful narrow slice. The rejection travels through the tool's existing
+ * error path, so no output field has to be declared to carry it. `alwaysKeep`
+ * names are the author's, not the caller's, and an absent one is ignored.
+ *
  * @param doc - The full document.
  * @param want - Section identifiers the agent requested (from the outline).
  * @param options.alwaysKeep - Metadata keys to retain regardless (ids, timestamps).
+ * @throws {McpError} `InvalidParams` when any name in `want` is not a key of
+ *   `doc`. The message names the unmatched and available keys; `data` carries
+ *   both as `unmatched` and `available`.
  */
 export function selectSections<T extends Record<string, unknown>>(
   doc: T,
   want: string[],
   options?: { alwaysKeep?: string[] },
 ): Partial<T> {
+  const available = Object.keys(doc);
+  const availableSet = new Set(available);
+  const unmatched = [...new Set(want.filter((name) => !availableSet.has(name)))];
+  if (unmatched.length > 0) {
+    throw invalidParams(
+      `Unknown section${unmatched.length === 1 ? '' : 's'}: ${unmatched.join(', ')}. ` +
+        `Available sections: ${available.join(', ')}.`,
+      { unmatched, available },
+    );
+  }
   const keep = new Set<string>([...want, ...(options?.alwaysKeep ?? [])]);
   return Object.fromEntries(Object.entries(doc).filter(([key]) => keep.has(key))) as Partial<T>;
 }
@@ -204,7 +233,7 @@ export function formatOutline(outline: OutlinePayload): ContentBlock[] {
   const lines = [
     `**${outline.sections.length} sections available** (record too large to inline)`,
     '',
-    ...outline.sections.map((s) => `- \`${s.name}\` — ${s.bytes} bytes`),
+    ...outline.sections.map((s) => `- ${codeSpan(s.name)} — ${s.bytes} bytes`),
     '',
     outline.notice,
   ];

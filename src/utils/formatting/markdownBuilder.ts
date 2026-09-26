@@ -2,6 +2,7 @@
  * @fileoverview Markdown builder utility for creating well-structured, semantic markdown content
  * @module utils/formatting/markdownBuilder
  */
+import { codeSpan } from '@/utils/formatting/codeSpan.js';
 
 /**
  * Utility class for building well-formatted markdown content with consistent structure.
@@ -215,8 +216,17 @@ export class MarkdownBuilder {
   }
 
   /**
-   * Append inline code wrapped in single backticks (`` `code` ``).
+   * Append an inline code span (`` `code` ``).
    * No trailing newline is added — suitable for inline use within a sentence.
+   *
+   * The backtick delimiter is sized one past the longest backtick run in `code`
+   * and space-padded where CommonMark would otherwise merge or strip a
+   * character, so a value the tool did not author — an upstream field, a
+   * caller-supplied name — reads back byte-identical as a single span and
+   * nothing after a backtick in it renders as live markdown. A value with no
+   * backtick that does not both begin and end with a space renders as a plain
+   * single-backtick span. Line endings are outside that guarantee: a code span
+   * reads them back as spaces.
    *
    * @param code - The code text to wrap
    * @returns this builder for chaining
@@ -225,10 +235,12 @@ export class MarkdownBuilder {
    * ```typescript
    * markdown().text('Call ').inlineCode('build()').text(' when done.').build();
    * // Call `build()` when done.
+   * markdown().inlineCode('a`b').build();
+   * // ``a`b``
    * ```
    */
   inlineCode(code: string): this {
-    this.sections.push(`\`${code}\``);
+    this.sections.push(codeSpan(code));
     return this;
   }
 

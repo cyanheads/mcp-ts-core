@@ -114,6 +114,33 @@ describe('MarkdownBuilder', () => {
       expect(result).toBe('Use `npm install` to install.');
     });
 
+    // #505 — the inline span is sized past the value's longest backtick run and
+    // space-padded where CommonMark would otherwise strip or merge a delimiter,
+    // so the value reads back byte-identical and nothing after it goes live.
+    test.each([
+      ['a`b [x](https://example.com)', '``a`b [x](https://example.com)``'],
+      ['`lead', '`` `lead ``'],
+      ['trail`', '`` trail` ``'],
+      ['```', '```` ``` ````'],
+      [' a ', '`  a  `'],
+      ['a ``b`` c', '```a ``b`` c```'],
+      ['plain', '`plain`'],
+      [' lead-space', '` lead-space`'],
+      ['b ', '`b `'],
+      ['   ', '`   `'],
+      ['', '``'],
+    ])('should wrap %j as %j', (value, expected) => {
+      expect(markdown().inlineCode(value).build()).toBe(expected);
+    });
+
+    test('should size the span for a value made almost entirely of backtick runs', () => {
+      const value = '`x'.repeat(200_000);
+
+      const result = markdown().inlineCode(value).build();
+
+      expect(result).toBe(`\`\` ${value} \`\``);
+    });
+
     test('should keep a fenced payload inside the block', () => {
       const upstream = 'before\n```\nfenced\n```\nafter';
 
