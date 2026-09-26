@@ -425,6 +425,56 @@ describe('createResourceHandler', () => {
           recovery: { hint: expect.stringContaining('`elicitation.form`') },
         },
       });
+      // #495: a consent gate has no input field to fall back on, so the default
+      // hint stops at the reconnect sentence.
+      expect((error as McpError).data?.recovery).toEqual({
+        hint: 'Reconnect with a client that declares the `elicitation.form` capability.',
+      });
+    });
+
+    it('appends a per-call fallbackHint to the refusal hint (#495)', async () => {
+      const passphraseResource = resource('vault://{id}', {
+        description: 'Asks for a passphrase unless the URI already carries one.',
+        params: z.object({ id: z.string().describe('id') }),
+        handler: (params, ctx) =>
+          ctx.requestInput(
+            {
+              inputRequests: {
+                passphrase: inputRequired.elicit({
+                  message: `Passphrase for ${params.id}?`,
+                  requestedSchema: z.object({ value: z.string().describe('The passphrase.') }),
+                }),
+              },
+            },
+            { fallbackHint: 'Or read vault://{id}/{passphrase} instead.' },
+          ),
+      });
+      const handler = createResourceHandler(
+        passphraseResource as AnyResourceDefinition,
+        services,
+        notifiers,
+        createInputRequiredGate(() => ({})),
+      );
+
+      const error = await handler(new URL('vault://a'), { id: 'a' }, makeServerContext()).catch(
+        (e: unknown) => e,
+      );
+
+      expect(error).toBeInstanceOf(McpError);
+      expect(error).toMatchObject({
+        code: JsonRpcErrorCode.InvalidRequest,
+        message:
+          "Cannot request input 'passphrase' (elicitation/create): the client on this 2025-era " +
+          'connection did not declare the `elicitation.form` capability',
+        data: {
+          reason: 'client_capability_missing',
+          recovery: {
+            hint:
+              'Reconnect with a client that declares the `elicitation.form` capability. ' +
+              'Or read vault://{id}/{passphrase} instead.',
+          },
+        },
+      });
     });
 
     it('records a refused read as a failed measurement, not an input-required one (#379)', async () => {

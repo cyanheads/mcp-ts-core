@@ -9,7 +9,7 @@ import {
   expectInputRequired,
   type MockContextOptions,
 } from '@cyanheads/mcp-ts-core/testing';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { madlibsElicitationTool } from '../../../examples/mcp-server/tools/definitions/template-madlibs-elicitation.tool.js';
 
 type ToolInput = Parameters<typeof madlibsElicitationTool.handler>[0];
@@ -62,6 +62,30 @@ describe('madlibsElicitationTool', () => {
     const result = await expectInputRequired(() => runHandler(input));
     expect(Object.keys(result.inputRequests ?? {})).toEqual(['verb', 'adjective']);
   });
+
+  it.each([
+    [{}, 'Or call again with noun, verb, and adjective supplied.'],
+    [{ noun: 'cat' }, 'Or call again with verb and adjective supplied.'],
+    [{ noun: 'cat', verb: 'ran' }, 'Or call again with adjective supplied.'],
+  ])(
+    'offers the parts it asked for as the capability-refusal fallback for %j',
+    async (args, fallbackHint) => {
+      // The refusal a client without elicitation gets is shaped by the framework's
+      // gate; what the tool owns is the sentence naming the arguments that can
+      // stand in for the answers it asked for.
+      const ctx = createMockContext({ errors: madlibsElicitationTool.errors });
+      const requestInput = vi.spyOn(ctx, 'requestInput');
+
+      const result = await expectInputRequired(() =>
+        madlibsElicitationTool.handler(madlibsElicitationTool.input.parse(args), ctx),
+      );
+
+      expect(requestInput).toHaveBeenCalledTimes(1);
+      expect(requestInput.mock.calls[0]?.[1]).toEqual({ fallbackHint });
+      // The option shapes a refusal only; it never rides the input_required result.
+      expect(JSON.stringify(result)).not.toContain('call again');
+    },
+  );
 
   it('treats an empty string from a form-based client as not supplied', async () => {
     const input = madlibsElicitationTool.input.parse({ noun: '', verb: 'ran', adjective: 'big' });

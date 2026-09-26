@@ -71,8 +71,33 @@ export type { AuthContext };
  * At least one of `inputRequests` or `requestState` must be supplied.
  * `requestState` round-trips through the client and is attacker-controlled on
  * re-entry — integrity-protect anything that influences authorization.
+ *
+ * `options` shape only the refusal a 2025-era connection gets when its client
+ * declared no matching capability — see {@link RequestInputOptions}. They never
+ * reach the wire on a request the connection can serve.
  */
-export type RequestInputFn = (spec: InputRequiredSpec) => never;
+export type RequestInputFn = (spec: InputRequiredSpec, options?: RequestInputOptions) => never;
+
+/** Per-call options for {@link RequestInputFn}. */
+export interface RequestInputOptions {
+  /**
+   * A sentence appended, after a space, to the recovery hint of the
+   * `client_capability_missing` refusal — for a handler whose own arguments can
+   * stand in for the answer it asked for:
+   *
+   * ```ts
+   * return ctx.requestInput(
+   *   { inputRequests: { noun: inputRequired.elicit({ message: 'I need a noun.', requestedSchema: Answer }) } },
+   *   { fallbackHint: 'Or call again with noun supplied.' },
+   * );
+   * ```
+   *
+   * Omit it when nothing the caller can send replaces the answer — a consent
+   * gate deliberately has no input field for it, since the model would fill it
+   * in — and the hint stops at reconnecting with a capable client.
+   */
+  fallbackHint?: string;
+}
 
 /**
  * Reader over the input responses a retried request carried. Empty on the first

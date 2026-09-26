@@ -25,6 +25,7 @@ import { StorageService } from '@/storage/core/StorageService.js';
 import { InMemoryProvider } from '@/storage/providers/inMemory/inMemoryProvider.js';
 import { JsonRpcErrorCode, validationError } from '@/types-global/errors.js';
 import { logger } from '@/utils/internal/logger.js';
+import { madlibsElicitationTool } from '../../examples/mcp-server/tools/definitions/template-madlibs-elicitation.tool.js';
 
 // ---------------------------------------------------------------------------
 // Fixtures — registered through the framework's real registration path
@@ -454,6 +455,49 @@ describe('Multi-round-trip input integration', () => {
 
       expect(result.isError).toBeFalsy();
       expect(result.structuredContent).toMatchObject({ round: 'round-1' });
+    });
+
+    it('ends a consent gate’s hint at reconnecting, offering no argument to send (#495)', async () => {
+      const { client, received } = track(await connectPair({ advertiseElicitation: false }));
+
+      const result = await client.callTool({ name: 'confirm_or_give_up', arguments: {} });
+
+      expect(refusal(result).data?.recovery?.hint).toBe(
+        'Reconnect with a client that declares the `elicitation.form` capability.',
+      );
+      expect(received).toHaveLength(0);
+    });
+
+    it('appends the fallback the madlibs example names for the parts it asked for (#495)', async () => {
+      const { client, received } = track(
+        await connectPair({
+          advertiseElicitation: false,
+          extraTools: [madlibsElicitationTool as unknown as AnyToolDefinition],
+        }),
+      );
+
+      const result = await client.callTool({
+        name: 'template_madlibs_elicitation',
+        arguments: { noun: 'cat' },
+      });
+
+      const hint =
+        'Reconnect with a client that declares the `elicitation.form` capability. ' +
+        'Or call again with verb and adjective supplied.';
+      const error = (
+        result.structuredContent as { error: { code: number; data: unknown; message: string } }
+      ).error;
+      expect(error).toEqual({
+        code: JsonRpcErrorCode.InvalidRequest,
+        message:
+          "Cannot request input 'verb' (elicitation/create): the client on this 2025-era " +
+          'connection did not declare the `elicitation.form` capability',
+        data: { reason: 'client_capability_missing', recovery: { hint } },
+      });
+      expect((result.content as Array<{ text: string }>)[0]?.text).toBe(
+        `Error: ${error.message}\n\nRecovery: ${hint}\n\n(reason client_capability_missing)`,
+      );
+      expect(received).toHaveLength(0);
     });
 
     it('fails a resource read with a JSON-RPC error carrying the reason and hint', async () => {

@@ -23,7 +23,6 @@ import {
   acceptedContent,
   type ClientCapabilities,
   type InputRequiredResult,
-  type InputRequiredSpec,
   type InputResponseView,
   inputRequired,
   inputResponse,
@@ -31,7 +30,7 @@ import {
   type StandardSchemaV1,
 } from '@modelcontextprotocol/server';
 
-import type { ContextInputs } from '@/core/context.js';
+import type { ContextInputs, RequestInputFn } from '@/core/context.js';
 import { JsonRpcErrorCode, McpError } from '@/types-global/errors.js';
 
 /**
@@ -135,9 +134,13 @@ function capabilityPath({ capability, member }: CapabilityRequirement): string {
 /**
  * Decides whether a handler's `input_required` return can be served on this
  * connection: the `McpError` the caller receives instead, or `undefined` to
- * let the return through.
+ * let the return through. `fallbackHint` is the handler's per-call
+ * `RequestInputOptions.fallbackHint`, appended to the refusal's hint.
  */
-export type InputRequiredGate = (result: InputRequiredResult) => McpError | undefined;
+export type InputRequiredGate = (
+  result: InputRequiredResult,
+  fallbackHint?: string,
+) => McpError | undefined;
 
 /**
  * Builds the gate for one connection from its declared client capabilities.
@@ -155,11 +158,16 @@ export type InputRequiredGate = (result: InputRequiredResult) => McpError | unde
  * `clientCapabilities()` returning `undefined` is the per-request legacy case:
  * an instance that never saw an `initialize` holds no capability view, so every
  * embedded request is refused, and the message and hint say so.
+ *
+ * The hint ends at reconnecting (#495). Whether the caller could instead
+ * supply the answer as an argument is the handler's knowledge, not the gate's:
+ * a consent gate deliberately has no such field, so the gate appends a
+ * fallback only when the handler passed one.
  */
 export function createInputRequiredGate(
   clientCapabilities: () => ClientCapabilities | undefined,
 ): InputRequiredGate {
-  return (result) => {
+  return (result, fallbackHint) => {
     const requests = result.inputRequests;
     if (requests === undefined) return;
     const declared = clientCapabilities();
@@ -170,6 +178,9 @@ export function createInputRequiredGate(
       const path = capabilityPath(requirement);
       const method = (entry as { method: string }).method;
       const blind = declared === undefined;
+      const reconnect = blind
+        ? `No client capabilities are visible on a per-request connection, so \`${path}\` cannot be requested here. Reconnect over a stateful session whose client declares it.`
+        : `Reconnect with a client that declares the \`${path}\` capability.`;
       return new McpError(
         JsonRpcErrorCode.InvalidRequest,
         `Cannot request input '${key}' (${method}): the client on this 2025-era connection did not declare the \`${path}\` capability${
@@ -179,11 +190,7 @@ export function createInputRequiredGate(
         }`,
         {
           reason: CLIENT_CAPABILITY_MISSING_REASON,
-          recovery: {
-            hint: blind
-              ? `No client capabilities are visible on a per-request connection, so \`${path}\` cannot be requested here. Reconnect over a stateful session whose client declares it, or call again supplying the value this request would have asked for.`
-              : `Reconnect with a client that declares the \`${path}\` capability, or call again supplying the value this request would have asked for.`,
-          },
+          recovery: { hint: fallbackHint ? `${reconnect} ${fallbackHint}` : reconnect },
         },
       );
     }
@@ -203,11 +210,14 @@ export function createInputRequiredGate(
  * error path shapes it. Resolving it any later — in a factory's catch, after
  * the measured region has closed — would record a refused call as a successful
  * input-required round while the client is told the call failed.
+ *
+ * `options.fallbackHint` goes to the gate alone; it never enters the
+ * `input_required` result.
  */
-export function createRequestInput(gate?: InputRequiredGate): (spec: InputRequiredSpec) => never {
-  return (spec: InputRequiredSpec): never => {
+export function createRequestInput(gate?: InputRequiredGate): RequestInputFn {
+  return (spec, options) => {
     const result = inputRequired(spec);
-    const refusal = gate?.(result);
+    const refusal = gate?.(result, options?.fallbackHint);
     if (refusal !== undefined) throw refusal;
     throw new InputRequiredSignal(result);
   };

@@ -8,6 +8,9 @@
  * and the SDK's legacy shim fulfils them for a 2025-era session by issuing real
  * `elicitation/create` requests. That legacy leg needs a live session, so a
  * server hosting this tool declares `sessionMode: { require: 'stateful' }`.
+ * A 2025-era client that cannot be asked at all is refused, and the refusal's
+ * recovery hint names the omitted parts via `fallbackHint`, since every part
+ * is also an input field.
  *
  * A declined or cancelled prompt ends the call through the `input_declined`
  * contract entry, logged at `notice` rather than `error` via its `severity`.
@@ -94,17 +97,22 @@ export const madlibsElicitationTool = tool('template_madlibs_elicitation', {
     }
 
     if (missing.length > 0) {
-      return ctx.requestInput({
-        inputRequests: Object.fromEntries(
-          missing.map((part) => [
-            part,
-            inputRequired.elicit({
-              message: `I need a ${part}. Please provide one below.`,
-              requestedSchema: AnswerSchema,
-            }),
-          ]),
-        ),
-      });
+      return ctx.requestInput(
+        {
+          inputRequests: Object.fromEntries(
+            missing.map((part) => [
+              part,
+              inputRequired.elicit({
+                message: `I need a ${part}. Please provide one below.`,
+                requestedSchema: AnswerSchema,
+              }),
+            ]),
+          ),
+        },
+        {
+          fallbackHint: `Or call again with ${new Intl.ListFormat('en').format(missing)} supplied.`,
+        },
+      );
     }
 
     // Every part was supplied or accepted once `missing` is empty.

@@ -52,4 +52,28 @@ describe('context helper types', () => {
       },
     });
   });
+
+  it('takes an optional fallbackHint beside the spec, in return position either way', () => {
+    tool('typed_request_input', {
+      description: 'demo',
+      input: z.object({ noun: z.string().optional().describe('noun') }),
+      output: z.object({ noun: z.string().describe('noun') }),
+      handler: (input, ctx) => {
+        expectTypeOf(ctx.requestInput).returns.toBeNever();
+        expectTypeOf(ctx.requestInput)
+          .parameter(1)
+          .toEqualTypeOf<{ fallbackHint?: string } | undefined>();
+        if (!input.noun) return ctx.requestInput({ requestState: 'round-1' });
+        if (input.noun === 'ask') {
+          return ctx.requestInput(
+            { requestState: 'round-1' },
+            { fallbackHint: 'Or call again with noun supplied.' },
+          );
+        }
+        // @ts-expect-error — the fallback is a sentence, not a flag
+        ctx.requestInput({ requestState: 'round-1' }, { fallbackHint: true });
+        return { noun: input.noun };
+      },
+    });
+  });
 });
