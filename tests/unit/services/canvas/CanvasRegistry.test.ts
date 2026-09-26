@@ -16,6 +16,7 @@ import {
   type CanvasRegistryOptions,
 } from '@/services/canvas/core/CanvasRegistry.js';
 import type { IDataCanvasProvider } from '@/services/canvas/core/IDataCanvasProvider.js';
+import { runToolContract } from '@/testing/index.js';
 import { JsonRpcErrorCode, McpError } from '@/types-global/errors.js';
 import type { RequestContext } from '@/utils/internal/requestContext.js';
 import { IdGenerator } from '@/utils/security/idGenerator.js';
@@ -242,6 +243,16 @@ describe('CanvasRegistry · malformed vs missing ids (#327)', () => {
   });
 });
 
+/** A tool whose only argument is a `canvas_id` declared with the exported schema. */
+function canvasConsumer() {
+  return tool('canvas_consumer', {
+    description: 'Accepts a canvas id shaped by the exported schema.',
+    input: z.object({ canvas_id: CanvasIdSchema.optional() }),
+    output: z.object({ ok: z.boolean().describe('Always true.') }),
+    handler: () => ({ ok: true }),
+  });
+}
+
 describe('CanvasIdSchema (#327)', () => {
   it('accepts every id mintId() produces and rejects malformed values', async () => {
     const provider = makeStubProvider();
@@ -266,19 +277,97 @@ describe('CanvasIdSchema (#327)', () => {
     expect(z.toJSONSchema(CanvasIdSchema).description).toEqual(expect.any(String));
   });
 
-  it('passes schema-serializable inside a tool input', () => {
-    const consumer = tool('canvas_consumer', {
-      description: 'Accepts a canvas id shaped by the exported schema.',
-      input: z.object({ canvas_id: CanvasIdSchema.optional() }),
-      output: z.object({ ok: z.boolean().describe('Always true.') }),
-      handler: () => ({ ok: true }),
-    });
+  // #483 — a check message is not part of the JSON Schema Zod emits, so the
+  // schema and a consumer's advertised inputSchema stay byte-identical:
+  // `pattern` plus `description`, nothing else.
+  it('emits exactly the pinned JSON Schema bytes', () => {
+    expect(JSON.stringify(z.toJSONSchema(CanvasIdSchema))).toBe(
+      '{"$schema":"https://json-schema.org/draft/2020-12/schema","type":"string","pattern":"^[A-Za-z0-9_-]{10}$","description":"Canvas ID as an earlier response on this server returned it — exactly 10 characters of letters, digits, hyphens, and underscores."}',
+    );
+  });
 
-    const report = validateDefinitions({ tools: [consumer] });
+  it("leaves a consuming tool's advertised inputSchema byte-identical", () => {
+    const standard = (
+      canvasConsumer().input as unknown as {
+        '~standard': { jsonSchema: { input: (o: { target: string }) => unknown } };
+      }
+    )['~standard'];
+    expect(JSON.stringify(standard.jsonSchema.input({ target: 'draft-2020-12' }))).toBe(
+      '{"$schema":"https://json-schema.org/draft/2020-12/schema","type":"object","properties":{"canvas_id":{"type":"string","pattern":"^[A-Za-z0-9_-]{10}$","description":"Canvas ID as an earlier response on this server returned it — exactly 10 characters of letters, digits, hyphens, and underscores."}},"additionalProperties":false}',
+    );
+  });
+
+  it('passes schema-serializable inside a tool input', () => {
+    const report = validateDefinitions({ tools: [canvasConsumer()] });
     expect(
       [...report.errors, ...report.warnings].filter((d) => d.rule === 'schema-serializable'),
     ).toEqual([]);
     expect(report.passed).toBe(true);
+  });
+});
+
+// Issue #483 — the regex check carries a message saying what a canvas ID is,
+// so a table name or an id wrapped in prose is rejected with more than the
+// bare pattern. The argument-rejection envelope renders the issue message into
+// its own message and hint, so both are asserted to contain it rather than to
+// equal a fixed rendering.
+describe('CanvasIdSchema · rejection message (#483)', () => {
+  const CANVAS_ID_MESSAGE =
+    'Expected a canvas ID exactly as an earlier response on this server returned it: 10 characters of letters, digits, hyphens, and underscores. A table name is not a canvas ID.';
+
+  interface ArgumentRejection {
+    code: number;
+    data: {
+      issues: { code: string; message: string; path: PropertyKey[] }[];
+      reason: string;
+      recovery: { hint: string };
+    };
+    message: string;
+  }
+
+  it.each(['df_abc123', 'x', 'AbC-_12345 is the canvas', 'AAAAAAAAAAA', ''])(
+    'rejects canvas_id %o as invalid_arguments naming what a canvas ID is',
+    async (bad) => {
+      const result = await runToolContract(canvasConsumer(), { canvas_id: bad });
+
+      expect(result.isError).toBe(true);
+      const error = (result.structuredContent as { error: ArgumentRejection }).error;
+      expect(error.code).toBe(JsonRpcErrorCode.InvalidParams);
+      expect(error.data.reason).toBe('invalid_arguments');
+      expect(error.data.issues).toHaveLength(1);
+      expect(error.data.issues[0]).toMatchObject({
+        code: 'invalid_format',
+        message: CANVAS_ID_MESSAGE,
+        path: ['canvas_id'],
+      });
+      expect(error.message).toContain(CANVAS_ID_MESSAGE);
+      expect(error.data.recovery.hint).toContain(CANVAS_ID_MESSAGE);
+      // The content[] surface a format()-only client reads carries it too.
+      expect((result.content[0] as { text: string }).text).toContain(CANVAS_ID_MESSAGE);
+    },
+  );
+
+  it('accepts a well-formed id on the same tool', async () => {
+    const result = await runToolContract(canvasConsumer(), { canvas_id: 'AbC-_12345' });
+    expect(result.isError).toBeFalsy();
+    expect(result.structuredContent).toEqual({ ok: true });
+  });
+
+  it('agrees with the canvas_id_malformed hint on what a canvas ID is', async () => {
+    const issue = CanvasIdSchema.safeParse('df_abc123').error?.issues[0];
+    expect(issue?.message).toBe(CANVAS_ID_MESSAGE);
+
+    const registry = new CanvasRegistry(makeStubProvider(), makeOptions());
+    const malformed = await registry.drop('df_abc123', 'tenant-a', baseContext).catch((e) => e);
+    const hint = (malformed as McpError).data?.recovery as { hint: string };
+    for (const fact of [
+      'exactly as an earlier response',
+      '10 characters of letters, digits, hyphens, and underscores',
+    ]) {
+      expect(hint.hint).toContain(fact);
+      expect(CANVAS_ID_MESSAGE).toContain(fact);
+    }
+    await registry.shutdown(baseContext);
   });
 });
 

@@ -6,9 +6,9 @@
  * @module tests/unit/canvas/exportWriter.test
  */
 
-import { mkdir, mkdtemp, readFile, rm, stat, symlink, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readdir, readFile, rm, stat, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join, sep } from 'node:path';
+import { basename, dirname, join, sep } from 'node:path';
 
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
@@ -80,6 +80,43 @@ describe('resolveExportPath', () => {
     }
   });
 
+  // The operator's root may itself be reached through a link (a symlinked
+  // CANVAS_EXPORT_PATH, or /tmp and /var on macOS); only links below it are
+  // refused, and the resolved path keeps the root as configured.
+  it('accepts a root reached through a symlink and still rejects a symlink below it', async () => {
+    const real = join(root, 'real');
+    const linked = join(root, 'linked');
+    await mkdir(real);
+    await symlink(real, linked);
+
+    await expect(resolveExportPath(linked, 'sub/output.csv')).resolves.toBe(
+      join(linked, 'sub', 'output.csv'),
+    );
+
+    await symlink(root, join(real, 'escape'));
+    await expect(resolveExportPath(linked, 'escape/output.csv')).rejects.toMatchObject({
+      data: { reason: 'export_path_symlink' },
+    });
+  });
+
+  // #565 — the provider redacts the root as configured, so a filesystem fault
+  // in the walk must quote that path, not the root's realpath.
+  it.skipIf(process.platform === 'win32')(
+    'reports a filesystem fault under a symlinked root against the root as configured',
+    async () => {
+      const real = join(root, 'real');
+      const linked = join(root, 'linked');
+      await mkdir(real);
+      await symlink(real, linked);
+      await writeFile(join(real, 'sub'), 'a file, not a directory');
+
+      const err = await resolveExportPath(linked, 'sub/output.csv').catch((e: unknown) => e);
+
+      expect(err).toMatchObject({ code: 'ENOTDIR', path: join(linked, 'sub', 'output.csv') });
+      expect((err as Error).message).not.toContain(real);
+    },
+  );
+
   it('rejects an existing destination that is itself a symlink', async () => {
     const outside = join(root, '..', `outside-${crypto.randomUUID()}.csv`);
     try {
@@ -105,29 +142,39 @@ describe('copyFormatClause', () => {
   });
 });
 
+// #554 — scratch files sit directly in the provider's private directory under
+// crypto.randomUUID() names; the 0700 directory, not the name, is the boundary.
 describe('tempFilePathFor', () => {
-  let root: string;
-  beforeEach(async () => {
-    root = await mkdtemp(join(tmpdir(), 'canvas-temp-'));
-  });
-  afterEach(async () => {
-    await rm(root, { recursive: true, force: true });
+  const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+
+  it.each(['csv', 'parquet', 'json'] as const)(
+    'names a %s scratch file <uuid>.<format> directly inside the directory',
+    (format) => {
+      const root = join(tmpdir(), 'mcp-canvas-AbC123');
+      const path = tempFilePathFor(root, format);
+      expect(dirname(path)).toBe(root);
+      const name = basename(path);
+      expect(name.endsWith(`.${format}`)).toBe(true);
+      expect(name.slice(0, -`.${format}`.length)).toMatch(UUID);
+    },
+  );
+
+  it('never repeats a name', () => {
+    const root = join(tmpdir(), 'mcp-canvas-AbC123');
+    const names = new Set(Array.from({ length: 1000 }, () => tempFilePathFor(root, 'parquet')));
+    expect(names.size).toBe(1000);
   });
 
-  it('places temp files inside the sandbox root', async () => {
-    const path = await tempFilePathFor(root, 'csv');
-    expect(path.startsWith(`${root}${sep}.canvas-export-`)).toBe(true);
-    expect(path.endsWith('.csv')).toBe(true);
-  });
-  it('uses unique names', async () => {
-    const a = await tempFilePathFor(root, 'parquet');
-    const b = await tempFilePathFor(root, 'parquet');
-    expect(a).not.toBe(b);
-  });
-  it('creates the sandbox root if missing', async () => {
-    const ephemeralRoot = join(root, 'auto-created');
-    const path = await tempFilePathFor(ephemeralRoot, 'csv');
-    expect(path.startsWith(`${ephemeralRoot}${sep}`)).toBe(true);
+  it('touches nothing on disk — the directory it names into must already exist', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'canvas-temp-'));
+    try {
+      const missing = join(root, 'not-created');
+      tempFilePathFor(missing, 'csv');
+      await expect(stat(missing)).rejects.toMatchObject({ code: 'ENOENT' });
+      expect(await readdir(root)).toEqual([]);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
   });
 });
 

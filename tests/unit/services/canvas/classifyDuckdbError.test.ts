@@ -11,6 +11,126 @@ import { describe, expect, it } from 'vitest';
 import { classifyDuckdbError } from '@/services/canvas/providers/duckdb/DuckdbProvider.js';
 import { JsonRpcErrorCode, McpError, notFound, validationError } from '@/types-global/errors.js';
 
+/**
+ * Messages measured from `@duckdb/node-api` 1.5.5 (#565). The caller-side
+ * branches are matched against these, not against wording guessed from the
+ * branch names.
+ */
+const MEASURED = {
+  /** `COPY … TO` / a file scan with `enable_external_access = false`. */
+  externalAccessDenied:
+    'Permission Error: Cannot access file "/srv/data/x.csv" - file system operations are disabled by configuration',
+  /** A write inside `BEGIN TRANSACTION READ ONLY`. */
+  readOnlyTransactionWrite:
+    'TransactionContext Error: Cannot write to database "memory" - transaction is launched in read-only mode',
+  /** A write statement against a database opened with `access_mode = READ_ONLY`. */
+  readOnlyDatabaseWrite:
+    'Invalid Input Error: Cannot execute statement of type "CREATE" on database "file" which is attached in read-only mode!',
+  parserErrors: [
+    'Parser Error: syntax error at or near "SELEC"\n\nLINE 1: SELEC 1\n        ^',
+    'Parser Error: syntax error at end of input',
+    `Parser Error: unterminated quoted string at or near "'unterminated"`,
+  ],
+  /** The operating system refusing a file DuckDB was told to write or read. */
+  ioFaults: [
+    'IO Error: Cannot open file "/srv/exports/out.csv": Permission denied',
+    'IO Error: Failed to create directory "/tmp/mcp-canvas-AbC123/0f3c2b9e-6c1d-4a39-9d2e-6f1b7a0c5e44": Permission denied',
+    'IO Error: Cannot open file "/srv/exports/out.csv": Read-only file system',
+    // A caller-chosen export name must not steer the classification either.
+    'IO Error: Cannot open file "/srv/exports/syntax_report.csv": Permission denied',
+  ],
+} as const;
+
+describe('classifyDuckdbError · measured caller-side messages (#565)', () => {
+  it.each([MEASURED.externalAccessDenied, MEASURED.readOnlyTransactionWrite])(
+    'keeps %s as sql_read_only',
+    (message) => {
+      const original = new Error(message);
+      const mcp = classifyDuckdbError(original) as McpError;
+      expect(mcp.code).toBe(JsonRpcErrorCode.ValidationError);
+      expect(mcp.data?.reason).toBe('sql_read_only');
+      expect(mcp.cause).toBe(original);
+    },
+  );
+
+  it.each(MEASURED.parserErrors)('keeps %s as sql_parse_error', (message) => {
+    const mcp = classifyDuckdbError(new Error(message)) as McpError;
+    expect(mcp.code).toBe(JsonRpcErrorCode.ValidationError);
+    expect(mcp.data?.reason).toBe('sql_parse_error');
+  });
+
+  // The write refusal leads with an execution-error class prefix, so it has to
+  // be recognised before the #451 execution-error branch claims it.
+  it('classifies a write refused by a read-only database as sql_read_only, not sql_execution_error', () => {
+    const mcp = classifyDuckdbError(new Error(MEASURED.readOnlyDatabaseWrite)) as McpError;
+    expect(mcp.code).toBe(JsonRpcErrorCode.ValidationError);
+    expect(mcp.data?.reason).toBe('sql_read_only');
+    expect((mcp.data as { recovery: { hint: string } }).recovery.hint).not.toMatch(/TRY_CAST/);
+  });
+
+  it.each(MEASURED.ioFaults)('keeps the I/O fault %s a DatabaseError with no reason', (message) => {
+    const original = new Error(message);
+    const mcp = classifyDuckdbError(original) as McpError;
+    expect(mcp.code).toBe(JsonRpcErrorCode.DatabaseError);
+    expect(mcp.data?.reason).toBeUndefined();
+    expect(mcp.cause).toBe(original);
+  });
+});
+
+describe('classifyDuckdbError · host path redaction (#565)', () => {
+  it('replaces a redacted directory with [path] and keeps the raw error on cause', () => {
+    const original = new Error(MEASURED.ioFaults[0]);
+    const mcp = classifyDuckdbError(original, ['/srv/exports']) as McpError;
+    expect(mcp.message).toBe('IO Error: Cannot open file "[path]/out.csv": Permission denied');
+    expect(mcp.cause).toBe(original);
+    expect((mcp.cause as Error).message).toContain('/srv/exports/out.csv');
+  });
+
+  it('redacts the messages of the caller-side branches too', () => {
+    const readOnly = classifyDuckdbError(new Error(MEASURED.externalAccessDenied), [
+      '/srv/data',
+    ]) as McpError;
+    expect(readOnly.data?.reason).toBe('sql_read_only');
+    expect(readOnly.message).toBe(
+      'Canvas SQL rejected: Permission Error: Cannot access file "[path]/x.csv" - file system operations are disabled by configuration',
+    );
+
+    const execution = classifyDuckdbError(
+      new Error('Conversion Error: Could not convert string "/srv/data/a" to INT32'),
+      ['/srv/data'],
+    ) as McpError;
+    expect(execution.data?.reason).toBe('sql_execution_error');
+    expect(execution.message).not.toContain('/srv/data');
+  });
+
+  it('redacts a nested directory whole, whichever order the paths arrive in', () => {
+    const message =
+      'IO Error: Failed to create directory "/data/tmp/mcp-canvas-AbC123/spill": Permission denied';
+    for (const paths of [
+      ['/data', '/data/tmp/mcp-canvas-AbC123'],
+      ['/data/tmp/mcp-canvas-AbC123', '/data'],
+    ]) {
+      expect((classifyDuckdbError(new Error(message), paths) as McpError).message).toBe(
+        'IO Error: Failed to create directory "[path]/spill": Permission denied',
+      );
+    }
+  });
+
+  it('replaces every occurrence, including paths full of regex metacharacters', () => {
+    const dir = '/srv/a+b (1)/[x]';
+    const mcp = classifyDuckdbError(
+      new Error(`IO Error: could not move "${dir}/tmp_out.csv" to "${dir}/out.csv"`),
+      [dir],
+    ) as McpError;
+    expect(mcp.message).toBe('IO Error: could not move "[path]/tmp_out.csv" to "[path]/out.csv"');
+  });
+
+  it('never redacts the filesystem root, which would mangle the whole message', () => {
+    const mcp = classifyDuckdbError(new Error(MEASURED.ioFaults[0]), ['/', '']) as McpError;
+    expect(mcp.message).toBe(MEASURED.ioFaults[0]);
+  });
+});
+
 describe('classifyDuckdbError', () => {
   it('classifies parser errors as ValidationError with sql_parse_error reason', () => {
     const result = classifyDuckdbError(new Error('Parser Error: syntax error at end of input'));
@@ -21,28 +141,6 @@ describe('classifyDuckdbError', () => {
     expect(mcp.data?.reason).toBe('sql_parse_error');
     expect(mcp.cause).toBeInstanceOf(Error);
   });
-
-  it('classifies bare "syntax" errors via the parser pattern', () => {
-    const result = classifyDuckdbError(new Error('Syntax error near "FROM"'));
-    expect((result as McpError).data?.reason).toBe('sql_parse_error');
-  });
-
-  it('classifies permission errors as ValidationError with sql_read_only reason', () => {
-    const result = classifyDuckdbError(new Error('Permission denied: cannot write'));
-    expect(result).toBeInstanceOf(McpError);
-    const mcp = result as McpError;
-    expect(mcp.code).toBe(JsonRpcErrorCode.ValidationError);
-    expect(mcp.data?.reason).toBe('sql_read_only');
-  });
-
-  it.each(['read-only', 'readonly', 'read only'])(
-    'matches the read-only pattern for "%s"',
-    (phrase) => {
-      expect(
-        (classifyDuckdbError(new Error(`database is ${phrase}`)) as McpError).data?.reason,
-      ).toBe('sql_read_only');
-    },
-  );
 
   it('classifies unmatched Error instances as DatabaseError preserving the cause', () => {
     const original = new Error('Out of memory');
@@ -160,7 +258,7 @@ describe('classifyDuckdbError · execution-time data errors (#451)', () => {
     );
     expect((parse.data as { recovery: { hint: string } }).recovery.hint.length).toBeGreaterThan(0);
 
-    const readOnly = classifyDuckdbError(new Error('database is read-only')) as McpError;
+    const readOnly = classifyDuckdbError(new Error(MEASURED.readOnlyTransactionWrite)) as McpError;
     expect((readOnly.data as { recovery: { hint: string } }).recovery.hint.length).toBeGreaterThan(
       0,
     );

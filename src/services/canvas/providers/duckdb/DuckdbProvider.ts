@@ -7,14 +7,17 @@
  * @module src/services/canvas/providers/duckdb/DuckdbProvider
  */
 
-import { mkdir, unlink } from 'node:fs/promises';
+import { randomUUID } from 'node:crypto';
+import { mkdir, mkdtemp, rm, unlink } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 
 import {
+  configurationError,
   databaseError,
   McpError,
   notFound,
+  serviceUnavailable,
   timeout,
   validationError,
 } from '@/types-global/errors.js';
@@ -88,9 +91,16 @@ export interface DuckdbProviderOptions {
   /** Number of rows to sniff for schema inference. */
   schemaSniffRows: number;
   /**
-   * Root for scratch I/O — DuckDB's `temp_directory` plus the transient files
-   * behind stream exports and the spillover round-trip. Defaults to
-   * `<os.tmpdir()>/mcp-canvas` when unset; never the process cwd.
+   * Parent of the provider's private scratch directory. On first use the
+   * provider creates `mcp-canvas-XXXXXX` inside it with `mkdtemp` (mode
+   * `0700` on POSIX) and keeps every scratch path there: each canvas's DuckDB
+   * `temp_directory` and the transient files behind stream exports and
+   * `importFrom`. `shutdown()` removes it once the calls still running
+   * against it settle. Defaults to `os.tmpdir()`, never the process cwd. A
+   * configured parent is created if missing and gets no ownership or mode
+   * check, so it must not be a directory another local user controls. On
+   * Windows the private directory inherits the parent's ACL, so there the
+   * parent must also not grant other users access.
    */
   tempRootPath?: string | undefined;
 }
@@ -98,13 +108,23 @@ export interface DuckdbProviderOptions {
 interface CanvasRecord {
   /** Long-lived connection for DDL/describe/drop operations. */
   controlConnection: DuckDBConnection;
+  /** This canvas's share of the provider's holds, one per call still running on it — see {@link DuckdbProvider.holdCanvas}. */
+  holds: Set<Promise<void>>;
   instance: DuckDBInstance;
+  /** The provider's private scratch directory this canvas was created under; export and import staging go here. */
+  scratchDir: string;
+  /** This canvas's own DuckDB `temp_directory`, inside `scratchDir`. DuckDB creates it on the first spill. */
+  spillDir: string;
 }
 
 export class DuckdbProvider implements IDataCanvasProvider {
   readonly name = 'duckdb';
 
   private readonly canvases = new Map<string, CanvasRecord>();
+  /** One pending promise per held canvas record, resolved on release — see {@link holdCanvas}. */
+  private readonly holds = new Set<Promise<void>>();
+  /** The private scratch directory once first requested — see {@link ensureTempRoot}. */
+  private tempRoot: Promise<string> | undefined;
 
   constructor(private readonly options: DuckdbProviderOptions) {}
 
@@ -113,37 +133,87 @@ export class DuckdbProvider implements IDataCanvasProvider {
   // ---------------------------------------------------------------------
 
   /**
-   * Absolute scratch root, created on first use.
+   * The provider's private scratch directory, created once on first use.
    *
-   * DuckDB defaults an in-memory database's `temp_directory` to a
-   * cwd-relative `.tmp`, so the first query that spills `mkdir`s under the
-   * process working directory — which fails with `EACCES` whenever the
-   * container runs non-root or on a read-only rootfs. Resolving scratch to an
-   * explicitly writable directory keeps spills working regardless of cwd.
+   * `mkdtemp` makes a directory no other local user can have pre-created,
+   * planted links in, or read (`0700` on POSIX; on Windows it inherits the
+   * parent's ACL, so there the parent must not grant other users access), so
+   * no scratch path resolves through a fixed shared name (#554). It also
+   * keeps scratch off the process cwd: DuckDB defaults an in-memory
+   * database's `temp_directory` to a cwd-relative `.tmp`, which fails on a
+   * non-root or read-only rootfs. Concurrent first calls share one directory;
+   * a failed attempt is dropped so the next call retries.
    */
-  private async ensureTempRoot(): Promise<string> {
-    const root = resolve(this.options.tempRootPath ?? join(tmpdir(), 'mcp-canvas'));
-    await mkdir(root, { recursive: true });
-    return root;
+  private ensureTempRoot(): Promise<string> {
+    if (!this.tempRoot) {
+      const pending = this.createTempRoot();
+      this.tempRoot = pending;
+      pending.catch(() => {
+        if (this.tempRoot === pending) this.tempRoot = undefined;
+      });
+    }
+    return this.tempRoot;
+  }
+
+  private async createTempRoot(): Promise<string> {
+    const parent = resolve(this.options.tempRootPath ?? tmpdir());
+    try {
+      await mkdir(parent, { recursive: true });
+      return await mkdtemp(join(parent, 'mcp-canvas-'));
+    } catch (err) {
+      throw configurationError(
+        'Canvas scratch directory could not be created: CANVAS_TEMP_PATH (the OS temp directory when unset) must be writable by the server process.',
+        undefined,
+        { cause: err },
+      );
+    }
   }
 
   async initCanvas(canvasId: string, _context: RequestContext): Promise<void> {
     if (this.canvases.has(canvasId)) return;
     const duck = await importDuckDB();
-    const tempDirectory = await this.ensureTempRoot();
+    const root = this.ensureTempRoot();
+    const scratchDir = await root;
+    // DuckDB names spill files by block size alone, so instances sharing a
+    // temp_directory overwrite each other's evicted blocks (#561).
+    const spillDir = join(scratchDir, randomUUID());
     const instance = await duck.DuckDBInstance.create(':memory:', {
       memory_limit: `${this.options.memoryLimitMb}MB`,
-      temp_directory: tempDirectory,
+      temp_directory: spillDir,
       // Disable extension install/load paths in canvas mode.
       autoinstall_known_extensions: 'false',
       autoload_known_extensions: 'false',
     });
     const controlConnection = await instance.connect();
     await controlConnection.run(`SET memory_limit = '${this.options.memoryLimitMb}MB'`);
-    this.canvases.set(canvasId, { instance, controlConnection });
+    // A shutdown that began meanwhile retired `scratchDir` and may already
+    // have removed it, freeing the name for another local user to re-create;
+    // DuckDB creates only the leaf of its temp_directory and would spill into
+    // whatever sits there. The check and the insert share one synchronous run,
+    // so no shutdown can begin between them.
+    if (this.tempRoot !== root) {
+      controlConnection.closeSync();
+      instance.closeSync();
+      throw serviceUnavailable('Canvas provider shut down while the canvas was being created.');
+    }
+    this.canvases.set(canvasId, {
+      instance,
+      controlConnection,
+      holds: new Set(),
+      scratchDir,
+      spillDir,
+    });
   }
 
-  // biome-ignore lint/suspicious/useAwait: async is required by IDataCanvasProvider; close is sync for DuckDB.
+  /**
+   * Close the canvas's instance and remove its spill directory. A call still
+   * running on the canvas keeps the database open on its own connection and
+   * can still read spilled blocks back from that directory, so the directory
+   * goes once the last such call settles, and this does not wait for it.
+   * DuckDB removes a `temp_directory` it created when the database finally
+   * closes; the removal here covers every other case, so nothing of the
+   * canvas outlives it.
+   */
   async destroyCanvas(canvasId: string, _context: RequestContext): Promise<void> {
     const record = this.canvases.get(canvasId);
     if (!record) return;
@@ -168,6 +238,18 @@ export class DuckdbProvider implements IDataCanvasProvider {
         withExtra(closeContext, { error: err instanceof Error ? err.message : String(err) }),
       );
     }
+    const remove = () =>
+      rm(record.spillDir, { recursive: true, force: true }).catch((err: unknown) => {
+        logger.warning(
+          'Canvas spill directory removal failed.',
+          withExtra(closeContext, { error: err instanceof Error ? err.message : String(err) }),
+        );
+      });
+    if (record.holds.size > 0) {
+      void Promise.all(record.holds).then(remove);
+      return;
+    }
+    await remove();
   }
 
   async healthCheck(): Promise<boolean> {
@@ -184,12 +266,43 @@ export class DuckdbProvider implements IDataCanvasProvider {
     }
   }
 
+  /**
+   * Destroy every canvas, then remove the private scratch directory. A call
+   * that reached a canvas before shutdown began can still be writing there —
+   * an open per-query connection outlives its closed instance — so the
+   * directory goes once the last such call settles, and shutdown does not
+   * wait for it. Until then the directory stays in place and private, which
+   * keeps another local user from re-creating its name while that call still
+   * writes inside it. A canvas whose creation straddles the shutdown is
+   * refused rather than bound to the retired directory. A provider used
+   * again afterwards creates a fresh one. After an abnormal exit the
+   * directory stays behind, still private; nothing sweeps it on the next
+   * start.
+   */
   async shutdown(): Promise<void> {
     const context = requestContextService.createRequestContext({
       operation: 'DuckdbProvider.shutdown',
     });
     const ids = [...this.canvases.keys()];
+    const held = [...this.holds];
+    const tempRoot = this.tempRoot;
+    this.tempRoot = undefined;
     await Promise.allSettled(ids.map((id) => this.destroyCanvas(id, context)));
+    const dir = await tempRoot?.catch(() => undefined);
+    if (!dir) return;
+    const remove = () =>
+      rm(dir, { recursive: true, force: true }).catch((err: unknown) => {
+        logger.warning(
+          'Canvas scratch directory removal failed; it stays in place, still private.',
+          withExtra(context, { error: err instanceof Error ? err.message : String(err) }),
+        );
+      });
+    const pending = held.filter((hold) => this.holds.has(hold));
+    if (pending.length > 0) {
+      void Promise.all(pending).then(remove);
+      return;
+    }
+    await remove();
   }
 
   // ---------------------------------------------------------------------
@@ -203,7 +316,7 @@ export class DuckdbProvider implements IDataCanvasProvider {
     _context: RequestContext,
     options?: RegisterTableOptions,
   ): Promise<RegisterTableResult> {
-    const record = this.requireCanvas(canvasId);
+    using record = this.holdCanvas(canvasId);
     const duck = await importDuckDB();
     assertValidIdentifier(name, 'table');
     options?.signal?.throwIfAborted();
@@ -239,45 +352,51 @@ export class DuckdbProvider implements IDataCanvasProvider {
     await record.controlConnection.run(ddl);
     options?.signal?.throwIfAborted();
 
-    const appender = await record.controlConnection.createAppender(name);
     let count = 0;
     try {
-      const appendOne = (row: Record<string, unknown>) => {
-        for (const col of schema) {
-          appendValue(appender, col, row[col.name], duck);
+      const appender = await record.controlConnection.createAppender(name);
+      try {
+        const appendOne = (row: Record<string, unknown>) => {
+          for (const col of schema) {
+            appendValue(appender, col, row[col.name], duck);
+          }
+          appender.endRow();
+          count += 1;
+        };
+        if (bufferedRows) {
+          for (const row of bufferedRows) {
+            options?.signal?.throwIfAborted();
+            appendOne(row);
+          }
         }
-        appender.endRow();
-        count += 1;
-      };
-      if (bufferedRows) {
-        for (const row of bufferedRows) {
-          options?.signal?.throwIfAborted();
-          appendOne(row);
+        if (isAsyncIterable) {
+          for await (const row of rows as AsyncIterable<Record<string, unknown>>) {
+            options?.signal?.throwIfAborted();
+            appendOne(row);
+          }
+        } else if (remainingSync) {
+          // Continuation iterator from the sniffer — picks up just past
+          // bufferedRows so we don't re-iterate (which would drop data on
+          // generators or duplicate rows from fresh-iterator iterables).
+          let next = remainingSync.next();
+          while (!next.done) {
+            options?.signal?.throwIfAborted();
+            appendOne(next.value);
+            next = remainingSync.next();
+          }
+        } else {
+          for (const row of rows as Iterable<Record<string, unknown>>) {
+            options?.signal?.throwIfAborted();
+            appendOne(row);
+          }
         }
+      } finally {
+        appender.closeSync();
       }
-      if (isAsyncIterable) {
-        for await (const row of rows as AsyncIterable<Record<string, unknown>>) {
-          options?.signal?.throwIfAborted();
-          appendOne(row);
-        }
-      } else if (remainingSync) {
-        // Continuation iterator from the sniffer — picks up just past
-        // bufferedRows so we don't re-iterate (which would drop data on
-        // generators or duplicate rows from fresh-iterator iterables).
-        let next = remainingSync.next();
-        while (!next.done) {
-          options?.signal?.throwIfAborted();
-          appendOne(next.value);
-          next = remainingSync.next();
-        }
-      } else {
-        for (const row of rows as Iterable<Record<string, unknown>>) {
-          options?.signal?.throwIfAborted();
-          appendOne(row);
-        }
-      }
-    } finally {
-      appender.closeSync();
+    } catch (err) {
+      // A spill that cannot start fails here; the caller's own row source
+      // runs in the same block, so only errors naming a host path change.
+      throw this.redactHostPaths(err, record);
     }
 
     return {
@@ -293,7 +412,7 @@ export class DuckdbProvider implements IDataCanvasProvider {
     _context: RequestContext,
     options?: QueryOptions,
   ): Promise<QueryResult> {
-    const record = this.requireCanvas(canvasId);
+    using record = this.holdCanvas(canvasId);
     options?.signal?.throwIfAborted();
 
     const rowLimit = options?.rowLimit ?? this.options.defaultRowLimit;
@@ -382,7 +501,7 @@ export class DuckdbProvider implements IDataCanvasProvider {
     _context: RequestContext,
     options?: ExportOptions,
   ): Promise<ExportResult> {
-    const record = this.requireCanvas(canvasId);
+    using record = this.holdCanvas(canvasId);
     assertValidIdentifier(tableName, 'table');
     options?.signal?.throwIfAborted();
 
@@ -411,7 +530,7 @@ export class DuckdbProvider implements IDataCanvasProvider {
         // Stream branch: COPY to a scratch file, pipe to the caller's stream,
         // then unlink. pipeFileToStream owns cleanup once invoked; if the COPY
         // itself fails we must unlink here before re-throwing.
-        const tempPath = await tempFilePathFor(await this.ensureTempRoot(), target.format);
+        const tempPath = tempFilePathFor(record.scratchDir, target.format);
         try {
           await conn.run(
             `COPY ${quoteIdentifier(tableName)} TO '${escapeSqlString(tempPath)}' ${formatClause}`,
@@ -437,7 +556,7 @@ export class DuckdbProvider implements IDataCanvasProvider {
     _context: RequestContext,
     options?: RegisterViewOptions,
   ): Promise<RegisterViewResult> {
-    const record = this.requireCanvas(canvasId);
+    using record = this.holdCanvas(canvasId);
     const duck = await importDuckDB();
     assertValidIdentifier(name, 'table');
     options?.signal?.throwIfAborted();
@@ -464,7 +583,7 @@ export class DuckdbProvider implements IDataCanvasProvider {
         `CREATE OR REPLACE VIEW ${quoteIdentifier(name)} AS ${selectSql}`,
       );
     } catch (err) {
-      throw classifyDuckdbError(err);
+      throw this.classify(err, record);
     }
 
     return { viewName: name, columns: await this.columnNames(record.controlConnection, name) };
@@ -490,8 +609,8 @@ export class DuckdbProvider implements IDataCanvasProvider {
       );
     }
 
-    const target = this.requireCanvas(targetCanvasId);
-    const source = this.requireCanvas(sourceCanvasId);
+    using target = this.holdCanvas(targetCanvasId);
+    using source = this.holdCanvas(sourceCanvasId);
 
     assertValidIdentifier(sourceTableName, 'table');
     assertValidIdentifier(asName, 'table');
@@ -532,7 +651,7 @@ export class DuckdbProvider implements IDataCanvasProvider {
     // autoload disabled). All column types — including TIMESTAMP/DATE/BLOB
     // — round-trip losslessly, which an in-memory appender path can't
     // guarantee for native engine value types.
-    const tempPath = await tempFilePathFor(await this.ensureTempRoot(), 'parquet');
+    const tempPath = tempFilePathFor(target.scratchDir, 'parquet');
     try {
       await source.controlConnection.run(
         `COPY ${quoteIdentifier(sourceTableName)} TO '${escapeSqlString(tempPath)}' (FORMAT 'parquet')`,
@@ -546,7 +665,7 @@ export class DuckdbProvider implements IDataCanvasProvider {
       await target.controlConnection
         .run(`DROP TABLE IF EXISTS ${quoteIdentifier(asName)}`)
         .catch(() => {});
-      throw classifyDuckdbError(err);
+      throw this.classify(err, target);
     } finally {
       await unlink(tempPath).catch(() => {});
     }
@@ -564,7 +683,7 @@ export class DuckdbProvider implements IDataCanvasProvider {
     _context: RequestContext,
     options?: DescribeOptions,
   ): Promise<TableInfo[]> {
-    const record = this.requireCanvas(canvasId);
+    using record = this.holdCanvas(canvasId);
     if (options?.tableName !== undefined) {
       assertValidIdentifier(options.tableName, 'table');
     }
@@ -597,15 +716,20 @@ export class DuckdbProvider implements IDataCanvasProvider {
       table_type: string;
     }[];
 
-    return await Promise.all(
-      tableRows.map((row) =>
-        this.describeOne(
-          record.controlConnection,
-          row.table_name,
-          row.table_type === 'VIEW' ? 'view' : 'table',
+    try {
+      return await Promise.all(
+        tableRows.map((row) =>
+          this.describeOne(
+            record.controlConnection,
+            row.table_name,
+            row.table_type === 'VIEW' ? 'view' : 'table',
+          ),
         ),
-      ),
-    );
+      );
+    } catch (err) {
+      // Counting a view runs it, and a view past the memory limit spills.
+      throw this.redactHostPaths(err, record);
+    }
   }
 
   private async describeOne(
@@ -631,7 +755,7 @@ export class DuckdbProvider implements IDataCanvasProvider {
   }
 
   async drop(canvasId: string, name: string, _context: RequestContext): Promise<boolean> {
-    const record = this.requireCanvas(canvasId);
+    using record = this.holdCanvas(canvasId);
     assertValidIdentifier(name, 'table');
     const kind = await this.lookupKind(record.controlConnection, name);
     if (kind === undefined) return false;
@@ -641,7 +765,7 @@ export class DuckdbProvider implements IDataCanvasProvider {
   }
 
   async clear(canvasId: string, _context: RequestContext): Promise<number> {
-    const record = this.requireCanvas(canvasId);
+    using record = this.holdCanvas(canvasId);
     const reader = await record.controlConnection.runAndReadAll(
       `SELECT table_name, table_type FROM information_schema.tables WHERE table_schema = 'main'`,
     );
@@ -664,12 +788,54 @@ export class DuckdbProvider implements IDataCanvasProvider {
   // Internals
   // ---------------------------------------------------------------------
 
-  private requireCanvas(canvasId: string): CanvasRecord {
+  /**
+   * `canvasId`'s record, held until the caller's `using` scope exits, on
+   * return or throw. {@link destroyCanvas} removes the canvas's spill
+   * directory only once every hold on that canvas is released, so a call
+   * already running can still read back the blocks it spilled. {@link shutdown}
+   * removes the scratch directory only once every hold taken before it began
+   * is released, so a call already running finishes inside the private
+   * directory, never in one another local user re-created under its name.
+   * Every data-plane call reaches its record through a hold.
+   */
+  private holdCanvas(canvasId: string): CanvasRecord & Disposable {
     const record = this.canvases.get(canvasId);
     // Defensive — CanvasInstance touches the registry first, which throws the
     // same structured canvas_not_found before the provider is reached (#261).
     if (!record) throw canvasNotFound(canvasId);
-    return record;
+    const { promise, resolve } = Promise.withResolvers<void>();
+    this.holds.add(promise);
+    record.holds.add(promise);
+    return {
+      ...record,
+      [Symbol.dispose]: () => {
+        this.holds.delete(promise);
+        record.holds.delete(promise);
+        resolve();
+      },
+    };
+  }
+
+  /** Host directories an engine message can quote and a caller must not see. */
+  private hostPaths(record: CanvasRecord): string[] {
+    return [resolve(this.options.exportRootPath), record.scratchDir];
+  }
+
+  /** {@link classifyDuckdbError} with this canvas's host directories redacted. */
+  private classify(err: unknown, record: CanvasRecord): Error {
+    return classifyDuckdbError(err, this.hostPaths(record));
+  }
+
+  /**
+   * `err` classified and redacted when it is an engine error naming a host
+   * directory; anything else as it came. For blocks that also run code other
+   * than the engine's — a caller's row source, a cancellation check — whose
+   * failures must reach the caller as thrown.
+   */
+  private redactHostPaths(err: unknown, record: CanvasRecord): unknown {
+    if (!(err instanceof Error) || err instanceof McpError) return err;
+    const paths = this.hostPaths(record);
+    return redactPaths(err.message, paths) === err.message ? err : classifyDuckdbError(err, paths);
   }
 
   /**
@@ -700,7 +866,7 @@ export class DuckdbProvider implements IDataCanvasProvider {
       return await fn(conn);
     } catch (err) {
       if (cancelled) throw timeout(cancelledMessage, { reason: 'cancelled' }, { cause: err });
-      throw classifyDuckdbError(err);
+      throw this.classify(err, record);
     } finally {
       signal?.removeEventListener('abort', onAbort);
       try {
@@ -734,18 +900,23 @@ export class DuckdbProvider implements IDataCanvasProvider {
 
   /**
    * The rejection for a statement that failed to parse or prepare: a
-   * SELECT-shaped statement surfaces the sanitized binder message (the SQL
-   * itself is probably wrong), anything else is rejected as non-SELECT.
+   * SELECT-shaped statement surfaces the binder message, host directories
+   * redacted (the SQL itself is probably wrong), anything else is rejected as
+   * non-SELECT.
    */
-  private prepareFailure(sql: string, err: unknown): McpError {
+  private prepareFailure(sql: string, err: unknown, record: CanvasRecord): McpError {
     if (isSelectShaped(sql) && err instanceof Error) {
-      const binderMessage = sanitizeBinderMessage(err.message, this.options.exportRootPath);
-      return validationError(`Canvas query failed to prepare: ${binderMessage}`, {
-        reason: SQL_GATE_REASONS.invalidSql,
-        statementType: 'UNKNOWN',
-        binderMessage,
-        ...gateRecovery(SQL_GATE_REASONS.invalidSql),
-      });
+      const binderMessage = redactPaths(err.message.trim(), this.hostPaths(record));
+      return validationError(
+        `Canvas query failed to prepare: ${binderMessage}`,
+        {
+          reason: SQL_GATE_REASONS.invalidSql,
+          statementType: 'UNKNOWN',
+          binderMessage,
+          ...gateRecovery(SQL_GATE_REASONS.invalidSql),
+        },
+        { cause: err },
+      );
     }
     return validationError(
       'Canvas query must be SELECT; the statement could not be parsed or prepared.',
@@ -822,7 +993,7 @@ export class DuckdbProvider implements IDataCanvasProvider {
               );
             }
           }
-          throw this.prepareFailure(sql, prepErr);
+          throw this.prepareFailure(sql, prepErr, record);
         } finally {
           prepared?.destroySync();
         }
@@ -835,7 +1006,7 @@ export class DuckdbProvider implements IDataCanvasProvider {
       // instanceof McpError, not a loose `'code' in err` — engine/Node errors
       // can carry errno-style `code` props and must not escape the gate raw.
       if (err instanceof McpError) throw err;
-      throw this.prepareFailure(sql, err);
+      throw this.prepareFailure(sql, err, record);
     }
     assertSelectOnly({ statementCount, statementType });
 
@@ -1128,19 +1299,18 @@ function isSelectShaped(sql: string): boolean {
 }
 
 /**
- * Strip any occurrence of the configured export root path from a DuckDB binder
- * message before it leaves the gate. Column/function/expression binder errors
- * carry no host or path material, but the export root is the one local path
- * that could in principle appear — redact it defensively so the detail surfaced
- * to callers stays free of filesystem hints.
+ * Replace every occurrence of each host directory in an engine message with
+ * `[path]`, longest first so a directory nested inside another is redacted
+ * whole. DuckDB quotes the absolute export and scratch paths it failed on;
+ * the part below the directory — the caller's own export name — stays. A
+ * one-character path (the filesystem root) is skipped, since replacing it
+ * would mangle every path in the message.
  */
-function sanitizeBinderMessage(raw: string, exportRootPath: string): string {
-  const trimmed = raw.trim();
-  if (exportRootPath.length > 1) {
-    const escaped = exportRootPath.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-    return trimmed.replace(new RegExp(escaped, 'g'), '[path]');
-  }
-  return trimmed;
+function redactPaths(message: string, paths: readonly string[]): string {
+  return paths
+    .filter((path) => path.length > 1)
+    .sort((a, b) => b.length - a.length)
+    .reduce((text, path) => text.replaceAll(path, '[path]'), message);
 }
 
 async function ensureTableMissing(connection: DuckDBConnection, tableName: string): Promise<void> {
@@ -1163,7 +1333,10 @@ async function ensureTableMissing(connection: DuckDBConnection, tableName: strin
 export const DUCKDB_ERROR_REASONS = {
   /** SQL the engine could not parse. */
   sqlParseError: 'sql_parse_error',
-  /** A write the engine refused, or a permission it denied. */
+  /**
+   * A write the engine refused, or file access its configuration denies —
+   * never the operating system refusing a file, which is an I/O fault.
+   */
   sqlReadOnly: 'sql_read_only',
   /** A gated SELECT that prepared cleanly and then failed on the staged data. */
   sqlExecutionError: 'sql_execution_error',
@@ -1199,6 +1372,21 @@ const DUCKDB_ERROR_RECOVERY: Record<DuckdbErrorReason, string> = {
 const DUCKDB_EXECUTION_ERROR_PREFIX = /^(?:Conversion|Invalid Input|Out of Range) Error\b/;
 
 /**
+ * DuckDB's refusals, anchored on the class prefix the engine gives them:
+ * `Permission Error` (file access with `enable_external_access` off), and a
+ * write attempted in a read-only transaction (`TransactionContext Error: …
+ * read-only mode`) or against a read-only database (`Invalid Input Error: …
+ * attached in read-only mode!`). An `IO Error` never matches, whatever its
+ * text: `Permission denied` and `Read-only file system` there are the
+ * operating system refusing a file, an engine fault the caller cannot act on.
+ */
+const DUCKDB_REFUSAL =
+  /^(?:Permission Error\b|(?:TransactionContext|Invalid Input) Error: .*\bread-only mode\b)/;
+
+/** DuckDB's parser class; a quoted file name mentioning "syntax" is not one. */
+const DUCKDB_PARSER_ERROR_PREFIX = /^Parser Error\b/;
+
+/**
  * Map a DuckDB-thrown error to a framework error class. Classification is for
  * raw engine errors only — an already-structured `McpError` passes through
  * unchanged (#254): structured throws from inside the provider's try blocks
@@ -1206,18 +1394,23 @@ const DUCKDB_EXECUTION_ERROR_PREFIX = /^(?:Conversion|Invalid Input|Out of Range
  * validations) must keep their code and `data.reason` instead of being
  * reclassified as `DatabaseError`.
  *
- * The three caller-side classes are `ValidationError`; everything else — I/O,
- * internal, out-of-memory, transaction, interrupt — stays `DatabaseError`,
- * which is what an export or Parquet round-trip failing on the filesystem
- * must remain.
+ * The three caller-side classes are `ValidationError`, each matched on the
+ * engine's own class prefix; everything else — I/O, internal, out-of-memory,
+ * transaction conflict, interrupt — stays `DatabaseError`, which is what an
+ * export or Parquet round-trip failing on the filesystem must remain (#565).
+ * Every `redact` path in the message becomes `[path]`; the raw engine error,
+ * paths included, stays on `cause`.
  * @internal Exported for unit testing.
  */
-export function classifyDuckdbError(err: unknown): Error {
+export function classifyDuckdbError(err: unknown, redact: readonly string[] = []): Error {
   if (err instanceof McpError) return err;
   if (err instanceof Error) {
-    const msg = err.message;
-    // Checked first: the anchored class prefix is a stronger signal than the
-    // loose word matches below, which a data-error message can also satisfy.
+    const msg = redactPaths(err.message, redact);
+    // Checked before the execution prefix: a write refused by a read-only
+    // database is phrased as an `Invalid Input Error`.
+    if (DUCKDB_REFUSAL.test(msg)) {
+      return engineFailure(DUCKDB_ERROR_REASONS.sqlReadOnly, `Canvas SQL rejected: ${msg}`, err);
+    }
     if (DUCKDB_EXECUTION_ERROR_PREFIX.test(msg)) {
       return engineFailure(
         DUCKDB_ERROR_REASONS.sqlExecutionError,
@@ -1225,15 +1418,14 @@ export function classifyDuckdbError(err: unknown): Error {
         err,
       );
     }
-    if (/parser error|syntax/i.test(msg)) {
+    if (DUCKDB_PARSER_ERROR_PREFIX.test(msg)) {
       return engineFailure(DUCKDB_ERROR_REASONS.sqlParseError, `Canvas SQL rejected: ${msg}`, err);
-    }
-    if (/permission|read.?only/i.test(msg)) {
-      return engineFailure(DUCKDB_ERROR_REASONS.sqlReadOnly, `Canvas SQL rejected: ${msg}`, err);
     }
     return databaseError(msg, undefined, { cause: err });
   }
-  return databaseError('DuckDB threw a non-Error value.', { value: String(err) });
+  return databaseError('DuckDB threw a non-Error value.', {
+    value: redactPaths(String(err), redact),
+  });
 }
 
 /** A caller-side engine failure: reason, contract recovery, and the engine error chained. */

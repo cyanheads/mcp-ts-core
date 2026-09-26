@@ -121,11 +121,16 @@ const canvasProbe = tool('canvas_probe', {
         break;
       // The gate intercepts parse and write failures before execution, so no
       // SQL reaches these classifier branches through query(). The classifier
-      // itself is the code under test — the engine message is its input.
+      // itself is the code under test — the engine message, as DuckDB words
+      // it (#565), is its input.
       case 'sql_parse_error':
         throw classifyDuckdbError(new Error('Parser Error: syntax error at or near "FROM"'));
       case 'sql_read_only':
-        throw classifyDuckdbError(new Error('Cannot execute statement: database is read-only'));
+        throw classifyDuckdbError(
+          new Error(
+            'TransactionContext Error: Cannot write to database "memory" - transaction is launched in read-only mode',
+          ),
+        );
     }
     return { unreachable: true };
   },

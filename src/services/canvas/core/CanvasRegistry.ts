@@ -43,12 +43,19 @@ const CANVAS_ID_REGEX = /^[A-Za-z0-9_-]{10}$/;
  * `inputSchema`, so a model sees the constraint before it calls — instead of
  * discovering it inside the handler after a registry lookup.
  *
- * The `.describe()` is load-bearing: a schema rejection's synthesized hint
- * carries only the pattern, which says nothing about where an id comes from.
+ * The regex message is what a rejection reports: the argument-rejection
+ * envelope prefixes the field path and carries it into the message and the
+ * recovery hint, so the text names neither the field nor the pattern. A check
+ * message is not part of the emitted JSON Schema, so the advertised shape is
+ * the pattern and the `.describe()` alone. The wording matches the
+ * `canvas_id_malformed` hint {@link assertCanvasIdShape} throws.
  */
 export const CanvasIdSchema = z
   .string()
-  .regex(CANVAS_ID_REGEX)
+  .regex(
+    CANVAS_ID_REGEX,
+    'Expected a canvas ID exactly as an earlier response on this server returned it: 10 characters of letters, digits, hyphens, and underscores. A table name is not a canvas ID.',
+  )
   .describe(
     'Canvas ID as an earlier response on this server returned it — exactly 10 characters of letters, digits, hyphens, and underscores.',
   );

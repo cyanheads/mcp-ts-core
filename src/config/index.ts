@@ -180,6 +180,9 @@ const ConfigSchema = z
      * much data they stage. Default 1 MiB; raise only for servers whose tools
      * accept large payloads in the request body itself (base64 media, pasted
      * documents). Set to `0` to disable and defer to the runtime/reverse proxy.
+     * The only request-body limit the transport applies: the SDK's own 4 MiB
+     * read cap never engages, since it is handed the already-parsed body, so a
+     * value above 4 MiB holds as set.
      */
     mcpHttpMaxBodyBytes: z.coerce
       .number()
@@ -316,16 +319,24 @@ const ConfigSchema = z
          */
         exportRootPath: z.string().default('./.canvas-exports'),
         /**
-         * Root for scratch I/O: DuckDB's `temp_directory` (where a query
-         * exceeding `memory_limit` spills) and the transient files behind
-         * stream exports and the spillover round-trip.
+         * Parent directory for canvas scratch I/O. On first use the DuckDB
+         * provider creates a private `mcp-canvas-XXXXXX` directory inside it
+         * (`mkdtemp`, mode `0700` on POSIX) holding each canvas's own DuckDB
+         * `temp_directory` (where a query exceeding `memory_limit` spills)
+         * and the transient files behind stream exports and `importFrom`;
+         * shutdown removes it once the calls still running against it
+         * settle.
          *
-         * Left unset, the DuckDB provider resolves it under the OS temp
-         * directory. It must not fall back to the process cwd — DuckDB's own
-         * default for an in-memory database is a cwd-relative `.tmp`, which
-         * fails outright under a non-root or read-only container rootfs.
-         * Distinct from `CANVAS_EXPORT_PATH`, which holds user-requested
-         * export files and stays where the caller asked for them.
+         * Left unset, the parent is the OS temp directory — never the process
+         * cwd, since DuckDB's own default for an in-memory database is a
+         * cwd-relative `.tmp`, which fails outright under a non-root or
+         * read-only container rootfs. A configured parent is created if
+         * missing and gets no ownership or mode check, so it must not be a
+         * directory another local user controls. On Windows the private
+         * directory inherits the parent's ACL, so there the parent must also
+         * not grant other users access. Distinct from
+         * `CANVAS_EXPORT_PATH`, which holds user-requested export files and
+         * stays where the caller asked for them.
          */
         tempRootPath: z.string().optional(),
         /** Maximum active canvases per tenant before `RateLimited`. */

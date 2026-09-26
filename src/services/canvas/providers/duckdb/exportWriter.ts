@@ -1,12 +1,14 @@
 /**
  * @fileoverview Path resolution and sandboxing for canvas exports. Path
  * targets are resolved against `CANVAS_EXPORT_PATH`; absolute paths and `..`
- * traversal are rejected. Stream targets write a sandboxed temp file, pipe to
- * the caller's `WritableStream`, then unlink.
+ * traversal are rejected. Stream targets write a scratch file in the
+ * provider's private scratch directory, pipe it to the caller's
+ * `WritableStream`, then unlink.
  * @module src/services/canvas/providers/duckdb/exportWriter
  */
 
-import { lstat, mkdir, open, realpath, stat, unlink } from 'node:fs/promises';
+import { randomUUID } from 'node:crypto';
+import { lstat, mkdir, open, stat, unlink } from 'node:fs/promises';
 import { isAbsolute, join, relative, resolve, sep } from 'node:path';
 
 import { validationError } from '@/types-global/errors.js';
@@ -31,7 +33,6 @@ export async function resolveExportPath(rootPath: string, requested: string): Pr
   }
   const root = resolve(rootPath);
   await mkdir(root, { recursive: true });
-  const canonicalRoot = await realpath(root);
   const candidate = resolve(root, requested);
   const rel = relative(root, candidate);
   if (rel.startsWith(`..${sep}`) || rel === '..') {
@@ -43,8 +44,11 @@ export async function resolveExportPath(rootPath: string, requested: string): Pr
 
   // Lexical confinement does not stop an in-sandbox symlink from pointing
   // outside. Reject every existing symlink in the destination chain (including
-  // an existing destination file) before handing the path to DuckDB.
-  let cursor = canonicalRoot;
+  // an existing destination file) before handing the path to DuckDB. The walk
+  // starts at the root as configured, not its realpath: `lstat` resolves the
+  // root's own links either way, and a filesystem fault then quotes the path
+  // the provider redacts (#565).
+  let cursor = root;
   for (const segment of rel.split(sep)) {
     cursor = join(cursor, segment);
     const info = await lstat(cursor).catch((error: NodeJS.ErrnoException) => {
@@ -110,17 +114,16 @@ export async function pipeFileToStream(
 }
 
 /**
- * Generate a unique scratch file path under `rootPath`. Creates the root if
- * missing so the caller can write immediately. Callers pass the scratch root
- * (see `CANVAS_TEMP_PATH`), not the user-facing export sandbox — these files
- * are transient and unlinked once consumed.
+ * A fresh scratch file path directly inside `dir`, the provider's private
+ * scratch directory, which must already exist — nothing touches the disk
+ * here. The name is a `crypto.randomUUID()`, but the directory's `0700` mode
+ * is what keeps other local users out: there is no exclusive-create step,
+ * since DuckDB's `COPY … TO` opens the path itself and replaces an existing
+ * target through a `tmp_<name>` sidecar. Callers unlink the file once it is
+ * consumed.
  */
-export async function tempFilePathFor(rootPath: string, format: ExportFormat): Promise<string> {
-  const root = resolve(rootPath);
-  await mkdir(root, { recursive: true });
-  const stamp = Date.now().toString(36);
-  const rand = Math.random().toString(36).slice(2, 10);
-  return join(root, `.canvas-export-${stamp}-${rand}.${format}`);
+export function tempFilePathFor(dir: string, format: ExportFormat): string {
+  return join(dir, `${randomUUID()}.${format}`);
 }
 
 /** Best-effort file size lookup. Returns 0 on failure. */
