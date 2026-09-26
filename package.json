@@ -202,17 +202,20 @@
     "@duckdb/node-api": "^1.5.5-r.5",
     "@hono/otel": "^1.1.2",
     "@modelcontextprotocol/client": "^2.0.0",
+    "@opentelemetry/api-logs": "^0.222.0",
+    "@opentelemetry/exporter-logs-otlp-http": "^0.222.0",
     "@opentelemetry/exporter-metrics-otlp-http": "^0.222.0",
     "@opentelemetry/exporter-trace-otlp-http": "^0.222.0",
     "@opentelemetry/instrumentation-http": "^0.222.0",
     "@opentelemetry/instrumentation-pino": "^0.68.0",
     "@opentelemetry/resources": "^2.11.0",
+    "@opentelemetry/sdk-logs": "^0.222.0",
     "@opentelemetry/sdk-metrics": "^2.11.0",
     "@opentelemetry/sdk-node": "^0.222.0",
     "@opentelemetry/sdk-trace-node": "^2.11.0",
     "@opentelemetry/semantic-conventions": "^1.43.0",
     "@socketsecurity/bun-security-scanner": "^1.1.3",
-    "@supabase/supabase-js": "^2.117.0",
+    "@supabase/supabase-js": "^2.117.1",
     "@types/bun": "^1.4.2",
     "@types/node": "26.6.2",
     "@types/papaparse": "^5.5.2",
@@ -232,7 +235,7 @@
     "js-yaml": "^5.4.2",
     "linkedom": "^0.18.13",
     "node-cron": "^4.6.0",
-    "openai": "^7.21.0",
+    "openai": "^7.23.0",
     "papaparse": "^5.7.0",
     "partial-json": "^0.1.7",
     "pdf-lib": "^1.17.1",
@@ -297,11 +300,14 @@
   "peerDependencies": {
     "@duckdb/node-api": "^1.5.5-r.1",
     "@hono/otel": "^1.1.2",
+    "@opentelemetry/api-logs": "^0.222.0",
+    "@opentelemetry/exporter-logs-otlp-http": "^0.222.0",
     "@opentelemetry/exporter-metrics-otlp-http": "^0.222.0",
     "@opentelemetry/exporter-trace-otlp-http": "^0.222.0",
     "@opentelemetry/instrumentation-http": "^0.222.0",
     "@opentelemetry/instrumentation-pino": "^0.68.0",
     "@opentelemetry/resources": "^2.10.0",
+    "@opentelemetry/sdk-logs": "^0.222.0",
     "@opentelemetry/sdk-metrics": "^2.10.0",
     "@opentelemetry/sdk-node": "^0.222.0",
     "@opentelemetry/sdk-trace-node": "^2.10.0",
@@ -332,6 +338,12 @@
     "@hono/otel": {
       "optional": true
     },
+    "@opentelemetry/api-logs": {
+      "optional": true
+    },
+    "@opentelemetry/exporter-logs-otlp-http": {
+      "optional": true
+    },
     "@opentelemetry/instrumentation-http": {
       "optional": true
     },
@@ -345,6 +357,9 @@
       "optional": true
     },
     "@opentelemetry/resources": {
+      "optional": true
+    },
+    "@opentelemetry/sdk-logs": {
       "optional": true
     },
     "@opentelemetry/sdk-metrics": {
