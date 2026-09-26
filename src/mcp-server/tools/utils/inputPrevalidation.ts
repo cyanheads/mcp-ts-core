@@ -95,7 +95,8 @@ export interface InputHandlingOptions {
    * Retry a failed parse once against repaired argument *values* — a
    * JSON-stringified array or object parsed back into what it encodes, or a
    * safe integer sent where a string was expected turned into its decimal
-   * string. `false` restores the single-parse behavior exactly. Default `true`.
+   * string. `false` turns the repair off, so each order of the key stages is
+   * parsed once, with the values as sent. Default `true`.
    */
   coerce?: boolean;
   /**

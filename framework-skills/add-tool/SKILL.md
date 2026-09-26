@@ -310,7 +310,7 @@ await createApp({
   input: {
     ignoreKeys: ['some_client_field'], // adds to the built-in list; `false` disables the stage
     caseStyleAliases: false,           // declared `inputAliases` only
-    coerce: false,                     // never retry a failed parse
+    coerce: false,                     // never repair an argument value
   },
   tools: allToolDefinitions,
 });

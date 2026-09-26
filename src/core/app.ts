@@ -176,9 +176,11 @@ export interface CreateAppOptions<TSupabaseClient extends object = SupabaseClien
   icons?: Implementation['icons'];
   /**
    * Switches for the pre-validation step every `tools/call` argument object
-   * passes through: rewriting key aliases, dropping client-added root keys,
-   * and, after a failed parse, repairing a JSON-stringified array or object or
-   * an integer sent for a string.
+   * passes through: dropping client-added root keys, then rewriting key
+   * aliases, and, after a failed parse, repairing a JSON-stringified array or
+   * object or an integer sent for a string. When that still fails and the drop
+   * discarded a key, the stages rerun alias-first, kept only if the call then
+   * validates.
    *
    * Every stage is on with no configuration. An entry here either extends a
    * stage or turns it off for the whole server; nothing about the advertised
@@ -189,7 +191,7 @@ export interface CreateAppOptions<TSupabaseClient extends object = SupabaseClien
    * input: {
    *   ignoreKeys: ['some_client_field'], // adds to the built-in list; `false` disables the stage
    *   caseStyleAliases: false,           // declared `inputAliases` only
-   *   coerce: false,                     // never retry a failed parse
+   *   coerce: false,                     // never repair an argument value
    * }
    * ```
    */
