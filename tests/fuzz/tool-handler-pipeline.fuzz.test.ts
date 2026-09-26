@@ -98,12 +98,14 @@ vi.mock('@/utils/internal/performance.js', () => ({
 // ---------------------------------------------------------------------------
 
 import type { CallToolResult } from '@modelcontextprotocol/server';
+import { prevalidateToolArguments } from '@/mcp-server/tools/utils/inputPrevalidation.js';
 import type { AnyToolDefinition } from '@/mcp-server/tools/utils/toolDefinition.js';
 import { tool } from '@/mcp-server/tools/utils/toolDefinition.js';
 import {
   createToolHandler,
   type HandlerServices,
   type NotifierSources,
+  parseToolArguments,
 } from '@/mcp-server/tools/utils/toolHandlerFactory.js';
 import { measureToolExecution } from '@/utils/internal/performance.js';
 import { Allow, jsonParser } from '@/utils/parsing/jsonParser.js';
@@ -252,6 +254,23 @@ describe('Tool Handler Pipeline Fuzz Tests', () => {
       ['complexTool', complexTool as AnyToolDefinition],
     ];
 
+    /**
+     * Whether pre-validation's repair rescues an input the schema rejects as
+     * sent. Here only one can: a safe integer other than `-0` at `stringTool`'s
+     * string field becomes its decimal string (#487). `numberTool` takes numbers
+     * only, and `complexTool`'s enum never receives one of its own values, so no
+     * repair makes either valid.
+     */
+    function repairable(name: string, input: Record<string, unknown>): boolean {
+      const { value } = input;
+      return (
+        name === 'stringTool' &&
+        typeof value === 'number' &&
+        Number.isSafeInteger(value) &&
+        !Object.is(value, -0)
+      );
+    }
+
     for (const [name, def] of toolDefs) {
       it(`${name}: adversarial inputs produce isError responses`, async () => {
         const handler = createToolHandler(def, services, notifiers);
@@ -262,7 +281,8 @@ describe('Tool Handler Pipeline Fuzz Tests', () => {
             // Must always return a result (either success or error), never throw
             const result = await call(handler, input);
             expect(Array.isArray(result.content)).toBe(true);
-            expect(result.isError).toBe(def.input.safeParse(input).success ? undefined : true);
+            const accepted = def.input.safeParse(input).success || repairable(name, input);
+            expect(result.isError).toBe(accepted ? undefined : true);
             if (result.isError) {
               // Error responses must have text content
               expect(result.content!.length).toBeGreaterThan(0);
@@ -283,6 +303,102 @@ describe('Tool Handler Pipeline Fuzz Tests', () => {
         );
       });
     }
+  });
+
+  describe('Pre-validation key order (#563)', () => {
+    /**
+     * Declares each shape on which dropping first and aliasing first disagree:
+     * an optional field an underscore spelling folds onto, a declared
+     * underscore alias beside a case variant of its target, and a declared
+     * alias for an ignore-listed key.
+     */
+    const keyOrderTool = tool('fuzz_key_order', {
+      description: 'Takes keys the two pre-validation orders resolve differently.',
+      input: z.object({
+        query: z.string().describe('Query'),
+        maxResults: z.number().optional().describe('Maximum results'),
+        callId: z.string().optional().describe('Call ID'),
+      }),
+      inputAliases: { _q: 'query', toolCallId: 'callId' },
+      output: z.object({ ok: z.boolean().describe('Ok') }),
+      handler: () => ({ ok: true }),
+    });
+
+    /**
+     * Declared keys, their underscore and case spellings, and client artifacts,
+     * over values each field accepts or refuses. Half the calls also carry a
+     * valid `query`, so the drop-first order validates often enough to test.
+     */
+    const argumentsArb = fc
+      .tuple(
+        fc.option(fc.string({ maxLength: 4 }), { nil: undefined }),
+        fc.dictionary(
+          fc.constantFrom(
+            'query',
+            'maxResults',
+            'callId',
+            '_query',
+            '_q',
+            'QUERY',
+            '_max_results',
+            'max_results',
+            'toolCallId',
+            '_call_id',
+            '_meta',
+            '_search',
+            'tool_call_description',
+          ),
+          fc.oneof(
+            fc.string({ maxLength: 4 }),
+            fc.integer(),
+            fc.boolean(),
+            fc.constant('12345'),
+            fc.constant(null),
+            fc.array(fc.string({ maxLength: 2 }), { maxLength: 2 }),
+          ),
+          { maxKeys: 4 },
+        ),
+      )
+      .map(
+        ([query, rest]): Record<string, unknown> =>
+          query === undefined ? rest : { query, ...rest },
+      );
+
+    /** The parse of the first attempt — the order every call is tried in first. */
+    function dropFirst(args: Record<string, unknown>) {
+      const first = prevalidateToolArguments(keyOrderTool as AnyToolDefinition, args, undefined);
+      return { first, parsed: keyOrderTool.input.safeParse(first.args) };
+    }
+
+    it('resolves a call the drop-first order validates exactly as that order does', () => {
+      fc.assert(
+        fc.property(argumentsArb, (args) => {
+          const { parsed } = dropFirst(args);
+          fc.pre(parsed.success);
+          expect(parseToolArguments(keyOrderTool, args)).toEqual(parsed.data);
+        }),
+        { numRuns: 300 },
+      );
+    });
+
+    it('rejects a call no order validates with the drop-first rejection', () => {
+      fc.assert(
+        fc.property(argumentsArb, (args) => {
+          const { first, parsed } = dropFirst(args);
+          let thrown: unknown;
+          try {
+            parseToolArguments(keyOrderTool, args);
+          } catch (error) {
+            thrown = error;
+          }
+          fc.pre(thrown instanceof McpError);
+          const data = (thrown as McpError).data as { input?: unknown; issues?: unknown };
+          expect(data.issues).toEqual(parsed.error?.issues);
+          expect(data.input).toEqual(first.report);
+        }),
+        { numRuns: 300 },
+      );
+    });
   });
 
   describe('Post-handler failure containment (#346)', () => {

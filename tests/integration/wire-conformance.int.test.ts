@@ -252,7 +252,8 @@ describe('Phase 1 wire conformance', () => {
   describe('argument-validation error envelope (#377)', () => {
     const rejections: Array<[label: string, args: Record<string, unknown>]> = [
       ['an unknown root key', { query: 'ok', salt: true }],
-      ['a wrong argument type', { query: 123 }],
+      // A boolean: an integer for `query` is repaired to its decimal string (#487).
+      ['a wrong argument type', { query: true }],
       ['a missing required field', {}],
       ['a failed constraint', { query: '' }],
     ];

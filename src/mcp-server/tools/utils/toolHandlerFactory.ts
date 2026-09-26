@@ -43,12 +43,17 @@ import {
 import { sanitization } from '@/utils/security/sanitization.js';
 import { ATTR_MCP_TOOL_ENRICHED } from '@/utils/telemetry/attributes.js';
 import {
+  type CoercionKind,
   countCoerced,
   type InputHandlingOptions,
+  type PrevalidatedArguments,
+  type PrevalidationReport,
+  prevalidateAliasFirst,
   prevalidateToolArguments,
+  recordPrevalidation,
   repairRepresentations,
 } from './inputPrevalidation.js';
-import { isZodObjectSchema } from './schemaShape.js';
+import { isZodObjectSchema, type ZodDef, zodDef } from './schemaShape.js';
 import type { AnyToolDefinition } from './toolDefinition.js';
 
 // ---------------------------------------------------------------------------
@@ -148,12 +153,13 @@ function renderBranchableTerms(data: Record<string, unknown> | undefined): strin
  * stay JSON-only.
  *
  * The `Recovery:` line is dropped when the message already contains the hint
- * verbatim (#459) — `buildArgumentRecoveryHint` falls back to an issue's own
- * message for a constraint or refinement, and repeating that sentence costs
- * the reader without adding a next step. Containment, not equality: the
- * argument-rejection preamble and a field-path prefix both leave the hint's
- * whole text on screen. `structuredContent.error.data.recovery.hint` stays
- * populated either way, so #445's guarantee holds on the JSON surface.
+ * verbatim (#459) — `buildArgumentRecoveryHint` restates a constraint or
+ * refinement issue as its own message line, and a hint made only of those is
+ * the message's issue text, so repeating it costs the reader without adding a
+ * next step. Containment, not equality: the argument-rejection preamble leaves
+ * that text whole on screen, and so does a handler hint the message embeds.
+ * `structuredContent.error.data.recovery.hint` stays populated either way, so
+ * #445's guarantee holds on the JSON surface.
  *
  * Note: `_meta.error` is intentionally NOT emitted — the error code, message,
  * and data live on `structuredContent.error` instead, mirroring the success
@@ -208,13 +214,15 @@ const ABSENT = Symbol('absent');
  * is how Zod itself reads it.
  */
 function readArgumentAt(args: unknown, path: ReadonlyArray<PropertyKey>): unknown {
-  let cursor = args;
-  for (const segment of path) {
-    if (cursor === null || typeof cursor !== 'object') return ABSENT;
-    if (!Object.hasOwn(cursor, segment)) return ABSENT;
-    cursor = (cursor as Record<PropertyKey, unknown>)[segment];
-  }
-  return cursor === undefined ? ABSENT : cursor;
+  const value = path.reduce<unknown>(stepInto, args);
+  return value === undefined ? ABSENT : value;
+}
+
+/** The caller's value one step down, or `undefined` when nothing owns one there. */
+function stepInto(value: unknown, step: PropertyKey): unknown {
+  return value !== null && typeof value === 'object' && Object.hasOwn(value, step)
+    ? (value as Record<PropertyKey, unknown>)[step]
+    : undefined;
 }
 
 /** The accepted-value half of an `invalid_value` sentence, from the issue's own values. */
@@ -223,23 +231,96 @@ function expectedValuesText(values: readonly unknown[]): string {
   return values.length === 1 ? `Expected ${rendered}` : `Expected one of ${rendered}`;
 }
 
+/** The branch's only issue, when it has exactly one. */
+function onlyIssue(branch: readonly ArgumentIssue[]): ArgumentIssue | undefined {
+  return branch.length === 1 ? branch[0] : undefined;
+}
+
+/** Whether any of a branch's issues names a path below the branch's root. */
+function failsBelowRoot(branch: readonly ArgumentIssue[]): boolean {
+  return branch.some((issue) => issue.path.length > 0);
+}
+
 /**
- * The union branches worth rendering: every branch except one whose only issue
- * is a single-valued `invalid_value`.
+ * The union branches worth rendering. Two filters, both reading issue shape
+ * only, never message text:
  *
- * That shape is the `z.literal('')` blank-field sentinel of the form-client
- * convention — never the branch that says what would have been accepted. The
- * filter reads issue shape only, never message text, so a one-entry
- * `z.enum([...])` (which Zod reports identically) is filtered too and the
- * caller falls back to the union's own message.
+ * - **#417** — drop a branch whose only issue is a single-valued
+ *   `invalid_value`. That shape is the `z.literal('')` blank-field sentinel of
+ *   the form-client convention — never the branch that says what would have
+ *   been accepted. A one-entry `z.enum([...])`, which Zod reports identically,
+ *   is filtered too, and the caller falls back to the union's own message.
+ * - **#492** — once some branch fails below its root, drop every branch whose
+ *   only issue is a root `invalid_type`. In a one-or-many field
+ *   (`z.union([z.array(Item), Item])`) that branch merely says the value is
+ *   the other shape; the branch that failed inside the value is the one that
+ *   says what to change. When every branch fails at its root, none is dropped.
  */
 function selectUnionBranches(
   branches: ReadonlyArray<readonly ArgumentIssue[]>,
 ): ReadonlyArray<readonly ArgumentIssue[]> {
-  return branches.filter((branch) => {
-    const only = branch.length === 1 ? branch[0] : undefined;
+  const selected = branches.filter((branch) => {
+    const only = onlyIssue(branch);
     return !(only?.code === 'invalid_value' && only.values.length === 1);
   });
+  if (!selected.some(failsBelowRoot)) return selected;
+  return selected.filter((branch) => {
+    const only = onlyIssue(branch);
+    return !(only?.code === 'invalid_type' && only.path.length === 0);
+  });
+}
+
+/**
+ * One line of a rendered argument rejection: a Zod issue and the full path it
+ * renders under. The path equals `issue.path` except for an issue lifted out of
+ * a union branch, whose branch-relative path follows the union's own.
+ */
+interface RenderedIssue {
+  readonly issue: ArgumentIssue;
+  readonly path: readonly PropertyKey[];
+}
+
+/**
+ * The issues a rejection renders, in order: Zod's list, except that a union
+ * left with one selected branch that fails below its root is replaced by that
+ * branch's issues under the union's path (#492) — so a one-or-many field
+ * reports a list element's field error exactly as a list-only field does
+ * (`items.1.name: …`). Recursive, so a one-or-many union nested in another, or
+ * inside a list element, resolves the same way at every level.
+ *
+ * The message ({@link formatInputValidationMessage}) and the hint
+ * ({@link buildArgumentRecoveryHint}) both render from this list, which keeps
+ * the hint's restatements identical to the message's lines. `data.issues` is
+ * never rebuilt from it: it ships Zod's own list.
+ */
+function renderedIssues(
+  issues: readonly ArgumentIssue[],
+  prefix: readonly PropertyKey[] = [],
+): RenderedIssue[] {
+  return issues.flatMap((issue) => {
+    const path = [...prefix, ...issue.path];
+    if (issue.code === 'invalid_union') {
+      const [branch, ...others] = selectUnionBranches(issue.errors);
+      if (branch && others.length === 0 && failsBelowRoot(branch)) {
+        return renderedIssues(branch, path);
+      }
+    }
+    return [{ issue, path }];
+  });
+}
+
+/** `items.1.name` — the dotted form a path takes in the message and the hint. */
+function dottedPath(path: readonly PropertyKey[]): string {
+  return path.map(String).join('.');
+}
+
+/**
+ * One line of the rendered detail: `path: message`, or the bare message at the
+ * root. `args` decides the absent/present bit {@link renderIssueMessage} reads.
+ */
+function renderIssueLine({ issue, path }: RenderedIssue, args: unknown): string {
+  const message = renderIssueMessage(issue, readArgumentAt(args, path) === ABSENT);
+  return path.length > 0 ? `${dottedPath(path)}: ${message}` : message;
 }
 
 /**
@@ -295,7 +376,7 @@ function renderIssueMessage(issue: ArgumentIssue, absent: boolean): string {
  */
 function renderBranchIssue(issue: ArgumentIssue, absent: boolean): string {
   const message = renderIssueMessage(issue, absent);
-  return issue.path.length > 0 ? `${issue.path.map(String).join('.')}: ${message}` : message;
+  return issue.path.length > 0 ? `${dottedPath(issue.path)}: ${message}` : message;
 }
 
 /**
@@ -313,11 +394,8 @@ export function formatInputValidationMessage(
   error: ZodError,
   args: unknown,
 ): string {
-  const detail = error.issues
-    .map((issue) => {
-      const message = renderIssueMessage(issue, readArgumentAt(args, issue.path) === ABSENT);
-      return issue.path.length > 0 ? `${issue.path.map(String).join('.')}: ${message}` : message;
-    })
+  const detail = renderedIssues(error.issues)
+    .map((entry) => renderIssueLine(entry, args))
     .join(', ');
   return `Input validation error: Invalid arguments for tool ${toolName}: ${detail}`;
 }
@@ -352,34 +430,171 @@ function rootPropertyNames(input: AnyToolDefinition['input']): readonly string[]
   return isZodObjectSchema(input) ? Object.keys(input.shape) : [];
 }
 
+/** The Zod 4 definition fields {@link objectSchemaAt} reads beyond `ZodDef`'s. */
+type WalkedDef = ZodDef & {
+  getter?: () => unknown;
+  in?: unknown;
+  rest?: unknown;
+};
+
+/**
+ * The `z.object()` a nested unknown-key issue sits in, found by walking its
+ * rendered path down from `schema` beside the caller's own `value` — or
+ * `undefined` when the path does not land on exactly one object (#566).
+ *
+ * Wrappers (`optional`, `nullable`, `default`, …), `pipe`, and `z.lazy()` are
+ * looked through. A numeric step enters an array element or tuple item; a
+ * string step, a property or a record value. A discriminated union follows the
+ * variant the argument's own discriminator selects, as Zod did. A plain union
+ * follows the one option under which the rest of the path still lands on an
+ * object — the branch {@link renderedIssues} lifted under #492. Anything else,
+ * an intersection or a union two options satisfy, resolves to nothing.
+ */
+function objectSchemaAt(
+  schema: unknown,
+  path: readonly PropertyKey[],
+  value: unknown,
+): ZodObject<ZodRawShape> | undefined {
+  const def = zodDef(schema) as WalkedDef | undefined;
+  if (!def) return undefined;
+  if (def.type === 'lazy' && def.getter) return objectSchemaAt(def.getter(), path, value);
+  if (def.type === 'pipe') return objectSchemaAt(def.in, path, value);
+  if (def.innerType !== undefined) return objectSchemaAt(def.innerType, path, value);
+  if (def.type === 'union') return unionOptionAt(def, path, value);
+
+  const [step, ...rest] = path;
+  if (step === undefined) return isZodObjectSchema(schema) ? schema : undefined;
+  const next = stepInto(value, step);
+
+  switch (def.type) {
+    case 'object':
+      return typeof step === 'string' && def.shape && Object.hasOwn(def.shape, step)
+        ? objectSchemaAt(def.shape[step], rest, next)
+        : undefined;
+    case 'record':
+      return objectSchemaAt(def.valueType, rest, next);
+    case 'array':
+      return typeof step === 'number' ? objectSchemaAt(def.element, rest, next) : undefined;
+    case 'tuple':
+      return typeof step === 'number'
+        ? objectSchemaAt(def.items?.[step] ?? def.rest, rest, next)
+        : undefined;
+    default:
+      return undefined;
+  }
+}
+
+/** {@link objectSchemaAt} at a union: the one option the path resolves through. */
+function unionOptionAt(
+  def: WalkedDef,
+  path: readonly PropertyKey[],
+  value: unknown,
+): ZodObject<ZodRawShape> | undefined {
+  const options = def.options ?? [];
+  const { discriminator } = def;
+  if (typeof discriminator === 'string') {
+    const tag = stepInto(value, discriminator);
+    const selected = options.find((option) => {
+      const field = isZodObjectSchema(option) ? option.shape[discriminator] : undefined;
+      return (field as ZodType | undefined)?.safeParse(tag).success === true;
+    });
+    return selected === undefined ? undefined : objectSchemaAt(selected, path, value);
+  }
+  const resolved = options.flatMap((option) => objectSchemaAt(option, path, value) ?? []);
+  return resolved.length === 1 ? resolved[0] : undefined;
+}
+
+/**
+ * The unknown-key sentence for one `unrecognized_keys` issue.
+ *
+ * A root key names the root properties the tool advertises (#445). A key inside
+ * a nested strict object is named by its full path, beside the keys that object
+ * accepts (#566) — the root list there would send the caller to move the key to
+ * the root or rename it after a root field. Neither list is given when there is
+ * none to give: a discriminated-union root, a nested object declaring no keys,
+ * or a path {@link objectSchemaAt} cannot resolve.
+ */
+function unknownKeySentence(
+  input: AnyToolDefinition['input'],
+  keys: readonly string[],
+  path: readonly PropertyKey[],
+  args: unknown,
+): string {
+  const label = keys.length === 1 ? 'Unknown key' : 'Unknown keys';
+  if (path.length === 0) {
+    const accepted = rootPropertyNames(input);
+    return accepted.length > 0
+      ? `${label} ${keys.join(', ')}. This tool accepts: ${accepted.join(', ')}.`
+      : `${label} ${keys.join(', ')}.`;
+  }
+  const where = dottedPath(path);
+  const named = keys.map((key) => `${where}.${key}`).join(', ');
+  const accepted = Object.keys(objectSchemaAt(input, path, args)?.shape ?? {});
+  return accepted.length > 0
+    ? `${label} ${named}. ${where} accepts: ${accepted.join(', ')}.`
+    : `${label} ${named}.`;
+}
+
+/**
+ * The wrong-type sentence for one `invalid_type` issue.
+ *
+ * `int` is the one expectation a JSON number fails by type — `.int()`,
+ * `z.int()`, `z.int32()`, and `z.uint32()` all report it, while range and
+ * safe-integer violations arrive as `too_big` / `too_small` — so a number
+ * arriving there has a fractional part, and the sentence names that fix
+ * rather than the type names `int` and `number`, which the value already
+ * satisfies (#499).
+ */
+function wrongTypeSentence(subject: string, expected: string, arrived: unknown): string {
+  if (arrived === ABSENT) return `Send ${subject} as ${withArticle(expected)}.`;
+  if (expected === 'int' && typeof arrived === 'number') {
+    return `Send ${subject} as an integer, not a fractional number.`;
+  }
+  return `Send ${subject} as ${withArticle(expected)}, not ${arrivedTypeText(arrived)}.`;
+}
+
 /**
  * Synthesizes `data.recovery.hint` from the Zod issues, the raw arguments, and
  * the root schema (#445) — so the one failure a weaker model hits most often
  * carries the same next step every handler-thrown error does, instead of
  * costing a round trip for the schema.
  *
- * One sentence per issue, joined into a single hint, except that every missing
- * required field collapses into one `Provide …` sentence at the first of their
- * positions. An issue no bucket claims contributes its rendered message
- * unchanged, which keeps the hint nonempty for any rejection Zod can produce.
+ * One sentence per {@link renderedIssues} entry, joined into a single hint,
+ * except that every missing required field collapses into one `Provide …`
+ * sentence at the first of their positions. An issue no bucket claims is
+ * restated as its message line — `start: Must be …`, path included, so
+ * identical constraints on different fields stay distinguishable (#493).
+ *
+ * When every sentence is a restatement, the hint is the message's issue text
+ * verbatim, which is what lets {@link buildToolErrorResult} drop the
+ * `Recovery:` line (#459). When restatements share the hint with the
+ * framework's own sentences, each is terminated so it cannot run into the next
+ * one, and a sentence already stated is not repeated.
+ *
+ * `report` closes the hint with what the pre-validation step changed before
+ * the parse (#468) — `Validated query as targetQuery.` for a rewritten key,
+ * `Dropped undeclared key _max.` for an underscore-rule drop — since the issues
+ * name only the keys that were validated. Both are framework sentences, never
+ * restatements, so a hint carrying one keeps its `Recovery:` line.
  */
-function buildArgumentRecoveryHint(def: AnyToolDefinition, error: ZodError, args: unknown): string {
+function buildArgumentRecoveryHint(
+  def: AnyToolDefinition,
+  error: ZodError,
+  args: unknown,
+  report: PrevalidationReport | undefined,
+): string {
   const sentences: string[] = [];
+  const restatements: string[] = [];
   const missing: string[] = [];
   let missingSlot = -1;
 
-  for (const issue of error.issues) {
-    const path = issue.path.map(String).join('.');
-    const arrived = readArgumentAt(args, issue.path);
+  for (const entry of renderedIssues(error.issues)) {
+    const { issue } = entry;
+    const path = dottedPath(entry.path);
+    const arrived = readArgumentAt(args, entry.path);
 
     if (issue.code === 'unrecognized_keys') {
-      const label = issue.keys.length === 1 ? 'Unknown key' : 'Unknown keys';
-      const accepted = rootPropertyNames(def.input);
-      sentences.push(
-        accepted.length > 0
-          ? `${label} ${issue.keys.join(', ')}. This tool accepts: ${accepted.join(', ')}.`
-          : `${label} ${issue.keys.join(', ')}.`,
-      );
+      sentences.push(unknownKeySentence(def.input, issue.keys, entry.path, args));
       continue;
     }
 
@@ -393,21 +608,29 @@ function buildArgumentRecoveryHint(def: AnyToolDefinition, error: ZodError, args
     }
 
     if (issue.code === 'invalid_type') {
-      const subject = path.length > 0 ? path : 'the arguments';
-      const expected = withArticle(issue.expected);
       sentences.push(
-        arrived === ABSENT
-          ? `Send ${subject} as ${expected}.`
-          : `Send ${subject} as ${expected}, not ${arrivedTypeText(arrived)}.`,
+        wrongTypeSentence(path.length > 0 ? path : 'the arguments', issue.expected, arrived),
       );
       continue;
     }
 
-    sentences.push(renderIssueMessage(issue, false));
+    const line = renderIssueLine(entry, args);
+    restatements.push(line);
+    sentences.push(terminateSentence(line));
   }
 
+  if (report && report.aliased.length > 0) {
+    const rewrites = report.aliased.map(({ alias, target }) => `${alias} as ${target}`);
+    sentences.push(`Validated ${joinNames(rewrites)}.`);
+  }
+  if (report && report.ignored.length > 0) {
+    const label = report.ignored.length === 1 ? 'key' : 'keys';
+    sentences.push(`Dropped undeclared ${label} ${joinNames(report.ignored)}.`);
+  }
+
+  if (restatements.length === sentences.length) return restatements.join(', ');
   if (missingSlot >= 0) sentences[missingSlot] = `Provide ${joinNames(missing)}.`;
-  return sentences.join(' ');
+  return [...new Set(sentences)].join(' ');
 }
 
 /** What {@link parseToolArguments} needs beyond the definition and the arguments. */
@@ -430,10 +653,19 @@ export interface ParseToolArgumentsOptions {
  * An ordered pre-validation step wraps the parse. Before it,
  * {@link prevalidateToolArguments} drops client-added keys (#453) and rewrites
  * key aliases (#452); after a failure — and only then —
- * {@link repairRepresentations} undoes a stringified array and the arguments
- * are parsed once more (#234), the repair kept only if the author's own schema
- * now accepts it. When nothing validates, the *original* rejection is thrown
- * verbatim, built from the arguments that produced it.
+ * {@link repairRepresentations} undoes a stringified array or object or an
+ * integer sent for a string, and the arguments are parsed once more (#234,
+ * #479, #487), the repair kept only if the author's own schema now accepts it.
+ * When that attempt still fails and its drop discarded a key,
+ * {@link prevalidateAliasFirst} reruns the stages alias-first and the same
+ * parse-then-repair runs on the result, kept only if it validates (#563).
+ * {@link recordPrevalidation} then counts and logs the attempt the handler
+ * receives, so a call the first attempt validates is untouched by the retry.
+ * When nothing validates, the first attempt's *original* rejection is thrown,
+ * built from the arguments that produced it — identical to the one the same
+ * call gets under `input: { coerce: false }`. It carries the rewrites and
+ * underscore-rule drops that attempt made as `data.input`, and as sentences
+ * closing the hint (#468); a call with neither gains no `data.input`.
  *
  * The single argument-rejection path. {@link createToolHandler} and the
  * `runToolContract` test helper both route through it, so a test written to
@@ -448,30 +680,68 @@ export function parseToolArguments<TDefinition extends AnyToolDefinition>(
   input: unknown,
   options: ParseToolArgumentsOptions = {},
 ): z.infer<TDefinition['input']> {
-  const prepared = prevalidateToolArguments(def, input, options.input, options.context);
-  const parsed = def.input.safeParse(prepared);
-  if (parsed.success) return parsed.data as z.infer<TDefinition['input']>;
+  const first = prevalidateToolArguments(def, input, options.input);
+  const parsed = parseAttempt(def, first.args, options.input);
+  if (parsed.success) return accept(def, first, parsed, options.context);
 
-  if (options.input?.coerce !== false) {
-    const repaired = repairRepresentations(prepared, parsed.error.issues);
-    if (repaired !== prepared) {
-      const retried = def.input.safeParse(repaired);
-      if (retried.success) {
-        countCoerced(def.name, options.context);
-        return retried.data as z.infer<TDefinition['input']>;
-      }
-    }
+  const retry = prevalidateAliasFirst(def, input, first, options.input);
+  if (retry) {
+    const retried = parseAttempt(def, retry.args, options.input);
+    if (retried.success) return accept(def, retry, retried, options.context);
   }
 
+  recordPrevalidation(def, first, options.context);
+  const { report } = first;
   throw new McpError(
     JsonRpcErrorCode.InvalidParams,
-    formatInputValidationMessage(def.name, parsed.error, prepared),
+    formatInputValidationMessage(def.name, parsed.error, first.args),
     {
       issues: parsed.error.issues,
       reason: INVALID_ARGUMENTS_REASON,
-      recovery: { hint: buildArgumentRecoveryHint(def, parsed.error, prepared) },
+      ...(report && { input: report }),
+      recovery: { hint: buildArgumentRecoveryHint(def, parsed.error, first.args, report) },
     },
   );
+}
+
+/** What {@link parseAttempt} decided for one ordering of the pre-parse stages. */
+type ParsedAttempt =
+  | { readonly coerced: readonly CoercionKind[]; readonly data: unknown; readonly success: true }
+  | { readonly error: ZodError; readonly success: false };
+
+/**
+ * Parses one attempt's arguments, and on failure repairs them once and
+ * re-parses, keeping the repair only if the schema then accepts it. A failure
+ * carries the first parse's error: a discarded repair leaves no trace.
+ */
+function parseAttempt(
+  def: AnyToolDefinition,
+  args: unknown,
+  options: InputHandlingOptions | undefined,
+): ParsedAttempt {
+  const parsed = def.input.safeParse(args);
+  if (parsed.success) return { success: true, data: parsed.data, coerced: [] };
+
+  if (options?.coerce !== false) {
+    const repair = repairRepresentations(args, parsed.error.issues);
+    if (repair.args !== args) {
+      const retried = def.input.safeParse(repair.args);
+      if (retried.success) return { success: true, data: retried.data, coerced: repair.kinds };
+    }
+  }
+  return { success: false, error: parsed.error };
+}
+
+/** Emits the winning attempt's telemetry and hands its arguments to the handler. */
+function accept<TDefinition extends AnyToolDefinition>(
+  def: TDefinition,
+  attempt: PrevalidatedArguments,
+  parsed: Extract<ParsedAttempt, { success: true }>,
+  context: RequestContext | undefined,
+): z.infer<TDefinition['input']> {
+  recordPrevalidation(def, attempt, context);
+  if (parsed.coerced.length > 0) countCoerced(def.name, parsed.coerced, context);
+  return parsed.data as z.infer<TDefinition['input']>;
 }
 
 /**
@@ -528,15 +798,15 @@ export function parseToolOutput(def: AnyToolDefinition, value: unknown): Record<
 }
 
 /**
- * A contract entry's `when` text, terminated so the entry that follows it —
- * and the description's own trailing sentence — starts a new one (#389).
- * Nothing validates a punctuation convention on `when`, and an entry authored
- * as a fragment otherwise runs into whatever comes next. Punctuating at the
- * join leaves the authored text alone, terminator or not.
+ * `text`, trimmed and ending in terminal punctuation, so whatever is joined
+ * after it starts a new sentence. Punctuating at the join leaves authored text
+ * alone, terminator or not: a contract entry's `when` (#389), which nothing
+ * validates a punctuation convention on, and an issue message restated in an
+ * argument hint beside the framework's own sentences (#493).
  */
-function terminateWhen(when: string): string {
-  const text = when.trim();
-  return /[.?!]$/.test(text) ? text : `${text}.`;
+function terminateSentence(text: string): string {
+  const trimmed = text.trim();
+  return /[.?!]$/.test(trimmed) ? trimmed : `${trimmed}.`;
 }
 
 /**
@@ -566,7 +836,7 @@ function toolErrorEnvelopeSchema(def: AnyToolDefinition): ZodType {
           .string()
           .describe(
             `Machine-readable failure mode. Declared by this tool: ${contract
-              .map((entry) => `\`${entry.reason}\`: ${terminateWhen(entry.when)}`)
+              .map((entry) => `\`${entry.reason}\`: ${terminateSentence(entry.when)}`)
               .join(' ')} Other values are possible when a failure originates below the handler.`,
           )
           .meta({ examples: reasons })

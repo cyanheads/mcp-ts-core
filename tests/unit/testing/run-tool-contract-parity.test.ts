@@ -71,6 +71,21 @@ const multi = tool('parity_multi', {
   handler: () => ({ ok: true }),
 }) as AnyToolDefinition;
 
+const nestedStrict = tool('parity_nested_strict', {
+  description: 'A strict options object beside an aliased key.',
+  input: z.object({
+    query: z.string().min(3).describe('Search query'),
+    opts: z
+      .object({ exact: z.boolean().describe('Exact match') })
+      .strict()
+      .optional()
+      .describe('Options'),
+  }),
+  inputAliases: { q: 'query' },
+  output: z.object({ ok: z.boolean().describe('Success') }),
+  handler: () => ({ ok: true }),
+}) as AnyToolDefinition;
+
 describe('runToolContract argument rejection', () => {
   const cases: Array<{
     args: Record<string, unknown>;
@@ -78,7 +93,8 @@ describe('runToolContract argument rejection', () => {
     name: string;
   }> = [
     { name: 'a failed constraint', definition: bounded, args: { n: 5 } },
-    { name: 'a wrong type', definition: typed, args: { name: 123 } },
+    // A boolean: an integer for a string field is repaired before parsing (#487).
+    { name: 'a wrong type', definition: typed, args: { name: true } },
     { name: 'a missing required field', definition: typed, args: {} },
     {
       name: 'an unrecognized root key against input.strict()',
@@ -90,6 +106,21 @@ describe('runToolContract argument rejection', () => {
       name: 'a nested field two levels down',
       definition: typed,
       args: { name: 'ok', nested: { depth: 'deep' } },
+    },
+    {
+      name: 'an unknown key in a nested strict object',
+      definition: nestedStrict,
+      args: { query: 'abc', opts: { exact: true, fuzzy: true } },
+    },
+    {
+      name: 'a rejection reporting an alias rewrite and a dropped key',
+      definition: nestedStrict,
+      args: { q: 'ab', _page: 2 },
+    },
+    {
+      name: 'a stringified object and an integer the schema still refuses',
+      definition: nestedStrict,
+      args: { query: 12, opts: '{"exact":"yes"}' },
     },
   ];
 
@@ -288,12 +319,13 @@ describe('runToolContract cancellation', () => {
     const controller = new AbortController();
     controller.abort();
 
+    // A boolean stays schema-invalid; an integer for `name` would be repaired (#487).
     const production = (await createToolHandler(
       typed,
       services,
       notifiers,
-    )({ name: 123 }, makeServerContext({ signal: controller.signal }))) as CallToolResult;
-    const helper = await runToolContract(typed, { name: 123 } as never, {
+    )({ name: true }, makeServerContext({ signal: controller.signal }))) as CallToolResult;
+    const helper = await runToolContract(typed, { name: true } as never, {
       context: { signal: controller.signal },
     });
 

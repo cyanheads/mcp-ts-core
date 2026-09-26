@@ -841,7 +841,8 @@ describe('tool telemetry records the terminal outcome (#346)', () => {
     }
 
     it('counts an argument rejection once, outside the call metrics', async () => {
-      const result = await callTool(guarded, { name: 42 });
+      // A boolean: an integer for `name` is repaired and the call succeeds (#487).
+      const result = await callTool(guarded, { name: true });
 
       expect((result.structuredContent as { error: { code: number } }).error.code).toBe(
         JsonRpcErrorCode.InvalidParams,

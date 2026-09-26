@@ -103,7 +103,11 @@ export const ATTR_MCP_INPUT_TARGET = 'mcp.input.target';
 /** Which half of the alias stage fired: `declared` or `case_style`. */
 export const ATTR_MCP_INPUT_ALIAS_KIND = 'mcp.input.alias_kind';
 
-/** Which representation repair earned validity (`stringified_array`). */
+/**
+ * Which representation repair earned validity: `stringified_array`,
+ * `stringified_object`, or `integer_as_string`. A call that needed several
+ * kinds counts once under each.
+ */
 export const ATTR_MCP_INPUT_COERCION = 'mcp.input.coercion';
 
 // ============================================================================

@@ -176,8 +176,9 @@ export interface CreateAppOptions<TSupabaseClient extends object = SupabaseClien
   icons?: Implementation['icons'];
   /**
    * Switches for the pre-validation step every `tools/call` argument object
-   * passes through: dropping client-added root keys, rewriting key aliases, and
-   * repairing a stringified array after a failed parse.
+   * passes through: rewriting key aliases, dropping client-added root keys,
+   * and, after a failed parse, repairing a JSON-stringified array or object or
+   * an integer sent for a string.
    *
    * Every stage is on with no configuration. An entry here either extends a
    * stage or turns it off for the whole server; nothing about the advertised
@@ -1005,10 +1006,12 @@ export async function createApp<TSupabaseClient extends object = SupabaseClientH
 
   /**
    * Stdin EOF is a stdio client hanging up — a transport disconnect, handled
-   * like a signal. Left unobserved, the process instead runs out of ref'd
-   * handles and drains: shutdown never runs, the OTel export never leaves, and
-   * a handle server code forgot to `unref()` keeps the server resident long
-   * after its client is gone (#322).
+   * like a signal. The SDK transport closes itself on the same EOF, aborting
+   * requests still in flight, but that is the connection alone. Left
+   * unobserved, the process instead runs out of ref'd handles and drains:
+   * shutdown never runs, the OTel export never leaves, and a handle server
+   * code forgot to `unref()` keeps the server resident long after its client
+   * is gone (#322).
    *
    * The backstop is ref'd, unlike `fatalShutdown`'s. It holds the loop open for
    * the duration — that same drain would otherwise exit mid-cleanup — and caps

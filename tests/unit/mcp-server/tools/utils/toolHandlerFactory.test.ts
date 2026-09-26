@@ -728,11 +728,11 @@ describe('createToolHandler', () => {
         );
       });
 
-      it('carries the prefixed text into data.recovery.hint', async () => {
+      it('carries the prefixed text into data.recovery.hint, behind the field path (#493)', async () => {
         const result = await reject(objUnion, { spec: {} });
 
         expect(hint(result)).toBe(
-          'kind: Invalid option: expected one of "x"|"y"; ' +
+          'spec: kind: Invalid option: expected one of "x"|"y"; ' +
             'n: Invalid input: expected number, received undefined or ' +
             'other: Invalid input: expected string, received undefined',
         );
@@ -821,10 +821,10 @@ describe('createToolHandler', () => {
         expect(hint(result)).toBe('Provide lat and lon.');
       });
 
-      it('leaves a constraint failure on the issue message', async () => {
+      it('leaves a constraint failure on the issue message, behind its path (#493)', async () => {
         const result = await reject(search, { query: '' });
 
-        expect(hint(result)).toBe('Too small: expected string to have >=1 characters');
+        expect(hint(result)).toBe('query: Too small: expected string to have >=1 characters');
       });
 
       it('joins several issues into one hint, one sentence per issue', async () => {
@@ -840,10 +840,10 @@ describe('createToolHandler', () => {
         expect(hint(result)).not.toContain('This tool accepts');
       });
 
-      it('carries a selected union branch into the hint', async () => {
+      it('carries a selected union branch into the hint, behind its path (#493)', async () => {
         const result = await reject(optionalCourt, { court: 'bogus' });
 
-        expect(hint(result)).toBe('Invalid option: expected one of "CJEU"|"GC"');
+        expect(hint(result)).toBe('court: Invalid option: expected one of "CJEU"|"GC"');
       });
 
       it('mirrors the hint into content[] after the diagnostic line', async () => {
@@ -853,6 +853,605 @@ describe('createToolHandler', () => {
           'Error: Input validation error: Invalid arguments for tool search_tool: ' +
             'Unrecognized key: "salt"\n\nRecovery: Unknown key salt. ' +
             'This tool accepts: query, limit.\n\n(reason invalid_arguments)',
+        );
+      });
+
+      // #499 — `expected: 'int'` with a number arriving means a fractional number
+      describe('a fractional number on an integer field (#499)', () => {
+        const rowsTool = (rows: z.ZodType) =>
+          tool('rows_tool', {
+            description: 'Takes a row count.',
+            input: z.object({ rows: rows.describe('Rows.') }),
+            output: ok,
+            handler: pass,
+          });
+
+        it.each([
+          ['z.number().int()', z.number().int().min(1).max(100), 1.5],
+          ['z.number().int()', z.number().int().min(1).max(100), -0.5],
+          ['z.int()', z.int(), 1.5],
+          ['z.int()', z.int(), -0.5],
+          ['z.int32()', z.int32(), 1.5],
+          ['z.int32()', z.int32(), -0.5],
+          ['z.uint32()', z.uint32(), 1.5],
+          ['z.uint32()', z.uint32(), -0.5],
+        ])('names the integer fix for %s given %s', async (_label, rows, value) => {
+          const result = await reject(rowsTool(rows), { rows: value });
+
+          expect(hint(result)).toBe('Send rows as an integer, not a fractional number.');
+          expect((firstBlock(result) as { text: string }).text).toBe(
+            'Error: Input validation error: Invalid arguments for tool rows_tool: ' +
+              'rows: Invalid input: expected int, received number\n\n' +
+              'Recovery: Send rows as an integer, not a fractional number.\n\n' +
+              '(reason invalid_arguments)',
+          );
+          // The message and data.issues keep Zod's own wording and shape.
+          expect(envelope(result).data?.issues).toEqual([
+            expect.objectContaining({ code: 'invalid_type', expected: 'int', path: ['rows'] }),
+          ]);
+        });
+
+        it.each([
+          ['a string', '2', 'Send rows as a number, not a string.'],
+          ['null', null, 'Send rows as a number, not null.'],
+          ['a boolean', true, 'Send rows as a number, not a boolean.'],
+        ])('leaves %s on the number sentence', async (_label, value, expected) => {
+          const result = await reject(rowsTool(z.number().int().min(1).max(100)), { rows: value });
+
+          expect(hint(result)).toBe(expected);
+        });
+
+        it('names the full path of a nested or array-element integer', async () => {
+          const paged = tool('paged_tool', {
+            description: 'Takes nested paging and a list of IDs.',
+            input: z.object({
+              page: z.object({ size: z.int().describe('Page size.') }).describe('Paging.'),
+              ids: z.array(z.int().describe('ID.')).describe('IDs.'),
+            }),
+            output: ok,
+            handler: pass,
+          });
+
+          const result = await reject(paged, { page: { size: 2.5 }, ids: [1, 2, 3.25] });
+
+          expect(hint(result)).toBe(
+            'Send page.size as an integer, not a fractional number. ' +
+              'Send ids.2 as an integer, not a fractional number.',
+          );
+        });
+      });
+    });
+
+    // ---------------------------------------------------------------------
+    // #493 — a restated issue carries its path
+    // ---------------------------------------------------------------------
+
+    describe('restated issues carry their path (#493)', () => {
+      const isoDate = () =>
+        z.string().refine((s) => !Number.isNaN(Date.parse(s)), 'Must be a parseable ISO 8601 date');
+
+      const range = tool('range_tool', {
+        description: 'Takes a date range.',
+        input: z.object({
+          start: isoDate().describe('Start date.'),
+          end: isoDate().describe('End date.'),
+          n: z.number().optional().describe('Count.'),
+        }),
+        output: ok,
+        handler: pass,
+      });
+
+      const text = (result: HandlerResult) => (firstBlock(result) as { text: string }).text;
+
+      it('keeps identical constraints on different fields distinguishable', async () => {
+        const result = await reject(range, { start: 'x', end: 'y' });
+
+        expect(hint(result)).toBe(
+          'start: Must be a parseable ISO 8601 date, end: Must be a parseable ISO 8601 date',
+        );
+        // Every sentence restates an issue, so the hint is the message's issue
+        // text verbatim and #459 drops the line.
+        expect(text(result)).toBe(
+          'Error: Input validation error: Invalid arguments for tool range_tool: ' +
+            'start: Must be a parseable ISO 8601 date, end: Must be a parseable ISO 8601 date' +
+            '\n\n(reason invalid_arguments)',
+        );
+      });
+
+      it('suppresses the line only — the rest of the rejection data is untouched', async () => {
+        const args = { start: 'x', end: 'y' };
+        const result = await reject(range, args);
+
+        expect(envelope(result).data).toEqual({
+          issues: range.input.safeParse(args).error?.issues,
+          reason: 'invalid_arguments',
+          recovery: {
+            hint: 'start: Must be a parseable ISO 8601 date, end: Must be a parseable ISO 8601 date',
+          },
+        });
+      });
+
+      it('terminates a restatement that shares the hint with a framework sentence', async () => {
+        const result = await reject(range, { start: 'x', end: '2020-01-01', n: 'five' });
+
+        expect(hint(result)).toBe(
+          'start: Must be a parseable ISO 8601 date. Send n as a number, not a string.',
+        );
+        expect(text(result)).toContain(
+          '\n\nRecovery: start: Must be a parseable ISO 8601 date. ' +
+            'Send n as a number, not a string.\n\n',
+        );
+      });
+
+      it('adds no second terminator to a restatement that already ends a sentence', async () => {
+        const tokens = tool('token_limit_tool', {
+          description: 'Takes a single-token query and a limit.',
+          input: z.object({
+            query: z
+              .string()
+              .refine((v) => !v.includes(' '), 'Use a single token; spaces are not supported.')
+              .describe('Search query.'),
+            limit: z.number().describe('Limit.'),
+          }),
+          output: ok,
+          handler: pass,
+        });
+
+        const result = await reject(tokens, { query: 'two words', limit: '5' });
+
+        expect(hint(result)).toBe(
+          'query: Use a single token; spaces are not supported. ' +
+            'Send limit as a number, not a string.',
+        );
+      });
+
+      it('states an identical sentence once in a mixed hint', async () => {
+        const doubled = tool('doubled_tool', {
+          description: 'A field whose two checks share one message.',
+          input: z.object({
+            x: z
+              .string()
+              .refine((v) => v.length > 3, 'Bad value')
+              .refine((v) => v.startsWith('a'), 'Bad value')
+              .describe('X.'),
+            n: z.number().describe('N.'),
+          }),
+          output: ok,
+          handler: pass,
+        });
+
+        const result = await reject(doubled, { x: 'b', n: 'five' });
+
+        expect(detail(result, 'doubled_tool')).toBe(
+          'x: Bad value, x: Bad value, n: Invalid input: expected number, received string',
+        );
+        expect(hint(result)).toBe('x: Bad value. Send n as a number, not a string.');
+      });
+
+      it('names each array element a refinement rejected, alongside a framework sentence', async () => {
+        const tagged = tool('tagged_tool', {
+          description: 'Takes lowercase tags and a count.',
+          input: z.object({
+            tags: z
+              .array(
+                z
+                  .string()
+                  .refine((v) => v === v.toLowerCase(), 'Use lowercase')
+                  .describe('Tag.'),
+              )
+              .describe('Tags.'),
+            n: z.number().describe('N.'),
+          }),
+          output: ok,
+          handler: pass,
+        });
+
+        const result = await reject(tagged, { tags: ['a', 'B', 'C'], n: 'x' });
+
+        expect(hint(result)).toBe(
+          'tags.1: Use lowercase. tags.2: Use lowercase. Send n as a number, not a string.',
+        );
+      });
+    });
+
+    // ---------------------------------------------------------------------
+    // #492 — a one-or-many union renders the surviving branch under its path
+    // ---------------------------------------------------------------------
+
+    describe('one-or-many union (#492)', () => {
+      const Item = z.object({ name: z.string().describe('Name.') }).describe('Item.');
+
+      const oneOrMany = tool('items', {
+        description: 'One item or a list of items.',
+        input: z.object({
+          items: z.union([z.array(Item).min(1).describe('List.'), Item]).describe('Items.'),
+        }),
+        output: ok,
+        handler: pass,
+      });
+
+      const listOnly = tool('items', {
+        description: 'A list of items.',
+        input: z.object({ items: z.array(Item).min(1).describe('List.') }),
+        output: ok,
+        handler: pass,
+      });
+
+      const ids = tool('ids_tool', {
+        description: 'One ID or a list of IDs.',
+        input: z.object({
+          ids: z.union([z.string(), z.array(z.string())]).describe('IDs.'),
+        }),
+        output: ok,
+        handler: pass,
+      });
+
+      const text = (result: HandlerResult) => (firstBlock(result) as { text: string }).text;
+
+      it('renders a list element’s field error byte-identically to a list-only field', async () => {
+        const args = { items: [{ name: 'a' }, { name: true }] };
+        const union = await reject(oneOrMany, args);
+        const list = await reject(listOnly, args);
+
+        expect(envelope(union).message).toBe(envelope(list).message);
+        expect(hint(union)).toBe(hint(list));
+        expect(text(union)).toBe(
+          'Error: Input validation error: Invalid arguments for tool items: ' +
+            'items.1.name: Invalid input: expected string, received boolean\n\n' +
+            'Recovery: Send items.1.name as a string, not a boolean.\n\n' +
+            '(reason invalid_arguments)',
+        );
+      });
+
+      it('asks for a field missing from a list element', async () => {
+        const result = await reject(oneOrMany, { items: [{ name: 'a' }, {}] });
+
+        expect(detail(result, 'items')).toBe(
+          'items.1.name: Invalid input: expected string, received undefined',
+        );
+        expect(hint(result)).toBe('Provide items.1.name.');
+      });
+
+      it('renders the object branch under the field path when it is the deeper one', async () => {
+        const result = await reject(oneOrMany, { items: { name: true } });
+
+        expect(detail(result, 'items')).toBe(
+          'items.name: Invalid input: expected string, received boolean',
+        );
+        expect(hint(result)).toBe('Send items.name as a string, not a boolean.');
+      });
+
+      it('carries every issue of the surviving branch', async () => {
+        const result = await reject(oneOrMany, { items: [{ name: true }, { name: 5 }] });
+
+        expect(detail(result, 'items')).toBe(
+          'items.0.name: Invalid input: expected string, received boolean, ' +
+            'items.1.name: Invalid input: expected string, received number',
+        );
+        expect(hint(result)).toBe(
+          'Send items.0.name as a string, not a boolean. ' +
+            'Send items.1.name as a string, not a number.',
+        );
+      });
+
+      it('renders a scalar one-or-many field’s element under its index', async () => {
+        const result = await reject(ids, { ids: ['a', true] });
+
+        expect(detail(result, 'ids_tool')).toBe(
+          'ids.1: Invalid input: expected string, received boolean',
+        );
+        expect(hint(result)).toBe('Send ids.1 as a string, not a boolean.');
+        expect(text(result)).toContain('\n\nRecovery: Send ids.1 as a string, not a boolean.\n\n');
+      });
+
+      it('resolves a one-or-many union nested inside another', async () => {
+        const nested = tool('nested_one_or_many_tool', {
+          description: 'A list of one-or-many groups, or one item.',
+          input: z.object({
+            items: z
+              .union([
+                z.array(z.union([z.array(Item), Item]).describe('Group.')).describe('Groups.'),
+                Item,
+              ])
+              .describe('Items.'),
+          }),
+          output: ok,
+          handler: pass,
+        });
+
+        const result = await reject(nested, { items: [[{ name: 'a' }, { name: true }]] });
+
+        expect(detail(result, 'nested_one_or_many_tool')).toBe(
+          'items.0.1.name: Invalid input: expected string, received boolean',
+        );
+        expect(hint(result)).toBe('Send items.0.1.name as a string, not a boolean.');
+      });
+
+      it('resolves a one-or-many field inside a list element', async () => {
+        const grouped = tool('grouped_tool', {
+          description: 'Groups, each with one member or many.',
+          input: z.object({
+            groups: z
+              .array(
+                z
+                  .object({
+                    members: z.union([z.array(Item), Item]).describe('Members.'),
+                  })
+                  .describe('Group.'),
+              )
+              .describe('Groups.'),
+          }),
+          output: ok,
+          handler: pass,
+        });
+
+        const result = await reject(grouped, {
+          groups: [{ members: { name: 'a' } }, { members: [{ name: 'b' }, { name: 5 }] }],
+        });
+
+        expect(detail(result, 'grouped_tool')).toBe(
+          'groups.1.members.1.name: Invalid input: expected string, received number',
+        );
+        expect(hint(result)).toBe('Send groups.1.members.1.name as a string, not a number.');
+      });
+
+      it('lifts the one branch a blank sentinel leaves when it fails below its root', async () => {
+        const blankOrItem = tool('blank_or_item_tool', {
+          description: 'An item, or blank for none.',
+          input: z.object({ note: z.union([z.literal(''), Item]).describe('Item, or blank.') }),
+          output: ok,
+          handler: pass,
+        });
+
+        const result = await reject(blankOrItem, { note: { name: 5 } });
+
+        expect(detail(result, 'blank_or_item_tool')).toBe(
+          'note.name: Invalid input: expected string, received number',
+        );
+        expect(hint(result)).toBe('Send note.name as a string, not a number.');
+      });
+
+      it('drops the root-type branch but keeps `or` when several branches fail below their roots', async () => {
+        const manyShapes = tool('many_shapes_tool', {
+          description: 'Strings, numbers, or one string.',
+          input: z.object({
+            x: z.union([z.array(z.string()), z.array(z.number()), z.string()]).describe('Values.'),
+          }),
+          output: ok,
+          handler: pass,
+        });
+
+        const result = await reject(manyShapes, { x: [true] });
+
+        expect(detail(result, 'many_shapes_tool')).toBe(
+          'x: 0: Invalid input: expected string, received boolean or ' +
+            '0: Invalid input: expected number, received boolean',
+        );
+      });
+
+      it('keeps the `or` rendering when every branch fails at its root', async () => {
+        const result = await reject(oneOrMany, { items: 'x' });
+
+        expect(detail(result, 'items')).toBe(
+          'items: Invalid input: expected array, received string or ' +
+            'Invalid input: expected object, received string',
+        );
+        expect(hint(result)).toBe(
+          'items: Invalid input: expected array, received string or ' +
+            'Invalid input: expected object, received string',
+        );
+        expect(text(result)).not.toContain('Recovery:');
+      });
+
+      it('leaves data.issues one invalid_union issue with the branch issues under errors', async () => {
+        const args = { items: [{ name: 'a' }, { name: true }] };
+        const result = await reject(oneOrMany, args);
+        const issues = envelope(result).data?.issues as Array<{
+          code: string;
+          errors: Array<Array<{ path: PropertyKey[] }>>;
+          path: PropertyKey[];
+        }>;
+
+        expect(issues).toEqual(oneOrMany.input.safeParse(args).error?.issues);
+        expect(issues).toHaveLength(1);
+        expect(issues[0]).toMatchObject({ code: 'invalid_union', path: ['items'] });
+        expect(issues[0]?.errors[0]?.[0]?.path).toEqual([1, 'name']);
+      });
+    });
+
+    // ---------------------------------------------------------------------
+    // #566 — an unknown key in a nested strict object
+    // ---------------------------------------------------------------------
+
+    describe('an unknown key in a nested strict object (#566)', () => {
+      const Item = z
+        .object({ name: z.string().describe('Name.') })
+        .strict()
+        .describe('Item.');
+
+      interface TreeNode {
+        children?: TreeNode[] | undefined;
+        label: string;
+      }
+      const Tree: z.ZodType<TreeNode> = z.lazy(() =>
+        z
+          .object({
+            label: z.string().describe('Label.'),
+            children: z.array(Tree).optional().describe('Child nodes.'),
+          })
+          .strict(),
+      );
+
+      const nestedStrict = tool('nested_strict_tool', {
+        description: 'Takes strict nested objects at several depths.',
+        input: z.object({
+          query: z.string().describe('Query.'),
+          opts: z
+            .object({ a: z.string().describe('A.') })
+            .strict()
+            .optional()
+            .describe('Options.'),
+          items: z.array(Item).optional().describe('Items.'),
+          labels: z.record(z.string(), Item).optional().describe('Items by label.'),
+          oneOrMany: z
+            .union([z.array(Item), Item])
+            .optional()
+            .describe('One item or several.'),
+          filter: z
+            .discriminatedUnion('kind', [
+              z
+                .object({ kind: z.literal('a').describe('A.'), x: z.number().describe('X.') })
+                .strict(),
+              z
+                .object({ kind: z.literal('b').describe('B.'), y: z.number().describe('Y.') })
+                .strict(),
+            ])
+            .optional()
+            .describe('Filter.'),
+          tree: Tree.optional().describe('A tree of labels.'),
+          empty: z.object({}).strict().optional().describe('Accepts no keys.'),
+          pair: z
+            .intersection(
+              z.object({ a: z.string().describe('A.') }).strict(),
+              z.object({ b: z.string().describe('B.') }).strict(),
+            )
+            .optional()
+            .describe('An intersection of two strict objects.'),
+        }),
+        output: ok,
+        handler: pass,
+      });
+
+      const byMode = tool('nested_strict_union_root', {
+        description: 'Looks a record up, with per-mode strict options.',
+        input: z.discriminatedUnion('mode', [
+          z.object({
+            mode: z.literal('byId').describe('By ID.'),
+            id: z.string().describe('Record ID.'),
+            opts: z
+              .object({ exact: z.boolean().describe('Exact.') })
+              .strict()
+              .optional()
+              .describe('ID options.'),
+          }),
+          z.object({
+            mode: z.literal('byName').describe('By name.'),
+            name: z.string().describe('Name.'),
+            opts: z
+              .object({ fuzzy: z.boolean().describe('Fuzzy.') })
+              .strict()
+              .optional()
+              .describe('Name options.'),
+          }),
+        ]),
+        output: ok,
+        handler: pass,
+      });
+
+      const text = (result: HandlerResult) => (firstBlock(result) as { text: string }).text;
+
+      it('names the full path and the nested object’s own keys', async () => {
+        const result = await reject(nestedStrict, { query: 'x', opts: { a: 'x', b: 1 } });
+
+        expect(detail(result, 'nested_strict_tool')).toBe('opts: Unrecognized key: "b"');
+        expect(hint(result)).toBe('Unknown key opts.b. opts accepts: a.');
+        expect(text(result)).toBe(
+          'Error: Input validation error: Invalid arguments for tool nested_strict_tool: ' +
+            'opts: Unrecognized key: "b"\n\n' +
+            'Recovery: Unknown key opts.b. opts accepts: a.\n\n' +
+            '(reason invalid_arguments)',
+        );
+      });
+
+      it('names every unknown key of one nested object', async () => {
+        const result = await reject(nestedStrict, { query: 'x', opts: { a: 'x', b: 1, c: 2 } });
+
+        expect(hint(result)).toBe('Unknown keys opts.b, opts.c. opts accepts: a.');
+      });
+
+      it('names a list element’s path and the element object’s keys', async () => {
+        const result = await reject(nestedStrict, {
+          query: 'x',
+          items: [{ name: 'a' }, { name: 'b', b: 1 }],
+        });
+
+        expect(hint(result)).toBe('Unknown key items.1.b. items.1 accepts: name.');
+      });
+
+      it('resolves a record value', async () => {
+        const result = await reject(nestedStrict, {
+          query: 'x',
+          labels: { first: { name: 'a', extra: true } },
+        });
+
+        expect(hint(result)).toBe('Unknown key labels.first.extra. labels.first accepts: name.');
+      });
+
+      it('resolves through a union branch lifted under #492', async () => {
+        const result = await reject(nestedStrict, {
+          query: 'x',
+          oneOrMany: [{ name: 'a' }, { name: 'b', x: 1 }],
+        });
+
+        expect(detail(result, 'nested_strict_tool')).toBe('oneOrMany.1: Unrecognized key: "x"');
+        expect(hint(result)).toBe('Unknown key oneOrMany.1.x. oneOrMany.1 accepts: name.');
+      });
+
+      it('resolves the variant a nested discriminated union selected', async () => {
+        const result = await reject(nestedStrict, {
+          query: 'x',
+          filter: { kind: 'b', y: 1, x: 2 },
+        });
+
+        expect(hint(result)).toBe('Unknown key filter.x. filter accepts: kind, y.');
+      });
+
+      it("resolves against a discriminated-union root's selected variant", async () => {
+        const result = await reject(byMode, {
+          mode: 'byName',
+          name: 'x',
+          opts: { fuzzy: true, exact: true },
+        });
+
+        expect(hint(result)).toBe('Unknown key opts.exact. opts accepts: fuzzy.');
+      });
+
+      it('resolves a recursive schema several levels down', async () => {
+        const result = await reject(nestedStrict, {
+          query: 'x',
+          tree: {
+            label: 'root',
+            children: [{ label: 'a' }, { label: 'b', children: [{ label: 'c', colour: 'red' }] }],
+          },
+        });
+
+        expect(hint(result)).toBe(
+          'Unknown key tree.children.1.children.0.colour. ' +
+            'tree.children.1.children.0 accepts: label, children.',
+        );
+      });
+
+      it('leaves the accepted list out when the nested object declares no keys', async () => {
+        const result = await reject(nestedStrict, { query: 'x', empty: { b: 1 } });
+
+        expect(hint(result)).toBe('Unknown key empty.b.');
+      });
+
+      it('leaves the accepted list out when the path does not resolve to one object', async () => {
+        // Zod reports a key both strict sides refuse; no single object owns it.
+        const result = await reject(nestedStrict, { query: 'x', pair: { a: 'x', b: 'y', c: 1 } });
+
+        expect(detail(result, 'nested_strict_tool')).toBe('pair: Unrecognized key: "c"');
+        expect(hint(result)).toBe('Unknown key pair.c.');
+      });
+
+      it('keeps the root sentence for an unknown root key beside a nested one', async () => {
+        const result = await reject(nestedStrict, { query: 'x', salt: 1, opts: { a: 'x', b: 1 } });
+
+        // Zod reports the nested object's issue before the root's own.
+        expect(hint(result)).toBe(
+          'Unknown key opts.b. opts accepts: a. Unknown key salt. This tool accepts: query, ' +
+            'opts, items, labels, oneOrMany, filter, tree, empty, pair.',
         );
       });
     });
@@ -1176,7 +1775,7 @@ describe('createToolHandler', () => {
         );
       });
 
-      it('drops the line when the message only adds the field path the hint lacks', async () => {
+      it('drops the line when a field-level refinement hint restates its path and message', async () => {
         const result = await reject(tokenProbe, { query: 'two words' });
 
         expect(rendered(result as CallToolResult)).not.toContain('Recovery:');
@@ -1184,7 +1783,7 @@ describe('createToolHandler', () => {
           'query: Use a single token; spaces are not supported.',
         );
         expect(envelope(result).data?.recovery?.hint).toBe(
-          'Use a single token; spaces are not supported.',
+          'query: Use a single token; spaces are not supported.',
         );
       });
 
@@ -1224,7 +1823,9 @@ describe('createToolHandler', () => {
           'Unknown key salt. This tool accepts: query, limit.',
         ],
         ['a missing required field', {}, 'Provide query.'],
-        ['a wrong type', { query: 1 }, 'Send query as a string, not a number.'],
+        // A boolean, not an integer: an integer at a string field is repaired
+        // before the rejection is built (#487).
+        ['a wrong type', { query: true }, 'Send query as a string, not a boolean.'],
       ])('keeps the line for %s', async (_label, args, hint) => {
         const keeper = tool('keeper_tool', {
           description: 'Searches.',
@@ -1259,9 +1860,9 @@ describe('createToolHandler', () => {
         );
       });
 
-      it('drops the line for a union-branch rejection, whose hint is the message minus the path', async () => {
+      it('drops the line for a union-branch rejection, whose hint restates the message', async () => {
         // Same shape as the field-level refinement above: the hint is the
-        // branch sentence, the message is that sentence behind `court: `.
+        // branch sentence behind `court: `, exactly as the message renders it.
         const courts = tool('union_branch_tool', {
           description: 'Blank or a court code.',
           input: z.object({
@@ -1281,7 +1882,7 @@ describe('createToolHandler', () => {
             'court: Invalid option: expected one of "CJEU"|"GC"\n\n(reason invalid_arguments)',
         );
         expect(envelope(result).data?.recovery?.hint).toBe(
-          'Invalid option: expected one of "CJEU"|"GC"',
+          'court: Invalid option: expected one of "CJEU"|"GC"',
         );
       });
 
@@ -1302,7 +1903,7 @@ describe('createToolHandler', () => {
         const result = await reject(courts, { court: 'bogus' });
 
         expect(rendered(result as CallToolResult)).toContain(
-          '\n\nRecovery: Provide what. Invalid option: expected one of "CJEU"|"GC"\n\n',
+          '\n\nRecovery: Provide what. court: Invalid option: expected one of "CJEU"|"GC".\n\n',
         );
       });
     });
@@ -2086,6 +2687,124 @@ describe('createToolHandler', () => {
         expect(envelope(result).data?.reason).toBe('client_capability_missing');
         expect(envelope(result).message).toContain('served per-request');
         expect(envelope(result).data?.recovery?.hint).toContain('stateful session');
+      });
+
+      it('ends the hint at the reconnect sentence, offering no input fallback (#495)', async () => {
+        const result = await gated({});
+
+        expect(envelope(result).message).toBe(
+          "Cannot request input 'confirm' (elicitation/create): the client on this 2025-era " +
+            'connection did not declare the `elicitation.form` capability',
+        );
+        expect(envelope(result).data?.recovery?.hint).toBe(
+          'Reconnect with a client that declares the `elicitation.form` capability.',
+        );
+      });
+
+      it('ends the per-request hint at the stateful-session sentence (#495)', async () => {
+        const result = await gated(undefined);
+
+        expect(envelope(result).data?.recovery?.hint).toBe(
+          'No client capabilities are visible on a per-request connection, so `elicitation.form` ' +
+            'cannot be requested here. Reconnect over a stateful session whose client declares it.',
+        );
+      });
+
+      describe('fallbackHint (#495)', () => {
+        /** A handler whose arguments can stand in for the elicited answer, and says so. */
+        const nounTool = tool('noun_tool', {
+          description: 'Uses a noun, asking for one when the input omits it.',
+          input: z.object({ noun: z.string().optional().describe('A noun.') }),
+          output: z.object({ noun: z.string().describe('The noun used.') }),
+          handler: (input, ctx) => {
+            if (input.noun) return { noun: input.noun };
+            return ctx.requestInput(
+              {
+                inputRequests: {
+                  noun: inputRequired.elicit({
+                    message: 'I need a noun.',
+                    requestedSchema: z.object({ value: z.string().describe('A noun.') }),
+                  }),
+                },
+              },
+              { fallbackHint: 'Or call again with noun supplied.' },
+            );
+          },
+        });
+
+        async function refuse(declared: ClientCapabilities | undefined): Promise<HandlerResult> {
+          const handler = createToolHandler(
+            nounTool as AnyToolDefinition,
+            services,
+            notifiers,
+            createInputRequiredGate(() => declared),
+          );
+          return await handler({}, makeServerContext());
+        }
+
+        it('appends the fallback sentence after the reconnect sentence on both surfaces', async () => {
+          const result = await refuse({});
+          const hint =
+            'Reconnect with a client that declares the `elicitation.form` capability. ' +
+            'Or call again with noun supplied.';
+
+          expect(envelope(result)).toEqual({
+            code: JsonRpcErrorCode.InvalidRequest,
+            message:
+              "Cannot request input 'noun' (elicitation/create): the client on this 2025-era " +
+              'connection did not declare the `elicitation.form` capability',
+            data: { reason: 'client_capability_missing', recovery: { hint } },
+          });
+          expect((firstBlock(result) as { text: string }).text).toBe(
+            `Error: ${envelope(result).message}\n\nRecovery: ${hint}` +
+              '\n\n(reason client_capability_missing)',
+          );
+        });
+
+        it('appends it to the per-request hint as well', async () => {
+          const result = await refuse(undefined);
+
+          expect(envelope(result).data?.recovery?.hint).toBe(
+            'No client capabilities are visible on a per-request connection, so `elicitation.form` ' +
+              'cannot be requested here. Reconnect over a stateful session whose client declares it. ' +
+              'Or call again with noun supplied.',
+          );
+        });
+
+        it('leaves a servable request untouched — the option only shapes a refusal', async () => {
+          const result = await refuse({ elicitation: { form: {} } });
+
+          expect(result as Record<string, unknown>).toMatchObject({
+            resultType: 'input_required',
+            inputRequests: { noun: { method: 'elicitation/create' } },
+          });
+          expect(JSON.stringify(result)).not.toContain('noun supplied');
+        });
+
+        it('treats an empty fallbackHint as none, leaving no trailing space', async () => {
+          const def = tool('empty_fallback_tool', {
+            description: 'Passes an empty fallback sentence.',
+            input: z.object({}),
+            output: z.object({ ok: z.boolean().describe('ok') }),
+            handler: (_input, ctx) =>
+              ctx.requestInput(
+                { inputRequests: { ask: inputRequired.listRoots() } },
+                { fallbackHint: '' },
+              ),
+          });
+          const handler = createToolHandler(
+            def as AnyToolDefinition,
+            services,
+            notifiers,
+            createInputRequiredGate(() => ({})),
+          );
+
+          const result = await handler({}, makeServerContext());
+
+          expect(envelope(result).data?.recovery?.hint).toBe(
+            'Reconnect with a client that declares the `roots` capability.',
+          );
+        });
       });
 
       it.each([

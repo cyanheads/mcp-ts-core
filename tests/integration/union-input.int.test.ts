@@ -205,7 +205,7 @@ describe('discriminated-union tool input (#142)', () => {
         (result.structuredContent as { error: { data?: Record<string, unknown> } }).error.data,
       ).toMatchObject({
         reason: 'invalid_arguments',
-        recovery: { hint: "Invalid discriminator value. Expected 'byId' | 'byName'" },
+        recovery: { hint: "mode: Invalid discriminator value. Expected 'byId' | 'byName'" },
       });
     });
   });

@@ -55,8 +55,9 @@ toolContractSuite(definition, {
       // The suite has no parse path of its own — it delegates to
       // `runToolContract`, so an argument the schema rejects arrives as the
       // `InvalidParams` envelope a client receives, with no suite-side change.
+      // A boolean, since an integer for `value` is repaired first (#487).
       name: 'inherits the argument-rejection envelope for schema-invalid input',
-      input: { value: 123 } as unknown as { value: string },
+      input: { value: true } as unknown as { value: string },
       code: JsonRpcErrorCode.InvalidParams,
     },
   ],
