@@ -76,7 +76,7 @@ import {
   createToolHandler,
   type HandlerServices,
 } from '@/mcp-server/tools/utils/toolHandlerFactory.js';
-import { logger, type OtelLogRecord } from '@/utils/internal/logger.js';
+import { logger, type OtelLogRecord, setOtelLogSink } from '@/utils/internal/logger.js';
 
 // ---------------------------------------------------------------------------
 // Harness
@@ -123,11 +123,11 @@ const PAYLOAD_PREFIX = 'Tool failure payload: ';
 beforeAll(async () => {
   otContext.setGlobalContextManager(new AlsContextManager());
   await logger.initialize('debug');
-  logger.setOtelLogSink({ emit: (record) => exported.push(record) });
+  setOtelLogSink({ emit: (record) => exported.push(record) });
 });
 
 afterAll(async () => {
-  logger.setOtelLogSink(undefined);
+  setOtelLogSink(undefined);
   await logger.close();
   otContext.disable();
 });

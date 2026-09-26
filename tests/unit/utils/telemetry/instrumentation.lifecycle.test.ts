@@ -60,7 +60,7 @@ vi.mock('@/utils/internal/runtime.js', () => ({
 }));
 
 vi.mock('@/utils/internal/logger.js', () => ({
-  logger: { setOtelLogSink: otelState.setOtelLogSinkSpy },
+  setOtelLogSink: otelState.setOtelLogSinkSpy,
 }));
 
 vi.mock('@opentelemetry/sdk-logs', () => {

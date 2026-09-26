@@ -10,7 +10,7 @@ import { env } from 'cloudflare:workers';
 import { afterEach, describe, expect, it } from 'vitest';
 import { resetConfig } from '@/config/index.js';
 import type { CloudflareBindings } from '@/core/worker.js';
-import { logger, type OtelLogRecord } from '@/utils/internal/logger.js';
+import { type OtelLogRecord, setOtelLogSink } from '@/utils/internal/logger.js';
 import worker from '../fixtures/worker-runtime.fixture.js';
 import { jsonrpc, MCP_HEADERS, parseSseDataFrames } from './wire-helpers.js';
 
@@ -54,7 +54,7 @@ async function callTool(
 /** Captures every record the logger writes, for the duration of one call. */
 function captureRecords(): OtelLogRecord[] {
   const records: OtelLogRecord[] = [];
-  logger.setOtelLogSink({ emit: (record) => records.push(record) });
+  setOtelLogSink({ emit: (record) => records.push(record) });
   // Config is parsed once per isolate; re-read it after the call injects the bindings.
   resetConfig();
   return records;
@@ -63,7 +63,7 @@ function captureRecords(): OtelLogRecord[] {
 const REJECTED_ARGS = { message: 'workerd payload', auth: { apiKey: 'sk-worker-291' } };
 
 afterEach(() => {
-  logger.setOtelLogSink(undefined);
+  setOtelLogSink(undefined);
   // `injectEnvVars` sets bindings on `process.env` but never clears them.
   delete process.env.LOG_TOOL_FAILURE_PAYLOADS;
   resetConfig();

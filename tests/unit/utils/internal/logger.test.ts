@@ -7,7 +7,12 @@
 import fc from 'fast-check';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-import { Logger, type McpLogLevel, sanitizeLogBindings } from '@/utils/internal/logger.js';
+import {
+  Logger,
+  type McpLogLevel,
+  sanitizeLogBindings,
+  setOtelLogSink,
+} from '@/utils/internal/logger.js';
 import { TELEMETRY_LOG_MESSAGES } from '@/utils/internal/telemetryMessages.js';
 
 // Mock pino to avoid file I/O in unit tests
@@ -520,7 +525,7 @@ describe('Logger', () => {
     const sink = { emit: vi.fn() };
 
     afterEach(() => {
-      logger.setOtelLogSink(undefined);
+      setOtelLogSink(undefined);
     });
 
     it('keeps every canonical value in the pino record when extra reuses the name', async () => {
@@ -550,7 +555,7 @@ describe('Logger', () => {
 
     it('keeps every canonical value in the exported OTel record', async () => {
       await logger.initialize('info');
-      logger.setOtelLogSink(sink);
+      setOtelLogSink(sink);
 
       logger.info('canonical: exported', { ...canonical, extra: colliding } as any);
 
@@ -644,12 +649,12 @@ describe('Logger', () => {
         .filter((record) => !String(record.body).startsWith('Logger initialized'));
 
     afterEach(() => {
-      logger.setOtelLogSink(undefined);
+      setOtelLogSink(undefined);
     });
 
     it('emits the message, MCP severity, and bindings of each written record', async () => {
       await logger.initialize('info');
-      logger.setOtelLogSink(sink);
+      setOtelLogSink(sink);
 
       logger.info('otel: plain record', context({ itemId: 'a-1', count: 3 }));
 
@@ -679,7 +684,7 @@ describe('Logger', () => {
       ['emerg', 22],
     ] as const)('maps %s to OTel severity number %i', async (level, severityNumber) => {
       await logger.initialize('debug');
-      logger.setOtelLogSink(sink);
+      setOtelLogSink(sink);
 
       logger[level](`otel: ${level}`, context());
 
@@ -690,7 +695,7 @@ describe('Logger', () => {
 
     it('redacts sensitive fields at every depth, as the pino output does', async () => {
       await logger.initialize('info');
-      logger.setOtelLogSink(sink);
+      setOtelLogSink(sink);
 
       logger.info(
         'otel: secrets',
@@ -710,7 +715,7 @@ describe('Logger', () => {
 
     it('carries an Error as exception.* attributes rather than an err binding', async () => {
       await logger.initialize('info');
-      logger.setOtelLogSink(sink);
+      setOtelLogSink(sink);
       const failure = new TypeError('boom');
 
       logger.error('otel: failure', failure, context());
@@ -726,7 +731,7 @@ describe('Logger', () => {
 
     it('does not emit records the active level filters out', async () => {
       await logger.initialize('warning');
-      logger.setOtelLogSink(sink);
+      setOtelLogSink(sink);
 
       logger.info('otel: below the level', context());
       logger.debug('otel: far below the level', context());
@@ -737,7 +742,7 @@ describe('Logger', () => {
 
     it('does not emit records the rate limiter suppresses', async () => {
       await logger.initialize('info');
-      logger.setOtelLogSink(sink);
+      setOtelLogSink(sink);
 
       for (let i = 0; i < 15; i++) logger.info('otel: storm', context());
 
@@ -747,12 +752,16 @@ describe('Logger', () => {
 
     it('stops emitting once the sink is detached', async () => {
       await logger.initialize('info');
-      logger.setOtelLogSink(sink);
-      logger.setOtelLogSink(undefined);
+      setOtelLogSink(sink);
+      setOtelLogSink(undefined);
 
       logger.info('otel: after detach', context());
 
       expect(emitted()).toEqual([]);
+    });
+
+    it('keeps the sink hook off the published Logger surface', () => {
+      expect('setOtelLogSink' in logger).toBe(false);
     });
   });
 });

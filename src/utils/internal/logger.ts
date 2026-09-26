@@ -342,6 +342,24 @@ function toOtelLogRecord(
   };
 }
 
+/** The OTel Logs API sink every written record is also emitted to, when attached. */
+let otelLogSink: OtelLogSink | undefined;
+
+/**
+ * Attaches (or, with `undefined`, detaches) the OTel Logs API sink that every
+ * record passing the logger's level filter and rate limit is also emitted to.
+ * `initializeOpenTelemetry` attaches it when OTLP log export is configured
+ * and `shutdownOpenTelemetry` detaches it.
+ *
+ * A module function rather than a `Logger` method, so the published `Logger`
+ * type carries no telemetry-lifecycle hook.
+ *
+ * @internal Called by the telemetry lifecycle and tests. Not part of the public API.
+ */
+export function setOtelLogSink(sink: OtelLogSink | undefined): void {
+  otelLogSink = sink;
+}
+
 /**
  * Singleton structured logger backed by Pino with RFC 5424 level semantics.
  *
@@ -388,7 +406,6 @@ export class Logger {
   private pendingRecords: PendingRecord[] = [];
   private droppedPendingRecords = 0;
   private everInitialized = false;
-  private otelLogSink: OtelLogSink | undefined;
   /** Set when the startup probe dropped `interactions.log`, which the startup warning already reported. */
   private interactionSinkDropped = false;
 
@@ -566,18 +583,6 @@ export class Logger {
         additionalContext: { droppedLogFiles: dropped },
       }),
     );
-  }
-
-  /**
-   * Attaches (or, with `undefined`, detaches) the OTel Logs API sink that every
-   * record passing the level filter and rate limit is also emitted to.
-   * `initializeOpenTelemetry` attaches it when OTLP log export is configured
-   * and `shutdownOpenTelemetry` detaches it.
-   *
-   * @internal Called by the telemetry lifecycle. Not part of the public API.
-   */
-  public setOtelLogSink(sink: OtelLogSink | undefined): void {
-    this.otelLogSink = sink;
   }
 
   /**
@@ -928,7 +933,7 @@ export class Logger {
     // runs *after* our `formatters.log` sanitizer. Pre-serializing here would produce
     // an object whose prototype (`pinoErrProto`) trips the sanitizer's plain-object check.
     this.pinoLogger[pinoLevel](error ? { ...bindings, err: error } : bindings, msg);
-    this.otelLogSink?.emit(toOtelLogRecord(level, msg, bindings, error));
+    otelLogSink?.emit(toOtelLogRecord(level, msg, bindings, error));
   }
 
   private logWithError(

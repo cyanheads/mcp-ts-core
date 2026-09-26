@@ -11,7 +11,7 @@ import type { LogRecordProcessor } from '@opentelemetry/sdk-logs';
 import type { NodeSDK } from '@opentelemetry/sdk-node';
 import { config } from '@/config/index.js';
 
-import { logger } from '@/utils/internal/logger.js';
+import { setOtelLogSink } from '@/utils/internal/logger.js';
 import { runtimeCaps } from '@/utils/internal/runtime.js';
 
 /**
@@ -310,7 +310,7 @@ export async function initializeOpenTelemetry(): Promise<void> {
       // `PinoInstrumentation` never sees the framework's `pino` (imported at module
       // load, before `start()`), so the logger forwards its records to the Logs API itself.
       if (loggerProvider) {
-        logger.setOtelLogSink(
+        setOtelLogSink(
           loggerProvider.getLogger(
             config.openTelemetry.serviceName,
             config.openTelemetry.serviceVersion,
@@ -357,7 +357,7 @@ export async function shutdownOpenTelemetry(timeoutMs = 5000): Promise<void> {
   }
 
   let timer: ReturnType<typeof setTimeout> | undefined;
-  logger.setOtelLogSink(undefined);
+  setOtelLogSink(undefined);
   try {
     const shutdownPromise = sdk.shutdown();
     await new Promise<void>((resolve, reject) => {
