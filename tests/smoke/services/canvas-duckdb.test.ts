@@ -703,6 +703,176 @@ describe('canvas · DuckDB round trip', () => {
     expect((caught as McpError).data?.reason).toBe('non_select_statement');
   });
 
+  // Issue #484 — only a missing table is missing_table. Every other catalog
+  // miss on a SELECT-shaped statement is invalid_sql with the binder detail;
+  // the old match named the missing function/type/schema as a table.
+  describe('issue #484 — catalog misses other than a table', () => {
+    async function rejection(run: () => Promise<unknown>): Promise<McpError> {
+      try {
+        await run();
+      } catch (err) {
+        expect(err).toBeInstanceOf(McpError);
+        return err as McpError;
+      }
+      throw new Error('expected the canvas call to reject');
+    }
+
+    it.each([
+      ['scalar function', 'SELECT nosuchfn(1) FROM items484', 'nosuchfn'],
+      ['table function', 'SELECT * FROM nosuchtablefn(3)', 'nosuchtablefn'],
+      ['type', 'SELECT 1::nosuchtype', 'nosuchtype'],
+      ['collation', "SELECT 'a' COLLATE nosuchcoll", 'nosuchcoll'],
+      ['schema', 'SELECT * FROM nosuchschema.items484', 'nosuchschema'],
+    ])('a missing %s is invalid_sql naming it in binderMessage', async (_label, sql, name) => {
+      const instance = await canvas.acquire(undefined, ctx);
+      await instance.registerTable('items484', [{ id: 1 }]);
+
+      const error = await rejection(() => instance.query(sql));
+
+      expect(error.code).toBe(-32007);
+      const data = error.data as { reason?: string; binderMessage?: string; tableName?: string };
+      expect(data.reason).toBe('invalid_sql');
+      expect(data.binderMessage).toContain(name);
+      expect(data).not.toHaveProperty('tableName');
+    });
+
+    it('registerView classifies a missing function the same way', async () => {
+      const instance = await canvas.acquire(undefined, ctx);
+      await instance.registerTable('items484v', [{ id: 1 }]);
+
+      const error = await rejection(() =>
+        instance.registerView('v484', 'SELECT nosuchfn(id) FROM items484v'),
+      );
+
+      expect(error.code).toBe(-32007);
+      expect(error.data?.reason).toBe('invalid_sql');
+    });
+
+    it('a quoted table name with a space is missing_table with the full name', async () => {
+      const instance = await canvas.acquire(undefined, ctx);
+
+      const error = await rejection(() => instance.query('SELECT * FROM "my table"'));
+
+      expect(error.code).toBe(-32001);
+      expect(error.data).toMatchObject({ reason: 'missing_table', tableName: 'my table' });
+      expect(error.message).toContain('"my table"');
+    });
+
+    it.each([
+      ['SELECT * FROM', 'SELECT * FROM gone484'],
+      ['a bare FROM', 'FROM gone484'],
+      ['a WITH query', 'WITH x AS (SELECT * FROM gone484) SELECT * FROM x'],
+      ['a main-qualified name', 'SELECT * FROM main.gone484'],
+    ])('a missing table under %s stays missing_table (#223)', async (_label, sql) => {
+      const instance = await canvas.acquire(undefined, ctx);
+
+      const error = await rejection(() => instance.query(sql));
+
+      expect(error.code).toBe(-32001);
+      expect(error.data).toMatchObject({
+        reason: 'missing_table',
+        tableName: 'gone484',
+        recovery: {
+          hint: "Re-run the tool that produced this table to stage it again, or list the currently staged tables with this server's dataframe-describe tool.",
+        },
+      });
+    });
+
+    it('registerView over a missing table is missing_table', async () => {
+      const instance = await canvas.acquire(undefined, ctx);
+
+      const error = await rejection(() => instance.registerView('v484m', 'SELECT * FROM gone484'));
+
+      expect(error.code).toBe(-32001);
+      expect(error.data).toMatchObject({ reason: 'missing_table', tableName: 'gone484' });
+    });
+
+    // A write or DDL statement naming a table that does not exist fails DuckDB's
+    // prepare with the same catalog text a missing SELECT source does. The
+    // statement is rejected for its shape, so re-staging the table would not help.
+    it.each([
+      ['DROP TABLE', 'DROP TABLE gone484w'],
+      ['DELETE', 'DELETE FROM gone484w'],
+      ['INSERT', 'INSERT INTO gone484w VALUES (1)'],
+      ['UPDATE', 'UPDATE gone484w SET a = 1'],
+      ['ALTER TABLE', 'ALTER TABLE gone484w ADD COLUMN b INTEGER'],
+    ])(
+      '%s against a missing table is non_select_statement, not missing_table',
+      async (_label, sql) => {
+        const instance = await canvas.acquire(undefined, ctx);
+
+        const error = await rejection(() => instance.query(sql));
+
+        expect(error.code).toBe(-32007);
+        expect(error.data).toMatchObject({ reason: 'non_select_statement' });
+        expect(error.data).not.toHaveProperty('tableName');
+      },
+    );
+
+    it('registerView over a DROP of a missing table is non_select_statement', async () => {
+      const instance = await canvas.acquire(undefined, ctx);
+
+      const error = await rejection(() => instance.registerView('v484d', 'DROP TABLE gone484w'));
+
+      expect(error.code).toBe(-32007);
+      expect(error.data).toMatchObject({ reason: 'non_select_statement' });
+    });
+  });
+
+  // DuckDB's FROM-first syntax is a read-only SELECT: it prepares as SELECT and
+  // passes the gate. When one fails to prepare, it is classified like any
+  // other SELECT — the binder detail, not the non-SELECT rejection.
+  describe('FROM-first queries', () => {
+    it.each([
+      ['a bare FROM', 'FROM fromfirst', [{ name: 'alpha' }, { name: 'beta' }]],
+      [
+        'FROM … SELECT',
+        'FROM fromfirst SELECT upper(name) AS up ORDER BY up',
+        [{ up: 'ALPHA' }, { up: 'BETA' }],
+      ],
+    ])('%s passes the gate and returns rows', async (_label, sql, expected) => {
+      const instance = await canvas.acquire(undefined, ctx);
+      await instance.registerTable('fromfirst', [{ name: 'alpha' }, { name: 'beta' }]);
+
+      const result = await instance.query(sql);
+
+      expect(result.rows).toEqual(expected);
+    });
+
+    it('a mistyped column in FROM … SELECT is invalid_sql with the binder detail', async () => {
+      const instance = await canvas.acquire(undefined, ctx);
+      await instance.registerTable('fromfirst_bad', [{ a: 1 }]);
+
+      let caught: unknown;
+      try {
+        await instance.query('FROM fromfirst_bad SELECT nosuch_col');
+      } catch (err) {
+        caught = err;
+      }
+
+      expect(caught).toBeInstanceOf(McpError);
+      const error = caught as McpError;
+      expect(error.code).toBe(-32007);
+      expect(error.data?.reason).toBe('invalid_sql');
+      expect(error.data?.binderMessage).toContain('nosuch_col');
+    });
+
+    it('a FROM-first write is still rejected', async () => {
+      const instance = await canvas.acquire(undefined, ctx);
+      await instance.registerTable('fromfirst_w', [{ a: 1 }]);
+
+      let caught: unknown;
+      try {
+        await instance.query('FROM fromfirst_w SELECT a; DROP TABLE fromfirst_w');
+      } catch (err) {
+        caught = err;
+      }
+
+      expect(caught).toBeInstanceOf(McpError);
+      expect((caught as McpError).data?.reason).toBe('multi_statement');
+    });
+  });
+
   // Issue #224 — denySystemCatalogs: when set, the gate rejects catalog
   // references at the text-scan layer (system_catalog_access). Without the
   // flag, catalog queries still fail at the plan walk, but with a different

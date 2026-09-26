@@ -778,10 +778,9 @@ export class DuckdbProvider implements IDataCanvasProvider {
     // generic scans that pass the operator allowlist, so reject by name first.
     assertNoDeniedFunctions(sql);
 
-    // Layers 2-3: parse and type-check before EXPLAIN.
-    // Fail closed: if extractStatements or prepare(0) throws for a missing-
-    // table binder error, surface NotFound so the agent knows to re-stage.
-    // Any other error is treated as non-SELECT (the existing fail-closed path).
+    // Layers 2-3: parse and type-check before EXPLAIN. Fail closed: a statement
+    // that cannot be parsed or prepared is rejected — as a missing table, an
+    // invalid SELECT, or a non-SELECT (see `prepareFailure`).
     let statementCount: number;
     let statementType: string;
     try {
@@ -794,20 +793,28 @@ export class DuckdbProvider implements IDataCanvasProvider {
           const typeInt = prepared.statementType;
           statementType = duck.StatementType[typeInt] ?? 'UNKNOWN';
         } catch (prepErr) {
-          // DuckDB raises a Catalog/Binder error at prepare time when the
-          // referenced table doesn't exist. Surface a structured NotFound so
-          // the agent knows to re-stage rather than blaming the SQL shape.
-          if (prepErr instanceof Error) {
-            const tableNameMatch = prepErr.message.match(
-              /Table with name (\S+) does not exist|Catalog Error:.*?(\S+) does not exist/i,
-            );
-            if (tableNameMatch) {
-              const tableName = tableNameMatch[1] ?? tableNameMatch[2];
+          // DuckDB raises a Catalog error at prepare time when the referenced
+          // table doesn't exist. Surface a structured NotFound so the agent
+          // knows to re-stage rather than blaming the SQL shape. Only the
+          // table form qualifies: a missing function, table function, type,
+          // collation, or schema is a Catalog error too, but the SQL is what
+          // is wrong, so it falls through to invalid_sql with the binder
+          // detail (#484). A schema miss is phrased "Table with name "s.t"
+          // does not exist because schema …", without the closing `!`. The
+          // name is captured whole, since a quoted one can contain spaces.
+          // A DROP/DELETE/INSERT/UPDATE/ALTER naming a missing table fails
+          // with the same text, but re-staging would not make it pass, so only
+          // a read-shaped statement qualifies; the rest fall to non-SELECT.
+          if (prepErr instanceof Error && isSelectShaped(sql)) {
+            const tableName = prepErr.message.match(
+              /Catalog Error: Table with name (.+?) does not exist!/,
+            )?.[1];
+            if (tableName) {
               throw notFound(
-                `Canvas table ${tableName ? `"${tableName}"` : '(unknown)'} does not exist. The table may have expired, been dropped, or the name may be mistyped.`,
+                `Canvas table "${tableName}" does not exist. The table may have expired, been dropped, or the name may be mistyped.`,
                 {
                   reason: 'missing_table',
-                  ...(tableName && { tableName }),
+                  tableName,
                   recovery: {
                     hint: "Re-run the tool that produced this table to stage it again, or list the currently staged tables with this server's dataframe-describe tool.",
                   },
@@ -1111,11 +1118,13 @@ function escapeSqlString(value: string): string {
 
 /**
  * SELECT-shape probe for prepare-failure classification. A statement that
- * starts with `SELECT` or `WITH` (CTE) but throws at prepare time is an invalid
- * SELECT (unknown column/function/expression), not a non-SELECT statement.
+ * starts with `SELECT`, `WITH` (CTE), or `FROM` (DuckDB's FROM-first form) but
+ * throws at prepare time is an invalid SELECT (missing table, unknown
+ * column/function/expression), not a non-SELECT statement. Only classifies a
+ * failure: a statement that prepares is judged by its statement type.
  */
 function isSelectShaped(sql: string): boolean {
-  return /^\s*(?:select|with)\b/i.test(sql);
+  return /^\s*(?:select|with|from)\b/i.test(sql);
 }
 
 /**
