@@ -169,7 +169,8 @@ export interface FetchWithTimeoutOptions extends Omit<RequestInit, 'signal'> {
    * timeout fires, the fetch is cancelled immediately. An abort whose reason is a
    * `TimeoutError` — `AbortSignal.timeout()`, or an `AbortSignal.any` whose timeout
    * member fired — throws `Timeout` with `data.errorSource: 'FetchSignalTimeout'`,
-   * logged at `error`. Any other abort is the caller going away and throws
+   * logged at `error`, and not retried by `withRetry`'s default predicate, since a
+   * retry would reuse the fired signal. Any other abort is the caller going away and throws
    * `RequestCancelled` — logged at `info`, and never retried by `withRetry`.
    */
   signal?: AbortSignal;
@@ -562,6 +563,7 @@ function withBodyDeadline(
  *   when it expires during the stream.
  * @throws {McpError} `Timeout` with `data.errorSource: 'FetchSignalTimeout'` if the
  *   external signal aborts with a `TimeoutError` reason (a caller-side deadline).
+ *   Outside `withRetry`'s default transient set, like `RequestCancelled`.
  * @throws {McpError} `RequestCancelled` if the request is cancelled via the external
  *   signal for any other reason — likewise from the body read when the cancellation
  *   lands mid-stream. Logged at `info` and outside `withRetry`'s transient set.

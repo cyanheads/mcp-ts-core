@@ -210,6 +210,10 @@ export function parseRetryAfterMs(error: unknown): number | undefined {
  * classification applies. Non-`McpError` throws (raw network errors, unexpected
  * throws) are always assumed transient regardless of the flag.
  *
+ * Two framework shapes are also never retried: a pacer shed
+ * (`data.reason: 'pacer_shed'`) and a caller-side deadline from
+ * `fetchWithTimeout` (`data.errorSource: 'FetchSignalTimeout'`).
+ *
  * **Composing rather than replacing.** {@link RetryOptions.isTransient} replaces
  * this predicate outright, so a caller that wants "the framework default, except
  * this one error" composes off this export instead of mirroring the transient
@@ -238,6 +242,13 @@ export function defaultIsTransient(error: unknown): boolean {
      * again — and that flag on the wire would say the opposite.
      */
     if (error.data?.reason === 'pacer_shed') return false;
+    /**
+     * A caller-side deadline — `fetchWithTimeout`'s external signal aborting
+     * with a `TimeoutError` — has already fired, and every retry would reuse
+     * that aborted signal: the loop could only sleep past the deadline the
+     * caller set. It stays `Timeout` on the wire, where a later call can succeed.
+     */
+    if (error.data?.errorSource === 'FetchSignalTimeout') return false;
     return TRANSIENT_CODES.has(error.code);
   }
   // Non-McpError (raw network errors, unexpected throws) — assume transient

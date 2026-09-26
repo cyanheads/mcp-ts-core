@@ -1004,4 +1004,34 @@ describe('withRetry over fetchWithTimeout — upstream 5xx policy (#323)', () =>
     expect(error.code).toBe(JsonRpcErrorCode.RequestCancelled);
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
+
+  it('keeps a caller-side deadline out of the retry loop', async () => {
+    const deadline = new AbortController();
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockImplementation(
+      (_url, init) =>
+        new Promise((_resolve, reject) => {
+          const signal = init?.signal;
+          if (signal?.aborted) return reject(signal.reason);
+          signal?.addEventListener('abort', () => reject(signal.reason));
+        }),
+    );
+
+    const promise = withRetry(
+      () =>
+        fetchWithTimeout('https://api.example.com/x', 30_000, context, {
+          signal: deadline.signal,
+        }),
+      { baseDelayMs: 10, jitter: 0, maxRetries: 3, operation: 'fetchThing', context },
+    ).catch((e: unknown) => e);
+
+    // The shape `AbortSignal.timeout()` aborts with. Every retry would reuse
+    // the already-fired signal, so the ladder could only sleep past the deadline.
+    deadline.abort(new DOMException('The operation timed out.', 'TimeoutError'));
+    const error = (await promise) as McpError;
+
+    expect(error.code).toBe(JsonRpcErrorCode.Timeout);
+    expect(error.data?.errorSource).toBe('FetchSignalTimeout');
+    expect(error.data).not.toHaveProperty('retryAttempts');
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
 });
