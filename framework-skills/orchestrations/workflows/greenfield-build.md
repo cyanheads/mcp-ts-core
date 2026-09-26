@@ -4,7 +4,7 @@ description: >
   Workflow: scaffold one or more new MCP server projects from `bunx @cyanheads/mcp-ts-core init` through design → build → polish → first public release. Each phase invokes a foundational skill end-to-end; this file is the sequencing and gates, not the procedural detail. Read `../SKILL.md` first for the universal rules and sub-agent strategy.
 metadata:
   author: cyanheads
-  version: "1.2"
+  version: "1.3"
   audience: external
   type: workflow
 ---
@@ -85,6 +85,8 @@ Sub-agent runs `bunx @cyanheads/mcp-ts-core init <name>`, follows the `setup` sk
 ### Phase 2: Initial commit
 Sub-agent verifies `gh repo view --json visibility` returns `PRIVATE` (or has explicit user authorization for public) before push. Tag is `v0.1.0`.
 
+A private repository without GitHub Advanced Security has no code scanning, so the scaffolded `.github/workflows/codeql.yml` fails on every push until the repo is public. Keep the file. GitHub registers the workflow on the first push, and that push already runs it. Right after this push, disable it with `gh workflow disable CodeQL` and delete that failed run with `gh run delete <id>`. It stays disabled through the private checkpoints. Phase 18 turns it back on.
+
 ### Checkpoint commits (Phases 2, 5, 10, 16)
 Plain commits on `main`, pushed to the private repo. They follow `git-wrapup`'s step 3 conventions — grouped by concern, staged and committed by pathspec, one- or two-line bodies — and nothing else from that skill: no version bump, no changelog entry, no release branch or PR. Run end to end, `git-wrapup` bumps the version and, when the project declares a release PR mode, moves the work to `release/<version>` and opens a PR; that belongs to Phase 17 alone. Only Phase 2 tags (`v0.1.0`, annotated, `--cleanup=whitespace`).
 
@@ -115,7 +117,7 @@ Orchestrator-direct mechanical verification per target: `bun run rebuild`, `bun 
 Version bump intent is typically **patch** — v0.1.0 was the scaffold tag; the launch is the first real release at v0.1.1. Runs `git-wrapup` end to end, Bash git only. In release PR mode it pushes `release/<version>` and opens the PR; otherwise nothing is pushed. No tag — Phase 18 merges, tags, pushes `main`, and publishes.
 
 ### Phase 18: Release
-`release-and-publish` never changes repo visibility. When the release is public, the orchestrator makes the repo public before the release runs: scan the full git history (not just tracked files) for secrets and private content, since every commit goes public, then `gh repo edit <owner>/<repo> --visibility public --accept-visibility-change-consequences`. Publishing from a still-private repo leaves the npm repository link, the GitHub Release, and the `.mcpb` download URL unreachable.
+`release-and-publish` never changes repo visibility. When the release is public, the orchestrator makes the repo public before the release runs: scan the full git history (not just tracked files) for secrets and private content, since every commit goes public, then `gh repo edit <owner>/<repo> --visibility public --accept-visibility-change-consequences`. Publishing from a still-private repo leaves the npm repository link, the GitHub Release, and the `.mcpb` download URL unreachable. Right after the flip, before the release PR opens, run `gh workflow enable CodeQL`. The template has no `workflow_dispatch`, so the release PR's `pull_request` event runs the first scan. Wait on that check, then read the PR's open alerts with `gh api 'repos/<owner>/<repo>/code-scanning/alerts?ref=refs/pull/<N>/merge&state=open'`. The Analyze job passes even when alerts are open, so the check conclusion alone proves nothing. Land a real finding as a commit on the release branch before merging.
 
 ## Workflow-specific gotchas
 
@@ -126,12 +128,13 @@ Version bump intent is typically **patch** — v0.1.0 was the scaffold tag; the 
 | 3 | Design gate sub-agents flag style preferences as failures | Gate prompt: "Do NOT flag style preferences or marginal scope suggestions — only structural issues that would cause wasted build effort" |
 | 4 | Sub-agent commits during Phase 1 despite the orchestration override | Phase 1 prompt restates: "Do NOT commit — leave working tree dirty for Phase 2" verbatim |
 | 5 | A checkpoint commit routed through `git-wrapup` end to end bumps the version mid-build, or opens a release PR in release PR mode | Checkpoint commits use `git-wrapup`'s commit conventions only (see "Checkpoint commits"); the full skill runs once, in Phase 17 |
+| 6 | The scaffolded CodeQL workflow fails on every push while the repo is private (no code scanning there) | Disable it after the Phase 2 push and re-enable it after the Phase 18 visibility flip, before the release PR opens (see Phases 2 and 18) |
 
 ## Checklist
 
 - [ ] Pre-flight: targets confirmed, `gh` + `npm` auth verified, gold-standard reference(s) named, API key inventory complete
 - [ ] Phase 1: scaffold + setup run, private repo created, LICENSE present, working tree dirty (no commits)
-- [ ] Phase 2: v0.1.0 commit + annotated tag + push verified per target
+- [ ] Phase 2: v0.1.0 commit + annotated tag + push verified per target; CodeQL workflow disabled while the repo is private
 - [ ] Phase 3: `docs/design.md` authored per target with Decisions Log
 - [ ] Phase 4: design hardened by review pass; gate returns PASS per target
 - [ ] Phase 5: design committed per target
@@ -147,4 +150,4 @@ Version bump intent is typically **patch** — v0.1.0 was the scaffold tag; the 
 - [ ] Phase 15: final-state check — rebuild + devcheck + test:all + lint:packaging green; LICENSE; no TODO/FIXME
 - [ ] Phase 16: pre-launch commit per target
 - [ ] Phase 17: final wrap-up — version bumped, changelog authored, release commit per target (release PR open in release PR mode); no tag
-- [ ] Phase 18: release — repo public first when the release is public (full-history scan clean), published per scope, artifacts verified reachable; field-test issues closed with the version that fixed them
+- [ ] Phase 18: release — repo public first when the release is public (full-history scan clean), CodeQL re-enabled and the release PR's code-scanning alerts read, published per scope, artifacts verified reachable; field-test issues closed with the version that fixed them

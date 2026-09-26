@@ -4,7 +4,7 @@ description: >
   Review an MCP server for common security gaps: LLM-facing surfaces as injection vector (tools, resources, prompts, descriptions), scope blast radius, destructive ops without consent, upstream auth shape, input sinks (URL / path / roots / shell / schema strictness / ReDoS), tenant isolation, leakage through errors and telemetry, unbounded resources, and HTTP-mode deployment surface. Use before a release, after a batch of handler changes, or when the user asks for a security review, audit, or hardening pass. Produces grouped findings and a numbered options list.
 metadata:
   author: cyanheads
-  version: "1.10"
+  version: "1.11"
   audience: external
   type: audit
 ---
@@ -127,7 +127,7 @@ grep -rn "ctx.requestInput\|ctx.inputs" src/mcp-server/tools/definitions/
 - Consent is scoped to the specific target (e.g., record ID rendered in the message), not a generic "proceed?"
 - Any `requestState` carried across rounds is integrity-protected if it influences authorization, resource access, or which target gets mutated. It round-trips through the client and comes back attacker-controlled; the SDK does not sign or verify it.
 - **A consent gate's state is server-issued and single-use.** A client can send `inputResponses` plus a `requestState` of its own on the very FIRST call — honored on 2025-era connections, even from a client that declared no `elicitation` — so a handler that only *compares* client-carried state against a fresh resolution deletes on a forged "accepted" answer without ever prompting. A signed state closes forgery but not replay within its TTL. Keep the confirmed target (plus a content hash, so a same-path swap is caught) in a server-side record keyed by a random id, send only the id, redeem it before anything else in the handler, and refuse an unknown, used, or expired id.
-- **The weak point is answerability, not availability.** `ctx.requestInput` is present on every transport and both protocol eras — the 2025-era shim issues the real `elicitation/create` round trip, the 2026-07-28 client fulfils the embedded request directly. A client that never retries simply leaves the destructive step un-run, which fails safe. Keep `destructiveHint: true` so client-side approval flows still surface the risk, and do not accept "proceed anyway when the round is unavailable" as a fallback — there is no such state to detect.
+- **The weak point is answerability, not availability.** `ctx.requestInput` is present on every transport and both protocol eras — the 2025-era shim issues the real `elicitation/create` round trip, the 2026-07-28 client fulfils the embedded request directly. A client that never retries simply leaves the destructive step un-run, which fails safe. Keep `destructiveHint: true` so client-side approval flows still surface the risk, and do not accept "proceed anyway when the round is unavailable" as a fallback. On a 2025-era connection whose client lacks the capability, `ctx.requestInput` throws `client_capability_missing` inside the handler; catching that to run the side effect is exactly this bypass — let it propagate.
 
 **Smell:** `destructiveHint: true` file with no `ctx.requestInput` in it. Or `ctx.inputs.accepted('confirm')` with no schema argument — the content could be anything. Or a handler that re-issues the same request after a `decline`.
 

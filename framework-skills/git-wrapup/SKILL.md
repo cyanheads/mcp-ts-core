@@ -4,7 +4,7 @@ description: >
   Land working-tree changes as logical commits — the work grouped by concern, topped by a release commit (version bump, changelog, regenerated artifacts). The work commits land first, then the version bump, verification, and the release commit on top. Stops at "committed locally on main" — or, when the project releases through a release PR, at "release branch pushed, PR open". No tag, no push to main, no publish: the release-and-publish skill merges, tags, and ships from here. Distilled from the git_wrapup_instructions protocol.
 metadata:
   author: cyanheads
-  version: "1.26"
+  version: "1.27"
   audience: external
   type: workflow
 ---
@@ -194,15 +194,16 @@ Both scripts are idempotent — safe to run even if nothing changed.
 
 ### 7. Run the verification gate
 
-The stack being shipped must pass verification. Both must succeed:
+The stack being shipped must pass verification. All must succeed:
 
 ```bash
 bun run devcheck
+bun run rebuild
 bun run test:all           # or `bun run test` if no test:all script exists
 bun run test:package       # only if the script exists — NOT part of test:all
 ```
 
-**If either fails, halt.** Do not bypass verification to land the release commit.
+**If any fails, halt.** Do not bypass verification to land the release commit.
 
 The work is already committed by this point, so the fix is a new commit on top of the stack, under step 3's conventions — never `git commit --amend`, never a rebase, reset, or any other rewrite of a commit the stack already carries. Land the fix, then re-run this step. The same holds when the gate passes but leaves the tree dirty: `devcheck` auto-fixes as it runs, and a formatter fix to a file committed in step 3 is a follow-up commit of its own, not something to fold into the release commit.
 
@@ -305,6 +306,7 @@ If the working tree isn't clean or the release commit isn't at HEAD, something w
 - [ ] `CHANGELOG.md` rollup regenerated (`bun run changelog:build`)
 - [ ] `docs/tree.md` regenerated if structure changed (`bun run tree`)
 - [ ] `bun run devcheck` passes
+- [ ] `bun run rebuild` succeeds
 - [ ] `bun run test:all` (or `test`) passes
 - [ ] `bun run test:package` passes, when the project defines it — it guards the public-export manifest and `test:all` does not run it
 - [ ] Release PR mode: stack committed on `release/<version>`, never on `main`
