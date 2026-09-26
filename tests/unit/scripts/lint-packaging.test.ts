@@ -2,12 +2,17 @@
  * @fileoverview Tests for scripts/lint-packaging.ts — the `.mcpbignore` static
  * guards (checks 5–7, issues #172/#207), the post-bundle content check
  * (check 8, issues #230/#274), the identity checks (check 9, issue #231), and
- * the plugin marketplace manifests (check 10, issues #240/#393).
+ * the plugin marketplace manifests (check 10, issues #240/#393), and the
+ * npm `files` exclusion of the built bundle (check 13, issue #469).
  * Imports the real implementation; no inline mirror.
  * @module tests/unit/scripts/lint-packaging.test
  */
 
-import { describe, expect, it } from 'vitest';
+import { spawnSync } from 'node:child_process';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { afterEach, describe, expect, it } from 'vitest';
 import {
   AGENT_DOC_ENTRY as CLEAN_AGENT_DOC_ENTRY,
   NATIVE_BINDING_ENTRY as CLEAN_NATIVE_BINDING_ENTRY,
@@ -16,6 +21,7 @@ import {
   AGENT_DOC_ENTRY,
   checkBundleContent,
   checkBundleEntries,
+  checkBundleExcludedFromFiles,
   checkEntrypointIdentity,
   checkManifestIdentity,
   checkManifestUserConfigWiring,
@@ -668,5 +674,88 @@ describe('lint-packaging · README version badge (check 12, #418)', () => {
 
     expect(errors).toHaveLength(1);
     expect(errors[0]).toMatch(/not a readable version/);
+  });
+});
+
+describe('lint-packaging · npm files exclude the built bundle (check 13, #469)', () => {
+  const REPO_ROOT = join(import.meta.dirname, '..', '..', '..');
+
+  it('passes the scaffold template files allowlist', () => {
+    const template = JSON.parse(readFileSync(join(REPO_ROOT, 'templates/package.json'), 'utf8'));
+    expect(template.files).toContain('dist/');
+    expect(checkBundleExcludedFromFiles(template.files)).toEqual([]);
+  });
+
+  it('fails a files allowlist that covers dist/ without the exclusion, naming the entry', () => {
+    const errors = checkBundleExcludedFromFiles(['dist/', 'README.md']);
+    expect(errors).toHaveLength(1);
+    expect(errors[0]).toContain('"!dist/*.mcpb"');
+    expect(errors[0]).toContain('package.json');
+  });
+
+  it.each(['dist', 'dist/', './dist/', 'dist/**', 'dist/**/*', 'dist/*'])(
+    'treats %s as covering dist/',
+    (entry) => {
+      expect(checkBundleExcludedFromFiles([entry])).toHaveLength(1);
+      expect(checkBundleExcludedFromFiles([entry, '!dist/*.mcpb'])).toEqual([]);
+    },
+  );
+
+  it('accepts the recursive form of the exclusion', () => {
+    expect(checkBundleExcludedFromFiles(['dist/', '!dist/**/*.mcpb'])).toEqual([]);
+  });
+
+  it('skips a files allowlist that does not cover dist/ wholesale', () => {
+    expect(checkBundleExcludedFromFiles(['dist/**/*.js', 'README.md'])).toEqual([]);
+    expect(checkBundleExcludedFromFiles(['distribution/'])).toEqual([]);
+  });
+
+  it('skips a package.json without a files allowlist', () => {
+    expect(checkBundleExcludedFromFiles(undefined)).toEqual([]);
+  });
+
+  describe('standalone run', () => {
+    const SCRIPT = join(REPO_ROOT, 'scripts/lint-packaging.ts');
+    let dir: string | undefined;
+
+    afterEach(() => {
+      if (dir) rmSync(dir, { recursive: true, force: true });
+      dir = undefined;
+    });
+
+    function project(files: string[], withManifest: boolean): string {
+      dir = mkdtempSync(join(tmpdir(), 'lint-packaging-files-'));
+      writeFileSync(
+        join(dir, 'package.json'),
+        JSON.stringify({ name: 'probe-mcp-server', version: '0.1.0', files }),
+      );
+      if (withManifest) {
+        writeFileSync(join(dir, 'manifest.json'), JSON.stringify({ name: 'probe-mcp-server' }));
+      }
+      return dir;
+    }
+
+    function lint(cwd: string): { code: number; out: string } {
+      const result = spawnSync('bun', ['run', SCRIPT], { cwd, encoding: 'utf8' });
+      return { code: result.status ?? -1, out: `${result.stdout}${result.stderr}` };
+    }
+
+    it('fails a project with manifest.json whose files ship dist/ unfiltered', () => {
+      const { code, out } = lint(project(['dist/'], true));
+      expect(code).toBe(1);
+      expect(out).toContain('"!dist/*.mcpb"');
+    });
+
+    it('passes the same project once files carries the exclusion', () => {
+      const { code, out } = lint(project(['dist/', '!dist/*.mcpb'], true));
+      expect(out).not.toContain('!dist/*.mcpb');
+      expect(code).toBe(0);
+    });
+
+    it('skips the check when manifest.json is absent', () => {
+      const { code, out } = lint(project(['dist/'], false));
+      expect(out).not.toContain('!dist/*.mcpb');
+      expect(code).toBe(0);
+    });
   });
 });

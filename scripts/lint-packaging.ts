@@ -59,6 +59,12 @@
  *      package's headline version on GitHub and npmjs.com and ships in the
  *      tarball, so a half-finished bump is publicly visible. Skipped when the
  *      README, the badge, or the package version is absent (issue #418).
+ *  13. npm `files` excludes the built bundle: when `manifest.json` exists and
+ *      `package.json` `files` covers `dist/` wholesale, it must also carry
+ *      `"!dist/*.mcpb"`. The `bundle` script writes the `.mcpb` into `dist/`,
+ *      so without the entry a release that bundles before publishing ships the
+ *      server and its production dependencies inside the npm tarball
+ *      (issue #469). Skipped when `manifest.json` or `files` is absent.
  *
  * Every check skips cleanly when its input is absent — consumers who deleted
  * `manifest.json` for an HTTP-only deploy, or who haven't built a bundle,
@@ -742,6 +748,33 @@ export function checkReadmeVersionBadge(readme: string, packageVersion?: string)
   ];
 }
 
+/** The `files` entry that keeps the `bundle` script's `dist/<name>.mcpb` out of the npm tarball. */
+const BUNDLE_EXCLUSION = '!dist/*.mcpb';
+
+/**
+ * Check 13: a `files` allowlist that covers `dist/` wholesale must exclude the
+ * `.mcpb` the `bundle` script writes there. npm and Bun both honor `!` entries
+ * in `files`, and both ignore `.npmignore` once `files` is set, so the entry is
+ * the only place the exclusion can live. The caller runs this only when
+ * `manifest.json` exists — a project without one never builds a bundle.
+ */
+export function checkBundleExcludedFromFiles(files: unknown): string[] {
+  if (!Array.isArray(files)) return [];
+  const entries = files.filter((entry): entry is string => typeof entry === 'string');
+
+  const coversDist = entries.some(
+    (entry) => entry.replace(/^\.\//, '').replace(/\/(?:\*\*(?:\/\*)?|\*)?$/, '') === 'dist',
+  );
+  if (!coversDist) return [];
+  if (entries.includes(BUNDLE_EXCLUSION) || entries.includes('!dist/**/*.mcpb')) return [];
+
+  return [
+    `package.json "files" covers dist/ without "${BUNDLE_EXCLUSION}" — the bundle script writes ` +
+      `dist/<name>.mcpb, so a release that bundles before publishing ships it in the npm tarball; ` +
+      `add "${BUNDLE_EXCLUSION}" to "files"`,
+  ];
+}
+
 /** Read `packaging.pluginManifests` from devcheck.config.json; default on. */
 function pluginManifestsEnabled(): boolean {
   const cfg = tryReadJson<{ packaging?: { pluginManifests?: boolean } }>(
@@ -755,7 +788,9 @@ async function main(): Promise<void> {
   const warnings: string[] = [];
   const notes: string[] = [];
 
-  const pkg = tryReadJson<{ name?: string; version?: string }>(resolve('package.json'));
+  const pkg = tryReadJson<{ files?: unknown; name?: string; version?: string }>(
+    resolve('package.json'),
+  );
   const unscopedName = pkg?.name?.split('/').pop();
 
   // ── Manifest-dependent checks (1–4 + manifest identity) ──
@@ -826,6 +861,8 @@ async function main(): Promise<void> {
     if (unscopedName) {
       errors.push(...checkManifestIdentity(manifest, unscopedName));
     }
+
+    errors.push(...checkBundleExcludedFromFiles(pkg?.files));
   } else {
     notes.push('No manifest.json — skipping manifest/server.json alignment checks.');
   }
