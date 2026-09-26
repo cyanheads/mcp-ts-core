@@ -239,6 +239,8 @@ Core config comes from environment variables, validated with Zod. Server-specifi
 | `STORAGE_PROVIDER_TYPE` | `in-memory`, `filesystem`, `supabase`, `cloudflare-d1`/`kv`/`r2` | `in-memory` |
 | `CANVAS_PROVIDER_TYPE` | `none` or `duckdb` (optional peer dependency `@duckdb/node-api`) | `none` |
 | `OTEL_ENABLED` | Enable OpenTelemetry | `false` |
+| `LOG_TOOL_FAILURE_PAYLOADS` | Log each failed tool call's arguments and result, redacted by key name (a secret inside a free-form value is not caught) | `false` |
+| `LOG_TOOL_FAILURE_PAYLOAD_MAX_BYTES` | Cap per logged payload, in UTF-8 bytes | `16384` |
 | `OPENROUTER_API_KEY` | API key for the optional OpenRouter LLM provider (`/services`) | — |
 
 See [CLAUDE.md/AGENTS.md](CLAUDE.md) for the full configuration reference.

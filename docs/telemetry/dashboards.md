@@ -70,7 +70,7 @@ Datadog ingests OTel metrics natively or via the OTel Collector's `datadog` expo
 
 Service filter: `service:mcp-ts-core` (Datadog populates `service` from `service.name`).
 
-The error-rate ratio, here and in the dashboard's "Tool error rate" stat, is failures inside the handler over calls that reached it. A call rejected at argument validation (`-32602`) is in neither series; count those from `mcp.errors.classified` when the caller-facing failure rate is the question.
+The error-rate ratio, here and in the dashboard's "Tool error rate" stat, is failures inside the handler over calls that reached it, caller hang-ups included. A call rejected before the handler ran — argument validation (`-32602`), an inline `auth` refusal (`-32005`/`-32006`) — is in neither series and counts on `mcp.tool.rejections`; the failure rate a caller sees is `(errors + rejections) / (calls + rejections)`, e.g. `(sum(rate(mcp_tool_errors_total[5m])) + sum(rate(mcp_tool_rejections_total[5m]))) / (sum(rate(mcp_tool_calls_total[5m])) + sum(rate(mcp_tool_rejections_total[5m])))`. To leave hang-ups out, filter both call and error series on `mcp_tool_outcome!="cancelled"`.
 
 ### New Relic (NRQL)
 
