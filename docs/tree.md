@@ -1,6 +1,6 @@
 # mcp-ts-core - Directory Structure
 
-Generated on: 2026-09-26 18:10:49
+Generated on: 2026-09-26 19:04:05
 
 ```text
 mcp-ts-core/
@@ -860,6 +860,7 @@ mcp-ts-core/
 │   │   │   ├── husky-pre-commit.test.ts
 │   │   │   ├── lint-mcp.test.ts
 │   │   │   ├── lint-packaging.test.ts
+│   │   │   ├── release-github.test.ts
 │   │   │   └── tree.test.ts
 │   │   ├── services/
 │   │   │   ├── canvas/
