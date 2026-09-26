@@ -30,6 +30,7 @@ import type { AnyResourceDefinition } from '@/mcp-server/resources/utils/resourc
 import { createMcpServerInstance } from '@/mcp-server/server.js';
 import type { AnyToolDef } from '@/mcp-server/tools/tool-registration.js';
 import { ToolRegistry } from '@/mcp-server/tools/tool-registration.js';
+import { getDisabledMetadata } from '@/mcp-server/tools/utils/disabled-tool.js';
 import type { InputHandlingOptions } from '@/mcp-server/tools/utils/inputPrevalidation.js';
 import { initHeartbeatMetrics } from '@/mcp-server/transports/heartbeat.js';
 import { initSessionMetrics } from '@/mcp-server/transports/http/sessionStore.js';
@@ -814,12 +815,24 @@ export async function createApp<TSupabaseClient extends object = SupabaseClientH
   // --- Optional forced-GC pressure loop (issue #50 mitigation) ---
   const stopGcPressure = startGcPressureLoop(config.mcpGcPressureIntervalMs);
 
+  // `definitionCounts` counts every tool on purpose (the landing page renders
+  // disabled ones); this line reports what `tools/list` will serve.
+  const registeredTools: string[] = [];
+  const disabledTools: string[] = [];
+  for (const def of options.tools ?? []) {
+    (getDisabledMetadata(def) ? disabledTools : registeredTools).push(def.name);
+  }
+  const disabledNote =
+    disabledTools.length > 0
+      ? ` (+${disabledTools.length} disabled: ${disabledTools.join(', ')})`
+      : '';
   logger.info(
-    `Core services constructed — ${definitionCounts.tools} tool(s), ${definitionCounts.resources} resource(s), ${definitionCounts.prompts} prompt(s). Storage: ${config.storage.providerType}.`,
+    `Core services constructed — ${registeredTools.length} tool(s)${disabledNote}, ${definitionCounts.resources} resource(s), ${definitionCounts.prompts} prompt(s). Storage: ${config.storage.providerType}.`,
     requestContextService.createRequestContext({
       operation: 'ServerInit',
       additionalContext: {
-        tools: (options.tools ?? []).map((t) => t.name),
+        tools: registeredTools,
+        ...(disabledTools.length > 0 && { disabledTools }),
         resources: (options.resources ?? []).map((r) => r.name ?? r.uriTemplate),
         prompts: (options.prompts ?? []).map((p) => p.name),
       },

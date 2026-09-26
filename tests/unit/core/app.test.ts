@@ -356,8 +356,11 @@ vi.mock('@/utils/telemetry/trace.js', () => ({
   runDetached: <T>(fn: () => T): T => fn(),
 }));
 
+import { z } from 'zod';
+
 import { composeServices, createApp } from '@/core/app.js';
 import { resource } from '@/mcp-server/resources/utils/resourceDefinition.js';
+import { disabledTool, tool } from '@/mcp-server/tools/utils/toolDefinition.js';
 import { JsonRpcErrorCode } from '@/types-global/errors.js';
 
 describe('core/app', () => {
@@ -934,6 +937,92 @@ describe('core/app', () => {
       expect.anything(),
       expect.objectContaining({ operation: 'ServerShutdown' }),
     );
+  });
+
+  describe('ServerInit startup line', () => {
+    const makeTool = (name: string) =>
+      tool(name, {
+        description: `Tool ${name}.`,
+        input: z.object({}),
+        output: z.object({ ok: z.boolean().describe('Always true.') }),
+        handler: () => ({ ok: true }),
+      });
+    const serverInitCall = () =>
+      mockLogger.info.mock.calls.find(
+        ([, context]) => (context as { operation?: string })?.operation === 'ServerInit',
+      );
+
+    it('reads exactly as before when no tool is disabled', async () => {
+      const handle = await createApp({ tools: [makeTool('alpha'), makeTool('beta')] });
+
+      const [message, context] = serverInitCall() ?? [];
+      expect(message).toBe(
+        'Core services constructed — 2 tool(s), 0 resource(s), 0 prompt(s). Storage: in-memory.',
+      );
+      expect((context as { extra: Record<string, unknown> }).extra).toEqual({
+        prompts: [],
+        resources: [],
+        tools: ['alpha', 'beta'],
+      });
+      await handle.shutdown();
+    });
+
+    it('counts and lists a disabled tool apart from the registered ones', async () => {
+      const spanAttributes = new Map<string, unknown>();
+      const span = {
+        setAttribute: vi.fn((key: string, value: unknown) => spanAttributes.set(key, value)),
+      };
+      // The startup span and its nested transport span.
+      mockWithSpan
+        .mockImplementationOnce(async (_name, fn) => await fn(span as never))
+        .mockImplementationOnce(async (_name, fn) => await fn(span as never));
+
+      const handle = await createApp({
+        tools: [
+          makeTool('alpha'),
+          disabledTool(makeTool('gated'), { reason: 'Writes are off.' }),
+          makeTool('beta'),
+        ],
+      });
+
+      const [message, context] = serverInitCall() ?? [];
+      expect(message).toBe(
+        'Core services constructed — 2 tool(s) (+1 disabled: gated), 0 resource(s), 0 prompt(s). Storage: in-memory.',
+      );
+      expect((context as { extra: Record<string, unknown> }).extra).toMatchObject({
+        disabledTools: ['gated'],
+        tools: ['alpha', 'beta'],
+      });
+      // The manifest and the startup span keep counting every definition.
+      expect(MockTransportManager).toHaveBeenCalledWith(
+        mockConfig,
+        mockLogger,
+        expect.any(Function),
+        expect.objectContaining({ definitionCounts: { prompts: 0, resources: 0, tools: 3 } }),
+        expect.anything(),
+      );
+      expect(spanAttributes.get('mcp.server.tools_count')).toBe(3);
+      await handle.shutdown();
+    });
+
+    it('reports zero registered tools when every tool is disabled', async () => {
+      const handle = await createApp({
+        tools: [
+          disabledTool(makeTool('one'), { reason: 'Off.' }),
+          disabledTool(makeTool('two'), { reason: 'Off.' }),
+        ],
+      });
+
+      const [message, context] = serverInitCall() ?? [];
+      expect(message).toBe(
+        'Core services constructed — 0 tool(s) (+2 disabled: one, two), 0 resource(s), 0 prompt(s). Storage: in-memory.',
+      );
+      expect((context as { extra: Record<string, unknown> }).extra).toMatchObject({
+        disabledTools: ['one', 'two'],
+        tools: [],
+      });
+      await handle.shutdown();
+    });
   });
 
   it('does not suppress colors when transport is http and stdout is a TTY', async () => {
