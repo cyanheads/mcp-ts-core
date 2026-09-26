@@ -4,6 +4,7 @@
  * @module src/linter/rules/tool-rules
  */
 
+import { scanHeaderDesignations } from '@/mcp-server/tools/utils/headerParam.js';
 import { foldArgumentKey } from '@/mcp-server/tools/utils/inputPrevalidation.js';
 import { inputVariants } from '@/mcp-server/tools/utils/schemaShape.js';
 import type { LintDiagnostic } from '../types.js';
@@ -154,7 +155,8 @@ export function lintToolDefinition(
  * Case-folding uses {@link foldArgumentKey}, the same fold the rewrite applies.
  * On a discriminated-union root, every variant's keys count as declared: a
  * rewrite resolves against the selected variant, so an alias naming a key no
- * variant declares can never fire.
+ * variant declares can never fire. Nor can one onto a `headerParam`-designated
+ * key (#569): the rewrite never targets a header-mirrored field.
  */
 export function lintInputAliases(
   aliases: unknown,
@@ -182,6 +184,7 @@ export function lintInputAliases(
   for (const variant of inputVariants(input)) {
     for (const key of Object.keys(variant.shape)) declared.add(key);
   }
+  const headerKeys = headerDesignatedRootKeys(input);
 
   const diagnostics: LintDiagnostic[] = [];
 
@@ -236,6 +239,19 @@ export function lintInputAliases(
       );
     }
 
+    const header = headerKeys.get(target);
+    if (header !== undefined) {
+      diagnostics.push(
+        diagnostic(
+          `Tool '${definitionName}' aliases '${alias}' to '${target}', which is designated ` +
+            `headerParam(…, '${header}') and mirrored in the Mcp-Param-${header} request header. ` +
+            `The alias stage never rewrites onto a header-mirrored field — the SDK checks that ` +
+            `header against the body the caller sent — so the alias never fires. Remove the ` +
+            `alias, or drop the header designation.`,
+        ),
+      );
+    }
+
     const fold = foldArgumentKey(alias);
     const shadowed = (declaredByFold.get(fold) ?? []).filter((key) => key !== target);
     if (shadowed.length > 0) {
@@ -266,6 +282,29 @@ export function lintInputAliases(
   }
 
   return diagnostics;
+}
+
+/**
+ * Root keys designated with `headerParam`, each mapped to its header name —
+ * read by the same scan the runtime takes its rewrite exclusions from.
+ *
+ * Scanned variant by variant: a discriminated-union root advertises every field
+ * under `oneOf`, where no designation is valid, so a whole-root scan reports the
+ * `header-param-designation` fault and no targets. Each variant scanned alone
+ * still shows which of its keys the author meant to mirror, and an alias onto
+ * one is reported beside that fault.
+ */
+function headerDesignatedRootKeys(input: unknown): ReadonlyMap<string, string> {
+  const designated = new Map<string, string>();
+  for (const variant of inputVariants(input)) {
+    const scan = scanHeaderDesignations(variant);
+    if (!scan?.valid) continue;
+    for (const { headerName, path } of scan.designations) {
+      const [step] = path;
+      if (path.length === 1 && step?.kind === 'property') designated.set(step.key, headerName);
+    }
+  }
+  return designated;
 }
 
 /** Validates that auth scopes are well-formed (array of non-empty strings). */

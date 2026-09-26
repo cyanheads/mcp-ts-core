@@ -14,6 +14,7 @@ import {
 } from '@/linter/rules/tool-rules.js';
 import { validateDefinitions } from '@/linter/validate.js';
 import { headerParam } from '@/mcp-server/tools/utils/headerParam.js';
+import { tool } from '@/mcp-server/tools/utils/toolDefinition.js';
 import { JsonRpcErrorCode } from '@/types-global/errors.js';
 
 // ---------------------------------------------------------------------------
@@ -576,5 +577,172 @@ describe('lintToolDefinition — inputAliases', () => {
     expect(
       report.errors.some((d) => d.message.includes('api-linter/SKILL.md#input-alias-conflict')),
     ).toBe(true);
+  });
+
+  describe('output that must not move', () => {
+    const searchWithMax = z.object({
+      query: z.string().describe('Search query'),
+      maxResults: z.number().optional().describe('Maximum results'),
+    });
+
+    it.each([
+      ['no aliases', {}, []],
+      ['aliases resolving to one key', { inputAliases: { search_query: 'query', q: 'query' } }, []],
+      [
+        'an alias beside a header-designated key it does not target',
+        {
+          input: z.object({
+            query: z.string().describe('Search query'),
+            regionCode: headerParam(z.string(), 'Region').describe('Region.'),
+          }),
+          inputAliases: { q: 'query' },
+        },
+        [],
+      ],
+      [
+        'an alias equal to a declared key',
+        {
+          input: z.object({
+            query: z.string().describe('Search query'),
+            q: z.string().optional().describe('Short query'),
+          }),
+          inputAliases: { q: 'query' },
+        },
+        [
+          "Tool 'test_tool' declares 'q' as both an input key and an alias for 'query'. A " +
+            'declared key is never rewritten, so the alias can never fire — remove it, or rename ' +
+            'the input key.',
+          "Tool 'test_tool' aliases 'q' to 'query', but 'q' is a case-style variant of q. Alias " +
+            'it to the key it spells, or rename it so the two readings cannot disagree.',
+        ],
+      ],
+      [
+        'a missing target',
+        { inputAliases: { q: 'searchQuery' } },
+        [
+          "Tool 'test_tool' aliases 'q' to 'searchQuery', which is not a declared input key " +
+            '(declared: query). Point the alias at an existing key.',
+        ],
+      ],
+      [
+        'two declared keys folding to one name',
+        {
+          input: z.object({
+            maxResults: z.number().optional().describe('Maximum results'),
+            max_results: z.number().optional().describe('Legacy maximum results'),
+            query: z.string().describe('Search query'),
+          }),
+          inputAliases: { limit: 'query' },
+        },
+        [
+          "Tool 'test_tool' declares maxResults and max_results, which differ only in case style. " +
+            'No alias can resolve between them — rename one, or drop the other and declare it as ' +
+            'an alias of the one you keep.',
+        ],
+      ],
+      [
+        'an alias folding onto another declared key',
+        { input: searchWithMax, inputAliases: { max_results: 'query' } },
+        [
+          "Tool 'test_tool' aliases 'max_results' to 'query', but 'max_results' is a case-style " +
+            'variant of maxResults. Alias it to the key it spells, or rename it so the two ' +
+            'readings cannot disagree.',
+        ],
+      ],
+      [
+        'two aliases folding to one name with different targets',
+        {
+          input: searchWithMax,
+          inputAliases: { 'search-term': 'query', search_term: 'maxResults' },
+        },
+        [
+          "Tool 'test_tool' aliases 'search-term' → 'query' and 'search_term' → 'maxResults', " +
+            'which differ only in case style but name different keys. Pick one target, or spell ' +
+            'the aliases so they are distinguishable.',
+        ],
+      ],
+      [
+        'a non-object inputAliases',
+        { inputAliases: ['query'] },
+        [
+          "Tool 'test_tool' inputAliases must be an object mapping each alias to the declared " +
+            "input key it stands for, e.g. { drug_name: 'drug' }.",
+        ],
+      ],
+      [
+        'a non-string target',
+        { inputAliases: { q: 7 } },
+        [
+          "Tool 'test_tool' inputAliases['q'] must name a declared input key as a non-empty string.",
+        ],
+      ],
+    ])('reports exactly this for %s', (_label, overrides, expected) => {
+      expect(conflicts(overrides)).toEqual(expected);
+    });
+  });
+
+  // #569 — the alias stage never rewrites onto a headerParam-designated field
+  describe('an alias onto a headerParam-designated field (#569)', () => {
+    it('rejects the definition, naming the alias, its target, and the designation', () => {
+      const def = tool('header_alias_probe', {
+        description: 'Probe.',
+        input: z.object({
+          query: z.string().describe('Query.'),
+          regionCode: headerParam(z.string(), 'Region').describe('Region.'),
+        }),
+        inputAliases: { region: 'regionCode' },
+        output: z.object({ ok: z.boolean().describe('ok') }),
+        handler: () => ({ ok: true }),
+      });
+
+      const report = validateDefinitions({ tools: [def] });
+      const aliasErrors = report.errors.filter((d) => d.rule === 'input-alias-conflict');
+
+      expect(report.passed).toBe(false);
+      expect(aliasErrors).toHaveLength(1);
+      expect(aliasErrors[0]?.message).toContain(
+        "Tool 'header_alias_probe' aliases 'region' to 'regionCode', which is designated " +
+          "headerParam(…, 'Region') and mirrored in the Mcp-Param-Region request header.",
+      );
+      expect(aliasErrors[0]?.message).toContain('api-linter/SKILL.md#input-alias-conflict');
+    });
+
+    it('reports an alias onto a header field inside one discriminated-union variant', () => {
+      const messages = conflicts({
+        input: z.discriminatedUnion('mode', [
+          z.object({
+            mode: z.literal('byRegion').describe('By region.'),
+            regionCode: headerParam(z.string(), 'Region').describe('Region.'),
+          }),
+          z.object({
+            mode: z.literal('byName').describe('By name.'),
+            fullName: z.string().describe('Name.'),
+          }),
+        ]),
+        inputAliases: { region: 'regionCode', name: 'fullName' },
+      });
+
+      expect(messages).toEqual([
+        "Tool 'test_tool' aliases 'region' to 'regionCode', which is designated " +
+          "headerParam(…, 'Region') and mirrored in the Mcp-Param-Region request header. The " +
+          'alias stage never rewrites onto a header-mirrored field — the SDK checks that header ' +
+          'against the body the caller sent — so the alias never fires. Remove the alias, or ' +
+          'drop the header designation.',
+      ]);
+    });
+
+    it('leaves a header designation deeper than the root alone', () => {
+      const messages = conflicts({
+        input: z.object({
+          region: z.string().describe('Region name.'),
+          routing: z
+            .object({ region: headerParam(z.string(), 'Region').describe('Routing region.') })
+            .describe('Routing.'),
+        }),
+        inputAliases: { area: 'region' },
+      });
+
+      expect(messages).toEqual([]);
+    });
   });
 });
