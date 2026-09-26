@@ -6,6 +6,10 @@
 import { type McpRequestContext, McpServer } from '@modelcontextprotocol/server';
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
 import { z } from 'zod';
+import type { AppConfig } from '@/config/index.js';
+import { buildServerManifest } from '@/core/serverManifest.js';
+import { disabledTool } from '@/mcp-server/tools/utils/disabled-tool.js';
+import { headerParam, tool } from '@/mcp-server/tools/utils/toolDefinition.js';
 import { authContext } from '@/mcp-server/transports/auth/lib/authContext.js';
 import type { AuthInfo } from '@/mcp-server/transports/auth/lib/authTypes.js';
 import { createHttpApp } from '@/mcp-server/transports/http/httpTransport.js';
@@ -141,7 +145,10 @@ const initializeBody = (id = 1): string =>
  * A 2026-07-28 request: the three routing headers plus the per-request `_meta`
  * envelope that `isLegacyRequest` classifies as modern.
  */
-const modernToolCall = (toolName: string): { headers: Record<string, string>; body: string } => ({
+const modernToolCall = (
+  toolName: string,
+  value = 'hello',
+): { headers: Record<string, string>; body: string } => ({
   headers: {
     'content-type': 'application/json',
     accept: 'application/json, text/event-stream',
@@ -156,7 +163,7 @@ const modernToolCall = (toolName: string): { headers: Record<string, string>; bo
     method: 'tools/call',
     params: {
       name: toolName,
-      arguments: { value: 'hello' },
+      arguments: { value },
       _meta: {
         'io.modelcontextprotocol/protocolVersion': '2026-07-28',
         'io.modelcontextprotocol/clientInfo': { name: 'test', version: '1.0.0' },
@@ -182,6 +189,15 @@ async function readJsonRpc(response: Response): Promise<Record<string, unknown>>
   const result = frames.find((frame) => frame.id !== undefined);
   if (!result) throw new Error(`No id-carrying SSE frame in: ${text}`);
   return result;
+}
+
+/** Every id-carrying JSON-RPC message in a response — a JSON value or array, or SSE frames. */
+async function readJsonRpcAll(response: Response): Promise<Array<Record<string, unknown>>> {
+  const text = await response.text();
+  const messages: unknown[] = response.headers.get('content-type')?.includes('text/event-stream')
+    ? parseSSEEvents(text).map((event) => JSON.parse(event.data))
+    : [JSON.parse(text)].flat();
+  return (messages as Array<Record<string, unknown>>).filter((message) => message.id !== undefined);
 }
 
 const AUTH_A: AuthInfo = {
@@ -379,6 +395,37 @@ describe('HTTP Transport', () => {
       expect(data.error).toContain('Invalid origin');
     });
 
+    test('refuses a disallowed Origin before the body limit or the parser reads the body', async () => {
+      // The Origin guard is registered ahead of the body-limit guard and the
+      // JSON parse, so an unparseable body from a refused Origin is a 403, not
+      // a 400, and not one byte of it is pulled.
+      await withConfigOverrides({ mcpHttpMaxBodyBytes: 1024 * 1024 }, async () => {
+        const { app } = await buildApp();
+        let pulls = 0;
+        const body = new ReadableStream<Uint8Array>(
+          {
+            pull(controller) {
+              pulls++;
+              controller.enqueue(new TextEncoder().encode('{ "jsonrpc": "2.0", '));
+              controller.close();
+            },
+          },
+          { highWaterMark: 0 },
+        );
+
+        const response = await app.request(ENDPOINT, {
+          method: 'POST',
+          headers: legacyHeaders({ origin: 'http://evil.com' }),
+          body,
+          duplex: 'half',
+        } as RequestInit);
+
+        expect(response.status).toBe(403);
+        expect(pulls).toBe(0);
+        expect(factory).not.toHaveBeenCalled();
+      });
+    });
+
     test('should include credentials in CORS when origin is explicitly configured', async () => {
       const { app } = await buildApp();
 
@@ -508,6 +555,292 @@ describe('HTTP Transport', () => {
       });
 
       expect(response.status).toBe(415);
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // CORS preflight (#571). A browser page can send only the request headers
+  // the preflight lists, so an origin the Origin guard admits is offered every
+  // header a request to this server may carry: the 2025-era set, the
+  // 2026-07-28 standard headers, `Last-Event-ID` for SSE resume, and one
+  // `Mcp-Param-<Name>` per `headerParam` designation on a registered tool. An
+  // origin the guard refuses keeps the 2025-era answer, and learns no
+  // designation names from it.
+  // -------------------------------------------------------------------------
+  describe('CORS preflight', () => {
+    const BASE_ALLOW_HEADERS = 'Content-Type,Authorization,Mcp-Session-Id,MCP-Protocol-Version';
+
+    const preflight = async (app: TestApp, origin: string): Promise<Response> =>
+      await app.request(ENDPOINT, {
+        method: 'OPTIONS',
+        headers: {
+          Origin: origin,
+          'Access-Control-Request-Method': 'POST',
+          'Access-Control-Request-Headers': 'content-type, mcp-protocol-version, mcp-method',
+        },
+      });
+
+    /** Every CORS-relevant part of a preflight answer, as one comparable record. */
+    const corsAnswer = (response: Response): Record<string, string | number | null> => ({
+      status: response.status,
+      allowOrigin: response.headers.get('access-control-allow-origin'),
+      allowCredentials: response.headers.get('access-control-allow-credentials'),
+      allowMethods: response.headers.get('access-control-allow-methods'),
+      allowHeaders: response.headers.get('access-control-allow-headers'),
+      exposeHeaders: response.headers.get('access-control-expose-headers'),
+      vary: response.headers.get('vary'),
+    });
+
+    /** The allowed request headers, lowercased. */
+    const allowedHeaders = (response: Response): string[] =>
+      (response.headers.get('access-control-allow-headers') ?? '')
+        .split(',')
+        .map((header) => header.trim().toLowerCase())
+        .filter(Boolean);
+
+    /** Each allowlist posture, with an origin the Origin guard admits under it. */
+    const admitted = [
+      ['an explicit allowlist', ['http://localhost:3000'], 'http://localhost:3000'],
+      ['no allowlist (loopback only)', [], 'http://localhost:5173'],
+      ["MCP_ALLOWED_ORIGINS='*'", ['*'], 'https://anything.example'],
+    ] as const;
+
+    /** A manifest built from real definitions, one of them carrying `headerParam` designations. */
+    const manifestWithHeaderParams = () =>
+      buildServerManifest({
+        config: {
+          mcpServerName: 'test-mcp-server',
+          mcpServerVersion: '1.0.0',
+          environment: 'testing',
+          mcpTransportType: 'http',
+          mcpHttpEndpointPath: ENDPOINT,
+          mcpSessionMode: 'stateless',
+          mcpAuthMode: 'none',
+        } as AppConfig,
+        tools: [
+          tool('route_lookup', {
+            description: 'Looks a record up on its shard.',
+            input: z.object({
+              query: z.string().describe('Search query.'),
+              routing: z
+                .object({
+                  region: headerParam(z.string(), 'Region').describe('Deployment region.'),
+                  shard: headerParam(z.int(), 'Shard-Id').describe('Shard the record lives on.'),
+                })
+                .describe('Where to route the lookup.'),
+            }),
+            output: z.object({ found: z.boolean().describe('Whether the record exists.') }),
+            handler: () => ({ found: true }),
+          }),
+          tool('region_status', {
+            description: 'Reports a region status.',
+            // Same header as `route_lookup`, differently cased: listed once.
+            input: z.object({ region: headerParam(z.string(), 'region').describe('Region.') }),
+            output: z.object({ up: z.boolean().describe('Whether the region is up.') }),
+            handler: () => ({ up: true }),
+          }),
+          disabledTool(
+            tool('tenant_audit', {
+              description: 'Audits a tenant.',
+              input: z.object({ tenant: headerParam(z.string(), 'Tenant').describe('Tenant.') }),
+              output: z.object({ ok: z.boolean().describe('Audit outcome.') }),
+              handler: () => ({ ok: true }),
+            }),
+            { reason: 'Audits are off in this deployment.' },
+          ),
+        ],
+        resources: [],
+        prompts: [],
+      });
+
+    test('answers an allowlisted origin with the credentialed 2025-era header set', async () => {
+      const { app } = await buildApp();
+
+      const response = await preflight(app, ORIGIN);
+
+      expect(corsAnswer(response)).toMatchObject({
+        status: 204,
+        allowOrigin: ORIGIN,
+        allowCredentials: 'true',
+        allowMethods: 'GET,POST,DELETE,OPTIONS',
+        exposeHeaders: 'Mcp-Session-Id',
+      });
+      expect(allowedHeaders(response)).toEqual(
+        expect.arrayContaining(BASE_ALLOW_HEADERS.toLowerCase().split(',')),
+      );
+    });
+
+    test('answers an origin missing from the allowlist exactly as before', async () => {
+      const { app } = await buildApp(manifestWithHeaderParams());
+
+      const response = await preflight(app, 'http://evil.com');
+
+      expect(corsAnswer(response)).toEqual({
+        status: 204,
+        allowOrigin: null,
+        allowCredentials: 'true',
+        allowMethods: 'GET,POST,DELETE,OPTIONS',
+        allowHeaders: BASE_ALLOW_HEADERS,
+        exposeHeaders: 'Mcp-Session-Id',
+        vary: 'Origin, Access-Control-Request-Headers',
+      });
+    });
+
+    test('answers a non-loopback origin with no allowlist configured with the 2025-era set, varying on Origin', async () => {
+      await withConfigOverrides({ mcpAllowedOrigins: [] }, async () => {
+        const { app } = await buildApp(manifestWithHeaderParams());
+
+        const response = await preflight(app, 'http://evil.example');
+
+        expect(corsAnswer(response)).toEqual({
+          status: 204,
+          allowOrigin: '*',
+          allowCredentials: null,
+          allowMethods: 'GET,POST,DELETE,OPTIONS',
+          allowHeaders: BASE_ALLOW_HEADERS,
+          exposeHeaders: 'Mcp-Session-Id',
+          vary: 'Origin, Access-Control-Request-Headers',
+        });
+      });
+    });
+
+    test.each(admitted)(
+      'allows the 2026-07-28 standard headers Mcp-Method and Mcp-Name (%s)',
+      async (_label, origins, origin) => {
+        await withConfigOverrides({ mcpAllowedOrigins: origins }, async () => {
+          const { app } = await buildApp();
+
+          const response = await preflight(app, origin);
+
+          expect(response.headers.get('access-control-allow-origin')).not.toBeNull();
+          expect(allowedHeaders(response)).toEqual(
+            expect.arrayContaining(['mcp-method', 'mcp-name']),
+          );
+        });
+      },
+    );
+
+    test.each(admitted)(
+      'allows Last-Event-ID for SSE resume (%s)',
+      async (_label, origins, origin) => {
+        await withConfigOverrides({ mcpAllowedOrigins: origins }, async () => {
+          const { app } = await buildApp();
+
+          const response = await preflight(app, origin);
+
+          expect(allowedHeaders(response)).toContain('last-event-id');
+        });
+      },
+    );
+
+    test.each(admitted)(
+      'allows one Mcp-Param-<Name> per headerParam designation on a registered tool (%s)',
+      async (_label, origins, origin) => {
+        await withConfigOverrides({ mcpAllowedOrigins: origins }, async () => {
+          const { app } = await buildApp(manifestWithHeaderParams());
+
+          const params = allowedHeaders(await preflight(app, origin)).filter((header) =>
+            header.startsWith('mcp-param-'),
+          );
+
+          // Nested designations count; a name two tools share is listed once;
+          // a disabled tool is never registered, so its designation is absent.
+          expect(params.sort()).toEqual(['mcp-param-region', 'mcp-param-shard-id']);
+        });
+      },
+    );
+
+    test('allows no Mcp-Param headers when no registered tool designates one', async () => {
+      const { app } = await buildApp();
+
+      const response = await preflight(app, ORIGIN);
+
+      expect(allowedHeaders(response).filter((header) => header.startsWith('mcp-param-'))).toEqual(
+        [],
+      );
+    });
+
+    // Which allow-list a request gets depends on its Origin, and so does the
+    // Origin guard's answer on the MCP endpoint, so every response names Origin
+    // in Vary — otherwise a shared cache can hand one origin's answer to
+    // another. That holds under the wildcard CORS origin (no allowlist, or `*`)
+    // as under an explicit list, merged into whatever Vary the response
+    // already carries.
+    describe('Vary: Origin', () => {
+      /** The response's Vary tokens, lowercased, in order. */
+      const varyTokens = (response: Response): string[] =>
+        (response.headers.get('vary') ?? '')
+          .split(',')
+          .map((token) => token.trim().toLowerCase())
+          .filter(Boolean);
+
+      /** A manifest whose landing page sets its own `Vary: Authorization`. */
+      const authGatedLanding = () => ({
+        ...defaultMeta,
+        landing: { ...defaultMeta.landing, requireAuth: true },
+      });
+
+      /** Each posture whose CORS origin is `*`, with an origin to send under it. */
+      const wildcard = [
+        ['a loopback origin, no allowlist', [], 'http://localhost:5173'],
+        ['a non-loopback origin, no allowlist', [], 'http://evil.example'],
+        ["any origin, MCP_ALLOWED_ORIGINS='*'", ['*'], 'https://anything.example'],
+      ] as const;
+
+      test.each(wildcard)(
+        'a preflight varies on Origin under the wildcard CORS origin (%s)',
+        async (_label, origins, origin) => {
+          await withConfigOverrides({ mcpAllowedOrigins: origins }, async () => {
+            const { app } = await buildApp(manifestWithHeaderParams());
+
+            const response = await preflight(app, origin);
+
+            expect(response.headers.get('access-control-allow-origin')).toBe('*');
+            expect(varyTokens(response)).toEqual(['origin', 'access-control-request-headers']);
+          });
+        },
+      );
+
+      test.each(wildcard)(
+        'a response keeps its own Vary and adds Origin under the wildcard CORS origin (%s)',
+        async (_label, origins, origin) => {
+          await withConfigOverrides({ mcpAllowedOrigins: origins }, async () => {
+            const { app } = await buildApp(authGatedLanding());
+
+            const response = await app.request('/', { method: 'GET', headers: { Origin: origin } });
+
+            expect(response.status).toBe(200);
+            expect(varyTokens(response)).toEqual(['authorization', 'origin']);
+          });
+        },
+      );
+
+      test('the MCP endpoint varies on Origin whether the guard serves or refuses it', async () => {
+        await withConfigOverrides({ mcpAllowedOrigins: [] }, async () => {
+          const { app } = await buildApp();
+          const get = (headers: Record<string, string>) =>
+            app.request(ENDPOINT, { method: 'GET', headers });
+
+          const cli = await get({});
+          const loopback = await get({ Origin: 'http://localhost:5173' });
+          const refused = await get({ Origin: 'http://evil.example' });
+
+          expect([cli.status, loopback.status, refused.status]).toEqual([200, 200, 403]);
+          for (const response of [cli, loopback, refused]) {
+            expect(varyTokens(response)).toEqual(['origin']);
+          }
+        });
+      });
+
+      test('an explicit allowlist varies on Origin once, through Hono', async () => {
+        const { app } = await buildApp(authGatedLanding());
+
+        const preflightResponse = await preflight(app, ORIGIN);
+        const page = await app.request('/', { method: 'GET', headers: { Origin: ORIGIN } });
+
+        expect(varyTokens(preflightResponse)).toEqual(['origin', 'access-control-request-headers']);
+        expect(varyTokens(page)).toEqual(['authorization', 'origin']);
+      });
     });
   });
 
@@ -670,6 +1003,76 @@ describe('HTTP Transport', () => {
       });
     });
 
+    // Id `0` is a legal JSON-RPC id and the first one a zero-based counter
+    // assigns, so a cancellation naming it must reach the handler exactly as
+    // one naming `1` does.
+    test.each([[0], [1]])(
+      'a notifications/cancelled naming request id %i aborts that in-flight request',
+      async (requestId) => {
+        await withStatefulMode(async () => {
+          const started = Promise.withResolvers<void>();
+          const aborted = Promise.withResolvers<'aborted'>();
+          const blockingFactory = vi.fn(async (_ctx: McpRequestContext): Promise<McpServer> => {
+            const server = new McpServer(
+              { name: 'test-mcp-server', version: '1.0.0' },
+              { capabilities: { tools: {} } },
+            );
+            server.registerTool(
+              'block',
+              {
+                description: 'Stays in flight until its request is cancelled.',
+                inputSchema: z.object({}),
+              },
+              async (_args, ctx) => {
+                started.resolve();
+                await new Promise((resolve) =>
+                  ctx.mcpReq.signal.addEventListener('abort', resolve, { once: true }),
+                );
+                aborted.resolve('aborted');
+                return { content: [] };
+              },
+            );
+            return server;
+          });
+          const { app, close } = await createHttpApp(blockingFactory, mockContext, defaultMeta);
+          teardown.push(close);
+          const onSession = legacyHeaders({ 'mcp-session-id': await initialize(app) });
+
+          const call = await app.request(ENDPOINT, {
+            method: 'POST',
+            headers: onSession,
+            body: JSON.stringify({
+              jsonrpc: '2.0',
+              id: requestId,
+              method: 'tools/call',
+              params: { name: 'block', arguments: {} },
+            }),
+          });
+          await started.promise;
+
+          const cancel = await app.request(ENDPOINT, {
+            method: 'POST',
+            headers: onSession,
+            body: JSON.stringify({
+              jsonrpc: '2.0',
+              method: 'notifications/cancelled',
+              params: { requestId, reason: 'caller gave up' },
+            }),
+          });
+          const outcome = await Promise.race([
+            aborted.promise,
+            new Promise<'still running'>((resolve) =>
+              setTimeout(() => resolve('still running'), 1_000),
+            ),
+          ]);
+
+          expect(cancel.status).toBe(202);
+          expect(outcome).toBe('aborted');
+          await call.body?.cancel();
+        });
+      },
+    );
+
     describe('DELETE', () => {
       test('terminates the session and makes it unreachable', async () => {
         await withStatefulMode(async () => {
@@ -781,6 +1184,107 @@ describe('HTTP Transport', () => {
         expect(factory.mock.calls.map((call) => call[0]?.era)).toEqual(['legacy']);
       });
     });
+  });
+
+  // -------------------------------------------------------------------------
+  // A 2026-07-28 POST must carry `MCP-Protocol-Version` alongside `Mcp-Method`
+  // (and `Mcp-Name` where the method names a target). Era classification stays
+  // body-primary, so a header-less request is still routed to the modern leg —
+  // which refuses it before building an instance.
+  // -------------------------------------------------------------------------
+  describe('Modern (2026-07-28) request headers', () => {
+    test.each([['stateless'], ['stateful']])(
+      'refuses a modern POST that omits MCP-Protocol-Version with 400 / -32020 (%s)',
+      async (mode) => {
+        await withConfigOverrides({ mcpSessionMode: mode }, async () => {
+          const { app } = await buildApp();
+          const { headers, body } = modernToolCall('echo');
+          const { 'mcp-protocol-version': _omitted, ...withoutVersion } = headers;
+
+          const response = await app.request(ENDPOINT, {
+            method: 'POST',
+            headers: withoutVersion,
+            body,
+          });
+          const message = (await response.json()) as { error: { code: number }; id: unknown };
+
+          expect(response.status).toBe(400);
+          expect(message.error.code).toBe(-32020);
+          expect(message.id).toBe(1);
+          expect(factory).not.toHaveBeenCalled();
+        });
+      },
+    );
+  });
+
+  // -------------------------------------------------------------------------
+  // JSON-RPC batch arrays (2025-era traffic) are served up to 100 messages. A
+  // longer batch is refused whole with 400 / -32600 before any of it is
+  // dispatched — on the stateless handler and the sessionful arm alike.
+  // -------------------------------------------------------------------------
+  describe('JSON-RPC batches', () => {
+    const pingBatch = (count: number): string =>
+      JSON.stringify(
+        Array.from({ length: count }, (_, index) => ({
+          jsonrpc: '2.0',
+          method: 'ping',
+          id: index + 1,
+        })),
+      );
+
+    /** Headers for a batch POST: a live session's in stateful mode, none needed stateless. */
+    async function batchHeaders(app: TestApp, mode: string): Promise<Record<string, string>> {
+      if (mode === 'stateless') return legacyHeaders();
+      const response = await app.request(ENDPOINT, {
+        method: 'POST',
+        headers: legacyHeaders(),
+        body: initializeBody(),
+      });
+      await response.text();
+      return legacyHeaders({ 'mcp-session-id': response.headers.get('mcp-session-id') as string });
+    }
+
+    test.each([['stateless'], ['stateful']])(
+      'answers every message of a 100-message batch (%s)',
+      async (mode) => {
+        await withConfigOverrides({ mcpSessionMode: mode }, async () => {
+          const { app } = await buildApp();
+
+          const response = await app.request(ENDPOINT, {
+            method: 'POST',
+            headers: await batchHeaders(app, mode),
+            body: pingBatch(100),
+          });
+          const messages = await readJsonRpcAll(response);
+
+          expect(response.status).toBe(200);
+          expect(
+            messages.map((message) => message.id).sort((a, b) => Number(a) - Number(b)),
+          ).toEqual(Array.from({ length: 100 }, (_, index) => index + 1));
+          expect(messages.every((message) => 'result' in message)).toBe(true);
+        });
+      },
+    );
+
+    test.each([['stateless'], ['stateful']])(
+      'refuses a 101-message batch whole with 400 / -32600 (%s)',
+      async (mode) => {
+        await withConfigOverrides({ mcpSessionMode: mode }, async () => {
+          const { app } = await buildApp();
+
+          const response = await app.request(ENDPOINT, {
+            method: 'POST',
+            headers: await batchHeaders(app, mode),
+            body: pingBatch(101),
+          });
+          const message = (await response.json()) as { error: { code: number; message: string } };
+
+          expect(response.status).toBe(400);
+          expect(message.error.code).toBe(-32600);
+          expect(message.error.message).toContain('Batch must not exceed 100 messages');
+        });
+      },
+    );
   });
 
   describe('Request body size limit (issue #157)', () => {
@@ -987,6 +1491,153 @@ describe('HTTP Transport', () => {
         expect(state.bytesPulled).toBeLessThan(CAP + 8 * 1024);
       });
     });
+  });
+
+  // -------------------------------------------------------------------------
+  // The SDK bounds every request body it reads itself (`maxRequestBodySize`,
+  // 4 MiB by default, answered 413). Every serving arm here is handed the body
+  // already parsed, so that read never happens and MCP_HTTP_MAX_BODY_BYTES is
+  // the only limit in force: a limit above 4 MiB is honored, and `0` leaves the
+  // body unbounded at this layer (the runtime or reverse proxy decides).
+  // -------------------------------------------------------------------------
+  describe('MCP_HTTP_MAX_BODY_BYTES is the only body limit in force', () => {
+    const MiB = 1024 * 1024;
+    /** Past the SDK's own 4 MiB default. */
+    const LARGE = 5 * MiB;
+
+    type Era = 'legacy' | 'modern';
+    type Delivery = 'declared' | 'streamed';
+
+    /** A 2025-era initialize carrying `size` bytes of padding in an experimental capability. */
+    const paddedInitialize = (size: number): string =>
+      JSON.stringify({
+        jsonrpc: '2.0',
+        method: 'initialize',
+        id: 1,
+        params: {
+          protocolVersion: '2025-06-18',
+          capabilities: { experimental: { padding: { data: 'x'.repeat(size) } } },
+          clientInfo: { name: 'test-client', version: '1.0.0' },
+        },
+      });
+
+    /** The body in 1 MiB chunks, with no Content-Length to go by. */
+    const chunked = (body: string): ReadableStream<Uint8Array> => {
+      const bytes = new TextEncoder().encode(body);
+      let offset = 0;
+      return new ReadableStream<Uint8Array>({
+        pull(controller) {
+          if (offset >= bytes.byteLength) {
+            controller.close();
+            return;
+          }
+          controller.enqueue(bytes.subarray(offset, offset + MiB));
+          offset += MiB;
+        },
+      });
+    };
+
+    /**
+     * Posts a request whose body carries `size` bytes of payload to `era`'s arm
+     * of a freshly built app: a 2025-era initialize, or a 2026-07-28 echo call.
+     */
+    async function postLarge(era: Era, size: number, delivery: Delivery): Promise<Response> {
+      const { app } = await buildApp();
+      const { headers, body } =
+        era === 'modern'
+          ? modernToolCall('echo', 'x'.repeat(size))
+          : { headers: legacyHeaders(), body: paddedInitialize(size) };
+      return delivery === 'declared'
+        ? await app.request(ENDPOINT, {
+            method: 'POST',
+            headers: { ...headers, 'content-length': String(body.length) },
+            body,
+          })
+        : await app.request(ENDPOINT, {
+            method: 'POST',
+            headers,
+            body: chunked(body),
+            duplex: 'half',
+          } as RequestInit);
+    }
+
+    /** Asserts the arm served the request `postLarge` sent, rather than refusing it. */
+    async function expectServed(
+      mode: string,
+      era: Era,
+      response: Response,
+      size: number,
+    ): Promise<void> {
+      expect(response.status).toBe(200);
+      const message = await readJsonRpc(response);
+      if (era === 'modern') {
+        const { result } = message as { result: { content: Array<{ text: string }> } };
+        expect(result.content[0]?.text).toHaveLength(size);
+        return;
+      }
+      expect((message as { result: { serverInfo: unknown } }).result.serverInfo).toMatchObject({
+        name: 'test-mcp-server',
+      });
+      if (mode === 'stateful') {
+        expect(response.headers.get('mcp-session-id')).toMatch(/^[0-9a-f]{64}$/);
+      }
+    }
+
+    const arms = [
+      ['stateless', 'legacy'],
+      ['stateless', 'modern'],
+      ['stateful', 'legacy'],
+      ['stateful', 'modern'],
+    ] as const;
+    const cases = arms.flatMap(([mode, era]) =>
+      (['declared', 'streamed'] as const).map((delivery) => [mode, era, delivery] as const),
+    );
+
+    test.each(cases)(
+      'an 8 MiB limit admits a 5 MiB body (%s, %s arm, %s length)',
+      async (mode, era, delivery) => {
+        await withConfigOverrides(
+          { mcpSessionMode: mode, mcpHttpMaxBodyBytes: 8 * MiB },
+          async () => {
+            const response = await postLarge(era, LARGE, delivery);
+            await expectServed(mode, era, response, LARGE);
+          },
+        );
+      },
+    );
+
+    test.each(cases)(
+      'a disabled limit (0) admits a 5 MiB body (%s, %s arm, %s length)',
+      async (mode, era, delivery) => {
+        await withConfigOverrides({ mcpSessionMode: mode, mcpHttpMaxBodyBytes: 0 }, async () => {
+          const response = await postLarge(era, LARGE, delivery);
+          await expectServed(mode, era, response, LARGE);
+        });
+      },
+    );
+
+    test.each(
+      (['stateless', 'stateful'] as const).flatMap((mode) =>
+        (['declared', 'streamed'] as const).map((delivery) => [mode, delivery] as const),
+      ),
+    )(
+      'a body past an 8 MiB limit gets the framework 413 naming the setting (%s, %s length)',
+      async (mode, delivery) => {
+        await withConfigOverrides(
+          { mcpSessionMode: mode, mcpHttpMaxBodyBytes: 8 * MiB },
+          async () => {
+            const response = await postLarge('modern', 9 * MiB, delivery);
+            const data = (await response.json()) as { error: string };
+
+            expect(response.status).toBe(413);
+            expect(data.error).toBe(
+              `Request body exceeds the ${8 * MiB}-byte limit (configurable via MCP_HTTP_MAX_BODY_BYTES).`,
+            );
+            expect(factory).not.toHaveBeenCalled();
+          },
+        );
+      },
+    );
   });
 
   // -------------------------------------------------------------------------

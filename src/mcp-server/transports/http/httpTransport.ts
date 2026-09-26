@@ -70,6 +70,37 @@ import { createObservableGauge } from '@/utils/telemetry/metrics.js';
  * dev-server case this guard exists for. */
 const LOOPBACK_ORIGIN_RE = /^https?:\/\/(?:localhost|127\.0\.0\.1|\[::1\])(?::\d+)?$/i;
 
+/** Request headers the 2025-era protocol uses — the preflight answer for every origin. */
+const BASE_CORS_ALLOW_HEADERS = [
+  'Content-Type',
+  'Authorization',
+  'Mcp-Session-Id',
+  'MCP-Protocol-Version',
+];
+
+/**
+ * The 2026-07-28 standard request headers, plus `Last-Event-ID`, which an SSE
+ * resume on the sessionful arm sends.
+ */
+const MCP_CORS_ALLOW_HEADERS = ['Mcp-Method', 'Mcp-Name', 'Last-Event-ID'];
+
+/**
+ * `Mcp-Param-<Name>` for every `headerParam` designation on a registered tool.
+ * A disabled tool is never registered, so its designations are left out, and a
+ * name two tools share is listed once — header names are case-insensitive.
+ */
+function mcpParamHeaders(manifest: ServerManifest): string[] {
+  const byLowerName = new Map<string, string>();
+  for (const tool of manifest.definitions.tools) {
+    if (tool.disabled) continue;
+    for (const name of tool.headerParams ?? []) {
+      const header = `Mcp-Param-${name}`;
+      if (!byLowerName.has(header.toLowerCase())) byLowerName.set(header.toLowerCase(), header);
+    }
+  }
+  return [...byLowerName.values()];
+}
+
 type BoundedBodyRead =
   | { exceeded: false; body: ArrayBuffer }
   | { exceeded: true; bytesRead: number };
@@ -264,6 +295,11 @@ export async function createHttpApp<TBindings extends object = HonoNodeBindings>
   const corsOrigin: string | string[] =
     !explicitOrigins || wildcardExplicitlyAllowed ? '*' : explicitOrigins;
 
+  /** Whether the Origin guard admits a browser `Origin` value. */
+  const isAdmittedOrigin = (origin: string): boolean =>
+    wildcardExplicitlyAllowed ||
+    (explicitOrigins ? explicitOrigins.includes(origin) : LOOPBACK_ORIGIN_RE.test(origin));
+
   if (!explicitOrigins) {
     logger.warning(
       'MCP_ALLOWED_ORIGINS is not set — CORS is wildcard for CLI clients; browser Origin headers are restricted to loopback. Set MCP_ALLOWED_ORIGINS for production deployments accepting remote browser origins.',
@@ -279,16 +315,35 @@ export async function createHttpApp<TBindings extends object = HonoNodeBindings>
   // Per Fetch spec, Access-Control-Allow-Origin: * with
   // Access-Control-Allow-Credentials: true is invalid — browsers reject the
   // preflight. Only enable credentials when origin is explicitly configured.
-  app.use(
-    '*',
+  //
+  // A browser sends only the request headers the preflight lists (#571). An
+  // origin the Origin guard admits is offered every header a request here can
+  // carry; any other origin keeps the 2025-era set, so a page the guard would
+  // refuse learns no `headerParam` designation names from the preflight.
+  //
+  // The answer therefore turns on the request's Origin, as the Origin guard's
+  // does, so every response names Origin in Vary; otherwise a shared cache
+  // could hand one origin's answer to another. Hono appends it, preflight and
+  // actual response alike, for every origin option but the literal '*', so the
+  // wildcard goes in as a function that always answers '*'.
+  const corsWith = (allowHeaders: string[]) =>
     cors({
-      origin: corsOrigin,
+      origin: corsOrigin === '*' ? () => '*' : corsOrigin,
       allowMethods: ['GET', 'POST', 'DELETE', 'OPTIONS'],
-      allowHeaders: ['Content-Type', 'Authorization', 'Mcp-Session-Id', 'MCP-Protocol-Version'],
+      allowHeaders,
       exposeHeaders: ['Mcp-Session-Id'],
       ...(corsOrigin !== '*' && { credentials: true }),
-    }),
-  );
+    });
+  const baseCors = corsWith(BASE_CORS_ALLOW_HEADERS);
+  const admittedCors = corsWith([
+    ...BASE_CORS_ALLOW_HEADERS,
+    ...MCP_CORS_ALLOW_HEADERS,
+    ...mcpParamHeaders(manifest),
+  ]);
+  app.use('*', (c, next) => {
+    const origin = c.req.header('origin');
+    return (origin && isAdmittedOrigin(origin) ? admittedCors : baseCors)(c, next);
+  });
 
   // Centralized error handling
   app.onError(httpErrorHandler);
@@ -303,11 +358,7 @@ export async function createHttpApp<TBindings extends object = HonoNodeBindings>
   app.use(config.mcpHttpEndpointPath, async (c, next) => {
     const origin = c.req.header('origin');
     if (origin) {
-      const isAllowed =
-        wildcardExplicitlyAllowed ||
-        (explicitOrigins ? explicitOrigins.includes(origin) : LOOPBACK_ORIGIN_RE.test(origin));
-
-      if (!isAllowed) {
+      if (!isAdmittedOrigin(origin)) {
         const requestContext = requestContextService.createRequestContext({
           operation: 'HttpOriginGuard',
           additionalContext: { component: 'HttpTransport' },
@@ -333,7 +384,9 @@ export async function createHttpApp<TBindings extends object = HonoNodeBindings>
   // crosses the limit, then cancelled. Valid bodies are cached so downstream
   // `c.req.json()` reuses the preserved bytes. This closes the bypass where a
   // client omits or under-declares Content-Length. `MCP_HTTP_MAX_BODY_BYTES=0`
-  // disables the guard.
+  // disables the guard. It is the only limit in force: the SDK caps just the
+  // body reads it performs itself (4 MiB by default), and every arm below is
+  // handed the body already parsed.
   const maxBodyBytes = config.mcpHttpMaxBodyBytes;
   if (maxBodyBytes > 0) {
     app.use(config.mcpHttpEndpointPath, async (c, next) => {
@@ -713,7 +766,9 @@ export async function createHttpApp<TBindings extends object = HonoNodeBindings>
 
     // Read the POST body once, from the cache the body-limit guard may have
     // seeded. Every downstream consumer takes it as `parsedBody` because the raw
-    // stream is not guaranteed re-readable after that guard runs.
+    // stream is not guaranteed re-readable after that guard runs — which also
+    // keeps the SDK's own read cap out of play, so a configured limit above it
+    // (or `0`) holds.
     let parsedBody: unknown;
     if (c.req.method === 'POST') {
       try {

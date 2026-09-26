@@ -27,6 +27,7 @@ import {
   type DisabledMetadata,
   getDisabledMetadata,
 } from '@/mcp-server/tools/utils/disabled-tool.js';
+import { scanHeaderDesignations } from '@/mcp-server/tools/utils/headerParam.js';
 import { inputVariants } from '@/mcp-server/tools/utils/schemaShape.js';
 import type { AnyToolDefinition } from '@/mcp-server/tools/utils/toolDefinition.js';
 import {
@@ -281,6 +282,12 @@ export interface ManifestTool {
    * present-but-uncallable.
    */
   disabled?: DisabledMetadata;
+  /**
+   * Header names the input designates with `headerParam()`, each mirrored in an
+   * `Mcp-Param-<Name>` request header. Absent when there are none. The HTTP
+   * transport's CORS preflight allows these headers.
+   */
+  headerParams?: string[];
   /** JSON Schema for the input (when Zod → JSON Schema succeeds). */
   inputSchema?: unknown;
   /** True when `_meta.ui.resourceUri` is set (MCP Apps). */
@@ -588,6 +595,10 @@ export function buildServerManifest(input: BuildServerManifestInput): ServerMani
     const requiredFields = extractRequiredFields(d.input);
     const sourceUrl = d.sourceUrl ?? deriveSourceUrl(repoRoot, 'tools', name);
     const disabled = getDisabledMetadata(def);
+    // `tool()` has already rejected an invalid designation, so a failed scan
+    // here only means there is nothing to list.
+    const scan = scanHeaderDesignations(d.input);
+    const headerParams = scan?.valid ? scan.designations.map((entry) => entry.headerName) : [];
 
     return {
       name,
@@ -595,6 +606,7 @@ export function buildServerManifest(input: BuildServerManifestInput): ServerMani
       ...(d.annotations && { annotations: d.annotations as Record<string, unknown> }),
       isApp: isMcpAppTool(def),
       ...(d.auth && d.auth.length > 0 && { auth: d.auth }),
+      ...(headerParams.length > 0 && { headerParams }),
       ...(inputSchema !== undefined && { inputSchema }),
       ...(outputSchema !== undefined && { outputSchema }),
       requiredFields,

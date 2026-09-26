@@ -20,7 +20,7 @@ import { appTool } from '@/mcp-server/apps/appBuilders.js';
 import { prompt } from '@/mcp-server/prompts/utils/promptDefinition.js';
 import { resource } from '@/mcp-server/resources/utils/resourceDefinition.js';
 import { disabledTool } from '@/mcp-server/tools/utils/disabled-tool.js';
-import { tool } from '@/mcp-server/tools/utils/toolDefinition.js';
+import { headerParam, tool } from '@/mcp-server/tools/utils/toolDefinition.js';
 import { JsonRpcErrorCode } from '@/types-global/errors.js';
 
 /**
@@ -252,6 +252,39 @@ describe('buildServerManifest — baseline', () => {
       reason: 'Writes are turned off in this deployment.',
       hint: 'BRAPI_ENABLE_WRITES=true',
     });
+  });
+
+  test('records each headerParam designation, nested ones included, and omits the field when there are none', () => {
+    const routed = tool('route_lookup', {
+      description: 'Looks a record up on its shard.',
+      input: z.object({
+        region: headerParam(z.string(), 'Region').describe('Deployment region.'),
+        routing: z
+          .object({
+            shard: headerParam(z.int(), 'Shard-Id').describe('Shard the record lives on.'),
+          })
+          .describe('Where to route the lookup.'),
+      }),
+      output: z.object({}),
+      handler: () => ({}),
+    });
+    const plain = tool('plain_lookup', {
+      description: 'Looks a record up.',
+      input: z.object({ query: z.string().describe('Search query.') }),
+      output: z.object({}),
+      handler: () => ({}),
+    });
+
+    const manifest = buildServerManifest({
+      config: stubConfig(),
+      tools: [routed, plain],
+      resources: [],
+      prompts: [],
+    });
+
+    const [routedEntry, plainEntry] = manifest.definitions.tools;
+    expect(routedEntry?.headerParams).toEqual(['Region', 'Shard-Id']);
+    expect(plainEntry).not.toHaveProperty('headerParams');
   });
 
   test('marks MCP App tools from UI metadata', () => {
