@@ -144,8 +144,8 @@ When every concern is committed, `git status` is clean. That clean tree is what 
 Every file that declares a version must be updated. Skip any file that doesn't exist in the project. For `@cyanheads/mcp-ts-core` projects:
 
 - `package.json` — `version`
-- `server.json` — top-level `version` AND every `packages[].version` entry
-- `manifest.json` (if present) — `version`. Verify `name` is the bare package name (e.g. `bls-mcp-server`, not `@cyanheads/bls-mcp-server`)
+- `server.json` — top-level `version` AND every `packages[].version` entry. `lint:mcp` flags a mismatch at either level
+- `manifest.json` (if present) — `version`. Packaging validation fails on a mismatch, and on a scoped `name` (use `bls-mcp-server`, not `@cyanheads/bls-mcp-server`)
 - `.claude-plugin/plugin.json` and `.codex-plugin/plugin.json` (if present) — `version`. Packaging validation fails on a mismatch; `.codex-plugin/mcp.json` is connection config and carries none
 - `README.md` — version badge. Packaging validation fails on a mismatch with `package.json`; a literal `-` in a prerelease is escaped as `--` (`Version-0.14.0--rc.1-`)
 - `CLAUDE.md` / `AGENTS.md` — if they pin a version string
@@ -299,7 +299,7 @@ If the working tree isn't clean or the release commit isn't at HEAD, something w
 
 - [ ] Diff reviewed end-to-end before the first commit
 - [ ] Work concerns committed before the version bump — a version-bearing file a work concern also touches ships whole in that concern's commit, so the release commit brings it the version hunk alone
-- [ ] Version bumped in every declaring file (`package.json`, `server.json`, `manifest.json`, `.claude-plugin/plugin.json`, `.codex-plugin/plugin.json`, README badge, `CLAUDE.md`/`AGENTS.md` if they pin a version) — verify by command, not by eye: `v=$(jq -r .version package.json); grep -rl "$v" package.json server.json manifest.json .claude-plugin/plugin.json .codex-plugin/plugin.json README.md | wc -l` must equal the count of files that exist, and `grep -c "Version-$v-" README.md` must print `1`. `lint:packaging` checks the README badge against `package.json`, so a stale badge now fails `devcheck` instead of shipping unnoticed — the grep still catches a badge written in a shape the check skips
+- [ ] Version bumped in every declaring file (`package.json`, `server.json`, `manifest.json`, `.claude-plugin/plugin.json`, `.codex-plugin/plugin.json`, README badge, `CLAUDE.md`/`AGENTS.md` if they pin a version) — `devcheck` flags a mismatch in `server.json` (both levels), `manifest.json`, both plugin manifests, and the README badge; step 4's straggler grep covers the docs and Dockerfile labels
 - [ ] GH issues addressed by this work commented with what landed (if working from GH issues)
 - [ ] Docs updated for any new or changed features
 - [ ] Changelog authored at `changelog/<major.minor>.x/<version>.md`

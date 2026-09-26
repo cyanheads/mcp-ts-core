@@ -4,7 +4,7 @@ description: >
   Ship a release end-to-end across every registry the project targets (npm, MCP Registry, GitHub Releases for `.mcpb` bundles, GHCR). Runs the final verification gate, fast-forwards `main` when the release rode a release PR, creates the annotated tag on the commit `main` now points at, pushes commits and tags, then publishes to each applicable destination. Assumes git wrapup (version bumps, changelog, commit stack — and in release PR mode, the pushed branch and open PR) is already complete — this skill is the post-wrapup merge + tag + publish workflow. Retries transient network failures on publish steps; halts with a partial-state report when retries are exhausted or the failure is terminal.
 metadata:
   author: cyanheads
-  version: "2.21"
+  version: "2.22"
   audience: external
   type: workflow
 ---
@@ -158,9 +158,10 @@ Verify before moving on:
 ```bash
 git show v<version> --stat | head -20   # tag points at HEAD (the release commit, or the last review commit above it)
 git tag -l v<version> --format='%(if)%(contents:signature)%(then)signed%(else)unsigned%(end)'   # with tag signing enabled, must print "signed"
+bun run release:github -- --check       # annotated; subject ≤72 chars, no version, no ";"; no section headers; no signature block in the body; changelog link last
 ```
 
-`unsigned` under enabled tag signing means the signature didn't parse (see the cleanup note above) — delete and recreate the tag now, before it leaks the signature block into the GitHub Release body. This is the one tag deletion that needs no authorization: the tag is local, seconds old, and yours.
+`unsigned` under enabled tag signing, or a `--check` failure, means the tag is not publishable — delete and recreate it now, before the push. This is the one tag deletion that needs no authorization: the tag is local, seconds old, and yours. The check reads only the local tag and makes no `gh` calls. If `scripts/release-github.ts` does not mention `--check` (a project not yet resynced by the maintenance skill), skip that line and check the rules above by hand — an older script ignores the flag and attempts the release.
 
 ### 5. Push to origin
 
@@ -225,7 +226,7 @@ Halt on any publisher error other than "cannot publish duplicate version".
 
 ### 8. Create GitHub Release
 
-Pre-flight: `--notes-from-tag` publishes the tag message as-is. With tag signing enabled, confirm the tag's signature parses — `git tag -l v<version> --format='%(contents:signature)'` must be non-empty. Empty on a signing-enabled repo (e.g. a tag created with `--cleanup=verbatim`) means git is treating the signature as message text, and the `-----BEGIN SSH SIGNATURE-----` block will land in the public release body — the tag is already pushed by now, so halt and report rather than recreating it silently.
+`--notes-from-tag` publishes the tag message as-is, so the script re-runs the step 4 check before any `gh` call and halts on a violation. The tag is already pushed by now — on a failure, halt and report rather than recreating it silently.
 
 For all projects (including those without `manifest.json`):
 
@@ -237,6 +238,7 @@ The script (`scripts/release-github.ts`) handles everything in one command:
 
 - Reads `version` from `package.json`
 - Derives the tag subject via `git for-each-ref refs/tags/v<version>`
+- Validates the tag annotation (the step 4 `--check` rules)
 - Runs `gh release create v<version> --verify-tag --notes-from-tag --title "v<version>: <subject>"`
 - Attaches `dist/*.mcpb` when `manifest.json` exists (skip the `bun run bundle` step first if not already built — see below)
 - On "release already exists" (re-invocation after a prior partial run): uploads/clobbers the `.mcpb` asset (if applicable) and patches the title via `gh release edit`
@@ -315,7 +317,7 @@ If any check fails, halt and report which destination is unreachable. A successf
 - [ ] `bun run test:all` (or `test`) passes
 - [ ] `bun run test:package` passes, when the project defines it
 - [ ] Release PR mode: `git merge --ff-only` onto `main` locally — never the GitHub merge button; HEAD equals the PR's `headRefOid` afterwards
-- [ ] Annotated tag `v<version>` created on HEAD (`main`'s tip in release PR mode) with `--cleanup=whitespace`, a subject written fresh at ~60 characters without the version, headline-digest body, changelog link as final line, signature parses
+- [ ] Annotated tag `v<version>` created on HEAD (`main`'s tip in release PR mode) with `--cleanup=whitespace`, a subject written fresh at ~60 characters without the version, headline-digest body, changelog link as final line, signature parses; `bun run release:github -- --check` passes before the push
 - [ ] `main` pushed, then the tag pushed
 - [ ] Release PR mode: PR reports `MERGED`; remote and local `release/<version>` deleted
 - [ ] `bun publish --access public` succeeds

@@ -4,7 +4,7 @@ description: >
   Finalize documentation and project metadata for a ship-ready MCP server. Use after implementation is complete, tests pass, and devcheck is clean. Safe to run at any stage — each step checks current state and only acts on what still needs work.
 metadata:
   author: cyanheads
-  version: "2.19"
+  version: "2.20"
   audience: external
   type: workflow
 ---
@@ -173,7 +173,7 @@ Never hand-edit `CHANGELOG.md` when using this pattern — it's a build artifact
 
 ### 10. Plugin Metadata (Codex / Claude Code)
 
-`lint:packaging` (run by `devcheck`) now enforces the high-value subset automatically when these manifests are present: non-empty descriptions, identity/install correctness — display fields (`name`, server key, `interface.displayName`) must be the **unscoped** machine name, while the `npx -y` install arg must be the full `package.json` `name` (scoped if scoped) — and the env contract below (no `""` values; every `${user_config.*}` reference declared). Opt out per project with `"packaging": { "pluginManifests": false }` in `devcheck.config.json`. The checks below cover the fields the gate doesn't (version / repository / license sync, category, the wording of each option).
+`lint:packaging` (run by `devcheck`) now enforces the high-value subset automatically when these manifests are present: non-empty descriptions, `version` equal to `package.json`'s, identity/install correctness — display fields (`name`, server key, `interface.displayName`) must be the **unscoped** machine name, while the `npx -y` install arg must be the full `package.json` `name` (scoped if scoped) — and the env contract below (no `""` values; every `${user_config.*}` reference declared). Opt out per project with `"packaging": { "pluginManifests": false }` in `devcheck.config.json`. The checks below cover the fields the gate doesn't (repository / license sync, category, the wording of each option).
 
 **How user-supplied values reach the server.** Neither client passes the user's shell environment through untouched, so an env entry of `"KEY": ""` is not a hint — it is the value the server receives, and the framework reads an empty string as unset. Claude Code prompts for values declared under `userConfig` at enable time and substitutes `${user_config.<option>}` into `env` (sensitive values go to the Keychain). Codex starts stdio servers with a whitelisted environment and forwards only the host variables named in `env_vars`. Mirror `manifest.json`'s `user_config` block: same options, same titles and descriptions.
 
@@ -204,11 +204,11 @@ If the project ships as an `.mcpb` bundle for Claude Desktop (check for `manifes
 **`package.json` scripts:**
 
 - `bundle` — builds the `.mcpb` (`mcpb pack`, then `scripts/clean-mcpb.ts` prunes dev deps and strips dependency-shipped agent docs)
-- `lint:packaging` — validates `manifest.json` ↔ `server.json` env var consistency, plus the version-parity checks below (run by `devcheck`, which gates the step on `manifest.json`, a plugin manifest, `.mcpbignore`, or `README.md`)
+- `lint:packaging` — validates `manifest.json` ↔ `server.json` env var consistency, version parity for `manifest.json`, the plugin manifests, and the README badge, and the Dockerfile build stage (run by `devcheck`, which gates the step on `manifest.json`, a plugin manifest, `.mcpbignore`, `README.md`, or `Dockerfile`)
 
 **Cross-file consistency:**
 
-- `manifest.json` version matches `package.json` version
+- `manifest.json` version matches `package.json` version — `lint:packaging` enforces this
 - Env var names in `manifest.json` (`mcp_config.env` + `user_config`) match `server.json` `environmentVariables` — `lint:packaging` enforces this, but verify the set is complete
 - `manifest.json` `name` matches `package.json` name **without the npm scope prefix** (e.g. `bls-mcp-server`, not `@cyanheads/bls-mcp-server`); `description` matches `package.json`
 - `manifest.json` `author` is `{ "name": "<publisher handle>" }` — the same handle as the `.claude-plugin` / `.codex-plugin` `author.name` and the GitHub owner (e.g. `{ "name": "cyanheads" }`), not the LICENSE copyright holder's person object; `package.json` `author` is where the full `Name <email> (url)` identity lives
