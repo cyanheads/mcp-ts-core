@@ -4,7 +4,7 @@ description: >
   Land working-tree changes as logical commits — the work grouped by concern, topped by a release commit (version bump, changelog, regenerated artifacts). The work commits land first, then the version bump, verification, and the release commit on top. Stops at "committed locally on main" — or, when the project releases through a release PR, at "release branch pushed, PR open". No tag, no push to main, no publish: the release-and-publish skill merges, tags, and ships from here. Distilled from the git_wrapup_instructions protocol.
 metadata:
   author: cyanheads
-  version: "1.25"
+  version: "1.26"
   audience: external
   type: workflow
 ---
@@ -105,7 +105,9 @@ git commit --only <paths-for-this-concern> -m "<subject>" -m "<body>"
 
 **The file is the atomic boundary:** NEVER split a single file's working-tree changes across commits, regardless of mechanism — not `git add -p`, not an index-only patch (`git apply --cached`), not editing the file between commits to remove-then-re-add a hunk. When one file serves two concerns, it ships whole in the commit of its dominant concern; a later commit may touch the file again only for changes made AFTER the first commit (the version bump applied in step 4).
 
-**Every commit builds on its own.** When a concern changes an exported contract — a service method's return type, a shared helper's signature — the files that consume it ride in the same commit, even when they also carry other concerns. Grouping the contract change into one commit and each consumer into its own later commit leaves pushed commits that fail typecheck alone, and pushed history is never rewritten to repair them.
+**Every commit builds and passes its tests on its own.** When a concern changes an exported contract — a service method's return type, a shared helper's signature, a renamed export, a changed query or behavior a consumer's tests assert — the files that consume it AND their tests ride in the same commit, even when they also carry other concerns. Grouping the contract change into one commit and each consumer into its own later commit leaves pushed commits that fail typecheck or the suite alone, and pushed history is never rewritten to repair them. A snapshot can typecheck and still be red: before pushing, check out each work commit's tree (`git stash` is not the tool — extract it with `git archive <sha> | tar -x -C <scratch>`, symlink the project's `node_modules` into it) and run the test script there; merge groups whose snapshot fails.
+
+**A dependency bump lands before the commits that use it.** When any later commit in the stack uses something the new versions introduce — a new framework export, a new `tool()` option, a changed signature — `chore(deps)` is the first work commit. It builds on its own: `package.json`, the lockfile, and any source change the upgrade itself forces (a renamed import, a removed option) ride in it, so the commits above it compile against the versions they were written for. Ordered the other way, the adopting commit and every commit up to the bump fail typecheck at their own SHA.
 
 **Subject format:** Conventional Commits, no version in the subject — `feat: hosted server endpoint`, `fix: handle empty SPARQL result sets`, `feat(linter): enrichment contract rules`, `docs: document the enrichment block`, `chore(deps): refresh dev dependencies`.
 
@@ -307,6 +309,7 @@ If the working tree isn't clean or the release commit isn't at HEAD, something w
 - [ ] `bun run test:package` passes, when the project defines it — it guards the public-export manifest and `test:all` does not run it
 - [ ] Release PR mode: stack committed on `release/<version>`, never on `main`
 - [ ] Work grouped into logical commits (large features split by layer); release artifacts (version + changelog + tree) committed separately on top, subject leading with the version
+- [ ] `chore(deps)` is the first work commit whenever a later commit uses what the new versions introduce, and it builds on its own — carrying `package.json`, the lockfile, and any source change the upgrade forces
 - [ ] A gate failure after the work is committed landed as a new commit on the stack — nothing amended, rebased, or otherwise rewritten
 - [ ] Every commit carries a body, and every body is one or two lines — none subject-only, none a paragraph
 - [ ] Release PR mode: branch pushed, PR open — title = release commit subject; body = theme line, `## Changes` in tag rules, `## Gates`, changelog link last (via `--body-file`, no closing keywords)
