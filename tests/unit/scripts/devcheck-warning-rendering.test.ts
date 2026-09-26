@@ -32,7 +32,7 @@ const WARNING_MESSAGE = 'demo: SKILL.md body changed without a metadata.version 
  * identically-shaped return in `Skills Sync` is not the one rewritten.
  */
 const SKILL_VERSIONS_DEMOTION =
-  "'Skill bodies changed without a version bump.';\n      return { success: true, warning: firstLine };";
+  "'Skill versions are out of step with the policy.';\n      return { success: true, warning: firstLine };";
 
 /** The `isSuccess` shape no shipped step produces today, but the renderer must handle. */
 const SKILL_VERSIONS_FAILURE_WITH_WARNING = SKILL_VERSIONS_DEMOTION.replace(

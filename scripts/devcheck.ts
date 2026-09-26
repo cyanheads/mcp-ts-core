@@ -811,7 +811,8 @@ const ALL_CHECKS: Check[] = [
     flag: '--no-skill-versions',
     canFix: false,
     // Flags framework-skills/<name>/SKILL.md body changes (vs HEAD) that lack a metadata.version
-    // bump (#99). Skipped when framework-skills/ is absent. Drift is demoted to a warning via
+    // bump (#99), and, in the framework repo, a skill bumped more than one step past the last
+    // release tag. Skipped when framework-skills/ is absent. Drift is demoted to a warning via
     // isSuccess — the typo/whitespace carve-out lives in devcheck.config.json
     // `skillVersions.ignore`.
     getCommand: () => {
@@ -821,11 +822,11 @@ const ALL_CHECKS: Check[] = [
     isSuccess: (result) => {
       if (result.exitCode === 0) return true;
       const firstLine =
-        result.stdout.split('\n')[0]?.trim() || 'Skill bodies changed without a version bump.';
+        result.stdout.split('\n')[0]?.trim() || 'Skill versions are out of step with the policy.';
       return { success: true, warning: firstLine };
     },
     tip: (c) =>
-      `Bump ${c.bold('metadata.version')} in the changed ${c.bold('SKILL.md')}, or add it to ${c.bold('devcheck.config.json')} ${c.bold('skillVersions.ignore')}.`,
+      `Bump ${c.bold('metadata.version')} once per release in the changed ${c.bold('SKILL.md')}, or add it to ${c.bold('devcheck.config.json')} ${c.bold('skillVersions.ignore')}.`,
   },
   {
     name: 'Changelog Sync',

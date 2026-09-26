@@ -92,3 +92,86 @@ describe('check-skill-versions · worktree-deleted skill (#237)', () => {
     expect(stdout).not.toContain('ENOENT');
   });
 });
+
+describe('check-skill-versions · one step per release', () => {
+  let dir: string;
+
+  /** Seed a repo whose last release tag holds `framework-skills/kept` at 1.0. */
+  function seedRelease(packageName: string): void {
+    writeFileSync(resolve(dir, 'package.json'), JSON.stringify({ name: packageName }));
+    writeSkill(dir, 'kept', '1.0', 'Released body.');
+    git(dir, ['add', '-A']);
+    git(dir, ['commit', '-m', 'release']);
+    git(dir, ['tag', '--no-sign', '-a', 'v0.1.0', '-m', 'release']);
+  }
+
+  beforeEach(() => {
+    dir = mkdtempSync(resolve(tmpdir(), 'check-skill-versions-'));
+    git(dir, ['init', '-b', 'main']);
+    git(dir, ['config', 'user.email', 'test@example.com']);
+    git(dir, ['config', 'user.name', 'Test']);
+  });
+
+  afterEach(() => {
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('accepts a single minor step past the last release tag', () => {
+    seedRelease('@cyanheads/mcp-ts-core');
+    writeSkill(dir, 'kept', '1.1', 'Edited body.');
+
+    const { code, stdout } = runCheck(dir);
+
+    expect(code).toBe(0);
+    expect(stdout).toContain('Skill versions are in step with body changes.');
+  });
+
+  it('accepts a single major step to X.0', () => {
+    seedRelease('@cyanheads/mcp-ts-core');
+    writeSkill(dir, 'kept', '2.0', 'Restructured body.');
+
+    expect(runCheck(dir).code).toBe(0);
+  });
+
+  it('flags a skill bumped more than one step since the last release tag', () => {
+    seedRelease('@cyanheads/mcp-ts-core');
+    writeSkill(dir, 'kept', '1.3', 'Edited three times, bumped three times.');
+
+    const { code, stdout } = runCheck(dir);
+
+    expect(code).toBe(1);
+    expect(stdout).toContain('framework-skills/kept/SKILL.md');
+    expect(stdout).toContain('"1.0" at v0.1.0');
+    expect(stdout).toContain('"1.3"');
+  });
+
+  it('flags an overshoot already committed after the tag', () => {
+    seedRelease('@cyanheads/mcp-ts-core');
+    writeSkill(dir, 'kept', '1.1', 'First edit.');
+    git(dir, ['commit', '-am', 'docs: first edit']);
+    writeSkill(dir, 'kept', '1.2', 'Second edit.');
+    git(dir, ['commit', '-am', 'docs: second edit']);
+
+    const { code, stdout } = runCheck(dir);
+
+    expect(code).toBe(1);
+    expect(stdout).toContain('"1.2"');
+  });
+
+  it('lets a consumer repo take a multi-step jump from a skill sync', () => {
+    seedRelease('some-mcp-server');
+    writeSkill(dir, 'kept', '1.5', 'Synced from a newer framework release.');
+
+    expect(runCheck(dir).code).toBe(0);
+  });
+
+  it('skips the step check when no release tag exists', () => {
+    writeFileSync(resolve(dir, 'package.json'), JSON.stringify({ name: '@cyanheads/mcp-ts-core' }));
+    writeSkill(dir, 'kept', '1.0', 'Body.');
+    git(dir, ['add', '-A']);
+    git(dir, ['commit', '-m', 'seed']);
+    writeSkill(dir, 'kept', '1.4', 'Edited body.');
+
+    expect(runCheck(dir).code).toBe(0);
+  });
+});
