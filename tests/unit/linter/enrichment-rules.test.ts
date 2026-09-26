@@ -12,6 +12,9 @@ import {
   lintCappedListTruncation,
   lintEnrichmentContract,
 } from '@/linter/rules/enrichment-rules.js';
+import { validateDefinitions } from '@/linter/validate.js';
+import { tool } from '@/mcp-server/tools/utils/toolDefinition.js';
+import { formatOutline, OUTLINE_VARIANT } from '@/utils/overflow/outlineOnOverflow.js';
 
 const output = z.object({ items: z.array(z.string()).describe('items') });
 
@@ -74,6 +77,47 @@ describe('lintEnrichmentContract', () => {
         totalCount: z.number().describe('total'),
       });
       expect(lintEnrichmentContract({ output: withTotal }, 'tool', 'x')).toEqual([]);
+    });
+
+    // #271 — the outline arm's `notice` is the re-call instruction the agent acts
+    // on, main-body payload by design, so the arm's `sections` array exempts it.
+    it('does not flag notice when the output declares the outline arm', () => {
+      const outlineOutput = z.object({
+        kind: z.enum(['full', 'outline']).describe('mode'),
+        sections: OUTLINE_VARIANT.shape.sections.optional(),
+        notice: OUTLINE_VARIANT.shape.notice.optional(),
+      });
+      expect(lintEnrichmentContract({ output: outlineOutput }, 'tool', 'x')).toEqual([]);
+    });
+
+    it('still flags notice when sections is not an array', () => {
+      const d = lintEnrichmentContract(
+        {
+          output: z.object({
+            sections: z.string().describe('section list'),
+            notice: z.string().describe('notice'),
+          }),
+        },
+        'tool',
+        'x',
+      );
+      expect(d.map((x) => x.rule)).toEqual(['enrichment-prefer-block']);
+    });
+
+    it('still flags effectiveQuery alongside the outline arm', () => {
+      const d = lintEnrichmentContract(
+        {
+          output: z.object({
+            sections: OUTLINE_VARIANT.shape.sections.optional(),
+            notice: OUTLINE_VARIANT.shape.notice.optional(),
+            effectiveQuery: z.string().describe('parsed query'),
+          }),
+        },
+        'tool',
+        'x',
+      );
+      expect(d).toHaveLength(1);
+      expect(d[0]?.message).toContain("'effectiveQuery'");
     });
   });
 
@@ -530,6 +574,57 @@ describe('lintCappedListTruncation', () => {
         expect(lintCappedListTruncation(def), plainField).toHaveLength(0);
       }
     });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The documented outline-on-overflow `output` shape (#271)
+// ---------------------------------------------------------------------------
+
+describe('the documented outline-on-overflow output shape', () => {
+  /** A tool whose `output` copies the `OUTLINE_VARIANT` JSDoc snippet. */
+  const getLabel = tool('get_label', {
+    description: 'Fetch a label. Returns the full record, or a section outline when it overflows.',
+    input: z.object({ query: z.string().describe('Label query') }),
+    output: z.object({
+      kind: z
+        .enum(['full', 'outline'])
+        .describe('Whether the full record or a section outline was returned'),
+      id: z.string().optional().describe('Label identifier'),
+      sections: z
+        .array(OUTLINE_VARIANT.shape.sections.element.describe('One section of the record'))
+        .optional()
+        .describe('Available sections, largest first'),
+      notice: OUTLINE_VARIANT.shape.notice.optional(),
+    }),
+    handler: async (input) => ({ kind: 'full' as const, id: input.query }),
+    format: (r) => [
+      { type: 'text', text: `**Mode:** ${r.kind}` },
+      ...(r.id ? [{ type: 'text' as const, text: `**ID:** ${r.id}` }] : []),
+      ...(r.sections
+        ? formatOutline({ kind: 'outline', sections: r.sections, notice: r.notice ?? '' })
+        : []),
+    ],
+  });
+
+  it('lints with zero diagnostics', () => {
+    const report = validateDefinitions({ tools: [getLabel] });
+    expect([...report.errors, ...report.warnings]).toEqual([]);
+  });
+
+  it('still warns on a notice with no sections arm and no enrichment block', () => {
+    const noticeOnly = tool('search', {
+      description: 'Search records and report an empty-result notice.',
+      input: z.object({ query: z.string().describe('Search query') }),
+      output: z.object({
+        items: z.array(z.string()).describe('Matching record names'),
+        notice: z.string().optional().describe('Why the result is empty'),
+      }),
+      handler: async () => ({ items: [] }),
+      format: (r) => [{ type: 'text', text: [...r.items, r.notice ?? ''].join('\n') }],
+    });
+    const report = validateDefinitions({ tools: [noticeOnly] });
+    expect(report.warnings.map((d) => d.rule)).toEqual(['enrichment-prefer-block']);
   });
 });
 

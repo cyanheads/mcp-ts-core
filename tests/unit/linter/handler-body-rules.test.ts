@@ -51,6 +51,44 @@ describe('prefer-mcp-error-in-handler', () => {
     };
     expect(lint(handler).map((x) => x.rule)).not.toContain('prefer-mcp-error-in-handler');
   });
+
+  /**
+   * Bun's runtime transpiler rewrites `new Error(…)` to `Error(…)` for every
+   * built-in error constructor, so `handler.toString()` under Bun never carries
+   * the `new`. Vitest's own transform keeps it, which is why these spellings are
+   * built with `new Function` — the only way to hand the rule Bun's exact output.
+   */
+  describe("Bun's transpiled spellings (#465)", () => {
+    it('flags throw Error(…) without new', () => {
+      const handler = new Function('return async () => { throw Error("boom"); }')();
+      expect(lint(handler).map((x) => x.rule)).toContain('prefer-mcp-error-in-handler');
+    });
+
+    it.each(['TypeError', 'RangeError'])(
+      'does not flag throw %s(…) without new, as it does not flag the new form',
+      (ctor) => {
+        const handler = new Function(`return async () => { throw ${ctor}("x"); }`)();
+        expect(lint(handler).map((x) => x.rule)).not.toContain('prefer-mcp-error-in-handler');
+      },
+    );
+
+    it('does not flag a user error class whose name ends in Error', () => {
+      const handler = new Function('return async () => { throw McpError("x"); }')();
+      expect(lint(handler).map((x) => x.rule)).not.toContain('prefer-mcp-error-in-handler');
+    });
+
+    it('ignores throw Error(…) inside a string literal', () => {
+      const handler = new Function(
+        'return async () => { const m = "never throw Error(\\"x\\") here"; return m; }',
+      )();
+      expect(lint(handler).map((x) => x.rule)).not.toContain('prefer-mcp-error-in-handler');
+    });
+
+    it('ignores throw Error(…) inside a comment', () => {
+      const handler = new Function('return async () => { /* throw Error("x") */ return null; }')();
+      expect(lint(handler).map((x) => x.rule)).not.toContain('prefer-mcp-error-in-handler');
+    });
+  });
 });
 
 describe('prefer-error-factory', () => {
@@ -129,6 +167,58 @@ describe('preserve-cause-on-rethrow', () => {
     )();
     const d = lint(handler);
     expect(d.map((x) => x.rule)).toContain('preserve-cause-on-rethrow');
+  });
+
+  it('does not flag { cause: cause } when the catch binding is named cause', () => {
+    const handler = new Function(
+      `return async () => {
+        try { return 1; }
+        catch (cause) { throw notFound('x', undefined, { cause: cause }); }
+      }`,
+    )();
+    expect(lint(handler).map((x) => x.rule)).not.toContain('preserve-cause-on-rethrow');
+  });
+
+  /** Bun prints `{ cause: cause }` as `{ cause }`, and authors write the shorthand too. */
+  it('does not flag the { cause } shorthand when the catch binding is named cause (#465)', () => {
+    const handler = new Function(
+      `return async () => {
+        try { return 1; }
+        catch (cause) { throw notFound("x", void 0, { cause }); }
+      }`,
+    )();
+    expect(lint(handler).map((x) => x.rule)).not.toContain('preserve-cause-on-rethrow');
+  });
+
+  it('still flags the { cause } shorthand when it names something other than the catch binding', () => {
+    const handler = new Function(
+      `return async () => {
+        const cause = new Error('unrelated');
+        try { return 1; }
+        catch (e) { throw notFound('x', undefined, { cause }); }
+      }`,
+    )();
+    expect(lint(handler).map((x) => x.rule)).toContain('preserve-cause-on-rethrow');
+  });
+
+  it('flags a catch (e) that throws a factory with no options at all', () => {
+    const handler = new Function(
+      `return async () => {
+        try { return 1; }
+        catch (e) { throw notFound('x'); }
+      }`,
+    )();
+    expect(lint(handler).map((x) => x.rule)).toContain('preserve-cause-on-rethrow');
+  });
+
+  it('does not treat a longer identifier starting with cause as the shorthand', () => {
+    const handler = new Function(
+      `return async () => {
+        try { return 1; }
+        catch (cause) { throw notFound('x', undefined, { causeChain }); }
+      }`,
+    )();
+    expect(lint(handler).map((x) => x.rule)).toContain('preserve-cause-on-rethrow');
   });
 });
 

@@ -116,6 +116,11 @@ export function lintSchemaRoot(
  *   - `.key` for object properties
  *   - `[]` for array element types
  *   - `|<i>` for union / discriminatedUnion variant at index i
+ *
+ * A self-referential schema (a Zod 4 getter returning the schema itself) is
+ * walked once: the walk tracks the compound schemas on its current path and
+ * stops when one re-enters. The guard is per path, not global, so a
+ * non-recursive schema reused at two sibling paths is reported at both.
  */
 export function checkFieldDescriptions(
   schema: unknown,
@@ -135,8 +140,11 @@ export function checkFieldDescriptions(
   const single = roots.length === 1;
   roots.forEach((root, i) => {
     const prefix = single ? fieldName : `${fieldName}|${i}`;
+    const ancestors = new Set<object>();
+    const rootIdentity = schemaIdentity(root);
+    if (rootIdentity) ancestors.add(rootIdentity);
     for (const [key, field] of Object.entries(root.shape)) {
-      walkField(field, `${prefix}.${key}`, diagnostics, definitionType, definitionName);
+      walkField(field, `${prefix}.${key}`, diagnostics, definitionType, definitionName, ancestors);
     }
   });
 
@@ -144,10 +152,26 @@ export function checkFieldDescriptions(
 }
 
 /**
+ * The identity a cycle is detected by: the schema's `_zod.def`. Not the schema
+ * instance — `.describe()` clones the instance but shares the def, and a getter
+ * that returns `Self.describe('…')` builds a fresh clone on every access, so an
+ * instance-keyed guard would never see the re-entry.
+ */
+function schemaIdentity(schema: unknown): object | undefined {
+  if (!schema || typeof schema !== 'object') return;
+  const def = (schema as { _zod?: { def?: unknown } })._zod?.def;
+  return def && typeof def === 'object' ? def : undefined;
+}
+
+/**
  * Emits a diagnostic when the field lacks a description, then recurses into
  * compound types (object, array, union) so inner fields get the same check.
  * A described container does NOT suppress checks on its children — each level
  * is evaluated independently because LLMs read the flattened JSON Schema.
+ *
+ * A field whose core schema is already on the current path (`ancestors`) is a
+ * cycle back into a schema being walked, and is skipped whole: everything it
+ * would report has been reported at its first occurrence.
  */
 function walkField(
   field: unknown,
@@ -155,7 +179,11 @@ function walkField(
   diagnostics: LintDiagnostic[],
   definitionType: LintDiagnostic['definitionType'],
   definitionName: string,
+  ancestors: Set<object>,
 ): void {
+  const identity = schemaIdentity(unwrapWrappers(field));
+  if (identity && ancestors.has(identity)) return;
+
   if (!hasDescription(field)) {
     diagnostics.push({
       rule: 'describe-on-fields',
@@ -168,7 +196,7 @@ function walkField(
     });
   }
 
-  recurseIntoCompound(field, path, diagnostics, definitionType, definitionName);
+  recurseIntoCompound(field, path, diagnostics, definitionType, definitionName, ancestors);
 }
 
 /**
@@ -176,6 +204,7 @@ function walkField(
  * core type, then recurses into object shapes, array elements, and union
  * options. Non-compound cores (primitives, literals) terminate recursion.
  * Primitive array elements are skipped — array-level describe is sufficient.
+ * The core stays in `ancestors` only while its own subtree is walked.
  */
 function recurseIntoCompound(
   field: unknown,
@@ -183,6 +212,7 @@ function recurseIntoCompound(
   diagnostics: LintDiagnostic[],
   definitionType: LintDiagnostic['definitionType'],
   definitionName: string,
+  ancestors: Set<object>,
 ): void {
   const core = unwrapWrappers(field);
   if (!core || typeof core !== 'object') return;
@@ -190,23 +220,18 @@ function recurseIntoCompound(
   const def = (core as { _zod?: { def?: { type?: string } } })._zod?.def;
   if (!def) return;
 
+  const walk = (inner: unknown, innerPath: string) =>
+    walkField(inner, innerPath, diagnostics, definitionType, definitionName, ancestors);
+
+  ancestors.add(def);
+
   if (def.type === 'object') {
     const shape = (core as ZodObject<ZodRawShape>).shape;
-    for (const [key, inner] of Object.entries(shape)) {
-      walkField(inner, `${path}.${key}`, diagnostics, definitionType, definitionName);
-    }
-    return;
-  }
-
-  if (def.type === 'array') {
+    for (const [key, inner] of Object.entries(shape)) walk(inner, `${path}.${key}`);
+  } else if (def.type === 'array') {
     const element = (def as { element?: unknown }).element;
-    if (element && isCompound(element)) {
-      walkField(element, `${path}[]`, diagnostics, definitionType, definitionName);
-    }
-    return;
-  }
-
-  if (def.type === 'union') {
+    if (element && isCompound(element)) walk(element, `${path}[]`);
+  } else if (def.type === 'union') {
     const options = (def as { options?: unknown[] }).options;
     if (Array.isArray(options)) {
       options.forEach((option, i) => {
@@ -214,11 +239,12 @@ function recurseIntoCompound(
         // blank-tolerance sentinels like z.literal('')) carry no independent
         // semantic content. The outer union describe is sufficient; a describe
         // on the literal variant would ship to JSON Schema as clutter.
-        if (isLiteralVariant(option)) return;
-        walkField(option, `${path}|${i}`, diagnostics, definitionType, definitionName);
+        if (!isLiteralVariant(option)) walk(option, `${path}|${i}`);
       });
     }
   }
+
+  ancestors.delete(def);
 }
 
 /** True when the (unwrapped) field is a `z.literal(...)` — not a compound variant. */

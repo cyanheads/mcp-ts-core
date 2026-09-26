@@ -22,6 +22,7 @@ import {
   unwrapWrappers,
 } from '@/linter/rules/schema-rules.js';
 import { lintToolDefinition } from '@/linter/rules/tool-rules.js';
+import { validateDefinitions } from '@/linter/validate.js';
 import { headerParam } from '@/mcp-server/tools/utils/headerParam.js';
 import { tool } from '@/mcp-server/tools/utils/toolDefinition.js';
 
@@ -244,6 +245,184 @@ describe('checkFieldDescriptions', () => {
       );
       expect(diagnostics.find((d) => d.message.includes('input.value|0'))).toBeUndefined();
     });
+  });
+
+  describe('reused and self-referential schemas', () => {
+    const paths = (diagnostics: ReturnType<typeof checkFieldDescriptions>) =>
+      diagnostics.map((d) => /' (\S+) is missing/.exec(d.message)?.[1]);
+
+    it('reports a reused, non-recursive schema at every path that embeds it', () => {
+      const Shared = z.object({ id: z.string() }).describe('shared');
+      const diagnostics = checkFieldDescriptions(
+        z.object({
+          left: Shared,
+          right: z.object({ nested: Shared }).describe('right'),
+          list: z.array(Shared).describe('list'),
+        }),
+        'output',
+        'tool',
+        'x',
+      );
+      expect(paths(diagnostics)).toEqual([
+        'output.left.id',
+        'output.right.nested.id',
+        'output.list[].id',
+      ]);
+    });
+
+    // #491 — a Zod 4 getter makes the schema its own descendant; the walk used
+    // to follow it until the stack overflowed.
+    it('walks a getter-recursive schema once and reports its gaps without repeating per level', () => {
+      const TreeNode: z.ZodType = z
+        .object({
+          name: z.string().describe('Name'),
+          label: z.string(),
+          get children() {
+            return z.array(TreeNode).optional().describe('Child nodes');
+          },
+        })
+        .describe('A node');
+      const diagnostics = checkFieldDescriptions(
+        z.object({ root: TreeNode }),
+        'output',
+        'tool',
+        'x',
+      );
+      expect(paths(diagnostics)).toEqual(['output.root.label']);
+    });
+
+    it('stops at a cycle that re-enters through a freshly described clone', () => {
+      const TreeNode: z.ZodType = z.object({
+        id: z.string(),
+        get parent() {
+          return TreeNode.describe('Parent node').optional();
+        },
+      });
+      const diagnostics = checkFieldDescriptions(
+        z.object({ node: TreeNode.describe('Node') }),
+        'output',
+        'tool',
+        'x',
+      );
+      expect(paths(diagnostics)).toEqual(['output.node.id']);
+    });
+
+    it('stops at a cycle behind a union option', () => {
+      const TreeNode: z.ZodType = z
+        .object({
+          id: z.string().describe('ID'),
+          get next() {
+            return z.union([z.literal('end'), TreeNode]).describe('Next node, or end');
+          },
+          note: z.string(),
+        })
+        .describe('A node');
+      const diagnostics = checkFieldDescriptions(
+        z.object({ head: z.union([TreeNode, z.string().describe('raw')]).describe('head') }),
+        'input',
+        'tool',
+        'x',
+      );
+      expect(paths(diagnostics)).toEqual(['input.head|0.note']);
+    });
+
+    it('does not re-walk a root that recurses into itself', () => {
+      const Root: z.ZodType = z.object({
+        title: z.string(),
+        get sub() {
+          return z.array(Root).describe('Sub-entries');
+        },
+      });
+      expect(paths(checkFieldDescriptions(Root, 'output', 'tool', 'x'))).toEqual(['output.title']);
+    });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Self-referential schemas through the whole report (#491)
+// ---------------------------------------------------------------------------
+
+describe('validateDefinitions on a self-referential schema', () => {
+  const TreeNode: z.ZodType = z
+    .object({
+      name: z.string().describe('Name'),
+      get children() {
+        return z.array(TreeNode).optional().describe('Child nodes');
+      },
+    })
+    .describe('A node');
+
+  const recursiveTool = (placement: 'input' | 'output' | 'union') =>
+    tool('tree_example', {
+      description: 'Returns a tree of named nodes for the linter to walk.',
+      input: z.object({
+        id: z.string().describe('ID'),
+        ...(placement === 'input' && { filter: TreeNode.optional() }),
+        ...(placement === 'union' && {
+          filter: z
+            .union([TreeNode, z.string().describe('Name')])
+            .optional()
+            .describe('Filter'),
+        }),
+      }),
+      output: z.object({
+        root: placement === 'output' ? TreeNode : z.string().describe('Root name'),
+      }),
+      handler: async () => ({ root: 'a' }) as never,
+      format: (r: { root: unknown }) => [{ type: 'text' as const, text: JSON.stringify(r.root) }],
+    });
+
+  it.each(['input', 'output', 'union'] as const)(
+    'returns a report for the schema in tool %s',
+    (placement) => {
+      const report = validateDefinitions({ tools: [recursiveTool(placement)] });
+      expect(report.errors).toEqual([]);
+    },
+  );
+
+  it('keeps the rest of the report — format-parity depth limit and strict-mode $defs', () => {
+    const report = validateDefinitions({
+      tools: [recursiveTool('output')],
+      portability: 'strict',
+    });
+    const rules = report.warnings.map((d) => d.rule);
+    expect(rules).toContain('format-parity-depth-limit');
+    expect(rules).toContain('schema-no-defs');
+  });
+
+  it('returns a report for the schema in resource params and prompt args', () => {
+    const Branch: z.ZodType = z
+      .object({
+        tag: z.string(),
+        get branches() {
+          return z.array(Branch).describe('Sub-branches');
+        },
+      })
+      .describe('A branch');
+    const report = validateDefinitions({
+      resources: [
+        {
+          name: 'tree-resource',
+          uriTemplate: 'tree://{id}',
+          description: 'A tree resource.',
+          mimeType: 'application/json',
+          params: z.object({ id: z.string().describe('ID'), tree: Branch.optional() }),
+          handler: async () => ({}),
+        },
+      ],
+      prompts: [
+        {
+          name: 'tree_prompt',
+          description: 'A tree prompt.',
+          args: z.object({ tree: Branch.optional() }),
+          generate: () => [],
+        },
+      ],
+    });
+    const missing = report.warnings
+      .filter((d) => d.rule === 'describe-on-fields')
+      .map((d) => /' (\S+) is missing/.exec(d.message)?.[1]);
+    expect(missing).toEqual(['params.tree.tag', 'args.tree.tag']);
   });
 });
 

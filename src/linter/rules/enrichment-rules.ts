@@ -180,8 +180,9 @@ function isDeltaShape(schema: unknown): boolean {
  *
  * When `enrichment` is absent: emits an advisory nudge for any `output` field
  * whose name strongly signals agent-facing context (e.g. `notice`,
- * `effectiveQuery`) that would be better expressed as enrichment — and errors if
- * an `enrichmentTrailer` is declared with no block to attach to.
+ * `effectiveQuery`) that would be better expressed as enrichment — except a
+ * `notice` beside an outline-on-overflow `sections` array — and errors if an
+ * `enrichmentTrailer` is declared with no block to attach to.
  */
 export function lintEnrichmentContract(
   def: { enrichment?: unknown; output?: unknown; enrichmentTrailer?: unknown } | null | undefined,
@@ -204,7 +205,12 @@ export function lintEnrichmentContract(
         definitionName,
       });
     }
+    // An output carrying the outline-on-overflow arm (a `sections` array) owns its
+    // `notice`: the re-call instruction is main-body payload by design, and it
+    // replaces the document rather than annotating it, which enrichment cannot do.
+    const hasOutlineArm = getCoreDefType(objectShape(def.output)?.sections) === 'array';
     for (const key of outputKeys) {
+      if (hasOutlineArm && key.toLowerCase() === 'notice') continue;
       if (META_FIELD_HINTS.has(key.toLowerCase())) {
         diagnostics.push({
           rule: 'enrichment-prefer-block',

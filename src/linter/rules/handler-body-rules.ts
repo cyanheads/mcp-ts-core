@@ -69,8 +69,10 @@ export function lintHandlerBody(
   const cleaned = stripCommentsAndStrings(source);
 
   // ── Rule 1: prefer-mcp-error-in-handler ──────────────────────────────────
-  // Plain `throw new Error(...)` doesn't carry a JSON-RPC code.
-  if (/throw\s+new\s+Error\s*\(/.test(cleaned)) {
+  // Plain `throw new Error(...)` doesn't carry a JSON-RPC code. `new` is
+  // optional: Bun's transpiler prints `throw new Error(x)` as `throw Error(x)`,
+  // so `handler.toString()` under Bun never carries it.
+  if (/throw\s+(?:new\s+)?Error\s*\(/.test(cleaned)) {
     diagnostics.push({
       rule: 'prefer-mcp-error-in-handler',
       severity: 'warning',
@@ -113,8 +115,13 @@ export function lintHandlerBody(
     const blockStart = catchMatch.index + catchMatch[0].length;
     const block = cleaned.slice(blockStart, blockStart + 800);
     if (!STRUCTURED_THROW_RE.test(block)) continue;
-    // `cause: errorVar` or `cause: e` somewhere in the block satisfies the rule.
-    const causeRe = new RegExp(String.raw`cause\s*:\s*${errorVar}\b`);
+    // `cause: errorVar` somewhere in the block satisfies the rule — as does the
+    // `{ cause }` shorthand when the binding is itself named `cause`, which is
+    // also how Bun's transpiler prints `{ cause: cause }`.
+    const causeRe =
+      errorVar === 'cause'
+        ? /cause\s*:\s*cause\b|[{,]\s*cause\s*[,}]/
+        : new RegExp(String.raw`cause\s*:\s*${errorVar}\b`);
     if (causeRe.test(block)) continue;
     diagnostics.push({
       rule: 'preserve-cause-on-rethrow',
