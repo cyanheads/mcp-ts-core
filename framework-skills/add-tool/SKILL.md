@@ -19,8 +19,8 @@ Tools use the `tool()` builder from `@cyanheads/mcp-ts-core`. Each tool lives in
 2. **Determine if it needs input the caller may not supply** — a confirmation, a choice, the client's roots — which makes it a multi-round-trip handler (`ctx.requestInput` / `ctx.inputs`, see `api-context`)
 3. **Create the file** at `src/mcp-server/tools/definitions/{{tool-name}}.tool.ts`
 4. **Register** the tool in the project's existing `createApp()` tool list (directly in `src/index.ts` for fresh scaffolds, or via a barrel if the repo already has one)
-5. **Run `bun run devcheck`** to verify — if Biome reports formatting issues, run `bun run format` to auto-fix, then re-run devcheck
-6. **Smoke-test** with `bun run rebuild && bun run start:stdio` (or `start:http`)
+5. **Run `bun run devcheck`** to verify — it applies Biome's formatting fixes as it runs
+6. **Smoke-test** with `bun run rebuild && bun run start:stdio < /dev/null` (or `start:http`) — the `Core services constructed` log record must list the new tool in its `tools` field (the message text shows only counts); if it doesn't, the tool never reached `createApp()`
 
 ## Naming
 
@@ -895,4 +895,4 @@ return { items: hits };
 - [ ] Registered in the project's existing `createApp()` tool list (directly or via barrel)
 - [ ] Test file created via `add-test` skill, or handler tested directly with `createMockContext()`
 - [ ] `bun run devcheck` passes
-- [ ] Smoke-tested with `bun run rebuild && bun run start:stdio` (or `start:http`)
+- [ ] Smoke-tested with `bun run rebuild && bun run start:stdio < /dev/null` (or `start:http`); the `Core services constructed` record lists the new tool in its `tools` field

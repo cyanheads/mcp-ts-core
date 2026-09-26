@@ -100,9 +100,8 @@ await createApp({
   tools: allToolDefinitions,
   resources: allResourceDefinitions,
   prompts: allPromptDefinitions,
-  instructions:                     // server-level orientation, sent on every initialize
-    'Pre-configured shortcuts:\n- `default` → production API\n' +
-    'Other endpoints reachable via `connect({ baseUrl })`.',
+  instructions:                     // server-level orientation, sent on every initialize — one literal, a few sentences
+    'Calls reach the production API by default. Pass `baseUrl` to `connect` to reach another endpoint.',
   extensions: {                     // SEP-2133 extensions advertised in capabilities
     'vendor/my-extension': { /* extension config */ },
   },
@@ -238,7 +237,7 @@ export const myTool = tool('my_tool', {
 });
 ```
 
-**Steps:** Create `src/mcp-server/tools/definitions/[name].tool.ts` (kebab-case) → use `tool('snake_case', {...})` with Zod `.describe()` on all fields → implement `handler(input, ctx)` (pure, throws on failure) → add `auth`/`format` if needed → register in `definitions/index.ts` → `bun run devcheck` → smoke-test with `bun run rebuild && bun run start:stdio` (or `start:http`).
+**Steps:** Create `src/mcp-server/tools/definitions/[name].tool.ts` (kebab-case) → use `tool('snake_case', {...})` with Zod `.describe()` on all fields → implement `handler(input, ctx)` (pure, throws on failure) → add `auth`/`format` if needed → register in `definitions/index.ts` → `bun run devcheck` → smoke-test with `bun run rebuild && bun run start:stdio < /dev/null` (or `start:http`) and confirm the `Core services constructed` log record lists the tool in its `tools` field (the message text shows only counts).
 
 **Schema constraint:** Input/output schemas must use JSON-Schema-serializable Zod types only. The MCP SDK converts schemas to JSON Schema for `tools/list` — non-serializable types (`z.custom()`, `z.date()`, `z.transform()`, `z.bigint()`, `z.symbol()`, `z.void()`, `z.map()`, `z.set()`, `z.function()`, `z.nan()`) cause a hard runtime failure. Use structural equivalents instead (e.g., `z.string()` with `.describe('ISO 8601 date')` instead of `z.date()`). The `schema-serializable` lint rule catches this at build time (`bun run lint:mcp` / `devcheck`).
 
@@ -545,10 +544,10 @@ Skills live in `framework-skills/<name>/SKILL.md`; the full list is discoverable
 - **Auth:** via `auth: ['scope']` on definitions (not HOF wrapper)
 - **Missing input:** read `ctx.inputs` first, then `return ctx.requestInput(...)`
 - **Pagination:** large resource lists use `extractCursor`/`paginateArray`
-- **Registration:** definitions exported in `definitions/index.ts` barrel
+- **Registration:** definitions collected in the `definitions/index.ts` barrel's array passed to `createApp()` — an `export` line alone registers nothing
 - **Tests:** `createMockContext()`, `.handler()` tested directly
 - **Gate:** `bun run devcheck` passes (includes MCP definition linting)
-- **Smoke-test:** `bun run rebuild && bun run start:stdio` (or `start:http`)
+- **Smoke-test:** `bun run rebuild && bun run start:stdio < /dev/null` (or `start:http`); the `Core services constructed` log record lists every definition in its `tools` / `resources` / `prompts` fields
 
 ---
 

@@ -4,7 +4,7 @@ description: >
   Scaffold an MCP App tool + UI resource pair. Use when the user asks to add a tool with interactive UI, create an MCP App, or build a visual/interactive tool.
 metadata:
   author: cyanheads
-  version: "1.6"
+  version: "1.7"
   audience: external
   type: reference
 ---
@@ -40,7 +40,7 @@ For the full API, Context interface, and error codes, read the framework's `CLAU
 4. **Create the app resource** at `src/mcp-server/resources/definitions/{{tool-name}}-ui.app-resource.ts`
 5. **Register both** in the project's existing `createApp()` arrays (directly in `src/index.ts` for fresh scaffolds, or via barrels if the repo already has them)
 6. **Run `bun run devcheck`** — the linter validates `_meta.ui` and cross-checks tool/resource pairing
-7. **Smoke-test** with `bun run rebuild && bun run start:stdio` (or `start:http`)
+7. **Smoke-test** with `bun run rebuild && bun run start:stdio < /dev/null` (or `start:http`) — the `Core services constructed` log record must list the tool in its `tools` field and its UI resource in `resources` (the message text shows only counts)
 
 ## App Tool Template
 
@@ -235,4 +235,4 @@ If the repo already uses `definitions/index.ts` barrels, update those instead of
 - [ ] Both registered in the project's existing `createApp()` arrays (directly or via barrels)
 - [ ] Handler tested directly via `createMockContext()`, or `add-test` skill run to scaffold the test file
 - [ ] `bun run devcheck` passes (linter validates `_meta.ui` and tool/resource pairing)
-- [ ] Smoke-tested with `bun run rebuild && bun run start:stdio` (or `start:http`)
+- [ ] Smoke-tested with `bun run rebuild && bun run start:stdio < /dev/null` (or `start:http`); the `Core services constructed` record lists the tool in `tools` and its UI resource in `resources`
