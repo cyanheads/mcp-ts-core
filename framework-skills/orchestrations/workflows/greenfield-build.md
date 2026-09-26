@@ -71,7 +71,7 @@ Each phase's Objective column is the goal state per target — the verifiable en
 | 15 | Final-state check | `rebuild` + `devcheck` + `test:all` + `lint:packaging` green; LICENSE present; no unfinished TODO/FIXME | orchestrator-direct | gate-free |
 | 16 | Pre-launch commit | Final polish + security work committed and pushed | parallel fanout | **barrier** — human decision: version-bump intent (typically v0.1.1) |
 | 17 | Final wrap-up | Launch version (typically v0.1.1) release commit on top of the stack — on `main`, or on a pushed `release/<version>` branch with the PR open in release PR mode; no tag | parallel fanout (Bash git only) | **barrier** — release authorization required before push and publish |
-| 18 | Release | Repo public when the release is public; merged (release PR mode), tagged, pushed, and published per scope; tag annotation renders as structured markdown on GitHub Release; artifacts reachable | parallel fanout or serial (per npm 2FA mode) | — |
+| 18 | Release | Repo public when the release is public; merged (release PR mode), tagged, pushed, and published per scope; tag annotation passes `bun run release:github -- --check`, so the GitHub Release renders a flat headline digest; artifacts reachable | parallel fanout or serial (per npm 2FA mode) | — |
 
 Phase 11 is optional. Phase 12 is the last phase that modifies source code — everything after is docs/metadata/verification.
 
@@ -117,7 +117,7 @@ Orchestrator-direct mechanical verification per target: `bun run rebuild`, `bun 
 Version bump intent is typically **patch** — v0.1.0 was the scaffold tag; the launch is the first real release at v0.1.1. Runs `git-wrapup` end to end, Bash git only. In release PR mode it pushes `release/<version>` and opens the PR; otherwise nothing is pushed. No tag — Phase 18 merges, tags, pushes `main`, and publishes.
 
 ### Phase 18: Release
-`release-and-publish` never changes repo visibility. When the release is public, the orchestrator makes the repo public before the release runs: scan the full git history (not just tracked files) for secrets and private content, since every commit goes public, then `gh repo edit <owner>/<repo> --visibility public --accept-visibility-change-consequences`. Publishing from a still-private repo leaves the npm repository link, the GitHub Release, and the `.mcpb` download URL unreachable. Right after the flip, before the release PR opens, run `gh workflow enable CodeQL`. The template has no `workflow_dispatch`, so the release PR's `pull_request` event runs the first scan. Wait on that check, then read the PR's open alerts with `gh api 'repos/<owner>/<repo>/code-scanning/alerts?ref=refs/pull/<N>/merge&state=open'`. The Analyze job passes even when alerts are open, so the check conclusion alone proves nothing. Land a real finding as a commit on the release branch before merging.
+`release-and-publish` never changes repo visibility. When the release is public, the orchestrator makes the repo public before the release runs: scan the full git history (not just tracked files) for secrets and private content, since every commit goes public, then `gh repo edit <owner>/<repo> --visibility public --accept-visibility-change-consequences`. Publishing from a still-private repo leaves the npm repository link, the GitHub Release, and the `.mcpb` download URL unreachable. Right after the flip, run `gh workflow enable CodeQL`. Enabling it starts no scan: the template has no `workflow_dispatch`, and in release PR mode the PR opened in Phase 17, while the workflow was still disabled. Close and reopen the PR (`gh pr close <N> && gh pr reopen <N>`) — the `reopened` event is a `pull_request` event, and it runs the first scan. Without a release PR, the push to `main` runs it. Wait on that check, then read the PR's open alerts with `gh api 'repos/<owner>/<repo>/code-scanning/alerts?ref=refs/pull/<N>/merge&state=open'`. The Analyze job passes even when alerts are open, so the check conclusion alone proves nothing. Land a real finding as a commit on the release branch before merging.
 
 ## Workflow-specific gotchas
 
@@ -128,7 +128,7 @@ Version bump intent is typically **patch** — v0.1.0 was the scaffold tag; the 
 | 3 | Design gate sub-agents flag style preferences as failures | Gate prompt: "Do NOT flag style preferences or marginal scope suggestions — only structural issues that would cause wasted build effort" |
 | 4 | Sub-agent commits during Phase 1 despite the orchestration override | Phase 1 prompt restates: "Do NOT commit — leave working tree dirty for Phase 2" verbatim |
 | 5 | A checkpoint commit routed through `git-wrapup` end to end bumps the version mid-build, or opens a release PR in release PR mode | Checkpoint commits use `git-wrapup`'s commit conventions only (see "Checkpoint commits"); the full skill runs once, in Phase 17 |
-| 6 | The scaffolded CodeQL workflow fails on every push while the repo is private (no code scanning there) | Disable it after the Phase 2 push and re-enable it after the Phase 18 visibility flip, before the release PR opens (see Phases 2 and 18) |
+| 6 | The scaffolded CodeQL workflow fails on every push while the repo is private (no code scanning there) | Disable it after the Phase 2 push. After the Phase 18 visibility flip, re-enable it, then close and reopen the release PR, whose `opened` event fired while the workflow was off (see Phases 2 and 18) |
 
 ## Checklist
 
@@ -150,4 +150,4 @@ Version bump intent is typically **patch** — v0.1.0 was the scaffold tag; the 
 - [ ] Phase 15: final-state check — rebuild + devcheck + test:all + lint:packaging green; LICENSE; no TODO/FIXME
 - [ ] Phase 16: pre-launch commit per target
 - [ ] Phase 17: final wrap-up — version bumped, changelog authored, release commit per target (release PR open in release PR mode); no tag
-- [ ] Phase 18: release — repo public first when the release is public (full-history scan clean), CodeQL re-enabled and the release PR's code-scanning alerts read, published per scope, artifacts verified reachable; field-test issues closed with the version that fixed them
+- [ ] Phase 18: release — repo public first when the release is public (full-history scan clean), CodeQL re-enabled, the release PR closed and reopened so its first scan runs, and its code-scanning alerts read, published per scope, artifacts verified reachable; field-test issues closed with the version that fixed them
