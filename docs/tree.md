@@ -1,6 +1,6 @@
 # mcp-ts-core - Directory Structure
 
-Generated on: 2026-09-26 19:04:05
+Generated on: 2026-09-26 23:52:25
 
 ```text
 mcp-ts-core/
@@ -266,6 +266,7 @@ mcp-ts-core/
 │   ├── devcheck.ts
 │   ├── devdocs.ts
 │   ├── fetch-openapi-spec.ts
+│   ├── install-otel.ts
 │   ├── lint-mcp.ts
 │   ├── lint-packaging.ts
 │   ├── list-skills.ts
@@ -664,7 +665,8 @@ mcp-ts-core/
 │   │   ├── server-context.ts
 │   │   ├── server-process.ts
 │   │   ├── standalone-worker.ts
-│   │   └── stdio-session.ts
+│   │   ├── stdio-session.ts
+│   │   └── tool-result.ts
 │   ├── integration/
 │   │   ├── cache-hints.int.test.ts
 │   │   ├── completions.int.test.ts
@@ -831,6 +833,8 @@ mcp-ts-core/
 │   │   │   │   ├── heartbeat.test.ts
 │   │   │   │   └── manager.test.ts
 │   │   │   ├── handlerContext.test.ts
+│   │   │   ├── inputRequired.serving.test.ts
+│   │   │   ├── inputRequired.test.ts
 │   │   │   ├── notifications.test.ts
 │   │   │   └── server.test.ts
 │   │   ├── packaging/
@@ -858,6 +862,7 @@ mcp-ts-core/
 │   │   │   ├── devcheck-worker-tsconfig.test.ts
 │   │   │   ├── devdocs.test.ts
 │   │   │   ├── husky-pre-commit.test.ts
+│   │   │   ├── install-otel.test.ts
 │   │   │   ├── lint-mcp.test.ts
 │   │   │   ├── lint-packaging.test.ts
 │   │   │   ├── release-github.test.ts
@@ -1014,6 +1019,7 @@ mcp-ts-core/
 │   │   ├── fetch-with-timeout.worker.test.ts
 │   │   ├── lifecycle-failures.worker.test.ts
 │   │   ├── logger-shutdown.worker.test.ts
+│   │   ├── request-state.worker.test.ts
 │   │   ├── storage-d1.worker.test.ts
 │   │   ├── storage-failures.worker.test.ts
 │   │   ├── storage-provider-compliance.worker.test.ts

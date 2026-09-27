@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.13.10](changelog/0.13.x/0.13.10.md) — 2026-09-26 · 🛡️ Security
+
+A client can no longer pre-answer a consent gate with a response its declared capabilities do not cover, framework-built errors carry their request ID and fill a declared recovery hint, and multi-arch Docker builds stop running Bun under QEMU.
+
 ## [0.13.9](changelog/0.13.x/0.13.9.md) — 2026-09-26 · 🛡️ Security
 
 Canvas scratch files move into a private directory, a JSON-stringified object or an integer sent for a string is repaired before the schema rejects it, and argument rejections name the field paths and key rewrites behind them.
