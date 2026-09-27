@@ -188,10 +188,10 @@ function tryReadJson<T>(path: string): T | undefined {
  * to evaluate which paths survive the ignore rules. Returns an array of error
  * strings; empty means all checks passed.
  *
- * **Context note:** this guard runs inside the scaffolded server project, not
- * inside mcp-ts-core itself. `ignore` is listed in `templates/package.json`
- * devDependencies (`^7.0.5`) and is therefore available in the server's
- * `node_modules` when `bun run lint:packaging` is invoked there.
+ * **Context note:** `ignore` is a devDependency of the framework and of every
+ * scaffold (`templates/package.json`), so it resolves wherever
+ * `bun run lint:packaging` runs against an `.mcpbignore` — a server project, or
+ * mcp-ts-core itself. Where it cannot load, the guard is skipped.
  */
 interface IgnoreMatcher {
   add(patterns: string[]): IgnoreMatcher;
