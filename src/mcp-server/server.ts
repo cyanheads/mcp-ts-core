@@ -18,7 +18,7 @@ import {
 
 import type { AppConfig } from '@/config/index.js';
 import type { CacheHints } from '@/mcp-server/cacheHints.js';
-import { createInputRequiredGate } from '@/mcp-server/inputRequired.js';
+import { clientCapabilityView, type RequestStateSealer } from '@/mcp-server/inputRequired.js';
 import type { PromptRegistry } from '@/mcp-server/prompts/prompt-registration.js';
 import type { ResourceRegistry } from '@/mcp-server/resources/resource-registration.js';
 import { installResourceSubscriptions } from '@/mcp-server/resources/resourceSubscriptions.js';
@@ -68,6 +68,14 @@ export interface McpServerDeps {
    */
   notifier?: ServerNotifier;
   promptRegistry: PromptRegistry;
+  /**
+   * The process's `requestState` sealer, built once from
+   * `MCP_REQUEST_STATE_KEY`. Its `verify` becomes the instance's
+   * `requestState.verify`, so every echoed state is checked before a handler
+   * runs, on the 2025-era shim's rounds as on 2026-07-28 retries. Absent when
+   * no key is configured, and the SDK then receives no `requestState` option.
+   */
+  requestState?: RequestStateSealer;
   resourceRegistry: ResourceRegistry;
   /**
    * Human-readable display name forwarded to `new McpServer({ serverInfo })`.
@@ -130,8 +138,11 @@ export async function createMcpServerInstance(deps: McpServerDeps): Promise<McpS
       // `elicitation/create` round trips over the live session) on 2025-era
       // ones, so handlers are written once.
       inputRequired: { legacyShim: true },
+      ...(deps.requestState && { requestState: { verify: deps.requestState.verify } }),
     },
   );
+
+  const era = deps.era ?? 'legacy';
 
   // The `resources/subscribe` registry is a 2025-era mechanism: the method
   // does not exist on 2026-07-28, where the client opts in through
@@ -139,18 +150,15 @@ export async function createMcpServerInstance(deps: McpServerDeps): Promise<McpS
   // modern instance would leave the registry permanently empty and silently
   // drop every `ctx.notifyResourceUpdated(uri)` — the notifiers read `undefined`
   // as "no subscription tracking on this connection" and emit unconditionally.
-  const subscriptions =
-    (deps.era ?? 'legacy') === 'legacy' ? installResourceSubscriptions(server) : undefined;
+  const subscriptions = era === 'legacy' ? installResourceSubscriptions(server) : undefined;
 
-  // The capability gate on `ctx.requestInput(...)` is a 2025-era mechanism too:
-  // there the refusal comes from the SDK's legacy shim, above the handler
-  // callback, where a factory can no longer shape it into an error envelope
-  // (#379). A modern instance is gated by the SDK itself, before any result
-  // leaves, so it takes no gate.
-  const inputGate =
-    (deps.era ?? 'legacy') === 'legacy'
-      ? createInputRequiredGate(() => server.server.getClientCapabilities())
-      : undefined;
+  // What the client declared, resolved per request from the source this era
+  // has (#580): the `initialize` value on a 2025-era instance, the request's
+  // envelope on a modern one. One view per instance feeds
+  // `ctx.clientCapabilities`, the filter over `ctx.inputs` (#496), and — on
+  // the 2025-era arm only, where the SDK's shim refusal cannot be shaped into
+  // an error envelope (#379) — the gate `ctx.requestInput` runs.
+  const capabilities = clientCapabilityView(era, server);
 
   try {
     logger.debug('Registering all MCP capabilities via registries...', context);
@@ -158,11 +166,11 @@ export async function createMcpServerInstance(deps: McpServerDeps): Promise<McpS
     // The bus reaches a modern instance only. Passing it to a legacy one would
     // route `ctx.notify*` away from the live session that can actually deliver
     // it — the 2025 era has no `subscriptions/listen` stream to publish to.
-    const bus = (deps.era ?? 'legacy') === 'modern' ? deps.notifier : undefined;
+    const bus = era === 'modern' ? deps.notifier : undefined;
 
     await Promise.all([
-      deps.toolRegistry.registerAll(server, subscriptions, bus, inputGate),
-      deps.resourceRegistry.registerAll(server, subscriptions, bus, inputGate),
+      deps.toolRegistry.registerAll(server, subscriptions, bus, capabilities),
+      deps.resourceRegistry.registerAll(server, subscriptions, bus, capabilities),
       deps.promptRegistry.registerAll(server),
     ]);
 

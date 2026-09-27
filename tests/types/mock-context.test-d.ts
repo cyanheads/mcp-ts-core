@@ -7,7 +7,7 @@
  * @module tests/types/mock-context.test-d
  */
 
-import type { Context } from '@cyanheads/mcp-ts-core';
+import type { ClientCapabilities, Context } from '@cyanheads/mcp-ts-core';
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { createMockContext, createMockSession } from '@cyanheads/mcp-ts-core/testing';
@@ -101,6 +101,23 @@ describe('createMockContext — contract dimension', () => {
   it('stays assignable to Context when other options are supplied', () => {
     const ctx = createMockContext({ tenantId: 'tenant-a', requestId: 'req-1' });
     expectTypeOf(ctx).toExtend<Context>();
+  });
+});
+
+describe('createMockContext — client capabilities (#580)', () => {
+  it('types ctx.clientCapabilities as the SDK shape, or undefined when no view exists', () => {
+    const ctx = createMockContext({ clientCapabilities: { roots: {}, elicitation: { form: {} } } });
+    expectTypeOf(ctx.clientCapabilities).toEqualTypeOf<ClientCapabilities | undefined>();
+  });
+
+  it('accepts the capabilities on createMockSession too', () => {
+    const session = createMockSession({ clientCapabilities: {} });
+    expectTypeOf(session.ctx.clientCapabilities).toEqualTypeOf<ClientCapabilities | undefined>();
+  });
+
+  it('rejects a value that is not a capabilities object', () => {
+    // @ts-expect-error — capabilities are an object keyed by capability name
+    createMockContext({ clientCapabilities: 'roots' });
   });
 });
 

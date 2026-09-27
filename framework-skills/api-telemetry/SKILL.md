@@ -4,7 +4,7 @@ description: >
   Catalog of OpenTelemetry instrumentation built into framework `@cyanheads/mcp-ts-core` — spans, metrics, completion logs, env config, runtime caveats, custom instrumentation patterns, and cardinality rules. Use when enabling OTel export, adding custom spans or metrics in services, debugging missing telemetry, looking up attribute names, or deciding what's safe to put on a metric attribute vs. a span.
 metadata:
   author: cyanheads
-  version: "1.15"
+  version: "1.16"
   audience: external
   type: reference
 ---
@@ -214,15 +214,17 @@ A dashboard reading `error_category` alone therefore no longer needs to special-
 A definition may put `severity` on an `errors[]` entry — `debug`, `info`, `notice`, or `warning` — for an outcome it models rather than suffers. Two things move, and nothing else:
 
 - The `Error in tool:<name>` log record is emitted at that level instead of `error`, with the same message and structured fields.
-- `mcp.errors.classified` gains `mcp.error.severity` on that record. It is set only when a declared severity resolved, so a server that declares none emits exactly the series it did before.
+- `mcp.errors.classified` gains `mcp.error.severity` on that record. It is set only when a severity resolved below `error`.
 
-The call still failed: the execution span keeps `SpanStatusCode.ERROR` and its recorded exception, `mcp.tool.calls` / `mcp.tool.duration` / `mcp.tool.errors` record the same values, and the completion log still reads `isSuccess: false`. Splitting those series on an authoring decision would redefine what an error rate means. Tools only — resources re-throw for the SDK to log. A cancelled request keeps its own `info`, stack-free path whatever the contract declares. See `api-errors`.
+The framework's own refusals resolve one without a declaration: an argument rejection (`invalid_arguments`) and a `ctx.requestInput` the client connection cannot serve (`client_capability_missing`) log at `notice`, so even a server that declares no severity sees `mcp.error.severity: "notice"` on those `mcp.errors.classified` increments — a bounded split a dashboard can use to separate caller rejections from faults. An argument rejection opens no execution span and reaches no call counter either way; it still counts once on `mcp.tool.rejections`.
+
+The call still failed: the execution span keeps `SpanStatusCode.ERROR` and its recorded exception, `mcp.tool.calls` / `mcp.tool.duration` / `mcp.tool.errors` record the same values, and the completion log still reads `isSuccess: false`. Splitting those series on an authoring decision would redefine what an error rate means. Tools only — resources write no failure record of their own. A cancelled request keeps its own `info`, stack-free path whatever the contract declares. See `api-errors`.
 
 ### Errors, rate limits, HTTP client
 
 | Metric | Type | Unit | Attributes |
 |:-------|:-----|:-----|:-----------|
-| `mcp.errors.classified` | counter | `{errors}` | `mcp.error.classified_code` (JSON-RPC code), `mcp.error.category` (`upstream`/`server`/`client`, as in [Error category](#error-category)), `operation`, and `mcp.error.severity` when the failure's declared severity resolved |
+| `mcp.errors.classified` | counter | `{errors}` | `mcp.error.classified_code` (JSON-RPC code), `mcp.error.category` (`upstream`/`server`/`client`, as in [Error category](#error-category)), `operation`, and `mcp.error.severity` when a tool failure's level resolved below `error` — a declared severity, or `notice` for an `invalid_arguments` / `client_capability_missing` refusal |
 | `mcp.ratelimit.rejections` | counter | `{rejections}` | — (the rate-limit key is caller-supplied and typically per-client, so it would materialize an unbounded series in the meter; per-key attribution lives on the span instead) |
 | `http.client.request.duration` | histogram | `s` | `http.request.method`, `server.address`, `http.response.status_code` (when > 0; absent on network errors before a response is received) |
 
@@ -245,17 +247,19 @@ Auto-registered when `process.memoryUsage` / `process.uptime` / `perf_hooks` are
 
 Every framework log record carries `requestId`, `traceId`, `spanId`, and `tenantId` from the request context, so every log line is searchable by trace. `@opentelemetry/instrumentation-pino` does not touch these records: it patches only a `pino` loaded after the SDK starts. To ship the records to the same backend as traces, set `OTEL_EXPORTER_OTLP_LOGS_ENDPOINT` (see Enabling export).
 
-For domain logging inside handlers, use `ctx.log` (`debug`/`info`/`notice`/`warning`/`error`) — auto-includes `requestId`, `traceId`, `tenantId`, `spanId`. The completion log emitted at the end of every handler carries a `metrics` payload, with fields tuned to each surface:
+For domain logging inside handlers, use `ctx.log` (`debug`/`info`/`notice`/`warning`/`error`) — auto-includes `requestId`, `traceId`, `tenantId`, `spanId`. The completion log emitted at the end of every handler — at `info`, whatever the outcome — carries a `metrics` payload, with fields tuned to each surface:
 
 | Handler | Log message | `metrics` fields |
 |:--------|:------------|:-----------------|
 | Tool | `Tool execution finished.` | `durationMs`, `isSuccess`, `errorCode`, `inputBytes`, `outputBytes`, plus `partialSuccess` / `batchSucceeded` / `batchFailed` when the result is a partial-success batch |
 | Resource | `Resource read finished.` | `durationMs`, `isSuccess`, `errorCode`, `outputBytes`, `uri`, `mimeType` |
-| Prompt | `Prompt generation finished.` (or `failed.`) | `durationMs`, `isSuccess`, `errorCode`, `inputBytes`, `outputBytes`, `messageCount` |
+| Prompt | `Prompt generation finished.` | `durationMs`, `isSuccess`, `errorCode`, `inputBytes` (0 for a prompt declaring no arguments), `outputBytes`, `messageCount` |
+
+A failed tool call or prompt adds exactly one `Error in tool:<name>` / `Error in prompt:<name>` record. Each call — prompts included — logs under its own `requestId`, and the client receives that value as `data.requestId` on the call's error envelope, so a reported failure resolves to its records.
 
 ### Failed-call payloads
 
-Off by default. With `LOG_TOOL_FAILURE_PAYLOADS=true`, a failed tool call writes one more record right after its `Error in tool:<name>` record: message `Tool failure payload: <name>`, the same request context (`requestId`, `traceId`, `spanId`, `toolName`), and the same level, a declared `severity` included.
+Off by default. With `LOG_TOOL_FAILURE_PAYLOADS=true`, a failed tool call writes one more record right after its `Error in tool:<name>` record: message `Tool failure payload: <name>`, the same request context (`requestId`, `traceId`, `spanId`, `toolName`), and the same level, a declared `severity` and the `notice` of an argument rejection included. A payload record below `MCP_LOG_LEVEL` is dropped with its `Error in tool:` record, so at `warning` or above an argument rejection writes neither.
 
 | Field | Content |
 |:------|:--------|

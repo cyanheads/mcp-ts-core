@@ -13,7 +13,6 @@ import { lintEnrichmentContract } from './enrichment-rules.js';
 import {
   lintErrorContract,
   lintErrorContractConformance,
-  lintErrorContractRecoveryUnforwarded,
   lintErrorContractUnthrown,
 } from './error-contract-rules.js';
 import { lintFormatParity } from './format-parity-rules.js';
@@ -135,7 +134,6 @@ export function lintToolDefinition(
     diagnostics.push(...lintErrorContract(d.errors, 'tool', displayName));
     diagnostics.push(...lintErrorContractConformance(contractDef, 'tool', displayName));
     diagnostics.push(...lintErrorContractUnthrown(contractDef, 'tool', displayName));
-    diagnostics.push(...lintErrorContractRecoveryUnforwarded(contractDef, 'tool', displayName));
   }
 
   return diagnostics;

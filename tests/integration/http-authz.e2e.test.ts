@@ -135,10 +135,12 @@ describe('HTTP auth authorization e2e', () => {
       });
 
       expect(protectedResult.isError).toBe(true);
+      // The request id is the only data: the refusal withholds the scope names (#576).
       expect(protectedResult.structuredContent).toEqual({
         error: {
           code: expect.any(Number),
           message: expect.stringContaining('Insufficient permissions.'),
+          data: { requestId: expect.any(String) },
         },
       });
       expect(protectedResult.content).toContainEqual({
@@ -180,6 +182,7 @@ describe('HTTP auth authorization e2e', () => {
           error: {
             code: expect.any(Number),
             message: expect.stringContaining('Insufficient permissions.'),
+            data: { requestId: expect.any(String) },
           },
         });
       });

@@ -8,7 +8,7 @@ import {
   type ServerNotifier,
 } from '@modelcontextprotocol/server';
 
-import type { InputRequiredGate } from '@/mcp-server/inputRequired.js';
+import type { ClientCapabilityView } from '@/mcp-server/inputRequired.js';
 import type { ResourceSubscriptions } from '@/mcp-server/notifications.js';
 import type { AnyResourceDefinition } from '@/mcp-server/resources/utils/resourceDefinition.js';
 import {
@@ -36,12 +36,14 @@ export class ResourceRegistry {
 
   /**
    * Registers all resolved resource definitions with the provided McpServer instance.
+   * `capabilities` is the instance's view of what its client declared (#580),
+   * which every handler context resolves per request.
    */
   public async registerAll(
     server: McpServer,
     subscriptions?: ResourceSubscriptions,
     bus?: ServerNotifier,
-    inputGate?: InputRequiredGate,
+    capabilities?: ClientCapabilityView,
   ): Promise<void> {
     this.registeredNames.clear();
 
@@ -68,7 +70,7 @@ export class ResourceRegistry {
     // declared `resources` capability, so a server with no resources still
     // answers `resources/list` with an empty array rather than `-32601`.
     for (const resourceDef of this.resourceDefs) {
-      await this.registerResource(server, resourceDef, notifiers, inputGate);
+      await this.registerResource(server, resourceDef, notifiers, capabilities);
     }
   }
 
@@ -87,7 +89,7 @@ export class ResourceRegistry {
     server: McpServer,
     def: AnyResourceDefinition,
     notifiers: NotifierSources,
-    inputGate?: InputRequiredGate,
+    capabilities?: ClientCapabilityView,
   ): Promise<void> {
     const resourceName = def.name ?? def.uriTemplate;
     const registrationContext = requestContextService.createRequestContext({
@@ -101,7 +103,7 @@ export class ResourceRegistry {
 
     await ErrorHandler.tryCatch(
       () => {
-        const handler = createResourceHandler(def, this.services, notifiers, inputGate);
+        const handler = createResourceHandler(def, this.services, notifiers, capabilities);
         const title = def.title ?? resourceName;
         const mimeType = def.mimeType ?? 'application/json';
         const metadata = {

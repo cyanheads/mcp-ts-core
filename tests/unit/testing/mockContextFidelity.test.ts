@@ -70,7 +70,7 @@ function makeRealContext(overrides: Partial<ContextDeps> = {}) {
   return createContext({
     appContext: makeRequestContext((overrides as any).appContextOverrides),
     defaultTenantId: 'default',
-    inputs: createContextInputs(undefined),
+    inputs: createContextInputs(undefined, undefined),
     logger: mockLogger as unknown as Logger,
     requestInput: createRequestInput(),
     storage: createFakeStorage() as unknown as ContextDeps['storage'],
@@ -97,6 +97,17 @@ describe('createMockContext fidelity', () => {
         expect(real, `real still has ${key}`).not.toHaveProperty(key);
         expect(mock, `mock still has ${key}`).not.toHaveProperty(key);
       }
+    });
+
+    it('both carry clientCapabilities, undefined until a view is supplied (#580)', () => {
+      const declared = { roots: {} };
+
+      expect(Object.hasOwn(makeRealContext(), 'clientCapabilities')).toBe(true);
+      expect(Object.hasOwn(createMockContext(), 'clientCapabilities')).toBe(true);
+      expect(createMockContext().clientCapabilities).toBe(makeRealContext().clientCapabilities);
+      expect(createMockContext({ clientCapabilities: declared }).clientCapabilities).toEqual(
+        makeRealContext({ clientCapabilities: declared }).clientCapabilities,
+      );
     });
   });
 
@@ -138,8 +149,12 @@ describe('createMockContext fidelity', () => {
       const requestState = { attempt: 2 };
       const schema = z.object({ ok: z.boolean() });
 
+      // A client that declared elicitation, so production's filter keeps the
+      // elicit results; the unseeded mock does not filter at all.
       const real = makeRealContext({
-        inputs: createContextInputs(makeServerContext({ inputResponses, requestState }).mcpReq),
+        inputs: createContextInputs(makeServerContext({ inputResponses, requestState }).mcpReq, {
+          elicitation: {},
+        }),
       });
       const mock = createMockContext({ inputResponses, requestState });
 
@@ -168,6 +183,28 @@ describe('createMockContext fidelity', () => {
 
       // state(): the round's multi-round-trip state.
       expect(mock.inputs.state()).toEqual(real.inputs.state());
+    });
+
+    it.each([
+      ['elicitation only', { elicitation: {} }],
+      ['sampling and roots', { sampling: {}, roots: {} }],
+      ['nothing', {}],
+    ])('a seeded clientCapabilities filters ctx.inputs as production does (%s)', (_l, declared) => {
+      const inputResponses = {
+        confirm: { action: 'accept', content: { ok: true } },
+        summary: { role: 'assistant', content: { type: 'text', text: 'hi' }, model: 'm' },
+        roots: { roots: [{ uri: 'file:///work' }] },
+        junk: { unrelated: true },
+      };
+      const real = makeRealContext({
+        inputs: createContextInputs(makeServerContext({ inputResponses }).mcpReq, declared),
+      });
+      const mock = createMockContext({ inputResponses, clientCapabilities: declared });
+
+      expect(mock.inputs.responses).toEqual(real.inputs.responses);
+      for (const key of Object.keys(inputResponses)) {
+        expect(mock.inputs.view(key)).toEqual(real.inputs.view(key));
+      }
     });
 
     it('both leave ctx.inputs empty on the first round', () => {

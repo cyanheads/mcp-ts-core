@@ -3,7 +3,9 @@
  * tool handler factory. Every case drives both paths with the same definition
  * and the same arguments and compares the two results to each other — never to
  * a hand-written literal, which is how the two drifted apart in the first
- * place.
+ * place. The one sanctioned difference is the request id the factory adds and
+ * the helper, having no real request, never does (#576); it is stripped from
+ * the production side before each comparison.
  * @module tests/testing/run-tool-contract-parity.test
  */
 
@@ -22,17 +24,18 @@ import { runToolContract } from '@/testing/index.js';
 import { JsonRpcErrorCode, McpError } from '@/types-global/errors.js';
 import { withRetry } from '@/utils/network/retry.js';
 import { makeServerContext } from '../../helpers/server-context.js';
+import { withoutRequestId } from '../../helpers/tool-result.js';
 
 const services = {} as HandlerServices;
 const notifiers: NotifierSources = {};
 
-/** Drives the production factory for a definition + raw arguments. */
+/** Drives the production factory for a definition + raw arguments, minus its request id. */
 async function viaFactory(
   definition: AnyToolDefinition,
   args: Record<string, unknown>,
 ): Promise<CallToolResult> {
   const handler = createToolHandler(definition, services, notifiers);
-  return (await handler(args, makeServerContext())) as CallToolResult;
+  return withoutRequestId((await handler(args, makeServerContext())) as CallToolResult);
 }
 
 /** The error envelope both paths publish, narrowed for assertions. */
@@ -172,6 +175,48 @@ describe('runToolContract classification that must not move', () => {
   });
 });
 
+// Issue #579 — a declared reason thrown without a recovery gets the entry's
+// recovery in the helper exactly as in production.
+describe('runToolContract declared recovery fill', () => {
+  const contract = [
+    {
+      reason: 'no_match',
+      code: JsonRpcErrorCode.NotFound,
+      when: 'No record matched the query.',
+      recovery: 'Search with broader terms before fetching by ID.',
+    },
+  ] as const;
+
+  it.each([
+    ['a bare ctx.fail', (ctx: any) => ctx.fail('no_match')],
+    [
+      'a service throw with a declared reason and another code',
+      () =>
+        new McpError(JsonRpcErrorCode.ServiceUnavailable, 'Upstream refused.', {
+          reason: 'no_match',
+        }),
+    ],
+  ])('publishes the production envelope for %s', async (_label, fail) => {
+    const definition = tool('parity_fill', {
+      description: 'Fails with a declared reason.',
+      input: z.object({}),
+      output: z.object({ ok: z.boolean().describe('Never returned.') }),
+      errors: contract,
+      handler: (_input, ctx) => {
+        throw fail(ctx);
+      },
+    }) as AnyToolDefinition;
+
+    const production = await viaFactory(definition, {});
+    const helper = await runToolContract(definition, {} as never);
+
+    expect(envelope(production).data?.recovery).toEqual({
+      hint: 'Search with broader terms before fetching by ID.',
+    });
+    expect(helper).toEqual(production);
+  });
+});
+
 // Issue #480 — the framework's own output-contract parses fail as the server
 // fault they are, in the helper exactly as in production.
 describe('runToolContract output-contract violations', () => {
@@ -242,7 +287,7 @@ describe('runToolContract cancellation', () => {
     abort(helperController);
     return {
       helper: await helperRun,
-      production: (await productionRun) as CallToolResult,
+      production: withoutRequestId((await productionRun) as CallToolResult),
     };
   }
 
@@ -320,11 +365,13 @@ describe('runToolContract cancellation', () => {
     controller.abort();
 
     // A boolean stays schema-invalid; an integer for `name` would be repaired (#487).
-    const production = (await createToolHandler(
-      typed,
-      services,
-      notifiers,
-    )({ name: true }, makeServerContext({ signal: controller.signal }))) as CallToolResult;
+    const production = withoutRequestId(
+      (await createToolHandler(
+        typed,
+        services,
+        notifiers,
+      )({ name: true }, makeServerContext({ signal: controller.signal }))) as CallToolResult,
+    );
     const helper = await runToolContract(typed, { name: true } as never, {
       context: { signal: controller.signal },
     });

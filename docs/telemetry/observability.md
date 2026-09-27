@@ -174,7 +174,7 @@ Every value above is author- or framework-defined; the caller's own key text nev
 
 | Metric | Type | Unit | Attributes |
 |:-------|:-----|:-----|:-----------|
-| `mcp.errors.classified` | counter | `{errors}` | `mcp.error.classified_code` (JSON-RPC code), `mcp.error.category` (`upstream`/`server`/`client`), `operation`, and `mcp.error.severity` when the failure's `errors[]` entry declared one |
+| `mcp.errors.classified` | counter | `{errors}` | `mcp.error.classified_code` (JSON-RPC code), `mcp.error.category` (`upstream`/`server`/`client`), `operation`, and `mcp.error.severity` when a tool failure's level resolved below `error` — its `errors[]` entry declared one, or it is an `invalid_arguments` / `client_capability_missing` refusal (`notice`) |
 | `mcp.ratelimit.rejections` | counter | `{rejections}` | — (the limiter key is per caller and stays off the metric) |
 | `http.client.request.duration` | histogram | `s` | `http.request.method`, `server.address`, `http.response.status_code` (when > 0; absent on network errors before a response is received) |
 
@@ -199,13 +199,15 @@ Auto-registered when `process.memoryUsage`/`process.uptime`/`perf_hooks` are ava
 
 Every framework log record carries `requestId`, `traceId`, `spanId`, and `tenantId` from the request context, so every log line is searchable by trace. `@opentelemetry/instrumentation-pino` does not touch these records: it patches only a `pino` loaded after the SDK starts. To ship the records to the same backend as traces, set `OTEL_EXPORTER_OTLP_LOGS_ENDPOINT` (see Enabling export).
 
-For domain logging inside handlers, use `ctx.log` (`debug`/`info`/`notice`/`warning`/`error`). It auto-includes `requestId`, `traceId`, `tenantId`, `spanId`. The completion log emitted at the end of every handler carries a `metrics` payload, with fields tuned to each surface:
+For domain logging inside handlers, use `ctx.log` (`debug`/`info`/`notice`/`warning`/`error`). It auto-includes `requestId`, `traceId`, `tenantId`, `spanId`. The completion log emitted at the end of every handler — at `info`, whatever the outcome — carries a `metrics` payload, with fields tuned to each surface:
 
 | Handler | Log message | `metrics` fields |
 |:--------|:------------|:-----------------|
 | Tool | `Tool execution finished.` | `durationMs`, `isSuccess`, `errorCode`, `inputBytes`, `outputBytes`, plus `partialSuccess`/`batchSucceeded`/`batchFailed` when the result is a partial-success batch |
 | Resource | `Resource read finished.` | `durationMs`, `isSuccess`, `errorCode`, `outputBytes`, `uri`, `mimeType` |
-| Prompt | `Prompt generation finished.` (or `failed.`) | `durationMs`, `isSuccess`, `errorCode`, `inputBytes`, `outputBytes`, `messageCount` |
+| Prompt | `Prompt generation finished.` | `durationMs`, `isSuccess`, `errorCode`, `inputBytes` (0 for a prompt declaring no arguments), `outputBytes`, `messageCount` |
+
+A failed tool call or prompt adds one `Error in tool:<name>` / `Error in prompt:<name>` record under the same `requestId` — at `error`, or at the tool's declared `severity`, or at `notice` for the framework's own `invalid_arguments` and `client_capability_missing` refusals. The `requestId` is the value the client receives as `data.requestId` on that call's error envelope, so a failure reported from the client resolves to these records.
 
 **Failed-call payloads (opt-in).** `LOG_TOOL_FAILURE_PAYLOADS=true` adds one `Tool failure payload: <tool>` record after each failed tool call's error record, at the same level and with the same `requestId`/`traceId`. It carries `toolInput` (the arguments as sent) and `toolResult` (the `CallToolResult` returned) as JSON strings, each redacted by key name and capped at `LOG_TOOL_FAILURE_PAYLOAD_MAX_BYTES` (default `16384`), with `toolInputTruncated`/`toolResultTruncated` flags. Successes, cancellations, and `input_required` returns write nothing. The record reaches stderr, `combined.log`, and the OTLP log export alike. Key-name redaction does not catch a secret inside a free-form value such as a query string, so enable it only where the log store may hold caller data.
 

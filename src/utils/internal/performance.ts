@@ -734,12 +734,14 @@ const PROMPT_KIND: MeasuredKind = {
  *
  * Prompts can perform meaningful work (conditional logic, async data fetches,
  * multi-message assembly), so they get the same instrumentation depth as tools
- * and resources.
+ * and resources — including the completion record, written at `info` for a
+ * failed generation too.
  *
  * @template T - The resolved type of the prompt generate function's return value.
  * @param promptLogicFn - Zero-argument async function containing the prompt's generate logic.
  * @param context - Request context extended with `promptName`; used for span/log correlation.
- * @param inputPayload - The validated args object passed to the prompt, serialized to compute byte size.
+ * @param inputPayload - The validated args object passed to the prompt, serialized to compute
+ *   byte size; `undefined` for a prompt that declares no arguments, which measures 0.
  * @returns A promise that resolves with the generate result or rejects with the original error.
  */
 export async function measurePromptGeneration<T>(
@@ -782,12 +784,11 @@ export async function measurePromptGeneration<T>(
           });
         }
 
-        const logFn = ok ? logger.info : logger.error;
-        logFn.call(
-          logger,
-          ok
-            ? TELEMETRY_LOG_MESSAGES.promptGenerationFinished
-            : TELEMETRY_LOG_MESSAGES.promptGenerationFailed,
+        // `info` whatever the outcome, as tools and resources log theirs: a
+        // failure's one `error` record is the caller's `Error in prompt:` line,
+        // and `metrics.isSuccess` / `errorCode` carry the outcome here (#582).
+        logger.info(
+          TELEMETRY_LOG_MESSAGES.promptGenerationFinished,
           withExtra(spanContext, {
             promptName,
             metrics: {

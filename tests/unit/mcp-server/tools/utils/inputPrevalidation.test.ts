@@ -18,6 +18,7 @@ import { z } from 'zod';
 
 import { JsonRpcErrorCode } from '@/types-global/errors.js';
 import { makeServerContext } from '../../../../helpers/server-context.js';
+import { withoutRequestId } from '../../../../helpers/tool-result.js';
 
 // ---------------------------------------------------------------------------
 // Module mocks — the counters and the debug channel are the step's only
@@ -104,6 +105,7 @@ function envelope(result: CallToolResult): {
     issues?: unknown[];
     reason?: string;
     recovery?: { hint?: string };
+    requestId?: string;
   };
   message: string;
 } {
@@ -1147,7 +1149,7 @@ describe('tool argument pre-validation', () => {
           'query: Too small: expected string to have >=3 characters\n\n' +
           'Recovery: query: Too small: expected string to have >=3 characters. ' +
           'Validated _q as query.\n\n' +
-          '(reason invalid_arguments)',
+          `(reason invalid_arguments · request ${envelope(result).data?.requestId})`,
       );
       // Telemetry follows the attempt the rejection reports: the rewrite, no drop.
       expect(adds('mcp.input.ignored_key')).toEqual([]);
@@ -1706,7 +1708,7 @@ describe('tool argument pre-validation', () => {
           'targetQuery: Too small: expected string to have >=3 characters\n\n' +
           'Recovery: targetQuery: Too small: expected string to have >=3 characters. ' +
           'Validated query as targetQuery.\n\n' +
-          '(reason invalid_arguments)',
+          `(reason invalid_arguments · request ${envelope(result).data?.requestId})`,
       );
     });
 
@@ -1783,6 +1785,7 @@ describe('tool argument pre-validation', () => {
         'issues',
         'reason',
         'recovery',
+        'requestId',
       ]);
       expect(envelope(result).data?.recovery?.hint).toBe('Send query as a string, not a boolean.');
     });
@@ -1834,8 +1837,10 @@ describe('tool argument pre-validation', () => {
       expect(seen).toEqual(viaProduction);
     });
 
+    // The helper adds no request id (#576); the production side drops its own
+    // before each comparison.
     it('publishes the production envelope when the step cannot rescue the call', async () => {
-      const production = await call(search, { query: 'x', salt: true });
+      const production = withoutRequestId(await call(search, { query: 'x', salt: true }));
       const helper = await runToolContract(
         search as AnyToolDefinition,
         {
@@ -1856,7 +1861,7 @@ describe('tool argument pre-validation', () => {
       ['a refused number branch (#487)', numericIds, { positiveOrText: -1 }],
       ['a declared underscore alias both orders reject (#563)', underscoreFloor, { _q: 'ab' }],
     ])('publishes the production envelope for %s', async (_label, def, args) => {
-      const production = await call(def, args as Record<string, unknown>);
+      const production = withoutRequestId(await call(def, args as Record<string, unknown>));
       const helper = await runToolContract(def as AnyToolDefinition, args as never);
 
       expect(production.isError).toBe(true);

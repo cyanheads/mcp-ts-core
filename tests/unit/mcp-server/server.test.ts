@@ -42,7 +42,6 @@ vi.mock('@/utils/internal/requestContext.js', async (importOriginal) => {
 import type { ResourceSubscriptionRegistry } from '@/mcp-server/resources/resourceSubscriptions.js';
 import { installResourceSubscriptions } from '@/mcp-server/resources/resourceSubscriptions.js';
 import { createMcpServerInstance, type McpServerDeps } from '@/mcp-server/server.js';
-import { McpError } from '@/types-global/errors.js';
 import { logger } from '@/utils/internal/logger.js';
 
 /** Teardown for every connected client/server pair a test opened. */
@@ -105,6 +104,10 @@ describe('createMcpServerInstance', () => {
     expect(server).toBeInstanceOf(McpServer);
   });
 
+  /** The per-instance capability view a registry receives (#580). */
+  const view = (era: 'legacy' | 'modern') =>
+    expect.objectContaining({ era, capabilities: expect.any(Function) });
+
   it('should call ToolRegistry.registerAll with the server and the subscription registry', async () => {
     const server = await createMcpServerInstance(deps);
     expect(mockToolRegistry.registerAll).toHaveBeenCalledTimes(1);
@@ -112,7 +115,7 @@ describe('createMcpServerInstance', () => {
       server,
       expect.objectContaining({ has: expect.any(Function) }),
       undefined,
-      expect.any(Function),
+      view('legacy'),
     );
   });
 
@@ -123,7 +126,7 @@ describe('createMcpServerInstance', () => {
       server,
       expect.objectContaining({ has: expect.any(Function) }),
       undefined,
-      expect.any(Function),
+      view('legacy'),
     );
   });
 
@@ -134,7 +137,7 @@ describe('createMcpServerInstance', () => {
         server,
         expect.objectContaining({ has: expect.any(Function) }),
         undefined,
-        expect.any(Function),
+        view('legacy'),
       );
     });
 
@@ -148,13 +151,13 @@ describe('createMcpServerInstance', () => {
         server,
         undefined,
         undefined,
-        undefined,
+        view('modern'),
       );
       expect(mockResourceRegistry.registerAll).toHaveBeenCalledWith(
         server,
         undefined,
         undefined,
-        undefined,
+        view('modern'),
       );
     });
 
@@ -164,7 +167,7 @@ describe('createMcpServerInstance', () => {
         server,
         expect.objectContaining({ has: expect.any(Function) }),
         undefined,
-        expect.any(Function),
+        view('legacy'),
       );
     });
 
@@ -184,7 +187,7 @@ describe('createMcpServerInstance', () => {
         modern,
         undefined,
         notifier,
-        undefined,
+        view('modern'),
       );
 
       const legacy = await createMcpServerInstance({ ...deps, era: 'legacy', notifier });
@@ -192,52 +195,65 @@ describe('createMcpServerInstance', () => {
         legacy,
         expect.objectContaining({ has: expect.any(Function) }),
         undefined,
-        expect.any(Function),
+        view('legacy'),
       );
     });
   });
 
-  describe('input_required capability gate by era (#379)', () => {
-    it('binds a gate on a legacy instance and none on a modern one', async () => {
-      // The 2025-era shim refuses above the handler callback, where nothing can
-      // shape the failure; a modern instance is gated by the SDK itself, which
-      // raises `MissingRequiredClientCapabilityError` (-32021).
-      const legacy = await createMcpServerInstance({ ...deps, era: 'legacy' });
-      expect(mockToolRegistry.registerAll).toHaveBeenLastCalledWith(
-        legacy,
-        expect.anything(),
-        undefined,
-        expect.any(Function),
-      );
-
-      const modern = await createMcpServerInstance({ ...deps, era: 'modern' });
-      expect(mockToolRegistry.registerAll).toHaveBeenLastCalledWith(
-        modern,
-        undefined,
-        undefined,
-        undefined,
-      );
-    });
-
-    it('reads the connection capabilities through the instance, not a snapshot', async () => {
-      // Bound once per registerAll, but evaluated per call — an `initialize`
-      // that lands after registration still has to be visible to the gate.
-      const server = await createMcpServerInstance({ ...deps, era: 'legacy' });
-      const gate = mockToolRegistry.registerAll.mock.calls[0]?.[3] as (
-        result: unknown,
-      ) => unknown | undefined;
-      const request = {
-        inputRequests: {
-          who: { method: 'elicitation/create', params: { message: 'Who?', mode: 'form' } },
-        },
+  describe('client-capability view by era (#580, #379)', () => {
+    /** The view the last registered tool registry received. */
+    const lastView = () =>
+      mockToolRegistry.registerAll.mock.lastCall?.[3] as {
+        capabilities: (mcpReq: unknown) => unknown;
+        era: string;
       };
 
-      expect(gate(request)).toBeInstanceOf(McpError);
+    it('hands the same view to the tool and resource registries', async () => {
+      await createMcpServerInstance({ ...deps, era: 'legacy' });
+      expect(mockResourceRegistry.registerAll.mock.lastCall?.[3]).toBe(lastView());
+    });
+
+    it('reads the connection capabilities through a legacy instance, not a snapshot', async () => {
+      // Bound once per registerAll, but evaluated per call — an `initialize`
+      // that lands after registration still has to be visible to the view.
+      const server = await createMcpServerInstance({ ...deps, era: 'legacy' });
+      const legacyView = lastView();
+
+      expect(legacyView.capabilities(undefined)).toBeUndefined();
 
       vi.spyOn(server.server, 'getClientCapabilities').mockReturnValue({
         elicitation: { form: {} },
       });
-      expect(gate(request)).toBeUndefined();
+      expect(legacyView.capabilities(undefined)).toEqual({ elicitation: { form: {} } });
+    });
+
+    it('ignores an envelope capabilities key on a legacy instance', async () => {
+      const server = await createMcpServerInstance({ ...deps, era: 'legacy' });
+      vi.spyOn(server.server, 'getClientCapabilities').mockReturnValue({});
+
+      expect(
+        lastView().capabilities({
+          envelope: { 'io.modelcontextprotocol/clientCapabilities': { elicitation: {} } },
+        }),
+      ).toEqual({});
+    });
+
+    it('reads the request envelope on a modern instance, never the instance', async () => {
+      const server = await createMcpServerInstance({ ...deps, era: 'modern' });
+      const instance = vi
+        .spyOn(server.server, 'getClientCapabilities')
+        .mockReturnValue({ roots: {} });
+      const modernView = lastView();
+
+      expect(
+        modernView.capabilities({
+          envelope: { 'io.modelcontextprotocol/clientCapabilities': { sampling: {} } },
+        }),
+      ).toEqual({ sampling: {} });
+      expect(
+        modernView.capabilities({ envelope: { 'io.modelcontextprotocol/clientCapabilities': {} } }),
+      ).toEqual({});
+      expect(instance).not.toHaveBeenCalled();
     });
   });
 

@@ -18,6 +18,8 @@ import { z } from 'zod';
 import { JsonRpcErrorCode, McpError } from '@/types-global/errors.js';
 import type { ServerContextOverrides } from '../../../../helpers/server-context.js';
 import {
+  EVERY_INPUT_CAPABILITY,
+  legacyCapabilityView,
   makeSenderlessServerContext,
   makeServerContext,
 } from '../../../../helpers/server-context.js';
@@ -105,7 +107,7 @@ vi.mock('@/utils/internal/performance.js', () => ({
 // Imports (after mocks)
 // ---------------------------------------------------------------------------
 
-import { createInputRequiredGate } from '@/mcp-server/inputRequired.js';
+import { type ClientCapabilityView, createRequestStateSealer } from '@/mcp-server/inputRequired.js';
 import type { AnyToolDefinition } from '@/mcp-server/tools/utils/toolDefinition.js';
 import { tool } from '@/mcp-server/tools/utils/toolDefinition.js';
 import {
@@ -134,10 +136,21 @@ function firstBlock(result: HandlerResult): ContentBlock {
   return (result as CallToolResult).content![0]!;
 }
 
+/**
+ * The request id the mocked `createRequestContext` hands every call, which the
+ * factory sets as `data.requestId` and closes the `content[]` text with (#576).
+ */
+const REQUEST_ID = 'test-req-id';
+
 /** The error envelope a failed call put on `structuredContent`. */
 function envelope(result: HandlerResult): {
   code: number;
-  data?: { issues?: unknown[]; reason?: string; recovery?: { hint?: string } };
+  data?: {
+    issues?: unknown[];
+    reason?: string;
+    recovery?: { hint?: string };
+    requestId?: string;
+  };
   message: string;
 } {
   return ((result as CallToolResult).structuredContent as { error: ReturnType<typeof envelope> })
@@ -852,7 +865,7 @@ describe('createToolHandler', () => {
         expect((firstBlock(result) as { text: string }).text).toBe(
           'Error: Input validation error: Invalid arguments for tool search_tool: ' +
             'Unrecognized key: "salt"\n\nRecovery: Unknown key salt. ' +
-            'This tool accepts: query, limit.\n\n(reason invalid_arguments)',
+            `This tool accepts: query, limit.\n\n(reason invalid_arguments · request ${REQUEST_ID})`,
         );
       });
 
@@ -883,7 +896,7 @@ describe('createToolHandler', () => {
             'Error: Input validation error: Invalid arguments for tool rows_tool: ' +
               'rows: Invalid input: expected int, received number\n\n' +
               'Recovery: Send rows as an integer, not a fractional number.\n\n' +
-              '(reason invalid_arguments)',
+              `(reason invalid_arguments · request ${REQUEST_ID})`,
           );
           // The message and data.issues keep Zod's own wording and shape.
           expect(envelope(result).data?.issues).toEqual([
@@ -954,7 +967,7 @@ describe('createToolHandler', () => {
         expect(text(result)).toBe(
           'Error: Input validation error: Invalid arguments for tool range_tool: ' +
             'start: Must be a parseable ISO 8601 date, end: Must be a parseable ISO 8601 date' +
-            '\n\n(reason invalid_arguments)',
+            `\n\n(reason invalid_arguments · request ${REQUEST_ID})`,
         );
       });
 
@@ -968,6 +981,7 @@ describe('createToolHandler', () => {
           recovery: {
             hint: 'start: Must be a parseable ISO 8601 date, end: Must be a parseable ISO 8601 date',
           },
+          requestId: REQUEST_ID,
         });
       });
 
@@ -1099,7 +1113,7 @@ describe('createToolHandler', () => {
           'Error: Input validation error: Invalid arguments for tool items: ' +
             'items.1.name: Invalid input: expected string, received boolean\n\n' +
             'Recovery: Send items.1.name as a string, not a boolean.\n\n' +
-            '(reason invalid_arguments)',
+            `(reason invalid_arguments · request ${REQUEST_ID})`,
         );
       });
 
@@ -1359,7 +1373,7 @@ describe('createToolHandler', () => {
           'Error: Input validation error: Invalid arguments for tool nested_strict_tool: ' +
             'opts: Unrecognized key: "b"\n\n' +
             'Recovery: Unknown key opts.b. opts accepts: a.\n\n' +
-            '(reason invalid_arguments)',
+            `(reason invalid_arguments · request ${REQUEST_ID})`,
         );
       });
 
@@ -1476,13 +1490,19 @@ describe('createToolHandler', () => {
       const result = await handler({}, makeServerContext());
 
       expect(result.isError).toBe(true);
-      // A classified plain Error appends no reason or hint line.
-      expect((firstBlock(result) as { text: string }).text).toBe('Error: something broke');
+      // A classified plain Error appends no reason or hint, only the request term (#576).
+      expect((firstBlock(result) as { text: string }).text).toBe(
+        `Error: something broke\n\n(request ${REQUEST_ID})`,
+      );
       // _meta.error is no longer emitted — error data lives on structuredContent.error
       expect(result._meta).toBeUndefined();
-      // Plain errors get classified as InternalError, no data
+      // Plain errors get classified as InternalError, with the request id as their only data
       expect(result.structuredContent).toEqual({
-        error: { code: JsonRpcErrorCode.InternalError, message: 'something broke' },
+        error: {
+          code: JsonRpcErrorCode.InternalError,
+          message: 'something broke',
+          data: { requestId: REQUEST_ID },
+        },
       });
     });
 
@@ -1506,7 +1526,7 @@ describe('createToolHandler', () => {
         error: {
           code: JsonRpcErrorCode.NotFound,
           message: 'Item not found',
-          data: { id: '123' },
+          data: { id: '123', requestId: REQUEST_ID },
         },
       });
     });
@@ -1560,7 +1580,7 @@ describe('createToolHandler', () => {
       expect(sc.error.data?.recovery?.hint).toBe('Try the search tool with broader terms.');
     });
 
-    it('should not append recovery section when data.recovery.hint is missing', async () => {
+    it('should not append recovery section when data.recovery.hint is missing and no contract declares one', async () => {
       const def = tool('no_recovery_tool', {
         description: 'Throws without recovery hint.',
         input: z.object({}),
@@ -1574,9 +1594,9 @@ describe('createToolHandler', () => {
       const result = await handler({}, makeServerContext());
 
       const text = (firstBlock(result) as { text: string }).text;
-      // The declared reason still renders its own line (#458); only the
-      // `Recovery:` line is absent.
-      expect(text).toBe('Error: Boom\n\n(reason boom)');
+      // The reason still renders on the terms line (#458); only the
+      // `Recovery:` line is absent — the tool declares no errors[] to fill it from.
+      expect(text).toBe(`Error: Boom\n\n(reason boom · request ${REQUEST_ID})`);
       expect(text).not.toContain('Recovery:');
     });
 
@@ -1596,7 +1616,7 @@ describe('createToolHandler', () => {
       const result = await handler({}, makeServerContext());
 
       const text = (firstBlock(result) as { text: string }).text;
-      expect(text).toBe('Error: Boom');
+      expect(text).toBe(`Error: Boom\n\n(request ${REQUEST_ID})`);
     });
   });
 
@@ -1694,7 +1714,7 @@ describe('createToolHandler', () => {
         const result = await handler({ query: 'ok', salt: true }, makeServerContext());
         const text = rendered(result as CallToolResult);
 
-        expect(text.endsWith('\n\n(reason invalid_arguments)')).toBe(true);
+        expect(text.endsWith(`\n\n(reason invalid_arguments · request ${REQUEST_ID})`)).toBe(true);
         expect(text).not.toContain('retryable');
       });
 
@@ -1717,12 +1737,16 @@ describe('createToolHandler', () => {
         expect(envelope(result).data?.issues).toBeDefined();
       });
 
-      it('leaves structuredContent byte-identical to the thrown envelope', async () => {
+      it('leaves structuredContent the thrown envelope plus the request id', async () => {
         const data = { reason: 'no_match', retryable: false, recovery: { hint: 'Broaden it.' } };
         const result = await throwing(new McpError(JsonRpcErrorCode.NotFound, 'Nothing.', data));
 
         expect((result as CallToolResult).structuredContent).toEqual({
-          error: { code: JsonRpcErrorCode.NotFound, message: 'Nothing.', data },
+          error: {
+            code: JsonRpcErrorCode.NotFound,
+            message: 'Nothing.',
+            data: { ...data, requestId: REQUEST_ID },
+          },
         });
       });
     });
@@ -1768,7 +1792,7 @@ describe('createToolHandler', () => {
         expect(rendered(result as CallToolResult)).toBe(
           'Error: Input validation error: Invalid arguments for tool exclusive_probe: ' +
             'Provide exactly one of `pmcids` or `pmids` (not zero, not more).\n\n' +
-            '(reason invalid_arguments)',
+            `(reason invalid_arguments · request ${REQUEST_ID})`,
         );
         expect(envelope(result).data?.recovery?.hint).toBe(
           'Provide exactly one of `pmcids` or `pmids` (not zero, not more).',
@@ -1794,12 +1818,14 @@ describe('createToolHandler', () => {
           }),
         );
 
-        expect(rendered(result as CallToolResult)).toBe('Error: No such record.');
+        expect(rendered(result as CallToolResult)).toBe(
+          `Error: No such record.\n\n(request ${REQUEST_ID})`,
+        );
         expect((result as CallToolResult).structuredContent).toEqual({
           error: {
             code: JsonRpcErrorCode.NotFound,
             message: 'No such record.',
-            data: { recovery: { hint: 'No such record.' } },
+            data: { recovery: { hint: 'No such record.' }, requestId: REQUEST_ID },
           },
         });
       });
@@ -1812,7 +1838,7 @@ describe('createToolHandler', () => {
         );
 
         expect(rendered(result as CallToolResult)).toBe(
-          'Error: No such record.\n\nRecovery: no such record.',
+          `Error: No such record.\n\nRecovery: no such record.\n\n(request ${REQUEST_ID})`,
         );
       });
 
@@ -1879,7 +1905,8 @@ describe('createToolHandler', () => {
 
         expect(rendered(result as CallToolResult)).toBe(
           'Error: Input validation error: Invalid arguments for tool union_branch_tool: ' +
-            'court: Invalid option: expected one of "CJEU"|"GC"\n\n(reason invalid_arguments)',
+            'court: Invalid option: expected one of "CJEU"|"GC"\n\n' +
+            `(reason invalid_arguments · request ${REQUEST_ID})`,
         );
         expect(envelope(result).data?.recovery?.hint).toBe(
           'court: Invalid option: expected one of "CJEU"|"GC"',
@@ -2022,7 +2049,7 @@ describe('createToolHandler', () => {
       expect(envelope(declared)).toEqual({
         code: JsonRpcErrorCode.InvalidRequest,
         message: 'Declined.',
-        data,
+        data: { ...data, requestId: REQUEST_ID },
       });
     });
 
@@ -2052,6 +2079,553 @@ describe('createToolHandler', () => {
         vi
           .mocked(mockLogger.info)
           .mock.calls.some(([message]) => String(message).startsWith('Cancelled tool:')),
+      ).toBe(true);
+    });
+
+    // Issue #567 — the two framework-owned refusals log at `notice`.
+    describe('framework-owned refusals (#567)', () => {
+      const searchTool = tool('refusal_search', {
+        description: 'Searches.',
+        input: z.object({
+          query: z.string().describe('Search query.'),
+          limit: z
+            .number()
+            .refine((n) => n <= 50, 'At most 50 results.')
+            .optional()
+            .describe('Maximum results.'),
+        }),
+        output: z.object({ ok: z.boolean().describe('ok') }),
+        handler: () => ({ ok: true }),
+      });
+
+      /** The `[message, context]` of the call's `Error in tool:` record at `level`. */
+      function recordAt(level: 'error' | 'notice' | 'debug'): [string, Record<string, any>] {
+        const call = vi
+          .mocked(mockLogger[level])
+          .mock.calls.findLast(([message]) => String(message).startsWith('Error in tool:'));
+        if (!call) throw new Error(`No Error in tool: record at ${level}`);
+        return [String(call[0]), call[1] as Record<string, any>];
+      }
+
+      it.each([
+        ['an unknown key', { query: 'ok', salt: true }],
+        ['a wrong type', { query: true }],
+        ['a missing field', {}],
+        ['a failed refinement', { query: 'ok', limit: 99 }],
+      ])('logs a schema rejection for %s through logger.notice', async (_label, args) => {
+        const handler = createToolHandler(searchTool as AnyToolDefinition, services, notifiers);
+
+        const result = await handler(args, makeServerContext());
+
+        expect(envelope(result).data?.reason).toBe('invalid_arguments');
+        expect(failureRecord().level).toBe('notice');
+        const [message, context] = recordAt('notice');
+        expect(message).toBe(`Error in tool:refusal_search: ${envelope(result).message}`);
+        // Same structured fields an `error` record carries — the stack included.
+        expect(context.extra).toMatchObject({
+          errorCode: JsonRpcErrorCode.InvalidParams,
+          errorData: expect.objectContaining({ reason: 'invalid_arguments' }),
+          stack: expect.any(String),
+        });
+        expect(mockLogger.error).not.toHaveBeenCalledWith(
+          expect.stringContaining('Error in tool:'),
+          expect.anything(),
+        );
+      });
+
+      it('logs a client_capability_missing refusal through logger.notice', async () => {
+        const asks = tool('refusal_asks', {
+          description: 'Asks the caller to confirm.',
+          input: z.object({}),
+          output: z.object({ ok: z.boolean().describe('ok') }),
+          handler: (_input, ctx) =>
+            ctx.requestInput({
+              inputRequests: {
+                confirm: inputRequired.elicit({
+                  message: 'Proceed?',
+                  requestedSchema: z.object({ yes: z.boolean().describe('Proceed.') }),
+                }),
+              },
+            }),
+        });
+        const handler = createToolHandler(
+          asks as AnyToolDefinition,
+          services,
+          notifiers,
+          legacyCapabilityView({}),
+        );
+
+        const result = await handler({}, makeServerContext());
+
+        expect(envelope(result).data?.reason).toBe('client_capability_missing');
+        expect(failureRecord().level).toBe('notice');
+        expect(recordAt('notice')[0]).toBe(
+          `Error in tool:refusal_asks: ${envelope(result).message}`,
+        );
+      });
+
+      it('lets a severity the tool declares for invalid_arguments win', async () => {
+        const quiet = tool('refusal_declared', {
+          description: 'Declares its own level for argument rejections.',
+          input: z.object({ query: z.string().describe('Search query.') }),
+          output: z.object({ ok: z.boolean().describe('ok') }),
+          errors: [
+            {
+              reason: 'invalid_arguments',
+              code: JsonRpcErrorCode.InvalidParams,
+              when: 'The arguments failed the schema.',
+              severity: 'debug',
+              recovery: 'Fix the arguments and call the tool again.',
+            },
+          ],
+          handler: () => ({ ok: true }),
+        });
+        const handler = createToolHandler(quiet as AnyToolDefinition, services, notifiers);
+
+        await handler({ query: true }, makeServerContext());
+
+        expect(failureRecord().level).toBe('debug');
+        expect(mockLogger.notice).not.toHaveBeenCalled();
+      });
+
+      it.each([
+        ['a handler throw', () => new McpError(JsonRpcErrorCode.NotFound, 'Missing.')],
+        ['a plain Error', () => new Error('Boom.')],
+      ])('keeps %s at error', async (_label, make) => {
+        await run('refusal_regression', make());
+
+        expect(failureRecord().level).toBe('error');
+      });
+
+      it('keeps an output-contract failure at error', async () => {
+        const broken = tool('refusal_output', {
+          description: 'Returns a value its schema rejects.',
+          input: z.object({}),
+          output: z.object({ ok: z.boolean().describe('ok') }),
+          handler: () => ({ ok: 'nope' }) as never,
+        });
+        const handler = createToolHandler(broken as AnyToolDefinition, services, notifiers);
+
+        await handler({}, makeServerContext());
+
+        expect(failureRecord().level).toBe('error');
+      });
+
+      it('keeps an auth refusal at error', async () => {
+        mockConfig.mcpAuthMode = 'jwt';
+        try {
+          const scoped = tool('refusal_scoped', {
+            description: 'Requires a scope.',
+            input: z.object({}),
+            output: z.object({ ok: z.boolean().describe('ok') }),
+            auth: ['tool:refusal_scoped:read'],
+            handler: () => ({ ok: true }),
+          });
+          const handler = createToolHandler(scoped as AnyToolDefinition, services, notifiers);
+
+          const result = await handler({}, makeServerContext());
+
+          expect(envelope(result).code).toBe(JsonRpcErrorCode.Unauthorized);
+          expect(failureRecord().level).toBe('error');
+        } finally {
+          mockConfig.mcpAuthMode = 'none';
+        }
+      });
+
+      it('leaves both client surfaces untouched by the level change', async () => {
+        const handler = createToolHandler(searchTool as AnyToolDefinition, services, notifiers);
+
+        const result = (await handler(
+          { query: 'ok', salt: true },
+          makeServerContext(),
+        )) as CallToolResult;
+
+        expect(result.isError).toBe(true);
+        expect(envelope(result).code).toBe(JsonRpcErrorCode.InvalidParams);
+        expect(envelope(result).data).toMatchObject({
+          reason: 'invalid_arguments',
+          recovery: { hint: 'Unknown key salt. This tool accepts: query, limit.' },
+        });
+        expect(firstBlock(result)).toMatchObject({
+          type: 'text',
+          text: expect.stringContaining(
+            'Recovery: Unknown key salt. This tool accepts: query, limit.',
+          ),
+        });
+      });
+    });
+  });
+
+  // -----------------------------------------------------------------------
+  // Declared recovery fill (#579)
+  // -----------------------------------------------------------------------
+
+  describe('declared recovery fill (#579)', () => {
+    const RECOVERY = 'Search with broader terms before fetching by ID.';
+
+    const contract = [
+      {
+        reason: 'no_match',
+        code: JsonRpcErrorCode.NotFound,
+        when: 'No record matched the query.',
+        recovery: RECOVERY,
+      },
+    ] as const;
+
+    /** Two layers below the handler, as a real service's fetch path sits. */
+    const lookupService = {
+      find(id: string): never {
+        return lookupService.fetchRecord(id);
+      },
+      fetchRecord(id: string): never {
+        throw new McpError(JsonRpcErrorCode.NotFound, `No record ${id}.`, { reason: 'no_match' });
+      },
+    };
+
+    /** Runs a tool under `errors` (`null` for none) whose handler throws what `fail` builds. */
+    async function failWith(
+      fail: (ctx: any) => unknown,
+      errors: readonly unknown[] | null = contract,
+    ): Promise<CallToolResult> {
+      const def = tool('fill_probe', {
+        description: 'Fails in a chosen way.',
+        input: z.object({}),
+        output: z.object({ ok: z.boolean().describe('ok') }),
+        ...(errors && { errors: errors as never }),
+        handler: (_input, ctx) => {
+          throw fail(ctx);
+        },
+      });
+      const handler = createToolHandler(def as AnyToolDefinition, services, notifiers);
+      return (await handler({}, makeServerContext())) as CallToolResult;
+    }
+
+    const text = (result: CallToolResult) => (firstBlock(result) as { text: string }).text;
+
+    it('fills a bare ctx.fail from the declared entry on both surfaces', async () => {
+      const result = await failWith((ctx) => ctx.fail('no_match'));
+
+      expect(envelope(result).data?.recovery).toEqual({ hint: RECOVERY });
+      expect(text(result)).toContain(`\n\nRecovery: ${RECOVERY}\n\n`);
+    });
+
+    it('fills a declared reason thrown by a service two calls below the handler', async () => {
+      const result = await failWith(() => lookupService.find('42'));
+
+      expect(envelope(result).message).toBe('No record 42.');
+      expect(envelope(result).data?.recovery).toEqual({ hint: RECOVERY });
+      expect(text(result)).toContain(`\n\nRecovery: ${RECOVERY}\n\n`);
+    });
+
+    it('fills a declared reason thrown with a code other than the entry’s', async () => {
+      const result = await failWith(
+        () =>
+          new McpError(JsonRpcErrorCode.ServiceUnavailable, 'Upstream refused.', {
+            reason: 'no_match',
+          }),
+      );
+
+      expect(envelope(result).code).toBe(JsonRpcErrorCode.ServiceUnavailable);
+      expect(envelope(result).data?.recovery).toEqual({ hint: RECOVERY });
+    });
+
+    it.each([
+      [
+        'ctx.recoveryFor',
+        (ctx: any) => ctx.fail('no_match', undefined, ctx.recoveryFor('no_match')),
+        RECOVERY,
+      ],
+      [
+        'an explicit hint',
+        (ctx: any) => ctx.fail('no_match', 'Nothing.', { recovery: { hint: 'Dynamic hint 42.' } }),
+        'Dynamic hint 42.',
+      ],
+    ])('leaves a throw-site hint from %s unchanged', async (_label, fail, hint) => {
+      const result = await failWith(fail);
+
+      expect(envelope(result).data?.recovery).toEqual({ hint });
+    });
+
+    it('leaves a malformed throw-site recovery as authored', async () => {
+      const result = await failWith((ctx) =>
+        ctx.fail('no_match', 'Boom.', { recovery: { hint: 42 } }),
+      );
+
+      expect(envelope(result).data?.recovery).toEqual({ hint: 42 });
+      expect(text(result)).not.toContain('Recovery:');
+    });
+
+    it.each([
+      [
+        'an undeclared reason',
+        () => new McpError(JsonRpcErrorCode.NotFound, 'Boom.', { reason: 'other_reason' }),
+        contract,
+      ],
+      [
+        'a tool without errors[]',
+        () => new McpError(JsonRpcErrorCode.NotFound, 'Boom.', { reason: 'no_match' }),
+        null,
+      ],
+      ['a non-McpError throw', () => new Error('no_match'), contract],
+    ])('adds no hint for %s', async (_label, fail, errors) => {
+      const result = await failWith(fail, errors);
+
+      expect(envelope(result).data?.recovery).toBeUndefined();
+      expect(text(result)).not.toContain('Recovery:');
+    });
+
+    it('adds no hint to a cancelled call', async () => {
+      const controller = new AbortController();
+      const def = tool('fill_cancelled', {
+        description: 'Fails after the caller went away.',
+        input: z.object({}),
+        output: z.object({ ok: z.boolean().describe('ok') }),
+        errors: contract as never,
+        handler: (_input, ctx: any) => {
+          controller.abort();
+          throw ctx.fail('no_match');
+        },
+      });
+      const handler = createToolHandler(def as AnyToolDefinition, services, notifiers);
+
+      const result = (await handler(
+        {},
+        makeServerContext({ signal: controller.signal }),
+      )) as CallToolResult;
+
+      expect(envelope(result).code).toBe(JsonRpcErrorCode.RequestCancelled);
+      expect(envelope(result).data?.recovery).toBeUndefined();
+    });
+
+    it('keeps the framework hint on an argument rejection whose reason the tool declares', async () => {
+      const def = tool('fill_reserved', {
+        description: 'Declares the framework reason.',
+        input: z.object({ query: z.string().describe('Search query.') }),
+        output: z.object({ ok: z.boolean().describe('ok') }),
+        errors: [
+          {
+            reason: 'invalid_arguments',
+            code: JsonRpcErrorCode.InvalidParams,
+            when: 'The arguments failed the schema.',
+            recovery: 'This declared hint must never replace the synthesized one.',
+          },
+        ],
+        handler: () => ({ ok: true }),
+      });
+      const handler = createToolHandler(def as AnyToolDefinition, services, notifiers);
+
+      const result = (await handler(
+        { query: 'ok', salt: true },
+        makeServerContext(),
+      )) as CallToolResult;
+
+      expect(envelope(result).data?.recovery).toEqual({
+        hint: 'Unknown key salt. This tool accepts: query.',
+      });
+    });
+
+    it('logs the same hint the envelope carries', async () => {
+      const result = await failWith((ctx) => ctx.fail('no_match'));
+
+      const record = vi
+        .mocked(mockLogger.error)
+        .mock.calls.findLast(([message]) => String(message).startsWith('Error in tool:fill_probe'));
+      expect(envelope(result).data?.recovery).toEqual({ hint: RECOVERY });
+      expect((record?.[1] as Record<string, any> | undefined)?.extra.errorData.recovery).toEqual({
+        hint: RECOVERY,
+      });
+    });
+
+    it('leaves the error ctx.fail returned exactly as the throw site built it', async () => {
+      let thrown: McpError | undefined;
+      const result = await failWith((ctx) => {
+        thrown = ctx.fail('no_match', 'Nothing matched.', undefined, { cause: 'upstream' });
+        return thrown;
+      });
+
+      // The envelope is filled; the thrown instance is not.
+      expect(envelope(result).data?.recovery).toEqual({ hint: RECOVERY });
+      expect(thrown?.data).toEqual({ reason: 'no_match' });
+      expect(thrown).toMatchObject({
+        code: JsonRpcErrorCode.NotFound,
+        message: 'Nothing matched.',
+        name: 'McpError',
+        cause: 'upstream',
+      });
+    });
+
+    it('builds an envelope the advertised outputSchema accepts', async () => {
+      const def = tool('fill_schema', {
+        description: 'Fails with a declared reason.',
+        input: z.object({}),
+        output: z.object({ ok: z.boolean().describe('ok') }),
+        errors: contract,
+        handler: (_input, ctx) => {
+          throw ctx.fail('no_match');
+        },
+      });
+      const handler = createToolHandler(def as AnyToolDefinition, services, notifiers);
+
+      const result = (await handler({}, makeServerContext())) as CallToolResult;
+
+      expect(envelope(result).data?.recovery).toEqual({ hint: RECOVERY });
+      expect(
+        advertisedOutputSchema(def as AnyToolDefinition).safeParse(result.structuredContent)
+          .success,
+      ).toBe(true);
+    });
+  });
+
+  // -----------------------------------------------------------------------
+  // Request id on the error envelope (#576)
+  // -----------------------------------------------------------------------
+
+  describe('request id on the error envelope (#576)', () => {
+    const text = (result: CallToolResult) => (firstBlock(result) as { text: string }).text;
+
+    async function call(def: unknown, args: Record<string, unknown> = {}): Promise<CallToolResult> {
+      const handler = createToolHandler(def as AnyToolDefinition, services, notifiers);
+      return (await handler(args, makeServerContext())) as CallToolResult;
+    }
+
+    const throwing = (thrown: unknown) =>
+      tool('rid_throws', {
+        description: 'Throws a supplied value.',
+        input: z.object({ query: z.string().optional().describe('Query.') }),
+        output: z.object({ ok: z.boolean().describe('ok') }),
+        handler: () => {
+          throw thrown;
+        },
+      });
+
+    it('closes a declared failure with the request term after reason and retryable', async () => {
+      const result = await call(
+        throwing(
+          new McpError(JsonRpcErrorCode.NotFound, 'No data for 3 PMIDs', {
+            reason: 'no_match',
+            retryable: false,
+            recovery: { hint: 'Search first.' },
+          }),
+        ),
+      );
+
+      expect(envelope(result).data).toEqual({
+        reason: 'no_match',
+        retryable: false,
+        recovery: { hint: 'Search first.' },
+        requestId: REQUEST_ID,
+      });
+      expect(text(result)).toBe(
+        'Error: No data for 3 PMIDs\n\nRecovery: Search first.\n\n' +
+          `(reason no_match · not retryable · request ${REQUEST_ID})`,
+      );
+    });
+
+    it('renders the request term alone when data carries no reason or retryable', async () => {
+      const result = await call(throwing(new Error('something broke')));
+
+      expect(result.structuredContent).toEqual({
+        error: {
+          code: JsonRpcErrorCode.InternalError,
+          message: 'something broke',
+          data: { requestId: REQUEST_ID },
+        },
+      });
+      expect(text(result)).toBe(`Error: something broke\n\n(request ${REQUEST_ID})`);
+    });
+
+    it('replaces a thrown data.requestId with the framework value', async () => {
+      const result = await call(
+        throwing(new McpError(JsonRpcErrorCode.NotFound, 'Gone.', { requestId: 'upstream-7' })),
+      );
+
+      expect(envelope(result).data).toEqual({ requestId: REQUEST_ID });
+      expect(text(result)).not.toContain('upstream-7');
+    });
+
+    it('carries the request id on an argument rejection', async () => {
+      const result = await call(throwing(new Error('never runs')), { salt: 1 });
+
+      expect(envelope(result).code).toBe(JsonRpcErrorCode.InvalidParams);
+      expect(envelope(result).data).toMatchObject({
+        reason: 'invalid_arguments',
+        requestId: REQUEST_ID,
+      });
+      expect(text(result).endsWith(`(reason invalid_arguments · request ${REQUEST_ID})`)).toBe(
+        true,
+      );
+    });
+
+    it('carries the request id on an output-contract failure, which had no data', async () => {
+      const broken = tool('rid_output', {
+        description: 'Returns a value its schema rejects.',
+        input: z.object({}),
+        output: z.object({ ok: z.boolean().describe('ok') }),
+        handler: () => ({ ok: 'nope' }) as never,
+      });
+
+      const result = await call(broken);
+
+      expect(envelope(result).code).toBe(JsonRpcErrorCode.InternalError);
+      expect(envelope(result).data).toEqual({ requestId: REQUEST_ID });
+    });
+
+    it('carries the request id on an auth refusal', async () => {
+      mockConfig.mcpAuthMode = 'jwt';
+      try {
+        const scoped = tool('rid_scoped', {
+          description: 'Requires a scope.',
+          input: z.object({}),
+          output: z.object({ ok: z.boolean().describe('ok') }),
+          auth: ['tool:rid_scoped:read'],
+          handler: () => ({ ok: true }),
+        });
+
+        const result = await call(scoped);
+
+        expect(envelope(result).code).toBe(JsonRpcErrorCode.Unauthorized);
+        expect(envelope(result).data).toEqual({ requestId: REQUEST_ID });
+      } finally {
+        mockConfig.mcpAuthMode = 'none';
+      }
+    });
+
+    it('matches the requestId of the Error in tool: record', async () => {
+      const result = await call(throwing(new Error('something broke')));
+
+      const record = vi
+        .mocked(mockLogger.error)
+        .mock.calls.findLast(([message]) => String(message).startsWith('Error in tool:rid_throws'));
+      expect((record?.[1] as { requestId?: string } | undefined)?.requestId).toBe(
+        envelope(result).data?.requestId,
+      );
+    });
+
+    it('keeps requestId out of the thrown error and the logged errorData', async () => {
+      const thrown = new McpError(JsonRpcErrorCode.NotFound, 'Gone.', { reason: 'gone' });
+
+      const result = await call(throwing(thrown));
+
+      expect(envelope(result).data).toEqual({ reason: 'gone', requestId: REQUEST_ID });
+      expect(thrown.data).toEqual({ reason: 'gone' });
+      const record = vi
+        .mocked(mockLogger.error)
+        .mock.calls.findLast(([message]) => String(message).startsWith('Error in tool:rid_throws'));
+      expect((record?.[1] as Record<string, any> | undefined)?.extra.errorData).toBeDefined();
+      expect((record?.[1] as Record<string, any> | undefined)?.extra.errorData).not.toHaveProperty(
+        'requestId',
+      );
+    });
+
+    it('keeps the envelope valid against the advertised outputSchema', async () => {
+      const def = throwing(new Error('something broke'));
+
+      const result = await call(def);
+
+      expect(envelope(result).data).toEqual({ requestId: REQUEST_ID });
+      expect(
+        advertisedOutputSchema(def as AnyToolDefinition).safeParse(result.structuredContent)
+          .success,
       ).toBe(true);
     });
   });
@@ -2637,7 +3211,12 @@ describe('createToolHandler', () => {
     });
 
     it('completes normally once the retry carries the accepted response', async () => {
-      const handler = createToolHandler(confirmingTool as AnyToolDefinition, services, notifiers);
+      const handler = createToolHandler(
+        confirmingTool as AnyToolDefinition,
+        services,
+        notifiers,
+        legacyCapabilityView({ elicitation: { form: {} } }),
+      );
 
       const result = await handler(
         { path: '/tmp/x' },
@@ -2651,6 +3230,131 @@ describe('createToolHandler', () => {
       expect(result.isError).toBeUndefined();
     });
 
+    describe('responses of a kind the client never declared (#496)', () => {
+      const answered = () =>
+        makeServerContext({
+          inputResponses: { confirm: { action: 'accept', content: { confirm: true } } },
+        });
+
+      it('never reach ctx.inputs, so the gate asks — and a 2025-era client without elicitation is refused', async () => {
+        const handler = createToolHandler(
+          confirmingTool as AnyToolDefinition,
+          services,
+          notifiers,
+          legacyCapabilityView({ sampling: {}, roots: {} }),
+        );
+
+        const result = await handler({ path: '/tmp/x' }, answered());
+
+        expect(result.structuredContent).not.toEqual({ confirmed: true });
+        expect(envelope(result).data?.reason).toBe('client_capability_missing');
+      });
+
+      it('never reach ctx.inputs on a 2026-07-28 instance, which returns the round for the SDK to refuse', async () => {
+        const handler = createToolHandler(
+          confirmingTool as AnyToolDefinition,
+          services,
+          notifiers,
+          {
+            era: 'modern',
+            capabilities: () => ({}),
+          },
+        );
+
+        const result = (await handler({ path: '/tmp/x' }, answered())) as Record<string, unknown>;
+
+        // The framework does not gate the modern arm; the SDK's -32021 does, above here.
+        expect(result.resultType).toBe('input_required');
+      });
+
+      it('never reach ctx.inputs when there is no capability view at all', async () => {
+        const handler = createToolHandler(confirmingTool as AnyToolDefinition, services, notifiers);
+
+        const result = (await handler({ path: '/tmp/x' }, answered())) as Record<string, unknown>;
+
+        expect(result.resultType).toBe('input_required');
+      });
+    });
+
+    describe('requestState sealing (MCP_REQUEST_STATE_KEY)', () => {
+      const sealer = createRequestStateSealer('k'.repeat(32));
+      const sealing: HandlerServices = { ...services, ...(sealer && { requestState: sealer }) };
+
+      it('seals the state a handler returns and verifies it back to the original string', async () => {
+        const handler = createToolHandler(confirmingTool as AnyToolDefinition, sealing, notifiers);
+        const serverContext = makeServerContext();
+
+        const result = (await handler({ path: '/tmp/x' }, serverContext)) as Record<string, any>;
+
+        expect(result.resultType).toBe('input_required');
+        expect(result.inputRequests.confirm.method).toBe('elicitation/create');
+        expect(result.requestState).toMatch(/^v1\./);
+        expect(result.requestState).not.toContain('round-1');
+        await expect(sealer?.verify(result.requestState, serverContext)).resolves.toBe('round-1');
+      });
+
+      it('leaves a result that carries no state untouched', async () => {
+        const stateless = tool('stateless_ask', {
+          description: 'Asks without carrying state.',
+          input: z.object({}),
+          output: z.object({ ok: z.boolean().describe('ok') }),
+          handler: (_input, ctx) =>
+            ctx.requestInput({ inputRequests: { roots: inputRequired.listRoots() } }),
+        });
+        const handler = createToolHandler(stateless as AnyToolDefinition, sealing, notifiers);
+
+        const result = (await handler({}, makeServerContext())) as Record<string, unknown>;
+
+        expect(result).not.toHaveProperty('requestState');
+        expect(result.inputRequests).toEqual({ roots: { method: 'roots/list' } });
+      });
+
+      describe('a sealing failure is a failed call, not an escaped rejection', () => {
+        /** The `Error in tool:confirming_tool` records the call wrote, at any level. */
+        const failureRecords = () =>
+          (['debug', 'info', 'notice', 'warning', 'error'] as const).flatMap((level) =>
+            vi
+              .mocked(mockLogger[level])
+              .mock.calls.filter(([message]) =>
+                String(message).startsWith('Error in tool:confirming_tool'),
+              ),
+          );
+
+        it.each([
+          [
+            'a codec that rejects',
+            {
+              ...services,
+              requestState: {
+                seal: async () => {
+                  throw new Error('HMAC key import failed');
+                },
+                verify: async () => 'unused',
+              },
+            } satisfies HandlerServices,
+            makeServerContext(),
+          ],
+          // The real codec's mint() rejects when it has no request to bind to.
+          ['the real codec with no request context', sealing, undefined],
+        ])('%s: InternalError envelope, one error record, request id', async (_l, svc, ctx) => {
+          for (const level of ['debug', 'info', 'notice', 'warning', 'error'] as const) {
+            vi.mocked(mockLogger[level]).mockClear();
+          }
+          const handler = createToolHandler(confirmingTool as AnyToolDefinition, svc, notifiers);
+
+          const result = await handler({ path: '/tmp/x' }, ctx as never);
+
+          expect((result as CallToolResult).isError).toBe(true);
+          expect(envelope(result)).toMatchObject({
+            code: JsonRpcErrorCode.InternalError,
+            data: { requestId: REQUEST_ID },
+          });
+          expect(JSON.stringify(result)).not.toContain('k'.repeat(32));
+          expect(failureRecords()).toHaveLength(1);
+        });
+      });
+    });
+
     // ---------------------------------------------------------------------
     // Client-capability gate (#379)
     // ---------------------------------------------------------------------
@@ -2662,7 +3366,7 @@ describe('createToolHandler', () => {
           confirmingTool as AnyToolDefinition,
           services,
           notifiers,
-          createInputRequiredGate(() => declared),
+          legacyCapabilityView(declared),
         );
         return await handler({ path: '/tmp/x' }, makeServerContext());
       }
@@ -2676,7 +3380,7 @@ describe('createToolHandler', () => {
         expect(envelope(result).data?.recovery?.hint).toContain('`elicitation.form`');
         expect((firstBlock(result) as { text: string }).text).toBe(
           `Error: ${envelope(result).message}\n\nRecovery: ${envelope(result).data?.recovery?.hint}` +
-            '\n\n(reason client_capability_missing)',
+            `\n\n(reason client_capability_missing · request ${REQUEST_ID})`,
         );
       });
 
@@ -2737,7 +3441,7 @@ describe('createToolHandler', () => {
             nounTool as AnyToolDefinition,
             services,
             notifiers,
-            createInputRequiredGate(() => declared),
+            legacyCapabilityView(declared),
           );
           return await handler({}, makeServerContext());
         }
@@ -2753,11 +3457,15 @@ describe('createToolHandler', () => {
             message:
               "Cannot request input 'noun' (elicitation/create): the client on this 2025-era " +
               'connection did not declare the `elicitation.form` capability',
-            data: { reason: 'client_capability_missing', recovery: { hint } },
+            data: {
+              reason: 'client_capability_missing',
+              recovery: { hint },
+              requestId: REQUEST_ID,
+            },
           });
           expect((firstBlock(result) as { text: string }).text).toBe(
             `Error: ${envelope(result).message}\n\nRecovery: ${hint}` +
-              '\n\n(reason client_capability_missing)',
+              `\n\n(reason client_capability_missing · request ${REQUEST_ID})`,
           );
         });
 
@@ -2796,7 +3504,7 @@ describe('createToolHandler', () => {
             def as AnyToolDefinition,
             services,
             notifiers,
-            createInputRequiredGate(() => ({})),
+            legacyCapabilityView({}),
           );
 
           const result = await handler({}, makeServerContext());
@@ -2844,7 +3552,7 @@ describe('createToolHandler', () => {
           def as AnyToolDefinition,
           services,
           notifiers,
-          createInputRequiredGate(() => ({ elicitation: { form: {} } }) as ClientCapabilities),
+          legacyCapabilityView({ elicitation: { form: {} } } as ClientCapabilities),
         );
 
         const result = await handler({}, makeServerContext());
@@ -2864,7 +3572,7 @@ describe('createToolHandler', () => {
           def as AnyToolDefinition,
           services,
           notifiers,
-          createInputRequiredGate(() => undefined),
+          legacyCapabilityView(undefined),
         );
 
         const result = await handler({}, makeServerContext());
@@ -2900,7 +3608,7 @@ describe('createToolHandler', () => {
           def as AnyToolDefinition,
           services,
           notifiers,
-          createInputRequiredGate(() => ({ elicitation: { form: {} } }) as ClientCapabilities),
+          legacyCapabilityView({ elicitation: { form: {} } } as ClientCapabilities),
         );
 
         // Round one is servable and passes through untouched.
@@ -2924,10 +3632,15 @@ describe('createToolHandler', () => {
   describe('ctx.inputs', () => {
     const confirmSchema = z.object({ confirm: z.boolean().describe('confirm') });
 
-    /** Runs a probe handler against a request scope and returns what it read. */
+    /**
+     * Runs a probe handler against a request scope and returns what it read.
+     * The client declared every response kind unless `view` says otherwise;
+     * `null` hands the factory no view at all.
+     */
     async function readInputs(
       overrides: Parameters<typeof makeServerContext>[0],
       read: (ctx: any) => unknown,
+      view: ClientCapabilityView | null = legacyCapabilityView(EVERY_INPUT_CAPABILITY),
     ): Promise<unknown> {
       let captured: unknown;
       const def = tool('inputs_probe', {
@@ -2939,11 +3652,108 @@ describe('createToolHandler', () => {
           return { ok: true };
         },
       });
-      const handler = createToolHandler(def as AnyToolDefinition, services, notifiers);
+      const handler = createToolHandler(
+        def as AnyToolDefinition,
+        services,
+        notifiers,
+        view ?? undefined,
+      );
       const result = await handler({}, makeServerContext(overrides));
       expect(result.isError).toBeUndefined();
       return captured;
     }
+
+    describe('filtered by the declared capabilities (#496)', () => {
+      const every = {
+        confirm: { action: 'accept', content: { confirm: true } },
+        summary: { role: 'assistant', content: { type: 'text', text: 'hi' }, model: 'test' },
+        roots: { roots: [{ uri: 'file:///work' }] },
+      };
+      const snapshot = (ctx: any) => ({
+        accepted: ctx.inputs.accepted('confirm'),
+        kinds: Object.keys(every).map((key) => ctx.inputs.view(key).kind),
+        responses: ctx.inputs.responses,
+      });
+
+      it.each([
+        ['elicitation', { elicitation: {} }, ['elicit', 'missing', 'missing'], ['confirm']],
+        ['sampling', { sampling: {} }, ['missing', 'sampling', 'missing'], ['summary']],
+        ['roots', { roots: {} }, ['missing', 'missing', 'roots'], ['roots']],
+        // `confirm` carries form `content`, which needs `elicitation.form`.
+        [
+          'url-mode elicitation only',
+          { elicitation: { url: {} } },
+          ['missing', 'missing', 'missing'],
+          [],
+        ],
+      ])('keeps only the kind %s answers to', async (_label, declared, kinds, keys) => {
+        const seen = (await readInputs(
+          { inputResponses: every },
+          snapshot,
+          legacyCapabilityView(declared as ClientCapabilities),
+        )) as ReturnType<typeof snapshot>;
+
+        expect(seen.kinds).toEqual(kinds);
+        expect(Object.keys(seen.responses ?? {})).toEqual(keys);
+      });
+
+      it.each([
+        ['declared nothing', legacyCapabilityView({})],
+        ['has no view on a per-request connection', legacyCapabilityView(undefined)],
+        ['reached the factory with no view at all', null],
+      ])('exposes nothing when the client %s', async (_label, view) => {
+        const seen = (await readInputs({ inputResponses: every }, snapshot, view)) as ReturnType<
+          typeof snapshot
+        >;
+
+        expect(seen).toEqual({
+          accepted: undefined,
+          kinds: ['missing', 'missing', 'missing'],
+          responses: undefined,
+        });
+      });
+
+      it('drops an entry the SDK classifier reads as no kind at all', async () => {
+        const seen = await readInputs(
+          { inputResponses: { odd: { unrelated: true }, confirm: every.confirm } },
+          (ctx) => ctx.inputs.responses,
+        );
+
+        expect(seen).toEqual({ confirm: every.confirm });
+      });
+
+      it('keeps the SDK-dropped keys and the request state, which no capability governs', async () => {
+        const seen = await readInputs(
+          { droppedInputResponseKeys: ['confirm'], requestState: 'round-2' },
+          (ctx) => ({ dropped: [...ctx.inputs.dropped], state: ctx.inputs.state() }),
+          legacyCapabilityView({}),
+        );
+
+        expect(seen).toEqual({ dropped: ['confirm'], state: 'round-2' });
+      });
+    });
+
+    describe('ctx.clientCapabilities (#580)', () => {
+      it('is what the instance view resolves for the request', async () => {
+        const declared = { roots: {}, extensions: { 'io.modelcontextprotocol/ui': {} } };
+
+        await expect(
+          readInputs({}, (ctx) => ctx.clientCapabilities, legacyCapabilityView(declared)),
+        ).resolves.toEqual(declared);
+        await expect(
+          readInputs({}, (ctx) => ctx.clientCapabilities, legacyCapabilityView({})),
+        ).resolves.toEqual({});
+      });
+
+      it('is undefined when there is no view', async () => {
+        await expect(
+          readInputs({}, (ctx) => ctx.clientCapabilities, legacyCapabilityView(undefined)),
+        ).resolves.toBeUndefined();
+        await expect(
+          readInputs({}, (ctx) => ctx.clientCapabilities, null),
+        ).resolves.toBeUndefined();
+      });
+    });
 
     it('returns the validated content of an accepted response', async () => {
       const accepted = await readInputs(

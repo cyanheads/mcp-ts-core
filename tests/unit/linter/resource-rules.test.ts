@@ -238,7 +238,7 @@ describe('lintResourceDefinition', () => {
       ).toContain('error-contract-type');
     });
 
-    it('reports a fail site that does not forward the declared recovery', () => {
+    it('stays silent on a bare fail site — the framework fills its recovery (#579)', () => {
       expect(
         rules({
           uriTemplate: 'widget://{id}',
@@ -257,7 +257,7 @@ describe('lintResourceDefinition', () => {
             },
           ],
         }),
-      ).toContain('error-contract-recovery-unforwarded');
+      ).toEqual([]);
     });
   });
 

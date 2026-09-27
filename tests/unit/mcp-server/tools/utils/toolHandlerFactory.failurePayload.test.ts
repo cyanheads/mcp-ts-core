@@ -23,7 +23,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vites
 import { z } from 'zod';
 
 import { JsonRpcErrorCode, McpError } from '@/types-global/errors.js';
-import { makeServerContext } from '../../../../helpers/server-context.js';
+import { legacyCapabilityView, makeServerContext } from '../../../../helpers/server-context.js';
 
 // ---------------------------------------------------------------------------
 // Module mocks
@@ -70,7 +70,6 @@ vi.mock('pino', () => {
 // Imports (after mocks)
 // ---------------------------------------------------------------------------
 
-import { createInputRequiredGate } from '@/mcp-server/inputRequired.js';
 import { type AnyToolDefinition, tool } from '@/mcp-server/tools/utils/toolDefinition.js';
 import {
   createToolHandler,
@@ -150,7 +149,7 @@ async function call(
     def as AnyToolDefinition,
     services,
     {},
-    options.gate ? createInputRequiredGate(() => options.gate) : undefined,
+    options.gate ? legacyCapabilityView(options.gate) : undefined,
   );
   const parent = trace.setSpanContext(ROOT_CONTEXT, {
     spanId: SPAN_ID,
@@ -280,11 +279,15 @@ const asksForInput = tool('payload_asks', {
     }),
 });
 
-/** The four failure kinds the payload record covers, as `[label, definition, args, setup?]`. */
+/**
+ * The four failure kinds the payload record covers, as `[label, definition, args, setup?,
+ * pinoLevel]`. An argument rejection is the framework's own `invalid_arguments` refusal,
+ * logged at `notice` — pino's `info` (#567).
+ */
 const FAILURES = [
-  ['a handler throw', handlerThrows, { query: SENTINEL }, undefined],
-  ['an output-schema failure', breaksOutput, { query: SENTINEL }, undefined],
-  ['an argument rejection', handlerThrows, { query: SENTINEL, limit: 'ten' }, undefined],
+  ['a handler throw', handlerThrows, { query: SENTINEL }, undefined, 'error'],
+  ['an output-schema failure', breaksOutput, { query: SENTINEL }, undefined, 'error'],
+  ['an argument rejection', handlerThrows, { query: SENTINEL, limit: 'ten' }, undefined, 'info'],
   [
     'an auth refusal',
     scoped,
@@ -292,6 +295,7 @@ const FAILURES = [
     () => {
       mockConfig.mcpAuthMode = 'jwt';
     },
+    'error',
   ],
 ] as const;
 
@@ -302,13 +306,13 @@ const FAILURES = [
 describe('LOG_TOOL_FAILURE_PAYLOADS unset', () => {
   it.each(FAILURES)(
     'logs %s without a payload record or any argument value',
-    async (_label, def, args, setup) => {
+    async (_label, def, args, setup, level) => {
       setup?.();
 
       const result = await call(def, args);
 
       expect(result.isError).toBe(true);
-      expect(errorRecord().level).toBe('error');
+      expect(errorRecord().level).toBe(level);
       expect(payloadWrites()).toEqual([]);
       expect(exported.filter((r) => r.body.startsWith(PAYLOAD_PREFIX))).toEqual([]);
       for (const w of writes) expect(JSON.stringify(w.fields)).not.toContain(SENTINEL);
@@ -377,6 +381,35 @@ describe('LOG_TOOL_FAILURE_PAYLOADS=true', () => {
       'Error in tool:payload_throws: probe failed',
       `${PAYLOAD_PREFIX}payload_throws`,
     ]);
+  });
+
+  it('writes an argument rejection and its payload at notice (#567)', async () => {
+    await call(handlerThrows, { query: SENTINEL, limit: 'ten' });
+
+    expect(errorRecord().level).toBe('info');
+    expect(onlyPayload().level).toBe('info');
+    const exportedRecords = exported.filter(
+      (r) => r.body.startsWith(PAYLOAD_PREFIX) || r.body.startsWith('Error in tool:'),
+    );
+    expect(exportedRecords.map((r) => [r.body.split(':')[0], r.severityText])).toEqual([
+      ['Error in tool', 'notice'],
+      ['Tool failure payload', 'notice'],
+    ]);
+    expect(writes.filter((w) => w.level === 'error')).toEqual([]);
+  });
+
+  it('carries the declared recovery in the payload record of a bare ctx.fail (#579)', async () => {
+    const result = await call(softMiss, { query: SENTINEL });
+
+    const toolResult = JSON.parse(onlyPayload().fields.toolResult as string) as CallToolResult;
+    expect(toolResult).toEqual(result);
+    expect(
+      (toolResult.structuredContent as { error: { data: { recovery?: unknown } } }).error.data
+        .recovery,
+    ).toEqual({ hint: 'Broaden the query and call the tool again with fewer filters.' });
+    expect(errorRecord().fields.errorData).toMatchObject({
+      recovery: { hint: 'Broaden the query and call the tool again with fewer filters.' },
+    });
   });
 
   it('follows a declared severity to the error record level', async () => {

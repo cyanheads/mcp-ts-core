@@ -59,7 +59,7 @@ function buildDeps(overrides: Partial<ContextDeps> = {}): ContextDeps {
   return {
     appContext: buildAppContext(),
     defaultTenantId: 'default',
-    inputs: createContextInputs(undefined),
+    inputs: createContextInputs(undefined, undefined),
     logger,
     requestInput: createRequestInput(),
     signal: new AbortController().signal,
@@ -942,14 +942,17 @@ describe('ContextState (ctx.state)', () => {
 });
 describe('createContext — multi-round-trip input wiring', () => {
   it('reads a retried request’s responses through ctx.inputs (accepted / view / state / dropped)', () => {
-    const inputs = createContextInputs({
-      inputResponses: {
-        confirm: { action: 'accept', content: { ok: true } },
-        cancelled: { action: 'cancel' },
-      },
-      droppedInputResponseKeys: ['wrapped'],
-      requestState: () => 'round-1',
-    } as never);
+    const inputs = createContextInputs(
+      {
+        inputResponses: {
+          confirm: { action: 'accept', content: { ok: true } },
+          cancelled: { action: 'cancel' },
+        },
+        droppedInputResponseKeys: ['wrapped'],
+        requestState: () => 'round-1',
+      } as never,
+      { elicitation: {} },
+    );
     const ctx = createContext(buildDeps({ inputs }));
 
     expect(ctx.inputs.accepted('confirm', z.object({ ok: z.boolean() }))).toEqual({ ok: true });
@@ -958,6 +961,22 @@ describe('createContext — multi-round-trip input wiring', () => {
     expect(ctx.inputs.view('never-asked')).toEqual({ kind: 'missing' });
     expect(ctx.inputs.state()).toBe('round-1');
     expect(ctx.inputs.dropped).toEqual(['wrapped']);
+  });
+
+  it('forwards the resolved client capabilities onto ctx.clientCapabilities (#580)', () => {
+    const declared = { roots: {}, extensions: { 'io.modelcontextprotocol/ui': {} } };
+
+    expect(createContext(buildDeps({ clientCapabilities: declared })).clientCapabilities).toBe(
+      declared,
+    );
+    expect(createContext(buildDeps({ clientCapabilities: {} })).clientCapabilities).toEqual({});
+  });
+
+  it('has an always-present clientCapabilities key, undefined when no view was supplied', () => {
+    const ctx = createContext(buildDeps());
+
+    expect(Object.hasOwn(ctx, 'clientCapabilities')).toBe(true);
+    expect(ctx.clientCapabilities).toBeUndefined();
   });
 
   it('defaults to an empty inputs reader on the first round', () => {

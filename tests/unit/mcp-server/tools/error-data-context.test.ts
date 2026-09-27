@@ -36,7 +36,7 @@ import { htmlExtractor } from '@/utils/parsing/htmlExtractor.js';
 import { Allow, jsonParser } from '@/utils/parsing/jsonParser.js';
 import { xmlParser } from '@/utils/parsing/xmlParser.js';
 import { yamlParser } from '@/utils/parsing/yamlParser.js';
-import { makeServerContext } from '../../../helpers/server-context.js';
+import { legacyCapabilityView, makeServerContext } from '../../../helpers/server-context.js';
 
 const provider = new NodeTracerProvider();
 const storage = new StorageService(new InMemoryProvider());
@@ -45,14 +45,18 @@ const services = { logger: logger as never, storage, exposeStatelessSessionId: t
 const SESSION_ID = 'a'.repeat(64);
 const PASSPHRASE = 'hunter2';
 
-/** Context keys that must never reach `structuredContent.error.data`. */
+/**
+ * Context keys that must never reach `structuredContent.error.data`. `requestId`
+ * is the one exception: the handler factory adds the call's own id to every
+ * envelope it builds (#576), which {@link expectOnlyRequestId} pins.
+ */
 const CONTEXT_KEYS = [
   'auth',
+  'clientCapabilities',
   'extra',
   'inputs',
   'log',
   'operation',
-  'requestId',
   'sessionId',
   'signal',
   'spanId',
@@ -95,7 +99,13 @@ async function answeredRound(call: (ctx: Context) => Promise<unknown>) {
     seen = ctx;
     return call(ctx);
   });
-  const handler = createToolHandler(def as AnyToolDefinition, services as never, {});
+  // A client that declared elicitation, so the answer reaches `ctx.inputs`.
+  const handler = createToolHandler(
+    def as AnyToolDefinition,
+    services as never,
+    {},
+    legacyCapabilityView({ elicitation: {} }),
+  );
   const result = (await handler(
     {},
     makeServerContext({
@@ -109,6 +119,12 @@ async function answeredRound(call: (ctx: Context) => Promise<unknown>) {
 function errorData(result: CallToolResult): Record<string, unknown> | undefined {
   expect(result.isError).toBe(true);
   return (result.structuredContent as { error: { data?: Record<string, unknown> } }).error.data;
+}
+
+/** The envelope carries the call's own request id and no other context key (#576). */
+function expectOnlyRequestId(data: Record<string, unknown> | undefined, ctx: Context): void {
+  expect(data?.requestId).toBe(ctx.requestId);
+  for (const key of CONTEXT_KEYS) expect(data ?? {}).not.toHaveProperty(key);
 }
 
 describe('framework error data built from a handler ctx (#548)', () => {
@@ -164,10 +180,10 @@ describe('framework error data built from a handler ctx (#548)', () => {
 
     const data = errorData(result);
     expect(JSON.stringify(data ?? {})).not.toContain(PASSPHRASE);
-    for (const key of CONTEXT_KEYS) expect(data ?? {}).not.toHaveProperty(key);
+    expectOnlyRequestId(data, ctx);
   });
 
-  it('a ctx.state validation failure returns only the offending field', async () => {
+  it('a ctx.state validation failure returns only the offending field and the request id', async () => {
     const cases: [(ctx: Context) => Promise<unknown>, Record<string, unknown>][] = [
       [(ctx) => ctx.state.get('note:42'), { key: 'note:42' }],
       [(ctx) => ctx.state.set('a..b', 1), { key: 'a..b' }],
@@ -175,8 +191,8 @@ describe('framework error data built from a handler ctx (#548)', () => {
       [(ctx) => ctx.state.list('ok/', { limit: 0 }), { limit: 0 }],
     ];
     for (const [call, expected] of cases) {
-      const { result } = await answeredRound(call);
-      expect(errorData(result)).toEqual(expected);
+      const { result, ctx } = await answeredRound(call);
+      expect(errorData(result)).toEqual({ ...expected, requestId: ctx.requestId });
     }
   });
 
@@ -204,7 +220,7 @@ describe('framework error data built from a handler ctx (#548)', () => {
       const data = errorData(result);
       expect(data).toMatchObject({ originalErrorName: 'McpError' });
       expect(JSON.stringify(data ?? {})).not.toContain(PASSPHRASE);
-      for (const key of CONTEXT_KEYS) expect(data ?? {}).not.toHaveProperty(key);
+      expectOnlyRequestId(data, ctx);
       // The provider's tryCatch log record still carries the correlation.
       expect(errorSpy).toHaveBeenCalledWith(
         expect.stringContaining('Error in FileSystemProvider.get'),
@@ -236,7 +252,7 @@ describe('framework error data built from a handler ctx (#548)', () => {
 
       const data = errorData(result);
       expect(data).toHaveProperty('errorSource');
-      for (const key of CONTEXT_KEYS) expect(data ?? {}).not.toHaveProperty(key);
+      expectOnlyRequestId(data, ctx);
       expect(errorSpy).toHaveBeenCalledWith(
         expect.stringMatching(/Fetch failed|Network error/),
         expect.objectContaining({ requestId: ctx.requestId }),
@@ -249,7 +265,7 @@ describe('framework error data built from a handler ctx (#548)', () => {
 
     const { result, ctx } = await answeredRound((c) => storage.get('note:42', c));
 
-    expect(errorData(result)).toEqual({ key: 'note:42' });
+    expect(errorData(result)).toEqual({ key: 'note:42', requestId: ctx.requestId });
     expect(errorSpy).toHaveBeenCalledWith(
       expect.stringContaining('Key contains invalid characters'),
       expect.objectContaining({

@@ -7,6 +7,7 @@
  */
 
 import type {
+  ClientCapabilities,
   ContentBlock,
   InputRequiredSpec,
   InputResponses,
@@ -69,8 +70,14 @@ export type { AuthContext };
  * service-layer helper, but TypeScript will not narrow across it.
  *
  * At least one of `inputRequests` or `requestState` must be supplied.
- * `requestState` round-trips through the client and is attacker-controlled on
- * re-entry — integrity-protect anything that influences authorization.
+ * `requestState` round-trips through the client and comes back on re-entry.
+ * With `MCP_REQUEST_STATE_KEY` set the framework seals the string before it
+ * leaves and the SDK verifies it before the handler runs, so a retry can only
+ * echo state this server minted, for the same principal, within 900 s; unset,
+ * it is whatever the client sent. Sealed or not, it can be replayed within its
+ * lifetime — a consent gate keeps what was confirmed (operation, caller,
+ * target) in a `ctx.state` record, redeemed once, and sends only that
+ * record's random id.
  *
  * `options` shape only the refusal a 2025-era connection gets when its client
  * declared no matching capability — see {@link RequestInputOptions}. They never
@@ -100,12 +107,21 @@ export interface RequestInputOptions {
 }
 
 /**
- * Reader over the input responses a retried request carried. Empty on the first
- * round; populated once the client (or the legacy shim) has fulfilled a prior
- * `ctx.requestInput(...)`.
+ * Reader over the input responses a request carried. Populated once the client
+ * (or the legacy shim) has fulfilled a prior `ctx.requestInput(...)` — but a
+ * client can also send responses on a call nothing asked for, so only what its
+ * declared capabilities cover reaches here, at the mode level the request
+ * would need: an elicit result needs `elicitation` (`elicitation.form` when it
+ * carries `content`), a sampling result `sampling` (`sampling.tools` when it
+ * holds a `tool_use` or `tool_result` block), a roots result `roots`. A
+ * request with no capability view (`ctx.clientCapabilities` undefined) carries
+ * none.
  *
  * Responses arrive from the client and are never validated by the SDK — pass a
- * schema to {@link ContextInputs.accepted} wherever the content matters.
+ * schema to {@link ContextInputs.accepted} wherever the content matters. A
+ * response a capable client sends is still client-supplied: it proves a
+ * prompt was answered only when the handler redeems a record it stored when
+ * it asked.
  */
 export interface ContextInputs {
   /**
@@ -127,9 +143,10 @@ export interface ContextInputs {
   /** The raw response map, for kinds the helpers do not cover. */
   readonly responses: InputResponses | Record<string, unknown> | undefined;
   /**
-   * The multi-round-trip state for this round: the value
-   * `ServerOptions.requestState.verify` resolved with, the raw wire string when
-   * no verifier is configured, or `undefined` on the first round.
+   * The `requestState` this round carried: the string the handler returned on
+   * the previous round — verified and unsealed when `MCP_REQUEST_STATE_KEY` is
+   * set, the raw wire string otherwise — or `undefined` when the round carried
+   * none.
    */
   state<T = string>(): T | undefined;
   /**
@@ -199,6 +216,26 @@ export interface Context extends RequestContext {
   /** Auth data when request is authenticated. */
   readonly auth?: AuthContext | undefined;
 
+  // --- Client capabilities (always present; value may be undefined) ---
+  /**
+   * The capabilities the client declared for this request — on a 2025-era
+   * connection the SDK's parsed `initialize` value, on 2026-07-28 the request's
+   * own envelope as sent. `{}` when it declared none; `undefined` when no view
+   * exists (a 2025-era request served per-request under
+   * `MCP_SESSION_MODE=stateless`).
+   *
+   * Decides whether to *ask* for optional context — request roots only when
+   * `roots` is declared, and fall through to another source otherwise, which a
+   * 2026-07-28 request's `-32021` would not allow. Read `ctx.inputs` first so a
+   * retry does not ask again. Never a reason to skip a consent prompt: a gate
+   * that proceeds when `elicitation` is absent is the bypass a gate exists to
+   * prevent. A bare `elicitation: {}` counts as declaring `elicitation.form`;
+   * the SDK normalizes it at `initialize`, so it reads back as
+   * `{ elicitation: { form: {} } }` on a 2025-era connection and as
+   * `{ elicitation: {} }` on 2026-07-28.
+   */
+  readonly clientCapabilities: ClientCapabilities | undefined;
+
   // --- Content blocks (always present; no-op when unused) ---
   /**
    * Accumulates non-text content blocks (image/audio bytes) onto this request.
@@ -229,7 +266,8 @@ export interface Context extends RequestContext {
 
   // --- Multi-round-trip input (always present) ---
   /**
-   * Input responses carried by a retried request. Empty on the first round.
+   * Input responses the request carried, limited to the kinds the client
+   * declared the capability for.
    * @see {@link ContextInputs}
    */
   readonly inputs: ContextInputs;
@@ -254,8 +292,7 @@ export interface Context extends RequestContext {
    * factory `data` or `ctx.fail`'s data argument:
    *
    * ```ts
-   * throw ctx.fail('parse_failed', `Parse error: ${err.message}`, ctx.recoveryFor('parse_failed'));
-   * throw validationError('Parse failed', { reason: 'parse_failed', ...ctx.recoveryFor('parse_failed') });
+   * throw ctx.fail('partial_scan', msg, ctx.recoveryFor('rate_limited'));
    * ```
    *
    * Returns `{}` when the calling definition has no `errors[]` contract, or the
@@ -263,10 +300,13 @@ export interface Context extends RequestContext {
    * needed at call sites. The strict, typed variant (which guarantees the
    * non-empty return) lives on `HandlerContext<R>` when a contract is declared.
    *
-   * Single source of truth pattern: write the recovery once in the contract entry
-   * (lint-validated for ≥5 words), reference it everywhere via this resolver.
-   * Authors who want runtime-context recovery (interpolating input values, IDs,
-   * queue state) override at the throw site as today.
+   * Not needed to put a declared reason's hint on the wire: the handler
+   * factory fills `data.recovery` from the contract entry whenever a failure
+   * carrying that reason arrives without one (#579). Reach for it when the
+   * hint must travel on the thrown error itself — a test asserting the
+   * handler's own throw, or another reason's entry named on purpose. Authors
+   * who want runtime-context recovery (interpolating input values, IDs, queue
+   * state) pass their own `recovery: { hint }` at the throw site instead.
    */
   recoveryFor(reason: string): { recovery: { hint: string } } | Record<string, never>;
 
@@ -362,9 +402,6 @@ export type ReasonOf<E> = E extends readonly { reason: infer R extends string }[
  * to:
  *   - `reason` is constrained to the declared union (TS catches typos)
  *   - return is the non-empty wire shape (no fallback `{}` branch)
- *
- * Family of opt-in resolution helpers — future contract-bound fields
- * (`troubleshootingFor`, `userMessageFor`, …) follow the same shape.
  */
 export type TypedRecoveryFor<R extends string> = (reason: R) => { recovery: { hint: string } };
 
@@ -606,6 +643,54 @@ export function createRecoveryFor(
 }
 
 /**
+ * Resolves a thrown failure against a definition's `errors[]` contract at the
+ * handler boundary (#579): the entry its `data.reason` names, and the failure
+ * to report — the thrown value itself, or, when the throw site left
+ * `data.recovery` unset, a copy whose `data.recovery.hint` is the entry's
+ * `recovery`. The tool factory reads both halves (the entry also decides the
+ * log level, #380); the resource factory and `runToolContract` report the
+ * failure.
+ *
+ * Matched on the reason alone, as {@link createRecoveryFor} and the declared
+ * severity are, so a service that raises a declared reason through a different
+ * factory still gets its hint; a reason declared twice resolves to its last
+ * entry, as `createRecoveryFor` does. A throw-site `recovery` of any shape wins. A
+ * non-`McpError`, an `McpError` without a string `data.reason`, and a reason
+ * the contract never declared resolve to no entry and the thrown value as-is;
+ * a cancellation reaches here already replaced by the reason-less error
+ * `asRequestCancelled` builds.
+ *
+ * The thrown error is never mutated — the `McpError` a handler-level test gets
+ * from `ctx.fail` still carries exactly what the throw site wrote. The copy
+ * keeps its code, message, name, stack, and cause, so the log record and the
+ * envelope built from it describe the same throw.
+ *
+ * @internal
+ */
+export function resolveDeclaredFailure<T>(
+  errors: readonly ErrorContract[] | undefined,
+  error: T,
+): { entry: ErrorContract | undefined; failure: T | McpError } {
+  const reason = error instanceof McpError ? error.data?.reason : undefined;
+  const entry =
+    typeof reason === 'string'
+      ? errors?.findLast((candidate) => candidate.reason === reason)
+      : undefined;
+  if (!entry || !(error instanceof McpError) || error.data?.recovery !== undefined) {
+    return { entry, failure: error };
+  }
+  const failure = new McpError(
+    error.code,
+    error.message,
+    { ...error.data, recovery: { hint: entry.recovery } },
+    error.cause === undefined ? undefined : { cause: error.cause },
+  );
+  failure.name = error.name;
+  if (error.stack !== undefined) failure.stack = error.stack;
+  return { entry, failure };
+}
+
+/**
  * Attaches a typed `fail` and `recoveryFor` helper to `ctx` when the definition
  * declares an error contract. The bare `Context.recoveryFor` (always present
  * via `createContext`) is overwritten with a contract-aware resolver. Used by
@@ -766,6 +851,12 @@ export function readContentStore(ctx: Context): ContentStore | undefined {
 export interface ContextDeps {
   appContext: RequestContext;
   /**
+   * The capabilities the request's client declared, as the instance's view
+   * resolved them — forwarded onto `Context.clientCapabilities` as-is.
+   * Omitted, the context has no view (`undefined`).
+   */
+  clientCapabilities?: ClientCapabilities | undefined;
+  /**
    * Tenant used when `appContext` carries none (no `tid` claim). The caller
    * resolves it from parsed config: `'default'` where no auth pipeline can
    * supply a tenant (stdio, or HTTP with `MCP_AUTH_MODE=none`), `undefined`
@@ -843,6 +934,7 @@ export function createContext(deps: ContextDeps): Context {
     traceId: appContext.traceId,
     spanId: appContext.spanId,
     auth: appContext.auth,
+    clientCapabilities: deps.clientCapabilities,
     inputs: deps.inputs,
     requestInput: deps.requestInput,
     notifyPromptListChanged: deps.notifyPromptListChanged,

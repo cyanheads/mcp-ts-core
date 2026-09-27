@@ -318,17 +318,124 @@ describe('runToolContract', () => {
 
     const result = await runToolContract(definition, { id: 'missing' });
 
-    expect(result).toMatchObject({
+    // The declared recovery fills the bare `ctx.fail`, as the factory does (#579),
+    // and no request id is added — the runner has no real request (#576).
+    expect(result).toEqual({
       isError: true,
-      content: [{ type: 'text', text: 'Error: The item is missing.\n\n(reason missing_item)' }],
+      content: [
+        {
+          type: 'text',
+          text:
+            'Error: The item is missing.\n\n' +
+            'Recovery: Request a known item identifier and retry.\n\n(reason missing_item)',
+        },
+      ],
       structuredContent: {
         error: {
           code: JsonRpcErrorCode.NotFound,
           message: 'The item is missing.',
-          data: { reason: 'missing_item' },
+          data: {
+            reason: 'missing_item',
+            recovery: { hint: 'Request a known item identifier and retry.' },
+          },
         },
       },
     });
+  });
+
+  it('fills a declared reason a service throws below the handler (#579)', async () => {
+    const fetchItem = (id: string): never => {
+      throw new McpError(JsonRpcErrorCode.NotFound, `No item ${id}.`, { reason: 'missing_item' });
+    };
+    const definition = tool('contract_service_error', {
+      description: 'Error contract, thrown below the handler.',
+      errors: [
+        {
+          reason: 'missing_item',
+          code: JsonRpcErrorCode.NotFound,
+          when: 'The item is missing.',
+          recovery: 'Request a known item identifier and retry.',
+          thrownBy: 'service',
+        },
+      ],
+      input: z.object({ id: z.string().describe('Item ID') }),
+      output: z.object({ id: z.string().describe('Item ID') }),
+      handler: (input) => fetchItem(input.id),
+    });
+
+    const result = await runToolContract(definition, { id: '7' });
+
+    expect(result.structuredContent).toEqual({
+      error: {
+        code: JsonRpcErrorCode.NotFound,
+        message: 'No item 7.',
+        data: {
+          reason: 'missing_item',
+          recovery: { hint: 'Request a known item identifier and retry.' },
+        },
+      },
+    });
+  });
+
+  it('fills a duplicated reason from the entry ctx.recoveryFor resolves (#579)', async () => {
+    let resolved: unknown;
+    const definition = tool('contract_duplicate_reason', {
+      description: 'Error contract declaring one reason twice.',
+      errors: [
+        {
+          reason: 'missing_item',
+          code: JsonRpcErrorCode.NotFound,
+          when: 'The item is missing.',
+          recovery: 'Request a known item identifier and retry.',
+        },
+        {
+          reason: 'missing_item',
+          code: JsonRpcErrorCode.NotFound,
+          when: 'The item is gone.',
+          recovery: 'List the current items and pick one of those.',
+        },
+      ],
+      input: z.object({}),
+      output: z.object({ ok: z.boolean().describe('Success') }),
+      handler(_input, ctx) {
+        resolved = ctx.recoveryFor('missing_item');
+        throw ctx.fail('missing_item');
+      },
+    });
+
+    const result = await runToolContract(definition, {});
+
+    expect(resolved).toEqual({
+      recovery: { hint: 'List the current items and pick one of those.' },
+    });
+    expect(result.structuredContent).toMatchObject({ error: { data: resolved } });
+  });
+
+  it('drops a thrown data.requestId instead of rendering it as the request (#576)', async () => {
+    const definition = tool('contract_upstream_id', {
+      description: 'Error contract, carrying an upstream request id.',
+      input: z.object({}),
+      output: z.object({ ok: z.boolean().describe('Success') }),
+      handler: () => {
+        throw new McpError(JsonRpcErrorCode.ServiceUnavailable, 'Upstream failed.', {
+          reason: 'upstream_down',
+          requestId: 'upstream-7f3a',
+        });
+      },
+    });
+
+    const result = await runToolContract(definition, {});
+
+    expect(result.structuredContent).toEqual({
+      error: {
+        code: JsonRpcErrorCode.ServiceUnavailable,
+        message: 'Upstream failed.',
+        data: { reason: 'upstream_down' },
+      },
+    });
+    expect(result.content).toEqual([
+      { type: 'text', text: 'Error: Upstream failed.\n\n(reason upstream_down)' },
+    ]);
   });
 
   it('turns output-schema and formatter failures into error envelopes', async () => {

@@ -108,7 +108,9 @@ export interface ErrorHandlerOptions {
    * Level to emit this failure's log record at, in place of `error`.
    *
    * Set by the tool handler factory when the thrown error's `data.reason` names
-   * a contract entry declaring one (#380). It moves the level of that one record
+   * a contract entry declaring one (#380), and to `notice` for the framework's
+   * own `invalid_arguments` and `client_capability_missing` refusals when no
+   * entry declares one (#567). It moves the level of that one record
    * and adds `mcp.error.severity` to the `mcp.errors.classified` increment;
    * everything else the handler does — the span status, the rebuilt `McpError`,
    * the structured fields — is unchanged. A `RequestCancelled` keeps its own

@@ -6,7 +6,7 @@
 import { describe, expect, it } from 'vitest';
 import { z } from 'zod';
 
-import { createMockContext } from '@/testing/index.js';
+import { createMockContext, createMockSession } from '@/testing/index.js';
 
 describe('createMockContext helpers', () => {
   it('supports schema-aware state reads and batch state operations', async () => {
@@ -74,5 +74,51 @@ describe('createMockContext helpers', () => {
 
     expect(withSession.sessionId).toBe('sess-xyz');
     expect(withoutSession.sessionId).toBeUndefined();
+  });
+});
+
+describe('createMockContext — clientCapabilities (#580, #496)', () => {
+  const inputResponses = {
+    confirm: { action: 'accept', content: { ok: true } },
+    roots: { roots: [{ uri: 'file:///work' }] },
+  };
+
+  it('seeds ctx.clientCapabilities, undefined when omitted', () => {
+    expect(createMockContext({ clientCapabilities: { roots: {} } }).clientCapabilities).toEqual({
+      roots: {},
+    });
+    expect(createMockContext().clientCapabilities).toBeUndefined();
+  });
+
+  it('leaves seeded responses unfiltered when no capabilities are seeded', () => {
+    const ctx = createMockContext({ inputResponses });
+
+    expect(ctx.inputs.accepted('confirm')).toEqual({ ok: true });
+    expect(ctx.inputs.view('roots').kind).toBe('roots');
+  });
+
+  it('filters seeded responses to the declared kinds once capabilities are seeded', () => {
+    const ctx = createMockContext({ inputResponses, clientCapabilities: { roots: {} } });
+
+    expect(ctx.inputs.accepted('confirm')).toBeUndefined();
+    expect(ctx.inputs.view('confirm')).toEqual({ kind: 'missing' });
+    expect(ctx.inputs.view('roots').kind).toBe('roots');
+    expect(Object.keys(ctx.inputs.responses ?? {})).toEqual(['roots']);
+  });
+
+  it('keeps the mock requestInput ungated whatever was declared', () => {
+    const ctx = createMockContext({ clientCapabilities: {} });
+
+    expect(() => ctx.requestInput({ requestState: 'r' })).toThrow(
+      expect.objectContaining({ isInputRequiredSignal: true }),
+    );
+  });
+
+  it('passes through createMockSession', () => {
+    const session = createMockSession({ inputResponses, clientCapabilities: { elicitation: {} } });
+
+    expect(session.ctx.clientCapabilities).toEqual({ elicitation: {} });
+    expect(session.ctx.inputs.accepted('confirm')).toEqual({ ok: true });
+    expect(session.ctx.inputs.view('roots')).toEqual({ kind: 'missing' });
   });
 });

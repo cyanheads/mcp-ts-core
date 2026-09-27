@@ -337,10 +337,11 @@ export const ATTR_MCP_ERROR_CLASSIFIED_CODE = 'mcp.error.classified_code';
 export const ATTR_MCP_ERROR_CATEGORY = 'mcp.error.category';
 
 /**
- * Log level a definition declared for this failure mode: `debug`, `info`,
- * `notice`, or `warning`. Set only on a record whose declared severity
- * resolved, so a server that declares none emits exactly the series it did
- * before. The `reason` itself is unbounded across a fleet and stays on the
+ * Log level resolved for this failure mode: `debug`, `info`, `notice`, or
+ * `warning`. Set when a definition's `errors[]` entry declares one, and as
+ * `notice` on the framework's `invalid_arguments` and
+ * `client_capability_missing` refusals when none does; absent on every other
+ * failure. The `reason` itself is unbounded across a fleet and stays on the
  * span and in the log.
  */
 export const ATTR_MCP_ERROR_SEVERITY = 'mcp.error.severity';

@@ -15,18 +15,24 @@ import { ZodError, type ZodObject, type ZodRawShape, type ZodType, z } from 'zod
 
 import { config } from '@/config/index.js';
 import type { Context, EnrichmentStore } from '@/core/context.js';
-import { readContentStore, readEnrichmentStore } from '@/core/context.js';
+import { readContentStore, readEnrichmentStore, resolveDeclaredFailure } from '@/core/context.js';
 import {
   buildHandlerContext,
   type HandlerServices,
   handlerParentContext,
   resolveHandlerRequest,
 } from '@/mcp-server/handlerContext.js';
-import { type InputRequiredGate, isInputRequiredSignal } from '@/mcp-server/inputRequired.js';
+import {
+  CLIENT_CAPABILITY_MISSING_REASON,
+  type ClientCapabilityView,
+  isInputRequiredSignal,
+  sealThrown,
+} from '@/mcp-server/inputRequired.js';
 import type { NotifierSources } from '@/mcp-server/notifications.js';
 import { parseOutputContract } from '@/mcp-server/outputContract.js';
 import { withRequiredScopes } from '@/mcp-server/transports/auth/lib/authUtils.js';
 import {
+  type ErrorContract,
   type ErrorContractSeverity,
   internalError,
   JsonRpcErrorCode,
@@ -120,15 +126,17 @@ function extractRecoveryHint(data: Record<string, unknown> | undefined): string 
 /**
  * The compact trailing line carrying the two `data` fields a caller branches
  * on — `reason`, the stable identifier, and `retryable`, whether a retry can
- * succeed (#458). Both reach `structuredContent.error.data`; without this line
- * neither reaches the text surface, so a model that just failed cannot tell a
- * deterministic rejection from a transient one.
+ * succeed (#458) — then `request <id>`, the `data.requestId` the server's log
+ * records carry (#576). All three reach `structuredContent.error.data`;
+ * without this line none reaches the text surface, so a model that just failed
+ * cannot tell a deterministic rejection from a transient one, and a failure
+ * reported from a `content[]`-only client cannot be matched to its log record.
  *
- * Returns `undefined` when `data` carries neither — a classified plain
- * `Error`, an `McpError` with no `data` — leaving the text as it was. The
- * numeric `code` and `data.issues` stay JSON-only on purpose: the code is the
- * one envelope field a model cannot act on, and the message already renders
- * each issue as a sentence.
+ * Returns `undefined` when `data` carries none of them — an `McpError` with no
+ * `data` outside a request, as `runToolContract` builds it — leaving the text
+ * as it was. The numeric `code` and `data.issues` stay JSON-only on purpose:
+ * the code is the one envelope field a model cannot act on, and the message
+ * already renders each issue as a sentence.
  */
 function renderBranchableTerms(data: Record<string, unknown> | undefined): string | undefined {
   const terms: string[] = [];
@@ -137,6 +145,9 @@ function renderBranchableTerms(data: Record<string, unknown> | undefined): strin
   }
   if (typeof data?.retryable === 'boolean') {
     terms.push(data.retryable ? 'retryable' : 'not retryable');
+  }
+  if (typeof data?.requestId === 'string' && data.requestId.length > 0) {
+    terms.push(`request ${data.requestId}`);
   }
   return terms.length > 0 ? `(${terms.join(' · ')})` : undefined;
 }
@@ -148,9 +159,9 @@ function renderBranchableTerms(data: Record<string, unknown> | undefined): strin
  * - `structuredContent.error` — read by clients like Claude Code (JSON)
  *
  * The text carries the message, the `data.recovery.hint` when it adds
- * something, and the branchable `reason` / `retryable` terms
- * {@link renderBranchableTerms} renders; the numeric `code` and `data.issues`
- * stay JSON-only.
+ * something, and the `reason` / `retryable` / `request` terms
+ * {@link renderBranchableTerms} renders, in that order; the numeric `code` and
+ * `data.issues` stay JSON-only.
  *
  * The `Recovery:` line is dropped when the message already contains the hint
  * verbatim (#459) — `buildArgumentRecoveryHint` restates a constraint or
@@ -754,20 +765,37 @@ function accept<TDefinition extends AnyToolDefinition>(
  * Builds an error `CallToolResult` from a raw thrown value. Classifies via
  * {@link ErrorHandler.classifyOnly} when the value isn't already an
  * `McpError`. Only propagates data from `McpError` (its declared `data`) or
- * `ZodError` (its `issues`) — other thrown values get a `structuredContent.error`
- * with `code` and `message` only, so internal classification context never
- * leaks to clients.
+ * `ZodError` (its `issues`), so internal classification context never leaks
+ * to clients.
+ *
+ * `requestId`, when given, is set as `data.requestId` on the envelope — after
+ * the thrown data, so the framework's value replaces a thrown one, as
+ * canonical fields win in log records (#550) — and closes the `content[]`
+ * terms line (#576). It is the one request-context field that reaches `data`,
+ * added here rather than to the thrown `McpError.data`, so the error the
+ * handler threw and the log record's `errorData` stay context-free (#548).
+ * `runToolContract` passes none: it has no real request, so a thrown
+ * `data.requestId` is dropped rather than rendered as one.
  *
  * Use after invoking {@link ErrorHandler.handleError} for OTel/logging side
  * effects — this helper does not log.
  */
-export function classifyAndBuildToolErrorResult(error: unknown): CallToolResult {
+export function classifyAndBuildToolErrorResult(
+  error: unknown,
+  requestId?: string,
+): CallToolResult {
+  const withRequestId = (data: Record<string, unknown> | undefined) => {
+    if (requestId !== undefined) return { ...data, requestId };
+    if (data?.requestId === undefined) return data;
+    const { requestId: _thrown, ...rest } = data;
+    return Object.keys(rest).length > 0 ? rest : undefined;
+  };
   if (error instanceof McpError) {
-    return buildToolErrorResult(error.code, error.message, error.data);
+    return buildToolErrorResult(error.code, error.message, withRequestId(error.data));
   }
   const { code, message } = ErrorHandler.classifyOnly(error);
   const data = error instanceof ZodError ? { issues: error.issues } : undefined;
-  return buildToolErrorResult(code, message, data);
+  return buildToolErrorResult(code, message, withRequestId(data));
 }
 
 // ---------------------------------------------------------------------------
@@ -1077,26 +1105,40 @@ export function buildToolSuccessResult(
 // ---------------------------------------------------------------------------
 
 /**
- * The log level the definition declared for the failure that just unwound, or
- * `undefined` to keep `error` (#380).
- *
- * The outer catch is the one place holding both the definition and the thrown
- * error, so the reason-to-entry lookup happens here rather than inside
- * `ErrorHandler`, which sees neither. Resolution is deliberately narrow: an
- * `McpError` whose `data.reason` names a contract entry that declared a
- * severity. A plain `Error`, a reason thrown below the handler that the
- * contract never declared, and an entry with no severity all fall through to
- * today's behavior. A cancellation is settled earlier — `asRequestCancelled`
- * replaces the thrown value, so no declared reason reaches this point.
+ * The two reasons the framework raises itself, both a refusal of the call
+ * rather than a fault in this server: `invalid_arguments`, only from the schema
+ * gate in {@link parseToolArguments}, and `client_capability_missing`, only
+ * from `ctx.requestInput`'s capability gate.
  */
-function declaredSeverity(
-  def: AnyToolDefinition,
-  error: unknown,
+const FRAMEWORK_REFUSAL_REASONS: ReadonlySet<string> = new Set([
+  INVALID_ARGUMENTS_REASON,
+  CLIENT_CAPABILITY_MISSING_REASON,
+]);
+
+/**
+ * The level the `Error in tool:<name>` record is emitted at, or `undefined` to
+ * keep `error`.
+ *
+ * A severity the matched `errors[]` entry declares wins (#380). Otherwise one
+ * of the framework's own refusals ({@link FRAMEWORK_REFUSAL_REASONS}) logs at
+ * `notice` (#567): a caller's arguments failing the tool's schema, or a client
+ * connection that cannot serve an input request, is routine traffic, and a
+ * schema that wrongly rejects valid calls still shows per tool on
+ * `mcp.tool.rejections`. Everything else — a plain `Error`, an undeclared
+ * reason, an entry with no severity, an auth refusal, an output-contract
+ * failure — keeps `error`. A cancellation takes `handleError`'s own `info`
+ * path whatever this returns.
+ *
+ * Resolved here rather than in `ErrorHandler`, which also serves services,
+ * prompts, and transports and knows neither the definition nor the schema gate.
+ */
+function failureSeverity(
+  entry: ErrorContract | undefined,
+  failure: unknown,
 ): ErrorContractSeverity | undefined {
-  if (!(error instanceof McpError)) return undefined;
-  const reason = error.data?.reason;
-  if (typeof reason !== 'string') return undefined;
-  return def.errors?.find((entry) => entry.reason === reason)?.severity;
+  if (entry?.severity !== undefined) return entry.severity;
+  const reason = failure instanceof McpError ? failure.data?.reason : undefined;
+  return typeof reason === 'string' && FRAMEWORK_REFUSAL_REASONS.has(reason) ? 'notice' : undefined;
 }
 
 /**
@@ -1117,7 +1159,7 @@ export function createToolHandler(
   def: AnyToolDefinition,
   services: HandlerServices,
   notifiers: NotifierSources,
-  inputGate?: InputRequiredGate,
+  capabilities?: ClientCapabilityView,
 ): (
   input: Record<string, unknown>,
   ctx: ServerContext,
@@ -1129,7 +1171,7 @@ export function createToolHandler(
   return async (input, serverContext): Promise<CallToolResult | InputRequiredResult> => {
     const request = resolveHandlerRequest(serverContext, services, notifiers);
     const appContext = requestContextService.createRequestContext({
-      parentContext: handlerParentContext(request),
+      parentContext: handlerParentContext(serverContext),
       operation: 'HandleToolRequest',
       additionalContext: { toolName: def.name },
     });
@@ -1169,7 +1211,7 @@ export function createToolHandler(
             services,
             spanContext,
             def.errors,
-            inputGate,
+            capabilities,
           );
           ctx = handlerCtx;
 
@@ -1194,8 +1236,13 @@ export function createToolHandler(
           } catch (error) {
             // Inside the measurement on purpose: the completion log's
             // `metrics.errorCode` and the span's error-code attribute are
-            // derived from what leaves this callback (#421).
-            throw asRequestCancelled(error, request.signal);
+            // derived from what leaves this callback (#421). An input-required
+            // signal leaves with its `requestState` sealed when a key is
+            // configured, so a sealing failure is a failed call like any other.
+            throw asRequestCancelled(
+              await sealThrown(error, services.requestState, serverContext),
+              request.signal,
+            );
           }
         },
         { ...appContext, toolName: def.name },
@@ -1210,21 +1257,27 @@ export function createToolHandler(
       );
     } catch (error: unknown) {
       // `ctx.requestInput(...)` is protocol control flow, not a failure: return
-      // the `input_required` result untouched, with no span, log, or
-      // classification. The client (2026 era) or the SDK's legacy shim (2025
-      // era) fulfils it and re-invokes this handler. A request this connection
-      // cannot serve never reaches here as a signal — `ctx.requestInput`
-      // throws the refusal instead, and it arrives below as an `McpError`.
+      // the `input_required` result — its `requestState` already sealed when a
+      // key is configured — with no span, log, or classification. The client
+      // (2026 era) or the SDK's legacy shim (2025 era) fulfils it and
+      // re-invokes this handler. A request this connection cannot serve never
+      // reaches here as a signal — `ctx.requestInput` throws the refusal
+      // instead, and it arrives below as an `McpError`.
       if (isInputRequiredSignal(error)) return error.result;
 
-      const severity = declaredSeverity(def, error);
-      ErrorHandler.handleError(error, {
+      // One reason-to-entry lookup: the declared recovery fills a failure that
+      // carries none (#579) and the entry's severity sets the log level (#380,
+      // #567). Filled before `handleError`, so the error record, the envelope,
+      // and the failure-payload record carry the same hint.
+      const { entry, failure } = resolveDeclaredFailure(def.errors, error);
+      const severity = failureSeverity(entry, failure);
+      ErrorHandler.handleError(failure, {
         operation: `tool:${def.name}`,
         context: appContext,
         ...(severity !== undefined && { severity }),
       });
-      if (!measured) recordToolRejection(def.name, error);
-      const result = classifyAndBuildToolErrorResult(error);
+      if (!measured) recordToolRejection(def.name, failure);
+      const result = classifyAndBuildToolErrorResult(failure, appContext.requestId);
       if (config.logToolFailurePayloads) {
         logFailurePayload(services.logger, def.name, appContext, input, result, severity);
       }

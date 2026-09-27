@@ -10,7 +10,7 @@ import { env } from 'cloudflare:workers';
 import { afterEach, describe, expect, it } from 'vitest';
 import { resetConfig } from '@/config/index.js';
 import type { CloudflareBindings } from '@/core/worker.js';
-import { type OtelLogRecord, setOtelLogSink } from '@/utils/internal/logger.js';
+import { logger, type OtelLogRecord, setOtelLogSink } from '@/utils/internal/logger.js';
 import worker from '../fixtures/worker-runtime.fixture.js';
 import { jsonrpc, MCP_HEADERS, parseSseDataFrames } from './wire-helpers.js';
 
@@ -62,7 +62,18 @@ function captureRecords(): OtelLogRecord[] {
 
 const REJECTED_ARGS = { message: 'workerd payload', auth: { apiKey: 'sk-worker-291' } };
 
+/**
+ * Lowers the isolate's logger from the lane's `error` to `notice`, the level an
+ * argument rejection's records are written at (#567). The logger initializes on
+ * the isolate's first request, so one valid call warms it first.
+ */
+async function admitNotice(): Promise<void> {
+  await callTool('echo', { message: 'warm' }, env);
+  logger.setLevel('notice');
+}
+
 afterEach(() => {
+  logger.setLevel('error');
   setOtelLogSink(undefined);
   // `injectEnvVars` sets bindings on `process.env` but never clears them.
   delete process.env.LOG_TOOL_FAILURE_PAYLOADS;
@@ -70,7 +81,21 @@ afterEach(() => {
 });
 
 describe('failed-call payload logging on workerd (#291)', () => {
+  it('writes neither record for a rejection below the configured level', async () => {
+    const records = captureRecords();
+
+    const called = await callTool('echo', REJECTED_ARGS, {
+      ...env,
+      LOG_TOOL_FAILURE_PAYLOADS: 'true',
+    } as CloudflareBindings);
+
+    expect(called.result.isError).toBe(true);
+    expect(records.filter((r) => r.body.startsWith('Error in tool:echo'))).toEqual([]);
+    expect(records.filter((r) => r.body.startsWith('Tool failure payload'))).toEqual([]);
+  });
+
   it('writes no payload record when the binding is unset', async () => {
+    await admitNotice();
     const records = captureRecords();
 
     const called = await callTool('echo', REJECTED_ARGS, env);
@@ -82,6 +107,7 @@ describe('failed-call payload logging on workerd (#291)', () => {
   });
 
   it('writes one redacted payload record from the LOG_TOOL_FAILURE_PAYLOADS binding', async () => {
+    await admitNotice();
     const records = captureRecords();
 
     const called = await callTool('echo', REJECTED_ARGS, {
@@ -93,7 +119,7 @@ describe('failed-call payload logging on workerd (#291)', () => {
     const payloads = records.filter((r) => r.body === 'Tool failure payload: echo');
     expect(payloads).toHaveLength(1);
     const { attributes, severityText } = payloads[0]!;
-    expect(severityText).toBe('error');
+    expect(severityText).toBe('notice');
     expect(JSON.parse(attributes.toolInput as string)).toEqual({
       message: 'workerd payload',
       auth: { apiKey: '[REDACTED]' },

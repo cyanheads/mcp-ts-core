@@ -15,7 +15,7 @@ import { Client, type ElicitResult } from '@modelcontextprotocol/client';
 import { InMemoryTransport, inputRequired, McpServer } from '@modelcontextprotocol/server';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { z } from 'zod';
-import { createInputRequiredGate } from '@/mcp-server/inputRequired.js';
+import { clientCapabilityView } from '@/mcp-server/inputRequired.js';
 import { ResourceRegistry } from '@/mcp-server/resources/resource-registration.js';
 import { resource } from '@/mcp-server/resources/utils/resourceDefinition.js';
 import { ToolRegistry } from '@/mcp-server/tools/tool-registration.js';
@@ -192,8 +192,9 @@ async function connectPair(options: {
     },
   );
   const services = { logger, storage: new StorageService(new InMemoryProvider()) };
-  // The gate `createMcpServerInstance` binds for a 2025-era instance (#379).
-  const inputGate = createInputRequiredGate(() => server.server.getClientCapabilities());
+  // The capability view `createMcpServerInstance` binds for a 2025-era
+  // instance (#580), which also drives the gate (#379) and the inputs filter.
+  const capabilities = clientCapabilityView('legacy', server);
   await new ToolRegistry(
     [
       pickColor,
@@ -204,12 +205,12 @@ async function connectPair(options: {
       ...(options.extraTools ?? []),
     ] as AnyToolDefinition[],
     services,
-  ).registerAll(server, undefined, undefined, inputGate);
+  ).registerAll(server, undefined, undefined, capabilities);
   await new ResourceRegistry([gatedDoc], services).registerAll(
     server,
     undefined,
     undefined,
-    inputGate,
+    capabilities,
   );
 
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
@@ -368,7 +369,7 @@ describe('Multi-round-trip input integration', () => {
       result.structuredContent as {
         error?: {
           code?: number;
-          data?: { reason?: string; recovery?: { hint?: string } };
+          data?: { reason?: string; recovery?: { hint?: string }; requestId?: string };
           message?: string;
         };
       }
@@ -376,10 +377,11 @@ describe('Multi-round-trip input integration', () => {
     expect(error?.code).toBe(JsonRpcErrorCode.InvalidRequest);
     expect(error?.data?.reason).toBe('client_capability_missing');
     expect(error?.data?.recovery?.hint).toContain('elicitation.form');
+    expect(error?.data?.requestId).toEqual(expect.any(String));
     const text = (result.content as Array<{ text: string }>)[0]?.text ?? '';
     expect(text).toBe(
       `Error: ${error?.message}\n\nRecovery: ${error?.data?.recovery?.hint}` +
-        '\n\n(reason client_capability_missing)',
+        `\n\n(reason client_capability_missing · request ${error?.data?.requestId})`,
     );
     // The refusal precedes any wire traffic — no elicitation/create is sent.
     expect(received).toHaveLength(0);
@@ -485,17 +487,24 @@ describe('Multi-round-trip input integration', () => {
         'Reconnect with a client that declares the `elicitation.form` capability. ' +
         'Or call again with verb and adjective supplied.';
       const error = (
-        result.structuredContent as { error: { code: number; data: unknown; message: string } }
+        result.structuredContent as {
+          error: { code: number; data: { requestId?: string }; message: string };
+        }
       ).error;
       expect(error).toEqual({
         code: JsonRpcErrorCode.InvalidRequest,
         message:
           "Cannot request input 'verb' (elicitation/create): the client on this 2025-era " +
           'connection did not declare the `elicitation.form` capability',
-        data: { reason: 'client_capability_missing', recovery: { hint } },
+        data: {
+          reason: 'client_capability_missing',
+          recovery: { hint },
+          requestId: expect.any(String),
+        },
       });
       expect((result.content as Array<{ text: string }>)[0]?.text).toBe(
-        `Error: ${error.message}\n\nRecovery: ${hint}\n\n(reason client_capability_missing)`,
+        `Error: ${error.message}\n\nRecovery: ${hint}\n\n` +
+          `(reason client_capability_missing · request ${error.data.requestId})`,
       );
       expect(received).toHaveLength(0);
     });

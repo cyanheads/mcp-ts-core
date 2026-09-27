@@ -317,10 +317,11 @@ export class ErrorHandler {
      * Record error classification metric. The category is the same
      * `getErrorCategory` answer the per-surface error counters carry, handed
      * the thrown `McpError`'s `data` so the canvas tenant-cap refusal files
-     * under `server` rather than upstream throttling (#481). The declared
+     * under `server` rather than upstream throttling (#481). The resolved
      * severity is a bounded dimension and rides as an attribute; it is present
-     * only when one resolved, so a server that declares none keeps exactly its
-     * old series. The `reason` behind either never becomes a metric attribute —
+     * only when one resolved — a declared entry's, or `notice` for the
+     * framework's argument and capability refusals (#567). The `reason` behind
+     * either never becomes a metric attribute —
      * unbounded across a fleet, so it belongs on the span and in the log.
      */
     getErrorMetrics().errorClassifiedCounter.add(1, {
@@ -397,8 +398,8 @@ export class ErrorHandler {
   /**
    * Classifies an error and returns its JSON-RPC error code and message without
    * logging, OTel side effects, or error wrapping. Use this when you need error
-   * classification but the caller handles logging/rethrowing (e.g., resource
-   * handler factory where the SDK logs the re-thrown error).
+   * classification but the caller handles logging/rethrowing (e.g., the resource
+   * handler factory, whose completion record carries the code).
    *
    * @param error - The error instance or value to classify.
    * @returns `{ code, message, data? }` — the classified error code, a human-readable
@@ -525,8 +526,9 @@ export class ErrorHandler {
    * error-handling boilerplate.
    *
    * The thrown error's `data` reaches the client when a tool or resource handler lets it propagate,
-   * so it carries `originalErrorName`, `originalMessage`, `rootCause`, and `options.context`'s canonical
-   * fields and `extra`, but no stack; the throw-site stack and cause chain are logged.
+   * so it carries the caught error's own `data`, `originalErrorName`, `originalMessage`, and
+   * `rootCause`, but no stack and nothing from `options.context`; the throw-site stack, the cause
+   * chain, and the context are logged (#548).
    *
    * @template T The expected return type of `fn`.
    * @param fn - The function to execute. May be synchronous or return a `Promise`.

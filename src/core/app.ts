@@ -22,6 +22,7 @@ import {
   type ServerManifest,
 } from '@/core/serverManifest.js';
 import { assertValidCacheHints, type CacheHints } from '@/mcp-server/cacheHints.js';
+import { createRequestStateSealer } from '@/mcp-server/inputRequired.js';
 import { notifierFor } from '@/mcp-server/notifications.js';
 import { PromptRegistry } from '@/mcp-server/prompts/prompt-registration.js';
 import type { AnyPromptDefinition } from '@/mcp-server/prompts/utils/promptDefinition.js';
@@ -498,6 +499,20 @@ export async function composeServices<TSupabaseClient extends object = SupabaseC
   // will actually run with.
   assertSessionModeRequirement(sessionMode.require, seedsSessionMode);
 
+  // One codec for the process when `MCP_REQUEST_STATE_KEY` is set: every
+  // server instance verifies with it and every handler factory seals with it,
+  // so a round minted by one instance verifies on any other holding the key.
+  // A short key fails here, naming the variable. Config reads a blank value as
+  // unset, so the record below is how an operator confirms a key took; it
+  // names the variable and never carries the key.
+  const requestState = createRequestStateSealer(config.mcpRequestStateKey);
+  if (requestState) {
+    logger.info(
+      'requestState sealing is on (MCP_REQUEST_STATE_KEY): input_required state is signed on the way out and verified on every retry.',
+      requestContextService.createRequestContext({ operation: 'ServerInit' }),
+    );
+  }
+
   // --- Core services ---
 
   let supabaseClient: SupabaseClient<Database> | undefined;
@@ -594,19 +609,22 @@ export async function composeServices<TSupabaseClient extends object = SupabaseC
     storage: storageService,
     exposeStatelessSessionId,
     ...(options.input && { input: options.input }),
+    ...(requestState && { requestState }),
   });
   const resourceRegistry = new ResourceRegistry(resources, {
     logger,
     storage: storageService,
     exposeStatelessSessionId,
+    ...(requestState && { requestState }),
   });
-  const promptRegistry = new PromptRegistry(prompts, logger);
+  const promptRegistry = new PromptRegistry(prompts, logger, requestState);
 
   const createServer: FrameworkServerFactory = (ctx) =>
     createMcpServerInstance({
       config,
       era: ctx.era,
       notifier: notify,
+      ...(requestState && { requestState }),
       ...(cacheHints && { cacheHints }),
       ...(description && { description }),
       ...(extensions && { extensions }),

@@ -194,12 +194,18 @@ export const httpErrorHandler = async <TBindings extends object = HonoNodeBindin
   }
 
   c.status(status);
+  /**
+   * `data` carries what a thrown `McpError` declared plus this handler's own
+   * `requestId` (#576) — the id its `Client error:` or `Error in httpTransport`
+   * record logs, so a failure reported from the client can be matched to it.
+   * Set last, so it replaces a thrown `data.requestId`.
+   */
   const errorResponse = {
     jsonrpc: '2.0',
     error: {
       code: errorCode,
       message: classified.message,
-      ...(originalData !== undefined && { data: originalData }),
+      data: { ...originalData, requestId: context.requestId },
     },
     id: requestId,
   };

@@ -4,7 +4,7 @@ description: >
   Testing patterns for MCP tool/resource handlers using `createMockContext` and Vitest. Covers mock context options, handler testing, McpError assertions, format testing, Vitest config setup, and test isolation conventions.
 metadata:
   author: cyanheads
-  version: "1.12"
+  version: "1.13"
   audience: external
   type: reference
 ---
@@ -133,6 +133,8 @@ toolContractSuite(searchTool, {
 
 Use `runToolContract(definition, input, { context })` from `/testing` when a custom test runner or an imperative assertion is a better fit. It intentionally skips transport auth and telemetry; those belong in transport/integration tests.
 
+A declared reason thrown without a hint — a bare `ctx.fail('reason')` or a service throw carrying `{ reason }` — comes back with the entry's `recovery` as `data.recovery.hint` and a `Recovery:` line in `content[]`, as in production. The one production field it leaves out is `data.requestId` (and the `request <id>` term closing `content[]`), since there is no real request; a test asserting the factory's envelope instead expects both. Calling `definition.handler(...)` directly returns the `McpError` exactly as the throw site built it — no fill, no request id.
+
 Arguments that fail the `input` schema are rejected the way the production handler factory rejects them: `InvalidParams` (`-32602`), with a message naming the tool and every failing field. That is the code a client sees on the wire, so assert it — not `ValidationError` (`-32007`), which stays the classification for a `ZodError` a handler throws itself. A result that breaks the tool's own `output` or `enrichment` schema is the definition's bug, so it returns `InternalError` (`-32603`) with a message naming that contract, exactly as in production.
 
 Cancellation settles as it does in production. Pass `context: { signal }` and abort it: once the signal has fired, whatever the handler — or the output validation, `format()`, and enrichment after it — throws comes back as `RequestCancelled` (`-32011`), whether that is the signal's `AbortError`, its reason string, a `withRetry` backoff that stopped, or an `McpError` of the handler's own. A throw while the signal is still live keeps its own classification, and argument parsing stays outside the settle, so schema-invalid arguments on an aborted signal still return `InvalidParams`. A `toolContractSuite` error case with an aborted `context.signal` asserts `code: JsonRpcErrorCode.RequestCancelled` the same way.
@@ -149,6 +151,7 @@ createMockContext({ tenantId: 'test-tenant' })               // explicit tenant 
 createMockContext({ errors: myTool.errors })                 // attaches typed ctx.fail keyed by the contract reasons
 createMockContext({ inputResponses: { confirm: { action: 'accept', content: { ok: true } } } }) // second round of a multi-round-trip handler
 createMockContext({ requestState: 'opaque-state' })          // seeds ctx.inputs.state()
+createMockContext({ clientCapabilities: { roots: {} } })     // seeds ctx.clientCapabilities and filters inputResponses to declared kinds
 createMockContext({ requestId: 'my-id' })                    // override request ID (default: 'test-request-id')
 createMockContext({ notifyResourceListChanged: () => {} })   // with resource-list change notifier
 createMockContext({ notifyResourceUpdated: (_uri) => {} })   // with resource update notifier
@@ -162,6 +165,7 @@ createMockContext({ uri: new URL('myscheme://item/123') })   // for resource han
 ```ts
 interface MockContextOptions<TErrors extends readonly ErrorContract[] | undefined> {
   auth?: AuthContext;
+  clientCapabilities?: ClientCapabilities;
   errors?: TErrors | undefined;
   inputResponses?: InputResponses | Record<string, unknown>;
   notifyPromptListChanged?: () => void;
@@ -181,6 +185,7 @@ interface MockContextOptions<TErrors extends readonly ErrorContract[] | undefine
 |:-------|:-------|
 | _(none)_ | Working `ctx.state` on tenant `'default'`; `ctx.inputs` is empty (first round) |
 | `auth` | Sets `ctx.auth` for scope-checking tests |
+| `clientCapabilities` | Sets `ctx.clientCapabilities` (`undefined` when omitted) and applies the production filter to `inputResponses`: only the answers these capabilities cover reach `ctx.inputs` (elicit → `elicitation`, and `elicitation.form` when it carries `content`; sampling → `sampling`, and `sampling.tools` when it holds a `tool_use` / `tool_result` block; roots → `roots`). Omitted, every seeded response reaches `ctx.inputs`, so existing `{ inputResponses }` tests are unaffected. The mock's `ctx.requestInput` stays ungated either way |
 | `errors` | Attaches a typed `ctx.fail` against the contract — same wiring the production handler factory uses. Pass `myTool.errors` directly; the return type narrows to `HandlerContext<ReasonOf<…>>`, so the context is assignable to that definition's handler parameter. |
 | `inputResponses` | Seeds `ctx.inputs` with the responses a retried request would carry, keyed by the identifiers the handler's `ctx.requestInput(...)` assigned (see below) |
 | `notifyPromptListChanged` | Assigns `ctx.notifyPromptListChanged` for prompt-list change notification tests |
@@ -219,14 +224,14 @@ Reach for `createInMemoryStorage()` when a service takes a `StorageService` dire
 
 ### Mock inputs
 
-`ctx.requestInput` is the real implementation: it throws an `InputRequiredSignal` the production handler factories convert into an `input_required` result. In a unit test the handler is called directly, so that signal surfaces as a thrown value — which is exactly how you assert the first round.
+`ctx.requestInput` is the real implementation: it throws an `InputRequiredSignal` the production handler factories convert into an `input_required` result. In a unit test the handler is called directly, so that signal surfaces as a thrown value — which is exactly how you assert the first round. The examples below drive `export_report` from `api-context` § *The shape of a multi-round-trip handler*, which asks for a format the caller left out:
 
 ```ts
 import { isInputRequiredSignal } from '@cyanheads/mcp-ts-core';
 
-it('asks for confirmation on the first round', async () => {
+it('asks for the format on the first round', async () => {
   const ctx = createMockContext();
-  await expect(myTool.handler(myTool.input.parse({ path: '/tmp/x' }), ctx))
+  await expect(exportReport.handler(exportReport.input.parse({ reportId: 'r1' }), ctx))
     .rejects.toSatisfy(isInputRequiredSignal);
 });
 ```
@@ -236,29 +241,56 @@ To assert on *what* was requested, use `expectInputRequired` from `/testing`. It
 ```ts
 import { createMockContext, expectInputRequired } from '@cyanheads/mcp-ts-core/testing';
 
-const asked = await expectInputRequired(() => myTool.handler(input, createMockContext()));
-expect(asked.inputRequests?.confirm?.method).toBe('elicitation/create');
+const asked = await expectInputRequired(() => exportReport.handler(input, createMockContext()));
+expect(asked.inputRequests?.format?.method).toBe('elicitation/create');
 ```
 
 Pass `asked.requestState` back as `createMockContext({ requestState })` when the handler reads state from the prior round. `inputResponses` drives the second round. `ctx.inputs.accepted(key, schema)` and `.view(key)` read it with the same helpers production uses, so a wrong response shape fails in the test:
 
 ```ts
-it('proceeds once the user accepts', async () => {
+it('exports in the format the user picked', async () => {
   const ctx = createMockContext({
-    inputResponses: { confirm: { action: 'accept', content: { confirm: true } } },
+    inputResponses: { format: { action: 'accept', content: { format: 'csv' } } },
   });
-  await expect(myTool.handler(input, ctx)).resolves.toMatchObject({ deleted: '/tmp/x' });
+  await expect(exportReport.handler(input, ctx)).resolves.toMatchObject({ url: expect.any(String) });
 });
 
 it('stops when the user declines', async () => {
   const ctx = createMockContext({
-    inputResponses: { confirm: { action: 'decline' } },
+    inputResponses: { format: { action: 'decline' } },
   });
-  await expect(myTool.handler(input, ctx)).rejects.toThrow(McpError);
+  await expect(exportReport.handler(input, ctx)).rejects.toThrow(McpError);
 });
 ```
 
+Seeding an answer this way is right for a handler that treats it as input. A consent gate does not: it acts only on a record it stored when it asked, so an answer seeded alone makes it ask again — see below.
+
 `ctx.inputs.dropped` is always `[]` on a mock context — the drop only happens in the SDK's wire decoding, so cover it in an integration test rather than a unit one.
+
+Seed `clientCapabilities` to test what a client without a capability gets: a pre-answered `inputResponses` the declared capabilities do not cover — a kind never declared, a form answer (one carrying `content`) from a client that declared only `elicitation.url`, a tool-use sampling answer without `sampling.tools` — never reaches `ctx.inputs`, so the handler asks again. A handler that falls through when a capability is missing (`if (ctx.clientCapabilities?.roots) … else …`) is tested by seeding both shapes.
+
+A consent gate that redeems a `ctx.state` record (see `api-context` § *Consent gates*) needs the record in the second round's storage, and each mock context has its own. Copy what round one stored into the round-two context. The record carries the caller, so seed the same `auth` (or none) on both:
+
+```ts
+const accept = { confirm: { action: 'accept', content: { confirm: true } } };
+
+const first = createMockContext();
+const asked = await expectInputRequired(() => deletePath.handler(input, first));
+const record = await first.state.get(`consent/${asked.requestState}`);
+
+const second = createMockContext({ inputResponses: accept, requestState: asked.requestState });
+await second.state.set(`consent/${asked.requestState}`, record);
+await expect(deletePath.handler(input, second)).resolves.toEqual({ deleted: input.path });
+
+// The record is spent: the same state again asks for a fresh confirmation.
+await expect(deletePath.handler(input, second)).rejects.toSatisfy(isInputRequiredSignal);
+
+// An answer with no record behind it asks as well — nothing was asked, so nothing was confirmed.
+const unasked = createMockContext({ inputResponses: accept });
+await expect(deletePath.handler(input, unasked)).rejects.toSatisfy(isInputRequiredSignal);
+```
+
+A record the round-two context holds under another `auth`, or one written by another tool (its `operation` differs), asks again the same way — cover whichever of those the handler's binding is meant to catch.
 
 ### Mock logger
 

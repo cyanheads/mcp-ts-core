@@ -4,7 +4,7 @@ description: >
   Reference for core and server configuration in `@cyanheads/mcp-ts-core`. Covers env var tables with defaults, priority order, server-specific Zod schema pattern, and Workers lazy-parsing requirement.
 metadata:
   author: cyanheads
-  version: "1.22"
+  version: "1.23"
   audience: external
   type: reference
 ---
@@ -137,6 +137,7 @@ await createApp({ sessionMode: { default: 'stateful', require: 'stateful' } }); 
 | `MCP_AUTH_MODE` | `mcpAuthMode` | `none` | `none` \| `jwt` \| `oauth` |
 | `MCP_AUTH_SECRET_KEY` | `mcpAuthSecretKey` | — | Required for `jwt` mode; min 32 chars |
 | `MCP_AUTH_DISABLE_SCOPE_CHECKS` | `mcpAuthDisableScopeChecks` | `false` | When `true`, bypasses both `withRequiredScopes` (declared `auth: [...]`) and `checkScopes` (runtime/tenant scopes). Token validation (sig/aud/iss/exp) intact. Logs a `WARNING` at startup. See `api-auth` skill. |
+| `MCP_REQUEST_STATE_KEY` | `mcpRequestStateKey` | — | Opt-in, any auth mode. When set, the framework seals the `requestState` a handler returns with `ctx.requestInput` (bound to the request's `clientId` / `subject` / `tenantId`, valid 900 s) and every server instance rejects any other state as `-32602` `invalid_request_state` before the handler runs; `ctx.inputs.state()` still returns the handler's string. Must be ≥ 32 UTF-8 bytes — shorter fails startup with a `ConfigurationError` naming the variable — and identical on every instance a retry can reach (stateless replicas, Worker isolates, restarts). Unset or empty: no verifier, state round-trips raw. See `api-context` § `requestState` |
 | `OAUTH_ISSUER_URL` | `oauthIssuerUrl` | — | Required for `oauth` mode |
 | `OAUTH_AUDIENCE` | `oauthAudience` | — | Required for `oauth` mode |
 | `OAUTH_JWKS_URI` | `oauthJwksUri` | — | Override JWKS endpoint (otherwise derived from issuer) |

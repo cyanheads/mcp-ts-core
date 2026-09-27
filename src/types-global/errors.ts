@@ -311,13 +311,14 @@ export interface ErrorContract {
    * occurs. Forcing function for the author: declaring a failure mode without
    * articulating recovery leaves the agent without a next move.
    *
-   * **Type-level only — not auto-injected at runtime.** The contract `recovery`
-   * is descriptive metadata read by the linter, scaffolding skills, and dev
-   * tools. The wire payload's `data.recovery.hint` (which the framework mirrors
-   * into `content[]` text per the error-path parity invariant) is populated
-   * separately at the throw site, where dynamic context (input values, attempted
-   * IDs, queue state) is available. Authors who want recovery on the wire pass
-   * it explicitly: `ctx.fail('reason', msg, { recovery: { hint: '...' } })`.
+   * **The wire default for this reason.** When a failure whose `data.reason`
+   * names this entry reaches the tool or resource handler factory with no
+   * `data.recovery`, the factory sets `data.recovery.hint` to this text — a bare
+   * `ctx.fail('reason')` and a service throw carrying the reason alike — and
+   * mirrors it into `content[]` text per the error-path parity invariant. A
+   * throw site that knows more (input values, attempted IDs, queue state)
+   * overrides it by passing its own: `ctx.fail('reason', msg, { recovery: {
+   * hint: '...' } })`. The `McpError` the throw site built is never changed.
    *
    * **Validation.** Required, non-empty, minimum 5 words (lint warning under
    * that floor). Specific, actionable guidance beats placeholders like
@@ -361,8 +362,8 @@ export interface ErrorContract {
    * the recovery hint, and the wire envelope.
    *
    * **Tools only, and logging only.** Resolved in the tool handler factory
-   * against the thrown error's `data.reason`; resources re-throw for the SDK to
-   * log and never reach the resolution site. Nothing client-visible moves —
+   * against the thrown error's `data.reason`; resources write no failure record,
+   * so there is no level to set. Nothing client-visible moves —
    * `isError`, the JSON-RPC code, `structuredContent.error`, and the `content[]`
    * text are built from the thrown error and are byte-identical either way. The
    * span still closes ERROR and `mcp.tool.calls` / `mcp.tool.errors` still count
@@ -371,7 +372,9 @@ export interface ErrorContract {
    * `mcp.errors.classified`.
    *
    * A cancelled request keeps its own `info`, stack-free path regardless.
-   * Omitted, the record is exactly what it is today.
+   * Omitted, the record logs at `error` — except for the framework's own
+   * refusals, `invalid_arguments` and `client_capability_missing`, which log at
+   * `notice` unless an entry naming them declares otherwise.
    */
   severity?: ErrorContractSeverity;
   /**
@@ -380,11 +383,11 @@ export interface ErrorContract {
    * handler body names.
    *
    * **Lint-only metadata.** Nothing at runtime reads it: `ctx.fail` resolves
-   * `code` and `retryable`, `ctx.recoveryFor` resolves `recovery`, the tool
-   * handler factory resolves `severity`, and the advertised error envelope
-   * carries `reason` and `when`. A marked entry is advertised, typed, and
-   * thrown exactly as an unmarked one, and stays in the `ctx.fail` /
-   * `ctx.recoveryFor` reason union.
+   * `code` and `retryable`, the handler factories fill `recovery` and the tool
+   * factory resolves `severity` by reason, wherever the reason was thrown, and
+   * the advertised error envelope carries `reason` and `when`. A marked entry is
+   * advertised, typed, and thrown exactly as an unmarked one, and stays in the
+   * `ctx.fail` / `ctx.recoveryFor` reason union.
    *
    * What it changes is `error-contract-unthrown`, whose scan reads only the
    * handler source: a marked entry is skipped, while every other entry in the

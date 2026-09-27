@@ -230,6 +230,16 @@ const ConfigSchema = z
     mcpGcPressureIntervalMs: z.coerce.number().min(0).default(0),
     mcpAllowedOrigins: z.array(z.string()).optional(),
     mcpAuthSecretKey: z.string().optional(),
+    /**
+     * Opt-in HMAC key for multi-round-trip `requestState`. When set, the
+     * framework seals the state a handler returns with `ctx.requestInput` and
+     * the SDK verifies every echoed state before the handler runs, so a retry
+     * can only carry state this server minted, for the same principal, within
+     * 900 s. Every instance a retry can reach needs the same key. Unset, state
+     * round-trips raw. At least 32 bytes; the length is checked where the
+     * codec is built, so the startup error names this variable.
+     */
+    mcpRequestStateKey: z.string().optional(),
     mcpJwtExpectedIssuer: z.string().optional(),
     mcpJwtExpectedAudience: z.string().optional(),
     mcpAuthMode: z.preprocess(
@@ -526,6 +536,7 @@ const parseConfig = (envOverrides?: Record<string, string | undefined>) => {
       .map((o) => o.trim())
       .filter(Boolean),
     mcpAuthSecretKey: env.MCP_AUTH_SECRET_KEY,
+    mcpRequestStateKey: env.MCP_REQUEST_STATE_KEY,
     mcpJwtExpectedIssuer: env.MCP_JWT_EXPECTED_ISSUER,
     mcpJwtExpectedAudience: env.MCP_JWT_EXPECTED_AUDIENCE,
     mcpAuthMode: env.MCP_AUTH_MODE,

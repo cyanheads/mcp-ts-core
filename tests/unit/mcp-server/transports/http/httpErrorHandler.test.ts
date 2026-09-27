@@ -345,6 +345,43 @@ describe('HTTP Error Handler', () => {
       });
     });
 
+    test('carries the request id its Client error: record logs on a 401 (#576)', async () => {
+      vi.mocked(logger.warning).mockClear();
+      const error = new McpError(
+        JsonRpcErrorCode.Unauthorized,
+        'Missing or invalid Authorization header. Bearer scheme required.',
+      );
+
+      await httpErrorHandler(error, mockContext as Context<{ Bindings: HonoNodeBindings }>);
+
+      expect(statusValue).toBe(401);
+      expect((jsonResponseData as any).error).toEqual({
+        code: JsonRpcErrorCode.Unauthorized,
+        message: 'Missing or invalid Authorization header. Bearer scheme required.',
+        data: { requestId: 'test-req-id' },
+      });
+      const record = vi
+        .mocked(logger.warning)
+        .mock.calls.find(([message]) => String(message).startsWith('Client error:'));
+      expect((record?.[1] as { requestId?: string } | undefined)?.requestId).toBe(
+        (jsonResponseData as any).error.data.requestId,
+      );
+    });
+
+    test('replaces a thrown data.requestId with its own', async () => {
+      const error = new McpError(JsonRpcErrorCode.NotFound, 'Missing', {
+        reason: 'missing_item',
+        requestId: 'upstream-7',
+      });
+
+      await httpErrorHandler(error, mockContext as Context<{ Bindings: HonoNodeBindings }>);
+
+      expect((jsonResponseData as any).error.data).toEqual({
+        reason: 'missing_item',
+        requestId: 'test-req-id',
+      });
+    });
+
     test('should preserve explicitly declared McpError data', async () => {
       const error = new McpError(JsonRpcErrorCode.NotFound, 'Missing', {
         reason: 'missing_item',
@@ -352,7 +389,10 @@ describe('HTTP Error Handler', () => {
 
       await httpErrorHandler(error, mockContext as Context<{ Bindings: HonoNodeBindings }>);
 
-      expect((jsonResponseData as any).error.data).toEqual({ reason: 'missing_item' });
+      expect((jsonResponseData as any).error.data).toEqual({
+        reason: 'missing_item',
+        requestId: 'test-req-id',
+      });
     });
   });
 
@@ -381,6 +421,7 @@ describe('HTTP Error Handler', () => {
       expect((jsonResponseData as any).error).toEqual({
         code: JsonRpcErrorCode.RequestCancelled,
         message: 'aborted',
+        data: { requestId: 'test-req-id' },
       });
       expect(logger.error).not.toHaveBeenCalled();
       const record = vi
@@ -420,7 +461,7 @@ describe('HTTP Error Handler', () => {
       expect((jsonResponseData as any).error).toEqual({
         code: JsonRpcErrorCode.ServiceUnavailable,
         message: 'Upstream down',
-        data: { reason: 'x' },
+        data: { reason: 'x', requestId: 'test-req-id' },
       });
     });
 

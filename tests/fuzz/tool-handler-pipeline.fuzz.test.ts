@@ -512,7 +512,8 @@ describe('Tool Handler Pipeline Fuzz Tests', () => {
         error: {
           code: JsonRpcErrorCode.ValidationError,
           message: expect.stringContaining('Failed to parse JSON content: '),
-          data: { reason: 'json_parse_failed' },
+          // The call's own request id is the one context field on `data` (#576).
+          data: { reason: 'json_parse_failed', requestId: 'fuzz-req-id' },
         },
       });
     });

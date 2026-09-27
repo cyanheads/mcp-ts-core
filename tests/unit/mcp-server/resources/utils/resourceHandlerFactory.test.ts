@@ -16,6 +16,8 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { z } from 'zod';
 import { JsonRpcErrorCode, McpError } from '@/types-global/errors.js';
 import {
+  EVERY_INPUT_CAPABILITY,
+  legacyCapabilityView,
   makeSenderlessServerContext,
   makeServerContext,
 } from '../../../../helpers/server-context.js';
@@ -89,7 +91,7 @@ vi.mock('@/utils/internal/requestContext.js', () => ({
 // Imports (after mocks)
 // ---------------------------------------------------------------------------
 
-import { createInputRequiredGate } from '@/mcp-server/inputRequired.js';
+import { createRequestStateSealer } from '@/mcp-server/inputRequired.js';
 import type { ResourceSubscriptions } from '@/mcp-server/notifications.js';
 import type { AnyResourceDefinition } from '@/mcp-server/resources/utils/resourceDefinition.js';
 import { resource } from '@/mcp-server/resources/utils/resourceDefinition.js';
@@ -382,6 +384,7 @@ describe('createResourceHandler', () => {
         confirmingResource as AnyResourceDefinition,
         services,
         notifiers,
+        legacyCapabilityView(EVERY_INPUT_CAPABILITY),
       );
 
       const contents = readContents(
@@ -401,6 +404,103 @@ describe('createResourceHandler', () => {
       });
     });
 
+    it('keeps a pre-answered read from a client without elicitation off ctx.inputs (#496)', async () => {
+      const handler = createResourceHandler(
+        confirmingResource as AnyResourceDefinition,
+        services,
+        notifiers,
+        legacyCapabilityView({ roots: {} }),
+      );
+
+      const error = await handler(
+        new URL('confirm://item-1'),
+        { id: 'item-1' },
+        makeServerContext({
+          inputResponses: { confirm: { action: 'accept', content: { ok: true } } },
+        }),
+      ).catch((e: unknown) => e);
+
+      // The answer never reached the handler, so it asked — and was refused.
+      expect(error).toMatchObject({
+        code: JsonRpcErrorCode.InvalidRequest,
+        data: { reason: 'client_capability_missing' },
+      });
+    });
+
+    it('exposes the view it resolved as ctx.clientCapabilities (#580)', async () => {
+      let seen: unknown = 'unset';
+      const def = resource('caps://{id}', {
+        description: 'Reads the client capabilities.',
+        handler: (_params, ctx) => {
+          seen = ctx.clientCapabilities;
+          return { ok: true };
+        },
+      });
+      const declared = { sampling: {} };
+      const handler = createResourceHandler(
+        def as AnyResourceDefinition,
+        services,
+        notifiers,
+        legacyCapabilityView(declared),
+      );
+
+      await handler(new URL('caps://x'), { id: 'x' }, makeServerContext());
+
+      expect(seen).toEqual(declared);
+    });
+
+    it('seals the requestState it returns when a key is configured', async () => {
+      const sealer = createRequestStateSealer('k'.repeat(32));
+      const handler = createResourceHandler(
+        confirmingResource as AnyResourceDefinition,
+        { ...services, ...(sealer && { requestState: sealer }) },
+        notifiers,
+      );
+      const serverContext = makeServerContext();
+
+      const result = (await handler(
+        new URL('confirm://item-1'),
+        { id: 'item-1' },
+        serverContext,
+      )) as InputRequiredResult;
+
+      expect(result.resultType).toBe('input_required');
+      expect(result.requestState).toMatch(/^v1\./);
+      await expect(sealer?.verify(result.requestState ?? '', serverContext)).resolves.toBe(
+        'awaiting-confirm',
+      );
+    });
+
+    it('fails the read as a classified InternalError when sealing fails', async () => {
+      const handler = createResourceHandler(
+        confirmingResource as AnyResourceDefinition,
+        {
+          ...services,
+          requestState: {
+            seal: async () => {
+              throw new Error('HMAC key import failed');
+            },
+            verify: async () => 'unused',
+          },
+        },
+        notifiers,
+      );
+
+      const error = await handler(
+        new URL('confirm://item-1'),
+        { id: 'item-1' },
+        makeServerContext(),
+      ).catch((e: unknown) => e);
+
+      expect(error).toBeInstanceOf(McpError);
+      expect(error).toMatchObject({
+        code: JsonRpcErrorCode.InternalError,
+        data: { requestId: 'test-req-id' },
+      });
+      // The measured read ends failed, so its one completion record carries the code.
+      expect(completionMetrics().errorCode).toBe(String(JsonRpcErrorCode.InternalError));
+    });
+
     it('refuses with a JSON-RPC error when the connection declares no capability (#379)', async () => {
       // The 2025-era shim's own refusal is a bare `-32603` above the callback;
       // gating before the signal is returned keeps the reason and hint.
@@ -408,7 +508,7 @@ describe('createResourceHandler', () => {
         confirmingResource as AnyResourceDefinition,
         services,
         notifiers,
-        createInputRequiredGate(() => ({})),
+        legacyCapabilityView({}),
       );
 
       const error = await handler(
@@ -453,7 +553,7 @@ describe('createResourceHandler', () => {
         passphraseResource as AnyResourceDefinition,
         services,
         notifiers,
-        createInputRequiredGate(() => ({})),
+        legacyCapabilityView({}),
       );
 
       const error = await handler(new URL('vault://a'), { id: 'a' }, makeServerContext()).catch(
@@ -499,7 +599,7 @@ describe('createResourceHandler', () => {
           confirmingResource as AnyResourceDefinition,
           services,
           notifiers,
-          createInputRequiredGate(() => ({})),
+          legacyCapabilityView({}),
         );
         await handler(new URL('confirm://item-1'), { id: 'item-1' }, makeServerContext()).catch(
           (e: unknown) => e,
@@ -526,7 +626,7 @@ describe('createResourceHandler', () => {
         confirmingResource as AnyResourceDefinition,
         services,
         notifiers,
-        createInputRequiredGate(() => ({ elicitation: { form: {} } })),
+        legacyCapabilityView({ elicitation: { form: {} } }),
       );
 
       const result = await handler(
@@ -790,6 +890,147 @@ describe('createResourceHandler', () => {
         expect.anything(),
       );
     });
+
+    describe('declared recovery fill (#579) and the request id (#576)', () => {
+      const RECOVERY = 'List the available records and read one of those instead.';
+
+      /** Two layers below the handler, as a real service's fetch path sits. */
+      const recordService = {
+        read(id: string): never {
+          return recordService.fetch(id);
+        },
+        fetch(id: string): never {
+          throw new McpError(JsonRpcErrorCode.NotFound, `Record ${id} is gone.`, {
+            reason: 'gone',
+          });
+        },
+      };
+
+      /** Reads through a resource under `errors` (`null` for none) whose handler throws `fail`. */
+      async function readFailing(
+        fail: (ctx: any) => unknown,
+        errors: readonly unknown[] | null = [
+          {
+            reason: 'gone',
+            code: JsonRpcErrorCode.NotFound,
+            when: 'The record is gone.',
+            recovery: RECOVERY,
+          },
+        ],
+      ): Promise<McpError> {
+        const def = resource('fill://{id}', {
+          description: 'Fails in a chosen way.',
+          params: z.object({ id: z.string().describe('id') }),
+          ...(errors && { errors: errors as never }),
+          handler: (_params, ctx) => {
+            throw fail(ctx);
+          },
+        });
+        const handler = createResourceHandler(def as AnyResourceDefinition, services, notifiers);
+        const rejection = await handler(new URL('fill://x'), { id: 'x' }, makeServerContext()).then(
+          () => {
+            throw new Error('expected the read to fail');
+          },
+          (error: unknown) => error,
+        );
+        expect(rejection).toBeInstanceOf(McpError);
+        return rejection as McpError;
+      }
+
+      it('fills a bare ctx.fail from the declared entry', async () => {
+        const rejection = await readFailing((ctx) => ctx.fail('gone'));
+
+        expect(rejection.code).toBe(JsonRpcErrorCode.NotFound);
+        expect(rejection.data?.recovery).toEqual({ hint: RECOVERY });
+      });
+
+      it('fills a declared reason thrown by a service below the handler', async () => {
+        const rejection = await readFailing(() => recordService.read('x'));
+
+        expect(rejection.message).toBe('Record x is gone.');
+        expect(rejection.data?.recovery).toEqual({ hint: RECOVERY });
+      });
+
+      it('leaves a throw-site hint unchanged', async () => {
+        const rejection = await readFailing((ctx) =>
+          ctx.fail('gone', 'Gone.', { recovery: { hint: 'Read fill://y instead.' } }),
+        );
+
+        expect(rejection.data?.recovery).toEqual({ hint: 'Read fill://y instead.' });
+      });
+
+      it.each([
+        [
+          'an undeclared reason',
+          () => new McpError(JsonRpcErrorCode.NotFound, 'Gone.', { reason: 'other' }),
+        ],
+        ['a non-McpError', () => new Error('gone')],
+      ])('adds no hint for %s under a contract', async (_label, fail) => {
+        const rejection = await readFailing(fail);
+
+        expect(rejection.data?.recovery).toBeUndefined();
+      });
+
+      it('adds no hint for a declared-looking reason on a resource with no contract', async () => {
+        const rejection = await readFailing(
+          () => new McpError(JsonRpcErrorCode.NotFound, 'Gone.', { reason: 'gone' }),
+          null,
+        );
+
+        expect(rejection.data).toEqual({ reason: 'gone', requestId: 'test-req-id' });
+      });
+
+      it('carries the read’s request id, the id its completion record logs', async () => {
+        const rejection = await readFailing((ctx) => ctx.fail('gone'));
+
+        expect(rejection.data).toEqual({
+          reason: 'gone',
+          recovery: { hint: RECOVERY },
+          requestId: 'test-req-id',
+        });
+        const finished = mockLogger.info.mock.calls.findLast(
+          ([message]) => message === TELEMETRY_LOG_MESSAGES.resourceReadFinished,
+        );
+        expect((finished?.[1] as { requestId?: string } | undefined)?.requestId).toBe(
+          rejection.data?.requestId,
+        );
+      });
+
+      it('replaces a thrown data.requestId and fills a classified error’s empty data', async () => {
+        const thrown = await readFailing(
+          () => new McpError(JsonRpcErrorCode.NotFound, 'Gone.', { requestId: 'upstream-7' }),
+          null,
+        );
+        const classified = await readFailing(() => new Error('socket hang up'), null);
+
+        expect(thrown.data).toEqual({ requestId: 'test-req-id' });
+        expect(classified.data).toEqual({ requestId: 'test-req-id' });
+      });
+
+      it('passes a resource-not-found -32602 whose data is exactly { uri } through untouched', async () => {
+        const rejection = await readFailing(
+          () =>
+            new McpError(JsonRpcErrorCode.InvalidParams, 'Resource not found', { uri: 'fill://x' }),
+          null,
+        );
+
+        expect(rejection.code).toBe(JsonRpcErrorCode.InvalidParams);
+        expect(rejection.data).toEqual({ uri: 'fill://x' });
+      });
+
+      it('adds the request id to any other -32602', async () => {
+        const rejection = await readFailing(
+          () =>
+            new McpError(JsonRpcErrorCode.InvalidParams, 'Bad id', {
+              uri: 'fill://x',
+              field: 'id',
+            }),
+          null,
+        );
+
+        expect(rejection.data).toEqual({ uri: 'fill://x', field: 'id', requestId: 'test-req-id' });
+      });
+    });
   });
 
   // -----------------------------------------------------------------------
@@ -928,7 +1169,8 @@ describe('createResourceHandler', () => {
           /^Resource broken-contract returned output that does not match its output schema: value: /,
         ),
       });
-      expect((rejection as McpError).data).toBeUndefined();
+      // The read's request id is the only data (#576).
+      expect((rejection as McpError).data).toEqual({ requestId: 'test-req-id' });
       expect(completionMetrics()).toMatchObject({
         isSuccess: false,
         errorCode: String(JsonRpcErrorCode.InternalError),

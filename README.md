@@ -127,9 +127,7 @@ const search = tool('search', {
   ],
   handler: async (input, ctx) => {
     const res = await runSearch(input.query, input.limit);
-    if (!res) {
-      throw ctx.fail('index_unavailable', undefined, ctx.recoveryFor('index_unavailable'));
-    }
+    if (!res) throw ctx.fail('index_unavailable');
     ctx.enrich({ effectiveQuery: res.parsed, totalCount: res.total });
     if (res.items.length === 0) {
       ctx.enrich({ notice: `No matches for "${input.query}". Try broader terms.` });
@@ -141,7 +139,7 @@ const search = tool('search', {
 await createApp({ tools: [search] });
 ```
 
-Both contracts are advertised in `tools/list`, so clients see them before calling, and the definition linter checks the handler against them. `ctx.recoveryFor()` adds the declared recovery hint to the error response.
+Both contracts are advertised in `tools/list`, so clients see them before calling, and the definition linter checks the handler against them. A failure with a declared reason reaches the client carrying that entry's recovery hint, and every tool error carries the request ID its server log records share.
 
 ### Same data across client surfaces
 
@@ -236,6 +234,7 @@ Core config comes from environment variables, validated with Zod. Server-specifi
 | `MCP_HTTP_HOST` | HTTP server hostname | `127.0.0.1` |
 | `MCP_AUTH_MODE` | `none`, `jwt`, or `oauth` | `none` |
 | `MCP_AUTH_SECRET_KEY` | JWT signing secret (required for `jwt` mode) | — |
+| `MCP_REQUEST_STATE_KEY` | Opt-in key (≥ 32 bytes, the same on every instance) that seals the `requestState` handlers return and rejects any a client did not get from this server | — |
 | `STORAGE_PROVIDER_TYPE` | `in-memory`, `filesystem`, `supabase`, `cloudflare-d1`/`kv`/`r2` | `in-memory` |
 | `CANVAS_PROVIDER_TYPE` | `none` or `duckdb` (optional peer dependency `@duckdb/node-api`) | `none` |
 | `OTEL_ENABLED` | Enable OpenTelemetry | `false` |
@@ -273,17 +272,18 @@ Tool and resource handlers receive a `Context`. `ctx.enrich` and `ctx.fail` are 
 | `ctx.log` | `ContextLogger` | Request-scoped logger (auto-correlates requestId, traceId, tenantId); also mirrored to the client as `notifications/message` |
 | `ctx.state` | `ContextState` | Tenant-scoped key-value storage |
 | `ctx.requestInput` | `(spec) => never` | Suspend and ask the caller for more input; the handler is re-entered with the answers |
-| `ctx.inputs` | `ContextInputs` | Reader over a retried request's responses — `.accepted()`, `.view()`, `.state()`, `.dropped` |
+| `ctx.inputs` | `ContextInputs` | The request's responses, limited to the kinds the client declared — `.accepted()`, `.view()`, `.state()`, `.dropped` |
+| `ctx.clientCapabilities` | `ClientCapabilities \| undefined` | What the client declared for this request; decides whether to ask for optional context, never whether to skip a consent prompt |
 | `ctx.enrich` | `Enrich` / `TypedEnrich<E>` | Add declared result context to structured output and text content |
 | `ctx.content` | `ContentCollect` | Attach image/audio blocks to `content[]` — `content.image(data, mimeType)`, `content.audio(...)`, or a raw block |
 | `ctx.fail` | `(reason, msg?, data?) => McpError` | Creates an error for `throw ctx.fail(...)`; available with a declared `errors` contract |
-| `ctx.recoveryFor` | `(reason) => object` | Resolves a declared recovery hint to `{ recovery: { hint } }`, for `ctx.fail`'s data argument |
+| `ctx.recoveryFor` | `(reason) => object` | Resolves a declared recovery hint to `{ recovery: { hint } }`; the framework already sends it with any failure carrying that reason and no hint of its own |
 | `ctx.signal` | `AbortSignal` | Cancellation signal |
 | `ctx.notifyResourceUpdated` | `Function?` | Notify subscribed clients a resource changed |
 | `ctx.notifyResourceListChanged` | `Function?` | Notify clients the resource list changed |
 | `ctx.notifyPromptListChanged` | `Function?` | Notify clients the prompt list changed |
 | `ctx.notifyToolListChanged` | `Function?` | Notify clients the tool list changed |
-| `ctx.requestId` | `string` | Unique request ID |
+| `ctx.requestId` | `string` | Request ID — shared by the call's log records and returned on its errors as `data.requestId` |
 | `ctx.tenantId` | `string?` | Tenant ID (JWT `tid` claim, or `'default'` for stdio and HTTP+`MCP_AUTH_MODE=none`) |
 | `ctx.auth` | `AuthContext?` | Token claims and scopes when the request is authenticated |
 | `ctx.sessionId` | `string?` | HTTP session ID in stateful/`auto` session mode — a scoping key, not an authorization principal |
@@ -334,7 +334,7 @@ const input = myTool.input.parse({ query: 'test' });
 const result = await myTool.handler(input, ctx);
 ```
 
-`createMockContext()` gives you a recording `log`, a `signal`, and a `state` backed by a real `StorageService` over an in-memory provider, so key validation, TTL expiry, and the JSON round-trip of stored values behave as they do in production: a `Date` reads back as its ISO string, and a value JSON cannot encode rejects. It uses tenant `'default'` unless you pass `{ tenantId }`. Pass `{ errors: myTool.errors }` for a typed `ctx.fail`, or `{ inputResponses, requestState }` to start a multi-round-trip handler at its second round.
+`createMockContext()` gives you a recording `log`, a `signal`, and a `state` backed by a real `StorageService` over an in-memory provider, so key validation, TTL expiry, and the JSON round-trip of stored values behave as they do in production: a `Date` reads back as its ISO string, and a value JSON cannot encode rejects. It uses tenant `'default'` unless you pass `{ tenantId }`. Pass `{ errors: myTool.errors }` for a typed `ctx.fail`, `{ inputResponses, requestState }` to start a multi-round-trip handler at its second round, or `{ clientCapabilities }` to set what the client declared (seeded responses are then filtered to the declared kinds, as in production).
 
 `/testing` also exports `createMockSession()` for session-bound contexts, `createFetchMock()` as a strict fake for upstream HTTP, and `runToolContract()`, which runs a definition through schema, handler, formatting, and error-envelope checks. `/testing/vitest` adds the `mcpTest` fixtures (`ctx`, `session`, `fetchMock`, `storage`) and `toolContractSuite()`.
 

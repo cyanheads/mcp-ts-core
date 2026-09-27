@@ -184,6 +184,15 @@ async function connect() {
   return { client, server };
 }
 
+/** A framework-generated request id — the client's JSON-RPC ids are numeric. */
+const REQUEST_ID_PATTERN = /^[A-Z0-9]{5}-[A-Z0-9]{5}$/;
+
+/** The `data.requestId` a failed tool call's envelope carries. */
+function requestIdOf(result: unknown): string | undefined {
+  return (result as { structuredContent?: { error?: { data?: { requestId?: string } } } })
+    .structuredContent?.error?.data?.requestId;
+}
+
 /** Compiles the `outputSchema` a tool advertises in `tools/list`, as a strict client would. */
 async function advertisedOutputValidator(client: Client, name: string) {
   const { tools } = await client.listTools();
@@ -297,20 +306,41 @@ describe('Phase 1 wire conformance', () => {
       // The existing hint mirror carries the accepted-key list to format-only
       // clients with no extra work (#445).
       expect(text).toContain('Recovery: Unknown key salt. This tool accepts: query, limit.');
-      // #458: the branchable reason rides the same text; the numeric code does not.
-      expect(text.endsWith('\n\n(reason invalid_arguments)')).toBe(true);
+      // #458: the branchable reason rides the same text; the numeric code does
+      // not. #576: the request id closes the line.
+      expect(text.endsWith(`\n\n(reason invalid_arguments · request ${requestIdOf(result)})`)).toBe(
+        true,
+      );
       expect(text).not.toContain('-32602');
     });
 
-    it('renders a declared reason on the text surface (#458)', async () => {
+    it('renders a bare ctx.fail with its declared recovery and request id (#458, #576, #579)', async () => {
       // The contract entry declares no `retryable`, so no key is injected and
-      // no retryable term renders.
+      // no retryable term renders. The throw site forwards no recovery; the
+      // framework fills it from the declared entry.
       const client = await session();
 
       const result = await client.callTool({ name: 'wire_search', arguments: { query: 'boom' } });
 
       const text = (result.content as Array<{ text: string }>)[0]?.text ?? '';
-      expect(text).toBe('Error: The search index has not been built.\n\n(reason index_missing)');
+      const requestId = requestIdOf(result);
+      expect(requestId).toMatch(REQUEST_ID_PATTERN);
+      expect(text).toBe(
+        'Error: The search index has not been built.\n\n' +
+          'Recovery: Build the index before searching again.\n\n' +
+          `(reason index_missing · request ${requestId})`,
+      );
+      expect(result.structuredContent).toEqual({
+        error: {
+          code: JsonRpcErrorCode.NotFound,
+          message: 'The search index has not been built.',
+          data: {
+            reason: 'index_missing',
+            recovery: { hint: 'Build the index before searching again.' },
+            requestId,
+          },
+        },
+      });
     });
 
     it('emits an envelope the advertised outputSchema accepts', async () => {
@@ -591,11 +621,12 @@ describe('Phase 1 wire conformance', () => {
 
         expect(error.code).toBe(JsonRpcErrorCode.InternalError);
         expect(error.message).toContain('upstream lookup failed');
-        expect(error.data).toBeUndefined();
+        // The call's own request id is the one field added (#576).
+        expect(error.data).toEqual({ requestId: expect.stringMatching(REQUEST_ID_PATTERN) });
       },
     );
 
-    it("prompts/get answers a thrown McpError with exactly that error's data", async () => {
+    it("prompts/get answers a thrown McpError with that error's data and its request id", async () => {
       const client = await session();
 
       const error = await rejectionOf(
@@ -604,7 +635,10 @@ describe('Phase 1 wire conformance', () => {
 
       expect(error.code).toBe(JsonRpcErrorCode.NotFound);
       expect(error.message).toContain('no such topic');
-      expect(error.data).toEqual({ topic: 'x' });
+      expect(error.data).toEqual({
+        topic: 'x',
+        requestId: expect.stringMatching(REQUEST_ID_PATTERN),
+      });
     });
 
     it('a tryCatch-wrapped service failure keeps its code and loses its stack on every path', async () => {
@@ -626,8 +660,17 @@ describe('Phase 1 wire conformance', () => {
           rootCause: { name: 'Error', message: 'EACCES' },
         });
       }
-      // A prompt's rejection carries none of the context its registry was built with.
-      expect(promptError.data).not.toHaveProperty('requestId');
+      // A prompt's rejection carries its own call's request id — the one its
+      // `Error in prompt:` record logs — and none of the registry's context (#576).
+      const promptRecord = errorLog.mock.calls.find(([msg]) =>
+        String(msg).startsWith('Error in prompt:wire_failing'),
+      )?.[1] as { operation?: string; requestId?: string } | undefined;
+      expect(promptError.data?.requestId).toBe(promptRecord?.requestId);
+      expect(promptRecord?.operation).not.toBe('PromptRegistry.registerAll');
+      for (const error of [promptError, toolError, resourceError]) {
+        expect(error?.data?.requestId).toEqual(expect.stringMatching(REQUEST_ID_PATTERN));
+        expect(error?.data).not.toHaveProperty('operation');
+      }
       expect(toolResult.isError).toBe(true);
 
       // The server log still carries the throw-site stack and the cause chain.
@@ -641,7 +684,7 @@ describe('Phase 1 wire conformance', () => {
       }
     });
 
-    it('leaves a plain Error thrown directly by a tool or resource with no data', async () => {
+    it('gives a plain Error thrown directly by a tool or resource only the request id', async () => {
       const client = await session();
 
       const toolResult = await client.callTool({
@@ -653,10 +696,26 @@ describe('Phase 1 wire conformance', () => {
       );
 
       expect(toolResult.structuredContent).toEqual({
-        error: { code: JsonRpcErrorCode.InternalError, message: 'direct failure' },
+        error: {
+          code: JsonRpcErrorCode.InternalError,
+          message: 'direct failure',
+          data: { requestId: expect.stringMatching(REQUEST_ID_PATTERN) },
+        },
       });
+      expect((toolResult.content as Array<{ text: string }>)[0]?.text).toBe(
+        `Error: direct failure\n\n(request ${requestIdOf(toolResult)})`,
+      );
       expect(resourceError.code).toBe(JsonRpcErrorCode.InternalError);
-      expect(resourceError.data).toBeUndefined();
+      expect(resourceError.data).toEqual({ requestId: expect.stringMatching(REQUEST_ID_PATTERN) });
+    });
+
+    it('leaves the SDK resource-not-found shape exactly { uri }', async () => {
+      const client = await session();
+
+      const error = await rejectionOf(client.readResource({ uri: 'unknown://missing' }));
+
+      expect(error.code).toBe(JsonRpcErrorCode.InvalidParams);
+      expect(error.data).toEqual({ uri: 'unknown://missing' });
     });
   });
 

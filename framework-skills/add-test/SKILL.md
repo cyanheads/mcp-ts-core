@@ -4,7 +4,7 @@ description: >
   Scaffold a test file for an existing tool, resource, or service. Use when the user asks to add tests, improve coverage, or when a definition exists without a matching test file.
 metadata:
   author: cyanheads
-  version: "1.7"
+  version: "1.8"
   audience: external
   type: reference
 ---
@@ -36,7 +36,8 @@ Read the handler and identify:
 | **Input variations** | Optional fields omitted, defaults applied, boundary values |
 | **Error paths** | Invalid state, missing resources, service failures → correct error thrown |
 | **`ctx.state` usage** | Available on any mock context (tenant `'default'` unless `{ tenantId }` says otherwise). It runs the production storage path, so use storage-legal keys (`cache/v1/abc`, never `cache:v1:abc`) and assert TTL expiry with fake timers. |
-| **`ctx.requestInput` / `ctx.inputs`** | Two rounds. First round: assert the handler throws the input-required signal (`.rejects.toSatisfy(isInputRequiredSignal)`), or catch it and assert on `error.result.inputRequests`. Second round: seed `createMockContext({ inputResponses })` and assert the handler completes. Cover the decline/cancel branch too. |
+| **`ctx.requestInput` / `ctx.inputs`** | Two rounds. First round: assert the handler throws the input-required signal (`.rejects.toSatisfy(isInputRequiredSignal)`), or catch it and assert on `error.result.inputRequests`. Second round: seed `createMockContext({ inputResponses })` and assert the handler completes. Cover the decline/cancel branch too. A consent gate that redeems a `ctx.state` record also needs that record written into the second round's context, and a replay case showing the spent record asks again (see `api-testing` § Mock inputs). |
+| **`ctx.clientCapabilities`** | When the handler asks only if the client declared a capability, seed `createMockContext({ clientCapabilities })` with and without it and assert it asks in one case and falls through in the other. Seeding it also filters `inputResponses` to the declared kinds, as production does. |
 | **`ctx.signal`** | Pass `createMockContext({ signal: controller.signal })` and assert a long loop stops early rather than running to completion. |
 | **`ctx.fail` (typed contract)** | Definitions with `errors[]` need `fail` attached to the mock ctx — `createMockContext({ errors: myTool.errors })` does it for you. Assert on `data.reason` (stable per-contract entry), not just `code`. |
 | **`format` function** | Test separately if defined — it's pure, no ctx needed. Verify it renders the IDs and fields the model needs, not just a count or title. For projection-style tools, test non-default field selections. |
@@ -222,6 +223,8 @@ it('does not re-ask after a decline', async () => {
 });
 ```
 
+For a destructive consent gate, the second round completes only when the context holds the single-use record the first round stored, keyed by the `requestState` it returned — each mock context has its own `ctx.state`, so write the record into the second context before calling the handler. `api-testing` § Mock inputs has the full pattern, including the replay case.
+
 ### Cancellation test
 
 ```typescript
@@ -308,7 +311,7 @@ When scaffolding tests for an existing handler, use the Zod schemas to generate 
 - [ ] Happy path tested with valid input → expected output
 - [ ] Error paths tested (at least one `.rejects.toThrow()`)
 - [ ] `format` function tested if defined
-- [ ] `createMockContext` options match handler's ctx usage (`tenantId`, `inputResponses`, `requestState`, `errors`, `signal`)
+- [ ] `createMockContext` options match handler's ctx usage (`tenantId`, `inputResponses`, `requestState`, `clientCapabilities`, `errors`, `signal`)
 - [ ] Service re-initialized in `beforeEach` if handler depends on a service singleton
 - [ ] If handler has optional fields: tested with empty-string inner values (form-client simulation)
 - [ ] If wrapping external API: sparse-payload case tested — fixture omits at least one optional upstream field; output still validates and `format()` renders uncertainty honestly instead of inventing values

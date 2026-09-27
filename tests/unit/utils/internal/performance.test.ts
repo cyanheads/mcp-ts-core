@@ -1067,7 +1067,7 @@ describe('measurePromptGeneration', () => {
     ]);
   });
 
-  it('records OTel error counter and logs via logger.error on failure', async () => {
+  it('records OTel error counter and logs the completion at info on failure (#582)', async () => {
     await expect(
       measurePromptGeneration(
         async () => {
@@ -1090,7 +1090,20 @@ describe('measurePromptGeneration', () => {
       'mcp.prompt.name': 'err-prompt',
       'mcp.prompt.error_category': 'client',
     });
-    expect(errorSpy).toHaveBeenCalled();
+    // The failure's one `error` record is the caller's `Error in prompt:` line;
+    // the completion record stays at `info`, as it does for tools and resources.
+    expect(errorSpy).not.toHaveBeenCalled();
+    expect(infoSpy).toHaveBeenCalledWith(
+      'Prompt generation finished.',
+      expect.objectContaining({
+        extra: expect.objectContaining({
+          metrics: expect.objectContaining({
+            isSuccess: false,
+            errorCode: String(JsonRpcErrorCode.InvalidParams),
+          }),
+        }),
+      }),
+    );
   });
 
   it('captures McpError code on failure', async () => {

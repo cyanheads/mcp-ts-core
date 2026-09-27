@@ -20,7 +20,6 @@
  * reworded message cannot silently fall back under the limiter.
  */
 export const TELEMETRY_LOG_MESSAGES = {
-  promptGenerationFailed: 'Prompt generation failed.',
   promptGenerationFinished: 'Prompt generation finished.',
   resourceReadFinished: 'Resource read finished.',
   toolExecutionFinished: 'Tool execution finished.',

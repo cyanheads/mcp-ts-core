@@ -7,8 +7,32 @@
  * edit here rather than one per test file.
  * @module tests/helpers/server-context
  */
-import type { AuthInfo, RequestId, ServerContext } from '@modelcontextprotocol/server';
+import type {
+  AuthInfo,
+  ClientCapabilities,
+  RequestId,
+  ServerContext,
+} from '@modelcontextprotocol/server';
 import { vi } from 'vitest';
+
+import type { ClientCapabilityView } from '@/mcp-server/inputRequired.js';
+
+/**
+ * The capability view a 2025-era instance hands its handler factories, fixed
+ * to `declared` — `undefined` is the per-request connection with no view.
+ */
+export function legacyCapabilityView(
+  declared: ClientCapabilities | undefined,
+): ClientCapabilityView {
+  return { era: 'legacy', capabilities: () => declared };
+}
+
+/** Every response kind a client can answer — for tests about reading `ctx.inputs`. */
+export const EVERY_INPUT_CAPABILITY = {
+  elicitation: {},
+  roots: {},
+  sampling: {},
+} as const satisfies ClientCapabilities;
 
 /** Overrides accepted by {@link makeServerContext}, flattened for convenience. */
 export interface ServerContextOverrides {

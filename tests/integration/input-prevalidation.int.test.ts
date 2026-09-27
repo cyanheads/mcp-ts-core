@@ -203,11 +203,18 @@ describe('tool argument pre-validation (#453, #452, #234)', () => {
       ]);
 
       const detail = (result: typeof withAliases) =>
-        (result.structuredContent as { error: { data?: unknown; message: string } }).error;
+        (result.structuredContent as { error: { data?: Record<string, unknown>; message: string } })
+          .error;
+      /** The envelope's `data` minus the per-call request id each carries (#576). */
+      const dataOf = (result: typeof withAliases) => {
+        const { requestId, ...data } = detail(result).data ?? {};
+        expect(requestId).toEqual(expect.any(String));
+        return data;
+      };
 
       expect(withAliases.isError).toBe(true);
       expect(detail(withAliases).message).toContain('Unrecognized key: "querry"');
-      expect(detail(withAliases).data).toEqual(detail(without).data);
+      expect(dataOf(withAliases)).toEqual(dataOf(without));
       expect(detail(withAliases).message.replace('_aliased', '_plain')).toBe(
         detail(without).message,
       );

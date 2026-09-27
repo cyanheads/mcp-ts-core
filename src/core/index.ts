@@ -118,6 +118,7 @@ export type {
   CacheHint,
   CacheScope,
   CallToolResult,
+  ClientCapabilities,
   CompleteCallback,
   CompleteResourceTemplateCallback,
   ContentBlock,

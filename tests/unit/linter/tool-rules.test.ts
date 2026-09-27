@@ -158,7 +158,7 @@ describe('lintToolDefinition — error contract', () => {
     },
   ];
 
-  it('reports a fail site that does not forward the declared recovery', () => {
+  it('stays silent on a bare fail site — the framework fills its recovery (#579)', () => {
     const diagnostics = lintToolDefinition(
       validTool({
         errors,
@@ -168,10 +168,10 @@ describe('lintToolDefinition — error contract', () => {
       }),
     );
 
-    expect(diagnostics.map((d) => d.rule)).toContain('error-contract-recovery-unforwarded');
+    expect(diagnostics).toEqual([]);
   });
 
-  it('stays silent once the site forwards it', () => {
+  it('stays silent when the site forwards it explicitly', () => {
     const diagnostics = lintToolDefinition(
       validTool({
         errors,

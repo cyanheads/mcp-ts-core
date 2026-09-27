@@ -4,7 +4,7 @@
  */
 import type { McpServer, ServerNotifier, ToolCallback } from '@modelcontextprotocol/server';
 
-import type { InputRequiredGate } from '@/mcp-server/inputRequired.js';
+import type { ClientCapabilityView } from '@/mcp-server/inputRequired.js';
 import type { ResourceSubscriptions } from '@/mcp-server/notifications.js';
 import { deferInputValidation } from '@/mcp-server/tools/utils/deferredInputSchema.js';
 import { getDisabledMetadata } from '@/mcp-server/tools/utils/disabled-tool.js';
@@ -45,12 +45,16 @@ export class ToolRegistry {
     private readonly services: HandlerServices,
   ) {}
 
-  /** Registers all tool definitions with the provided McpServer instance. */
+  /**
+   * Registers all tool definitions with the provided McpServer instance.
+   * `capabilities` is the instance's view of what its client declared (#580),
+   * which every handler context resolves per request.
+   */
   public async registerAll(
     server: McpServer,
     subscriptions?: ResourceSubscriptions,
     bus?: ServerNotifier,
-    inputGate?: InputRequiredGate,
+    capabilities?: ClientCapabilityView,
   ): Promise<void> {
     // Reset per-server uniqueness tracking — registries are shared across
     // per-request McpServer instances under HTTP serving.
@@ -95,7 +99,7 @@ export class ToolRegistry {
     // `tools` capability, so a server with every tool disabled still answers
     // `tools/list` with an empty array rather than `-32601`.
     for (const toolDef of tools) {
-      await this.registerTool(server, toolDef, notifiers, inputGate);
+      await this.registerTool(server, toolDef, notifiers, capabilities);
     }
   }
 
@@ -115,7 +119,7 @@ export class ToolRegistry {
     server: McpServer,
     tool: AnyToolDefinition,
     notifiers: NotifierSources,
-    inputGate?: InputRequiredGate,
+    capabilities?: ClientCapabilityView,
   ): Promise<void> {
     const registrationContext = requestContextService.createRequestContext({
       operation: 'ToolRegistry.registerTool',
@@ -128,7 +132,7 @@ export class ToolRegistry {
 
     await ErrorHandler.tryCatch(
       () => {
-        const handler = createToolHandler(tool, this.services, notifiers, inputGate);
+        const handler = createToolHandler(tool, this.services, notifiers, capabilities);
         const title = tool.title ?? tool.annotations?.title ?? deriveTitleFromName(tool.name);
 
         // Advertised verbatim; the same schema rejects the same arguments one

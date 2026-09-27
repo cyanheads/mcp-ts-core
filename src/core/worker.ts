@@ -48,6 +48,12 @@ export interface CloudflareBindings {
   MCP_AUTH_MODE?: string;
   MCP_AUTH_SECRET_KEY?: string;
   MCP_PUBLIC_URL?: string;
+  /**
+   * Opt-in `requestState` sealing key (≥ 32 bytes). Set it as a secret on the
+   * Worker: isolates share nothing, so a 2026-07-28 retry lands wherever the
+   * platform routes it and verifies only against the same key.
+   */
+  MCP_REQUEST_STATE_KEY?: string;
   OAUTH_AUDIENCE?: string;
   OAUTH_ISSUER_URL?: string;
   OAUTH_JWKS_URI?: string;
@@ -112,6 +118,7 @@ const CORE_ENV_BINDINGS: ReadonlyArray<[keyof CloudflareBindings, string]> = [
   ['MCP_AUTH_MODE', 'MCP_AUTH_MODE'],
   ['MCP_AUTH_SECRET_KEY', 'MCP_AUTH_SECRET_KEY'],
   ['MCP_PUBLIC_URL', 'MCP_PUBLIC_URL'],
+  ['MCP_REQUEST_STATE_KEY', 'MCP_REQUEST_STATE_KEY'],
   ['OPENROUTER_API_KEY', 'OPENROUTER_API_KEY'],
   ['SUPABASE_URL', 'SUPABASE_URL'],
   ['SUPABASE_ANON_KEY', 'SUPABASE_ANON_KEY'],

@@ -8,6 +8,7 @@
 
 import type {
   CallToolResult,
+  ClientCapabilities,
   ContentBlock,
   InputRequiredResult,
   InputResponses,
@@ -30,12 +31,14 @@ import {
   createEnrichmentStore,
   readContentStore,
   readEnrichmentStore,
+  resolveDeclaredFailure,
   stashContentStore,
   stashEnrichmentStore,
 } from '@/core/context.js';
 import {
   contextInputsFrom,
   createRequestInput,
+  declaredResponses,
   isInputRequiredSignal,
 } from '@/mcp-server/inputRequired.js';
 import type { AnyToolDefinition } from '@/mcp-server/tools/utils/toolDefinition.js';
@@ -71,6 +74,13 @@ export interface MockContextOptions<
 > {
   /** Auth context. */
   auth?: AuthContext;
+  /**
+   * The capabilities the client declared, exposed as `ctx.clientCapabilities`
+   * (`undefined` when omitted). Seeding it also applies the production filter
+   * to `inputResponses`: only the response kinds these capabilities cover
+   * reach `ctx.inputs`. Omitted, every seeded response reaches it.
+   */
+  clientCapabilities?: ClientCapabilities;
   /**
    * Error contract to attach a typed `ctx.fail` against. Pass the definition's
    * own `errors` array (`createMockContext({ errors: myTool.errors })`) so the
@@ -160,11 +170,20 @@ export function createMockLogger(): MockContextLogger {
   };
 }
 
+/**
+ * `ctx.inputs` over the seeded responses — filtered to the kinds `declared`
+ * covers, as production filters them, only when capabilities were seeded.
+ */
 function createMockInputs(
   responses: InputResponses | Record<string, unknown> | undefined,
   requestState: unknown,
+  declared: ClientCapabilities | undefined,
 ): ContextInputs {
-  return contextInputsFrom(responses, [], <T>(): T | undefined => requestState as T | undefined);
+  return contextInputsFrom(
+    declared === undefined ? responses : declaredResponses(responses, declared),
+    [],
+    <T>(): T | undefined => requestState as T | undefined,
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -200,6 +219,10 @@ const DEFAULT_MOCK_TENANT_ID = 'default';
  *
  * // Second round of a multi-round-trip handler
  * const ctx = createMockContext({ inputResponses: { confirm: { action: 'accept', content: { ok: true } } } });
+ *
+ * // A client that declared only roots: ctx.clientCapabilities is set, and the
+ * // elicit response above would be filtered out of ctx.inputs, as in production
+ * const ctx = createMockContext({ clientCapabilities: { roots: {} } });
  * ```
  */
 export function createMockContext<
@@ -228,7 +251,12 @@ export function createMockContext<
     tenantId,
     sessionId: options.sessionId,
     auth: options.auth,
-    inputs: createMockInputs(options.inputResponses, options.requestState),
+    clientCapabilities: options.clientCapabilities,
+    inputs: createMockInputs(
+      options.inputResponses,
+      options.requestState,
+      options.clientCapabilities,
+    ),
     requestInput: createRequestInput(),
     notifyPromptListChanged: options.notifyPromptListChanged,
     notifyResourceListChanged: options.notifyResourceListChanged,
@@ -517,7 +545,11 @@ export interface RunToolContractOptions {
  * The runner validates input and output schemas, invokes the real handler,
  * applies `format()`, enrichment, and collected content, and converts thrown
  * values to the same dual-surface error envelope used by the production tool
- * pipeline. It intentionally skips transport auth and telemetry.
+ * pipeline — a declared reason thrown without a `recovery` gets the entry's
+ * `recovery` as `data.recovery.hint`, as it does in production. It
+ * intentionally skips transport auth and telemetry, and adds no
+ * `data.requestId`: there is no real request, so the envelope and its
+ * `content[]` terms line stop at `reason` / `retryable`.
  *
  * Arguments that fail the `input` schema are rejected through
  * `parseToolArguments` — the same call the production handler factory makes —
@@ -560,7 +592,11 @@ export async function runToolContract<TDefinition extends AnyToolDefinition>(
       renderToolContent(definition, validatedOutput, ctx),
     );
   } catch (error) {
-    return classifyAndBuildToolErrorResult(asRequestCancelled(error, ctx.signal));
+    const { failure } = resolveDeclaredFailure(
+      definition.errors,
+      asRequestCancelled(error, ctx.signal),
+    );
+    return classifyAndBuildToolErrorResult(failure);
   }
 }
 

@@ -45,7 +45,7 @@ Both paths share the same public API. Init copies starter `package.json`, config
 
 | Subpath | Key Exports | Purpose |
 |:--------|:------------|:--------|
-| `@cyanheads/mcp-ts-core` | `createApp`, `tool`, `resource`, `prompt`, `appTool`, `appResource`, `APP_RESOURCE_MIME_TYPE`, `headerParam`, `Context`, `createFail`, `createRecoveryFor`, `TypedFail`, `TypedRecoveryFor`, `ReasonOf`, `HandlerContext`, `Enrich`, `EnrichHelpers`, `TypedEnrich`, `ContentCollect`, `ContentBlock`, `z`, `inputRequired`, `completable`, `isCompletable`, `CompleteCallback`, `CompleteResourceTemplateCallback`, `CacheHint`, `CacheHints`, `CacheScope`, `SessionMode`, `ResolvedSessionMode` | Main entry point |
+| `@cyanheads/mcp-ts-core` | `createApp`, `tool`, `resource`, `prompt`, `appTool`, `appResource`, `APP_RESOURCE_MIME_TYPE`, `headerParam`, `Context`, `ClientCapabilities`, `createFail`, `createRecoveryFor`, `TypedFail`, `TypedRecoveryFor`, `ReasonOf`, `HandlerContext`, `Enrich`, `EnrichHelpers`, `TypedEnrich`, `ContentCollect`, `ContentBlock`, `z`, `inputRequired`, `completable`, `isCompletable`, `CompleteCallback`, `CompleteResourceTemplateCallback`, `CacheHint`, `CacheHints`, `CacheScope`, `SessionMode`, `ResolvedSessionMode` | Main entry point |
 | `/worker` | `createWorkerHandler`, `CloudflareBindings` | Cloudflare Workers entry |
 | `/tools` | `ToolDefinition`, `AnyToolDefinition`, `ToolAnnotations` | Tool definition types |
 | `/resources` | `ResourceDefinition`, `AnyResourceDefinition` | Resource definition types |
@@ -300,10 +300,11 @@ interface Context {
   readonly traceId?: string;
   readonly spanId?: string;
   readonly auth?: AuthContext;
+  readonly clientCapabilities: ClientCapabilities | undefined; // what the client declared; undefined when no view (2025-era stateless HTTP)
   readonly log: ContextLogger;                // auto-correlated: requestId, traceId, tenantId
   readonly state: ContextState;               // tenant-scoped KV storage
   readonly requestInput: RequestInputFn;      // (spec, options?) => never — suspends and asks the caller for input
-  readonly inputs: ContextInputs;             // reader over a retried request's responses
+  readonly inputs: ContextInputs;             // the request's responses, limited to what the client declared
   readonly notifyPromptListChanged?: (() => void) | undefined;     // prompt list changed
   readonly notifyResourceListChanged?: (() => void) | undefined;   // resource list changed
   readonly notifyResourceUpdated?: ((uri: string) => void) | undefined; // resource content changed
@@ -312,7 +313,7 @@ interface Context {
   readonly uri?: URL;                         // present for resource handlers
   readonly content: ContentCollect;           // media blocks → prepended to content[]; never in structuredContent
   readonly enrich: Enrich;                    // success-path agent context → structuredContent + content[]; typed on HandlerContext<R, E>
-  recoveryFor(reason: string): { recovery: { hint: string } } | Record<string, never>; // opt-in contract resolver
+  recoveryFor(reason: string): { recovery: { hint: string } } | Record<string, never>; // a declared entry's hint, in wire shape
 }
 ```
 
@@ -367,10 +368,32 @@ useFormat(answer.format);
 cancelled prompt is terminal, not a round to retry. `inputRequired.elicitUrl({ message, url })`
 hands the user an external link instead of a form.
 
+A client can send responses on a call nothing asked for, so only what it declared reaches
+`ctx.inputs`, at the mode level the request would need: an elicit result needs `elicitation` —
+`elicitation.form` when it carries `content` — a sampling result `sampling` (`sampling.tools` when it
+holds a tool block), a roots result `roots`, and a request with no capability view gets none.
+`ctx.clientCapabilities` — the SDK-parsed `initialize` value on 2025-era connections (a bare
+`elicitation: {}` reads back as `{ elicitation: { form: {} } }`), the request's envelope as sent on
+2026-07-28 — decides whether to *ask* for optional context (request roots only when `roots` is
+declared, else fall through); it is never a reason to skip a consent prompt.
+
 A 2025-era client that declared no matching capability is refused as `client_capability_missing`,
 with a hint that ends at reconnecting. When the tool's own arguments can stand in for the answer,
 say so per call — `ctx.requestInput(spec, { fallbackHint: 'Or call again with noun supplied.' })` —
 and the sentence is appended to that hint. A consent gate passes none: it has no such field.
+
+**Consent gates redeem a server record.** A capable client can still pre-answer, and any
+`requestState` can be replayed within its lifetime, so a destructive handler first redeems (reads and
+deletes) a `ctx.state` record `{ operation, clientId, subject, target, contentHash }` stored under a
+random id — the id is all `requestState` carries — and asks again on an unknown, used, or expired id,
+or when any field differs from this call. Carrying the target in `requestState` and comparing on
+re-entry is replayable. Redeeming stops a sequential replay, not concurrent retries: until an atomic
+`ctx.state.take` exists (#593), an action that must not repeat is made idempotent per record. The
+record's storage is shared by every instance a 2026-07-28 retry can reach — `filesystem`, `supabase`,
+or `cloudflare-d1`, never `cloudflare-kv`. `MCP_REQUEST_STATE_KEY` (≥ 32 bytes, the same on every
+instance) opts into sealing: the framework signs the string a handler returns, the SDK rejects any
+other as `-32602` `invalid_request_state` before the handler runs, and `ctx.inputs.state()` still
+returns the original string. See `api-context` for the full pattern.
 
 ### `ctx.content`
 
@@ -382,7 +405,7 @@ See `api-context` skill for full details.
 
 ## Error Handling
 
-**Recommended path: declare a typed error contract.** Add `errors: [{ reason, code, when, recovery, retryable?, severity?, thrownBy? }]` to `tool()` / `resource()`. Handler gets `ctx.fail(reason, msg?, data?)` typed against the reason union — typos fail at compile time. Runtime auto-populates `data.reason` for observability; linter enforces conformance against the handler body. `recovery` is required (≥5 words, lint-validated) — the single source of truth for the wire hint. Spread `ctx.recoveryFor('reason')` into `data` to opt the contract recovery onto the wire (framework mirrors `data.recovery.hint` into `content[]` text); override with explicit `{ recovery: { hint: '...' } }` when runtime context matters. Optional `severity` (`debug`/`info`/`notice`/`warning`) logs a modeled outcome below `error` — tools only, logging only: the wire envelope, the span status, and the `mcp.tool.*` metrics are untouched. Optional `thrownBy: 'service'` marks an entry the service layer produces, so `error-contract-unthrown` skips it while still checking the handler's own reasons — lint-only metadata, nothing at runtime reads it.
+**Recommended path: declare a typed error contract.** Add `errors: [{ reason, code, when, recovery, retryable?, severity?, thrownBy? }]` to `tool()` / `resource()`. Handler gets `ctx.fail(reason, msg?, data?)` typed against the reason union — typos fail at compile time. Runtime auto-populates `data.reason` for observability; linter enforces conformance against the handler body. `recovery` is required (≥5 words, lint-validated) — the wire hint for its reason: when a failure whose `data.reason` names the entry reaches the tool or resource factory without `data.recovery`, the framework fills `data.recovery.hint` from it — a bare `ctx.fail('reason')` and a service throw carrying `{ reason }` alike, matched on the reason alone — and mirrors it into `content[]` text. Override with explicit `{ recovery: { hint: '...' } }` when runtime context matters; a throw-site `recovery` always wins, and the thrown `McpError` itself is never changed. Optional `severity` (`debug`/`info`/`notice`/`warning`) logs a modeled outcome below `error` — tools only, logging only: the wire envelope, the span status, and the `mcp.tool.*` metrics are untouched. The framework's own `invalid_arguments` and `client_capability_missing` refusals log at `notice` unless an entry naming them declares otherwise. Optional `thrownBy: 'service'` marks an entry the service layer produces, so `error-contract-unthrown` skips it while still checking the handler's own reasons — lint-only metadata, nothing at runtime reads it.
 
 ```ts
 errors: [
@@ -394,8 +417,8 @@ errors: [
     recovery: 'Wait 30 seconds before retrying or reduce batch size.' },
 ],
 async handler(input, ctx) {
-  // Static recovery — pulled from the contract via ctx.recoveryFor.
-  if (queue.full()) throw ctx.fail('queue_full', undefined, { ...ctx.recoveryFor('queue_full') });
+  // Static recovery — the framework fills the contract's hint onto the wire.
+  if (queue.full()) throw ctx.fail('queue_full');
   // Dynamic recovery — interpolate runtime context, override the contract default.
   if (!matched) throw ctx.fail('no_match', `No data for ${input.pmids.length} PMIDs`, {
     pmids: input.pmids,
@@ -404,7 +427,7 @@ async handler(input, ctx) {
 }
 ```
 
-**`ctx.recoveryFor(reason)`** returns `{}` when no contract exists (spread-safe). Typed against the declared reason union on `HandlerContext<R>`. Works in services: `throw validationError(msg, { reason: 'X', ...ctx.recoveryFor('X') })`. Opt-in — author spreads explicitly.
+**`ctx.recoveryFor(reason)`** returns the entry's hint in wire shape, `{}` when no contract exists (spread-safe). Typed against the declared reason union on `HandlerContext<R>`. Not needed to put a declared hint on the wire — the fill does that — only when the hint must ride the thrown error itself, as in a test of the handler's own throw.
 
 **Contracts are inline, per-tool.** Don't extract shared `errors[]` constants — locality is the point, and dynamic `recovery` hints need tool-specific context. Declare domain-specific failures only; **baseline codes** (`InternalError`, `ServiceUnavailable`, `Timeout`, `ValidationError`, `SerializationError`, `RequestCancelled`) are auto-allowed by conformance lint. The lint scans handler source only — service-layer throws still reach clients via auto-classification.
 
@@ -422,9 +445,9 @@ For HTTP responses from upstream APIs, use `httpErrorFromResponse(response, { se
 
 **Auto-classification.** Plain `Error`, `ZodError`, and any other thrown value are caught and classified automatically. Resolution order: request signal already aborted (→ `RequestCancelled`, outranking the thrown value's own code, `McpError` included) → `McpError` code (preserved as-is) → SDK `ConnectionClosed` (→ `RequestCancelled`) → engine resource-limit `RangeError` by whole message — stack overflow, maximum string size (→ `InternalError`) → JS constructor name (`SyntaxError` → `ValidationError`; `TypeError` is excluded) → provider patterns (HTTP status codes, AWS errors, DB errors) → common message patterns → `AbortError` name (→ `Timeout`) → `InternalError` fallback. A result that breaks the definition's own `output` or `enrichment` schema fails as `InternalError` naming that contract, not `ValidationError`.
 
-**Error-path parity.** Tool errors: `content[]` carries `Error: <message>`, then `Recovery: <hint>` when the hint says something the message does not already contain, then a closing `(reason … · not retryable)` for whichever of `data.reason` / `data.retryable` is present; the numeric code and `data.issues` stay JSON-only. `structuredContent.error` carries `{ code, message, data? }`. No `_meta.error`. Resources re-throw via JSON-RPC error envelope. An argument rejection is one of them: `-32602` with `data.issues`, plus `data.reason: 'invalid_arguments'` and a hint synthesized from the issues and the root schema — never a tool-declared `reason`, since the handler never ran. When pre-validation rewrote or dropped a key the caller wrote, `data.input` (`{ aliased: [{ alias, target }], ignored }`) names it and the hint closes with `Validated … as ….` / `Dropped undeclared key ….`; an ignore-list drop is never reported. `client_capability_missing` is the second framework-owned reason: a `ctx.requestInput` return a 2025-era connection cannot serve is refused before any wire traffic as `-32600` carrying that reason and a hint naming the capability.
+**Error-path parity.** Tool errors: `content[]` carries `Error: <message>`, then `Recovery: <hint>` when the hint says something the message does not already contain, then a closing `(reason … · not retryable · request <id>)` for whichever of `data.reason` / `data.retryable` / `data.requestId` is present; the numeric code and `data.issues` stay JSON-only. `structuredContent.error` carries `{ code, message, data? }`. No `_meta.error`. Resources re-throw via JSON-RPC error envelope. An argument rejection is one of them: `-32602` with `data.issues`, plus `data.reason: 'invalid_arguments'` and a hint synthesized from the issues and the root schema — never a tool-declared `reason`, since the handler never ran. When pre-validation rewrote or dropped a key the caller wrote, `data.input` (`{ aliased: [{ alias, target }], ignored }`) names it and the hint closes with `Validated … as ….` / `Dropped undeclared key ….`; an ignore-list drop is never reported. `client_capability_missing` is the second framework-owned reason: a `ctx.requestInput` return a 2025-era connection cannot serve is refused before any wire traffic as `-32600` carrying that reason and a hint naming the capability. **`data.requestId`** is set on every error envelope the framework builds — tool results, resource reads, prompts, `httpErrorHandler`'s JSON-RPC errors — equal to the `requestId` of that call's log records: a generated token, or the client's JSON-RPC id when it is a string (`httpErrorHandler` always generates its own). A resource read refused before it is measured (auth, `params`) carries an id no record shares. It replaces a thrown `data.requestId`, is never added to the thrown `McpError`, and is left off a resource `-32602` whose `data` is exactly `{ uri }` and off `runToolContract` results.
 
-**Lint rules** (all warnings, surfaced in `devcheck`): `prefer-mcp-error-in-handler`, `prefer-error-factory`, `preserve-cause-on-rethrow`, `no-stringify-upstream-error`, `error-contract-conformance`, `error-contract-prefer-fail`, `error-contract-unthrown` (a declared reason no literal `ctx.fail`/`ctx.recoveryFor` in the handler names, unless marked `thrownBy: 'service'`), `error-contract-recovery-unforwarded` (a `ctx.fail` site carrying neither `ctx.recoveryFor('<reason>')` nor its own `recovery` key, so the declared hint reaches neither client surface). See `api-linter` skill.
+**Lint rules** (all warnings, surfaced in `devcheck`): `prefer-mcp-error-in-handler`, `prefer-error-factory`, `preserve-cause-on-rethrow`, `no-stringify-upstream-error`, `error-contract-conformance`, `error-contract-prefer-fail`, `error-contract-unthrown` (a declared reason no literal `ctx.fail`/`ctx.recoveryFor` in the handler names, unless marked `thrownBy: 'service'`). See `api-linter` skill.
 
 See `api-errors` skill for the full pattern-matching table, error code reference, and detailed examples.
 
@@ -458,7 +481,7 @@ Managed by `@cyanheads/mcp-ts-core`. Validated via Zod. Precedence: `createApp()
 | Category | Key Variables |
 |:---------|:-------------|
 | Transport | `MCP_TRANSPORT_TYPE` (`stdio`\|`http`), `MCP_HTTP_PORT`, `MCP_HTTP_HOST`, `MCP_HTTP_ENDPOINT_PATH` |
-| Auth | `MCP_AUTH_MODE`, `MCP_AUTH_SECRET_KEY`, `MCP_AUTH_DISABLE_SCOPE_CHECKS`, `OAUTH_*` |
+| Auth | `MCP_AUTH_MODE`, `MCP_AUTH_SECRET_KEY`, `MCP_AUTH_DISABLE_SCOPE_CHECKS`, `OAUTH_*`, `MCP_REQUEST_STATE_KEY` (opt-in `requestState` sealing) |
 | Storage | `STORAGE_PROVIDER_TYPE` (`in-memory`\|`filesystem`\|`supabase`\|`cloudflare-r2`\|`cloudflare-kv`\|`cloudflare-d1`) |
 | LLM | `OPENROUTER_API_KEY`, `OPENROUTER_APP_URL/NAME`, `LLM_DEFAULT_*` |
 | Telemetry | `OTEL_ENABLED`, `OTEL_SERVICE_NAME/VERSION`, `OTEL_EXPORTER_OTLP_*` |
@@ -485,7 +508,7 @@ describe('myTool', () => {
 });
 ```
 
-**`createMockContext` options:** `createMockContext()` (state included), `{ tenantId: 'test-tenant' }` (explicit tenant; defaults to `'default'`, as stdio resolves it), `{ errors: myTool.errors }` (typed `ctx.fail`), `{ inputResponses }` / `{ requestState }` (seed `ctx.inputs` to drive a multi-round-trip handler's second round directly), plus `auth`, `sessionId`, `signal`, `requestId`, `uri`, and the four `notify*` callbacks.
+**`createMockContext` options:** `createMockContext()` (state included), `{ tenantId: 'test-tenant' }` (explicit tenant; defaults to `'default'`, as stdio resolves it), `{ errors: myTool.errors }` (typed `ctx.fail`), `{ inputResponses }` / `{ requestState }` (seed `ctx.inputs` to drive a multi-round-trip handler's second round directly), `{ clientCapabilities }` (seeds `ctx.clientCapabilities` and filters the seeded responses to the declared kinds, as production does — omitted, nothing is filtered), plus `auth`, `sessionId`, `signal`, `requestId`, `uri`, and the four `notify*` callbacks.
 
 **`ctx.state` in tests is the production path.** The mock backs it with a real `StorageService` over an `InMemoryProvider`, so key validation (`[a-zA-Z0-9_.\-/]+` — colons rejected), the JSON round-trip of every value, and TTL expiry behave exactly as they do in a deployment. Passing `errors` narrows the return type to `HandlerContext<ReasonOf<…>>`, which is what a definition declaring a contract types its handler's `ctx` as — so `definition.handler(input, ctx)` typechecks.
 
@@ -495,7 +518,7 @@ describe('myTool', () => {
 
 **Fixture-based tests:** `mcpTest` from `/testing/vitest` (optional peer `vitest`) extends Vitest's `test` with per-test fixtures: `ctx` (fresh mock context), `session` (session-bound context), `fetchMock` (strict fetch fake, installed/restored around the test), and `storage` (fresh in-memory `StorageService`). Override fixtures via `.extend` with the function form only — a bare value would share one mutable context across every test in the file.
 
-**Tool contracts:** `runToolContract(definition, input)` from `/testing` validates input/output, invokes the handler, formats content, and returns production-shaped success/error surfaces without transport auth or telemetry. `toolContractSuite(definition, { success, errors })` from `/testing/vitest` registers reusable schema/handler/error-envelope conformance cases for a server's own tool definitions.
+**Tool contracts:** `runToolContract(definition, input)` from `/testing` validates input/output, invokes the handler, formats content, and returns production-shaped success/error surfaces — the declared `recovery` fill included — without transport auth, telemetry, or `data.requestId`. `toolContractSuite(definition, { success, errors })` from `/testing/vitest` registers reusable schema/handler/error-envelope conformance cases for a server's own tool definitions.
 
 **Fuzz testing:** `fuzzTool`/`fuzzResource`/`fuzzPrompt` from `/testing/fuzz` generate valid and adversarial inputs from Zod schemas via `fast-check`, then assert handler invariants (no crashes, no prototype pollution, no stack trace leaks). Returns a `FuzzReport` for custom assertions.
 

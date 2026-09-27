@@ -268,6 +268,16 @@ describe('config parsing', () => {
     expect(parseConfig().mcpPublicUrl).toBeUndefined();
   });
 
+  it('parses MCP_REQUEST_STATE_KEY when set, reads blank as unset, and leaves length to the codec', () => {
+    expect(parseConfig({ MCP_REQUEST_STATE_KEY: '' }).mcpRequestStateKey).toBeUndefined();
+    expect(parseConfig({ MCP_REQUEST_STATE_KEY: 'k'.repeat(32) }).mcpRequestStateKey).toBe(
+      'k'.repeat(32),
+    );
+    // The byte-length check runs where the codec is built, so the startup error
+    // names the variable rather than reading "Invalid application configuration".
+    expect(parseConfig({ MCP_REQUEST_STATE_KEY: 'short' }).mcpRequestStateKey).toBe('short');
+  });
+
   // Overrides merge over process.env and an empty value reads as unset, so these
   // cases hold regardless of what the ambient env or a local .env carries.
   it('applies defaults when the core variables are unset', () => {

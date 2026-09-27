@@ -4,7 +4,7 @@ description: >
   MCP definition linter rules reference. Use when `bun run lint:mcp` or `bun run devcheck` reports a lint error or warning (`format-parity`, `schema-is-object`, `name-format`, `server-json-*`, etc.) and you need to understand the rule, its severity, and how to fix it. Every rule ID the linter emits has an entry in this doc.
 metadata:
   author: cyanheads
-  version: "1.20"
+  version: "1.21"
   audience: external
   type: reference
 ---
@@ -53,7 +53,7 @@ Grouped by family. Jump to any rule ID via its anchor.
 | Prompts | `generate-required` | [Prompt rules](#prompt-rules) |
 | Handler body | `prefer-mcp-error-in-handler`, `prefer-error-factory`, `preserve-cause-on-rethrow`, `no-stringify-upstream-error` | [Handler body rules](#handler-body-rules) |
 | Error contract (structural) | `error-contract-type`, `error-contract-empty`, `error-contract-entry-type`, `error-contract-code-type`, `error-contract-code-unknown`, `error-contract-code-unknown-error`, `error-contract-reason-required`, `error-contract-reason-format`, `error-contract-reason-unique`, `error-contract-when-required`, `error-contract-retryable-type`, `error-contract-severity-unknown`, `error-contract-recovery-required`, `error-contract-recovery-empty`, `error-contract-recovery-min-words` | [Error contract rules](#error-contract-rules) |
-| Error contract (conformance) | `error-contract-conformance`, `error-contract-prefer-fail`, `error-contract-unthrown`, `error-contract-recovery-unforwarded` | [Error contract rules](#error-contract-rules) |
+| Error contract (conformance) | `error-contract-conformance`, `error-contract-prefer-fail`, `error-contract-unthrown` | [Error contract rules](#error-contract-rules) |
 | Enrichment | `enrichment-type`, `enrichment-empty`, `enrichment-field-type`, `enrichment-output-collision`, `enrichment-prefer-block`, `enrichment-trailer-render`, `enrichment-trailer-orphan`, `enrichment-trailer-unknown-field`, `capped-list-no-truncation` | [Enrichment rules](#enrichment-rules) |
 | server.json | ~40 rules prefixed `server-json-*` | [server.json rules](#server-json-rules) |
 
@@ -866,7 +866,7 @@ Fires when an entry's optional `severity` field is present but isn't one of `deb
 
 **Severity:** error
 
-Fires when an entry's `recovery` field is missing or not a string. `recovery` is the agent's next-move guidance when this failure fires — it flows to the wire via `ctx.recoveryFor`.
+Fires when an entry's `recovery` field is missing or not a string. `recovery` is the agent's next-move guidance when this failure fires — the handler factory sends it as `data.recovery.hint` with any failure carrying the entry's reason and no hint of its own.
 
 ### error-contract-recovery-empty
 
@@ -948,37 +948,13 @@ async handler(input, ctx) {
 }
 ```
 
-The field is lint-only metadata: `ctx.fail`, `ctx.recoveryFor`, the `severity` lookup, and the advertised error envelope never read it, so a marked entry is typed, advertised, and thrown exactly as an unmarked one. Prefer it over the workarounds that also silence the rule — moving the literal `ctx.fail` into a module-level helper turns the whole tool off, handler-local reasons included.
+The field is lint-only metadata: `ctx.fail`, `ctx.recoveryFor`, the recovery fill, the `severity` lookup, and the advertised error envelope never read it, so a marked entry is typed, advertised, and thrown exactly as an unmarked one. Prefer it over the workarounds that also silence the rule — moving the literal `ctx.fail` into a module-level helper turns the whole tool off, handler-local reasons included.
 
 **Trigger.** Only when the handler holds at least one literal `ctx.fail(`. A handler with none produces its reasons somewhere the scan cannot reach, so firing there would warn on every service-layer definition. A `ctx.fail(` or `ctx.recoveryFor(` whose first argument is not a string literal — a variable, a template literal, a map lookup — makes the named set unknowable, and the whole definition is skipped rather than guessed at.
 
 **Heuristic limitations:** the scan reads `handler.toString()` and matches call sites in the comment- and string-stripped text, so a `ctx.fail('…')` written inside a comment or nested in another literal does not count as thrown. A reason produced outside the handler closure is invisible to any `toString()` scan, which is why the rule can never prove absence and stays a warning. Still silent without a marker: a `createFail(errors)` resolver built outside the handler, and an aliased `const fail = ctx.fail`.
 
-### error-contract-recovery-unforwarded
-
-**Severity:** warning
-
-Fires per literal `ctx.fail('<reason>', …)` site that does not put the contract's `recovery` on the wire.
-
-`recovery` is required on every `errors[]` entry, but reaching the client with it is opt-in — the throw site forwards `ctx.recoveryFor('<reason>')`, or passes its own `recovery` key. A site that does neither ships `reason` and `retryable` with no hint, and since the framework mirrors `data.recovery.hint` into the error `content[]`, both client surfaces lose it together. Nothing else catches this: the contract is declared, `lint:mcp` passes, and an error-path test asserting `code` and `reason` passes with the hint absent.
-
-**Fix:** forward the resolver at the site named in the diagnostic.
-
-```ts
-// warns
-throw ctx.fail('rate_limited', 'Upstream rate limit exceeded');
-
-// clean — any of
-throw ctx.fail('rate_limited', msg, { ...ctx.recoveryFor('rate_limited') });
-throw ctx.fail('rate_limited', msg, ctx.recoveryFor('rate_limited'));
-throw ctx.fail('rate_limited', msg, { recovery: { hint: `Retry in ${waitSeconds}s.` } });
-```
-
-**Per site, not per reason.** A handler wiring one of six throws is covered at one of them, so each site is judged on its own argument list. Two sites naming one reason, one forwarding and one bare, produce exactly one diagnostic. A site whose only resolver names a *different* reason warns too, naming both — the caller would otherwise get another failure mode's guidance.
-
-**Bails.** A non-literal first argument on either `ctx.fail(` or `ctx.recoveryFor(` skips the whole definition, as it does for `error-contract-unthrown`. A resolver sitting outside every fail span — a hoisted `const hint = ctx.recoveryFor('x')` — skips that reason, since the binding is assembled where the scan cannot follow it. A data argument the scan cannot read skips that one site: an identifier (`ctx.fail('r', msg, data)`), a call other than the resolver, or an object literal spreading another value (`{ ...details }`), any of which may carry `recovery` already. An object literal of plain keys carrying no `recovery` still warns.
-
-**Heuristic limitations:** same `handler.toString()` scan as `error-contract-unthrown`, so a call written inside a comment or nested in another literal is not a site, and a failure thrown below the handler is invisible. The rule speaks only for the sites it sees, which is why it stays a warning.
+No rule checks that a throw site forwards the declared `recovery`: the handler factory fills `data.recovery.hint` from the entry for any failure carrying its reason and no hint of its own, so a bare `ctx.fail('<reason>')` and a service throw both reach the client with it. See `api-errors`.
 
 ---
 

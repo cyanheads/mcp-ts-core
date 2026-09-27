@@ -4,7 +4,7 @@ description: >
   Scaffold a new MCP tool definition. Use when the user asks to add a tool, create a new tool, or implement a new capability for the server.
 metadata:
   author: cyanheads
-  version: "2.31"
+  version: "2.32"
   audience: external
   type: reference
 ---
@@ -80,8 +80,8 @@ export const {{TOOL_EXPORT}} = tool('{{tool_name}}', {
   // `recovery` is required (≥ 5 words) — it's the agent's next move when this
   // failure fires. Forcing function for thoughtful guidance: placeholders like
   // "Try again." get flagged by the linter. The contract `recovery` is the
-  // single source of truth for what flows to the wire — opt in at the throw
-  // site by spreading `ctx.recoveryFor('reason')` into the `data` arg.
+  // single source of truth for what flows to the wire — the framework sends it
+  // with any failure carrying the reason and no hint of its own.
   errors: [
     { reason: 'queue_full', code: JsonRpcErrorCode.RateLimited,
       when: 'Local queue at capacity.', retryable: true,
@@ -95,10 +95,9 @@ export const {{TOOL_EXPORT}} = tool('{{tool_name}}', {
     // Without: throw via factories (`notFound`, `validationError`, …) or plain `Error`.
     const items = await search(input);
     if (queue.full()) {
-      // Static recovery — resolve from the contract via ctx.recoveryFor('reason').
-      // Single source of truth: the string lives in errors[] above; this spread
-      // pulls it onto the wire so format()-only clients see the recovery hint.
-      throw ctx.fail('queue_full', undefined, { ...ctx.recoveryFor('queue_full') });
+      // Static recovery — the string lives in errors[] above, and the framework
+      // puts it on both client surfaces as `data.recovery.hint`.
+      throw ctx.fail('queue_full');
     }
     // Surface what the agent reasons with — echoed query, true total — on BOTH
     // client surfaces, with no format() plumbing. An empty result is a notice,
@@ -137,29 +136,25 @@ A handler that needs something the caller didn't supply returns `ctx.requestInpu
 import { inputRequired, tool, z } from '@cyanheads/mcp-ts-core';
 import { validationError } from '@cyanheads/mcp-ts-core/errors';
 
-const Confirm = z.object({ confirm: z.boolean().describe('Whether to proceed.') });
+const Choice = z.object({ region: z.enum(['us', 'eu']).describe('Region to deploy to.') });
 
 export const {{TOOL_EXPORT}} = tool('{{tool_name}}', {
   description: '{{TOOL_DESCRIPTION}}',
   input: z.object({ /* ... */ }),
   output: z.object({ /* ... */ }),
-  annotations: { destructiveHint: true },
 
   handler(input, ctx) {
+    // A declined or cancelled prompt is a dead end — don't re-ask it.
+    const view = ctx.inputs.view('region');
+    if (view.kind === 'elicit' && view.action !== 'accept') {
+      throw validationError(`User ${view.action} the region prompt.`);
+    }
     // Read what a prior round collected before asking for anything.
-    const answer = ctx.inputs.accepted('confirm', Confirm);
+    const answer = ctx.inputs.accepted('region', Choice);
     if (!answer) {
-      // A declined or cancelled prompt is a dead end — don't re-ask it.
-      const view = ctx.inputs.view('confirm');
-      if (view.kind === 'elicit' && view.action !== 'accept') {
-        throw validationError(`User ${view.action} the confirmation.`);
-      }
       return ctx.requestInput({
         inputRequests: {
-          confirm: inputRequired.elicit({
-            message: `Proceed with ${input.target}?`,
-            requestedSchema: Confirm,
-          }),
+          region: inputRequired.elicit({ message: 'Which region?', requestedSchema: Choice }),
         },
       });
     }
@@ -168,6 +163,8 @@ export const {{TOOL_EXPORT}} = tool('{{tool_name}}', {
   },
 });
 ```
+
+**A confirmation before a destructive step is different.** `ctx.inputs` only carries response kinds the client declared, but a client that declared `elicitation` can still send an "accepted" answer on a call nothing asked, and any `requestState` replays within its lifetime. A consent gate stores `{ operation, clientId, subject, target, contentHash }` in `ctx.state` under a random id, sends only that id as `requestState`, redeems the record before anything else in the handler, and asks again on an unknown, used, or expired id or on any field that differs from this call — the full handler, and the concurrency limit an action that must not repeat has to design around, are in `api-context` § *Consent gates*. Pair it with `MCP_REQUEST_STATE_KEY` so a retry can only carry state this server minted.
 
 Write it as `return ctx.requestInput(...)` — the `never` return type makes it valid in return position for any output, and it is what lets TypeScript narrow the line below. Full reference (`inputRequired.elicitUrl` / `.createMessage` / `.listRoots`, `requestState`, decline handling): `framework-skills/api-context`.
 
@@ -657,10 +654,9 @@ export const fetchArticles = tool('fetch_articles', {
   input: z.object({ pmids: z.array(z.string()).describe('PMIDs to fetch') }),
   output: z.object({ articles: z.array(ArticleSchema).describe('Resolved articles') }),
   async handler(input, ctx) {
-    // Static recovery — ctx.recoveryFor pulls the contract recovery onto the wire.
-    // The contract is the single source of truth; this spread surfaces it on the
-    // wire so format()-only clients see the hint mirrored into content[] text.
-    if (queue.full()) throw ctx.fail('queue_full', undefined, { ...ctx.recoveryFor('queue_full') });
+    // Static recovery — the framework fills the contract recovery onto the wire,
+    // mirrored into content[] text for format()-only clients.
+    if (queue.full()) throw ctx.fail('queue_full');
 
     const articles = await fetch(input.pmids);
     if (articles.length === 0) {
@@ -675,7 +671,7 @@ export const fetchArticles = tool('fetch_articles', {
 });
 ```
 
-**`ctx.recoveryFor(reason)`** resolves the contract's `recovery` string into the wire shape `{ recovery: { hint } }` — safe to spread into `data` so format()-only clients see the same recovery hint that structuredContent clients read. Always available on `Context` (no-op `{}` when no contract), strictly typed on `HandlerContext<R>` against the declared reasons. Use it for static recovery; pass `{ recovery: { hint: \`…${dynamic}…\` } }` directly when you need runtime context. The contract is the single source of truth — write the recovery once, lint validates it ≥5 words, the resolver carries it to every throw site.
+**The declared `recovery` reaches the wire on its own.** When a failure whose `data.reason` names a contract entry leaves the handler without `data.recovery`, the framework sets `data.recovery.hint` to that entry's `recovery` — both client surfaces, the error log record, and `runToolContract` alike — whatever code it was thrown with. Pass `{ recovery: { hint: \`…${dynamic}…\` } }` when you need runtime context; a throw-site hint always wins. `ctx.recoveryFor(reason)` still resolves the entry into `{ recovery: { hint } }` for a hint that must ride the thrown error itself. The contract is the single source of truth — write the recovery once, lint validates it ≥5 words, the framework carries it to every failure with that reason.
 
 **Baseline codes** (`InternalError`, `ServiceUnavailable`, `Timeout`, `ValidationError`, `SerializationError`) bubble freely and don't need declaring. Wire-level behavior is identical when the contract is omitted, but you lose the type-checked `ctx.fail`, the `tools/list` advertisement, and conformance lint coverage — declare a contract whenever the tool has a domain-specific failure mode.
 
@@ -683,12 +679,12 @@ export const fetchArticles = tool('fetch_articles', {
 
 #### Service-layer throws
 
-API-wrapping tools usually delegate to a service: `await ncbi.fetch(input, ctx)`. The throw lives in the service, not the handler. Services accept `ctx` (the unified Context) so they can call `ctx.log`, `ctx.recoveryFor`, etc. The handler doesn't catch — it just bubbles, and the framework's auto-classifier preserves `data` on the wire.
+API-wrapping tools usually delegate to a service: `await ncbi.fetch(input, ctx)`. The throw lives in the service, not the handler. Services accept `ctx` (the unified Context) so they can call `ctx.log`, `ctx.state`, etc. The handler doesn't catch — it just bubbles, and the framework's auto-classifier preserves `data` on the wire.
 
-The contract entry on the tool and the `data: { reason }` on the service throw need to use the **same reason string** so the two sides line up. `ctx.recoveryFor('reason')` resolves the contract recovery from the calling tool's `errors[]` — same single-source-of-truth pattern that works in handlers.
+The contract entry on the tool and the `data: { reason }` on the service throw need to use the **same reason string** so the two sides line up. That reason is all it takes: the framework fills the calling tool's declared `recovery` onto the failure as it leaves the handler.
 
 ```typescript
-// service — receives ctx; passes data.reason and spreads ctx.recoveryFor
+// service — receives ctx; passes data.reason
 import type { Context } from '@cyanheads/mcp-ts-core';
 import { serviceUnavailable } from '@cyanheads/mcp-ts-core/errors';
 
@@ -697,9 +693,8 @@ export class NcbiService {
     const response = await fetchWithRetry(...);
     if (!response.ok) {
       throw serviceUnavailable(`NCBI returned HTTP ${response.status}`, {
-        reason: 'ncbi_unreachable',
+        reason: 'ncbi_unreachable',  // the caller's declared recovery is filled from this
         status: response.status,
-        ...ctx.recoveryFor('ncbi_unreachable'),  // resolves from caller's contract
       });
     }
     return response.json();
@@ -719,7 +714,7 @@ export const fetchArticles = tool('fetch_articles', {
 });
 ```
 
-`ctx.recoveryFor` returns `{}` when the calling tool has no contract or the reason isn't declared, so the spread is always safe — services don't have to know which tool called them.
+A tool that declares no matching entry gets no hint — the service doesn't have to know which tool called it.
 
 Add `thrownBy: 'service'` to a contract entry the service produces once the handler also throws one of its own. `error-contract-unthrown` reads the handler body alone: as soon as one literal `ctx.fail(` appears there, every declared reason the body does not name is flagged, and the marker is what tells the rule this one is thrown a layer down. Lint-only metadata — the entry stays typed, advertised, and thrown exactly as an unmarked one.
 
@@ -748,8 +743,9 @@ throw serviceUnavailable(`arXiv API returned HTTP ${status}. Retry in a few seco
 // clients (Claude Desktop) see the same guidance that structuredContent clients
 // (Claude Code) read from `error.data.recovery.hint`. A hint the message already
 // contains verbatim is dropped from the text rather than stated twice; it stays
-// on structuredContent regardless. `data.reason` and `data.retryable` render as
-// a closing `(reason … · not retryable)` line; other `data` keys reach
+// on structuredContent regardless. `data.reason`, `data.retryable`, and the
+// framework's own `data.requestId` render as a closing
+// `(reason … · not retryable · request <id>)` line; other `data` keys reach
 // structuredContent only.
 import { invalidParams } from '@cyanheads/mcp-ts-core/errors';
 throw invalidParams(
@@ -886,7 +882,7 @@ return { items: hits };
 - [ ] `errors: [...]` contract declared for the tool's domain-specific failure modes — or block deleted if no domain failures apply (baseline codes bubble freely)
 - [ ] Error contract declared inline on this tool — not imported from a shared module, even when other tools have near-identical entries
 - [ ] Long loops check `ctx.signal.aborted` so a cancelled request (or a closed transport) stops the work
-- [ ] If the tool needs caller input it may not have been given: reads `ctx.inputs` first, requests only what is missing via `return ctx.requestInput(...)`, and treats a declined/cancelled response as terminal rather than re-asking
+- [ ] If the tool needs caller input it may not have been given: reads `ctx.inputs` first, requests only what is missing via `return ctx.requestInput(...)`, and treats a declined/cancelled response as terminal rather than re-asking. A destructive confirmation redeems a `ctx.state` consent record bound to the operation, caller, and target (`api-context` § *Consent gates*) rather than trusting the answer alone
 - [ ] If tool returns unbounded arrays: pagination with total count, or `spillover()` / DataCanvas for *analytical* working sets (an agent would SQL them — not a discovery/search surface). If any tool emits a `canvas_id`, a `dataframe_query` tool is registered in the same server — a token with no query tool is dead output
 - [ ] If tool returns one large *document* (not a row set) that can overflow context: `outlineOnOverflow()` returns a `full | outline` union so the agent re-calls with `sections: [...]` — not one-sided truncation
 - [ ] If tool is feature-gated: evaluated whether `disabledTool()` wrapper is appropriate (present in manifest but uncallable)
