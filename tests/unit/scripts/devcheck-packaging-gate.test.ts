@@ -129,6 +129,26 @@ describe('devcheck Packaging gate (#343)', () => {
     expect(out).toContain('--platform=$BUILDPLATFORM');
   });
 
+  it('fails a production stage that installs after copying bunfig.toml (#575)', () => {
+    writeFileSync(
+      resolve(dir, 'Dockerfile'),
+      [
+        'FROM --platform=$BUILDPLATFORM oven/bun:1.4.2 AS build',
+        'COPY . .',
+        'RUN bun install && bun run build',
+        'FROM oven/bun:1.4.2-slim AS production',
+        'COPY package.json bun.lock bunfig.toml ./',
+        'RUN bun install --production --omit=peer --frozen-lockfile --ignore-scripts',
+        'COPY --from=build /app/dist ./dist',
+        'CMD ["bun", "run", "dist/index.js"]',
+      ].join('\n'),
+    );
+    const { code, out } = runPackagingCheck(dir);
+    expect(code).not.toBe(0);
+    expect(out).toContain('Dockerfile:4 "FROM oven/bun:1.4.2-slim AS production"');
+    expect(out).toContain('Dockerfile:6 runs `bun install` after bunfig.toml');
+  });
+
   describe('plugin manifest as the only packaging input (#393)', () => {
     /** Writes `.claude-plugin/plugin.json`; the scaffold's package.json is 0.0.0. */
     const writePlugin = (version: string): void => {

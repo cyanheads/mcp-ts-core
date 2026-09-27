@@ -130,6 +130,9 @@ describe('CLI init command', () => {
     expect(existsSync(join(dest, 'scripts', 'devcheck.ts'))).toBe(true);
     expect(existsSync(join(dest, 'scripts', 'check-framework-antipatterns.ts'))).toBe(true);
     expect(existsSync(join(dest, 'scripts', 'check-dependency-specifiers.ts'))).toBe(true);
+    // The scaffold Dockerfile's OTel step runs it; a scaffold without it fails the image build.
+    expect(existsSync(join(dest, 'scripts', 'install-otel.ts'))).toBe(true);
+    expect(readFileSync(join(dest, 'Dockerfile'), 'utf-8')).toContain('scripts/install-otel.ts');
     expect(existsSync(join(dest, 'framework-skills', 'add-tool', 'SKILL.md'))).toBe(true);
     expect(existsSync(join(dest, 'framework-skills', 'README.md'))).toBe(false);
     // Plugin hosts auto-load a root skills/ — the scaffold must never create one.

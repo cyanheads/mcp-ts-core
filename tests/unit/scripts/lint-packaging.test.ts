@@ -4,7 +4,8 @@
  * (check 8, issues #230/#274), the identity checks (check 9, issue #231), and
  * the plugin marketplace manifests (check 10, issues #240/#393), and the
  * npm `files` exclusion of the built bundle (check 13, issue #469), manifest.json
- * version parity (check 14), and the Dockerfile build platform (check 15).
+ * version parity (check 14), and the Dockerfile stages that run JavaScript off
+ * the build platform (check 15, #575).
  * Imports the real implementation; no inline mirror.
  * @module tests/unit/scripts/lint-packaging.test
  */
@@ -789,7 +790,7 @@ describe('lint-packaging · manifest.json version (check 14)', () => {
   });
 });
 
-describe('lint-packaging · Dockerfile build platform (check 15)', () => {
+describe('lint-packaging · Dockerfile build platform (check 15, #575)', () => {
   const REPO_ROOT = join(import.meta.dirname, '..', '..', '..');
 
   it('passes the scaffold template Dockerfile', () => {
@@ -834,5 +835,202 @@ describe('lint-packaging · Dockerfile build platform (check 15)', () => {
       'COPY dist ./dist',
     ].join('\n');
     expect(checkDockerfileBuildPlatform(dockerfile)).toEqual([]);
+  });
+
+  /** The build stage every fixture below shares; pinned, so it never reports. */
+  const BUILD_STAGE = [
+    'FROM --platform=$BUILDPLATFORM oven/bun:1.4.2 AS build',
+    'WORKDIR /usr/src/app',
+    'COPY package.json bun.lock ./',
+    'RUN --mount=type=cache,target=/root/.bun/install/cache \\',
+    '    bun install --frozen-lockfile --ignore-scripts',
+    'COPY . .',
+    'RUN bun run build',
+  ];
+
+  /** The runtime tail every scaffold carries: shell-only RUNs, then Bun only at container start. */
+  const RUNTIME_TAIL = [
+    'COPY --from=build /usr/src/app/dist ./dist',
+    'RUN mkdir -p /var/log/srv && chown -R bun:bun /var/log/srv',
+    'RUN mkdir -p /usr/src/app/.cache \\',
+    '  && chown -R bun:bun /usr/src/app/.cache',
+    'USER bun',
+    'HEALTHCHECK --interval=30s CMD bun -e "fetch(\'http://localhost:3010/healthz\').then((r)=>process.exit(r.ok?0:1))"',
+    'CMD ["bun", "run", "dist/index.js"]',
+  ];
+
+  it('passes a target-stage install that never sees bunfig.toml (the pre-0.13.8 production stage)', () => {
+    const dockerfile = [
+      ...BUILD_STAGE,
+      'FROM oven/bun:1.4.2-slim AS production',
+      'WORKDIR /usr/src/app',
+      'COPY package.json bun.lock ./',
+      'RUN --mount=type=cache,target=/root/.bun/install/cache \\',
+      '    bun install --production --omit=peer --frozen-lockfile --ignore-scripts',
+      'ARG OTEL_ENABLED=true',
+      'RUN --mount=type=cache,target=/root/.bun/install/cache \\',
+      '    if [ "$OTEL_ENABLED" = "true" ]; then \\',
+      '      bun add --omit=dev --omit=peer --ignore-scripts @hono/otel \\',
+      '        @opentelemetry/sdk-node; \\',
+      '    fi',
+      'RUN bun i --production && bun a left-pad',
+      ...RUNTIME_TAIL,
+    ].join('\n');
+    expect(checkDockerfileBuildPlatform(dockerfile)).toEqual([]);
+  });
+
+  it('never reads HEALTHCHECK, CMD, ENTRYPOINT, or bun as a non-command word as a build step', () => {
+    const dockerfile = [
+      'FROM oven/bun:1.4.2-slim',
+      'COPY bunfig.toml ./',
+      'RUN chown -R bun:bun /usr/src/app && chown bun /var/log && ls /root/.bun/ && id -u bun',
+      'USER bun',
+      'HEALTHCHECK CMD bun -e "process.exit(0)"',
+      'ENTRYPOINT ["bun"]',
+      'CMD ["bun", "run", "dist/index.js"]',
+    ].join('\n');
+    expect(checkDockerfileBuildPlatform(dockerfile)).toEqual([]);
+  });
+
+  it('never reads a quoted mention of bun as a command', () => {
+    const dockerfile = [
+      'FROM oven/bun:1.4.2-slim',
+      'COPY bunfig.toml ./',
+      `RUN echo "bun run build" > /dev/null && printf '%s' 'bun -e 1; bun install'`,
+    ].join('\n');
+    expect(checkDockerfileBuildPlatform(dockerfile)).toEqual([]);
+  });
+
+  it('passes the framework Dockerfile', () => {
+    const dockerfile = readFileSync(join(REPO_ROOT, 'Dockerfile'), 'utf8');
+    expect(checkDockerfileBuildPlatform(dockerfile)).toEqual([]);
+  });
+
+  /** 1-based line of the first fixture line equal to `text`. */
+  const lineOf = (lines: string[], text: string): number => {
+    const index = lines.indexOf(text);
+    expect(index, `fixture carries ${text}`).toBeGreaterThanOrEqual(0);
+    return index + 1;
+  };
+
+  it('fails the 0.13.8 production stage, naming its install and its OTel step', () => {
+    const lines = [
+      ...BUILD_STAGE,
+      'FROM oven/bun:1.4.2-slim AS production',
+      'WORKDIR /usr/src/app',
+      'COPY package.json bun.lock bunfig.toml ./',
+      'COPY --from=build /usr/src/app/node_modules/@socketsecurity/bun-security-scanner ./node_modules/@socketsecurity/bun-security-scanner',
+      'RUN --mount=type=cache,target=/root/.bun/install/cache \\',
+      '    bun install --production --omit=peer --frozen-lockfile --ignore-scripts',
+      'ARG OTEL_ENABLED=true',
+      '# The OTel step: resolves each range, then installs',
+      'RUN --mount=type=cache,target=/root/.bun/install/cache \\',
+      '    if [ "$OTEL_ENABLED" = "true" ]; then \\',
+      "      specs=$(bun -e ' \\",
+      '        const peers = (await Bun.file("node_modules/@cyanheads/mcp-ts-core/package.json").json()).peerDependencies; \\',
+      '        console.log(process.argv.slice(1).map((name) => name + "@" + peers[name]).join(" ")); \\',
+      "      ' \\",
+      '        @hono/otel \\',
+      '        @opentelemetry/sdk-node) \\',
+      '      && bun add --omit=dev --omit=peer --ignore-scripts $specs; \\',
+      '    fi',
+      ...RUNTIME_TAIL,
+    ];
+    const runs = lines
+      .map((line, i) => (line.startsWith('RUN --mount') ? i + 1 : 0))
+      .filter((line) => line > lineOf(lines, 'FROM oven/bun:1.4.2-slim AS production'));
+
+    const errors = checkDockerfileBuildPlatform(lines.join('\n'));
+
+    expect(runs).toHaveLength(2);
+    expect(errors).toHaveLength(1);
+    const [error] = errors;
+    expect(error).toContain(
+      `Dockerfile:${lineOf(lines, 'FROM oven/bun:1.4.2-slim AS production')} "FROM oven/bun:1.4.2-slim AS production"`,
+    );
+    expect(error).toContain(`Dockerfile:${runs[0]} runs \`bun install\` after bunfig.toml`);
+    expect(error).toContain(`Dockerfile:${runs[1]} runs \`bun -e\``);
+    expect(error).toContain('--platform=$BUILDPLATFORM');
+    expect(error).not.toContain(`Dockerfile:${lineOf(lines, 'USER bun') + 1}`);
+  });
+
+  it.each([
+    ['shell form', 'RUN bun -e "console.log(1)"', 'bun -e'],
+    ['a script file', 'RUN bun scripts/seed.ts', 'bun scripts/seed.ts'],
+    ['an absolute path', 'RUN /usr/local/bin/bun run build', 'bun run'],
+    ['bunx', 'RUN bunx some-cli --flag', 'bunx some-cli'],
+    ['exec form', 'RUN ["bun", "run", "build"]', 'bun run'],
+    ['an env prefix', 'RUN NODE_ENV=production bun run build', 'bun run'],
+    ['a compound command', 'RUN set -e; if true; then bun x tsc; fi', 'bun x'],
+    [
+      'a mount flag',
+      'RUN --mount=type=cache,target=/root/.bun/install/cache bun run build',
+      'bun run',
+    ],
+    ['a heredoc', 'RUN <<EOF\nset -e\nbun run build\nEOF', 'bun run'],
+  ])('fails a target-stage RUN invoking bun (%s)', (_form, run, invocation) => {
+    const errors = checkDockerfileBuildPlatform(`FROM oven/bun:1.4.2-slim\n${run}\nCMD ["bun"]`);
+    expect(errors).toHaveLength(1);
+    expect(errors[0]).toContain('Dockerfile:1 "FROM oven/bun:1.4.2-slim"');
+    expect(errors[0]).toContain(`Dockerfile:2 runs \`${invocation}\``);
+  });
+
+  it('fails an install once bunfig.toml reaches the stage, however it arrives', () => {
+    const direct = ['FROM oven/bun:1.4.2-slim', 'COPY bunfig.toml ./', 'RUN bun install'];
+    const context = ['FROM oven/bun:1.4.2-slim', 'COPY . .', 'RUN bun install --production'];
+    const inherited = [
+      'FROM oven/bun:1.4.2 AS base',
+      'COPY package.json bunfig.toml ./',
+      'FROM base AS production',
+      'RUN bun add left-pad',
+    ];
+
+    for (const [lines, installLine] of [
+      [direct, 3],
+      [context, 3],
+      [inherited, 4],
+    ] as const) {
+      const errors = checkDockerfileBuildPlatform(lines.join('\n'));
+      expect(errors, lines.join(' | ')).toHaveLength(1);
+      expect(errors[0]).toContain(`Dockerfile:${installLine} runs \`bun`);
+      expect(errors[0]).toContain('after bunfig.toml');
+    }
+
+    // An install that ran before bunfig.toml arrived never saw its scanner.
+    const before = ['FROM oven/bun:1.4.2-slim', 'RUN bun install', 'COPY bunfig.toml ./'];
+    expect(checkDockerfileBuildPlatform(before.join('\n'))).toEqual([]);
+  });
+
+  it('reports each target stage that runs JavaScript once, and never a build-platform stage', () => {
+    const lines = [
+      ...BUILD_STAGE,
+      'FROM oven/bun:1.4.2-slim AS migrate',
+      'RUN bun run migrate',
+      'FROM oven/bun:1.4.2-slim AS target-deps',
+      'COPY package.json bun.lock bunfig.toml ./',
+      'RUN bun install --production',
+      'RUN bun add left-pad',
+      'FROM --platform=$BUILDPLATFORM oven/bun:1.4.2 AS deps',
+      'COPY package.json bun.lock bunfig.toml ./',
+      'RUN bun install --production --os=linux --cpu=x64 && bun scripts/install-otel.ts --os=linux --cpu=x64',
+      'FROM oven/bun:1.4.2-slim AS production',
+      'COPY --from=deps /usr/src/app/node_modules ./node_modules',
+      ...RUNTIME_TAIL,
+    ];
+
+    const errors = checkDockerfileBuildPlatform(lines.join('\n'));
+
+    expect(errors).toHaveLength(2);
+    expect(errors[0]).toContain(
+      `Dockerfile:${lineOf(lines, 'FROM oven/bun:1.4.2-slim AS migrate')} `,
+    );
+    expect(errors[0]).toContain(
+      `Dockerfile:${lineOf(lines, 'RUN bun run migrate')} runs \`bun run\``,
+    );
+    expect(errors[1]).toContain(
+      `Dockerfile:${lineOf(lines, 'FROM oven/bun:1.4.2-slim AS target-deps')} `,
+    );
+    expect(errors[1]).toContain(`Dockerfile:${lineOf(lines, 'RUN bun install --production')} `);
+    expect(errors[1]).toContain(`Dockerfile:${lineOf(lines, 'RUN bun add left-pad')} `);
   });
 });

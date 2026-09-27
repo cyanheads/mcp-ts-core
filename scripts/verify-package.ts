@@ -801,6 +801,8 @@ async function verifyCli(
   }
   await access(join(projectDir, 'src', 'index.ts'), constants.R_OK);
   await access(join(projectDir, 'scripts', 'build.ts'), constants.R_OK);
+  // The scaffold Dockerfile's OTel step runs it; without it the image build fails at its COPY.
+  await access(join(projectDir, 'scripts', 'install-otel.ts'), constants.R_OK);
 
   // Preserve the generated manifest long enough to assert its published
   // dependency contract above, then point only this temporary verifier copy at

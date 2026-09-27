@@ -16,6 +16,7 @@
     "scripts/clean-mcpb.ts",
     "scripts/clean.ts",
     "scripts/devcheck.ts",
+    "scripts/install-otel.ts",
     "scripts/lint-mcp.ts",
     "scripts/lint-packaging.ts",
     "scripts/list-skills.ts",

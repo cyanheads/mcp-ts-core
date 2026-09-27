@@ -4,7 +4,7 @@ description: >
   Finalize documentation and project metadata for a ship-ready MCP server. Use after implementation is complete, tests pass, and devcheck is clean. Safe to run at any stage — each step checks current state and only acts on what still needs work.
 metadata:
   author: cyanheads
-  version: "2.20"
+  version: "2.21"
   audience: external
   type: workflow
 ---
@@ -204,7 +204,7 @@ If the project ships as an `.mcpb` bundle for Claude Desktop (check for `manifes
 **`package.json` scripts:**
 
 - `bundle` — builds the `.mcpb` (`mcpb pack`, then `scripts/clean-mcpb.ts` prunes dev deps and strips dependency-shipped agent docs)
-- `lint:packaging` — validates `manifest.json` ↔ `server.json` env var consistency, version parity for `manifest.json`, the plugin manifests, and the README badge, and the Dockerfile build stage (run by `devcheck`, which gates the step on `manifest.json`, a plugin manifest, `.mcpbignore`, `README.md`, or `Dockerfile`)
+- `lint:packaging` — validates `manifest.json` ↔ `server.json` env var consistency, version parity for `manifest.json`, the plugin manifests, and the README badge, and the Dockerfile's stages: a stage not pinned to `$BUILDPLATFORM` must not run JavaScript while building — no `bun run build`, `bun -e`, or script, and no `bun install` once `bunfig.toml` is in the stage (run by `devcheck`, which gates the step on `manifest.json`, a plugin manifest, `.mcpbignore`, `README.md`, or `Dockerfile`)
 
 **Cross-file consistency:**
 

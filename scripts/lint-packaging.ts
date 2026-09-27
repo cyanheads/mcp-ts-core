@@ -69,12 +69,17 @@
  *      same rule check 10 applies to the plugin manifests — the bundle's install
  *      dialog shows it. Skipped when `manifest.json` or the package version is
  *      absent.
- *  15. Dockerfile build platform: every stage that runs `bun run build` must
- *      start `FROM --platform=$BUILDPLATFORM`. Without it the non-native leg of
- *      a multi-arch `docker buildx` build runs under QEMU, where bun >= 1.4
- *      aborts inside the build and no image publishes for either architecture —
- *      and the image publishes last, after npm and the MCP Registry. Skipped
- *      when there is no `Dockerfile` or no stage builds.
+ *  15. Dockerfile build platform: a stage that does not start
+ *      `FROM --platform=$BUILDPLATFORM` must not run JavaScript while it
+ *      builds — no `RUN` invoking `bun` for anything but `install`/`add`
+ *      (`bun run build`, `bun -e`, a script, `bunx`), and no `bun install`/
+ *      `bun add` once `bunfig.toml` is in the stage, since its security scanner
+ *      runs as a Bun program. The non-native leg of a multi-arch `docker buildx`
+ *      build runs such a stage under QEMU, where bun >= 1.4 aborts and no image
+ *      publishes for either architecture — and the image publishes last, after
+ *      npm and the MCP Registry. `HEALTHCHECK`/`CMD`/`ENTRYPOINT` run at
+ *      container start and never count. One error per stage, naming each
+ *      offending line (issue #575). Skipped when there is no `Dockerfile`.
  *
  * Every check skips cleanly when its input is absent — consumers who deleted
  * `manifest.json` for an HTTP-only deploy, or who haven't built a bundle,
@@ -799,33 +804,189 @@ export function checkManifestVersion(manifest: Manifest, packageVersion?: string
   ];
 }
 
-const DOCKERFILE_FROM = /^\s*FROM\s/i;
-const DOCKERFILE_BUILD_PLATFORM = /--platform=\$\{?BUILDPLATFORM\}?(?:\s|$)/;
-const DOCKERFILE_BUILD_STEP = /\bbun run (?:re)?build\b/;
+/** One Dockerfile instruction: continuations joined, a `RUN` heredoc body folded in. */
+interface DockerInstruction {
+  args: string;
+  keyword: string;
+  /** 1-based line the instruction starts on. */
+  line: number;
+  text: string;
+}
+
+const DOCKERFILE_SKIPPED_LINE = /^\s*(?:#|$)/;
+const DOCKERFILE_CONTINUATION = /\\\s*$/;
+const DOCKERFILE_HEREDOC = /<<-?(["']?)([A-Za-z_]\w*)\1/g;
 
 /**
- * Check 15: every Dockerfile stage that runs `bun run build` must be pinned to
- * the build platform. Stages are split at `FROM` lines; comment lines are
- * ignored so a note mentioning the build does not count as one.
+ * Splits a Dockerfile into instructions the way BuildKit reads it: a trailing
+ * `\` continues onto the next line, comment and blank lines inside a
+ * continuation are dropped, and a `RUN` heredoc's body belongs to its `RUN`.
+ */
+function dockerInstructions(dockerfile: string): DockerInstruction[] {
+  const lines = dockerfile.split(/\r?\n/);
+  const instructions: DockerInstruction[] = [];
+  for (let i = 0; i < lines.length; i++) {
+    if (DOCKERFILE_SKIPPED_LINE.test(lines[i] ?? '')) continue;
+    const line = i + 1;
+    let text = (lines[i] ?? '').trim();
+    while (DOCKERFILE_CONTINUATION.test(text) && i + 1 < lines.length) {
+      text = text.replace(DOCKERFILE_CONTINUATION, ' ');
+      do i++;
+      while (i < lines.length && DOCKERFILE_SKIPPED_LINE.test(lines[i] ?? ''));
+      text += (lines[i] ?? '').trim();
+    }
+    const keyword = (text.split(/\s/, 1)[0] ?? '').toUpperCase();
+    if (keyword === 'RUN') {
+      for (const [, , delimiter] of text.matchAll(DOCKERFILE_HEREDOC)) {
+        while (i + 1 < lines.length && (lines[++i] ?? '').trim() !== delimiter) {
+          text += `\n${lines[i]}`;
+        }
+      }
+    }
+    instructions.push({ keyword, args: text.slice(keyword.length).trim(), line, text });
+  }
+  return instructions;
+}
+
+/** Words that may precede the command itself in a simple shell command. */
+const SHELL_COMMAND_PREFIX = new Set([
+  '!',
+  'command',
+  'do',
+  'elif',
+  'else',
+  'env',
+  'exec',
+  'if',
+  'then',
+  'time',
+  'until',
+  'while',
+]);
+
+/** A `bun`/`bunx` invocation in a `RUN`: the command word and the words after it. */
+interface BunInvocation {
+  args: string[];
+  command: 'bun' | 'bunx';
+}
+
+function bunCommand(word: string | undefined): BunInvocation['command'] | undefined {
+  const name = word?.split('/').pop();
+  return name === 'bun' || name === 'bunx' ? name : undefined;
+}
+
+/**
+ * The `bun`/`bunx` invocations a `RUN` instruction's command makes, read from
+ * command position only — `chown bun:bun`, `/root/.bun/`, and a quoted
+ * mention are not invocations. Quoted strings are opaque, so a `bun -e '…'`
+ * program never splits into commands of its own.
+ */
+function bunInvocations(runArgs: string): BunInvocation[] {
+  const command = runArgs.replace(/^(?:--[\w-]+=\S+\s+)*/, '');
+  if (command.startsWith('[')) {
+    try {
+      const argv: unknown = JSON.parse(command);
+      if (Array.isArray(argv)) {
+        const name = bunCommand(String(argv[0]));
+        return name ? [{ command: name, args: argv.slice(1).map(String) }] : [];
+      }
+    } catch {
+      // Not a JSON exec form: fall through and read it as shell.
+    }
+  }
+  return command
+    .replace(/'[^']*'|"(?:\\.|[^"\\])*"/g, "'…'")
+    .split(/&&|\|\||[;|&(){}`\n]/)
+    .flatMap((segment) => {
+      const words = segment.trim().split(/\s+/);
+      const start = words.findIndex(
+        (word) => !SHELL_COMMAND_PREFIX.has(word) && !/^[A-Za-z_]\w*=/.test(word),
+      );
+      const name = bunCommand(words[start]);
+      return name ? [{ command: name, args: words.slice(start + 1) }] : [];
+    });
+}
+
+const DOCKERFILE_BUILD_PLATFORM = /--platform=\$\{?BUILDPLATFORM\}?(?:\s|$)/;
+const BUN_INSTALL_SUBCOMMANDS = new Set(['install', 'i', 'add', 'a']);
+const BUNFIG_SOURCE = /(?:^|[\s/"'[,])bunfig\.toml(?=[\s"',\]]|$)/;
+
+/** Whether a `COPY`/`ADD` brings `bunfig.toml` into the stage, by name or with the whole context. */
+function copiesBunfig(args: string): boolean {
+  if (BUNFIG_SOURCE.test(args)) return true;
+  const words = args.split(/\s+/);
+  if (words.some((word) => word.startsWith('--from='))) return false;
+  const sources = words.filter((word) => !word.startsWith('--')).slice(0, -1);
+  return sources.some((source) => source === '.' || source === './');
+}
+
+/**
+ * Check 15: a Dockerfile stage built for the target platform must not run
+ * JavaScript while it builds. A multi-arch `docker buildx` build runs every
+ * such stage under QEMU on the non-native leg, where bun >= 1.4 aborts, and the
+ * image publishes last — after npm and the MCP Registry. A stage counts as
+ * running JavaScript when a `RUN` invokes `bun` for anything but
+ * `install`/`add` (`bun run build`, `bun -e`, a script, `bunx`), or runs
+ * `bun install`/`bun add` once `bunfig.toml` is in the stage, since its
+ * `[install.security]` scanner runs as a Bun program. A stage whose `FROM`
+ * carries `--platform=$BUILDPLATFORM` is exempt, and so are `HEALTHCHECK`,
+ * `CMD`, and `ENTRYPOINT`, which run at container start on the real target.
+ * One error per stage, naming each offending line.
  */
 export function checkDockerfileBuildPlatform(dockerfile: string): string[] {
-  const stages: { from: string; line: number; builds: boolean }[] = [];
-  for (const [index, line] of dockerfile.split('\n').entries()) {
-    if (DOCKERFILE_FROM.test(line)) {
-      stages.push({ from: line.trim(), line: index + 1, builds: false });
-    } else if (!line.trimStart().startsWith('#') && DOCKERFILE_BUILD_STEP.test(line)) {
-      const stage = stages.at(-1);
-      if (stage) stage.builds = true;
+  const stages: {
+    alias: string | undefined;
+    bunfig: boolean;
+    findings: string[];
+    from: DockerInstruction;
+    pinned: boolean;
+  }[] = [];
+
+  for (const instruction of dockerInstructions(dockerfile)) {
+    if (instruction.keyword === 'FROM') {
+      const [image = '', , alias] = instruction.args
+        .toLowerCase()
+        .split(/\s+/)
+        .filter((word) => !word.startsWith('--'));
+      stages.push({
+        alias,
+        // A stage built FROM an earlier one starts with that stage's files.
+        bunfig: stages.find((earlier) => earlier.alias === image)?.bunfig ?? false,
+        findings: [],
+        from: instruction,
+        pinned: DOCKERFILE_BUILD_PLATFORM.test(instruction.args),
+      });
+      continue;
+    }
+    const stage = stages.at(-1);
+    if (!stage) continue;
+    if (instruction.keyword === 'COPY' || instruction.keyword === 'ADD') {
+      stage.bunfig ||= copiesBunfig(instruction.args);
+    } else if (instruction.keyword === 'RUN' && !stage.pinned) {
+      const finding = bunInvocations(instruction.args)
+        .map(({ command, args }) => {
+          const subcommand = args.find((arg) => !arg.startsWith('-'));
+          if (command === 'bun' && BUN_INSTALL_SUBCOMMANDS.has(subcommand ?? '')) {
+            return stage.bunfig
+              ? `\`bun ${subcommand}\` after bunfig.toml is in the stage, which starts its security scanner as a Bun program`
+              : undefined;
+          }
+          return `\`${[command, args[0]].filter(Boolean).join(' ')}\``;
+        })
+        .find(Boolean);
+      if (finding) stage.findings.push(`Dockerfile:${instruction.line} runs ${finding}`);
     }
   }
 
   return stages
-    .filter((stage) => stage.builds && !DOCKERFILE_BUILD_PLATFORM.test(stage.from))
+    .filter((stage) => stage.findings.length > 0)
     .map(
-      (stage) =>
-        `Dockerfile:${stage.line} "${stage.from}" runs \`bun run build\` without --platform=$BUILDPLATFORM — ` +
-        `a multi-arch buildx build then runs it under QEMU, where bun aborts and no image publishes; ` +
-        `start the build stage with "FROM --platform=$BUILDPLATFORM" and copy dist/ into a separate runtime stage`,
+      ({ from, findings }) =>
+        `Dockerfile:${from.line} "${from.text}" builds for the target platform but runs JavaScript while ` +
+        `building — ${findings.join('; ')}. A multi-arch buildx build runs that under QEMU on the non-native ` +
+        `leg, where bun aborts and no image publishes. Move these steps into a stage that starts ` +
+        `"FROM --platform=$BUILDPLATFORM" (cross-install with \`bun install --os=<os> --cpu=<x64|arm64>\`) and ` +
+        `copy their output (dist/, node_modules/) into this stage`,
     );
 }
 

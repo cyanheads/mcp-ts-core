@@ -4,7 +4,7 @@ description: >
   Ship a release end-to-end across every registry the project targets (npm, MCP Registry, GitHub Releases for `.mcpb` bundles, GHCR). Runs the final verification gate, fast-forwards `main` when the release rode a release PR, creates the annotated tag on the commit `main` now points at, pushes commits and tags, then publishes to each applicable destination. Assumes git wrapup (version bumps, changelog, commit stack — and in release PR mode, the pushed branch and open PR) is already complete — this skill is the post-wrapup merge + tag + publish workflow. Retries transient network failures on publish steps; halts with a partial-state report when retries are exhausted or the failure is terminal.
 metadata:
   author: cyanheads
-  version: "2.22"
+  version: "2.23"
   audience: external
   type: workflow
 ---
@@ -68,7 +68,7 @@ The user fixes locally and re-invokes. On re-invocation, already-published desti
 Read `package.json` → capture `version`. Then use your git tools to verify:
 
 - **Working tree is clean** — no uncommitted changes
-- **The release commit is in the stack** — `git log -1 --format=%s` starts with `chore(release): <version>`, or, in gated release PR mode, `git log main..HEAD --format=%s` contains it with only the review pass's own commits above it (`release-pr-review` lands fixes as ordinary commits on top; the tag still goes on the tip). Any other commit above the release commit — new work, a second version — is a halt.
+- **The release commit is in the stack** — `git log -1 --format=%s` starts with `chore(release): <version>`, or, in gated release PR mode, `git log main..HEAD --format=%s` contains it with only the review pass's own commits above it (`release-pr-review` lands its fixes, and any work the caller handed it to include, as ordinary commits on top; the tag still goes on the tip). Any other commit above the release commit — one the review pass did not land, a second version — is a halt.
 - **Current branch** — `main`, or `release/<version>` in release PR mode. Anything else, halt.
 - **Release PR mode:** `gh pr view --json number,state,headRefOid` shows the PR `OPEN` with `headRefOid` equal to local HEAD. A mismatch means the branch has commits the PR doesn't (or the reverse) — halt and report both SHAs. Keep `number` and `headRefOid`: the merge check (step 3) and the tag body (step 4) need them after the checkout has moved to `main`.
 
@@ -280,7 +280,7 @@ docker buildx build --platform linux/amd64,linux/arm64 \
   --push .
 ```
 
-The build stage in `Dockerfile` must carry `FROM --platform=$BUILDPLATFORM` (the templates ship it). Without it the non-native leg of the multi-arch build runs under QEMU, where bun >= 1.4 aborts inside `bun run build` with a JavaScriptCore allocator assertion (`qemu: uncaught target signal 6`, exit 134) and no image publishes for either architecture. npm, the MCP Registry, and the GitHub Release have all published by this step, so the recovery is a follow-up patch release rather than a retry — check the flag before building, not after.
+No stage built for the target platform may run JavaScript: the non-native leg of the multi-arch build runs it under QEMU, where bun >= 1.4 aborts with a JavaScriptCore allocator assertion (`qemu: uncaught target signal 6`) and no image publishes for either architecture. That covers `bun run build`, and also a `bun install` that sees `bunfig.toml` — its security scanner runs as a Bun program and the install fails with `NoSecurityScanData`. The templates keep every such step in stages that start `FROM --platform=$BUILDPLATFORM` — the build stage, and a `deps` stage that cross-installs production dependencies with `--os`/`--cpu` and runs `scripts/install-otel.ts` — so the production stage's only Bun calls are `HEALTHCHECK` and `CMD`. `bun run lint:packaging` (check 15, part of `devcheck`) fails a Dockerfile that breaks this and names the line. npm, the MCP Registry, and the GitHub Release have all published by this step, so the recovery is a follow-up patch release rather than a retry — confirm the lint passes before building, not after.
 
 If the project uses a non-GHCR registry or a custom image name, respect the project's convention. If push fails with a 401/403, prompt the user to authenticate (`echo $GITHUB_TOKEN | docker login ghcr.io -u <OWNER> --password-stdin`) and retry. Halt on build failure or non-auth push failure.
 
