@@ -7,29 +7,42 @@
  *
  * `devcheck.ts` resolves its project root from the SCRIPT location
  * (`scripts/..`), not the cwd, so the faithful reproduction copies both
- * self-contained scripts (they import only `node:` builtins) into a temp dir and
- * runs the gate there, exactly as a scaffolded server would.
+ * scripts into a temp dir and runs the gate there, exactly as a scaffolded
+ * server would.
+ *
+ * Their one package import is the `.mcpbignore` guard's `import('ignore')`,
+ * which skips the guard when the package cannot load. The scaffold links the
+ * repository's own copy into its `node_modules`: without that directory Bun
+ * auto-installs `ignore` from the registry, and a failed install turned the
+ * guard off, so the unanchored-pattern case failed whenever the network did.
  *
  * @module tests/unit/scripts/devcheck-packaging-gate.test
  */
 
 import { spawnSync } from 'node:child_process';
-import { copyFileSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { copyFileSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
-const SCRIPTS_DIR = resolve(dirname(fileURLToPath(import.meta.url)), '../../../scripts');
+const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '../../..');
+const SCRIPTS_DIR = resolve(REPO_ROOT, 'scripts');
 
-/** A scaffold carrying devcheck plus the packaging linter it shells out to. */
+/** A scaffold carrying devcheck, the packaging linter it shells out to, and the linter's `ignore`. */
 function makeScaffold(): string {
   const dir = mkdtempSync(resolve(tmpdir(), 'devcheck-packaging-gate-'));
   mkdirSync(resolve(dir, 'scripts'));
   mkdirSync(resolve(dir, 'src'));
+  mkdirSync(resolve(dir, 'node_modules'));
   for (const script of ['devcheck.ts', 'lint-packaging.ts']) {
     copyFileSync(resolve(SCRIPTS_DIR, script), resolve(dir, 'scripts', script));
   }
+  symlinkSync(
+    resolve(REPO_ROOT, 'node_modules', 'ignore'),
+    resolve(dir, 'node_modules', 'ignore'),
+    'dir',
+  );
   writeFileSync(resolve(dir, 'package.json'), '{"name":"scaffold","version":"0.0.0"}\n');
   writeFileSync(resolve(dir, 'src', 'index.ts'), 'export const x = 1;\n');
   return dir;
