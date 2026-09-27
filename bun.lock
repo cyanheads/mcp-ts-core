@@ -16,7 +16,7 @@
       "devDependencies": {
         "@biomejs/biome": "2.5.14",
         "@cloudflare/vitest-pool-workers": "^0.22.0",
-        "@cloudflare/workers-types": "5.20260922.1",
+        "@cloudflare/workers-types": "5.20260923.1",
         "@duckdb/node-api": "^1.5.5-r.5",
         "@hono/otel": "^1.1.2",
         "@modelcontextprotocol/client": "^2.1.0",
@@ -217,7 +217,7 @@
 
     "@cloudflare/workerd-windows-64": ["@cloudflare/workerd-windows-64@1.20260815.1", "", { "os": "win32", "cpu": "x64" }, "sha512-PiIUWrhbMg3quolwjgMvPOd75vKESjT4aDm7nL6mSjL5IOgmpO/zKstXnYfnEH3pq7sC0UCvKlF8ZPcfsh8NMw=="],
 
-    "@cloudflare/workers-types": ["@cloudflare/workers-types@5.20260922.1", "", {}, "sha512-zZVBBFJan5Kw+flEgSHqqCZ0LvHPv5LvfP2igmQiLvZ4fFQYsI4epN9cGiCQqaCyhCzQuqWEyK1Lamzm3QJAmw=="],
+    "@cloudflare/workers-types": ["@cloudflare/workers-types@5.20260923.1", "", {}, "sha512-zuOqyxfhzhN2LlxxcpnAS79aGVm9ku3ZcWKyvVLHyjPV6oHsuHSFidzSHhHE9ho9UTcUxU1IdtpdVuFXluKB+g=="],
 
     "@cspotcode/source-map-support": ["@cspotcode/source-map-support@0.8.1", "", { "dependencies": { "@jridgewell/trace-mapping": "0.3.9" } }, "sha512-IchNf6dN4tHoMFIn/7OE8LWZ19Y6q/67Bmf6vnGREv8RSbBVb9LPJxEcnwrcwX6ixSvaiGoomAUvu4YSxXrVgw=="],
 

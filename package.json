@@ -199,7 +199,7 @@
   "devDependencies": {
     "@biomejs/biome": "2.5.14",
     "@cloudflare/vitest-pool-workers": "^0.22.0",
-    "@cloudflare/workers-types": "5.20260922.1",
+    "@cloudflare/workers-types": "5.20260923.1",
     "@duckdb/node-api": "^1.5.5-r.5",
     "@hono/otel": "^1.1.2",
     "@modelcontextprotocol/client": "^2.1.0",
