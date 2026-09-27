@@ -4,7 +4,7 @@ description: >
   Review pass on an open release PR (`release/<version>` → `main`) — the step between `git-wrapup` and `release-and-publish` when a project releases in gated release PR mode. Reads the PR's commit range through the `code-simplifier` lens plus a correctness review, verifies whatever an automated reviewer left on the PR, lands fixes as ordinary commits on top of the release branch and pushes it, keeps the PR body in sync with what ships, and leaves one summary comment. The only agent role that both edits and commits — and it never rewrites pushed history, tags, merges, touches `main`, or publishes.
 metadata:
   author: cyanheads
-  version: "1.6"
+  version: "1.7"
   audience: external
   type: workflow
 ---
@@ -21,7 +21,7 @@ Not for: PRs from outside contributors (those get a human reply, not a commit on
 - The PR is open, and its head SHA equals local HEAD
 - No tag `v<version>` exists yet — tagging is `release-and-publish`'s job, after this pass
 
-Verify all three in step 1; halt on any mismatch.
+Verify all three in step 1; halt on any mismatch. The one exception to a clean tree: uncommitted work the caller explicitly hands over to ship in this release. Verify it against its description, commit it first as ordinary commits on top of the stack (step 5's conventions), add it to the changelog entry, and review it with the rest of the range. Any other uncommitted change is a halt.
 
 ## Steps
 
