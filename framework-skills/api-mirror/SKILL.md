@@ -4,7 +4,7 @@ description: >
   Stand up a persistent, self-refreshing local mirror of a bulk upstream dataset with the MirrorService (@cyanheads/mcp-ts-core/mirror). Use when a server wraps a large or slow API and should query a synced local index (embedded SQLite + FTS5) instead of paginating the live API per request.
 metadata:
   author: cyanheads
-  version: "1.3"
+  version: "1.4"
   audience: external
   type: reference
 ---
@@ -65,7 +65,7 @@ Why they can't merge: during a from-scratch init the records aren't ordered by t
 
 | Framework | Server |
 |---|---|
-| Cross-runtime SQLite handle, WAL + `busy_timeout` | The `sync` generator (the ingester) |
+| Cross-runtime SQLite handle, WAL + `busy_timeout`; an open waits out another connection's lock for `busyTimeoutMs` | The `sync` generator (the ingester) |
 | `mirror_sync_state` + cursor/checkpoint state machine | Translating your query syntax → FTS5 `match` |
 | `runSync({ init \| refresh })`, per-page persist, resume | Mapping upstream records → row objects |
 | Schema gen (columns + FTS + tokenizer + triggers) | Migration *content* (the `up` functions) |
@@ -93,6 +93,7 @@ A migration runs identically on first creation and on upgrade: a fresh database 
 The service owns `runSync` + state; it does not schedule. Wire "self-refreshing" yourself:
 
 - **Refresh** — register `runSync({ mode: 'refresh' })` on a cron via `schedulerService` from `@cyanheads/mcp-ts-core/utils`, inside `setup()`. Gate on transport (HTTP) when stdio operators run it out-of-band.
+- **Off the serving thread** — SQLite calls are synchronous, so each write transaction a sync runs blocks the event loop until it commits. A refresh whose pages or post-sync recomputes take seconds stalls every request, `/healthz` included, for that long. Run such a scheduled sync in a child process instead: spawn `process.execPath` with `process.execArgv` and a compiled job entry in `dist/`, relay its log lines, and in `teardown` stop it with SIGTERM, then SIGKILL after a grace period. In-process scheduling suits mirrors whose transactions stay short.
 - **Init** — run out-of-band (a CLI script / one-shot), never on startup: a full init can take hours and must not block the server. It is idempotent and resumable — re-running after an interrupt continues from the persisted cursor.
 
 ### Shipping the mirror CLI in a production Docker image
@@ -122,7 +123,7 @@ RUN echo '{"compilerOptions":{"baseUrl":".","paths":{"@/*":["./dist/*"]}}}' > ts
 
 **Caveat:** this relies on Bun's runtime `paths` resolution. A Node runtime image (no native `.ts` execution) needs the scripts compiled into `dist/` instead — a separate tsconfig pass with a different `rootDir` is required in that case.
 
-**`package.json` `files[]`:** add `scripts/_mirror-context.ts` and the three named lifecycle scripts so the npm tarball and `.mcpb` bundle carry them. Consumers installing from npm need them for `docker exec` access.
+**`package.json` `files[]`:** add `scripts/_mirror-context.ts` and the three named lifecycle scripts so the npm tarball and `.mcpb` bundle carry them. They resolve `@/` only where a `tsconfig.json` maps it (a dev checkout, or the image above). An npm install ships no such mapping, so an npm-installed server cannot run them: document building the mirror from a checkout or the image.
 
 ## Checklist
 

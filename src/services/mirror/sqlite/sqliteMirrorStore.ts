@@ -43,7 +43,12 @@ export interface SqliteMirrorStoreLimits {
 
 /** Configuration for {@link sqliteMirrorStore}. */
 export interface SqliteMirrorStoreSpec extends SchemaSpec {
-  /** `PRAGMA busy_timeout` in ms. Default 5000. */
+  /**
+   * How long, in ms, a statement waits on another connection's lock
+   * (`PRAGMA busy_timeout`). It bounds the store's open too: the open retries
+   * the switch to WAL under another connection's lock until this much time has
+   * passed. Default 5000.
+   */
   busyTimeoutMs?: number;
   /** Query and batch ceilings. Omitted fields stay unbounded. */
   limits?: SqliteMirrorStoreLimits;

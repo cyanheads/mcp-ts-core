@@ -12,6 +12,7 @@
 
 import { mkdir } from 'node:fs/promises';
 import { dirname, resolve as resolvePath } from 'node:path';
+import { setTimeout as delay } from 'node:timers/promises';
 import { configurationError, databaseError, McpError } from '@/types-global/errors.js';
 import { runtimeCaps } from '@/utils/internal/runtime.js';
 
@@ -38,7 +39,11 @@ export interface SqliteHandle {
 
 /** Options for {@link openSqliteHandle}. */
 export interface OpenHandleOptions {
-  /** `PRAGMA busy_timeout` in ms — how long a writer waits on a locked DB. Default 5000. */
+  /**
+   * How long, in ms, a statement waits on another connection's lock
+   * (`PRAGMA busy_timeout`), and how long the open keeps retrying the switch
+   * to WAL, counted from when the open began. Default 5000.
+   */
   busyTimeoutMs?: number;
 }
 
@@ -50,6 +55,9 @@ export interface OpenHandleOptions {
  */
 const BUN_SQLITE_SPECIFIER: string = 'bun:sqlite';
 const BETTER_SQLITE3_SPECIFIER: string = 'better-sqlite3';
+
+/** Pause between attempts to switch a contended file to WAL. */
+const WAL_RETRY_INTERVAL_MS = 10;
 
 /** The surface `bun:sqlite` and `better-sqlite3` share, as far as the mirror store uses it. */
 interface SqliteDriver {
@@ -102,36 +110,68 @@ function wrapDriver(db: SqliteDriver, close: () => void): SqliteHandle {
 
 /**
  * Open (or create) a SQLite database at `path`, picking the driver for the
- * current runtime. Creates the parent directory, enables WAL, and sets
- * `busy_timeout` so a refresh writer and reader processes coexist without
- * spurious `database is locked` errors.
+ * current runtime. Creates the parent directory, sets `busy_timeout` before
+ * anything reads the file, then enables WAL, so a refresh writer and reader
+ * processes coexist without spurious `database is locked` errors. An open that
+ * meets another connection's lock waits it out for up to `busyTimeoutMs`.
  *
  * Throws `ConfigurationError` on Node when `better-sqlite3` is not installed,
- * and `DatabaseError` for any other open failure.
+ * and `DatabaseError` for any other open failure, with the driver error on
+ * `cause` and the connection already closed.
  */
 export async function openSqliteHandle(
   path: string,
   options: OpenHandleOptions = {},
 ): Promise<SqliteHandle> {
+  const startedAt = performance.now();
   await mkdir(dirname(resolvePath(path)), { recursive: true });
   const busyTimeoutMs = options.busyTimeoutMs ?? 5000;
 
-  let handle: SqliteHandle;
+  let handle: SqliteHandle | undefined;
   try {
     handle = runtimeCaps.isBun ? await openBunHandle(path) : await openBetterSqlite3Handle(path);
+    // One statement per call: bun:sqlite's multi-statement `exec` drops the
+    // step error of a statement followed by more text (oven-sh/bun#37415).
+    // NORMAL synchronous is the WAL-recommended durability/throughput balance.
+    handle.exec(`PRAGMA busy_timeout = ${busyTimeoutMs}`);
+    await enableWal(handle, startedAt + busyTimeoutMs);
+    handle.exec('PRAGMA synchronous = NORMAL');
+    handle.exec('PRAGMA foreign_keys = ON');
+    return handle;
   } catch (err) {
+    handle?.close();
     // The Node path throws a ConfigurationError when better-sqlite3 is absent —
     // preserve it rather than masking it as a generic open failure.
     if (err instanceof McpError) throw err;
     throw databaseError(`Failed to open mirror store at ${path}`, { path }, { cause: err });
   }
+}
 
-  // Connection pragmas. WAL allows one writer + concurrent readers; NORMAL
-  // synchronous is the WAL-recommended durability/throughput balance.
-  handle.exec(
-    `PRAGMA journal_mode = WAL; PRAGMA synchronous = NORMAL; PRAGMA foreign_keys = ON; PRAGMA busy_timeout = ${busyTimeoutMs};`,
-  );
-  return handle;
+/**
+ * Switch the connection to WAL, which lets one writer and concurrent readers
+ * share the file. The switch is the open's first read of the file, and the
+ * busy handler waits out a lock met there. Converting a rollback-mode file
+ * also takes a RESERVED lock, which SQLite never waits for through the busy
+ * handler (it fails at once to avoid deadlock), so a `SQLITE_BUSY*` result is
+ * retried here until `deadline`. Runs through `prepare().get()` so a step
+ * error always surfaces, on `bun:sqlite` too.
+ */
+async function enableWal(handle: SqliteHandle, deadline: number): Promise<void> {
+  for (;;) {
+    try {
+      handle.prepare('PRAGMA journal_mode = WAL').get();
+      return;
+    } catch (err) {
+      if (!isBusy(err) || performance.now() >= deadline) throw err;
+      await delay(WAL_RETRY_INTERVAL_MS);
+    }
+  }
+}
+
+/** Both drivers name the extended result code on `code`: `SQLITE_BUSY`, `SQLITE_BUSY_RECOVERY`, … */
+function isBusy(err: unknown): boolean {
+  const code = (err as { code?: unknown }).code;
+  return typeof code === 'string' && code.startsWith('SQLITE_BUSY');
 }
 
 /**

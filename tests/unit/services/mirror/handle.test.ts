@@ -14,11 +14,15 @@
  * @module tests/unit/services/mirror/handle
  */
 
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { openSqliteHandle, type SqliteHandle } from '@/services/mirror/sqlite/handle.js';
+import {
+  type OpenHandleOptions,
+  openSqliteHandle,
+  type SqliteHandle,
+} from '@/services/mirror/sqlite/handle.js';
 import { JsonRpcErrorCode } from '@/types-global/errors.js';
 import { runtimeCaps } from '@/utils/internal/runtime.js';
 
@@ -29,13 +33,35 @@ import { runtimeCaps } from '@/utils/internal/runtime.js';
  */
 const IS_BUN = runtimeCaps.isBun;
 
+/** Variable specifiers, as in handle.ts, so neither tsc nor Vite resolves a driver statically. */
+const BUN_SQLITE_SPECIFIER: string = 'bun:sqlite';
+const BETTER_SQLITE3_SPECIFIER: string = 'better-sqlite3';
+
+/** A driver connection opened outside the handle under test. */
+interface RawConnection {
+  close(): void;
+  exec(sql: string): void;
+}
+
+/** The driver class `openSqliteHandle` constructs on this runtime. */
+type DriverClass = (new (path: string) => RawConnection) & { prototype: RawConnection };
+
+async function loadDriver(): Promise<DriverClass> {
+  if (IS_BUN) {
+    return ((await import(BUN_SQLITE_SPECIFIER)) as { Database: DriverClass }).Database;
+  }
+  return ((await import(BETTER_SQLITE3_SPECIFIER)) as { default: DriverClass }).default;
+}
+
 describe('openSqliteHandle', () => {
   let dir: string;
   let handles: SqliteHandle[];
+  let holders: RawConnection[];
 
   beforeEach(async () => {
     dir = await mkdtemp(join(tmpdir(), 'mirror-handle-test-'));
     handles = [];
+    holders = [];
   });
 
   afterEach(async () => {
@@ -46,6 +72,8 @@ describe('openSqliteHandle', () => {
         // Already closed by the test body — fine.
       }
     }
+    // Closing rolls back whatever transaction a holder still has open.
+    for (const holder of holders) holder.close();
     await rm(dir, { recursive: true, force: true });
   });
 
@@ -106,11 +134,15 @@ describe('openSqliteHandle', () => {
   });
 
   describe('connection pragmas', () => {
-    it('enables WAL journal mode and foreign keys', async () => {
+    it('enables WAL journal mode, NORMAL synchronous, and foreign keys', async () => {
       const handle = await open('pragma.db');
       expect(
         handle.prepare<{ journal_mode: string }>('PRAGMA journal_mode').get()?.journal_mode,
       ).toBe('wal');
+      // 1 = NORMAL, the WAL-recommended durability setting.
+      expect(handle.prepare<{ synchronous: number }>('PRAGMA synchronous').get()?.synchronous).toBe(
+        1,
+      );
       expect(
         handle.prepare<{ foreign_keys: number }>('PRAGMA foreign_keys').get()?.foreign_keys,
       ).toBe(1);
@@ -124,6 +156,125 @@ describe('openSqliteHandle', () => {
     it('defaults busy_timeout to 5000ms when not specified', async () => {
       const handle = await open('pragma-default.db');
       expect(handle.prepare<{ timeout: number }>('PRAGMA busy_timeout').get()?.timeout).toBe(5000);
+    });
+  });
+
+  /**
+   * Another connection holds a lock while the open runs. The holder sits in
+   * this process, which SQLite's unix VFS locks per connection like separate
+   * processes. Timing bounds are a lower bound at `busyTimeoutMs` plus a
+   * generous ceiling that still sits below better-sqlite3's own 5000 ms
+   * default, so they hold on a loaded machine.
+   */
+  describe('open under another connection lock', () => {
+    /**
+     * Creates a rollback-mode file at `path` holding one row, then leaves a
+     * write transaction open on it at `lock` from a raw driver connection.
+     */
+    async function holdLock(path: string, lock: 'EXCLUSIVE' | 'IMMEDIATE') {
+      const Driver = await loadDriver();
+      const holder = new Driver(path);
+      holders.push(holder);
+      holder.exec('CREATE TABLE t (x)');
+      holder.exec('INSERT INTO t VALUES (1)');
+      holder.exec(`BEGIN ${lock}`);
+      holder.exec('INSERT INTO t VALUES (2)');
+      return holder;
+    }
+
+    /** Runs an open expected to reject; reports the rejection, its timing, and driver close() calls. */
+    async function failedOpen(path: string, options: OpenHandleOptions) {
+      const Driver = await loadDriver();
+      const close = vi.spyOn(Driver.prototype, 'close');
+      try {
+        const started = performance.now();
+        const error = await openSqliteHandle(path, options).then(
+          (handle) => {
+            handles.push(handle);
+            throw new Error(`Expected the open of ${path} to reject.`);
+          },
+          (err: unknown) => err,
+        );
+        return {
+          error,
+          elapsedMs: performance.now() - started,
+          closeCalls: close.mock.calls.length,
+        };
+      } finally {
+        close.mockRestore();
+      }
+    }
+
+    it('waits busyTimeoutMs on an exclusive lock, then rejects with DatabaseError and closes the connection', async () => {
+      const path = join(dir, 'exclusive.db');
+      await holdLock(path, 'EXCLUSIVE');
+
+      const { error, elapsedMs, closeCalls } = await failedOpen(path, { busyTimeoutMs: 200 });
+
+      expect(closeCalls).toBe(1);
+      expect(error).toMatchObject({
+        code: JsonRpcErrorCode.DatabaseError,
+        data: { path },
+        cause: { code: 'SQLITE_BUSY' },
+      });
+      expect(elapsedMs).toBeGreaterThanOrEqual(200);
+      expect(elapsedMs).toBeLessThan(2000);
+    });
+
+    it('switches to WAL once an immediate lock is released within busyTimeoutMs', async () => {
+      // Converting a rollback-mode file to WAL needs a RESERVED lock, which
+      // SQLite never waits for through the busy handler — only a retry does.
+      const holder = await holdLock(join(dir, 'immediate-released.db'), 'IMMEDIATE');
+      const release = setTimeout(() => holder.exec('ROLLBACK'), 100);
+      try {
+        const handle = await open('immediate-released.db', { busyTimeoutMs: 2000 });
+
+        expect(
+          handle.prepare<{ journal_mode: string }>('PRAGMA journal_mode').get()?.journal_mode,
+        ).toBe('wal');
+        // The pragmas after the WAL switch ran too.
+        expect(
+          handle.prepare<{ foreign_keys: number }>('PRAGMA foreign_keys').get()?.foreign_keys,
+        ).toBe(1);
+        expect(handle.prepare<{ timeout: number }>('PRAGMA busy_timeout').get()?.timeout).toBe(
+          2000,
+        );
+        expect(handle.prepare<{ n: number }>('SELECT COUNT(*) AS n FROM t').get()?.n).toBe(1);
+      } finally {
+        clearTimeout(release);
+      }
+    });
+
+    it('rejects with DatabaseError once busyTimeoutMs passes under an immediate lock that is never released', async () => {
+      const path = join(dir, 'immediate-held.db');
+      await holdLock(path, 'IMMEDIATE');
+
+      const { error, elapsedMs, closeCalls } = await failedOpen(path, { busyTimeoutMs: 300 });
+
+      expect(closeCalls).toBe(1);
+      expect(error).toMatchObject({
+        code: JsonRpcErrorCode.DatabaseError,
+        data: { path },
+        cause: { code: 'SQLITE_BUSY' },
+      });
+      expect(elapsedMs).toBeGreaterThanOrEqual(300);
+      expect(elapsedMs).toBeLessThan(3000);
+    });
+
+    it('rejects a non-SQLite file with DatabaseError without retrying, and closes the connection', async () => {
+      const path = join(dir, 'not-a-database.db');
+      await writeFile(path, 'x'.repeat(4096));
+
+      const { error, elapsedMs, closeCalls } = await failedOpen(path, { busyTimeoutMs: 2000 });
+
+      expect(closeCalls).toBe(1);
+      expect(error).toMatchObject({
+        code: JsonRpcErrorCode.DatabaseError,
+        data: { path },
+        cause: { code: 'SQLITE_NOTADB' },
+      });
+      // A retry would hold the open until the 2000 ms budget ran out.
+      expect(elapsedMs).toBeLessThan(2000);
     });
   });
 
