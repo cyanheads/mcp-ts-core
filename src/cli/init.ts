@@ -1,7 +1,8 @@
 #!/usr/bin/env node
 /**
  * @fileoverview CLI entry point for `@cyanheads/mcp-ts-core`. Dispatches subcommands.
- * Currently supports `init` for scaffolding new consumer projects.
+ * Supports `init` for scaffolding new consumer projects and `app-render` (loaded on
+ * demand) for rendering an app tool's view in the headless MCP Apps host.
  * @module src/cli/init
  */
 
@@ -46,9 +47,12 @@ const [subcommand] = process.argv.slice(2);
 
 if (subcommand === 'init') {
   init();
+} else if (subcommand === 'app-render') {
+  const { appRender } = await import('./app-render.js');
+  process.exitCode = await appRender(process.argv.slice(3));
 } else {
   printUsage();
-  process.exit(subcommand === undefined || subcommand === '--help' ? 0 : 1);
+  process.exit(subcommand === undefined || subcommand === '--help' || subcommand === '-h' ? 0 : 1);
 }
 
 function printUsage(): void {
@@ -58,11 +62,14 @@ function printUsage(): void {
   Usage:
     mcp-ts-core init [name]    Scaffold a new MCP server project
                                Without [name], scaffolds in place (upgrade flow)
+    mcp-ts-core app-render ... Render an app tool's view in a headless MCP Apps host
+                               and print the report (app-render --help for options)
     mcp-ts-core --help, -h     Show this help message
     mcp-ts-core init --help    Show init help (same output)
 
   Examples:
     bunx @cyanheads/mcp-ts-core init my-mcp-server
+    bunx @cyanheads/mcp-ts-core app-render --tool my_app_tool -- bun run dist/index.js
 `);
 }
 

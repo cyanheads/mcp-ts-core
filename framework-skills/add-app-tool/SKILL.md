@@ -4,7 +4,7 @@ description: >
   Scaffold an MCP App tool + UI resource pair. Use when the user asks to add a tool with interactive UI, create an MCP App, or build a visual/interactive tool.
 metadata:
   author: cyanheads
-  version: "1.7"
+  version: "1.8"
   audience: external
   type: reference
 ---
@@ -236,3 +236,4 @@ If the repo already uses `definitions/index.ts` barrels, update those instead of
 - [ ] Handler tested directly via `createMockContext()`, or `add-test` skill run to scaffold the test file
 - [ ] `bun run devcheck` passes (linter validates `_meta.ui` and tool/resource pairing)
 - [ ] Smoke-tested with `bun run rebuild && bun run start:stdio < /dev/null` (or `start:http`); the `Core services constructed` record lists the tool in `tools` and its UI resource in `resources`
+- [ ] View rendered in the headless MCP Apps host (`mcp-ts-core app-render`; `field-test` skill, Step 6): `initialized` is true, `errors` and `cspViolations` are empty, and the screenshot shows the tool result

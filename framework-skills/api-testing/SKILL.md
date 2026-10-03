@@ -4,7 +4,7 @@ description: >
   Testing patterns for MCP tool/resource handlers using `createMockContext` and Vitest. Covers mock context options, handler testing, McpError assertions, format testing, Vitest config setup, and test isolation conventions.
 metadata:
   author: cyanheads
-  version: "1.13"
+  version: "1.14"
   audience: external
   type: reference
 ---
@@ -14,6 +14,8 @@ metadata:
 Tests target handler behavior directly — call `handler(input, ctx)`, assert on the return value or thrown error. The framework's handler factory (try/catch, formatting, telemetry) is not involved. Use `createMockContext` from `@cyanheads/mcp-ts-core/testing` to construct the `ctx` argument.
 
 **Additional exports from `/testing`:** `createMockSession()` binds a mock handler context to an HTTP session; `createFetchMock()` provides a strict upstream HTTP fake; `runToolContract()` executes a definition through schema, handler, formatting, enrichment/content, and production-shaped error-envelope checks. `createMockLogger()` returns a standalone `MockContextLogger`, `createInMemoryStorage(options?)` provides a real `StorageService` backed by `InMemoryProvider`, and `expectInputRequired(run)` returns the `input_required` result a multi-round-trip handler asked for (see [Mock inputs](#mock-inputs)).
+
+**Other testing subpaths:** `/testing/vitest` (fixtures and conformance suites, below), `/testing/fuzz` (see [Fuzz testing](#fuzz-testing)), and `/testing/apps`, whose `renderAppTool` renders an app tool's `ui://` view against your server (a stdio command or an HTTP URL) in a headless MCP Apps host and reports initialization, errors, CSP violations, the view↔host messages, and screenshots. It needs the optional peers `@modelcontextprotocol/client` and `@modelcontextprotocol/ext-apps` plus a `chrome-headless-shell` build; the `field-test` skill covers installing one and reading the report.
 
 **Philosophy:** Test behavior, not implementation. Refactors should not break tests. Match the repo's existing test layout: fresh scaffolds use `tests/`, while colocated `src/**/*.test.ts` files are also supported. Integration tests at I/O boundaries over unit tests of internals.
 
@@ -138,6 +140,8 @@ A declared reason thrown without a hint — a bare `ctx.fail('reason')` or a ser
 Arguments that fail the `input` schema are rejected the way the production handler factory rejects them: `InvalidParams` (`-32602`), with a message naming the tool and every failing field. That is the code a client sees on the wire, so assert it — not `ValidationError` (`-32007`), which stays the classification for a `ZodError` a handler throws itself. A result that breaks the tool's own `output` or `enrichment` schema is the definition's bug, so it returns `InternalError` (`-32603`) with a message naming that contract, exactly as in production.
 
 Cancellation settles as it does in production. Pass `context: { signal }` and abort it: once the signal has fired, whatever the handler — or the output validation, `format()`, and enrichment after it — throws comes back as `RequestCancelled` (`-32011`), whether that is the signal's `AbortError`, its reason string, a `withRetry` backoff that stopped, or an `McpError` of the handler's own. A throw while the signal is still live keeps its own classification, and argument parsing stays outside the settle, so schema-invalid arguments on an aborted signal still return `InvalidParams`. A `toolContractSuite` error case with an aborted `context.signal` asserts `code: JsonRpcErrorCode.RequestCancelled` the same way.
+
+**Resources have no contract runner.** A resource definition's `handler(...)` called directly returns the throw site's `McpError` with no recovery fill, so asserting a resource's declared `errors[]` hints needs a path through the resource factory. Serve the definition from `createWorkerHandler({ name, title, resources: [def] })` (`/worker`) and `fetch` it a `resources/read` JSON-RPC request carrying the current protocol revision in both the `MCP-Protocol-Version` header and `params._meta`. The response is plain JSON or an SSE `data:` frame, and its `error` carries `code`, `data.reason`, and the filled `data.recovery.hint`.
 
 ---
 

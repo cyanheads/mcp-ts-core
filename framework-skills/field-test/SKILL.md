@@ -1,10 +1,10 @@
 ---
 name: field-test
 description: >
-  Exercise tools, resources, and prompts against a live HTTP server via MCP JSON-RPC over curl. Starts the server, surfaces the catalog, runs real and adversarial inputs, measures every call (bytes, token estimate, wall-clock) and weighs the catalog, and produces a tight report with concrete findings and numbered follow-up options. Use after adding or modifying definitions, or when the user asks to test, try out, or verify their MCP surface.
+  Exercise tools, resources, and prompts against a live HTTP server via MCP JSON-RPC over curl. Starts the server, surfaces the catalog, runs real and adversarial inputs, measures every call (bytes, token estimate, wall-clock) and weighs the catalog, renders app tools' views in a headless MCP Apps host, and produces a tight report with concrete findings and numbered follow-up options. Use after adding or modifying definitions, or when the user asks to test, try out, or verify their MCP surface.
 metadata:
   author: cyanheads
-  version: "2.18"
+  version: "2.19"
   audience: external
   type: debug
 ---
@@ -413,6 +413,7 @@ Treat any hit as a `ux` finding in the report. The authoring rule lives under *T
 | Tool declared an `errors: [...]` contract | Error contract (tool): trigger ≥1 declared failure mode. Verify `result.structuredContent.error.code` matches the contract entry, `result.structuredContent.error.data.reason` is the declared reason (only present when the handler threw an `McpError` — `ctx.fail` always does, plain `throw new Error(...)` does not), and `content[0].text` is actionable. Reasons declared but unreachable from any input are dead contract entries. |
 | Resource declared an `errors: [...]` contract | Error contract (resource): trigger ≥1 declared failure mode by reading a URI that exercises it. Resources re-throw errors at the JSON-RPC level — verify `error.code` matches the contract entry and `error.data.reason` is the declared reason. (Resources don't use the `result.isError` envelope — they fail the request itself.) |
 | Mutator (write/update/delete/append/patch verbs, or `destructiveHint: true`) | Mutator response observability: run an intentionally-ambiguous input (typo path, wrong ID, already-deleted target). Confirm the response carries enough state (pre/post values, state-change discriminator) for the agent to detect intent-effect divergence without re-fetching. |
+| `_meta.ui.resourceUri` on the tool (an app tool) | View rendering: Step 6. The curl calls see only the `format()` text and the view's raw HTML; whether the view runs is visible only when it is rendered. |
 
 **Resources.** Happy path, not-found URI (use a syntactically valid but non-existent ID — e.g., substitute a fake ID into the URI template), `list` if defined, pagination if used.
 **Prompts.** Happy path, defaults omitted, skim message quality.
@@ -430,7 +431,7 @@ Use `TaskCreate` — one task per definition. Mark complete as you go. Don't bat
 
 For each call, capture: input sent, the `⏱` line (bytes, split, ms), response (trim huge payloads to files), whether `isError: true` appeared, anything surprising (slow response, parity drift, unhelpful text, crash).
 
-When a call surprises you — slow, hangs, returns terse output, surfaces an unhelpful error — run `. /tmp/<project-name>-field-test-<ID>.sh && mcp_log <log>` to tail the server log. The pino startup banner, request handler errors, upstream API call traces, and rate-limit warnings all land in the per-server log (read via `mcp_log`) rather than coming back through `mcp_call`. Don't guess at runtime behavior from response text alone.
+When a call surprises you — slow, hangs, returns terse output, surfaces an unhelpful error — run `. /tmp/<project-name>-field-test-<ID>.sh && mcp_log <log>` to tail the server log. The pino startup banner, request handler errors, upstream API call traces, and rate-limit warnings all land in the per-server log (read via `mcp_log`) rather than coming back through `mcp_call`. Don't guess at runtime behavior from response text alone. To count upstream requests from the log, start the server with `MCP_LOG_RATE_LIMIT_THRESHOLD=0`: by default the logger drops a message repeated past its per-window threshold and reports it later as a `Suppressed N` line, so a count read mid-run comes up short.
 
 **Interpreting responses**
 
@@ -441,17 +442,60 @@ When a call surprises you — slow, hangs, returns terse output, surfaces an unh
 - JSON-RPC `error` only appears for protocol issues (bad session, malformed envelope, unknown method).
 - `mcp_call` already strips SSE framing. Pipe to `jq` for readability.
 
-### 6. Tear down
+### 6. Render app views
+
+Skip this step when no tool carries `_meta.ui.resourceUri`. List the app tools:
+
+```bash
+. /tmp/<project-name>-field-test-<ID>.sh
+mcp_call <url> <sid> tools/list '' <protocol> | jq -r '.result.tools[] | select(._meta.ui.resourceUri) | .name'
+```
+
+Render each one with `mcp-ts-core app-render` against the Step 1 server. It connects as an MCP Apps client, calls the tool, loads the `ui://` view into headless `chrome-headless-shell` inside the double-iframe sandbox and CSP the MCP Apps spec prescribes, plays the host half of the protocol, and writes `report.json` plus screenshots under `--out`. No window opens.
+
+```bash
+bunx @cyanheads/mcp-ts-core app-render --url <url> --tool <app_tool> --args '<happy-path JSON>' \
+  --click '<selector>' --out /tmp/<project-name>-field-test-<ID>-apps/<app_tool> > /dev/null; echo "exit=$?"
+jq '{initialized, failure, toolError, errors, cspViolations, size, steps, text}' \
+  /tmp/<project-name>-field-test-<ID>-apps/<app_tool>/report.json
+```
+
+The report also goes to stdout; read the file instead, since `messages` grows with every exchange. Pass one `--click` per control whose handler matters (a screenshot follows each), run a second pass with `--theme dark` when the view applies host theming, and add `--stream-input` when it renders partial input. Fill, wait-for, and evaluate steps need `renderAppTool` from `@cyanheads/mcp-ts-core/testing/apps` in a script; it returns the same report.
+
+**A setup failure exits 1** with `app-render: <reason>` on stderr and writes no report:
+
+| Reason names | Meaning |
+|:-------------|:--------|
+| A missing optional peer | `@modelcontextprotocol/client` or `@modelcontextprotocol/ext-apps` is not installed. With the user's go-ahead, `bun add -d` it; otherwise record app views as `skipped — requires <package>`. |
+| No browser, or a browser path | No usable `chrome-headless-shell`. With the user's go-ahead, `npx @puppeteer/browsers install chrome-headless-shell@stable --path ~/.cache/puppeteer` (without `--path` it installs into the working directory, where the host never looks), or pass an existing build with `--browser`; otherwise record `skipped — requires chrome-headless-shell`. Never point `--browser` at a desktop browser. |
+| The server is unreachable | Wrong URL, or the Step 1 server died — `mcp_log <log>`. |
+| No such tool, no UI resource, an unreadable UI resource, or a `_meta.ui.csp` entry | A server finding (`bug`): the tool is unregistered, its `resourceUri` is missing, `resources/read` on the `ui://` URI fails, or a CSP domain entry is not a plain origin. |
+
+**A view failure exits 0**: the run reached the browser, and the report says what the view did. Read every field:
+
+- **`initialized`** — the view completed `ui/initialize`. `false`, with `failure` naming the timeout, means the view never connected: a script threw before `app.connect()` (see `errors`), the CSP blocked its SDK import (see `cspViolations`), or the HTML does not use the ext-apps `App` class. `bug`.
+- **`toolError`** — the tool call failed at the protocol level, so the view received `tool-cancelled` instead of a result.
+- **`errors`** — uncaught exceptions and console errors, each tagged with its `frame`. A `view` entry is the server's own UI code: `bug`. `sandbox`, `host`, and `unknown` entries come from the host pages, not the server; report them apart from the server's findings.
+- **`cspViolations`** — loads the view's CSP blocked, as `directive` + `blockedURI`. An origin the view needs but its resource's `_meta.ui.csp` omits (`resourceDomains` for scripts, styles, images, fonts, and media; `connectDomains` for fetch and WebSocket; `frameDomains` for iframes) is a `bug`, because a spec-conformant host blocks the same load. `blockedURI: "eval"` means the view calls `eval` or `new Function`, which the policy never allows. An `eval` entry whose `sourceURL` points into the ext-apps bundle (`app-with-deps.js`) is Zod's guarded capability probe, which catches the refusal, not the view's own code, so it is no finding.
+- **`messages`** — every message between view and host, in order, with its `direction`. A healthy run opens `view-to-host` `ui/initialize` → `ui/notifications/initialized`, then `host-to-view` `ui/notifications/tool-input` → `ui/notifications/tool-result`. A click that should reach the server shows a `view-to-host` `tools/call` and its `host-to-view` response; an `error` there is the server's rejection, or the host refusing a tool whose `_meta.ui.visibility` excludes `app`. Requests that need a user or a model (`ui/message`, `ui/open-link`, `ui/update-model-context`, `ui/request-display-mode`) are recorded and acknowledged — check their params carry what the control meant to send.
+- **`steps`** — one entry per click and screenshot; `ok: false` with `No element matches <selector>` means the control is missing from the rendered view.
+- **`text` and the screenshots** — the rendered text after the steps, and the PNGs (`final.png`, one per click). Open them: a blank, unstyled, clipped, or unreadable-in-dark view is a `ux` finding even when every field above is clean, and so is data in the tool result's `structuredContent` that the view never shows.
+- **`size`** — the view's last `ui/notifications/size-changed`. Absent means the view never reports its size, so a host cannot fit its frame to it: `ux`.
+
+The harness stops the browser and deletes its profile itself; the `--out` directories are removed in Step 7.
+
+### 7. Tear down
 
 ```bash
 . /tmp/<project-name>-field-test-<ID>.sh
 mcp_stop <pid> <log> <port>
+rm -rf /tmp/<project-name>-field-test-<ID>-apps
 rm -f /tmp/<project-name>-field-test-<ID>.sh
 ```
 
-Kills the background server and its port-holding child, removes the server log, then removes the helper script itself. Do this *before* writing the report so nothing leaks into the next session. Pass the `port` — it's what turns "the wrapper PID is gone" into "the socket is actually free." If `mcp_stop` warns the port is still held or the PID survived SIGKILL, note it in the report and proceed — don't block on a zombie process, but do say which PID to kill.
+Kills the background server and its port-holding child, removes the server log and any app-render output, then removes the helper script itself. Do this *before* writing the report so nothing leaks into the next session. Pass the `port` — it's what turns "the wrapper PID is gone" into "the socket is actually free." If `mcp_stop` warns the port is still held or the PID survived SIGKILL, note it in the report and proceed — don't block on a zombie process, but do say which PID to kill.
 
-### 7. Report
+### 8. Report
 
 Four sections. Tight. The user should be able to skim the summary, scan the numbers, read details only for what matters, and act on numbered options.
 
@@ -514,5 +558,6 @@ End with:
 - [ ] **If a resource declared an `errors: [...]` contract:** ≥1 declared failure mode triggered; top-level JSON-RPC `error.code` and `error.data.reason` verified against the contract entry
 - [ ] **If any tool truncates, caps, or spills its output:** truncation forced; disclosure + a retrieval path (cursor, offset, selector, canvas handle) verified
 - [ ] External-state / auth-gated tools handled explicitly (run, skip, or confirm)
-- [ ] Server stopped (port confirmed free); server log and helper script removed
+- [ ] **If any tool carries `_meta.ui.resourceUri`:** each view rendered with `app-render` (Step 6); `initialized`, `errors`, `cspViolations`, the message log, and the screenshots checked; a missing peer or browser recorded as skipped, not as a server finding
+- [ ] Server stopped (port confirmed free); server log, app-render output, and helper script removed
 - [ ] Report: summary paragraph → size & latency table → grouped findings → numbered options
