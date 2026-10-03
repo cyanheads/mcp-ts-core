@@ -1,6 +1,6 @@
 # mcp-ts-core - Directory Structure
 
-Generated on: 2026-09-26 23:52:25
+Generated on: 2026-10-03 21:57:08
 
 ```text
 mcp-ts-core/
@@ -270,6 +270,7 @@ mcp-ts-core/
 │   ├── lint-mcp.ts
 │   ├── lint-packaging.ts
 │   ├── list-skills.ts
+│   ├── prune-musl-packages.ts
 │   ├── public-api-contract-update.ts
 │   ├── public-api-contract.ts
 │   ├── release-github.ts
@@ -280,6 +281,7 @@ mcp-ts-core/
 │   └── with-node.ts
 ├── src/
 │   ├── cli/
+│   │   ├── app-render.ts
 │   │   └── init.ts
 │   ├── config/
 │   │   ├── appRoot.ts
@@ -461,6 +463,14 @@ mcp-ts-core/
 │   │           ├── supabase.types.ts
 │   │           └── supabaseProvider.ts
 │   ├── testing/
+│   │   ├── apps/
+│   │   │   ├── browser.ts
+│   │   │   ├── cdp-pipe.ts
+│   │   │   ├── csp.ts
+│   │   │   ├── host-pages.ts
+│   │   │   ├── index.ts
+│   │   │   ├── partial-json.ts
+│   │   │   └── run.ts
 │   │   ├── fuzz.ts
 │   │   ├── index.ts
 │   │   └── vitest.ts
@@ -640,6 +650,7 @@ mcp-ts-core/
 │   │   ├── load-tools.js
 │   │   ├── load-worker.js
 │   │   ├── logger-levels.js
+│   │   ├── mcp-app-render-server.js
 │   │   ├── mcp-app-server.js
 │   │   ├── session-mode-server.js
 │   │   ├── stdio-inflight-server.js
@@ -683,6 +694,7 @@ mcp-ts-core/
 │   │   ├── input-prevalidation.int.test.ts
 │   │   ├── logger-sinks.int.test.ts
 │   │   ├── logger.int.test.ts
+│   │   ├── mcp-apps-render.int.test.ts
 │   │   ├── mcp-apps.int.test.ts
 │   │   ├── modern-notifications.int.test.ts
 │   │   ├── multi-round-trip.int.test.ts
@@ -740,6 +752,7 @@ mcp-ts-core/
 │   │   └── tool-contract-suite.test-d.ts
 │   ├── unit/
 │   │   ├── cli/
+│   │   │   ├── app-render.test.ts
 │   │   │   └── init.test.ts
 │   │   ├── config/
 │   │   │   ├── appRoot.test.ts
@@ -751,6 +764,7 @@ mcp-ts-core/
 │   │   │   ├── app.sessionMode.test.ts
 │   │   │   ├── app.test.ts
 │   │   │   ├── context-state-bounds.test.ts
+│   │   │   ├── context-wire-level.test.ts
 │   │   │   ├── context.test.ts
 │   │   │   ├── gcPressure.test.ts
 │   │   │   └── serverManifest.test.ts
@@ -856,6 +870,7 @@ mcp-ts-core/
 │   │   │   ├── clean-mcpb.test.ts
 │   │   │   ├── devcheck-audit-classifier.test.ts
 │   │   │   ├── devcheck-git-guard.test.ts
+│   │   │   ├── devcheck-git-scans.test.ts
 │   │   │   ├── devcheck-outdated-alias.test.ts
 │   │   │   ├── devcheck-packaging-gate.test.ts
 │   │   │   ├── devcheck-warning-rendering.test.ts
@@ -865,6 +880,7 @@ mcp-ts-core/
 │   │   │   ├── install-otel.test.ts
 │   │   │   ├── lint-mcp.test.ts
 │   │   │   ├── lint-packaging.test.ts
+│   │   │   ├── prune-musl-packages.test.ts
 │   │   │   ├── release-github.test.ts
 │   │   │   └── tree.test.ts
 │   │   ├── services/
@@ -925,6 +941,16 @@ mcp-ts-core/
 │   │   │   ├── StorageService.metrics.test.ts
 │   │   │   └── StorageService.test.ts
 │   │   ├── testing/
+│   │   │   ├── apps/
+│   │   │   │   ├── browser.test.ts
+│   │   │   │   ├── cdp-pipe.test.ts
+│   │   │   │   ├── csp.test.ts
+│   │   │   │   ├── fake-host.ts
+│   │   │   │   ├── host-pages.test.ts
+│   │   │   │   ├── missing-peer.test.ts
+│   │   │   │   ├── partial-json.test.ts
+│   │   │   │   ├── run.test.ts
+│   │   │   │   └── stand-in-process.ts
 │   │   │   ├── exports.test.ts
 │   │   │   ├── fuzz-branches.test.ts
 │   │   │   ├── fuzz-contract-regressions.test.ts

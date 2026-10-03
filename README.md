@@ -6,9 +6,9 @@
 
 <div align="center">
 
-[![Version](https://img.shields.io/badge/Version-0.13.10-blue.svg?style=flat-square)](./CHANGELOG.md) [![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg?style=flat-square)](./LICENSE) [![MCP Spec](https://img.shields.io/badge/MCP%20Spec-2026--07--28-8A2BE2.svg?style=flat-square)](https://modelcontextprotocol.io/specification/2026-07-28)
+[![Version](https://img.shields.io/badge/Version-0.13.11-blue.svg?style=flat-square)](./CHANGELOG.md) [![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg?style=flat-square)](./LICENSE) [![MCP Spec](https://img.shields.io/badge/MCP%20Spec-2026--07--28-8A2BE2.svg?style=flat-square)](https://modelcontextprotocol.io/specification/2026-07-28)
 
-[![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^2.1.0-green.svg?style=flat-square)](https://modelcontextprotocol.io/) [![TypeScript](https://img.shields.io/badge/TypeScript-^7.0.2-3178C6.svg?style=flat-square)](https://www.typescriptlang.org/) [![Bun](https://img.shields.io/badge/Bun-v1.4.0%2B-blueviolet.svg?style=flat-square)](https://bun.sh/)
+[![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^2.2.0-green.svg?style=flat-square)](https://modelcontextprotocol.io/) [![TypeScript](https://img.shields.io/badge/TypeScript-^7.0.2-3178C6.svg?style=flat-square)](https://www.typescriptlang.org/) [![Bun](https://img.shields.io/badge/Bun-v1.4.0%2B-blueviolet.svg?style=flat-square)](https://bun.sh/)
 
 [Quick start](#quick-start) · [Capabilities](#what-comes-with-it) · [API reference](#api-overview) · [Examples](#examples)
 
@@ -304,6 +304,7 @@ import { validateDefinitions } from '@cyanheads/mcp-ts-core/linter';
 import { createMockContext } from '@cyanheads/mcp-ts-core/testing';
 import { mcpTest, toolContractSuite } from '@cyanheads/mcp-ts-core/testing/vitest';
 import { fuzzTool, fuzzResource, fuzzPrompt } from '@cyanheads/mcp-ts-core/testing/fuzz';
+import { renderAppTool } from '@cyanheads/mcp-ts-core/testing/apps';
 ```
 
 See [CLAUDE.md/AGENTS.md](CLAUDE.md) for the complete exports reference.
@@ -351,6 +352,31 @@ expect(report.prototypePollution).toBe(false);
 
 It also exports `fuzzResource`, `fuzzPrompt`, `zodToArbitrary`, and `ADVERSARIAL_STRINGS` for custom property-based tests.
 
+`/testing/apps` is a headless MCP Apps host. `renderAppTool` connects to your server as an MCP Apps client, calls an app tool, loads its `ui://` view into `chrome-headless-shell` inside the sandbox and CSP the MCP Apps spec prescribes, runs scripted steps against the view, and returns a report:
+
+```ts
+import { renderAppTool } from '@cyanheads/mcp-ts-core/testing/apps';
+
+const run = await renderAppTool({
+  server: { command: 'bun', args: ['run', 'dist/index.js'] }, // or { url }
+  tool: 'my_app_tool',
+  arguments: { query: 'probe' },
+  steps: [{ click: '#action-btn' }, { screenshot: 'after-click' }],
+});
+expect(run.initialized).toBe(true);
+expect(run.errors).toHaveLength(0);
+expect(run.cspViolations).toHaveLength(0);
+```
+
+The report also carries every message between the view and the host, the view's rendered text, and the screenshot paths. The same run from the command line, writing `report.json` and the screenshots under `--out`:
+
+```bash
+bunx @cyanheads/mcp-ts-core app-render --tool my_app_tool --args '{"query":"probe"}' \
+  --click '#action-btn' --out ./app-run -- bun run dist/index.js
+```
+
+It needs the optional peers `@modelcontextprotocol/client` and `@modelcontextprotocol/ext-apps`, and a `chrome-headless-shell` build: the newest one in Puppeteer's cache (`npx @puppeteer/browsers install chrome-headless-shell@stable --path ~/.cache/puppeteer`), or an explicit executable path through `browserPath`, `--browser`, or `MCP_APPS_BROWSER_PATH`. Installed Chrome, Edge, Brave, and Chromium are never searched for.
+
 ## Documentation
 
 - **[CLAUDE.md/AGENTS.md](CLAUDE.md)**: the framework reference, covering exports, patterns, `Context`, error codes, auth, config, and testing. It ships in the npm package, so your agent reads it from `node_modules` after `init`.
@@ -361,7 +387,7 @@ It also exports `fuzzResource`, `fuzzPrompt`, `zodToArbitrary`, and `ADVERSARIAL
 
 ```bash
 bun run rebuild        # clean + build (scripts/clean.ts + scripts/build.ts)
-bun run devcheck       # full gate: lint/format, typecheck, MCP defs, framework antipatterns, docs/skills/changelog sync, audit, outdated, secrets/TODO scan
+bun run devcheck       # full gate: lint/format, typecheck, MCP defs, packaging, framework antipatterns, docs/skills/changelog sync, audit, outdated, tracked-secrets and to-do marker scans
 bun run lint:mcp       # validate MCP definitions against spec
 bun run test:all       # rebuild + coverage + Node.js + Workers + integration
 bun run test:package   # pack the tarball and consume it as an external project would

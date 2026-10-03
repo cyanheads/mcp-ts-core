@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.13.11](changelog/0.13.x/0.13.11.md) — 2026-10-03 · 🛡️ Security
+
+A headless MCP Apps host renders app tool views in tests and from the CLI, ctx.log's mirror to the client honors MCP_LOG_LEVEL and masks sensitive fields, and devcheck's git scans and the scaffold server.json HTTP entry are fixed.
+
 ## [0.13.10](changelog/0.13.x/0.13.10.md) — 2026-09-26 · 🛡️ Security
 
 A client can no longer pre-answer a consent gate with a response its declared capabilities do not cover, framework-built errors carry their request ID and fill a declared recovery hint, and multi-arch Docker builds stop running Bun under QEMU.

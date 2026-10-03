@@ -1,9 +1,9 @@
 # Developer Protocol
 
 **Package:** `@cyanheads/mcp-ts-core`
-**Version:** 0.13.10
+**Version:** 0.13.11
 **Engines:** Bun ≥1.4.0, Node ≥24.0.0
-**MCP SDK:** `@modelcontextprotocol/server` ^2.1.0 (protocol revisions 2026-07-28 and 2025-*)
+**MCP SDK:** `@modelcontextprotocol/server` ^2.2.0 (protocol revisions 2026-07-28 and 2025-*)
 **Zod:** ^4.6.5
 **GitHub:** [cyanheads/mcp-ts-core](https://github.com/cyanheads/mcp-ts-core)
 **npm:** [@cyanheads/mcp-ts-core](https://www.npmjs.com/package/@cyanheads/mcp-ts-core)
@@ -61,6 +61,7 @@ Both paths share the same public API. Init copies starter `package.json`, config
 | `/services` | `OpenRouterProvider`, `SpeechService`, `createSpeechProvider`, `ElevenLabsProvider`, `WhisperProvider`, `GraphService`, provider interfaces and types | LLM, Speech (TTS/STT), Graph services |
 | `/linter` | `validateDefinitions`, `LintReport`, `LintDiagnostic`, `LintInput`, `LintSeverity` | Definition validation |
 | `/testing` | `createMockContext`, `createMockSession`, `createFetchMock`, `runToolContract`, `createMockLogger`, `getEnrichment`, `getContentBlocks`, `createInMemoryStorage`, `expectInputRequired` | Test kit for handlers and upstream HTTP boundaries |
+| `/testing/apps` | `renderAppTool`, `RenderAppToolOptions`, `AppRenderReport`, `AppRenderStep`, `AppServerTarget`, `AppHostOptions` | Headless MCP Apps host that renders an app tool's `ui://` view and reports on it (optional peers `@modelcontextprotocol/client`, `@modelcontextprotocol/ext-apps`) |
 | `/testing/fuzz` | `fuzzTool`, `fuzzResource`, `fuzzPrompt`, `zodToArbitrary`, `adversarialArbitrary`, `ADVERSARIAL_STRINGS` | Fuzz testing |
 | `/testing/vitest` | `mcpTest`, `toolContractSuite`, `McpTestFixtures` (+ re-exported `/testing` helpers) | Vitest fixtures and tool conformance suites (optional peer `vitest`) |
 
@@ -319,7 +320,7 @@ interface Context {
 
 ### `ctx.log`
 
-Opt-in domain-specific logging. Methods: `debug`, `info`, `notice`, `warning`, `error`. Auto-includes `requestId`, `traceId`, `tenantId`, `spanId`. Use `ctx.log` in handlers; global `logger` for startup/shutdown/background.
+Opt-in domain-specific logging. Methods: `debug`, `info`, `notice`, `warning`, `error`. Auto-includes `requestId`, `traceId`, `tenantId`, `spanId`. Each record also reaches the client as `notifications/message` — only at or above `MCP_LOG_LEVEL` (RFC 5424 order; a client's own level can only narrow it), with sensitive fields masked as `[REDACTED]`. Use `ctx.log` in handlers; global `logger` for startup/shutdown/background.
 
 ### `ctx.state`
 
@@ -534,6 +535,8 @@ it('survives fuzz testing', async () => {
 ```
 
 Options: `numRuns` (valid inputs, default 50), `numAdversarial` (adversarial inputs, default 30), `seed` (reproducibility), `timeout` (per-call ms, default 5000), `ctx` (`MockContextOptions` for stateful handlers). Also exports `zodToArbitrary(schema)` for custom property-based tests and `ADVERSARIAL_STRINGS` for targeted injection testing.
+
+**App views:** `renderAppTool` from `/testing/apps` connects to a server as an MCP Apps client, calls an app tool, and renders its `ui://` view in `chrome-headless-shell` inside the spec's double-iframe sandbox and CSP. The report carries `initialized`, `errors`, `cspViolations`, every view↔host `messages` entry, the rendered `text`, and `screenshots`; only setup failures (missing peer, no browser, server unreachable, tool missing, UI resource absent or unreadable, a `_meta.ui.csp` entry that is not a plain origin) throw. `mcp-ts-core app-render` is the CLI form. Needs the optional peers `@modelcontextprotocol/client` and `@modelcontextprotocol/ext-apps`, plus a `chrome-headless-shell` build — the newest in `~/.cache/puppeteer`, or `browserPath` / `MCP_APPS_BROWSER_PATH`; the `field-test` skill covers installing one and reading a report.
 
 **Vitest config:** Extend core config, add `@/` alias: `resolve: { alias: { '@/': new URL('./src/', import.meta.url).pathname } }`. Construct deps in `beforeEach`. Re-init services per suite.
 
