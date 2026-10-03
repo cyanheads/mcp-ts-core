@@ -40,7 +40,6 @@ dist/
 # TESTING & COVERAGE
 # =============================================================================
 coverage/
-!coverage/coverage-final.json
 
 # =============================================================================
 # LOGS & DATABASES
@@ -59,9 +58,10 @@ logs/
 # =============================================================================
 # ENVIRONMENT & CONFIGURATION
 # =============================================================================
-.env
-.env.local
-.env.*.local
+.env*
+!.env.example
+!.env.template
+!.env.sample
 .wrangler
 worker-configuration.d.ts
 

@@ -4,7 +4,7 @@ description: >
   Review pass on an open release PR (`release/<version>` → `main`) — the step between `git-wrapup` and `release-and-publish` when a project releases in gated release PR mode. Reads the PR's commit range through the `code-simplifier` lens plus a correctness review, verifies whatever an automated reviewer left on the PR, lands fixes as ordinary commits on top of the release branch and pushes it, keeps the PR body in sync with what ships, and leaves one summary comment. The only agent role that both edits and commits — and it never rewrites pushed history, tags, merges, touches `main`, or publishes.
 metadata:
   author: cyanheads
-  version: "1.7"
+  version: "1.8"
   audience: external
   type: workflow
 ---
@@ -84,14 +84,14 @@ A passing check is not an all-clear — it can pass while alerts stay open on th
 
 ```bash
 gh api "repos/<OWNER>/<REPO>/code-scanning/alerts?state=open&ref=refs/pull/<N>/merge" \
-  --jq '.[] | "\(.number) \(.rule.id) \(.most_recent_instance.ref) \(.most_recent_instance.analysis_key)"'
+  --jq '.[] | "\(.number) \(.rule.id) \(.most_recent_instance.ref) \(.most_recent_instance.category)"'
 ```
 
-Every alert ends the pass in a settled state: a real finding is fixed on the branch, a genuine false positive is dismissed with a stated reason. One trap sits between those two. **An alert that the branch has already fixed but that will not close is an analysis-key problem, not a dismissal decision.** An alert raised by the retired CodeQL default setup (`analysis_key` beginning `dynamic/`) can never close itself once the repository carries its own workflow, because an alert closes only when the *same* key re-scans the ref — the new key's scan reports zero results while the old alert stays open forever. None of the three dismissal reasons (`false positive`, `won't fix`, `used in tests`) is true of a real finding that has been fixed, and `won't fix` on a high-severity alert reads to anyone auditing the repository as a decision not to fix it. Delete the retired configuration's orphaned analyses instead, newest-first:
+Every alert ends the pass in a settled state: a real finding is fixed on the branch, a genuine false positive is dismissed with a stated reason. One trap sits between those two. **An alert that the branch has already fixed but that will not close is a category problem, not a dismissal decision.** GitHub re-evaluates an alert only through new analyses in the alert's own category (`most_recent_instance.category`), whichever workflow or setup uploads them. Once no current configuration uploads to that category, the fixed code is scanned only under other categories, where it reports zero results while the old alert stays open forever. The template CodeQL workflow uploads each language under `/language:<language>`, the category CodeQL default setup uses, so alerts default setup raised close normally, and default setup's earlier analyses share a set with the workflow's — neither orphaned nor deletable. The usual orphan is a retired category, such as the path-derived `.github/workflows/codeql.yml:analyze` an earlier workflow uploaded under. None of the three dismissal reasons (`false positive`, `won't fix`, `used in tests`) is true of a real finding that has been fixed, and `won't fix` on a high-severity alert reads to anyone auditing the repository as a decision not to fix it. Once the current workflow has analyzed the alert's ref under its own categories, delete the orphaned category's analyses on that ref instead, newest-first — only the most recent analysis of a set is deletable, and `confirm_delete` lets the last one go:
 
 ```bash
-gh api "repos/<OWNER>/<REPO>/code-scanning/analyses?per_page=100" \
-  --jq '.[] | select(.analysis_key | startswith("dynamic/")) | "\(.id) \(.created_at) \(.ref)"'
+gh api --paginate "repos/<OWNER>/<REPO>/code-scanning/analyses?ref=<REF>&per_page=100" \
+  --jq '.[] | select(.category == "<ORPHANED_CATEGORY>") | "\(.id) \(.created_at) \(.deletable)"'
 gh api -X DELETE "repos/<OWNER>/<REPO>/code-scanning/analyses/<ID>?confirm_delete=true"
 ```
 

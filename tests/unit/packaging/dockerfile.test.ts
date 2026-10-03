@@ -1,13 +1,14 @@
 /**
  * @fileoverview Stage invariants for the framework and scaffold Dockerfiles.
  * Everything that can run JavaScript while the image builds — a `bun install`
- * whose `bunfig.toml` starts the Socket scanner as a Bun program, and the OTel
- * step's `scripts/install-otel.ts` — runs in the `deps` stage on
- * `$BUILDPLATFORM`, cross-installing for the target with `--os`/`--cpu`. The
- * production stage copies `node_modules` from it and runs only shell `RUN`s, so
- * the non-native leg of a multi-arch build never runs Bun under QEMU (#575).
- * The RUN steps are executed here with a recording `bun` on `PATH`, so the
- * assertions cover the flags each install actually receives (#578).
+ * whose `bunfig.toml` starts the Socket scanner as a Bun program, the OTel
+ * step's `scripts/install-otel.ts`, and the musl prune that follows it (#608)
+ * — runs in the `deps` stage on `$BUILDPLATFORM`, cross-installing for the
+ * target with `--os`/`--cpu`. The production stage copies `node_modules` from
+ * it and runs only shell `RUN`s, so the non-native leg of a multi-arch build
+ * never runs Bun under QEMU (#575). The RUN steps are executed here with a
+ * recording `bun` on `PATH`, so the assertions cover the flags each install
+ * actually receives (#578).
  * @module tests/unit/packaging/dockerfile.test
  */
 
@@ -114,6 +115,7 @@ describe.each(['Dockerfile', 'templates/Dockerfile'])('%s', (relativePath) => {
     const cpuMapping = () => runStep(deps(), /\bTARGETARCH\b/);
     const productionInstall = () => runStep(deps(), /\bbun install\b/);
     const otelStep = () => runStep(deps(), /"\$OTEL_ENABLED"/);
+    const pruneStep = () => runStep(deps(), /prune-musl-packages/);
 
     /** Runs the TARGETARCH mapping, then `step`, as BuildKit would for that target. */
     function forTarget(targetArch: string, step: string, env: Record<string, string> = {}) {
@@ -197,6 +199,36 @@ describe.each(['Dockerfile', 'templates/Dockerfile'])('%s', (relativePath) => {
       expect(copy).toBeGreaterThan(lines.indexOf(productionInstall()));
       expect(copy).toBeLessThan(lines.indexOf(otelStep()));
     });
+
+    it('prunes musl-only packages after every install and before the scanner removal', () => {
+      const lines = deps();
+      const copy = lines.indexOf('COPY scripts/prune-musl-packages.ts ./scripts/');
+      const prune = lines.indexOf(pruneStep());
+
+      expect(copy).toBeGreaterThan(lines.indexOf(otelStep()));
+      expect(prune).toBeGreaterThan(copy);
+      expect(prune).toBeLessThan(lines.indexOf(runStep(lines, /\brm\b/)));
+      // A later install restores a pruned package, so none may follow the prune.
+      expect(
+        lines
+          .slice(prune + 1)
+          .filter(
+            (line) => line.startsWith('RUN ') && /\bbun (install|add)\b|install-otel/.test(line),
+          ),
+      ).toEqual([]);
+    });
+
+    it.each(['true', 'false'])(
+      'runs scripts/prune-musl-packages.ts whatever OTEL_ENABLED is (%s)',
+      (otel) => {
+        const { bunCalls, status, stderr } = forTarget('arm64', pruneStep(), {
+          OTEL_ENABLED: otel,
+        });
+
+        expect(status, stderr).toBe(0);
+        expect(bunCalls).toEqual(['scripts/prune-musl-packages.ts']);
+      },
+    );
 
     it('removes the seeded scanner after the last install, so the runtime image carries none', () => {
       const lines = deps();

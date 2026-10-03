@@ -3,10 +3,67 @@
  * @module tests/unit/cli/init.test
  */
 
+import { spawnSync } from 'node:child_process';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import * as yaml from 'js-yaml';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+
+const ROOT = join(import.meta.dirname, '..', '..', '..');
+
+/** Env files a server must keep out of git and out of the image build context. */
+const ENV_FILES = [
+  '.env',
+  '.env.local',
+  '.env.production',
+  '.env.test',
+  '.env.development',
+  '.env.production.local',
+];
+
+/** The template shapes devcheck's Tracked Secrets step treats as safe to track. */
+const ENV_TEMPLATES = ['.env.example', '.env.template', '.env.sample'];
+
+/** Each name at the root and one directory down. */
+const atAnyDepth = (names: string[], dir: string): string[] => [
+  ...names,
+  ...names.map((name) => `${dir}/${name}`),
+];
+
+/** The subset of `paths` the ignore rules of the repository at `repo` exclude, in input order. */
+function ignoredPaths(repo: string, paths: string[]): string[] {
+  // `--no-index` checks the rules even for tracked paths, which git otherwise never reports.
+  const result = spawnSync('git', ['check-ignore', '--no-index', '--stdin'], {
+    cwd: repo,
+    encoding: 'utf8',
+    input: paths.join('\n'),
+  });
+  expect([0, 1], result.stderr).toContain(result.status);
+  return result.stdout.split('\n').filter(Boolean);
+}
+
+/** The `.env`-prefixed lines of a `.dockerignore`. */
+const dockerignoreEnvLines = (path: string): string[] =>
+  readFileSync(path, 'utf8')
+    .split(/\r?\n/)
+    .filter((line) => line.startsWith('.env'));
+
+interface CodeqlWorkflow {
+  jobs: Record<
+    string,
+    {
+      name: string;
+      permissions: Record<string, string>;
+      'runs-on': string;
+      steps: { uses?: string; with?: Record<string, unknown> }[];
+      strategy?: unknown;
+      'timeout-minutes': number;
+    }
+  >;
+  on: unknown;
+  permissions: Record<string, string>;
+}
 
 describe('CLI init command', () => {
   let originalArgv: string[];
@@ -133,6 +190,11 @@ describe('CLI init command', () => {
     // The scaffold Dockerfile's OTel step runs it; a scaffold without it fails the image build.
     expect(existsSync(join(dest, 'scripts', 'install-otel.ts'))).toBe(true);
     expect(readFileSync(join(dest, 'Dockerfile'), 'utf-8')).toContain('scripts/install-otel.ts');
+    // Likewise the deps stage's musl prune, which runs after the OTel step.
+    expect(existsSync(join(dest, 'scripts', 'prune-musl-packages.ts'))).toBe(true);
+    expect(readFileSync(join(dest, 'Dockerfile'), 'utf-8')).toContain(
+      'scripts/prune-musl-packages.ts',
+    );
     expect(existsSync(join(dest, 'framework-skills', 'add-tool', 'SKILL.md'))).toBe(true);
     expect(existsSync(join(dest, 'framework-skills', 'README.md'))).toBe(false);
     // Plugin hosts auto-load a root skills/ — the scaffold must never create one.
@@ -213,4 +275,117 @@ describe('CLI init command', () => {
     expect(output).toContain('bun install');
     expect(output).not.toContain('\n    1. cd ');
   });
+
+  it('scaffolds ignore rules that keep every env file but the three templates out of git and the image', async () => {
+    const tempRoot = createTempDir();
+    process.chdir(tempRoot);
+
+    await runCli(['init', 'demo-server']);
+
+    const dest = join(tempRoot, 'demo-server');
+    const envFiles = atAnyDepth(ENV_FILES, 'nested');
+    const templates = atAnyDepth(ENV_TEMPLATES, 'nested');
+    mkdirSync(join(dest, 'nested'));
+    for (const file of [...envFiles, ...templates]) {
+      writeFileSync(join(dest, file), 'API_KEY=value\n');
+    }
+    expect(spawnSync('git', ['init', '-q'], { cwd: dest }).status).toBe(0);
+
+    expect(ignoredPaths(dest, [...envFiles, ...templates])).toEqual(envFiles);
+
+    // With everything git does not ignore staged, devcheck's Tracked Secrets step passes.
+    expect(spawnSync('git', ['add', '-A'], { cwd: dest }).status).toBe(0);
+    const secrets = spawnSync(
+      'bun',
+      ['run', 'scripts/devcheck.ts', '--only', 'Tracked Secrets', '--no-fix'],
+      { cwd: dest, encoding: 'utf8' },
+    );
+    expect(secrets.status, `${secrets.stdout}${secrets.stderr}`).toBe(0);
+    expect(secrets.stdout).toMatch(/Tracked Secrets\s+✅ PASSED/);
+
+    // No build step reads an env template, so the build context takes none of them.
+    expect(dockerignoreEnvLines(join(dest, '.dockerignore'))).toEqual(['.env*']);
+  });
+
+  it('scaffolds the CodeQL workflow byte-identical to the repository copy, triggers and pins intact', async () => {
+    const tempRoot = createTempDir();
+    process.chdir(tempRoot);
+
+    await runCli(['init', 'demo-server']);
+
+    const scaffolded = readFileSync(
+      join(tempRoot, 'demo-server', '.github', 'workflows', 'codeql.yml'),
+      'utf8',
+    );
+    expect(scaffolded).toBe(readFileSync(join(ROOT, '.github', 'workflows', 'codeql.yml'), 'utf8'));
+
+    const workflow = yaml.load(scaffolded) as CodeqlWorkflow;
+    expect(workflow.on).toEqual({
+      push: { branches: ['main'] },
+      pull_request: { branches: ['main'] },
+      schedule: [{ cron: '30 6 * * 1' }],
+    });
+    expect(workflow.permissions).toEqual({ contents: 'read' });
+    expect(Object.keys(workflow.jobs)).toEqual(['analyze']);
+    const analyze = workflow.jobs.analyze;
+    expect(analyze?.name).toBe('Analyze');
+    expect(analyze?.['runs-on']).toBe('ubuntu-latest');
+    expect(analyze?.['timeout-minutes']).toBe(15);
+    expect(analyze?.permissions).toEqual({
+      'security-events': 'write',
+      contents: 'read',
+      actions: 'read',
+    });
+    expect(analyze?.steps.map((step) => step.uses)).toEqual([
+      'actions/checkout@v7',
+      'github/codeql-action/init@v4',
+      'github/codeql-action/analyze@v4',
+    ]);
+    expect(analyze?.steps[1]?.with).toMatchObject({ 'build-mode': 'none' });
+  });
+
+  it("analyzes each CodeQL language in its own job, uploading under default setup's category", async () => {
+    const tempRoot = createTempDir();
+    process.chdir(tempRoot);
+
+    await runCli(['init', 'demo-server']);
+
+    const workflow = yaml.load(
+      readFileSync(join(tempRoot, 'demo-server', '.github', 'workflows', 'codeql.yml'), 'utf8'),
+    ) as CodeqlWorkflow;
+    const analyze = workflow.jobs.analyze;
+    // One language failing must not cancel the other's upload.
+    expect(analyze?.strategy).toEqual({
+      'fail-fast': false,
+      matrix: { language: ['actions', 'javascript-typescript'] },
+    });
+    const [, init, upload] = analyze?.steps ?? [];
+    // biome-ignore lint/suspicious/noTemplateCurlyInString: a GitHub Actions expression, not a JS template
+    const language = '${{ matrix.language }}';
+    expect(init?.with).toEqual({ languages: language, 'build-mode': 'none' });
+    // An alert re-evaluates only through analyses in its own category; this is default setup's name.
+    expect(upload?.with).toEqual({ category: `/language:${language}` });
+  });
+});
+
+describe('repository ignore rules for env files', () => {
+  it('git ignores every env file but the three template shapes, here and under templates/', () => {
+    const envFiles = atAnyDepth(ENV_FILES, 'templates');
+    const templates = atAnyDepth(ENV_TEMPLATES, 'templates');
+
+    expect(ignoredPaths(ROOT, [...envFiles, ...templates])).toEqual(envFiles);
+    // The repo's own templates are among the unignored paths above and stay tracked.
+    const tracked = spawnSync('git', ['ls-files', '.env.example', 'templates/.env.example'], {
+      cwd: ROOT,
+      encoding: 'utf8',
+    });
+    expect(tracked.stdout.trim().split('\n')).toEqual(['.env.example', 'templates/.env.example']);
+  });
+
+  it.each(['.dockerignore', 'templates/_.dockerignore'])(
+    '%s keeps every env file out of the build context',
+    (file) => {
+      expect(dockerignoreEnvLines(join(ROOT, file))).toEqual(['.env*']);
+    },
+  );
 });

@@ -565,6 +565,57 @@ test('loads the published testing/vitest subpath in its required host context', 
   }
 }
 
+/**
+ * The clean consumer installs neither optional peer of `testing/apps`. Importing the
+ * subpath must still succeed, since the peers load on first use, and `renderAppTool` must
+ * reject naming the first missing package. Either peer resolving in the consumer would
+ * leave that path unexercised, so that fails the check too.
+ */
+async function verifyAppsWithoutPeers(
+  consumerDir: string,
+  pkg: PackageJson,
+  nodeBin: string,
+  bunBin: string,
+): Promise<void> {
+  const peers = ['@modelcontextprotocol/client', '@modelcontextprotocol/ext-apps'];
+  await writeFile(
+    join(consumerDir, 'apps-without-peers.mjs'),
+    `
+const peers = ${JSON.stringify(peers)};
+for (const peer of peers) {
+  let resolved;
+  try {
+    resolved = import.meta.resolve(peer);
+  } catch {}
+  if (resolved) {
+    throw new Error(peer + ' resolves in the clean consumer (' + resolved + '), so the missing-peer path goes unverified.');
+  }
+}
+const { renderAppTool } = await import('${publicSpecifier(pkg, './testing/apps')}');
+const error = await renderAppTool({ server: { command: 'unused' }, tool: 'unused' }).then(
+  () => undefined,
+  (rejection) => rejection,
+);
+if (error?.data?.reason !== 'missing_peer' || error.data.package !== peers[0] || !String(error.message).includes(peers[0])) {
+  throw new Error('renderAppTool without its optional peers did not reject naming ' + peers[0] + ': ' + (error ? error.message : 'it resolved'));
+}
+console.log('APPS_WITHOUT_PEERS_OK=' + error.data.package);
+`,
+  );
+  for (const [runtime, executable] of [
+    ['Node', nodeBin],
+    ['Bun', bunBin],
+  ] as const) {
+    const result = await run(executable, ['apps-without-peers.mjs'], consumerDir);
+    assertSuccess(result, `${runtime} testing/apps import without its optional peers`);
+    if (!result.stdout.includes('APPS_WITHOUT_PEERS_OK=')) {
+      throw new Error(
+        `${runtime} testing/apps optional-peer check produced no verification marker.`,
+      );
+    }
+  }
+}
+
 async function verifyTypes(consumerDir: string, pkg: PackageJson): Promise<void> {
   await writeFile(join(consumerDir, 'consumer-node.ts'), nodeTypeConsumerSource(pkg));
   await writeFile(join(consumerDir, 'consumer-supabase.ts'), supabaseTypeConsumerSource(pkg));
@@ -801,8 +852,9 @@ async function verifyCli(
   }
   await access(join(projectDir, 'src', 'index.ts'), constants.R_OK);
   await access(join(projectDir, 'scripts', 'build.ts'), constants.R_OK);
-  // The scaffold Dockerfile's OTel step runs it; without it the image build fails at its COPY.
+  // The scaffold Dockerfile's deps stage runs both; without either the image build fails at its COPY.
   await access(join(projectDir, 'scripts', 'install-otel.ts'), constants.R_OK);
+  await access(join(projectDir, 'scripts', 'prune-musl-packages.ts'), constants.R_OK);
 
   // Preserve the generated manifest long enough to assert its published
   // dependency contract above, then point only this temporary verifier copy at
@@ -976,6 +1028,7 @@ export async function verifyPublishedPackage(): Promise<PackageVerificationRepor
     }
 
     await verifyRuntimeImports(consumerDir, installedPkg, nodeBin, bunBin);
+    await verifyAppsWithoutPeers(consumerDir, installedPkg, nodeBin, bunBin);
     await verifyTypes(consumerDir, installedPkg);
     await verifyWorkerTypes(workerConsumerDir, installedPkg);
     await verifyBaseConfigConsumer(consumerDir, installedPackageDir, installedPkg);

@@ -4,7 +4,7 @@ description: >
   Ship a release end-to-end across every registry the project targets (npm, MCP Registry, GitHub Releases for `.mcpb` bundles, GHCR). Runs the final verification gate, fast-forwards `main` when the release rode a release PR, creates the annotated tag on the commit `main` now points at, pushes commits and tags, then publishes to each applicable destination. Assumes git wrapup (version bumps, changelog, commit stack — and in release PR mode, the pushed branch and open PR) is already complete — this skill is the post-wrapup merge + tag + publish workflow. Retries transient network failures on publish steps; halts with a partial-state report when retries are exhausted or the failure is terminal.
 metadata:
   author: cyanheads
-  version: "2.23"
+  version: "2.24"
   audience: external
   type: workflow
 ---
@@ -280,7 +280,7 @@ docker buildx build --platform linux/amd64,linux/arm64 \
   --push .
 ```
 
-No stage built for the target platform may run JavaScript: the non-native leg of the multi-arch build runs it under QEMU, where bun >= 1.4 aborts with a JavaScriptCore allocator assertion (`qemu: uncaught target signal 6`) and no image publishes for either architecture. That covers `bun run build`, and also a `bun install` that sees `bunfig.toml` — its security scanner runs as a Bun program and the install fails with `NoSecurityScanData`. The templates keep every such step in stages that start `FROM --platform=$BUILDPLATFORM` — the build stage, and a `deps` stage that cross-installs production dependencies with `--os`/`--cpu` and runs `scripts/install-otel.ts` — so the production stage's only Bun calls are `HEALTHCHECK` and `CMD`. `bun run lint:packaging` (check 15, part of `devcheck`) fails a Dockerfile that breaks this and names the line. npm, the MCP Registry, and the GitHub Release have all published by this step, so the recovery is a follow-up patch release rather than a retry — confirm the lint passes before building, not after.
+No stage built for the target platform may run JavaScript: the non-native leg of the multi-arch build runs it under QEMU, where bun >= 1.4 aborts with a JavaScriptCore allocator assertion (`qemu: uncaught target signal 6`) and no image publishes for either architecture. That covers `bun run build`, and also a `bun install` that sees `bunfig.toml` — its security scanner runs as a Bun program and the install fails with `NoSecurityScanData`. The templates keep every such step in stages that start `FROM --platform=$BUILDPLATFORM` — the build stage, and a `deps` stage that cross-installs production dependencies with `--os`/`--cpu`, runs `scripts/install-otel.ts`, then runs `scripts/prune-musl-packages.ts` (Bun cannot filter optional dependencies by libc, so it deletes the musl variants the glibc runtime image never loads) — so the production stage's only Bun calls are `HEALTHCHECK` and `CMD`. `bun run lint:packaging` (check 15, part of `devcheck`) fails a Dockerfile that breaks this and names the line. npm, the MCP Registry, and the GitHub Release have all published by this step, so the recovery is a follow-up patch release rather than a retry — confirm the lint passes before building, not after.
 
 If the project uses a non-GHCR registry or a custom image name, respect the project's convention. If push fails with a 401/403, prompt the user to authenticate (`echo $GITHUB_TOKEN | docker login ghcr.io -u <OWNER> --password-stdin`) and retry. Halt on build failure or non-auth push failure.
 
