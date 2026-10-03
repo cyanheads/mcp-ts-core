@@ -907,6 +907,28 @@ describe('measureResourceExecution', () => {
     expect(mockUpDownCounterAdd).toHaveBeenCalledWith(-1);
   });
 
+  it('sets mcp.resource.uri_length only when the URI was cut (#617)', async () => {
+    const context = { resourceName: 'cut-resource', requestId: 'req-r9', timestamp: 'now' };
+    await measureResourceExecution(async () => null, context, {
+      uri: 'myscheme://items/9',
+      mimeType: 'text/plain',
+    });
+    await measureResourceExecution(async () => null, context, {
+      uri: 'myscheme://items/9',
+      uriLength: 4_096,
+      mimeType: 'text/plain',
+    });
+
+    const [uncut, cut] = span.setAttributes.mock.calls
+      .map(([attributes]) => attributes as Record<string, unknown>)
+      .filter((attributes) => 'mcp.resource.uri' in attributes);
+    expect(uncut).not.toHaveProperty('mcp.resource.uri_length');
+    expect(cut).toMatchObject({
+      'mcp.resource.uri': 'myscheme://items/9',
+      'mcp.resource.uri_length': 4_096,
+    });
+  });
+
   it('sets span attributes for URI and MIME type', async () => {
     await measureResourceExecution(
       async () => null,

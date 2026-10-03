@@ -129,6 +129,7 @@ export const PUBLIC_RUNTIME_EXPORTS = {
     'ATTR_MCP_RESOURCE_SIZE_BYTES',
     'ATTR_MCP_RESOURCE_SUCCESS',
     'ATTR_MCP_RESOURCE_URI',
+    'ATTR_MCP_RESOURCE_URI_LENGTH',
     'ATTR_MCP_SESSION_EVENT',
     'ATTR_MCP_SPEECH_DURATION_MS',
     'ATTR_MCP_SPEECH_INPUT_BYTES',
@@ -262,6 +263,7 @@ export const PUBLIC_RUNTIME_EXPORTS = {
     'getEnrichment',
     'runToolContract',
   ],
+  './testing/apps': ['renderAppTool'],
   './testing/fuzz': [
     'ADVERSARIAL_STRINGS',
     'adversarialArbitrary',

@@ -43,6 +43,7 @@ const { mockConfig, mockLogger } = vi.hoisted(() => ({
     crit: vi.fn(),
     emerg: vi.fn(),
     child: vi.fn(),
+    isLevelEnabled: vi.fn((_level: string) => true),
   },
 }));
 
@@ -1231,6 +1232,153 @@ describe('createResourceHandler', () => {
       expect(serializedCalls).not.toContain('SUPERSECRET');
       expect(serializedCalls).not.toContain('password');
       expect(serializedCalls).not.toContain('fragment-secret');
+    });
+
+    // #617 — the projection had no length bound, so every record of a read
+    // carried whatever the client sent.
+    describe('URI length cap (#617)', () => {
+      const BASE = 'artic://artworks/';
+      const CAP = 1024;
+      let seenUri: string | undefined;
+
+      const artwork = resource('artic://artworks/{id}', {
+        name: 'artwork',
+        description: 'Artwork by numeric id.',
+        mimeType: 'application/json',
+        params: z.object({ id: z.string().regex(/^\d+$/).describe('Numeric artwork id') }),
+        handler(params, ctx) {
+          seenUri = ctx.uri?.href;
+          ctx.log.info('resource handler entered');
+          if (params.id.length > 12) throw new Error('Artwork id out of range');
+          return { id: params.id };
+        },
+      });
+
+      /** Reads `uri` with the tracer stubbed; returns the outcome and what the read recorded. */
+      async function read(uri: string, id: string) {
+        const span = {
+          setAttributes: vi.fn(),
+          setAttribute: vi.fn(),
+          setStatus: vi.fn(),
+          recordException: vi.fn(),
+          end: vi.fn(),
+        };
+        const tracerSpy = vi.spyOn(trace, 'getTracer').mockReturnValue({
+          startActiveSpan: (_name: string, cb: (s: unknown) => unknown) => cb(span),
+        } as never);
+        try {
+          const handler = createResourceHandler(
+            artwork as AnyResourceDefinition,
+            services,
+            notifiers,
+          );
+          const outcome = await handler(new URL(uri), { id }, makeServerContext()).then(
+            (result) => ({ result, error: undefined }),
+            (error: unknown) => ({ result: undefined, error }),
+          );
+          const recordOf = (message: string) =>
+            mockLogger.info.mock.calls.findLast(([logged]) => logged === message)?.[1] as
+              | Record<string, any>
+              | undefined;
+          return {
+            ...outcome,
+            completion: recordOf(TELEMETRY_LOG_MESSAGES.resourceReadFinished),
+            handlerLine: recordOf('resource handler entered'),
+            spanAttributes: Object.assign(
+              {},
+              ...span.setAttributes.mock.calls.map(([attributes]) => attributes),
+            ) as Record<string, unknown>,
+          };
+        } finally {
+          tracerSpy.mockRestore();
+        }
+      }
+
+      it('records the first 1,024 characters and the uncut length on every record and the span', async () => {
+        const id = '7'.repeat(200_000);
+        const projection = `${BASE}${id}`;
+
+        const { error, completion, handlerLine, spanAttributes } = await read(projection, id);
+
+        expect(error).toBeInstanceOf(McpError);
+        const capped = projection.slice(0, CAP);
+        expect(completion?.resourceUri).toBe(capped);
+        expect(completion?.resourceUriLength).toBe(200_017);
+        expect(completion?.extra.metrics.uri).toBe(capped);
+        expect(handlerLine?.resourceUri).toBe(capped);
+        expect(handlerLine?.resourceUriLength).toBe(200_017);
+        expect(spanAttributes['mcp.resource.uri']).toBe(capped);
+        expect(spanAttributes['mcp.resource.uri_length']).toBe(200_017);
+      });
+
+      it.each([
+        [CAP, false],
+        [CAP + 1, true],
+      ])('a %i-character projection is cut: %s', async (length, cut) => {
+        const id = '4'.repeat(length - BASE.length);
+        const projection = `${BASE}${id}`;
+
+        const { completion, handlerLine, spanAttributes } = await read(projection, id);
+
+        expect(completion?.resourceUri).toBe(projection.slice(0, CAP));
+        for (const record of [completion, handlerLine]) {
+          if (cut) expect(record?.resourceUriLength).toBe(length);
+          else expect(record).not.toHaveProperty('resourceUriLength');
+        }
+        if (cut) expect(spanAttributes['mcp.resource.uri_length']).toBe(length);
+        else expect(spanAttributes).not.toHaveProperty('mcp.resource.uri_length');
+      });
+
+      it('strips userinfo, query, and fragment before the cap applies', async () => {
+        const id = '9'.repeat(2_000);
+        const query = `?api_key=SUPERSECRET&pad=${'x'.repeat(5_000)}`;
+
+        const long = await read(`artic://user:pw@artworks/${id}${query}#frag`, id);
+        const short = await read(`artic://user:pw@artworks/42${query}#frag`, '42');
+
+        expect(long.completion?.resourceUri).toBe(`${BASE}${id}`.slice(0, CAP));
+        expect(long.completion?.resourceUriLength).toBe(BASE.length + id.length);
+        expect(short.completion?.resourceUri).toBe(`${BASE}42`);
+        expect(short.completion).not.toHaveProperty('resourceUriLength');
+        expect(JSON.stringify(mockLogger.info.mock.calls)).not.toContain('SUPERSECRET');
+      });
+
+      it('hands the handler and the response the full URI, query included', async () => {
+        const id = '5'.repeat(12);
+        const uri = `${BASE}${id}?page=${'p'.repeat(3_000)}`;
+
+        const { result, completion } = await read(uri, id);
+
+        expect(completion).not.toHaveProperty('resourceUriLength');
+        expect(seenUri).toBe(uri);
+        expect(readContents(result!)[0]?.uri).toBe(uri);
+      });
+
+      it('keeps the full URI and the full response for a successful read past the cap', async () => {
+        // A path under the handler's own id guard but over the cap needs a long
+        // host, since the guard rejects ids past 12 digits.
+        const host = `artworks${'h'.repeat(1_100)}`;
+        const uri = `artic://${host}/42`;
+
+        const { result, completion } = await read(uri, '42');
+
+        expect(completion?.resourceUri).toHaveLength(CAP);
+        expect(completion?.resourceUriLength).toBe(uri.length);
+        expect(seenUri).toBe(uri);
+        expect(readContents(result!)[0]?.uri).toBe(uri);
+      });
+
+      it('records a URI within the cap unchanged', async () => {
+        const { completion, handlerLine, spanAttributes } = await read(`${BASE}42`, '42');
+
+        expect(completion?.resourceUri).toBe(`${BASE}42`);
+        expect(completion?.extra.metrics.uri).toBe(`${BASE}42`);
+        expect(completion).not.toHaveProperty('resourceUriLength');
+        expect(handlerLine?.resourceUri).toBe(`${BASE}42`);
+        expect(handlerLine).not.toHaveProperty('resourceUriLength');
+        expect(spanAttributes['mcp.resource.uri']).toBe(`${BASE}42`);
+        expect(spanAttributes).not.toHaveProperty('mcp.resource.uri_length');
+      });
     });
   });
 

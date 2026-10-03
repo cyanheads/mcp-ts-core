@@ -127,10 +127,17 @@ export const ATTR_MCP_PACER_NAME = 'mcp.pacer.name';
 // ============================================================================
 
 /**
- * Full URI identifying the MCP resource being accessed (e.g., `myscheme://items/123`).
+ * URI of the MCP resource being read (e.g., `myscheme://items/123`), without
+ * userinfo, query, or fragment, and cut to its first 1,024 characters.
  * Use on spans only — not on metrics, where unbounded cardinality is a concern.
  */
 export const ATTR_MCP_RESOURCE_URI = 'mcp.resource.uri';
+
+/**
+ * Length of the URI `mcp.resource.uri` was cut from — set only when the cut
+ * removed something. Spans only, like `mcp.resource.uri`.
+ */
+export const ATTR_MCP_RESOURCE_URI_LENGTH = 'mcp.resource.uri_length';
 
 /** Bounded resource identifier (name or URI template) for metric attributes. */
 export const ATTR_MCP_RESOURCE_NAME = 'mcp.resource.name';

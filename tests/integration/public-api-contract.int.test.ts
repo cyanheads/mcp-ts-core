@@ -14,6 +14,7 @@ import * as Services from '@/services/index.js';
 import * as Mirror from '@/services/mirror/index.js';
 import * as StorageTypes from '@/storage/core/IStorageProvider.js';
 import * as Storage from '@/storage/core/StorageService.js';
+import * as TestingApps from '@/testing/apps/index.js';
 import * as TestingFuzz from '@/testing/fuzz.js';
 import * as Testing from '@/testing/index.js';
 import * as TestingVitest from '@/testing/vitest.js';
@@ -38,6 +39,7 @@ const SOURCE_MODULES = {
   './services': Services,
   './linter': Linter,
   './testing': Testing,
+  './testing/apps': TestingApps,
   './testing/fuzz': TestingFuzz,
   './testing/vitest': TestingVitest,
 } satisfies Record<keyof typeof PUBLIC_RUNTIME_EXPORTS, object>;

@@ -74,16 +74,27 @@ export function defaultResponseFormatter(
   ];
 }
 
-/** Strip URL components that commonly carry credentials or caller secrets
- * before the URI reaches logs or telemetry. The protocol response still uses
- * the original URI; this projection is observability-only. */
-function observableResourceUri(uri: URL): string {
+/** The longest URI a read's log records and span carry: 1 KiB, since the projection is ASCII. */
+const OBSERVABLE_URI_MAX_LENGTH = 1024;
+
+/**
+ * The URI a read's log records and span carry: userinfo, query, and fragment
+ * stripped — they commonly carry credentials or caller secrets — then cut to
+ * its first {@link OBSERVABLE_URI_MAX_LENGTH} characters, since a client sets
+ * its length. `uriLength` is the uncut projection's length, present only when
+ * the cut removed something. The handler's `ctx.uri` and the response keep the
+ * original URI; this projection is observability-only.
+ */
+function observableResourceUri(uri: URL): { uri: string; uriLength?: number } {
   const safe = new URL(uri.href);
   safe.username = '';
   safe.password = '';
   safe.search = '';
   safe.hash = '';
-  return safe.href;
+  const { href } = safe;
+  return href.length > OBSERVABLE_URI_MAX_LENGTH
+    ? { uri: href.slice(0, OBSERVABLE_URI_MAX_LENGTH), uriLength: href.length }
+    : { uri: href };
 }
 
 // ---------------------------------------------------------------------------
@@ -123,7 +134,7 @@ export function createResourceHandler(
     serverContext,
   ): Promise<ReadResourceResult | InputRequiredResult> => {
     const request = resolveHandlerRequest(serverContext, services, notifiers);
-    const resourceUri = observableResourceUri(uri);
+    const observed = observableResourceUri(uri);
 
     // The URI template already captures the named segments; anything else is
     // query-string / caller-supplied and belongs in metrics, not logs.
@@ -132,7 +143,8 @@ export function createResourceHandler(
       operation: 'HandleResourceRead',
       additionalContext: {
         resourceName,
-        resourceUri,
+        resourceUri: observed.uri,
+        ...(observed.uriLength !== undefined && { resourceUriLength: observed.uriLength }),
         resourceHasQuery: uri.search.length > 0,
       },
     });
@@ -193,7 +205,7 @@ export function createResourceHandler(
           }
         },
         { ...appContext, resourceName },
-        { uri: resourceUri, mimeType },
+        { ...observed, mimeType },
       );
     } catch (error: unknown) {
       // `ctx.requestInput(...)` is protocol control flow, not a failure —

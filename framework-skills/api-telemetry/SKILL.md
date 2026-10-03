@@ -4,7 +4,7 @@ description: >
   Catalog of OpenTelemetry instrumentation built into framework `@cyanheads/mcp-ts-core` — spans, metrics, completion logs, env config, runtime caveats, custom instrumentation patterns, and cardinality rules. Use when enabling OTel export, adding custom spans or metrics in services, debugging missing telemetry, looking up attribute names, or deciding what's safe to put on a metric attribute vs. a span.
 metadata:
   author: cyanheads
-  version: "1.16"
+  version: "1.17"
   audience: external
   type: reference
 ---
@@ -94,7 +94,7 @@ Every handler call gets a span. Nested operations (storage, graph, LLM) become c
 | Span name | Source | Key attributes |
 |:----------|:-------|:---------------|
 | `tool_execution:<tool>` | every tool call | `mcp.tool.input_bytes`, `mcp.tool.output_bytes`, `mcp.tool.duration_ms`, `mcp.tool.success`, `mcp.tool.error_code`, `mcp.tool.input_required`, `mcp.tool.partial_success`, `mcp.tool.batch.{succeeded,failed}_count` |
-| `resource_read:<resource>` | every resource handler | `mcp.resource.uri`, `mcp.resource.mime_type`, `mcp.resource.size_bytes`, `mcp.resource.duration_ms`, `mcp.resource.success`, `mcp.resource.error_code`, `mcp.resource.input_required` |
+| `resource_read:<resource>` | every resource handler | `mcp.resource.uri` (userinfo, query, and fragment stripped, then cut to its first 1,024 characters), `mcp.resource.uri_length` (the uncut length, only when the cut removed something), `mcp.resource.mime_type`, `mcp.resource.size_bytes`, `mcp.resource.duration_ms`, `mcp.resource.success`, `mcp.resource.error_code`, `mcp.resource.input_required` |
 | `prompt_generation:<prompt>` | every prompt handler | `mcp.prompt.input_bytes`, `mcp.prompt.output_bytes`, `mcp.prompt.message_count`, `mcp.prompt.duration_ms`, `mcp.prompt.success`, `mcp.prompt.error_code`, `mcp.prompt.input_required` |
 | `storage:<op>` | `StorageService` (every call) | `mcp.storage.operation`, `mcp.storage.duration_ms`, `mcp.storage.success`, `mcp.storage.key_count` (batch ops) |
 | `graph:<op>` | `GraphService` (every call) | `mcp.graph.operation`, `mcp.graph.duration_ms`, `mcp.graph.success` |
@@ -252,8 +252,10 @@ For domain logging inside handlers, use `ctx.log` (`debug`/`info`/`notice`/`warn
 | Handler | Log message | `metrics` fields |
 |:--------|:------------|:-----------------|
 | Tool | `Tool execution finished.` | `durationMs`, `isSuccess`, `errorCode`, `inputBytes`, `outputBytes`, plus `partialSuccess` / `batchSucceeded` / `batchFailed` when the result is a partial-success batch |
-| Resource | `Resource read finished.` | `durationMs`, `isSuccess`, `errorCode`, `outputBytes`, `uri`, `mimeType` |
+| Resource | `Resource read finished.` | `durationMs`, `isSuccess`, `errorCode`, `outputBytes`, `uri` (the same capped URI as `mcp.resource.uri`), `mimeType` |
 | Prompt | `Prompt generation finished.` | `durationMs`, `isSuccess`, `errorCode`, `inputBytes` (0 for a prompt declaring no arguments), `outputBytes`, `messageCount` |
+
+Every record of a resource read — scope checks, the handler's `ctx.log` lines, the completion record — carries the read's URI as `resourceUri`, capped like `mcp.resource.uri`, plus `resourceUriLength` when the cap cut it. The handler's `ctx.uri` and the response keep the full URI.
 
 A failed tool call or prompt adds exactly one `Error in tool:<name>` / `Error in prompt:<name>` record. Each call — prompts included — logs under its own `requestId`, and the client receives that value as `data.requestId` on the call's error envelope, so a reported failure resolves to its records.
 
@@ -316,7 +318,7 @@ Series are cheap to emit but expensive to store and query. The framework deliber
 
 | On metrics | On spans / logs only |
 |:-----------|:---------------------|
-| `mcp.resource.name` (URI template) | `mcp.resource.uri` (full URI with IDs) |
+| `mcp.resource.name` (URI template) | `mcp.resource.uri` (URI with IDs, capped at 1,024 characters), `mcp.resource.uri_length` |
 | `gen_ai.request.model` (bounded enum) | `mcp.tenant.id`, `mcp.client.id`, `mcp.auth.subject` |
 | Bounded enum / template strings | Per-request unique IDs, free-form user input, opaque tokens |
 

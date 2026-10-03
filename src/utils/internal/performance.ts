@@ -40,6 +40,7 @@ import {
   ATTR_MCP_RESOURCE_SIZE_BYTES,
   ATTR_MCP_RESOURCE_SUCCESS,
   ATTR_MCP_RESOURCE_URI,
+  ATTR_MCP_RESOURCE_URI_LENGTH,
   ATTR_MCP_TOOL_BATCH_FAILED,
   ATTR_MCP_TOOL_BATCH_SUCCEEDED,
   ATTR_MCP_TOOL_DURATION_MS,
@@ -613,7 +614,8 @@ const RESOURCE_KIND: MeasuredKind = {
  *   value to designate what `mcp.resource.output_bytes` measures. Without a call, the
  *   callback's return value is measured.
  * @param context - Request context extended with `resourceName`; used for span/log correlation.
- * @param meta - Resource metadata: URI and MIME type for span attributes.
+ * @param meta - Resource metadata for span attributes: the URI as recorded, its
+ *   uncut length when the recorded URI was cut (`mcp.resource.uri_length`), and the MIME type.
  * @returns A promise that resolves with the handler's return value or rejects with the original error.
  */
 export async function measureResourceExecution<T>(
@@ -622,7 +624,7 @@ export async function measureResourceExecution<T>(
     recordOutput: (payload: unknown) => void,
   ) => Promise<T>,
   context: RequestContext & { resourceName: string },
-  meta: { uri: string; mimeType: string },
+  meta: { uri: string; uriLength?: number; mimeType: string },
 ): Promise<T> {
   const { resourceName } = context;
 
@@ -630,7 +632,11 @@ export async function measureResourceExecution<T>(
     RESOURCE_KIND,
     resourceName,
     context,
-    { [ATTR_MCP_RESOURCE_URI]: meta.uri, [ATTR_MCP_RESOURCE_MIME_TYPE]: meta.mimeType },
+    {
+      [ATTR_MCP_RESOURCE_URI]: meta.uri,
+      ...(meta.uriLength !== undefined && { [ATTR_MCP_RESOURCE_URI_LENGTH]: meta.uriLength }),
+      [ATTR_MCP_RESOURCE_MIME_TYPE]: meta.mimeType,
+    },
     resourceLogicFn,
     {
       onSuccess: (span, outcome) => {
