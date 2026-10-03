@@ -4,8 +4,9 @@
  * (check 8, issues #230/#274), the identity checks (check 9, issue #231), and
  * the plugin marketplace manifests (check 10, issues #240/#393), and the
  * npm `files` exclusion of the built bundle (check 13, issue #469), manifest.json
- * version parity (check 14), and the Dockerfile stages that run JavaScript off
- * the build platform (check 15, #575).
+ * version parity (check 14), the Dockerfile stages that run JavaScript off
+ * the build platform (check 15, #575), and the launch shape of server.json npm
+ * entries (check 16, #622).
  * Imports the real implementation; no inline mirror.
  * @module tests/unit/scripts/lint-packaging.test
  */
@@ -31,6 +32,7 @@ import {
   checkManifestVersion,
   checkPluginManifests,
   checkReadmeVersionBadge,
+  checkServerJsonLaunch,
   NATIVE_BINDING_ENTRY,
 } from '../../../scripts/lint-packaging.js';
 
@@ -1032,5 +1034,236 @@ describe('lint-packaging · Dockerfile build platform (check 15, #575)', () => {
     );
     expect(errors[1]).toContain(`Dockerfile:${lineOf(lines, 'RUN bun install --production')} `);
     expect(errors[1]).toContain(`Dockerfile:${lineOf(lines, 'RUN bun add left-pad')} `);
+  });
+});
+
+describe('lint-packaging · server.json npm launch shape (check 16, #622)', () => {
+  const REPO_ROOT = join(import.meta.dirname, '..', '..', '..');
+
+  const LOG_LEVEL = {
+    name: 'MCP_LOG_LEVEL',
+    description: 'Sets the minimum log level for output.',
+    format: 'string',
+    isRequired: false,
+    default: 'info',
+  };
+  const TRANSPORT_HTTP = {
+    name: 'MCP_TRANSPORT_TYPE',
+    description: 'Selects the HTTP transport.',
+    format: 'string',
+    value: 'http',
+  };
+  const HTTP_TRANSPORT = { type: 'streamable-http', url: 'http://localhost:3010/mcp' };
+
+  /** One npm package entry; the defaults are a corrected stdio entry. */
+  const npmEntry = (overrides: Record<string, unknown> = {}): Record<string, unknown> => ({
+    registryType: 'npm',
+    registryBaseUrl: 'https://registry.npmjs.org',
+    identifier: '@acme/probe-mcp-server',
+    runtimeHint: 'npx',
+    version: '0.1.0',
+    environmentVariables: [LOG_LEVEL],
+    transport: { type: 'stdio' },
+    ...overrides,
+  });
+  const httpEntry = (environmentVariables: unknown[]): Record<string, unknown> =>
+    npmEntry({ environmentVariables, transport: HTTP_TRANSPORT });
+  const runScript = (script: string) => [
+    { type: 'positional', value: 'run' },
+    { type: 'positional', value: script },
+  ];
+
+  /** The two npm entries as `templates/server.json` shipped them through 0.13.10. */
+  const PRE_FIX_PACKAGES = [
+    npmEntry({ runtimeHint: 'node', packageArguments: runScript('start:stdio') }),
+    npmEntry({
+      runtimeHint: 'node',
+      packageArguments: runScript('start:http'),
+      transport: HTTP_TRANSPORT,
+    }),
+  ];
+
+  it.each(['templates/server.json', 'server.json'])(
+    'passes %s, whose npm entries take npx and no arguments',
+    (file) => {
+      const serverJson = JSON.parse(readFileSync(join(REPO_ROOT, file), 'utf8'));
+      expect(checkServerJsonLaunch(serverJson)).toEqual([]);
+      const npm = serverJson.packages.filter(
+        (entry: { registryType: string }) => entry.registryType === 'npm',
+      );
+      expect(npm).toHaveLength(2);
+      for (const entry of npm) {
+        expect(entry.runtimeHint).toBe('npx');
+        expect(entry.packageArguments).toBeUndefined();
+      }
+      const http = npm.find(
+        (entry: { transport: { type: string } }) => entry.transport.type === 'streamable-http',
+      );
+      expect(http.environmentVariables).toContainEqual(TRANSPORT_HTTP);
+    },
+  );
+
+  it('passes a corrected stdio + streamable-http pair', () => {
+    const packages = [npmEntry(), httpEntry([TRANSPORT_HTTP, LOG_LEVEL])];
+    expect(checkServerJsonLaunch({ packages })).toEqual([]);
+  });
+
+  it('fails the pre-fix template entries: both argument pairs and the missing transport', () => {
+    const errors = checkServerJsonLaunch({ packages: PRE_FIX_PACKAGES });
+    expect(errors).toHaveLength(3);
+    expect(errors.filter((e) => e.startsWith('server.json packages[0]'))).toHaveLength(1);
+    expect(errors.filter((e) => e.startsWith('server.json packages[1]'))).toHaveLength(2);
+  });
+
+  it('fails a streamable-http entry with no MCP_TRANSPORT_TYPE, naming the index and the fix', () => {
+    const errors = checkServerJsonLaunch({ packages: [npmEntry(), httpEntry([LOG_LEVEL])] });
+    expect(errors).toHaveLength(1);
+    expect(errors[0]).toContain('server.json packages[1]');
+    expect(errors[0]).toContain('does not set MCP_TRANSPORT_TYPE');
+    expect(errors[0]).toContain('"name": "MCP_TRANSPORT_TYPE"');
+    expect(errors[0]).toContain('"value": "http"');
+  });
+
+  it('fails an MCP_TRANSPORT_TYPE carried only as a user-editable default', () => {
+    const { value: _value, ...asDefault } = { ...TRANSPORT_HTTP, default: 'http' };
+    const errors = checkServerJsonLaunch({ packages: [httpEntry([asDefault])] });
+    expect(errors).toHaveLength(1);
+    expect(errors[0]).toContain('server.json packages[0]');
+    expect(errors[0]).toContain('"default": "http"');
+    expect(errors[0]).toContain('set "value": "http"');
+  });
+
+  it('fails an MCP_TRANSPORT_TYPE that declares neither value nor default', () => {
+    const { value: _value, ...bare } = TRANSPORT_HTTP;
+    const errors = checkServerJsonLaunch({ packages: [httpEntry([bare])] });
+    expect(errors).toHaveLength(1);
+    expect(errors[0]).toContain('has no "value"');
+    expect(errors[0]).toContain('set "value": "http"');
+  });
+
+  it.each(['stdio', 'HTTP', ''])('fails an MCP_TRANSPORT_TYPE value of %j', (value) => {
+    const errors = checkServerJsonLaunch({
+      packages: [httpEntry([{ ...TRANSPORT_HTTP, value }])],
+    });
+    expect(errors).toHaveLength(1);
+    expect(errors[0]).toContain('server.json packages[0]');
+    expect(errors[0]).toContain(`"value" is "${value}"`);
+    expect(errors[0]).toContain('set it to "http"');
+  });
+
+  it.each(['start:stdio', 'start:http', 'start'])(
+    'fails an npm entry carrying the run + %s pair, naming the index and the fix',
+    (script) => {
+      const errors = checkServerJsonLaunch({
+        packages: [npmEntry({ packageArguments: runScript(script) })],
+      });
+      expect(errors).toHaveLength(1);
+      expect(errors[0]).toContain('server.json packages[0]');
+      expect(errors[0]).toContain(`"run" "${script}"`);
+      expect(errors[0]).toContain('remove both arguments');
+    },
+  );
+
+  it('keeps arguments that are not the npm-script pair', () => {
+    const packages = [
+      npmEntry({
+        packageArguments: [
+          { type: 'named', name: '--port', default: '3000' },
+          { type: 'positional', value: 'run' },
+        ],
+      }),
+      npmEntry({ packageArguments: [{ type: 'positional', value: 'start:http' }] }),
+      npmEntry({
+        packageArguments: [
+          { type: 'named', name: 'run', value: 'start:http' },
+          { type: 'positional', value: 'start:stdio' },
+        ],
+      }),
+    ];
+    expect(checkServerJsonLaunch({ packages })).toEqual([]);
+  });
+
+  it('reports each npm entry on its own index and leaves other registries alone', () => {
+    const packages = [
+      npmEntry({ packageArguments: runScript('start:stdio') }),
+      {
+        registryType: 'oci',
+        identifier: 'ghcr.io/acme/probe-mcp-server',
+        packageArguments: runScript('start:http'),
+        transport: HTTP_TRANSPORT,
+      },
+      npmEntry(),
+      httpEntry([LOG_LEVEL]),
+    ];
+    const errors = checkServerJsonLaunch({ packages });
+    expect(errors).toHaveLength(2);
+    expect(errors[0]).toContain('server.json packages[0]');
+    expect(errors[0]).toContain('"run" "start:stdio"');
+    expect(errors[1]).toContain('server.json packages[3]');
+    expect(errors[1]).toContain('MCP_TRANSPORT_TYPE');
+  });
+
+  it('skips a server.json with no packages, or entries it cannot read', () => {
+    expect(checkServerJsonLaunch({})).toEqual([]);
+    expect(checkServerJsonLaunch({ packages: [] })).toEqual([]);
+    expect(checkServerJsonLaunch({ packages: 'npm' })).toEqual([]);
+    expect(checkServerJsonLaunch({ packages: [null, 'npm', 7] })).toEqual([]);
+  });
+
+  describe('standalone run', () => {
+    const SCRIPT = join(REPO_ROOT, 'scripts/lint-packaging.ts');
+    let dir: string | undefined;
+
+    afterEach(() => {
+      if (dir) rmSync(dir, { recursive: true, force: true });
+      dir = undefined;
+    });
+
+    function project(serverJson: unknown, withManifest: boolean): string {
+      dir = mkdtempSync(join(tmpdir(), 'lint-packaging-server-json-'));
+      writeFileSync(
+        join(dir, 'package.json'),
+        JSON.stringify({ name: 'probe-mcp-server', version: '0.1.0' }),
+      );
+      if (serverJson !== undefined) {
+        writeFileSync(join(dir, 'server.json'), JSON.stringify(serverJson));
+      }
+      if (withManifest) {
+        writeFileSync(
+          join(dir, 'manifest.json'),
+          JSON.stringify({ name: 'probe-mcp-server', version: '0.1.0' }),
+        );
+      }
+      return dir;
+    }
+
+    function lint(cwd: string): { code: number; out: string } {
+      const result = spawnSync('bun', ['run', SCRIPT], { cwd, encoding: 'utf8' });
+      return { code: result.status ?? -1, out: `${result.stdout}${result.stderr}` };
+    }
+
+    it.each([false, true])(
+      'fails the pre-fix template entries (manifest.json present: %s)',
+      (withManifest) => {
+        const { code, out } = lint(project({ packages: PRE_FIX_PACKAGES }, withManifest));
+        expect(code).toBe(1);
+        expect(out).toContain('server.json packages[0]');
+        expect(out).toContain('server.json packages[1]');
+        expect(out).toContain('MCP_TRANSPORT_TYPE');
+      },
+    );
+
+    it('passes the corrected template', () => {
+      const template = JSON.parse(readFileSync(join(REPO_ROOT, 'templates/server.json'), 'utf8'));
+      const { code, out } = lint(project(template, false));
+      expect(out).toContain('Packaging alignment OK.');
+      expect(code).toBe(0);
+    });
+
+    it('skips the check in a project without server.json', () => {
+      const { code, out } = lint(project(undefined, false));
+      expect(out).not.toContain('server.json packages');
+      expect(code).toBe(0);
+    });
   });
 });

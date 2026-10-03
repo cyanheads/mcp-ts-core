@@ -3,7 +3,8 @@
  * #343). The step used to run only when `manifest.json` or a plugin manifest
  * existed, so a project carrying just an `.mcpbignore` — the framework itself —
  * never had its bundle-content guards checked, and three unanchored dev-dir
- * patterns sat undetected behind a green `devcheck`.
+ * patterns sat undetected behind a green `devcheck`. `server.json` gates the
+ * step in its own right, for the npm launch-shape check (#622).
  *
  * `devcheck.ts` resolves its project root from the SCRIPT location
  * (`scripts/..`), not the cwd, so the faithful reproduction copies both
@@ -77,10 +78,46 @@ describe('devcheck Packaging gate (#343)', () => {
     rmSync(dir, { recursive: true, force: true });
   });
 
-  it('skips cleanly with no manifest, plugin manifest, .mcpbignore, README, or Dockerfile', () => {
+  it('skips cleanly with no manifest, plugin manifest, .mcpbignore, README, Dockerfile, or server.json', () => {
     const { code, out } = runPackagingCheck(dir);
     expect(code).toBe(0);
     expect(packagingLine(out)).toContain('SKIPPED');
+  });
+
+  describe('server.json as the only packaging input (#622)', () => {
+    it('runs on a server.json alone and fails a streamable-http entry that starts stdio', () => {
+      writeFileSync(
+        resolve(dir, 'server.json'),
+        `${JSON.stringify({
+          packages: [
+            {
+              registryType: 'npm',
+              identifier: 'scaffold',
+              version: '0.0.0',
+              packageArguments: [
+                { type: 'positional', value: 'run' },
+                { type: 'positional', value: 'start:http' },
+              ],
+              transport: { type: 'streamable-http', url: 'http://localhost:3010/mcp' },
+            },
+          ],
+        })}\n`,
+      );
+      const { code, out } = runPackagingCheck(dir);
+      expect(packagingLine(out)).not.toContain('SKIPPED');
+      expect(code).not.toBe(0);
+      expect(out).toContain('server.json packages[0]');
+      expect(out).toContain('MCP_TRANSPORT_TYPE');
+      expect(out).toContain('"run" "start:http"');
+    });
+
+    it('runs on the scaffold template server.json alone and passes it', () => {
+      copyFileSync(resolve(REPO_ROOT, 'templates', 'server.json'), resolve(dir, 'server.json'));
+      const { code, out } = runPackagingCheck(dir);
+      expect(packagingLine(out)).not.toContain('SKIPPED');
+      expect(out).toContain('Packaging alignment OK.');
+      expect(code).toBe(0);
+    });
   });
 
   describe('README as the only packaging input (#418)', () => {

@@ -80,6 +80,15 @@
  *      npm and the MCP Registry. `HEALTHCHECK`/`CMD`/`ENTRYPOINT` run at
  *      container start and never count. One error per stage, naming each
  *      offending line (issue #575). Skipped when there is no `Dockerfile`.
+ *  16. server.json npm launch shape: a registry client runs an npm entry as
+ *      `npx <identifier>@<version> <packageArguments>` with the entry's
+ *      `environmentVariables`, so the package's bin starts, never an npm
+ *      script. No npm entry may carry the positional `run` + `start:*` pair
+ *      (npm-script syntax the bin receives as ignored argv), and a
+ *      `streamable-http` npm entry must fix `MCP_TRANSPORT_TYPE` as
+ *      `"value": "http"` — absent, or only a user-editable `default`, the
+ *      server starts on stdio. Runs with or without `manifest.json`; skipped
+ *      when there is no `server.json` (issue #622).
  *
  * Every check skips cleanly when its input is absent — consumers who deleted
  * `manifest.json` for an HTTP-only deploy, or who haven't built a bundle,
@@ -990,6 +999,82 @@ export function checkDockerfileBuildPlatform(dockerfile: string): string[] {
     );
 }
 
+/** The environment entry a `streamable-http` npm package carries, as the mcp-ts-core scaffold writes it. */
+const HTTP_TRANSPORT_ENV =
+  '{ "name": "MCP_TRANSPORT_TYPE", "description": "Selects the HTTP transport.", "format": "string", "value": "http" }';
+
+/** An npm script name the `run` positional selects: `start` or `start:<variant>`. */
+const NPM_START_SCRIPT = /^start(?::|$)/;
+
+/** The `value` of a positional package argument; undefined for anything else. */
+function positionalValue(arg: unknown): string | undefined {
+  return isRecord(arg) && arg.type === 'positional' && typeof arg.value === 'string'
+    ? arg.value
+    : undefined;
+}
+
+/**
+ * Check 16: the launch shape of `server.json` npm entries. A registry client
+ * runs an npm entry as `npx <identifier>@<version> <packageArguments>` with the
+ * entry's `environmentVariables`, so the package's bin starts, never an npm
+ * script. A positional `run` followed by `start` or `start:<variant>` is
+ * npm-script syntax the bin receives as argv and ignores. The transport comes
+ * only from `MCP_TRANSPORT_TYPE`, so a `streamable-http` npm entry must fix it
+ * as `"value": "http"`: absent, it starts on stdio, and a `default` is
+ * user-editable. Entries of other registry types are left alone. Every error
+ * names the entry's index and the change that fixes it.
+ */
+export function checkServerJsonLaunch(serverJson: unknown): string[] {
+  const errors: string[] = [];
+  const packages =
+    isRecord(serverJson) && Array.isArray(serverJson.packages) ? serverJson.packages : [];
+
+  for (const [index, entry] of packages.entries()) {
+    if (!isRecord(entry) || entry.registryType !== 'npm') continue;
+    const label = `server.json packages[${index}]`;
+
+    const args: unknown[] = Array.isArray(entry.packageArguments) ? entry.packageArguments : [];
+    const runAt = args.findIndex(
+      (arg, i) =>
+        positionalValue(arg) === 'run' && NPM_START_SCRIPT.test(positionalValue(args[i + 1]) ?? ''),
+    );
+    if (runAt !== -1) {
+      errors.push(
+        `${label} packageArguments carry "run" "${positionalValue(args[runAt + 1])}" — npm-script ` +
+          'syntax: a registry client launches the entry as `npx <identifier>@<version> <packageArguments>`, ' +
+          "so the package's bin receives both as argv it ignores; remove both arguments",
+      );
+    }
+
+    if (!isRecord(entry.transport) || entry.transport.type !== 'streamable-http') continue;
+    const envVars: unknown[] = Array.isArray(entry.environmentVariables)
+      ? entry.environmentVariables
+      : [];
+    const transportVar = envVars.find((v) => isRecord(v) && v.name === 'MCP_TRANSPORT_TYPE');
+    if (!isRecord(transportVar)) {
+      errors.push(
+        `${label} (streamable-http) does not set MCP_TRANSPORT_TYPE, so the server it launches ` +
+          `starts on stdio; add ${HTTP_TRANSPORT_ENV} to its environmentVariables`,
+      );
+    } else if (transportVar.value === undefined) {
+      const reason =
+        transportVar.default === 'http'
+          ? '"default": "http" is user-editable, so the HTTP transport is not guaranteed'
+          : 'the server it launches starts on stdio';
+      errors.push(
+        `${label} (streamable-http) MCP_TRANSPORT_TYPE has no "value" — ${reason}; set "value": "http"`,
+      );
+    } else if (transportVar.value !== 'http') {
+      errors.push(
+        `${label} (streamable-http) MCP_TRANSPORT_TYPE "value" is "${String(transportVar.value)}" — ` +
+          'set it to "http"',
+      );
+    }
+  }
+
+  return errors;
+}
+
 /** Read `packaging.pluginManifests` from devcheck.config.json; default on. */
 function pluginManifestsEnabled(): boolean {
   const cfg = tryReadJson<{ packaging?: { pluginManifests?: boolean } }>(
@@ -1007,6 +1092,7 @@ async function main(): Promise<void> {
     resolve('package.json'),
   );
   const unscopedName = pkg?.name?.split('/').pop();
+  const serverJson = tryReadJson<ServerJson>(resolve('server.json'));
 
   // ── Manifest-dependent checks (1–4 + manifest identity) ──
   const manifestPath = resolve('manifest.json');
@@ -1039,7 +1125,6 @@ async function main(): Promise<void> {
 
     errors.push(...checkManifestUserConfigWiring(manifest));
 
-    const serverJson = tryReadJson<ServerJson>(resolve('server.json'));
     if (serverJson) {
       const manifestEnv = manifest.server?.mcp_config?.env ?? {};
       const manifestEnvKeys = new Set(Object.keys(manifestEnv));
@@ -1081,6 +1166,11 @@ async function main(): Promise<void> {
     errors.push(...checkBundleExcludedFromFiles(pkg?.files));
   } else {
     notes.push('No manifest.json — skipping manifest/server.json alignment checks.');
+  }
+
+  // ── server.json npm launch shape (check 16) ──
+  if (serverJson) {
+    errors.push(...checkServerJsonLaunch(serverJson));
   }
 
   // ── Bundle-content guard (checks 5–7) ──

@@ -4,7 +4,7 @@ description: >
   Finalize documentation and project metadata for a ship-ready MCP server. Use after implementation is complete, tests pass, and devcheck is clean. Safe to run at any stage — each step checks current state and only acts on what still needs work.
 metadata:
   author: cyanheads
-  version: "2.21"
+  version: "2.22"
   audience: external
   type: workflow
 ---
@@ -95,6 +95,7 @@ Key sync points:
 - `description` matches `package.json` description
 - `environmentVariables` reflect the server config Zod schema — server-specific required vars in both entries, transport vars only in HTTP entry
 - Two package entries: one for stdio, one for HTTP (if both transports supported)
+- npm entries carry `runtimeHint: "npx"` and no `packageArguments` — a registry client runs the package's bin, which ignores `run start:*` arguments; the HTTP entry fixes `MCP_TRANSPORT_TYPE` as `"value": "http"`, never as a `default`. `lint:packaging` fails the arguments and a missing or wrong transport value
 
 ### 7. GitHub Repository Metadata
 
@@ -204,7 +205,7 @@ If the project ships as an `.mcpb` bundle for Claude Desktop (check for `manifes
 **`package.json` scripts:**
 
 - `bundle` — builds the `.mcpb` (`mcpb pack`, then `scripts/clean-mcpb.ts` prunes dev deps and strips dependency-shipped agent docs)
-- `lint:packaging` — validates `manifest.json` ↔ `server.json` env var consistency, version parity for `manifest.json`, the plugin manifests, and the README badge, and the Dockerfile's stages: a stage not pinned to `$BUILDPLATFORM` must not run JavaScript while building — no `bun run build`, `bun -e`, or script, and no `bun install` once `bunfig.toml` is in the stage (run by `devcheck`, which gates the step on `manifest.json`, a plugin manifest, `.mcpbignore`, `README.md`, or `Dockerfile`)
+- `lint:packaging` — validates `manifest.json` ↔ `server.json` env var consistency, version parity for `manifest.json`, the plugin manifests, and the README badge, the launch shape of `server.json` npm entries (no `run start:*` arguments; a `streamable-http` entry sets `MCP_TRANSPORT_TYPE` to `"value": "http"`), and the Dockerfile's stages: a stage not pinned to `$BUILDPLATFORM` must not run JavaScript while building — no `bun run build`, `bun -e`, or script, and no `bun install` once `bunfig.toml` is in the stage (run by `devcheck`, which gates the step on `manifest.json`, a plugin manifest, `.mcpbignore`, `README.md`, `Dockerfile`, or `server.json`)
 
 **Cross-file consistency:**
 
@@ -270,7 +271,7 @@ Both must pass clean.
 - [ ] Agent protocol file accurate — no stale template content, real examples, structure matches reality
 - [ ] `.env.example` in sync with server config schema
 - [ ] `package.json` metadata complete (`description`, `mcpName`, `repository`, `author`, `keywords`, `engines`, `packageManager`)
-- [ ] `server.json` matches official MCP schema, versions synced, env vars current
+- [ ] `server.json` matches official MCP schema, versions synced, env vars current; npm entries launch through `npx` with no arguments, and the HTTP entry fixes `MCP_TRANSPORT_TYPE` as `"value": "http"`
 - [ ] GitHub repo description matches `package.json` description; topics ↔ keywords in sync
 - [ ] `bunfig.toml` present
 - [ ] Changelog current — either monolithic `CHANGELOG.md` (hand-edited, Keep a Changelog) or directory-based (`changelog/<minor>.x/<version>.md` + rollup regenerated and in sync)
