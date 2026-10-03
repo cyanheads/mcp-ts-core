@@ -93,6 +93,79 @@ const PATH_REJECTION_HINTS: Record<PathRejectionReason, string> = {
   absolute_path_disallowed: 'Provide a relative path instead of an absolute one.',
 };
 
+/**
+ * Each sensitive field lowercased with non-alphanumerics stripped, matched
+ * against a whole key. Module state: the singleton `Sanitization` and
+ * {@link maskSensitiveFields} read one list, which `setSensitiveFields` rebuilds.
+ */
+let sensitiveNames: ReadonlySet<string> = new Set();
+/** Each sensitive field lowercased, matched against each word of a key. */
+let sensitiveWords: ReadonlySet<string> = new Set();
+
+/** Lowercases a field name and strips every non-alphanumeric character. */
+function normalizeName(name: string): string {
+  return name.toLowerCase().replace(/[^a-z0-9]/g, '');
+}
+
+function setSensitiveNames(fields: readonly string[]): void {
+  sensitiveNames = new Set(fields.map(normalizeName).filter(Boolean));
+  sensitiveWords = new Set(fields.map((field) => field.toLowerCase()).filter(Boolean));
+}
+
+setSensitiveNames(DEFAULT_SENSITIVE_FIELDS);
+
+/**
+ * Whether `key` names a sensitive field: its normalized form equals one
+ * (`API_KEY` matches `apiKey`), or one of its camelCase, snake_case, or
+ * kebab-case words does (`accessToken` matches `token`).
+ */
+function isSensitiveKey(key: string): boolean {
+  if (sensitiveNames.has(normalizeName(key))) return true;
+  return key
+    .replace(/([A-Z])/g, ' $1')
+    .toLowerCase()
+    .split(/[\s_-]+/)
+    .some((word) => sensitiveWords.has(word));
+}
+
+/**
+ * Copies `fields` with the value of every sensitive field replaced by
+ * `'[REDACTED]'`, at any depth, matching keys as `sanitizeForLogging` does —
+ * fields added with `setSensitiveFields` included. The copy is what
+ * `JSON.stringify` reads from the input (an object's `toJSON()` result, else its
+ * own enumerable properties), so it serializes as the input would, minus the
+ * masked values. Nothing passes through `structuredClone`, which rejects a `URL`
+ * or a function. A reference back to an enclosing object becomes `'[Circular]'`.
+ * The input is never modified.
+ *
+ * @internal Masks the `ctx.log` mirror to the client. Not part of the public API.
+ */
+export function maskSensitiveFields(fields: Record<string, unknown>): Record<string, unknown> {
+  return maskEntries(fields, new Set([fields]));
+}
+
+/** Masks an object's own enumerable entries; `ancestors` holds every object enclosing them. */
+function maskEntries(object: object, ancestors: Set<object>): Record<string, unknown> {
+  const masked: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(object)) {
+    masked[key] = isSensitiveKey(key) ? '[REDACTED]' : maskValue(value, ancestors);
+  }
+  return masked;
+}
+
+function maskValue(value: unknown, ancestors: Set<object>): unknown {
+  const toJSON = isRecord(value) ? value.toJSON : undefined;
+  const json: unknown = typeof toJSON === 'function' ? toJSON.call(value) : value;
+  if (json === null || typeof json !== 'object') return json;
+  if (ancestors.has(json)) return '[Circular]';
+  ancestors.add(json);
+  const masked = Array.isArray(json)
+    ? json.map((item: unknown) => maskValue(item, ancestors))
+    : maskEntries(json, ancestors);
+  ancestors.delete(json);
+  return masked;
+}
+
 // Dynamically import 'path' only in Node.js environments.
 // Top-level await ensures the module is loaded before any sanitizePath call.
 let pathModule: typeof import('node:path') | undefined;
@@ -280,12 +353,7 @@ export class Sanitization {
   };
 
   /** @private */
-  private constructor() {
-    this.rebuildSensitiveSets();
-  }
-
-  private normalizedSensitiveSet!: Set<string>;
-  private wordSensitiveSet!: Set<string>;
+  private constructor() {}
 
   /**
    * Returns the singleton instance of `Sanitization`, creating it on first call.
@@ -305,9 +373,10 @@ export class Sanitization {
   }
 
   /**
-   * Extends the list of sensitive field names used by `sanitizeForLogging`.
+   * Extends the list of sensitive field names used by `sanitizeForLogging` and by the
+   * masking of every `ctx.log` record mirrored to the client.
    * New names are merged with the existing list (deduplication applied, case-insensitive).
-   * Changes take effect immediately on subsequent `sanitizeForLogging` calls.
+   * Changes take effect immediately on subsequent calls.
    *
    * @param fields - Field names to add to the sensitive list (e.g., `['myApiKey', 'session_id']`).
    * @returns `void`
@@ -322,7 +391,7 @@ export class Sanitization {
     this.sensitiveFields = [
       ...new Set([...this.sensitiveFields, ...fields.map((f) => f.toLowerCase())]),
     ];
-    this.rebuildSensitiveSets();
+    setSensitiveNames(this.sensitiveFields);
     const logContext = requestContextService.createRequestContext({
       operation: 'Sanitization.setSensitiveFields',
       additionalContext: {
@@ -973,45 +1042,13 @@ export class Sanitization {
     for (const key in obj) {
       if (Object.hasOwn(obj, key)) {
         const value = obj[key];
-        const normalizedKey = Sanitization.normalizeName(key);
-        // Split into words for token-based matching (camelCase, snake_case, kebab-case)
-        const keyWords = key
-          .replace(/([A-Z])/g, ' $1')
-          .toLowerCase()
-          .split(/[\s_-]+/)
-          .filter(Boolean);
-
-        const isExactSensitive = this.normalizedSensitiveSet.has(normalizedKey);
-        const isWordSensitive = keyWords.some((w) => this.wordSensitiveSet.has(w));
-        const isSensitive = isExactSensitive || isWordSensitive;
-
-        if (isSensitive) {
+        if (isSensitiveKey(key)) {
           obj[key] = '[REDACTED]';
         } else if (value && typeof value === 'object') {
           this.redactSensitiveFields(value);
         }
       }
     }
-  }
-
-  /**
-   * Normalizes a field name for sensitive-key lookup by lowercasing and stripping
-   * all non-alphanumeric characters. Used for exact-match detection in `redactSensitiveFields`.
-   * @param str - The raw field name string.
-   * @returns Lowercased alphanumeric-only version of `str`.
-   * @private
-   */
-  private static normalizeName(str: string): string {
-    return str.toLowerCase().replace(/[^a-z0-9]/g, '');
-  }
-
-  private rebuildSensitiveSets(): void {
-    this.normalizedSensitiveSet = new Set(
-      this.sensitiveFields.map((f) => Sanitization.normalizeName(f)).filter(Boolean),
-    );
-    this.wordSensitiveSet = new Set(
-      this.sensitiveFields.map((f) => f.toLowerCase()).filter(Boolean),
-    );
   }
 }
 

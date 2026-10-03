@@ -632,6 +632,90 @@ describe('Logger', () => {
 
       expect(mockLogger.error.mock.calls.length).toBeGreaterThan(initialErrorCalls);
     });
+
+    /** The eight levels, most severe first: RFC 5424 order. */
+    const RFC5424_ORDER = [
+      'emerg',
+      'alert',
+      'crit',
+      'error',
+      'warning',
+      'notice',
+      'info',
+      'debug',
+    ] as const satisfies readonly McpLogLevel[];
+
+    /** The pino method each level is emitted through. */
+    const PINO_METHOD = {
+      emerg: 'fatal',
+      alert: 'fatal',
+      crit: 'error',
+      error: 'error',
+      warning: 'warn',
+      notice: 'info',
+      info: 'info',
+      debug: 'debug',
+    } as const satisfies Record<McpLogLevel, string>;
+
+    /** The levels at `floor` or more severe — what a `floor` start level admits. */
+    const admittedAt = (floor: McpLogLevel): McpLogLevel[] =>
+      RFC5424_ORDER.slice(0, RFC5424_ORDER.indexOf(floor) + 1);
+
+    it.each(RFC5424_ORDER)(
+      'at a %s floor, writes exactly the records at that level or more severe',
+      async (floor) => {
+        await logger.initialize(floor);
+        const mockLogger = (await import('pino')).default() as any;
+        const ctx = { requestId: `floor-${floor}`, timestamp: '2026-10-03T00:00:00.000Z' };
+
+        for (const level of RFC5424_ORDER) logger[level](`floor ${floor}: ${level}`, ctx);
+
+        const written = RFC5424_ORDER.filter((level) =>
+          mockLogger[PINO_METHOD[level]].mock.calls.some(
+            ([, msg]: [unknown, string]) => msg === `floor ${floor}: ${level}`,
+          ),
+        );
+        expect(written).toEqual(admittedAt(floor));
+      },
+    );
+
+    it.each(RFC5424_ORDER)(
+      'isLevelEnabled at a %s floor admits that level and every more severe one',
+      async (floor) => {
+        await logger.initialize(floor);
+
+        const enabled = RFC5424_ORDER.filter((level) => logger.isLevelEnabled(level));
+
+        expect(enabled).toEqual(admittedAt(floor));
+      },
+    );
+
+    it('keeps notice and info apart although pino emits both at info', async () => {
+      await logger.initialize('notice');
+      const mockLogger = (await import('pino')).default() as any;
+      mockLogger.info.mockClear();
+
+      logger.info('notice floor: info record');
+      logger.notice('notice floor: notice record');
+
+      expect(mockLogger.info.mock.calls.map(([, msg]: [unknown, string]) => msg)).toEqual([
+        'notice floor: notice record',
+      ]);
+      expect(logger.isLevelEnabled('info')).toBe(false);
+      expect(logger.isLevelEnabled('notice')).toBe(true);
+    });
+
+    it('follows setLevel() in both directions', async () => {
+      await logger.initialize('info');
+      expect(logger.isLevelEnabled('debug')).toBe(false);
+
+      logger.setLevel('debug');
+      expect(logger.isLevelEnabled('debug')).toBe(true);
+
+      logger.setLevel('warning');
+      expect(logger.isLevelEnabled('info')).toBe(false);
+      expect(logger.isLevelEnabled('warning')).toBe(true);
+    });
   });
 
   describe('OTel log sink', () => {

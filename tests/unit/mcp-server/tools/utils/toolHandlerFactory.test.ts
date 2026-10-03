@@ -45,6 +45,7 @@ const { mockConfig, mockLogger } = vi.hoisted(() => ({
     crit: vi.fn(),
     emerg: vi.fn(),
     child: vi.fn(),
+    isLevelEnabled: vi.fn((_level: string) => true),
   },
 }));
 
@@ -3895,6 +3896,40 @@ describe('createToolHandler', () => {
       const { log } = await logOnce((ctx) => ctx.log.info('bare'));
 
       expect(log).toHaveBeenCalledWith('info', { message: 'bare' });
+    });
+
+    // #621 — the mirror ignored the logger's level, so MCP_LOG_LEVEL bounded
+    // only the process log.
+    it("skips a level the logger's level check rejects, after the process log saw it", async () => {
+      mockLogger.isLevelEnabled.mockImplementation((level: string) => level !== 'debug');
+      try {
+        const { log } = await logOnce((ctx) => {
+          ctx.log.debug('below the floor', { k: 1 });
+          ctx.log.info('at the floor', { k: 2 });
+        });
+
+        expect(mockLogger.isLevelEnabled).toHaveBeenCalledWith('debug');
+        expect(mockLogger.debug).toHaveBeenCalledWith('below the floor', expect.anything());
+        expect(log.mock.calls).toEqual([['info', { message: 'at the floor', k: 2 }]]);
+      } finally {
+        mockLogger.isLevelEnabled.mockImplementation(() => true);
+      }
+    });
+
+    // #630 — the mirror sent the caller's data unredacted.
+    it('masks sensitive fields before the payload reaches ctx.mcpReq.log', async () => {
+      const { log } = await logOnce((ctx) =>
+        ctx.log.info('upstream call', {
+          apiKey: 'sk-live-123',
+          request: { headers: { authorization: 'Bearer abc', accept: 'application/json' } },
+        }),
+      );
+
+      expect(log).toHaveBeenCalledWith('info', {
+        message: 'upstream call',
+        apiKey: '[REDACTED]',
+        request: { headers: { authorization: '[REDACTED]', accept: 'application/json' } },
+      });
     });
 
     it('still writes to the process logger', async () => {

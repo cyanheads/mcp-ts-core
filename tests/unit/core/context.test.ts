@@ -36,6 +36,7 @@ import { InMemoryProvider } from '@/storage/providers/inMemory/inMemoryProvider.
 import { type ErrorContract, JsonRpcErrorCode, McpError } from '@/types-global/errors.js';
 import { logger } from '@/utils/internal/logger.js';
 import type { RequestContext } from '@/utils/internal/requestContext.js';
+import { sanitization } from '@/utils/security/sanitization.js';
 
 // ---------------------------------------------------------------------------
 // Local fixtures — no shared test helper covers ContextDeps construction, so
@@ -1160,6 +1161,160 @@ describe('ContextLogger — wire sink (ctx.mcpReq.log mirror)', () => {
 
     expect(infoSpy).toHaveBeenCalledWith('no wire', expect.anything());
     expect(errorSpy).toHaveBeenCalledWith('no wire either', expect.anything());
+  });
+
+  it('serializes dates, URLs, arrays, and nested values exactly as the data would', () => {
+    const { ctx, wireLog } = buildWireCtx();
+    class Upstream {
+      region = 'us-west';
+      describe() {
+        return this.region;
+      }
+    }
+    const data = {
+      when: new Date(0),
+      url: new URL('https://api.example.test/v1/items?page=2'),
+      pages: [1, { cursor: 'c2', seen: [true, null] }],
+      nested: { level1: { level2: { level3: 'deep' } } },
+      cause: new Error('upstream failed'),
+      upstream: new Upstream(),
+      seen: new Map([['a', 1]]),
+      skipped: undefined,
+    };
+
+    ctx.log.info('shapes', data);
+
+    const [[, payload]] = wireLog.mock.calls as unknown as [[string, unknown]];
+    expect(JSON.stringify(payload)).toBe(JSON.stringify({ message: 'shapes', ...data }));
+  });
+
+  it('never fails the handler on a value whose toJSON throws', () => {
+    const { ctx } = buildWireCtx();
+    vi.spyOn(logger, 'info').mockImplementation(() => {});
+    const exploding = {
+      toJSON() {
+        throw new Error('cannot serialize');
+      },
+    };
+
+    expect(() => ctx.log.info('odd value', { exploding })).not.toThrow();
+  });
+
+  // #630 — the wire payload went out with the caller's data unredacted.
+  describe('sensitive-field masking (#630)', () => {
+    it('masks sensitive fields at the top level and nested, leaving the rest as written', () => {
+      const { ctx, wireLog } = buildWireCtx();
+
+      ctx.log.info('upstream call', {
+        apiKey: 'sk-live-123',
+        password: 'hunter2',
+        query: 'aspirin',
+        upstream: { apiKey: 'sk-live-456', status: 200, auth: { token: 't-1', scheme: 'Bearer' } },
+      });
+
+      expect(wireLog).toHaveBeenCalledWith('info', {
+        message: 'upstream call',
+        apiKey: '[REDACTED]',
+        password: '[REDACTED]',
+        query: 'aspirin',
+        upstream: {
+          apiKey: '[REDACTED]',
+          status: 200,
+          auth: { token: '[REDACTED]', scheme: 'Bearer' },
+        },
+      });
+    });
+
+    it('masks past the depths the process log redact paths reach, through arrays and toJSON', () => {
+      const { ctx, wireLog } = buildWireCtx();
+
+      ctx.log.debug('deep', {
+        a: { b: { c: { d: { secret: 's-4', kept: 4 } } } },
+        attempts: [{ token: 't-1' }, { token: 't-2', ok: true }, ['plain', { cookie: 'c' }]],
+        credentials: { toJSON: () => ({ client_secret: 'cs', clientId: 'id-1' }) },
+      });
+
+      expect(wireLog).toHaveBeenCalledWith('debug', {
+        message: 'deep',
+        a: { b: { c: { d: { secret: '[REDACTED]', kept: 4 } } } },
+        attempts: [
+          { token: '[REDACTED]' },
+          { token: '[REDACTED]', ok: true },
+          ['plain', { cookie: '[REDACTED]' }],
+        ],
+        credentials: { client_secret: '[REDACTED]', clientId: 'id-1' },
+      });
+    });
+
+    it('masks any casing or separator of a sensitive name, and a name it is one word of', () => {
+      const { ctx, wireLog } = buildWireCtx();
+
+      ctx.log.warning('variants', {
+        API_KEY: 'k-1',
+        'Api-Key': 'k-2',
+        Authorization: 'Bearer x',
+        accessToken: 'at-1',
+        tokenizer: 'kept',
+      });
+
+      expect(wireLog).toHaveBeenCalledWith('warning', {
+        message: 'variants',
+        API_KEY: '[REDACTED]',
+        'Api-Key': '[REDACTED]',
+        Authorization: '[REDACTED]',
+        accessToken: '[REDACTED]',
+        tokenizer: 'kept',
+      });
+    });
+
+    it('masks a field registered through sanitization.setSensitiveFields', () => {
+      sanitization.setSensitiveFields(['upstreamSignature']);
+      const { ctx, wireLog } = buildWireCtx();
+
+      ctx.log.notice('signed', {
+        upstreamSignature: 'sig-1',
+        response: { upstream_signature: 'sig-2', signatureAlgorithm: 'HS256' },
+      });
+
+      expect(wireLog).toHaveBeenCalledWith('notice', {
+        message: 'signed',
+        upstreamSignature: '[REDACTED]',
+        response: { upstream_signature: '[REDACTED]', signatureAlgorithm: 'HS256' },
+      });
+    });
+
+    it('keeps message and error framework-owned and leaves the caller data unmodified', () => {
+      const { ctx, wireLog } = buildWireCtx();
+      vi.spyOn(logger, 'error').mockImplementation(() => {});
+      const data = { message: 'caller text', password: 'p-1', nested: { token: 't-1' } };
+      const before = structuredClone(data);
+
+      ctx.log.error('login failed', new Error('denied'), data);
+
+      expect(wireLog).toHaveBeenCalledWith('error', {
+        message: 'login failed',
+        password: '[REDACTED]',
+        nested: { token: '[REDACTED]' },
+        error: 'denied',
+      });
+      expect(data).toEqual(before);
+    });
+
+    it('delivers a payload that refers back to itself, marking the cycle', () => {
+      const { ctx, wireLog } = buildWireCtx();
+      const node: Record<string, unknown> = { name: 'root', apiKey: 'k' };
+      node.self = node;
+      const shared = { id: 'shared' };
+
+      ctx.log.info('cyclic', { node, left: shared, right: shared });
+
+      expect(wireLog).toHaveBeenCalledWith('info', {
+        message: 'cyclic',
+        node: { name: 'root', apiKey: '[REDACTED]', self: '[Circular]' },
+        left: { id: 'shared' },
+        right: { id: 'shared' },
+      });
+    });
   });
 });
 

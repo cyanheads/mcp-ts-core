@@ -62,6 +62,7 @@ const {
       crit: vi.fn(),
       emerg: vi.fn(),
       child: vi.fn(),
+      isLevelEnabled: vi.fn(() => true),
     },
     mockUpDownCounterAdd: vi.fn(),
   };

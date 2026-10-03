@@ -176,6 +176,30 @@ describe('records logged before initialize', () => {
     expect(stderr).not.toHaveBeenCalled();
   });
 
+  it('pass the level check at every level until the level is known', async () => {
+    const { logger } = await freshLogger();
+    const levels = [
+      'debug',
+      'info',
+      'notice',
+      'warning',
+      'error',
+      'crit',
+      'alert',
+      'emerg',
+    ] as const;
+
+    expect(levels.filter((level) => !logger.isLevelEnabled(level))).toEqual([]);
+
+    await logger.initialize('warning');
+
+    expect(levels.filter((level) => !logger.isLevelEnabled(level))).toEqual([
+      'debug',
+      'info',
+      'notice',
+    ]);
+  });
+
   it('are dropped rather than buffered after the logger has been closed', async () => {
     const { logger, pino } = await freshLogger();
 

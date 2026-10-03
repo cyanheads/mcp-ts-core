@@ -2,13 +2,21 @@
  * @fileoverview Wire-level regressions for the decisions taken in the SDK v2
  * migration's wire-tightening review (#305 Phase 1). Each case pins a byte the
  * framework now puts on the wire, driven through a real MCP client so the
- * assertions are on what a caller actually receives.
+ * assertions are on what a caller actually receives. The `MCP_LOG_LEVEL` floor
+ * on the `ctx.log` mirror (#621) is set at startup, so its cases run a built
+ * fixture as a real process over stdio and both HTTP session modes.
  * @module tests/integration/wire-conformance.int.test
  */
-import { Client, ProtocolErrorCode } from '@modelcontextprotocol/client';
+import { resolve } from 'node:path';
+import {
+  Client,
+  ProtocolErrorCode,
+  StreamableHTTPClientTransport,
+} from '@modelcontextprotocol/client';
+import { StdioClientTransport } from '@modelcontextprotocol/client/stdio';
 import { InMemoryTransport, McpServer } from '@modelcontextprotocol/server';
 import { AjvJsonSchemaValidator } from '@modelcontextprotocol/server/validators/ajv';
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 import { z } from 'zod';
 import { config } from '@/config/index.js';
 import { buildServerManifest } from '@/core/serverManifest.js';
@@ -26,6 +34,10 @@ import { InMemoryProvider } from '@/storage/providers/inMemory/inMemoryProvider.
 import { JsonRpcErrorCode, McpError } from '@/types-global/errors.js';
 import { ErrorHandler } from '@/utils/internal/error-handler/errorHandler.js';
 import { logger } from '@/utils/internal/logger.js';
+import { sanitization } from '@/utils/security/sanitization.js';
+import { MCP_HEADERS, parseSSEEvents } from '../helpers/http-helpers.js';
+import { exchange } from '../helpers/node-http.js';
+import { type ServerHandle, startServerFromEntrypoint } from '../helpers/server-process.js';
 
 /** Proves an argument rejection never reaches the handler (#377). */
 let handlerCalls = 0;
@@ -151,6 +163,32 @@ const failingPrompt = prompt('wire_failing', {
   },
 });
 
+/**
+ * The call-site data `wire_log` logs. Module-level so a case can show the wire
+ * mirror masks a copy and leaves the caller's object as it was (#630).
+ * `accountNumber` matches no default sensitive field; the case registers it.
+ */
+const wireLogData = {
+  apiKey: 'sk-wire-630',
+  password: 'hunter2',
+  accountNumber: '0000-630',
+  region: 'us-east-1',
+  upstream: { apiKey: 'sk-wire-630-nested', password: 'hunter3', status: 503 },
+};
+
+const logTool = tool('wire_log', {
+  description: 'Logs an upstream call whose data carries credentials.',
+  input: z.object({}),
+  output: z.object({ ok: z.boolean().describe('Always true.') }),
+  handler(_input, ctx) {
+    ctx.log.info('upstream call', wireLogData);
+    ctx.log.error('upstream call failed', new Error('upstream answered 503'), {
+      token: 'tok-wire-630',
+    });
+    return { ok: true };
+  },
+});
+
 async function connect() {
   const server = new McpServer(
     { name: 'wire-conformance', version: '0.0.0' },
@@ -166,7 +204,7 @@ async function connect() {
   const subscriptions = installResourceSubscriptions(server);
   const services = { logger, storage: new StorageService(new InMemoryProvider()) };
   // `searchTool` stays first: the schema assertions below read `tools[0]`.
-  await new ToolRegistry([searchTool, facetTool, serviceTool], services).registerAll(
+  await new ToolRegistry([searchTool, facetTool, serviceTool, logTool], services).registerAll(
     server,
     subscriptions,
   );
@@ -561,6 +599,43 @@ describe('Phase 1 wire conformance', () => {
         }),
       );
     });
+
+    it('masks sensitive fields in the records it mirrors, registered ones included (#630)', async () => {
+      sanitization.setSensitiveFields(['accountNumber']);
+      const asLogged = structuredClone(wireLogData);
+      const client = await session();
+      const messages: WireMessage[] = [];
+      client.setNotificationHandler('notifications/message', (notification) => {
+        messages.push(notification.params as WireMessage);
+      });
+
+      const result = await client.callTool({ name: 'wire_log', arguments: {} });
+
+      expect(result.isError).not.toBe(true);
+      expect(messages).toEqual([
+        {
+          level: 'info',
+          data: {
+            message: 'upstream call',
+            apiKey: '[REDACTED]',
+            password: '[REDACTED]',
+            accountNumber: '[REDACTED]',
+            region: 'us-east-1',
+            upstream: { apiKey: '[REDACTED]', password: '[REDACTED]', status: 503 },
+          },
+        },
+        {
+          level: 'error',
+          data: {
+            message: 'upstream call failed',
+            token: '[REDACTED]',
+            error: 'upstream answered 503',
+          },
+        },
+      ]);
+      // The mirror masked a copy: the handler's own object still holds every value.
+      expect(wireLogData).toEqual(asLogged);
+    });
   });
 
   describe('resource and prompt execution', () => {
@@ -733,5 +808,206 @@ describe('Phase 1 wire conformance', () => {
       expect(manifest.protocol.supportedVersions[0]).toBe(MODERN_PROTOCOL_REVISION);
       expect(manifest.protocol.supportedVersions).toContain('2025-06-18');
     });
+  });
+});
+
+/** A fixture whose `echo_logged` handler writes one `ctx.log.info` record. */
+const LOG_FIXTURE = resolve(process.cwd(), 'tests/fixtures/stdio-log-server.js');
+
+/** A transport a 2025-era client reaches the fixture over. */
+type Leg = 'stateful HTTP' | 'stateless HTTP' | 'stdio';
+type HttpMode = 'stateful' | 'stateless';
+
+/** A `notifications/message` as the client received it. */
+type WireMessage = { data: unknown; level: string };
+
+/** One JSON-RPC message from a 2026-07-28 response stream. */
+type StreamMessage = {
+  id?: number;
+  method?: string;
+  params?: WireMessage;
+  result?: { structuredContent?: unknown };
+};
+
+/** What `echo_logged` mirrors when its record passes every level. */
+const ECHO_MESSAGE: WireMessage = {
+  level: 'info',
+  data: { message: 'echo_logged handler ran', echoed: 'ping' },
+};
+
+/**
+ * Runs the log fixture at one `MCP_LOG_LEVEL` for the enclosing `describe`: an
+ * HTTP server per session mode for the whole block, and a stdio process per
+ * client. Each call reads its notifications once its result is in — the same
+ * stream carries the result after any record the handler mirrored.
+ */
+function fixtureAt(floor: 'info' | 'warning') {
+  const servers = new Map<HttpMode, ServerHandle>();
+  const clients: Client[] = [];
+
+  beforeAll(async () => {
+    // One at a time: concurrent starts can be handed the same free port.
+    for (const mode of ['stateful', 'stateless'] as const) {
+      servers.set(
+        mode,
+        await startServerFromEntrypoint(LOG_FIXTURE, 'http', {
+          MCP_LOG_LEVEL: floor,
+          MCP_SESSION_MODE: mode,
+        }),
+      );
+    }
+  });
+
+  afterEach(async () => {
+    await Promise.all(clients.splice(0).map((client) => client.close().catch(() => undefined)));
+  });
+
+  afterAll(async () => {
+    await Promise.all([...servers.values()].map((server) => server.kill()));
+  });
+
+  const portOf = (mode: HttpMode): number => {
+    const port = servers.get(mode)?.port;
+    if (port === undefined) throw new Error(`The ${mode} fixture server is not running.`);
+    return port;
+  };
+
+  /** Connects a 2025-era client over `leg` and returns a call that yields what it mirrored. */
+  async function connect(leg: Leg) {
+    const transport =
+      leg === 'stdio'
+        ? new StdioClientTransport({
+            command: process.execPath,
+            args: [LOG_FIXTURE],
+            env: { ...process.env, MCP_LOG_LEVEL: floor, MCP_TRANSPORT_TYPE: 'stdio' },
+            stderr: 'ignore',
+          })
+        : new StreamableHTTPClientTransport(
+            new URL(
+              `http://127.0.0.1:${portOf(leg === 'stateful HTTP' ? 'stateful' : 'stateless')}/mcp`,
+            ),
+          );
+    const client = new Client({ name: 'wire-log-floor', version: '0.0.0' });
+    const messages: WireMessage[] = [];
+    client.setNotificationHandler('notifications/message', (notification) => {
+      messages.push(notification.params as WireMessage);
+    });
+    clients.push(client);
+    await client.connect(transport);
+
+    const echo = async (): Promise<WireMessage[]> => {
+      const seen = messages.length;
+      const result = await client.callTool({ name: 'echo_logged', arguments: { message: 'ping' } });
+      // The handler ran, so its `ctx.log.info` call was made.
+      expect(result.structuredContent).toEqual({ message: 'ping' });
+      return messages.slice(seen);
+    };
+    return { client, echo };
+  }
+
+  /**
+   * POSTs one 2026-07-28 `echo_logged` call, with `logLevel` in its envelope
+   * when given, and returns the `notifications/message` its response stream
+   * carried. The stream closes on the result, so it is read whole.
+   */
+  async function modernEcho(mode: HttpMode, logLevel?: 'debug' | 'info'): Promise<WireMessage[]> {
+    const response = await exchange(portOf(mode), {
+      method: 'POST',
+      path: '/mcp',
+      headers: {
+        ...MCP_HEADERS,
+        'MCP-Protocol-Version': MODERN_PROTOCOL_REVISION,
+        'Mcp-Method': 'tools/call',
+        'Mcp-Name': 'echo_logged',
+      },
+      body: JSON.stringify({
+        jsonrpc: '2.0',
+        id: 1,
+        method: 'tools/call',
+        params: {
+          name: 'echo_logged',
+          arguments: { message: 'ping' },
+          _meta: {
+            'io.modelcontextprotocol/protocolVersion': MODERN_PROTOCOL_REVISION,
+            'io.modelcontextprotocol/clientInfo': { name: 'wire-log-floor', version: '0.0.0' },
+            'io.modelcontextprotocol/clientCapabilities': {},
+            ...(logLevel && { 'io.modelcontextprotocol/logLevel': logLevel }),
+          },
+        },
+      }),
+    });
+    expect(response.status, response.body).toBe(200);
+    const stream: StreamMessage[] = String(response.headers['content-type']).includes(
+      'text/event-stream',
+    )
+      ? parseSSEEvents(response.body).map((event) => JSON.parse(event.data) as StreamMessage)
+      : [JSON.parse(response.body) as StreamMessage];
+    expect(stream.find((message) => message.id === 1)?.result?.structuredContent).toEqual({
+      message: 'ping',
+    });
+    return stream.flatMap((message) =>
+      message.method === 'notifications/message' && message.params ? [message.params] : [],
+    );
+  }
+
+  return { connect, modernEcho };
+}
+
+describe('MCP_LOG_LEVEL floors the ctx.log wire mirror (#621)', () => {
+  const legs: Leg[] = ['stdio', 'stateful HTTP', 'stateless HTTP'];
+  const modes: HttpMode[] = ['stateful', 'stateless'];
+
+  describe('under a warning floor', () => {
+    const fixture = fixtureAt('warning');
+
+    it.each(legs)(
+      'mirrors no info record on %s, before or after logging/setLevel debug',
+      async (leg) => {
+        const { client, echo } = await fixture.connect(leg);
+
+        expect(await echo()).toEqual([]);
+        // A client level below the floor never widens it.
+        await client.setLoggingLevel('debug');
+        expect(await echo()).toEqual([]);
+      },
+    );
+
+    it.each(modes)(
+      'mirrors no info record to a %s-mode 2026-07-28 request asking for debug',
+      async (mode) => {
+        expect(await fixture.modernEcho(mode, 'debug')).toEqual([]);
+      },
+    );
+  });
+
+  describe('under an info floor', () => {
+    const fixture = fixtureAt('info');
+
+    it.each(legs)('mirrors the info record on %s with no client level', async (leg) => {
+      const { echo } = await fixture.connect(leg);
+
+      expect(await echo()).toEqual([ECHO_MESSAGE]);
+    });
+
+    it.each(['stdio', 'stateful HTTP'] as const)(
+      'still narrows to logging/setLevel warning on %s',
+      async (leg) => {
+        const { client, echo } = await fixture.connect(leg);
+
+        await client.setLoggingLevel('warning');
+        expect(await echo()).toEqual([]);
+      },
+    );
+
+    it.each(modes)('mirrors it to a %s-mode 2026-07-28 request asking for info', async (mode) => {
+      expect(await fixture.modernEcho(mode, 'info')).toEqual([ECHO_MESSAGE]);
+    });
+
+    it.each(modes)(
+      'mirrors nothing to a %s-mode 2026-07-28 request that names no level',
+      async (mode) => {
+        expect(await fixture.modernEcho(mode)).toEqual([]);
+      },
+    );
   });
 });

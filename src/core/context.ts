@@ -24,12 +24,13 @@ import {
   JsonRpcErrorCode,
   McpError,
 } from '@/types-global/errors.js';
-import type { Logger } from '@/utils/internal/logger.js';
+import type { Logger, McpLogLevel } from '@/utils/internal/logger.js';
 import {
   type AuthContext,
   type RequestContext,
   withExtra,
 } from '@/utils/internal/requestContext.js';
+import { maskSensitiveFields } from '@/utils/security/sanitization.js';
 
 // Re-export AuthContext so consumers can type against it from ./context
 export type { AuthContext };
@@ -882,8 +883,9 @@ export interface ContextDeps {
   uri?: URL | undefined;
   /**
    * Mirrors `ctx.log` onto the MCP wire as `notifications/message`
-   * (`ctx.mcpReq.log`). Absent outside a live request scope; a rejected send is
-   * swallowed — a log that cannot flush must never fail the handler.
+   * (`ctx.mcpReq.log`) — only a record `logger.isLevelEnabled` admits, with
+   * its sensitive fields masked. Absent outside a live request scope; a rejected
+   * send is swallowed — a log that cannot flush must never fail the handler.
    */
   wireLog?: ((level: LoggingLevel, data: unknown) => Promise<void>) | undefined;
 }
@@ -973,28 +975,36 @@ function createContextLogger(
     data ? withExtra(appContext, data) : appContext;
 
   // Second sink: the MCP `notifications/message` stream. The framework
-  // advertises the `logging` capability, so every `ctx.log` call must reach the
-  // client that asked for it — not just the process logger. Fire-and-forget:
-  // the client may have set a higher level (the SDK filters), may not have
-  // upgraded to SSE, or may already be gone.
+  // advertises the `logging` capability, so a `ctx.log` call reaches the client
+  // that asked for it — not just the process logger — when the logger's own
+  // level admits it: `MCP_LOG_LEVEL` is a floor for both sinks. The SDK then
+  // filters by the client's level, which can only narrow it. Fire-and-forget:
+  // the client may not have upgraded to SSE, or may already be gone.
   //
-  // `message` and `error` are framework-owned wire keys, written after the
-  // call-site data so a caller's own `message` (an error-shaped object spread
-  // into the log data) cannot replace the log line. Assigning over the spread
-  // keeps `message` first, so a payload without a collision serializes exactly
-  // as `{ message, ...data }`. The process logger still gets the caller's field.
+  // The client is outside the process, so the payload is masked with the
+  // sensitive-field list the logs are redacted with. `message` and `error` are
+  // framework-owned wire keys, written after the call-site data so a caller's
+  // own `message` (an error-shaped object spread into the log data) cannot
+  // replace the log line. Assigning over the spread keeps `message` first, so
+  // a payload without a collision serializes exactly as `{ message, ...data }`.
+  // The process logger still gets the caller's field.
   const toWire = (
-    level: LoggingLevel,
+    level: Extract<LoggingLevel, McpLogLevel>,
     msg: string,
     data?: Record<string, unknown>,
     error?: Error,
   ): void => {
-    if (!wireLog) return;
-    const payload: Record<string, unknown> = { message: msg, ...data };
-    payload.message = msg;
-    if (error) payload.error = error.message;
-    void wireLog(level, payload).catch(() => {
-      // A log that cannot be delivered must never fail the request.
+    if (!wireLog || !appLogger.isLevelEnabled(level)) return;
+    void Promise.try(() => {
+      const payload: Record<string, unknown> = {
+        message: msg,
+        ...(data && maskSensitiveFields(data)),
+      };
+      payload.message = msg;
+      if (error) payload.error = error.message;
+      return wireLog(level, payload);
+    }).catch(() => {
+      // A log that cannot be built or delivered must never fail the request.
     });
   };
 

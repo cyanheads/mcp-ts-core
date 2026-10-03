@@ -19,12 +19,15 @@ import { DEFAULT_SENSITIVE_FIELDS, toPinoRedactPaths } from '@/utils/security/se
 
 /**
  * RFC 5424 severity levels supported by the MCP logger, ordered from least to most severe.
- * These map internally to Pino levels for transport compatibility:
+ * A record is emitted at the pino level its MCP level maps to:
  * - `debug` → pino `debug`
  * - `info` / `notice` → pino `info`
  * - `warning` → pino `warn`
  * - `error` / `crit` → pino `error`
  * - `alert` / `emerg` → pino `fatal`
+ *
+ * The level filter ({@link Logger.isLevelEnabled}) compares on the RFC 5424 order of
+ * all eight levels, never on that pino level, so two levels sharing one stay distinct.
  */
 export type McpLogLevel =
   | 'debug'
@@ -47,10 +50,14 @@ const mcpToPinoLevel: Record<McpLogLevel, LevelWithSilent> = {
   debug: 'debug',
 };
 
-const pinoToMcpLevelSeverity: Record<string, number> = {
-  fatal: 0,
-  error: 2,
-  warn: 4,
+/** RFC 5424 severity per level: `emerg` is 0, `debug` 7, and a lower number is more severe. */
+const RFC5424_SEVERITY: Record<McpLogLevel, number> = {
+  emerg: 0,
+  alert: 1,
+  crit: 2,
+  error: 3,
+  warning: 4,
+  notice: 5,
   info: 6,
   debug: 7,
 };
@@ -716,6 +723,27 @@ export class Logger {
   }
 
   /**
+   * Returns whether a record at `level` passes the active level — the check that
+   * gates every sink this logger writes and the `ctx.log` mirror to the client.
+   *
+   * Compares on the RFC 5424 order of the eight levels, not on the pino level a
+   * record is emitted at, so a `notice` level drops `info` and a `crit` level
+   * drops `error`. Returns `true` before {@link initialize}: the level is not
+   * known yet, so filtering waits for it, as it does for the records held until then.
+   *
+   * @param level - The level a record would be logged at.
+   * @returns `true` when a record at `level` would be written.
+   * @example
+   * ```ts
+   * if (logger.isLevelEnabled('debug')) logger.debug('Cache state', withExtra(ctx, cache.dump()));
+   * ```
+   */
+  public isLevelEnabled(level: McpLogLevel): boolean {
+    if (!this.everInitialized) return true;
+    return RFC5424_SEVERITY[level] <= RFC5424_SEVERITY[this.currentMcpLevel];
+  }
+
+  /**
    * Evicts expired rate-limit bookkeeping and flushes the suppression record.
    *
    * Replaces the `setInterval` this class used to arm in {@link initialize},
@@ -901,21 +929,8 @@ export class Logger {
       return;
     }
 
+    if (!this.isLevelEnabled(level) || this.isRateLimited(level, msg)) return;
     const pinoLevel = mcpToPinoLevel[level] ?? 'info';
-    const currentPinoLevel = mcpToPinoLevel[this.currentMcpLevel] ?? 'info';
-
-    const levelSeverity = pinoToMcpLevelSeverity[pinoLevel];
-    const currentLevelSeverity = pinoToMcpLevelSeverity[currentPinoLevel];
-
-    if (
-      typeof levelSeverity === 'number' &&
-      typeof currentLevelSeverity === 'number' &&
-      levelSeverity > currentLevelSeverity
-    ) {
-      return;
-    }
-
-    if (this.isRateLimited(level, msg)) return;
 
     // `extra` is flattened rather than nested so the emitted line keeps the
     // shape callers had when `RequestContext` was an open bag. The projection

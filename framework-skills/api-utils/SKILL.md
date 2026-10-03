@@ -4,7 +4,7 @@ description: >
   API reference for all utilities exported from `@cyanheads/mcp-ts-core/utils`. Use when looking up utility method signatures, options, peer dependencies, or usage patterns.
 metadata:
   author: cyanheads
-  version: "2.14"
+  version: "2.15"
   audience: external
   type: reference
 ---
@@ -85,7 +85,7 @@ The `utils` export includes two type guards. The full set of guards lives in the
 | Export | API | Notes |
 |:-------|:----|:------|
 | `Logger` | Class | The `Logger` class itself. Use `Logger.getInstance()` if needed; most consumers use the `logger` singleton. |
-| `logger` | `Logger` instance (wraps Pino). `.debug(msg, ctx?)` `.info(msg, ctx?)` `.notice(msg, ctx?)` `.warning(msg, ctx?)` `.error(msg, errorOrCtx, ctx?)` `.crit(msg, errorOrCtx, ctx?)` `.alert(msg, errorOrCtx, ctx?)` `.emerg(msg, errorOrCtx, ctx?)` `.fatal(msg, errorOrCtx, ctx?)` | Global structured logger. Use `ctx.log` in handlers instead. `logger` is for lifecycle/background contexts (startup, shutdown, `setup()`). Auto-redacts sensitive fields. The context's `extra` bag is flattened into the record, but a canonical field the context carries (`requestId`, `timestamp`, `traceId`, `spanId`, `sessionId`, `tenantId`, `operation`) always wins over an `extra` key of the same name. Records logged before the framework initializes the logger — anything in `setup()` — are held in a 250-record buffer and replayed once the sinks exist, filtered against the level the logger starts with. **Note:** `.error()` and higher accept `(msg, Error, ctx?)` or `(msg, ctx?)` — the second arg is overloaded. `.fatal()` is an alias for `.emerg()`. Full RFC 5424 severity set. |
+| `logger` | `Logger` instance (wraps Pino). `.debug(msg, ctx?)` `.info(msg, ctx?)` `.notice(msg, ctx?)` `.warning(msg, ctx?)` `.error(msg, errorOrCtx, ctx?)` `.crit(msg, errorOrCtx, ctx?)` `.alert(msg, errorOrCtx, ctx?)` `.emerg(msg, errorOrCtx, ctx?)` `.fatal(msg, errorOrCtx, ctx?)` `.isLevelEnabled(level) -> boolean` | Global structured logger. Use `ctx.log` in handlers instead. `logger` is for lifecycle/background contexts (startup, shutdown, `setup()`). Auto-redacts sensitive fields. The context's `extra` bag is flattened into the record, but a canonical field the context carries (`requestId`, `timestamp`, `traceId`, `spanId`, `sessionId`, `tenantId`, `operation`) always wins over an `extra` key of the same name. Records logged before the framework initializes the logger — anything in `setup()` — are held in a 250-record buffer and replayed once the sinks exist, filtered against the level the logger starts with. `isLevelEnabled(level)` is that filter: `true` when a record at `level` would be written, compared on the RFC 5424 order of all eight levels (a `notice` level drops `info` though pino emits both at `info`, a `crit` level drops `error`), and `true` for every level before initialization. The `ctx.log` mirror to the client is gated by the same check. **Note:** `.error()` and higher accept `(msg, Error, ctx?)` or `(msg, ctx?)` — the second arg is overloaded. `.fatal()` is an alias for `.emerg()`. Full RFC 5424 severity set. |
 | `McpLogLevel` | Type | Log level union type for typing level variables. |
 
 ---
@@ -175,7 +175,7 @@ Helper API only. For the catalog of what the framework auto-emits (span names, m
 
 ### `telemetry/attributes`
 
-MCP-specific `ATTR_*` constant exports for span and metric attributes. Covers: code execution (`code.function.name`, `code.namespace`), MCP tool execution (name, input/output bytes, duration, success, error code, error category, partial success, batch succeeded/failed counts), MCP resource (URI, name, MIME type, size, duration, success, error code), MCP request context (tenant ID, client ID), MCP session events, MCP storage, GenAI semantic conventions, speech, graph, auth, task, and error classification attributes.
+MCP-specific `ATTR_*` constant exports for span and metric attributes. Covers: code execution (`code.function.name`, `code.namespace`), MCP tool execution (name, input/output bytes, duration, success, error code, error category, partial success, batch succeeded/failed counts), MCP resource (URI, the uncut URI length when the recorded URI was capped, name, MIME type, size, duration, success, error code), MCP request context (tenant ID, client ID), MCP session events, MCP storage, GenAI semantic conventions, speech, graph, auth, task, and error classification attributes.
 
 Batch/partial success attributes (`mcp.tool.partial_success`, `mcp.tool.batch.succeeded_count`, `mcp.tool.batch.failed_count`) are set automatically by the framework when a tool handler returns a result containing a non-empty `failed` array — matching the batch response pattern from the design skill. A tool whose `output` is built with `partialResultSchema()` is read under its `failedKey`/`succeededKey` instead, including after `.extend()`, `.pick()`, `.omit()`, or a `.shape` spread.
 
