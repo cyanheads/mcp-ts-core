@@ -4,7 +4,7 @@ description: >
   Scaffold a new MCP tool definition. Use when the user asks to add a tool, create a new tool, or implement a new capability for the server.
 metadata:
   author: cyanheads
-  version: "2.32"
+  version: "2.33"
   audience: external
   type: reference
 ---
@@ -822,7 +822,7 @@ input: z.object({
 }),
 ```
 
-`toJSONSchema` emits only the inner schema for a preprocess pipe in both `io` modes, so the advertised `pattern` is unchanged; `''` parses to an absent key, a real value still hits the validator, and the handler needs no extra guard.
+`toJSONSchema` emits only the inner schema for a preprocess pipe in both `io` modes, so the advertised `pattern` is unchanged; `''` parses to `undefined`, a real value still hits the validator, and a handler that tests the value (`input.d1 ?? default`, `if (input.d1)`) needs no extra guard. The key itself stays present (`'d1' in input` is `true`), so never test for the key or spread `input` into an upstream query. Because the advertised pattern still rejects `''`, keep the blank out of the `.describe()` text: "an empty string means unset" contradicts the schema a validating client reads. The blank is tolerated for form clients, not offered as input.
 
 **Required fields are different.** If a string field is required and must be non-empty to be meaningful, `.min(1)` is correct — the client shouldn't have submitted the form without filling it in.
 

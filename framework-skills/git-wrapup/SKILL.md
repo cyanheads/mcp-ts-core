@@ -4,7 +4,7 @@ description: >
   Land working-tree changes as logical commits — the work grouped by concern, topped by a release commit (version bump, changelog, regenerated artifacts). The work commits land first, then the version bump, verification, and the release commit on top. Stops at "committed locally on main" — or, when the project releases through a release PR, at "release branch pushed, PR open". No tag, no push to main, no publish: the release-and-publish skill merges, tags, and ships from here. Distilled from the git_wrapup_instructions protocol.
 metadata:
   author: cyanheads
-  version: "1.27"
+  version: "1.28"
   audience: external
   type: workflow
 ---
@@ -173,7 +173,7 @@ security: false    # true ONLY for a security fix in this server's own source �
 ---
 ```
 
-**Write `summary:` LAST, derived from the body you just wrote — never independently.** It is the line most readers see: `changelog:build` copies it verbatim into the `CHANGELOG.md` rollup, which ships inside the npm tarball, and in release PR mode it opens the PR body. Written from recollection rather than from the body, it reliably names a mechanism that was never built or a target that was never fixed, while the body beside it stays correct. After writing it, re-read the body and confirm every claim in the summary appears there. Derived-from-the-body means the facts come from the body — not that every body item appears: it is one headline, and comma-stitching every change into an inventory near the 350-char cap is the failure mode.
+**Write `summary:` LAST, derived from the body you just wrote — never independently.** It is the line most readers see: `changelog:build` copies it verbatim into the `CHANGELOG.md` rollup, the entry file ships inside the npm tarball (`changelog/` is in `package.json` `files`; the rollup is not), and in release PR mode it opens the PR body. Written from recollection rather than from the body, it reliably names a mechanism that was never built or a target that was never fixed, while the body beside it stays correct. After writing it, re-read the body and confirm every claim in the summary appears there. Derived-from-the-body means the facts come from the body — not that every body item appears: it is one headline, and comma-stitching every change into an inventory near the 350-char cap is the failure mode.
 
 **`security:` is a source-code signal — not a dependency-CVE signal.** Set `security: true` only when this release fixes a vulnerability or adds hardening in code *this server ships*. A dependency or transitive CVE bump — even one that clears an advisory (`bun audit` going 1 → 0) — is routine maintenance: record it under `## Dependencies` with the advisory ID and leave the flag `false`. The `🛡️ Security` badge answers "does the server itself have a vuln"; a dep bump must not trip it.
 

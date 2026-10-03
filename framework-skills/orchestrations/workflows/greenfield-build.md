@@ -4,7 +4,7 @@ description: >
   Workflow: scaffold one or more new MCP server projects from `bunx @cyanheads/mcp-ts-core init` through design → build → polish → first public release. Each phase invokes a foundational skill end-to-end; this file is the sequencing and gates, not the procedural detail. Read `../SKILL.md` first for the universal rules and sub-agent strategy.
 metadata:
   author: cyanheads
-  version: "1.3"
+  version: "1.4"
   audience: external
   type: workflow
 ---
@@ -85,7 +85,7 @@ Sub-agent runs `bunx @cyanheads/mcp-ts-core init <name>`, follows the `setup` sk
 ### Phase 2: Initial commit
 Sub-agent verifies `gh repo view --json visibility` returns `PRIVATE` (or has explicit user authorization for public) before push. Tag is `v0.1.0`.
 
-A private repository without GitHub Advanced Security has no code scanning, so the scaffolded `.github/workflows/codeql.yml` fails on every push until the repo is public. Keep the file. GitHub registers the workflow on the first push, and that push already runs it. Right after this push, disable it with `gh workflow disable CodeQL` and delete that failed run with `gh run delete <id>`. It stays disabled through the private checkpoints. Phase 18 turns it back on.
+A private repository without GitHub Advanced Security has no code scanning, so the scaffolded `.github/workflows/codeql.yml` fails on every push until the repo is public. Keep the file. GitHub registers the workflow on the first push, and that push already runs it. Right after this push, disable it with `gh workflow disable CodeQL` and cancel that run with `gh run cancel <id>` before it fails. Keep the cancelled run: deleting a workflow's only run unregisters the workflow, and the next push registers it again as active and runs it. It stays disabled through the private checkpoints; after each checkpoint push, confirm that `gh api repos/<owner>/<repo>/actions/workflows` still shows it `disabled_manually`. Phase 18 turns it back on.
 
 ### Checkpoint commits (Phases 2, 5, 10, 16)
 Plain commits on `main`, pushed to the private repo. They follow `git-wrapup`'s step 3 conventions — grouped by concern, staged and committed by pathspec, one- or two-line bodies — and nothing else from that skill: no version bump, no changelog entry, no release branch or PR. Run end to end, `git-wrapup` bumps the version and, when the project declares a release PR mode, moves the work to `release/<version>` and opens a PR; that belongs to Phase 17 alone. Only Phase 2 tags (`v0.1.0`, annotated, `--cleanup=whitespace`).

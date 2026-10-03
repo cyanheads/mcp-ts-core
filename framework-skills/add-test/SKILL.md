@@ -4,7 +4,7 @@ description: >
   Scaffold a test file for an existing tool, resource, or service. Use when the user asks to add tests, improve coverage, or when a definition exists without a matching test file.
 metadata:
   author: cyanheads
-  version: "1.8"
+  version: "1.9"
   audience: external
   type: reference
 ---
@@ -227,20 +227,20 @@ For a destructive consent gate, the second round completes only when the context
 
 ### Cancellation test
 
-```typescript
-it('respects cancellation', async () => {
-  const controller = new AbortController();
-  const ctx = createMockContext({ signal: controller.signal });
-  const input = {{TOOL_EXPORT}}.input.parse({ count: 100, delayMs: 10 });
+Pass an `AbortController` signal through `createMockContext` or `runToolContract`.
+Abort after a controlled I/O operation or loop iteration starts, then assert that
+the pending call settles and no further requests or iterations run. Use a deferred
+fixture or fake timers so the test does not depend on a wall-clock delay; restore
+timers and close any fixture resources afterward. A defined result alone does not
+prove cancellation stopped the work.
 
-  setTimeout(() => controller.abort(), 50);
-  const result = await {{TOOL_EXPORT}}.handler(input, ctx);
-
-  // Should have returned a partial result rather than throwing on cancellation.
-  // Assert on a field from the tool's actual output schema.
-  expect(result).toBeDefined();
-});
-```
+When an abort-aware handler throws after the signal fires, `runToolContract` returns
+`isError: true` with `structuredContent.error.code` equal to
+`JsonRpcErrorCode.RequestCancelled`; assert the cancellation message in `content[]`
+as well. Use schema-valid arguments: invalid arguments still return `InvalidParams`
+before the handler runs. A partial success is appropriate only when the tool's
+contract explicitly supports it; assert its actual partial-result fields, output
+schema, and `format()` content instead of requiring every handler to return one.
 
 ### Prompt test
 

@@ -4,7 +4,7 @@ description: >
   Cleanup pass that edits the working tree — over a session's uncommitted changes, or a named path or whole codebase. Reads `git diff` (or the named target) and simplifies, consolidates, and aligns code with the existing codebase — modernize syntax, cut unnecessary complexity and slop, consolidate duplicated logic, catch efficiency issues. Not a bug hunt: defects are reported, not fixed. Use after a substantive working session, or when asked to clean up, simplify, reduce slop, consolidate, modernize, tighten up, de-slop, or scan a codebase. For `@cyanheads/mcp-ts-core` projects, includes specific transformations for tool/resource/prompt definitions, the ctx pattern, error factories, and framework idioms.
 metadata:
   author: cyanheads
-  version: "1.6"
+  version: "1.7"
   audience: external
   type: workflow
 ---
@@ -75,7 +75,7 @@ Evaluate the changes across these dimensions. Not every dimension applies to eve
 - **Gate** — `bun run devcheck` plus the test suite (`bun run test`) is the project gate in Phase 2 step 4 and Phase 4 step 5.
 - **Framework-provided utilities** — Before hand-rolling, check `src/utils/` and `src/errors/` in the project and `node_modules/@cyanheads/mcp-ts-core/` for framework exports: pagination helpers, schema builders, retry primitives, and the `ATTR_*` OTel attribute constants are framework-provided. Raw OTel attribute keys should be `ATTR_*` imports from `@cyanheads/mcp-ts-core/utils`.
 - **Error throwing patterns** — Prefer framework error factories (`McpError`, `validationError`, `notFound`, `httpErrorFromResponse`) over raw `throw new Error()`. Tool handlers should throw — the framework catches, classifies, and instruments.
-- **Error codes** — `InvalidParams` only for malformed JSON-RPC params shape. `ValidationError` for domain validation. `NotFound` for missing entities. Don't conflate them.
+- **Error codes** — `InvalidParams` for input the schema rejects (the framework raises it before the handler runs) and for an upstream 400 mapped by `httpErrorFromResponse`. `ValidationError` for a business rule the schema cannot express. `NotFound` for missing entities. Don't conflate them.
 - **Ctx usage** — Use `ctx.log`, `ctx.state`, `ctx.enrich` — don't reach for global loggers or request-scoped storage directly. The `ctx` pattern carries tenant scope and OTel context.
 - **Zod schemas** — Every tool input/output field needs `.describe()`. Zod 4 requires `z.record(z.string(), z.string())` not `z.record(z.string())`. Use `.optional()` rather than `.nullish()` unless null is semantically distinct from absent.
 - **Tool annotations** — `readOnlyHint`, `idempotentHint`, `openWorldHint` should reflect reality. A read-only tool with `readOnlyHint: false` gives clients the wrong picture.
