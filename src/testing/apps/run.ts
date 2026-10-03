@@ -553,7 +553,17 @@ class BrowserRun {
         return { step, ok: true };
       }
       if ('evaluate' in step) {
-        const value = await this.#evaluate(this.#requireView(), step.evaluate);
+        const value = await this.#evaluate(
+          this.#requireView(),
+          step.evaluate,
+          undefined,
+          AbortSignal.timeout(this.#timeoutMs),
+        ).catch((err: unknown) => {
+          if (err instanceof Error && err.name === 'TimeoutError') {
+            throw new Error(`The expression did not settle within ${this.#timeoutMs} ms.`);
+          }
+          throw err;
+        });
         await this.#settle();
         return { step, ok: true, value };
       }
@@ -728,8 +738,16 @@ class BrowserRun {
     return this.#viewFrame;
   }
 
-  /** Evaluate `expression` in a frame's main world, or in the named isolated world. */
-  async #evaluate<T = unknown>(frameId: string, expression: string, world?: string): Promise<T> {
+  /**
+   * Evaluate `expression` in a frame's main world, or in the named isolated world. An
+   * aborted `signal` rejects with its reason and drops the browser's eventual answer.
+   */
+  async #evaluate<T = unknown>(
+    frameId: string,
+    expression: string,
+    world?: string,
+    signal?: AbortSignal,
+  ): Promise<T> {
     let contextId: number | undefined;
     for (const [id, info] of this.#contexts) {
       if (info.frameId !== frameId) continue;
@@ -739,7 +757,11 @@ class BrowserRun {
     const result = await this.#send<{
       result: { value?: unknown };
       exceptionDetails?: ExceptionDetails;
-    }>('Runtime.evaluate', { expression, contextId, awaitPromise: true, returnByValue: true });
+    }>(
+      'Runtime.evaluate',
+      { expression, contextId, awaitPromise: true, returnByValue: true },
+      signal,
+    );
     if (result.exceptionDetails) {
       const d = result.exceptionDetails;
       throw new Error(d.exception?.description ?? d.text);
@@ -747,8 +769,8 @@ class BrowserRun {
     return result.result.value as T;
   }
 
-  #send<R = CdpObject>(method: string, params: CdpObject = {}): Promise<R> {
-    return this.#init.cdp.send<R>(method, params, { sessionId: this.#sessionId });
+  #send<R = CdpObject>(method: string, params: CdpObject = {}, signal?: AbortSignal): Promise<R> {
+    return this.#init.cdp.send<R>(method, params, { sessionId: this.#sessionId, signal });
   }
 
   #on<P = CdpObject>(method: string, listener: (params: P) => void): void {

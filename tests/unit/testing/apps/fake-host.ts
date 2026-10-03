@@ -473,15 +473,23 @@ export class FakeCdp {
     for (const listener of this.#listeners.get(method) ?? []) listener(params, sessionId);
   }
 
+  /** As `CdpPipe.send`: an aborted `signal` rejects the command with its reason. */
   async send<R = CdpObject>(
     method: string,
     params: CdpObject = {},
-    options: { sessionId?: string | undefined } = {},
+    options: { sessionId?: string | undefined; signal?: AbortSignal | undefined } = {},
   ): Promise<R> {
     this.#host.commands.push({ method, params, sessionId: options.sessionId });
     const failure = this.#host.options.failCommands?.[method];
     if (failure) throw new Error(`${method}: ${failure}`);
-    return (await this.#host.answer(method, params)) as R;
+    const { signal } = options;
+    signal?.throwIfAborted();
+    const answer = this.#host.answer(method, params) as Promise<R>;
+    if (!signal) return await answer;
+    const aborted = new Promise<never>((_, reject) =>
+      signal.addEventListener('abort', () => reject(signal.reason), { once: true }),
+    );
+    return await Promise.race([answer, aborted]);
   }
 }
 
@@ -638,7 +646,11 @@ export class FakeHost {
         setImmediate(() => this.#navigate());
         return { frameId: MAIN_FRAME, loaderId: 'loader' };
       case 'Runtime.evaluate':
-        return this.#evaluate(params.expression as string, params.contextId as number);
+        return this.#evaluate(
+          params.expression as string,
+          params.contextId as number,
+          params.awaitPromise === true,
+        );
       case 'Input.dispatchMouseEvent':
         if (params.type === 'mouseReleased') {
           this.view?.clickAt(
@@ -689,10 +701,15 @@ export class FakeHost {
     } as JSONRPCMessage);
   }
 
-  /** An `Error` thrown in the page carries a description; a thrown primitive only its text. */
-  #evaluate(expression: string, contextId: number): unknown {
+  /**
+   * An `Error` thrown in the page carries a description; a thrown primitive only its text.
+   * Under `awaitPromise`, as in CDP, a promise value is awaited, so one that never settles
+   * leaves the command unanswered.
+   */
+  async #evaluate(expression: string, contextId: number, awaitPromise: boolean): Promise<unknown> {
     try {
-      return { result: { value: this.#valueOf(expression, contextId) } };
+      const value = this.#valueOf(expression, contextId);
+      return { result: { value: awaitPromise ? await value : value } };
     } catch (err) {
       return {
         result: {},

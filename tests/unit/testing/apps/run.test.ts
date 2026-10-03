@@ -493,6 +493,24 @@ describe('runAppRender — steps', () => {
     expect(report.failure).toBeUndefined();
   });
 
+  it('fails an evaluate step whose promise never settles once timeoutMs passes, then runs the next', async () => {
+    const { report } = await render(
+      { timeoutMs: 500, steps: [{ evaluate: 'never settles' }, { evaluate: 'settles' }] },
+      {
+        evaluate: (expression) => (expression === 'never settles' ? new Promise(() => {}) : 'done'),
+      },
+    );
+    expect(report.steps).toEqual([
+      {
+        step: { evaluate: 'never settles' },
+        ok: false,
+        error: 'The expression did not settle within 500 ms.',
+      },
+      { step: { evaluate: 'settles' }, ok: true, value: 'done' },
+    ]);
+    expect(report.failure).toBeUndefined();
+  });
+
   it('acknowledges the requests that need a user or a model', async () => {
     const { report } = await render({
       host: { availableDisplayModes: ['inline', 'fullscreen'] },
