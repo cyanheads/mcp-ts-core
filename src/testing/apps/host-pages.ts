@@ -4,7 +4,8 @@
  * page with the view's CSP as an HTTP header. The proxy announces
  * `ui/notifications/sandbox-proxy-ready`; on `ui/notifications/sandbox-resource-ready` it
  * creates the inner view iframe and writes the view HTML into it (an about:blank child
- * inherits the proxy's origin and CSP); it relays every other message both ways.
+ * inherits the proxy's origin and CSP); it relays every other message both ways except a
+ * `ui/notifications/sandbox-*` one, a name the spec reserves for host and proxy.
  *
  * Both iframes carry the view's permissions-policy `allow` value, set before each frame
  * loads: a frame can only delegate a feature its own frame was granted, and writing the
@@ -118,12 +119,13 @@ function sandboxPage(hostOrigin: string, allow: string): string {
 (() => {
   const HOST_ORIGIN = ${JSON.stringify(hostOrigin)};
   const ALLOW = ${JSON.stringify(allow)};
+  const reserved = (data) => typeof data?.method === 'string' && data.method.startsWith('ui/notifications/sandbox-');
   let inner;
   window.addEventListener('message', (event) => {
+    const data = event.data;
     if (event.source === window.parent) {
       if (event.origin !== HOST_ORIGIN) return;
-      const data = event.data;
-      if (data && data.method === 'ui/notifications/sandbox-resource-ready') {
+      if (data?.method === 'ui/notifications/sandbox-resource-ready') {
         inner = document.createElement('iframe');
         inner.setAttribute('sandbox', 'allow-scripts allow-same-origin allow-forms');
         if (ALLOW) inner.setAttribute('allow', ALLOW);
@@ -134,10 +136,10 @@ function sandboxPage(hostOrigin: string, allow: string): string {
         doc.close();
         return;
       }
-      if (inner && inner.contentWindow) inner.contentWindow.postMessage(data, '*');
+      if (!reserved(data) && inner?.contentWindow) inner.contentWindow.postMessage(data, '*');
     } else if (inner && event.source === inner.contentWindow) {
-      if (event.origin !== location.origin) return;
-      window.parent.postMessage(event.data, HOST_ORIGIN);
+      if (event.origin !== location.origin || reserved(data)) return;
+      window.parent.postMessage(data, HOST_ORIGIN);
     }
   });
   window.parent.postMessage({ jsonrpc: '2.0', method: 'ui/notifications/sandbox-proxy-ready', params: {} }, HOST_ORIGIN);

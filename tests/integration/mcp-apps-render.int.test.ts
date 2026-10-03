@@ -419,6 +419,26 @@ describe('headless MCP Apps host — steps and view requests', () => {
   });
 });
 
+describe('headless MCP Apps host — sandbox proxy', () => {
+  it(
+    'relays no ui/notifications/sandbox-* message from the view to the host',
+    async () => {
+      // A view spoofing the proxy's ready notification, then counting the proxy's iframes.
+      const spoof = `new Promise((resolve) => {
+  window.parent.postMessage({ jsonrpc: '2.0', method: 'ui/notifications/sandbox-proxy-ready', params: {} }, '*');
+  setTimeout(() => resolve(window.parent.document.querySelectorAll('iframe').length), 500);
+})`;
+      const report = await render({ steps: [{ evaluate: spoof }] });
+      expect(report.failure).toBeUndefined();
+      expect(report.steps).toEqual([{ step: { evaluate: spoof }, ok: true, value: 1 }]);
+      expect(
+        methods(report).filter((entry) => entry === 'view-to-host:ui/initialize'),
+      ).toHaveLength(1);
+    },
+    RUN_TIMEOUT_MS,
+  );
+});
+
 describe('headless MCP Apps host — permissions', () => {
   it(
     'grants a permission the resource declares in _meta.ui.permissions, and withholds it otherwise',
