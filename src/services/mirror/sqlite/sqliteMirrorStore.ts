@@ -7,6 +7,7 @@
  * @module services/mirror/sqlite/sqliteMirrorStore
  */
 
+import { basename } from 'node:path';
 import { databaseError, validationError } from '@/types-global/errors.js';
 import type {
   FilterOp,
@@ -19,7 +20,12 @@ import type {
   SqlValue,
   SyncState,
 } from '../types.js';
-import { type OpenHandleOptions, openSqliteHandle, type SqliteHandle } from './handle.js';
+import {
+  MIRROR_STORE_UNAVAILABLE_HINT,
+  type OpenHandleOptions,
+  openSqliteHandle,
+  type SqliteHandle,
+} from './handle.js';
 import { buildSchemaSql, type SchemaSpec, validateSchemaSpec } from './schema.js';
 
 /**
@@ -107,8 +113,8 @@ export function sqliteMirrorStore(spec: SqliteMirrorStoreSpec): MirrorStore {
       } catch (err) {
         handle.close();
         throw databaseError(
-          `Failed to initialize mirror store at ${spec.path}`,
-          { path: spec.path },
+          `Failed to initialize mirror store "${basename(spec.path)}".`,
+          { recovery: { hint: MIRROR_STORE_UNAVAILABLE_HINT } },
           { cause: err },
         );
       }

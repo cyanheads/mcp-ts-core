@@ -14,16 +14,17 @@
  * @module tests/unit/services/mirror/handle
  */
 
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
+  MIRROR_STORE_UNAVAILABLE_HINT,
   type OpenHandleOptions,
   openSqliteHandle,
   type SqliteHandle,
 } from '@/services/mirror/sqlite/handle.js';
-import { JsonRpcErrorCode } from '@/types-global/errors.js';
+import { JsonRpcErrorCode, McpError } from '@/types-global/errors.js';
 import { runtimeCaps } from '@/utils/internal/runtime.js';
 
 /**
@@ -32,6 +33,9 @@ import { runtimeCaps } from '@/utils/internal/runtime.js';
  * that are meaningful for only one driver are gated on this flag.
  */
 const IS_BUN = runtimeCaps.isBun;
+
+/** Root ignores file modes, so a `chmod` cannot make a path unreadable or unwritable. */
+const RUNNING_AS_ROOT = process.getuid?.() === 0;
 
 /** Variable specifiers, as in handle.ts, so neither tsc nor Vite resolves a driver statically. */
 const BUN_SQLITE_SPECIFIER: string = 'bun:sqlite';
@@ -57,11 +61,14 @@ describe('openSqliteHandle', () => {
   let dir: string;
   let handles: SqliteHandle[];
   let holders: RawConnection[];
+  /** Paths a test `chmod`ed, with the mode to put back before the temp dir is removed. */
+  let modes: Array<[path: string, mode: number]>;
 
   beforeEach(async () => {
     dir = await mkdtemp(join(tmpdir(), 'mirror-handle-test-'));
     handles = [];
     holders = [];
+    modes = [];
   });
 
   afterEach(async () => {
@@ -74,6 +81,7 @@ describe('openSqliteHandle', () => {
     }
     // Closing rolls back whatever transaction a holder still has open.
     for (const holder of holders) holder.close();
+    for (const [path, mode] of modes) await chmod(path, mode);
     await rm(dir, { recursive: true, force: true });
   });
 
@@ -82,6 +90,35 @@ describe('openSqliteHandle', () => {
     const handle = await openSqliteHandle(join(dir, relPath), options);
     handles.push(handle);
     return handle;
+  }
+
+  /** Sets `path`'s mode for the test body; `afterEach` puts `restore` back. */
+  async function setMode(path: string, mode: number, restore: number) {
+    await chmod(path, mode);
+    modes.push([path, restore]);
+  }
+
+  /** Runs an open expected to reject and returns the rejection. */
+  async function openFailure(path: string): Promise<unknown> {
+    return openSqliteHandle(path).then(
+      (handle) => {
+        handles.push(handle);
+        throw new Error(`Expected the open of ${path} to reject.`);
+      },
+      (err: unknown) => err,
+    );
+  }
+
+  /**
+   * What a failed open puts on the wire (#635): the store named by its
+   * basename, `data` holding only the recovery hint, no host directory.
+   */
+  function expectStoreNamedByBasename(error: unknown, fileName: string) {
+    expect(error).toBeInstanceOf(McpError);
+    const { message, data } = error as McpError;
+    expect(message).toBe(`Failed to open mirror store "${fileName}".`);
+    expect(message).not.toContain(dir);
+    expect(data).toEqual({ recovery: { hint: MIRROR_STORE_UNAVAILABLE_HINT } });
   }
 
   describe('driver selection on this runtime', () => {
@@ -95,9 +132,9 @@ describe('openSqliteHandle', () => {
         const original = runtimeCaps.isBun;
         runtimeCaps.isBun = true;
         try {
-          await expect(open('forced-bun.db')).rejects.toMatchObject({
-            code: JsonRpcErrorCode.DatabaseError,
-          });
+          const error = await openFailure(join(dir, 'forced-bun.db'));
+          expect(error).toMatchObject({ code: JsonRpcErrorCode.DatabaseError });
+          expectStoreNamedByBasename(error, 'forced-bun.db');
         } finally {
           runtimeCaps.isBun = original;
         }
@@ -119,12 +156,17 @@ describe('openSqliteHandle', () => {
           const { openSqliteHandle: openWithMissingDriver } = await import(
             '@/services/mirror/sqlite/handle.js'
           );
-          await expect(openWithMissingDriver(join(dir, 'missing-driver.db'))).rejects.toMatchObject(
-            {
-              code: JsonRpcErrorCode.ConfigurationError,
-              message: expect.stringContaining('better-sqlite3'),
-            },
+          const error = await openWithMissingDriver(join(dir, 'missing-driver.db')).catch(
+            (err: unknown) => err,
           );
+          expect(error).toMatchObject({
+            code: JsonRpcErrorCode.ConfigurationError,
+            message:
+              'Install "better-sqlite3" to use the SQLite mirror store on Node: bun add better-sqlite3',
+            cause: expect.any(Error),
+          });
+          // No `data` at all, so the store's path never reaches the caller (#635).
+          expect((error as { data?: unknown }).data).toBeUndefined();
         } finally {
           vi.doUnmock('better-sqlite3');
           vi.resetModules();
@@ -214,9 +256,9 @@ describe('openSqliteHandle', () => {
       expect(closeCalls).toBe(1);
       expect(error).toMatchObject({
         code: JsonRpcErrorCode.DatabaseError,
-        data: { path },
         cause: { code: 'SQLITE_BUSY' },
       });
+      expectStoreNamedByBasename(error, 'exclusive.db');
       expect(elapsedMs).toBeGreaterThanOrEqual(200);
       expect(elapsedMs).toBeLessThan(2000);
     });
@@ -254,9 +296,9 @@ describe('openSqliteHandle', () => {
       expect(closeCalls).toBe(1);
       expect(error).toMatchObject({
         code: JsonRpcErrorCode.DatabaseError,
-        data: { path },
         cause: { code: 'SQLITE_BUSY' },
       });
+      expectStoreNamedByBasename(error, 'immediate-held.db');
       expect(elapsedMs).toBeGreaterThanOrEqual(300);
       expect(elapsedMs).toBeLessThan(3000);
     });
@@ -270,12 +312,50 @@ describe('openSqliteHandle', () => {
       expect(closeCalls).toBe(1);
       expect(error).toMatchObject({
         code: JsonRpcErrorCode.DatabaseError,
-        data: { path },
         cause: { code: 'SQLITE_NOTADB' },
       });
+      expectStoreNamedByBasename(error, 'not-a-database.db');
       // A retry would hold the open until the 2000 ms budget ran out.
       expect(elapsedMs).toBeLessThan(2000);
     });
+  });
+
+  /** A store the process cannot open or create. Root ignores file modes, so both cases skip there. */
+  describe('unopenable store (#635)', () => {
+    it.skipIf(RUNNING_AS_ROOT)(
+      'rejects a store file with no permissions as a DatabaseError naming it by basename',
+      async () => {
+        const path = join(dir, 'store', 'records.db');
+        (await open('store/records.db')).close();
+        await setMode(path, 0o000, 0o644);
+
+        const error = await openFailure(path);
+
+        expect(error).toMatchObject({
+          code: JsonRpcErrorCode.DatabaseError,
+          cause: { code: 'SQLITE_CANTOPEN' },
+        });
+        expectStoreNamedByBasename(error, 'records.db');
+      },
+    );
+
+    it.skipIf(RUNNING_AS_ROOT)(
+      'rejects a store whose parent directory cannot be created as a DatabaseError, not a raw EACCES',
+      async () => {
+        const locked = join(dir, 'locked');
+        await mkdir(locked);
+        await setMode(locked, 0o555, 0o755);
+
+        const error = await openFailure(join(locked, 'data', 'records.db'));
+
+        // A raw `EACCES` would be classified Forbidden (-32005) at the handler.
+        expect(error).toMatchObject({
+          code: JsonRpcErrorCode.DatabaseError,
+          cause: { code: 'EACCES' },
+        });
+        expectStoreNamedByBasename(error, 'records.db');
+      },
+    );
   });
 
   describe('prepare / exec / query', () => {

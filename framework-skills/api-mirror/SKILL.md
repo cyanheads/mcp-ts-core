@@ -4,7 +4,7 @@ description: >
   Stand up a persistent, self-refreshing local mirror of a bulk upstream dataset with the MirrorService (@cyanheads/mcp-ts-core/mirror). Use when a server wraps a large or slow API and should query a synced local index (embedded SQLite + FTS5) instead of paginating the live API per request.
 metadata:
   author: cyanheads
-  version: "1.4"
+  version: "1.5"
   audience: external
   type: reference
 ---
@@ -71,6 +71,8 @@ Why they can't merge: during a from-scratch init the records aren't ordered by t
 | Schema gen (columns + FTS + tokenizer + triggers) | Migration *content* (the `up` functions) |
 | `schema_version` + migration *runner* | Scheduling + init/refresh bootstrap (see below) |
 | Generic `query()` + the raw-handle escape hatch | Server-specific access paths via the raw handle |
+
+A store that cannot be opened or initialized (a lock held past `busyTimeoutMs`, an unreadable or corrupted file, a parent directory that cannot be created, a migration that throws) rejects with `DatabaseError` (`-32010`). The caller sees the store's file name and a `data.recovery.hint`, never its directory; the driver or filesystem error stays on `cause` for the log.
 
 ## Querying
 

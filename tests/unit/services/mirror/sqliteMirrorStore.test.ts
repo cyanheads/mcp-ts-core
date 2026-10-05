@@ -10,11 +10,13 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { MIRROR_STORE_UNAVAILABLE_HINT } from '@/services/mirror/sqlite/handle.js';
 import {
   type SqliteMirrorStoreSpec,
   sqliteMirrorStore,
 } from '@/services/mirror/sqlite/sqliteMirrorStore.js';
 import type { MirrorRow, MirrorStore } from '@/services/mirror/types.js';
+import { JsonRpcErrorCode, McpError } from '@/types-global/errors.js';
 
 function specFor(
   path: string,
@@ -440,6 +442,36 @@ describe('sqliteMirrorStore migrations', () => {
     expect(await schemaVersion(repaired)).toBe(2);
     expect(await migLogCount(repaired)).toBe(1);
     await repaired.close();
+  });
+
+  it('names a store whose migration throws by its basename, with a recovery hint and no path (#635)', async () => {
+    const failing = sqliteMirrorStore(
+      specFor(join(dir, 'failing.db'), {
+        version: 2,
+        migrations: [
+          {
+            version: 2,
+            up: () => {
+              throw new Error('migration exploded');
+            },
+          },
+        ],
+      }),
+    );
+
+    const error = await failing.count().catch((err: unknown) => err);
+    await failing.close();
+
+    expect(error).toBeInstanceOf(McpError);
+    expect(error).toMatchObject({
+      code: JsonRpcErrorCode.DatabaseError,
+      message: 'Failed to initialize mirror store "failing.db".',
+      cause: { message: 'migration exploded' },
+    });
+    expect((error as McpError).message).not.toContain(dir);
+    expect((error as McpError).data).toEqual({
+      recovery: { hint: MIRROR_STORE_UNAVAILABLE_HINT },
+    });
   });
 
   it('runs a pending migration once when upgrading an existing database', async () => {

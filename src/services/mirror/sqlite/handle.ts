@@ -11,7 +11,7 @@
  */
 
 import { mkdir } from 'node:fs/promises';
-import { dirname, resolve as resolvePath } from 'node:path';
+import { basename, dirname, resolve as resolvePath } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { configurationError, databaseError, McpError } from '@/types-global/errors.js';
 import { runtimeCaps } from '@/utils/internal/runtime.js';
@@ -58,6 +58,15 @@ const BETTER_SQLITE3_SPECIFIER: string = 'better-sqlite3';
 
 /** Pause between attempts to switch a contended file to WAL. */
 const WAL_RETRY_INTERVAL_MS = 10;
+
+/**
+ * The caller-facing `data.recovery.hint` on a store that fails to open or
+ * initialize. Worded to hold for every cause — a lock another process still
+ * holds (`SQLITE_BUSY`), missing permissions, a corrupted file, a failed
+ * migration — since none of them is something the request can change.
+ */
+export const MIRROR_STORE_UNAVAILABLE_HINT =
+  "The server could not use its local mirror store, and changing the request will not help. Try again later, and report the failure to the server's operator if it persists.";
 
 /** The surface `bun:sqlite` and `better-sqlite3` share, as far as the mirror store uses it. */
 interface SqliteDriver {
@@ -116,19 +125,23 @@ function wrapDriver(db: SqliteDriver, close: () => void): SqliteHandle {
  * meets another connection's lock waits it out for up to `busyTimeoutMs`.
  *
  * Throws `ConfigurationError` on Node when `better-sqlite3` is not installed,
- * and `DatabaseError` for any other open failure, with the driver error on
- * `cause` and the connection already closed.
+ * and `DatabaseError` for any other open failure — creating the parent
+ * directory included — with the driver or filesystem error on `cause` and the
+ * connection already closed. Neither error carries the path, since a handler
+ * forwards message and `data` to the caller: the `DatabaseError` names the
+ * store by its basename and its `data` holds only a recovery hint, and the
+ * `ConfigurationError` carries no `data`.
  */
 export async function openSqliteHandle(
   path: string,
   options: OpenHandleOptions = {},
 ): Promise<SqliteHandle> {
   const startedAt = performance.now();
-  await mkdir(dirname(resolvePath(path)), { recursive: true });
   const busyTimeoutMs = options.busyTimeoutMs ?? 5000;
 
   let handle: SqliteHandle | undefined;
   try {
+    await mkdir(dirname(resolvePath(path)), { recursive: true });
     handle = runtimeCaps.isBun ? await openBunHandle(path) : await openBetterSqlite3Handle(path);
     // One statement per call: bun:sqlite's multi-statement `exec` drops the
     // step error of a statement followed by more text (oven-sh/bun#37415).
@@ -143,7 +156,11 @@ export async function openSqliteHandle(
     // The Node path throws a ConfigurationError when better-sqlite3 is absent —
     // preserve it rather than masking it as a generic open failure.
     if (err instanceof McpError) throw err;
-    throw databaseError(`Failed to open mirror store at ${path}`, { path }, { cause: err });
+    throw databaseError(
+      `Failed to open mirror store "${basename(path)}".`,
+      { recovery: { hint: MIRROR_STORE_UNAVAILABLE_HINT } },
+      { cause: err },
+    );
   }
 }
 
@@ -194,7 +211,7 @@ async function openBetterSqlite3Handle(path: string): Promise<SqliteHandle> {
     /* istanbul ignore next -- missing-dep path; better-sqlite3 is installed in the test env */
     throw configurationError(
       'Install "better-sqlite3" to use the SQLite mirror store on Node: bun add better-sqlite3',
-      { path },
+      undefined,
       { cause: err },
     );
   }
