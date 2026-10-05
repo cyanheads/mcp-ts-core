@@ -2,7 +2,7 @@
   "name": "@cyanheads/mcp-ts-core",
   "version": "0.13.11",
   "mcpName": "io.github.cyanheads/mcp-ts-core",
-  "description": "Agent-native TypeScript framework for MCP servers. Includes runtime infrastructure and agent skills for building, testing, and shipping servers.",
+  "description": "Agent-native TypeScript framework for building MCP servers.",
   "files": [
     "changelog/",
     "dist/",
@@ -225,7 +225,7 @@
     "@socketsecurity/bun-security-scanner": "^1.1.3",
     "@supabase/supabase-js": "^2.117.2",
     "@types/bun": "^1.4.2",
-    "@types/node": "26.6.3",
+    "@types/node": "26.6.4",
     "@types/papaparse": "^5.5.2",
     "@types/sanitize-html": "^2.16.2",
     "@vitest/coverage-istanbul": "4.1.11",
@@ -243,7 +243,7 @@
     "js-yaml": "^5.4.2",
     "linkedom": "^0.18.13",
     "node-cron": "^4.6.0",
-    "openai": "^7.25.0",
+    "openai": "^7.27.0",
     "papaparse": "^5.7.0",
     "partial-json": "^0.1.7",
     "pdf-lib": "^1.17.1",
@@ -255,7 +255,7 @@
     "typescript": "^7.0.2",
     "typescript-v6": "npm:typescript@^6.0.3",
     "unpdf": "^1.8.1",
-    "vite": "8.3.1",
+    "vite": "8.3.2",
     "vitest": "^4.1.11"
   },
   "keywords": [

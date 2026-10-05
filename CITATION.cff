@@ -1,7 +1,7 @@
 cff-version: 1.2.0
 message: "If you use this software, please cite it as below."
 title: "@cyanheads/mcp-ts-core"
-abstract: "Agent-native TypeScript framework for MCP servers. Includes runtime infrastructure and agent skills for building, testing, and shipping servers."
+abstract: "Agent-native TypeScript framework for building MCP servers."
 type: software
 authors:
   - family-names: Hand
