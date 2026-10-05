@@ -29,6 +29,10 @@ import type { AnyResourceDefinition } from '@/mcp-server/resources/utils/resourc
 import { withRequiredScopes } from '@/mcp-server/transports/auth/lib/authUtils.js';
 import { JsonRpcErrorCode, McpError } from '@/types-global/errors.js';
 import { asRequestCancelled, ErrorHandler } from '@/utils/internal/error-handler/errorHandler.js';
+import {
+  capForObservability,
+  OBSERVABILITY_MAX_STRING_LENGTH,
+} from '@/utils/internal/observabilityCap.js';
 import { measureResourceExecution } from '@/utils/internal/performance.js';
 import { requestContextService } from '@/utils/internal/requestContext.js';
 
@@ -74,16 +78,13 @@ export function defaultResponseFormatter(
   ];
 }
 
-/** The longest URI a read's log records and span carry: 1 KiB, since the projection is ASCII. */
-const OBSERVABLE_URI_MAX_LENGTH = 1024;
-
 /**
  * The URI a read's log records and span carry: userinfo, query, and fragment
  * stripped — they commonly carry credentials or caller secrets — then cut to
- * its first {@link OBSERVABLE_URI_MAX_LENGTH} characters, since a client sets
- * its length. `uriLength` is the uncut projection's length, present only when
- * the cut removed something. The handler's `ctx.uri` and the response keep the
- * original URI; this projection is observability-only.
+ * its first {@link OBSERVABILITY_MAX_STRING_LENGTH} characters, since a client
+ * sets its length. `uriLength` is the uncut projection's length, present only
+ * when the cut removed something. The handler's `ctx.uri` and the response
+ * keep the original URI; this projection is observability-only.
  */
 function observableResourceUri(uri: URL): { uri: string; uriLength?: number } {
   const safe = new URL(uri.href);
@@ -91,10 +92,8 @@ function observableResourceUri(uri: URL): { uri: string; uriLength?: number } {
   safe.password = '';
   safe.search = '';
   safe.hash = '';
-  const { href } = safe;
-  return href.length > OBSERVABLE_URI_MAX_LENGTH
-    ? { uri: href.slice(0, OBSERVABLE_URI_MAX_LENGTH), uriLength: href.length }
-    : { uri: href };
+  const { value, length } = capForObservability(safe.href);
+  return { uri: value, ...(length !== undefined && { uriLength: length }) };
 }
 
 // ---------------------------------------------------------------------------

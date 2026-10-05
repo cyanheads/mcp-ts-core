@@ -30,7 +30,7 @@ import {
 } from '@/mcp-server/inputRequired.js';
 import type { NotifierSources } from '@/mcp-server/notifications.js';
 import { parseOutputContract } from '@/mcp-server/outputContract.js';
-import { withRequiredScopes } from '@/mcp-server/transports/auth/lib/authUtils.js';
+import { isScopeRefusal, withRequiredScopes } from '@/mcp-server/transports/auth/lib/authUtils.js';
 import {
   type ErrorContract,
   type ErrorContractSeverity,
@@ -40,6 +40,10 @@ import {
 } from '@/types-global/errors.js';
 import { resolvePartialResultKeys } from '@/utils/formatting/partialResult.js';
 import { asRequestCancelled, ErrorHandler } from '@/utils/internal/error-handler/errorHandler.js';
+import {
+  capForObservability,
+  OBSERVABILITY_MAX_STRING_LENGTH,
+} from '@/utils/internal/observabilityCap.js';
 import { measureToolExecution, recordToolRejection } from '@/utils/internal/performance.js';
 import {
   type RequestContext,
@@ -1120,14 +1124,17 @@ const FRAMEWORK_REFUSAL_REASONS: ReadonlySet<string> = new Set([
  * keep `error`.
  *
  * A severity the matched `errors[]` entry declares wins (#380). Otherwise one
- * of the framework's own refusals ({@link FRAMEWORK_REFUSAL_REASONS}) logs at
- * `notice` (#567): a caller's arguments failing the tool's schema, or a client
- * connection that cannot serve an input request, is routine traffic, and a
+ * of the framework's own refusals logs at `notice`: a reason in
+ * {@link FRAMEWORK_REFUSAL_REASONS} (#567) — a caller's arguments failing the
+ * tool's schema, or a client connection that cannot serve an input request —
+ * and a scope check's missing-scope refusal (#585), from the inline `auth`
+ * check or a handler's `checkScopes`, recognized by the mark those utilities
+ * put on it rather than by its `Forbidden` code. Each is routine traffic, and a
  * schema that wrongly rejects valid calls still shows per tool on
  * `mcp.tool.rejections`. Everything else — a plain `Error`, an undeclared
- * reason, an entry with no severity, an auth refusal, an output-contract
- * failure — keeps `error`. A cancellation takes `handleError`'s own `info`
- * path whatever this returns.
+ * reason, an entry with no severity, a missing auth context, a handler's own
+ * `forbidden()`, an upstream 403, an output-contract failure — keeps `error`.
+ * A cancellation takes `handleError`'s own `info` path whatever this returns.
  *
  * Resolved here rather than in `ErrorHandler`, which also serves services,
  * prompts, and transports and knows neither the definition nor the schema gate.
@@ -1137,8 +1144,68 @@ function failureSeverity(
   failure: unknown,
 ): ErrorContractSeverity | undefined {
   if (entry?.severity !== undefined) return entry.severity;
+  if (isScopeRefusal(failure)) return 'notice';
   const reason = failure instanceof McpError ? failure.data?.reason : undefined;
   return typeof reason === 'string' && FRAMEWORK_REFUSAL_REASONS.has(reason) ? 'notice' : undefined;
+}
+
+/** The most entries an array keeps in an argument rejection's log record (#631). */
+const LOGGED_ARRAY_ENTRIES = 10;
+
+/** Whether {@link boundedForLog} cuts `value` itself. */
+function cutForLog(value: unknown): boolean {
+  return typeof value === 'string'
+    ? value.length > OBSERVABILITY_MAX_STRING_LENGTH
+    : Array.isArray(value) && value.length > LOGGED_ARRAY_ENTRIES;
+}
+
+/**
+ * `value` bounded for a log record: a string cut to its first
+ * {@link OBSERVABILITY_MAX_STRING_LENGTH} characters, an array to its first
+ * {@link LOGGED_ARRAY_ENTRIES} entries, and every nested value the same. An
+ * object records each cut beside the field it cut — `<key>Length` for a string,
+ * `<key>Count` for an array, and `<key>Lengths`, the uncut length of every
+ * entry kept, when one of the array's own entries was cut — and gains nothing
+ * where nothing was.
+ */
+function boundedForLog(value: unknown): unknown {
+  if (typeof value === 'string') return capForObservability(value).value;
+  if (Array.isArray(value)) return value.slice(0, LOGGED_ARRAY_ENTRIES).map(boundedForLog);
+  if (value === null || typeof value !== 'object') return value;
+
+  const bounded: Record<string, unknown> = {};
+  for (const [key, entry] of Object.entries(value)) {
+    bounded[key] = boundedForLog(entry);
+    if (typeof entry === 'string' && cutForLog(entry)) bounded[`${key}Length`] = entry.length;
+    if (!Array.isArray(entry)) continue;
+    if (cutForLog(entry)) bounded[`${key}Count`] = entry.length;
+    const kept = entry.slice(0, LOGGED_ARRAY_ENTRIES);
+    if (kept.some(cutForLog)) {
+      bounded[`${key}Lengths`] = kept.map((item) =>
+        typeof item === 'string' || Array.isArray(item) ? item.length : null,
+      );
+    }
+  }
+  return bounded;
+}
+
+/**
+ * The argument rejection its `Error in tool:<name>` record is written from
+ * (#631). The caller sets every length in it — a key's name, how many keys,
+ * how many issues — and the record is logged at `notice`, which the default
+ * level admits, so it is bounded like any other caller-supplied value: the
+ * message and every string in `data` keep at most their first 1,024 characters and
+ * every array its first 10 entries ({@link boundedForLog}), with
+ * `originalMessageLength` beside a cut message. A rejection within the caps
+ * logs the fields it always did. The `-32602` result is still built from the
+ * rejection itself.
+ */
+function argumentRejectionForLog(rejection: McpError): McpError {
+  const { value: message, length } = capForObservability(rejection.message);
+  return new McpError(rejection.code, message, {
+    ...(boundedForLog(rejection.data) as Record<string, unknown>),
+    ...(length !== undefined && { originalMessageLength: length }),
+  });
 }
 
 /**
@@ -1271,10 +1338,18 @@ export function createToolHandler(
       // and the failure-payload record carry the same hint.
       const { entry, failure } = resolveDeclaredFailure(def.errors, error);
       const severity = failureSeverity(entry, failure);
-      ErrorHandler.handleError(failure, {
+      // The schema gate's rejection, raised before the handler ran (#631).
+      const argumentRejection =
+        !measured &&
+        failure instanceof McpError &&
+        failure.data?.reason === INVALID_ARGUMENTS_REASON;
+      // Neither refusal is a fault in this server, so a stack would name only
+      // the gate that refused it (#585, #631).
+      ErrorHandler.handleError(argumentRejection ? argumentRejectionForLog(failure) : failure, {
         operation: `tool:${def.name}`,
         context: appContext,
         ...(severity !== undefined && { severity }),
+        ...((argumentRejection || isScopeRefusal(failure)) && { includeStack: false }),
       });
       if (!measured) recordToolRejection(def.name, failure);
       const result = classifyAndBuildToolErrorResult(failure, appContext.requestId);

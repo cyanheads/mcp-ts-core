@@ -5,7 +5,9 @@
 import { afterEach, beforeEach, describe, expect, it, type MockInstance, vi } from 'vitest';
 
 import { JsonRpcErrorCode, McpError } from '../../../../src/types-global/errors.js';
+import { ErrorHandler } from '../../../../src/utils/internal/error-handler/errorHandler.js';
 import { logger } from '../../../../src/utils/internal/logger.js';
+import { withExtra } from '../../../../src/utils/internal/requestContext.js';
 import { fetchWithTimeout } from '../../../../src/utils/network/fetchWithTimeout.js';
 import { httpErrorFromResponse } from '../../../../src/utils/network/httpError.js';
 import { withRetry } from '../../../../src/utils/network/retry.js';
@@ -729,9 +731,10 @@ describe('fetchWithTimeout', () => {
   describe('URL redaction (#190 — query-string secrets must not leak)', () => {
     // The Guardian (?api-key=…) and many api.data.gov services (?api_key=…)
     // authenticate via the query string. The secret must never reach a
-    // client-facing error message or the logs.
+    // client-facing error message or the logs. The path is elided too (#626),
+    // so the request is named by its origin and the two elision markers.
     const secretUrl = 'https://api.example.com/search?q=cats&api-key=SUPERSECRET';
-    const safePrefix = 'https://api.example.com/search';
+    const safeName = 'https://api.example.com/…?…';
 
     it('redacts the secret from the thrown error and the log on a non-OK response', async () => {
       vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response('nope', { status: 401 }));
@@ -739,11 +742,13 @@ describe('fetchWithTimeout', () => {
 
       expect(error.message).not.toContain('SUPERSECRET');
       expect(error.message).not.toContain('api-key');
-      expect(error.message).toContain(safePrefix);
+      expect(error.message).not.toContain('/search');
+      expect(error.message).toContain(safeName);
 
       const logged = String(errorSpy.mock.calls.at(-1)?.[0]);
       expect(logged).not.toContain('SUPERSECRET');
-      expect(logged).toContain(safePrefix);
+      expect(logged).not.toContain('/search');
+      expect(logged).toContain(safeName);
     });
 
     it('redacts the secret from the timeout error', async () => {
@@ -756,14 +761,16 @@ describe('fetchWithTimeout', () => {
       );
       const error = (await fetchWithTimeout(secretUrl, 5, context).catch((e) => e)) as McpError;
       expect(error.message).not.toContain('SUPERSECRET');
-      expect(error.message).toContain(safePrefix);
+      expect(error.message).not.toContain('/search');
+      expect(error.message).toContain(safeName);
     });
 
     it('redacts the secret from the network-error wrapper', async () => {
       vi.spyOn(globalThis, 'fetch').mockRejectedValue(new Error('connection reset'));
       const error = (await fetchWithTimeout(secretUrl, 1000, context).catch((e) => e)) as McpError;
       expect(error.message).not.toContain('SUPERSECRET');
-      expect(error.message).toContain(safePrefix);
+      expect(error.message).not.toContain('/search');
+      expect(error.message).toContain(safeName);
     });
 
     it('redacts the secret from the success debug log', async () => {
@@ -773,7 +780,552 @@ describe('fetchWithTimeout', () => {
         debugSpy.mock.calls.find((c) => String(c[0]).includes('Successfully fetched'))?.[0],
       );
       expect(logged).not.toContain('SUPERSECRET');
-      expect(logged).toContain(safePrefix);
+      expect(logged).not.toContain('/search');
+      expect(logged).toContain(safeName);
+    });
+  });
+
+  describe('path redaction (#626 — a key carried in the path must not leak)', () => {
+    // Telegram (`/bot<token>/…`), webhook URLs, and `https://host/<KEY>/…`
+    // services carry the credential in the path, where query redaction alone
+    // leaves it in every message and log record.
+    const keyUrl = 'https://api.example.com/sk-test-0000/reverse?lat=1&lon=2';
+    const name = 'https://api.example.com/…?…';
+    const PATH_PARTS = ['sk-test-0000', '/reverse', 'lat=1', 'lon=2'];
+    let infoSpy: MockInstance;
+
+    beforeEach(() => {
+      infoSpy = vi.spyOn(logger, 'info').mockImplementation(() => {});
+    });
+
+    /** Every record the logger received, serialized — message and context alike. */
+    function everyRecord(): string {
+      return JSON.stringify([
+        ...debugSpy.mock.calls,
+        ...infoSpy.mock.calls,
+        ...errorSpy.mock.calls,
+      ]);
+    }
+
+    function expectNoPath(text: string): void {
+      for (const part of PATH_PARTS) expect(text).not.toContain(part);
+    }
+
+    /** A fetch that settles only when its signal aborts, rejecting with the reason. */
+    function hangUntilAborted() {
+      return vi.spyOn(globalThis, 'fetch').mockImplementation(
+        (_url, init) =>
+          new Promise((_resolve, reject) => {
+            const signal = init?.signal;
+            signal?.addEventListener('abort', () => reject(signal.reason));
+          }),
+      );
+    }
+
+    it('names a non-2xx response by origin, with classification and the request unchanged', async () => {
+      const fetchMock = vi
+        .spyOn(globalThis, 'fetch')
+        .mockResolvedValue(new Response('not found', { status: 404 }));
+
+      const error = (await fetchWithTimeout(keyUrl, 30_000, context).catch((e) => e)) as McpError;
+
+      expect(error.message).toBe(`Fetch failed for ${name}. Status: 404`);
+      expect(error.code).toBe(JsonRpcErrorCode.NotFound);
+      expect(error.data).toMatchObject({
+        status: 404,
+        statusCode: 404,
+        body: 'not found',
+        responseBody: 'not found',
+      });
+      expect(debugSpy).toHaveBeenCalledWith(
+        `Attempting fetch GET ${name} with 30000ms timeout.`,
+        context,
+      );
+      expect(errorSpy).toHaveBeenCalledWith(
+        `Fetch failed for ${name} with status 404.`,
+        expect.objectContaining({ extra: expect.objectContaining({ statusCode: 404 }) }),
+      );
+      expectNoPath(error.message);
+      expectNoPath(everyRecord());
+      // The upstream still receives the full path and query.
+      expect(fetchMock).toHaveBeenCalledWith(keyUrl, expect.anything());
+    });
+
+    it.each([
+      [401, JsonRpcErrorCode.Unauthorized],
+      [503, JsonRpcErrorCode.ServiceUnavailable],
+    ])('keeps a %d classified as %d', async (status, code) => {
+      vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response('upstream says', { status }));
+
+      const error = (await fetchWithTimeout(keyUrl, 1000, context).catch((e) => e)) as McpError;
+
+      expect(error.code).toBe(code);
+      expect(error.message).toBe(`Fetch failed for ${name}. Status: ${status}`);
+      expect(error.data).toMatchObject({ status, statusCode: status, body: 'upstream says' });
+      expectNoPath(everyRecord());
+    });
+
+    it('names the request by origin on a timeout', async () => {
+      hangUntilAborted();
+
+      const error = (await fetchWithTimeout(keyUrl, 5, context).catch((e) => e)) as McpError;
+
+      expect(error.code).toBe(JsonRpcErrorCode.Timeout);
+      expect(error.message).toBe(`fetch GET ${name} timed out.`);
+      expect(errorSpy).toHaveBeenCalledWith(
+        `fetch GET ${name} timed out after 5ms.`,
+        expect.anything(),
+      );
+      expectNoPath(everyRecord());
+    });
+
+    it("names the request by origin when the caller's deadline fires", async () => {
+      hangUntilAborted();
+
+      const error = (await fetchWithTimeout(keyUrl, 30_000, context, {
+        signal: AbortSignal.timeout(5),
+      }).catch((e) => e)) as McpError;
+
+      expect(error.data?.errorSource).toBe('FetchSignalTimeout');
+      expect(error.message).toBe(`fetch GET ${name} timed out on the caller's signal.`);
+      expect(errorSpy).toHaveBeenCalledWith(
+        `fetch GET ${name} timed out on the caller's signal.`,
+        expect.anything(),
+      );
+      expectNoPath(everyRecord());
+    });
+
+    it('names the request by origin when the caller aborts', async () => {
+      hangUntilAborted();
+      const controller = new AbortController();
+
+      const promise = fetchWithTimeout(keyUrl, 30_000, context, {
+        method: 'POST',
+        signal: controller.signal,
+      });
+      controller.abort('client disconnected');
+      const error = (await promise.catch((e) => e)) as McpError;
+
+      expect(error.code).toBe(JsonRpcErrorCode.RequestCancelled);
+      expect(error.message).toBe(`fetch POST ${name} was aborted.`);
+      expect(infoSpy).toHaveBeenCalledWith(
+        `fetch POST ${name} aborted by caller.`,
+        expect.anything(),
+      );
+      expectNoPath(everyRecord());
+    });
+
+    it('names the request by origin on a network error', async () => {
+      vi.spyOn(globalThis, 'fetch').mockRejectedValue(new Error('connection reset'));
+
+      const error = (await fetchWithTimeout(keyUrl, 1000, context).catch((e) => e)) as McpError;
+
+      expect(error.code).toBe(JsonRpcErrorCode.ServiceUnavailable);
+      expect(error.message).toBe(`Network error during fetch GET ${name}: connection reset`);
+      expect(errorSpy).toHaveBeenCalledWith(
+        `Network error during fetch GET ${name}: connection reset`,
+        expect.anything(),
+      );
+      expectNoPath(everyRecord());
+    });
+
+    it.each([
+      [
+        'an Error',
+        // Bun 1.4 quotes the request URL whole in this rejection's message.
+        new TypeError(
+          `Malformed_HTTP_Response fetching "${keyUrl}". For more information, pass \`verbose: true\` in the second argument to fetch()`,
+        ),
+        `Malformed_HTTP_Response fetching "${name}". For more information, pass \`verbose: true\` in the second argument to fetch()`,
+      ],
+      ['a non-Error value', `socket hang up on ${keyUrl}`, `socket hang up on ${name}`],
+    ])('redacts a URL the runtime quotes in %s rejection', async (_label, rejection, rendered) => {
+      vi.spyOn(globalThis, 'fetch').mockRejectedValue(rejection);
+
+      const error = (await fetchWithTimeout(keyUrl, 1000, context).catch((e) => e)) as McpError;
+
+      expect(error.message).toBe(`Network error during fetch GET ${name}: ${rendered}`);
+      expect(errorSpy).toHaveBeenCalledWith(
+        `Network error during fetch GET ${name}: ${rendered}`,
+        expect.anything(),
+      );
+      expectNoPath(error.message);
+      expectNoPath(everyRecord());
+    });
+
+    describe('a rejection whose message cannot be written', () => {
+      /**
+       * A replaced or instrumented `globalThis.fetch`, or a test fake, can reject
+       * with an error whose `message` refuses assignment. Assigning it throws in
+       * a module, so the redaction must not replace the failure being reported.
+       */
+      const keyedUrl = `${keyUrl}&key=sk-query-0000`;
+      const quoting = `fetch failed for "${keyedUrl}"`;
+      const redacted = `fetch failed for "${name}"`;
+      const wrapperMessage = `Network error during fetch GET ${name}: ${redacted}`;
+
+      /** `message` as an own accessor with no setter. */
+      function getterOnlyMessage(): TypeError {
+        const error = new TypeError('placeholder');
+        Object.defineProperty(error, 'message', { get: () => quoting });
+        return error;
+      }
+
+      it.each([
+        ['a frozen TypeError', () => Object.freeze(new TypeError(quoting)), 'TypeError', undefined],
+        [
+          'a non-abort DOMException',
+          () => new DOMException(quoting, 'NetworkError'),
+          'NetworkError',
+          undefined,
+        ],
+        ['a TypeError with a getter-only message', getterOnlyMessage, 'TypeError', undefined],
+        [
+          'a TypeError with a non-writable message',
+          () => Object.defineProperty(new TypeError(quoting), 'message', { writable: false }),
+          'TypeError',
+          undefined,
+        ],
+        [
+          'a frozen Bun-shaped rejection with a string code',
+          () =>
+            Object.freeze(
+              Object.assign(new TypeError(quoting), {
+                code: 'Malformed_HTTP_Response',
+                path: keyedUrl,
+              }),
+            ),
+          'TypeError',
+          'Malformed_HTTP_Response',
+        ],
+      ])(
+        'still throws the network-error wrapper for %s quoting the URL',
+        async (_label, make, rejectionName, code) => {
+          vi.spyOn(globalThis, 'fetch').mockRejectedValue(make());
+
+          const error = (await fetchWithTimeout(keyedUrl, 1000, context).catch(
+            (e) => e,
+          )) as McpError;
+
+          expect(error).toBeInstanceOf(McpError);
+          expect(error.code).toBe(JsonRpcErrorCode.ServiceUnavailable);
+          expect(error.message).toBe(wrapperMessage);
+          expect(error.data).toEqual({
+            originalErrorName: rejectionName,
+            errorSource: 'FetchNetworkErrorWrapper',
+          });
+          const cause = error.cause as Error & { code?: unknown };
+          expect(cause).toBeInstanceOf(Error);
+          expect(cause.name).toBe(rejectionName);
+          expect(cause.message).toBe(redacted);
+          expect(cause.code).toBe(code);
+          // The network-error record is written, its chain read from the same cause.
+          expect(errorSpy).toHaveBeenCalledWith(wrapperMessage, {
+            ...context,
+            extra: {
+              originalErrorName: rejectionName,
+              errorSource: 'FetchNetworkError',
+              ...(code && { causeChain: [{ name: rejectionName, message: redacted, code }] }),
+            },
+          });
+          const surfaces = JSON.stringify([
+            everyRecord(),
+            error.message,
+            error.data,
+            cause,
+            cause.message,
+            cause.stack,
+          ]);
+          expectNoPath(surfaces);
+          expect(surfaces).not.toContain('sk-query-0000');
+        },
+      );
+
+      it("keeps a transport code carried on the rejection's own cause", async () => {
+        const transport = Object.assign(new Error('connect ECONNREFUSED 127.0.0.1:3614'), {
+          code: 'ECONNREFUSED',
+        });
+        vi.spyOn(globalThis, 'fetch').mockRejectedValue(
+          Object.freeze(new TypeError(quoting, { cause: transport })),
+        );
+
+        const error = (await fetchWithTimeout(keyedUrl, 1000, context).catch((e) => e)) as McpError;
+
+        expect(error.code).toBe(JsonRpcErrorCode.ServiceUnavailable);
+        const cause = error.cause as Error;
+        expect(cause.message).toBe(redacted);
+        expect(cause.cause).toBe(transport);
+        expect(errorSpy).toHaveBeenCalledWith(wrapperMessage, {
+          ...context,
+          extra: {
+            originalErrorName: 'TypeError',
+            errorSource: 'FetchNetworkError',
+            causeChain: [
+              { name: 'TypeError', message: redacted },
+              {
+                name: 'Error',
+                message: 'connect ECONNREFUSED 127.0.0.1:3614',
+                code: 'ECONNREFUSED',
+              },
+            ],
+          },
+        });
+        expectNoPath(everyRecord());
+        expect(everyRecord()).not.toContain('sk-query-0000');
+      });
+
+      it('publishes a redacted rootCause, code included, through tryCatch', async () => {
+        vi.spyOn(globalThis, 'fetch').mockRejectedValue(
+          Object.freeze(Object.assign(new TypeError(quoting), { code: 'Malformed_HTTP_Response' })),
+        );
+
+        const error = (await ErrorHandler.tryCatch(
+          () => fetchWithTimeout(keyedUrl, 1000, context),
+          { operation: 'reverseGeocode', context },
+        ).catch((e) => e)) as McpError;
+
+        expect(error.data?.rootCause).toEqual({ name: 'TypeError', message: redacted });
+        const handled = errorSpy.mock.calls.at(-1)?.[1] as {
+          extra: { errorData: { causeChain: Array<{ code?: string }> } };
+        };
+        expect(handled.extra.errorData.causeChain.at(-1)?.code).toBe('Malformed_HTTP_Response');
+        const surfaces = JSON.stringify([everyRecord(), error.message, error.data]);
+        expectNoPath(surfaces);
+        expect(surfaces).not.toContain('sk-query-0000');
+      });
+
+      it('redacts a writable rejection in place, chaining the same object', async () => {
+        const rejection = new TypeError(quoting);
+        vi.spyOn(globalThis, 'fetch').mockRejectedValue(rejection);
+
+        const error = (await fetchWithTimeout(keyedUrl, 1000, context).catch((e) => e)) as McpError;
+
+        expect(error.message).toBe(wrapperMessage);
+        expect(error.cause).toBe(rejection);
+        expect(rejection.message).toBe(redacted);
+      });
+    });
+
+    it('names a successful fetch by origin', async () => {
+      vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response('ok', { status: 200 }));
+
+      await (await fetchWithTimeout(keyUrl, 1000, context)).text();
+
+      expect(debugSpy).toHaveBeenCalledWith(`Successfully fetched ${name}. Status: 200`, context);
+      expectNoPath(everyRecord());
+    });
+
+    it('names each redirect hop by origin', async () => {
+      vi.spyOn(globalThis, 'fetch')
+        .mockResolvedValueOnce(
+          new Response(null, {
+            status: 302,
+            headers: { location: 'https://new.example.com/sk-hop-1111/page?t=9' },
+          }),
+        )
+        .mockResolvedValueOnce(new Response('ok', { status: 200 }));
+
+      await (await fetchWithTimeout(keyUrl, 1000, context, { rejectPrivateIPs: true })).text();
+
+      expect(debugSpy).toHaveBeenCalledWith(
+        'Following validated redirect 1: https://new.example.com/…?…',
+        context,
+      );
+      expect(debugSpy).toHaveBeenCalledWith(
+        'Successfully fetched https://new.example.com/…?…. Status: 200',
+        context,
+      );
+      expectNoPath(everyRecord());
+      expect(everyRecord()).not.toContain('sk-hop-1111');
+    });
+
+    it('names the request by origin when a redirect has no Location', async () => {
+      vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(new Response(null, { status: 302 }));
+
+      const error = (await fetchWithTimeout(keyUrl, 1000, context, {
+        rejectPrivateIPs: true,
+      }).catch((e) => e)) as McpError;
+
+      expect(error.code).toBe(JsonRpcErrorCode.ServiceUnavailable);
+      expect(error.message).toBe(`Redirect response missing Location header from ${name}`);
+      expectNoPath(everyRecord());
+    });
+
+    it.each([
+      ['https://example.com', 'https://example.com'],
+      ['https://example.com/', 'https://example.com'],
+      ['https://example.com/?k=1', 'https://example.com?…'],
+    ])('names a root URL %s as %s, as before', async (url, expected) => {
+      vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response('ok', { status: 200 }));
+
+      await (await fetchWithTimeout(url, 1000, context)).text();
+
+      expect(debugSpy).toHaveBeenCalledWith(
+        `Successfully fetched ${expected}. Status: 200`,
+        context,
+      );
+    });
+
+    it('carries a withExtra endpoint label on every record for the call', async () => {
+      vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response('nope', { status: 404 }));
+      const labelled = withExtra(context, { endpoint: 'reverse' });
+
+      await fetchWithTimeout(keyUrl, 1000, labelled).catch(() => undefined);
+
+      const records = [...debugSpy.mock.calls, ...errorSpy.mock.calls];
+      expect(records.length).toBeGreaterThanOrEqual(2);
+      for (const [, recordContext] of records) {
+        expect(recordContext).toMatchObject({ extra: { endpoint: 'reverse' } });
+      }
+    });
+
+    it('keeps the path out of a withRetry retry record and the exhausted error', async () => {
+      vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response('busy', { status: 503 }));
+
+      const error = (await withRetry(() => fetchWithTimeout(keyUrl, 1000, context), {
+        maxRetries: 1,
+        baseDelayMs: 1,
+        jitter: 0,
+        operation: 'reverseGeocode',
+        context,
+      }).catch((e) => e)) as McpError;
+
+      expect(error.message).toBe(`Fetch failed for ${name}. Status: 503 (failed after 2 attempts)`);
+      expect(debugSpy).toHaveBeenCalledWith(
+        `Retry 1/1 for reverseGeocode: Fetch failed for ${name}. Status: 503 — waiting 1ms`,
+        context,
+      );
+      expectNoPath(error.message);
+      expectNoPath(everyRecord());
+    });
+  });
+
+  describe('network-error cause (#615 — the transport code survives the wrapper)', () => {
+    const url = 'https://api.example.com/sk-test-0000/x?key=1';
+    const name = 'https://api.example.com/…?…';
+
+    /** Node's shape: `fetch failed`, with the transport code on its cause. */
+    function nodeRefusal(): TypeError {
+      return new TypeError('fetch failed', {
+        cause: Object.assign(new Error('connect ECONNREFUSED 127.0.0.1:3614'), {
+          code: 'ECONNREFUSED',
+        }),
+      });
+    }
+
+    /**
+     * Bun's shape: the code on the rejection itself, an enumerable `path`
+     * holding the full URL, and no stack.
+     */
+    function bunRejection(message: string, code: string): TypeError {
+      const rejection = Object.assign(new TypeError(message), { code, path: url, errno: 0 });
+      Object.defineProperty(rejection, 'stack', { value: undefined });
+      return rejection;
+    }
+
+    it("chains the runtime's rejection as cause, leaving code, message, and data unchanged", async () => {
+      const rejection = nodeRefusal();
+      vi.spyOn(globalThis, 'fetch').mockRejectedValue(rejection);
+
+      const error = (await fetchWithTimeout(url, 1000, context).catch((e) => e)) as McpError;
+
+      expect(error.cause).toBe(rejection);
+      expect(error.code).toBe(JsonRpcErrorCode.ServiceUnavailable);
+      expect(error.message).toBe(`Network error during fetch GET ${name}: fetch failed`);
+      expect(error.data).toEqual({
+        originalErrorName: 'TypeError',
+        errorSource: 'FetchNetworkErrorWrapper',
+      });
+    });
+
+    it('carries the projected chain on its own network-error record (Node shape)', async () => {
+      vi.spyOn(globalThis, 'fetch').mockRejectedValue(nodeRefusal());
+
+      await fetchWithTimeout(url, 1000, context).catch(() => undefined);
+
+      expect(errorSpy).toHaveBeenCalledWith(
+        `Network error during fetch GET ${name}: fetch failed`,
+        {
+          ...context,
+          extra: {
+            originalErrorName: 'TypeError',
+            errorSource: 'FetchNetworkError',
+            causeChain: [
+              { name: 'TypeError', message: 'fetch failed' },
+              {
+                name: 'Error',
+                message: 'connect ECONNREFUSED 127.0.0.1:3614',
+                code: 'ECONNREFUSED',
+              },
+            ],
+          },
+        },
+      );
+    });
+
+    it("carries the rejection's own code, never its path (Bun shape)", async () => {
+      vi.spyOn(globalThis, 'fetch').mockRejectedValue(
+        bunRejection(
+          'Unable to connect. Is the computer able to access the url?',
+          'ConnectionRefused',
+        ),
+      );
+
+      const error = (await fetchWithTimeout(url, 1000, context).catch((e) => e)) as McpError;
+
+      const record = errorSpy.mock.calls.at(-1)?.[1] as { extra: Record<string, unknown> };
+      expect(record.extra.causeChain).toEqual([
+        {
+          name: 'TypeError',
+          message: 'Unable to connect. Is the computer able to access the url?',
+          code: 'ConnectionRefused',
+        },
+      ]);
+      expect((error.cause as { code?: unknown }).code).toBe('ConnectionRefused');
+      expect(JSON.stringify(errorSpy.mock.calls)).not.toContain('sk-test-0000');
+    });
+
+    it('logs a rejection with no cause and no string code exactly as before', async () => {
+      vi.spyOn(globalThis, 'fetch').mockRejectedValue(new Error('connection reset'));
+
+      await fetchWithTimeout(url, 1000, context).catch(() => undefined);
+
+      expect(errorSpy).toHaveBeenCalledWith(
+        `Network error during fetch GET ${name}: connection reset`,
+        {
+          ...context,
+          extra: { originalErrorName: 'Error', errorSource: 'FetchNetworkError' },
+        },
+      );
+    });
+
+    it('redacts a URL the rejection quotes before chaining it, so no record or rootCause carries it', async () => {
+      const quoted = (target: string) =>
+        `Malformed_HTTP_Response fetching "${target}". For more information, pass \`verbose: true\` in the second argument to fetch()`;
+      vi.spyOn(globalThis, 'fetch').mockRejectedValue(
+        bunRejection(quoted(url), 'Malformed_HTTP_Response'),
+      );
+
+      const error = (await ErrorHandler.tryCatch(() => fetchWithTimeout(url, 1000, context), {
+        operation: 'reverseGeocode',
+        context,
+      }).catch((e) => e)) as McpError;
+
+      // The chained rejection keeps its identity and code, with the URL reduced.
+      const rejection = (error.cause as Error).cause as Error & { code?: unknown };
+      expect(rejection).toBeInstanceOf(TypeError);
+      expect(rejection.message).toBe(quoted(name));
+      expect(rejection.code).toBe('Malformed_HTTP_Response');
+      // `tryCatch` publishes the root cause on the thrown error's data.
+      expect(error.data?.rootCause).toEqual({ name: 'TypeError', message: quoted(name) });
+      // `handleError`'s logged chain carries the code too.
+      const handled = errorSpy.mock.calls.at(-1)?.[1] as {
+        extra: { errorData: { causeChain: Array<{ code?: string }> } };
+      };
+      expect(handled.extra.errorData.causeChain.at(-1)?.code).toBe('Malformed_HTTP_Response');
+      const everything = JSON.stringify([errorSpy.mock.calls, error.message, error.data]);
+      expect(everything).not.toContain('sk-test-0000');
+      expect(everything).not.toContain('key=1');
     });
   });
 

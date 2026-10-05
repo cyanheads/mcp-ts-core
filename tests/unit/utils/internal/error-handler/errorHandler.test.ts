@@ -472,6 +472,117 @@ describe('ErrorHandler', () => {
       expect(logged.extra).not.toHaveProperty('stack');
     });
 
+    // Issue #586 — `includeStack: false` governs every stack the record holds,
+    // not only `extra.stack`: the throw-site `originalStack`, one carried in a
+    // thrown `McpError`'s own `data`, and each cause-chain node's.
+    describe('includeStack: false leaves no stack in the record (#586)', () => {
+      type CauseNode = Record<string, unknown> & { data?: Record<string, unknown> };
+      type Logged = {
+        extra: Record<string, unknown> & {
+          errorData: Record<string, unknown> & { causeChain?: CauseNode[] };
+        };
+      };
+      const lastErrorRecord = () =>
+        vi.mocked(logger.error).mock.calls.at(-1)?.[1] as unknown as Logged;
+
+      /** `outer` → `McpError` carrying its own `originalStack` → plain root. */
+      function threeLevelChain() {
+        const root = new Error('db down');
+        const mid = new McpError(
+          JsonRpcErrorCode.ServiceUnavailable,
+          'pool exhausted',
+          { originalStack: 'MID_DATA_STACK', pool: 'primary' },
+          { cause: root },
+        );
+        return { mid, outer: new Error('lookup failed', { cause: mid }) };
+      }
+
+      /** Asserts the record is stack-free and its chain kept every other field. */
+      function expectStackFree(logged: Logged) {
+        expect(logged.extra).not.toHaveProperty('stack');
+        expect(logged.extra.errorData).not.toHaveProperty('originalStack');
+        const chain = logged.extra.errorData.causeChain ?? [];
+        expect(chain.map(({ name, message, depth }) => [name, message, depth])).toEqual([
+          ['Error', 'lookup failed', 0],
+          ['McpError', 'pool exhausted', 1],
+          ['Error', 'db down', 2],
+        ]);
+        for (const node of chain) expect(node).not.toHaveProperty('stack');
+        expect(chain[1]?.data).toEqual({ pool: 'primary' });
+        const serialized = JSON.stringify(logged);
+        expect(serialized).not.toContain('errorHandler.test.ts');
+        expect(serialized).not.toContain('MID_DATA_STACK');
+      }
+
+      it('logs the cause chain without a stack on any node, past the first level', () => {
+        const { mid, outer } = threeLevelChain();
+
+        ErrorHandler.handleError(outer, { operation: 'probe', includeStack: false });
+
+        expectStackFree(lastErrorRecord());
+        // The logged copy is stripped; the thrown cause's own data is untouched.
+        expect(mid.data).toEqual({ originalStack: 'MID_DATA_STACK', pool: 'primary' });
+      });
+
+      it('logs the same stack-free record from tryCatch, and still rethrows', async () => {
+        const { outer } = threeLevelChain();
+
+        const thrown = await ErrorHandler.tryCatch(
+          () => {
+            throw outer;
+          },
+          { operation: 'probe', includeStack: false },
+        ).catch((e: unknown) => e);
+
+        expect(thrown).toBeInstanceOf(McpError);
+        expect((thrown as McpError).message).toBe('lookup failed');
+        expectStackFree(lastErrorRecord());
+      });
+
+      it.each([
+        ['omitted', undefined],
+        ['true', true],
+      ])('logs every stack when includeStack is %s', (_label, includeStack) => {
+        const { outer } = threeLevelChain();
+
+        ErrorHandler.handleError(outer, {
+          operation: 'probe',
+          ...(includeStack !== undefined && { includeStack }),
+        });
+
+        const { extra } = lastErrorRecord();
+        expect(extra.stack).toEqual(expect.any(String));
+        expect(extra.errorData.originalStack).toBe(outer.stack);
+        const chain = extra.errorData.causeChain ?? [];
+        expect(chain).toHaveLength(3);
+        for (const node of chain) expect(node.stack).toEqual(expect.any(String));
+        expect(chain[1]?.data).toEqual({ originalStack: 'MID_DATA_STACK', pool: 'primary' });
+      });
+
+      it('returns the same code, message, and data either way', () => {
+        const thrown = new McpError(
+          JsonRpcErrorCode.NotFound,
+          'missing',
+          { originalStack: 'CARRIED_STACK', itemId: 'x-1' },
+          { cause: new Error('db down') },
+        );
+
+        const withStack = ErrorHandler.handleError(thrown, {
+          operation: 'probe',
+          includeStack: true,
+        }) as McpError;
+        const without = ErrorHandler.handleError(thrown, {
+          operation: 'probe',
+          includeStack: false,
+        }) as McpError;
+
+        expect(without.code).toBe(withStack.code);
+        expect(without.message).toBe(withStack.message);
+        expect(without.data).toEqual(withStack.data);
+        expect(without.data).toMatchObject({ originalStack: 'CARRIED_STACK', itemId: 'x-1' });
+      });
+    });
+
     describe('OpenTelemetry span recording', () => {
       const span = {
         recordException: vi.fn(),

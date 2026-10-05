@@ -48,6 +48,12 @@ export function initErrorMetrics(): void {
   getErrorMetrics();
 }
 
+/** A copy of `data` without its `originalStack`, for an `includeStack: false` log record. */
+function withoutOriginalStack(data: Record<string, unknown>): Record<string, unknown> {
+  const { originalStack: _originalStack, ...rest } = data;
+  return rest;
+}
+
 /**
  * The value a handler unwound with, resolved against its request's cancellation.
  *
@@ -198,6 +204,7 @@ export class ErrorHandler {
    *    `originalStack`, `causeChain`, and the context ride the log record only.
    * 5. Logs the result via the global logger with full structured context — at `error` level,
    *    or at `info` without a stack for `RequestCancelled`, which is a routine caller disconnect.
+   *    `includeStack: false` logs no stack anywhere in the record (see `ErrorHandlerOptions`).
    * 6. Returns the processed error, or rethrows it if `options.rethrow` is `true`.
    *
    * @param error - The error instance or value that occurred.
@@ -288,6 +295,8 @@ export class ErrorHandler {
      * resources forward an `McpError`'s `data` to the client verbatim (#519).
      * A cancellation carries neither — its every node would hold a stack and
      * invite triage to read a caller hanging up as a fault in this server.
+     * `includeStack: false` keeps the chain but logs no stack on any of its
+     * nodes; the record's `originalStack` is dropped where it is logged (#586).
      */
     const diagnostics: Record<string, unknown> = {};
     if (
@@ -305,7 +314,11 @@ export class ErrorHandler {
       const rootCause = causeChain.at(-1);
       if (rootCause) {
         consolidatedData.rootCause = { name: rootCause.name, message: rootCause.message };
-        diagnostics.causeChain = causeChain;
+        diagnostics.causeChain = includeStack
+          ? causeChain
+          : causeChain.map(({ stack: _stack, ...node }) =>
+              node.data ? { ...node, data: withoutOriginalStack(node.data) } : node,
+            );
       }
     }
 
@@ -320,8 +333,9 @@ export class ErrorHandler {
      * under `server` rather than upstream throttling (#481). The resolved
      * severity is a bounded dimension and rides as an attribute; it is present
      * only when one resolved — a declared entry's, or `notice` for the
-     * framework's argument and capability refusals (#567). The `reason` behind
-     * either never becomes a metric attribute —
+     * framework's argument and capability refusals (#567) and a scope check's
+     * missing-scope refusal (#585). The `reason` behind any of them never
+     * becomes a metric attribute —
      * unbounded across a fleet, so it belongs on the span and in the log.
      */
     getErrorMetrics().errorClassifiedCounter.add(1, {
@@ -355,6 +369,10 @@ export class ErrorHandler {
         : new Date().toISOString();
 
     const stack = finalError instanceof Error ? finalError.stack : originalStack;
+    const errorData = {
+      ...(finalError instanceof McpError && finalError.data ? finalError.data : consolidatedData),
+      ...diagnostics,
+    };
     const { extra: contextExtra, ...contextCanonical } = context;
     const logContext: RequestContext = {
       operation,
@@ -368,12 +386,7 @@ export class ErrorHandler {
         errorCode: loggedErrorCode,
         originalErrorType: originalErrorName,
         finalErrorType: getErrorName(finalError),
-        errorData: {
-          ...(finalError instanceof McpError && finalError.data
-            ? finalError.data
-            : consolidatedData),
-          ...diagnostics,
-        },
+        errorData: includeStack ? errorData : withoutOriginalStack(errorData),
         ...(includeStack && stack && !isCancellation ? { stack } : {}),
       },
     };

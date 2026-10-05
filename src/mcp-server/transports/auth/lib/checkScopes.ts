@@ -7,6 +7,7 @@
 
 import { config } from '@/config/index.js';
 import type { Context } from '@/core/context.js';
+import { markScopeRefusal } from '@/mcp-server/transports/auth/lib/authUtils.js';
 import { forbidden, unauthorized } from '@/types-global/errors.js';
 
 /**
@@ -52,6 +53,6 @@ export function checkScopes(ctx: Context, requiredScopes: string[]): void {
       requiredScopes,
       missingScopes,
     });
-    throw forbidden('Insufficient permissions.');
+    throw markScopeRefusal(forbidden('Insufficient permissions.'));
   }
 }

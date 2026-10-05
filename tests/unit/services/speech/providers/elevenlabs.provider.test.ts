@@ -189,7 +189,7 @@ describe('ElevenLabsProvider', () => {
       // fetchWithTimeout throws McpError on non-ok responses
       const apiError = new McpError(
         -32003,
-        'Fetch failed for https://api.elevenlabs.test/v1/text-to-speech/voice-123. Status: 401',
+        'Fetch failed for https://api.elevenlabs.test/…. Status: 401',
       );
       mockFetch.mockRejectedValue(apiError);
 
@@ -257,7 +257,7 @@ describe('ElevenLabsProvider', () => {
       // fetchWithTimeout throws McpError on non-ok responses
       const apiError = new McpError(
         -32003,
-        'Fetch failed for https://api.elevenlabs.test/v1/voices. Status: 500',
+        'Fetch failed for https://api.elevenlabs.test/…. Status: 500',
       );
       mockFetch.mockRejectedValue(apiError);
 

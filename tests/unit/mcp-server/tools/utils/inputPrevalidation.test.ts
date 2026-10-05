@@ -140,10 +140,16 @@ async function expectOriginalRejection(
 ): Promise<CallToolResult> {
   const on = await call(definition, args);
   const off = await call(definition, args, { coerce: false });
+  /** The result with its own request id masked: every call gets a fresh one (#584). */
+  const sansRequestId = (result: CallToolResult): unknown => {
+    const requestId = envelope(result).data?.requestId;
+    expect(requestId).toBeTypeOf('string');
+    return JSON.parse(JSON.stringify(result).replaceAll(requestId as string, '<request-id>'));
+  };
 
   expect(on.isError).toBe(true);
   expect(envelope(on).code).toBe(JsonRpcErrorCode.InvalidParams);
-  expect(on).toEqual(off);
+  expect(sansRequestId(on)).toEqual(sansRequestId(off));
   return on;
 }
 
@@ -839,6 +845,100 @@ describe('tool argument pre-validation', () => {
       expect(result.isError).toBeUndefined();
       expect(seen).toEqual({ query: 'x', maxResults: 5 });
     });
+  });
+
+  // -----------------------------------------------------------------------
+  // #631 — a debug record naming the caller's key stays bounded
+  // -----------------------------------------------------------------------
+
+  describe('bounded debug records (#631)', () => {
+    /** The one debug record whose message contains `fragment`: its message and fields. */
+    function debugRecord(fragment: string): { extra: Record<string, unknown>; message: string } {
+      const found = mockLogger.debug.mock.calls.filter(([message]) =>
+        String(message).includes(fragment),
+      );
+      expect(found).toHaveLength(1);
+      const [message, context] = found[0]!;
+      return {
+        message: String(message),
+        extra: (context as { extra: Record<string, unknown> }).extra,
+      };
+    }
+
+    it('cuts a 200,001-character dropped key to its first 1,024 on an accepted call, with its length', async () => {
+      const key = `_${'v'.repeat(200_000)}`;
+
+      const result = await call(search, { query: 'x', [key]: 1 });
+
+      expect(result.isError).toBeUndefined();
+      expect(seen).toEqual({ query: 'x' });
+      const { message, extra } = debugRecord('dropped client-added argument key');
+      expect(message).toBe(
+        `Tool 'prevalidation_search': dropped client-added argument key '${key.slice(0, 1_024)}'.`,
+      );
+      expect(extra).toMatchObject({
+        ignoredKey: key.slice(0, 1_024),
+        ignoredKeyLength: 200_001,
+        ignoreRule: 'underscore_prefix',
+      });
+    });
+
+    it('cuts a 200,005-character case-style alias the same way', async () => {
+      const alias = `Q${'_'.repeat(200_000)}uery`;
+
+      const result = await call(search, { [alias]: 'x' });
+
+      expect(result.isError).toBeUndefined();
+      expect(seen).toEqual({ query: 'x' });
+      const { message, extra } = debugRecord('rewrote argument key');
+      expect(message).toBe(
+        `Tool 'prevalidation_search': rewrote argument key '${alias.slice(0, 1_024)}' to 'query'.`,
+      );
+      expect(extra).toMatchObject({
+        alias: alias.slice(0, 1_024),
+        aliasLength: 200_005,
+        target: 'query',
+        aliasKind: 'case_style',
+      });
+    });
+
+    it('cuts the key on a rejected call’s debug record too', async () => {
+      const key = `_${'v'.repeat(5_000)}`;
+
+      const result = await call(search, { query: true, [key]: 1 });
+
+      expect(result.isError).toBe(true);
+      const { extra } = debugRecord('dropped client-added argument key');
+      expect(extra).toMatchObject({ ignoredKey: key.slice(0, 1_024), ignoredKeyLength: 5_001 });
+    });
+
+    it.each([
+      [
+        'a dropped key',
+        { query: 'x', [`_${'v'.repeat(1_023)}`]: 1 },
+        'ignoredKey',
+        `_${'v'.repeat(1_023)}`,
+      ],
+      [
+        'a case-style alias',
+        { [`Q${'_'.repeat(1_019)}uery`]: 'x' },
+        'alias',
+        `Q${'_'.repeat(1_019)}uery`,
+      ],
+    ])(
+      'logs %s of exactly 1,024 characters whole, with no length',
+      async (_label, args, field, key) => {
+        await call(search, args);
+
+        const fragment =
+          field === 'alias' ? 'rewrote argument key' : 'dropped client-added argument key';
+        const { message, extra } = debugRecord(fragment);
+        expect(key).toHaveLength(1_024);
+        expect(message).toContain(`'${key}'`);
+        expect(extra[field]).toBe(key);
+        expect(extra).not.toHaveProperty(`${field}Length`);
+      },
+    );
   });
 
   // -----------------------------------------------------------------------

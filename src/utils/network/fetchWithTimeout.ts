@@ -20,6 +20,7 @@ import {
   selectErrorHeaders,
 } from '@/utils/network/httpError.js';
 import { readBoundedResponseText } from '@/utils/network/responseBody.js';
+import { causeChainForLog } from '@/utils/network/retry.js';
 import { createHistogram } from '@/utils/telemetry/metrics.js';
 
 /** Default captured bytes of an upstream error response body. Keeps tool errors from poisoning the agent's context. */
@@ -58,12 +59,15 @@ export function initHttpClientMetrics(): void {
 }
 
 /**
- * Redacts a URL to `origin + pathname` for safe inclusion in error messages and
- * logs. Drops the query string — where API keys commonly ride (`?api-key=…`,
- * `?api_key=…`, `?key=…`) — along with the fragment and any embedded
- * `user:pass@` credentials (`URL.origin` omits userinfo). A trailing `?…` marks
- * that a query was present (redacted) so diagnostics still signal it; a
- * bare-domain `/` pathname is elided to keep output clean.
+ * Names a URL by its origin for error messages and logs:
+ * `https://host/sk-key/reverse?lat=1` reads `https://host/…?…`. Credentials
+ * ride the query (`?api-key=…`, `?key=…`) and the path alike (Telegram's
+ * `/bot<token>/…`, webhook URLs, `https://host/<KEY>/…`), so both are elided
+ * behind a marker that still says one was there; a root URL keeps its bare
+ * origin (`https://example.com`). The fragment and any `user:pass@` userinfo
+ * (`URL.origin` omits it) are dropped. A caller that needs to tell endpoints
+ * apart labels the call through its context —
+ * `withExtra(ctx, { endpoint: 'reverse' })` — which every record carries.
  *
  * Fail-closed: an unparseable URL returns a fixed placeholder rather than
  * echoing the raw (possibly secret-bearing) string.
@@ -74,12 +78,50 @@ export function initHttpClientMetrics(): void {
 function redactUrl(url: string | URL): string {
   try {
     const parsed = url instanceof URL ? url : new URL(String(url));
-    const path = parsed.pathname === '/' ? '' : parsed.pathname;
-    const marker = parsed.search ? '?…' : '';
-    return `${parsed.origin}${path}${marker}`;
+    const path = parsed.pathname === '/' ? '' : '/…';
+    const query = parsed.search ? '?…' : '';
+    return `${parsed.origin}${path}${query}`;
   } catch {
     return '[unparseable URL]';
   }
+}
+
+/** An absolute `http:`/`https:` URL inside free text, up to the first quote, bracket, or space. */
+const EMBEDDED_URL = /https?:\/\/[^\s"'`<>]+/gi;
+
+/**
+ * Applies {@link redactUrl} to every URL inside a runtime's rejection text. The
+ * runtime's message is the one part of a network-error record this helper does
+ * not compose, and it can quote the request whole — Bun 1.4 rejects a malformed
+ * response with `Malformed_HTTP_Response fetching "<full URL>"`.
+ */
+function redactEmbeddedUrls(text: string): string {
+  return text.replace(EMBEDDED_URL, (match) => redactUrl(match));
+}
+
+/**
+ * `error` with its `message` set to `message`, written in place so the
+ * runtime's identity and transport `code` survive. A rejection that refuses
+ * the write — frozen, a getter-only or non-writable `message`, a
+ * `DOMException` — is replaced by an `Error` carrying its `name`, `message`,
+ * `cause`, and string `code`, so the redaction holds and the failure still
+ * classifies as a network error.
+ */
+function withRedactedMessage(error: Error, message: string): Error {
+  if (error.message === message) return error;
+  try {
+    error.message = message;
+  } catch {
+    // A read-only `message` throws in a module; the stand-in below takes over.
+  }
+  if (error.message === message) return error;
+  const standIn = new Error(
+    message,
+    error.cause === undefined ? undefined : { cause: error.cause },
+  );
+  standIn.name = error.name;
+  const { code } = error as { code?: unknown };
+  return typeof code === 'string' ? Object.assign(standIn, { code }) : standIn;
 }
 
 /**
@@ -573,7 +615,9 @@ function withBodyDeadline(
  *   plus the legacy aliases `statusCode` (= `status`) and `responseBody` (= `body`), kept
  *   for existing consumers and slated for consolidation in a future major. List a status in
  *   `options.expectedStatuses` to log it at `debug` rather than `error` (still thrown).
- * @throws {McpError} `ServiceUnavailable` if a network-level error occurs.
+ * @throws {McpError} `ServiceUnavailable` if a network-level error occurs, chaining
+ *   the runtime's rejection as `cause` so its transport `code` (`ECONNREFUSED`,
+ *   `ConnectionRefused`) survives; the failure record carries it as `causeChain`.
  * @example
  * ```ts
  * // Basic GET with a 5-second timeout
@@ -845,12 +889,27 @@ export async function fetchWithTimeout(
       throw abortedFailure();
     }
 
-    const errorMessage = error instanceof Error ? error.message : String(error);
+    const errorMessage = redactEmbeddedUrls(error instanceof Error ? error.message : String(error));
+    /**
+     * The runtime's rejection is chained as the wrapper's `cause`, where
+     * `handleError` reads its message into `data.rootCause` — client-visible
+     * once `tryCatch` throws — and into the logged cause chain. A URL it quotes
+     * is redacted on the rejection itself first; its identity, `code`, and
+     * every other field stay as the runtime set them. A rejection whose
+     * `message` cannot be written is chained as a stand-in instead.
+     */
+    const cause =
+      error instanceof Error && !(error instanceof McpError)
+        ? withRedactedMessage(error, errorMessage)
+        : error;
+    const originalErrorName = error instanceof Error ? error.name : 'UnknownError';
+    const causeChain = causeChainForLog(cause);
     logger.error(
       `Network error during ${operationDescription}: ${errorMessage}`,
       withExtra(context, {
-        originalErrorName: error instanceof Error ? error.name : 'UnknownError',
+        originalErrorName,
         errorSource: 'FetchNetworkError',
+        ...(causeChain && { causeChain }),
       }),
     );
 
@@ -858,10 +917,13 @@ export async function fetchWithTimeout(
       throw error;
     }
 
-    throw serviceUnavailable(`Network error during ${operationDescription}: ${errorMessage}`, {
-      originalErrorName: error instanceof Error ? error.name : 'UnknownError',
-      errorSource: 'FetchNetworkErrorWrapper',
-    });
+    // A non-`Error` rejection carries no transport code, and chaining its raw
+    // text would put back the URL `errorMessage` redacted.
+    throw serviceUnavailable(
+      `Network error during ${operationDescription}: ${errorMessage}`,
+      { originalErrorName, errorSource: 'FetchNetworkErrorWrapper' },
+      cause instanceof Error ? { cause } : undefined,
+    );
   } finally {
     if (!deadlineFollowsBody) clearTimeout(timeoutId);
     const durationS = (performance.now() - startTime) / 1000;

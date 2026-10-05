@@ -145,6 +145,50 @@ describe('ErrorHandler (unit)', () => {
       expect((ctx as Record<string, any>).extra.stack).toBeUndefined();
     });
 
+    it('omits the throw-site originalStack from the record under includeStack: false (#586)', () => {
+      const err = new Error('network down');
+      err.stack = 'STACK_LINE_1\nSTACK_LINE_2';
+
+      ErrorHandler.handleError(err, { operation: 'noStackTest', includeStack: false });
+
+      const ctx = errorSpy.mock.calls.at(-1)?.[1] as Record<string, any>;
+      expect(ctx.extra.errorData).toMatchObject({
+        originalErrorName: 'Error',
+        originalMessage: 'network down',
+      });
+      expect(ctx.extra.errorData).not.toHaveProperty('originalStack');
+      expect(JSON.stringify(ctx)).not.toContain('STACK_LINE_1');
+    });
+
+    it('drops an originalStack carried in a thrown McpError from the log, not from the returned data (#586)', () => {
+      const original = new McpError(JsonRpcErrorCode.InternalError, 'oops', {
+        originalStack: 'ORIG_STACK',
+        foo: 'bar',
+      });
+
+      const final = ErrorHandler.handleError(original, {
+        operation: 'mcpDataNoStackTest',
+        includeStack: false,
+      }) as McpError;
+
+      const ctx = errorSpy.mock.calls.at(-1)?.[1] as Record<string, any>;
+      expect(ctx.extra.errorData).toMatchObject({ originalErrorName: 'McpError', foo: 'bar' });
+      expect(ctx.extra.errorData).not.toHaveProperty('originalStack');
+      expect(final.data).toMatchObject({ originalStack: 'ORIG_STACK', foo: 'bar' });
+      expect(original.data).toEqual({ originalStack: 'ORIG_STACK', foo: 'bar' });
+    });
+
+    it('still records the exception, stack intact, on the active span under includeStack: false', () => {
+      const err = new Error('span keeps it');
+      const span = { recordException: vi.fn(), setStatus: vi.fn(), isRecording: () => true };
+      getActiveSpanSpy.mockReturnValue(span as never);
+
+      ErrorHandler.handleError(err, { operation: 'spanTest', includeStack: false });
+
+      expect(span.recordException).toHaveBeenCalledWith(err);
+      expect(err.stack).toEqual(expect.any(String));
+    });
+
     it('preserves original McpError data and does not duplicate originalStack when already present', () => {
       const original = new McpError(JsonRpcErrorCode.InternalError, 'oops', {
         originalStack: 'ORIG_STACK',
@@ -277,6 +321,26 @@ describe('ErrorHandler (unit)', () => {
           expect(data).not.toHaveProperty('causeChain');
         }
         expect(ctx.extra).not.toHaveProperty('stack');
+      } finally {
+        infoSpy.mockRestore();
+      }
+    });
+
+    it('keeps a cancellation stack-free and chain-free under includeStack: false too', () => {
+      const infoSpy = vi.spyOn(logger, 'info').mockImplementation(() => {});
+      try {
+        ErrorHandler.handleError(
+          new McpError(JsonRpcErrorCode.RequestCancelled, 'gone', undefined, {
+            cause: new Error('socket closed'),
+          }),
+          { operation: 'cancelSplit', includeStack: false },
+        );
+
+        expect(errorSpy).not.toHaveBeenCalled();
+        const ctx = infoSpy.mock.calls.at(-1)?.[1] as Record<string, any>;
+        expect(ctx.extra).not.toHaveProperty('stack');
+        expect(ctx.extra.errorData).not.toHaveProperty('originalStack');
+        expect(ctx.extra.errorData).not.toHaveProperty('causeChain');
       } finally {
         infoSpy.mockRestore();
       }

@@ -8,7 +8,11 @@ import { afterEach, beforeEach, describe, expect, it, type MockInstance, vi } fr
 import { JsonRpcErrorCode, McpError } from '../../../../src/types-global/errors.js';
 import { logger } from '../../../../src/utils/internal/logger.js';
 import { fetchWithTimeout } from '../../../../src/utils/network/fetchWithTimeout.js';
-import { defaultIsTransient, withRetry } from '../../../../src/utils/network/retry.js';
+import {
+  defaultIsTransient,
+  type RetryOptions,
+  withRetry,
+} from '../../../../src/utils/network/retry.js';
 
 describe('withRetry', () => {
   const context = {
@@ -1033,5 +1037,215 @@ describe('withRetry over fetchWithTimeout — upstream 5xx policy (#323)', () =>
     expect(error.data?.errorSource).toBe('FetchSignalTimeout');
     expect(error.data).not.toHaveProperty('retryAttempts');
     expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('withRetry logs the cause chain of a retried error (#615)', () => {
+  const context = {
+    requestId: 'retry-cause-request',
+    timestamp: new Date().toISOString(),
+    operation: 'retry-cause',
+  };
+
+  let debugSpy: MockInstance;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    debugSpy = vi.spyOn(logger, 'debug').mockImplementation(() => {});
+    vi.spyOn(logger, 'error').mockImplementation(() => {});
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  /**
+   * Fails once with `failure`, then succeeds; returns the one retry record.
+   * `null` runs the ladder with no `context` option at all.
+   */
+  async function retryRecordFor(
+    failure: unknown,
+    retryContext: RetryOptions['context'] | null = context,
+  ): Promise<[string, unknown]> {
+    let first = true;
+    await withRetry(
+      async () => {
+        if (!first) return 'ok';
+        first = false;
+        throw failure;
+      },
+      {
+        operation: 'demo',
+        baseDelayMs: 1,
+        jitter: 0,
+        ...(retryContext !== null && { context: retryContext }),
+      },
+    );
+    expect(debugSpy).toHaveBeenCalledTimes(1);
+    return debugSpy.mock.calls[0] as [string, unknown];
+  }
+
+  /** The `ECONNRESET` cause from the issue's reproduction. */
+  const connectionReset = () => Object.assign(new Error('read ECONNRESET'), { code: 'ECONNRESET' });
+
+  it("carries a retried error's cause — name, message, and code — on the retry record", async () => {
+    const failure = new McpError(
+      JsonRpcErrorCode.ServiceUnavailable,
+      'upstream is unreachable.',
+      undefined,
+      { cause: connectionReset() },
+    );
+
+    const [message, recordContext] = await retryRecordFor(failure);
+
+    // The message is unchanged; the chain rides the context.
+    expect(message).toBe('Retry 1/3 for demo: upstream is unreachable. — waiting 1ms');
+    expect(recordContext).toEqual({
+      ...context,
+      extra: {
+        causeChain: [
+          { name: 'McpError', message: 'upstream is unreachable.' },
+          { name: 'Error', message: 'read ECONNRESET', code: 'ECONNRESET' },
+        ],
+      },
+    });
+  });
+
+  it("logs a raw Bun fetch rejection's own code, and never its path", async () => {
+    // Bun puts the code on the rejection itself, beside an enumerable `path`
+    // holding the full request URL.
+    const rejection = Object.assign(
+      new TypeError('Unable to connect. Is the computer able to access the url?'),
+      { code: 'ConnectionRefused', path: 'http://127.0.0.1:3614/sk-test-0000/x?key=1', errno: 0 },
+    );
+
+    const [, recordContext] = await retryRecordFor(rejection);
+
+    expect(recordContext).toEqual({
+      ...context,
+      extra: {
+        causeChain: [
+          {
+            name: 'TypeError',
+            message: 'Unable to connect. Is the computer able to access the url?',
+            code: 'ConnectionRefused',
+          },
+        ],
+      },
+    });
+    expect(JSON.stringify(recordContext)).not.toContain('sk-test-0000');
+  });
+
+  it('projects every node past the first level — never a raw Error, a stack, or McpError data', async () => {
+    const root = Object.assign(new Error('connect ECONNREFUSED 127.0.0.1:3614'), {
+      code: 'ECONNREFUSED',
+      address: '127.0.0.1',
+      port: 3614,
+    });
+    const middle = new McpError(
+      JsonRpcErrorCode.ServiceUnavailable,
+      'pool exhausted',
+      { upstreamSecret: 'payload-123' },
+      { cause: root },
+    );
+    const failure = new McpError(
+      JsonRpcErrorCode.ServiceUnavailable,
+      'search failed',
+      { upstreamSecret: 'payload-456' },
+      { cause: middle },
+    );
+
+    const [, recordContext] = await retryRecordFor(failure);
+
+    const chain = (recordContext as { extra: { causeChain: object[] } }).extra.causeChain;
+    expect(chain).toEqual([
+      { name: 'McpError', message: 'search failed' },
+      { name: 'McpError', message: 'pool exhausted' },
+      { name: 'Error', message: 'connect ECONNREFUSED 127.0.0.1:3614', code: 'ECONNREFUSED' },
+    ]);
+    for (const node of chain) expect(Object.getPrototypeOf(node)).toBe(Object.prototype);
+    const serialized = JSON.stringify(recordContext);
+    for (const leaked of ['"stack"', 'payload-', 'upstreamSecret', '"address"', '"port"']) {
+      expect(serialized).not.toContain(leaked);
+    }
+  });
+
+  it("merges the chain into the caller's own extra", async () => {
+    const labelled = { ...context, extra: { endpoint: 'reverse' } };
+    const failure = new TypeError('fetch failed', { cause: connectionReset() });
+
+    const [, recordContext] = await retryRecordFor(failure, labelled);
+
+    expect(recordContext).toEqual({
+      ...labelled,
+      extra: {
+        endpoint: 'reverse',
+        causeChain: [
+          { name: 'TypeError', message: 'fetch failed' },
+          { name: 'Error', message: 'read ECONNRESET', code: 'ECONNRESET' },
+        ],
+      },
+    });
+  });
+
+  it('attaches the chain when the caller passed no context', async () => {
+    const failure = new TypeError('fetch failed', { cause: connectionReset() });
+
+    const [, recordContext] = await retryRecordFor(failure, null);
+
+    expect(recordContext).toEqual({
+      extra: {
+        causeChain: [
+          { name: 'TypeError', message: 'fetch failed' },
+          { name: 'Error', message: 'read ECONNRESET', code: 'ECONNRESET' },
+        ],
+      },
+    });
+  });
+
+  it.each([
+    ['an McpError', new McpError(JsonRpcErrorCode.ServiceUnavailable, 'down', { upstream: 'x' })],
+    ['a plain Error', new Error('transient')],
+    ['an Error with a numeric code', Object.assign(new Error('odd'), { code: 42 })],
+    ['a non-Error value', 'string failure'],
+  ])('logs %s with no cause and no string code exactly as before', async (_label, failure) => {
+    const [, recordContext] = await retryRecordFor(failure);
+
+    expect(recordContext).toBe(context);
+  });
+
+  it('carries the transport code through a fetchWithTimeout network-error wrapper', async () => {
+    // Node's shape: `fetch failed`, with the code on its cause.
+    vi.spyOn(globalThis, 'fetch').mockRejectedValue(
+      new TypeError('fetch failed', {
+        cause: Object.assign(new Error('connect ECONNREFUSED 127.0.0.1:3614'), {
+          code: 'ECONNREFUSED',
+        }),
+      }),
+    );
+
+    const error = (await withRetry(
+      () => fetchWithTimeout('https://api.example.com/sk-test-0000/x', 1000, context),
+      { operation: 'demo-fetch', baseDelayMs: 1, jitter: 0, maxRetries: 1, context },
+    ).catch((e: unknown) => e)) as McpError;
+
+    expect(debugSpy).toHaveBeenCalledWith(
+      'Retry 1/1 for demo-fetch: Network error during fetch GET https://api.example.com/…: fetch failed — waiting 1ms',
+      {
+        ...context,
+        extra: {
+          causeChain: [
+            {
+              name: 'McpError',
+              message: 'Network error during fetch GET https://api.example.com/…: fetch failed',
+            },
+            { name: 'TypeError', message: 'fetch failed' },
+            { name: 'Error', message: 'connect ECONNREFUSED 127.0.0.1:3614', code: 'ECONNREFUSED' },
+          ],
+        },
+      },
+    );
+    // Exhausted error → the wrapper → the runtime's rejection.
+    expect((error.cause as Error).cause).toBeInstanceOf(TypeError);
   });
 });

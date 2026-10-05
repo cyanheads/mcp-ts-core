@@ -10,28 +10,31 @@ import { McpError } from '@/types-global/errors.js';
 import { isAggregateError } from '@/utils/types/guards.js';
 
 /**
- * Formats a ZodError as a human-readable sentence.
+ * Formats a ZodError as a single readable line: `<dotted.path>: <message>`.
  *
  * `ZodError.message` is a serialized JSON array of `ZodIssue` objects — useful for
  * debugging but unreadable in logs, client error messages, and UI surfaces. This
- * helper extracts the first issue's message (typically the most actionable) and
- * appends path + overflow count so `error.message` reads as prose.
+ * helper renders the first issue (typically the most actionable) with its path
+ * leading, the form every other path-bearing renderer in the framework uses, so
+ * a custom message written as a full sentence stays intact. An issue with an
+ * empty path renders as its bare message, and a count of the remaining issues
+ * trails as ` (+N more)`.
  *
  * Pair with `ErrorHandler.classifyOnly` (which returns `data: { issues }`) to
  * preserve the structured issue array for clients that can render field-level
  * errors.
  *
  * @param err - The ZodError to format.
- * @returns A single-line sentence, e.g. `"Expected string at nctId (+2 more)"`.
+ * @returns A single line, e.g. `"nctId: Invalid input: expected string, received number (+2 more)"`.
  */
 export function formatZodErrorMessage(err: ZodError): string {
   const issues = err.issues;
   const first = issues[0];
   if (!first) return 'Validation failed';
-  const path = first.path.length > 0 ? ` at ${first.path.map(String).join('.')}` : '';
+  const path = first.path.length > 0 ? `${first.path.map(String).join('.')}: ` : '';
   const rest = issues.length - 1;
   const tail = rest > 0 ? ` (+${rest} more)` : '';
-  return `${first.message}${path}${tail}`;
+  return `${path}${first.message}${tail}`;
 }
 
 /**
@@ -161,6 +164,13 @@ export function getErrorMessage(error: unknown): string {
  * with `depth: 0` being the original (outermost) error and increasing depth tracking nested causes.
  */
 export interface ErrorCauseNode {
+  /**
+   * The error's own string `code`, when it carries one — the transport code a
+   * fetch failure keeps: `ECONNREFUSED` on the `cause` of Node's
+   * `TypeError: fetch failed`, `ConnectionRefused` on Bun's rejection itself.
+   * `McpError`'s numeric JSON-RPC code is not copied.
+   */
+  code?: string;
   /** Additional data from McpError instances */
   data?: Record<string, unknown>;
   /** Depth in the cause chain (0 = original error) */
@@ -182,7 +192,8 @@ export interface ErrorCauseNode {
  * - or `maxDepth` is reached (sentinel node appended, then stops).
  *
  * String causes are treated as terminal `StringError` nodes.
- * `McpError` nodes include the `data` property when present.
+ * `McpError` nodes include the `data` property when present, and any `Error`
+ * node carrying a string `code` includes it.
  * Circular references are detected via `WeakSet` identity tracking.
  *
  * @param error - The outermost error to start traversal from.
@@ -226,6 +237,7 @@ export function extractErrorCauseChain(error: unknown, maxDepth = 20): ErrorCaus
         name: current.name,
         message: current.message,
         depth,
+        ...('code' in current && typeof current.code === 'string' ? { code: current.code } : {}),
         // Only include stack if it exists (exact optional property types)
         ...(current.stack !== undefined ? { stack: current.stack } : {}),
       };

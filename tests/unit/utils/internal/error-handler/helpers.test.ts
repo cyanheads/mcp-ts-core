@@ -1,6 +1,6 @@
 /**
  * @fileoverview Test suite for error handler helper utilities — getErrorName, getErrorMessage,
- * extractErrorCauseChain.
+ * formatZodErrorMessage, extractErrorCauseChain.
  * @module tests/utils/internal/error-handler/helpers.test
  */
 
@@ -120,38 +120,84 @@ describe('Error Handler Helpers', () => {
       const msg = getErrorMessage(result.error);
       expect(msg).not.toContain('[\n');
       expect(msg).not.toContain('"code":');
-      expect(msg).toContain('at name');
+      expect(msg).toBe('name: Invalid input: expected string, received number');
     });
   });
 
   // ─── formatZodErrorMessage ───────────────────────────────────────────────────
 
   describe('formatZodErrorMessage', () => {
-    it('should format single-issue error with path', () => {
-      const result = z.object({ nctId: z.string().regex(/^NCT\d{8}$/) }).safeParse({ nctId: 'X' });
+    /** The ZodError `schema` raises for `value`. */
+    const zodErrorFor = (schema: z.ZodType, value: unknown) => {
+      const result = schema.safeParse(value);
       expect(result.success).toBe(false);
-      if (result.success) return;
-      const msg = formatZodErrorMessage(result.error);
-      expect(msg).toContain('at nctId');
+      return result.error as z.ZodError;
+    };
+
+    it('should format single-issue error with path', () => {
+      const msg = formatZodErrorMessage(
+        zodErrorFor(z.object({ nctId: z.string().regex(/^NCT\d{8}$/) }), { nctId: 'X' }),
+      );
+      expect(msg).toBe('nctId: Invalid string: must match pattern /^NCT\\d{8}$/');
       expect(msg).not.toContain('(+');
     });
 
-    it('should append overflow count when multiple issues', () => {
-      const result = z
-        .object({ a: z.string(), b: z.number(), c: z.boolean() })
-        .safeParse({ a: 1, b: 'x', c: 'y' });
-      expect(result.success).toBe(false);
-      if (result.success) return;
-      const msg = formatZodErrorMessage(result.error);
-      expect(msg).toMatch(/\(\+\d+ more\)/);
+    it('leads with the path when a custom message is a full sentence (#620)', () => {
+      const schema = z.object({
+        recid: z.string().regex(/^\d+$/, 'A recid is digits, such as 6004.'),
+      });
+      expect(formatZodErrorMessage(zodErrorFor(schema, { recid: 'abc' }))).toBe(
+        'recid: A recid is digits, such as 6004.',
+      );
     });
 
-    it('should omit path suffix for root-level issues', () => {
-      const result = z.string().safeParse(42);
-      expect(result.success).toBe(false);
-      if (result.success) return;
-      const msg = formatZodErrorMessage(result.error);
-      expect(msg).not.toContain(' at ');
+    it('joins an array index into the dotted path', () => {
+      const schema = z.object({
+        ids: z.array(z.string().regex(/^\d+$/, 'A recid is digits, such as 6004.')),
+      });
+      expect(formatZodErrorMessage(zodErrorFor(schema, { ids: ['6004', 'abc'] }))).toBe(
+        'ids.1: A recid is digits, such as 6004.',
+      );
+    });
+
+    it('names every level of a nested path', () => {
+      const schema = z.object({
+        filter: z.object({ range: z.object({ from: z.string().min(4) }) }),
+      });
+      expect(
+        formatZodErrorMessage(zodErrorFor(schema, { filter: { range: { from: 'ab' } } })),
+      ).toBe('filter.range.from: Too small: expected string to have >=4 characters');
+    });
+
+    it('should append overflow count when multiple issues', () => {
+      const msg = formatZodErrorMessage(
+        zodErrorFor(z.object({ a: z.string(), b: z.number(), c: z.boolean() }), {
+          a: 1,
+          b: 'x',
+          c: 'y',
+        }),
+      );
+      expect(msg).toMatch(/\(\+\d+ more\)/);
+      expect(msg).toBe('a: Invalid input: expected string, received number (+2 more)');
+    });
+
+    it('should render a root-level issue as its bare message', () => {
+      expect(formatZodErrorMessage(zodErrorFor(z.string(), 42))).toBe(
+        'Invalid input: expected string, received number',
+      );
+    });
+
+    it('should render an object-level refine as exactly its own message', () => {
+      const schema = z
+        .object({ start: z.number(), end: z.number() })
+        .refine((range) => range.start < range.end, 'start must come before end.');
+      expect(formatZodErrorMessage(zodErrorFor(schema, { start: 2, end: 1 }))).toBe(
+        'start must come before end.',
+      );
+    });
+
+    it('should fall back to a fixed sentence for an error with no issues', () => {
+      expect(formatZodErrorMessage(new z.ZodError([]))).toBe('Validation failed');
     });
   });
 
@@ -224,6 +270,56 @@ describe('Error Handler Helpers', () => {
     it('should return empty chain for falsy input', () => {
       expect(extractErrorCauseChain(null)).toHaveLength(0);
       expect(extractErrorCauseChain(undefined)).toHaveLength(0);
+    });
+
+    it('carries a string code on every node that has one, past the first level (#615)', () => {
+      // Node's undici shape: the transport code sits on the cause of `fetch failed`.
+      const socket = Object.assign(new Error('read ECONNRESET'), { code: 'ECONNRESET' });
+      const fetchFailed = new TypeError('fetch failed', { cause: socket });
+      const wrapper = new McpError(
+        JsonRpcErrorCode.ServiceUnavailable,
+        'Network error',
+        undefined,
+        {
+          cause: fetchFailed,
+        },
+      );
+
+      const chain = extractErrorCauseChain(wrapper);
+
+      expect(chain).toHaveLength(3);
+      expect(chain[2]).toMatchObject({
+        name: 'Error',
+        message: 'read ECONNRESET',
+        code: 'ECONNRESET',
+        depth: 2,
+      });
+      // McpError's numeric JSON-RPC code is not a transport code.
+      expect(chain[0]).not.toHaveProperty('code');
+      expect(chain[1]).not.toHaveProperty('code');
+    });
+
+    it('reads the code off the outermost error itself', () => {
+      // Bun's shape: the code rides the fetch rejection, which has no cause.
+      const rejection = Object.assign(
+        new TypeError('Unable to connect. Is the computer able to access the url?'),
+        { code: 'ConnectionRefused' },
+      );
+
+      expect(extractErrorCauseChain(rejection)).toEqual([
+        {
+          name: 'TypeError',
+          message: 'Unable to connect. Is the computer able to access the url?',
+          code: 'ConnectionRefused',
+          depth: 0,
+          stack: expect.any(String),
+        },
+      ]);
+    });
+
+    it('ignores a code that is not a string', () => {
+      const node = extractErrorCauseChain(Object.assign(new Error('odd'), { code: 42 }))[0];
+      expect(node).not.toHaveProperty('code');
     });
   });
 });

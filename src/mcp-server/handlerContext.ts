@@ -26,6 +26,7 @@ import { resolveSessionMode } from '@/mcp-server/types.js';
 import type { StorageService } from '@/storage/core/StorageService.js';
 import type { ErrorContract } from '@/types-global/errors.js';
 import type { Logger } from '@/utils/internal/logger.js';
+import { jsonRpcIdLogFields } from '@/utils/internal/observabilityCap.js';
 import type { RequestContext } from '@/utils/internal/requestContext.js';
 
 /** Services a handler factory builds `Context` from. */
@@ -108,21 +109,27 @@ function sdkSessionIdOf(serverContext: ServerContext | undefined): string | unde
 
 /**
  * The `parentContext` of a request's tracing context — for a tool call, a
- * resource read, and a `prompts/get` alike: the SDK request id when the client
- * sent a string id (otherwise the context generates one) and the raw session
- * id when present. That id is the one the call's log records carry and its
- * error `data.requestId` returns (#576). Raw handler input is deliberately not
- * part of it — the context spreads into the completion log and can carry
- * caller PII or secrets; sizes and parameter names are recorded as metric
- * attributes by the execution measurement instead.
+ * resource read, and a `prompts/get` alike. It carries no `requestId`, so the
+ * context generates one per call: a JSON-RPC id is chosen by the client and
+ * unique only within its connection, so it cannot name a call (#584). That
+ * generated id is the one the call's log records carry and its error
+ * `data.requestId` returns (#576).
+ *
+ * The client's id rides every record of the call as `extra.jsonRpcId` instead
+ * — capped by {@link jsonRpcIdLogFields}, string or number as sent — beside the
+ * raw session id when present. Log fields only: the execution span and metrics
+ * never read `extra`. Raw handler input is deliberately not part of it — the
+ * context spreads into the completion log and can carry caller PII or secrets;
+ * sizes and parameter names are recorded as metric attributes by the execution
+ * measurement instead.
  */
 export function handlerParentContext(
   serverContext: ServerContext | undefined,
-): Partial<Pick<RequestContext, 'requestId' | 'sessionId'>> {
-  const requestId = serverContext?.mcpReq?.id;
+): Partial<Pick<RequestContext, 'extra' | 'sessionId'>> {
+  const jsonRpcId = serverContext?.mcpReq?.id;
   const sessionId = sdkSessionIdOf(serverContext);
   return {
-    ...(typeof requestId === 'string' && { requestId }),
+    ...(jsonRpcId !== undefined && { extra: jsonRpcIdLogFields(jsonRpcId) }),
     ...(sessionId && { sessionId }),
   };
 }

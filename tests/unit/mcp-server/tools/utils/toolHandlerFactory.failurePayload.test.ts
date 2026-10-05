@@ -289,7 +289,7 @@ const FAILURES = [
   ['an output-schema failure', breaksOutput, { query: SENTINEL }, undefined, 'error'],
   ['an argument rejection', handlerThrows, { query: SENTINEL, limit: 'ten' }, undefined, 'info'],
   [
-    'an auth refusal',
+    'a missing auth context',
     scoped,
     { query: SENTINEL },
     () => {
@@ -554,12 +554,18 @@ describe('LOG_TOOL_FAILURE_PAYLOADS=true', () => {
   });
 
   it('leaves the client-visible result identical to the flag-unset call', async () => {
+    /** The result with its own request id masked: every call gets a fresh one (#584). */
+    const sansRequestId = (result: CallToolResult): unknown => {
+      const { requestId } = (result.structuredContent as { error: { data: { requestId: string } } })
+        .error.data;
+      return JSON.parse(JSON.stringify(result).replaceAll(requestId, '<request-id>'));
+    };
     const withFlag = await call(handlerThrows, { query: SENTINEL, limit: 'ten' });
     expect(onlyPayload().fields.toolResult).toBe(JSON.stringify(withFlag));
     mockConfig.logToolFailurePayloads = false;
     const withoutFlag = await call(handlerThrows, { query: SENTINEL, limit: 'ten' });
 
-    expect(withFlag).toEqual(withoutFlag);
+    expect(sansRequestId(withFlag)).toEqual(sansRequestId(withoutFlag));
     expect(payloadWrites()).toHaveLength(1);
   });
 });

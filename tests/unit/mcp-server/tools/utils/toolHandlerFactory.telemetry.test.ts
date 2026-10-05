@@ -7,7 +7,7 @@
  * @module tests/mcp-server/tools/utils/toolHandlerFactory.telemetry.test
  */
 
-import type { CallToolResult, ClientCapabilities } from '@modelcontextprotocol/server';
+import type { CallToolResult, ClientCapabilities, RequestId } from '@modelcontextprotocol/server';
 import { inputRequired } from '@modelcontextprotocol/server';
 import { SpanStatusCode, trace } from '@opentelemetry/api';
 import { afterEach, beforeEach, describe, expect, it, type MockInstance, vi } from 'vitest';
@@ -149,10 +149,10 @@ function byteRecords(toolName: string): [number, Record<string, unknown>][] {
 }
 
 /**
- * The request id `callTool` runs under: `makeServerContext`'s string JSON-RPC
- * id, which the request context inherits and the envelope carries (#576).
+ * The request id `callTool` runs under: a framework-generated token the
+ * envelope carries (#576), never `makeServerContext`'s string JSON-RPC id (#584).
  */
-const REQUEST_ID = 'test-request-id';
+const REQUEST_ID = expect.stringMatching(/^[A-Z0-9]{5}-[A-Z0-9]{5}$/);
 
 async function callTool(def: unknown, input: Record<string, unknown> = {}) {
   const handler = createToolHandler(def as AnyToolDefinition, services, notifiers);
@@ -707,6 +707,110 @@ describe('tool telemetry records the terminal outcome (#346)', () => {
     });
   });
 
+  // Issue #584 — every call logs under a generated requestId; the client's own
+  // JSON-RPC id rides each record as `jsonRpcId`, capped like `resourceUri`.
+  describe('the client JSON-RPC id on every record (#584)', () => {
+    const TOKEN = /^[A-Z0-9]{5}-[A-Z0-9]{5}$/;
+
+    const probe = tool('telemetry_jsonrpc', {
+      description: 'Logs through ctx.log, then fails.',
+      input: z.object({ q: z.string().describe('query') }),
+      output: z.object({ ok: z.boolean().describe('ok') }),
+      handler: (_input, ctx) => {
+        ctx.log.info('jsonrpc probe entered');
+        throw new McpError(JsonRpcErrorCode.NotFound, 'No record.', { reason: 'no_record' });
+      },
+    });
+
+    /** Calls `probe` under JSON-RPC id `id`; returns the result and its envelope's `data.requestId`. */
+    async function callWith(id: RequestId, input: Record<string, unknown> = { q: 'x' }) {
+      const handler = createToolHandler(probe as AnyToolDefinition, services, notifiers);
+      const result = (await handler(input, makeServerContext({ requestId: id }))) as CallToolResult;
+      const { requestId } = (result.structuredContent as { error: { data: { requestId: string } } })
+        .error.data;
+      return { result, requestId };
+    }
+
+    type LoggedContext = { requestId?: unknown; extra?: Record<string, unknown> };
+
+    /** Every record the call wrote: its message and the context the logger received. */
+    function records(): Array<[message: string, context: LoggedContext]> {
+      return (['debug', 'info', 'notice', 'warning', 'error'] as const).flatMap((level) =>
+        mockLogger[level].mock.calls.map(
+          ([message, context]) => [String(message), context as LoggedContext] as const,
+        ),
+      ) as Array<[string, LoggedContext]>;
+    }
+
+    it('logs a string id as jsonRpcId under a generated requestId the envelope returns', async () => {
+      const { result, requestId } = await callWith('client-string-id-19');
+
+      expect(requestId).toMatch(TOKEN);
+      expect(records().map(([message]) => message)).toEqual(
+        expect.arrayContaining([
+          'jsonrpc probe entered',
+          TELEMETRY_LOG_MESSAGES.toolExecutionFinished,
+          expect.stringMatching(/^Error in tool:telemetry_jsonrpc:/),
+        ]),
+      );
+      for (const [, context] of records()) {
+        expect(context.requestId).toBe(requestId);
+        expect(context.extra).toMatchObject({ jsonRpcId: 'client-string-id-19' });
+        expect(context.extra).not.toHaveProperty('jsonRpcIdLength');
+      }
+      expect((result.content as Array<{ text: string }>)[0]?.text).toBe(
+        `Error: No record.\n\n(reason no_record · request ${requestId})`,
+      );
+    });
+
+    it('never takes a string id shaped like a generated token as the requestId', async () => {
+      const { requestId } = await callWith('AAAAA-BBBBB');
+
+      expect(requestId).toMatch(TOKEN);
+      expect(requestId).not.toBe('AAAAA-BBBBB');
+      for (const [, context] of records()) {
+        expect(context.extra).toMatchObject({ jsonRpcId: 'AAAAA-BBBBB' });
+      }
+    });
+
+    it('logs a numeric id as a number', async () => {
+      const { requestId } = await callWith(10);
+
+      expect(requestId).toMatch(TOKEN);
+      for (const [, context] of records()) {
+        expect(context.requestId).toBe(requestId);
+        expect(context.extra?.jsonRpcId).toBe(10);
+      }
+    });
+
+    it('logs a 999,000-character id cut to 1,024 with its length, and keeps it off the envelope', async () => {
+      const id = 'q'.repeat(999_000);
+
+      const { result, requestId } = await callWith(id);
+
+      expect(requestId).toMatch(TOKEN);
+      for (const [, context] of records()) {
+        expect(context.extra).toMatchObject({
+          jsonRpcId: id.slice(0, 1_024),
+          jsonRpcIdLength: 999_000,
+        });
+      }
+      expect(JSON.stringify(result.structuredContent)).not.toContain('q'.repeat(64));
+      expect(JSON.stringify(result.content)).not.toContain('q'.repeat(64));
+    });
+
+    it('logs the id on an argument rejection’s record', async () => {
+      const { requestId } = await callWith('client-string-id-19', { q: 'x', salt: 1 });
+
+      const rejection = mockLogger.notice.mock.calls.findLast(([message]) =>
+        /^Error in tool:telemetry_jsonrpc:/.test(String(message)),
+      )?.[1] as LoggedContext | undefined;
+      expect(requestId).toMatch(TOKEN);
+      expect(rejection?.requestId).toBe(requestId);
+      expect(rejection?.extra).toMatchObject({ jsonRpcId: 'client-string-id-19' });
+    });
+  });
+
   describe('a handler failure', () => {
     it('still reports the failure it did in 0.12.2', async () => {
       const def = tool('telemetry_throws', {
@@ -968,6 +1072,41 @@ describe('tool telemetry records the terminal outcome (#346)', () => {
         JsonRpcErrorCode.Unauthorized,
       );
       expectRejectionOnly(JsonRpcErrorCode.Unauthorized, 'client');
+    });
+
+    it('tags a missing-scope refusal as notice on mcp.errors.classified (#585)', async () => {
+      mockConfig.mcpAuthMode = 'jwt';
+      const authInfo = { token: 't', clientId: 'c', scopes: [] };
+
+      await authContext.run({ authInfo } as never, () => callTool(guarded, { name: 'x' }));
+
+      expect(mockClassifiedCounterAdd).toHaveBeenCalledWith(1, {
+        'mcp.error.classified_code': String(JsonRpcErrorCode.Forbidden),
+        'mcp.error.category': 'client',
+        'mcp.error.severity': 'notice',
+        operation: 'tool:guarded_tool',
+      });
+      expect(mockLogger.notice).toHaveBeenCalledWith(
+        expect.stringMatching(/^Error in tool:guarded_tool: /),
+        expect.anything(),
+      );
+      expect(mockLogger.error).not.toHaveBeenCalled();
+    });
+
+    it('leaves a missing auth context at error, with no severity on mcp.errors.classified', async () => {
+      mockConfig.mcpAuthMode = 'jwt';
+
+      await callTool(guarded, { name: 'x' });
+
+      expect(mockClassifiedCounterAdd).toHaveBeenCalledWith(1, {
+        'mcp.error.classified_code': String(JsonRpcErrorCode.Unauthorized),
+        'mcp.error.category': 'client',
+        operation: 'tool:guarded_tool',
+      });
+      expect(mockLogger.error).toHaveBeenCalledWith(
+        expect.stringMatching(/^Error in tool:guarded_tool: /),
+        expect.anything(),
+      );
     });
 
     it('records a cancelled call as cancelled on calls and errors', async () => {

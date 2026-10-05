@@ -709,7 +709,7 @@ describe('createResourceHandler', () => {
       );
     });
 
-    it('carries the request scope id into RequestContext', async () => {
+    it('carries the client id into RequestContext as jsonRpcId, never as the requestId (#584)', async () => {
       const { requestContextService } = await import('@/utils/internal/requestContext.js');
 
       const def = resource('reqid://{id}', {
@@ -720,11 +720,48 @@ describe('createResourceHandler', () => {
       const handler = createResourceHandler(def as AnyResourceDefinition, services, notifiers);
       await handler(new URL('reqid://x'), { id: 'x' }, makeServerContext({ requestId: 'req-77' }));
 
-      expect(requestContextService.createRequestContext).toHaveBeenCalledWith(
-        expect.objectContaining({
-          parentContext: expect.objectContaining({ requestId: 'req-77' }),
-        }),
+      const params = vi.mocked(requestContextService.createRequestContext).mock.calls.at(-1)?.[0];
+      expect(params?.parentContext).not.toHaveProperty('requestId');
+      expect(params?.parentContext?.extra).toEqual({ jsonRpcId: 'req-77' });
+    });
+
+    it('answers a failed read with the generated requestId its records carry, beside jsonRpcId (#584)', async () => {
+      const actual = await vi.importActual<typeof import('@/utils/internal/requestContext.js')>(
+        '@/utils/internal/requestContext.js',
       );
+      const { requestContextService } = await import('@/utils/internal/requestContext.js');
+      vi.mocked(requestContextService.createRequestContext).mockImplementationOnce(
+        actual.requestContextService.createRequestContext,
+      );
+      const def = resource('rid://{id}', {
+        description: 'Logs, then fails.',
+        params: z.object({ id: z.string().describe('id') }),
+        handler: (_params, ctx) => {
+          ctx.log.info('rid read entered');
+          throw new Error('gone');
+        },
+      });
+
+      const handler = createResourceHandler(def as AnyResourceDefinition, services, notifiers);
+      const rejection = (await handler(
+        new URL('rid://x'),
+        { id: 'x' },
+        makeServerContext({ requestId: 'res-str-1' }),
+      ).catch((error: unknown) => error)) as McpError;
+
+      const recordOf = (message: string) =>
+        mockLogger.info.mock.calls.findLast(([logged]) => logged === message)?.[1] as
+          | { extra?: Record<string, unknown>; requestId?: string }
+          | undefined;
+      const requestId = rejection.data?.requestId;
+      expect(requestId).toMatch(/^[A-Z0-9]{5}-[A-Z0-9]{5}$/);
+      for (const record of [
+        recordOf(TELEMETRY_LOG_MESSAGES.resourceReadFinished),
+        recordOf('rid read entered'),
+      ]) {
+        expect(record?.requestId).toBe(requestId);
+        expect(record?.extra).toMatchObject({ jsonRpcId: 'res-str-1', resourceUri: 'rid://x' });
+      }
     });
 
     it('surfaces ctx.sessionId in stateful HTTP mode', async () => {
@@ -826,7 +863,7 @@ describe('createResourceHandler', () => {
       // Flat human-readable message — no JSON blob
       expect(err.message).not.toContain('[\n');
       expect(err.message).not.toContain('"code":');
-      expect(err.message).toContain('at nctId');
+      expect(err.message).toBe('nctId: NCT IDs must match NCTxxxxxxxx');
       // Structured issues preserved in data
       expect(err.data).toBeDefined();
       expect(Array.isArray(err.data.issues)).toBe(true);

@@ -5,8 +5,9 @@
  * @module src/utils/network/retry
  */
 import { JsonRpcErrorCode, McpError, timeout } from '@/types-global/errors.js';
+import { extractErrorCauseChain } from '@/utils/internal/error-handler/helpers.js';
 import { logger } from '@/utils/internal/logger.js';
-import type { RequestContext } from '@/utils/internal/requestContext.js';
+import { type RequestContext, withExtra } from '@/utils/internal/requestContext.js';
 
 /**
  * Error codes considered transient — eligible for retry.
@@ -57,7 +58,9 @@ export interface RetryOptions {
    * Log bindings for correlated logging. When provided, retry log entries
    * include `requestId`, `traceId`, etc. Passing the handler `Context` is
    * safe — the logger strips non-serializable fields (`signal`, `log`,
-   * `state`, protocol method handles) before pino sees them.
+   * `state`, protocol method handles) before pino sees them. A retried error
+   * with a cause or a string `code` adds `causeChain` to the entry's `extra`,
+   * with or without a context.
    */
   context?: RequestContext;
 
@@ -194,6 +197,34 @@ export function parseRetryAfterMs(error: unknown): number | undefined {
   const dateMs = Date.parse(trimmed);
   if (Number.isNaN(dateMs)) return;
   return Math.max(0, dateMs - Date.now());
+}
+
+/** One entry of the `causeChain` field a retry or network-error log record carries. */
+export interface LoggedCauseNode {
+  readonly code?: string;
+  readonly message: string;
+  readonly name: string;
+}
+
+/**
+ * Projects an error's cause chain for a log record — `{ name, message, code? }`
+ * per node, the error itself first — or `undefined` when the error has neither
+ * a cause nor a string `code`, so its record stays exactly as it was.
+ *
+ * Projections only: pino writes an `Error` under any key but `err` as its
+ * enumerable properties, and a Bun fetch rejection's `path` holds the full
+ * request URL. Stacks and `McpError.data` stay out for the same reason.
+ * Module-level, not public: `fetchWithTimeout`'s network-error record carries
+ * the same field.
+ */
+export function causeChainForLog(error: unknown): LoggedCauseNode[] | undefined {
+  if (!(error instanceof Error)) return;
+  if (!error.cause && !('code' in error && typeof error.code === 'string')) return;
+  return extractErrorCauseChain(error).map(({ name, message, code }) => ({
+    name,
+    message,
+    ...(code !== undefined && { code }),
+  }));
 }
 
 /**
@@ -512,10 +543,14 @@ export async function withRetry<T>(
 
         const errorMessage = error instanceof Error ? error.message : String(error);
         const delaySource = retryAfterMs === undefined ? '' : ' (Retry-After)';
+        // The transport code (`ECONNRESET`, `ConnectionRefused`) rides the
+        // cause chain, not the message — the only trace of why a retry that
+        // later succeeds was needed.
+        const causeChain = causeChainForLog(error);
 
         logger.debug(
           `Retry ${attempt + 1}/${maxRetries} for ${operation ?? 'operation'}: ${errorMessage} — waiting ${Math.round(delay)}ms${delaySource}`,
-          context,
+          causeChain ? withExtra(context ?? ({} as RequestContext), { causeChain }) : context,
         );
 
         try {

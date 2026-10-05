@@ -80,8 +80,14 @@ export interface ErrorHandlerOptions {
   errorMapper?: (error: unknown) => Error;
 
   /**
-   * If true, stack traces will be included in the logs.
-   * Defaults to `true`.
+   * Whether the log record carries stack traces. Defaults to `true`.
+   *
+   * `false` removes every stack from the record: `extra.stack`,
+   * `extra.errorData.originalStack` (including one carried in a thrown
+   * `McpError`'s own `data`, or a cause's), and the `stack` of each
+   * `extra.errorData.causeChain` node. The chain itself stays, each node
+   * keeping its other fields. The returned error and the exception recorded
+   * on the active span are the same either way.
    */
   includeStack?: boolean;
 
@@ -108,9 +114,10 @@ export interface ErrorHandlerOptions {
    * Level to emit this failure's log record at, in place of `error`.
    *
    * Set by the tool handler factory when the thrown error's `data.reason` names
-   * a contract entry declaring one (#380), and to `notice` for the framework's
+   * a contract entry declaring one (#380), to `notice` for the framework's
    * own `invalid_arguments` and `client_capability_missing` refusals when no
-   * entry declares one (#567). It moves the level of that one record
+   * entry declares one (#567), and to `notice` for a scope check's
+   * missing-scope refusal (#585). It moves the level of that one record
    * and adds `mcp.error.severity` to the `mcp.errors.classified` increment;
    * everything else the handler does — the span status, the rebuilt `McpError`,
    * the structured fields — is unchanged. A `RequestCancelled` keeps its own

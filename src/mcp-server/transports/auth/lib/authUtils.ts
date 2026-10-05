@@ -6,13 +6,42 @@
 
 import { config } from '@/config/index.js';
 import { authContext } from '@/mcp-server/transports/auth/lib/authContext.js';
-import { forbidden, unauthorized } from '@/types-global/errors.js';
+import { forbidden, McpError, unauthorized } from '@/types-global/errors.js';
 import { logger } from '@/utils/internal/logger.js';
 import {
   type RequestContext,
   requestContextService,
   withExtra,
 } from '@/utils/internal/requestContext.js';
+
+/** The `Forbidden` errors a scope check threw for a missing scope. */
+const scopeRefusals = new WeakSet<McpError>();
+
+/**
+ * Marks `error` as a scope check's missing-scope refusal and returns it. The
+ * mark is kept beside the error rather than on it, so the thrown `McpError`,
+ * its wire envelope, and its log fields stay exactly what they were. Lives here
+ * rather than in `checkScopes.ts`, which is the public `/auth` entry: anything
+ * exported there is public API.
+ *
+ * @internal Used by {@link withRequiredScopes} and `checkScopes`.
+ */
+export function markScopeRefusal(error: McpError): McpError {
+  scopeRefusals.add(error);
+  return error;
+}
+
+/**
+ * Whether `error` is the `Forbidden` a scope check threw for a missing scope.
+ * That refusal is told apart from every other `Forbidden` — a handler's own
+ * `forbidden()`, an upstream 403 — by where it was raised, never by its code,
+ * so the tool handler factory can log it at `notice` with no stack (#585).
+ *
+ * @internal
+ */
+export function isScopeRefusal(error: unknown): boolean {
+  return error instanceof McpError && scopeRefusals.has(error);
+}
 
 /**
  * Checks if the current authentication context contains all the specified scopes.
@@ -84,7 +113,7 @@ export function withRequiredScopes(requiredScopes: string[], parentContext?: Req
     );
     // Do not include scope names in the client-facing error data — prevents scope enumeration.
     // Full details (grantedScopes, missingScopes, clientId, subject) are in the server-side log above.
-    throw forbidden('Insufficient permissions.');
+    throw markScopeRefusal(forbidden('Insufficient permissions.'));
   }
 
   logger.debug('Scope authorization successful.', finalContext);

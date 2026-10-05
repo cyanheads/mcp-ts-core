@@ -4,7 +4,7 @@ description: >
   Catalog of OpenTelemetry instrumentation built into framework `@cyanheads/mcp-ts-core` — spans, metrics, completion logs, env config, runtime caveats, custom instrumentation patterns, and cardinality rules. Use when enabling OTel export, adding custom spans or metrics in services, debugging missing telemetry, looking up attribute names, or deciding what's safe to put on a metric attribute vs. a span.
 metadata:
   author: cyanheads
-  version: "1.17"
+  version: "1.18"
   audience: external
   type: reference
 ---
@@ -157,7 +157,7 @@ The three `mcp.input.*` counters are the pre-validation step's metrics. Each mar
 
 **Every label is author- or framework-defined — the caller's own key text is never one.** `mcp.input.ignore_rule` is the ignore-list entry that matched or the fixed `underscore_prefix`, bounded by the list's length plus one. `mcp.input.aliased` is labelled by the canonical `mcp.input.target` (a declared property of the tool) and `mcp.input.alias_kind`, not by the alias the caller sent — the case-style half accepts every `-`/`_`/case permutation of a declared key, so labelling the alias would put a caller-controlled set on a permanent series. That is the unbounded-label leak removed from the rate-limiter counter in 0.9.0: a metric attribute set lives until process restart, so anything the caller names belongs on a span or in a log, never on a counter.
 
-**To find the raw key, read the debug log**, which carries `ignoredKey` / `alias` alongside the bounded rule and target. The counter tells you a client artifact exists and how often; the log tells you what it is called, which is what you need before extending `input.ignoreKeys`, declaring an `inputAliases` entry, or renaming a parameter.
+**To find the raw key, read the debug log**, which carries `ignoredKey` / `alias` alongside the bounded rule and target — at most its first 1,024 characters, with `ignoredKeyLength` / `aliasLength` holding the uncut length of a longer key. The counter tells you a client artifact exists and how often; the log tells you what it is called, which is what you need before extending `input.ignoreKeys`, declaring an `inputAliases` entry, or renaming a parameter.
 
 ### Outbound pacer
 
@@ -216,7 +216,7 @@ A definition may put `severity` on an `errors[]` entry — `debug`, `info`, `not
 - The `Error in tool:<name>` log record is emitted at that level instead of `error`, with the same message and structured fields.
 - `mcp.errors.classified` gains `mcp.error.severity` on that record. It is set only when a severity resolved below `error`.
 
-The framework's own refusals resolve one without a declaration: an argument rejection (`invalid_arguments`) and a `ctx.requestInput` the client connection cannot serve (`client_capability_missing`) log at `notice`, so even a server that declares no severity sees `mcp.error.severity: "notice"` on those `mcp.errors.classified` increments — a bounded split a dashboard can use to separate caller rejections from faults. An argument rejection opens no execution span and reaches no call counter either way; it still counts once on `mcp.tool.rejections`.
+The framework's own refusals resolve one without a declaration: an argument rejection (`invalid_arguments`), a `ctx.requestInput` the client connection cannot serve (`client_capability_missing`), and a missing-scope refusal from the inline `auth` check or `checkScopes` log at `notice`, so even a server that declares no severity sees `mcp.error.severity: "notice"` on those `mcp.errors.classified` increments — a bounded split a dashboard can use to separate caller rejections from faults. A missing auth context (`-32006`), a handler's own `forbidden()`, and an upstream 403 stay at `error`. An argument rejection and an inline missing-scope refusal open no execution span and reach no call counter either way; each still counts once on `mcp.tool.rejections`. Neither the argument-rejection nor the missing-scope record carries a stack.
 
 The call still failed: the execution span keeps `SpanStatusCode.ERROR` and its recorded exception, `mcp.tool.calls` / `mcp.tool.duration` / `mcp.tool.errors` record the same values, and the completion log still reads `isSuccess: false`. Splitting those series on an authoring decision would redefine what an error rate means. Tools only — resources write no failure record of their own. A cancelled request keeps its own `info`, stack-free path whatever the contract declares. See `api-errors`.
 
@@ -224,7 +224,7 @@ The call still failed: the execution span keeps `SpanStatusCode.ERROR` and its r
 
 | Metric | Type | Unit | Attributes |
 |:-------|:-----|:-----|:-----------|
-| `mcp.errors.classified` | counter | `{errors}` | `mcp.error.classified_code` (JSON-RPC code), `mcp.error.category` (`upstream`/`server`/`client`, as in [Error category](#error-category)), `operation`, and `mcp.error.severity` when a tool failure's level resolved below `error` — a declared severity, or `notice` for an `invalid_arguments` / `client_capability_missing` refusal |
+| `mcp.errors.classified` | counter | `{errors}` | `mcp.error.classified_code` (JSON-RPC code), `mcp.error.category` (`upstream`/`server`/`client`, as in [Error category](#error-category)), `operation`, and `mcp.error.severity` when a tool failure's level resolved below `error` — a declared severity, or `notice` for an `invalid_arguments` / `client_capability_missing` refusal or a missing-scope refusal |
 | `mcp.ratelimit.rejections` | counter | `{rejections}` | — (the rate-limit key is caller-supplied and typically per-client, so it would materialize an unbounded series in the meter; per-key attribution lives on the span instead) |
 | `http.client.request.duration` | histogram | `s` | `http.request.method`, `server.address`, `http.response.status_code` (when > 0; absent on network errors before a response is received) |
 
@@ -257,11 +257,15 @@ For domain logging inside handlers, use `ctx.log` (`debug`/`info`/`notice`/`warn
 
 Every record of a resource read — scope checks, the handler's `ctx.log` lines, the completion record — carries the read's URI as `resourceUri`, capped like `mcp.resource.uri`, plus `resourceUriLength` when the cap cut it. The handler's `ctx.uri` and the response keep the full URI.
 
-A failed tool call or prompt adds exactly one `Error in tool:<name>` / `Error in prompt:<name>` record. Each call — prompts included — logs under its own `requestId`, and the client receives that value as `data.requestId` on the call's error envelope, so a reported failure resolves to its records.
+Every record of a tool call, resource read, or `prompts/get` carries the client's JSON-RPC id as `jsonRpcId`, string or number as sent; a string over 1,024 characters keeps at most its first 1,024, plus `jsonRpcIdLength` with the uncut length. `httpErrorHandler`'s records carry the request body's id the same way. It is a log field only — no span or metric attribute carries it — and never the call's `requestId`; the response `id` returns it unchanged. A 2025-era `ctx.requestInput` round trip, which the SDK serves by re-entering the handler, logs each entry under a new `requestId`; the shared `jsonRpcId` ties them together.
+
+A failed tool call or prompt adds exactly one `Error in tool:<name>` / `Error in prompt:<name>` record. Each call — prompts included — logs under its own generated `requestId`, and the client receives that value as `data.requestId` on the call's error envelope, so a reported failure resolves to its records.
+
+An argument rejection's `Error in tool:<name>` record is bounded whatever the caller sends: every string it takes from the rejection — the message (so `msg` and `errorData.originalMessage`), `recovery.hint`, each issue's `message`, each `input` key — keeps at most its first 1,024 characters, and every array its first 10 entries. Each cut records the uncut length or count beside it: `originalMessageLength` for the message, `<field>Length` beside a cut string, `<field>Count` beside a cut array, and `<field>Lengths` — the uncut length of each entry kept — beside an array one of whose entries was cut. A rejection within the caps carries no such field. The `-32602` result the caller receives is built from the uncut rejection.
 
 ### Failed-call payloads
 
-Off by default. With `LOG_TOOL_FAILURE_PAYLOADS=true`, a failed tool call writes one more record right after its `Error in tool:<name>` record: message `Tool failure payload: <name>`, the same request context (`requestId`, `traceId`, `spanId`, `toolName`), and the same level, a declared `severity` and the `notice` of an argument rejection included. A payload record below `MCP_LOG_LEVEL` is dropped with its `Error in tool:` record, so at `warning` or above an argument rejection writes neither.
+Off by default. With `LOG_TOOL_FAILURE_PAYLOADS=true`, a failed tool call writes one more record right after its `Error in tool:<name>` record: message `Tool failure payload: <name>`, the same request context (`requestId`, `traceId`, `spanId`, `toolName`), and the same level, a declared `severity` and the `notice` of a framework refusal included. A payload record below `MCP_LOG_LEVEL` is dropped with its `Error in tool:` record, so at `warning` or above an argument rejection writes neither.
 
 | Field | Content |
 |:------|:--------|

@@ -19,6 +19,7 @@ import { PromptRegistry } from '@/mcp-server/prompts/prompt-registration.js';
 import { prompt } from '@/mcp-server/prompts/utils/promptDefinition.js';
 import { JsonRpcErrorCode, McpError } from '@/types-global/errors.js';
 import { logger } from '@/utils/internal/logger.js';
+import { TELEMETRY_LOG_MESSAGES } from '@/utils/internal/telemetryMessages.js';
 
 const testPrompt = prompt('test_prompt', {
   description: 'A test prompt for unit tests.',
@@ -187,19 +188,22 @@ describe('PromptRegistry', () => {
       const rejection = (await handler({}, serverContext).catch((e: unknown) => e)) as McpError;
       const logged = errorSpy.mock.calls.findLast(([msg]) =>
         String(msg).startsWith('Error in prompt:failing_args_prompt'),
-      )?.[1] as { requestId?: string; sessionId?: string } | undefined;
+      )?.[1] as
+        | { extra?: Record<string, unknown>; requestId?: string; sessionId?: string }
+        | undefined;
       return { logged, rejection };
     };
 
-    it("logs and answers under the client's string request id and the session", async () => {
+    it("logs and answers under a generated request id, with the client's string id as jsonRpcId and the session (#584)", async () => {
       const { logged, rejection } = await failUnder({
         mcpReq: { id: 'client-7' },
         sessionId: 'session-1',
       });
 
-      expect(logged?.requestId).toBe('client-7');
+      expect(logged?.requestId).toMatch(/^[A-Z0-9]{5}-[A-Z0-9]{5}$/);
+      expect(logged?.extra?.jsonRpcId).toBe('client-7');
       expect(logged?.sessionId).toBe('session-1');
-      expect(rejection.data).toEqual({ requestId: 'client-7' });
+      expect(rejection.data).toEqual({ requestId: logged?.requestId });
     });
 
     it('generates a request id when the client sent a numeric one', async () => {
@@ -208,6 +212,32 @@ describe('PromptRegistry', () => {
       expect(logged?.requestId).toEqual(expect.any(String));
       expect(logged?.requestId).not.toBe('7');
       expect(rejection.data).toEqual({ requestId: logged?.requestId });
+    });
+
+    it("records the client's numeric id as a number on the error and completion records (#584)", async () => {
+      const infoSpy = vi.spyOn(logger, 'info').mockImplementation(() => {});
+
+      const { logged } = await failUnder({ mcpReq: { id: 7 } });
+
+      const completion = infoSpy.mock.calls.findLast(
+        ([msg]) => msg === TELEMETRY_LOG_MESSAGES.promptGenerationFinished,
+      )?.[1] as { extra?: Record<string, unknown>; requestId?: string } | undefined;
+      expect(logged?.extra?.jsonRpcId).toBe(7);
+      expect(completion?.requestId).toBe(logged?.requestId);
+      expect(completion?.extra?.jsonRpcId).toBe(7);
+    });
+
+    it('records a 999,000-character id cut to 1,024 with its length, and keeps it off the envelope (#584)', async () => {
+      const id = 'q'.repeat(999_000);
+
+      const { logged, rejection } = await failUnder({ mcpReq: { id } });
+
+      expect(logged?.extra).toMatchObject({
+        jsonRpcId: id.slice(0, 1_024),
+        jsonRpcIdLength: 999_000,
+      });
+      expect(rejection.data).toEqual({ requestId: logged?.requestId });
+      expect(logged?.requestId).toMatch(/^[A-Z0-9]{5}-[A-Z0-9]{5}$/);
     });
   });
 

@@ -2122,12 +2122,13 @@ describe('createToolHandler', () => {
         expect(failureRecord().level).toBe('notice');
         const [message, context] = recordAt('notice');
         expect(message).toBe(`Error in tool:refusal_search: ${envelope(result).message}`);
-        // Same structured fields an `error` record carries — the stack included.
+        // Same structured fields an `error` record carries, minus the stacks (#631).
         expect(context.extra).toMatchObject({
           errorCode: JsonRpcErrorCode.InvalidParams,
           errorData: expect.objectContaining({ reason: 'invalid_arguments' }),
-          stack: expect.any(String),
         });
+        expect(context.extra).not.toHaveProperty('stack');
+        expect(context.extra.errorData).not.toHaveProperty('originalStack');
         expect(mockLogger.error).not.toHaveBeenCalledWith(
           expect.stringContaining('Error in tool:'),
           expect.anything(),

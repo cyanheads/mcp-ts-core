@@ -49,8 +49,9 @@
  * carrying the caller's own key text mints a permanent time series per spelling
  * a client invents (#114). The raw key and alias go to the debug log, which is
  * where an operator looks when a counter shows a new client artifact and where
- * cardinality costs nothing — and, on a rejection, back to the caller who sent
- * them, since an error payload is per call rather than a permanent series.
+ * cardinality costs nothing, at most their first 1,024 characters bounding its size
+ * (#631) — and, on a rejection, back to the caller who sent them, whole, since
+ * an error payload is per call rather than a permanent series.
  *
  * @module src/mcp-server/tools/utils/inputPrevalidation
  */
@@ -59,6 +60,7 @@ import type { Counter } from '@opentelemetry/api';
 import type { ZodError, ZodObject, ZodRawShape, ZodType } from 'zod';
 
 import { logger } from '@/utils/internal/logger.js';
+import { capForObservability } from '@/utils/internal/observabilityCap.js';
 import {
   type RequestContext,
   requestContextService,
@@ -249,6 +251,11 @@ function countAliased(toolName: string, target: string, kind: AliasKind): void {
  * call, for the attempt whose arguments the handler receives — or, on a
  * rejection, the first attempt, the one the rejection reports — so a key the
  * alias-first retry rewrote never also counts as dropped (#563).
+ *
+ * The key a record names is the caller's, of whatever length the caller wrote,
+ * so the message and the field carry at most its first 1,024 characters, with
+ * `aliasLength` / `ignoredKeyLength` holding the uncut length when that cut
+ * something (#631).
  */
 export function recordPrevalidation(
   def: AnyToolDefinition,
@@ -257,19 +264,27 @@ export function recordPrevalidation(
 ): void {
   for (const change of attempt.changes) {
     if (change.kind === 'aliased') {
-      const { alias, aliasKind, target } = change;
+      const { aliasKind, target } = change;
+      const alias = capForObservability(change.alias);
       countAliased(def.name, target, aliasKind);
-      debugLog(`Tool '${def.name}': rewrote argument key '${alias}' to '${target}'.`, context, {
-        toolName: def.name,
-        alias,
-        target,
-        aliasKind,
-      });
+      debugLog(
+        `Tool '${def.name}': rewrote argument key '${alias.value}' to '${target}'.`,
+        context,
+        {
+          toolName: def.name,
+          alias: alias.value,
+          ...(alias.length !== undefined && { aliasLength: alias.length }),
+          target,
+          aliasKind,
+        },
+      );
     } else {
+      const key = capForObservability(change.key);
       countIgnoredKey(def.name, change.rule);
-      debugLog(`Tool '${def.name}': dropped client-added argument key '${change.key}'.`, context, {
+      debugLog(`Tool '${def.name}': dropped client-added argument key '${key.value}'.`, context, {
         toolName: def.name,
-        ignoredKey: change.key,
+        ignoredKey: key.value,
+        ...(key.length !== undefined && { ignoredKeyLength: key.length }),
         ignoreRule: change.rule,
       });
     }

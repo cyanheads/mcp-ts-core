@@ -4,7 +4,7 @@ description: >
   Canonical reference for the unified `Context` object passed to every tool and resource handler in `@cyanheads/mcp-ts-core`. Covers the full interface, its `RequestContext` base, all sub-APIs (`ctx.log`, `ctx.state`, `ctx.requestInput`, `ctx.inputs`, `ctx.clientCapabilities`, `ctx.enrich`, `ctx.content`), and when to use each.
 metadata:
   author: cyanheads
-  version: "2.10"
+  version: "2.11"
   audience: external
   type: reference
 ---
@@ -87,7 +87,7 @@ interface Context extends RequestContext {
 
 | Field | Always present | Source |
 |:------|:--------------|:-------|
-| `requestId` | Yes | The client's JSON-RPC id when it is a string, otherwise a generated `XXXXX-XXXXX` token. Every log record of the call carries it, and the framework returns it on the call's error envelope as `data.requestId` |
+| `requestId` | Yes | A generated `XXXXX-XXXXX` token, one per call — never the client's JSON-RPC id, which the call's log records carry as `jsonRpcId` instead. Every log record of the call carries it, and the framework returns it on the call's error envelope as `data.requestId`. A 2025-era `ctx.requestInput` round trip re-enters the handler under a new token; the shared `jsonRpcId` ties the entries together |
 | `timestamp` | Yes | ISO 8601, request start |
 | `tenantId` | Stdio and HTTP+`MCP_AUTH_MODE=none` (as `'default'`); JWT `tid` claim in HTTP+`jwt`/`oauth` | JWT / single-tenant default |
 | `sessionId` | HTTP `stateful` / `auto` mode; undefined for stdio and stateless HTTP unless opted in | `Mcp-Session-Id` header (or server-minted) — see [§ `ctx.sessionId`](#ctxsessionid) |
@@ -122,11 +122,11 @@ Three supported ways, most common first:
 
 ```ts
 // 1. Per-log-call metadata — the common case. Nothing lands on the context.
-ctx.log.info('Retrying upstream call', { attempt, url });
+ctx.log.info('Retrying upstream call', { attempt, endpoint: 'search' });
 
 // 2. A copy of this context carrying extra fields. `withExtra` MERGES into any
 //    bag the parent already had; a hand-written `{ ...ctx, extra: {…} }` replaces it.
-logger.warning('Retrying upstream call', withExtra(ctx, { attempt, url }));
+logger.warning('Retrying upstream call', withExtra(ctx, { attempt, endpoint: 'search' }));
 
 // 3. A derived context for a sub-operation. `additionalContext` lands on `extra`,
 //    merged over whatever the parent already carried.

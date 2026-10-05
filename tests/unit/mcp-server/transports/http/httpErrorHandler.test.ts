@@ -478,4 +478,73 @@ describe('HTTP Error Handler', () => {
       );
     });
   });
+
+  // #584 — the JSON-RPC id read from the body is caller-sized, so its records
+  // carry it capped at 1,024 characters, as a call's records do.
+  describe('the JSON-RPC id on its records (#584)', () => {
+    /** The `extra` of the two records that carry the id, after handling a 500 for a body with `id`. */
+    async function loggedIdsFor(id: unknown) {
+      mockContext.req!.json = vi.fn(async () => ({ id })) as any;
+      await httpErrorHandler(
+        new Error('Test error'),
+        mockContext as Context<{ Bindings: HonoNodeBindings }>,
+      );
+      const extraOf = (calls: unknown[][], message: string) =>
+        (
+          calls.findLast(([logged]) => logged === message)?.[1] as {
+            extra?: Record<string, unknown>;
+          }
+        )?.extra;
+      return [
+        extraOf(vi.mocked(logger.debug).mock.calls, 'Extracted JSON-RPC request ID from body.'),
+        extraOf(vi.mocked(logger.info).mock.calls, 'Sending formatted error response for request.'),
+      ];
+    }
+
+    beforeEach(() => {
+      vi.clearAllMocks();
+    });
+
+    test.each([
+      ['a short string id', 'test-request-123'],
+      ['a numeric id', 42],
+      ['a 1,024-character string id', 'q'.repeat(1_024)],
+    ])('logs %s whole, with no length', async (_label, id) => {
+      for (const extra of await loggedIdsFor(id)) {
+        expect(extra?.jsonRpcId).toBe(id);
+        expect(extra).not.toHaveProperty('jsonRpcIdLength');
+      }
+      expect((jsonResponseData as any).id).toBe(id);
+    });
+
+    test.each([1_025, 999_000])(
+      'logs a %i-character string id cut to 1,024 plus its length; the response id stays whole',
+      async (length) => {
+        const id = 'q'.repeat(length);
+
+        for (const extra of await loggedIdsFor(id)) {
+          expect(extra?.jsonRpcId).toBe(id.slice(0, 1_024));
+          expect(extra?.jsonRpcIdLength).toBe(length);
+        }
+        expect((jsonResponseData as any).id).toBe(id);
+      },
+    );
+
+    test('logs a body with no id as a null jsonRpcId', async () => {
+      mockContext.req!.json = vi.fn(async () => ({ data: 'test' })) as any;
+
+      await httpErrorHandler(
+        new Error('Test error'),
+        mockContext as Context<{ Bindings: HonoNodeBindings }>,
+      );
+
+      const record = vi
+        .mocked(logger.info)
+        .mock.calls.findLast(
+          ([message]) => message === 'Sending formatted error response for request.',
+        )?.[1] as { extra?: Record<string, unknown> } | undefined;
+      expect(record?.extra?.jsonRpcId).toBeNull();
+      expect(record?.extra).not.toHaveProperty('jsonRpcIdLength');
+    });
+  });
 });

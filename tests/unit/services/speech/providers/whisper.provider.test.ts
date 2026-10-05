@@ -233,7 +233,7 @@ describe('WhisperProvider', () => {
       // fetchWithTimeout throws McpError on non-ok responses
       const apiError = new McpError(
         -32003,
-        'Fetch failed for https://api.openai.test/v1/audio/transcriptions. Status: 400',
+        'Fetch failed for https://api.openai.test/…. Status: 400',
       );
       mockFetch.mockRejectedValue(apiError);
 

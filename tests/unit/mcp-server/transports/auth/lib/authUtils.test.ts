@@ -6,7 +6,7 @@ import { describe, expect, it, vi } from 'vitest';
 
 import { authContext } from '@/mcp-server/transports/auth/lib/authContext.js';
 import type { AuthInfo } from '@/mcp-server/transports/auth/lib/authTypes.js';
-import { JsonRpcErrorCode, McpError } from '@/types-global/errors.js';
+import { forbidden, JsonRpcErrorCode, McpError } from '@/types-global/errors.js';
 
 // Mutable config mock — tests override mcpAuthMode per scenario.
 const mockConfig = {
@@ -16,7 +16,9 @@ const mockConfig = {
 vi.mock('@/config/index.js', () => ({ config: mockConfig }));
 
 // Must import after vi.mock so the mock is in place.
-const { withRequiredScopes } = await import('@/mcp-server/transports/auth/lib/authUtils.js');
+const { isScopeRefusal, withRequiredScopes } = await import(
+  '@/mcp-server/transports/auth/lib/authUtils.js'
+);
 const { logger } = await import('@/utils/internal/logger.js');
 
 describe('withRequiredScopes', () => {
@@ -154,6 +156,47 @@ describe('withRequiredScopes', () => {
       mockConfig.mcpAuthMode = 'none';
       mockConfig.mcpAuthDisableScopeChecks = true;
       expect(() => withRequiredScopes(['tool:foo:read'])).not.toThrow();
+    });
+  });
+
+  // #585 — the tool handler factory logs a missing-scope refusal at notice, so
+  // the scope check marks the one error it throws for a missing scope.
+  describe('the missing-scope mark (#585)', () => {
+    /** What `run` threw. */
+    function thrownBy(run: () => void): unknown {
+      try {
+        run();
+      } catch (error) {
+        return error;
+      }
+      throw new Error('Expected a throw');
+    }
+
+    it('marks the Forbidden thrown for a missing scope', () => {
+      mockConfig.mcpAuthMode = 'jwt';
+      mockConfig.mcpAuthDisableScopeChecks = false;
+
+      const error = authContext.run({ authInfo: createAuthInfo(['scope:read']) }, () =>
+        thrownBy(() => withRequiredScopes(['scope:write'])),
+      );
+
+      expect(isScopeRefusal(error)).toBe(true);
+      expect((error as McpError).data).toBeUndefined();
+    });
+
+    it('leaves a missing auth context unmarked', () => {
+      mockConfig.mcpAuthMode = 'jwt';
+      mockConfig.mcpAuthDisableScopeChecks = false;
+
+      expect(isScopeRefusal(thrownBy(() => withRequiredScopes(['scope:read'])))).toBe(false);
+    });
+
+    it.each([
+      ['a Forbidden raised anywhere else', forbidden('Insufficient permissions.')],
+      ['a plain Error', new Error('Insufficient permissions.')],
+      ['a non-object', 'Insufficient permissions.'],
+    ])('reports %s unmarked', (_label, value) => {
+      expect(isScopeRefusal(value)).toBe(false);
     });
   });
 });

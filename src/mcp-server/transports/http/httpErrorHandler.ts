@@ -16,6 +16,7 @@ import { resolvePublicOrigin } from '@/mcp-server/transports/http/publicOrigin.j
 import { JsonRpcErrorCode, McpError } from '@/types-global/errors.js';
 import { asRequestCancelled, ErrorHandler } from '@/utils/internal/error-handler/errorHandler.js';
 import { logger } from '@/utils/internal/logger.js';
+import { jsonRpcIdLogFields } from '@/utils/internal/observabilityCap.js';
 import { requestContextService, withExtra } from '@/utils/internal/requestContext.js';
 import { getProperty } from '@/utils/types/guards.js';
 
@@ -174,6 +175,7 @@ export const httpErrorHandler = async <TBindings extends object = HonoNodeBindin
   );
 
   // Attempt to get the request ID from the body, but don't fail if it's not there or unreadable.
+  // The response echoes it whole; the records carry it capped, as `jsonRpcId` (#584).
   let requestId: string | number | null = null;
   // Only attempt to read the body if it hasn't been consumed already.
   if (c.req.raw.bodyUsed === false) {
@@ -183,7 +185,7 @@ export const httpErrorHandler = async <TBindings extends object = HonoNodeBindin
       requestId = typeof id === 'string' || typeof id === 'number' ? id : null;
       logger.debug(
         'Extracted JSON-RPC request ID from body.',
-        withExtra(context, { jsonRpcId: requestId }),
+        withExtra(context, jsonRpcIdLogFields(requestId)),
       );
     } catch {
       logger.warning('Could not parse request body to extract JSON-RPC ID.', context);
@@ -211,7 +213,7 @@ export const httpErrorHandler = async <TBindings extends object = HonoNodeBindin
   };
   logger.info(
     `Sending formatted error response for request.`,
-    withExtra(context, { status, errorCode, jsonRpcId: requestId }),
+    withExtra(context, { status, errorCode, ...jsonRpcIdLogFields(requestId) }),
   );
   return c.json(errorResponse);
 };

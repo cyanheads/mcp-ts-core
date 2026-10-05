@@ -14,7 +14,7 @@ import {
   StreamableHTTPClientTransport,
 } from '@modelcontextprotocol/client';
 import { StdioClientTransport } from '@modelcontextprotocol/client/stdio';
-import { InMemoryTransport, McpServer } from '@modelcontextprotocol/server';
+import { InMemoryTransport, type JSONRPCMessage, McpServer } from '@modelcontextprotocol/server';
 import { AjvJsonSchemaValidator } from '@modelcontextprotocol/server/validators/ajv';
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 import { z } from 'zod';
@@ -189,7 +189,8 @@ const logTool = tool('wire_log', {
   },
 });
 
-async function connect() {
+/** The server every session talks to, with the definitions above registered. */
+async function buildServer() {
   const server = new McpServer(
     { name: 'wire-conformance', version: '0.0.0' },
     {
@@ -214,7 +215,11 @@ async function connect() {
   );
   // `greetPrompt` stays first: the requiredness assertion reads `prompts[0]`.
   await new PromptRegistry([greetPrompt, failingPrompt], logger).registerAll(server);
+  return server;
+}
 
+async function connect() {
+  const server = await buildServer();
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
   const client = new Client({ name: 'wire-conformance-client', version: '0.0.0' });
   await server.connect(serverTransport);
@@ -222,7 +227,47 @@ async function connect() {
   return { client, server };
 }
 
-/** A framework-generated request id — the client's JSON-RPC ids are numeric. */
+/** A JSON-RPC response as {@link rawSession} receives it. */
+type RawResponse = {
+  error?: { code: number; data?: Record<string, unknown>; message: string };
+  id: number | string;
+  result?: Record<string, unknown>;
+};
+
+/**
+ * A 2025-era session on the same server, driven as raw JSON-RPC: the SDK client
+ * numbers its own requests, so a string id needs a client that sets it (#584).
+ */
+async function rawSession() {
+  const server = await buildServer();
+  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+  const pending = new Map<number | string, (response: RawResponse) => void>();
+  clientTransport.onmessage = (message) => {
+    const { id, method } = message as { id?: number | string; method?: string };
+    if (id === undefined || method !== undefined) return;
+    pending.get(id)?.(message as RawResponse);
+    pending.delete(id);
+  };
+  await server.connect(serverTransport);
+  await clientTransport.start();
+  const request = (id: number | string, method: string, params: Record<string, unknown>) =>
+    new Promise<RawResponse>((resolve) => {
+      pending.set(id, resolve);
+      void clientTransport.send({ jsonrpc: '2.0', id, method, params } as JSONRPCMessage);
+    });
+  await request('init', 'initialize', {
+    protocolVersion: '2025-11-25',
+    capabilities: {},
+    clientInfo: { name: 'wire-conformance-raw', version: '0.0.0' },
+  });
+  await clientTransport.send({
+    jsonrpc: '2.0',
+    method: 'notifications/initialized',
+  } as JSONRPCMessage);
+  return { request, close: () => server.close() };
+}
+
+/** A framework-generated request id, whatever the type of the client's JSON-RPC id (#584). */
 const REQUEST_ID_PATTERN = /^[A-Z0-9]{5}-[A-Z0-9]{5}$/;
 
 /** The `data.requestId` a failed tool call's envelope carries. */
@@ -791,6 +836,120 @@ describe('Phase 1 wire conformance', () => {
 
       expect(error.code).toBe(JsonRpcErrorCode.InvalidParams);
       expect(error.data).toEqual({ uri: 'unknown://missing' });
+    });
+  });
+
+  describe("the client's JSON-RPC id rides each record as jsonRpcId (#584)", () => {
+    const raw: Array<Awaited<ReturnType<typeof rawSession>>> = [];
+
+    afterEach(async () => {
+      while (raw.length)
+        await raw
+          .pop()
+          ?.close()
+          .catch(() => undefined);
+      vi.restoreAllMocks();
+    });
+
+    const rawRequest = async () => {
+      const opened = await rawSession();
+      raw.push(opened);
+      return opened.request;
+    };
+
+    type LoggedContext = { extra?: Record<string, unknown>; requestId?: string };
+
+    /** The context of the last record `log` received whose message matches `pattern`. */
+    const recordOf = (log: 'error' | 'info', pattern: RegExp) =>
+      vi
+        .mocked(logger[log])
+        .mock.calls.findLast(([message]) => pattern.test(String(message)))?.[1] as
+        | LoggedContext
+        | undefined;
+
+    const boom = { name: 'wire_search', arguments: { query: 'boom' } };
+
+    it('runs a tools/call sent with a string id under a generated requestId', async () => {
+      vi.spyOn(logger, 'error');
+      const request = await rawRequest();
+
+      const response = await request('client-string-id-19', 'tools/call', boom);
+
+      expect(response.id).toBe('client-string-id-19');
+      const requestId = requestIdOf(response.result);
+      expect(requestId).toMatch(REQUEST_ID_PATTERN);
+      const content = response.result?.content as Array<{ text: string }> | undefined;
+      const text = content?.[0]?.text ?? '';
+      expect(text.endsWith(`(reason index_missing · request ${requestId})`)).toBe(true);
+      const record = recordOf('error', /^Error in tool:wire_search:/);
+      expect(record?.requestId).toBe(requestId);
+      expect(record?.extra).toMatchObject({ jsonRpcId: 'client-string-id-19' });
+    });
+
+    it('never takes a string id shaped like a generated token as the requestId', async () => {
+      const request = await rawRequest();
+
+      const response = await request('AAAAA-BBBBB', 'tools/call', boom);
+
+      expect(requestIdOf(response.result)).toMatch(REQUEST_ID_PATTERN);
+      expect(requestIdOf(response.result)).not.toBe('AAAAA-BBBBB');
+    });
+
+    it('gives two sessions that each send id "1" two requestIds', async () => {
+      const first = await (await rawRequest())('1', 'tools/call', boom);
+      const second = await (await rawRequest())('1', 'tools/call', boom);
+
+      expect(requestIdOf(first.result)).toMatch(REQUEST_ID_PATTERN);
+      expect(requestIdOf(second.result)).toMatch(REQUEST_ID_PATTERN);
+      expect(requestIdOf(first.result)).not.toBe(requestIdOf(second.result));
+    });
+
+    it('logs a numeric id as a number', async () => {
+      vi.spyOn(logger, 'error');
+      const request = await rawRequest();
+
+      const response = await request(10, 'tools/call', boom);
+
+      const record = recordOf('error', /^Error in tool:wire_search:/);
+      expect(record?.requestId).toBe(requestIdOf(response.result));
+      expect(record?.extra?.jsonRpcId).toBe(10);
+    });
+
+    it('answers a failed resources/read and prompts/get with the requestId their records carry', async () => {
+      vi.spyOn(logger, 'info');
+      vi.spyOn(logger, 'error');
+      const request = await rawRequest();
+
+      const read = await request('res-str-1', 'resources/read', { uri: 'wire://service/direct' });
+      const got = await request('prompt-str-1', 'prompts/get', {
+        name: 'wire_failing',
+        arguments: { mode: 'plain' },
+      });
+
+      const readRecord = recordOf('info', /^Resource read finished\.$/);
+      const promptRecord = recordOf('error', /^Error in prompt:wire_failing:/);
+      expect(read.error?.data?.requestId).toMatch(REQUEST_ID_PATTERN);
+      expect(read.error?.data?.requestId).toBe(readRecord?.requestId);
+      expect(readRecord?.extra).toMatchObject({ jsonRpcId: 'res-str-1' });
+      expect(got.error?.data?.requestId).toMatch(REQUEST_ID_PATTERN);
+      expect(got.error?.data?.requestId).toBe(promptRecord?.requestId);
+      expect(promptRecord?.extra).toMatchObject({ jsonRpcId: 'prompt-str-1' });
+    });
+
+    it('logs a 999,000-character id cut to 1,024 with its length, and keeps it off the result', async () => {
+      vi.spyOn(logger, 'error');
+      const request = await rawRequest();
+      const id = 'q'.repeat(999_000);
+
+      const response = await request(id, 'tools/call', boom);
+
+      expect(response.id).toBe(id);
+      expect(requestIdOf(response.result)).toMatch(REQUEST_ID_PATTERN);
+      expect(JSON.stringify(response.result)).not.toContain('q'.repeat(64));
+      expect(recordOf('error', /^Error in tool:wire_search:/)?.extra).toMatchObject({
+        jsonRpcId: id.slice(0, 1_024),
+        jsonRpcIdLength: 999_000,
+      });
     });
   });
 

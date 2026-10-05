@@ -18,6 +18,7 @@ vi.mock('@/config/index.js', () => ({ config: mockConfig }));
 const { createMockContext } = await import('@/testing/index.js');
 
 const { checkScopes } = await import('@/mcp-server/transports/auth/lib/checkScopes.js');
+const { isScopeRefusal } = await import('@/mcp-server/transports/auth/lib/authUtils.js');
 
 describe('checkScopes', () => {
   it('no-ops when auth is disabled', () => {
@@ -147,6 +148,43 @@ describe('checkScopes', () => {
       const ctx = createMockContext();
 
       expect(() => checkScopes(ctx as never, ['tool:read'])).not.toThrow();
+    });
+  });
+
+  // #585 — the tool handler factory logs a missing-scope refusal at notice.
+  describe('the missing-scope mark (#585)', () => {
+    /** What `checkScopes` threw for `ctx`. */
+    function thrownFor(ctx: ReturnType<typeof createMockContext>): unknown {
+      try {
+        checkScopes(ctx as never, ['team:t1:write']);
+      } catch (caught) {
+        return caught;
+      }
+      throw new Error('Expected checkScopes to throw');
+    }
+
+    it('marks the Forbidden thrown for a missing scope', () => {
+      mockConfig.mcpAuthMode = 'jwt';
+      mockConfig.mcpAuthDisableScopeChecks = false;
+
+      const error = thrownFor(
+        createMockContext({
+          auth: { clientId: 'test-client', scopes: ['tool:read'], sub: 'user-1', token: 'token-1' },
+        }),
+      );
+
+      expect(error).toMatchObject({ code: JsonRpcErrorCode.Forbidden });
+      expect(isScopeRefusal(error)).toBe(true);
+    });
+
+    it('leaves a missing auth context unmarked', () => {
+      mockConfig.mcpAuthMode = 'jwt';
+      mockConfig.mcpAuthDisableScopeChecks = false;
+
+      const error = thrownFor(createMockContext());
+
+      expect(error).toMatchObject({ code: JsonRpcErrorCode.Unauthorized });
+      expect(isScopeRefusal(error)).toBe(false);
     });
   });
 });
