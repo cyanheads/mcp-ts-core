@@ -4,7 +4,7 @@ description: >
   Exercise tools, resources, and prompts against a live HTTP server via MCP JSON-RPC over curl. Starts the server, surfaces the catalog, runs real and adversarial inputs, measures every call (bytes, token estimate, wall-clock) and weighs the catalog, renders app tools' views in a headless MCP Apps host, and produces a tight report with concrete findings and numbered follow-up options. Use after adding or modifying definitions, or when the user asks to test, try out, or verify their MCP surface.
 metadata:
   author: cyanheads
-  version: "2.19"
+  version: "2.20"
   audience: external
   type: debug
 ---
@@ -371,7 +371,7 @@ mcp_call <url> <sid> prompts/list   | jq '.result.prompts[]   | {name, descripti
 mcp_catalog_size <url> <sid> <protocol>
 ```
 
-**Weigh the catalog.** `mcp_catalog_size` prints the `tools/list` bytes — the context every client loads per session before a single call — and each tool's entry, largest first, split into description / `inputSchema` / `outputSchema`. Record the total alongside the `instructions=` bytes from Step 2; together they are the per-session tax. The split says where a heavy tool's weight lives: an `outputSchema` narrating every field of a 60-field record is the common surprise, an over-long description the obvious one. Hand the outliers to `tool-defs-analysis` (its length-outliers pass) rather than trimming blind.
+**Weigh the catalog.** `mcp_catalog_size` prints the `tools/list` bytes — the context every client loads per session before a single call — and each tool's entry, largest first, split into description / `inputSchema` / `outputSchema`. Record the total alongside the `instructions=` bytes from Step 2; together they are the per-session tax. The split says where a heavy tool's weight lives: an `outputSchema` narrating every field of a 60-field record is the common surprise, an over-long description the obvious one. Hand the outliers to `tool-defs-analysis` rather than trimming blind. Its length-outliers pass weighs the output and enrichment field prose as well as the tool description.
 
 Present a compact catalog to the user: each definition's name + 1-line description. Flag vague or missing descriptions as you go — those feed into the report. Use this to build the test plan.
 
