@@ -48,9 +48,12 @@ export function initErrorMetrics(): void {
   getErrorMetrics();
 }
 
-/** A copy of `data` without its `originalStack`, for an `includeStack: false` log record. */
-function withoutOriginalStack(data: Record<string, unknown>): Record<string, unknown> {
-  const { originalStack: _originalStack, ...rest } = data;
+/** A copy of `record` without `key`, for an `includeStack: false` log record. */
+function withoutKey(
+  record: Readonly<Record<string, unknown>>,
+  key: string,
+): Record<string, unknown> {
+  const { [key]: _omitted, ...rest } = record;
   return rest;
 }
 
@@ -317,7 +320,7 @@ export class ErrorHandler {
         diagnostics.causeChain = includeStack
           ? causeChain
           : causeChain.map(({ stack: _stack, ...node }) =>
-              node.data ? { ...node, data: withoutOriginalStack(node.data) } : node,
+              node.data ? { ...node, data: withoutKey(node.data, 'originalStack') } : node,
             );
       }
     }
@@ -373,20 +376,21 @@ export class ErrorHandler {
       ...(finalError instanceof McpError && finalError.data ? finalError.data : consolidatedData),
       ...diagnostics,
     };
-    const { extra: contextExtra, ...contextCanonical } = context;
+    const { extra: contextExtra = {}, ...contextCanonical } = context;
     const logContext: RequestContext = {
       operation,
       ...contextCanonical,
       requestId: logRequestId,
       timestamp: logTimestamp,
       extra: {
-        ...contextExtra,
+        // `extra.stack` is the record's stack field, whoever set it.
+        ...(includeStack ? contextExtra : withoutKey(contextExtra, 'stack')),
         input: sanitizedInput,
         critical,
         errorCode: loggedErrorCode,
         originalErrorType: originalErrorName,
         finalErrorType: getErrorName(finalError),
-        errorData: includeStack ? errorData : withoutOriginalStack(errorData),
+        errorData: includeStack ? errorData : withoutKey(errorData, 'originalStack'),
         ...(includeStack && stack && !isCancellation ? { stack } : {}),
       },
     };

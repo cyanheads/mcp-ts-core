@@ -581,6 +581,23 @@ describe('ErrorHandler', () => {
         expect(without.data).toEqual(withStack.data);
         expect(without.data).toMatchObject({ originalStack: 'CARRIED_STACK', itemId: 'x-1' });
       });
+
+      it('drops a stack the caller put in the context extra, keeping its other fields', () => {
+        ErrorHandler.handleError(new Error('boom'), {
+          operation: 'probe',
+          context: {
+            requestId: 'req-extra-stack',
+            timestamp: '2026-01-01T00:00:00.000Z',
+            extra: { stack: 'CALLER_STACK', toolName: 'probe_tool' },
+          },
+          includeStack: false,
+        });
+
+        const { extra } = lastErrorRecord();
+        expect(extra).not.toHaveProperty('stack');
+        expect(extra.toolName).toBe('probe_tool');
+        expect(JSON.stringify(extra)).not.toContain('CALLER_STACK');
+      });
     });
 
     describe('OpenTelemetry span recording', () => {
