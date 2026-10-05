@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.13.12](changelog/0.13.x/0.13.12.md) — 2026-10-04 · 🛡️ Security
+
+Log records and error messages no longer carry credential-bearing URL paths, host directory paths, or unbounded caller-supplied strings, and every call logs under a generated requestId with the client's JSON-RPC id moved to jsonRpcId.
+
 ## [0.13.11](changelog/0.13.x/0.13.11.md) — 2026-10-03 · 🛡️ Security
 
 A headless MCP Apps host renders app tool views in tests and from the CLI, ctx.log's mirror to the client honors MCP_LOG_LEVEL and masks sensitive fields, and devcheck's git scans and the scaffold server.json HTTP entry are fixed.

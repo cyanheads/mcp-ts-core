@@ -1,6 +1,6 @@
 # mcp-ts-core - Directory Structure
 
-Generated on: 2026-10-03 21:57:08
+Generated on: 2026-10-05 00:03:55
 
 ```text
 mcp-ts-core/
@@ -495,6 +495,7 @@ mcp-ts-core/
 │   │   │   ├── encoding.ts
 │   │   │   ├── lazyImport.ts
 │   │   │   ├── logger.ts
+│   │   │   ├── observabilityCap.ts
 │   │   │   ├── performance.ts
 │   │   │   ├── requestContext.ts
 │   │   │   ├── runtime.ts
@@ -807,6 +808,7 @@ mcp-ts-core/
 │   │   │   │   │   ├── schemaShape.test.ts
 │   │   │   │   │   ├── toolDefinition.test.ts
 │   │   │   │   │   ├── toolHandlerFactory.failurePayload.test.ts
+│   │   │   │   │   ├── toolHandlerFactory.rejectionRecords.test.ts
 │   │   │   │   │   ├── toolHandlerFactory.telemetry.test.ts
 │   │   │   │   │   └── toolHandlerFactory.test.ts
 │   │   │   │   ├── content.test.ts
@@ -910,7 +912,8 @@ mcp-ts-core/
 │   │   │   │   ├── handle.test.ts
 │   │   │   │   ├── runner.test.ts
 │   │   │   │   ├── schema.test.ts
-│   │   │   │   └── sqliteMirrorStore.test.ts
+│   │   │   │   ├── sqliteMirrorStore.test.ts
+│   │   │   │   └── storeFailureWire.test.ts
 │   │   │   └── speech/
 │   │   │       ├── core/
 │   │   │       │   ├── speechMetrics.test.ts
@@ -978,6 +981,7 @@ mcp-ts-core/
 │   │   │   ├── internal/
 │   │   │   │   ├── error-handler/
 │   │   │   │   │   ├── errorHandler.test.ts
+│   │   │   │   │   ├── formatZodErrorMessage.wire.test.ts
 │   │   │   │   │   ├── helpers.test.ts
 │   │   │   │   │   └── mappings.test.ts
 │   │   │   │   ├── encoding.test.ts
@@ -988,6 +992,7 @@ mcp-ts-core/
 │   │   │   │   ├── logger.fileSinks.test.ts
 │   │   │   │   ├── logger.preInit.test.ts
 │   │   │   │   ├── logger.test.ts
+│   │   │   │   ├── observabilityCap.test.ts
 │   │   │   │   ├── performance.nowMs.test.ts
 │   │   │   │   ├── performance.test.ts
 │   │   │   │   ├── requestContext.test.ts
@@ -997,6 +1002,7 @@ mcp-ts-core/
 │   │   │   │   └── tokenCounter.test.ts
 │   │   │   ├── network/
 │   │   │   │   ├── fetchWithTimeout.bodyDeadline.test.ts
+│   │   │   │   ├── fetchWithTimeout.loopback.test.ts
 │   │   │   │   ├── fetchWithTimeout.metrics.test.ts
 │   │   │   │   ├── fetchWithTimeout.test.ts
 │   │   │   │   ├── httpError.test.ts
