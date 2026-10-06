@@ -411,6 +411,13 @@ describe('frontmatterParser · delimiter scanning (#431)', () => {
     expect(result.content).toBe('body');
   });
 
+  it('skips a `---` line with text after it and opens on the next fence', async () => {
+    const result = await frontmatterParser.parse<{ a: number }>('--- note\n---\na: 1\n---\nbody');
+    expect(result.hasFrontmatter).toBe(true);
+    expect(result.frontmatter).toEqual({ a: 1 });
+    expect(result.content).toBe('body');
+  });
+
   it('consumes the whole whitespace run after the opening delimiter', async () => {
     const result = await frontmatterParser.parse<{ a: number }>('---   \n\n  a: 1\n---\nbody');
     expect(result.frontmatter).toEqual({ a: 1 });

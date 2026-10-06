@@ -1,3 +1,8 @@
+/**
+ * @fileoverview Verifies an over-budget input is rejected before any parser loads or
+ * invokes its optional peer dependency.
+ * @module tests/unit/utils/parsing/inputBudgetDependencies.test
+ */
 import type { PDFDocument } from 'pdf-lib';
 import { describe, expect, it, vi } from 'vitest';
 import { frontmatterParser } from '@/utils/parsing/frontmatterParser.js';

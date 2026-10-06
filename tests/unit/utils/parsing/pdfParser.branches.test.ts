@@ -262,6 +262,20 @@ describe('PdfParser branch boundaries', () => {
     });
   });
 
+  it('classifies bytes pdf.js cannot read as a text-extraction failure', async () => {
+    const failure = (await parser
+      .extractText(new Uint8Array([1, 2, 3, 4]), undefined, context)
+      .catch((error: unknown) => error)) as McpError;
+
+    expect(failure).toBeInstanceOf(McpError);
+    expect(failure.cause).toBeInstanceOf(Error);
+    expect(failure).toMatchObject({
+      code: JsonRpcErrorCode.InternalError,
+      message: `Failed to extract text from PDF: ${(failure.cause as Error).message}`,
+      data: { reason: 'pdf_text_extract_failed' },
+    });
+  });
+
   it('carries the library diagnostic in the message and keeps the stack out of data', async () => {
     const libraryFailure = new Error('Cannot serialize an encrypted document');
     Object.defineProperty(libraryFailure, 'stack', {

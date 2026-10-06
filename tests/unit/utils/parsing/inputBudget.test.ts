@@ -1,3 +1,8 @@
+/**
+ * @fileoverview Tests for the opt-in parser input byte budgets: UTF-8 counting, exact and
+ * boundary + 1 limits, and the budget each parser enforces before doing any work.
+ * @module tests/unit/utils/parsing/inputBudget.test
+ */
 import { PDFDocument } from 'pdf-lib';
 import { describe, expect, it } from 'vitest';
 import { JsonRpcErrorCode, McpError } from '@/types-global/errors.js';

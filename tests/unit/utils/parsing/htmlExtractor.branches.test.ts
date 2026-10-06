@@ -140,7 +140,7 @@ describe('HtmlExtractor branch behavior', () => {
     expect(failure.cause).toBeInstanceOf(Error);
   });
 
-  it('falls back to the error string when a failure has no stack', async () => {
+  it('wraps an Error failure with its message and keeps it as the cause', async () => {
     const failure = new Error('stackless parser error');
     Object.defineProperty(failure, 'stack', { value: undefined });
     defuddleMock.mockRejectedValue(failure);

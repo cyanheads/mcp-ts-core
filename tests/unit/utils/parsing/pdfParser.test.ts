@@ -49,11 +49,6 @@ describe('PdfParser', () => {
       );
     });
 
-    it('should create context if none provided', async () => {
-      const doc = await parser.createDocument();
-      expect(doc).toBeInstanceOf(PDFDocument);
-    });
-
     it('should throw McpError on document creation failure', async () => {
       vi.spyOn(PDFDocument, 'create').mockRejectedValueOnce(new Error('Creation failed'));
       const errorSpy = vi.spyOn(logger, 'error');
@@ -99,11 +94,6 @@ describe('PdfParser', () => {
           }),
         }),
       );
-    });
-
-    it('should create context if none provided', async () => {
-      const doc = await parser.loadDocument(samplePdfBytes);
-      expect(doc).toBeInstanceOf(PDFDocument);
     });
 
     it('should throw McpError on invalid PDF bytes', async () => {
@@ -176,11 +166,6 @@ describe('PdfParser', () => {
           }),
         }),
       );
-    });
-
-    it('should create context if none provided', async () => {
-      const font = await parser.embedFont(doc);
-      expect(font).toBeDefined();
     });
 
     it('should throw McpError on font embedding failure', async () => {
@@ -308,15 +293,6 @@ describe('PdfParser', () => {
           }),
         }),
       );
-    });
-
-    it('should create context if none provided', async () => {
-      const options: EmbedImageOptions = {
-        imageBytes: pngBytes,
-        format: 'png',
-      };
-      const image = await parser.embedImage(doc, options);
-      expect(image).toBeDefined();
     });
 
     it('should throw McpError on invalid image bytes', async () => {
@@ -543,11 +519,6 @@ describe('PdfParser', () => {
       );
     });
 
-    it('should create context if none provided', async () => {
-      const merged = await parser.mergePdfs([pdf1Bytes, pdf2Bytes]);
-      expect(merged.getPageCount()).toBe(3);
-    });
-
     it('should throw McpError on merge failure', async () => {
       const invalidBytes = new Uint8Array([1, 2, 3, 4]);
       const errorSpy = vi.spyOn(logger, 'error');
@@ -638,12 +609,6 @@ describe('PdfParser', () => {
           }),
         }),
       );
-    });
-
-    it('should create context if none provided', async () => {
-      const ranges: PageRange[] = [{ start: 0, end: 4 }];
-      const results = await parser.splitPdf(pdfBytes, ranges);
-      expect(results).toHaveLength(1);
     });
 
     it('should throw McpError on split failure', async () => {
@@ -787,16 +752,6 @@ describe('PdfParser', () => {
           }),
         }),
       );
-    });
-
-    it('should create context if none provided', () => {
-      const options: FillFormOptions = {
-        fields: {
-          Name: 'Test',
-        },
-      };
-
-      expect(() => parser.fillForm(doc, options)).not.toThrow();
     });
 
     it('wraps unexpected form access errors in an McpError', () => {
@@ -1028,12 +983,6 @@ describe('PdfParser', () => {
       );
     });
 
-    it('should create context if none provided', async () => {
-      const result = await parser.extractText(doc);
-      expect(result.totalPages).toBe(3);
-      expect(result.text).toBeDefined();
-    });
-
     it('should handle PDFs without text content', async () => {
       const emptyDoc = await PDFDocument.create();
       emptyDoc.addPage([600, 400]);
@@ -1172,11 +1121,6 @@ describe('PdfParser', () => {
       );
     });
 
-    it('should create context if none provided', async () => {
-      const bytes = await parser.saveDocument(doc);
-      expect(bytes).toBeInstanceOf(Uint8Array);
-    });
-
     it('should throw McpError on save failure', async () => {
       const errorSpy = vi.spyOn(logger, 'error');
       vi.spyOn(doc, 'save').mockRejectedValueOnce(new Error('Save failed'));
@@ -1287,6 +1231,45 @@ describe('PdfParser', () => {
       expect(splits[0]?.getPageCount()).toBe(2);
       expect(splits[1]?.getPageCount()).toBe(1);
       expect(splits[2]?.getPageCount()).toBe(3);
+    });
+  });
+
+  describe('auto-generated log context', () => {
+    type Call = (subject: PdfParser) => unknown;
+    const onePageDoc = async () => {
+      const doc = await PDFDocument.create();
+      doc.addPage([600, 400]);
+      return doc;
+    };
+    const onePageBytes = async () => (await onePageDoc()).save();
+    const imageHost = () => ({ embedPng: vi.fn().mockResolvedValue({}) }) as unknown as PDFDocument;
+
+    it.each<[string, Call]>([
+      ['createDocument', (subject) => subject.createDocument()],
+      ['loadDocument', async (subject) => subject.loadDocument(await onePageBytes())],
+      ['embedFont', async (subject) => subject.embedFont(await onePageDoc())],
+      [
+        'embedImage',
+        (subject) =>
+          subject.embedImage(imageHost(), { imageBytes: new Uint8Array(1), format: 'png' }),
+      ],
+      ['mergePdfs', async (subject) => subject.mergePdfs([await onePageBytes()])],
+      [
+        'splitPdf',
+        async (subject) => subject.splitPdf(await onePageBytes(), [{ start: 0, end: 0 }]),
+      ],
+      ['fillForm', async (subject) => subject.fillForm(await onePageDoc(), { fields: {} })],
+      ['extractText', async (subject) => subject.extractText(await onePageDoc())],
+      ['saveDocument', async (subject) => subject.saveDocument(await onePageDoc())],
+    ])('logs %s under an auto-generated PdfParser context', async (method, call) => {
+      const debugSpy = vi.spyOn(logger, 'debug');
+
+      await call(parser);
+
+      expect(debugSpy).toHaveBeenCalledWith(
+        expect.any(String),
+        expect.objectContaining({ operation: `PdfParser.${method}` }),
+      );
     });
   });
 

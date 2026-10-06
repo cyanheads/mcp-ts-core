@@ -71,6 +71,7 @@ describe('XmlParser', () => {
         expect(error.message).toBe(
           'XML string is empty after removing <think> block and trimming.',
         );
+        expect(error.data).toEqual({ reason: 'parser_input_empty' });
       }
     }
   });

@@ -2,7 +2,7 @@
  * @fileoverview Tests for the HtmlExtractor utility (defuddle + linkedom).
  * @module tests/utils/parsing/htmlExtractor.test
  */
-import { afterAll, afterEach, describe, expect, it, vi } from 'vitest';
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 import { logger } from '@/utils/internal/logger.js';
 import { JsonRpcErrorCode, McpError } from '../../../../src/types-global/errors.js';
 import { HtmlExtractor, htmlExtractor } from '../../../../src/utils/parsing/htmlExtractor.js';
@@ -42,6 +42,11 @@ const MALFORMED_HTML = `<html><body><article><h1>Unclosed<p>Paragraph one<p>Para
 describe('HtmlExtractor', () => {
   const debugSpy = vi.spyOn(logger, 'debug').mockImplementation(() => {});
   const errorSpy = vi.spyOn(logger, 'error').mockImplementation(() => {});
+
+  // Pay the cold defuddle/linkedom import under the hook timeout, not inside the first case.
+  beforeAll(async () => {
+    await Promise.all([import('defuddle/node'), import('linkedom')]);
+  });
 
   afterEach(() => {
     vi.clearAllMocks();

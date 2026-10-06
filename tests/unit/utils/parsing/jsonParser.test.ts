@@ -81,6 +81,7 @@ describe('JsonParser', () => {
     expect(error).toBeInstanceOf(McpError);
     expect((error as McpError).code).toBe(JsonRpcErrorCode.ValidationError);
     expect((error as McpError).message).toContain('JSON string is empty');
+    expect((error as McpError).data).toEqual({ reason: 'parser_input_empty' });
   });
 
   it('should handle leading/trailing whitespace in the JSON string', async () => {

@@ -28,7 +28,10 @@ describe('yamlParser.parse', () => {
   });
 
   it('throws when the remaining content is empty', async () => {
-    await expect(yamlParser.parse('<think>only thoughts</think>   ')).rejects.toThrow(McpError);
+    await expect(yamlParser.parse('<think>only thoughts</think>   ')).rejects.toMatchObject({
+      code: JsonRpcErrorCode.ValidationError,
+      data: { reason: 'parser_input_empty' },
+    });
   });
 
   it('wraps parser failures in an McpError', async () => {
