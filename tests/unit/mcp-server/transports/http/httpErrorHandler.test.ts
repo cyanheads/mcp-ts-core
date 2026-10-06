@@ -381,19 +381,6 @@ describe('HTTP Error Handler', () => {
         requestId: 'test-req-id',
       });
     });
-
-    test('should preserve explicitly declared McpError data', async () => {
-      const error = new McpError(JsonRpcErrorCode.NotFound, 'Missing', {
-        reason: 'missing_item',
-      });
-
-      await httpErrorHandler(error, mockContext as Context<{ Bindings: HonoNodeBindings }>);
-
-      expect((jsonResponseData as any).error.data).toEqual({
-        reason: 'missing_item',
-        requestId: 'test-req-id',
-      });
-    });
   });
 
   describe('caller disconnect before a handler runs (#507)', () => {

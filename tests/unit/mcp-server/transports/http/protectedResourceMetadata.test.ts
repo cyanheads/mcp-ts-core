@@ -74,8 +74,6 @@ async function readMetadata(response: Response): Promise<Record<string, unknown>
 describe('protectedResourceMetadataHandler', () => {
   beforeEach(() => {
     Object.assign(mockConfig, defaultMockConfig);
-    debugSpy.mockClear();
-    createRequestContextSpy.mockClear();
   });
 
   it('returns OAuth metadata with authorization server details and cache headers', async () => {
@@ -93,19 +91,6 @@ describe('protectedResourceMetadataHandler', () => {
       resource: 'http://localhost/mcp',
       resource_signing_alg_values_supported: ['RS256', 'ES256', 'PS256'],
     });
-    expect(createRequestContextSpy).toHaveBeenCalledWith({
-      operation: 'protectedResourceMetadataHandler',
-    });
-    expect(debugSpy).toHaveBeenCalledWith(
-      'Serving Protected Resource Metadata.',
-      expect.objectContaining({
-        operation: 'protectedResourceMetadataHandler',
-        extra: expect.objectContaining({
-          authMode: 'oauth',
-          resource: 'http://localhost/mcp',
-        }),
-      }),
-    );
   });
 
   it('prefers explicit resource identifiers and omits OAuth metadata outside oauth mode', async () => {

@@ -1,26 +1,11 @@
 /**
- * @fileoverview Tests for session ID generation and validation utilities.
+ * @fileoverview Tests for session ID format validation. Generation is covered
+ * by `sessionIdUtils.runtime.test.ts`, which pins its exact output.
  * @module tests/mcp-server/transports/http/sessionIdUtils.test
  */
 import { describe, expect, it } from 'vitest';
 
-import {
-  generateSecureSessionId,
-  validateSessionIdFormat,
-} from '../../../../../src/mcp-server/transports/http/sessionIdUtils.js';
-
-describe('generateSecureSessionId', () => {
-  it('returns a 64-character hex string', () => {
-    const id = generateSecureSessionId();
-    expect(id).toHaveLength(64);
-    expect(id).toMatch(/^[a-f0-9]{64}$/);
-  });
-
-  it('generates unique IDs on successive calls', () => {
-    const ids = new Set(Array.from({ length: 50 }, () => generateSecureSessionId()));
-    expect(ids.size).toBe(50);
-  });
-});
+import { validateSessionIdFormat } from '@/mcp-server/transports/http/sessionIdUtils.js';
 
 describe('validateSessionIdFormat', () => {
   it('accepts a manually constructed valid ID', () => {

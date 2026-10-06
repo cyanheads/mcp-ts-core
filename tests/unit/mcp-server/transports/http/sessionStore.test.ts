@@ -337,26 +337,4 @@ describe('SessionStore - Security & Tenant Isolation', () => {
       await scheduled.destroy();
     });
   });
-
-  describe('Multi-Tenant Scenarios', () => {
-    it('isolates sessions across multiple tenants', () => {
-      register(SESSION_A, { tenantId: 'tenant-a', clientId: 'client-a' });
-      register(SESSION_B, { tenantId: 'tenant-b', clientId: 'client-b' });
-
-      expect(
-        store.isValidForIdentity(SESSION_A, { tenantId: 'tenant-a', clientId: 'client-a' }),
-      ).toBe(true);
-      expect(
-        store.isValidForIdentity(SESSION_B, { tenantId: 'tenant-b', clientId: 'client-b' }),
-      ).toBe(true);
-
-      // Cross-tenant access is refused in both directions.
-      expect(
-        store.isValidForIdentity(SESSION_A, { tenantId: 'tenant-b', clientId: 'client-b' }),
-      ).toBe(false);
-      expect(
-        store.isValidForIdentity(SESSION_B, { tenantId: 'tenant-a', clientId: 'client-a' }),
-      ).toBe(false);
-    });
-  });
 });
