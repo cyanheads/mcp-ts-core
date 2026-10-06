@@ -219,6 +219,19 @@ describe('TransportManager', () => {
 
       expect(heartbeats[0]?.stop).toHaveBeenCalledTimes(1);
     });
+
+    it('stops the transport when the heartbeat declares the connection dead', async () => {
+      const { factory } = await startStdio();
+      await factory({ era: 'legacy' });
+      const { stopStdioTransport } = await import(
+        '@/mcp-server/transports/stdio/stdioTransport.js'
+      );
+
+      heartbeats[0]?.options.onDead();
+
+      await vi.waitFor(() => expect(stopStdioTransport).toHaveBeenCalledTimes(1));
+      expect(heartbeats[0]?.stop).toHaveBeenCalledTimes(1);
+    });
   });
 
   describe('stop', () => {

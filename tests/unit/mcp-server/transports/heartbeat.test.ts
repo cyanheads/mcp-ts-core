@@ -114,7 +114,7 @@ describe('HeartbeatMonitor', () => {
     expect(mockLogger.info).not.toHaveBeenCalled();
   });
 
-  it('stops scheduled work and no-ops internal scheduling when already stopped', async () => {
+  it('sends no ping once stopped, however stop() and start() interleave', async () => {
     const { HeartbeatMonitor } = await import('@/mcp-server/transports/heartbeat.js');
     const sendPing = vi.fn().mockResolvedValue(undefined);
 
@@ -131,15 +131,70 @@ describe('HeartbeatMonitor', () => {
     monitor.start();
     monitor.stop();
     monitor.stop();
+    expect(vi.getTimerCount()).toBe(0);
 
     await vi.advanceTimersByTimeAsync(50);
-    await (monitor as any).scheduleNext();
-    await (monitor as any).tick();
 
     expect(sendPing).not.toHaveBeenCalled();
   });
 
-  it('records failures, then logs recovery and resets the consecutive failure count', async () => {
+  it('arms no further ping after one that was in flight when the monitor stopped', async () => {
+    const { HeartbeatMonitor } = await import('@/mcp-server/transports/heartbeat.js');
+    const inFlight = Promise.withResolvers<void>();
+    const sendPing = vi.fn(() => inFlight.promise);
+
+    const monitor = new HeartbeatMonitor({
+      intervalMs: 10,
+      missThreshold: 2,
+      onDead: vi.fn(),
+      sendPing,
+      transport: 'stdio',
+    });
+
+    monitor.start();
+    await vi.advanceTimersByTimeAsync(10);
+    expect(sendPing).toHaveBeenCalledTimes(1);
+
+    // The ping settles after stop(): the cycle must end there, not re-arm.
+    monitor.stop();
+    inFlight.resolve();
+    await vi.advanceTimersByTimeAsync(5);
+    expect(vi.getTimerCount()).toBe(0);
+
+    await vi.advanceTimersByTimeAsync(100);
+    expect(sendPing).toHaveBeenCalledTimes(1);
+  });
+
+  it('counts only consecutive failures toward the threshold: a successful ping resets the run', async () => {
+    const { HeartbeatMonitor } = await import('@/mcp-server/transports/heartbeat.js');
+    const onDead = vi.fn();
+    const sendPing = vi
+      .fn()
+      .mockRejectedValueOnce(new Error('blip'))
+      .mockResolvedValueOnce(undefined)
+      .mockRejectedValueOnce(new Error('blip'))
+      .mockRejectedValueOnce(new Error('down'));
+
+    const monitor = new HeartbeatMonitor({
+      intervalMs: 10,
+      missThreshold: 2,
+      onDead,
+      sendPing,
+      transport: 'stdio',
+    });
+
+    monitor.start();
+    // Failure, success, failure: two misses in total, but never two in a row.
+    for (let tick = 0; tick < 3; tick++) await vi.advanceTimersByTimeAsync(10);
+    expect(sendPing).toHaveBeenCalledTimes(3);
+    expect(onDead).not.toHaveBeenCalled();
+
+    // The next miss is the second consecutive one.
+    await vi.advanceTimersByTimeAsync(10);
+    expect(onDead).toHaveBeenCalledTimes(1);
+  });
+
+  it('records a failure, then logs the recovery', async () => {
     const { HeartbeatMonitor } = await import('@/mcp-server/transports/heartbeat.js');
     const sendPing = vi
       .fn()
