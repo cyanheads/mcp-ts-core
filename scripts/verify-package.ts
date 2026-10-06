@@ -161,6 +161,11 @@ function assertSuccess(result: RunResult, label: string): void {
   );
 }
 
+/** Runs a `bin/tsc` on real Node: Bun's `node` shim truncates a child's piped stdout at exit. */
+function runTsc(nodeBin: string, tsc: string, args: string[], cwd: string): Promise<RunResult> {
+  return run(nodeBin, [tsc, ...args], cwd);
+}
+
 async function findCommand(name: 'bun' | 'node' | 'npm'): Promise<string> {
   const result = await run('which', ['-a', name], ROOT);
   assertSuccess(result, `locating ${name}`);
@@ -622,7 +627,7 @@ console.log('APPS_WITHOUT_PEERS_OK=' + error.data.package);
   }
 }
 
-async function verifyTypes(consumerDir: string, pkg: PackageJson): Promise<void> {
+async function verifyTypes(consumerDir: string, pkg: PackageJson, nodeBin: string): Promise<void> {
   await writeFile(join(consumerDir, 'consumer-node.ts'), nodeTypeConsumerSource(pkg));
   await writeFile(join(consumerDir, 'consumer-supabase.ts'), supabaseTypeConsumerSource(pkg));
   await writeFile(
@@ -675,7 +680,8 @@ async function verifyTypes(consumerDir: string, pkg: PackageJson): Promise<void>
     ['TypeScript 6', join(consumerDir, 'node_modules', 'typescript-v6', 'bin', 'tsc')],
   ] as const;
   for (const [compiler, tsc] of compilers) {
-    const nodeResult = await run(
+    const nodeResult = await runTsc(
+      nodeBin,
       tsc,
       ['--project', 'tsconfig.node.json', '--listFiles'],
       consumerDir,
@@ -684,7 +690,12 @@ async function verifyTypes(consumerDir: string, pkg: PackageJson): Promise<void>
     if (nodeResult.stdout.includes('/@supabase/')) {
       throw new Error(`${compiler} default public declaration graph unexpectedly loaded Supabase.`);
     }
-    const supabaseResult = await run(tsc, ['--project', 'tsconfig.supabase.json'], consumerDir);
+    const supabaseResult = await runTsc(
+      nodeBin,
+      tsc,
+      ['--project', 'tsconfig.supabase.json'],
+      consumerDir,
+    );
     assertSuccess(supabaseResult, `${compiler} explicit Supabase client type opt-in`);
   }
 }
@@ -697,7 +708,11 @@ async function verifyTypes(consumerDir: string, pkg: PackageJson): Promise<void>
  * is what holds the lane green: put `@types/node` back in this fixture's
  * dependencies and it fails.
  */
-async function verifyWorkerTypes(workerDir: string, pkg: PackageJson): Promise<void> {
+async function verifyWorkerTypes(
+  workerDir: string,
+  pkg: PackageJson,
+  nodeBin: string,
+): Promise<void> {
   await writeFile(join(workerDir, 'consumer-worker.ts'), workerTypeConsumerSource(pkg));
   await writeFile(join(workerDir, 'buffer-global.d.ts'), WORKER_BUFFER_GLOBAL_SOURCE);
   await writeFile(
@@ -727,7 +742,12 @@ async function verifyWorkerTypes(workerDir: string, pkg: PackageJson): Promise<v
     ['TypeScript 6', join(workerDir, 'node_modules', 'typescript-v6', 'bin', 'tsc')],
   ] as const;
   for (const [compiler, tsc] of compilers) {
-    const result = await run(tsc, ['--project', 'tsconfig.worker.json', '--listFiles'], workerDir);
+    const result = await runTsc(
+      nodeBin,
+      tsc,
+      ['--project', 'tsconfig.worker.json', '--listFiles'],
+      workerDir,
+    );
     assertSuccess(result, `${compiler} strict Worker consumer typecheck`);
 
     const files = result.stdout.split(/\r?\n/).filter(Boolean);
@@ -772,6 +792,7 @@ async function verifyBaseConfigConsumer(
   consumerDir: string,
   installedPackageDir: string,
   pkg: PackageJson,
+  nodeBin: string,
 ): Promise<void> {
   const projectDir = join(consumerDir, 'base-config-consumer');
   await mkdir(join(projectDir, 'src'), { recursive: true });
@@ -802,7 +823,12 @@ async function verifyBaseConfigConsumer(
     await rm(join(projectDir, 'dist'), { force: true, recursive: true });
     await rm(join(projectDir, 'tsconfig.tsbuildinfo'), { force: true });
 
-    const build = await run(tsc, ['--project', 'tsconfig.json', '--pretty', 'false'], projectDir);
+    const build = await runTsc(
+      nodeBin,
+      tsc,
+      ['--project', 'tsconfig.json', '--pretty', 'false'],
+      projectDir,
+    );
     assertSuccess(build, `${compiler} build of a consumer extending tsconfig.base.json`);
     await access(join(projectDir, 'dist', 'index.js'), constants.R_OK);
     await access(join(projectDir, 'tsconfig.tsbuildinfo'), constants.R_OK);
@@ -1267,9 +1293,9 @@ export async function verifyPublishedPackage(): Promise<PackageVerificationRepor
 
     await verifyRuntimeImports(consumerDir, installedPkg, nodeBin, bunBin);
     await verifyAppsWithoutPeers(consumerDir, installedPkg, nodeBin, bunBin);
-    await verifyTypes(consumerDir, installedPkg);
-    await verifyWorkerTypes(workerConsumerDir, installedPkg);
-    await verifyBaseConfigConsumer(consumerDir, installedPackageDir, installedPkg);
+    await verifyTypes(consumerDir, installedPkg, nodeBin);
+    await verifyWorkerTypes(workerConsumerDir, installedPkg, nodeBin);
+    await verifyBaseConfigConsumer(consumerDir, installedPackageDir, installedPkg, nodeBin);
     const cliProject = await verifyCli(
       consumerDir,
       installedPackageDir,
