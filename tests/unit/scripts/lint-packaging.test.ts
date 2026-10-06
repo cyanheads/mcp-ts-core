@@ -1,5 +1,8 @@
 /**
- * @fileoverview Tests for scripts/lint-packaging.ts — the `.mcpbignore` static
+ * @fileoverview Tests for scripts/lint-packaging.ts — the manifest.json and
+ * server.json alignment that runs inside `main()` (checks 1–4: no scope prefix on
+ * the manifest name, `title`/`type` on every `user_config` entry, and stdio env
+ * vars agreeing in both directions), the `.mcpbignore` static
  * guards (checks 5–7, issues #172/#207), the post-bundle content check
  * (check 8, issues #230/#274), the identity checks (check 9, issue #231), and
  * the plugin marketplace manifests (check 10, issues #240/#393), and the
@@ -12,7 +15,7 @@
  */
 
 import { spawnSync } from 'node:child_process';
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
@@ -35,6 +38,168 @@ import {
   checkServerJsonLaunch,
   NATIVE_BINDING_ENTRY,
 } from '../../../scripts/lint-packaging.js';
+
+describe('lint-packaging · manifest and server.json alignment (checks 1–4, standalone run)', () => {
+  const SCRIPT = join(import.meta.dirname, '..', '..', '..', 'scripts/lint-packaging.ts');
+  let dir: string | undefined;
+
+  afterEach(() => {
+    if (dir) rmSync(dir, { recursive: true, force: true });
+    dir = undefined;
+  });
+
+  type Json = Record<string, any>;
+
+  /** A stdio bundle whose manifest and server.json agree on every env var. */
+  function alignedPair(): { manifest: Json; serverJson: Json } {
+    return {
+      manifest: {
+        name: 'probe-mcp-server',
+        version: '0.1.0',
+        server: {
+          mcp_config: {
+            command: 'node',
+            args: [`\${__dirname}/dist/index.js`],
+            env: {
+              PROBE_API_KEY: `\${user_config.api_key}`,
+              PROBE_REGION: `\${user_config.region}`,
+              MCP_TRANSPORT_TYPE: 'stdio',
+            },
+          },
+        },
+        user_config: {
+          api_key: { title: 'API key', type: 'string', required: true },
+          region: { title: 'Region', type: 'string', default: '' },
+        },
+      },
+      serverJson: {
+        packages: [
+          {
+            registryType: 'npm',
+            identifier: '@acme/probe-mcp-server',
+            version: '0.1.0',
+            transport: { type: 'stdio' },
+            environmentVariables: [
+              { name: 'PROBE_API_KEY', isRequired: true },
+              { name: 'PROBE_REGION' },
+              { name: 'PROBE_TIMEOUT_MS', isRequired: true, default: '30000' },
+              { name: 'PROBE_DEBUG' },
+            ],
+          },
+        ],
+      },
+    };
+  }
+
+  function lint(files: Record<string, unknown>): { code: number; lines: string[]; out: string } {
+    dir = mkdtempSync(join(tmpdir(), 'lint-packaging-alignment-'));
+    const project = {
+      'package.json': { name: '@acme/probe-mcp-server', version: '0.1.0' },
+      ...files,
+    };
+    for (const [relPath, content] of Object.entries(project)) {
+      mkdirSync(join(dir, relPath, '..'), { recursive: true });
+      writeFileSync(
+        join(dir, relPath),
+        typeof content === 'string' ? content : JSON.stringify(content),
+      );
+    }
+    const result = spawnSync('bun', ['run', SCRIPT], { cwd: dir, encoding: 'utf8' });
+    const out = `${result.stdout}${result.stderr}`;
+    return { code: result.status ?? -1, lines: out.split('\n'), out };
+  }
+
+  it('passes a manifest and server.json that agree on every stdio env var', () => {
+    const { manifest, serverJson } = alignedPair();
+    const { code, out } = lint({ 'manifest.json': manifest, 'server.json': serverJson });
+    expect(out).toContain('Packaging alignment OK.');
+    expect(code).toBe(0);
+  });
+
+  it('fails a scoped manifest name (check 1)', () => {
+    const { manifest, serverJson } = alignedPair();
+    manifest.name = '@acme/probe-mcp-server';
+    const { code, out } = lint({ 'manifest.json': manifest, 'server.json': serverJson });
+    expect(code).toBe(1);
+    expect(out).toContain(
+      'manifest.json "name" contains a scope prefix ("@acme/probe-mcp-server") — use the bare package name (e.g. "probe-mcp-server")',
+    );
+  });
+
+  it('fails a user_config entry missing its title or type (check 2)', () => {
+    const { manifest, serverJson } = alignedPair();
+    manifest.user_config.api_key.type = '';
+    delete manifest.user_config.region.title;
+    const { code, out } = lint({ 'manifest.json': manifest, 'server.json': serverJson });
+    expect(code).toBe(1);
+    expect(out).toContain(
+      'manifest.json user_config["api_key"] is missing required field(s): type',
+    );
+    expect(out).toContain(
+      'manifest.json user_config["region"] is missing required field(s): title',
+    );
+  });
+
+  it('fails a user_config env var that no stdio package advertises (check 3)', () => {
+    const { manifest, serverJson } = alignedPair();
+    const [stdio] = serverJson.packages;
+    stdio.environmentVariables = stdio.environmentVariables.filter(
+      (v: Json) => v.name !== 'PROBE_REGION',
+    );
+    // A non-stdio package advertising the var does not count.
+    serverJson.packages.push({
+      registryType: 'oci',
+      identifier: 'ghcr.io/acme/probe-mcp-server',
+      transport: { type: 'streamable-http', url: 'http://localhost:3010/mcp' },
+      environmentVariables: [{ name: 'PROBE_REGION' }],
+    });
+    const { code, lines } = lint({ 'manifest.json': manifest, 'server.json': serverJson });
+    expect(code).toBe(1);
+    expect(lines).toContain(
+      '  ✗ manifest.json references user_config env var(s) not advertised in server.json stdio environmentVariables[]: PROBE_REGION',
+    );
+  });
+
+  it('fails a required stdio env var with no default that the manifest never sets (check 4)', () => {
+    const { manifest, serverJson } = alignedPair();
+    serverJson.packages[0].environmentVariables.push({ name: 'PROBE_ORG', isRequired: true });
+    const { code, lines } = lint({ 'manifest.json': manifest, 'server.json': serverJson });
+    expect(code).toBe(1);
+    // PROBE_TIMEOUT_MS has a default and PROBE_DEBUG is optional, so neither is named.
+    expect(lines).toContain(
+      '  ✗ server.json declares required stdio env var(s) without default missing from manifest.json mcp_config.env: PROBE_ORG',
+    );
+  });
+
+  it('fails a malformed manifest.json', () => {
+    const { code, out } = lint({ 'manifest.json': '{ "name": ' });
+    expect(code).toBe(1);
+    expect(out).toContain('manifest.json is unreadable or malformed.');
+  });
+
+  it('skips the plugin manifest checks when devcheck.config.json turns them off', () => {
+    const stalePlugin = {
+      '.claude-plugin/plugin.json': {
+        name: 'probe-mcp-server',
+        version: '0.0.9',
+        description: 'Probe server.',
+      },
+    };
+    const enabled = lint(stalePlugin);
+    expect(enabled.code).toBe(1);
+    expect(enabled.out).toContain('.claude-plugin/plugin.json');
+    rmSync(dir as string, { recursive: true, force: true });
+
+    const disabled = lint({
+      ...stalePlugin,
+      'devcheck.config.json': { packaging: { pluginManifests: false } },
+    });
+    expect(disabled.out).toContain(
+      'Plugin-manifest checks disabled via devcheck.config.json packaging.pluginManifests.',
+    );
+    expect(disabled.code).toBe(0);
+  });
+});
 
 describe('lint-packaging · bundle-content guard (checks 5–7)', () => {
   describe('dev-dir exclusion (check 5)', () => {

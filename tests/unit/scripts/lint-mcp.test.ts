@@ -6,7 +6,8 @@
  *   `validateDefinitions`, so the precedence rungs are exercised through the same
  *   path the CLI takes rather than through a copy of its logic.
  * - The CLI over a project tree (issue #516). Spawns the real script against a
- *   temp project root — discovery, the `import()` of each definition file, the
+ *   temp project root — discovery of every definition suffix (tools, resources,
+ *   prompts, app tools, app resources), the `import()` of each definition file, the
  *   `server.json` read, the printed report, and the exit code are the surface,
  *   so nothing is mocked. A definition file that fails to import, or a
  *   `server.json` that fails to parse, must fail the run rather than drop out
@@ -138,6 +139,7 @@ const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '../../..');
 const SCRIPT = join(REPO_ROOT, 'scripts/lint-mcp.ts');
 
 const TOOLS = 'src/mcp-server/tools/definitions';
+const RESOURCES = 'src/mcp-server/resources/definitions';
 const PROMPTS = 'src/mcp-server/prompts/definitions';
 const EXAMPLE_PROMPTS = 'examples/mcp-server/prompts/definitions';
 
@@ -161,6 +163,25 @@ const CLEAN_PROMPT = `export const greetPrompt = {
   generate: () => [{ role: 'user', content: { type: 'text', text: 'Hello.' } }],
 };
 `;
+
+/** A resource definition that passes every rule. */
+const CLEAN_RESOURCE = `import { z } from 'zod';
+
+export const echoResource = {
+  uriTemplate: 'fixture://echo/{message}',
+  name: 'fixture-echo',
+  description: 'Echo a message back as a resource.',
+  mimeType: 'text/plain',
+  params: z.object({ message: z.string().describe('Message to echo') }),
+  handler: async (params: { message: string }) => params.message,
+};
+`;
+
+/** Fails `uri-template-valid` (error): the template's brace never closes. */
+const BAD_TEMPLATE_RESOURCE = CLEAN_RESOURCE.replace(
+  "'fixture://echo/{message}'",
+  "'fixture://echo/{message'",
+);
 
 /** Fails `name-format` (error). */
 const BAD_NAME_TOOL = CLEAN_TOOL.replace("'fixture_echo'", "'Bad Name'");
@@ -310,6 +331,32 @@ describe('lint-mcp · CLI over a project tree', () => {
       const run = runLint(project({ [`${TOOLS}/bad-name.tool.ts`]: BAD_NAME_TOOL }));
       expect(run.code).toBe(1);
       expect(run.stderr).toContain('  ✗ [name-format] ');
+      expect(run.stderr).toContain('\nFailed: 1 error(s), 0 warning(s).\n');
+    });
+  });
+
+  describe('resources and app definitions', () => {
+    it('discovers .resource.ts, .app-tool.ts, and .app-resource.ts files and counts each kind', () => {
+      const run = runLint(
+        project({
+          [`${RESOURCES}/echo.resource.ts`]: CLEAN_RESOURCE,
+          [`${RESOURCES}/echo-ui.app-resource.ts`]: CLEAN_RESOURCE.replace(
+            "'fixture-echo'",
+            "'fixture-echo-ui'",
+          ).replace('fixture://echo/', 'fixture://echo-ui/'),
+          [`${TOOLS}/echo.app-tool.ts`]: CLEAN_TOOL,
+        }),
+      );
+      expect(run.code).toBe(0);
+      expect(run.stdout).toBe(
+        'Linting 1 tool(s), 2 resource(s), 0 prompt(s) from 3 file(s)...\n\nAll definitions valid.\n',
+      );
+    });
+
+    it('fails on a resource rule error', () => {
+      const run = runLint(project({ [`${RESOURCES}/bad.resource.ts`]: BAD_TEMPLATE_RESOURCE }));
+      expect(run.code).toBe(1);
+      expect(run.stderr).toContain('  ✗ [uri-template-valid] ');
       expect(run.stderr).toContain('\nFailed: 1 error(s), 0 warning(s).\n');
     });
   });

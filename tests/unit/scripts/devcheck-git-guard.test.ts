@@ -39,7 +39,13 @@ function runDevcheckOnly(cwd: string, only: string): { code: number; out: string
     cwd,
     encoding: 'utf-8',
   });
-  return { code: result.status ?? -1, out: `${result.stdout}${result.stderr}` };
+  const out = `${result.stdout}${result.stderr}`.replace(/\u001B\[[0-9;]*m/g, '');
+  return { code: result.status ?? -1, out };
+}
+
+/** The check's own summary row, which leads with its padded name. */
+function summaryRow(out: string, check: string): string {
+  return out.split('\n').find((line) => line.startsWith(check)) ?? '';
 }
 
 describe('devcheck git-repo guard on a fresh scaffold (#243)', () => {
@@ -53,13 +59,15 @@ describe('devcheck git-repo guard on a fresh scaffold (#243)', () => {
     rmSync(dir, { recursive: true, force: true });
   });
 
-  it.each(['TODOs', 'Tracked Secrets', 'Framework Antipatterns'])(
+  it.each(['TODOs/FIXMEs', 'Tracked Secrets', 'Framework Antipatterns'])(
     'skips %s cleanly when not a git repository (no exit-128 failure)',
     (check) => {
       const { code, out } = runDevcheckOnly(dir, check);
       expect(code).toBe(0);
-      // The fix routes the check to the "No relevant files to check" skip path.
-      expect(out).toContain('SKIPPED');
+      // The fix routes the check to the "No relevant files to check" skip path —
+      // asserted on the check's own row, since `--only` marks every other row SKIPPED.
+      expect(out).toContain(`Skipping ${check}... (No relevant files to check)`);
+      expect(summaryRow(out, check)).toContain('SKIPPED');
       // The pre-fix bug surfaced these — assert neither escapes.
       expect(out).not.toContain('FAILED');
       expect(out).not.toContain('not a git repository');

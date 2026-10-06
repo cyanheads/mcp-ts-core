@@ -4,7 +4,9 @@
  * `Mcp-Session-Id` header as fatal, so a server running under
  * `MCP_SESSION_MODE=stateless` — which completes a valid 2025-era
  * initialization without minting a session — could not be field-tested at all,
- * and `mcp_call` rejected the empty `sid` that mode produces.
+ * and `mcp_call` rejected the empty `sid` that mode produces. `mcp_call` must
+ * also print only the JSON-RPC reply — never a notification streamed ahead of
+ * it, never an HTTP error body — so its output pipes straight into `jq`.
  *
  * The helper is extracted from the skill body itself, so the assertions run
  * against exactly the script an agent pastes. Stub servers stand in for the
@@ -31,12 +33,28 @@ const SESSION_ID = 'sess-abc123';
 
 /** Response shapes a real deployment can produce for `initialize`. */
 type StubMode =
+  | 'call-503'
   | 'http-500'
   | 'no-protocol'
   | 'rpc-error'
+  | 'sse-call'
   | 'sse-stateless'
   | 'stateful'
   | 'stateless';
+
+/** The JSON-RPC reply every non-initialize call answers with. */
+const CALL_REPLY = '{"jsonrpc":"2.0","id":7,"result":{"tools":[{"name":"probe"}]}}';
+
+/**
+ * A log notification streamed ahead of the reply on the same POST. Its logged
+ * data carries a `"result"` key of its own, so only a structural pick — a
+ * top-level `result` or `error` — separates it from the reply.
+ */
+const LOG_FRAME = JSON.stringify({
+  jsonrpc: '2.0',
+  method: 'notifications/message',
+  params: { level: 'info', data: { upstream: { result: 'partial' } } },
+});
 
 interface Recorded {
   body: string;
@@ -73,12 +91,24 @@ async function startStub(mode: StubMode): Promise<Stub> {
       const method = /"method":"([^"]*)"/.exec(raw)?.[1];
 
       if (method !== 'initialize') {
+        if (mode === 'sse-call') {
+          res.writeHead(200, { 'Content-Type': 'text/event-stream' });
+          res.end(`event: message\ndata: ${LOG_FRAME}\n\nevent: message\ndata: ${CALL_REPLY}\n\n`);
+          return;
+        }
+        if (mode === 'call-503') {
+          res.writeHead(503, { 'Content-Type': 'text/plain' });
+          res.end('upstream down');
+          return;
+        }
         res.writeHead(200, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ jsonrpc: '2.0', id: 7, result: { tools: [] } }));
+        res.end(CALL_REPLY);
         return;
       }
 
       switch (mode) {
+        case 'call-503':
+        case 'sse-call':
         case 'stateful':
           res.writeHead(200, {
             'Content-Type': 'application/json',
@@ -264,6 +294,24 @@ describe('field-test helper · mcp_call (#391)', () => {
     expect(code).toBe(0);
     expect(server.requests[0]?.headers['mcp-session-id']).toBe(SESSION_ID);
     expect(server.requests[0]?.headers['mcp-protocol-version']).toBeUndefined();
+  });
+
+  it('prints only the reply from an SSE stream that carries notifications first', async () => {
+    const server = await stub('sse-call');
+    const { code, stdout } = await run(`mcp_call ${server.url} '' tools/list '' ${PROTOCOL}`);
+
+    expect(code).toBe(0);
+    expect(stdout).toBe(`${CALL_REPLY}\n`);
+  });
+
+  it('fails visibly on an HTTP error status instead of printing the body as a reply', async () => {
+    const server = await stub('call-503');
+    const { code, stderr, stdout } = await run(`mcp_call ${server.url} '' tools/list`);
+
+    expect(code).not.toBe(0);
+    expect(stderr).toContain('HTTP 503 from tools/list — response:');
+    expect(stderr).toContain('upstream down');
+    expect(stdout).toBe('');
   });
 
   it('still rejects a missing url or method', async () => {

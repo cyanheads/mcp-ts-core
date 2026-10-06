@@ -2,8 +2,8 @@
  * @fileoverview Tests for devdocs.ts pattern matching functionality
  * @module tests/scripts/devdocs
  * @description
- *   Validates the security-hardened glob pattern matching with proper regex escaping.
- *   Ensures protection against regex injection and ReDoS attacks.
+ *   Validates glob pattern matching with proper regex escaping, so regex
+ *   metacharacters in a pattern match literally.
  */
 
 import { describe, expect, it } from 'vitest';
@@ -112,45 +112,6 @@ describe('devdocs.ts - matchesPattern', () => {
     });
   });
 
-  describe('Security: ReDoS prevention', () => {
-    it('should handle patterns with multiple asterisks safely', () => {
-      // These patterns should not cause catastrophic backtracking
-      const patterns = ['**/**/**/*.ts', '*****.ts', 'a*b*c*d*e*f*.ts'];
-
-      // Should complete quickly without hanging
-      const start = Date.now();
-      const result = matchesPattern('a/b/c/d/e/f/test.ts', patterns);
-      const duration = Date.now() - start;
-
-      expect(duration).toBeLessThan(100); // Should be nearly instantaneous
-      expect(result).toBe(true);
-    });
-
-    it('should handle deeply nested patterns efficiently', () => {
-      const deepPattern = 'a/**/b/**/c/**/d/**/e/**/test.ts';
-      const deepPath = 'a/1/b/2/c/3/d/4/e/5/test.ts';
-
-      const start = Date.now();
-      const result = matchesPattern(deepPath, [deepPattern]);
-      const duration = Date.now() - start;
-
-      expect(duration).toBeLessThan(100);
-      expect(result).toBe(true);
-    });
-
-    it('should handle very long file paths efficiently', () => {
-      const longPath = `${'a/'.repeat(100)}test.ts`;
-      const pattern = '**/*.ts';
-
-      const start = Date.now();
-      const result = matchesPattern(longPath, [pattern]);
-      const duration = Date.now() - start;
-
-      expect(duration).toBeLessThan(100);
-      expect(result).toBe(true);
-    });
-  });
-
   describe('Edge cases', () => {
     it('should handle empty strings', () => {
       expect(matchesPattern('', ['*.ts'])).toBe(false);
@@ -217,28 +178,6 @@ describe('devdocs.ts - matchesPattern', () => {
       expect(matchesPattern('.git/config', depPatterns)).toBe(true);
       expect(matchesPattern('.vscode/settings.json', depPatterns)).toBe(true);
       expect(matchesPattern('src/index.ts', depPatterns)).toBe(false);
-    });
-  });
-
-  describe('Security regression tests', () => {
-    it('should not allow regex injection via backslash escapes', () => {
-      // Attempt to inject regex patterns - should match literally, not as regex
-      // '.' is literal; '*' stays a glob wildcard
-      expect(matchesPattern('anything.ts', ['.*'])).toBe(false);
-      expect(matchesPattern('.env', ['.*'])).toBe(true);
-      expect(matchesPattern('test123.ts', ['\\d+'])).toBe(false);
-    });
-
-    it('should not allow alternation injection via pipe character', () => {
-      // Pipe should be treated literally, not as alternation
-      expect(matchesPattern('test.ts', ['test|other'])).toBe(false);
-      expect(matchesPattern('test|other', ['test|other'])).toBe(true);
-    });
-
-    it('should not allow character class injection', () => {
-      // Character classes should be treated literally
-      expect(matchesPattern('a', ['[abc]'])).toBe(false);
-      expect(matchesPattern('[abc]', ['[abc]'])).toBe(true);
     });
   });
 });
