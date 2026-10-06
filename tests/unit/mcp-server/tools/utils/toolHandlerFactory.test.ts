@@ -1446,6 +1446,37 @@ describe('createToolHandler', () => {
         );
       });
 
+      it.each([
+        [
+          'a tuple position',
+          { pair: ['a', { width: 1, height: 2, depth: 3 }] },
+          'Unknown key pair.1.depth. pair.1 accepts: width, height.',
+        ],
+        [
+          'a pipe',
+          { piped: { width: 1, height: 2, depth: 3 } },
+          'Unknown key piped.depth. piped accepts: width, height.',
+        ],
+      ])('resolves through %s', async (_label, args, expected) => {
+        const Box = z
+          .object({ width: z.number().describe('Width.'), height: z.number().describe('Height.') })
+          .strict();
+        // Its own definition, so the root key list other cases pin stays put.
+        const wrapped = tool('nested_strict_wrapped', {
+          description: 'Takes a strict object behind a tuple position and behind a pipe.',
+          input: z.object({
+            pair: z.tuple([z.string(), Box]).optional().describe('A label and a box.'),
+            piped: Box.pipe(Box).optional().describe('A box behind a pipe.'),
+          }),
+          output: ok,
+          handler: pass,
+        });
+
+        const result = await reject(wrapped, args);
+
+        expect(hint(result)).toBe(expected);
+      });
+
       it('leaves the accepted list out when the nested object declares no keys', async () => {
         const result = await reject(nestedStrict, { query: 'x', empty: { b: 1 } });
 
@@ -3561,6 +3592,35 @@ describe('createToolHandler', () => {
 
         expect(envelope(result).data?.reason).toBe('client_capability_missing');
         expect(envelope(result).message).toContain(path);
+      });
+
+      it('asks for sampling.tools when a sampling request carries toolChoice alone', async () => {
+        const def = tool('tool_choice_probe', {
+          description: 'Asks for a sampling round that steers tool use.',
+          input: z.object({}),
+          output: z.object({ ok: z.boolean().describe('ok') }),
+          handler: (_input, ctx) =>
+            ctx.requestInput({
+              inputRequests: {
+                ask: inputRequired.createMessage({
+                  maxTokens: 8,
+                  messages: [],
+                  toolChoice: { mode: 'none' },
+                }),
+              },
+            }),
+        });
+        const handler = createToolHandler(
+          def as AnyToolDefinition,
+          services,
+          notifiers,
+          legacyCapabilityView({ sampling: {} } as ClientCapabilities),
+        );
+
+        const result = await handler({}, makeServerContext());
+
+        expect(envelope(result).data?.reason).toBe('client_capability_missing');
+        expect(envelope(result).message).toContain('`sampling.tools`');
       });
 
       it('leaves a requestState-only return untouched', async () => {

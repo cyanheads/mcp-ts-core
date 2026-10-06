@@ -291,6 +291,52 @@ describe('enrichment block', () => {
       expect(result.structuredContent).toEqual({ items: ['x'], totalCount: 99 });
       expect(lastText(result.content)).toContain('99');
     });
+
+    it('renders the trailer from what the effective-output parse kept', async () => {
+      // The loose service-layer shape can carry a key the block never declared,
+      // and a nested default only exists once the block has parsed the value.
+      function runService(ctx: { enrich: (fields: Record<string, unknown>) => void }): void {
+        ctx.enrich({
+          appliedFilters: { range: '2020' },
+          scopes: ['titles', 'abstracts'],
+          stray: 'never declared',
+        });
+      }
+
+      const t = tool('svc_enrich_parsed', {
+        description: 'Search.',
+        input: z.object({ q: z.string().describe('q') }),
+        output: z.object({ items: z.array(z.string()).describe('items') }),
+        enrichment: {
+          appliedFilters: z
+            .object({
+              range: z.string().describe('range'),
+              types: z.array(z.string()).default(['any']).describe('types'),
+            })
+            .describe('applied filters'),
+          scopes: z.array(z.string()).describe('fields searched'),
+        },
+        enrichmentTrailer: {
+          appliedFilters: { render: (v) => `Range ${v.range}; types ${v.types.join(', ')}` },
+        },
+        handler: (_input, ctx) => {
+          runService(ctx);
+          return { items: [] };
+        },
+      });
+
+      const handler = createToolHandler(t as AnyToolDefinition, services, notifiers);
+      const result = await handler({ q: 'x' }, makeServerContext());
+
+      expect(result.structuredContent).toEqual({
+        items: [],
+        appliedFilters: { range: '2020', types: ['any'] },
+        scopes: ['titles', 'abstracts'],
+      });
+      expect(lastText(result.content)).toBe(
+        '\n\nRange 2020; types any\n**scopes:** ["titles","abstracts"]',
+      );
+    });
   });
 
   describe('guards and no-op behavior', () => {

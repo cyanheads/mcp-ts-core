@@ -93,7 +93,7 @@ import {
 import { authContext } from '@/mcp-server/transports/auth/lib/authContext.js';
 import type { AuthInfo } from '@/mcp-server/transports/auth/lib/authTypes.js';
 import { checkScopes } from '@/mcp-server/transports/auth/lib/checkScopes.js';
-import { forbidden, JsonRpcErrorCode } from '@/types-global/errors.js';
+import { forbidden, invalidParams, JsonRpcErrorCode } from '@/types-global/errors.js';
 import {
   logger,
   type OtelLogRecord,
@@ -258,6 +258,17 @@ const loud = tool('records_loud', {
   output: ok,
   handler: () => {
     throw new Error(`Upstream said: ${'z'.repeat(5_000)}`);
+  },
+});
+
+const relays = tool('records_relays', {
+  description: 'Relays an upstream argument rejection from inside the handler.',
+  input: z.object({}),
+  output: ok,
+  handler: () => {
+    throw invalidParams(`Upstream rejected: ${'y'.repeat(5_000)}`, {
+      reason: 'invalid_arguments',
+    });
   },
 });
 
@@ -476,6 +487,13 @@ describe('an argument rejection’s record stays bounded (#631)', () => {
   /** The first 1,024 characters of `value`. */
   const cut = (value: string) => value.slice(0, 1_024);
 
+  /**
+   * Per-test timeout for the cases that build a 50,000-issue rejection: a
+   * second or more alone, several times that under a full parallel run, past
+   * the unit project's 5 s default.
+   */
+  const REPRO_TIMEOUT_MS = 30_000;
+
   it.each(REPRO)(
     'serializes the record for %s to under 8 KiB, at notice, with no stack',
     async (_label, args) => {
@@ -487,6 +505,7 @@ describe('an argument rejection’s record stays bounded (#631)', () => {
       expect(record.fields).not.toHaveProperty('stack');
       expect(record.fields.errorData).not.toHaveProperty('originalStack');
     },
+    REPRO_TIMEOUT_MS,
   );
 
   it.each(REPRO)(
@@ -507,6 +526,7 @@ describe('an argument rejection’s record stays bounded (#631)', () => {
         recovery: { hint: cut(hint), hintLength: hint.length },
       });
     },
+    REPRO_TIMEOUT_MS,
   );
 
   it('names the tool, the reason, and the long key’s first characters', async () => {
@@ -540,15 +560,19 @@ describe('an argument rejection’s record stays bounded (#631)', () => {
     expect(logged).not.toHaveProperty('keysLengths');
   });
 
-  it('keeps the first 10 of 50,000 issues, with the count', async () => {
-    const result = await callTool(search, REPRO[2][1]);
+  it(
+    'keeps the first 10 of 50,000 issues, with the count',
+    async () => {
+      const result = await callTool(search, REPRO[2][1]);
 
-    const issues = envelope(result).data?.issues ?? [];
-    expect(issues).toHaveLength(50_000);
-    const { errorData } = errorRecord().fields;
-    expect(errorData.issues).toEqual(issues.slice(0, 10));
-    expect(errorData.issuesCount).toBe(50_000);
-  });
+      const issues = envelope(result).data?.issues ?? [];
+      expect(issues).toHaveLength(50_000);
+      const { errorData } = errorRecord().fields;
+      expect(errorData.issues).toEqual(issues.slice(0, 10));
+      expect(errorData.issuesCount).toBe(50_000);
+    },
+    REPRO_TIMEOUT_MS,
+  );
 
   it('cuts each input key the pre-validation step reports, with its length', async () => {
     const alias = `Q${'_'.repeat(5_000)}uery`;
@@ -601,6 +625,7 @@ describe('an argument rejection’s record stays bounded (#631)', () => {
         ),
       );
     },
+    REPRO_TIMEOUT_MS,
   );
 
   it('keeps a handler throw at error, with the stack and the full message', async () => {
@@ -610,6 +635,22 @@ describe('an argument rejection’s record stays bounded (#631)', () => {
     const message = `Upstream said: ${'z'.repeat(5_000)}`;
     expect(levelOf('Error in tool:')).toBe('error');
     expect(record.msg).toBe(`Error in tool:records_loud: ${message}`);
+    expect(record.fields.stack).toEqual(expect.any(String));
+    expect(record.fields.errorData).toMatchObject({
+      originalMessage: message,
+      originalStack: expect.any(String),
+    });
+    expect(record.fields.errorData).not.toHaveProperty('originalMessageLength');
+  });
+
+  it('keeps an invalid_arguments failure the handler raised whole, with the stack', async () => {
+    // Only the schema gate's rejection, raised before the handler ran, is cut:
+    // the same reason thrown from inside the handler is a fault worth a stack.
+    await callTool(relays, {});
+
+    const record = errorRecord();
+    const message = `Upstream rejected: ${'y'.repeat(5_000)}`;
+    expect(record.msg).toBe(`Error in tool:records_relays: ${message}`);
     expect(record.fields.stack).toEqual(expect.any(String));
     expect(record.fields.errorData).toMatchObject({
       originalMessage: message,

@@ -1,7 +1,8 @@
 /**
  * @fileoverview Fuzz tests for the tool handler pipeline.
  * Exercises `createToolHandler` with schema-generated and adversarial inputs
- * to verify the framework never crashes, leaks internals, or allows prototype pollution.
+ * to verify the framework never crashes or leaks internals. That an own `__proto__` key
+ * never re-prototypes a copy of the arguments is pinned in the pre-validation unit suite.
  * @module tests/fuzz/tool-handler-pipeline.fuzz.test
  */
 
@@ -519,33 +520,6 @@ describe('Tool Handler Pipeline Fuzz Tests', () => {
     });
   });
 
-  describe('Prototype pollution resistance', () => {
-    it('adversarial __proto__ payloads do not pollute Object.prototype', async () => {
-      const handler = createToolHandler(stringTool as AnyToolDefinition, services, notifiers);
-      const protoKeysBefore = new Set(Object.keys(Object.prototype));
-
-      const payloads = [
-        { __proto__: { polluted: true }, value: 'test' },
-        { constructor: { prototype: { polluted: true } }, value: 'test' },
-        JSON.parse('{"__proto__":{"injected":true},"value":"test"}'),
-      ];
-
-      for (const payload of payloads) {
-        await call(handler, payload);
-      }
-
-      const protoKeysAfter = new Set(Object.keys(Object.prototype));
-      for (const key of protoKeysAfter) {
-        if (!protoKeysBefore.has(key)) {
-          delete (Object.prototype as any)[key];
-          throw new Error(`Prototype pollution detected: ${key}`);
-        }
-      }
-      expect((Object.prototype as any).polluted).toBeUndefined();
-      expect((Object.prototype as any).injected).toBeUndefined();
-    });
-  });
-
   describe('Type confusion resistance', () => {
     it('survives completely wrong top-level types', async () => {
       const handler = createToolHandler(stringTool as AnyToolDefinition, services, notifiers);
@@ -562,6 +536,9 @@ describe('Tool Handler Pipeline Fuzz Tests', () => {
         () => {},
         Symbol('test'),
         BigInt(42),
+        // The arguments themselves arriving as JSON text: the repair step acts on
+        // values the parse rejected below the root, never on the root itself.
+        '{"value":"test"}',
       ];
 
       for (const input of wrongTypes) {

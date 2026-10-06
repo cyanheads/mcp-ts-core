@@ -2,6 +2,8 @@
  * @fileoverview Tests for tool registration system.
  * @module tests/mcp-server/tools/tool-registration.test
  */
+import { Client } from '@modelcontextprotocol/client';
+import { InMemoryTransport, McpServer } from '@modelcontextprotocol/server';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { z } from 'zod';
 import { ToolRegistry } from '@/mcp-server/tools/tool-registration.js';
@@ -279,6 +281,48 @@ describe('ToolRegistry', () => {
         false,
       );
     });
+
+    it.each([
+      ['.passthrough()', z.object({ id: z.string().describe('ID') }).passthrough(), {}],
+      [
+        '.catchall(z.string())',
+        z.object({ id: z.string().describe('ID') }).catchall(z.string()),
+        { type: 'string' },
+      ],
+    ])(
+      'keeps a %s output root open for a client that validates structuredContent',
+      async (_label, output, additional) => {
+        // The SDK client checks a success result's structuredContent against the
+        // advertised outputSchema, so a root advertised closed would turn every
+        // call returning an extra key into a client-side -32602.
+        const openOutput = tool('open_output_tool', {
+          description: 'Returns keys its output schema leaves open.',
+          input: z.object({}),
+          output: output as z.ZodObject<{ id: z.ZodString }>,
+          handler: () => ({ id: 'a', extra: 'kept' }) as { id: string },
+        });
+        const server = new McpServer(
+          { name: 'open-output', version: '0.0.0' },
+          { capabilities: { tools: {} } },
+        );
+        await new ToolRegistry([openOutput], services).registerAll(server);
+        const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+        const client = new Client({ name: 'open-output-client', version: '0.0.0' });
+        await server.connect(serverTransport);
+        await client.connect(clientTransport);
+        try {
+          const { tools } = await client.listTools();
+          const result = await client.callTool({ name: 'open_output_tool', arguments: {} });
+
+          expect(tools[0]?.outputSchema?.additionalProperties).toEqual(additional);
+          expect(result.isError).toBeUndefined();
+          expect(result.structuredContent).toEqual({ id: 'a', extra: 'kept' });
+        } finally {
+          await client.close();
+          await server.close();
+        }
+      },
+    );
   });
 
   describe('Annotations', () => {

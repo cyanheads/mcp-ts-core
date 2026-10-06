@@ -209,6 +209,17 @@ const underscoreDeclaring = tool('prevalidation_underscore', {
   handler: record,
 });
 
+const declaresListed = tool('prevalidation_declares_listed', {
+  description: 'Declares keys the built-in and a server-configured ignore list name.',
+  input: z.object({
+    query: z.string().describe('Search query.'),
+    toolCallId: z.string().optional().describe('Caller-supplied call ID.'),
+    sessionId: z.string().optional().describe('Caller-supplied session ID.'),
+  }),
+  output: ok,
+  handler: record,
+});
+
 const openRoot = tool('prevalidation_open', {
   description: 'Open root accepting unknown keys outright.',
   input: z.object({ query: z.string().describe('Search query.') }).passthrough(),
@@ -495,6 +506,13 @@ const numericIds = tool('prevalidation_numeric_ids', {
   handler: record,
 });
 
+const mixedLiteral = tool('prevalidation_mixed_literal', {
+  description: 'Takes a literal set holding both a string and a number.',
+  input: z.object({ days: z.literal(['7', 30]).describe('Window in days.') }),
+  output: ok,
+  handler: record,
+});
+
 /**
  * The `inputSchema` each probe advertised in `tools/list` before the rewrite
  * and repair stages learned their new cases (#468, #479, #487, #563), byte for
@@ -555,6 +573,32 @@ describe('tool argument pre-validation', () => {
 
       expect(result.isError).toBeUndefined();
       expect(seen).toEqual({ query: 'x', _cursor: 'abc' });
+    });
+
+    it('never drops a declared key the built-in or a server-configured ignore list names', async () => {
+      const result = await call(
+        declaresListed,
+        { query: 'x', toolCallId: 'c1', sessionId: 's1' },
+        { ignoreKeys: ['sessionId'] },
+      );
+
+      expect(result.isError).toBeUndefined();
+      expect(seen).toEqual({ query: 'x', toolCallId: 'c1', sessionId: 's1' });
+      expect(adds('mcp.input.ignored_key')).toEqual([]);
+    });
+
+    it.each([
+      ['the drop stage', '{"__proto__": {"query": "smuggled"}}'],
+      ['the alias-first retry', '{"__proto__": {"query": "smuggled"}, "_max_results": 5}'],
+    ])('never lets an own __proto__ key re-prototype the copy %s makes', async (_label, raw) => {
+      // JSON.parse creates `__proto__` as an own data property. A copy that
+      // assigned it rather than defining it would hand the parse an object
+      // inheriting `query`, which Zod reads — a value the caller never sent.
+      const result = await call(search, JSON.parse(raw));
+
+      expect(seen).toBeUndefined();
+      expect(envelope(result).data?.recovery?.hint).toMatch(/^Provide query\. /);
+      expect(envelope(result).data?.input).toMatchObject({ ignored: ['__proto__'] });
     });
 
     it('still rejects an undeclared underscore key on a tool declaring one', async () => {
@@ -1318,6 +1362,13 @@ describe('tool argument pre-validation', () => {
       expect(seen).toEqual({ statusFilter: ['RECRUITING'] });
     });
 
+    it('repairs a stringified array the caller padded with whitespace', async () => {
+      const result = await call(listy, { statusFilter: ' \n["RECRUITING"] ' });
+
+      expect(result.isError).toBeUndefined();
+      expect(seen).toEqual({ statusFilter: ['RECRUITING'] });
+    });
+
     it('bubbles the original rejection for a truncated string', async () => {
       const truncated = await call(listy, { statusFilter: '["RECRUITING"' });
       const plain = await call(listy, { statusFilter: '["RECRUITING"', note: 1 as never });
@@ -1696,6 +1747,13 @@ describe('tool argument pre-validation', () => {
       ['an integer beside an unrelated invalid field', { stationId: 5, days: 'never' }],
     ])('throws the coerce: false rejection for %s', async (_label, args) => {
       await expectOriginalRejection(numericIds, args);
+      expect(adds('mcp.input.coerced')).toEqual([]);
+    });
+
+    it('throws the coerce: false rejection for a number outside a literal set that also lists a number', async () => {
+      // `"7"` is in the set, but so is a number: the field takes numbers, and
+      // 7 is a wrong one rather than a string sent as an integer.
+      await expectOriginalRejection(mixedLiteral, { days: 7 });
       expect(adds('mcp.input.coerced')).toEqual([]);
     });
 

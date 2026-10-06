@@ -1068,6 +1068,26 @@ describe('createResourceHandler', () => {
 
         expect(rejection.data).toEqual({ uri: 'fill://x', field: 'id', requestId: 'test-req-id' });
       });
+
+      it('adds the request id to a { uri } error under any code other than -32602', async () => {
+        // A handler's own notFound(…, { uri }) is not the spec's not-found shape.
+        const rejection = await readFailing(
+          () => new McpError(JsonRpcErrorCode.NotFound, 'Gone.', { uri: 'fill://x' }),
+          null,
+        );
+
+        expect(rejection.code).toBe(JsonRpcErrorCode.NotFound);
+        expect(rejection.data).toEqual({ uri: 'fill://x', requestId: 'test-req-id' });
+      });
+
+      it('leaves the McpError the handler threw as the throw site built it', async () => {
+        const thrown = new McpError(JsonRpcErrorCode.NotFound, 'Gone.', { reason: 'gone' });
+
+        const rejection = await readFailing(() => thrown, null);
+
+        expect(rejection.data).toEqual({ reason: 'gone', requestId: 'test-req-id' });
+        expect(thrown.data).toEqual({ reason: 'gone' });
+      });
     });
   });
 
