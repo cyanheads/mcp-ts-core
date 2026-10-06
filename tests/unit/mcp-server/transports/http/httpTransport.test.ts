@@ -976,6 +976,10 @@ describe('HTTP Transport', () => {
         expect(response.status).toBe(400);
         expect(body.error.message).toContain('Bad Request');
         expect((sessionStore as SessionStore).getSessionCount()).toBe(0);
+        // The refused handshake minted no session, so the instance built for it
+        // has no owner: it is closed here rather than left connected.
+        expect(servers).toHaveLength(1);
+        expect(servers[0]?.isConnected()).toBe(false);
       });
     });
 
@@ -1072,6 +1076,28 @@ describe('HTTP Transport', () => {
         });
       },
     );
+
+    // A single-request POST is tracked only while its response stream is open
+    // (#401). The id is released when that stream ends, so a long-lived session
+    // does not hold one entry for every request it has ever served.
+    test('releases a single-request id once its response stream ends', async () => {
+      await withStatefulMode(async () => {
+        const { app, sessionStore } = await buildApp();
+        const sessionId = await initialize(app);
+
+        for (const id of [2, 3]) {
+          const response = await app.request(ENDPOINT, {
+            method: 'POST',
+            headers: legacyHeaders({ 'mcp-session-id': sessionId }),
+            body: JSON.stringify({ jsonrpc: '2.0', method: 'tools/list', id }),
+          });
+          expect(response.status).toBe(200);
+          await response.text();
+        }
+
+        expect(sessionStore?.getConnection(sessionId)?.singleRequestIds.size).toBe(0);
+      });
+    });
 
     describe('DELETE', () => {
       test('terminates the session and makes it unreachable', async () => {
