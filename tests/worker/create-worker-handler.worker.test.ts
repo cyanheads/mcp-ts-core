@@ -13,6 +13,7 @@ import {
 } from 'cloudflare:test';
 import { env } from 'cloudflare:workers';
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { resetConfig } from '@/config/index.js';
 import { logger } from '@/utils/internal/logger.js';
 import worker, {
   createWorkerLifecycleTestHandler,
@@ -119,6 +120,30 @@ describe('createWorkerHandler in the Workers runtime', () => {
       } finally {
         if (previousLevel === undefined) delete process.env.MCP_LOG_LEVEL;
         else process.env.MCP_LOG_LEVEL = previousLevel;
+      }
+    });
+
+    it('carries the ENVIRONMENT binding into config as NODE_ENV', async () => {
+      const previousNodeEnv = process.env.NODE_ENV;
+      const lifecycleWorker = createWorkerLifecycleTestHandler({ setupCalls: 0 });
+      const ctx = createExecutionContext();
+
+      try {
+        const response = await lifecycleWorker.fetch(
+          new Request('http://example.com/mcp'),
+          lifecycleEnv({ ENVIRONMENT: 'production' }),
+          ctx,
+        );
+        await waitOnExecutionContext(ctx);
+
+        expect(response.status).toBe(200);
+        await expect(response.json()).resolves.toMatchObject({
+          server: { environment: 'production' },
+        });
+      } finally {
+        if (previousNodeEnv === undefined) delete process.env.NODE_ENV;
+        else process.env.NODE_ENV = previousNodeEnv;
+        resetConfig();
       }
     });
 
