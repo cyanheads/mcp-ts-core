@@ -4,8 +4,9 @@
  */
 
 import type { HandlerContext, ReasonOf } from '@cyanheads/mcp-ts-core';
+import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { describe, expect, it } from 'vitest';
-import { createMockContext } from '@cyanheads/mcp-ts-core/testing';
+import { createMockContext, getEnrichment } from '@cyanheads/mcp-ts-core/testing';
 import { mcpTest } from '@cyanheads/mcp-ts-core/testing/vitest';
 import { echoTool } from '@/mcp-server/tools/definitions/echo.tool.js';
 
@@ -60,6 +61,23 @@ describe('echoTool', () => {
     const input = echoTool.input.parse({ message: 'hello world' });
     const result = await echoTool.handler(input, ctx);
     expect(result).toEqual(expect.schemaMatching(echoTool.output));
+  });
+
+  it('enriches the result with the character count', async () => {
+    const ctx = echoContext();
+    await echoTool.handler(echoTool.input.parse({ message: 'hello world' }), ctx);
+    expect(getEnrichment(ctx)).toEqual({ characterCount: 11 });
+  });
+
+  it('fails a whitespace-only message with the declared empty_message reason', async () => {
+    const ctx = echoContext();
+    const input = echoTool.input.parse({ message: '   ' });
+    // The async wrapper turns a synchronous throw into a rejection, so this
+    // form holds whether the handler is sync or async.
+    await expect(async () => echoTool.handler(input, ctx)).rejects.toMatchObject({
+      code: JsonRpcErrorCode.InvalidParams,
+      data: { reason: 'empty_message' },
+    });
   });
 
   it('formats output as text content', () => {
