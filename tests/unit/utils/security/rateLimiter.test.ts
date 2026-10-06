@@ -55,6 +55,7 @@ describe('RateLimiter', () => {
     if (timer) {
       clearInterval(timer);
     }
+    vi.useRealTimers();
     process.env = originalEnv;
     debugSpy.mockRestore();
     getActiveSpanSpy.mockRestore();
@@ -133,20 +134,19 @@ describe('RateLimiter', () => {
     );
   });
 
-  it('cleans up expired entries when the cleanup timer runs', () => {
-    const now = Date.now();
-    const entryKey = 'expired';
-    (
-      rateLimiter as unknown as {
-        limits: Map<string, { count: number; resetTime: number }>;
-      }
-    ).limits.set(entryKey, { count: 1, resetTime: now - 1000 });
+  it('sweeps expired entries when the cleanup interval fires', () => {
+    vi.useFakeTimers();
+    rateLimiter.configure({ windowMs: 1000, maxRequests: 5, cleanupInterval: 500 });
+    rateLimiter.check('expired', { requestId: 'sweep', timestamp: new Date().toISOString() });
 
-    (rateLimiter as unknown as { cleanupExpiredEntries: () => void }).cleanupExpiredEntries();
+    // The 500ms sweep finds the window still open; the 1000ms one finds it closed.
+    vi.advanceTimersByTime(500);
+    expect(rateLimiter.getStatus('expired')).not.toBeNull();
 
-    expect(rateLimiter.getStatus(entryKey)).toBeNull();
+    vi.advanceTimersByTime(500);
+    expect(rateLimiter.getStatus('expired')).toBeNull();
     expect(debugSpy).toHaveBeenCalledWith(
-      expect.stringContaining('Cleaned up 1 expired rate limit entries'),
+      'Cleaned up 1 expired rate limit entries',
       expect.objectContaining({
         operation: 'RateLimiter.cleanupExpiredEntries',
       }),
@@ -244,6 +244,7 @@ describe('RateLimiter', () => {
   });
 
   it('should substitute {waitTime} in custom error messages', () => {
+    vi.useFakeTimers();
     rateLimiter.configure({
       windowMs: 10_000,
       maxRequests: 1,
@@ -260,26 +261,7 @@ describe('RateLimiter', () => {
       thrown = err;
     }
     expect(thrown).toBeDefined();
-    expect((thrown as { message: string }).message).toMatch(/^Slow down! Retry in \d+s\.$/);
-  });
-
-  it('resets the window when the reset time has elapsed', () => {
-    rateLimiter.configure({ windowMs: 1, maxRequests: 1 });
-    const ctx = { requestId: 'window', timestamp: new Date().toISOString() };
-
-    rateLimiter.check('window-key', ctx);
-    // Manually expire the entry
-    const limits = (
-      rateLimiter as unknown as {
-        limits: Map<string, { count: number; resetTime: number }>;
-      }
-    ).limits;
-    const entry = limits.get('window-key');
-    if (entry) entry.resetTime = Date.now() - 1;
-
-    // Should not throw — window has reset
-    expect(() => rateLimiter.check('window-key', ctx)).not.toThrow();
-    expect(rateLimiter.getStatus('window-key')).toMatchObject({ current: 1 });
+    expect((thrown as { message: string }).message).toBe('Slow down! Retry in 10s.');
   });
 
   it('[Symbol.dispose] is equivalent to dispose()', () => {

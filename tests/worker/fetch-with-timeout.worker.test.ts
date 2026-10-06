@@ -11,13 +11,17 @@
  * @module tests/worker/fetch-with-timeout.worker.test
  */
 
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { fetchWithTimeout } from '../../src/utils/network/fetchWithTimeout.js';
 
 const context = { requestId: 'worker-fetch', timestamp: '2026-01-01T00:00:00.000Z' };
 
 describe('fetchWithTimeout under workerd', () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
   it('preserves status, headers, url, and body through the deadline passthrough', async () => {
     const upstream = new Response('worker body', {
       status: 200,
@@ -36,8 +40,6 @@ describe('fetchWithTimeout under workerd', () => {
     expect(response.url).toBe('https://example.com/data');
     expect(response.redirected).toBe(false);
     expect(await response.text()).toBe('worker body');
-
-    vi.restoreAllMocks();
   });
 
   it('streams a chunked body through the passthrough in order', async () => {
@@ -57,7 +59,5 @@ describe('fetchWithTimeout under workerd', () => {
     const response = await fetchWithTimeout('https://example.com/data', 1000, context);
 
     expect(await response.json()).toEqual({ a: 1, b: 2 });
-
-    vi.restoreAllMocks();
   });
 });

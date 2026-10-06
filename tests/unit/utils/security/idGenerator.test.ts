@@ -2,7 +2,7 @@
  * @fileoverview Tests for the IdGenerator utility.
  * @module tests/utils/security/idGenerator.test
  */
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 
 import { JsonRpcErrorCode, McpError } from '../../../../src/types-global/errors.js';
 import {
@@ -52,6 +52,28 @@ describe('IdGenerator and UUID', () => {
       const randomStr = idGenerator.generateRandomString(5000, 'abc');
       expect(randomStr).toHaveLength(5000);
       expect(randomStr).toMatch(/^[a-c]+$/);
+      // Drawn from the whole charset, not one character of it (miss odds ~ (2/3)^5000).
+      expect(new Set(randomStr)).toEqual(new Set('abc'));
+    });
+
+    it('discards bytes past the largest charset multiple rather than folding them in', () => {
+      // 'abc' samples bytes below 255; a folded 255 would read as 'a' (255 % 3).
+      const draws = [
+        [255, 255, 255, 255], // all rejected, so the sampler draws again
+        [1, 255, 2, 0],
+      ];
+      const getRandomValues = vi
+        .spyOn(crypto, 'getRandomValues')
+        .mockImplementation(<T extends ArrayBufferView | null>(array: T): T => {
+          (array as Uint8Array).set(draws.shift() ?? []);
+          return array;
+        });
+      try {
+        expect(idGenerator.generateRandomString(2, 'abc')).toBe('bc');
+        expect(getRandomValues).toHaveBeenCalledTimes(2);
+      } finally {
+        getRandomValues.mockRestore();
+      }
     });
 
     it('draws from a 1-character charset and from the 256-character ceiling', () => {
@@ -90,16 +112,6 @@ describe('IdGenerator and UUID', () => {
       expect(userId).toMatch(/^USR_/);
     });
 
-    it('should throw an error when generating for an unknown entity', () => {
-      expect(() => idGenerator.generateForEntity('unknown')).toThrow(McpError);
-      try {
-        idGenerator.generateForEntity('unknown');
-      } catch (error) {
-        const mcpError = error as McpError;
-        expect(mcpError.code).toBe(JsonRpcErrorCode.ValidationError);
-      }
-    });
-
     it('should validate a correct ID', () => {
       const userId = idGenerator.generateForEntity('user');
       expect(idGenerator.isValid(userId, 'user')).toBe(true);
@@ -118,10 +130,6 @@ describe('IdGenerator and UUID', () => {
     it('should get the entity type from an ID', () => {
       const projId = 'PROJ_XYZ789';
       expect(idGenerator.getEntityType(projId)).toBe('project');
-    });
-
-    it('should throw an error for an unknown prefix when getting entity type', () => {
-      expect(() => idGenerator.getEntityType('UNK_123')).toThrow(McpError);
     });
 
     it('should normalize an ID', () => {

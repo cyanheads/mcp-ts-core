@@ -77,10 +77,14 @@ describe('withRetry', () => {
     );
   });
 
-  it('applies jitter when computing retry delays', async () => {
+  // jitter 0.25 on a 100ms backoff spans [75, 125); Math.random() picks the point.
+  it.each([
+    ['the low end', 0, 75],
+    ['near the high end', 0.96, 123],
+  ])('waits a jittered delay at %s of its range', async (_label, random, expectedMs) => {
     vi.useFakeTimers();
 
-    const randomSpy = vi.spyOn(Math, 'random').mockReturnValue(0.5);
+    vi.spyOn(Math, 'random').mockReturnValue(random);
     const fn = vi
       .fn<() => Promise<string>>()
       .mockRejectedValueOnce(new McpError(JsonRpcErrorCode.RateLimited, 'slow down'))
@@ -94,12 +98,44 @@ describe('withRetry', () => {
       context,
     });
 
-    await vi.advanceTimersByTimeAsync(100);
+    await vi.advanceTimersByTimeAsync(expectedMs - 1);
+    expect(fn).toHaveBeenCalledTimes(1);
 
+    await vi.advanceTimersByTimeAsync(1);
+    expect(fn).toHaveBeenCalledTimes(2);
     await expect(promise).resolves.toBe('ok');
-    expect(randomSpy).toHaveBeenCalledOnce();
     expect(debugSpy).toHaveBeenCalledWith(
-      'Retry 1/1 for jitteredCall: slow down — waiting 100ms',
+      `Retry 1/1 for jitteredCall: slow down — waiting ${expectedMs}ms`,
+      context,
+    );
+  });
+
+  it('caps the exponential backoff at maxDelayMs', async () => {
+    vi.useFakeTimers();
+
+    const fn = vi
+      .fn<() => Promise<string>>()
+      .mockRejectedValue(new McpError(JsonRpcErrorCode.ServiceUnavailable, 'down'));
+
+    const promise = withRetry(fn, {
+      baseDelayMs: 100,
+      jitter: 0,
+      maxDelayMs: 250,
+      maxRetries: 3,
+      operation: 'capped',
+      context,
+    }).catch((e: unknown) => e);
+
+    // 100 + 200, then the third wait is 250, not the uncapped 400.
+    await vi.advanceTimersByTimeAsync(300 + 249);
+    expect(fn).toHaveBeenCalledTimes(3);
+
+    await vi.advanceTimersByTimeAsync(1);
+    expect(fn).toHaveBeenCalledTimes(4);
+    await promise;
+    expect(debugSpy).toHaveBeenNthCalledWith(
+      3,
+      'Retry 3/3 for capped: down — waiting 250ms',
       context,
     );
   });
@@ -444,6 +480,67 @@ describe('withRetry', () => {
       'Retry 1/1 for rateLimited: slow down — waiting 100ms',
       context,
     );
+  });
+
+  /**
+   * The other `data.retryAfter` forms. A number means delta-seconds, like the
+   * header; an HTTP-date already past means "retry now"; a value that names no
+   * wait leaves the 10ms exponential backoff in charge.
+   */
+  it.each([
+    ['a numeric delta-seconds value', 5, 5000, ' (Retry-After)'],
+    ['an HTTP-date already past', 'Sun, 31 May 2026 23:59:00 GMT', 0, ' (Retry-After)'],
+    ['a negative number', -1, 10, ''],
+    ['a non-finite number', Number.POSITIVE_INFINITY, 10, ''],
+  ])('reads a Retry-After given as %s', async (_label, retryAfter, expectedMs, suffix) => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-06-01T00:00:00Z'));
+
+    const fn = vi
+      .fn<() => Promise<string>>()
+      .mockRejectedValueOnce(new McpError(JsonRpcErrorCode.RateLimited, 'slow', { retryAfter }))
+      .mockResolvedValueOnce('ok');
+
+    const promise = withRetry(fn, {
+      baseDelayMs: 10,
+      jitter: 0,
+      maxRetries: 1,
+      operation: 'rateLimited',
+      context,
+    });
+
+    if (expectedMs > 0) {
+      await vi.advanceTimersByTimeAsync(expectedMs - 1);
+      expect(fn).toHaveBeenCalledTimes(1);
+    }
+
+    await vi.advanceTimersByTimeAsync(expectedMs > 0 ? 1 : 0);
+    expect(fn).toHaveBeenCalledTimes(2);
+    await expect(promise).resolves.toBe('ok');
+    expect(debugSpy).toHaveBeenCalledWith(
+      `Retry 1/1 for rateLimited: slow — waiting ${expectedMs}ms${suffix}`,
+      context,
+    );
+  });
+
+  it('honors a Retry-After of exactly maxDelayMs rather than failing fast', async () => {
+    vi.useFakeTimers();
+
+    const fn = vi
+      .fn<() => Promise<string>>()
+      .mockRejectedValueOnce(
+        new McpError(JsonRpcErrorCode.RateLimited, 'slow down', { retryAfter: '30' }),
+      )
+      .mockResolvedValueOnce('ok');
+
+    const promise = withRetry(fn, { maxDelayMs: 30_000, maxRetries: 1, operation: 'atCap' });
+
+    await vi.advanceTimersByTimeAsync(29_999);
+    expect(fn).toHaveBeenCalledTimes(1);
+
+    await vi.advanceTimersByTimeAsync(1);
+    expect(fn).toHaveBeenCalledTimes(2);
+    await expect(promise).resolves.toBe('ok');
   });
 
   // -----------------------------------------------------------------------

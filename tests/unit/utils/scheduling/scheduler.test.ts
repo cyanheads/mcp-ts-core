@@ -99,17 +99,22 @@ describe('schedulerService', () => {
     expect(job.isRunning).toBe(false);
   });
 
-  it('prevents overlapping executions by logging a warning', async () => {
-    const job = await schedulerService.schedule(
-      'job-overlap',
-      '* * * * *',
-      () => undefined,
-      'Overlap',
+  it('skips a tick that fires while the previous run is still in flight', async () => {
+    let finishRun = () => {};
+    const handler = vi.fn(
+      () =>
+        new Promise<void>((resolve) => {
+          finishRun = resolve;
+        }),
     );
+    const job = await schedulerService.schedule('job-overlap', '* * * * *', handler, 'Overlap');
+    const { trigger } = job.task as unknown as { trigger: () => Promise<void> };
 
-    job.isRunning = true;
-    await (job.task as unknown as { trigger: () => Promise<void> | void }).trigger();
+    const firstRun = trigger();
+    expect(job.isRunning).toBe(true);
 
+    await trigger();
+    expect(handler).toHaveBeenCalledTimes(1);
     expect(warningSpy).toHaveBeenCalledWith(
       "Job 'job-overlap' is already running. Skipping this execution.",
       expect.objectContaining({
@@ -117,6 +122,16 @@ describe('schedulerService', () => {
         extra: expect.objectContaining({ jobId: 'job-overlap' }),
       }),
     );
+
+    finishRun();
+    await firstRun;
+    expect(job.isRunning).toBe(false);
+
+    // The guard lifts with the run it was holding.
+    const nextRun = trigger();
+    expect(handler).toHaveBeenCalledTimes(2);
+    finishRun();
+    await nextRun;
   });
 
   it('captures errors thrown by the scheduled handler', async () => {
@@ -183,6 +198,17 @@ describe('schedulerService', () => {
     expect(
       (schedulerService as unknown as { jobs: Map<string, unknown> }).jobs.has('job-control'),
     ).toBe(false);
+  });
+
+  it('stops the underlying task when a job is removed', async () => {
+    const job = await schedulerService.schedule('job-gone', '* * * * *', () => undefined, 'Gone');
+    const { stop } = job.task as unknown as { stop: MockInstance };
+
+    schedulerService.remove('job-gone');
+
+    // Dropped from the map while still ticking, it would run with nothing to stop it.
+    expect(stop).toHaveBeenCalledTimes(1);
+    expect(schedulerService.listJobs()).toEqual([]);
   });
 
   it('rejects duplicate job identifiers', async () => {

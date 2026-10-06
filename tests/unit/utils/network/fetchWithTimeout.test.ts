@@ -728,6 +728,85 @@ describe('fetchWithTimeout', () => {
     });
   });
 
+  /**
+   * The 2xx body streams through a passthrough that carries the deadline. Each
+   * upstream body here holds a first chunk, so the passthrough has already
+   * buffered it and sits idle — no read is pending that could disarm the
+   * deadline on the caller's behalf.
+   */
+  describe('2xx body passthrough', () => {
+    const firstChunk = () => new TextEncoder().encode('partial');
+
+    afterEach(() => {
+      vi.useRealTimers();
+    });
+
+    it('disarms the deadline and cancels the upstream body when the caller cancels', async () => {
+      vi.useFakeTimers();
+      let upstreamCancelReason: unknown = 'never cancelled';
+      vi.spyOn(globalThis, 'fetch').mockResolvedValue(
+        new Response(
+          new ReadableStream<Uint8Array>({
+            start(controller) {
+              controller.enqueue(firstChunk());
+            },
+            cancel(reason) {
+              upstreamCancelReason = reason;
+            },
+          }),
+          { status: 200 },
+        ),
+      );
+
+      const response = await fetchWithTimeout('https://example.com', 30_000, context);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(vi.getTimerCount()).toBe(1);
+
+      await response.body?.cancel('caller is done');
+
+      // The upstream socket is released now, not when the deadline would have fired.
+      expect(upstreamCancelReason).toBe('caller is done');
+      expect(vi.getTimerCount()).toBe(0);
+    });
+
+    it('surfaces a mid-body upstream failure as itself and disarms the deadline', async () => {
+      vi.useFakeTimers();
+      const reset = new TypeError('terminated');
+      vi.spyOn(globalThis, 'fetch').mockResolvedValue(
+        new Response(
+          new ReadableStream<Uint8Array>({
+            start(controller) {
+              controller.enqueue(firstChunk());
+            },
+            pull(controller) {
+              controller.error(reset);
+            },
+          }),
+          { status: 200 },
+        ),
+      );
+
+      const response = await fetchWithTimeout('https://example.com', 30_000, context);
+
+      // Neither signal fired, so this is no timeout or cancellation to relabel.
+      await expect(response.text()).rejects.toBe(reset);
+      expect(vi.getTimerCount()).toBe(0);
+    });
+
+    it('carries a followed redirect across the passthrough', async () => {
+      const upstream = new Response('moved here', { status: 200 });
+      Object.defineProperty(upstream, 'redirected', { value: true });
+      Object.defineProperty(upstream, 'url', { value: 'https://example.com/final' });
+      vi.spyOn(globalThis, 'fetch').mockResolvedValue(upstream);
+
+      const response = await fetchWithTimeout('https://example.com/start', 1000, context);
+
+      expect(response.redirected).toBe(true);
+      expect(response.url).toBe('https://example.com/final');
+      expect(await response.text()).toBe('moved here');
+    });
+  });
+
   describe('URL redaction (#190 — query-string secrets must not leak)', () => {
     // The Guardian (?api-key=…) and many api.data.gov services (?api_key=…)
     // authenticate via the query string. The secret must never reach a

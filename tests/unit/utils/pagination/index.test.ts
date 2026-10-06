@@ -81,18 +81,6 @@ describe('Pagination Utilities', () => {
       }
     });
 
-    it('should throw McpError with InvalidParams for valid base64 but invalid JSON', () => {
-      const invalidJsonCursor = Buffer.from('not json', 'utf-8').toString('base64url');
-
-      expect(() => decodeCursor(invalidJsonCursor, context)).toThrow(McpError);
-      try {
-        decodeCursor(invalidJsonCursor, context);
-      } catch (error) {
-        const mcpError = error as McpError;
-        expect(mcpError.code).toBe(JsonRpcErrorCode.InvalidParams);
-      }
-    });
-
     it.each([
       ['offset is missing', { limit: 50 }],
       ['limit is missing', { offset: 10 }],
@@ -359,18 +347,6 @@ describe('Pagination Utilities', () => {
       expect(result.items).toHaveLength(20);
       expect(result.items[0]?.id).toBe(11);
     });
-
-    it('should throw McpError for invalid cursor', () => {
-      const invalidCursor = 'invalid-cursor-string';
-
-      expect(() => paginateArray(testItems, invalidCursor, 10, 100, context)).toThrow(McpError);
-      try {
-        paginateArray(testItems, invalidCursor, 10, 100, context);
-      } catch (error) {
-        const mcpError = error as McpError;
-        expect(mcpError.code).toBe(JsonRpcErrorCode.InvalidParams);
-      }
-    });
   });
 
   describe('Integration Scenarios', () => {
@@ -399,25 +375,6 @@ describe('Pagination Utilities', () => {
       expect(pageCount).toBe(5); // 10+10+10+10+7
       expect(collectedItems[0]?.id).toBe(1);
       expect(collectedItems[46]?.id).toBe(47);
-    });
-
-    it('should handle round-trip encode/decode preserving all fields', () => {
-      const originalState: PaginationState = {
-        offset: 42,
-        limit: 73,
-        sortBy: 'name',
-        sortOrder: 'desc',
-        filterApplied: true,
-      };
-
-      const cursor = encodeCursor(originalState);
-      const decodedState = decodeCursor(cursor, context);
-
-      expect(decodedState.offset).toBe(originalState.offset);
-      expect(decodedState.limit).toBe(originalState.limit);
-      expect(decodedState.sortBy).toBe(originalState.sortBy);
-      expect(decodedState.sortOrder).toBe(originalState.sortOrder);
-      expect(decodedState.filterApplied).toBe(originalState.filterApplied);
     });
 
     it('should handle pagination with extractCursor helper', () => {

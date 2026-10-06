@@ -19,6 +19,12 @@ import { fetchWithTimeout } from '../../../../src/utils/network/fetchWithTimeout
  */
 const DEADLINE_MS = 250;
 const PAST_DEADLINE_MS = 1000;
+/**
+ * The deadline for exchanges that must complete. It still has to cover the
+ * header phase, which a saturated host can stretch past 250ms on a cold
+ * request. The odd value lets {@link trackDeadlineTimer} pick its timer out.
+ */
+const UNREACHED_DEADLINE_MS = 9_876;
 
 let server: Server;
 let origin: string;
@@ -102,7 +108,7 @@ afterEach(() => {
 
 describe('fetchWithTimeout body deadline (issue #341)', () => {
   it('returns a response whose status, headers, and body survive the passthrough', async () => {
-    const response = await fetchWithTimeout(`${origin}/fast`, DEADLINE_MS, context);
+    const response = await fetchWithTimeout(`${origin}/fast`, UNREACHED_DEADLINE_MS, context);
 
     expect(response.status).toBe(200);
     expect(response.ok).toBe(true);
@@ -121,7 +127,7 @@ describe('fetchWithTimeout body deadline (issue #341)', () => {
   it('passes a null-body status straight through', async () => {
     // Runtimes disagree on `response.body` for a 204 — Node yields null, Bun an
     // empty stream — so the assertion is on what the caller can observe.
-    const response = await fetchWithTimeout(`${origin}/no-content`, DEADLINE_MS, context);
+    const response = await fetchWithTimeout(`${origin}/no-content`, UNREACHED_DEADLINE_MS, context);
 
     expect(response.status).toBe(204);
     expect(response.headers.get('x-marker')).toBe('empty');
@@ -129,14 +135,14 @@ describe('fetchWithTimeout body deadline (issue #341)', () => {
   });
 
   it('resolves a body that completes within the deadline', async () => {
-    const response = await fetchWithTimeout(`${origin}/slow`, DEADLINE_MS, context);
+    const response = await fetchWithTimeout(`${origin}/slow`, UNREACHED_DEADLINE_MS, context);
 
     expect(await response.text()).toBe('first second');
   });
 
   it('disarms the deadline once the body settles', async () => {
-    const deadline = trackDeadlineTimer(DEADLINE_MS);
-    const response = await fetchWithTimeout(`${origin}/slow`, DEADLINE_MS, context);
+    const deadline = trackDeadlineTimer(UNREACHED_DEADLINE_MS);
+    const response = await fetchWithTimeout(`${origin}/slow`, UNREACHED_DEADLINE_MS, context);
     expect(deadline.cleared()).toHaveLength(0);
 
     await response.text();
@@ -147,8 +153,8 @@ describe('fetchWithTimeout body deadline (issue #341)', () => {
   });
 
   it('unrefs the deadline it hands to the body', async () => {
-    const deadline = trackDeadlineTimer(DEADLINE_MS);
-    const response = await fetchWithTimeout(`${origin}/fast`, DEADLINE_MS, context);
+    const deadline = trackDeadlineTimer(UNREACHED_DEADLINE_MS);
+    const response = await fetchWithTimeout(`${origin}/fast`, UNREACHED_DEADLINE_MS, context);
 
     // A ref'd deadline would keep the runtime alive for the rest of the window
     // whenever a caller reads the status and never touches the body.

@@ -1,3 +1,4 @@
+import { basename } from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
 import { z } from 'zod';
 
@@ -660,6 +661,17 @@ describe('Sanitization Utility', () => {
     it.each([
       ['escaping rootDir', '../../etc/passwd', { rootDir: '/app/data' }],
       ['escaping the working directory', '../../../../outside', {}],
+      // A sibling whose name extends the root's: a bare prefix check reads it as inside.
+      [
+        'into a sibling of rootDir that shares its prefix',
+        '../data-evil/x',
+        { rootDir: '/app/data' },
+      ],
+      [
+        'into a sibling of the working directory that shares its prefix',
+        `../${basename(process.cwd())}-evil/x`,
+        {},
+      ],
     ])('sanitizePath rejects a path %s as path_traversal', async (_label, input, options) => {
       const error = await failureOf(() => sanitization.sanitizePath(input, options));
 

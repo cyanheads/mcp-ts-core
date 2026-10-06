@@ -39,6 +39,16 @@ describe('RateLimiter resource bounds', () => {
     });
   });
 
+  it('keeps limiting outside development even when skipInDevelopment is set', () => {
+    const production = { environment: 'production' } as unknown as typeof config;
+    using limiter = new RateLimiter(production, logger);
+    limiter.configure({ maxRequests: 1, skipInDevelopment: true, cleanupInterval: 0 });
+    limiter.check('caller');
+    expect(() => limiter.check('caller')).toThrow(
+      expect.objectContaining({ code: JsonRpcErrorCode.RateLimited }),
+    );
+  });
+
   it.each(['hot', ''])('refreshes recency and preserves quotas for a surviving key: %j', (hot) => {
     using limiter = new RateLimiter(config, logger);
     limiter.configure({ maxTrackedKeys: 2, maxRequests: 2, cleanupInterval: 0 });

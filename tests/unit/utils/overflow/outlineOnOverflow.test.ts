@@ -39,6 +39,14 @@ describe('outlineOnOverflow', () => {
     expect(result).toEqual({ only: 'z'.repeat(500), kind: 'full' });
   });
 
+  it('inlines a document exactly at the budget and outlines one byte over', () => {
+    const doc = { a: 'x'.repeat(10), b: 'y' };
+    const size = JSON.stringify(doc).length;
+
+    expect(outlineOnOverflow(doc, { budget: size }).kind).toBe('full');
+    expect(outlineOnOverflow(doc, { budget: size - 1 }).kind).toBe('outline');
+  });
+
   it('honors the default budget constant when no budget is given', () => {
     const underDefault = outlineOnOverflow({ a: 'x'.repeat(100), b: 'y' });
     expect(underDefault.kind).toBe('full');
