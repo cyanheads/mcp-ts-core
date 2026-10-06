@@ -598,7 +598,7 @@ Skills live in `framework-skills/<name>/SKILL.md`; the full list is discoverable
 | `bun run test:coverage` | Root projects with coverage thresholds enforced |
 | `bun run test:integration` | Real server subprocesses over stdio and HTTP |
 | `bun run test:worker` | The framework under real `workerd`, then a standalone Worker bundle through the Wrangler toolchain — real Node on both legs. The `workerd` leg enforces its own coverage thresholds over the Worker entry and Cloudflare storage providers, reported to `reports/coverage-worker/` |
-| `bun run test:package` | Rebuilds, packs the tarball, and consumes it as an external project would (exports, declarations, both runtimes) |
+| `bun run test:package` | Rebuilds, packs the tarball, and consumes it as an external project would (exports, declarations, both runtimes). Then scaffolds with the installed `init` and gates the scaffold on its own scripts: the first-run `lint:mcp` / `lint:packaging` to-do list, `devcheck --no-fix --no-audit --no-deps` against an exact per-check status map, build, and `bun run test` |
 | `bun run test:node` | Root projects + integration under real Node via `scripts/with-node.ts`, which bypasses Bun's `node` PATH shim |
 | `bun run test:order` | Root projects on real Node in shuffled file order under a pinned seed — catches inter-file state leakage |
 | `bun run test:leaks` | Real-Node root async-resource retention gate; [scope and evidence](tests/leaks/README.md) |
