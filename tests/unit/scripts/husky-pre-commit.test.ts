@@ -79,7 +79,12 @@ function biomeResult(out: string): string | undefined {
   return out.split('\n').find((l) => /Biome/.test(l) && /(PASSED|FAILED|SKIPPED)/.test(l));
 }
 
-describe('.husky/pre-commit (#543)', () => {
+/**
+ * Each case spawns devcheck, and the two commit cases run its full pass (Biome,
+ * tsc, and every other step the fixture gives inputs to) inside the hook — about
+ * 4 s alone and past 10 s on a loaded machine, so the default 5 s is too tight.
+ */
+describe('.husky/pre-commit (#543)', { timeout: 30_000 }, () => {
   let dir: string;
 
   beforeEach(() => {
