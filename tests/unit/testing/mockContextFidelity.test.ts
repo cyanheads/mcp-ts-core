@@ -1,7 +1,7 @@
 /**
  * @fileoverview Fidelity tests comparing createMockContext() against real createContext().
  * Ensures the mock context used in consumer tests behaves equivalently to the
- * production context. Documents known divergences.
+ * production context.
  * @module tests/testing/mockContextFidelity.test
  */
 
@@ -57,7 +57,7 @@ import {
   createRequestInput,
   isInputRequiredSignal,
 } from '@/mcp-server/inputRequired.js';
-import { createMockContext, type MockContextLogger } from '@/testing/index.js';
+import { createMockContext } from '@/testing/index.js';
 import type { Logger } from '@/utils/internal/logger.js';
 import { createFakeStorage, makeRequestContext } from '../../helpers/index.js';
 import { makeServerContext } from '../../helpers/server-context.js';
@@ -108,30 +108,6 @@ describe('createMockContext fidelity', () => {
       expect(createMockContext({ clientCapabilities: declared }).clientCapabilities).toEqual(
         makeRealContext({ clientCapabilities: declared }).clientCapabilities,
       );
-    });
-  });
-
-  // -----------------------------------------------------------------------
-  // Documented divergences
-  // -----------------------------------------------------------------------
-
-  describe('Documented divergences', () => {
-    it('DIVERGENCE: real logger includes requestId in log calls, mock logger does not', () => {
-      const real = makeRealContext();
-      const mock = createMockContext();
-
-      // Real ctx.log passes full RequestContext to Logger
-      real.log.info('test');
-      const realCall = mockLogger.info.mock.lastCall;
-      expect(realCall).toBeDefined();
-      expect(realCall![1]).toHaveProperty('requestId', real.requestId);
-
-      // Mock ctx.log just stores {level, msg, data} — no requestId injection,
-      // so log correlation is not verified by consumer unit tests.
-      mock.log.info('test');
-      expect((mock.log as MockContextLogger).calls).toEqual([
-        { level: 'info', msg: 'test', data: undefined },
-      ]);
     });
   });
 

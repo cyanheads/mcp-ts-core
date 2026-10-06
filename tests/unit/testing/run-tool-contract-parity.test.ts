@@ -89,6 +89,35 @@ const nestedStrict = tool('parity_nested_strict', {
   handler: () => ({ ok: true }),
 }) as AnyToolDefinition;
 
+describe('runToolContract success surfaces', () => {
+  it('publishes the production result for formatted output, enrichment, and media', async () => {
+    const definition = tool('parity_success', {
+      description: 'Lists matches with a total and a thumbnail.',
+      input: z.object({ query: z.string().describe('Search query') }),
+      output: z.object({ items: z.array(z.string().describe('Match')).describe('Matches') }),
+      enrichment: { totalCount: z.number().describe('Total matches') },
+      handler(input, ctx) {
+        ctx.content.image('aW1hZ2U=', 'image/png');
+        ctx.enrich.total(2);
+        return { items: [input.query, `${input.query}-2`] };
+      },
+      format: (output) => [{ type: 'text', text: output.items.join(', ') }],
+    }) as AnyToolDefinition;
+
+    const production = (await createToolHandler(
+      definition,
+      services,
+      notifiers,
+    )({ query: 'probe' }, makeServerContext())) as CallToolResult;
+    const helper = await runToolContract(definition, { query: 'probe' } as never);
+
+    // Anchor the comparison on what the factory published.
+    expect(production.isError).toBeUndefined();
+    expect(production.structuredContent).toEqual({ items: ['probe', 'probe-2'], totalCount: 2 });
+    expect(helper).toEqual(production);
+  });
+});
+
 describe('runToolContract argument rejection', () => {
   const cases: Array<{
     args: Record<string, unknown>;
