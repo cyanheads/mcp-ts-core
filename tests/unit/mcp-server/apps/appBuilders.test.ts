@@ -5,6 +5,7 @@
  * @module tests/unit/mcp-server/apps/appBuilders.test
  */
 
+import { RESOURCE_MIME_TYPE, RESOURCE_URI_META_KEY } from '@modelcontextprotocol/ext-apps/server';
 import { describe, expect, expectTypeOf, it } from 'vitest';
 import { z } from 'zod';
 
@@ -48,7 +49,7 @@ describe('appTool()', () => {
     expect(def._meta?.vendor).toEqual({ featureFlag: true });
     // ui and compat key still present
     expect(def._meta?.ui).toEqual({ resourceUri: 'ui://my-app/app.html' });
-    expect(def._meta?.['ui/resourceUri']).toBe('ui://my-app/app.html');
+    expect(def._meta?.[RESOURCE_URI_META_KEY]).toBe('ui://my-app/app.html');
   });
 
   it('auto-populated resourceUri wins over extraMeta.ui.resourceUri', () => {
@@ -194,7 +195,6 @@ describe('appResource()', () => {
     });
 
     expect(def.mimeType).toBe(APP_RESOURCE_MIME_TYPE);
-    expect(def.mimeType).toBe('text/html;profile=mcp-app');
   });
 
   it('allows overriding mimeType', () => {
@@ -389,6 +389,6 @@ describe('appResource()', () => {
 
 describe('APP_RESOURCE_MIME_TYPE', () => {
   it('matches the ext-apps spec value', () => {
-    expect(APP_RESOURCE_MIME_TYPE).toBe('text/html;profile=mcp-app');
+    expect(APP_RESOURCE_MIME_TYPE).toBe(RESOURCE_MIME_TYPE);
   });
 });
