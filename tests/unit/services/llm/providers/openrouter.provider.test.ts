@@ -10,6 +10,22 @@ import { JsonRpcErrorCode } from '@/types-global/errors.js';
 import { logger } from '@/utils/internal/logger.js';
 import { RateLimiter } from '@/utils/security/rateLimiter.js';
 
+/** Lets a test make the next OpenAI client construction throw; every other one is the real SDK's. */
+const sdk = vi.hoisted(() => ({ failNextConstruction: false }));
+vi.mock('openai', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('openai')>();
+  class OpenAI extends actual.default {
+    constructor(...args: ConstructorParameters<typeof actual.default>) {
+      if (sdk.failNextConstruction) {
+        sdk.failNextConstruction = false;
+        throw new Error('client construction failed');
+      }
+      super(...args);
+    }
+  }
+  return { ...actual, default: OpenAI };
+});
+
 const settings = {
   ...config,
   openrouterApiKey: 'test-api-key',
@@ -61,6 +77,7 @@ afterEach(async () => {
   fetchMock.restore();
   limiter.dispose();
   vi.restoreAllMocks();
+  sdk.failNextConstruction = false;
 });
 
 describe('OpenRouter request boundary', () => {
@@ -134,6 +151,49 @@ describe('OpenRouter request boundary', () => {
     expect(fetchMock.calls).toHaveLength(1);
     await provider.chatCompletion(params, { ...context, tenantId: 'tenant-b' });
     expect(fetchMock.calls).toHaveLength(2);
+  });
+
+  it('keys the rate limit on the authenticated client ahead of the tenant', async () => {
+    fetchMock.route({ match: endpoint, respond: Response.json(completion) });
+    limiter.configure({ maxRequests: 1, windowMs: 60_000 });
+    const asClient = (clientId: string) => ({
+      ...context,
+      auth: { clientId, scopes: [], sub: clientId },
+    });
+
+    await provider.chatCompletion(params, asClient('client-a'));
+    await provider.chatCompletion(params, asClient('client-b'));
+    await expect(provider.chatCompletion(params, asClient('client-a'))).rejects.toMatchObject({
+      code: JsonRpcErrorCode.RateLimited,
+    });
+    expect(fetchMock.calls).toHaveLength(2);
+  });
+
+  it('retries a rate-limited upstream twice before rejecting as RateLimited', async () => {
+    fetchMock.route({
+      match: endpoint,
+      respond: () =>
+        Response.json(
+          { error: { message: 'Rate limit exceeded' } },
+          { status: 429, headers: { 'retry-after-ms': '1' } },
+        ),
+    });
+
+    await expect(provider.chatCompletion(params, context)).rejects.toMatchObject({
+      code: JsonRpcErrorCode.RateLimited,
+    });
+    expect(fetchMock.calls).toHaveLength(3);
+  });
+
+  it('reports a failed client construction as ConfigurationError and retries it on the next call', async () => {
+    fetchMock.route({ match: endpoint, respond: Response.json(completion) });
+    sdk.failNextConstruction = true;
+
+    await expect(provider.chatCompletion(params, context)).rejects.toMatchObject({
+      code: JsonRpcErrorCode.ConfigurationError,
+    });
+    expect(fetchMock.calls).toEqual([]);
+    await expect(provider.chatCompletion(params, context)).resolves.toEqual(completion);
   });
 
   it('classifies an upstream validation failure and remains usable', async () => {
