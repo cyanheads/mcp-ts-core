@@ -257,14 +257,18 @@ describe('createMcpServerInstance', () => {
     expect(mockPromptRegistry.registerAll).toHaveBeenCalledTimes(1);
   });
 
-  it('should rethrow and log when tool registration fails', async () => {
-    const regError = new Error('tool registration failed');
-    mockToolRegistry.registerAll.mockRejectedValue(regError);
+  it.each([
+    ['tool', () => mockToolRegistry],
+    ['resource', () => mockResourceRegistry],
+    ['prompt', () => mockPromptRegistry],
+  ] as const)('should rethrow and log when %s registration fails', async (kind, registry) => {
+    const regError = new Error(`${kind} registration failed`);
+    registry().registerAll.mockRejectedValue(regError);
 
-    await expect(createMcpServerInstance(deps)).rejects.toThrow('tool registration failed');
+    await expect(createMcpServerInstance(deps)).rejects.toBe(regError);
     expect(logger.error).toHaveBeenCalledWith(
       'Failed to register MCP capabilities',
-      expect.objectContaining({ message: 'tool registration failed' }),
+      regError,
       expect.any(Object),
     );
   });
