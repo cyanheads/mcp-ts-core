@@ -146,6 +146,69 @@ describe('schema-aware fuzz execution', () => {
   });
 });
 
+describe('fuzz per-call deadlines', () => {
+  it.each([
+    ['tool', 'valid'],
+    ['tool', 'adversarial'],
+    ['resource', 'valid'],
+    ['resource', 'adversarial'],
+    ['prompt', 'valid'],
+    ['prompt', 'adversarial'],
+  ] as const)('reports a %s handler that never settles in the %s phase', async (kind, phase) => {
+    // Settles a second after the first call, well past the 20 ms deadline, so a
+    // phase that waits instead of timing out leaves every later call settled too.
+    const settle = Promise.withResolvers<{ ok: boolean }>();
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const hang = () => {
+      timer ??= setTimeout(() => settle.resolve({ ok: true }), 1_000);
+      return settle.promise;
+    };
+    const params = z.object({ value: z.any().describe('Value') });
+    const phaseOptions = {
+      ...options,
+      numRuns: phase === 'valid' ? 1 : 0,
+      numAdversarial: phase === 'adversarial' ? 1 : 0,
+    };
+
+    try {
+      const report =
+        kind === 'tool'
+          ? await fuzzTool(
+              tool('fuzz_hang', {
+                description: 'Never settles.',
+                input: params,
+                output,
+                handler: hang,
+              }),
+              phaseOptions,
+            )
+          : kind === 'resource'
+            ? await fuzzResource(
+                resource('fuzz://hang/{value}', {
+                  description: 'Never settles.',
+                  params,
+                  handler: hang,
+                }),
+                phaseOptions,
+              )
+            : await fuzzPrompt(
+                prompt('fuzz_hang', {
+                  description: 'Never settles.',
+                  args: params,
+                  generate: () => hang().then(() => []),
+                }),
+                phaseOptions,
+              );
+
+      expect(report.crashes.length).toBeGreaterThan(0);
+      expect(report.crashes[0]?.error).toMatchObject({ message: 'Fuzz timeout after 20ms' });
+    } finally {
+      clearTimeout(timer);
+      settle.resolve({ ok: true });
+    }
+  });
+});
+
 describe('fuzz deadline cleanup', () => {
   it.each(['success', 'rejection'] as const)(
     'leaves no pending timers after %s in every runner',

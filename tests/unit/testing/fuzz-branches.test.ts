@@ -281,6 +281,90 @@ describe('fuzzTool failure accounting', () => {
     expect(report.leaks[0]?.errorText).toContain('/Users/example/private/parser.ts');
   });
 
+  // Each message trips exactly one branch of the leak heuristic. The input
+  // schema is empty so no generated string can echo into the text.
+  it.each([
+    ['a stack frame', 'Lookup failed\n    at resolveItem (server.js:12:3)', 'at resolveItem ('],
+    ['a node_modules path', 'Lookup failed in node_modules/upstream-client', 'node_modules/'],
+    ['an environment read', 'Lookup failed: process.env.API_TOKEN is unset', 'process.env.'],
+    ['a macOS home path', 'Lookup failed: /Users/example/cache.json', '/Users/example/'],
+  ])('records a leak when an MCP error message exposes %s', async (_label, message, marker) => {
+    const definition = tool('fuzz_leak_heuristic', {
+      description: 'Throws an MCP error naming one kind of internal detail.',
+      input: z.object({}),
+      output: z.object({ ok: z.boolean().describe('Success') }),
+      handler() {
+        throw new McpError(JsonRpcErrorCode.InternalError, message);
+      },
+    });
+
+    const report = await fuzzTool(definition, { numRuns: 1, numAdversarial: 0, seed: 51 });
+
+    expect(report.crashes).toHaveLength(0);
+    expect(report.leaks.length).toBeGreaterThan(0);
+    expect(report.leaks.every((leak) => leak.errorText.includes(marker))).toBe(true);
+  });
+
+  const cyclic: Record<string, unknown> = { path: '/home/example/private/cache.json' };
+  cyclic.self = cyclic;
+
+  it.each([
+    ['a bigint', { count: 10n, path: '/home/example/private/cache.json' }],
+    ['a reference cycle', cyclic],
+  ])('scans McpError data holding %s for leaked internals', async (_label, data) => {
+    const definition = tool('fuzz_unserializable_data_leak', {
+      description: 'Throws an MCP error whose data JSON cannot encode as is.',
+      input: z.object({}),
+      output: z.object({ ok: z.boolean().describe('Success') }),
+      handler() {
+        throw new McpError(JsonRpcErrorCode.InternalError, 'Safe message', data);
+      },
+    });
+
+    const report = await fuzzTool(definition, { numRuns: 1, numAdversarial: 0, seed: 53 });
+
+    expect(report.leaks.length).toBeGreaterThan(0);
+    expect(report.leaks[0]?.errorText).toContain('/home/example/private/cache.json');
+  });
+
+  it('hands the configured context options to every handler call', async () => {
+    const tenants = new Set<string | undefined>();
+    const definition = tool('fuzz_ctx_options', {
+      description: 'Records the tenant each call ran under.',
+      input: z.object({ value: z.string().describe('Value') }),
+      output: z.object({ ok: z.boolean().describe('Success') }),
+      handler(_input, ctx) {
+        tenants.add(ctx.tenantId);
+        return { ok: true };
+      },
+    });
+
+    const report = await fuzzTool(definition, {
+      numRuns: 2,
+      numAdversarial: 0,
+      seed: 52,
+      ctx: { tenantId: 'fuzz-tenant' },
+    });
+
+    expect(report.crashes).toHaveLength(0);
+    expect([...tenants]).toEqual(['fuzz-tenant']);
+  });
+
+  it('validates the output of raw top-level payloads the input schema accepts', async () => {
+    const definition = tool('fuzz_raw_bad_output', {
+      description: 'Accepts arbitrary object keys and returns output that breaks its schema.',
+      input: z.object({}).passthrough(),
+      output: z.object({ ok: z.boolean().describe('Success') }),
+      handler: () => JSON.parse('{"ok":"invalid"}'),
+    });
+
+    // No valid or adversarial runs: only the raw top-level payloads reach the handler.
+    const report = await fuzzTool(definition, { numRuns: 0, numAdversarial: 0, seed: 54 });
+
+    expect(report.crashes).toHaveLength(2);
+    expect(report.crashes.every((crash) => crash.error instanceof z.ZodError)).toBe(true);
+  });
+
   it('detects and removes Object.prototype pollution introduced by a handler', async () => {
     const definition = tool('fuzz_prototype_pollution_accounting', {
       description: 'Pollutes Object.prototype for guard verification.',
@@ -444,6 +528,28 @@ describe('fuzzPrompt failure accounting', () => {
 
     expect(report.crashes).toHaveLength(0);
     expect(generate).toHaveBeenCalledTimes(3);
+  });
+
+  it('scans MCP errors from adversarial args for leaked internals', async () => {
+    const definition = prompt('fuzz_prompt_adversarial_leak', {
+      description: 'Fails with an MCP error naming a private path.',
+      args: z.object({ payload: z.any().describe('Payload') }),
+      generate() {
+        throw new McpError(
+          JsonRpcErrorCode.InternalError,
+          'Render failed at /home/example/private/prompt.ts',
+        );
+      },
+    });
+
+    // Adversarial phase only: no valid-args runs.
+    const report = await fuzzPrompt(definition, { numRuns: 0, numAdversarial: 3, seed: 55 });
+
+    expect(report.crashes).toHaveLength(0);
+    expect(report.leaks).toHaveLength(3);
+    expect(report.leaks.every((leak) => leak.errorText.includes('/home/example/private'))).toBe(
+      true,
+    );
   });
 
   it('skips generated args rejected by additional schema constraints', async () => {
