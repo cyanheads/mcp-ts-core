@@ -14,6 +14,12 @@ describe('Runtime Capabilities', () => {
     expect(runtimeCaps.hasBuffer).toBe(true);
   });
 
+  it('reports Bun exactly when the Bun global exists', () => {
+    // An oracle independent of `process.versions`: the Bun lane checks the
+    // positive, the Node lanes the negative.
+    expect(runtimeCaps.isBun).toBe('Bun' in globalThis);
+  });
+
   it('should correctly identify not being a worker or browser', () => {
     expect(runtimeCaps.isWorkerLike).toBe(false);
     expect(runtimeCaps.isBrowserLike).toBe(false);

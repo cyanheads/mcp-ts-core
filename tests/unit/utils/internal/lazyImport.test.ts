@@ -16,6 +16,7 @@ vi.mock('../../../../src/utils/internal/logger.js', () => ({
   },
 }));
 
+import { JsonRpcErrorCode } from '../../../../src/types-global/errors.js';
 import { lazyImport } from '../../../../src/utils/internal/lazyImport.js';
 import { logger } from '../../../../src/utils/internal/logger.js';
 
@@ -58,13 +59,16 @@ describe('lazyImport', () => {
   });
 
   describe('failure path', () => {
-    it('throws ConfigurationError on import failure', async () => {
+    it('throws ConfigurationError on import failure, and again from the cache', async () => {
       const importFn = vi.fn().mockRejectedValue(new Error('Cannot find module'));
       const loader = lazyImport(importFn, 'Install "foo": bun add foo');
+      const configurationError = {
+        code: JsonRpcErrorCode.ConfigurationError,
+        message: 'Install "foo": bun add foo',
+      };
 
-      await expect(loader()).rejects.toMatchObject({
-        message: expect.stringContaining('Install "foo"'),
-      });
+      await expect(loader()).rejects.toMatchObject(configurationError);
+      await expect(loader()).rejects.toMatchObject(configurationError);
     });
 
     it('logs warning exactly once on failure', async () => {

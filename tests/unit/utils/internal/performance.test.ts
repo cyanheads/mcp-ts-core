@@ -120,6 +120,35 @@ describe('measureToolExecution', () => {
     expect(mockErrorCounterAdd).not.toHaveBeenCalled();
   });
 
+  describe('mcp.tool.param.usage', () => {
+    /** The `mcp.tool.param.usage` increments, in emission order. */
+    const paramAdds = () =>
+      mockCounterAdd.mock.calls.filter(([, attrs]) => 'mcp.tool.param' in (attrs as object));
+
+    it('counts each top-level input key once, not the keys nested under it', async () => {
+      await measureToolExecution(
+        async () => ({ message: 'ok' }),
+        { toolName: 'param-tool', requestId: 'req-p1', timestamp: new Date().toISOString() },
+        { query: 'x', filter: { status: 'open' } },
+      );
+
+      expect(paramAdds()).toEqual([
+        [1, { 'mcp.tool.name': 'param-tool', 'mcp.tool.param': 'query' }],
+        [1, { 'mcp.tool.name': 'param-tool', 'mcp.tool.param': 'filter' }],
+      ]);
+    });
+
+    it('counts nothing for an input that is not an object', async () => {
+      await measureToolExecution(
+        async () => ({ message: 'ok' }),
+        { toolName: 'param-tool', requestId: 'req-p2', timestamp: new Date().toISOString() },
+        'raw',
+      );
+
+      expect(paramAdds()).toEqual([]);
+    });
+  });
+
   it('records OTel error counter on failure', async () => {
     await expect(
       measureToolExecution(

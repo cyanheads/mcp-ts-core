@@ -606,33 +606,6 @@ describe('Logger', () => {
   });
 
   describe('log level filtering', () => {
-    it('should not log debug messages when level is set to warning', async () => {
-      await logger.initialize('warning');
-
-      const pino = (await import('pino')).default;
-      const mockLogger = pino() as any;
-      const initialDebugCalls = mockLogger.debug.mock.calls.length;
-
-      logger.debug('this should be filtered');
-
-      expect(mockLogger.debug.mock.calls.length).toBe(initialDebugCalls);
-    });
-
-    it('should log error messages when level is set to warning', async () => {
-      await logger.initialize('warning');
-
-      const pino = (await import('pino')).default;
-      const mockLogger = pino() as any;
-      const initialErrorCalls = mockLogger.error.mock.calls.length;
-
-      logger.error('this should pass', {
-        requestId: 'r4',
-        timestamp: new Date().toISOString(),
-      } as any);
-
-      expect(mockLogger.error.mock.calls.length).toBeGreaterThan(initialErrorCalls);
-    });
-
     /** The eight levels, most severe first: RFC 5424 order. */
     const RFC5424_ORDER = [
       'emerg',

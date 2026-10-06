@@ -4,7 +4,15 @@
  * leaves no file descriptor open behind it.
  * @module tests/unit/utils/internal/logger.fileSinks.test
  */
-import { chmodSync, existsSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import {
+  chmodSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
@@ -76,6 +84,22 @@ describe('probeFileSinks', () => {
       ['error.log', 'ENOTDIR'],
       ['interactions.log', 'ENOTDIR'],
     ]);
+  });
+
+  it('drops only a destination that is a directory and keeps its siblings', async () => {
+    // EISDIR holds for root too, so this runs where the read-only case skips.
+    const dir = makeTempDir();
+    mkdirSync(join(dir, 'error.log'));
+
+    const probe = await probeFileSinks(dir);
+
+    expect(probe.dropped).toEqual([
+      { code: 'EISDIR', name: 'error.log', path: join(dir, 'error.log') },
+    ]);
+    expect(probe.writable).toEqual({
+      'combined.log': join(dir, 'combined.log'),
+      'interactions.log': join(dir, 'interactions.log'),
+    });
   });
 
   it.skipIf(RUNNING_AS_ROOT)('drops only a read-only file and keeps its siblings', async () => {

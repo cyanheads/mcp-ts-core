@@ -10,7 +10,9 @@ import { authContext } from '../../../../src/mcp-server/transports/auth/lib/auth
 import {
   type RequestContext,
   requestContextService,
+  toCanonicalContext,
   withActiveSpan,
+  withExtra,
 } from '../../../../src/utils/internal/requestContext.js';
 
 /** A valid span context — 32/16 lowercase hex digits, sampled. */
@@ -311,5 +313,72 @@ describe('requestContextService', () => {
 
       expect(withActiveSpan(bound)).toBe(bound);
     });
+  });
+});
+
+describe('toCanonicalContext', () => {
+  /** Every field `RequestContext` declares. */
+  const canonical = {
+    auth: { clientId: 'client-1', scopes: ['tool:x:read'], sub: 'user-1' },
+    extra: { toolName: 'probe_tool' },
+    operation: 'HandleToolRequest',
+    requestId: 'req-1',
+    sessionId: 'session-1',
+    spanId: 'b'.repeat(16),
+    tenantId: 'tenant-1',
+    timestamp: '2026-01-01T00:00:00.000Z',
+    traceId: 'a'.repeat(32),
+  };
+
+  it('keeps every declared field and drops the live machinery of a handler context', () => {
+    // A handler `ctx` is accepted wherever a `RequestContext` is, so it arrives
+    // whole: request machinery, and after an elicitation round what the user typed.
+    const handlerContext = {
+      ...canonical,
+      inputs: { responses: { creds: { action: 'accept', content: { passphrase: 'hunter2' } } } },
+      log: { info: () => {} },
+      signal: new AbortController().signal,
+      state: { get: async () => null },
+      requestInput: () => {},
+      notifyResourceUpdated: () => {},
+    };
+
+    const projected = toCanonicalContext(handlerContext);
+
+    expect(projected).toEqual(canonical);
+    expect(JSON.stringify(projected)).not.toContain('hunter2');
+  });
+
+  it('leaves out a declared field whose value is undefined', () => {
+    const projected = toCanonicalContext({
+      requestId: 'req-2',
+      timestamp: '2026-01-01T00:00:00.000Z',
+      tenantId: undefined,
+    });
+
+    expect(projected).toEqual({ requestId: 'req-2', timestamp: '2026-01-01T00:00:00.000Z' });
+    expect(projected).not.toHaveProperty('tenantId');
+  });
+});
+
+describe('withExtra', () => {
+  const parent: RequestContext = {
+    requestId: 'req-1',
+    timestamp: '2026-01-01T00:00:00.000Z',
+    extra: { toolName: 'probe_tool', attempt: 1 },
+  };
+
+  it('merges into the extra a parent already carried, the new fields winning', () => {
+    expect(withExtra(parent, { attempt: 2, url: 'https://x.test' })).toEqual({
+      requestId: 'req-1',
+      timestamp: '2026-01-01T00:00:00.000Z',
+      extra: { toolName: 'probe_tool', attempt: 2, url: 'https://x.test' },
+    });
+  });
+
+  it('leaves the parent context and its extra untouched', () => {
+    withExtra(parent, { attempt: 2 });
+
+    expect(parent.extra).toEqual({ toolName: 'probe_tool', attempt: 1 });
   });
 });
