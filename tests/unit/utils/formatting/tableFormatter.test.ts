@@ -107,30 +107,35 @@ describe('TableFormatter', () => {
       expect(result).toContain('Engineer');
     });
 
-    it('should format raw data with ascii style', () => {
-      const result = tableFormatter.formatRaw(headers, rows, {
-        style: 'ascii',
-      });
+    const people = [
+      ['Alice', '30'],
+      ['Bob', '7'],
+    ];
 
-      expect(result).toContain('+');
-      expect(result).toContain('|');
-      expect(result).toContain('-');
-      expect(result).toContain('Alice');
+    it('should draw ascii borders sized to the padded column widths', () => {
+      const result = tableFormatter.formatRaw(['Name', 'Age'], people, { style: 'ascii' });
+
+      expect(result.split('\n')).toEqual([
+        '+-------+-----+',
+        '| Name  | Age |',
+        '+-------+-----+',
+        '| Alice | 30  |',
+        '| Bob   | 7   |',
+        '+-------+-----+',
+      ]);
     });
 
-    it('should format raw data with grid style', () => {
-      const result = tableFormatter.formatRaw(headers, rows, { style: 'grid' });
+    it('should draw grid borders with box-drawing junctions', () => {
+      const result = tableFormatter.formatRaw(['Name', 'Age'], people, { style: 'grid' });
 
-      expect(result).toContain('┌');
-      expect(result).toContain('┬');
-      expect(result).toContain('┐');
-      expect(result).toContain('│');
-      expect(result).toContain('├');
-      expect(result).toContain('┤');
-      expect(result).toContain('└');
-      expect(result).toContain('┴');
-      expect(result).toContain('┘');
-      expect(result).toContain('Alice');
+      expect(result.split('\n')).toEqual([
+        '┌───────┬─────┐',
+        '│ Name  │ Age │',
+        '├───────┼─────┤',
+        '│ Alice │ 30  │',
+        '│ Bob   │ 7   │',
+        '└───────┴─────┘',
+      ]);
     });
 
     it('should format raw data with compact style', () => {
@@ -170,30 +175,23 @@ describe('TableFormatter', () => {
       expect(result).toBe('Name   Age  Score\nAlice  30   95   \nBob    25   88   ');
     });
 
-    it('should render right-alignment indicators in markdown separators', () => {
-      const result = tableFormatter.formatRaw(headers, rows, {
-        style: 'markdown',
-        alignment: { Age: 'right', Score: 'right' },
-      });
+    it('should pad right and center columns and mark them in the separator row', () => {
+      const result = tableFormatter.formatRaw(
+        ['Item', 'Qty', 'Notes'],
+        [
+          ['apple', '7', 'ok'],
+          ['kiwi', '12', 'fine'],
+        ],
+        { style: 'markdown', alignment: { Qty: 'right', Notes: 'center' } },
+      );
 
-      // Right-aligned columns use trailing colon in separator
-      const separatorLine = result.split('\n')[1];
-      expect(separatorLine).toMatch(/-+:/);
-      expect(result).toContain('Age');
-      expect(result).toContain('Score');
-    });
-
-    it('should render center-alignment indicators in markdown separators', () => {
-      const result = tableFormatter.formatRaw(headers, rows, {
-        style: 'markdown',
-        alignment: { Name: 'center' },
-      });
-
-      // Center-aligned columns use leading and trailing colons in separator
-      const separatorLine = result.split('\n')[1];
-      expect(separatorLine).toMatch(/:-+:/);
-      expect(result).toContain('Alice');
-      expect(result).toContain('Bob');
+      // A centered cell's odd leftover space goes to the right ('ok' in 5 → ' ok  ').
+      expect(result.split('\n')).toEqual([
+        '| Item  | Qty | Notes |',
+        '| ----- | --: | :---: |',
+        '| apple |   7 |  ok   |',
+        '| kiwi  |  12 | fine  |',
+      ]);
     });
 
     it('should support alignment by column index string', () => {
@@ -479,8 +477,8 @@ describe('TableFormatter', () => {
         padding: 3,
       });
 
-      expect(noPadding).not.toBe(withPadding);
-      expect(withPadding.length).toBeGreaterThan(noPadding.length);
+      expect(noPadding).toBe('|A  |\n|---|\n|1  |');
+      expect(withPadding).toBe('|   A     |\n|   ---   |\n|   1     |');
     });
   });
 
@@ -499,10 +497,8 @@ describe('TableFormatter', () => {
         minWidth: 1,
       });
 
-      // Table with minWidth should be wider than without
-      expect(withMinWidth.length).toBeGreaterThan(withoutMinWidth.length);
-      expect(withMinWidth).toContain('A');
-      expect(withMinWidth).toContain('1');
+      expect(withMinWidth).toBe('| A          |\n| ---------- |\n| 1          |');
+      expect(withoutMinWidth).toBe('| A |\n| - |\n| 1 |');
     });
   });
 });

@@ -73,6 +73,36 @@ describe('partialResultSchema', () => {
       unavailable: [{ pmid: '999', reason: 'not_found' }],
     });
     expect((withFailures as { unavailable: unknown[] }).unavailable).toHaveLength(1);
+    expect(Object.keys(schema.shape)).toEqual(['articles', 'totalSucceeded', 'unavailable']);
+  });
+
+  it('adds a nonnegative-integer totalFailed and carries custom descriptions when asked', () => {
+    type JsonNode = {
+      description?: string;
+      items?: JsonNode;
+      properties?: Record<string, JsonNode>;
+    };
+    const schema = partialResultSchema({
+      succeededKey: 'articles',
+      succeededSchema: itemSchema,
+      succeededDescription: 'Fetched articles',
+      failedKey: 'unavailable',
+      idKey: 'pmid',
+      idDescription: 'PMID that failed',
+      reason,
+      failureDescription: 'One PMID that could not be fetched',
+      includeTotalFailed: true,
+    });
+    const base = { articles: [], totalSucceeded: 0 };
+
+    expect(schema.parse({ ...base, totalFailed: 2 })).toEqual({ ...base, totalFailed: 2 });
+    expect(schema.safeParse({ ...base, totalFailed: -1 }).success).toBe(false);
+    expect(schema.safeParse({ ...base, totalFailed: 1.5 }).success).toBe(false);
+
+    const { properties } = z.toJSONSchema(schema, { io: 'output' }) as JsonNode;
+    expect(properties?.articles?.description).toBe('Fetched articles');
+    expect(properties?.unavailable?.items?.description).toBe('One PMID that could not be fetched');
+    expect(properties?.unavailable?.items?.properties?.pmid?.description).toBe('PMID that failed');
   });
 });
 

@@ -19,13 +19,22 @@ describe('DiffFormatter', () => {
 }`;
 
   describe('diff() method', () => {
-    it('should generate a unified diff for changed text', async () => {
+    it('defaults to hunk-only unified output for changed text', async () => {
+      const [newSignature, newBody] = newText.split('\n');
       const result = await diffFormatter.diff(oldText, newText);
 
-      expect(result).toBeTruthy();
-      expect(result).toContain('@@'); // Unified diff header
-      expect(result).toContain('-'); // Deletions
-      expect(result).toContain('+'); // Additions
+      expect(result).toBe(
+        [
+          '@@ -1,3 +1,3 @@',
+          '-function hello() {',
+          "-  console.log('Hi');",
+          `+${newSignature}`,
+          `+${newBody}`,
+          ' }',
+          '\\ No newline at end of file',
+          '',
+        ].join('\n'),
+      );
     });
 
     it.each([
@@ -123,14 +132,6 @@ describe('DiffFormatter', () => {
       expect(result).toContain('-line 2');
       expect(result).toContain('+modified line 2');
       expect(result).toContain('+line 4');
-    });
-
-    it('should handle empty line arrays', async () => {
-      const result = await diffFormatter.diffLines([], []);
-
-      // Library returns headers even for empty arrays
-      expect(result).toBeTruthy();
-      expect(result).not.toContain('@@'); // No hunks for identical empty arrays
     });
 
     it('should handle single-line arrays', async () => {

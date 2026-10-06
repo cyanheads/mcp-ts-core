@@ -140,10 +140,7 @@ describe('TreeFormatter', () => {
         style: 'compact',
       });
 
-      expect(result).toBeTruthy();
-      // With more indentation, output should be wider
-      const lines = result.split('\n');
-      expect(lines.some((line) => line.startsWith('    '))).toBe(true);
+      expect(result).toBe('root\nchild1\nchild2\nparent\n    grandchild1\n    grandchild2');
     });
 
     it('should pad the vertical connector to nothing for a single-character indent', () => {
@@ -190,6 +187,21 @@ describe('TreeFormatter', () => {
   });
 
   describe('Circular reference detection', () => {
+    it('renders a node shared by two branches under both parents, not as a cycle', () => {
+      const shared: TreeNode = { name: 'shared', children: [{ name: 'leaf' }] };
+      const root: TreeNode = {
+        name: 'root',
+        children: [
+          { name: 'a', children: [shared] },
+          { name: 'b', children: [shared] },
+        ],
+      };
+
+      expect(treeFormatter.format(root)).toBe(
+        'root\n├── a\n│ └── shared\n│   └── leaf\n└── b\n  └── shared\n    └── leaf',
+      );
+    });
+
     it('should detect and handle circular references', () => {
       const parent: TreeNode = { name: 'parent', children: [] };
       const child: TreeNode = { name: 'child', children: [parent] };

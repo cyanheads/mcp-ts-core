@@ -288,8 +288,7 @@ describe('MarkdownBuilder', () => {
           md.list(['file1.ts', 'file2.ts']);
         })
         .build();
-      expect(result).toContain('## Files');
-      expect(result).toContain('- file1.ts');
+      expect(result).toBe('## Files\n\n- file1.ts\n- file2.ts');
     });
 
     test('should create section with level 3', () => {
@@ -299,8 +298,7 @@ describe('MarkdownBuilder', () => {
           md.paragraph('Some details');
         })
         .build();
-      expect(result).toContain('### Details');
-      expect(result).toContain('Some details');
+      expect(result).toBe('### Details\n\nSome details');
     });
 
     test('should create section with level 4', () => {
@@ -310,8 +308,7 @@ describe('MarkdownBuilder', () => {
           md.paragraph('Deep content');
         })
         .build();
-      expect(result).toContain('#### Sub-detail');
-      expect(result).toContain('Deep content');
+      expect(result).toBe('#### Sub-detail\n\nDeep content');
     });
   });
 

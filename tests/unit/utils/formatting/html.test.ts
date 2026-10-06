@@ -65,6 +65,12 @@ describe('html tagged template', () => {
     expect(out.toString()).toBe('<ul><li>&lt;a&gt;</li><li>&lt;b&gt;</li><li>&lt;c&gt;</li></ul>');
   });
 
+  test('escapes plain-string elements of an interpolated array, at any depth', () => {
+    const rows = ['<b>', 'x&y', null, 3, html`<i>${'<raw>'}</i>`, ["it's", ['<s>']]];
+    const out = html`<ul>${rows}</ul>`;
+    expect(out.toString()).toBe('<ul>&lt;b&gt;x&amp;y3<i>&lt;raw&gt;</i>it&#39;s&lt;s&gt;</ul>');
+  });
+
   test('coerces numbers without escaping', () => {
     expect(html`<span>${42}</span>`.toString()).toBe('<span>42</span>');
   });
