@@ -4,7 +4,34 @@
  * can be run individually by filter (`--project unit`) or all at once.
  * @module vitest.config
  */
+import { readFileSync } from 'node:fs';
 import { defineConfig } from 'vitest/config';
+
+/**
+ * Maps `@cyanheads/mcp-ts-core` and each subpath export onto its `src/` module.
+ * Unaliased, the package name resolves through its own `exports` to `dist/`, so
+ * definitions written against the published name (`examples/`, `templates/`)
+ * would build on whatever was last compiled, or fail to import before a build.
+ */
+const selfSourceAliases = Object.entries(
+  (
+    JSON.parse(readFileSync(new URL('./package.json', import.meta.url), 'utf8')) as {
+      exports: Record<string, string | { import: string }>;
+    }
+  ).exports,
+).flatMap(([subpath, target]) =>
+  typeof target === 'object'
+    ? [
+        {
+          find: new RegExp(`^@cyanheads/mcp-ts-core${subpath.slice(1)}$`),
+          replacement: new URL(
+            target.import.replace('./dist/', './src/').replace(/\.js$/, '.ts'),
+            import.meta.url,
+          ).pathname,
+        },
+      ]
+    : [],
+);
 
 // node-cron ships dist/ but not src/, so its sourceMappingURL points at a
 // non-existent path. Vite's `logger.warnOnce` reaches stderr via
@@ -100,6 +127,7 @@ export default defineConfig({
       },
       {
         extends: true,
+        resolve: { alias: selfSourceAliases },
         test: {
           ...sharedUnit,
           name: 'smoke',
