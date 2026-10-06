@@ -15,6 +15,9 @@
  * earlier abort — see `tests/helpers/node-http.ts`.
  * @module tests/integration/http-sse-abort
  */
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
 import { initializeBody, MCP_HEADERS } from '../helpers/http-helpers.js';
@@ -97,29 +100,50 @@ function openAndAbortSse(
   });
 }
 
+/** One structured record from the server's own log sink. */
+interface LogRecord {
+  level: number;
+  msg: string;
+}
+
 describe('HTTP SSE abort cleanup (issue #50)', () => {
   let handle: ServerHandle;
   let port: number;
-  /** Combined stdout + stderr from the server subprocess. */
-  let serverOutput = '';
+  /**
+   * The server's log sink. The subprocess inherits Vitest's `NODE_ENV=test`,
+   * which turns the logger's stderr sink off, so records are read from
+   * `combined.log` instead.
+   */
+  const logsDir = mkdtempSync(join(tmpdir(), 'mcp-ts-core-sse-abort-'));
+
+  /** Every structured log record the server has written so far. */
+  const logRecords = (): LogRecord[] => {
+    let raw: string;
+    try {
+      raw = readFileSync(join(logsDir, 'combined.log'), 'utf8');
+    } catch {
+      return [];
+    }
+    return raw
+      .split('\n')
+      .filter((line) => line.startsWith('{'))
+      .map((line) => JSON.parse(line) as LogRecord);
+  };
 
   beforeAll(async () => {
     handle = await startServer('http', {
+      LOGS_DIR: logsDir,
       MCP_SESSION_MODE: 'stateful',
       // Keep log noise low but allow warnings (close failures log at warning).
       MCP_LOG_LEVEL: 'warning',
     });
     if (!handle.port) throw new Error('expected http transport to allocate a port');
     port = handle.port;
-    const capture = (chunk: Buffer): void => {
-      serverOutput += chunk.toString();
-    };
-    handle.process.stderr?.on('data', capture);
-    handle.process.stdout?.on('data', capture);
   });
 
   afterAll(async () => {
     await handle?.kill();
+    rmSync(logsDir, { force: true, recursive: true });
   });
 
   it('opens an SSE stream, aborts it, and the server stays healthy', async () => {
@@ -146,14 +170,6 @@ describe('HTTP SSE abort cleanup (issue #50)', () => {
     const healthz = await health(port);
     expect(healthz.status).toBe(200);
     expect((JSON.parse(healthz.body) as { status: string }).status).toBe('ok');
-  });
-
-  it('logs no close failures or unhandled rejections during abort cycles', async () => {
-    // Drain any deferred logger flushes from prior tests.
-    await new Promise((r) => setTimeout(r, 200));
-
-    expect(serverOutput).not.toMatch(/Failed to close a session surface/);
-    expect(serverOutput).not.toMatch(/UnhandledPromiseRejection/);
   });
 
   it('a normal POST still works after a long sequence of SSE aborts', async () => {
@@ -188,7 +204,9 @@ describe('HTTP SSE abort cleanup (issue #50)', () => {
     expect((await health(port)).status).toBe(200);
   });
 
-  it('concurrent SSE aborts on different sessions do not cross-contaminate', async () => {
+  it('concurrent SSE aborts on different sessions neither cross-contaminate nor fail to close', async () => {
+    const recordsBefore = logRecords().length;
+
     // Mint 10 sessions, open 10 SSE streams in parallel, abort all in parallel.
     const sessions = await Promise.all(Array.from({ length: 10 }, () => newSession(port)));
     const results = await Promise.all(sessions.map((sid) => openAndAbortSse(port, sid, 30)));
@@ -201,5 +219,28 @@ describe('HTTP SSE abort cleanup (issue #50)', () => {
     // All 10 sessions can still be cleanly DELETEd post-abort.
     const deletes = await Promise.all(sessions.map((sid) => deleteSession(port, sid)));
     expect(deletes).toEqual(sessions.map(() => 200));
+
+    // A session-less DELETE logs a warning after every teardown above. The sink
+    // writes in order, so once that sentinel lands, so has anything they logged.
+    const sentinel = await exchange(port, {
+      method: 'DELETE',
+      path: '/mcp',
+      headers: { 'MCP-Protocol-Version': PROTOCOL_VERSION },
+    });
+    expect(sentinel.status).toBe(400);
+    const isSentinel = (record: LogRecord) => record.msg === 'DELETE request without session ID';
+    const deadline = Date.now() + 5_000;
+    while (!logRecords().slice(recordsBefore).some(isSentinel) && Date.now() < deadline) {
+      await new Promise((r) => setTimeout(r, 50));
+    }
+
+    // Neither the aborts nor the teardowns after them leave a close failure or
+    // an error-level record (an unhandled rejection logs at fatal) behind.
+    const records = logRecords().slice(recordsBefore);
+    expect(records.some(isSentinel)).toBe(true);
+    expect(records.filter((r) => r.msg.startsWith('Failed to close a session surface'))).toEqual(
+      [],
+    );
+    expect(records.filter((r) => r.level >= 50)).toEqual([]);
   });
 });
