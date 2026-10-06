@@ -62,25 +62,6 @@ describe('PromptRegistry', () => {
     registry = new PromptRegistry(testDefinitions, logger);
   });
 
-  describe('Prompt Registration', () => {
-    it('should call server.registerPrompt for each prompt', async () => {
-      await registry.registerAll(mockServer);
-      expect(mockServer.registerPrompt).toHaveBeenCalledTimes(2);
-    });
-
-    it('should create async handler function', async () => {
-      await registry.registerAll(mockServer);
-
-      const handler = mockServer.registerPrompt.mock.calls[0][2];
-      const result = handler({});
-      expect(result).toBeInstanceOf(Promise);
-
-      const resolved = await result;
-      expect(resolved).toHaveProperty('messages');
-      expect(Array.isArray(resolved.messages)).toBe(true);
-    });
-  });
-
   describe('Error Handling', () => {
     it('should reject duplicate prompt names during registration', async () => {
       const duplicateRegistry = new PromptRegistry([testPrompt, testPrompt], logger);

@@ -7,18 +7,7 @@ import { describe, expect, it } from 'vitest';
 import { resource } from '@/mcp-server/resources/utils/resourceDefinition.js';
 
 describe('resource() builder', () => {
-  it('creates a resource definition with URI template extracted', () => {
-    const def = resource('items://{id}', {
-      description: 'Get item',
-      handler: () => ({ ok: true }),
-    });
-
-    expect(def.uriTemplate).toBe('items://{id}');
-    expect(def.description).toBe('Get item');
-    expect(typeof def.handler).toBe('function');
-  });
-
-  it('carries optional metadata through unchanged', () => {
+  it('takes the URI template from its first argument and carries every option through', () => {
     const def = resource('docs://{docId}', {
       description: 'Get document',
       name: 'custom_resource_name',
@@ -37,6 +26,8 @@ describe('resource() builder', () => {
     });
 
     expect(def).toMatchObject({
+      uriTemplate: 'docs://{docId}',
+      description: 'Get document',
       name: 'custom_resource_name',
       title: 'Document Lookup',
       mimeType: 'text/markdown',

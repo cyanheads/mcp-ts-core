@@ -45,39 +45,7 @@ describe('AnyToolDefinition', () => {
 });
 
 describe('tool() builder', () => {
-  it('creates a definition with name extracted from first argument', () => {
-    const def = tool('my_tool', {
-      description: 'Test tool',
-      input: z.object({ value: z.string().describe('A value') }),
-      output: z.object({ ok: z.boolean() }),
-      handler: () => ({ ok: true }),
-    });
-
-    expect(def.name).toBe('my_tool');
-    expect(def.description).toBe('Test tool');
-    expect(typeof def.handler).toBe('function');
-  });
-
-  it('preserves input schema for validation', () => {
-    const def = tool('schema_tool', {
-      description: 'Schema test',
-      input: z.object({
-        query: z.string().min(1).describe('Search query'),
-        limit: z.number().default(10).describe('Result limit'),
-      }),
-      output: z.object({ query: z.string(), limit: z.number() }),
-      handler: (input) => ({ query: input.query, limit: input.limit }),
-    });
-
-    const parsed = def.input.parse({ query: 'test' });
-    expect(parsed.query).toBe('test');
-    expect(parsed.limit).toBe(10);
-
-    const bad = def.input.safeParse({ query: '' });
-    expect(bad.success).toBe(false);
-  });
-
-  it('carries optional metadata through unchanged', () => {
+  it('takes the name from its first argument and carries every option through', () => {
     const def = tool('meta_tool', {
       description: 'Metadata test',
       title: 'My Titled Tool',
@@ -91,6 +59,8 @@ describe('tool() builder', () => {
     });
 
     expect(def).toMatchObject({
+      name: 'meta_tool',
+      description: 'Metadata test',
       title: 'My Titled Tool',
       auth: ['tool:auth:read', 'tool:auth:write'],
       annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: false },

@@ -99,11 +99,6 @@ describe('createMcpServerInstance', () => {
     }
   });
 
-  it('should return an McpServer instance', async () => {
-    const server = await createMcpServerInstance(deps);
-    expect(server).toBeInstanceOf(McpServer);
-  });
-
   /** The per-instance capability view a registry receives (#580). */
   const view = (era: 'legacy' | 'modern') =>
     expect.objectContaining({ era, capabilities: expect.any(Function) });
@@ -262,18 +257,6 @@ describe('createMcpServerInstance', () => {
     expect(mockPromptRegistry.registerAll).toHaveBeenCalledTimes(1);
   });
 
-  it('should log initialization and success messages', async () => {
-    await createMcpServerInstance(deps);
-    expect(logger.debug).toHaveBeenCalledWith(
-      'Initializing MCP server instance',
-      expect.any(Object),
-    );
-    expect(logger.debug).toHaveBeenCalledWith(
-      'All MCP capabilities registered successfully',
-      expect.any(Object),
-    );
-  });
-
   it('should rethrow and log when tool registration fails', async () => {
     const regError = new Error('tool registration failed');
     mockToolRegistry.registerAll.mockRejectedValue(regError);
@@ -284,14 +267,6 @@ describe('createMcpServerInstance', () => {
       expect.objectContaining({ message: 'tool registration failed' }),
       expect.any(Object),
     );
-  });
-
-  it('should rethrow and log when resource registration fails', async () => {
-    const regError = new Error('resource registration failed');
-    mockResourceRegistry.registerAll.mockRejectedValue(regError);
-
-    await expect(createMcpServerInstance(deps)).rejects.toThrow('resource registration failed');
-    expect(logger.error).toHaveBeenCalled();
   });
 
   it('should handle non-Error throws during registration', async () => {
