@@ -12,6 +12,7 @@ import { createHash } from 'node:crypto';
 import { constants } from 'node:fs';
 import {
   access,
+  cp,
   lstat,
   mkdir,
   mkdtemp,
@@ -116,14 +117,19 @@ const CHILD_TIMEOUT_MS = 300_000;
 const PACKED_CONSUMER_NAME = 'mcp-ts-core-packed-consumer';
 const PACKED_CONSUMER_VERSION = '0.0.0-packed-consumer';
 
-function run(command: string, args: string[], cwd: string): Promise<RunResult> {
+function run(
+  command: string,
+  args: string[],
+  cwd: string,
+  env: NodeJS.ProcessEnv = process.env,
+): Promise<RunResult> {
   return new Promise((resolveResult, rejectResult) => {
     execFile(
       command,
       args,
       {
         cwd,
-        env: { ...process.env, NODE_PATH: '', NO_COLOR: '1' },
+        env: { ...env, NODE_PATH: '', NO_COLOR: '1' },
         killSignal: 'SIGKILL',
         maxBuffer: 20 * 1024 * 1024,
         timeout: CHILD_TIMEOUT_MS,
@@ -808,6 +814,237 @@ async function verifyBaseConfigConsumer(
   }
 }
 
+/**
+ * Variables that, inherited from a git hook running this verifier, would point
+ * the scaffold's `git` at another repository (`GIT_DIR`, …) or switch its
+ * devcheck into staged-files mode (`HUSKY`, `GIT_PARAMS`).
+ */
+const HOOK_ENV_KEYS = new Set([
+  'GIT_DIR',
+  'GIT_INDEX_FILE',
+  'GIT_PARAMS',
+  'GIT_WORK_TREE',
+  'HUSKY',
+]);
+
+/**
+ * The only diagnostics, errors or warnings, a fresh scaffold's `lint:mcp` may
+ * report: the `server.json` identity `init` ships empty on purpose (setup skill
+ * step 5). Anything else is a defect in the shipped template definitions.
+ */
+const SCAFFOLD_TODO_LINT_RULES = [
+  'server-json-description-required',
+  'server-json-name-format',
+  'server-json-repository-url',
+];
+
+/**
+ * The only diagnostics a fresh scaffold's `lint:packaging` may report: the
+ * plugin-manifest fields `init` ships empty (setup skill step 5).
+ */
+const SCAFFOLD_TODO_PACKAGING = [
+  '.claude-plugin/plugin.json "description" is empty',
+  '.codex-plugin/plugin.json "description" is empty',
+  '.codex-plugin/plugin.json interface.longDescription is empty',
+  '.codex-plugin/plugin.json interface.shortDescription is empty',
+];
+
+type DevcheckStatus = 'FAILED' | 'PASSED' | 'SKIPPED' | 'WARNING';
+
+/**
+ * Every devcheck step's status on the scaffold once the setup skill's identity,
+ * skill-mirror, and git steps have run, under `--no-fix --no-audit --no-deps`
+ * (the two network-bound steps report registry state, not the scaffold). Exact:
+ * a step that starts skipping in a consumer layout, or a step added without
+ * being verified there, fails the lane.
+ */
+const SCAFFOLD_DEVCHECK_STATUS: Readonly<Record<string, DevcheckStatus>> = {
+  'TODOs/FIXMEs': 'PASSED',
+  'Tracked Secrets': 'PASSED',
+  'MCP Definitions': 'PASSED',
+  Packaging: 'PASSED',
+  'Framework Antipatterns': 'PASSED',
+  'Dependency Specifiers': 'PASSED',
+  'Open-Indexed Interfaces': 'SKIPPED',
+  'Docs Sync': 'PASSED',
+  'Skills Sync': 'PASSED',
+  'Skill Versions': 'PASSED',
+  'Changelog Sync': 'PASSED',
+  TypeScript: 'PASSED',
+  'TypeScript (Worker)': 'SKIPPED',
+  Tests: 'SKIPPED',
+  'Unused Dependencies': 'PASSED',
+  'Security Audit': 'SKIPPED',
+  'Dependencies (Outdated)': 'SKIPPED',
+};
+
+/** Steps that must appear in the summary but whose status is not asserted. */
+const SCAFFOLD_DEVCHECK_UNASSERTED = new Set([
+  // A fresh scaffold fails Biome today: its templates are not Biome-clean (#557).
+  'Biome',
+]);
+
+/** Replaces the one occurrence of `search` in the file at `path`, or throws naming the count. */
+async function replaceOnce(path: string, search: string, replacement: string): Promise<void> {
+  const source = await readFile(path, 'utf8');
+  const occurrences = source.split(search).length - 1;
+  if (occurrences !== 1) {
+    throw new Error(`Expected exactly one ${search} in ${path}, found ${occurrences}.`);
+  }
+  await writeFile(
+    path,
+    source.replace(search, () => replacement),
+  );
+}
+
+/**
+ * A fresh scaffold's first lint run is a to-do list, not a green light: both
+ * gates must fail on exactly the identity fields `init` ships empty, with no
+ * other diagnostic. Also
+ * requires `lint:mcp` to have loaded every kind of template definition — it
+ * exits 0 with "Skipping lint" when discovery finds nothing, so a discovery bug
+ * in the consumer layout would otherwise pass silently.
+ */
+async function verifyScaffoldTodoList(
+  projectDir: string,
+  bunBin: string,
+  env: NodeJS.ProcessEnv,
+): Promise<void> {
+  const lintMcp = await run(bunBin, ['run', 'lint:mcp'], projectDir, env);
+  const lintMcpOutput = `${lintMcp.stdout}\n${lintMcp.stderr}`;
+  const counts = /Linting (\d+) tool\(s\), (\d+) resource\(s\), (\d+) prompt\(s\)/
+    .exec(lintMcpOutput)
+    ?.slice(1)
+    .map(Number);
+  const rules = [...lintMcpOutput.matchAll(/[✗⚠] \[([^\]]+)\]/g)].map((match) => match[1]).sort();
+  if (
+    lintMcp.exitCode !== 1 ||
+    !counts?.every((count) => count > 0) ||
+    rules.join() !== [...SCAFFOLD_TODO_LINT_RULES].sort().join()
+  ) {
+    throw new Error(
+      `Fresh scaffold lint:mcp must load at least one tool, resource, and prompt, then report exactly ${SCAFFOLD_TODO_LINT_RULES.join(', ')}. ` +
+        `Got exit ${lintMcp.exitCode}, counts ${counts?.join('/') ?? 'none'}, rules ${rules.join(', ') || 'none'}.\n${lintMcpOutput}`,
+    );
+  }
+
+  const lintPackaging = await run(bunBin, ['run', 'lint:packaging'], projectDir, env);
+  const lintPackagingOutput = `${lintPackaging.stdout}\n${lintPackaging.stderr}`;
+  const gaps = lintPackagingOutput
+    .split(/\r?\n/)
+    .map((line) => /^\s*[✗⚠] (.+?)(?: — .*)?$/.exec(line)?.[1])
+    .filter((gap): gap is string => Boolean(gap))
+    .sort();
+  if (
+    lintPackaging.exitCode !== 1 ||
+    gaps.join('\n') !== [...SCAFFOLD_TODO_PACKAGING].sort().join('\n')
+  ) {
+    throw new Error(
+      `Fresh scaffold lint:packaging must report exactly: ${SCAFFOLD_TODO_PACKAGING.join('; ')}. ` +
+        `Got exit ${lintPackaging.exitCode}.\n${lintPackagingOutput}`,
+    );
+  }
+}
+
+/** Fills only the identity fields the setup skill's step 5 gates, as single-line edits. */
+async function populateScaffoldIdentity(projectDir: string, projectName: string): Promise<void> {
+  const description = '"Scaffold verified by the package lane."';
+  const serverJson = join(projectDir, 'server.json');
+  await replaceOnce(
+    serverJson,
+    `"name": "${projectName}"`,
+    `"name": "io.github.example/${projectName}"`,
+  );
+  await replaceOnce(serverJson, '"description": ""', `"description": ${description}`);
+  await replaceOnce(serverJson, '"url": ""', `"url": "https://github.com/example/${projectName}"`);
+  const claudePlugin = join(projectDir, '.claude-plugin', 'plugin.json');
+  await replaceOnce(claudePlugin, '"description": ""', `"description": ${description}`);
+  const codexPlugin = join(projectDir, '.codex-plugin', 'plugin.json');
+  await replaceOnce(codexPlugin, '"description": ""', `"description": ${description}`);
+  await replaceOnce(codexPlugin, '"shortDescription": ""', `"shortDescription": ${description}`);
+  await replaceOnce(codexPlugin, '"longDescription": ""', `"longDescription": ${description}`);
+}
+
+type DevcheckRow = { lines: string[]; status: DevcheckStatus };
+
+/** Rows of devcheck's `Checkup Summary` by step name, each with the output printed under it. */
+function parseDevcheckSummary(stdout: string): Map<string, DevcheckRow> {
+  const rows = new Map<string, DevcheckRow>();
+  const lines = stdout.split(/\r?\n/);
+  const start = lines.findIndex((line) => line.includes('Checkup Summary'));
+  if (start === -1) return rows;
+
+  let current: DevcheckRow | undefined;
+  for (const line of lines.slice(start + 1)) {
+    const row = /^(\S.*?)\s+\S+\s+(FAILED|PASSED|SKIPPED|WARNING)\b/.exec(line);
+    if (row?.[1]) {
+      current = { lines: [line], status: row[2] as DevcheckStatus };
+      rows.set(row[1], current);
+    } else if (line.startsWith('---')) {
+      current = undefined; // the rule that closes the summary
+    } else {
+      current?.lines.push(line);
+    }
+  }
+  return rows;
+}
+
+/**
+ * Runs the scaffold's own gate on the project the setup skill leaves behind:
+ * identity populated, framework skills mirrored into `.claude/skills`, and the
+ * tree under git so the git-backed steps run instead of skipping. Every step's
+ * status must match {@link SCAFFOLD_DEVCHECK_STATUS}.
+ */
+async function verifyScaffoldDevcheck(
+  projectDir: string,
+  projectName: string,
+  bunBin: string,
+  env: NodeJS.ProcessEnv,
+): Promise<void> {
+  await populateScaffoldIdentity(projectDir, projectName);
+  await cp(join(projectDir, 'framework-skills'), join(projectDir, '.claude', 'skills'), {
+    recursive: true,
+  });
+  for (const args of [
+    ['init', '-q'],
+    ['add', '-A'],
+  ]) {
+    assertSuccess(await run('git', args, projectDir, env), `installed CLI scaffold git ${args[0]}`);
+  }
+
+  const flags = ['--no-fix', '--no-audit', '--no-deps'];
+  const devcheck = await run(bunBin, ['run', 'devcheck', ...flags], projectDir, env);
+  const rows = parseDevcheckSummary(devcheck.stdout);
+  if (rows.size === 0) {
+    throw new Error(
+      `installed CLI scaffold devcheck printed no summary (exit ${devcheck.exitCode}).\n${devcheck.stderr}\n${devcheck.stdout}`,
+    );
+  }
+
+  const mismatches: Array<{ detail: string; name: string }> = [];
+  for (const [name, expected] of Object.entries(SCAFFOLD_DEVCHECK_STATUS)) {
+    const actual = rows.get(name)?.status ?? 'no summary row';
+    if (actual !== expected) {
+      mismatches.push({ name, detail: `expected ${expected}, got ${actual}` });
+    }
+  }
+  for (const name of SCAFFOLD_DEVCHECK_UNASSERTED) {
+    if (!rows.has(name)) mismatches.push({ name, detail: 'no summary row' });
+  }
+  for (const [name, row] of rows) {
+    if (!Object.hasOwn(SCAFFOLD_DEVCHECK_STATUS, name) && !SCAFFOLD_DEVCHECK_UNASSERTED.has(name)) {
+      mismatches.push({ name, detail: `unexpected step, got ${row.status}` });
+    }
+  }
+  if (mismatches.length > 0) {
+    const headline = mismatches.map(({ name, detail }) => `${name} (${detail})`).join('; ');
+    const blocks = mismatches.map(({ name }) => rows.get(name)?.lines.join('\n').trimEnd() ?? name);
+    throw new Error(
+      `installed CLI scaffold devcheck ${flags.join(' ')}: ${headline}\n\n${blocks.join('\n\n')}`,
+    );
+  }
+}
+
 async function verifyCli(
   consumerDir: string,
   installedPackageDir: string,
@@ -861,21 +1098,15 @@ async function verifyCli(
   // the tarball. Installing in the scaffold gives it its own dependency tree:
   // undeclared template imports cannot resolve through the repository or the
   // parent consumer, and the framework resolves only from the packed artifact.
+  // The one dependency line is edited in place, leaving the rest of the file
+  // byte-identical to what `init` wrote, so the scaffold's own Biome reads the
+  // template's formatting rather than this verifier's.
   // `--prefer-offline`, not `--offline`: cached manifests expire, and a strict
   // offline install fails on any metadata the cache no longer holds.
-  await writeFile(
+  await replaceOnce(
     join(projectDir, 'package.json'),
-    `${JSON.stringify(
-      {
-        ...scaffoldPackage,
-        dependencies: {
-          ...scaffoldPackage.dependencies,
-          [pkg.name]: `file:${tarball}`,
-        },
-      },
-      null,
-      2,
-    )}\n`,
+    `${JSON.stringify(pkg.name)}: ${JSON.stringify(`^${pkg.version}`)}`,
+    `${JSON.stringify(pkg.name)}: ${JSON.stringify(`file:${tarball}`)}`,
   );
   const install = await run(
     bunBin,
@@ -901,16 +1132,23 @@ async function verifyCli(
   assertSuccess(build, 'installed CLI scaffold build (scripts/build.ts)');
   await access(join(projectDir, 'dist', 'index.js'), constants.R_OK);
 
-  const vitest = join(projectDir, 'node_modules', 'vitest', 'vitest.mjs');
-  const tests = await run(bunBin, [vitest, 'run', '--config', 'vitest.config.ts'], projectDir);
-  assertSuccess(tests, 'installed CLI scaffold test suites');
+  // The scaffold's own root script, as its user runs it.
+  const tests = await run(bunBin, ['run', 'test'], projectDir);
+  assertSuccess(tests, 'installed CLI scaffold `bun run test`');
+
+  const env = Object.fromEntries(
+    Object.entries(process.env).filter(([key]) => !HOOK_ENV_KEYS.has(key)),
+  );
+  await verifyScaffoldTodoList(projectDir, bunBin, env);
+  await verifyScaffoldDevcheck(projectDir, projectName, bunBin, env);
   return projectDir;
 }
 
 /**
  * Packs the repository as npm would, installs the tarball into an isolated
  * production-only consumer, and exercises its runtime imports, public type
- * declarations, and CLI bin.
+ * declarations, and CLI bin — whose scaffold must typecheck, build, pass its
+ * own tests, and pass its own devcheck once the setup skill's steps have run.
  *
  * @returns What the run verified.
  * @throws If the build is stale, the packlist drifts, or any verification step fails.
@@ -1056,7 +1294,7 @@ if (resolve(process.argv[1] ?? '') === fileURLToPath(import.meta.url)) {
   verifyPublishedPackage()
     .then((report) => {
       console.log(
-        `Package verification passed: ${report.runtimeSubpaths.length} runtime subpaths, ${report.packEntries} packed entries, CLI scaffolded/typechecked/built/tested.`,
+        `Package verification passed: ${report.runtimeSubpaths.length} runtime subpaths, ${report.packEntries} packed entries, CLI scaffolded/typechecked/built/tested/devchecked.`,
       );
     })
     .catch((error: unknown) => {
