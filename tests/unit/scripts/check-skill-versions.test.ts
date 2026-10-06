@@ -7,6 +7,10 @@
  * hit on every such pass until committed. Spawns the real script against a temp git
  * repo reproducing the deletion — the bug is a process-level crash, so the test
  * asserts a clean exit, not a thrown stack trace.
+ *
+ * The other suites cover the policy itself, both directions: one step per
+ * release against the last `v*` tag, and the typo/whitespace carve-outs
+ * (whitespace-only edits, `devcheck.config.json` `skillVersions.ignore`).
  * @module tests/unit/scripts/check-skill-versions.test
  */
 
@@ -187,6 +191,29 @@ describe('check-skill-versions · one step per release', () => {
     expect(runCheck(dir).code).toBe(0);
   });
 
+  it('flags a major step that does not land on X.0', () => {
+    seedRelease('@cyanheads/mcp-ts-core');
+    writeSkill(dir, 'kept', '2.1', 'Restructured body.');
+
+    const { code, stdout } = runCheck(dir);
+
+    expect(code).toBe(1);
+    expect(stdout).toContain('is "2.1", more than one step past "1.0" at v0.1.0');
+  });
+
+  it('lets a skill added since the last release tag take later edits without another bump', () => {
+    seedRelease('@cyanheads/mcp-ts-core');
+    writeSkill(dir, 'fresh', '1.0', 'New this cycle.');
+    git(dir, ['add', '-A']);
+    git(dir, ['commit', '-m', 'docs: add fresh skill']);
+    writeSkill(dir, 'fresh', '1.0', 'New this cycle, edited again.');
+
+    const { code, stdout } = runCheck(dir);
+
+    expect(code).toBe(0);
+    expect(stdout).toContain('Skill versions are in step with body changes.');
+  });
+
   it('skips the step check when no release tag exists', () => {
     writeFileSync(resolve(dir, 'package.json'), JSON.stringify({ name: '@cyanheads/mcp-ts-core' }));
     writeSkill(dir, 'kept', '1.0', 'Body.');
@@ -195,5 +222,58 @@ describe('check-skill-versions · one step per release', () => {
     writeSkill(dir, 'kept', '1.4', 'Edited body.');
 
     expect(runCheck(dir).code).toBe(0);
+  });
+});
+
+describe('check-skill-versions · typo and whitespace carve-outs', () => {
+  let dir: string;
+
+  beforeEach(() => {
+    dir = mkdtempSync(resolve(tmpdir(), 'check-skill-versions-'));
+    git(dir, ['init', '-b', 'main']);
+    git(dir, ['config', 'user.email', 'test@example.com']);
+    git(dir, ['config', 'user.name', 'Test']);
+    writeSkill(dir, 'kept', '1.0', 'Original body text.');
+    git(dir, ['add', '-A']);
+    git(dir, ['commit', '-m', 'seed']);
+  });
+
+  afterEach(() => {
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('accepts a whitespace-only body edit without a bump', () => {
+    writeSkill(dir, 'kept', '1.0', 'Original   body\ntext.\n\n');
+
+    const { code, stdout } = runCheck(dir);
+
+    expect(code).toBe(0);
+    expect(stdout).toContain('Skill versions are in step with body changes.');
+  });
+
+  it.each([
+    ['the bare skill name', 'kept'],
+    ['the <name>/SKILL.md path', 'kept/SKILL.md'],
+  ])('skips an unbumped edit to a skill ignored by %s', (_label, pattern) => {
+    writeFileSync(
+      resolve(dir, 'devcheck.config.json'),
+      JSON.stringify({ skillVersions: { ignore: [pattern] } }),
+    );
+    writeSkill(dir, 'kept', '1.0', 'Typo fixed in the body text.');
+
+    expect(runCheck(dir).code).toBe(0);
+  });
+
+  it('still flags the edit when the ignore list names a different skill', () => {
+    writeFileSync(
+      resolve(dir, 'devcheck.config.json'),
+      JSON.stringify({ skillVersions: { ignore: ['other-skill'] } }),
+    );
+    writeSkill(dir, 'kept', '1.0', 'Typo fixed in the body text.');
+
+    const { code, stdout } = runCheck(dir);
+
+    expect(code).toBe(1);
+    expect(stdout).toContain('metadata.version is still "1.0"');
   });
 });

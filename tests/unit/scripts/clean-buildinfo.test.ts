@@ -5,6 +5,10 @@
  * lane-suffixed `.tsbuildinfo.<lane>` name, and any build-info file written
  * beside a tsconfig in `config/`.
  *
+ * Explicit targets pass a path guard first: a target naming the project root, a
+ * path outside it, or an absolute path is refused, so a stray argument can never
+ * delete what the project does not own.
+ *
  * `clean.ts` roots itself at the cwd, so the scaffold is a temp directory the
  * copied script is run inside, exactly as a consumer's would be.
  *
@@ -14,7 +18,7 @@
 import { spawnSync } from 'node:child_process';
 import { copyFileSync, existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { dirname, resolve } from 'node:path';
+import { basename, dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
@@ -110,5 +114,48 @@ describe('clean.ts build-info removal (#441)', () => {
     rmSync(resolve(dir, 'config'), { recursive: true, force: true });
     expect(runClean(dir).code).toBe(0);
     expect(present('.tsbuildinfo')).toBe(false);
+  });
+});
+
+describe('clean.ts target path guard', () => {
+  /** A directory beside the scaffold, reachable from it only by leaving the project root. */
+  let sibling: string;
+
+  beforeEach(() => {
+    dir = makeScaffold();
+    sibling = mkdtempSync(resolve(tmpdir(), 'clean-sibling-'));
+    writeFileSync(resolve(sibling, 'keep.txt'), 'keep\n');
+  });
+
+  afterEach(() => {
+    rmSync(dir, { recursive: true, force: true });
+    rmSync(sibling, { recursive: true, force: true });
+  });
+
+  it.each([
+    ['the project root itself', () => '.', 'Path escapes project root'],
+    ['a parent-relative path', () => `../${basename(sibling)}`, 'Path traversal not allowed'],
+    [
+      'a traversal hidden behind a subdirectory',
+      () => `dist/../../${basename(sibling)}`,
+      'Path traversal not allowed',
+    ],
+    ['an absolute path', () => sibling, 'Absolute paths not allowed'],
+  ])('refuses %s and deletes nothing outside the project', (_label, target, reason) => {
+    const { code, out } = runClean(dir, [target()]);
+
+    expect(code).toBe(1);
+    expect(out).toContain(reason);
+    expect(present('package.json')).toBe(true);
+    expect(existsSync(resolve(sibling, 'keep.txt'))).toBe(true);
+  });
+
+  it('still cleans the valid targets beside a refused one', () => {
+    const { code, out } = runClean(dir, ['dist', `../${basename(sibling)}`]);
+
+    expect(code).toBe(1);
+    expect(present('dist')).toBe(false);
+    expect(out).toContain('✓ dist');
+    expect(existsSync(resolve(sibling, 'keep.txt'))).toBe(true);
   });
 });

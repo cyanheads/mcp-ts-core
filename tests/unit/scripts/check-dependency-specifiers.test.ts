@@ -119,6 +119,22 @@ describe('check-dependency-specifiers (#246)', () => {
     expect(output).not.toContain('ok → *');
   });
 
+  it('rejects `latest` in peerDependencies and optionalDependencies, where `*` is allowed', () => {
+    write(dir, 'package.json', {
+      name: 'x',
+      peerDependencies: { peer: 'latest', anyPeer: '*' },
+      optionalDependencies: { opt: 'latest', anyOpt: '*' },
+    });
+
+    const { code, output } = runCheck(dir);
+
+    expect(code).toBe(1);
+    expect(output).toContain('peer → latest (package.json peerDependencies)');
+    expect(output).toContain('opt → latest (package.json optionalDependencies)');
+    expect(output).not.toContain('anyPeer →');
+    expect(output).not.toContain('anyOpt →');
+  });
+
   it('rejects a pre-release dist-tag in devDependencies', () => {
     write(dir, 'package.json', { name: 'x', devDependencies: { a: 'next' } });
 
