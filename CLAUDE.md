@@ -591,8 +591,9 @@ Skills live in `framework-skills/<name>/SKILL.md`; the full list is discoverable
 | `bun run format:unsafe` | Also apply Biome's unsafe autofixes — review the diff; they can change behavior, not just formatting |
 | `bun run tree` | Regenerate `docs/tree.md` after the directory structure changes |
 | `bun run typecheck:worker` | The workerd type environment (`tsconfig.worker.json`). Cloudflare's ambient globals declare `Buffer` as `any` and cannot share a program with `@types/node`, so the worker lane is checked separately, against the built declarations — build first |
-| `bun run test` | Every root project — unit, leak-gate, compliance, smoke, fuzz, typecheck (Bun runtime) |
-| `bun run test:unit` / `:smoke` / `:fuzz` / `:compliance` / `:typecheck` | One root project via `--project`. `test:typecheck` runs the `.test-d.ts` contracts, whose `@ts-expect-error` cases are the negative assertions |
+| `bun run test` | Every root project — unit, leak-gate, compliance, smoke, contract, fuzz, typecheck (Bun runtime) |
+| `bun run test:unit` / `:smoke` / `:contract` / `:fuzz` / `:compliance` / `:typecheck` | One root project via `--project`. `test:typecheck` runs the `.test-d.ts` contracts, whose `@ts-expect-error` cases are the negative assertions |
+| `bun run test:contract -u` | Accept a client-visible change: the `contract` project pins what a client receives — the handshake, the advertised lists, and a fixed matrix of call outcomes — as committed files under `tests/contract/pins/`, and a missing or changed pin fails (root `update: 'none'`). Review the pin diff and commit it with the change; see `tests/contract/README.md` |
 | `bun run test:leak-gate` | The retention gate's own sentinel suite. Each case spawns a full Vitest run, so it is excluded from the `unit` project |
 | `bun run test:coverage` | Root projects with coverage thresholds enforced |
 | `bun run test:integration` | Real server subprocesses over stdio and HTTP |
