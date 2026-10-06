@@ -5,6 +5,7 @@
  * @module vitest.config
  */
 import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
 import { defineConfig } from 'vitest/config';
 
 /**
@@ -24,10 +25,12 @@ const selfSourceAliases = Object.entries(
     ? [
         {
           find: new RegExp(`^@cyanheads/mcp-ts-core${subpath.slice(1)}$`),
-          replacement: new URL(
-            target.import.replace('./dist/', './src/').replace(/\.js$/, '.ts'),
-            import.meta.url,
-          ).pathname,
+          replacement: fileURLToPath(
+            new URL(
+              target.import.replace('./dist/', './src/').replace(/\.js$/, '.ts'),
+              import.meta.url,
+            ),
+          ),
         },
       ]
     : [],
@@ -92,10 +95,10 @@ export default defineConfig({
           statements: 100,
         },
         'src/storage/providers/supabase/supabaseProvider.ts': {
-          lines: 95,
+          lines: 100,
           functions: 100,
-          branches: 60,
-          statements: 85,
+          branches: 95,
+          statements: 100,
         },
       },
     },
