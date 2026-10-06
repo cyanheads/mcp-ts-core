@@ -4,9 +4,17 @@
  */
 
 import { spawnSync } from 'node:child_process';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, relative } from 'node:path';
 import * as yaml from 'js-yaml';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -242,6 +250,79 @@ describe('CLI init command', () => {
     expect(output).toContain('Next steps:');
     expect(output).toContain('cd demo-server');
     expect(output).toContain('bun install');
+  });
+
+  it('fills every template placeholder, version ranges included, from the framework manifest', async () => {
+    const tempRoot = createTempDir();
+    process.chdir(tempRoot);
+
+    await runCli(['init', 'demo-server']);
+
+    const dest = join(tempRoot, 'demo-server');
+    const framework = JSON.parse(readFileSync(join(ROOT, 'package.json'), 'utf8')) as {
+      dependencies: Record<string, string>;
+      peerDependencies: Record<string, string>;
+      version: string;
+    };
+    // Skills and scripts are copied verbatim, and skill docs show placeholders on purpose.
+    const substituted = readdirSync(dest, { recursive: true, withFileTypes: true })
+      .filter((entry) => entry.isFile())
+      .map((entry) => relative(dest, join(entry.parentPath, entry.name)))
+      .filter((path) => !path.startsWith('framework-skills/') && !path.startsWith('scripts/'));
+    expect(substituted).toContain('package.json');
+    const unfilled = substituted.filter((path) =>
+      /\{\{[A-Z_]+\}\}/.test(readFileSync(join(dest, path), 'utf8')),
+    );
+    expect(unfilled).toEqual([]);
+
+    const sdkRange = framework.dependencies['@modelcontextprotocol/server'];
+    const zodRange = framework.peerDependencies.zod;
+    expect(sdkRange).toBeTruthy();
+    expect(zodRange).toBeTruthy();
+    const { dependencies } = JSON.parse(readFileSync(join(dest, 'package.json'), 'utf8'));
+    expect(dependencies['@cyanheads/mcp-ts-core']).toBe(`^${framework.version}`);
+    expect(dependencies.zod).toBe(zodRange);
+    for (const doc of ['CLAUDE.md', 'AGENTS.md']) {
+      const text = readFileSync(join(dest, doc), 'utf8');
+      expect(text, doc).toContain(`**MCP SDK:** \`@modelcontextprotocol/server\` ${sdkRange}\n`);
+      expect(text, doc).toContain(`**Zod:** ${zodRange}\n`);
+    }
+  });
+
+  it('names an in-place scaffold after the directory it runs in', async () => {
+    const dest = join(createTempDir(), 'inplace-server');
+    mkdirSync(dest);
+    process.chdir(dest);
+
+    await runCli(['init']);
+
+    expect(JSON.parse(readFileSync(join(dest, 'package.json'), 'utf8')).name).toBe(
+      'inplace-server',
+    );
+    expect(readFileSync(join(dest, 'CLAUDE.md'), 'utf8')).toContain('**Server:** inplace-server');
+  });
+
+  it('ships the external-audience framework skills and none of the internal ones', async () => {
+    const tempRoot = createTempDir();
+    process.chdir(tempRoot);
+
+    await runCli(['init', 'demo-server']);
+
+    const audienceOf = (skill: string): unknown => {
+      const skillMd = readFileSync(join(ROOT, 'framework-skills', skill, 'SKILL.md'), 'utf8');
+      const frontmatter = /^---\n([\s\S]*?)\n---/.exec(skillMd)?.[1] ?? '';
+      return (yaml.load(frontmatter) as { metadata?: { audience?: unknown } }).metadata?.audience;
+    };
+    const skills = readdirSync(join(ROOT, 'framework-skills'), { withFileTypes: true })
+      .filter((entry) => entry.isDirectory())
+      .map((entry) => entry.name);
+    const internal = skills.filter((skill) => audienceOf(skill) === 'internal');
+    // The repository keeps framework-only skills; without one this case proves nothing.
+    expect(internal).toContain('add-export');
+
+    expect(readdirSync(join(tempRoot, 'demo-server', 'framework-skills')).sort()).toEqual(
+      skills.filter((skill) => audienceOf(skill) === 'external').sort(),
+    );
   });
 
   it('scaffolds in the current directory, skips existing files, and preserves user content', async () => {

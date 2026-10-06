@@ -145,6 +145,32 @@ describe('config parsing', () => {
     expect((thrown as McpError).code).toBe(JsonRpcErrorCode.ConfigurationError);
   });
 
+  it('holds the jwt secret floor at exactly 32 characters', () => {
+    const consoleSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const jwt = (key: string) =>
+      parseConfig({
+        NODE_ENV: 'development',
+        MCP_AUTH_MODE: 'jwt',
+        MCP_AUTH_SECRET_KEY: key,
+        DEV_MCP_AUTH_BYPASS: '',
+      });
+
+    let thrown: unknown;
+    try {
+      jwt('k'.repeat(31));
+    } catch (error) {
+      thrown = error;
+    }
+    consoleSpy.mockRestore();
+
+    expect(thrown).toBeInstanceOf(McpError);
+    const fieldErrors = (thrown as McpError).data?.validationErrors as Record<string, string[]>;
+    expect(fieldErrors.mcpAuthSecretKey).toEqual([
+      'MCP_AUTH_SECRET_KEY must be at least 32 characters for JWT mode.',
+    ]);
+    expect(jwt('k'.repeat(32)).mcpAuthSecretKey).toBe('k'.repeat(32));
+  });
+
   it('accepts a 32+ character secret key in jwt mode', () => {
     process.env.NODE_ENV = 'production';
     process.env.MCP_AUTH_MODE = 'jwt';
@@ -155,7 +181,7 @@ describe('config parsing', () => {
     expect(parsed.mcpAuthMode).toBe('jwt');
   });
 
-  it('rejects MCP_AUTH_MODE=oauth without an issuer URL and audience', () => {
+  it('rejects MCP_AUTH_MODE=oauth without an issuer URL and audience, naming each', () => {
     process.env.NODE_ENV = 'development';
     process.env.MCP_AUTH_MODE = 'oauth';
     delete process.env.OAUTH_ISSUER_URL;
@@ -170,6 +196,14 @@ describe('config parsing', () => {
 
     expect(thrown).toBeInstanceOf(McpError);
     expect((thrown as McpError).code).toBe(JsonRpcErrorCode.ConfigurationError);
+    // Each requirement is its own check: dropping either one must surface here.
+    const fieldErrors = (thrown as McpError).data?.validationErrors as Record<string, string[]>;
+    expect(fieldErrors.oauthIssuerUrl).toEqual([
+      'OAUTH_ISSUER_URL is required when MCP_AUTH_MODE=oauth.',
+    ]);
+    expect(fieldErrors.oauthAudience).toEqual([
+      'OAUTH_AUDIENCE is required when MCP_AUTH_MODE=oauth.',
+    ]);
   });
 
   it('accepts MCP_AUTH_MODE=oauth with an issuer URL and audience', () => {
