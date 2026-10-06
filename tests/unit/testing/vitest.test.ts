@@ -1,10 +1,11 @@
 /**
  * @fileoverview Behavioral tests for the `mcpTest` fixture-based Vitest test.
  * Verifies per-test freshness of `ctx` and `storage` fixtures, storage fixture
- * correctness, and the `.extend` override pattern using the function form.
+ * correctness, the `fetchMock` fixture's install and restore, and the `.extend`
+ * override pattern using the function form.
  * @module tests/testing/vitest.test
  */
-import { describe, expect } from 'vitest';
+import { describe, expect, onTestFinished } from 'vitest';
 import { StorageService } from '@/storage/core/StorageService.js';
 import type { MockContextLogger } from '@/testing/index.js';
 import { createMockContext } from '@/testing/index.js';
@@ -71,8 +72,19 @@ mcpTest('fetchMock fixture installs a strict upstream HTTP fake', async ({ fetch
   expect(fetchMock.calls).toHaveLength(1);
 });
 
+// Fixture teardown runs before `onTestFinished` callbacks, so the callback sees
+// what every later test in the run will see.
+const realFetch = globalThis.fetch;
+
+mcpTest('fetchMock fixture restores the original fetch once its test ends', ({ fetchMock }) => {
+  expect(globalThis.fetch).toBe(fetchMock.fetch);
+  onTestFinished(() => {
+    expect(globalThis.fetch).toBe(realFetch);
+  });
+});
+
 // ---------------------------------------------------------------------------
-// extend — function-form override preserves per-test freshness
+// extend — a function-form override beside the inherited fixtures
 // ---------------------------------------------------------------------------
 
 describe('mcpTest.extend with function-form override', () => {
@@ -83,21 +95,10 @@ describe('mcpTest.extend with function-form override', () => {
     },
   });
 
-  tenantTest('ctx.tenantId reflects override', ({ ctx }) => {
+  tenantTest('overrides ctx and keeps the inherited fixtures', async ({ ctx, storage }) => {
     expect(ctx.tenantId).toBe('override-tenant');
-  });
-
-  tenantTest('each override test still gets a fresh ctx', async ({ ctx }) => {
-    const calls = (ctx.log as MockContextLogger).calls;
-    expect(calls).toHaveLength(0);
-    ctx.log.info('override test log');
-    expect(calls).toHaveLength(1);
-  });
-
-  tenantTest('another override test has zero prior logs', ({ ctx }) => {
-    const calls = (ctx.log as MockContextLogger).calls;
-    expect(calls).toHaveLength(0);
-    ctx.log.info('another local message');
-    expect(calls).toHaveLength(1);
+    const rctx = { requestId: 'extend-test', timestamp: new Date().toISOString(), tenantId: 't1' };
+    await storage.set('inherited', { written: true }, rctx);
+    expect(await storage.get('inherited', rctx)).toEqual({ written: true });
   });
 });

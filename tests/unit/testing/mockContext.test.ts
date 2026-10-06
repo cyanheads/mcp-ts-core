@@ -49,22 +49,28 @@ describe('createMockContext helpers', () => {
   });
 
   it('applies requestId defaults and passes through optional handlers', () => {
+    const notifyPromptListChanged = () => {};
     const notifyResourceListChanged = () => {};
     const notifyResourceUpdated = (_uri: string) => {};
+    const notifyToolListChanged = () => {};
     const uri = new URL('test://resource/1');
 
     const defaultCtx = createMockContext();
     const customCtx = createMockContext({
+      notifyPromptListChanged,
       notifyResourceListChanged,
       notifyResourceUpdated,
+      notifyToolListChanged,
       requestId: 'custom-request-id',
       uri,
     });
 
     expect(defaultCtx.requestId).toBe('test-request-id');
     expect(customCtx.requestId).toBe('custom-request-id');
+    expect(customCtx.notifyPromptListChanged).toBe(notifyPromptListChanged);
     expect(customCtx.notifyResourceListChanged).toBe(notifyResourceListChanged);
     expect(customCtx.notifyResourceUpdated).toBe(notifyResourceUpdated);
+    expect(customCtx.notifyToolListChanged).toBe(notifyToolListChanged);
     expect(customCtx.uri).toBe(uri);
   });
 

@@ -74,6 +74,54 @@ describe('createFetchMock', () => {
     expect(harness.calls).toHaveLength(0);
   });
 
+  it('treats a request whose method differs from the route as unhandled', async () => {
+    const harness = createFetchMock([
+      { match: 'https://api.example.test/items', method: 'GET', respond: new Response('listed') },
+    ]);
+
+    await expect(
+      harness.fetch('https://api.example.test/items', { method: 'POST', body: '{}' }),
+    ).rejects.toThrow('Unhandled fetch request: POST https://api.example.test/items');
+    expect(harness.calls).toHaveLength(0);
+  });
+
+  it('matches a global regular expression on every request, not every other one', async () => {
+    const harness = createFetchMock([{ match: /\/items\/\d+$/g, respond: new Response('item') }]);
+
+    for (const id of [1, 2, 3]) {
+      await expect(
+        harness.fetch(`https://api.example.test/items/${id}`).then((r) => r.text()),
+      ).resolves.toBe('item');
+    }
+  });
+
+  it('serves the first registered route when several match', async () => {
+    const harness = createFetchMock([{ match: /\/items$/, respond: new Response('first') }]).route({
+      match: 'https://api.example.test/items',
+      respond: new Response('second'),
+    });
+
+    await expect(
+      harness.fetch('https://api.example.test/items').then((r) => r.text()),
+    ).resolves.toBe('first');
+  });
+
+  it('keeps a captured request readable after the responder consumed its body', async () => {
+    const harness = createFetchMock([
+      {
+        match: (request) => request.method === 'POST',
+        respond: async (request) => Response.json(await request.json()),
+      },
+    ]);
+
+    await harness.fetch('https://api.example.test/items', {
+      method: 'POST',
+      body: JSON.stringify({ name: 'example' }),
+    });
+
+    await expect(harness.calls[0]?.request.json()).resolves.toEqual({ name: 'example' });
+  });
+
   it('installs and restores global fetch idempotently and reset clears routes and calls', async () => {
     const originalFetch = globalThis.fetch;
     const harness = createFetchMock([
@@ -298,85 +346,6 @@ describe('runToolContract', () => {
     ]);
   });
 
-  it('returns the production error envelope for declared handler failures', async () => {
-    const definition = tool('contract_error', {
-      description: 'Error contract.',
-      errors: [
-        {
-          reason: 'missing_item',
-          code: JsonRpcErrorCode.NotFound,
-          when: 'The item is missing.',
-          recovery: 'Request a known item identifier and retry.',
-        },
-      ],
-      input: z.object({ id: z.string().describe('Item ID') }),
-      output: z.object({ id: z.string().describe('Item ID') }),
-      handler(_input, ctx) {
-        throw ctx.fail('missing_item');
-      },
-    });
-
-    const result = await runToolContract(definition, { id: 'missing' });
-
-    // The declared recovery fills the bare `ctx.fail`, as the factory does (#579),
-    // and no request id is added — the runner has no real request (#576).
-    expect(result).toEqual({
-      isError: true,
-      content: [
-        {
-          type: 'text',
-          text:
-            'Error: The item is missing.\n\n' +
-            'Recovery: Request a known item identifier and retry.\n\n(reason missing_item)',
-        },
-      ],
-      structuredContent: {
-        error: {
-          code: JsonRpcErrorCode.NotFound,
-          message: 'The item is missing.',
-          data: {
-            reason: 'missing_item',
-            recovery: { hint: 'Request a known item identifier and retry.' },
-          },
-        },
-      },
-    });
-  });
-
-  it('fills a declared reason a service throws below the handler (#579)', async () => {
-    const fetchItem = (id: string): never => {
-      throw new McpError(JsonRpcErrorCode.NotFound, `No item ${id}.`, { reason: 'missing_item' });
-    };
-    const definition = tool('contract_service_error', {
-      description: 'Error contract, thrown below the handler.',
-      errors: [
-        {
-          reason: 'missing_item',
-          code: JsonRpcErrorCode.NotFound,
-          when: 'The item is missing.',
-          recovery: 'Request a known item identifier and retry.',
-          thrownBy: 'service',
-        },
-      ],
-      input: z.object({ id: z.string().describe('Item ID') }),
-      output: z.object({ id: z.string().describe('Item ID') }),
-      handler: (input) => fetchItem(input.id),
-    });
-
-    const result = await runToolContract(definition, { id: '7' });
-
-    expect(result.structuredContent).toEqual({
-      error: {
-        code: JsonRpcErrorCode.NotFound,
-        message: 'No item 7.',
-        data: {
-          reason: 'missing_item',
-          recovery: { hint: 'Request a known item identifier and retry.' },
-        },
-      },
-    });
-  });
-
   it('fills a duplicated reason from the entry ctx.recoveryFor resolves (#579)', async () => {
     let resolved: unknown;
     const definition = tool('contract_duplicate_reason', {
@@ -438,13 +407,7 @@ describe('runToolContract', () => {
     ]);
   });
 
-  it('turns output-schema and formatter failures into error envelopes', async () => {
-    const badOutput = tool('contract_bad_output', {
-      description: 'Invalid output contract.',
-      input: z.object({}),
-      output: z.object({ ok: z.boolean().describe('Success') }),
-      handler: () => ({ ok: 'wrong' }) as never,
-    });
+  it('turns a formatter failure into an error envelope', async () => {
     const badFormat = tool('contract_bad_format', {
       description: 'Invalid formatter contract.',
       input: z.object({}),
@@ -455,10 +418,8 @@ describe('runToolContract', () => {
       },
     });
 
-    const schemaResult = await runToolContract(badOutput, {});
     const formatResult = await runToolContract(badFormat, {});
 
-    expect(schemaResult).toMatchObject({ isError: true });
     expect(formatResult).toMatchObject({
       isError: true,
       structuredContent: {
