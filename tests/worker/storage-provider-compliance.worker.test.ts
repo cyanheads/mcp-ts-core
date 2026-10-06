@@ -33,10 +33,6 @@ CREATE TABLE IF NOT EXISTS kv_store (
 `;
 
 storageProviderTests({
-  capabilities: {
-    rejectsUnserializableValues: true,
-    setManyIsAtomic: true,
-  },
   create: () => new D1Provider(env.DB),
   name: 'cloudflare-d1 (real Miniflare D1)',
   async setup() {
@@ -52,7 +48,6 @@ storageProviderTests({
     deterministicTtl: false,
     listFiltersExpired: false,
     preciseDeleteCounts: false,
-    rejectsUnserializableValues: true,
   },
   create: () => new KvProvider(env.KV_NAMESPACE),
   name: 'cloudflare-kv (real Miniflare KV)',
@@ -65,7 +60,6 @@ storageProviderTests({
   capabilities: {
     listFiltersExpired: false,
     preciseDeleteCounts: false,
-    rejectsUnserializableValues: true,
   },
   create: () => new R2Provider(env.R2_BUCKET),
   name: 'cloudflare-r2 (real Miniflare R2)',

@@ -4,9 +4,9 @@
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-import type { IStorageProvider } from '@/storage/core/IStorageProvider.js';
+import type { IStorageProvider, ListResult } from '@/storage/core/IStorageProvider.js';
 import { StorageService } from '@/storage/core/StorageService.js';
-import { JsonRpcErrorCode, McpError } from '@/types-global/errors.js';
+import { JsonRpcErrorCode } from '@/types-global/errors.js';
 import type { RequestContext } from '@/utils/internal/requestContext.js';
 import { requestContextService } from '@/utils/internal/requestContext.js';
 
@@ -17,10 +17,6 @@ export interface StorageProviderCapabilities {
   listFiltersExpired?: boolean;
   /** Backend reports whether a deleted key actually existed. */
   preciseDeleteCounts?: boolean;
-  /** Provider rejects values that cannot be serialized by its backend. */
-  rejectsUnserializableValues?: boolean;
-  /** A rejected setMany() leaves none of that batch committed. */
-  setManyIsAtomic?: boolean;
 }
 
 export interface StorageProviderHarness {
@@ -33,6 +29,12 @@ export interface StorageProviderHarness {
 
 const TENANT_A = 'tenant-a';
 const TENANT_B = 'tenant-b';
+
+function cyclicValue(): Record<string, unknown> {
+  const cyclic: Record<string, unknown> = {};
+  cyclic.self = cyclic;
+  return cyclic;
+}
 
 function contextFor(tenantId: string): RequestContext {
   return requestContextService.createRequestContext({
@@ -56,8 +58,6 @@ export function storageProviderTests(harness: StorageProviderHarness): void {
       deterministicTtl: true,
       listFiltersExpired: true,
       preciseDeleteCounts: true,
-      rejectsUnserializableValues: false,
-      setManyIsAtomic: false,
       ...harness.capabilities,
     };
 
@@ -74,6 +74,18 @@ export function storageProviderTests(harness: StorageProviderHarness): void {
       contextA = contextFor(TENANT_A);
       contextB = contextFor(TENANT_B);
     });
+
+    /** Follows `nextCursor` from the first page to the last, bounded so a cursor loop fails fast. */
+    async function walkPages(prefix: string, limit: number): Promise<ListResult[]> {
+      const pages: ListResult[] = [];
+      let cursor: string | undefined;
+      do {
+        const page = await storageA.list(prefix, contextA, { limit, ...(cursor && { cursor }) });
+        pages.push(page);
+        cursor = page.nextCursor;
+      } while (cursor && pages.length < 10);
+      return pages;
+    }
 
     afterEach(async () => {
       try {
@@ -237,6 +249,47 @@ export function storageProviderTests(harness: StorageProviderHarness): void {
       });
     });
 
+    it('matches list prefixes literally and only at the start of a key', async () => {
+      await storageA.setMany(
+        new Map<string, unknown>([
+          ['lit/a', 1],
+          ['x/lit/b', 2],
+          ['lit_x/c', 3],
+          ['litax/d', 4],
+        ]),
+        contextA,
+      );
+
+      await expect(storageA.list('lit/', contextA)).resolves.toMatchObject({ keys: ['lit/a'] });
+      // `_` is a SQL LIKE wildcard; a provider that leaves it unescaped also matches `litax/d`.
+      await expect(storageA.list('lit_x/', contextA)).resolves.toMatchObject({
+        keys: ['lit_x/c'],
+      });
+    });
+
+    it('walks every key exactly once and ends without a cursor on an exact-multiple page', async () => {
+      const keys = Array.from(
+        { length: 12 },
+        (_, index) => `walk/${String(index).padStart(2, '0')}`,
+      );
+      await storageA.setMany(new Map(keys.map((key, index) => [key, { index }])), contextA);
+
+      for (const [limit, pageSizes] of [
+        [5, [5, 5, 2]],
+        [4, [4, 4, 4]],
+      ] as const) {
+        const pages = await walkPages('walk/', limit);
+        expect(pages.map((page) => page.keys.length)).toEqual(pageSizes);
+        expect(pages.flatMap((page) => page.keys)).toEqual(keys);
+        for (const page of pages) {
+          // Pre-fetched values are optional; when a provider supplies them they must be the stored ones.
+          if (page.values) {
+            expect(page.values).toEqual(await storageA.getMany(page.keys, contextA));
+          }
+        }
+      }
+    });
+
     it('resumes pagination without overlap when the cursor key is deleted', async () => {
       await storageA.setMany(
         new Map<string, unknown>([
@@ -369,16 +422,19 @@ export function storageProviderTests(harness: StorageProviderHarness): void {
     });
 
     it.each([
-      ['undefined', undefined],
-      ['function', () => 1],
-      ['symbol', Symbol('unencodable')],
-    ])('rejects a top-level %s on set and setMany without writing', async (_label, value) => {
+      ['a top-level undefined', undefined],
+      ['a top-level function', () => 1],
+      ['a top-level symbol', Symbol('unencodable')],
+      ['a nested bigint', { big: 10n }],
+      ['a cyclic reference', cyclicValue()],
+    ])('rejects %s on set and setMany without writing', async (_label, value) => {
+      const unencodable = { name: 'McpError', code: JsonRpcErrorCode.SerializationError };
       await storageA.set('unencodable/existing', 'original', contextA);
-      await expect(storageA.set('unencodable/existing', value, contextA)).rejects.toBeInstanceOf(
-        McpError,
+      await expect(storageA.set('unencodable/existing', value, contextA)).rejects.toMatchObject(
+        unencodable,
       );
-      await expect(storageA.set('unencodable/new', value, contextA)).rejects.toBeInstanceOf(
-        McpError,
+      await expect(storageA.set('unencodable/new', value, contextA)).rejects.toMatchObject(
+        unencodable,
       );
       await expect(
         storageA.setMany(
@@ -388,7 +444,7 @@ export function storageProviderTests(harness: StorageProviderHarness): void {
           ]),
           contextA,
         ),
-      ).rejects.toBeInstanceOf(McpError);
+      ).rejects.toMatchObject(unencodable);
 
       await expect(storageA.get('unencodable/existing', contextA)).resolves.toBe('original');
       await expect(
@@ -401,22 +457,6 @@ export function storageProviderTests(harness: StorageProviderHarness): void {
         keys: ['unencodable/existing'],
       });
     });
-
-    if (capabilities.rejectsUnserializableValues) {
-      it('rejects unserializable batches, preserves documented atomicity, and remains usable', async () => {
-        const entries = new Map<string, unknown>([
-          ['failure/good', 'value'],
-          ['failure/bad', 1n],
-        ]);
-        await expect(storageA.setMany(entries, contextA)).rejects.toThrow();
-
-        if (capabilities.setManyIsAtomic) {
-          await expect(storageA.get('failure/good', contextA)).resolves.toBeNull();
-        }
-        await storageA.set('failure/recovery', 'ok', contextA);
-        await expect(storageA.get('failure/recovery', contextA)).resolves.toBe('ok');
-      });
-    }
 
     it('rejects malformed cursors and unsafe list limits without touching another tenant', async () => {
       await storageB.set('sentinel/value', 'tenant-b', contextB);

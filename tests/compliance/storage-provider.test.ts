@@ -12,19 +12,12 @@ import { InMemoryProvider } from '@/storage/providers/inMemory/inMemoryProvider.
 import { storageProviderTests } from './storage-provider.js';
 
 storageProviderTests({
-  capabilities: {
-    rejectsUnserializableValues: true,
-    setManyIsAtomic: true,
-  },
   create: () => new InMemoryProvider(),
   name: 'in-memory',
 });
 
 let fileSystemPath = '';
 storageProviderTests({
-  capabilities: {
-    rejectsUnserializableValues: true,
-  },
   async setup() {
     fileSystemPath = await mkdtemp(join(tmpdir(), 'mcp-ts-core-storage-compliance-'));
   },
