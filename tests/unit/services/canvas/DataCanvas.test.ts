@@ -177,12 +177,13 @@ describe('DataCanvas · drop / countForTenant / healthCheck / shutdown', () => {
     await registry.shutdown(ctxWithTenant);
   });
 
-  it('healthCheck delegates to the provider', async () => {
+  it("healthCheck reports the provider's verdict, an unhealthy one included", async () => {
     const provider = makeStubProvider();
+    provider.healthCheck.mockResolvedValueOnce(false);
     const registry = new CanvasRegistry(provider, makeOptions());
     const canvas = new DataCanvas(provider, registry);
-    await expect(canvas.healthCheck()).resolves.toBe(true);
-    expect(provider.healthCheck).toHaveBeenCalled();
+    await expect(canvas.healthCheck()).resolves.toBe(false);
+    expect(provider.healthCheck).toHaveBeenCalledTimes(1);
     await registry.shutdown(ctxWithTenant);
   });
 

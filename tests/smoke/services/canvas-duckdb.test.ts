@@ -7,9 +7,11 @@
  * @module tests/smoke/canvas-duckdb.test
  */
 
-import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { existsSync } from 'node:fs';
+import { mkdtemp, readdir, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { setTimeout as delay } from 'node:timers/promises';
 
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
@@ -20,7 +22,7 @@ import {
   collectDisallowedOperators,
 } from '@/services/canvas/core/sqlGate.js';
 import { DuckdbProvider } from '@/services/canvas/providers/duckdb/DuckdbProvider.js';
-import { McpError } from '@/types-global/errors.js';
+import { JsonRpcErrorCode, McpError } from '@/types-global/errors.js';
 import type { RequestContext } from '@/utils/internal/requestContext.js';
 
 const ctx: RequestContext = {
@@ -274,6 +276,49 @@ describe('canvas · DuckDB round trip', () => {
     expect(((absoluteErr as McpError).data as { reason?: string }).reason).toBe(
       'export_path_absolute',
     );
+  });
+
+  // The export path is caller input spliced into a `COPY … TO '<path>'`
+  // literal. Lexical confinement passes a relative path whatever it contains,
+  // so quote-escaping is what keeps it one literal rather than the end of one
+  // statement and the start of another.
+  describe('export path quoting', () => {
+    it('writes a path containing a quote to that exact file inside the sandbox', async () => {
+      const instance = await canvas.acquire(undefined, ctx);
+      await instance.registerTable('quoted_export', [{ id: 1 }]);
+
+      const result = await instance.export('quoted_export', { format: 'csv', path: "it's.csv" });
+
+      expect(result.path).toBe(join(exportRoot, "it's.csv"));
+      expect((await readFile(join(exportRoot, "it's.csv"))).toString()).toBe('id\n1\n');
+    });
+
+    it('cannot smuggle a second COPY that writes outside the sandbox', async () => {
+      const outside = await mkdtemp(join(tmpdir(), 'canvas-smoke-outside-'));
+      try {
+        const instance = await canvas.acquire(undefined, ctx);
+        await instance.registerTable('smuggle_src', [{ id: 1 }]);
+        const target = join(outside, 'pwned.csv');
+
+        const failure = await instance
+          .export('smuggle_src', {
+            format: 'csv',
+            path: `a.csv' (FORMAT 'csv'); COPY "smuggle_src" TO '${target}`,
+          })
+          .then(
+            () => undefined,
+            (err: unknown) => err,
+          );
+
+        // Escaped, the whole string is one file name under directories that
+        // do not exist, so the engine's open fails as an I/O fault.
+        expect(failure).toBeInstanceOf(McpError);
+        expect((failure as McpError).code).toBe(JsonRpcErrorCode.DatabaseError);
+        expect(existsSync(target)).toBe(false);
+      } finally {
+        await rm(outside, { recursive: true, force: true });
+      }
+    });
   });
 
   it('drop and clear behave correctly', async () => {
@@ -984,6 +1029,23 @@ describe('canvas · DuckDB round trip', () => {
     await expect(provider.healthCheck()).resolves.toBe(true);
   });
 
+  // A canvas never fetches or loads an extension on its own: each one adds
+  // table functions and plan operators the gate was not written against.
+  it('creates every canvas with extension autoinstall and autoload switched off', async () => {
+    const instance = await canvas.acquire(undefined, ctx);
+    // biome-ignore lint/complexity/useLiteralKeys: deliberate access to the private record to read engine settings outside the gate.
+    const record = provider['canvases'].get(instance.canvasId)!;
+    const reader = await record.controlConnection.runAndReadAll(
+      `SELECT name, value FROM duckdb_settings()
+       WHERE name IN ('autoinstall_known_extensions', 'autoload_known_extensions')
+       ORDER BY name`,
+    );
+    expect(reader.getRowObjectsJson()).toEqual([
+      { name: 'autoinstall_known_extensions', value: 'false' },
+      { name: 'autoload_known_extensions', value: 'false' },
+    ]);
+  });
+
   // dataTypeToColumnType round-trip — every ColumnType tag maps to and from
   // its DuckDB information_schema.columns.data_type string correctly. This is
   // the describe()/describeOne() column-typing path, otherwise untested.
@@ -1182,4 +1244,71 @@ describe('canvas · DuckDB round trip', () => {
     expect(mcpErr.code).toBe(-32010);
     expect((mcpErr.data as { reason?: string } | undefined)?.reason).toBeUndefined();
   });
+});
+
+// An abort reaches a running query as an engine interrupt and surfaces as a
+// cancelled Timeout. DuckDB acts on an interrupt only while a query executes,
+// so the abort waits until this one observably is: a sort over a three-way
+// cross join (8 billion rows) past a 24 MB memory limit writes its first spill
+// file within moments of starting and could not finish for hours. No timing is
+// asserted — the only clock is the poll for that file.
+describe('canvas · query cancellation', () => {
+  let scratchParent: string;
+  let cancelExportRoot: string;
+  let cancelProvider: DuckdbProvider;
+
+  beforeAll(async () => {
+    scratchParent = await mkdtemp(join(tmpdir(), 'canvas-smoke-cancel-'));
+    cancelExportRoot = await mkdtemp(join(tmpdir(), 'canvas-smoke-cancel-export-'));
+    cancelProvider = new DuckdbProvider({
+      memoryLimitMb: 24,
+      exportRootPath: cancelExportRoot,
+      tempRootPath: scratchParent,
+      defaultRowLimit: 100,
+      schemaSniffRows: 10,
+    });
+    await cancelProvider.initCanvas('cancelq001', ctx);
+    await cancelProvider.registerTable(
+      'cancelq001',
+      'big',
+      Array.from({ length: 2_000 }, (_, x) => ({ x })),
+      ctx,
+    );
+  });
+
+  afterAll(async () => {
+    await cancelProvider?.shutdown();
+    await rm(scratchParent, { recursive: true, force: true });
+    await rm(cancelExportRoot, { recursive: true, force: true });
+  });
+
+  /** Files the engine has spilled anywhere under this provider's scratch parent. */
+  async function spilledFiles(): Promise<number> {
+    const entries = await readdir(scratchParent, { recursive: true, withFileTypes: true });
+    return entries.filter((entry) => entry.isFile()).length;
+  }
+
+  it('interrupts a running query and rejects with a cancelled Timeout', async () => {
+    expect(await spilledFiles()).toBe(0);
+    const controller = new AbortController();
+    const outcome = cancelProvider
+      .query(
+        'cancelq001',
+        'SELECT a.x AS a, b.x AS b, c.x AS c FROM big a, big b, big c ORDER BY a DESC, b DESC, c DESC',
+        ctx,
+        { signal: controller.signal },
+      )
+      .then(
+        () => undefined,
+        (err: unknown) => err,
+      );
+
+    while ((await spilledFiles()) === 0) await delay(20);
+    controller.abort();
+
+    const failure = await outcome;
+    expect(failure).toBeInstanceOf(McpError);
+    expect((failure as McpError).code).toBe(JsonRpcErrorCode.Timeout);
+    expect((failure as McpError).data?.reason).toBe('cancelled');
+  }, 120_000);
 });

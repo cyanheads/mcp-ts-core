@@ -891,6 +891,51 @@ describe('CanvasRegistry · mintId collision handling', () => {
   });
 });
 
+// Every other suite here disables the interval and calls sweep() directly;
+// these drive the timer a deployment actually runs on.
+describe('CanvasRegistry · periodic sweeper', () => {
+  const INTERVAL = 60_000;
+
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('destroys an expired canvas on the next interval tick, and only then', async () => {
+    const clock = vi.fn(() => 1_000_000);
+    const provider = makeStubProvider();
+    const registry = new CanvasRegistry(
+      provider,
+      makeOptions({ sweeperIntervalMs: INTERVAL }),
+      clock,
+    );
+    const { canvasId } = await registry.acquire(undefined, 'tenant-a', baseContext);
+
+    await vi.advanceTimersByTimeAsync(INTERVAL);
+    expect(provider.destroyCalls).toEqual([]);
+
+    clock.mockReturnValue(1_000_000 + TTL + 1);
+    expect(provider.destroyCalls).toEqual([]);
+    await vi.advanceTimersByTimeAsync(INTERVAL);
+    expect(provider.destroyCalls).toEqual([canvasId]);
+    expect(registry.totalActive()).toBe(0);
+    await registry.shutdown(baseContext);
+  });
+
+  it('owns exactly one interval, and shutdown clears it', async () => {
+    const before = vi.getTimerCount();
+    const registry = new CanvasRegistry(
+      makeStubProvider(),
+      makeOptions({ sweeperIntervalMs: INTERVAL }),
+    );
+    expect(vi.getTimerCount()).toBe(before + 1);
+    await registry.shutdown(baseContext);
+    expect(vi.getTimerCount()).toBe(before);
+  });
+});
+
 describe('CanvasRegistry · sweep() after shutdown', () => {
   it('sweep() is a no-op once the registry is shutting down', async () => {
     const clock = vi.fn(() => 1_000_000);

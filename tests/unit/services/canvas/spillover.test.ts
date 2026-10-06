@@ -569,4 +569,31 @@ describe('spillover · caps.maxRows exact-boundary behavior', () => {
     expect(harness.capture.last?.rows).toEqual([{ i: 0 }, { i: 1 }]);
     await shutdown();
   });
+
+  it('caps the staged table below the preview row count, leaving the preview whole', async () => {
+    const { canvas, harness, shutdown } = await freshCanvas();
+    // previewChars=35 holds five 7-char rows; a cap of 2 is reached inside
+    // the buffered rows, before the sentinel or the tail.
+    const source = Array.from({ length: 10 }, (_, i) => ({ i }));
+    const result = await spillover({ canvas, source, previewChars: 35, caps: { maxRows: 2 } });
+    expect(result.spilled).toBe(true);
+    if (!result.spilled) throw new Error('unreachable');
+    expect(result.previewRows).toEqual(source.slice(0, 5));
+    expect(result.truncated).toBe(true);
+    expect(harness.capture.last?.rows).toEqual([{ i: 0 }, { i: 1 }]);
+    expect(result.handle.rowCount).toBe(2);
+    await shutdown();
+  });
+});
+
+describe('spillover · previewChars exact-boundary behavior', () => {
+  it('keeps a source whose rows serialize to exactly previewChars inline', async () => {
+    const { canvas, harness, shutdown } = await freshCanvas();
+    // Two 7-char rows (`{"i":N}`) fill a 14-char budget exactly.
+    const source = [{ i: 0 }, { i: 1 }];
+    const result = await spillover({ canvas, source, previewChars: 14 });
+    expect(result).toEqual({ spilled: false, previewRows: source });
+    expect(harness.provider.registerTable).not.toHaveBeenCalled();
+    await shutdown();
+  });
 });
