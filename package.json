@@ -190,6 +190,7 @@
     "test:fuzz": "bunx vitest run --project fuzz",
     "test:typecheck": "bunx vitest run --project typecheck",
     "test:compliance": "bunx vitest run --project compliance",
+    "test:contract": "bunx vitest run --project contract",
     "test:leak-gate": "bunx vitest run --project leak-gate",
     "test:worker": "bun run scripts/with-node.ts ./node_modules/vitest/vitest.mjs run --config tests/config/vitest.worker.ts && bun run scripts/with-node.ts ./node_modules/vitest/vitest.mjs run --config tests/config/vitest.worker-bundle.ts",
     "test:ui": "bunx vitest --ui",

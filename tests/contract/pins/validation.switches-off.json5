@@ -1,0 +1,795 @@
+{
+  "contract_disabled: disabled tool": {
+    "protocolError": {
+      "code": -32602,
+      "message": "Tool contract_disabled not found"
+    }
+  },
+  "contract_missing: unknown tool": {
+    "protocolError": {
+      "code": -32602,
+      "message": "Tool contract_missing not found"
+    }
+  },
+  "contract_open_root: open root, undeclared key": {
+    "accepted": {
+      "content": [
+        {
+          "text": "{\n  \"ok\": true\n}",
+          "type": "text"
+        }
+      ],
+      "handlerSaw": {
+        "extra": true,
+        "id": "r1"
+      },
+      "structuredContent": {
+        "ok": true
+      }
+    }
+  },
+  "contract_probe: arguments not an object": {
+    "protocolError": {
+      "code": -32602,
+      "message": "Invalid tools/call request: [\n  {\n    \"expected\": \"record\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"params\",\n      \"arguments\"\n    ],\n    \"message\": \"Invalid input: expected record, received array\"\n  }\n]"
+    }
+  },
+  "contract_probe: arguments omitted": {
+    "rejected": {
+      "content": [
+        {
+          "text": "Error: Input validation error: Invalid arguments for tool contract_probe: query: Invalid input: expected string, received undefined\n\nRecovery: Provide query.\n\n(reason invalid_arguments · request <requestId>)",
+          "type": "text"
+        }
+      ],
+      "isError": true,
+      "structuredContent": {
+        "error": {
+          "code": -32602,
+          "data": {
+            "issues": [
+              {
+                "code": "invalid_type",
+                "path": [
+                  "query"
+                ]
+              }
+            ],
+            "reason": "invalid_arguments",
+            "recovery": {
+              "hint": "Provide query."
+            },
+            "requestId": "<requestId>"
+          },
+          "message": "Input validation error: Invalid arguments for tool contract_probe: query: Invalid input: expected string, received undefined"
+        }
+      }
+    }
+  },
+  "contract_probe: case-style alias": {
+    "rejected": {
+      "content": [
+        {
+          "text": "Error: Input validation error: Invalid arguments for tool contract_probe: Unrecognized key: \"max_results\"\n\nRecovery: Unknown key max_results. This tool accepts: query, limit, tags, filter, weights, maxResults, code, region, note, shape, routing.\n\n(reason invalid_arguments · request <requestId>)",
+          "type": "text"
+        }
+      ],
+      "isError": true,
+      "structuredContent": {
+        "error": {
+          "code": -32602,
+          "data": {
+            "issues": [
+              {
+                "code": "unrecognized_keys",
+                "path": []
+              }
+            ],
+            "reason": "invalid_arguments",
+            "recovery": {
+              "hint": "Unknown key max_results. This tool accepts: query, limit, tags, filter, weights, maxResults, code, region, note, shape, routing."
+            },
+            "requestId": "<requestId>"
+          },
+          "message": "Input validation error: Invalid arguments for tool contract_probe: Unrecognized key: \"max_results\""
+        }
+      }
+    }
+  },
+  "contract_probe: client-added keys": {
+    "rejected": {
+      "content": [
+        {
+          "text": "Error: Input validation error: Invalid arguments for tool contract_probe: Unrecognized keys: \"_meta\", \"toolCallId\", \"tool_call_description\"\n\nRecovery: Unknown keys _meta, toolCallId, tool_call_description. This tool accepts: query, limit, tags, filter, weights, maxResults, code, region, note, shape, routing.\n\n(reason invalid_arguments · request <requestId>)",
+          "type": "text"
+        }
+      ],
+      "isError": true,
+      "structuredContent": {
+        "error": {
+          "code": -32602,
+          "data": {
+            "issues": [
+              {
+                "code": "unrecognized_keys",
+                "path": []
+              }
+            ],
+            "reason": "invalid_arguments",
+            "recovery": {
+              "hint": "Unknown keys _meta, toolCallId, tool_call_description. This tool accepts: query, limit, tags, filter, weights, maxResults, code, region, note, shape, routing."
+            },
+            "requestId": "<requestId>"
+          },
+          "message": "Input validation error: Invalid arguments for tool contract_probe: Unrecognized keys: \"_meta\", \"toolCallId\", \"tool_call_description\""
+        }
+      }
+    }
+  },
+  "contract_probe: declared alias": {
+    "accepted": {
+      "content": [
+        {
+          "text": "ok: true",
+          "type": "text"
+        }
+      ],
+      "handlerSaw": {
+        "limit": 10,
+        "query": "x"
+      },
+      "structuredContent": {
+        "ok": true
+      }
+    }
+  },
+  "contract_probe: declared alias beside its target": {
+    "rejected": {
+      "content": [
+        {
+          "text": "Error: Input validation error: Invalid arguments for tool contract_probe: Unrecognized key: \"q\"\n\nRecovery: Unknown key q. This tool accepts: query, limit, tags, filter, weights, maxResults, code, region, note, shape, routing.\n\n(reason invalid_arguments · request <requestId>)",
+          "type": "text"
+        }
+      ],
+      "isError": true,
+      "structuredContent": {
+        "error": {
+          "code": -32602,
+          "data": {
+            "issues": [
+              {
+                "code": "unrecognized_keys",
+                "path": []
+              }
+            ],
+            "reason": "invalid_arguments",
+            "recovery": {
+              "hint": "Unknown key q. This tool accepts: query, limit, tags, filter, weights, maxResults, code, region, note, shape, routing."
+            },
+            "requestId": "<requestId>"
+          },
+          "message": "Input validation error: Invalid arguments for tool contract_probe: Unrecognized key: \"q\""
+        }
+      }
+    }
+  },
+  "contract_probe: declared underscore alias with a bad value": {
+    "rejected": {
+      "content": [
+        {
+          "text": "Error: Input validation error: Invalid arguments for tool contract_probe: query: Too small: expected string to have >=1 characters\n\nRecovery: query: Too small: expected string to have >=1 characters. Validated _q as query.\n\n(reason invalid_arguments · request <requestId>)",
+          "type": "text"
+        }
+      ],
+      "isError": true,
+      "structuredContent": {
+        "error": {
+          "code": -32602,
+          "data": {
+            "input": {
+              "aliased": [
+                {
+                  "alias": "_q",
+                  "target": "query"
+                }
+              ],
+              "ignored": []
+            },
+            "issues": [
+              {
+                "code": "too_small",
+                "path": [
+                  "query"
+                ]
+              }
+            ],
+            "reason": "invalid_arguments",
+            "recovery": {
+              "hint": "query: Too small: expected string to have >=1 characters. Validated _q as query."
+            },
+            "requestId": "<requestId>"
+          },
+          "message": "Input validation error: Invalid arguments for tool contract_probe: query: Too small: expected string to have >=1 characters"
+        }
+      }
+    }
+  },
+  "contract_probe: empty string on an optional field": {
+    "accepted": {
+      "content": [
+        {
+          "text": "ok: true",
+          "type": "text"
+        }
+      ],
+      "handlerSaw": {
+        "limit": 10,
+        "note": "",
+        "query": "x"
+      },
+      "structuredContent": {
+        "ok": true
+      }
+    }
+  },
+  "contract_probe: empty-string sentinel": {
+    "accepted": {
+      "content": [
+        {
+          "text": "ok: true",
+          "type": "text"
+        }
+      ],
+      "handlerSaw": {
+        "limit": 10,
+        "query": "x",
+        "region": ""
+      },
+      "structuredContent": {
+        "ok": true
+      }
+    }
+  },
+  "contract_probe: integer for a string": {
+    "rejected": {
+      "content": [
+        {
+          "text": "Error: Input validation error: Invalid arguments for tool contract_probe: code: Invalid input: expected string, received number\n\nRecovery: Send code as a string, not a number.\n\n(reason invalid_arguments · request <requestId>)",
+          "type": "text"
+        }
+      ],
+      "isError": true,
+      "structuredContent": {
+        "error": {
+          "code": -32602,
+          "data": {
+            "issues": [
+              {
+                "code": "invalid_type",
+                "path": [
+                  "code"
+                ]
+              }
+            ],
+            "reason": "invalid_arguments",
+            "recovery": {
+              "hint": "Send code as a string, not a number."
+            },
+            "requestId": "<requestId>"
+          },
+          "message": "Input validation error: Invalid arguments for tool contract_probe: code: Invalid input: expected string, received number"
+        }
+      }
+    }
+  },
+  "contract_probe: malformed stringified array": {
+    "rejected": {
+      "content": [
+        {
+          "text": "Error: Input validation error: Invalid arguments for tool contract_probe: tags: Invalid input: expected array, received string\n\nRecovery: Send tags as an array, not a string.\n\n(reason invalid_arguments · request <requestId>)",
+          "type": "text"
+        }
+      ],
+      "isError": true,
+      "structuredContent": {
+        "error": {
+          "code": -32602,
+          "data": {
+            "issues": [
+              {
+                "code": "invalid_type",
+                "path": [
+                  "tags"
+                ]
+              }
+            ],
+            "reason": "invalid_arguments",
+            "recovery": {
+              "hint": "Send tags as an array, not a string."
+            },
+            "requestId": "<requestId>"
+          },
+          "message": "Input validation error: Invalid arguments for tool contract_probe: tags: Invalid input: expected array, received string"
+        }
+      }
+    }
+  },
+  "contract_probe: missing required": {
+    "rejected": {
+      "content": [
+        {
+          "text": "Error: Input validation error: Invalid arguments for tool contract_probe: query: Invalid input: expected string, received undefined\n\nRecovery: Provide query.\n\n(reason invalid_arguments · request <requestId>)",
+          "type": "text"
+        }
+      ],
+      "isError": true,
+      "structuredContent": {
+        "error": {
+          "code": -32602,
+          "data": {
+            "issues": [
+              {
+                "code": "invalid_type",
+                "path": [
+                  "query"
+                ]
+              }
+            ],
+            "reason": "invalid_arguments",
+            "recovery": {
+              "hint": "Provide query."
+            },
+            "requestId": "<requestId>"
+          },
+          "message": "Input validation error: Invalid arguments for tool contract_probe: query: Invalid input: expected string, received undefined"
+        }
+      }
+    }
+  },
+  "contract_probe: nested union, unknown discriminator": {
+    "rejected": {
+      "content": [
+        {
+          "text": "Error: Input validation error: Invalid arguments for tool contract_probe: shape.kind: Invalid discriminator value. Expected 'circle' | 'square'\n\n(reason invalid_arguments · request <requestId>)",
+          "type": "text"
+        }
+      ],
+      "isError": true,
+      "structuredContent": {
+        "error": {
+          "code": -32602,
+          "data": {
+            "issues": [
+              {
+                "code": "invalid_union",
+                "path": [
+                  "shape",
+                  "kind"
+                ]
+              }
+            ],
+            "reason": "invalid_arguments",
+            "recovery": {
+              "hint": "shape.kind: Invalid discriminator value. Expected 'circle' | 'square'"
+            },
+            "requestId": "<requestId>"
+          },
+          "message": "Input validation error: Invalid arguments for tool contract_probe: shape.kind: Invalid discriminator value. Expected 'circle' | 'square'"
+        }
+      }
+    }
+  },
+  "contract_probe: out of range": {
+    "rejected": {
+      "content": [
+        {
+          "text": "Error: Input validation error: Invalid arguments for tool contract_probe: limit: Too big: expected number to be <=50\n\n(reason invalid_arguments · request <requestId>)",
+          "type": "text"
+        }
+      ],
+      "isError": true,
+      "structuredContent": {
+        "error": {
+          "code": -32602,
+          "data": {
+            "issues": [
+              {
+                "code": "too_big",
+                "path": [
+                  "limit"
+                ]
+              }
+            ],
+            "reason": "invalid_arguments",
+            "recovery": {
+              "hint": "limit: Too big: expected number to be <=50"
+            },
+            "requestId": "<requestId>"
+          },
+          "message": "Input validation error: Invalid arguments for tool contract_probe: limit: Too big: expected number to be <=50"
+        }
+      }
+    }
+  },
+  "contract_probe: record value of the wrong type": {
+    "rejected": {
+      "content": [
+        {
+          "text": "Error: Input validation error: Invalid arguments for tool contract_probe: weights.a: Invalid input: expected number, received string\n\nRecovery: Send weights.a as a number, not a string.\n\n(reason invalid_arguments · request <requestId>)",
+          "type": "text"
+        }
+      ],
+      "isError": true,
+      "structuredContent": {
+        "error": {
+          "code": -32602,
+          "data": {
+            "issues": [
+              {
+                "code": "invalid_type",
+                "path": [
+                  "weights",
+                  "a"
+                ]
+              }
+            ],
+            "reason": "invalid_arguments",
+            "recovery": {
+              "hint": "Send weights.a as a number, not a string."
+            },
+            "requestId": "<requestId>"
+          },
+          "message": "Input validation error: Invalid arguments for tool contract_probe: weights.a: Invalid input: expected number, received string"
+        }
+      }
+    }
+  },
+  "contract_probe: stringified array": {
+    "rejected": {
+      "content": [
+        {
+          "text": "Error: Input validation error: Invalid arguments for tool contract_probe: tags: Invalid input: expected array, received string\n\nRecovery: Send tags as an array, not a string.\n\n(reason invalid_arguments · request <requestId>)",
+          "type": "text"
+        }
+      ],
+      "isError": true,
+      "structuredContent": {
+        "error": {
+          "code": -32602,
+          "data": {
+            "issues": [
+              {
+                "code": "invalid_type",
+                "path": [
+                  "tags"
+                ]
+              }
+            ],
+            "reason": "invalid_arguments",
+            "recovery": {
+              "hint": "Send tags as an array, not a string."
+            },
+            "requestId": "<requestId>"
+          },
+          "message": "Input validation error: Invalid arguments for tool contract_probe: tags: Invalid input: expected array, received string"
+        }
+      }
+    }
+  },
+  "contract_probe: stringified object": {
+    "rejected": {
+      "content": [
+        {
+          "text": "Error: Input validation error: Invalid arguments for tool contract_probe: filter: Invalid input: expected object, received string\n\nRecovery: Send filter as an object, not a string.\n\n(reason invalid_arguments · request <requestId>)",
+          "type": "text"
+        }
+      ],
+      "isError": true,
+      "structuredContent": {
+        "error": {
+          "code": -32602,
+          "data": {
+            "issues": [
+              {
+                "code": "invalid_type",
+                "path": [
+                  "filter"
+                ]
+              }
+            ],
+            "reason": "invalid_arguments",
+            "recovery": {
+              "hint": "Send filter as an object, not a string."
+            },
+            "requestId": "<requestId>"
+          },
+          "message": "Input validation error: Invalid arguments for tool contract_probe: filter: Invalid input: expected object, received string"
+        }
+      }
+    }
+  },
+  "contract_probe: undeclared underscore key": {
+    "rejected": {
+      "content": [
+        {
+          "text": "Error: Input validation error: Invalid arguments for tool contract_probe: Unrecognized key: \"_trace\"\n\nRecovery: Unknown key _trace. This tool accepts: query, limit, tags, filter, weights, maxResults, code, region, note, shape, routing.\n\n(reason invalid_arguments · request <requestId>)",
+          "type": "text"
+        }
+      ],
+      "isError": true,
+      "structuredContent": {
+        "error": {
+          "code": -32602,
+          "data": {
+            "issues": [
+              {
+                "code": "unrecognized_keys",
+                "path": []
+              }
+            ],
+            "reason": "invalid_arguments",
+            "recovery": {
+              "hint": "Unknown key _trace. This tool accepts: query, limit, tags, filter, weights, maxResults, code, region, note, shape, routing."
+            },
+            "requestId": "<requestId>"
+          },
+          "message": "Input validation error: Invalid arguments for tool contract_probe: Unrecognized key: \"_trace\""
+        }
+      }
+    }
+  },
+  "contract_probe: underscore spelling of a declared key": {
+    "rejected": {
+      "content": [
+        {
+          "text": "Error: Input validation error: Invalid arguments for tool contract_probe: query: Invalid input: expected string, received undefined, Unrecognized key: \"_query\"\n\nRecovery: Provide query. Unknown key _query. This tool accepts: query, limit, tags, filter, weights, maxResults, code, region, note, shape, routing.\n\n(reason invalid_arguments · request <requestId>)",
+          "type": "text"
+        }
+      ],
+      "isError": true,
+      "structuredContent": {
+        "error": {
+          "code": -32602,
+          "data": {
+            "issues": [
+              {
+                "code": "invalid_type",
+                "path": [
+                  "query"
+                ]
+              },
+              {
+                "code": "unrecognized_keys",
+                "path": []
+              }
+            ],
+            "reason": "invalid_arguments",
+            "recovery": {
+              "hint": "Provide query. Unknown key _query. This tool accepts: query, limit, tags, filter, weights, maxResults, code, region, note, shape, routing."
+            },
+            "requestId": "<requestId>"
+          },
+          "message": "Input validation error: Invalid arguments for tool contract_probe: query: Invalid input: expected string, received undefined, Unrecognized key: \"_query\""
+        }
+      }
+    }
+  },
+  "contract_probe: unknown nested key": {
+    "accepted": {
+      "content": [
+        {
+          "text": "ok: true",
+          "type": "text"
+        }
+      ],
+      "handlerSaw": {
+        "filter": {
+          "field": "a",
+          "op": "eq"
+        },
+        "limit": 10,
+        "query": "x"
+      },
+      "structuredContent": {
+        "ok": true
+      }
+    }
+  },
+  "contract_probe: unknown root key": {
+    "rejected": {
+      "content": [
+        {
+          "text": "Error: Input validation error: Invalid arguments for tool contract_probe: Unrecognized key: \"limt\"\n\nRecovery: Unknown key limt. This tool accepts: query, limit, tags, filter, weights, maxResults, code, region, note, shape, routing.\n\n(reason invalid_arguments · request <requestId>)",
+          "type": "text"
+        }
+      ],
+      "isError": true,
+      "structuredContent": {
+        "error": {
+          "code": -32602,
+          "data": {
+            "issues": [
+              {
+                "code": "unrecognized_keys",
+                "path": []
+              }
+            ],
+            "reason": "invalid_arguments",
+            "recovery": {
+              "hint": "Unknown key limt. This tool accepts: query, limit, tags, filter, weights, maxResults, code, region, note, shape, routing."
+            },
+            "requestId": "<requestId>"
+          },
+          "message": "Input validation error: Invalid arguments for tool contract_probe: Unrecognized key: \"limt\""
+        }
+      }
+    }
+  },
+  "contract_probe: valid, required only": {
+    "accepted": {
+      "content": [
+        {
+          "text": "ok: true",
+          "type": "text"
+        }
+      ],
+      "handlerSaw": {
+        "limit": 10,
+        "query": "x"
+      },
+      "structuredContent": {
+        "ok": true
+      }
+    }
+  },
+  "contract_probe: value outside the sentinel union": {
+    "rejected": {
+      "content": [
+        {
+          "text": "Error: Input validation error: Invalid arguments for tool contract_probe: region: Invalid option: expected one of \"us\"|\"eu\"\n\n(reason invalid_arguments · request <requestId>)",
+          "type": "text"
+        }
+      ],
+      "isError": true,
+      "structuredContent": {
+        "error": {
+          "code": -32602,
+          "data": {
+            "issues": [
+              {
+                "code": "invalid_union",
+                "path": [
+                  "region"
+                ]
+              }
+            ],
+            "reason": "invalid_arguments",
+            "recovery": {
+              "hint": "region: Invalid option: expected one of \"us\"|\"eu\""
+            },
+            "requestId": "<requestId>"
+          },
+          "message": "Input validation error: Invalid arguments for tool contract_probe: region: Invalid option: expected one of \"us\"|\"eu\""
+        }
+      }
+    }
+  },
+  "contract_probe: wrong type": {
+    "rejected": {
+      "content": [
+        {
+          "text": "Error: Input validation error: Invalid arguments for tool contract_probe: query: Invalid input: expected string, received boolean\n\nRecovery: Send query as a string, not a boolean.\n\n(reason invalid_arguments · request <requestId>)",
+          "type": "text"
+        }
+      ],
+      "isError": true,
+      "structuredContent": {
+        "error": {
+          "code": -32602,
+          "data": {
+            "issues": [
+              {
+                "code": "invalid_type",
+                "path": [
+                  "query"
+                ]
+              }
+            ],
+            "reason": "invalid_arguments",
+            "recovery": {
+              "hint": "Send query as a string, not a boolean."
+            },
+            "requestId": "<requestId>"
+          },
+          "message": "Input validation error: Invalid arguments for tool contract_probe: query: Invalid input: expected string, received boolean"
+        }
+      }
+    }
+  },
+  "contract_union_root: union root, defaulted branch": {
+    "accepted": {
+      "content": [
+        {
+          "text": "{\n  \"ok\": true\n}",
+          "type": "text"
+        }
+      ],
+      "handlerSaw": {
+        "fuzzy": false,
+        "mode": "byName",
+        "name": "ada"
+      },
+      "structuredContent": {
+        "ok": true
+      }
+    }
+  },
+  "contract_union_root: union root, the other branch's field": {
+    "rejected": {
+      "content": [
+        {
+          "text": "Error: Input validation error: Invalid arguments for tool contract_union_root: id: Invalid input: expected string, received undefined, Unrecognized key: \"name\"\n\nRecovery: Provide id. Unknown key name.\n\n(reason invalid_arguments · request <requestId>)",
+          "type": "text"
+        }
+      ],
+      "isError": true,
+      "structuredContent": {
+        "error": {
+          "code": -32602,
+          "data": {
+            "issues": [
+              {
+                "code": "invalid_type",
+                "path": [
+                  "id"
+                ]
+              },
+              {
+                "code": "unrecognized_keys",
+                "path": []
+              }
+            ],
+            "reason": "invalid_arguments",
+            "recovery": {
+              "hint": "Provide id. Unknown key name."
+            },
+            "requestId": "<requestId>"
+          },
+          "message": "Input validation error: Invalid arguments for tool contract_union_root: id: Invalid input: expected string, received undefined, Unrecognized key: \"name\""
+        }
+      }
+    }
+  },
+  "contract_union_root: union root, unknown discriminator": {
+    "rejected": {
+      "content": [
+        {
+          "text": "Error: Input validation error: Invalid arguments for tool contract_union_root: mode: Invalid discriminator value. Expected 'byId' | 'byName'\n\n(reason invalid_arguments · request <requestId>)",
+          "type": "text"
+        }
+      ],
+      "isError": true,
+      "structuredContent": {
+        "error": {
+          "code": -32602,
+          "data": {
+            "issues": [
+              {
+                "code": "invalid_union",
+                "path": [
+                  "mode"
+                ]
+              }
+            ],
+            "reason": "invalid_arguments",
+            "recovery": {
+              "hint": "mode: Invalid discriminator value. Expected 'byId' | 'byName'"
+            },
+            "requestId": "<requestId>"
+          },
+          "message": "Input validation error: Invalid arguments for tool contract_union_root: mode: Invalid discriminator value. Expected 'byId' | 'byName'"
+        }
+      }
+    }
+  }
+}

@@ -1,0 +1,943 @@
+{
+  "2025-11-25": {
+    "initialize": {
+      "result": {
+        "capabilities": {
+          "completions": {},
+          "extensions": {
+            "vendor/contract": {
+              "pinned": true
+            }
+          },
+          "logging": {},
+          "prompts": {
+            "listChanged": true
+          },
+          "resources": {
+            "listChanged": true,
+            "subscribe": true
+          },
+          "tools": {
+            "listChanged": true
+          }
+        },
+        "instructions": "Search with contract_probe, then read contract://item/{id}.",
+        "protocolVersion": "2025-11-25",
+        "serverInfo": {
+          "description": "Serves the contract lane.",
+          "icons": [
+            {
+              "mimeType": "image/png",
+              "sizes": [
+                "48x48"
+              ],
+              "src": "https://example.com/icon.png"
+            }
+          ],
+          "name": "contract-fixture",
+          "title": "Contract Fixture",
+          "version": "0.0.0",
+          "websiteUrl": "https://example.com/contract"
+        }
+      }
+    },
+    "prompts/list": {
+      "result": {
+        "prompts": [
+          {
+            "arguments": [
+              {
+                "description": "Topic to summarize.",
+                "name": "topic",
+                "required": true
+              },
+              {
+                "description": "Summary style.",
+                "name": "style",
+                "required": false
+              },
+              {
+                "description": "Intended audience.",
+                "name": "audience",
+                "required": false
+              }
+            ],
+            "description": "Drafts a summary of a topic.",
+            "name": "contract_prompt",
+            "title": "Contract Prompt"
+          },
+          {
+            "description": "A prompt with no arguments.",
+            "name": "contract_bare_prompt"
+          }
+        ]
+      }
+    },
+    "resources/list": {
+      "result": {
+        "resources": [
+          {
+            "_meta": {
+              "vendor/contract": {
+                "pinned": true
+              }
+            },
+            "annotations": {
+              "audience": [
+                "user",
+                "assistant"
+              ],
+              "lastModified": "2026-01-01T00:00:00Z"
+            },
+            "description": "Service status.",
+            "mimeType": "text/plain",
+            "name": "contract_status",
+            "size": 2,
+            "title": "Contract Status",
+            "uri": "contract://status"
+          },
+          {
+            "description": "A document declaring nothing optional.",
+            "mimeType": "application/json",
+            "name": "contract_plain",
+            "title": "contract_plain",
+            "uri": "contract://plain"
+          },
+          {
+            "_meta": {
+              "ui": {
+                "csp": {
+                  "resourceDomains": [
+                    "https://cdn.example.com"
+                  ]
+                }
+              }
+            },
+            "annotations": {
+              "audience": [
+                "user"
+              ]
+            },
+            "description": "The view the app tool renders.",
+            "mimeType": "text/html;profile=mcp-app",
+            "name": "contract_app_view",
+            "title": "Contract App View",
+            "uri": "ui://contract/app.html"
+          },
+          {
+            "annotations": {
+              "audience": [
+                "assistant"
+              ],
+              "priority": 0.5
+            },
+            "description": "One item, addressed by ID.",
+            "examples": [
+              {
+                "name": "First item",
+                "uri": "contract://item/1"
+              }
+            ],
+            "mimeType": "application/json",
+            "name": "Item 1",
+            "title": "Contract Item",
+            "uri": "contract://item/1"
+          }
+        ]
+      }
+    },
+    "resources/templates/list": {
+      "result": {
+        "resourceTemplates": [
+          {
+            "annotations": {
+              "audience": [
+                "assistant"
+              ],
+              "priority": 0.5
+            },
+            "description": "One item, addressed by ID.",
+            "examples": [
+              {
+                "name": "First item",
+                "uri": "contract://item/1"
+              }
+            ],
+            "mimeType": "application/json",
+            "name": "contract_item",
+            "title": "Contract Item",
+            "uriTemplate": "contract://item/{id}"
+          }
+        ]
+      }
+    },
+    "tools/list": {
+      "result": {
+        "tools": [
+          {
+            "annotations": {
+              "openWorldHint": false,
+              "readOnlyHint": true
+            },
+            "description": "Searches an index with every kind of argument a client can send.",
+            "inputSchema": {
+              "$schema": "https://json-schema.org/draft/2020-12/schema",
+              "additionalProperties": false,
+              "properties": {
+                "code": {
+                  "description": "Opaque upstream code.",
+                  "type": "string"
+                },
+                "filter": {
+                  "description": "One field filter.",
+                  "properties": {
+                    "field": {
+                      "description": "Field name.",
+                      "type": "string"
+                    },
+                    "op": {
+                      "description": "Comparison operator.",
+                      "enum": [
+                        "eq",
+                        "ne"
+                      ],
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "field",
+                    "op"
+                  ],
+                  "type": "object"
+                },
+                "limit": {
+                  "default": 10,
+                  "description": "Maximum results.",
+                  "maximum": 50,
+                  "minimum": 1,
+                  "type": "integer"
+                },
+                "maxResults": {
+                  "description": "Upstream result cap.",
+                  "maximum": 9007199254740991,
+                  "minimum": -9007199254740991,
+                  "type": "integer"
+                },
+                "note": {
+                  "description": "Free-text note.",
+                  "type": "string"
+                },
+                "query": {
+                  "description": "Search query.",
+                  "minLength": 1,
+                  "type": "string"
+                },
+                "region": {
+                  "anyOf": [
+                    {
+                      "const": "",
+                      "type": "string"
+                    },
+                    {
+                      "enum": [
+                        "us",
+                        "eu"
+                      ],
+                      "type": "string"
+                    }
+                  ],
+                  "description": "Region, or blank for any."
+                },
+                "routing": {
+                  "description": "Routing hints.",
+                  "properties": {
+                    "tenant": {
+                      "description": "Tenant to route to.",
+                      "type": "string",
+                      "x-mcp-header": "Tenant"
+                    }
+                  },
+                  "required": [
+                    "tenant"
+                  ],
+                  "type": "object"
+                },
+                "shape": {
+                  "description": "Search area.",
+                  "oneOf": [
+                    {
+                      "properties": {
+                        "kind": {
+                          "const": "circle",
+                          "description": "A circle.",
+                          "type": "string"
+                        },
+                        "radius": {
+                          "description": "Radius.",
+                          "type": "number"
+                        }
+                      },
+                      "required": [
+                        "kind",
+                        "radius"
+                      ],
+                      "type": "object"
+                    },
+                    {
+                      "properties": {
+                        "kind": {
+                          "const": "square",
+                          "description": "A square.",
+                          "type": "string"
+                        },
+                        "side": {
+                          "description": "Side length.",
+                          "type": "number"
+                        }
+                      },
+                      "required": [
+                        "kind",
+                        "side"
+                      ],
+                      "type": "object"
+                    }
+                  ]
+                },
+                "tags": {
+                  "description": "Tags to include.",
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array"
+                },
+                "weights": {
+                  "additionalProperties": {
+                    "type": "number"
+                  },
+                  "description": "Per-field ranking weights.",
+                  "propertyNames": {
+                    "type": "string"
+                  },
+                  "type": "object"
+                }
+              },
+              "required": [
+                "query"
+              ],
+              "type": "object"
+            },
+            "name": "contract_probe",
+            "outputSchema": {
+              "$schema": "https://json-schema.org/draft/2020-12/schema",
+              "additionalProperties": false,
+              "anyOf": [
+                {
+                  "not": {
+                    "required": [
+                      "error"
+                    ]
+                  },
+                  "required": [
+                    "ok"
+                  ]
+                },
+                {
+                  "required": [
+                    "error"
+                  ]
+                }
+              ],
+              "properties": {
+                "error": {
+                  "additionalProperties": {},
+                  "description": "Present when the call failed. Absent on success.",
+                  "properties": {
+                    "code": {
+                      "description": "JSON-RPC error code for this failure.",
+                      "maximum": 9007199254740991,
+                      "minimum": -9007199254740991,
+                      "type": "integer"
+                    },
+                    "data": {
+                      "additionalProperties": {},
+                      "properties": {
+                        "reason": {
+                          "description": "Machine-readable failure mode. Declared by this tool: `index_missing`: The search index has not been built. `queue_full`: The search queue is at capacity. Other values are possible when a failure originates below the handler.",
+                          "examples": [
+                            "index_missing",
+                            "queue_full"
+                          ],
+                          "type": "string"
+                        },
+                        "recovery": {
+                          "additionalProperties": {},
+                          "description": "Actionable next step for the caller.",
+                          "properties": {
+                            "hint": {
+                              "type": "string"
+                            }
+                          },
+                          "required": [
+                            "hint"
+                          ],
+                          "type": "object"
+                        },
+                        "retryable": {
+                          "description": "Whether retrying may succeed.",
+                          "type": "boolean"
+                        }
+                      },
+                      "type": "object"
+                    },
+                    "message": {
+                      "description": "Human-readable description of what went wrong.",
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "code",
+                    "message"
+                  ],
+                  "type": "object"
+                },
+                "ok": {
+                  "description": "Always true.",
+                  "type": "boolean"
+                },
+                "total": {
+                  "description": "Total matches.",
+                  "type": "number"
+                }
+              },
+              "type": "object"
+            },
+            "title": "Contract Probe"
+          },
+          {
+            "description": "Looks a record up by exactly one key.",
+            "inputSchema": {
+              "$schema": "https://json-schema.org/draft/2020-12/schema",
+              "oneOf": [
+                {
+                  "additionalProperties": false,
+                  "properties": {
+                    "id": {
+                      "description": "Record ID.",
+                      "minLength": 1,
+                      "type": "string"
+                    },
+                    "mode": {
+                      "const": "byId",
+                      "description": "Look up by ID.",
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "mode",
+                    "id"
+                  ],
+                  "type": "object"
+                },
+                {
+                  "additionalProperties": false,
+                  "properties": {
+                    "fuzzy": {
+                      "default": false,
+                      "description": "Match loosely.",
+                      "type": "boolean"
+                    },
+                    "mode": {
+                      "const": "byName",
+                      "description": "Search by name.",
+                      "type": "string"
+                    },
+                    "name": {
+                      "description": "Name fragment.",
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "mode",
+                    "name"
+                  ],
+                  "type": "object"
+                }
+              ],
+              "type": "object"
+            },
+            "name": "contract_union_root",
+            "outputSchema": {
+              "$schema": "https://json-schema.org/draft/2020-12/schema",
+              "additionalProperties": false,
+              "anyOf": [
+                {
+                  "not": {
+                    "required": [
+                      "error"
+                    ]
+                  },
+                  "required": [
+                    "ok"
+                  ]
+                },
+                {
+                  "required": [
+                    "error"
+                  ]
+                }
+              ],
+              "properties": {
+                "error": {
+                  "additionalProperties": {},
+                  "description": "Present when the call failed. Absent on success.",
+                  "properties": {
+                    "code": {
+                      "description": "JSON-RPC error code for this failure.",
+                      "maximum": 9007199254740991,
+                      "minimum": -9007199254740991,
+                      "type": "integer"
+                    },
+                    "data": {
+                      "additionalProperties": {},
+                      "properties": {
+                        "reason": {
+                          "description": "Machine-readable failure mode.",
+                          "type": "string"
+                        },
+                        "recovery": {
+                          "additionalProperties": {},
+                          "description": "Actionable next step for the caller.",
+                          "properties": {
+                            "hint": {
+                              "type": "string"
+                            }
+                          },
+                          "required": [
+                            "hint"
+                          ],
+                          "type": "object"
+                        },
+                        "retryable": {
+                          "description": "Whether retrying may succeed.",
+                          "type": "boolean"
+                        }
+                      },
+                      "type": "object"
+                    },
+                    "message": {
+                      "description": "Human-readable description of what went wrong.",
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "code",
+                    "message"
+                  ],
+                  "type": "object"
+                },
+                "ok": {
+                  "description": "Always true.",
+                  "type": "boolean"
+                }
+              },
+              "type": "object"
+            },
+            "title": "Contract Union Root"
+          },
+          {
+            "description": "Forwards arbitrary filters upstream.",
+            "inputSchema": {
+              "$schema": "https://json-schema.org/draft/2020-12/schema",
+              "additionalProperties": {},
+              "properties": {
+                "id": {
+                  "description": "Record ID.",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "id"
+              ],
+              "type": "object"
+            },
+            "name": "contract_open_root",
+            "outputSchema": {
+              "$schema": "https://json-schema.org/draft/2020-12/schema",
+              "additionalProperties": {},
+              "anyOf": [
+                {
+                  "not": {
+                    "required": [
+                      "error"
+                    ]
+                  }
+                },
+                {
+                  "required": [
+                    "error"
+                  ]
+                }
+              ],
+              "properties": {
+                "error": {
+                  "additionalProperties": {},
+                  "description": "Present when the call failed. Absent on success.",
+                  "properties": {
+                    "code": {
+                      "description": "JSON-RPC error code for this failure.",
+                      "maximum": 9007199254740991,
+                      "minimum": -9007199254740991,
+                      "type": "integer"
+                    },
+                    "data": {
+                      "additionalProperties": {},
+                      "properties": {
+                        "reason": {
+                          "description": "Machine-readable failure mode.",
+                          "type": "string"
+                        },
+                        "recovery": {
+                          "additionalProperties": {},
+                          "description": "Actionable next step for the caller.",
+                          "properties": {
+                            "hint": {
+                              "type": "string"
+                            }
+                          },
+                          "required": [
+                            "hint"
+                          ],
+                          "type": "object"
+                        },
+                        "retryable": {
+                          "description": "Whether retrying may succeed.",
+                          "type": "boolean"
+                        }
+                      },
+                      "type": "object"
+                    },
+                    "message": {
+                      "description": "Human-readable description of what went wrong.",
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "code",
+                    "message"
+                  ],
+                  "type": "object"
+                }
+              },
+              "type": "object"
+            },
+            "title": "Contract Open Root"
+          },
+          {
+            "description": "Root description declared after `.strict()`.",
+            "inputSchema": {
+              "$schema": "https://json-schema.org/draft/2020-12/schema",
+              "additionalProperties": false,
+              "description": "Kept root description.",
+              "properties": {
+                "id": {
+                  "description": "Record ID.",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "id"
+              ],
+              "type": "object"
+            },
+            "name": "contract_described_root",
+            "outputSchema": {
+              "$schema": "https://json-schema.org/draft/2020-12/schema",
+              "additionalProperties": false,
+              "anyOf": [
+                {
+                  "not": {
+                    "required": [
+                      "error"
+                    ]
+                  },
+                  "required": [
+                    "ok"
+                  ]
+                },
+                {
+                  "required": [
+                    "error"
+                  ]
+                }
+              ],
+              "properties": {
+                "error": {
+                  "additionalProperties": {},
+                  "description": "Present when the call failed. Absent on success.",
+                  "properties": {
+                    "code": {
+                      "description": "JSON-RPC error code for this failure.",
+                      "maximum": 9007199254740991,
+                      "minimum": -9007199254740991,
+                      "type": "integer"
+                    },
+                    "data": {
+                      "additionalProperties": {},
+                      "properties": {
+                        "reason": {
+                          "description": "Machine-readable failure mode.",
+                          "type": "string"
+                        },
+                        "recovery": {
+                          "additionalProperties": {},
+                          "description": "Actionable next step for the caller.",
+                          "properties": {
+                            "hint": {
+                              "type": "string"
+                            }
+                          },
+                          "required": [
+                            "hint"
+                          ],
+                          "type": "object"
+                        },
+                        "retryable": {
+                          "description": "Whether retrying may succeed.",
+                          "type": "boolean"
+                        }
+                      },
+                      "type": "object"
+                    },
+                    "message": {
+                      "description": "Human-readable description of what went wrong.",
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "code",
+                    "message"
+                  ],
+                  "type": "object"
+                },
+                "ok": {
+                  "description": "Always true.",
+                  "type": "boolean"
+                }
+              },
+              "type": "object"
+            },
+            "title": "Contract Described Root"
+          },
+          {
+            "description": "Root description declared without `.strict()`.",
+            "inputSchema": {
+              "$schema": "https://json-schema.org/draft/2020-12/schema",
+              "additionalProperties": false,
+              "properties": {
+                "id": {
+                  "description": "Record ID.",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "id"
+              ],
+              "type": "object"
+            },
+            "name": "contract_discarded_root",
+            "outputSchema": {
+              "$schema": "https://json-schema.org/draft/2020-12/schema",
+              "additionalProperties": false,
+              "anyOf": [
+                {
+                  "not": {
+                    "required": [
+                      "error"
+                    ]
+                  },
+                  "required": [
+                    "ok"
+                  ]
+                },
+                {
+                  "required": [
+                    "error"
+                  ]
+                }
+              ],
+              "properties": {
+                "error": {
+                  "additionalProperties": {},
+                  "description": "Present when the call failed. Absent on success.",
+                  "properties": {
+                    "code": {
+                      "description": "JSON-RPC error code for this failure.",
+                      "maximum": 9007199254740991,
+                      "minimum": -9007199254740991,
+                      "type": "integer"
+                    },
+                    "data": {
+                      "additionalProperties": {},
+                      "properties": {
+                        "reason": {
+                          "description": "Machine-readable failure mode.",
+                          "type": "string"
+                        },
+                        "recovery": {
+                          "additionalProperties": {},
+                          "description": "Actionable next step for the caller.",
+                          "properties": {
+                            "hint": {
+                              "type": "string"
+                            }
+                          },
+                          "required": [
+                            "hint"
+                          ],
+                          "type": "object"
+                        },
+                        "retryable": {
+                          "description": "Whether retrying may succeed.",
+                          "type": "boolean"
+                        }
+                      },
+                      "type": "object"
+                    },
+                    "message": {
+                      "description": "Human-readable description of what went wrong.",
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "code",
+                    "message"
+                  ],
+                  "type": "object"
+                },
+                "ok": {
+                  "description": "Always true.",
+                  "type": "boolean"
+                }
+              },
+              "type": "object"
+            },
+            "title": "Contract Discarded Root"
+          },
+          {
+            "_meta": {
+              "ui": {
+                "prefersBorder": true,
+                "resourceUri": "ui://contract/app.html"
+              },
+              "ui/resourceUri": "ui://contract/app.html",
+              "vendor/contract": {
+                "pinned": true
+              }
+            },
+            "description": "Shows a record in an interactive view.",
+            "inputSchema": {
+              "$schema": "https://json-schema.org/draft/2020-12/schema",
+              "additionalProperties": false,
+              "properties": {},
+              "type": "object"
+            },
+            "name": "contract_app",
+            "outputSchema": {
+              "$schema": "https://json-schema.org/draft/2020-12/schema",
+              "additionalProperties": false,
+              "anyOf": [
+                {
+                  "not": {
+                    "required": [
+                      "error"
+                    ]
+                  },
+                  "required": [
+                    "ok"
+                  ]
+                },
+                {
+                  "required": [
+                    "error"
+                  ]
+                }
+              ],
+              "properties": {
+                "error": {
+                  "additionalProperties": {},
+                  "description": "Present when the call failed. Absent on success.",
+                  "properties": {
+                    "code": {
+                      "description": "JSON-RPC error code for this failure.",
+                      "maximum": 9007199254740991,
+                      "minimum": -9007199254740991,
+                      "type": "integer"
+                    },
+                    "data": {
+                      "additionalProperties": {},
+                      "properties": {
+                        "reason": {
+                          "description": "Machine-readable failure mode.",
+                          "type": "string"
+                        },
+                        "recovery": {
+                          "additionalProperties": {},
+                          "description": "Actionable next step for the caller.",
+                          "properties": {
+                            "hint": {
+                              "type": "string"
+                            }
+                          },
+                          "required": [
+                            "hint"
+                          ],
+                          "type": "object"
+                        },
+                        "retryable": {
+                          "description": "Whether retrying may succeed.",
+                          "type": "boolean"
+                        }
+                      },
+                      "type": "object"
+                    },
+                    "message": {
+                      "description": "Human-readable description of what went wrong.",
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "code",
+                    "message"
+                  ],
+                  "type": "object"
+                },
+                "ok": {
+                  "description": "Always true.",
+                  "type": "boolean"
+                }
+              },
+              "type": "object"
+            },
+            "title": "Contract App"
+          }
+        ]
+      }
+    }
+  },
+  "olderRevisions": {
+    "2025-03-26": {
+      "initialize": {
+        "changed": {
+          "protocolVersion": "2025-03-26"
+        }
+      }
+    },
+    "2025-06-18": {
+      "initialize": {
+        "changed": {
+          "protocolVersion": "2025-06-18"
+        }
+      }
+    }
+  }
+}

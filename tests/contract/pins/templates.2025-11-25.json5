@@ -1,0 +1,329 @@
+{
+  "2025-11-25": {
+    "initialize": {
+      "result": {
+        "capabilities": {
+          "logging": {},
+          "prompts": {
+            "listChanged": true
+          },
+          "resources": {
+            "listChanged": true,
+            "subscribe": true
+          },
+          "tools": {
+            "listChanged": true
+          }
+        },
+        "protocolVersion": "2025-11-25",
+        "serverInfo": {
+          "name": "contract-fixture",
+          "version": "0.0.0"
+        }
+      }
+    },
+    "prompts/list": {
+      "result": {
+        "prompts": [
+          {
+            "arguments": [
+              {
+                "description": "The message to echo.",
+                "name": "message",
+                "required": true
+              }
+            ],
+            "description": "Generate a simple echo message. Replace this with your first real prompt.",
+            "name": "template_echo_message"
+          }
+        ]
+      }
+    },
+    "resources/list": {
+      "result": {
+        "resources": [
+          {
+            "_meta": {
+              "ui": {
+                "csp": {
+                  "resourceDomains": [
+                    "https://unpkg.com"
+                  ]
+                }
+              }
+            },
+            "annotations": {
+              "audience": [
+                "user"
+              ]
+            },
+            "description": "Interactive HTML app for the echo app tool. Displayed as a sandboxed iframe by MCP Apps-capable hosts.",
+            "mimeType": "text/html;profile=mcp-app",
+            "name": "echo-app-ui",
+            "title": "Echo App UI",
+            "uri": "ui://template-echo-app/app.html"
+          },
+          {
+            "description": "Echo a message from the URI. Replace this with your first real resource.",
+            "mimeType": "application/json",
+            "name": "Echo Hello",
+            "title": "template-echo-resource",
+            "uri": "echo://hello"
+          }
+        ]
+      }
+    },
+    "resources/templates/list": {
+      "result": {
+        "resourceTemplates": [
+          {
+            "description": "Echo a message from the URI. Replace this with your first real resource.",
+            "mimeType": "application/json",
+            "name": "template-echo-resource",
+            "title": "template-echo-resource",
+            "uriTemplate": "echo://{message}"
+          }
+        ]
+      }
+    },
+    "tools/list": {
+      "result": {
+        "tools": [
+          {
+            "annotations": {
+              "readOnlyHint": true
+            },
+            "description": "Echo a message back. Replace this with your first real tool.",
+            "inputSchema": {
+              "$schema": "https://json-schema.org/draft/2020-12/schema",
+              "additionalProperties": false,
+              "properties": {
+                "message": {
+                  "description": "The message to echo back.",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "message"
+              ],
+              "type": "object"
+            },
+            "name": "template_echo_message",
+            "outputSchema": {
+              "$schema": "https://json-schema.org/draft/2020-12/schema",
+              "additionalProperties": false,
+              "anyOf": [
+                {
+                  "not": {
+                    "required": [
+                      "error"
+                    ]
+                  },
+                  "required": [
+                    "message",
+                    "characterCount"
+                  ]
+                },
+                {
+                  "required": [
+                    "error"
+                  ]
+                }
+              ],
+              "properties": {
+                "characterCount": {
+                  "description": "Length of the echoed message.",
+                  "type": "number"
+                },
+                "error": {
+                  "additionalProperties": {},
+                  "description": "Present when the call failed. Absent on success.",
+                  "properties": {
+                    "code": {
+                      "description": "JSON-RPC error code for this failure.",
+                      "maximum": 9007199254740991,
+                      "minimum": -9007199254740991,
+                      "type": "integer"
+                    },
+                    "data": {
+                      "additionalProperties": {},
+                      "properties": {
+                        "reason": {
+                          "description": "Machine-readable failure mode. Declared by this tool: `empty_message`: Message contained only whitespace. Other values are possible when a failure originates below the handler.",
+                          "examples": [
+                            "empty_message"
+                          ],
+                          "type": "string"
+                        },
+                        "recovery": {
+                          "additionalProperties": {},
+                          "description": "Actionable next step for the caller.",
+                          "properties": {
+                            "hint": {
+                              "type": "string"
+                            }
+                          },
+                          "required": [
+                            "hint"
+                          ],
+                          "type": "object"
+                        },
+                        "retryable": {
+                          "description": "Whether retrying may succeed.",
+                          "type": "boolean"
+                        }
+                      },
+                      "type": "object"
+                    },
+                    "message": {
+                      "description": "Human-readable description of what went wrong.",
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "code",
+                    "message"
+                  ],
+                  "type": "object"
+                },
+                "message": {
+                  "description": "The echoed message.",
+                  "type": "string"
+                }
+              },
+              "type": "object"
+            },
+            "title": "Template Echo Message"
+          },
+          {
+            "_meta": {
+              "ui": {
+                "resourceUri": "ui://template-echo-app/app.html"
+              },
+              "ui/resourceUri": "ui://template-echo-app/app.html"
+            },
+            "annotations": {
+              "readOnlyHint": true
+            },
+            "description": "Echo a message back with an interactive UI. Hosts that support MCP Apps render an HTML interface; other hosts receive a text fallback.",
+            "inputSchema": {
+              "$schema": "https://json-schema.org/draft/2020-12/schema",
+              "additionalProperties": false,
+              "properties": {
+                "message": {
+                  "description": "The message to echo.",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "message"
+              ],
+              "type": "object"
+            },
+            "name": "template_echo_app",
+            "outputSchema": {
+              "$schema": "https://json-schema.org/draft/2020-12/schema",
+              "additionalProperties": false,
+              "anyOf": [
+                {
+                  "not": {
+                    "required": [
+                      "error"
+                    ]
+                  },
+                  "required": [
+                    "message",
+                    "timestamp"
+                  ]
+                },
+                {
+                  "required": [
+                    "error"
+                  ]
+                }
+              ],
+              "properties": {
+                "error": {
+                  "additionalProperties": {},
+                  "description": "Present when the call failed. Absent on success.",
+                  "properties": {
+                    "code": {
+                      "description": "JSON-RPC error code for this failure.",
+                      "maximum": 9007199254740991,
+                      "minimum": -9007199254740991,
+                      "type": "integer"
+                    },
+                    "data": {
+                      "additionalProperties": {},
+                      "properties": {
+                        "reason": {
+                          "description": "Machine-readable failure mode.",
+                          "type": "string"
+                        },
+                        "recovery": {
+                          "additionalProperties": {},
+                          "description": "Actionable next step for the caller.",
+                          "properties": {
+                            "hint": {
+                              "type": "string"
+                            }
+                          },
+                          "required": [
+                            "hint"
+                          ],
+                          "type": "object"
+                        },
+                        "retryable": {
+                          "description": "Whether retrying may succeed.",
+                          "type": "boolean"
+                        }
+                      },
+                      "type": "object"
+                    },
+                    "message": {
+                      "description": "Human-readable description of what went wrong.",
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "code",
+                    "message"
+                  ],
+                  "type": "object"
+                },
+                "message": {
+                  "description": "The echoed message.",
+                  "type": "string"
+                },
+                "timestamp": {
+                  "description": "ISO 8601 timestamp of the echo.",
+                  "format": "date-time",
+                  "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z))$",
+                  "type": "string"
+                }
+              },
+              "type": "object"
+            },
+            "title": "Echo App"
+          }
+        ]
+      }
+    }
+  },
+  "olderRevisions": {
+    "2025-03-26": {
+      "initialize": {
+        "changed": {
+          "protocolVersion": "2025-03-26"
+        }
+      }
+    },
+    "2025-06-18": {
+      "initialize": {
+        "changed": {
+          "protocolVersion": "2025-06-18"
+        }
+      }
+    }
+  }
+}

@@ -1,0 +1,312 @@
+{
+  "purpose fixtures": {
+    "prompts/list": {
+      "added": {
+        "_meta": {
+          "io.modelcontextprotocol/serverInfo": {
+            "description": "Serves the contract lane.",
+            "icons": [
+              {
+                "mimeType": "image/png",
+                "sizes": [
+                  "48x48"
+                ],
+                "src": "https://example.com/icon.png"
+              }
+            ],
+            "name": "contract-fixture",
+            "title": "Contract Fixture",
+            "version": "0.0.0",
+            "websiteUrl": "https://example.com/contract"
+          }
+        },
+        "cacheScope": "private",
+        "resultType": "complete",
+        "ttlMs": 0
+      }
+    },
+    "resources/list": {
+      "added": {
+        "_meta": {
+          "io.modelcontextprotocol/serverInfo": {
+            "description": "Serves the contract lane.",
+            "icons": [
+              {
+                "mimeType": "image/png",
+                "sizes": [
+                  "48x48"
+                ],
+                "src": "https://example.com/icon.png"
+              }
+            ],
+            "name": "contract-fixture",
+            "title": "Contract Fixture",
+            "version": "0.0.0",
+            "websiteUrl": "https://example.com/contract"
+          }
+        },
+        "cacheScope": "private",
+        "resultType": "complete",
+        "ttlMs": 0
+      }
+    },
+    "resources/templates/list": {
+      "added": {
+        "_meta": {
+          "io.modelcontextprotocol/serverInfo": {
+            "description": "Serves the contract lane.",
+            "icons": [
+              {
+                "mimeType": "image/png",
+                "sizes": [
+                  "48x48"
+                ],
+                "src": "https://example.com/icon.png"
+              }
+            ],
+            "name": "contract-fixture",
+            "title": "Contract Fixture",
+            "version": "0.0.0",
+            "websiteUrl": "https://example.com/contract"
+          }
+        },
+        "cacheScope": "private",
+        "resultType": "complete",
+        "ttlMs": 0
+      }
+    },
+    "server/discover": {
+      "result": {
+        "_meta": {
+          "io.modelcontextprotocol/serverInfo": {
+            "description": "Serves the contract lane.",
+            "icons": [
+              {
+                "mimeType": "image/png",
+                "sizes": [
+                  "48x48"
+                ],
+                "src": "https://example.com/icon.png"
+              }
+            ],
+            "name": "contract-fixture",
+            "title": "Contract Fixture",
+            "version": "0.0.0",
+            "websiteUrl": "https://example.com/contract"
+          }
+        },
+        "cacheScope": "private",
+        "capabilities": {
+          "completions": {},
+          "extensions": {
+            "vendor/contract": {
+              "pinned": true
+            }
+          },
+          "logging": {},
+          "prompts": {
+            "listChanged": true
+          },
+          "resources": {
+            "listChanged": true,
+            "subscribe": true
+          },
+          "tools": {
+            "listChanged": true
+          }
+        },
+        "instructions": "Search with contract_probe, then read contract://item/{id}.",
+        "resultType": "complete",
+        "supportedVersions": [
+          "2026-07-28"
+        ],
+        "ttlMs": 0
+      }
+    },
+    "tools/list": {
+      "added": {
+        "_meta": {
+          "io.modelcontextprotocol/serverInfo": {
+            "description": "Serves the contract lane.",
+            "icons": [
+              {
+                "mimeType": "image/png",
+                "sizes": [
+                  "48x48"
+                ],
+                "src": "https://example.com/icon.png"
+              }
+            ],
+            "name": "contract-fixture",
+            "title": "Contract Fixture",
+            "version": "0.0.0",
+            "websiteUrl": "https://example.com/contract"
+          }
+        },
+        "cacheScope": "private",
+        "resultType": "complete",
+        "ttlMs": 0
+      }
+    }
+  },
+  "resources/read": {
+    "contract://item/1": {
+      "added": {
+        "_meta": {
+          "io.modelcontextprotocol/serverInfo": {
+            "description": "Serves the contract lane.",
+            "icons": [
+              {
+                "mimeType": "image/png",
+                "sizes": [
+                  "48x48"
+                ],
+                "src": "https://example.com/icon.png"
+              }
+            ],
+            "name": "contract-fixture",
+            "title": "Contract Fixture",
+            "version": "0.0.0",
+            "websiteUrl": "https://example.com/contract"
+          }
+        },
+        "cacheScope": "public",
+        "resultType": "complete",
+        "ttlMs": 60000
+      }
+    },
+    "contract://plain": {
+      "added": {
+        "_meta": {
+          "io.modelcontextprotocol/serverInfo": {
+            "description": "Serves the contract lane.",
+            "icons": [
+              {
+                "mimeType": "image/png",
+                "sizes": [
+                  "48x48"
+                ],
+                "src": "https://example.com/icon.png"
+              }
+            ],
+            "name": "contract-fixture",
+            "title": "Contract Fixture",
+            "version": "0.0.0",
+            "websiteUrl": "https://example.com/contract"
+          }
+        },
+        "cacheScope": "private",
+        "resultType": "complete",
+        "ttlMs": 30000
+      }
+    },
+    "contract://status": {
+      "added": {
+        "_meta": {
+          "io.modelcontextprotocol/serverInfo": {
+            "description": "Serves the contract lane.",
+            "icons": [
+              {
+                "mimeType": "image/png",
+                "sizes": [
+                  "48x48"
+                ],
+                "src": "https://example.com/icon.png"
+              }
+            ],
+            "name": "contract-fixture",
+            "title": "Contract Fixture",
+            "version": "0.0.0",
+            "websiteUrl": "https://example.com/contract"
+          }
+        },
+        "cacheScope": "public",
+        "resultType": "complete",
+        "ttlMs": 30000
+      }
+    }
+  },
+  "shipped templates": {
+    "prompts/list": {
+      "added": {
+        "_meta": {
+          "io.modelcontextprotocol/serverInfo": {
+            "name": "contract-fixture",
+            "version": "0.0.0"
+          }
+        },
+        "cacheScope": "private",
+        "resultType": "complete",
+        "ttlMs": 0
+      }
+    },
+    "resources/list": {
+      "added": {
+        "_meta": {
+          "io.modelcontextprotocol/serverInfo": {
+            "name": "contract-fixture",
+            "version": "0.0.0"
+          }
+        },
+        "cacheScope": "private",
+        "resultType": "complete",
+        "ttlMs": 0
+      }
+    },
+    "resources/templates/list": {
+      "added": {
+        "_meta": {
+          "io.modelcontextprotocol/serverInfo": {
+            "name": "contract-fixture",
+            "version": "0.0.0"
+          }
+        },
+        "cacheScope": "private",
+        "resultType": "complete",
+        "ttlMs": 0
+      }
+    },
+    "server/discover": {
+      "result": {
+        "_meta": {
+          "io.modelcontextprotocol/serverInfo": {
+            "name": "contract-fixture",
+            "version": "0.0.0"
+          }
+        },
+        "cacheScope": "private",
+        "capabilities": {
+          "logging": {},
+          "prompts": {
+            "listChanged": true
+          },
+          "resources": {
+            "listChanged": true,
+            "subscribe": true
+          },
+          "tools": {
+            "listChanged": true
+          }
+        },
+        "resultType": "complete",
+        "supportedVersions": [
+          "2026-07-28"
+        ],
+        "ttlMs": 0
+      }
+    },
+    "tools/list": {
+      "added": {
+        "_meta": {
+          "io.modelcontextprotocol/serverInfo": {
+            "name": "contract-fixture",
+            "version": "0.0.0"
+          }
+        },
+        "cacheScope": "private",
+        "resultType": "complete",
+        "ttlMs": 0
+      }
+    }
+  }
+}

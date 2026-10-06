@@ -1,0 +1,128 @@
+{
+  "echo app view": {
+    "result": {
+      "contents": [
+        {
+          "_meta": {
+            "ui": {
+              "csp": {
+                "resourceDomains": [
+                  "https://unpkg.com"
+                ]
+              }
+            }
+          },
+          "mimeType": "text/html;profile=mcp-app",
+          "text": "<html omitted>",
+          "uri": "ui://template-echo-app/app.html"
+        }
+      ]
+    }
+  },
+  "echo prompt": {
+    "result": {
+      "messages": [
+        {
+          "content": {
+            "text": "Echo: hello",
+            "type": "text"
+          },
+          "role": "user"
+        }
+      ]
+    }
+  },
+  "echo prompt, missing argument": {
+    "error": {
+      "code": -32602,
+      "message": "Invalid arguments for prompt template_echo_message: Invalid input: expected object, received undefined"
+    }
+  },
+  "echo resource": {
+    "result": {
+      "contents": [
+        {
+          "mimeType": "application/json",
+          "text": "{\n  \"message\": \"hello\"\n}",
+          "uri": "echo://hello"
+        }
+      ]
+    }
+  },
+  "echo tool, declared failure": {
+    "result": {
+      "content": [
+        {
+          "text": "Error: Message must contain at least one non-whitespace character.\n\nRecovery: Provide a message with at least one non-whitespace character.\n\n(reason empty_message · request <requestId>)",
+          "type": "text"
+        }
+      ],
+      "isError": true,
+      "structuredContent": {
+        "error": {
+          "code": -32602,
+          "data": {
+            "reason": "empty_message",
+            "recovery": {
+              "hint": "Provide a message with at least one non-whitespace character."
+            },
+            "requestId": "<requestId>"
+          },
+          "message": "Message must contain at least one non-whitespace character."
+        }
+      }
+    }
+  },
+  "echo tool, missing argument": {
+    "result": {
+      "content": [
+        {
+          "text": "Error: Input validation error: Invalid arguments for tool template_echo_message: message: Invalid input: expected string, received undefined\n\nRecovery: Provide message.\n\n(reason invalid_arguments · request <requestId>)",
+          "type": "text"
+        }
+      ],
+      "isError": true,
+      "structuredContent": {
+        "error": {
+          "code": -32602,
+          "data": {
+            "issues": [
+              {
+                "code": "invalid_type",
+                "expected": "string",
+                "message": "Invalid input: expected string, received undefined",
+                "path": [
+                  "message"
+                ]
+              }
+            ],
+            "reason": "invalid_arguments",
+            "recovery": {
+              "hint": "Provide message."
+            },
+            "requestId": "<requestId>"
+          },
+          "message": "Input validation error: Invalid arguments for tool template_echo_message: message: Invalid input: expected string, received undefined"
+        }
+      }
+    }
+  },
+  "echo tool, success": {
+    "result": {
+      "content": [
+        {
+          "text": "hello",
+          "type": "text"
+        },
+        {
+          "text": "\n\n**characterCount:** 5",
+          "type": "text"
+        }
+      ],
+      "structuredContent": {
+        "characterCount": 5,
+        "message": "hello"
+      }
+    }
+  }
+}

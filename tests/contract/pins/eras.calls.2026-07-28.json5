@@ -1,0 +1,30 @@
+{
+  "everyCase": {
+    "added": {
+      "_meta": {
+        "io.modelcontextprotocol/serverInfo": {
+          "description": "Serves the contract lane.",
+          "icons": [
+            {
+              "mimeType": "image/png",
+              "sizes": [
+                "48x48"
+              ],
+              "src": "https://example.com/icon.png"
+            }
+          ],
+          "name": "contract-fixture",
+          "title": "Contract Fixture",
+          "version": "0.0.0",
+          "websiteUrl": "https://example.com/contract"
+        }
+      },
+      "resultType": "complete"
+    }
+  },
+  "except": {
+    "contract_disabled: disabled tool": {},
+    "contract_missing: unknown tool": {},
+    "contract_probe: arguments not an object": {}
+  }
+}

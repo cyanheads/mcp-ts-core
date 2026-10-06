@@ -1,7 +1,7 @@
 /**
  * @fileoverview Root Vitest config. Uses Vitest 4 `projects` so unit, smoke,
- * compliance, fuzz, leak-gate, and typecheck suites live in a single config and
- * can be run individually by filter (`--project unit`) or all at once.
+ * contract, compliance, fuzz, leak-gate, and typecheck suites live in a single
+ * config and can be run individually by filter (`--project unit`) or all at once.
  * @module vitest.config
  */
 import { readFileSync } from 'node:fs';
@@ -66,6 +66,12 @@ export default defineConfig({
     noExternal: ['zod'],
   },
   test: {
+    /**
+     * Never write a snapshot implicitly. Vitest's local default (`new`) writes a
+     * missing one and passes, which would let a deleted contract pin regenerate
+     * unreviewed; `-u` still writes.
+     */
+    update: 'none',
     expect: {
       requireAssertions: true,
     },
@@ -132,6 +138,20 @@ export default defineConfig({
           ...sharedUnit,
           name: 'smoke',
           include: ['tests/smoke/**/*.test.ts'],
+          exclude: ['node_modules/**'],
+        },
+      },
+      {
+        extends: true,
+        resolve: { alias: selfSourceAliases },
+        test: {
+          ...sharedUnit,
+          /**
+           * Pins what an MCP client receives — advertised lists and argument
+           * outcomes — as committed files. See tests/contract/README.md.
+           */
+          name: 'contract',
+          include: ['tests/contract/**/*.test.ts'],
           exclude: ['node_modules/**'],
         },
       },
