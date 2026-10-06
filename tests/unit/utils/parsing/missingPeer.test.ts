@@ -26,7 +26,7 @@ vi.mock('chrono-node', () => {
 const context = { requestId: 'missing-peer-test', timestamp: new Date().toISOString() };
 
 // JSON, YAML, XML, and diff are left out: today they relabel the ConfigurationError
-// as a parse failure, pending the tracking issue (#TBD-peer-relabel).
+// as a parse failure, pending the tracking issue (#679).
 describe('missing optional peer dependency', () => {
   it.each([
     ['papaparse', () => csvParser.parse('a,b\n1,2'), 'bun add papaparse'],
