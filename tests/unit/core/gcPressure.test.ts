@@ -126,7 +126,21 @@ describe('startGcPressureLoop', () => {
     disposer();
     vi.advanceTimersByTime(5_000);
     expect(gc).toHaveBeenCalledTimes(3);
-    expect(() => disposer()).not.toThrow();
+    disposer();
+    const stopped = mockLogger.info.mock.calls.filter(([message]) =>
+      String(message).startsWith('GC pressure loop stopped.'),
+    );
+    expect(stopped).toHaveLength(1);
+  });
+
+  it('never holds the process open on its own', () => {
+    vi.spyOn(_gcPressureInternals, 'resolveBunGc').mockReturnValue(vi.fn());
+    const setIntervalSpy = vi.spyOn(globalThis, 'setInterval');
+    const disposer = startGcPressureLoop(1_000);
+
+    const handle = setIntervalSpy.mock.results[0]?.value as { hasRef(): boolean };
+    expect(handle.hasRef()).toBe(false);
+    disposer();
   });
 
   it('swallows Bun.gc throws and keeps the interval running', () => {

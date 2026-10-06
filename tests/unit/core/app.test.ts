@@ -359,6 +359,7 @@ vi.mock('@/utils/telemetry/trace.js', () => ({
 import { z } from 'zod';
 
 import { composeServices, createApp } from '@/core/app.js';
+import { prompt } from '@/mcp-server/prompts/utils/promptDefinition.js';
 import { resource } from '@/mcp-server/resources/utils/resourceDefinition.js';
 import { disabledTool, tool } from '@/mcp-server/tools/utils/toolDefinition.js';
 import { JsonRpcErrorCode } from '@/types-global/errors.js';
@@ -553,6 +554,31 @@ describe('core/app', () => {
     expect(composed.manifest.server.websiteUrl).toBe('https://github.com/owner/repo');
     expect(composed.manifest.server.description).toBe('One-line description.');
     expect(composed.manifest.server.icons).toEqual(icons);
+  });
+
+  it('hands the stateless session-id opt-in to both registries, off unless set', async () => {
+    await composeServices({ context: { exposeStatelessSessionId: true } });
+
+    expect(MockToolRegistry).toHaveBeenCalledWith(
+      [],
+      expect.objectContaining({ exposeStatelessSessionId: true }),
+    );
+    expect(MockResourceRegistry).toHaveBeenCalledWith(
+      [],
+      expect.objectContaining({ exposeStatelessSessionId: true }),
+    );
+
+    vi.clearAllMocks();
+    await composeServices();
+
+    expect(MockToolRegistry).toHaveBeenCalledWith(
+      [],
+      expect.objectContaining({ exposeStatelessSessionId: false }),
+    );
+    expect(MockResourceRegistry).toHaveBeenCalledWith(
+      [],
+      expect.objectContaining({ exposeStatelessSessionId: false }),
+    );
   });
 
   it('starts the app, registers shutdown handlers, and performs graceful shutdown', async () => {
@@ -750,11 +776,14 @@ describe('core/app', () => {
     expect(timeoutRefs[1]?.unref).toHaveBeenCalledTimes(1);
     expect(processExitSpy).toHaveBeenCalledWith(1);
 
-    timeoutCallbacks.forEach((callback) => {
+    // The settled shutdown has already exited 1; clear it so each backstop's
+    // own exit code is what gets checked.
+    processExitSpy.mockClear();
+    for (const callback of timeoutCallbacks) {
       callback();
-    });
-
-    expect(processExitSpy).toHaveBeenCalledWith(1);
+      expect(processExitSpy).toHaveBeenLastCalledWith(1);
+    }
+    expect(processExitSpy).toHaveBeenCalledTimes(2);
     expect(mockTransportManager.instance.stop).toHaveBeenCalledWith('uncaughtException');
 
     setTimeoutSpy.mockRestore();
@@ -1002,6 +1031,35 @@ describe('core/app', () => {
         expect.anything(),
       );
       expect(spanAttributes.get('mcp.server.tools_count')).toBe(3);
+      await handle.shutdown();
+    });
+
+    it('lists every resource and prompt by name, an unnamed resource by its URI template', async () => {
+      const named = resource('inventory://items/{itemId}', {
+        name: 'inventory_item',
+        description: 'Retrieve one inventory item.',
+        handler: () => ({ ok: true }),
+      });
+      const unnamed = resource('anon://{id}', {
+        description: 'A resource that never declared a name.',
+        handler: () => ({ ok: true }),
+      });
+      const review = prompt('code_review', {
+        description: 'Review a patch.',
+        generate: () => [],
+      });
+
+      const handle = await createApp({ resources: [named, unnamed], prompts: [review] });
+
+      const [message, context] = serverInitCall() ?? [];
+      expect(message).toBe(
+        'Core services constructed — 0 tool(s), 2 resource(s), 1 prompt(s). Storage: in-memory.',
+      );
+      expect((context as { extra: Record<string, unknown> }).extra).toEqual({
+        prompts: ['code_review'],
+        resources: ['inventory_item', 'anon://{id}'],
+        tools: [],
+      });
       await handle.shutdown();
     });
 
@@ -1338,6 +1396,24 @@ describe('core/app', () => {
       expect(mockTransportManager.instance.stop).toHaveBeenCalledTimes(1);
     });
 
+    it('is armed before the transport binds, so a signal during a slow bind shuts down cleanly', async () => {
+      const bind = Promise.withResolvers<void>();
+      mockTransportManager.instance.start.mockReturnValueOnce(bind.promise);
+
+      const starting = createApp();
+      await vi.waitFor(() => expect(mockTransportManager.instance.start).toHaveBeenCalledOnce());
+
+      (getProcessHandler('SIGTERM') as () => void)();
+      await flushAsyncWork();
+
+      expect(mockTransportManager.instance.stop).toHaveBeenCalledWith('SIGTERM');
+      expect(mockLogger.close).toHaveBeenCalledTimes(1);
+      expect(processExitSpy).toHaveBeenCalledWith(0);
+
+      bind.resolve();
+      await starting;
+    });
+
     it('does not cut off a cleanup step that is still progressing', async () => {
       const cleanup = Promise.withResolvers<void>();
       mockTransportManager.instance.stop.mockReturnValueOnce(cleanup.promise);
@@ -1472,8 +1548,10 @@ describe('core/app', () => {
       processExitSpy.mockRestore();
     });
 
-    it('runs once, after the transport stops and before the logger closes', async () => {
+    it('runs once, after the transport stops and before services are disposed or the logger closes', async () => {
       const teardown = vi.fn();
+      const canvasShutdown = vi.fn(async () => {});
+      mockCreateCanvasService.mockReturnValueOnce({ kind: 'canvas', shutdown: canvasShutdown });
       const handle = await createApp({ teardown });
 
       await handle.shutdown('SIGTERM');
@@ -1481,10 +1559,34 @@ describe('core/app', () => {
       expect(teardown).toHaveBeenCalledTimes(1);
       expect(teardown).toHaveBeenCalledWith(handle.services);
       const [stopOrder] = mockTransportManager.instance.stop.mock.invocationCallOrder;
-      const [teardownOrder] = teardown.mock.invocationCallOrder;
-      const [closeOrder] = mockLogger.close.mock.invocationCallOrder;
-      expect(stopOrder).toBeLessThan(teardownOrder as number);
-      expect(teardownOrder).toBeLessThan(closeOrder as number);
+      const [teardownOrder] = teardown.mock.invocationCallOrder as [number];
+      expect(stopOrder).toBeLessThan(teardownOrder);
+      // Everything the hook might still reach is alive while it runs.
+      for (const disposed of [
+        mockRateLimiter.instance.dispose,
+        mockSchedulerService.destroyAll,
+        canvasShutdown,
+        mockLogger.close,
+      ]) {
+        expect(disposed).toHaveBeenCalledTimes(1);
+        expect(disposed.mock.invocationCallOrder[0]).toBeGreaterThan(teardownOrder);
+      }
+    });
+
+    it('runs on the startup-failure rollback, releasing what setup() allocated', async () => {
+      const teardown = vi.fn();
+      mockTransportManager.instance.start.mockRejectedValueOnce(new Error('bind failed'));
+
+      await expect(createApp({ teardown })).rejects.toThrow('bind failed');
+
+      expect(mockTransportManager.instance.stop).toHaveBeenCalledWith('STARTUP_FAILURE');
+      expect(teardown).toHaveBeenCalledTimes(1);
+      expect(teardown).toHaveBeenCalledWith(
+        expect.objectContaining({ config: mockConfig, rateLimiter: mockRateLimiter.instance }),
+      );
+      expect(teardown.mock.invocationCallOrder[0]).toBeLessThan(
+        mockRateLimiter.instance.dispose.mock.invocationCallOrder[0] as number,
+      );
     });
 
     it('runs on the signal path and on the stdin EOF path', async () => {
@@ -1526,6 +1628,31 @@ describe('core/app', () => {
       expect(processExitSpy).toHaveBeenCalledWith(0);
     });
 
+    it('lets a throwing hook stop none of the disposal steps after it', async () => {
+      const canvasShutdown = vi.fn(async () => {});
+      mockCreateCanvasService.mockReturnValueOnce({ kind: 'canvas', shutdown: canvasShutdown });
+      const handle = await createApp({
+        teardown: () => {
+          throw new Error('watcher close failed');
+        },
+      });
+
+      await handle.shutdown('SIGTERM');
+
+      expect(mockRateLimiter.instance.dispose).toHaveBeenCalledTimes(1);
+      expect(mockSchedulerService.destroyAll).toHaveBeenCalledTimes(1);
+      expect(canvasShutdown).toHaveBeenCalledTimes(1);
+      expect(mockLogger.info).toHaveBeenCalledWith(
+        'Graceful shutdown completed successfully.',
+        expect.objectContaining({ operation: 'ServerShutdown' }),
+      );
+      expect(mockLogger.error).not.toHaveBeenCalledWith(
+        'Critical error during shutdown process.',
+        expect.anything(),
+        expect.anything(),
+      );
+    });
+
     it('is cut by the ceiling with exit code 1 when it never settles', async () => {
       const stuck = Promise.withResolvers<void>();
       const backstop = captureBackstops();
@@ -1546,6 +1673,59 @@ describe('core/app', () => {
       backstop.restore();
       stuck.resolve();
       await flushAsyncWork();
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // Shutdown step isolation
+  // -------------------------------------------------------------------------
+
+  describe('shutdown step isolation', () => {
+    it('runs every later step when the transport stop fails, then reports that failure', async () => {
+      const teardown = vi.fn();
+      const canvasShutdown = vi.fn(async () => {});
+      mockCreateCanvasService.mockReturnValueOnce({ kind: 'canvas', shutdown: canvasShutdown });
+      mockTransportManager.instance.stop.mockRejectedValueOnce(new Error('stop failed'));
+      const handle = await createApp({ teardown });
+
+      await handle.shutdown('SIGTERM');
+
+      expect(teardown).toHaveBeenCalledTimes(1);
+      expect(mockRateLimiter.instance.dispose).toHaveBeenCalledTimes(1);
+      expect(mockSchedulerService.destroyAll).toHaveBeenCalledTimes(1);
+      expect(canvasShutdown).toHaveBeenCalledTimes(1);
+      expect(mockLogger.error).toHaveBeenCalledWith(
+        'Critical error during shutdown process.',
+        expect.objectContaining({ message: 'stop failed' }),
+        expect.objectContaining({ operation: 'ServerShutdown' }),
+      );
+      expect(mockLogger.close).toHaveBeenCalledTimes(1);
+    });
+
+    it('reports the first failed step as critical and every later one as an additional failure', async () => {
+      mockRateLimiter.instance.dispose.mockImplementationOnce(() => {
+        throw new Error('dispose failed');
+      });
+      mockSchedulerService.destroyAll.mockImplementationOnce(() => {
+        throw new Error('destroy failed');
+      });
+      const handle = await createApp();
+
+      await handle.shutdown('SIGTERM');
+
+      expect(mockLogger.error).toHaveBeenCalledWith(
+        'Critical error during shutdown process.',
+        expect.objectContaining({ message: 'dispose failed' }),
+        expect.anything(),
+      );
+      expect(mockLogger.warning).toHaveBeenCalledWith(
+        'Additional shutdown cleanup failure.',
+        expect.objectContaining({
+          extra: expect.objectContaining({ cleanupStep: 'scheduler', error: 'destroy failed' }),
+        }),
+      );
+      expect(mockLogger.warning).toHaveBeenCalledTimes(1);
+      expect(mockLogger.close).toHaveBeenCalledTimes(1);
     });
   });
 

@@ -216,6 +216,37 @@ describe('buildServerManifest — baseline', () => {
     );
   });
 
+  test('carries tool annotations and auth scopes, omitting an empty scope list', () => {
+    const scoped = tool('scoped_search', {
+      description: 'Searches behind a scope.',
+      annotations: { readOnlyHint: true, openWorldHint: false },
+      auth: ['tool:scoped_search:read'],
+      input: z.object({}),
+      output: z.object({}),
+      handler: () => ({}),
+    });
+    const open = tool('open_search', {
+      description: 'Searches without a scope.',
+      auth: [],
+      input: z.object({}),
+      output: z.object({}),
+      handler: () => ({}),
+    });
+
+    const manifest = buildServerManifest({
+      config: stubConfig(),
+      tools: [scoped, open] as Parameters<typeof buildServerManifest>[0]['tools'],
+      resources: [],
+      prompts: [],
+    });
+
+    const [scopedEntry, openEntry] = manifest.definitions.tools;
+    expect(scopedEntry?.annotations).toEqual({ readOnlyHint: true, openWorldHint: false });
+    expect(scopedEntry?.auth).toEqual(['tool:scoped_search:read']);
+    expect(openEntry).not.toHaveProperty('auth');
+    expect(openEntry).not.toHaveProperty('annotations');
+  });
+
   test('passes disabled metadata through to ManifestTool when wrapped', () => {
     const enabledDef = tool('readable', {
       description: 'Read tool',
