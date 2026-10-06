@@ -1179,6 +1179,44 @@ describe('renderLandingPage — tool schema preview and args', () => {
     expect(html).toContain('&quot;q&quot;');
     expect(html).toContain('&quot;limit&quot;');
   });
+
+  // `requiredFields` for a discriminated union is the intersection across
+  // variants (the discriminator alone), which no branch accepts as a call. The
+  // snippet shows the first branch whole, discriminator literal in place.
+  test('builds the invocation snippet from the first branch of a discriminated-union input', () => {
+    const manifest = buildServerManifest({
+      config: stubConfig(),
+      tools: [
+        {
+          name: 'record_lookup',
+          description: 'x',
+          input: z.discriminatedUnion('mode', [
+            z.object({ mode: z.literal('by_id'), id: z.string(), verbose: z.boolean().optional() }),
+            z.object({ mode: z.literal('by_name'), name: z.string() }),
+          ]),
+          output: z.object({ r: z.string() }),
+          handler: async () => ({ r: '' }),
+        },
+      ] as Parameters<typeof buildServerManifest>[0]['tools'],
+      resources: [],
+      prompts: [],
+    });
+    const html = renderLandingPage(manifest, 'https://example.com');
+
+    const escaped = html.match(
+      /<pre id="snippet-tool-record_lookup"><code>([\s\S]*?)<\/code>/,
+    )?.[1];
+    expect(escaped).toBeDefined();
+    const snippet = JSON.parse(
+      (escaped ?? '')
+        .replaceAll('&quot;', '"')
+        .replaceAll('&lt;', '<')
+        .replaceAll('&gt;', '>')
+        .replaceAll('&amp;', '&'),
+    ) as { params: { arguments: Record<string, unknown> } };
+
+    expect(snippet.params.arguments).toEqual({ mode: 'by_id', id: '<id>' });
+  });
 });
 
 describe('createLandingPageHandler — security headers', () => {
