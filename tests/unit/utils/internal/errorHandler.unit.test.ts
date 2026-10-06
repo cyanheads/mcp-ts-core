@@ -28,30 +28,6 @@ describe('ErrorHandler (unit)', () => {
     errorSpy.mockRestore();
   });
 
-  describe('determineErrorCode - additional branches', () => {
-    it('falls back to AbortError special-case when regex patterns are bypassed', () => {
-      const abortError = new Error('no matching keywords');
-      (abortError as any).name = 'AbortError';
-
-      const originalTest = RegExp.prototype.test;
-      const testSpy = vi.spyOn(RegExp.prototype, 'test').mockImplementation(function (
-        this: RegExp,
-        str: string,
-      ) {
-        if (this.source.includes('abort') || this.source.includes('cancell')) {
-          return false;
-        }
-        return originalTest.call(this, str);
-      });
-
-      try {
-        expect(ErrorHandler.determineErrorCode(abortError)).toBe(JsonRpcErrorCode.Timeout);
-      } finally {
-        testSpy.mockRestore();
-      }
-    });
-  });
-
   describe('formatError - non-Error input', () => {
     it('returns UnknownError for non-Error values and includes errorType', () => {
       const formatted = ErrorHandler.formatError(42);

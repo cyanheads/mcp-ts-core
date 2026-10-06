@@ -9,7 +9,7 @@ import { SpanStatusCode, trace } from '@opentelemetry/api';
 import { afterEach, beforeEach, describe, expect, it, type MockInstance, vi } from 'vitest';
 import { z } from 'zod';
 import { JsonRpcErrorCode, McpError } from '@/types-global/errors.js';
-import { ErrorHandler } from '@/utils/internal/error-handler/errorHandler.js';
+import { asRequestCancelled, ErrorHandler } from '@/utils/internal/error-handler/errorHandler.js';
 import { logger } from '@/utils/internal/logger.js';
 
 // Suppress logger output in tests
@@ -199,8 +199,11 @@ describe('ErrorHandler', () => {
       expect(ErrorHandler.determineErrorCode(new Error(message))).toBe(code);
     });
 
-    it('should classify AbortError special case as Timeout', () => {
-      const err = { name: 'AbortError', message: 'signal aborted' };
+    it('falls back to Timeout for a value named AbortError that no pattern matches', () => {
+      // A non-enumerable `name` leaves the patterns nothing to read: the message
+      // is the bare-object fallback and the name `objectEncountered`. Only the
+      // AbortError special case can classify it.
+      const err = Object.defineProperty({}, 'name', { value: 'AbortError' });
       expect(ErrorHandler.determineErrorCode(err)).toBe(JsonRpcErrorCode.Timeout);
     });
 
@@ -260,6 +263,74 @@ describe('ErrorHandler', () => {
         JsonRpcErrorCode.InternalError,
       );
     });
+
+    // Each step of the ladder outranks the next: a value two steps could
+    // classify takes the earlier step's code, and each case below would read
+    // as the later step's code were the two swapped.
+    describe('resolution order', () => {
+      it.each([
+        [
+          "an McpError's own code over the pattern ladder",
+          new McpError(
+            JsonRpcErrorCode.Forbidden,
+            'Request failed with status code 404: not found',
+          ),
+          JsonRpcErrorCode.Forbidden,
+        ],
+        [
+          'the constructor table over the message patterns',
+          new SyntaxError('Unexpected token N in JSON: "Not Found" is not valid JSON'),
+          JsonRpcErrorCode.ValidationError,
+        ],
+        [
+          'a provider pattern over a common pattern',
+          new Error('Request failed with status code 503: upstream request timed out'),
+          JsonRpcErrorCode.ServiceUnavailable,
+        ],
+        [
+          'an HTTP status over a validation word',
+          new Error('Request failed with status code 404: invalid id'),
+          JsonRpcErrorCode.NotFound,
+        ],
+        [
+          'a common pattern over the AbortError special case',
+          Object.assign(new Error('resource not found'), { name: 'AbortError' }),
+          JsonRpcErrorCode.NotFound,
+        ],
+      ])('classifies %s', (_label, error, code) => {
+        expect(ErrorHandler.determineErrorCode(error)).toBe(code);
+      });
+    });
+  });
+
+  // ─── asRequestCancelled ──────────────────────────────────────────────────────
+
+  describe('asRequestCancelled', () => {
+    it('returns an McpError that already carries RequestCancelled as is, data intact', () => {
+      const cancelled = new McpError(
+        JsonRpcErrorCode.RequestCancelled,
+        'fetch GET x was aborted.',
+        {
+          errorSource: 'FetchAborted',
+        },
+      );
+
+      const settled = asRequestCancelled(cancelled, AbortSignal.abort('probe'));
+
+      expect(settled).toBe(cancelled);
+      expect((settled as McpError).data).toEqual({ errorSource: 'FetchAborted' });
+    });
+
+    it('wraps any other value thrown after the abort, keeping its message and chaining it', () => {
+      const thrown = new Error('socket hang up');
+
+      const settled = asRequestCancelled(thrown, AbortSignal.abort('probe')) as McpError;
+
+      expect(settled).toBeInstanceOf(McpError);
+      expect(settled.code).toBe(JsonRpcErrorCode.RequestCancelled);
+      expect(settled.message).toBe('socket hang up');
+      expect(settled.cause).toBe(thrown);
+    });
   });
 
   // ─── classifyOnly ────────────────────────────────────────────────────────────
@@ -307,13 +378,34 @@ describe('ErrorHandler', () => {
       expect(result.message).toBe('generic');
     });
 
-    it('should rethrow when rethrow option is true', () => {
-      expect(() =>
-        ErrorHandler.handleError(new Error('boom'), {
-          operation: 'test',
-          rethrow: true,
-        }),
-      ).toThrow();
+    it('rethrows the processed McpError, not the original, when rethrow is true', () => {
+      const original = new Error('status code 503');
+      let thrown: unknown;
+      try {
+        ErrorHandler.handleError(original, { operation: 'test', rethrow: true });
+      } catch (error) {
+        thrown = error;
+      }
+
+      expect(thrown).toBeInstanceOf(McpError);
+      expect(thrown).not.toBe(original);
+      expect((thrown as McpError).code).toBe(JsonRpcErrorCode.ServiceUnavailable);
+    });
+
+    it.each([
+      ['no context', undefined],
+      ['an empty requestId and timestamp', { requestId: '', timestamp: '' }],
+    ])('generates the record requestId and timestamp for %s', (_label, context) => {
+      ErrorHandler.handleError(new Error('boom'), { operation: 'op', ...(context && { context }) });
+
+      const logged = vi.mocked(logger.error).mock.calls.at(-1)?.[1] as {
+        requestId: string;
+        timestamp: string;
+      };
+      expect(logged.requestId).toMatch(
+        /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/,
+      );
+      expect(new Date(logged.timestamp).toISOString()).toBe(logged.timestamp);
     });
 
     it('should use custom errorMapper when provided', () => {

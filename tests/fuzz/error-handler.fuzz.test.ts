@@ -161,14 +161,36 @@ describe('ErrorHandler Fuzz Tests', () => {
       }
     });
 
-    it('never leaks internal details in the error message for random inputs', () => {
+    it('returns data carrying no stack, cause chain, or context for any non-McpError throw', () => {
+      // The returned error's `data` reaches the client verbatim; diagnostics and
+      // the caller's context belong in the log record alone.
+      const DATA_KEYS = new Set(['originalErrorName', 'originalMessage', 'rootCause']);
+      const thrownValue = fc.oneof(
+        fc.string(),
+        fc.integer(),
+        fc.constant(null),
+        fc.dictionary(fc.string(), fc.string()),
+        fc.string().map((message) => new Error(message)),
+        fc
+          .array(fc.string(), { minLength: 2, maxLength: 4 })
+          .map(
+            (messages) =>
+              messages.reduceRight<Error | undefined>(
+                (cause, message) => new Error(message, { cause }),
+                undefined,
+              ) as Error,
+          ),
+      );
+
       fc.assert(
-        fc.property(fc.string(), (message) => {
-          const result = ErrorHandler.handleError(new Error(message), {
+        fc.property(thrownValue, (thrown) => {
+          const result = ErrorHandler.handleError(thrown, {
             operation: 'fuzz-test',
-            context: { requestId: 'fuzz-req' } as any,
-          });
-          expect(result.message).not.toMatch(/node_modules/);
+            context: { requestId: 'fuzz-req', extra: { contextOnly: 'context-only-marker' } },
+          }) as McpError;
+
+          expect(Object.keys(result.data ?? {}).filter((key) => !DATA_KEYS.has(key))).toEqual([]);
+          expect(JSON.stringify(result.data)).not.toMatch(/\n\s+at |context-only-marker/);
         }),
         { numRuns: 100 },
       );

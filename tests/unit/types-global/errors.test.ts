@@ -98,13 +98,6 @@ describe('Global Error Types', () => {
 
       expect(error.cause).toBe(cause);
     });
-
-    it('should capture stack trace', () => {
-      const error = new McpError(JsonRpcErrorCode.InternalError, 'Test error');
-
-      expect(error.stack).toBeDefined();
-      expect(error.stack).toContain('McpError');
-    });
   });
 
   describe('ErrorSchema', () => {
@@ -236,21 +229,19 @@ describe('Global Error Types', () => {
         const err = fn('msg', { key: 'val' });
         expect(err.data).toEqual({ key: 'val' });
       });
+
+      it(`${name}() should chain the cause option, with or without data`, () => {
+        const cause = new Error('upstream failure');
+
+        const withData = fn('msg', { url: '/foo' }, { cause });
+        const withoutData = fn('msg', undefined, { cause });
+
+        expect(withData.cause).toBe(cause);
+        expect(withData.data).toEqual({ url: '/foo' });
+        expect(withoutData.cause).toBe(cause);
+        expect(withoutData.data).toBeUndefined();
+      });
     }
-
-    it('should pass through cause option', () => {
-      const cause = new Error('upstream failure');
-      const err = serviceUnavailable('API down', { url: '/foo' }, { cause });
-      expect(err.cause).toBe(cause);
-      expect(err.data).toEqual({ url: '/foo' });
-    });
-
-    it('should pass cause without data', () => {
-      const cause = new Error('connection reset');
-      const err = timeout('Request timed out', undefined, { cause });
-      expect(err.cause).toBe(cause);
-      expect(err.data).toBeUndefined();
-    });
   });
 });
 

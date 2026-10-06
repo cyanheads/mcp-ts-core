@@ -238,8 +238,12 @@ describe('Error Handler Helpers', () => {
         current = new Error(`deep-${i}`, { cause: current });
       }
       const chain = extractErrorCauseChain(current, 3);
-      const lastNode = chain[chain.length - 1]!;
-      expect(lastNode.name).toBe('MaxDepthExceeded');
+      expect(chain.map(({ name, message, depth }) => [name, message, depth])).toEqual([
+        ['Error', 'deep-5', 0],
+        ['Error', 'deep-4', 1],
+        ['Error', 'deep-3', 2],
+        ['MaxDepthExceeded', 'Error cause chain exceeded maximum depth of 3', 3],
+      ]);
     });
 
     it('should include McpError data', () => {
