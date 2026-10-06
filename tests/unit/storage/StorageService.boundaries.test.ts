@@ -11,7 +11,7 @@ import { requestContextService } from '@/utils/internal/requestContext.js';
 
 const LARGE_BATCH_SIZE = 10_001;
 
-describe('StorageService batch and pagination boundaries', () => {
+describe('StorageService batch boundaries', () => {
   let context: RequestContext;
   let provider: InMemoryProvider;
   let storage: StorageService;
@@ -69,13 +69,5 @@ describe('StorageService batch and pagination boundaries', () => {
     await expect(storage.setMany(entries as never, context)).rejects.toThrow();
     expect(setMany).not.toHaveBeenCalled();
     await expect(storage.get('valid-key', context)).resolves.toBeNull();
-  });
-
-  it('rejects malformed, fractional, zero, and oversized list controls', async () => {
-    await expect(storage.list('', context, { cursor: 'not-a-cursor' })).rejects.toThrow();
-    await expect(storage.list('', context, { cursor: 'YWJj.ZGVm' })).rejects.toThrow();
-    await expect(storage.list('', context, { limit: 0 })).rejects.toThrow();
-    await expect(storage.list('', context, { limit: 1.5 })).rejects.toThrow();
-    await expect(storage.list('', context, { limit: 10_001 })).rejects.toThrow();
   });
 });

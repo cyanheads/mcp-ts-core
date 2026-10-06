@@ -128,6 +128,10 @@ describe('Storage Validation', () => {
       expect(() => validateKey(undefined as any, context)).toThrow(McpError);
     });
 
+    it('should accept a key at the maximum length', () => {
+      expect(() => validateKey('k'.repeat(1024), context)).not.toThrow();
+    });
+
     it('should reject key that is too long', () => {
       const longKey = 'k'.repeat(1025);
       expect(() => validateKey(longKey, context)).toThrow(McpError);
@@ -169,6 +173,10 @@ describe('Storage Validation', () => {
       expect(() => validatePrefix(undefined as any, context)).toThrow(McpError);
       expect(() => validatePrefix(123 as any, context)).toThrow(McpError);
       expect(() => validatePrefix({} as any, context)).toThrow(McpError);
+    });
+
+    it('should accept a prefix at the maximum length', () => {
+      expect(() => validatePrefix('p'.repeat(512), context)).not.toThrow();
     });
 
     it('should reject prefix that is too long', () => {
@@ -257,6 +265,11 @@ describe('Storage Validation', () => {
     it('should accept valid base64 cursors', () => {
       const validCursor = encodeCursor('key', 'tenant');
       expect(() => validateListOptions({ cursor: validCursor }, context)).not.toThrow();
+    });
+
+    it('should accept the minimum and maximum limits', () => {
+      expect(() => validateListOptions({ limit: 1 }, context)).not.toThrow();
+      expect(() => validateListOptions({ limit: 10_000 }, context)).not.toThrow();
     });
 
     it('should reject negative limit', () => {

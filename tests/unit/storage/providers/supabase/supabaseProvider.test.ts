@@ -176,6 +176,21 @@ describe('SupabaseProvider', () => {
     expect(builder.gt).toHaveBeenCalledWith('key', 'prefix_%:0');
   });
 
+  it('scopes list to the tenant, unexpired rows, and ascending key order', async () => {
+    vi.setSystemTime(new Date('2026-01-01T00:00:00.000Z'));
+    const builder = createQueryBuilder({ data: [{ key: 'a' }], error: null });
+    const provider = new SupabaseProvider(createClient(builder) as never);
+
+    await provider.list('tenant-1', 'a', context);
+
+    expect(builder.eq).toHaveBeenCalledWith('tenant_id', 'tenant-1');
+    expect(builder.or).toHaveBeenCalledWith(
+      'expires_at.is.null,expires_at.gt.2026-01-01T00:00:00.000Z',
+    );
+    // The `gt` cursor resumes after the last key, which is only correct over ascending keys.
+    expect(builder.order).toHaveBeenCalledWith('key', { ascending: true });
+  });
+
   it('getMany omits missing and expired rows while cleaning expired keys', async () => {
     vi.setSystemTime(new Date('2026-01-01T00:00:00.000Z'));
     const builder = createQueryBuilder({
@@ -192,6 +207,7 @@ describe('SupabaseProvider', () => {
 
     expect(result).toEqual(new Map([['fresh', 'ok']]));
     expect(deleteSpy).toHaveBeenCalledWith('tenant-1', 'expired', context);
+    expect(builder.eq).toHaveBeenCalledWith('tenant_id', 'tenant-1');
     expect(builder.in).toHaveBeenCalledWith('key', ['fresh', 'expired']);
   });
 
@@ -246,6 +262,8 @@ describe('SupabaseProvider', () => {
     await expect(deleteManyProvider.deleteMany('tenant-1', ['a', 'b', 'c'], context)).resolves.toBe(
       2,
     );
+    expect(deleteManyBuilder.delete).toHaveBeenCalledWith({ count: 'exact' });
+    expect(deleteManyBuilder.eq).toHaveBeenCalledWith('tenant_id', 'tenant-1');
     expect(deleteManyBuilder.in).toHaveBeenCalledWith('key', ['a', 'b', 'c']);
 
     const clearBuilder = createQueryBuilder({ count: 7, error: null });

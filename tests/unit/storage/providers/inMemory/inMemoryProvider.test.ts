@@ -323,6 +323,23 @@ describe('InMemoryProvider (unit)', () => {
       },
     );
 
+    it('releases capacity and the tenant namespace when list() drops expired entries', async () => {
+      const context = createTestContext();
+      const boundedProvider = new InMemoryProvider({ maxEntries: 1 });
+      await boundedProvider.set(tenantId, 'expiring', 'old', context, { ttl: 1 });
+      now += 1_001;
+
+      await expect(boundedProvider.list(tenantId, '', context)).resolves.toEqual({
+        keys: [],
+        nextCursor: undefined,
+      });
+      expect(boundedProvider.size).toBe(0);
+      const internalStore = (boundedProvider as unknown as { store: Map<string, unknown> }).store;
+      expect(internalStore.size).toBe(0);
+      await boundedProvider.set(tenantId, 'fresh', 'new', context);
+      await expect(boundedProvider.get(tenantId, 'fresh', context)).resolves.toBe('new');
+    });
+
     it('preflights setMany capacity so a rejected batch commits no partial entries', async () => {
       const context = createTestContext();
       const boundedProvider = new InMemoryProvider({ maxEntries: 2 });

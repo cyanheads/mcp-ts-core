@@ -7,7 +7,7 @@ import { existsSync, mkdirSync, rmSync } from 'node:fs';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { FileSystemProvider } from '@/storage/providers/fileSystem/fileSystemProvider.js';
-import { McpError } from '@/types-global/errors.js';
+import { JsonRpcErrorCode, McpError } from '@/types-global/errors.js';
 import { requestContextService } from '@/utils/internal/requestContext.js';
 
 const TEST_STORAGE_PATH = path.join(process.cwd(), '.test-storage-fs');
@@ -107,13 +107,16 @@ describe('FileSystemProvider', () => {
       expect(result).toEqual({ data: 'test' });
     });
 
-    it('should throw McpError when stored JSON is corrupted', async () => {
+    it('should throw a SerializationError when stored JSON is corrupted', async () => {
       const fs = await import('node:fs/promises');
       const tenantPath = path.join(TEST_STORAGE_PATH, 'tenant1');
       mkdirSync(tenantPath, { recursive: true });
       await fs.writeFile(path.join(tenantPath, 'corrupt-key'), 'not-valid-json{{{', 'utf-8');
 
-      await expect(provider.get('tenant1', 'corrupt-key', testContext)).rejects.toThrow(McpError);
+      await expect(provider.get('tenant1', 'corrupt-key', testContext)).rejects.toMatchObject({
+        name: 'McpError',
+        code: JsonRpcErrorCode.SerializationError,
+      });
     });
 
     it('should re-throw non-ENOENT errors from get', async () => {
