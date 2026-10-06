@@ -331,6 +331,84 @@ describe('sqliteMirrorStore', () => {
     const { ok } = await store.integrityCheck();
     expect(ok).toBe(true);
   });
+
+  /** FTS5's own consistency check of the index against the content table. */
+  async function expectFtsConsistent(): Promise<void> {
+    const handle = await store.raw();
+    expect(() =>
+      handle.exec(`INSERT INTO papers_fts(papers_fts) VALUES('integrity-check')`),
+    ).not.toThrow();
+  }
+
+  const matchIds = async (match: string): Promise<unknown[]> =>
+    (await store.query({ match, limit: 10, offset: 0 })).rows.map((r) => r.id);
+
+  it('re-indexes an upsert that rewrites an indexed column', async () => {
+    await store.applyBatch([rec('1', { title: 'quasar survey' })], []);
+    await store.applyBatch([rec('1', { title: 'pulsar timing' })], []);
+    expect(await matchIds('quasar')).toEqual([]);
+    expect(await matchIds('pulsar')).toEqual(['1']);
+    await expectFtsConsistent();
+  });
+
+  it('removes a tombstoned record from the index, so a reused rowid inherits none of its terms', async () => {
+    await store.applyBatch(
+      [rec('1', { title: 'quasar survey' }), rec('2', { title: 'pulsar timing' })],
+      [],
+    );
+    // Deleting the highest rowid lets the next insert take that rowid again.
+    await store.applyBatch([], ['2']);
+    await store.applyBatch([rec('3', { title: 'nebula catalog' })], []);
+    expect(await matchIds('pulsar')).toEqual([]);
+    expect(await matchIds('nebula')).toEqual(['3']);
+    await expectFtsConsistent();
+  });
+
+  it.each([
+    ['eq', ['3']],
+    ['ne', ['1', '2']],
+    ['gt', ['2']],
+    ['gte', ['2', '3']],
+    ['lt', ['1']],
+    ['lte', ['1', '3']],
+  ] as const)('applies the %s filter operator', async (op, ids) => {
+    await store.applyBatch(
+      [rec('1', { year: 2022 }), rec('2', { year: 2024 }), rec('3', { year: 2023 })],
+      [],
+    );
+    const result = await store.query({
+      filters: [{ column: 'year', op, value: 2023 }],
+      sort: { column: 'id', direction: 'asc' },
+      limit: 10,
+      offset: 0,
+    });
+    expect(result.rows.map((r) => r.id)).toEqual(ids);
+    expect(result.total).toBe(ids.length);
+  });
+
+  it.each([
+    ['insertion order', undefined],
+    ['relevance', 'relevance'],
+  ] as const)('combines a match with filters under %s sort', async (_label, sort) => {
+    await store.applyBatch(
+      [
+        rec('1', { title: 'attention attention', category: 'cs.LG' }),
+        rec('2', { title: 'attention', category: 'astro-ph' }),
+        rec('3', { title: 'convolution', category: 'cs.LG' }),
+        rec('4', { title: 'attention mechanisms', category: 'cs.LG' }),
+      ],
+      [],
+    );
+    const result = await store.query({
+      match: 'attention',
+      filters: [{ column: 'category', op: 'eq', value: 'cs.LG' }],
+      ...(sort !== undefined && { sort }),
+      limit: 10,
+      offset: 0,
+    });
+    expect(result.total).toBe(2);
+    expect(result.rows.map((r) => r.id)).toEqual(['1', '4']);
+  });
 });
 
 describe('sqliteMirrorStore migrations', () => {

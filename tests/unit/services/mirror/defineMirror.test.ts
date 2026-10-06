@@ -7,16 +7,13 @@
  * own delegation, `status()`/`ready()` derivation, and `runSync()` option wiring
  * are exercised in isolation from the real SQLite store (covered by
  * `sqliteMirrorStore.test.ts`) and the full init/refresh state machine (covered
- * by `runner.test.ts`). A couple of tests use a real `sqliteMirrorStore` where
- * the fake can't stand in: store-construction error propagation and one
- * end-to-end sanity check.
+ * by `runner.test.ts`, which also runs defineMirror end to end over a real
+ * store). One test uses a real `sqliteMirrorStore` where the fake can't stand
+ * in: store-construction error propagation.
  * @module tests/unit/services/mirror/defineMirror
  */
 
-import { mkdtemp, rm } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { describe, expect, it } from 'vitest';
 import { defineMirror } from '@/services/mirror/core/defineMirror.js';
 import { sqliteMirrorStore } from '@/services/mirror/sqlite/sqliteMirrorStore.js';
 import type {
@@ -351,38 +348,8 @@ describe('defineMirror — error surfacing', () => {
     const status = await mirror.status();
     expect(status.status).toBe('error');
     expect(status.error).toBe('recorded failure message');
-  });
-});
-
-describe('defineMirror — end-to-end sanity with a real sqliteMirrorStore', () => {
-  let dir: string;
-
-  beforeEach(async () => {
-    dir = await mkdtemp(join(tmpdir(), 'define-mirror-test-'));
-  });
-  afterEach(async () => {
-    await rm(dir, { recursive: true, force: true });
-  });
-
-  it('runs a real sync end to end and exposes the raw handle', async () => {
-    const mirror = defineMirror({
-      name: 'sanity',
-      store: sqliteMirrorStore({
-        path: join(dir, 'sanity.db'),
-        table: 'docs',
-        primaryKey: 'id',
-        columns: { id: 'TEXT', title: 'TEXT' },
-      }),
-      async *sync() {
-        yield { records: [{ id: '1', title: 'hello' }] };
-      },
-    });
-    const result = await mirror.runSync({ mode: 'init' });
-    expect(result.recordsApplied).toBe(1);
-    expect((await mirror.status()).ready).toBe(true);
-
-    const handle = await mirror.raw();
-    expect(handle.prepare<{ n: number }>('SELECT COUNT(*) AS n FROM docs').get()?.n).toBe(1);
-    await mirror.close();
+    // A run that never completed must not read as a usable mirror.
+    expect(status.ready).toBe(false);
+    expect(status.completedAt).toBeUndefined();
   });
 });

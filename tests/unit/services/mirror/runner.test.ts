@@ -33,6 +33,8 @@ function maxStamp(rows: MirrorRow[]): string | undefined {
 }
 
 interface FakeSource {
+  /** Cursor the last page carries instead of none, like a feed's end-of-list token. */
+  finalCursor?: string;
   pageSize: number;
   received: SyncContext[];
   records: MirrorRow[];
@@ -65,7 +67,7 @@ function makeSync(src: FakeSource): SyncGenerator {
       yield {
         records: slice,
         ...(tombstones.length > 0 && { tombstones }),
-        cursor: offset < visible.length ? String(offset) : undefined,
+        cursor: offset < visible.length ? String(offset) : src.finalCursor,
         ...(checkpoint && { checkpoint }),
       };
       pageIndex += 1;
@@ -112,7 +114,12 @@ describe('mirror runner / defineMirror', () => {
   };
 
   it('runs a full init and reports ready with the high-water checkpoint', async () => {
-    const src: FakeSource = { records: corpusOf(8), pageSize: 2, received: [] };
+    const src: FakeSource = {
+      records: corpusOf(8),
+      pageSize: 2,
+      finalCursor: 'end-of-list',
+      received: [],
+    };
     const mirror = mirrorFor(src);
     const result = await mirror.runSync({ mode: 'init' });
 
@@ -124,7 +131,7 @@ describe('mirror runner / defineMirror', () => {
     expect(status.ready).toBe(true);
     expect(status.total).toBe(8);
     expect(status.checkpoint).toBe(stamp(7));
-    // Volatile cursor is cleared on completion.
+    // Volatile cursor is cleared on completion, even though the last page set one.
     expect((await mirror.store.readState()).cursor).toBeUndefined();
     await mirror.close();
   });
@@ -139,6 +146,10 @@ describe('mirror runner / defineMirror', () => {
     expect(errored.cursor).toBe('4');
     expect(errored.startedAt).toBeDefined();
     expect(await m1.store.count()).toBe(4);
+    // Half the corpus is written, but no run has completed: not ready, no total.
+    expect(errored.completedAt).toBeUndefined();
+    expect(errored.total).toBeUndefined();
+    expect((await m1.status()).ready).toBe(false);
     await m1.close();
 
     // Second run (no throw) must resume from cursor '4', not restart.
@@ -154,6 +165,69 @@ describe('mirror runner / defineMirror', () => {
     // been going), not a fresh "now" timestamp from the recovering call.
     expect((await m2.store.readState()).startedAt).toBe(errored.startedAt);
     await m2.close();
+  });
+
+  // A killed process runs no catch block; what it leaves behind is whatever
+  // was persisted after the last page it applied.
+  it('resumes an init a crash left in_progress from the cursor persisted with its last page', async () => {
+    const crashed: FakeSource = { records: corpusOf(8), pageSize: 2, received: [] };
+    const m1 = mirrorFor(crashed);
+    await m1.store.applyBatch(corpusOf(8).slice(0, 4), []);
+    await m1.store.writeState({
+      status: 'in_progress',
+      startedAt: '2024-02-01T00:00:00.000Z',
+      cursor: '4',
+      checkpoint: stamp(3),
+    });
+
+    const result = await m1.runSync({ mode: 'init' });
+    expect(crashed.received[0]).toMatchObject({ mode: 'init', cursor: '4', checkpoint: stamp(3) });
+    expect(result.recordsApplied).toBe(4);
+    expect(await m1.store.count()).toBe(8);
+    expect(await m1.status()).toMatchObject({ status: 'complete', ready: true, total: 8 });
+    expect((await m1.store.readState()).startedAt).toBe('2024-02-01T00:00:00.000Z');
+    await m1.close();
+  });
+
+  it('persists in_progress state with each page before pulling the next one', async () => {
+    const pages: SyncPage[] = [
+      { records: [{ id: 'a', title: 'A', stamp: stamp(0) }], cursor: 'c1', checkpoint: stamp(0) },
+      { records: [{ id: 'b', title: 'B', stamp: stamp(1) }], cursor: 'c2', checkpoint: stamp(1) },
+    ];
+    const store = sqliteMirrorStore({
+      path: dbPath,
+      table: 'docs',
+      primaryKey: 'id',
+      columns: { id: 'TEXT', title: 'TEXT', stamp: 'TEXT' },
+    });
+    const seen: SyncState[] = [];
+    const sync: SyncGenerator = async function* (): AsyncGenerator<SyncPage> {
+      seen.push(await store.readState());
+      for (const page of pages) {
+        yield page;
+        // The runner resumes the generator only after persisting the page.
+        seen.push(await store.readState());
+      }
+    };
+    try {
+      await runSync(
+        store,
+        sync,
+        { log: {}, signal: new AbortController().signal },
+        { mode: 'init' },
+      );
+      expect(
+        seen.map(({ status, cursor, checkpoint }) => ({ status, cursor, checkpoint })),
+      ).toEqual([
+        { status: 'in_progress', cursor: undefined, checkpoint: undefined },
+        { status: 'in_progress', cursor: 'c1', checkpoint: stamp(0) },
+        { status: 'in_progress', cursor: 'c2', checkpoint: stamp(1) },
+      ]);
+      expect(new Set(seen.map((state) => state.startedAt)).size).toBe(1);
+      expect(seen.every((state) => state.completedAt === undefined)).toBe(true);
+    } finally {
+      await store.close();
+    }
   });
 
   it('restarts a full init from scratch after a prior init completed, ignoring any stale cursor/checkpoint', async () => {
