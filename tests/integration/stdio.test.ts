@@ -80,7 +80,12 @@ interface TerminatedRun {
 
 const READY_LINE = 'is now running and ready';
 const READY_TIMEOUT_MS = 15_000;
-const EXIT_TIMEOUT_MS = 10_000;
+/**
+ * Outlasts the framework's 10 s shutdown ceiling, so a run the ceiling ends is
+ * observed exiting with its `did not settle` warning on stderr, not cut off
+ * here as merely still alive.
+ */
+const EXIT_TIMEOUT_MS = 15_000;
 
 /** How a booted server is told to stop. */
 type Terminator = (child: ChildProcess) => void;
@@ -308,11 +313,12 @@ describe('Stdio transport signal shutdown (#435)', () => {
     const run = await runUntilTerminated(sendSignal('SIGTERM'));
 
     expect(run.stillAlive).toBe(false);
+    // The ceiling names the step that never settled before it exits 1.
+    expect(run.stderr).not.toContain('did not settle');
     expect(run.code).toBe(0);
     expect(run.signal).toBeNull();
     expect(run.stderr).toContain('Initiating graceful shutdown');
     expect(run.stderr).toContain('Graceful shutdown completed successfully.');
-    expect(run.stderr).not.toContain('did not settle');
     expect(run.stdout).toBe('');
   });
 
@@ -327,9 +333,9 @@ describe('Stdio transport signal shutdown (#435)', () => {
       });
 
       expect(run.stillAlive).toBe(false);
+      expect(run.stderr).not.toContain('did not settle');
       expect(run.code).toBe(0);
       expect(run.stderr).toContain('Graceful shutdown completed successfully.');
-      expect(run.stderr).not.toContain('did not settle');
     } finally {
       await rm(dir, { force: true, recursive: true });
     }
@@ -341,10 +347,10 @@ describe('Stdio transport signal shutdown (#435)', () => {
     });
 
     expect(run.stillAlive).toBe(false);
+    expect(run.stderr).not.toContain('did not settle');
     expect(run.code).toBe(0);
     expect(run.stderr).toContain('teardown fixture released its handle.');
     expect(run.stderr).toContain('Graceful shutdown completed successfully.');
-    expect(run.stderr).not.toContain('did not settle');
   });
 
   it('exits 0 on SIGINT', async () => {
