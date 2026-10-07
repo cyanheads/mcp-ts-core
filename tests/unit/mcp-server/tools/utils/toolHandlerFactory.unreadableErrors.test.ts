@@ -343,7 +343,9 @@ describe('a declared failure whose fields cannot be read (#697)', () => {
         data: { reason: 'gone', recovery: { hint: RECOVERY } },
       });
       const text = (result.content as Array<{ text: string }>)[0]?.text;
-      expect(text).toMatch(new RegExp(`^Error: ${message.replace(/[[\].]/g, '\\$&')}\\n`));
+      expect(text).toMatch(
+        new RegExp(`^Error: ${message.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\n`),
+      );
       expect(text).toContain(`Recovery: ${RECOVERY}`);
 
       const written = errorRecord(name);
