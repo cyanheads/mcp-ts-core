@@ -6,7 +6,7 @@
 
 import { config } from '@/config/index.js';
 import { authContext } from '@/mcp-server/transports/auth/lib/authContext.js';
-import { forbidden, McpError, unauthorized } from '@/types-global/errors.js';
+import { forbidden, type McpError, unauthorized } from '@/types-global/errors.js';
 import { logger } from '@/utils/internal/logger.js';
 import {
   type RequestContext,
@@ -36,11 +36,13 @@ export function markScopeRefusal(error: McpError): McpError {
  * That refusal is told apart from every other `Forbidden` — a handler's own
  * `forbidden()`, an upstream 403 — by where it was raised, never by its code,
  * so the tool handler factory can log it at `notice` with no stack (#585).
+ * An identity lookup, so it never throws on what it is handed — a revoked
+ * `Proxy` included (#697).
  *
  * @internal
  */
 export function isScopeRefusal(error: unknown): boolean {
-  return error instanceof McpError && scopeRefusals.has(error);
+  return scopeRefusals.has(error as McpError);
 }
 
 /**

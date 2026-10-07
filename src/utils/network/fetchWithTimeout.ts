@@ -156,8 +156,9 @@ export interface FetchWithTimeoutOptions extends Omit<RequestInit, 'signal'> {
    *
    * `location` is selectable under `redirect: 'manual'`, which is how a caller
    * validates a redirect target before re-issuing. It does not compose with
-   * {@link FetchWithTimeoutOptions.rejectPrivateIPs}: that mode consumes the 3xx
-   * in the per-hop branch below, so the throw path never sees it.
+   * {@link FetchWithTimeoutOptions.rejectPrivateIPs}: that mode follows every 3xx
+   * carrying a `Location` in the per-hop branch below, so the throw path only sees
+   * a 3xx without one.
    */
   errorHeaders?: string[];
   /**
@@ -187,8 +188,9 @@ export interface FetchWithTimeoutOptions extends Omit<RequestInit, 'signal'> {
    * fatal. See {@link assertDnsNotPrivate}. Available in Node, Bun, and
    * Cloudflare Workers under `nodejs_compat`.
    *
-   * When enabled, redirects are followed manually (up to {@link MAX_SSRF_REDIRECTS}
-   * hops) with SSRF validation applied to each redirect target.
+   * When enabled, a 3xx carrying a `Location` is followed manually (up to
+   * {@link MAX_SSRF_REDIRECTS} hops) with SSRF validation applied to each redirect
+   * target; a 3xx without one fails as a non-2xx status.
    *
    * **Best-effort, not a hard guarantee — DNS rebinding / TOCTOU still applies.**
    * The pre-validation lookup and the native `fetch` call's own DNS resolution
@@ -568,8 +570,10 @@ function withBodyDeadline(
  * aborted at the deadline rather than held open.
  *
  * When `options.rejectPrivateIPs` is `true`, the target URL is validated before the
- * request is sent, and all redirects are followed manually with per-hop SSRF checks
- * (up to 5 hops). This mode forces `redirect: 'manual'` on the underlying fetch.
+ * request is sent, and every 3xx carrying a `Location` is followed manually with
+ * per-hop SSRF checks (up to 5 hops). This mode forces `redirect: 'manual'` on the
+ * underlying fetch. A hop the guard rejects throws the `ValidationError` the initial
+ * URL would, with no record here.
  *
  * Non-2xx responses are treated as errors. The response body is captured under a
  * byte budget (`options.errorBodyLimit`, default {@link ERROR_BODY_LIMIT}) to avoid
@@ -579,8 +583,9 @@ function withBodyDeadline(
  * 404 → `NotFound`, 429 → `RateLimited`, 5xx → `ServiceUnavailable`/`Timeout`).
  * A 501 additionally carries `data.retryable: false`, so `withRetry` fails it
  * fast instead of re-attempting a method the upstream does not implement. A 3xx
- * reaches this path only under `redirect: 'manual'` and maps to `InvalidRequest`,
- * which `withRetry` does not retry.
+ * reaches this path when it is not followed — under `redirect: 'manual'`, or with
+ * no `Location` header (a 304 included) — and maps to `InvalidRequest`, which
+ * `withRetry` does not retry.
  *
  * @param url - The URL to fetch (string or `URL` instance).
  * @param timeoutMs - Maximum duration in milliseconds before the exchange is aborted.
@@ -599,7 +604,9 @@ function withBodyDeadline(
  *   headers, `url`, `redirected`, and `type` are preserved, and the body streams
  *   through unchanged under the deadline.
  * @throws {McpError} `ValidationError` for a non-HTTP(S) URL, or if the URL targets
- *   a non-global/reserved address and `rejectPrivateIPs` is enabled.
+ *   a non-global/reserved address and `rejectPrivateIPs` is enabled. Under
+ *   `rejectPrivateIPs` the same holds for each redirect target, plus
+ *   `too_many_redirects` past 5 hops. Thrown with no record here; the caller logs it.
  * @throws {McpError} `Timeout` if the exchange exceeds `timeoutMs`. Raised from the
  *   call itself when the deadline expires before headers, and from the body read
  *   when it expires during the stream.
@@ -615,7 +622,8 @@ function withBodyDeadline(
  *   plus the legacy aliases `statusCode` (= `status`) and `responseBody` (= `body`), kept
  *   for existing consumers and slated for consolidation in a future major. List a status in
  *   `options.expectedStatuses` to log it at `debug` rather than `error` (still thrown).
- * @throws {McpError} `ServiceUnavailable` if a network-level error occurs, chaining
+ * @throws {McpError} `ServiceUnavailable` if a network-level error occurs — an
+ *   unparseable redirect `Location` included — chaining
  *   the runtime's rejection as `cause` so its transport `code` (`ECONNREFUSED`,
  *   `ConnectionRefused`) survives; the failure record carries it as `causeChain`.
  * @example
@@ -746,6 +754,11 @@ export async function fetchWithTimeout(
   const startTime = performance.now();
   const method = (fetchInit.method ?? 'GET').toUpperCase();
   let statusCode = 0;
+  /**
+   * The SSRF guard's rejection of a redirect hop, held so the catch below can
+   * tell it from a `fetch` rejection by identity rather than by type.
+   */
+  let hopRejection: McpError | undefined;
 
   try {
     let currentUrl: string | URL = url;
@@ -757,18 +770,20 @@ export async function fetchWithTimeout(
         signal: fetchSignal,
       });
 
-      // Handle redirects manually when SSRF protection is active
-      if (rejectPrivate && response.status >= 300 && response.status < 400) {
-        const location = response.headers.get('location');
-        if (!location) {
-          throw serviceUnavailable(
-            `Redirect response missing Location header from ${redactUrl(currentUrl)}`,
-          );
-        }
-
+      /**
+       * Under SSRF protection, follow a 3xx that names its target, validating
+       * each hop. A 3xx with no `Location` — a 304 included — is a final
+       * response, as the platform's own redirect following returns it, and fails
+       * below like any other non-2xx.
+       */
+      const location =
+        rejectPrivate && response.status >= 300 && response.status < 400
+          ? response.headers.get('location')
+          : null;
+      if (location) {
         redirectCount++;
         if (redirectCount > MAX_SSRF_REDIRECTS) {
-          throw validationError(
+          hopRejection = validationError(
             `Too many redirects (${MAX_SSRF_REDIRECTS}) — possible SSRF redirect loop`,
             {
               maxRedirects: MAX_SSRF_REDIRECTS,
@@ -778,13 +793,18 @@ export async function fetchWithTimeout(
               },
             },
           );
+          throw hopRejection;
         }
 
-        // Resolve relative redirect URLs against the current URL
+        // Resolve relative redirect URLs against the current URL. An unparseable
+        // `Location` is a malformed response, not a guard rejection.
         const redirectUrl = new URL(location, currentUrl.toString()).toString();
 
         // Validate the redirect target against SSRF rules
-        await assertNotPrivateUrl(redirectUrl);
+        await assertNotPrivateUrl(redirectUrl).catch((rejection: McpError) => {
+          hopRejection = rejection;
+          throw rejection;
+        });
 
         logger.debug(
           `Following validated redirect ${redirectCount}: ${redactUrl(redirectUrl)}`,
@@ -889,14 +909,22 @@ export async function fetchWithTimeout(
       throw abortedFailure();
     }
 
+    /**
+     * The SSRF guard's rejection of a redirect hop — a blocked target, a
+     * non-HTTP scheme, too many hops — is the same policy refusal the initial
+     * URL gets before any request, and leaves the same way: thrown, with no
+     * record here, so the caller logs it at the severity its own contract
+     * declares. A deadline that fired first still reports the deadline, above.
+     */
+    if (hopRejection && error === hopRejection) throw error;
+
     const errorMessage = redactEmbeddedUrls(error instanceof Error ? error.message : String(error));
     /**
      * The runtime's rejection is chained as the wrapper's `cause`, where
-     * `handleError` reads its message into `data.rootCause` — client-visible
-     * once `tryCatch` throws — and into the logged cause chain. A URL it quotes
-     * is redacted on the rejection itself first; its identity, `code`, and
-     * every other field stay as the runtime set them. A rejection whose
-     * `message` cannot be written is chained as a stand-in instead.
+     * `handleError` reads its message into the logged `rootCause` and cause
+     * chain. A URL it quotes is redacted on the rejection itself first; its
+     * identity, `code`, and every other field stay as the runtime set them. A
+     * rejection whose `message` cannot be written is chained as a stand-in instead.
      */
     const cause =
       error instanceof Error && !(error instanceof McpError)

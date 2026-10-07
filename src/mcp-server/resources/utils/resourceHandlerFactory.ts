@@ -21,7 +21,7 @@ import {
 import {
   type ClientCapabilityView,
   isInputRequiredSignal,
-  sealThrown,
+  sealSignal,
 } from '@/mcp-server/inputRequired.js';
 import type { NotifierSources } from '@/mcp-server/notifications.js';
 import { parseOutputContract } from '@/mcp-server/outputContract.js';
@@ -29,6 +29,7 @@ import type { AnyResourceDefinition } from '@/mcp-server/resources/utils/resourc
 import { withRequiredScopes } from '@/mcp-server/transports/auth/lib/authUtils.js';
 import { JsonRpcErrorCode, McpError } from '@/types-global/errors.js';
 import { asRequestCancelled, ErrorHandler } from '@/utils/internal/error-handler/errorHandler.js';
+import { isInstance, readErrorData, UNREADABLE } from '@/utils/internal/error-handler/helpers.js';
 import {
   capForObservability,
   OBSERVABILITY_MAX_STRING_LENGTH,
@@ -196,9 +197,12 @@ export function createResourceHandler(
             // `metrics.errorCode` and the span's error-code attribute are
             // derived from what leaves this callback (#421). An input-required
             // signal leaves with its `requestState` sealed when a key is
-            // configured, so a sealing failure is a failed read like any other.
+            // configured, so a sealing failure is a failed read like any other;
+            // anything else leaves as itself, never awaited (#697).
             throw asRequestCancelled(
-              await sealThrown(error, services.requestState, serverContext),
+              isInputRequiredSignal(error)
+                ? await sealSignal(error, services.requestState, serverContext)
+                : error,
               request.signal,
             );
           }
@@ -223,7 +227,7 @@ export function createResourceHandler(
 
 /** The thrown value as an `McpError`, classified by {@link ErrorHandler.classifyOnly} when it is not one. */
 function asMcpError(error: unknown): McpError {
-  if (error instanceof McpError) return error;
+  if (isInstance(error, McpError)) return error;
   const { code, message, data } = ErrorHandler.classifyOnly(error);
   return new McpError(code, message, data, { cause: error });
 }
@@ -237,14 +241,23 @@ function asMcpError(error: unknown): McpError {
  * A `-32602` whose `data` is exactly `{ uri }` passes through untouched: it is
  * the spec's resource-not-found shape, which clients recognize by that exact
  * `data`.
+ *
+ * Never throws on the thrown error (#697): its `code`, `message`, and `data`
+ * are read as {@link ErrorHandler.classifyOnly} reads them, so one that cannot
+ * be read is `InternalError`, `'[Unreadable]'`, or left out. A not-found error
+ * whose message cannot be read is rebuilt with the same `{ uri }`, so the SDK
+ * never reads the thrown one.
  */
 function withRequestId(error: McpError, requestId: string): McpError {
-  const { data } = error;
+  const { code, message } = ErrorHandler.classifyOnly(error);
+  const data = readErrorData(error);
   const isResourceNotFound =
-    error.code === JsonRpcErrorCode.InvalidParams &&
+    code === JsonRpcErrorCode.InvalidParams &&
     data !== undefined &&
     typeof data.uri === 'string' &&
     Object.keys(data).length === 1;
-  if (isResourceNotFound) return error;
-  return new McpError(error.code, error.message, { ...data, requestId }, { cause: error });
+  if (isResourceNotFound) {
+    return message === UNREADABLE ? new McpError(code, message, data, { cause: error }) : error;
+  }
+  return new McpError(code, message, { ...data, requestId }, { cause: error });
 }

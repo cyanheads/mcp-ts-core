@@ -635,7 +635,7 @@ describe('ErrorHandler', () => {
         ['omitted', undefined],
         ['true', true],
       ])('logs every stack when includeStack is %s', (_label, includeStack) => {
-        const { outer } = threeLevelChain();
+        const { mid, outer } = threeLevelChain();
 
         ErrorHandler.handleError(outer, {
           operation: 'probe',
@@ -643,11 +643,15 @@ describe('ErrorHandler', () => {
         });
 
         const { extra } = lastErrorRecord();
-        expect(extra.stack).toEqual(expect.any(String));
-        expect(extra.errorData.originalStack).toBe(outer.stack);
+        // The throw site's stack, once, as the record's `stack` (#694): node 0
+        // is the thrown error, so it does not repeat it; each cause keeps its own.
+        expect(extra.stack).toBe(outer.stack);
+        expect(extra.errorData).not.toHaveProperty('originalStack');
         const chain = extra.errorData.causeChain ?? [];
         expect(chain).toHaveLength(3);
-        for (const node of chain) expect(node.stack).toEqual(expect.any(String));
+        expect(chain[0]).not.toHaveProperty('stack');
+        expect(chain[1]?.stack).toBe(mid.stack);
+        expect(chain[2]?.stack).toBe((mid.cause as Error).stack);
         expect(chain[1]?.data).toEqual({ originalStack: 'MID_DATA_STACK', pool: 'primary' });
       });
 
@@ -819,6 +823,129 @@ describe('ErrorHandler', () => {
       expect(result.message).toBe('string error');
     });
   });
+
+  // ─── a value whose reads throw (#697) ────────────────────────────────────────
+
+  describe('a thrown value whose reads throw (#697)', () => {
+    /** `target` with an own `key` whose read throws. */
+    function unreadable<T extends object>(target: T, key: string): T {
+      return Object.defineProperty(target, key, {
+        configurable: true,
+        get() {
+          throw new Error(`${key} getter`);
+        },
+      });
+    }
+
+    /** A revoked Proxy: every operation on it, `instanceof` included, throws. */
+    function revoked(): object {
+      const { proxy, revoke } = Proxy.revocable({}, {});
+      revoke();
+      return proxy;
+    }
+
+    it.each([
+      [
+        'an Error whose message getter throws',
+        () => unreadable(new Error('boom'), 'message'),
+        {
+          code: JsonRpcErrorCode.InternalError,
+          message: '[Unreadable]',
+          data: { errorType: 'Error' },
+        },
+      ],
+      [
+        'an Error whose name getter throws',
+        () => unreadable(new TypeError('boom'), 'name'),
+        {
+          code: JsonRpcErrorCode.InternalError,
+          message: 'boom',
+          data: { errorType: '[Unreadable]' },
+        },
+      ],
+      [
+        'an McpError whose message getter throws',
+        () => unreadable(new McpError(JsonRpcErrorCode.NotFound, 'gone', { id: 1 }), 'message'),
+        { code: JsonRpcErrorCode.NotFound, message: '[Unreadable]', data: { id: 1 } },
+      ],
+      [
+        'an McpError whose data getter throws',
+        () => unreadable(new McpError(JsonRpcErrorCode.NotFound, 'gone', { id: 1 }), 'data'),
+        { code: JsonRpcErrorCode.NotFound, message: 'gone', data: {} },
+      ],
+      [
+        'an McpError whose data is a revoked Proxy',
+        () =>
+          Object.defineProperty(new McpError(JsonRpcErrorCode.NotFound, 'gone'), 'data', {
+            configurable: true,
+            enumerable: true,
+            value: revoked(),
+          }),
+        { code: JsonRpcErrorCode.NotFound, message: 'gone', data: {} },
+      ],
+      [
+        'a revoked Proxy',
+        revoked,
+        {
+          code: JsonRpcErrorCode.UnknownError,
+          message: '[Unreadable]',
+          data: { errorType: '[Unreadable]' },
+        },
+      ],
+    ])('formatError writes %s as [Unreadable] where it cannot read', (_label, make, expected) => {
+      expect(ErrorHandler.formatError(make())).toEqual(expected);
+    });
+
+    it.each([
+      [
+        'an McpError whose message getter throws',
+        () => unreadable(new McpError(JsonRpcErrorCode.NotFound, 'gone'), 'message'),
+        { code: JsonRpcErrorCode.NotFound, message: '[Unreadable]' },
+      ],
+      [
+        'an McpError whose code getter throws',
+        () => unreadable(new McpError(JsonRpcErrorCode.NotFound, 'gone'), 'code'),
+        { code: JsonRpcErrorCode.InternalError, message: 'gone' },
+      ],
+      [
+        'a revoked Proxy',
+        revoked,
+        { code: JsonRpcErrorCode.InternalError, message: '[Unreadable]' },
+      ],
+    ])('classifyOnly classifies %s without throwing', (_label, make, expected) => {
+      expect(ErrorHandler.classifyOnly(make())).toEqual(expected);
+    });
+
+    it('determineErrorCode classifies a revoked Proxy and an unreadable SdkError code as InternalError', () => {
+      expect(ErrorHandler.determineErrorCode(revoked())).toBe(JsonRpcErrorCode.InternalError);
+      expect(
+        ErrorHandler.determineErrorCode(
+          unreadable(new SdkError(SdkErrorCode.ConnectionClosed, 'something weird'), 'code'),
+        ),
+      ).toBe(JsonRpcErrorCode.InternalError);
+    });
+
+    it.each([
+      ['a revoked Proxy', revoked],
+      ['a null-prototype object', () => Object.create(null) as object],
+    ])('mapError wraps %s, which it cannot convert, as an [Unreadable] Error', (_label, make) => {
+      const result = ErrorHandler.mapError(make(), []);
+      expect(result).toBeInstanceOf(Error);
+      expect(result.message).toBe('[Unreadable]');
+    });
+
+    it('asRequestCancelled cancels an McpError whose code it cannot read, keeping a cancelled one as is', () => {
+      const aborted = AbortSignal.abort();
+      const cancelled = new McpError(JsonRpcErrorCode.RequestCancelled, 'gone');
+      const thrown = unreadable(new McpError(JsonRpcErrorCode.NotFound, 'gone'), 'code');
+
+      expect(asRequestCancelled(cancelled, aborted)).toBe(cancelled);
+      const resolved = asRequestCancelled(thrown, aborted);
+      expect(resolved).toBeInstanceOf(McpError);
+      expect(resolved).toMatchObject({ code: JsonRpcErrorCode.RequestCancelled, message: 'gone' });
+      expect((resolved as McpError).cause).toBe(thrown);
+    });
+  });
 });
 
 describe('ErrorHandler context projection', () => {
@@ -914,7 +1041,8 @@ describe('ErrorHandler context projection', () => {
     );
   });
 
-  it('carries rootCause on data for a chained error, but no context', () => {
+  // #644 — a cause's message reaches the log record, never `data`.
+  it('logs a chained error’s rootCause, keeping it and the context out of data', () => {
     const handled = ErrorHandler.handleError(
       new Error('wrapper', { cause: new TypeError('inner boom') }),
       { operation: 'svc', context: handlerShapedContext as never },
@@ -923,7 +1051,16 @@ describe('ErrorHandler context projection', () => {
     expect((handled as McpError).data).toEqual({
       originalErrorName: 'Error',
       originalMessage: 'wrapper',
-      rootCause: { name: 'TypeError', message: 'inner boom' },
     });
+    expect(logger.error).toHaveBeenCalledWith(
+      'Error in svc: wrapper',
+      expect.objectContaining({
+        extra: expect.objectContaining({
+          errorData: expect.objectContaining({
+            rootCause: { name: 'TypeError', message: 'inner boom' },
+          }),
+        }),
+      }),
+    );
   });
 });

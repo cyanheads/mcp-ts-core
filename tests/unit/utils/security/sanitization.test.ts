@@ -238,6 +238,41 @@ describe('Sanitization Utility', () => {
       expect(sanitized[1]).toBe(1);
       expect(sanitized[2]).toEqual(date);
     });
+
+    // #696 — a field name split across two words of a longer key was missed.
+    it('redacts a sensitive name spanning adjacent words of a key, and keeps token counters', () => {
+      const sanitized = sanitization.sanitizeForLogging({
+        meta: {
+          'x-api-key': 'sk-live-0000',
+          'X-Api-Key': 'sk-live-0001',
+          upstream_private_key: 'pem',
+          apiKey: 'k',
+          apiKey2: 'k2',
+          CVV2: '123',
+          max_tokens: 5,
+          MAX_TOKENS: 5,
+          usage: { prompt_tokens: 1, completion_tokens: 2, total_tokens: 3 },
+          tokenizer: 'cl100k',
+          TOKENIZER: 'cl100k',
+        },
+      });
+
+      expect(sanitized).toEqual({
+        meta: {
+          'x-api-key': '[REDACTED]',
+          'X-Api-Key': '[REDACTED]',
+          upstream_private_key: '[REDACTED]',
+          apiKey: '[REDACTED]',
+          apiKey2: '[REDACTED]',
+          CVV2: '[REDACTED]',
+          max_tokens: 5,
+          MAX_TOKENS: 5,
+          usage: { prompt_tokens: 1, completion_tokens: 2, total_tokens: 3 },
+          tokenizer: 'cl100k',
+          TOKENIZER: 'cl100k',
+        },
+      });
+    });
   });
 
   describe('serializeForLogging', () => {

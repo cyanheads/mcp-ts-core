@@ -16,6 +16,11 @@ import {
   type PartialResultKeys,
 } from '@/utils/formatting/partialResult.js';
 import { ErrorHandler } from '@/utils/internal/error-handler/errorHandler.js';
+import {
+  isInstance,
+  readErrorData,
+  recordSpanFailure,
+} from '@/utils/internal/error-handler/helpers.js';
 import { type ErrorCategory, getErrorCategory } from '@/utils/internal/error-handler/mappings.js';
 import { logger } from '@/utils/internal/logger.js';
 import { type RequestContext, withActiveSpan, withExtra } from '@/utils/internal/requestContext.js';
@@ -350,19 +355,14 @@ async function measure<TContext extends RequestContext, T>(
       // An `McpError` keeps its own code; `data` rides along so a code shared by
       // two sources — a local capacity refusal and upstream throttling both
       // answer `-32003` — lands in the right `error_category` bucket (#275).
+      // Every read is guarded: an error whose fields throw on read must leave
+      // here as itself (#697), an `McpError` code it cannot read as `-32603`.
       outcome.classifiedCode = ErrorHandler.determineErrorCode(err);
-      outcome.errorCategory = getErrorCategory(
-        outcome.classifiedCode,
-        err instanceof McpError ? err.data : undefined,
-      );
-      if (err instanceof McpError) outcome.errorCode = String(err.code);
-      else outcome.errorCode = err instanceof Error ? 'UNHANDLED_ERROR' : 'UNKNOWN_ERROR';
+      outcome.errorCategory = getErrorCategory(outcome.classifiedCode, readErrorData(err));
+      if (isInstance(err, McpError)) outcome.errorCode = String(outcome.classifiedCode);
+      else outcome.errorCode = isInstance(err, Error) ? 'UNHANDLED_ERROR' : 'UNKNOWN_ERROR';
 
-      if (err instanceof Error) span.recordException(err);
-      span.setStatus({
-        code: SpanStatusCode.ERROR,
-        message: err instanceof Error ? err.message : String(err),
-      });
+      recordSpanFailure(span, err);
       throw err;
     } finally {
       activeGauge.add(-1);
@@ -550,10 +550,7 @@ export function recordToolRejection(toolName: string, error: unknown): void {
   getToolMetrics().toolRejections.add(1, {
     [ATTR_MCP_TOOL_NAME]: toolName,
     [ATTR_MCP_TOOL_ERROR_CODE]: String(code),
-    [ATTR_MCP_TOOL_ERROR_CATEGORY]: getErrorCategory(
-      code,
-      error instanceof McpError ? error.data : undefined,
-    ),
+    [ATTR_MCP_TOOL_ERROR_CATEGORY]: getErrorCategory(code, readErrorData(error)),
   });
 }
 

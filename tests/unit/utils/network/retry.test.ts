@@ -1300,6 +1300,124 @@ describe('withRetry logs the cause chain of a retried error (#615)', () => {
     });
   });
 
+  /** `error` with an own `key` whose read throws. */
+  const unreadable = <E extends Error>(error: E, key: string): E =>
+    Object.defineProperty(error, key, {
+      configurable: true,
+      get() {
+        throw new Error(`${key} getter`);
+      },
+    });
+
+  it.each([
+    ['whose getter throws', () => unreadable(new TypeError('fetch failed'), 'cause')],
+    [
+      'that is a revoked Proxy',
+      () => {
+        const { proxy, revoke } = Proxy.revocable({}, {});
+        revoke();
+        return new TypeError('fetch failed', { cause: proxy });
+      },
+    ],
+  ])(
+    'retries an error with a cause %s, the chain ending [Unreadable] (#697)',
+    async (_label, make) => {
+      const [message, recordContext] = await retryRecordFor(make());
+
+      expect(message).toBe('Retry 1/3 for demo: fetch failed — waiting 1ms');
+      expect(recordContext).toEqual({
+        ...context,
+        extra: {
+          causeChain: [
+            { name: 'TypeError', message: 'fetch failed' },
+            { name: '[Unreadable]', message: '[Unreadable]' },
+          ],
+        },
+      });
+    },
+  );
+
+  it('retries an error whose message and code cannot be read (#697)', async () => {
+    const failure = unreadable(unreadable(new TypeError('fetch failed'), 'message'), 'code');
+
+    const [message, recordContext] = await retryRecordFor(failure);
+
+    expect(message).toBe('Retry 1/3 for demo: [Unreadable] — waiting 1ms');
+    // No cause and no readable string code: the record stays as it was.
+    expect(recordContext).toBe(context);
+  });
+
+  /** `error` with its `message` set to `value`. */
+  const withMessage = <E extends Error>(error: E, value: unknown): E =>
+    Object.defineProperty(error, 'message', { configurable: true, value });
+  /** An object whose conversion to text throws. */
+  const hostile = {
+    toString(): never {
+      throw new Error('toString threw');
+    },
+  };
+  const messages = [
+    ['a Symbol', Symbol('sym-msg'), 'Symbol(sym-msg)'],
+    ['a number', 404, '404'],
+    ['an object whose toString throws', hostile, '[Unreadable]'],
+  ] as const;
+
+  it.each(messages)(
+    'retries an error whose message is %s, logging it as text (#697)',
+    async (_label, value, text) => {
+      const failure = withMessage(new McpError(JsonRpcErrorCode.ServiceUnavailable, 'down'), value);
+
+      const [message] = await retryRecordFor(failure);
+
+      expect(message).toBe(`Retry 1/3 for demo: ${text} — waiting 1ms`);
+    },
+  );
+
+  it.each([
+    ['a Symbol', Symbol('thrown'), 'Symbol(thrown)'],
+    ['an object whose toString throws', hostile, '[Unreadable]'],
+  ])(
+    'retries a thrown value that is not an Error — %s — logging it as text (#697)',
+    async (_label, failure, text) => {
+      const [message] = await retryRecordFor(failure);
+
+      expect(message).toBe(`Retry 1/3 for demo: ${text} — waiting 1ms`);
+    },
+  );
+
+  it.each(messages)(
+    'exhausts an McpError and an Error whose message is %s to an error carrying it as text (#697)',
+    async (_label, value, text) => {
+      const mcp = withMessage(new McpError(JsonRpcErrorCode.ServiceUnavailable, 'down'), value);
+      const plain = withMessage(new TypeError('down'), value);
+      const exhausted = (failure: Error) =>
+        withRetry(() => Promise.reject(failure), { maxRetries: 0, operation: 'demo' }).catch(
+          (error: unknown) => error as Error,
+        );
+
+      const [fromMcp, fromPlain] = await Promise.all([exhausted(mcp), exhausted(plain)]);
+
+      expect(fromMcp).toBeInstanceOf(McpError);
+      expect(fromMcp.message).toBe(`${text} (failed after 1 attempt)`);
+      expect(fromMcp.cause).toBe(mcp);
+      expect(fromPlain.name).toBe('TypeError');
+      expect(fromPlain.message).toBe(`${text} (failed after 1 attempt)`);
+      expect(fromPlain.cause).toBe(plain);
+    },
+  );
+
+  it('exhausts an Error whose name cannot be read to a wrapper named [Unreadable] (#697)', async () => {
+    const failure = unreadable(new TypeError('down'), 'name');
+
+    const result = (await withRetry(() => Promise.reject(failure), { maxRetries: 0 }).catch(
+      (error: unknown) => error,
+    )) as Error;
+
+    expect(result.name).toBe('[Unreadable]');
+    expect(result.message).toBe('down (failed after 1 attempt)');
+    expect(result.cause).toBe(failure);
+  });
+
   it.each([
     ['an McpError', new McpError(JsonRpcErrorCode.ServiceUnavailable, 'down', { upstream: 'x' })],
     ['a plain Error', new Error('transient')],

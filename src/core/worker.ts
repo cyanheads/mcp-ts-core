@@ -22,6 +22,7 @@ import type { Hono } from 'hono';
 import { normalizeLogLevelAlias } from '@/config/logLevelAlias.js';
 import { type CreateAppOptions, composeServices } from '@/core/app.js';
 import { createHttpApp } from '@/mcp-server/transports/http/httpTransport.js';
+import { asError, readField } from '@/utils/internal/error-handler/helpers.js';
 import { logger, type McpLogLevel } from '@/utils/internal/logger.js';
 import { requestContextService, withExtra } from '@/utils/internal/requestContext.js';
 
@@ -232,7 +233,7 @@ export function createWorkerHandler(options: WorkerHandlerOptions = {}) {
   function initializeApp(env: CloudflareBindings): Promise<Hono<WorkerEnv>> {
     if (appPromise) return appPromise;
 
-    appPromise = (async () => {
+    const pending = (async () => {
       const initStartTime = Date.now();
 
       try {
@@ -288,28 +289,34 @@ export function createWorkerHandler(options: WorkerHandlerOptions = {}) {
         return app;
       } catch (error: unknown) {
         const initDuration = Date.now() - initStartTime;
+        // Guarded: a failure whose fields throw on read is still logged, and rethrown as itself (#697).
+        const failure = asError(error);
         const errorContext = requestContextService.createRequestContext({
           operation: 'WorkerInitialization',
           additionalContext: {
             isServerless: true,
             initDurationMs: initDuration,
-            error: error instanceof Error ? error.message : String(error),
-            stack: error instanceof Error ? error.stack : undefined,
+            error: readField(failure, 'message'),
+            stack: failure === error ? readField(failure, 'stack') : undefined,
           },
         });
 
-        logger.crit(
-          'Failed to initialize Cloudflare Worker.',
-          error instanceof Error ? error : new Error(String(error)),
-          errorContext,
-        );
-
-        appPromise = null;
+        logger.crit('Failed to initialize Cloudflare Worker.', failure, errorContext);
         throw error;
       }
     })();
+    appPromise = pending;
+    /**
+     * Cleared once the failure settles, so the next request initializes again.
+     * Never inside the initializer: a failure thrown before its first `await`
+     * (the `instructions` callback) runs that catch before this assignment,
+     * which would then cache the rejection for the isolate's lifetime.
+     */
+    pending.catch(() => {
+      if (appPromise === pending) appPromise = null;
+    });
 
-    return appPromise;
+    return pending;
   }
 
   return {
@@ -362,11 +369,7 @@ export function createWorkerHandler(options: WorkerHandlerOptions = {}) {
           },
         });
 
-        logger.error(
-          'Worker fetch handler error.',
-          error instanceof Error ? error : new Error(String(error)),
-          errorContext,
-        );
+        logger.error('Worker fetch handler error.', asError(error), errorContext);
 
         return new Response(
           JSON.stringify({
@@ -416,11 +419,7 @@ export function createWorkerHandler(options: WorkerHandlerOptions = {}) {
           additionalContext: { isServerless: true, cron: controller.cron },
         });
 
-        logger.error(
-          'Worker scheduled handler error.',
-          error instanceof Error ? error : new Error(String(error)),
-          errorContext,
-        );
+        logger.error('Worker scheduled handler error.', asError(error), errorContext);
         throw error;
       }
     },

@@ -94,7 +94,7 @@ export class McpError extends Error {
     if (data) {
       // `data` travels to the client on the wire and into every error log and
       // span. A `RequestContext` carries `auth`, and `auth.token` is the raw
-      // bearer credential — the framework's logger redacts `*.token` paths
+      // bearer credential — the framework's logger redacts `token` fields
       // precisely so it is never persisted, and this payload bypasses that.
       // Authentication is never diagnostic; drop it rather than redact one
       // field, so a future `AuthContext` addition cannot reopen the hole.
@@ -121,81 +121,82 @@ export class McpError extends Error {
 /** Options shared by all error factory functions (re-uses the ES2022 built-in). */
 export type ErrorFactoryOptions = ErrorOptions;
 
+/**
+ * The error factory for `code`, named `name` — its export's name, which
+ * `.name` reports. Its error's stack starts at the factory's caller: captured
+ * again with the factory itself as the cut, so the top frame a log reader sees
+ * is the line that threw rather than this module (#694). An engine without
+ * `Error.captureStackTrace` keeps the constructor's stack.
+ */
+function factoryFor(
+  name: string,
+  code: JsonRpcErrorCode,
+): (message: string, data?: ErrorData, options?: ErrorFactoryOptions) => McpError {
+  const factory = (message: string, data?: ErrorData, options?: ErrorFactoryOptions): McpError => {
+    const error = new McpError(code, message, data, options);
+    Error.captureStackTrace?.(error, factory);
+    return error;
+  };
+  return Object.defineProperty(factory, 'name', { value: name });
+}
+
 /** Create an InvalidParams (-32602) error. */
-export const invalidParams = (message: string, data?: ErrorData, options?: ErrorFactoryOptions) =>
-  new McpError(JsonRpcErrorCode.InvalidParams, message, data, options);
+export const invalidParams = factoryFor('invalidParams', JsonRpcErrorCode.InvalidParams);
 
 /** Create an InvalidRequest (-32600) error. */
-export const invalidRequest = (message: string, data?: ErrorData, options?: ErrorFactoryOptions) =>
-  new McpError(JsonRpcErrorCode.InvalidRequest, message, data, options);
+export const invalidRequest = factoryFor('invalidRequest', JsonRpcErrorCode.InvalidRequest);
 
 /** Create a NotFound (-32001) error. */
-export const notFound = (message: string, data?: ErrorData, options?: ErrorFactoryOptions) =>
-  new McpError(JsonRpcErrorCode.NotFound, message, data, options);
+export const notFound = factoryFor('notFound', JsonRpcErrorCode.NotFound);
 
 /** Create a Forbidden (-32005) error. */
-export const forbidden = (message: string, data?: ErrorData, options?: ErrorFactoryOptions) =>
-  new McpError(JsonRpcErrorCode.Forbidden, message, data, options);
+export const forbidden = factoryFor('forbidden', JsonRpcErrorCode.Forbidden);
 
 /** Create an Unauthorized (-32006) error. */
-export const unauthorized = (message: string, data?: ErrorData, options?: ErrorFactoryOptions) =>
-  new McpError(JsonRpcErrorCode.Unauthorized, message, data, options);
+export const unauthorized = factoryFor('unauthorized', JsonRpcErrorCode.Unauthorized);
 
 /** Create a ValidationError (-32007) error. */
-export const validationError = (message: string, data?: ErrorData, options?: ErrorFactoryOptions) =>
-  new McpError(JsonRpcErrorCode.ValidationError, message, data, options);
+export const validationError = factoryFor('validationError', JsonRpcErrorCode.ValidationError);
 
 /** Create a Conflict (-32002) error. */
-export const conflict = (message: string, data?: ErrorData, options?: ErrorFactoryOptions) =>
-  new McpError(JsonRpcErrorCode.Conflict, message, data, options);
+export const conflict = factoryFor('conflict', JsonRpcErrorCode.Conflict);
 
 /** Create a RateLimited (-32003) error. */
-export const rateLimited = (message: string, data?: ErrorData, options?: ErrorFactoryOptions) =>
-  new McpError(JsonRpcErrorCode.RateLimited, message, data, options);
+export const rateLimited = factoryFor('rateLimited', JsonRpcErrorCode.RateLimited);
 
 /** Create a Timeout (-32004) error. */
-export const timeout = (message: string, data?: ErrorData, options?: ErrorFactoryOptions) =>
-  new McpError(JsonRpcErrorCode.Timeout, message, data, options);
+export const timeout = factoryFor('timeout', JsonRpcErrorCode.Timeout);
 
 /** Create a ServiceUnavailable (-32000) error. */
-export const serviceUnavailable = (
-  message: string,
-  data?: ErrorData,
-  options?: ErrorFactoryOptions,
-) => new McpError(JsonRpcErrorCode.ServiceUnavailable, message, data, options);
+export const serviceUnavailable = factoryFor(
+  'serviceUnavailable',
+  JsonRpcErrorCode.ServiceUnavailable,
+);
 
 /** Create a ConfigurationError (-32008) error. */
-export const configurationError = (
-  message: string,
-  data?: ErrorData,
-  options?: ErrorFactoryOptions,
-) => new McpError(JsonRpcErrorCode.ConfigurationError, message, data, options);
+export const configurationError = factoryFor(
+  'configurationError',
+  JsonRpcErrorCode.ConfigurationError,
+);
 
 /** Create an InternalError (-32603) error. */
-export const internalError = (message: string, data?: ErrorData, options?: ErrorFactoryOptions) =>
-  new McpError(JsonRpcErrorCode.InternalError, message, data, options);
+export const internalError = factoryFor('internalError', JsonRpcErrorCode.InternalError);
 
 /** Create a SerializationError (-32070) error — JSON/XML/parser failures. */
-export const serializationError = (
-  message: string,
-  data?: ErrorData,
-  options?: ErrorFactoryOptions,
-) => new McpError(JsonRpcErrorCode.SerializationError, message, data, options);
+export const serializationError = factoryFor(
+  'serializationError',
+  JsonRpcErrorCode.SerializationError,
+);
 
 /** Create a DatabaseError (-32010) error. */
-export const databaseError = (message: string, data?: ErrorData, options?: ErrorFactoryOptions) =>
-  new McpError(JsonRpcErrorCode.DatabaseError, message, data, options);
+export const databaseError = factoryFor('databaseError', JsonRpcErrorCode.DatabaseError);
 
 /**
  * Create a RequestCancelled (-32011) error — the caller abandoned the request
  * (client disconnect, external abort signal). Not a server fault and never
  * retryable: there is no longer anyone to answer.
  */
-export const requestCancelled = (
-  message: string,
-  data?: ErrorData,
-  options?: ErrorFactoryOptions,
-) => new McpError(JsonRpcErrorCode.RequestCancelled, message, data, options);
+export const requestCancelled = factoryFor('requestCancelled', JsonRpcErrorCode.RequestCancelled);
 
 /**
  * Zod schema for validating error objects. This schema can be used for:

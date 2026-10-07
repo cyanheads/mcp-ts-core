@@ -16,11 +16,12 @@ import { handlerParentContext } from '@/mcp-server/handlerContext.js';
 import {
   isInputRequiredSignal,
   type RequestStateSealer,
-  sealThrown,
+  sealSignal,
 } from '@/mcp-server/inputRequired.js';
 import type { AnyPromptDefinition } from '@/mcp-server/prompts/utils/promptDefinition.js';
 import { JsonRpcErrorCode, McpError } from '@/types-global/errors.js';
 import { ErrorHandler } from '@/utils/internal/error-handler/errorHandler.js';
+import { readErrorData } from '@/utils/internal/error-handler/helpers.js';
 import type { logger as defaultLogger } from '@/utils/internal/logger.js';
 import { measurePromptGeneration } from '@/utils/internal/performance.js';
 import { requestContextService } from '@/utils/internal/requestContext.js';
@@ -128,8 +129,11 @@ export class PromptRegistry {
                     // Inside the measurement, as for tools and resources: an
                     // input-required signal leaves with its `requestState`
                     // sealed when a key is configured, so a sealing failure
-                    // is a failed call like any other.
-                    throw await sealThrown(error, this.requestState, serverContext);
+                    // is a failed call like any other; anything else leaves
+                    // as itself, never awaited (#697).
+                    throw isInputRequiredSignal(error)
+                      ? await sealSignal(error, this.requestState, serverContext)
+                      : error;
                   }
                 },
                 { ...requestContext, promptName: promptDef.name },
@@ -148,6 +152,7 @@ export class PromptRegistry {
                * (#582). The client gets the classified code and message, plus
                * only the `data` a thrown `McpError` declared and the call's
                * `requestId` (#576) — the same wire shape as tools and resources.
+               * That `data` is a copy, left out when it cannot be read (#697).
                */
               const handled = ErrorHandler.handleError(error, {
                 operation: `prompt:${promptDef.name}`,
@@ -156,10 +161,7 @@ export class PromptRegistry {
               throw new McpError(
                 handled instanceof McpError ? handled.code : JsonRpcErrorCode.InternalError,
                 handled.message,
-                {
-                  ...(error instanceof McpError ? error.data : undefined),
-                  requestId: requestContext.requestId,
-                },
+                { ...readErrorData(error), requestId: requestContext.requestId },
                 { cause: error },
               );
             }

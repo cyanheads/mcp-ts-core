@@ -101,7 +101,9 @@ import {
   type HandlerServices,
   type NotifierSources,
 } from '@/mcp-server/resources/utils/resourceHandlerFactory.js';
+import { ErrorHandler } from '@/utils/internal/error-handler/errorHandler.js';
 import { TELEMETRY_LOG_MESSAGES } from '@/utils/internal/telemetryMessages.js';
+import { withSpan } from '@/utils/telemetry/trace.js';
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -1087,6 +1089,225 @@ describe('createResourceHandler', () => {
 
         expect(rejection.data).toEqual({ reason: 'gone', requestId: 'test-req-id' });
         expect(thrown.data).toEqual({ reason: 'gone' });
+      });
+    });
+
+    describe('a thrown McpError or value the factory cannot read (#697)', () => {
+      /** The resource's undeclared `McpError(NotFound, 'Gone.', { id: 7 })`. */
+      const gone = () => new McpError(JsonRpcErrorCode.NotFound, 'Gone.', { id: 7 });
+
+      /** `target` with an own `key` whose read throws. */
+      function unreadable<T extends object>(target: T, key: string): T {
+        return Object.defineProperty(target, key, {
+          configurable: true,
+          get() {
+            throw new Error(`${key} getter`);
+          },
+        });
+      }
+
+      /** `error` carrying `data`, assigned after construction as a service might. */
+      function withData(error: McpError, data: unknown): McpError {
+        return Object.defineProperty(error, 'data', {
+          configurable: true,
+          enumerable: true,
+          writable: true,
+          value: data,
+        });
+      }
+
+      /** A revoked Proxy: every operation on it, `instanceof` and a `then` lookup included, throws. */
+      function revoked(): object {
+        const { proxy, revoke } = Proxy.revocable({}, {});
+        revoke();
+        return proxy;
+      }
+
+      /** An object whose `ownKeys` trap throws, so copying its fields throws. */
+      const keyless = () =>
+        new Proxy(
+          { id: 7 },
+          {
+            ownKeys() {
+              throw new Error('ownKeys trap');
+            },
+          },
+        );
+
+      /** What a read rejects with when its handler fails as `run` does. */
+      async function readRejection(run: () => unknown): Promise<McpError> {
+        const def = resource('hostile://{id}', {
+          description: 'Fails with an error it cannot fully read.',
+          params: z.object({ id: z.string().describe('id') }),
+          handler: async () => {
+            await run();
+            return {};
+          },
+        });
+        const handler = createResourceHandler(def as AnyResourceDefinition, services, notifiers);
+        const rejection = await handler(
+          new URL('hostile://x'),
+          { id: 'x' },
+          makeServerContext(),
+        ).then(
+          () => {
+            throw new Error('expected the read to fail');
+          },
+          (error: unknown) => error,
+        );
+        expect(rejection).toBeInstanceOf(McpError);
+        return rejection as McpError;
+      }
+
+      it.each([
+        [
+          'directly',
+          () => {
+            throw unreadable(gone(), 'message');
+          },
+        ],
+        [
+          'through withSpan',
+          () =>
+            withSpan('lookup', async () => {
+              throw unreadable(gone(), 'message');
+            }),
+        ],
+        [
+          'through tryCatch with an identity errorMapper',
+          () =>
+            ErrorHandler.tryCatch(
+              () => {
+                throw unreadable(gone(), 'message');
+              },
+              { operation: 'lookup', errorMapper: (e) => e as Error },
+            ),
+        ],
+      ])(
+        'rejects with NotFound for an undeclared McpError whose message cannot be read, thrown %s',
+        async (_route, run) => {
+          const rejection = await readRejection(run);
+
+          expect(rejection).toMatchObject({
+            code: JsonRpcErrorCode.NotFound,
+            message: '[Unreadable]',
+            data: { id: 7, requestId: 'test-req-id' },
+          });
+          expect(completionMetrics()).toMatchObject({
+            isSuccess: false,
+            errorCode: String(JsonRpcErrorCode.NotFound),
+          });
+        },
+      );
+
+      it.each([
+        [
+          'code',
+          () => unreadable(gone(), 'code'),
+          JsonRpcErrorCode.InternalError,
+          { id: 7 },
+          String(JsonRpcErrorCode.InternalError),
+        ],
+        [
+          'data',
+          () => unreadable(gone(), 'data'),
+          JsonRpcErrorCode.NotFound,
+          {},
+          String(JsonRpcErrorCode.NotFound),
+        ],
+        [
+          'data, a revoked Proxy',
+          () => withData(gone(), revoked()),
+          JsonRpcErrorCode.NotFound,
+          {},
+          String(JsonRpcErrorCode.NotFound),
+        ],
+        [
+          'data, whose ownKeys trap throws',
+          () => withData(gone(), keyless()),
+          JsonRpcErrorCode.NotFound,
+          {},
+          String(JsonRpcErrorCode.NotFound),
+        ],
+        [
+          'isInputRequiredSignal',
+          () => unreadable(gone(), 'isInputRequiredSignal'),
+          JsonRpcErrorCode.NotFound,
+          { id: 7 },
+          String(JsonRpcErrorCode.NotFound),
+        ],
+        [
+          'then',
+          () => unreadable(gone(), 'then'),
+          JsonRpcErrorCode.NotFound,
+          { id: 7 },
+          String(JsonRpcErrorCode.NotFound),
+        ],
+        [
+          'name',
+          () => unreadable(gone(), 'name'),
+          JsonRpcErrorCode.NotFound,
+          { id: 7 },
+          String(JsonRpcErrorCode.NotFound),
+        ],
+        [
+          'stack',
+          () => unreadable(gone(), 'stack'),
+          JsonRpcErrorCode.NotFound,
+          { id: 7 },
+          String(JsonRpcErrorCode.NotFound),
+        ],
+        [
+          'cause',
+          () => unreadable(gone(), 'cause'),
+          JsonRpcErrorCode.NotFound,
+          { id: 7 },
+          String(JsonRpcErrorCode.NotFound),
+        ],
+      ] as const)(
+        'rejects with the code it can read for an undeclared McpError whose %s cannot be read',
+        async (_label, make, code, data, errorCode) => {
+          const rejection = await readRejection(() => {
+            throw make();
+          });
+
+          expect(rejection).toMatchObject({ code, message: 'Gone.' });
+          expect(rejection.data).toEqual({ ...data, requestId: 'test-req-id' });
+          expect(completionMetrics()).toMatchObject({ isSuccess: false, errorCode });
+        },
+      );
+
+      it('rejects with InternalError for a thrown revoked Proxy', async () => {
+        const rejection = await readRejection(() => {
+          throw revoked();
+        });
+
+        expect(rejection).toMatchObject({
+          code: JsonRpcErrorCode.InternalError,
+          message: '[Unreadable]',
+        });
+        expect(rejection.data).toEqual({ requestId: 'test-req-id' });
+        expect(completionMetrics()).toMatchObject({
+          isSuccess: false,
+          errorCode: 'UNKNOWN_ERROR',
+        });
+      });
+
+      it('keeps a resource-not-found -32602 whose message cannot be read in the spec shape', async () => {
+        const rejection = await readRejection(() => {
+          throw unreadable(
+            new McpError(JsonRpcErrorCode.InvalidParams, 'Resource not found', {
+              uri: 'hostile://x',
+            }),
+            'message',
+          );
+        });
+
+        expect(rejection).toMatchObject({
+          code: JsonRpcErrorCode.InvalidParams,
+          message: '[Unreadable]',
+        });
+        expect(rejection.data).toEqual({ uri: 'hostile://x' });
       });
     });
   });

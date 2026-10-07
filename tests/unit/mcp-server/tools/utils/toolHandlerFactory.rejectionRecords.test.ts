@@ -9,11 +9,15 @@
  * @module tests/unit/mcp-server/tools/utils/toolHandlerFactory.rejectionRecords.test
  */
 
-import type { CallToolResult } from '@modelcontextprotocol/server';
+import {
+  type CallToolResult,
+  type ClientCapabilities,
+  inputRequired,
+} from '@modelcontextprotocol/server';
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { z } from 'zod';
 
-import { makeServerContext } from '../../../../helpers/server-context.js';
+import { legacyCapabilityView, makeServerContext } from '../../../../helpers/server-context.js';
 
 // ---------------------------------------------------------------------------
 // Module mocks
@@ -139,13 +143,21 @@ beforeEach(() => {
   mockConfig.mcpAuthMode = 'none';
 });
 
-/** Drives one `tools/call` through the factory, inside a validated token's auth context when asked. */
+/**
+ * Drives one `tools/call` through the factory, inside a validated token's auth
+ * context when asked, and on a 2025-era connection declaring `capabilities` when given.
+ */
 async function callTool(
   def: unknown,
   args: Record<string, unknown>,
-  options: { authenticated?: boolean } = {},
+  options: { authenticated?: boolean; capabilities?: ClientCapabilities } = {},
 ): Promise<CallToolResult> {
-  const handler = createToolHandler(def as AnyToolDefinition, services, {});
+  const handler = createToolHandler(
+    def as AnyToolDefinition,
+    services,
+    {},
+    options.capabilities && legacyCapabilityView(options.capabilities),
+  );
   const run = () => handler(args, makeServerContext());
   return (await (options.authenticated
     ? authContext.run({ authInfo: AUTH_INFO }, run)
@@ -435,8 +447,10 @@ describe('a tool refused for a missing scope (#585)', () => {
       expect(envelope(result).code).toBe(code);
       expect(levelOf('Error in tool:')).toBe('error');
       const record = errorRecord();
+      // The throw site's stack, once (#694).
       expect(record.fields.stack).toEqual(expect.any(String));
-      expect(record.fields.errorData.originalStack).toEqual(expect.any(String));
+      expect(record.fields.stack).not.toMatch(/at (ErrorHandler\.)?handleError /);
+      expect(record.fields.errorData).not.toHaveProperty('originalStack');
       expect(adds('mcp.errors.classified')[0]).not.toHaveProperty('mcp.error.severity');
     });
   });
@@ -459,6 +473,108 @@ describe('a tool refused for a missing scope (#585)', () => {
 
     expect(nonDebugWrites()).toEqual([['warn', 'Authorization failed: Missing required scopes.']]);
     expect(adds('mcp.errors.classified')).toEqual([]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// #651 — a client_capability_missing refusal
+// ---------------------------------------------------------------------------
+
+describe('a client_capability_missing refusal (#651)', () => {
+  const CAPABILITY_HINT =
+    'Reconnect with a client that declares the `elicitation.form` capability.';
+  const CAPABILITY_MESSAGE =
+    "Cannot request input 'confirm' (elicitation/create): the client on this 2025-era " +
+    'connection did not declare the `elicitation.form` capability';
+
+  /** A tool that asks the caller to confirm, declaring `errors` when given. */
+  function asks(name: string, errors?: readonly unknown[]): unknown {
+    return tool(name, {
+      description: 'Asks the caller to confirm.',
+      input: z.object({}),
+      output: ok,
+      ...(errors && { errors: errors as never }),
+      handler: (_input, ctx) =>
+        ctx.requestInput({
+          inputRequests: {
+            confirm: inputRequired.elicit({
+              message: 'Proceed?',
+              requestedSchema: z.object({ yes: z.boolean().describe('Proceed.') }),
+            }),
+          },
+        }),
+    });
+  }
+
+  it('logs the Error in tool: record at notice, with no stack', async () => {
+    await callTool(asks('records_asks'), {}, { capabilities: {} });
+
+    const record = errorRecord();
+    expect(record.msg).toBe(`Error in tool:records_asks: ${CAPABILITY_MESSAGE}`);
+    expect(levelOf('Error in tool:')).toBe('notice');
+    expect(record.fields).not.toHaveProperty('stack');
+    expect(record.fields.errorData).not.toHaveProperty('originalStack');
+    expect(serialized(record)).not.toMatch(/"stack"|originalStack|inputRequired\.ts/);
+    expect(record.fields).toMatchObject({
+      errorCode: JsonRpcErrorCode.InvalidRequest,
+      errorData: { reason: 'client_capability_missing', recovery: { hint: CAPABILITY_HINT } },
+    });
+  });
+
+  it('logs at the level an errors[] entry naming the reason declares, still with no stack', async () => {
+    const declared = asks('records_asks_declared', [
+      {
+        reason: 'client_capability_missing',
+        code: JsonRpcErrorCode.InvalidRequest,
+        when: 'The client connection cannot answer the confirmation.',
+        severity: 'warning',
+        recovery: 'Reconnect with a client that supports elicitation and retry.',
+      },
+    ]);
+
+    await callTool(declared, {}, { capabilities: {} });
+
+    const record = errorRecord();
+    expect(levelOf('Error in tool:')).toBe('warning');
+    expect(record.fields).not.toHaveProperty('stack');
+    expect(serialized(record)).not.toMatch(/"stack"|originalStack/);
+  });
+
+  it('leaves the wire result and the notice severity on mcp.errors.classified as they were', async () => {
+    const result = await callTool(asks('records_asks_wire'), {}, { capabilities: {} });
+
+    const requestId = envelope(result).data?.requestId as string;
+    expect(requestId).toMatch(REQUEST_ID);
+    expect(result).toEqual({
+      isError: true,
+      content: [
+        {
+          type: 'text',
+          text:
+            `Error: ${CAPABILITY_MESSAGE}\n\nRecovery: ${CAPABILITY_HINT}` +
+            `\n\n(reason client_capability_missing · request ${requestId})`,
+        },
+      ],
+      structuredContent: {
+        error: {
+          code: JsonRpcErrorCode.InvalidRequest,
+          message: CAPABILITY_MESSAGE,
+          data: {
+            reason: 'client_capability_missing',
+            recovery: { hint: CAPABILITY_HINT },
+            requestId,
+          },
+        },
+      },
+    });
+    expect(adds('mcp.errors.classified')).toEqual([
+      {
+        'mcp.error.classified_code': String(JsonRpcErrorCode.InvalidRequest),
+        'mcp.error.category': 'client',
+        'mcp.error.severity': 'notice',
+        operation: 'tool:records_asks_wire',
+      },
+    ]);
   });
 });
 
@@ -584,7 +700,8 @@ describe('an argument rejection’s record stays bounded (#631)', () => {
       aliased: [{ alias, target: 'query' }],
       ignored: [dropped],
     });
-    expect(errorRecord().fields.errorData.input).toEqual({
+    // Read from the serialized line: `aliased[0]` sits at depth 4 of the record.
+    expect(JSON.parse(serialized(errorRecord())).errorData.input).toEqual({
       aliased: [{ alias: cut(alias), aliasLength: alias.length, target: 'query' }],
       ignored: [cut(dropped)],
       ignoredLengths: [dropped.length],
@@ -635,11 +752,11 @@ describe('an argument rejection’s record stays bounded (#631)', () => {
     const message = `Upstream said: ${'z'.repeat(5_000)}`;
     expect(levelOf('Error in tool:')).toBe('error');
     expect(record.msg).toBe(`Error in tool:records_loud: ${message}`);
-    expect(record.fields.stack).toEqual(expect.any(String));
-    expect(record.fields.errorData).toMatchObject({
-      originalMessage: message,
-      originalStack: expect.any(String),
-    });
+    // The handler's throw site, once (#694).
+    expect(record.fields.stack).toEqual(expect.stringContaining(`Error: ${message}\n`));
+    expect(record.fields.stack).not.toMatch(/at (ErrorHandler\.)?handleError /);
+    expect(record.fields.errorData).toMatchObject({ originalMessage: message });
+    expect(record.fields.errorData).not.toHaveProperty('originalStack');
     expect(record.fields.errorData).not.toHaveProperty('originalMessageLength');
   });
 
@@ -651,11 +768,12 @@ describe('an argument rejection’s record stays bounded (#631)', () => {
     const record = errorRecord();
     const message = `Upstream rejected: ${'y'.repeat(5_000)}`;
     expect(record.msg).toBe(`Error in tool:records_relays: ${message}`);
-    expect(record.fields.stack).toEqual(expect.any(String));
-    expect(record.fields.errorData).toMatchObject({
-      originalMessage: message,
-      originalStack: expect.any(String),
-    });
+    // The handler's throw site, once (#694): the factory's own frame is cut.
+    expect(record.fields.stack).toEqual(expect.stringContaining(`McpError: ${message}\n`));
+    expect(record.fields.stack).not.toMatch(/at (ErrorHandler\.)?handleError /);
+    expect(record.fields.stack).not.toMatch(/types-global[\\/]errors\.[jt]s/);
+    expect(record.fields.errorData).toMatchObject({ originalMessage: message });
+    expect(record.fields.errorData).not.toHaveProperty('originalStack');
     expect(record.fields.errorData).not.toHaveProperty('originalMessageLength');
   });
 });

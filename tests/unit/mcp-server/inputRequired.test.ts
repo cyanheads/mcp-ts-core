@@ -8,12 +8,48 @@
 import { inputRequired, type ServerContext } from '@modelcontextprotocol/server';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
-import { createRequestStateSealer, declaredResponses } from '@/mcp-server/inputRequired.js';
+import {
+  createRequestStateSealer,
+  declaredResponses,
+  InputRequiredSignal,
+  isInputRequiredSignal,
+} from '@/mcp-server/inputRequired.js';
 import { JsonRpcErrorCode, McpError } from '@/types-global/errors.js';
 
 const ELICIT = { action: 'accept', content: { ok: true } };
 const SAMPLING = { role: 'assistant', content: { type: 'text', text: 'hi' }, model: 'm' };
 const ROOTS = { roots: [{ uri: 'file:///work' }] };
+
+describe('isInputRequiredSignal', () => {
+  it('recognizes the signal and a value carrying its brand', () => {
+    const asking = inputRequired({ inputRequests: { roots: inputRequired.listRoots() } });
+    expect(isInputRequiredSignal(new InputRequiredSignal(asking))).toBe(true);
+    expect(isInputRequiredSignal({ isInputRequiredSignal: true })).toBe(true);
+    expect(isInputRequiredSignal(new Error('boom'))).toBe(false);
+  });
+
+  it.each([
+    [
+      'a revoked Proxy',
+      () => {
+        const { proxy, revoke } = Proxy.revocable({}, {});
+        revoke();
+        return proxy;
+      },
+    ],
+    [
+      'a value whose brand getter throws',
+      () =>
+        Object.defineProperty(new Error('boom'), 'isInputRequiredSignal', {
+          get() {
+            throw new Error('brand getter');
+          },
+        }),
+    ],
+  ])('answers false, never throwing, for %s it cannot inspect (#697)', (_label, make) => {
+    expect(isInputRequiredSignal(make())).toBe(false);
+  });
+});
 
 describe('declaredResponses (#496)', () => {
   const every = { confirm: ELICIT, summary: SAMPLING, roots: ROOTS };

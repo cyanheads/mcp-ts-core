@@ -64,8 +64,8 @@ export interface AuthContext {
   /**
    * Raw bearer token from the validated request. Forwarded so handlers can
    * relay it to upstream APIs in on-behalf-of / PAT pass-through flows.
-   * Redacted by the framework logger's pino-redact paths (`*.token`,
-   * `*.*.token`); avoid passing it to telemetry sinks that bypass that layer.
+   * Redacted by the framework logger's log-data walk, which matches the `token`
+   * key at any depth; avoid passing it to telemetry sinks that bypass that layer.
    */
   token?: string;
   /** Additional token payload properties not mapped to named fields. */
@@ -215,7 +215,7 @@ export function toCanonicalContext(context: Readonly<Record<string, unknown>>): 
  *
  * @example
  * ```typescript
- * logger.warning('Retrying upstream call', withExtra(ctx, { attempt, url }));
+ * logger.warning('Retrying upstream call', withExtra(ctx, { attempt, endpoint }));
  * ```
  */
 export function withExtra(

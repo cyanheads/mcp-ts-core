@@ -5,7 +5,12 @@
  * @module src/utils/network/retry
  */
 import { JsonRpcErrorCode, McpError, timeout } from '@/types-global/errors.js';
-import { extractErrorCauseChain } from '@/utils/internal/error-handler/helpers.js';
+import {
+  errorText,
+  extractErrorCauseChain,
+  readField,
+  UNREADABLE,
+} from '@/utils/internal/error-handler/helpers.js';
 import { logger } from '@/utils/internal/logger.js';
 import { type RequestContext, withExtra } from '@/utils/internal/requestContext.js';
 
@@ -211,15 +216,20 @@ export interface LoggedCauseNode {
  * per node, the error itself first — or `undefined` when the error has neither
  * a cause nor a string `code`, so its record stays exactly as it was.
  *
- * Projections only: pino writes an `Error` under any key but `err` as its
- * enumerable properties, and a Bun fetch rejection's `path` holds the full
- * request URL. Stacks and `McpError.data` stay out for the same reason.
+ * Projections only, `{ name, message, code? }` per node: a compact chain for
+ * triage, since a retry writes a record per attempt. The error in full — its
+ * stack, an `McpError`'s `data` — is the failure record's to write
+ * (`ErrorHandler.handleError`'s, once the error reaches a handler).
  * Module-level, not public: `fetchWithTimeout`'s network-error record carries
- * the same field.
+ * the same field. Every read is guarded, as `extractErrorCauseChain`'s are: a
+ * `cause` that cannot be read ends the chain as an `'[Unreadable]'` node, and
+ * a `code` that cannot be read counts as none.
  */
 export function causeChainForLog(error: unknown): LoggedCauseNode[] | undefined {
   if (!(error instanceof Error)) return;
-  if (!error.cause && !('code' in error && typeof error.code === 'string')) return;
+  const code = readField(error, 'code');
+  const hasCode = typeof code === 'string' && code !== UNREADABLE;
+  if (!readField(error, 'cause') && !hasCode) return;
   return extractErrorCauseChain(error).map(({ name, message, code }) => ({
     name,
     message,
@@ -352,11 +362,14 @@ function createDeadlineClock(deadlineMs: number, operation?: string): DeadlineCl
 /**
  * Enriches an error with retry exhaustion context.
  * Appends attempt count to the message and to `data` for programmatic access.
+ * The error's `message` and `name` are read as text (`errorText`), so one that
+ * throws on read or is not a string never replaces the exhausted error.
  */
 function enrichExhaustedError(error: unknown, totalAttempts: number, operation?: string): unknown {
   if (error instanceof McpError) {
     const suffix = `(failed after ${totalAttempts} attempt${totalAttempts > 1 ? 's' : ''})`;
-    const enrichedMessage = error.message ? `${error.message} ${suffix}` : suffix;
+    const message = errorText(readField(error, 'message'));
+    const enrichedMessage = message ? `${message} ${suffix}` : suffix;
     const enrichedData: Record<string, unknown> = {
       ...error.data,
       retryAttempts: totalAttempts,
@@ -367,8 +380,10 @@ function enrichExhaustedError(error: unknown, totalAttempts: number, operation?:
 
   if (error instanceof Error) {
     const suffix = `(failed after ${totalAttempts} attempt${totalAttempts > 1 ? 's' : ''})`;
-    const wrapped = new Error(`${error.message} ${suffix}`, { cause: error });
-    wrapped.name = error.name;
+    const wrapped = new Error(`${errorText(readField(error, 'message'))} ${suffix}`, {
+      cause: error,
+    });
+    wrapped.name = errorText(readField(error, 'name'));
     return wrapped;
   }
 
@@ -541,7 +556,10 @@ export async function withRetry<T>(
           throw clock.exceeded(error, attempt + 1);
         }
 
-        const errorMessage = error instanceof Error ? error.message : String(error);
+        // As text, guarded: a `message` that throws on read or is not a string never fails the retry (#697).
+        const errorMessage = errorText(
+          error instanceof Error ? readField(error, 'message') : error,
+        );
         const delaySource = retryAfterMs === undefined ? '' : ' (Retry-After)';
         // The transport code (`ECONNRESET`, `ConnectionRefused`) rides the
         // cause chain, not the message — the only trace of why a retry that

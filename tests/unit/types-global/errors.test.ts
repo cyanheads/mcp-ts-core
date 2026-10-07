@@ -26,6 +26,23 @@ import {
 } from '@/types-global/errors.js';
 import type { RequestContext } from '@/utils/internal/requestContext.js';
 
+/**
+ * Calls an error factory from a frame in this file, as a service throw site
+ * would, and constructs an `McpError` directly beside it: the constructor cuts
+ * its own frame, so `direct`'s stack is the oracle for where `made`'s starts.
+ */
+function callerOfFactory(factory: (message: string) => McpError) {
+  const made = factory('from the caller');
+  const direct = new McpError(JsonRpcErrorCode.InternalError, 'from the caller');
+  return { made, direct };
+}
+
+/** A stack's frames, the header line dropped and the top frame's position stripped. */
+function framesOf(error: Error): string[] {
+  const [, top = '', ...rest] = String(error.stack).split('\n');
+  return [top.replace(/:\d+:\d+\)?$/, ''), ...rest];
+}
+
 describe('Global Error Types', () => {
   describe('JsonRpcErrorCode', () => {
     it('should have all standard JSON-RPC 2.0 error codes', () => {
@@ -228,6 +245,21 @@ describe('Global Error Types', () => {
       it(`${name}() should accept optional data`, () => {
         const err = fn('msg', { key: 'val' });
         expect(err.data).toEqual({ key: 'val' });
+      });
+
+      it(`${name}() keeps its own name`, () => {
+        expect(fn.name).toBe(name);
+      });
+
+      it(`${name}() starts its stack at the caller, not at the factory`, () => {
+        const { made, direct } = callerOfFactory(fn);
+
+        expect(String(made.stack).split('\n')[0]).toBe('McpError: from the caller');
+        expect(made.stack).not.toMatch(/types-global[\\/]errors\.[jt]s/);
+        // The same frames as a direct construction in the same caller: the
+        // factory's own frame is cut, and nothing below it.
+        expect(framesOf(made)).toEqual(framesOf(direct));
+        expect(framesOf(made)[0]).toContain('errors.test.ts');
       });
 
       it(`${name}() should chain the cause option, with or without data`, () => {

@@ -2,7 +2,7 @@
  * @fileoverview Unit tests targeting uncovered branches in ErrorHandler.
  * @module tests/utils/internal/errorHandler.unit.test
  */
-import { trace } from '@opentelemetry/api';
+import { SpanStatusCode, trace } from '@opentelemetry/api';
 import { afterEach, beforeEach, describe, expect, it, type MockInstance, vi } from 'vitest';
 import { ErrorHandler } from '@/utils/internal/error-handler/errorHandler.js';
 import { getErrorMessage } from '@/utils/internal/error-handler/helpers.js';
@@ -154,6 +154,40 @@ describe('ErrorHandler (unit)', () => {
       expect(original.data).toEqual({ originalStack: 'ORIG_STACK', foo: 'bar' });
     });
 
+    it.each([
+      ['stack', 'boom'],
+      ['message', '[Unreadable]'],
+      ['name', 'boom'],
+    ])(
+      'marks a recording span failed, never throwing, for an Error whose %s getter throws (#697)',
+      (key, message) => {
+        // The OTel SDK's recordException reads code, name, message, and stack unguarded.
+        const span = {
+          recordException: vi.fn((e: Error) => {
+            void [e.name, e.message, e.stack];
+          }),
+          setStatus: vi.fn(),
+          isRecording: () => true,
+        };
+        getActiveSpanSpy.mockReturnValue(span as never);
+        const err = Object.defineProperty(new Error('boom'), key, {
+          configurable: true,
+          get() {
+            throw new Error(`${key} getter`);
+          },
+        });
+
+        let returned: Error | undefined;
+        expect(() => {
+          returned = ErrorHandler.handleError(err, { operation: 'spanUnreadable' });
+        }).not.toThrow();
+
+        expect(returned).toBeInstanceOf(McpError);
+        expect(span.setStatus).toHaveBeenCalledWith({ code: SpanStatusCode.ERROR, message });
+        expect(errorSpy).toHaveBeenCalledTimes(1);
+      },
+    );
+
     it('still records the exception, stack intact, on the active span under includeStack: false', () => {
       const err = new Error('span keeps it');
       const span = { recordException: vi.fn(), setStatus: vi.fn(), isRecording: () => true };
@@ -231,14 +265,15 @@ describe('ErrorHandler (unit)', () => {
   });
 
   describe('returned data vs. log record (#519)', () => {
-    /** The `errorData` of the most recent `error`-level log record. */
-    const loggedErrorData = (): Record<string, any> => {
+    /** The `extra` of the most recent `error`-level log record. */
+    const loggedExtra = (): Record<string, any> => {
       const ctx = errorSpy.mock.calls.at(-1)?.[1] as Record<string, any> | undefined;
       if (!ctx) throw new Error('errorSpy was not called');
-      return ctx.extra.errorData;
+      return ctx.extra;
     };
+    const loggedErrorData = (): Record<string, any> => loggedExtra().errorData;
 
-    it('keeps originalStack and causeChain out of the returned data and in the log', () => {
+    it('keeps the stack and causeChain out of the returned data and in the log', () => {
       const err = new Error('db read failed', { cause: new Error('EACCES') });
 
       const final = ErrorHandler.handleError(err, {
@@ -247,17 +282,21 @@ describe('ErrorHandler (unit)', () => {
       }) as McpError;
 
       expect(final.code).toBe(JsonRpcErrorCode.InternalError);
-      // No `requestId`: the context rides the log record only (#548).
+      // No `requestId`: the context rides the log record only (#548), and no
+      // `rootCause`: nothing derived from a cause reaches `data` (#644).
       expect(final.data).toEqual({
         originalErrorName: 'Error',
         originalMessage: 'db read failed',
-        rootCause: { name: 'Error', message: 'EACCES' },
       });
 
+      // The record's one stack is the throw site's (#694): the chain's first
+      // node is the thrown error and does not repeat it; the cause keeps its own.
+      expect(loggedExtra().stack).toBe(err.stack);
       const errorData = loggedErrorData();
-      expect(errorData.originalStack).toBe(err.stack);
+      expect(errorData).not.toHaveProperty('originalStack');
       expect(errorData.causeChain).toHaveLength(2);
-      for (const node of errorData.causeChain) expect(node.stack).toEqual(expect.any(String));
+      expect(errorData.causeChain[0]).not.toHaveProperty('stack');
+      expect(errorData.causeChain[1].stack).toBe((err.cause as Error).stack);
       expect(errorData.rootCause).toEqual({ name: 'Error', message: 'EACCES' });
     });
 
@@ -273,8 +312,10 @@ describe('ErrorHandler (unit)', () => {
       expect((thrown as McpError).code).toBe(JsonRpcErrorCode.InternalError);
       expect(JSON.stringify((thrown as McpError).data)).not.toMatch(/stack|causeChain/i);
 
+      expect(loggedExtra().stack).toContain('errorHandler.unit.test.ts');
+      expect((thrown as McpError).stack).toBe(loggedExtra().stack);
       const errorData = loggedErrorData();
-      expect(errorData.originalStack).toContain('errorHandler.unit.test.ts');
+      expect(errorData).not.toHaveProperty('originalStack');
       expect(errorData.causeChain.map((n: { message: string }) => n.message)).toEqual([
         'db read failed',
         'EACCES',
@@ -323,6 +364,96 @@ describe('ErrorHandler (unit)', () => {
     });
   });
 
+  // Issue #644 — nothing derived from a cause reaches the returned error's
+  // `data`, so a redaction that keeps the raw error on `cause` stays redacted.
+  describe('a cause stays off the returned data (#644)', () => {
+    const HOST_DIR = '/srv/exports';
+    const redacted = 'IO Error: Cannot open file "[path]/out.csv": Permission denied';
+    const causes: ReadonlyArray<readonly [string, () => unknown]> = [
+      [
+        'an Error',
+        () => new Error(`IO Error: Cannot open file "${HOST_DIR}/out.csv": Permission denied`),
+      ],
+      ['a string', () => `open ${HOST_DIR}/out.csv: EACCES`],
+      ['a plain object', () => ({ path: `${HOST_DIR}/out.csv`, errno: -13 })],
+    ];
+    const throwers: ReadonlyArray<readonly [string, (cause: unknown) => Error]> = [
+      [
+        'an McpError',
+        (cause) =>
+          new McpError(JsonRpcErrorCode.DatabaseError, redacted, { table: 'out' }, { cause }),
+      ],
+      ['a plain Error', (cause) => new Error(redacted, { cause })],
+    ];
+    const matrix = throwers.flatMap(([thrower, make]) =>
+      causes.map(([cause, makeCause]) => [thrower, cause, () => make(makeCause())] as const),
+    );
+
+    /** What `tryCatch` rethrows for `thrown`. */
+    async function rethrown(thrown: Error): Promise<McpError> {
+      const error = await ErrorHandler.tryCatch(
+        () => {
+          throw thrown;
+        },
+        { operation: 'exportTable' },
+      ).catch((e: unknown) => e);
+      expect(error).toBeInstanceOf(McpError);
+      return error as McpError;
+    }
+
+    it.each(matrix)(
+      'tryCatch over %s whose cause is %s rethrows data with no host path',
+      async (_thrower, _cause, make) => {
+        const error = await rethrown(make());
+
+        expect(error.message).toBe(redacted);
+        expect(error.data).not.toHaveProperty('rootCause');
+        expect(error.data).toMatchObject({ originalMessage: redacted });
+        expect(JSON.stringify(error.data)).not.toContain(HOST_DIR);
+      },
+    );
+
+    it.each(matrix)(
+      'the record for %s whose cause is %s keeps the raw rootCause and causeChain',
+      async (_thrower, _cause, make) => {
+        await rethrown(make());
+
+        const { errorData } = (errorSpy.mock.calls.at(-1)?.[1] as Record<string, any>)?.extra ?? {};
+        expect(errorData.rootCause.message).toContain(HOST_DIR);
+        expect(errorData.causeChain.at(-1)).toMatchObject({
+          name: errorData.rootCause.name,
+          message: errorData.rootCause.message,
+        });
+      },
+    );
+
+    it("passes a thrown McpError's own data through, a rootCause it set itself included", async () => {
+      const own = { rootCause: { name: 'QuotaError', message: 'Quota exhausted.' }, table: 'out' };
+
+      const error = await rethrown(
+        new McpError(JsonRpcErrorCode.DatabaseError, redacted, own, {
+          cause: new Error(`open ${HOST_DIR}/out.csv: EACCES`),
+        }),
+      );
+
+      expect(error.data).toEqual({
+        ...own,
+        originalErrorName: 'McpError',
+        originalMessage: redacted,
+      });
+    });
+
+    it('re-derives nothing from the chain in a nested tryCatch', async () => {
+      const inner = await rethrown(
+        new Error(redacted, { cause: new Error(`open ${HOST_DIR}/out.csv: EACCES`) }),
+      );
+
+      const outer = await rethrown(inner);
+
+      expect(outer.data).toEqual({ originalErrorName: 'McpError', originalMessage: redacted });
+    });
+  });
+
   describe('formatError helper coverage', () => {
     it('handles null, undefined, function, symbol, and complex objects', () => {
       const nullResult = ErrorHandler.formatError(null);
@@ -350,7 +481,7 @@ describe('ErrorHandler (unit)', () => {
       expect(bigintResult.message).toBe('123');
     });
 
-    it('recovers when symbol stringification fails', () => {
+    it('recovers when symbol stringification fails, writing the message [Unreadable] (#697)', () => {
       const original = Symbol.prototype.toString;
       Object.defineProperty(Symbol.prototype, 'toString', {
         configurable: true,
@@ -364,7 +495,7 @@ describe('ErrorHandler (unit)', () => {
         const result = ErrorHandler.formatError(Symbol('boom'));
         expect(result).toMatchObject({
           code: JsonRpcErrorCode.UnknownError,
-          message: expect.stringContaining('symbol toString unavailable'),
+          message: '[Unreadable]',
         });
       } finally {
         Object.defineProperty(Symbol.prototype, 'toString', {
@@ -375,7 +506,7 @@ describe('ErrorHandler (unit)', () => {
       }
     });
 
-    it('falls back when reading aggregate errors fails unexpectedly', () => {
+    it('falls back to [Unreadable] when reading aggregate errors fails unexpectedly (#697)', () => {
       const aggregate = new AggregateError([], 'aggregate failure');
       const proxyError = new Proxy(aggregate, {
         has(target, prop) {
@@ -386,9 +517,8 @@ describe('ErrorHandler (unit)', () => {
         },
       });
 
-      expect(getErrorMessage(proxyError)).toBe(
-        'Error converting error to string: errors accessor failed',
-      );
+      // The trap's own text is not the error's message.
+      expect(getErrorMessage(proxyError)).toBe('[Unreadable]');
       expect(ErrorHandler.determineErrorCode(proxyError)).toBe(JsonRpcErrorCode.InternalError);
     });
 

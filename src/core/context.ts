@@ -24,13 +24,20 @@ import {
   JsonRpcErrorCode,
   McpError,
 } from '@/types-global/errors.js';
+import {
+  errorText,
+  isInstance,
+  readErrorData,
+  readField,
+  UNREADABLE,
+} from '@/utils/internal/error-handler/helpers.js';
 import type { Logger, McpLogLevel } from '@/utils/internal/logger.js';
+import { toLogValue, toMirrorValue } from '@/utils/internal/logValue.js';
 import {
   type AuthContext,
   type RequestContext,
   withExtra,
 } from '@/utils/internal/requestContext.js';
-import { maskSensitiveFields } from '@/utils/security/sanitization.js';
 
 // Re-export AuthContext so consumers can type against it from ./context
 export type { AuthContext };
@@ -585,12 +592,16 @@ export type HandlerContext<
  * past the `TypedFail` type-system guard — `createFail` returns an
  * `McpError(InternalError)` with diagnostic data (`{ reason, declaredReasons }`)
  * rather than throwing, so the call site can `throw` it like any other error.
+ *
+ * Either error's stack starts at the line that called `fail`, with this
+ * module's frames cut, as an error factory's does (#694): the `Error in tool:`
+ * record's `stack` opens on the handler's `throw ctx.fail(…)`.
  */
 export function createFail(errors: readonly ErrorContract[]): TypedFail<string> {
   const byReason = new Map<string, ErrorContract>();
   for (const entry of errors) byReason.set(entry.reason, entry);
 
-  return (reason, message, data, options) => {
+  const build: TypedFail<string> = (reason, message, data, options) => {
     const entry = byReason.get(reason);
     if (!entry) {
       // Reason isn't in the contract. The TypedFail type prevents this at
@@ -616,6 +627,12 @@ export function createFail(errors: readonly ErrorContract[]): TypedFail<string> 
       options,
     );
   };
+  const fail: TypedFail<string> = (reason, message, data, options) => {
+    const error = build(reason, message, data, options);
+    Error.captureStackTrace?.(error, fail);
+    return error;
+  };
+  return fail;
 }
 
 /**
@@ -666,28 +683,44 @@ export function createRecoveryFor(
  * keeps its code, message, name, stack, and cause, so the log record and the
  * envelope built from it describe the same throw.
  *
+ * Every read of the thrown value is guarded (#697): a value `instanceof` cannot
+ * inspect and an `McpError` whose `data` cannot be read or copied (a getter, a
+ * revoked `Proxy`, a throwing `ownKeys` trap) resolve to no entry; the copy
+ * writes a `message`, `name`, or `stack` it cannot read as `'[Unreadable]'` and
+ * a `message` that is not a string as text (`errorText`), takes the entry's
+ * code for one it cannot read, and keeps an unreadable `cause`
+ * unreadable, so the record writes it as it would the thrown error's.
+ *
  * @internal
  */
 export function resolveDeclaredFailure<T>(
   errors: readonly ErrorContract[] | undefined,
   error: T,
 ): { entry: ErrorContract | undefined; failure: T | McpError } {
-  const reason = error instanceof McpError ? error.data?.reason : undefined;
+  const thrown = isInstance(error, McpError) ? error : undefined;
+  const declared = readErrorData(thrown);
+  const reason = declared?.reason;
   const entry =
     typeof reason === 'string'
       ? errors?.findLast((candidate) => candidate.reason === reason)
       : undefined;
-  if (!entry || !(error instanceof McpError) || error.data?.recovery !== undefined) {
+  if (!entry || !thrown || declared?.recovery !== undefined) {
     return { entry, failure: error };
   }
+  const code = readField(thrown, 'code');
+  const cause = readField(thrown, 'cause');
   const failure = new McpError(
-    error.code,
-    error.message,
-    { ...error.data, recovery: { hint: entry.recovery } },
-    error.cause === undefined ? undefined : { cause: error.cause },
+    code === UNREADABLE ? entry.code : (code as JsonRpcErrorCode),
+    errorText(readField(thrown, 'message')),
+    { ...declared, recovery: { hint: entry.recovery } },
+    cause === undefined || cause === UNREADABLE ? undefined : { cause },
   );
-  failure.name = error.name;
-  if (error.stack !== undefined) failure.stack = error.stack;
+  if (cause === UNREADABLE) {
+    Object.defineProperty(failure, 'cause', { configurable: true, get: () => thrown.cause });
+  }
+  failure.name = readField(thrown, 'name') as string;
+  const stack = readField(thrown, 'stack');
+  if (stack !== undefined) failure.stack = stack as string;
   return { entry, failure };
 }
 
@@ -970,9 +1003,24 @@ function createContextLogger(
 ): ContextLogger {
   // Build a RequestContext carrying the call's extra data. `withExtra` merges
   // into whatever the request context already accumulated rather than
-  // replacing it; the logger flattens `extra` into the emitted line.
-  const enriched = (data?: Record<string, unknown>): RequestContext =>
-    data ? withExtra(appContext, data) : appContext;
+  // replacing it; the logger flattens `extra` into the emitted line. Its spread
+  // reads every field, so data it cannot read (a throwing getter, a revoked
+  // Proxy) goes through the guarded walk instead, which writes `[Unreadable]`
+  // where a read fails: a log call never fails the request.
+  const enriched = (data?: Record<string, unknown>): RequestContext => {
+    if (!data) return appContext;
+    try {
+      return withExtra(appContext, data);
+    } catch {
+      const readable = toLogValue(data);
+      return withExtra(
+        appContext,
+        readable !== null && typeof readable === 'object'
+          ? (readable as Record<string, unknown>)
+          : { data: readable },
+      );
+    }
+  };
 
   // Second sink: the MCP `notifications/message` stream. The framework
   // advertises the `logging` capability, so a `ctx.log` call reaches the client
@@ -981,8 +1029,10 @@ function createContextLogger(
   // filters by the client's level, which can only narrow it. Fire-and-forget:
   // the client may not have upgraded to SSE, or may already be gone.
   //
-  // The client is outside the process, so the payload is masked with the
-  // sensitive-field list the logs are redacted with. `message` and `error` are
+  // The client is outside the process, so the payload goes through the walk
+  // the logs are written with, in its mirror mode: the same key matcher, depth
+  // bound, ceiling on reads, bound on repeated content, and guarded reads, so a log call can neither leak a
+  // field the logs redact nor stall or fail the handler. `message` and `error` are
   // framework-owned wire keys, written after the call-site data so a caller's
   // own `message` (an error-shaped object spread into the log data) cannot
   // replace the log line. Assigning over the spread keeps `message` first, so
@@ -998,10 +1048,11 @@ function createContextLogger(
     void Promise.try(() => {
       const payload: Record<string, unknown> = {
         message: msg,
-        ...(data && maskSensitiveFields(data)),
+        ...(data && toMirrorValue(data)),
       };
       payload.message = msg;
-      if (error) payload.error = error.message;
+      // As text, guarded: an unreadable or non-string `message` still writes an `error` string.
+      if (error) payload.error = errorText(readField(error, 'message'));
       return wireLog(level, payload);
     }).catch(() => {
       // A log that cannot be built or delivered must never fail the request.

@@ -448,3 +448,40 @@ describe('httpErrorFromResponse', () => {
     expect(error.data).not.toHaveProperty('responseBody');
   });
 });
+
+describe('httpErrorFromResponse — the stack starts at the caller (#694)', () => {
+  /** A stack's top frame, its position and any `async` marker stripped. */
+  function topFrame(error: Error): string {
+    const top = String(error.stack).split('\n')[1] ?? '';
+    return top
+      .trim()
+      .replace(/^at async /, 'at ')
+      .replace(/:\d+:\d+\)?$/, '');
+  }
+
+  /**
+   * Builds the error from a frame in this file, and constructs an `McpError`
+   * directly beside it: the constructor cuts its own frame, so `direct`'s top
+   * frame is the oracle for where `made`'s starts.
+   */
+  async function callerOfHelper(captureBody: boolean) {
+    const made = await httpErrorFromResponse(new Response('upstream down', { status: 503 }), {
+      service: 'probe',
+      captureBody,
+    });
+    const direct = new McpError(JsonRpcErrorCode.InternalError, 'direct');
+    return { made, direct };
+  }
+
+  it.each([
+    ['after reading the body', true],
+    ['without reading the body', false],
+  ])('cuts the helper’s own frame %s', async (_label, captureBody) => {
+    const { made, direct } = await callerOfHelper(captureBody);
+
+    expect(String(made.stack).split('\n')[0]).toBe('McpError: probe returned HTTP 503.');
+    expect(made.stack).not.toMatch(/network[\\/]httpError\.[jt]s/);
+    expect(topFrame(made)).toBe(topFrame(direct));
+    expect(topFrame(made)).toContain('httpError.test.ts');
+  });
+});

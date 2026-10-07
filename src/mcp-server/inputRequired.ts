@@ -66,14 +66,22 @@ export class InputRequiredSignal extends Error {
   }
 }
 
-/** Narrows an unknown thrown value to the input-required control-flow signal. */
+/**
+ * Narrows an unknown thrown value to the input-required control-flow signal.
+ * Never throws: a value it cannot inspect — a revoked `Proxy`, a brand getter
+ * that throws — is no signal, so it fails as what it is (#697).
+ */
 export function isInputRequiredSignal(error: unknown): error is InputRequiredSignal {
-  return (
-    error instanceof InputRequiredSignal ||
-    (typeof error === 'object' &&
-      error !== null &&
-      (error as { isInputRequiredSignal?: unknown }).isInputRequiredSignal === true)
-  );
+  try {
+    return (
+      error instanceof InputRequiredSignal ||
+      (typeof error === 'object' &&
+        error !== null &&
+        (error as { isInputRequiredSignal?: unknown }).isInputRequiredSignal === true)
+    );
+  } catch {
+    return false;
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -435,7 +443,7 @@ const REQUEST_STATE_KEY_MIN_BYTES = 32;
  * Seals the `requestState` handlers return and verifies it when a retry
  * echoes it back. Built once per process from `MCP_REQUEST_STATE_KEY`; the
  * handler factories seal each input-required signal through
- * {@link sealThrown}, and every `McpServer` gets
+ * {@link sealSignal}, and every `McpServer` gets
  * {@link RequestStateSealer.verify} as `ServerOptions.requestState.verify`.
  */
 export interface RequestStateSealer {
@@ -498,26 +506,31 @@ export function createRequestStateSealer(key: string | undefined): RequestStateS
 }
 
 /**
- * What a handler factory rethrows for a value its handler threw: an
- * input-required signal carrying its `requestState` sealed when `sealer` is
- * configured, anything else unchanged.
+ * What a handler factory rethrows for the input-required signal its handler
+ * threw: the signal carrying its `requestState` sealed when `sealer` is
+ * configured, else the signal unchanged.
  *
  * The factories call it inside the measured region, where the signal is
- * rethrown. Minting can reject — WebCrypto failing, or no request context for
- * the principal binding — and a rejection there would escape the factory with
- * no error envelope, no failure record, and no request id. It resolves to an
+ * rethrown, and only for a value {@link isInputRequiredSignal} accepts: any
+ * other thrown value is rethrown as is, never resolved through an `await`,
+ * which would read its `then` — and a revoked `Proxy`, or a `then` getter that
+ * throws, would then replace it with that read's own error (#697).
+ *
+ * Minting can reject — WebCrypto failing, or no request context for the
+ * principal binding — and a rejection there would escape the factory with no
+ * error envelope, no failure record, and no request id. It resolves to an
  * `InternalError` instead, so the call fails through the family's ordinary
  * error path; the codec's error rides as `cause` into the server log only, and
  * no part of the key reaches it.
  */
-export async function sealThrown(
-  thrown: unknown,
+export async function sealSignal(
+  signal: InputRequiredSignal,
   sealer: RequestStateSealer | undefined,
   ctx: ServerContext,
-): Promise<unknown> {
-  if (sealer === undefined || !isInputRequiredSignal(thrown)) return thrown;
+): Promise<InputRequiredSignal | McpError> {
+  if (sealer === undefined) return signal;
   try {
-    return new InputRequiredSignal(await sealer.seal(thrown.result, ctx));
+    return new InputRequiredSignal(await sealer.seal(signal.result, ctx));
   } catch (error) {
     return internalError(
       'Could not seal the requestState of an input_required result.',

@@ -761,7 +761,7 @@ describe('Phase 1 wire conformance', () => {
       });
     });
 
-    it('a tryCatch-wrapped service failure keeps its code and loses its stack on every path', async () => {
+    it('a tryCatch-wrapped service failure keeps its code and loses its stack and cause on every path', async () => {
       const client = await session();
       const errorLog = vi.spyOn(logger, 'error');
 
@@ -775,10 +775,10 @@ describe('Phase 1 wire conformance', () => {
       for (const error of [promptError, toolError, resourceError]) {
         expect(error?.code).toBe(JsonRpcErrorCode.InternalError);
         expectStackFree(error?.data);
-        expect(error?.data).toMatchObject({
-          originalMessage: 'db read failed',
-          rootCause: { name: 'Error', message: 'EACCES' },
-        });
+        expect(error?.data).toMatchObject({ originalMessage: 'db read failed' });
+        // Nothing derived from the cause reaches the wire (#644).
+        expect(error?.data).not.toHaveProperty('rootCause');
+        expect(JSON.stringify(error?.data)).not.toContain('EACCES');
       }
       // A prompt's rejection carries its own call's request id — the one its
       // `Error in prompt:` record logs — and none of the registry's context (#576).
@@ -793,14 +793,16 @@ describe('Phase 1 wire conformance', () => {
       }
       expect(toolResult.isError).toBe(true);
 
-      // The server log still carries the throw-site stack and the cause chain.
+      // The server log still carries the throw-site stack, once (#694), and the cause chain.
       const serviceRecords = errorLog.mock.calls
         .filter(([msg]) => String(msg).startsWith('Error in WireService.read'))
-        .map(([, ctx]) => (ctx as Record<string, any>).extra.errorData);
+        .map(([, ctx]) => (ctx as Record<string, any>).extra);
       expect(serviceRecords).toHaveLength(3);
-      for (const errorData of serviceRecords) {
-        expect(errorData.originalStack).toContain('wire-conformance.int.test.ts');
+      for (const { stack, errorData } of serviceRecords) {
+        expect(stack).toContain('wire-conformance.int.test.ts');
+        expect(errorData).not.toHaveProperty('originalStack');
         expect(errorData.causeChain).toHaveLength(2);
+        expect(errorData.rootCause).toEqual({ name: 'Error', message: 'EACCES' });
       }
     });
 

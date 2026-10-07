@@ -11,7 +11,7 @@ import type {
   ServerContext,
 } from '@modelcontextprotocol/server';
 
-import { ZodError, type ZodObject, type ZodRawShape, type ZodType, z } from 'zod';
+import { type ZodError, type ZodObject, type ZodRawShape, type ZodType, z } from 'zod';
 
 import { config } from '@/config/index.js';
 import type { Context, EnrichmentStore } from '@/core/context.js';
@@ -26,7 +26,7 @@ import {
   CLIENT_CAPABILITY_MISSING_REASON,
   type ClientCapabilityView,
   isInputRequiredSignal,
-  sealThrown,
+  sealSignal,
 } from '@/mcp-server/inputRequired.js';
 import type { NotifierSources } from '@/mcp-server/notifications.js';
 import { parseOutputContract } from '@/mcp-server/outputContract.js';
@@ -40,6 +40,7 @@ import {
 } from '@/types-global/errors.js';
 import { resolvePartialResultKeys } from '@/utils/formatting/partialResult.js';
 import { asRequestCancelled, ErrorHandler } from '@/utils/internal/error-handler/errorHandler.js';
+import { isInstance, readErrorData } from '@/utils/internal/error-handler/helpers.js';
 import {
   capForObservability,
   OBSERVABILITY_MAX_STRING_LENGTH,
@@ -781,6 +782,11 @@ function accept<TDefinition extends AnyToolDefinition>(
  * `runToolContract` passes none: it has no real request, so a thrown
  * `data.requestId` is dropped rather than rendered as one.
  *
+ * Never throws on the thrown value (#697): its `code`, `message`, and `data`
+ * are read as {@link ErrorHandler.classifyOnly} reads them, so one that cannot
+ * be read is `InternalError`, `'[Unreadable]'`, or left out, and `data` is a
+ * copy of the thrown one.
+ *
  * Use after invoking {@link ErrorHandler.handleError} for OTel/logging side
  * effects — this helper does not log.
  */
@@ -794,12 +800,9 @@ export function classifyAndBuildToolErrorResult(
     const { requestId: _thrown, ...rest } = data;
     return Object.keys(rest).length > 0 ? rest : undefined;
   };
-  if (error instanceof McpError) {
-    return buildToolErrorResult(error.code, error.message, withRequestId(error.data));
-  }
-  const { code, message } = ErrorHandler.classifyOnly(error);
-  const data = error instanceof ZodError ? { issues: error.issues } : undefined;
-  return buildToolErrorResult(code, message, withRequestId(data));
+  // `classifyOnly` returns only a `ZodError`'s issues as `data`; a thrown `McpError`'s is copied here.
+  const { code, message, data } = ErrorHandler.classifyOnly(error);
+  return buildToolErrorResult(code, message, withRequestId(readErrorData(error) ?? data));
 }
 
 // ---------------------------------------------------------------------------
@@ -1135,17 +1138,20 @@ const FRAMEWORK_REFUSAL_REASONS: ReadonlySet<string> = new Set([
  * reason, an entry with no severity, a missing auth context, a handler's own
  * `forbidden()`, an upstream 403, an output-contract failure — keeps `error`.
  * A cancellation takes `handleError`'s own `info` path whatever this returns.
+ * The three framework refusals also log without a stack, whatever level this
+ * resolves for them (#651).
  *
  * Resolved here rather than in `ErrorHandler`, which also serves services,
  * prompts, and transports and knows neither the definition nor the schema gate.
+ * `reason` is the failure's `data.reason`, as {@link readErrorData} reads it.
  */
 function failureSeverity(
   entry: ErrorContract | undefined,
   failure: unknown,
+  reason: unknown,
 ): ErrorContractSeverity | undefined {
   if (entry?.severity !== undefined) return entry.severity;
   if (isScopeRefusal(failure)) return 'notice';
-  const reason = failure instanceof McpError ? failure.data?.reason : undefined;
   return typeof reason === 'string' && FRAMEWORK_REFUSAL_REASONS.has(reason) ? 'notice' : undefined;
 }
 
@@ -1305,9 +1311,12 @@ export function createToolHandler(
             // `metrics.errorCode` and the span's error-code attribute are
             // derived from what leaves this callback (#421). An input-required
             // signal leaves with its `requestState` sealed when a key is
-            // configured, so a sealing failure is a failed call like any other.
+            // configured, so a sealing failure is a failed call like any other;
+            // anything else leaves as itself, never awaited (#697).
             throw asRequestCancelled(
-              await sealThrown(error, services.requestState, serverContext),
+              isInputRequiredSignal(error)
+                ? await sealSignal(error, services.requestState, serverContext)
+                : error,
               request.signal,
             );
           }
@@ -1337,19 +1346,25 @@ export function createToolHandler(
       // #567). Filled before `handleError`, so the error record, the envelope,
       // and the failure-payload record carry the same hint.
       const { entry, failure } = resolveDeclaredFailure(def.errors, error);
-      const severity = failureSeverity(entry, failure);
+      // Read once, through a copy: the failure may be a thrown value whose
+      // `data` cannot be read (#697).
+      const reason = readErrorData(failure)?.reason;
+      const severity = failureSeverity(entry, failure, reason);
       // The schema gate's rejection, raised before the handler ran (#631).
       const argumentRejection =
-        !measured &&
-        failure instanceof McpError &&
-        failure.data?.reason === INVALID_ARGUMENTS_REASON;
-      // Neither refusal is a fault in this server, so a stack would name only
-      // the gate that refused it (#585, #631).
+        !measured && isInstance(failure, McpError) && reason === INVALID_ARGUMENTS_REASON;
+      // The capability gate's refusal, recognized by its reserved reason.
+      const capabilityRefusal = reason === CLIENT_CAPABILITY_MISSING_REASON;
+      // No framework refusal is a fault in this server, so a stack would name
+      // only the gate that refused it and the line that called it — at
+      // whatever level an `errors[]` entry declares (#585, #631, #651).
       ErrorHandler.handleError(argumentRejection ? argumentRejectionForLog(failure) : failure, {
         operation: `tool:${def.name}`,
         context: appContext,
         ...(severity !== undefined && { severity }),
-        ...((argumentRejection || isScopeRefusal(failure)) && { includeStack: false }),
+        ...((argumentRejection || capabilityRefusal || isScopeRefusal(failure)) && {
+          includeStack: false,
+        }),
       });
       if (!measured) recordToolRejection(def.name, failure);
       const result = classifyAndBuildToolErrorResult(failure, appContext.requestId);

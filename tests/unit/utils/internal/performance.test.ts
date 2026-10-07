@@ -14,6 +14,7 @@ import {
   measurePromptGeneration,
   measureResourceExecution,
   measureToolExecution,
+  recordToolRejection,
 } from '../../../../src/utils/internal/performance.js';
 
 // Shared OTel metric mocks (hoisted for vi.mock factory)
@@ -366,6 +367,131 @@ describe('measureToolExecution', () => {
     const [, logMeta] = call;
     expect((logMeta as any).extra.metrics.isSuccess).toBe(false);
     expect((logMeta as any).extra.metrics.errorCode).toBe(String(JsonRpcErrorCode.InternalError));
+  });
+
+  it.each([
+    ['stack', 'boom'],
+    ['message', '[Unreadable]'],
+    ['name', 'boom'],
+  ])(
+    'rethrows an Error whose %s getter throws as itself, the span marked failed (#697)',
+    async (key, message) => {
+      const failure = Object.defineProperty(new Error('boom'), key, {
+        configurable: true,
+        get() {
+          throw new Error(`${key} getter`);
+        },
+      });
+      // The OTel SDK's recordException reads code, name, message, and stack unguarded.
+      span.recordException.mockImplementationOnce((e: Error) => {
+        void [e.name, e.message, e.stack];
+      });
+
+      await expect(
+        measureToolExecution(
+          async () => {
+            throw failure;
+          },
+          { toolName: 'unreadable-tool', requestId: 'req-u', timestamp: new Date().toISOString() },
+          {},
+        ),
+      ).rejects.toBe(failure);
+
+      expect(span.setStatus).toHaveBeenCalledWith({ code: SpanStatusCode.ERROR, message });
+      expect(span.setAttribute).toHaveBeenCalledWith('mcp.tool.error_code', 'UNHANDLED_ERROR');
+    },
+  );
+
+  describe('a thrown McpError or value it cannot read (#697)', () => {
+    /** `target` with an own `key` whose read throws. */
+    function unreadable<T extends object>(target: T, key: string): T {
+      return Object.defineProperty(target, key, {
+        configurable: true,
+        get() {
+          throw new Error(`${key} getter`);
+        },
+      });
+    }
+
+    /** A revoked Proxy: every operation on it, `instanceof` included, throws. */
+    function revoked(): object {
+      const { proxy, revoke } = Proxy.revocable({}, {});
+      revoke();
+      return proxy;
+    }
+
+    /** A rate-limit refusal, the one code whose category reads `data`. */
+    const busy = () =>
+      new McpError(JsonRpcErrorCode.RateLimited, 'busy', { reason: 'canvas_capacity_exhausted' });
+
+    it.each([
+      [
+        'an McpError whose code cannot be read',
+        () => unreadable(busy(), 'code'),
+        '-32603',
+        'server',
+      ],
+      [
+        'an McpError whose data cannot be read',
+        () => unreadable(busy(), 'data'),
+        '-32003',
+        'upstream',
+      ],
+      [
+        'an McpError whose data is a revoked Proxy',
+        () =>
+          Object.defineProperty(busy(), 'data', {
+            configurable: true,
+            enumerable: true,
+            value: revoked(),
+          }),
+        '-32003',
+        'upstream',
+      ],
+      [
+        'an McpError whose isInputRequiredSignal cannot be read',
+        () => unreadable(busy(), 'isInputRequiredSignal'),
+        '-32003',
+        'server',
+      ],
+      ['a revoked Proxy', revoked, 'UNKNOWN_ERROR', 'server'],
+    ])(
+      'rethrows %s as itself, with the code and category it can read',
+      async (_label, make, code, category) => {
+        const failure = make();
+
+        await expect(
+          measureToolExecution(
+            async () => {
+              throw failure;
+            },
+            { toolName: 'hostile-tool', requestId: 'req-h', timestamp: new Date().toISOString() },
+            {},
+          ),
+        ).rejects.toBe(failure);
+
+        expect(span.setAttribute).toHaveBeenCalledWith('mcp.tool.error_code', code);
+        const errors = mockErrorCounterAdd.mock.calls.at(-1)?.[1] as Record<string, unknown>;
+        expect(errors['mcp.tool.error_category']).toBe(category);
+        const completion = infoSpy.mock.calls.at(-1)?.[1] as {
+          extra: { metrics: Record<string, unknown> };
+        };
+        expect(completion.extra.metrics).toMatchObject({ isSuccess: false, errorCode: code });
+      },
+    );
+
+    it.each([
+      ['whose data cannot be read', () => unreadable(busy(), 'data'), '-32003', 'upstream'],
+      ['whose code cannot be read', () => unreadable(busy(), 'code'), '-32603', 'server'],
+    ])('counts a rejection by an McpError %s', (_label, make, code, category) => {
+      expect(() => recordToolRejection('hostile-tool', make())).not.toThrow();
+
+      expect(mockCounterAdd).toHaveBeenLastCalledWith(1, {
+        'mcp.tool.name': 'hostile-tool',
+        'mcp.tool.error_code': code,
+        'mcp.tool.error_category': category,
+      });
+    });
   });
 
   it('handles generic errors and uses JSON length fallback when Buffer is unavailable', async () => {

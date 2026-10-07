@@ -168,6 +168,35 @@ describe('records logged before initialize', () => {
     expect(messagesAt(pino, 'info')).toEqual(['Logger initialized. MCP level: info.']);
   });
 
+  it('drain an error whose message cannot be read as [Unreadable], without throwing', async () => {
+    const { logger } = await freshLogger();
+    const unreadable = Object.defineProperty(new Error('hidden'), 'message', {
+      get() {
+        throw new Error('message getter threw');
+      },
+    });
+
+    logger.error('Boot aborted', unreadable);
+
+    expect(() => logger.drainPendingToStderr()).not.toThrow();
+    expect(String(stderr.mock.calls[0]?.[0])).toBe(
+      '[pre-init error] Boot aborted — [Unreadable]\n',
+    );
+  });
+
+  it('drain a function-shaped Error, which has no message the walk writes, without throwing', async () => {
+    const { logger } = await freshLogger();
+    const shaped = Object.setPrototypeOf(function shaped() {}, Error.prototype) as Error;
+
+    logger.warning('Retrying config load');
+    logger.error('Boot aborted', shaped);
+
+    expect(() => logger.drainPendingToStderr()).not.toThrow();
+    expect(String(stderr.mock.calls[0]?.[0])).toBe(
+      '[pre-init warning] Retrying config load\n[pre-init error] Boot aborted\n',
+    );
+  });
+
   it('drain nothing when no record was held', async () => {
     const { logger } = await freshLogger();
 

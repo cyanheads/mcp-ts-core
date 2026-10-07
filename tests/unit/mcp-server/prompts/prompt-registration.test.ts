@@ -18,8 +18,10 @@ import { createRequestStateSealer, InputRequiredSignal } from '@/mcp-server/inpu
 import { PromptRegistry } from '@/mcp-server/prompts/prompt-registration.js';
 import { prompt } from '@/mcp-server/prompts/utils/promptDefinition.js';
 import { JsonRpcErrorCode, McpError } from '@/types-global/errors.js';
+import { ErrorHandler } from '@/utils/internal/error-handler/errorHandler.js';
 import { logger } from '@/utils/internal/logger.js';
 import { TELEMETRY_LOG_MESSAGES } from '@/utils/internal/telemetryMessages.js';
+import { withSpan } from '@/utils/telemetry/trace.js';
 
 const testPrompt = prompt('test_prompt', {
   description: 'A test prompt for unit tests.',
@@ -118,11 +120,12 @@ describe('PromptRegistry', () => {
         expect(rejection.message).toBe('upstream lookup failed');
         expect(rejection.data).toEqual({ requestId: loggedRequestId(errorSpy) });
 
-        // The stack and cause chain still reach the server log.
+        // The throw-site stack (once, #694) and the cause chain still reach the server log.
         const logged = errorSpy.mock.calls.findLast(([msg]) =>
           String(msg).startsWith('Error in prompt:failing_prompt'),
         )?.[1] as Record<string, any> | undefined;
-        expect(logged?.extra.errorData.originalStack).toBe(thrown.stack);
+        expect(logged?.extra.stack).toBe(thrown.stack);
+        expect(logged?.extra.errorData).not.toHaveProperty('originalStack');
         expect(logged?.extra.errorData.causeChain?.length).toBe(chainLength);
       },
     );
@@ -143,6 +146,162 @@ describe('PromptRegistry', () => {
       // The call's own id replaces a thrown one (#576).
       expect(rejection.data).toEqual({ topic: 'x', requestId: loggedRequestId(errorSpy) });
       expect(rejection.data?.requestId).not.toBe('upstream-7');
+    });
+
+    describe('a thrown McpError or value the prompt cannot read (#697)', () => {
+      /** The prompt's `McpError(NotFound, 'gone', { id: 7 })`. */
+      const gone = () => new McpError(JsonRpcErrorCode.NotFound, 'gone', { id: 7 });
+
+      /** `target` with an own `key` whose read throws. */
+      function unreadable<T extends object>(target: T, key: string): T {
+        return Object.defineProperty(target, key, {
+          configurable: true,
+          get() {
+            throw new Error(`${key} getter`);
+          },
+        });
+      }
+
+      /** `error` carrying `data`, assigned after construction as a service might. */
+      function withData(error: McpError, data: unknown): McpError {
+        return Object.defineProperty(error, 'data', {
+          configurable: true,
+          enumerable: true,
+          writable: true,
+          value: data,
+        });
+      }
+
+      /** A revoked Proxy: every operation on it, `instanceof` and a `then` lookup included, throws. */
+      function revoked(): object {
+        const { proxy, revoke } = Proxy.revocable({}, {});
+        revoke();
+        return proxy;
+      }
+
+      /** An object whose `ownKeys` trap throws, so copying its fields throws. */
+      const keyless = () =>
+        new Proxy(
+          { id: 7 },
+          {
+            ownKeys() {
+              throw new Error('ownKeys trap');
+            },
+          },
+        );
+
+      /**
+       * What `prompts/get` rejects with when `generate` fails as `run` does,
+       * and the request id of the call's `Error in prompt:` record.
+       */
+      async function getRejection(
+        run: () => unknown,
+      ): Promise<{ rejection: McpError; loggedId: string | undefined }> {
+        const errorSpy = vi.spyOn(logger, 'error').mockImplementation(() => {});
+        const failing = prompt('failing_prompt', {
+          description: 'Fails with an error it cannot fully read.',
+          generate: async () => {
+            await run();
+            return [];
+          },
+        });
+        await new PromptRegistry([failing], logger).registerAll(mockServer);
+        const handler = mockServer.registerPrompt.mock.calls[0][2] as (
+          ctx: unknown,
+        ) => Promise<unknown>;
+
+        const rejection = await handler({}).then(
+          () => {
+            throw new Error('expected the call to fail');
+          },
+          (error: unknown) => error,
+        );
+        expect(rejection).toBeInstanceOf(McpError);
+        const loggedId = loggedRequestId(errorSpy);
+        expect(loggedId).toEqual(expect.any(String));
+        return { rejection: rejection as McpError, loggedId };
+      }
+
+      it.each([
+        [
+          'directly',
+          () => {
+            throw unreadable(gone(), 'message');
+          },
+        ],
+        [
+          'through withSpan',
+          () =>
+            withSpan('lookup', async () => {
+              throw unreadable(gone(), 'message');
+            }),
+        ],
+        [
+          'through tryCatch with an identity errorMapper',
+          () =>
+            ErrorHandler.tryCatch(
+              () => {
+                throw unreadable(gone(), 'message');
+              },
+              { operation: 'lookup', errorMapper: (e) => e as Error },
+            ),
+        ],
+      ])(
+        'answers an McpError whose message cannot be read, thrown %s, with its code',
+        async (_route, run) => {
+          const { rejection, loggedId } = await getRejection(run);
+
+          expect(rejection).toMatchObject({
+            code: JsonRpcErrorCode.NotFound,
+            message: '[Unreadable]',
+          });
+          expect(rejection.data).toEqual({ id: 7, requestId: loggedId });
+        },
+      );
+
+      it.each([
+        ['code', () => unreadable(gone(), 'code'), JsonRpcErrorCode.InternalError, { id: 7 }],
+        ['data', () => unreadable(gone(), 'data'), JsonRpcErrorCode.NotFound, {}],
+        ['data, a revoked Proxy', () => withData(gone(), revoked()), JsonRpcErrorCode.NotFound, {}],
+        [
+          'data, whose ownKeys trap throws',
+          () => withData(gone(), keyless()),
+          JsonRpcErrorCode.NotFound,
+          {},
+        ],
+        [
+          'isInputRequiredSignal',
+          () => unreadable(gone(), 'isInputRequiredSignal'),
+          JsonRpcErrorCode.NotFound,
+          { id: 7 },
+        ],
+        ['then', () => unreadable(gone(), 'then'), JsonRpcErrorCode.NotFound, { id: 7 }],
+        ['name', () => unreadable(gone(), 'name'), JsonRpcErrorCode.NotFound, { id: 7 }],
+        ['stack', () => unreadable(gone(), 'stack'), JsonRpcErrorCode.NotFound, { id: 7 }],
+        ['cause', () => unreadable(gone(), 'cause'), JsonRpcErrorCode.NotFound, { id: 7 }],
+      ] as const)(
+        'answers an McpError whose %s cannot be read with the code it can read',
+        async (_label, make, code, data) => {
+          const { rejection, loggedId } = await getRejection(() => {
+            throw make();
+          });
+
+          expect(rejection).toMatchObject({ code, message: 'gone' });
+          expect(rejection.data).toEqual({ ...data, requestId: loggedId });
+        },
+      );
+
+      it('answers a thrown revoked Proxy with InternalError', async () => {
+        const { rejection, loggedId } = await getRejection(() => {
+          throw revoked();
+        });
+
+        expect(rejection).toMatchObject({
+          code: JsonRpcErrorCode.InternalError,
+          message: '[Unreadable]',
+        });
+        expect(rejection.data).toEqual({ requestId: loggedId });
+      });
     });
   });
 

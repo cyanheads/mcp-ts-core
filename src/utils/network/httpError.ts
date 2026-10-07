@@ -16,11 +16,13 @@ import { readBoundedResponseText } from '@/utils/network/responseBody.js';
  * Returns `undefined` when the status is in the 1xx/2xx range — those are not
  * errors and the caller should not be invoking error mapping on them.
  *
- * A 3xx does reach error mapping: under `redirect: 'manual'` the caller gets the
- * redirect back rather than the followed response, and `!response.ok` throws. It
- * maps like an unlisted 4xx — the request as sent cannot be served at this URL —
- * which also keeps it out of `withRetry`'s transient set, since re-issuing it
- * returns the same redirect.
+ * A 3xx does reach error mapping whenever it is not followed: under
+ * `redirect: 'manual'` the caller gets the redirect back rather than the followed
+ * response, a 304 comes back under every redirect mode, and any other 3xx with no
+ * `Location` comes back under `follow` too (`redirect: 'error'` rejects it as a
+ * network error); `!response.ok` then throws. It maps like an unlisted 4xx — the
+ * request as sent cannot be served at this URL — which also keeps it out of
+ * `withRetry`'s transient set, since re-issuing it returns the same redirect.
  *
  * | Status | Code |
  * |:-------|:-----|
@@ -240,7 +242,7 @@ const DEFAULT_BODY_LIMIT = 500;
  *   return await response.text();
  * } catch (error) {
  *   if (error instanceof McpError) throw error;
- *   throw new McpError(JsonRpcErrorCode.ServiceUnavailable, 'NCBI request failed', { url }, { cause: error });
+ *   throw serviceUnavailable('NCBI request failed', { endpoint: 'esearch' }, { cause: error });
  * }
  * ```
  */
@@ -248,6 +250,15 @@ export async function httpErrorFromResponse(
   response: Response,
   options: HttpErrorFromResponseOptions = {},
 ): Promise<McpError> {
+  /**
+   * The caller's frames, taken before the body read: past that `await` the
+   * engine resumes this function from its task queue, with the caller no longer
+   * on the stack. The error's stack starts at the caller's line, as an error
+   * factory's does (#694).
+   */
+  const callSite: { stack?: string } = {};
+  Error.captureStackTrace?.(callSite, httpErrorFromResponse);
+
   const {
     captureBody = true,
     bodyLimit = DEFAULT_BODY_LIMIT,
@@ -297,12 +308,17 @@ export async function httpErrorFromResponse(
     ...extraData,
   };
 
-  return new McpError(
+  const error = new McpError(
     code,
     `${subject} returned HTTP ${response.status}${statusText}.`,
     data,
     cause !== undefined ? { cause } : undefined,
   );
+  // The call site's stack is a one-line header, then the caller's frames.
+  const { stack: siteStack = '' } = callSite;
+  const framesAt = siteStack.indexOf('\n');
+  if (framesAt !== -1) error.stack = `${String(error)}${siteStack.slice(framesAt)}`;
+  return error;
 }
 
 /** Returns the hostname from a URL string, or `undefined` if it can't be parsed. */

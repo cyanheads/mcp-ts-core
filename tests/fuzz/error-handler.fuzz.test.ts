@@ -161,10 +161,11 @@ describe('ErrorHandler Fuzz Tests', () => {
       }
     });
 
-    it('returns data carrying no stack, cause chain, or context for any non-McpError throw', () => {
-      // The returned error's `data` reaches the client verbatim; diagnostics and
-      // the caller's context belong in the log record alone.
-      const DATA_KEYS = new Set(['originalErrorName', 'originalMessage', 'rootCause']);
+    it('returns data carrying no stack, cause chain, root cause, or context for any non-McpError throw', () => {
+      // The returned error's `data` reaches the client verbatim; diagnostics, what
+      // the cause chain says (#644), and the caller's context belong in the log
+      // record alone.
+      const DATA_KEYS = new Set(['originalErrorName', 'originalMessage']);
       const thrownValue = fc.oneof(
         fc.string(),
         fc.integer(),

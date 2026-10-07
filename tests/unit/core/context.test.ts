@@ -24,6 +24,7 @@ import {
   createRecoveryFor,
   readContentStore,
   readEnrichmentStore,
+  resolveDeclaredFailure,
 } from '@/core/context.js';
 import {
   createContextInputs,
@@ -189,6 +190,31 @@ describe('createFail', () => {
       'no_retry_hint',
     ]);
   });
+
+  /**
+   * The top frame is matched by file, not by function name: under coverage
+   * instrumentation JSC renames frames, so a frame's file is what both
+   * runtimes report the same way.
+   */
+  it.each([
+    ['a declared reason', 'no_match', 'McpError: No items matched the query.'],
+    ['an undeclared reason', 'typo_reason', 'McpError: ctx.fail() called with unknown reason'],
+  ])(
+    'starts the stack at the line that called it, its own frame cut, for %s (#694)',
+    (_label, reason, header) => {
+      const fail = createFail(errors);
+      function throwSiteOfCtxFail(): McpError {
+        return fail(reason);
+      }
+
+      const err = throwSiteOfCtxFail();
+
+      const [first, top] = String(err.stack).split('\n');
+      expect(first?.startsWith(header)).toBe(true);
+      expect(top).toContain('context.test.ts:');
+      expect(err.stack).not.toMatch(/core[\\/]context\.[jt]s/);
+    },
+  );
 });
 
 describe('createRecoveryFor', () => {
@@ -211,6 +237,97 @@ describe('createRecoveryFor', () => {
   it('returns an empty object for an undeclared reason', () => {
     const recoveryFor = createRecoveryFor(errors);
     expect(recoveryFor('unknown_reason')).toEqual({});
+  });
+});
+
+describe('resolveDeclaredFailure', () => {
+  const RECOVERY = 'Search for the item again before retrying the call.';
+  const errors: readonly ErrorContract[] = [
+    {
+      reason: 'gone',
+      code: JsonRpcErrorCode.NotFound,
+      when: 'The item is gone.',
+      recovery: RECOVERY,
+    },
+  ];
+
+  /** `target` with an own `key` whose read throws. */
+  function unreadable<T extends object>(target: T, key: string): T {
+    return Object.defineProperty(target, key, {
+      configurable: true,
+      get() {
+        throw new Error(`${key} getter`);
+      },
+    });
+  }
+
+  /** A declared failure as a service raises it, with a cause. */
+  function declared(): McpError {
+    return new McpError(
+      JsonRpcErrorCode.ServiceUnavailable,
+      'upstream gone',
+      { reason: 'gone', id: 7 },
+      { cause: new Error('socket closed') },
+    );
+  }
+
+  it('fills the entry’s recovery on a copy that keeps the thrown code, message, name, stack, and cause', () => {
+    const thrown = declared();
+
+    const { entry, failure } = resolveDeclaredFailure(errors, thrown);
+
+    expect(entry?.reason).toBe('gone');
+    expect(failure).not.toBe(thrown);
+    expect(failure).toMatchObject({
+      code: JsonRpcErrorCode.ServiceUnavailable,
+      message: 'upstream gone',
+      name: 'McpError',
+      stack: thrown.stack,
+      cause: thrown.cause,
+      data: { reason: 'gone', id: 7, recovery: { hint: RECOVERY } },
+    });
+    expect(thrown.data).toEqual({ reason: 'gone', id: 7 });
+  });
+
+  it('resolves no entry for a thrown McpError whose data it cannot read, or a revoked Proxy (#697)', () => {
+    const thrown = unreadable(declared(), 'data');
+    const { proxy, revoke } = Proxy.revocable({}, {});
+    revoke();
+
+    expect(resolveDeclaredFailure(errors, thrown)).toEqual({ entry: undefined, failure: thrown });
+    const resolved = resolveDeclaredFailure(errors, proxy);
+    expect(resolved.entry).toBeUndefined();
+    expect(Object.is(resolved.failure, proxy)).toBe(true);
+  });
+
+  it('copies each field it cannot read as [Unreadable], an unreadable code as the entry’s (#697)', () => {
+    const thrown = unreadable(
+      unreadable(unreadable(unreadable(declared(), 'stack'), 'name'), 'message'),
+      'code',
+    );
+
+    const { failure } = resolveDeclaredFailure(errors, thrown);
+
+    expect(failure).toBeInstanceOf(McpError);
+    expect(failure).toMatchObject({
+      code: JsonRpcErrorCode.NotFound,
+      message: '[Unreadable]',
+      name: '[Unreadable]',
+      stack: '[Unreadable]',
+      data: { reason: 'gone', id: 7, recovery: { hint: RECOVERY } },
+    });
+  });
+
+  it('keeps a cause it cannot read unreadable on the copy (#697)', () => {
+    const thrown = unreadable(declared(), 'cause');
+
+    const { failure } = resolveDeclaredFailure(errors, thrown);
+
+    expect(failure).toMatchObject({
+      message: 'upstream gone',
+      data: { recovery: { hint: RECOVERY } },
+    });
+    expect(() => (failure as McpError).cause).toThrow('cause getter');
   });
 });
 
@@ -1067,6 +1184,53 @@ describe('ContextLogger — wire sink (ctx.mcpReq.log mirror)', () => {
     });
   });
 
+  it('mirrors ctx.log.error with an Error whose message cannot be read, error: [Unreadable] (#697)', () => {
+    const { ctx, wireLog } = buildWireCtx();
+    vi.spyOn(logger, 'error').mockImplementation(() => {});
+    const unreadable = Object.defineProperty(new Error('unused'), 'message', {
+      get() {
+        throw new Error('message getter threw');
+      },
+    });
+
+    ctx.log.error('failed', unreadable, { detail: 'x' });
+
+    expect(wireLog).toHaveBeenCalledWith('error', {
+      message: 'failed',
+      detail: 'x',
+      error: '[Unreadable]',
+    });
+  });
+
+  it.each([
+    ['a Symbol', Symbol('m'), 'Symbol(m)'],
+    ['a number', 404, '404'],
+    [
+      'an object whose toJSON throws',
+      {
+        toJSON(): never {
+          throw new Error('toJSON threw');
+        },
+      },
+      '[Unreadable]',
+    ],
+  ])(
+    'mirrors ctx.log.error with an Error whose message is %s, its error key as text (#697)',
+    (_label, value, text) => {
+      const { ctx, wireLog } = buildWireCtx();
+      vi.spyOn(logger, 'error').mockImplementation(() => {});
+      const failure = Object.defineProperty(new Error('unused'), 'message', { value });
+
+      ctx.log.error('failed', failure, { detail: 'x' });
+
+      // The payload as the transport serializes it into the notification.
+      const [, payload] = (wireLog.mock.calls as unknown[][])[0] as [unknown, unknown];
+      expect(JSON.stringify(payload)).toBe(
+        `{"message":"failed","detail":"x","error":${JSON.stringify(text)}}`,
+      );
+    },
+  );
+
   it('omits the error key when ctx.log.error is called without an Error', () => {
     const { ctx, wireLog } = buildWireCtx();
 
@@ -1163,7 +1327,7 @@ describe('ContextLogger — wire sink (ctx.mcpReq.log mirror)', () => {
     expect(errorSpy).toHaveBeenCalledWith('no wire either', expect.anything());
   });
 
-  it('serializes dates, URLs, arrays, and nested values exactly as the data would', () => {
+  it('serializes dates, URLs, arrays, and nested values as the data would, and an Error as { type, message }', () => {
     const { ctx, wireLog } = buildWireCtx();
     class Upstream {
       region = 'us-west';
@@ -1185,11 +1349,53 @@ describe('ContextLogger — wire sink (ctx.mcpReq.log mirror)', () => {
     ctx.log.info('shapes', data);
 
     const [[, payload]] = wireLog.mock.calls as unknown as [[string, unknown]];
-    expect(JSON.stringify(payload)).toBe(JSON.stringify({ message: 'shapes', ...data }));
+    expect(JSON.stringify(payload)).toBe(
+      JSON.stringify({
+        message: 'shapes',
+        ...data,
+        cause: { type: 'Error', message: 'upstream failed' },
+      }),
+    );
   });
 
-  it('never fails the handler on a value whose toJSON throws', () => {
-    const { ctx } = buildWireCtx();
+  // #646 — the mirror sent an Error's enumerable own properties: a request URL, a server file path.
+  it('writes each Error in data as { type, message } only, at any depth and over its toJSON', () => {
+    const { ctx, wireLog } = buildWireCtx();
+    const rejection = Object.assign(
+      new TypeError('Unable to connect.', { cause: new Error('connect ECONNREFUSED') }),
+      {
+        code: 'ConnectionRefused',
+        path: 'http://127.0.0.1:3619/sk-test-0000/reverse?api-key=QSECRET-9999',
+        sourceURL: '/srv/app/handler.js',
+        line: 36,
+      },
+    );
+    const libraryError = Object.assign(new Error('library failure'), {
+      toJSON: () => ({ message: 'library failure', config: { url: 'https://api.example.test' } }),
+    });
+    const aborted = AbortSignal.abort().reason as DOMException;
+
+    ctx.log.warning('errors', {
+      error: rejection,
+      nested: { attempts: [libraryError, { last: rejection }] },
+      aborted,
+    });
+
+    expect(wireLog).toHaveBeenCalledWith('warning', {
+      message: 'errors',
+      error: { type: 'TypeError', message: 'Unable to connect.' },
+      nested: {
+        attempts: [
+          { type: 'Error', message: 'library failure' },
+          { last: { type: 'TypeError', message: 'Unable to connect.' } },
+        ],
+      },
+      aborted: { type: 'AbortError', message: aborted.message },
+    });
+  });
+
+  it('never fails the handler on a value whose toJSON throws, and mirrors it as [Unreadable]', () => {
+    const { ctx, wireLog } = buildWireCtx();
     vi.spyOn(logger, 'info').mockImplementation(() => {});
     const exploding = {
       toJSON() {
@@ -1197,7 +1403,118 @@ describe('ContextLogger — wire sink (ctx.mcpReq.log mirror)', () => {
       },
     };
 
-    expect(() => ctx.log.info('odd value', { exploding })).not.toThrow();
+    expect(() => ctx.log.info('odd value', { exploding, kept: 1 })).not.toThrow();
+    expect(wireLog).toHaveBeenCalledWith('info', {
+      message: 'odd value',
+      exploding: '[Unreadable]',
+      kept: 1,
+    });
+  });
+
+  it('never fails the handler when the log data object itself cannot be read (#695)', () => {
+    const { ctx } = buildWireCtx();
+    const info = vi.spyOn(logger, 'info').mockImplementation(() => {});
+    const throwingGetter = {
+      kept: 1,
+      get broken(): never {
+        throw new Error('getter threw');
+      },
+    };
+    const { proxy: revoked, revoke } = Proxy.revocable({}, {});
+    revoke();
+
+    expect(() => ctx.log.info('getter', throwingGetter)).not.toThrow();
+    expect(() => ctx.log.info('revoked', revoked)).not.toThrow();
+
+    const extraOf = (call: number) =>
+      (info.mock.calls[call]?.[1] as { extra?: Record<string, unknown> } | undefined)?.extra;
+    expect(extraOf(0)).toMatchObject({ kept: 1, broken: '[Unreadable]' });
+    expect(extraOf(1)).toMatchObject({ data: '[Unreadable]' });
+  });
+
+  // #695 — the mirror walked log data with no depth bound or budget and read it unguarded.
+  describe('bounds and unreadable values (#695)', () => {
+    it('stops at depth 16 with [MaxDepth] and still delivers a 20,000-level value', () => {
+      const { ctx, wireLog } = buildWireCtx();
+      vi.spyOn(logger, 'info').mockImplementation(() => {});
+      let deep: Record<string, unknown> = { leaf: true };
+      for (let i = 0; i < 20_000; i++) deep = { n: deep };
+
+      ctx.log.info('deep', { deep });
+
+      expect(wireLog).toHaveBeenCalledTimes(1);
+      const [[, payload]] = wireLog.mock.calls as unknown as [[string, Record<string, unknown>]];
+      // `deep` sits at depth 1 of the data, as in the process log: objects through 15, then the marker.
+      let cursor: unknown = payload.deep;
+      let objectLevels = 0;
+      while (cursor !== null && typeof cursor === 'object') {
+        cursor = (cursor as Record<string, unknown>).n;
+        objectLevels++;
+      }
+      expect(objectLevels).toBe(15);
+      expect(cursor).toBe('[MaxDepth]');
+    });
+
+    it('mirrors a shared-reference graph within the walk budget, marked [Truncated]', () => {
+      const { ctx, wireLog } = buildWireCtx();
+      vi.spyOn(logger, 'info').mockImplementation(() => {});
+      let graph: Record<string, unknown> = { leaf: true };
+      for (let i = 0; i < 16; i++) graph = { a: graph, b: graph, c: graph };
+
+      const start = process.threadCpuUsage();
+      ctx.log.info('graph', { graph });
+      const { user, system } = process.threadCpuUsage(start);
+
+      // Unbounded, the 3^16 paths take tens of seconds; bounded, a few ms (headroom for coverage and load).
+      expect((user + system) / 1000).toBeLessThan(250);
+      const payload = JSON.stringify(wireLog.mock.calls[0]);
+      expect(payload).toContain('"[Truncated]"');
+      // Bounded by the budget, not by the 3^16 paths through the graph.
+      expect(payload.length).toBeLessThan(2_000_000);
+    });
+
+    it('mirrors each unreadable value as [Unreadable] and delivers the rest of the record', () => {
+      const { ctx, wireLog } = buildWireCtx();
+      vi.spyOn(logger, 'info').mockImplementation(() => {});
+      const { proxy: revoked, revoke } = Proxy.revocable({ a: 1 }, {});
+      revoke();
+      const unreadable = {
+        getter: {
+          fine: 1,
+          get boom(): never {
+            throw new Error('getter threw');
+          },
+        },
+        ownKeysTrap: new Proxy(
+          {},
+          {
+            ownKeys() {
+              throw new Error('ownKeys threw');
+            },
+          },
+        ),
+        revoked,
+        messageAccessor: Object.defineProperty(new Error('unused'), 'message', {
+          get() {
+            throw new Error('message getter threw');
+          },
+        }),
+      };
+
+      ctx.log.info('unreadable', { top: unreadable, deep: { a: { b: { c: unreadable } } } });
+
+      const mirrored = {
+        getter: { fine: 1, boom: '[Unreadable]' },
+        ownKeysTrap: '[Unreadable]',
+        revoked: '[Unreadable]',
+        messageAccessor: { type: 'Error', message: '[Unreadable]' },
+      };
+      expect(wireLog).toHaveBeenCalledWith('info', {
+        message: 'unreadable',
+        top: mirrored,
+        deep: { a: { b: { c: mirrored } } },
+      });
+    });
   });
 
   // #630 — the wire payload went out with the caller's data unredacted.
@@ -1264,6 +1581,33 @@ describe('ContextLogger — wire sink (ctx.mcpReq.log mirror)', () => {
         Authorization: '[REDACTED]',
         accessToken: '[REDACTED]',
         tokenizer: 'kept',
+      });
+    });
+
+    // #696 — a sensitive name split across adjacent words of a longer key went out in clear.
+    it('masks a name spanning adjacent words, and leaves token counters as written', () => {
+      const { ctx, wireLog } = buildWireCtx();
+      const headers = new Headers({ 'x-api-key': 'sk-live-0000', accept: 'application/json' });
+
+      ctx.log.info('upstream', {
+        'x-api-key': 'sk-live-0001',
+        'X-Api-Key': 'sk-live-0002',
+        upstream_private_key: 'pem',
+        headers,
+        max_tokens: 5,
+        usage: { prompt_tokens: 1, completion_tokens: 2, total_tokens: 3 },
+      });
+
+      const [[, payload]] = wireLog.mock.calls as unknown as [[string, Record<string, unknown>]];
+      // Bun's Headers has a toJSON, Node's does not: either way no key reaches the wire.
+      expect(JSON.stringify(payload)).not.toContain('sk-live');
+      expect(payload).toMatchObject({
+        message: 'upstream',
+        'x-api-key': '[REDACTED]',
+        'X-Api-Key': '[REDACTED]',
+        upstream_private_key: '[REDACTED]',
+        max_tokens: 5,
+        usage: { prompt_tokens: 1, completion_tokens: 2, total_tokens: 3 },
       });
     });
 

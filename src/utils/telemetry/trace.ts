@@ -16,6 +16,7 @@ import {
 } from '@opentelemetry/api';
 
 import { config } from '@/config/index.js';
+import { asError, recordSpanFailure } from '@/utils/internal/error-handler/helpers.js';
 import type { RequestContext } from '@/utils/internal/requestContext.js';
 import { requestContextService } from '@/utils/internal/requestContext.js';
 
@@ -152,7 +153,9 @@ export function injectCurrentContextInto<T extends Record<string, unknown>>(carr
 /**
  * Creates a new span for manual instrumentation with automatic error handling.
  * The span is automatically marked as OK on success or ERROR on exception.
- * Errors are recorded as exceptions and automatically propagated.
+ * Errors are recorded as exceptions (any other thrown value as an `Error` of its
+ * string form) and propagated as thrown — a field that cannot be read, such as
+ * a `message` getter that throws, is written `'[Unreadable]'` on the span.
  *
  * @param operationName - Name of the span (e.g., 'database.query', 'external.api')
  * @param fn - Async function to execute within the span
@@ -189,11 +192,8 @@ export async function withSpan<T>(
       span.setStatus({ code: SpanStatusCode.OK });
       return result;
     } catch (error: unknown) {
-      span.recordException(error instanceof Error ? error : new Error(String(error)));
-      span.setStatus({
-        code: SpanStatusCode.ERROR,
-        message: error instanceof Error ? error.message : String(error),
-      });
+      // Guarded: a value whose fields throw on read must leave here as itself (#697).
+      recordSpanFailure(span, asError(error));
       throw error;
     } finally {
       span.end();

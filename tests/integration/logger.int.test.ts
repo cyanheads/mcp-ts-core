@@ -114,6 +114,36 @@ describe('Logger Integration (Pino)', () => {
     ).toBeUndefined();
   });
 
+  it('routes a record carrying a caller level key by its own level, keeping the caller value (#698)', async () => {
+    const context = (testId: string, level: unknown) => ({
+      extra: { testId, level },
+      requestId: `test-${testId}`,
+      timestamp: new Date().toISOString(),
+    });
+    logger.info('Caller level string', context('caller-level-string', 'high'));
+    logger.info('Caller level numeric', context('caller-level-numeric', 60));
+    // This later record reaches both sinks, so the error.log assertion follows a completed write.
+    logger.error('Caller level barrier', context('caller-level-barrier', 'low'));
+
+    await expect
+      .poll(
+        () => readJsonLog(ERROR_LOG_PATH).find((entry) => entry.testId === 'caller-level-barrier'),
+        { timeout: 2000 },
+      )
+      .toMatchObject({ level: 50, data_level: 'low' });
+    for (const [testId, level] of [
+      ['caller-level-string', 'high'],
+      ['caller-level-numeric', 60],
+    ] as const) {
+      await expect
+        .poll(() => readJsonLog(COMBINED_LOG_PATH).find((entry) => entry.testId === testId), {
+          timeout: 2000,
+        })
+        .toMatchObject({ level: 30, data_level: level });
+      expect(readJsonLog(ERROR_LOG_PATH).find((entry) => entry.testId === testId)).toBeUndefined();
+    }
+  });
+
   it('writes an error and its serialized cause to both file sinks', async () => {
     logger.error('This is a pino error message', new Error('test error'), {
       extra: { testId: 'pino-error-test' },
@@ -333,9 +363,9 @@ describe('Logger Integration (Pino)', () => {
       );
     });
 
-    it('serializes Error with cause chain via pino err serializer after sanitization', async () => {
-      const root = new Error('root cause');
-      const wrapped = new Error('outer failure', { cause: root });
+    it('writes an Error and its cause in the same shape, the cause nested', async () => {
+      const root = Object.assign(new Error('root cause'), { code: 'ECONNREFUSED', port: 1 });
+      const wrapped = new TypeError('outer failure', { cause: root });
 
       logger.error('Error with cause chain', wrapped, {
         requestId: 'err-cause-1',
@@ -348,10 +378,17 @@ describe('Logger Integration (Pino)', () => {
           const entries = readJsonLog(COMBINED_LOG_PATH);
           const hit = entries.find((e) => e.testId === 'err-cause-chain');
           expect(hit).toBeDefined();
-          expect(hit.err).toBeDefined();
-          expect(hit.err.message).toContain('outer failure');
-          // pino's err serializer threads cause messages into the message/stack.
-          expect(hit.err.message + hit.err.stack).toContain('root cause');
+          expect(hit.err).toEqual({
+            type: 'TypeError',
+            message: 'outer failure',
+            stack: expect.stringContaining('outer failure'),
+            cause: {
+              type: 'Error',
+              message: 'root cause',
+              stack: expect.stringContaining('root cause'),
+              code: 'ECONNREFUSED',
+            },
+          });
         },
         { timeout: 2000, interval: 50 },
       );

@@ -19,6 +19,7 @@ import { type AnyToolDefinition, tool } from '@/mcp-server/tools/utils/toolDefin
 import { createToolHandler } from '@/mcp-server/tools/utils/toolHandlerFactory.js';
 import { createInMemoryStorage } from '@/testing/index.js';
 import { JsonRpcErrorCode, type McpError } from '@/types-global/errors.js';
+import { ErrorHandler } from '@/utils/internal/error-handler/errorHandler.js';
 import { logger } from '@/utils/internal/logger.js';
 import { fetchWithTimeout } from '@/utils/network/fetchWithTimeout.js';
 import { withRetry } from '@/utils/network/retry.js';
@@ -258,6 +259,32 @@ describe('a refused connection keeps its transport code (#615)', () => {
     expect(text.startsWith(`Error: ${message}`)).toBe(true);
     expect(JSON.stringify(result)).not.toMatch(
       /causeChain|rootCause|ECONNREFUSED|ConnectionRefused/,
+    );
+  });
+
+  // #644 — the same failure through `tryCatch` publishes nothing the direct throw does not.
+  it('rethrows it through tryCatch with no rootCause, logging the code on the chain', async () => {
+    const error = (await ErrorHandler.tryCatch(
+      () => fetchWithTimeout(`${closedOrigin}/x`, 5000, context),
+      { operation: 'reverseGeocode', context },
+    ).catch((e: unknown) => e)) as McpError;
+
+    expect(error.code).toBe(JsonRpcErrorCode.ServiceUnavailable);
+    expect(error.data).toEqual({
+      errorSource: 'FetchNetworkErrorWrapper',
+      originalErrorName: 'McpError',
+      originalMessage: `Network error during fetch GET ${closedOrigin}/…: ${refusedMessage}`,
+    });
+    expect(JSON.stringify(error.data)).not.toMatch(/rootCause|ECONNREFUSED|ConnectionRefused/);
+
+    const record = vi
+      .mocked(logger.error)
+      .mock.calls.find(([message]) => String(message).startsWith('Error in reverseGeocode'))?.[1] as
+      | { extra: { errorData: { causeChain: Array<{ code?: string }>; rootCause: unknown } } }
+      | undefined;
+    expect(record?.extra.errorData.causeChain.at(-1)?.code).toBe(refusedCode);
+    expect(record?.extra.errorData.rootCause).toEqual(
+      expect.objectContaining({ name: expect.any(String) }),
     );
   });
 });

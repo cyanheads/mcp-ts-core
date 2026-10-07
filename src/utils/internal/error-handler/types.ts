@@ -55,6 +55,9 @@ export interface ErrorHandlerOptions {
    * This can include `requestId` and other relevant debugging information.
    * It reaches the log record only, never the returned error's client-visible
    * `data`; put caller-actionable fields in the thrown `McpError`'s `data`.
+   * A context, or its `extra`, whose fields throw when copied — an own getter,
+   * a `Proxy` trap — is written as `'[Unreadable]'` under `context` or `extra`
+   * rather than failing the call.
    */
   context?: ErrorContext;
 
@@ -80,14 +83,21 @@ export interface ErrorHandlerOptions {
   errorMapper?: (error: unknown) => Error;
 
   /**
-   * Whether the log record carries stack traces. Defaults to `true`.
+   * Whether the log record carries stack traces. Defaults to `true`: the
+   * record's `extra.stack` is then the throw site's stack — never a context's
+   * `extra.stack` — and each stack is written once: a `causeChain` node
+   * carrying the record's stack, or the same stack as the node before it, is
+   * written without it.
    *
-   * `false` removes every stack from the record: `extra.stack`,
-   * `extra.errorData.originalStack` (including one carried in a thrown
-   * `McpError`'s own `data`, or a cause's), and the `stack` of each
-   * `extra.errorData.causeChain` node. The chain itself stays, each node
-   * keeping its other fields. The returned error and the exception recorded
-   * on the active span are the same either way.
+   * `false` makes the record stack-free, as a `RequestCancelled` always is: no
+   * `extra.stack`, no `extra.errorData.originalStack`, no `stack` on any
+   * `extra.errorData.causeChain` node nor `originalStack` in a node's `data`,
+   * and every `Error` in the record — in `errorData`, `input`, or the
+   * context's `extra` — written without its `stack`, whether this handler, the
+   * thrown `McpError`'s own `data`, or the caller supplied the field. Any other
+   * key named `stack` is the caller's data and is written as given. The chain
+   * itself stays, each node keeping its other fields. The returned error and
+   * the exception recorded on the active span are the same either way.
    */
   includeStack?: boolean;
 

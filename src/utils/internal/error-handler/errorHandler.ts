@@ -5,13 +5,14 @@
  */
 
 import { SdkError, SdkErrorCode } from '@modelcontextprotocol/server';
-import { SpanStatusCode, trace } from '@opentelemetry/api';
+import { trace } from '@opentelemetry/api';
 
 import { ZodError } from 'zod';
 
 import { isInputRequiredSignal } from '@/mcp-server/inputRequired.js';
 import { JsonRpcErrorCode, McpError, requestCancelled } from '@/types-global/errors.js';
 import { logger } from '@/utils/internal/logger.js';
+import { toLogValue } from '@/utils/internal/logValue.js';
 import type { RequestContext } from '@/utils/internal/requestContext.js';
 import { generateUUID } from '@/utils/security/idGenerator.js';
 import { sanitizeInputForLogging } from '@/utils/security/sanitization.js';
@@ -21,7 +22,20 @@ import {
   ATTR_MCP_ERROR_SEVERITY,
 } from '@/utils/telemetry/attributes.js';
 import { createCounter } from '@/utils/telemetry/metrics.js';
-import { extractErrorCauseChain, getErrorMessage, getErrorName } from './helpers.js';
+import { isRecord } from '@/utils/types/guards.js';
+import {
+  asError,
+  copyFields,
+  errorText,
+  extractErrorCauseChain,
+  getErrorMessage,
+  getErrorName,
+  isInstance,
+  readErrorData,
+  readField,
+  recordSpanFailure,
+  UNREADABLE,
+} from './helpers.js';
 import {
   COMPILED_ERROR_PATTERNS,
   COMPILED_PROVIDER_PATTERNS,
@@ -30,7 +44,7 @@ import {
   getCompiledPattern,
   getErrorCategory,
 } from './mappings.js';
-import type { ErrorHandlerOptions, ErrorMapping } from './types.js';
+import type { ErrorContext, ErrorHandlerOptions, ErrorMapping } from './types.js';
 
 let errorClassifiedCounter: ReturnType<typeof createCounter> | undefined;
 
@@ -48,13 +62,32 @@ export function initErrorMetrics(): void {
   getErrorMetrics();
 }
 
-/** A copy of `record` without `key`, for an `includeStack: false` log record. */
-function withoutKey(
-  record: Readonly<Record<string, unknown>>,
-  key: string,
-): Record<string, unknown> {
-  const { [key]: _omitted, ...rest } = record;
+/**
+ * A record's `extra` as a stack-free record writes it, every field in one walk
+ * — the context's, `input`, `errorData`: each `Error` written without its
+ * `stack`, no `stack`, and none of `errorData`'s stack fields (`originalStack`,
+ * and on each `causeChain` node its `stack` and the same fields in its `data`).
+ * `extra` is the record's own object literal, so the walk returns an object
+ * whatever the context's `extra` was.
+ */
+function toStackFreeExtra(extra: Record<string, unknown>): Record<string, unknown> {
+  const { stack: _stack, ...rest } = toLogValue(extra, { includeStack: false }) as Record<
+    string,
+    unknown
+  >;
+  if (isRecord(rest.errorData)) dropStackFields(rest.errorData);
   return rest;
+}
+
+/** Deletes the record's stack fields from `data`, a walked copy, down its `causeChain`. */
+function dropStackFields(data: Record<string, unknown>): void {
+  delete data.originalStack;
+  if (!Array.isArray(data.causeChain)) return;
+  for (const node of data.causeChain) {
+    if (!isRecord(node)) continue;
+    delete node.stack;
+    if (isRecord(node.data)) dropStackFields(node.data);
+  }
 }
 
 /**
@@ -90,7 +123,12 @@ function withoutKey(
  */
 export function asRequestCancelled(error: unknown, signal: AbortSignal): unknown {
   if (!signal.aborted || isInputRequiredSignal(error)) return error;
-  if (error instanceof McpError && error.code === JsonRpcErrorCode.RequestCancelled) return error;
+  if (
+    isInstance(error, McpError) &&
+    readField(error, 'code') === JsonRpcErrorCode.RequestCancelled
+  ) {
+    return error;
+  }
   return requestCancelled(getErrorMessage(error), undefined, { cause: error });
 }
 
@@ -108,7 +146,7 @@ export class ErrorHandler {
    * which outranks every step below.
    *
    * Resolution order:
-   * 1. `McpError` instances — returns `error.code` directly.
+   * 1. `McpError` instances — returns `error.code` directly (`InternalError` when the code cannot be read).
    * 2. SDK `ConnectionClosed` rejections — mapped to `RequestCancelled`, ahead of the pattern ladder.
    * 3. Engine resource-limit `RangeError`s — a whole message in `ENGINE_RESOURCE_LIMIT_MESSAGES`
    *    (stack overflow, maximum string size) maps to `InternalError` (#482).
@@ -134,8 +172,14 @@ export class ErrorHandler {
    * ```
    */
   public static determineErrorCode(error: unknown): JsonRpcErrorCode {
-    if (error instanceof McpError) {
-      return error.code;
+    /**
+     * Every read of the thrown value is guarded (#697): a value `instanceof`
+     * cannot inspect (a revoked `Proxy`) is classified as a non-Error, and a
+     * field whose read throws as `'[Unreadable]'`.
+     */
+    if (isInstance(error, McpError)) {
+      const code = readField(error, 'code');
+      return code === UNREADABLE ? JsonRpcErrorCode.InternalError : (code as JsonRpcErrorCode);
     }
 
     /**
@@ -145,7 +189,7 @@ export class ErrorHandler {
      * one wording, and the one that says "aborted" would otherwise be caught by
      * the generic abort pattern below and read as a `Timeout`.
      */
-    if (error instanceof SdkError && error.code === SdkErrorCode.ConnectionClosed) {
+    if (isInstance(error, SdkError) && readField(error, 'code') === SdkErrorCode.ConnectionClosed) {
       return JsonRpcErrorCode.RequestCancelled;
     }
 
@@ -182,12 +226,7 @@ export class ErrorHandler {
       }
     }
     // Special-case common platform errors
-    if (
-      typeof error === 'object' &&
-      error !== null &&
-      'name' in error &&
-      (error as { name?: string }).name === 'AbortError'
-    ) {
+    if (typeof error === 'object' && error !== null && readField(error, 'name') === 'AbortError') {
       return JsonRpcErrorCode.Timeout;
     }
     return JsonRpcErrorCode.InternalError;
@@ -199,15 +238,24 @@ export class ErrorHandler {
    * Steps performed:
    * 1. Records the exception on the active OTel span and sets span status to ERROR.
    * 2. Sanitizes `options.input` via `sanitizeInputForLogging` before including in logs.
-   * 3. Extracts and consolidates error data, original stack, and the full cause chain.
+   * 3. Extracts and consolidates error data and the full cause chain.
    * 4. Rebuilds the error as a new `McpError` carrying the consolidated data — the thrown
-   *    error's own `data`, `originalErrorName`, `originalMessage`, and `rootCause` — preserving
-   *    the classified code (or delegates to `options.errorMapper`). That `data` is client-visible
-   *    once the error is thrown toward a handler, so it carries no stack and no `context`:
-   *    `originalStack`, `causeChain`, and the context ride the log record only.
+   *    error's own `data`, `originalErrorName`, and `originalMessage` — preserving the classified
+   *    code (or delegates to `options.errorMapper`). That `data` is client-visible once the error
+   *    is thrown toward a handler, so it carries nothing derived from a cause, no stack, and no
+   *    `context`: `rootCause`, `causeChain`, and the context ride the log record only. The
+   *    rebuilt error takes the thrown error's stack, so it starts at the throw site.
    * 5. Logs the result via the global logger with full structured context — at `error` level,
-   *    or at `info` without a stack for `RequestCancelled`, which is a routine caller disconnect.
-   *    `includeStack: false` logs no stack anywhere in the record (see `ErrorHandlerOptions`).
+   *    with the throw site's stack as the record's `stack` (none for a thrown value without one,
+   *    and never a context's `extra.stack`), and each stack written once: a `causeChain` node
+   *    carrying the record's stack, or the same stack as the node before it, is written without
+   *    it. The handler's own fields lead the record, ahead of the context's `extra` and `input`,
+   *    and no caller key replaces one. A field of the thrown value whose read throws is written
+   *    as `'[Unreadable]'`, so the call never throws on what it reports.
+   *    A record is stack-free for `RequestCancelled`, which is a routine caller disconnect logged
+   *    at `info`, and under `includeStack: false`: no `stack`, no `errorData.originalStack`, no
+   *    `causeChain` node `stack` nor `originalStack` in a node's `data`, and every `Error` in the
+   *    record written without its `stack` (see `ErrorHandlerOptions`).
    * 6. Returns the processed error, or rethrows it if `options.rethrow` is `true`.
    *
    * @param error - The error instance or value that occurred.
@@ -233,15 +281,7 @@ export class ErrorHandler {
     // --- OpenTelemetry Integration ---
     // Skip ended/no-op spans — measure*Execution paths already record + end the span before re-throwing.
     const activeSpan = trace.getActiveSpan();
-    if (activeSpan?.isRecording()) {
-      if (error instanceof Error) {
-        activeSpan.recordException(error);
-      }
-      activeSpan.setStatus({
-        code: SpanStatusCode.ERROR,
-        message: error instanceof Error ? error.message : String(error),
-      });
-    }
+    if (activeSpan?.isRecording()) recordSpanFailure(activeSpan, error);
     // --- End OpenTelemetry Integration ---
 
     const {
@@ -257,9 +297,18 @@ export class ErrorHandler {
     } = options;
 
     const sanitizedInput = input !== undefined ? sanitizeInputForLogging(input) : undefined;
+    /**
+     * Every read of the thrown value is guarded: a `name`, `message`, `stack`,
+     * `cause`, or an `McpError`'s `code` whose read throws (a getter, a revoked
+     * `Proxy`), or a `data` that cannot be read or copied, is written as
+     * `'[Unreadable]'` or left out, and a value `instanceof` cannot inspect is
+     * handled as a non-Error, so reporting a failure never fails itself (#697).
+     */
     const originalErrorName = getErrorName(error);
     const originalErrorMessage = getErrorMessage(error);
-    const originalStack = error instanceof Error ? error.stack : undefined;
+    const thrownError = isInstance(error, Error) ? error : undefined;
+    const thrownMcpError = isInstance(error, McpError) ? error : undefined;
+    const originalStack = thrownError ? readField(thrownError, 'stack') : undefined;
 
     /**
      * Classified before the record is assembled, because the code decides more
@@ -267,16 +316,20 @@ export class ErrorHandler {
      * it is logged at `info` and carries no stack. Attaching one invites triage
      * to read a client hanging up as a fault in this server.
      */
-    const loggedErrorCode: JsonRpcErrorCode =
-      error instanceof McpError
-        ? error.code
-        : explicitErrorCode || ErrorHandler.determineErrorCode(error);
+    const loggedErrorCode: JsonRpcErrorCode = thrownMcpError
+      ? ErrorHandler.determineErrorCode(thrownMcpError)
+      : explicitErrorCode || ErrorHandler.determineErrorCode(error);
     const isCancellation = loggedErrorCode === JsonRpcErrorCode.RequestCancelled;
+    /**
+     * A stack-free record has none of the stack fields `ErrorHandlerOptions.includeStack`
+     * lists, and writes every `Error` in it without its `stack` — whether this
+     * handler, the thrown `McpError`'s own `data`, the context, or `input`
+     * supplied it (#650). Any other key named `stack` is a caller's data and is
+     * written as given. The returned error is the same either way.
+     */
+    const stackFree = !includeStack || isCancellation;
 
-    const errorDataSeed =
-      error instanceof McpError && typeof error.data === 'object' && error.data !== null
-        ? { ...error.data }
-        : {};
+    const errorDataSeed: Record<string, unknown> = readErrorData(error) ?? {};
 
     /**
      * `consolidatedData` becomes `McpError.data`, which the tool handler puts on
@@ -293,41 +346,62 @@ export class ErrorHandler {
     };
 
     /**
-     * Stack-bearing diagnostics go to the log record only, never into the
+     * What the cause chain says goes to the log record only, never into the
      * returned error's `data`: `tryCatch` throws that error, and tools and
-     * resources forward an `McpError`'s `data` to the client verbatim (#519).
-     * A cancellation carries neither — its every node would hold a stack and
-     * invite triage to read a caller hanging up as a fault in this server.
-     * `includeStack: false` keeps the chain but logs no stack on any of its
-     * nodes; the record's `originalStack` is dropped where it is logged (#586).
+     * resources forward an `McpError`'s `data` to the client verbatim (#519),
+     * so a message redacted at the throw site would reach the client raw
+     * through its cause (#644). A cancellation carries no chain — its every
+     * node would hold a stack and invite triage to read a caller hanging up
+     * as a fault in this server. `includeStack: false` keeps the chain, and
+     * the stack-free record logs none of its nodes' stacks (#586).
      */
     const diagnostics: Record<string, unknown> = {};
-    if (
-      originalStack &&
-      !isCancellation &&
-      !(error instanceof McpError && error.data?.originalStack)
-    ) {
-      diagnostics.originalStack = originalStack;
-    }
 
-    const cause = error instanceof Error ? error : undefined;
-
-    if (!isCancellation && error instanceof Error && error.cause) {
-      const causeChain = extractErrorCauseChain(error);
+    if (!isCancellation && thrownError && readField(thrownError, 'cause')) {
+      const causeChain = extractErrorCauseChain(thrownError);
       const rootCause = causeChain.at(-1);
       if (rootCause) {
-        consolidatedData.rootCause = { name: rootCause.name, message: rootCause.message };
-        diagnostics.causeChain = includeStack
-          ? causeChain
-          : causeChain.map(({ stack: _stack, ...node }) =>
-              node.data ? { ...node, data: withoutKey(node.data, 'originalStack') } : node,
-            );
+        diagnostics.rootCause = { name: rootCause.name, message: rootCause.message };
+        /**
+         * A node whose stack is the record's own, or the node's before it, is
+         * written without it — the rule the log walk applies to an `Error`'s
+         * `cause` — so the record carries each stack once (#694): the thrown
+         * error itself, and every error a nested `tryCatch` rebuilt from
+         * another. A stack that could not be read is no stack to repeat.
+         */
+        diagnostics.causeChain = causeChain.map((node, i) => {
+          const { stack } = node;
+          const repeated = stack === originalStack || stack === causeChain[i - 1]?.stack;
+          if (stack === undefined || stack === UNREADABLE || !repeated) return node;
+          const { stack: _stack, ...rest } = node;
+          return rest;
+        });
       }
     }
 
     const finalError: Error = errorMapper
       ? errorMapper(error)
-      : new McpError(loggedErrorCode, originalErrorMessage, consolidatedData, { cause });
+      : new McpError(loggedErrorCode, originalErrorMessage, consolidatedData, {
+          cause: thrownError,
+        });
+
+    /**
+     * The rebuilt error takes the throw site's stack, so the error `tryCatch`
+     * rethrows starts where the failure happened rather than here (#694). It is
+     * copied verbatim: the header line names the class that was thrown, and
+     * `finalErrorType` on the record names the rebuilt one. A mapper's result
+     * keeps the stack its mapper gave it, and takes the throw site's only when
+     * it has none. A throw-site stack that could not be read is not copied.
+     */
+    if (
+      typeof originalStack === 'string' &&
+      originalStack &&
+      originalStack !== UNREADABLE &&
+      finalError !== error &&
+      (!errorMapper || !finalError.stack)
+    ) {
+      finalError.stack = originalStack;
+    }
 
     /**
      * Record error classification metric. The category is the same
@@ -343,59 +417,71 @@ export class ErrorHandler {
      */
     getErrorMetrics().errorClassifiedCounter.add(1, {
       [ATTR_MCP_ERROR_CLASSIFIED_CODE]: String(loggedErrorCode),
-      [ATTR_MCP_ERROR_CATEGORY]: getErrorCategory(
-        loggedErrorCode,
-        error instanceof McpError ? error.data : undefined,
-      ),
+      [ATTR_MCP_ERROR_CATEGORY]: getErrorCategory(loggedErrorCode, errorDataSeed),
       operation,
       ...(severity !== undefined && { [ATTR_MCP_ERROR_SEVERITY]: severity }),
     });
 
-    if (
-      finalError !== error &&
-      error instanceof Error &&
-      finalError instanceof Error &&
-      !finalError.stack &&
-      error.stack
-    ) {
-      finalError.stack = error.stack;
-    }
+    /**
+     * The context is read once, through these copies: a field that throws when
+     * read — an own getter, a `Proxy` trap — would otherwise fail the call that
+     * reports a failure. A copy that throws is written as `'[Unreadable]'` in
+     * the record, under `context` or `extra`.
+     */
+    const contextFields = copyFields(context);
+    const { extra: contextExtra, ...contextCanonical }: ErrorContext = contextFields ?? {};
+    const extraFields = copyFields(contextExtra);
 
     const logRequestId =
-      typeof context.requestId === 'string' && context.requestId
-        ? context.requestId
+      typeof contextCanonical.requestId === 'string' && contextCanonical.requestId
+        ? contextCanonical.requestId
         : generateUUID();
 
     const logTimestamp =
-      typeof context.timestamp === 'string' && context.timestamp
-        ? context.timestamp
+      typeof contextCanonical.timestamp === 'string' && contextCanonical.timestamp
+        ? contextCanonical.timestamp
         : new Date().toISOString();
 
-    const stack = finalError instanceof Error ? finalError.stack : originalStack;
-    const errorData = {
-      ...(finalError instanceof McpError && finalError.data ? finalError.data : consolidatedData),
-      ...diagnostics,
+    /**
+     * Read and copied as the thrown value's is: an `errorMapper` may return the
+     * very error it was given. A `data` that cannot be read or copied gives way
+     * to `consolidatedData`.
+     */
+    const errorData = { ...(readErrorData(finalError) ?? consolidatedData), ...diagnostics };
+    const handlerFields = {
+      critical,
+      errorCode: loggedErrorCode,
+      originalErrorType: originalErrorName,
+      finalErrorType: getErrorName(finalError),
+      errorData,
+      // The record's one stack: the throw site's, absent for a thrown value with none (#694).
+      ...(originalStack ? { stack: originalStack } : {}),
     };
-    const { extra: contextExtra = {}, ...contextCanonical } = context;
+    // A context's `extra.stack` never stands in for the throw site's (#694).
+    const { stack: _contextStack, ...callerExtra } = extraFields ?? { extra: UNREADABLE };
+    /**
+     * The handler's own fields lead the record, so the log walk, which works
+     * in key order, reaches `errorData` before caller-sized `extra` and `input`
+     * can spend its bound on what it writes (#649); spread again last, so a
+     * caller's key never replaces one.
+     */
+    const recordExtra: Record<string, unknown> = {
+      ...handlerFields,
+      ...callerExtra,
+      ...(contextFields === undefined && { context: UNREADABLE }),
+      input: sanitizedInput,
+      ...handlerFields,
+    };
     const logContext: RequestContext = {
       operation,
       ...contextCanonical,
       requestId: logRequestId,
       timestamp: logTimestamp,
-      extra: {
-        // `extra.stack` is the record's stack field, whoever set it.
-        ...(includeStack ? contextExtra : withoutKey(contextExtra, 'stack')),
-        input: sanitizedInput,
-        critical,
-        errorCode: loggedErrorCode,
-        originalErrorType: originalErrorName,
-        finalErrorType: getErrorName(finalError),
-        errorData: includeStack ? errorData : withoutKey(errorData, 'originalStack'),
-        ...(includeStack && stack && !isCancellation ? { stack } : {}),
-      },
+      extra: stackFree ? toStackFreeExtra(recordExtra) : recordExtra,
     };
 
-    const logDescription = finalError.message || originalErrorMessage;
+    const finalMessage = readField(finalError, 'message');
+    const logDescription = finalMessage ? errorText(finalMessage) : originalErrorMessage;
     if (isCancellation) {
       logger.info(`Cancelled ${operation}: ${logDescription}`, logContext);
     } else if (severity !== undefined) {
@@ -428,14 +514,17 @@ export class ErrorHandler {
     message: string;
     data?: Record<string, unknown>;
   } {
-    if (error instanceof McpError) {
-      return { code: error.code, message: error.message };
+    if (isInstance(error, McpError)) {
+      return {
+        code: ErrorHandler.determineErrorCode(error),
+        message: errorText(readField(error, 'message')),
+      };
     }
-    if (error instanceof ZodError) {
+    if (isInstance(error, ZodError)) {
       return {
         code: JsonRpcErrorCode.ValidationError,
         message: getErrorMessage(error),
-        data: { issues: error.issues },
+        data: { issues: readField(error, 'issues') },
       };
     }
     return {
@@ -488,15 +577,21 @@ export class ErrorHandler {
     if (defaultFactory) {
       return defaultFactory(error);
     }
-    return error instanceof Error ? error : new Error(String(error));
+    return asError(error);
   }
 
   /**
    * Formats an error into a consistent `{ code, message, data }` structure for API responses or structured logging.
    *
-   * - `McpError` → `{ code: error.code, message: error.message, data: error.data ?? {} }`
+   * - `McpError` → `{ code: error.code, message: error.message, data: <a copy of error.data> ?? {} }`
    * - `Error` → `{ code: determineErrorCode(error), message: error.message, data: { errorType: error.name } }`
    * - Other values → `{ code: JsonRpcErrorCode.UnknownError, message: getErrorMessage(value), data: { errorType: getErrorName(value) } }`
+   *
+   * Never throws on the value it formats: a `message` or `name` whose read throws is
+   * `'[Unreadable]'`, one that is not a string is written as text (`String` for a
+   * primitive, `'[Unreadable]'` for an object), a `data` that cannot be read or copied
+   * (a revoked `Proxy`) is `{}`, and a value `instanceof` cannot inspect (a revoked
+   * `Proxy`) is formatted as a non-Error.
    *
    * @param error - The error instance or value to format.
    * @returns A plain object with `code` (numeric `JsonRpcErrorCode`), `message` (string), and `data` (object).
@@ -511,19 +606,19 @@ export class ErrorHandler {
    * ```
    */
   public static formatError(error: unknown): Record<string, unknown> {
-    if (error instanceof McpError) {
+    if (isInstance(error, McpError)) {
       return {
-        code: error.code,
-        message: error.message,
-        data: typeof error.data === 'object' && error.data !== null ? error.data : {},
+        code: ErrorHandler.determineErrorCode(error),
+        message: errorText(readField(error, 'message')),
+        data: readErrorData(error) ?? {},
       };
     }
 
-    if (error instanceof Error) {
+    if (isInstance(error, Error)) {
       return {
         code: ErrorHandler.determineErrorCode(error),
-        message: error.message,
-        data: { errorType: error.name || 'Error' },
+        message: errorText(readField(error, 'message')),
+        data: { errorType: getErrorName(error) },
       };
     }
 
@@ -543,9 +638,9 @@ export class ErrorHandler {
    * error-handling boilerplate.
    *
    * The thrown error's `data` reaches the client when a tool or resource handler lets it propagate,
-   * so it carries the caught error's own `data`, `originalErrorName`, `originalMessage`, and
-   * `rootCause`, but no stack and nothing from `options.context`; the throw-site stack, the cause
-   * chain, and the context are logged (#548).
+   * so it carries the caught error's own `data`, `originalErrorName`, and `originalMessage`, but
+   * nothing derived from a cause, no stack, and nothing from `options.context`; the throw-site
+   * stack, `rootCause`, the cause chain, and the context are logged (#548, #644).
    *
    * @template T The expected return type of `fn`.
    * @param fn - The function to execute. May be synchronous or return a `Promise`.

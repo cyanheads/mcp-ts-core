@@ -6,13 +6,14 @@
  */
 import fc from 'fast-check';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-
+import { JsonRpcErrorCode, McpError } from '@/types-global/errors.js';
 import {
   Logger,
   type McpLogLevel,
   sanitizeLogBindings,
   setOtelLogSink,
 } from '@/utils/internal/logger.js';
+import { toLogValue, toMirrorValue } from '@/utils/internal/logValue.js';
 import { TELEMETRY_LOG_MESSAGES } from '@/utils/internal/telemetryMessages.js';
 
 // Mock pino to avoid file I/O in unit tests
@@ -87,6 +88,18 @@ async function getMockPinoLogger(): Promise<{ flush: ReturnType<typeof vi.fn> }>
     flush: ReturnType<typeof vi.fn>;
   };
   return pino();
+}
+
+/**
+ * The string-keyed fields of each record a mock pino method received, with its
+ * message. The logger also hands pino the record's context under a symbol only
+ * it holds, for the walk to read; that symbol is never written.
+ */
+function pinoRecords(method: ReturnType<typeof vi.fn>): [Record<string, unknown>, unknown][] {
+  return method.mock.calls.map(([record, msg]) => [
+    Object.fromEntries(Object.entries(record as object)),
+    msg,
+  ]);
 }
 
 describe('Logger', () => {
@@ -467,7 +480,7 @@ describe('Logger', () => {
       logger[method](msg, err, ctx);
       logger[method](msg, ctx);
 
-      expect(mockLogger[pinoLevel].mock.calls).toEqual([
+      expect(pinoRecords(mockLogger[pinoLevel])).toEqual([
         [{ ...ctx, err }, msg],
         [ctx, msg],
       ]);
@@ -481,7 +494,7 @@ describe('Logger', () => {
 
       logger.error('Something failed', err);
 
-      expect(mockLogger.error).toHaveBeenCalledWith({ err }, 'Something failed');
+      expect(pinoRecords(mockLogger.error)).toEqual([[{ err }, 'Something failed']]);
     });
 
     it('fatal() should delegate to emerg()', async () => {
@@ -534,10 +547,10 @@ describe('Logger', () => {
 
       logger.info('canonical: collision', { ...canonical, extra: colliding } as any);
 
-      expect(mockLogger.info).toHaveBeenLastCalledWith(
+      expect(pinoRecords(mockLogger.info).at(-1)).toEqual([
         { ...canonical, itemId: 'item-1' },
         'canonical: collision',
-      );
+      ]);
     });
 
     it('keeps every canonical value alongside an Error on the error path', async () => {
@@ -547,10 +560,10 @@ describe('Logger', () => {
 
       logger.error('canonical: failure', err, { ...canonical, extra: colliding } as any);
 
-      expect(mockLogger.error).toHaveBeenLastCalledWith(
+      expect(pinoRecords(mockLogger.error).at(-1)).toEqual([
         { ...canonical, itemId: 'item-1', err },
         'canonical: failure',
-      );
+      ]);
     });
 
     it('keeps every canonical value in the exported OTel record', async () => {
@@ -577,10 +590,10 @@ describe('Logger', () => {
 
       // `requestId` is always set, so the context's wins; `traceId` was never
       // set, so the caller's value replaces nothing and stays.
-      expect(mockLogger.info).toHaveBeenLastCalledWith(
+      expect(pinoRecords(mockLogger.info).at(-1)).toEqual([
         { ...bare, traceId: 'upstream-trace' },
         'canonical: unset',
-      );
+      ]);
     });
   });
 
@@ -601,6 +614,18 @@ describe('Logger', () => {
         'Interaction logger not available.',
         expect.objectContaining({ requestId: 'int-1' }),
       );
+      spy.mockRestore();
+    });
+
+    it('warns without throwing when the interaction data cannot be read', async () => {
+      await logger.initialize('info');
+      const spy = vi.spyOn(logger, 'warning');
+      const { proxy: revoked, revoke } = Proxy.revocable({}, {});
+      revoke();
+
+      expect(() => logger.logInteraction('test', revoked as any)).not.toThrow();
+
+      expect(spy).toHaveBeenCalledWith('Interaction logger not available.', undefined);
       spy.mockRestore();
     });
   });
@@ -750,7 +775,7 @@ describe('Logger', () => {
       ]);
     });
 
-    it('redacts sensitive fields at every depth, as the pino output does', async () => {
+    it('redacts sensitive fields at every depth it keeps, as the process log does', async () => {
       await logger.initialize('info');
       setOtelLogSink(sink);
 
@@ -758,14 +783,24 @@ describe('Logger', () => {
         'otel: secrets',
         context({
           token: 'top-secret',
-          nested: { apiKey: 'sk-1', deeper: { password: 'hunter2', kept: 'visible' } },
+          nested: {
+            apiKey: 'sk-1',
+            deeper: { password: 'hunter2', kept: 'visible', deepest: { auth: { secret: 's-5' } } },
+          },
           list: [{ secret: 's' }],
         }),
       );
 
       expect(emitted()[0]?.attributes).toMatchObject({
         token: '[REDACTED]',
-        nested: { apiKey: '[REDACTED]', deeper: { password: '[REDACTED]', kept: 'visible' } },
+        nested: {
+          apiKey: '[REDACTED]',
+          deeper: {
+            password: '[REDACTED]',
+            kept: 'visible',
+            deepest: { auth: { secret: '[REDACTED]' } },
+          },
+        },
         list: [{ secret: '[REDACTED]' }],
       });
     });
@@ -844,17 +879,26 @@ describe('sanitizeLogBindings', () => {
     });
   });
 
-  it('strips AbortSignal without invoking its aborted getter', () => {
-    const controller = new AbortController();
-    const signal = controller.signal;
-
-    // Trip-wire: replace the aborted getter on a tracking proxy-like wrapper
-    // to prove the sanitizer never touches it.
-    let accessed = false;
-    const trackedSignal = new Proxy(signal, {
-      get(target, prop, receiver) {
-        if (prop === 'aborted') accessed = true;
-        return Reflect.get(target, prop, receiver);
+  it('strips AbortSignal without reading anything off it', () => {
+    // Trip-wire on every trap that reads a property or lists keys — the `aborted` getter, a
+    // `toJSON` lookup, a copy of its fields. The prototype check the walk does make is not one.
+    const reads: PropertyKey[] = [];
+    const trackedSignal = new Proxy(new AbortController().signal, {
+      get(target, prop) {
+        reads.push(prop);
+        return Reflect.get(target, prop);
+      },
+      getOwnPropertyDescriptor(target, prop) {
+        reads.push(prop);
+        return Reflect.getOwnPropertyDescriptor(target, prop);
+      },
+      has(target, prop) {
+        reads.push(prop);
+        return Reflect.has(target, prop);
+      },
+      ownKeys(target) {
+        reads.push('[[OwnPropertyKeys]]');
+        return Reflect.ownKeys(target);
       },
     });
 
@@ -864,7 +908,7 @@ describe('sanitizeLogBindings', () => {
     });
 
     expect(out).toEqual({ requestId: 'req-1' });
-    expect(accessed).toBe(false);
+    expect(reads).toEqual([]);
   });
 
   it('strips functions and method handles from framework Context', () => {
@@ -925,24 +969,91 @@ describe('sanitizeLogBindings', () => {
     expect(out).toEqual({ requestId: 'req-1' });
   });
 
-  it('preserves Error instances for pino stdSerializers', () => {
-    const err = new Error('boom');
-    const out = sanitizeLogBindings({ requestId: 'req-1', err });
+  it('writes an Error as its type, message, and stack, never the instance', () => {
+    const err = Object.assign(new TypeError('boom'), { path: 'https://api.example.test/x' });
+    const out = sanitizeLogBindings({ requestId: 'req-1', err, nested: { cause: err } });
 
-    expect(out.requestId).toBe('req-1');
-    expect(out.err).toBe(err);
+    const written = { type: 'TypeError', message: 'boom', stack: err.stack };
+    expect(out).toEqual({ requestId: 'req-1', err: written, nested: { cause: written } });
   });
 
-  it('survives circular references without stack overflow', () => {
+  it('writes every Error without its stack under includeStack: false, at any depth', () => {
+    const upstream = new Error('upstream down', { cause: new TypeError('socket hang up') });
+    const failure = new McpError(JsonRpcErrorCode.RequestCancelled, 'cancelled', { upstream });
+    const bindings = { errorData: { causeChain: [{ data: { failure } }] }, err: failure };
+
+    const stackFree = toLogValue(bindings, { includeStack: false });
+
+    expect(JSON.stringify(stackFree)).not.toContain('"stack"');
+    expect(stackFree).toEqual({
+      errorData: {
+        causeChain: [
+          {
+            data: {
+              failure: {
+                type: 'McpError',
+                message: 'cancelled',
+                code: JsonRpcErrorCode.RequestCancelled,
+                data: {
+                  upstream: {
+                    type: 'Error',
+                    message: 'upstream down',
+                    cause: { type: 'TypeError', message: 'socket hang up' },
+                  },
+                },
+              },
+            },
+          },
+        ],
+      },
+      err: expect.objectContaining({ type: 'McpError', message: 'cancelled' }),
+    });
+    // The default walk, the one every record goes through, keeps them.
+    expect(toLogValue(bindings)).toEqual(sanitizeLogBindings(bindings));
+    expect(JSON.stringify(sanitizeLogBindings(bindings)).match(/"stack"/g)).toHaveLength(6);
+  });
+
+  it('writes an own __proto__ key as a field, never as the copy’s prototype', () => {
+    const parsed = JSON.parse('{"__proto__":{"leaked":"yes","token":"t"},"a":2}') as object;
+
+    const written = toLogValue(parsed) as Record<string, unknown>;
+
+    expect(Object.getPrototypeOf(written)).toBe(Object.prototype);
+    expect(Object.hasOwn(written, '__proto__')).toBe(true);
+    expect(JSON.stringify(written)).toBe(
+      '{"__proto__":{"leaked":"yes","token":"[REDACTED]"},"a":2}',
+    );
+  });
+
+  it('writes an invalid Date as null instead of throwing out of the walk', () => {
+    expect(
+      sanitizeLogBindings({ at: new Date('not a date'), nested: { at: new Date(Number.NaN) } }),
+    ).toEqual({ at: null, nested: { at: null } });
+  });
+
+  it('writes a reference back to an enclosing object as [Circular]', () => {
     const node: Record<string, unknown> = { requestId: 'req-1', value: 42 };
     node.self = node;
     node.nested = { parent: node };
 
-    const out = sanitizeLogBindings(node);
-    expect(out.requestId).toBe('req-1');
-    expect(out.value).toBe(42);
-    // self/nested get truncated at the depth cap but must not hang or throw.
-    expect(JSON.stringify(out)).toBeDefined();
+    expect(sanitizeLogBindings(node)).toEqual({
+      requestId: 'req-1',
+      value: 42,
+      self: '[Circular]',
+      nested: { parent: '[Circular]' },
+    });
+  });
+
+  it('writes a reference back to the mirror’s data root as [Circular], directly and through toJSON', () => {
+    const data: Record<string, unknown> = { value: 42 };
+    data.self = data;
+    data.nested = { parent: data, viaJson: { toJSON: () => data } };
+
+    expect(toMirrorValue(data)).toEqual({
+      value: 42,
+      self: '[Circular]',
+      nested: { parent: '[Circular]', viaJson: '[Circular]' },
+    });
   });
 
   it('fuzz: never throws and produces JSON-serializable output for arbitrary bindings', () => {
@@ -988,24 +1099,631 @@ describe('sanitizeLogBindings', () => {
     );
   });
 
-  it('stops recursion at the depth cap', () => {
-    // Build an object 6 levels deep; cap (4) drops values beyond the limit.
-    let node: Record<string, unknown> = { v: 'leaf' };
-    for (let i = 0; i < 5; i++) {
-      node = { child: node };
+  it('keeps data through depth 15 and writes a value past the bound as [MaxDepth]', () => {
+    /** `levels` nested `child` objects around a leaf, the outermost being the bindings. */
+    const nest = (levels: number): Record<string, unknown> => {
+      let node: Record<string, unknown> = { v: 'leaf' };
+      for (let i = 0; i < levels; i++) node = { child: node };
+      return node;
+    };
+    /** The `child` objects walked before reaching a non-object, and that value. */
+    const descend = (value: unknown): [number, unknown] => {
+      let cursor = value;
+      let levels = 0;
+      while (cursor !== null && typeof cursor === 'object' && 'child' in cursor) {
+        cursor = (cursor as { child: unknown }).child;
+        levels++;
+      }
+      return [levels, cursor];
+    };
+
+    // The bindings sit at depth 0, so the leaf object of `nest(15)` sits at 15.
+    expect(descend(sanitizeLogBindings(nest(15)))).toEqual([15, { v: 'leaf' }]);
+    expect(descend(sanitizeLogBindings(nest(16)))).toEqual([16, '[MaxDepth]']);
+    expect(descend((sanitizeLogBindings({ list: [[[nest(13)]]] }) as any).list[0][0][0])).toEqual([
+      12,
+      '[MaxDepth]',
+    ]);
+  });
+
+  it('never lists the keys of an object past the depth bound', () => {
+    let listed = 0;
+    /** An object whose key listing throws, counting each attempt. */
+    const unlistable = new Proxy(
+      {},
+      {
+        ownKeys() {
+          listed++;
+          throw new Error('ownKeys trap');
+        },
+      },
+    );
+    let data: Record<string, unknown> = { child: unlistable };
+    for (let level = 1; level < 16; level++) data = { child: data };
+
+    const written = sanitizeLogBindings(data);
+
+    // The Proxy sits at depth 16: written as [MaxDepth], not [Unreadable], and never asked for its keys.
+    let cursor: unknown = written;
+    for (let level = 0; level < 16; level++) cursor = (cursor as { child: unknown }).child;
+    expect(cursor).toBe('[MaxDepth]');
+    expect(listed).toBe(0);
+    // One level up, the same object is listed, and its throwing trap is [Unreadable].
+    expect(sanitizeLogBindings({ child: unlistable })).toEqual({ child: '[Unreadable]' });
+    expect(listed).toBe(1);
+  });
+
+  describe('the walk’s bounds', () => {
+    /** `shared` five levels below the bindings, in an array holding it `copies` times. */
+    const repeated = (shared: unknown, copies: number) => ({
+      a: { b: { c: { d: { rows: Array.from({ length: copies }, () => shared) } } } },
+      after: 'kept',
+    });
+    /** `fn`'s result and the thread CPU milliseconds it took. */
+    const timed = <T>(fn: () => T): [T, number] => {
+      const start = process.threadCpuUsage();
+      const result = fn();
+      const { user, system } = process.threadCpuUsage(start);
+      return [result, (user + system) / 1000];
+    };
+    /** How many times `marker` is written as a value in `json`. */
+    const count = (json: string, marker: string) => json.split(`"${marker}"`).length - 1;
+    /** A plain object whose three getters each build a fresh object of the same kind on every read. */
+    const builtByGetters = (): object => {
+      const node = {};
+      for (const key of ['a', 'b', 'c']) {
+        Object.defineProperty(node, key, { enumerable: true, get: builtByGetters });
+      }
+      return node;
+    };
+    /** A Proxy whose every field read builds a fresh Proxy of the same kind. */
+    const builtByProxy = (): object =>
+      new Proxy(
+        {},
+        {
+          ownKeys: () => ['a', 'b', 'c'],
+          getOwnPropertyDescriptor: () => ({
+            configurable: true,
+            enumerable: true,
+            value: undefined,
+            writable: true,
+          }),
+          get: (_target, key) =>
+            ['a', 'b', 'c'].includes(key as string) ? builtByProxy() : undefined,
+        },
+      );
+    /** A value whose `toJSON` builds three fresh instances of itself on every call. */
+    class BuiltByToJSON {
+      toJSON() {
+        return { a: new BuiltByToJSON(), b: new BuiltByToJSON(), c: new BuiltByToJSON() };
+      }
     }
-    // top-level walks at depth=1, so we get `child` nested up to the cap
-    // then drops the deepest `v`.
-    const result = sanitizeLogBindings(node) as Record<string, any>;
-    // Walk down until we find an undefined/missing leaf — confirms truncation.
-    let cursor: any = result;
-    let depth = 0;
-    while (cursor && typeof cursor === 'object' && 'child' in cursor) {
-      cursor = cursor.child;
-      depth++;
-    }
-    expect(depth).toBeGreaterThan(0);
-    // The leaf `{ v: 'leaf' }` is at depth 6, past the cap — so we never reach it.
-    expect(cursor?.v).toBeUndefined();
+
+    it('writes 100,000 distinct objects in full', () => {
+      const items = Array.from({ length: 100_000 }, (_, i) => ({ i }));
+
+      const out = sanitizeLogBindings({ items, after: 'kept' }) as { items: unknown[] };
+
+      expect(out.items).toHaveLength(100_000);
+      expect(out.items.at(-1)).toEqual({ i: 99_999 });
+      expect(JSON.stringify(out)).not.toContain('[Truncated]');
+    });
+
+    it('writes a large distinct string whole', () => {
+      const text = 'x'.repeat(4_000_000);
+
+      expect((sanitizeLogBindings({ nested: { text } }) as any).nested.text).toBe(text);
+    });
+
+    it('writes small values that 20,000 rows share in full on every row', () => {
+      const tags: string[] = [];
+      const meta = { currency: 'USD', unit: 'm' };
+      const rows = Array.from({ length: 20_000 }, (_, id) => ({ id, tags, meta }));
+
+      const json = JSON.stringify(sanitizeLogBindings({ rows }));
+
+      expect(count(json, '[Truncated]')).toBe(0);
+      expect(JSON.parse(json).rows.at(-1)).toEqual({ id: 19_999, tags: [], meta });
+    });
+
+    it('charges each repeat about the characters it writes, up to a million, then writes [Truncated]', () => {
+      // A repeat writes {"k":"x…x"}: two braces, the name with its quotes, colon, and comma,
+      // and the string with its quotes — 109 characters.
+      const shared = { k: 'x'.repeat(100) };
+
+      const out = sanitizeLogBindings({
+        items: Array.from({ length: 12_000 }, () => shared),
+        after: 'kept',
+      }) as { after: string; items: unknown[] };
+
+      // The first write is the object's own; 9,174 repeats of 109 characters fit in 1,000,000.
+      const whole = out.items.filter((item) => JSON.stringify(item) === JSON.stringify(shared));
+      expect(whole).toHaveLength(9_175);
+      expect(out.items[9_175]).toEqual({ k: '[Truncated]' });
+      expect(out.items.at(-1)).toBe('[Truncated]');
+      expect(out.after).toBe('kept');
+    });
+
+    it('writes a later small repeat that fits after a large one was cut', () => {
+      const big = { s: 'x'.repeat(600_000) };
+      const meta = { a: 1 };
+
+      const out = sanitizeLogBindings({ big: [big, big, big], later: { x: meta, y: meta } }) as any;
+
+      expect(out.big).toEqual([big, big, { s: '[Truncated]' }]);
+      expect(out.later).toEqual({ x: meta, y: meta });
+    });
+
+    it.each([
+      ['the process log', (data: Record<string, unknown>) => sanitizeLogBindings(data)],
+      ['the mirror', (data: Record<string, unknown>) => toMirrorValue(data)],
+    ])('bounds a long string repeated across distinct objects, on %s', (_sink, walk) => {
+      const text = 'x'.repeat(100_000);
+      const rows = Array.from({ length: 2_000 }, () => ({ s: text }));
+
+      const out = walk({ a: { b: { c: { d: { rows } } } }, after: 'kept' }) as any;
+
+      // One whole copy, then about a million characters of repeats; unbounded, 200 MB.
+      expect(JSON.stringify(out).length).toBeLessThan(1_500_000);
+      const written = out.a.b.c.d.rows as unknown[];
+      expect(written).toHaveLength(2_000);
+      expect(written[0]).toEqual({ s: text });
+      expect(written.at(-1)).toEqual({ s: '[Truncated]' });
+      expect(out.after).toBe('kept');
+    });
+
+    /**
+     * `count` distinct texts of `length` characters: one long run with a six-digit tag at `at`,
+     * each built by concatenation as a fresh, unflattened string, as data usually reaches a log.
+     */
+    const distinctLongTexts = (count: number, at: number, length = 20_000) => {
+      const run = 'a'.repeat(length - 6);
+      return Array.from(
+        { length: count },
+        (_, i) => run.slice(0, at) + String(i).padStart(6, '0') + run.slice(at),
+      );
+    };
+
+    it.each([
+      ['in their last characters', 16_394],
+      // Outside every window the walk samples a long text by: its head, middle, and tail.
+      ['3,000 characters in', 3_000],
+    ])(
+      'remembers distinct same-length long texts differing %s in time linear in their number',
+      (_where, at) => {
+        /** The fastest of three walks over `count` fresh texts, in thread CPU milliseconds. */
+        const fastest = (count: number) => {
+          let best = Number.POSITIVE_INFINITY;
+          for (let run = 0; run < 3; run++) {
+            // 16,400 characters, just past the length V8 hashes a string by alone; 1,000 of them
+            // stay within the ceiling on characters written.
+            const list = distinctLongTexts(count, at, 16_400);
+            const [out, ms] = timed(() => sanitizeLogBindings({ list }) as any);
+            // Compared after timing: comparing flattens each string, which hides the quadratic case.
+            expect(out.list).toEqual(list);
+            best = Math.min(best, ms);
+          }
+          return best;
+        };
+
+        const small = fastest(250);
+        const large = fastest(1_000);
+
+        // Four times the texts: about four times the work when linear, sixteen when quadratic. A set
+        // of strings, which V8 hashes by length alone past 16,383 characters, took 275 ms at 1,000 on
+        // Node, sixteen times its 250; comparing texts sharing one sample one by one took 16 times too.
+        expect(large / Math.max(small, 1)).toBeLessThan(8);
+        expect(large).toBeLessThan(1_000);
+      },
+    );
+
+    it('remembers text by value from 1,024 characters, writing shorter text on every row', () => {
+      const short = 'y'.repeat(300);
+      const long = 'y'.repeat(2_048);
+
+      const shortJson = JSON.stringify(
+        sanitizeLogBindings({
+          rows: Array.from({ length: 5_000 }, (_, id) => ({ id, text: short })),
+        }),
+      );
+      const longOut = sanitizeLogBindings({
+        rows: Array.from({ length: 2_000 }, (_, id) => ({ id, text: long })),
+      }) as any;
+
+      // 1.6 MB of a 300-character string, past the million repeated characters a long one may take.
+      expect(shortJson.length).toBeGreaterThan(1_500_000);
+      expect(count(shortJson, '[Truncated]')).toBe(0);
+      // The 2,048-character one is repeated content from its second row: about a million characters
+      // of repeats, where writing it on every row is 4 MB.
+      const longJson = JSON.stringify(longOut);
+      expect(longJson.length).toBeLessThan(1_500_000);
+      expect(longOut.rows[0]).toEqual({ id: 0, text: long });
+      expect(longOut.rows.at(-1)).toEqual({ id: 1_999, text: '[Truncated]' });
+    });
+
+    it('never takes a distinct long text for one written before, however much of it matches', () => {
+      // The repeats spend the bound on repeated content, so any text taken for a repeat is cut.
+      const spent = { s: 'x'.repeat(600_000) };
+      const texts = distinctLongTexts(40, 3_000);
+
+      const out = sanitizeLogBindings({ spent: [spent, spent, spent], texts }) as any;
+
+      expect(out.spent.at(-1)).toEqual({ s: '[Truncated]' });
+      expect(out.texts).toEqual(texts);
+    });
+
+    it('bounds a long field name repeated across distinct objects, matching it once per write', () => {
+      const name = 'k'.repeat(100_000);
+      const rows = Array.from({ length: 2_000 }, () => ({ [name]: 1 }));
+
+      const [out, ms] = timed(() => sanitizeLogBindings({ rows, after: 'kept' }) as any);
+
+      expect(JSON.stringify(out).length).toBeLessThan(1_500_000);
+      expect(out.rows[0]).toEqual({ [name]: 1 });
+      expect(out.rows.at(-1)).toBe('[Truncated]');
+      expect(out.after).toBe('kept');
+      // Unbounded, the key matcher's 2,000 scans of the name took 300–550 ms.
+      expect(ms).toBeLessThan(250);
+    });
+
+    it('bounds a mirror whose toJSON returns one shared object from distinct objects', () => {
+      // Short fields only, so neither a shared child object nor a long string marks the repeat.
+      const shared = Object.fromEntries(Array.from({ length: 300 }, (_, i) => [`k${i}`, i]));
+      const rows = Array.from({ length: 2_000 }, () => ({ toJSON: () => shared }));
+
+      const json = JSON.stringify(toMirrorValue({ rows, after: 'kept' }));
+
+      // About a million characters of repeats; unbounded, 6.2 MB.
+      expect(json.length).toBeLessThan(1_500_000);
+      expect(json).toContain('"[Truncated]"');
+      expect(JSON.parse(json).after).toBe('kept');
+    });
+
+    it.each([
+      ['getters, on the process log', () => sanitizeLogBindings({ value: builtByGetters() })],
+      ['getters, on the mirror', () => toMirrorValue({ value: builtByGetters() })],
+      ['a Proxy, on the process log', () => sanitizeLogBindings({ value: builtByProxy() })],
+      ['a Proxy, on the mirror', () => toMirrorValue({ value: builtByProxy() })],
+      ['toJSON, on the mirror', () => toMirrorValue({ value: new BuiltByToJSON() })],
+    ])('bounds data built on every read by %s, then stops', (_kind, walk) => {
+      const [json, ms] = timed(() => JSON.stringify(walk()));
+
+      // 7–36 ms on Bun and Node; unbounded, 3–35 s and a 308 MB line.
+      expect(ms).toBeLessThan(250);
+      expect(json.length).toBeLessThan(2_000_000);
+      expect(count(json, '[Truncated]')).toBe(1);
+    });
+
+    it.each([
+      ['numbers', (i: number) => i],
+      ['sensitive values, each written as [REDACTED] without a read', (i: number) => `secret-${i}`],
+    ])(
+      'counts every field of data built on every read, so fields holding %s stay within 400,000 reads',
+      (kind, leaf) => {
+        const prefix = kind === 'numbers' ? 'n' : 'password';
+        /** A plain object whose three getters each build a fresh one on every read, beside 50 data fields. */
+        const wide = (): object => {
+          const node: Record<string, unknown> = {};
+          for (const key of ['a', 'b', 'c']) {
+            Object.defineProperty(node, key, { enumerable: true, get: wide });
+          }
+          for (let i = 0; i < 50; i++) node[`${prefix}${i}`] = leaf(i);
+          return node;
+        };
+
+        const json = JSON.stringify(sanitizeLogBindings({ value: wide() }));
+
+        // Every field written costs at least one read: 298,534 fields, 2.6 MB of numbers or 7.5 MB
+        // of [REDACTED]. Counting only objects, the walk wrote 504,480 fields: 4.5 MB and 12.7 MB.
+        expect(json.split('":').length - 1).toBeLessThanOrEqual(400_000);
+        expect(json.length).toBeLessThan(kind === 'numbers' ? 3_000_000 : 8_000_000);
+        expect(count(json, '[Truncated]')).toBe(1);
+      },
+    );
+
+    describe('the ceiling on characters written', () => {
+      /** 16 MiB: what one walk may write, in characters of strings, field names, and primitives. */
+      const CEILING = 16 * 1024 * 1024;
+      const LONG = 'x'.repeat(1_000);
+      /** A plain object whose three getters each build another like it, beside 50 fields of one 1,000-character string. */
+      const wideByGetters = (): object => {
+        const node: Record<string, unknown> = {};
+        for (const key of ['a', 'b', 'c']) {
+          Object.defineProperty(node, key, { enumerable: true, get: wideByGetters });
+        }
+        for (let i = 0; i < 50; i++) node[`f${i}`] = LONG;
+        return node;
+      };
+      const wideKeys = ['a', 'b', 'c', ...Array.from({ length: 50 }, (_, i) => `f${i}`)];
+      /** The same as a Proxy: each child read builds a fresh Proxy, each other field reads the long string. */
+      const wideByProxy = (): object =>
+        new Proxy(
+          {},
+          {
+            ownKeys: () => wideKeys,
+            getOwnPropertyDescriptor: () => ({
+              configurable: true,
+              enumerable: true,
+              value: undefined,
+              writable: true,
+            }),
+            get: (_target, key) =>
+              key === 'a' || key === 'b' || key === 'c' ? wideByProxy() : LONG,
+          },
+        );
+
+      it.each([
+        ['getters, on the process log', () => sanitizeLogBindings({ value: wideByGetters() })],
+        ['getters, on the mirror', () => toMirrorValue({ value: wideByGetters() })],
+        ['a Proxy, on the process log', () => sanitizeLogBindings({ value: wideByProxy() })],
+        ['a Proxy, on the mirror', () => toMirrorValue({ value: wideByProxy() })],
+      ])(
+        'stops data built on every read with long string fields at 16 MiB, built by %s',
+        (_kind, walk) => {
+          const [json, ms] = timed(() => JSON.stringify(walk()));
+
+          // Bounded by reads alone, the walk wrote 284 MB.
+          expect(json.length).toBeGreaterThan(CEILING - 2_000);
+          expect(json.length).toBeLessThan(CEILING + 20_000);
+          expect(count(json, '[Truncated]')).toBe(1);
+          expect(ms).toBeLessThan(1_000);
+        },
+      );
+
+      it.each([
+        ['the process log', (data: Record<string, unknown>) => sanitizeLogBindings(data)],
+        ['the mirror', (data: Record<string, unknown>) => toMirrorValue(data)],
+      ])(
+        'writes a 10 MB string whole and cuts a 20 MB one, stopping the walk there, on %s',
+        (_sink, walk) => {
+          const ten = 'x'.repeat(10_000_000);
+          const twenty = 'y'.repeat(20_000_000);
+
+          expect(walk({ nested: { text: ten }, after: 'kept' })).toEqual({
+            nested: { text: ten },
+            after: 'kept',
+          });
+          expect(walk({ nested: { text: twenty }, after: 'not reached' })).toEqual({
+            nested: { text: '[Truncated]' },
+          });
+        },
+      );
+
+      it('writes a string that fills the ceiling exactly, and cuts one a character longer', () => {
+        // The name `text` with its quotes, colon, and comma, then the string with its quotes.
+        const fits = 'x'.repeat(CEILING - 8 - 2);
+        const over = `${fits}x`;
+
+        expect(toLogValue({ text: fits })).toEqual({ text: fits });
+        expect(toLogValue({ text: over })).toEqual({ text: '[Truncated]' });
+      });
+
+      it.each([
+        ['the process log', (data: Record<string, unknown>) => sanitizeLogBindings(data)],
+        ['the mirror', (data: Record<string, unknown>) => toMirrorValue(data)],
+      ])(
+        'writes a field name past the ceiling as [Truncated], with its value, on %s',
+        (_sink, walk) => {
+          const name = 'k'.repeat(20_000_000);
+
+          expect(walk({ before: 'kept', nested: { [name]: 1 }, after: 'not reached' })).toEqual({
+            before: 'kept',
+            nested: { '[Truncated]': '[Truncated]' },
+          });
+        },
+      );
+
+      it('counts field names toward the ceiling', () => {
+        // 20,000 distinct names of 1,000 characters: 20 MB of names, none of them repeated.
+        const wide = Object.fromEntries(
+          Array.from({ length: 20_000 }, (_, i) => [String(i).padStart(1_000, 'k'), i]),
+        );
+
+        const out = sanitizeLogBindings({ wide, after: 'not reached' }) as any;
+        const json = JSON.stringify(out);
+
+        expect(json.length).toBeLessThan(CEILING + 20_000);
+        expect(json).toContain('"[Truncated]"');
+        expect(Object.keys(out.wide).slice(0, 10_000)).toEqual(Object.keys(wide).slice(0, 10_000));
+        expect(out).not.toHaveProperty('after');
+      });
+
+      it('counts primitives toward the ceiling', () => {
+        const numbers = Array.from({ length: 5_000 }, () => 123_456_789);
+
+        const out = sanitizeLogBindings({
+          text: 'x'.repeat(CEILING - 10_000),
+          numbers,
+          after: 'not reached',
+        }) as any;
+
+        // About 10,000 characters were left: some 1,100 nine-digit numbers.
+        expect(out.numbers.length).toBeGreaterThan(1_000);
+        expect(out.numbers.length).toBeLessThan(1_200);
+        expect(out.numbers.at(-1)).toBe('[Truncated]');
+        expect(out).not.toHaveProperty('after');
+      });
+
+      it('counts repeated content toward the ceiling as well as toward the bound on repeats', () => {
+        // 9,000 repeats of 109 characters fit in the million characters of repeats, not in what
+        // the 16,000,000-character string leaves of the ceiling.
+        const shared = { k: 'x'.repeat(100) };
+
+        const out = sanitizeLogBindings({
+          text: 'x'.repeat(16_000_000),
+          rows: Array.from({ length: 9_000 }, () => shared),
+          after: 'not reached',
+        }) as any;
+
+        expect(out.rows.length).toBeLessThan(9_000);
+        expect(out.rows.at(-1)).toEqual(expect.objectContaining({ k: '[Truncated]' }));
+        expect(out).not.toHaveProperty('after');
+      });
+    });
+
+    it('stops after 400,000 reads — one per object, per field, and per array element that is not an object — at [Truncated]', () => {
+      const list = Array.from({ length: 450_000 }, (_, i) => i);
+      const rows = Array.from({ length: 250_000 }, (_, i) => ({ i }));
+
+      const out = sanitizeLogBindings({ list, after: 'not reached' }) as any;
+      const outRows = sanitizeLogBindings({ rows, after: 'not reached' }) as any;
+
+      // The bindings and the array take two reads, then 399,998 elements.
+      expect(out.list).toHaveLength(399_999);
+      expect(out.list[399_997]).toBe(399_997);
+      expect(out.list[399_998]).toBe('[Truncated]');
+      expect(out).not.toHaveProperty('after');
+      // Each row takes two: the object and its field.
+      expect(outRows.rows).toHaveLength(200_000);
+      expect(outRows.rows[199_998]).toEqual({ i: 199_998 });
+      expect(outRows.rows[199_999]).toBe('[Truncated]');
+      expect(outRows).not.toHaveProperty('after');
+    });
+
+    it('counts an object past the depth bound as ten reads', () => {
+      // 50,000 objects at depth 16, each written as [MaxDepth], in one array at depth 15.
+      let data: unknown = Array.from({ length: 50_000 }, () => ({}));
+      for (let level = 0; level < 15; level++) data = { n: data };
+
+      const json = JSON.stringify(sanitizeLogBindings(data as Record<string, unknown>));
+
+      // Sixteen reads reach the array; 39,998 objects of ten fit in the rest.
+      expect(count(json, '[MaxDepth]')).toBe(39_998);
+      expect(count(json, '[Truncated]')).toBe(1);
+    });
+
+    it('bounds an array whose length a Proxy reports', () => {
+      const list = new Proxy([], {
+        get: (target, key) =>
+          key === 'length'
+            ? 5_000_000
+            : typeof key === 'string' && /^\d+$/.test(key)
+              ? 1
+              : Reflect.get(target, key),
+      });
+
+      const [out, ms] = timed(() => sanitizeLogBindings({ list }) as any);
+
+      expect(out.list).toHaveLength(399_999);
+      expect(out.list.at(-1)).toBe('[Truncated]');
+      expect(ms).toBeLessThan(250);
+    });
+
+    it.each([
+      ['a string', { text: 'x'.repeat(100_000) }],
+      ['a field name', { ['k'.repeat(100_000)]: 1 }],
+      ['an array of numbers', Array.from({ length: 10_000 }, (_, i) => i * 1.5)],
+    ])('bounds the characters a shared reference to %s writes again', (_kind, shared) => {
+      const written = sanitizeLogBindings(repeated(shared, 200)) as any;
+      const json = JSON.stringify(written);
+
+      // One whole copy, then about a million characters of repeats, then markers.
+      expect(json.length).toBeLessThan(1_500_000);
+      expect(written.a.b.c.d.rows[0]).toEqual(shared);
+      // The last copy is cut: whole, or at its first field when its braces and name still fit.
+      expect(JSON.stringify(written.a.b.c.d.rows.at(-1))).toContain('"[Truncated]"');
+      expect(written.after).toBe('kept');
+    });
+
+    it('stops a repeated array at its first value past the bound, with one marker', () => {
+      const numbers = Array.from({ length: 10_000 }, (_, i) => i * 1.5);
+
+      const rows = (sanitizeLogBindings(repeated(numbers, 200)) as any).a.b.c.d.rows as unknown[];
+
+      const cut = rows.find(
+        (row) => Array.isArray(row) && row.at(-1) === '[Truncated]',
+      ) as unknown[];
+      expect(cut.length).toBeLessThan(numbers.length);
+      expect(cut.indexOf('[Truncated]')).toBe(cut.length - 1);
+    });
+
+    it('bounds a mirror whose toJSON builds a fresh object on every call', () => {
+      class Node {
+        constructor(private readonly next: unknown) {}
+        toJSON() {
+          return { a: this.next, b: this.next, c: this.next };
+        }
+      }
+      let graph: unknown = { leaf: true };
+      for (let i = 0; i < 16; i++) graph = new Node(graph);
+
+      const json = JSON.stringify(toMirrorValue({ graph }));
+
+      expect(json).toContain('"[Truncated]"');
+      expect(json.length).toBeLessThan(2_000_000);
+    });
+
+    it('writes a shared reference in full on every path while the budget lasts', () => {
+      const shared = { id: 's', tags: ['a'] };
+
+      expect(sanitizeLogBindings({ a: shared, b: { c: shared }, list: [shared, shared] })).toEqual({
+        a: shared,
+        b: { c: shared },
+        list: [shared, shared],
+      });
+    });
+
+    it('bounds a graph whose objects share references to about a million characters, at every walk', () => {
+      let graph: Record<string, unknown> = { leaf: true };
+      for (let i = 0; i < 16; i++) graph = { a: graph, b: graph, c: graph };
+
+      const first = JSON.stringify(sanitizeLogBindings({ graph }));
+      const second = JSON.stringify(sanitizeLogBindings({ graph }));
+
+      // Unbounded, the 3^16 paths through these 17 objects write 380 MB.
+      expect(first.length).toBeLessThan(1_500_000);
+      expect(first).toContain('"[Truncated]"');
+      expect(second).toBe(first);
+      // A fresh walk starts with a full budget.
+      expect(sanitizeLogBindings({ small: { a: 1 } })).toEqual({ small: { a: 1 } });
+    });
+  });
+
+  it('writes a value whose read throws as [Unreadable], never throwing out of the walk', () => {
+    const { proxy: revoked, revoke } = Proxy.revocable({}, {});
+    revoke();
+    const failing = Object.defineProperty(new Error('accessor'), 'code', {
+      get() {
+        throw new Error('code getter threw');
+      },
+    });
+    const level = {
+      getter: {
+        get boom(): never {
+          throw new Error('getter threw');
+        },
+      },
+      revoked,
+      failing,
+    };
+
+    const out = sanitizeLogBindings({ top: level, deep: { a: { b: { c: { d: level } } } } }) as any;
+
+    const expected = {
+      getter: { boom: '[Unreadable]' },
+      revoked: '[Unreadable]',
+      failing: { type: 'Error', message: 'accessor', stack: failing.stack },
+    };
+    expect(out.top).toEqual(expected);
+    expect(out.deep.a.b.c.d).toEqual(expected);
+  });
+
+  it('redacts with the shared key matcher at every depth, word and adjacent-word matches included', () => {
+    const secrets = {
+      accessToken: 'a',
+      'x-api-key': 'b',
+      upstream_private_key: 'c',
+      max_tokens: 5,
+    };
+    const masked = {
+      accessToken: '[REDACTED]',
+      'x-api-key': '[REDACTED]',
+      upstream_private_key: '[REDACTED]',
+      max_tokens: 5,
+    };
+
+    expect(
+      sanitizeLogBindings({ ...secrets, l1: { l2: { l3: { l4: { l5: { ...secrets } } } } } }),
+    ).toEqual({ ...masked, l1: { l2: { l3: { l4: { l5: masked } } } } });
   });
 });

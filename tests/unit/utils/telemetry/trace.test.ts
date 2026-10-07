@@ -331,6 +331,84 @@ describe('OpenTelemetry Tracing', () => {
     });
   });
 
+  describe('withSpan with a thrown value it cannot read (#697)', () => {
+    /** `error` with an own `key` whose read throws. */
+    function unreadable<E extends Error>(error: E, key: string): E {
+      return Object.defineProperty(error, key, {
+        configurable: true,
+        get() {
+          throw new Error(`${key} getter`);
+        },
+      });
+    }
+
+    /** A revoked Proxy: every operation on it throws. */
+    function revoked(): object {
+      const { proxy, revoke } = Proxy.revocable({}, {});
+      revoke();
+      return proxy;
+    }
+
+    /**
+     * What `withSpan` rejects with when `fn` throws `value`, boxed: a promise
+     * resolved with a revoked Proxy reads its `then` and rejects. Compared with
+     * `Object.is`, never `toBe`: printing an unreadable value on a mismatch throws.
+     */
+    async function rejectionOf(value: unknown): Promise<{ rejected: unknown }> {
+      return await traceUtils
+        .withSpan('unreadable-op', async () => {
+          throw value;
+        })
+        .then(
+          () => {
+            throw new Error('expected a rejection');
+          },
+          (rejected: unknown) => ({ rejected }),
+        );
+    }
+
+    afterEach(() => {
+      vi.restoreAllMocks();
+    });
+
+    test.each([
+      ['an Error whose message getter throws', () => unreadable(new Error('boom'), 'message')],
+      ['a null-prototype object', () => Object.create(null) as object],
+      ['a revoked Proxy', revoked],
+    ])('rejects with %s itself when OpenTelemetry is off', async (_label, make) => {
+      const thrown = make();
+
+      expect(Object.is((await rejectionOf(thrown)).rejected, thrown)).toBe(true);
+    });
+
+    test.each([
+      ['stack', 'boom'],
+      ['name', 'boom'],
+      ['message', '[Unreadable]'],
+    ])(
+      'rejects with the thrown Error when a recording span cannot read its %s',
+      async (key, message) => {
+        const span = {
+          setAttributes: vi.fn(),
+          // Reads what the OTel SDK's `recordException` reads, unguarded.
+          recordException: vi.fn((e: Error & { code?: unknown }) => {
+            void [e.code, e.name, e.message, e.stack];
+          }),
+          setStatus: vi.fn(),
+          end: vi.fn(),
+        };
+        vi.spyOn(trace, 'getTracer').mockReturnValue({
+          startActiveSpan: vi.fn((_name: string, fn: (s: typeof span) => unknown) => fn(span)),
+        } as never);
+        const thrown = unreadable(new Error('boom'), key);
+
+        expect(Object.is((await rejectionOf(thrown)).rejected, thrown)).toBe(true);
+        expect(span.setStatus).toHaveBeenCalledWith({ code: SpanStatusCode.ERROR, message });
+        expect(span.end).toHaveBeenCalledOnce();
+      },
+    );
+  });
+
   describe('runInContext', () => {
     test('should propagate exceptions', () => {
       const ctx: RequestContext = {

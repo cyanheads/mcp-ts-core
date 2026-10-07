@@ -2166,7 +2166,7 @@ describe('createToolHandler', () => {
         );
       });
 
-      it('logs a client_capability_missing refusal through logger.notice', async () => {
+      it('logs a client_capability_missing refusal through logger.notice, with no stack (#651)', async () => {
         const asks = tool('refusal_asks', {
           description: 'Asks the caller to confirm.',
           input: z.object({}),
@@ -2192,9 +2192,11 @@ describe('createToolHandler', () => {
 
         expect(envelope(result).data?.reason).toBe('client_capability_missing');
         expect(failureRecord().level).toBe('notice');
-        expect(recordAt('notice')[0]).toBe(
-          `Error in tool:refusal_asks: ${envelope(result).message}`,
-        );
+        const [message, context] = recordAt('notice');
+        expect(message).toBe(`Error in tool:refusal_asks: ${envelope(result).message}`);
+        // A property of the client's connection, not a fault here (#651).
+        expect(context.extra).not.toHaveProperty('stack');
+        expect(context.extra.errorData).not.toHaveProperty('originalStack');
       });
 
       it('lets a severity the tool declares for invalid_arguments win', async () => {

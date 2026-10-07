@@ -4,10 +4,139 @@
  * @module src/utils/internal/error-handler/helpers
  */
 
+import { type Span, SpanStatusCode } from '@opentelemetry/api';
 import { ZodError } from 'zod';
 
 import { McpError } from '@/types-global/errors.js';
 import { isAggregateError } from '@/utils/types/guards.js';
+
+/**
+ * What the error path writes for a field whose read throws — a getter, a
+ * `Proxy` trap, a revoked `Proxy` — as the log-data walk does.
+ */
+export const UNREADABLE = '[Unreadable]';
+
+/** `value[key]`, or {@link UNREADABLE} when reading it throws. */
+export function readField(value: object, key: PropertyKey): unknown {
+  try {
+    return (value as Record<PropertyKey, unknown>)[key];
+  } catch {
+    return UNREADABLE;
+  }
+}
+
+/**
+ * An error's `message` or `name`, as read, written as text: a string as it is;
+ * any other primitive as `String` converts it, which runs no caller code and
+ * never throws, a `Symbol` included (`'Symbol(description)'`), so a `message`
+ * set to `404` reads `'404'`; and an object or function as {@link UNREADABLE},
+ * since converting one runs its own `toString`, which can throw or return
+ * anything.
+ */
+export function errorText(value: unknown): string {
+  if (typeof value === 'string') return value;
+  return value === null || (typeof value !== 'object' && typeof value !== 'function')
+    ? String(value)
+    : UNREADABLE;
+}
+
+/**
+ * `value instanceof type`, or `false` when the check throws — a revoked
+ * `Proxy`, a `getPrototypeOf` trap — so such a value is handled as the
+ * non-instance it cannot be shown not to be.
+ */
+export function isInstance<T>(
+  value: unknown,
+  type: abstract new (...args: never[]) => T,
+): value is T {
+  try {
+    return value instanceof type;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * A copy of `value`'s own enumerable fields, as a spread makes it (`{}` for
+ * `undefined`), or `undefined` when making it throws — a getter that throws, a
+ * `Proxy` whose trap throws.
+ */
+export function copyFields<T extends object>(value: T | undefined): T | undefined {
+  try {
+    return { ...value } as T;
+  } catch {
+    return;
+  }
+}
+
+/**
+ * A copy of the `data` a thrown `McpError` carries, so the error path reads
+ * plain fields rather than the thrown value's, and every field of it is one the
+ * wire can carry: a field `JSON.stringify` cannot serialize — a getter or a
+ * revoked `Proxy` that throws on read at any depth, a `BigInt`, a cycle, a
+ * `toJSON` that throws — is {@link UNREADABLE}, since a response holding one is
+ * never sent and the client waits for it. Every other field is the thrown
+ * value itself, so readable `data` is written byte for byte as thrown.
+ * `undefined` when `error` is not an `McpError`, carries no object `data`, or
+ * its `data` cannot be read or copied — a getter, a revoked `Proxy`, a throwing
+ * `ownKeys` trap.
+ */
+export function readErrorData(error: unknown): Record<string, unknown> | undefined {
+  if (!isInstance(error, McpError)) return;
+  const data = readField(error, 'data');
+  const copy =
+    typeof data === 'object' && data !== null
+      ? copyFields(data as Record<string, unknown>)
+      : undefined;
+  if (copy === undefined) return;
+  for (const key of Object.keys(copy)) {
+    try {
+      JSON.stringify(copy[key]);
+    } catch {
+      copy[key] = UNREADABLE;
+    }
+  }
+  return copy;
+}
+
+/**
+ * `value` when it is an `Error`, else an `Error` whose message is `String(value)`
+ * — or {@link UNREADABLE} when the value can be neither checked nor converted
+ * (a revoked `Proxy`, a null-prototype object).
+ */
+export function asError(value: unknown): Error {
+  try {
+    return value instanceof Error ? value : new Error(String(value));
+  } catch {
+    return new Error(UNREADABLE);
+  }
+}
+
+/**
+ * Marks `span` failed with `error`: records an `Error` as the span's exception,
+ * then sets the `ERROR` status with its `message` (any other value as `String`
+ * converts it). Never throws: an exception the span cannot read — a field
+ * whose getter throws, which the SDK's `recordException` reads unguarded — is
+ * left unrecorded, and a message that cannot be read is {@link UNREADABLE}.
+ */
+export function recordSpanFailure(span: Span, error: unknown): void {
+  let message: string;
+  try {
+    if (error instanceof Error) {
+      try {
+        span.recordException(error);
+      } catch {
+        // The span could not read it; the status below still marks the failure.
+      }
+      message = String(error.message);
+    } else {
+      message = String(error);
+    }
+  } catch {
+    message = UNREADABLE;
+  }
+  span.setStatus({ code: SpanStatusCode.ERROR, message });
+}
 
 /**
  * Formats a ZodError as a single readable line: `<dotted.path>: <message>`.
@@ -40,11 +169,13 @@ export function formatZodErrorMessage(err: ZodError): string {
 /**
  * Retrieves a descriptive name for an error object or value.
  *
- * - `Error` instances → `error.name` (e.g. `'TypeError'`), falling back to `'Error'`.
+ * - `Error` instances → `error.name` (e.g. `'TypeError'`), falling back to `'Error'`;
+ *   a `name` that is not a string is written as {@link errorText} writes it.
  * - `null` → `'NullValueEncountered'`
  * - `undefined` → `'UndefinedValueEncountered'`
  * - Non-plain objects with a named constructor → `'<ConstructorName>Encountered'`
  * - Everything else → `'<typeof value>Encountered'` (e.g. `'stringEncountered'`)
+ * - A value whose inspection throws (a `name` getter, a revoked `Proxy`) → `'[Unreadable]'`
  *
  * @param error - The error object or value.
  * @returns A stable, human-readable string identifying the error's type.
@@ -57,38 +188,45 @@ export function formatZodErrorMessage(err: ZodError): string {
  * ```
  */
 export function getErrorName(error: unknown): string {
-  if (error instanceof Error) {
-    return error.name || 'Error';
+  try {
+    if (error instanceof Error) {
+      const name = readField(error, 'name');
+      return name ? errorText(name) : 'Error';
+    }
+    if (error === null) {
+      return 'NullValueEncountered';
+    }
+    if (error === undefined) {
+      return 'UndefinedValueEncountered';
+    }
+    if (
+      typeof error === 'object' &&
+      error.constructor &&
+      typeof error.constructor.name === 'string' &&
+      error.constructor.name !== 'Object'
+    ) {
+      return `${error.constructor.name}Encountered`;
+    }
+    return `${typeof error}Encountered`;
+  } catch {
+    return UNREADABLE;
   }
-  if (error === null) {
-    return 'NullValueEncountered';
-  }
-  if (error === undefined) {
-    return 'UndefinedValueEncountered';
-  }
-  if (
-    typeof error === 'object' &&
-    error !== null &&
-    error.constructor &&
-    typeof error.constructor.name === 'string' &&
-    error.constructor.name !== 'Object'
-  ) {
-    return `${error.constructor.name}Encountered`;
-  }
-  return `${typeof error}Encountered`;
 }
 
 /**
  * Extracts a human-readable message string from any thrown value.
  *
  * Handles every JavaScript type so that `catch (e)` blocks never produce `[object Object]`:
- * - `AggregateError` → combines up to 3 inner error messages after the outer message.
- * - `Error` → `error.message`
+ * - `AggregateError` → combines up to 3 inner error messages after the outer message,
+ *   each one that cannot be read as `'[Unreadable]'`.
+ * - `Error` → `error.message`, or `'[Unreadable]'` when reading it throws (a getter);
+ *   a `message` that is not a string, the outer's or a member's, as {@link errorText} writes it.
  * - `null` / `undefined` → descriptive literal strings.
  * - Primitives (`string`, `number`, `boolean`, `bigint`, `symbol`) → string-coerced value.
  * - Functions → `[function <name>]`
  * - Objects → JSON-serialized if possible; otherwise constructor name fallback.
- * - If conversion itself throws, returns a safe fallback describing the conversion error.
+ * - A value whose inspection throws (a getter, a `Proxy` trap, a revoked `Proxy`) →
+ *   `'[Unreadable]'`, never the text of what the read threw.
  *
  * @param error - The thrown value to extract a message from.
  * @returns A non-empty string describing the error.
@@ -109,16 +247,17 @@ export function getErrorMessage(error: unknown): string {
       return formatZodErrorMessage(error);
     }
     if (error instanceof Error) {
+      const message = errorText(readField(error, 'message'));
       // AggregateError should surface combined messages succinctly
       if (isAggregateError(error)) {
         const inner = error.errors
-          .map((e) => (e instanceof Error ? e.message : String(e)))
+          .map((e) => errorText(readField(asError(e), 'message')))
           .filter(Boolean)
           .slice(0, 3)
           .join('; ');
-        return inner ? `${error.message}: ${inner}` : error.message;
+        return inner ? `${message}: ${inner}` : message;
       }
-      return error.message;
+      return message;
     }
     if (error === null) {
       return 'Null value encountered as error';
@@ -153,8 +292,8 @@ export function getErrorMessage(error: unknown): string {
     }
     // c8 ignore next
     return '[unrepresentable error]';
-  } catch (conversionError) {
-    return `Error converting error to string: ${conversionError instanceof Error ? conversionError.message : 'Unknown conversion error'}`;
+  } catch {
+    return UNREADABLE;
   }
 }
 
@@ -183,6 +322,18 @@ export interface ErrorCauseNode {
   stack?: string;
 }
 
+/** Stands in, inside {@link extractErrorCauseChain}, for a `cause` whose read threw. */
+const UNREADABLE_CAUSE = Symbol('unreadable cause');
+
+/** `value instanceof Error`, or `undefined` when the check throws: a revoked `Proxy`, a `getPrototypeOf` trap. */
+function errorCheck(value: unknown): boolean | undefined {
+  try {
+    return value instanceof Error;
+  } catch {
+    return;
+  }
+}
+
 /**
  * Extracts the complete error cause chain into a flat array of `ErrorCauseNode` objects.
  *
@@ -195,6 +346,11 @@ export interface ErrorCauseNode {
  * `McpError` nodes include the `data` property when present, and any `Error`
  * node carrying a string `code` includes it.
  * Circular references are detected via `WeakSet` identity tracking.
+ * Every read is guarded: a `name`, `message`, or `stack` whose read throws is
+ * `'[Unreadable]'` on its node, an unreadable `code` or `data` is left out, and
+ * a cause that cannot be read or inspected — a throwing `cause` getter, a
+ * revoked `Proxy` — ends the chain as a node whose `name` and `message` are
+ * both `'[Unreadable]'`.
  *
  * @param error - The outermost error to start traversal from.
  * @param maxDepth - Maximum number of nodes to traverse before stopping. Defaults to `20`.
@@ -232,25 +388,37 @@ export function extractErrorCauseChain(error: unknown, maxDepth = 20): ErrorCaus
       seen.add(current);
     }
 
-    if (current instanceof Error) {
+    const isError = current === UNREADABLE_CAUSE ? undefined : errorCheck(current);
+    if (isError === undefined) {
+      chain.push({ name: UNREADABLE, message: UNREADABLE, depth });
+      break;
+    }
+
+    if (isError) {
+      const err = current as Error;
+      const code = readField(err, 'code');
+      const stack = readField(err, 'stack');
       const node: ErrorCauseNode = {
-        name: current.name,
-        message: current.message,
+        name: errorText(readField(err, 'name')),
+        message: errorText(readField(err, 'message')),
         depth,
-        ...('code' in current && typeof current.code === 'string' ? { code: current.code } : {}),
+        ...(typeof code === 'string' && code !== UNREADABLE ? { code } : {}),
         // Only include stack if it exists (exact optional property types)
-        ...(current.stack !== undefined ? { stack: current.stack } : {}),
+        ...(stack !== undefined ? { stack: stack as string } : {}),
       };
 
       // Extract data from McpError instances
-      if (current instanceof McpError && current.data) {
-        node.data = current.data;
-      }
+      const data = err instanceof McpError ? readField(err, 'data') : undefined;
+      if (data && data !== UNREADABLE) node.data = data as Record<string, unknown>;
 
       chain.push(node);
 
       // Continue traversing cause chain
-      current = current.cause;
+      try {
+        current = err.cause;
+      } catch {
+        current = UNREADABLE_CAUSE;
+      }
     } else if (typeof current === 'string') {
       chain.push({
         name: 'StringError',

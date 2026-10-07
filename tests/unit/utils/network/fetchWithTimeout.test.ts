@@ -2,8 +2,15 @@
  * @fileoverview Unit tests for the fetchWithTimeout utility.
  * @module tests/utils/network/fetchWithTimeout.test
  */
+import type { CallToolResult } from '@modelcontextprotocol/server';
 import { afterEach, beforeEach, describe, expect, it, type MockInstance, vi } from 'vitest';
+import { z } from 'zod';
 
+import {
+  type AnyToolDefinition,
+  tool,
+} from '../../../../src/mcp-server/tools/utils/toolDefinition.js';
+import { createToolHandler } from '../../../../src/mcp-server/tools/utils/toolHandlerFactory.js';
 import { JsonRpcErrorCode, McpError } from '../../../../src/types-global/errors.js';
 import { ErrorHandler } from '../../../../src/utils/internal/error-handler/errorHandler.js';
 import { logger } from '../../../../src/utils/internal/logger.js';
@@ -11,6 +18,7 @@ import { withExtra } from '../../../../src/utils/internal/requestContext.js';
 import { fetchWithTimeout } from '../../../../src/utils/network/fetchWithTimeout.js';
 import { httpErrorFromResponse } from '../../../../src/utils/network/httpError.js';
 import { withRetry } from '../../../../src/utils/network/retry.js';
+import { legacyCapabilityView, makeServerContext } from '../../../helpers/server-context.js';
 
 /**
  * The SSRF guard resolves through `node:dns/promises`. Holding each function in
@@ -1153,7 +1161,7 @@ describe('fetchWithTimeout', () => {
         expect(everyRecord()).not.toContain('sk-query-0000');
       });
 
-      it('publishes a redacted rootCause, code included, through tryCatch', async () => {
+      it('logs a redacted rootCause, code included, through tryCatch, and publishes none', async () => {
         vi.spyOn(globalThis, 'fetch').mockRejectedValue(
           Object.freeze(Object.assign(new TypeError(quoting), { code: 'Malformed_HTTP_Response' })),
         );
@@ -1163,10 +1171,12 @@ describe('fetchWithTimeout', () => {
           { operation: 'reverseGeocode', context },
         ).catch((e) => e)) as McpError;
 
-        expect(error.data?.rootCause).toEqual({ name: 'TypeError', message: redacted });
+        // A cause's message reaches the log record only (#644).
+        expect(error.data).not.toHaveProperty('rootCause');
         const handled = errorSpy.mock.calls.at(-1)?.[1] as {
-          extra: { errorData: { causeChain: Array<{ code?: string }> } };
+          extra: { errorData: { causeChain: Array<{ code?: string }>; rootCause: unknown } };
         };
+        expect(handled.extra.errorData.rootCause).toEqual({ name: 'TypeError', message: redacted });
         expect(handled.extra.errorData.causeChain.at(-1)?.code).toBe('Malformed_HTTP_Response');
         const surfaces = JSON.stringify([everyRecord(), error.message, error.data]);
         expectNoPath(surfaces);
@@ -1225,8 +1235,13 @@ describe('fetchWithTimeout', () => {
         rejectPrivateIPs: true,
       }).catch((e) => e)) as McpError;
 
-      expect(error.code).toBe(JsonRpcErrorCode.ServiceUnavailable);
-      expect(error.message).toBe(`Redirect response missing Location header from ${name}`);
+      // Not followed, so it fails as the HTTP status it is (#647).
+      expect(error.code).toBe(JsonRpcErrorCode.InvalidRequest);
+      expect(error.message).toBe(`Fetch failed for ${name}. Status: 302`);
+      expect(errorSpy).toHaveBeenCalledWith(
+        `Fetch failed for ${name} with status 302.`,
+        expect.anything(),
+      );
       expectNoPath(everyRecord());
     });
 
@@ -1395,12 +1410,16 @@ describe('fetchWithTimeout', () => {
       expect(rejection).toBeInstanceOf(TypeError);
       expect(rejection.message).toBe(quoted(name));
       expect(rejection.code).toBe('Malformed_HTTP_Response');
-      // `tryCatch` publishes the root cause on the thrown error's data.
-      expect(error.data?.rootCause).toEqual({ name: 'TypeError', message: quoted(name) });
-      // `handleError`'s logged chain carries the code too.
+      // `handleError` logs the root cause beside a chain carrying the code, and
+      // puts none of it on the thrown error's data (#644).
+      expect(error.data).not.toHaveProperty('rootCause');
       const handled = errorSpy.mock.calls.at(-1)?.[1] as {
-        extra: { errorData: { causeChain: Array<{ code?: string }> } };
+        extra: { errorData: { causeChain: Array<{ code?: string }>; rootCause: unknown } };
       };
+      expect(handled.extra.errorData.rootCause).toEqual({
+        name: 'TypeError',
+        message: quoted(name),
+      });
       expect(handled.extra.errorData.causeChain.at(-1)?.code).toBe('Malformed_HTTP_Response');
       const everything = JSON.stringify([errorSpy.mock.calls, error.message, error.data]);
       expect(everything).not.toContain('sk-test-0000');
@@ -1869,7 +1888,7 @@ describe('fetchWithTimeout', () => {
         expect(fetchMock).toHaveBeenCalledTimes(1);
       });
 
-      it('should reject redirect missing Location header', async () => {
+      it('should fail a redirect missing its Location header as its HTTP status', async () => {
         vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(new Response(null, { status: 302 }));
 
         await expect(
@@ -1877,8 +1896,8 @@ describe('fetchWithTimeout', () => {
             rejectPrivateIPs: true,
           }),
         ).rejects.toMatchObject({
-          code: JsonRpcErrorCode.ServiceUnavailable,
-          message: expect.stringContaining('missing Location header'),
+          code: JsonRpcErrorCode.InvalidRequest,
+          data: { status: 302, errorSource: 'FetchHttpError' },
         });
       });
 
@@ -2006,6 +2025,247 @@ describe('fetchWithTimeout', () => {
           hint: 'Request the final URL directly instead of one that redirects more than 5 times.',
         },
       });
+    });
+  });
+
+  /**
+   * A redirect hop the SSRF guard rejects is the same policy refusal the initial
+   * URL gets before any request is sent, so it leaves the same way: thrown, with
+   * no record from `fetchWithTimeout`. The caller logs it, at the severity its
+   * own contract declares. Genuine network errors keep their record.
+   */
+  describe('a redirect hop the SSRF guard rejects (#647)', () => {
+    const ssrfOpts = { rejectPrivateIPs: true };
+    const START = 'https://public.example.com';
+    let atWarningOrAbove: MockInstance[];
+
+    beforeEach(() => {
+      atWarningOrAbove = [
+        vi.spyOn(logger, 'warning').mockImplementation(() => {}),
+        errorSpy,
+        vi.spyOn(logger, 'crit').mockImplementation(() => {}),
+        vi.spyOn(logger, 'alert').mockImplementation(() => {}),
+        vi.spyOn(logger, 'emerg').mockImplementation(() => {}),
+      ];
+      // `inside.example` resolves to private space; every other name stays unresolvable.
+      dnsSlots.lookup = vi.fn(async (hostname: string) => {
+        if (hostname === 'inside.example') return [{ address: '10.9.8.7', family: 4 }];
+        throw unresolvable();
+      });
+    });
+
+    function expectNoRecordAtWarningOrAbove() {
+      for (const spy of atWarningOrAbove) expect(spy).not.toHaveBeenCalled();
+    }
+
+    const redirectTo = (location: string) =>
+      new Response(null, { status: 302, headers: { location } });
+
+    it.each([
+      ['a non-global literal IP', 'http://10.0.0.1/', 'private_address_blocked'],
+      ['a private hostname', 'http://localhost/', 'private_address_blocked'],
+      [
+        'a name the resolver answers with a private address',
+        'https://inside.example/',
+        'private_address_blocked',
+      ],
+      ['a non-HTTP scheme', 'file:///etc/passwd', 'invalid_url'],
+    ])(
+      'a 302 to %s rejects as that URL does up front, with no record at warning or above',
+      async (_label, location, reason) => {
+        const upFront = (await fetchWithTimeout(location, 1000, context, ssrfOpts).catch(
+          (e) => e,
+        )) as McpError;
+        vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(redirectTo(location));
+
+        const error = (await fetchWithTimeout(START, 1000, context, ssrfOpts).catch(
+          (e) => e,
+        )) as McpError;
+
+        expect(error).toBeInstanceOf(McpError);
+        expect(error.data?.reason).toBe(reason);
+        expect(error).toMatchObject({
+          code: JsonRpcErrorCode.ValidationError,
+          message: upFront.message,
+          data: upFront.data,
+        });
+        expectNoRecordAtWarningOrAbove();
+      },
+    );
+
+    it('a redirect loop rejects as too_many_redirects, logging each followed hop at debug only', async () => {
+      vi.spyOn(globalThis, 'fetch').mockImplementation(async () =>
+        redirectTo('https://example.com/loop'),
+      );
+
+      const error = (await fetchWithTimeout(START, 1000, context, ssrfOpts).catch(
+        (e) => e,
+      )) as McpError;
+
+      expect(error).toMatchObject({
+        code: JsonRpcErrorCode.ValidationError,
+        data: { reason: 'too_many_redirects', maxRedirects: 5 },
+      });
+      for (let hop = 1; hop <= 5; hop++) {
+        expect(debugSpy).toHaveBeenCalledWith(
+          `Following validated redirect ${hop}: https://example.com/…`,
+          context,
+        );
+      }
+      expectNoRecordAtWarningOrAbove();
+    });
+
+    it("a tool declaring severity 'notice' for private_address_blocked logs the rejection only at notice", async () => {
+      const noticeSpy = vi.spyOn(logger, 'notice').mockImplementation(() => {});
+      vi.spyOn(logger, 'info').mockImplementation(() => {});
+      vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(redirectTo('http://10.0.0.1/admin'));
+      const definition = tool('fetch_page', {
+        description: 'Fetches one page.',
+        input: z.object({}),
+        output: z.object({ ok: z.boolean().describe('Always true') }),
+        errors: [
+          {
+            reason: 'private_address_blocked',
+            code: JsonRpcErrorCode.ValidationError,
+            when: 'The target or a redirect hop is a private address',
+            recovery: 'Use a publicly routable host instead of a private one.',
+            severity: 'notice',
+            thrownBy: 'service',
+          },
+        ],
+        async handler(_input, ctx) {
+          await fetchWithTimeout(START, 1000, ctx, ssrfOpts);
+          return { ok: true };
+        },
+      });
+      const handler = createToolHandler(
+        definition as AnyToolDefinition,
+        { logger, storage: undefined } as never,
+        {},
+        legacyCapabilityView({}),
+      );
+
+      const result = (await handler({}, makeServerContext({}))) as CallToolResult;
+
+      expect(result.isError).toBe(true);
+      expect(result.structuredContent).toMatchObject({
+        error: {
+          code: JsonRpcErrorCode.ValidationError,
+          data: { reason: 'private_address_blocked' },
+        },
+      });
+      expect(noticeSpy).toHaveBeenCalledWith(
+        expect.stringMatching(
+          /^Error in tool:fetch_page: Request to non-global\/reserved IP blocked/,
+        ),
+        expect.anything(),
+      );
+      expectNoRecordAtWarningOrAbove();
+    });
+
+    it.each([302, 304])(
+      'a %i with no Location fails as it does without the option',
+      async (status) => {
+        vi.spyOn(globalThis, 'fetch').mockImplementation(
+          async () => new Response(null, { status }),
+        );
+
+        for (const options of [ssrfOpts, {}]) {
+          errorSpy.mockClear();
+
+          const error = (await fetchWithTimeout(START, 1000, context, options).catch(
+            (e) => e,
+          )) as McpError;
+
+          expect(error).toMatchObject({
+            code: JsonRpcErrorCode.InvalidRequest,
+            message: `Fetch failed for ${START}. Status: ${status}`,
+            data: { status, errorSource: 'FetchHttpError' },
+          });
+          expect(errorSpy).toHaveBeenCalledTimes(1);
+          expect(errorSpy).toHaveBeenCalledWith(
+            `Fetch failed for ${START} with status ${status}.`,
+            expect.objectContaining({
+              extra: expect.objectContaining({ errorSource: 'FetchHttpError' }),
+            }),
+          );
+        }
+      },
+    );
+
+    it('withRetry fetches a 302 with no Location once, as without the option', async () => {
+      const fetchMock = vi
+        .spyOn(globalThis, 'fetch')
+        .mockImplementation(async () => new Response(null, { status: 302 }));
+
+      const error = (await withRetry(() => fetchWithTimeout(START, 1000, context, ssrfOpts), {
+        maxRetries: 3,
+        baseDelayMs: 1,
+        jitter: 0,
+      }).catch((e) => e)) as McpError;
+
+      expect(error.code).toBe(JsonRpcErrorCode.InvalidRequest);
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+    });
+
+    it.each<[string, () => Promise<Response>]>([
+      [
+        'a fetch rejection',
+        async () => {
+          throw Object.assign(new TypeError('fetch failed'), { code: 'ECONNREFUSED' });
+        },
+      ],
+      ['a 302 with an unparseable Location', async () => redirectTo('https://exa mple.com/')],
+    ])(
+      '%s still logs a network error with causeChain and throws the wrapper',
+      async (_label, fake) => {
+        vi.spyOn(globalThis, 'fetch').mockImplementation(fake);
+
+        const error = (await fetchWithTimeout(START, 1000, context, ssrfOpts).catch(
+          (e) => e,
+        )) as McpError;
+
+        expect(error).toMatchObject({
+          code: JsonRpcErrorCode.ServiceUnavailable,
+          data: { errorSource: 'FetchNetworkErrorWrapper' },
+        });
+        expect(errorSpy).toHaveBeenCalledTimes(1);
+        expect(errorSpy).toHaveBeenCalledWith(
+          expect.stringMatching(/^Network error during fetch GET https:\/\/public\.example\.com: /),
+          expect.objectContaining({
+            extra: expect.objectContaining({
+              errorSource: 'FetchNetworkError',
+              causeChain: [
+                expect.objectContaining({ name: 'TypeError', code: expect.any(String) }),
+              ],
+            }),
+          }),
+        );
+      },
+    );
+
+    it('a guard rejection landing after timeoutMs still throws Timeout', async () => {
+      // The redirect target's lookup ignores the signal and answers after the deadline.
+      dnsSlots.lookup = vi.fn(async (hostname: string) => {
+        if (hostname !== 'slow.example') throw unresolvable();
+        await new Promise((resolve) => setTimeout(resolve, 150));
+        return [{ address: '10.0.0.9', family: 4 }];
+      });
+      vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(redirectTo('https://slow.example/'));
+
+      const error = (await fetchWithTimeout(START, 30, context, ssrfOpts).catch(
+        (e) => e,
+      )) as McpError;
+
+      expect(error).toMatchObject({
+        code: JsonRpcErrorCode.Timeout,
+        data: { errorSource: 'FetchTimeout' },
+      });
+      expect(errorSpy).toHaveBeenCalledTimes(1);
+      expect(errorSpy).toHaveBeenCalledWith(
+        `fetch GET ${START} timed out after 30ms.`,
+        expect.anything(),
+      );
     });
   });
 });

@@ -23,7 +23,12 @@ import {
 import { logger } from '@/utils/internal/logger.js';
 import { requestContextService } from '@/utils/internal/requestContext.js';
 import { runtimeCaps } from '@/utils/internal/runtime.js';
-import { DEFAULT_SENSITIVE_FIELDS, toPinoRedactPaths } from '@/utils/security/sensitiveFields.js';
+import {
+  DEFAULT_SENSITIVE_FIELDS,
+  isSensitiveKey,
+  setSensitiveNames,
+  toPinoRedactPaths,
+} from '@/utils/security/sensitiveFields.js';
 import { isRecord } from '@/utils/types/guards.js';
 
 let _sanitizeHtmlFn: typeof sanitizeHtml | undefined;
@@ -92,79 +97,6 @@ const PATH_REJECTION_HINTS: Record<PathRejectionReason, string> = {
     'Provide a relative path that stays inside the permitted directory, with no `..` segments climbing out of it.',
   absolute_path_disallowed: 'Provide a relative path instead of an absolute one.',
 };
-
-/**
- * Each sensitive field lowercased with non-alphanumerics stripped, matched
- * against a whole key. Module state: the singleton `Sanitization` and
- * {@link maskSensitiveFields} read one list, which `setSensitiveFields` rebuilds.
- */
-let sensitiveNames: ReadonlySet<string> = new Set();
-/** Each sensitive field lowercased, matched against each word of a key. */
-let sensitiveWords: ReadonlySet<string> = new Set();
-
-/** Lowercases a field name and strips every non-alphanumeric character. */
-function normalizeName(name: string): string {
-  return name.toLowerCase().replace(/[^a-z0-9]/g, '');
-}
-
-function setSensitiveNames(fields: readonly string[]): void {
-  sensitiveNames = new Set(fields.map(normalizeName).filter(Boolean));
-  sensitiveWords = new Set(fields.map((field) => field.toLowerCase()).filter(Boolean));
-}
-
-setSensitiveNames(DEFAULT_SENSITIVE_FIELDS);
-
-/**
- * Whether `key` names a sensitive field: its normalized form equals one
- * (`API_KEY` matches `apiKey`), or one of its camelCase, snake_case, or
- * kebab-case words does (`accessToken` matches `token`).
- */
-function isSensitiveKey(key: string): boolean {
-  if (sensitiveNames.has(normalizeName(key))) return true;
-  return key
-    .replace(/([A-Z])/g, ' $1')
-    .toLowerCase()
-    .split(/[\s_-]+/)
-    .some((word) => sensitiveWords.has(word));
-}
-
-/**
- * Copies `fields` with the value of every sensitive field replaced by
- * `'[REDACTED]'`, at any depth, matching keys as `sanitizeForLogging` does —
- * fields added with `setSensitiveFields` included. The copy is what
- * `JSON.stringify` reads from the input (an object's `toJSON()` result, else its
- * own enumerable properties), so it serializes as the input would, minus the
- * masked values. Nothing passes through `structuredClone`, which rejects a `URL`
- * or a function. A reference back to an enclosing object becomes `'[Circular]'`.
- * The input is never modified.
- *
- * @internal Masks the `ctx.log` mirror to the client. Not part of the public API.
- */
-export function maskSensitiveFields(fields: Record<string, unknown>): Record<string, unknown> {
-  return maskEntries(fields, new Set([fields]));
-}
-
-/** Masks an object's own enumerable entries; `ancestors` holds every object enclosing them. */
-function maskEntries(object: object, ancestors: Set<object>): Record<string, unknown> {
-  const masked: Record<string, unknown> = {};
-  for (const [key, value] of Object.entries(object)) {
-    masked[key] = isSensitiveKey(key) ? '[REDACTED]' : maskValue(value, ancestors);
-  }
-  return masked;
-}
-
-function maskValue(value: unknown, ancestors: Set<object>): unknown {
-  const toJSON = isRecord(value) ? value.toJSON : undefined;
-  const json: unknown = typeof toJSON === 'function' ? toJSON.call(value) : value;
-  if (json === null || typeof json !== 'object') return json;
-  if (ancestors.has(json)) return '[Circular]';
-  ancestors.add(json);
-  const masked = Array.isArray(json)
-    ? json.map((item: unknown) => maskValue(item, ancestors))
-    : maskEntries(json, ancestors);
-  ancestors.delete(json);
-  return masked;
-}
 
 // Dynamically import 'path' only in Node.js environments.
 // Top-level await ensures the module is loaded before any sanitizePath call.
@@ -373,16 +305,20 @@ export class Sanitization {
   }
 
   /**
-   * Extends the list of sensitive field names used by `sanitizeForLogging` and by the
-   * masking of every `ctx.log` record mirrored to the client.
+   * Extends the list of sensitive field names used by `sanitizeForLogging` and by every
+   * log sink: the process log, `interactions.log`, the OTLP export, and the `ctx.log`
+   * mirror to the client.
    * New names are merged with the existing list (deduplication applied, case-insensitive).
-   * Changes take effect immediately on subsequent calls.
+   * Changes take effect immediately on subsequent calls. The correlation fields a record's
+   * context supplies at its root (`requestId`, `sessionId`, `tenantId`, `traceId`, `spanId`,
+   * `timestamp`, `operation`) are never redacted in the logs; a name matching one of them
+   * still redacts a caller's own key of that name.
    *
-   * @param fields - Field names to add to the sensitive list (e.g., `['myApiKey', 'session_id']`).
+   * @param fields - Field names to add to the sensitive list (e.g., `['myApiKey', 'accountNumber']`).
    * @returns `void`
    * @example
    * ```ts
-   * sanitization.setSensitiveFields(['myApiKey', 'session_id']);
+   * sanitization.setSensitiveFields(['myApiKey', 'accountNumber']);
    * sanitization.sanitizeForLogging({ myApiKey: 'abc123' });
    * // => { myApiKey: '[REDACTED]' }
    * ```
@@ -425,7 +361,11 @@ export class Sanitization {
    * - `'*.token'` — matches `{ auth: { token: '...' } }`
    * - `'*.*.token'` — matches `{ context: { auth: { token: '...' } } }`
    *
-   * Pass the result directly to pino's `redact.paths` option.
+   * Pass the result to pino's `redact.paths` option for a pino instance of your own; the
+   * framework's loggers redact with the key matcher instead. These paths are narrower: whole
+   * names only, matched case-sensitively, at three depths. A name added through
+   * `setSensitiveFields` is stored lowercased, so its path matches only a lowercase key
+   * (`myapikey`, not `myApiKey`).
    *
    * @returns Array of fast-redact-compatible path strings for use in pino's `redact.paths`.
    * @example
@@ -927,15 +867,16 @@ export class Sanitization {
   /**
    * Produces a log-safe deep clone of `input` with sensitive field values replaced by `'[REDACTED]'`.
    *
-   * This method is **synchronous**. It uses `structuredClone` for deep cloning. Sensitive field
-   * detection combines two strategies:
-   * - **Exact match**: the normalized key (lowercased, non-alphanumeric stripped) matches a
-   *   sensitive field name.
-   * - **Word match**: splitting the key by camelCase/snake_case/kebab-case tokens and checking
-   *   each token against the sensitive word set.
+   * This method is **synchronous**. It uses `structuredClone` for deep cloning. A key is
+   * sensitive when some run of its adjacent words, joined, equals a sensitive field name with
+   * case and separators ignored. Words are split at every character other than a letter or
+   * digit, at a lowercase letter followed by a capital, at the end of a run of capitals, and
+   * around each run of digits: `apiKey`, `API_KEY`, `APIKey`, `x-api-key`, `accessToken`,
+   * `upstream_private_key`, and `apiKey2` are all sensitive, while `max_tokens`, `MAX_TOKENS`,
+   * and `tokenizer` are not. Every log sink matches keys the same way.
    *
    * Non-object/non-array inputs (primitives, `null`) are returned as-is without cloning.
-   * If `structuredClone` itself throws (e.g., circular reference, uncloneable type), the method
+   * If `structuredClone` itself throws (e.g., a function, a symbol, or a getter that throws), the method
    * returns the string `'[Log Sanitization Failed]'` and emits an error log rather than throwing.
    *
    * @param input - The value to sanitize. Non-objects are returned unchanged.
@@ -981,8 +922,8 @@ export class Sanitization {
    * the result is always well-formed. It is a prefix of the whole serialization,
    * so a truncated payload is no longer valid JSON; `truncated` says so.
    *
-   * Returned as a string rather than an object because the logger drops values
-   * nested past its sanitize depth, which would silently strip the deep parts of
+   * Returned as a string rather than an object because the logger writes an
+   * object 16 levels below the record root as `'[MaxDepth]'`, which would cut the deep parts of
    * a payload. A value `JSON.stringify` rejects (a `bigint`) yields
    * `'[Log Serialization Failed]'` rather than throwing into the caller's path.
    *
