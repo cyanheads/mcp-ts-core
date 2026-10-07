@@ -8,6 +8,8 @@ import { JsonRpcErrorCode, McpError, timeout } from '@/types-global/errors.js';
 import {
   errorText,
   extractErrorCauseChain,
+  getErrorMessage,
+  isInstance,
   readField,
   UNREADABLE,
 } from '@/utils/internal/error-handler/helpers.js';
@@ -556,10 +558,11 @@ export async function withRetry<T>(
           throw clock.exceeded(error, attempt + 1);
         }
 
-        // As text, guarded: a `message` that throws on read or is not a string never fails the retry (#697).
-        const errorMessage = errorText(
-          error instanceof Error ? readField(error, 'message') : error,
-        );
+        // As text, guarded: a `message` that throws on read or is not a string never fails the retry (#697),
+        // and any other thrown value is described as `getErrorMessage` describes it.
+        const errorMessage = isInstance(error, Error)
+          ? errorText(readField(error, 'message'))
+          : getErrorMessage(error);
         const delaySource = retryAfterMs === undefined ? '' : ' (Retry-After)';
         // The transport code (`ECONNRESET`, `ConnectionRefused`) rides the
         // cause chain, not the message — the only trace of why a retry that

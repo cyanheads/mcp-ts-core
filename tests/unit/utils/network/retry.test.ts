@@ -1185,6 +1185,12 @@ describe('withRetry logs the cause chain of a retried error (#615)', () => {
   /** The `ECONNRESET` cause from the issue's reproduction. */
   const connectionReset = () => Object.assign(new Error('read ECONNRESET'), { code: 'ECONNRESET' });
 
+  it('writes a thrown plain object as its JSON, not as unreadable', async () => {
+    const [message] = await retryRecordFor({ code: 'ECONNRESET' });
+
+    expect(message).toBe('Retry 1/3 for demo: {"code":"ECONNRESET"} — waiting 1ms');
+  });
+
   it("carries a retried error's cause — name, message, and code — on the retry record", async () => {
     const failure = new McpError(
       JsonRpcErrorCode.ServiceUnavailable,
