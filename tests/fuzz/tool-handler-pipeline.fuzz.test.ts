@@ -1,8 +1,9 @@
 /**
  * @fileoverview Fuzz tests for the tool handler pipeline.
  * Exercises `createToolHandler` with schema-generated and adversarial inputs
- * to verify the framework never crashes or leaks internals. That an own `__proto__` key
- * never re-prototypes a copy of the arguments is pinned in the pre-validation unit suite.
+ * to verify the framework never crashes, leaks internals, or lets a `constructor.prototype`
+ * payload reach `Object.prototype`. That an own `__proto__` key never re-prototypes a copy
+ * of the arguments is pinned in the pre-validation unit suite.
  * @module tests/fuzz/tool-handler-pipeline.fuzz.test
  */
 
@@ -517,6 +518,63 @@ describe('Tool Handler Pipeline Fuzz Tests', () => {
           data: { reason: 'json_parse_failed', requestId: 'fuzz-req-id' },
         },
       });
+    });
+  });
+
+  describe('Prototype pollution resistance', () => {
+    /**
+     * A recursive merge into an existing object follows an own `constructor` key
+     * to the inherited `Object`, then `prototype` to `Object.prototype`. Each
+     * payload arrives parsed from JSON, as the wire delivers it, at a different
+     * depth of the arguments.
+     */
+    it('a constructor.prototype payload never reaches Object.prototype', async () => {
+      const payload = '"constructor":{"prototype":{"polluted":true}}';
+      const complex = '"name":"n","tags":[],"priority":"low"';
+      const calls: {
+        where: string;
+        def: AnyToolDefinition;
+        args: unknown;
+        isError: true | undefined;
+      }[] = [
+        {
+          where: 'at the root, which strict input rejects',
+          def: stringTool as AnyToolDefinition,
+          args: JSON.parse(`{"value":"test",${payload}}`),
+          isError: true,
+        },
+        {
+          where: 'inside a declared object, which strips the undeclared key',
+          def: complexTool as AnyToolDefinition,
+          args: JSON.parse(`{${complex},"metadata":{"source":"s",${payload}}}`),
+          isError: undefined,
+        },
+        {
+          where: 'as JSON text in that object, which the repair step decodes',
+          def: complexTool as AnyToolDefinition,
+          args: { ...JSON.parse(`{${complex}}`), metadata: `{"source":"s",${payload}}` },
+          isError: undefined,
+        },
+      ];
+
+      const before = new Set(Object.getOwnPropertyNames(Object.prototype));
+      /** Deletes and returns every key `Object.prototype` gained, so none outlives this test. */
+      const takeAdded = (): string[] => {
+        const added = Object.getOwnPropertyNames(Object.prototype).filter(
+          (key) => !before.has(key),
+        );
+        for (const key of added) delete (Object.prototype as Record<string, unknown>)[key];
+        return added;
+      };
+
+      for (const { where, def, args, isError } of calls) {
+        let added: string[] = [];
+        const result = await call(createToolHandler(def, services, notifiers), args).finally(() => {
+          added = takeAdded();
+        });
+        expect(added, where).toEqual([]);
+        expect(result.isError, where).toBe(isError);
+      }
     });
   });
 

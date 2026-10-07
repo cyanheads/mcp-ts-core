@@ -51,6 +51,9 @@ To accept a change, run `bun run test:contract -u`, review
 them. A new pin must also be listed in `PINS` (`harness.ts`).
 `pins.test.ts` fails on any file in `pins/` the suite does not write. Vitest
 never reports a file snapshot as obsolete, so nothing else would catch a stale one.
+Outside `-u` it also fails on a listed pin missing from `pins/`. Under `-u` it
+skips that check, because another test file may write a new pin after
+`pins.test.ts` reads the directory, so a run that adds a pin passes first time.
 
 Pins characterise current behaviour, known issues included. When a filed fix
 changes a pin, it lands with a reviewed `-u`. Zod and SDK upgrades can also

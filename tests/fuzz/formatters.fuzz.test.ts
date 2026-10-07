@@ -18,8 +18,8 @@ import { type TreeNode, type TreeStyle, treeFormatter } from '@/utils/formatting
 
 const SEED = 20_261_006;
 
+describe('tableFormatter', () => {
   // Prototype-named headers are excluded: alignment lookups read Object.prototype for them.
-  // Prototype-named headers are excluded pending the tracking issue (#677).
   const header = fc
     .stringMatching(/^[A-Za-z_][A-Za-z0-9_]{0,11}$/)
     .filter((name) => !(name in Object.prototype));

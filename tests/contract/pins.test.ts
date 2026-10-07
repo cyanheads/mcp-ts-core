@@ -11,6 +11,14 @@ import { PINS, PINS_DIR } from './harness.js';
 
 describe('pins directory', () => {
   it('holds exactly the pins the suite writes', () => {
-    expect(readdirSync(PINS_DIR).sort()).toEqual([...PINS].sort());
+    const onDisk = readdirSync(PINS_DIR).sort();
+    if (expect.getState().snapshotState.snapshotUpdateState === 'all') {
+      // Under `-u` another file may write a new pin after this read, so only an
+      // unlisted file fails here: Vitest never deletes one, in any mode.
+      const listed = new Set<string>(PINS);
+      expect(onDisk.filter((file) => !listed.has(file))).toEqual([]);
+    } else {
+      expect(onDisk).toEqual([...PINS].sort());
+    }
   });
 });

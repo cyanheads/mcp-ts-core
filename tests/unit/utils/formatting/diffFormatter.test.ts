@@ -140,6 +140,13 @@ describe('DiffFormatter', () => {
       expect(result).toContain('-old');
       expect(result).toContain('+new');
     });
+
+    it('should emit no hunk for two empty arrays', async () => {
+      const result = await diffFormatter.diffLines([], []);
+
+      expect(result).not.toContain('@@');
+      expect(result).not.toMatch(/^[-+](?![-+]{2})/m);
+    });
   });
 
   describe('diffWords() method', () => {

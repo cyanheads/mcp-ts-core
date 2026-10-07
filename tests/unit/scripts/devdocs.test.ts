@@ -110,6 +110,18 @@ describe('devdocs.ts - matchesPattern', () => {
       expect(matchesPattern('test|file.ts', ['test|file.ts'])).toBe(true);
       expect(matchesPattern('testfile.ts', ['test|file.ts'])).toBe(false);
     });
+
+    it('should keep a star a glob wildcard after a literal dot', () => {
+      // `.*` is a dotfile glob, never the regex "any run of characters".
+      expect(matchesPattern('.env', ['.*'])).toBe(true);
+      expect(matchesPattern('anything.ts', ['.*'])).toBe(false);
+    });
+
+    it('should read a regex escape class as its literal characters', () => {
+      // `\d+` is a backslash, a `d`, and a `+`, never a digit class.
+      expect(matchesPattern('\\d+', ['\\d+'])).toBe(true);
+      expect(matchesPattern('123', ['\\d+'])).toBe(false);
+    });
   });
 
   describe('Edge cases', () => {

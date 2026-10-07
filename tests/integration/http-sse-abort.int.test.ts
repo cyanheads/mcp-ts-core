@@ -204,9 +204,7 @@ describe('HTTP SSE abort cleanup (issue #50)', () => {
     expect((await health(port)).status).toBe(200);
   });
 
-  it('concurrent SSE aborts on different sessions neither cross-contaminate nor fail to close', async () => {
-    const recordsBefore = logRecords().length;
-
+  it('concurrent SSE aborts on different sessions do not cross-contaminate', async () => {
     // Mint 10 sessions, open 10 SSE streams in parallel, abort all in parallel.
     const sessions = await Promise.all(Array.from({ length: 10 }, () => newSession(port)));
     const results = await Promise.all(sessions.map((sid) => openAndAbortSse(port, sid, 30)));
@@ -219,8 +217,11 @@ describe('HTTP SSE abort cleanup (issue #50)', () => {
     // All 10 sessions can still be cleanly DELETEd post-abort.
     const deletes = await Promise.all(sessions.map((sid) => deleteSession(port, sid)));
     expect(deletes).toEqual(sessions.map(() => 200));
+  });
 
-    // A session-less DELETE logs a warning after every teardown above. The sink
+  // Runs last: it reads every record the cases above left, the 50-cycle run included.
+  it('leaves no close failure or error-level record behind across every abort above', async () => {
+    // A session-less DELETE logs a warning after every request above. The sink
     // writes in order, so once that sentinel lands, so has anything they logged.
     const sentinel = await exchange(port, {
       method: 'DELETE',
@@ -230,13 +231,13 @@ describe('HTTP SSE abort cleanup (issue #50)', () => {
     expect(sentinel.status).toBe(400);
     const isSentinel = (record: LogRecord) => record.msg === 'DELETE request without session ID';
     const deadline = Date.now() + 5_000;
-    while (!logRecords().slice(recordsBefore).some(isSentinel) && Date.now() < deadline) {
+    while (!logRecords().some(isSentinel) && Date.now() < deadline) {
       await new Promise((r) => setTimeout(r, 50));
     }
 
     // Neither the aborts nor the teardowns after them leave a close failure or
     // an error-level record (an unhandled rejection logs at fatal) behind.
-    const records = logRecords().slice(recordsBefore);
+    const records = logRecords();
     expect(records.some(isSentinel)).toBe(true);
     expect(records.filter((r) => r.msg.startsWith('Failed to close a session surface'))).toEqual(
       [],
