@@ -1381,7 +1381,12 @@ describe('withRetry logs the cause chain of a retried error (#615)', () => {
 
   it.each([
     ['a Symbol', Symbol('thrown'), 'Symbol(thrown)'],
-    ['an object whose toString throws', hostile, '[Unreadable]'],
+    // Described from its fields; its `toString` is never called.
+    [
+      'an object whose toString throws',
+      hostile,
+      'Non-Error object encountered (constructor: Object)',
+    ],
   ])(
     'retries a thrown value that is not an Error — %s — logging it as text (#697)',
     async (_label, failure, text) => {
