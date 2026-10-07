@@ -21,7 +21,7 @@ import {
 import type { AnyPromptDefinition } from '@/mcp-server/prompts/utils/promptDefinition.js';
 import { JsonRpcErrorCode, McpError } from '@/types-global/errors.js';
 import { ErrorHandler } from '@/utils/internal/error-handler/errorHandler.js';
-import { readErrorData } from '@/utils/internal/error-handler/helpers.js';
+import { readWireErrorData } from '@/utils/internal/error-handler/helpers.js';
 import type { logger as defaultLogger } from '@/utils/internal/logger.js';
 import { measurePromptGeneration } from '@/utils/internal/performance.js';
 import { requestContextService } from '@/utils/internal/requestContext.js';
@@ -152,7 +152,8 @@ export class PromptRegistry {
                * (#582). The client gets the classified code and message, plus
                * only the `data` a thrown `McpError` declared and the call's
                * `requestId` (#576) — the same wire shape as tools and resources.
-               * That `data` is a copy, left out when it cannot be read (#697).
+               * That `data` is a copy, left out when it cannot be read (#697),
+               * with every field one the wire carries.
                */
               const handled = ErrorHandler.handleError(error, {
                 operation: `prompt:${promptDef.name}`,
@@ -161,7 +162,7 @@ export class PromptRegistry {
               throw new McpError(
                 handled instanceof McpError ? handled.code : JsonRpcErrorCode.InternalError,
                 handled.message,
-                { ...readErrorData(error), requestId: requestContext.requestId },
+                { ...readWireErrorData(error), requestId: requestContext.requestId },
                 { cause: error },
               );
             }

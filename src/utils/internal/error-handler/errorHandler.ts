@@ -33,6 +33,7 @@ import {
   isInstance,
   readErrorData,
   readField,
+  readWireErrorData,
   recordSpanFailure,
   UNREADABLE,
 } from './helpers.js';
@@ -591,7 +592,9 @@ export class ErrorHandler {
    * `'[Unreadable]'`, one that is not a string is written as text (`String` for a
    * primitive, `'[Unreadable]'` for an object), a `data` that cannot be read or copied
    * (a revoked `Proxy`) is `{}`, and a value `instanceof` cannot inspect (a revoked
-   * `Proxy`) is formatted as a non-Error.
+   * `Proxy`) is formatted as a non-Error. Every `data` field is one a response can
+   * carry: one `JSON.stringify` cannot write is `'[Unreadable]'`, and one that takes
+   * more than 1,000,000 JSON values to write is `'[Truncated]'`.
    *
    * @param error - The error instance or value to format.
    * @returns A plain object with `code` (numeric `JsonRpcErrorCode`), `message` (string), and `data` (object).
@@ -610,7 +613,7 @@ export class ErrorHandler {
       return {
         code: ErrorHandler.determineErrorCode(error),
         message: errorText(readField(error, 'message')),
-        data: readErrorData(error) ?? {},
+        data: readWireErrorData(error) ?? {},
       };
     }
 

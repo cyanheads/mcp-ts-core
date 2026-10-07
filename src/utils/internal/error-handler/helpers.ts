@@ -70,32 +70,64 @@ export function copyFields<T extends object>(value: T | undefined): T | undefine
 }
 
 /**
- * A copy of the `data` a thrown `McpError` carries, so the error path reads
- * plain fields rather than the thrown value's, and every field of it is one the
- * wire can carry: a field `JSON.stringify` cannot serialize — a getter or a
- * revoked `Proxy` that throws on read at any depth, a `BigInt`, a cycle, a
- * `toJSON` that throws — is {@link UNREADABLE}, since a response holding one is
- * never sent and the client waits for it. Every other field is the thrown
- * value itself, so readable `data` is written byte for byte as thrown.
- * `undefined` when `error` is not an `McpError`, carries no object `data`, or
- * its `data` cannot be read or copied — a getter, a revoked `Proxy`, a throwing
- * `ownKeys` trap.
+ * A shallow copy of the `data` a thrown `McpError` carries, so the error path
+ * reads plain fields rather than the thrown value's. Nothing is serialized: the
+ * log record writes the copy through the bounded log walk, and the wire
+ * boundaries check it with {@link readWireErrorData}. `undefined` when `error`
+ * is not an `McpError`, carries no object `data`, or its `data` cannot be read
+ * or copied — a getter, a revoked `Proxy`, a throwing `ownKeys` trap.
  */
 export function readErrorData(error: unknown): Record<string, unknown> | undefined {
   if (!isInstance(error, McpError)) return;
   const data = readField(error, 'data');
-  const copy =
-    typeof data === 'object' && data !== null
-      ? copyFields(data as Record<string, unknown>)
-      : undefined;
-  if (copy === undefined) return;
-  for (const key of Object.keys(copy)) {
-    try {
-      JSON.stringify(copy[key]);
-    } catch {
-      copy[key] = UNREADABLE;
-    }
+  return typeof data === 'object' && data !== null
+    ? copyFields(data as Record<string, unknown>)
+    : undefined;
+}
+
+/**
+ * JSON values one `data` field may take to write before the wire check gives it
+ * up: about 6 MB of JSON, checked in tens of milliseconds. `JSON.stringify`
+ * writes a shared object once per reference, so 17 objects that each refer to
+ * the next three times write 43 million values: seconds and gigabytes to
+ * serialize, and a response a stdio client cannot read.
+ */
+const WIRE_VALUES = 1_000_000;
+
+/** Thrown by the wire check's replacer once a field passes {@link WIRE_VALUES}. */
+const OVER_WIRE_BUDGET = Symbol('over wire budget');
+
+/**
+ * `value` when `JSON.stringify` writes it within {@link WIRE_VALUES} values;
+ * `'[Truncated]'` when it would take more, and {@link UNREADABLE} when it
+ * cannot be written at all — a getter or a revoked `Proxy` that throws on read
+ * at any depth, a `BigInt`, a cycle, a `toJSON` that throws.
+ */
+function wireField(value: unknown): unknown {
+  let values = 0;
+  try {
+    JSON.stringify(value, (_key, field: unknown) => {
+      if (++values > WIRE_VALUES) throw OVER_WIRE_BUDGET;
+      return field;
+    });
+    return value;
+  } catch (error) {
+    return error === OVER_WIRE_BUDGET ? '[Truncated]' : UNREADABLE;
   }
+}
+
+/**
+ * {@link readErrorData} for a response: every field is one the wire carries.
+ * A field `JSON.stringify` cannot write is {@link UNREADABLE}, since a response
+ * holding one is never sent and the client waits for it, and a field that takes
+ * more than {@link WIRE_VALUES} JSON values to write is `'[Truncated]'`. Every
+ * other field is the thrown value itself, so readable `data` is sent byte for
+ * byte as thrown.
+ */
+export function readWireErrorData(error: unknown): Record<string, unknown> | undefined {
+  const copy = readErrorData(error);
+  if (copy === undefined) return;
+  for (const key of Object.keys(copy)) copy[key] = wireField(copy[key]);
   return copy;
 }
 

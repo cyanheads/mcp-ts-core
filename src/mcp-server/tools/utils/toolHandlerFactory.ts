@@ -40,7 +40,11 @@ import {
 } from '@/types-global/errors.js';
 import { resolvePartialResultKeys } from '@/utils/formatting/partialResult.js';
 import { asRequestCancelled, ErrorHandler } from '@/utils/internal/error-handler/errorHandler.js';
-import { isInstance, readErrorData } from '@/utils/internal/error-handler/helpers.js';
+import {
+  isInstance,
+  readErrorData,
+  readWireErrorData,
+} from '@/utils/internal/error-handler/helpers.js';
 import {
   capForObservability,
   OBSERVABILITY_MAX_STRING_LENGTH,
@@ -785,7 +789,8 @@ function accept<TDefinition extends AnyToolDefinition>(
  * Never throws on the thrown value (#697): its `code`, `message`, and `data`
  * are read as {@link ErrorHandler.classifyOnly} reads them, so one that cannot
  * be read is `InternalError`, `'[Unreadable]'`, or left out, and `data` is a
- * copy of the thrown one.
+ * copy of the thrown one in which every field is one the wire carries
+ * ({@link readWireErrorData}).
  *
  * Use after invoking {@link ErrorHandler.handleError} for OTel/logging side
  * effects — this helper does not log.
@@ -802,7 +807,7 @@ export function classifyAndBuildToolErrorResult(
   };
   // `classifyOnly` returns only a `ZodError`'s issues as `data`; a thrown `McpError`'s is copied here.
   const { code, message, data } = ErrorHandler.classifyOnly(error);
-  return buildToolErrorResult(code, message, withRequestId(readErrorData(error) ?? data));
+  return buildToolErrorResult(code, message, withRequestId(readWireErrorData(error) ?? data));
 }
 
 // ---------------------------------------------------------------------------

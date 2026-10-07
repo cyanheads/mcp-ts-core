@@ -7,7 +7,9 @@
  * serializes every message as the stdio transport does, so a response that
  * cannot be serialized is never sent. Every call answers with its error
  * envelope and `requestId`, each field the wire cannot carry written as
- * `'[Unreadable]'`, and readable data unchanged.
+ * `'[Unreadable]'`, one that takes more than 1,000,000 JSON values to write (a
+ * shared object, written once per reference) as `'[Truncated]'`, and readable
+ * data unchanged.
  * @module tests/unit/mcp-server/unserializableErrorData.wire.test
  */
 
@@ -77,6 +79,14 @@ const UNSERIALIZABLE: Record<string, { label: string; data: () => Record<string,
         },
       },
     }),
+  },
+  shared: {
+    label: 'a shared object written 43 million times',
+    data: () => {
+      let node: Record<string, unknown> = { leaf: true };
+      for (let i = 0; i < 16; i++) node = { a: node, b: node, c: node };
+      return { id: 1, bad: node };
+    },
   },
 };
 
@@ -155,9 +165,10 @@ afterAll(async () => {
 
 /** The `data` each surface answers with for `variant`, beyond what the surface adds itself. */
 function expectedData(variant: string): Record<string, unknown> {
-  return variant === 'readable'
-    ? { id: 1, when: '1970-01-01T00:00:00.000Z', nested: { list: [1, 'x', null] } }
-    : { id: 1, bad: '[Unreadable]' };
+  if (variant === 'readable') {
+    return { id: 1, when: '1970-01-01T00:00:00.000Z', nested: { list: [1, 'x', null] } };
+  }
+  return { id: 1, bad: variant === 'shared' ? '[Truncated]' : '[Unreadable]' };
 }
 
 /** What `call` rejects with. */

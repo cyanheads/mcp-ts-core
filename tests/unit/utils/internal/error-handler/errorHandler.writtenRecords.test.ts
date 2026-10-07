@@ -582,6 +582,21 @@ describe('the handler’s fields beside caller-sized data (#649)', () => {
     if (includeStack === false) expect(line).not.toMatch(/"stack"/);
   });
 
+  it('keeps data a shared graph fills without writing every path through it', () => {
+    // 17 objects, 43 million paths: a JSON.stringify of it takes seconds and gigabytes.
+    const graph = sharedGraph(16);
+    const started = performance.now();
+
+    const returned = handle(new McpError(JsonRpcErrorCode.Conflict, 'shared data', { v: graph }), {
+      operation: 'shared_data',
+    });
+
+    expect(performance.now() - started).toBeLessThan(1_000);
+    expect((returned as McpError).data?.v).toBe(graph);
+    const { written } = record('shared_data');
+    expect(written.errorData.v).toMatchObject({ a: { a: { a: expect.any(Object) } } });
+  });
+
   it('never lets a caller’s extra key replace one of the handler’s fields', () => {
     const thrown = thrownBy(throwSiteOfTypeError);
 

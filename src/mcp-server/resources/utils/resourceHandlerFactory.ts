@@ -29,7 +29,11 @@ import type { AnyResourceDefinition } from '@/mcp-server/resources/utils/resourc
 import { withRequiredScopes } from '@/mcp-server/transports/auth/lib/authUtils.js';
 import { JsonRpcErrorCode, McpError } from '@/types-global/errors.js';
 import { asRequestCancelled, ErrorHandler } from '@/utils/internal/error-handler/errorHandler.js';
-import { isInstance, readErrorData, UNREADABLE } from '@/utils/internal/error-handler/helpers.js';
+import {
+  isInstance,
+  readWireErrorData,
+  UNREADABLE,
+} from '@/utils/internal/error-handler/helpers.js';
 import {
   capForObservability,
   OBSERVABILITY_MAX_STRING_LENGTH,
@@ -244,13 +248,14 @@ function asMcpError(error: unknown): McpError {
  *
  * Never throws on the thrown error (#697): its `code`, `message`, and `data`
  * are read as {@link ErrorHandler.classifyOnly} reads them, so one that cannot
- * be read is `InternalError`, `'[Unreadable]'`, or left out. A not-found error
+ * be read is `InternalError`, `'[Unreadable]'`, or left out, and every `data`
+ * field is one the wire carries ({@link readWireErrorData}). A not-found error
  * whose message cannot be read is rebuilt with the same `{ uri }`, so the SDK
  * never reads the thrown one.
  */
 function withRequestId(error: McpError, requestId: string): McpError {
   const { code, message } = ErrorHandler.classifyOnly(error);
-  const data = readErrorData(error);
+  const data = readWireErrorData(error);
   const isResourceNotFound =
     code === JsonRpcErrorCode.InvalidParams &&
     data !== undefined &&
