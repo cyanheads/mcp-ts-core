@@ -4,7 +4,7 @@ description: >
   Reference for core and server configuration in `@cyanheads/mcp-ts-core`. Covers env var tables with defaults, priority order, server-specific Zod schema pattern, and Workers lazy-parsing requirement.
 metadata:
   author: cyanheads
-  version: "1.24"
+  version: "1.25"
   audience: external
   type: reference
 ---
@@ -96,6 +96,7 @@ await createApp({ sessionMode: { default: 'stateful', require: 'stateful' } }); 
 | `LOGS_DIR` | `logsPath` | `<app-root>/logs` | Node.js only; absolute paths are used verbatim, relative ones resolve against the application root (see Core config) — never the framework's install directory. A file under it that cannot be opened (read-only mount, another user's directory) is dropped at startup with one `warning` naming it and the error code; stderr and the other files keep logging |
 | `LOG_TOOL_FAILURE_PAYLOADS` | `logToolFailurePayloads` | `false` | Opt-in. Each failed tool call also writes a `Tool failure payload: <tool>` record carrying `toolInput` (the arguments as sent) and `toolResult` (the `CallToolResult` returned) as redacted JSON strings, at the call's error-record level. Reaches every log destination — stderr, `combined.log`, and OTLP when `OTEL_EXPORTER_OTLP_LOGS_ENDPOINT` is set. Redaction is by key name only, so a secret inside a free-form value (a query, a message) is logged. Record shape: `api-telemetry` Logs |
 | `LOG_TOOL_FAILURE_PAYLOAD_MAX_BYTES` | `logToolFailurePayloadMaxBytes` | `16384` | Cap per payload, in UTF-8 bytes. A longer one is cut on a character boundary and flagged with `toolInputTruncated` / `toolResultTruncated` |
+| `LOG_LLM_INTERACTIONS` | `logLlmInteractions` | `false` | Opt-in. The OpenRouter provider (`/services`) writes each chat completion's full request and response bodies to `interactions.log` instead of metadata (model, message count, generation params, finish reasons, token usage). Transcripts can carry user PII, secrets, and confidential prompts, and redaction is by key name only. `interactions.log` sits under `LOGS_DIR` (Node.js only) and is never exported over OTLP |
 
 ### Transport
 
