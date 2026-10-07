@@ -1,6 +1,6 @@
 # mcp-ts-core - Directory Structure
 
-Generated on: 2026-10-05 00:03:55
+Generated on: 2026-10-07 09:22:04
 
 ```text
 mcp-ts-core/
@@ -495,6 +495,7 @@ mcp-ts-core/
 │   │   │   ├── encoding.ts
 │   │   │   ├── lazyImport.ts
 │   │   │   ├── logger.ts
+│   │   │   ├── logValue.ts
 │   │   │   ├── observabilityCap.ts
 │   │   │   ├── performance.ts
 │   │   │   ├── requestContext.ts
@@ -643,6 +644,23 @@ mcp-ts-core/
 │   │   ├── vitest.performance.ts
 │   │   ├── vitest.worker-bundle.ts
 │   │   └── vitest.worker.ts
+│   ├── contract/
+│   │   ├── pins/
+│   │   │   ├── calls.templates.json5
+│   │   │   ├── eras.2026-07-28.json5
+│   │   │   ├── eras.calls.2026-07-28.json5
+│   │   │   ├── purpose.2025-11-25.json5
+│   │   │   ├── templates.2025-11-25.json5
+│   │   │   ├── validation.defaults.json5
+│   │   │   └── validation.switches-off.json5
+│   │   ├── calls.test.ts
+│   │   ├── eras.test.ts
+│   │   ├── fixtures.ts
+│   │   ├── harness.ts
+│   │   ├── pins.test.ts
+│   │   ├── README.md
+│   │   ├── surfaces.test.ts
+│   │   └── validation.test.ts
 │   ├── fixtures/
 │   │   ├── auth-scoped-server.js
 │   │   ├── failure-payload-server.js
@@ -661,9 +679,11 @@ mcp-ts-core/
 │   ├── fuzz/
 │   │   ├── definition-fuzz.test.ts
 │   │   ├── error-handler.fuzz.test.ts
+│   │   ├── formatters.fuzz.test.ts
 │   │   ├── resource-handler-pipeline.fuzz.test.ts
 │   │   ├── session-store.fuzz.test.ts
 │   │   ├── session-store.model.fuzz.test.ts
+│   │   ├── sql-gate.fuzz.test.ts
 │   │   └── tool-handler-pipeline.fuzz.test.ts
 │   ├── helpers/
 │   │   ├── context-helpers.ts
@@ -706,6 +726,7 @@ mcp-ts-core/
 │   │   ├── server-identity.int.test.ts
 │   │   ├── session-mode-option.int.test.ts
 │   │   ├── setup.ts
+│   │   ├── shutdown-signals.int.test.ts
 │   │   ├── stdio.test.ts
 │   │   ├── tool-failure-payload.int.test.ts
 │   │   ├── union-input.int.test.ts
@@ -734,14 +755,17 @@ mcp-ts-core/
 │   │   ├── services/
 │   │   │   ├── canvas-duckdb.test.ts
 │   │   │   ├── canvas-error-surfaces.test.ts
-│   │   │   └── canvas-scratch.test.ts
+│   │   │   ├── canvas-gate-bypass.test.ts
+│   │   │   ├── canvas-scratch.test.ts
+│   │   │   └── canvas-spillover.test.ts
 │   │   ├── tools/
 │   │   │   ├── template-cat-fact.tool.test.ts
 │   │   │   ├── template-data-explorer.app-tool.test.ts
 │   │   │   ├── template-echo-message.tool.test.ts
 │   │   │   ├── template-image-test.tool.test.ts
 │   │   │   └── template-madlibs-elicitation.tool.test.ts
-│   │   └── examples-registry.test.ts
+│   │   ├── examples-registry.test.ts
+│   │   └── templates-lint.test.ts
 │   ├── types/
 │   │   ├── context-helpers.test-d.ts
 │   │   ├── error-contract.test-d.ts
@@ -750,7 +774,8 @@ mcp-ts-core/
 │   │   ├── request-context.test-d.ts
 │   │   ├── retry.test-d.ts
 │   │   ├── tool-builder.test-d.ts
-│   │   └── tool-contract-suite.test-d.ts
+│   │   ├── tool-contract-suite.test-d.ts
+│   │   └── worker-handler.test-d.ts
 │   ├── unit/
 │   │   ├── cli/
 │   │   │   ├── app-render.test.ts
@@ -762,13 +787,15 @@ mcp-ts-core/
 │   │   │   ├── logLevelAlias.test.ts
 │   │   │   └── parseEnvConfig.test.ts
 │   │   ├── core/
+│   │   │   ├── app.compose.test.ts
 │   │   │   ├── app.sessionMode.test.ts
 │   │   │   ├── app.test.ts
 │   │   │   ├── context-state-bounds.test.ts
 │   │   │   ├── context-wire-level.test.ts
 │   │   │   ├── context.test.ts
 │   │   │   ├── gcPressure.test.ts
-│   │   │   └── serverManifest.test.ts
+│   │   │   ├── serverManifest.test.ts
+│   │   │   └── worker.test.ts
 │   │   ├── helpers/
 │   │   │   └── matchers.test.ts
 │   │   ├── linter/
@@ -810,7 +837,8 @@ mcp-ts-core/
 │   │   │   │   │   ├── toolHandlerFactory.failurePayload.test.ts
 │   │   │   │   │   ├── toolHandlerFactory.rejectionRecords.test.ts
 │   │   │   │   │   ├── toolHandlerFactory.telemetry.test.ts
-│   │   │   │   │   └── toolHandlerFactory.test.ts
+│   │   │   │   │   ├── toolHandlerFactory.test.ts
+│   │   │   │   │   └── toolHandlerFactory.unreadableErrors.test.ts
 │   │   │   │   ├── content.test.ts
 │   │   │   │   ├── disabled-tool.test.ts
 │   │   │   │   ├── enrichment.test.ts
@@ -852,7 +880,8 @@ mcp-ts-core/
 │   │   │   ├── inputRequired.serving.test.ts
 │   │   │   ├── inputRequired.test.ts
 │   │   │   ├── notifications.test.ts
-│   │   │   └── server.test.ts
+│   │   │   ├── server.test.ts
+│   │   │   └── unserializableErrorData.wire.test.ts
 │   │   ├── packaging/
 │   │   │   ├── dependency-ranges.test.ts
 │   │   │   ├── dockerfile.test.ts
@@ -863,14 +892,18 @@ mcp-ts-core/
 │   │   ├── public-api/
 │   │   │   └── type-contract.test.ts
 │   │   ├── scripts/
+│   │   │   ├── audit-open-index-signatures.test.ts
 │   │   │   ├── build-changelog.test.ts
 │   │   │   ├── build-project-resolution.test.ts
 │   │   │   ├── check-dependency-specifiers.test.ts
+│   │   │   ├── check-docs-sync.test.ts
+│   │   │   ├── check-framework-antipatterns.test.ts
 │   │   │   ├── check-skill-versions.test.ts
 │   │   │   ├── check-skills-sync.test.ts
 │   │   │   ├── clean-buildinfo.test.ts
 │   │   │   ├── clean-mcpb.test.ts
 │   │   │   ├── devcheck-audit-classifier.test.ts
+│   │   │   ├── devcheck-gate-semantics.test.ts
 │   │   │   ├── devcheck-git-guard.test.ts
 │   │   │   ├── devcheck-git-scans.test.ts
 │   │   │   ├── devcheck-outdated-alias.test.ts
@@ -920,6 +953,7 @@ mcp-ts-core/
 │   │   │       │   └── SpeechService.test.ts
 │   │   │       └── providers/
 │   │   │           ├── elevenlabs.provider.test.ts
+│   │   │           ├── whisper.provider.http.test.ts
 │   │   │           └── whisper.provider.test.ts
 │   │   ├── skills/
 │   │   │   └── field-test-helper.test.ts
@@ -935,6 +969,7 @@ mcp-ts-core/
 │   │   │   │   │   ├── kvProvider.test.ts
 │   │   │   │   │   └── r2Provider.test.ts
 │   │   │   │   ├── fileSystem/
+│   │   │   │   │   ├── fileSystemProvider.failureWire.test.ts
 │   │   │   │   │   └── fileSystemProvider.test.ts
 │   │   │   │   ├── inMemory/
 │   │   │   │   │   └── inMemoryProvider.test.ts
@@ -965,86 +1000,92 @@ mcp-ts-core/
 │   │   │   ├── mockContextState.test.ts
 │   │   │   ├── run-tool-contract-parity.test.ts
 │   │   │   ├── test-kit.test.ts
+│   │   │   ├── tool-contract-suite-failures.test.ts
 │   │   │   ├── tool-contract-suite.test.ts
 │   │   │   └── vitest.test.ts
 │   │   ├── types-global/
 │   │   │   └── errors.test.ts
-│   │   ├── utils/
-│   │   │   ├── formatting/
-│   │   │   │   ├── diffFormatter.branches.test.ts
-│   │   │   │   ├── diffFormatter.test.ts
-│   │   │   │   ├── html.test.ts
-│   │   │   │   ├── markdownBuilder.test.ts
-│   │   │   │   ├── partialResult.test.ts
-│   │   │   │   ├── tableFormatter.test.ts
-│   │   │   │   └── treeFormatter.test.ts
-│   │   │   ├── internal/
-│   │   │   │   ├── error-handler/
-│   │   │   │   │   ├── errorHandler.test.ts
-│   │   │   │   │   ├── formatZodErrorMessage.wire.test.ts
-│   │   │   │   │   ├── helpers.test.ts
-│   │   │   │   │   └── mappings.test.ts
-│   │   │   │   ├── encoding.test.ts
-│   │   │   │   ├── errorHandler.metrics.test.ts
-│   │   │   │   ├── errorHandler.unit.test.ts
-│   │   │   │   ├── execution-span-context.test.ts
-│   │   │   │   ├── lazyImport.test.ts
-│   │   │   │   ├── logger.fileSinks.test.ts
-│   │   │   │   ├── logger.preInit.test.ts
-│   │   │   │   ├── logger.test.ts
-│   │   │   │   ├── observabilityCap.test.ts
-│   │   │   │   ├── performance.nowMs.test.ts
-│   │   │   │   ├── performance.test.ts
-│   │   │   │   ├── requestContext.test.ts
-│   │   │   │   ├── runtime.test.ts
-│   │   │   │   └── startupBanner.test.ts
-│   │   │   ├── metrics/
-│   │   │   │   └── tokenCounter.test.ts
-│   │   │   ├── network/
-│   │   │   │   ├── fetchWithTimeout.bodyDeadline.test.ts
-│   │   │   │   ├── fetchWithTimeout.loopback.test.ts
-│   │   │   │   ├── fetchWithTimeout.metrics.test.ts
-│   │   │   │   ├── fetchWithTimeout.test.ts
-│   │   │   │   ├── httpError.test.ts
-│   │   │   │   ├── pacer.test.ts
-│   │   │   │   └── retry.test.ts
-│   │   │   ├── overflow/
-│   │   │   │   └── outlineOnOverflow.test.ts
-│   │   │   ├── pagination/
-│   │   │   │   └── index.test.ts
-│   │   │   ├── parsing/
-│   │   │   │   ├── csvParser.test.ts
-│   │   │   │   ├── dateParser.test.ts
-│   │   │   │   ├── frontmatterParser.test.ts
-│   │   │   │   ├── htmlExtractor.branches.test.ts
-│   │   │   │   ├── htmlExtractor.test.ts
-│   │   │   │   ├── inputBudget.test.ts
-│   │   │   │   ├── inputBudgetDependencies.test.ts
-│   │   │   │   ├── jsonParser.test.ts
-│   │   │   │   ├── pdfParser.branches.test.ts
-│   │   │   │   ├── pdfParser.imageCap.test.ts
-│   │   │   │   ├── pdfParser.test.ts
-│   │   │   │   ├── xmlParser.test.ts
-│   │   │   │   └── yamlParser.test.ts
-│   │   │   ├── scheduling/
-│   │   │   │   ├── scheduler.runtime.test.ts
-│   │   │   │   └── scheduler.test.ts
-│   │   │   ├── security/
-│   │   │   │   ├── idGenerator.test.ts
-│   │   │   │   ├── rateLimiter.bounds.test.ts
-│   │   │   │   ├── rateLimiter.metrics.test.ts
-│   │   │   │   ├── rateLimiter.test.ts
-│   │   │   │   ├── sanitization.property.test.ts
-│   │   │   │   ├── sanitization.test.ts
-│   │   │   │   └── sensitiveFields.test.ts
-│   │   │   ├── telemetry/
-│   │   │   │   ├── attributes.test.ts
-│   │   │   │   ├── instrumentation.lifecycle.test.ts
-│   │   │   │   ├── metrics.test.ts
-│   │   │   │   └── trace.test.ts
-│   │   │   └── types/
-│   │   │       └── guards.test.ts
-│   │   └── worker.test.ts
+│   │   └── utils/
+│   │       ├── formatting/
+│   │       │   ├── diffFormatter.branches.test.ts
+│   │       │   ├── diffFormatter.test.ts
+│   │       │   ├── html.test.ts
+│   │       │   ├── markdownBuilder.test.ts
+│   │       │   ├── partialResult.test.ts
+│   │       │   ├── tableFormatter.test.ts
+│   │       │   └── treeFormatter.test.ts
+│   │       ├── internal/
+│   │       │   ├── error-handler/
+│   │       │   │   ├── errorHandler.test.ts
+│   │       │   │   ├── errorHandler.writtenRecords.test.ts
+│   │       │   │   ├── formatZodErrorMessage.wire.test.ts
+│   │       │   │   ├── helpers.test.ts
+│   │       │   │   └── mappings.test.ts
+│   │       │   ├── encoding.test.ts
+│   │       │   ├── errorHandler.metrics.test.ts
+│   │       │   ├── errorHandler.unit.test.ts
+│   │       │   ├── execution-span-context.test.ts
+│   │       │   ├── lazyImport.test.ts
+│   │       │   ├── logger.fileSinks.test.ts
+│   │       │   ├── logger.preInit.test.ts
+│   │       │   ├── logger.test.ts
+│   │       │   ├── logger.transports.test.ts
+│   │       │   ├── logger.writtenRecords.test.ts
+│   │       │   ├── observabilityCap.test.ts
+│   │       │   ├── performance.nowMs.test.ts
+│   │       │   ├── performance.test.ts
+│   │       │   ├── requestContext.test.ts
+│   │       │   ├── runtime.test.ts
+│   │       │   └── startupBanner.test.ts
+│   │       ├── metrics/
+│   │       │   └── tokenCounter.test.ts
+│   │       ├── network/
+│   │       │   ├── fetchWithTimeout.bodyDeadline.test.ts
+│   │       │   ├── fetchWithTimeout.loopback.test.ts
+│   │       │   ├── fetchWithTimeout.metrics.test.ts
+│   │       │   ├── fetchWithTimeout.test.ts
+│   │       │   ├── httpError.test.ts
+│   │       │   ├── pacer.test.ts
+│   │       │   ├── responseBody.test.ts
+│   │       │   └── retry.test.ts
+│   │       ├── overflow/
+│   │       │   └── outlineOnOverflow.test.ts
+│   │       ├── pagination/
+│   │       │   └── index.test.ts
+│   │       ├── parsing/
+│   │       │   ├── csvParser.test.ts
+│   │       │   ├── dateParser.test.ts
+│   │       │   ├── frontmatterParser.test.ts
+│   │       │   ├── htmlExtractor.branches.test.ts
+│   │       │   ├── htmlExtractor.test.ts
+│   │       │   ├── inputBudget.test.ts
+│   │       │   ├── inputBudgetDependencies.test.ts
+│   │       │   ├── jsonParser.test.ts
+│   │       │   ├── missingPeer.test.ts
+│   │       │   ├── pdfParser.branches.test.ts
+│   │       │   ├── pdfParser.imageCap.test.ts
+│   │       │   ├── pdfParser.test.ts
+│   │       │   ├── thinkBlock.test.ts
+│   │       │   ├── xmlParser.test.ts
+│   │       │   └── yamlParser.test.ts
+│   │       ├── scheduling/
+│   │       │   ├── scheduler.runtime.test.ts
+│   │       │   └── scheduler.test.ts
+│   │       ├── security/
+│   │       │   ├── idGenerator.test.ts
+│   │       │   ├── rateLimiter.bounds.test.ts
+│   │       │   ├── rateLimiter.metrics.test.ts
+│   │       │   ├── rateLimiter.test.ts
+│   │       │   ├── sanitization.property.test.ts
+│   │       │   ├── sanitization.test.ts
+│   │       │   └── sensitiveFields.test.ts
+│   │       ├── telemetry/
+│   │       │   ├── attributes.test.ts
+│   │       │   ├── instrumentation.lifecycle.test.ts
+│   │       │   ├── metrics.test.ts
+│   │       │   └── trace.test.ts
+│   │       └── types/
+│   │           └── guards.test.ts
 │   ├── worker/
 │   │   ├── create-worker-handler.worker.test.ts
 │   │   ├── encoding.worker.test.ts

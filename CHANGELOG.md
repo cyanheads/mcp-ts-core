@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.13.13](changelog/0.13.x/0.13.13.md) — 2026-10-07 · 🛡️ Security
+
+Error envelopes no longer carry data.rootCause, filesystem storage errors name the key instead of the storage root, and every log sink shares one bounded, redacting walk that neither a thrown value nor log data can fail or stall.
+
 ## [0.13.12](changelog/0.13.x/0.13.12.md) — 2026-10-04 · 🛡️ Security
 
 Log records and error messages no longer carry credential-bearing URL paths, host directory paths, or unbounded caller-supplied strings, and every call logs under a generated requestId with the client's JSON-RPC id moved to jsonRpcId.
