@@ -107,34 +107,48 @@ describe('FileSystemProvider', () => {
       expect(result).toEqual({ data: 'test' });
     });
 
-    it('should throw a SerializationError when stored JSON is corrupted', async () => {
+    it('should reject a corrupted stored value as SerializationError', async () => {
       const fs = await import('node:fs/promises');
       const tenantPath = path.join(TEST_STORAGE_PATH, 'tenant1');
       mkdirSync(tenantPath, { recursive: true });
       await fs.writeFile(path.join(tenantPath, 'corrupt-key'), 'not-valid-json{{{', 'utf-8');
 
       await expect(provider.get('tenant1', 'corrupt-key', testContext)).rejects.toMatchObject({
-        name: 'McpError',
         code: JsonRpcErrorCode.SerializationError,
       });
     });
 
-    it('should re-throw non-ENOENT errors from get', async () => {
-      // Create a directory where a file is expected — readFile() on a directory
-      // fails with a directory-related error, not ENOENT, so the provider must
-      // re-throw rather than treat it as a missing key.
-      const tenantPath = path.join(TEST_STORAGE_PATH, 'tenant1');
-      mkdirSync(path.join(tenantPath, 'dir-not-file'), { recursive: true });
-
-      await expect(provider.get('tenant1', 'dir-not-file', testContext)).rejects.toThrow();
+    it('should read a missing key as null and delete it as false', async () => {
+      await expect(provider.get('tenant1', 'absent', testContext)).resolves.toBeNull();
+      await expect(provider.delete('tenant1', 'absent', testContext)).resolves.toBe(false);
     });
 
-    it('should re-throw non-ENOENT errors from delete', async () => {
-      const tenantPath = path.join(TEST_STORAGE_PATH, 'tenant1');
-      mkdirSync(path.join(tenantPath, 'dir-not-file'), { recursive: true });
+    // A directory where a file is expected — a key colliding with a stored
+    // prefix — fails with a directory error, not ENOENT, so the provider must
+    // reject rather than treat it as a missing key. The raw fs error quotes the
+    // absolute path; the rejection names the key instead (#645).
+    it.each([
+      ['get', 'read'],
+      ['delete', 'delete'],
+    ] as const)(
+      'should reject a non-ENOENT %s failure as DatabaseError without the storage path',
+      async (operation, verb) => {
+        mkdirSync(path.join(TEST_STORAGE_PATH, 'tenant1', 'dir-not-file'), { recursive: true });
 
-      await expect(provider.delete('tenant1', 'dir-not-file', testContext)).rejects.toThrow();
-    });
+        const error = await provider[operation]('tenant1', 'dir-not-file', testContext).catch(
+          (err: unknown) => err,
+        );
+
+        expect(error).toBeInstanceOf(McpError);
+        expect(error).toMatchObject({
+          code: JsonRpcErrorCode.DatabaseError,
+          message: `Failed to ${verb} stored value for key "dir-not-file".`,
+        });
+        expect((error as McpError).message).not.toContain(TEST_STORAGE_PATH);
+        expect((error as McpError).data).not.toHaveProperty('rootCause');
+        expect(JSON.stringify((error as McpError).data)).not.toContain(TEST_STORAGE_PATH);
+      },
+    );
   });
 
   describe('Legacy Data Format Support', () => {

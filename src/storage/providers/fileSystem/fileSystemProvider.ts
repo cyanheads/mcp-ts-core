@@ -33,6 +33,7 @@ import {
 import { decodeCursor, validateTenantId } from '@/storage/core/storageValidation.js';
 import {
   configurationError,
+  databaseError,
   JsonRpcErrorCode,
   McpError,
   validationError,
@@ -43,6 +44,29 @@ import { sanitization } from '@/utils/security/sanitization.js';
 import { isErrorWithCode } from '@/utils/types/guards.js';
 
 const DEFAULT_LIST_LIMIT = 1000;
+
+const isMissing = (error: unknown) => isErrorWithCode(error) && error.code === 'ENOENT';
+
+/**
+ * Maps a raw `fs` failure to the error a caller may see. Every `fs` error
+ * quotes the absolute path it failed on, and `ErrorHandler.tryCatch` forwards
+ * message and `data` toward the caller, so the mapped error names the key
+ * instead and keeps the raw error on `cause`, where the log record's
+ * `causeChain` carries its `code` and path. `ENAMETOOLONG` on a key the caller
+ * chose is a `ValidationError`, as `validateKey` throws, since a shorter key
+ * succeeds; every other fault — a key colliding with a stored prefix included —
+ * is a `DatabaseError`.
+ */
+function fsFailure(error: unknown, message: string, key?: string): McpError {
+  if (key !== undefined && isErrorWithCode(error) && error.code === 'ENAMETOOLONG') {
+    return validationError(
+      `Key "${key}" is too long for filesystem storage. Use a shorter key or shorter "/"-separated segments.`,
+      { key },
+      { cause: error },
+    );
+  }
+  return databaseError(message, undefined, { cause: error });
+}
 
 export class FileSystemProvider implements IStorageProvider {
   private readonly storagePath: string;
@@ -71,7 +95,11 @@ export class FileSystemProvider implements IStorageProvider {
     }
     const tenantPath = path.join(this.storagePath, sanitizedTenantId);
     if (!existsSync(tenantPath)) {
-      mkdirSync(tenantPath, { recursive: true });
+      try {
+        mkdirSync(tenantPath, { recursive: true });
+      } catch (error: unknown) {
+        throw fsFailure(error, `Failed to create the storage directory for tenant "${tenantId}".`);
+      }
     }
     return tenantPath;
   }
@@ -114,24 +142,27 @@ export class FileSystemProvider implements IStorageProvider {
     return decoded.value;
   }
 
-  private async writeDocument(filePath: string, document: string): Promise<void> {
-    mkdirSync(path.dirname(filePath), { recursive: true });
-    await writeFile(filePath, document, 'utf-8');
+  private async writeDocument(filePath: string, key: string, document: string): Promise<void> {
+    try {
+      mkdirSync(path.dirname(filePath), { recursive: true });
+      await writeFile(filePath, document, 'utf-8');
+    } catch (error: unknown) {
+      throw fsFailure(error, `Failed to write stored value for key "${key}".`, key);
+    }
   }
 
   async get<T>(tenantId: string, key: string, context: RequestContext): Promise<T | null> {
-    const filePath = this.getFilePath(tenantId, key, context);
     return await ErrorHandler.tryCatch(
       async () => {
+        const filePath = this.getFilePath(tenantId, key, context);
+        let data: string;
         try {
-          const data = await readFile(filePath, 'utf-8');
-          return this.parseAndValidate<T>(data, tenantId, key, filePath);
+          data = await readFile(filePath, 'utf-8');
         } catch (error: unknown) {
-          if (isErrorWithCode(error) && error.code === 'ENOENT') {
-            return null; // File not found
-          }
-          throw error; // Re-throw other errors
+          if (isMissing(error)) return null;
+          throw fsFailure(error, `Failed to read stored value for key "${key}".`, key);
         }
+        return await this.parseAndValidate<T>(data, tenantId, key, filePath);
       },
       {
         operation: 'FileSystemProvider.get',
@@ -148,9 +179,13 @@ export class FileSystemProvider implements IStorageProvider {
     context: RequestContext,
     options?: StorageOptions,
   ): Promise<void> {
-    const filePath = this.getFilePath(tenantId, key, context);
     return await ErrorHandler.tryCatch(
-      () => this.writeDocument(filePath, encodeEnvelope(serializeValue(key, value), options)),
+      () =>
+        this.writeDocument(
+          this.getFilePath(tenantId, key, context),
+          key,
+          encodeEnvelope(serializeValue(key, value), options),
+        ),
       {
         operation: 'FileSystemProvider.set',
         context,
@@ -160,17 +195,15 @@ export class FileSystemProvider implements IStorageProvider {
   }
 
   async delete(tenantId: string, key: string, context: RequestContext): Promise<boolean> {
-    const filePath = this.getFilePath(tenantId, key, context);
     return await ErrorHandler.tryCatch(
       async () => {
+        const filePath = this.getFilePath(tenantId, key, context);
         try {
           await rm(filePath);
           return true;
         } catch (error: unknown) {
-          if (isErrorWithCode(error) && error.code === 'ENOENT') {
-            return false; // File didn't exist
-          }
-          throw error;
+          if (isMissing(error)) return false;
+          throw fsFailure(error, `Failed to delete stored value for key "${key}".`, key);
         }
       },
       {
@@ -182,7 +215,9 @@ export class FileSystemProvider implements IStorageProvider {
   }
 
   private async listFilesRecursively(dir: string, baseDir: string): Promise<string[]> {
-    const entries = await readdir(dir, { withFileTypes: true });
+    const entries = await readdir(dir, { withFileTypes: true }).catch((error: unknown) => {
+      throw fsFailure(error, 'Failed to list stored keys.');
+    });
     const results: string[] = [];
     for (const entry of entries) {
       const fullPath = path.join(dir, entry.name);
@@ -285,7 +320,7 @@ export class FileSystemProvider implements IStorageProvider {
           encodeEnvelope(serializeValue(key, value), options),
         );
         return setManyViaSet(documents, (key, document) =>
-          this.writeDocument(this.getFilePath(tenantId, key, context), document),
+          this.writeDocument(this.getFilePath(tenantId, key, context), key, document),
         );
       },
       {
