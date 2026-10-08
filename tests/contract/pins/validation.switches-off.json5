@@ -126,6 +126,38 @@
       }
     }
   },
+  "contract_probe: comma-joined string for a list": {
+    "rejected": {
+      "content": [
+        {
+          "text": "Error: Input validation error: Invalid arguments for tool contract_probe: tags: Invalid input: expected array, received string\n\nRecovery: Send tags as an array, not a string.\n\n(reason invalid_arguments · request <requestId>)",
+          "type": "text"
+        }
+      ],
+      "isError": true,
+      "structuredContent": {
+        "error": {
+          "code": -32602,
+          "data": {
+            "issues": [
+              {
+                "code": "invalid_type",
+                "path": [
+                  "tags"
+                ]
+              }
+            ],
+            "reason": "invalid_arguments",
+            "recovery": {
+              "hint": "Send tags as an array, not a string."
+            },
+            "requestId": "<requestId>"
+          },
+          "message": "Input validation error: Invalid arguments for tool contract_probe: tags: Invalid input: expected array, received string"
+        }
+      }
+    }
+  },
   "contract_probe: declared alias": {
     "accepted": {
       "content": [
@@ -147,7 +179,7 @@
     "rejected": {
       "content": [
         {
-          "text": "Error: Input validation error: Invalid arguments for tool contract_probe: Unrecognized key: \"q\"\n\nRecovery: Unknown key q. This tool accepts: query, limit, tags, filter, weights, maxResults, code, region, note, shape, routing.\n\n(reason invalid_arguments · request <requestId>)",
+          "text": "Error: Input validation error: Invalid arguments for tool contract_probe: Unrecognized key: \"q\"\n\nRecovery: q is an alias of query; send one of them, not both.\n\n(reason invalid_arguments · request <requestId>)",
           "type": "text"
         }
       ],
@@ -164,7 +196,7 @@
             ],
             "reason": "invalid_arguments",
             "recovery": {
-              "hint": "Unknown key q. This tool accepts: query, limit, tags, filter, weights, maxResults, code, region, note, shape, routing."
+              "hint": "q is an alias of query; send one of them, not both."
             },
             "requestId": "<requestId>"
           },
@@ -210,6 +242,103 @@
             "requestId": "<requestId>"
           },
           "message": "Input validation error: Invalid arguments for tool contract_probe: query: Too small: expected string to have >=1 characters"
+        }
+      }
+    }
+  },
+  "contract_probe: eleven wrong-type tags": {
+    "rejected": {
+      "content": [
+        {
+          "text": "Error: Input validation error: Invalid arguments for tool contract_probe: tags.0: Invalid input: expected string, received boolean, tags.1: Invalid input: expected string, received boolean, tags.2: Invalid input: expected string, received boolean, tags.3: Invalid input: expected string, received boolean, tags.4: Invalid input: expected string, received boolean, tags.5: Invalid input: expected string, received boolean, tags.6: Invalid input: expected string, received boolean, tags.7: Invalid input: expected string, received boolean, tags.8: Invalid input: expected string, received boolean, tags.9: Invalid input: expected string, received boolean (+1 more)\n\nRecovery: Send tags.0 as a string, not a boolean. Send tags.1 as a string, not a boolean. Send tags.2 as a string, not a boolean. Send tags.3 as a string, not a boolean. Send tags.4 as a string, not a boolean. Send tags.5 as a string, not a boolean. Send tags.6 as a string, not a boolean. Send tags.7 as a string, not a boolean. Send tags.8 as a string, not a boolean. Send tags.9 as a string, not a boolean. (+1 more)\n\n(reason invalid_arguments · request <requestId>)",
+          "type": "text"
+        }
+      ],
+      "isError": true,
+      "structuredContent": {
+        "error": {
+          "code": -32602,
+          "data": {
+            "issues": [
+              {
+                "code": "invalid_type",
+                "path": [
+                  "tags",
+                  0
+                ]
+              },
+              {
+                "code": "invalid_type",
+                "path": [
+                  "tags",
+                  1
+                ]
+              },
+              {
+                "code": "invalid_type",
+                "path": [
+                  "tags",
+                  2
+                ]
+              },
+              {
+                "code": "invalid_type",
+                "path": [
+                  "tags",
+                  3
+                ]
+              },
+              {
+                "code": "invalid_type",
+                "path": [
+                  "tags",
+                  4
+                ]
+              },
+              {
+                "code": "invalid_type",
+                "path": [
+                  "tags",
+                  5
+                ]
+              },
+              {
+                "code": "invalid_type",
+                "path": [
+                  "tags",
+                  6
+                ]
+              },
+              {
+                "code": "invalid_type",
+                "path": [
+                  "tags",
+                  7
+                ]
+              },
+              {
+                "code": "invalid_type",
+                "path": [
+                  "tags",
+                  8
+                ]
+              },
+              {
+                "code": "invalid_type",
+                "path": [
+                  "tags",
+                  9
+                ]
+              }
+            ],
+            "issuesCount": 11,
+            "reason": "invalid_arguments",
+            "recovery": {
+              "hint": "Send tags.0 as a string, not a boolean. Send tags.1 as a string, not a boolean. Send tags.2 as a string, not a boolean. Send tags.3 as a string, not a boolean. Send tags.4 as a string, not a boolean. Send tags.5 as a string, not a boolean. Send tags.6 as a string, not a boolean. Send tags.7 as a string, not a boolean. Send tags.8 as a string, not a boolean. Send tags.9 as a string, not a boolean. (+1 more)"
+            },
+            "requestId": "<requestId>"
+          },
+          "message": "Input validation error: Invalid arguments for tool contract_probe: tags.0: Invalid input: expected string, received boolean, tags.1: Invalid input: expected string, received boolean, tags.2: Invalid input: expected string, received boolean, tags.3: Invalid input: expected string, received boolean, tags.4: Invalid input: expected string, received boolean, tags.5: Invalid input: expected string, received boolean, tags.6: Invalid input: expected string, received boolean, tags.7: Invalid input: expected string, received boolean, tags.8: Invalid input: expected string, received boolean, tags.9: Invalid input: expected string, received boolean (+1 more)"
         }
       }
     }
@@ -278,6 +407,114 @@
             "requestId": "<requestId>"
           },
           "message": "Input validation error: Invalid arguments for tool contract_probe: code: Invalid input: expected string, received number"
+        }
+      }
+    }
+  },
+  "contract_probe: integer for a string beside a numeric string out of range": {
+    "rejected": {
+      "content": [
+        {
+          "text": "Error: Input validation error: Invalid arguments for tool contract_probe: limit: Invalid input: expected number, received string, code: Invalid input: expected string, received number\n\nRecovery: Send limit as a number, not a string. Send code as a string, not a number.\n\n(reason invalid_arguments · request <requestId>)",
+          "type": "text"
+        }
+      ],
+      "isError": true,
+      "structuredContent": {
+        "error": {
+          "code": -32602,
+          "data": {
+            "issues": [
+              {
+                "code": "invalid_type",
+                "path": [
+                  "limit"
+                ]
+              },
+              {
+                "code": "invalid_type",
+                "path": [
+                  "code"
+                ]
+              }
+            ],
+            "reason": "invalid_arguments",
+            "recovery": {
+              "hint": "Send limit as a number, not a string. Send code as a string, not a number."
+            },
+            "requestId": "<requestId>"
+          },
+          "message": "Input validation error: Invalid arguments for tool contract_probe: limit: Invalid input: expected number, received string, code: Invalid input: expected string, received number"
+        }
+      }
+    }
+  },
+  "contract_probe: integer for a string beside an out-of-range field": {
+    "rejected": {
+      "content": [
+        {
+          "text": "Error: Input validation error: Invalid arguments for tool contract_probe: limit: Too big: expected number to be <=50, code: Invalid input: expected string, received number\n\nRecovery: limit: Too big: expected number to be <=50. Send code as a string, not a number.\n\n(reason invalid_arguments · request <requestId>)",
+          "type": "text"
+        }
+      ],
+      "isError": true,
+      "structuredContent": {
+        "error": {
+          "code": -32602,
+          "data": {
+            "issues": [
+              {
+                "code": "too_big",
+                "path": [
+                  "limit"
+                ]
+              },
+              {
+                "code": "invalid_type",
+                "path": [
+                  "code"
+                ]
+              }
+            ],
+            "reason": "invalid_arguments",
+            "recovery": {
+              "hint": "limit: Too big: expected number to be <=50. Send code as a string, not a number."
+            },
+            "requestId": "<requestId>"
+          },
+          "message": "Input validation error: Invalid arguments for tool contract_probe: limit: Too big: expected number to be <=50, code: Invalid input: expected string, received number"
+        }
+      }
+    }
+  },
+  "contract_probe: lone string for a list": {
+    "rejected": {
+      "content": [
+        {
+          "text": "Error: Input validation error: Invalid arguments for tool contract_probe: tags: Invalid input: expected array, received string\n\nRecovery: Send tags as an array, not a string.\n\n(reason invalid_arguments · request <requestId>)",
+          "type": "text"
+        }
+      ],
+      "isError": true,
+      "structuredContent": {
+        "error": {
+          "code": -32602,
+          "data": {
+            "issues": [
+              {
+                "code": "invalid_type",
+                "path": [
+                  "tags"
+                ]
+              }
+            ],
+            "reason": "invalid_arguments",
+            "recovery": {
+              "hint": "Send tags as an array, not a string."
+            },
+            "requestId": "<requestId>"
+          },
+          "message": "Input validation error: Invalid arguments for tool contract_probe: tags: Invalid input: expected array, received string"
         }
       }
     }
@@ -379,6 +616,102 @@
       }
     }
   },
+  "contract_probe: null for a defaulted field": {
+    "rejected": {
+      "content": [
+        {
+          "text": "Error: Input validation error: Invalid arguments for tool contract_probe: limit: Invalid input: expected number, received null\n\nRecovery: Send limit as a number, not null.\n\n(reason invalid_arguments · request <requestId>)",
+          "type": "text"
+        }
+      ],
+      "isError": true,
+      "structuredContent": {
+        "error": {
+          "code": -32602,
+          "data": {
+            "issues": [
+              {
+                "code": "invalid_type",
+                "path": [
+                  "limit"
+                ]
+              }
+            ],
+            "reason": "invalid_arguments",
+            "recovery": {
+              "hint": "Send limit as a number, not null."
+            },
+            "requestId": "<requestId>"
+          },
+          "message": "Input validation error: Invalid arguments for tool contract_probe: limit: Invalid input: expected number, received null"
+        }
+      }
+    }
+  },
+  "contract_probe: null for a required field": {
+    "rejected": {
+      "content": [
+        {
+          "text": "Error: Input validation error: Invalid arguments for tool contract_probe: query: Invalid input: expected string, received null\n\nRecovery: Send query as a string, not null.\n\n(reason invalid_arguments · request <requestId>)",
+          "type": "text"
+        }
+      ],
+      "isError": true,
+      "structuredContent": {
+        "error": {
+          "code": -32602,
+          "data": {
+            "issues": [
+              {
+                "code": "invalid_type",
+                "path": [
+                  "query"
+                ]
+              }
+            ],
+            "reason": "invalid_arguments",
+            "recovery": {
+              "hint": "Send query as a string, not null."
+            },
+            "requestId": "<requestId>"
+          },
+          "message": "Input validation error: Invalid arguments for tool contract_probe: query: Invalid input: expected string, received null"
+        }
+      }
+    }
+  },
+  "contract_probe: null for an optional field": {
+    "rejected": {
+      "content": [
+        {
+          "text": "Error: Input validation error: Invalid arguments for tool contract_probe: filter: Invalid input: expected object, received null\n\nRecovery: Send filter as an object, not null.\n\n(reason invalid_arguments · request <requestId>)",
+          "type": "text"
+        }
+      ],
+      "isError": true,
+      "structuredContent": {
+        "error": {
+          "code": -32602,
+          "data": {
+            "issues": [
+              {
+                "code": "invalid_type",
+                "path": [
+                  "filter"
+                ]
+              }
+            ],
+            "reason": "invalid_arguments",
+            "recovery": {
+              "hint": "Send filter as an object, not null."
+            },
+            "requestId": "<requestId>"
+          },
+          "message": "Input validation error: Invalid arguments for tool contract_probe: filter: Invalid input: expected object, received null"
+        }
+      }
+    }
+  },
   "contract_probe: out of range": {
     "rejected": {
       "content": [
@@ -440,6 +773,38 @@
             "requestId": "<requestId>"
           },
           "message": "Input validation error: Invalid arguments for tool contract_probe: weights.a: Invalid input: expected number, received string"
+        }
+      }
+    }
+  },
+  "contract_probe: string for a number": {
+    "rejected": {
+      "content": [
+        {
+          "text": "Error: Input validation error: Invalid arguments for tool contract_probe: maxResults: Invalid input: expected number, received string\n\nRecovery: Send maxResults as a number, not a string.\n\n(reason invalid_arguments · request <requestId>)",
+          "type": "text"
+        }
+      ],
+      "isError": true,
+      "structuredContent": {
+        "error": {
+          "code": -32602,
+          "data": {
+            "issues": [
+              {
+                "code": "invalid_type",
+                "path": [
+                  "maxResults"
+                ]
+              }
+            ],
+            "reason": "invalid_arguments",
+            "recovery": {
+              "hint": "Send maxResults as a number, not a string."
+            },
+            "requestId": "<requestId>"
+          },
+          "message": "Input validation error: Invalid arguments for tool contract_probe: maxResults: Invalid input: expected number, received string"
         }
       }
     }

@@ -1,6 +1,6 @@
 /**
  * @fileoverview Wire-level coverage for the tool-argument pre-validation step
- * (#453, #452, #234). The step rescues a call the strict `input` schema would
+ * (#453, #452, #234, #707, #602, #616, #599, #639). The step rescues a call the strict `input` schema would
  * otherwise reject, and the whole point is that it costs nothing on the wire:
  * `tools/list` and the server manifest advertise the same bytes they did
  * before, `inputAliases` included, and a call that is still rejected is
@@ -65,6 +65,28 @@ const plain = tool('prevalidation_plain', {
   handler,
 });
 
+/** Takes one item or several, a lone object wrapped as a list by a preprocess (#599). */
+const wrapped = tool('prevalidation_wrapped', {
+  description: 'Lists items.',
+  input: z.object({
+    items: z
+      .preprocess(
+        (value) =>
+          typeof value === 'object' && value !== null && !Array.isArray(value) ? [value] : value,
+        z.array(
+          z.object({
+            name: z.string().describe('Name.'),
+            year: z.string().optional().describe('Year.'),
+          }),
+        ),
+      )
+      .describe('One item or several.'),
+  }),
+  output: z.object({ years: z.array(z.string()).describe('The years that arrived.') }),
+  handler: (input) => ({ years: input.items.map((item) => item.year ?? '') }),
+  format: (result) => [{ type: 'text', text: `years: ${result.years.join(', ')}` }],
+});
+
 async function connect(defs: AnyToolDefinition[]) {
   const server = new McpServer(
     { name: 'input-prevalidation', version: '0.0.0' },
@@ -80,7 +102,7 @@ async function connect(defs: AnyToolDefinition[]) {
   return { client, server };
 }
 
-describe('tool argument pre-validation (#453, #452, #234)', () => {
+describe('tool argument pre-validation (#453, #452, #234, #707, #602, #616, #599)', () => {
   const open: Array<{ client: Client; server: McpServer }> = [];
 
   afterEach(async () => {
@@ -174,6 +196,43 @@ describe('tool argument pre-validation (#453, #452, #234)', () => {
       ]);
     });
 
+    it('rescues a quoted number, a lone string for a list, and nulls for optional fields (#707, #602, #616)', async () => {
+      const client = await session();
+      const quoted = await client.callTool({
+        name: 'prevalidation_aliased',
+        arguments: { drug: 'aspirin', maxResults: '5', statusFilter: 'RECRUITING' } as never,
+      });
+      const nulls = await client.callTool({
+        name: 'prevalidation_aliased',
+        arguments: { drug: 'aspirin', maxResults: null, statusFilter: null } as never,
+      });
+
+      expect(quoted.isError).toBeUndefined();
+      expect(quoted.structuredContent).toEqual({
+        drug: 'aspirin',
+        maxResults: 5,
+        statuses: ['RECRUITING'],
+      });
+      expect(quoted.content).toEqual([
+        { type: 'text', text: '**aspirin** — 5 max, statuses: RECRUITING' },
+      ]);
+      expect(nulls.isError).toBeUndefined();
+      expect(nulls.structuredContent).toEqual({ drug: 'aspirin', maxResults: 0, statuses: [] });
+      expect(nulls.content).toEqual([{ type: 'text', text: '**aspirin** — 0 max, statuses: ' }]);
+    });
+
+    it('rescues an integer inside the list a preprocess made of a lone object (#599)', async () => {
+      const client = await session([wrapped as AnyToolDefinition]);
+      const result = await client.callTool({
+        name: 'prevalidation_wrapped',
+        arguments: { items: { name: 'abc', year: 2020 } } as never,
+      });
+
+      expect(result.isError).toBeUndefined();
+      expect(result.structuredContent).toEqual({ years: ['2020'] });
+      expect(result.content).toEqual([{ type: 'text', text: 'years: 2020' }]);
+    });
+
     it('accepts an unchanged canonical call exactly as before', async () => {
       const client = await session();
       const result = await client.callTool({
@@ -215,6 +274,37 @@ describe('tool argument pre-validation (#453, #452, #234)', () => {
       expect(withAliases.isError).toBe(true);
       expect(detail(withAliases).message).toContain('Unrecognized key: "querry"');
       expect(dataOf(withAliases)).toEqual(dataOf(without));
+      expect(detail(withAliases).message.replace('_aliased', '_plain')).toBe(
+        detail(without).message,
+      );
+    });
+
+    it('names an alias sent beside its target on both surfaces, issues unchanged (#639)', async () => {
+      const client = await session([aliased as AnyToolDefinition, plain as AnyToolDefinition]);
+      const args = { drug: 'aspirin', drug_name: 'tylenol' };
+      const [withAliases, without] = await Promise.all([
+        client.callTool({ name: 'prevalidation_aliased', arguments: args as never }),
+        client.callTool({ name: 'prevalidation_plain', arguments: args as never }),
+      ]);
+
+      const detail = (result: typeof withAliases) =>
+        (
+          result.structuredContent as {
+            error: { data?: { issues?: unknown; recovery?: { hint?: string } }; message: string };
+          }
+        ).error;
+      const hint = 'drug_name is an alias of drug; send one of them, not both.';
+
+      expect(withAliases.isError).toBe(true);
+      expect(detail(withAliases).data?.recovery?.hint).toBe(hint);
+      expect((withAliases.content as Array<{ text: string }>)[0]?.text).toContain(
+        `\n\nRecovery: ${hint}\n\n`,
+      );
+      // Only the hint differs from the tool that declares no alias.
+      expect(detail(without).data?.recovery?.hint).toBe(
+        'Unknown key drug_name. This tool accepts: drug, maxResults, statusFilter.',
+      );
+      expect(detail(withAliases).data?.issues).toEqual(detail(without).data?.issues);
       expect(detail(withAliases).message.replace('_aliased', '_plain')).toBe(
         detail(without).message,
       );

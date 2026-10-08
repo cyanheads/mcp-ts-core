@@ -625,22 +625,40 @@ describe('an argument rejection’s record stays bounded (#631)', () => {
   );
 
   it.each(REPRO)(
-    'cuts the message and hint of the record for %s to their first 1,024 characters, with the uncut lengths',
+    'cuts the message and hint the result carries for %s to their first 1,024 characters in the record, with the uncut lengths',
     async (_label, args) => {
       const result = await callTool(search, args);
 
       const { message, data } = envelope(result);
       const hint = data?.recovery?.hint as string;
-      expect(message.length).toBeGreaterThan(1_024);
-      expect(hint.length).toBeGreaterThan(1_024);
       const { fields, msg } = errorRecord();
       expect(msg).toBe(`Error in tool:records_search: ${cut(message)}`);
       expect(fields.errorData).toMatchObject({
         reason: 'invalid_arguments',
         originalMessage: cut(message),
-        originalMessageLength: message.length,
-        recovery: { hint: cut(hint), hintLength: hint.length },
+        recovery: { hint: cut(hint) },
       });
+      // A length beside each field the record cut, and none beside one it kept whole.
+      expect(fields.errorData.originalMessageLength).toBe(
+        message.length > 1_024 ? message.length : undefined,
+      );
+      expect(fields.errorData.recovery.hintLength).toBe(
+        hint.length > 1_024 ? hint.length : undefined,
+      );
+    },
+    REPRO_TIMEOUT_MS,
+  );
+
+  it.each(REPRO)(
+    'bounds the -32602 result for %s: its text under 4 KiB, at most 10 issues (#648)',
+    async (_label, args) => {
+      const result = await callTool(search, args);
+
+      const [block] = result.content ?? [];
+      expect(Buffer.byteLength((block as { text: string }).text)).toBeLessThan(4 * 1_024);
+      expect(Buffer.byteLength(JSON.stringify(result.structuredContent))).toBeLessThan(8 * 1_024);
+      const issues = envelope(result).data?.issues ?? [];
+      expect(issues.length).toBeLessThanOrEqual(10);
     },
     REPRO_TIMEOUT_MS,
   );
@@ -652,28 +670,29 @@ describe('an argument rejection’s record stays bounded (#631)', () => {
     expect(msg.startsWith('Error in tool:records_search: ')).toBe(true);
     expect(msg).toContain('k'.repeat(512));
     expect(fields.errorData.reason).toBe('invalid_arguments');
-    const [issue] = envelope(result).data?.issues ?? [];
-    const issueMessage = issue?.message as string;
-    expect(fields.errorData.issues).toEqual([
-      {
-        ...issue,
-        keys: [cut(LONG_KEY)],
-        keysLengths: [200_000],
-        message: cut(issueMessage),
-        messageLength: issueMessage.length,
-      },
-    ]);
+    const zodMessage = `Unrecognized key: "${LONG_KEY}"`;
+    const bounded = {
+      code: 'unrecognized_keys',
+      keys: [cut(LONG_KEY)],
+      keysLengths: [200_000],
+      path: [],
+      message: cut(zodMessage),
+      messageLength: zodMessage.length,
+    };
+    // The result carries the bounded issue (#648), and the record the same one.
+    expect(envelope(result).data?.issues).toEqual([bounded]);
+    expect(fields.errorData.issues).toEqual([bounded]);
   });
 
   it('keeps the first 10 of 1,000 unknown keys, with the count', async () => {
     const result = await callTool(search, REPRO[1][1]);
 
+    const keys = Object.keys(REPRO[1][1]).filter((key) => key !== 'query');
     const [issue] = envelope(result).data?.issues ?? [];
-    const keys = issue?.keys as string[];
-    expect(keys).toHaveLength(1_000);
+    expect(issue).toMatchObject({ keys: keys.slice(0, 10), keysCount: 1_000 });
+    expect(issue).not.toHaveProperty('keysLengths');
     const [logged] = errorRecord().fields.errorData.issues as Array<Record<string, unknown>>;
-    expect(logged).toMatchObject({ keys: keys.slice(0, 10), keysCount: 1_000 });
-    expect(logged).not.toHaveProperty('keysLengths');
+    expect(logged).toEqual(issue);
   });
 
   it(
@@ -681,10 +700,12 @@ describe('an argument rejection’s record stays bounded (#631)', () => {
     async () => {
       const result = await callTool(search, REPRO[2][1]);
 
-      const issues = envelope(result).data?.issues ?? [];
-      expect(issues).toHaveLength(50_000);
+      const zodIssues = search.input.safeParse(REPRO[2][1]).error?.issues ?? [];
+      const { data } = envelope(result);
+      expect(data?.issues).toEqual(zodIssues.slice(0, 10));
+      expect(data?.issuesCount).toBe(50_000);
       const { errorData } = errorRecord().fields;
-      expect(errorData.issues).toEqual(issues.slice(0, 10));
+      expect(errorData.issues).toEqual(zodIssues.slice(0, 10));
       expect(errorData.issuesCount).toBe(50_000);
     },
     REPRO_TIMEOUT_MS,
@@ -696,16 +717,14 @@ describe('an argument rejection’s record stays bounded (#631)', () => {
 
     const result = await callTool(search, { [alias]: true, [dropped]: 1 });
 
-    expect(envelope(result).data?.input).toEqual({
-      aliased: [{ alias, target: 'query' }],
-      ignored: [dropped],
-    });
-    // Read from the serialized line: `aliased[0]` sits at depth 4 of the record.
-    expect(JSON.parse(serialized(errorRecord())).errorData.input).toEqual({
+    const bounded = {
       aliased: [{ alias: cut(alias), aliasLength: alias.length, target: 'query' }],
       ignored: [cut(dropped)],
       ignoredLengths: [dropped.length],
-    });
+    };
+    expect(envelope(result).data?.input).toEqual(bounded);
+    // Read from the serialized line: `aliased[0]` sits at depth 4 of the record.
+    expect(JSON.parse(serialized(errorRecord())).errorData.input).toEqual(bounded);
   });
 
   it('logs a rejection within the caps with the same fields as before, minus the stacks', async () => {
@@ -725,7 +744,7 @@ describe('an argument rejection’s record stays bounded (#631)', () => {
   });
 
   it.each(REPRO)(
-    'builds the -32602 result for %s from the uncut rejection',
+    'builds the -32602 result for %s from the rejection parseToolArguments throws',
     async (_label, args) => {
       const result = await callTool(search, args);
 

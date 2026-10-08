@@ -673,10 +673,221 @@ describe('createToolHandler', () => {
         );
       });
 
-      it("falls back to the union's own message when every branch is filtered out", async () => {
+      it('names every accepted value when every branch is filtered out', async () => {
         const result = await reject(singleValueBranches, { v: 'bogus' });
 
-        expect(detail(result, 'single_value_union_tool')).toBe('v: Invalid input');
+        expect(detail(result, 'single_value_union_tool')).toBe(
+          'v: Invalid option: expected one of ""|"only"',
+        );
+        expect(hint(result)).toBe('v: Invalid option: expected one of ""|"only"');
+      });
+
+      describe('when every branch fails on one literal', () => {
+        const Tagged = z
+          .union([
+            z.object({ kind: z.literal('a').describe('Kind.'), id: z.string().describe('ID.') }),
+            z.object({ kind: z.literal('b').describe('Kind.') }),
+          ])
+          .describe('Target.');
+        const tagOnly = tool('tag_only_union_tool', {
+          description: 'Literal-tagged object branches, alone, in a list, and one-or-many.',
+          input: z.object({
+            target: Tagged.optional(),
+            targets: z.array(Tagged).optional().describe('Targets.'),
+            listOrId: z
+              .union([z.array(Tagged), z.string()])
+              .optional()
+              .describe('Targets, or an ID.'),
+            choice: z
+              .union([z.literal('x'), z.literal('y')])
+              .optional()
+              .describe('x or y.'),
+          }),
+          output: ok,
+          handler: pass,
+        });
+        const untagged = tool('untagged_literal_union_tool', {
+          description: 'Object branches each holding a different literal field.',
+          input: z.object({
+            spec: z
+              .union([
+                z.object({ kind: z.literal('a').describe('Kind.') }),
+                z.object({ type: z.literal('b').describe('Type.') }),
+              ])
+              .describe('Spec.'),
+          }),
+          output: ok,
+          handler: pass,
+        });
+        const nestedTag = tool('nested_tag_union_tool', {
+          description: 'A tagged union inside one branch of a two-branch union.',
+          input: z.object({
+            spec: z
+              .union([
+                z.object({ target: Tagged, n: z.number().describe('N.') }),
+                z.object({ other: z.string().describe('Other.') }),
+              ])
+              .describe('Spec.'),
+          }),
+          output: ok,
+          handler: pass,
+        });
+
+        it.each([
+          [
+            'a tag the caller sent wrong',
+            { target: { kind: 'c', id: 'x' } },
+            'target.kind: Invalid option: expected one of "a"|"b"',
+            'target.kind: Invalid option: expected one of "a"|"b"',
+          ],
+          [
+            'an omitted tag',
+            { target: { id: 'x' } },
+            'target.kind: Missing required field. Expected one of "a"|"b"',
+            'Provide target.kind.',
+          ],
+          [
+            'a list element',
+            {
+              targets: [
+                { kind: 'a', id: 'x' },
+                { kind: 'c', id: 'y' },
+              ],
+            },
+            'targets.1.kind: Invalid option: expected one of "a"|"b"',
+            'targets.1.kind: Invalid option: expected one of "a"|"b"',
+          ],
+          [
+            'the surviving branch of a list-or-ID union',
+            { listOrId: [{ kind: 'a', id: 'x' }, { id: 'y' }] },
+            'listOrId.1.kind: Missing required field. Expected one of "a"|"b"',
+            'Provide listOrId.1.kind.',
+          ],
+          [
+            'a scalar union of literals',
+            { choice: 'z' },
+            'choice: Invalid option: expected one of "x"|"y"',
+            'choice: Invalid option: expected one of "x"|"y"',
+          ],
+        ])('names every tag at its own path for %s', async (_label, args, line, expectedHint) => {
+          const result = await reject(tagOnly, args);
+
+          expect(detail(result, 'tag_only_union_tool')).toBe(line);
+          expect(hint(result)).toBe(expectedHint);
+          // A restatement-only hint is the message's text, so `content[]` drops its Recovery line.
+          const text = ((result as CallToolResult).content[0] as { text: string }).text;
+          expect(text).toContain(line);
+          expect(text.includes('Recovery:')).toBe(expectedHint !== line);
+          expect(envelope(result).data?.issues).toEqual([
+            expect.objectContaining({ code: 'invalid_union' }),
+          ]);
+        });
+
+        it('renders every branch when the literals sit at different paths', async () => {
+          const result = await reject(untagged, { spec: {} });
+
+          expect(detail(result, 'untagged_literal_union_tool')).toBe(
+            'spec: kind: Invalid input: expected "a" or type: Invalid input: expected "b"',
+          );
+        });
+
+        it('names the tag inside a branch of a union that keeps two branches', async () => {
+          const result = await reject(nestedTag, {
+            spec: { target: { kind: 'c', id: 'x' }, n: 'x' },
+          });
+
+          expect(detail(result, 'nested_tag_union_tool')).toBe(
+            'spec: target: kind: Invalid option: expected one of "a"|"b"; ' +
+              'n: Invalid input: expected number, received string or ' +
+              'other: Invalid input: expected string, received undefined',
+          );
+        });
+      });
+
+      describe('a branch whose only failure is a literal the caller left out', () => {
+        const formatOrList = tool('format_or_list_tool', {
+          description: 'A JSON query object, or a list of terms.',
+          input: z.object({
+            target: z
+              .union([
+                z.object({
+                  format: z.enum(['json']).describe('Format.'),
+                  q: z.string().describe('Query.'),
+                }),
+                z.array(z.string()),
+              ])
+              .describe('Target.'),
+          }),
+          output: ok,
+          handler: pass,
+        });
+        const noted = tool('noted_tagged_tool', {
+          description: 'Literal-tagged branches, one with a count and a note.',
+          input: z.object({
+            target: z
+              .union([
+                z.object({
+                  kind: z.literal('a').describe('Kind.'),
+                  n: z.number().describe('N.'),
+                  note: z.string().optional().describe('Note.'),
+                }),
+                z.object({ kind: z.literal('b').describe('Kind.') }),
+              ])
+              .describe('Target.'),
+          }),
+          output: ok,
+          handler: pass,
+        });
+        const tagged = tool('tagged_id_tool', {
+          description: 'Literal-tagged branches, one with an ID.',
+          input: z.object({
+            target: z
+              .union([
+                z.object({
+                  kind: z.literal('a').describe('Kind.'),
+                  id: z.string().describe('ID.'),
+                }),
+                z.object({ kind: z.literal('b').describe('Kind.') }),
+              ])
+              .describe('Target.'),
+          }),
+          output: ok,
+          handler: pass,
+        });
+
+        it.each([
+          ['once a repair beside it held (#706)', { target: { q: 5 } }],
+          ['with nothing else wrong', { target: { q: 'x' } }],
+        ])('keeps the branch and asks for the field %s', async (_label, args) => {
+          const result = await reject(formatOrList, args);
+
+          expect(detail(result, 'format_or_list_tool')).toBe(
+            'target.format: Missing required field. Expected "json"',
+          );
+          expect(hint(result)).toBe('Provide target.format.');
+        });
+
+        it('still drops a branch whose tag the caller sent another value for', async () => {
+          // The note's repair holds; then every branch fails on the tag alone.
+          const result = await reject(noted, { target: { kind: 'c', n: 5, note: 3 } });
+
+          expect(detail(result, 'noted_tagged_tool')).toBe(
+            'target.kind: Invalid option: expected one of "a"|"b"',
+          );
+          expect(hint(result)).toBe('target.kind: Invalid option: expected one of "a"|"b"');
+        });
+
+        it('keeps lifting the branch that fails on more than the omitted tag', async () => {
+          const result = await reject(tagged, { target: { id: true } });
+
+          expect(detail(result, 'tagged_id_tool')).toBe(
+            'target.kind: Missing required field. Expected "a", ' +
+              'target.id: Invalid input: expected string, received boolean',
+          );
+          expect(hint(result)).toBe(
+            'Provide target.kind. Send target.id as a string, not a boolean.',
+          );
+        });
       });
 
       it('selects the branch first, then renders an omitted required union as missing', async () => {
@@ -779,7 +990,7 @@ describe('createToolHandler', () => {
     describe('reason and recovery hint (#445)', () => {
       it.each([
         ['an unknown root key', search, { query: 'ok', salt: true }],
-        ['a wrong argument type', point, { lat: '1', lon: 2 }],
+        ['a wrong argument type', point, { lat: 'north', lon: 2 }],
         ['a missing required field', point, {}],
         ['a failed constraint', search, { query: '' }],
       ])('carries reason and a nonempty hint for %s', async (_label, def, args) => {
@@ -812,7 +1023,7 @@ describe('createToolHandler', () => {
       });
 
       it('names the arriving type on a wrong-type argument', async () => {
-        const result = await reject(point, { lat: '1', lon: 2 });
+        const result = await reject(point, { lat: 'north', lon: 2 });
 
         expect(hint(result)).toBe('Send lat as a number, not a string.');
       });
@@ -906,7 +1117,7 @@ describe('createToolHandler', () => {
         });
 
         it.each([
-          ['a string', '2', 'Send rows as a number, not a string.'],
+          ['a string', 'two', 'Send rows as a number, not a string.'],
           ['null', null, 'Send rows as a number, not null.'],
           ['a boolean', true, 'Send rows as a number, not a boolean.'],
         ])('leaves %s on the number sentence', async (_label, value, expected) => {
@@ -1012,7 +1223,7 @@ describe('createToolHandler', () => {
           handler: pass,
         });
 
-        const result = await reject(tokens, { query: 'two words', limit: '5' });
+        const result = await reject(tokens, { query: 'two words', limit: 'five' });
 
         expect(hint(result)).toBe(
           'query: Use a single token; spaces are not supported. ' +
@@ -1137,15 +1348,15 @@ describe('createToolHandler', () => {
       });
 
       it('carries every issue of the surviving branch', async () => {
-        const result = await reject(oneOrMany, { items: [{ name: true }, { name: 5 }] });
+        const result = await reject(oneOrMany, { items: [{ name: true }, { name: false }] });
 
         expect(detail(result, 'items')).toBe(
           'items.0.name: Invalid input: expected string, received boolean, ' +
-            'items.1.name: Invalid input: expected string, received number',
+            'items.1.name: Invalid input: expected string, received boolean',
         );
         expect(hint(result)).toBe(
           'Send items.0.name as a string, not a boolean. ' +
-            'Send items.1.name as a string, not a number.',
+            'Send items.1.name as a string, not a boolean.',
         );
       });
 
@@ -1201,13 +1412,13 @@ describe('createToolHandler', () => {
         });
 
         const result = await reject(grouped, {
-          groups: [{ members: { name: 'a' } }, { members: [{ name: 'b' }, { name: 5 }] }],
+          groups: [{ members: { name: 'a' } }, { members: [{ name: 'b' }, { name: false }] }],
         });
 
         expect(detail(result, 'grouped_tool')).toBe(
-          'groups.1.members.1.name: Invalid input: expected string, received number',
+          'groups.1.members.1.name: Invalid input: expected string, received boolean',
         );
-        expect(hint(result)).toBe('Send groups.1.members.1.name as a string, not a number.');
+        expect(hint(result)).toBe('Send groups.1.members.1.name as a string, not a boolean.');
       });
 
       it('lifts the one branch a blank sentinel leaves when it fails below its root', async () => {
@@ -1218,12 +1429,12 @@ describe('createToolHandler', () => {
           handler: pass,
         });
 
-        const result = await reject(blankOrItem, { note: { name: 5 } });
+        const result = await reject(blankOrItem, { note: { name: false } });
 
         expect(detail(result, 'blank_or_item_tool')).toBe(
-          'note.name: Invalid input: expected string, received number',
+          'note.name: Invalid input: expected string, received boolean',
         );
-        expect(hint(result)).toBe('Send note.name as a string, not a number.');
+        expect(hint(result)).toBe('Send note.name as a string, not a boolean.');
       });
 
       it('drops the root-type branch but keeps `or` when several branches fail below their roots', async () => {
@@ -1271,6 +1482,288 @@ describe('createToolHandler', () => {
         expect(issues).toHaveLength(1);
         expect(issues[0]).toMatchObject({ code: 'invalid_union', path: ['items'] });
         expect(issues[0]?.errors[0]?.[0]?.path).toEqual([1, 'name']);
+      });
+    });
+
+    // ---------------------------------------------------------------------
+    // #599 — a value a z.preprocess reshaped is read as the schema received it
+    // ---------------------------------------------------------------------
+
+    describe('a value a z.preprocess reshaped (#599)', () => {
+      const isPlainObject = (value: unknown) =>
+        typeof value === 'object' && value !== null && !Array.isArray(value);
+      /** Wraps a lone object as a one-element list. */
+      const wrapLone = (value: unknown) => (isPlainObject(value) ? [value] : value);
+      /** Splits a comma-joined string into trimmed parts. */
+      const splitComma = (value: unknown) =>
+        typeof value === 'string' ? value.split(',').map((part) => part.trim()) : value;
+      /** Reads `47.5°N` as a number; anything else falls through as sent. */
+      const parseLatitude = (value: unknown) =>
+        typeof value === 'string' && /^\d+(\.\d+)?°N$/.test(value)
+          ? Number.parseFloat(value)
+          : value;
+
+      const Item = z
+        .object({
+          name: z
+            .string()
+            .regex(/^[a-z]+$/, 'Lowercase letters only.')
+            .describe('Name.'),
+          year: z.string().optional().describe('Year.'),
+          kind: z.enum(['a', 'b']).optional().describe('Kind.'),
+        })
+        .strict()
+        .describe('Item.');
+      const EventType = z.enum(['ground_stop', 'ground_delay']);
+
+      const reshaped = tool('reshaped_tool', {
+        description: 'Takes values a preprocess reshapes.',
+        input: z.object({
+          items: z.preprocess(wrapLone, z.array(Item).min(1)).optional().describe('Items.'),
+          event_types: z
+            .preprocess(splitComma, z.array(EventType))
+            .optional()
+            .describe('Event types.'),
+          piped: z
+            .string()
+            .transform((value) => value.split(',').map((part) => part.trim()))
+            .pipe(z.array(EventType))
+            .optional()
+            .describe('Event types, comma-joined.'),
+          d1: z
+            .preprocess(
+              (value) => (value === '' ? undefined : value),
+              z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
+            )
+            .optional()
+            .describe('Date.'),
+          lat: z.preprocess(parseLatitude, z.number()).optional().describe('Latitude.'),
+          points: z
+            .array(
+              z.object({ tags: z.preprocess(splitComma, z.array(EventType)).describe('Tags.') }),
+            )
+            .optional()
+            .describe('Points.'),
+          groups: z
+            .preprocess(
+              wrapLone,
+              z.array(
+                z.object({ tags: z.preprocess(splitComma, z.array(EventType)).describe('Tags.') }),
+              ),
+            )
+            .optional()
+            .describe('Groups.'),
+          either: z
+            .union([z.array(z.preprocess(splitComma, z.array(EventType))), z.number()])
+            .optional()
+            .describe('Comma-joined event types per group, or a count.'),
+        }),
+        output: ok,
+        handler: pass,
+      });
+
+      const required = tool('reshaped_required_tool', {
+        description: 'Requires a preprocessed list.',
+        input: z.object({
+          items: z.preprocess(wrapLone, z.array(Item).min(1)).describe('Items.'),
+        }),
+        output: ok,
+        handler: pass,
+      });
+
+      const defaulted = tool('reshaped_defaulted_tool', {
+        description: 'Requires a list a preprocess defaults to empty.',
+        input: z.object({
+          items: z.preprocess((value) => value ?? [], z.array(Item).min(1)).describe('Items.'),
+        }),
+        output: ok,
+        handler: pass,
+      });
+
+      const text = (result: HandlerResult) => (firstBlock(result) as { text: string }).text;
+
+      it.each([
+        [
+          'a failed check',
+          { items: { name: 'Bad1' } },
+          { items: [{ name: 'Bad1' }] },
+          'items.0.name: Lowercase letters only.',
+        ],
+        [
+          'a value outside an enum',
+          { items: { name: 'abc', kind: 'zzz' } },
+          { items: [{ name: 'abc', kind: 'zzz' }] },
+          'items.0.kind: Invalid option: expected one of "a"|"b"',
+        ],
+      ])(
+        'renders %s inside a wrapped lone object exactly as its list form',
+        async (_label, lone, list, line) => {
+          const fromLone = await reject(reshaped, lone);
+          const fromList = await reject(reshaped, list);
+
+          expect(detail(fromLone, 'reshaped_tool')).toBe(line);
+          expect(envelope(fromLone).message).toBe(envelope(fromList).message);
+          expect(hint(fromLone)).toBe(hint(fromList));
+          expect(hint(fromLone)).not.toContain('Provide');
+          expect(text(fromLone)).not.toContain('Recovery:');
+        },
+      );
+
+      it.each([
+        ['z.preprocess', { event_types: 'departure delay, ground_stop' }, 'event_types.0'],
+        ['.transform().pipe()', { piped: 'departure delay, ground_stop' }, 'piped.0'],
+      ])('restates a split item a %s produced, never as missing', async (_label, args, path) => {
+        const result = await reject(reshaped, args);
+
+        expect(detail(result, 'reshaped_tool')).toBe(
+          `${path}: Invalid option: expected one of "ground_stop"|"ground_delay"`,
+        );
+        expect(text(result)).not.toContain('Recovery:');
+      });
+
+      it.each([
+        [
+          '.transform().pipe()',
+          z
+            .string()
+            .transform((value) => value.split(',').map((part) => part.trim()))
+            .pipe(z.array(EventType)),
+        ],
+        ['z.preprocess', z.preprocess(splitComma, z.array(EventType))],
+      ])(
+        'restates a split item a %s branch beside a list branch produced, never as missing',
+        async (_label, split) => {
+          const kinds = z.union([z.array(EventType), split]).describe('Event types.');
+          const listOrSplit = tool('list_or_split_tool', {
+            description: 'Takes event types as a list or comma-joined.',
+            input: z.object({
+              kinds: kinds.optional(),
+              rows: z.array(z.object({ kinds })).optional().describe('Rows of event types.'),
+            }),
+            output: ok,
+            handler: pass,
+          });
+
+          const top = await reject(listOrSplit, { kinds: 'ground_stop, holding' });
+          const nested = await reject(listOrSplit, {
+            rows: [{ kinds: ['ground_delay'] }, { kinds: 'ground_stop, holding' }],
+          });
+
+          expect(detail(top, 'list_or_split_tool')).toBe(
+            'kinds.1: Invalid option: expected one of "ground_stop"|"ground_delay"',
+          );
+          expect(detail(nested, 'list_or_split_tool')).toBe(
+            'rows.1.kinds.1: Invalid option: expected one of "ground_stop"|"ground_delay"',
+          );
+          for (const result of [top, nested]) {
+            expect(hint(result) ?? '').not.toContain('Provide');
+            expect(text(result)).not.toContain('Recovery:');
+          }
+        },
+      );
+
+      it('resolves a preprocess inside a list element, past the first level', async () => {
+        const result = await reject(reshaped, {
+          points: [{ tags: 'ground_stop' }, { tags: 'ground_stop, holding' }],
+        });
+
+        expect(detail(result, 'reshaped_tool')).toBe(
+          'points.1.tags.1: Invalid option: expected one of "ground_stop"|"ground_delay"',
+        );
+        expect(hint(result)).not.toContain('Provide');
+      });
+
+      it('resolves a preprocess inside the output of another', async () => {
+        const result = await reject(reshaped, { groups: { tags: 'ground_stop, holding' } });
+
+        expect(detail(result, 'reshaped_tool')).toBe(
+          'groups.0.tags.1: Invalid option: expected one of "ground_stop"|"ground_delay"',
+        );
+        expect(text(result)).not.toContain('Recovery:');
+      });
+
+      it('resolves a preprocess inside the one union branch that survives', async () => {
+        const result = await reject(reshaped, { either: ['ground_stop', 'ground_stop, holding'] });
+
+        expect(detail(result, 'reshaped_tool')).toBe(
+          'either.1.1: Invalid option: expected one of "ground_stop"|"ground_delay"',
+        );
+        expect(hint(result)).not.toContain('Provide');
+      });
+
+      it('names the type a wrapped lone object’s field arrived as', async () => {
+        const lone = await reject(reshaped, { items: { name: 5 } });
+        const list = await reject(reshaped, { items: [{ name: 5 }] });
+
+        expect(hint(lone)).toBe('Send items.0.name as a string, not a number.');
+        expect(hint(lone)).toBe(hint(list));
+      });
+
+      it('asks for a value the inner schema received as undefined', async () => {
+        const result = await reject(reshaped, { d1: '' });
+
+        expect(hint(result)).toBe('Provide d1.');
+      });
+
+      it('restates a wrong type the preprocess hands on, instead of naming the raw type', async () => {
+        const result = await reject(reshaped, { lat: 'ninety north' });
+
+        expect(hint(result)).toBe('lat: Invalid input: expected number, received string');
+        expect(text(result)).not.toContain('Recovery:');
+        expect(hint(result)).not.toContain('Send lat');
+      });
+
+      it('keeps the wrong-type sentence for a value the input side of a .transform().pipe() rejects', async () => {
+        const result = await reject(reshaped, { piped: 5 });
+
+        expect(hint(result)).toBe('Send piped as a string, not a number.');
+      });
+
+      it.each([
+        ['an empty lone object', reshaped, { items: {} }, 'Provide items.0.name.'],
+        ['an empty list element', reshaped, { items: [{}] }, 'Provide items.0.name.'],
+        ['an omitted required field', required, {}, 'Provide items.'],
+        // The preprocess would turn the omission into `[]`; the caller still sent nothing.
+        ['an omitted field its preprocess defaults', defaulted, {}, 'Provide items.'],
+      ])('keeps Provide for %s', async (_label, definition, args, expected) => {
+        const result = await reject(definition, args);
+
+        expect(hint(result)).toBe(expected);
+      });
+
+      it('leaves data.issues Zod’s own list, carrying no value the caller sent', async () => {
+        const args = { items: { name: 'Bad1', year: 'x' }, event_types: 'holding' };
+        const result = await reject(reshaped, args);
+
+        expect(envelope(result).data?.issues).toEqual(reshaped.input.safeParse(args).error?.issues);
+        expect(JSON.stringify(envelope(result).data?.issues)).not.toContain('"input"');
+        expect(JSON.stringify(envelope(result).data?.issues)).not.toContain('Bad1');
+      });
+
+      it('keeps a -32602 rejection when re-applying the preprocess throws', async () => {
+        let calls = 0;
+        /** Wraps once, then throws on every later call. */
+        const once = (value: unknown) => {
+          calls++;
+          if (calls > 1) throw new Error('preprocess ran twice');
+          return wrapLone(value);
+        };
+        const fragile = tool('fragile_tool', {
+          description: 'Takes items a stateful preprocess wraps.',
+          input: z.object({ items: z.preprocess(once, z.array(Item)).describe('Items.') }),
+          output: ok,
+          handler: pass,
+        });
+
+        const result = await reject(fragile, { items: { name: 'abc', year: 2020 } });
+
+        expect(envelope(result).code).toBe(JsonRpcErrorCode.InvalidParams);
+        expect(envelope(result).data?.reason).toBe('invalid_arguments');
+        expect(detail(result, 'fragile_tool')).toBe(
+          'items.0.year: Invalid input: expected string, received number',
+        );
+        // What the inner schema received is unknown, so it is neither missing nor retyped.
+        expect(hint(result)).toBe('items.0.year: Invalid input: expected string, received number');
       });
     });
 
@@ -1477,6 +1970,71 @@ describe('createToolHandler', () => {
         expect(hint(result)).toBe(expected);
       });
 
+      it.each([
+        ['a list element', { items: [{ name: 'abc', extra: 1 }] }],
+        ['the lone object it wraps', { items: { name: 'abc', extra: 1 } }],
+      ])('resolves through a z.preprocess, from %s (#599)', async (_label, args) => {
+        const Strict = z
+          .object({
+            name: z.string().describe('Name.'),
+            year: z.string().optional().describe('Year.'),
+            kind: z.enum(['a', 'b']).optional().describe('Kind.'),
+          })
+          .strict();
+        const wrapped = tool('nested_strict_preprocessed', {
+          description: 'Takes a strict item, or a list of them, behind a preprocess.',
+          input: z.object({
+            items: z
+              .preprocess(
+                (value) =>
+                  typeof value === 'object' && value !== null && !Array.isArray(value)
+                    ? [value]
+                    : value,
+                z.array(Strict),
+              )
+              .optional()
+              .describe('Items.'),
+          }),
+          output: ok,
+          handler: pass,
+        });
+
+        const result = await reject(wrapped, args);
+
+        expect(detail(result, 'nested_strict_preprocessed')).toBe(
+          'items.0: Unrecognized key: "extra"',
+        );
+        expect(hint(result)).toBe('Unknown key items.0.extra. items.0 accepts: name, year, kind.');
+      });
+
+      it('resolves the option of a plain union whose literal tag matches (#570)', async () => {
+        const tagged = tool('nested_strict_tagged', {
+          description: 'Takes one of two strict tagged targets.',
+          input: z.object({
+            target: z
+              .union([
+                z
+                  .object({
+                    kind: z.literal('a').describe('Kind.'),
+                    id: z.string().describe('ID.'),
+                    note: z.string().optional().describe('Note.'),
+                  })
+                  .strict(),
+                z.object({ kind: z.literal('b').describe('Kind.') }),
+              ])
+              .describe('Target.'),
+          }),
+          output: ok,
+          handler: pass,
+        });
+
+        const result = await reject(tagged, { target: { kind: 'a', extra: 1 } });
+
+        expect(hint(result)).toBe(
+          'Provide target.id. Unknown key target.extra. target accepts: kind, id, note.',
+        );
+      });
+
       it('leaves the accepted list out when the nested object declares no keys', async () => {
         const result = await reject(nestedStrict, { query: 'x', empty: { b: 1 } });
 
@@ -1499,6 +2057,555 @@ describe('createToolHandler', () => {
           'Unknown key opts.b. opts accepts: a. Unknown key salt. This tool accepts: query, ' +
             'opts, items, labels, oneOrMany, filter, tree, empty, pair.',
         );
+      });
+    });
+
+    // ---------------------------------------------------------------------
+    // #648 — the result stays bounded whatever the caller sends
+    // ---------------------------------------------------------------------
+
+    describe('a bounded result (#648)', () => {
+      const LONG_ENUM = Array.from(
+        { length: 400 },
+        (_, i) => `option_value_${String(i).padStart(4, '0')}`,
+      ) as [string, ...string[]];
+
+      let deep: z.ZodType = z.string().describe('Leaf.');
+      for (let level = 0; level < 11; level++) deep = z.array(deep).describe(`Level ${level}.`);
+
+      const caps = tool('caps_tool', {
+        description: 'Takes fields a caller can make fail without bound.',
+        input: z.object({
+          query: z.string().describe('Search query.'),
+          items: z.array(z.string()).optional().describe('Items.'),
+          choices: z.array(z.enum(LONG_ENUM)).optional().describe('Choices.'),
+          either: z
+            .union([z.array(z.string()), z.array(z.number())])
+            .optional()
+            .describe('Either list.'),
+          weights: z.record(z.string(), z.number()).optional().describe('Weights by caller key.'),
+          rows: z
+            .record(z.string(), z.object({ id: z.string().describe('Row id.') }))
+            .optional()
+            .describe('Rows by caller key.'),
+          deep: deep.optional().describe('Eleven nested lists.'),
+        }),
+        output: ok,
+        handler: pass,
+      });
+
+      const twelve = tool('twelve_tool', {
+        description: 'Twelve required fields.',
+        input: z.object(
+          Object.fromEntries(
+            Array.from({ length: 12 }, (_, i) => [`f${i}`, z.string().describe(`Field ${i}.`)]),
+          ),
+        ),
+        output: ok,
+        handler: pass,
+      });
+
+      const ACCEPTS = 'This tool accepts: query, items, choices, either, weights, rows, deep.';
+      const PREAMBLE = 'Input validation error: Invalid arguments for tool caps_tool: ';
+      const TEN = Array.from({ length: 10 }, (_, i) => i);
+      const wrongItem = (i: number) =>
+        `items.${i}: Invalid input: expected string, received boolean`;
+      const sendItem = (i: number) => `Send items.${i} as a string, not a boolean.`;
+
+      /** Cases that build tens of thousands of issues, slower under a full parallel run. */
+      const LARGE_TIMEOUT_MS = 30_000;
+
+      /** `text` as a rendered line keeps it: its first 1,024 characters, then `…`. */
+      const cutLine = (text: string) => `${text.slice(0, 1_024)}…`;
+
+      /** The bytes of the Streamable HTTP event a client receives `result` in. */
+      function responseBytes(result: HandlerResult): number {
+        const message = JSON.stringify({ result, jsonrpc: '2.0', id: 1 });
+        return Buffer.byteLength(`event: message\ndata: ${message}\n\n`);
+      }
+
+      function text(result: HandlerResult): string {
+        return (firstBlock(result) as { text: string }).text;
+      }
+
+      /** Zod's own issues for `args` against `def`, which carry no repair or pre-validation rewrite. */
+      function zodIssues(
+        args: Record<string, unknown>,
+        def: { input: z.ZodType } = caps,
+      ): unknown[] {
+        return def.input.safeParse(args).error?.issues ?? [];
+      }
+
+      /** `count` keys a case fold maps onto `query`, each a distinct spelling led by `prefix`. */
+      function queryVariants(count: number, prefix = ''): Record<string, string> {
+        return Object.fromEntries(
+          Array.from({ length: count }, (_, i) => [
+            `${prefix}query${i.toString(2).padStart(17, '0').replaceAll('0', '-').replaceAll('1', '_')}`,
+            'y',
+          ]),
+        );
+      }
+
+      /** `count` root keys named after their index, each led by `prefix`. */
+      function indexedKeys(count: number, prefix: string): Record<string, number> {
+        return Object.fromEntries(Array.from({ length: count }, (_, i) => [`${prefix}${i}`, 1]));
+      }
+
+      /**
+       * The fastest thread-CPU milliseconds of three rejections of `args` by
+       * `def`, from the call to the response a transport writes.
+       */
+      async function rejectionCost(
+        args: Record<string, unknown>,
+        def: unknown = caps,
+      ): Promise<number> {
+        let best = Number.POSITIVE_INFINITY;
+        for (let sample = 0; sample < 3; sample++) {
+          const start = process.threadCpuUsage();
+          JSON.stringify(await reject(def, args));
+          const { user, system } = process.threadCpuUsage(start);
+          best = Math.min(best, (user + system) / 1_000);
+        }
+        return Math.max(best, 0.001);
+      }
+
+      it('keeps a rejection within the caps byte for byte: ten issues, whole', async () => {
+        const args = { query: 'x', items: Array(10).fill(true) };
+        const result = await reject(caps, args);
+
+        const message = `${PREAMBLE}${TEN.map(wrongItem).join(', ')}`;
+        const recovery = TEN.map(sendItem).join(' ');
+        expect(envelope(result)).toEqual({
+          code: JsonRpcErrorCode.InvalidParams,
+          message,
+          data: {
+            issues: zodIssues(args),
+            reason: 'invalid_arguments',
+            recovery: { hint: recovery },
+            requestId: REQUEST_ID,
+          },
+        });
+        expect(Object.keys(envelope(result).data ?? {})).toEqual([
+          'issues',
+          'reason',
+          'recovery',
+          'requestId',
+        ]);
+        expect(text(result)).toBe(
+          `Error: ${message}\n\nRecovery: ${recovery}\n\n` +
+            `(reason invalid_arguments · request ${REQUEST_ID})`,
+        );
+      });
+
+      it(
+        'renders the first 10 of 50,000 issues, counts the rest, and keeps Zod’s first 10',
+        async () => {
+          const args = { query: 'x', items: Array(50_000).fill(true) };
+          const result = await reject(caps, args);
+
+          const { data, message } = envelope(result);
+          expect(message).toBe(`${PREAMBLE}${TEN.map(wrongItem).join(', ')} (+49990 more)`);
+          expect(message.endsWith(`${wrongItem(9)} (+49990 more)`)).toBe(true);
+          expect(hint(result)).toBe(`${TEN.map(sendItem).join(' ')} (+49990 more)`);
+          expect(data?.issues).toEqual(zodIssues(args).slice(0, 10));
+          expect(data).toMatchObject({ issuesCount: 50_000 });
+          expect(Object.keys(data ?? {})).toEqual([
+            'issues',
+            'issuesCount',
+            'reason',
+            'recovery',
+            'requestId',
+          ]);
+          expect(Buffer.byteLength(text(result))).toBeLessThan(4 * 1_024);
+          expect(
+            Buffer.byteLength(JSON.stringify((result as CallToolResult).structuredContent)),
+          ).toBeLessThan(4 * 1_024);
+        },
+        LARGE_TIMEOUT_MS,
+      );
+
+      it.each([
+        ['1,000 wrong-type items', { query: 'x', items: Array(1_000).fill(true) }],
+        ['10,000 wrong-type items', { query: 'x', items: Array(10_000).fill(true) }],
+        ['349,488 empty objects, a 1 MiB request', { query: 'x', items: Array(349_488).fill({}) }],
+      ])(
+        'answers %s with a response under 8 KiB',
+        async (_label, args) => {
+          const result = await reject(caps, args);
+
+          expect(envelope(result).data).toMatchObject({ issuesCount: args.items.length });
+          expect(responseBytes(result)).toBeLessThan(8 * 1_024);
+        },
+        LARGE_TIMEOUT_MS,
+      );
+
+      it('cuts each line of a long enum list at 1,024 characters and keeps the hint the message’s text', async () => {
+        const result = await reject(caps, { query: 'x', choices: Array(12).fill('nope') });
+
+        const detail = envelope(result).message.replace(PREAMBLE, '');
+        expect(detail.endsWith(' (+2 more)')).toBe(true);
+        const lines = detail.replace(/ \(\+2 more\)$/, '').split(/, (?=choices\.\d+: )/);
+        expect(lines).toHaveLength(10);
+        for (const [i, line] of lines.entries()) {
+          expect(
+            line.startsWith(`choices.${i}: Invalid option: expected one of "option_value_0000"`),
+          ).toBe(true);
+          expect(line).toHaveLength(1_025);
+          expect(line.endsWith('…')).toBe(true);
+        }
+        expect(hint(result)).toBe(detail);
+        expect(text(result)).not.toContain('Recovery:');
+        expect(responseBytes(result)).toBeLessThan(64 * 1_024);
+
+        const [issue] = (envelope(result).data?.issues ?? []) as Array<Record<string, unknown>>;
+        const zodMessage = `Invalid option: expected one of ${LONG_ENUM.map((v) => JSON.stringify(v)).join('|')}`;
+        expect(issue).toEqual({
+          code: 'invalid_value',
+          values: LONG_ENUM.slice(0, 10),
+          valuesCount: 400,
+          path: ['choices', 0],
+          message: zodMessage.slice(0, 1_024),
+          messageLength: zodMessage.length,
+        });
+      });
+
+      it('keeps the first 1,024 characters of a 200,000-character unknown key, with its length', async () => {
+        const key = 'k'.repeat(200_000);
+        const result = await reject(caps, { query: 'x', [key]: 1 });
+
+        const zodMessage = `Unrecognized key: "${key}"`;
+        expect(envelope(result).data?.issues).toEqual([
+          {
+            code: 'unrecognized_keys',
+            keys: [key.slice(0, 1_024)],
+            keysLengths: [200_000],
+            path: [],
+            message: zodMessage.slice(0, 1_024),
+            messageLength: zodMessage.length,
+          },
+        ]);
+        expect(envelope(result).message).toBe(`${PREAMBLE}${cutLine(zodMessage)}`);
+        expect(hint(result)).toBe(cutLine(`Unknown key ${key}. ${ACCEPTS}`));
+        expect(hint(result)).toHaveLength(1_025);
+      });
+
+      it('keeps the first 10 of 1,000 unknown keys, with the count', async () => {
+        const keys = Array.from({ length: 1_000 }, (_, i) => String(i).padEnd(200, 'm'));
+        const result = await reject(caps, {
+          query: 'x',
+          ...Object.fromEntries(keys.map((key) => [key, 1])),
+        });
+
+        const [issue] = (envelope(result).data?.issues ?? []) as Array<Record<string, unknown>>;
+        expect(issue?.keys).toEqual(keys.slice(0, 10));
+        expect(issue?.keysCount).toBe(1_000);
+        expect(issue).not.toHaveProperty('keysLengths');
+        expect(hint(result)).toBe(cutLine(`Unknown keys ${keys.join(', ')}. ${ACCEPTS}`));
+      });
+
+      it('keeps the first 10 of 1,000 dropped keys, with the count, in a sentence of at most 1,025 characters', async () => {
+        const dropped = Array.from({ length: 1_000 }, (_, i) => `_k${i}`);
+        const result = await reject(caps, {
+          query: 1.5,
+          ...Object.fromEntries(dropped.map((key) => [key, 1])),
+        });
+
+        expect(envelope(result).data).toMatchObject({
+          input: { aliased: [], ignored: dropped.slice(0, 10), ignoredCount: 1_000 },
+        });
+        const sent = 'Send query as a string, not a number. ';
+        const recovery = hint(result) ?? '';
+        expect(recovery.startsWith(sent)).toBe(true);
+        const sentence = recovery.slice(sent.length);
+        expect(sentence).toBe(
+          cutLine(
+            `Dropped undeclared keys ${dropped.slice(0, -1).join(', ')} and ${dropped.at(-1)}.`,
+          ),
+        );
+      });
+
+      it('cuts an alias-collision sentence that names thousands of spellings', async () => {
+        const variants = queryVariants(2_000);
+        const result = await reject(caps, { query: 'x', ...variants });
+
+        const names = Object.keys(variants);
+        expect(hint(result)).toBe(
+          cutLine(
+            `${names.slice(0, -1).join(', ')} and ${names.at(-1)} are aliases of query; ` +
+              'send only one of them.',
+          ),
+        );
+        expect(hint(result)).toHaveLength(1_025);
+      });
+
+      it('counts an unknown-key issue as one entry, however many keys and aliases it names', async () => {
+        const result = await reject(caps, {
+          query: 'x',
+          items: Array(10).fill(true),
+          ...queryVariants(2_000),
+        });
+
+        // Zod reports the root's unknown keys after its fields, so they are the 11th entry.
+        expect(envelope(result).message).toBe(
+          `${PREAMBLE}${TEN.map(wrongItem).join(', ')} (+1 more)`,
+        );
+        expect(hint(result)).toBe(`${TEN.map(sendItem).join(' ')} (+1 more)`);
+      });
+
+      it('answers a two-branch union of 10,000 wrong-type items under 8 KiB, every level cut', async () => {
+        const result = await reject(caps, { query: 'x', either: Array(10_000).fill(true) });
+
+        expect(responseBytes(result)).toBeLessThan(8 * 1_024);
+        const [issue] = (envelope(result).data?.issues ?? []) as Array<Record<string, unknown>>;
+        expect(issue).toMatchObject({ code: 'invalid_union', errorsLengths: [10_000, 10_000] });
+        const branches = issue?.errors as unknown[][];
+        expect(branches.map((branch) => branch.length)).toEqual([10, 10]);
+        const detail = envelope(result).message.replace(PREAMBLE, '');
+        expect(detail).toHaveLength(1_025);
+        expect(hint(result)).toBe(detail);
+      });
+
+      it('cuts a path past 10 segments in data.issues, with the count, and renders it whole', async () => {
+        let value: unknown = true;
+        for (let level = 0; level < 11; level++) value = [value];
+        const result = await reject(caps, { query: 'x', deep: value });
+
+        const path = ['deep', ...Array(11).fill(0)];
+        const [issue] = (envelope(result).data?.issues ?? []) as Array<Record<string, unknown>>;
+        expect(issue).toMatchObject({ path: path.slice(0, 10), pathCount: 12 });
+        expect(hint(result)).toBe(`Send ${path.join('.')} as a string, not a boolean.`);
+      });
+
+      it('names the first 10 missing fields in the Provide sentence and counts the rest', async () => {
+        const result = await reject(twelve, {});
+
+        const missing = Array.from({ length: 10 }, (_, i) => `f${i}`);
+        expect(envelope(result).message).toBe(
+          'Input validation error: Invalid arguments for tool twelve_tool: ' +
+            missing
+              .map((f) => `${f}: Invalid input: expected string, received undefined`)
+              .join(', ') +
+            ' (+2 more)',
+        );
+        expect(hint(result)).toBe(`Provide ${missing.slice(0, -1).join(', ')} and f9. (+2 more)`);
+      });
+
+      it('cuts every hint sentence a caller-sized path runs past 1,024 characters', async () => {
+        const key = (c: string) => c.repeat(2_000);
+        const missing = await reject(caps, {
+          query: 'x',
+          rows: { [key('a')]: {}, [key('b')]: {}, [key('c')]: {} },
+        });
+        const wrongType = await reject(caps, { query: 'x', weights: { [key('w')]: 'high' } });
+
+        expect(hint(missing)).toBe(
+          cutLine(`Provide rows.${key('a')}.id, rows.${key('b')}.id and rows.${key('c')}.id.`),
+        );
+        for (const line of envelope(missing).message.replace(PREAMBLE, '').split(', ')) {
+          expect(line).toHaveLength(1_025);
+        }
+        expect(hint(wrongType)).toBe(
+          cutLine(`Send weights.${key('w')} as a number, not a string.`),
+        );
+      });
+
+      it('closes the issue sentences with the count, before what pre-validation changed', async () => {
+        const result = await reject(caps, { QUERY: 'x', items: Array(12).fill(true) });
+
+        expect(hint(result)).toBe(
+          `${TEN.map(sendItem).join(' ')} (+2 more) Validated QUERY as query.`,
+        );
+        expect(envelope(result).data).toMatchObject({
+          input: { aliased: [{ alias: 'QUERY', target: 'query' }], ignored: [] },
+          issuesCount: 12,
+        });
+      });
+
+      it.each([
+        ['wrong-type items', (n: number) => ({ query: 'x', items: Array(n).fill(true) })],
+        ['unknown root keys', (n: number) => ({ query: 'x', ...indexedKeys(n, 'k') })],
+        [
+          'dropped keys beside a bad value',
+          (n: number) => ({ query: 1.5, ...indexedKeys(n, '_k') }),
+        ],
+        [
+          'wrong-type items under a two-branch union',
+          (n: number) => ({ query: 'x', either: Array(n).fill(true) }),
+        ],
+        [
+          'case-style spellings of a key sent beside it',
+          (n: number) => ({ query: 'x', ...queryVariants(n) }),
+        ],
+        [
+          'underscore spellings of a key the drop discarded',
+          (n: number) => ({ query: 'x', weights: 'z', ...queryVariants(n, '_') }),
+        ],
+      ])(
+        'answers %s in time linear in their count, the response under 8 KiB',
+        async (_label, args) => {
+          const at5k = await rejectionCost(args(5_000));
+          const at20k = await rejectionCost(args(20_000));
+          const at80k = await rejectionCost(args(80_000));
+
+          // 16× the input: linear is ~16×, a pass per issue over the issues ~256×.
+          expect(at80k / at5k).toBeLessThan(64);
+          expect(at20k / at5k).toBeLessThan(12);
+          // Tens of ms on Bun, a few hundred at most on Node with coverage.
+          expect(at80k).toBeLessThan(2_000);
+          expect(responseBytes(await reject(caps, args(80_000)))).toBeLessThan(8 * 1_024);
+        },
+        120_000,
+      );
+
+      describe('a recursive union whose branches share one clause list', () => {
+        /**
+         * The common filter shape. Its `and` and `or` branches both parse the
+         * same clause list, and Zod parses each clause once and lists the
+         * clause's issues under both, so the issue tree a bad leaf raises is
+         * 2^depth issues wide while its distinct issues grow with the depth.
+         */
+        const Filter: z.ZodType = z.lazy(() =>
+          z.union([
+            z.object({ op: z.literal('and'), filters: z.array(Filter) }),
+            z.object({ op: z.literal('or'), filters: z.array(Filter) }),
+            z.object({ op: z.literal('eq'), field: z.string(), value: z.string() }),
+          ]),
+        );
+        const filters = tool('filter_tool', {
+          description: 'Filters rows.',
+          input: z.object({ where: Filter.describe('Row filter.') }),
+          output: ok,
+          handler: pass,
+        });
+
+        /** One bad leaf, `value: 5`, under `depth` levels alternating `or` and `and`. */
+        function nested(depth: number): Record<string, unknown> {
+          let node: unknown = { op: 'eq', field: 'name', value: 5 };
+          for (let level = 0; level < depth; level++) {
+            node = { op: level % 2 ? 'and' : 'or', filters: [node] };
+          }
+          return { where: node };
+        }
+
+        /**
+         * The whole rendering of {@link nested}'s rejection, worked out from the
+         * union rule (#417, #447) rather than the factory's code: each branch's
+         * issues joined on `; ` under their branch-relative paths, the branches
+         * on ` or `. Twice as long per level, so only shallow depths are built.
+         */
+        function wholeRendering(depth: number): string {
+          let text =
+            'op: Invalid input: expected "and"; filters: Invalid input: expected array, received undefined' +
+            ' or op: Invalid input: expected "or"; filters: Invalid input: expected array, received undefined' +
+            ' or value: Invalid input: expected string, received number';
+          for (let level = 0; level < depth; level++) {
+            const op = level % 2 ? 'and' : 'or';
+            const branch = (tag: string) =>
+              `${tag === op ? '' : `op: Invalid input: expected "${tag}"; `}filters.0: ${text}`;
+            const eq =
+              'op: Invalid input: expected "eq"; field: Invalid input: expected string, received undefined;' +
+              ' value: Invalid input: expected string, received undefined';
+            text = [branch('and'), branch('or'), eq].join(' or ');
+          }
+          return `where: ${text}`;
+        }
+
+        /**
+         * The first `limit` issues in `issues`, in document order — each one
+         * followed by the issues of its union branches — without its branches
+         * or the counts a cut writes beside a field.
+         */
+        function listed(issues: readonly unknown[], limit = Number.POSITIVE_INFINITY): unknown[] {
+          const found: unknown[] = [];
+          const visit = (list: readonly unknown[]): void => {
+            for (const issue of list) {
+              if (found.length >= limit) return;
+              found.push(
+                Object.fromEntries(
+                  Object.entries(issue as Record<string, unknown>).filter(
+                    ([key]) => key !== 'errors' && !/(Count|Length|Lengths)$/.test(key),
+                  ),
+                ),
+              );
+              for (const branch of (issue as { errors?: unknown[][] }).errors ?? []) visit(branch);
+            }
+          };
+          visit(issues);
+          return found;
+        }
+
+        it('renders the message and the hint as the first 1,024 characters of the whole rendering', async () => {
+          for (let depth = 0; depth <= 14; depth++) {
+            const result = await reject(filters, nested(depth));
+            const whole = wholeRendering(depth);
+            const expected = whole.length > 1_024 ? cutLine(whole) : whole;
+
+            expect(detail(result, 'filter_tool'), `depth ${depth}`).toBe(expected);
+            expect(hint(result), `depth ${depth}`).toBe(expected);
+          }
+        });
+
+        it('names the bad leaf and what it expected at depth 14', async () => {
+          const result = await reject(filters, nested(14));
+          const rendered = detail(result, 'filter_tool');
+
+          expect(rendered.startsWith('where: filters.0: op: Invalid input: expected "and"; ')).toBe(
+            true,
+          );
+          expect(rendered.match(/filters\.0: /g)?.length).toBeGreaterThanOrEqual(14);
+          expect(rendered).toContain('value: Invalid input: expected string, received number');
+          expect(text(result)).not.toContain('Recovery:');
+        });
+
+        it('keeps the issues of a rejection within 30 issues whole', async () => {
+          const args = nested(1);
+          const result = await reject(filters, args);
+
+          expect(listed(zodIssues(args, filters))).toHaveLength(17);
+          expect(envelope(result).data?.issues).toEqual(zodIssues(args, filters));
+        });
+
+        it('carries the first 30 issues in document order past them, the branch count beside each cut', async () => {
+          // Ascending, so a rejection that doubles per level fails at 3 rather than running on.
+          for (const depth of [3, 4, 14, 24]) {
+            const args = nested(depth);
+            const result = await reject(filters, args);
+
+            const issues = envelope(result).data?.issues ?? [];
+            expect(listed(issues), `depth ${depth}`).toEqual(listed(zodIssues(args, filters), 30));
+            // The outermost union keeps the branch the budget ran out in, and counts all three.
+            expect(issues).toHaveLength(1);
+            expect(issues[0]).toMatchObject({
+              code: 'invalid_union',
+              path: ['where'],
+              errorsCount: 3,
+            });
+            expect((issues[0] as { errors: unknown[] }).errors).toHaveLength(1);
+            expect(envelope(result).data).not.toHaveProperty('issuesCount');
+          }
+        });
+
+        it('answers one bad leaf under 8 KiB at every depth from 3 to 24', async () => {
+          // Ascending, so a result that doubles per level fails at 3 rather than running on.
+          for (let depth = 3; depth <= 24; depth++) {
+            const result = await reject(filters, nested(depth));
+            expect(responseBytes(result), `depth ${depth}`).toBeLessThan(8 * 1_024);
+          }
+        });
+
+        it('answers one bad leaf in time linear in its depth', async () => {
+          const costs: number[] = [];
+          await rejectionCost(nested(8), filters);
+          for (const depth of [8, 12, 16, 20, 24]) {
+            const cost = await rejectionCost(nested(depth), filters);
+            // Checked per depth, so a walk that doubles per level fails at 16 rather than running on.
+            expect(cost, `depth ${depth}`).toBeLessThan(100);
+            costs.push(cost);
+          }
+
+          // 3× the depth: linear is ~3×, quadratic 9×, a walk of every path 65,536×.
+          expect(costs[4]! / costs[0]!).toBeLessThan(6);
+        }, 60_000);
       });
     });
   });

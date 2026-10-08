@@ -260,9 +260,13 @@ export interface ToolDefinition<
    * Aliases are not advertised — `inputSchema` is byte-identical with or
    * without them, so the canonical key keeps its place in `required` and the
    * model is still told to use it. A rewrite applies only when the target key
-   * is absent; with both present the call fails as it does today. Case-style
-   * variants of a declared key (`max_results` for `maxResults`) are rewritten
-   * without any declaration — see `createApp({ input: { caseStyleAliases } })`.
+   * is absent; with both present the call is rejected, and its hint names the
+   * alias beside its target (`drug_name is an alias of drug; send one of them,
+   * not both.`) rather than calling it an unknown key. The exception is an
+   * `_`-prefixed alias the drop discards as a client-added key: the target's
+   * value then validates. Case-style variants of a declared key (`max_results`
+   * for `maxResults`) are rewritten without any declaration — see
+   * `createApp({ input: { caseStyleAliases } })`.
    *
    * Root level only, matching `.strict()` itself. `lint:mcp` rejects an alias
    * that shadows a declared key, names a target that does not exist, or is

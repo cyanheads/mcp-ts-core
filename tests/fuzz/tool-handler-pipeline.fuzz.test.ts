@@ -101,6 +101,7 @@ vi.mock('@/utils/internal/performance.js', () => ({
 
 import type { CallToolResult } from '@modelcontextprotocol/server';
 import {
+  type InputHandlingOptions,
   prevalidateAliasFirst,
   prevalidateToolArguments,
 } from '@/mcp-server/tools/utils/inputPrevalidation.js';
@@ -149,6 +150,127 @@ const services: HandlerServices = {
 };
 
 const notifiers: NotifierSources = {};
+
+/** An argument rejection's `data`, and its message. */
+interface RejectionData {
+  input?: unknown;
+  issues?: unknown;
+  issuesCount?: number;
+  message: string;
+}
+
+/** The rejection `parseToolArguments` throws for `args`, or `undefined` when it validates. */
+function rejection(
+  def: unknown,
+  args: Record<string, unknown>,
+  input?: InputHandlingOptions,
+): RejectionData | undefined {
+  try {
+    parseToolArguments(def as AnyToolDefinition, args, input ? { input } : {});
+  } catch (error) {
+    if (error instanceof McpError) {
+      return { ...(error.data as Omit<RejectionData, 'message'>), message: error.message };
+    }
+    throw error;
+  }
+  return undefined;
+}
+
+/** The most issues `data.issues` keeps in all, counted in document order through every union's branches (#648). */
+const ISSUE_BUDGET = 30;
+
+/**
+ * How many objects `value`'s arrays hold, at every depth and each time one is
+ * listed — counted only until the count passes `limit`, since Zod lists the
+ * issues of a value two union branches parsed under both.
+ */
+function objectsIn(value: unknown, limit: number): number {
+  if (typeof value !== 'object' || value === null) return 0;
+  let count = 0;
+  for (const field of Object.values(value)) {
+    const listed = Array.isArray(value) && typeof field === 'object' && field !== null;
+    if (listed && !Array.isArray(field)) count += 1;
+    if (count > limit) return count;
+    count += objectsIn(field, limit - count);
+  }
+  return count;
+}
+
+/**
+ * Whether `value` keeps every array to 10 entries and every string to 1,024
+ * characters, and its arrays hold no more than `budget` objects in all.
+ */
+function withinCaps(value: unknown, budget = Number.POSITIVE_INFINITY): boolean {
+  const capped = (item: unknown): boolean => {
+    if (typeof item === 'string') return item.length <= 1_024;
+    if (Array.isArray(item)) return item.length <= 10 && item.every(capped);
+    if (typeof item !== 'object' || item === null) return true;
+    return Object.values(item).every(capped);
+  };
+  return capped(value) && objectsIn(value, budget) <= budget;
+}
+
+/**
+ * `value` as an argument rejection's `data` carries it (#648), worked out from
+ * the rule rather than the factory's code: the first 10 entries of every array
+ * and the first 1,024 characters of every string, at every depth, each array
+ * ending before the first object past `budget` objects in all — read in
+ * document order — or the first nested array once none is left, with the
+ * uncut count (`<key>Count`), length (`<key>Length`), or kept entries' lengths
+ * (`<key>Lengths`) beside each cut. ASCII strings only, as `fc.string()` draws.
+ */
+function carried(value: unknown, budget = { left: Number.POSITIVE_INFINITY }): unknown {
+  if (typeof value === 'string') return value.slice(0, 1_024);
+  if (Array.isArray(value)) {
+    const kept: unknown[] = [];
+    for (const item of value.slice(0, 10)) {
+      if (typeof item === 'object' && item !== null) {
+        if (budget.left === 0) break;
+        if (!Array.isArray(item)) budget.left -= 1;
+      }
+      kept.push(carried(item, budget));
+    }
+    return kept;
+  }
+  if (typeof value !== 'object' || value === null) return value;
+  const out: Record<string, unknown> = {};
+  for (const [key, field] of Object.entries(value)) {
+    const kept = carried(field, budget);
+    out[key] = kept;
+    if (typeof field === 'string' && field.length > 1_024) out[`${key}Length`] = field.length;
+    if (!Array.isArray(field) || !Array.isArray(kept)) continue;
+    if (kept.length < field.length) out[`${key}Count`] = field.length;
+    const length = (item: unknown) =>
+      typeof item === 'string' || Array.isArray(item) ? item.length : null;
+    if (kept.some((item, i) => length(item) !== length(field[i]))) {
+      out[`${key}Lengths`] = kept.map((_, i) => length(field[i]));
+    }
+  }
+  return out;
+}
+
+/**
+ * Asserts a rejection carries `issues` and `report` as the bound rules: Zod's
+ * list and the report exactly when they are within the caps, and the
+ * projection {@link carried} works out when they are not — `issues` keeping
+ * at most {@link ISSUE_BUDGET} issues in all.
+ */
+function expectCarried(
+  data: RejectionData | undefined,
+  issues: readonly unknown[],
+  report: unknown,
+): void {
+  const { issues: sentIssues, issuesCount } = data ?? {};
+  if (withinCaps(issues, ISSUE_BUDGET)) {
+    expect(sentIssues).toEqual(issues);
+    expect(issuesCount).toBeUndefined();
+  } else {
+    expect({ issues: sentIssues, ...(issuesCount !== undefined && { issuesCount }) }).toEqual(
+      carried({ issues }, { left: ISSUE_BUDGET }),
+    );
+  }
+  expect(data?.input).toEqual(withinCaps(report) ? report : carried(report));
+}
 
 // ---------------------------------------------------------------------------
 // Test definitions with various schema shapes
@@ -262,9 +384,12 @@ describe('Tool Handler Pipeline Fuzz Tests', () => {
     /**
      * Whether pre-validation's repair rescues an input the schema rejects as
      * sent. Here only one can: a safe integer other than `-0` at `stringTool`'s
-     * string field becomes its decimal string (#487). `numberTool` takes numbers
-     * only, and `complexTool`'s enum never receives one of its own values, so no
-     * repair makes either valid.
+     * string field becomes its decimal string (#487). `numberTool` would take a
+     * string spelling a number (#707), but no adversarial string spells one as
+     * `String(n)` writes it; `complexTool` would take a lone string for `tags`
+     * (#602), but its enum never receives one of its own values; and every
+     * root field of the three, where each adversarial value lands, is
+     * required, so no `null` is deleted (#616).
      */
     function repairable(name: string, input: Record<string, unknown>): boolean {
       const { value } = input;
@@ -331,8 +456,11 @@ describe('Tool Handler Pipeline Fuzz Tests', () => {
 
     /**
      * Declared keys, their underscore and case spellings, and client artifacts,
-     * over values each field accepts or refuses. Half the calls also carry a
-     * valid `query`, so the drop-first order validates often enough to test.
+     * over values each field accepts or refuses — among them values only a
+     * repair makes valid (an integer for a string, `'12345'` and `' 7 '` for
+     * `maxResults`) and stringified values whose decoding the field still
+     * refuses (`'[1]'`, `'{}'`). Half the calls also carry a valid `query`, so
+     * the drop-first order validates often enough to test.
      */
     const argumentsArb = fc
       .tuple(
@@ -360,6 +488,7 @@ describe('Tool Handler Pipeline Fuzz Tests', () => {
             fc.constant('12345'),
             fc.constant(null),
             fc.array(fc.string({ maxLength: 2 }), { maxLength: 2 }),
+            fc.constantFrom('[1]', '{}', ' 7 '),
           ),
           { maxKeys: 4 },
         ),
@@ -386,33 +515,197 @@ describe('Tool Handler Pipeline Fuzz Tests', () => {
       );
     });
 
-    it('rejects a call no order validates with the last order tried', () => {
+    /**
+     * The order a call no order validates is reported under: the alias-first
+     * retry runs only when it changes the arguments, and when it does, the keys
+     * the drop discarded reach their targets there, so its rejection is the one
+     * reported.
+     */
+    function reportedOrder(args: Record<string, unknown>) {
+      const { first, parsed } = dropFirst(args);
+      const retry = prevalidateAliasFirst(
+        keyOrderTool as AnyToolDefinition,
+        args,
+        first,
+        undefined,
+      );
+      return retry
+        ? { attempt: retry, parsed: keyOrderTool.input.safeParse(retry.args) }
+        : { attempt: first, parsed };
+    }
+
+    it('rejects a call no order validates with the last order tried, as sent under coerce: false', () => {
       fc.assert(
         fc.property(argumentsArb, (args) => {
-          const { first, parsed } = dropFirst(args);
-          let thrown: unknown;
-          try {
-            parseToolArguments(keyOrderTool, args);
-          } catch (error) {
-            thrown = error;
-          }
-          fc.pre(thrown instanceof McpError);
-          // The alias-first retry runs only when it changes the arguments; when
-          // it does, the keys the drop discarded reach their targets there, and
-          // its rejection is the one reported.
-          const retry = prevalidateAliasFirst(
-            keyOrderTool as AnyToolDefinition,
-            args,
-            first,
-            undefined,
-          );
-          const reported = retry ?? first;
-          const reparsed = retry ? keyOrderTool.input.safeParse(retry.args) : parsed;
-          const data = (thrown as McpError).data as { input?: unknown; issues?: unknown };
-          expect(data.issues).toEqual(reparsed.error?.issues);
-          expect(data.input).toEqual(reported.report);
+          const data = rejection(keyOrderTool, args, { coerce: false });
+          fc.pre(data !== undefined);
+          const { attempt, parsed } = reportedOrder(args);
+          expectCarried(data, parsed.error?.issues ?? [], attempt.report);
         }),
         { numRuns: 300 },
+      );
+    });
+
+    /**
+     * `args` with exactly the repairs that hold written (#706), worked out from
+     * `keyOrderTool`'s field rules rather than the repair code: an integer for
+     * `query` or `callId` becomes its digits, a `maxResults` string spelling a
+     * finite number becomes it, and `null` for an optional field is deleted —
+     * each a value the field then accepts. A stringified array or object for
+     * `maxResults` decodes to a value the field refuses, so it stays as sent,
+     * like every value no repair reaches.
+     */
+    function heldOnly(args: Record<string, unknown>): Record<string, unknown> {
+      const held = { ...args };
+      for (const key of ['query', 'callId']) {
+        const value = held[key];
+        if (typeof value === 'number' && Number.isSafeInteger(value) && !Object.is(value, -0)) {
+          held[key] = String(value);
+        }
+      }
+      if (typeof held.maxResults === 'string') {
+        const trimmed = held.maxResults.trim();
+        const number = Number(trimmed);
+        if (!/^[[{]/.test(trimmed) && Number.isFinite(number) && String(number) === trimmed) {
+          held.maxResults = number;
+        }
+      }
+      for (const key of ['maxResults', 'callId']) {
+        if (held[key] === null) delete held[key];
+      }
+      return held;
+    }
+
+    it('rejects a call no order validates with the last order tried, with only the repairs that held', () => {
+      fc.assert(
+        fc.property(argumentsArb, (args) => {
+          const data = rejection(keyOrderTool, args);
+          fc.pre(data !== undefined);
+          const { attempt } = reportedOrder(args);
+          const reported = keyOrderTool.input.safeParse(
+            heldOnly(attempt.args as Record<string, unknown>),
+          );
+          expect(reported.success).toBe(false);
+          expectCarried(data, reported.error?.issues ?? [], attempt.report);
+        }),
+        {
+          numRuns: 300,
+          // A repair that held beside one that did not; a held `null` deletion behind a case-style alias.
+          examples: [[{ query: 5, maxResults: '[1]' }], [{ max_results: null }]],
+        },
+      );
+    });
+  });
+
+  describe('Bounded rejection data (#648)', () => {
+    /**
+     * Takes a list whose every wrong element is its own issue, so a caller can
+     * send more of them than a rejection renders, beside unknown and dropped
+     * keys long enough to cut (#648).
+     */
+    const capsTool = tool('fuzz_caps', {
+      description: 'Takes a query and a list of strings.',
+      input: z.object({
+        query: z.string().describe('Query'),
+        items: z.array(z.string()).optional().describe('Items'),
+      }),
+      output: z.object({ ok: z.boolean().describe('Ok') }),
+      handler: () => ({ ok: true }),
+    });
+
+    /**
+     * Wrong-type elements no repair reaches (a boolean, an object), and root
+     * keys no case fold maps onto a declared one: `x…` keys the strict root
+     * rejects and `_x…` keys the drop discards, some past 1,024 characters.
+     */
+    const capsArb = fc
+      .record({
+        query: fc.oneof(fc.string({ maxLength: 4 }), fc.boolean()),
+        items: fc.array(fc.oneof(fc.string({ maxLength: 2 }), fc.boolean(), fc.constant({})), {
+          maxLength: 25,
+        }),
+        extra: fc.dictionary(
+          fc
+            .tuple(
+              fc.constantFrom('x', '_x'),
+              fc.oneof(
+                fc.string({ maxLength: 6 }),
+                fc.string({ minLength: 1_030, maxLength: 1_100 }),
+              ),
+            )
+            .map(([prefix, rest]) => `${prefix}${rest}`),
+          fc.constant(1),
+          { maxKeys: 14 },
+        ),
+      })
+      .map(({ query, items, extra }): Record<string, unknown> => ({ ...extra, query, items }));
+
+    it('carries the first 10 issues and every cut length past the caps, exactly the list within them (#648)', () => {
+      fc.assert(
+        fc.property(capsArb, (args) => {
+          const data = rejection(capsTool, args, { coerce: false });
+          fc.pre(data !== undefined);
+          const first = prevalidateToolArguments(capsTool as AnyToolDefinition, args, undefined);
+          const issues = capsTool.input.safeParse(first.args).error?.issues ?? [];
+          expectCarried(data, issues, first.report);
+          const more = issues.length - 10;
+          expect(data?.message.endsWith(` (+${more} more)`)).toBe(more > 0);
+        }),
+        { numRuns: 150 },
+      );
+    });
+
+    /**
+     * A filter whose `and` and `or` branches both parse one clause list, so Zod
+     * lists each clause's issues under both: the issue tree doubles per level
+     * of nesting while its distinct issues grow with it.
+     */
+    const Filter: z.ZodType = z.lazy(() =>
+      z.union([
+        z.object({ op: z.literal('and'), filters: z.array(Filter) }),
+        z.object({ op: z.literal('or'), filters: z.array(Filter) }),
+        z.object({ op: z.literal('eq'), field: z.string(), value: z.string() }),
+      ]),
+    );
+    const filterTool = tool('fuzz_filter', {
+      description: 'Takes a filter of nested clauses.',
+      input: z.object({ where: Filter.describe('Filter') }),
+      output: z.object({ ok: z.boolean().describe('Ok') }),
+      handler: () => ({ ok: true }),
+    });
+
+    /** Clause trees up to 16 levels deep, with leaves that are valid, wrong-typed, or unknown. */
+    const { clause } = fc.letrec<{ clause: unknown; leaf: unknown }>((tie) => ({
+      leaf: fc.record({
+        op: fc.constantFrom('eq', 'eq', 'ne'),
+        field: fc.oneof(fc.string({ maxLength: 3 }), fc.boolean()),
+        value: fc.oneof(fc.string({ maxLength: 3 }), fc.boolean(), fc.constant({})),
+      }),
+      clause: fc.oneof(
+        { depthSize: 'medium', maxDepth: 16 },
+        tie('leaf'),
+        fc.record({
+          op: fc.constantFrom('and', 'or', 'not'),
+          filters: fc.array(tie('clause'), { minLength: 1, maxLength: 2 }),
+        }),
+      ),
+    }));
+
+    it('carries at most 30 issues of a clause tree, in document order, and lines of at most 1,025 characters (#648)', () => {
+      fc.assert(
+        fc.property(clause, (where) => {
+          const args = { where };
+          const data = rejection(filterTool, args, { coerce: false });
+          fc.pre(data !== undefined);
+          const first = prevalidateToolArguments(filterTool as AnyToolDefinition, args, undefined);
+          const issues = filterTool.input.safeParse(first.args).error?.issues ?? [];
+          expectCarried(data, issues, first.report);
+          expect(objectsIn(data?.issues, ISSUE_BUDGET)).toBeLessThanOrEqual(ISSUE_BUDGET);
+          // One issue, at `where`: one line.
+          const preamble = 'Input validation error: Invalid arguments for tool fuzz_filter: ';
+          expect(data?.message.length).toBeLessThanOrEqual(preamble.length + 1_025);
+        }),
+        { numRuns: 150 },
       );
     });
   });

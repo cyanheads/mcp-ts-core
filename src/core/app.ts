@@ -179,9 +179,10 @@ export interface CreateAppOptions<TSupabaseClient extends object = SupabaseClien
    * Switches for the pre-validation step every `tools/call` argument object
    * passes through: dropping client-added root keys, then rewriting key
    * aliases, and, after a failed parse, repairing a JSON-stringified array or
-   * object or an integer sent for a string. When that still fails and the drop
-   * discarded a key, the stages rerun alias-first, kept only if the call then
-   * validates.
+   * object, an integer sent for a string, a string sent for a number or
+   * boolean, a lone string sent for an array, or `null` sent for an optional
+   * field. When that still fails and the drop discarded a key, the stages rerun
+   * alias-first, kept only if the call then validates.
    *
    * Every stage is on with no configuration. An entry here either extends a
    * stage or turns it off for the whole server; nothing about the advertised

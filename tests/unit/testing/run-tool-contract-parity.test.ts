@@ -89,6 +89,16 @@ const nestedStrict = tool('parity_nested_strict', {
   handler: () => ({ ok: true }),
 }) as AnyToolDefinition;
 
+const listed = tool('parity_listed', {
+  description: 'A list of strings.',
+  input: z.object({ items: z.array(z.string()).describe('Items') }),
+  output: z.object({ ok: z.boolean().describe('Success') }),
+  handler: () => ({ ok: true }),
+}) as AnyToolDefinition;
+
+/** More issues than a rejection renders, beside a key longer than any string it keeps (#648). */
+const PAST_THE_CAPS = { items: Array(50).fill(true), [`_${'k'.repeat(2_000)}`]: 1 };
+
 describe('runToolContract success surfaces', () => {
   it('publishes the production result for formatted output, enrichment, and media', async () => {
     const definition = tool('parity_success', {
@@ -133,7 +143,13 @@ describe('runToolContract argument rejection', () => {
       definition: typed,
       args: { name: 'ok', surprise: true },
     },
-    { name: 'a multi-issue input', definition: multi, args: { a: 1, b: 'x' } },
+    // A boolean `a`: a repaired integer that held would not be reported (#706).
+    { name: 'a multi-issue input', definition: multi, args: { a: true, b: 'x' } },
+    {
+      name: 'a repair that held beside a real failure (#706)',
+      definition: multi,
+      args: { a: 1, b: 'x' },
+    },
     {
       name: 'a nested field two levels down',
       definition: typed,
@@ -150,10 +166,16 @@ describe('runToolContract argument rejection', () => {
       args: { q: 'ab', _page: 2 },
     },
     {
+      name: 'an alias sent beside its target (#639)',
+      definition: nestedStrict,
+      args: { q: 'abc', query: 'abcd' },
+    },
+    {
       name: 'a stringified object and an integer the schema still refuses',
       definition: nestedStrict,
       args: { query: 12, opts: '{"exact":"yes"}' },
     },
+    { name: 'a rejection past the caps (#648)', definition: listed, args: PAST_THE_CAPS },
   ];
 
   for (const { args, definition, name } of cases) {
@@ -176,12 +198,23 @@ describe('runToolContract argument rejection', () => {
   }
 
   it('names the tool and every failing field in the shared message', async () => {
-    const helper = await runToolContract(multi, { a: 1, b: 'x' } as never);
+    const helper = await runToolContract(multi, { a: true, b: 'x' } as never);
     const message = envelope(helper).message;
 
     expect(message).toContain('parity_multi');
     expect(message).toContain('a: ');
     expect(message).toContain('b: ');
+  });
+
+  it('publishes the bounded rejection, not Zod’s whole list (#648)', async () => {
+    const helper = await runToolContract(listed, PAST_THE_CAPS as never);
+    const { data, message } = envelope(helper);
+
+    expect(
+      message.endsWith('items.9: Invalid input: expected string, received boolean (+40 more)'),
+    ).toBe(true);
+    expect(data).toMatchObject({ issuesCount: 50, input: { ignored: [`_${'k'.repeat(1_023)}`] } });
+    expect(data?.issues).toHaveLength(10);
   });
 });
 
