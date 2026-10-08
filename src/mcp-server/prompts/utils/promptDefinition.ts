@@ -26,7 +26,10 @@ export interface PromptDefinition<TArgs extends ZodObject<ZodRawShape> | undefin
   /** LLM-facing description. */
   description: string;
   /**
-   * Generates the prompt messages from validated arguments.
+   * Generates the prompt messages from the `args` schema's parsed output. The
+   * wire arguments are validated once, before `generate` runs: transforms have
+   * applied, defaults are filled, and async refinements have passed. An
+   * argless prompt receives `{}`.
    */
   generate: (
     args: TArgs extends ZodObject<ZodRawShape> ? z.infer<TArgs> : Record<string, never>,

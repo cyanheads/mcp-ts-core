@@ -8,15 +8,24 @@ import {
   completable,
   inputRequired,
   isCompletable,
+  type JSONRPCMessage,
   McpServer,
   type ServerContext,
 } from '@modelcontextprotocol/server';
+import { serveStdio } from '@modelcontextprotocol/server/stdio';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { z } from 'zod';
+import { type ZodObject, type ZodRawShape, z } from 'zod';
 
+import { config } from '@/config/index.js';
 import { createRequestStateSealer, InputRequiredSignal } from '@/mcp-server/inputRequired.js';
 import { PromptRegistry } from '@/mcp-server/prompts/prompt-registration.js';
 import { prompt } from '@/mcp-server/prompts/utils/promptDefinition.js';
+import { ResourceRegistry } from '@/mcp-server/resources/resource-registration.js';
+import { createMcpServerInstance } from '@/mcp-server/server.js';
+import { ToolRegistry } from '@/mcp-server/tools/tool-registration.js';
+import { MODERN_PROTOCOL_REVISION } from '@/mcp-server/types.js';
+import { StorageService } from '@/storage/core/StorageService.js';
+import { InMemoryProvider } from '@/storage/providers/inMemory/inMemoryProvider.js';
 import { JsonRpcErrorCode, McpError } from '@/types-global/errors.js';
 import { ErrorHandler } from '@/utils/internal/error-handler/errorHandler.js';
 import { logger } from '@/utils/internal/logger.js';
@@ -534,7 +543,7 @@ describe('PromptRegistry', () => {
 });
 
 // ---------------------------------------------------------------------------
-// prompts/get through the real SDK dispatch (#576, #581, #582)
+// prompts/get through the real SDK dispatch (#576, #581, #582, #643)
 // ---------------------------------------------------------------------------
 
 describe('prompts/get through the SDK dispatch', () => {
@@ -670,6 +679,353 @@ describe('prompts/get through the SDK dispatch', () => {
       expect(context.operation).not.toBe('PromptRegistry.registerAll');
     }
   });
+
+  describe.each(['2025-11-25', MODERN_PROTOCOL_REVISION])(
+    'arguments the SDK parsed, on %s over serveStdio (#643)',
+    (revision) => {
+      /** Every `generate` call the prompts below received, in order. */
+      const generated: Array<{ name: string; args: unknown }> = [];
+      /** How many times the `counted` prompt's argument transform has run. */
+      let transformRuns = 0;
+
+      /** A prompt whose `generate` records the args it received and echoes them as JSON. */
+      function recording<TArgs extends ZodObject<ZodRawShape>>(name: string, args: TArgs) {
+        return prompt(name, {
+          description: 'Echoes its arguments as JSON.',
+          args,
+          generate: (received) => {
+            generated.push({ name, args: received });
+            return [
+              {
+                role: 'user' as const,
+                content: { type: 'text' as const, text: JSON.stringify(received) },
+              },
+            ];
+          },
+        });
+      }
+
+      const defs = [
+        recording('flagged', z.object({ v: z.stringbool().describe('Flag') })),
+        recording(
+          'tagged',
+          z.object({
+            tags: z
+              .string()
+              .describe('Comma-separated tags')
+              .transform((s) => s.split(',')),
+          }),
+        ),
+        recording(
+          'async_refined',
+          z.object({
+            code: z
+              .string()
+              .describe('Code')
+              .refine(async (s) => s.length > 1, 'too short'),
+          }),
+        ),
+        recording(
+          'exclaimed',
+          z.object({
+            word: z
+              .string()
+              .describe('Word')
+              .transform((s) => `${s}!`),
+          }),
+        ),
+        recording(
+          'counted',
+          z.object({
+            x: z
+              .string()
+              .describe('Anything')
+              .transform((s) => {
+                transformRuns++;
+                return s;
+              }),
+          }),
+        ),
+        recording(
+          'completable_tags',
+          z.object({
+            tags: completable(
+              z
+                .string()
+                .describe('Comma-separated tags')
+                .transform((s) => s.split(',')),
+              async (partial) => ['alpha', 'beta'].filter((t) => t.startsWith(partial ?? '')),
+            ),
+          }),
+        ),
+        recording('plain_string', z.object({ topic: z.string().describe('Topic') })),
+        recording('coerced', z.object({ n: z.coerce.number().describe('Number') })),
+        recording('lowered', z.object({ s: z.string().toLowerCase().describe('String') })),
+        recording(
+          'defaulted',
+          z.object({
+            topic: z.string().describe('Topic'),
+            tone: z.string().default('neutral').describe('Tone'),
+          }),
+        ),
+        recording('enum_mode', z.object({ mode: z.enum(['a', 'b']).describe('Mode') })),
+        recording('strict_args', z.object({ k: z.string().describe('Key') }).strict()),
+        recording(
+          'root_refined',
+          z
+            .object({ a: z.string().describe('A'), b: z.string().describe('B') })
+            .refine((o) => o.a !== o.b, 'a and b must differ'),
+        ),
+        prompt('argless', {
+          description: 'Echoes its arguments as JSON.',
+          generate: (received) => {
+            generated.push({ name: 'argless', args: received });
+            return [
+              {
+                role: 'user' as const,
+                content: { type: 'text' as const, text: JSON.stringify(received) },
+              },
+            ];
+          },
+        }),
+        failing,
+      ];
+
+      type RpcResponse = {
+        error?: { code: number; data?: Record<string, unknown>; message: string };
+        result?: Record<string, any>;
+      };
+
+      /**
+       * A raw JSON-RPC connection speaking `revision` to `createMcpServerInstance`
+       * over the SDK's `serveStdio`: an `initialize` handshake on 2025-11-25, the
+       * per-request envelope on 2026-07-28, which a bare `McpServer` over
+       * `InMemoryTransport` does not negotiate.
+       */
+      async function serve() {
+        const promptRegistry = new PromptRegistry(defs, logger);
+        const shared = { logger, storage: new StorageService(new InMemoryProvider()) };
+        const toolRegistry = new ToolRegistry([], shared);
+        const resourceRegistry = new ResourceRegistry([], shared);
+        const [clientSide, serverSide] = InMemoryTransport.createLinkedPair();
+        const handle = serveStdio(
+          async ({ era }) =>
+            await createMcpServerInstance({
+              config,
+              era,
+              promptRegistry,
+              resourceRegistry,
+              toolRegistry,
+            }),
+          { transport: serverSide },
+        );
+        cleanups.push(async () => {
+          await handle.close();
+        });
+        const pending = new Map<number, (response: RpcResponse) => void>();
+        clientSide.onmessage = (message) => {
+          const { id } = message as { id?: number };
+          if (id === undefined) return;
+          pending.get(id)?.(message as RpcResponse);
+          pending.delete(id);
+        };
+        await clientSide.start();
+        let nextId = 1;
+        const send = (method: string, params: Record<string, unknown> = {}) => {
+          const id = nextId++;
+          return new Promise<RpcResponse>((resolve) => {
+            pending.set(id, resolve);
+            void clientSide.send({ jsonrpc: '2.0', id, method, params } as JSONRPCMessage);
+          });
+        };
+        const clientInfo = { name: 'prompt-era-client', version: '0.0.0' };
+        if (revision === MODERN_PROTOCOL_REVISION) {
+          const _meta = {
+            'io.modelcontextprotocol/protocolVersion': revision,
+            'io.modelcontextprotocol/clientCapabilities': {},
+            'io.modelcontextprotocol/clientInfo': clientInfo,
+          };
+          return (method: string, params: Record<string, unknown> = {}) =>
+            send(method, { ...params, _meta });
+        }
+        const init = await send('initialize', {
+          protocolVersion: revision,
+          capabilities: {},
+          clientInfo,
+        });
+        expect(init.result?.protocolVersion).toBe(revision);
+        return send;
+      }
+
+      beforeEach(() => {
+        generated.length = 0;
+        transformRuns = 0;
+      });
+
+      it.each([
+        ['flagged', { v: 'true' }, { v: true }],
+        ['flagged', { v: 'no' }, { v: false }],
+        ['tagged', { tags: 'a,b' }, { tags: ['a', 'b'] }],
+        ['async_refined', { code: 'ok' }, { code: 'ok' }],
+        ['exclaimed', { word: 'hi' }, { word: 'hi!' }],
+        ['completable_tags', { tags: 'alpha,beta' }, { tags: ['alpha', 'beta'] }],
+      ])('hands %s %j to generate as %j and measures that', async (name, args, expected) => {
+        const infoSpy = vi.spyOn(logger, 'info');
+        const call = await serve();
+
+        const response = await call('prompts/get', { name, arguments: args });
+
+        expect(response.error).toBeUndefined();
+        expect(response.result?.messages).toEqual([
+          { role: 'user', content: { type: 'text', text: JSON.stringify(expected) } },
+        ]);
+        expect(generated).toEqual([{ name, args: expected }]);
+        const [finished] = records(infoSpy, /^Prompt generation finished\.$/);
+        expect(finished?.[1].extra.metrics.inputBytes).toBe(JSON.stringify(expected).length);
+      });
+
+      it('runs an argument transform once per call', async () => {
+        const call = await serve();
+
+        const response = await call('prompts/get', { name: 'counted', arguments: { x: 'once' } });
+
+        expect(response.error).toBeUndefined();
+        expect(transformRuns).toBe(1);
+        expect(generated).toEqual([{ name: 'counted', args: { x: 'once' } }]);
+      });
+
+      it('still completes a completable() transform argument', async () => {
+        const call = await serve();
+
+        const response = await call('completion/complete', {
+          ref: { type: 'ref/prompt', name: 'completable_tags' },
+          argument: { name: 'tags', value: 'al' },
+        });
+
+        expect(response.result?.completion).toEqual({
+          values: ['alpha'],
+          total: 1,
+          hasMore: false,
+        });
+      });
+
+      it.each([
+        [
+          'flagged',
+          { v: 'maybe' },
+          'v: Invalid option: expected one of "true"|"1"|"yes"|"on"|"y"|"enabled"|"false"|"0"|"no"|"off"|"n"|"disabled"',
+        ],
+        ['enum_mode', { mode: 'c' }, 'mode: Invalid option: expected one of "a"|"b"'],
+        ['plain_string', {}, 'topic: Invalid input: expected string, received undefined'],
+        ['strict_args', { k: 'v', extra: 'y' }, 'Unrecognized key: "extra"'],
+        ['root_refined', { a: 'same', b: 'same' }, 'a and b must differ'],
+        ['async_refined', { code: 'x' }, 'code: too short'],
+      ])(
+        'refuses %s %j as the SDK -32602 with no data, before generate runs',
+        async (name, args, issues) => {
+          const call = await serve();
+
+          const response = await call('prompts/get', { name, arguments: args });
+
+          expect(JSON.stringify(response.error)).toBe(
+            JSON.stringify({
+              code: JsonRpcErrorCode.InvalidParams,
+              message: `Invalid arguments for prompt ${name}: ${issues}`,
+            }),
+          );
+          expect(generated).toEqual([]);
+        },
+      );
+
+      it.each([
+        ['plain_string', { topic: 'x' }, { topic: 'x' }, 13],
+        ['coerced', { n: '42' }, { n: 42 }, 8],
+        ['lowered', { s: 'ABC' }, { s: 'abc' }, 11],
+        ['defaulted', { topic: 't' }, { topic: 't', tone: 'neutral' }, 30],
+      ])(
+        'hands %s %j to generate as %j and measures %i input bytes',
+        async (name, args, expected, bytes) => {
+          const infoSpy = vi.spyOn(logger, 'info');
+          const call = await serve();
+
+          const response = await call('prompts/get', { name, arguments: args });
+
+          expect(response.result?.messages[0].content.text).toBe(JSON.stringify(expected));
+          expect(generated).toEqual([{ name, args: expected }]);
+          const [finished] = records(infoSpy, /^Prompt generation finished\.$/);
+          expect(finished?.[1].extra.metrics.inputBytes).toBe(bytes);
+        },
+      );
+
+      it('hands an argless prompt {} and measures 0 input bytes', async () => {
+        const infoSpy = vi.spyOn(logger, 'info');
+        const call = await serve();
+
+        const response = await call('prompts/get', { name: 'argless' });
+
+        expect(response.result?.messages[0].content.text).toBe('{}');
+        expect(generated).toEqual([{ name: 'argless', args: {} }]);
+        const [finished] = records(infoSpy, /^Prompt generation finished\.$/);
+        expect(finished?.[1].extra.metrics.inputBytes).toBe(0);
+      });
+
+      it("answers a generate() throw with its code, its data, and the call's request id", async () => {
+        const errorSpy = vi.spyOn(logger, 'error').mockImplementation(() => {});
+        const call = await serve();
+
+        const response = await call('prompts/get', {
+          name: 'always_fails',
+          arguments: { topic: 'q' },
+        });
+
+        const [record] = records(errorSpy, /^Error in prompt:always_fails:/);
+        expect(record?.[1].requestId).toMatch(/^[A-Z0-9]{5}-[A-Z0-9]{5}$/);
+        expect(response.error).toStrictEqual({
+          code: JsonRpcErrorCode.NotFound,
+          message: 'No template for q',
+          data: { reason: 'no_template', requestId: record?.[1].requestId },
+        });
+      });
+
+      it('advertises every argument as before', async () => {
+        const call = await serve();
+
+        const response = await call('prompts/list');
+
+        const { prompts } = response.result as {
+          prompts: Array<{ arguments?: unknown; name: string }>;
+        };
+        const advertised = Object.fromEntries(
+          prompts.map((listed) => [listed.name, listed.arguments]),
+        );
+        const required = (name: string, description: string) => ({
+          name,
+          description,
+          required: true,
+        });
+        expect(advertised).toEqual({
+          flagged: [required('v', 'Flag')],
+          tagged: [required('tags', 'Comma-separated tags')],
+          async_refined: [required('code', 'Code')],
+          exclaimed: [required('word', 'Word')],
+          counted: [required('x', 'Anything')],
+          completable_tags: [required('tags', 'Comma-separated tags')],
+          plain_string: [required('topic', 'Topic')],
+          coerced: [required('n', 'Number')],
+          lowered: [required('s', 'String')],
+          defaulted: [
+            required('topic', 'Topic'),
+            { name: 'tone', description: 'Tone', required: false },
+          ],
+          enum_mode: [required('mode', 'Mode')],
+          strict_args: [required('k', 'Key')],
+          root_refined: [required('a', 'A'), required('b', 'B')],
+          argless: undefined,
+          always_fails: [required('topic', 'Topic.')],
+        });
+      });
+    },
+  );
 });
 
 // ---------------------------------------------------------------------------

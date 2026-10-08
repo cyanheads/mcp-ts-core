@@ -116,14 +116,21 @@ export class PromptRegistry {
               additionalContext: { promptName: promptDef.name },
             });
             try {
-              // An argless prompt's `generate` is typed to receive `{}`; its
-              // input measures as nothing.
-              const validatedArgs = promptDef.args ? promptDef.args.parse(args) : {};
+              /**
+               * `args` is already the SDK's parse of the wire arguments against
+               * `argsSchema`: transforms applied once, defaults filled, async
+               * refinements awaited, and invalid input refused as `-32602`
+               * before this callback runs. Parsing that output again would
+               * apply every transform twice and refuse any argument whose
+               * output is not valid input, such as `z.stringbool()` (#643).
+               * An argless prompt's `generate` is typed to receive `{}`; its
+               * `undefined` input measures as nothing.
+               */
               const messages = await measurePromptGeneration(
                 async () => {
                   try {
                     return await promptDef.generate(
-                      validatedArgs as Parameters<typeof promptDef.generate>[0],
+                      (promptDef.args ? args : {}) as Parameters<typeof promptDef.generate>[0],
                     );
                   } catch (error) {
                     // Inside the measurement, as for tools and resources: an
@@ -137,7 +144,7 @@ export class PromptRegistry {
                   }
                 },
                 { ...requestContext, promptName: promptDef.name },
-                promptDef.args ? validatedArgs : undefined,
+                args,
               );
               return { messages };
             } catch (error: unknown) {
