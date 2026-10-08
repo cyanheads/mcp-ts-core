@@ -2376,6 +2376,122 @@ describe('createToolHandler', () => {
         expect(hint(result)).toBe(`Send ${path.join('.')} as a string, not a boolean.`);
       });
 
+      describe('caller data a custom issue carries', () => {
+        /** Rejects every call with a custom issue whose `params` is the caller's payload. */
+        const echoes = tool('echo_tool', {
+          description: 'Rejects every payload, echoing it in the issue.',
+          input: z
+            .object({ payload: z.unknown().describe('Payload.') })
+            .superRefine((value, ctx) => {
+              ctx.addIssue({
+                code: 'custom',
+                message: 'bad',
+                params: value.payload as Record<string, unknown>,
+              });
+            }),
+          output: ok,
+          handler: pass,
+        });
+
+        /** `count` keys named after their index, each holding it. */
+        const indexed = (count: number) =>
+          Object.fromEntries(Array.from({ length: count }, (_, i) => [`k${i}`, i]));
+
+        /** The one issue `payload`'s rejection carries in `data.issues`. */
+        async function carriedIssue(payload: unknown): Promise<Record<string, unknown>> {
+          const result = await reject(echoes, { payload });
+          const issues = (envelope(result).data?.issues ?? []) as Array<Record<string, unknown>>;
+          expect(issues).toHaveLength(1);
+          return issues[0] as Record<string, unknown>;
+        }
+
+        it('keeps a payload within the caps whole', async () => {
+          const payload = {
+            ...indexed(7),
+            ['p'.repeat(1_024)]: ['x'.repeat(1_024)],
+            nested: { a: 'b' },
+            rows: [{ id: 1, tags: ['t'] }],
+          };
+          const result = await reject(echoes, { payload });
+
+          expect(envelope(result).data?.issues).toEqual(zodIssues({ payload }, echoes));
+        });
+
+        it('keeps the first 10 of 10,000 keys, the count beside them', async () => {
+          const result = await reject(echoes, { payload: indexed(10_000) });
+
+          const [zodIssue] = zodIssues({ payload: indexed(10_000) }, echoes) as Array<
+            Record<string, unknown>
+          >;
+          const [issue] = (envelope(result).data?.issues ?? []) as Array<Record<string, unknown>>;
+          expect(issue).toEqual({ ...zodIssue, params: indexed(10), paramsCount: 10_000 });
+          const keys = Object.keys(issue ?? {});
+          expect(keys.indexOf('paramsCount')).toBe(keys.indexOf('params') + 1);
+          expect(responseBytes(result)).toBeLessThan(4 * 1_024);
+        });
+
+        it('keeps the first 1,024 characters of a 100,000-character key, its length beside it', async () => {
+          const key = 'q'.repeat(100_000);
+          const issue = await carriedIssue({ [key]: 1 });
+
+          const kept = key.slice(0, 1_024);
+          expect(issue.params).toEqual({ [kept]: 1, [`${kept}KeyLength`]: 100_000 });
+          expect(issue).not.toHaveProperty('paramsCount');
+        });
+
+        it('leaves out a key a record or an earlier cut key takes, and counts it', async () => {
+          const prefix = 'p'.repeat(1_024);
+          const issue = await carriedIssue({
+            a: 'x'.repeat(2_000),
+            aLength: 3,
+            [`${prefix}one`]: 1,
+            [`${prefix}two`]: 2,
+          });
+
+          expect(issue.params).toEqual({
+            a: 'x'.repeat(1_024),
+            aLength: 2_000,
+            [prefix]: 1,
+            [`${prefix}KeyLength`]: 1_027,
+          });
+          expect(issue.paramsCount).toBe(4);
+        });
+
+        it('records an object a list holds past 10 keys in the list’s lengths', async () => {
+          const issue = await carriedIssue({ list: [indexed(11), 'short'] });
+
+          expect(issue.params).toEqual({ list: [indexed(10), 'short'], listLengths: [11, 5] });
+        });
+
+        it('keeps two levels of nesting below the issue or an object a list holds, each deeper list or object empty with its count', async () => {
+          const issue = await carriedIssue({
+            a: { b: { c: 1 }, d: [[1, 2], 3] },
+            rows: [{ f: { g: [1] } }],
+          });
+
+          expect(issue.params).toEqual({
+            a: { b: {}, bCount: 1, d: [], dCount: 2 },
+            rows: [{ f: { g: [1] } }],
+          });
+        });
+
+        it.each([
+          ['nested lists', 5],
+          ['nested objects', 5],
+        ])('answers %s five levels deep and ten wide under 8 KiB', async (label, depth) => {
+          const grow = (level: number): unknown => {
+            if (level === 0) return 'leafleaf';
+            const entries = Array.from({ length: 10 }, () => grow(level - 1));
+            return label === 'nested lists'
+              ? entries
+              : Object.fromEntries(entries.map((entry, i) => [`k${i}`, entry]));
+          };
+          const result = await reject(echoes, { payload: { tree: grow(depth) } });
+
+          expect(responseBytes(result)).toBeLessThan(8 * 1_024);
+        });
+      });
+
       it('names the first 10 missing fields in the Provide sentence and counts the rest', async () => {
         const result = await reject(twelve, {});
 

@@ -727,6 +727,60 @@ describe('an argument rejection’s record stays bounded (#631)', () => {
     expect(JSON.parse(serialized(errorRecord())).errorData.input).toEqual(bounded);
   });
 
+  describe('caller data a custom issue carries', () => {
+    const echoes = tool('records_echoes', {
+      description: 'Rejects every payload, echoing it in the issue.',
+      input: z.object({ payload: z.unknown().describe('Payload.') }).superRefine((value, ctx) => {
+        ctx.addIssue({
+          code: 'custom',
+          message: 'bad',
+          params: value.payload as Record<string, unknown>,
+        });
+      }),
+      output: ok,
+      handler: () => ({ ok: true }),
+    });
+
+    /** `count` keys named after their index, each holding `value(i)`. */
+    const indexed = (count: number, value: (i: number) => unknown = (i) => i) =>
+      Object.fromEntries(Array.from({ length: count }, (_, i) => [`k${i}`, value(i)]));
+
+    const LONG = 'q'.repeat(100_000);
+
+    it.each([
+      ['10,000 keys', indexed(10_000)],
+      ['a 100,000-character key', { [LONG]: 1 }],
+      ['ten 2,000-character values', indexed(10, () => 'v'.repeat(2_000))],
+      ['nested ten-wide objects', { tree: indexed(10, () => indexed(10, () => indexed(10))) }],
+    ])(
+      'logs the bounded issue the result carries for %s, under 16 KiB',
+      async (_label, payload) => {
+        const result = await callTool(echoes, { payload });
+
+        // The record re-projects `data`, so the records the result's cut wrote must pass through it.
+        const issues = envelope(result).data?.issues;
+        const record = errorRecord();
+        expect(record.fields.errorData.issues).toEqual(issues);
+        expect(JSON.parse(serialized(record)).errorData.issues).toEqual(issues);
+        expect(Buffer.byteLength(serialized(record))).toBeLessThan(16 * 1_024);
+        expect(Buffer.byteLength(JSON.stringify(result.structuredContent))).toBeLessThan(
+          16 * 1_024,
+        );
+      },
+    );
+
+    it('keeps the first 10 of 10,000 keys and a long key’s first 1,024 characters', async () => {
+      await callTool(echoes, { payload: { ...indexed(10_000), [LONG]: 1 } });
+      const [wide] = errorRecord().fields.errorData.issues as Array<Record<string, unknown>>;
+      expect(wide).toMatchObject({ params: indexed(10), paramsCount: 10_001 });
+
+      writes.length = 0;
+      await callTool(echoes, { payload: { [LONG]: 1 } });
+      const [long] = errorRecord().fields.errorData.issues as Array<Record<string, unknown>>;
+      expect(long?.params).toEqual({ [cut(LONG)]: 1, [`${cut(LONG)}KeyLength`]: 100_000 });
+    });
+  });
+
   it('logs a rejection within the caps with the same fields as before, minus the stacks', async () => {
     const result = await callTool(search, { query: 'x', salt: true });
 

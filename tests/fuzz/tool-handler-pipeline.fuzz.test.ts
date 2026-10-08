@@ -196,57 +196,130 @@ function objectsIn(value: unknown, limit: number): number {
   return count;
 }
 
+/** Whether `value` is an object and not an array: what an array's entry counts as an issue for. */
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
 /**
- * Whether `value` keeps every array to 10 entries and every string to 1,024
- * characters, and its arrays hold no more than `budget` objects in all.
+ * How many entries a list or object `level` levels below the nearest object
+ * an array holds keeps: 10 through two levels, none past them.
+ */
+function entriesAt(level: number): number {
+  return level > 2 ? 0 : 10;
+}
+
+/**
+ * Whether `value` keeps every array to 10 entries, every object to 10 keys,
+ * every string and key to 1,024 characters, and every list or object past two
+ * levels below the nearest object an array holds empty, and its arrays hold no
+ * more than `budget` objects in all.
  */
 function withinCaps(value: unknown, budget = Number.POSITIVE_INFINITY): boolean {
-  const capped = (item: unknown): boolean => {
+  const capped = (item: unknown, level: number): boolean => {
     if (typeof item === 'string') return item.length <= 1_024;
-    if (Array.isArray(item)) return item.length <= 10 && item.every(capped);
-    if (typeof item !== 'object' || item === null) return true;
-    return Object.values(item).every(capped);
+    if (Array.isArray(item)) {
+      return (
+        item.length <= entriesAt(level) &&
+        item.every((entry) => capped(entry, isRecord(entry) ? 0 : level + 1))
+      );
+    }
+    if (!isRecord(item)) return true;
+    const keys = Object.keys(item);
+    return (
+      keys.length <= entriesAt(level) &&
+      keys.every((key) => key.length <= 1_024 && capped(item[key], level + 1))
+    );
   };
-  return capped(value) && objectsIn(value, budget) <= budget;
+  return capped(value, 0) && objectsIn(value, budget) <= budget;
+}
+
+/** What a cut keeps of a value, and the records its field takes beside it, by suffix. */
+interface Carried {
+  kept: unknown;
+  records: Partial<Record<'Count' | 'Length' | 'Lengths', unknown>>;
 }
 
 /**
  * `value` as an argument rejection's `data` carries it (#648), worked out from
  * the rule rather than the factory's code: the first 10 entries of every array
- * and the first 1,024 characters of every string, at every depth, each array
- * ending before the first object past `budget` objects in all — read in
- * document order — or the first nested array once none is left, with the
- * uncut count (`<key>Count`), length (`<key>Length`), or kept entries' lengths
- * (`<key>Lengths`) beside each cut. ASCII strings only, as `fc.string()` draws.
+ * and keys of every object, the first 1,024 characters of every string and
+ * key, and no entries in a list or object past two levels below the nearest
+ * object an array holds, each array ending before the first object past
+ * `budget` objects in all — read in document order — or the first nested
+ * array once none is left. Each cut is recorded beside its field: the uncut
+ * count (`<key>Count`, an array's entries or an object's keys), length
+ * (`<key>Length`, `<key>KeyLength`), or kept entries' sizes (`<key>Lengths`),
+ * and a key a record's name takes, or that cutting makes equal to an earlier
+ * one, is left out and counted. ASCII strings only, as `fc.string()` draws.
  */
 function carried(value: unknown, budget = { left: Number.POSITIVE_INFINITY }): unknown {
-  if (typeof value === 'string') return value.slice(0, 1_024);
+  return carve(value, budget, 0).kept;
+}
+
+/** {@link carried}, with the records the value's field takes. */
+function carve(value: unknown, budget: { left: number }, level: number): Carried {
+  if (typeof value === 'string') {
+    return {
+      kept: value.slice(0, 1_024),
+      records: value.length > 1_024 ? { Length: value.length } : {},
+    };
+  }
+  const size = (item: unknown) =>
+    typeof item === 'string' || Array.isArray(item)
+      ? item.length
+      : isRecord(item)
+        ? Object.keys(item).length
+        : null;
   if (Array.isArray(value)) {
     const kept: unknown[] = [];
-    for (const item of value.slice(0, 10)) {
+    let entryCut = false;
+    for (const item of value.slice(0, entriesAt(level))) {
       if (typeof item === 'object' && item !== null) {
         if (budget.left === 0) break;
         if (!Array.isArray(item)) budget.left -= 1;
       }
-      kept.push(carried(item, budget));
+      const entry = carve(item, budget, isRecord(item) ? 0 : level + 1);
+      kept.push(entry.kept);
+      if ('Count' in entry.records || 'Length' in entry.records) entryCut = true;
     }
-    return kept;
+    return {
+      kept,
+      records: {
+        ...(kept.length < value.length && { Count: value.length }),
+        ...(entryCut && { Lengths: kept.map((_, i) => size(value[i])) }),
+      },
+    };
   }
-  if (typeof value !== 'object' || value === null) return value;
+  if (!isRecord(value)) return { kept: value, records: {} };
+
+  const keys = Object.keys(value);
+  const fields: Array<{ name: string; entry: Carried; keyLength?: number }> = [];
+  for (const key of keys.slice(0, entriesAt(level))) {
+    const name = key.slice(0, 1_024);
+    if (fields.some((field) => field.name === name)) continue;
+    fields.push({
+      name,
+      entry: carve(value[key], budget, level + 1),
+      ...(key.length > 1_024 && { keyLength: key.length }),
+    });
+  }
+  const recordsOf = ({ name, entry, keyLength }: (typeof fields)[number]) => [
+    ...(keyLength !== undefined ? [[`${name}KeyLength`, keyLength] as const] : []),
+    ...Object.entries(entry.records).map(
+      ([suffix, record]) => [`${name}${suffix}`, record] as const,
+    ),
+  ];
+  const taken = new Set(fields.flatMap((field) => recordsOf(field).map(([name]) => name)));
   const out: Record<string, unknown> = {};
-  for (const [key, field] of Object.entries(value)) {
-    const kept = carried(field, budget);
-    out[key] = kept;
-    if (typeof field === 'string' && field.length > 1_024) out[`${key}Length`] = field.length;
-    if (!Array.isArray(field) || !Array.isArray(kept)) continue;
-    if (kept.length < field.length) out[`${key}Count`] = field.length;
-    const length = (item: unknown) =>
-      typeof item === 'string' || Array.isArray(item) ? item.length : null;
-    if (kept.some((item, i) => length(item) !== length(field[i]))) {
-      out[`${key}Lengths`] = kept.map((_, i) => length(field[i]));
-    }
+  let kept = 0;
+  for (const field of fields) {
+    if (taken.has(field.name)) continue;
+    kept += 1;
+    out[field.name] = field.entry.kept;
+    for (const [name, record] of recordsOf(field)) out[name] = record;
   }
-  return out;
+  return { kept: out, records: kept < keys.length ? { Count: keys.length } : {} };
 }
 
 /**
@@ -652,6 +725,73 @@ describe('Tool Handler Pipeline Fuzz Tests', () => {
           expect(data?.message.endsWith(` (+${more} more)`)).toBe(more > 0);
         }),
         { numRuns: 150 },
+      );
+    });
+
+    /** Rejects every call with a custom issue whose `params` is the caller's payload. */
+    const echoTool = tool('fuzz_echo', {
+      description: 'Rejects every payload, echoing it in the issue.',
+      input: z.object({ payload: z.unknown().describe('Payload') }).superRefine((value, ctx) => {
+        ctx.addIssue({
+          code: 'custom',
+          message: 'bad',
+          params: value.payload as Record<string, unknown>,
+        });
+      }),
+      output: z.object({ ok: z.boolean().describe('Ok') }),
+      handler: () => ({ ok: true }),
+    });
+
+    /**
+     * Keys past 1,024 characters, some sharing their first 1,024, and keys
+     * named like the records a cut writes beside `a`.
+     */
+    const payloadKey = fc
+      .oneof(
+        fc.string({ maxLength: 3 }),
+        fc.constantFrom('a', 'aLength', 'aCount', 'aLengths', 'aKeyLength'),
+        fc.string({ minLength: 1_025, maxLength: 1_040 }),
+        fc.string({ minLength: 1, maxLength: 4 }).map((tail) => `${'p'.repeat(1_024)}${tail}`),
+      )
+      .filter((key) => key !== '__proto__');
+
+    /** Values past every cap: strings past 1,024 characters, lists and objects past 10 entries, nesting past two levels. */
+    const { node } = fc.letrec<{ node: unknown }>((tie) => ({
+      node: fc.oneof(
+        { depthSize: 'small', maxDepth: 5 },
+        fc.oneof(
+          fc.string({ maxLength: 3 }),
+          fc.string({ minLength: 1_025, maxLength: 1_040 }),
+          fc.integer(),
+        ),
+        fc.array(tie('node'), { maxLength: 12 }),
+        fc.dictionary(payloadKey, tie('node'), { maxKeys: 13 }),
+      ),
+    }));
+
+    it('carries the caller data a custom issue holds cut to every cap, exactly within them (#648)', () => {
+      fc.assert(
+        fc.property(fc.dictionary(payloadKey, node, { maxKeys: 14 }), (payload) => {
+          const args = { payload };
+          const data = rejection(echoTool, args);
+          const first = prevalidateToolArguments(echoTool as AnyToolDefinition, args, undefined);
+          const issues = echoTool.input.safeParse(first.args).error?.issues ?? [];
+          expectCarried(data, issues, first.report);
+        }),
+        {
+          numRuns: 150,
+          examples: [
+            [
+              {
+                a: 'x'.repeat(1_030),
+                aLength: 1,
+                [`${'p'.repeat(1_024)}x`]: 1,
+                [`${'p'.repeat(1_024)}y`]: [{ deep: { er: { still: [1] } } }],
+                b: { c: { d: [[1]] } },
+              },
+            ],
+          ],
+        },
       );
     });
 

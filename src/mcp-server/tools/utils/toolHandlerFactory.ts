@@ -477,10 +477,11 @@ function dottedPath(path: readonly PropertyKey[]): string {
 
 /**
  * The most entries an argument rejection keeps, in its result (#648) and its
- * log record (#631) alike: issue lines of the message and the hint, and
- * entries of every array its `data` carries. The caller sets every count and
- * length a rejection reports — how many issues, how many keys, how long a key
- * — so neither surface grows with them.
+ * log record (#631) alike: issue lines of the message and the hint, entries of
+ * every array its `data` carries, and own keys of every object. The caller
+ * sets every count and length a rejection reports — how many issues, how many
+ * keys, how long a key — and an author's refinement can copy the caller's
+ * value into a custom issue, so neither surface grows with them.
  */
 const REJECTION_ENTRIES = 10;
 
@@ -525,6 +526,21 @@ function moreLines(lines: readonly LocatedIssue[]): string | undefined {
  */
 const REJECTION_ISSUES = 30;
 
+/**
+ * The most levels of arrays and objects a projection keeps below an object an
+ * array holds — an issue, in `data.issues` — or below its root. An issue's own
+ * structure reaches two: a union's `errors` and the branch lists in it. Caller
+ * data an author's refinement copies into a custom issue keeps the same two,
+ * so its nesting no more grows a rejection than its width does; a list or an
+ * object one level deeper keeps none of its entries.
+ */
+const REJECTION_LEVELS = 2;
+
+/** How many entries a list or an object `level` levels below an issue keeps: none past {@link REJECTION_LEVELS}. */
+function entriesAt(level: number): number {
+  return level > REJECTION_LEVELS ? 0 : REJECTION_ENTRIES;
+}
+
 /** What is left of the objects a projection may still keep ({@link boundedProjection}). */
 interface Budget {
   left: number;
@@ -542,31 +558,53 @@ function admits(budget: Budget, entry: unknown): boolean {
   return true;
 }
 
-/** Whether {@link cutToCaps} cuts `value` itself, whatever its budget. */
-function pastCaps(value: unknown): boolean {
-  return typeof value === 'string'
-    ? value.length > OBSERVABILITY_MAX_STRING_LENGTH
-    : Array.isArray(value) && value.length > REJECTION_ENTRIES;
+/**
+ * How many levels below an issue an array's entry sits, `level` being the
+ * array's: an object it holds is counted like an issue, from zero again, and
+ * takes its share of the budget for it ({@link admits}).
+ */
+function entryLevel(entry: unknown, level: number): number {
+  return entry !== null && typeof entry === 'object' && !Array.isArray(entry) ? 0 : level + 1;
 }
 
 /**
- * Whether {@link cutToCaps} leaves `value` as it is: nothing in it, at any
- * depth, past the caps, and its arrays holding no more objects in all than
- * `budget` admits. Walked without copying, since nearly every rejection is
- * within them, and stopped at the first object past the budget, so a finite
- * one bounds the walk however many times Zod lists one issue.
+ * The containers {@link cutToCaps} built. A projection writes each cut's
+ * record beside the field it cut, and a second projection would read those
+ * records as fields of the caller's and cut them again — past 10 keys, or a
+ * `<key>KeyLength` past 1,024 characters — so a container the projection built
+ * passes through a later one unchanged: the argument rejection's log record
+ * projects a `data` whose `data.issues` and `data.input` it already built
+ * (#631).
  */
-function withinCaps(value: unknown, budget: Budget): boolean {
-  if (pastCaps(value)) return false;
-  if (value === null || typeof value !== 'object') return true;
+const projections = new WeakSet<object>();
+
+/**
+ * Whether {@link cutToCaps} leaves `value` as it is: nothing in it past the
+ * caps — no string or key past 1,024 characters, no array past 10 entries, no
+ * object past 10 own keys, no list or object holding anything past
+ * {@link REJECTION_LEVELS} levels below an issue — and its arrays holding no
+ * more objects in all than `budget` admits. Walked without copying, since
+ * nearly every rejection is within them, and stopped at the first value past
+ * them, so a finite budget bounds the walk however many times Zod lists one
+ * issue. `level` is `value`'s, below the nearest object an array holds.
+ */
+function withinCaps(value: unknown, budget: Budget, level = 0): boolean {
+  if (typeof value === 'string') return value.length <= OBSERVABILITY_MAX_STRING_LENGTH;
+  if (value === null || typeof value !== 'object' || projections.has(value)) return true;
   if (Array.isArray(value)) {
+    if (value.length > entriesAt(level)) return false;
     for (const entry of value) {
-      if (!admits(budget, entry) || !withinCaps(entry, budget)) return false;
+      if (!admits(budget, entry) || !withinCaps(entry, budget, entryLevel(entry, level))) {
+        return false;
+      }
     }
     return true;
   }
-  for (const key in value) {
-    if (!withinCaps((value as Record<string, unknown>)[key], budget)) return false;
+  const keys = Object.keys(value);
+  if (keys.length > entriesAt(level)) return false;
+  for (const key of keys) {
+    if (key.length > OBSERVABILITY_MAX_STRING_LENGTH) return false;
+    if (!withinCaps((value as Record<string, unknown>)[key], budget, level + 1)) return false;
   }
   return true;
 }
@@ -577,52 +615,126 @@ function withinCaps(value: unknown, budget: Budget): boolean {
  * caps, so a rejection within them is carried uncut, and otherwise its
  * {@link cutToCaps} projection. `objects` is the most objects its arrays keep
  * in all — {@link REJECTION_ISSUES} for `data.issues`, where every such object
- * is an issue.
+ * is an issue. `value` is an object the framework builds, whose own few keys
+ * are never cut, so the records of its own cut have no field to sit beside.
  */
 function boundedProjection(value: unknown, objects = Number.POSITIVE_INFINITY): unknown {
-  return withinCaps(value, { left: objects }) ? value : cutToCaps(value, { left: objects });
+  return withinCaps(value, { left: objects })
+    ? value
+    : cutToCaps(value, { left: objects }, 0).value;
 }
+
+/**
+ * What a cut removed from a value itself, as the suffix and the value of the
+ * record its field takes beside it: `Length`, a string's uncut length;
+ * `Count`, an array's uncut entry count or an object's uncut key count; and
+ * `Lengths`, the uncut {@link sizeOf size} of every entry an array kept, when
+ * it cut one of them.
+ */
+type CutRecord = readonly [suffix: 'Count' | 'Length' | 'Lengths', value: unknown];
+
+/** A value as {@link cutToCaps} keeps it, and the records its field takes. */
+interface Cut {
+  readonly records: readonly CutRecord[];
+  readonly value: unknown;
+}
+
+/** The records of a value nothing was cut from. */
+const UNCUT: readonly CutRecord[] = [];
 
 /**
  * `value` with a string cut to its first {@link OBSERVABILITY_MAX_STRING_LENGTH}
  * characters, an array to its first {@link REJECTION_ENTRIES} entries and
- * before the first entry `budget` no longer {@link admits}, read in document
- * order, and every nested value the same. An object records each cut beside
- * the field it cut — `<key>Length` for a string, `<key>Count` for an array,
- * and `<key>Lengths`, the uncut length of every entry kept, when one of the
- * array's own entries was cut — and gains nothing where nothing was, keeping
- * its own fields in their own order.
+ * before the first entry `budget` no longer {@link admits}, an object to its
+ * first 10 own keys ({@link cutObject}), and a list or an object
+ * {@link REJECTION_LEVELS} levels below an issue to none of its entries, read
+ * in document order, and every nested value the same. A value the projection
+ * built passes through unchanged ({@link projections}).
  */
-function cutToCaps(value: unknown, budget: Budget): unknown {
-  if (typeof value === 'string') return capForObservability(value).value;
-  if (Array.isArray(value)) {
-    const kept: unknown[] = [];
-    for (const entry of value.slice(0, REJECTION_ENTRIES)) {
-      if (!admits(budget, entry)) break;
-      kept.push(cutToCaps(entry, budget));
-    }
-    return kept;
+function cutToCaps(value: unknown, budget: Budget, level: number): Cut {
+  if (typeof value === 'string') {
+    const { value: kept, length } = capForObservability(value);
+    return { value: kept, records: length === undefined ? UNCUT : [['Length', length]] };
   }
-  if (value === null || typeof value !== 'object') return value;
-
-  const bounded: Record<string, unknown> = {};
-  for (const [key, entry] of Object.entries(value)) {
-    const cut = cutToCaps(entry, budget);
-    bounded[key] = cut;
-    if (typeof entry === 'string' && pastCaps(entry)) bounded[`${key}Length`] = entry.length;
-    if (!Array.isArray(entry)) continue;
-    const kept = cut as unknown[];
-    if (kept.length < entry.length) bounded[`${key}Count`] = entry.length;
-    if (kept.some((item, i) => cutLength(item) !== cutLength(entry[i]))) {
-      bounded[`${key}Lengths`] = kept.map((_, i) => cutLength(entry[i]) ?? null);
-    }
+  if (value === null || typeof value !== 'object' || projections.has(value)) {
+    return { value, records: UNCUT };
   }
-  return bounded;
+  const cut = Array.isArray(value)
+    ? cutArray(value, budget, level)
+    : cutObject(value as Record<string, unknown>, budget, level);
+  projections.add(cut.value as object);
+  return cut;
 }
 
-/** The length {@link cutToCaps} can cut: a string's or an array's, `undefined` for anything else. */
-function cutLength(value: unknown): number | undefined {
-  return typeof value === 'string' || Array.isArray(value) ? value.length : undefined;
+/**
+ * An array's first {@link entriesAt} entries, ending before the first one
+ * `budget` no longer {@link admits}, each cut in turn: `Count` when entries
+ * were left out, and `Lengths` when a kept entry's own string, entries, or
+ * keys were cut.
+ */
+function cutArray(value: readonly unknown[], budget: Budget, level: number): Cut {
+  const kept: unknown[] = [];
+  let entryCut = false;
+  for (const entry of value.slice(0, entriesAt(level))) {
+    if (!admits(budget, entry)) break;
+    const cut = cutToCaps(entry, budget, entryLevel(entry, level));
+    kept.push(cut.value);
+    entryCut ||= cut.records.some(([suffix]) => suffix !== 'Lengths');
+  }
+  const records: CutRecord[] = [];
+  if (kept.length < value.length) records.push(['Count', value.length]);
+  if (entryCut) records.push(['Lengths', kept.map((_, i) => sizeOf(value[i]) ?? null)]);
+  return { value: kept, records };
+}
+
+/**
+ * An object's first {@link entriesAt} own keys, each key cut to its first
+ * 1,024 characters with `<key>KeyLength`, the uncut length, beside a cut one,
+ * and each value cut in turn with its records beside it, in the object's own
+ * order. A record never shares a name with a kept key: a key a record's name
+ * takes, or one that cutting makes equal to an earlier key, is left out with
+ * the keys past the first 10, and `Count` records them all. A `<key>KeyLength`
+ * is longer than any kept key, so no kept key can take its name. Nor can two
+ * records share one: the only suffix that ends another, `KeyLength` ending
+ * `Length`, follows a cut key, and the field that would share it, `<key>Key`,
+ * is longer than any key kept.
+ */
+function cutObject(value: Record<string, unknown>, budget: Budget, level: number): Cut {
+  const keys = Object.keys(value);
+  const fields: Array<{ name: string; records: Array<[string, unknown]>; value: unknown }> = [];
+  const names = new Set<string>();
+  for (const key of keys.slice(0, entriesAt(level))) {
+    const { value: name, length } = capForObservability(key);
+    if (names.has(name)) continue;
+    names.add(name);
+    const cut = cutToCaps(value[key], budget, level + 1);
+    const records = cut.records.map(([suffix, record]): [string, unknown] => [
+      `${name}${suffix}`,
+      record,
+    ]);
+    if (length !== undefined) records.unshift([`${name}KeyLength`, length]);
+    fields.push({ name, records, value: cut.value });
+  }
+
+  const recorded = new Set(fields.flatMap(({ records }) => records.map(([name]) => name)));
+  const bounded: Record<string, unknown> = {};
+  let kept = 0;
+  for (const field of fields) {
+    if (recorded.has(field.name)) continue;
+    kept++;
+    bounded[field.name] = field.value;
+    for (const [name, record] of field.records) bounded[name] = record;
+  }
+  return { value: bounded, records: kept < keys.length ? [['Count', keys.length]] : UNCUT };
+}
+
+/**
+ * What {@link cutToCaps} can cut of `value` itself: a string's length, an
+ * array's entry count, an object's key count, `undefined` for anything else.
+ */
+function sizeOf(value: unknown): number | undefined {
+  if (typeof value === 'string' || Array.isArray(value)) return value.length;
+  return value !== null && typeof value === 'object' ? Object.keys(value).length : undefined;
 }
 
 /**
@@ -1042,8 +1154,9 @@ export interface ParseToolArgumentsOptions {
  * throw, so every path through this function carries the bound: the message
  * and the hint render the first 10 issue lines, each cut to 1,024 characters,
  * and `data.issues` and `data.input` are {@link boundedProjection}s — the
- * first 10 entries of every array and the first 1,024 characters of every
- * string at every depth, the uncut count or length beside each cut — with
+ * first 10 entries of every array and own keys of every object, the first
+ * 1,024 characters of every string and key, and {@link REJECTION_LEVELS} levels
+ * of nesting below each issue, the uncut count or length beside each cut — with
  * `data.issues` keeping at most {@link REJECTION_ISSUES} issues in all through
  * every union's branches. `data.issuesCount`, how many issues Zod raised at
  * the top level, sits beside `data.issues` whenever it keeps fewer of them —
@@ -1687,13 +1800,14 @@ function failureSeverity(
  * (#631). The caller sets every length in it — a key's name, how many keys,
  * how many issues — and the record is logged at `notice`, which the default
  * level admits, so it is bounded like any other caller-supplied value: the
- * message and every string in `data` keep at most their first 1,024 characters and
- * every array its first 10 entries ({@link boundedProjection}), with
+ * message and every string in `data` keep at most their first 1,024 characters,
+ * and `data` is the {@link boundedProjection} the result's is, with
  * `originalMessageLength` beside a cut message. `data.issues` and `data.input`
- * arrive bounded the same way (#648) and pass through unchanged; what the
- * record cuts further is the message and `recovery.hint`, which the `-32602`
- * result carries as up to 10 lines of up to 1,025 characters each. A
- * rejection within the caps is logged uncut.
+ * arrive as projections already (#648) and pass through unchanged, the records
+ * their cuts wrote included ({@link projections}); what the record cuts further
+ * is the message and `recovery.hint`, which the `-32602` result carries as up
+ * to 10 lines of up to 1,025 characters each. A rejection within the caps is
+ * logged uncut.
  */
 function argumentRejectionForLog(rejection: McpError): McpError {
   const { value: message, length } = capForObservability(rejection.message);
