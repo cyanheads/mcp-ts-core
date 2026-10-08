@@ -26,7 +26,7 @@ import {
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { BUILD_INPUT_PATHS } from './build-inputs.js';
+import { BUILD_INPUT_PATHS, readByBuild } from './build-inputs.js';
 import { PUBLIC_RUNTIME_EXPORTS, type PublicRuntimeSubpath } from './public-api-contract.js';
 
 type ConditionalExport = {
@@ -185,9 +185,11 @@ async function newestMtimeMs(path: string): Promise<number> {
 
   const children = await readdir(path, { withFileTypes: true });
   const childTimes = await Promise.all(
-    children.map((entry) => newestMtimeMs(join(path, entry.name))),
+    children
+      .filter((entry) => readByBuild(entry.name, entry.isDirectory()))
+      .map((entry) => newestMtimeMs(join(path, entry.name))),
   );
-  return Math.max(metadata.mtimeMs, ...childTimes);
+  return Math.max(0, ...childTimes);
 }
 
 function runtimeSubpaths(pkg: PackageJson): string[] {

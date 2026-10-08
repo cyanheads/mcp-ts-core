@@ -13,7 +13,7 @@ import { type ChildProcess, spawn } from 'node:child_process';
 import { existsSync, readdirSync, statSync } from 'node:fs';
 import { createServer } from 'node:net';
 import { resolve } from 'node:path';
-import { BUILD_INPUT_PATHS } from '../../scripts/build-inputs.js';
+import { BUILD_INPUT_PATHS, readByBuild } from '../../scripts/build-inputs.js';
 import { exchange } from './node-http.js';
 
 export interface ServerHandle {
@@ -26,14 +26,15 @@ const DIST_INDEX = resolve(process.cwd(), 'dist/index.js');
 const DIST_CORE_INDEX = resolve(process.cwd(), 'dist/core/index.js');
 const BUILD_INPUTS = BUILD_INPUT_PATHS.map((path) => resolve(process.cwd(), path));
 
-function newestMtimeMs(path: string): number {
+/** The newest mtime of what the build reads at `path`: the file itself, or the sources under it. */
+export function newestMtimeMs(path: string): number {
   const stat = statSync(path);
   if (!stat.isDirectory()) return stat.mtimeMs;
 
-  let newest = stat.mtimeMs;
+  let newest = 0;
   for (const entry of readdirSync(path, { withFileTypes: true })) {
-    const child = resolve(path, entry.name);
-    newest = Math.max(newest, newestMtimeMs(child));
+    if (!readByBuild(entry.name, entry.isDirectory())) continue;
+    newest = Math.max(newest, newestMtimeMs(resolve(path, entry.name)));
   }
   return newest;
 }
