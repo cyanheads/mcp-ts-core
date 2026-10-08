@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.13.14](changelog/0.13.x/0.13.14.md) — 2026-10-08 · 🛡️ Security
+
+Tool-argument pre-validation repairs numeric and boolean strings, lone strings for arrays, and null optionals, including inside unions, tags, and preprocess output; the -32602 rejection is bounded in size and CPU; prompt arguments are parsed once.
+
 ## [0.13.13](changelog/0.13.x/0.13.13.md) — 2026-10-07 · 🛡️ Security
 
 Error envelopes no longer carry data.rootCause, filesystem storage errors name the key instead of the storage root, and every log sink shares one bounded, redacting walk that neither a thrown value nor log data can fail or stall.

@@ -1,6 +1,6 @@
 # mcp-ts-core - Directory Structure
 
-Generated on: 2026-10-07 09:22:04
+Generated on: 2026-10-08 09:08:53
 
 ```text
 mcp-ts-core/
@@ -797,7 +797,8 @@ mcp-ts-core/
 │   │   │   ├── serverManifest.test.ts
 │   │   │   └── worker.test.ts
 │   │   ├── helpers/
-│   │   │   └── matchers.test.ts
+│   │   │   ├── matchers.test.ts
+│   │   │   └── server-process.test.ts
 │   │   ├── linter/
 │   │   │   ├── enrichment-rules.test.ts
 │   │   │   ├── error-contract-rules.test.ts
