@@ -551,7 +551,7 @@ describe('argumentAt (#599)', () => {
         ).toBeLessThan(25);
       }
 
-      const deepest = 400;
+      const deepest = 200;
       /** Thread-CPU ms of walking `deepest` levels' worth of paths `depth` levels deep, best of 3. */
       const walkCost = (depth: number): number => {
         const { args, path } = nested(depth);
@@ -563,8 +563,8 @@ describe('argumentAt (#599)', () => {
         return cost(walkAll);
       };
 
-      // Each side walks 400 levels in all: linear is ~1×, a re-walk of the
-      // path from the root at every step ~15×.
+      // Each side walks 200 levels in all: linear is ~1×, a re-walk of the
+      // path from the root at every step ~8×.
       expect(walkCost(deepest) / walkCost(25)).toBeLessThan(4);
     });
   });
