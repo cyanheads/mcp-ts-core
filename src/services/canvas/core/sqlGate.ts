@@ -518,6 +518,11 @@ const DATABASE_QUALIFIERS: ReadonlySet<string> = new Set([
  * file path, so a reference counts as a file when its name holds a dot — no
  * canvas name can — or a qualifier the database does not have. A DESCRIBE's
  * subject is a reference like any other.
+ *
+ * A CTE whose name holds a dot is refused too: the parse tree writes a CTE
+ * reference as a `BASE_TABLE` like any other, and exempting the names a
+ * statement's `cte_map`s define would also admit a same-named reference
+ * outside that CTE's scope, which DuckDB reads as a file.
  */
 export function findFileReference(parseTree: unknown): string | undefined {
   if (parseTree === null || typeof parseTree !== 'object') return;
