@@ -21,7 +21,7 @@ import {
   type OptionalNotifiers,
   selectNotifiers,
 } from '@/mcp-server/notifications.js';
-import type { InputHandlingOptions } from '@/mcp-server/tools/utils/inputPrevalidation.js';
+import type { InputHandlingOptions } from '@/mcp-server/tools/utils/arguments/index.js';
 import { resolveSessionMode } from '@/mcp-server/types.js';
 import type { StorageService } from '@/storage/core/StorageService.js';
 import type { ErrorContract } from '@/types-global/errors.js';

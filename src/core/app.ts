@@ -31,8 +31,8 @@ import type { AnyResourceDefinition } from '@/mcp-server/resources/utils/resourc
 import { createMcpServerInstance } from '@/mcp-server/server.js';
 import type { AnyToolDef } from '@/mcp-server/tools/tool-registration.js';
 import { ToolRegistry } from '@/mcp-server/tools/tool-registration.js';
+import type { InputHandlingOptions } from '@/mcp-server/tools/utils/arguments/index.js';
 import { getDisabledMetadata } from '@/mcp-server/tools/utils/disabled-tool.js';
-import type { InputHandlingOptions } from '@/mcp-server/tools/utils/inputPrevalidation.js';
 import { initHeartbeatMetrics } from '@/mcp-server/transports/heartbeat.js';
 import { initSessionMetrics } from '@/mcp-server/transports/http/sessionStore.js';
 import { TransportManager } from '@/mcp-server/transports/manager.js';

@@ -101,10 +101,10 @@ import type { AnyToolDefinition } from '@/mcp-server/tools/utils/toolDefinition.
 import { tool } from '@/mcp-server/tools/utils/toolDefinition.js';
 import {
   createToolHandler,
-  effectiveOutputSchema,
   type HandlerServices,
   type NotifierSources,
 } from '@/mcp-server/tools/utils/toolHandlerFactory.js';
+import { effectiveOutputSchema } from '@/mcp-server/tools/utils/toolOutputSchema.js';
 import { createMockContext, getEnrichment } from '@/testing/index.js';
 
 // ---------------------------------------------------------------------------

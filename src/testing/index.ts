@@ -41,14 +41,14 @@ import {
   declaredResponses,
   isInputRequiredSignal,
 } from '@/mcp-server/inputRequired.js';
+import { parseToolArguments } from '@/mcp-server/tools/utils/arguments/index.js';
 import type { AnyToolDefinition } from '@/mcp-server/tools/utils/toolDefinition.js';
 import {
   buildToolSuccessResult,
   classifyAndBuildToolErrorResult,
-  parseToolArguments,
   parseToolOutput,
   renderToolContent,
-} from '@/mcp-server/tools/utils/toolHandlerFactory.js';
+} from '@/mcp-server/tools/utils/toolResult.js';
 import { StorageService } from '@/storage/core/StorageService.js';
 import {
   InMemoryProvider,
@@ -487,10 +487,17 @@ export function createFetchMock(
 ): FetchMockHarness {
   const routes = [...initialRoutes];
   const calls: FetchMockCall[] = [];
+  /**
+   * Every Request built, held until `reset()`. Node's `Request` follows the caller's signal
+   * through a weak reference, so a Request collected mid-response would drop a later abort;
+   * a real `fetch` keeps its Request alive for the whole exchange.
+   */
+  const requests: Request[] = [];
   let installedFetch: typeof globalThis.fetch | undefined;
 
   const mockFetch: typeof globalThis.fetch = (input, init) => {
     const request = new Request(input, init);
+    requests.push(request);
     const route = routes.find((candidate) => matchesFetchRoute(candidate, request));
     if (!route) {
       if (options.onUnhandled) return Promise.resolve(options.onUnhandled(request));
@@ -514,6 +521,7 @@ export function createFetchMock(
     },
     reset() {
       calls.length = 0;
+      requests.length = 0;
       routes.length = 0;
     },
     restore() {

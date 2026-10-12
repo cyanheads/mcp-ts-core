@@ -35,7 +35,7 @@
   "echo prompt, missing argument": {
     "error": {
       "code": -32602,
-      "message": "Invalid arguments for prompt template_echo_message: Invalid input: expected object, received undefined"
+      "message": "Invalid arguments for prompt template_echo_message: message: Invalid input: expected string, received undefined"
     }
   },
   "echo resource": {

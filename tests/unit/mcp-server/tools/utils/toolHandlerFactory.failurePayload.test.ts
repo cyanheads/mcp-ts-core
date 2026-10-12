@@ -19,7 +19,7 @@ import {
   ROOT_CONTEXT,
   trace,
 } from '@opentelemetry/api';
-import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { z } from 'zod';
 
 import { JsonRpcErrorCode, McpError } from '@/types-global/errors.js';
@@ -567,5 +567,169 @@ describe('LOG_TOOL_FAILURE_PAYLOADS=true', () => {
 
     expect(sansRequestId(withFlag)).toEqual(sansRequestId(withoutFlag));
     expect(payloadWrites()).toHaveLength(1);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The logger's default rate limit (#735)
+// ---------------------------------------------------------------------------
+
+/**
+ * Every case above runs with the limiter off (`logRateLimitThreshold: 0`). These
+ * run at the shipped default — 10 records per level and message per 60 s — where a
+ * payload record's constant per-tool message made a tool's 11th failure in a window
+ * drop its payload. Each case names its own tools, so no case inherits another's
+ * counts from the singleton logger.
+ */
+describe('LOG_TOOL_FAILURE_PAYLOADS at the default rate limit', () => {
+  const DEFAULT_THRESHOLD = 10;
+  const CALLS = 15;
+
+  const limiter = logger as unknown as {
+    flushSuppressedMessages(): void;
+    rateLimitThreshold: number;
+  };
+  let savedThreshold: number;
+
+  beforeEach(() => {
+    savedThreshold = limiter.rateLimitThreshold;
+    limiter.rateLimitThreshold = DEFAULT_THRESHOLD;
+    mockConfig.logToolFailurePayloads = true;
+  });
+
+  afterEach(() => {
+    limiter.flushSuppressedMessages();
+    limiter.rateLimitThreshold = savedThreshold;
+  });
+
+  /** Flushes the limiter's suppression record and returns the notices it wrote. */
+  function suppressionNotices(): string[] {
+    const before = writes.length;
+    limiter.flushSuppressedMessages();
+    return writes
+      .slice(before)
+      .filter((w) => w.msg.startsWith('Suppressed '))
+      .map((w) => w.msg);
+  }
+
+  /** A tool that always fails, with a message that varies per call or stays constant. */
+  const failing = (name: string, message: (query: string) => string) =>
+    tool(name, {
+      description: 'Always fails.',
+      input: probeInput,
+      output: ok,
+      handler: (input) => {
+        throw new McpError(JsonRpcErrorCode.NotFound, message(input.query));
+      },
+    });
+
+  it.each([
+    ['varies with the input', (q: string) => `No results for "${q}".`],
+    ['is constant', () => 'No results.'],
+  ])(
+    'writes one payload record per failed call when the thrown message %s',
+    async (label, message) => {
+      const name = `payload_rate_${label.replaceAll(' ', '_')}`;
+      const def = failing(name, message);
+
+      const results: CallToolResult[] = [];
+      for (let i = 0; i < CALLS; i++) results.push(await call(def, { query: `term-${i}` }));
+
+      const payloads = payloadWrites();
+      expect(payloads).toHaveLength(CALLS);
+      expect(payloads.map((p) => p.msg)).toEqual(Array(CALLS).fill(`${PAYLOAD_PREFIX}${name}`));
+      expect(payloads.map((p) => p.level)).toEqual(Array(CALLS).fill('error'));
+      // One record per call, in call order: each carries its own call's arguments,
+      // result, and request id.
+      expect(payloads.map((p) => JSON.parse(p.fields.toolInput as string))).toEqual(
+        Array.from({ length: CALLS }, (_, i) => ({ query: `term-${i}` })),
+      );
+      expect(payloads.map((p) => JSON.parse(p.fields.toolResult as string))).toEqual(results);
+      expect(new Set(payloads.map((p) => p.fields.requestId)).size).toBe(CALLS);
+      for (const p of payloads) {
+        expect(p.fields).toMatchObject({
+          toolInputTruncated: false,
+          toolName: name,
+          toolResultTruncated: false,
+          traceId: TRACE_ID,
+        });
+      }
+      expect(exported.filter((r) => r.body === `${PAYLOAD_PREFIX}${name}`)).toHaveLength(CALLS);
+      expect(suppressionNotices().filter((m) => m.includes(PAYLOAD_PREFIX))).toEqual([]);
+    },
+  );
+
+  it('keeps every varying error record, each paired with its payload by request id', async () => {
+    const name = 'payload_rate_paired';
+    const def = failing(name, (q) => `No results for "${q}".`);
+
+    for (let i = 0; i < CALLS; i++) await call(def, { query: `term-${i}` });
+
+    const errors = writes.filter((w) => w.msg.startsWith(`Error in tool:${name}:`));
+    expect(errors).toHaveLength(CALLS);
+    expect(payloadWrites().map((p) => p.fields.requestId)).toEqual(
+      errors.map((e) => e.fields.requestId),
+    );
+  });
+
+  it('still cuts a constant-message error record at the threshold and reports the cut', async () => {
+    const name = 'payload_rate_constant_error';
+    const def = failing(name, () => 'No results.');
+
+    for (let i = 0; i < CALLS; i++) await call(def, { query: `term-${i}` });
+
+    expect(writes.filter((w) => w.msg === `Error in tool:${name}: No results.`)).toHaveLength(
+      DEFAULT_THRESHOLD,
+    );
+    expect(payloadWrites()).toHaveLength(CALLS);
+    expect(suppressionNotices()).toEqual([
+      `Suppressed ${CALLS - DEFAULT_THRESHOLD} occurrences of "error:Error in tool:${name}: No results." — rate limit is ${DEFAULT_THRESHOLD} per 60000ms.`,
+    ]);
+  });
+
+  it('keeps the declared severity and the argument-rejection notice on every payload record', async () => {
+    const soft = tool('payload_rate_soft', {
+      description: 'Fails with a declared, milder severity.',
+      input: probeInput,
+      output: ok,
+      errors: [
+        {
+          reason: 'soft_miss',
+          code: JsonRpcErrorCode.NotFound,
+          when: 'Nothing matched the query.',
+          severity: 'warning',
+          recovery: 'Broaden the query and call the tool again with fewer filters.',
+        },
+      ],
+      handler: (_input, ctx) => {
+        throw ctx.fail('soft_miss', 'Nothing matched.');
+      },
+    });
+    const strict = failing('payload_rate_rejects', () => 'unreachable');
+
+    for (let i = 0; i < CALLS; i++) {
+      await call(soft, { query: `term-${i}` });
+      await call(strict, { query: `term-${i}`, limit: 'ten' });
+    }
+
+    const byTool = (name: string) =>
+      payloadWrites().filter((p) => p.msg === `${PAYLOAD_PREFIX}${name}`);
+    expect(byTool('payload_rate_soft').map((p) => p.level)).toEqual(Array(CALLS).fill('warn'));
+    expect(byTool('payload_rate_rejects').map((p) => p.level)).toEqual(Array(CALLS).fill('info'));
+    const exportedLevels = (name: string) =>
+      exported.filter((r) => r.body === `${PAYLOAD_PREFIX}${name}`).map((r) => r.severityText);
+    expect(exportedLevels('payload_rate_soft')).toEqual(Array(CALLS).fill('warning'));
+    expect(exportedLevels('payload_rate_rejects')).toEqual(Array(CALLS).fill('notice'));
+    expect(suppressionNotices().filter((m) => m.includes(PAYLOAD_PREFIX))).toEqual([]);
+  });
+
+  it('writes no payload record with the flag off', async () => {
+    mockConfig.logToolFailurePayloads = false;
+    const def = failing('payload_rate_flag_off', (q) => `No results for "${q}".`);
+
+    for (let i = 0; i < CALLS; i++) await call(def, { query: `term-${i}` });
+
+    expect(payloadWrites()).toEqual([]);
+    expect(exported.filter((r) => r.body.startsWith(PAYLOAD_PREFIX))).toEqual([]);
   });
 });

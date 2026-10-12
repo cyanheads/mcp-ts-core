@@ -27,7 +27,7 @@ import { installResourceSubscriptions } from '@/mcp-server/resources/resourceSub
 import { resource } from '@/mcp-server/resources/utils/resourceDefinition.js';
 import { ToolRegistry } from '@/mcp-server/tools/tool-registration.js';
 import { tool } from '@/mcp-server/tools/utils/toolDefinition.js';
-import { advertisedOutputSchema } from '@/mcp-server/tools/utils/toolHandlerFactory.js';
+import { advertisedOutputSchema } from '@/mcp-server/tools/utils/toolOutputSchema.js';
 import { MODERN_PROTOCOL_REVISION } from '@/mcp-server/types.js';
 import { StorageService } from '@/storage/core/StorageService.js';
 import { InMemoryProvider } from '@/storage/providers/inMemory/inMemoryProvider.js';

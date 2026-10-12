@@ -31,7 +31,7 @@ import type {
   AnyToolDefinition,
   ToolInputSchema,
 } from '@/mcp-server/tools/utils/toolDefinition.js';
-import { buildToolSuccessResult } from '@/mcp-server/tools/utils/toolHandlerFactory.js';
+import { buildToolSuccessResult } from '@/mcp-server/tools/utils/toolResult.js';
 import { McpError } from '@/types-global/errors.js';
 import { createMockContext, type MockContextOptions } from './index.js';
 

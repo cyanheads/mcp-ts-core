@@ -102,16 +102,22 @@ vi.mock('@/utils/internal/performance.js', () => ({
 import type { CallToolResult } from '@modelcontextprotocol/server';
 import {
   type InputHandlingOptions,
+  parseToolArguments,
+} from '@/mcp-server/tools/utils/arguments/index.js';
+/**
+ * The module's own pre-parse stage, imported by path as a test oracle for the
+ * expected issue list — deliberately not on the module's public surface.
+ */
+import {
   prevalidateAliasFirst,
   prevalidateToolArguments,
-} from '@/mcp-server/tools/utils/inputPrevalidation.js';
+} from '@/mcp-server/tools/utils/arguments/prevalidation.js';
 import type { AnyToolDefinition } from '@/mcp-server/tools/utils/toolDefinition.js';
 import { tool } from '@/mcp-server/tools/utils/toolDefinition.js';
 import {
   createToolHandler,
   type HandlerServices,
   type NotifierSources,
-  parseToolArguments,
 } from '@/mcp-server/tools/utils/toolHandlerFactory.js';
 import { measureToolExecution } from '@/utils/internal/performance.js';
 import { Allow, jsonParser } from '@/utils/parsing/jsonParser.js';

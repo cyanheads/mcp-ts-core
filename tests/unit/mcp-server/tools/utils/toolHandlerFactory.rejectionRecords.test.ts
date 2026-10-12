@@ -87,13 +87,13 @@ import {
   resource,
 } from '@/mcp-server/resources/utils/resourceDefinition.js';
 import { createResourceHandler } from '@/mcp-server/resources/utils/resourceHandlerFactory.js';
+import { parseToolArguments } from '@/mcp-server/tools/utils/arguments/index.js';
 import { type AnyToolDefinition, tool } from '@/mcp-server/tools/utils/toolDefinition.js';
 import {
-  classifyAndBuildToolErrorResult,
   createToolHandler,
   type HandlerServices,
-  parseToolArguments,
 } from '@/mcp-server/tools/utils/toolHandlerFactory.js';
+import { classifyAndBuildToolErrorResult } from '@/mcp-server/tools/utils/toolResult.js';
 import { authContext } from '@/mcp-server/transports/auth/lib/authContext.js';
 import type { AuthInfo } from '@/mcp-server/transports/auth/lib/authTypes.js';
 import { checkScopes } from '@/mcp-server/transports/auth/lib/checkScopes.js';

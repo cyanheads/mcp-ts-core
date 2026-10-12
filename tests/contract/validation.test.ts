@@ -7,7 +7,7 @@
  */
 import { describe, it } from 'vitest';
 
-import type { InputHandlingOptions } from '@/mcp-server/tools/utils/inputPrevalidation.js';
+import type { InputHandlingOptions } from '@/mcp-server/tools/utils/arguments/index.js';
 import { CASES, PURPOSE, takeHandlerInput } from './fixtures.js';
 import { expectPin, openLegacySession, type PinName, type WireResponse } from './harness.js';
 

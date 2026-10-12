@@ -10,11 +10,11 @@ import { deferInputValidation } from '@/mcp-server/tools/utils/deferredInputSche
 import { getDisabledMetadata } from '@/mcp-server/tools/utils/disabled-tool.js';
 import type { AnyToolDefinition } from '@/mcp-server/tools/utils/toolDefinition.js';
 import {
-  advertisedOutputSchema,
   createToolHandler,
   type HandlerServices,
   type NotifierSources,
 } from '@/mcp-server/tools/utils/toolHandlerFactory.js';
+import { advertisedOutputSchema } from '@/mcp-server/tools/utils/toolOutputSchema.js';
 import { JsonRpcErrorCode } from '@/types-global/errors.js';
 import { ErrorHandler } from '@/utils/internal/error-handler/errorHandler.js';
 import { logger } from '@/utils/internal/logger.js';

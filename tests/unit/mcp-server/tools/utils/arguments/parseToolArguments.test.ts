@@ -11,9 +11,9 @@
  *
  * Almost every case drives the real `createToolHandler`, so what is asserted
  * is the envelope (or the handler input) a deployment produces — never a
- * stubbed `parseToolArguments`. The repair-cost cases time `parseToolArguments`
- * itself, and one case reads the repair records `repairRepresentations` returns.
- * @module tests/mcp-server/tools/utils/inputPrevalidation.test
+ * stubbed `parseToolArguments`. The repair-cost cases, and the cases that read
+ * the arguments a repair hands on, call `parseToolArguments` itself.
+ * @module tests/unit/mcp-server/tools/utils/arguments/parseToolArguments.test
  */
 
 import { Client } from '@modelcontextprotocol/client';
@@ -22,8 +22,9 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { z } from 'zod';
 
 import { JsonRpcErrorCode } from '@/types-global/errors.js';
-import { makeServerContext } from '../../../../helpers/server-context.js';
-import { withoutRequestId } from '../../../../helpers/tool-result.js';
+import { cpuMs, fastestCpuMs } from '../../../../../helpers/cpu-time.js';
+import { makeServerContext } from '../../../../../helpers/server-context.js';
+import { withoutRequestId } from '../../../../../helpers/tool-result.js';
 
 // ---------------------------------------------------------------------------
 // Module mocks — the counters and the debug channel are the step's only
@@ -72,18 +73,15 @@ vi.mock('@/utils/internal/logger.js', () => ({
 
 import { ToolRegistry } from '@/mcp-server/tools/tool-registration.js';
 import {
-  heldRepairs,
   type InputHandlingOptions,
-  type Repair,
-  repairRepresentations,
-} from '@/mcp-server/tools/utils/inputPrevalidation.js';
+  parseToolArguments,
+} from '@/mcp-server/tools/utils/arguments/index.js';
 import type { AnyToolDefinition } from '@/mcp-server/tools/utils/toolDefinition.js';
 import { headerParam, tool } from '@/mcp-server/tools/utils/toolDefinition.js';
 import {
   createToolHandler,
   type HandlerServices,
   type NotifierSources,
-  parseToolArguments,
 } from '@/mcp-server/tools/utils/toolHandlerFactory.js';
 import { runToolContract } from '@/testing/index.js';
 
@@ -3170,27 +3168,35 @@ describe('tool argument pre-validation', () => {
       ]);
     });
 
-    it('returns one record per repaired path, naming what was sent and what replaces it', () => {
+    it('returns the arguments with every repair applied, never writes to the caller’s, and logs both kinds in kind order', () => {
       const args = { query: 'x', items: [{ name: 'a', note: null }], sort: null, maxResults: '3' };
-      const parsed = nullable.input.safeParse(args);
-      if (parsed.success) throw new Error('Expected the arguments to fail as sent.');
 
-      const located = parsed.error.issues.map((issue) => ({ issue, path: issue.path }));
-      const repaired = repairRepresentations(args, located, nullable.input, new Map());
-
-      expect(repaired.repairs).toEqual([
-        { kind: 'string_as_number', path: ['maxResults'], sent: '3', value: 3 },
-        { kind: 'null_as_absent', path: ['sort'], sent: null },
-        { kind: 'null_as_absent', path: ['items', 0, 'note'], sent: null },
-      ]);
-      expect(repaired.kinds).toEqual(['string_as_number', 'null_as_absent']);
-      expect(repaired.args).toEqual({ query: 'x', items: [{ name: 'a' }], maxResults: 3 });
+      // Each deleted `null` key is absent, not `undefined`; `limit` is the schema's own default.
+      expect(parseToolArguments(nullable, args)).toStrictEqual({
+        query: 'x',
+        items: [{ name: 'a' }],
+        maxResults: 3,
+        limit: 10,
+      });
       // The caller's own arguments are never written to.
-      expect(args).toEqual({
+      expect(args).toStrictEqual({
         query: 'x',
         items: [{ name: 'a', note: null }],
         sort: null,
         maxResults: '3',
+      });
+      expect(debugLines('arguments validated after repairing')).toEqual([
+        "Tool 'prevalidation_nullable': arguments validated after repairing a string sent for " +
+          'a number and null sent for an optional field.',
+      ]);
+      const log = mockLogger.debug.mock.calls.find(([message]) =>
+        String(message).includes('arguments validated after repairing'),
+      );
+      expect(log?.[1]).toMatchObject({
+        extra: {
+          toolName: 'prevalidation_nullable',
+          coercions: ['string_as_number', 'null_as_absent'],
+        },
       });
     });
 
@@ -5829,22 +5835,10 @@ describe('tool argument pre-validation', () => {
       return { root: node };
     };
 
-    /** The fastest thread-CPU milliseconds of three runs of `run`. */
-    const cost = (run: () => void): number => {
-      let best = Number.POSITIVE_INFINITY;
-      for (let sample = 0; sample < 3; sample++) {
-        const start = process.threadCpuUsage();
-        run();
-        const { user, system } = process.threadCpuUsage(start);
-        best = Math.min(best, (user + system) / 1000);
-      }
-      return Math.max(best, 0.001);
-    };
-
     /** `parseToolArguments` over `args(n)`, swallowing the rejection a rejected call throws. */
     const parseCost = (definition: AnyToolDefinition, args: (n: number) => unknown, n: number) => {
       const built = args(n);
-      return cost(() => {
+      return cpuMs(() => {
         try {
           parseToolArguments(definition, built);
         } catch {
@@ -6053,7 +6047,7 @@ describe('tool argument pre-validation', () => {
         ...Array.from({ length: 200 }, (_, i) => [`_${i}${'A-b_'.repeat(5_000)}`, i]),
       ]);
       const parse = (input?: InputHandlingOptions) =>
-        cost(() => parseToolArguments(search, args, input ? { input } : {}));
+        cpuMs(() => parseToolArguments(search, args, input ? { input } : {}));
       expect(parseToolArguments(search, args)).toEqual({ query: 'x' });
 
       parse();
@@ -6113,7 +6107,7 @@ describe('tool argument pre-validation', () => {
 
       // The issue line is cut at its first 1,024 characters (#648), mid-path.
       expect(() => parseToolArguments(filtered, args)).toThrow(/: where(\.filter){145}\.fil…$/);
-      const parse = cost(() => filtered.input.safeParse(args));
+      const parse = cpuMs(() => filtered.input.safeParse(args));
       const rejection = parseCost(filtered, () => args, 0);
 
       // Reading the leaf's path for the repair, the message, and the hint once
@@ -6141,7 +6135,7 @@ describe('tool argument pre-validation', () => {
       const args = { where };
 
       expect(() => parseToolArguments(negated, args)).toThrow(/: where(\.filter){145}\.fil…$/);
-      const parse = cost(() => negated.input.safeParse(args));
+      const parse = cpuMs(() => negated.input.safeParse(args));
       const rejection = parseCost(negated, () => args, 0);
 
       // ~29× the parse when each lifted level re-read the full path of every entry below it.
@@ -6169,58 +6163,85 @@ describe('tool argument pre-validation', () => {
         handler: record,
       });
 
-      /** One bad leaf, `value: 5`, under `depth` levels alternating `or` and `and`. */
-      const nested = (depth: number): Record<string, unknown> => {
-        let node: unknown = { op: 'eq', field: 'name', value: 5 };
+      /**
+       * `leaf` — by default one bad value, `value: 5` — under `depth` levels
+       * alternating `or` and `and`.
+       */
+      const nested = (
+        depth: number,
+        leaf: Record<string, unknown> = { op: 'eq', field: 'name', value: 5 },
+      ): Record<string, unknown> => {
+        let node: unknown = leaf;
         for (let level = 0; level < depth; level++) {
           node = { op: level % 2 ? 'and' : 'or', filters: [node] };
         }
         return { where: node };
       };
 
-      /** The full path of `key` in {@link nested}'s leaf. */
-      const leaf = (depth: number, key: string): PropertyKey[] => [
-        'where',
-        ...Array.from({ length: depth }, () => ['filters', 0]).flat(),
-        key,
-      ];
+      it('reports a leaf value whose repair did not hold, and not the one beside it whose repair did, in time linear in the depth (#706)', () => {
+        /**
+         * {@link Filter} with a length check on each leaf string. A check
+         * failure never aborts a branch, so Zod hands each one through every
+         * level as one issue at the leaf's full path, where the repair decodes
+         * the stringified lists. The re-parse then fails on `value`'s list as a
+         * type, which the `and` and `or` branches of every level both list, so
+         * the check of which repairs held walks the shared tree.
+         */
+        const Checked: z.ZodType = z.lazy(() =>
+          z.union([
+            z.object({ op: z.literal('and'), filters: z.array(Checked) }),
+            z.object({ op: z.literal('or'), filters: z.array(Checked) }),
+            z.object({
+              op: z.literal('eq'),
+              field: z.union([z.array(z.string()), z.string().min(10)]),
+              value: z.string().min(5),
+            }),
+          ]),
+        );
+        const checked = tool('prevalidation_checked_filter', {
+          description: 'Takes a filter of nested clauses whose leaf strings are length-checked.',
+          input: z.object({ where: Checked.describe('Filter.') }),
+          output: ok,
+          handler: record,
+        });
+        /** `field`'s list is one the field takes; `value`'s is not. */
+        const leaf = { op: 'eq', field: '["a"]', value: '[1]' };
+        /** The message `parseToolArguments` rejects `args` with. */
+        const rejectionMessage = (args: unknown): string => {
+          try {
+            parseToolArguments(checked, args);
+          } catch (error) {
+            return (error as Error).message;
+          }
+          throw new Error('Expected a rejection.');
+        };
 
-      /** {@link heldRepairs} of one repair at `path`, against the issues of {@link nested}. */
-      const held = (depth: number, path: PropertyKey[]) => {
-        const issues = filtered.input.safeParse(nested(depth)).error?.issues ?? [];
-        const repair: Repair = { kind: 'integer_as_string', path, sent: 5, value: '5' };
-        return heldRepairs([repair], issues);
-      };
-
-      it('finds a repair at the leaf broken and one beside it held, through every level', () => {
-        expect(held(12, leaf(12, 'value'))).toEqual([]);
-        expect(held(12, leaf(12, 'field'))).toHaveLength(1);
-      });
-
-      it('checks a repair at the leaf in time linear in the depth', () => {
         const costs: number[] = [];
         for (const depth of [8, 12, 16, 20, 24]) {
-          const issues = filtered.input.safeParse(nested(depth)).error?.issues ?? [];
-          const repairs: Repair[] = [
-            { kind: 'integer_as_string', path: leaf(depth, 'field'), sent: 5, value: '5' },
-          ];
-          // 200 checks a sample, so the shallowest depth's cost sits well above the timer's noise.
-          const spent = cost(() => {
-            for (let check = 0; check < 200; check++) heldRepairs(repairs, issues);
-          });
-          // Checked per depth, so a walk that doubles per level fails at 20 rather than running on.
-          expect(spent, `depth ${depth}`).toBeLessThan(25);
-          costs.push(spent);
+          const args = nested(depth, leaf);
+          const at = ['where', ...Array.from({ length: depth }, () => 'filters.0')].join('.');
+          /**
+           * A check that broke `field`'s repair would report `field` as sent
+           * too, and one that held `value`'s would report the re-parse's union.
+           */
+          expect(rejectionMessage(args), `depth ${depth}`).toBe(
+            'Input validation error: Invalid arguments for tool prevalidation_checked_filter: ' +
+              `${at}.value: Too small: expected string to have >=5 characters`,
+          );
+          const rejection = parseCost(checked, () => args, 0);
+          // Checked per depth, so a walk that doubles per level fails by 20 rather than running on.
+          expect(rejection, `depth ${depth}`).toBeLessThan(100);
+          costs.push(rejection);
         }
 
-        // 3× the depth: linear is ~3×, quadratic 9×, a walk of every path 65,536×.
+        // 3× the depth: linear stays under ~3×, a walk that doubles per level is 65,536×.
         expect(costs[4]! / costs[0]!).toBeLessThan(6);
       });
 
       it('rejects one bad leaf at about the cost of the parse at every depth to 24', () => {
         for (const depth of [8, 12, 16, 20, 24]) {
           const args = nested(depth);
-          const parse = cost(() => filtered.input.safeParse(args));
+          const parse = cpuMs(() => filtered.input.safeParse(args));
           const rejection = parseCost(filtered, () => args, 0);
           // Checked per depth, so a rejection that doubles per level fails at 16 rather than running on.
           expect(rejection, `depth ${depth}`).toBeLessThan(100);
@@ -6269,7 +6290,7 @@ describe('tool argument pre-validation', () => {
         (_label, leaf, line) => {
           for (const depth of [8, 12, 16, 20, 24]) {
             const args = nested(depth, leaf);
-            const parse = cost(() => clauses.input.safeParse(args));
+            const parse = cpuMs(() => clauses.input.safeParse(args));
             const rejection = parseCost(clauses, () => args, 0);
             // Checked per depth, so a walk that doubles per level fails by 16 rather than running on.
             expect(rejection, `depth ${depth}`).toBeLessThan(100);
@@ -6294,37 +6315,14 @@ describe('tool argument pre-validation', () => {
       handler: record,
     });
 
-    /**
-     * The fastest thread-CPU milliseconds of each of `runs`, over five rounds
-     * that alternate which one goes first.
-     */
-    const fastest = (...runs: Array<() => void>): number[] => {
-      const best = runs.map(() => Number.POSITIVE_INFINITY);
-      for (let round = 0; round < 5; round++) {
-        const order = round % 2 ? [...runs.keys()].reverse() : [...runs.keys()];
-        for (const index of order) {
-          const start = process.threadCpuUsage();
-          runs[index]?.();
-          const { user, system } = process.threadCpuUsage(start);
-          best[index] = Math.min(best[index] ?? Number.POSITIVE_INFINITY, (user + system) / 1000);
-        }
-      }
-      return best.map((ms) => Math.max(ms, 0.001));
-    };
-
     it('adds little to the parse when every key is one the tool declares', () => {
       const args = { query: 'x', pageSize: 5, sort: 'a' };
-      const calls = 20_000;
       expect(parseToolArguments(paged, args)).toEqual(args);
 
-      const [parse = 0, through = 0] = fastest(
-        () => {
-          for (let i = 0; i < calls; i++) paged.input.safeParse(args);
-        },
-        () => {
-          for (let i = 0; i < calls; i++) parseToolArguments(paged, args);
-        },
-      );
+      const [parse = 0, through = 0] = fastestCpuMs([
+        () => paged.input.safeParse(args),
+        () => parseToolArguments(paged, args),
+      ]);
 
       // ~1.8× the parse on Bun and Node, ~2.6× under coverage; ~6× when such a
       // call still ran both key stages and built the repair's transform cache.

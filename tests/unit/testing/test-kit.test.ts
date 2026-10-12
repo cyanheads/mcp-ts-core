@@ -3,6 +3,8 @@
  * @module tests/testing/test-kit.test
  */
 
+import v8 from 'node:v8';
+import vm from 'node:vm';
 import { afterEach, describe, expect, it } from 'vitest';
 import { z } from 'zod';
 import { tool } from '@/mcp-server/tools/utils/toolDefinition.js';
@@ -12,6 +14,25 @@ import { fetchWithTimeout } from '@/utils/network/fetchWithTimeout.js';
 import { httpErrorFromResponse } from '@/utils/network/httpError.js';
 
 const installedHarnesses: Array<ReturnType<typeof createFetchMock>> = [];
+
+const bun = (globalThis as { Bun?: { gc(force: boolean): void } }).Bun;
+
+/** A full collection on whichever runtime runs the suite. */
+const collectGarbage: () => void = bun ? () => bun.gc(true) : exposedV8Gc();
+
+/** V8's `gc()`, exposed for this process. */
+function exposedV8Gc(): () => void {
+  v8.setFlagsFromString('--expose-gc');
+  return vm.runInNewContext('gc');
+}
+
+/** Collects, then yields a macrotask so cleared weak references are observable. */
+async function collectAcrossTurns(turns = 3): Promise<void> {
+  for (let turn = 0; turn < turns; turn++) {
+    collectGarbage();
+    await new Promise((resolve) => setImmediate(resolve));
+  }
+}
 
 afterEach(() => {
   for (const harness of installedHarnesses) harness.restore();
@@ -146,6 +167,94 @@ describe('createFetchMock', () => {
     harness.restore();
     harness.restore();
     expect(globalThis.fetch).toBe(originalFetch);
+  });
+
+  it("delivers a caller's abort to a pending responder after a garbage collection", async () => {
+    const harness = createFetchMock([
+      {
+        match: 'https://api.example.test/slow',
+        respond: (request) =>
+          new Promise<Response>((_resolve, reject) => {
+            request.signal.addEventListener('abort', () => reject(request.signal.reason), {
+              once: true,
+            });
+          }),
+      },
+    ]);
+    const caller = new AbortController();
+    const reason = new Error('timed out');
+
+    const pending = harness.fetch('https://api.example.test/slow', { signal: caller.signal });
+    await collectAcrossTurns();
+    caller.abort(reason);
+
+    await expect(pending).rejects.toBe(reason);
+  });
+
+  it('holds each request until reset() and releases it after', async () => {
+    let held: WeakRef<Request> | undefined;
+    const harness = createFetchMock([
+      {
+        match: 'https://api.example.test/ok',
+        respond: (request) => {
+          held = new WeakRef(request);
+          return new Response('ok');
+        },
+      },
+    ]);
+
+    await harness.fetch('https://api.example.test/ok').then((response) => response.text());
+    await collectAcrossTurns();
+    expect(held?.deref()).toBeInstanceOf(Request);
+
+    harness.reset();
+    await collectAcrossTurns();
+    // Bun's collector scans the stack conservatively, so only V8 promises the release.
+    if (!bun) expect(held?.deref()).toBeUndefined();
+  });
+
+  it("delivers a caller's abort to the request signal after a garbage collection mid-body", async () => {
+    const state = { pulled: 0, cancelled: false };
+    const harness = createFetchMock([
+      {
+        match: 'https://api.example.test/stream',
+        respond: (request) => {
+          const source = new ReadableStream<Uint8Array>(
+            {
+              async pull(controller) {
+                await new Promise((resolve) => setTimeout(resolve, 1));
+                controller.enqueue(new Uint8Array(1024));
+                state.pulled++;
+              },
+              cancel() {
+                state.cancelled = true;
+              },
+            },
+            { highWaterMark: 0 },
+          );
+          const { readable, writable } = new TransformStream<Uint8Array, Uint8Array>();
+          source.pipeTo(writable, { signal: request.signal }).catch(() => undefined);
+          return new Response(readable);
+        },
+      },
+    ]);
+    const caller = new AbortController();
+
+    const response = await harness.fetch('https://api.example.test/stream', {
+      signal: caller.signal,
+    });
+    const reader = response.body!.getReader();
+    const readUntilAborted = async () => {
+      for (let chunk = 1; chunk <= 200; chunk++) {
+        await reader.read();
+        if (chunk === 2) collectGarbage();
+        if (chunk === 3) caller.abort();
+      }
+    };
+
+    await expect(readUntilAborted()).rejects.toBeDefined();
+    expect(state.cancelled).toBe(true);
+    expect(state.pulled).toBeLessThan(10);
   });
 
   // Issue #503 — a static route must not serve a tee branch: on Node, a

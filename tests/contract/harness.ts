@@ -21,7 +21,7 @@ import { ResourceRegistry } from '@/mcp-server/resources/resource-registration.j
 import type { AnyResourceDefinition } from '@/mcp-server/resources/utils/resourceDefinition.js';
 import { createMcpServerInstance, type McpServerDeps } from '@/mcp-server/server.js';
 import { ToolRegistry } from '@/mcp-server/tools/tool-registration.js';
-import type { InputHandlingOptions } from '@/mcp-server/tools/utils/inputPrevalidation.js';
+import type { InputHandlingOptions } from '@/mcp-server/tools/utils/arguments/index.js';
 import type { AnyToolDefinition } from '@/mcp-server/tools/utils/toolDefinition.js';
 import { createHttpApp } from '@/mcp-server/transports/http/httpTransport.js';
 import { MODERN_PROTOCOL_REVISION } from '@/mcp-server/types.js';

@@ -21,6 +21,7 @@ import {
   stepInto,
   type TransformCache,
 } from '@/mcp-server/tools/utils/schemaShape.js';
+import { cpuMs } from '../../../../helpers/cpu-time.js';
 
 const byId = z.object({ mode: z.literal('byId'), id: z.string() });
 const byName = z.object({ mode: z.literal('byName'), name: z.string() });
@@ -463,14 +464,7 @@ describe('argumentAt (#599)', () => {
           for (let i = 0; i < walks; i++) argumentAt(tree, path, args);
         };
         walk();
-        let best = Number.POSITIVE_INFINITY;
-        for (let sample = 0; sample < 3; sample++) {
-          const start = process.threadCpuUsage();
-          walk();
-          const { user, system } = process.threadCpuUsage(start);
-          best = Math.min(best, (user + system) / 1000);
-        }
-        return Math.max(best, 0.001);
+        return cpuMs(walk);
       };
 
       const shallow = walkCost(125);
@@ -504,17 +498,6 @@ describe('argumentAt (#599)', () => {
       ];
       return { args: { where }, path };
     };
-    /** The fastest thread-CPU milliseconds of three runs of `run`. */
-    const cost = (run: () => void): number => {
-      let best = Number.POSITIVE_INFINITY;
-      for (let sample = 0; sample < 3; sample++) {
-        const start = process.threadCpuUsage();
-        run();
-        const { user, system } = process.threadCpuUsage(start);
-        best = Math.min(best, (user + system) / 1000);
-      }
-      return Math.max(best, 0.001);
-    };
 
     it('reads the leaf value off the arguments, no single option resolving the path', () => {
       const { args, path } = nested(24);
@@ -546,7 +529,7 @@ describe('argumentAt (#599)', () => {
         const { args, path } = nested(depth);
         // Checked per depth first, so a walk that doubles per level fails at 16 rather than running on.
         expect(
-          cost(() => walk(args, path)),
+          cpuMs(() => walk(args, path)),
           `depth ${depth}`,
         ).toBeLessThan(25);
       }
@@ -560,7 +543,7 @@ describe('argumentAt (#599)', () => {
           for (let i = 0; i < walks; i++) walk(args, path);
         };
         walkAll();
-        return cost(walkAll);
+        return cpuMs(walkAll);
       };
 
       // Each side walks 200 levels in all: linear is ~1×, a re-walk of the

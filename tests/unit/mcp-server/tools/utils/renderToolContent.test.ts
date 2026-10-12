@@ -9,7 +9,7 @@ import { z } from 'zod';
 
 import type { AnyToolDefinition } from '@/mcp-server/tools/utils/toolDefinition.js';
 import { tool } from '@/mcp-server/tools/utils/toolDefinition.js';
-import { renderToolContent } from '@/mcp-server/tools/utils/toolHandlerFactory.js';
+import { renderToolContent } from '@/mcp-server/tools/utils/toolResult.js';
 import { createMockContext } from '@/testing/index.js';
 import { JsonRpcErrorCode, McpError } from '@/types-global/errors.js';
 

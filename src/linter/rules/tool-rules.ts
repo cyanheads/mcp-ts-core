@@ -4,8 +4,8 @@
  * @module src/linter/rules/tool-rules
  */
 
+import { foldArgumentKey } from '@/mcp-server/tools/utils/arguments/index.js';
 import { scanHeaderDesignations } from '@/mcp-server/tools/utils/headerParam.js';
-import { foldArgumentKey } from '@/mcp-server/tools/utils/inputPrevalidation.js';
 import { inputVariants } from '@/mcp-server/tools/utils/schemaShape.js';
 import type { LintDiagnostic } from '../types.js';
 import { invalidDefinitionEntry, isDefinitionObject } from './definition-rules.js';

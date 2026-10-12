@@ -16,6 +16,7 @@ import { AjvJsonSchemaValidator } from '@modelcontextprotocol/server/validators/
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { z } from 'zod';
 import { JsonRpcErrorCode, McpError } from '@/types-global/errors.js';
+import { cpuMsAsync } from '../../../../helpers/cpu-time.js';
 import type { ServerContextOverrides } from '../../../../helpers/server-context.js';
 import {
   EVERY_INPUT_CAPABILITY,
@@ -112,13 +113,15 @@ import { type ClientCapabilityView, createRequestStateSealer } from '@/mcp-serve
 import type { AnyToolDefinition } from '@/mcp-server/tools/utils/toolDefinition.js';
 import { tool } from '@/mcp-server/tools/utils/toolDefinition.js';
 import {
-  advertisedOutputSchema,
-  buildToolErrorResult,
   createToolHandler,
-  effectiveOutputSchema,
   type HandlerServices,
   type NotifierSources,
 } from '@/mcp-server/tools/utils/toolHandlerFactory.js';
+import {
+  advertisedOutputSchema,
+  effectiveOutputSchema,
+} from '@/mcp-server/tools/utils/toolOutputSchema.js';
+import { buildToolErrorResult } from '@/mcp-server/tools/utils/toolResult.js';
 import { ErrorHandler } from '@/utils/internal/error-handler/errorHandler.js';
 import { fetchWithTimeout } from '@/utils/network/fetchWithTimeout.js';
 
@@ -2152,21 +2155,11 @@ describe('createToolHandler', () => {
       }
 
       /**
-       * The fastest thread-CPU milliseconds of three rejections of `args` by
-       * `def`, from the call to the response a transport writes.
+       * The fastest thread-CPU milliseconds of a rejection of `args` by `def`,
+       * from the call to the response a transport writes.
        */
-      async function rejectionCost(
-        args: Record<string, unknown>,
-        def: unknown = caps,
-      ): Promise<number> {
-        let best = Number.POSITIVE_INFINITY;
-        for (let sample = 0; sample < 3; sample++) {
-          const start = process.threadCpuUsage();
-          JSON.stringify(await reject(def, args));
-          const { user, system } = process.threadCpuUsage(start);
-          best = Math.min(best, (user + system) / 1_000);
-        }
-        return Math.max(best, 0.001);
+      function rejectionCost(args: Record<string, unknown>, def: unknown = caps): Promise<number> {
+        return cpuMsAsync(async () => JSON.stringify(await reject(def, args)));
       }
 
       it('keeps a rejection within the caps byte for byte: ten issues, whole', async () => {
@@ -2473,6 +2466,23 @@ describe('createToolHandler', () => {
             a: { b: {}, bCount: 1, d: [], dCount: 2 },
             rows: [{ f: { g: [1] } }],
           });
+        });
+
+        it('keeps a caller’s own `__proto__` key as a key of a plain object, cut like any other (#733)', async () => {
+          // Twelve keys, so the payload is past the key cap and copied; the
+          // first is the own `__proto__` key JSON gives a wire body.
+          const payload = JSON.parse(
+            `{"__proto__":{"polluted":true},${Array.from({ length: 11 }, (_, i) => `"k${i}":${i}`).join(',')}}`,
+          ) as Record<string, unknown>;
+          const issue = await carriedIssue(payload);
+
+          const params = issue.params as Record<string, unknown>;
+          expect(Object.getPrototypeOf(params)).toBe(Object.prototype);
+          expect(Object.entries(params)).toEqual([
+            ['__proto__', { polluted: true }],
+            ...Array.from({ length: 9 }, (_, i) => [`k${i}`, i]),
+          ]);
+          expect(issue.paramsCount).toBe(12);
         });
 
         it.each([
