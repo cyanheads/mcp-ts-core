@@ -1,0 +1,15 @@
+# Replaces the root .dockerignore when .oss-scanner/Dockerfile is built (BuildKit
+# reads <Dockerfile>.dockerignore next to the Dockerfile). The scanner needs the
+# whole checkout; this keeps out only local build output and local secrets.
+node_modules/
+dist/
+coverage/
+reports/
+.storage/
+.wrangler/
+*.tsbuildinfo
+.env
+.env.*
+!.env.example
+.mcpregistry_*
+.DS_Store
