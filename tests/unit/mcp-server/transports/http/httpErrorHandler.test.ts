@@ -7,6 +7,7 @@ import { trace } from '@opentelemetry/api';
 import type { Context } from 'hono';
 import { HTTPException } from 'hono/http-exception';
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
+import { z } from 'zod';
 import { httpErrorHandler } from '@/mcp-server/transports/http/httpErrorHandler.js';
 import type { HonoNodeBindings } from '@/mcp-server/transports/http/httpTypes.js';
 import { JsonRpcErrorCode, McpError } from '@/types-global/errors.js';
@@ -136,6 +137,48 @@ describe('HTTP Error Handler', () => {
         expect.objectContaining({ message: 'Method not allowed' }),
       );
       expect(mockContext.json).not.toHaveBeenCalled();
+    });
+
+    // The span is marked through the shared `recordSpanFailure`, which never
+    // throws: a span that cannot record the exception still gets the ERROR
+    // status, and the protocol response still goes out (#736).
+    test('should preserve the protocol response when the span cannot record the exception', async () => {
+      const recordException = vi.fn(() => {
+        throw new Error('exception unreadable');
+      });
+      const setStatus = vi.fn();
+      vi.spyOn(trace, 'getActiveSpan').mockReturnValue({ recordException, setStatus } as never);
+      const error = new HTTPException(405, { message: 'Method not allowed' });
+
+      const response = await httpErrorHandler(
+        error,
+        mockContext as Context<{ Bindings: HonoNodeBindings }>,
+      );
+
+      expect(response.status).toBe(405);
+      expect(recordException).toHaveBeenCalledWith(error);
+      expect(setStatus).toHaveBeenCalledWith({ code: 2, message: 'Method not allowed' });
+    });
+
+    // A ZodError is never an HTTPException, so it reaches the classified path,
+    // where an expected client error writes a log line and never touches the
+    // span — Zod's JSON of every issue reaches no span attribute (#736).
+    test('should keep a ZodError issue list off the active span', async () => {
+      const recordException = vi.fn();
+      const setStatus = vi.fn();
+      vi.spyOn(trace, 'getActiveSpan').mockReturnValue({
+        isRecording: () => true,
+        recordException,
+        setStatus,
+      } as never);
+      const parsed = z.array(z.string().regex(/^\d+$/)).safeParse(['a', 'b', 'c']);
+      if (parsed.success) throw new Error('fixture must fail');
+
+      await httpErrorHandler(parsed.error, mockContext as Context<{ Bindings: HonoNodeBindings }>);
+
+      const spanText = JSON.stringify([recordException.mock.calls, setStatus.mock.calls]);
+      expect(spanText).not.toContain('"code"');
+      expect(spanText).not.toContain(parsed.error.message);
     });
 
     test('should preserve Hono protocol responses when no span is active', async () => {

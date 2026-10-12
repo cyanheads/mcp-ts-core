@@ -28,6 +28,20 @@ export function capForObservability(
   return { value: value.slice(0, end), length: value.length };
 }
 
+/**
+ * Text a message carries whatever the caller sends: its first
+ * {@link OBSERVABILITY_MAX_STRING_LENGTH} characters, ending `…` when that cut
+ * removed something. An argument rejection cuts each issue line and hint
+ * sentence (#648), since a line grows with the caller's keys and paths, a
+ * union's branches, and an author's enum list; every other `ZodError`'s
+ * one-line summary cuts only its first issue's rendered path and keeps the
+ * message whole (#710).
+ */
+export function cutLine(text: string): string {
+  if (text.length <= OBSERVABILITY_MAX_STRING_LENGTH) return text;
+  return `${capForObservability(text).value}…`;
+}
+
 /** Whether `unit` is the high (leading) half of a UTF-16 surrogate pair. */
 function isHighSurrogate(unit: number): boolean {
   return unit >= 0xd800 && unit <= 0xdbff;

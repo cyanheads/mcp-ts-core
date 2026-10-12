@@ -5,7 +5,7 @@
  * formats them into a consistent JSON-RPC error response.
  * @module src/mcp-server/transports/http/httpErrorHandler
  */
-import { SpanStatusCode, trace } from '@opentelemetry/api';
+import { trace } from '@opentelemetry/api';
 import type { Context } from 'hono';
 import { HTTPException } from 'hono/http-exception';
 import type { StatusCode, UnofficialStatusCode } from 'hono/utils/http-status';
@@ -15,6 +15,7 @@ import type { HonoNodeBindings } from '@/mcp-server/transports/http/httpTypes.js
 import { resolvePublicOrigin } from '@/mcp-server/transports/http/publicOrigin.js';
 import { JsonRpcErrorCode, McpError } from '@/types-global/errors.js';
 import { asRequestCancelled, ErrorHandler } from '@/utils/internal/error-handler/errorHandler.js';
+import { recordSpanFailure } from '@/utils/internal/error-handler/helpers.js';
 import { logger } from '@/utils/internal/logger.js';
 import { jsonRpcIdLogFields } from '@/utils/internal/observabilityCap.js';
 import { requestContextService, withExtra } from '@/utils/internal/requestContext.js';
@@ -36,14 +37,12 @@ export const httpErrorHandler = async <TBindings extends object = HonoNodeBindin
   err: Error,
   c: Context<{ Bindings: TBindings }>,
 ): Promise<Response> => {
-  // @hono/mcp throws HTTPException for protocol errors — honor its pre-built response.
-  // Annotate the active span so traces capture the error detail, then log for debugging.
+  // A Hono HTTPException carries a pre-built protocol response — honor it. Mark
+  // the active span failed through the shared helper, which records every
+  // failure the same way and never throws, then log for debugging.
   if (err instanceof HTTPException) {
     const activeSpan = trace.getActiveSpan();
-    if (activeSpan) {
-      activeSpan.recordException(err);
-      activeSpan.setStatus({ code: SpanStatusCode.ERROR, message: err.message });
-    }
+    if (activeSpan) recordSpanFailure(activeSpan, err);
     logger.debug(
       `Protocol error: HTTP ${err.status}`,
       requestContextService.createRequestContext({

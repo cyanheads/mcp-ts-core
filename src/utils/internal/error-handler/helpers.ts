@@ -8,6 +8,7 @@ import { type Span, SpanStatusCode } from '@opentelemetry/api';
 import { ZodError } from 'zod';
 
 import { McpError } from '@/types-global/errors.js';
+import { cutLine } from '@/utils/internal/observabilityCap.js';
 import { isAggregateError } from '@/utils/types/guards.js';
 
 /**
@@ -145,16 +146,55 @@ export function asError(value: unknown): Error {
 }
 
 /**
+ * The stack a log record or span writes for `error`, given the `stack` read off
+ * it. A `ZodError`'s `message` is Zod's pretty-printed JSON of every issue, and a
+ * stack whose header line carries it — V8's always, Bun's under a formatter such
+ * as `Error.prepareStackTrace` — starts `${name}: ${message}`: that header is
+ * replaced by `${name}: ${formatZodErrorMessage(error)}`, and the frames after
+ * it are kept. Every other stack is returned as read: a non-Zod error's, and a
+ * `ZodError` stack without that header (Bun's own is the bare `ZodError`).
+ *
+ * The message is read only once the stack starts with `${name}: `, since a
+ * `ZodError` computes it on first read.
+ */
+export function loggedStack(error: unknown, stack: unknown): unknown {
+  if (typeof stack !== 'string' || !isInstance(error, ZodError)) return stack;
+  const name = readField(error, 'name');
+  if (typeof name !== 'string' || !stack.startsWith(`${name}: `)) return stack;
+  const message = readField(error, 'message');
+  if (typeof message !== 'string') return stack;
+  const messageEnd = name.length + 2 + message.length;
+  // Compared as a slice: string equality is a block compare, where `startsWith` goes char by char.
+  if (stack.slice(name.length + 2, messageEnd) !== message) return stack;
+  return `${name}: ${getErrorMessage(error)}${stack.slice(messageEnd)}`;
+}
+
+/**
  * Marks `span` failed with `error`: records an `Error` as the span's exception,
  * then sets the `ERROR` status with its `message` (any other value as `String`
- * converts it). Never throws: an exception the span cannot read — a field
- * whose getter throws, which the SDK's `recordException` reads unguarded — is
- * left unrecorded, and a message that cannot be read is {@link UNREADABLE}.
+ * converts it). A `ZodError` is recorded and described as its one-line summary
+ * ({@link formatZodErrorMessage}), with the stack {@link loggedStack} writes,
+ * never Zod's JSON of every issue. Never throws: an exception the span cannot
+ * read — a field whose getter throws, which the SDK's `recordException` reads
+ * unguarded — is left unrecorded, and a message that cannot be read is
+ * {@link UNREADABLE}.
  */
 export function recordSpanFailure(span: Span, error: unknown): void {
   let message: string;
   try {
-    if (error instanceof Error) {
+    if (isInstance(error, ZodError)) {
+      message = getErrorMessage(error);
+      const stack = loggedStack(error, readField(error, 'stack'));
+      try {
+        span.recordException({
+          name: errorText(readField(error, 'name')),
+          message,
+          ...(typeof stack === 'string' && { stack }),
+        });
+      } catch {
+        // The span could not record it; the status below still marks the failure.
+      }
+    } else if (error instanceof Error) {
       try {
         span.recordException(error);
       } catch {
@@ -181,9 +221,16 @@ export function recordSpanFailure(span: Span, error: unknown): void {
  * empty path renders as its bare message, and a count of the remaining issues
  * trails as ` (+N more)`.
  *
- * Pair with `ErrorHandler.classifyOnly` (which returns `data: { issues }`) to
- * preserve the structured issue array for clients that can render field-level
- * errors.
+ * Bounded whatever the caller sends (#710): the rendered path is cut by
+ * `cutLine` — its first 1,024 characters, ending `…` when cut — since the
+ * caller sets it (a record key, a deep path). The message is Zod's or the
+ * server author's and is kept whole: a `z.enum` miss lists every valid option,
+ * which `data.issues` keeps only the first 10 of. The count trails the message,
+ * so it always shows; a path within 1,024 characters is unchanged.
+ *
+ * Pair with `ErrorHandler.classifyOnly` (which returns `data: { issues }`,
+ * bounded to the first 10 issues with `issuesCount` beside a cut list) to carry
+ * the structured issues for clients that can render field-level errors.
  *
  * @param err - The ZodError to format.
  * @returns A single line, e.g. `"nctId: Invalid input: expected string, received number (+2 more)"`.
@@ -192,7 +239,7 @@ export function formatZodErrorMessage(err: ZodError): string {
   const issues = err.issues;
   const first = issues[0];
   if (!first) return 'Validation failed';
-  const path = first.path.length > 0 ? `${first.path.map(String).join('.')}: ` : '';
+  const path = first.path.length > 0 ? `${cutLine(first.path.map(String).join('.'))}: ` : '';
   const rest = issues.length - 1;
   const tail = rest > 0 ? ` (+${rest} more)` : '';
   return `${path}${first.message}${tail}`;
@@ -250,7 +297,8 @@ export function getErrorName(error: unknown): string {
  *
  * Handles every JavaScript type so that `catch (e)` blocks never produce `[object Object]`:
  * - `AggregateError` → combines up to 3 inner error messages after the outer message,
- *   each one that cannot be read as `'[Unreadable]'`.
+ *   each as {@link messageText} writes it: a `ZodError` member's as its one-line summary,
+ *   one that cannot be read as `'[Unreadable]'`.
  * - `Error` → `error.message`, or `'[Unreadable]'` when reading it throws (a getter);
  *   a `message` that is not a string, the outer's or a member's, as {@link errorText} writes it.
  * - `null` / `undefined` → descriptive literal strings.
@@ -283,7 +331,7 @@ export function getErrorMessage(error: unknown): string {
       // AggregateError should surface combined messages succinctly
       if (isAggregateError(error)) {
         const inner = error.errors
-          .map((e) => errorText(readField(asError(e), 'message')))
+          .map((e) => messageText(asError(e)))
           .filter(Boolean)
           .slice(0, 3)
           .join('; ');
@@ -327,6 +375,17 @@ export function getErrorMessage(error: unknown): string {
   } catch {
     return UNREADABLE;
   }
+}
+
+/**
+ * An error's `message` as text ({@link errorText}), `'[Unreadable]'` when reading
+ * it throws — a `ZodError`'s as its one-line summary ({@link formatZodErrorMessage}),
+ * never Zod's JSON of every issue. Never throws.
+ */
+export function messageText(error: object): string {
+  return isInstance(error, ZodError)
+    ? getErrorMessage(error)
+    : errorText(readField(error, 'message'));
 }
 
 /**
@@ -376,7 +435,9 @@ function errorCheck(value: unknown): boolean | undefined {
  *
  * String causes are treated as terminal `StringError` nodes.
  * `McpError` nodes include the `data` property when present, and any `Error`
- * node carrying a string `code` includes it.
+ * node carrying a string `code` includes it. A `ZodError` node's `message` is
+ * its one-line summary ({@link formatZodErrorMessage}) and its `stack` the one
+ * {@link loggedStack} writes, never Zod's JSON of every issue.
  * Circular references are detected via `WeakSet` identity tracking.
  * Every read is guarded: a `name`, `message`, or `stack` whose read throws is
  * `'[Unreadable]'` on its node, an unreadable `code` or `data` is left out, and
@@ -429,10 +490,10 @@ export function extractErrorCauseChain(error: unknown, maxDepth = 20): ErrorCaus
     if (isError) {
       const err = current as Error;
       const code = readField(err, 'code');
-      const stack = readField(err, 'stack');
+      const stack = loggedStack(err, readField(err, 'stack'));
       const node: ErrorCauseNode = {
         name: errorText(readField(err, 'name')),
-        message: errorText(readField(err, 'message')),
+        message: messageText(err),
         depth,
         ...(typeof code === 'string' && code !== UNREADABLE ? { code } : {}),
         // Only include stack if it exists (exact optional property types)

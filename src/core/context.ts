@@ -27,6 +27,7 @@ import {
 import {
   errorText,
   isInstance,
+  messageText,
   readErrorData,
   readField,
   UNREADABLE,
@@ -1051,8 +1052,9 @@ function createContextLogger(
         ...(data && toMirrorValue(data)),
       };
       payload.message = msg;
-      // As text, guarded: an unreadable or non-string `message` still writes an `error` string.
-      if (error) payload.error = errorText(readField(error, 'message'));
+      // As text, guarded: an unreadable or non-string `message` still writes an `error` string,
+      // and a ZodError's is its summary rather than its JSON of every issue.
+      if (error) payload.error = messageText(error);
       return wireLog(level, payload);
     }).catch(() => {
       // A log that cannot be built or delivered must never fail the request.

@@ -4,7 +4,8 @@
  * any key and at any depth (#646); nested data kept through depth 15, with
  * cycles marked and sensitive fields redacted at every depth (#649); the walk's
  * bound on repeated content and guarded reads, on every sink and the client mirror (#695);
- * the adjacent-word key matcher (#696); and every pino path into a written line
+ * the adjacent-word key matcher (#696); a `ZodError` written as its one-line
+ * summary on every sink (#736); and every pino path into a written line
  * going through the walk. pino is the real module with its destination swapped
  * for an in-memory stream, so `formatters.log` and `serializers` run as in
  * production; an OTel Logs API sink alongside captures the exported attributes.
@@ -258,11 +259,13 @@ describe('an Error in log data (#646)', () => {
   });
 
   it.runIf(IS_BUN)('keeps Bun’s string code on a refused fetch', async () => {
-    const rejection = await refusedFetch();
+    // `ConnectionRefused` before Bun 1.4.3, `ECONNREFUSED` from it.
+    const rejection = (await refusedFetch()) as { code: unknown };
+    expect(rejection.code).toEqual(expect.any(String));
 
     logger.warning('refused: bun code', context({ error: rejection }));
 
-    expect(written('refused: bun code').error.code).toBe('ConnectionRefused');
+    expect(written('refused: bun code').error.code).toBe(rejection.code);
   });
 
   it.skipIf(IS_BUN)('keeps the cause that explains Node’s fetch failed', async () => {
@@ -1174,6 +1177,193 @@ describe('a stack an error shares with its parent', () => {
     expect(record.aggregate.stack).toBe(aggregate.stack);
     expect(record.aggregate.errors[0]).toEqual({ type: 'Error', message: 'member' });
     expect(record.aggregate.errors[1].stack).toBe(inner.stack);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// #736 — a ZodError written as its one-line summary
+// ---------------------------------------------------------------------------
+
+describe('a ZodError in a log record (#736)', () => {
+  const Ids = z.object({ ids: z.array(z.string().regex(/^\d+$/).describe('Id')) });
+  const badIds = (n: number) => Array.from({ length: n }, (_, i) => `x${i}`);
+  /** What `Ids.parse` throws for `n` non-digit ids: one issue each. */
+  const thrownIdsError = (n: number) => thrownBy(() => Ids.parse({ ids: badIds(n) })) as z.ZodError;
+  const summary = (n: number) =>
+    `ids.0: Invalid string: must match pattern /^\\d+$/ (+${n - 1} more)`;
+  /**
+   * The stack written for `error`: a `ZodError: <JSON message>` header — V8's
+   * always, Bun's only under a stack formatter such as the test runner's —
+   * replaced by the summary, every frame kept; one carrying no message, as read.
+   */
+  const summaryStack = (error: z.ZodError, n: number) => {
+    const header = `ZodError: ${error.message}`;
+    return error.stack?.startsWith(header)
+      ? `ZodError: ${summary(n)}${error.stack.slice(header.length)}`
+      : error.stack;
+  };
+  /** Whether a thrown ZodError's stack here carries its message in the header. */
+  const stackCarriesMessage = (() => {
+    const error = thrownIdsError(2);
+    return error.stack?.startsWith(`ZodError: ${error.message}`) === true;
+  })();
+
+  it.skipIf(IS_BUN)('keeps V8’s frames under the summary header (the precondition)', () => {
+    expect(stackCarriesMessage).toBe(true);
+    const [header, ...frames] = String(summaryStack(thrownIdsError(3), 3)).split('\n');
+    expect(header).toBe(`ZodError: ${summary(3)}`);
+    expect(frames.length).toBeGreaterThan(0);
+    expect(frames.every((frame) => frame.startsWith('    at '))).toBe(true);
+  });
+
+  it('writes a non-Zod error and its cause byte for byte as read (characterization)', () => {
+    const cause = new RangeError('limit 10');
+    const error = new Error('lookup failed', { cause });
+
+    logger.warning('plain chain: data', context({ error }));
+    logger.error('plain chain: argument', error, context());
+
+    const expected = {
+      type: 'Error',
+      message: 'lookup failed',
+      stack: error.stack,
+      cause: { type: 'RangeError', message: 'limit 10', stack: cause.stack },
+    };
+    expect(written('plain chain: data').error).toEqual(expected);
+    expect(written('plain chain: argument').err).toEqual(expected);
+    expect(exportedAttributes('plain chain: argument')).toMatchObject({
+      'exception.type': 'Error',
+      'exception.message': 'lookup failed',
+      'exception.stacktrace': error.stack,
+    });
+  });
+
+  it('writes a ZodError under any key, under err, and as the error argument as its summary', () => {
+    const error = thrownIdsError(1000);
+    // A thrown ZodError has a stack on both runtimes, so `expected` carries one.
+    const expected = { type: 'ZodError', message: summary(1000), stack: summaryStack(error, 1000) };
+    expect(expected.stack).toEqual(expect.any(String));
+
+    logger.warning('zod: data', context({ error, attempt: { last: error } }));
+    logger.warning('zod: err key', context({ err: error }));
+    logger.error('zod: argument', error, context());
+
+    for (const prefix of ['zod: data', 'zod: err key', 'zod: argument']) {
+      expect(writtenLine(prefix)).not.toContain('invalid_format');
+    }
+    expect(written('zod: data')).toMatchObject({ error: expected, attempt: { last: expected } });
+    expect(written('zod: err key').err).toEqual(expected);
+    expect(written('zod: argument').err).toEqual(expected);
+    const attributes = exportedAttributes('zod: argument');
+    expect(attributes['exception.type']).toBe('ZodError');
+    expect(attributes['exception.message']).toBe(summary(1000));
+    expect(attributes['exception.stacktrace']).toBe(expected.stack);
+    expect(JSON.stringify(attributes)).not.toContain('invalid_format');
+  });
+
+  it('writes a ZodError two causes deep as its summary', () => {
+    const zodError = thrownIdsError(1000);
+    const error = new Error('lookup failed', {
+      cause: new Error('record rejected', { cause: zodError }),
+    });
+
+    logger.warning('zod: deep cause', context({ error }));
+
+    expect(writtenLine('zod: deep cause')).not.toContain('invalid_format');
+    const record = written('zod: deep cause').error;
+    expect(record).toMatchObject({ message: 'lookup failed', stack: error.stack });
+    expect(record.cause).toMatchObject({ message: 'record rejected' });
+    const deepest = record.cause.cause;
+    expect(deepest.type).toBe('ZodError');
+    expect(deepest.message).toBe(summary(1000));
+    expect(deepest.stack).toBe(summaryStack(zodError, 1000));
+  });
+
+  it('writes a nested tryCatch rethrow of a ZodError as its summary, the stack once', async () => {
+    const zodError = thrownIdsError(1000);
+    const rethrown = (await ErrorHandler.tryCatch(
+      () =>
+        ErrorHandler.tryCatch(
+          () => {
+            throw zodError;
+          },
+          { operation: 'inner', context: context() },
+        ),
+      { operation: 'outer', context: context() },
+    ).catch((error: unknown) => error)) as Error;
+
+    logger.error('zod: rethrown', rethrown, context());
+
+    for (const line of lines.process) expect(line).not.toContain('invalid_format');
+    const { err } = written('zod: rethrown');
+    expect(err.message).toBe(summary(1000));
+    expect(err.stack).toBe(summaryStack(zodError, 1000));
+    // Each level rebuilt from the throw site shares its stack, so only the outermost writes it.
+    expect(err.cause).toMatchObject({
+      type: 'McpError',
+      message: summary(1000),
+      code: JsonRpcErrorCode.ValidationError,
+    });
+    expect(err.cause).not.toHaveProperty('stack');
+    expect(err.cause.cause).toEqual({ type: 'ZodError', message: summary(1000) });
+  });
+
+  it('writes a handler-thrown ZodError’s error record with the summary, flat from 100 to 10,000 issues', async () => {
+    const countIds = tool('written_count_ids', {
+      description: 'Validates generated record IDs inside the handler.',
+      input: z.object({ count: z.number().int().describe('How many invalid IDs to validate') }),
+      output: z.object({ count: z.number().describe('Valid record IDs') }),
+      handler: ({ count }) => ({ count: Ids.parse({ ids: badIds(count) }).ids.length }),
+    });
+    const sizes: number[] = [];
+
+    for (const n of [100, 10_000]) {
+      lines.process.length = 0;
+      const result = await callTool(countIds, { count: n });
+      expect(result.isError).toBe(true);
+
+      const line = writtenLine('Error in tool:written_count_ids');
+      expect(line).not.toContain('invalid_format');
+      const record = JSON.parse(line) as Written;
+      expect(record.msg).toBe(`Error in tool:written_count_ids: ${summary(n)}`);
+      if (stackCarriesMessage) {
+        const [header, ...frames] = String(record.stack).split('\n');
+        expect(header).toBe(`ZodError: ${summary(n)}`);
+        if (!IS_BUN) expect(frames.length).toBeGreaterThan(0);
+        expect(frames.every((frame) => frame.startsWith('    at '))).toBe(true);
+      }
+      sizes.push(line.length);
+    }
+    expect(sizes[1]! - sizes[0]!).toBeLessThan(64);
+  });
+
+  it('mirrors a ZodError to the client as its summary, as data and as the error argument', async () => {
+    const zodError = thrownIdsError(1000);
+    const logsZod = tool('written_logs_zod', {
+      description: 'Logs a ZodError.',
+      input: z.object({}),
+      output: ok,
+      handler: (_input, ctx) => {
+        ctx.log.warning('zod mirror: data', { error: zodError });
+        ctx.log.error('zod mirror: argument', zodError);
+        return { ok: true };
+      },
+    });
+    const wire = vi.fn(async () => {});
+
+    await callTool(logsZod, {}, wire);
+
+    expect(JSON.stringify(wire.mock.calls)).not.toContain('invalid_format');
+    expect(wire).toHaveBeenCalledWith('warning', {
+      message: 'zod mirror: data',
+      error: { type: 'ZodError', message: summary(1000) },
+    });
+    expect(wire).toHaveBeenCalledWith('error', {
+      message: 'zod mirror: argument',
+      error: summary(1000),
+    });
+    expect(written('zod mirror: data').error.message).toBe(summary(1000));
+    expect(written('zod mirror: argument').err.message).toBe(summary(1000));
   });
 });
 

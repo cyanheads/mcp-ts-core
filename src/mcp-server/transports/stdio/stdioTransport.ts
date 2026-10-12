@@ -20,6 +20,7 @@ import type { McpServerFactory } from '@modelcontextprotocol/server';
 import { type StdioServerHandle, serveStdio } from '@modelcontextprotocol/server/stdio';
 
 import { ErrorHandler } from '@/utils/internal/error-handler/errorHandler.js';
+import { messageText } from '@/utils/internal/error-handler/helpers.js';
 import { logger } from '@/utils/internal/logger.js';
 import { type RequestContext, withExtra } from '@/utils/internal/requestContext.js';
 import { logStartupBanner } from '@/utils/internal/startupBanner.js';
@@ -50,8 +51,9 @@ export function startStdioTransport(
 
   try {
     const handle = serveStdio(serverFactory, {
+      // An inbound line failing the SDK's JSON-RPC schema arrives as its ZodError, written as its summary.
       onerror: (error) => {
-        logger.debug(`Stdio transport reported: ${error.message}`, operationContext);
+        logger.debug(`Stdio transport reported: ${messageText(error)}`, operationContext);
       },
     });
 

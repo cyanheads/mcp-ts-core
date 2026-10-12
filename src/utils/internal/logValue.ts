@@ -8,7 +8,14 @@
  * A leaf module, so the logger and the mirror use it without importing each other.
  * @module src/utils/internal/logValue
  */
+import { ZodError } from 'zod';
+
 import { McpError } from '@/types-global/errors.js';
+import {
+  getErrorMessage,
+  isInstance,
+  loggedStack,
+} from '@/utils/internal/error-handler/helpers.js';
 import { isSensitiveKey } from '@/utils/security/sensitiveFields.js';
 
 /**
@@ -493,6 +500,8 @@ function put(out: Record<string, unknown>, key: string, field: unknown, walk: Wa
  * A stack equal to the parent error's — the error whose `cause` or `errors`
  * this one is — is left out, so a chain sharing one stack writes it once. An
  * unreadable `code` is left out; any other unreadable field is `'[Unreadable]'`.
+ * A `ZodError`, whose own `message` is Zod's JSON of every issue, is written with
+ * its one-line summary as `message` and as its stack's header ({@link loggedStack}).
  */
 function walkError(err: Error, shape: Shape, depth: number, walk: Walk): Record<string, unknown> {
   const { parentStack } = walk;
@@ -500,10 +509,19 @@ function walkError(err: Error, shape: Shape, depth: number, walk: Walk): Record<
   const out: Record<string, unknown> = {};
   if (
     put(out, 'type', walkValue(read(err, 'name'), depth + 1, walk), walk) &&
-    put(out, 'message', walkValue(read(err, 'message'), depth + 1, walk), walk) &&
+    put(
+      out,
+      'message',
+      walkValue(
+        isInstance(err, ZodError) ? getErrorMessage(err) : read(err, 'message'),
+        depth + 1,
+        walk,
+      ),
+      walk,
+    ) &&
     walk.mode === 'log'
   ) {
-    const stack = walk.includeStack ? read(err, 'stack') : undefined;
+    const stack = walk.includeStack ? loggedStack(err, read(err, 'stack')) : undefined;
     let more =
       stack === undefined ||
       stack === parentStack ||

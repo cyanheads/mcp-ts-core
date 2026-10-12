@@ -870,6 +870,69 @@ describe('createResourceHandler', () => {
       expect(err.data).toBeDefined();
       expect(Array.isArray(err.data.issues)).toBe(true);
       expect(err.data.issues).toHaveLength(1);
+      expect(err.data).toEqual({
+        issues: def.params?.safeParse({ nctId: 'INVALID' }).error?.issues,
+        requestId: expect.any(String),
+      });
+    });
+
+    it('keeps the first 10 params issues, with issuesCount beside them, past the caps (#710)', async () => {
+      const params = z.object({
+        ids: z.array(z.string().regex(/^\d+$/).describe('Id')).describe('Ids'),
+      });
+      const def = resource('items://{ids*}', {
+        description: 'Items by id.',
+        params,
+        handler: () => ({ ok: true }),
+      });
+      const ids = Array.from({ length: 1000 }, (_, i) => `x${i}`);
+
+      const handler = createResourceHandler(def as AnyResourceDefinition, services, notifiers);
+      const err = await handler(
+        new URL(`items://${ids.join(',')}`),
+        { ids } as any,
+        makeServerContext(),
+      ).catch((e) => e);
+
+      expect(err).toBeInstanceOf(McpError);
+      expect(err.code).toBe(JsonRpcErrorCode.ValidationError);
+      expect(err.message).toBe('ids.0: Invalid string: must match pattern /^\\d+$/ (+999 more)');
+      expect(err.data).toEqual({
+        issues: params.safeParse({ ids }).error?.issues.slice(0, 10),
+        issuesCount: 1000,
+        requestId: expect.any(String),
+      });
+    });
+
+    it('cuts a handler-thrown ZodError’s deep issue path to its first 10 segments (#710)', async () => {
+      /** A tree whose leaf names must be digits; a bad leaf 12 levels down. */
+      const Node: z.ZodType = z.lazy(() =>
+        z.object({ name: z.string().regex(/^\d+$/), children: z.array(Node) }),
+      );
+      let tree: unknown = { name: 'leaf', children: [] };
+      for (let level = 0; level < 12; level++) tree = { name: '1', children: [tree] };
+      const thrown = Node.safeParse(tree).error as z.ZodError;
+      const def = resource('tree://{id}', {
+        description: 'A tree.',
+        params: z.object({ id: z.string().describe('id') }),
+        handler: () => {
+          throw thrown;
+        },
+      });
+
+      const handler = createResourceHandler(def as AnyResourceDefinition, services, notifiers);
+      const err = await handler(new URL('tree://x'), { id: 'x' }, makeServerContext()).catch(
+        (e) => e,
+      );
+
+      const [issue] = thrown.issues;
+      expect(issue?.path).toHaveLength(25);
+      expect(err.code).toBe(JsonRpcErrorCode.ValidationError);
+      expect(err.message).toBe(`${issue?.path.join('.')}: ${issue?.message}`);
+      expect(err.data).toEqual({
+        issues: [{ ...issue, path: issue?.path.slice(0, 10), pathCount: 25 }],
+        requestId: expect.any(String),
+      });
     });
 
     it('should pass variables through when no params schema is defined', async () => {

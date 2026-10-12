@@ -4,6 +4,7 @@
  */
 
 import { afterEach, beforeEach, describe, expect, it, type MockInstance, vi } from 'vitest';
+import { z } from 'zod';
 
 import { JsonRpcErrorCode, McpError } from '../../../../src/types-global/errors.js';
 import { logger } from '../../../../src/utils/internal/logger.js';
@@ -212,6 +213,30 @@ describe('withRetry', () => {
     expect(result.name).toBe('TypeError');
     expect(result.message).toBe('socket closed (failed after 2 attempts)');
     expect(result.cause).toBe(failure);
+  });
+
+  it('describes a retried ZodError by its one-line summary, never its JSON of every issue', async () => {
+    vi.useFakeTimers();
+
+    const parsed = z.array(z.string().regex(/^\d+$/)).safeParse(['a', 'b', 'c']);
+    if (parsed.success) throw new Error('fixture must fail');
+    const failure = parsed.error;
+    const summary = '0: Invalid string: must match pattern /^\\d+$/ (+2 more)';
+    const resultPromise = withRetry(() => Promise.reject(failure), {
+      baseDelayMs: 5,
+      jitter: 0,
+      maxRetries: 1,
+      operation: 'parseRows',
+      isTransient: () => true,
+    }).catch((error) => error);
+
+    await vi.advanceTimersByTimeAsync(5);
+
+    const result = await resultPromise;
+    expect(result.name).toBe('ZodError');
+    expect(result.message).toBe(`${summary} (failed after 2 attempts)`);
+    expect(result.cause).toBe(failure);
+    expect(debugSpy.mock.calls[0]?.[0]).toBe(`Retry 1/1 for parseRows: ${summary} — waiting 5ms`);
   });
 
   it('rethrows the original error when the signal is already aborted', async () => {

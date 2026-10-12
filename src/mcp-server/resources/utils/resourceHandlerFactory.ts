@@ -229,7 +229,12 @@ export function createResourceHandler(
   };
 }
 
-/** The thrown value as an `McpError`, classified by {@link ErrorHandler.classifyOnly} when it is not one. */
+/**
+ * The thrown value as an `McpError`, classified by {@link ErrorHandler.classifyOnly}
+ * when it is not one: a `params` rejection or a handler-thrown `ZodError` carries
+ * its issues as `classifyOnly` bounds them, the first 10 with `issuesCount` beside
+ * a cut list (#710).
+ */
 function asMcpError(error: unknown): McpError {
   if (isInstance(error, McpError)) return error;
   const { code, message, data } = ErrorHandler.classifyOnly(error);

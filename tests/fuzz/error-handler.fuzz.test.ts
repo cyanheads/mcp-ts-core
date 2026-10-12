@@ -7,6 +7,7 @@
 
 import fc from 'fast-check';
 import { describe, expect, it, vi } from 'vitest';
+import { z } from 'zod';
 import { JsonRpcErrorCode, McpError } from '@/types-global/errors.js';
 
 vi.mock('@/config/index.js', () => ({
@@ -44,6 +45,7 @@ vi.mock('@/utils/internal/logger.js', () => ({
 
 import { ADVERSARIAL_STRINGS } from '@/testing/fuzz.js';
 import { ErrorHandler } from '@/utils/internal/error-handler/errorHandler.js';
+import { logger } from '@/utils/internal/logger.js';
 
 // All valid JSON-RPC error codes the classifier can return
 const VALID_CODES = new Set(Object.values(JsonRpcErrorCode).filter((v) => typeof v === 'number'));
@@ -124,6 +126,37 @@ describe('ErrorHandler Fuzz Tests', () => {
         expect(typeof result.message).toBe('string');
       }
     });
+
+    it('carries a ZodError’s issues whole within 10, and the first 10 with issuesCount past them (#710)', () => {
+      /** Rows whose ids must be digits and whose tags at most 3 characters: issues two arrays deep. */
+      const Rows = z.array(
+        z.object({
+          id: z.string().regex(/^\d+$/).describe('Row ID'),
+          tags: z.array(z.string().max(3).describe('Tag')).describe('Tags'),
+        }),
+      );
+      const row = fc.record({
+        id: fc.oneof(fc.stringMatching(/^\d{1,4}$/), fc.string({ maxLength: 8 })),
+        tags: fc.array(fc.string({ maxLength: 6 }), { maxLength: 6 }),
+      });
+
+      fc.assert(
+        fc.property(fc.array(row, { maxLength: 12 }), (rows) => {
+          const parsed = Rows.safeParse(rows);
+          if (parsed.success) return;
+          const { issues } = parsed.error;
+          const { code, data } = ErrorHandler.classifyOnly(parsed.error);
+          expect(code).toBe(JsonRpcErrorCode.ValidationError);
+          if (issues.length <= 10) {
+            expect(data?.issues).toBe(issues);
+            expect(data).not.toHaveProperty('issuesCount');
+          } else {
+            expect(data).toEqual({ issues: issues.slice(0, 10), issuesCount: issues.length });
+          }
+        }),
+        { numRuns: 200, seed: 20_261_012 },
+      );
+    });
   });
 
   describe('handleError', () => {
@@ -194,6 +227,64 @@ describe('ErrorHandler Fuzz Tests', () => {
           expect(JSON.stringify(result.data)).not.toMatch(/\n\s+at |context-only-marker/);
         }),
         { numRuns: 100 },
+      );
+    });
+
+    it('logs a ZodError at any cause depth as its summary, never its JSON of every issue (#736)', () => {
+      const Rows = z.array(
+        z.object({
+          id: z.string().regex(/^\d+$/).describe('Row ID'),
+          tags: z.array(z.string().max(3).describe('Tag')).describe('Tags'),
+        }),
+      );
+      const row = fc.record({
+        id: fc.oneof(fc.stringMatching(/^\d{1,4}$/), fc.string({ maxLength: 8 })),
+        tags: fc.array(fc.string({ maxLength: 6 }), { maxLength: 6 }),
+      });
+      /** A pretty-printed issue's key, as Zod's own `message` writes every one. */
+      const ISSUE_JSON = '"code": "';
+
+      fc.assert(
+        fc.property(
+          fc.array(row, { maxLength: 12 }),
+          fc.integer({ min: 0, max: 3 }),
+          (rows, depth) => {
+            let zodError: z.ZodError | undefined;
+            try {
+              Rows.parse(rows);
+            } catch (error) {
+              zodError = error as z.ZodError;
+            }
+            if (!zodError) return;
+            const summary = ErrorHandler.classifyOnly(zodError).message;
+            let thrown: Error = zodError;
+            for (let level = 0; level < depth; level++) {
+              thrown = new Error(`level ${level}`, { cause: thrown });
+            }
+
+            ErrorHandler.handleError(thrown, { operation: 'fuzz-zod' });
+
+            const [message, record] = vi.mocked(logger.error).mock.calls.at(-1) as unknown as [
+              string,
+              { extra: { stack?: string; errorData: Record<string, unknown> } },
+            ];
+            const { stack, errorData } = record.extra;
+            const chain = (errorData.causeChain ?? []) as Array<{
+              message: string;
+              stack?: string;
+            }>;
+            const written = [
+              message,
+              stack,
+              (errorData.rootCause as { message?: string } | undefined)?.message,
+              ...chain.flatMap((node) => [node.message, node.stack]),
+            ];
+            for (const text of written) expect(text ?? '').not.toContain(ISSUE_JSON);
+            if (depth === 0) expect(message).toBe(`Error in fuzz-zod: ${summary}`);
+            else expect(chain.at(-1)?.message).toBe(summary);
+          },
+        ),
+        { numRuns: 200, seed: 20_261_012 },
       );
     });
   });

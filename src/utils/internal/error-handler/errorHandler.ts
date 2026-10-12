@@ -11,6 +11,7 @@ import { ZodError } from 'zod';
 
 import { isInputRequiredSignal } from '@/mcp-server/inputRequired.js';
 import { JsonRpcErrorCode, McpError, requestCancelled } from '@/types-global/errors.js';
+import { boundedProjection, REJECTION_ISSUES } from '@/utils/internal/boundedProjection.js';
 import { logger } from '@/utils/internal/logger.js';
 import { toLogValue } from '@/utils/internal/logValue.js';
 import type { RequestContext } from '@/utils/internal/requestContext.js';
@@ -31,6 +32,7 @@ import {
   getErrorMessage,
   getErrorName,
   isInstance,
+  loggedStack,
   readErrorData,
   readField,
   readWireErrorData,
@@ -252,7 +254,10 @@ export class ErrorHandler {
    *    carrying the record's stack, or the same stack as the node before it, is written without
    *    it. The handler's own fields lead the record, ahead of the context's `extra` and `input`,
    *    and no caller key replaces one. A field of the thrown value whose read throws is written
-   *    as `'[Unreadable]'`, so the call never throws on what it reports.
+   *    as `'[Unreadable]'`, so the call never throws on what it reports. A `ZodError`'s text
+   *    is its one-line summary (`formatZodErrorMessage`) wherever the record carries it — the
+   *    log line, the header of the record's `stack` and of the rebuilt error's, and a
+   *    `causeChain` node's `message` and `stack` — never Zod's JSON of every issue.
    *    A record is stack-free for `RequestCancelled`, which is a routine caller disconnect logged
    *    at `info`, and under `includeStack: false`: no `stack`, no `errorData.originalStack`, no
    *    `causeChain` node `stack` nor `originalStack` in a node's `data`, and every `Error` in the
@@ -309,7 +314,10 @@ export class ErrorHandler {
     const originalErrorMessage = getErrorMessage(error);
     const thrownError = isInstance(error, Error) ? error : undefined;
     const thrownMcpError = isInstance(error, McpError) ? error : undefined;
-    const originalStack = thrownError ? readField(thrownError, 'stack') : undefined;
+    // A ZodError's stack header carries its JSON of every issue; the record's carries its summary.
+    const originalStack = thrownError
+      ? loggedStack(thrownError, readField(thrownError, 'stack'))
+      : undefined;
 
     /**
      * Classified before the record is assembled, because the code decides more
@@ -481,7 +489,11 @@ export class ErrorHandler {
       extra: stackFree ? toStackFreeExtra(recordExtra) : recordExtra,
     };
 
-    const finalMessage = readField(finalError, 'message');
+    // A mapper may return a ZodError, whose own `message` is its JSON of every issue.
+    const finalMessage =
+      errorMapper && isInstance(finalError, ZodError)
+        ? getErrorMessage(finalError)
+        : readField(finalError, 'message');
     const logDescription = finalMessage ? errorText(finalMessage) : originalErrorMessage;
     if (isCancellation) {
       logger.info(`Cancelled ${operation}: ${logDescription}`, logContext);
@@ -505,10 +517,19 @@ export class ErrorHandler {
    * classification but the caller handles logging/rethrowing (e.g., the resource
    * handler factory, whose completion record carries the code).
    *
+   * A `ZodError`'s `data` is `{ issues }` so clients can render field-level
+   * errors, bounded as the tool argument rejection's is (#710): within the caps
+   * it is Zod's own `issues` array, and past them it keeps the first 10 issues
+   * and at most 30 in all through union branches, the first 1,024 characters of
+   * every string and key, the first 10 entries of every array and keys of every
+   * object, and two levels of lists and objects below each issue, with the uncut
+   * count or length beside each cut (`issuesCount` beside `issues`). Every
+   * envelope built from this `data` — a resource read's error, a tool's
+   * `structuredContent.error`, `runToolContract` — carries that bound.
+   *
    * @param error - The error instance or value to classify.
    * @returns `{ code, message, data? }` — the classified error code, a human-readable
-   *          message, and optional structured data (populated for `ZodError` with
-   *          the full `issues` array so clients can render field-level errors).
+   *          message, and optional structured data (a `ZodError`'s bounded `issues`).
    */
   public static classifyOnly(error: unknown): {
     code: JsonRpcErrorCode;
@@ -525,7 +546,10 @@ export class ErrorHandler {
       return {
         code: JsonRpcErrorCode.ValidationError,
         message: getErrorMessage(error),
-        data: { issues: readField(error, 'issues') },
+        data: boundedProjection({ issues: readField(error, 'issues') }, REJECTION_ISSUES) as Record<
+          string,
+          unknown
+        >,
       };
     }
     return {

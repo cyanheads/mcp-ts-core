@@ -12,6 +12,7 @@ import { EventEmitter } from 'node:events';
 import type { McpServer, McpServerFactory } from '@modelcontextprotocol/server';
 import type { StdioServerHandle } from '@modelcontextprotocol/server/stdio';
 import { afterEach, beforeEach, describe, expect, it, type Mock, vi } from 'vitest';
+import { z } from 'zod';
 import type { RequestContext } from '@/utils/internal/requestContext.js';
 
 const { handleCloseSpy, serveStdioSpy } = vi.hoisted(() => ({
@@ -106,6 +107,24 @@ describe('Stdio Transport', () => {
 
       expect(loggerSpy.debug).toHaveBeenCalledWith(
         'Stdio transport reported: wire glitch',
+        expect.objectContaining({ operation: 'connectStdioTransport' }),
+      );
+    });
+
+    it('reports a ZodError the transport raises by its one-line summary', async () => {
+      const { startStdioTransport } = await import(
+        '@/mcp-server/transports/stdio/stdioTransport.js'
+      );
+      // The SDK validates each inbound line against its JSON-RPC schema and reports the ZodError.
+      const parsed = z.object({ jsonrpc: z.literal('2.0'), id: z.number() }).safeParse({});
+      if (parsed.success) throw new Error('fixture must fail');
+
+      startStdioTransport(serverFactory, mockContext);
+      const options = serveStdioSpy.mock.calls[0]?.[1] as { onerror: (error: Error) => void };
+      options.onerror(parsed.error);
+
+      expect(loggerSpy.debug).toHaveBeenCalledWith(
+        'Stdio transport reported: jsonrpc: Invalid input: expected "2.0" (+1 more)',
         expect.objectContaining({ operation: 'connectStdioTransport' }),
       );
     });

@@ -11,6 +11,7 @@ import { z } from 'zod';
 import { JsonRpcErrorCode, McpError } from '@/types-global/errors.js';
 import { asRequestCancelled, ErrorHandler } from '@/utils/internal/error-handler/errorHandler.js';
 import { logger } from '@/utils/internal/logger.js';
+import { cpuMs } from '../../../../helpers/cpu-time.js';
 
 // Suppress logger output in tests
 vi.mock('@/utils/internal/logger.js', () => ({
@@ -363,6 +364,183 @@ describe('ErrorHandler', () => {
       expect(result.message).toBe('boom');
       expect(result.data).toBeUndefined();
     });
+
+    describe('bounds a ZodError’s data.issues (#710)', () => {
+      const Ids = z.object({
+        ids: z.array(z.string().regex(/^\d+$/).describe('Id')).describe('Ids'),
+      });
+      /** The ZodError `n` non-digit ids raise: one issue per id. */
+      const idsError = (n: number) =>
+        Ids.safeParse({ ids: Array.from({ length: n }, (_, i) => `x${i}`) }).error as z.ZodError;
+      const bytes = (value: unknown) => JSON.stringify(value).length;
+
+      it('carries Zod’s own issues array, uncut, at exactly 10 issues', () => {
+        const error = idsError(10);
+        const result = ErrorHandler.classifyOnly(error);
+        expect(result.data).toEqual({ issues: error.issues });
+        expect(result.data?.issues).toBe(error.issues);
+        expect(result.message).toBe('ids.0: Invalid string: must match pattern /^\\d+$/ (+9 more)');
+      });
+
+      it('carries an empty issues list, and the fallback message, unchanged', () => {
+        const result = ErrorHandler.classifyOnly(new z.ZodError([]));
+        expect(result).toEqual({
+          code: JsonRpcErrorCode.ValidationError,
+          message: 'Validation failed',
+          data: { issues: [] },
+        });
+      });
+
+      it('keeps the first 10 issues and issuesCount beside them at 11', () => {
+        const error = idsError(11);
+        const result = ErrorHandler.classifyOnly(error);
+        expect(result.data).toEqual({ issues: error.issues.slice(0, 10), issuesCount: 11 });
+      });
+
+      it('keeps the first 10 of 10,000 issues, byte-identical to Zod’s, under 4 KiB', () => {
+        const error = idsError(10_000);
+        const result = ErrorHandler.classifyOnly(error);
+        expect(result.code).toBe(JsonRpcErrorCode.ValidationError);
+        expect(result.message).toBe(
+          'ids.0: Invalid string: must match pattern /^\\d+$/ (+9999 more)',
+        );
+        expect(result.data).toEqual({ issues: error.issues.slice(0, 10), issuesCount: 10_000 });
+        expect(bytes(result.data)).toBeLessThan(4096);
+      });
+
+      it('cuts an issue message past 1,024 characters, with its uncut length beside it', () => {
+        const long = 'm'.repeat(5000);
+        const error = z.object({ id: z.string().regex(/^\d+$/, long) }).safeParse({ id: 'x' })
+          .error as z.ZodError;
+        const result = ErrorHandler.classifyOnly(error);
+        const [issue] = (result.data?.issues ?? []) as Array<Record<string, unknown>>;
+        expect(issue?.message).toBe('m'.repeat(1024));
+        expect(issue?.messageLength).toBe(5000);
+        expect(issue?.path).toEqual(['id']);
+        expect(result.data).not.toHaveProperty('issuesCount');
+      });
+
+      it('cuts the message’s path to 1,025 characters when the first issue’s path is a 1,000,000-character key', () => {
+        const key = 'k'.repeat(1_000_000);
+        const error = z.record(z.string(), z.number()).safeParse({ [key]: 'x' })
+          .error as z.ZodError;
+        const result = ErrorHandler.classifyOnly(error);
+        expect(result.code).toBe(JsonRpcErrorCode.ValidationError);
+        expect(result.message).toBe(
+          `${'k'.repeat(1_024)}…: Invalid input: expected number, received string`,
+        );
+        expect(bytes(result)).toBeLessThan(4096);
+      });
+
+      it('carries a 250-option enum’s message whole, though data.issues keeps 10 of its values', () => {
+        const options = Array.from({ length: 250 }, (_, i) => `C${String(i).padStart(3, '0')}`);
+        const error = z
+          .object({ code: z.enum(options as [string, ...string[]]) })
+          .safeParse({ code: 'nope' }).error as z.ZodError;
+        const message = error.issues[0]?.message ?? '';
+        expect(message.length).toBeGreaterThan(1_024);
+
+        const result = ErrorHandler.classifyOnly(error);
+        expect(result.message).toBe(`code: ${message}`);
+        const [issue] = (result.data?.issues ?? []) as Array<Record<string, unknown>>;
+        expect(issue?.values).toEqual(options.slice(0, 10));
+      });
+
+      it('carries an unreadable issues field as [Unreadable]', () => {
+        const error = new Proxy(new z.ZodError([]), {
+          get(target, key, receiver) {
+            if (key === 'issues') throw new Error('nope');
+            return Reflect.get(target, key, receiver);
+          },
+        });
+        expect(ErrorHandler.classifyOnly(error)).toEqual({
+          code: JsonRpcErrorCode.ValidationError,
+          message: '[Unreadable]',
+          data: { issues: '[Unreadable]' },
+        });
+      });
+
+      it('writes an issue field whose read throws as [Unreadable], and never throws', () => {
+        const issue = {
+          code: 'custom',
+          message: 'Rejected.',
+          path: ['ids', 0],
+          get params(): never {
+            throw new Error('params getter threw');
+          },
+        };
+        const result = ErrorHandler.classifyOnly(new z.ZodError([issue as never]));
+        expect(result).toEqual({
+          code: JsonRpcErrorCode.ValidationError,
+          message: 'ids.0: Rejected.',
+          data: {
+            issues: [
+              { code: 'custom', message: 'Rejected.', path: ['ids', 0], params: '[Unreadable]' },
+            ],
+          },
+        });
+        expect(() => JSON.stringify(result)).not.toThrow();
+      });
+
+      it('writes an issues list that cannot be inspected as [Unreadable], and never throws', () => {
+        const { proxy, revoke } = Proxy.revocable([] as never[], {});
+        revoke();
+        expect(ErrorHandler.classifyOnly(new z.ZodError(proxy))).toEqual({
+          code: JsonRpcErrorCode.ValidationError,
+          message: '[Unreadable]',
+          data: { issues: '[Unreadable]' },
+        });
+      });
+
+      describe('a recursive union whose branches share one clause list', () => {
+        /**
+         * The `and` and `or` branches both parse the same clause list, and Zod
+         * lists the clause's issues under both, so a bad leaf's issue tree is
+         * 2^depth issues wide while its distinct issues grow with the depth.
+         */
+        const Filter: z.ZodType = z.lazy(() =>
+          z.union([
+            z.object({ op: z.literal('and'), filters: z.array(Filter) }),
+            z.object({ op: z.literal('or'), filters: z.array(Filter) }),
+            z.object({ op: z.literal('eq'), field: z.string(), value: z.string() }),
+          ]),
+        );
+        /** One bad leaf, `value: 5`, under `depth` levels alternating `or` and `and`. */
+        const nested = (depth: number) => {
+          let node: unknown = { op: 'eq', field: 'name', value: 5 };
+          for (let level = 0; level < depth; level++) {
+            node = { op: level % 2 ? 'and' : 'or', filters: [node] };
+          }
+          return node;
+        };
+        /** Objects held in arrays anywhere in `value`: what the 30-issue budget counts. */
+        const issueObjects = (value: unknown): number => {
+          if (value === null || typeof value !== 'object') return 0;
+          let count = 0;
+          for (const entry of Array.isArray(value) ? value : Object.values(value)) {
+            const isObject = entry !== null && typeof entry === 'object' && !Array.isArray(entry);
+            if (Array.isArray(value) && isObject) count++;
+            count += issueObjects(entry);
+          }
+          return count;
+        };
+
+        it('keeps at most 30 issues of the tree, in a bounded walk, at every depth to 24', () => {
+          const costs: number[] = [];
+          for (const depth of [8, 16, 24]) {
+            const error = Filter.safeParse(nested(depth)).error as z.ZodError;
+            const result = ErrorHandler.classifyOnly(error);
+            expect(result.code, `depth ${depth}`).toBe(JsonRpcErrorCode.ValidationError);
+            // Checked per depth, so a carried tree that doubles per level fails at 8.
+            expect(bytes(result.data), `depth ${depth}`).toBeLessThan(16_384);
+            expect(issueObjects(result.data?.issues), `depth ${depth}`).toBeLessThanOrEqual(30);
+            costs.push(cpuMs(() => ErrorHandler.classifyOnly(error)));
+          }
+          // 3× the depth: a bounded walk stays flat, one that doubles per level is 65,536×.
+          expect(costs[2]! / costs[0]!).toBeLessThan(6);
+        });
+      });
+    });
   });
 
   // ─── handleError ─────────────────────────────────────────────────────────────
@@ -696,6 +874,243 @@ describe('ErrorHandler', () => {
       });
     });
 
+    describe('a ZodError reaches the record as its one-line summary (#736)', () => {
+      type CauseNode = { name: string; message: string; depth: number; stack?: string };
+      type Logged = {
+        extra: Record<string, unknown> & {
+          stack?: string;
+          errorData: Record<string, unknown> & {
+            rootCause?: { name: string; message: string };
+            causeChain?: CauseNode[];
+          };
+        };
+      };
+      const lastErrorRecord = () =>
+        vi.mocked(logger.error).mock.calls.at(-1)?.[1] as unknown as Logged;
+      const fixedContext = { requestId: 'req-736', timestamp: '2026-10-12T00:00:00.000Z' };
+
+      const Ids = z.object({ ids: z.array(z.string().regex(/^\d+$/).describe('Id')) });
+      /** What `Ids.parse` throws for `n` non-digit ids: one issue each, frames and all on V8. */
+      function thrownIdsError(n: number): z.ZodError {
+        try {
+          Ids.parse({ ids: Array.from({ length: n }, (_, i) => `x${i}`) });
+        } catch (error) {
+          return error as z.ZodError;
+        }
+        throw new Error('expected Ids.parse to throw');
+      }
+      const summary = (n: number) =>
+        `ids.0: Invalid string: must match pattern /^\\d+$/${n > 1 ? ` (+${n - 1} more)` : ''}`;
+      const IS_BUN = typeof process.versions.bun === 'string';
+      /**
+       * Whether `error`'s stack starts `ZodError: <its JSON message>`: always on
+       * V8; on Bun only under a stack formatter such as the test runner's, since
+       * Bun's own carries no message.
+       */
+      const carriesMessage = (error: z.ZodError) =>
+        typeof error.stack === 'string' && error.stack.startsWith(`ZodError: ${error.message}`);
+
+      /**
+       * The stack the record writes for `error`: a header carrying the message
+       * becomes the summary and every frame of the thrown stack is kept; one
+       * that carries none is written as read.
+       */
+      function expectSummaryStack(stack: unknown, error: z.ZodError, n: number) {
+        if (!carriesMessage(error)) {
+          expect(stack).toBe(error.stack);
+          return;
+        }
+        const [header, ...frames] = String(stack).split('\n');
+        expect(header).toBe(`ZodError: ${summary(n)}`);
+        if (!IS_BUN) expect(frames.length).toBeGreaterThan(0);
+        for (const frame of frames) expect(frame.startsWith('    at ')).toBe(true);
+        expect(error.stack?.endsWith(frames.map((frame) => `\n${frame}`).join(''))).toBe(true);
+      }
+
+      it.runIf(!IS_BUN)(
+        'V8 starts a thrown ZodError’s stack with its JSON message (the precondition)',
+        () => {
+          expect(carriesMessage(thrownIdsError(3))).toBe(true);
+        },
+      );
+
+      it('writes a non-Zod error’s stack and cause-chain messages as read (characterization)', () => {
+        const root = new TypeError('socket closed');
+        const mid = new Error('pool exhausted', { cause: root });
+        const outer = new Error('lookup failed', { cause: mid });
+
+        ErrorHandler.handleError(outer, { operation: 'probe', context: fixedContext });
+
+        const { extra } = lastErrorRecord();
+        expect(extra.stack).toBe(outer.stack);
+        expect(extra.errorData.rootCause).toEqual({ name: 'TypeError', message: 'socket closed' });
+        expect(extra.errorData.causeChain).toEqual([
+          { name: 'Error', message: 'lookup failed', depth: 0 },
+          { name: 'Error', message: 'pool exhausted', depth: 1, stack: mid.stack },
+          { name: 'TypeError', message: 'socket closed', depth: 2, stack: root.stack },
+        ]);
+        expect(vi.mocked(logger.error).mock.calls.at(-1)?.[0]).toBe(
+          'Error in probe: lookup failed',
+        );
+      });
+
+      it('writes a thrown ZodError’s stack header as the summary, frames kept, flat from 100 to 10,000 issues', () => {
+        const sizes: number[] = [];
+        for (const n of [100, 10_000]) {
+          const error = thrownIdsError(n);
+
+          ErrorHandler.handleError(error, { operation: 'probe', context: fixedContext });
+
+          const logged = lastErrorRecord();
+          expectSummaryStack(logged.extra.stack, error, n);
+          expect(vi.mocked(logger.error).mock.calls.at(-1)?.[0]).toBe(
+            `Error in probe: ${summary(n)}`,
+          );
+          const serialized = JSON.stringify(logged);
+          expect(serialized).not.toContain('invalid_format');
+          sizes.push(serialized.length);
+        }
+        // `(+99 more)` against `(+9999 more)`: two characters, nothing per issue.
+        expect(sizes[1]! - sizes[0]!).toBeLessThan(64);
+      });
+
+      it('writes a ZodError two causes deep as its summary in the cause chain and rootCause', () => {
+        const error = thrownIdsError(500);
+        const mid = new McpError(JsonRpcErrorCode.ValidationError, 'record rejected', undefined, {
+          cause: error,
+        });
+        const outer = new Error('lookup failed', { cause: mid });
+
+        ErrorHandler.handleError(outer, { operation: 'probe', context: fixedContext });
+
+        const { extra } = lastErrorRecord();
+        expect(extra.stack).toBe(outer.stack);
+        expect(extra.errorData.rootCause).toEqual({ name: 'ZodError', message: summary(500) });
+        const chain = extra.errorData.causeChain ?? [];
+        expect(chain.map(({ name, message, depth }) => [name, message, depth])).toEqual([
+          ['Error', 'lookup failed', 0],
+          ['McpError', 'record rejected', 1],
+          ['ZodError', summary(500), 2],
+        ]);
+        expect(chain[1]?.stack).toBe(mid.stack);
+        expectSummaryStack(chain[2]?.stack, error, 500);
+        expect(JSON.stringify(extra)).not.toContain('invalid_format');
+      });
+
+      it('writes the summary at every level a nested tryCatch rebuilds, each stack once', async () => {
+        const error = thrownIdsError(500);
+
+        const rethrown = await ErrorHandler.tryCatch(
+          () =>
+            ErrorHandler.tryCatch(
+              () => {
+                throw error;
+              },
+              { operation: 'inner', context: fixedContext },
+            ),
+          { operation: 'outer', context: fixedContext },
+        ).catch((e: unknown) => e as McpError);
+
+        expect(rethrown.message).toBe(summary(500));
+        expectSummaryStack(rethrown.stack, error, 500);
+        const calls = vi.mocked(logger.error).mock.calls;
+        expect(calls.map(([message]) => message)).toEqual([
+          `Error in inner: ${summary(500)}`,
+          `Error in outer: ${summary(500)}`,
+        ]);
+        for (const [, record] of calls)
+          expect(JSON.stringify(record)).not.toContain('invalid_format');
+        const { extra } = lastErrorRecord();
+        expectSummaryStack(extra.stack, error, 500);
+        // Every level shares the throw site's stack, so no node repeats it.
+        expect(extra.errorData.causeChain).toEqual([
+          {
+            name: 'McpError',
+            message: summary(500),
+            depth: 0,
+            data: { originalErrorName: 'ZodError', originalMessage: summary(500) },
+          },
+          { name: 'ZodError', message: summary(500), depth: 1 },
+        ]);
+      });
+
+      it('logs the summary when an errorMapper returns the ZodError itself', () => {
+        const error = thrownIdsError(500);
+
+        const handled = ErrorHandler.handleError(error, {
+          operation: 'probe',
+          context: fixedContext,
+          errorMapper: (e) => e as Error,
+        });
+
+        expect(handled).toBe(error);
+        expect(vi.mocked(logger.error).mock.calls.at(-1)?.[0]).toBe(
+          `Error in probe: ${summary(500)}`,
+        );
+        expect(JSON.stringify(lastErrorRecord())).not.toContain('invalid_format');
+      });
+
+      it('writes a single root-level issue as its bare message, with no count', () => {
+        let error: z.ZodError | undefined;
+        try {
+          z.string().regex(/^\d+$/).parse('x');
+        } catch (thrown) {
+          error = thrown as z.ZodError;
+        }
+        const line = 'Invalid string: must match pattern /^\\d+$/';
+        const header = `ZodError: ${error?.message}`;
+        const rawStack = error?.stack;
+
+        ErrorHandler.handleError(error, { operation: 'probe', context: fixedContext });
+
+        expect(vi.mocked(logger.error).mock.calls.at(-1)?.[0]).toBe(`Error in probe: ${line}`);
+        expect(lastErrorRecord().extra.stack).toBe(
+          rawStack?.startsWith(header)
+            ? `ZodError: ${line}${rawStack.slice(header.length)}`
+            : rawStack,
+        );
+        expect(JSON.stringify(lastErrorRecord())).not.toContain('invalid_format');
+      });
+
+      it('writes a stack the caller replaced as given', () => {
+        const error = thrownIdsError(500);
+        error.stack = 'ZodError: replaced by the caller\n    at caller (caller.ts:1:1)';
+
+        ErrorHandler.handleError(error, { operation: 'probe', context: fixedContext });
+
+        expect(lastErrorRecord().extra.stack).toBe(error.stack);
+      });
+
+      it('writes a ZodError whose stack cannot be read with [Unreadable], and its summary', () => {
+        const error = new Proxy(thrownIdsError(500), {
+          get(target, key, receiver) {
+            if (key === 'stack') throw new Error('stack getter threw');
+            return Reflect.get(target, key, receiver);
+          },
+        });
+
+        expect(() =>
+          ErrorHandler.handleError(error, { operation: 'probe', context: fixedContext }),
+        ).not.toThrow();
+
+        expect(vi.mocked(logger.error).mock.calls.at(-1)?.[0]).toBe(
+          `Error in probe: ${summary(500)}`,
+        );
+        expect(lastErrorRecord().extra.stack).toBe('[Unreadable]');
+      });
+
+      it('writes a ZodError an AggregateError holds as its summary, on the wire and in the record', () => {
+        const error = new AggregateError([thrownIdsError(500)], 'every source failed');
+        const message = `every source failed: ${summary(500)}`;
+
+        expect(ErrorHandler.classifyOnly(error).message).toBe(message);
+        ErrorHandler.handleError(error, { operation: 'probe', context: fixedContext });
+
+        expect(vi.mocked(logger.error).mock.calls.at(-1)?.[0]).toBe(`Error in probe: ${message}`);
+        expect(JSON.stringify(lastErrorRecord())).not.toContain('invalid_format');
+      });
+    });
+
     describe('OpenTelemetry span recording', () => {
       const span = {
         recordException: vi.fn(),
@@ -722,6 +1137,32 @@ describe('ErrorHandler', () => {
           code: SpanStatusCode.ERROR,
           message: 'Telemetry test',
         });
+      });
+
+      it('records a ZodError as its summary, on the exception event and the status (#736)', () => {
+        const Ids = z.array(z.string().regex(/^\d+$/));
+        let error: z.ZodError | undefined;
+        try {
+          Ids.parse(Array.from({ length: 1000 }, (_, i) => `x${i}`));
+        } catch (thrown) {
+          error = thrown as z.ZodError;
+        }
+        const message = '0: Invalid string: must match pattern /^\\d+$/ (+999 more)';
+        const rawStack = error?.stack;
+        const header = `ZodError: ${error?.message}`;
+
+        ErrorHandler.handleError(error, { operation: 'otelTest' });
+
+        expect(span.recordException).toHaveBeenCalledTimes(1);
+        const recorded = span.recordException.mock.calls[0]?.[0] as Record<string, unknown>;
+        expect(recorded).toMatchObject({ name: 'ZodError', message });
+        expect(recorded.stack).toBe(
+          rawStack?.startsWith(header)
+            ? `ZodError: ${message}${rawStack.slice(header.length)}`
+            : rawStack,
+        );
+        expect(JSON.stringify(recorded)).not.toContain('invalid_format');
+        expect(span.setStatus).toHaveBeenCalledWith({ code: SpanStatusCode.ERROR, message });
       });
 
       it('sets a stringified ERROR status without recordException for a non-Error value', () => {

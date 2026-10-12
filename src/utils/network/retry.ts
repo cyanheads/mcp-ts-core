@@ -10,6 +10,7 @@ import {
   extractErrorCauseChain,
   getErrorMessage,
   isInstance,
+  messageText,
   readField,
   UNREADABLE,
 } from '@/utils/internal/error-handler/helpers.js';
@@ -365,7 +366,8 @@ function createDeadlineClock(deadlineMs: number, operation?: string): DeadlineCl
  * Enriches an error with retry exhaustion context.
  * Appends attempt count to the message and to `data` for programmatic access.
  * The error's `message` and `name` are read as text (`errorText`), so one that
- * throws on read or is not a string never replaces the exhausted error.
+ * throws on read or is not a string never replaces the exhausted error, and a
+ * `ZodError`'s message as its one-line summary (`messageText`).
  */
 function enrichExhaustedError(error: unknown, totalAttempts: number, operation?: string): unknown {
   if (error instanceof McpError) {
@@ -382,7 +384,7 @@ function enrichExhaustedError(error: unknown, totalAttempts: number, operation?:
 
   if (error instanceof Error) {
     const suffix = `(failed after ${totalAttempts} attempt${totalAttempts > 1 ? 's' : ''})`;
-    const wrapped = new Error(`${errorText(readField(error, 'message'))} ${suffix}`, {
+    const wrapped = new Error(`${messageText(error)} ${suffix}`, {
       cause: error,
     });
     wrapped.name = errorText(readField(error, 'name'));
@@ -559,10 +561,8 @@ export async function withRetry<T>(
         }
 
         // As text, guarded: a `message` that throws on read or is not a string never fails the retry (#697),
-        // and any other thrown value is described as `getErrorMessage` describes it.
-        const errorMessage = isInstance(error, Error)
-          ? errorText(readField(error, 'message'))
-          : getErrorMessage(error);
+        // a ZodError's is its summary, and any other thrown value is described as `getErrorMessage` describes it.
+        const errorMessage = isInstance(error, Error) ? messageText(error) : getErrorMessage(error);
         const delaySource = retryAfterMs === undefined ? '' : ' (Retry-After)';
         // The transport code (`ECONNRESET`, `ConnectionRefused`) rides the
         // cause chain, not the message — the only trace of why a retry that

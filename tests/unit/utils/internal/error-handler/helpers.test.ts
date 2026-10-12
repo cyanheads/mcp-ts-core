@@ -204,6 +204,111 @@ describe('Error Handler Helpers', () => {
     it('should fall back to a fixed sentence for an error with no issues', () => {
       expect(formatZodErrorMessage(new z.ZodError([]))).toBe('Validation failed');
     });
+
+    describe('cuts the first issue’s path to 1,024 characters, the message and count kept (#710)', () => {
+      /** A ZodError whose first issue sits at `path` with `message`, plus `more` issues after it. */
+      const issuesAt = (path: PropertyKey[], message: string, more = 0) =>
+        new z.ZodError(
+          Array.from({ length: 1 + more }, (_, i) =>
+            i === 0
+              ? { code: 'custom' as const, path, message, input: undefined }
+              : {
+                  code: 'custom' as const,
+                  path: ['other'],
+                  message: 'Rejected.',
+                  input: undefined,
+                },
+          ),
+        );
+      /** Whether `text` holds a UTF-16 surrogate half without its partner. */
+      const loneSurrogate = (text: string) =>
+        /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/.test(text);
+
+      it('leaves a path of exactly 1,024 characters whole, with and without its count', () => {
+        const key = 'k'.repeat(1_024);
+        expect(formatZodErrorMessage(issuesAt([key], 'Rejected.'))).toBe(`${key}: Rejected.`);
+        expect(formatZodErrorMessage(issuesAt([key], 'Rejected.', 3))).toBe(
+          `${key}: Rejected. (+3 more)`,
+        );
+      });
+
+      it('cuts a path of 1,025 characters to its first 1,024 and an ellipsis', () => {
+        // Two segments, so the cut counts the joining dot.
+        const summary = formatZodErrorMessage(issuesAt(['a', 'k'.repeat(1_023)], 'Rejected.'));
+        expect(summary).toBe(`a.${'k'.repeat(1_022)}…: Rejected.`);
+      });
+
+      it('cuts a long record key, the message after it kept whole', () => {
+        const key = 'k'.repeat(5_000);
+        const error = z.record(z.string(), z.number()).safeParse({ [key]: 'x' })
+          .error as z.ZodError;
+        expect(formatZodErrorMessage(error)).toBe(
+          `${'k'.repeat(1_024)}…: Invalid input: expected number, received string`,
+        );
+      });
+
+      it('carries a long message whole, an author’s refinement echoing the caller’s value included', () => {
+        const value = 'v'.repeat(5_000);
+        const schema = z.object({
+          recid: z.string().superRefine((recid, ctx) => {
+            ctx.addIssue({ code: 'custom', message: `${recid} is not a recid.` });
+          }),
+        });
+        const error = schema.safeParse({ recid: value }).error as z.ZodError;
+        expect(formatZodErrorMessage(error)).toBe(`recid: ${value} is not a recid.`);
+      });
+
+      it('carries a 250-option enum’s message whole, every valid option listed', () => {
+        const options = Array.from({ length: 250 }, (_, i) => `C${String(i).padStart(3, '0')}`);
+        const schema = z.object({ code: z.enum(options as [string, ...string[]]) });
+        const error = schema.safeParse({ code: 'nope' }).error as z.ZodError;
+        const message = error.issues[0]?.message ?? '';
+        expect(message.length).toBeGreaterThan(1_024);
+        expect(message).toContain('"C249"');
+
+        expect(formatZodErrorMessage(error)).toBe(`code: ${message}`);
+      });
+
+      it('keeps ` (+N more)` whole after a cut path', () => {
+        const summary = formatZodErrorMessage(issuesAt(['k'.repeat(5_000)], 'Rejected.', 9_999));
+        expect(summary).toBe(`${'k'.repeat(1_024)}…: Rejected. (+9999 more)`);
+      });
+
+      it('carries a root-level issue’s long bare message whole', () => {
+        const message = 'm'.repeat(2_000);
+        expect(formatZodErrorMessage(issuesAt([], message))).toBe(message);
+      });
+
+      it('never splits a surrogate pair at the path cut', () => {
+        // 1,023 characters put the emoji's high half at index 1,023, the last one kept.
+        const key = `${'x'.repeat(1_023)}😀${'y'.repeat(100)}`;
+        const summary = formatZodErrorMessage(issuesAt([key], 'Rejected.', 1));
+        expect(summary).toBe(`${'x'.repeat(1_023)}…: Rejected. (+1 more)`);
+        expect(loneSurrogate(summary)).toBe(false);
+
+        // One character earlier, the whole pair fits.
+        const fits = formatZodErrorMessage(
+          issuesAt([`${'x'.repeat(1_022)}😀${'y'.repeat(9)}`], 'Rejected.'),
+        );
+        expect(fits).toBe(`${'x'.repeat(1_022)}😀…: Rejected.`);
+        expect(loneSurrogate(fits)).toBe(false);
+      });
+
+      it('cuts a path many levels deep, the second issue still counted', () => {
+        const Tree: z.ZodType = z.lazy(() =>
+          z.object({ value: z.number().optional(), child: Tree.optional() }),
+        );
+        let node: unknown = { value: 'x', child: 5 };
+        for (let level = 0; level < 300; level++) node = { child: node };
+        const error = Tree.safeParse(node).error as z.ZodError;
+        const path = `${'child.'.repeat(300)}value`;
+
+        const summary = formatZodErrorMessage(error);
+        expect(summary).toBe(
+          `${path.slice(0, 1_024)}…: Invalid input: expected number, received string (+1 more)`,
+        );
+      });
+    });
   });
 
   // ─── extractErrorCauseChain ──────────────────────────────────────────────────
