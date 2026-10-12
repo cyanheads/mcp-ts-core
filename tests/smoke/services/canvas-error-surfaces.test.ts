@@ -9,7 +9,7 @@
  * @module tests/smoke/canvas-error-surfaces.test
  */
 
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -51,6 +51,9 @@ const CASES = [
   'sql_execution_error',
   'sql_parse_error',
   'sql_read_only',
+  'sql_read_only_outside_path',
+  'sql_read_only_file_reference',
+  'denied_function_setting_read',
 ] as const;
 
 type ProbeCase = (typeof CASES)[number];
@@ -58,6 +61,8 @@ type ProbeCase = (typeof CASES)[number];
 let canvas: DataCanvas;
 let provider: DuckdbProvider;
 let exportRoot: string;
+let outsideDir: string;
+let outsideFile: string;
 let workspace: CanvasInstance;
 let importSource: CanvasInstance;
 
@@ -87,7 +92,7 @@ const canvasProbe = tool('canvas_probe', {
       case 'denied_function':
         await workspace.query("SELECT * FROM read_json('/etc/passwd')");
         break;
-      // DuckDB never plans a statement that reaches layer 4 with a write
+      // DuckDB never plans a statement that reaches layer 5 with a write
       // operator or a file-reading function — the statement-type layer rejects
       // it first — so these two run the real gate over a plan fixture.
       case 'denied_function_in_plan':
@@ -131,10 +136,25 @@ const canvasProbe = tool('canvas_probe', {
             'TransactionContext Error: Cannot write to database "memory" - transaction is launched in read-only mode',
           ),
         );
+      // The engine refuses a path outside the export root and scratch
+      // directory while preparing, before the plan walk runs.
+      case 'sql_read_only_outside_path':
+        await workspace.query(`SELECT * FROM '${outsideFile}'`);
+        break;
+      // The engine may read under the export root; the gate refuses the file.
+      case 'sql_read_only_file_reference':
+        await workspace.query(`DESCRIBE '${join(exportRoot, 'inside.csv')}'`);
+        break;
+      case 'denied_function_setting_read':
+        await workspace.query(`SELECT current_setting('temp_directory') AS v`);
+        break;
     }
     return { unreachable: true };
   },
 });
+
+const SQL_READ_ONLY_HINT =
+  "Send a read-only SELECT over the staged tables — list them with this server's dataframe-describe tool. This surface reads no files and cannot create, alter, or drop anything.";
 
 /** Expected `data.reason` and `data.recovery.hint` for each probe. */
 const EXPECTED: Record<ProbeCase, { hint: string; reason: string }> = {
@@ -152,7 +172,11 @@ const EXPECTED: Record<ProbeCase, { hint: string; reason: string }> = {
   },
   denied_function: {
     reason: 'denied_function',
-    hint: 'Remove the file-reading or external-data function — only the staged tables are queryable.',
+    hint: 'Remove the function the message names — only the staged tables are queryable.',
+  },
+  denied_function_setting_read: {
+    reason: 'denied_function',
+    hint: 'Remove the function the message names — only the staged tables are queryable.',
   },
   denied_function_in_plan: {
     reason: 'denied_function_in_plan',
@@ -196,7 +220,15 @@ const EXPECTED: Record<ProbeCase, { hint: string; reason: string }> = {
   },
   sql_read_only: {
     reason: 'sql_read_only',
-    hint: 'Send a read-only SELECT — this surface cannot create, alter, or drop anything.',
+    hint: SQL_READ_ONLY_HINT,
+  },
+  sql_read_only_outside_path: {
+    reason: 'sql_read_only',
+    hint: SQL_READ_ONLY_HINT,
+  },
+  sql_read_only_file_reference: {
+    reason: 'sql_read_only',
+    hint: SQL_READ_ONLY_HINT,
   },
 };
 
@@ -221,6 +253,10 @@ function renderedText(result: CallToolResult): string {
 describe('canvas · error surfaces (#299, #451)', () => {
   beforeAll(async () => {
     exportRoot = await mkdtemp(join(tmpdir(), 'canvas-error-surfaces-'));
+    await writeFile(join(exportRoot, 'inside.csv'), 'label,n\nINSIDE,1\n');
+    outsideDir = await mkdtemp(join(tmpdir(), 'canvas-error-surfaces-outside-'));
+    outsideFile = join(outsideDir, 'outside.csv');
+    await writeFile(outsideFile, 'label,n\nOUTSIDE,1\n');
     provider = new DuckdbProvider({
       memoryLimitMb: 256,
       exportRootPath: exportRoot,
@@ -243,6 +279,7 @@ describe('canvas · error surfaces (#299, #451)', () => {
   afterAll(async () => {
     if (canvas) await canvas.shutdown(ctx);
     await rm(exportRoot, { recursive: true, force: true });
+    await rm(outsideDir, { recursive: true, force: true });
   });
 
   it.each(CASES)('%s carries its recovery hint on both client surfaces', async (probe) => {

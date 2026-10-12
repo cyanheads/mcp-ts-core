@@ -8,13 +8,15 @@
  */
 
 import { existsSync } from 'node:fs';
-import { mkdtemp, readdir, readFile, rm } from 'node:fs/promises';
+import { mkdtemp, readdir, readFile, realpath, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { basename, join, sep } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { DuckDBConnection, DuckDBInstance } from '@duckdb/node-api';
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 
+import type { CanvasInstance } from '@/services/canvas/core/CanvasInstance.js';
 import { CanvasRegistry } from '@/services/canvas/core/CanvasRegistry.js';
 import { DataCanvas } from '@/services/canvas/core/DataCanvas.js';
 import {
@@ -597,6 +599,40 @@ describe('canvas · DuckDB round trip', () => {
     expect((mcpErr.data as { reason?: string } | undefined)?.reason).toBe('non_select_statement');
   });
 
+  // The parse-tree layer fails closed: a SELECT the serializer reports it
+  // cannot represent is refused, never run unchecked. No statement that
+  // prepares as one SELECT does this on DuckDB v1.5.6, so the serializer's
+  // error shape is substituted for its answer on the canvas's own connection.
+  it('refuses a SELECT whose parse tree the engine cannot serialize', async () => {
+    const instance = await canvas.acquire(undefined, ctx);
+    await instance.registerTable('t', [{ x: 1 }]);
+    // biome-ignore lint/complexity/useLiteralKeys: deliberate access to the private record to substitute one engine answer.
+    const connection = provider['canvases'].get(instance.canvasId)!.controlConnection;
+    const runAndReadAll = connection.runAndReadAll.bind(connection);
+    const serialize = vi
+      .spyOn(connection, 'runAndReadAll')
+      .mockImplementation((sql, ...rest) =>
+        sql.startsWith('SELECT json_serialize_sql(')
+          ? runAndReadAll(
+              `SELECT '{"error":true,"error_type":"not implemented","error_message":"x"}' AS tree`,
+            )
+          : runAndReadAll(sql, ...rest),
+      );
+    try {
+      await expect(instance.query('SELECT x FROM t')).rejects.toMatchObject({
+        code: JsonRpcErrorCode.ValidationError,
+        data: { reason: 'non_select_statement' },
+      });
+      expect(serialize).toHaveBeenCalledWith(
+        expect.stringMatching(/^SELECT json_serialize_sql\(/),
+        ['SELECT x FROM t'],
+      );
+    } finally {
+      serialize.mockRestore();
+    }
+    expect((await instance.query('SELECT x FROM t')).rows).toEqual([{ x: '1' }]);
+  });
+
   // Issue #210 — pragma_* TVF bypass: SELECT * FROM pragma_table_info('t')
   // must be rejected before executing.
   it('issue #210 — pragma_* table function is denied by the gate', async () => {
@@ -918,6 +954,93 @@ describe('canvas · DuckDB round trip', () => {
     });
   });
 
+  // A server learns the column types of a caller's (already-gated) SQL by
+  // describing it through query() over a string literal. The literal is gated
+  // as its own statement, so the metadata query runs where a computed string
+  // would not.
+  describe('column types of a caller query through query() over a literal', () => {
+    /** The metadata query a dataframe-query tool runs after the caller's SQL. */
+    const columnTypesSql = (callerSql: string) =>
+      `SELECT list(column_type) AS column_types FROM (DESCRIBE SELECT * FROM query('${callerSql.replaceAll("'", "''")}'))`;
+
+    // One canvas for the block: the suite shares a 100-canvas tenant cap.
+    let staged: Promise<CanvasInstance> | undefined;
+    function stagedInstance() {
+      staged ??= canvas.acquire(undefined, ctx).then(async (instance) => {
+        await instance.registerTable('scores', [
+          { id: 1, name: "o'brien", score: 0.5 },
+          { id: 2, name: 'beta', score: 0.75 },
+        ]);
+        return instance;
+      });
+      return staged;
+    }
+
+    /** The same metadata query run on the control connection, past the gate. */
+    async function ungatedColumnTypes(canvasId: string, callerSql: string) {
+      // biome-ignore lint/complexity/useLiteralKeys: deliberate access to the private record to run the oracle query outside the gate.
+      const record = provider['canvases'].get(canvasId)!;
+      const reader = await record.controlConnection.runAndReadAll(columnTypesSql(callerSql));
+      return reader.getRowObjectsJson();
+    }
+
+    it.each([
+      [
+        'a CTE with a window function, a trailing semicolon, and a line comment',
+        'WITH ranked AS (SELECT id, name, score FROM scores) SELECT name, score, row_number() OVER (ORDER BY score DESC) AS rn FROM ranked; -- top scores',
+        ['VARCHAR', 'DOUBLE', 'BIGINT'],
+      ],
+      [
+        'a quote doubled into the literal',
+        `SELECT name, 'it''s' AS note FROM scores WHERE name <> 'o''brien'`,
+        ['VARCHAR', 'VARCHAR'],
+      ],
+      [
+        'duplicate column names',
+        'SELECT id, id, score AS id FROM scores',
+        ['BIGINT', 'BIGINT', 'DOUBLE'],
+      ],
+      ['an empty result', 'SELECT id, name FROM scores WHERE false', ['BIGINT', 'VARCHAR']],
+    ])('returns the column types of %s', async (_label, callerSql, types) => {
+      const instance = await stagedInstance();
+      await instance.query(callerSql);
+
+      const result = await instance.query(columnTypesSql(callerSql));
+
+      expect(result.rows).toEqual([{ column_types: types }]);
+      expect(result.rows).toEqual(await ungatedColumnTypes(instance.canvasId, callerSql));
+    });
+
+    it('admits the metadata query as a view and through registerAs', async () => {
+      const instance = await stagedInstance();
+      const sql = columnTypesSql('SELECT id, name FROM scores');
+
+      await instance.registerView('scores_types_v', sql);
+      expect((await instance.query('SELECT column_types FROM scores_types_v')).rows).toEqual([
+        { column_types: ['BIGINT', 'VARCHAR'] },
+      ]);
+
+      await instance.query(sql, { registerAs: 'scores_types_t' });
+      expect((await instance.query('SELECT column_types FROM scores_types_t')).rows).toEqual([
+        { column_types: ['BIGINT', 'VARCHAR'] },
+      ]);
+    });
+
+    it('surfaces a caller mistake inside the literal as invalid_sql', async () => {
+      const instance = await stagedInstance();
+      await expect(
+        instance.query(columnTypesSql('SELECT nosuch_col FROM scores')),
+      ).rejects.toMatchObject({ data: { reason: 'invalid_sql' } });
+    });
+
+    it('surfaces a missing table inside the literal as missing_table', async () => {
+      const instance = await stagedInstance();
+      await expect(
+        instance.query(columnTypesSql('SELECT * FROM no_such_table')),
+      ).rejects.toMatchObject({ data: { reason: 'missing_table' } });
+    });
+  });
+
   // Issue #224 — denySystemCatalogs: when set, the gate rejects catalog
   // references at the text-scan layer (system_catalog_access). Without the
   // flag, catalog queries still fail at the plan walk, but with a different
@@ -1044,6 +1167,62 @@ describe('canvas · DuckDB round trip', () => {
       { name: 'autoinstall_known_extensions', value: 'false' },
       { name: 'autoload_known_extensions', value: 'false' },
     ]);
+  });
+
+  // The engine reads and writes only under the export root and the canvas's
+  // scratch directory, and nothing reachable from SQL can widen that.
+  describe('engine file access', () => {
+    /** Ungated engine settings of a fresh canvas, read on its control connection. */
+    async function settingsOf(canvasId: string) {
+      // biome-ignore lint/complexity/useLiteralKeys: deliberate access to the private record to read engine settings outside the gate.
+      const record = provider['canvases'].get(canvasId)!;
+      const reader = await record.controlConnection.runAndReadAll(
+        `SELECT current_setting('enable_external_access') AS external_access,
+                current_setting('lock_configuration') AS locked,
+                current_setting('allowed_directories') AS allowed`,
+      );
+      return { record, settings: reader.getRowObjectsJson()[0]! };
+    }
+
+    it('creates every canvas with external access off, its directories allow-listed, and configuration locked', async () => {
+      const instance = await canvas.acquire(undefined, ctx);
+      const { record, settings } = await settingsOf(instance.canvasId);
+
+      expect(settings.external_access).toBe(false);
+      expect(settings.locked).toBe(true);
+      // DuckDB stores each entry canonicalized: symlinks resolved, trailing separator added.
+      const exportDir = `${await realpath(exportRoot)}${sep}`;
+      const scratchDir = `${await realpath(record.scratchDir)}${sep}`;
+      const allowed = settings.allowed as string[];
+      expect(allowed).toContain(exportDir);
+      expect(allowed).toContain(scratchDir);
+      // The only other entry is DuckDB's own: the canvas's spill directory, inside the scratch directory.
+      expect(allowed.filter((dir) => dir !== exportDir && dir !== scratchDir)).toEqual([
+        `${scratchDir}${basename(record.spillDir)}${sep}`,
+      ]);
+    });
+
+    it.each([
+      ['re-enabling external access', 'SET enable_external_access = true'],
+      ['widening the allow-list', `SET allowed_directories = ['/']`],
+      ['raising the memory limit', `SET memory_limit = '4GB'`],
+      ['moving the spill directory', `SET temp_directory = '/'`],
+      ['resetting the lock', 'RESET lock_configuration'],
+    ])('refuses %s, even on a connection the gate never sees', async (_label, statement) => {
+      const instance = await canvas.acquire(undefined, ctx);
+      // biome-ignore lint/complexity/useLiteralKeys: deliberate access to the private record to run a statement outside the gate.
+      const record = provider['canvases'].get(instance.canvasId)!;
+      const connection = await record.instance.connect();
+      try {
+        await expect(connection.run(statement)).rejects.toThrow(
+          /^Invalid Input Error: Cannot change configuration option "\w+" - the configuration has been locked/,
+        );
+      } finally {
+        connection.closeSync();
+      }
+      const { settings } = await settingsOf(instance.canvasId);
+      expect(settings).toMatchObject({ external_access: false, locked: true });
+    });
   });
 
   // dataTypeToColumnType round-trip — every ColumnType tag maps to and from
@@ -1311,4 +1490,387 @@ describe('canvas · query cancellation', () => {
     expect((failure as McpError).code).toBe(JsonRpcErrorCode.Timeout);
     expect((failure as McpError).data?.reason).toBe('cancelled');
   }, 120_000);
+
+  it('interrupts a running registerAs, leaves no table, and keeps the canvas answering', async () => {
+    const before = await spilledFiles();
+    const controller = new AbortController();
+    const outcome = cancelProvider
+      .query(
+        'cancelq001',
+        'SELECT a.x AS a, b.x AS b, c.x AS c FROM big a, big b, big c ORDER BY a DESC, b DESC, c DESC',
+        ctx,
+        { signal: controller.signal, registerAs: 'kept' },
+      )
+      .then(
+        () => undefined,
+        (err: unknown) => err,
+      );
+
+    while ((await spilledFiles()) <= before) await delay(20);
+    controller.abort();
+
+    const failure = await outcome;
+    expect(failure).toBeInstanceOf(McpError);
+    expect((failure as McpError).code).toBe(JsonRpcErrorCode.Timeout);
+    expect((failure as McpError).data?.reason).toBe('cancelled');
+    expect((failure as McpError).message).toBe('Canvas query was cancelled.');
+    expect(await cancelProvider.describe('cancelq001', ctx, { tableName: 'kept' })).toEqual([]);
+    const followUp = await cancelProvider.query(
+      'cancelq001',
+      'SELECT count(*) AS n FROM big',
+      ctx,
+      {
+        signal: new AbortController().signal,
+      },
+    );
+    expect(followUp.rows).toEqual([{ n: '2000' }]);
+  }, 120_000);
+});
+
+// An abort that lands before the engine starts executing — before the call,
+// while the read-only gate runs, or between preparing the statement and
+// running it — rejects the same way an abort mid-execution does, instead of
+// being dropped while the query runs to completion (#662). The three-way cross
+// join takes seconds; every aborted call must reject well inside that, and the
+// baseline is measured on the same machine and load rather than hardcoded.
+describe('canvas · cancellation before execution', () => {
+  const CROSS_JOIN = 'SELECT sum(a.x * b.x * c.x) AS s FROM t a, t b, t c';
+  let exportRoot: string;
+  let provider: DuckdbProvider;
+  let baselineMs: number;
+  /** Per-call connections the provider opened after setup, and those it closed. */
+  const opened = new Set<DuckDBConnection>();
+  const closed = new Set<DuckDBConnection>();
+  /** When set, called with each statement a per-call connection has prepared, before it runs. */
+  let onPrepared: ((sql: string) => void) | undefined;
+
+  beforeAll(async () => {
+    exportRoot = await mkdtemp(join(tmpdir(), 'canvas-smoke-early-abort-'));
+    provider = new DuckdbProvider({
+      memoryLimitMb: 256,
+      exportRootPath: exportRoot,
+      defaultRowLimit: 100,
+      schemaSniffRows: 10,
+    });
+    await provider.initCanvas('earlyab001', ctx);
+    await provider.initCanvas('earlyab002', ctx);
+    await provider.registerTable(
+      'earlyab001',
+      't',
+      Array.from({ length: 1_500 }, (_, x) => ({ x })),
+      ctx,
+    );
+    await provider.registerTable('earlyab001', 'small', [{ x: 1 }, { x: 2 }, { x: 3 }], ctx);
+
+    const started = performance.now();
+    const unaborted = await provider.query('earlyab001', CROSS_JOIN, ctx, {
+      signal: new AbortController().signal,
+    });
+    baselineMs = performance.now() - started;
+    expect(unaborted.rowCount).toBe(1);
+
+    // Installed after setup, so the canvases' control connections stay out.
+    const originalConnect = DuckDBInstance.prototype.connect;
+    vi.spyOn(DuckDBInstance.prototype, 'connect').mockImplementation(async function (
+      this: DuckDBInstance,
+    ) {
+      const connection = await originalConnect.call(this);
+      opened.add(connection);
+      return connection;
+    });
+    const originalClose = DuckDBConnection.prototype.closeSync;
+    vi.spyOn(DuckDBConnection.prototype, 'closeSync').mockImplementation(function (
+      this: DuckDBConnection,
+    ) {
+      closed.add(this);
+      originalClose.call(this);
+    });
+    const originalExtract = DuckDBConnection.prototype.extractStatements;
+    vi.spyOn(DuckDBConnection.prototype, 'extractStatements').mockImplementation(async function (
+      this: DuckDBConnection,
+      sql: string,
+    ) {
+      const extracted = await originalExtract.call(this, sql);
+      const hook = onPrepared;
+      if (hook && opened.has(this)) {
+        const prepare = extracted.prepare.bind(extracted);
+        extracted.prepare = async (index: number) => {
+          const prepared = await prepare(index);
+          hook(sql);
+          return prepared;
+        };
+      }
+      return extracted;
+    });
+  }, 120_000);
+
+  afterAll(async () => {
+    vi.restoreAllMocks();
+    await provider?.shutdown();
+    await rm(exportRoot, { recursive: true, force: true });
+  });
+
+  /** How `run` settled, and how long it took. */
+  async function settle(run: () => Promise<unknown>): Promise<{ error: unknown; ms: number }> {
+    const started = performance.now();
+    try {
+      await run();
+      return { error: undefined, ms: performance.now() - started };
+    } catch (error) {
+      return { error, ms: performance.now() - started };
+    }
+  }
+
+  function expectCancelled(error: unknown, message: string): void {
+    expect(error).toBeInstanceOf(McpError);
+    expect((error as McpError).code).toBe(JsonRpcErrorCode.Timeout);
+    expect((error as McpError).data?.reason).toBe('cancelled');
+    expect((error as McpError).message).toBe(message);
+  }
+
+  async function tableNames(canvasId: string): Promise<string[]> {
+    return (await provider.describe(canvasId, ctx)).map((table) => table.name).sort();
+  }
+
+  it('measures a cross join that runs for seconds unaborted', () => {
+    expect(baselineMs).toBeGreaterThan(1_000);
+  });
+
+  it('rejects an already-aborted query as cancelled without running it', async () => {
+    const controller = new AbortController();
+    controller.abort();
+    const { error, ms } = await settle(() =>
+      provider.query('earlyab001', CROSS_JOIN, ctx, { signal: controller.signal }),
+    );
+    expectCancelled(error, 'Canvas query was cancelled.');
+    expect(ms).toBeLessThan(baselineMs / 4);
+  });
+
+  it('rejects a query aborted in a microtask after the call', async () => {
+    const controller = new AbortController();
+    const outcome = settle(() =>
+      provider.query('earlyab001', CROSS_JOIN, ctx, { signal: controller.signal }),
+    );
+    queueMicrotask(() => controller.abort());
+    const { error, ms } = await outcome;
+    expectCancelled(error, 'Canvas query was cancelled.');
+    expect(ms).toBeLessThan(baselineMs / 4);
+  }, 60_000);
+
+  it('rejects a query aborted while the read-only gate runs', async () => {
+    const controller = new AbortController();
+    const originalRead = DuckDBConnection.prototype.runAndReadAll;
+    const gateSpy = vi
+      .spyOn(DuckDBConnection.prototype, 'runAndReadAll')
+      .mockImplementation(async function (this: DuckDBConnection, ...args) {
+        const reader = await originalRead.apply(this, args);
+        if (args[0].includes('json_serialize_sql')) controller.abort();
+        return reader;
+      });
+    try {
+      const { error, ms } = await settle(() =>
+        provider.query('earlyab001', CROSS_JOIN, ctx, { signal: controller.signal }),
+      );
+      expect(controller.signal.aborted).toBe(true);
+      expectCancelled(error, 'Canvas query was cancelled.');
+      expect(ms).toBeLessThan(baselineMs / 4);
+    } finally {
+      gateSpy.mockRestore();
+    }
+  }, 60_000);
+
+  it('rejects a query aborted after its statement is prepared but before the engine runs it', async () => {
+    const controller = new AbortController();
+    onPrepared = (sql) => {
+      if (sql === CROSS_JOIN) controller.abort();
+    };
+    try {
+      const { error, ms } = await settle(() =>
+        provider.query('earlyab001', CROSS_JOIN, ctx, { signal: controller.signal }),
+      );
+      expect(controller.signal.aborted).toBe(true);
+      expectCancelled(error, 'Canvas query was cancelled.');
+      expect(ms).toBeLessThan(baselineMs / 4);
+    } finally {
+      onPrepared = undefined;
+    }
+  }, 60_000);
+
+  it('rejects a registerAs aborted after its CTAS is prepared but before it runs, leaving no table', async () => {
+    const controller = new AbortController();
+    onPrepared = (sql) => {
+      if (sql.startsWith('CREATE TABLE')) controller.abort();
+    };
+    try {
+      const { error, ms } = await settle(() =>
+        provider.query('earlyab001', CROSS_JOIN, ctx, {
+          signal: controller.signal,
+          registerAs: 'early_ctas',
+        }),
+      );
+      expect(controller.signal.aborted).toBe(true);
+      expectCancelled(error, 'Canvas query was cancelled.');
+      expect(ms).toBeLessThan(baselineMs / 4);
+    } finally {
+      onPrepared = undefined;
+    }
+    expect(await tableNames('earlyab001')).toEqual(['small', 't']);
+  }, 60_000);
+
+  it('drops the registerAs table when the abort lands after the CTAS has created it', async () => {
+    const controller = new AbortController();
+    onPrepared = (sql) => {
+      if (sql.startsWith('SELECT COUNT(*)')) controller.abort();
+    };
+    try {
+      const { error } = await settle(() =>
+        provider.query('earlyab001', 'SELECT x FROM small', ctx, {
+          signal: controller.signal,
+          registerAs: 'late_ctas',
+        }),
+      );
+      expect(controller.signal.aborted).toBe(true);
+      expectCancelled(error, 'Canvas query was cancelled.');
+    } finally {
+      onPrepared = undefined;
+    }
+    expect(await tableNames('earlyab001')).toEqual(['small', 't']);
+  });
+
+  it('rejects a registerAs aborted in a microtask after the call and leaves no table', async () => {
+    const controller = new AbortController();
+    const outcome = settle(() =>
+      provider.query('earlyab001', CROSS_JOIN, ctx, {
+        signal: controller.signal,
+        registerAs: 'early_ctas',
+      }),
+    );
+    queueMicrotask(() => controller.abort());
+    const { error, ms } = await outcome;
+    expectCancelled(error, 'Canvas query was cancelled.');
+    expect(ms).toBeLessThan(baselineMs / 4);
+    expect(await tableNames('earlyab001')).toEqual(['small', 't']);
+  }, 60_000);
+
+  it('rejects registerView aborted before the call or during the gate, and registers nothing', async () => {
+    const already = new AbortController();
+    already.abort();
+    const before = await settle(() =>
+      provider.registerView('earlyab001', 'early_view', 'SELECT x FROM small', ctx, {
+        signal: already.signal,
+      }),
+    );
+    expectCancelled(before.error, 'Canvas view registration was cancelled.');
+
+    const controller = new AbortController();
+    const originalRead = DuckDBConnection.prototype.runAndReadAll;
+    const gateSpy = vi
+      .spyOn(DuckDBConnection.prototype, 'runAndReadAll')
+      .mockImplementation(async function (this: DuckDBConnection, ...args) {
+        const reader = await originalRead.apply(this, args);
+        if (args[0].includes('json_serialize_sql')) controller.abort();
+        return reader;
+      });
+    try {
+      const during = await settle(() =>
+        provider.registerView('earlyab001', 'early_view', 'SELECT x FROM small', ctx, {
+          signal: controller.signal,
+        }),
+      );
+      expect(controller.signal.aborted).toBe(true);
+      expectCancelled(during.error, 'Canvas view registration was cancelled.');
+    } finally {
+      gateSpy.mockRestore();
+    }
+    expect(await tableNames('earlyab001')).toEqual(['small', 't']);
+  });
+
+  it('rejects an export aborted before the call or in a microtask after it, writing nothing', async () => {
+    const already = new AbortController();
+    already.abort();
+    const before = await settle(() =>
+      provider.export('earlyab001', 'small', { format: 'csv', path: 'early-before.csv' }, ctx, {
+        signal: already.signal,
+      }),
+    );
+    expectCancelled(before.error, 'Canvas export was cancelled.');
+
+    const controller = new AbortController();
+    const outcome = settle(() =>
+      provider.export('earlyab001', 'small', { format: 'csv', path: 'early-micro.csv' }, ctx, {
+        signal: controller.signal,
+      }),
+    );
+    queueMicrotask(() => controller.abort());
+    expectCancelled((await outcome).error, 'Canvas export was cancelled.');
+    expect(existsSync(join(exportRoot, 'early-before.csv'))).toBe(false);
+    expect(existsSync(join(exportRoot, 'early-micro.csv'))).toBe(false);
+  });
+
+  it('rejects importFrom aborted before the call or in a microtask after it, importing nothing', async () => {
+    const already = new AbortController();
+    already.abort();
+    const before = await settle(() =>
+      provider.importFrom('earlyab002', 'earlyab001', 'small', 'imported', ctx, {
+        signal: already.signal,
+      }),
+    );
+    expectCancelled(before.error, 'Canvas import was cancelled.');
+
+    const controller = new AbortController();
+    const outcome = settle(() =>
+      provider.importFrom('earlyab002', 'earlyab001', 'small', 'imported', ctx, {
+        signal: controller.signal,
+      }),
+    );
+    queueMicrotask(() => controller.abort());
+    expectCancelled((await outcome).error, 'Canvas import was cancelled.');
+    expect(await tableNames('earlyab002')).toEqual([]);
+  });
+
+  it('closes every per-call connection and still answers each entry point un-aborted', async () => {
+    const signal = new AbortController().signal;
+    const result = await provider.query('earlyab001', 'SELECT x FROM small ORDER BY x', ctx, {
+      signal,
+    });
+    // Sniffed as BIGINT, which DuckDB returns as a string.
+    expect(result.rows).toEqual([{ x: '1' }, { x: '2' }, { x: '3' }]);
+    const registered = await provider.query('earlyab001', 'SELECT x * 10 AS y FROM small', ctx, {
+      signal,
+      registerAs: 'scaled',
+    });
+    expect(registered).toMatchObject({ tableName: 'scaled', rowCount: 3, columns: ['y'] });
+    const view = await provider.registerView(
+      'earlyab001',
+      'small_view',
+      'SELECT x FROM small',
+      ctx,
+      {
+        signal,
+      },
+    );
+    expect(view.viewName).toBe('small_view');
+    const exported = await provider.export(
+      'earlyab001',
+      'scaled',
+      { format: 'csv', path: 'scaled.csv' },
+      ctx,
+      { signal },
+    );
+    expect(exported.rowCount).toBe(3);
+    const imported = await provider.importFrom(
+      'earlyab002',
+      'earlyab001',
+      'scaled',
+      'scaled',
+      ctx,
+      {
+        signal,
+      },
+    );
+    expect(imported).toMatchObject({ tableName: 'scaled', rowCount: 3 });
+
+    expect(opened.size).toBeGreaterThan(0);
+    expect([...opened].filter((connection) => !closed.has(connection))).toEqual([]);
+  });
 });

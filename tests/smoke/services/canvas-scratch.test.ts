@@ -1,8 +1,10 @@
 /**
  * @fileoverview Scratch I/O of the DuckDB canvas provider against real DuckDB
  * and the real filesystem: where spill files, stream-export staging, and
- * `importFrom` staging land, and that the canvas lifecycle leaves none of it
- * behind (#554, #561). Every provider here gets its scratch parent from a
+ * `importFrom` staging land, that the canvas lifecycle leaves none of it
+ * behind (#554, #561), and that each of them keeps working with the engine
+ * confined to the export root and the scratch directory, a symlinked export
+ * root included. Every provider here gets its scratch parent from a
  * throwaway `mkdtemp` directory, and the default-root case points `TMPDIR` at
  * one, so no test reads or writes the shared OS temp root.
  * @module tests/smoke/services/canvas-scratch.test
@@ -106,6 +108,31 @@ async function readBack(provider: DuckdbProvider, canvasId: string, tag: string)
     ctx,
   );
   return result.rows[0];
+}
+
+/** A canvas's `enable_external_access`, read on its control connection outside the gate. */
+async function externalAccessOf(provider: DuckdbProvider, canvasId: string): Promise<unknown> {
+  // biome-ignore lint/complexity/useLiteralKeys: deliberate access to the private record to read an engine setting outside the gate.
+  const record = provider['canvases'].get(canvasId)!;
+  const reader = await record.controlConnection.runAndReadAll(
+    `SELECT current_setting('enable_external_access') AS v`,
+  );
+  return reader.getRowObjectsJson()[0]?.v;
+}
+
+/** The `id`/`label` rows of an exported file, read back by a default DuckDB instance. */
+async function rowsInFile(path: string): Promise<{ id: number; label: string }[]> {
+  const plain = await DuckDBInstance.create(':memory:');
+  const connection = await plain.connect();
+  try {
+    const reader = await connection.runAndReadAll(
+      `SELECT id::INTEGER AS id, label FROM '${path}' ORDER BY id`,
+    );
+    return reader.getRowObjectsJson() as { id: number; label: string }[];
+  } finally {
+    connection.closeSync();
+    plain.closeSync();
+  }
 }
 
 /** Every regular file (and symlink) under `dir`, as paths relative to it. */
@@ -367,6 +394,104 @@ describe('canvas · DuckDB scratch I/O', () => {
     await second.shutdown();
     expect(await readdir(parent)).toEqual([]);
   }, 60_000);
+
+  // The engine reads and writes only under the export root and the scratch
+  // directory; spilling is the scratch directory's busiest use, so a query
+  // past memory_limit must still spill there and read back exactly.
+  it('a query past memory_limit spills on a canvas with external access off and reads back exactly', async () => {
+    const { parent, provider } = await makeProvider({ memoryLimitMb: SPILL_MEMORY_LIMIT_MB });
+    await provider.initCanvas('hardspill1', ctx);
+    expect(await externalAccessOf(provider, 'hardspill1')).toBe(false);
+
+    await stageSpilling(provider, 'hardspill1', 'AAA');
+    const doubled = await provider.query('hardspill1', 'SELECT i, pad || pad AS p FROM t', ctx, {
+      registerAs: 'doubled',
+      preview: 0,
+    });
+    const [scratch = ''] = await privateDirsUnder(parent);
+    const [spillDir = '', ...otherSpillDirs] = await subdirsOf(scratch);
+    const spilled = await readdir(join(scratch, spillDir));
+
+    expect(doubled.rowCount).toBe(SPILL_ROWS);
+    expect(await readBack(provider, 'hardspill1', 'AAA')).toEqual(EXACT_READBACK);
+    const doubledBack = await provider.query(
+      'hardspill1',
+      'SELECT count(*) AS n, sum(i) AS s, min(length(p)) AS shortest, max(length(p)) AS longest FROM doubled',
+      ctx,
+    );
+    expect(doubledBack.rows[0]).toEqual({
+      n: '400000',
+      s: '79999800000',
+      shortest: '128',
+      longest: '128',
+    });
+    expect(otherSpillDirs).toEqual([]);
+    expect(spilled.some((name) => name.startsWith('duckdb_temp_storage_'))).toBe(true);
+
+    await provider.destroyCanvas('hardspill1', ctx);
+    expect(await subdirsOf(scratch)).toEqual([]);
+  }, 60_000);
+
+  // A symlinked CANVAS_EXPORT_PATH, as /tmp and /var are on macOS: the engine
+  // reaches the export root through the link and every write lands under it.
+  it.skipIf(!IS_POSIX)(
+    'path exports, stream exports, and importFrom succeed under a symlinked export root',
+    async () => {
+      const parent = await throwaway();
+      const realRoot = join(parent, 'real-exports');
+      await mkdir(realRoot);
+      await symlink(realRoot, join(parent, 'exports'));
+      const { provider } = await makeProvider({ parent });
+      await provider.initCanvas('linkexport', ctx);
+      await provider.initCanvas('linkimport', ctx);
+      await provider.registerTable(
+        'linkexport',
+        'export_me',
+        [
+          { id: 1, label: 'alpha' },
+          { id: 2, label: 'beta' },
+        ],
+        ctx,
+      );
+
+      for (const format of ['csv', 'parquet', 'json'] as const) {
+        const result = await provider.export(
+          'linkexport',
+          'export_me',
+          { format, path: `out.${format}` },
+          ctx,
+        );
+        expect(result).toMatchObject({ format, rowCount: 2 });
+        expect(await rowsInFile(join(realRoot, `out.${format}`))).toEqual([
+          { id: 1, label: 'alpha' },
+          { id: 2, label: 'beta' },
+        ]);
+      }
+
+      const csv = collectingStream();
+      await provider.export('linkexport', 'export_me', { format: 'csv', stream: csv.stream }, ctx);
+      expect(csv.text()).toBe('id,label\n1,alpha\n2,beta\n');
+      const json = collectingStream();
+      await provider.export(
+        'linkexport',
+        'export_me',
+        { format: 'json', stream: json.stream },
+        ctx,
+      );
+      expect(json.text()).toBe('{"id":1,"label":"alpha"}\n{"id":2,"label":"beta"}\n');
+
+      await provider.importFrom('linkimport', 'linkexport', 'export_me', 'copied', ctx);
+      const imported = await provider.query(
+        'linkimport',
+        'SELECT id, label FROM copied ORDER BY id',
+        ctx,
+      );
+      expect(imported.rows).toEqual([
+        { id: '1', label: 'alpha' },
+        { id: '2', label: 'beta' },
+      ]);
+    },
+  );
 
   // #554 — the old default root was a fixed `<tmpdir>/mcp-canvas` accepted
   // whatever its owner or mode, and DuckDB followed links planted at its spill

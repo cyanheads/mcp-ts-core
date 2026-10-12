@@ -121,8 +121,9 @@ const ConfigSchema = z
      * When `true`, every failed tool call also writes one `Tool failure payload`
      * record carrying the arguments as sent and the `CallToolResult` returned,
      * each redacted by key name and capped at `logToolFailurePayloadMaxBytes`.
-     * Default `false` — arguments are caller data, and key-name redaction does
-     * not reach a secret inside a free-form value.
+     * The record is exempt from `logRateLimitThreshold`, so every failed call
+     * keeps its own. Default `false` — arguments are caller data, and key-name
+     * redaction does not reach a secret inside a free-form value.
      */
     logToolFailurePayloads: envBoolean,
     /** Per-payload cap, in UTF-8 bytes, on the `toolInput` and `toolResult` strings. */
@@ -132,7 +133,8 @@ const ConfigSchema = z
      * `logRateLimitWindowMs` before further occurrences are suppressed.
      * Guards against log storms from a repeated error. Set to `0` to disable
      * rate limiting entirely — appropriate for a high-throughput server whose
-     * per-call lines use a constant message by design.
+     * own per-call lines use a constant message by design. The framework's
+     * per-call completion and failure-payload records are already exempt.
      */
     logRateLimitThreshold: z.coerce.number().int().min(0).default(10),
     /** Window, in milliseconds, over which `logRateLimitThreshold` is counted. */
@@ -349,8 +351,12 @@ const ConfigSchema = z
          * stays where the caller asked for them.
          */
         tempRootPath: z.string().optional(),
-        /** Maximum active canvases per tenant before `RateLimited`. */
-        maxCanvasesPerTenant: z.coerce.number().min(1).default(100),
+        /**
+         * Maximum active canvases per tenant before `RateLimited`. Under
+         * `MCP_AUTH_MODE=none` every caller shares one tenant, so this bounds
+         * the whole deployment.
+         */
+        maxCanvasesPerTenant: z.coerce.number().min(1).default(500),
         /** Sliding TTL in milliseconds. Default 24h. */
         ttlMs: z.coerce
           .number()

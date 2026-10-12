@@ -1,8 +1,9 @@
 /**
- * @fileoverview Tests for the canvas SQL gate. Validates the three layers of
- * enforcement (statement count, statement type, plan-walk allowlist) and the
- * identifier helpers. The gate itself is engine-agnostic — these tests use
- * hand-crafted plan JSON without invoking DuckDB.
+ * @fileoverview Tests for the canvas SQL gate. Validates its layers of
+ * enforcement (function deny-lists, statement count, statement type, parse-tree
+ * function check, plan-walk allowlist) and the identifier helpers. The gate
+ * itself is engine-agnostic — these tests use hand-crafted parse-tree and plan
+ * JSON without invoking DuckDB.
  * @module tests/unit/canvas/sqlGate.test
  */
 
@@ -11,14 +12,19 @@ import {
   ALLOWED_PLAN_OPERATORS,
   ALLOWED_STATEMENT_TYPES,
   assertNoDeniedFunctions,
+  assertNoDeniedParsedFunctions,
   assertNoSystemCatalogs,
   assertPlanReadOnly,
+  assertQueryNesting,
   assertReadOnlyQuery,
   assertSelectOnly,
   assertValidIdentifier,
   collectDisallowedOperators,
   collectPlanViolations,
+  DENIED_PARSED_FUNCTIONS,
   DENIED_TABLE_FUNCTIONS,
+  findFileReference,
+  MAX_QUERY_NESTING,
   quoteIdentifier,
   SQL_GATE_REASONS,
   type SqlGateReason,
@@ -367,6 +373,338 @@ describe('sqlGate · DENIED_TABLE_FUNCTIONS', () => {
       );
     },
   );
+
+  // File-reading table functions DuckDB v1.5.6 lists in duckdb_functions().
+  it.each(['read_duckdb', 'parquet_bloom_probe', 'parquet_full_metadata'])(
+    'denies the v1.5.6 file reader %s by name',
+    (fn) => {
+      expect(DENIED_TABLE_FUNCTIONS.has(fn)).toBe(true);
+      expect(() => assertNoDeniedFunctions(`SELECT * FROM ${fn}('/etc/passwd')`)).toThrow(
+        /disallowed table function/i,
+      );
+    },
+  );
+});
+
+/**
+ * Parse-tree fixtures in the shape `json_serialize_sql` emits on DuckDB
+ * v1.5.6: a function call is an object with `class: 'FUNCTION'` and a
+ * lowercased `function_name`; a table function wraps one under `function`.
+ */
+const constant = (value: string) => ({
+  class: 'CONSTANT',
+  type: 'VALUE_CONSTANT',
+  alias: '',
+  value: { type: { id: 'VARCHAR', type_info: null }, is_null: false, value },
+});
+const columnRef = (name: string) => ({
+  class: 'COLUMN_REF',
+  type: 'COLUMN_REF',
+  alias: '',
+  column_names: [name],
+});
+const call = (name: string, ...children: unknown[]) => ({
+  class: 'FUNCTION',
+  type: 'FUNCTION',
+  function_name: name,
+  schema: '',
+  catalog: '',
+  children,
+});
+const selectNode = (selectList: unknown[], fromTable: unknown = { type: 'EMPTY' }) => ({
+  type: 'SELECT_NODE',
+  select_list: selectList,
+  from_table: fromTable,
+  where_clause: null,
+});
+const parseTree = (node: unknown) => ({ error: false, statements: [{ node }] });
+
+describe('sqlGate · assertNoDeniedParsedFunctions', () => {
+  it.each([...DENIED_PARSED_FUNCTIONS])('refuses %s as denied_function', (fn) => {
+    const err = gateRejection(() =>
+      assertNoDeniedParsedFunctions(parseTree(selectNode([call(fn, columnRef('x'))]))),
+    );
+    expect(err.data?.reason).toBe('denied_function');
+    expect(err.data?.function).toBe(fn);
+    expect(err.message).toBe(
+      `Canvas query references disallowed function: ${fn}. Functions that read engine settings, or run SQL or name a table from a string, are not permitted.`,
+    );
+  });
+
+  it('covers every scalar that reads a setting, query(), and query_table()', () => {
+    expect([...DENIED_PARSED_FUNCTIONS].sort()).toEqual([
+      'current_schema',
+      'current_schemas',
+      'current_setting',
+      'in_search_path',
+      'query',
+      'query_table',
+    ]);
+  });
+
+  it.each([...DENIED_TABLE_FUNCTIONS])(
+    'refuses the file reader %s by name, as the text scan does',
+    (fn) => {
+      const tree = parseTree(
+        selectNode([{ class: 'STAR', type: 'STAR' }], {
+          type: 'TABLE_FUNCTION',
+          function: call(fn, constant('/x')),
+        }),
+      );
+      const err = gateRejection(() => assertNoDeniedParsedFunctions(tree));
+      expect(err.data?.reason).toBe('denied_function');
+      expect(err.data?.function).toBe(fn);
+      expect(err.message).toBe(
+        `Canvas query references disallowed table function: ${fn}. File-reading and external-data functions are not permitted.`,
+      );
+    },
+  );
+
+  it('finds a call nested in a subquery inside a join, inside another call', () => {
+    const tree = parseTree(
+      selectNode([{ class: 'STAR', type: 'STAR' }], {
+        type: 'JOIN',
+        left: { type: 'BASE_TABLE', table_name: 't' },
+        right: {
+          type: 'SUBQUERY',
+          subquery: {
+            node: selectNode([
+              call('upper', call('lower', call('current_setting', constant('x')))),
+            ]),
+          },
+        },
+      }),
+    );
+    expect(gateRejection(() => assertNoDeniedParsedFunctions(tree)).data?.function).toBe(
+      'current_setting',
+    );
+  });
+
+  it('finds query() as a table function in FROM', () => {
+    const tree = parseTree(
+      selectNode([{ class: 'STAR', type: 'STAR' }], {
+        type: 'TABLE_FUNCTION',
+        function: call('query', call('concat', constant('SELECT 1'), constant(''))),
+      }),
+    );
+    expect(gateRejection(() => assertNoDeniedParsedFunctions(tree)).data?.function).toBe('query');
+  });
+
+  it('matches the function name case-insensitively', () => {
+    const tree = parseTree(selectNode([call('CURRENT_SETTING', constant('x'))]));
+    expect(gateRejection(() => assertNoDeniedParsedFunctions(tree)).data?.function).toBe(
+      'current_setting',
+    );
+  });
+
+  it('passes a tree that names the function only as data or as a column', () => {
+    const tree = parseTree(
+      selectNode([
+        constant('current_setting(temp_directory)'),
+        { class: 'COLUMN_REF', type: 'COLUMN_REF', column_names: ['query'] },
+        call('upper', constant('query(SELECT 1)')),
+        { class: 'FUNCTION', function_name: 42 },
+      ]),
+    );
+    expect(() => assertNoDeniedParsedFunctions(tree)).not.toThrow();
+  });
+
+  it('passes a tree of allowed calls, and tolerates degenerate input', () => {
+    expect(() =>
+      assertNoDeniedParsedFunctions(parseTree(selectNode([call('sum', constant('1'))]))),
+    ).not.toThrow();
+    expect(() => assertNoDeniedParsedFunctions(null)).not.toThrow();
+    expect(() => assertNoDeniedParsedFunctions('not-a-tree')).not.toThrow();
+  });
+});
+
+/** `query(...)` as a FROM-clause table function, the way DuckDB v1.5.6 serializes it. */
+const queryFrom = (...args: unknown[]) =>
+  parseTree(
+    selectNode([{ class: 'STAR', type: 'STAR' }], {
+      type: 'TABLE_FUNCTION',
+      function: call('query', ...args),
+    }),
+  );
+
+describe('sqlGate · assertNoDeniedParsedFunctions · query() over a string literal', () => {
+  it('admits query() over one plain string literal and returns the literal', () => {
+    expect(assertNoDeniedParsedFunctions(queryFrom(constant('SELECT x FROM t')))).toEqual([
+      'SELECT x FROM t',
+    ]);
+  });
+
+  it('returns every admitted literal, in walk order, wherever the calls sit', () => {
+    const tree = parseTree(
+      selectNode([{ class: 'STAR', type: 'STAR' }], {
+        type: 'JOIN',
+        left: { type: 'TABLE_FUNCTION', function: call('QUERY', constant('SELECT 1')) },
+        right: {
+          type: 'SUBQUERY',
+          subquery: {
+            node: selectNode([{ class: 'STAR', type: 'STAR' }], {
+              type: 'TABLE_FUNCTION',
+              function: call('query', constant("SELECT 'it''s'")),
+            }),
+          },
+        },
+      }),
+    );
+    expect(assertNoDeniedParsedFunctions(tree)).toEqual(['SELECT 1', "SELECT 'it''s'"]);
+  });
+
+  it('returns no literals for a tree without query()', () => {
+    expect(
+      assertNoDeniedParsedFunctions(parseTree(selectNode([call('sum', constant('1'))]))),
+    ).toEqual([]);
+  });
+
+  it('still refuses a denied call elsewhere in a tree that holds an admitted query()', () => {
+    const tree = parseTree(
+      selectNode([call('current_setting', constant('x'))], {
+        type: 'TABLE_FUNCTION',
+        function: call('query', constant('SELECT 1')),
+      }),
+    );
+    expect(gateRejection(() => assertNoDeniedParsedFunctions(tree)).data?.function).toBe(
+      'current_setting',
+    );
+  });
+
+  const typedConstant = (id: string, value: unknown, isNull = false) => ({
+    class: 'CONSTANT',
+    type: 'VALUE_CONSTANT',
+    alias: '',
+    value: { type: { id, type_info: null }, is_null: isNull, value },
+  });
+
+  it.each([
+    ['a concatenation', [call('concat', constant('SELECT current_'), constant('setting(1)'))]],
+    [
+      'the || operator',
+      [
+        {
+          class: 'FUNCTION',
+          type: 'FUNCTION',
+          alias: '',
+          function_name: '||',
+          children: [constant('a'), constant('b')],
+        },
+      ],
+    ],
+    [
+      'a cast literal',
+      [{ class: 'CAST', type: 'OPERATOR_CAST', alias: '', child: constant('SELECT 1') }],
+    ],
+    ['a column reference', [columnRef('sql_text')]],
+    ['a parameter', [{ class: 'PARAMETER', type: 'VALUE_PARAMETER', alias: '', identifier: '1' }]],
+    [
+      'a collated literal',
+      [{ class: 'COLLATE', type: 'COLLATE', alias: '', child: constant('SELECT 1') }],
+    ],
+    ['a named argument', [{ ...constant('SELECT 1'), alias: 'sql' }]],
+    ['an integer constant', [typedConstant('INTEGER', 1)]],
+    ['a NULL constant', [typedConstant('NULL', undefined, true)]],
+    ['a constant missing its alias field', [{ ...constant('SELECT 1'), alias: undefined }]],
+    ['two literals', [constant('SELECT 1'), constant('SELECT 2')]],
+    ['no argument', []],
+  ])('refuses query() over %s with the existing message and hint', (_label, args) => {
+    const err = gateRejection(() => assertNoDeniedParsedFunctions(queryFrom(...args)));
+    expect(err.data?.reason).toBe('denied_function');
+    expect(err.data?.function).toBe('query');
+    expect(err.message).toBe(
+      'Canvas query references disallowed function: query. Functions that read engine settings, or run SQL or name a table from a string, are not permitted.',
+    );
+    expect((err.data?.recovery as { hint?: string } | undefined)?.hint).toBe(
+      'Remove the function the message names — only the staged tables are queryable.',
+    );
+  });
+
+  it('refuses query_table() over a plain string literal', () => {
+    const tree = parseTree(
+      selectNode([{ class: 'STAR', type: 'STAR' }], {
+        type: 'TABLE_FUNCTION',
+        function: call('query_table', constant('t')),
+      }),
+    );
+    expect(gateRejection(() => assertNoDeniedParsedFunctions(tree)).data?.function).toBe(
+      'query_table',
+    );
+  });
+});
+
+describe('sqlGate · assertQueryNesting', () => {
+  it('caps query() nesting at four levels', () => {
+    expect(MAX_QUERY_NESTING).toBe(4);
+  });
+
+  it.each([1, 2, 3, 4])('admits a literal %i levels deep', (depth) => {
+    expect(() => assertQueryNesting(depth)).not.toThrow();
+  });
+
+  it.each([5, 6, 50])('refuses a literal %i levels deep as denied_function', (depth) => {
+    const err = gateRejection(() => assertQueryNesting(depth));
+    expect(err.data?.reason).toBe('denied_function');
+    expect(err.data?.function).toBe('query');
+    expect(err.message).toBe('Canvas query nests query() more than 4 levels deep.');
+  });
+});
+
+/** A `BASE_TABLE` reference as `json_serialize_sql` emits it on DuckDB v1.5.6. */
+const tableRef = (table_name: string, schema_name = '', catalog_name = '') => ({
+  type: 'BASE_TABLE',
+  alias: '',
+  schema_name,
+  table_name,
+  catalog_name,
+});
+
+describe('sqlGate · findFileReference', () => {
+  it.each([
+    ['a quoted path', tableRef('/srv/exports/a.csv'), '/srv/exports/a.csv'],
+    ['a bare file name', tableRef('a.parquet'), 'a.parquet'],
+    ['a path split into a schema and a table', tableRef('csv', 'a'), 'a.csv'],
+    ['an unknown catalog', tableRef('t', 'main', 'other'), 'other.main.t'],
+    ['a dotted name under a known schema', tableRef('a.csv', 'main'), 'main.a.csv'],
+  ])('finds %s', (_label, from, name) => {
+    expect(findFileReference(parseTree(selectNode([], from)))).toBe(name);
+  });
+
+  it('finds the subject of a DESCRIBE, nested in a subquery inside a join', () => {
+    const describe = {
+      type: 'SHOW_REF',
+      show_type: 'DESCRIBE',
+      table_name: '',
+      query: selectNode([{ class: 'STAR', type: 'STAR' }], tableRef('a.json')),
+    };
+    const tree = parseTree(
+      selectNode([], {
+        type: 'JOIN',
+        left: tableRef('t'),
+        right: { type: 'SUBQUERY', subquery: { node: selectNode([], describe) } },
+      }),
+    );
+    expect(findFileReference(tree)).toBe('a.json');
+  });
+
+  it.each([
+    ['a staged table', tableRef('t')],
+    ['a quoted name with spaces', tableRef('staged rows')],
+    ['a schema-qualified table', tableRef('t', 'main')],
+    ['a catalog-qualified table', tableRef('t', 'main', 'memory')],
+    ['a catalog used as the schema', tableRef('t', 'memory')],
+    ['a system catalog view', tableRef('tables', 'information_schema')],
+    ['a pg_catalog table', tableRef('pg_class', 'pg_catalog')],
+  ])('passes %s', (_label, from) => {
+    expect(findFileReference(parseTree(selectNode([], from)))).toBeUndefined();
+  });
+
+  it('passes a path that appears only as data, and tolerates degenerate input', () => {
+    const tree = parseTree(selectNode([constant('/srv/exports/a.csv')], tableRef('t')));
+    expect(findFileReference(tree)).toBeUndefined();
+    expect(findFileReference(null)).toBeUndefined();
+    expect(findFileReference('not-a-tree')).toBeUndefined();
+  });
 });
 
 describe('sqlGate · pragma_* deny-list (issue #210)', () => {
@@ -842,7 +1180,15 @@ const GATE_HINT_CASES: [SqlGateReason, () => void, string][] = [
   [
     SQL_GATE_REASONS.deniedFunction,
     () => assertNoDeniedFunctions("SELECT * FROM read_json('/etc/passwd')"),
-    'Remove the file-reading or external-data function — only the staged tables are queryable.',
+    'Remove the function the message names — only the staged tables are queryable.',
+  ],
+  [
+    SQL_GATE_REASONS.deniedFunction,
+    () =>
+      assertNoDeniedParsedFunctions(
+        parseTree(selectNode([call('current_setting', constant('x'))])),
+      ),
+    'Remove the function the message names — only the staged tables are queryable.',
   ],
   [
     SQL_GATE_REASONS.deniedFunctionInPlan,

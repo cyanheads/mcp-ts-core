@@ -84,7 +84,7 @@ interface CanvasRecord {
 export interface CanvasRegistryOptions {
   /** Absolute cap from creation in milliseconds. Default 7d. */
   absoluteCapMs: number;
-  /** Maximum active canvases per tenant. Default 100. */
+  /** Maximum active canvases per tenant. Default 500. */
   maxCanvasesPerTenant: number;
   /** Sweeper interval in milliseconds. Default 60s. Set to 0 to disable. */
   sweeperIntervalMs: number;
@@ -99,7 +99,7 @@ export interface CanvasRegistryOptions {
 export const DEFAULT_CANVAS_REGISTRY_OPTIONS: CanvasRegistryOptions = {
   ttlMs: 24 * 60 * 60 * 1000,
   absoluteCapMs: 7 * 24 * 60 * 60 * 1000,
-  maxCanvasesPerTenant: 100,
+  maxCanvasesPerTenant: 500,
   sweeperIntervalMs: 60 * 1000,
 };
 
