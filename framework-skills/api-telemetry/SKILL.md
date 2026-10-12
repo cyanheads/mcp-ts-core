@@ -4,7 +4,7 @@ description: >
   Catalog of OpenTelemetry instrumentation built into framework `@cyanheads/mcp-ts-core` — spans, metrics, completion logs, env config, runtime caveats, custom instrumentation patterns, and cardinality rules. Use when enabling OTel export, adding custom spans or metrics in services, debugging missing telemetry, looking up attribute names, or deciding what's safe to put on a metric attribute vs. a span.
 metadata:
   author: cyanheads
-  version: "1.20"
+  version: "1.21"
   audience: external
   type: reference
 ---
@@ -277,7 +277,7 @@ Off by default. With `LOG_TOOL_FAILURE_PAYLOADS=true`, a failed tool call writes
 
 Each payload is redacted with `sanitization.sanitizeForLogging`, serialized, then cut on a UTF-8 character boundary, each on its own. They are strings, not objects, so the byte cap bounds each one and a payload of any depth is written whole up to it — within the 16 MiB of characters one record's walk writes — never cut at the logger's 16-level depth bound. Covered: `auth` refusals, argument rejections (`-32602`), handler throws, and output/enrichment contract failures. Nothing is written for a success, a `RequestCancelled`, or an `input_required` return, nor for resource and prompt failures.
 
-The record goes wherever the error record goes: stderr, `combined.log`, and OTLP when `OTEL_EXPORTER_OTLP_LOGS_ENDPOINT` is set. On Workers, where no file sink exists, set the flag as a Worker binding. It passes the `MCP_LOG_LEVEL` filter and the rate limit like any record, and its message is constant per tool, so when one tool fails more than `MCP_LOG_RATE_LIMIT_THRESHOLD` times in a window, only the first payloads are kept. **Redaction matches key names only.** A secret inside a free-form value, such as a token pasted into a `query` or a connection string in an error message, is written as-is. Enable it only where the log store is trusted with caller data.
+The record goes wherever the error record goes: stderr, `combined.log`, and OTLP when `OTEL_EXPORTER_OTLP_LOGS_ENDPOINT` is set. On Workers, where no file sink exists, set the flag as a Worker binding. It passes the `MCP_LOG_LEVEL` filter like any record but is exempt from the rate limit, as the completion log is: its message is constant per tool, yet each record belongs to a different call, so a tool failing more than `MCP_LOG_RATE_LIMIT_THRESHOLD` times in a window still writes one payload per failed call. The call's `Error in tool:` record keeps its limit, so when that message is the same on every call, only the first records in the window are written, followed by one `Suppressed N occurrences` warning. **Redaction matches key names only.** A secret inside a free-form value, such as a token pasted into a `query` or a connection string in an error message, is written as-is. Enable it only where the log store is trusted with caller data.
 
 ---
 

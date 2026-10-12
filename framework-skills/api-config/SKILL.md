@@ -4,7 +4,7 @@ description: >
   Reference for core and server configuration in `@cyanheads/mcp-ts-core`. Covers env var tables with defaults, priority order, server-specific Zod schema pattern, and Workers lazy-parsing requirement.
 metadata:
   author: cyanheads
-  version: "1.25"
+  version: "1.26"
   audience: external
   type: reference
 ---
@@ -169,7 +169,7 @@ await createApp({ sessionMode: { default: 'stateful', require: 'stateful' } }); 
 | `CANVAS_DEFAULT_MEMORY_LIMIT_MB` | `canvas.defaultMemoryLimitMb` | `1024` | Per-canvas DuckDB `memory_limit` PRAGMA value, in MB. |
 | `CANVAS_EXPORT_PATH` | `canvas.exportRootPath` | `./.canvas-exports` | Sandbox root for path-targeted exports. Absolute paths and `..` traversal are rejected. |
 | `CANVAS_TEMP_PATH` | `canvas.tempRootPath` | `os.tmpdir()` | Parent of the provider's private scratch directory: on first use the DuckDB provider creates `mcp-canvas-XXXXXX` inside it (`mkdtemp`, `0700` on POSIX) for each canvas's own DuckDB `temp_directory` and the transient files behind stream exports and `importFrom`; shutdown removes it once the calls still running against it settle. Created if missing, with no ownership or mode check — must not be a directory another local user controls, and on Windows, where the private directory inherits the parent's ACL, must not grant other users access. Never resolves to the process cwd — DuckDB's own cwd-relative `.tmp` default fails on a non-root or read-only container rootfs. |
-| `CANVAS_MAX_CANVASES_PER_TENANT` | `canvas.maxCanvasesPerTenant` | `100` | Active canvas cap per tenant; throws `RateLimited` when exceeded. |
+| `CANVAS_MAX_CANVASES_PER_TENANT` | `canvas.maxCanvasesPerTenant` | `500` | Active canvas cap per tenant; throws `RateLimited` when exceeded. Under `MCP_AUTH_MODE=none` every caller shares one tenant. |
 | `CANVAS_TTL_MS` | `canvas.ttlMs` | `86400000` | Sliding TTL (24 h). Every operation extends the expiry. |
 | `CANVAS_ABSOLUTE_CAP_MS` | `canvas.absoluteCapMs` | `604800000` | Absolute cap from creation (7 d). Sliding window clamps to this. |
 | `CANVAS_SWEEPER_INTERVAL_MS` | `canvas.sweeperIntervalMs` | `60000` | Background sweep interval. Set to `0` to disable. |
