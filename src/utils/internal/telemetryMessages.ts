@@ -1,8 +1,8 @@
 /**
- * @fileoverview Message strings for the framework's per-call telemetry logs.
- * Shared by the emitter (`performance.ts`) and the rate limiter (`logger.ts`)
- * so the two cannot drift apart. A leaf module with no imports — depending on
- * either side would create a cycle.
+ * @fileoverview Message strings for the framework's one-per-call log records.
+ * Shared by the emitters (`performance.ts`, `toolHandlerFactory.ts`) and the
+ * rate limiter (`logger.ts`) so the two sides cannot drift apart. A leaf module
+ * with no imports — depending on either side would create a cycle.
  * @module src/utils/internal/telemetryMessages
  */
 
@@ -29,3 +29,19 @@ export const TELEMETRY_LOG_MESSAGES = {
 export const UNTHROTTLED_MESSAGES: ReadonlySet<string> = new Set(
   Object.values(TELEMETRY_LOG_MESSAGES),
 );
+
+/**
+ * Message prefix of the opt-in failed-call payload record
+ * (`LOG_TOOL_FAILURE_PAYLOADS`): `Tool failure payload: <tool>`.
+ *
+ * The record is written once per failed tool call, and its message is constant
+ * per tool, so under rate limiting a tool failing past the threshold in one
+ * window would keep only its first payloads, though each belongs to a different
+ * call. The logger exempts every message starting with this prefix, as it does
+ * the telemetry lines above. The call's `Error in tool:` record keeps its limit:
+ * a repeated error message is the storm the limiter exists for.
+ *
+ * The emitter builds its message from this constant, so a reworded message
+ * cannot silently fall back under the limiter.
+ */
+export const TOOL_FAILURE_PAYLOAD_MESSAGE_PREFIX = 'Tool failure payload: ';

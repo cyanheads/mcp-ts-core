@@ -402,6 +402,53 @@ describe('Logger', () => {
       expect((logger as any).suppressedMessages.size).toBe(0);
     });
 
+    // The opt-in failure-payload record is written once per failed call, and its
+    // message is constant per tool — the same shape as the per-call telemetry
+    // lines, so the limiter read a failing tool's throughput as a storm. (#735)
+    it('should not rate-limit the per-call tool failure payload record at any level', async () => {
+      await logger.initialize('debug');
+
+      const pino = (await import('pino')).default;
+      const mockLogger = pino() as any;
+      const errorBefore = mockLogger.error.mock.calls.length;
+      const warnBefore = mockLogger.warn.mock.calls.length;
+      const infoBefore = mockLogger.info.mock.calls.length;
+
+      for (let i = 0; i < 30; i++) {
+        const ctx = { requestId: `limiter-probe-${i}`, timestamp: new Date().toISOString() };
+        logger.error('Tool failure payload: limiter_probe_error', ctx);
+        logger.warning('Tool failure payload: limiter_probe_warning', ctx);
+        logger.notice('Tool failure payload: limiter_probe_notice', ctx);
+      }
+
+      expect(mockLogger.error.mock.calls.length - errorBefore).toBe(30);
+      expect(mockLogger.warn.mock.calls.length - warnBefore).toBe(30);
+      expect(mockLogger.info.mock.calls.length - infoBefore).toBe(30);
+      expect((logger as any).suppressedMessages.size).toBe(0);
+    });
+
+    // The exemption is the payload record's prefix, not any message carrying the
+    // text: a repeated error that merely mentions it is still a storm. (#735)
+    it('should still rate-limit a repeated error record that only contains the payload prefix', async () => {
+      await logger.initialize('info');
+
+      const pino = (await import('pino')).default;
+      const mockLogger = pino() as any;
+      const before = mockLogger.error.mock.calls.length;
+
+      for (let i = 0; i < 15; i++) {
+        logger.error(
+          'Error in tool:limiter_probe: Tool failure payload: limiter_probe',
+          new Error('boom'),
+        );
+      }
+
+      expect(mockLogger.error.mock.calls.length - before).toBe(10);
+      expect([...(logger as any).suppressedMessages.entries()]).toEqual([
+        ['error:Error in tool:limiter_probe: Tool failure payload: limiter_probe', 5],
+      ]);
+    });
+
     it('should disable rate limiting entirely when the threshold is 0', async () => {
       await logger.initialize('info');
 

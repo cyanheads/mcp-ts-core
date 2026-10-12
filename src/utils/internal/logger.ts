@@ -15,7 +15,10 @@ import {
   requestContextService,
   toCanonicalContext,
 } from '@/utils/internal/requestContext.js';
-import { UNTHROTTLED_MESSAGES } from '@/utils/internal/telemetryMessages.js';
+import {
+  TOOL_FAILURE_PAYLOAD_MESSAGE_PREFIX,
+  UNTHROTTLED_MESSAGES,
+} from '@/utils/internal/telemetryMessages.js';
 
 /**
  * RFC 5424 severity levels supported by the MCP logger, ordered from least to most severe.
@@ -500,8 +503,9 @@ export function setOtelLogSink(sink: OtelLogSink | undefined): void {
  *   Suppressed counts are flushed at `warning` once a window has elapsed, on
  *   the next log call or at {@link Logger.close} — traffic-driven rather than
  *   timer-driven, so the bookkeeping stays bounded on serverless runtimes. The
- *   framework's per-call telemetry lines (see `telemetryMessages.ts`) bypass the
- *   limiter, since their repetition is request throughput rather than a storm.
+ *   framework's per-call telemetry lines and its `Tool failure payload: <tool>`
+ *   records (see `telemetryMessages.ts`) bypass the limiter, since their
+ *   repetition is request throughput rather than a storm.
  * - Records emitted before {@link Logger.initialize} are held in a bounded buffer
  *   and replayed once the sinks exist, so boot-time lines from service
  *   composition and a consumer's `setup()` hook are not silently dropped.
@@ -889,10 +893,16 @@ export class Logger {
     // Threshold 0 disables rate limiting entirely.
     if (this.rateLimitThreshold === 0) return false;
 
-    // Per-call telemetry lines are one-per-request by construction, so their
-    // repetition is throughput rather than a storm. Limiting them would cap
-    // log-derived call volume at the threshold and silently drop the rest.
-    if (UNTHROTTLED_MESSAGES.has(message)) return false;
+    // Per-call telemetry lines and failure-payload records are one-per-request
+    // by construction, so their repetition is throughput rather than a storm.
+    // Limiting them would cap log-derived call volume at the threshold and
+    // silently drop the rest.
+    if (
+      UNTHROTTLED_MESSAGES.has(message) ||
+      message.startsWith(TOOL_FAILURE_PAYLOAD_MESSAGE_PREFIX)
+    ) {
+      return false;
+    }
 
     const now = Date.now();
     this.maybeSweep(now);
