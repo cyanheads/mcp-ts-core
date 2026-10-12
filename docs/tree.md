@@ -1,6 +1,6 @@
 # mcp-ts-core - Directory Structure
 
-Generated on: 2026-10-08 09:08:53
+Generated on: 2026-10-12 07:53:47
 
 ```text
 mcp-ts-core/
@@ -17,6 +17,10 @@ mcp-ts-core/
 │   └── SECURITY.md
 ├── .husky/
 │   └── pre-commit
+├── .oss-scanner/
+│   ├── Dockerfile
+│   ├── Dockerfile.dockerignore
+│   └── threat_model.md
 ├── .vscode/
 │   ├── extensions.json
 │   └── settings.json
@@ -331,14 +335,24 @@ mcp-ts-core/
 │   │   │   └── resourceSubscriptions.ts
 │   │   ├── tools/
 │   │   │   ├── utils/
+│   │   │   │   ├── arguments/
+│   │   │   │   │   ├── bounds.ts
+│   │   │   │   │   ├── index.ts
+│   │   │   │   │   ├── issues.ts
+│   │   │   │   │   ├── parseToolArguments.ts
+│   │   │   │   │   ├── prevalidation.ts
+│   │   │   │   │   ├── rejection.ts
+│   │   │   │   │   ├── repair.ts
+│   │   │   │   │   └── telemetry.ts
 │   │   │   │   ├── deferredInputSchema.ts
 │   │   │   │   ├── disabled-tool.ts
 │   │   │   │   ├── headerParam.ts
-│   │   │   │   ├── inputPrevalidation.ts
 │   │   │   │   ├── schemaShape.ts
 │   │   │   │   ├── strictenRecord.ts
 │   │   │   │   ├── toolDefinition.ts
-│   │   │   │   └── toolHandlerFactory.ts
+│   │   │   │   ├── toolHandlerFactory.ts
+│   │   │   │   ├── toolOutputSchema.ts
+│   │   │   │   └── toolResult.ts
 │   │   │   └── tool-registration.ts
 │   │   ├── transports/
 │   │   │   ├── auth/
@@ -484,6 +498,7 @@ mcp-ts-core/
 │   │   │   ├── index.ts
 │   │   │   ├── markdownBuilder.ts
 │   │   │   ├── partialResult.ts
+│   │   │   ├── sentence.ts
 │   │   │   ├── tableFormatter.ts
 │   │   │   └── treeFormatter.ts
 │   │   ├── internal/
@@ -492,6 +507,7 @@ mcp-ts-core/
 │   │   │   │   ├── helpers.ts
 │   │   │   │   ├── mappings.ts
 │   │   │   │   └── types.ts
+│   │   │   ├── boundedProjection.ts
 │   │   │   ├── encoding.ts
 │   │   │   ├── lazyImport.ts
 │   │   │   ├── logger.ts
@@ -687,6 +703,7 @@ mcp-ts-core/
 │   │   └── tool-handler-pipeline.fuzz.test.ts
 │   ├── helpers/
 │   │   ├── context-helpers.ts
+│   │   ├── cpu-time.ts
 │   │   ├── default-server-mcp.ts
 │   │   ├── fixtures.ts
 │   │   ├── http-helpers.ts
@@ -829,9 +846,10 @@ mcp-ts-core/
 │   │   │   │   └── resource-registration.test.ts
 │   │   │   ├── tools/
 │   │   │   │   ├── utils/
+│   │   │   │   │   ├── arguments/
+│   │   │   │   │   │   └── parseToolArguments.test.ts
 │   │   │   │   │   ├── deferredInputSchema.test.ts
 │   │   │   │   │   ├── header-param.test.ts
-│   │   │   │   │   ├── inputPrevalidation.test.ts
 │   │   │   │   │   ├── renderToolContent.test.ts
 │   │   │   │   │   ├── schemaShape.test.ts
 │   │   │   │   │   ├── toolDefinition.test.ts
