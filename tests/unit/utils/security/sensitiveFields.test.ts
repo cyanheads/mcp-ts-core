@@ -12,6 +12,7 @@ import {
   isSensitiveKey,
   toPinoRedactPaths,
 } from '@/utils/security/sensitiveFields.js';
+import { sampleCpuMs } from '../../../helpers/cpu-time.js';
 
 describe('sensitiveFields', () => {
   it('expands each field to top-level, one-deep, and two-deep pino paths', () => {
@@ -137,9 +138,9 @@ describe('isSensitiveKey', () => {
 
   it('scans a key in time linear in its length', () => {
     /**
-     * Fastest thread-CPU microseconds of several runs over distinct keys of `length` characters, one per
-     * worst case of the word split: one all-caps word, one-letter words, a hump or acronym end at every
-     * character, and alternating letters and digits.
+     * Fastest thread-CPU milliseconds of several samples over distinct keys of `length` characters, one
+     * per worst case of the word split: one all-caps word, one-letter words, a hump or acronym end at
+     * every character, and alternating letters and digits. Keys this long are never memoized.
      */
     const cost = (length: number): number => {
       let best = Number.POSITIVE_INFINITY;
@@ -147,12 +148,14 @@ describe('isSensitiveKey', () => {
         const keys = ['A', 'a_', 'aB', 'ABc', 'a1'].map(
           (unit) => `${unit.repeat(length / unit.length)}${sample}`,
         );
-        const start = process.threadCpuUsage();
-        for (const key of keys) isSensitiveKey(key);
-        const { user, system } = process.threadCpuUsage(start);
-        best = Math.min(best, user + system);
+        best = Math.min(
+          best,
+          sampleCpuMs(() => {
+            for (const key of keys) isSensitiveKey(key);
+          }),
+        );
       }
-      return Math.max(best, 1);
+      return best;
     };
 
     cost(5_000);
