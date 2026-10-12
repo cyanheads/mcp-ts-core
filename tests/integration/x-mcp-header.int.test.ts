@@ -82,17 +82,16 @@ async function connect(tools: AnyToolDefinition[]) {
 /**
  * Registers a definition and reports whether the SDK's own `x-mcp-header` scan
  * rejected it. The SDK surfaces that verdict only as a `console.warn`, so the
- * warning is the observable.
+ * warning is the observable. Since SDK 2.3 the scan runs when `tools/list`
+ * converts the schema, not at registration, so the list is requested first.
  */
 async function sdkRejects(definition: AnyToolDefinition): Promise<boolean> {
   const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
   try {
-    const server = new McpServer(
-      { name: 'sdk-scan', version: '0.0.0' },
-      { capabilities: { tools: { listChanged: true } } },
-    );
-    await new ToolRegistry([definition], services()).registerAll(server, undefined);
-    await server.close();
+    const pair = await connect([definition]);
+    await pair.client.listTools();
+    await pair.client.close();
+    await pair.server.close();
     return warn.mock.calls.some((args) => String(args[0]).includes('x-mcp-header'));
   } finally {
     warn.mockRestore();

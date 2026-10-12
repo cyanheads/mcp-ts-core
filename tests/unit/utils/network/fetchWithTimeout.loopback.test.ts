@@ -156,12 +156,13 @@ describe('a refused connection keeps its transport code (#615)', () => {
   /**
    * The runtimes disagree on where the code lives: Bun sets it on the fetch
    * rejection itself, Node's undici on the `cause` of `TypeError: fetch failed`.
+   * Bun's code and message also vary by release (`ConnectionRefused` before
+   * 1.4.3, `ECONNREFUSED` and an `ECONNREFUSED: ` message prefix from it), so the
+   * expected values are read off a raw refused fetch.
    */
   const isBun = typeof process.versions.bun === 'string';
-  const refusedCode = isBun ? 'ConnectionRefused' : 'ECONNREFUSED';
-  const refusedMessage = isBun
-    ? 'Unable to connect. Is the computer able to access the url?'
-    : 'fetch failed';
+  let refusedCode: string;
+  let refusedMessage: string;
 
   let closedOrigin: string;
 
@@ -170,6 +171,16 @@ describe('a refused connection keeps its transport code (#615)', () => {
     const placeholder = createServer();
     closedOrigin = await listen(placeholder);
     await new Promise<void>((resolve) => placeholder.close(() => resolve()));
+
+    const rejection = (await fetch(closedOrigin).catch((e: unknown) => e)) as {
+      message: string;
+      code?: unknown;
+      cause?: { code?: unknown };
+    };
+    const code = isBun ? rejection.code : rejection.cause?.code;
+    if (typeof code !== 'string') throw new Error('a refused fetch carried no transport code');
+    refusedCode = code;
+    refusedMessage = rejection.message;
   });
 
   /** The `causeChain` field of every record that carries one. */
@@ -257,7 +268,8 @@ describe('a refused connection keeps its transport code (#615)', () => {
     });
     const text = (result.content[0] as { text: string }).text;
     expect(text.startsWith(`Error: ${message}`)).toBe(true);
-    expect(JSON.stringify(result)).not.toMatch(
+    // The runtime's own message may name the code; nothing else may carry it.
+    expect(JSON.stringify(result).replaceAll(refusedMessage, '')).not.toMatch(
       /causeChain|rootCause|ECONNREFUSED|ConnectionRefused/,
     );
   });
@@ -275,7 +287,9 @@ describe('a refused connection keeps its transport code (#615)', () => {
       originalErrorName: 'McpError',
       originalMessage: `Network error during fetch GET ${closedOrigin}/…: ${refusedMessage}`,
     });
-    expect(JSON.stringify(error.data)).not.toMatch(/rootCause|ECONNREFUSED|ConnectionRefused/);
+    expect(JSON.stringify(error.data).replaceAll(refusedMessage, '')).not.toMatch(
+      /rootCause|ECONNREFUSED|ConnectionRefused/,
+    );
 
     const record = vi
       .mocked(logger.error)
