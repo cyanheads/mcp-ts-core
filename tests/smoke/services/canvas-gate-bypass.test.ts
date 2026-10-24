@@ -3,7 +3,7 @@
  * deny-list cannot see: quoted table-function names, replacement scans over a
  * quoted path, functions that run a SQL string, smuggling through LATERAL /
  * CTE / UNION, catalog views referenced without parentheses, and functions
- * that read engine settings. A planted file outside the canvas holds a marker
+ * that read engine settings, called or written bare. A planted file outside the canvas holds a marker
  * no refusal may echo, and every entry point that runs the gate — `query()`,
  * `registerView()`, and `query({ registerAs })` — must refuse every input
  * before creating anything. The engine reads and writes only under the export
@@ -23,6 +23,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import type { CanvasInstance } from '@/services/canvas/core/CanvasInstance.js';
 import { CanvasRegistry } from '@/services/canvas/core/CanvasRegistry.js';
 import { DataCanvas } from '@/services/canvas/core/DataCanvas.js';
+import { BARE_FUNCTION_KEYWORDS } from '@/services/canvas/core/sqlGate.js';
 import {
   classifyDuckdbError,
   DuckdbProvider,
@@ -83,6 +84,9 @@ beforeAll(async () => {
   canvas = new DataCanvas(provider, registry);
   instance = await canvas.acquire(undefined, ctx);
   await instance.registerTable('t', [{ x: 1 }]);
+  // Columns named after denied functions, one of which DuckDB also binds bare.
+  await instance.registerTable('c', [{ current_schema: 'staged' }]);
+  await instance.registerTable('q', [{ query: 'q1', current_setting: 's1' }]);
 });
 
 afterAll(async () => {
@@ -267,6 +271,26 @@ const PARSED_FUNCTION_CALLS: ReadonlyArray<readonly [label: string, fn: string, 
     `SELECT current_setting/* x */('temp_directory') AS v`,
   ],
   ['current_schema()', 'current_schema', 'SELECT current_schema() AS v'],
+  // DuckDB binds an unqualified current_schema to the function when no column
+  // of that name is in scope, so the parse tree's bare column reference is
+  // refused too — even where a staged column of that name is in scope.
+  ['a bare current_schema', 'current_schema', 'SELECT current_schema'],
+  ['a quoted, uppercase bare CURRENT_SCHEMA', 'current_schema', 'SELECT "CURRENT_SCHEMA" AS v'],
+  [
+    'a bare current_schema in a WHERE clause',
+    'current_schema',
+    `SELECT x FROM t WHERE current_schema = 'main'`,
+  ],
+  [
+    'a bare current_schema inside a query() literal',
+    'current_schema',
+    `SELECT * FROM query('SELECT current_schema AS v')`,
+  ],
+  [
+    'an unqualified staged column named current_schema',
+    'current_schema',
+    'SELECT current_schema FROM c',
+  ],
   ['current_schemas()', 'current_schemas', 'SELECT current_schemas(true) AS v'],
   ['in_search_path()', 'in_search_path', `SELECT in_search_path('memory', 'main') AS v`],
   [
@@ -530,6 +554,44 @@ describe('canvas · the engine reads only the export root and scratch directory'
   });
 });
 
+describe('canvas · names DuckDB binds as a function without parentheses', () => {
+  // Re-derives BARE_FUNCTION_KEYWORDS on the installed engine: every function
+  // name it lists, plus the documented set (the clock keywords bind functions
+  // of other names), written bare in a scope with no column of that name.
+  it('binds exactly BARE_FUNCTION_KEYWORDS, and current_schema reads the schema setting', async () => {
+    const plain = await DuckDBInstance.create(':memory:');
+    const connection = await plain.connect();
+    try {
+      await connection.run('CREATE TABLE t AS SELECT 1 AS x');
+      const listed = (
+        await connection.runAndReadAll('SELECT DISTINCT function_name FROM duckdb_functions()')
+      ).getRowObjectsJson() as { function_name: string }[];
+      const candidates = new Set([
+        ...listed.map((row) => row.function_name),
+        ...BARE_FUNCTION_KEYWORDS,
+      ]);
+      const bound: string[] = [];
+      for (const name of candidates) {
+        if (!/^[a-z_][a-z0-9_]*$/.test(name)) continue;
+        const binds = await connection.runAndReadAll(`SELECT "${name}" FROM t`).then(
+          () => true,
+          () => false,
+        );
+        if (binds) bound.push(name);
+      }
+      expect(bound.sort()).toEqual([...BARE_FUNCTION_KEYWORDS].sort());
+
+      await connection.run('CREATE SCHEMA s2');
+      await connection.run('SET schema = s2');
+      const reader = await connection.runAndReadAll('SELECT current_schema AS v');
+      expect(reader.getRowObjectsJson()).toEqual([{ v: 's2' }]);
+    } finally {
+      connection.closeSync();
+      plain.closeSync();
+    }
+  });
+});
+
 describe('canvas · SQL gate refuses reads only the engine or the plan walk can see', () => {
   acrossEntryPoints(
     'outside-path reads',
@@ -632,6 +694,25 @@ describe('canvas · SQL gate refuses reads only the engine or the plan walk can 
     );
     expect(result.rows).toEqual([
       { s: "current_setting('temp_directory')", q: 'query(x)', current_setting: '1' },
+    ]);
+  });
+
+  it('refuses an unqualified current_schema column with a message to qualify it', async () => {
+    const err = await refusalOf(() => instance.query('SELECT current_schema FROM c'));
+    expect(err.message).toBe(
+      'Canvas query references disallowed function: current_schema. DuckDB reads an unqualified current_schema as that function, written without parentheses; to read a staged column named current_schema, qualify it with its table (<table>.current_schema).',
+    );
+  });
+
+  it('reads a staged current_schema column qualified with its table', async () => {
+    expect((await instance.query('SELECT c.current_schema FROM c')).rows).toEqual([
+      { current_schema: 'staged' },
+    ]);
+  });
+
+  it('reads unqualified columns named after the other denied functions', async () => {
+    expect((await instance.query('SELECT query, current_setting FROM q')).rows).toEqual([
+      { query: 'q1', current_setting: 's1' },
     ]);
   });
 

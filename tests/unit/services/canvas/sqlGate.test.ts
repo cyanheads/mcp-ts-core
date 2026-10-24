@@ -19,8 +19,10 @@ import {
   assertReadOnlyQuery,
   assertSelectOnly,
   assertValidIdentifier,
+  BARE_FUNCTION_KEYWORDS,
   collectDisallowedOperators,
   collectPlanViolations,
+  DENIED_BARE_KEYWORDS,
   DENIED_PARSED_FUNCTIONS,
   DENIED_TABLE_FUNCTIONS,
   findFileReference,
@@ -515,6 +517,97 @@ describe('sqlGate · assertNoDeniedParsedFunctions', () => {
     ).not.toThrow();
     expect(() => assertNoDeniedParsedFunctions(null)).not.toThrow();
     expect(() => assertNoDeniedParsedFunctions('not-a-tree')).not.toThrow();
+  });
+});
+
+describe('sqlGate · assertNoDeniedParsedFunctions · bare function keywords', () => {
+  const baseTable = (table_name: string) => ({ type: 'BASE_TABLE', table_name });
+  const qualifiedRef = (...parts: string[]) => ({
+    class: 'COLUMN_REF',
+    type: 'COLUMN_REF',
+    alias: '',
+    column_names: parts,
+  });
+
+  it('names current_schema as the one denied function DuckDB binds bare', () => {
+    expect([...DENIED_BARE_KEYWORDS]).toEqual(['current_schema']);
+    for (const name of DENIED_BARE_KEYWORDS) expect(DENIED_PARSED_FUNCTIONS.has(name)).toBe(true);
+  });
+
+  it('lists the names DuckDB v1.5.6 binds without parentheses', () => {
+    expect([...BARE_FUNCTION_KEYWORDS].sort()).toEqual([
+      'current_catalog',
+      'current_date',
+      'current_role',
+      'current_schema',
+      'current_time',
+      'current_timestamp',
+      'current_user',
+      'localtime',
+      'localtimestamp',
+      'session_user',
+      'user',
+    ]);
+  });
+
+  it.each([
+    ['lowercase', 'current_schema'],
+    ['quoted uppercase', 'CURRENT_SCHEMA'],
+    ['mixed case', 'Current_Schema'],
+  ])(
+    'refuses an unqualified %s current_schema, telling the caller to qualify a column',
+    (_label, name) => {
+      const err = gateRejection(() =>
+        assertNoDeniedParsedFunctions(parseTree(selectNode([columnRef(name)]))),
+      );
+      expect(err.data?.reason).toBe('denied_function');
+      expect(err.data?.function).toBe('current_schema');
+      expect(err.message).toBe(
+        'Canvas query references disallowed function: current_schema. DuckDB reads an unqualified current_schema as that function, written without parentheses; to read a staged column named current_schema, qualify it with its table (<table>.current_schema).',
+      );
+      expect((err.data?.recovery as { hint?: string } | undefined)?.hint).toBe(
+        'Remove the function the message names — only the staged tables are queryable.',
+      );
+    },
+  );
+
+  it('finds a bare current_schema in a WHERE comparison under an operator', () => {
+    const tree = parseTree({
+      ...selectNode([columnRef('x')], baseTable('t')),
+      where_clause: {
+        class: 'COMPARISON',
+        type: 'COMPARE_EQUAL',
+        left: { class: 'OPERATOR', type: 'ARRAY_EXTRACT', children: [columnRef('current_schema')] },
+        right: constant('main'),
+      },
+    });
+    expect(gateRejection(() => assertNoDeniedParsedFunctions(tree)).data?.function).toBe(
+      'current_schema',
+    );
+  });
+
+  it('passes current_schema qualified with its table, and as data or an alias', () => {
+    const tree = parseTree(
+      selectNode(
+        [
+          qualifiedRef('c', 'current_schema'),
+          qualifiedRef('main', 'c', 'current_schema'),
+          constant('current_schema'),
+          { ...columnRef('x'), alias: 'current_schema' },
+        ],
+        baseTable('c'),
+      ),
+    );
+    expect(() => assertNoDeniedParsedFunctions(tree)).not.toThrow();
+  });
+
+  it('passes unqualified columns named after other denied functions and other bare keywords', () => {
+    const names = [
+      ...[...DENIED_PARSED_FUNCTIONS].filter((fn) => fn !== 'current_schema'),
+      ...[...BARE_FUNCTION_KEYWORDS].filter((name) => name !== 'current_schema'),
+    ];
+    const tree = parseTree(selectNode(names.map(columnRef), baseTable('q')));
+    expect(() => assertNoDeniedParsedFunctions(tree)).not.toThrow();
   });
 });
 

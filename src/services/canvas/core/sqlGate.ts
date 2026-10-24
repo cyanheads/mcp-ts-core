@@ -17,7 +17,8 @@
  *    SELECT.
  * 4. **Parse-tree check.** Walk DuckDB's own parse of the statement and
  *    reject any call to a function that reads an engine setting, runs SQL or
- *    names a table from a string, or reads a file, and any table reference
+ *    names a table from a string, or reads a file — called, or bare where
+ *    DuckDB binds the bare name as the call — and any table reference
  *    that names a file. DuckDB resolves these while binding, so the plan need
  *    not name them. `query()` over a plain string literal is the one admitted
  *    call: its SQL is gated as its own statement, to a fixed nesting depth.
@@ -410,11 +411,58 @@ export const DENIED_PARSED_FUNCTIONS: ReadonlySet<string> = new Set([
 ]);
 
 /**
+ * Names DuckDB binds as a function call when written bare, without
+ * parentheses: an unqualified column reference of one of these names, quoted
+ * or not and in any case, reads the function whenever no column of that name
+ * is in scope. The parse tree writes it as a one-part `COLUMN_REF`, so only
+ * the name says it may be a call.
+ *
+ * Last derived against DuckDB v1.5.6 (`GetSQLValueFunctionName`) by running
+ * `SELECT <name>` for every name `duckdb_functions()` lists plus these: these
+ * bind and no other name does. Re-derive alongside
+ * {@link DENIED_TABLE_FUNCTIONS}; `canvas-gate-bypass.test.ts` fails when the
+ * engine's set moves.
+ */
+export const BARE_FUNCTION_KEYWORDS: ReadonlySet<string> = new Set([
+  'current_catalog',
+  'current_date',
+  'current_role',
+  'current_schema',
+  'current_time',
+  'current_timestamp',
+  'current_user',
+  'localtime',
+  'localtimestamp',
+  'session_user',
+  'user',
+]);
+
+/**
+ * The {@link BARE_FUNCTION_KEYWORDS} that are also
+ * {@link DENIED_PARSED_FUNCTIONS} — on DuckDB v1.5.6, `current_schema` alone.
+ * Layer 4 refuses an unqualified column reference of one of these names, since
+ * the parse tree cannot tell a staged column of that name from the function;
+ * the column stays reachable qualified with its table. The rest read no engine
+ * setting: `current_catalog` is the admitted `current_database()`, the user and
+ * role names are constants, and the others read the clock.
+ */
+export const DENIED_BARE_KEYWORDS: ReadonlySet<string> = new Set(
+  [...BARE_FUNCTION_KEYWORDS].filter((name) => DENIED_PARSED_FUNCTIONS.has(name)),
+);
+
+/** A denied name the parse tree reaches, and whether it was written as a call or bare. */
+interface DeniedReference {
+  fn: string;
+  form: 'call' | 'bare';
+}
+
+/**
  * Layer 4: reject a call to any function in {@link DENIED_PARSED_FUNCTIONS}
  * or {@link DENIED_TABLE_FUNCTIONS} anywhere in `parseTree`, the statement as
- * DuckDB's `json_serialize_sql` parses it. A call is any object carrying a
- * string `function_name`; string constants and column references never carry
- * one, so a name that appears only as data passes.
+ * DuckDB's `json_serialize_sql` parses it, and an unqualified column reference
+ * named in {@link DENIED_BARE_KEYWORDS}. A call is any object carrying a
+ * string `function_name`; string constants and other column references never
+ * carry one, so a name that appears only as data passes.
  *
  * `query` over a single plain string literal is admitted, and the SQL of every
  * admitted call is returned in walk order. The literal is all the text layers
@@ -426,28 +474,47 @@ export const DENIED_PARSED_FUNCTIONS: ReadonlySet<string> = new Set([
  */
 export function assertNoDeniedParsedFunctions(parseTree: unknown): string[] {
   const literals: string[] = [];
-  const fn = findDeniedCall(parseTree, literals);
-  if (fn === undefined) return literals;
+  const denied = findDeniedCall(parseTree, literals);
+  if (denied === undefined) return literals;
+  const { fn, form } = denied;
   throw deniedFunctionError(
     fn,
-    DENIED_TABLE_FUNCTIONS.has(fn)
-      ? deniedTableFunctionMessage(fn)
-      : `Canvas query references disallowed function: ${fn}. Functions that read engine settings, or run SQL or name a table from a string, are not permitted.`,
+    form === 'bare'
+      ? `Canvas query references disallowed function: ${fn}. DuckDB reads an unqualified ${fn} as that function, written without parentheses; to read a staged column named ${fn}, qualify it with its table (<table>.${fn}).`
+      : DENIED_TABLE_FUNCTIONS.has(fn)
+        ? deniedTableFunctionMessage(fn)
+        : `Canvas query references disallowed function: ${fn}. Functions that read engine settings, or run SQL or name a table from a string, are not permitted.`,
   );
 }
 
 /**
- * The first denied function name a depth-first walk of `node` reaches,
+ * The first denied name a depth-first walk of `node` reaches, called or bare,
  * collecting into `literals` the SQL of each `query` call it admits.
  */
-function findDeniedCall(node: unknown, literals: string[]): string | undefined {
+function findDeniedCall(node: unknown, literals: string[]): DeniedReference | undefined {
   if (node === null || typeof node !== 'object') return;
-  const call = node as { children?: unknown; function_name?: unknown };
+  const call = node as {
+    children?: unknown;
+    class?: unknown;
+    column_names?: unknown;
+    function_name?: unknown;
+  };
   if (typeof call.function_name === 'string') {
     const fn = call.function_name.toLowerCase();
     const literal = fn === 'query' ? soleStringLiteral(call.children) : undefined;
     if (literal !== undefined) literals.push(literal);
-    else if (DENIED_PARSED_FUNCTIONS.has(fn) || DENIED_TABLE_FUNCTIONS.has(fn)) return fn;
+    else if (DENIED_PARSED_FUNCTIONS.has(fn) || DENIED_TABLE_FUNCTIONS.has(fn)) {
+      return { fn, form: 'call' };
+    }
+  }
+  if (
+    call.class === 'COLUMN_REF' &&
+    Array.isArray(call.column_names) &&
+    call.column_names.length === 1 &&
+    typeof call.column_names[0] === 'string'
+  ) {
+    const name = call.column_names[0].toLowerCase();
+    if (DENIED_BARE_KEYWORDS.has(name)) return { fn: name, form: 'bare' };
   }
   for (const value of Object.values(node)) {
     const found = findDeniedCall(value, literals);
