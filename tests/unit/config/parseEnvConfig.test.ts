@@ -95,6 +95,89 @@ describe('parseEnvConfig', () => {
     }
   });
 
+  describe('a failure inside a field (#628)', () => {
+    /** The `ConfigurationError` `parseEnvConfig` throws for `env`. */
+    function rejection<T extends z.ZodType>(
+      schema: T,
+      map: Record<string, string>,
+      env: Record<string, string>,
+    ): McpError {
+      try {
+        parseEnvConfig(schema, map, env);
+      } catch (err) {
+        expect(err).toBeInstanceOf(McpError);
+        expect((err as McpError).code).toBe(JsonRpcErrorCode.ConfigurationError);
+        return err as McpError;
+      }
+      return expect.fail('should have thrown');
+    }
+
+    it('names the variable behind an array element a transform and pipe produced', () => {
+      const Endpoints = z.object({
+        endpoints: z
+          .string()
+          .transform((s) => s.split(',').map((url) => ({ url })))
+          .pipe(z.array(z.object({ url: z.string().url() }))),
+      });
+      const error = rejection(
+        Endpoints,
+        { endpoints: 'MY_ENDPOINTS' },
+        { MY_ENDPOINTS: 'not-a-url' },
+      );
+
+      expect(error.message).toBe(
+        'Server config validation failed:\n  - MY_ENDPOINTS (endpoints.0.url): Invalid URL',
+      );
+      expect(error.data?.issues).toEqual([
+        expect.objectContaining({ envVar: 'MY_ENDPOINTS', path: 'endpoints.0.url' }),
+      ]);
+    });
+
+    it('names the variable behind a field of an object parsed from one JSON value', () => {
+      const Nested = z.object({
+        db: z.preprocess(
+          (v) => JSON.parse(String(v)),
+          z.object({ host: z.string(), port: z.coerce.number().int() }),
+        ),
+      });
+      const error = rejection(
+        Nested,
+        { db: 'MY_DB_JSON' },
+        { MY_DB_JSON: '{"host":"h","port":"x"}' },
+      );
+
+      expect(error.message).toBe(
+        'Server config validation failed:\n  - MY_DB_JSON (db.port): Invalid input: expected number, received NaN',
+      );
+      expect(error.data?.issues).toEqual([
+        expect.objectContaining({ envVar: 'MY_DB_JSON', path: 'db.port' }),
+      ]);
+    });
+
+    it('reports a root-level refinement under its empty path', () => {
+      const Paired = z
+        .object({ min: z.coerce.number(), max: z.coerce.number() })
+        .refine((c) => c.min <= c.max, { message: 'MY_MIN must not exceed MY_MAX' });
+      const error = rejection(
+        Paired,
+        { min: 'MY_MIN', max: 'MY_MAX' },
+        { MY_MIN: '5', MY_MAX: '1' },
+      );
+
+      expect(error.message).toBe(
+        'Server config validation failed:\n  -  (): MY_MIN must not exceed MY_MAX',
+      );
+      expect(error.data?.issues).toEqual([expect.objectContaining({ envVar: '', path: '' })]);
+    });
+
+    it('never resolves a path through a key the map only inherits', () => {
+      const Inherited = z.object({ constructor: z.string() });
+      const error = rejection(Inherited, {}, {});
+
+      expect(error.message).toContain('  - constructor (constructor): ');
+    });
+  });
+
   describe('values that mean "not provided"', () => {
     // Built without a template-literal-shaped string so Biome's
     // noTemplateCurlyInString does not flag a deliberate placeholder.

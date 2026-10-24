@@ -15,6 +15,7 @@ import packageJson from '../../package.json' with { type: 'json' };
 import { configurationError } from '../types-global/errors.js';
 import { runtimeCaps } from '../utils/internal/runtime.js';
 import { type PackageManifest, resolveAppRoot } from './appRoot.js';
+import { formatEnvIssues, toEnvIssues } from './envIssue.js';
 import { emptyStringAsUndefined, normalizeEnv } from './envValue.js';
 import { normalizeLogLevelAlias } from './logLevelAlias.js';
 
@@ -65,19 +66,38 @@ const envBooleanDefaulting = (fallback: boolean) =>
 
 const envBoolean = envBooleanDefaulting(false);
 
+/** The largest delay `setTimeout` honors; a longer one fires after 1 ms. */
+const MAX_TIMER_MS = 2_147_483_647;
+
+/**
+ * A timer variable in integer milliseconds, capped at {@link MAX_TIMER_MS}.
+ * `min` is `0` where zero disables the interval, delay, or cooldown, and `1`
+ * where zero would time out or evict at once. Bounded at startup because
+ * `AbortSignal.timeout()` throws on a negative value and Node also on a
+ * fractional one, failing every call that builds the timer instead.
+ */
+const envTimerMs = (min: 0 | 1) => z.coerce.number().int().min(min).max(MAX_TIMER_MS);
+
+/** Reads one environment variable for the field at a dot-joined schema `path`. */
+type EnvReader = (path: string, name: string) => string | undefined;
+
 /**
  * One signal's OTLP/HTTP endpoint, per the OTLP exporter spec: the
  * signal-specific variable is used as-is; otherwise `OTEL_EXPORTER_OTLP_ENDPOINT`
  * is the base and the signal path is appended to it, keeping any path prefix
- * and never doubling the slash. Undefined when neither is set.
+ * and never doubling the slash. Undefined when neither is set. Read through
+ * `read`, so the field is attributed to whichever variable supplied it.
  * @see https://opentelemetry.io/docs/specs/otel/protocol/exporter/#endpoint-urls-for-otlphttp
  */
 const otlpSignalEndpoint = (
-  signalEndpoint: string | undefined,
-  baseEndpoint: string | undefined,
+  read: EnvReader,
+  path: string,
+  signalVar: string,
   signalPath: 'v1/traces' | 'v1/metrics',
 ): string | undefined => {
+  const signalEndpoint = read(path, signalVar);
   if (signalEndpoint !== undefined) return signalEndpoint;
+  const baseEndpoint = read(path, 'OTEL_EXPORTER_OTLP_ENDPOINT');
   if (baseEndpoint === undefined) return undefined;
   return `${baseEndpoint.endsWith('/') ? baseEndpoint : `${baseEndpoint}/`}${signalPath}`;
 };
@@ -165,7 +185,7 @@ const ConfigSchema = z
       emptyStringAsUndefined,
       z.enum(['stateless', 'stateful', 'auto']).default('auto'),
     ),
-    mcpHttpPort: z.coerce.number().min(0).max(65535).default(3010),
+    mcpHttpPort: z.coerce.number().int().min(0).max(65535).default(3010),
     mcpHttpHost: z.string().default('127.0.0.1'),
     mcpHttpEndpointPath: z.string().default('/mcp'),
     /**
@@ -188,6 +208,7 @@ const ConfigSchema = z
      */
     mcpHttpMaxBodyBytes: z.coerce
       .number()
+      .int()
       .min(0)
       .default(1024 * 1024),
     /**
@@ -200,9 +221,9 @@ const ConfigSchema = z
      * public `https://` scheme instead of the proxy-to-container `http://`.
      */
     mcpPublicUrl: z.preprocess(emptyStringAsUndefined, z.url().optional()),
-    mcpHttpMaxPortRetries: z.coerce.number().default(15),
-    mcpHttpPortRetryDelayMs: z.coerce.number().default(50),
-    mcpStatefulSessionStaleTimeoutMs: z.coerce.number().default(1_800_000),
+    mcpHttpMaxPortRetries: z.coerce.number().int().min(0).default(15),
+    mcpHttpPortRetryDelayMs: envTimerMs(0).default(50),
+    mcpStatefulSessionStaleTimeoutMs: envTimerMs(1).default(1_800_000),
     /**
      * Kill switch for SSE stream replay under stateful HTTP. Replay is on by
      * default there — selecting a session mode is the opt-in, and a session
@@ -216,8 +237,8 @@ const ConfigSchema = z
     mcpHttpResumabilityMaxEvents: z.coerce.number().int().min(1).default(512),
     /** How long a retained event stays replayable, in milliseconds. */
     mcpHttpResumabilityTtlMs: z.coerce.number().int().min(1).default(300_000),
-    mcpHeartbeatIntervalMs: z.coerce.number().min(0).default(0),
-    mcpHeartbeatMissThreshold: z.coerce.number().min(1).default(3),
+    mcpHeartbeatIntervalMs: envTimerMs(0).default(0),
+    mcpHeartbeatMissThreshold: z.coerce.number().int().min(1).default(3),
     /**
      * Interval in milliseconds for an opt-in forced GC loop. Only takes effect
      * when the runtime is Bun and `globalThis.Bun.gc` is callable. When set,
@@ -229,7 +250,7 @@ const ConfigSchema = z
      * exhibiting heap growth: `60000` (1 min). Cheap (~50 ms reclaims dozens of
      * pairs); benign on Node / Workers / when unset.
      */
-    mcpGcPressureIntervalMs: z.coerce.number().min(0).default(0),
+    mcpGcPressureIntervalMs: envTimerMs(0).default(0),
     mcpAllowedOrigins: z.array(z.string()).optional(),
     mcpAuthSecretKey: z.string().optional(),
     /**
@@ -261,8 +282,8 @@ const ConfigSchema = z
     oauthIssuerUrl: z.url().optional(),
     oauthJwksUri: z.url().optional(),
     oauthAudience: z.string().optional(),
-    oauthJwksCooldownMs: z.coerce.number().default(300_000), // 5 minutes
-    oauthJwksTimeoutMs: z.coerce.number().default(5_000), // 5 seconds
+    oauthJwksCooldownMs: envTimerMs(0).default(300_000), // 5 minutes
+    oauthJwksTimeoutMs: envTimerMs(1).default(5_000), // 5 seconds
     mcpServerResourceIdentifier: z.url().optional(), // RFC 8707 resource indicator
     devMcpAuthBypass: envBoolean,
     devMcpClientId: z.string().optional(),
@@ -273,8 +294,9 @@ const ConfigSchema = z
     llmDefaultModel: z.string().default('google/gemini-2.5-flash-preview-05-20'),
     llmDefaultTemperature: z.coerce.number().optional(),
     llmDefaultTopP: z.coerce.number().optional(),
-    llmDefaultMaxTokens: z.coerce.number().optional(),
-    llmDefaultTopK: z.coerce.number().optional(),
+    llmDefaultMaxTokens: z.coerce.number().int().min(1).optional(),
+    // OpenRouter reads `top_k: 0` as "consider every token".
+    llmDefaultTopK: z.coerce.number().int().min(0).optional(),
     llmDefaultMinP: z.coerce.number().optional(),
     supabase: z
       .object({
@@ -323,7 +345,7 @@ const ConfigSchema = z
          * Per-canvas DuckDB `memory_limit` PRAGMA value, in MB.
          * Applied at instance creation; one DuckDB instance per canvasId.
          */
-        defaultMemoryLimitMb: z.coerce.number().min(64).default(1024),
+        defaultMemoryLimitMb: z.coerce.number().int().min(64).default(1024),
         /**
          * Sandbox root for path-targeted exports. Path-based `export()` calls
          * are resolved relative to this directory and rejected if they escape
@@ -356,7 +378,7 @@ const ConfigSchema = z
          * `MCP_AUTH_MODE=none` every caller shares one tenant, so this bounds
          * the whole deployment.
          */
-        maxCanvasesPerTenant: z.coerce.number().min(1).default(500),
+        maxCanvasesPerTenant: z.coerce.number().int().min(1).default(500),
         /** Sliding TTL in milliseconds. Default 24h. */
         ttlMs: z.coerce
           .number()
@@ -368,11 +390,11 @@ const ConfigSchema = z
           .min(1000)
           .default(7 * 24 * 60 * 60 * 1000),
         /** Sweeper interval in milliseconds. Default 60s. Set to 0 to disable. */
-        sweeperIntervalMs: z.coerce.number().min(0).default(60_000),
-        /** Default row cap for `query()` results. */
-        defaultRowLimit: z.coerce.number().min(1).default(10_000),
+        sweeperIntervalMs: envTimerMs(0).default(60_000),
+        /** Default row cap for `query()` results; a safe integer, as `query()` requires of `rowLimit`. */
+        defaultRowLimit: z.coerce.number().int().min(1).default(10_000),
         /** Number of rows to sniff for schema inference when schema is omitted. */
-        schemaSniffRows: z.coerce.number().min(1).default(100),
+        schemaSniffRows: z.coerce.number().int().min(1).default(100),
       })
       .refine((c) => c.absoluteCapMs >= c.ttlMs, {
         message:
@@ -423,7 +445,7 @@ const ConfigSchema = z
             baseUrl: z.url().optional(),
             defaultVoiceId: z.string().optional(),
             defaultModelId: z.string().optional(),
-            timeout: z.coerce.number().optional(),
+            timeout: envTimerMs(1).optional(),
           })
           .optional(),
         stt: z
@@ -433,7 +455,7 @@ const ConfigSchema = z
             apiKey: z.string().optional(),
             baseUrl: z.url().optional(),
             defaultModelId: z.string().optional(),
-            timeout: z.coerce.number().optional(),
+            timeout: envTimerMs(1).optional(),
           })
           .optional(),
       })
@@ -504,139 +526,169 @@ const parseConfig = (envOverrides?: Record<string, string | undefined>) => {
   // and when no manifest is reachable, so the framework defaults apply.
   const consumerPkg: PackageManifest = resolveAppRoot()?.manifest ?? {};
 
+  // Each field names the variable it reads, so a validation failure can name
+  // what the operator set (`CANVAS_DEFAULT_ROW_LIMIT`) rather than the field.
+  const envVarByPath: Record<string, string> = Object.create(null);
+  const read: EnvReader = (path, name) => {
+    envVarByPath[path] = name;
+    return env[name];
+  };
+
   const rawConfig = {
     pkg: {
-      name: env.PACKAGE_NAME ?? consumerPkg.name ?? frameworkPkg.name,
-      version: env.PACKAGE_VERSION ?? consumerPkg.version ?? frameworkPkg.version,
-      description: env.PACKAGE_DESCRIPTION ?? consumerPkg.description ?? frameworkPkg.description,
+      name: read('pkg.name', 'PACKAGE_NAME') ?? consumerPkg.name ?? frameworkPkg.name,
+      version:
+        read('pkg.version', 'PACKAGE_VERSION') ?? consumerPkg.version ?? frameworkPkg.version,
+      description:
+        read('pkg.description', 'PACKAGE_DESCRIPTION') ??
+        consumerPkg.description ??
+        frameworkPkg.description,
       keywords:
-        env.PACKAGE_KEYWORDS?.split(',')
+        read('pkg.keywords', 'PACKAGE_KEYWORDS')
+          ?.split(',')
           .map((k) => k.trim())
           .filter(Boolean) ?? consumerPkg.keywords,
     },
-    logLevel: env.MCP_LOG_LEVEL,
-    logsPath: env.LOGS_DIR,
-    logLlmInteractions: env.LOG_LLM_INTERACTIONS,
-    logToolFailurePayloads: env.LOG_TOOL_FAILURE_PAYLOADS,
-    logToolFailurePayloadMaxBytes: env.LOG_TOOL_FAILURE_PAYLOAD_MAX_BYTES,
-    logRateLimitThreshold: env.MCP_LOG_RATE_LIMIT_THRESHOLD,
-    logRateLimitWindowMs: env.MCP_LOG_RATE_LIMIT_WINDOW_MS,
-    environment: env.NODE_ENV,
-    mcpTransportType: env.MCP_TRANSPORT_TYPE,
-    mcpSessionMode: env.MCP_SESSION_MODE,
-    mcpHttpPort: env.MCP_HTTP_PORT,
-    mcpHttpHost: env.MCP_HTTP_HOST,
-    mcpHttpEndpointPath: env.MCP_HTTP_ENDPOINT_PATH,
-    mcpHttpMaxBodyBytes: env.MCP_HTTP_MAX_BODY_BYTES,
-    mcpPublicUrl: env.MCP_PUBLIC_URL,
-    mcpHttpMaxPortRetries: env.MCP_HTTP_MAX_PORT_RETRIES,
-    mcpHttpPortRetryDelayMs: env.MCP_HTTP_PORT_RETRY_DELAY_MS,
-    mcpStatefulSessionStaleTimeoutMs: env.MCP_STATEFUL_SESSION_STALE_TIMEOUT_MS,
-    mcpHttpResumability: env.MCP_HTTP_RESUMABILITY,
-    mcpHttpResumabilityMaxEvents: env.MCP_HTTP_RESUMABILITY_MAX_EVENTS,
-    mcpHttpResumabilityTtlMs: env.MCP_HTTP_RESUMABILITY_TTL_MS,
-    mcpHeartbeatIntervalMs: env.MCP_HEARTBEAT_INTERVAL_MS,
-    mcpHeartbeatMissThreshold: env.MCP_HEARTBEAT_MISS_THRESHOLD,
-    mcpGcPressureIntervalMs: env.MCP_GC_PRESSURE_INTERVAL_MS,
-    mcpAllowedOrigins: env.MCP_ALLOWED_ORIGINS?.split(',')
+    logLevel: read('logLevel', 'MCP_LOG_LEVEL'),
+    logsPath: read('logsPath', 'LOGS_DIR'),
+    logLlmInteractions: read('logLlmInteractions', 'LOG_LLM_INTERACTIONS'),
+    logToolFailurePayloads: read('logToolFailurePayloads', 'LOG_TOOL_FAILURE_PAYLOADS'),
+    logToolFailurePayloadMaxBytes: read(
+      'logToolFailurePayloadMaxBytes',
+      'LOG_TOOL_FAILURE_PAYLOAD_MAX_BYTES',
+    ),
+    logRateLimitThreshold: read('logRateLimitThreshold', 'MCP_LOG_RATE_LIMIT_THRESHOLD'),
+    logRateLimitWindowMs: read('logRateLimitWindowMs', 'MCP_LOG_RATE_LIMIT_WINDOW_MS'),
+    environment: read('environment', 'NODE_ENV'),
+    mcpTransportType: read('mcpTransportType', 'MCP_TRANSPORT_TYPE'),
+    mcpSessionMode: read('mcpSessionMode', 'MCP_SESSION_MODE'),
+    mcpHttpPort: read('mcpHttpPort', 'MCP_HTTP_PORT'),
+    mcpHttpHost: read('mcpHttpHost', 'MCP_HTTP_HOST'),
+    mcpHttpEndpointPath: read('mcpHttpEndpointPath', 'MCP_HTTP_ENDPOINT_PATH'),
+    mcpHttpMaxBodyBytes: read('mcpHttpMaxBodyBytes', 'MCP_HTTP_MAX_BODY_BYTES'),
+    mcpPublicUrl: read('mcpPublicUrl', 'MCP_PUBLIC_URL'),
+    mcpHttpMaxPortRetries: read('mcpHttpMaxPortRetries', 'MCP_HTTP_MAX_PORT_RETRIES'),
+    mcpHttpPortRetryDelayMs: read('mcpHttpPortRetryDelayMs', 'MCP_HTTP_PORT_RETRY_DELAY_MS'),
+    mcpStatefulSessionStaleTimeoutMs: read(
+      'mcpStatefulSessionStaleTimeoutMs',
+      'MCP_STATEFUL_SESSION_STALE_TIMEOUT_MS',
+    ),
+    mcpHttpResumability: read('mcpHttpResumability', 'MCP_HTTP_RESUMABILITY'),
+    mcpHttpResumabilityMaxEvents: read(
+      'mcpHttpResumabilityMaxEvents',
+      'MCP_HTTP_RESUMABILITY_MAX_EVENTS',
+    ),
+    mcpHttpResumabilityTtlMs: read('mcpHttpResumabilityTtlMs', 'MCP_HTTP_RESUMABILITY_TTL_MS'),
+    mcpHeartbeatIntervalMs: read('mcpHeartbeatIntervalMs', 'MCP_HEARTBEAT_INTERVAL_MS'),
+    mcpHeartbeatMissThreshold: read('mcpHeartbeatMissThreshold', 'MCP_HEARTBEAT_MISS_THRESHOLD'),
+    mcpGcPressureIntervalMs: read('mcpGcPressureIntervalMs', 'MCP_GC_PRESSURE_INTERVAL_MS'),
+    mcpAllowedOrigins: read('mcpAllowedOrigins', 'MCP_ALLOWED_ORIGINS')
+      ?.split(',')
       .map((o) => o.trim())
       .filter(Boolean),
-    mcpAuthSecretKey: env.MCP_AUTH_SECRET_KEY,
-    mcpRequestStateKey: env.MCP_REQUEST_STATE_KEY,
-    mcpJwtExpectedIssuer: env.MCP_JWT_EXPECTED_ISSUER,
-    mcpJwtExpectedAudience: env.MCP_JWT_EXPECTED_AUDIENCE,
-    mcpAuthMode: env.MCP_AUTH_MODE,
-    mcpAuthDisableScopeChecks: env.MCP_AUTH_DISABLE_SCOPE_CHECKS,
-    oauthIssuerUrl: env.OAUTH_ISSUER_URL,
-    oauthJwksUri: env.OAUTH_JWKS_URI,
-    oauthAudience: env.OAUTH_AUDIENCE,
-    oauthJwksCooldownMs: env.OAUTH_JWKS_COOLDOWN_MS,
-    oauthJwksTimeoutMs: env.OAUTH_JWKS_TIMEOUT_MS,
-    mcpServerResourceIdentifier: env.MCP_SERVER_RESOURCE_IDENTIFIER,
-    devMcpAuthBypass: env.DEV_MCP_AUTH_BYPASS,
-    devMcpClientId: env.DEV_MCP_CLIENT_ID,
-    devMcpScopes: env.DEV_MCP_SCOPES?.split(',').map((s) => s.trim()),
-    openrouterAppUrl: env.OPENROUTER_APP_URL,
-    openrouterAppName: env.OPENROUTER_APP_NAME,
-    openrouterApiKey: env.OPENROUTER_API_KEY,
-    llmDefaultModel: env.LLM_DEFAULT_MODEL,
-    llmDefaultTemperature: env.LLM_DEFAULT_TEMPERATURE,
-    llmDefaultTopP: env.LLM_DEFAULT_TOP_P,
-    llmDefaultMaxTokens: env.LLM_DEFAULT_MAX_TOKENS,
-    llmDefaultTopK: env.LLM_DEFAULT_TOP_K,
-    llmDefaultMinP: env.LLM_DEFAULT_MIN_P,
+    mcpAuthSecretKey: read('mcpAuthSecretKey', 'MCP_AUTH_SECRET_KEY'),
+    mcpRequestStateKey: read('mcpRequestStateKey', 'MCP_REQUEST_STATE_KEY'),
+    mcpJwtExpectedIssuer: read('mcpJwtExpectedIssuer', 'MCP_JWT_EXPECTED_ISSUER'),
+    mcpJwtExpectedAudience: read('mcpJwtExpectedAudience', 'MCP_JWT_EXPECTED_AUDIENCE'),
+    mcpAuthMode: read('mcpAuthMode', 'MCP_AUTH_MODE'),
+    mcpAuthDisableScopeChecks: read('mcpAuthDisableScopeChecks', 'MCP_AUTH_DISABLE_SCOPE_CHECKS'),
+    oauthIssuerUrl: read('oauthIssuerUrl', 'OAUTH_ISSUER_URL'),
+    oauthJwksUri: read('oauthJwksUri', 'OAUTH_JWKS_URI'),
+    oauthAudience: read('oauthAudience', 'OAUTH_AUDIENCE'),
+    oauthJwksCooldownMs: read('oauthJwksCooldownMs', 'OAUTH_JWKS_COOLDOWN_MS'),
+    oauthJwksTimeoutMs: read('oauthJwksTimeoutMs', 'OAUTH_JWKS_TIMEOUT_MS'),
+    mcpServerResourceIdentifier: read(
+      'mcpServerResourceIdentifier',
+      'MCP_SERVER_RESOURCE_IDENTIFIER',
+    ),
+    devMcpAuthBypass: read('devMcpAuthBypass', 'DEV_MCP_AUTH_BYPASS'),
+    devMcpClientId: read('devMcpClientId', 'DEV_MCP_CLIENT_ID'),
+    devMcpScopes: read('devMcpScopes', 'DEV_MCP_SCOPES')
+      ?.split(',')
+      .map((s) => s.trim()),
+    openrouterAppUrl: read('openrouterAppUrl', 'OPENROUTER_APP_URL'),
+    openrouterAppName: read('openrouterAppName', 'OPENROUTER_APP_NAME'),
+    openrouterApiKey: read('openrouterApiKey', 'OPENROUTER_API_KEY'),
+    llmDefaultModel: read('llmDefaultModel', 'LLM_DEFAULT_MODEL'),
+    llmDefaultTemperature: read('llmDefaultTemperature', 'LLM_DEFAULT_TEMPERATURE'),
+    llmDefaultTopP: read('llmDefaultTopP', 'LLM_DEFAULT_TOP_P'),
+    llmDefaultMaxTokens: read('llmDefaultMaxTokens', 'LLM_DEFAULT_MAX_TOKENS'),
+    llmDefaultTopK: read('llmDefaultTopK', 'LLM_DEFAULT_TOP_K'),
+    llmDefaultMinP: read('llmDefaultMinP', 'LLM_DEFAULT_MIN_P'),
     supabase: env.SUPABASE_URL
       ? {
-          url: env.SUPABASE_URL,
-          anonKey: env.SUPABASE_ANON_KEY,
-          serviceRoleKey: env.SUPABASE_SERVICE_ROLE_KEY,
+          url: read('supabase.url', 'SUPABASE_URL'),
+          anonKey: read('supabase.anonKey', 'SUPABASE_ANON_KEY'),
+          serviceRoleKey: read('supabase.serviceRoleKey', 'SUPABASE_SERVICE_ROLE_KEY'),
         }
       : undefined,
     storage: {
-      providerType: env.STORAGE_PROVIDER_TYPE,
-      filesystemPath: env.STORAGE_FILESYSTEM_PATH,
+      providerType: read('storage.providerType', 'STORAGE_PROVIDER_TYPE'),
+      filesystemPath: read('storage.filesystemPath', 'STORAGE_FILESYSTEM_PATH'),
     },
     canvas: {
-      providerType: env.CANVAS_PROVIDER_TYPE,
-      defaultMemoryLimitMb: env.CANVAS_DEFAULT_MEMORY_LIMIT_MB,
-      exportRootPath: env.CANVAS_EXPORT_PATH,
-      tempRootPath: env.CANVAS_TEMP_PATH,
-      maxCanvasesPerTenant: env.CANVAS_MAX_CANVASES_PER_TENANT,
-      ttlMs: env.CANVAS_TTL_MS,
-      absoluteCapMs: env.CANVAS_ABSOLUTE_CAP_MS,
-      sweeperIntervalMs: env.CANVAS_SWEEPER_INTERVAL_MS,
-      defaultRowLimit: env.CANVAS_DEFAULT_ROW_LIMIT,
-      schemaSniffRows: env.CANVAS_SCHEMA_SNIFF_ROWS,
+      providerType: read('canvas.providerType', 'CANVAS_PROVIDER_TYPE'),
+      defaultMemoryLimitMb: read('canvas.defaultMemoryLimitMb', 'CANVAS_DEFAULT_MEMORY_LIMIT_MB'),
+      exportRootPath: read('canvas.exportRootPath', 'CANVAS_EXPORT_PATH'),
+      tempRootPath: read('canvas.tempRootPath', 'CANVAS_TEMP_PATH'),
+      maxCanvasesPerTenant: read('canvas.maxCanvasesPerTenant', 'CANVAS_MAX_CANVASES_PER_TENANT'),
+      ttlMs: read('canvas.ttlMs', 'CANVAS_TTL_MS'),
+      absoluteCapMs: read('canvas.absoluteCapMs', 'CANVAS_ABSOLUTE_CAP_MS'),
+      sweeperIntervalMs: read('canvas.sweeperIntervalMs', 'CANVAS_SWEEPER_INTERVAL_MS'),
+      defaultRowLimit: read('canvas.defaultRowLimit', 'CANVAS_DEFAULT_ROW_LIMIT'),
+      schemaSniffRows: read('canvas.schemaSniffRows', 'CANVAS_SCHEMA_SNIFF_ROWS'),
     },
     openTelemetry: {
-      enabled: env.OTEL_ENABLED,
-      serviceName: env.OTEL_SERVICE_NAME,
-      serviceVersion: env.OTEL_SERVICE_VERSION,
+      enabled: read('openTelemetry.enabled', 'OTEL_ENABLED'),
+      serviceName: read('openTelemetry.serviceName', 'OTEL_SERVICE_NAME'),
+      serviceVersion: read('openTelemetry.serviceVersion', 'OTEL_SERVICE_VERSION'),
       tracesEndpoint: otlpSignalEndpoint(
-        env.OTEL_EXPORTER_OTLP_TRACES_ENDPOINT,
-        env.OTEL_EXPORTER_OTLP_ENDPOINT,
+        read,
+        'openTelemetry.tracesEndpoint',
+        'OTEL_EXPORTER_OTLP_TRACES_ENDPOINT',
         'v1/traces',
       ),
       metricsEndpoint: otlpSignalEndpoint(
-        env.OTEL_EXPORTER_OTLP_METRICS_ENDPOINT,
-        env.OTEL_EXPORTER_OTLP_ENDPOINT,
+        read,
+        'openTelemetry.metricsEndpoint',
+        'OTEL_EXPORTER_OTLP_METRICS_ENDPOINT',
         'v1/metrics',
       ),
-      logsEndpoint: env.OTEL_EXPORTER_OTLP_LOGS_ENDPOINT,
-      samplingRatio: env.OTEL_TRACES_SAMPLER_ARG,
-      logLevel: env.OTEL_LOG_LEVEL,
+      logsEndpoint: read('openTelemetry.logsEndpoint', 'OTEL_EXPORTER_OTLP_LOGS_ENDPOINT'),
+      samplingRatio: read('openTelemetry.samplingRatio', 'OTEL_TRACES_SAMPLER_ARG'),
+      logLevel: read('openTelemetry.logLevel', 'OTEL_LOG_LEVEL'),
     },
     speech:
       env.SPEECH_TTS_ENABLED || env.SPEECH_STT_ENABLED
         ? {
             tts: env.SPEECH_TTS_ENABLED
               ? {
-                  enabled: env.SPEECH_TTS_ENABLED,
-                  provider: env.SPEECH_TTS_PROVIDER,
-                  apiKey: env.SPEECH_TTS_API_KEY,
-                  baseUrl: env.SPEECH_TTS_BASE_URL,
-                  defaultVoiceId: env.SPEECH_TTS_DEFAULT_VOICE_ID,
-                  defaultModelId: env.SPEECH_TTS_DEFAULT_MODEL_ID,
-                  timeout: env.SPEECH_TTS_TIMEOUT,
+                  enabled: read('speech.tts.enabled', 'SPEECH_TTS_ENABLED'),
+                  provider: read('speech.tts.provider', 'SPEECH_TTS_PROVIDER'),
+                  apiKey: read('speech.tts.apiKey', 'SPEECH_TTS_API_KEY'),
+                  baseUrl: read('speech.tts.baseUrl', 'SPEECH_TTS_BASE_URL'),
+                  defaultVoiceId: read('speech.tts.defaultVoiceId', 'SPEECH_TTS_DEFAULT_VOICE_ID'),
+                  defaultModelId: read('speech.tts.defaultModelId', 'SPEECH_TTS_DEFAULT_MODEL_ID'),
+                  timeout: read('speech.tts.timeout', 'SPEECH_TTS_TIMEOUT'),
                 }
               : undefined,
             stt: env.SPEECH_STT_ENABLED
               ? {
-                  enabled: env.SPEECH_STT_ENABLED,
-                  provider: env.SPEECH_STT_PROVIDER,
-                  apiKey: env.SPEECH_STT_API_KEY,
-                  baseUrl: env.SPEECH_STT_BASE_URL,
-                  defaultModelId: env.SPEECH_STT_DEFAULT_MODEL_ID,
-                  timeout: env.SPEECH_STT_TIMEOUT,
+                  enabled: read('speech.stt.enabled', 'SPEECH_STT_ENABLED'),
+                  provider: read('speech.stt.provider', 'SPEECH_STT_PROVIDER'),
+                  apiKey: read('speech.stt.apiKey', 'SPEECH_STT_API_KEY'),
+                  baseUrl: read('speech.stt.baseUrl', 'SPEECH_STT_BASE_URL'),
+                  defaultModelId: read('speech.stt.defaultModelId', 'SPEECH_STT_DEFAULT_MODEL_ID'),
+                  timeout: read('speech.stt.timeout', 'SPEECH_STT_TIMEOUT'),
                 }
               : undefined,
           }
         : undefined,
     // The following fields will be derived and are not directly from env
-    mcpServerName: env.MCP_SERVER_NAME,
-    mcpServerVersion: env.MCP_SERVER_VERSION,
-    mcpServerDescription: env.MCP_SERVER_DESCRIPTION,
-    mcpServerHomepage: env.MCP_SERVER_HOMEPAGE,
+    mcpServerName: read('mcpServerName', 'MCP_SERVER_NAME'),
+    mcpServerVersion: read('mcpServerVersion', 'MCP_SERVER_VERSION'),
+    mcpServerDescription: read('mcpServerDescription', 'MCP_SERVER_DESCRIPTION'),
+    mcpServerHomepage: read('mcpServerHomepage', 'MCP_SERVER_HOMEPAGE'),
   };
 
   // Use a temporary schema to parse package info and provide defaults
@@ -680,16 +732,18 @@ const parseConfig = (envOverrides?: Record<string, string | undefined>) => {
   const parsedConfig = ConfigSchema.safeParse(finalRawConfig);
 
   if (!parsedConfig.success) {
+    const issues = toEnvIssues(parsedConfig.error.issues, envVarByPath);
     // Keep existing TTY error logging for developer convenience.
     if (process.stdout.isTTY) {
       console.error(
         '❌ Invalid configuration found. Please check your environment variables.',
-        parsedConfig.error.flatten().fieldErrors,
+        issues,
       );
     }
     // Throw a specific, typed error instead of exiting.
-    throw configurationError('Invalid application configuration.', {
-      validationErrors: parsedConfig.error.flatten().fieldErrors,
+    throw configurationError(`Invalid application configuration:\n${formatEnvIssues(issues)}`, {
+      validationErrors: z.flattenError(parsedConfig.error).fieldErrors,
+      issues,
     });
   }
 

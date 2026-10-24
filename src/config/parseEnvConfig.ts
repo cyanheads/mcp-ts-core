@@ -8,6 +8,7 @@
 import type { z } from 'zod';
 
 import { configurationError } from '../types-global/errors.js';
+import { formatEnvIssues, toEnvIssues } from './envIssue.js';
 import { emptyStringAsUndefined } from './envValue.js';
 
 /**
@@ -54,8 +55,16 @@ import { emptyStringAsUndefined } from './envValue.js';
  *   - MY_API_KEY (apiKey): Invalid input: expected string, received undefined
  * ```
  *
+ * A failure inside a field — an array element a `.transform()` / `.pipe()`
+ * produced, a property of an object parsed from one JSON variable — names the
+ * variable that fed the field, with the full schema path in parentheses
+ * (`MY_ENDPOINTS (endpoints.0.url)`). A root-level `.refine()` issue has no
+ * field to attribute and is reported under its empty path.
+ *
  * @param schema - Zod schema describing the server config shape.
- * @param envMap - Maps top-level schema keys to their env var names.
+ * @param envMap - Maps top-level schema keys to their env var names. Every
+ *   issue under a key — the key's own value or anything nested in it — is
+ *   attributed to that key's variable.
  * @param env - Source of env values. Defaults to `process.env`; override for testing.
  * @returns Parsed, validated config typed as `z.infer<T>`.
  * @throws {McpError} With `ConfigurationError` code if validation fails.
@@ -65,7 +74,8 @@ export function parseEnvConfig<T extends z.ZodType>(
   envMap: Record<string, string>,
   env: Record<string, string | undefined> = typeof process !== 'undefined' ? process.env : {},
 ): z.infer<T> {
-  const input: Record<string, unknown> = {};
+  // Null-prototype, so a schema key like `constructor` reads as absent rather than inherited.
+  const input: Record<string, unknown> = Object.create(null);
   for (const [key, envVar] of Object.entries(envMap)) {
     input[key] = emptyStringAsUndefined(env[envVar]);
   }
@@ -75,21 +85,9 @@ export function parseEnvConfig<T extends z.ZodType>(
     return result.data;
   }
 
-  const lines = result.error.issues.map((issue) => {
-    const path = issue.path.join('.');
-    const envVar = envMap[path] ?? path;
-    return `  - ${envVar} (${path}): ${issue.message}`;
-  });
-
-  throw configurationError(`Server config validation failed:\n${lines.join('\n')}`, {
-    issues: result.error.issues.map((issue) => {
-      const path = issue.path.join('.');
-      return {
-        path,
-        envVar: envMap[path] ?? path,
-        message: issue.message,
-        code: issue.code,
-      };
-    }),
+  // The first path segment is always the envMap key whose variable fed the value.
+  const issues = toEnvIssues(result.error.issues, envMap);
+  throw configurationError(`Server config validation failed:\n${formatEnvIssues(issues)}`, {
+    issues,
   });
 }

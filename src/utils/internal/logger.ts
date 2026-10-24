@@ -228,8 +228,15 @@ const CORRELATION_KEYS: ReadonlySet<string> = new Set([
   'traceId',
 ]);
 
-/** The `base` the process logger writes on every line: constants only. */
-function processLogBase(): Record<string, unknown> {
+/** The keys of the process logger's `base`, known without reading config. */
+const PROCESS_LOG_BASE_KEYS = ['env', 'version', 'pid'] as const;
+
+/**
+ * The `base` the process logger writes on every line: constants only. Called
+ * at {@link Logger.initialize}, never at module load — reading config here
+ * parses it, and a bad framework variable would then throw at import.
+ */
+function processLogBase(): Record<(typeof PROCESS_LOG_BASE_KEYS)[number], unknown> {
   return {
     env: config.environment,
     version: config.mcpServerVersion,
@@ -240,7 +247,7 @@ function processLogBase(): Record<string, unknown> {
 /**
  * The fields the logger's pino instances write on a line themselves: `level`
  * and `time` before the record and `msg` after it, the process logger's
- * `base` ({@link processLogBase}), and pino's default `base` — `pid` and
+ * `base` ({@link PROCESS_LOG_BASE_KEYS}), and pino's default `base` — `pid` and
  * `hostname` — on `interactions.log`. A record key with one of these names
  * would be a second copy in the line: a transport routes a line by the last
  * `level` it parses, so a caller's `level: 'high'` would drop the record from
@@ -251,8 +258,7 @@ const LINE_FIELDS: ReadonlySet<string> = new Set([
   'level',
   'time',
   'msg',
-  ...Object.keys(processLogBase()),
-  'pid',
+  ...PROCESS_LOG_BASE_KEYS,
   'hostname',
 ]);
 
@@ -523,8 +529,12 @@ export class Logger {
   private currentMcpLevel: McpLogLevel = 'info';
   private transportType: 'stdio' | 'http' | undefined;
 
-  private rateLimitThreshold = config.logRateLimitThreshold;
-  private rateLimitWindow = config.logRateLimitWindowMs;
+  /**
+   * Read from config at {@link initialize} — the limiter runs only after it —
+   * since the singleton is built at module load, where a config read would parse it.
+   */
+  private rateLimitThreshold = 0;
+  private rateLimitWindow = 0;
   private messageCounts = new Map<string, { count: number; firstSeen: number }>();
   private suppressedMessages = new Map<string, number>();
   private lastSweep = Date.now();
@@ -666,6 +676,8 @@ export class Logger {
     }
     this.currentMcpLevel = level;
     this.transportType = transportType;
+    this.rateLimitThreshold = config.logRateLimitThreshold;
+    this.rateLimitWindow = config.logRateLimitWindowMs;
     const fileSinks: FileSinkProbe =
       !isServerless() && config.logsPath
         ? await probeFileSinks(config.logsPath)

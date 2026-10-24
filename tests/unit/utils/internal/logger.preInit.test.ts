@@ -36,14 +36,25 @@ vi.mock('pino', () => {
   return { default: pino };
 });
 
-vi.mock('@/config/index.js', () => ({
-  config: {
+const { configReads, configValues } = vi.hoisted(() => ({
+  /** Every config field the logger read, in order. */
+  configReads: [] as PropertyKey[],
+  configValues: {
     environment: 'testing',
     logRateLimitThreshold: 0, // Rate limiting off: the replay asserts on every record.
     logRateLimitWindowMs: 60_000,
     logsPath: undefined,
     mcpServerVersion: '1.0.0-test',
   },
+}));
+
+vi.mock('@/config/index.js', () => ({
+  config: new Proxy(configValues, {
+    get(target, prop, receiver) {
+      configReads.push(prop);
+      return Reflect.get(target, prop, receiver);
+    },
+  }),
 }));
 
 /**
@@ -227,6 +238,54 @@ describe('records logged before initialize', () => {
       'info',
       'notice',
     ]);
+  });
+
+  it('are written by a logger whose module read no config when it loaded (#746)', async () => {
+    configReads.length = 0;
+
+    const { logger, pino } = await freshLogger();
+
+    // Loading the module must not parse config: a bad framework variable would
+    // otherwise throw at import, before createApp() can report it.
+    expect(configReads).toEqual([]);
+    logger.info('Boot step');
+    await logger.initialize('info');
+    expect(messagesAt(pino, 'info')).toContain('Boot step');
+  });
+
+  it('carry the configured environment and version on every line', async () => {
+    const { logger } = await freshLogger();
+    const pinoFactory = (await import('pino')).default as unknown as ReturnType<typeof vi.fn>;
+    pinoFactory.mockClear();
+
+    await logger.initialize('info');
+
+    expect(pinoFactory.mock.calls[0]?.[0]).toMatchObject({
+      base: { env: 'testing', version: '1.0.0-test' },
+    });
+  });
+
+  it('are rate limited by the threshold and window config holds at initialize', async () => {
+    const { logger, pino } = await freshLogger();
+    // Set after the module loaded and before initialize: the limiter must take these.
+    configValues.logRateLimitThreshold = 2;
+    configValues.logRateLimitWindowMs = 1_000;
+    try {
+      await logger.initialize('info');
+      for (let index = 0; index < 5; index++) logger.info('Repeated line');
+
+      expect(messagesAt(pino, 'info').filter((message) => message === 'Repeated line')).toEqual([
+        'Repeated line',
+        'Repeated line',
+      ]);
+      await logger.close();
+      expect(messagesAt(pino, 'warn')).toEqual([
+        'Suppressed 3 occurrences of "info:Repeated line" — rate limit is 2 per 1000ms.',
+      ]);
+    } finally {
+      configValues.logRateLimitThreshold = 0;
+      configValues.logRateLimitWindowMs = 60_000;
+    }
   });
 
   it('are dropped rather than buffered after the logger has been closed', async () => {

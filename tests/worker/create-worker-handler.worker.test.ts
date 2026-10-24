@@ -1,8 +1,10 @@
 /**
  * @fileoverview Worker-runtime tests for createWorkerHandler.
  * Covers binding injection, origin guard, scheduled handler, end-to-end MCP
- * JSON-RPC (initialize → tools/list → tools/call), and runtime detection
- * (`runtimeCaps.isWorkerLike === true` under `nodejs_compat`).
+ * JSON-RPC (initialize → tools/list → tools/call), runtime detection
+ * (`runtimeCaps.isWorkerLike === true` under `nodejs_compat`), and a handler
+ * without identity options taking auth, environment, and transport from its
+ * bindings on the first request even when config was parsed before it.
  * @module tests/worker/create-worker-handler.worker.test
  */
 
@@ -12,8 +14,11 @@ import {
   waitOnExecutionContext,
 } from 'cloudflare:test';
 import { env } from 'cloudflare:workers';
+import { SignJWT } from 'jose';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { resetConfig } from '@/config/index.js';
+import { config, resetConfig } from '@/config/index.js';
+import { tool, z } from '@/core/index.js';
+import { createWorkerHandler } from '@/core/worker.js';
 import { logger } from '@/utils/internal/logger.js';
 import worker, {
   createWorkerLifecycleTestHandler,
@@ -279,6 +284,134 @@ describe('createWorkerHandler in the Workers runtime', () => {
       ).resolves.toBeUndefined();
       expect(control.setupCalls).toBe(1);
       expect(control.scheduledCalls).toBeUndefined();
+    });
+  });
+
+  describe('a handler created without name, version, or sessionMode (#746)', () => {
+    /** The variables these cases bind, plus the two the handler derives from them. */
+    const KEYS = [
+      'MCP_AUTH_MODE',
+      'MCP_AUTH_SECRET_KEY',
+      'MCP_TRANSPORT_TYPE',
+      'NODE_ENV',
+    ] as const;
+    const saved = new Map(KEYS.map((key) => [key, process.env[key]]));
+    const SECRET = 'worker-unnamed-handler-secret-0123456789';
+    const jwtEnv = { ...env, MCP_AUTH_MODE: 'jwt', MCP_AUTH_SECRET_KEY: SECRET };
+
+    /**
+     * Parses config before the handler's first request — what a module-scope
+     * config read at import does. `populated` is what the runtime had already
+     * copied from bindings into `process.env` by then: nothing when it does not
+     * populate `process.env`, the same-named bindings when it does. Neither
+     * carries the two values the handler derives at request time.
+     */
+    function parseConfigBeforeFirstRequest(populated: Record<string, string> = {}): void {
+      for (const key of KEYS) delete process.env[key];
+      Object.assign(process.env, populated);
+      resetConfig();
+      expect([config.mcpTransportType, config.environment]).toEqual(['stdio', 'development']);
+    }
+
+    /** A tool that reports the tenant its request resolved to, after touching `ctx.state`. */
+    const tenantProbe = tool('tenant_probe', {
+      description: 'Reports the tenant a request resolved to, after touching ctx.state.',
+      input: z.object({}),
+      output: z.object({ tenantId: z.string().describe('Resolved tenant') }),
+      async handler(_input, ctx) {
+        await ctx.state.get('probe');
+        return { tenantId: ctx.tenantId ?? '(none)' };
+      },
+      format: (result) => [{ type: 'text', text: result.tenantId }],
+    });
+
+    afterEach(() => {
+      for (const [key, value] of saved) {
+        if (value === undefined) delete process.env[key];
+        else process.env[key] = value;
+      }
+      resetConfig();
+    });
+
+    it('enforces MCP_AUTH_MODE=jwt bindings on its first request', async () => {
+      parseConfigBeforeFirstRequest();
+      expect(config.mcpAuthMode).toBe('none');
+      const unnamed = createWorkerHandler({ tools: [] });
+      const ctx = createExecutionContext();
+
+      const response = await unnamed.fetch(
+        new Request('http://example.com/mcp', {
+          method: 'POST',
+          headers: MCP_HEADERS,
+          body: initializeBody(1),
+        }),
+        jwtEnv,
+        ctx,
+      );
+      await waitOnExecutionContext(ctx);
+
+      expect(response.status).toBe(401);
+      expect(response.headers.get('WWW-Authenticate')).toMatch(/^Bearer /);
+    });
+
+    it('fails a token without a tid closed on ctx.state when the auth bindings were already in process.env', async () => {
+      parseConfigBeforeFirstRequest({ MCP_AUTH_MODE: 'jwt', MCP_AUTH_SECRET_KEY: SECRET });
+      const unnamed = createWorkerHandler({ tools: [tenantProbe] });
+      const token = await new SignJWT({ client_id: 'worker-test-client', scope: 'tool:probe:read' })
+        .setProtectedHeader({ alg: 'HS256' })
+        .setIssuedAt()
+        .setExpirationTime('5m')
+        .sign(new TextEncoder().encode(SECRET));
+      const post = async (body: string, sessionId?: string | null) => {
+        const ctx = createExecutionContext();
+        const response = await unnamed.fetch(
+          new Request('http://example.com/mcp', {
+            method: 'POST',
+            headers: {
+              ...MCP_HEADERS,
+              Authorization: `Bearer ${token}`,
+              ...(sessionId && { 'Mcp-Session-Id': sessionId }),
+            },
+            body,
+          }),
+          jwtEnv,
+          ctx,
+        );
+        await waitOnExecutionContext(ctx);
+        return response;
+      };
+
+      const init = await post(initializeBody(1));
+      expect(init.status).toBe(200);
+      const call = await post(
+        jsonrpc(2, 'tools/call', { name: 'tenant_probe', arguments: {} }),
+        init.headers.get('Mcp-Session-Id'),
+      );
+      const [frame] = parseSseDataFrames(await call.text()) as Array<{
+        result: { isError?: boolean; structuredContent: { error?: { code: number } } };
+      }>;
+
+      expect(frame?.result.isError).toBe(true);
+      expect(frame?.result.structuredContent.error?.code).toBe(-32600);
+    });
+
+    it('reads the ENVIRONMENT binding and the http transport on its first request', async () => {
+      parseConfigBeforeFirstRequest();
+      const unnamed = createWorkerHandler({ tools: [] });
+      const ctx = createExecutionContext();
+
+      const response = await unnamed.fetch(
+        new Request('http://example.com/mcp'),
+        lifecycleEnv({ ENVIRONMENT: 'production' }),
+        ctx,
+      );
+      await waitOnExecutionContext(ctx);
+
+      expect(response.status).toBe(200);
+      await expect(response.json()).resolves.toMatchObject({
+        server: { environment: 'production' },
+      });
+      expect([config.environment, config.mcpTransportType]).toEqual(['production', 'http']);
     });
   });
 

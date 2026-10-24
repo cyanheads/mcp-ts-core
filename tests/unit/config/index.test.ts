@@ -556,6 +556,221 @@ describe('config parsing', () => {
     consoleSpy.mockRestore();
   });
 
+  /** The `ConfigurationError` `parseConfig` throws for `overrides`. */
+  function rejection(overrides: Record<string, string>): McpError {
+    const consoleSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      parseConfig(overrides);
+    } catch (error) {
+      expect(error).toBeInstanceOf(McpError);
+      expect((error as McpError).code).toBe(JsonRpcErrorCode.ConfigurationError);
+      return error as McpError;
+    } finally {
+      consoleSpy.mockRestore();
+    }
+    return expect.fail(`parseConfig accepted ${JSON.stringify(overrides)}`);
+  }
+
+  describe('the validation error names the variable at fault (#746)', () => {
+    it('lists each failure as the variable, its schema path, and the reason', () => {
+      const error = rejection({ MCP_LOG_LEVEL: 'abc' });
+
+      expect(error.message).toMatch(
+        /^Invalid application configuration:\n {2}- MCP_LOG_LEVEL \(logLevel\): Invalid option/,
+      );
+      expect(error.data?.issues).toEqual([
+        expect.objectContaining({ envVar: 'MCP_LOG_LEVEL', path: 'logLevel' }),
+      ]);
+    });
+
+    it('names a nested field by its own variable, not its parent object', () => {
+      const error = rejection({ CANVAS_DEFAULT_ROW_LIMIT: '-1' });
+
+      expect(error.message).toContain('  - CANVAS_DEFAULT_ROW_LIMIT (canvas.defaultRowLimit): ');
+      expect(error.data?.issues).toEqual([
+        expect.objectContaining({
+          envVar: 'CANVAS_DEFAULT_ROW_LIMIT',
+          path: 'canvas.defaultRowLimit',
+        }),
+      ]);
+    });
+
+    it('names the variable a cross-field refinement points at', () => {
+      const error = rejection({ CANVAS_TTL_MS: '600000', CANVAS_ABSOLUTE_CAP_MS: '60000' });
+
+      expect(error.message).toContain('  - CANVAS_ABSOLUTE_CAP_MS (canvas.absoluteCapMs): ');
+    });
+
+    it('names the base OTLP endpoint when the signal URLs derived from it are invalid', () => {
+      const error = rejection({ OTEL_EXPORTER_OTLP_ENDPOINT: 'not a url' });
+
+      expect(error.data?.issues).toEqual([
+        expect.objectContaining({
+          envVar: 'OTEL_EXPORTER_OTLP_ENDPOINT',
+          path: 'openTelemetry.tracesEndpoint',
+        }),
+        expect.objectContaining({
+          envVar: 'OTEL_EXPORTER_OTLP_ENDPOINT',
+          path: 'openTelemetry.metricsEndpoint',
+        }),
+      ]);
+    });
+
+    it('names an auth requirement by the variable it requires', () => {
+      const error = rejection({
+        NODE_ENV: 'development',
+        MCP_AUTH_MODE: 'jwt',
+        MCP_AUTH_SECRET_KEY: '',
+        DEV_MCP_AUTH_BYPASS: '',
+      });
+
+      expect(error.message).toContain('  - MCP_AUTH_SECRET_KEY (mcpAuthSecretKey): ');
+    });
+  });
+
+  describe('count variables accept only integers (#747)', () => {
+    it.each([
+      ['MCP_HTTP_PORT', '3010.5'],
+      ['MCP_HTTP_MAX_PORT_RETRIES', '2.5'],
+      ['MCP_HTTP_MAX_PORT_RETRIES', '-1'],
+      ['MCP_HTTP_MAX_BODY_BYTES', '1048576.5'],
+      ['MCP_HEARTBEAT_MISS_THRESHOLD', '2.5'],
+      ['CANVAS_DEFAULT_MEMORY_LIMIT_MB', '1024.5'],
+      ['CANVAS_MAX_CANVASES_PER_TENANT', '10.5'],
+      ['CANVAS_DEFAULT_ROW_LIMIT', '500.5'],
+      ['CANVAS_DEFAULT_ROW_LIMIT', '1e20'],
+      ['CANVAS_SCHEMA_SNIFF_ROWS', '100.5'],
+      ['LLM_DEFAULT_MAX_TOKENS', '1024.5'],
+      ['LLM_DEFAULT_MAX_TOKENS', '0'],
+      ['LLM_DEFAULT_MAX_TOKENS', '-1'],
+      ['LLM_DEFAULT_TOP_K', '40.5'],
+      ['LLM_DEFAULT_TOP_K', '-1'],
+    ])('rejects %s=%s, naming the variable', (name, value) => {
+      expect(rejection({ [name]: value }).message).toContain(`  - ${name} (`);
+    });
+
+    it('parses integer values, blanks, and defaults unchanged', () => {
+      const set = parseConfig({
+        MCP_HTTP_PORT: '8080',
+        MCP_HTTP_MAX_PORT_RETRIES: '0',
+        MCP_HTTP_MAX_BODY_BYTES: '0',
+        MCP_HEARTBEAT_MISS_THRESHOLD: '5',
+        CANVAS_DEFAULT_MEMORY_LIMIT_MB: '2048',
+        CANVAS_MAX_CANVASES_PER_TENANT: '10',
+        CANVAS_DEFAULT_ROW_LIMIT: '500',
+        CANVAS_SCHEMA_SNIFF_ROWS: '50',
+        LLM_DEFAULT_MAX_TOKENS: '1024',
+        LLM_DEFAULT_TOP_K: '40',
+      });
+      // OpenRouter reads `top_k: 0` as "consider every token", so 0 stays valid.
+      expect(parseConfig({ LLM_DEFAULT_TOP_K: '0' }).llmDefaultTopK).toBe(0);
+      expect(set).toMatchObject({
+        mcpHttpPort: 8080,
+        mcpHttpMaxPortRetries: 0,
+        mcpHttpMaxBodyBytes: 0,
+        mcpHeartbeatMissThreshold: 5,
+        llmDefaultMaxTokens: 1024,
+        llmDefaultTopK: 40,
+      });
+      expect(set.canvas).toMatchObject({
+        defaultMemoryLimitMb: 2048,
+        maxCanvasesPerTenant: 10,
+        defaultRowLimit: 500,
+        schemaSniffRows: 50,
+      });
+
+      const defaults = parseConfig({
+        MCP_HTTP_PORT: '',
+        MCP_HTTP_MAX_PORT_RETRIES: '',
+        MCP_HTTP_MAX_BODY_BYTES: '',
+        MCP_HEARTBEAT_MISS_THRESHOLD: '',
+        CANVAS_DEFAULT_MEMORY_LIMIT_MB: '',
+        CANVAS_MAX_CANVASES_PER_TENANT: '',
+        CANVAS_DEFAULT_ROW_LIMIT: '',
+        CANVAS_SCHEMA_SNIFF_ROWS: '',
+        LLM_DEFAULT_MAX_TOKENS: '',
+        LLM_DEFAULT_TOP_K: '',
+      });
+      expect(defaults).toMatchObject({
+        mcpHttpPort: 3010,
+        mcpHttpMaxPortRetries: 15,
+        mcpHttpMaxBodyBytes: 1024 * 1024,
+        mcpHeartbeatMissThreshold: 3,
+      });
+      expect(defaults.llmDefaultMaxTokens).toBeUndefined();
+      expect(defaults.llmDefaultTopK).toBeUndefined();
+      expect(defaults.canvas).toMatchObject({
+        defaultMemoryLimitMb: 1024,
+        maxCanvasesPerTenant: 500,
+        defaultRowLimit: 10_000,
+        schemaSniffRows: 100,
+      });
+    });
+  });
+
+  describe('timer variables are integer milliseconds a timer accepts (#767)', () => {
+    /** Builds the speech block the SPEECH_*_TIMEOUT variables live in. */
+    const speechOn = { SPEECH_TTS_ENABLED: 'true', SPEECH_STT_ENABLED: 'true' };
+    const MAX_TIMER_MS = '2147483647';
+
+    /** Timers where 0 times out at once or evicts at once. */
+    const atLeastOne = [
+      'MCP_STATEFUL_SESSION_STALE_TIMEOUT_MS',
+      'OAUTH_JWKS_TIMEOUT_MS',
+      'SPEECH_TTS_TIMEOUT',
+      'SPEECH_STT_TIMEOUT',
+    ];
+    /** Timers where 0 disables the interval, the delay, or the cooldown. */
+    const zeroDisables = [
+      'MCP_HEARTBEAT_INTERVAL_MS',
+      'MCP_GC_PRESSURE_INTERVAL_MS',
+      'CANVAS_SWEEPER_INTERVAL_MS',
+      'MCP_HTTP_PORT_RETRY_DELAY_MS',
+      'OAUTH_JWKS_COOLDOWN_MS',
+    ];
+
+    it.each(
+      [...atLeastOne, ...zeroDisables].flatMap((name) =>
+        ['-1', '1.5', '2147483648'].map((value) => [name, value]),
+      ),
+    )('rejects %s=%s, naming the variable', (name, value) => {
+      expect(rejection({ ...speechOn, [name]: value }).message).toContain(`  - ${name} (`);
+    });
+
+    it.each(atLeastOne)('rejects %s=0', (name) => {
+      expect(rejection({ ...speechOn, [name]: '0' }).message).toContain(`  - ${name} (`);
+    });
+
+    it.each(zeroDisables)('accepts %s=0', (name) => {
+      expect(() => parseConfig({ ...speechOn, [name]: '0' })).not.toThrow();
+    });
+
+    it.each([...atLeastOne, ...zeroDisables])('accepts %s at the timer ceiling', (name) => {
+      expect(() => parseConfig({ ...speechOn, [name]: MAX_TIMER_MS })).not.toThrow();
+    });
+
+    it('keeps the defaults', () => {
+      const parsed = parseConfig({
+        MCP_HTTP_PORT_RETRY_DELAY_MS: '',
+        MCP_STATEFUL_SESSION_STALE_TIMEOUT_MS: '',
+        OAUTH_JWKS_COOLDOWN_MS: '',
+        OAUTH_JWKS_TIMEOUT_MS: '',
+        MCP_HEARTBEAT_INTERVAL_MS: '',
+        MCP_GC_PRESSURE_INTERVAL_MS: '',
+        CANVAS_SWEEPER_INTERVAL_MS: '',
+      });
+      expect(parsed).toMatchObject({
+        mcpHttpPortRetryDelayMs: 50,
+        mcpStatefulSessionStaleTimeoutMs: 1_800_000,
+        oauthJwksCooldownMs: 300_000,
+        oauthJwksTimeoutMs: 5_000,
+        mcpHeartbeatIntervalMs: 0,
+        mcpGcPressureIntervalMs: 0,
+      });
+      expect(parsed.canvas.sweeperIntervalMs).toBe(60_000);
+    });
+  });
+
   it('throws a configuration error when validation fails', async () => {
     // Mock console.error BEFORE setting isTTY to suppress output during tests
     const consoleSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
