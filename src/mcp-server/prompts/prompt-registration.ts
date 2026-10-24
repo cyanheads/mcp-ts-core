@@ -12,7 +12,7 @@ import type {
   ServerContext,
 } from '@modelcontextprotocol/server';
 
-import { handlerParentContext } from '@/mcp-server/handlerContext.js';
+import { handlerParentContext, requestSignalOf } from '@/mcp-server/handlerContext.js';
 import {
   isInputRequiredSignal,
   type RequestStateSealer,
@@ -20,7 +20,7 @@ import {
 } from '@/mcp-server/inputRequired.js';
 import type { AnyPromptDefinition } from '@/mcp-server/prompts/utils/promptDefinition.js';
 import { JsonRpcErrorCode, McpError } from '@/types-global/errors.js';
-import { ErrorHandler } from '@/utils/internal/error-handler/errorHandler.js';
+import { asRequestCancelled, ErrorHandler } from '@/utils/internal/error-handler/errorHandler.js';
 import { readWireErrorData } from '@/utils/internal/error-handler/helpers.js';
 import type { logger as defaultLogger } from '@/utils/internal/logger.js';
 import { measurePromptGeneration } from '@/utils/internal/performance.js';
@@ -115,6 +115,7 @@ export class PromptRegistry {
               operation: 'HandlePromptGet',
               additionalContext: { promptName: promptDef.name },
             });
+            const signal = requestSignalOf(serverContext);
             try {
               /**
                * `args` is already the SDK's parse of the wire arguments against
@@ -129,18 +130,27 @@ export class PromptRegistry {
               const messages = await measurePromptGeneration(
                 async () => {
                   try {
-                    return await promptDef.generate(
+                    const generated = await promptDef.generate(
                       (promptDef.args ? args : {}) as Parameters<typeof promptDef.generate>[0],
                     );
+                    // A generation that resolved after the client cancelled
+                    // settles as the cancellation, as a tool or resource
+                    // handler's return does (#753, #770).
+                    signal.throwIfAborted();
+                    return generated;
                   } catch (error) {
-                    // Inside the measurement, as for tools and resources: an
-                    // input-required signal leaves with its `requestState`
-                    // sealed when a key is configured, so a sealing failure
-                    // is a failed call like any other; anything else leaves
-                    // as itself, never awaited (#697).
-                    throw isInputRequiredSignal(error)
-                      ? await sealSignal(error, this.requestState, serverContext)
-                      : error;
+                    // Inside the measurement, as for tools and resources, so
+                    // the completion record carries `-32011` for a cancelled
+                    // request (#770). An input-required signal leaves with its
+                    // `requestState` sealed when a key is configured, so a
+                    // sealing failure is a failed call like any other;
+                    // anything else leaves as itself, never awaited (#697).
+                    throw asRequestCancelled(
+                      isInputRequiredSignal(error)
+                        ? await sealSignal(error, this.requestState, serverContext)
+                        : error,
+                      signal,
+                    );
                   }
                 },
                 { ...requestContext, promptName: promptDef.name },
@@ -155,12 +165,13 @@ export class PromptRegistry {
 
               /**
                * `handleError` writes the call's one `error` record, with the
-               * stack and cause chain; the completion record stays at `info`
-               * (#582). The client gets the classified code and message, plus
-               * only the `data` a thrown `McpError` declared and the call's
-               * `requestId` (#576) — the same wire shape as tools and resources.
-               * That `data` is a copy, left out when it cannot be read (#697),
-               * with every field one the wire carries.
+               * stack and cause chain — or, for a cancelled request, its
+               * stack-free `info` "Cancelled" record; the completion record
+               * stays at `info` (#582). The client gets the classified code
+               * and message, plus only the `data` a thrown `McpError` declared
+               * and the call's `requestId` (#576) — the same wire shape as
+               * tools and resources. That `data` is a copy, left out when it
+               * cannot be read (#697), with every field one the wire carries.
                */
               const handled = ErrorHandler.handleError(error, {
                 operation: `prompt:${promptDef.name}`,

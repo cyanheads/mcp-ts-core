@@ -373,6 +373,64 @@ describe('runToolContract cancellation', () => {
     expect(helper).toEqual(production);
   });
 
+  /**
+   * A fan-out that folds the leg `legSignal` fails into a partial result and
+   * returns it (#753).
+   */
+  const fanout = (legSignal: (ctx: { signal: AbortSignal }) => AbortSignal) =>
+    tool('parity_fanout', {
+      description: 'Two-leg fan-out that degrades a failed leg.',
+      input: z.object({}),
+      output: z.object({
+        succeeded: z.array(z.string()).describe('Legs that resolved.'),
+        failed: z.array(z.string()).describe('Legs that failed.'),
+      }),
+      async handler(_input, ctx) {
+        const legs = await Promise.allSettled([
+          Promise.resolve('a'),
+          new Promise<string>((_resolve, reject) => {
+            const signal = legSignal(ctx);
+            if (signal.aborted) reject(signal.reason);
+            signal.addEventListener('abort', () => reject(signal.reason), { once: true });
+          }),
+        ]);
+        return {
+          succeeded: legs.flatMap((l) => (l.status === 'fulfilled' ? [l.value] : [])),
+          failed: legs.flatMap((l, i) => (l.status === 'rejected' ? [`leg${i}`] : [])),
+        };
+      },
+    }) as AnyToolDefinition;
+
+  it('settles a partial result returned after the abort as RequestCancelled (#753)', async () => {
+    const { helper, production } = await bothAborted(
+      fanout((ctx) => ctx.signal),
+      (c) => c.abort('client disconnected'),
+    );
+
+    expect(envelope(production)).toEqual({
+      code: JsonRpcErrorCode.RequestCancelled,
+      message: 'client disconnected',
+    });
+    expect(helper).toEqual(production);
+  });
+
+  it('keeps a partial result returned while the signal is live a success (#753)', async () => {
+    const definition = fanout(() => AbortSignal.abort('leg failed'));
+
+    const production = (await createToolHandler(
+      definition,
+      services,
+      notifiers,
+    )({}, makeServerContext({ signal: new AbortController().signal }))) as CallToolResult;
+    const helper = await runToolContract(definition, {} as never, {
+      context: { signal: new AbortController().signal },
+    });
+
+    expect(production.isError).toBeUndefined();
+    expect(production.structuredContent).toEqual({ succeeded: ['a'], failed: ['leg1'] });
+    expect(helper).toEqual(production);
+  });
+
   it('settles a withRetry backoff aborted by ctx.signal as RequestCancelled', async () => {
     const definition = tool('parity_retry', {
       description: 'Retries a failing upstream until cancelled.',

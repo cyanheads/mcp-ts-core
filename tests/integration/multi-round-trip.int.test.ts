@@ -26,6 +26,7 @@ import { InMemoryProvider } from '@/storage/providers/inMemory/inMemoryProvider.
 import { JsonRpcErrorCode, validationError } from '@/types-global/errors.js';
 import { logger } from '@/utils/internal/logger.js';
 import { madlibsElicitationTool } from '../../examples/mcp-server/tools/definitions/template-madlibs-elicitation.tool.js';
+import { readCommonMark } from '../helpers/commonmark.js';
 
 // ---------------------------------------------------------------------------
 // Fixtures — registered through the framework's real registration path
@@ -379,7 +380,9 @@ describe('Multi-round-trip input integration', () => {
     expect(error?.data?.recovery?.hint).toContain('elicitation.form');
     expect(error?.data?.requestId).toEqual(expect.any(String));
     const text = (result.content as Array<{ text: string }>)[0]?.text ?? '';
-    expect(text).toBe(
+    // content[] escapes the backticks; a CommonMark parse reads back both surfaces' text (#760).
+    expect(text).toContain('the \\`elicitation.form\\` capability');
+    expect(readCommonMark(text)).toBe(
       `Error: ${error?.message}\n\nRecovery: ${error?.data?.recovery?.hint}` +
         `\n\n(reason client_capability_missing · request ${error?.data?.requestId})`,
     );
@@ -502,7 +505,7 @@ describe('Multi-round-trip input integration', () => {
           requestId: expect.any(String),
         },
       });
-      expect((result.content as Array<{ text: string }>)[0]?.text).toBe(
+      expect(readCommonMark((result.content as Array<{ text: string }>)[0]?.text ?? '')).toBe(
         `Error: ${error.message}\n\nRecovery: ${hint}\n\n` +
           `(reason client_capability_missing · request ${error.data.requestId})`,
       );

@@ -158,6 +158,13 @@ function throwing(name: string, make: () => unknown) {
 /** The node an unreadable cause is written as. */
 const UNREADABLE_NODE = { name: '[Unreadable]', message: '[Unreadable]' };
 
+/**
+ * A message as the `content[]` text renders it: `[Unreadable]` with its
+ * brackets escaped (#760). Every other message these cases throw holds no
+ * Markdown-active character and renders as itself.
+ */
+const asText = (message: string) => (message === '[Unreadable]' ? '\\[Unreadable\\]' : message);
+
 // ---------------------------------------------------------------------------
 // #697 — the call reports what it can read and returns its envelope
 // ---------------------------------------------------------------------------
@@ -232,7 +239,7 @@ describe('a handler that throws an Error whose fields cannot be read (#697)', ()
       expect(error).toMatchObject({ code: JsonRpcErrorCode.InternalError, message });
       expect(error.data?.requestId).toMatch(REQUEST_ID);
       const text = (result.content as Array<{ text: string }>)[0]?.text;
-      expect(text).toBe(`Error: ${message}\n\n(request ${String(error.data?.requestId)})`);
+      expect(text).toBe(`Error: ${asText(message)}\n\n(request ${String(error.data?.requestId)})`);
 
       const written = errorRecord(name);
       expect(written.level).toBe(50);
@@ -344,7 +351,7 @@ describe('a declared failure whose fields cannot be read (#697)', () => {
       });
       const text = (result.content as Array<{ text: string }>)[0]?.text;
       expect(text).toMatch(
-        new RegExp(`^Error: ${message.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\n`),
+        new RegExp(`^Error: ${asText(message).replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\n`),
       );
       expect(text).toContain(`Recovery: ${RECOVERY}`);
 
@@ -423,7 +430,7 @@ describe('an Error whose message or name is not a string', () => {
       expect(error).toMatchObject({ code, message });
       expect(error.data?.requestId).toMatch(REQUEST_ID);
       const text = (result.content as Array<{ text: string }>)[0]?.text;
-      expect(text).toBe(`Error: ${message}\n\n(request ${String(error.data?.requestId)})`);
+      expect(text).toBe(`Error: ${asText(message)}\n\n(request ${String(error.data?.requestId)})`);
       expect(errorRecord(name).requestId).toBe(error.data?.requestId);
     },
   );
@@ -556,7 +563,7 @@ describe('a thrown McpError or value the factory cannot read (#697)', () => {
     expect(requestId).toMatch(REQUEST_ID);
     expect(error).toEqual({ ...expected, data: { ...expected.data, requestId } });
     const text = (result.content as Array<{ text: string }>)[0]?.text;
-    expect(text).toBe(`Error: ${expected.message}\n\n(request ${String(requestId)})`);
+    expect(text).toBe(`Error: ${asText(expected.message)}\n\n(request ${String(requestId)})`);
 
     const written = errorRecord(name);
     expect(written.level).toBe(50);

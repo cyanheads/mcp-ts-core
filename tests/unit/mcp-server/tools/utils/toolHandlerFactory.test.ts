@@ -16,6 +16,7 @@ import { AjvJsonSchemaValidator } from '@modelcontextprotocol/server/validators/
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { z } from 'zod';
 import { JsonRpcErrorCode, McpError } from '@/types-global/errors.js';
+import { readCommonMark } from '../../../../helpers/commonmark.js';
 import { cpuMsAsync } from '../../../../helpers/cpu-time.js';
 import type { ServerContextOverrides } from '../../../../helpers/server-context.js';
 import {
@@ -779,7 +780,8 @@ describe('createToolHandler', () => {
           expect(hint(result)).toBe(expectedHint);
           // A restatement-only hint is the message's text, so `content[]` drops its Recovery line.
           const text = ((result as CallToolResult).content[0] as { text: string }).text;
-          expect(text).toContain(line);
+          // The `|` is escaped (#760); the rendered text reads the line back as sent.
+          expect(readCommonMark(text)).toContain(line);
           expect(text.includes('Recovery:')).toBe(expectedHint !== line);
           expect(envelope(result).data?.issues).toEqual([
             expect.objectContaining({ code: 'invalid_union' }),
@@ -2924,7 +2926,8 @@ describe('createToolHandler', () => {
 
         expect(text).toBe(
           'Error: Invalid id element "12,34" — send one identifier per element.\n\n' +
-            'Recovery: Submit one identifier per `ids` element.\n\n' +
+            // Escaped so the backticks read back rather than open a code span (#760).
+            'Recovery: Submit one identifier per \\`ids\\` element.\n\n' +
             '(reason malformed_id · not retryable)',
         );
       });
@@ -3056,7 +3059,7 @@ describe('createToolHandler', () => {
 
         expect(rendered(result as CallToolResult)).toBe(
           'Error: Input validation error: Invalid arguments for tool exclusive_probe: ' +
-            'Provide exactly one of `pmcids` or `pmids` (not zero, not more).\n\n' +
+            'Provide exactly one of \\`pmcids\\` or \\`pmids\\` (not zero, not more).\n\n' +
             `(reason invalid_arguments · request ${REQUEST_ID})`,
         );
         expect(envelope(result).data?.recovery?.hint).toBe(
@@ -3170,7 +3173,7 @@ describe('createToolHandler', () => {
 
         expect(rendered(result as CallToolResult)).toBe(
           'Error: Input validation error: Invalid arguments for tool union_branch_tool: ' +
-            'court: Invalid option: expected one of "CJEU"|"GC"\n\n' +
+            'court: Invalid option: expected one of "CJEU"\\|"GC"\n\n' +
             `(reason invalid_arguments · request ${REQUEST_ID})`,
         );
         expect(envelope(result).data?.recovery?.hint).toBe(
@@ -3195,8 +3198,91 @@ describe('createToolHandler', () => {
         const result = await reject(courts, { court: 'bogus' });
 
         expect(rendered(result as CallToolResult)).toContain(
-          '\n\nRecovery: Provide what. court: Invalid option: expected one of "CJEU"|"GC".\n\n',
+          '\n\nRecovery: Provide what. court: Invalid option: expected one of "CJEU"\\|"GC".\n\n',
         );
+      });
+    });
+
+    describe('Markdown-active text (#760)', () => {
+      const HINT = 'Call `list_apps` first, then pass one *exact* name.';
+      const notRunning = tool('apps_probe', {
+        description: 'Fails naming the app it was asked for.',
+        input: z.object({ name: z.string().describe('App name.') }),
+        output: z.object({ ok: z.boolean().describe('ok') }),
+        errors: [
+          {
+            reason: 'not_running',
+            code: JsonRpcErrorCode.NotFound,
+            when: 'No running app matches the name.',
+            recovery: HINT,
+          },
+        ],
+        handler: (input, ctx) => {
+          throw input.name.startsWith('Upstream')
+            ? ctx.fail('not_running', input.name)
+            : ctx.fail('not_running', `No running app matches ${JSON.stringify(input.name)}.`);
+        },
+      });
+
+      it.each([
+        ['emphasis', 'A*p*', 'No running app matches "A*p*".'],
+        ['backslashes', 'My "App" \\ 2', 'No running app matches "My \\"App\\" \\\\ 2".'],
+        ['a line-leading list marker', 'Upstream said:\n- item one', 'Upstream said:\n- item one'],
+      ])(
+        'reads back a message holding %s and the hint exactly, leaving structuredContent raw',
+        async (_label, name, message) => {
+          const handler = createToolHandler(notRunning as AnyToolDefinition, services, notifiers);
+          const result = (await handler({ name }, makeServerContext())) as CallToolResult;
+
+          expect(readCommonMark(rendered(result))).toBe(
+            `Error: ${message}\n\nRecovery: ${HINT}\n\n(reason not_running · request ${REQUEST_ID})`,
+          );
+          expect(envelope(result)).toMatchObject({
+            message,
+            data: { reason: 'not_running', recovery: { hint: HINT } },
+          });
+        },
+      );
+
+      it('renders the escaped bytes for the hint', () => {
+        expect(
+          rendered(
+            buildToolErrorResult(JsonRpcErrorCode.NotFound, 'Missing.', {
+              recovery: { hint: HINT },
+            }),
+          ),
+        ).toBe(
+          'Error: Missing.\n\nRecovery: Call \\`list_apps\\` first, then pass one \\*exact\\* name.',
+        );
+      });
+
+      it.each(['No running app matches "Safari".', 'limit: Too big: expected number to be <=50'])(
+        'renders a plain message byte-identically: %s',
+        (message) => {
+          expect(
+            rendered(buildToolErrorResult(JsonRpcErrorCode.NotFound, message, undefined)),
+          ).toBe(`Error: ${message}`);
+        },
+      );
+
+      it('escapes a reason that can open emphasis and reads it back', () => {
+        const text = rendered(
+          buildToolErrorResult(JsonRpcErrorCode.NotFound, 'Missing.', { reason: '_hidden_' }),
+        );
+
+        expect(text).toBe('Error: Missing.\n\n(reason \\_hidden\\_)');
+        expect(readCommonMark(text)).toBe('Error: Missing.\n\n(reason _hidden_)');
+      });
+
+      it('decides the Recovery line on the raw strings, not the escaped ones', () => {
+        // Raw, `a_x` contains `_x`; escaped, `\_x` is no substring of `a_x`.
+        const text = rendered(
+          buildToolErrorResult(JsonRpcErrorCode.NotFound, 'Use key a_x.', {
+            recovery: { hint: '_x' },
+          }),
+        );
+
+        expect(text).toBe('Error: Use key a_x.');
       });
     });
   });
@@ -4024,7 +4110,7 @@ describe('createToolHandler', () => {
         expect(JSON.stringify(record.extra)).not.toContain('stack');
       });
 
-      it('leaves a handler that completed after the abort a success', async () => {
+      it('settles a handler that returned after the abort as RequestCancelled (#753)', async () => {
         const def = tool('cancelled_success_tool', {
           description: 'Returns normally even though the request was cancelled.',
           input: z.object({}),
@@ -4035,8 +4121,52 @@ describe('createToolHandler', () => {
 
         const result = await handler({}, makeServerContext({ signal: AbortSignal.abort('probe') }));
 
-        expect(result.isError).toBeUndefined();
-        expect((result as CallToolResult).structuredContent).toEqual({ ok: true });
+        expect(result.isError).toBe(true);
+        expect(envelope(result)).toEqual({
+          code: JsonRpcErrorCode.RequestCancelled,
+          message: 'probe',
+          data: { requestId: REQUEST_ID },
+        });
+      });
+
+      it('settles a fan-out that folded the aborted leg into a partial result as RequestCancelled (#753)', async () => {
+        const controller = new AbortController();
+        const def = tool('cancelled_fanout_tool', {
+          description: 'Two-leg fan-out that degrades a failed leg.',
+          input: z.object({}),
+          output: z.object({
+            ok: z.array(z.string()).describe('Legs that resolved.'),
+            failed: z.array(z.string()).describe('Legs that failed.'),
+          }),
+          async handler(_input, ctx) {
+            const legs = await Promise.allSettled([
+              Promise.resolve('a'),
+              new Promise<string>((_resolve, reject) => {
+                ctx.signal.addEventListener('abort', () => reject(ctx.signal.reason), {
+                  once: true,
+                });
+                controller.abort('client disconnected');
+              }),
+            ]);
+            return {
+              ok: legs.flatMap((l) => (l.status === 'fulfilled' ? [l.value] : [])),
+              failed: legs.flatMap((l, i) => (l.status === 'rejected' ? [`leg${i}`] : [])),
+            };
+          },
+        });
+        const handler = createToolHandler(def as AnyToolDefinition, services, notifiers);
+
+        const result = await handler({}, makeServerContext({ signal: controller.signal }));
+
+        expect(result.isError).toBe(true);
+        expect(envelope(result).code).toBe(JsonRpcErrorCode.RequestCancelled);
+        expect(envelope(result).message).toBe('client disconnected');
+        expect(mockLogger.error).not.toHaveBeenCalled();
+        expect(
+          mockLogger.info.mock.calls.some(([message]) =>
+            String(message).startsWith('Cancelled tool:cancelled_fanout_tool'),
+          ),
+        ).toBe(true);
       });
 
       it('leaves an input_required signal raised after the abort as control flow', async () => {
@@ -4646,7 +4776,10 @@ describe('createToolHandler', () => {
         expect(envelope(result).code).toBe(JsonRpcErrorCode.InvalidRequest);
         expect(envelope(result).data?.reason).toBe('client_capability_missing');
         expect(envelope(result).data?.recovery?.hint).toContain('`elicitation.form`');
-        expect((firstBlock(result) as { text: string }).text).toBe(
+        // content[] escapes the backticks; a CommonMark parse reads back both surfaces' text (#760).
+        const text = (firstBlock(result) as { text: string }).text;
+        expect(text).toContain('declare the \\`elicitation.form\\` capability');
+        expect(readCommonMark(text)).toBe(
           `Error: ${envelope(result).message}\n\nRecovery: ${envelope(result).data?.recovery?.hint}` +
             `\n\n(reason client_capability_missing · request ${REQUEST_ID})`,
         );
@@ -4731,7 +4864,8 @@ describe('createToolHandler', () => {
               requestId: REQUEST_ID,
             },
           });
-          expect((firstBlock(result) as { text: string }).text).toBe(
+          // Read back through CommonMark: content[] escapes the backticks (#760).
+          expect(readCommonMark((firstBlock(result) as { text: string }).text)).toBe(
             `Error: ${envelope(result).message}\n\nRecovery: ${hint}` +
               `\n\n(reason client_capability_missing · request ${REQUEST_ID})`,
           );

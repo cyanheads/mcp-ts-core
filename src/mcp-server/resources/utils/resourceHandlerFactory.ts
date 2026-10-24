@@ -180,6 +180,9 @@ export function createResourceHandler(
           try {
             // Handler may return sync or async.
             const handlerResult = await def.handler(validatedParams, ctx);
+            // A handler that caught the abort and returned settles as the
+            // cancellation it is, through the catch below (#753).
+            request.signal.throwIfAborted();
 
             // The domain value is what `mcp.resource.output_bytes` measures — not
             // the assembled `contents` this callback returns.

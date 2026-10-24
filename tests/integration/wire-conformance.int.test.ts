@@ -35,6 +35,7 @@ import { JsonRpcErrorCode, McpError } from '@/types-global/errors.js';
 import { ErrorHandler } from '@/utils/internal/error-handler/errorHandler.js';
 import { logger } from '@/utils/internal/logger.js';
 import { sanitization } from '@/utils/security/sanitization.js';
+import { readCommonMark } from '../helpers/commonmark.js';
 import { MCP_HEADERS, parseSSEEvents } from '../helpers/http-helpers.js';
 import { exchange } from '../helpers/node-http.js';
 import { type ServerHandle, startServerFromEntrypoint } from '../helpers/server-process.js';
@@ -455,12 +456,15 @@ describe('Phase 1 wire conformance', () => {
   });
 
   describe('missing-vs-wrong and union rendering (#378, #417)', () => {
-    /** The `content[]` diagnostic a client reads for a rejected call. */
+    /**
+     * The `content[]` diagnostic a client reads for a rejected call, read back
+     * through CommonMark: the text escapes the `|` between options (#760).
+     */
     const rejectionText = async (args: Record<string, unknown>) => {
       const client = await session();
       const result = await client.callTool({ name: 'wire_facet', arguments: args });
       expect(result.isError).toBe(true);
-      return (result.content as Array<{ text: string }>)[0]?.text ?? '';
+      return readCommonMark((result.content as Array<{ text: string }>)[0]?.text ?? '');
     };
 
     it('renders an omitted required enum as missing, not as a wrong choice (#378)', async () => {

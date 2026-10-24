@@ -567,10 +567,11 @@ export interface RunToolContractOptions {
  * `InternalError` (`-32603`) naming that contract.
  *
  * A cancellation settles as it does in production: once `context.signal` has
- * fired, anything the handler or the success pipeline after it throws
- * (output validation, `format()`, enrichment) becomes `RequestCancelled`
- * (`-32011`), whatever its own shape. Argument parsing stays outside that
- * settle, so schema-invalid arguments on an aborted signal still return
+ * fired, the call returns `RequestCancelled` (`-32011`) whether the handler
+ * throws — whatever the thrown value's own shape — or returns, a partial
+ * result included, and so does anything the success pipeline after it throws
+ * (output validation, `format()`, enrichment). Argument parsing stays outside
+ * that settle, so schema-invalid arguments on an aborted signal still return
  * `InvalidParams`.
  */
 export async function runToolContract<TDefinition extends AnyToolDefinition>(
@@ -592,6 +593,8 @@ export async function runToolContract<TDefinition extends AnyToolDefinition>(
 
   try {
     const output = await definition.handler(validatedInput, ctx);
+    // As in the factory: a handler returning after the abort is cancelled (#753).
+    ctx.signal.throwIfAborted();
     const validatedOutput = parseToolOutput(definition, output);
     return buildToolSuccessResult(
       definition,

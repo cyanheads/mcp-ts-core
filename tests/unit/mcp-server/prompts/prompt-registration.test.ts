@@ -459,6 +459,117 @@ describe('PromptRegistry', () => {
     });
   });
 
+  describe('a cancelled prompts/get (#770)', () => {
+    afterEach(() => {
+      vi.restoreAllMocks();
+    });
+
+    const messages = [{ role: 'user' as const, content: { type: 'text' as const, text: 'Hi' } }];
+
+    /** Registers `generate` as an argless prompt and calls it with `signal` as the request's. */
+    async function callWith(generate: () => unknown, signal: AbortSignal) {
+      const errorSpy = vi.spyOn(logger, 'error').mockImplementation(() => {});
+      const infoSpy = vi.spyOn(logger, 'info').mockImplementation(() => {});
+      const def = prompt('cancel_prompt', {
+        description: 'Generates under a request signal.',
+        generate: generate as () => typeof messages,
+      });
+      await new PromptRegistry([def], logger).registerAll(mockServer);
+      const handler = mockServer.registerPrompt.mock.calls[0][2] as (
+        ctx: unknown,
+      ) => Promise<unknown>;
+      const outcome: { rejection?: unknown; value?: unknown } = await handler({
+        mcpReq: { id: 'p-1', signal },
+      }).then(
+        (value) => ({ value }),
+        (rejection: unknown) => ({ rejection }),
+      );
+      const completion = infoSpy.mock.calls.findLast(
+        ([msg]) => msg === TELEMETRY_LOG_MESSAGES.promptGenerationFinished,
+      )?.[1] as { extra: { metrics: Record<string, unknown> } } | undefined;
+      return {
+        ...outcome,
+        metrics: completion?.extra.metrics,
+        cancelledRecords: infoSpy.mock.calls.filter(([msg]) =>
+          String(msg).startsWith('Cancelled prompt:cancel_prompt'),
+        ),
+        errorRecords: errorSpy.mock.calls.filter(([msg]) =>
+          String(msg).startsWith('Error in prompt:cancel_prompt'),
+        ),
+      };
+    }
+
+    it('settles a generate() throw after the abort as RequestCancelled', async () => {
+      const result = await callWith(() => {
+        throw new McpError(JsonRpcErrorCode.ServiceUnavailable, 'upstream gave up');
+      }, AbortSignal.abort('client disconnected'));
+
+      expect(result.rejection).toBeInstanceOf(McpError);
+      expect(result.rejection).toMatchObject({
+        code: JsonRpcErrorCode.RequestCancelled,
+        message: 'upstream gave up',
+        data: { requestId: expect.any(String) },
+      });
+      expect(result.metrics).toMatchObject({
+        isSuccess: false,
+        errorCode: String(JsonRpcErrorCode.RequestCancelled),
+      });
+      expect(result.cancelledRecords).toHaveLength(1);
+      expect(result.errorRecords).toEqual([]);
+    });
+
+    it('settles a generate() that resolved after the client cancelled as RequestCancelled', async () => {
+      const controller = new AbortController();
+
+      const result = await callWith(async () => {
+        await Promise.resolve();
+        controller.abort('client disconnected');
+        return messages;
+      }, controller.signal);
+
+      expect(result).not.toHaveProperty('value');
+      expect(result.rejection).toMatchObject({
+        code: JsonRpcErrorCode.RequestCancelled,
+        message: 'client disconnected',
+      });
+      expect(result.metrics).toMatchObject({
+        isSuccess: false,
+        errorCode: String(JsonRpcErrorCode.RequestCancelled),
+      });
+      expect(result.cancelledRecords).toHaveLength(1);
+      expect(result.errorRecords).toEqual([]);
+    });
+
+    it('keeps a generation that finished while the request is live a success', async () => {
+      const result = await callWith(() => messages, new AbortController().signal);
+
+      expect(result).toEqual(expect.objectContaining({ value: { messages } }));
+      expect(result.metrics).toMatchObject({ isSuccess: true });
+    });
+
+    it('keeps a generate() throw while the request is live on its own classification', async () => {
+      const result = await callWith(() => {
+        throw new McpError(JsonRpcErrorCode.NotFound, 'no such topic');
+      }, new AbortController().signal);
+
+      expect(result.rejection).toMatchObject({ code: JsonRpcErrorCode.NotFound });
+      expect(result.errorRecords).toHaveLength(1);
+      expect(result.cancelledRecords).toEqual([]);
+    });
+
+    it('leaves an input_required signal raised after the abort as control flow', async () => {
+      const result = await callWith(() => {
+        throw new InputRequiredSignal(
+          inputRequired({ inputRequests: { roots: inputRequired.listRoots() } }),
+        );
+      }, AbortSignal.abort('client disconnected'));
+
+      expect(result.value).toMatchObject({ resultType: 'input_required' });
+      expect(result.errorRecords).toEqual([]);
+      expect(result.cancelledRecords).toEqual([]);
+    });
+  });
+
   describe('Registration Order', () => {
     it('should register prompts in definition order', async () => {
       await registry.registerAll(mockServer);

@@ -191,6 +191,11 @@ export function createToolHandler(
           try {
             // Handler may return sync or async.
             const handlerResult = await def.handler(validatedInput, handlerCtx);
+            // A handler that caught the abort and returned — a fan-out folding
+            // the aborted leg into a partial result, an early `return` on
+            // `ctx.signal.aborted` — settles as the cancellation it is, through
+            // the catch below, before its result is measured (#753).
+            request.signal.throwIfAborted();
 
             // The domain value is what `mcp.tool.output_bytes` and
             // partial-success detection measure — not the assembled result this

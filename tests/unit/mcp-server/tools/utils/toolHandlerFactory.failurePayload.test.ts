@@ -264,6 +264,23 @@ const cancelled = (controller: AbortController) =>
     },
   });
 
+/** A fan-out that folds the leg the cancellation failed into a partial result (#753). */
+const cancelledFanout = (controller: AbortController) =>
+  tool('payload_cancelled_fanout', {
+    description: 'Returns a partial result after the caller went away.',
+    input: probeInput,
+    output: z.object({ failed: z.array(z.string()).describe('Legs that failed.') }),
+    async handler(_input, ctx) {
+      const legs = await Promise.allSettled([
+        new Promise<string>((_resolve, reject) => {
+          ctx.signal.addEventListener('abort', () => reject(ctx.signal.reason), { once: true });
+          controller.abort();
+        }),
+      ]);
+      return { failed: legs.flatMap((l, i) => (l.status === 'rejected' ? [`leg${i}`] : [])) };
+    },
+  });
+
 const asksForInput = tool('payload_asks', {
   description: 'Asks the caller for input.',
   input: probeInput,
@@ -430,6 +447,27 @@ describe('LOG_TOOL_FAILURE_PAYLOADS=true', () => {
       () => {
         const controller = new AbortController();
         return call(cancelled(controller), { query: SENTINEL }, { signal: controller.signal });
+      },
+    ],
+    [
+      'a partial result returned after the cancellation (#753)',
+      async () => {
+        const controller = new AbortController();
+        const result = await call(
+          cancelledFanout(controller),
+          { query: SENTINEL },
+          { signal: controller.signal },
+        );
+        expect((result.structuredContent as { error: { code: number } }).error.code).toBe(
+          JsonRpcErrorCode.RequestCancelled,
+        );
+        expect(
+          writes.filter((w) => w.level !== 'debug').map((w) => [w.level, w.msg.split(':')[0]]),
+        ).toEqual([
+          ['info', 'Tool execution finished.'],
+          ['info', 'Cancelled tool'],
+        ]);
+        return result;
       },
     ],
     [

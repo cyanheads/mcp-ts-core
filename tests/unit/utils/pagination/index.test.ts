@@ -170,8 +170,9 @@ describe('Pagination Utilities', () => {
       expect(block?.type).toBe('text');
       const text = block?.type === 'text' ? block.text : '';
       expect(text).toContain('Error: Invalid pagination cursor.');
+      // Escaped so a CommonMark parse reads the backticks back rather than as code spans (#760).
       expect(text).toContain(
-        'Recovery: Omit `cursor` to start from the first page, or pass the `nextCursor` from the previous response unchanged.',
+        'Recovery: Omit \\`cursor\\` to start from the first page, or pass the \\`nextCursor\\` from the previous response unchanged.',
       );
       expect(text).toContain('(reason invalid_cursor)');
     });

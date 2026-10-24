@@ -1452,6 +1452,78 @@ describe('createResourceHandler', () => {
         isSuccess: false,
       });
     });
+
+    describe('a handler that returns after the abort (#753)', () => {
+      /** A read whose handler degrades a leg that fails when `legSignal` fires, then returns. */
+      const degrading = (
+        uriTemplate: string,
+        legSignal: (ctx: { signal: AbortSignal }) => AbortSignal,
+        fire: () => void,
+      ) =>
+        resource(uriTemplate, {
+          description: 'Returns a partial value when a leg fails.',
+          async handler(_params, ctx) {
+            const [leg] = await Promise.allSettled([
+              new Promise<string>((_resolve, reject) => {
+                const signal = legSignal(ctx);
+                signal.addEventListener('abort', () => reject(signal.reason), { once: true });
+                fire();
+              }),
+            ]);
+            return { degraded: leg.status === 'rejected' };
+          },
+        });
+
+      it('settles as RequestCancelled in the rejection and the completion log', async () => {
+        const request = new AbortController();
+        const def = degrading(
+          'cancelled://returned',
+          (ctx) => ctx.signal,
+          () => request.abort('client disconnected'),
+        );
+        const handler = createResourceHandler(def as AnyResourceDefinition, services, notifiers);
+
+        const rejection = await handler(
+          new URL('cancelled://returned'),
+          {},
+          makeServerContext({ signal: request.signal }),
+        ).then(
+          () => undefined,
+          (err: unknown) => err,
+        );
+
+        expect(rejection).toBeInstanceOf(McpError);
+        expect(rejection).toMatchObject({
+          code: JsonRpcErrorCode.RequestCancelled,
+          message: 'client disconnected',
+        });
+        expect(completionMetrics()).toMatchObject({
+          errorCode: String(JsonRpcErrorCode.RequestCancelled),
+          isSuccess: false,
+        });
+      });
+
+      it('stays a success when the leg fails while the request is live', async () => {
+        const leg = new AbortController();
+        const def = degrading(
+          'live://returned',
+          () => leg.signal,
+          () => leg.abort('leg failed'),
+        );
+        const handler = createResourceHandler(def as AnyResourceDefinition, services, notifiers);
+
+        const result = await handler(
+          new URL('live://returned'),
+          {},
+          makeServerContext({ signal: new AbortController().signal }),
+        );
+
+        expect(JSON.parse((readContents(result)[0] as { text: string }).text)).toEqual({
+          degraded: true,
+        });
+        expect(completionMetrics()).toMatchObject({ isSuccess: true });
+      });
+    });
   });
 
   // -----------------------------------------------------------------------

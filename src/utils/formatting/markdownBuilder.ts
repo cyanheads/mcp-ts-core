@@ -3,6 +3,7 @@
  * @module utils/formatting/markdownBuilder
  */
 import { codeSpan } from '@/utils/formatting/codeSpan.js';
+import { markdownImage, markdownLink } from '@/utils/formatting/markdownInline.js';
 
 /**
  * Utility class for building well-formatted markdown content with consistent structure.
@@ -293,21 +294,26 @@ export class MarkdownBuilder {
   }
 
   /**
-   * Append an inline markdown link (`[text](url)`).
+   * Append an inline markdown link (`[text](<url>)`) via {@link markdownLink}.
    * No trailing newline is added — suitable for inline use within a sentence.
    *
-   * @param text - The visible link label
+   * The label is escaped and the destination wrapped in `<…>`, so a label with
+   * `]` or a URL with a space reads back unchanged. A URL that is not absolute
+   * `http:`/`https:` — `javascript:`, a relative path — renders as literal text,
+   * `text (url)`.
+   *
+   * @param text - The visible link label, taken as plain text
    * @param url - The link target URL
    * @returns this builder for chaining
    *
    * @example
    * ```typescript
    * markdown().text('See ').link('the docs', 'https://example.com').text(' for details.').build();
-   * // See [the docs](https://example.com) for details.
+   * // See [the docs](<https://example.com>) for details.
    * ```
    */
   link(text: string, url: string): this {
-    this.sections.push(`[${text}](${url})`);
+    this.sections.push(markdownLink(text, url));
     return this;
   }
 
@@ -492,22 +498,24 @@ export class MarkdownBuilder {
   }
 
   /**
-   * Add an image with alt text and optional title.
+   * Add an image with alt text and optional title via {@link markdownImage}:
+   * the alt text escaped, the destination wrapped in `<…>`, and a URL that is
+   * not absolute `http:`/`https:` (a relative path included) rendered as literal
+   * text, `alt (url "title")`.
    *
-   * @param altText - Alternative text for the image
+   * @param altText - Alternative text for the image, taken as plain text
    * @param url - Image URL
    * @param title - Optional title (shown on hover)
    * @returns this builder for chaining
    *
    * @example
    * ```typescript
-   * md.image('Architecture diagram', '/assets/diagram.png', 'System Architecture');
-   * // Renders: ![Architecture diagram](/assets/diagram.png "System Architecture")
+   * md.image('Architecture diagram', 'https://example.com/diagram.png', 'System Architecture');
+   * // Renders: ![Architecture diagram](<https://example.com/diagram.png> "System Architecture")
    * ```
    */
   image(altText: string, url: string, title?: string): this {
-    const titlePart = title ? ` "${title}"` : '';
-    this.sections.push(`![${altText}](${url}${titlePart})\n\n`);
+    this.sections.push(`${markdownImage(altText, url, title)}\n\n`);
     return this;
   }
 
@@ -579,7 +587,8 @@ export class MarkdownBuilder {
   }
 
   /**
-   * Add a badge/shield (uses shields.io style).
+   * Add a badge/shield (uses shields.io style), rendered via
+   * {@link markdownImage} with `label: message` as escaped alt text.
    *
    * @param label - Badge label (left side)
    * @param message - Badge message (right side)
@@ -589,14 +598,15 @@ export class MarkdownBuilder {
    * @example
    * ```typescript
    * md.badge('build', 'passing', 'green');
-   * // Renders: ![build: passing](https://img.shields.io/badge/build-passing-green)
+   * // Renders: ![build: passing](<https://img.shields.io/badge/build-passing-green>)
    * ```
    */
   badge(label: string, message: string, color = 'blue'): this {
-    const encodedLabel = encodeURIComponent(label);
-    const encodedMessage = encodeURIComponent(message);
-    const url = `https://img.shields.io/badge/${encodedLabel}-${encodedMessage}-${color}`;
-    this.sections.push(`![${label}: ${message}](${url})`);
+    // shields.io splits the path on `-` and reads `_` as a space; doubling keeps each literal.
+    const field = (text: string) =>
+      encodeURIComponent(text.replaceAll('-', '--').replaceAll('_', '__'));
+    const url = `https://img.shields.io/badge/${field(label)}-${field(message)}-${color}`;
+    this.sections.push(markdownImage(`${label}: ${message}`, url));
     return this;
   }
 

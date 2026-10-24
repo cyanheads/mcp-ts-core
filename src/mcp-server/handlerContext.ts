@@ -98,8 +98,17 @@ export function resolveHandlerRequest(
       sdkSessionId && (isStatefulMode || services.exposeStatelessSessionId === true)
         ? sdkSessionId
         : undefined,
-    signal: mcpReq?.signal ?? new AbortController().signal,
+    signal: requestSignalOf(serverContext),
   };
+}
+
+/**
+ * The request's cancellation signal — for a tool call, a resource read, and a
+ * `prompts/get` alike: the SDK's per-request signal, or a never-aborting one
+ * when the SDK gives none.
+ */
+export function requestSignalOf(serverContext: ServerContext | undefined): AbortSignal {
+  return serverContext?.mcpReq?.signal ?? new AbortController().signal;
 }
 
 /** The raw SDK session token of a request, when it carries one. */

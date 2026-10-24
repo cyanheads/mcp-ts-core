@@ -91,15 +91,16 @@ describe('modern wire contracts without initialize', () => {
     });
 
     // #378: the omitted and the wrong-value case are no longer byte-identical.
+    // content[] escapes the `|` between options (#760).
     expect(missing.result.content[0].text).toContain(
-      'what: Missing required field. Expected one of "os"|"cpu"|"memory"',
+      'what: Missing required field. Expected one of "os"\\|"cpu"\\|"memory"',
     );
     expect(wrong.result.content[0].text).toContain(
-      'what: Invalid option: expected one of "os"|"cpu"|"memory"',
+      'what: Invalid option: expected one of "os"\\|"cpu"\\|"memory"',
     );
     // #417: the branch message, not the union's `Invalid input` placeholder.
     expect(union.result.content[0].text).toContain(
-      'court: Invalid option: expected one of "CJEU"|"GC"',
+      'court: Invalid option: expected one of "CJEU"\\|"GC"',
     );
     // #445: the rejection carries a reason and a next step on this runtime too.
     expect(missing.result.structuredContent.error.data).toMatchObject({

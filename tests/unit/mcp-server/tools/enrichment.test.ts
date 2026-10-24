@@ -12,6 +12,7 @@
 import type { CallToolResult, ContentBlock } from '@modelcontextprotocol/server';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { z } from 'zod';
+import { readCommonMark } from '../../../helpers/commonmark.js';
 import { makeServerContext } from '../../../helpers/server-context.js';
 
 // ---------------------------------------------------------------------------
@@ -333,8 +334,9 @@ describe('enrichment block', () => {
         appliedFilters: { range: '2020', types: ['any'] },
         scopes: ['titles', 'abstracts'],
       });
+      // The JSON of an object value is escaped like a string value (#640).
       expect(lastText(result.content)).toBe(
-        '\n\nRange 2020; types any\n**scopes:** ["titles","abstracts"]',
+        '\n\nRange 2020; types any\n**scopes:** \\["titles","abstracts"\\]',
       );
     });
   });
@@ -540,6 +542,88 @@ describe('enrichment block', () => {
       expect(trailer).toContain('sizeInBytes'); // default label is the field key
       // structuredContent gets the raw before/after object — the agent judges the change.
       expect(result.structuredContent).toEqual({ ok: true, sizeInBytes: { before: 0, after: 68 } });
+    });
+  });
+
+  describe('caller strings in echo, default, and delta lines (#640)', () => {
+    const literalBlock = {
+      effectiveQuery: z.string().optional().describe('query as parsed'),
+      since: z.string().optional().describe('lower date bound as sent'),
+      title: z
+        .object({
+          before: z.string().describe('title before'),
+          after: z.string().describe('title after'),
+        })
+        .optional()
+        .describe('title before/after'),
+      scopes: z.array(z.string()).optional().describe('fields searched'),
+      flag: z.boolean().optional().describe('a flag'),
+    };
+
+    /** Runs a tool whose handler enriches via `enrich`, returns the trailer text. */
+    async function trailerFor(name: string, enrich: (ctx: any) => void): Promise<string> {
+      const t = tool(name, {
+        description: 'Search.',
+        input: z.object({ q: z.string().describe('q') }),
+        output: z.object({ items: z.array(z.string()).describe('items') }),
+        enrichment: literalBlock,
+        handler: (_input: unknown, ctx: any) => {
+          enrich(ctx);
+          return { items: [] };
+        },
+      } as any);
+      const handler = createToolHandler(t as AnyToolDefinition, services, notifiers);
+      const result = await handler({ q: 'x' }, makeServerContext());
+      expect(result.isError).toBeUndefined();
+      return lastText(result.content);
+    }
+
+    it.each([
+      [
+        'an echo holding a link, raw HTML, and emphasis',
+        (ctx: any) =>
+          ctx.enrich.echo(
+            `q=${JSON.stringify('sunflowers [x](https://evil.example) <b>bold</b> *emphasis*')}`,
+          ),
+        'Query: q="sunflowers [x](https://evil.example) <b>bold</b> *emphasis*"',
+      ],
+      [
+        'a default scalar holding emphasis',
+        (ctx: any) => ctx.enrich({ since: '_2026_ *today*' }),
+        '⟨strong⟩since:⟨/strong⟩ _2026_ *today*',
+      ],
+      [
+        'a delta holding a code span and raw HTML',
+        (ctx: any) =>
+          ctx.enrich.delta({ field: 'title', before: 'Old `x`', after: 'New <i>y</i>' }),
+        '⟨strong⟩title:⟨/strong⟩ Old `x` → New <i>y</i>',
+      ],
+      [
+        'an echo whose second line opens a list',
+        (ctx: any) => ctx.enrich.echo('line one\n- line two'),
+        'Query: line one\n- line two',
+      ],
+      [
+        'the JSON of an object value',
+        (ctx: any) => ctx.enrich({ scopes: ['*title*', 'a_b'] }),
+        '⟨strong⟩scopes:⟨/strong⟩ ["*title*","a_b"]',
+      ],
+    ])('reads back %s as written', async (_label, enrich, expected) => {
+      const trailer = await trailerFor('literal_trailer', enrich);
+      expect(readCommonMark(trailer)).toBe(expected);
+    });
+
+    it('renders the escaped bytes for each arm', async () => {
+      const trailer = await trailerFor('literal_trailer_bytes', (ctx) => {
+        ctx.enrich.echo('a *b*');
+        ctx.enrich({ since: '_x_' });
+        ctx.enrich.delta({ field: 'title', before: '`a`', after: '<b>' });
+        ctx.enrich({ flag: false });
+      });
+
+      expect(trailer).toBe(
+        '\n\nQuery: a \\*b\\*\n**since:** \\_x\\_\n**title:** \\`a\\` → \\<b>\n**flag:** false',
+      );
     });
   });
 

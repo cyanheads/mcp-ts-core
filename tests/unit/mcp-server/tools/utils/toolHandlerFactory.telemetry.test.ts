@@ -1155,6 +1155,123 @@ describe('tool telemetry records the terminal outcome (#346)', () => {
       });
     });
 
+    describe('a fan-out that degrades a failed leg (#753)', () => {
+      /**
+       * Two legs under `Promise.allSettled`; the second rejects when `legSignal`
+       * fires, which `fire` triggers once the leg is listening. The handler then
+       * returns the partial result.
+       */
+      const fanout = (legSignal: (ctx: { signal: AbortSignal }) => AbortSignal, fire: () => void) =>
+        tool('fanout', {
+          description: 'Two-leg fan-out that degrades a failed leg.',
+          input: z.object({}),
+          output: z.object({
+            succeeded: z.array(z.string()).describe('Legs that resolved.'),
+            failed: z.array(z.string()).describe('Legs that failed.'),
+          }),
+          async handler(_input, ctx) {
+            const legs = await Promise.allSettled([
+              Promise.resolve('a'),
+              new Promise<string>((_resolve, reject) => {
+                const signal = legSignal(ctx);
+                signal.addEventListener('abort', () => reject(signal.reason), { once: true });
+                fire();
+              }),
+            ]);
+            return {
+              succeeded: legs.flatMap((l) => (l.status === 'fulfilled' ? [l.value] : [])),
+              failed: legs.flatMap((l, i) => (l.status === 'rejected' ? [`leg${i}`] : [])),
+            };
+          },
+        });
+
+      async function run(def: unknown, signal: AbortSignal): Promise<CallToolResult> {
+        const handler = createToolHandler(def as AnyToolDefinition, services, notifiers);
+        return (await handler({}, makeServerContext({ signal }))) as CallToolResult;
+      }
+
+      it('records the cancelled request as cancelled, with no partial success', async () => {
+        const request = new AbortController();
+
+        const result = await run(
+          fanout(
+            (ctx) => ctx.signal,
+            () => request.abort('client disconnected'),
+          ),
+          request.signal,
+        );
+
+        expect((result.structuredContent as { error: { code: number } }).error.code).toBe(
+          JsonRpcErrorCode.RequestCancelled,
+        );
+        const metrics = completionMetrics();
+        expect(metrics).toMatchObject({
+          isSuccess: false,
+          errorCode: String(JsonRpcErrorCode.RequestCancelled),
+        });
+        expect(metrics).not.toHaveProperty('partialSuccess');
+        expect(metrics).not.toHaveProperty('batchFailed');
+        expect(span.setAttribute).not.toHaveBeenCalledWith(
+          'mcp.tool.partial_success',
+          expect.anything(),
+        );
+        expect(mockCounterAdd).toHaveBeenCalledWith(1, {
+          'mcp.tool.name': 'fanout',
+          'mcp.tool.success': false,
+          'mcp.tool.outcome': 'cancelled',
+        });
+        expect(mockErrorCounterAdd).toHaveBeenCalledWith(1, {
+          'mcp.tool.name': 'fanout',
+          'mcp.tool.error_category': 'client',
+          'mcp.tool.outcome': 'cancelled',
+        });
+        expect(mockLogger.info).toHaveBeenCalledWith(
+          expect.stringMatching(/^Cancelled tool:fanout/),
+          expect.anything(),
+        );
+        expect(mockLogger.error).not.toHaveBeenCalled();
+      });
+
+      it('keeps a partial success while the request is live', async () => {
+        const leg = new AbortController();
+
+        const result = await run(
+          fanout(
+            () => leg.signal,
+            () => leg.abort('leg failed'),
+          ),
+          new AbortController().signal,
+        );
+
+        expect(result.isError).toBeUndefined();
+        expect(result.structuredContent).toEqual({ succeeded: ['a'], failed: ['leg1'] });
+        expect(completionMetrics()).toMatchObject({ isSuccess: true, partialSuccess: true });
+        expect(mockCounterAdd).toHaveBeenCalledWith(1, {
+          'mcp.tool.name': 'fanout',
+          'mcp.tool.success': true,
+          'mcp.tool.outcome': 'ok',
+        });
+      });
+
+      it("keeps a partial success when a leg fails on the handler's own deadline", async () => {
+        const request = new AbortController();
+        const deadline = new AbortController();
+
+        const result = await run(
+          fanout(
+            (ctx) => AbortSignal.any([ctx.signal, deadline.signal]),
+            () => deadline.abort(new DOMException('The deadline elapsed.', 'TimeoutError')),
+          ),
+          request.signal,
+        );
+
+        expect(request.signal.aborted).toBe(false);
+        expect(result.isError).toBeUndefined();
+        expect(result.structuredContent).toEqual({ succeeded: ['a'], failed: ['leg1'] });
+        expect(completionMetrics()).toMatchObject({ isSuccess: true, partialSuccess: true });
+      });
+    });
+
     it('records an input_required round as ok', async () => {
       const confirming = tool('ok_input_tool', {
         description: 'Requests confirmation.',

@@ -5,6 +5,7 @@
 import { describe, expect, test } from 'vitest';
 
 import { markdown } from '@/utils/formatting/markdownBuilder.js';
+import { readCommonMarkTarget } from '../../../helpers/commonmark.js';
 
 describe('MarkdownBuilder', () => {
   describe('Headings', () => {
@@ -240,7 +241,7 @@ describe('MarkdownBuilder', () => {
   describe('Links', () => {
     test('should create link', () => {
       const result = markdown().link('Google', 'https://google.com').build();
-      expect(result).toBe('[Google](https://google.com)');
+      expect(result).toBe('[Google](<https://google.com>)');
     });
 
     test('should integrate link in text', () => {
@@ -249,7 +250,23 @@ describe('MarkdownBuilder', () => {
         .link('our site', 'https://example.com')
         .text(' for more info.')
         .build();
-      expect(result).toBe('Visit [our site](https://example.com) for more info.');
+      expect(result).toBe('Visit [our site](<https://example.com>) for more info.');
+    });
+
+    test('reads back a label with brackets and a URL with a space as written', () => {
+      const result = markdown().link('see [1] *here*', 'https://example.com/a b').build();
+      expect(readCommonMarkTarget(result)).toEqual({
+        kind: 'link',
+        text: 'see [1] *here*',
+        title: null,
+        url: 'https://example.com/a b',
+      });
+    });
+
+    test('renders a non-http(s) URL as literal text', () => {
+      expect(markdown().link('run', 'javascript:alert(1)').build()).toBe(
+        'run (javascript:alert(1))',
+      );
     });
   });
 
@@ -429,14 +446,32 @@ describe('MarkdownBuilder', () => {
   describe('Images', () => {
     test('should create image without title', () => {
       const result = markdown().image('Alt text', 'https://example.com/image.png').build();
-      expect(result).toBe('![Alt text](https://example.com/image.png)');
+      expect(result).toBe('![Alt text](<https://example.com/image.png>)');
     });
 
     test('should create image with title', () => {
       const result = markdown()
         .image('Alt text', 'https://example.com/image.png', 'Hover title')
         .build();
-      expect(result).toBe('![Alt text](https://example.com/image.png "Hover title")');
+      expect(result).toBe('![Alt text](<https://example.com/image.png> "Hover title")');
+    });
+
+    test('reads back alt text, URL, and title as written', () => {
+      const result = markdown()
+        .image('logo_ [v2]', 'https://cdn.example/a (1).png', 'The "main" logo')
+        .build();
+      expect(readCommonMarkTarget(result)).toEqual({
+        kind: 'image',
+        text: 'logo_ [v2]',
+        title: 'The "main" logo',
+        url: 'https://cdn.example/a (1).png',
+      });
+    });
+
+    test('renders a relative path as literal text', () => {
+      expect(markdown().image('Diagram', '/assets/diagram.png').build()).toBe(
+        'Diagram (/assets/diagram.png)',
+      );
     });
   });
 
@@ -546,6 +581,24 @@ describe('MarkdownBuilder', () => {
       const result = markdown().badge('test coverage', '95%', 'green').build();
       expect(result).toContain('test%20coverage');
       expect(result).toContain('95%25');
+    });
+
+    test("doubles shields.io's separators so a dash or underscore stays in its field", () => {
+      expect(readCommonMarkTarget(markdown().badge('my-label', 'v1_0', 'green').build())).toEqual({
+        kind: 'image',
+        text: 'my-label: v1_0',
+        title: null,
+        url: 'https://img.shields.io/badge/my--label-v1__0-green',
+      });
+    });
+
+    test('escapes the alt text', () => {
+      expect(readCommonMarkTarget(markdown().badge('[x]', '*y*').build())).toEqual({
+        kind: 'image',
+        text: '[x]: *y*',
+        title: null,
+        url: 'https://img.shields.io/badge/%5Bx%5D-*y*-blue',
+      });
     });
   });
 });

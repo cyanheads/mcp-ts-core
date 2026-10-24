@@ -1751,7 +1751,8 @@ describe('tool argument pre-validation', () => {
         'Error: Input validation error: Invalid arguments for tool prevalidation_underscore_floor: ' +
           'query: Too small: expected string to have >=3 characters\n\n' +
           'Recovery: query: Too small: expected string to have >=3 characters. ' +
-          'Validated _q as query.\n\n' +
+          // A non-intraword `_` is escaped in content[] (#760).
+          'Validated \\_q as query.\n\n' +
           `(reason invalid_arguments · request ${envelope(result).data?.requestId})`,
       );
       // Telemetry follows the attempt the rejection reports: the rewrite, no drop.
@@ -3381,12 +3382,11 @@ describe('tool argument pre-validation', () => {
     it('keeps every issue as sent under coerce: false', async () => {
       const result = await call(cappedPmids, { pmids: FOURTEEN_PMIDS }, { coerce: false });
 
-      // 14 integers and the list's own `too_big`; a rejection carries the first 10 (#648).
-      expect(issuePaths(result)).toEqual(
-        FOURTEEN_PMIDS.slice(0, 10).map((_, index) => ['pmids', index]),
-      );
-      expect(envelope(result).data).toMatchObject({ issuesCount: 15 });
-      expect(envelope(result).message.endsWith(' (+5 more)')).toBe(true);
+      // Zod checks the list's `.max()` before its elements, so the rejection as
+      // sent is the list's own `too_big`, with none of the 14 integers.
+      expect(issuePaths(result)).toEqual([['pmids']]);
+      expect(envelope(result).data).not.toHaveProperty('issuesCount');
+      expect(envelope(result).message).toBe(`${preamble('prevalidation_capped_pmids')}${TOO_BIG}`);
     });
 
     it('never admits a call through the reporting parse', async () => {
@@ -3771,7 +3771,8 @@ describe('tool argument pre-validation', () => {
               `Input validation error: Invalid arguments for tool ${definition.name}: ${line}`,
             );
             expect(envelope(result).data?.recovery?.hint).toBe(expectedHint);
-            expect(text(result)).toContain(line);
+            // content[] escapes the `|` (#760); a CommonMark parse reads the line back as sent.
+            expect(text(result)).toContain(line.replace('|', '\\|'));
             expect(text(result)).not.toContain('target: Invalid input');
             // `data.issues` still ships Zod's one union issue.
             expect(envelope(result).data?.issues).toEqual([
@@ -6377,7 +6378,7 @@ describe('tool argument pre-validation', () => {
         'Provide query. Dropped undeclared key _search.',
       );
       expect(text(result)).toContain(
-        '\n\nRecovery: Provide query. Dropped undeclared key _search.',
+        '\n\nRecovery: Provide query. Dropped undeclared key \\_search.',
       );
     });
 
@@ -6542,7 +6543,7 @@ describe('tool argument pre-validation', () => {
         ignored: ['_max'],
       });
       expect(text(helper)).toContain(
-        'Validated query as targetQuery. Dropped undeclared key _max.\n\n',
+        'Validated query as targetQuery. Dropped undeclared key \\_max.\n\n',
       );
     });
   });
@@ -6717,7 +6718,7 @@ describe('tool argument pre-validation', () => {
       expect(text(result)).toContain('_max');
       expect(text(result)).toContain(
         '\n\nRecovery: targetQuery: Too small: expected string to have >=3 characters. ' +
-          'Validated query as targetQuery. Dropped undeclared key _max.\n\n',
+          'Validated query as targetQuery. Dropped undeclared key \\_max.\n\n',
       );
     });
   });

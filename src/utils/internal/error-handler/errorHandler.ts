@@ -112,13 +112,18 @@ function dropStackFields(data: Record<string, unknown>): void {
  * response for a request whose signal it aborted, so the client-visible
  * envelope is the same either way.
  *
- * Applied inside the measured region by both handler factories, so the
- * completion log's `metrics.errorCode` and the execution span's error-code
- * attribute carry `-32011` alongside the classified envelope. The HTTP
- * transport's error handler applies it against the inbound request's signal,
- * and `runToolContract` against the mock context's, over the handler and the
- * success pipeline after it, so a contract test of cancellation sees the
- * envelope the factory emits (#513).
+ * Applied inside the measured region by both handler factories and by the
+ * `prompts/get` callback (#770), so the completion log's `metrics.errorCode`
+ * and the execution span's error-code attribute carry `-32011` alongside the
+ * classified envelope. A handler that returns after the abort — a fan-out that
+ * folded the aborted leg into a partial result, an early `return` on
+ * `ctx.signal.aborted` — reaches this too: the factories, the prompt callback,
+ * and `runToolContract` call `signal.throwIfAborted()` once the handler (or
+ * `generate`) resolves, so the call settles as a cancellation whatever the
+ * handler did next (#753). The HTTP transport's error handler applies it
+ * against the inbound request's signal, and `runToolContract` against the mock
+ * context's, over the handler and the success pipeline after it, so a contract
+ * test of cancellation sees the envelope the factory emits (#513).
  *
  * Returns the value unchanged while the signal is live, for an `input_required`
  * signal (protocol control flow, never a failure), and for an error already

@@ -17,6 +17,7 @@ export {
   unsafeRaw,
 } from './html.js';
 export { MarkdownBuilder, markdown } from './markdownBuilder.js';
+export { escapeMarkdownInline, markdownImage, markdownLink } from './markdownInline.js';
 export { failureEntrySchema, partialResult, partialResultSchema } from './partialResult.js';
 export {
   type Alignment,

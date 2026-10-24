@@ -12,6 +12,7 @@ import type { Context, EnrichmentStore } from '@/core/context.js';
 import { readContentStore, readEnrichmentStore } from '@/core/context.js';
 import { parseOutputContract } from '@/mcp-server/outputContract.js';
 import { internalError, type JsonRpcErrorCode } from '@/types-global/errors.js';
+import { escapeMarkdownInline } from '@/utils/formatting/markdownInline.js';
 import { ErrorHandler } from '@/utils/internal/error-handler/errorHandler.js';
 import { readWireErrorData } from '@/utils/internal/error-handler/helpers.js';
 import type { AnyToolDefinition } from './toolDefinition.js';
@@ -87,7 +88,7 @@ function extractRecoveryHint(data: Record<string, unknown> | undefined): string 
 function renderBranchableTerms(data: Record<string, unknown> | undefined): string | undefined {
   const terms: string[] = [];
   if (typeof data?.reason === 'string' && data.reason.length > 0) {
-    terms.push(`reason ${data.reason}`);
+    terms.push(`reason ${escapeMarkdownInline(data.reason)}`);
   }
   if (typeof data?.retryable === 'boolean') {
     terms.push(data.retryable ? 'retryable' : 'not retryable');
@@ -109,6 +110,13 @@ function renderBranchableTerms(data: Record<string, unknown> | undefined): strin
  * {@link renderBranchableTerms} renders, in that order; the numeric `code` and
  * `data.issues` stay JSON-only.
  *
+ * The message, hint, and reason are caller or upstream text, so each is
+ * rendered through {@link escapeMarkdownInline} (#760): a CommonMark parse of
+ * the block reads each back exactly as `structuredContent.error` carries it,
+ * rather than as emphasis, a code span, raw HTML, or a list. A handler throws
+ * raw text for that reason — escaping it first would put the backslashes on
+ * both surfaces.
+ *
  * The `Recovery:` line is dropped when the message already contains the hint
  * verbatim (#459) — `buildArgumentRecoveryHint` restates a constraint or
  * refinement issue as its own message line, and a hint made only of those is
@@ -128,8 +136,10 @@ export function buildToolErrorResult(
   data: Record<string, unknown> | undefined,
 ): CallToolResult {
   const hint = extractRecoveryHint(data);
-  const blocks = [`Error: ${message}`];
-  if (hint !== undefined && !message.trim().includes(hint.trim())) blocks.push(`Recovery: ${hint}`);
+  const blocks = [`Error: ${escapeMarkdownInline(message)}`];
+  if (hint !== undefined && !message.trim().includes(hint.trim())) {
+    blocks.push(`Recovery: ${escapeMarkdownInline(hint)}`);
+  }
   const terms = renderBranchableTerms(data);
   if (terms !== undefined) blocks.push(terms);
   const text = blocks.join('\n\n');
@@ -206,10 +216,16 @@ export function parseToolOutput(def: AnyToolDefinition, value: unknown): Record<
   }) as Record<string, unknown>;
 }
 
-/** Renders a non-kind-tagged enrichment value as compact trailer text. */
+/**
+ * Renders an enrichment value as compact trailer text for the echo, delta, and
+ * default arms. A string, and the JSON of an object, is caller or upstream data,
+ * so it goes through {@link escapeMarkdownInline} and a CommonMark parse reads
+ * it back as written (#640); a number, boolean, or `null` renders as itself.
+ */
 function formatEnrichmentScalar(value: unknown): string {
   if (value == null) return String(value);
-  if (typeof value === 'object') return JSON.stringify(value);
+  if (typeof value === 'object') return escapeMarkdownInline(JSON.stringify(value));
+  if (typeof value === 'string') return escapeMarkdownInline(value);
   return String(value);
 }
 
@@ -259,6 +275,12 @@ function joinTrailerFields(fields: string[]): string {
  *   3. the generic `**key:** value` fallback (key overridable via `label`),
  *      `JSON.stringify`-ing non-scalars.
  *
+ * Echo, delta, and default values are data, rendered through
+ * {@link formatEnrichmentScalar} so their Markdown-active characters read back
+ * literally. Authored text stays live Markdown: a `render` result, a `label`,
+ * the `total` line, and the `notice` blockquote, whose author escapes any
+ * untrusted text embedded in it.
+ *
  * `parsed` is the validated effective output, so renderers receive the typed,
  * post-parse value rather than the raw accumulator entry. The rendered markdown
  * is appended to `content[]` only — `structuredContent` is built separately from
@@ -294,7 +316,7 @@ function renderEnrichmentTrailer(
         fields.push(`**${String(value)} total**`);
         break;
       case 'echo':
-        fields.push(`Query: ${String(value)}`);
+        fields.push(`Query: ${formatEnrichmentScalar(value)}`);
         break;
       case 'delta': {
         const d = (value ?? {}) as { after?: unknown; before?: unknown };

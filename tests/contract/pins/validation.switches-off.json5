@@ -100,7 +100,7 @@
     "rejected": {
       "content": [
         {
-          "text": "Error: Input validation error: Invalid arguments for tool contract_probe: Unrecognized keys: \"_meta\", \"toolCallId\", \"tool_call_description\"\n\nRecovery: Unknown keys _meta, toolCallId, tool_call_description. This tool accepts: query, limit, tags, filter, weights, maxResults, code, region, note, shape, routing.\n\n(reason invalid_arguments · request <requestId>)",
+          "text": "Error: Input validation error: Invalid arguments for tool contract_probe: Unrecognized keys: \"\\_meta\", \"toolCallId\", \"tool_call_description\"\n\nRecovery: Unknown keys \\_meta, toolCallId, tool_call_description. This tool accepts: query, limit, tags, filter, weights, maxResults, code, region, note, shape, routing.\n\n(reason invalid_arguments · request <requestId>)",
           "type": "text"
         }
       ],
@@ -209,7 +209,7 @@
     "rejected": {
       "content": [
         {
-          "text": "Error: Input validation error: Invalid arguments for tool contract_probe: query: Too small: expected string to have >=1 characters\n\nRecovery: query: Too small: expected string to have >=1 characters. Validated _q as query.\n\n(reason invalid_arguments · request <requestId>)",
+          "text": "Error: Input validation error: Invalid arguments for tool contract_probe: query: Too small: expected string to have >=1 characters\n\nRecovery: query: Too small: expected string to have >=1 characters. Validated \\_q as query.\n\n(reason invalid_arguments · request <requestId>)",
           "type": "text"
         }
       ],
@@ -587,7 +587,7 @@
     "rejected": {
       "content": [
         {
-          "text": "Error: Input validation error: Invalid arguments for tool contract_probe: shape.kind: Invalid discriminator value. Expected 'circle' | 'square'\n\n(reason invalid_arguments · request <requestId>)",
+          "text": "Error: Input validation error: Invalid arguments for tool contract_probe: shape.kind: Invalid discriminator value. Expected 'circle' \\| 'square'\n\n(reason invalid_arguments · request <requestId>)",
           "type": "text"
         }
       ],
@@ -877,7 +877,7 @@
     "rejected": {
       "content": [
         {
-          "text": "Error: Input validation error: Invalid arguments for tool contract_probe: Unrecognized key: \"_trace\"\n\nRecovery: Unknown key _trace. This tool accepts: query, limit, tags, filter, weights, maxResults, code, region, note, shape, routing.\n\n(reason invalid_arguments · request <requestId>)",
+          "text": "Error: Input validation error: Invalid arguments for tool contract_probe: Unrecognized key: \"\\_trace\"\n\nRecovery: Unknown key \\_trace. This tool accepts: query, limit, tags, filter, weights, maxResults, code, region, note, shape, routing.\n\n(reason invalid_arguments · request <requestId>)",
           "type": "text"
         }
       ],
@@ -907,7 +907,7 @@
     "rejected": {
       "content": [
         {
-          "text": "Error: Input validation error: Invalid arguments for tool contract_probe: query: Invalid input: expected string, received undefined, Unrecognized key: \"_query\"\n\nRecovery: Provide query. Unknown key _query. This tool accepts: query, limit, tags, filter, weights, maxResults, code, region, note, shape, routing.\n\n(reason invalid_arguments · request <requestId>)",
+          "text": "Error: Input validation error: Invalid arguments for tool contract_probe: query: Invalid input: expected string, received undefined, Unrecognized key: \"\\_query\"\n\nRecovery: Provide query. Unknown key \\_query. This tool accepts: query, limit, tags, filter, weights, maxResults, code, region, note, shape, routing.\n\n(reason invalid_arguments · request <requestId>)",
           "type": "text"
         }
       ],
@@ -1011,7 +1011,7 @@
     "rejected": {
       "content": [
         {
-          "text": "Error: Input validation error: Invalid arguments for tool contract_probe: region: Invalid option: expected one of \"us\"|\"eu\"\n\n(reason invalid_arguments · request <requestId>)",
+          "text": "Error: Input validation error: Invalid arguments for tool contract_probe: region: Invalid option: expected one of \"us\"\\|\"eu\"\n\n(reason invalid_arguments · request <requestId>)",
           "type": "text"
         }
       ],
@@ -1129,7 +1129,7 @@
     "rejected": {
       "content": [
         {
-          "text": "Error: Input validation error: Invalid arguments for tool contract_union_root: mode: Invalid discriminator value. Expected 'byId' | 'byName'\n\n(reason invalid_arguments · request <requestId>)",
+          "text": "Error: Input validation error: Invalid arguments for tool contract_union_root: mode: Invalid discriminator value. Expected 'byId' \\| 'byName'\n\n(reason invalid_arguments · request <requestId>)",
           "type": "text"
         }
       ],

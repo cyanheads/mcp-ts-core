@@ -551,7 +551,10 @@ describe('a client_capability_missing refusal (#651)', () => {
         {
           type: 'text',
           text:
-            `Error: ${CAPABILITY_MESSAGE}\n\nRecovery: ${CAPABILITY_HINT}` +
+            // content[] escapes the backticks so a CommonMark parse reads them back (#760).
+            "Error: Cannot request input 'confirm' (elicitation/create): the client on this " +
+            '2025-era connection did not declare the \\`elicitation.form\\` capability' +
+            '\n\nRecovery: Reconnect with a client that declares the \\`elicitation.form\\` capability.' +
             `\n\n(reason client_capability_missing · request ${requestId})`,
         },
       ],
