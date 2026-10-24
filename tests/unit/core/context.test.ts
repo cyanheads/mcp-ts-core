@@ -1548,7 +1548,7 @@ describe('ContextLogger — wire sink (ctx.mcpReq.log mirror)', () => {
       ctx.log.debug('deep', {
         a: { b: { c: { d: { secret: 's-4', kept: 4 } } } },
         attempts: [{ token: 't-1' }, { token: 't-2', ok: true }, ['plain', { cookie: 'c' }]],
-        credentials: { toJSON: () => ({ client_secret: 'cs', clientId: 'id-1' }) },
+        oauthClient: { toJSON: () => ({ client_secret: 'cs', clientId: 'id-1' }) },
       });
 
       expect(wireLog).toHaveBeenCalledWith('debug', {
@@ -1559,7 +1559,7 @@ describe('ContextLogger — wire sink (ctx.mcpReq.log mirror)', () => {
           { token: '[REDACTED]', ok: true },
           ['plain', { cookie: '[REDACTED]' }],
         ],
-        credentials: { client_secret: '[REDACTED]', clientId: 'id-1' },
+        oauthClient: { client_secret: '[REDACTED]', clientId: 'id-1' },
       });
     });
 

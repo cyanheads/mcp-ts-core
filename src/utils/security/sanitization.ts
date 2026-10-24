@@ -869,11 +869,18 @@ export class Sanitization {
    *
    * This method is **synchronous**. It uses `structuredClone` for deep cloning. A key is
    * sensitive when some run of its adjacent words, joined, equals a sensitive field name with
-   * case and separators ignored. Words are split at every character other than a letter or
-   * digit, at a lowercase letter followed by a capital, at the end of a run of capitals, and
-   * around each run of digits: `apiKey`, `API_KEY`, `APIKey`, `x-api-key`, `accessToken`,
-   * `upstream_private_key`, and `apiKey2` are all sensitive, while `max_tokens`, `MAX_TOKENS`,
-   * and `tokenizer` are not. Every log sink matches keys the same way.
+   * case and separators ignored, or when one of its words ends with a sensitive name or ends
+   * in `key` with a sensitive name before that `key`. Words are split at every character other
+   * than a letter or digit, at a lowercase letter followed by a capital, at the end of a run of
+   * capitals, and around each run of digits, and a trailing `keys` reads as `key`. The plural
+   * of every name but `token` is a name too (`secrets`, `cookies`); `tokens` names a token
+   * count, so it stays as written, while credential-token lists (`accessTokens`,
+   * `refresh_tokens`) are matched by name. `apiKey`, `API_KEY`, `APIKey`, `x-api-key`,
+   * `api_keys`, `accessToken`, `upstream_private_key`, `apiKey2`, `DBPASSWORD`, `accesstoken`,
+   * and `AWSSECRETACCESSKEY` are all sensitive, while `max_tokens`, `MAXTOKENS`, `tokenizer`,
+   * and `PASSWORDLESS` are not. A name followed by another word in one word is not matched
+   * (`PASSWORDHASH`), and a short name added through `setSensitiveFields` matches as the
+   * ending of any word (`key` matches `monkey`). Every log sink matches keys the same way.
    *
    * Non-object/non-array inputs (primitives, `null`) are returned as-is without cloning.
    * If `structuredClone` itself throws (e.g., a function, a symbol, or a getter that throws), the method

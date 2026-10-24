@@ -182,7 +182,7 @@ describe('Sanitization Utility', () => {
     it('should redact sensitive keys in a deeply nested object', () => {
       const sensitiveObject = {
         user: 'casey',
-        credentials: {
+        account: {
           password: 'my-secret-password',
           session_token: 'abc-123-def-456',
         },
@@ -191,7 +191,7 @@ describe('Sanitization Utility', () => {
       const sanitized = sanitization.sanitizeForLogging(sensitiveObject);
       expect(sanitized).toEqual({
         user: 'casey',
-        credentials: {
+        account: {
           password: '[REDACTED]',
           session_token: '[REDACTED]',
         },
@@ -272,6 +272,43 @@ describe('Sanitization Utility', () => {
           TOKENIZER: 'cl100k',
         },
       });
+    });
+
+    // #702 — a name run into another word, with no separator or case change, went out in clear.
+    it('redacts a sensitive name run into the word before it, and keeps a word it only starts', () => {
+      expect(
+        JSON.stringify(
+          sanitization.sanitizeForLogging({
+            DBPASSWORD: 'p1',
+            AWSSECRETACCESSKEY: 'a1',
+            accesstoken: 't1',
+            DB_PASSWORD: 'p2',
+            APIKEYS: ['k1'],
+            PASSWORDLESS: true,
+            MAXTOKENS: 5,
+          }),
+        ),
+      ).toBe(
+        '{"DBPASSWORD":"[REDACTED]","AWSSECRETACCESSKEY":"[REDACTED]","accesstoken":"[REDACTED]","DB_PASSWORD":"[REDACTED]","APIKEYS":"[REDACTED]","PASSWORDLESS":true,"MAXTOKENS":5}',
+      );
+    });
+
+    it('redacts the plural of every sensitive name but token, which stays a counter', () => {
+      expect(
+        JSON.stringify(
+          sanitization.sanitizeForLogging({
+            secrets: ['s1'],
+            api_secrets: ['s2'],
+            DBPASSWORDS: ['p1'],
+            cookies: 'a=1',
+            clientSecrets: ['c1'],
+            tokens: 12,
+            NUM_TOKENS: 3,
+          }),
+        ),
+      ).toBe(
+        '{"secrets":"[REDACTED]","api_secrets":"[REDACTED]","DBPASSWORDS":"[REDACTED]","cookies":"[REDACTED]","clientSecrets":"[REDACTED]","tokens":12,"NUM_TOKENS":3}',
+      );
     });
   });
 

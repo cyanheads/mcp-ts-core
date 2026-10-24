@@ -81,6 +81,54 @@ describe('isSensitiveKey', () => {
     'SSN_LAST4',
     'api_key_2',
     'X-API-KEY-2',
+    // #702 — a name run into the word before it: a word ending with a name, or ending in `key`
+    // with a name before that `key`.
+    'DBPASSWORD',
+    'XAPIKEY',
+    'OPENAIAPIKEY',
+    'GITHUBTOKEN',
+    'JWTSECRET',
+    'SESSIONCOOKIE',
+    'USERSSN',
+    'AWSSECRETACCESSKEY',
+    'SECRETKEY',
+    'X_DBPASSWORD',
+    'DBPASSWORD_2',
+    'accesstoken',
+    'userpassword',
+    // A trailing `keys` reads as `key`, in a run and in a single word alike.
+    'api_keys',
+    'apiKeys',
+    'APIKEYS',
+    'X-API-KEYS',
+    'private_keys',
+    'XAPIKEYS',
+    'SECRETKEYS',
+    // The plural of every name but `token`, as a run and as a word ending.
+    'secrets',
+    'api_secrets',
+    'DBPASSWORDS',
+    'passwords',
+    'credentials',
+    'cookies',
+    'clientSecrets',
+    'CLIENT_SECRETS',
+    'privateKeys',
+    'authorizations',
+    'jwts',
+    'USER_SSNS',
+    'cvvs',
+    // A list of credential tokens, though `tokens` alone is a count.
+    'accessTokens',
+    'refresh_tokens',
+    'ACCESSTOKENS',
+    'X_REFRESHTOKENS',
+    'idTokens',
+    'bearer_tokens',
+    'sessionTokens',
+    'oauthTokens',
+    'apiTokens',
+    'authTokens',
   ])('treats %s as sensitive', (key) => {
     expect(isSensitiveKey(key)).toBe(true);
   });
@@ -121,6 +169,32 @@ describe('isSensitiveKey', () => {
     's3Bucket',
     'v2Tokens',
     'tokens2',
+    // A word that starts with a name, or ends with something other than a name or a `key`.
+    'PASSWORDLESS',
+    'TOKENIZER',
+    'SECRETARY',
+    'MAXTOKENS',
+    'NUMTOKENS',
+    'CLASSNAME',
+    'BUSINESSNAME',
+    'ADDRESSNUMBER',
+    'KEYBOARD',
+    'MONKEY',
+    'TURKEY',
+    'MONKEYS',
+    'AUTHOR',
+    'TOKENEXPIRY',
+    'APIKEYID',
+    'keys',
+    'publicKeys',
+    // A name followed by another word cannot be told from `PASSWORDLESS` without a dictionary.
+    'PASSWORDHASH',
+    'PRIVATEKEYPEM',
+    // `tokens` names a token count, so the plural of `token` is the one plural left as written.
+    'tokens',
+    'TOKENS',
+    'TOTALTOKENS',
+    'secretariats',
   ])('leaves %s unredacted', (key) => {
     expect(isSensitiveKey(key)).toBe(false);
   });
@@ -145,7 +219,7 @@ describe('isSensitiveKey', () => {
     const cost = (length: number): number => {
       let best = Number.POSITIVE_INFINITY;
       for (let sample = 0; sample < 5; sample++) {
-        const keys = ['A', 'a_', 'aB', 'ABc', 'a1'].map(
+        const keys = ['A', 'a_', 'aB', 'ABc', 'a1', 'akey'].map(
           (unit) => `${unit.repeat(length / unit.length)}${sample}`,
         );
         best = Math.min(
@@ -166,5 +240,16 @@ describe('isSensitiveKey', () => {
     // 16× the characters: linear is ~16×, a scan over every run of words would be ~256×.
     expect(at80k / at5k).toBeLessThan(48);
     expect(at20k / at5k).toBeLessThan(12);
+  });
+
+  // Runs last: the name it adds stays on the list for the rest of the file.
+  it('matches a short added name as the ending of any word', () => {
+    expect(isSensitiveKey('monkey')).toBe(false);
+
+    sanitization.setSensitiveFields(['key']);
+
+    expect(isSensitiveKey('monkey')).toBe(true);
+    expect(isSensitiveKey('TURKEY')).toBe(true);
+    expect(isSensitiveKey('keyboard')).toBe(false);
   });
 });
