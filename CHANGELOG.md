@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.13.16](changelog/0.13.x/0.13.16.md) — 2026-10-24 · 🛡️ Security
+
+A createWorkerHandler() without name, version, or sessionMode now applies its Worker bindings, framework config is parsed at startup rather than import and bounded, HTTP shutdown drains with 503s, cancelled calls settle as RequestCancelled, and error and trailer text in content[] is Markdown-safe.
+
 ## [0.13.15](changelog/0.13.x/0.13.15.md) — 2026-10-12 · 🛡️ Security
 
 DuckDB canvases run with external access off, directories allow-listed, and configuration locked, and the SQL gate refuses more functions and file references; every ZodError's data.issues is bounded and ZodErrors log as their one-line summary.

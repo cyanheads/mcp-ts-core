@@ -1,6 +1,6 @@
 # mcp-ts-core - Directory Structure
 
-Generated on: 2026-10-12 07:53:47
+Generated on: 2026-10-24 13:49:38
 
 ```text
 mcp-ts-core/
@@ -289,6 +289,7 @@ mcp-ts-core/
 │   │   └── init.ts
 │   ├── config/
 │   │   ├── appRoot.ts
+│   │   ├── envIssue.ts
 │   │   ├── envValue.ts
 │   │   ├── index.ts
 │   │   ├── logLevelAlias.ts
@@ -497,6 +498,7 @@ mcp-ts-core/
 │   │   │   ├── html.ts
 │   │   │   ├── index.ts
 │   │   │   ├── markdownBuilder.ts
+│   │   │   ├── markdownInline.ts
 │   │   │   ├── partialResult.ts
 │   │   │   ├── sentence.ts
 │   │   │   ├── tableFormatter.ts
@@ -702,6 +704,7 @@ mcp-ts-core/
 │   │   ├── sql-gate.fuzz.test.ts
 │   │   └── tool-handler-pipeline.fuzz.test.ts
 │   ├── helpers/
+│   │   ├── commonmark.ts
 │   │   ├── context-helpers.ts
 │   │   ├── cpu-time.ts
 │   │   ├── default-server-mcp.ts
@@ -717,6 +720,7 @@ mcp-ts-core/
 │   │   ├── stdio-session.ts
 │   │   └── tool-result.ts
 │   ├── integration/
+│   │   ├── bad-env-import.int.test.ts
 │   │   ├── cache-hints.int.test.ts
 │   │   ├── completions.int.test.ts
 │   │   ├── http-auth-sessions.test.ts
@@ -725,6 +729,7 @@ mcp-ts-core/
 │   │   ├── http-body-disconnect.int.test.ts
 │   │   ├── http-protocol-session.int.test.ts
 │   │   ├── http-sessions.test.ts
+│   │   ├── http-shutdown-drain.int.test.ts
 │   │   ├── http-sse-abort.int.test.ts
 │   │   ├── http-storage-security.int.test.ts
 │   │   ├── http-transport.int.test.ts
@@ -906,6 +911,7 @@ mcp-ts-core/
 │   │   │   ├── dockerfile.test.ts
 │   │   │   ├── export-map.test.ts
 │   │   │   ├── optional-peer-deps.test.ts
+│   │   │   ├── shared-biome-config.test.ts
 │   │   │   ├── tsconfig-base.test.ts
 │   │   │   └── type-environment-isolation.test.ts
 │   │   ├── public-api/
@@ -1030,6 +1036,7 @@ mcp-ts-core/
 │   │       │   ├── diffFormatter.test.ts
 │   │       │   ├── html.test.ts
 │   │       │   ├── markdownBuilder.test.ts
+│   │       │   ├── markdownInline.test.ts
 │   │       │   ├── partialResult.test.ts
 │   │       │   ├── tableFormatter.test.ts
 │   │       │   └── treeFormatter.test.ts

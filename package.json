@@ -1,6 +1,6 @@
 {
   "name": "@cyanheads/mcp-ts-core",
-  "version": "0.13.15",
+  "version": "0.13.16",
   "mcpName": "io.github.cyanheads/mcp-ts-core",
   "description": "Agent-native TypeScript framework for building MCP servers.",
   "files": [
@@ -245,7 +245,7 @@
     "linkedom": "^0.18.14",
     "markdown-it": "15.0.3",
     "node-cron": "^4.6.0",
-    "openai": "^7.39.0",
+    "openai": "^7.40.0",
     "papaparse": "^5.7.0",
     "partial-json": "^0.1.7",
     "pdf-lib": "^1.17.1",
