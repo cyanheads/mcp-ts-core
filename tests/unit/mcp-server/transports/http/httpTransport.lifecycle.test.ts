@@ -12,6 +12,7 @@ import { defaultServerManifest as defaultMeta } from '../../../../helpers/fixtur
 
 const {
   closeAllConnectionsSpy,
+  closeIdleConnectionsSpy,
   createServerSpy,
   probeOutcomes,
   serveSpy,
@@ -19,6 +20,7 @@ const {
   startupBannerSpy,
 } = vi.hoisted(() => ({
   closeAllConnectionsSpy: vi.fn(),
+  closeIdleConnectionsSpy: vi.fn(),
   createServerSpy: vi.fn(),
   probeOutcomes: [] as Array<'free' | 'inUse'>,
   serveSpy: vi.fn(),
@@ -117,6 +119,7 @@ vi.mock('@hono/node-server', () => ({ serve: serveSpy }));
 type FakeServer = EventEmitter & {
   close: typeof serverCloseSpy;
   closeAllConnections: typeof closeAllConnectionsSpy;
+  closeIdleConnections: typeof closeIdleConnectionsSpy;
 };
 
 interface DeferredAttempt {
@@ -130,6 +133,7 @@ function makeFakeServer(): FakeServer {
   return Object.assign(new EventEmitter(), {
     close: serverCloseSpy,
     closeAllConnections: closeAllConnectionsSpy,
+    closeIdleConnections: closeIdleConnectionsSpy,
   }) as FakeServer;
 }
 
@@ -495,5 +499,43 @@ describe('HTTP Transport lifecycle', () => {
     expect(closeAllConnectionsSpy).toHaveBeenCalledOnce();
     closeCallback?.();
     await stopPromise;
+  });
+
+  // A response whose headers went out before shutdown promised keep-alive, so
+  // its socket outlives it and would hold the drain open to the timeout (#757).
+  test('retires idle sockets as each response ends once stop begins, without the drain timeout', async () => {
+    vi.useFakeTimers();
+    let closeCallback: ((err?: Error) => void) | undefined;
+    serverCloseSpy.mockImplementationOnce((callback?: (err?: Error) => void) => {
+      closeCallback = callback;
+    });
+    probeOutcomes.push('free');
+
+    const { startHttpTransport } = await import('@/mcp-server/transports/http/httpServer.js');
+    const handle = await startHttpTransport(
+      () => Promise.resolve({} as McpServer),
+      mockContext,
+      defaultMeta,
+    );
+    const server = handle.server as unknown as FakeServer;
+    const beforeStop = new EventEmitter();
+    const inFlight = new EventEmitter();
+    server.emit('request', {}, beforeStop);
+    server.emit('request', {}, inFlight);
+
+    beforeStop.emit('close');
+    expect(closeIdleConnectionsSpy).not.toHaveBeenCalled();
+
+    const stopPromise = handle.stop(mockContext);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(serverCloseSpy).toHaveBeenCalledOnce();
+    expect(closeIdleConnectionsSpy).not.toHaveBeenCalled();
+
+    inFlight.emit('close');
+    expect(closeIdleConnectionsSpy).toHaveBeenCalledOnce();
+
+    closeCallback?.();
+    await stopPromise;
+    expect(closeAllConnectionsSpy).not.toHaveBeenCalled();
   });
 });

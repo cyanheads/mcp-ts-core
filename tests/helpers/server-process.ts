@@ -86,7 +86,7 @@ export function assertServerEntrypoint(entrypoint: string): string {
 }
 
 /** Finds a free port by briefly binding to port 0 and releasing. */
-async function getFreePort(): Promise<number> {
+export async function getFreePort(): Promise<number> {
   return new Promise((resolve, reject) => {
     const srv = createServer();
     srv.listen(0, '127.0.0.1', () => {

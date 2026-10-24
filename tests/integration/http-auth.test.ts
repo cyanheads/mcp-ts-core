@@ -10,12 +10,14 @@ import { generateTestJwt, initializeBody, MCP_HEADERS } from '../helpers/http-he
 import { type ServerHandle, startServer } from '../helpers/server-process.js';
 
 const AUTH_SECRET = 'test-secret-key-for-conformance!';
+const BROWSER_ORIGIN = 'https://app.example';
 
 describe('HTTP auth integration', () => {
   let handle: ServerHandle;
 
   beforeAll(async () => {
     handle = await startServer('http', {
+      MCP_ALLOWED_ORIGINS: BROWSER_ORIGIN,
       MCP_AUTH_MODE: 'jwt',
       MCP_AUTH_SECRET_KEY: AUTH_SECRET,
     });
@@ -33,6 +35,27 @@ describe('HTTP auth integration', () => {
     });
 
     expect(res.status).toBe(401);
+  });
+
+  // A browser hides every response header CORS does not expose, so without
+  // this a cross-origin client cannot read the RFC 9728 challenge that points
+  // it at the authorization server.
+  it('exposes the 401 WWW-Authenticate challenge to an allowlisted browser origin', async () => {
+    const res = await fetch(`http://localhost:${handle.port}/mcp`, {
+      body: initializeBody(),
+      headers: { ...MCP_HEADERS, Origin: BROWSER_ORIGIN },
+      method: 'POST',
+    });
+    const exposed = (res.headers.get('access-control-expose-headers') ?? '')
+      .split(',')
+      .map((header) => header.trim().toLowerCase());
+
+    expect(res.status).toBe(401);
+    expect(res.headers.get('access-control-allow-origin')).toBe(BROWSER_ORIGIN);
+    expect(res.headers.get('www-authenticate')).toContain('resource_metadata=');
+    expect(exposed).toEqual(
+      expect.arrayContaining(['www-authenticate', 'mcp-session-id', 'retry-after']),
+    );
   });
 
   it('accepts a valid JWT and completes initialize', async () => {

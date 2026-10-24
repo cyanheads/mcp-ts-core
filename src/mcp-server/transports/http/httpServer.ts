@@ -216,17 +216,40 @@ export async function startHttpTransport(
 
   logger.info('HTTP transport started successfully.', transportContext);
 
+  // `serve()` builds a `node:http` server; the HTTP/2 variants its type also
+  // admits are never requested here.
+  const httpServer = server as http.Server;
+
+  /**
+   * Set when stop begins. A response whose headers went out before then
+   * promised keep-alive, so once it ends its socket sits idle and holds the
+   * drain open; sweeping idle sockets as each response ends retires it, and
+   * the sweep never touches a connection whose response is still in progress.
+   */
+  let draining = false;
+  httpServer.on('request', (_req, res: http.ServerResponse) => {
+    res.once('close', () => {
+      if (draining) httpServer.closeIdleConnections();
+    });
+  });
+
   return {
     server,
-    stop: (ctx: RequestContext) => stopHttpTransport(server, close, ctx),
+    stop: (ctx: RequestContext) => {
+      draining = true;
+      return stopHttpTransport(httpServer, close, ctx);
+    },
   };
 }
 
-/** Max time (ms) to wait for in-flight connections (e.g. SSE streams) to drain. */
+/**
+ * Max time (ms) to wait for connections to drain once every in-flight exchange
+ * has been aborted — the backstop for a response that still never ends.
+ */
 const DRAIN_TIMEOUT_MS = 5_000;
 
 async function stopHttpTransport(
-  server: ServerType,
+  server: http.Server,
   closeApp: () => Promise<void>,
   parentContext: RequestContext,
 ): Promise<void> {
@@ -236,8 +259,8 @@ async function stopHttpTransport(
   );
   logger.info('Attempting to stop http transport...', operationContext);
 
-  // Tear the MCP layer down first: aborts in-flight modern exchanges, closes
-  // per-request instances, and closes every live session's server + transport.
+  // Tear the MCP layer down first: enters draining, then aborts every
+  // in-flight exchange and closes every live session's server + transport.
   await closeApp();
 
   return new Promise<void>((resolve, reject) => {
@@ -247,7 +270,7 @@ async function stopHttpTransport(
     // event which only fires for new arrivals.
     const drainTimer = setTimeout(() => {
       logger.warning('Drain timeout reached — force-closing all connections.', operationContext);
-      (server as http.Server).closeAllConnections();
+      server.closeAllConnections();
     }, DRAIN_TIMEOUT_MS);
     drainTimer.unref();
 
@@ -260,5 +283,6 @@ async function stopHttpTransport(
       logger.info('HTTP server closed successfully.', operationContext);
       resolve();
     });
+    logger.info('HTTP server stopped accepting connections; draining open ones.', operationContext);
   });
 }

@@ -31,7 +31,7 @@ import {
   type ServerEventBus,
   WebStandardStreamableHTTPServerTransport,
 } from '@modelcontextprotocol/server';
-import { Hono } from 'hono';
+import { type Context, Hono } from 'hono';
 import { cors } from 'hono/cors';
 import { config } from '@/config/index.js';
 import type { ServerManifest } from '@/core/serverManifest.js';
@@ -53,12 +53,14 @@ import {
   SessionStore,
 } from '@/mcp-server/transports/http/sessionStore.js';
 import { type FrameworkServerFactory, resolveSessionMode } from '@/mcp-server/types.js';
+import { JsonRpcErrorCode } from '@/types-global/errors.js';
 import { logger } from '@/utils/internal/logger.js';
 import {
   type RequestContext,
   requestContextService,
   withExtra,
 } from '@/utils/internal/requestContext.js';
+import { runtimeCaps } from '@/utils/internal/runtime.js';
 import { createObservableGauge } from '@/utils/telemetry/metrics.js';
 
 /** Matches loopback origins (http(s)://localhost|127.0.0.1|[::1] with optional port).
@@ -83,6 +85,16 @@ const BASE_CORS_ALLOW_HEADERS = [
  * resume on the sessionful arm sends.
  */
 const MCP_CORS_ALLOW_HEADERS = ['Mcp-Method', 'Mcp-Name', 'Last-Event-ID'];
+
+/**
+ * Response headers a cross-origin browser client may read. `Mcp-Session-Id`
+ * carries the 2025-era session; `WWW-Authenticate` carries a 401's RFC 9728
+ * `resource_metadata` challenge, the client's only pointer to the
+ * authorization server; `Retry-After` says when a retryable `503` (draining,
+ * session capacity) may be retried. None is CORS-safelisted, so without listing
+ * them a browser hides all three.
+ */
+const CORS_EXPOSE_HEADERS = ['Mcp-Session-Id', 'WWW-Authenticate', 'Retry-After'];
 
 /**
  * `Mcp-Param-<Name>` for every `headerParam` designation on a registered tool.
@@ -200,6 +212,19 @@ function onStreamEnd(response: Response, onEnd: () => void): Response {
 }
 
 /**
+ * `request` with `signal` joined to its own abort signal. Its body is left
+ * behind: a POST reaches the SDK already parsed, as `parsedBody`, and the
+ * other methods carry none.
+ */
+function withAddedSignal(request: Request, signal: AbortSignal): Request {
+  return new Request(request.url, {
+    method: request.method,
+    headers: request.headers,
+    signal: AbortSignal.any([request.signal, signal]),
+  });
+}
+
+/**
  * Creates a Hono HTTP application for the MCP server.
  *
  * This function is generic and can create apps with different binding types:
@@ -226,7 +251,13 @@ export async function createHttpApp<TBindings extends object = HonoNodeBindings>
   bus?: ServerEventBus,
 ): Promise<{
   app: Hono<{ Bindings: TBindings }>;
-  /** Tears down the modern leg's in-flight exchanges and per-request instances. */
+  /**
+   * Starts draining, then tears down every in-flight exchange: the modern
+   * leg's, the stateless legacy leg's, and each live session. Draining is
+   * entered before anything is aborted and never left: from then on the MCP
+   * endpoint answers every request with a retryable `503`, and every response
+   * the app finishes carries `Connection: close`.
+   */
   close: () => Promise<void>;
   /** The modern handler's `subscriptions/listen` bus and publish facade. */
   handler: McpHttpHandler;
@@ -234,6 +265,56 @@ export async function createHttpApp<TBindings extends object = HonoNodeBindings>
 }> {
   const app = new Hono<{ Bindings: TBindings }>();
   const transportContext = withExtra(parentContext, { component: 'HttpTransportSetup' });
+
+  /**
+   * Shutdown admission. `close()` sets `draining` before it aborts anything.
+   * From then on the MCP endpoint refuses every request, and every response
+   * the app finishes, whatever its route, closes its socket, so the server's
+   * drain never waits on a keep-alive connection it answered during shutdown.
+   */
+  let draining = false;
+  /**
+   * Fired by `close()`. Every JSON request handed to `handler.fetch` carries it:
+   * the SDK's stateless legacy serving tears an exchange down only on its
+   * request's signal, and `handler.close()` leaves that serving untouched. A
+   * non-JSON POST keeps its own request, body included, since the SDK answers
+   * it with a 415 at once.
+   * Absent on a Worker, which never shuts the app down and binds a signal to
+   * the request that created it, so a later request touching it fails.
+   */
+  const shutdown = runtimeCaps.isWorkerLike ? undefined : new AbortController();
+
+  app.use('*', async (c, next) => {
+    await next();
+    if (draining) c.header('Connection', 'close');
+  });
+
+  /**
+   * The answer to an MCP request that arrives, or reaches dispatch, after
+   * draining starts. No MCP work has begun, so the request is safe to resend.
+   */
+  const refuseWhileDraining = (c: Context, id?: RequestId): Response => {
+    const requestContext = requestContextService.createRequestContext({
+      operation: 'HttpDrainGate',
+      additionalContext: { component: 'HttpTransport' },
+    });
+    logger.info(
+      'Refused MCP request: the server is shutting down.',
+      withExtra(requestContext, { method: c.req.method }),
+    );
+    return c.json(
+      {
+        jsonrpc: '2.0',
+        id: id ?? null,
+        error: {
+          code: JsonRpcErrorCode.ServiceUnavailable,
+          message: 'The server is shutting down. Retry the request.',
+        },
+      },
+      503,
+      { 'Retry-After': '1' },
+    );
+  };
 
   // Initialize session store for stateful mode. `auto` is resolved by the
   // shared resolution the manifest advertises, so what the server does and what
@@ -331,7 +412,7 @@ export async function createHttpApp<TBindings extends object = HonoNodeBindings>
       origin: corsOrigin === '*' ? () => '*' : corsOrigin,
       allowMethods: ['GET', 'POST', 'DELETE', 'OPTIONS'],
       allowHeaders,
-      exposeHeaders: ['Mcp-Session-Id'],
+      exposeHeaders: CORS_EXPOSE_HEADERS,
       ...(corsOrigin !== '*' && { credentials: true }),
     });
   const baseCors = corsWith(BASE_CORS_ALLOW_HEADERS);
@@ -347,6 +428,14 @@ export async function createHttpApp<TBindings extends object = HonoNodeBindings>
 
   // Centralized error handling
   app.onError(httpErrorHandler);
+
+  // Drain gate: after CORS, so a browser can read the refusal, and ahead of
+  // auth and body parsing, so a refused request costs nothing. Dispatch checks
+  // again below for a request that passed here before draining started.
+  app.use(config.mcpHttpEndpointPath, async (c, next) => {
+    if (draining) return refuseWhileDraining(c);
+    return await next();
+  });
 
   // MCP Spec 2025-06-18: Origin header validation for DNS rebinding protection.
   // https://modelcontextprotocol.io/specification/2025-06-18/basic/transports#security-warning
@@ -592,6 +681,7 @@ export async function createHttpApp<TBindings extends object = HonoNodeBindings>
   // the spec-shaped response and fires `onsessionclosed`.
   // https://modelcontextprotocol.io/specification/2026-07-28/basic/transports
   app.delete(config.mcpHttpEndpointPath, async (c, next) => {
+    if (draining) return refuseWhileDraining(c);
     const requestContext = requestContextService.createRequestContext({
       operation: 'HttpSessionTermination',
       additionalContext: { component: 'HttpTransport' },
@@ -760,6 +850,7 @@ export async function createHttpApp<TBindings extends object = HonoNodeBindings>
     // even a well-formed body into a misleading `-32700`, so hand those
     // straight to the handler and let it produce the canonical response.
     if (c.req.method === 'POST' && !isJsonContentType(c.req.header('content-type'))) {
+      if (draining) return refuseWhileDraining(c);
       const authInfo = currentAuthInfo();
       return await handler.fetch(c.req.raw, { ...(authInfo && { authInfo }) });
     }
@@ -783,12 +874,21 @@ export async function createHttpApp<TBindings extends object = HonoNodeBindings>
       }
     }
 
-    if (sessionStore && (await isLegacyRequest(c.req.raw, parsedBody))) {
+    const legacySessionful =
+      sessionStore !== null && (await isLegacyRequest(c.req.raw, parsedBody));
+
+    // Auth and the body read above can outlast the start of draining, so check
+    // again with no await left before dispatch: a request that cleared the gate
+    // never reaches the closed handler or starts a session once draining began.
+    if (draining) return refuseWhileDraining(c, singleRequestId(parsedBody));
+
+    if (legacySessionful) {
       return await handleLegacySessionful(sessionStore, c.req.raw, parsedBody, requestContext);
     }
 
     const authInfo = currentAuthInfo();
-    return await handler.fetch(c.req.raw, {
+    const request = shutdown ? withAddedSignal(c.req.raw, shutdown.signal) : c.req.raw;
+    return await handler.fetch(request, {
       ...(parsedBody !== undefined && { parsedBody }),
       ...(authInfo && { authInfo }),
     });
@@ -800,6 +900,8 @@ export async function createHttpApp<TBindings extends object = HonoNodeBindings>
     handler,
     sessionStore,
     close: async () => {
+      draining = true;
+      shutdown?.abort();
       await handler.close();
       await sessionStore?.destroy();
     },

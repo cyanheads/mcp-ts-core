@@ -10,6 +10,8 @@ import type { AppConfig } from '@/config/index.js';
 import { buildServerManifest } from '@/core/serverManifest.js';
 import { disabledTool } from '@/mcp-server/tools/utils/disabled-tool.js';
 import { headerParam, tool } from '@/mcp-server/tools/utils/toolDefinition.js';
+import { createAuthStrategy } from '@/mcp-server/transports/auth/authFactory.js';
+import { createAuthMiddleware } from '@/mcp-server/transports/auth/authMiddleware.js';
 import { authContext } from '@/mcp-server/transports/auth/lib/authContext.js';
 import type { AuthInfo } from '@/mcp-server/transports/auth/lib/authTypes.js';
 import { createHttpApp } from '@/mcp-server/transports/http/httpTransport.js';
@@ -663,7 +665,7 @@ describe('HTTP Transport', () => {
         allowOrigin: ORIGIN,
         allowCredentials: 'true',
         allowMethods: 'GET,POST,DELETE,OPTIONS',
-        exposeHeaders: 'Mcp-Session-Id',
+        exposeHeaders: 'Mcp-Session-Id,WWW-Authenticate,Retry-After',
       });
       expect(allowedHeaders(response)).toEqual(
         expect.arrayContaining(BASE_ALLOW_HEADERS.toLowerCase().split(',')),
@@ -681,7 +683,7 @@ describe('HTTP Transport', () => {
         allowCredentials: 'true',
         allowMethods: 'GET,POST,DELETE,OPTIONS',
         allowHeaders: BASE_ALLOW_HEADERS,
-        exposeHeaders: 'Mcp-Session-Id',
+        exposeHeaders: 'Mcp-Session-Id,WWW-Authenticate,Retry-After',
         vary: 'Origin, Access-Control-Request-Headers',
       });
     });
@@ -698,7 +700,7 @@ describe('HTTP Transport', () => {
           allowCredentials: null,
           allowMethods: 'GET,POST,DELETE,OPTIONS',
           allowHeaders: BASE_ALLOW_HEADERS,
-          exposeHeaders: 'Mcp-Session-Id',
+          exposeHeaders: 'Mcp-Session-Id,WWW-Authenticate,Retry-After',
           vary: 'Origin, Access-Control-Request-Headers',
         });
       });
@@ -1723,6 +1725,238 @@ describe('HTTP Transport', () => {
 
         await expect(close()).resolves.toBeUndefined();
         expect((sessionStore as SessionStore).getSessionCount()).toBe(0);
+      });
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // Shutdown drain (#749, #757). `close()` enters draining before it aborts
+  // anything. From then on every request to the MCP endpoint, on every arm and
+  // method, gets a retryable 503 before any MCP work starts, and every response
+  // the app finishes carries `Connection: close`, so the server's drain never
+  // waits on a socket it answered during shutdown.
+  // -------------------------------------------------------------------------
+  describe('Shutdown drain', () => {
+    const DRAIN_REFUSAL = {
+      jsonrpc: '2.0',
+      error: { code: -32000, message: 'The server is shutting down. Retry the request.' },
+    };
+
+    /** The parts of a drain refusal a caller and its socket act on. */
+    const refusal = async (response: Response) => ({
+      status: response.status,
+      retryAfter: response.headers.get('retry-after'),
+      connection: response.headers.get('connection'),
+      allowOrigin: response.headers.get('access-control-allow-origin'),
+      body: await response.json(),
+    });
+
+    const expectedRefusal = (id: number | null = null) => ({
+      status: 503,
+      retryAfter: '1',
+      connection: 'close',
+      allowOrigin: ORIGIN,
+      body: { ...DRAIN_REFUSAL, id },
+    });
+
+    /** A factory whose `block` tool stays in flight until its request is aborted. */
+    function createBlockingFactory() {
+      const started = Promise.withResolvers<void>();
+      const aborted = Promise.withResolvers<void>();
+      const blockingFactory = vi.fn(async (_ctx: McpRequestContext): Promise<McpServer> => {
+        const server = new McpServer(
+          { name: 'test-mcp-server', version: '1.0.0' },
+          { capabilities: { tools: {} } },
+        );
+        server.registerTool(
+          'block',
+          {
+            description: 'Stays in flight until its request is aborted.',
+            inputSchema: z.object({ value: z.string() }),
+          },
+          async (_args, ctx) => {
+            started.resolve();
+            await new Promise((resolve) =>
+              ctx.mcpReq.signal.addEventListener('abort', resolve, { once: true }),
+            );
+            aborted.resolve();
+            return { content: [] };
+          },
+        );
+        return server;
+      });
+      return { aborted, blockingFactory, started };
+    }
+
+    const legacyToolCall = (name: string, id = 7): string =>
+      JSON.stringify({
+        jsonrpc: '2.0',
+        id,
+        method: 'tools/call',
+        params: { name, arguments: { value: 'hello' } },
+      });
+
+    test.each([
+      ['stateless', 'stateless'],
+      ['stateful', 'stateful'],
+    ])('refuses every request shape once draining (%s)', async (_label, mode) => {
+      await withConfigOverrides({ mcpSessionMode: mode }, async () => {
+        const errorSpy = vi.spyOn(logger, 'error');
+        const { app, close } = await createHttpApp(factory, mockContext, defaultMeta);
+        await close();
+
+        const requests: Array<[string, RequestInit]> = [
+          ['initialize', { method: 'POST', headers: legacyHeaders(), body: initializeBody() }],
+          [
+            '2025-era tools/call',
+            { method: 'POST', headers: legacyHeaders(), body: legacyToolCall('echo') },
+          ],
+          ['2026-07-28 tools/call', { method: 'POST', ...modernToolCall('echo') }],
+          [
+            'non-JSON POST',
+            { method: 'POST', headers: legacyHeaders({ 'content-type': 'text/plain' }), body: 'x' },
+          ],
+          ['plain GET', { method: 'GET', headers: { origin: ORIGIN } }],
+          ['SSE GET', { method: 'GET', headers: { origin: ORIGIN, accept: 'text/event-stream' } }],
+          [
+            'DELETE',
+            { method: 'DELETE', headers: { origin: ORIGIN, 'mcp-session-id': 'a'.repeat(64) } },
+          ],
+        ];
+        for (const [label, init] of requests) {
+          const response = await app.request(ENDPOINT, init);
+          expect({ label, ...(await refusal(response)) }).toEqual({ label, ...expectedRefusal() });
+        }
+        expect(factory).not.toHaveBeenCalled();
+        expect(errorSpy).not.toHaveBeenCalled();
+      });
+    });
+
+    test('refuses a request on a session opened before draining, and registers no new session', async () => {
+      await withStatefulMode(async () => {
+        const { app, close, sessionStore } = await createHttpApp(factory, mockContext, defaultMeta);
+        const init = await app.request(ENDPOINT, {
+          method: 'POST',
+          headers: legacyHeaders(),
+          body: initializeBody(),
+        });
+        await init.text();
+        const sessionId = init.headers.get('mcp-session-id') as string;
+
+        await close();
+        const onSession = await app.request(ENDPOINT, {
+          method: 'POST',
+          headers: legacyHeaders({ 'mcp-session-id': sessionId }),
+          body: legacyToolCall('echo'),
+        });
+        const newSession = await app.request(ENDPOINT, {
+          method: 'POST',
+          headers: legacyHeaders(),
+          body: initializeBody(2),
+        });
+
+        expect(await refusal(onSession)).toEqual(expectedRefusal());
+        expect(await refusal(newSession)).toEqual(expectedRefusal());
+        expect(newSession.headers.get('mcp-session-id')).toBeNull();
+        expect((sessionStore as SessionStore).getSessionCount()).toBe(0);
+        expect(factory).toHaveBeenCalledTimes(1);
+      });
+    });
+
+    // A request can clear the gate before shutdown and still be in auth (or in
+    // its body read) when draining starts. Dispatch checks again, so it never
+    // reaches the closed handler or opens a session on a draining instance.
+    test.each([
+      ['stateless', '2025-era tools/call', legacyToolCall('echo', 9), 9],
+      ['stateful', 'initialize', initializeBody(9), 9],
+    ])(
+      'refuses a %s %s that passed the gate before draining and reaches dispatch after',
+      async (mode, _label, body, id) => {
+        await withConfigOverrides({ mcpSessionMode: mode }, async () => {
+          const inAuth = Promise.withResolvers<void>();
+          const release = Promise.withResolvers<void>();
+          vi.mocked(createAuthStrategy).mockReturnValueOnce({} as never);
+          vi.mocked(createAuthMiddleware).mockReturnValueOnce(async (_c, next) => {
+            inAuth.resolve();
+            await release.promise;
+            await next();
+          });
+          const errorSpy = vi.spyOn(logger, 'error');
+          const { app, close, sessionStore } = await createHttpApp(
+            factory,
+            mockContext,
+            defaultMeta,
+          );
+
+          const pending = app.request(ENDPOINT, { method: 'POST', headers: legacyHeaders(), body });
+          await inAuth.promise;
+          await close();
+          release.resolve();
+          const response = await pending;
+
+          expect(await refusal(response)).toEqual(expectedRefusal(id));
+          expect(factory).not.toHaveBeenCalled();
+          expect(sessionStore?.getSessionCount() ?? 0).toBe(0);
+          expect(errorSpy).not.toHaveBeenCalled();
+        });
+      },
+    );
+
+    test.each([
+      ['stateless', 'stateless'],
+      ['stateful', 'stateful'],
+    ])(
+      'answers an in-flight 2026-07-28 call aborted by close() with a 499 that closes its socket (%s)',
+      async (_label, mode) => {
+        await withConfigOverrides({ mcpSessionMode: mode }, async () => {
+          const { aborted, blockingFactory, started } = createBlockingFactory();
+          const { app, close } = await createHttpApp(blockingFactory, mockContext, defaultMeta);
+
+          const pending = app.request(ENDPOINT, { method: 'POST', ...modernToolCall('block') });
+          await started.promise;
+          await close();
+          const response = await pending;
+
+          expect({
+            status: response.status,
+            connection: response.headers.get('connection'),
+          }).toEqual({ status: 499, connection: 'close' });
+          await aborted.promise;
+        });
+      },
+    );
+
+    // The SDK serves a stateless 2025-era exchange outside `handler.close()`'s
+    // reach and tears it down only on its request's signal, so `close()` fires
+    // that signal: the handler's `ctx.signal` aborts and the SSE stream ends.
+    test('aborts an in-flight stateless 2025-era call and ends its stream', async () => {
+      const { aborted, blockingFactory, started } = createBlockingFactory();
+      const { app, close } = await createHttpApp(blockingFactory, mockContext, defaultMeta);
+
+      const response = await app.request(ENDPOINT, {
+        method: 'POST',
+        headers: legacyHeaders(),
+        body: legacyToolCall('block'),
+      });
+      await started.promise;
+      await close();
+
+      await aborted.promise;
+      expect(response.headers.get('content-type')).toContain('text/event-stream');
+      await expect(response.text()).resolves.toBeTypeOf('string');
+    });
+
+    test('closes the socket of every response finished while draining, on any route', async () => {
+      const { app, close } = await createHttpApp(factory, mockContext, defaultMeta);
+
+      const before = await app.request('/healthz');
+      await close();
+      const after = await app.request('/healthz');
+
+      expect(before.headers.get('connection')).toBeNull();
+      expect({ status: after.status, connection: after.headers.get('connection') }).toEqual({
+        status: 200,
+        connection: 'close',
       });
     });
   });
