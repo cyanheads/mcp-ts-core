@@ -379,7 +379,11 @@ describe('HTTP shutdown drain on a real process', () => {
 
     /**
      * Opens a connection, proves the server accepted it with a complete
-     * `/healthz` exchange, then sends `body`'s request short of its last byte.
+     * `/healthz` exchange, then sends `body`'s request short of its last byte
+     * and waits for the server's `100 Continue`. Until the server has parsed a
+     * request head the socket is idle, and stop closes idle sockets — so
+     * without that interim reply, a `SIGTERM` sent right after the write can
+     * win the race and the request never reaches the drain gate.
      */
     async function hold(
       run: Run,
@@ -396,27 +400,33 @@ describe('HTTP shutdown drain on a real process', () => {
       const closed = new Promise<void>((settle) => socket.once('close', () => settle()));
       await new Promise<void>((settle) => socket.once('connect', () => settle()));
 
+      const receive = (text: string) =>
+        new Promise<void>((settle) => {
+          const check = () => {
+            if (!received.includes(text)) return;
+            socket.off('data', check);
+            settle();
+          };
+          socket.on('data', check);
+          check();
+        });
+
       socket.write('GET /healthz HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n');
-      await new Promise<void>((settle) => {
-        const check = () => {
-          if (!received.includes('{"status":"ok"}')) return;
-          socket.off('data', check);
-          settle();
-        };
-        socket.on('data', check);
-        check();
-      });
+      await receive('{"status":"ok"}');
       received = '';
 
       const head = [
         'POST /mcp HTTP/1.1',
         'Host: 127.0.0.1',
         ...Object.entries(headers).map(([name, value]) => `${name}: ${value}`),
+        'Expect: 100-continue',
         `Content-Length: ${Buffer.byteLength(body)}`,
         '',
         '',
       ].join('\r\n');
       socket.write(head + body.slice(0, -1));
+      await receive('HTTP/1.1 100 Continue\r\n\r\n');
+      received = '';
       return {
         finish: async () => {
           socket.write(body.slice(-1));
