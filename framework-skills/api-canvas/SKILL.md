@@ -4,7 +4,7 @@ description: >
   DataCanvas primitive reference — a Tier 3 SQL/analytical workspace for tabular MCP servers, backed by DuckDB. Use when registering tables from upstream APIs, running ad-hoc SQL across them, and exporting results. Covers the acquire → register → query → export flow, per-table TTL, the token-sharing pattern for multi-agent collaboration, env config, and Cloudflare Workers fail-closed behavior.
 metadata:
   author: cyanheads
-  version: "2.8"
+  version: "2.9"
   audience: external
   type: reference
 ---
@@ -219,7 +219,7 @@ const chained = await instance.query(
 1. Text-level deny-list — pre-parse scan for file/HTTP-reading table functions (`read_csv*`, `read_json*`, `read_parquet*`, `read_duckdb`, `read_text`, `read_blob`, `glob`, `iceberg_scan`, `delta_scan`, `postgres_scan`, `mysql_scan`, `sqlite_scan`, plus pre-staged spatial ones).
 2. Statement count (must be 1) via `extractStatements`.
 3. Statement type (must be `SELECT`) via `prepared.statementType`.
-4. Parse-tree check — DuckDB's own parse of the statement. A call to a function that reads an engine setting (`current_setting`, `current_schema`, `current_schemas`, `in_search_path`), runs SQL or names a table from a string (`query`, `query_table`), or reads a file (the layer-1 list) is rejected as `denied_function`; a table reference that names a file, as `sql_read_only`. The one exception is `query()` over a single plain string literal: that SQL is gated as its own single SELECT statement — the catalog layer and layers 1–4 again, recursively — up to 4 `query()` levels deep, and layer 5 covers its plan inside the outer statement's. Any other `query()` argument, and nesting past 4 levels, is `denied_function`.
+4. Parse-tree check — DuckDB's own parse of the statement. A call to a function that reads an engine setting (`current_setting`, `current_schema`, `current_schemas`, `in_search_path`), runs SQL or names a table from a string (`query`, `query_table`), or reads a file (the layer-1 list) is rejected as `denied_function`. So is an unqualified `current_schema` written without parentheses, quoted or not: DuckDB binds it to the function whenever no column of that name is in scope, and the parse tree cannot tell the two apart, so a staged column named `current_schema` is read qualified (`c.current_schema`). It is the one denied name DuckDB binds bare; columns named after the others (`query`, `current_setting`) read unqualified. A table reference that names a file is rejected as `sql_read_only`. The one exception is `query()` over a single plain string literal: that SQL is gated as its own single SELECT statement — the catalog layer and layers 1–4 again, recursively — up to 4 `query()` levels deep, and layer 5 covers its plan inside the outer statement's. Any other `query()` argument, and nesting past 4 levels, is `denied_function`.
 5. EXPLAIN-plan walk against an allowlisted set of physical operators + a denied-function rescan over plan metadata strings.
 
 Any layer's rejection throws `ValidationError` with a structured `data.reason`. File-reading scans (`READ_CSV`, `READ_PARQUET`, `READ_JSON`), DDL (`CREATE_*`, `DROP_*`, `ALTER_*`), DML (`INSERT`, `UPDATE`, `DELETE`), exports (`COPY_TO_FILE`), and utility statements (`PRAGMA`, `ATTACH`, `LOAD`, `SET`) are all rejected.
@@ -565,8 +565,7 @@ Pass `schema` explicitly whenever a column's type can't be read off the first ro
 |:---------|:-------|
 | Linux x64 / arm64 | Supported |
 | macOS x64 / arm64 | Supported |
-| Windows x64 | Supported |
-| Windows arm64 | **Not supported** (DuckDB upstream limitation) |
+| Windows x64 / arm64 | Supported (`@duckdb/node-api` 1.5.6-r.1 publishes prebuilt bindings for both) |
 | Cloudflare Workers | **Not supported** — fail-closed at init time |
 
 ---

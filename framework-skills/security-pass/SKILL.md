@@ -4,7 +4,7 @@ description: >
   Review an MCP server for common security gaps: LLM-facing surfaces as injection vector (tools, resources, prompts, descriptions), scope blast radius, destructive ops without consent, upstream auth shape, input sinks (URL / path / roots / shell / schema strictness / ReDoS), tenant isolation, leakage through errors and telemetry, unbounded resources, and HTTP-mode deployment surface. Use before a release, after a batch of handler changes, or when the user asks for a security review, audit, or hardening pass. Produces grouped findings and a numbered options list.
 metadata:
   author: cyanheads
-  version: "1.13"
+  version: "1.14"
   audience: external
   type: audit
 ---
@@ -96,7 +96,7 @@ Every `auth: [...]` entry is a blast-radius dial.
 **Look in:** every `*.tool.ts` — `auth:` array.
 
 ```bash
-grep -rn "auth: \[" src/mcp-server/tools/definitions/
+rg -n 'auth: \[' src/mcp-server/tools/definitions/
 ```
 
 **Check:**
@@ -115,8 +115,8 @@ grep -rn "auth: \[" src/mcp-server/tools/definitions/
 **Look in:** handlers with `destructiveHint: true` or side-effecting verbs in names (`delete_*`, `send_*`, `pay_*`, `publish_*`, `drop_*`).
 
 ```bash
-grep -rn "destructiveHint" src/mcp-server/tools/definitions/
-grep -rnE "ctx\.requestInput|ctx\.inputs" src/mcp-server/tools/definitions/
+rg -n 'destructiveHint' src/mcp-server/tools/definitions/
+rg -n 'ctx\.requestInput|ctx\.inputs' src/mcp-server/tools/definitions/
 ```
 
 **Check:**
@@ -155,25 +155,25 @@ LLM-supplied inputs feel internal but aren't. Classic sinks apply, amplified. Sa
 
 ```bash
 # URL sinks — SSRF
-grep -rn "z.string().url()" src/
+rg -nF 'z.string().url()' src/
 
 # Path sinks — traversal
-grep -rnE "readFile|writeFile|readdirSync|createReadStream|statSync" src/
+rg -n 'readFile|writeFile|readdirSync|createReadStream|statSync' src/
 
 # Shell sinks — command injection
-grep -rnE "\b(exec|spawn|execSync|spawnSync)\b" src/
+rg -n '\b(exec|spawn|execSync|spawnSync)\b' src/
 
 # Merges — prototype pollution
-grep -rnE "Object\.assign\b|structuredClone" src/
+rg -n 'Object\.assign\b|structuredClone' src/
 
 # Lookups — prototype chain read through an object literal
-grep -rnE "\[[a-zA-Z_$][a-zA-Z0-9_$.]*\] *\?\? |\[[a-zA-Z_$][a-zA-Z0-9_$.]*\] *\|\| " src/
+rg -n '\[[a-zA-Z_$][a-zA-Z0-9_$.]*\] *\?\? |\[[a-zA-Z_$][a-zA-Z0-9_$.]*\] *\|\| ' src/
 
 # Roots — client-shared filesystem
-grep -rnE "roots/list|ctx\.roots" src/
+rg -n 'roots/list|ctx\.roots' src/
 
 # Schema laxity — fields sneaking past validation
-grep -rnE "\.passthrough\(\)|\.loose\(\)|looseObject\(|\.catchall\(" src/mcp-server/
+rg -n '\.passthrough\(\)|\.loose\(\)|looseObject\(|\.catchall\(' src/mcp-server/
 ```
 
 **Check:**
@@ -199,8 +199,8 @@ grep -rnE "\.passthrough\(\)|\.loose\(\)|looseObject\(|\.catchall\(" src/mcp-ser
 **Look in:** `src/services/*`.
 
 ```bash
-grep -rnE "^(const|let) .* = new (Map|Set|WeakMap|Array)" src/services/
-grep -rn "^let " src/services/
+rg -n '^(const|let) .* = new (Map|Set|WeakMap|Array)' src/services/
+rg -n '^let ' src/services/
 ```
 
 **Check:**
@@ -219,10 +219,10 @@ What accidentally reaches the LLM, user, or observability sinks.
 **Look in:** `throw new McpError(...)` and `ctx.fail(reason, msg, data)` sites, error factory calls (`notFound`, `httpErrorFromResponse`, …), `McpError.data` fields (the `data` arg flows through both paths), output schemas, and every logging / telemetry surface — not just `ctx.log`.
 
 ```bash
-grep -rnE "new McpError|ctx\.fail\(|httpErrorFromResponse\(" src/
-grep -rnE "\b(ctx\.log|console\.(log|info|warn|error|debug)|logger\.)" src/
-grep -rnE "(Sentry\.|captureException|setTag|setContext|addBreadcrumb)" src/
-grep -rnE "(setAttribute|setAttributes|span\.)" src/  # OpenTelemetry
+rg -n 'new McpError|ctx\.fail\(|httpErrorFromResponse\(' src/
+rg -n '\b(ctx\.log|console\.(log|info|warn|error|debug)|logger\.)' src/
+rg -n '(Sentry\.|captureException|setTag|setContext|addBreadcrumb)' src/
+rg -n '(setAttribute|setAttributes|span\.)' src/  # OpenTelemetry
 ```
 
 **Check:**
@@ -245,9 +245,9 @@ Unbounded = DoS of self, upstream, or the LLM's context window (billing-DoS is r
 **Look in:** handlers with loops, pagination, retries, or inputs that feed `JSON.parse` / schema validation.
 
 ```bash
-grep -rnE "while\s*\(|for\s*\(.*of" src/mcp-server/tools/definitions/
-grep -rnE "cursor|nextPage|paginate" src/
-grep -rn "JSON.parse\b" src/
+rg -n 'while\s*\(|for\s*\(.*of' src/mcp-server/tools/definitions/
+rg -n 'cursor|nextPage|paginate' src/
+rg -n 'JSON.parse\b' src/
 ```
 
 **Check:**

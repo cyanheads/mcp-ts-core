@@ -471,7 +471,8 @@ export interface EnrichHelpers {
   /**
    * Discloses that the returned list was capped. Writes `truncated: true`, `shown`, `cap`,
    * and optionally `truncationCeiling` (the smallest shown value when the list is sorted by the
-   * cap key — a rigorous upper bound on all omitted items). Also writes a `notice` (last-wins;
+   * cap key — an upper bound on the items after the page; on a later page of a descending list,
+   * items before the offset rank at or above it). Also writes a `notice` (last-wins;
    * compose multiple notice sources into one string) using `guidance` or a generated default.
    *
    * Declare the corresponding fields in the `enrichment` block:
@@ -480,7 +481,7 @@ export interface EnrichHelpers {
    *   truncated: z.boolean().describe('True when the list was capped.'),
    *   shown: z.number().describe('Number of items returned.'),
    *   cap: z.number().describe('The cap that was applied.'),
-   *   truncationCeiling: z.number().optional().describe('Upper bound for omitted items.'),
+   *   truncationCeiling: z.number().optional().describe('Upper bound for the items after this page.'),
    * }
    * ```
    */

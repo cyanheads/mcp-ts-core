@@ -4,7 +4,7 @@ description: >
   Cloudflare Workers deployment using `createWorkerHandler` from `@cyanheads/mcp-ts-core/worker`. Covers the full handler signature, binding types, CloudflareBindings extensibility, runtime compatibility guards, and wrangler.toml requirements.
 metadata:
   author: cyanheads
-  version: "1.9"
+  version: "1.10"
   audience: external
   type: reference
 ---
@@ -61,6 +61,7 @@ Fresh scaffolds register definitions directly in the entry point as shown above.
 - **Env bindings refreshed per-request**: Cloudflare may rotate binding object references between requests; the handler re-injects them on every call.
 - **OTel NodeSDK is disabled in Workers** — `canUseNodeSDK()` returns `false` for V8 isolates, so no OTLP spans or metrics are emitted. Structured logs via `ctx.log` still work. `OTEL_ENABLED=true` has no effect in Workers. `ctx.waitUntil()` is received and passed through to `app.fetch` and `onScheduled` but not called by the framework (nothing to flush asynchronously).
 - **Singleton app promise with retry-on-failure**: the framework init runs once; if it fails, the next request retries rather than leaving the Worker in a permanently broken state.
+- **Core config is re-parsed on the first request**: init drops any config cached before it and parses again after the bindings are injected, with or without `name`/`version`, so `MCP_AUTH_MODE`, `ENVIRONMENT`, and the always-`http` transport hold even when something read `config` at module load. A `resetConfig(overrides)` call made before that request does not survive it.
 
 ---
 
@@ -190,11 +191,11 @@ export default createWorkerHandler({
 
 Plain strings work the same as on `createApp`. Type extends `Omit<CreateAppOptions, 'instructions'>`, so this is the only option whose shape differs between Node and Worker entry points.
 
-**Lazy env parsing is mandatory.** Cloudflare injects env bindings at request time via `injectEnvVars()`, after all static module imports complete. Never parse `process.env` at module top-level in Workers:
+**Lazy env parsing is mandatory.** The framework writes bindings into `process.env` at request time via `injectEnvVars()`, after all static module imports complete. Under `nodejs_compat` with a `compatibility_date` of 2025-04-01 or later, a same-named binding is already in `process.env` at module load, but a renamed one (`extraEnvBindings` targets, `ENVIRONMENT` → `NODE_ENV`, `LOG_LEVEL` → `MCP_LOG_LEVEL`) is not, and with `nodejs_compat_do_not_populate_process_env` none are. Never parse `process.env` at module top-level in Workers:
 
 ```ts
 // WRONG — parsed before env is injected
-const apiKey = process.env.MY_API_KEY;  // undefined in Workers
+const apiKey = process.env.MY_API_KEY;  // missing whenever the binding isn't copied at load
 
 // CORRECT — lazy parse inside a function or getter
 export function getServerConfig() {

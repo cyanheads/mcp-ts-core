@@ -313,18 +313,40 @@ Refer to "your MCP client configuration file" generically — don't prescribe `c
 ```markdown
 ### Public Hosted Instance
 
-A public instance is available at `https://my-server.example.com/mcp` — no installation required. Point any MCP client at it via Streamable HTTP:
+A public instance is available at `https://my-server.example.com/mcp` — no installation required. It serves Streamable HTTP; each client takes its own config shape.
+
+For Claude Code:
+
+\`\`\`sh
+claude mcp add --transport http my-server https://my-server.example.com/mcp
+\`\`\`
+
+For Cline (`cline_mcp_settings.json`):
 
 \`\`\`json
 {
   "mcpServers": {
     "my-server": {
-      "type": "streamable-http",
+      "type": "streamableHttp",
       "url": "https://my-server.example.com/mcp"
     }
   }
 }
 \`\`\`
+
+For Cursor (`mcp.json`):
+
+\`\`\`json
+{
+  "mcpServers": {
+    "my-server": {
+      "url": "https://my-server.example.com/mcp"
+    }
+  }
+}
+\`\`\`
+
+Claude Desktop adds remote servers under Settings → Connectors.
 
 ### Self-Hosted / Local
 
