@@ -3771,8 +3771,8 @@ describe('tool argument pre-validation', () => {
               `Input validation error: Invalid arguments for tool ${definition.name}: ${line}`,
             );
             expect(envelope(result).data?.recovery?.hint).toBe(expectedHint);
-            // content[] escapes the `|` (#760); a CommonMark parse reads the line back as sent.
-            expect(text(result)).toContain(line.replace('|', '\\|'));
+            // content[] escapes every `|` (#760); a CommonMark parse reads the line back as sent.
+            expect(text(result)).toContain(line.replaceAll('|', '\\|'));
             expect(text(result)).not.toContain('target: Invalid input');
             // `data.issues` still ships Zod's one union issue.
             expect(envelope(result).data?.issues).toEqual([
