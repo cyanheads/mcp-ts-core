@@ -1,12 +1,21 @@
 {
-  "$schema": "https://biomejs.dev/schemas/2.5.15/schema.json",
+  "$schema": "./node_modules/@biomejs/biome/configuration_schema.json",
   "vcs": {
     "enabled": true,
     "clientKind": "git",
     "useIgnoreFile": true
   },
   "files": {
-    "includes": ["src/**", "scripts/**", "tests/**", "examples/**", "*.json", "*.js", "*.ts"]
+    "includes": [
+      "src/**",
+      "scripts/**",
+      "tests/**",
+      "examples/**",
+      "*.json",
+      "*.js",
+      "*.ts",
+      "!**/*.md"
+    ]
   },
   "formatter": {
     "enabled": true,
