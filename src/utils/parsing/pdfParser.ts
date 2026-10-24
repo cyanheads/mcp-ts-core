@@ -53,6 +53,55 @@ function pdfFailure(
 }
 
 /**
+ * pdf.js names each failure by class in `error.name`. These two mean the
+ * caller's bytes cannot be read — no PDF structure, a broken trailer `/Root`,
+ * or an encrypted document with no password supplied — so they fail as
+ * `ValidationError`. Every other name stays `InternalError`, including
+ * `UnknownErrorException`, which wraps any other worker failure, parser bugs
+ * among them.
+ */
+const UNREADABLE_PDFJS_ERRORS: ReadonlySet<string> = new Set([
+  'InvalidPDFException',
+  'PasswordException',
+]);
+
+type PdfLib = Awaited<ReturnType<typeof getPdfLib>>;
+
+/**
+ * Loads a caller-supplied PDF with pdf-lib. Bytes it cannot load fail as
+ * `ValidationError` under the calling operation's summary and reason: the
+ * input is the caller's fault, whatever the operation does with it next.
+ *
+ * pdf-lib parses leniently, so bytes with a PDF header but no catalog (no
+ * objects at all, or a trailer `/Root` naming something other than a
+ * `/Type /Catalog` dictionary) load without error, and the document then
+ * throws a `TypeError` on first use. A missing catalog is rejected here
+ * instead, by the same test pdf-lib's own root recovery applies.
+ */
+async function loadInputPdf(
+  pdfLib: PdfLib,
+  pdfBytes: Uint8Array | ArrayBuffer,
+  summary: string,
+  reason: string,
+): Promise<PDFDocument> {
+  let doc: PDFDocument;
+  try {
+    doc = await pdfLib.PDFDocument.load(pdfBytes);
+  } catch (e: unknown) {
+    const error = e instanceof Error ? e : new Error(String(e));
+    throw pdfFailure(JsonRpcErrorCode.ValidationError, summary, reason, error);
+  }
+  if (!(doc.catalog instanceof pdfLib.PDFCatalog)) {
+    throw new McpError(
+      JsonRpcErrorCode.ValidationError,
+      `${summary}: No document catalog found; the trailer /Root is missing or is not a /Type /Catalog dictionary.`,
+      { reason },
+    );
+  }
+  return doc;
+}
+
+/**
  * Options for adding a new page to a PDF document.
  */
 export interface AddPageOptions {
@@ -384,7 +433,8 @@ export class PdfParser {
    * @param budget - Optional byte budget for the input. Unbounded when omitted.
    * @returns The loaded `PDFDocument` instance.
    * @throws {McpError} With `ConfigurationError` if `pdf-lib` is not installed.
-   * @throws {McpError} With `ValidationError` if the bytes are not a valid PDF.
+   * @throws {McpError} With `ValidationError` if the bytes are not a valid PDF, are
+   *   encrypted, or carry no document catalog.
    * @example
    * ```typescript
    * import { readFile } from 'node:fs/promises';
@@ -408,8 +458,7 @@ export class PdfParser {
       const pdfLib = await getPdfLib();
       logger.debug('Loading PDF document from bytes.', withExtra(logContext, { byteLength }));
 
-      const doc = await pdfLib.PDFDocument.load(pdfBytes);
-      return doc;
+      return await loadInputPdf(pdfLib, pdfBytes, 'Failed to load PDF document', 'pdf_load_failed');
     } catch (e: unknown) {
       const error = e instanceof Error ? e : new Error(String(e));
       logger.error(
@@ -694,7 +743,9 @@ export class PdfParser {
    * @param budget - Optional aggregate byte budget across all inputs. Unbounded when omitted.
    * @returns A new `PDFDocument` containing all pages from the input documents.
    * @throws {McpError} With `ConfigurationError` if `pdf-lib` is not installed.
-   * @throws {McpError} With `InternalError` if any source PDF is invalid or merging fails.
+   * @throws {McpError} With `ValidationError` if any source PDF cannot be loaded — not a
+   *   valid PDF, encrypted, or carrying no document catalog.
+   * @throws {McpError} With `InternalError` if merging fails.
    * @example
    * ```typescript
    * import { readFile } from 'node:fs/promises';
@@ -728,7 +779,12 @@ export class PdfParser {
       const mergedPdf = await pdfLib.PDFDocument.create();
 
       for (const pdfBytes of presentInputs) {
-        const pdfDoc = await pdfLib.PDFDocument.load(pdfBytes);
+        const pdfDoc = await loadInputPdf(
+          pdfLib,
+          pdfBytes,
+          'Failed to merge PDF documents',
+          'pdf_merge_failed',
+        );
         const copiedPages = await mergedPdf.copyPages(pdfDoc, pdfDoc.getPageIndices());
         for (const page of copiedPages) mergedPdf.addPage(page);
       }
@@ -769,7 +825,11 @@ export class PdfParser {
    * @param budget - Optional byte budget for the input. Unbounded when omitted.
    * @returns An array of new `PDFDocument` instances, one per range, in order.
    * @throws {McpError} With `ConfigurationError` if `pdf-lib` is not installed.
-   * @throws {McpError} With `InternalError` if the source PDF is invalid or a page index is out of bounds.
+   * @throws {McpError} With `ValidationError` if the source PDF cannot be loaded — not a
+   *   valid PDF, encrypted, or carrying no document catalog.
+   * @throws {McpError} With `ValidationError` if a range is not integers with
+   *   `0 <= start <= end < pageCount`. Every range is checked before any page is copied.
+   * @throws {McpError} With `InternalError` if splitting fails.
    * @example
    * ```typescript
    * import { readFile } from 'node:fs/promises';
@@ -797,7 +857,40 @@ export class PdfParser {
       const pdfLib = await getPdfLib();
       logger.debug('Splitting PDF document.', withExtra(logContext, { rangeCount: ranges.length }));
 
-      const sourcePdf = await pdfLib.PDFDocument.load(pdfBytes);
+      const sourcePdf = await loadInputPdf(
+        pdfLib,
+        pdfBytes,
+        'Failed to split PDF document',
+        'pdf_split_failed',
+      );
+
+      /*
+       * Validate every range up front: the index loop below allocates one entry
+       * per page, so an unchecked `end` costs O(end) before pdf-lib fails on it,
+       * and `start > end` would yield an empty document.
+       */
+      const pageCount = sourcePdf.getPageCount();
+      for (const [index, { start, end }] of ranges.entries()) {
+        if (
+          Number.isInteger(start) &&
+          Number.isInteger(end) &&
+          start >= 0 &&
+          start <= end &&
+          end < pageCount
+        ) {
+          continue;
+        }
+        const bounds =
+          pageCount === 0
+            ? 'the document has no pages'
+            : `start and end must be integers with 0 <= start <= end <= ${pageCount - 1}`;
+        throw new McpError(
+          JsonRpcErrorCode.ValidationError,
+          `Failed to split PDF document: ranges[${index}] { start: ${start}, end: ${end} } is not a valid page range for a ${pageCount}-page document; ${bounds}.`,
+          { reason: 'pdf_split_failed' },
+        );
+      }
+
       const results: PDFDocument[] = [];
 
       for (const range of ranges) {
@@ -1023,7 +1116,11 @@ export class PdfParser {
    *   per page) by default, or a single `string` when `mergePages` is `true`.
    * @throws {McpError} With `ConfigurationError` if `unpdf` is not installed (or
    *   `pdf-lib` is missing when a `PDFDocument` is passed).
-   * @throws {McpError} With `InternalError` if text extraction fails.
+   * @throws {McpError} With `ValidationError` if pdf.js cannot read the input: no PDF
+   *   structure, a trailer `/Root` that is not a catalog, or an encrypted document
+   *   (no password is accepted).
+   * @throws {McpError} With `InternalError` if extraction fails otherwise, or if
+   *   serializing a passed `PDFDocument` fails.
    * @example
    * ```typescript
    * // Direct from bytes — skips the pdf-lib round-trip (unpdf-only path)
@@ -1112,7 +1209,9 @@ export class PdfParser {
       );
 
       throw pdfFailure(
-        JsonRpcErrorCode.InternalError,
+        UNREADABLE_PDFJS_ERRORS.has(error.name)
+          ? JsonRpcErrorCode.ValidationError
+          : JsonRpcErrorCode.InternalError,
         'Failed to extract text from PDF',
         'pdf_text_extract_failed',
         error,

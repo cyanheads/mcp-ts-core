@@ -519,7 +519,7 @@ describe('PdfParser', () => {
       );
     });
 
-    it('should throw McpError on merge failure', async () => {
+    it('should throw a ValidationError when a source is not a PDF', async () => {
       const invalidBytes = new Uint8Array([1, 2, 3, 4]);
       const errorSpy = vi.spyOn(logger, 'error');
 
@@ -529,7 +529,7 @@ describe('PdfParser', () => {
         await parser.mergePdfs([pdf1Bytes, invalidBytes], context);
       } catch (error) {
         const mcpError = error as McpError;
-        expect(mcpError.code).toBe(JsonRpcErrorCode.InternalError);
+        expect(mcpError.code).toBe(JsonRpcErrorCode.ValidationError);
         expect(mcpError.message).toBe(
           `Failed to merge PDF documents: ${(mcpError.cause as Error).message}`,
         );
@@ -611,7 +611,7 @@ describe('PdfParser', () => {
       );
     });
 
-    it('should throw McpError on split failure', async () => {
+    it('should throw a ValidationError when the source is not a PDF', async () => {
       const invalidBytes = new Uint8Array([1, 2, 3, 4]);
       const ranges: PageRange[] = [{ start: 0, end: 1 }];
       const errorSpy = vi.spyOn(logger, 'error');
@@ -622,7 +622,7 @@ describe('PdfParser', () => {
         await parser.splitPdf(invalidBytes, ranges, context);
       } catch (error) {
         const mcpError = error as McpError;
-        expect(mcpError.code).toBe(JsonRpcErrorCode.InternalError);
+        expect(mcpError.code).toBe(JsonRpcErrorCode.ValidationError);
         expect(mcpError.message).toContain('Failed to split PDF');
         expect(errorSpy).toHaveBeenCalled();
       }

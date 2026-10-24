@@ -236,9 +236,10 @@ describe('PdfParser branch boundaries', () => {
       data: { reason: 'pdf_merge_failed' },
     });
 
+    // A source that fails to load is the caller's input, as it is for loadDocument.
     vi.spyOn(PDFDocument, 'load').mockRejectedValueOnce('split rejected');
     await expect(parser.splitPdf(new Uint8Array(), [], context)).rejects.toMatchObject({
-      code: JsonRpcErrorCode.InternalError,
+      code: JsonRpcErrorCode.ValidationError,
       message: 'Failed to split PDF document: split rejected',
       data: { reason: 'pdf_split_failed' },
     });
@@ -270,9 +271,195 @@ describe('PdfParser branch boundaries', () => {
     expect(failure).toBeInstanceOf(McpError);
     expect(failure.cause).toBeInstanceOf(Error);
     expect(failure).toMatchObject({
-      code: JsonRpcErrorCode.InternalError,
-      message: `Failed to extract text from PDF: ${(failure.cause as Error).message}`,
+      code: JsonRpcErrorCode.ValidationError,
+      message: 'Failed to extract text from PDF: Invalid PDF structure.',
       data: { reason: 'pdf_text_extract_failed' },
+    });
+  });
+
+  describe('unreadable input PDFs', () => {
+    const encode = (text: string) => new TextEncoder().encode(text);
+
+    /** Serializes numbered objects plus a classic xref table and trailer. */
+    const buildPdf = (objects: string[], trailerExtra = ''): Uint8Array => {
+      let body = '%PDF-1.4\n';
+      const offsets = objects.map((object, index) => {
+        const offset = body.length;
+        body += `${index + 1} 0 obj\n${object}\nendobj\n`;
+        return offset;
+      });
+      const xrefOffset = body.length;
+      body += `xref\n0 ${objects.length + 1}\n0000000000 65535 f \n`;
+      for (const offset of offsets) body += `${String(offset).padStart(10, '0')} 00000 n \n`;
+      body += `trailer\n<< /Size ${objects.length + 1} /Root 1 0 R ${trailerExtra} >>\n`;
+      body += `startxref\n${xrefOffset}\n%%EOF\n`;
+      return encode(body);
+    };
+
+    const notADocument = () => encode('%PDF-1.4\nnot a document\n%%EOF\n');
+    const headerOnly = () => encode('%PDF-1.7\n');
+    const html = () => encode('<!doctype html><p>404</p>');
+    const rootNotCatalog = () => buildPdf(['<< /Type /Pages /Kids [] /Count 0 >>']);
+    const encrypted = () =>
+      buildPdf(
+        [
+          '<< /Type /Catalog /Pages 2 0 R >>',
+          '<< /Type /Pages /Kids [] /Count 0 >>',
+          `<< /Filter /Standard /V 1 /R 2 /O <${'11'.repeat(32)}> /U <${'22'.repeat(32)}> /P -4 >>`,
+        ],
+        `/Encrypt 3 0 R /ID [<${'33'.repeat(16)}> <${'33'.repeat(16)}>]`,
+      );
+
+    it.each([
+      ['a header with no document', notADocument, 'Invalid PDF structure.'],
+      [
+        'an empty body',
+        () => new Uint8Array(0),
+        'The PDF file is empty, i.e. its size is zero bytes.',
+      ],
+      ['an HTML page', html, 'Invalid PDF structure.'],
+      ['a bare header', headerOnly, 'Invalid PDF structure.'],
+      ['a trailer /Root that is not a catalog', rootNotCatalog, 'Invalid Root reference.'],
+      ['an encrypted document with no password', encrypted, 'No password given'],
+    ])('extractText fails %s as ValidationError', async (_label, bytes, diagnostic) => {
+      await expect(parser.extractText(bytes(), undefined, context)).rejects.toMatchObject({
+        code: JsonRpcErrorCode.ValidationError,
+        message: `Failed to extract text from PDF: ${diagnostic}`,
+        data: { reason: 'pdf_text_extract_failed' },
+      });
+    });
+
+    const loaders = [
+      ['loadDocument', 'Failed to load PDF document', 'pdf_load_failed'],
+      ['mergePdfs', 'Failed to merge PDF documents', 'pdf_merge_failed'],
+      ['splitPdf', 'Failed to split PDF document', 'pdf_split_failed'],
+    ] as const;
+    const load = (method: (typeof loaders)[number][0], bytes: Uint8Array) => {
+      if (method === 'loadDocument') return parser.loadDocument(bytes, context);
+      if (method === 'mergePdfs') return parser.mergePdfs([bytes], context);
+      return parser.splitPdf(bytes, [{ start: 0, end: 0 }], context);
+    };
+
+    describe.each(loaders)('%s', (method, summary, reason) => {
+      it.each([
+        ['a header with no document', notADocument],
+        ['a bare header', headerOnly],
+        ['a trailer /Root that is not a catalog', rootNotCatalog],
+      ])('rejects %s as ValidationError instead of loading it', async (_label, bytes) => {
+        await expect(load(method, bytes())).rejects.toMatchObject({
+          code: JsonRpcErrorCode.ValidationError,
+          message: `${summary}: No document catalog found; the trailer /Root is missing or is not a /Type /Catalog dictionary.`,
+          data: { reason },
+        });
+      });
+
+      it('fails bytes with no PDF header as ValidationError', async () => {
+        await expect(load(method, html())).rejects.toMatchObject({
+          code: JsonRpcErrorCode.ValidationError,
+          message: `${summary}: Failed to parse PDF document (line:0 col:50 offset=25): No PDF header found`,
+          data: { reason },
+        });
+      });
+
+      it('fails an encrypted document as ValidationError', async () => {
+        await expect(load(method, encrypted())).rejects.toMatchObject({
+          code: JsonRpcErrorCode.ValidationError,
+          message: expect.stringContaining(
+            `${summary}: Input document to \`PDFDocument.load\` is encrypted.`,
+          ),
+          data: { reason },
+        });
+      });
+    });
+  });
+
+  describe('splitPdf page ranges', () => {
+    const pagesOf = async (count: number) => {
+      const source = await PDFDocument.create();
+      for (let i = 0; i < count; i++) source.addPage();
+      // pdf-lib's save() otherwise gives an empty document one blank page.
+      return source.save({ addDefaultPage: false });
+    };
+    const invalid = (range: string, pageCount: number) =>
+      `Failed to split PDF document: ${range} is not a valid page range for a ${pageCount}-page document; start and end must be integers with 0 <= start <= end <= ${pageCount - 1}.`;
+
+    it.each([
+      ['an end past the last page', { start: 0, end: 3 }, '{ start: 0, end: 3 }'],
+      ['a start past the last page', { start: 3, end: 3 }, '{ start: 3, end: 3 }'],
+      ['a negative start', { start: -1, end: 1 }, '{ start: -1, end: 1 }'],
+      ['a start after its end', { start: 2, end: 1 }, '{ start: 2, end: 1 }'],
+      ['a fractional index', { start: 0.5, end: 1 }, '{ start: 0.5, end: 1 }'],
+    ])('rejects %s as ValidationError naming the range', async (_label, range, rendered) => {
+      const bytes = await pagesOf(3);
+
+      await expect(parser.splitPdf(bytes, [range], context)).rejects.toMatchObject({
+        code: JsonRpcErrorCode.ValidationError,
+        message: invalid(`ranges[0] ${rendered}`, 3),
+        data: { reason: 'pdf_split_failed' },
+      });
+    });
+
+    it('rejects a huge end before creating or copying any page', async () => {
+      const bytes = await pagesOf(3);
+      const create = vi.spyOn(PDFDocument, 'create');
+      const copyPages = vi.spyOn(PDFDocument.prototype, 'copyPages');
+
+      await expect(
+        parser.splitPdf(bytes, [{ start: 0, end: 3_000_000 }], context),
+      ).rejects.toMatchObject({
+        code: JsonRpcErrorCode.ValidationError,
+        message: invalid('ranges[0] { start: 0, end: 3000000 }', 3),
+        data: { reason: 'pdf_split_failed' },
+      });
+      expect(create).not.toHaveBeenCalled();
+      expect(copyPages).not.toHaveBeenCalled();
+    });
+
+    it('checks every range before splitting any, naming the first invalid one', async () => {
+      const bytes = await pagesOf(3);
+      const create = vi.spyOn(PDFDocument, 'create');
+
+      await expect(
+        parser.splitPdf(
+          bytes,
+          [
+            { start: 0, end: 1 },
+            { start: 1, end: 5 },
+          ],
+          context,
+        ),
+      ).rejects.toMatchObject({
+        code: JsonRpcErrorCode.ValidationError,
+        message: invalid('ranges[1] { start: 1, end: 5 }', 3),
+      });
+      expect(create).not.toHaveBeenCalled();
+    });
+
+    it('rejects any range on a document with no pages', async () => {
+      const bytes = await pagesOf(0);
+
+      await expect(parser.splitPdf(bytes, [{ start: 0, end: 0 }], context)).rejects.toMatchObject({
+        code: JsonRpcErrorCode.ValidationError,
+        message:
+          'Failed to split PDF document: ranges[0] { start: 0, end: 0 } is not a valid page range for a 0-page document; the document has no pages.',
+        data: { reason: 'pdf_split_failed' },
+      });
+    });
+
+    it('accepts ranges that touch the first and last page', async () => {
+      const bytes = await pagesOf(3);
+
+      const parts = await parser.splitPdf(
+        bytes,
+        [
+          { start: 0, end: 0 },
+          { start: 2, end: 2 },
+          { start: 0, end: 2 },
+        ],
+        context,
+      );
+
+      expect(parts.map((part) => part.getPageCount())).toEqual([1, 1, 3]);
     });
   });
 
