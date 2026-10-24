@@ -342,7 +342,7 @@ const DIRECT_DEPS: ReadonlySet<string> = new Set(
   ),
 );
 
-// ── Minimal range matching (alias attribution only) ──────────────────
+// ── Minimal range matching (alias attribution, advisory ranges) ──────
 
 type VersionTriple = readonly [number, number, number];
 
@@ -549,6 +549,21 @@ function renderOutdatedTable(output: string): string {
   ].join('\n');
 }
 
+/** The version installed at the project root, i.e. the copy a direct dependency resolves to. */
+function installedRootVersion(pkg: string): string | null {
+  try {
+    const manifest = JSON.parse(
+      readFileSync(path.join(ROOT_DIR, 'node_modules', pkg, 'package.json'), 'utf-8'),
+    );
+    return typeof manifest.version === 'string' ? manifest.version : null;
+  } catch {
+    return null;
+  }
+}
+
+/** Trailing vulnerable range of an advisory line: `high: … (>=2.0.0 <2.4.0) - https://…`. */
+const ADVISORY_RANGE = /\(([^()]+)\)(?:\s+-\s+\S+)?\s*$/;
+
 /**
  * Parses `bun audit` output and classifies high/critical vulnerabilities as
  * direct (in our package.json) or upstream (transitive dependency we can't fix).
@@ -556,10 +571,15 @@ function renderOutdatedTable(output: string): string {
  * Bun audit format per vulnerability block — Bun 1.4 changed the header token
  * and the path separator, so both shapes are accepted:
  *   <package>  <version-range>        ← header, Bun <1.4 (no indent, 2+ spaces before range)
- *   <package>@<version>               ← header, Bun ≥1.4
+ *   <package>@<version>[, <version>]  ← header, Bun ≥1.4 (every installed copy)
  *     <parent> › <child> [› ...]      ← dependency path (indented; › or, Bun ≥1.4, > = transitive)
  *     (direct dependency)             ← dependency path of a direct dependency, Bun ≥1.4
- *     <severity>: <description>       ← advisory (indented)
+ *     <severity>: <description> (<vulnerable range>) - <url>   ← advisory (indented)
+ *
+ * One block covers every installed copy of a package, so a direct dependency's
+ * block also carries the advisories of an older copy a dev tool pins. The block
+ * counts as direct only when the copy installed at the root falls inside a
+ * high/critical advisory's range; an unreadable version or range counts as direct.
  *
  * Returns null if parsing yields no results (caller should fall back to default behavior).
  */
@@ -583,31 +603,39 @@ function classifyAuditVulns(output: string): { direct: string[]; upstream: strin
       const [, pkg, versionRange] = pkgMatch;
       i++;
 
-      let hasHighCritical = false;
+      const highCriticalRanges: (string | null)[] = [];
       const paths: string[] = [];
 
       // Collect indented lines belonging to this block
       while (i < lines.length && (lines[i]?.startsWith('  ') ?? false)) {
         const trimmed = (lines[i] ?? '').trim();
         if (/^(critical|high):/i.test(trimmed)) {
-          hasHighCritical = true;
+          highCriticalRanges.push(ADVISORY_RANGE.exec(trimmed)?.[1] ?? null);
         } else if (trimmed && !/^(moderate|low):/i.test(trimmed)) {
           paths.push(trimmed);
         }
         i++;
       }
 
-      if (!hasHighCritical) continue;
+      if (highCriticalRanges.length === 0) continue;
 
-      // Direct if: the vulnerable package is in our package.json, or any
-      // dependency path lacks a transitive separator — U+203A `›` (Bun <1.4)
-      // or `>` (Bun ≥1.4). Bun 1.4's literal `(direct dependency)` path has neither.
+      // A path without a transitive separator — U+203A `›` (Bun <1.4) or `>`
+      // (Bun ≥1.4) — reaches the package directly; Bun 1.4's literal
+      // `(direct dependency)` path has neither. When transitive paths share the
+      // block, only the copy installed at the root decides.
       const pkgName = pkg ?? '';
-      const isDirect = DIRECT_DEPS.has(pkgName) || paths.some((p) => !/[\u203a>]/.test(p));
+      const transitivePaths = paths.filter((p) => /[\u203a>]/.test(p));
+      let isDirect = DIRECT_DEPS.has(pkgName) || transitivePaths.length < paths.length;
+      if (isDirect && transitivePaths.length > 0) {
+        const rootVersion = installedRootVersion(pkgName);
+        isDirect =
+          rootVersion === null ||
+          highCriticalRanges.some((range) => range === null || rangeAdmits(range, rootVersion));
+      }
       if (isDirect) {
         direct.push(`${pkgName} ${versionRange}`);
       } else {
-        const via = paths[0]?.split(/\s*[\u203a>]\s*/)[0] ?? 'unknown';
+        const via = transitivePaths[0]?.split(/\s*[\u203a>]\s*/)[0] ?? 'unknown';
         upstream.push(`${pkgName} ${versionRange} (via ${via})`);
       }
     }

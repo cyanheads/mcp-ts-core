@@ -6,7 +6,9 @@
  * - A warning never fails the run; any failed step does.
  * - Security Audit passes low/moderate-only findings, warns when the output is
  *   not an audit report at all (registry unreachable), and fails a high/critical
- *   report it cannot attribute — the conservative fallback.
+ *   report it cannot attribute — the conservative fallback. A block a direct
+ *   dependency shares with a transitive copy fails only when the copy installed
+ *   at the root is in the advisory's vulnerable range.
  * - Dependencies (Outdated) fails hard when `bun outdated` exits non-zero without
  *   printing its table (a lockfile or network error, not a finding).
  * - Skills Sync drift is demoted to a warning.
@@ -212,6 +214,53 @@ describe('devcheck gate semantics', () => {
 
     expect(row(out, 'Security Audit')).toContain('FAILED');
     expect(code).toBe(1);
+  });
+
+  describe('a high advisory on a direct dependency that a dev tool also pins', () => {
+    /** One block for both copies: the root `lodash` and an older one under `some-tool`. */
+    const SHARED_BLOCK = [
+      'bun audit v1.4.0 (fixture)',
+      '',
+      'lodash@4.17.21, 4.17.20',
+      '  (direct dependency)',
+      '  some-tool > lodash',
+      '  high: Command injection in lodash (<4.17.21) - https://github.com/advisories/GHSA-35jh-r3h4-6jhm',
+      '',
+      '1 vulnerability (1 high)',
+    ].join('\n');
+
+    function installRootLodash(version: string): void {
+      mkdirSync(resolve(dir, 'node_modules/lodash'), { recursive: true });
+      writeFileSync(
+        resolve(dir, 'node_modules/lodash/package.json'),
+        `${JSON.stringify({ name: 'lodash', version })}\n`,
+      );
+    }
+
+    afterAll(() => {
+      rmSync(resolve(dir, 'node_modules/lodash'), { recursive: true, force: true });
+    });
+
+    it('warns, naming the dev tool, when the root copy is outside the vulnerable range', () => {
+      installRootLodash('4.17.21');
+      servePackageManager('audit', SHARED_BLOCK, 1);
+
+      const { code, out } = runDevcheck('--only', 'Audit');
+
+      expect(row(out, 'Security Audit')).toContain('WARNING');
+      expect(out).toContain('lodash 4.17.21, 4.17.20 (via some-tool)');
+      expect(code).toBe(0);
+    });
+
+    it('fails when the root copy is inside the vulnerable range', () => {
+      installRootLodash('4.17.20');
+      servePackageManager('audit', SHARED_BLOCK, 1);
+
+      const { code, out } = runDevcheck('--only', 'Audit');
+
+      expect(row(out, 'Security Audit')).toContain('FAILED');
+      expect(code).toBe(1);
+    });
   });
 
   it('skips the slow steps under --fast without running them, and runs the rest', () => {
