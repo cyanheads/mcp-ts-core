@@ -391,6 +391,7 @@ bun run devcheck       # full gate: lint/format, typecheck, MCP defs, packaging,
 bun run lint:mcp       # validate MCP definitions against spec
 bun run test:all       # rebuild + coverage + Node.js + Workers + integration
 bun run test:package   # pack the tarball and consume it as an external project would
+bun run test:soak      # sustained HTTP load; fails when the server heap grows per request
 ```
 
 ## License
