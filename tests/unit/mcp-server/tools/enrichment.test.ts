@@ -789,6 +789,28 @@ describe('enrichment block', () => {
       expect(trailer).toBe('\n\n> page size 25\n\n> Nothing matched.');
     });
 
+    it.each([
+      ['\\n', '\n'],
+      ['\\r\\n', '\r\n'],
+      ['\\r', '\r'],
+    ])(
+      '#765 — quotes every line of a notice split by %s, blank lines included',
+      async (_label, eol) => {
+        const trailer = await trailerFor('multi_line_notice', (ctx) => {
+          ctx.enrich.notice(
+            `No match for "zzqq${eol}# INJECTED".${eol}${eol}- try *broader* terms`,
+          );
+          ctx.enrich.total(0);
+        });
+
+        // The notice stays authored Markdown, so `*broader*` is not escaped.
+        expect(trailer).toBe(
+          '\n\n> No match for "zzqq\n> # INJECTED".\n>\n> - try *broader* terms\n\n**0 total**',
+        );
+        expect(lazyContinuationLines(trailer)).toEqual([]);
+      },
+    );
+
     it('renders a trailer with no notice byte-identically to the pre-fix layout', async () => {
       const trailer = await trailerFor('no_notice', (ctx) => {
         ctx.enrich.echo('parsed terms');

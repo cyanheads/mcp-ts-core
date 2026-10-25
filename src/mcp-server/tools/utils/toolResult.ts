@@ -310,7 +310,14 @@ function renderEnrichmentTrailer(
     }
     switch (store.kinds.get(key)) {
       case 'notice':
-        fields.push(`> ${String(value)}`);
+        // Every line is quoted: one left bare ends the quote, and the rest of
+        // the notice renders as top-level Markdown (#765).
+        fields.push(
+          String(value)
+            .split(/\r\n|\r|\n/)
+            .map((line) => (line === '' ? '>' : `> ${line}`))
+            .join('\n'),
+        );
         break;
       case 'total':
         fields.push(`**${String(value)} total**`);

@@ -4,7 +4,7 @@ description: >
   Canonical reference for the unified `Context` object passed to every tool and resource handler in `@cyanheads/mcp-ts-core`. Covers the full interface, its `RequestContext` base, all sub-APIs (`ctx.log`, `ctx.state`, `ctx.requestInput`, `ctx.inputs`, `ctx.clientCapabilities`, `ctx.enrich`, `ctx.content`), and when to use each.
 metadata:
   author: cyanheads
-  version: "2.13"
+  version: "2.14"
   audience: external
   type: reference
 ---
@@ -835,7 +835,7 @@ ctx.enrich.truncated({ shown, cap, ceiling?, guidance? }): void
 | `format-parity` | Enrichment lives outside `output`, so the `format-parity` lint never requires it in `format()`. |
 | Trailer rendering | Per field: the definition's `enrichmentTrailer.render` if set, else the kind-tag (notice/total/echo/delta), else `**key:** value` with `label` replacing the key (objects/arrays `JSON.stringify`'d). A `render` overrides a kind-tagged field's default line; a `label` relabels only the generic and `delta` lines. A structured field with no `render` errors under `enrichment-trailer-render` — supply one so it renders as markdown; `structuredContent` keeps the full value regardless. |
 | Trailer escaping | Echo, delta, and generic values are data: their strings, and an object's JSON, render through `escapeMarkdownInline()`, so a CommonMark parse reads them back as written; numbers, booleans, and `null` render as themselves. Pass them raw — escaping first puts the backslashes in `structuredContent` too. A `render` result, a `label`, the `total` line, and the `notice` blockquote are authored Markdown and stay live; escape untrusted text embedded in a `notice` or `render` yourself. |
-| Trailer layout | One field per line. A field whose last line opens a block quote or a list item (`notice`, or a `render` ending in `>`, `-`, `*`, `1.`) gets a blank line after it, so the next field renders as its own block instead of being folded into that container by CommonMark lazy continuation. |
+| Trailer layout | One field per line. Every line of a `notice` is quoted (`\n`, `\r\n`, or `\r` ends a line; a blank one renders as `>`), so a multi-line notice stays one block quote. A field whose last line opens a block quote or a list item (`notice`, or a `render` ending in `>`, `-`, `*`, `1.`) gets a blank line after it, so the next field renders as its own block instead of being folded into that container by CommonMark lazy continuation. |
 
 ### `ctx.enrich.truncated()` — capped-list disclosure
 
