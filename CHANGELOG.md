@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.13.17](changelog/0.13.x/0.13.17.md) — 2026-10-25 · ⚠️ Breaking
+
+The HTTP transport no longer retains every request's signal (a ~71 KiB per-request leak in 0.13.16), a new test:soak lane guards it, and the framework moves to OpenTelemetry JS 3, DuckDB 2, and MCP SDK 2.4.
+
 ## [0.13.16](changelog/0.13.x/0.13.16.md) — 2026-10-24 · 🛡️ Security
 
 A createWorkerHandler() without name, version, or sessionMode now applies its Worker bindings, framework config is parsed at startup rather than import and bounded, HTTP shutdown drains with 503s, cancelled calls settle as RequestCancelled, and error and trailer text in content[] is Markdown-safe.

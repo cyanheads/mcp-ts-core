@@ -1,6 +1,6 @@
 # mcp-ts-core - Directory Structure
 
-Generated on: 2026-10-24 13:49:38
+Generated on: 2026-10-25 20:03:41
 
 ```text
 mcp-ts-core/
@@ -660,6 +660,7 @@ mcp-ts-core/
 │   │   ├── vitest.leaks.ts
 │   │   ├── vitest.package.ts
 │   │   ├── vitest.performance.ts
+│   │   ├── vitest.soak.ts
 │   │   ├── vitest.worker-bundle.ts
 │   │   └── vitest.worker.ts
 │   ├── contract/
@@ -690,6 +691,7 @@ mcp-ts-core/
 │   │   ├── mcp-app-render-server.js
 │   │   ├── mcp-app-server.js
 │   │   ├── session-mode-server.js
+│   │   ├── soak-http-server.js
 │   │   ├── stdio-inflight-server.js
 │   │   ├── stdio-log-server.js
 │   │   ├── teardown-server.js
@@ -788,6 +790,8 @@ mcp-ts-core/
 │   │   │   └── template-madlibs-elicitation.tool.test.ts
 │   │   ├── examples-registry.test.ts
 │   │   └── templates-lint.test.ts
+│   ├── soak/
+│   │   └── http-memory.soak.test.ts
 │   ├── types/
 │   │   ├── context-helpers.test-d.ts
 │   │   ├── error-contract.test-d.ts

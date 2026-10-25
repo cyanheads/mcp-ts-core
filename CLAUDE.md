@@ -1,9 +1,9 @@
 # Developer Protocol
 
 **Package:** `@cyanheads/mcp-ts-core`
-**Version:** 0.13.16
+**Version:** 0.13.17
 **Engines:** Bun ≥1.4.0, Node ≥24.0.0
-**MCP SDK:** `@modelcontextprotocol/server` ^2.3.1 (protocol revisions 2026-07-28 and 2025-*)
+**MCP SDK:** `@modelcontextprotocol/server` ^2.4.0 (protocol revisions 2026-07-28 and 2025-*)
 **Zod:** ^4.6.7
 **GitHub:** [cyanheads/mcp-ts-core](https://github.com/cyanheads/mcp-ts-core)
 **npm:** [@cyanheads/mcp-ts-core](https://www.npmjs.com/package/@cyanheads/mcp-ts-core)
