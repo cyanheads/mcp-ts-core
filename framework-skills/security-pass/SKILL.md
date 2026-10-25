@@ -4,7 +4,7 @@ description: >
   Review an MCP server for common security gaps: LLM-facing surfaces as injection vector (tools, resources, prompts, descriptions), scope blast radius, destructive ops without consent, upstream auth shape, input sinks (URL / path / roots / shell / schema strictness / ReDoS), tenant isolation, leakage through errors and telemetry, unbounded resources, and HTTP-mode deployment surface. Use before a release, after a batch of handler changes, or when the user asks for a security review, audit, or hardening pass. Produces grouped findings and a numbered options list.
 metadata:
   author: cyanheads
-  version: "1.14"
+  version: "1.15"
   audience: external
   type: audit
 ---
@@ -63,6 +63,8 @@ Note: tool / resource / prompt counts, auth mode, storage provider, upstream API
 Use `TaskCreate` — one task per axis. Mark complete as you go.
 
 **Run `fuzzTool` in parallel.** `@cyanheads/mcp-ts-core/testing/fuzz` catches crashes, memory leaks, and prototype pollution automatically on each tool — start it now so results are ready when you reach Axis 5.
+
+Verify that generated inputs reach each tool's handler and relevant fake I/O boundary. Preprocessing, refinements, or exclusive modes can make a generator produce only rejected inputs. Supplement those schemas with bounded valid seeds or input generators while retaining the original input parser, handler, output validation, and formatter; fake the network or process boundary, not domain logic. Report generated-input and successful-handler counts separately.
 
 ### 2. Walk the eight axes
 
@@ -341,7 +343,7 @@ End with:
 - [ ] Scope confirmed (whole server / module / diff)
 - [ ] Map built: tools / resources / prompts, services, upstream APIs, auth mode, consent-round / roots usage
 - [ ] Deployment surface reviewed (if HTTP): bind address, Origin allowlist, session ID, unauth routes, auth-spec compliance
-- [ ] `fuzzTool` started in parallel
+- [ ] `fuzzTool` completed with verified handler execution; valid supplemental inputs cover generator gaps, with generated and executed counts reported separately
 - [ ] Axis 1 — LLM-facing surfaces (tool / resource / prompt output + descriptions) framed and static
 - [ ] Axis 2 — scope granularity audited
 - [ ] Axis 3 — destructive ops verified to gate on a `ctx.requestInput` round that redeems a `ctx.state` record bound to the operation, caller, and target, the response schema-validated, decline/cancel terminal, non-repeatable actions idempotent per record, `MCP_REQUEST_STATE_KEY` set where state drives a mutation
