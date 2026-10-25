@@ -48,8 +48,9 @@ export interface SpilloverOptions<T extends Row> {
    */
   schema?: ColumnSchema[];
   /**
-   * Cancellation. Throws on abort during drain or registration; partial
-   * canvas tables are best-effort dropped before the throw propagates.
+   * Cancellation. Throws on abort during drain or registration, with the
+   * source closed and the canvas left as it was — no partial table, and a
+   * table of the same name kept.
    */
   signal?: AbortSignal;
   /** Row source. Anything DataCanvas.registerTable accepts. */
@@ -150,8 +151,30 @@ export async function spillover<T extends Row>(
 
   opts.signal?.throwIfAborted();
 
-  const iter = openIterator(opts.source);
+  /**
+   * Every early exit — the `maxRows` cap, an abort, a failed registration —
+   * closes the source, so a generator's `finally` releases what it holds
+   * (#661). A failed registration leaves the canvas as it was, a table it was
+   * replacing included, so nothing is dropped here (#659).
+   */
+  const source = openSource(opts.source);
+  try {
+    const result = await drainAndSpill(opts, tableName, source);
+    await source.close();
+    return result;
+  } catch (err) {
+    // The error that ended the spill wins over one from closing the source.
+    await source.close().catch(() => {});
+    throw err;
+  }
+}
 
+/** The two phases of {@link spillover}, pulling from `source`. */
+async function drainAndSpill<T extends Row>(
+  opts: SpilloverOptions<T>,
+  tableName: string,
+  source: RowSource<T>,
+): Promise<SpilloverResult<T>> {
   // ---------------- Phase 1: drain into the preview buffer ---------------
   const previewBuffer: T[] = [];
   let bytes = 0;
@@ -159,7 +182,7 @@ export async function spillover<T extends Row>(
 
   while (true) {
     opts.signal?.throwIfAborted();
-    const next = await iter.next();
+    const next = await source.next();
     if (next.done) break;
     const row = next.value;
     const rowChars = safeJsonLength(row);
@@ -183,29 +206,17 @@ export async function spillover<T extends Row>(
   const merged = mergedRows({
     bufferedRows: previewBuffer,
     overflowSentinel,
-    remaining: iter,
+    remaining: source,
     maxRows: opts.caps?.maxRows,
     signal: opts.signal,
     truncationFlag,
   });
 
-  let handle: RegisterTableResult;
-  try {
-    handle = await opts.canvas.registerTable(tableName, merged, {
-      schema,
-      ...(opts.signal !== undefined && { signal: opts.signal }),
-      ...(opts.ttlMs !== undefined && { ttlMs: opts.ttlMs }),
-    });
-  } catch (err) {
-    // Best-effort cleanup so an aborted or failed registration doesn't leave
-    // a partially-appended table on the canvas. Drop is idempotent.
-    try {
-      await opts.canvas.drop(tableName);
-    } catch {
-      /* swallow — original error wins */
-    }
-    throw err;
-  }
+  const handle = await opts.canvas.registerTable(tableName, merged, {
+    schema,
+    ...(opts.signal !== undefined && { signal: opts.signal }),
+    ...(opts.ttlMs !== undefined && { ttlMs: opts.ttlMs }),
+  });
 
   return {
     spilled: true,
@@ -234,11 +245,36 @@ function validateMaxRows(value: number | undefined): void {
   }
 }
 
-function openIterator<T>(source: AsyncIterable<T> | Iterable<T>): Iterator<T> | AsyncIterator<T> {
-  if (typeof (source as AsyncIterable<T>)[Symbol.asyncIterator] === 'function') {
-    return (source as AsyncIterable<T>)[Symbol.asyncIterator]();
-  }
-  return (source as Iterable<T>)[Symbol.iterator]();
+/** The spill's source iterator, pulled one row at a time and closed at most once. */
+interface RowSource<T> {
+  /** Closes the source unless it already ran out or threw, which closed it. */
+  close(): Promise<void>;
+  next(): Promise<IteratorResult<T>>;
+}
+
+function openSource<T>(source: AsyncIterable<T> | Iterable<T>): RowSource<T> {
+  const iter: Iterator<T> | AsyncIterator<T> =
+    typeof (source as AsyncIterable<T>)[Symbol.asyncIterator] === 'function'
+      ? (source as AsyncIterable<T>)[Symbol.asyncIterator]()
+      : (source as Iterable<T>)[Symbol.iterator]();
+  let finished = false;
+  return {
+    async next() {
+      try {
+        const next = await iter.next();
+        if (next.done) finished = true;
+        return next;
+      } catch (err) {
+        finished = true;
+        throw err;
+      }
+    },
+    async close() {
+      if (finished) return;
+      finished = true;
+      await iter.return?.();
+    },
+  };
 }
 
 function safeJsonLength(row: unknown): number {
@@ -259,7 +295,7 @@ interface MergedRowsArgs<T> {
   bufferedRows: readonly T[];
   maxRows: number | undefined;
   overflowSentinel: T;
-  remaining: Iterator<T> | AsyncIterator<T>;
+  remaining: RowSource<T>;
   signal: AbortSignal | undefined;
   truncationFlag: { hit: boolean };
 }

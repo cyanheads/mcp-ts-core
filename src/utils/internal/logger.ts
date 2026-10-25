@@ -379,8 +379,9 @@ function isError(value: unknown): value is Error {
 
 /**
  * The record shape an OTel Logs API `Logger` accepts, narrowed to the fields
- * the framework sets. Declared here rather than imported so this module's
- * public types never require the optional `@opentelemetry/api-logs` peer.
+ * the framework sets. Declared here rather than imported from
+ * `@opentelemetry/api`, whose `AnyValue` is `unknown`, so the value shapes the
+ * framework writes stay typed.
  *
  * @internal Exported only for tests that capture records. Not part of the public API.
  */

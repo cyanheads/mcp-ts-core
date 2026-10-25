@@ -4,7 +4,7 @@ description: >
   Catalog of OpenTelemetry instrumentation built into framework `@cyanheads/mcp-ts-core` — spans, metrics, completion logs, env config, runtime caveats, custom instrumentation patterns, and cardinality rules. Use when enabling OTel export, adding custom spans or metrics in services, debugging missing telemetry, looking up attribute names, or deciding what's safe to put on a metric attribute vs. a span.
 metadata:
   author: cyanheads
-  version: "1.22"
+  version: "1.23"
   audience: external
   type: reference
 ---
@@ -41,7 +41,7 @@ Metrics push via `PeriodicExportingMetricReader` every **15 seconds**. Traces us
 
 Traces and metrics endpoints resolve per the [OTLP exporter spec](https://opentelemetry.io/docs/specs/otel/protocol/exporter/#endpoint-urls-for-otlphttp): the signal-specific variable as-is, else the base plus the signal path. A signal with no resolved endpoint exports nothing, and `NodeSDK`'s own `OTEL_METRICS_EXPORTER` / `OTEL_LOGS_EXPORTER` defaults are not consulted.
 
-Log records export only when `OTEL_EXPORTER_OTLP_LOGS_ENDPOINT` is set. The base endpoint alone never turns it on, so a deployment exporting traces and metrics keeps its logs local until it opts in. When set, every record the framework logger writes — after the `MCP_LOG_LEVEL` filter and the rate limit, with the same fields as the pino output (the error argument as the `exception.*` attributes rather than an `err` field), redacted the same way — is also sent through a `BatchLogRecordProcessor`, with its MCP level as the severity and the active span's trace context (a handler's `ctx.log` record joins its `tool_execution:*` span). `interactions.log` transcripts are never exported. Log export needs three more optional peers: `bun add @opentelemetry/sdk-logs @opentelemetry/exporter-logs-otlp-http @opentelemetry/api-logs`.
+Log records export only when `OTEL_EXPORTER_OTLP_LOGS_ENDPOINT` is set. The base endpoint alone never turns it on, so a deployment exporting traces and metrics keeps its logs local until it opts in. When set, every record the framework logger writes — after the `MCP_LOG_LEVEL` filter and the rate limit, with the same fields as the pino output (the error argument as the `exception.*` attributes rather than an `err` field), redacted the same way — is also sent through a `BatchLogRecordProcessor`, with its MCP level as the severity and the active span's trace context (a handler's `ctx.log` record joins its `tool_execution:*` span). `interactions.log` transcripts are never exported. Log export needs two more optional peers: `bun add @opentelemetry/sdk-logs @opentelemetry/exporter-logs-otlp-http`.
 
 ---
 

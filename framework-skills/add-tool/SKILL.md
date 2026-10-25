@@ -4,7 +4,7 @@ description: >
   Scaffold a new MCP tool definition. Use when the user asks to add a tool, create a new tool, or implement a new capability for the server.
 metadata:
   author: cyanheads
-  version: "2.35"
+  version: "2.36"
   audience: external
   type: reference
 ---
@@ -380,7 +380,7 @@ The emitted property carries `"x-mcp-header": "Region"` and nothing else about t
 
 **It mirrors, it does not relocate.** When the body carries a value for a designated property, the matching `Mcp-Param-<Name>` header MUST be present and decode to an equal value; the SDK cross-checks the pair before dispatch and rejects a disagreement with `-32020` (`HeaderMismatch`, HTTP `400`). Absent or `null` in the body means no header is expected. **Your handler still reads the argument from `input`** — there is nothing new to do in the handler body. Browser clients need nothing extra either: the HTTP transport's CORS preflight allows `Mcp-Param-<Name>` for every designation on a registered tool, for each origin `MCP_ALLOWED_ORIGINS` accepts.
 
-**Where a designation is legal.** The property must be primitive-typed (`string`, `integer`, `number`, `boolean`) and statically reachable through a chain of `properties` keys. Top-level and nested `z.object()` fields qualify. These do not:
+**Where a designation is legal.** The property must be primitive-typed (`string`, `integer`, `boolean`; a `z.number()` emits `number`, which the spec excludes, so use `z.int()`) and statically reachable through a chain of `properties` keys. Top-level and nested `z.object()` fields qualify. These do not:
 
 | Placement | Why |
 |:--|:--|

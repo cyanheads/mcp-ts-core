@@ -60,7 +60,13 @@ const SPILL_SCHEMA: ColumnSchema[] = [
 ];
 /** A canvas that read back its own rows: count, rows carrying its tag, and sum(i) over 0..N-1. */
 const EXACT_READBACK = { n: '400000', own: '400000', s: '79999800000' };
-/** The fixed names DuckDB gives spill files in a `temp_directory`. */
+/**
+ * A spill file in a `temp_directory`: `duckdb_temp_storage_<size>-<n>.tmp` on
+ * DuckDB v1.5, `duckdb_temp_<pid>_<instance>_storage_<size>-<n>.tmp` on v2.0.
+ */
+const SPILL_FILE = /^duckdb_temp_(?:\d+_\d+_)?storage_/;
+const isSpillFile = (name: string) => SPILL_FILE.test(name);
+/** The fixed names DuckDB v1.5 gives spill files, which #554 plants links at. */
 const SPILL_FILE_NAMES = [
   'duckdb_temp_storage_DEFAULT-0.tmp',
   'duckdb_temp_storage_S32K-0.tmp',
@@ -359,7 +365,7 @@ describe('canvas · DuckDB scratch I/O', () => {
       for (const dir of spillDirs) {
         expect(dir).toMatch(UUID);
         const names = await readdir(join(scratch, dir));
-        expect(names.some((name) => name.startsWith('duckdb_temp_storage_'))).toBe(true);
+        expect(names.some((name) => isSpillFile(name))).toBe(true);
       }
 
       await provider.destroyCanvas(one, ctx);
@@ -426,7 +432,7 @@ describe('canvas · DuckDB scratch I/O', () => {
       longest: '128',
     });
     expect(otherSpillDirs).toEqual([]);
-    expect(spilled.some((name) => name.startsWith('duckdb_temp_storage_'))).toBe(true);
+    expect(spilled.some((name) => isSpillFile(name))).toBe(true);
 
     await provider.destroyCanvas('hardspill1', ctx);
     expect(await subdirsOf(scratch)).toEqual([]);
@@ -531,7 +537,7 @@ describe('canvas · DuckDB scratch I/O', () => {
       expect(others).toEqual([]);
       expect(await modeOf(scratch)).toBe(0o700);
       const spilled = await filesUnder(scratch);
-      expect(spilled.some((file) => basename(file).startsWith('duckdb_temp_storage_'))).toBe(true);
+      expect(spilled.some((file) => isSpillFile(basename(file)))).toBe(true);
 
       await provider.shutdown();
       expect((await readdir(fakeTmp)).sort()).toEqual(['mcp-canvas', 'victims']);
@@ -679,7 +685,7 @@ describe('canvas · DuckDB scratch I/O', () => {
       const [spillDir = '', ...otherSpillDirs] = await subdirsOf(scratch);
       expect(otherSpillDirs).toEqual([]);
       const spilled = await readdir(join(scratch, spillDir));
-      expect(spilled.some((name) => name.startsWith('duckdb_temp_storage_'))).toBe(true);
+      expect(spilled.some((name) => isSpillFile(name))).toBe(true);
 
       const paused = pauseNextConnection();
       const sink = lineCountingStream();

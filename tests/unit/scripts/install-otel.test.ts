@@ -42,8 +42,8 @@ const FRAMEWORK: Manifest = {
   peerDependencies: {
     '@duckdb/node-api': '^1.5.5',
     '@hono/otel': '^9.0.0',
-    '@opentelemetry/api-logs': '^9.1.0',
     '@opentelemetry/sdk-node': '^9.2.0',
+    '@opentelemetry/sdk-trace': '^9.1.0',
     openai: '^7.0.0',
     vitest: '>=4.0.0',
   },
@@ -154,8 +154,8 @@ describe('install-otel', () => {
       dependencies: {
         ...server.dependencies,
         '@hono/otel': '^9.0.0',
-        '@opentelemetry/api-logs': '^9.1.0',
         '@opentelemetry/sdk-node': '^9.2.0',
+        '@opentelemetry/sdk-trace': '^9.1.0',
       },
       devDependencies: { typescript: '^7.0.2' },
     });

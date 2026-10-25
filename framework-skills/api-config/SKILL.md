@@ -4,7 +4,7 @@ description: >
   Reference for core and server configuration in `@cyanheads/mcp-ts-core`. Covers env var tables with defaults, priority order, server-specific Zod schema pattern, and Workers lazy-parsing requirement.
 metadata:
   author: cyanheads
-  version: "1.27"
+  version: "1.28"
   audience: external
   type: reference
 ---
@@ -218,7 +218,7 @@ Activated when `SUPABASE_URL` is set.
 | `OTEL_EXPORTER_OTLP_ENDPOINT` | — | — | OTLP/HTTP base URL; resolves `tracesEndpoint` to `<base>/v1/traces` and `metricsEndpoint` to `<base>/v1/metrics` (path prefix kept) when the signal-specific variable is unset |
 | `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` | `openTelemetry.tracesEndpoint` | — | OTLP traces endpoint URL; overrides the base, used as-is |
 | `OTEL_EXPORTER_OTLP_METRICS_ENDPOINT` | `openTelemetry.metricsEndpoint` | — | OTLP metrics endpoint URL; overrides the base, used as-is |
-| `OTEL_EXPORTER_OTLP_LOGS_ENDPOINT` | `openTelemetry.logsEndpoint` | — | OTLP logs endpoint URL; the only switch for log record export, never derived from the base. Needs the optional peers `@opentelemetry/sdk-logs`, `@opentelemetry/exporter-logs-otlp-http`, `@opentelemetry/api-logs` |
+| `OTEL_EXPORTER_OTLP_LOGS_ENDPOINT` | `openTelemetry.logsEndpoint` | — | OTLP logs endpoint URL; the only switch for log record export, never derived from the base. Needs the optional peers `@opentelemetry/sdk-logs` and `@opentelemetry/exporter-logs-otlp-http` |
 | `OTEL_TRACES_SAMPLER_ARG` | `openTelemetry.samplingRatio` | `1.0` | 0–1; fraction of traces to export |
 | `OTEL_LOG_LEVEL` | `openTelemetry.logLevel` | `INFO` | OTel SDK internal log level: `NONE` \| `ERROR` \| `WARN` \| `INFO` \| `DEBUG` \| `VERBOSE` \| `ALL`; aliases `warning`→`WARN`, `err`→`ERROR`, `information`→`INFO`. Diag output goes to stderr at every level |
 

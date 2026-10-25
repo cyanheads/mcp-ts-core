@@ -115,14 +115,11 @@ describe('scanHeaderDesignations — valid', () => {
     );
   });
 
-  it('accepts every primitive type the SDK permits, number included', () => {
+  it('accepts every primitive type the spec permits', () => {
     const scan = scanHeaderDesignations(
       z.object({
         b: headerParam(z.boolean(), 'B').describe('B.'),
         i: headerParam(z.int(), 'I').describe('I.'),
-        // The spec text excludes `number`; the SDK release this targets accepts
-        // it, and matching the runtime is the point of this scan.
-        n: headerParam(z.number(), 'N').describe('N.'),
         s: headerParam(z.string(), 'S').describe('S.'),
       }),
     );
@@ -130,7 +127,6 @@ describe('scanHeaderDesignations — valid', () => {
     expect(scan?.valid && scan.designations.map((d) => d.type).sort()).toEqual([
       'boolean',
       'integer',
-      'number',
       'string',
     ]);
   });
@@ -257,6 +253,16 @@ describe('scanHeaderDesignations — invalid', () => {
     );
     expect(scan?.valid === false && scan.reason).toContain('primitive-typed');
     expect(scan?.valid === false && scan.reason).toContain('type object');
+  });
+
+  it('rejects a number-typed property and points at z.int()', () => {
+    const scan = scanHeaderDesignations(
+      z.object({ ratio: headerParam(z.number(), 'Ratio').describe('Ratio.') }),
+    );
+    expect(scan?.valid === false && scan.reason).toBe(
+      'x-mcp-header is only permitted on a primitive-typed property (string, integer, boolean); ' +
+        'this property emits type number. Use z.int() for a whole-number value, or z.string().',
+    );
   });
 
   it('rejects a case-insensitive duplicate and names the prior declaration', () => {

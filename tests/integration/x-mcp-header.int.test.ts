@@ -246,9 +246,9 @@ describe('x-mcp-header input designation (#360)', () => {
         false,
       ],
       [
-        'number-typed property the SDK admits',
+        'number-typed property',
         z.object({ ratio: headerParam(z.number(), 'Ratio').describe('Ratio.') }),
-        false,
+        true,
       ],
       [
         'array element',

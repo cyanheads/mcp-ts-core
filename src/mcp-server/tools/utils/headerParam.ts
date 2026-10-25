@@ -39,15 +39,11 @@ export const X_MCP_HEADER_KEY = 'x-mcp-header';
 const RFC9110_TOKEN = /^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$/;
 
 /**
- * Emitted `type` values a designation may sit on.
- *
- * The spec names `string`, `integer`, and `boolean`; the SDK release this
- * framework targets also accepts `number` (its own source comment tracks the
- * discrepancy against the conformance referee). Matching the runtime is the
- * point of this scan — a rule that hard-rejected `number` would fail a
- * declaration the SDK accepts.
+ * Emitted `type` values a designation may sit on: the spec's `string`,
+ * `integer`, and `boolean`. `number` is excluded by the spec and by the SDK's
+ * scan, so `z.number()` fails here while `z.int()` passes.
  */
-const PERMITTED_TYPES = new Set(['boolean', 'integer', 'number', 'string']);
+const PERMITTED_TYPES = new Set(['boolean', 'integer', 'string']);
 
 /**
  * JSON Schema keywords the static-reachability constraint excludes from the
@@ -200,7 +196,8 @@ function scanEmitted(inputSchema: Record<string, unknown>): HeaderDesignationSca
         path,
         reason:
           'x-mcp-header is only permitted on a primitive-typed property (string, integer, ' +
-          `number, boolean); this property emits type ${type ?? '<none>'}.`,
+          `boolean); this property emits type ${type ?? '<none>'}.` +
+          (type === 'number' ? ' Use z.int() for a whole-number value, or z.string().' : ''),
       };
     }
 

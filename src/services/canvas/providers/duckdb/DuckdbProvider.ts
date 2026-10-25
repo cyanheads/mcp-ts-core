@@ -87,6 +87,14 @@ type DuckDBResultReader = InstanceType<DuckDBModule['DuckDBResultReader']>;
 type DuckDBTimestampValue = InstanceType<DuckDBModule['DuckDBTimestampValue']>;
 type DuckDBDateValue = InstanceType<DuckDBModule['DuckDBDateValue']>;
 
+/**
+ * `memory_limit` budgeted per engine thread. DuckDB v2.0 holds a buffer of
+ * several MiB per thread through a `COPY` and fails with Out of Memory, where
+ * v1.5 spills, once those buffers near the limit; at 32 MB per thread it
+ * fails, at 64 MB it spills.
+ */
+const MEMORY_MB_PER_THREAD = 64;
+
 /** Configuration for {@link DuckdbProvider}. Mirrors the AppConfig.canvas block. */
 export interface DuckdbProviderOptions {
   /** Default row cap for `query()` results. */
@@ -201,8 +209,8 @@ export class DuckdbProvider implements IDataCanvasProvider {
     const duck = await importDuckDB();
     const root = this.ensureTempRoot();
     const scratchDir = await root;
-    // DuckDB names spill files by block size alone, so instances sharing a
-    // temp_directory overwrite each other's evicted blocks (#561).
+    // DuckDB v1.5 names spill files by block size alone, so instances sharing
+    // a temp_directory overwrite each other's evicted blocks (#561).
     const spillDir = join(scratchDir, randomUUID());
     const instance = await duck.DuckDBInstance.create(':memory:', {
       memory_limit: `${this.options.memoryLimitMb}MB`,
@@ -210,9 +218,22 @@ export class DuckdbProvider implements IDataCanvasProvider {
       // Disable extension install/load paths in canvas mode.
       autoinstall_known_extensions: 'false',
       autoload_known_extensions: 'false',
+      // DuckDB v2.0 refuses the `x -> x + 1` lambda arrow by default; this keeps
+      // it beside `lambda x: x + 1`, as v1.5 accepts both.
+      lambda_syntax: 'ENABLE_SINGLE_ARROW',
     });
     const controlConnection = await instance.connect();
     await controlConnection.run(`SET memory_limit = '${this.options.memoryLimitMb}MB'`);
+    // DuckDB's own thread count (the cores, or a container's CPU quota) stays
+    // the ceiling; the cap only lowers it on a small memory_limit.
+    const threadCap = Math.max(1, Math.floor(this.options.memoryLimitMb / MEMORY_MB_PER_THREAD));
+    const detected = await controlConnection.runAndReadAll(
+      "SELECT current_setting('threads')::INTEGER AS n",
+    );
+    const { n: detectedThreads } = detected.getRowObjectsJson()[0] as { n: number };
+    if (detectedThreads > threadCap) {
+      await controlConnection.run(`SET threads = ${threadCap}`);
+    }
     // The engine reads and writes only under the export root and the scratch
     // directory (DuckDB adds the spill directory itself). An extension
     // INSTALL/LOAD would have to run before external access goes off.
@@ -382,57 +403,81 @@ export class DuckdbProvider implements IDataCanvasProvider {
 
     for (const col of schema) assertValidIdentifier(col.name, 'column');
 
-    // Drop+create makes register idempotent under re-registration of a name.
+    /**
+     * Drop, create, and append run in one transaction on a connection of the
+     * call's own, so a re-registration replaces the table whole or not at all
+     * (#659): every other connection reads the previous table until the commit,
+     * and a source, conversion, or cancellation failure rolls back to it — or,
+     * on a first registration, to no table. A concurrent write to the same
+     * table fails this call with DuckDB's write-write conflict.
+     */
     const ddl = buildCreateTableSql(name, schema);
-    await record.controlConnection.run(`DROP TABLE IF EXISTS ${quoteIdentifier(name)}`);
-    await record.controlConnection.run(ddl);
-    options?.signal?.throwIfAborted();
-
+    const conn = await record.instance.connect();
     let count = 0;
     try {
-      const appender = await record.controlConnection.createAppender(name);
+      await conn.run('BEGIN TRANSACTION');
       try {
-        const appendOne = (row: Record<string, unknown>) => {
-          for (const col of schema) {
-            appendValue(appender, col, row[col.name], duck);
+        await conn.run(`DROP TABLE IF EXISTS ${quoteIdentifier(name)}`);
+        await conn.run(ddl);
+        options?.signal?.throwIfAborted();
+        const appender = await conn.createAppender(name);
+        try {
+          const appendOne = (row: Record<string, unknown>) => {
+            for (const col of schema) {
+              appendValue(appender, col, row[col.name], duck);
+            }
+            appender.endRow();
+            count += 1;
+          };
+          if (bufferedRows) {
+            for (const row of bufferedRows) {
+              options?.signal?.throwIfAborted();
+              appendOne(row);
+            }
           }
-          appender.endRow();
-          count += 1;
-        };
-        if (bufferedRows) {
-          for (const row of bufferedRows) {
-            options?.signal?.throwIfAborted();
-            appendOne(row);
+          if (isAsyncIterable) {
+            for await (const row of rows as AsyncIterable<Record<string, unknown>>) {
+              options?.signal?.throwIfAborted();
+              appendOne(row);
+            }
+          } else if (remainingSync) {
+            // Continuation iterator from the sniffer — picks up just past
+            // bufferedRows so we don't re-iterate (which would drop data on
+            // generators or duplicate rows from fresh-iterator iterables).
+            let next = remainingSync.next();
+            while (!next.done) {
+              options?.signal?.throwIfAborted();
+              appendOne(next.value);
+              next = remainingSync.next();
+            }
+          } else {
+            for (const row of rows as Iterable<Record<string, unknown>>) {
+              options?.signal?.throwIfAborted();
+              appendOne(row);
+            }
           }
+        } finally {
+          appender.closeSync();
         }
-        if (isAsyncIterable) {
-          for await (const row of rows as AsyncIterable<Record<string, unknown>>) {
-            options?.signal?.throwIfAborted();
-            appendOne(row);
-          }
-        } else if (remainingSync) {
-          // Continuation iterator from the sniffer — picks up just past
-          // bufferedRows so we don't re-iterate (which would drop data on
-          // generators or duplicate rows from fresh-iterator iterables).
-          let next = remainingSync.next();
-          while (!next.done) {
-            options?.signal?.throwIfAborted();
-            appendOne(next.value);
-            next = remainingSync.next();
-          }
-        } else {
-          for (const row of rows as Iterable<Record<string, unknown>>) {
-            options?.signal?.throwIfAborted();
-            appendOne(row);
-          }
+        await conn.run('COMMIT');
+      } catch (err) {
+        // The source stopped early is closed so its `finally` runs (#661); the
+        // loops above close theirs, the sniffer's continuation is closed here.
+        // Neither that nor the rollback replaces the error that ended the call.
+        try {
+          remainingSync?.return?.();
+        } catch {
+          /* the original error wins */
         }
-      } finally {
-        appender.closeSync();
+        await conn.run('ROLLBACK').catch(() => {});
+        throw err;
       }
     } catch (err) {
       // A spill that cannot start fails here; the caller's own row source
       // runs in the same block, so only errors naming a host path change.
       throw this.redactHostPaths(err, record);
+    } finally {
+      conn.closeSync();
     }
 
     return {
@@ -682,10 +727,6 @@ export class DuckdbProvider implements IDataCanvasProvider {
       );
     }
 
-    // Drop+create makes import idempotent under re-imports of the same name,
-    // matching registerTable's behavior.
-    await target.controlConnection.run(`DROP TABLE IF EXISTS ${quoteIdentifier(asName)}`);
-
     // Round-trip through a scratch Parquet file. Parquet is
     // built into DuckDB's core (no extension load needed even with
     // autoload disabled). All column types — including TIMESTAMP/DATE/BLOB
@@ -700,19 +741,28 @@ export class DuckdbProvider implements IDataCanvasProvider {
           `COPY ${quoteIdentifier(sourceTableName)} TO '${escapeSqlString(tempPath)}' (FORMAT 'parquet')`,
         ),
       );
+      /**
+       * Drop and create run in one transaction, as in `registerTable`: a
+       * re-import replaces the destination whole, and a failed or cancelled
+       * copy rolls back to the previous table, or to none (#659).
+       */
       return await this.withConnection(target, options?.signal, IMPORT_CANCELLED, async (conn) => {
-        await conn.run(
-          `CREATE TABLE ${quoteIdentifier(asName)} AS SELECT * FROM read_parquet('${escapeSqlString(tempPath)}')`,
-        );
-        const columns = await this.columnNames(conn, asName);
-        const rowCount = await this.countRows(conn, asName);
-        return { tableName: asName, rowCount, columns };
+        await conn.run('BEGIN TRANSACTION');
+        try {
+          await conn.run(`DROP TABLE IF EXISTS ${quoteIdentifier(asName)}`);
+          await conn.run(
+            `CREATE TABLE ${quoteIdentifier(asName)} AS SELECT * FROM read_parquet('${escapeSqlString(tempPath)}')`,
+          );
+          const columns = await this.columnNames(conn, asName);
+          const rowCount = await this.countRows(conn, asName);
+          await conn.run('COMMIT');
+          return { tableName: asName, rowCount, columns };
+        } catch (err) {
+          await conn.run('ROLLBACK').catch(() => {});
+          throw err;
+        }
       });
     } catch (err) {
-      // Best-effort cleanup of a half-written or cancelled target before surfacing.
-      await target.controlConnection
-        .run(`DROP TABLE IF EXISTS ${quoteIdentifier(asName)}`)
-        .catch(() => {});
       throw this.classify(err, target);
     } finally {
       await unlink(tempPath).catch(() => {});

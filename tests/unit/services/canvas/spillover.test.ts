@@ -301,19 +301,31 @@ describe('spillover · signal.abort()', () => {
     await shutdown();
   });
 
-  it('drops the partial table when registration throws', async () => {
-    const failingHarness = makeProviderHarness({
-      registerTable: async () => {
-        throw new Error('register-failed');
-      },
+  // The provider rolls a failed registration back to the canvas as it was, so
+  // a drop here would delete the table a failed replacement kept (#659).
+  it('drops nothing and closes the source when registration throws (#659, #661)', async () => {
+    const { canvas, harness, shutdown } = await freshCanvas();
+    // Fails two rows in, with the rest of the source unread.
+    vi.mocked(harness.provider.registerTable).mockImplementationOnce(async (_id, _name, rows) => {
+      const iter = (rows as AsyncIterable<Row>)[Symbol.asyncIterator]();
+      await iter.next();
+      await iter.next();
+      throw new Error('register-failed');
     });
-    const { canvas, harness, shutdown } = await freshCanvas(failingHarness);
+    let closed = 0;
+    function* gen(): Iterable<Row> {
+      try {
+        for (let i = 0; i < 10; i++) yield { i };
+      } finally {
+        closed++;
+      }
+    }
 
-    const source = Array.from({ length: 10 }, (_, i) => ({ i }));
     await expect(
-      spillover({ canvas, source, previewChars: 5, tableName: 'will_be_dropped' }),
+      spillover({ canvas, source: gen(), previewChars: 5, tableName: 'kept' }),
     ).rejects.toThrow(/register-failed/);
-    expect(harness.drops).toContain('will_be_dropped');
+    expect(harness.drops).toEqual([]);
+    expect(closed).toBe(1);
     await shutdown();
   });
 
@@ -511,13 +523,18 @@ describe('spillover · safeJsonLength failure handling', () => {
 // ---------------------------------------------------------------------
 
 describe('spillover · abort during the spill phase', () => {
-  it('reaches registerTable, then drops the partial table, when the signal aborts mid-drain', async () => {
+  it('reaches registerTable, then closes the source and drops nothing, when the signal aborts mid-drain', async () => {
     const { canvas, harness, shutdown } = await freshCanvas();
     const ctrl = new AbortController();
+    let closed = 0;
     async function* gen(): AsyncIterable<Row> {
-      for (let i = 0; i < 50; i++) {
-        if (i === 4) ctrl.abort();
-        yield { i };
+      try {
+        for (let i = 0; i < 50; i++) {
+          if (i === 4) ctrl.abort();
+          yield { i };
+        }
+      } finally {
+        closed++;
       }
     }
     await expect(
@@ -533,7 +550,86 @@ describe('spillover · abort during the spill phase', () => {
     // previewChars) so registerTable had already begun draining the merged
     // rows before the abort was observed mid-stream.
     expect(harness.provider.registerTable).toHaveBeenCalled();
-    expect(harness.drops).toContain('abort_mid_spill');
+    expect(harness.drops).toEqual([]);
+    expect(closed).toBe(1);
+    await shutdown();
+  });
+});
+
+// ---------------------------------------------------------------------
+// #661 — the source is closed on every early exit, and only once
+// ---------------------------------------------------------------------
+
+describe('spillover · closing the source (#661)', () => {
+  /** An async source of `count` rows that counts how often its `finally` runs. */
+  function counted(count: number, onRow?: (i: number) => void) {
+    const state = { closed: 0 };
+    async function* gen(): AsyncIterable<Row> {
+      try {
+        for (let i = 0; i < count; i++) {
+          onRow?.(i);
+          yield { i };
+        }
+      } finally {
+        state.closed++;
+      }
+    }
+    return { state, source: gen() };
+  }
+
+  it('closes the source once caps.maxRows stops the spill', async () => {
+    const { canvas, shutdown } = await freshCanvas();
+    const { state, source } = counted(100);
+
+    const result = await spillover({ canvas, source, previewChars: 1, caps: { maxRows: 10 } });
+
+    expect(result).toMatchObject({ spilled: true, truncated: true, handle: { rowCount: 10 } });
+    expect(state.closed).toBe(1);
+    await shutdown();
+  });
+
+  it('closes the source when the signal aborts during the preview drain', async () => {
+    const { canvas, harness, shutdown } = await freshCanvas();
+    const ctrl = new AbortController();
+    const { state, source } = counted(100, (i) => {
+      if (i === 2) ctrl.abort();
+    });
+
+    await expect(
+      spillover({ canvas, source, previewChars: 1_000_000, signal: ctrl.signal }),
+    ).rejects.toMatchObject({ name: 'AbortError' });
+    expect(harness.provider.registerTable).not.toHaveBeenCalled();
+    expect(state.closed).toBe(1);
+    await shutdown();
+  });
+
+  it.each([
+    ['fits the preview', 1_000_000],
+    ['spills whole', 1],
+  ])(
+    'closes a source that runs to completion exactly once when it %s',
+    async (_label, previewChars) => {
+      const { canvas, shutdown } = await freshCanvas();
+      const { state, source } = counted(5);
+      const returnSpy = vi.spyOn(source as AsyncGenerator<Row>, 'return');
+
+      await spillover({ canvas, source, previewChars });
+
+      expect(state.closed).toBe(1);
+      expect(returnSpy).not.toHaveBeenCalled();
+      await shutdown();
+    },
+  );
+
+  it('does not close a source that threw', async () => {
+    const { canvas, shutdown } = await freshCanvas();
+    const { source } = counted(5, (i) => {
+      if (i === 3) throw new Error('upstream');
+    });
+    const returnSpy = vi.spyOn(source as AsyncGenerator<Row>, 'return');
+
+    await expect(spillover({ canvas, source, previewChars: 1 })).rejects.toThrow('upstream');
+    expect(returnSpy).not.toHaveBeenCalled();
     await shutdown();
   });
 });

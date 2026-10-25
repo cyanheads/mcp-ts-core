@@ -120,6 +120,7 @@ const OUTSIDE_PATH_READS: Corpus = [
   ['a quoted read_json_objects', () => `SELECT * FROM "read_json_objects"('${planted}')`],
   ['a quoted glob', () => `SELECT * FROM "glob"('${plantedDir}/*')`],
   ['a quoted parquet_metadata', () => `SELECT * FROM "parquet_metadata"('${planted}')`],
+  ['a quoted read_single_csv_file', () => `SELECT * FROM "read_single_csv_file"('${planted}')`],
   [
     'query() running a deny-listed call inside a string',
     () => `SELECT * FROM query('SELECT * FROM read_csv(''${planted}'')')`,
@@ -159,7 +160,6 @@ const OUTSIDE_PATH_READS: Corpus = [
  */
 const INSIDE_ROOT_FILE_REFERENCES: Corpus = [
   ['DESCRIBE over a quoted path', () => `DESCRIBE '${inside}'`],
-  ['SHOW over a quoted path', () => `SHOW '${inside}'`],
   ['DESCRIBE over a SELECT', () => `DESCRIBE SELECT * FROM '${inside}'`],
   ['a DESCRIBE subquery', () => `SELECT column_name FROM (DESCRIBE '${inside}')`],
   ['DESCRIBE over a glob', () => `DESCRIBE '${exportRoot}/*.csv'`],
@@ -187,6 +187,13 @@ const INSIDE_ROOT_FILE_REFERENCES: Corpus = [
   ],
 ];
 
+/**
+ * DuckDB v2.0 resolves `SHOW '<path>'` as a catalog lookup while preparing and
+ * fails it there, before any file opens; v1.5 binds the file's columns, which
+ * the parse tree's SHOW_REF check refuses instead.
+ */
+const INSIDE_ROOT_SHOW_REFERENCES: Corpus = [['SHOW over a quoted path', () => `SHOW '${inside}'`]];
+
 /** Named readers of a file under the export root, spelled past the text scan. */
 const INSIDE_ROOT_NAMED_READS: ReadonlyArray<
   readonly [label: string, fn: string, sql: () => string]
@@ -200,6 +207,13 @@ const INSIDE_ROOT_NAMED_READS: ReadonlyArray<
     'DESCRIBE over a quoted read_csv_auto',
     'read_csv_auto',
     () => `DESCRIBE SELECT * FROM "read_csv_auto"('${inside}')`,
+  ],
+  // DuckDB v2.0 binds the file's columns here and plans the scan away to
+  // EMPTY_RESULT, so only the deny-list refuses it.
+  [
+    'a quoted read_single_csv_file the optimizer removes',
+    'read_single_csv_file',
+    () => `SELECT * FROM "read_single_csv_file"('${inside}') WHERE false`,
   ],
   [
     'query_table() over a quoted path',
@@ -224,6 +238,7 @@ const PLAN_WALK_READS: Corpus = [
   ['duckdb_profiling_settings()', () => 'SELECT * FROM duckdb_profiling_settings()'],
   ['a quoted pragma_version()', () => 'SELECT * FROM "pragma_version"()'],
   ['a quoted pragma_table_info()', () => `SELECT * FROM "pragma_table_info"('t')`],
+  ['duckdb_external_resources()', () => 'SELECT * FROM duckdb_external_resources()'],
   ['SHOW TABLES inside a query() literal', () => `SELECT * FROM query('SHOW TABLES')`],
   [
     'a catalog view inside a query() literal',
@@ -327,6 +342,11 @@ const PARSED_FUNCTION_CALLS: ReadonlyArray<readonly [label: string, fn: string, 
     `SELECT * FROM query('SELECT * FROM pragma_version()')`,
   ],
   ['query_table()', 'query_table', `SELECT * FROM query_table('t')`],
+  [
+    'deregister_external_resource()',
+    'deregister_external_resource',
+    `SELECT * FROM deregister_external_resource('x')`,
+  ],
   // sniff_csv opens its file only when it runs, so preparing it reaches no
   // engine refusal; the parse tree refuses it before anything opens the file.
   [
@@ -610,6 +630,20 @@ describe('canvas · SQL gate refuses reads only the engine or the plan walk can 
   );
 
   acrossEntryPoints(
+    'SHOW over a path under the export root',
+    'show',
+    INSIDE_ROOT_SHOW_REFERENCES,
+    ([, sql]) => sql(),
+    (err) => {
+      expect(err.code).toBe(JsonRpcErrorCode.ValidationError);
+      expect(err.data?.reason).toBe('non_select_statement');
+      const surface = surfaceOf(err);
+      expect(surface).not.toContain(INSIDE_MARKER);
+      expect(surface).not.toContain(exportRoot);
+    },
+  );
+
+  acrossEntryPoints(
     'named readers under the export root',
     'reader',
     INSIDE_ROOT_NAMED_READS,
@@ -728,6 +762,8 @@ describe('canvas · SQL gate refuses reads only the engine or the plan walk can 
     ['a quoted query() over a literal', `SELECT x FROM "query"('SELECT x FROM t')`, '1'],
     ['a dollar-quoted query() literal', 'SELECT x FROM query($$SELECT x FROM t$$)', '1'],
     ['a schema-qualified query() literal', `SELECT x FROM main.query('SELECT x FROM t')`, '1'],
+    ['an arrow lambda', 'SELECT list_transform([x], y -> y + 1)[1] AS x FROM t', '2'],
+    ['a lambda keyword', 'SELECT list_transform([x], lambda y: y + 1)[1] AS x FROM t', '2'],
   ])('passes %s', async (_label, sql, x) => {
     expect((await instance.query(sql)).rows).toEqual([{ x }]);
   });

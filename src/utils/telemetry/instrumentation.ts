@@ -5,8 +5,7 @@
  * @module src/utils/telemetry/instrumentation
  */
 
-import { type DiagLogger, DiagLogLevel, diag } from '@opentelemetry/api';
-import type { LoggerProvider } from '@opentelemetry/api-logs';
+import { type DiagLogger, DiagLogLevel, diag, logs } from '@opentelemetry/api';
 import type { LogRecordProcessor } from '@opentelemetry/sdk-logs';
 import type { NodeSDK } from '@opentelemetry/sdk-node';
 import { config } from '@/config/index.js';
@@ -206,7 +205,7 @@ export async function initializeOpenTelemetry(): Promise<void> {
         import('@opentelemetry/resources'),
         import('@opentelemetry/sdk-metrics'),
         import('@opentelemetry/sdk-node'),
-        import('@opentelemetry/sdk-trace-node'),
+        import('@opentelemetry/sdk-trace'),
         import('@opentelemetry/semantic-conventions'),
         import('node:util'),
       ]);
@@ -241,7 +240,7 @@ export async function initializeOpenTelemetry(): Promise<void> {
       if (tracesEndpoint) {
         diag.info(`Using OTLP exporter for traces, endpoint: ${tracesEndpoint}`);
         const traceExporter = new OTLPTraceExporter({ url: tracesEndpoint });
-        spanProcessors.push(new BatchSpanProcessor(traceExporter));
+        spanProcessors.push(new BatchSpanProcessor({ exporter: traceExporter }));
       } else {
         diag.info('No OTLP traces endpoint configured. Traces will not be exported.');
       }
@@ -265,18 +264,15 @@ export async function initializeOpenTelemetry(): Promise<void> {
        * asked for, so a deployment without them never reaches these imports.
        */
       const logRecordProcessors: LogRecordProcessor[] = [];
-      let loggerProvider: LoggerProvider | undefined;
       if (logsEndpoint) {
-        const [{ BatchLogRecordProcessor }, { OTLPLogExporter }, { logs }] = await Promise.all([
+        const [{ BatchLogRecordProcessor }, { OTLPLogExporter }] = await Promise.all([
           import('@opentelemetry/sdk-logs'),
           import('@opentelemetry/exporter-logs-otlp-http'),
-          import('@opentelemetry/api-logs'),
         ]);
         diag.info(`Using OTLP exporter for logs, endpoint: ${logsEndpoint}`);
         logRecordProcessors.push(
           new BatchLogRecordProcessor({ exporter: new OTLPLogExporter({ url: logsEndpoint }) }),
         );
-        loggerProvider = logs;
       }
 
       /**
@@ -309,12 +305,9 @@ export async function initializeOpenTelemetry(): Promise<void> {
       sdk.start();
       // `PinoInstrumentation` never sees the framework's `pino` (imported at module
       // load, before `start()`), so the logger forwards its records to the Logs API itself.
-      if (loggerProvider) {
+      if (logsEndpoint) {
         setOtelLogSink(
-          loggerProvider.getLogger(
-            config.openTelemetry.serviceName,
-            config.openTelemetry.serviceVersion,
-          ),
+          logs.getLogger(config.openTelemetry.serviceName, config.openTelemetry.serviceVersion),
         );
       }
       isOtelInitialized = true;

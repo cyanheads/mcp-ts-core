@@ -386,6 +386,18 @@ describe('sqlGate · DENIED_TABLE_FUNCTIONS', () => {
       );
     },
   );
+
+  // File-reading table functions new in DuckDB v2.0.0's duckdb_functions().
+  it.each(['read_single_csv_file', 'read_single_json_file', 'read_single_parquet_file'])(
+    'denies the v2.0.0 file reader %s by name',
+    (fn) => {
+      expect(DENIED_TABLE_FUNCTIONS.has(fn)).toBe(true);
+      expect(() => assertNoDeniedFunctions(`SELECT * FROM ${fn}('/etc/passwd')`)).toThrow(
+        /disallowed table function/i,
+      );
+      expect(ALLOWED_PLAN_OPERATORS.has(fn.toUpperCase())).toBe(false);
+    },
+  );
 });
 
 /**
@@ -429,18 +441,24 @@ describe('sqlGate · assertNoDeniedParsedFunctions', () => {
     expect(err.data?.reason).toBe('denied_function');
     expect(err.data?.function).toBe(fn);
     expect(err.message).toBe(
-      `Canvas query references disallowed function: ${fn}. Functions that read engine settings, or run SQL or name a table from a string, are not permitted.`,
+      `Canvas query references disallowed function: ${fn}. Functions that read engine settings, change engine state, or run SQL or name a table from a string, are not permitted.`,
     );
   });
 
-  it('covers every scalar that reads a setting, query(), and query_table()', () => {
+  it('covers every scalar that reads a setting, the string-named runners, and the external-resource functions', () => {
     expect([...DENIED_PARSED_FUNCTIONS].sort()).toEqual([
+      'create_external_resource',
       'current_schema',
       'current_schemas',
       'current_setting',
+      'deregister_external_resource',
+      'destroy_external_resource',
       'in_search_path',
+      'index_key',
       'query',
       'query_table',
+      'register_external_resource',
+      'register_external_resource_type',
     ]);
   });
 
@@ -534,7 +552,7 @@ describe('sqlGate · assertNoDeniedParsedFunctions · bare function keywords', (
     for (const name of DENIED_BARE_KEYWORDS) expect(DENIED_PARSED_FUNCTIONS.has(name)).toBe(true);
   });
 
-  it('lists the names DuckDB v1.5.6 binds without parentheses', () => {
+  it('lists the names DuckDB v1.5.6 and v2.0.0 bind without parentheses', () => {
     expect([...BARE_FUNCTION_KEYWORDS].sort()).toEqual([
       'current_catalog',
       'current_date',
@@ -706,11 +724,71 @@ describe('sqlGate · assertNoDeniedParsedFunctions · query() over a string lite
     expect(err.data?.reason).toBe('denied_function');
     expect(err.data?.function).toBe('query');
     expect(err.message).toBe(
-      'Canvas query references disallowed function: query. Functions that read engine settings, or run SQL or name a table from a string, are not permitted.',
+      'Canvas query references disallowed function: query. Functions that read engine settings, change engine state, or run SQL or name a table from a string, are not permitted.',
     );
     expect((err.data?.recovery as { hint?: string } | undefined)?.hint).toBe(
       'Remove the function the message names — only the staged tables are queryable.',
     );
+  });
+
+  /**
+   * `query(...)` as DuckDB v2.0.0 serializes it: each argument under
+   * `arguments[]` as `{ name, expression }`, a constant carrying
+   * `literal: { kind, text }` instead of `value`.
+   */
+  const literal = (kind: string, text: string) => ({
+    class: 'CONSTANT',
+    type: 'VALUE_CONSTANT',
+    alias: '',
+    literal: { kind, text },
+  });
+  const argument = (expression: unknown, name = '') => ({ name, expression });
+  const v2QueryFrom = (...args: unknown[]) =>
+    parseTree(
+      selectNode([{ class: 'STAR', type: 'STAR' }], {
+        type: 'TABLE_FUNCTION',
+        function: {
+          class: 'FUNCTION',
+          type: 'FUNCTION',
+          function_name: 'query',
+          schema: '',
+          catalog: '',
+          arguments: args,
+          qualified_name: { path: ['query'] },
+        },
+      }),
+    );
+
+  it('admits query() over one plain string literal in the v2.0.0 argument shape', () => {
+    expect(
+      assertNoDeniedParsedFunctions(v2QueryFrom(argument(literal('STRING', 'SELECT x FROM t')))),
+    ).toEqual(['SELECT x FROM t']);
+  });
+
+  it.each([
+    ['a NULL literal', [argument(literal('NULL_LITERAL', ''))]],
+    ['an integer literal', [argument(literal('INTEGER', '1'))]],
+    ['a named argument', [argument({ ...literal('STRING', 'SELECT 1'), alias: 'sql' }, 'sql')]],
+    [
+      'a cast literal',
+      [
+        argument({
+          class: 'CAST',
+          type: 'OPERATOR_CAST',
+          alias: '',
+          child: literal('STRING', 'x'),
+        }),
+      ],
+    ],
+    [
+      'two literals',
+      [argument(literal('STRING', 'SELECT 1')), argument(literal('STRING', 'SELECT 2'))],
+    ],
+    ['no argument', []],
+  ])('refuses query() over %s in the v2.0.0 argument shape', (_label, args) => {
+    const err = gateRejection(() => assertNoDeniedParsedFunctions(v2QueryFrom(...args)));
+    expect(err.data?.reason).toBe('denied_function');
+    expect(err.data?.function).toBe('query');
   });
 
   it('refuses query_table() over a plain string literal', () => {
@@ -778,6 +856,21 @@ describe('sqlGate · findFileReference', () => {
       }),
     );
     expect(findFileReference(tree)).toBe('a.json');
+  });
+
+  it('finds the subject of a SHOW the way DuckDB v2.0.0 writes it, on the SHOW_REF itself', () => {
+    const show = {
+      type: 'SHOW_REF',
+      show_type: 'SHOW',
+      table_name: '/srv/exports/a.csv',
+      schema_name: '',
+      catalog_name: '',
+      query: null,
+    };
+    expect(findFileReference(parseTree(selectNode([], show)))).toBe('/srv/exports/a.csv');
+    expect(
+      findFileReference(parseTree(selectNode([], { ...show, table_name: 't' }))),
+    ).toBeUndefined();
   });
 
   it.each([
@@ -979,6 +1072,8 @@ describe('sqlGate · exported allowlists', () => {
     expect(ALLOWED_PLAN_OPERATORS.has('COPY_DATABASE')).toBe(false);
     expect(ALLOWED_PLAN_OPERATORS.has('READ_CSV')).toBe(false);
     expect(ALLOWED_PLAN_OPERATORS.has('READ_PARQUET')).toBe(false);
+    expect(ALLOWED_PLAN_OPERATORS.has('READ_SINGLE_CSV_FILE')).toBe(false);
+    expect(ALLOWED_PLAN_OPERATORS.has('DUCKDB_EXTERNAL_RESOURCES')).toBe(false);
     expect(ALLOWED_PLAN_OPERATORS.has('PRAGMA')).toBe(false);
     expect(ALLOWED_PLAN_OPERATORS.has('ATTACH')).toBe(false);
     expect(ALLOWED_PLAN_OPERATORS.has('INOUT_FUNCTION')).toBe(false);

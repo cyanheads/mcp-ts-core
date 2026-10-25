@@ -9,11 +9,12 @@
  */
 
 import { context as otelContext, trace } from '@opentelemetry/api';
+import { AsyncLocalStorageContextManager } from '@opentelemetry/context-async-hooks';
 import {
   InMemorySpanExporter,
-  NodeTracerProvider,
   SimpleSpanProcessor,
-} from '@opentelemetry/sdk-trace-node';
+  TracerProvider,
+} from '@opentelemetry/sdk-trace';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { z } from 'zod';
 
@@ -28,7 +29,7 @@ import { createToolHandler } from '@/mcp-server/tools/utils/toolHandlerFactory.j
 import { logger } from '@/utils/internal/logger.js';
 
 const exporter = new InMemorySpanExporter();
-const provider = new NodeTracerProvider({ spanProcessors: [new SimpleSpanProcessor(exporter)] });
+const provider = new TracerProvider({ spanProcessors: [new SimpleSpanProcessor({ exporter })] });
 
 const noopStorage = {
   get: async () => null,
@@ -49,10 +50,11 @@ function exportedSpan(prefix: string) {
 
 describe('handler context binds to its execution span (#296)', () => {
   beforeAll(() => {
-    // `register()` installs the global tracer provider *and* the platform
-    // context manager, which is what makes the active span propagate across
-    // the awaits between the factory and the handler.
-    provider.register();
+    // The global tracer provider *and* an async context manager: the context
+    // manager is what makes the active span propagate across the awaits
+    // between the factory and the handler.
+    trace.setGlobalTracerProvider(provider);
+    otelContext.setGlobalContextManager(new AsyncLocalStorageContextManager().enable());
   });
 
   afterAll(async () => {

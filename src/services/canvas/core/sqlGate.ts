@@ -127,8 +127,11 @@ export function gateRecovery(reason: SqlGateReason): { recovery: { hint: string 
  * Last derived against `PhysicalOperatorToString` in DuckDB v1.5.6
  * (`@duckdb/node-api` 1.5.6-r.1):
  * https://github.com/duckdb/duckdb/blob/v1.5.6/src/common/enums/physical_operator_type.cpp
- * Re-derive this set and {@link DENIED_TABLE_FUNCTIONS} whenever the
- * `@duckdb/node-api` peer range moves.
+ * and re-checked against the plans DuckDB v2.0.0 (`@duckdb/node-api`
+ * 2.0.0-r.1) emits, which fold GROUPING SETS, ROLLUP, and CUBE into CTEs over
+ * operators already listed here. Re-derive this set and
+ * {@link DENIED_TABLE_FUNCTIONS} whenever the `@duckdb/node-api` peer range
+ * moves.
  */
 export const ALLOWED_PLAN_OPERATORS: ReadonlySet<string> = new Set([
   // Scans (registered tables only)
@@ -210,8 +213,8 @@ export const ALLOWED_PLAN_OPERATORS: ReadonlySet<string> = new Set([
  * regardless of how DuckDB lowers them.
  *
  * Last derived against the table functions `duckdb_functions()` lists on
- * DuckDB v1.5.6 (`@duckdb/node-api` 1.5.6-r.1), plus extension readers named
- * ahead of any extension load. Re-derive this set and
+ * DuckDB v1.5.6 and v2.0.0 (`@duckdb/node-api` 1.5.6-r.1 and 2.0.0-r.1), plus
+ * extension readers named ahead of any extension load. Re-derive this set and
  * {@link ALLOWED_PLAN_OPERATORS} whenever the `@duckdb/node-api` peer range
  * moves.
  */
@@ -219,6 +222,7 @@ export const DENIED_TABLE_FUNCTIONS: ReadonlySet<string> = new Set([
   // CSV
   'read_csv',
   'read_csv_auto',
+  'read_single_csv_file',
   'sniff_csv',
   // DuckDB database files
   'read_duckdb',
@@ -230,8 +234,10 @@ export const DENIED_TABLE_FUNCTIONS: ReadonlySet<string> = new Set([
   'read_ndjson',
   'read_ndjson_auto',
   'read_ndjson_objects',
+  'read_single_json_file',
   // Parquet
   'read_parquet',
+  'read_single_parquet_file',
   'parquet_scan',
   'parquet_metadata',
   'parquet_schema',
@@ -388,26 +394,35 @@ function deniedTableFunctionMessage(fn: string): string {
 
 /**
  * Functions refused by name in the parsed statement, beyond
- * {@link DENIED_TABLE_FUNCTIONS}: the scalars that read an engine setting, and
- * `query` and `query_table`, which run SQL or name a table from a string.
- * DuckDB resolves these while binding, so the plan never names them. `query`
- * is admitted over a single plain string literal, whose SQL the caller of
+ * {@link DENIED_TABLE_FUNCTIONS}: the scalars that read an engine setting;
+ * `query`, `query_table`, and `index_key`, which run SQL or name a table from
+ * a string; and the external-resource table functions, which change engine
+ * state and take the functions they call as strings. DuckDB resolves these
+ * while binding, so the plan need not name them. `query` is admitted over a
+ * single plain string literal, whose SQL the caller of
  * {@link assertNoDeniedParsedFunctions} gates as its own statement.
  *
- * Last derived against `duckdb_functions()` on DuckDB v1.5.6:
+ * Last derived against `duckdb_functions()` on DuckDB v1.5.6 and v2.0.0:
  * `current_setting` reads any setting; `current_schema`, `current_schemas`,
  * and `in_search_path` read the `schema` / `search_path` settings. The
  * settings table functions (`duckdb_settings`, `duckdb_profiling_settings`)
  * plan as their own operators, which {@link ALLOWED_PLAN_OPERATORS} excludes.
+ * `index_key` and the external-resource functions are new in v2.0.
  * Re-derive alongside {@link DENIED_TABLE_FUNCTIONS}.
  */
 export const DENIED_PARSED_FUNCTIONS: ReadonlySet<string> = new Set([
+  'create_external_resource',
   'current_setting',
   'current_schema',
   'current_schemas',
+  'deregister_external_resource',
+  'destroy_external_resource',
   'in_search_path',
+  'index_key',
   'query',
   'query_table',
+  'register_external_resource',
+  'register_external_resource_type',
 ]);
 
 /**
@@ -417,9 +432,9 @@ export const DENIED_PARSED_FUNCTIONS: ReadonlySet<string> = new Set([
  * is in scope. The parse tree writes it as a one-part `COLUMN_REF`, so only
  * the name says it may be a call.
  *
- * Last derived against DuckDB v1.5.6 (`GetSQLValueFunctionName`) by running
- * `SELECT <name>` for every name `duckdb_functions()` lists plus these: these
- * bind and no other name does. Re-derive alongside
+ * Last derived against DuckDB v1.5.6 (`GetSQLValueFunctionName`) and v2.0.0
+ * by running `SELECT <name>` for every name `duckdb_functions()` lists plus
+ * these: on both, these bind and no other name does. Re-derive alongside
  * {@link DENIED_TABLE_FUNCTIONS}; `canvas-gate-bypass.test.ts` fails when the
  * engine's set moves.
  */
@@ -439,7 +454,7 @@ export const BARE_FUNCTION_KEYWORDS: ReadonlySet<string> = new Set([
 
 /**
  * The {@link BARE_FUNCTION_KEYWORDS} that are also
- * {@link DENIED_PARSED_FUNCTIONS} — on DuckDB v1.5.6, `current_schema` alone.
+ * {@link DENIED_PARSED_FUNCTIONS} — on DuckDB v1.5.6 and v2.0.0, `current_schema` alone.
  * Layer 4 refuses an unqualified column reference of one of these names, since
  * the parse tree cannot tell a staged column of that name from the function;
  * the column stays reachable qualified with its table. The rest read no engine
@@ -483,7 +498,7 @@ export function assertNoDeniedParsedFunctions(parseTree: unknown): string[] {
       ? `Canvas query references disallowed function: ${fn}. DuckDB reads an unqualified ${fn} as that function, written without parentheses; to read a staged column named ${fn}, qualify it with its table (<table>.${fn}).`
       : DENIED_TABLE_FUNCTIONS.has(fn)
         ? deniedTableFunctionMessage(fn)
-        : `Canvas query references disallowed function: ${fn}. Functions that read engine settings, or run SQL or name a table from a string, are not permitted.`,
+        : `Canvas query references disallowed function: ${fn}. Functions that read engine settings, change engine state, or run SQL or name a table from a string, are not permitted.`,
   );
 }
 
@@ -493,15 +508,14 @@ export function assertNoDeniedParsedFunctions(parseTree: unknown): string[] {
  */
 function findDeniedCall(node: unknown, literals: string[]): DeniedReference | undefined {
   if (node === null || typeof node !== 'object') return;
-  const call = node as {
-    children?: unknown;
+  const call = node as CallArguments & {
     class?: unknown;
     column_names?: unknown;
     function_name?: unknown;
   };
   if (typeof call.function_name === 'string') {
     const fn = call.function_name.toLowerCase();
-    const literal = fn === 'query' ? soleStringLiteral(call.children) : undefined;
+    const literal = fn === 'query' ? soleStringLiteral(call) : undefined;
     if (literal !== undefined) literals.push(literal);
     else if (DENIED_PARSED_FUNCTIONS.has(fn) || DENIED_TABLE_FUNCTIONS.has(fn)) {
       return { fn, form: 'call' };
@@ -524,11 +538,45 @@ function findDeniedCall(node: unknown, literals: string[]): DeniedReference | un
 }
 
 /**
- * The string of `args` when it is exactly one unnamed, non-null `VARCHAR`
- * constant, as `json_serialize_sql` on DuckDB v1.5.6 serializes a string
- * literal; `undefined` for any other shape.
+ * A function call's arguments as `json_serialize_sql` writes them: `children`
+ * on DuckDB v1.5, `arguments` on v2.0.
  */
-function soleStringLiteral(args: unknown): string | undefined {
+interface CallArguments {
+  arguments?: unknown;
+  children?: unknown;
+}
+
+/**
+ * The string of `call`'s arguments when they are exactly one unnamed, non-null
+ * string constant; `undefined` for any other shape. DuckDB v2.0 serializes that
+ * constant as `{ name: '', expression: { literal: { kind: 'STRING', text } } }`,
+ * v1.5.6 as a `VARCHAR` `value`; both carry the string unescaped, as the engine
+ * runs it.
+ */
+function soleStringLiteral(call: CallArguments): string | undefined {
+  if (Array.isArray(call.arguments)) {
+    if (call.arguments.length !== 1) return;
+    const arg = call.arguments[0] as {
+      expression?: {
+        alias?: unknown;
+        class?: unknown;
+        literal?: { kind?: unknown; text?: unknown };
+      };
+      name?: unknown;
+    } | null;
+    const expression = arg?.expression;
+    if (
+      arg?.name !== '' ||
+      expression?.class !== 'CONSTANT' ||
+      expression.alias !== '' ||
+      expression.literal?.kind !== 'STRING' ||
+      typeof expression.literal.text !== 'string'
+    ) {
+      return;
+    }
+    return expression.literal.text;
+  }
+  const args = call.children;
   if (!Array.isArray(args) || args.length !== 1) return;
   const arg = args[0] as {
     alias?: unknown;
@@ -584,7 +632,8 @@ const DATABASE_QUALIFIERS: ReadonlySet<string> = new Set([
  * there is none. DuckDB reads a table name it cannot find in the catalog as a
  * file path, so a reference counts as a file when its name holds a dot — no
  * canvas name can — or a qualifier the database does not have. A DESCRIBE's
- * subject is a reference like any other.
+ * subject is a reference like any other, and so is a SHOW's, which DuckDB v2.0
+ * writes as the `SHOW_REF`'s own `table_name`.
  *
  * A CTE whose name holds a dot is refused too: the parse tree writes a CTE
  * reference as a `BASE_TABLE` like any other, and exempting the names a
@@ -599,7 +648,10 @@ export function findFileReference(parseTree: unknown): string | undefined {
     table_name?: unknown;
     type?: unknown;
   };
-  if (ref.type === 'BASE_TABLE' && typeof ref.table_name === 'string') {
+  if (
+    (ref.type === 'BASE_TABLE' || ref.type === 'SHOW_REF') &&
+    typeof ref.table_name === 'string'
+  ) {
     const qualifiers = [ref.catalog_name, ref.schema_name].filter(
       (part): part is string => typeof part === 'string' && part !== '',
     );

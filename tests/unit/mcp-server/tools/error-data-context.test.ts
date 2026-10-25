@@ -16,7 +16,8 @@ import { join } from 'node:path';
 import type { CallToolResult } from '@modelcontextprotocol/server';
 import { inputRequired } from '@modelcontextprotocol/server';
 import { context as otelContext, trace } from '@opentelemetry/api';
-import { NodeTracerProvider } from '@opentelemetry/sdk-trace-node';
+import { AsyncLocalStorageContextManager } from '@opentelemetry/context-async-hooks';
+import { TracerProvider } from '@opentelemetry/sdk-trace';
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 import { z } from 'zod';
 
@@ -38,7 +39,7 @@ import { xmlParser } from '@/utils/parsing/xmlParser.js';
 import { yamlParser } from '@/utils/parsing/yamlParser.js';
 import { legacyCapabilityView, makeServerContext } from '../../../helpers/server-context.js';
 
-const provider = new NodeTracerProvider();
+const provider = new TracerProvider();
 const storage = new StorageService(new InMemoryProvider());
 const services = { logger: logger as never, storage, exposeStatelessSessionId: true };
 
@@ -130,7 +131,8 @@ function expectOnlyRequestId(data: Record<string, unknown> | undefined, ctx: Con
 describe('framework error data built from a handler ctx (#548)', () => {
   beforeAll(() => {
     // A live tracer so the handler ctx carries a real traceId/spanId to leak.
-    provider.register();
+    trace.setGlobalTracerProvider(provider);
+    otelContext.setGlobalContextManager(new AsyncLocalStorageContextManager().enable());
   });
 
   afterAll(async () => {

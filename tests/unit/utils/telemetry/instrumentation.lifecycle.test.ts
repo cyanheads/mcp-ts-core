@@ -3,13 +3,12 @@
  * @module tests/utils/telemetry/instrumentation.lifecycle.test
  */
 
-import { type DiagLogger, DiagLogLevel, diag } from '@opentelemetry/api';
+import { type DiagLogger, DiagLogLevel, diag, type Logger, logs } from '@opentelemetry/api';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const otelState = vi.hoisted(() => ({
   batchLogProcessorOptions: [] as Array<Record<string, unknown>>,
-  batchSpanProcessorArgs: [] as unknown[],
-  getLoggerSpy: vi.fn((name: string, version?: string) => ({ emit: vi.fn(), name, version })),
+  batchSpanProcessorOptions: [] as Array<Record<string, unknown>>,
   httpInstrumentationOptions: [] as Array<Record<string, unknown>>,
   logExporterOptions: [] as Array<Record<string, unknown>>,
   logModulesLoaded: [] as string[],
@@ -85,11 +84,6 @@ vi.mock('@opentelemetry/exporter-logs-otlp-http', () => {
   };
 });
 
-vi.mock('@opentelemetry/api-logs', () => {
-  otelState.logModulesLoaded.push('@opentelemetry/api-logs');
-  return { logs: { getLogger: otelState.getLoggerSpy } };
-});
-
 vi.mock('@opentelemetry/instrumentation-http', () => ({
   HttpInstrumentation: class HttpInstrumentation {
     constructor(options: Record<string, unknown>) {
@@ -151,10 +145,10 @@ vi.mock('@opentelemetry/sdk-node', () => ({
   },
 }));
 
-vi.mock('@opentelemetry/sdk-trace-node', () => ({
+vi.mock('@opentelemetry/sdk-trace', () => ({
   BatchSpanProcessor: class BatchSpanProcessor {
-    constructor(exporter: unknown) {
-      otelState.batchSpanProcessorArgs.push(exporter);
+    constructor(options: Record<string, unknown>) {
+      otelState.batchSpanProcessorOptions.push(options);
     }
   },
   TraceIdRatioBasedSampler: class TraceIdRatioBasedSampler {
@@ -188,7 +182,7 @@ describe('OpenTelemetry instrumentation lifecycle', () => {
     vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
 
     otelState.batchLogProcessorOptions.length = 0;
-    otelState.batchSpanProcessorArgs.length = 0;
+    otelState.batchSpanProcessorOptions.length = 0;
     otelState.httpInstrumentationOptions.length = 0;
     otelState.logExporterOptions.length = 0;
     otelState.logModulesLoaded.length = 0;
@@ -278,6 +272,7 @@ describe('OpenTelemetry instrumentation lifecycle', () => {
     expect(instrumentation.sdk).not.toBeNull();
     expect(setLoggerSpy).toHaveBeenCalledOnce();
     expect(otelState.traceExporterOptions).toEqual([{ url: 'http://localhost:4318/v1/traces' }]);
+    expect(otelState.batchSpanProcessorOptions).toEqual([{ exporter: expect.any(Object) }]);
     expect(otelState.metricExporterOptions).toEqual([{ url: 'http://localhost:4318/v1/metrics' }]);
     // A timeout within the interval, so the reader has nothing to clamp and no boot notice to print.
     expect(otelState.metricReaderOptions).toEqual([
@@ -603,6 +598,8 @@ describe('OpenTelemetry instrumentation lifecycle', () => {
     it('attaches a batch log processor and the logger sink when the logs endpoint is set', async () => {
       mockConfig.openTelemetry.logsEndpoint = 'http://collector:4318/v1/logs';
       const infoSpy = vi.spyOn(diag, 'info').mockImplementation(() => true);
+      const sdkLogger: Logger = { emit: vi.fn(), enabled: () => true };
+      const getLoggerSpy = vi.spyOn(logs, 'getLogger').mockReturnValue(sdkLogger);
       const { initializeOpenTelemetry } = await import('@/utils/telemetry/instrumentation.js');
 
       await initializeOpenTelemetry();
@@ -612,10 +609,8 @@ describe('OpenTelemetry instrumentation lifecycle', () => {
       expect(otelState.nodeSdkOptions[0]).toMatchObject({
         logRecordProcessors: [expect.any(Object)],
       });
-      expect(otelState.getLoggerSpy).toHaveBeenCalledWith('test-service', '1.0.0');
-      expect(otelState.setOtelLogSinkSpy).toHaveBeenCalledWith(
-        expect.objectContaining({ name: 'test-service', version: '1.0.0' }),
-      );
+      expect(getLoggerSpy).toHaveBeenCalledWith('test-service', '1.0.0');
+      expect(otelState.setOtelLogSinkSpy).toHaveBeenCalledWith(sdkLogger);
       expect(infoSpy).toHaveBeenCalledWith(
         'Using OTLP exporter for logs, endpoint: http://collector:4318/v1/logs',
       );

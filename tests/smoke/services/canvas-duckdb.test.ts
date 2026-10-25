@@ -1169,6 +1169,154 @@ describe('canvas · DuckDB round trip', () => {
     ]);
   });
 
+  // #659 — a failed registration leaves the canvas as it was: the previous
+  // table whole on a replacement, no table on a first registration.
+  describe('a registration that fails part way (#659)', () => {
+    const idSchema = [{ name: 'id', type: 'INTEGER' as const }];
+    const tsSchema = [{ name: 'd', type: 'TIMESTAMP' as const }];
+    // One canvas for the group: the file runs near the per-tenant canvas cap.
+    let instance: CanvasInstance;
+
+    beforeAll(async () => {
+      instance = await canvas.acquire(undefined, ctx);
+    });
+
+    async function rowsOf(on: CanvasInstance, table: string) {
+      return (await on.query(`SELECT * FROM ${table} ORDER BY 1`)).rows;
+    }
+
+    // Integers registered without a schema are sniffed as BIGINT, which reads back as strings.
+    it('keeps the previous table and its row count when the source throws', async () => {
+      await instance.registerTable('rows', [{ id: 1 }, { id: 2 }, { id: 3 }]);
+      function* failing() {
+        yield { id: 10 };
+        yield { id: 11 };
+        throw new Error('upstream');
+      }
+
+      await expect(instance.registerTable('rows', failing(), { schema: idSchema })).rejects.toThrow(
+        'upstream',
+      );
+
+      expect(await rowsOf(instance, 'rows')).toEqual([{ id: '1' }, { id: '2' }, { id: '3' }]);
+      expect((await instance.describe({ tableName: 'rows' }))[0]?.rowCount).toBe(3);
+    });
+
+    it('keeps the previous table when a value fails conversion', async () => {
+      await instance.registerTable('ts', [{ d: '2024-01-01T00:00:00Z' }], { schema: tsSchema });
+
+      await expect(
+        instance.registerTable(
+          'ts',
+          [{ d: '2024-01-02T00:00:00Z' }, { d: '2024-01-03T00:00:00Z' }, { d: 'garbage' }],
+          { schema: tsSchema },
+        ),
+      ).rejects.toThrow(/TIMESTAMP/);
+
+      expect(await rowsOf(instance, 'ts')).toEqual([{ d: '2024-01-01 00:00:00' }]);
+    });
+
+    it('keeps the previous table when the call is cancelled mid-stream', async () => {
+      await instance.registerTable('cancelled', [{ id: 1 }]);
+      const ctrl = new AbortController();
+      async function* source() {
+        yield { id: 10 };
+        ctrl.abort();
+        yield { id: 11 };
+      }
+
+      await expect(
+        instance.registerTable('cancelled', source(), { schema: idSchema, signal: ctrl.signal }),
+      ).rejects.toMatchObject({ name: 'AbortError' });
+
+      expect(await rowsOf(instance, 'cancelled')).toEqual([{ id: '1' }]);
+    });
+
+    it('leaves no table when a first registration fails', async () => {
+      function* failing() {
+        yield { id: 10 };
+        throw new Error('upstream');
+      }
+
+      await expect(
+        instance.registerTable('never_staged', failing(), { schema: idSchema }),
+      ).rejects.toThrow('upstream');
+
+      expect(await instance.describe({ tableName: 'never_staged' })).toEqual([]);
+    });
+
+    it('serves the previous table to readers until a replacement commits, then the new one', async () => {
+      await instance.registerTable('swapped', [{ id: 1 }, { id: 2 }]);
+      const { promise: released, resolve: release } = Promise.withResolvers<void>();
+      const { promise: halfway, resolve: reachHalfway } = Promise.withResolvers<void>();
+      async function* slow() {
+        yield { id: 10 };
+        reachHalfway();
+        await released;
+        yield { id: 11 };
+      }
+
+      const replacing = instance.registerTable('swapped', slow(), { schema: idSchema });
+      await halfway;
+      expect(await rowsOf(instance, 'swapped')).toEqual([{ id: '1' }, { id: '2' }]);
+      release();
+
+      await expect(replacing).resolves.toMatchObject({ rowCount: 2 });
+      expect(await rowsOf(instance, 'swapped')).toEqual([{ id: 10 }, { id: 11 }]);
+    });
+
+    it('closes a sync source it stops reading on a conversion failure (#661)', async () => {
+      let closed = 0;
+      // The sniffer types `n` BIGINT from its first rows; the bad value sits past
+      // its window, so the failure lands in the sniffer's continuation.
+      function* source() {
+        try {
+          for (let i = 0; i < 200; i++) yield { n: i === 150 ? 'garbage' : i };
+        } finally {
+          closed++;
+        }
+      }
+
+      await expect(instance.registerTable('sync_n', source())).rejects.toThrow();
+      expect(closed).toBe(1);
+      expect(await instance.describe({ tableName: 'sync_n' })).toEqual([]);
+    });
+
+    it('keeps the destination table when an import fails part way', async () => {
+      await instance.registerTable('raw', [{ v: '1' }, { v: 'x' }]);
+      // The cast fails while the copy runs, not when the view is defined.
+      await instance.registerView('bad', 'SELECT v::INTEGER AS v FROM raw');
+      const target = await canvas.acquire(undefined, ctx);
+      await target.registerTable('dest', [{ v: 7 }]);
+
+      await expect(
+        target.importFrom(instance.canvasId, 'bad', { asName: 'dest' }),
+      ).rejects.toThrow();
+
+      expect(await rowsOf(target, 'dest')).toEqual([{ v: '7' }]);
+    });
+  });
+
+  // DuckDB v2.0 runs a COPY out of memory, where v1.5 spills, once its
+  // per-thread buffers near memory_limit; a 256 MB canvas runs at most 4.
+  it('caps engine threads at one per 64 MB of memory_limit, below the count DuckDB detects', async () => {
+    const plain = await DuckDBInstance.create(':memory:');
+    const connection = await plain.connect();
+    const detected = (
+      await connection.runAndReadAll("SELECT current_setting('threads')::INTEGER AS n")
+    ).getRowObjectsJson()[0]!.n as number;
+    connection.closeSync();
+    plain.closeSync();
+
+    const instance = await canvas.acquire(undefined, ctx);
+    // biome-ignore lint/complexity/useLiteralKeys: deliberate access to the private record to read engine settings outside the gate.
+    const record = provider['canvases'].get(instance.canvasId)!;
+    const reader = await record.controlConnection.runAndReadAll(
+      "SELECT current_setting('threads')::INTEGER AS n",
+    );
+    expect(reader.getRowObjectsJson()).toEqual([{ n: Math.min(detected, 4) }]);
+  });
+
   // The engine reads and writes only under the export root and the canvas's
   // scratch directory, and nothing reachable from SQL can widen that.
   describe('engine file access', () => {
@@ -1214,8 +1362,9 @@ describe('canvas · DuckDB round trip', () => {
       const record = provider['canvases'].get(instance.canvasId)!;
       const connection = await record.instance.connect();
       try {
+        // DuckDB v2.0 doubles the quotes around the option name.
         await expect(connection.run(statement)).rejects.toThrow(
-          /^Invalid Input Error: Cannot change configuration option "\w+" - the configuration has been locked/,
+          /^Invalid Input Error: Cannot change configuration option "{1,2}\w+"{1,2} - the configuration has been locked/,
         );
       } finally {
         connection.closeSync();
