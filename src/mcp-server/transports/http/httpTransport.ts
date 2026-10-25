@@ -176,9 +176,10 @@ function cancelledRequestIds(body: unknown): RequestId[] {
 }
 
 /**
- * Re-streams an SSE response so `onEnd` runs once its stream is over — after
- * the transport writes the response and closes it, when the client
- * disconnects, or when the sessionful arm's cancellation shim closes it.
+ * Re-streams a response so `onEnd` runs once its body is over — after the
+ * transport writes the response and closes it, when the client disconnects, or
+ * when the sessionful arm's cancellation shim closes it. A response with no
+ * body runs `onEnd` at once.
  */
 function onStreamEnd(response: Response, onEnd: () => void): Response {
   const reader = response.body?.getReader();
@@ -274,15 +275,19 @@ export async function createHttpApp<TBindings extends object = HonoNodeBindings>
    */
   let draining = false;
   /**
-   * Fired by `close()`. Every JSON request handed to `handler.fetch` carries it:
-   * the SDK's stateless legacy serving tears an exchange down only on its
-   * request's signal, and `handler.close()` leaves that serving untouched. A
+   * One controller per JSON request handed to `handler.fetch`, joined to that
+   * request's signal and held until its response stream ends; `close()` aborts
+   * every one. The SDK's stateless legacy serving tears an exchange down only on
+   * its request's signal, and `handler.close()` leaves that serving untouched. A
    * non-JSON POST keeps its own request, body included, since the SDK answers
    * it with a 415 at once.
+   * Each controller lives only as long as its exchange: a signal joined to one
+   * process-lifetime controller is retained by it, so every request would leak
+   * (#786).
    * Absent on a Worker, which never shuts the app down and binds a signal to
    * the request that created it, so a later request touching it fails.
    */
-  const shutdown = runtimeCaps.isWorkerLike ? undefined : new AbortController();
+  const inFlight = runtimeCaps.isWorkerLike ? undefined : new Set<AbortController>();
 
   app.use('*', async (c, next) => {
     await next();
@@ -887,11 +892,22 @@ export async function createHttpApp<TBindings extends object = HonoNodeBindings>
     }
 
     const authInfo = currentAuthInfo();
-    const request = shutdown ? withAddedSignal(c.req.raw, shutdown.signal) : c.req.raw;
-    return await handler.fetch(request, {
+    const options = {
       ...(parsedBody !== undefined && { parsedBody }),
       ...(authInfo && { authInfo }),
-    });
+    };
+    if (!inFlight) return await handler.fetch(c.req.raw, options);
+
+    const exchange = new AbortController();
+    inFlight.add(exchange);
+    const release = () => inFlight.delete(exchange);
+    try {
+      const response = await handler.fetch(withAddedSignal(c.req.raw, exchange.signal), options);
+      return onStreamEnd(response, release);
+    } catch (error) {
+      release();
+      throw error;
+    }
   });
 
   logger.info('Hono application setup complete.', transportContext);
@@ -901,7 +917,7 @@ export async function createHttpApp<TBindings extends object = HonoNodeBindings>
     sessionStore,
     close: async () => {
       draining = true;
-      shutdown?.abort();
+      for (const exchange of inFlight ?? []) exchange.abort();
       await handler.close();
       await sessionStore?.destroy();
     },
