@@ -2,10 +2,10 @@
 # For more options, see: https://bun.com/docs/runtime/bunfig
 
 [install]
-# Block package versions published less than 3 days ago — supply-chain guard
-# against freshly compromised releases. Existing versions in bun.lock are
-# unaffected.
-minimumReleaseAge = 259200 # seconds (3 days)
+# Block package versions published less than a day ago — supply-chain guard
+# against freshly compromised releases, which are usually pulled within hours.
+# Existing versions in bun.lock are unaffected.
+minimumReleaseAge = 86400 # seconds (1 day)
 # Framework releases are first-party — adopt them same-day.
 minimumReleaseAgeExcludes = ["@cyanheads/mcp-ts-core"]
 

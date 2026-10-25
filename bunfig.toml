@@ -2,11 +2,13 @@
 # For more options, see: https://bun.com/docs/runtime/bunfig
 
 [install]
-# Block package versions published less than 3 days ago — supply-chain guard
-# against freshly compromised releases. Bun widens the window automatically
-# when it detects rapid-fire publishes just past the gate. Existing versions
-# in bun.lock are unaffected.
-minimumReleaseAge = 259200 # seconds (3 days)
+# Block package versions published less than a day ago — supply-chain guard
+# against freshly compromised releases, which are usually pulled within hours.
+# Matches `templates/_bunfig.toml`, so every version this repo installs is one
+# a consumer can install the day it ships. Bun widens the window automatically
+# when it detects rapid-fire publishes just past the gate. Existing versions in
+# bun.lock are unaffected.
+minimumReleaseAge = 86400 # seconds (1 day)
 
 [install.security]
 # Socket scans every package before install (malware, typosquats, CVEs).
