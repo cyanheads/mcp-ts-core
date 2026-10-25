@@ -4,7 +4,7 @@ description: >
   Exercise tools, resources, and prompts against a live HTTP server via MCP JSON-RPC over curl. Starts the server, surfaces the catalog, runs real and adversarial inputs, measures every call (bytes, token estimate, wall-clock) and weighs the catalog, renders app tools' views in a headless MCP Apps host, and produces a tight report with concrete findings and numbered follow-up options. Use after adding or modifying definitions, or when the user asks to test, try out, or verify their MCP surface.
 metadata:
   author: cyanheads
-  version: "2.23"
+  version: "2.24"
   audience: external
   type: debug
 ---
@@ -357,7 +357,7 @@ The helper requests the newest `initialize`-negotiated revision the SDK supports
 mcp_call <url> '' tools/list '' <protocol-from-mcp_init>
 ```
 
-To exercise both session modes, start the server twice — once with the project's default, once with `MCP_SESSION_MODE=stateless` — and run the same calls against each.
+To exercise both session modes, start the server with `MCP_SESSION_MODE=stateful`, then with `MCP_SESSION_MODE=stateless`, and run the same calls against each. A bare `createApp({ sessionMode: 'stateless' })` sets a default; an explicit environment value overrides it. Verify that the stateful initialization returns a `Mcp-Session-Id` and reuse it, and that the stateless initialization returns none. A declared `sessionMode.require: 'stateful'` may reject stateless startup; record that limitation. Two starts resolving to stateless cover only one mode.
 
 Both modes exercise the **2025-era arm**: `initialize` negotiates the revision, and the session (when there is one) carries it. The [2026-07-28 revision](https://modelcontextprotocol.io/specification/2026-07-28/basic/transports) is a different thing from a sessionless 2025 handshake — it does not initialize at all, and is selected per request by the `io.modelcontextprotocol/protocolVersion` key in the request's own `_meta` envelope. This helper does not reach it; exercise the per-request leg from a real 2026-era client or an integration test.
 
@@ -548,6 +548,7 @@ End with:
 - [ ] Stdio boot check completed — `bun run rebuild && bun run start:stdio < /dev/null` shows clean startup (every expected definition listed in the `Core services constructed` record's `tools` / `resources` / `prompts` fields, no errors) and a graceful shutdown on EOF
 - [ ] HTTP server built and started; real port parsed from log
 - [ ] Session initialized (a stateless server returns an empty `sid` — still a pass); `notifications/initialized` sent; negotiated protocol version matches the requested one (a downgrade is a finding)
+- [ ] Explicit stateful and stateless runs verified by session-header behavior; any declared requirement preventing a mode recorded
 - [ ] Catalog surfaced and presented; descriptions audited for leaks (implementation details, meta-coaching, consumer-aware phrasing)
 - [ ] Catalog weighed (`mcp_catalog_size`); total + `instructions=` bytes recorded for the report
 - [ ] Every call's `⏱` line read; any happy-path response over 24,000 B with no disclosure + retrieval path filed as `ux`
