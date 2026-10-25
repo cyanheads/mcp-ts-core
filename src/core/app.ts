@@ -53,6 +53,12 @@ import { createStorageProvider } from '@/storage/core/storageFactory.js';
 import type { Database } from '@/storage/providers/supabase/supabase.types.js';
 import { configurationError, JsonRpcErrorCode, McpError } from '@/types-global/errors.js';
 import { initErrorMetrics } from '@/utils/internal/error-handler/errorHandler.js';
+import {
+  errorText,
+  isInstance,
+  readErrorData,
+  readField,
+} from '@/utils/internal/error-handler/helpers.js';
 import { logger, type McpLogLevel } from '@/utils/internal/logger.js';
 import { initHandlerMetrics } from '@/utils/internal/performance.js';
 import { requestContextService, withExtra } from '@/utils/internal/requestContext.js';
@@ -587,7 +593,7 @@ export async function composeServices<TSupabaseClient extends object = SupabaseC
     try {
       await setup(coreServices);
     } catch (err) {
-      if (err instanceof z.ZodError) {
+      if (isInstance(err, z.ZodError)) {
         const lines = err.issues.map((issue) => {
           const path = issue.path.join('.');
           return `  - ${path}: ${issue.message}`;
@@ -681,6 +687,8 @@ function suppressColors(): void {
  * Writes a user-friendly banner to stderr for startup-time configuration errors,
  * hiding the framework stack trace behind `DEBUG=true`. Meant to replace the raw
  * ZodError/stack dump that Node prints for unhandled rejections during `createApp`.
+ * Every read of `err` is guarded: `setup()` can throw a value whose fields throw
+ * on read, and the banner must not replace the startup error (#701).
  */
 function printStartupConfigError(err: McpError): void {
   const isDebug = !!process.env.DEBUG;
@@ -690,7 +698,7 @@ function printStartupConfigError(err: McpError): void {
     divider,
     ' Configuration error — server failed to start',
     divider,
-    err.message,
+    errorText(readField(err, 'message')),
     '',
     'Check your .env file or environment variables, then retry.',
   ];
@@ -702,11 +710,13 @@ function printStartupConfigError(err: McpError): void {
   process.stderr.write(`${lines.join('\n')}\n`);
 
   if (isDebug) {
-    if (err.data) {
-      process.stderr.write(`Data: ${JSON.stringify(err.data, null, 2)}\n`);
+    const data = readErrorData(err);
+    if (data) {
+      process.stderr.write(`Data: ${JSON.stringify(data, null, 2)}\n`);
     }
-    if (err.stack) {
-      process.stderr.write(`${err.stack}\n`);
+    const stack = readField(err, 'stack');
+    if (typeof stack === 'string' && stack !== '') {
+      process.stderr.write(`${stack}\n`);
     }
   }
 }
@@ -738,7 +748,10 @@ export async function createApp<TSupabaseClient extends object = SupabaseClientH
     // including a consumer `setup()` line describing what failed — is still
     // buffered. Surface it before the process ends.
     logger.drainPendingToStderr();
-    if (err instanceof McpError && err.code === JsonRpcErrorCode.ConfigurationError) {
+    if (
+      isInstance(err, McpError) &&
+      readField(err, 'code') === JsonRpcErrorCode.ConfigurationError
+    ) {
       printStartupConfigError(err);
       process.exit(1);
     }

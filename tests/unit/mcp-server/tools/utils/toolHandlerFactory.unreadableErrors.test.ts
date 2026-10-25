@@ -661,6 +661,29 @@ describe('a thrown McpError or value the factory cannot read (#697)', () => {
 });
 
 // ---------------------------------------------------------------------------
+// #701 — a thrown input-required brand whose `result` cannot be read
+// ---------------------------------------------------------------------------
+
+describe('a thrown input-required brand whose result cannot be read (#701)', () => {
+  it('fails the call with an InternalError envelope carrying the request id', async () => {
+    const forged = Object.defineProperty({ isInputRequiredSignal: true }, 'result', {
+      get() {
+        throw new Error('result getter');
+      },
+    });
+
+    const result = await callTool(throwing('forged_signal', () => forged));
+
+    expect(result.isError).toBe(true);
+    const error = envelope(result);
+    expect(error.code).toBe(JsonRpcErrorCode.InternalError);
+    expect(error.message).toBe('Could not read the result of an input_required signal.');
+    expect(error.data?.requestId).toMatch(REQUEST_ID);
+    expect(errorRecord('forged_signal').requestId).toBe(error.data?.requestId);
+  });
+});
+
+// ---------------------------------------------------------------------------
 // #694 — `throw ctx.fail(…)` starts the record's stack at the handler's line
 // ---------------------------------------------------------------------------
 

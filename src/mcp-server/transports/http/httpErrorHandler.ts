@@ -13,9 +13,13 @@ import type { StatusCode, UnofficialStatusCode } from 'hono/utils/http-status';
 import { config } from '@/config/index.js';
 import type { HonoNodeBindings } from '@/mcp-server/transports/http/httpTypes.js';
 import { resolvePublicOrigin } from '@/mcp-server/transports/http/publicOrigin.js';
-import { JsonRpcErrorCode, McpError } from '@/types-global/errors.js';
+import { JsonRpcErrorCode } from '@/types-global/errors.js';
 import { asRequestCancelled, ErrorHandler } from '@/utils/internal/error-handler/errorHandler.js';
-import { recordSpanFailure } from '@/utils/internal/error-handler/helpers.js';
+import {
+  isInstance,
+  readErrorData,
+  recordSpanFailure,
+} from '@/utils/internal/error-handler/helpers.js';
 import { logger } from '@/utils/internal/logger.js';
 import { jsonRpcIdLogFields } from '@/utils/internal/observabilityCap.js';
 import { requestContextService, withExtra } from '@/utils/internal/requestContext.js';
@@ -40,7 +44,7 @@ export const httpErrorHandler = async <TBindings extends object = HonoNodeBindin
   // A Hono HTTPException carries a pre-built protocol response — honor it. Mark
   // the active span failed through the shared helper, which records every
   // failure the same way and never throws, then log for debugging.
-  if (err instanceof HTTPException) {
+  if (isInstance(err, HTTPException)) {
     const activeSpan = trace.getActiveSpan();
     if (activeSpan) recordSpanFailure(activeSpan, err);
     logger.debug(
@@ -80,7 +84,8 @@ export const httpErrorHandler = async <TBindings extends object = HonoNodeBindin
 
   // Capture original McpError data before enrichment — handleError adds internal
   // details (operation context, classification fields) that must not leak.
-  const originalData = error instanceof McpError ? error.data : undefined;
+  // Read guarded: a route can throw a value whose `data` throws on read (#701).
+  const originalData = readErrorData(error);
 
   // Pre-classify to split expected client errors (4xx) from unexpected server
   // errors (5xx). Client errors get a compact warning log without stack traces;

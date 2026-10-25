@@ -16,6 +16,7 @@ import {
   rateLimited,
   requestCancelled,
 } from '@/types-global/errors.js';
+import { isInstance, readErrorData, readField } from '@/utils/internal/error-handler/helpers.js';
 import { parseRetryAfterMs } from '@/utils/network/retry.js';
 import { ATTR_MCP_PACER_NAME } from '@/utils/telemetry/attributes.js';
 import { createCounter, createHistogram, createUpDownCounter } from '@/utils/telemetry/metrics.js';
@@ -424,8 +425,12 @@ export function createPacer(options: PacerOptions): Pacer {
    */
   function noteRateLimit(error: unknown): void {
     if (!cooldown) return;
-    if (!(error instanceof McpError) || error.code !== JsonRpcErrorCode.RateLimited) return;
-    if (error.data?.reason === 'pacer_shed') return;
+    // Guarded reads (#701): this runs in the task's rejection handler, where a
+    // throw would leave the caller unsettled and its concurrency slot held.
+    if (!isInstance(error, McpError) || readField(error, 'code') !== JsonRpcErrorCode.RateLimited) {
+      return;
+    }
+    if (readErrorData(error)?.reason === 'pacer_shed') return;
 
     const now = Date.now();
     consecutiveRateLimits = streak(now) + 1;

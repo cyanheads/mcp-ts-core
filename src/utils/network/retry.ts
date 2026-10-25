@@ -11,6 +11,7 @@ import {
   getErrorMessage,
   isInstance,
   messageText,
+  readErrorData,
   readField,
   UNREADABLE,
 } from '@/utils/internal/error-handler/helpers.js';
@@ -186,8 +187,8 @@ function computeDelay(
  * the same errors, and a second copy of the RFC 9110 forms would drift.
  */
 export function parseRetryAfterMs(error: unknown): number | undefined {
-  if (!(error instanceof McpError)) return;
-  const raw = error.data?.retryAfter;
+  // Guarded reads: a `data` that throws on read carries no hint (#701).
+  const raw = readErrorData(error)?.retryAfter;
 
   if (typeof raw === 'number') {
     return Number.isFinite(raw) && raw >= 0 ? raw * 1000 : undefined;
@@ -229,7 +230,7 @@ export interface LoggedCauseNode {
  * a `code` that cannot be read counts as none.
  */
 export function causeChainForLog(error: unknown): LoggedCauseNode[] | undefined {
-  if (!(error instanceof Error)) return;
+  if (!isInstance(error, Error)) return;
   const code = readField(error, 'code');
   const hasCode = typeof code === 'string' && code !== UNREADABLE;
   if (!readField(error, 'cause') && !hasCode) return;
@@ -275,9 +276,15 @@ export function causeChainForLog(error: unknown): LoggedCauseNode[] | undefined 
  * `defaultIsTransient(error) || isMyRetryableShape(error)`.
  */
 export function defaultIsTransient(error: unknown): boolean {
-  if (error instanceof McpError) {
+  if (isInstance(error, McpError)) {
+    /**
+     * Every read is guarded (#701): a `data` that throws on read counts as
+     * none, and a `code` that cannot be read is no transient code, so the
+     * error fails at once rather than being retried on a guess.
+     */
+    const data = readErrorData(error);
     // Explicit opt-out wins over code-based classification.
-    if (error.data?.retryable === false) return false;
+    if (data?.retryable === false) return false;
     /**
      * A pacer shed is a `RateLimited` the *caller* should honor and this loop
      * should not: sleeping its `retryAfter` would burn the very deadline the
@@ -285,15 +292,16 @@ export function defaultIsTransient(error: unknown): boolean {
      * the calling agent a shed is an ordinary rate limit — wait, then call
      * again — and that flag on the wire would say the opposite.
      */
-    if (error.data?.reason === 'pacer_shed') return false;
+    if (data?.reason === 'pacer_shed') return false;
     /**
      * A caller-side deadline — `fetchWithTimeout`'s external signal aborting
      * with a `TimeoutError` — has already fired, and every retry would reuse
      * that aborted signal: the loop could only sleep past the deadline the
      * caller set. It stays `Timeout` on the wire, where a later call can succeed.
      */
-    if (error.data?.errorSource === 'FetchSignalTimeout') return false;
-    return TRANSIENT_CODES.has(error.code);
+    if (data?.errorSource === 'FetchSignalTimeout') return false;
+    const code = readField(error, 'code');
+    return typeof code === 'number' && TRANSIENT_CODES.has(code);
   }
   // Non-McpError (raw network errors, unexpected throws) — assume transient
   return true;
@@ -370,19 +378,22 @@ function createDeadlineClock(deadlineMs: number, operation?: string): DeadlineCl
  * `ZodError`'s message as its one-line summary (`messageText`).
  */
 function enrichExhaustedError(error: unknown, totalAttempts: number, operation?: string): unknown {
-  if (error instanceof McpError) {
+  if (isInstance(error, McpError)) {
+    // An error whose code cannot be read is rethrown as it is: no code to carry over.
+    const code = readField(error, 'code');
+    if (typeof code !== 'number') return error;
     const suffix = `(failed after ${totalAttempts} attempt${totalAttempts > 1 ? 's' : ''})`;
     const message = errorText(readField(error, 'message'));
     const enrichedMessage = message ? `${message} ${suffix}` : suffix;
     const enrichedData: Record<string, unknown> = {
-      ...error.data,
+      ...readErrorData(error),
       retryAttempts: totalAttempts,
       ...(operation ? { operation } : {}),
     };
-    return new McpError(error.code, enrichedMessage, enrichedData, { cause: error });
+    return new McpError(code, enrichedMessage, enrichedData, { cause: error });
   }
 
-  if (error instanceof Error) {
+  if (isInstance(error, Error)) {
     const suffix = `(failed after ${totalAttempts} attempt${totalAttempts > 1 ? 's' : ''})`;
     const wrapped = new Error(`${messageText(error)} ${suffix}`, {
       cause: error,

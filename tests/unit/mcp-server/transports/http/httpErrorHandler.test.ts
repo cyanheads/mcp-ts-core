@@ -424,6 +424,43 @@ describe('HTTP Error Handler', () => {
         requestId: 'test-req-id',
       });
     });
+
+    test('answers an McpError whose data cannot be read with its code and the request id (#701)', async () => {
+      const error = Object.defineProperty(
+        new McpError(JsonRpcErrorCode.ServiceUnavailable, 'down'),
+        'data',
+        {
+          get() {
+            throw new Error('data getter');
+          },
+        },
+      );
+
+      await httpErrorHandler(error, mockContext as Context<{ Bindings: HonoNodeBindings }>);
+
+      expect(statusValue).toBe(503);
+      expect((jsonResponseData as any).error).toEqual({
+        code: JsonRpcErrorCode.ServiceUnavailable,
+        message: 'down',
+        data: { requestId: 'test-req-id' },
+      });
+    });
+
+    test('answers a thrown revoked Proxy with a 500 carrying the request id (#701)', async () => {
+      const { proxy, revoke } = Proxy.revocable({}, {});
+      revoke();
+
+      await httpErrorHandler(
+        proxy as Error,
+        mockContext as Context<{ Bindings: HonoNodeBindings }>,
+      );
+
+      expect(statusValue).toBe(500);
+      expect((jsonResponseData as any).error).toMatchObject({
+        code: JsonRpcErrorCode.InternalError,
+        data: { requestId: 'test-req-id' },
+      });
+    });
   });
 
   describe('caller disconnect before a handler runs (#507)', () => {

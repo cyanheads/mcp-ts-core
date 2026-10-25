@@ -311,6 +311,15 @@ describe('PromptRegistry', () => {
         });
         expect(rejection.data).toEqual({ requestId: loggedId });
       });
+
+      it('fails a thrown input-required brand whose result cannot be read with the request id (#701)', async () => {
+        const { rejection, loggedId } = await getRejection(() => {
+          throw unreadable({ isInputRequiredSignal: true }, 'result');
+        });
+
+        expect(rejection.code).toBe(JsonRpcErrorCode.InternalError);
+        expect(rejection.data).toMatchObject({ requestId: loggedId });
+      });
     });
   });
 

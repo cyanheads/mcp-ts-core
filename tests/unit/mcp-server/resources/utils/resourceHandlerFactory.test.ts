@@ -1372,6 +1372,15 @@ describe('createResourceHandler', () => {
         });
         expect(rejection.data).toEqual({ uri: 'hostile://x' });
       });
+
+      it('fails a thrown input-required brand whose result cannot be read with the request id (#701)', async () => {
+        const rejection = await readRejection(() => {
+          throw unreadable({ isInputRequiredSignal: true }, 'result');
+        });
+
+        expect(rejection.code).toBe(JsonRpcErrorCode.InternalError);
+        expect(rejection.data).toMatchObject({ requestId: 'test-req-id' });
+      });
     });
   });
 

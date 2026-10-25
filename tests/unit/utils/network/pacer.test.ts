@@ -786,6 +786,54 @@ describe('createPacer', () => {
     expect(startedAt).toEqual([0]);
   });
 
+  it('settles a rate limit whose data cannot be read, its slot freed and the gate doubling (#701)', async () => {
+    const pacer = serial({ baseMs: 5000, maxMs: 60_000 });
+    const { startedAt, task } = makeRecorder(() => origin);
+    const failure = Object.defineProperty(rateLimit('30'), 'data', {
+      get() {
+        throw new Error('data getter');
+      },
+    });
+
+    const limited = pacer
+      .run(async () => {
+        throw failure;
+      })
+      .catch((e: unknown) => e);
+    const next = pacer.run(task('next'));
+
+    await vi.advanceTimersByTimeAsync(0);
+    expect(await limited).toBe(failure);
+    // An unreadable Retry-After contributes nothing, leaving the 5s doubling.
+    await vi.advanceTimersByTimeAsync(5000);
+    await expect(next).resolves.toBe('next');
+    expect(startedAt).toEqual([5000]);
+  });
+
+  it('settles a task that throws a revoked Proxy and frees its slot (#701)', async () => {
+    const pacer = serial({ baseMs: 5000, maxMs: 60_000 });
+    const { startedAt, task } = makeRecorder(() => origin);
+    const { proxy, revoke } = Proxy.revocable({}, {});
+    revoke();
+
+    // Captured, not returned: resolving a promise with the proxy reads its `then`.
+    let rejection: unknown;
+    const failed = pacer
+      .run(async () => {
+        throw proxy;
+      })
+      .catch((e: unknown) => {
+        rejection = e;
+      });
+    const next = pacer.run(task('next'));
+
+    await vi.advanceTimersByTimeAsync(0);
+    await failed;
+    expect(rejection).toBe(proxy);
+    await expect(next).resolves.toBe('next');
+    expect(startedAt).toEqual([0]);
+  });
+
   it('keeps doubling to the maxMs clamp for serial callers rate-limited back to back', async () => {
     const pacer = serial({ baseMs: 5000, maxMs: 60_000 });
     const { startedAt, task } = makeRecorder(() => origin);

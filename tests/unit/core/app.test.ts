@@ -1177,6 +1177,60 @@ describe('core/app', () => {
     processExitSpy.mockRestore();
   });
 
+  it('prints the banner for a ConfigurationError whose data and stack cannot be read (#701)', async () => {
+    process.env.DEBUG = 'true';
+    const processExitSpy = vi
+      .spyOn(process, 'exit')
+      .mockImplementation(((_: number) => undefined as never) as typeof process.exit);
+    const stderrWriteSpy = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+
+    const { JsonRpcErrorCode, McpError } = await import('@/types-global/errors.js');
+    const failure = new McpError(JsonRpcErrorCode.ConfigurationError, 'API key missing');
+    for (const key of ['data', 'stack']) {
+      Object.defineProperty(failure, key, {
+        get() {
+          throw new Error(`${key} getter`);
+        },
+      });
+    }
+    const setup = () => {
+      throw failure;
+    };
+
+    await expect(createApp({ setup })).rejects.toBe(failure);
+
+    expect(processExitSpy).toHaveBeenCalledWith(1);
+    const written = stderrWriteSpy.mock.calls.map((call) => String(call[0])).join('');
+    expect(written).toContain('Configuration error — server failed to start');
+    expect(written).toContain('API key missing');
+    expect(written).not.toContain('Data:');
+
+    stderrWriteSpy.mockRestore();
+    processExitSpy.mockRestore();
+  });
+
+  it('rethrows a revoked Proxy thrown from setup() as itself (#701)', async () => {
+    const { proxy, revoke } = Proxy.revocable({}, {});
+    revoke();
+    const setup = () => {
+      throw proxy;
+    };
+    const processExitSpy = vi
+      .spyOn(process, 'exit')
+      .mockImplementation(((_: number) => undefined as never) as typeof process.exit);
+
+    // Captured, not returned: resolving a promise with the proxy reads its `then`.
+    let rejection: unknown;
+    await createApp({ setup }).catch((err: unknown) => {
+      rejection = err;
+    });
+
+    expect(rejection).toBe(proxy);
+    expect(processExitSpy).not.toHaveBeenCalled();
+
+    processExitSpy.mockRestore();
+  });
+
   it('does not print a startup banner or exit when createApp fails with a non-configuration error', async () => {
     const original = new Error('database unreachable');
     const setup = () => {

@@ -1454,6 +1454,72 @@ describe('withRetry logs the cause chain of a retried error (#615)', () => {
     expect(result.cause).toBe(failure);
   });
 
+  it('retries a transient McpError whose data cannot be read (#701)', async () => {
+    let calls = 0;
+    const result = await withRetry(
+      async () => {
+        calls++;
+        if (calls < 2)
+          throw unreadable(new McpError(JsonRpcErrorCode.ServiceUnavailable, 'down'), 'data');
+        return 'ok';
+      },
+      { operation: 'probe', baseDelayMs: 1, jitter: 0, maxRetries: 2 },
+    );
+
+    expect(result).toBe('ok');
+    expect(calls).toBe(2);
+  });
+
+  it('fails an McpError whose code cannot be read at once, rejecting with it (#701)', async () => {
+    const failure = unreadable(new McpError(JsonRpcErrorCode.ServiceUnavailable, 'down'), 'code');
+    let calls = 0;
+
+    const rejection = await withRetry(
+      async () => {
+        calls++;
+        throw failure;
+      },
+      { baseDelayMs: 1, maxRetries: 2 },
+    ).catch((error: unknown) => error);
+
+    expect(rejection).toBe(failure);
+    expect(calls).toBe(1);
+  });
+
+  it('retries a thrown revoked Proxy and rejects with it once retries run out (#701)', async () => {
+    const { proxy, revoke } = Proxy.revocable({}, {});
+    revoke();
+    let calls = 0;
+    // Captured, not returned: resolving a promise with the proxy reads its `then`.
+    let rejection: unknown;
+
+    await withRetry(
+      async () => {
+        calls++;
+        throw proxy;
+      },
+      { baseDelayMs: 1, jitter: 0, maxRetries: 2 },
+    ).catch((error: unknown) => {
+      rejection = error;
+    });
+
+    expect(rejection).toBe(proxy);
+    expect(calls).toBe(3);
+  });
+
+  it('exhausts an McpError whose data cannot be read to one carrying the attempt count (#701)', async () => {
+    const failure = unreadable(new McpError(JsonRpcErrorCode.ServiceUnavailable, 'down'), 'data');
+
+    const result = (await withRetry(() => Promise.reject(failure), { maxRetries: 0 }).catch(
+      (error: unknown) => error,
+    )) as McpError;
+
+    expect(result).toBeInstanceOf(McpError);
+    expect(result.code).toBe(JsonRpcErrorCode.ServiceUnavailable);
+    expect(result.data).toEqual({ retryAttempts: 1 });
+    expect(result.cause).toBe(failure);
+  });
+
   it.each([
     ['an McpError', new McpError(JsonRpcErrorCode.ServiceUnavailable, 'down', { upstream: 'x' })],
     ['a plain Error', new Error('transient')],

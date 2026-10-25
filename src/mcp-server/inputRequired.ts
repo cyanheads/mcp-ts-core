@@ -507,8 +507,14 @@ export function createRequestStateSealer(key: string | undefined): RequestStateS
 
 /**
  * What a handler factory rethrows for the input-required signal its handler
- * threw: the signal carrying its `requestState` sealed when `sealer` is
- * configured, else the signal unchanged.
+ * threw: a signal carrying its `requestState` sealed when `sealer` is
+ * configured, else its `result` unchanged.
+ *
+ * `result` is read once, guarded, and the signal rebuilt around the value read:
+ * a value that passes the brand check can still throw on that read, and the
+ * factories return the rethrown signal's `result` outside any catch, where a
+ * throw would leave with no error envelope and no request id (#701). An
+ * unreadable `result` resolves to an `InternalError`, as a failed mint does.
  *
  * The factories call it inside the measured region, where the signal is
  * rethrown, and only for a value {@link isInputRequiredSignal} accepts: any
@@ -528,9 +534,17 @@ export async function sealSignal(
   sealer: RequestStateSealer | undefined,
   ctx: ServerContext,
 ): Promise<InputRequiredSignal | McpError> {
-  if (sealer === undefined) return signal;
+  let result: InputRequiredResult;
   try {
-    return new InputRequiredSignal(await sealer.seal(signal.result, ctx));
+    result = signal.result;
+  } catch (error) {
+    return internalError('Could not read the result of an input_required signal.', undefined, {
+      cause: error,
+    });
+  }
+  if (sealer === undefined) return new InputRequiredSignal(result);
+  try {
+    return new InputRequiredSignal(await sealer.seal(result, ctx));
   } catch (error) {
     return internalError(
       'Could not seal the requestState of an input_required result.',
