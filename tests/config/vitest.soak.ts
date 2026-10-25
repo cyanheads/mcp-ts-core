@@ -18,7 +18,7 @@ export default defineConfig({
     fileParallelism: false,
     isolate: true,
     pool: 'forks',
-    /** 22,000 loopback requests plus server startup; a run takes well under a minute. */
+    /** 25,000 loopback requests plus server startup; a run takes well under a minute. */
     testTimeout: 300_000,
     hookTimeout: 60_000,
   },
