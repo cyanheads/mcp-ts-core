@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.13.18](changelog/0.13.x/0.13.18.md) — 2026-10-25
+
+A server can publish Agent Skills from a root skills/ tree and serve them over MCP with createApp({ skills }), the scaffold gains the Agent Plugins root plugin.json and mcp.json, and .mcpb bundles drop dev paths, node-gyp output, and build-only files.
+
 ## [0.13.17](changelog/0.13.x/0.13.17.md) — 2026-10-25 · ⚠️ Breaking · 🛡️ Security
 
 The HTTP transport no longer retains every request's signal (a ~71 KiB per-request leak in 0.13.16), a new test:soak lane guards it, and the framework moves to OpenTelemetry JS 3, DuckDB 2, and MCP SDK 2.4.
