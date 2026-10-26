@@ -2,7 +2,7 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
-## [0.13.18](changelog/0.13.x/0.13.18.md) — 2026-10-25
+## [0.13.18](changelog/0.13.x/0.13.18.md) — 2026-10-25 · 🛡️ Security
 
 A server can publish Agent Skills from a root skills/ tree and serve them over MCP with createApp({ skills }), the scaffold gains the Agent Plugins root plugin.json and mcp.json, and .mcpb bundles drop dev paths, node-gyp output, and build-only files.
 
