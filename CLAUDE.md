@@ -59,7 +59,7 @@ Both paths share the same public API. Init copies starter `package.json`, config
 | `/mirror` | `defineMirror`, `sqliteMirrorStore`, `buildSchemaSql`, `openSqliteHandle`, `Mirror`, `MirrorStore`, `MirrorDefinition`, `SyncContext`, `SyncPage`, ... | MirrorService primitive (Tier 3, optional peer dep `better-sqlite3` on Node; `bun:sqlite` built-in on Bun); persistent self-refreshing local mirror of a bulk upstream dataset (embedded SQLite + FTS5). Node/Bun only |
 | `/utils` | formatting (`markdown()`, `escapeMarkdownInline`, `markdownLink`, `markdownImage`), encoding, network (`fetchWithTimeout`, `withRetry` + `deadlineMs`/`defaultIsTransient`, `createPacer`, `httpErrorFromResponse`), pagination, overflow (`outlineOnOverflow`, `OUTLINE_VARIANT`, `selectSections`, `formatOutline`), logging, runtime, telemetry, token counting, parsers†, sanitization†, scheduling† | All utilities (†optional peer deps) |
 | `/services` | `OpenRouterProvider`, `SpeechService`, `createSpeechProvider`, `ElevenLabsProvider`, `WhisperProvider`, `GraphService`, provider interfaces and types | LLM, Speech (TTS/STT), Graph services |
-| `/linter` | `validateDefinitions`, `LintReport`, `LintDiagnostic`, `LintInput`, `LintSeverity` | Definition validation |
+| `/linter` | `validateDefinitions`, `LintReport`, `LintDiagnostic`, `LintInput`, `LintSeverity`, `validateSkillTree`, `SkillProblem` | Definition validation; strict check of a published skill tree (`lint:packaging`) |
 | `/testing` | `createMockContext`, `createMockSession`, `createFetchMock`, `runToolContract`, `createMockLogger`, `getEnrichment`, `getContentBlocks`, `createInMemoryStorage`, `expectInputRequired` | Test kit for handlers and upstream HTTP boundaries |
 | `/testing/apps` | `renderAppTool`, `RenderAppToolOptions`, `AppRenderReport`, `AppRenderStep`, `AppServerTarget`, `AppHostOptions` | Headless MCP Apps host that renders an app tool's `ui://` view and reports on it (optional peers `@modelcontextprotocol/client`, `@modelcontextprotocol/ext-apps`) |
 | `/testing/fuzz` | `fuzzTool`, `fuzzResource`, `fuzzPrompt`, `zodToArbitrary`, `adversarialArbitrary`, `ADVERSARIAL_STRINGS` | Fuzz testing |
@@ -106,6 +106,7 @@ await createApp({
   extensions: {                     // SEP-2133 extensions advertised in capabilities
     'vendor/my-extension': { /* extension config */ },
   },
+  skills: 'skills',                 // serve the published root skills/ over MCP (SEP-2640)
   sessionMode: 'stateless',         // session posture in code, not in a Dockerfile
   setup(core) {                     // runs after core services init, before transport starts
     initMyService(core.config, core.storage);
@@ -123,6 +124,8 @@ await createApp({
 **`sessionMode`** — `SessionMode | { default?: SessionMode; require?: 'stateful' }`; the bare string is shorthand for `{ default }`. Declares the HTTP session posture in `src/` instead of leaving it to a deployment's `MCP_SESSION_MODE`, which still wins whenever it carries a meaningful value — an empty string and a whole-value unsubstituted `${…}` placeholder read as unset, so both fall through to the option rather than to the schema default (`auto`). `require: 'stateful'` fails startup with a `ConfigurationError` when the resolved HTTP mode is `stateless`: declare it on a server whose tools ask the caller for input mid-handler, since under `stateless` a 2025-era client's round trip is refused unconditionally and the tool is unusable rather than merely guarded. Never refuses a stdio start. Workers are outside this contract (`MCP_SESSION_MODE` is not in `CORE_ENV_BINDINGS`).
 
 **`teardown(core)`** — the `setup()` counterpart, awaited inside `shutdown()` after the transport stops accepting requests and before core services are disposed and the logger closes, so the hook can still log and still reach `core.storage`. Runs exactly once per shutdown, on the signal path, the stdin-EOF path, and a direct `ServerHandle.shutdown()` alike; an error it raises is logged and never blocks the exit, and on the signal and EOF paths a hook that never settles is cut by the shutdown ceiling (exit 1 on a signal, 0 on EOF). Register whatever the framework cannot see — a `fs.watch`, an open socket, a `setInterval` nobody `unref()`'d. Node/Bun only; `createWorkerHandler` does not accept it, because an isolate is evicted without notice.
+
+**`skills`** — a folder of skill folders to serve through the SEP-2640 Skills extension, conventionally `'skills'`, the root tree a server publishes to the agents that use it (`add-skill`). A relative path resolves against the application root (`resolveAppRoot()`), the working directory only when none is found. Read once at startup with the SDK's non-strict loader: a missing or unreadable folder fails startup with a `ConfigurationError` naming the resolved path; a skill the SDK rejects is skipped with a `Skill problem in <path>: <message>` warning (operation `SkillsLoad`) and the rest are served. Opting in adds `capabilities.extensions['io.modelcontextprotocol/skills'] = { directoryRead: true }`, `skills/list`, `skills/get`, `resources/directory/read`, each `SKILL.md` in `resources/list`, and the `skill://{+path}` template, on both protocol eras; `tools/list` and `instructions` are unchanged. The server card gains the extension key and `capabilities.resources: true`, and the `Core services constructed` record a `skills` field naming what is served. Skill resources are served by the SDK: transport auth applies, per-definition `auth` scopes do not. Unset, nothing changes. `createWorkerHandler` takes the files as a record instead (`api-workers`); `validateSkillTree` from `/linter` is the strict build-time check.
 
 **Also available** — `landing` (`LandingConfig`, HTTP transport only: landing-page config, all fields optional), `context: { exposeStatelessSessionId }` (populate `ctx.sessionId` from the SDK's per-request token in stateless HTTP mode; default `false`), `input` (`InputHandlingOptions` — the tool-argument pre-validation switches `ignoreKeys` / `caseStyleAliases` / `coerce`; every stage on when unset, see Adding a Tool), `eventBus` (the `ServerEventBus` backing `subscriptions/listen`; defaults to an in-process bus — supply one for a multi-isolate or multi-process runtime, Workers most of all), and `cacheHints` (2026-07-28 `ttlMs`/`cacheScope` per cacheable operation — see Adding a Resource for the per-resource override).
 
@@ -204,6 +207,7 @@ src/
 
 ```ts
 import { tool, z } from '@cyanheads/mcp-ts-core';
+import { escapeMarkdownInline } from '@cyanheads/mcp-ts-core/utils';
 
 export const myTool = tool('my_tool', {
   description: 'Does something useful.',
@@ -229,9 +233,9 @@ export const myTool = tool('my_tool', {
   format: (result) => {
     const lines = [`**${result.totalCount} results**\n`];
     for (const item of result.items) {
-      lines.push(`### ${item.name}`);
-      lines.push(`**ID:** ${item.id} | **Status:** ${item.status}`);
-      if (item.description) lines.push(item.description);
+      lines.push(`### ${escapeMarkdownInline(item.name)}`);
+      lines.push(`**ID:** ${escapeMarkdownInline(item.id)} | **Status:** ${escapeMarkdownInline(item.status)}`);
+      if (item.description) lines.push(escapeMarkdownInline(item.description));
     }
     return [{ type: 'text', text: lines.join('\n') }];
   },
@@ -252,7 +256,7 @@ export const myTool = tool('my_tool', {
 - **Fallback:** omit `format` for JSON stringify. Additional formatters in `/utils`: `markdown()` (builder), `diffFormatter` (async), `tableFormatter`, `treeFormatter`.
 - **Upstream text renders as itself:** interpolate a string the tool did not author through `escapeMarkdownInline()` and an image or link field through `markdownImage()` / `markdownLink()` (`/utils`), so a CommonMark parse reads back the `structuredContent` value. Never defang (`https[:]//`, HTML entities). See `add-tool`.
 
-**`enrichment`** (optional): The success-path counterpart to `errors[]` — a `ZodRawShape` of agent-facing context (empty-result notices, query/filter echo, pagination totals, truncation disclosure) that must reach both client surfaces. Populate via `ctx.enrich(...)` (or `ctx.enrich.notice()` / `.total()` / `.echo()` / `.truncated()`) in the handler or service layer. The framework merges it into `structuredContent`, advertises `output.extend(enrichment)` as `outputSchema`, and mirrors it into a `content[]` trailer — so it reaches `structuredContent`-only and `content[]`-only clients alike, with no `format()` entry. Echo, delta, and generic trailer values render through `escapeMarkdownInline`, so pass them raw. Keys must be disjoint from `output`; a required field never populated fails the effective-output parse. See `api-context`'s `ctx.enrich`.
+**`enrichment`** (optional): The success-path counterpart to `errors[]` — a `ZodRawShape` of agent-facing context (empty-result notices, query/filter echo, pagination totals, truncation disclosure) that must reach both client surfaces. Populate via `ctx.enrich(...)` (or `ctx.enrich.notice()` / `.total()` / `.echo()` / `.truncated()`) in the handler or service layer. The framework merges it into `structuredContent`, advertises `output.extend(enrichment)` as `outputSchema`, and mirrors it into a `content[]` trailer — so it reaches `structuredContent`-only and `content[]`-only clients alike, with no `format()` entry. Echo, delta, and generic trailer strings, and an object's JSON, render as code literals — a code span, or a fenced block on its own lines when the value holds a line break — so an agent copying one into its next call carries no escapes; pass them raw. Keys must be disjoint from `output`; a required field never populated fails the effective-output parse. See `api-context`'s `ctx.enrich`.
 
 **Strict input:** `tool()` stores `input.strict()`, so an unrecognized argument key is rejected by name before the handler runs and `inputSchema` advertises `additionalProperties: false`. Root-level only — a nested `z.object()` still strips unless it is strict itself. An explicit `.passthrough()` / `.catchall()` is honored. Declare `.strict()` **before** `.describe()` / `.meta()` on the root: Zod keys both to the schema instance and `.strict()` clones without it, so a root describe declared after is discarded and never advertised — `lint:mcp` reports that as `schema-root-meta-discarded`.
 
@@ -553,7 +557,7 @@ Each `framework-skills/<name>/SKILL.md` carries `metadata.version` in frontmatte
 
 **Policy:** Bump `metadata.version` when changing any file under `framework-skills/<name>/` — SKILL.md is the single version knob for the directory. Typo/whitespace fixes exempt. **Exactly one step per release, however many edits land:** before bumping, compare the version against the last release tag (`git show $(git describe --tags --abbrev=0):framework-skills/<name>/SKILL.md`) and skip the bump when it has already moved. Enforced by `bun run devcheck` (`scripts/check-skill-versions.ts`), both directions as warnings: a SKILL.md body change vs `HEAD` without a `metadata.version` bump while the version still matches the last release tag, and a version more than one step (next minor, or next major at `.0`) past the last release tag. Whitespace-only edits never trigger the first, and a genuine typo fix opts out via `devcheck.config.json` `skillVersions.ignore`.
 
-Skills live in `framework-skills/<name>/SKILL.md`; the full list is discoverable via the agent's skill registry at session start. The directory is deliberately not `skills/`: Claude Code and Codex auto-load a plugin's root `skills/`, and these are development-time skills, not skills for the agents that use a server. `skills/` stays free for that second kind.
+Skills live in `framework-skills/<name>/SKILL.md`; the full list is discoverable via the agent's skill registry at session start. The directory is deliberately not `skills/`: Claude Code and Codex auto-load a plugin's root `skills/`, and these are development-time skills, not skills for the agents that use a server. `skills/` stays free for that second kind: the tree a server publishes, authored with `add-skill` and served by the `createApp` `skills` option.
 
 ---
 

@@ -1,6 +1,6 @@
 # mcp-ts-core - Directory Structure
 
-Generated on: 2026-10-25 20:03:41
+Generated on: 2026-10-26 01:29:12
 
 ```text
 mcp-ts-core/
@@ -175,6 +175,8 @@ mcp-ts-core/
 │   ├── add-resource/
 │   │   └── SKILL.md
 │   ├── add-service/
+│   │   └── SKILL.md
+│   ├── add-skill/
 │   │   └── SKILL.md
 │   ├── add-test/
 │   │   └── SKILL.md
@@ -409,6 +411,7 @@ mcp-ts-core/
 │   │   ├── notifications.ts
 │   │   ├── outputContract.ts
 │   │   ├── server.ts
+│   │   ├── skills.ts
 │   │   └── types.ts
 │   ├── services/
 │   │   ├── canvas/
@@ -625,7 +628,9 @@ mcp-ts-core/
 │   ├── Dockerfile
 │   ├── LICENSE
 │   ├── manifest.json
+│   ├── mcp.json
 │   ├── package.json
+│   ├── plugin.json
 │   ├── server.json
 │   └── vitest.config.ts
 ├── tests/
@@ -751,6 +756,7 @@ mcp-ts-core/
 │   │   ├── session-mode-option.int.test.ts
 │   │   ├── setup.ts
 │   │   ├── shutdown-signals.int.test.ts
+│   │   ├── skills.int.test.ts
 │   │   ├── stdio.test.ts
 │   │   ├── tool-failure-payload.int.test.ts
 │   │   ├── union-input.int.test.ts
@@ -909,6 +915,7 @@ mcp-ts-core/
 │   │   │   ├── inputRequired.test.ts
 │   │   │   ├── notifications.test.ts
 │   │   │   ├── server.test.ts
+│   │   │   ├── skills.test.ts
 │   │   │   └── unserializableErrorData.wire.test.ts
 │   │   ├── packaging/
 │   │   │   ├── dependency-ranges.test.ts

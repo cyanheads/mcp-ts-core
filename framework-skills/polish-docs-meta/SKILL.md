@@ -4,7 +4,7 @@ description: >
   Finalize documentation and project metadata for a ship-ready MCP server. Use after implementation is complete, tests pass, and devcheck is clean. Safe to run at any stage — each step checks current state and only acts on what still needs work.
 metadata:
   author: cyanheads
-  version: "2.25"
+  version: "2.26"
   audience: external
   type: workflow
 ---
@@ -191,6 +191,8 @@ If `.codex-plugin/plugin.json` exists, verify it's populated and in sync with `p
 
 If `.codex-plugin/mcp.json` exists, verify the server-name key is the unscoped `package.json` `name`, the `npx -y` install arg is the full `package.json` `name`, `env` carries only fixed values (`MCP_TRANSPORT_TYPE`), and `env_vars` lists every user-supplied variable from the server config schema (API keys, contact emails, instance URLs) so Codex forwards it from the user's environment.
 
+If root `plugin.json` exists (Agent Plugins 1.0.0, read by Codex, Cursor, GitHub Copilot, VS Code, and Kiro), verify `$schema` is `https://agent-plugins.org/schemas/1.0.0/plugin.schema.json`, it carries only `$schema`, `name`, `version`, `description`, `author`, `homepage`, `repository`, `license`, `keywords` (no `extensions`), `name` is the unscoped `package.json` `name`, and the metadata matches `package.json`. Root `mcp.json` beside it carries `$schema` `https://agent-plugins.org/schemas/1.0.0/mcp.schema.json` and one `"type": "stdio"` entry keyed by the unscoped name, with `env` identical to `.codex-plugin/mcp.json`'s — fixed values only. Keep both overlays and the `.codex-plugin/plugin.json` `"mcpServers": "./.codex-plugin/mcp.json"` pointer: Codex forwards `env_vars` to the root server only through it.
+
 If `.claude-plugin/plugin.json` exists, apply the same checks: `name` (unscoped), `version`, `description`, `author`, `repository`, `license`, `keywords` from `package.json`, `$schema` set to `https://json.schemastore.org/claude-code-plugin-manifest.json`. Verify the inline `mcpServers` entry key is the unscoped name and its `npx -y` install arg is the full `package.json` `name`. Every user-supplied variable is declared under `userConfig` — `type: "string"`, `title`, `description`, `sensitive: true` for keys and tokens, and either `required: true` or `default: ""` so a blank answer reaches the server as empty rather than as the literal placeholder — and referenced from `env` as `"KEY": "${user_config.<option>}"`. Run `claude plugin validate .` after editing.
 
 The CLAUDE.md-at-root warning is expected. The CLI also reports directory-submission advisories separately from its manifest verdict: missing icons, system files in the local folder, and marketplace-install guidance. For a reported file, check `git ls-files` and the completed bundle to establish whether it is actually distributed; exclude unwanted files that are. Apply icon and listing requirements when submitting to the Claude plugin directory. Manifest or packaging errors still fail validation.
@@ -204,14 +206,14 @@ If the project ships as an `.mcpb` bundle for Claude Desktop (check for `manifes
 - `manifest.json` — MCPB manifest with `mcp_config.env`, `user_config`, and metadata
 - `.mcpbignore` — controls what's excluded from the bundle
 
-Exclude project and dependency agent instructions with unanchored `AGENTS.md` and `CLAUDE.md` patterns; root-anchored patterns leave copies under `node_modules/` in the archive. Exclude development-only root metadata such as `/devcheck.config.json`, `/.dockerignore`, and `/.gitattributes`, while retaining every runtime asset.
+`mcpb pack` reads `.mcpbignore`, not `.gitignore`, so every root path the bundle must not ship — source, tests, docs, caches, logs, agent docs (`/CLAUDE.md`, `/AGENTS.md`), plugin manifests, development-only metadata (`/devcheck.config.json`, `/.dockerignore`, `/.gitattributes`), gitignored local files — needs a root-anchored line there, while every runtime asset stays. Never write one unanchored: `docs/` or `CLAUDE.md` also strips the same name inside `node_modules/`. `lint:packaging` names each missing or unanchored line for the paths it knows; a root path of the server's own needs its line added by hand. Root `skills/` ships on purpose — it holds the skills the server publishes.
 
 After packing and cleaning finish, inspect the archive entry list and verify those exclusions. Run packaging checks against that completed archive, never concurrently with the pack or clean step.
 
 **`package.json` scripts:**
 
-- `bundle` — builds the `.mcpb` (`mcpb pack`, then `scripts/clean-mcpb.ts` prunes dev deps and strips dependency-shipped agent docs)
-- `lint:packaging` — validates `manifest.json` ↔ `server.json` env var consistency, version parity for `manifest.json`, the plugin manifests, and the README badge, the launch shape of `server.json` npm entries (no `run start:*` arguments; a `streamable-http` entry sets `MCP_TRANSPORT_TYPE` to `"value": "http"`), and the Dockerfile's stages: a stage not pinned to `$BUILDPLATFORM` must not run JavaScript while building — no `bun run build`, `bun -e`, or script, and no `bun install` once `bunfig.toml` is in the stage (run by `devcheck`, which gates the step on `manifest.json`, a plugin manifest, `.mcpbignore`, `README.md`, `Dockerfile`, or `server.json`)
+- `bundle` — builds the `.mcpb` (`mcpb pack`, then `scripts/clean-mcpb.ts` prunes dev deps and strips four classes of `node_modules/**` content: dependency-shipped agent docs, platform-specific native bindings, node-gyp build output beside a `binding.gyp`, and build-only package files such as the framework's `changelog/`, `scripts/`, and `templates/`)
+- `lint:packaging` — validates `manifest.json` ↔ `server.json` env var consistency, `.mcpbignore` coverage and the built bundle's content, the published root `skills/` tree when present, version parity for `manifest.json`, the plugin manifests, and the README badge, the launch shape of `server.json` npm entries (no `run start:*` arguments; a `streamable-http` entry sets `MCP_TRANSPORT_TYPE` to `"value": "http"`), and the Dockerfile's stages: a stage not pinned to `$BUILDPLATFORM` must not run JavaScript while building — no `bun run build`, `bun -e`, or script, and no `bun install` once `bunfig.toml` is in the stage (run by `devcheck`, which gates the step on `manifest.json`, a plugin manifest, `.mcpbignore`, `README.md`, `Dockerfile`, `server.json`, or root `skills/`)
 
 **Cross-file consistency:**
 
@@ -283,6 +285,7 @@ Both must pass clean.
 - [ ] Changelog current — either monolithic `CHANGELOG.md` (hand-edited, Keep a Changelog) or directory-based (`changelog/<minor>.x/<version>.md` + rollup regenerated and in sync)
 - [ ] `.codex-plugin/plugin.json` populated and in sync with `package.json` (if present)
 - [ ] `.codex-plugin/mcp.json` server name current; user-supplied variables in `env_vars`, none as `""` in `env` (if present)
+- [ ] `plugin.json` + `mcp.json` populated and in sync with `package.json` and `.codex-plugin/mcp.json` (if present)
 - [ ] `.claude-plugin/plugin.json` populated and in sync with `package.json`; every user-supplied variable declared in `userConfig` and referenced as `${user_config.<option>}`, none as `""` in `env` (if present)
 - [ ] MCPB artifacts consistent (if `manifest.json` present) — version synced, env vars match `server.json`, `bundle` + `lint:packaging` scripts exist, README install badges present
 - [ ] `LICENSE` file present

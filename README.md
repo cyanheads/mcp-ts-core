@@ -184,6 +184,7 @@ await createApp({
   resources: allResourceDefinitions,
   prompts: allPromptDefinitions,
   instructions: 'Brief composition hints for the model.', // optional, sent on every `initialize`
+  skills: 'skills', // optional, serves root skills/ over the SEP-2640 Skills extension
 });
 ```
 
@@ -194,7 +195,7 @@ On Cloudflare Workers, `createWorkerHandler()` takes the same definitions from a
 - **Auth and storage:** Declare `auth: ['scope']` on a definition and the scope is checked, under JWT or OAuth, before the handler runs. `ctx.state` is tenant-scoped storage over in-memory, filesystem, Supabase, or Cloudflare D1/KV/R2, chosen by config.
 - **Client interaction:** Return `ctx.requestInput(...)` to ask the user for input, the client's model for a sample, or the client for its roots. The handler runs again with the answers on `ctx.inputs`.
 - **Protocol compatibility:** HTTP serves 2026-07-28 clients (per-request `_meta` envelope) and session-based 2025-era clients. The SDK's compatibility layer handles input requests for the older ones.
-- **Server presentation:** `instructions` gives the model server-wide guidance once, at `initialize`, instead of in every tool description. Identity fields (`title`, `websiteUrl`, `description`, `icons`) populate the client's server info, the `/.well-known/mcp.json` server card, and the HTTP landing page.
+- **Server presentation:** `instructions` gives the model server-wide guidance once, at `initialize`, instead of in every tool description. Identity fields (`title`, `websiteUrl`, `description`, `icons`) populate the client's server info, the `/.well-known/mcp.json` server card, and the HTTP landing page. `skills: 'skills'` serves the Agent Skills the server publishes in root `skills/` through the SEP-2640 Skills extension (`skills/list`, `skills/get`), checked at build time by `lint:packaging`.
 - **Definition checks:** `lint:mcp` checks names, schemas, scopes, annotations, format parity, and JSON Schema portability. It runs at build time, never at startup, so a new rule can't break a deployed server.
 - **DataCanvas:** An optional DuckDB workspace where agents run SQL across staged API results and export CSV, Parquet, or JSON. Agents share a workspace by passing its canvas token. Enable it with `CANVAS_PROVIDER_TYPE=duckdb` and `@duckdb/node-api` (Bun or Node.js only). [brapi-mcp-server](https://github.com/cyanheads/brapi-mcp-server#working-with-dataframes) walks through loading API results into a dataframe and querying it.
 - **Mirror:** The `/mirror` module keeps a persistent local copy of a bulk upstream dataset in embedded SQLite with an optional FTS5 index, so tools query it locally instead of paging the live API on every call. You write the `sync` ingester and the schema; the framework handles storage, resumable initial loads, and incremental refreshes. Bun or Node.js only (`better-sqlite3` is an optional peer on Node). [faa-aircraft-registry-mcp-server](https://github.com/cyanheads/faa-aircraft-registry-mcp-server) serves the full FAA registry this way.

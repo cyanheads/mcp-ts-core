@@ -4,7 +4,7 @@ description: >
   Exercise tools, resources, and prompts against a live HTTP server via MCP JSON-RPC over curl. Starts the server, surfaces the catalog, runs real and adversarial inputs, measures every call (bytes, token estimate, wall-clock) and weighs the catalog, renders app tools' views in a headless MCP Apps host, and produces a tight report with concrete findings and numbered follow-up options. Use after adding or modifying definitions, or when the user asks to test, try out, or verify their MCP surface.
 metadata:
   author: cyanheads
-  version: "2.24"
+  version: "2.25"
   audience: external
   type: debug
 ---
@@ -415,6 +415,7 @@ Treat any hit as a `ux` finding in the report. The authoring rule lives under *T
 | Resource declared an `errors: [...]` contract | Error contract (resource): trigger ≥1 declared failure mode by reading a URI that exercises it. Resources re-throw errors at the JSON-RPC level — verify `error.code` matches the contract entry and `error.data.reason` is the declared reason. (Resources don't use the `result.isError` envelope — they fail the request itself.) |
 | Mutator (write/update/delete/append/patch verbs, or `destructiveHint: true`) | Mutator response observability: run an intentionally-ambiguous input (typo path, wrong ID, already-deleted target). Confirm the response carries enough state (pre/post values, state-change discriminator) for the agent to detect intent-effect divergence without re-fetching. |
 | `_meta.ui.resourceUri` on the tool (an app tool) | View rendering: Step 6. The curl calls see only the `format()` text and the view's raw HTML; whether the view runs is visible only when it is rendered. |
+| The project has a root `skills/` (a published skill, `add-skill`) | Skill claims: read each `SKILL.md` and its `references/`, then test every gate and identifier claim with a live call — the tool it names yields that ID, a precondition it states really changes the result (an unresolved filter does return the global set), a stop rule's coverage check exists. A claim that does not hold is a `bug` finding against the skill, fixed by correcting the claim or cutting it. When the server opts in with `createApp({ skills })`, `skills/list` lists each skill and `resources/read` on its `skill://` URI returns the file. |
 
 **Resources.** Happy path, not-found URI (use a syntactically valid but non-existent ID — e.g., substitute a fake ID into the URI template), `list` if defined, pagination if used.
 **Prompts.** Happy path, defaults omitted, skim message quality.
@@ -561,6 +562,7 @@ End with:
 - [ ] **If a resource declared an `errors: [...]` contract:** ≥1 declared failure mode triggered; top-level JSON-RPC `error.code` and `error.data.reason` verified against the contract entry
 - [ ] **If any tool truncates, caps, or spills its output:** truncation forced; disclosure + a retrieval path (cursor, offset, selector, canvas handle) verified
 - [ ] External-state / auth-gated tools handled explicitly (run, skip, or confirm)
+- [ ] **If the project publishes a root `skills/`:** every gate and identifier claim in each skill tested against live tool behavior, and each one that failed reported as a `bug`; when served over MCP, `skills/list` and the `skill://` reads checked
 - [ ] **If any tool carries `_meta.ui.resourceUri`:** each view rendered with `app-render` (Step 6); `initialized`, `errors`, `cspViolations`, the message log, and the screenshots checked; a missing peer or browser recorded as skipped, not as a server finding
 - [ ] Server stopped (port confirmed free); server log, app-render output, and helper script removed
 - [ ] Report: summary paragraph → size & latency table → grouped findings → numbered options

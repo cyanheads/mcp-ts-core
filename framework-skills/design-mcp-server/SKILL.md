@@ -4,7 +4,7 @@ description: >
   Design the tool surface, resources, and service layer for a new MCP server. Use when starting a new server, planning a major feature expansion, or when the user describes a domain/API they want to expose via MCP. Produces a design doc at docs/design.md that drives implementation.
 metadata:
   author: cyanheads
-  version: "2.33"
+  version: "2.34"
   audience: external
   type: workflow
 ---
@@ -610,9 +610,19 @@ message shape).
 ## Server Instructions
 
 Draft `instructions` string for `createApp()` — the orientation every client sees at
-initialize: canonical workflow chain, identifier semantics, rate-limit posture. A short
+initialize: canonical workflow chain, identifier semantics, rate-limit posture. One
 paragraph under 2,048 characters, essentials first — Claude Code truncates the string at that
-length, mid-sentence. Tool descriptions carry the rest.
+length, mid-sentence. Tool descriptions carry the rest. Keep in it every identifier, auth, and
+call-order requirement a client connecting directly needs: such a client may never load a
+published skill.
+
+## Published Skill
+
+Whether the server ships a root `skills/<name>/SKILL.md` for the agents that install it —
+default none. It earns its place only for what `instructions` and tool descriptions cannot
+carry: a gate that prevents a wrong call or a wrong conclusion, a multi-hop identifier chain,
+a query syntax. When it ships, list what it carries — gates, where each opaque identifier
+comes from, cross-tool guidance — sourced from this doc; `add-skill` writes it.
 
 ## Implementation Order
 
@@ -668,7 +678,8 @@ Execute the plan using the scaffolding skills:
 4. `add-prompt` for each prompt
 5. `add-app-tool` *only if any app tools survived the design step* (rare — see the App Tool row in Step 3)
 6. `add-test` alongside each definition, declared error contracts included
-7. `devcheck` after each addition
+7. `add-skill` *only if the design calls for a published skill*
+8. `devcheck` after each addition
 
 Once the surface is built, `tool-defs-analysis` audits the definition language and `field-test` exercises the tools against the live upstream.
 
@@ -698,7 +709,8 @@ Items without an `If …:` prefix apply to every design. Conditional items only 
 - [ ] **If a tool resolves a single identifier:** no-match returns `{ found: false, guidance }` — a result, not a throw — with guidance routing per miss outcome
 - [ ] **If the domain has opaque vocabulary (codes, identifier formats, coverage windows):** reference tool designed (`topic` enum), implemented first, and used as the routing target in recovery strings and notices
 - [ ] Annotations set correctly (`readOnlyHint`, `destructiveHint`, `idempotentHint`, `openWorldHint`) — benign writes set `destructiveHint: false` explicitly, read-only tools omit it
-- [ ] Server-level `instructions` string drafted — workflow chain, identifier semantics, rate-limit posture, under 2,048 characters (ships via `createApp()` on every initialize)
+- [ ] Server-level `instructions` string drafted — one paragraph: workflow chain, identifier semantics, rate-limit posture, under 2,048 characters (ships via `createApp()` on every initialize)
+- [ ] Published skill decided — none by default; one only for gates, a multi-hop identifier chain, or a query syntax that `instructions` and tool descriptions cannot carry, its contents listed under Published Skill, with every requirement a direct client needs kept in `instructions` and the schemas
 - [ ] **If ops share a noun:** related operations consolidated under a `mode`/`operation` enum; input shape preserves all fields in the target clients (flat object for Claude clients, discriminated union only where supported)
 - [ ] **If an upstream API has no native search but the relevant set is bounded:** MCP-side list filtering considered — a distinct local filter param (`filter`/`nameContains`, not `query`), filtering the full set, strict token match (fuzzy only when a caller needs typo tolerance)
 - [ ] **If the server has workflow tools:** call-flow documented (upstream sequence + mode arms) in design doc's Workflow Analysis
