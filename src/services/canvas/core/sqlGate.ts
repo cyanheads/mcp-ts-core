@@ -378,12 +378,17 @@ export function assertNoDeniedFunctions(sql: string): void {
   }
 }
 
-/** The `denied_function` rejection naming `fn`. */
-function deniedFunctionError(fn: string, message: string) {
+/**
+ * The `denied_function` rejection naming `fn`, carrying `hint` as its recovery
+ * when given and the reason's catalog hint otherwise.
+ */
+function deniedFunctionError(fn: string, message: string, hint?: string) {
   return validationError(message, {
     reason: SQL_GATE_REASONS.deniedFunction,
     function: fn,
-    ...gateRecovery(SQL_GATE_REASONS.deniedFunction),
+    ...(hint === undefined
+      ? gateRecovery(SQL_GATE_REASONS.deniedFunction)
+      : { recovery: { hint } }),
   });
 }
 
@@ -492,13 +497,21 @@ export function assertNoDeniedParsedFunctions(parseTree: unknown): string[] {
   const denied = findDeniedCall(parseTree, literals);
   if (denied === undefined) return literals;
   const { fn, form } = denied;
+  // A bare name may be a staged column DuckDB would bind, which the parse tree
+  // cannot tell from the function — so the refusal says so, and its hint says
+  // to qualify the column instead of the catalog's "remove the function".
+  if (form === 'bare') {
+    throw deniedFunctionError(
+      fn,
+      `Canvas query references ${fn} unqualified. DuckDB reads that as the ${fn}() function unless a column of that name is in scope, so the canvas refuses it either way.`,
+      `Qualify a column named ${fn} with its table (<table>.${fn}), or remove the reference — the ${fn}() function is not available.`,
+    );
+  }
   throw deniedFunctionError(
     fn,
-    form === 'bare'
-      ? `Canvas query references disallowed function: ${fn}. DuckDB reads an unqualified ${fn} as that function, written without parentheses; to read a staged column named ${fn}, qualify it with its table (<table>.${fn}).`
-      : DENIED_TABLE_FUNCTIONS.has(fn)
-        ? deniedTableFunctionMessage(fn)
-        : `Canvas query references disallowed function: ${fn}. Functions that read engine settings, change engine state, or run SQL or name a table from a string, are not permitted.`,
+    DENIED_TABLE_FUNCTIONS.has(fn)
+      ? deniedTableFunctionMessage(fn)
+      : `Canvas query references disallowed function: ${fn}. Functions that read engine settings, change engine state, or run SQL or name a table from a string, are not permitted.`,
   );
 }
 

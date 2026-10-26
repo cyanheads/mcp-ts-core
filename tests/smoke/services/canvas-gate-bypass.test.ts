@@ -286,26 +286,6 @@ const PARSED_FUNCTION_CALLS: ReadonlyArray<readonly [label: string, fn: string, 
     `SELECT current_setting/* x */('temp_directory') AS v`,
   ],
   ['current_schema()', 'current_schema', 'SELECT current_schema() AS v'],
-  // DuckDB binds an unqualified current_schema to the function when no column
-  // of that name is in scope, so the parse tree's bare column reference is
-  // refused too — even where a staged column of that name is in scope.
-  ['a bare current_schema', 'current_schema', 'SELECT current_schema'],
-  ['a quoted, uppercase bare CURRENT_SCHEMA', 'current_schema', 'SELECT "CURRENT_SCHEMA" AS v'],
-  [
-    'a bare current_schema in a WHERE clause',
-    'current_schema',
-    `SELECT x FROM t WHERE current_schema = 'main'`,
-  ],
-  [
-    'a bare current_schema inside a query() literal',
-    'current_schema',
-    `SELECT * FROM query('SELECT current_schema AS v')`,
-  ],
-  [
-    'an unqualified staged column named current_schema',
-    'current_schema',
-    'SELECT current_schema FROM c',
-  ],
   ['current_schemas()', 'current_schemas', 'SELECT current_schemas(true) AS v'],
   ['in_search_path()', 'in_search_path', `SELECT in_search_path('memory', 'main') AS v`],
   [
@@ -355,6 +335,35 @@ const PARSED_FUNCTION_CALLS: ReadonlyArray<readonly [label: string, fn: string, 
     `SELECT * FROM "sniff_csv"('/no-such-dir/planted.csv')`,
   ],
 ];
+
+/**
+ * Unqualified `current_schema` references, which DuckDB binds to the function
+ * when no column of that name is in scope. The parse tree cannot tell the two
+ * apart, so the bare reference is refused too — even where a staged column of
+ * that name is in scope.
+ */
+const BARE_CURRENT_SCHEMA_REFERENCES: Corpus = [
+  ['a bare current_schema', () => 'SELECT current_schema'],
+  ['a quoted, uppercase bare CURRENT_SCHEMA', () => 'SELECT "CURRENT_SCHEMA" AS v'],
+  [
+    'a bare current_schema in a WHERE clause',
+    () => `SELECT x FROM t WHERE current_schema = 'main'`,
+  ],
+  [
+    'a bare current_schema inside a query() literal',
+    () => `SELECT * FROM query('SELECT current_schema AS v')`,
+  ],
+  ['an unqualified staged column named current_schema', () => 'SELECT current_schema FROM c'],
+];
+
+const BARE_CURRENT_SCHEMA_MESSAGE =
+  'Canvas query references current_schema unqualified. DuckDB reads that as the current_schema() function unless a column of that name is in scope, so the canvas refuses it either way.';
+const BARE_CURRENT_SCHEMA_HINT =
+  'Qualify a column named current_schema with its table (<table>.current_schema), or remove the reference — the current_schema() function is not available.';
+
+/** The `denied_function` reason's own hint, which every refusal by name but the bare `current_schema` carries. */
+const DENIED_FUNCTION_HINT =
+  'Remove the function the message names — only the staged tables are queryable.';
 
 /**
  * `query()` calls DuckDB itself refuses while preparing: a string that is not
@@ -664,7 +673,26 @@ describe('canvas · SQL gate refuses reads only the engine or the plan walk can 
     'parsed',
     PARSED_FUNCTION_CALLS,
     ([, , sql]) => sql,
-    (err, [, fn]) => expectParsedFunctionRefusal(err, fn),
+    (err, [, fn]) => {
+      expectParsedFunctionRefusal(err, fn);
+      expect((err.data?.recovery as { hint?: string } | undefined)?.hint).toBe(
+        DENIED_FUNCTION_HINT,
+      );
+    },
+  );
+
+  acrossEntryPoints(
+    'an unqualified current_schema',
+    'bare',
+    BARE_CURRENT_SCHEMA_REFERENCES,
+    ([, sql]) => sql(),
+    (err) => {
+      expectParsedFunctionRefusal(err, 'current_schema');
+      expect(err.message).toBe(BARE_CURRENT_SCHEMA_MESSAGE);
+      expect((err.data?.recovery as { hint?: string } | undefined)?.hint).toBe(
+        BARE_CURRENT_SCHEMA_HINT,
+      );
+    },
   );
 
   acrossEntryPoints(
@@ -692,7 +720,7 @@ describe('canvas · SQL gate refuses reads only the engine or the plan walk can 
       expect(err.data?.function).toBe('query');
       expect(err.message).toBe('Canvas query nests query() more than 4 levels deep.');
       expect((err.data?.recovery as { hint?: string } | undefined)?.hint).toBe(
-        'Remove the function the message names — only the staged tables are queryable.',
+        DENIED_FUNCTION_HINT,
       );
     },
   );
@@ -731,10 +759,11 @@ describe('canvas · SQL gate refuses reads only the engine or the plan walk can 
     ]);
   });
 
-  it('refuses an unqualified current_schema column with a message to qualify it', async () => {
+  it('refuses an unqualified current_schema column with a hint to qualify it', async () => {
     const err = await refusalOf(() => instance.query('SELECT current_schema FROM c'));
-    expect(err.message).toBe(
-      'Canvas query references disallowed function: current_schema. DuckDB reads an unqualified current_schema as that function, written without parentheses; to read a staged column named current_schema, qualify it with its table (<table>.current_schema).',
+    expect(err.message).toBe(BARE_CURRENT_SCHEMA_MESSAGE);
+    expect((err.data?.recovery as { hint?: string } | undefined)?.hint).toBe(
+      BARE_CURRENT_SCHEMA_HINT,
     );
   });
 

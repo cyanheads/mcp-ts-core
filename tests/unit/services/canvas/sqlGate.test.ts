@@ -8,6 +8,7 @@
  */
 
 import { describe, expect, it } from 'vitest';
+import { classifyAndBuildToolErrorResult } from '@/mcp-server/tools/utils/toolResult.js';
 import {
   ALLOWED_PLAN_OPERATORS,
   ALLOWED_STATEMENT_TYPES,
@@ -32,6 +33,7 @@ import {
   type SqlGateReason,
 } from '@/services/canvas/core/sqlGate.js';
 import { McpError } from '@/types-global/errors.js';
+import { readCommonMark } from '../../../helpers/commonmark.js';
 
 const validSelectPlan = {
   name: 'PROJECTION',
@@ -538,6 +540,11 @@ describe('sqlGate · assertNoDeniedParsedFunctions', () => {
   });
 });
 
+const BARE_CURRENT_SCHEMA_MESSAGE =
+  'Canvas query references current_schema unqualified. DuckDB reads that as the current_schema() function unless a column of that name is in scope, so the canvas refuses it either way.';
+const BARE_CURRENT_SCHEMA_HINT =
+  'Qualify a column named current_schema with its table (<table>.current_schema), or remove the reference — the current_schema() function is not available.';
+
 describe('sqlGate · assertNoDeniedParsedFunctions · bare function keywords', () => {
   const baseTable = (table_name: string) => ({ type: 'BASE_TABLE', table_name });
   const qualifiedRef = (...parts: string[]) => ({
@@ -580,14 +587,36 @@ describe('sqlGate · assertNoDeniedParsedFunctions · bare function keywords', (
       );
       expect(err.data?.reason).toBe('denied_function');
       expect(err.data?.function).toBe('current_schema');
-      expect(err.message).toBe(
-        'Canvas query references disallowed function: current_schema. DuckDB reads an unqualified current_schema as that function, written without parentheses; to read a staged column named current_schema, qualify it with its table (<table>.current_schema).',
-      );
+      expect(err.message).toBe(BARE_CURRENT_SCHEMA_MESSAGE);
       expect((err.data?.recovery as { hint?: string } | undefined)?.hint).toBe(
-        'Remove the function the message names — only the staged tables are queryable.',
+        BARE_CURRENT_SCHEMA_HINT,
       );
     },
   );
+
+  it('keeps the call message and the catalog hint for current_schema()', () => {
+    const err = gateRejection(() =>
+      assertNoDeniedParsedFunctions(parseTree(selectNode([call('current_schema')]))),
+    );
+    expect(err.data?.function).toBe('current_schema');
+    expect(err.message).toBe(
+      'Canvas query references disallowed function: current_schema. Functions that read engine settings, change engine state, or run SQL or name a table from a string, are not permitted.',
+    );
+    expect((err.data?.recovery as { hint?: string } | undefined)?.hint).toBe(
+      'Remove the function the message names — only the staged tables are queryable.',
+    );
+  });
+
+  it('renders the bare refusal into tool error content[] with its own Recovery line', () => {
+    const err = gateRejection(() =>
+      assertNoDeniedParsedFunctions(parseTree(selectNode([columnRef('current_schema')]))),
+    );
+    const result = classifyAndBuildToolErrorResult(err);
+    const text = (result.content as Array<{ text: string }>)[0]?.text ?? '';
+    expect(readCommonMark(text)).toBe(
+      `Error: ${BARE_CURRENT_SCHEMA_MESSAGE}\n\nRecovery: ${BARE_CURRENT_SCHEMA_HINT}\n\n(reason denied_function)`,
+    );
+  });
 
   it('finds a bare current_schema in a WHERE comparison under an operator', () => {
     const tree = parseTree({
