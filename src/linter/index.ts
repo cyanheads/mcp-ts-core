@@ -1,9 +1,11 @@
 /**
- * @fileoverview Public barrel for the MCP definition linter.
- * Exports `validateDefinitions()` and all types needed to consume lint reports.
+ * @fileoverview Public barrel for the build-time linters: `validateDefinitions()`
+ * for tool, resource, and prompt definitions with the types its reports use,
+ * and `validateSkillTree()` for a published skill tree.
  * @module src/linter/index
  */
 
+export { type SkillProblem, validateSkillTree } from '@/mcp-server/skills.js';
 export type {
   LintDefinitionType,
   LintDiagnostic,

@@ -623,4 +623,64 @@ describe('createWorkerHandler in the Workers runtime', () => {
       await waitOnExecutionContext(ctx);
     });
   });
+
+  describe('skills record (SEP-2640)', () => {
+    const guideMd =
+      '---\nname: worker-guide\ndescription: Chain echo calls. Use when an echo is needed.\n---\n# Worker guide\n';
+
+    it('lists and reads a record-built skill', async () => {
+      const handler = createWorkerHandler({
+        tools: [],
+        skills: {
+          'worker-guide/SKILL.md': guideMd,
+          'worker-guide/references/ids.md': '# IDs\n',
+        },
+      });
+      const post = async (body: string, sessionId?: string | null) => {
+        const ctx = createExecutionContext();
+        const response = await handler.fetch(
+          new Request('http://example.com/mcp', {
+            method: 'POST',
+            headers: { ...MCP_HEADERS, ...(sessionId && { 'Mcp-Session-Id': sessionId }) },
+            body,
+          }),
+          env,
+          ctx,
+        );
+        await waitOnExecutionContext(ctx);
+        return response;
+      };
+      const resultOf = async (response: Response): Promise<Record<string, unknown>> => {
+        const [frame] = parseSseDataFrames(await response.text()) as Array<{
+          result: Record<string, unknown>;
+        }>;
+        return frame?.result ?? {};
+      };
+
+      const init = await post(initializeBody(1));
+      const sessionId = init.headers.get('Mcp-Session-Id');
+      expect(await resultOf(init)).toMatchObject({
+        capabilities: { extensions: { 'io.modelcontextprotocol/skills': { directoryRead: true } } },
+      });
+      await post(
+        JSON.stringify({ jsonrpc: '2.0', method: 'notifications/initialized' }),
+        sessionId,
+      );
+
+      const list = await resultOf(await post(jsonrpc(2, 'skills/list'), sessionId));
+      const read = await resultOf(
+        await post(
+          jsonrpc(3, 'resources/read', { uri: 'skill://worker-guide/SKILL.md' }),
+          sessionId,
+        ),
+      );
+
+      expect((list.skills as Array<{ uri: string }>).map((skill) => skill.uri)).toEqual([
+        'skill://worker-guide/SKILL.md',
+      ]);
+      expect(read.contents).toEqual([
+        expect.objectContaining({ uri: 'skill://worker-guide/SKILL.md', text: guideMd }),
+      ]);
+    });
+  });
 });

@@ -87,8 +87,12 @@ export interface CloudflareBindings {
  * notice, so there is no shutdown lifecycle to hang the hook on and no point
  * at which the framework could call it. Release per-request resources inside
  * the handler instead.
+ *
+ * `skills` takes the tree's files as a record instead of a folder path: a
+ * Worker has no filesystem to read.
  */
-export interface WorkerHandlerOptions extends Omit<CreateAppOptions, 'instructions' | 'teardown'> {
+export interface WorkerHandlerOptions
+  extends Omit<CreateAppOptions, 'instructions' | 'skills' | 'teardown'> {
   /** Extra string CF bindings to inject into process.env (beyond the core set). */
   extraEnvBindings?: Array<[string, string]>;
   /** Extra object CF bindings (KV, R2, D1, etc.) to store on globalThis. */
@@ -106,6 +110,21 @@ export interface WorkerHandlerOptions extends Omit<CreateAppOptions, 'instructio
     env: CloudflareBindings,
     ctx: ExecutionContext,
   ) => Promise<void>;
+  /**
+   * Skills to serve over MCP (SEP-2640) — see {@link CreateAppOptions.skills}.
+   * Keys are paths under the skills folder, values the file contents; build
+   * it from Wrangler `Text` module imports. Loaded once per isolate, on the
+   * first request.
+   *
+   * @example
+   * ```ts
+   * import guideMd from '../skills/my-server-guide/SKILL.md';
+   * import idsMd from '../skills/my-server-guide/references/ids.md';
+   *
+   * skills: { 'my-server-guide/SKILL.md': guideMd, 'my-server-guide/references/ids.md': idsMd },
+   * ```
+   */
+  skills?: Record<string, string | Uint8Array>;
 }
 
 /** Hono env shape for Workers. */

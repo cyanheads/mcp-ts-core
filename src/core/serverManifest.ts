@@ -22,6 +22,7 @@ import type { AppConfig } from '@/config/index.js';
 import { FRAMEWORK_NAME, FRAMEWORK_VERSION } from '@/config/index.js';
 import type { AnyPromptDefinition } from '@/mcp-server/prompts/utils/promptDefinition.js';
 import type { AnyResourceDefinition } from '@/mcp-server/resources/utils/resourceDefinition.js';
+import type { ServedSkills } from '@/mcp-server/skills.js';
 import type { AnyToolDef } from '@/mcp-server/tools/tool-registration.js';
 import {
   type DisabledMetadata,
@@ -537,6 +538,12 @@ export interface BuildServerManifestInput {
   landing?: LandingConfig;
   prompts: AnyPromptDefinition[];
   resources: AnyResourceDefinition[];
+  /**
+   * Skills served over SEP-2640. Adds the extension's capability key to
+   * `extensions`, and turns `capabilities.resources` on: skill files are
+   * resources, so a skills-only server serves them.
+   */
+  skills?: Pick<ServedSkills, 'extensions'>;
   /** Human-readable display name forwarded from `createApp({ title })`. */
   title?: string;
   tools: AnyToolDef[];
@@ -557,10 +564,12 @@ export function buildServerManifest(input: BuildServerManifestInput): ServerMani
     landing = {},
     prompts,
     resources,
+    skills,
     title,
     tools,
     websiteUrl,
   } = input;
+  const allExtensions = skills ? { ...extensions, ...skills.extensions } : extensions;
 
   // The SDK's `SUPPORTED_PROTOCOL_VERSIONS` covers only the revisions that are
   // negotiated through `initialize` — the 2025 era. Revision 2026-07-28 is
@@ -676,10 +685,10 @@ export function buildServerManifest(input: BuildServerManifestInput): ServerMani
     capabilities: {
       logging: true,
       tools: tools.length > 0,
-      resources: resources.length > 0,
+      resources: resources.length > 0 || skills !== undefined,
       prompts: prompts.length > 0,
     },
-    ...(extensions && { extensions }),
+    ...(allExtensions && { extensions: allExtensions }),
     framework: {
       name: FRAMEWORK_NAME,
       version: FRAMEWORK_VERSION,

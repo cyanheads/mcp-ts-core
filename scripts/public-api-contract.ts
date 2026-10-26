@@ -254,7 +254,7 @@ export const PUBLIC_RUNTIME_EXPORTS = {
     'WhisperProvider',
     'createSpeechProvider',
   ],
-  './linter': ['validateDefinitions'],
+  './linter': ['validateDefinitions', 'validateSkillTree'],
   './testing': [
     'createFetchMock',
     'createInMemoryStorage',

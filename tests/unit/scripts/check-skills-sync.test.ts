@@ -181,6 +181,19 @@ describe('check-skills-sync · pre-0.13 skills/ tree', () => {
     expect(stdout).toContain('rm -rf skills/add-tool');
   });
 
+  it('reads audience from the frontmatter only, never from a published skill’s body', () => {
+    writeFileAt(
+      dir,
+      'skills/domain-lookup/SKILL.md',
+      '---\nname: domain-lookup\ndescription: Look up domains.\n---\n\nFramework skills carry\n\n  audience: external\n\nin their metadata.\n',
+    );
+
+    const { code, stdout } = runCheck(dir);
+
+    expect(code).toBe(0);
+    expect(stdout).toContain('Skipped: no framework-skills/ directory.');
+  });
+
   it('leaves a skills/ tree of the server’s own published skills alone', () => {
     writeSkill(dir, 'framework-skills', 'add-tool');
     writeSkill(dir, '.claude/skills', 'add-tool');

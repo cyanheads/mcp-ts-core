@@ -18,7 +18,8 @@
     "CLAUDE.md",
     "AGENTS.md",
     "Dockerfile",
-    "server.json"
+    "server.json",
+    "skills/"
   ],
   "scripts": {
     "build": "bun run scripts/build.ts",

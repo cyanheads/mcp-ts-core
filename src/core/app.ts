@@ -29,6 +29,7 @@ import type { AnyPromptDefinition } from '@/mcp-server/prompts/utils/promptDefin
 import { ResourceRegistry } from '@/mcp-server/resources/resource-registration.js';
 import type { AnyResourceDefinition } from '@/mcp-server/resources/utils/resourceDefinition.js';
 import { createMcpServerInstance } from '@/mcp-server/server.js';
+import { loadServedSkills, type ServedSkills, type SkillFilesRecord } from '@/mcp-server/skills.js';
 import type { AnyToolDef } from '@/mcp-server/tools/tool-registration.js';
 import { ToolRegistry } from '@/mcp-server/tools/tool-registration.js';
 import type { InputHandlingOptions } from '@/mcp-server/tools/utils/arguments/index.js';
@@ -269,6 +270,30 @@ export interface CreateAppOptions<TSupabaseClient extends object = SupabaseClien
   /** Runs after core services are constructed, before transport starts. */
   setup?: (core: CoreServices<TSupabaseClient>) => void | Promise<void>;
   /**
+   * A folder of skill folders (each holding a `SKILL.md`) to serve over MCP
+   * through the SEP-2640 Skills extension — conventionally `'skills'`, the
+   * root tree the server publishes for the agents that use it.
+   *
+   * A relative path resolves against the application root (the nearest
+   * `package.json` above the entry module), so a stdio server launched from a
+   * client's project still serves its own tree; the working directory is the
+   * fallback only when no application root is found.
+   * The folder is read once at startup. A missing or unreadable folder fails
+   * startup with a `ConfigurationError` naming the resolved path; a skill the
+   * SDK rejects is skipped with a logged warning naming the file and problem,
+   * and the rest are served. `lint:packaging` is the strict gate.
+   *
+   * Opting in adds `io.modelcontextprotocol/skills` to
+   * `capabilities.extensions`, the skills methods (`skills/list`, `skills/get`,
+   * `resources/directory/read`), each `SKILL.md` to `resources/list`, and the
+   * `skill://{+path}` template — on both protocol eras. Skill resources are
+   * served by the SDK, outside the framework's resource factory: transport
+   * auth applies, per-definition `auth` scopes do not.
+   *
+   * @example `skills: 'skills'`
+   */
+  skills?: string;
+  /**
    * The counterpart to {@link CreateAppOptions.setup} — releases what setup
    * allocated. Awaited inside `shutdown()` once the transport has stopped
    * accepting requests and before core services are disposed and the logger
@@ -391,7 +416,18 @@ export interface ComposedApp<TSupabaseClient extends object = SupabaseClientHand
    * page at `/`.
    */
   manifest: ServerManifest;
+  /** Names of the skills served over MCP; absent when the `skills` option is unset. */
+  skillNames?: readonly string[];
 }
+
+/**
+ * @internal What {@link composeServices} accepts: the `createApp` options, with
+ * `skills` widened to the record form `createWorkerHandler` passes.
+ */
+export type ComposeOptions<TSupabaseClient extends object = SupabaseClientHandle> = Omit<
+  CreateAppOptions<TSupabaseClient>,
+  'skills'
+> & { skills?: string | SkillFilesRecord };
 
 /**
  * Widens the shorthand `sessionMode: 'stateless'` to its object form so both
@@ -453,7 +489,7 @@ function assertSessionModeRequirement(
  * @internal
  */
 export async function composeServices<TSupabaseClient extends object = SupabaseClientHandle>(
-  options: CreateAppOptions<TSupabaseClient> = {},
+  options: ComposeOptions<TSupabaseClient> = {},
 ): Promise<ComposedApp<TSupabaseClient>> {
   const {
     tools = [],
@@ -505,6 +541,19 @@ export async function composeServices<TSupabaseClient extends object = SupabaseC
   // Fail before any service is constructed, on the parsed config the server
   // will actually run with.
   assertSessionModeRequirement(sessionMode.require, seedsSessionMode);
+
+  // Read once per process, before any service exists: a missing folder is a
+  // startup failure, and every server instance attaches this one catalog.
+  let skills: ServedSkills | undefined;
+  if (options.skills !== undefined) {
+    const skillsContext = requestContextService.createRequestContext({ operation: 'SkillsLoad' });
+    skills = await loadServedSkills(options.skills, ({ path, message }) => {
+      logger.warning(
+        `Skill problem in ${path}: ${message}`,
+        withExtra(skillsContext, { skillPath: path, problem: message }),
+      );
+    });
+  }
 
   // One codec for the process when `MCP_REQUEST_STATE_KEY` is set: every
   // server instance verifies with it and every handler factory seals with it,
@@ -637,6 +686,7 @@ export async function composeServices<TSupabaseClient extends object = SupabaseC
       ...(extensions && { extensions }),
       ...(icons && { icons }),
       ...(instructions && { instructions }),
+      ...(skills && { skills }),
       ...(title && { title }),
       ...(websiteUrl && { websiteUrl }),
       promptRegistry,
@@ -653,6 +703,7 @@ export async function composeServices<TSupabaseClient extends object = SupabaseC
     ...(extensions && { extensions }),
     ...(icons && { icons }),
     ...(landing && { landing }),
+    ...(skills && { skills }),
     ...(title && { title }),
     ...(websiteUrl && { websiteUrl }),
   });
@@ -662,6 +713,7 @@ export async function composeServices<TSupabaseClient extends object = SupabaseC
     coreServices,
     createServer,
     manifest,
+    ...(skills && { skillNames: skills.names }),
   };
 }
 
@@ -757,7 +809,7 @@ export async function createApp<TSupabaseClient extends object = SupabaseClientH
     }
     throw err;
   }
-  const { bus, coreServices, createServer, manifest } = composed;
+  const { bus, coreServices, createServer, manifest, skillNames } = composed;
   const { definitionCounts } = manifest;
 
   // --- Initialize OTEL ---
@@ -861,8 +913,9 @@ export async function createApp<TSupabaseClient extends object = SupabaseClientH
     disabledTools.length > 0
       ? ` (+${disabledTools.length} disabled: ${disabledTools.join(', ')})`
       : '';
+  const skillsNote = skillNames ? `, ${skillNames.length} skill(s)` : '';
   logger.info(
-    `Core services constructed — ${registeredTools.length} tool(s)${disabledNote}, ${definitionCounts.resources} resource(s), ${definitionCounts.prompts} prompt(s). Storage: ${config.storage.providerType}.`,
+    `Core services constructed — ${registeredTools.length} tool(s)${disabledNote}, ${definitionCounts.resources} resource(s), ${definitionCounts.prompts} prompt(s)${skillsNote}. Storage: ${config.storage.providerType}.`,
     requestContextService.createRequestContext({
       operation: 'ServerInit',
       additionalContext: {
@@ -870,6 +923,7 @@ export async function createApp<TSupabaseClient extends object = SupabaseClientH
         ...(disabledTools.length > 0 && { disabledTools }),
         resources: (options.resources ?? []).map((r) => r.name ?? r.uriTemplate),
         prompts: (options.prompts ?? []).map((p) => p.name),
+        ...(skillNames && { skills: [...skillNames] }),
       },
     }),
   );

@@ -22,6 +22,7 @@ import { clientCapabilityView, type RequestStateSealer } from '@/mcp-server/inpu
 import type { PromptRegistry } from '@/mcp-server/prompts/prompt-registration.js';
 import type { ResourceRegistry } from '@/mcp-server/resources/resource-registration.js';
 import { installResourceSubscriptions } from '@/mcp-server/resources/resourceSubscriptions.js';
+import type { ServedSkills } from '@/mcp-server/skills.js';
 import type { ToolRegistry } from '@/mcp-server/tools/tool-registration.js';
 import { logger } from '@/utils/internal/logger.js';
 import { requestContextService } from '@/utils/internal/requestContext.js';
@@ -77,6 +78,13 @@ export interface McpServerDeps {
    */
   requestState?: RequestStateSealer;
   resourceRegistry: ResourceRegistry;
+  /**
+   * The process's SEP-2640 skill catalog, loaded once by `composeServices`.
+   * Attached after registration, it adds the skills methods, the
+   * `skill://{+path}` template, and the `io.modelcontextprotocol/skills`
+   * extension capability to this instance.
+   */
+  skills?: ServedSkills;
   /**
    * Human-readable display name forwarded to `new McpServer({ serverInfo })`.
    * Supplements the machine-identifier `name`.
@@ -183,6 +191,8 @@ export async function createMcpServerInstance(deps: McpServerDeps): Promise<McpS
     );
     throw err;
   }
+
+  deps.skills?.attach(server);
 
   return server;
 }
