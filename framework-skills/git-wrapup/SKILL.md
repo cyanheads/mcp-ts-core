@@ -4,7 +4,7 @@ description: >
   Land working-tree changes as logical commits — the work grouped by concern, topped by a release commit (version bump, changelog, regenerated artifacts). The work commits land first, then the version bump, verification, and the release commit on top. Stops at "committed locally on main" — or, when the project releases through a release PR, at "release branch pushed, PR open". No tag, no push to main, no publish: the release-and-publish skill merges, tags, and ships from here.
 metadata:
   author: cyanheads
-  version: "1.31"
+  version: "1.32"
   audience: external
   type: workflow
 ---
@@ -167,7 +167,7 @@ Every file that declares a version must be updated. Skip any file that doesn't e
 - `package.json` — `version`
 - `server.json` — top-level `version` AND every `packages[].version` entry. `lint:mcp` flags a mismatch at either level
 - `manifest.json` (if present) — `version`. Packaging validation fails on a mismatch, and on a scoped `name` (use `bls-mcp-server`, not `@cyanheads/bls-mcp-server`)
-- `.claude-plugin/plugin.json` and `.codex-plugin/plugin.json` (if present) — `version`. Packaging validation fails on a mismatch; `.codex-plugin/mcp.json` is connection config and carries none
+- `.claude-plugin/plugin.json`, `.codex-plugin/plugin.json`, and root `plugin.json` (if present) — `version`. Packaging validation fails on a mismatch; `.codex-plugin/mcp.json` and root `mcp.json` are connection config and carry none
 - `README.md` — version badge. Packaging validation fails on a mismatch with `package.json`; a literal `-` in a prerelease is escaped as `--` (`Version-0.14.0--rc.1-`)
 - `CLAUDE.md` / `AGENTS.md` — if they pin a version string
 - `Dockerfile` — OCI labels if they pin the version
@@ -326,7 +326,7 @@ If the working tree holds anything beyond those exclusions, or the release commi
 - [ ] Unfinished changes this run didn't make left uncommitted and reported
 - [ ] Version taken from the brief, the project's policy, or semver, in that order — asked when the row was unclear
 - [ ] Work concerns committed before the version bump — a version-bearing file a work concern also touches ships whole in that concern's commit, so the release commit brings it the version hunk alone
-- [ ] Version bumped in every declaring file (`package.json`, `server.json`, `manifest.json`, `.claude-plugin/plugin.json`, `.codex-plugin/plugin.json`, README badge, `CLAUDE.md`/`AGENTS.md` if they pin a version) — `devcheck` flags a mismatch in `server.json` (both levels), `manifest.json`, both plugin manifests, and the README badge; step 4's straggler grep covers the docs and Dockerfile labels
+- [ ] Version bumped in every declaring file (`package.json`, `server.json`, `manifest.json`, `.claude-plugin/plugin.json`, `.codex-plugin/plugin.json`, root `plugin.json`, README badge, `CLAUDE.md`/`AGENTS.md` if they pin a version) — `devcheck` flags a mismatch in `server.json` (both levels), `manifest.json`, the plugin manifests, and the README badge; step 4's straggler grep covers the docs and Dockerfile labels
 - [ ] GH issues addressed by this work commented with what landed (if working from GH issues)
 - [ ] Docs updated for any new or changed features
 - [ ] Changelog authored at `changelog/<major.minor>.x/<version>.md`

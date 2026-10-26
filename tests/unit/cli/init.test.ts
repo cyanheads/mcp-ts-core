@@ -302,6 +302,37 @@ describe('CLI init command', () => {
     expect(readFileSync(join(dest, 'CLAUDE.md'), 'utf8')).toContain('**Server:** inplace-server');
   });
 
+  it.each([
+    ['a named', ['init', 'demo-server'], 'demo-server'],
+    ['an in-place', ['init'], 'inplace-server'],
+  ])(
+    'writes the Agent Plugins root pair in %s scaffold, name substituted',
+    async (_label, args, name) => {
+      const root = join(createTempDir(), 'inplace-server');
+      mkdirSync(root);
+      process.chdir(root);
+
+      await runCli(args);
+
+      const dest = name === 'inplace-server' ? root : join(root, name);
+      expect(JSON.parse(readFileSync(join(dest, 'plugin.json'), 'utf8'))).toMatchObject({
+        $schema: 'https://agent-plugins.org/schemas/1.0.0/plugin.schema.json',
+        name,
+      });
+      expect(JSON.parse(readFileSync(join(dest, 'mcp.json'), 'utf8'))).toEqual({
+        $schema: 'https://agent-plugins.org/schemas/1.0.0/mcp.schema.json',
+        mcpServers: {
+          [name]: {
+            type: 'stdio',
+            command: 'npx',
+            args: ['-y', name],
+            env: { MCP_TRANSPORT_TYPE: 'stdio' },
+          },
+        },
+      });
+    },
+  );
+
   it('ships the external-audience framework skills and none of the internal ones', async () => {
     const tempRoot = createTempDir();
     process.chdir(tempRoot);

@@ -1,31 +1,48 @@
 # Framework is not distributed as .mcpb — this file protects verification
-# packs from leaking credentials and shipping dev-only paths.
+# packs from leaking credentials and shipping dev-only paths. Every path is
+# root-anchored so the same names inside node_modules/ still ship.
 
 # Credentials and agent-local state
+.env*
 .mcpregistry_*
 /.claude/
 /.agents/
 
 # Source / dev surface
-docs/
-examples/
-templates/
+/src/
+/scripts/
+/tests/
+/docs/
+/changelog/
+/coverage/
+/logs/
+/.cache/
+/.github/
+/.vscode/
+/.claude-plugin/
+/.codex-plugin/
+/plugin.json
+/mcp.json
+/CLAUDE.md
+/AGENTS.md
+/examples/
+/templates/
 /framework-skills/
-agent-feedback/
-announcements/
-logs/
+/agent-feedback/
+/announcements/
 
 # Build/IDE caches and configs
-.env*
-.husky/
-.markdownlint.jsonc
-.tsbuildinfo*
-Dockerfile
-biome.json
-bun.lock
-bunfig.toml
-devcheck.config.json
-repomix.config.json
-tsconfig*.json
-vitest*.config.ts
-wrangler.jsonc
+/.husky/
+/.markdownlint.jsonc
+/.tsbuildinfo*
+/Dockerfile
+/.dockerignore
+/.gitattributes
+/biome.json
+/bun.lock
+/bunfig.toml
+/devcheck.config.json
+/repomix.config.json
+/tsconfig*.json
+/vitest*.config.ts
+/wrangler.jsonc

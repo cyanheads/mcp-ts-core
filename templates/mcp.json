@@ -1,0 +1,13 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/mcp.schema.json",
+  "mcpServers": {
+    "{{PACKAGE_NAME}}": {
+      "type": "stdio",
+      "command": "npx",
+      "args": ["-y", "{{PACKAGE_NAME}}"],
+      "env": {
+        "MCP_TRANSPORT_TYPE": "stdio"
+      }
+    }
+  }
+}

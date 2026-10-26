@@ -3,28 +3,45 @@
  * server.json alignment that runs inside `main()` (checks 1–4: no scope prefix on
  * the manifest name, `title`/`type` on every `user_config` entry, and stdio env
  * vars agreeing in both directions), the `.mcpbignore` static
- * guards (checks 5–7, issues #172/#207), the post-bundle content check
- * (check 8, issues #230/#274), the identity checks (check 9, issue #231), and
- * the plugin marketplace manifests (check 10, issues #240/#393), and the
+ * guards (checks 5–7, issues #172/#207/#508), the post-bundle content check
+ * (check 8, issues #230/#274/#783/#791, including the selectors shared with
+ * scripts/clean-mcpb.ts), the identity checks (check 9, issue #231), and
+ * the plugin marketplace manifests (check 10, issues #240/#393, and the Agent
+ * Plugins root pair, #426), and the
  * npm `files` exclusion of the built bundle (check 13, issue #469), manifest.json
  * version parity (check 14), the Dockerfile stages that run JavaScript off
- * the build platform (check 15, #575), and the launch shape of server.json npm
- * entries (check 16, #622).
+ * the build platform (check 15, #575), the launch shape of server.json npm
+ * entries (check 16, #622), and the published root skills/ tree (check 17, #429).
  * Imports the real implementation; no inline mirror.
  * @module tests/unit/scripts/lint-packaging.test
  */
 
 import { spawnSync } from 'node:child_process';
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
+import { validateSkillTree } from '@/mcp-server/skills.js';
 import {
   AGENT_DOC_ENTRY as CLEAN_AGENT_DOC_ENTRY,
+  BUILD_ONLY_ENTRY as CLEAN_BUILD_ONLY_ENTRY,
   NATIVE_BINDING_ENTRY as CLEAN_NATIVE_BINDING_ENTRY,
+  NODE_GYP_OUTPUT as CLEAN_NODE_GYP_OUTPUT,
+  filterBuildOnlyEntries as cleanFilterBuildOnlyEntries,
+  filterNodeGypBuildEntries as cleanFilterNodeGypBuildEntries,
 } from '../../../scripts/clean-mcpb.js';
 import {
   AGENT_DOC_ENTRY,
+  BUILD_ONLY_ENTRY,
+  CRITICAL_RUNTIME_PATHS,
   checkBundleContent,
   checkBundleEntries,
   checkBundleExcludedFromFiles,
@@ -34,9 +51,14 @@ import {
   checkManifestUserConfigWiring,
   checkManifestVersion,
   checkPluginManifests,
+  checkPublishedSkills,
   checkReadmeVersionBadge,
   checkServerJsonLaunch,
+  checkSkillsKeptInBundle,
+  filterNodeGypBuildEntries,
+  KNOWN_DEV_DIRS,
   NATIVE_BINDING_ENTRY,
+  NODE_GYP_OUTPUT,
 } from '../../../scripts/lint-packaging.js';
 
 describe('lint-packaging · manifest and server.json alignment (checks 1–4, standalone run)', () => {
@@ -202,21 +224,82 @@ describe('lint-packaging · manifest and server.json alignment (checks 1–4, st
 });
 
 describe('lint-packaging · bundle-content guard (checks 5–7)', () => {
-  describe('dev-dir exclusion (check 5)', () => {
-    it('passes with anchored root patterns', async () => {
-      const content =
-        '/framework-skills/\n/.agents/\n/.claude/\n/scripts/\n/tests/\n/Dockerfile\n/bun.lock';
-      const errors = await checkBundleContent(content);
-      expect(errors.filter((e) => e.includes('does not exclude'))).toHaveLength(0);
+  const REPO_ROOT = join(import.meta.dirname, '..', '..', '..');
+  const template = readFileSync(join(REPO_ROOT, 'templates/_.mcpbignore'), 'utf8');
+
+  /** `templates/_.mcpbignore` as it shipped through 0.13.17. */
+  const PREVIOUS_TEMPLATE = [
+    '.env*',
+    '.mcpregistry_*',
+    '/.claude/',
+    '/.agents/',
+    '/framework-skills/',
+    '/docs/idea.md',
+    '/logs/',
+    '/Dockerfile',
+    '/bun.lock',
+    '/bunfig.toml',
+    '/wrangler.toml',
+    '/biome.json',
+    '/tsconfig*.json',
+    '/vitest.config.ts',
+  ].join('\n');
+
+  /** The anchored line each check-5 error asks for, sorted. */
+  const missingLines = (errors: string[]): string[] =>
+    errors
+      .map((e) => /^\.mcpbignore does not exclude root dev .* add the line "([^"]+)"$/.exec(e)?.[1])
+      .filter((line): line is string => line !== undefined)
+      .sort();
+
+  it.each(['templates/_.mcpbignore', '.mcpbignore'])('passes %s', async (file) => {
+    expect(await checkBundleContent(readFileSync(join(REPO_ROOT, file), 'utf8'))).toEqual([]);
+  });
+
+  describe('dev-path exclusion (check 5)', () => {
+    it('fails the previous template, naming each missing line', async () => {
+      const errors = await checkBundleContent(PREVIOUS_TEMPLATE);
+      expect(missingLines(errors)).toEqual(
+        [
+          '/src/',
+          '/scripts/',
+          '/tests/',
+          '/docs/',
+          '/changelog/',
+          '/coverage/',
+          '/.cache/',
+          '/.github/',
+          '/.vscode/',
+          '/.claude-plugin/',
+          '/.codex-plugin/',
+          '/CLAUDE.md',
+          '/AGENTS.md',
+          '/plugin.json',
+          '/mcp.json',
+          '/.dockerignore',
+          '/.gitattributes',
+          '/devcheck.config.json',
+        ].sort(),
+      );
+      expect(errors).toHaveLength(18);
     });
 
     it('flags a dev dir that is entirely missing from the ignore file', async () => {
-      const content = '/.agents/\n/.claude/\n/scripts/\n/tests/';
-      const errors = await checkBundleContent(content);
-      expect(
-        errors.some((e) => e.includes('does not exclude root dev directory "framework-skills/"')),
-      ).toBe(true);
-      expect(errors.some((e) => e.includes('".agents/"'))).toBe(false);
+      const errors = await checkBundleContent(template.replace('/framework-skills/\n', ''));
+      expect(errors).toEqual([
+        '.mcpbignore does not exclude root dev directory "framework-skills/" — the bundle ships it; add the line "/framework-skills/"',
+      ]);
+    });
+
+    it('flags a dev file that is entirely missing from the ignore file', async () => {
+      const errors = await checkBundleContent(template.replace('/AGENTS.md\n', ''));
+      expect(errors).toEqual([
+        '.mcpbignore does not exclude root dev file "AGENTS.md" — the bundle ships it; add the line "/AGENTS.md"',
+      ]);
+    });
+
+    it('never requires excluding root skills/, which ships the skills a server publishes', () => {
+      expect(KNOWN_DEV_DIRS).not.toContain('skills/');
     });
   });
 
@@ -227,6 +310,22 @@ describe('lint-packaging · bundle-content guard (checks 5–7)', () => {
       expect(errors.some((e) => e.includes('unanchored') && e.includes('framework-skills/'))).toBe(
         true,
       );
+    });
+
+    it('flags docs/ and CLAUDE.md written unanchored, one error each', async () => {
+      const content = template
+        .replace('/docs/\n', 'docs/\n')
+        .replace('/CLAUDE.md\n', 'CLAUDE.md\n');
+      const errors = await checkBundleContent(content);
+      expect(errors).toEqual([
+        '.mcpbignore uses an unanchored pattern that also strips runtime paths under node_modules: [docs/]. Use a leading "/" to anchor to root (e.g. "/docs/").',
+        '.mcpbignore uses an unanchored pattern that also strips runtime paths under node_modules: [CLAUDE.md]. Use a leading "/" to anchor to root (e.g. "/CLAUDE.md").',
+      ]);
+    });
+
+    it('leaves a pattern written against node_modules/ to check 7', async () => {
+      const errors = await checkBundleContent(`${template}/node_modules/**/tests/\n`);
+      expect(errors).toEqual([]);
     });
 
     it('flags all three unanchored dev-dir patterns', async () => {
@@ -245,30 +344,66 @@ describe('lint-packaging · bundle-content guard (checks 5–7)', () => {
   });
 
   describe('critical-runtime-path protection (check 7)', () => {
+    /** The check-7 errors, keyed by the runtime path each names. */
+    const strippedPaths = (errors: string[]): string[] =>
+      errors
+        .map((e) => /would strip critical runtime path "([^"]+)"/.exec(e)?.[1])
+        .filter((path): path is string => path !== undefined);
+
     it('flags a pattern that strips all node_modules paths', async () => {
-      const content = 'node_modules/**\n/framework-skills/';
+      const content = `${template}node_modules/**\n`;
       const errors = await checkBundleContent(content);
-      expect(errors.some((e) => e.includes('@opentelemetry'))).toBe(true);
+      expect(strippedPaths(errors)).toEqual([
+        'node_modules/@opentelemetry/api/dist/',
+        'node_modules/@opentelemetry/semantic-conventions/build/src/',
+        'node_modules/@modelcontextprotocol/server/dist/',
+        'node_modules/@cyanheads/mcp-ts-core/dist/',
+      ]);
     });
 
-    it('flags a pattern that strips dist/', async () => {
-      const content = 'dist/\n/framework-skills/';
-      const errors = await checkBundleContent(content);
-      expect(errors.some((e) => e.includes('dist/index.js'))).toBe(true);
+    it('flags an unanchored dist/, naming every dist/ runtime path', async () => {
+      const errors = await checkBundleContent(`${template}dist/\n`);
+      expect(strippedPaths(errors)).toEqual([
+        'node_modules/@opentelemetry/api/dist/',
+        'node_modules/@modelcontextprotocol/server/dist/',
+        'node_modules/@cyanheads/mcp-ts-core/dist/',
+        'dist/index.js',
+      ]);
+    });
+
+    it('flags an unanchored build/, naming the build/ runtime path', async () => {
+      const errors = await checkBundleContent(`${template}build/\n`);
+      expect(errors).toEqual([
+        '.mcpbignore pattern(s) [build/] would strip critical runtime path ' +
+          '"node_modules/@opentelemetry/semantic-conventions/build/src/" — add a leading "/" to anchor to root (e.g. "/build/").',
+      ]);
+    });
+
+    it('samples dependency paths that exist in a current install', () => {
+      // This repository is @cyanheads/mcp-ts-core, so its own dist/ is not under node_modules/.
+      const dependencyPaths = CRITICAL_RUNTIME_PATHS.filter(
+        (path) =>
+          path.startsWith('node_modules/') &&
+          !path.startsWith('node_modules/@cyanheads/mcp-ts-core/'),
+      );
+      expect(dependencyPaths).toHaveLength(3);
+      for (const path of dependencyPaths) {
+        expect(existsSync(join(REPO_ROOT, path)), path).toBe(true);
+      }
     });
   });
 
   describe('edge cases', () => {
     it('ignores comment lines', async () => {
-      const content =
-        '# this is a comment\n/framework-skills/\n/.agents/\n/.claude/\n/scripts/\n/tests/';
-      const errors = await checkBundleContent(content);
-      expect(errors).toHaveLength(0);
+      // A commented-out line excludes nothing.
+      const errors = await checkBundleContent(template.replace('/src/\n', '# /src/\n'));
+      expect(missingLines(errors)).toEqual(['/src/']);
+      expect(errors).toHaveLength(1);
     });
 
-    it('handles empty .mcpbignore — all dev dirs unexcluded', async () => {
+    it('handles empty .mcpbignore — every dev dir and file unexcluded', async () => {
       const errors = await checkBundleContent('');
-      expect(errors.filter((e) => e.includes('does not exclude'))).toHaveLength(3);
+      expect(errors.filter((e) => e.includes('does not exclude'))).toHaveLength(22);
     });
   });
 });
@@ -336,6 +471,173 @@ describe('lint-packaging · post-bundle content check (check 8)', () => {
       'node_modules/@duckdb/node-bindings-linux-x64/libduckdb.so',
     ];
     expect(checkBundleEntries(entries, 'dist/test.mcpb')).toHaveLength(2);
+  });
+
+  describe('node-gyp build output (#783) and build-only package files (#791)', () => {
+    /** One bundle listing both scripts' selectors run over: the stripped classes and their runtime neighbours. */
+    const LISTING = [
+      'manifest.json',
+      'dist/index.js',
+      'skills/repro-guide/SKILL.md',
+      // better-sqlite3: a node-gyp tree beside binding.gyp, plus its C sources.
+      'node_modules/better-sqlite3/binding.gyp',
+      'node_modules/better-sqlite3/package.json',
+      'node_modules/better-sqlite3/lib/index.js',
+      'node_modules/better-sqlite3/prebuilds/darwin-arm64.node',
+      'node_modules/better-sqlite3/deps/',
+      'node_modules/better-sqlite3/deps/sqlite3/sqlite3.c',
+      'node_modules/better-sqlite3/src/better_sqlite3.cpp',
+      'node_modules/better-sqlite3/build/',
+      'node_modules/better-sqlite3/build/Makefile',
+      'node_modules/better-sqlite3/build/config.gypi',
+      'node_modules/better-sqlite3/build/binding.Makefile',
+      'node_modules/better-sqlite3/build/better_sqlite3.target.mk',
+      'node_modules/better-sqlite3/build/gyp-mac-tool',
+      'node_modules/better-sqlite3/build/gyp-flock-tool',
+      'node_modules/better-sqlite3/build/binding.sln',
+      'node_modules/better-sqlite3/build/better_sqlite3.vcxproj',
+      'node_modules/better-sqlite3/build/better_sqlite3.vcxproj.filters',
+      'node_modules/better-sqlite3/build/node_gyp_bins/python3',
+      'node_modules/better-sqlite3/build/better_sqlite3.node',
+      'node_modules/better-sqlite3/build/Release/',
+      'node_modules/better-sqlite3/build/Release/.deps/Release/obj.target/better_sqlite3.stamp.d',
+      'node_modules/better-sqlite3/build/Release/obj.target/',
+      'node_modules/better-sqlite3/build/Release/obj.target/better_sqlite3.stamp',
+      'node_modules/better-sqlite3/build/Release/obj.target/better_sqlite3/src/better_sqlite3.o',
+      'node_modules/better-sqlite3/build/Release/obj/better_sqlite3/better_sqlite3.obj',
+      'node_modules/better-sqlite3/build/Release/sqlite3.a',
+      'node_modules/better-sqlite3/build/Release/better_sqlite3.lib',
+      'node_modules/better-sqlite3/build/Release/better_sqlite3.exp',
+      'node_modules/better-sqlite3/build/Release/better_sqlite3.pdb',
+      'node_modules/better-sqlite3/build/Release/better_sqlite3.ilk',
+      'node_modules/better-sqlite3/build/Release/better_sqlite3.iobj',
+      'node_modules/better-sqlite3/build/Release/better_sqlite3.ipdb',
+      'node_modules/better-sqlite3/build/Release/better_sqlite3.node',
+      'node_modules/better-sqlite3/build/Release/test_extension.node',
+      'node_modules/better-sqlite3/build/Release/libsqlite3.dylib',
+      'node_modules/better-sqlite3/build/Debug/better_sqlite3.node',
+      // sharp keeps binding.gyp below its package root, so its tree is src/build/.
+      'node_modules/sharp/lib/index.js',
+      'node_modules/sharp/src/binding.gyp',
+      'node_modules/sharp/src/build/config.gypi',
+      'node_modules/sharp/src/build/Release/sharp-darwin-arm64v8.node',
+      // A build/ with no sibling binding.gyp is runtime code, generator-like names included.
+      'node_modules/@opentelemetry/semantic-conventions/build/src/index.js',
+      'node_modules/pino/build/sync-version.js',
+      'node_modules/other/build/Makefile',
+      // mcp-ts-core: build-only files beside the runtime dist/ and package.json.
+      'node_modules/@cyanheads/mcp-ts-core/package.json',
+      'node_modules/@cyanheads/mcp-ts-core/README.md',
+      'node_modules/@cyanheads/mcp-ts-core/dist/core/index.js',
+      'node_modules/@cyanheads/mcp-ts-core/dist/cli/init.js',
+      'node_modules/@cyanheads/mcp-ts-core/CLAUDE.md',
+      'node_modules/@cyanheads/mcp-ts-core/AGENTS.md',
+      'node_modules/@cyanheads/mcp-ts-core/biome.json',
+      'node_modules/@cyanheads/mcp-ts-core/vitest.config.base.mjs',
+      'node_modules/@cyanheads/mcp-ts-core/config/',
+      'node_modules/@cyanheads/mcp-ts-core/config/tsconfig.base.json',
+      'node_modules/@cyanheads/mcp-ts-core/changelog/0.13.x/0.13.17.md',
+      'node_modules/@cyanheads/mcp-ts-core/scripts/devcheck.ts',
+      'node_modules/@cyanheads/mcp-ts-core/templates/CLAUDE.md',
+      'node_modules/@cyanheads/mcp-ts-core/templates/src/index.ts',
+      // The same names elsewhere ship.
+      'node_modules/other/CLAUDE.md',
+      'node_modules/other/scripts/postinstall.js',
+      'node_modules/other/src/index.js',
+      'node_modules/other/biome.json',
+      'node_modules/other/config/tsconfig.base.json',
+      'node_modules/@cyanheads/mcp-ts-core/dist/scripts/helper.js',
+      'node_modules/@cyanheads/mcp-ts-core/dist/config/index.js',
+      'node_modules/@cyanheads/mcp-ts-core/templates-extra/biome.json',
+      'node_modules/better-sqlite3-extra/src/index.js',
+      // A nested install of either package is selected the same way.
+      'node_modules/a/node_modules/@cyanheads/mcp-ts-core/CLAUDE.md',
+      'node_modules/a/node_modules/better-sqlite3/deps/sqlite3/sqlite3.h',
+    ];
+
+    const NODE_GYP = [
+      'node_modules/better-sqlite3/build/Makefile',
+      'node_modules/better-sqlite3/build/config.gypi',
+      'node_modules/better-sqlite3/build/binding.Makefile',
+      'node_modules/better-sqlite3/build/better_sqlite3.target.mk',
+      'node_modules/better-sqlite3/build/gyp-mac-tool',
+      'node_modules/better-sqlite3/build/gyp-flock-tool',
+      'node_modules/better-sqlite3/build/binding.sln',
+      'node_modules/better-sqlite3/build/better_sqlite3.vcxproj',
+      'node_modules/better-sqlite3/build/better_sqlite3.vcxproj.filters',
+      'node_modules/better-sqlite3/build/node_gyp_bins/python3',
+      'node_modules/better-sqlite3/build/Release/.deps/Release/obj.target/better_sqlite3.stamp.d',
+      'node_modules/better-sqlite3/build/Release/obj.target/',
+      'node_modules/better-sqlite3/build/Release/obj.target/better_sqlite3.stamp',
+      'node_modules/better-sqlite3/build/Release/obj.target/better_sqlite3/src/better_sqlite3.o',
+      'node_modules/better-sqlite3/build/Release/obj/better_sqlite3/better_sqlite3.obj',
+      'node_modules/better-sqlite3/build/Release/sqlite3.a',
+      'node_modules/better-sqlite3/build/Release/better_sqlite3.lib',
+      'node_modules/better-sqlite3/build/Release/better_sqlite3.exp',
+      'node_modules/better-sqlite3/build/Release/better_sqlite3.pdb',
+      'node_modules/better-sqlite3/build/Release/better_sqlite3.ilk',
+      'node_modules/better-sqlite3/build/Release/better_sqlite3.iobj',
+      'node_modules/better-sqlite3/build/Release/better_sqlite3.ipdb',
+      'node_modules/sharp/src/build/config.gypi',
+    ];
+
+    const BUILD_ONLY = [
+      'node_modules/better-sqlite3/deps/',
+      'node_modules/better-sqlite3/deps/sqlite3/sqlite3.c',
+      'node_modules/better-sqlite3/src/better_sqlite3.cpp',
+      'node_modules/@cyanheads/mcp-ts-core/CLAUDE.md',
+      'node_modules/@cyanheads/mcp-ts-core/AGENTS.md',
+      'node_modules/@cyanheads/mcp-ts-core/biome.json',
+      'node_modules/@cyanheads/mcp-ts-core/vitest.config.base.mjs',
+      'node_modules/@cyanheads/mcp-ts-core/config/',
+      'node_modules/@cyanheads/mcp-ts-core/config/tsconfig.base.json',
+      'node_modules/@cyanheads/mcp-ts-core/changelog/0.13.x/0.13.17.md',
+      'node_modules/@cyanheads/mcp-ts-core/scripts/devcheck.ts',
+      'node_modules/@cyanheads/mcp-ts-core/templates/CLAUDE.md',
+      'node_modules/@cyanheads/mcp-ts-core/templates/src/index.ts',
+      'node_modules/a/node_modules/@cyanheads/mcp-ts-core/CLAUDE.md',
+      'node_modules/a/node_modules/better-sqlite3/deps/sqlite3/sqlite3.h',
+    ];
+
+    it('keeps the node-gyp selector in sync with clean-mcpb.ts over one listing', () => {
+      expect(NODE_GYP_OUTPUT.source).toBe(CLEAN_NODE_GYP_OUTPUT.source);
+      expect(NODE_GYP_OUTPUT.flags).toBe(CLEAN_NODE_GYP_OUTPUT.flags);
+      expect(filterNodeGypBuildEntries(LISTING)).toEqual(NODE_GYP);
+      expect(cleanFilterNodeGypBuildEntries(LISTING)).toEqual(NODE_GYP);
+    });
+
+    it('keeps the build-only filter in sync with clean-mcpb.ts over one listing', () => {
+      expect(BUILD_ONLY_ENTRY.source).toBe(CLEAN_BUILD_ONLY_ENTRY.source);
+      expect(BUILD_ONLY_ENTRY.flags).toBe(CLEAN_BUILD_ONLY_ENTRY.flags);
+      expect(LISTING.filter((entry) => BUILD_ONLY_ENTRY.test(entry))).toEqual(BUILD_ONLY);
+      expect(cleanFilterBuildOnlyEntries(LISTING)).toEqual(BUILD_ONLY);
+    });
+
+    it('fails an uncleaned listing with one error per class, naming the count and a sample', () => {
+      const errors = checkBundleEntries(LISTING, 'dist/test.mcpb');
+      expect(errors).toHaveLength(2);
+      expect(errors[0]).toContain('dist/test.mcpb contains 23 node-gyp build entries');
+      expect(errors[0]).toContain('\n      node_modules/better-sqlite3/build/Makefile');
+      expect(errors[0]).toContain('clean-mcpb.ts');
+      expect(errors[1]).toContain('dist/test.mcpb contains 15 build-only package entries');
+      expect(errors[1]).toContain('\n      node_modules/better-sqlite3/deps/');
+      expect(errors[1]).toContain('clean-mcpb.ts');
+    });
+
+    it('passes the listing once both classes are stripped', () => {
+      const stripped = new Set([...NODE_GYP, ...BUILD_ONLY]);
+      const cleaned = LISTING.filter((entry) => !stripped.has(entry));
+      expect(checkBundleEntries(cleaned, 'dist/test.mcpb')).toEqual([]);
+      expect(cleaned).toContain('node_modules/better-sqlite3/build/Release/better_sqlite3.node');
+      expect(cleaned).toContain('node_modules/better-sqlite3/build/Debug/better_sqlite3.node');
+      expect(cleaned).toContain('node_modules/better-sqlite3/build/Release/libsqlite3.dylib');
+      expect(cleaned).toContain('node_modules/sharp/src/build/Release/sharp-darwin-arm64v8.node');
+      expect(cleaned).toContain(
+        'node_modules/@opentelemetry/semantic-conventions/build/src/index.js',
+      );
+      expect(cleaned).toContain('node_modules/@cyanheads/mcp-ts-core/dist/core/index.js');
+      expect(cleaned).toContain('node_modules/@cyanheads/mcp-ts-core/package.json');
+    });
   });
 });
 
@@ -760,6 +1062,509 @@ describe('lint-packaging · plugin marketplace manifests (check 10, #240)', () =
       },
     };
     expect(checkPluginManifests({ codexMcp }, UNSCOPED, FULL, VERSION)).toEqual([]);
+  });
+});
+
+describe('lint-packaging · Agent Plugins root pair (check 10, #426)', () => {
+  const REPO_ROOT = join(import.meta.dirname, '..', '..', '..');
+  const UNSCOPED = 'pubmed-mcp-server';
+  const FULL = '@cyanheads/pubmed-mcp-server';
+  const VERSION = '0.2.6';
+  const PLUGIN_SCHEMA = 'https://agent-plugins.org/schemas/1.0.0/plugin.schema.json';
+  const MCP_SCHEMA = 'https://agent-plugins.org/schemas/1.0.0/mcp.schema.json';
+
+  /** `${name}` as a plain string, built so Biome's template-placeholder rule stays quiet. */
+  const placeholder = (name: string) => ['$', `{${name}}`].join('');
+
+  type Json = Record<string, any>;
+
+  const rootPlugin = (overrides: Json = {}): Json => ({
+    $schema: PLUGIN_SCHEMA,
+    name: UNSCOPED,
+    version: VERSION,
+    description: 'Search and fetch PubMed articles.',
+    author: { name: 'cyanheads', email: 'casey@example.com', url: 'https://example.com' },
+    homepage: 'https://github.com/cyanheads/pubmed-mcp-server',
+    repository: 'https://github.com/cyanheads/pubmed-mcp-server',
+    license: 'Apache-2.0',
+    keywords: ['mcp'],
+    ...overrides,
+  });
+  const stdioEntry = (overrides: Json = {}): Json => ({
+    type: 'stdio',
+    command: 'npx',
+    args: ['-y', FULL],
+    env: { MCP_TRANSPORT_TYPE: 'stdio' },
+    ...overrides,
+  });
+  const rootMcp = (entry: Json = stdioEntry()): Json => ({
+    $schema: MCP_SCHEMA,
+    mcpServers: { [UNSCOPED]: entry },
+  });
+  const codexPlugin = (overrides: Json = {}): Json => ({
+    name: UNSCOPED,
+    version: VERSION,
+    description: 'Search and fetch PubMed articles.',
+    mcpServers: './.codex-plugin/mcp.json',
+    interface: {
+      displayName: UNSCOPED,
+      shortDescription: 'Search PubMed.',
+      longDescription: 'Search and fetch PubMed articles via E-utilities.',
+    },
+    ...overrides,
+  });
+  const codexMcp = (overrides: Json = {}): Json => ({
+    [UNSCOPED]: {
+      command: 'npx',
+      args: ['-y', FULL],
+      env: { MCP_TRANSPORT_TYPE: 'stdio' },
+      ...overrides,
+    },
+  });
+
+  const check = (inputs: Parameters<typeof checkPluginManifests>[0], unscoped = UNSCOPED) =>
+    checkPluginManifests(inputs, unscoped, unscoped === UNSCOPED ? FULL : unscoped, VERSION);
+
+  /** The pair plus the Codex overlay, every rule satisfied. */
+  const VALID = () => ({
+    rootPlugin: rootPlugin(),
+    rootMcp: rootMcp(),
+    codexPlugin: codexPlugin(),
+    codexMcp: codexMcp(),
+  });
+
+  it('passes a fully populated pair beside the Codex overlay', () => {
+    expect(check(VALID())).toEqual([]);
+  });
+
+  describe('the scaffold templates', () => {
+    /** Each plugin template as `init` writes it for `demo-server`. */
+    const rendered = (file: string, description = ''): unknown =>
+      JSON.parse(
+        readFileSync(join(REPO_ROOT, 'templates', file), 'utf8')
+          .replaceAll('{{PACKAGE_NAME}}', 'demo-server')
+          .replaceAll('"description": ""', `"description": "${description}"`)
+          .replaceAll('Description": ""', `Description": "${description}"`),
+      );
+    const scaffold = (description?: string) => ({
+      rootPlugin: rendered('plugin.json', description),
+      rootMcp: rendered('mcp.json', description),
+      claudePlugin: rendered('.claude-plugin/plugin.json', description),
+      codexPlugin: rendered('.codex-plugin/plugin.json', description),
+      codexMcp: rendered('.codex-plugin/mcp.json', description),
+    });
+
+    it('reports only the empty descriptions on a fresh scaffold', () => {
+      const errors = checkPluginManifests(scaffold(), 'demo-server', 'demo-server', '0.1.0');
+      expect(errors.map((e) => e.split(' — ')[0])).toEqual([
+        '.claude-plugin/plugin.json "description" is empty',
+        '.codex-plugin/plugin.json "description" is empty',
+        '.codex-plugin/plugin.json interface.shortDescription is empty',
+        '.codex-plugin/plugin.json interface.longDescription is empty',
+        'plugin.json "description" is empty',
+      ]);
+    });
+
+    it('passes once the descriptions are populated', () => {
+      const errors = checkPluginManifests(
+        scaffold('A demo server.'),
+        'demo-server',
+        'demo-server',
+        '0.1.0',
+      );
+      expect(errors).toEqual([]);
+    });
+
+    it('ships the root pair keyed and launched like the overlays', () => {
+      const pair = scaffold();
+      expect(pair.rootPlugin).toMatchObject({ $schema: PLUGIN_SCHEMA, name: 'demo-server' });
+      expect(pair.rootMcp).toEqual({
+        $schema: MCP_SCHEMA,
+        mcpServers: {
+          'demo-server': {
+            type: 'stdio',
+            command: 'npx',
+            args: ['-y', 'demo-server'],
+            env: { MCP_TRANSPORT_TYPE: 'stdio' },
+          },
+        },
+      });
+      // The overlays stay as they are: Codex merges env_vars through this pointer.
+      expect(pair.codexPlugin).toMatchObject({ mcpServers: './.codex-plugin/mcp.json' });
+    });
+  });
+
+  describe('plugin.json', () => {
+    it.each([
+      ['a draft schema', 'https://agent-plugins.org/schemas/1.1.0/plugin.schema.json'],
+      ['the Claude Code schema', 'https://json.schemastore.org/claude-code-plugin-manifest.json'],
+    ])('fails %s', (_label, schema) => {
+      const errors = check({ ...VALID(), rootPlugin: rootPlugin({ $schema: schema }) });
+      expect(errors).toEqual([
+        `plugin.json "$schema" is "${schema}" — must be "${PLUGIN_SCHEMA}"; Codex accepts only Agent Plugins 1.0.0 and rejects the plugin otherwise`,
+      ]);
+    });
+
+    it('fails a missing $schema', () => {
+      const { $schema: _omitted, ...noSchema } = rootPlugin();
+      const errors = check({ ...VALID(), rootPlugin: noSchema });
+      expect(errors).toHaveLength(1);
+      expect(errors[0]).toContain('plugin.json "$schema" is absent');
+    });
+
+    it('rejects extensions and every other field outside the closed set', () => {
+      const errors = check({
+        ...VALID(),
+        rootPlugin: rootPlugin({
+          extensions: { 'com.openai': { interface: {} } },
+          mcpServers: './mcp.json',
+          interface: {},
+        }),
+      });
+      expect(errors).toHaveLength(3);
+      expect(errors[0]).toContain('plugin.json carries "extensions"');
+      expect(errors[0]).toContain('interface in Codex');
+      expect(errors[1]).toContain('plugin.json carries "mcpServers", outside the closed');
+      expect(errors[2]).toContain('plugin.json carries "interface", outside the closed');
+    });
+
+    it('fails a metadata field of the wrong type', () => {
+      const errors = check({
+        ...VALID(),
+        rootPlugin: rootPlugin({
+          author: { name: 'cyanheads', github: 'cyanheads' },
+          keywords: 'mcp',
+          homepage: 7,
+        }),
+      });
+      expect(errors.map((e) => e.split(' — ')[0])).toEqual([
+        'plugin.json "author" must be an object carrying only string "name", "email", and "url"',
+        'plugin.json "homepage" must be a string',
+        'plugin.json "keywords" must be an array of strings',
+      ]);
+    });
+
+    it('requires a non-empty description and the package version', () => {
+      const errors = check({
+        ...VALID(),
+        rootPlugin: rootPlugin({ description: ' ', version: '0.2.4' }),
+      });
+      expect(errors).toHaveLength(2);
+      expect(errors[0]).toContain('plugin.json "description" is empty');
+      expect(errors[1]).toBe(
+        'plugin.json "version" is "0.2.4" — must equal the package.json version "0.2.6"',
+      );
+    });
+
+    it('fails a name that is not the unscoped package name', () => {
+      const errors = check({ ...VALID(), rootPlugin: rootPlugin({ name: FULL }) });
+      expect(errors).toEqual([
+        `plugin.json "name" is "${FULL}" — must equal the unscoped package name "${UNSCOPED}"`,
+      ]);
+    });
+
+    it('fails a project named My_Server with a §5.5 message', () => {
+      const name = 'My_Server';
+      const errors = check(
+        {
+          rootPlugin: rootPlugin({ name }),
+          rootMcp: {
+            $schema: MCP_SCHEMA,
+            mcpServers: { [name]: stdioEntry({ args: ['-y', name] }) },
+          },
+        },
+        name,
+      );
+      expect(errors).toEqual([
+        'plugin.json "name" must be the unscoped package name "My_Server", which breaks Agent Plugins §5.5 — ' +
+          'a plugin name is 1–64 characters from a-z, 0-9, "-", and ".", alphanumeric at both ends, with no "--" ' +
+          'or ".."; Codex and the other Agent Plugins clients reject the plugin, so rename the package to comply',
+      ]);
+    });
+
+    /** The pair for a project named `name`, its mcp.json empty: only the name rules apply. */
+    const named = (name: string) =>
+      check(
+        { rootPlugin: rootPlugin({ name }), rootMcp: { $schema: MCP_SCHEMA, mcpServers: {} } },
+        name,
+      );
+
+    it.each(['a', 'acme.tools', 'lint3r', `${'a'.repeat(63)}z`])(
+      'accepts the §5.5 name %s',
+      (name) => {
+        expect(named(name).filter((e) => e.includes('§5.5'))).toEqual([]);
+      },
+    );
+
+    it.each(['-start', 'end-', 'has--double', 'too.many..dots', 'a'.repeat(65), 'My-Plugin'])(
+      'rejects the §5.5 name %s',
+      (name) => {
+        expect(named(name).filter((e) => e.includes('§5.5'))).toHaveLength(1);
+      },
+    );
+
+    it('fails a plugin.json without mcp.json beside it', () => {
+      const errors = check({ rootPlugin: rootPlugin() });
+      expect(errors).toEqual([
+        'plugin.json has no mcp.json beside it — Agent Plugins clients load MCP servers only from root mcp.json, ' +
+          'so the plugin installs without its server; add mcp.json',
+      ]);
+    });
+
+    it('fails a plugin.json or mcp.json that did not parse', () => {
+      expect(check({ ...VALID(), rootPlugin: null })).toEqual([
+        'plugin.json is not a JSON object — Agent Plugins clients reject the plugin',
+      ]);
+      expect(check({ ...VALID(), rootMcp: null })).toEqual([
+        'mcp.json is not a JSON object — Agent Plugins clients disable MCP for the plugin',
+      ]);
+    });
+  });
+
+  describe('mcp.json', () => {
+    it('fails a wrong $schema and an extra top-level field', () => {
+      const errors = check({
+        ...VALID(),
+        rootMcp: {
+          ...rootMcp(),
+          $schema: 'https://agent-plugins.org/schemas/1.1.0/mcp.schema.json',
+          servers: {},
+        },
+      });
+      expect(errors).toHaveLength(2);
+      expect(errors[0]).toContain(
+        'mcp.json "$schema" is "https://agent-plugins.org/schemas/1.1.0/mcp.schema.json"',
+      );
+      expect(errors[0]).toContain(MCP_SCHEMA);
+      expect(errors[1]).toContain('mcp.json carries "servers"');
+    });
+
+    it('requires every server key to be the unscoped name', () => {
+      const errors = check({
+        ...VALID(),
+        rootMcp: { $schema: MCP_SCHEMA, mcpServers: { [FULL]: stdioEntry() } },
+      });
+      expect(errors).toEqual([
+        `mcp.json mcpServers has no "${UNSCOPED}" entry — the server key must be the unscoped package name`,
+        `mcp.json mcpServers["${FULL}"] — every server key must be the unscoped package name "${UNSCOPED}"`,
+      ]);
+    });
+
+    it('rejects fields outside the closed stdio variant, env_vars included', () => {
+      const errors = check({
+        ...VALID(),
+        rootMcp: rootMcp(
+          stdioEntry({ env_vars: ['NCBI_API_KEY'], url: 'https://example.com/mcp' }),
+        ),
+      });
+      expect(errors).toHaveLength(2);
+      expect(errors[0]).toContain(`mcp.json mcpServers["${UNSCOPED}"] carries "env_vars"`);
+      expect(errors[0]).toContain('list env_vars in .codex-plugin/mcp.json');
+      expect(errors[1]).toContain(`mcp.json mcpServers["${UNSCOPED}"] carries "url"`);
+    });
+
+    it.each([
+      [
+        'a streamable-http type',
+        { type: 'streamable-http' },
+        '"type" is "streamable-http" — must be "stdio"',
+      ],
+      ['a missing type', { type: undefined }, '"type" is absent — must be "stdio"'],
+      [
+        'a plugin-relative command',
+        { command: './bin/server' },
+        '"command" is "./bin/server" — must be a bare executable name',
+      ],
+      [
+        'a shell command string',
+        { command: 'npx -y' },
+        '"command" is "npx -y" — must be a bare executable name',
+      ],
+      [
+        'an unscoped install arg',
+        { args: ['-y', UNSCOPED] },
+        `install arg is "${UNSCOPED}" — must be the full package name "${FULL}"`,
+      ],
+      [
+        'a non-string arg',
+        { args: ['-y', FULL, 3] },
+        '"args" is ["-y","@cyanheads/pubmed-mcp-server",3] — must be an array of strings',
+      ],
+      ['a cwd outside the plugin', { cwd: '/tmp' }, '"cwd" is "/tmp" — must start with'],
+    ])('fails %s', (_label, overrides, message) => {
+      const errors = check({ ...VALID(), rootMcp: rootMcp(stdioEntry(overrides)) });
+      expect(errors).toHaveLength(1);
+      expect(errors[0]).toContain(`mcp.json mcpServers["${UNSCOPED}"] ${message}`);
+    });
+
+    it('accepts a cwd rooted at the plugin or its data directory', () => {
+      for (const cwd of ['./', placeholder('PLUGIN_ROOT'), `${placeholder('PLUGIN_DATA')}/cache`]) {
+        expect(check({ ...VALID(), rootMcp: rootMcp(stdioEntry({ cwd })) }), cwd).toEqual([]);
+      }
+    });
+  });
+
+  describe('mcp.json env', () => {
+    /** VALID with the same env on both connection configs, so parity stays out of the way. */
+    const withEnv = (env: Json) => ({
+      ...VALID(),
+      rootMcp: rootMcp(stdioEntry({ env })),
+      codexMcp: codexMcp({ env }),
+    });
+    const at = `mcp.json mcpServers["${UNSCOPED}"].env`;
+
+    it('fails an empty value', () => {
+      const errors = check(withEnv({ MCP_TRANSPORT_TYPE: 'stdio', NCBI_API_KEY: '' }));
+      // The overlay's own empty-value rule fires first; the root entry gets its own error.
+      expect(errors).toHaveLength(2);
+      expect(errors[0]).toContain(`.codex-plugin/mcp.json "${UNSCOPED}".env.NCBI_API_KEY is ""`);
+      expect(errors[1]).toContain(`${at}.NCBI_API_KEY is "" — an empty value replaces`);
+      expect(errors[1]).toContain('"env_vars"');
+      expect(errors[1]).toContain('"userConfig"');
+    });
+
+    it('fails a PLUGIN_ROOT or PLUGIN_DATA key', () => {
+      const errors = check(withEnv({ PLUGIN_ROOT: '/x', PLUGIN_DATA: '/y' }));
+      expect(errors.map((e) => e.split(' — ')[0])).toEqual([
+        `${at}.PLUGIN_ROOT`,
+        `${at}.PLUGIN_DATA`,
+      ]);
+      expect(errors[0]).toContain('PLUGIN_ROOT is reserved');
+    });
+
+    it('fails any placeholder besides PLUGIN_ROOT and PLUGIN_DATA', () => {
+      const errors = check(
+        withEnv({
+          NCBI_API_KEY: placeholder('NCBI_API_KEY'),
+          REGION: placeholder('user_config.region'),
+          CACHE_DIR: `${placeholder('PLUGIN_DATA')}/cache`,
+          CONFIG: `${placeholder('PLUGIN_ROOT')}/config.json`,
+        }),
+      );
+      expect(errors.map((e) => e.split(' — ')[0])).toEqual([
+        `${at}.NCBI_API_KEY references "${placeholder('NCBI_API_KEY')}"`,
+        `${at}.REGION references "${placeholder('user_config.region')}"`,
+      ]);
+      expect(errors[0]).toContain('the server receives the literal string');
+    });
+
+    it('requires the same env as .codex-plugin/mcp.json', () => {
+      const errors = check({
+        ...VALID(),
+        rootMcp: rootMcp(
+          stdioEntry({ env: { MCP_TRANSPORT_TYPE: 'stdio', MCP_LOG_LEVEL: 'info' } }),
+        ),
+        codexMcp: codexMcp({ env: { MCP_TRANSPORT_TYPE: 'http' } }),
+      });
+      expect(errors).toEqual([
+        `${at} differs from .codex-plugin/mcp.json "${UNSCOPED}".env at MCP_TRANSPORT_TYPE, MCP_LOG_LEVEL — keep ` +
+          'the two identical: Codex starts the server from root mcp.json, and other Agent Plugins clients read nothing else',
+      ]);
+    });
+
+    it('skips env parity when the project has no .codex-plugin/mcp.json', () => {
+      const { codexMcp: _omitted, ...noCodexMcp } = VALID();
+      expect(check(noCodexMcp)).toEqual([]);
+    });
+  });
+
+  describe('Codex env_vars overlay', () => {
+    const keyed = (overrides: Json = {}) => ({
+      ...VALID(),
+      codexMcp: codexMcp({
+        env_vars: ['NCBI_API_KEY', { name: 'NCBI_ADMIN_EMAIL', source: 'local' }],
+      }),
+      ...overrides,
+    });
+
+    it('passes a keyed server whose overlay keeps the mcpServers pointer', () => {
+      expect(check(keyed())).toEqual([]);
+    });
+
+    it('fails when .codex-plugin/plugin.json is absent, naming each dropped variable', () => {
+      const errors = check(keyed({ codexPlugin: undefined }));
+      expect(errors).toEqual([
+        '.codex-plugin/mcp.json forwards NCBI_API_KEY, NCBI_ADMIN_EMAIL through "env_vars", but ' +
+          '.codex-plugin/plugin.json is absent — with root mcp.json present, Codex merges env_vars into its ' +
+          'server only through .codex-plugin/plugin.json "mcpServers": "./.codex-plugin/mcp.json", so it drops ' +
+          'each of those variables without an error',
+      ]);
+    });
+
+    it.each([
+      ['removed', undefined, 'absent'],
+      ['repointed', './mcp.json', '"./mcp.json"'],
+    ])('fails when the overlay mcpServers pointer is %s', (_label, mcpServers, shown) => {
+      const errors = check(keyed({ codexPlugin: codexPlugin({ mcpServers }) }));
+      expect(errors).toHaveLength(1);
+      expect(errors[0]).toContain(
+        `forwards NCBI_API_KEY, NCBI_ADMIN_EMAIL through "env_vars", but .codex-plugin/plugin.json "mcpServers" is ${shown}`,
+      );
+    });
+
+    it('needs no pointer for a keyless server', () => {
+      expect(check({ ...VALID(), codexPlugin: undefined })).toEqual([]);
+    });
+  });
+
+  describe('without root plugin.json (regression)', () => {
+    it('validates the overlays exactly as before and ignores a root mcp.json', () => {
+      const clientConfigSample = {
+        mcpServers: { local: { command: 'node', args: ['dist/index.js'], env: { KEY: '' } } },
+      };
+      expect(
+        check({ codexPlugin: codexPlugin(), codexMcp: codexMcp(), rootMcp: clientConfigSample }),
+      ).toEqual([]);
+      expect(
+        check({
+          codexPlugin: codexPlugin({ mcpServers: undefined }),
+          codexMcp: codexMcp({ env_vars: ['NCBI_API_KEY'] }),
+          rootMcp: rootMcp(),
+        }),
+      ).toEqual([]);
+    });
+  });
+
+  describe('standalone run', () => {
+    const SCRIPT = join(REPO_ROOT, 'scripts/lint-packaging.ts');
+    let dir: string | undefined;
+
+    afterEach(() => {
+      if (dir) rmSync(dir, { recursive: true, force: true });
+      dir = undefined;
+    });
+
+    function lint(files: Record<string, unknown>): { code: number; out: string } {
+      dir = mkdtempSync(join(tmpdir(), 'lint-packaging-root-pair-'));
+      const project = { 'package.json': { name: FULL, version: VERSION }, ...files };
+      for (const [relPath, content] of Object.entries(project)) {
+        mkdirSync(join(dir, relPath, '..'), { recursive: true });
+        writeFileSync(
+          join(dir, relPath),
+          typeof content === 'string' ? content : JSON.stringify(content),
+        );
+      }
+      const result = spawnSync('bun', ['run', SCRIPT], { cwd: dir, encoding: 'utf8' });
+      return { code: result.status ?? -1, out: `${result.stdout}${result.stderr}` };
+    }
+
+    it('passes a valid root pair', () => {
+      const { code, out } = lint({ 'plugin.json': rootPlugin(), 'mcp.json': rootMcp() });
+      expect(out).toContain('Packaging alignment OK.');
+      expect(code).toBe(0);
+    });
+
+    it('fails a plugin.json that does not parse', () => {
+      const { code, out } = lint({ 'plugin.json': '{ "name": ', 'mcp.json': rootMcp() });
+      expect(code).toBe(1);
+      expect(out).toContain('plugin.json is not a JSON object');
+    });
+
+    it('leaves a root mcp.json alone when there is no plugin.json', () => {
+      const { code, out } = lint({ 'mcp.json': { mcpServers: { local: { command: 'node' } } } });
+      expect(out).toContain('Packaging alignment OK.');
+      expect(code).toBe(0);
+    });
   });
 });
 
@@ -1429,6 +2234,359 @@ describe('lint-packaging · server.json npm launch shape (check 16, #622)', () =
       const { code, out } = lint(project(undefined, false));
       expect(out).not.toContain('server.json packages');
       expect(code).toBe(0);
+    });
+  });
+});
+
+describe('lint-packaging · published skills (check 17, #429)', () => {
+  const REPO_ROOT = join(import.meta.dirname, '..', '..', '..');
+  const template = readFileSync(join(REPO_ROOT, 'templates/_.mcpbignore'), 'utf8');
+  let dir: string | undefined;
+
+  afterEach(() => {
+    if (dir) rmSync(dir, { recursive: true, force: true });
+    dir = undefined;
+  });
+
+  type TreeEntry = string | Buffer | { symlinkTo: string };
+
+  /** A project directory holding `files` (paths from the project root); returns its path. */
+  function project(files: Record<string, TreeEntry>): string {
+    dir = mkdtempSync(join(tmpdir(), 'lint-packaging-skills-'));
+    for (const [relPath, content] of Object.entries(files)) {
+      const full = join(dir, relPath);
+      mkdirSync(join(full, '..'), { recursive: true });
+      if (typeof content === 'object' && 'symlinkTo' in content)
+        symlinkSync(content.symlinkTo, full);
+      else writeFileSync(full, content);
+    }
+    return dir;
+  }
+
+  const skillMd = (...frontmatter: string[]): string =>
+    `---\n${frontmatter.join('\n')}\n---\n\n# Guide\n`;
+  const conformant = (name: string, ...extra: string[]): string =>
+    skillMd(`name: ${name}`, `description: Chain demo_search into demo_get.`, ...extra);
+
+  /** check 17 over the project's root `skills/`, with the source `validateSkillTree`. */
+  const lintSkills = (files: Record<string, TreeEntry>): Promise<string[]> =>
+    checkPublishedSkills(join(project(files), 'skills'), validateSkillTree);
+
+  it('passes a conformant tree', async () => {
+    expect(
+      await lintSkills({
+        'skills/demo-guide/SKILL.md': conformant(
+          'demo-guide',
+          'license: Apache-2.0',
+          'compatibility: Requires network access.',
+          'allowed-tools: Bash(git:*) Read',
+          'metadata:',
+          '  author: owner',
+          '  version: "1.0"',
+        ),
+        'skills/demo-guide/references/ids.md': '# IDs\n',
+      }),
+    ).toEqual([]);
+  });
+
+  it('passes a host-specific field beyond the specification', async () => {
+    expect(
+      await lintSkills({
+        'skills/demo-guide/SKILL.md': conformant('demo-guide', 'disable-model-invocation: true'),
+      }),
+    ).toEqual([]);
+  });
+
+  describe('SDK rules, through validateSkillTree', () => {
+    it.each<[string, Record<string, TreeEntry>, string[]]>([
+      [
+        'name missing',
+        { 'skills/x/SKILL.md': skillMd('description: A guide.') },
+        ['skills/x/SKILL.md: ', 'must contain string "name"'],
+      ],
+      [
+        'name not a string',
+        { 'skills/123/SKILL.md': skillMd('name: 123', 'description: A guide.') },
+        ['skills/123/SKILL.md: ', 'must contain string "name"'],
+      ],
+      [
+        'name not the directory name',
+        { 'skills/foo/SKILL.md': conformant('bar') },
+        ['skills/foo/SKILL.md: ', 'frontmatter name "bar" must match the last path segment "foo"'],
+      ],
+      [
+        'name over 64 characters',
+        { [`skills/${'a'.repeat(65)}/SKILL.md`]: conformant('a'.repeat(65)) },
+        [`skills/${'a'.repeat(65)}/SKILL.md: `, 'name', 'must be 1-64 lowercase letters'],
+      ],
+      [
+        'name outside the pattern',
+        { 'skills/a--b/SKILL.md': conformant('a--b') },
+        [
+          'skills/a--b/SKILL.md: ',
+          'name "a--b" must be 1-64 lowercase letters, digits and single hyphens',
+        ],
+      ],
+      [
+        'description missing',
+        { 'skills/x/SKILL.md': skillMd('name: x') },
+        ['skills/x/SKILL.md: ', '"description"'],
+      ],
+      [
+        'description empty',
+        { 'skills/x/SKILL.md': skillMd('name: x', 'description: ""') },
+        ['skills/x/SKILL.md: ', 'description must be 1-1024 characters'],
+      ],
+      [
+        'compatibility empty',
+        { 'skills/x/SKILL.md': conformant('x', 'compatibility: ""') },
+        ['skills/x/SKILL.md: ', 'compatibility must be a string of 1-500 characters'],
+      ],
+      [
+        'compatibility not a string',
+        { 'skills/x/SKILL.md': conformant('x', 'compatibility: 3') },
+        ['skills/x/SKILL.md: ', 'compatibility must be a string of 1-500 characters'],
+      ],
+      [
+        'compatibility over 500 characters',
+        { 'skills/x/SKILL.md': conformant('x', `compatibility: ${'c'.repeat(501)}`) },
+        ['skills/x/SKILL.md: ', 'compatibility must be a string of 1-500 characters'],
+      ],
+      [
+        'an unquoted metadata number',
+        { 'skills/x/SKILL.md': conformant('x', 'metadata:', '  version: 1.0') },
+        ['skills/x/SKILL.md: ', 'metadata must map strings to strings'],
+      ],
+      [
+        'a multi-line quoted value',
+        { 'skills/x/SKILL.md': skillMd('name: x', 'description: "first line', '  second line"') },
+        ['skills/x/SKILL.md: ', 'line 3', 'multi-line quoted values are not supported'],
+      ],
+      [
+        'a YAML anchor',
+        { 'skills/x/SKILL.md': skillMd('name: &n x', 'description: A guide.') },
+        ['skills/x/SKILL.md: ', 'anchors, aliases and tags are not supported'],
+      ],
+      [
+        'a symlink in a skill',
+        {
+          'skills/x/SKILL.md': conformant('x'),
+          'skills/x/references/real.md': '# r\n',
+          'skills/x/references/link.md': { symlinkTo: 'real.md' },
+        },
+        ['skills/x/references/link.md: ', 'symlinks and other special files are not followed'],
+      ],
+      [
+        'a skill over 512 files',
+        Object.fromEntries([
+          ['skills/x/SKILL.md', conformant('x')],
+          ...Array.from({ length: 512 }, (_, i) => [`skills/x/r/${i}.md`, `${i}\n`]),
+        ]),
+        ['skills/x: ', 'exceeds the limit of 512 files / 16777216 bytes'],
+      ],
+      [
+        'a skill over 16 MiB',
+        {
+          'skills/x/SKILL.md': conformant('x'),
+          'skills/x/references/big.bin': Buffer.alloc(16 * 1024 * 1024),
+        },
+        ['skills/x: ', 'exceeds the limit of 512 files / 16777216 bytes'],
+      ],
+      [
+        'a SKILL.md directly under skills/',
+        { 'skills/SKILL.md': conformant('skills') },
+        ['skills/SKILL.md: ', 'a SKILL.md at the root has no skill path'],
+      ],
+    ])('fails %s, naming the file and field', async (_label, files, fragments) => {
+      const errors = await lintSkills(files);
+      expect(errors).toHaveLength(1);
+      expect(errors[0]?.startsWith(fragments[0] ?? '')).toBe(true);
+      for (const fragment of fragments.slice(1)) expect(errors[0]).toContain(fragment);
+    });
+
+    it('fails a description over 1024 characters on both the SDK rule and the project budget', async () => {
+      const errors = await lintSkills({
+        'skills/x/SKILL.md': skillMd('name: x', `description: ${'d'.repeat(1025)}`),
+      });
+      expect(errors).toEqual([
+        expect.stringMatching(/^skills\/x\/SKILL\.md: .*description must be 1-1024 characters/),
+        expect.stringMatching(/^skills\/x\/SKILL\.md "description" is 1025 characters/),
+      ]);
+    });
+  });
+
+  describe('project rules', () => {
+    /** A description field whose value is `chars` characters long, in each YAML form. */
+    const descriptions: [string, (chars: number) => string[]][] = [
+      ['a plain value', (chars) => [`description: ${'d'.repeat(chars)}`]],
+      ['a quoted value', (chars) => [`description: "${'d'.repeat(chars)}"`]],
+      // Folding joins the two lines with a space and clips to one trailing newline.
+      [
+        'a folded block scalar',
+        (chars) => ['description: >', `  ${'d'.repeat(250)}`, `  ${'d'.repeat(chars - 252)}`],
+      ],
+    ];
+
+    it.each(descriptions)(
+      'passes a 500-character description written as %s',
+      async (_label, field) => {
+        expect(
+          await lintSkills({ 'skills/x/SKILL.md': skillMd('name: x', ...field(500)) }),
+        ).toEqual([]);
+      },
+    );
+
+    it.each(descriptions)(
+      'fails a 501-character description written as %s',
+      async (_label, field) => {
+        expect(
+          await lintSkills({ 'skills/x/SKILL.md': skillMd('name: x', ...field(501)) }),
+        ).toEqual([
+          'skills/x/SKILL.md "description" is 501 characters — keep it at 500 or fewer: a host keeps every installed skill\'s description in context for the whole session',
+        ]);
+      },
+    );
+
+    it.each([
+      ['a block list', ['allowed-tools:', '  - Bash', '  - Read']],
+      ['a flow list', ['allowed-tools: [Bash, Read]']],
+      ['a boolean', ['allowed-tools: true']],
+    ])('fails allowed-tools written as %s', async (_label, field) => {
+      expect(await lintSkills({ 'skills/x/SKILL.md': conformant('x', ...field) })).toEqual([
+        'skills/x/SKILL.md "allowed-tools" is not a string — the Agent Skills specification defines it as one space-separated string of tool names',
+      ]);
+    });
+
+    /** A `SKILL.md` of `lines` newline-terminated lines: the six of `conformant('x')`, then filler. */
+    const ofLines = (lines: number) => `${conformant('x')}${'line\n'.repeat(lines - 6)}`;
+
+    it('passes a SKILL.md of 150 lines', async () => {
+      expect(ofLines(150).split('\n')).toHaveLength(151);
+      expect(await lintSkills({ 'skills/x/SKILL.md': ofLines(150) })).toEqual([]);
+    });
+
+    it('fails a SKILL.md over 150 lines', async () => {
+      expect(await lintSkills({ 'skills/x/SKILL.md': ofLines(151) })).toEqual([
+        'skills/x/SKILL.md is 151 lines — keep it at 150 or fewer and move long material into skills/x/references/',
+      ]);
+    });
+
+    it('fails a skill folder with no SKILL.md', async () => {
+      expect(
+        await lintSkills({
+          'skills/demo-guide/SKILL.md': conformant('demo-guide'),
+          'skills/notes/README.md': '# Notes\n',
+        }),
+      ).toEqual([
+        'skills/notes/ has no SKILL.md — plugin hosts and the MCP server skip a skill folder without one; add skills/notes/SKILL.md or remove the folder',
+      ]);
+    });
+
+    it('fails a SKILL.md below skills/<name>/', async () => {
+      expect(
+        await lintSkills({
+          'skills/demo-guide/SKILL.md': conformant('demo-guide'),
+          'skills/demo-guide/advanced/SKILL.md': conformant('advanced'),
+        }),
+      ).toEqual([
+        'skills/demo-guide/advanced/SKILL.md sits below skills/demo-guide/ — plugin hosts discover only skills/<name>/SKILL.md, while the MCP server serves it as a separate skill; move that skill to skills/advanced/, or rename the file if it is reference material',
+      ]);
+    });
+
+    it.each(['external', '"external"'])('fails metadata.audience: %s', async (value) => {
+      expect(
+        await lintSkills({
+          'skills/x/SKILL.md': conformant(
+            'x',
+            'metadata:',
+            '  version: "1.0"',
+            `  audience: ${value}`,
+          ),
+        }),
+      ).toEqual([
+        'skills/x/SKILL.md "metadata.audience" is "external" — the value reserved for framework-managed skills, which init copies and the skills sync tracks by it; remove "audience", which a published skill never carries',
+      ]);
+    });
+
+    it('reads audience from the frontmatter only, never the body', async () => {
+      expect(
+        await lintSkills({
+          'skills/x/SKILL.md': `${conformant('x')}\n\`\`\`yaml\naudience: external\n\`\`\`\n`,
+        }),
+      ).toEqual([]);
+    });
+  });
+
+  describe('.mcpbignore keeps the tree in the bundle', () => {
+    const FILES = ['skills/demo-guide/SKILL.md', 'skills/demo-guide/references/ids.md'];
+
+    it('passes the template, which never excludes root skills/', async () => {
+      expect(await checkSkillsKeptInBundle(template, FILES)).toEqual([]);
+    });
+
+    it.each([
+      ['/skills/', 'skills/demo-guide/SKILL.md'],
+      ['skills/', 'skills/demo-guide/SKILL.md'],
+      ['/skills/*/references/', 'skills/demo-guide/references/ids.md'],
+    ])('fails "%s", naming the file it strips', async (pattern, file) => {
+      expect(await checkSkillsKeptInBundle(`${template}${pattern}\n`, FILES)).toEqual([
+        `.mcpbignore pattern "${pattern}" strips ${file} from the bundle — root skills/ holds the skills this server publishes, which the Claude Directory reads from the bundle; remove the line`,
+      ]);
+    });
+
+    it('leaves a pattern written against node_modules/ alone', async () => {
+      expect(await checkSkillsKeptInBundle(`${template}/node_modules/**/skills/\n`, FILES)).toEqual(
+        [],
+      );
+    });
+  });
+
+  describe('standalone run', () => {
+    const SCRIPT = join(REPO_ROOT, 'scripts/lint-packaging.ts');
+    const PRE_013 = `${template}/skills/\n`;
+    const TREE = { 'skills/demo-guide/SKILL.md': conformant('demo-guide') };
+
+    function lint(files: Record<string, TreeEntry>): { code: number; out: string } {
+      const cwd = project({
+        'package.json': '{"name":"probe-mcp-server","version":"0.1.0"}',
+        ...files,
+      });
+      const result = spawnSync('bun', ['run', SCRIPT], { cwd, encoding: 'utf8' });
+      return { code: result.status ?? -1, out: `${result.stdout}${result.stderr}` };
+    }
+
+    it('prints nothing about skills and passes without a root skills/', () => {
+      const { code, out } = lint({ '.mcpbignore': template });
+      expect(out).not.toContain('skills');
+      expect(code).toBe(0);
+    });
+
+    it('passes an .mcpbignore excluding /skills/ when there is no root skills/', () => {
+      const { code, out } = lint({ '.mcpbignore': PRE_013 });
+      expect(out).toContain('Packaging alignment OK.');
+      expect(code).toBe(0);
+    });
+
+    it('passes a conformant tree beside the template .mcpbignore', () => {
+      const { code, out } = lint({ ...TREE, '.mcpbignore': template });
+      expect(out).toContain('Packaging alignment OK.');
+      expect(code).toBe(0);
+    });
+
+    it('fails an .mcpbignore excluding /skills/ beside the tree', () => {
+      const { code, out } = lint({ ...TREE, '.mcpbignore': PRE_013 });
+      expect(out).toContain(
+        '.mcpbignore pattern "/skills/" strips skills/demo-guide/SKILL.md from the bundle',
+      );
+      expect(code).toBe(1);
+    });
+
+    it('fails a tree the SDK rejects through the linter it imports', () => {
+      const { code, out } = lint({ 'skills/foo/SKILL.md': conformant('bar') });
+      expect(out).toContain(
+        'skills/foo/SKILL.md: frontmatter name "bar" must match the last path segment "foo"',
+      );
+      expect(code).toBe(1);
     });
   });
 });

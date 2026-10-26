@@ -758,12 +758,14 @@ const ALL_CHECKS: Check[] = [
     flag: '--no-packaging',
     canFix: false,
     // Validates env var alignment between manifest.json (MCPB bundle) and
-    // server.json (MCP Registry), plus plugin marketplace manifests (#240), the
-    // bundle-content guards on .mcpbignore (#343), the README version badge
-    // (#418), the Dockerfile build platform, and the launch shape of server.json
-    // npm entries (#622). Runs when any of those inputs is present; skipped
-    // cleanly when none exist — consumers on an HTTP-only deploy are unaffected.
-    // README.md, Dockerfile, and server.json are triggers in their own right:
+    // server.json (MCP Registry), plus plugin marketplace manifests (#240) and
+    // the Agent Plugins root pair (#426), the bundle-content guards on
+    // .mcpbignore (#343), the README version badge (#418), the Dockerfile build
+    // platform, the launch shape of server.json npm entries (#622), and the
+    // published root skills/ tree (#429). Runs when any of those inputs is
+    // present; skipped cleanly when none exist — consumers on an HTTP-only
+    // deploy are unaffected.
+    // README.md, Dockerfile, server.json, and skills are triggers in their own right:
     // each check must gate a project that carries no bundle or plugin metadata
     // at all, which the other inputs only covered incidentally.
     getCommand: () => {
@@ -772,10 +774,13 @@ const ALL_CHECKS: Check[] = [
         '.claude-plugin/plugin.json',
         '.codex-plugin/plugin.json',
         '.codex-plugin/mcp.json',
+        'plugin.json',
+        'mcp.json',
         '.mcpbignore',
         'README.md',
         'Dockerfile',
         'server.json',
+        'skills',
       ];
       if (!inputs.some((input) => existsSync(path.join(ROOT_DIR, input)))) return null;
       return ['bun', 'run', 'scripts/lint-packaging.ts'];
@@ -836,10 +841,12 @@ const ALL_CHECKS: Check[] = [
     canFix: false,
     // Compares canonical framework-skills/ against local mirrors (.agents/skills, .claude/skills).
     // Skipped when framework-skills/ or both mirrors are absent (non-mirrored projects),
-    // except that a pre-0.13 `skills/` tree always runs — absent or alongside
-    // `framework-skills/` — so the script's migration message surfaces. Drift is demoted to
-    // a warning via isSuccess — intentional ignores live in devcheck.config.json
-    // `skillsSync.ignore`.
+    // except that any root `skills/` always runs — absent or alongside `framework-skills/`.
+    // Usually that tree holds the skills the server publishes, which the script leaves
+    // alone; it is a pre-0.13 framework tree only when its skills carry
+    // `metadata.audience: external`, and then the script's migration message surfaces.
+    // Drift is demoted to a warning via isSuccess — intentional ignores live in
+    // devcheck.config.json `skillsSync.ignore`.
     getCommand: () => {
       const hasSkills = existsSync(path.join(ROOT_DIR, 'framework-skills'));
       const hasLegacySkills = existsSync(path.join(ROOT_DIR, 'skills'));

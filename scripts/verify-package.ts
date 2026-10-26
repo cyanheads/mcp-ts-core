@@ -875,6 +875,7 @@ const SCAFFOLD_TODO_PACKAGING = [
   '.codex-plugin/plugin.json "description" is empty',
   '.codex-plugin/plugin.json interface.longDescription is empty',
   '.codex-plugin/plugin.json interface.shortDescription is empty',
+  'plugin.json "description" is empty',
 ];
 
 type DevcheckStatus = 'FAILED' | 'PASSED' | 'SKIPPED' | 'WARNING';
@@ -991,6 +992,8 @@ async function populateScaffoldIdentity(projectDir: string, projectName: string)
   await replaceOnce(codexPlugin, '"description": ""', `"description": ${description}`);
   await replaceOnce(codexPlugin, '"shortDescription": ""', `"shortDescription": ${description}`);
   await replaceOnce(codexPlugin, '"longDescription": ""', `"longDescription": ${description}`);
+  const rootPlugin = join(projectDir, 'plugin.json');
+  await replaceOnce(rootPlugin, '"description": ""', `"description": ${description}`);
 }
 
 type DevcheckRow = { lines: string[]; status: DevcheckStatus };

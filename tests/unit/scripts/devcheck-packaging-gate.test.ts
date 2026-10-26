@@ -4,7 +4,8 @@
  * existed, so a project carrying just an `.mcpbignore` — the framework itself —
  * never had its bundle-content guards checked, and three unanchored dev-dir
  * patterns sat undetected behind a green `devcheck`. `server.json` gates the
- * step in its own right, for the npm launch-shape check (#622).
+ * step in its own right, for the npm launch-shape check (#622), and so does
+ * the Agent Plugins root pair `plugin.json` + `mcp.json` (#426).
  *
  * `devcheck.ts` resolves its project root from the SCRIPT location
  * (`scripts/..`), not the cwd, so the faithful reproduction copies both
@@ -21,7 +22,15 @@
  */
 
 import { spawnSync } from 'node:child_process';
-import { copyFileSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import {
+  copyFileSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -82,6 +91,45 @@ describe('devcheck Packaging gate (#343)', () => {
     const { code, out } = runPackagingCheck(dir);
     expect(code).toBe(0);
     expect(packagingLine(out)).toContain('SKIPPED');
+  });
+
+  describe('the Agent Plugins root pair as the only packaging input (#426)', () => {
+    /** The scaffold templates' root pair, named and versioned for this scaffold. */
+    const writeRootPair = (description: string): void => {
+      for (const file of ['plugin.json', 'mcp.json']) {
+        const template = readFileSync(resolve(REPO_ROOT, 'templates', file), 'utf-8');
+        writeFileSync(
+          resolve(dir, file),
+          template
+            .replaceAll('{{PACKAGE_NAME}}', 'scaffold')
+            .replace('"version": "0.1.0"', '"version": "0.0.0"')
+            .replace('"description": ""', `"description": "${description}"`),
+        );
+      }
+    };
+
+    it('runs on the root pair alone and passes a populated one', () => {
+      writeRootPair('A scaffolded server.');
+      const { code, out } = runPackagingCheck(dir);
+      expect(packagingLine(out)).not.toContain('SKIPPED');
+      expect(out).toContain('Packaging alignment OK.');
+      expect(code).toBe(0);
+    });
+
+    it('fails the template pair on its empty description', () => {
+      writeRootPair('');
+      const { code, out } = runPackagingCheck(dir);
+      expect(code).not.toBe(0);
+      expect(out).toContain('plugin.json "description" is empty');
+    });
+
+    it('runs on a root mcp.json alone and leaves it unchecked without plugin.json', () => {
+      writeFileSync(resolve(dir, 'mcp.json'), '{"mcpServers":{"local":{"command":"node"}}}\n');
+      const { code, out } = runPackagingCheck(dir);
+      expect(packagingLine(out)).not.toContain('SKIPPED');
+      expect(out).toContain('Packaging alignment OK.');
+      expect(code).toBe(0);
+    });
   });
 
   describe('server.json as the only packaging input (#622)', () => {
@@ -163,8 +211,8 @@ describe('devcheck Packaging gate (#343)', () => {
     expect(out).toContain('unanchored pattern');
   });
 
-  it('passes on an .mcpbignore whose dev-dir patterns are root-anchored', () => {
-    writeFileSync(resolve(dir, '.mcpbignore'), '/framework-skills/\n/.claude/\n/.agents/\n');
+  it('passes the scaffold template .mcpbignore, whose dev paths are root-anchored', () => {
+    copyFileSync(resolve(REPO_ROOT, 'templates', '_.mcpbignore'), resolve(dir, '.mcpbignore'));
     const { code, out } = runPackagingCheck(dir);
     expect(code).toBe(0);
     expect(packagingLine(out)).not.toContain('SKIPPED');
