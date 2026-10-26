@@ -25,12 +25,14 @@ const MARKUP_OPENER = /<(?:[A-Za-z/!?]|[^\s<>@]*@[^\s<>]*>)/y;
  * would read as syntax. `line` holds no line break; its leading and trailing
  * whitespace becomes numeric references, since a paragraph strips spaces and
  * tabs and a GFM table cell (markdown-it's `String.prototype.trim`) strips
- * every Unicode whitespace character.
+ * every Unicode whitespace character. U+000B (vertical tab) is the exception
+ * and stays literal: markdown-it decodes `&#11;` as U+FFFD, while the literal
+ * character reads back wherever no trim reaches it.
  */
 function escapeLine(line: string): string {
-  const lead = /^\s*/u.exec(line)?.[0] ?? '';
+  const lead = /^[^\S\v]*/u.exec(line)?.[0] ?? '';
   if (lead.length === line.length) return toReferences(line);
-  const trail = /\s*$/u.exec(line)?.[0] ?? '';
+  const trail = /[^\S\v]*$/u.exec(line)?.[0] ?? '';
   const text = line.slice(lead.length, line.length - trail.length);
   // Code points, so a neighbour outside the BMP is tested as one character.
   const chars = Array.from(text);
@@ -117,9 +119,10 @@ function toReferences(whitespace: string): string {
  *   (`abc #` → `abc \#`), which an ATX heading would drop as its closing
  *   sequence.
  * - Leading and trailing whitespace on each line, every Unicode whitespace
- *   character included, becomes a numeric reference (`&#32;`, `&#9;`,
- *   `&#160;`), since a paragraph strips spaces and tabs and a GFM table cell
- *   strips the rest.
+ *   character but U+000B included, becomes a numeric reference (`&#32;`,
+ *   `&#9;`, `&#160;`), since a paragraph strips spaces and tabs and a GFM
+ *   table cell strips the rest. A vertical tab stays literal: markdown-it
+ *   decodes its reference as U+FFFD.
  * - A line break becomes a hard break (`\` before it), so the value stays one
  *   paragraph; a final line break becomes `&#10;`, where a hard break cannot
  *   stand. CR and CRLF read back as LF.

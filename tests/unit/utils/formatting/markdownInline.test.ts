@@ -279,6 +279,14 @@ describe('escapeMarkdownInline', () => {
     expect(escapeMarkdownInline('　')).toBe('&#12288;');
   });
 
+  it('leaves an edge vertical tab literal, which markdown-it reads back from &#11; as U+FFFD', () => {
+    expect(escapeMarkdownInline('\va\v')).toBe('\va\v');
+    for (const preset of PRESETS) {
+      expectSlotReadBack('after a label', '\va', preset);
+      expectSlotReadBack('paragraph', 'a\v\n\vb', preset);
+    }
+  });
+
   it('reads a table cell edged with a space and an ideographic space back under gfm', () => {
     expectSlotReadBack('table cell', ' a　', 'gfm');
   });
