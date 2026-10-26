@@ -10,9 +10,10 @@
  */
 
 import type { CallToolResult, ContentBlock } from '@modelcontextprotocol/server';
+import fc from 'fast-check';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { z } from 'zod';
-import { readCommonMark } from '../../../helpers/commonmark.js';
+import { readCommonMark, readCommonMarkCodeLiterals } from '../../../helpers/commonmark.js';
 import { makeServerContext } from '../../../helpers/server-context.js';
 
 // ---------------------------------------------------------------------------
@@ -234,7 +235,7 @@ describe('enrichment block', () => {
       const result = await handler({ q: 'x' }, makeServerContext());
 
       const trailer = lastText(result.content);
-      expect(trailer).toContain('Query: parsed terms');
+      expect(trailer).toContain('Query: `parsed terms`');
       expect(trailer).toContain('42 total');
       expect(trailer).toContain('> No matches — try broader terms.');
       // Helpers write the conventional keys into structuredContent.
@@ -334,9 +335,9 @@ describe('enrichment block', () => {
         appliedFilters: { range: '2020', types: ['any'] },
         scopes: ['titles', 'abstracts'],
       });
-      // The JSON of an object value is escaped like a string value (#640).
+      // The JSON of an object value renders as a code literal, like a string value.
       expect(lastText(result.content)).toBe(
-        '\n\nRange 2020; types any\n**scopes:** \\["titles","abstracts"\\]',
+        '\n\nRange 2020; types any\n**scopes:** `["titles","abstracts"]`',
       );
     });
   });
@@ -545,10 +546,12 @@ describe('enrichment block', () => {
     });
   });
 
-  describe('caller strings in echo, default, and delta lines (#640)', () => {
+  describe('caller strings in echo, default, and delta lines (#640, #785)', () => {
     const literalBlock = {
       effectiveQuery: z.string().optional().describe('query as parsed'),
       since: z.string().optional().describe('lower date bound as sent'),
+      nextCursor: z.string().optional().describe('continuation cursor'),
+      sql: z.string().optional().describe('SQL as run'),
       title: z
         .object({
           before: z.string().describe('title before'),
@@ -585,35 +588,35 @@ describe('enrichment block', () => {
           ctx.enrich.echo(
             `q=${JSON.stringify('sunflowers [x](https://evil.example) <b>bold</b> *emphasis*')}`,
           ),
-        'Query: q="sunflowers [x](https://evil.example) <b>bold</b> *emphasis*"',
+        'Query: ⟨code_inline:q="sunflowers [x](https://evil.example) <b>bold</b> *emphasis*"⟩',
       ],
       [
         'a default scalar holding emphasis',
         (ctx: any) => ctx.enrich({ since: '_2026_ *today*' }),
-        '⟨strong⟩since:⟨/strong⟩ _2026_ *today*',
+        '⟨strong⟩since:⟨/strong⟩ ⟨code_inline:_2026_ *today*⟩',
       ],
       [
         'a delta holding a code span and raw HTML',
         (ctx: any) =>
           ctx.enrich.delta({ field: 'title', before: 'Old `x`', after: 'New <i>y</i>' }),
-        '⟨strong⟩title:⟨/strong⟩ Old `x` → New <i>y</i>',
+        '⟨strong⟩title:⟨/strong⟩ ⟨code_inline:Old `x`⟩ → ⟨code_inline:New <i>y</i>⟩',
       ],
       [
         'an echo whose second line opens a list',
         (ctx: any) => ctx.enrich.echo('line one\n- line two'),
-        'Query: line one\n- line two',
+        'Query:\n\n⟨fence:line one\n- line two⟩',
       ],
       [
         'the JSON of an object value',
         (ctx: any) => ctx.enrich({ scopes: ['*title*', 'a_b'] }),
-        '⟨strong⟩scopes:⟨/strong⟩ ["*title*","a_b"]',
+        '⟨strong⟩scopes:⟨/strong⟩ ⟨code_inline:["*title*","a_b"]⟩',
       ],
     ])('reads back %s as written', async (_label, enrich, expected) => {
       const trailer = await trailerFor('literal_trailer', enrich);
       expect(readCommonMark(trailer)).toBe(expected);
     });
 
-    it('renders the escaped bytes for each arm', async () => {
+    it('renders the code-literal bytes for each arm', async () => {
       const trailer = await trailerFor('literal_trailer_bytes', (ctx) => {
         ctx.enrich.echo('a *b*');
         ctx.enrich({ since: '_x_' });
@@ -622,7 +625,122 @@ describe('enrichment block', () => {
       });
 
       expect(trailer).toBe(
-        '\n\nQuery: a \\*b\\*\n**since:** \\_x\\_\n**title:** \\`a\\` → \\<b>\n**flag:** false',
+        '\n\nQuery: `a *b*`\n**since:** `_x_`\n**title:** `` `a` `` → `<b>`\n**flag:** false',
+      );
+    });
+
+    it('renders a query, a cursor, and multi-line SQL as values an agent can copy back', async () => {
+      const trailer = await trailerFor('literal_trailer_copy_back', (ctx) => {
+        ctx.enrich({
+          effectiveQuery: 'cat:astro-ph* AND submittedDate:[202601010000 TO 202602010000]',
+          nextCursor: 'eyJvIjoyNX0_',
+          sql: 'SELECT *\nFROM t',
+        });
+      });
+
+      expect(trailer).toBe(
+        '\n\n**effectiveQuery:** `cat:astro-ph* AND submittedDate:[202601010000 TO 202602010000]`\n**nextCursor:** `eyJvIjoyNX0_`\n**sql:** \n```\nSELECT *\nFROM t\n```\n',
+      );
+      expect(readCommonMarkCodeLiterals(trailer)).toEqual([
+        'cat:astro-ph* AND submittedDate:[202601010000 TO 202602010000]',
+        'eyJvIjoyNX0_',
+        'SELECT *\nFROM t',
+      ]);
+    });
+
+    it('sizes a fence past a backtick run in a multi-line value', async () => {
+      const trailer = await trailerFor('literal_trailer_fence_size', (ctx) => {
+        ctx.enrich({ sql: '```\nx\n```' });
+      });
+
+      expect(trailer).toBe('\n\n**sql:** \n````\n```\nx\n```\n````\n');
+      expect(readCommonMarkCodeLiterals(trailer)).toEqual(['```\nx\n```']);
+    });
+
+    it('renders an empty string as nothing after the label', async () => {
+      const trailer = await trailerFor('literal_trailer_empty', (ctx) => {
+        ctx.enrich({ since: '' });
+      });
+
+      expect(trailer).toBe('\n\n**since:** ');
+    });
+
+    /** A string drawn from the runs a code literal must survive. */
+    const literalText = fc
+      .array(
+        fc.oneof(
+          {
+            weight: 6,
+            arbitrary: fc.constantFrom(
+              ...Array.from({ length: 95 }, (_, i) => String.fromCharCode(32 + i)),
+            ),
+          },
+          {
+            weight: 3,
+            arbitrary: fc.constantFrom(
+              '`',
+              '``',
+              '```',
+              ' ',
+              '  ',
+              '\t',
+              '|',
+              ':-',
+              '&amp;',
+              '# ',
+              '> ',
+              '1. ',
+              '😀',
+              ' ',
+            ),
+          },
+          {
+            weight: 1,
+            arbitrary: fc.constantFrom('\n', '\r\n', '\r', '\n\n', '\n```\n', '\n    x', '\n---'),
+          },
+        ),
+        { maxLength: 20 },
+      )
+      .map((parts) => parts.join(''));
+
+    it('reads every string and object JSON back exactly under commonmark and gfm', async () => {
+      await fc.assert(
+        fc.asyncProperty(
+          fc.record(
+            {
+              effectiveQuery: literalText,
+              since: literalText,
+              title: fc.record({ before: literalText, after: literalText }),
+              scopes: fc.array(literalText, { maxLength: 2 }),
+              flag: fc.boolean(),
+            },
+            { requiredKeys: [] },
+          ),
+          async (fields) => {
+            const trailer = await trailerFor('literal_trailer_property', (ctx) => {
+              if (fields.effectiveQuery !== undefined) ctx.enrich.echo(fields.effectiveQuery);
+              if (fields.since !== undefined) ctx.enrich({ since: fields.since });
+              if (fields.title !== undefined) ctx.enrich.delta({ field: 'title', ...fields.title });
+              if (fields.scopes !== undefined) ctx.enrich({ scopes: fields.scopes });
+              if (fields.flag !== undefined) ctx.enrich({ flag: fields.flag });
+            });
+            const expected = [
+              fields.effectiveQuery,
+              fields.since,
+              fields.title?.before,
+              fields.title?.after,
+              fields.scopes && JSON.stringify(fields.scopes),
+            ]
+              .filter((value): value is string => value !== undefined && value !== '')
+              .map((value) => value.replace(/\r\n?/g, '\n'));
+            for (const preset of ['commonmark', 'gfm'] as const) {
+              expect(readCommonMarkCodeLiterals(trailer, preset), JSON.stringify(trailer)).toEqual(
+                expected,
+              );
+            }
+          },
+        ),
+        { numRuns: 300 },
       );
     });
   });
@@ -679,7 +797,7 @@ describe('enrichment block', () => {
 
     it.each([
       ['total', (ctx: any) => ctx.enrich.total(0), '**0 total**'],
-      ['echo', (ctx: any) => ctx.enrich.echo('product_name=xyz'), 'Query: product_name=xyz'],
+      ['echo', (ctx: any) => ctx.enrich.echo('product_name=xyz'), 'Query: `product_name=xyz`'],
       [
         'delta',
         (ctx: any) => ctx.enrich.delta({ field: 'sizeInBytes', before: 0, after: 68 }),
@@ -713,7 +831,7 @@ describe('enrichment block', () => {
 
       expect(lazyContinuationLines(trailer)).toEqual([]);
       expect(trailer).toBe(
-        '\n\n> No recalls matched that filter.\n\n**0 total**\nQuery: product_name=xyz\n**pageSize:** 25',
+        '\n\n> No recalls matched that filter.\n\n**0 total**\nQuery: `product_name=xyz`\n**pageSize:** 25',
       );
     });
 
@@ -819,7 +937,7 @@ describe('enrichment block', () => {
       });
 
       // Single `\n` between ordinary scalar lines — the compact layout is unchanged.
-      expect(trailer).toBe('\n\nQuery: parsed terms\n**42 total**\n**pageSize:** 25');
+      expect(trailer).toBe('\n\nQuery: `parsed terms`\n**42 total**\n**pageSize:** 25');
     });
   });
 });

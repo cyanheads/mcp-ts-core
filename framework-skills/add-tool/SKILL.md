@@ -4,7 +4,7 @@ description: >
   Scaffold a new MCP tool definition. Use when the user asks to add a tool, create a new tool, or implement a new capability for the server.
 metadata:
   author: cyanheads
-  version: "2.36"
+  version: "2.37"
   audience: external
   type: reference
 ---
@@ -106,7 +106,10 @@ export const {{TOOL_EXPORT}} = tool('{{tool_name}}', {
     ctx.enrich.echo(input.query);
     ctx.enrich.total(items.length);
     if (items.length === 0) {
-      ctx.enrich.notice(`No items matched "${input.query}". Try broader terms or check the spelling.`);
+      // A notice is authored Markdown, so the caller's text inside it is escaped.
+      ctx.enrich.notice(
+        `No items matched "${escapeMarkdownInline(input.query)}". Try broader terms or check the spelling.`,
+      );
     }
     return { items };
   },
@@ -122,7 +125,9 @@ export const {{TOOL_EXPORT}} = tool('{{tool_name}}', {
     // Upstream text goes through escapeMarkdownInline so it reads back as written.
     for (const item of result.items) {
       lines.push(`## ${escapeMarkdownInline(item.name)}`);
-      lines.push(`**ID:** ${item.id} | **Status:** ${item.status}`);
+      lines.push(
+        `**ID:** ${escapeMarkdownInline(item.id)} | **Status:** ${escapeMarkdownInline(item.status)}`,
+      );
       if (item.description) lines.push(escapeMarkdownInline(item.description));
     }
     return [{ type: 'text', text: lines.join('\n') }];
@@ -427,7 +432,9 @@ async handler(input, ctx) {
   const res = await search(input.query, input.limit);
   ctx.enrich.echo(res.parsed);   // → structuredContent.effectiveQuery + "Query: …" trailer
   ctx.enrich.total(res.total);   // → structuredContent.totalCount + "N total" trailer
-  if (res.items.length === 0) ctx.enrich.notice(`No matches for "${input.query}".`);
+  if (res.items.length === 0) {
+    ctx.enrich.notice(`No matches for "${escapeMarkdownInline(input.query)}".`); // authored Markdown
+  }
   return { items: res.items };   // enrichment never rides in the domain return
 },
 ```
@@ -443,13 +450,13 @@ enrichment: {
 },
 enrichmentTrailer: {
   totalFound: { label: 'Total Found' },                                  // → "**Total Found:** 2990"
-  appliedFilters: { render: (f) => `### Filters\n- Range: ${f.dateRange}` }, // markdown, not JSON
+  appliedFilters: { render: (f) => `### Filters\n- Range: ${escapeMarkdownInline(f.dateRange)}` }, // markdown, not JSON
 },
 ```
 
 `structuredContent` always keeps the full structured value; `enrichmentTrailer` only controls the human-facing `content[]` line.
 
-**Pass echo, delta, and generic values raw.** They are data: the framework renders their strings, and an object's JSON, through `escapeMarkdownInline()`, so a query holding `*`, `[x](y)`, or a line-leading `- ` reads back as written while numbers, booleans, and `null` render as themselves. Escaping first would show the backslashes in `structuredContent` too. Authored text stays live Markdown — a `render` result, a `label`, the `total` line, the `notice` blockquote — so escape any untrusted text you embed in a `notice` or `render` yourself.
+**Pass echo, delta, and generic values raw.** They are data, often a value the agent copies into its next call — a query, a cursor, SQL — so the framework renders their strings, and an object's JSON, as code literals: a code span (`` `cat:astro-ph*` ``), or a fenced block on its own lines when the value holds a line break. A query holding `*`, `[x](y)`, or a line-leading `- ` reads back as written with no backslash to carry into the next call, an empty string renders as nothing, and numbers, booleans, and `null` render as themselves. Escaping or backtick-wrapping first would show in `structuredContent` too. Authored text stays live Markdown — a `render` result, a `label`, the `total` line, the `notice` blockquote — so escape any untrusted text you embed in a `notice` or `render` yourself.
 
 ### Image / audio output belongs in `ctx.content`
 
@@ -480,7 +487,7 @@ format: (r) => [{
 }],
 ```
 
-Never defang a value (`https[:]//`, HTML entities): that changes the data on one surface only. Markdown the tool authors — headings, `**Label:**`, list markers — stays live; escape what goes inside it. A heading holds one line, so keep multi-line values out of headings: the escaper keeps a value with line breaks in one paragraph through hard breaks.
+Never defang a value (`https[:]//`, HTML entities): that changes the data on one surface only. Markdown the tool authors — headings, `**Label:**`, list markers — stays live; escape what goes inside it. The escaped value reads back in a paragraph, after a label, and in a heading, list item, block quote, or table cell. Headings and table cells hold one line, so keep multi-line values out of them: the escaper keeps a value with line breaks in one paragraph, list item, or quote through hard breaks, and a heading or table row ends at the break.
 
 ### Capped lists must disclose truncation
 
@@ -586,7 +593,7 @@ async handler(input, ctx) {
   const results = await search(input);
   if (results.length === 0) {
     ctx.enrich.notice(
-      `No items matched status="${input.status}" in project "${input.project}". `
+      `No items matched status="${escapeMarkdownInline(input.status)}" in project "${escapeMarkdownInline(input.project)}". `
         + `Try a broader status filter or verify the project name.`,
     );
   }
@@ -649,8 +656,8 @@ output: z.object({
 format: (result) => [{
   type: 'text',
   text: result.repos.map((repo) => [
-    `## ${repo.name}`,
-    `**ID:** ${repo.id}`,
+    `## ${escapeMarkdownInline(repo.name)}`,
+    `**ID:** ${escapeMarkdownInline(repo.id)}`,
     typeof repo.archived === 'boolean'
       ? `**Archived:** ${repo.archived ? 'Yes' : 'No'}`
       : '**Archived:** Not available',
@@ -885,7 +892,7 @@ const hits = items.filter((it) => {
 });
 if (hits.length === 0) {
   ctx.enrich.notice(
-    `No name matched "${input.nameContains}". Call the tool without a filter to browse the full list.`,
+    `No name matched "${escapeMarkdownInline(input.nameContains)}". Call the tool without a filter to browse the full list.`,
   );
 }
 return { items: hits };

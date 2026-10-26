@@ -23,12 +23,14 @@ const MARKUP_OPENER = /<(?:[A-Za-z/!?]|[^\s<>@]*@[^\s<>]*>)/y;
 /**
  * Escapes the characters on one line that a CommonMark inline or block parse
  * would read as syntax. `line` holds no line break; its leading and trailing
- * spaces and tabs become numeric references, since a paragraph strips them.
+ * whitespace becomes numeric references, since a paragraph strips spaces and
+ * tabs and a GFM table cell (markdown-it's `String.prototype.trim`) strips
+ * every Unicode whitespace character.
  */
 function escapeLine(line: string): string {
-  const lead = /^[ \t]*/.exec(line)?.[0] ?? '';
+  const lead = /^\s*/u.exec(line)?.[0] ?? '';
   if (lead.length === line.length) return toReferences(line);
-  const trail = /[ \t]*$/.exec(line)?.[0] ?? '';
+  const trail = /\s*$/u.exec(line)?.[0] ?? '';
   const text = line.slice(lead.length, line.length - trail.length);
   // Code points, so a neighbour outside the BMP is tested as one character.
   const chars = Array.from(text);
@@ -63,6 +65,10 @@ function escapeLine(line: string): string {
   // a heading, quote, list, rule, or setext underline when no indentation
   // precedes it — and indentation here is always a reference.
   if (lead === '') core = escapeLineStart(core);
+  // An ATX heading drops a `#` run that ends its line after a space or tab as
+  // its closing sequence; escaping the run's last `#` keeps it text. Trailing
+  // whitespace is a reference, which already ends the run.
+  if (trail === '') core = core.replace(/(?<=[ \t]#*)#$/, '\\#');
   return `${toReferences(lead)}${core}${toReferences(trail)}`;
 }
 
@@ -85,8 +91,9 @@ function escapeLineStart(core: string): string {
   return core.replace(/^(\d{1,9})([.)])(?=[ \t]|$)/, '$1\\$2');
 }
 
+/** Each whitespace character as its decimal numeric reference (`&#32;`, `&#9;`, `&#160;`). */
 function toReferences(whitespace: string): string {
-  return whitespace.replace(/[ \t]/g, (ch) => (ch === ' ' ? '&#32;' : '&#9;'));
+  return whitespace.replace(/\s/gu, (ch) => `&#${ch.codePointAt(0)};`);
 }
 
 /**
@@ -97,7 +104,8 @@ function toReferences(whitespace: string): string {
  * `structuredContent` does.
  *
  * Only what can parse as syntax is escaped, so ordinary text stays readable:
- * `<=50`, `AT&T`, `C# 12`, `snake_case`, and `C:\Users\x` come back unchanged.
+ * `<=50`, `AT&T`, `C#`, `C# 12`, `a # b`, `snake_case`, and `C:\Users\x` come
+ * back unchanged.
  * - A backslash before ASCII punctuation, whitespace, or the end of the line.
  * - `` ` `` `*` `[` `]` `|` `~` everywhere, and `_` unless a letter or digit
  *   sits on both sides of it.
@@ -105,17 +113,25 @@ function toReferences(whitespace: string): string {
  *   entity-shaped run (`&copy;`, `&#123;`).
  * - At the start of every line: `#`, `>`, a list marker, a thematic break, a
  *   setext underline, and a GFM table delimiter row.
- * - Leading and trailing spaces and tabs on each line become `&#32;` / `&#9;`,
- *   since a paragraph strips them.
+ * - At the end of every line, the last `#` of a run a space or tab precedes
+ *   (`abc #` → `abc \#`), which an ATX heading would drop as its closing
+ *   sequence.
+ * - Leading and trailing whitespace on each line, every Unicode whitespace
+ *   character included, becomes a numeric reference (`&#32;`, `&#9;`,
+ *   `&#160;`), since a paragraph strips spaces and tabs and a GFM table cell
+ *   strips the rest.
  * - A line break becomes a hard break (`\` before it), so the value stays one
  *   paragraph; a final line break becomes `&#10;`, where a hard break cannot
  *   stand. CR and CRLF read back as LF.
  *
- * The output is inline text: it can follow a label on the same line
- * (`Error: ${escapeMarkdownInline(message)}`) or start a line of its own.
- * Two encoded values placed edge to edge can still form syntax neither holds
- * (`<` then `b>`), so separate them with authored text. A NUL character is
- * outside the guarantee — CommonMark replaces it with U+FFFD.
+ * The output is inline text, and reads back exactly in these slots: a value
+ * of one line in a paragraph, after a label on the same line
+ * (`Error: ${escapeMarkdownInline(message)}`), and in an ATX heading, list
+ * item, block quote, or GFM table cell; a value with line breaks in a
+ * paragraph, list item, or block quote, since a heading or table row ends at
+ * the line break. Two encoded values placed edge to edge can still form syntax
+ * neither holds (`<` then `b>`), so separate them with authored text. A NUL
+ * character is outside the guarantee — CommonMark replaces it with U+FFFD.
  *
  * @example
  * ```ts

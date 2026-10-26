@@ -43,17 +43,63 @@ function readInline(children: Token[]): string {
  * (line breaks as `\n`), joined by a blank line, with every node that is not
  * plain text named in place — `⟨strong⟩…⟨/strong⟩`, `⟨code_inline:x⟩`,
  * `⟨bullet_list_open⟩` — so an expectation written as plain text fails on any
- * live syntax.
+ * live syntax. A fenced or indented code block reads as `⟨fence:…⟩` or
+ * `⟨code_block:…⟩` holding its content without the line break that ends its
+ * last line, so `⟨fence:a\nb⟩` is a block whose lines are `a` and `b`.
  */
 export function readCommonMark(markdown: string, preset: CommonMarkPreset = 'gfm'): string {
   const parts: string[] = [];
   for (const token of parsers[preset].parse(markdown, {})) {
     if (token.type === 'inline') parts.push(readInline(token.children ?? []));
-    else if (token.type !== 'paragraph_open' && token.type !== 'paragraph_close') {
+    else if (token.type === 'fence' || token.type === 'code_block') {
+      parts.push(`⟨${token.type}:${token.content.replace(/\n$/, '')}⟩`);
+    } else if (token.type !== 'paragraph_open' && token.type !== 'paragraph_close') {
       parts.push(`⟨${token.type}⟩`);
     }
   }
   return parts.join('\n\n');
+}
+
+/**
+ * The block structure of `markdown` and the text of each inline run in it, in
+ * document order — a heading's text, a list item's, each table cell's — read
+ * as {@link readCommonMark} reads inline text. Asserts what one Markdown slot
+ * holds: `## ${value}` must yield a `heading_open` and exactly one inline run
+ * equal to the value.
+ */
+export function readCommonMarkInlines(
+  markdown: string,
+  preset: CommonMarkPreset = 'gfm',
+): { blocks: string[]; inlines: string[] } {
+  const blocks: string[] = [];
+  const inlines: string[] = [];
+  for (const token of parsers[preset].parse(markdown, {})) {
+    if (token.type === 'inline') inlines.push(readInline(token.children ?? []));
+    else blocks.push(token.type);
+  }
+  return { blocks, inlines };
+}
+
+/**
+ * The content of every code literal `markdown` parses to, in document order:
+ * each inline code span, and each fenced or indented code block without the
+ * line break that ends its last line.
+ */
+export function readCommonMarkCodeLiterals(
+  markdown: string,
+  preset: CommonMarkPreset = 'gfm',
+): string[] {
+  const literals: string[] = [];
+  for (const token of parsers[preset].parse(markdown, {})) {
+    if (token.type === 'fence' || token.type === 'code_block') {
+      literals.push(token.content.replace(/\n$/, ''));
+    } else if (token.type === 'inline') {
+      for (const child of token.children ?? []) {
+        if (child.type === 'code_inline') literals.push(child.content);
+      }
+    }
+  }
+  return literals;
 }
 
 /** A link or image `markdown` parses to when it is the whole paragraph, else `undefined`. */

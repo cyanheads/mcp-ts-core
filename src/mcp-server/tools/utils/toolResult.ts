@@ -12,6 +12,7 @@ import type { Context, EnrichmentStore } from '@/core/context.js';
 import { readContentStore, readEnrichmentStore } from '@/core/context.js';
 import { parseOutputContract } from '@/mcp-server/outputContract.js';
 import { internalError, type JsonRpcErrorCode } from '@/types-global/errors.js';
+import { codeFence, codeSpan } from '@/utils/formatting/codeSpan.js';
 import { escapeMarkdownInline } from '@/utils/formatting/markdownInline.js';
 import { ErrorHandler } from '@/utils/internal/error-handler/errorHandler.js';
 import { readWireErrorData } from '@/utils/internal/error-handler/helpers.js';
@@ -217,15 +218,29 @@ export function parseToolOutput(def: AnyToolDefinition, value: unknown): Record<
 }
 
 /**
+ * `value` as a code literal a CommonMark parse reads back exactly: nothing for
+ * the empty string, a {@link codeSpan} for one line, and for a value holding a
+ * line break a {@link codeFence} on lines of its own — a code span reads a line
+ * break back as a space, and a closing fence with text after it on its line
+ * does not close. CR and CRLF read back as LF.
+ */
+function codeLiteral(value: string): string {
+  if (value === '') return '';
+  if (!/[\r\n]/.test(value)) return codeSpan(value);
+  return `\n${codeFence(value.replace(/\r\n?/g, '\n'))}\n`;
+}
+
+/**
  * Renders an enrichment value as compact trailer text for the echo, delta, and
- * default arms. A string, and the JSON of an object, is caller or upstream data,
- * so it goes through {@link escapeMarkdownInline} and a CommonMark parse reads
- * it back as written (#640); a number, boolean, or `null` renders as itself.
+ * default arms. A string, and the JSON of an object, is caller or upstream data
+ * an agent may copy into its next call — a query, a cursor, SQL — so it renders
+ * as a {@link codeLiteral}, which reads back as written with no escape to carry
+ * along (#785); a number, boolean, or `null` renders as itself.
  */
 function formatEnrichmentScalar(value: unknown): string {
   if (value == null) return String(value);
-  if (typeof value === 'object') return escapeMarkdownInline(JSON.stringify(value));
-  if (typeof value === 'string') return escapeMarkdownInline(value);
+  if (typeof value === 'object') return codeLiteral(JSON.stringify(value));
+  if (typeof value === 'string') return codeLiteral(value);
   return String(value);
 }
 
@@ -276,10 +291,11 @@ function joinTrailerFields(fields: string[]): string {
  *      `JSON.stringify`-ing non-scalars.
  *
  * Echo, delta, and default values are data, rendered through
- * {@link formatEnrichmentScalar} so their Markdown-active characters read back
- * literally. Authored text stays live Markdown: a `render` result, a `label`,
- * the `total` line, and the `notice` blockquote, whose author escapes any
- * untrusted text embedded in it.
+ * {@link formatEnrichmentScalar} as code literals, so their Markdown-active
+ * characters read back literally and carry no escapes into a call that reuses
+ * them. Authored text stays live Markdown: a `render` result, a `label`, the
+ * `total` line, and the `notice` blockquote, whose author escapes any untrusted
+ * text embedded in it.
  *
  * `parsed` is the validated effective output, so renderers receive the typed,
  * post-parse value rather than the raw accumulator entry. The rendered markdown

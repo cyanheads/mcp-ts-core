@@ -2,7 +2,7 @@
  * @fileoverview Markdown builder utility for creating well-structured, semantic markdown content
  * @module utils/formatting/markdownBuilder
  */
-import { codeSpan } from '@/utils/formatting/codeSpan.js';
+import { codeFence, codeSpan } from '@/utils/formatting/codeSpan.js';
 import { markdownImage, markdownLink } from '@/utils/formatting/markdownInline.js';
 
 /**
@@ -206,13 +206,7 @@ export class MarkdownBuilder {
    * ```
    */
   codeBlock(content: string, language = ''): this {
-    // Iterated rather than collected: a payload that is mostly backticks yields
-    // as many runs as it has characters, and arbitrary third-party text is
-    // exactly the input this guards.
-    let longestRun = 0;
-    for (const [run] of content.matchAll(/`+/g)) longestRun = Math.max(longestRun, run.length);
-    const fence = '`'.repeat(Math.max(3, longestRun + 1));
-    this.sections.push(`${fence}${language}\n${content}\n${fence}\n\n`);
+    this.sections.push(`${codeFence(content, language)}\n\n`);
     return this;
   }
 

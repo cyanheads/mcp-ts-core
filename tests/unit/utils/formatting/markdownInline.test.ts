@@ -15,6 +15,7 @@ import {
 import {
   type CommonMarkPreset,
   readCommonMark,
+  readCommonMarkInlines,
   readCommonMarkTarget,
 } from '../../../helpers/commonmark.js';
 
@@ -88,6 +89,86 @@ const markdownishText = fc
   )
   .map((parts) => parts.join(''));
 
+/**
+ * {@link markdownishText} with the runs an ATX heading or a table cell reads
+ * as syntax spliced in: a `#` run after a space or tab, and Unicode whitespace
+ * that markdown-it's cell `trim()` strips.
+ */
+const slotText = fc
+  .array(
+    fc.oneof(
+      { weight: 3, arbitrary: markdownishText },
+      {
+        weight: 1,
+        arbitrary: fc.constantFrom(' #', ' ##', '\t#', '#', '# ', '﻿', ' ', ' '),
+      },
+    ),
+    { maxLength: 4 },
+  )
+  .map((parts) => parts.join(''));
+
+/** {@link slotText} with its line breaks removed: a value a heading or table cell can hold. */
+const slotLine = slotText.map((text) => text.replace(/[\r\n]/g, ''));
+
+/**
+ * Markdown slots a `format()` interpolates an encoded value into, each with the
+ * container its parse must open and the inline runs it must hold for `value`:
+ * the slot's own authored text around the value, and for a table the header
+ * cell before it. Any other run — a value split across two blocks — fails.
+ */
+const SLOTS = {
+  paragraph: { wrap: (e: string) => e, block: 'paragraph_open', runs: (v: string) => [v] },
+  heading: { wrap: (e: string) => `## ${e}`, block: 'heading_open', runs: (v: string) => [v] },
+  'list item': {
+    wrap: (e: string) => `- ${e}`,
+    block: 'bullet_list_open',
+    runs: (v: string) => [v],
+  },
+  'ordered item': {
+    wrap: (e: string) => `1. ${e}`,
+    block: 'ordered_list_open',
+    runs: (v: string) => [v],
+  },
+  'block quote': {
+    wrap: (e: string) => `> ${e}`,
+    block: 'blockquote_open',
+    runs: (v: string) => [v],
+  },
+  'after a label': {
+    wrap: (e: string) => `**Label:** ${e}`,
+    block: 'paragraph_open',
+    runs: (v: string) => [`⟨strong⟩Label:⟨/strong⟩ ${v}`],
+  },
+  'table cell': {
+    wrap: (e: string) => `| h |\n| - |\n| ${e} |`,
+    block: 'td_open',
+    runs: (v: string) => ['h', v],
+  },
+} as const;
+
+type Slot = keyof typeof SLOTS;
+
+/** Asserts `text`, encoded into `slot`, reads back as exactly `text` under `preset`. */
+function expectSlotReadBack(slot: Slot, text: string, preset: CommonMarkPreset): void {
+  const { wrap, block, runs } = SLOTS[slot];
+  const { blocks, inlines } = readCommonMarkInlines(wrap(escapeMarkdownInline(text)), preset);
+  expect(blocks, JSON.stringify(text)).toContain(block);
+  expect(inlines, JSON.stringify(text)).toEqual(runs(asParsed(text)));
+}
+
+/** Slots holding a value of one line, and the presets each is read under; a table is GFM only. */
+const SINGLE_LINE_SLOTS: ReadonlyArray<readonly [Slot, CommonMarkPreset]> = [
+  ...(
+    ['paragraph', 'heading', 'list item', 'ordered item', 'block quote', 'after a label'] as const
+  ).flatMap((slot) => PRESETS.map((preset) => [slot, preset] as const)),
+  ['table cell', 'gfm'],
+];
+
+/** Slots holding a value with line breaks: a heading or table row ends at the break. */
+const MULTI_LINE_SLOTS: ReadonlyArray<readonly [Slot, CommonMarkPreset]> = (
+  ['paragraph', 'list item', 'ordered item', 'block quote'] as const
+).flatMap((slot) => PRESETS.map((preset) => [slot, preset] as const));
+
 describe('escapeMarkdownInline', () => {
   it('matches the documented example', () => {
     expect(escapeMarkdownInline('A*p* <b>x</b>\n- y')).toBe('A\\*p\\* \\<b>x\\</b>\\\n\\- y');
@@ -146,7 +227,9 @@ describe('escapeMarkdownInline', () => {
       '<=50',
       'x >=1',
       'AT&T',
+      'C#',
       'C# 12',
+      'a # b',
       '3.14',
       '-5',
       'snake_case',
@@ -171,6 +254,60 @@ describe('escapeMarkdownInline', () => {
   it('is the identity on the empty string', () => {
     expect(escapeMarkdownInline('')).toBe('');
   });
+
+  it('escapes the last # of a run a space or tab precedes at the end of a line', () => {
+    expect(escapeMarkdownInline('abc #')).toBe('abc \\#');
+    expect(escapeMarkdownInline('abc ##')).toBe('abc #\\#');
+    expect(escapeMarkdownInline('a\t#')).toBe('a\t\\#');
+    expect(escapeMarkdownInline('# #')).toBe('\\# \\#');
+    expect(escapeMarkdownInline('a #\nb #')).toBe('a \\#\\\nb \\#');
+    // Trailing whitespace is a reference, which already ends the run.
+    expect(escapeMarkdownInline('abc # ')).toBe('abc #&#32;');
+  });
+
+  it.each(PRESETS)(
+    'reads a value ending in a space- or tab-preceded # run back in a heading under %s',
+    (preset) => {
+      for (const text of ['abc #', 'abc ##', 'a\t#', '# #', 'C#', 'C# 12', 'a # b', 'Issue #']) {
+        expectSlotReadBack('heading', text, preset);
+      }
+    },
+  );
+
+  it('encodes edge Unicode whitespace as numeric references', () => {
+    expect(escapeMarkdownInline(' a　')).toBe('&#160;a&#12288;');
+    expect(escapeMarkdownInline('　')).toBe('&#12288;');
+  });
+
+  it('reads a table cell edged with a space and an ideographic space back under gfm', () => {
+    expectSlotReadBack('table cell', ' a　', 'gfm');
+  });
+
+  it.each(SINGLE_LINE_SLOTS)(
+    'reads arbitrary single-line text back exactly in a %s under %s',
+    (slot, preset) => {
+      fc.assert(
+        fc.property(slotLine, (text) => {
+          fc.pre(text !== '');
+          expectSlotReadBack(slot, text, preset);
+        }),
+        { numRuns: 500 },
+      );
+    },
+  );
+
+  it.each(MULTI_LINE_SLOTS)(
+    'reads arbitrary multi-line text back exactly in a %s under %s',
+    (slot, preset) => {
+      fc.assert(
+        fc.property(slotText, (text) => {
+          fc.pre(text !== '');
+          expectSlotReadBack(slot, text, preset);
+        }),
+        { numRuns: 500 },
+      );
+    },
+  );
 
   it.each(PRESETS)('reads back arbitrary text exactly under %s', (preset) => {
     fc.assert(
