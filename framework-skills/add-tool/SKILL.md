@@ -4,7 +4,7 @@ description: >
   Scaffold a new MCP tool definition. Use when the user asks to add a tool, create a new tool, or implement a new capability for the server.
 metadata:
   author: cyanheads
-  version: "2.37"
+  version: "2.38"
   audience: external
   type: reference
 ---
@@ -709,11 +709,11 @@ export const fetchArticles = tool('fetch_articles', {
 
 **The declared `recovery` reaches the wire on its own.** When a failure whose `data.reason` names a contract entry leaves the handler without `data.recovery`, the framework sets `data.recovery.hint` to that entry's `recovery` — both client surfaces, the error log record, and `runToolContract` alike — whatever code it was thrown with. Pass `{ recovery: { hint: \`…${dynamic}…\` } }` when you need runtime context; a throw-site hint always wins. `ctx.recoveryFor(reason)` still resolves the entry into `{ recovery: { hint } }` for a hint that must ride the thrown error itself. The contract is the single source of truth — write the recovery once, lint validates it ≥5 words, the framework carries it to every failure with that reason.
 
-**Throw raw text.** The framework renders the message, the recovery hint, and `data.reason` into `content[]` through `escapeMarkdownInline()`, so a name like `A*p*` or an upstream message with a line-leading `- ` reads back exactly as `structuredContent.error` carries it. Backticks or backslashes added in the handler would show on both surfaces.
+**Throw raw text.** The framework renders the message, the recovery hint, and `data.reason` into `content[]` through `escapeMarkdownInline()`, so a name like `A*p*` or an upstream message with a line-leading `- ` reads back exactly as `structuredContent.error` carries it. Backticks or backslashes added in the handler would show on both surfaces. A value the caller must send back verbatim — a ticket, a cursor, a key name — goes in `literals` instead, so the model copying it gets no backslash: `throw ctx.fail('query_out_of_range', \`Ticket ${ticket} holds 2 queries.\`, { recovery: { hint: \`Re-call with ticket_id "${ticket}".\` } }, { literals: [ticket] })` renders each occurrence that no letter, digit, or `_` touches as a code span (`api-errors` § Error-path parity).
 
 **Baseline codes** (`InternalError`, `ServiceUnavailable`, `Timeout`, `ValidationError`, `SerializationError`) bubble freely and don't need declaring. Wire-level behavior is identical when the contract is omitted, but you lose the type-checked `ctx.fail`, the `tools/list` advertisement, and conformance lint coverage — declare a contract whenever the tool has a domain-specific failure mode.
 
-`ctx.fail` accepts an optional 4th `options` argument for ES2022 cause chaining: `throw ctx.fail('upstream_error', 'Upstream returned 500', { url }, { cause: e })`.
+`ctx.fail` accepts an optional 4th `options` argument, the error factories' own: `cause` for ES2022 chaining (`throw ctx.fail('upstream_error', 'Upstream returned 500', { url }, { cause: e })`) and `literals` (above).
 
 #### Service-layer throws
 
@@ -781,10 +781,10 @@ throw serviceUnavailable(`arXiv API returned HTTP ${status}. Retry in a few seco
 // clients (Claude Desktop) see the same guidance that structuredContent clients
 // (Claude Code) read from `error.data.recovery.hint`. A hint the message already
 // contains verbatim is dropped from the text rather than stated twice; it stays
-// on structuredContent regardless. `data.reason`, `data.retryable`, and the
-// framework's own `data.requestId` render as a closing
-// `(reason … · not retryable · request <id>)` line; other `data` keys reach
-// structuredContent only.
+// on structuredContent regardless. `data.reason`, `data.retryable`,
+// `data.retryAfter`, and the framework's own `data.requestId` render as a
+// closing `(reason … · not retryable · retry after … · request <id>)` line;
+// other `data` keys reach structuredContent only.
 import { invalidParams } from '@cyanheads/mcp-ts-core/errors';
 throw invalidParams(
   `Date range exceeds 90-day API limit.`,
@@ -868,7 +868,7 @@ input: z.object({
 
 Large payloads burn the agent's context window. Default to curated summaries; offer full data via opt-in parameters.
 
-- **Lists**: Return top N with a total count and pagination cursor, not unbounded arrays
+- **Lists**: Return exactly the caller's `limit` with a total count and pagination cursor, not unbounded arrays and never cut short by bytes. Keep the default conservative (about 25 short records, 10 or fewer heavy ones, never the cap) and clamp anything above one per-call cap with a notice instead of advertising a `.max()` (`design-mcp-server` § Parameter descriptions)
 - **Large objects**: Return key fields by default; accept a `fields` or `verbose` parameter for full data
 - **Binary/blob content**: Return metadata and a reference, not the raw content
 - **Analytical working sets**: When upstream returns more *analytical* rows (data an agent would SQL — aggregate, group, join) than fit in context, `DataCanvas` (`core.canvas`, wired in `setup()` via `setCanvas`; Tier 3 — opt-in via `CANVAS_PROVIDER_TYPE=duckdb`) lets you register the rows and return the `canvas_id` plus a preview so the agent can run SQL to slice down without a re-fetch. The `spillover()` helper (`@cyanheads/mcp-ts-core/canvas`) automates the overflow case: drain rows up to a character budget for the inline preview, auto-register the full source on overflow, return both as a discriminated union. **Two gates:** it must be analytical, not a discovery/search surface of categorical metadata (those don't earn a canvas regardless of row count — use MCP-side list filtering or pagination); and a tool emitting a `canvas_id` MUST be paired with a registered `dataframe_query` tool, or the handle is unreachable. Compute distributions or refinement hints across the full result — not the preview — so the agent gets honest aggregate signal on the rows it didn't read. Declare the *input* `canvas_id` field with `CanvasIdSchema` (`@cyanheads/mcp-ts-core/canvas`) rather than a bare `z.string()`: it advertises the 10-character URL-safe pattern in `inputSchema`, so a model sees the shape before it calls and a value that could never be an id is rejected at argument validation instead of after a registry lookup. Add your own `.describe()` over it to say which tool produced the id. The *output* field stays a plain `z.string()` — that id came from the server. See `api-canvas` for the register / query / export pattern and the spillover flow.
