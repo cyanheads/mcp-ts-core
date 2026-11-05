@@ -129,9 +129,10 @@ describe('Pagination Utilities', () => {
           cursor,
           reason: 'invalid_cursor',
           recovery: {
-            hint: 'Omit `cursor` to start from the first page, or pass the `nextCursor` from the previous response unchanged.',
+            hint: 'Omit cursor to start from the first page, or pass the nextCursor from the previous response unchanged.',
           },
         });
+        expect(mcpError.literals).toEqual(['cursor', 'nextCursor']);
       },
     );
 
@@ -164,15 +165,15 @@ describe('Pagination Utilities', () => {
       expect(error.data).toMatchObject({
         cursor: 'not-a-cursor',
         reason: 'invalid_cursor',
-        recovery: { hint: expect.stringContaining('Omit `cursor`') },
+        recovery: { hint: expect.stringContaining('Omit cursor') },
       });
       const block = result.content?.[0];
       expect(block?.type).toBe('text');
       const text = block?.type === 'text' ? block.text : '';
-      expect(text).toContain('Error: Invalid pagination cursor.');
-      // Escaped so a CommonMark parse reads the backticks back rather than as code spans (#760).
+      // The declared parameter names render as code spans; the raw hint carries none (#818).
+      expect(text).toContain('Error: Invalid pagination `cursor`.');
       expect(text).toContain(
-        'Recovery: Omit \\`cursor\\` to start from the first page, or pass the \\`nextCursor\\` from the previous response unchanged.',
+        'Recovery: Omit `cursor` to start from the first page, or pass the `nextCursor` from the previous response unchanged.',
       );
       expect(text).toContain('(reason invalid_cursor)');
     });

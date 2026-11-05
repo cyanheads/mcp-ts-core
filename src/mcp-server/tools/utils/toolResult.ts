@@ -11,11 +11,14 @@ import type { CallToolResult, ContentBlock } from '@modelcontextprotocol/server'
 import type { Context, EnrichmentStore } from '@/core/context.js';
 import { readContentStore, readEnrichmentStore } from '@/core/context.js';
 import { parseOutputContract } from '@/mcp-server/outputContract.js';
-import { internalError, type JsonRpcErrorCode } from '@/types-global/errors.js';
+import { internalError, type JsonRpcErrorCode, McpError } from '@/types-global/errors.js';
 import { codeFence, codeSpan } from '@/utils/formatting/codeSpan.js';
-import { escapeMarkdownInline } from '@/utils/formatting/markdownInline.js';
+import {
+  escapeMarkdownInline,
+  escapeMarkdownInlineWithLiterals,
+} from '@/utils/formatting/markdownInline.js';
 import { ErrorHandler } from '@/utils/internal/error-handler/errorHandler.js';
-import { readWireErrorData } from '@/utils/internal/error-handler/helpers.js';
+import { isInstance, readWireErrorData } from '@/utils/internal/error-handler/helpers.js';
 import type { AnyToolDefinition } from './toolDefinition.js';
 import { effectiveOutputSchema } from './toolOutputSchema.js';
 
@@ -74,11 +77,13 @@ function extractRecoveryHint(data: Record<string, unknown> | undefined): string 
 /**
  * The compact trailing line carrying the two `data` fields a caller branches
  * on — `reason`, the stable identifier, and `retryable`, whether a retry can
- * succeed (#458) — then `request <id>`, the `data.requestId` the server's log
- * records carry (#576). All three reach `structuredContent.error.data`;
- * without this line none reaches the text surface, so a model that just failed
- * cannot tell a deterministic rejection from a transient one, and a failure
- * reported from a `content[]`-only client cannot be matched to its log record.
+ * succeed (#458) — then `retry after <value>`, the wait a rate-limited failure
+ * names in `data.retryAfter` (#627), then `request <id>`, the `data.requestId`
+ * the server's log records carry (#576). All four reach
+ * `structuredContent.error.data`; without this line none reaches the text
+ * surface, so a model that just failed cannot tell a deterministic rejection
+ * from a transient one or how long to wait, and a failure reported from a
+ * `content[]`-only client cannot be matched to its log record.
  *
  * Returns `undefined` when `data` carries none of them — an `McpError` with no
  * `data` outside a request, as `runToolContract` builds it — leaving the text
@@ -94,10 +99,31 @@ function renderBranchableTerms(data: Record<string, unknown> | undefined): strin
   if (typeof data?.retryable === 'boolean') {
     terms.push(data.retryable ? 'retryable' : 'not retryable');
   }
+  const wait = retryAfterTerm(data?.retryAfter);
+  if (wait !== undefined) terms.push(wait);
   if (typeof data?.requestId === 'string' && data.requestId.length > 0) {
     terms.push(`request ${data.requestId}`);
   }
   return terms.length > 0 ? `(${terms.join(' · ')})` : undefined;
+}
+
+/**
+ * The `retry after` term for a `data.retryAfter` value, rendered as given: a
+ * finite non-negative number as itself — a pacer shed's whole seconds — and a
+ * string as a {@link codeSpan}, so the raw `Retry-After` header
+ * `fetchWithTimeout` and `httpErrorFromResponse` copy, delta-seconds or an
+ * HTTP-date, reads back exactly. Anything else adds no term: another type, a
+ * negative or non-finite number, a string of whitespace alone, or one holding a
+ * line break, which the one-line terms cannot carry.
+ */
+function retryAfterTerm(value: unknown): string | undefined {
+  if (typeof value === 'number') {
+    return Number.isFinite(value) && value >= 0 ? `retry after ${value}` : undefined;
+  }
+  if (typeof value === 'string' && /\S/.test(value) && !/[\r\n]/.test(value)) {
+    return `retry after ${codeSpan(value)}`;
+  }
+  return;
 }
 
 /**
@@ -107,16 +133,21 @@ function renderBranchableTerms(data: Record<string, unknown> | undefined): strin
  * - `structuredContent.error` — read by clients like Claude Code (JSON)
  *
  * The text carries the message, the `data.recovery.hint` when it adds
- * something, and the `reason` / `retryable` / `request` terms
+ * something, and the `reason` / `retryable` / `retry after` / `request` terms
  * {@link renderBranchableTerms} renders, in that order; the numeric `code` and
- * `data.issues` stay JSON-only.
+ * `data.issues` stay JSON-only. A `data.retryAfter` renders as given — a number
+ * as itself, a string as a code span — and a malformed one adds no term.
  *
  * The message, hint, and reason are caller or upstream text, so each is
  * rendered through {@link escapeMarkdownInline} (#760): a CommonMark parse of
  * the block reads each back exactly as `structuredContent.error` carries it,
  * rather than as emphasis, a code span, raw HTML, or a list. A handler throws
  * raw text for that reason — escaping it first would put the backslashes on
- * both surfaces.
+ * both surfaces. Each occurrence of a `literals` value in the message or hint —
+ * what the thrown `McpError` declares the caller must send back verbatim
+ * (#818) — renders as a code span instead
+ * ({@link escapeMarkdownInlineWithLiterals}), so a model copying it from the
+ * text carries no backslash; the parse still reads the raw strings back.
  *
  * The `Recovery:` line is dropped when the message already contains the hint
  * verbatim (#459) — `buildArgumentRecoveryHint` restates a constraint or
@@ -135,11 +166,12 @@ export function buildToolErrorResult(
   code: JsonRpcErrorCode,
   message: string,
   data: Record<string, unknown> | undefined,
+  literals: readonly string[] = [],
 ): CallToolResult {
   const hint = extractRecoveryHint(data);
-  const blocks = [`Error: ${escapeMarkdownInline(message)}`];
+  const blocks = [`Error: ${escapeMarkdownInlineWithLiterals(message, literals)}`];
   if (hint !== undefined && !message.trim().includes(hint.trim())) {
-    blocks.push(`Recovery: ${escapeMarkdownInline(hint)}`);
+    blocks.push(`Recovery: ${escapeMarkdownInlineWithLiterals(hint, literals)}`);
   }
   const terms = renderBranchableTerms(data);
   if (terms !== undefined) blocks.push(terms);
@@ -178,7 +210,8 @@ export function buildToolErrorResult(
  * are read as {@link ErrorHandler.classifyOnly} reads them, so one that cannot
  * be read is `InternalError`, `'[Unreadable]'`, or left out, and `data` is a
  * copy of the thrown one in which every field is one the wire carries
- * ({@link readWireErrorData}).
+ * ({@link readWireErrorData}). Its `literals` are read the same way
+ * ({@link readLiterals}).
  *
  * Use after invoking {@link ErrorHandler.handleError} for OTel/logging side
  * effects — this helper does not log.
@@ -195,7 +228,30 @@ export function classifyAndBuildToolErrorResult(
   };
   // `classifyOnly` returns only a `ZodError`'s bounded issues as `data`; a thrown `McpError`'s is copied here.
   const { code, message, data } = ErrorHandler.classifyOnly(error);
-  return buildToolErrorResult(code, message, withRequestId(readWireErrorData(error) ?? data));
+  return buildToolErrorResult(
+    code,
+    message,
+    withRequestId(readWireErrorData(error) ?? data),
+    readLiterals(error),
+  );
+}
+
+/**
+ * The strings a thrown `McpError` declares as `literals`; none for any other
+ * value, for `literals` that are not an array, and for one that cannot be read
+ * — a getter or `Proxy` trap that throws, a revoked `Proxy` — so the error
+ * path never throws on what was thrown (#697).
+ */
+function readLiterals(error: unknown): readonly string[] {
+  if (!isInstance(error, McpError)) return [];
+  try {
+    const literals: unknown = error.literals;
+    return Array.isArray(literals)
+      ? literals.filter((value): value is string => typeof value === 'string')
+      : [];
+  } catch {
+    return [];
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -218,14 +274,13 @@ export function parseToolOutput(def: AnyToolDefinition, value: unknown): Record<
 }
 
 /**
- * `value` as a code literal a CommonMark parse reads back exactly: nothing for
- * the empty string, a {@link codeSpan} for one line, and for a value holding a
- * line break a {@link codeFence} on lines of its own — a code span reads a line
- * break back as a space, and a closing fence with text after it on its line
- * does not close. CR and CRLF read back as LF.
+ * `value` as a code literal a CommonMark parse reads back exactly: a
+ * {@link codeSpan} for one line (nothing for the empty string), and for a value
+ * holding a line break a {@link codeFence} on lines of its own — a code span
+ * reads a line break back as a space, and a closing fence with text after it on
+ * its line does not close. CR and CRLF read back as LF.
  */
 function codeLiteral(value: string): string {
-  if (value === '') return '';
   if (!/[\r\n]/.test(value)) return codeSpan(value);
   return `\n${codeFence(value.replace(/\r\n?/g, '\n'))}\n`;
 }

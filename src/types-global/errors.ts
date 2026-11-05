@@ -55,6 +55,15 @@ export enum JsonRpcErrorCode {
 }
 
 /**
+ * Options the {@link McpError} constructor and every error factory take: the
+ * ES2022 `cause`, plus the `literals` a tool error renders as code.
+ */
+export interface ErrorFactoryOptions extends ErrorOptions {
+  /** Values the message and recovery hint quote for the caller to send back verbatim; see {@link McpError.literals}. */
+  literals?: readonly string[];
+}
+
+/**
  * Custom error class for MCP-specific errors, extending the built-in `Error` class.
  * It standardizes error reporting by encapsulating a `JsonRpcErrorCode`, a descriptive
  * human-readable message, and optional structured data for more context.
@@ -76,21 +85,35 @@ export class McpError extends Error {
   public readonly data?: Record<string, unknown>;
 
   /**
+   * Values the message and `data.recovery.hint` quote for the caller to send
+   * back verbatim — a ticket, a cursor, a key name — from the `literals`
+   * option. A tool error's `content[]` renders each occurrence as a code span
+   * instead of escaped text, so a model copying the value carries no
+   * backslash into its next call; an occurrence counts only where no letter,
+   * digit, or `_` touches it. Only that rendering reads them: they are not
+   * part of `data`, `structuredContent.error`, or the error log record.
+   * Absent unless the option was given.
+   */
+  declare public readonly literals?: readonly string[];
+
+  /**
    * Creates an instance of McpError.
    *
    * @param code - The standardized error code that categorizes the error.
    * @param message - A human-readable description of the error.
    * @param data - Optional. A record containing additional structured data about the error.
+   * @param options - Optional. `cause` for error chaining, and `literals`.
    */
   constructor(
     code: JsonRpcErrorCode,
     message?: string,
     data?: ErrorData,
-    options?: { cause?: unknown },
+    options?: ErrorFactoryOptions,
   ) {
     super(message, options);
 
     this.code = code;
+    if (options?.literals !== undefined) this.literals = options.literals;
     if (data) {
       // `data` travels to the client on the wire and into every error log and
       // span. A `RequestContext` carries `auth`, and `auth.token` is the raw
@@ -117,9 +140,6 @@ export class McpError extends Error {
 // ---------------------------------------------------------------------------
 // Factory functions — ergonomic alternatives to `new McpError(code, msg, data)`
 // ---------------------------------------------------------------------------
-
-/** Options shared by all error factory functions (re-uses the ES2022 built-in). */
-export type ErrorFactoryOptions = ErrorOptions;
 
 /**
  * The error factory for `code`, named `name` — its export's name, which

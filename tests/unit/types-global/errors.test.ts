@@ -115,6 +115,29 @@ describe('Global Error Types', () => {
 
       expect(error.cause).toBe(cause);
     });
+
+    it('carries the literals option as a property, never in data (#818)', () => {
+      const error = new McpError(
+        JsonRpcErrorCode.NotFound,
+        'Ticket _a*b expired.',
+        { reason: 'expired' },
+        { literals: ['_a*b'] },
+      );
+
+      expect(error.literals).toEqual(['_a*b']);
+      expect(error.data).toEqual({ reason: 'expired' });
+      expect(Object.hasOwn(error, 'cause')).toBe(false);
+    });
+
+    it('adds no literals key to an error built without the option', () => {
+      const keys = (error: McpError) => Object.keys(error).sort();
+
+      expect(keys(new McpError(JsonRpcErrorCode.NotFound, 'x'))).toEqual(['code', 'data', 'name']);
+      expect(
+        keys(new McpError(JsonRpcErrorCode.NotFound, 'x', undefined, { cause: new Error('c') })),
+      ).toEqual(['code', 'data', 'name']);
+      expect(new McpError(JsonRpcErrorCode.NotFound, 'x').literals).toBeUndefined();
+    });
   });
 
   describe('ErrorSchema', () => {
@@ -272,6 +295,16 @@ describe('Global Error Types', () => {
         expect(withData.data).toEqual({ url: '/foo' });
         expect(withoutData.cause).toBe(cause);
         expect(withoutData.data).toBeUndefined();
+      });
+
+      it(`${name}() carries the literals option beside cause, outside data (#818)`, () => {
+        const cause = new Error('upstream failure');
+
+        const err = fn('Use key k_1.', { key: 'k_1' }, { cause, literals: ['k_1'] });
+
+        expect(err.literals).toEqual(['k_1']);
+        expect(err.cause).toBe(cause);
+        expect(err.data).toEqual({ key: 'k_1' });
       });
     }
   });

@@ -4,7 +4,7 @@ description: >
   Canonical reference for the unified `Context` object passed to every tool and resource handler in `@cyanheads/mcp-ts-core`. Covers the full interface, its `RequestContext` base, all sub-APIs (`ctx.log`, `ctx.state`, `ctx.requestInput`, `ctx.inputs`, `ctx.clientCapabilities`, `ctx.enrich`, `ctx.content`), and when to use each.
 metadata:
   author: cyanheads
-  version: "2.15"
+  version: "2.16"
   audience: external
   type: reference
 ---
@@ -697,7 +697,7 @@ ctx.fail(
   reason: R,                         // union of declared reason strings
   message?: string,                  // defaults to the contract entry's `when` text
   data?: Record<string, unknown>,    // merged into err.data; cannot override `reason`
-  options?: { cause?: unknown },     // ES2022 cause chain
+  options?: ErrorFactoryOptions,     // { cause?, literals? }: ES2022 cause chain; literals render as code spans in content[]
 ): McpError
 ```
 
@@ -815,6 +815,8 @@ ctx.enrich(fields: Partial<z.infer<ZodObject<E>>>): void
 // Kind-tagged field-helpers (always present) — write a conventional key and tag
 // the content[] trailer rendering:
 ctx.enrich.notice(text: string): void      // writes `notice`         → blockquote
+                                            // last-wins: a later call replaces the text, so join
+                                            // a page's disclosures into one call
 ctx.enrich.total(count: number): void       // writes `totalCount`     → "N total"
 ctx.enrich.echo(query: string): void        // writes `effectiveQuery`  → "Query: …"
 ctx.enrich.delta({ field, before, after }): void  // writes `{before, after}` → "field: before → after"

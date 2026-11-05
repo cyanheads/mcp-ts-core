@@ -220,8 +220,9 @@ export class MarkdownBuilder {
    * caller-supplied name — reads back byte-identical as a single span and
    * nothing after a backtick in it renders as live markdown. A value with no
    * backtick that does not both begin and end with a space renders as a plain
-   * single-backtick span. Line endings are outside that guarantee: a code span
-   * reads them back as spaces.
+   * single-backtick span. An empty value appends nothing, which reads back as
+   * the empty value; CommonMark has no empty span. Line endings are outside
+   * that guarantee: a code span reads them back as spaces.
    *
    * @param code - The code text to wrap
    * @returns this builder for chaining

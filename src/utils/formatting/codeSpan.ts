@@ -28,15 +28,17 @@ function longestBacktickRun(value: string): number {
  * of such content). A value with no backtick that does not both begin and end
  * with a space renders as a plain single-backtick span.
  *
- * An empty value renders as two backticks, and line endings are outside the
- * guarantee: a code span reads them back as spaces. {@link codeFence} holds a
- * value with line breaks.
+ * An empty value renders as nothing, which a parse reads back as the empty
+ * value: CommonMark has no empty code span, and two backticks read as literal
+ * text. A value of whitespace alone is a span like any other and reads back
+ * whole. Line endings are outside the guarantee: a code span reads them back
+ * as spaces. {@link codeFence} holds a value with line breaks.
  *
  * @param value - Text placed verbatim inside the span.
- * @returns The span, delimiters and any padding included.
+ * @returns The span, delimiters and any padding included; `''` for `''`.
  */
 export function codeSpan(value: string): string {
-  if (value === '') return '``';
+  if (value === '') return '';
   const fence = '`'.repeat(longestBacktickRun(value) + 1);
   const pad =
     value.startsWith('`') ||

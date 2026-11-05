@@ -5,7 +5,11 @@
 import { describe, expect, test } from 'vitest';
 
 import { markdown } from '@/utils/formatting/markdownBuilder.js';
-import { readCommonMarkTarget } from '../../../helpers/commonmark.js';
+import {
+  readCommonMark,
+  readCommonMarkCodeLiterals,
+  readCommonMarkTarget,
+} from '../../../helpers/commonmark.js';
 
 describe('MarkdownBuilder', () => {
   describe('Headings', () => {
@@ -129,10 +133,35 @@ describe('MarkdownBuilder', () => {
       [' lead-space', '` lead-space`'],
       ['b ', '`b `'],
       ['   ', '`   `'],
-      ['', '``'],
+      ['\t', '`\t`'],
+      [' \t ', '`  \t  `'],
+      ['', ''],
     ])('should wrap %j as %j', (value, expected) => {
       expect(markdown().inlineCode(value).build()).toBe(expected);
     });
+
+    // #795 — CommonMark has no empty code span: two backticks read back as text.
+    test.each(['commonmark', 'gfm'] as const)(
+      'should render an empty value as nothing, which reads back empty under %s',
+      (preset) => {
+        const result = markdown().text('Value ').inlineCode('').text(' here.').build();
+
+        expect(result).toBe('Value  here.');
+        expect(readCommonMark(result, preset)).toBe('Value  here.');
+        expect(readCommonMarkCodeLiterals(result, preset)).toEqual([]);
+      },
+    );
+
+    test.each([' ', '   ', '\t', ' \t '])(
+      'should read a whitespace-only value %j back as one span in a paragraph and a table cell',
+      (value) => {
+        const span = markdown().inlineCode(value).build();
+
+        expect(readCommonMarkCodeLiterals(`Value ${span} here.`, 'commonmark')).toEqual([value]);
+        expect(readCommonMarkCodeLiterals(`Value ${span} here.`, 'gfm')).toEqual([value]);
+        expect(readCommonMarkCodeLiterals(`| h |\n|---|\n| ${span} |`, 'gfm')).toEqual([value]);
+      },
+    );
 
     test('should size the span for a value made almost entirely of backtick runs', () => {
       const value = '`x'.repeat(200_000);

@@ -175,6 +175,20 @@ describe('createFail', () => {
     expect(err.cause).toBe(cause);
   });
 
+  it.each([
+    ['a declared reason', 'no_match'],
+    ['an undeclared reason', 'typo_reason'],
+  ])('passes options.literals through, outside data, for %s (#818)', (_label, reason) => {
+    const fail = createFail(errors);
+    const cause = new Error('upstream boom');
+
+    const err = fail(reason, 'No item _a*b.', undefined, { cause, literals: ['_a*b'] });
+
+    expect(err.literals).toEqual(['_a*b']);
+    expect(err.cause).toBe(cause);
+    expect(JSON.stringify(err.data)).not.toContain('_a*b');
+  });
+
   it('returns (not throws) an InternalError with diagnostic data for an undeclared reason', () => {
     const fail = createFail(errors);
     const err = fail('typo_reason');
@@ -328,6 +342,34 @@ describe('resolveDeclaredFailure', () => {
       data: { recovery: { hint: RECOVERY } },
     });
     expect(() => (failure as McpError).cause).toThrow('cause getter');
+  });
+
+  it('keeps the thrown literals on the copy it fills, beside the cause (#818)', () => {
+    const thrown = new McpError(
+      JsonRpcErrorCode.NotFound,
+      'Item _a*b is gone.',
+      { reason: 'gone' },
+      { cause: new Error('socket closed'), literals: ['_a*b'] },
+    );
+
+    const { failure } = resolveDeclaredFailure(errors, thrown);
+
+    expect(failure).not.toBe(thrown);
+    expect(failure).toMatchObject({
+      literals: ['_a*b'],
+      cause: thrown.cause,
+      data: { reason: 'gone', recovery: { hint: RECOVERY } },
+    });
+  });
+
+  it.each([
+    ['declares none', declared],
+    ['declares literals it cannot read', () => unreadable(declared(), 'literals')],
+  ])('gives the copy no literals when the thrown error %s (#697, #818)', (_label, thrown) => {
+    const { failure } = resolveDeclaredFailure(errors, thrown());
+
+    expect(failure).toMatchObject({ data: { recovery: { hint: RECOVERY } } });
+    expect(Object.hasOwn(failure as McpError, 'literals')).toBe(false);
   });
 });
 

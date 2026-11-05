@@ -8,40 +8,219 @@
  * @module src/utils/formatting/markdownInline
  */
 
+import { codeSpan } from '@/utils/formatting/codeSpan.js';
+
 /** An `&` that starts a run CommonMark decodes as an entity or numeric reference. */
 const ENTITY_AMPERSAND = /&(?=#[xX][0-9a-fA-F]{1,6};|#[0-9]{1,7};|[A-Za-z][A-Za-z0-9]{1,31};)/g;
 const ASCII_PUNCTUATION = /[!-/:-@[-`{-~]/;
 const ALWAYS_ESCAPED = new Set(['`', '*', '[', ']', '|', '~']);
 const WORD_CHARACTER = /[\p{L}\p{N}]/u;
+/** Edge whitespace, which becomes a reference: every `\s` character but U+000B. */
+const EDGE_SPACE = /^[^\S\v]$/u;
 /**
  * A `<` that opens raw HTML or a URI autolink, or an email autolink, whose
  * local part may start with a digit or symbol (`<1@a.io>`). Sticky, matched at
  * the `<` in place.
  */
 const MARKUP_OPENER = /<(?:[A-Za-z/!?]|[^\s<>@]*@[^\s<>]*>)/y;
+/**
+ * One code point that is a letter, digit, or `_`: what may not touch a
+ * literal. Anchored at both ends: V8 misses a character outside the BMP that a
+ * class matches just before a `$` with no `^` (`/[\p{L}]$/u` fails on `'𝐀'`).
+ */
+const TOUCHING = /^[\p{L}\p{N}_]$/u;
+
+/** Whether the code point starting at `index` of `text` is a letter, digit, or `_`. */
+function touchesAt(text: string, index: number): boolean {
+  const point = text.codePointAt(index);
+  return point !== undefined && TOUCHING.test(String.fromCodePoint(point));
+}
+
+/** Whether the code point ending just before `index` of `text` is a letter, digit, or `_`. */
+function touchesBefore(text: string, index: number): boolean {
+  if (index === 0) return false;
+  const pair =
+    index >= 2 &&
+    (text.charCodeAt(index - 1) & 0xfc00) === 0xdc00 &&
+    (text.charCodeAt(index - 2) & 0xfc00) === 0xd800;
+  return TOUCHING.test(text.slice(index - (pair ? 2 : 1), index));
+}
 
 /**
- * Escapes the characters on one line that a CommonMark inline or block parse
- * would read as syntax. `line` holds no line break; its leading and trailing
- * whitespace becomes numeric references, since a paragraph strips spaces and
- * tabs and a GFM table cell (markdown-it's `String.prototype.trim`) strips
- * every Unicode whitespace character. U+000B (vertical tab) is the exception
- * and stays literal: markdown-it decodes `&#11;` as U+FFFD, while the literal
- * character reads back wherever no trim reaches it.
+ * A node of the trie of reversed literals {@link literalSpans} matches with.
+ * Read forward, its text is the last `depth` code units of `source`, so it
+ * ends some literal.
  */
-function escapeLine(line: string): string {
-  const lead = /^[^\S\v]*/u.exec(line)?.[0] ?? '';
-  if (lead.length === line.length) return toReferences(line);
-  const trail = /[^\S\v]*$/u.exec(line)?.[0] ?? '';
-  const text = line.slice(lead.length, line.length - trail.length);
-  // Code points, so a neighbour outside the BMP is tested as one character.
-  const chars = Array.from(text);
-  const out: string[] = [];
+interface LiteralNode {
+  readonly depth: number;
+  /** Aho–Corasick failure link: the node for the longest proper prefix of this node's text. */
+  fail: LiteralNode | undefined;
+  /** Whether this node's text is a whole literal. */
+  literal: boolean;
+  /** Children past the first, by code unit; most nodes have one child or none. */
+  more: Map<number, LiteralNode> | undefined;
+  /** The first child, along code unit {@link LiteralNode.unit}. */
+  next: LiteralNode | undefined;
+  /** A literal this node's text ends. */
+  readonly source: string;
+  unit: number;
+  /**
+   * The longest literal that is a proper prefix of this node's text and that
+   * the next code point of that text does not touch.
+   */
+  untouched: LiteralNode | undefined;
+}
+
+/** A literal's occurrence in a line: code-unit `[start, end)` offsets. */
+type Span = readonly [start: number, end: number];
+
+/** The child of `node` along code unit `unit`. */
+function childOf(node: LiteralNode, unit: number): LiteralNode | undefined {
+  return node.unit === unit ? node.next : node.more?.get(unit);
+}
+
+/**
+ * The root of the trie of the usable `literals`, each inserted last character
+ * first, with its failure links; `undefined` when none is usable. An empty
+ * literal, one holding a line break, and one holding a lone surrogate never
+ * match. Built in time linear in the literals' combined length.
+ */
+function literalTrie(literals: readonly string[]): LiteralNode | undefined {
+  const node = (depth: number, source: string): LiteralNode => ({
+    depth,
+    fail: undefined,
+    literal: false,
+    more: undefined,
+    next: undefined,
+    source,
+    unit: -1,
+    untouched: undefined,
+  });
+  const root = node(0, '');
+  for (const literal of literals) {
+    if (literal === '' || /[\r\n]/.test(literal) || !literal.isWellFormed()) continue;
+    let current = root;
+    for (let i = literal.length - 1; i >= 0; i--) {
+      const unit = literal.charCodeAt(i);
+      let child = childOf(current, unit);
+      if (child === undefined) {
+        child = node(current.depth + 1, literal);
+        if (current.next === undefined) {
+          current.unit = unit;
+          current.next = child;
+        } else {
+          current.more ??= new Map();
+          current.more.set(unit, child);
+        }
+      }
+      current = child;
+    }
+    current.literal = true;
+  }
+  if (root.next === undefined) return;
+  // Breadth first: a failure link, and everything read through it, is
+  // shallower than the node it belongs to, so it is finished first.
+  const queue = [root];
+  for (let head = 0; head < queue.length; head++) {
+    const current = queue[head] as LiteralNode;
+    const fail = current.fail;
+    if (fail !== undefined) {
+      // The literals that are proper prefixes of this node's text are the
+      // failure link's and the link itself; the code point after one of the
+      // link's own lies inside the link's text, so its answer carries over.
+      const after = current.source.length - current.depth + fail.depth;
+      current.untouched = fail.literal && !touchesAt(current.source, after) ? fail : fail.untouched;
+    }
+    const link = (child: LiteralNode, unit: number) => {
+      let candidate = current.fail;
+      while (candidate !== undefined && childOf(candidate, unit) === undefined) {
+        candidate = candidate.fail;
+      }
+      child.fail = candidate === undefined ? root : childOf(candidate, unit);
+      queue.push(child);
+    };
+    if (current.next !== undefined) link(current.next, current.unit);
+    for (const [unit, child] of current.more ?? []) link(child, unit);
+  }
+  return root;
+}
+
+/**
+ * The occurrences of `root`'s literals in `text` that render as code, in
+ * order: the leftmost first, at a start the longest; none that a letter,
+ * digit, or `_` touches on either side; and none starting where the previous
+ * one ended, since two code spans edge to edge read as one.
+ *
+ * Linear in `text`: one pass from the end walks the trie, so each start sees
+ * the longest literal it opens, and the node's `untouched` link is the longest
+ * shorter one whose next code point lies inside that literal's text and does
+ * not touch it.
+ */
+function literalSpans(text: string, root: LiteralNode): Span[] {
+  const longest = new Int32Array(text.length);
+  let current = root;
+  for (let start = text.length - 1; start >= 0; start--) {
+    const unit = text.charCodeAt(start);
+    let child = childOf(current, unit);
+    while (child === undefined && current.fail !== undefined) {
+      current = current.fail;
+      child = childOf(current, unit);
+    }
+    current = child ?? root;
+    longest[start] =
+      current.literal && !touchesAt(text, start + current.depth)
+        ? current.depth
+        : (current.untouched?.depth ?? 0);
+  }
+  const spans: Span[] = [];
+  let ended = -1;
+  for (let start = 0; start < text.length; start++) {
+    const length = longest[start] as number;
+    if (length === 0 || start === ended || touchesBefore(text, start)) continue;
+    ended = start + length;
+    spans.push([start, ended]);
+    start = ended - 1;
+  }
+  return spans;
+}
+
+/**
+ * Escapes `text`, a line without its edge whitespace, one code point at a
+ * time, and renders each of `spans` as a {@link codeSpan}. A span reads as a
+ * backtick to the code points beside it, which is what its delimiter is: a `\`
+ * before one stays escaped, and an `_` beside one is never intraword. An
+ * entity is matched within the text between spans only.
+ */
+function escapeText(text: string, spans: readonly Span[]): string {
+  const units: string[] = [];
+  const code: boolean[] = [];
+  let from = 0;
+  for (const [start, end] of [...spans, [text.length, text.length] as const]) {
+    // Code points, so a neighbour outside the BMP is tested as one character.
+    for (const ch of text.slice(from, start)) {
+      units.push(ch);
+      code.push(false);
+    }
+    if (start < end) {
+      units.push(codeSpan(text.slice(start, end)));
+      code.push(true);
+    }
+    from = end;
+  }
+  const rendered = spans.length === 0 ? text : units.join('');
+  const neighbour = (i: number) => (code[i] ? '`' : units[i]);
+  let out = '';
+  let prose = '';
   let offset = 0;
-  for (let i = 0; i < chars.length; offset += (chars[i] as string).length, i++) {
-    const ch = chars[i] as string;
-    const prev = chars[i - 1];
-    const next = chars[i + 1];
+  for (let i = 0; i < units.length; offset += (units[i] as string).length, i++) {
+    const ch = units[i] as string;
+    if (code[i]) {
+      out += prose.replace(ENTITY_AMPERSAND, '\\&') + ch;
+      prose = '';
+      continue;
+    }
+    const prev = neighbour(i - 1);
+    const next = neighbour(i + 1);
     let escaped: boolean;
     if (ch === '\\') {
       // A backslash is literal before anything else; before trailing whitespace
@@ -55,14 +234,38 @@ function escapeLine(line: string): string {
         WORD_CHARACTER.test(next)
       );
     } else if (ch === '<') {
+      // Tested against the line as rendered: a span after it is backticks.
       MARKUP_OPENER.lastIndex = offset;
-      escaped = MARKUP_OPENER.test(text);
+      escaped = MARKUP_OPENER.test(rendered);
     } else {
       escaped = ALWAYS_ESCAPED.has(ch);
     }
-    out.push(escaped ? `\\${ch}` : ch);
+    prose += escaped ? `\\${ch}` : ch;
   }
-  let core = out.join('').replace(ENTITY_AMPERSAND, '\\&');
+  return out + prose.replace(ENTITY_AMPERSAND, '\\&');
+}
+
+/**
+ * Escapes the characters on one line that a CommonMark inline or block parse
+ * would read as syntax, rendering each occurrence of a `literals` value as a
+ * code span. `line` holds no line break; its leading and trailing
+ * whitespace becomes numeric references, since a paragraph strips spaces and
+ * tabs and a GFM table cell (markdown-it's `String.prototype.trim`) strips
+ * every Unicode whitespace character. U+000B (vertical tab) is the exception
+ * and stays literal: markdown-it decodes `&#11;` as U+FFFD, while the literal
+ * character reads back wherever no trim reaches it.
+ */
+function escapeLine(line: string, literals: LiteralNode | undefined): string {
+  const lead = /^[^\S\v]*/u.exec(line)?.[0] ?? '';
+  if (lead.length === line.length) return toReferences(line);
+  // Found by scanning back from the end, so its cost is linear in the line.
+  // Every whitespace character is one UTF-16 code unit, and the scan never
+  // reaches `lead`: the character just after it is not edge whitespace.
+  let end = line.length;
+  while (EDGE_SPACE.test(line[end - 1] as string)) end--;
+  const trail = line.slice(end);
+  const text = line.slice(lead.length, end);
+  let core = escapeText(text, literals === undefined ? [] : literalSpans(text, literals));
   // Block structure is read from the start of the line, so a marker only opens
   // a heading, quote, list, rule, or setext underline when no indentation
   // precedes it — and indentation here is always a reference.
@@ -142,11 +345,42 @@ function toReferences(whitespace: string): string {
  * ```
  */
 export function escapeMarkdownInline(text: string): string {
+  return escapeLines(text, undefined);
+}
+
+/**
+ * {@link escapeMarkdownInline}, except that each occurrence of a `literals`
+ * value renders as a {@link codeSpan}, so a reader copying it from the text
+ * carries no escape. The tool error renderer's encoder for the values an
+ * `McpError` declares (`McpError.literals`).
+ *
+ * An occurrence counts when no letter, digit, or `_` touches it on either side
+ * and it does not start where another ended (two spans edge to edge read as
+ * one); between overlapping ones, the leftmost wins, then the longest. One
+ * that would reach into a line's edge whitespace does not count. An empty
+ * value, one holding a line break, and one holding a lone surrogate are
+ * ignored. The text around each span is escaped as {@link escapeMarkdownInline}
+ * escapes it, a span reading as a backtick to its neighbours, and a parse
+ * reads the text and the spans' content back as `text`. With no occurrence the
+ * output is {@link escapeMarkdownInline}'s. Linear in the length of `text` and
+ * `literals` together.
+ *
+ * @internal
+ */
+export function escapeMarkdownInlineWithLiterals(
+  text: string,
+  literals: readonly string[],
+): string {
+  return escapeLines(text, literals.length === 0 ? undefined : literalTrie(literals));
+}
+
+/** Escapes `text` line by line, joining the lines with hard breaks. */
+function escapeLines(text: string, literals: LiteralNode | undefined): string {
   const lines = text.replace(/\r\n?/g, '\n').split('\n');
-  let out = escapeLine(lines[0] as string);
+  let out = escapeLine(lines[0] as string, literals);
   for (let i = 1; i < lines.length; i++) {
     const line = lines[i] as string;
-    out += i === lines.length - 1 && line === '' ? '&#10;' : `\\\n${escapeLine(line)}`;
+    out += i === lines.length - 1 && line === '' ? '&#10;' : `\\\n${escapeLine(line, literals)}`;
   }
   return out;
 }

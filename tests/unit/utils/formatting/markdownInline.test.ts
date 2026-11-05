@@ -18,6 +18,7 @@ import {
   readCommonMarkInlines,
   readCommonMarkTarget,
 } from '../../../helpers/commonmark.js';
+import { expectLinearCost } from '../../../helpers/cpu-time.js';
 
 const PRESETS: CommonMarkPreset[] = ['commonmark', 'gfm'];
 
@@ -285,6 +286,75 @@ describe('escapeMarkdownInline', () => {
       expectSlotReadBack('after a label', '\va', preset);
       expectSlotReadBack('paragraph', 'a\v\n\vb', preset);
     }
+  });
+
+  it('encodes whitespace only at the edges of each line, a vertical tab ending the edge', () => {
+    for (const [text, expected] of [
+      ['a \t b', 'a \t b'],
+      [' a  b ', '&#32;a  b&#160;'],
+      ['a  \v', 'a  \v'],
+      ['a \v ', 'a \v&#32;'],
+      ['　a\tb\t', '&#12288;a\tb&#9;'],
+      ['a  b\n  c \t', 'a  b\\\n&#32;&#8195;c&#32;&#9;'],
+      ['\v \va b\v \v', '\v \va b\v \v'],
+      ['x  #', 'x  \\#'],
+      ['x # \t', 'x #&#32;&#9;'],
+    ] as const) {
+      expect(escapeMarkdownInline(text), JSON.stringify(text)).toBe(expected);
+    }
+  });
+
+  it('encodes every whitespace character but a line break and U+000B as a reference at either edge, and none mid-line', () => {
+    const whitespace = Array.from({ length: 0x10000 }, (_, unit) =>
+      String.fromCharCode(unit),
+    ).filter((ch) => /\s/.test(ch) && !/[\n\r\v]/.test(ch));
+    expect(whitespace).toHaveLength(22);
+    for (const ch of whitespace) {
+      const unit = ch.charCodeAt(0);
+      const reference = `&#${unit};`;
+      const label = `U+${unit.toString(16).padStart(4, '0')}`;
+      expect(escapeMarkdownInline(`a${ch}`), label).toBe(`a${reference}`);
+      expect(escapeMarkdownInline(`${ch}a`), label).toBe(`${reference}a`);
+      expect(escapeMarkdownInline(`a${ch}${ch}*`), label).toBe(`a${ch}${ch}\\*`);
+      expect(escapeMarkdownInline(`*${ch}${ch}`), label).toBe(`\\*${reference}${reference}`);
+      expect(escapeMarkdownInline(`${ch}\v${ch}`), label).toBe(`${reference}\v${reference}`);
+    }
+  });
+
+  it('encodes in time linear in the length of its input', () => {
+    /**
+     * One input of about `length` characters per shape the encoder treats
+     * differently: a run of a single character between two letters, for every
+     * character class it escapes, references, or passes through; a run of edge
+     * whitespace after and before text; one long line ending in a break; breaks
+     * throughout; and Markdown-active prose.
+     */
+    const EDGE = [' ', '\t', ' ', '　'];
+    const inputs = (length: number): string[] => [
+      ...['a', '1', '_', '*', '`', '\\', '<', '&', '#', '-', '[', ' ', '\t', ' ', '　', '\v'].map(
+        (unit) => `x${unit.repeat(length)}y`,
+      ),
+      ...EDGE.flatMap((unit) => [`x${unit.repeat(length)}`, `${unit.repeat(length)}x`]),
+      `x${'😀'.repeat(length / 2)}y`,
+      `${'§1 x'.repeat(length / 4)}\ny`,
+      '  \r\n'.repeat(length / 4),
+      '<1@'.repeat(length / 3),
+      '&#1'.repeat(length / 3),
+      'A*p* <b>x</b> [a](b) &copy; _c_ # '.repeat(length / 34),
+    ];
+    expectLinearCost((length) => {
+      // The edge-whitespace runs at this size, each a reference.
+      for (const unit of EDGE) {
+        const run = unit.repeat(length);
+        const references = `&#${unit.codePointAt(0)};`.repeat(length);
+        expect(escapeMarkdownInline(`x${run}`)).toBe(`x${references}`);
+        expect(escapeMarkdownInline(`${run}x`)).toBe(`${references}x`);
+      }
+      const batch = inputs(length);
+      return () => {
+        for (const input of batch) escapeMarkdownInline(input);
+      };
+    });
   });
 
   it('reads a table cell edged with a space and an ideographic space back under gfm', () => {

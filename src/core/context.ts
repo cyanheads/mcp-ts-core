@@ -20,6 +20,7 @@ import type { ZodObject, ZodRawShape, ZodType, z } from 'zod';
 import type { StorageService } from '@/storage/core/StorageService.js';
 import {
   type ErrorContract,
+  type ErrorFactoryOptions,
   invalidRequest,
   JsonRpcErrorCode,
   McpError,
@@ -379,12 +380,14 @@ export interface Context extends RequestContext {
  *
  * The thrown error's `data.reason` is auto-populated, so observability and the
  * auto-classifier can branch on a stable identifier without parsing message text.
+ * `options` is the error factories' own: `cause`, and `literals` the message and
+ * hint quote for the caller to send back ({@link McpError.literals}).
  */
 export type TypedFail<R extends string> = (
   reason: R,
   message?: string,
   data?: Record<string, unknown>,
-  options?: { cause?: unknown },
+  options?: ErrorFactoryOptions,
 ) => McpError;
 
 /**
@@ -682,8 +685,8 @@ export function createRecoveryFor(
  *
  * The thrown error is never mutated — the `McpError` a handler-level test gets
  * from `ctx.fail` still carries exactly what the throw site wrote. The copy
- * keeps its code, message, name, stack, and cause, so the log record and the
- * envelope built from it describe the same throw.
+ * keeps its code, message, name, stack, cause, and `literals`, so the log
+ * record and the envelope built from it describe the same throw.
  *
  * Every read of the thrown value is guarded (#697): a value `instanceof` cannot
  * inspect and an `McpError` whose `data` cannot be read or copied (a getter, a
@@ -711,11 +714,17 @@ export function resolveDeclaredFailure<T>(
   }
   const code = readField(thrown, 'code');
   const cause = readField(thrown, 'cause');
+  // Carried as read: the tool error renderer reads them guarded, as it reads the thrown error's.
+  const literals = readField(thrown, 'literals');
   const failure = new McpError(
     code === UNREADABLE ? entry.code : (code as JsonRpcErrorCode),
     errorText(readField(thrown, 'message')),
     { ...declared, recovery: { hint: entry.recovery } },
-    cause === undefined || cause === UNREADABLE ? undefined : { cause },
+    {
+      ...(cause !== undefined && cause !== UNREADABLE && { cause }),
+      ...(literals !== undefined &&
+        literals !== UNREADABLE && { literals: literals as readonly string[] }),
+    },
   );
   if (cause === UNREADABLE) {
     Object.defineProperty(failure, 'cause', { configurable: true, get: () => thrown.cause });

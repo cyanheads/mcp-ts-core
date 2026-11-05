@@ -13,11 +13,12 @@ import type {
 } from '@modelcontextprotocol/server';
 import { inputRequired, SdkError, SdkErrorCode } from '@modelcontextprotocol/server';
 import { AjvJsonSchemaValidator } from '@modelcontextprotocol/server/validators/ajv';
+import fc from 'fast-check';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { z } from 'zod';
 import { JsonRpcErrorCode, McpError } from '@/types-global/errors.js';
 import { readCommonMark } from '../../../../helpers/commonmark.js';
-import { cpuMsAsync } from '../../../../helpers/cpu-time.js';
+import { cpuMsAsync, expectLinearCost } from '../../../../helpers/cpu-time.js';
 import type { ServerContextOverrides } from '../../../../helpers/server-context.js';
 import {
   EVERY_INPUT_CAPABILITY,
@@ -125,6 +126,7 @@ import {
 import { buildToolErrorResult } from '@/mcp-server/tools/utils/toolResult.js';
 import { ErrorHandler } from '@/utils/internal/error-handler/errorHandler.js';
 import { fetchWithTimeout } from '@/utils/network/fetchWithTimeout.js';
+import { createPacer } from '@/utils/network/pacer.js';
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -3017,6 +3019,108 @@ describe('createToolHandler', () => {
           },
         });
       });
+
+      describe('retry after (#627)', () => {
+        /** A rate-limit failure's data, carrying `retryAfter` when one is given. */
+        const rateLimitData = (...retryAfter: unknown[]) => ({
+          reason: 'pacer_shed',
+          retryable: true,
+          ...(retryAfter.length > 0 && { retryAfter: retryAfter[0] }),
+          requestId: 'UTFAC-QE0MB',
+        });
+        const termsLine = (data: Record<string, unknown>) =>
+          rendered(buildToolErrorResult(JsonRpcErrorCode.RateLimited, 'Slow down.', data)).split(
+            '\n\n',
+          )[1];
+
+        it.each([
+          [31, 'retry after 31', 'retry after 31'],
+          [0, 'retry after 0', 'retry after 0'],
+          [1.5, 'retry after 1.5', 'retry after 1.5'],
+          ['120', 'retry after `120`', 'retry after ⟨code_inline:120⟩'],
+          [
+            'Wed, 21 Oct 2015 07:28:00 GMT',
+            'retry after `Wed, 21 Oct 2015 07:28:00 GMT`',
+            'retry after ⟨code_inline:Wed, 21 Oct 2015 07:28:00 GMT⟩',
+          ],
+          ['a`b*_c', 'retry after ``a`b*_c``', 'retry after ⟨code_inline:a`b*_c⟩'],
+          [' 7 ', 'retry after `  7  `', 'retry after ⟨code_inline: 7 ⟩'],
+        ])(
+          'renders %j between retryable and request, reading back as given',
+          (value, term, read) => {
+            const data = rateLimitData(value);
+            const result = buildToolErrorResult(JsonRpcErrorCode.RateLimited, 'Slow down.', data);
+
+            expect(termsLine(data)).toBe(
+              `(reason pacer_shed · retryable · ${term} · request UTFAC-QE0MB)`,
+            );
+            for (const preset of ['commonmark', 'gfm'] as const) {
+              expect(readCommonMark(rendered(result), preset)).toBe(
+                `Error: Slow down.\n\n(reason pacer_shed · retryable · ${read} · request UTFAC-QE0MB)`,
+              );
+            }
+            expect(result.structuredContent).toEqual({
+              error: { code: JsonRpcErrorCode.RateLimited, message: 'Slow down.', data },
+            });
+          },
+        );
+
+        it.each([
+          ['an empty string', ''],
+          ['a string of whitespace alone', '   '],
+          ['a string holding a line feed', '1\n2'],
+          ['a string holding a carriage return', '1\r2'],
+          ['a negative number', -1],
+          ['NaN', Number.NaN],
+          ['Infinity', Number.POSITIVE_INFINITY],
+          ['a boolean', true],
+          ['null', null],
+          ['an object', {}],
+          ['an array', [5]],
+        ])('adds no term for %s', (_label, value) => {
+          const data = rateLimitData(value);
+
+          expect(termsLine(data)).toBe(termsLine(rateLimitData()));
+          expect(termsLine(data)).toBe('(reason pacer_shed · retryable · request UTFAC-QE0MB)');
+          expect(
+            buildToolErrorResult(JsonRpcErrorCode.RateLimited, 'Slow down.', data)
+              .structuredContent,
+          ).toEqual({ error: { code: JsonRpcErrorCode.RateLimited, message: 'Slow down.', data } });
+        });
+
+        it('renders the wait of a pacer shed that fails a tool call', async () => {
+          const pacer = createPacer({ name: 'upstream', maxConcurrent: 1, maxQueueDepth: 0 });
+          let release = () => {};
+          const held = pacer.run(
+            () =>
+              new Promise<void>((resolve) => {
+                release = resolve;
+              }),
+          );
+
+          const def = tool('paced_probe', {
+            description: 'Calls a paced upstream.',
+            input: z.object({}),
+            output: z.object({ ok: z.boolean().describe('ok') }),
+            handler: async () => {
+              await pacer.run(async () => {});
+              return { ok: true };
+            },
+          });
+          const handler = createToolHandler(def as AnyToolDefinition, services, notifiers);
+
+          const result = (await handler({}, makeServerContext())) as CallToolResult;
+          release();
+          await held;
+          pacer.dispose();
+
+          expect(rendered(result)).toBe(
+            'Error: No upstream request slot is open and the wait queue is full.\n\n' +
+              `(reason pacer_shed · retry after 1 · request ${REQUEST_ID})`,
+          );
+          expect(envelope(result).data).toMatchObject({ reason: 'pacer_shed', retryAfter: 1 });
+        });
+      });
     });
 
     describe('hint repeats (#459)', () => {
@@ -3283,6 +3387,466 @@ describe('createToolHandler', () => {
         );
 
         expect(text).toBe('Error: Use key a_x.');
+      });
+    });
+
+    describe('declared literals (#818)', () => {
+      const TICKET = '_EywG0b*x';
+
+      /**
+       * What a parse of `Error: ${message}`, rendered with `literals`, reads as
+       * under the rule the renderer implements, found by a plain scan: each
+       * line's text between its edge whitespace, with every occurrence that
+       * counts named as the code span it renders. An occurrence counts when it
+       * does not start where the previous one ended and no letter, digit, or
+       * `_` touches it; the leftmost wins, then the longest. An empty literal,
+       * one holding a line break, and one holding a lone surrogate never count.
+       */
+      function readsAs(message: string, literals: readonly string[]): string {
+        const usable = literals.filter(
+          (literal) => literal !== '' && !/[\r\n]/.test(literal) && literal.isWellFormed(),
+        );
+        const touches = (ch: string | undefined) => ch !== undefined && /[\p{L}\p{N}_]/u.test(ch);
+        const edge = (ch: string | undefined) => ch !== undefined && /[^\S\v]/u.test(ch);
+        const lines = message.replace(/\r\n?/g, '\n').split('\n');
+        return lines
+          .map((line) => {
+            let start = 0;
+            while (edge(line[start])) start++;
+            let end = line.length;
+            while (end > start && edge(line[end - 1])) end--;
+            const text = line.slice(start, end);
+            let out = '';
+            let ended = -1;
+            for (let i = 0; i < text.length; ) {
+              const free = i !== ended && !touches([...text.slice(0, i)].at(-1));
+              const found = usable
+                .filter(
+                  (literal) =>
+                    free &&
+                    text.startsWith(literal, i) &&
+                    !touches([...text.slice(i + literal.length)][0]),
+                )
+                .sort((a, b) => b.length - a.length)[0];
+              if (found === undefined) {
+                out += text[i];
+                i++;
+              } else {
+                out += `⟨code_inline:${found}⟩`;
+                i += found.length;
+                ended = i;
+              }
+            }
+            return `${line.slice(0, start)}${out}${line.slice(end)}`;
+          })
+          .join('\n');
+      }
+
+      async function call(def: unknown, args: Record<string, unknown>): Promise<CallToolResult> {
+        const handler = createToolHandler(def as AnyToolDefinition, services, notifiers);
+        return (await handler(args, makeServerContext())) as CallToolResult;
+      }
+
+      const foldseek = tool('foldseek_probe', {
+        description: 'Fails quoting the ticket the caller must send back.',
+        input: z.object({ ticket: z.string().describe('Ticket.') }),
+        output: z.object({ ok: z.boolean().describe('ok') }),
+        errors: [
+          {
+            reason: 'query_out_of_range',
+            code: JsonRpcErrorCode.ValidationError,
+            when: 'The query index is past the last query the ticket holds.',
+            recovery: 'Re-call with a query index the ticket holds.',
+          },
+        ],
+        handler: (input, ctx) => {
+          throw ctx.fail(
+            'query_out_of_range',
+            `Foldseek ticket ${input.ticket} holds 2 queries.`,
+            {
+              recovery: {
+                hint: `Re-call with ticket_id "${input.ticket}" and query between 0 and 1.`,
+              },
+            },
+            { literals: [input.ticket] },
+          );
+        },
+      });
+
+      it('renders a declared value as a code span in the message and hint, reading back the raw text', async () => {
+        const result = await call(foldseek, { ticket: TICKET });
+
+        expect(rendered(result)).toBe(
+          'Error: Foldseek ticket `_EywG0b*x` holds 2 queries.\n\n' +
+            'Recovery: Re-call with ticket_id "`_EywG0b*x`" and query between 0 and 1.\n\n' +
+            `(reason query_out_of_range · request ${REQUEST_ID})`,
+        );
+        for (const preset of ['commonmark', 'gfm'] as const) {
+          expect(readCommonMark(rendered(result), preset)).toBe(
+            'Error: Foldseek ticket ⟨code_inline:_EywG0b*x⟩ holds 2 queries.\n\n' +
+              'Recovery: Re-call with ticket_id "⟨code_inline:_EywG0b*x⟩" and query between 0 and 1.\n\n' +
+              `(reason query_out_of_range · request ${REQUEST_ID})`,
+          );
+        }
+        expect(envelope(result)).toEqual({
+          code: JsonRpcErrorCode.ValidationError,
+          message: `Foldseek ticket ${TICKET} holds 2 queries.`,
+          data: {
+            reason: 'query_out_of_range',
+            recovery: { hint: `Re-call with ticket_id "${TICKET}" and query between 0 and 1.` },
+            requestId: REQUEST_ID,
+          },
+        });
+      });
+
+      it('keeps the declared values off the error log record', async () => {
+        await call(foldseek, { ticket: TICKET });
+
+        expect(mockLogger.error).toHaveBeenCalledWith(
+          expect.stringContaining(`Foldseek ticket ${TICKET} holds 2 queries.`),
+          expect.objectContaining({
+            extra: expect.objectContaining({
+              errorData: expect.objectContaining({ reason: 'query_out_of_range' }),
+            }),
+          }),
+        );
+        expect(JSON.stringify(mockLogger.error.mock.calls)).not.toContain('literals');
+      });
+
+      it('keeps the declared values when the framework fills the hint from the contract', async () => {
+        const stale = tool('stale_probe', {
+          description: 'Fails on a cursor that no longer resolves.',
+          input: z.object({ cursor: z.string().describe('Cursor.') }),
+          output: z.object({ ok: z.boolean().describe('ok') }),
+          errors: [
+            {
+              reason: 'stale_cursor',
+              code: JsonRpcErrorCode.InvalidParams,
+              when: 'The cursor no longer resolves to a page.',
+              recovery: 'Omit cursor to start again from the first page.',
+            },
+          ],
+          handler: (input, ctx) => {
+            throw ctx.fail('stale_cursor', `Cursor ${input.cursor} is stale.`, undefined, {
+              literals: [input.cursor, 'cursor'],
+            });
+          },
+        });
+
+        const result = await call(stale, { cursor: 'c_1*' });
+
+        expect(rendered(result)).toBe(
+          'Error: Cursor `c_1*` is stale.\n\n' +
+            'Recovery: Omit `cursor` to start again from the first page.\n\n' +
+            `(reason stale_cursor · request ${REQUEST_ID})`,
+        );
+        expect(envelope(result).data?.recovery).toEqual({
+          hint: 'Omit cursor to start again from the first page.',
+        });
+      });
+
+      it.each([
+        [
+          'occurrences a letter, digit, or _ touches',
+          'ticket_id id xid id1 é𝐀id',
+          ['id'],
+          'ticket_id `id` xid id1 é𝐀id',
+        ],
+        [
+          'occurrences beside punctuation and symbols',
+          '(id) "id" 😀id',
+          ['id'],
+          '(`id`) "`id`" 😀`id`',
+        ],
+        ['an occurrence starting where another ended', '$1$2 $1', ['$1', '$2'], '`$1`$2 `$1`'],
+        [
+          'overlapping occurrences, the leftmost then the longest',
+          'x-y-zzz ab-cd ef',
+          ['x-y', 'y-zzz', 'ab', 'ab-cd'],
+          '`x-y`-zzz `ab-cd` ef',
+        ],
+        [
+          'a shorter occurrence where a letter touches the longest',
+          'ab-cd',
+          ['ab', 'ab-c'],
+          '`ab`-cd',
+        ],
+        [
+          'an empty literal and literals holding a line break',
+          'Use x now',
+          ['', 'x\ny', 'x\r'],
+          'Use x now',
+        ],
+        [
+          'literals holding a lone surrogate',
+          'Mood 😀 now',
+          [
+            String.fromCharCode(0xd83d),
+            String.fromCharCode(0xde00),
+            `${String.fromCharCode(0xde00)} now`,
+          ],
+          'Mood 😀 now',
+        ],
+        [
+          'whitespace at the line edges and beside spans mid-line',
+          ' x  y x ',
+          ['x'],
+          '&#32;`x`  y `x`&#32;',
+        ],
+        ['a literal reaching into a line edge', ' x y: x', [' x'], '&#32;x y:` x`'],
+        ['a backslash before a span', 'C:\\x', ['x'], 'C:\\\\`x`'],
+        [
+          'literals holding Markdown',
+          'Tag <a>, &copy; and a`b.',
+          ['<a>', '&copy;', 'a`b'],
+          'Tag `<a>`, `&copy;` and ``a`b``.',
+        ],
+        ['a < that opens an autolink around a span', 'Mail <x@a.io>', ['x'], 'Mail \\<`x`@a.io>'],
+        ['block markers opening a line', '1. x\n# y', ['1.', '#'], '`1.` x\\\n`#` y'],
+      ])('renders %s', (_label, message, literals, expected) => {
+        const text = rendered(
+          buildToolErrorResult(JsonRpcErrorCode.NotFound, message, undefined, literals),
+        );
+
+        expect(text).toBe(`Error: ${expected}`);
+        for (const preset of ['commonmark', 'gfm'] as const) {
+          expect(readCommonMark(text, preset)).toBe(`Error: ${readsAs(message, literals)}`);
+        }
+      });
+
+      /** Values a handler declares: Markdown-active, backticked, space-edged, and ones that never count. */
+      const LITERALS = [
+        '_a*b',
+        '_EywG0b',
+        'a*b',
+        '`x`',
+        'x`',
+        '``',
+        ' a ',
+        'a b',
+        '<a>',
+        '&copy;',
+        '1.',
+        '#',
+        '\\',
+        'a\\',
+        '***',
+        '-',
+        '|',
+        'é😀',
+        '_',
+        '*',
+        'cursor',
+        'nextCursor',
+        '<1@a.io>',
+        'C#',
+        ' x',
+        '',
+        'x\ny',
+      ];
+      /** The text around them: Markdown-active characters, whitespace of every kind, line breaks, block markers. */
+      const PROSE = [
+        ' ',
+        '\t',
+        '\u00a0',
+        '\u3000',
+        '\v',
+        '\n',
+        '\r\n',
+        '"',
+        '(',
+        ')',
+        ',',
+        '.',
+        ':',
+        'a',
+        'Z',
+        '9',
+        '_',
+        '*',
+        '`',
+        '\\',
+        '<',
+        '>',
+        '@',
+        '&',
+        '#',
+        '-',
+        '+',
+        '1. ',
+        '# ',
+        '> ',
+        '[',
+        ']',
+        '!',
+        '|',
+        '~',
+        '&amp;',
+        ' #',
+        'é',
+        '😀',
+        '𝐀',
+      ];
+      const declaredError = fc
+        .array(fc.constantFrom(...LITERALS), { minLength: 1, maxLength: 3 })
+        .chain((literals) =>
+          fc.tuple(
+            fc.constant(literals),
+            fc
+              .array(
+                fc.oneof(
+                  { weight: 2, arbitrary: fc.constantFrom(...PROSE) },
+                  { weight: 1, arbitrary: fc.constantFrom(...literals) },
+                ),
+                { minLength: 1, maxLength: 14 },
+              )
+              .map((parts) => parts.join(''))
+              .filter((message) => message !== ''),
+          ),
+        );
+
+      it('reads back exactly, its spans the ones the rule picks, and byte-identically when it picks none', () => {
+        fc.assert(
+          fc.property(declaredError, ([literals, message]) => {
+            const text = rendered(
+              buildToolErrorResult(JsonRpcErrorCode.NotFound, message, undefined, literals),
+            );
+            const expected = `Error: ${readsAs(message, literals)}`;
+            for (const preset of ['commonmark', 'gfm'] as const) {
+              expect(readCommonMark(text, preset)).toBe(expected);
+            }
+            if (!expected.includes('⟨code_inline:')) {
+              expect(text).toBe(
+                rendered(buildToolErrorResult(JsonRpcErrorCode.NotFound, message, undefined)),
+              );
+            }
+          }),
+          { numRuns: 500 },
+        );
+      });
+
+      it('decides the Recovery line on the raw strings when a span renders the hint differently', () => {
+        // Alone the hint renders as a span; in the message a letter touches it.
+        const text = rendered(
+          buildToolErrorResult(
+            JsonRpcErrorCode.NotFound,
+            'Use key a_x.',
+            { recovery: { hint: '_x' } },
+            ['_x'],
+          ),
+        );
+
+        expect(text).toBe('Error: Use key a_x.');
+      });
+
+      it.each([
+        [
+          'a getter that throws',
+          (error: McpError) =>
+            Object.defineProperty(error, 'literals', {
+              get() {
+                throw new Error('literals getter');
+              },
+            }),
+        ],
+        [
+          'a value that is not an array',
+          (error: McpError) => Object.defineProperty(error, 'literals', { value: 'a*b' }),
+        ],
+      ])('renders literals it cannot read, %s, as none (#697)', async (_label, spoil) => {
+        const result = await throwing(
+          spoil(
+            new McpError(JsonRpcErrorCode.NotFound, 'No a*b.', undefined, { literals: ['a*b'] }),
+          ),
+        );
+
+        expect(rendered(result as CallToolResult)).toBe(
+          `Error: No a\\*b.\n\n(request ${REQUEST_ID})`,
+        );
+      });
+
+      it('renders in time linear in the length of the message and hint', () => {
+        /** `unit` repeated to `length` characters. */
+        const fill = (unit: string, length: number) =>
+          unit.repeat(Math.ceil(length / unit.length)).slice(0, length);
+        const ids = Array.from({ length: 100 }, (_, i) => `id${String(i * 37).padStart(5, '0')}`);
+        /**
+         * One error per kind of literal set a handler declares — one value, a
+         * handful that overlap one another, about a hundred identifiers, one
+         * value echoed from the call, as long as the rest of the text the call
+         * controls, one inside a longer run of its own character that touches
+         * it at every start, and a short value on every line beside a long one
+         * that never occurs — each quoting its values through about `length`
+         * characters of message and hint, with the text it renders at that
+         * size where it is known.
+         */
+        const errors: Array<
+          (length: number) => {
+            hint: string;
+            literals: string[];
+            message: string;
+            rendersAs?: string;
+          }
+        > = [
+          (length) => ({
+            message: fill(`Ticket ${TICKET} holds *2* <queries> & ${TICKET}_x; `, length / 2),
+            hint: fill(`Re-call with "${TICKET}" or \`list\` it. `, length / 2),
+            literals: [TICKET],
+          }),
+          (length) => ({
+            message: fill('a-b-c-d-e a-b-c-d_ xa-b c c-c ', length / 2),
+            hint: fill('a-b-c-d-e-f-g ', length / 2),
+            literals: ['a-b', 'a-b-c', 'b-c', 'c', 'a-b-c-d-e'],
+          }),
+          (length) => ({
+            message: fill(`${ids.join(', ')} xid00037 id0003 `, length / 2),
+            hint: fill(`${ids.slice(0, 10).join(' ')} `, length / 2),
+            literals: ids,
+          }),
+          (length) => {
+            const echo = `${fill('a-', length / 4)}z`;
+            return {
+              message: `No page for ${fill('a-', length / 2)}; ticket ${echo} expired.`,
+              hint: `Re-call with ${echo}.`,
+              literals: [echo],
+              rendersAs: `Error: No page for ${fill('a-', length / 2)}; ticket \`${echo}\` expired.\n\nRecovery: Re-call with \`${echo}\`.`,
+            };
+          },
+          (length) => {
+            const run = fill('a', length / 2);
+            return {
+              message: `Key ${run} here.`,
+              hint: `Re-call with ${run}b.`,
+              literals: [fill('a', length / 8)],
+              rendersAs: `Error: Key ${run} here.\n\nRecovery: Re-call with ${run}b.`,
+            };
+          },
+          (length) => {
+            const lines = Math.floor(length / 10);
+            const units = Math.floor(length / 12);
+            return {
+              message: 'id x\n'.repeat(lines),
+              hint: `${'§1 id '.repeat(units)}\ny`,
+              literals: ['id', fill('i', length / 8)],
+              rendersAs: `Error: ${Array(lines).fill('`id` x').join('\\\n')}&#10;\n\nRecovery: ${'§1 `id` '.repeat(units).slice(0, -1)}&#32;\\\ny`,
+            };
+          },
+        ];
+
+        for (const error of errors) {
+          expectLinearCost((length) => {
+            const { message, hint, literals, rendersAs } = error(length);
+            const render = () =>
+              buildToolErrorResult(
+                JsonRpcErrorCode.NotFound,
+                message,
+                { recovery: { hint } },
+                literals,
+              );
+            if (rendersAs !== undefined) expect(rendered(render())).toBe(rendersAs);
+            return render;
+          });
+        }
       });
     });
   });
