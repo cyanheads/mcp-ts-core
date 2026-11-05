@@ -518,6 +518,13 @@ describe('CanvasRegistry · sliding TTL and absolute cap', () => {
     expect(new Date(last.expiresAt).getTime()).toBe(1_000_000 + ABSOLUTE_CAP);
     await registry.shutdown(baseContext);
   });
+
+  // Issue #598 — `DataCanvas.acquireShared` sizes the stored id's TTL from it.
+  it('exposes the configured absolute cap', async () => {
+    const registry = new CanvasRegistry(makeStubProvider(), makeOptions({ absoluteCapMs: 90_500 }));
+    expect(registry.absoluteCapMs).toBe(90_500);
+    await registry.shutdown(baseContext);
+  });
 });
 
 describe('CanvasRegistry · per-tenant cap', () => {
@@ -583,11 +590,19 @@ describe('CanvasRegistry · per-tenant cap', () => {
       const hint = (await refusal()).data?.recovery as { hint?: string } | undefined;
 
       // Under the collapsed `default` tenant the occupied slots may belong to
-      // other callers and a consumer's drop tool is off by default, so the hint
-      // has to lead with passing back an id the caller already holds.
+      // other callers, so the hint has to lead with passing back an id the
+      // caller already holds.
       expect(hint?.hint).toBe(
-        "Pass a canvas_id you already hold instead of omitting it to create another, free a slot with this server's canvas-drop tool if it exposes one, or retry once idle canvases pass their TTL.",
+        'Pass a canvas_id you already hold instead of omitting it to create another, or retry once idle canvases pass their TTL.',
       );
+    });
+
+    // Issue #748 — a consumer's drop tool usually drops one table, which frees
+    // no slot; the framework cannot tell which kind a server ships.
+    it('names no drop tool', async () => {
+      const hint = (await refusal()).data?.recovery as { hint?: string } | undefined;
+
+      expect(hint?.hint).not.toMatch(/drop/i);
     });
 
     it('carries no advice in the message that the hint contradicts', async () => {

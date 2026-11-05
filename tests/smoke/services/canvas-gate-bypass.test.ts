@@ -7,13 +7,16 @@
  * no refusal may echo, and every entry point that runs the gate — `query()`,
  * `registerView()`, and `query({ registerAs })` — must refuse every input
  * before creating anything. The engine reads and writes only under the export
- * root and the canvas scratch directory, so a read naming any other path is
- * refused by the engine itself, as `sql_read_only`, before the plan walk.
+ * root and the canvas scratch directory and refuses any other path itself, but
+ * the parse-tree layer answers first: a statement naming a file fails the same
+ * way wherever the file is and whatever state it is in. SHOW over staged
+ * tables, the internal metadata views under `denySystemCatalogs`, and the text
+ * scans' reading of string literals and comments are pinned here too.
  * @module tests/smoke/services/canvas-gate-bypass.test
  */
 
 import { existsSync } from 'node:fs';
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { basename, join } from 'node:path';
 
@@ -23,7 +26,12 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import type { CanvasInstance } from '@/services/canvas/core/CanvasInstance.js';
 import { CanvasRegistry } from '@/services/canvas/core/CanvasRegistry.js';
 import { DataCanvas } from '@/services/canvas/core/DataCanvas.js';
-import { BARE_FUNCTION_KEYWORDS } from '@/services/canvas/core/sqlGate.js';
+import {
+  assertNoDeniedFunctions,
+  BARE_FUNCTION_KEYWORDS,
+  collectPlanViolations,
+  INTERNAL_METADATA_VIEWS,
+} from '@/services/canvas/core/sqlGate.js';
 import {
   classifyDuckdbError,
   DuckdbProvider,
@@ -107,58 +115,89 @@ function recordOf(canvasId: string) {
 
 type Corpus = ReadonlyArray<readonly [label: string, sql: () => string]>;
 
-/** Reads naming a path outside the export root and scratch directory. Builders, so each SQL string is formed once the paths exist. */
-const OUTSIDE_PATH_READS: Corpus = [
-  ['a replacement scan over a quoted path', () => `SELECT * FROM '${planted}'`],
-  ['a FROM-first replacement scan', () => `FROM '${planted}'`],
-  ['a replacement scan over a glob', () => `SELECT * FROM '${plantedDir}/*.csv'`],
-  ['a quoted read_csv', () => `SELECT * FROM "read_csv"('${planted}')`],
-  ['a quoted, uppercase READ_CSV', () => `SELECT * FROM "READ_CSV"('${planted}')`],
-  ['a quoted read_csv_auto', () => `SELECT * FROM "read_csv_auto"('${planted}')`],
-  ['a quoted read_text', () => `SELECT * FROM "read_text"('${planted}')`],
-  ['a quoted read_blob', () => `SELECT * FROM "read_blob"('${planted}')`],
-  ['a quoted read_json_objects', () => `SELECT * FROM "read_json_objects"('${planted}')`],
-  ['a quoted glob', () => `SELECT * FROM "glob"('${plantedDir}/*')`],
-  ['a quoted parquet_metadata', () => `SELECT * FROM "parquet_metadata"('${planted}')`],
-  ['a quoted read_single_csv_file', () => `SELECT * FROM "read_single_csv_file"('${planted}')`],
+/**
+ * Reads naming a path outside the export root and scratch directory, each with
+ * the function its refusal names, if it is refused by name rather than as a
+ * file reference. The engine refuses every one of these paths, but the
+ * parse-tree layer answers first, so each statement fails as it would naming a
+ * file inside those directories. Builders, so each SQL string is formed once
+ * the paths exist.
+ */
+const OUTSIDE_PATH_READS: ReadonlyArray<readonly [label: string, sql: () => string, fn?: string]> =
   [
-    'query() running a deny-listed call inside a string',
-    () => `SELECT * FROM query('SELECT * FROM read_csv(''${planted}'')')`,
-  ],
-  ['query_table() over a path', () => `SELECT * FROM query_table('${planted}')`],
-  [
-    'a quoted read_csv behind LATERAL',
-    () => `SELECT * FROM t, LATERAL (SELECT * FROM "read_csv"('${planted}'))`,
-  ],
-  [
-    'a quoted read_csv inside a CTE',
-    () => `WITH s AS (SELECT * FROM "read_csv"('${planted}')) SELECT * FROM s`,
-  ],
-  [
-    'a quoted read_csv joined by UNION ALL BY NAME',
-    () => `SELECT * FROM t UNION ALL BY NAME SELECT * FROM "read_csv"('${planted}')`,
-  ],
-  ['SUMMARIZE over a replacement scan', () => `SUMMARIZE SELECT * FROM '${planted}'`],
-  [
-    'a .. traversal out of the export root',
-    () => `SELECT * FROM '${exportRoot}/../${basename(plantedDir)}/planted.csv'`,
-  ],
-  [
-    'a sibling directory sharing the export root as a name prefix',
-    () => `SELECT * FROM '${siblingDir}/planted.csv'`,
-  ],
-  [
-    'a replacement scan inside a query() literal',
-    () => `SELECT * FROM query('SELECT * FROM ''${planted}''')`,
-  ],
-];
+    ['a replacement scan over a quoted path', () => `SELECT * FROM '${planted}'`],
+    ['a FROM-first replacement scan', () => `FROM '${planted}'`],
+    ['a replacement scan over a glob', () => `SELECT * FROM '${plantedDir}/*.csv'`],
+    ['a quoted read_csv', () => `SELECT * FROM "read_csv"('${planted}')`, 'read_csv'],
+    ['a quoted, uppercase READ_CSV', () => `SELECT * FROM "READ_CSV"('${planted}')`, 'read_csv'],
+    [
+      'a quoted read_csv_auto',
+      () => `SELECT * FROM "read_csv_auto"('${planted}')`,
+      'read_csv_auto',
+    ],
+    ['a quoted read_text', () => `SELECT * FROM "read_text"('${planted}')`, 'read_text'],
+    ['a quoted read_blob', () => `SELECT * FROM "read_blob"('${planted}')`, 'read_blob'],
+    [
+      'a quoted read_json_objects',
+      () => `SELECT * FROM "read_json_objects"('${planted}')`,
+      'read_json_objects',
+    ],
+    ['a quoted glob', () => `SELECT * FROM "glob"('${plantedDir}/*')`, 'glob'],
+    [
+      'a quoted parquet_metadata',
+      () => `SELECT * FROM "parquet_metadata"('${planted}')`,
+      'parquet_metadata',
+    ],
+    [
+      'a quoted read_single_csv_file',
+      () => `SELECT * FROM "read_single_csv_file"('${planted}')`,
+      'read_single_csv_file',
+    ],
+    [
+      'query() running a deny-listed call inside a string',
+      () => `SELECT * FROM query('SELECT * FROM read_csv(''${planted}'')')`,
+      'read_csv',
+    ],
+    ['query_table() over a path', () => `SELECT * FROM query_table('${planted}')`, 'query_table'],
+    [
+      'a quoted read_csv behind LATERAL',
+      () => `SELECT * FROM t, LATERAL (SELECT * FROM "read_csv"('${planted}'))`,
+      'read_csv',
+    ],
+    [
+      'a quoted read_csv inside a CTE',
+      () => `WITH s AS (SELECT * FROM "read_csv"('${planted}')) SELECT * FROM s`,
+      'read_csv',
+    ],
+    [
+      'a quoted read_csv joined by UNION ALL BY NAME',
+      () => `SELECT * FROM t UNION ALL BY NAME SELECT * FROM "read_csv"('${planted}')`,
+      'read_csv',
+    ],
+    ['SUMMARIZE over a replacement scan', () => `SUMMARIZE SELECT * FROM '${planted}'`],
+    [
+      'a .. traversal out of the export root',
+      () => `SELECT * FROM '${exportRoot}/../${basename(plantedDir)}/planted.csv'`,
+    ],
+    [
+      'a sibling directory sharing the export root as a name prefix',
+      () => `SELECT * FROM '${siblingDir}/planted.csv'`,
+    ],
+    [
+      'a replacement scan inside a query() literal',
+      () => `SELECT * FROM query('SELECT * FROM ''${planted}''')`,
+    ],
+  ];
 
 /**
  * Reads of a file under the export root, which the engine may open. Each binds
- * the file's columns while no plan node names a reader — a DESCRIBE, or a scan
- * the optimizer removes — so the parse tree is the layer that refuses them.
+ * the file's columns while no plan node names a reader — a DESCRIBE, a SHOW, or
+ * a scan the optimizer removes — so the parse tree is the layer that refuses
+ * them. DuckDB v2.0 fails `SHOW '<path>'` as a catalog lookup before any file
+ * opens; a name holding a path separator is still a file reference.
  */
 const INSIDE_ROOT_FILE_REFERENCES: Corpus = [
+  ['SHOW over a quoted path', () => `SHOW '${inside}'`],
   ['DESCRIBE over a quoted path', () => `DESCRIBE '${inside}'`],
   ['DESCRIBE over a SELECT', () => `DESCRIBE SELECT * FROM '${inside}'`],
   ['a DESCRIBE subquery', () => `SELECT column_name FROM (DESCRIBE '${inside}')`],
@@ -186,13 +225,6 @@ const INSIDE_ROOT_FILE_REFERENCES: Corpus = [
     () => `SELECT * FROM query('SELECT * FROM query(''SELECT * FROM ''''${inside}'''' LIMIT 0'')')`,
   ],
 ];
-
-/**
- * DuckDB v2.0 resolves `SHOW '<path>'` as a catalog lookup while preparing and
- * fails it there, before any file opens; v1.5 binds the file's columns, which
- * the parse tree's SHOW_REF check refuses instead.
- */
-const INSIDE_ROOT_SHOW_REFERENCES: Corpus = [['SHOW over a quoted path', () => `SHOW '${inside}'`]];
 
 /** Named readers of a file under the export root, spelled past the text scan. */
 const INSIDE_ROOT_NAMED_READS: ReadonlyArray<
@@ -233,11 +265,11 @@ const PLAN_WALK_READS: Corpus = [
   ['the sqlite_schema view', () => 'SELECT * FROM sqlite_schema'],
   ['the pragma_database_list view without parentheses', () => 'SELECT * FROM pragma_database_list'],
   ['SHOW TABLES', () => 'SHOW TABLES'],
+  ['SHOW ALL TABLES', () => 'SHOW ALL TABLES'],
+  ['SHOW DATABASES', () => 'SHOW DATABASES'],
   ['a quoted duckdb_settings()', () => 'SELECT * FROM "duckdb_settings"()'],
   ['a quoted duckdb_temporary_files()', () => 'SELECT * FROM "duckdb_temporary_files"()'],
   ['duckdb_profiling_settings()', () => 'SELECT * FROM duckdb_profiling_settings()'],
-  ['a quoted pragma_version()', () => 'SELECT * FROM "pragma_version"()'],
-  ['a quoted pragma_table_info()', () => `SELECT * FROM "pragma_table_info"('t')`],
   ['duckdb_external_resources()', () => 'SELECT * FROM duckdb_external_resources()'],
   ['SHOW TABLES inside a query() literal', () => `SELECT * FROM query('SHOW TABLES')`],
   [
@@ -295,6 +327,9 @@ const PARSED_FUNCTION_CALLS: ReadonlyArray<readonly [label: string, fn: string, 
   ],
   ['a quoted query() over a cast literal', 'query', `SELECT * FROM "query"('SELECT 1'::VARCHAR)`],
   ['query() over a parameter', 'query', 'SELECT * FROM query($1)'],
+  // DuckDB refuses these two while preparing; the parse tree refuses them first.
+  ['query() over a column', 'query', 'SELECT * FROM t, query(x::VARCHAR)'],
+  ['query() over two literals', 'query', `SELECT * FROM query('SELECT 1', 'SELECT 2')`],
   ['query() over a cast literal', 'query', `SELECT * FROM query('SELECT x FROM t'::VARCHAR)`],
   [
     'a concatenated query() nested inside a literal one',
@@ -320,6 +355,16 @@ const PARSED_FUNCTION_CALLS: ReadonlyArray<readonly [label: string, fn: string, 
     'a pragma_* call inside a query() literal',
     'pragma_version',
     `SELECT * FROM query('SELECT * FROM pragma_version()')`,
+  ],
+  ['a quoted pragma_version()', 'pragma_version', 'SELECT * FROM "pragma_version"()'],
+  ['a quoted pragma_table_info()', 'pragma_table_info', `SELECT * FROM "pragma_table_info"('t')`],
+  ['a quoted pragma_show()', 'pragma_show', `SELECT * FROM "pragma_show"('t')`],
+  ['a quoted, uppercase PRAGMA_SHOW()', 'pragma_show', `SELECT * FROM "PRAGMA_SHOW"('t')`],
+  ['a schema-qualified pragma_show()', 'pragma_show', `SELECT * FROM main."pragma_show"('t')`],
+  [
+    'a quoted pragma_show() inside a query() literal',
+    'pragma_show',
+    `SELECT * FROM query('SELECT * FROM "pragma_show"(''t'')')`,
   ],
   ['query_table()', 'query_table', `SELECT * FROM query_table('t')`],
   [
@@ -367,15 +412,13 @@ const DENIED_FUNCTION_HINT =
 
 /**
  * `query()` calls DuckDB itself refuses while preparing: a string that is not
- * one SELECT, a column argument, a second argument. Each is refused before the
- * parse-tree check runs, and carries only the binder's message.
+ * one SELECT. The parse tree admits the literal and finds nothing in it to
+ * refuse, so each carries only the binder's message.
  */
 const QUERY_PREPARE_REFUSALS: Corpus = [
   ['query() over a DROP literal', () => `SELECT * FROM query('DROP TABLE t')`],
   ['query() over a SET literal', () => `SELECT * FROM query('SET threads = 1')`],
   ['query() over a two-statement literal', () => `SELECT * FROM query('SELECT 1; SELECT 2')`],
-  ['query() over a column', () => 'SELECT * FROM t, query(x::VARCHAR)'],
-  ['query() over two literals', () => `SELECT * FROM query('SELECT 1', 'SELECT 2')`],
 ];
 
 /** `SELECT x FROM t` inside `levels` nested `query()` string literals. */
@@ -445,6 +488,26 @@ function expectFileReferenceRefusal(err: McpError): void {
   expect(surface).not.toContain(exportRoot);
 }
 
+/**
+ * The refusal of a read naming an outside path: by name when it calls a denied
+ * function, else as a file reference, carrying nothing read from the planted
+ * file and no host directory.
+ */
+function expectOutsidePathRefusal(err: McpError, fn: string | undefined): void {
+  if (fn !== undefined) {
+    expectParsedFunctionRefusal(err, fn);
+  } else {
+    expect(err.code).toBe(JsonRpcErrorCode.ValidationError);
+    expect(err.data?.reason).toBe('sql_read_only');
+    expect(err.message).toMatch(/^Canvas SQL rejected: ".+" names a file, not a staged table\.$/);
+    expect((err.data?.recovery as { hint?: string } | undefined)?.hint).toBe(SQL_READ_ONLY_HINT);
+  }
+  const surface = surfaceOf(err);
+  expect(surface).not.toContain(MARKER);
+  expect(surface).not.toContain(exportRoot);
+  expect(surface).not.toContain(recordOf(instance.canvasId).scratchDir);
+}
+
 /** The plan-walk refusal, carrying nothing read from the planted file. */
 function expectPlanWalkRefusal(err: McpError): void {
   expect(err.data?.reason).toBe('plan_operator_not_allowed');
@@ -472,17 +535,18 @@ function acrossEntryPoints<Row extends readonly [string, ...unknown[]]>(
   rows: ReadonlyArray<Row>,
   sqlOf: (row: Row) => string,
   check: (err: McpError, row: Row) => void,
+  options: { denySystemCatalogs?: boolean } = {},
 ): void {
   describe(title, () => {
     const cases = rows.map((row, i) => [row[0], row, i] as const);
 
     it.each(cases)('query() refuses %s', async (_label, row) => {
-      check(await refusalOf(() => instance.query(sqlOf(row))), row);
+      check(await refusalOf(() => instance.query(sqlOf(row), options)), row);
     });
 
     it.each(cases)('registerView() refuses %s and creates no view', async (_label, row, i) => {
       const viewName = `${prefix}_v_${i}`;
-      check(await refusalOf(() => instance.registerView(viewName, sqlOf(row))), row);
+      check(await refusalOf(() => instance.registerView(viewName, sqlOf(row), options)), row);
       expect(await instance.describe({ tableName: viewName })).toEqual([]);
     });
 
@@ -490,7 +554,10 @@ function acrossEntryPoints<Row extends readonly [string, ...unknown[]]>(
       'query({ registerAs }) refuses %s and materializes nothing',
       async (_label, row, i) => {
         const tableName = `${prefix}_ra_${i}`;
-        check(await refusalOf(() => instance.query(sqlOf(row), { registerAs: tableName })), row);
+        check(
+          await refusalOf(() => instance.query(sqlOf(row), { ...options, registerAs: tableName })),
+          row,
+        );
         expect(await instance.describe({ tableName })).toEqual([]);
       },
     );
@@ -563,10 +630,22 @@ describe('canvas · the engine reads only the export root and scratch directory'
     ]);
   });
 
-  it('refuses a COPY to an outside path through query() as sql_read_only and writes nothing', async () => {
+  it('refuses a COPY to an outside path through query() as non_select_statement and writes nothing', async () => {
     const target = join(plantedDir, 'copied.csv');
     const err = await refusalOf(() => instance.query(`COPY t TO '${target}'`));
-    expect(err.data?.reason).toBe('sql_read_only');
+    expect(err.data?.reason).toBe('non_select_statement');
+    expect(existsSync(target)).toBe(false);
+  });
+
+  it('refuses a COPY to an outside path on the canvas itself, with the gate not consulted', async () => {
+    const target = join(plantedDir, 'copied_direct.csv');
+    const failure = await recordOf(instance.canvasId)
+      .controlConnection.run(`COPY t TO '${target}'`)
+      .then(
+        () => undefined,
+        (err: unknown) => err,
+      );
+    expect((failure as Error).message).toMatch(/^Permission Error/);
     expect(existsSync(target)).toBe(false);
   });
 
@@ -621,13 +700,581 @@ describe('canvas · names DuckDB binds as a function without parentheses', () =>
   });
 });
 
+describe('canvas · SHOW over a staged table or view (#800)', () => {
+  beforeAll(async () => {
+    await instance.registerView('tv', 'SELECT x FROM t');
+  });
+
+  it.each([
+    'SHOW t',
+    'SHOW "t"',
+    'show T',
+    'SHOW main.t',
+    'SHOW tv',
+    `SELECT * FROM query('SHOW t')`,
+  ])('answers %s with the column listing', async (sql) => {
+    const result = await instance.query(sql);
+    expect(result.rows.map((row) => row.column_name)).toEqual(['x']);
+  });
+
+  it('refuses SHOW of a name nothing staged as non_select_statement', async () => {
+    const err = await refusalOf(() => instance.query('SHOW missing_tbl'));
+    expect(err.data?.reason).toBe('non_select_statement');
+  });
+
+  it.each([
+    ['SHOW sqlite_master', 'sqlite_master'],
+    ['SHOW information_schema.tables', 'information_schema'],
+  ])('refuses %s under denySystemCatalogs', async (sql, catalog) => {
+    const err = await refusalOf(() => instance.query(sql, { denySystemCatalogs: true }));
+    expect(err.data?.reason).toBe('system_catalog_access');
+    expect(err.data?.catalog).toBe(catalog);
+  });
+});
+
+describe('canvas · every pragma_* function, however its name is written (#800)', () => {
+  it('refuses each pragma_* table function the engine lists, by name, as denied_function', async () => {
+    const plain = await DuckDBInstance.create(':memory:');
+    const connection = await plain.connect();
+    let functions: { function_name: string; parameters: string[] }[];
+    try {
+      const reader = await connection.runAndReadAll(
+        String.raw`SELECT function_name, arg_min(parameters, len(parameters)) AS parameters FROM duckdb_functions() WHERE function_type = 'table' AND function_name LIKE 'pragma\_%' ESCAPE '\' GROUP BY function_name ORDER BY function_name`,
+      );
+      functions = reader.getRowObjectsJson() as typeof functions;
+    } finally {
+      connection.closeSync();
+      plain.closeSync();
+    }
+    expect(functions.map((row) => row.function_name)).toContain('pragma_show');
+    for (const { function_name: fn, parameters } of functions) {
+      // The first parameter, where there is one, is a table name; the rest are named.
+      const args = parameters.length === 0 ? '' : "'t'";
+      for (const spelling of [`"${fn}"`, `"${fn.toUpperCase()}"`, `main."${fn}"`]) {
+        const err = await refusalOf(() => instance.query(`SELECT * FROM ${spelling}(${args})`));
+        expectParsedFunctionRefusal(err, fn);
+      }
+    }
+  });
+});
+
+/**
+ * DuckDB's internal metadata views, referenced in every form the engine
+ * resolves. Each answers with the view's columns, so `denySystemCatalogs`
+ * refuses the name itself.
+ */
+const INTERNAL_VIEW_READS: Corpus = [
+  ['DESCRIBE of a view', () => 'DESCRIBE duckdb_tables'],
+  ['DESCRIBE of a quoted view', () => 'DESCRIBE "duckdb_tables"'],
+  ['DESCRIBE of a view in another case', () => 'DESCRIBE "DuckDB_Columns"'],
+  ['DESCRIBE of a catalog-qualified view', () => 'DESCRIBE system.main.duckdb_columns'],
+  ['SHOW of a view', () => 'SHOW duckdb_tables'],
+  ['a view scan the optimizer removes', () => 'SELECT * FROM duckdb_tables WHERE false'],
+  ['a view scan under LIMIT 0', () => 'SELECT * FROM sqlite_schema LIMIT 0'],
+  ['a DESCRIBE subquery', () => 'SELECT column_name FROM (DESCRIBE duckdb_views)'],
+  ['DESCRIBE inside a query() literal', () => `SELECT * FROM query('DESCRIBE duckdb_tables')`],
+  ['a pg_catalog view without its schema', () => 'DESCRIBE pg_class'],
+  ['the pragma_database_list view', () => 'SELECT * FROM pragma_database_list WHERE false'],
+  ['the sqlite_temp_master view', () => 'DESCRIBE sqlite_temp_master'],
+  ['a column the view lacks', () => 'SELECT nope FROM pg_type'],
+];
+
+describe('canvas · denySystemCatalogs refuses the internal metadata views, schema-qualified or not', () => {
+  it('names exactly the internal views the engine resolves without a schema', async () => {
+    const plain = await DuckDBInstance.create(':memory:');
+    const connection = await plain.connect();
+    try {
+      const views = (
+        await connection.runAndReadAll(
+          `SELECT view_name FROM duckdb_views() WHERE internal AND database_name = 'system'`,
+        )
+      ).getRowObjectsJson() as { view_name: string }[];
+      const resolved: string[] = [];
+      for (const { view_name: view } of views) {
+        const resolves = await connection.runAndReadAll(`SELECT * FROM "${view}" LIMIT 0`).then(
+          () => true,
+          () => false,
+        );
+        if (resolves) resolved.push(view);
+      }
+      expect(resolved.sort()).toEqual([...INTERNAL_METADATA_VIEWS].sort());
+    } finally {
+      connection.closeSync();
+      plain.closeSync();
+    }
+  });
+
+  acrossEntryPoints(
+    'under denySystemCatalogs',
+    'iview',
+    INTERNAL_VIEW_READS,
+    ([, sql]) => sql(),
+    (err) => {
+      expect(err.code).toBe(JsonRpcErrorCode.ValidationError);
+      expect(err.data?.reason).toBe('system_catalog_access');
+    },
+    { denySystemCatalogs: true },
+  );
+
+  it.each([...INTERNAL_METADATA_VIEWS])('refuses DESCRIBE of %s, naming the view', async (view) => {
+    const err = await refusalOf(() =>
+      instance.query(`DESCRIBE "${view}"`, { denySystemCatalogs: true }),
+    );
+    expect(err.data?.reason).toBe('system_catalog_access');
+    expect(err.data?.catalog).toBe(view);
+  });
+
+  it.each(['DESCRIBE duckdb_tables', 'DESCRIBE pg_class', 'SELECT * FROM sqlite_schema LIMIT 0'])(
+    'answers %s without the option',
+    async (sql) => {
+      expect((await instance.query(sql)).columns.length).toBeGreaterThan(0);
+    },
+  );
+
+  it.each([
+    ['an alias', 'SELECT x AS duckdb_tables FROM t'],
+    ['an alias of the existing name', 'SELECT x AS sqlite_master FROM t'],
+  ])('refuses %s spelled like a view, as for sqlite_master', async (_label, sql) => {
+    const err = await refusalOf(() => instance.query(sql, { denySystemCatalogs: true }));
+    expect(err.data?.reason).toBe('system_catalog_access');
+  });
+
+  it('answers a string literal that spells a view', async () => {
+    const result = await instance.query(`SELECT 'duckdb_tables' AS s, 'pg_class' AS p FROM t`, {
+      denySystemCatalogs: true,
+    });
+    expect(result.rows).toEqual([{ s: 'duckdb_tables', p: 'pg_class' }]);
+  });
+});
+
+const B = '\\';
+
+/**
+ * Statements whose string literals, comments, and quoted names the text scans
+ * must divide where the installed engine's tokenizer does, each holding a
+ * `read_text` call or the text of one.
+ */
+const TOKENIZER_FORMS: ReadonlyArray<readonly [label: string, sql: string]> = [
+  ['an escape string ending in an escaped quote', `SELECT E'a${B}'' AS q, read_text('x') AS v`],
+  ['a lowercase escape string', `SELECT e'${B}'' AS q, read_text('x') AS v`],
+  ['a dollar-quoted string holding a quote', `SELECT $$it's$$ AS q, read_text('x') AS v`],
+  ['a tagged dollar-quoted string', `SELECT $t$it's$t$ AS q, read_text('x') AS v`],
+  ['a string holding a line-comment opener', `SELECT '--' AS q, read_text('x') AS v`],
+  ['a string holding a block-comment opener', `SELECT '/*' AS q, read_text('x') AS v, '*/' AS w`],
+  ['a line comment ended by a carriage return', `SELECT 1 AS q -- note\r, read_text('x') AS v`],
+  [
+    'a nested comment holding a quote',
+    `SELECT 1 /* a /* b */ it's */ AS q, read_text('x') AS v, 'y' AS w`,
+  ],
+  ['a quoted name holding a quote', `SELECT 1 AS "it's", read_text('x') AS v, 'y' AS w`],
+  ['a backtick-quoted name holding a quote', "SELECT 1 AS `it's`, read_text('x') AS v, 'y' AS w"],
+  ['an escape string continued on the next line', `SELECT E'a'\n'${B}'' AS q, read_text('x') AS v`],
+  ['a doubled quote', `SELECT 'read_text(''x'')' AS q`],
+  ['an escaped quote in an escape string', `SELECT E'it${B}'s read_text(x)' AS q`],
+  ['a dollar-quoted call', `SELECT $$read_text('x')$$ AS q`],
+  ['a dollar-quoted string whose tag differs in case', `SELECT $T$ $t$ read_text('x') $T$ AS q`],
+  ['a closed nested comment', `SELECT 1 /* a /* read_text('x') */ b */ AS q`],
+  ['a line comment', `SELECT 1 AS q -- read_text('x')`],
+  ['a name holding dollar signs', `SELECT 1 AS a$$b, 'read_text(x)' AS q`],
+  ['a parameter', `SELECT $1 AS p, 'read_text(x)' AS q`],
+  ['a typed string after a name ending in E', `SELECT xE'${B}' AS q, 'read_text(x)' AS r`],
+  ['a quoted name holding a doubled quote', `SELECT 1 AS "a""b", 'read_text(x)' AS q`],
+  ['a string continued on the next line', `SELECT 'a'\n'read_text(x)' AS q`],
+  ['a string continued past a line comment', `SELECT 'a' -- c\n'read_text(x)' AS q`],
+  ['a string ending in a backslash', `SELECT 'C:${B}' AS p, 'read_text(x)' AS q`],
+  ['a plain backtick-quoted name', "SELECT `x`, 'read_text(x)' AS q FROM t"],
+];
+
+/** The functions DuckDB's own parse of `sql` calls; `undefined` when it cannot parse it. */
+async function parsedCalls(sql: string): Promise<string[] | undefined> {
+  const reader = await recordOf(instance.canvasId).controlConnection.runAndReadAll(
+    'SELECT json_serialize_sql($1::VARCHAR) AS tree',
+    [sql],
+  );
+  const tree = JSON.parse(String(reader.getRowObjectsJson()[0]?.tree)) as { error?: unknown };
+  if (tree.error !== false) return;
+  const calls: string[] = [];
+  const walk = (node: unknown): void => {
+    if (node === null || typeof node !== 'object') return;
+    const call = node as { class?: unknown; function_name?: unknown };
+    if (call.class === 'FUNCTION' && typeof call.function_name === 'string') {
+      calls.push(call.function_name);
+    }
+    for (const value of Object.values(node)) walk(value);
+  };
+  walk(tree);
+  return calls;
+}
+
+describe('canvas · the text scans read string literals and comments as the engine does', () => {
+  it.each(TOKENIZER_FORMS)(
+    'scans the read_text call after %s exactly when the engine parses one',
+    async (_label, sql) => {
+      const calls = await parsedCalls(sql);
+      let scanned = false;
+      try {
+        assertNoDeniedFunctions(sql);
+      } catch {
+        scanned = true;
+      }
+      // A statement the engine cannot parse never runs; the scan refuses it too.
+      expect(scanned).toBe(calls?.includes('read_text') ?? true);
+    },
+  );
+
+  acrossEntryPoints(
+    'refuses a system catalog read the engine sees as code, under denySystemCatalogs',
+    'tokenizer',
+    [
+      [
+        'after an escape string ending in an escaped quote',
+        `SELECT E'${B}'' AS q, table_name FROM information_schema.tables, (SELECT 'x') s`,
+      ],
+      [
+        'after a dollar-quoted string holding a quote',
+        `SELECT $$it's$$ AS q, table_name FROM information_schema.tables, (SELECT 'x') s`,
+      ],
+      [
+        'after a string holding a line-comment opener',
+        `SELECT '--' AS q, table_name FROM information_schema.tables`,
+      ],
+      [
+        'after a string holding a block-comment opener',
+        `SELECT '/*' AS q, table_name FROM information_schema.tables, (SELECT '*/') s`,
+      ],
+      [
+        'after a line comment ended by a carriage return',
+        `SELECT 1 AS q -- note\r, table_name FROM information_schema.tables`,
+      ],
+      [
+        'after a nested comment holding a quote',
+        `SELECT 1 /* a /* b */ it's */ AS q, table_name FROM information_schema.tables, (SELECT 'x') s`,
+      ],
+      [
+        'after a quoted name holding a quote',
+        `SELECT 1 AS "it's", table_name FROM information_schema.tables, (SELECT 'x') s`,
+      ],
+      [
+        'after a backtick-quoted name holding a quote',
+        "SELECT 1 AS `it's`, table_name FROM information_schema.tables, (SELECT 'x') s",
+      ],
+    ] as const,
+    ([, sql]) => sql,
+    (err) => {
+      expect(err.data?.reason).toBe('system_catalog_access');
+      expect(err.data?.catalog).toBe('information_schema');
+    },
+    { denySystemCatalogs: true },
+  );
+});
+
+/**
+ * Table references the catalog cannot hold: a name with a path separator is a
+ * file path, never a staged table, whether or not anything exists there.
+ */
+const PATH_NAMED_TABLES: ReadonlyArray<
+  readonly [label: string, sql: () => string, name: () => string]
+> = [
+  ['a quoted absolute path', () => `SELECT * FROM '/etc/hosts'`, () => '/etc/hosts'],
+  ['a double-quoted absolute path', () => `SELECT * FROM "/etc/hosts"`, () => '/etc/hosts'],
+  ['a directory', () => `SELECT * FROM '/etc'`, () => '/etc'],
+  ['a FROM-first path', () => `FROM '/etc/hosts'`, () => '/etc/hosts'],
+  ['a path beside a staged table', () => `SELECT * FROM t, '/etc/hosts'`, () => '/etc/hosts'],
+  [
+    'a backslash path',
+    () => String.raw`SELECT * FROM 'C:\Windows\win'`,
+    () => String.raw`C:\Windows\win`,
+  ],
+  [
+    'a file under the export root with no extension',
+    () => `SELECT * FROM '${exportRoot}/noext'`,
+    () => '[path]/noext',
+  ],
+  [
+    'a missing file under the export root with no extension',
+    () => `SELECT * FROM '${exportRoot}/missing_noext'`,
+    () => '[path]/missing_noext',
+  ],
+];
+
+describe('canvas · a table reference that holds a path separator names a file', () => {
+  beforeAll(async () => {
+    await writeFile(join(exportRoot, 'noext'), `${INSIDE_MARKER},n\n${MARKER},1\n`);
+  });
+
+  acrossEntryPoints(
+    'refused as sql_read_only',
+    'pathname',
+    PATH_NAMED_TABLES,
+    ([, sql]) => sql(),
+    (err, [, , name]) => {
+      expect(err.code).toBe(JsonRpcErrorCode.ValidationError);
+      expect(err.data?.reason).toBe('sql_read_only');
+      expect(err.message).toBe(
+        `Canvas SQL rejected: "${name()}" names a file, not a staged table.`,
+      );
+      expect((err.data?.recovery as { hint?: string } | undefined)?.hint).toBe(SQL_READ_ONLY_HINT);
+      const surface = surfaceOf(err);
+      expect(surface).not.toContain(INSIDE_MARKER);
+      expect(surface).not.toContain(MARKER);
+      expect(surface).not.toContain(exportRoot);
+    },
+  );
+
+  it.each([
+    ['a quoted name holding a dot', 'SELECT * FROM "a.b"', 'a.b'],
+    ['a quoted qualified name', 'SELECT * FROM "main.gone"', 'main.gone'],
+    ['a name nothing staged', 'SELECT * FROM gone', 'gone'],
+  ])('keeps %s a missing table', async (_label, sql, tableName) => {
+    const err = await refusalOf(() => instance.query(sql));
+    expect(err.code).toBe(JsonRpcErrorCode.NotFound);
+    expect(err.data?.reason).toBe('missing_table');
+    expect(err.data?.tableName).toBe(tableName);
+  });
+});
+
+/**
+ * States one path under the export root can be in. A statement naming the path
+ * must fail identically in each: the refusal says what the statement names, not
+ * what is on disk.
+ */
+const FILE_STATES: ReadonlyArray<readonly [state: string, set: (path: string) => Promise<void>]> = [
+  ['absent', async () => {}],
+  ['a CSV file', (path) => writeFile(path, `${INSIDE_MARKER},n\n${MARKER},1\n`)],
+  ['an empty file', (path) => writeFile(path, '')],
+  [
+    'an unreadable file',
+    async (path) => {
+      await writeFile(path, `${INSIDE_MARKER},n\n${MARKER},1\n`);
+      await chmod(path, 0o000);
+    },
+  ],
+  ['a directory', (path) => mkdir(path)],
+];
+
+/** Statements naming one path, each with the refusal every file state must get. */
+const FILE_STATE_STATEMENTS: ReadonlyArray<
+  readonly [label: string, sql: (path: string) => string, reason: string, fn?: string]
+> = [
+  ['a replacement scan', (p) => `SELECT * FROM '${p}'`, 'sql_read_only'],
+  [
+    'a replacement scan the optimizer removes',
+    (p) => `SELECT * FROM '${p}' WHERE false`,
+    'sql_read_only',
+  ],
+  ['a column the file may lack', (p) => `SELECT nope FROM '${p}'`, 'sql_read_only'],
+  ['DESCRIBE', (p) => `DESCRIBE '${p}'`, 'sql_read_only'],
+  ['SUMMARIZE', (p) => `SUMMARIZE SELECT * FROM '${p}'`, 'sql_read_only'],
+  ['a query() literal', (p) => `SELECT * FROM query('SELECT * FROM ''${p}''')`, 'sql_read_only'],
+  [
+    'two query() literals deep',
+    (p) => `SELECT * FROM query('SELECT * FROM query(''SELECT nope FROM ''''${p}'''''')')`,
+    'sql_read_only',
+  ],
+  ['a quoted read_csv', (p) => `SELECT * FROM "read_csv"('${p}')`, 'denied_function', 'read_csv'],
+  [
+    'a quoted read_json',
+    (p) => `SELECT * FROM "read_json"('${p}')`,
+    'denied_function',
+    'read_json',
+  ],
+  [
+    'a quoted read_parquet',
+    (p) => `SELECT * FROM "read_parquet"('${p}')`,
+    'denied_function',
+    'read_parquet',
+  ],
+  [
+    'query_table() over the path',
+    (p) => `SELECT * FROM query_table('"${p}"')`,
+    'denied_function',
+    'query_table',
+  ],
+  [
+    'query() over a computed string',
+    (p) => `SELECT * FROM query('SELECT * FROM ''${p}''' || '')`,
+    'denied_function',
+    'query',
+  ],
+  ['SHOW', (p) => `SHOW '${p}'`, 'sql_read_only'],
+  ['the path beside an outside path', (p) => `SELECT * FROM '${p}', '${planted}'`, 'sql_read_only'],
+  ['the path beside a missing table', (p) => `SELECT * FROM '${p}', gone`, 'sql_read_only'],
+  ['a missing table beside the path', (p) => `SELECT * FROM gone, '${p}'`, 'sql_read_only'],
+  ['the path beside a missing dotted name', (p) => `SELECT * FROM '${p}', "a.b"`, 'sql_read_only'],
+  ['the path beside a missing schema', (p) => `SELECT * FROM '${p}', nos.t`, 'sql_read_only'],
+  [
+    'a query() literal naming the path beside a missing table',
+    (p) => `SELECT * FROM query('SELECT * FROM ''${p}'', gone')`,
+    'sql_read_only',
+  ],
+  [
+    'a quoted read_csv beside an outside path',
+    (p) => `SELECT * FROM "read_csv"('${p}'), '${planted}'`,
+    'denied_function',
+    'read_csv',
+  ],
+];
+
+describe('canvas · a file reference fails the same way whether or not the file exists', () => {
+  const probe = () => join(exportRoot, 'state_probe.csv');
+
+  afterAll(async () => {
+    await chmod(probe(), 0o644).catch(() => undefined);
+    await rm(probe(), { recursive: true, force: true });
+  });
+
+  it.each(
+    FILE_STATE_STATEMENTS.map(([label, sqlOf, reason, fn]) => ({ label, sqlOf, reason, fn })),
+  )(
+    'refuses $label identically in every file state, through every entry point',
+    async ({ sqlOf, reason, fn }) => {
+      const sql = sqlOf(probe());
+      const outcomes: { state: string; entry: string; surface: string }[] = [];
+      for (const [state, set] of FILE_STATES) {
+        await chmod(probe(), 0o644).catch(() => undefined);
+        await rm(probe(), { recursive: true, force: true });
+        await set(probe());
+        for (const [entry, run] of [
+          ['query', () => instance.query(sql)],
+          ['registerView', () => instance.registerView('state_v', sql)],
+          ['registerAs', () => instance.query(sql, { registerAs: 'state_ra' })],
+        ] as const) {
+          const err = await refusalOf(run);
+          expect(err.data?.reason, `${state} via ${entry}`).toBe(reason);
+          if (fn !== undefined) expect(err.data?.function).toBe(fn);
+          else expectFileReferenceRefusal(err);
+          outcomes.push({ state, entry, surface: surfaceOf(err) });
+        }
+        expect(await instance.describe({ tableName: 'state_v' })).toEqual([]);
+        expect(await instance.describe({ tableName: 'state_ra' })).toEqual([]);
+      }
+      const [first] = outcomes;
+      for (const outcome of outcomes) {
+        expect(outcome.surface, `${outcome.state} via ${outcome.entry}`).toBe(first?.surface);
+      }
+    },
+  );
+});
+
+/** Statements that are not a SELECT, each naming one path. */
+const NON_SELECT_STATEMENTS: ReadonlyArray<
+  readonly [label: string, sql: (path: string) => string]
+> = [
+  ['CREATE TABLE AS', (p) => `CREATE TABLE ns_t AS SELECT * FROM '${p}'`],
+  ['CREATE VIEW AS', (p) => `CREATE VIEW ns_v AS SELECT * FROM '${p}'`],
+  ['INSERT … SELECT', (p) => `INSERT INTO t SELECT n FROM '${p}'`],
+  ['DELETE … WHERE IN (SELECT)', (p) => `DELETE FROM t WHERE x IN (SELECT n FROM '${p}')`],
+  ['EXPLAIN', (p) => `EXPLAIN SELECT * FROM '${p}'`],
+  ['COPY TO', (p) => `COPY t TO '${p}'`],
+];
+
+const NON_SELECT_SURFACE = JSON.stringify({
+  message: 'Canvas query must be SELECT.',
+  data: {
+    reason: 'non_select_statement',
+    statementType: 'UNKNOWN',
+    recovery: {
+      hint: 'Rewrite as a single SELECT — this surface is read-only and cannot create, alter, or drop tables.',
+    },
+  },
+});
+
+describe('canvas · a non-SELECT statement is refused before it is prepared', () => {
+  const probe = () => join(exportRoot, 'non_select_probe.csv');
+
+  afterAll(async () => {
+    await chmod(probe(), 0o644).catch(() => undefined);
+    await rm(probe(), { recursive: true, force: true });
+  });
+
+  it.each(NON_SELECT_STATEMENTS.map(([label, sqlOf]) => ({ label, sqlOf })))(
+    'refuses $label with one refusal in every file state, through every entry point',
+    async ({ sqlOf }) => {
+      const sql = sqlOf(probe());
+      for (const [state, set] of FILE_STATES) {
+        await chmod(probe(), 0o644).catch(() => undefined);
+        await rm(probe(), { recursive: true, force: true });
+        await set(probe());
+        for (const [entry, run] of [
+          ['query', () => instance.query(sql)],
+          ['registerView', () => instance.registerView('ns_state_v', sql)],
+          ['registerAs', () => instance.query(sql, { registerAs: 'ns_state_ra' })],
+        ] as const) {
+          const err = await refusalOf(run);
+          expect(err.code, `${state} via ${entry}`).toBe(JsonRpcErrorCode.ValidationError);
+          expect(surfaceOf(err), `${state} via ${entry}`).toBe(NON_SELECT_SURFACE);
+        }
+        expect(await instance.describe({ tableName: 'ns_t' })).toEqual([]);
+        expect(await instance.describe({ tableName: 'ns_v' })).toEqual([]);
+      }
+    },
+  );
+
+  it.each(['DROP TABLE t', 'CREATE TABLE ns_plain (a INTEGER)', 'PRAGMA version'])(
+    'refuses %s, which names no file, the same way',
+    async (sql) => {
+      const err = await refusalOf(() => instance.query(sql));
+      expect(err.code).toBe(JsonRpcErrorCode.ValidationError);
+      expect(surfaceOf(err)).toBe(NON_SELECT_SURFACE);
+      expect(await instance.describe({ tableName: 't' })).toHaveLength(1);
+    },
+  );
+});
+
+describe('canvas · the plan walk reads the function each real scan names', () => {
+  let insideParquet: string;
+
+  beforeAll(async () => {
+    insideParquet = join(exportRoot, 'inside.parquet');
+    const plain = await DuckDBInstance.create(':memory:');
+    const connection = await plain.connect();
+    try {
+      await connection.run(`COPY (SELECT 1 AS a) TO '${insideParquet}' (FORMAT parquet)`);
+    } finally {
+      connection.closeSync();
+      plain.closeSync();
+    }
+  });
+
+  /** The plan DuckDB builds for `sql`, read past the gate. */
+  async function planOf(sql: string): Promise<unknown> {
+    const reader = await recordOf(instance.canvasId).controlConnection.runAndReadAll(
+      `EXPLAIN (FORMAT JSON) ${sql}`,
+    );
+    return JSON.parse(String(reader.getRowObjectsJson()[0]?.explain_value));
+  }
+
+  it.each([
+    ['read_csv', () => `SELECT * FROM read_csv('${inside}')`],
+    ['read_csv_auto', () => `SELECT * FROM '${inside}'`],
+    ['read_text', () => `SELECT * FROM read_text('${inside}')`],
+    ['read_parquet', () => `SELECT * FROM read_parquet('${insideParquet}')`],
+    ['pragma_version', () => 'SELECT * FROM pragma_version()'],
+  ])('reports %s from the plan DuckDB builds for it', async (fn, sql) => {
+    expect([...collectPlanViolations(await planOf(sql())).deniedFunctions]).toEqual([fn]);
+  });
+
+  it.each([
+    'SELECT x FROM t',
+    `SELECT 'read_csv(x)' AS read_json, x AS pragma_version FROM t WHERE 'glob(x)' <> ''`,
+    'SHOW t',
+    'DESCRIBE t',
+    'SUMMARIZE t',
+  ])('reports nothing in the plan of %s', async (sql) => {
+    expect(collectPlanViolations(await planOf(sql))).toEqual({
+      offending: new Set(),
+      deniedFunctions: new Set(),
+    });
+  });
+});
+
 describe('canvas · SQL gate refuses reads only the engine or the plan walk can see', () => {
   acrossEntryPoints(
     'outside-path reads',
     'outside',
     OUTSIDE_PATH_READS,
     ([, sql]) => sql(),
-    (err) => expectEngineRefusal(err),
+    (err, [, , fn]) => expectOutsidePathRefusal(err, fn),
   );
 
   acrossEntryPoints(
@@ -636,20 +1283,6 @@ describe('canvas · SQL gate refuses reads only the engine or the plan walk can 
     INSIDE_ROOT_FILE_REFERENCES,
     ([, sql]) => sql(),
     (err) => expectFileReferenceRefusal(err),
-  );
-
-  acrossEntryPoints(
-    'SHOW over a path under the export root',
-    'show',
-    INSIDE_ROOT_SHOW_REFERENCES,
-    ([, sql]) => sql(),
-    (err) => {
-      expect(err.code).toBe(JsonRpcErrorCode.ValidationError);
-      expect(err.data?.reason).toBe('non_select_statement');
-      const surface = surfaceOf(err);
-      expect(surface).not.toContain(INSIDE_MARKER);
-      expect(surface).not.toContain(exportRoot);
-    },
   );
 
   acrossEntryPoints(

@@ -13,7 +13,7 @@ import { tmpdir } from 'node:os';
 import { basename, join, sep } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 
-import { DuckDBConnection, DuckDBInstance } from '@duckdb/node-api';
+import { DuckDBConnection, DuckDBInstance, version as duckdbVersion } from '@duckdb/node-api';
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 
 import type { CanvasInstance } from '@/services/canvas/core/CanvasInstance.js';
@@ -1572,6 +1572,112 @@ describe('canvas · DuckDB round trip', () => {
     expect(mcpErr.code).toBe(-32010);
     expect((mcpErr.data as { reason?: string } | undefined)?.reason).toBeUndefined();
   });
+});
+
+/**
+ * DESCRIBE, SUMMARIZE, and SHOW pass the gate as SELECTs. Kept as a table or a
+ * view, each runs inside `CREATE TABLE … AS` / `CREATE VIEW … AS`, which DuckDB
+ * v2.0 accepts and v1.5 cannot parse; on v1.5 the call is the caller's SQL to
+ * change, so it is refused as `sql_parse_error` and leaves nothing behind.
+ */
+describe('canvas · DESCRIBE, SUMMARIZE, and SHOW kept as a table or a view (#752)', () => {
+  /** DuckDB v1.5's CREATE … AS grammar takes a SELECT only. */
+  const ENGINE_KEEPS_METADATA = !duckdbVersion().startsWith('v1.');
+  const PARSE_HINT =
+    'Fix the SQL syntax the message names and send a single read-only SELECT. Put AS before an alias that is a SQL keyword, or double-quote it.';
+
+  let keptProvider: DuckdbProvider;
+  let keptExportRoot: string;
+  let kept: CanvasInstance;
+
+  beforeAll(async () => {
+    keptExportRoot = await mkdtemp(join(tmpdir(), 'canvas-smoke-kept-'));
+    keptProvider = new DuckdbProvider({
+      memoryLimitMb: 256,
+      exportRootPath: keptExportRoot,
+      defaultRowLimit: 1000,
+      schemaSniffRows: 100,
+    });
+    const keptCanvas = new DataCanvas(
+      keptProvider,
+      new CanvasRegistry(keptProvider, {
+        ttlMs: 60_000,
+        absoluteCapMs: 600_000,
+        maxCanvasesPerTenant: 10,
+        sweeperIntervalMs: 0,
+      }),
+    );
+    kept = await keptCanvas.acquire(undefined, ctx);
+    await kept.registerTable('kept_src', [
+      { a: 1, b: 'x' },
+      { a: 2, b: 'y' },
+    ]);
+  });
+
+  afterAll(async () => {
+    await keptProvider?.shutdown();
+    await rm(keptExportRoot, { recursive: true, force: true });
+  });
+
+  /** Each statement and the rows it answers with: one per column described or summarized. */
+  const STATEMENTS = [
+    ['DESCRIBE SELECT 1', 1],
+    ['DESCRIBE kept_src', 2],
+    ['SUMMARIZE SELECT 1 AS v', 1],
+    ['SUMMARIZE kept_src', 2],
+    ['SHOW SELECT a FROM kept_src', 1],
+    ['SHOW kept_src', 2],
+  ] as const;
+  const cases = STATEMENTS.map(([sql, rows], i) => [sql, rows, i] as const);
+
+  it.each(cases)('answers %s on its own', async (sql, rows) => {
+    expect((await kept.query(sql)).rowCount).toBe(rows);
+  });
+
+  it.runIf(ENGINE_KEEPS_METADATA).each(cases)(
+    'registerAs keeps %s as a table with its exact row count',
+    async (sql, rows, i) => {
+      const result = await kept.query(sql, { registerAs: `kept_t_${i}` });
+      expect(result).toMatchObject({ tableName: `kept_t_${i}`, rowCount: rows });
+      expect((await kept.describe({ tableName: `kept_t_${i}` }))[0]?.rowCount).toBe(rows);
+    },
+  );
+
+  it.runIf(ENGINE_KEEPS_METADATA).each(cases)(
+    'registerView keeps %s as a view',
+    async (sql, rows, i) => {
+      await kept.registerView(`kept_v_${i}`, sql);
+      expect((await kept.query(`SELECT * FROM kept_v_${i}`)).rowCount).toBe(rows);
+    },
+  );
+
+  it.runIf(!ENGINE_KEEPS_METADATA).each(cases)(
+    'registerAs refuses %s as sql_parse_error and leaves no table',
+    async (sql, _rows, i) => {
+      const error = await kept.query(sql, { registerAs: `kept_t_${i}` }).then(
+        () => undefined,
+        (err: unknown) => err,
+      );
+      expect(error).toBeInstanceOf(McpError);
+      expect(error).toMatchObject({
+        code: JsonRpcErrorCode.ValidationError,
+        data: { reason: 'sql_parse_error', recovery: { hint: PARSE_HINT } },
+      });
+      expect((error as McpError).message).toMatch(/^Canvas SQL rejected: .*Parser Error: /);
+      expect(await kept.describe({ tableName: `kept_t_${i}` })).toEqual([]);
+    },
+  );
+
+  it.runIf(!ENGINE_KEEPS_METADATA).each(cases)(
+    'registerView refuses %s as sql_parse_error and creates no view',
+    async (sql, _rows, i) => {
+      await expect(kept.registerView(`kept_v_${i}`, sql)).rejects.toMatchObject({
+        code: JsonRpcErrorCode.ValidationError,
+        data: { reason: 'sql_parse_error', recovery: { hint: PARSE_HINT } },
+      });
+      expect(await kept.describe({ tableName: `kept_v_${i}` })).toEqual([]);
+    },
+  );
 });
 
 // An abort reaches a running query as an engine interrupt and surfaces as a

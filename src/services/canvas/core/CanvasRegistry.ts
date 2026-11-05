@@ -332,6 +332,11 @@ export class CanvasRegistry {
     return true;
   }
 
+  /** Lifetime cap from creation, in milliseconds: no canvas outlives `createdAt + absoluteCapMs`. */
+  get absoluteCapMs(): number {
+    return this.options.absoluteCapMs;
+  }
+
   /** Active canvas count for a tenant (used by tests and metrics surfaces). */
   countForTenant(tenantId: string): number {
     return this.byTenant.get(tenantId)?.size ?? 0;
@@ -479,8 +484,13 @@ export class CanvasRegistry {
    *
    * The hint leads with reusing a held id because that is the one reclaim path
    * present in every configuration: under `MCP_AUTH_MODE=none` the tenant
-   * collapses to `default`, so the occupied slots may belong to other callers,
-   * and a consumer's dataframe-drop tool is off by default. The cap is reached
+   * collapses to `default`, so the occupied slots may belong to other callers.
+   * It names no drop tool: dropping a table (`CanvasInstance.drop`) or every
+   * table (`CanvasInstance.clear`) leaves the canvas registered and frees no
+   * slot — only {@link DataCanvas.drop} destroying the canvas does — and the
+   * framework cannot tell which of the two a server's drop tool performs. A
+   * server whose drop tool calls `DataCanvas.drop` can catch this reason where
+   * it mints and re-raise it with a hint naming that tool. The cap is reached
    * only on the mint path, when `canvas_id` was omitted.
    */
   private enforceTenantCap(tenantId: string): void {
@@ -495,7 +505,7 @@ export class CanvasRegistry {
           activeCount: count,
           cap: this.options.maxCanvasesPerTenant,
           recovery: {
-            hint: "Pass a canvas_id you already hold instead of omitting it to create another, free a slot with this server's canvas-drop tool if it exposes one, or retry once idle canvases pass their TTL.",
+            hint: 'Pass a canvas_id you already hold instead of omitting it to create another, or retry once idle canvases pass their TTL.',
           },
         },
       );

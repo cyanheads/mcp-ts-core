@@ -27,6 +27,7 @@ import {
   DENIED_PARSED_FUNCTIONS,
   DENIED_TABLE_FUNCTIONS,
   findFileReference,
+  INTERNAL_METADATA_VIEWS,
   MAX_QUERY_NESTING,
   quoteIdentifier,
   SQL_GATE_REASONS,
@@ -34,6 +35,7 @@ import {
 } from '@/services/canvas/core/sqlGate.js';
 import { McpError } from '@/types-global/errors.js';
 import { readCommonMark } from '../../../helpers/commonmark.js';
+import { expectLinearCost } from '../../../helpers/cpu-time.js';
 
 const validSelectPlan = {
   name: 'PROJECTION',
@@ -281,15 +283,27 @@ describe('sqlGate · assertNoDeniedFunctions (issue #100)', () => {
   });
 });
 
+/**
+ * A plan node as `EXPLAIN (FORMAT JSON)` emits it on DuckDB v1.5.6 and v2.0.0:
+ * `extra_info` is an object, and a table-function scan names its function
+ * under `Function`.
+ */
+const scanNode = (name: string, extraInfo: Record<string, unknown>, children: unknown[] = []) => ({
+  name,
+  children,
+  extra_info: extraInfo,
+});
+
 describe('sqlGate · plan-walk denied-function rescan (issue #100)', () => {
   it('rejects plans whose extra_info names a deny-listed function bare', () => {
     const plan = {
       name: 'PROJECTION',
       children: [
-        {
-          name: 'SEQ_SCAN',
-          extra_info: 'Function: read_json\nFiles: [/etc/passwd]',
-        },
+        scanNode('SEQ_SCAN', {
+          Function: 'READ_JSON',
+          Projections: ['a'],
+          'Estimated Cardinality': '1',
+        }),
       ],
     };
     let caught: unknown;
@@ -333,10 +347,7 @@ describe('sqlGate · plan-walk denied-function rescan (issue #100)', () => {
   });
 
   it('reports the denied-function violation before the operator violation', () => {
-    const plan = {
-      name: 'COPY_TO_FILE',
-      extra_info: 'Function: read_json',
-    };
+    const plan = scanNode('COPY_TO_FILE', { Function: 'READ_JSON' });
     let caught: unknown;
     try {
       assertPlanReadOnly(plan);
@@ -357,11 +368,121 @@ describe('sqlGate · collectPlanViolations', () => {
   it('separately reports operator and function violations on the same plan', () => {
     const plan = {
       name: 'PROJECTION',
-      children: [{ name: 'COPY_TO_FILE', extra_info: 'Function: read_json' }, { name: 'SEQ_SCAN' }],
+      children: [scanNode('COPY_TO_FILE', { Function: 'READ_JSON' }), { name: 'SEQ_SCAN' }],
     };
     const result = collectPlanViolations(plan);
     expect([...result.offending]).toEqual(['COPY_TO_FILE']);
     expect([...result.deniedFunctions]).toEqual(['read_json']);
+  });
+});
+
+/**
+ * Plans captured from `EXPLAIN (FORMAT JSON)` on DuckDB v2.0.0 (v1.5.6 emits
+ * the same nodes, except that it plans `SHOW t` as a `COLUMN_DATA_SCAN`).
+ */
+describe('sqlGate · the plan walk reads the function each scan names', () => {
+  it.each([
+    [
+      'a file reader',
+      [
+        scanNode('READ_CSV', {
+          Function: 'READ_CSV',
+          Projections: ['k', 'n'],
+          'Estimated Cardinality': '0',
+        }),
+      ],
+      ['read_csv'],
+      ['READ_CSV'],
+    ],
+    [
+      'a replacement scan over a path',
+      [
+        scanNode('READ_CSV_AUTO', {
+          Function: 'READ_CSV_AUTO',
+          Projections: ['k', 'n'],
+          'Estimated Cardinality': '0',
+        }),
+      ],
+      ['read_csv_auto'],
+      ['READ_CSV_AUTO'],
+    ],
+    [
+      'a pragma metadata function',
+      [scanNode('PRAGMA_VERSION', { Function: 'PRAGMA_VERSION', 'Estimated Cardinality': '1' })],
+      ['pragma_version'],
+      ['PRAGMA_VERSION'],
+    ],
+    [
+      'a reader under an allowlisted scan operator',
+      [scanNode('SEQ_SCAN', { Function: 'READ_PARQUET', 'Estimated Cardinality': '1' })],
+      ['read_parquet'],
+      [],
+    ],
+    [
+      'a pragma function under an allowlisted operator of another name',
+      [scanNode('SEQ_SCAN', { Function: 'PRAGMA_SHOW', 'Estimated Cardinality': '1' })],
+      ['pragma_show'],
+      [],
+    ],
+    [
+      'a function named under a lowercase key',
+      [scanNode('TABLE_SCAN', { function_name: 'read_text' })],
+      ['read_text'],
+      [],
+    ],
+  ])('reports %s', (_label, plan, functions, operators) => {
+    const { deniedFunctions, offending } = collectPlanViolations(plan);
+    expect([...deniedFunctions]).toEqual(functions);
+    expect([...offending]).toEqual(operators);
+    const err = gateRejection(() => assertPlanReadOnly(plan));
+    expect(err.data?.reason).toBe('denied_function_in_plan');
+    expect(err.data?.functions).toEqual(functions);
+  });
+
+  it.each([
+    [
+      'SHOW over a staged table',
+      [scanNode('PRAGMA_SHOW', { Function: 'PRAGMA_SHOW', 'Estimated Cardinality': '1' })],
+    ],
+    [
+      'columns aliased after deny-listed functions',
+      [
+        scanNode(
+          'PROJECTION',
+          { Projections: ['read_json', 'pragma_version'], 'Estimated Cardinality': '1' },
+          [
+            scanNode('SEQ_SCAN', {
+              Table: 'memory.main.t',
+              Type: 'Sequential Scan',
+              Projections: 'x',
+              'Estimated Cardinality': '1',
+            }),
+          ],
+        ),
+      ],
+    ],
+    [
+      'a filter comparing a column to a literal that spells a call',
+      [
+        scanNode('FILTER', { Expression: "(s != 'read_csv(x)')", 'Estimated Cardinality': '1' }, [
+          scanNode('SEQ_SCAN', {
+            Table: 'memory.main.t',
+            Type: 'Sequential Scan',
+            Projections: ['s', 'x'],
+          }),
+        ]),
+      ],
+    ],
+    [
+      'non-string extra_info values',
+      [scanNode('SEQ_SCAN', { Function: 42, Projections: [['read_csv']], Filters: null })],
+    ],
+  ])('passes %s', (_label, plan) => {
+    expect(collectPlanViolations(plan)).toEqual({
+      offending: new Set(),
+      deniedFunctions: new Set(),
+    });
+    expect(() => assertPlanReadOnly(plan)).not.toThrow();
   });
 });
 
@@ -920,6 +1041,27 @@ describe('sqlGate · findFileReference', () => {
     expect(findFileReference(null)).toBeUndefined();
     expect(findFileReference('not-a-tree')).toBeUndefined();
   });
+
+  it.each([
+    ['a dotted name', tableRef('a.b'), 'a.b'],
+    ['a missing schema', tableRef('t', 'nos'), 'nos.t'],
+    ['a missing catalog', tableRef('z', 'y', 'x'), 'x.y.z'],
+  ])('passes over %s matching the skipped name', (_label, from, skip) => {
+    expect(findFileReference(parseTree(selectNode([], from)), skip)).toBeUndefined();
+  });
+
+  it('still finds every other reference when one name is skipped, past the first level', () => {
+    const tree = parseTree(
+      selectNode([], {
+        type: 'JOIN',
+        left: tableRef('a.b'),
+        right: { type: 'SUBQUERY', subquery: { node: selectNode([], tableRef('f.csv', 'srv')) } },
+      }),
+    );
+    expect(findFileReference(tree, 'a.b')).toBe('srv.f.csv');
+    expect(findFileReference(tree, 'srv.f.csv')).toBe('a.b');
+    expect(findFileReference(tree, 'b')).toBe('a.b');
+  });
 });
 
 describe('sqlGate · pragma_* deny-list (issue #210)', () => {
@@ -967,17 +1109,43 @@ describe('sqlGate · pragma_* deny-list (issue #210)', () => {
     expect(data.functions).toContain('pragma_table_info');
   });
 
-  it('plan-walk rejects pragma_database_list in extra_info field', () => {
+  it('plan-walk rejects pragma_storage_info in extra_info field', () => {
     const plan = {
       name: 'PROJECTION',
-      children: [
-        {
-          name: 'SEQ_SCAN',
-          extra_info: 'Function: pragma_database_list',
-        },
-      ],
+      children: [scanNode('SEQ_SCAN', { Function: 'PRAGMA_STORAGE_INFO' })],
     };
     expect(() => assertPlanReadOnly(plan)).toThrow(/disallowed table function in plan/);
+  });
+
+  it.each([
+    ['pragma_show', 'pragma_show'],
+    ['an uppercase PRAGMA_VERSION', 'PRAGMA_VERSION'],
+    ['a pragma function DuckDB may add later', 'pragma_some_future_function'],
+  ])('assertNoDeniedParsedFunctions refuses a call to %s by name', (_label, name) => {
+    const tree = parseTree(
+      selectNode([{ class: 'STAR', type: 'STAR' }], {
+        type: 'TABLE_FUNCTION',
+        function: call(name, constant('t')),
+      }),
+    );
+    const fn = name.toLowerCase();
+    const err = gateRejection(() => assertNoDeniedParsedFunctions(tree));
+    expect(err.data?.reason).toBe('denied_function');
+    expect(err.data?.function).toBe(fn);
+    expect(err.message).toBe(
+      `Canvas query references disallowed table function: ${fn}. PRAGMA metadata functions are not permitted.`,
+    );
+    expect((err.data?.recovery as { hint?: string } | undefined)?.hint).toBe(
+      'Remove the function the message names — only the staged tables are queryable.',
+    );
+  });
+
+  it('assertNoDeniedParsedFunctions passes the pragma_database_list view, which is a table reference', () => {
+    expect(() =>
+      assertNoDeniedParsedFunctions(
+        parseTree(selectNode([{ class: 'STAR', type: 'STAR' }], tableRef('pragma_database_list'))),
+      ),
+    ).not.toThrow();
   });
 
   it('assertNoDeniedFunctions does not false-positive on pragma_ in a string literal', () => {
@@ -1092,6 +1260,13 @@ describe('sqlGate · exported allowlists', () => {
     expect(ALLOWED_PLAN_OPERATORS.has('RTREE_INDEX_SCAN')).toBe(true);
   });
 
+  it('allowlist admits PRAGMA_SHOW, the operator DuckDB v2.0 plans SHOW <table> as', () => {
+    expect(ALLOWED_PLAN_OPERATORS.has('PRAGMA_SHOW')).toBe(true);
+    for (const op of ['PRAGMA_VERSION', 'PRAGMA_TABLE_INFO', 'PRAGMA_STORAGE_INFO']) {
+      expect(ALLOWED_PLAN_OPERATORS.has(op)).toBe(false);
+    }
+  });
+
   it('plan operator allowlist explicitly excludes write/external operators', () => {
     expect(ALLOWED_PLAN_OPERATORS.has('INSERT')).toBe(false);
     expect(ALLOWED_PLAN_OPERATORS.has('UPDATE')).toBe(false);
@@ -1148,7 +1323,7 @@ describe('sqlGate · collectPlanViolations multi-function detection', () => {
       name: 'PROJECTION',
       children: [
         { name: 'SEQ_SCAN', function: 'read_parquet' },
-        { name: 'SEQ_SCAN', extra_info: 'Function: read_json\nFiles: [/x]' },
+        scanNode('SEQ_SCAN', { Function: 'READ_JSON', Projections: ['a'] }),
       ],
     };
     const result = collectPlanViolations(plan);
@@ -1169,11 +1344,9 @@ describe('sqlGate · collectPlanViolations multi-function detection', () => {
   });
 
   it('reports multiple denied functions sorted alphabetically on the thrown error', () => {
-    const plan = {
-      name: 'SEQ_SCAN',
-      extra_info: 'Function: read_parquet',
-      children: [{ name: 'SEQ_SCAN', function: 'read_json' }],
-    };
+    const plan = scanNode('SEQ_SCAN', { Function: 'READ_PARQUET' }, [
+      { name: 'SEQ_SCAN', function: 'read_json' },
+    ]);
     let caught: unknown;
     try {
       assertPlanReadOnly(plan);
@@ -1218,6 +1391,123 @@ describe('sqlGate · FUNCTION_METADATA_KEYS coverage (table_function, source)', 
       children: [{ name: 'PROJECTION' }],
     };
     expect(() => collectPlanViolations(plan)).not.toThrow();
+  });
+});
+
+describe('sqlGate · assertNoSystemCatalogs · the internal metadata views', () => {
+  it('lists the views DuckDB v1.5.6 and v2.0.0 resolve without a schema', () => {
+    expect([...INTERNAL_METADATA_VIEWS].sort()).toEqual([
+      'duckdb_columns',
+      'duckdb_constraints',
+      'duckdb_databases',
+      'duckdb_indexes',
+      'duckdb_logs',
+      'duckdb_schemas',
+      'duckdb_tables',
+      'duckdb_types',
+      'duckdb_views',
+      'pg_am',
+      'pg_attrdef',
+      'pg_attribute',
+      'pg_class',
+      'pg_collation',
+      'pg_constraint',
+      'pg_database',
+      'pg_depend',
+      'pg_description',
+      'pg_enum',
+      'pg_index',
+      'pg_indexes',
+      'pg_namespace',
+      'pg_prepared_statements',
+      'pg_proc',
+      'pg_sequence',
+      'pg_sequences',
+      'pg_settings',
+      'pg_tables',
+      'pg_tablespace',
+      'pg_type',
+      'pg_views',
+      'pragma_database_list',
+      'sqlite_master',
+      'sqlite_schema',
+      'sqlite_temp_master',
+      'sqlite_temp_schema',
+    ]);
+  });
+
+  it.each([...INTERNAL_METADATA_VIEWS])('refuses DESCRIBE %s, naming the view', (view) => {
+    const err = gateRejection(() => assertNoSystemCatalogs(`DESCRIBE ${view}`));
+    expect(err.data?.reason).toBe('system_catalog_access');
+    expect(err.data?.catalog).toBe(view);
+    expect(err.message).toBe(
+      `Canvas query references a system catalog: ${view}. System catalogs are not permitted.`,
+    );
+  });
+
+  it.each([
+    ['unqualified', (view: string) => `SELECT * FROM ${view} WHERE false`],
+    ['quoted in another case', (view: string) => `SELECT * FROM "${view.toUpperCase()}" LIMIT 0`],
+    ['schema-qualified', (view: string) => `DESCRIBE system.main.${view}`],
+    ['as a SHOW subject', (view: string) => `SHOW ${view}`],
+    ['in a DESCRIBE subquery', (view: string) => `SELECT column_name FROM (DESCRIBE ${view})`],
+    ['after a comment', (view: string) => `SELECT * FROM /* x */${view}`],
+    ['as a column', (view: string) => `SELECT ${view} FROM t`],
+    ['as a quoted column', (view: string) => `SELECT "${view}" FROM t`],
+    ['as an alias', (view: string) => `SELECT x AS ${view} FROM t`],
+  ])('refuses the views %s, as it refuses sqlite_master', (_label, sqlOf) => {
+    for (const view of ['sqlite_master', 'duckdb_tables', 'pg_class', 'pragma_database_list']) {
+      const err = gateRejection(() => assertNoSystemCatalogs(sqlOf(view)));
+      expect(err.data?.catalog).toBe(view);
+    }
+  });
+
+  it.each([
+    ['inside a string literal', (view: string) => `SELECT '${view}' AS s FROM t`],
+    ['inside a comment', (view: string) => `SELECT x FROM t -- ${view}`],
+    ['as the prefix of a longer name', (view: string) => `SELECT ${view}_id FROM t`],
+    ['as the suffix of a longer name', (view: string) => `SELECT my_${view} FROM t`],
+  ])('passes a view name %s, as it passes sqlite_master', (_label, sqlOf) => {
+    for (const view of ['sqlite_master', 'duckdb_tables', 'pg_class', 'pragma_database_list']) {
+      expect(() => assertNoSystemCatalogs(sqlOf(view))).not.toThrow();
+    }
+  });
+
+  it('still names a duckdb_<name>() call as the catalog', () => {
+    expect(
+      gateRejection(() => assertNoSystemCatalogs('SELECT * FROM duckdb_tables ()')).data?.catalog,
+    ).toBe('duckdb_tables');
+  });
+
+  it('scans in time linear in the SQL length', () => {
+    const fill = (unit: string, size: number) =>
+      unit.repeat(Math.ceil(size / unit.length)).slice(0, size);
+    const sqlAt = (size: number) => [
+      fill('pg_', size),
+      fill('pg_ ', size),
+      fill('pg_indexe ', size),
+      fill('duckdb_', size),
+      fill('duckdb_x ', size),
+      `duckdb_${fill('x', size)}${fill(' ', size)}`,
+      fill('sqlite_temp_maste ', size),
+      `${fill('§1 x', size)}\ny`,
+      fill('  \r\n', size),
+      fill("'", size),
+      fill('/*', size),
+    ];
+    expectLinearCost((size) => {
+      const inputs = sqlAt(size);
+      // The scan reads each input to its end at this size: a reference after it is found.
+      for (const sql of inputs) {
+        expect(
+          gateRejection(() => assertNoSystemCatalogs(`${sql}\nSELECT * FROM sqlite_master`)).data
+            ?.catalog,
+        ).toBe('sqlite_master');
+      }
+      return () => {
+        for (const sql of inputs) assertNoSystemCatalogs(sql);
+      };
+    });
   });
 });
 
@@ -1308,7 +1598,7 @@ describe('sqlGate · assertNoDeniedFunctions reports the first match by position
 // ---------------------------------------------------------------------------
 
 /**
- * `stripSqlComments` is module-private; the deny-list scan runs over its output,
+ * `stripCommentsAndLiterals` is module-private; the deny-list scan runs over its output,
  * so whether a `read_json(` call survives stripping is the observable pin on
  * what the stripper did. Each case below is a shape where a different stripping
  * rule would flip the outcome.
@@ -1325,6 +1615,13 @@ describe('sqlGate · comment stripping (#431)', () => {
 
   it('treats a nested opener as ordinary comment text', () => {
     expect(denied("SELECT 1 /* a /* read_json('/x') */ FROM t")).not.toThrow();
+  });
+
+  it('nests block comments the way the engine does, when the engine closes them', () => {
+    expect(denied("SELECT 1 /* a /* read_json('/x') */ b */ FROM t")).not.toThrow();
+    expect(denied("SELECT 1 /* a /* b */ */ read_json('/x') FROM t")).toThrow(
+      /disallowed table function/,
+    );
   });
 
   it('leaves an unterminated block comment — and everything after it — in place', () => {
@@ -1353,6 +1650,149 @@ describe('sqlGate · comment stripping (#431)', () => {
     assertNoDeniedFunctions(sql);
     assertNoSystemCatalogs(sql);
     expect(performance.now() - started).toBeLessThan(2_000);
+  });
+});
+
+/**
+ * The text scans read code the way DuckDB's tokenizer does: a string literal or
+ * comment ends exactly where the engine ends it, so text the engine reads as
+ * code is always scanned and text it reads as data never is. The smoke suite
+ * checks the same forms against the engine's own parse.
+ */
+describe('sqlGate · the text scans read string literals and comments as the engine does', () => {
+  const B = '\\';
+  const denied = (sql: string) => () => assertNoDeniedFunctions(sql);
+  const catalog = (sql: string) => () => assertNoSystemCatalogs(sql);
+
+  it.each([
+    ['after an escape string ending in an escaped quote', `SELECT E'a${B}'' AS q, read_text('x')`],
+    ['after a lowercase escape string', `SELECT e'${B}'' AS q, read_text('x')`],
+    [
+      'after an escape string ending in an escaped backslash',
+      `SELECT E'${B}${B}' AS q, read_text('x')`,
+    ],
+    ['after a dollar-quoted string holding a quote', `SELECT $$it's$$ AS q, read_text('x')`],
+    ['after a tagged dollar-quoted string', `SELECT $t$it's$t$ AS q, read_text('x')`],
+    ['after a string holding a line-comment opener', `SELECT '--' AS q, read_text('x')`],
+    ['after a string holding a block-comment opener', `SELECT '/*' AS q, read_text('x'), '*/'`],
+    ['after a line comment ended by a carriage return', `SELECT 1 -- note\r, read_text('x')`],
+    [
+      'after a nested comment holding a quote',
+      `SELECT 1 /* a /* b */ it's */, read_text('x'), 'y'`,
+    ],
+    ['after a quoted name holding a quote', `SELECT "it's", read_text('x'), 'y'`],
+    ['after a backtick-quoted name holding a quote', "SELECT `it's`, read_text('x'), 'y'"],
+    [
+      'after an escape string continued on the next line',
+      `SELECT E'a'\n'${B}'' AS q, read_text('x')`,
+    ],
+  ])('scans a call %s', (_label, sql) => {
+    expect(denied(sql)).toThrow(/disallowed table function/);
+  });
+
+  it.each([
+    ['a doubled quote', `SELECT 'read_text(''x'')' AS q`],
+    ['an escaped quote in an escape string', `SELECT E'it${B}'s read_text(x)' AS q`],
+    ['a dollar-quoted string', `SELECT $$read_text('x')$$ AS q`],
+    ['a dollar-quoted string whose tag differs in case', `SELECT $T$ $t$ read_text('x') $T$ AS q`],
+    ['a closed nested comment', `SELECT 1 /* a /* read_text('x') */ b */ AS q`],
+    ['a line comment', `SELECT 1 -- read_text('x')`],
+    ['a string after a name holding dollar signs', `SELECT 1 AS a$$b, 'read_text(x)' AS q`],
+    ['a string after a parameter', `SELECT $1, 'read_text(x)' AS q`],
+    ['a typed string after a name ending in E', `SELECT xE'${B}' AS q, 'read_text(x)' AS r`],
+    [
+      'a string after a quoted name holding a doubled quote',
+      `SELECT 1 AS "a""b", 'read_text(x)' AS q`,
+    ],
+    ['a string continued on the next line', `SELECT 'a'\n'read_text(x)' AS q`],
+    ['a string ending in a backslash', `SELECT 'C:${B}' AS p, 'read_text(x)' AS q`],
+    ['a string after a plain backtick-quoted name', "SELECT `name`, 'read_text(x)' AS q FROM t"],
+  ])('passes a call inside %s', (_label, sql) => {
+    expect(denied(sql)).not.toThrow();
+  });
+
+  it.each([
+    ['an escape string', `SELECT E'${B}'' AS q, table_name FROM information_schema.tables`],
+    ['a dollar-quoted string', `SELECT $q$'$q$ AS q FROM information_schema.tables`],
+    ['a string holding a comment opener', `SELECT '--' AS q FROM information_schema.tables`],
+    ['a carriage-return-ended comment', `SELECT 1 -- note\rFROM information_schema.tables`],
+    ['a quoted name', `SELECT "it's" FROM information_schema.tables, (SELECT 'x') s`],
+  ])('scans a system catalog reference after %s', (_label, sql) => {
+    expect(catalog(sql)).toThrow(/references a system catalog/);
+  });
+
+  it.each([
+    ['an unterminated string', "SELECT 'abc read_text(x)"],
+    ['an unterminated escape string', `SELECT E'abc${B}' read_text(x)`],
+    ['an unterminated dollar-quoted string', `SELECT $q$ read_text('x')`],
+    ['an unterminated quoted name', `SELECT "abc read_text('x')`],
+    ['an unterminated backtick-quoted name', "SELECT `abc read_text('x')"],
+  ])('scans the rest as written after %s', (_label, sql) => {
+    expect(denied(sql)).toThrow(/disallowed table function/);
+  });
+
+  it('scans in time linear in the SQL length', () => {
+    const fill = (unit: string, size: number) =>
+      unit.repeat(Math.ceil(size / unit.length)).slice(0, size);
+    const sqlAt = (size: number) => [
+      fill('/*', size),
+      `${fill('/*', size)}*/`,
+      fill('/* /* */', size),
+      fill('/* */', size),
+      fill("'", size),
+      fill("''x", size),
+      fill(`E'${B}`, size),
+      fill(`E'a' `, size),
+      `E'a'${fill(' \n-- x\n', size)}`,
+      fill('$a$', size),
+      fill('$a', size),
+      fill('$$x', size),
+      fill('--\r', size),
+      fill('"', size),
+      fill('`a`', size),
+      fill("`'", size),
+      `${fill('§1 x', size)}\ny`,
+      fill('  \r\n', size),
+    ];
+    expectLinearCost((size) => {
+      const inputs = sqlAt(size);
+      // The scan reads each input to its end at this size: a call after it is found.
+      for (const sql of inputs) {
+        expect(
+          gateRejection(() => assertNoDeniedFunctions(`${sql}\nSELECT * FROM read_text(x)`)).data
+            ?.function,
+        ).toBe('read_text');
+      }
+      return () => {
+        for (const sql of inputs) {
+          assertNoDeniedFunctions(sql);
+          assertNoSystemCatalogs(sql);
+        }
+      };
+    });
+  });
+
+  it('matches denied calls in time linear in the SQL length', () => {
+    const fill = (unit: string, size: number) =>
+      unit.repeat(Math.ceil(size / unit.length)).slice(0, size);
+    const sqlAt = (size: number) => [
+      fill('pragma_', size),
+      `pragma_${fill('x', size)}${fill(' ', size)}`,
+      fill('read_text ', size),
+    ];
+    expectLinearCost((size) => {
+      const inputs = sqlAt(size);
+      // The scan reads each input to its end at this size: a call after it is found.
+      for (const sql of inputs) {
+        expect(
+          gateRejection(() => assertNoDeniedFunctions(`${sql}\nSELECT * FROM read_text(x)`)).data
+            ?.function,
+        ).toBe('read_text');
+      }
+      return () => {
+        for (const sql of inputs) assertNoDeniedFunctions(sql);
+      };
+    });
   });
 });
 

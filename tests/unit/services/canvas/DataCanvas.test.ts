@@ -3,12 +3,14 @@
  * handle. These exercise the public API consumers actually use, with a stub
  * provider so the suite runs without `@duckdb/node-api`. Verifies tenant-id
  * enforcement, registry delegation, the touch-or-throw gate before every
- * operation, and the expiresAt mutation that slides the TTL window.
+ * operation, the expiresAt mutation that slides the TTL window, and the
+ * serialized shared-canvas acquire.
  * @module tests/unit/canvas/DataCanvas.test
  */
 
 import { describe, expect, it, vi } from 'vitest';
 
+import { type Context, type ContextState, createContextState } from '@/core/context.js';
 import { CanvasInstance } from '@/services/canvas/core/CanvasInstance.js';
 import {
   CanvasRegistry,
@@ -16,6 +18,8 @@ import {
 } from '@/services/canvas/core/CanvasRegistry.js';
 import { DataCanvas } from '@/services/canvas/core/DataCanvas.js';
 import type { IDataCanvasProvider } from '@/services/canvas/core/IDataCanvasProvider.js';
+import type { StorageService } from '@/storage/core/StorageService.js';
+import { createInMemoryStorage, createMockContext } from '@/testing/index.js';
 import { JsonRpcErrorCode, McpError } from '@/types-global/errors.js';
 import type { RequestContext } from '@/utils/internal/requestContext.js';
 
@@ -174,6 +178,32 @@ describe('DataCanvas · drop / countForTenant / healthCheck / shutdown', () => {
     await canvas.acquire(undefined, ctxWithTenant);
     await canvas.acquire(undefined, ctxWithTenant);
     expect(canvas.countForTenant(ctxWithTenant)).toBe(2);
+    await registry.shutdown(ctxWithTenant);
+  });
+
+  // Issue #748 — the capacity hint names no drop tool because most consumer drop
+  // tools drop one table, and only destroying the canvas releases its slot.
+  it('frees a tenant cap slot only through DataCanvas.drop, never a table drop or clear', async () => {
+    const provider = makeStubProvider();
+    const registry = new CanvasRegistry(provider, makeOptions({ maxCanvasesPerTenant: 1 }));
+    const canvas = new DataCanvas(provider, registry);
+    const instance = await canvas.acquire(undefined, ctxWithTenant);
+    await instance.registerTable('df_x', [{ v: 1 }]);
+
+    await expect(instance.drop('df_x')).resolves.toBe(true);
+    await expect(canvas.acquire(undefined, ctxWithTenant)).rejects.toMatchObject({
+      code: JsonRpcErrorCode.RateLimited,
+      data: { reason: 'canvas_capacity_exhausted' },
+    });
+    await instance.clear();
+    expect(canvas.countForTenant(ctxWithTenant)).toBe(1);
+    await expect(canvas.acquire(undefined, ctxWithTenant)).rejects.toMatchObject({
+      code: JsonRpcErrorCode.RateLimited,
+    });
+
+    await expect(canvas.drop(instance.canvasId, ctxWithTenant)).resolves.toBe(true);
+    expect(canvas.countForTenant(ctxWithTenant)).toBe(0);
+    await expect(canvas.acquire(undefined, ctxWithTenant)).resolves.toMatchObject({ isNew: true });
     await registry.shutdown(ctxWithTenant);
   });
 
@@ -587,6 +617,463 @@ describe('CanvasInstance · touch-or-throw + delegation', () => {
     expect(provider.query).not.toHaveBeenCalled();
     expect(provider.export).not.toHaveBeenCalled();
 
+    await registry.shutdown(ctxWithTenant);
+  });
+});
+
+// Issue #598 — servers that keep one canvas per tenant in `ctx.state` minted one
+// canvas per concurrent first call, stranding the tables the others staged.
+describe('DataCanvas · acquireShared (#598)', () => {
+  function setup(overrides: Partial<CanvasRegistryOptions> = {}, clock?: () => number) {
+    const provider = makeStubProvider();
+    const registry = new CanvasRegistry(provider, makeOptions(overrides), clock);
+    return {
+      provider,
+      registry,
+      canvas: new DataCanvas(provider, registry),
+      storage: createInMemoryStorage(),
+    };
+  }
+
+  /**
+   * A request context on tenant-a whose `ctx.state` runs over `storage`.
+   * `createMockContext` gives every context its own store; concurrent requests
+   * to one server share one, which is the case under test.
+   */
+  function sharedCtx(storage: StorageService, signal = new AbortController().signal): Context {
+    const base = createMockContext({ signal, tenantId: 'tenant-a' });
+    const state = createContextState(
+      storage,
+      { requestId: base.requestId, timestamp: base.timestamp, tenantId: 'tenant-a' },
+      signal,
+    );
+    return { ...base, state };
+  }
+
+  /** `ctx` with some `ctx.state` methods replaced. */
+  function withState(ctx: Context, patch: Partial<ContextState>): Context {
+    return { ...ctx, state: { ...ctx.state, ...patch } };
+  }
+
+  /** Lets every pending microtask, and the work it queues, run. */
+  const loopTurn = () => new Promise<void>((resolve) => setImmediate(resolve));
+
+  /** Reports whether `promise` has settled, without leaving a rejection unhandled. */
+  function track(promise: Promise<unknown>): () => boolean {
+    let settled = false;
+    promise.then(
+      () => {
+        settled = true;
+      },
+      () => {
+        settled = true;
+      },
+    );
+    return () => settled;
+  }
+
+  /**
+   * Keys with a shared-canvas resolution queued or running. The lock map must
+   * empty once every call settles; no public surface reports its size, so the
+   * test reads the private field.
+   */
+  function lockEntries(canvas: DataCanvas): number {
+    return (Reflect.get(canvas, 'sharedQueues') as Map<string, unknown>).size;
+  }
+
+  const storedId = (storage: StorageService, key = 'canvas-id') =>
+    sharedCtx(storage).state.get(key);
+
+  it("converges concurrent first calls on one canvas, each bound to its caller's ctx", async () => {
+    const { provider, registry, canvas, storage } = setup();
+    const ctxs = Array.from({ length: 5 }, () => sharedCtx(storage));
+    const onReplace = vi.fn();
+
+    const instances = await Promise.all(
+      ctxs.map((ctx) => canvas.acquireShared(ctx, { onReplace })),
+    );
+
+    const canvasId = instances[0]!.canvasId;
+    expect(instances.every((instance) => instance.canvasId === canvasId)).toBe(true);
+    expect(instances.filter((instance) => instance.isNew)).toHaveLength(1);
+    expect(canvas.countForTenant(ctxWithTenant)).toBe(1);
+    expect(onReplace).toHaveBeenCalledTimes(1);
+    expect(onReplace).toHaveBeenCalledWith(undefined);
+    expect(await storedId(storage)).toBe(canvasId);
+
+    await Promise.all(
+      instances.map((instance, i) => instance.registerTable(`df_${i}`, [{ v: i }])),
+    );
+    for (const [i, ctx] of ctxs.entries()) {
+      expect(provider.registerTable).toHaveBeenCalledWith(
+        canvasId,
+        `df_${i}`,
+        [{ v: i }],
+        ctx,
+        undefined,
+      );
+    }
+    expect(lockEntries(canvas)).toBe(0);
+    await registry.shutdown(ctxWithTenant);
+  });
+
+  it('resolves a live stored id while a resolution for the same key holds the lock', async () => {
+    const { registry, canvas, storage } = setup();
+    const gate = Promise.withResolvers<void>();
+    const holder = canvas.acquireShared(sharedCtx(storage), { onReplace: () => gate.promise });
+    await loopTurn();
+    const live = await canvas.acquire(undefined, ctxWithTenant);
+    await sharedCtx(storage).state.set('canvas-id', live.canvasId);
+
+    const fast = canvas.acquireShared(sharedCtx(storage));
+    const fastSettled = track(fast);
+    await loopTurn();
+
+    expect(fastSettled()).toBe(true);
+    await expect(fast).resolves.toMatchObject({ canvasId: live.canvasId, isNew: false });
+    gate.resolve();
+    await holder;
+    await registry.shutdown(ctxWithTenant);
+  });
+
+  it('replaces an empty slot, a canvas_not_found id, and a value that is not a canvas id', async () => {
+    const { registry, canvas, storage } = setup();
+    const onReplace = vi.fn();
+
+    const first = await canvas.acquireShared(sharedCtx(storage), { onReplace });
+    expect(onReplace).toHaveBeenLastCalledWith(undefined);
+    expect(first.isNew).toBe(true);
+
+    await canvas.drop(first.canvasId, ctxWithTenant);
+    const second = await canvas.acquireShared(sharedCtx(storage), { onReplace });
+    expect(onReplace).toHaveBeenLastCalledWith(first.canvasId);
+    expect(second.canvasId).not.toBe(first.canvasId);
+    expect(await storedId(storage)).toBe(second.canvasId);
+
+    for (const value of ['not-an-id', { canvasId: second.canvasId }]) {
+      await sharedCtx(storage).state.set('canvas-id', value);
+      const replaced = await canvas.acquireShared(sharedCtx(storage), { onReplace });
+      expect(onReplace).toHaveBeenLastCalledWith(undefined);
+      expect(replaced.isNew).toBe(true);
+      expect(await storedId(storage)).toBe(replaced.canvasId);
+    }
+    expect(onReplace).toHaveBeenCalledTimes(4);
+    await registry.shutdown(ctxWithTenant);
+  });
+
+  it('propagates a cancellation or a registry shutdown with the stored id unchanged', async () => {
+    const { canvas, storage } = setup();
+    const live = await canvas.acquireShared(sharedCtx(storage));
+    const onReplace = vi.fn();
+
+    // The abort lands after the stored id is read, so it reaches the registry
+    // lookup rather than `ctx.state`.
+    const controller = new AbortController();
+    const ctx = sharedCtx(storage, controller.signal);
+    const readThenAbort = withState(ctx, {
+      get: (async (key: string) => {
+        const value = await ctx.state.get(key);
+        controller.abort();
+        return value;
+      }) as ContextState['get'],
+    });
+    await expect(canvas.acquireShared(readThenAbort, { onReplace })).rejects.toMatchObject({
+      name: 'AbortError',
+    });
+
+    await canvas.shutdown(ctxWithTenant);
+    await expect(canvas.acquireShared(sharedCtx(storage), { onReplace })).rejects.toMatchObject({
+      code: JsonRpcErrorCode.NotFound,
+      message: expect.stringMatching(/shutting down/),
+    });
+
+    expect(onReplace).not.toHaveBeenCalled();
+    expect(await storedId(storage)).toBe(live.canvasId);
+    expect(lockEntries(canvas)).toBe(0);
+  });
+
+  it('lets no caller obtain the new canvas before onReplace settles', async () => {
+    const { registry, canvas, storage } = setup();
+    const gate = Promise.withResolvers<void>();
+    const onReplace = vi.fn(() => gate.promise);
+
+    const calls = Array.from({ length: 4 }, () =>
+      canvas.acquireShared(sharedCtx(storage), { onReplace }),
+    );
+    const settled = calls.map(track);
+    await loopTurn();
+
+    expect(onReplace).toHaveBeenCalledTimes(1);
+    expect(settled.some((isSettled) => isSettled())).toBe(false);
+    expect(canvas.countForTenant(ctxWithTenant)).toBe(0);
+
+    gate.resolve();
+    const instances = await Promise.all(calls);
+    expect(new Set(instances.map((instance) => instance.canvasId)).size).toBe(1);
+    expect(onReplace).toHaveBeenCalledTimes(1);
+    await registry.shutdown(ctxWithTenant);
+  });
+
+  it('purges stale records in onReplace without touching records written for the new canvas', async () => {
+    const { registry, canvas, storage } = setup();
+    const seed = await canvas.acquireShared(sharedCtx(storage));
+    await sharedCtx(storage).state.set('df-meta/df_old', { canvasId: seed.canvasId });
+    await canvas.drop(seed.canvasId, ctxWithTenant);
+
+    /** Deletes every `df-meta/` record; listing yields first, as a remote store's round trip does. */
+    async function purge(ctx: Context): Promise<void> {
+      await loopTurn();
+      const page = await ctx.state.list('df-meta/');
+      await ctx.state.deleteMany(page.items.map((item) => item.key));
+    }
+
+    const names = ['df_c0', 'df_c1', 'df_c2', 'df_c3', 'df_c4'];
+    await Promise.all(
+      names.map(async (name) => {
+        const ctx = sharedCtx(storage);
+        const instance = await canvas.acquireShared(ctx, { onReplace: () => purge(ctx) });
+        await instance.registerTable(name, [{ v: 1 }]);
+        await ctx.state.set(`df-meta/${name}`, { canvasId: instance.canvasId });
+      }),
+    );
+
+    const page = await sharedCtx(storage).state.list('df-meta/');
+    expect(page.items.map((item) => item.key).sort()).toEqual(
+      names.map((name) => `df-meta/${name}`),
+    );
+    await registry.shutdown(ctxWithTenant);
+  });
+
+  it('keeps the stored id when onReplace throws, and the next waiter runs its own resolution', async () => {
+    const { registry, canvas, storage } = setup();
+    const seed = await canvas.acquireShared(sharedCtx(storage));
+    await canvas.drop(seed.canvasId, ctxWithTenant);
+
+    const gate = Promise.withResolvers<void>();
+    const failure = new Error('purge failed');
+    const seen: Array<string | undefined> = [];
+    const storedWhenRerun: unknown[] = [];
+    const onReplace = vi.fn(async (previousId: string | undefined) => {
+      seen.push(previousId);
+      if (seen.length === 1) {
+        await gate.promise;
+        throw failure;
+      }
+      storedWhenRerun.push(await storedId(storage));
+    });
+
+    const calls = [
+      canvas.acquireShared(sharedCtx(storage), { onReplace }),
+      canvas.acquireShared(sharedCtx(storage), { onReplace }),
+    ];
+    await loopTurn();
+    gate.resolve();
+    const [a, b] = await Promise.allSettled(calls);
+
+    const outcomes = [a, b].map((result) => result?.status).sort();
+    expect(outcomes).toEqual(['fulfilled', 'rejected']);
+    const rejected = [a, b].find(
+      (result) => result?.status === 'rejected',
+    ) as PromiseRejectedResult;
+    const fulfilled = [a, b].find(
+      (result) => result?.status === 'fulfilled',
+    ) as PromiseFulfilledResult<CanvasInstance>;
+    expect(rejected.reason).toBe(failure);
+    expect(seen).toEqual([seed.canvasId, seed.canvasId]);
+    expect(storedWhenRerun).toEqual([seed.canvasId]);
+    expect(canvas.countForTenant(ctxWithTenant)).toBe(1);
+    expect(await storedId(storage)).toBe(fulfilled.value.canvasId);
+    expect(lockEntries(canvas)).toBe(0);
+    await registry.shutdown(ctxWithTenant);
+  });
+
+  it('with create: false, returns the live canvas or undefined and never mints', async () => {
+    const { registry, canvas, storage } = setup();
+    const onReplace = vi.fn();
+
+    await expect(
+      canvas.acquireShared(sharedCtx(storage), { create: false, onReplace }),
+    ).resolves.toBeUndefined();
+    expect(onReplace).toHaveBeenLastCalledWith(undefined);
+    expect(canvas.countForTenant(ctxWithTenant)).toBe(0);
+
+    const live = await canvas.acquireShared(sharedCtx(storage));
+    onReplace.mockClear();
+    const peek = await canvas.acquireShared(sharedCtx(storage), { create: false, onReplace });
+    expect(peek).toMatchObject({ canvasId: live.canvasId, isNew: false });
+    expect(onReplace).not.toHaveBeenCalled();
+
+    await canvas.drop(live.canvasId, ctxWithTenant);
+    await expect(
+      canvas.acquireShared(sharedCtx(storage), { create: false, onReplace }),
+    ).resolves.toBeUndefined();
+    expect(onReplace).toHaveBeenCalledWith(live.canvasId);
+    expect(await storedId(storage)).toBeNull();
+    expect(canvas.countForTenant(ctxWithTenant)).toBe(0);
+    await registry.shutdown(ctxWithTenant);
+  });
+
+  it('stores the bare id with a TTL of the absolute cap in whole seconds, rounded up', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    try {
+      vi.setSystemTime(10_000_000);
+      // A fixed registry clock keeps the canvas live while the store's clock moves.
+      const { registry, canvas, storage } = setup({ absoluteCapMs: 1_500 }, () => 0);
+      const instance = await canvas.acquireShared(sharedCtx(storage));
+
+      expect(await storedId(storage)).toBe(instance.canvasId);
+      vi.setSystemTime(10_000_000 + 2_000);
+      expect(await storedId(storage)).toBe(instance.canvasId);
+      vi.setSystemTime(10_000_000 + 2_001);
+      expect(await storedId(storage)).toBeNull();
+      await registry.shutdown(ctxWithTenant);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('reuses an id an earlier bridge stored as a bare string under the same key', async () => {
+    const { registry, canvas, storage } = setup();
+    const earlier = await canvas.acquire(undefined, ctxWithTenant);
+    await sharedCtx(storage).state.set('canvas-id', earlier.canvasId);
+    const onReplace = vi.fn();
+
+    const instance = await canvas.acquireShared(sharedCtx(storage), { onReplace });
+
+    expect(instance).toMatchObject({ canvasId: earlier.canvasId, isNew: false });
+    expect(onReplace).not.toHaveBeenCalled();
+    expect(canvas.countForTenant(ctxWithTenant)).toBe(1);
+    await registry.shutdown(ctxWithTenant);
+  });
+
+  it('drops the new canvas and rethrows when the id write fails', async () => {
+    const { registry, canvas, storage } = setup();
+    const failure = new Error('write refused');
+    const refusing = withState(sharedCtx(storage), {
+      set: async () => {
+        throw failure;
+      },
+    });
+    await expect(canvas.acquireShared(refusing)).rejects.toBe(failure);
+    expect(canvas.countForTenant(ctxWithTenant)).toBe(0);
+
+    // The call's own cancellation landing at the write takes the same path.
+    const controller = new AbortController();
+    const ctx = sharedCtx(storage, controller.signal);
+    const cancelling = withState(ctx, {
+      set: async (key, value, opts) => {
+        controller.abort();
+        await ctx.state.set(key, value, opts);
+      },
+    });
+    await expect(canvas.acquireShared(cancelling)).rejects.toMatchObject({ name: 'AbortError' });
+
+    expect(canvas.countForTenant(ctxWithTenant)).toBe(0);
+    expect(await storedId(storage)).toBeNull();
+    expect(lockEntries(canvas)).toBe(0);
+    await registry.shutdown(ctxWithTenant);
+  });
+
+  it('rejects a queued waiter whose signal aborts before the lock releases, without running its resolution', async () => {
+    const { registry, canvas, storage } = setup();
+    const gate = Promise.withResolvers<void>();
+    const leader = canvas.acquireShared(sharedCtx(storage), { onReplace: () => gate.promise });
+    const leaderSettled = track(leader);
+    await loopTurn();
+
+    const controller = new AbortController();
+    const waiterHook = vi.fn();
+    const waiter = canvas.acquireShared(sharedCtx(storage, controller.signal), {
+      onReplace: waiterHook,
+    });
+    const waiterSettled = track(waiter);
+    const others = [
+      canvas.acquireShared(sharedCtx(storage)),
+      canvas.acquireShared(sharedCtx(storage)),
+    ];
+    await loopTurn();
+    const reason = new Error('caller went away');
+    controller.abort(reason);
+    await loopTurn();
+
+    expect(waiterSettled()).toBe(true);
+    expect(leaderSettled()).toBe(false);
+    await expect(waiter).rejects.toBe(reason);
+    expect(waiterHook).not.toHaveBeenCalled();
+
+    gate.resolve();
+    const instances = await Promise.all([leader, ...others]);
+    expect(new Set(instances.map((instance) => instance.canvasId)).size).toBe(1);
+    expect(canvas.countForTenant(ctxWithTenant)).toBe(1);
+    expect(lockEntries(canvas)).toBe(0);
+    await registry.shutdown(ctxWithTenant);
+  });
+
+  it('resolves distinct state keys independently', async () => {
+    const { registry, canvas, storage } = setup();
+    const gate = Promise.withResolvers<void>();
+    const tenantWide = canvas.acquireShared(sharedCtx(storage), { onReplace: () => gate.promise });
+    await loopTurn();
+
+    const perSession = canvas.acquireShared(sharedCtx(storage), {
+      stateKey: 'session/s1/canvas-id',
+    });
+    const perSessionSettled = track(perSession);
+    await loopTurn();
+    expect(perSessionSettled()).toBe(true);
+
+    gate.resolve();
+    const [a, b] = await Promise.all([tenantWide, perSession]);
+    expect(a.canvasId).not.toBe(b.canvasId);
+    expect(await storedId(storage)).toBe(a.canvasId);
+    expect(await storedId(storage, 'session/s1/canvas-id')).toBe(b.canvasId);
+    expect(canvas.countForTenant(ctxWithTenant)).toBe(2);
+    await registry.shutdown(ctxWithTenant);
+  });
+
+  it('resolves one state key for distinct tenants independently', async () => {
+    const { registry, canvas, storage } = setup();
+    const gate = Promise.withResolvers<void>();
+    const tenantA = canvas.acquireShared(sharedCtx(storage), { onReplace: () => gate.promise });
+    await loopTurn();
+
+    const base = createMockContext({ tenantId: 'tenant-b' });
+    const ctxB: Context = {
+      ...base,
+      state: createContextState(
+        storage,
+        { requestId: base.requestId, timestamp: base.timestamp, tenantId: 'tenant-b' },
+        base.signal,
+      ),
+    };
+    const tenantB = canvas.acquireShared(ctxB);
+    const tenantBSettled = track(tenantB);
+    await loopTurn();
+    expect(tenantBSettled()).toBe(true);
+
+    gate.resolve();
+    const [a, b] = await Promise.all([tenantA, tenantB]);
+    expect(b.tenantId).toBe('tenant-b');
+    expect(a.canvasId).not.toBe(b.canvasId);
+    expect(await ctxB.state.get('canvas-id')).toBe(b.canvasId);
+    expect(await storedId(storage)).toBe(a.canvasId);
+    expect(lockEntries(canvas)).toBe(0);
+    await registry.shutdown(ctxWithTenant);
+  });
+
+  it("rejects an invalid stateKey with ctx.state's ValidationError before minting", async () => {
+    const { registry, canvas, storage } = setup();
+    const onReplace = vi.fn();
+
+    const caught = await canvas
+      .acquireShared(sharedCtx(storage), { stateKey: 'canvas:id', onReplace })
+      .catch((err: unknown) => err);
+
+    expect(caught).toBeInstanceOf(McpError);
+    expect((caught as McpError).code).toBe(JsonRpcErrorCode.ValidationError);
+    expect(onReplace).not.toHaveBeenCalled();
+    expect(canvas.countForTenant(ctxWithTenant)).toBe(0);
+    expect(lockEntries(canvas)).toBe(0);
     await registry.shutdown(ctxWithTenant);
   });
 });

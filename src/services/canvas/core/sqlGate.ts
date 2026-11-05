@@ -17,14 +17,15 @@
  *    SELECT.
  * 4. **Parse-tree check.** Walk DuckDB's own parse of the statement and
  *    reject any call to a function that reads an engine setting, runs SQL or
- *    names a table from a string, or reads a file — called, or bare where
- *    DuckDB binds the bare name as the call — and any table reference
- *    that names a file. DuckDB resolves these while binding, so the plan need
- *    not name them. `query()` over a plain string literal is the one admitted
- *    call: its SQL is gated as its own statement, to a fixed nesting depth.
+ *    names a table from a string, reads a file, or reads `pragma_*` metadata —
+ *    called, or bare where DuckDB binds the bare name as the call — and any
+ *    table reference that names a file. DuckDB resolves these while binding,
+ *    so the plan need not name them. `query()` over a plain string literal is
+ *    the one admitted call: its SQL is gated as its own statement, to a fixed
+ *    nesting depth.
  * 5. **Plan-walk allowlist + denied-function rescan.** Walk the
  *    `EXPLAIN (FORMAT JSON)` tree; reject any operator outside the allowlist
- *    or any string field referencing a deny-listed function.
+ *    and any scan whose function-identity field names a deny-listed function.
  *
  * The gate sits on top of the engine's own bound: a canvas's DuckDB instance
  * reads and writes only under the export root and its scratch directory.
@@ -56,7 +57,7 @@ export const ALLOWED_STATEMENT_TYPES: ReadonlySet<DuckdbStatementType> = new Set
 export const SQL_GATE_REASONS = {
   multiStatement: 'multi_statement',
   nonSelectStatement: 'non_select_statement',
-  /** SELECT-shaped statement that failed to prepare (unknown column/function/expression). */
+  /** SELECT-shaped statement that failed to parse or prepare (syntax, unknown column/function/expression). */
   invalidSql: 'invalid_sql',
   planOperatorNotAllowed: 'plan_operator_not_allowed',
   deniedFunction: 'denied_function',
@@ -129,7 +130,8 @@ export function gateRecovery(reason: SqlGateReason): { recovery: { hint: string 
  * https://github.com/duckdb/duckdb/blob/v1.5.6/src/common/enums/physical_operator_type.cpp
  * and re-checked against the plans DuckDB v2.0.0 (`@duckdb/node-api`
  * 2.0.0-r.1) emits, which fold GROUPING SETS, ROLLUP, and CUBE into CTEs over
- * operators already listed here. Re-derive this set and
+ * operators already listed here, and plan an unqualified `SHOW <name>` as
+ * `PRAGMA_SHOW` where v1.5.6 plans a `COLUMN_DATA_SCAN`. Re-derive this set and
  * {@link DENIED_TABLE_FUNCTIONS} whenever the `@duckdb/node-api` peer range
  * moves.
  */
@@ -199,6 +201,9 @@ export const ALLOWED_PLAN_OPERATORS: ReadonlySet<string> = new Set([
   // Result framing
   'RESULT_COLLECTOR',
   'EXPLAIN',
+  // A table's column listing: `SHOW <name>` on DuckDB v2.0. Layer 4 refuses
+  // every `pragma_*` call by name, so only the SHOW statement plans it.
+  'PRAGMA_SHOW',
   // Pivot/unpivot collapsed planner forms
   'PIVOT',
   // Spatial — pre-staged, dormant until the `spatial` extension loads.
@@ -281,9 +286,10 @@ const DENIED_FUNCTION_CALL_REGEX = new RegExp(
 );
 
 /**
- * Bare-name regex for the plan-walk rescan only. DuckDB EXPLAIN metadata can
- * spell out a function as `Function: read_json` without parens. Restricted to
- * known function-name fields to avoid scanning user-projected string literals.
+ * Bare-name regex for the plan-walk rescan only. A plan names a scan's function
+ * without parentheses (`"Function": "READ_JSON"`). Restricted to
+ * function-identity fields, so the caller's own literals and aliases elsewhere
+ * in the plan are never read as a call.
  */
 const DENIED_FUNCTION_BARE_REGEX = new RegExp(
   String.raw`\b(${[...DENIED_TABLE_FUNCTIONS].join('|')})\b`,
@@ -294,72 +300,209 @@ const DENIED_FUNCTION_BARE_REGEX = new RegExp(
  * Deny the entire `pragma_*` namespace. DuckDB rewrites bare PRAGMA statements
  * (e.g. `PRAGMA table_info('t')`) into `SELECT * FROM pragma_table_info('t')`,
  * which types as SELECT and would otherwise pass `assertSelectOnly`. Covering
- * the namespace with a prefix regex rather than an enumerated set ensures new
- * pragma metadata TVFs DuckDB adds in future versions are also blocked.
+ * the namespace by prefix rather than an enumerated set ensures new pragma
+ * metadata TVFs DuckDB adds in future versions are also blocked.
  *
- * Two forms match the two scan layers:
+ * Each layer covers it by prefix:
  * - `DENIED_PRAGMA_CALL_REGEX` — call shape (`pragma_<name>(`) for the text scan
- * - `DENIED_PRAGMA_BARE_REGEX` — bare name for the plan-walk rescan on metadata fields
+ * - layer 4 — any parsed call whose function name starts `pragma_`, however
+ *   the name is quoted, cased, or qualified
+ * - `DENIED_PRAGMA_BARE_REGEX` — bare name for the plan-walk rescan of
+ *   function-identity fields
  *
  * See https://github.com/cyanheads/mcp-ts-core/issues/210.
  */
 const DENIED_PRAGMA_CALL_REGEX = /\b(pragma_\w+)\s*\(/gi;
 const DENIED_PRAGMA_BARE_REGEX = /\b(pragma_\w+)\b/gi;
 
-/** Plan-node string fields where DuckDB stores lowered table-function names. */
+/**
+ * Plan-node fields that name a scan's function: on the node itself, whose keys
+ * DuckDB writes lowercase, or inside its `extra_info` object, matched
+ * case-insensitively, where DuckDB v1.5.6 and v2.0.0 write `Function`.
+ */
 const FUNCTION_METADATA_KEYS: ReadonlySet<string> = new Set([
-  'extra_info',
   'function',
   'function_name',
   'table_function',
   'source',
 ]);
 
+/** A name as DuckDB's tokenizer reads one: `$` continues a name but cannot start one. */
+const SQL_NAME = /[A-Za-z_\u0080-￿][A-Za-z0-9_$\u0080-￿]*/y;
+
+/** A number, so an `E` in its exponent is not read as an escape-string prefix. */
+const SQL_NUMBER = /[0-9][0-9_]*(?:\.[0-9_]*)?(?:[eE][+-]?[0-9][0-9_]*)?/y;
+
+/** A dollar-quote delimiter: `$$` or `$tag$`, the tag a name without `$`. */
+const SQL_DOLLAR_DELIMITER = /\$(?:[A-Za-z_\u0080-￿][A-Za-z0-9_\u0080-￿]*)?\$/y;
+
+/** Inside a backtick-quoted name, text a DuckDB without backtick names reads as a token of its own. */
+const BACKTICK_NAME_TOKEN_START = /['"$]|--|\/\*/;
+
 /**
- * Strip SQL block and line comments.
+ * `sql` as the text scans read it: each comment a space, each string literal
+ * `''`, names and the rest as written, divided where DuckDB's tokenizer
+ * divides them — so text the engine reads as code is always scanned, and text
+ * it reads as data never is. A standard literal ends at a `'` not doubled; an
+ * escape literal (`E'…'`, the `E` not ending a longer name) also takes
+ * backslash escapes; a dollar-quoted literal ends at its own `$tag$`, matched
+ * case-sensitively. Block comments nest; a line comment ends at `\n` or `\r`.
+ * `"…"` and backtick-quoted names are kept, each closed by an undoubled quote.
  *
- * The block-comment pass is an index walk rather than a lazy-quantifier
- * replace. `/\/\*[\s\S]*?\*\//g` takes time quadratic in the input on an
- * unterminated block opener followed by many further openers, and the SQL
- * reaching this gate is client-supplied (CodeQL `js/polynomial-redos`).
+ * Where the engine would fail to end a literal or name, or DuckDB versions
+ * read the text differently, the rest is scanned as written: an escape literal
+ * continued on a later line (v1.5 keeps its backslash escapes, v2.0 does not),
+ * and a backtick-quoted name holding a quote, `$`, or comment opener (v1.5
+ * reads a backtick as an operator and its contents as SQL). A block comment
+ * the engine never closes fails the statement before it runs; from there each
+ * comment closes at its first terminator, and with none the rest is scanned as
+ * written.
  *
- * Semantics are unchanged: the first block terminator after each opener closes
- * it, an unterminated opener is left in place along with everything after it,
- * and line comments are stripped in a second pass rather than interleaved — so
- * a `--` inside a block comment disappears with the block, and a block opener
- * inside a line comment never opens one.
+ * One pass that reads each character a bounded number of times, so the cost is
+ * linear in the input; the SQL reaching this gate is client-supplied.
  */
-function stripSqlComments(sql: string): string {
-  let stripped = '';
-  let cursor = 0;
-  for (;;) {
-    const open = sql.indexOf('/*', cursor);
-    if (open === -1) break;
-    const close = sql.indexOf('*/', open + 2);
-    if (close === -1) break;
-    stripped += `${sql.slice(cursor, open)} `;
-    cursor = close + 2;
+function stripCommentsAndLiterals(sql: string): string {
+  let out = '';
+  let i = 0;
+  let nested = true;
+  while (i < sql.length) {
+    const ch = sql[i] as string;
+    const next = sql[i + 1];
+    let end: number;
+    if (ch === '-' && next === '-') {
+      end = lineCommentEnd(sql, i);
+      out += ' ';
+    } else if (ch === '/' && next === '*') {
+      end = nested ? blockCommentEnd(sql, i) : -1;
+      if (end === -1) {
+        nested = false;
+        const close = sql.indexOf('*/', i + 2);
+        if (close === -1) break;
+        end = close + 2;
+      }
+      out += ' ';
+    } else if (ch === "'") {
+      end = quotedEnd(sql, i, "'");
+      if (end === -1) break;
+      out += "''";
+    } else if ((ch === 'E' || ch === 'e') && next === "'") {
+      end = escapeLiteralEnd(sql, i + 1);
+      if (end === -1 || continuesOnLaterLine(sql, end)) break;
+      out += "''";
+    } else if (ch === '$') {
+      SQL_DOLLAR_DELIMITER.lastIndex = i;
+      const delimiter = SQL_DOLLAR_DELIMITER.exec(sql)?.[0];
+      if (delimiter === undefined) {
+        end = i + 1;
+        out += ch;
+      } else {
+        const close = sql.indexOf(delimiter, i + delimiter.length);
+        if (close === -1) break;
+        end = close + delimiter.length;
+        out += "''";
+      }
+    } else if (ch === '"' || ch === '`') {
+      end = quotedEnd(sql, i, ch);
+      if (end === -1) break;
+      if (ch === '`' && BACKTICK_NAME_TOKEN_START.test(sql.slice(i + 1, end - 1))) break;
+      out += sql.slice(i, end);
+    } else {
+      const token = /[0-9]/.test(ch) ? SQL_NUMBER : SQL_NAME;
+      token.lastIndex = i;
+      end = token.exec(sql) === null ? i + 1 : token.lastIndex;
+      out += sql.slice(i, end);
+    }
+    i = end;
   }
-  return `${stripped}${sql.slice(cursor)}`.replace(/--[^\n]*/g, '');
+  return `${out}${sql.slice(i)}`;
+}
+
+/** Index of the `\n` or `\r` ending the line comment opened at `start`, or the input's end. */
+function lineCommentEnd(sql: string, start: number): number {
+  let i = start + 2;
+  while (i < sql.length && sql[i] !== '\n' && sql[i] !== '\r') i++;
+  return i;
+}
+
+/** Index past the terminator closing the block comment opened at `start`, counting nested openers; -1 when unterminated. */
+function blockCommentEnd(sql: string, start: number): number {
+  let depth = 1;
+  let i = start + 2;
+  while (i < sql.length) {
+    if (sql[i] === '/' && sql[i + 1] === '*') {
+      depth++;
+      i += 2;
+    } else if (sql[i] === '*' && sql[i + 1] === '/') {
+      i += 2;
+      if (--depth === 0) return i;
+    } else {
+      i++;
+    }
+  }
+  return -1;
+}
+
+/** Index past the `quote` closing the quoted text opened at `start`, a doubled `quote` standing for one; -1 when unterminated. */
+function quotedEnd(sql: string, start: number, quote: string): number {
+  let from = start + 1;
+  for (;;) {
+    const close = sql.indexOf(quote, from);
+    if (close === -1) return -1;
+    if (sql[close + 1] !== quote) return close + 1;
+    from = close + 2;
+  }
+}
+
+/** Index past the `'` closing the escape literal whose opening `'` is at `start`; -1 when unterminated. */
+function escapeLiteralEnd(sql: string, start: number): number {
+  let i = start + 1;
+  while (i < sql.length) {
+    if (sql[i] === '\\') {
+      i += 2;
+    } else if (sql[i] === "'") {
+      if (sql[i + 1] !== "'") return i + 1;
+      i += 2;
+    } else {
+      i++;
+    }
+  }
+  return -1;
 }
 
 /**
- * Strip standard SQL string literals. Doesn't handle E-strings or DuckDB
- * dollar-quoting; the plan-walk rescan catches anything that survives.
+ * Whether the literal ending at `end` continues: whitespace and line comments
+ * holding a line break, then a `'`, which DuckDB reads as more of the same
+ * literal.
  */
-function stripSqlStringLiterals(sql: string): string {
-  return sql.replace(/'(?:[^']|'')*'/g, "''");
+function continuesOnLaterLine(sql: string, end: number): boolean {
+  let i = end;
+  let lineBreak = false;
+  while (i < sql.length) {
+    const ch = sql[i];
+    if (ch === '\n' || ch === '\r') {
+      lineBreak = true;
+      i++;
+    } else if (ch === ' ' || ch === '\t' || ch === '\f' || ch === '\v') {
+      i++;
+    } else if (ch === '-' && sql[i + 1] === '-') {
+      i = lineCommentEnd(sql, i);
+    } else {
+      break;
+    }
+  }
+  return lineBreak && sql[i] === "'";
 }
 
 /**
- * Layer 1: pre-EXPLAIN function deny-list. Scans the SQL (string literals
- * stripped) for calls to any function in {@link DENIED_TABLE_FUNCTIONS} or the
+ * Layer 1: pre-EXPLAIN function deny-list. Scans the SQL (comments and string
+ * literals stripped where the engine ends them — {@link stripCommentsAndLiterals})
+ * for calls to any function in {@link DENIED_TABLE_FUNCTIONS} or the
  * `pragma_*` namespace so a malicious `read_json('/etc/passwd')` or
  * `pragma_table_info('t')` is rejected before reaching the planner.
  */
 export function assertNoDeniedFunctions(sql: string): void {
   if (typeof sql !== 'string' || sql.length === 0) return;
-  const stripped = stripSqlStringLiterals(stripSqlComments(sql));
+  const stripped = stripCommentsAndLiterals(sql);
   DENIED_FUNCTION_CALL_REGEX.lastIndex = 0;
   const match = DENIED_FUNCTION_CALL_REGEX.exec(stripped);
   if (match?.[1]) {
@@ -371,11 +514,18 @@ export function assertNoDeniedFunctions(sql: string): void {
   const pragmaMatch = DENIED_PRAGMA_CALL_REGEX.exec(stripped);
   if (pragmaMatch?.[1]) {
     const fn = pragmaMatch[1].toLowerCase();
-    throw deniedFunctionError(
-      fn,
-      `Canvas query references disallowed table function: ${fn}. PRAGMA metadata functions are not permitted.`,
-    );
+    throw deniedFunctionError(fn, deniedPragmaMessage(fn));
   }
+}
+
+/** Whether `fn`, lowercased, is in the `pragma_*` metadata namespace. */
+function isPragmaFunction(fn: string): boolean {
+  return fn.startsWith('pragma_');
+}
+
+/** The rejection message for a call to a `pragma_*` metadata function. */
+function deniedPragmaMessage(fn: string): string {
+  return `Canvas query references disallowed table function: ${fn}. PRAGMA metadata functions are not permitted.`;
 }
 
 /**
@@ -477,12 +627,13 @@ interface DeniedReference {
 }
 
 /**
- * Layer 4: reject a call to any function in {@link DENIED_PARSED_FUNCTIONS}
- * or {@link DENIED_TABLE_FUNCTIONS} anywhere in `parseTree`, the statement as
- * DuckDB's `json_serialize_sql` parses it, and an unqualified column reference
- * named in {@link DENIED_BARE_KEYWORDS}. A call is any object carrying a
- * string `function_name`; string constants and other column references never
- * carry one, so a name that appears only as data passes.
+ * Layer 4: reject a call to any function in {@link DENIED_PARSED_FUNCTIONS},
+ * in {@link DENIED_TABLE_FUNCTIONS}, or in the `pragma_*` namespace anywhere in
+ * `parseTree`, the statement as DuckDB's `json_serialize_sql` parses it, and an
+ * unqualified column reference named in {@link DENIED_BARE_KEYWORDS}. A call is
+ * any object carrying a string `function_name`; string constants, column
+ * references, and table references never carry one, so a name that appears
+ * only as data, a column, or a view passes.
  *
  * `query` over a single plain string literal is admitted, and the SQL of every
  * admitted call is returned in walk order. The literal is all the text layers
@@ -511,7 +662,9 @@ export function assertNoDeniedParsedFunctions(parseTree: unknown): string[] {
     fn,
     DENIED_TABLE_FUNCTIONS.has(fn)
       ? deniedTableFunctionMessage(fn)
-      : `Canvas query references disallowed function: ${fn}. Functions that read engine settings, change engine state, or run SQL or name a table from a string, are not permitted.`,
+      : isPragmaFunction(fn)
+        ? deniedPragmaMessage(fn)
+        : `Canvas query references disallowed function: ${fn}. Functions that read engine settings, change engine state, or run SQL or name a table from a string, are not permitted.`,
   );
 }
 
@@ -530,7 +683,11 @@ function findDeniedCall(node: unknown, literals: string[]): DeniedReference | un
     const fn = call.function_name.toLowerCase();
     const literal = fn === 'query' ? soleStringLiteral(call) : undefined;
     if (literal !== undefined) literals.push(literal);
-    else if (DENIED_PARSED_FUNCTIONS.has(fn) || DENIED_TABLE_FUNCTIONS.has(fn)) {
+    else if (
+      DENIED_PARSED_FUNCTIONS.has(fn) ||
+      DENIED_TABLE_FUNCTIONS.has(fn) ||
+      isPragmaFunction(fn)
+    ) {
       return { fn, form: 'call' };
     }
   }
@@ -652,8 +809,12 @@ const DATABASE_QUALIFIERS: ReadonlySet<string> = new Set([
  * reference as a `BASE_TABLE` like any other, and exempting the names a
  * statement's `cte_map`s define would also admit a same-named reference
  * outside that CTE's scope, which DuckDB reads as a file.
+ *
+ * `skip` exempts the references whose qualified name equals it: the name the
+ * catalog reported missing when the statement failed to prepare, which DuckDB
+ * looked up as a table rather than reading as a file.
  */
-export function findFileReference(parseTree: unknown): string | undefined {
+export function findFileReference(parseTree: unknown, skip?: string): string | undefined {
   if (parseTree === null || typeof parseTree !== 'object') return;
   const ref = parseTree as {
     catalog_name?: unknown;
@@ -668,36 +829,93 @@ export function findFileReference(parseTree: unknown): string | undefined {
     const qualifiers = [ref.catalog_name, ref.schema_name].filter(
       (part): part is string => typeof part === 'string' && part !== '',
     );
+    const name = [...qualifiers, ref.table_name].join('.');
     if (
-      ref.table_name.includes('.') ||
-      qualifiers.some((part) => !DATABASE_QUALIFIERS.has(part.toLowerCase()))
+      name !== skip &&
+      (ref.table_name.includes('.') ||
+        qualifiers.some((part) => !DATABASE_QUALIFIERS.has(part.toLowerCase())))
     ) {
-      return [...qualifiers, ref.table_name].join('.');
+      return name;
     }
   }
   for (const value of Object.values(parseTree)) {
-    const found = findFileReference(value);
+    const found = findFileReference(value, skip);
     if (found !== undefined) return found;
   }
   return;
 }
 
 /**
+ * DuckDB's internal metadata views that resolve without a schema: the
+ * `system.main` views (`duckdb_tables`, `sqlite_master`, `pragma_database_list`,
+ * …) and the `system.pg_catalog` views. Each reads catalog metadata — its
+ * columns through DESCRIBE or a scan the optimizer removes — however the
+ * reference is qualified.
+ *
+ * Last derived from `duckdb_views()` (internal views in the `system` catalog's
+ * `main` and `pg_catalog` schemas) on DuckDB v1.5.6 and v2.0.0, which list the
+ * same 36. Re-derive alongside {@link DENIED_TABLE_FUNCTIONS};
+ * `canvas-gate-bypass.test.ts` fails when the engine's set moves.
+ */
+export const INTERNAL_METADATA_VIEWS: ReadonlySet<string> = new Set([
+  'duckdb_columns',
+  'duckdb_constraints',
+  'duckdb_databases',
+  'duckdb_indexes',
+  'duckdb_logs',
+  'duckdb_schemas',
+  'duckdb_tables',
+  'duckdb_types',
+  'duckdb_views',
+  'pragma_database_list',
+  'sqlite_master',
+  'sqlite_schema',
+  'sqlite_temp_master',
+  'sqlite_temp_schema',
+  'pg_am',
+  'pg_attrdef',
+  'pg_attribute',
+  'pg_class',
+  'pg_collation',
+  'pg_constraint',
+  'pg_database',
+  'pg_depend',
+  'pg_description',
+  'pg_enum',
+  'pg_index',
+  'pg_indexes',
+  'pg_namespace',
+  'pg_prepared_statements',
+  'pg_proc',
+  'pg_sequence',
+  'pg_sequences',
+  'pg_settings',
+  'pg_tables',
+  'pg_tablespace',
+  'pg_type',
+  'pg_views',
+]);
+
+/**
  * System-catalog namespace patterns for the text-scan deny layer.
  *
- * Covers bare and dotted references to `information_schema`, `pg_catalog`,
- * `sqlite_master` (all three are reachable via DuckDB compatibility layers)
- * plus the `duckdb_<name>(` call namespace. String literals are stripped
- * before the scan so quoted catalog names do not false-positive.
+ * Covers bare and dotted references to the `information_schema` and
+ * `pg_catalog` schemas, the `duckdb_<name>(` call namespace, and every
+ * {@link INTERNAL_METADATA_VIEWS} name, schema-qualified or not. Comments and
+ * string literals are stripped before the scan so a catalog name written as
+ * data does not false-positive.
  *
- * Two forms to cover how each namespace can appear in SQL:
+ * Three forms to cover how each namespace can appear in SQL:
  * - `information_schema.` / `pg_catalog.` — schema-qualified table or view
  *   reference; bare `information_schema` alone selects the schema namespace.
- * - `sqlite_master` — bare table name (no dot required).
  * - `duckdb_<word>(` — metadata TVF call shape (e.g. `duckdb_tables()`).
+ * - an internal view name as a whole word (`sqlite_master`, `pg_class`), in
+ *   any case, quoted or not — the name is the reference.
  */
-const SYSTEM_CATALOG_REGEX =
-  /\b(information_schema|pg_catalog)\b|\bsqlite_master\b|\b(duckdb_\w+)\s*\(/gi;
+const SYSTEM_CATALOG_REGEX = new RegExp(
+  String.raw`\b(information_schema|pg_catalog)\b|\b(duckdb_\w+)\s*\(|\b(${[...INTERNAL_METADATA_VIEWS].join('|')})\b`,
+  'gi',
+);
 
 /**
  * Optional gate layer: reject references to system catalog namespaces.
@@ -705,16 +923,19 @@ const SYSTEM_CATALOG_REGEX =
  * Enable via `QueryOptions.denySystemCatalogs` or
  * `RegisterViewOptions.denySystemCatalogs` on servers that use a hidden shared
  * canvas where handle possession is the access boundary. When enabled, any
- * reference to `information_schema`, `pg_catalog`, `sqlite_master`, or
- * `duckdb_<name>()` throws `ValidationError` with
- * `data.reason: 'system_catalog_access'`.
+ * reference to `information_schema`, `pg_catalog`, `duckdb_<name>()`, or one of
+ * DuckDB's internal metadata views ({@link INTERNAL_METADATA_VIEWS} —
+ * `duckdb_tables`, `sqlite_master`, `pg_class`, …), schema-qualified or not,
+ * throws `ValidationError` with `data.reason: 'system_catalog_access'`. A
+ * column or alias spelled like one of those names is refused too: the scan
+ * reads names, not their role in the statement.
  *
- * Callers strip comments and string literals before this scan (identical
- * pre-processing to {@link assertNoDeniedFunctions}).
+ * Comments and string literals are stripped before the scan where the engine
+ * ends them (identical pre-processing to {@link assertNoDeniedFunctions}).
  */
 export function assertNoSystemCatalogs(sql: string): void {
   if (typeof sql !== 'string' || sql.length === 0) return;
-  const stripped = stripSqlStringLiterals(stripSqlComments(sql));
+  const stripped = stripCommentsAndLiterals(sql);
   SYSTEM_CATALOG_REGEX.lastIndex = 0;
   const match = SYSTEM_CATALOG_REGEX.exec(stripped);
   if (match) {
@@ -813,9 +1034,9 @@ export function collectDisallowedOperators(planJson: unknown): Set<string> {
 }
 
 /**
- * Combined plan-walk: disallowed operators and deny-listed table-function
- * references in string-valued fields, returned separately so callers can word
- * errors appropriately.
+ * Combined plan-walk: disallowed operators and the deny-listed table functions
+ * the plan's scans name, returned separately so callers can word errors
+ * appropriately.
  */
 export function collectPlanViolations(planJson: unknown): {
   offending: Set<string>;
@@ -835,12 +1056,13 @@ function walk(node: unknown, offending: Set<string>, deniedFunctions: Set<string
   }
   const obj = node as Record<string, unknown>;
   const operator = readOperatorName(obj);
-  if (operator !== undefined && !ALLOWED_PLAN_OPERATORS.has(operator)) {
+  const admitted = operator !== undefined && ALLOWED_PLAN_OPERATORS.has(operator);
+  if (operator !== undefined && !admitted) {
     offending.add(operator);
   }
-  // read_json/read_parquet lower into generic scan operators whose source
-  // function appears in plan metadata, not the operator name. Use the bare
-  // regex on known function-name fields, the call-shape regex elsewhere.
+  // A table function can lower into a generic scan operator, so a scan's
+  // function is read from its function-identity fields as well as from the
+  // operator name: bare names there, the call shape in other string fields.
   // Also scan for pragma_* metadata TVFs using the namespace-level regexes.
   for (const [key, value] of Object.entries(obj)) {
     if (typeof value !== 'string') continue;
@@ -852,6 +1074,19 @@ function walk(node: unknown, offending: Set<string>, deniedFunctions: Set<string
       ? DENIED_PRAGMA_BARE_REGEX
       : DENIED_PRAGMA_CALL_REGEX;
     collectDeniedFunctionMatches(value, pragmaRegex, deniedFunctions);
+  }
+  // `extra_info` names a scan's function beside fields that hold the caller's
+  // own literals and aliases, so only its function-identity keys are read. A
+  // scan names its own operator there (`Function: PRAGMA_SHOW` on PRAGMA_SHOW),
+  // which the allowlist has already ruled on.
+  const info = obj.extra_info;
+  if (info !== null && typeof info === 'object' && !Array.isArray(info)) {
+    for (const [key, value] of Object.entries(info)) {
+      if (typeof value !== 'string' || !FUNCTION_METADATA_KEYS.has(key.toLowerCase())) continue;
+      if (admitted && value.toUpperCase() === operator) continue;
+      collectDeniedFunctionMatches(value, DENIED_FUNCTION_BARE_REGEX, deniedFunctions);
+      collectDeniedFunctionMatches(value, DENIED_PRAGMA_BARE_REGEX, deniedFunctions);
+    }
   }
   for (const key of ['children', 'child', 'inputs', 'plan', 'root']) {
     if (key in obj) walk(obj[key], offending, deniedFunctions);

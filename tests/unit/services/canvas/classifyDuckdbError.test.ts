@@ -8,8 +8,12 @@
 
 import { describe, expect, it } from 'vitest';
 
-import { classifyDuckdbError } from '@/services/canvas/providers/duckdb/DuckdbProvider.js';
+import {
+  classifyDuckdbError,
+  prepareFailureRecovery,
+} from '@/services/canvas/providers/duckdb/DuckdbProvider.js';
 import { JsonRpcErrorCode, McpError, notFound, validationError } from '@/types-global/errors.js';
+import { expectLinearCost } from '../../../helpers/cpu-time.js';
 
 /**
  * Messages measured from `@duckdb/node-api` 1.5.5 (#565). The caller-side
@@ -31,6 +35,16 @@ const MEASURED = {
     'Parser Error: syntax error at end of input',
     `Parser Error: unterminated quoted string at or near "'unterminated"`,
   ],
+  /**
+   * `@duckdb/node-api` 1.5.6-r.2 and 2.0.0-r.1 wrap a parser error raised while
+   * extracting statements — `extractStatements()`, and `start()` through it.
+   * The first is a `CREATE TABLE … AS` DuckDB v1.5 cannot parse.
+   */
+  wrappedParserErrors: [
+    'Failed to extract statements: Parser Error: syntax error at or near "DESCRIBE"\n\nLINE 1: CREATE TABLE "x" AS DESCRIBE SELECT 1\n                            ^',
+    'Failed to extract statements: Parser Error: syntax error at end of input',
+    'Failed to extract statements: Parser Error: syntax error at or near "+"\n\nLINE 1: SELECT 1 +\n                 ^',
+  ],
   /** The operating system refusing a file DuckDB was told to write or read. */
   ioFaults: [
     'IO Error: Cannot open file "/srv/exports/out.csv": Permission denied',
@@ -40,6 +54,10 @@ const MEASURED = {
     'IO Error: Cannot open file "/srv/exports/syntax_report.csv": Permission denied',
   ],
 } as const;
+
+/** The recovery a parser error carries, as `sql_parse_error` and as a SELECT's `invalid_sql`. */
+const PARSE_HINT =
+  'Fix the SQL syntax the message names and send a single read-only SELECT. Put AS before an alias that is a SQL keyword, or double-quote it.';
 
 describe('classifyDuckdbError · measured caller-side messages (#565)', () => {
   it.each([MEASURED.externalAccessDenied, MEASURED.readOnlyTransactionWrite])(
@@ -57,6 +75,30 @@ describe('classifyDuckdbError · measured caller-side messages (#565)', () => {
     const mcp = classifyDuckdbError(new Error(message)) as McpError;
     expect(mcp.code).toBe(JsonRpcErrorCode.ValidationError);
     expect(mcp.data?.reason).toBe('sql_parse_error');
+  });
+
+  it.each(MEASURED.wrappedParserErrors)(
+    'classifies the statement-extraction parser error %s as sql_parse_error (#752)',
+    (message) => {
+      const original = new Error(message);
+      const mcp = classifyDuckdbError(original) as McpError;
+      expect(mcp.code).toBe(JsonRpcErrorCode.ValidationError);
+      expect(mcp.data?.reason).toBe('sql_parse_error');
+      expect(mcp.message).toBe(`Canvas SQL rejected: ${message}`);
+      expect((mcp.data as { recovery: { hint: string } }).recovery.hint).toBe(PARSE_HINT);
+      expect(mcp.cause).toBe(original);
+    },
+  );
+
+  it.each([
+    'IO Error: Cannot open file "/srv/exports/Parser Error.csv": Permission denied',
+    'IO Error: Cannot open file "/srv/exports/Failed to extract statements: Parser Error.csv": Permission denied',
+    'Failed to extract statements: Error in native callback',
+    'INTERNAL Error: Failed to extract statements: Parser Error: unexpected state',
+  ])('keeps %s off the parser branch', (message) => {
+    const mcp = classifyDuckdbError(new Error(message)) as McpError;
+    expect(mcp.code).toBe(JsonRpcErrorCode.DatabaseError);
+    expect(mcp.data?.reason).toBeUndefined();
   });
 
   // The write refusal leads with an execution-error class prefix, so it has to
@@ -207,23 +249,37 @@ describe('classifyDuckdbError', () => {
  * `Out of Memory Error` sit on opposite sides of the split.
  */
 describe('classifyDuckdbError · execution-time data errors (#451)', () => {
+  /** Each class with a message measured from DuckDB v2.0.0, and the recovery that class calls for. */
   const EXECUTION_MESSAGES = [
-    "Conversion Error: Could not convert string 'n/a' to INT32 when casting from source column amount",
-    'Invalid Input Error: Malformed JSON in the staged column payload',
-    'Out of Range Error: Overflow in multiplication of INT64',
-  ];
+    [
+      "Conversion Error: Could not convert string 'n/a' to INT32 when casting from source column amount",
+      'Wrap the cast in TRY_CAST, or filter out the rows the message names before converting them.',
+    ],
+    [
+      'Invalid Input Error: Malformed JSON at byte 0 of input: invalid literal.  Input: "nope"',
+      'Filter out the rows whose values the function cannot read, or use the function’s TRY variant where it has one, such as TRY_CAST or TRY_STRPTIME.',
+    ],
+    [
+      'Invalid Input Error: Could not parse string "a" according to format specifier "%Y"',
+      'Filter out the rows whose values the function cannot read, or use the function’s TRY variant where it has one, such as TRY_CAST or TRY_STRPTIME.',
+    ],
+    [
+      'Out of Range Error: Overflow in addition of INT64 (9223372036854775807 + 1)!',
+      'Cast to a wider type such as HUGEINT or DOUBLE before the arithmetic that overflows, or filter out the rows whose values are out of range.',
+    ],
+  ] as const;
 
   it.each(EXECUTION_MESSAGES)(
-    'classifies %s as a caller-side ValidationError with recovery',
-    (message) => {
+    'classifies %s as a caller-side ValidationError with its class recovery',
+    (message, hint) => {
       const original = new Error(message);
       const result = classifyDuckdbError(original);
       expect(result).toBeInstanceOf(McpError);
       const mcp = result as McpError;
       expect(mcp.code).toBe(JsonRpcErrorCode.ValidationError);
       expect(mcp.data?.reason).toBe('sql_execution_error');
-      expect(mcp.message).toContain(message);
-      expect((mcp.data as { recovery?: { hint?: string } }).recovery?.hint).toMatch(/TRY_CAST/);
+      expect(mcp.message).toBe(`Canvas query failed: ${message}`);
+      expect((mcp.data as { recovery?: { hint?: string } }).recovery?.hint).toBe(hint);
       expect(mcp.cause).toBe(original);
     },
   );
@@ -253,14 +309,159 @@ describe('classifyDuckdbError · execution-time data errors (#451)', () => {
     const parse = classifyDuckdbError(
       new Error('Parser Error: syntax error at or near "FROM"'),
     ) as McpError;
-    expect((parse.data as { recovery?: { hint?: string } }).recovery?.hint).toEqual(
-      expect.any(String),
-    );
-    expect((parse.data as { recovery: { hint: string } }).recovery.hint.length).toBeGreaterThan(0);
+    expect((parse.data as { recovery: { hint: string } }).recovery.hint).toBe(PARSE_HINT);
 
     const readOnly = classifyDuckdbError(new Error(MEASURED.readOnlyTransactionWrite)) as McpError;
-    expect((readOnly.data as { recovery: { hint: string } }).recovery.hint.length).toBeGreaterThan(
-      0,
+    expect((readOnly.data as { recovery: { hint: string } }).recovery.hint).toBe(
+      "Send a read-only SELECT over the staged tables — list them with this server's dataframe-describe tool. This surface reads no files and cannot create, alter, or drop anything.",
     );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The recovery a SELECT that fails to parse or prepare carries (#803)
+// ---------------------------------------------------------------------------
+
+/** The `invalid_sql` reason's own hint: the binder named a column, a grouping, or a signature. */
+const BINDER_HINT =
+  "Correct the column or function the message names; list the staged columns with this server's dataframe-describe tool.";
+
+describe('prepareFailureRecovery · one hint per engine class (#803)', () => {
+  /** Messages measured from DuckDB v1.5.6 and v2.0.0, each with the hint its class calls for. */
+  const PREPARE_MESSAGES = [
+    ...MEASURED.parserErrors.map((message) => [message, PARSE_HINT] as const),
+    ...MEASURED.wrappedParserErrors.map((message) => [message, PARSE_HINT] as const),
+    [
+      'Failed to extract statements: Parser Error: syntax error at or near "rows"\n\nLINE 1: SELECT COUNT(*) rows FROM t\n                        ^',
+      PARSE_HINT,
+    ],
+    ['Binder Error: Referenced column "nope" not found in FROM clause!', BINDER_HINT],
+    [
+      'Binder Error: column "x" must appear in the GROUP BY clause or must be part of an aggregate function.',
+      BINDER_HINT,
+    ],
+    [
+      "Binder Error: No function matches the given name and argument types 'sum(VARCHAR)'.",
+      BINDER_HINT,
+    ],
+    ...[
+      'Catalog Error: Scalar Function with name nofunc does not exist!',
+      'Catalog Error: Table Function with name nofunc_tbl does not exist!',
+      'Catalog Error: Type with name nosuchtype does not exist!',
+      'Catalog Error: Collation with name nocoll does not exist!',
+      'Catalog Error: Table with name "nos.t" does not exist because schema "nos" does not exist.',
+    ].map(
+      (message) =>
+        [
+          message,
+          "Correct the function, type, collation, or schema name the message reports missing — list the staged tables with this server's dataframe-describe tool.",
+        ] as const,
+    ),
+    ...[
+      'Invalid Input Error: missing ): (',
+      'Invalid Input Error: Failed to parse format specifier %Q: Unrecognized format for strftime/strptime: %Q',
+    ].map(
+      (message) =>
+        [
+          message,
+          'Correct the argument value the message names — a pattern, format string, or other constant the function cannot accept.',
+        ] as const,
+    ),
+    [
+      'IO Error: No files found that match the pattern "[path]/missing.csv"',
+      "Send a read-only SELECT over the staged tables — list them with this server's dataframe-describe tool. This surface reads no files and cannot create, alter, or drop anything.",
+    ],
+    ['Not implemented Error: some construct', BINDER_HINT],
+  ] as const;
+
+  it.each(PREPARE_MESSAGES)('gives %s its class hint', (message, hint) => {
+    expect(prepareFailureRecovery(message)).toBe(hint);
+  });
+
+  it('names no column or function in the hint for a parse failure', () => {
+    expect(prepareFailureRecovery(MEASURED.wrappedParserErrors[0])).not.toMatch(/column|function/i);
+  });
+
+  it('reads the class only at the start of the message', () => {
+    for (const message of [
+      'Binder Error: Referenced column "Parser Error" not found in FROM clause!',
+      'Binder Error: Referenced column "Catalog Error" not found in FROM clause!',
+      'Binder Error: Referenced column "IO Error" not found in FROM clause!',
+    ]) {
+      expect(prepareFailureRecovery(message)).toBe(BINDER_HINT);
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Cost over engine messages quoting caller SQL
+// ---------------------------------------------------------------------------
+
+/**
+ * Engine messages of about `size` characters, one per shape an anchored class read must
+ * handle: a repeated wrapper with no class after it, overlapping class prefixes, a near-miss of the
+ * read-only refusal, one long line ending in a break, breaks throughout, and a parser message
+ * quoting long caller SQL.
+ */
+function engineMessages(size: number): Error[] {
+  const fill = (unit: string) => unit.repeat(Math.ceil(size / unit.length)).slice(0, size);
+  return [
+    fill('Failed to extract statements: '),
+    `Failed to extract statements: ${fill('Parser Erro')}`,
+    fill('Out of '),
+    `Invalid Input Error: ${fill('read-only mod')}`,
+    `${fill('§1 x')}\ny`,
+    fill('  \r\n'),
+    `Parser Error: syntax error at or near "+"\n\nLINE 1: ${fill('SELECT 1 + ')}`,
+    `Catalog Error: ${fill('Catalog Error: ')}`,
+    `IO Error: ${fill('/srv/exports/')}`,
+  ].map((message) => new Error(message));
+}
+
+describe('engine-message classification cost', () => {
+  it('classifies an engine message in time linear in its length', () => {
+    expectLinearCost((size) => {
+      const errors = engineMessages(size);
+      // Each message classified at this size, its host paths redacted throughout.
+      const classified = errors.map(
+        (err) => classifyDuckdbError(err, ['/srv/exports', '/tmp/mcp-canvas-x']) as McpError,
+      );
+      expect(classified.map((mcp) => mcp.data?.reason)).toEqual([
+        undefined,
+        undefined,
+        undefined,
+        'sql_execution_error',
+        undefined,
+        undefined,
+        'sql_parse_error',
+        undefined,
+        undefined,
+      ]);
+      expect(classified[8]?.message).not.toContain('/srv/exports');
+      return () => {
+        for (const err of errors) classifyDuckdbError(err, ['/srv/exports', '/tmp/mcp-canvas-x']);
+      };
+    });
+  });
+
+  it('picks a prepare-failure hint in time linear in the message length', () => {
+    expectLinearCost((size) => {
+      const messages = engineMessages(size).map((err) => err.message);
+      // Each message's class read at this size.
+      expect(messages.map((message) => prepareFailureRecovery(message))).toEqual([
+        BINDER_HINT,
+        BINDER_HINT,
+        BINDER_HINT,
+        'Correct the argument value the message names — a pattern, format string, or other constant the function cannot accept.',
+        BINDER_HINT,
+        BINDER_HINT,
+        PARSE_HINT,
+        "Correct the function, type, collation, or schema name the message reports missing — list the staged tables with this server's dataframe-describe tool.",
+        "Send a read-only SELECT over the staged tables — list them with this server's dataframe-describe tool. This surface reads no files and cannot create, alter, or drop anything.",
+      ]);
+      return () => {
+        for (const message of messages) prepareFailureRecovery(message);
+      };
+    });
   });
 });

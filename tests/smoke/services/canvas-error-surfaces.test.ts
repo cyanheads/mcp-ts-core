@@ -39,6 +39,10 @@ const CASES = [
   'multi_statement',
   'non_select_statement',
   'invalid_sql',
+  'invalid_sql_parse',
+  'invalid_sql_catalog',
+  'invalid_sql_argument',
+  'sql_read_only_absent_file',
   'denied_function',
   'denied_function_in_plan',
   'plan_operator_not_allowed',
@@ -49,7 +53,10 @@ const CASES = [
   'missing_table_query',
   'missing_table_import',
   'sql_execution_error',
+  'sql_execution_error_input',
+  'sql_execution_error_range',
   'sql_parse_error',
+  'sql_parse_error_extraction',
   'sql_read_only',
   'sql_read_only_outside_path',
   'sql_read_only_file_reference',
@@ -89,6 +96,20 @@ const canvasProbe = tool('canvas_probe', {
       case 'invalid_sql':
         await workspace.query('SELECT nonexistent_col FROM probe');
         break;
+      case 'invalid_sql_parse':
+        await workspace.query('SELECT * FROM probe WHERE');
+        break;
+      case 'invalid_sql_catalog':
+        await workspace.query('SELECT id FROM probe ORDER BY id::VARCHAR COLLATE nosuchcoll');
+        break;
+      case 'invalid_sql_argument':
+        await workspace.query("SELECT regexp_matches('a', '(') AS m");
+        break;
+      // A file reference under the export root is refused the same way
+      // whether or not the file is there.
+      case 'sql_read_only_absent_file':
+        await workspace.query(`SELECT * FROM '${join(exportRoot, 'absent.csv')}'`);
+        break;
       case 'denied_function':
         await workspace.query("SELECT * FROM read_json('/etc/passwd')");
         break;
@@ -124,12 +145,24 @@ const canvasProbe = tool('canvas_probe', {
       case 'sql_execution_error':
         await workspace.query('SELECT CAST(amount AS INTEGER) AS n FROM probe_text');
         break;
+      case 'sql_execution_error_input':
+        await workspace.query("SELECT strptime(amount, '%Y') AS d FROM probe_text");
+        break;
+      case 'sql_execution_error_range':
+        await workspace.query('SELECT id + 9223372036854775807 AS n FROM probe');
+        break;
       // The gate intercepts parse and write failures before execution, so no
-      // SQL reaches these classifier branches through query(). The classifier
-      // itself is the code under test — the engine message, as DuckDB words
-      // it (#565), is its input.
+      // SQL reaches these classifier branches through query() on every engine
+      // version. The classifier itself is the code under test — the engine
+      // message, as DuckDB words it (#565, #752), is its input.
       case 'sql_parse_error':
         throw classifyDuckdbError(new Error('Parser Error: syntax error at or near "FROM"'));
+      case 'sql_parse_error_extraction':
+        throw classifyDuckdbError(
+          new Error(
+            'Failed to extract statements: Parser Error: syntax error at or near "DESCRIBE"\n\nLINE 1: CREATE TABLE "x" AS DESCRIBE SELECT 1\n                            ^',
+          ),
+        );
       case 'sql_read_only':
         throw classifyDuckdbError(
           new Error(
@@ -156,6 +189,10 @@ const canvasProbe = tool('canvas_probe', {
 const SQL_READ_ONLY_HINT =
   "Send a read-only SELECT over the staged tables — list them with this server's dataframe-describe tool. This surface reads no files and cannot create, alter, or drop anything.";
 
+/** A parser error's recovery, as `sql_parse_error` and as a SELECT's `invalid_sql`: syntax, never a column or function. */
+const PARSE_HINT =
+  'Fix the SQL syntax the message names and send a single read-only SELECT. Put AS before an alias that is a SQL keyword, or double-quote it.';
+
 /** Expected `data.reason` and `data.recovery.hint` for each probe. */
 const EXPECTED: Record<ProbeCase, { hint: string; reason: string }> = {
   multi_statement: {
@@ -170,6 +207,16 @@ const EXPECTED: Record<ProbeCase, { hint: string; reason: string }> = {
     reason: 'invalid_sql',
     hint: "Correct the column or function the message names; list the staged columns with this server's dataframe-describe tool.",
   },
+  invalid_sql_parse: { reason: 'invalid_sql', hint: PARSE_HINT },
+  invalid_sql_catalog: {
+    reason: 'invalid_sql',
+    hint: "Correct the function, type, collation, or schema name the message reports missing — list the staged tables with this server's dataframe-describe tool.",
+  },
+  invalid_sql_argument: {
+    reason: 'invalid_sql',
+    hint: 'Correct the argument value the message names — a pattern, format string, or other constant the function cannot accept.',
+  },
+  sql_read_only_absent_file: { reason: 'sql_read_only', hint: SQL_READ_ONLY_HINT },
   denied_function: {
     reason: 'denied_function',
     hint: 'Remove the function the message names — only the staged tables are queryable.',
@@ -214,10 +261,16 @@ const EXPECTED: Record<ProbeCase, { hint: string; reason: string }> = {
     reason: 'sql_execution_error',
     hint: 'Wrap the cast in TRY_CAST, or filter out the rows the message names before converting them.',
   },
-  sql_parse_error: {
-    reason: 'sql_parse_error',
-    hint: 'Fix the SQL syntax the message names and send a single read-only SELECT.',
+  sql_execution_error_input: {
+    reason: 'sql_execution_error',
+    hint: 'Filter out the rows whose values the function cannot read, or use the function’s TRY variant where it has one, such as TRY_CAST or TRY_STRPTIME.',
   },
+  sql_execution_error_range: {
+    reason: 'sql_execution_error',
+    hint: 'Cast to a wider type such as HUGEINT or DOUBLE before the arithmetic that overflows, or filter out the rows whose values are out of range.',
+  },
+  sql_parse_error: { reason: 'sql_parse_error', hint: PARSE_HINT },
+  sql_parse_error_extraction: { reason: 'sql_parse_error', hint: PARSE_HINT },
   sql_read_only: {
     reason: 'sql_read_only',
     hint: SQL_READ_ONLY_HINT,
@@ -291,6 +344,13 @@ describe('canvas · error surfaces (#299, #451)', () => {
     expect(error.data?.reason).toBe(expected.reason);
     expect(error.data?.recovery?.hint).toBe(expected.hint);
     expect(renderedText(result)).toContain(`Recovery: ${expected.hint}`);
+  });
+
+  it('keeps the parser message in binderMessage for a SELECT that fails to parse (#803)', async () => {
+    const error = envelope(await runToolContract(canvasProbe, { probe: 'invalid_sql_parse' }));
+    expect(error.message).toMatch(/^Canvas query failed to prepare: .*Parser Error: /);
+    expect((error.data as { binderMessage?: string }).binderMessage).toMatch(/Parser Error: /);
+    expect(error.data?.recovery?.hint).not.toMatch(/column|function/i);
   });
 
   it('names no framework method or provider option in any message or hint', async () => {

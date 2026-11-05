@@ -1012,8 +1012,9 @@ export class DuckdbProvider implements IDataCanvasProvider {
    * The rejection for a statement that failed to parse or prepare: the
    * engine's refusal of a file outside the canvas's directories is
    * `sql_read_only` whatever the statement's shape, a SELECT-shaped statement
-   * surfaces the binder message (the SQL itself is probably wrong), anything
-   * else is rejected as non-SELECT. Host directories are redacted throughout.
+   * surfaces the engine message (the SQL itself is probably wrong) with the
+   * recovery its error class calls for, anything else is rejected as
+   * non-SELECT. Host directories are redacted throughout.
    */
   private prepareFailure(sql: string, err: unknown, record: CanvasRecord): McpError {
     const classified = this.classify(err, record);
@@ -1031,7 +1032,7 @@ export class DuckdbProvider implements IDataCanvasProvider {
           reason: SQL_GATE_REASONS.invalidSql,
           statementType: 'UNKNOWN',
           binderMessage,
-          ...gateRecovery(SQL_GATE_REASONS.invalidSql),
+          recovery: { hint: prepareFailureRecovery(binderMessage) },
         },
         { cause: err },
       );
@@ -1092,61 +1093,34 @@ export class DuckdbProvider implements IDataCanvasProvider {
     options: { denySystemCatalogs?: boolean } | undefined,
     depth: number,
   ): Promise<string> {
-    // Optional layer 0: reject system catalog references on shared canvases
-    // where handle possession is the access boundary.
-    if (options?.denySystemCatalogs) {
-      assertNoSystemCatalogs(sql);
-    }
-
-    // Layer 1: text-level deny-list. read_json/read_parquet/... lower into
-    // generic scans that pass the operator allowlist, so reject by name first.
-    assertNoDeniedFunctions(sql);
+    assertTextGated(sql, options);
 
     // Layers 2-3: parse and type-check before EXPLAIN. Fail closed: a statement
-    // that cannot be parsed or prepared is rejected — as a missing table, an
-    // invalid SELECT, or a non-SELECT (see `prepareFailure`).
+    // that cannot be parsed or prepared is rejected (see `prepareRejection`).
     let statementCount: number;
     let statementType: string;
+    let tree: unknown;
     try {
       const extracted = await record.controlConnection.extractStatements(sql);
       statementCount = extracted.count;
       if (statementCount === 1) {
+        // DuckDB's serializer represents only a SELECT, so a statement it cannot
+        // represent is refused here, before it is prepared, with one refusal.
+        tree = await this.parseTree(record.controlConnection, sql);
+        if (tree === undefined) {
+          throw validationError('Canvas query must be SELECT.', {
+            reason: SQL_GATE_REASONS.nonSelectStatement,
+            statementType: 'UNKNOWN',
+            ...gateRecovery(SQL_GATE_REASONS.nonSelectStatement),
+          });
+        }
         let prepared: { statementType: number; destroySync(): void } | undefined;
         try {
           prepared = await extracted.prepare(0);
           const typeInt = prepared.statementType;
           statementType = duck.StatementType[typeInt] ?? 'UNKNOWN';
         } catch (prepErr) {
-          // DuckDB raises a Catalog error at prepare time when the referenced
-          // table doesn't exist. Surface a structured NotFound so the agent
-          // knows to re-stage rather than blaming the SQL shape. Only the
-          // table form qualifies: a missing function, table function, type,
-          // collation, or schema is a Catalog error too, but the SQL is what
-          // is wrong, so it falls through to invalid_sql with the binder
-          // detail (#484). A schema miss is phrased "Table with name "s.t"
-          // does not exist because schema …", without the closing `!`. The
-          // name is captured whole, since a quoted one can contain spaces.
-          // A DROP/DELETE/INSERT/UPDATE/ALTER naming a missing table fails
-          // with the same text, but re-staging would not make it pass, so only
-          // a read-shaped statement qualifies; the rest fall to non-SELECT.
-          if (prepErr instanceof Error && isSelectShaped(sql)) {
-            const tableName = prepErr.message.match(
-              /Catalog Error: Table with name (.+?) does not exist!/,
-            )?.[1];
-            if (tableName) {
-              throw notFound(
-                `Canvas table "${tableName}" does not exist. The table may have expired, been dropped, or the name may be mistyped.`,
-                {
-                  reason: 'missing_table',
-                  tableName,
-                  recovery: {
-                    hint: "Re-run the tool that produced this table to stage it again, or list the currently staged tables with this server's dataframe-describe tool.",
-                  },
-                },
-              );
-            }
-          }
-          throw this.prepareFailure(sql, prepErr, record);
+          throw await this.prepareRejection(record, sql, tree, prepErr, options, depth);
         } finally {
           prepared?.destroySync();
         }
@@ -1166,23 +1140,127 @@ export class DuckdbProvider implements IDataCanvasProvider {
     // Layer 4: DuckDB resolves setting reads, SQL or a table named in a
     // string, and a file named as a table while binding, so none of them need
     // leave a plan node; they are refused in its own parse of the statement.
-    // A named file gets the reason the engine gives one outside its directories.
     // query() over a plain string literal is admitted here, its SQL gated below.
-    const tree = await this.parseTree(record.controlConnection, sql);
-    const literals = assertNoDeniedParsedFunctions(tree);
-    const file = findFileReference(tree);
-    if (file !== undefined) {
-      const name = redactPaths(file, this.hostPaths(record));
-      throw validationError(`Canvas SQL rejected: "${name}" names a file, not a staged table.`, {
-        reason: DUCKDB_ERROR_REASONS.sqlReadOnly,
-        recovery: { hint: DUCKDB_ERROR_RECOVERY[DUCKDB_ERROR_REASONS.sqlReadOnly] },
-      });
-    }
-    for (const literal of literals) {
+    for (const literal of this.parsedLiterals(tree, record)) {
       assertQueryNesting(depth + 1);
       await this.assertStatementGated(record, literal, duck, options, depth + 1);
     }
     return statementType;
+  }
+
+  /**
+   * The rejection for a single statement that failed to prepare, `tree` its
+   * parse tree. Layer 4 reads the statement first, so a statement it refuses
+   * fails the same way whether or not it prepares, and whatever the engine
+   * said: a file reference fails alike whether the file is inside the engine's
+   * directories or outside them, and whether or not it exists, can be read, or
+   * holds what its reader expects. The name a catalog miss reports is the one
+   * reference layer 4 passes over, since DuckDB looked it up as a table rather
+   * than reading it as a file — unless it holds a path separator, which no
+   * staged name can. What remains is the engine's refusal of a file outside its
+   * directories, a missing table, then {@link prepareFailure}.
+   */
+  private async prepareRejection(
+    record: CanvasRecord,
+    sql: string,
+    tree: unknown,
+    err: unknown,
+    options: { denySystemCatalogs?: boolean } | undefined,
+    depth: number,
+  ): Promise<McpError> {
+    const missing = err instanceof Error ? catalogMissName(err.message) : undefined;
+    const skip = missing !== undefined && !/[/\\]/.test(missing) ? missing : undefined;
+    await this.assertParsedGated(record, tree, options, depth, skip);
+    const classified = this.classify(err, record);
+    if (
+      classified instanceof McpError &&
+      classified.data?.reason === DUCKDB_ERROR_REASONS.sqlReadOnly
+    ) {
+      return classified;
+    }
+    // DuckDB raises a Catalog error at prepare time when the referenced table
+    // doesn't exist. Surface a structured NotFound so the agent knows to
+    // re-stage rather than blaming the SQL shape. Only the table form
+    // qualifies: a missing function, table function, type, collation, or
+    // schema is a Catalog error too, but the SQL is what is wrong, so it falls
+    // through to invalid_sql with the binder detail (#484). A schema miss is
+    // phrased "Table with name "s.t" does not exist because schema …", without
+    // the closing `!`. The name is captured whole, since a quoted one can
+    // contain spaces. A DROP/DELETE/INSERT/UPDATE/ALTER naming a missing table
+    // fails with the same text, but re-staging would not make it pass, so only
+    // a read-shaped statement qualifies; the rest fall to non-SELECT. A name
+    // holding a path separator can never be staged: it names a file, and is
+    // refused as one whether or not anything is there.
+    if (err instanceof Error && isSelectShaped(sql)) {
+      const tableName = err.message.match(
+        /Catalog Error: Table with name (.+?) does not exist!/,
+      )?.[1];
+      if (tableName?.includes('/') || tableName?.includes('\\')) {
+        return this.fileReferenceRejection(tableName, record);
+      }
+      if (tableName) {
+        return notFound(
+          `Canvas table "${tableName}" does not exist. The table may have expired, been dropped, or the name may be mistyped.`,
+          {
+            reason: 'missing_table',
+            tableName,
+            recovery: {
+              hint: "Re-run the tool that produced this table to stage it again, or list the currently staged tables with this server's dataframe-describe tool.",
+            },
+          },
+        );
+      }
+    }
+    return this.prepareFailure(sql, err, record);
+  }
+
+  /**
+   * Every gate layer that does not need a statement to prepare: layer 4 over
+   * `tree`, then layers 0, 1, and 4 over each `query()` literal it holds, one
+   * level deeper. A literal the serializer cannot represent holds nothing for
+   * layer 4 to read. `skip` is the name a catalog miss reported, at any depth.
+   */
+  private async assertParsedGated(
+    record: CanvasRecord,
+    tree: unknown,
+    options: { denySystemCatalogs?: boolean } | undefined,
+    depth: number,
+    skip: string | undefined,
+  ): Promise<void> {
+    for (const literal of this.parsedLiterals(tree, record, skip)) {
+      assertQueryNesting(depth + 1);
+      assertTextGated(literal, options);
+      const literalTree = await this.parseTree(record.controlConnection, literal);
+      if (literalTree !== undefined) {
+        await this.assertParsedGated(record, literalTree, options, depth + 1, skip);
+      }
+    }
+  }
+
+  /**
+   * Layer 4 over `tree`: refuses a denied call and a table reference that
+   * names a file, passing over references named `skip`; returns the SQL of
+   * each admitted `query()` literal, in walk order, for the caller to gate.
+   */
+  private parsedLiterals(tree: unknown, record: CanvasRecord, skip?: string): string[] {
+    const literals = assertNoDeniedParsedFunctions(tree);
+    const file = findFileReference(tree, skip);
+    if (file !== undefined) throw this.fileReferenceRejection(file, record);
+    return literals;
+  }
+
+  /**
+   * The refusal of a table reference that names a file: the reason the engine
+   * gives a file outside its directories, host directories redacted.
+   */
+  private fileReferenceRejection(name: string, record: CanvasRecord): McpError {
+    return validationError(
+      `Canvas SQL rejected: "${redactPaths(name, this.hostPaths(record))}" names a file, not a staged table.`,
+      {
+        reason: DUCKDB_ERROR_REASONS.sqlReadOnly,
+        recovery: { hint: SQL_READ_ONLY_RECOVERY },
+      },
+    );
   }
 
   /**
@@ -1217,9 +1295,9 @@ export class DuckdbProvider implements IDataCanvasProvider {
   }
 
   /**
-   * `sql` as DuckDB's own parser reads it, via `json_serialize_sql`. Fails
-   * closed: a statement the serializer cannot represent is rejected as
-   * non-SELECT, as an EXPLAIN failure is.
+   * `sql` as DuckDB's own parser reads it, via `json_serialize_sql`;
+   * `undefined` when the serializer cannot represent it, as it cannot
+   * represent anything but a SELECT.
    */
   private async parseTree(connection: DuckDBConnection, sql: string): Promise<unknown> {
     const reader = await connection.runAndReadAll(
@@ -1233,14 +1311,7 @@ export class DuckdbProvider implements IDataCanvasProvider {
       );
     }
     const parsed = JSON.parse(tree) as { error?: unknown };
-    if (parsed.error !== false) {
-      throw validationError('Canvas query must be SELECT; the statement could not be parsed.', {
-        reason: SQL_GATE_REASONS.nonSelectStatement,
-        statementType: 'UNKNOWN',
-        ...gateRecovery(SQL_GATE_REASONS.nonSelectStatement),
-      });
-    }
-    return parsed;
+    return parsed.error === false ? parsed : undefined;
   }
 
   private async runExplain(connection: DuckDBConnection, explainSql: string): Promise<unknown> {
@@ -1483,6 +1554,29 @@ function isSelectShaped(sql: string): boolean {
 }
 
 /**
+ * The qualified name a catalog table miss reports, as the parse tree joins it;
+ * `undefined` for any other failure. DuckDB writes the name bare before `does
+ * not exist!`, and quoted before `does not exist because` a schema or catalog
+ * is missing.
+ */
+function catalogMissName(message: string): string | undefined {
+  const match = /^Catalog Error: Table with name (.+) does not exist(!| because )/.exec(message);
+  if (match?.[1] === undefined) return;
+  return match[2] === '!' ? match[1] : match[1].replace(/^"(.*)"$/, '$1');
+}
+
+/**
+ * Gate layers 0 and 1, the text scans. Optional layer 0 rejects system catalog
+ * references on shared canvases where handle possession is the access
+ * boundary. Layer 1 rejects deny-listed calls by name: read_json/read_parquet/…
+ * lower into generic scans that pass the operator allowlist.
+ */
+function assertTextGated(sql: string, options: { denySystemCatalogs?: boolean } | undefined): void {
+  if (options?.denySystemCatalogs) assertNoSystemCatalogs(sql);
+  assertNoDeniedFunctions(sql);
+}
+
+/**
  * Replace every occurrence of each host directory in an engine message with
  * `[path]`, longest first so a directory nested inside another is redacted
  * whole. DuckDB quotes the absolute export and scratch paths it failed on;
@@ -1545,15 +1639,17 @@ export const DUCKDB_ERROR_REASONS = {
 /** Union of the engine-error reason strings — see {@link DUCKDB_ERROR_REASONS}. */
 export type DuckdbErrorReason = (typeof DUCKDB_ERROR_REASONS)[keyof typeof DUCKDB_ERROR_REASONS];
 
-/** Recovery hint per engine-error reason, phrased as the caller's next move. */
-const DUCKDB_ERROR_RECOVERY: Record<DuckdbErrorReason, string> = {
-  [DUCKDB_ERROR_REASONS.sqlParseError]:
-    'Fix the SQL syntax the message names and send a single read-only SELECT.',
-  [DUCKDB_ERROR_REASONS.sqlReadOnly]:
-    "Send a read-only SELECT over the staged tables — list them with this server's dataframe-describe tool. This surface reads no files and cannot create, alter, or drop anything.",
-  [DUCKDB_ERROR_REASONS.sqlExecutionError]:
-    'Wrap the cast in TRY_CAST, or filter out the rows the message names before converting them.',
-};
+/**
+ * The recovery for SQL the engine could not parse, whether the statement is
+ * refused as `sql_parse_error` or, SELECT-shaped, as `invalid_sql`. DuckDB v1.5
+ * reads some keywords (`rows`, `name`) as an alias only after `AS`.
+ */
+const SQL_PARSE_RECOVERY =
+  'Fix the SQL syntax the message names and send a single read-only SELECT. Put AS before an alias that is a SQL keyword, or double-quote it.';
+
+/** The recovery for a write or a file read: what this surface can do instead. */
+const SQL_READ_ONLY_RECOVERY =
+  "Send a read-only SELECT over the staged tables — list them with this server's dataframe-describe tool. This surface reads no files and cannot create, alter, or drop anything.";
 
 /**
  * DuckDB's execution-error classes, the split its own `Exception::
@@ -1569,7 +1665,20 @@ const DUCKDB_ERROR_RECOVERY: Record<DuckdbErrorReason, string> = {
  * split and diverge only after `Out of `, and an engine fault whose message
  * merely quotes a data-error class mid-sentence is still an engine fault.
  */
-const DUCKDB_EXECUTION_ERROR_PREFIX = /^(?:Conversion|Invalid Input|Out of Range) Error\b/;
+const DUCKDB_EXECUTION_ERROR_PREFIX = /^(Conversion|Invalid Input|Out of Range) Error\b/;
+
+/** A class {@link DUCKDB_EXECUTION_ERROR_PREFIX} captures. */
+type ExecutionErrorClass = 'Conversion' | 'Invalid Input' | 'Out of Range';
+
+/** The `sql_execution_error` recovery per execution-error class, each the fix that class calls for. */
+const EXECUTION_ERROR_RECOVERY: Record<ExecutionErrorClass, string> = {
+  Conversion:
+    'Wrap the cast in TRY_CAST, or filter out the rows the message names before converting them.',
+  'Invalid Input':
+    'Filter out the rows whose values the function cannot read, or use the function’s TRY variant where it has one, such as TRY_CAST or TRY_STRPTIME.',
+  'Out of Range':
+    'Cast to a wider type such as HUGEINT or DOUBLE before the arithmetic that overflows, or filter out the rows whose values are out of range.',
+};
 
 /**
  * DuckDB's refusals, anchored on the class prefix the engine gives them:
@@ -1583,8 +1692,48 @@ const DUCKDB_EXECUTION_ERROR_PREFIX = /^(?:Conversion|Invalid Input|Out of Range
 const DUCKDB_REFUSAL =
   /^(?:Permission Error\b|(?:TransactionContext|Invalid Input) Error: .*\bread-only mode\b)/;
 
-/** DuckDB's parser class; a quoted file name mentioning "syntax" is not one. */
-const DUCKDB_PARSER_ERROR_PREFIX = /^Parser Error\b/;
+/**
+ * DuckDB's parser class, bare as `run()` reports it or behind the wrapper
+ * `@duckdb/node-api` puts on a statement-extraction failure (`extractStatements()`,
+ * and `start()` through it). Anchored like the other classes: a quoted file
+ * name mentioning "syntax" is not one.
+ */
+const DUCKDB_PARSER_ERROR_PREFIX = /^(?:Failed to extract statements: )?Parser Error\b/;
+
+/**
+ * The classes, other than the parser's, that fail a SELECT while it is
+ * prepared and each call for their own recovery. A `Binder Error` — an unknown
+ * column, a grouping or signature mismatch — and anything else take the
+ * `invalid_sql` reason's own hint.
+ */
+const PREPARE_ERROR_CLASS = /^(Catalog|Invalid Input|IO) Error\b/;
+
+/** A class {@link PREPARE_ERROR_CLASS} captures. */
+type PrepareErrorClass = 'Catalog' | 'Invalid Input' | 'IO';
+
+/** The `invalid_sql` recovery per prepare-time class, each the fix that class calls for. */
+const PREPARE_ERROR_RECOVERY: Record<PrepareErrorClass, string> = {
+  Catalog:
+    "Correct the function, type, collation, or schema name the message reports missing — list the staged tables with this server's dataframe-describe tool.",
+  'Invalid Input':
+    'Correct the argument value the message names — a pattern, format string, or other constant the function cannot accept.',
+  IO: SQL_READ_ONLY_RECOVERY,
+};
+
+/**
+ * The recovery for a SELECT-shaped statement that failed to parse or prepare,
+ * by the engine's class prefix on `message`: syntax for a parser error, the
+ * class's own fix for a catalog miss, a rejected argument, or a file, and the
+ * `invalid_sql` hint for everything else.
+ * @internal Exported for unit testing.
+ */
+export function prepareFailureRecovery(message: string): string {
+  if (DUCKDB_PARSER_ERROR_PREFIX.test(message)) return SQL_PARSE_RECOVERY;
+  const prepareClass = PREPARE_ERROR_CLASS.exec(message)?.[1] as PrepareErrorClass | undefined;
+  return prepareClass === undefined
+    ? gateRecovery(SQL_GATE_REASONS.invalidSql).recovery.hint
+    : PREPARE_ERROR_RECOVERY[prepareClass];
+}
 
 /**
  * Map a DuckDB-thrown error to a framework error class. Classification is for
@@ -1609,17 +1758,31 @@ export function classifyDuckdbError(err: unknown, redact: readonly string[] = []
     // Checked before the execution prefix: a write refused by a read-only
     // database is phrased as an `Invalid Input Error`.
     if (DUCKDB_REFUSAL.test(msg)) {
-      return engineFailure(DUCKDB_ERROR_REASONS.sqlReadOnly, `Canvas SQL rejected: ${msg}`, err);
+      return engineFailure(
+        DUCKDB_ERROR_REASONS.sqlReadOnly,
+        `Canvas SQL rejected: ${msg}`,
+        SQL_READ_ONLY_RECOVERY,
+        err,
+      );
     }
-    if (DUCKDB_EXECUTION_ERROR_PREFIX.test(msg)) {
+    const executionClass = DUCKDB_EXECUTION_ERROR_PREFIX.exec(msg)?.[1] as
+      | ExecutionErrorClass
+      | undefined;
+    if (executionClass !== undefined) {
       return engineFailure(
         DUCKDB_ERROR_REASONS.sqlExecutionError,
         `Canvas query failed: ${msg}`,
+        EXECUTION_ERROR_RECOVERY[executionClass],
         err,
       );
     }
     if (DUCKDB_PARSER_ERROR_PREFIX.test(msg)) {
-      return engineFailure(DUCKDB_ERROR_REASONS.sqlParseError, `Canvas SQL rejected: ${msg}`, err);
+      return engineFailure(
+        DUCKDB_ERROR_REASONS.sqlParseError,
+        `Canvas SQL rejected: ${msg}`,
+        SQL_PARSE_RECOVERY,
+        err,
+      );
     }
     return databaseError(msg, undefined, { cause: err });
   }
@@ -1628,11 +1791,12 @@ export function classifyDuckdbError(err: unknown, redact: readonly string[] = []
   });
 }
 
-/** A caller-side engine failure: reason, contract recovery, and the engine error chained. */
-function engineFailure(reason: DuckdbErrorReason, message: string, cause: Error): McpError {
-  return validationError(
-    message,
-    { reason, recovery: { hint: DUCKDB_ERROR_RECOVERY[reason] } },
-    { cause },
-  );
+/** A caller-side engine failure: reason, recovery, and the engine error chained. */
+function engineFailure(
+  reason: DuckdbErrorReason,
+  message: string,
+  hint: string,
+  cause: Error,
+): McpError {
+  return validationError(message, { reason, recovery: { hint } }, { cause });
 }

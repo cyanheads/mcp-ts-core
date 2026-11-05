@@ -98,8 +98,12 @@ export interface RegisterTableResult {
 export interface QueryOptions {
   /**
    * When `true`, the SQL gate rejects any reference to system catalog
-   * namespaces (`information_schema`, `pg_catalog`, `sqlite_master`,
-   * `duckdb_<name>()` functions) before executing. Default `false`.
+   * namespaces (`information_schema`, `pg_catalog`, `duckdb_<name>()`
+   * functions) and to DuckDB's internal metadata views (`duckdb_tables`,
+   * `sqlite_master`, `pg_class`, …), schema-qualified or not, before
+   * executing. The scan reads names, so a column or alias spelled like one is
+   * rejected too; a string literal or comment holding one is not. Default
+   * `false`.
    *
    * Use on shared canvases where handle possession is the access boundary —
    * catalog namespaces let callers enumerate every staged handle and defeat
@@ -199,9 +203,9 @@ export interface DescribeOptions {
 /** Options for {@link CanvasInstance.registerView}. */
 export interface RegisterViewOptions {
   /**
-   * When `true`, the SQL gate rejects catalog namespace references in the view
-   * definition SQL. Same semantics as {@link QueryOptions.denySystemCatalogs}.
-   * Default `false`.
+   * When `true`, the SQL gate rejects system catalog and internal metadata
+   * view references in the view definition SQL. Same semantics as
+   * {@link QueryOptions.denySystemCatalogs}. Default `false`.
    */
   denySystemCatalogs?: boolean;
   /** Cancellation signal forwarded to the provider. */
@@ -228,6 +232,29 @@ export interface ImportFromOptions {
 export interface AcquireOptions {
   /** Cancellation signal for the acquire/init handshake. */
   signal?: AbortSignal;
+}
+
+/** Options for {@link DataCanvas.acquireShared}. */
+export interface AcquireSharedOptions {
+  /** `false`: return the live canvas or `undefined`; never mint. Default `true`. */
+  create?: boolean;
+  /**
+   * Runs under the key's lock whenever no live canvas is found — before the
+   * mint, or before `undefined` returns — with the dead stored id (`undefined`
+   * when none is stored, which includes a canvas that reached its absolute cap:
+   * the stored id expires with it). No caller obtains the new canvas until it
+   * settles, so purge what was recorded for this key's canvas here. Must be
+   * idempotent: it runs again when it throws, when the mint fails, and when the
+   * call holding the lock is cancelled. If it throws, nothing is minted or
+   * stored and the error reaches this caller.
+   */
+  onReplace?: (previousId: string | undefined) => void | Promise<void>;
+  /**
+   * `ctx.state` key holding the canvas id. Default `'canvas-id'`: `ctx.state` is
+   * tenant-scoped, so that is one canvas per tenant; a narrower scope (per
+   * session) passes its own key. Follows `ctx.state`'s key rules.
+   */
+  stateKey?: string;
 }
 
 /**

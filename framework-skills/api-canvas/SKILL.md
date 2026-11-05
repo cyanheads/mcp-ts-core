@@ -4,7 +4,7 @@ description: >
   DataCanvas primitive reference — a Tier 3 SQL/analytical workspace for tabular MCP servers, backed by DuckDB. Use when registering tables from upstream APIs, running ad-hoc SQL across them, and exporting results. Covers the acquire → register → query → export flow, per-table TTL, the token-sharing pattern for multi-agent collaboration, env config, and Cloudflare Workers fail-closed behavior.
 metadata:
   author: cyanheads
-  version: "2.11"
+  version: "2.12"
   audience: external
   type: reference
 ---
@@ -80,11 +80,11 @@ A canvas is identified by an opaque 10-character URL-safe `canvasId` (~10¹⁸ k
 | **Existing id (other tenant)** | Throws `NotFound` — uniform with unknown to avoid leaking existence across tenants. |
 | **Unknown id** | Throws `NotFound` (`data.reason: 'canvas_not_found'`) with a recovery hint to re-run the producing tool or re-check the id. |
 | **Malformed id** | Throws `ValidationError` (`data.reason: 'canvas_id_malformed'`) before any lookup, with a hint naming the format. A value that cannot be an id is an input error; only a well-formed id that is absent is a lookup miss. |
-| **Omitted, tenant at its cap** | Throws `RateLimited` (`data.reason: 'canvas_capacity_exhausted'`, `retryable: true`) carrying `tenantId`, `activeCount`, and `cap`. The hint leads with reusing an id the caller already holds — the one reclaim path present in every configuration. |
+| **Omitted, tenant at its cap** | Throws `RateLimited` (`data.reason: 'canvas_capacity_exhausted'`, `retryable: true`) carrying `tenantId`, `activeCount`, and `cap`. The hint names no tool: it leads with reusing an id the caller already holds — the one reclaim path present in every configuration — then retrying once idle canvases expire. |
 
 When auth is enabled, the effective scope is the composite `(tenantId, canvasId)`. In `MCP_AUTH_MODE=none`, `tenantId` collapses to `'default'` and the canvasId is the only differentiator — entropy + TTL + the framework's rate limiter make brute-force discovery operationally infeasible. **Designed for public-data servers (BrAPI, OpenFEC, etc.). Don't put PII on a no-auth canvas.**
 
-That collapse is also why the capacity hint reads the way it does: under `default` the occupied slots may belong to other callers, and a consumer's dataframe-drop tool is off by default, so "drop an unused canvas" is advice nobody can follow. The cap is reached only on the mint path, when `canvas_id` was omitted. The refusal keeps `-32003` and its HTTP 429 mapping; `data.reason` is what separates it from upstream throttling, including in the `mcp.tool.error_category` metric, where it files under `server` rather than `upstream`.
+That collapse is also why the capacity hint reads the way it does: under `default` the occupied slots may belong to other callers, so "drop an unused canvas" is advice nobody can follow. Nor does the hint name a drop tool. Dropping a table (`instance.drop(name)`) or every table (`instance.clear()`) leaves the canvas registered and frees no slot; only `canvas.drop(canvasId, ctx)` destroys the canvas and releases one, and the framework cannot tell which of the two a server's drop tool does. A server whose drop tool calls `canvas.drop` can catch the reason in the tools that mint and re-raise it through their own `ctx.fail('canvas_capacity_exhausted', …, { cause })` with a hint naming that drop tool. The cap is reached only on the mint path, when `canvas_id` was omitted. The refusal keeps `-32003` and its HTTP 429 mapping; `data.reason` is what separates it from upstream throttling, including in the `mcp.tool.error_category` metric, where it files under `server` rather than `upstream`.
 
 ### Advertising the id shape
 
@@ -148,6 +148,29 @@ const instance = await canvas.acquire(input.canvas_id, ctx);
 // instance.expiresAt — ISO 8601 after sliding extension
 ```
 
+### `canvas.acquireShared(ctx, options?) → CanvasInstance`
+
+For a server that keeps the caller's canvas itself instead of handing out a token: resolves the canvas whose id `ctx.state` holds, and mints it once when none is live. Hand-rolling the same read → mint → write-back breaks under concurrent first calls: each one mints, the last write wins, and the tables the others staged sit on canvases no stored id reaches (`missing_table`), each holding a tenant cap slot until it expires.
+
+```ts
+const instance = await canvas.acquireShared(ctx, {
+  onReplace: () => purgeTableRecords(ctx), // records kept for the dead canvas
+});
+const live = await canvas.acquireShared(ctx, { create: false }); // describe/drop: never mints
+```
+
+| Option | Default | Meaning |
+|:--|:--|:--|
+| `stateKey` | `'canvas-id'` | `ctx.state` key holding the id. `ctx.state` is tenant-scoped, so the default keeps one canvas per tenant; a narrower scope (per session) passes its own key. An invalid key throws `ctx.state`'s `ValidationError` before anything is minted. |
+| `create` | `true` | `false` returns the live canvas or `undefined`, and never mints. |
+| `onReplace` | — | `(previousId) => void \| Promise<void>`, run whenever no live canvas is found, before the mint or before `undefined` returns. `previousId` is the dead id, `undefined` when none is stored — which includes a canvas that reached its absolute cap, since the stored id expires with it. Purge by key, not by `previousId`. |
+
+- **Liveness is the registry's.** A stored id the registry holds for the tenant returns at once, without queueing. No stored value, a canvas that is gone (`canvas_not_found`), or a value that is not a canvas id means no live canvas. Any other failure — a cancelled `ctx.signal`, a registry shutting down — propagates and leaves the stored id as it was.
+- **One resolution at a time per (tenant, `stateKey`).** A call that finds no live canvas queues; in its turn it re-reads the id under its own `ctx`, so the calls behind the one that mints receive that canvas (`isNew: false`), each bound to its own `ctx`. A queued call whose `ctx.signal` aborts rejects at once with the signal's reason.
+- **`onReplace` runs in that turn.** No call obtains the new canvas until it settles, so a purge there cannot delete a record another call wrote for the new canvas; a purge run after the call returns can. It must be idempotent: it runs again when it throws (nothing is minted or stored, the error reaches that caller, and the next queued call takes its own turn), when the mint fails, and when the call holding the turn is cancelled. Purge only what belongs to this key's canvas.
+- **Stored value:** the bare canvas id, with a TTL of the registry's absolute cap in whole seconds (`CANVAS_ABSOLUTE_CAP_MS`, rounded up), which no canvas outlives. An id stored earlier under the same key as a bare string is reused. If the write fails — a storage error, or the call's own cancellation — the new canvas is dropped and the error propagates. `create: false` deletes a dead stored value.
+- **Scope is one process**, like canvases themselves. Instances sharing one storage backend read each other's ids as dead, replace them, and run `onReplace` over each other's records; route each tenant (or key) to one instance.
+
 ### `instance.registerTable(name, rows, options?)`
 
 Register an in-memory or async-iterable rowset as a canvas table.
@@ -183,11 +206,11 @@ await instance.registerTable('recent_fetch', rows, { ttlMs: 30 * 60 * 1000 });
 
 Run SQL across registered tables. Returns at most `rowLimit` rows (default 10 000). When the result exceeds `rowLimit`, the response carries `truncated: true` and `rowCount` reflects the number of materialized rows (not the full result set). For full result sets and exact counts, pass `registerAs` — the result is materialized as a new canvas table; the response carries a `preview` slice and the exact `rowCount`.
 
-Querying a table that does not exist throws `NotFound` (`data.reason: 'missing_table'`, `data.tableName` carrying the full name as DuckDB reports it, spaces included) with a recovery hint to re-run the tool that staged the table or list what is currently staged. This happens when a table has expired (per-table TTL), been dropped, or the name is mistyped. The error is `NotFound`, not `ValidationError` — agents should re-stage, not fix the SQL shape. Only a read-shaped statement qualifies (one starting `SELECT`, `WITH`, or DuckDB's FROM-first `FROM`): a `DROP`, `DELETE`, `INSERT`, `UPDATE`, or `ALTER` naming a missing table is `non_select_statement`, since re-staging would not make it pass. A well-formed but unknown or expired `canvas_id` fails the same way (`data.reason: 'canvas_not_found'`, with its own recovery hint) — thrown by `acquire()` and every canvas operation. An id that fails the format check is a different failure: `ValidationError` with `data.reason: 'canvas_id_malformed'`, raised before the lookup on each of the three entry points that take a caller-supplied id — `acquire`, `drop` (which previously reported it as a silent `false`), and `importFrom`'s source id.
+Querying a table that does not exist throws `NotFound` (`data.reason: 'missing_table'`, `data.tableName` carrying the full name as DuckDB reports it, spaces included) with a recovery hint to re-run the tool that staged the table or list what is currently staged. This happens when a table has expired (per-table TTL), been dropped, or the name is mistyped. The error is `NotFound`, not `ValidationError` — agents should re-stage, not fix the SQL shape. Only a read-shaped statement qualifies (one starting `SELECT`, `WITH`, or DuckDB's FROM-first `FROM`): a `DROP`, `DELETE`, `INSERT`, `UPDATE`, or `ALTER` naming a missing table is `non_select_statement`, since re-staging would not make it pass. A name holding a path separator (`/` or `\`) is never a staged table: it is refused as a file reference (`sql_read_only`, below) whether or not anything exists there, while a dotted name DuckDB looked up as a table (`"a.b"`, `"main.gone"`) stays `missing_table`. A well-formed but unknown or expired `canvas_id` fails the same way (`data.reason: 'canvas_not_found'`, with its own recovery hint) — thrown by `acquire()` and every canvas operation. An id that fails the format check is a different failure: `ValidationError` with `data.reason: 'canvas_id_malformed'`, raised before the lookup on each of the three entry points that take a caller-supplied id — `acquire`, `drop` (which previously reported it as a silent `false`), and `importFrom`'s source id.
 
-A `SELECT` that parses but fails to prepare for any other reason — a mistyped column, an unknown scalar or table function, type, or collation, a schema the canvas does not have, an invalid expression — throws `ValidationError` (`data.reason: 'invalid_sql'`) and preserves the DuckDB binder detail in `data.binderMessage` (e.g. `Referenced column "x" not found...`, often with a candidate suggestion). This is distinct from `non_select_statement`, reserved for statements that genuinely aren't `SELECT`s — here the shape is fine, so the agent should fix the named column or function. DuckDB's FROM-first form (`FROM t`, `FROM t SELECT a`) is a `SELECT`: it passes the gate, and one that fails to prepare is classified the same way.
+A `SELECT` that fails to parse or prepare for any other reason — a syntax error, a mistyped column, an unknown scalar or table function, type, or collation, a schema the canvas does not have, an invalid expression — throws `ValidationError` (`data.reason: 'invalid_sql'`) and preserves the DuckDB detail in `data.binderMessage` (e.g. `Referenced column "x" not found...`, often with a candidate suggestion). The recovery hint follows the engine's error class: a `Parser Error` asks for the syntax fix (and `AS` before an alias that is a keyword), a `Catalog Error` for the function, type, collation, or schema name it reports missing, an `Invalid Input Error` for the constant argument it rejects, an `IO Error` for a read-only `SELECT` over the staged tables, and anything else — a binder error such as an unknown column — for the column or function the message names. This is distinct from `non_select_statement`, reserved for statements that genuinely aren't `SELECT`s — here the shape is fine, so the agent should fix the SQL the message names. DuckDB's FROM-first form (`FROM t`, `FROM t SELECT a`) is a `SELECT`: it passes the gate, and one that fails to prepare is classified the same way.
 
-A `SELECT` that prepares and then fails on the staged data throws `ValidationError` (`data.reason: 'sql_execution_error'`) with the engine message preserved and a hint pointing at `TRY_CAST` or filtering the offending rows. The split follows DuckDB's own execution-error classes — `Conversion Error`, `Invalid Input Error`, `Out of Range Error` — matched on the message prefix. `sql_read_only` and `sql_parse_error` are matched the same way: DuckDB's `Permission Error` or a write refused in `read-only mode`, and `Parser Error`. A statement that names a file — refused by the engine outside the canvas's [engine file access](#engine-file-access), and by the gate inside it — is `sql_read_only` whatever its shape, with a hint pointing back to the staged tables and nothing from the file in the rejection. Engine faults (`IO Error`, `INTERNAL Error`, `Out of Memory Error`, and anything unmatched) stay `DatabaseError` whatever their text says, so an export, import, or spill failing on I/O — `Permission denied`, `Read-only file system` — is never reported to the caller as bad SQL. Every engine message the provider throws has the export root and the [scratch directory](#scratch-directory) replaced with `[path]`, leaving only the part below them (the caller's own export name); the raw engine error stays on `cause` for logs. `DUCKDB_ERROR_REASONS` exports these alongside `SQL_GATE_REASONS`.
+A `SELECT` that prepares and then fails on the staged data throws `ValidationError` (`data.reason: 'sql_execution_error'`) with the engine message preserved and a hint for its class. The split follows DuckDB's own execution-error classes, matched on the message prefix: `Conversion Error` (wrap the cast in `TRY_CAST`, or filter out the rows), `Invalid Input Error` (filter out the rows, or use the function's `TRY` variant), `Out of Range Error` (cast to a wider type such as `HUGEINT` or `DOUBLE`, or filter out the rows). `sql_read_only` and `sql_parse_error` are matched the same way: DuckDB's `Permission Error` or a write refused in `read-only mode`, and `Parser Error`, bare or behind the `Failed to extract statements:` wrapper the Node client puts on statement extraction. DuckDB v1.5 cannot keep a `DESCRIBE`, `SUMMARIZE`, or `SHOW` as a table or view, so one sent with `registerAs` or to `registerView` fails there as `sql_parse_error` and leaves nothing behind; v2.0 keeps it. A SELECT that names a file is `sql_read_only` (`"<path>" names a file, not a staged table.`) with a hint pointing back to the staged tables and nothing from the file in the rejection — or `denied_function` when it reads the file through a named reader; any other statement is `non_select_statement` before it is prepared, whatever it names. Each fails the same way whether or not the file exists, can be read, or holds what its reader expects, and whether the path is inside the canvas's [engine file access](#engine-file-access) or outside it: the gate's parse-tree layer decides it, not the engine's refusal or the file's state. Engine faults (`IO Error`, `INTERNAL Error`, `Out of Memory Error`, and anything unmatched) stay `DatabaseError` whatever their text says, so an export, import, or spill failing on I/O — `Permission denied`, `Read-only file system` — is never reported to the caller as bad SQL. Every engine message the provider throws has the export root and the [scratch directory](#scratch-directory) replaced with `[path]`, leaving only the part below them (the caller's own export name); the raw engine error stays on `cause` for logs. `DUCKDB_ERROR_REASONS` exports these alongside `SQL_GATE_REASONS`.
 
 **Every gate and engine rejection carries `data.recovery.hint`**, which the framework mirrors into `content[]` as a `Recovery:` line — so the guidance reaches `structuredContent`-only and `content[]`-only clients alike. The hints name a capability, never a framework method: an MCP client sees only the consuming server's tool names, so `registerTable()` or `describe()` in a hint is guidance it cannot follow. Write your own hints the same way (see `api-errors`).
 
@@ -215,20 +238,20 @@ const chained = await instance.query(
 
 `ttlMs` on `query({ registerAs })` assigns a per-table TTL to the materialized table — the same sliding semantics as `registerTable({ ttlMs })`. The SQL text is also scanned for referenced table names; any tracked per-table TTL entry found is slid on each `query()` call.
 
-`denySystemCatalogs?: boolean` (default `false`) — when `true`, the gate rejects any reference to system catalog namespaces (`information_schema`, `pg_catalog`, `sqlite_master`, `duckdb_<name>()` calls) at the text-scan layer before the query executes. Use on shared canvases where handle possession is the access boundary — catalog namespaces let callers enumerate every staged handle. Rejection throws `ValidationError` with `data.reason: 'system_catalog_access'`. Canvas-token servers that explicitly expose `describe()` to agents do not need this; only servers that intentionally hide the full catalog should opt in.
+`denySystemCatalogs?: boolean` (default `false`) — when `true`, the gate rejects any reference to system catalog namespaces (`information_schema`, `pg_catalog`, `duckdb_<name>()` calls) and to DuckDB's internal metadata views (`duckdb_tables`, `duckdb_columns`, `sqlite_master`, `pg_class`, `pg_settings`, and the rest of the internal views in DuckDB's `system.main` and `system.pg_catalog` schemas), schema-qualified or not, at the text-scan layer before the query executes. The scan reads names, not their role in the statement, so a column or alias spelled like one of those names is rejected too; a string literal or comment holding one is not. Use on shared canvases where handle possession is the access boundary — catalog namespaces let callers enumerate every staged handle. Rejection throws `ValidationError` with `data.reason: 'system_catalog_access'`. Canvas-token servers that explicitly expose `describe()` to agents do not need this; only servers that intentionally hide the full catalog should opt in.
 
 **Read-only enforcement** (five layers + optional catalog layer, over the engine's own [file access bound](#engine-file-access)):
-1. Text-level deny-list — pre-parse scan for file/HTTP-reading table functions (`read_csv*`, `read_json*`, `read_parquet*`, `read_duckdb`, `read_text`, `read_blob`, `glob`, `iceberg_scan`, `delta_scan`, `postgres_scan`, `mysql_scan`, `sqlite_scan`, plus pre-staged spatial ones).
+1. Text-level deny-list — pre-parse scan for file/HTTP-reading table functions (`read_csv*`, `read_json*`, `read_parquet*`, `read_duckdb`, `read_text`, `read_blob`, `glob`, `iceberg_scan`, `delta_scan`, `postgres_scan`, `mysql_scan`, `sqlite_scan`, plus pre-staged spatial ones) and the `pragma_*` namespace. This scan and the catalog layer skip string literals and comments exactly where DuckDB's tokenizer ends them — standard, `E'…'` escape, and dollar-quoted literals, nested block comments, `--` to the line end — so text the engine reads as code is always scanned; anything the engine cannot tokenize, or that DuckDB versions tokenize differently, is scanned as written.
 2. Statement count (must be 1) via `extractStatements`.
-3. Statement type (must be `SELECT`) via `prepared.statementType`.
-4. Parse-tree check — DuckDB's own parse of the statement. A call to a function that reads an engine setting (`current_setting`, `current_schema`, `current_schemas`, `in_search_path`), runs SQL or names a table from a string (`query`, `query_table`), or reads a file (the layer-1 list) is rejected as `denied_function`. So is an unqualified `current_schema` written without parentheses, quoted or not: DuckDB binds it to the function whenever no column of that name is in scope, and the parse tree cannot tell the two apart, so a staged column named `current_schema` is read qualified (`c.current_schema`). That refusal says so in its message and carries its own recovery hint — qualify the column with its table, or remove the reference — in place of the remove-the-function hint every other `denied_function` refusal carries. It is the one denied name DuckDB binds bare; columns named after the others (`query`, `current_setting`) read unqualified. A table reference that names a file is rejected as `sql_read_only`. The one exception is `query()` over a single plain string literal: that SQL is gated as its own single SELECT statement — the catalog layer and layers 1–4 again, recursively — up to 4 `query()` levels deep, and layer 5 covers its plan inside the outer statement's. Any other `query()` argument, and nesting past 4 levels, is `denied_function`.
-5. EXPLAIN-plan walk against an allowlisted set of physical operators + a denied-function rescan over plan metadata strings.
+3. Statement type (must be `SELECT`). A statement DuckDB's own serializer cannot represent is not a SELECT and is refused before it is prepared, with one refusal whatever it names (`non_select_statement`, `Canvas query must be SELECT.`, `statementType: 'UNKNOWN'`); `prepared.statementType` confirms the rest.
+4. Parse-tree check — DuckDB's own parse of the statement. A call to a function that reads an engine setting (`current_setting`, `current_schema`, `current_schemas`, `in_search_path`), runs SQL or names a table from a string (`query`, `query_table`), or reads a file (the layer-1 list) is rejected as `denied_function`, and so is every `pragma_*` function, however its name is quoted, cased, or qualified. So is an unqualified `current_schema` written without parentheses, quoted or not: DuckDB binds it to the function whenever no column of that name is in scope, and the parse tree cannot tell the two apart, so a staged column named `current_schema` is read qualified (`c.current_schema`). That refusal says so in its message and carries its own recovery hint — qualify the column with its table, or remove the reference — in place of the remove-the-function hint every other `denied_function` refusal carries. It is the one denied name DuckDB binds bare; columns named after the others (`query`, `current_setting`) read unqualified. A table reference that names a file — a name holding a dot or path separator, or qualified by a schema or catalog the canvas does not have; a `DESCRIBE` or `SHOW` subject included — is rejected as `sql_read_only`, except the name DuckDB reports missing from its catalog: it looked that name up as a table rather than reading it as a file, so the miss is what the caller gets (`missing_table`, or `invalid_sql` for a missing schema), unless the name holds a path separator. This layer also reads a statement that fails to prepare, before the engine's own refusal or a missing table is reported, so its answer never depends on the engine or the file's state. `SHOW` and `DESCRIBE` of a staged table or view answer its column listing. The one exception is `query()` over a single plain string literal: that SQL is gated as its own single SELECT statement — the catalog layer and layers 1–4 again, recursively — up to 4 `query()` levels deep, and layer 5 covers its plan inside the outer statement's. Any other `query()` argument, and nesting past 4 levels, is `denied_function`.
+5. EXPLAIN-plan walk against an allowlisted set of physical operators + a denied-function rescan of the fields that name each scan's function, on the node or inside its `extra_info` — the scan's own allowlisted operator name aside, never the caller's literals or aliases elsewhere in the plan.
 
 Any layer's rejection throws `ValidationError` with a structured `data.reason`. File-reading scans (`READ_CSV`, `READ_PARQUET`, `READ_JSON`), DDL (`CREATE_*`, `DROP_*`, `ALTER_*`), DML (`INSERT`, `UPDATE`, `DELETE`), exports (`COPY_TO_FILE`), and utility statements (`PRAGMA`, `ATTACH`, `LOAD`, `SET`) are all rejected.
 
 ### `instance.registerView(name, selectSql, options?)`
 
-Register a SQL view on the canvas. The `SELECT` runs through the same gate `query()` enforces (five layers), so a malicious definition fails at registration time, not later when the view is referenced. Pass `{ denySystemCatalogs: true }` to also block catalog namespace references in the view definition — same semantics as the `query()` flag.
+Register a SQL view on the canvas. The `SELECT` runs through the same gate `query()` enforces (five layers), so a malicious definition fails at registration time, not later when the view is referenced. Pass `{ denySystemCatalogs: true }` to also block system catalog and internal metadata view references in the view definition — same semantics as the `query()` flag.
 
 ```ts
 await instance.registerView(
@@ -334,7 +357,7 @@ Most canvas use cases are public-data analytics: fetch from an upstream API, sta
 
 | Concern | Simple-shape answer |
 |:--|:--|
-| Canvas scoping | One shared canvas per tenant. Omit `canvas_id` on the first call to mint one; pass the returned id back to reuse it. |
+| Canvas scoping | One shared canvas per tenant. Either the caller carries it — omit `canvas_id` on the first call to mint one, pass the returned id back to reuse it — or the server keeps it through `canvas.acquireShared(ctx)` ([recipe](#recipe-a-canvas-the-server-keeps)). Never hand-roll the stored-id read and mint: concurrent first calls each mint a canvas. |
 | Table naming | `spillover()` auto-names the table `spilled_<id>`; pass `tableName` for a stable handle. A dataframe-query surface commonly adds its own `df_<id>` convention. |
 | Access control | Possession of the `canvas_id` is access — unguessable in practice (see [token-sharing model](#the-token-sharing-model)). TTL + the framework rate limiter backstop brute force. |
 | Enable flag | None of your own — canvas presence is the gate (`CANVAS_PROVIDER_TYPE=duckdb`; `getCanvas()` returns `undefined` otherwise). |
@@ -403,7 +426,8 @@ export const dataframeQuery = tool('dataframe_query', {
   }),
   output: z.object({
     rows: z.array(z.record(z.string(), z.unknown())).describe('Result rows (capped at the canvas row limit)'),
-    row_count: z.number().describe('Full result count before the row cap'),
+    row_count: z.number().describe('Rows returned — at most the canvas row limit, not the size of the full result'),
+    truncated: z.boolean().optional().describe('True when the result has more rows than came back; aggregate or page with ORDER BY … LIMIT … OFFSET to reach the rest'),
   }),
   async handler(input, ctx) {
     const canvas = getCanvas();
@@ -411,10 +435,58 @@ export const dataframeQuery = tool('dataframe_query', {
 
     const instance = await canvas.acquire(input.canvas_id, ctx);
     const result = await instance.query(input.sql, { signal: ctx.signal });
-    return { rows: result.rows, row_count: result.rowCount };
+    // Forward the cap flag: without it a capped result reads as the whole answer.
+    return {
+      rows: result.rows,
+      row_count: result.rowCount,
+      ...(result.truncated && { truncated: true }),
+    };
   },
 });
 ```
+
+### Recipe: a canvas the server keeps
+
+When the tools take no `canvas_id`, the server keeps one canvas per tenant and records what it staged in `ctx.state`. Every tool reaches the canvas through one bridge:
+
+```ts
+// src/services/canvas-bridge.ts
+import type { Context } from '@cyanheads/mcp-ts-core';
+import type { CanvasInstance } from '@cyanheads/mcp-ts-core/canvas';
+import { getCanvas } from '@/services/canvas-accessor.js';
+
+function requireCanvas() {
+  const canvas = getCanvas();
+  if (!canvas) throw new Error('DataCanvas is not enabled. Set CANVAS_PROVIDER_TYPE=duckdb.');
+  return canvas;
+}
+
+/** For staging: the tenant's canvas, minted once. Records kept for a dead canvas go first. */
+export function stagingCanvas(ctx: Context): Promise<CanvasInstance> {
+  return requireCanvas().acquireShared(ctx, { onReplace: () => purgeTableRecords(ctx) });
+}
+
+/** For describe, query, and drop: the live canvas, or undefined when nothing is staged. */
+export function liveCanvas(ctx: Context): Promise<CanvasInstance | undefined> {
+  return requireCanvas().acquireShared(ctx, {
+    create: false,
+    onReplace: () => purgeTableRecords(ctx),
+  });
+}
+
+async function purgeTableRecords(ctx: Context): Promise<void> {
+  const keys: string[] = [];
+  let cursor: string | undefined;
+  do {
+    const page = await ctx.state.list('df-meta/', cursor ? { cursor } : {});
+    keys.push(...page.items.map((item) => item.key));
+    cursor = page.cursor;
+  } while (cursor);
+  if (keys.length > 0) await ctx.state.deleteMany(keys);
+}
+```
+
+The fetcher stages through `stagingCanvas(ctx)` and writes `df-meta/<table>` after `registerTable`; the dataframe tools go through `liveCanvas(ctx)` and answer "nothing staged" on `undefined` instead of minting an empty canvas. A narrower scope — one canvas per session — passes its own `stateKey` and keys its records under the same scope, so a purge touches only that canvas's records. Several server instances over one storage backend need each tenant routed to one of them ([scope](#canvasacquiresharedctx-options--canvasinstance)).
 
 ### When the simple shape is enough
 

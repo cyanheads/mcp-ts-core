@@ -54,6 +54,7 @@ export {
 } from './spillover.js';
 export type {
   AcquireOptions,
+  AcquireSharedOptions,
   CanvasObjectKind,
   ColumnSchema,
   ColumnType,
