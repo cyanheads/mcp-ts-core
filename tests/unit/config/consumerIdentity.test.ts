@@ -5,7 +5,7 @@
  * disk, points the entry module at it, and launches from somewhere else.
  * @module tests/unit/config/consumerIdentity
  */
-import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
@@ -43,6 +43,28 @@ function makeServer(name: string, manifest: Record<string, unknown>): string {
   mkdirSync(resolve(entry, '..'), { recursive: true });
   writeFileSync(entry, '');
   process.argv[1] = entry;
+  return dir;
+}
+
+/**
+ * Installs a framework server under `project`'s `node_modules` and points the
+ * entry module at its `.bin` shim, the way `node node_modules/.bin/<server>`
+ * and a local `npx <server>` launch it. Returns the server's package root.
+ */
+function makeInstalledServer(project: string): string {
+  const dir = makePackage(join(project, 'node_modules', '@scope', 'x-mcp-server'), {
+    name: '@scope/x-mcp-server',
+    version: '0.5.3',
+    description: 'An installed server.',
+    dependencies: { '@cyanheads/mcp-ts-core': '^0.13.18' },
+  });
+  const entry = join(dir, 'dist', 'index.js');
+  mkdirSync(resolve(entry, '..'), { recursive: true });
+  writeFileSync(entry, '');
+  const binDir = join(project, 'node_modules', '.bin');
+  mkdirSync(binDir, { recursive: true });
+  symlinkSync(entry, join(binDir, 'x-mcp-server'));
+  process.argv[1] = join(binDir, 'x-mcp-server');
   return dir;
 }
 
@@ -96,6 +118,26 @@ describe('served package identity', () => {
 
     expect(parsed.pkg.name).toBe('@cyanheads/mcp-ts-core');
   });
+
+  it.each([
+    ['has', { name: 'my-app', version: '9.9.9-the-installing-project' }],
+    ['lacks', { name: 'my-app', private: true }],
+  ])(
+    'reports an installed server run from the installing project root, whose manifest %s a version',
+    (_has, projectManifest) => {
+      const project = makePackage(join(tempRoot, 'app'), projectManifest);
+      const server = makeInstalledServer(project);
+      process.chdir(project);
+
+      const parsed = parseConfig(CLEAN_ENV);
+
+      expect(parsed.mcpServerName).toBe('@scope/x-mcp-server');
+      expect(parsed.mcpServerVersion).toBe('0.5.3');
+      expect(parsed.mcpServerDescription).toBe('An installed server.');
+      expect(parsed.openTelemetry.serviceVersion).toBe('0.5.3');
+      expect(parsed.logsPath).toBe(join(server, 'logs'));
+    },
+  );
 
   it('keeps environment overrides ahead of the resolved manifest', () => {
     makeServer('served-server', { name: 'served-server', version: '2.10.4' });

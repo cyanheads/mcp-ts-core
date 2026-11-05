@@ -6,7 +6,7 @@
  * directories under a temp root, read through the SDK's own loader.
  * @module tests/unit/mcp-server/skills.test
  */
-import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -114,6 +114,47 @@ describe('loadServedSkills', () => {
     const skills = await loadServedSkills('skills', () => {});
 
     expect(skills.names).toEqual(['rooted-guide']);
+  });
+
+  it("serves an installed server's own tree when it runs from the installing project's root", async () => {
+    // The real resolver, so the folder anchors wherever the application root
+    // actually resolves for this launch.
+    const actual =
+      await vi.importActual<typeof import('@/config/appRoot.js')>('@/config/appRoot.js');
+    const project = realpathSync(root);
+    writeFileSync(join(project, 'package.json'), JSON.stringify({ name: 'my-app', private: true }));
+    const server = join(project, 'node_modules', 'x-mcp-server');
+    mkdirSync(join(server, 'dist'), { recursive: true });
+    writeFileSync(
+      join(server, 'package.json'),
+      JSON.stringify({
+        name: 'x-mcp-server',
+        version: '0.2.1',
+        dependencies: { '@cyanheads/mcp-ts-core': '^0.13.18' },
+      }),
+    );
+    writeFileSync(join(server, 'dist', 'index.js'), '');
+    mkdirSync(join(server, 'skills', 'server-guide'), { recursive: true });
+    writeFileSync(join(server, 'skills', 'server-guide', 'SKILL.md'), conformant('server-guide'));
+    const binDir = join(project, 'node_modules', '.bin');
+    mkdirSync(binDir, { recursive: true });
+    symlinkSync(join(server, 'dist', 'index.js'), join(binDir, 'x-mcp-server'));
+
+    const originalArgv1 = process.argv[1] ?? '';
+    const originalCwd = process.cwd();
+    process.argv[1] = join(binDir, 'x-mcp-server');
+    process.chdir(project);
+    actual.resetAppRootCache();
+    vi.mocked(resolveAppRoot).mockImplementation(actual.resolveAppRoot);
+    try {
+      const skills = await loadServedSkills('skills', () => {});
+
+      expect(skills.names).toEqual(['server-guide']);
+    } finally {
+      process.argv[1] = originalArgv1;
+      process.chdir(originalCwd);
+      actual.resetAppRootCache();
+    }
   });
 
   it('fails a missing folder as a ConfigurationError naming the resolved path', async () => {

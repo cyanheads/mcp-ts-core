@@ -5,7 +5,16 @@
  * @module src/utils/telemetry/instrumentation
  */
 
-import { type DiagLogger, DiagLogLevel, diag, logs } from '@opentelemetry/api';
+import {
+  context,
+  type DiagLogger,
+  DiagLogLevel,
+  diag,
+  logs,
+  metrics,
+  propagation,
+  trace,
+} from '@opentelemetry/api';
 import type { LogRecordProcessor } from '@opentelemetry/sdk-logs';
 import type { NodeSDK } from '@opentelemetry/sdk-node';
 import { config } from '@/config/index.js';
@@ -31,6 +40,16 @@ export let sdk: NodeSDK | null = null;
 // Initialization state management
 let isOtelInitialized = false;
 let initializationPromise: Promise<void> | null = null;
+
+/**
+ * The `@opentelemetry/api` globals the running `NodeSDK`'s `start()` registers.
+ * Its `shutdown()` shuts the providers down but leaves them registered, and the
+ * API refuses a second registration of the same global, so an SDK started after
+ * it would export nothing. {@link shutdownOpenTelemetry} releases these. The API
+ * does not say whether `start()`'s registration succeeded, so a global the host
+ * process registered first is released too.
+ */
+let registeredGlobals: ReadonlyArray<{ disable(): void }> = [];
 
 /**
  * Determines if the NodeSDK can be used in the current runtime.
@@ -303,6 +322,16 @@ export async function initializeOpenTelemetry(): Promise<void> {
       );
 
       sdk.start();
+      // What `start()` registers given the lists above: the context manager, the
+      // propagator, and a logger provider always; a tracer and meter provider only
+      // for a non-empty processor or reader list.
+      registeredGlobals = [
+        context,
+        propagation,
+        logs,
+        ...(spanProcessors.length > 0 ? [trace] : []),
+        ...(metricReaders.length > 0 ? [metrics] : []),
+      ];
       // `PinoInstrumentation` never sees the framework's `pino` (imported at module
       // load, before `start()`), so the logger forwards its records to the Logs API itself.
       if (logsEndpoint) {
@@ -330,6 +359,13 @@ export async function initializeOpenTelemetry(): Promise<void> {
  * Gracefully shuts down the OpenTelemetry SDK with timeout protection.
  * This function is called during the application's shutdown sequence.
  * Prevents hung processes by racing shutdown against a timeout.
+ *
+ * Once the shutdown settles — flushed, failed, or timed out — the API globals
+ * the SDK registered are released, so a later {@link initializeOpenTelemetry}
+ * registers its own and exports what it records. With no SDK started it does
+ * nothing. A process that registers its own OpenTelemetry SDK leaves
+ * `OTEL_ENABLED` off: this releases the host's registrations along with the
+ * framework's.
  *
  * @param timeoutMs - Maximum time to wait for shutdown in milliseconds (default: 5000)
  * @throws Error if shutdown times out or fails critically
@@ -363,6 +399,8 @@ export async function shutdownOpenTelemetry(timeoutMs = 5000): Promise<void> {
     throw error; // Propagate for caller handling
   } finally {
     clearTimeout(timer);
+    for (const api of registeredGlobals) api.disable();
+    registeredGlobals = [];
     sdk = null;
     isOtelInitialized = false;
     initializationPromise = null;

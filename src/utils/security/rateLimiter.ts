@@ -21,11 +21,6 @@ function getRateLimitMetrics() {
   return { rejectionCounter };
 }
 
-/** Eagerly creates the rate limit rejection counter so the series exists from startup. */
-export function initRateLimitMetrics(): void {
-  getRateLimitMetrics();
-}
-
 /**
  * Defines configuration options for the {@link RateLimiter}.
  */

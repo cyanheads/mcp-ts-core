@@ -98,7 +98,7 @@ Trace context propagates across boundaries via W3C `traceparent` headers. Helper
 
 ## Metrics
 
-All custom metrics are namespaced `mcp.*` (or `process.*`/`http.client.*` where standard semconv applies). Lazy-initialized on first emission, but the universal ones are eagerly created at startup so series exist from the first export cycle.
+All custom metrics are namespaced `mcp.*` (or `process.*`/`http.client.*` where standard semconv applies). Counters and histograms are created on first use, and the SDK exports a series only once a value has been recorded on it: a path a server never takes (a rate-limit rejection, a heartbeat failure) has no series, not a zero one. The observable gauges (`process.*`, `mcp.sessions.active`) report from the first export cycle.
 
 ### Tools, resources, prompts
 
@@ -244,6 +244,8 @@ export async function doWork() {
   }, { 'myservice.region': 'us-west' });
 }
 ```
+
+`createCounter`, `createUpDownCounter`, and `createHistogram` resolve their instrument from the running SDK each time they record, so module scope and `setup()`, which both run before `createApp()` starts telemetry, are safe places to create them. `getMeter()` and `createObservableGauge()` bind when called: call them after `createApp()` has started the SDK.
 
 Span context propagates automatically — `withSpan` calls inside a `tool_execution:*` span will appear as children.
 

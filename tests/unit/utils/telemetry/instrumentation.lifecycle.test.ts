@@ -3,7 +3,23 @@
  * @module tests/utils/telemetry/instrumentation.lifecycle.test
  */
 
-import { type DiagLogger, DiagLogLevel, diag, type Logger, logs } from '@opentelemetry/api';
+import {
+  type ContextManager,
+  context,
+  createNoopMeter,
+  type DiagLogger,
+  DiagLogLevel,
+  diag,
+  type Logger,
+  logs,
+  type MeterProvider,
+  metrics,
+  ProxyTracerProvider,
+  propagation,
+  ROOT_CONTEXT,
+  type TextMapPropagator,
+  trace,
+} from '@opentelemetry/api';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const otelState = vi.hoisted(() => ({
@@ -164,6 +180,9 @@ vi.mock('@opentelemetry/semantic-conventions', () => ({
   ATTR_SERVICE_VERSION: 'service.version',
 }));
 
+/** A distinct `MeterProvider` for registration identity checks. */
+const meterProvider = (): MeterProvider => ({ getMeter: () => createNoopMeter() });
+
 describe('OpenTelemetry instrumentation lifecycle', () => {
   const originalEnv = {
     AWS_LAMBDA_FUNCTION_NAME: process.env.AWS_LAMBDA_FUNCTION_NAME,
@@ -220,6 +239,7 @@ describe('OpenTelemetry instrumentation lifecycle', () => {
   afterEach(() => {
     vi.useRealTimers();
     vi.restoreAllMocks();
+    for (const api of [context, propagation, logs, trace, metrics]) api.disable();
     for (const [key, value] of Object.entries(originalEnv)) {
       if (value === undefined) {
         delete process.env[key];
@@ -516,10 +536,116 @@ describe('OpenTelemetry instrumentation lifecycle', () => {
   });
 
   it('returns immediately when shutdown is requested before initialization', async () => {
+    const elsewhere = meterProvider();
+    expect(metrics.setGlobalMeterProvider(elsewhere)).toBe(true);
     const instrumentation = await import('@/utils/telemetry/instrumentation.js');
 
     await expect(instrumentation.shutdownOpenTelemetry(25)).resolves.toBeUndefined();
     expect(otelState.sdkShutdownSpy).not.toHaveBeenCalled();
+    expect(metrics.getMeterProvider()).toBe(elsewhere);
+  });
+
+  describe('API globals across a restart', () => {
+    /**
+     * What `NodeSDK.start()` registers: the context manager, the propagator,
+     * and a logger provider always; a tracer and meter provider when its
+     * processor and reader lists are non-empty. Returns the meter provider and
+     * propagator it built, for identity checks.
+     */
+    function registerLikeNodeSdk() {
+      const options = otelState.nodeSdkOptions.at(-1) as {
+        metricReaders: unknown[];
+        spanProcessors: unknown[];
+      };
+      const registered = {
+        meterProvider: meterProvider(),
+        propagator: {
+          extract: (ctx) => ctx,
+          fields: () => [`field-${otelState.nodeSdkOptions.length}`],
+          inject: () => {},
+        } satisfies TextMapPropagator,
+      };
+      const contextManager: ContextManager = {
+        active: () => ROOT_CONTEXT,
+        bind: (_ctx, target) => target,
+        disable() {
+          return this;
+        },
+        enable() {
+          return this;
+        },
+        with: (_ctx, fn, thisArg, ...args) => fn.call(thisArg, ...args),
+      };
+      context.setGlobalContextManager(contextManager);
+      propagation.setGlobalPropagator(registered.propagator);
+      logs.setGlobalLoggerProvider({ getLogger: () => ({ emit: () => {}, enabled: () => true }) });
+      if (options.spanProcessors.length > 0) {
+        // A proxy with no delegate hands out no-op tracers.
+        trace.setGlobalTracerProvider(new ProxyTracerProvider());
+      }
+      if (options.metricReaders.length > 0) {
+        metrics.setGlobalMeterProvider(registered.meterProvider);
+      }
+      return registered;
+    }
+
+    it('releases what the SDK registered, so a restarted SDK registers its own', async () => {
+      const started: Array<ReturnType<typeof registerLikeNodeSdk>> = [];
+      otelState.sdkStartSpy.mockImplementation(() => {
+        started.push(registerLikeNodeSdk());
+      });
+      const diagErrors: string[] = [];
+      vi.spyOn(diag, 'error').mockImplementation((message: string) => {
+        diagErrors.push(message);
+      });
+      const instrumentation = await import('@/utils/telemetry/instrumentation.js');
+
+      await instrumentation.initializeOpenTelemetry();
+      await instrumentation.shutdownOpenTelemetry(50);
+      expect(metrics.getMeterProvider()).not.toBe(started[0]?.meterProvider);
+
+      await instrumentation.initializeOpenTelemetry();
+
+      expect(metrics.getMeterProvider()).toBe(started[1]?.meterProvider);
+      expect(propagation.fields()).toEqual(['field-2']);
+      expect(diagErrors.join('\n')).not.toContain('duplicate registration');
+      await instrumentation.shutdownOpenTelemetry(50);
+    });
+
+    it('releases them when the SDK shutdown times out', async () => {
+      vi.useFakeTimers();
+      const started: Array<ReturnType<typeof registerLikeNodeSdk>> = [];
+      otelState.sdkStartSpy.mockImplementation(() => {
+        started.push(registerLikeNodeSdk());
+      });
+      const instrumentation = await import('@/utils/telemetry/instrumentation.js');
+      await instrumentation.initializeOpenTelemetry();
+      otelState.sdkShutdownSpy.mockReturnValueOnce(new Promise(() => {}));
+
+      const shutdown = expect(instrumentation.shutdownOpenTelemetry(25)).rejects.toThrow(
+        'OpenTelemetry SDK shutdown timeout',
+      );
+      await vi.advanceTimersByTimeAsync(25);
+      await shutdown;
+
+      expect(metrics.getMeterProvider()).not.toBe(started[0]?.meterProvider);
+      expect(metrics.setGlobalMeterProvider(meterProvider())).toBe(true);
+    });
+
+    it('leaves a global the SDK never registered in place', async () => {
+      mockConfig.openTelemetry.metricsEndpoint = '';
+      const ownProvider = meterProvider();
+      expect(metrics.setGlobalMeterProvider(ownProvider)).toBe(true);
+      otelState.sdkStartSpy.mockImplementation(() => {
+        registerLikeNodeSdk();
+      });
+      const instrumentation = await import('@/utils/telemetry/instrumentation.js');
+
+      await instrumentation.initializeOpenTelemetry();
+      await instrumentation.shutdownOpenTelemetry(50);
+
+      expect(metrics.getMeterProvider()).toBe(ownProvider);
+    });
   });
 
   it('shares concurrent initialization and starts a fresh SDK after shutdown', async () => {

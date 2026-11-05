@@ -8,7 +8,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { logger } from '@/utils/internal/logger.js';
-import { fetchWithTimeout, initHttpClientMetrics } from '@/utils/network/fetchWithTimeout.js';
+import { fetchWithTimeout } from '@/utils/network/fetchWithTimeout.js';
 
 const { createHistogramMock, mockRecord } = vi.hoisted(() => ({
   createHistogramMock: vi.fn(),
@@ -38,8 +38,10 @@ describe('fetchWithTimeout – http.client.request.duration histogram', () => {
     vi.restoreAllMocks();
   });
 
-  it('uses the correct metric name and unit via createHistogram', () => {
-    initHttpClientMetrics();
+  it('uses the correct metric name and unit via createHistogram', async () => {
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response('ok', { status: 200 }));
+
+    await (await fetchWithTimeout('https://api.example.com/data', 5000, context)).text();
 
     expect(createHistogramMock).toHaveBeenCalledWith(
       'http.client.request.duration',

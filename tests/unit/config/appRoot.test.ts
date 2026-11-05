@@ -208,6 +208,122 @@ describe('resolveAppRoot', () => {
     });
   });
 
+  describe('an installed framework server launched from the installing project (#641)', () => {
+    const FRAMEWORK_DEP = { '@cyanheads/mcp-ts-core': '^0.13.18' };
+
+    it('keeps the server package when its bin shim runs from the project root', () => {
+      const project = makePackage(join(tempRoot, 'app'), { name: 'my-app', version: '9.9.9' });
+      const server = makePackage(join(project, 'node_modules', '@scope', 'x-mcp-server'), {
+        name: '@scope/x-mcp-server',
+        version: '0.5.3',
+        dependencies: FRAMEWORK_DEP,
+      });
+      const target = setEntry(join(server, 'dist', 'index.js'));
+      const binDir = join(project, 'node_modules', '.bin');
+      mkdirSync(binDir, { recursive: true });
+      symlinkSync(target, join(binDir, 'x-mcp-server'));
+      process.argv[1] = join(binDir, 'x-mcp-server');
+      process.chdir(project);
+
+      const root = resolveAppRoot();
+
+      expect(root?.dir).toBe(server);
+      expect(root?.manifest).toEqual({ name: '@scope/x-mcp-server', version: '0.5.3' });
+    });
+
+    it('keeps the server package when hoisted to a workspace root and launched from a member', () => {
+      const repo = makePackage(join(tempRoot, 'repo'), {
+        name: 'the-monorepo',
+        workspaces: ['packages/*'],
+      });
+      const member = makePackage(join(repo, 'packages', 'app'), { name: 'app', version: '1.0.0' });
+      const server = makePackage(join(repo, 'node_modules', 'x-mcp-server'), {
+        name: 'x-mcp-server',
+        version: '0.5.3',
+        dependencies: FRAMEWORK_DEP,
+      });
+      setEntry(join(server, 'dist', 'index.js'));
+      process.chdir(member);
+
+      expect(resolveAppRoot()?.dir).toBe(server);
+    });
+
+    it.each([
+      ['Bun', ['.bun', 'x-mcp-server@0.5.3', 'node_modules', 'x-mcp-server']],
+      ['pnpm', ['.pnpm', 'x-mcp-server@0.5.3', 'node_modules', 'x-mcp-server']],
+    ])('keeps the server package through a %s isolated store', (_store, storePath) => {
+      const project = makePackage(join(tempRoot, 'app'), { name: 'my-app', version: '9.9.9' });
+      const server = makePackage(join(project, 'node_modules', ...storePath), {
+        name: 'x-mcp-server',
+        version: '0.5.3',
+        dependencies: FRAMEWORK_DEP,
+      });
+      setEntry(join(server, 'dist', 'index.js'));
+      process.chdir(project);
+
+      expect(resolveAppRoot()?.dir).toBe(server);
+    });
+
+    it.each(['optionalDependencies', 'peerDependencies'])(
+      'counts the framework declared under %s',
+      (field) => {
+        const project = makePackage(join(tempRoot, 'app'), { name: 'my-app', version: '9.9.9' });
+        const server = makePackage(join(project, 'node_modules', 'x-mcp-server'), {
+          name: 'x-mcp-server',
+          version: '0.5.3',
+          [field]: FRAMEWORK_DEP,
+        });
+        setEntry(join(server, 'dist', 'index.js'));
+        process.chdir(project);
+
+        expect(resolveAppRoot()?.dir).toBe(server);
+      },
+    );
+
+    it('still prefers the project when the tool lists the framework only under devDependencies', () => {
+      const project = makePackage(join(tempRoot, 'app'), { name: 'my-app', version: '9.9.9' });
+      const runner = makePackage(join(project, 'node_modules', 'test-runner'), {
+        name: 'test-runner',
+        version: '4.1.11',
+        devDependencies: FRAMEWORK_DEP,
+      });
+      setEntry(join(runner, 'dist', 'workers', 'forks.js'));
+      process.chdir(project);
+
+      expect(resolveAppRoot()?.dir).toBe(project);
+    });
+
+    it('still prefers the project when the entry is the framework package itself', () => {
+      const project = makePackage(join(tempRoot, 'app'), {
+        name: 'my-app',
+        version: '9.9.9',
+        dependencies: FRAMEWORK_DEP,
+      });
+      const framework = makePackage(join(project, 'node_modules', '@cyanheads', 'mcp-ts-core'), {
+        name: '@cyanheads/mcp-ts-core',
+        version: '0.13.18',
+        dependencies: { zod: '^4' },
+      });
+      setEntry(join(framework, 'dist', 'cli', 'init.js'));
+      process.chdir(project);
+
+      expect(resolveAppRoot()?.dir).toBe(project);
+    });
+
+    it('reads only the framework key, not a package whose name merely contains it', () => {
+      const project = makePackage(join(tempRoot, 'app'), { name: 'my-app', version: '9.9.9' });
+      const tool = makePackage(join(project, 'node_modules', 'some-tool'), {
+        name: 'some-tool',
+        version: '1.0.0',
+        dependencies: { '@cyanheads/mcp-ts-core-plugin': '^1.0.0', 'mcp-ts-core': '^1.0.0' },
+      });
+      setEntry(join(tool, 'dist', 'index.js'));
+      process.chdir(project);
+
+      expect(resolveAppRoot()?.dir).toBe(project);
+    });
+  });
+
   it('follows a symlinked bin shim to the real package', () => {
     const app = makePackage(join(tempRoot, 'server'), { name: 'linked-server', version: '5.6.7' });
     const target = setEntry(join(app, 'dist', 'index.js'));

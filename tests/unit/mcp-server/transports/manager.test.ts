@@ -44,7 +44,6 @@ vi.mock('@/mcp-server/transports/heartbeat.js', () => ({
       heartbeats.push(this);
     }
   },
-  initHeartbeatMetrics: vi.fn(),
 }));
 
 /** Creates a config-like object with the given transport type. */

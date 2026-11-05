@@ -53,11 +53,6 @@ function getHttpClientMetrics() {
   return { clientDurationHistogram };
 }
 
-/** Eagerly creates the HTTP client duration histogram so the series exists from startup. */
-export function initHttpClientMetrics(): void {
-  getHttpClientMetrics();
-}
-
 /**
  * Names a URL by its origin for error messages and logs:
  * `https://host/sk-key/reverse?lat=1` reads `https://host/…?…`. Credentials

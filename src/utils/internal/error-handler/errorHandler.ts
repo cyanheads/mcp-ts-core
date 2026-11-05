@@ -60,11 +60,6 @@ function getErrorMetrics() {
   return { errorClassifiedCounter };
 }
 
-/** Eagerly creates the error classification counter so the series exists from startup. */
-export function initErrorMetrics(): void {
-  getErrorMetrics();
-}
-
 /**
  * A record's `extra` as a stack-free record writes it, every field in one walk
  * — the context's, `input`, `errorData`: each `Error` written without its

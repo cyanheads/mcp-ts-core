@@ -34,8 +34,6 @@ import type { AnyToolDef } from '@/mcp-server/tools/tool-registration.js';
 import { ToolRegistry } from '@/mcp-server/tools/tool-registration.js';
 import type { InputHandlingOptions } from '@/mcp-server/tools/utils/arguments/index.js';
 import { getDisabledMetadata } from '@/mcp-server/tools/utils/disabled-tool.js';
-import { initHeartbeatMetrics } from '@/mcp-server/transports/heartbeat.js';
-import { initSessionMetrics } from '@/mcp-server/transports/http/sessionStore.js';
 import { TransportManager } from '@/mcp-server/transports/manager.js';
 import { observeStdinEof } from '@/mcp-server/transports/stdio/stdioTransport.js';
 import {
@@ -53,7 +51,6 @@ import { StorageService } from '@/storage/core/StorageService.js';
 import { createStorageProvider } from '@/storage/core/storageFactory.js';
 import type { Database } from '@/storage/providers/supabase/supabase.types.js';
 import { configurationError, JsonRpcErrorCode, McpError } from '@/types-global/errors.js';
-import { initErrorMetrics } from '@/utils/internal/error-handler/errorHandler.js';
 import {
   errorText,
   isInstance,
@@ -61,11 +58,9 @@ import {
   readField,
 } from '@/utils/internal/error-handler/helpers.js';
 import { logger, type McpLogLevel } from '@/utils/internal/logger.js';
-import { initHandlerMetrics } from '@/utils/internal/performance.js';
 import { requestContextService, withExtra } from '@/utils/internal/requestContext.js';
-import { initHttpClientMetrics } from '@/utils/network/fetchWithTimeout.js';
 import { schedulerService } from '@/utils/scheduling/scheduler.js';
-import { initRateLimitMetrics, RateLimiter } from '@/utils/security/rateLimiter.js';
+import { RateLimiter } from '@/utils/security/rateLimiter.js';
 import {
   initializeOpenTelemetry,
   shutdownOpenTelemetry,
@@ -275,9 +270,10 @@ export interface CreateAppOptions<TSupabaseClient extends object = SupabaseClien
    * root tree the server publishes for the agents that use it.
    *
    * A relative path resolves against the application root (the nearest
-   * `package.json` above the entry module), so a stdio server launched from a
-   * client's project still serves its own tree; the working directory is the
-   * fallback only when no application root is found.
+   * `package.json` above the entry module), so a stdio server serves its own
+   * tree from any working directory, the root of the project that installed it
+   * included; the working directory is the fallback only when no application
+   * root is found.
    * The folder is read once at startup. A missing or unreadable folder fails
    * startup with a `ConfigurationError` naming the resolved path; a skill the
    * SDK rejects is skipped with a logged warning naming the file and problem,
@@ -816,14 +812,6 @@ export async function createApp<TSupabaseClient extends object = SupabaseClientH
   await initializeOpenTelemetry().catch((err: unknown) => {
     console.error('[Startup] Failed to initialize OpenTelemetry:', err);
   });
-
-  // --- Eager-init universal metrics so series exist from first export cycle ---
-  initHeartbeatMetrics();
-  initSessionMetrics();
-  initErrorMetrics();
-  initRateLimitMetrics();
-  initHttpClientMetrics();
-  initHandlerMetrics();
 
   // --- Process-level observable gauges (registered once after OTEL init) ---
   if (typeof process !== 'undefined' && typeof process.memoryUsage === 'function') {

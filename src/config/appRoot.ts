@@ -9,7 +9,11 @@
 import { existsSync, readFileSync, realpathSync, statSync } from 'node:fs';
 import { dirname, resolve, sep } from 'node:path';
 
+import frameworkPackageJson from '../../package.json' with { type: 'json' };
 import { runtimeCaps } from '../utils/internal/runtime.js';
+
+/** Manifest fields that list what a package needs installed to run. */
+const RUNTIME_DEPENDENCY_FIELDS = ['dependencies', 'optionalDependencies', 'peerDependencies'];
 
 /** The subset of `package.json` fields that feed server identity. */
 export type PackageManifest = {
@@ -95,6 +99,23 @@ function declaresWorkspace(dir: string): boolean {
   return readPackageJson(dir)?.workspaces !== undefined;
 }
 
+/**
+ * True when `dir`'s manifest declares this framework as a runtime dependency.
+ * A package that runs the framework is a server, so it is the application
+ * wherever it is installed. `devDependencies` do not count: they are never
+ * installed for a dependency, so a package listing the framework only there
+ * never runs it as an installed entry.
+ */
+function runsFramework(dir: string): boolean {
+  const manifest = readPackageJson(dir);
+  return RUNTIME_DEPENDENCY_FIELDS.some((field) => {
+    const deps = manifest?.[field];
+    return (
+      typeof deps === 'object' && deps !== null && Object.hasOwn(deps, frameworkPackageJson.name)
+    );
+  });
+}
+
 /** True when `ancestor` strictly contains `dir`. */
 function contains(ancestor: string, dir: string): boolean {
   return dir.startsWith(ancestor.endsWith(sep) ? ancestor : `${ancestor}${sep}`);
@@ -142,7 +163,10 @@ function entryDirectory(): string | undefined {
  *    test runner spawning the process is the common case, and a dependency's
  *    manifest is never the application's identity. The workspace declaration is
  *    what keeps a cache prefix or a plain project root, both equally ancestors of
- *    the working directory, from claiming an installed package's identity.
+ *    the working directory, from claiming an installed package's identity. A
+ *    package declaring this framework in `dependencies`, `optionalDependencies`,
+ *    or `peerDependencies` is not a tool but an installed server, and keeps rule
+ *    1 from every working directory, the installing project's root included.
  * 3. The nearest `package.json` at or above `process.cwd()`, when there is no
  *    entry module to anchor on (`node -e`, an embedded host).
  */
@@ -155,7 +179,12 @@ function computeAppRoot(): AppRoot | undefined {
   if (!fromEntry) return cwd ? findManifestUpward(cwd) : undefined;
 
   const owner = nodeModulesOwner(fromEntry.dir);
-  if (cwd && owner && (owner === cwd || (contains(owner, cwd) && declaresWorkspace(owner)))) {
+  if (
+    cwd &&
+    owner &&
+    (owner === cwd || (contains(owner, cwd) && declaresWorkspace(owner))) &&
+    !runsFramework(fromEntry.dir)
+  ) {
     const fromCwd = findManifestUpward(cwd);
     if (fromCwd) return fromCwd;
   }

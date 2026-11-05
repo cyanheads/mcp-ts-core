@@ -4,7 +4,7 @@ description: >
   API reference for all utilities exported from `@cyanheads/mcp-ts-core/utils`. Use when looking up utility method signatures, options, peer dependencies, or usage patterns.
 metadata:
   author: cyanheads
-  version: "2.20"
+  version: "2.21"
   audience: external
   type: reference
 ---
@@ -149,18 +149,18 @@ Helper API only. For the catalog of what the framework auto-emits (span names, m
 | Export | Signature | Notes |
 |:-------|:----------|:------|
 | `initializeOpenTelemetry` | `() -> Promise<void>` | Idempotent. Initializes `NodeSDK` with OTLP trace + metrics exporters, `TraceIdRatioBasedSampler`, and HTTP instrumentation, and attaches the framework logger's OTLP log sink when `OTEL_EXPORTER_OTLP_LOGS_ENDPOINT` is set. Framework log records carry `traceId`/`spanId` from the request context; `PinoInstrumentation` is registered but patches only a `pino` loaded after the SDK starts, never the framework logger's. No-ops when `OTEL_ENABLED=false` or in Worker/Edge runtimes where `NodeSDK` is unavailable. Safe to call multiple times. |
-| `shutdownOpenTelemetry` | `(timeoutMs?: number) -> Promise<void>` | Gracefully flushes and shuts down the SDK. `timeoutMs` defaults to `5000`. Resets internal state so the next `initializeOpenTelemetry()` call can reinitialize. No-op when SDK was never started. |
+| `shutdownOpenTelemetry` | `(timeoutMs?: number) -> Promise<void>` | Gracefully flushes and shuts down the SDK. `timeoutMs` defaults to `5000`. Once the shutdown settles (flushed, failed, or timed out), releases the `@opentelemetry/api` globals the SDK registered and resets internal state, so the next `initializeOpenTelemetry()` call starts an SDK that registers its own and exports what it records. No-op when SDK was never started. |
 | `sdk` | `NodeSDK \| null` | The live SDK instance, or `null` when telemetry is disabled, in a Worker runtime, or after shutdown. |
 
 ### `telemetry/metrics`
 
 | Export | Signature | Notes |
 |:-------|:----------|:------|
-| `getMeter` | `(name?: string) -> Meter` | Returns an OTel `Meter`. Defaults to service name + version from config. |
-| `createCounter` | `(name: string, description: string, unit?: string) -> Counter` | Monotonically increasing counter. `unit` defaults to `'1'`. |
-| `createUpDownCounter` | `(name: string, description: string, unit?: string) -> UpDownCounter` | Bidirectional counter (active connections, queue depth, etc.). `unit` defaults to `'1'`. |
-| `createHistogram` | `(name: string, description: string, unit?: string) -> Histogram` | Distribution recording (latency, sizes). `unit` optional. |
-| `createObservableGauge` | `(name: string, description: string, callback: () => Promise<number> \| number, unit?: string) -> ObservableGauge` | Polled gauge. `callback` is registered via `addCallback`; invoked on each SDK collection cycle. `unit` optional. For other observable instrument types, use `getMeter()` directly. |
+| `getMeter` | `(name?: string) -> Meter` | Returns an OTel `Meter`. Defaults to service name + version from config. Binds when called: a meter taken before the SDK starts (module scope, `setup()`) stays the API's no-op, so call it after `createApp()` has started telemetry. |
+| `createCounter` | `(name: string, description: string, unit?: string) -> Counter` | Monotonically increasing counter. `unit` defaults to `'1'`. Creating one reads no config and looks up no meter; each `add` resolves the instrument from the current global `MeterProvider`, re-created only when that provider changed, so one created at module scope or in `setup()` exports once the SDK starts (and again after a restart). `attributes` and `context` pass through unchanged. |
+| `createUpDownCounter` | `(name: string, description: string, unit?: string) -> UpDownCounter` | Bidirectional counter (active connections, queue depth, etc.). `unit` defaults to `'1'`. Binds on each `add`, like `createCounter`. |
+| `createHistogram` | `(name: string, description: string, unit?: string) -> Histogram` | Distribution recording (latency, sizes). `unit` optional. Binds on each `record`, like `createCounter`. |
+| `createObservableGauge` | `(name: string, description: string, callback: () => Promise<number> \| number, unit?: string) -> ObservableGauge` | Polled gauge. `callback` is registered via `addCallback`; invoked on each SDK collection cycle. `unit` optional. Binds when called, like `getMeter()`: create it after `createApp()` has started telemetry. For other observable instrument types, use `getMeter()` directly. |
 
 ### `telemetry/trace`
 

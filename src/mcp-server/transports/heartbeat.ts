@@ -57,11 +57,6 @@ function getMetrics() {
   return { heartbeatFailures };
 }
 
-/** Eagerly create metric series so they exist from the first export cycle. */
-export function initHeartbeatMetrics(): void {
-  getMetrics();
-}
-
 // ---------------------------------------------------------------------------
 // HeartbeatMonitor
 // ---------------------------------------------------------------------------

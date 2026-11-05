@@ -98,14 +98,6 @@ function getToolMetrics() {
   };
 }
 
-/** Eagerly creates tool, resource, and prompt metric instruments so series exist from startup. */
-export function initHandlerMetrics(): void {
-  getToolMetrics();
-  getResourceMetrics();
-  getPromptMetrics();
-  getActiveRequestsGauge();
-}
-
 function getActiveRequestsGauge() {
   activeRequests ??= createUpDownCounter(
     'mcp.requests.active',

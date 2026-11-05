@@ -79,18 +79,27 @@ describe('HeartbeatMonitor', () => {
     vi.useRealTimers();
   });
 
-  it('eagerly initializes the heartbeat failure metric once', async () => {
-    const { initHeartbeatMetrics } = await import('@/mcp-server/transports/heartbeat.js');
+  it('creates the heartbeat failure counter once, on the first failed ping', async () => {
+    const { HeartbeatMonitor } = await import('@/mcp-server/transports/heartbeat.js');
+    const monitor = new HeartbeatMonitor({
+      intervalMs: 10,
+      missThreshold: 5,
+      onDead: vi.fn(),
+      sendPing: vi.fn().mockRejectedValue(new Error('down')),
+      transport: 'stdio',
+    });
+    expect(mockCreateCounter).not.toHaveBeenCalled();
 
-    initHeartbeatMetrics();
-    initHeartbeatMetrics();
+    monitor.start();
+    await vi.advanceTimersByTimeAsync(30);
+    monitor.stop();
 
-    expect(mockCreateCounter).toHaveBeenCalledTimes(1);
-    expect(mockCreateCounter).toHaveBeenCalledWith(
+    expect(mockCreateCounter).toHaveBeenCalledExactlyOnceWith(
       'mcp.heartbeat.failures',
       'Heartbeat ping failures',
       '{failures}',
     );
+    expect(mockCounterAdd).toHaveBeenCalledTimes(3);
   });
 
   it('does not start when heartbeat is disabled', async () => {

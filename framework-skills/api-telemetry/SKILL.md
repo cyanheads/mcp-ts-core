@@ -4,7 +4,7 @@ description: >
   Catalog of OpenTelemetry instrumentation built into framework `@cyanheads/mcp-ts-core` — spans, metrics, completion logs, env config, runtime caveats, custom instrumentation patterns, and cardinality rules. Use when enabling OTel export, adding custom spans or metrics in services, debugging missing telemetry, looking up attribute names, or deciding what's safe to put on a metric attribute vs. a span.
 metadata:
   author: cyanheads
-  version: "1.23"
+  version: "1.24"
   audience: external
   type: reference
 ---
@@ -27,7 +27,7 @@ OTel is **off by default**. `OTEL_ENABLED=true` alone does nothing — you also 
 
 | Env var | Default | Purpose |
 |:--------|:--------|:--------|
-| `OTEL_ENABLED` | `false` | Master switch. Must be `true` to start the SDK. |
+| `OTEL_ENABLED` | `false` | Master switch. Must be `true` to start the SDK. Leave it off in a process that registers its own OpenTelemetry SDK: the framework's cannot register over that one, and shutting the framework's down releases the API's global registrations, the host's included. |
 | `OTEL_EXPORTER_OTLP_ENDPOINT` | — | OTLP/HTTP base URL (e.g. `http://localhost:4318`). Traces go to `<base>/v1/traces`, metrics to `<base>/v1/metrics`; a path prefix is kept. |
 | `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` | — | OTLP/HTTP traces endpoint (e.g. `http://localhost:4318/v1/traces`). Overrides the base for traces; used as-is. |
 | `OTEL_EXPORTER_OTLP_METRICS_ENDPOINT` | — | OTLP/HTTP metrics endpoint (e.g. `http://localhost:4318/v1/metrics`). Overrides the base for metrics; used as-is. |
@@ -123,7 +123,7 @@ Trace context propagates across boundaries via W3C `traceparent` headers. See `a
 
 ## Metrics
 
-All custom metrics are namespaced `mcp.*` (or `process.*` / `http.client.*` where standard semconv applies). Lazy-initialized on first emission; tool, resource, prompt, `http.client.request.duration`, heartbeat, session, auth, rate-limit, and error metrics are eagerly created at startup so series exist from the first export cycle. LLM, speech, graph, and storage instruments are lazy-initialized on first use.
+All custom metrics are namespaced `mcp.*` (or `process.*` / `http.client.*` where standard semconv applies). Counters and histograms are created on first use, and the SDK exports a series only once a value has been recorded on it: a path a server never takes (a rate-limit rejection, a heartbeat failure, an LLM call) has no series, not a zero one. The observable gauges (`process.*`, `mcp.sessions.active`) report from the first export cycle.
 
 ### Tools, resources, prompts
 
@@ -305,6 +305,8 @@ export async function doWork() {
   }, { 'myservice.region': 'us-west' });
 }
 ```
+
+`createCounter`, `createUpDownCounter`, and `createHistogram` resolve their instrument from the running SDK each time they record, so module scope and `setup()` — both of which run before `createApp()` starts telemetry — are safe places to create them. `getMeter()` and `createObservableGauge()` bind when called: one called before the SDK starts stays a no-op, so call them after `createApp()` returns or lazily on first use.
 
 Span context propagates automatically — `withSpan` calls inside a `tool_execution:*` span appear as children. `runInContext(ctx, fn)` re-establishes the span `ctx` names as the active one across async boundaries (`setTimeout`, `queueMicrotask`), so spans opened inside `fn` parent to the request's span.
 

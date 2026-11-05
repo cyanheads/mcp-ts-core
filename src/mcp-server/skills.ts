@@ -43,9 +43,10 @@ export interface ServedSkills {
 
 /**
  * Loads a skill catalog for serving: a folder of skill folders, resolved against
- * the application root when relative (`process.cwd()`, which for an `npx` stdio
- * launch is the client's project, only when no application root is found — the
- * `LOGS_DIR` rule), or a record of paths to contents.
+ * the application root when relative — the server's own package from any
+ * working directory, the installing project's root included, and
+ * `process.cwd()` only when no application root is found (the `LOGS_DIR`
+ * rule) — or a record of paths to contents.
  *
  * Non-strict: a skill the SDK rejects is skipped and reported through
  * `onWarning`, so a validation rule tightened in a floating SDK minor drops

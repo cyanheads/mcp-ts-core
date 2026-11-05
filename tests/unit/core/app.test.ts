@@ -11,12 +11,6 @@ const {
   mockCreateMcpServerInstance,
   mockCreateObservableGauge,
   mockCreateStorageProvider,
-  mockInitErrorMetrics,
-  mockInitHandlerMetrics,
-  mockInitHeartbeatMetrics,
-  mockInitHttpClientMetrics,
-  mockInitRateLimitMetrics,
-  mockInitSessionMetrics,
   mockInitializeOpenTelemetry,
   mockLogger,
   mockObserveStdinEof,
@@ -136,12 +130,6 @@ const {
 
   const mockCreateMcpServerInstance = vi.fn(async () => ({ server: 'mcp-server' }));
 
-  const mockInitHeartbeatMetrics = vi.fn();
-  const mockInitSessionMetrics = vi.fn();
-  const mockInitErrorMetrics = vi.fn();
-  const mockInitRateLimitMetrics = vi.fn();
-  const mockInitHttpClientMetrics = vi.fn();
-  const mockInitHandlerMetrics = vi.fn();
   const mockInitializeOpenTelemetry = vi.fn(async () => {});
   const mockShutdownOpenTelemetry = vi.fn(async () => {});
   const mockCreateObservableGauge = vi.fn();
@@ -201,12 +189,6 @@ const {
     mockCreateMcpServerInstance,
     mockCreateObservableGauge,
     mockCreateStorageProvider,
-    mockInitErrorMetrics,
-    mockInitHandlerMetrics,
-    mockInitHeartbeatMetrics,
-    mockInitHttpClientMetrics,
-    mockInitRateLimitMetrics,
-    mockInitSessionMetrics,
     mockInitializeOpenTelemetry,
     mockLogger,
     mockObserveStdinEof,
@@ -255,14 +237,6 @@ vi.mock('@/mcp-server/tools/tool-registration.js', () => ({
   ToolRegistry: MockToolRegistry,
 }));
 
-vi.mock('@/mcp-server/transports/heartbeat.js', () => ({
-  initHeartbeatMetrics: mockInitHeartbeatMetrics,
-}));
-
-vi.mock('@/mcp-server/transports/http/sessionStore.js', () => ({
-  initSessionMetrics: mockInitSessionMetrics,
-}));
-
 vi.mock('@/mcp-server/transports/manager.js', () => ({
   TransportManager: MockTransportManager,
 }));
@@ -291,16 +265,8 @@ vi.mock('@/storage/core/storageFactory.js', () => ({
   createStorageProvider: mockCreateStorageProvider,
 }));
 
-vi.mock('@/utils/internal/error-handler/errorHandler.js', () => ({
-  initErrorMetrics: mockInitErrorMetrics,
-}));
-
 vi.mock('@/utils/internal/logger.js', () => ({
   logger: mockLogger,
-}));
-
-vi.mock('@/utils/internal/performance.js', () => ({
-  initHandlerMetrics: mockInitHandlerMetrics,
 }));
 
 vi.mock('@/utils/internal/requestContext.js', () => ({
@@ -327,17 +293,12 @@ vi.mock('@/utils/internal/requestContext.js', () => ({
   requestContextService: mockRequestContextService,
 }));
 
-vi.mock('@/utils/network/fetchWithTimeout.js', () => ({
-  initHttpClientMetrics: mockInitHttpClientMetrics,
-}));
-
 vi.mock('@/utils/scheduling/scheduler.js', () => ({
   schedulerService: mockSchedulerService,
 }));
 
 vi.mock('@/utils/security/rateLimiter.js', () => ({
   RateLimiter: MockRateLimiter,
-  initRateLimitMetrics: mockInitRateLimitMetrics,
 }));
 
 vi.mock('@/utils/telemetry/instrumentation.js', () => ({
@@ -590,12 +551,6 @@ describe('core/app', () => {
     expect(process.env.NO_COLOR).toBe('1');
     expect(process.env.FORCE_COLOR).toBe('0');
     expect(mockInitializeOpenTelemetry).toHaveBeenCalledTimes(1);
-    expect(mockInitHeartbeatMetrics).toHaveBeenCalledTimes(1);
-    expect(mockInitSessionMetrics).toHaveBeenCalledTimes(1);
-    expect(mockInitErrorMetrics).toHaveBeenCalledTimes(1);
-    expect(mockInitRateLimitMetrics).toHaveBeenCalledTimes(1);
-    expect(mockInitHttpClientMetrics).toHaveBeenCalledTimes(1);
-    expect(mockInitHandlerMetrics).toHaveBeenCalledTimes(1);
     expect(mockLogger.initialize).toHaveBeenCalledWith('debug', 'stdio');
     expect(MockTransportManager).toHaveBeenCalledWith(
       mockConfig,
