@@ -18,12 +18,14 @@
 
 import { spawnSync } from 'node:child_process';
 import {
+  copyFileSync,
   existsSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
   rmSync,
   symlinkSync,
+  unlinkSync,
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -35,6 +37,7 @@ import {
   BUILD_ONLY_ENTRY as CLEAN_BUILD_ONLY_ENTRY,
   NATIVE_BINDING_ENTRY as CLEAN_NATIVE_BINDING_ENTRY,
   NODE_GYP_OUTPUT as CLEAN_NODE_GYP_OUTPUT,
+  filterAgentDocEntries as cleanFilterAgentDocEntries,
   filterBuildOnlyEntries as cleanFilterBuildOnlyEntries,
   filterNodeGypBuildEntries as cleanFilterNodeGypBuildEntries,
 } from '../../../scripts/clean-mcpb.js';
@@ -356,6 +359,7 @@ describe('lint-packaging · bundle-content guard (checks 5–7)', () => {
       expect(strippedPaths(errors)).toEqual([
         'node_modules/@opentelemetry/api/dist/',
         'node_modules/@opentelemetry/semantic-conventions/build/src/',
+        'node_modules/@opentelemetry/semantic-conventions/dist/',
         'node_modules/@modelcontextprotocol/server/dist/',
         'node_modules/@cyanheads/mcp-ts-core/dist/',
       ]);
@@ -365,6 +369,7 @@ describe('lint-packaging · bundle-content guard (checks 5–7)', () => {
       const errors = await checkBundleContent(`${template}dist/\n`);
       expect(strippedPaths(errors)).toEqual([
         'node_modules/@opentelemetry/api/dist/',
+        'node_modules/@opentelemetry/semantic-conventions/dist/',
         'node_modules/@modelcontextprotocol/server/dist/',
         'node_modules/@cyanheads/mcp-ts-core/dist/',
         'dist/index.js',
@@ -379,16 +384,29 @@ describe('lint-packaging · bundle-content guard (checks 5–7)', () => {
       ]);
     });
 
-    it('samples dependency paths that exist in a current install', () => {
+    it('samples, for each dependency, a runtime path that exists in a current install', () => {
       // This repository is @cyanheads/mcp-ts-core, so its own dist/ is not under node_modules/.
-      const dependencyPaths = CRITICAL_RUNTIME_PATHS.filter(
-        (path) =>
-          path.startsWith('node_modules/') &&
-          !path.startsWith('node_modules/@cyanheads/mcp-ts-core/'),
-      );
-      expect(dependencyPaths).toHaveLength(3);
-      for (const path of dependencyPaths) {
-        expect(existsSync(join(REPO_ROOT, path)), path).toBe(true);
+      // A dependency whose runtime moved between the versions its range admits keeps one
+      // sampled path per layout; the installed version has one of them.
+      const byPackage = new Map<string, string[]>();
+      for (const path of CRITICAL_RUNTIME_PATHS) {
+        if (!path.startsWith('node_modules/') || path.startsWith('node_modules/@cyanheads/')) {
+          continue;
+        }
+        const segments = path.split('/');
+        const name = segments.slice(1, segments[1]?.startsWith('@') ? 3 : 2).join('/');
+        byPackage.set(name, [...(byPackage.get(name) ?? []), path]);
+      }
+      expect([...byPackage.keys()]).toEqual([
+        '@opentelemetry/api',
+        '@opentelemetry/semantic-conventions',
+        '@modelcontextprotocol/server',
+      ]);
+      for (const [name, paths] of byPackage) {
+        expect(
+          paths.some((path) => existsSync(join(REPO_ROOT, path))),
+          name,
+        ).toBe(true);
       }
     });
   });
@@ -473,6 +491,66 @@ describe('lint-packaging · post-bundle content check (check 8)', () => {
     expect(checkBundleEntries(entries, 'dist/test.mcpb')).toHaveLength(2);
   });
 
+  describe('agent docs at a package root (#794, #820)', () => {
+    /** One bundle listing both scripts' agent-doc selectors run over. */
+    const LISTING = [
+      'manifest.json',
+      'dist/index.js',
+      'skills/repro-guide/SKILL.md',
+      // Runtime modules named skills/ below a package root.
+      'node_modules/@modelcontextprotocol/server/dist/ext/skills/',
+      'node_modules/@modelcontextprotocol/server/dist/ext/skills/index.mjs',
+      'node_modules/@modelcontextprotocol/core/dist/ext/skills/index.mjs',
+      'node_modules/@modelcontextprotocol/client/dist/ext/skills/index.mjs',
+      'node_modules/openai/client.js',
+      'node_modules/openai/resources/skills/skills.js',
+      'node_modules/a/node_modules/@modelcontextprotocol/core/dist/ext/skills/index.mjs',
+      'node_modules/skills/index.js',
+      'node_modules/@scope/skills/index.js',
+      'node_modules/x/docs/AGENTS.md',
+      'node_modules/x/templates/CLAUDE.md',
+      // Agent docs at a package root, and SKILL.md anywhere under node_modules/.
+      'node_modules/@cyanheads/mcp-ts-core/framework-skills/',
+      'node_modules/@cyanheads/mcp-ts-core/framework-skills/add-tool/SKILL.md',
+      'node_modules/@cyanheads/mcp-ts-core/AGENTS.md',
+      'node_modules/@cyanheads/mcp-ts-core/CLAUDE.md',
+      'node_modules/dotenv/skills/dotenv/SKILL.md',
+      'node_modules/resolve/.claude/settings.json',
+      'node_modules/nanoid/.agents/',
+      'node_modules/sonic-boom/AGENTS.md',
+      'node_modules/@supabase/auth-js/AGENTS.md',
+      'node_modules/a/node_modules/b/CLAUDE.md',
+      'node_modules/a/node_modules/@s/b/skills/x/SKILL.md',
+      'node_modules/x/docs/SKILL.md',
+    ];
+
+    const AGENT_DOCS = LISTING.slice(
+      LISTING.indexOf('node_modules/@cyanheads/mcp-ts-core/framework-skills/'),
+    );
+
+    it('selects the same entries through both scripts', () => {
+      expect(LISTING.filter((entry) => AGENT_DOC_ENTRY.test(entry))).toEqual(AGENT_DOCS);
+      expect(cleanFilterAgentDocEntries(LISTING)).toEqual(AGENT_DOCS);
+    });
+
+    it('fails an uncleaned listing with one agent-doc error naming the count and a sample', () => {
+      const errors = checkBundleEntries(LISTING, 'dist/test.mcpb');
+      expect(errors).toHaveLength(1);
+      expect(errors[0]).toContain('dist/test.mcpb contains 12 node_modules agent-doc entries');
+      expect(errors[0]).toContain('\n      node_modules/@cyanheads/mcp-ts-core/framework-skills/');
+      expect(errors[0]).toContain('clean-mcpb.ts');
+    });
+
+    it('passes the listing once the agent docs are stripped, runtime skills/ modules included', () => {
+      const cleaned = LISTING.filter((entry) => !AGENT_DOCS.includes(entry));
+      expect(checkBundleEntries(cleaned, 'dist/test.mcpb')).toEqual([]);
+      expect(cleaned).toContain(
+        'node_modules/@modelcontextprotocol/server/dist/ext/skills/index.mjs',
+      );
+      expect(cleaned).toContain('node_modules/openai/resources/skills/skills.js');
+    });
+  });
+
   describe('node-gyp build output (#783) and build-only package files (#791)', () => {
     /** One bundle listing both scripts' selectors run over: the stripped classes and their runtime neighbours. */
     const LISTING = [
@@ -525,7 +603,8 @@ describe('lint-packaging · post-bundle content check (check 8)', () => {
       'node_modules/@opentelemetry/semantic-conventions/build/src/index.js',
       'node_modules/pino/build/sync-version.js',
       'node_modules/other/build/Makefile',
-      // mcp-ts-core: build-only files beside the runtime dist/ and package.json.
+      // mcp-ts-core: build-only files beside the runtime dist/ and package.json. Its
+      // root CLAUDE.md and AGENTS.md are agent docs, never build-only (#820).
       'node_modules/@cyanheads/mcp-ts-core/package.json',
       'node_modules/@cyanheads/mcp-ts-core/README.md',
       'node_modules/@cyanheads/mcp-ts-core/dist/core/index.js',
@@ -541,7 +620,7 @@ describe('lint-packaging · post-bundle content check (check 8)', () => {
       'node_modules/@cyanheads/mcp-ts-core/templates/CLAUDE.md',
       'node_modules/@cyanheads/mcp-ts-core/templates/src/index.ts',
       // The same names elsewhere ship.
-      'node_modules/other/CLAUDE.md',
+      'node_modules/other/docs/CLAUDE.md',
       'node_modules/other/scripts/postinstall.js',
       'node_modules/other/src/index.js',
       'node_modules/other/biome.json',
@@ -552,7 +631,14 @@ describe('lint-packaging · post-bundle content check (check 8)', () => {
       'node_modules/better-sqlite3-extra/src/index.js',
       // A nested install of either package is selected the same way.
       'node_modules/a/node_modules/@cyanheads/mcp-ts-core/CLAUDE.md',
+      'node_modules/a/node_modules/@cyanheads/mcp-ts-core/biome.json',
       'node_modules/a/node_modules/better-sqlite3/deps/sqlite3/sqlite3.h',
+    ];
+
+    const AGENT_DOCS = [
+      'node_modules/@cyanheads/mcp-ts-core/CLAUDE.md',
+      'node_modules/@cyanheads/mcp-ts-core/AGENTS.md',
+      'node_modules/a/node_modules/@cyanheads/mcp-ts-core/CLAUDE.md',
     ];
 
     const NODE_GYP = [
@@ -585,8 +671,6 @@ describe('lint-packaging · post-bundle content check (check 8)', () => {
       'node_modules/better-sqlite3/deps/',
       'node_modules/better-sqlite3/deps/sqlite3/sqlite3.c',
       'node_modules/better-sqlite3/src/better_sqlite3.cpp',
-      'node_modules/@cyanheads/mcp-ts-core/CLAUDE.md',
-      'node_modules/@cyanheads/mcp-ts-core/AGENTS.md',
       'node_modules/@cyanheads/mcp-ts-core/biome.json',
       'node_modules/@cyanheads/mcp-ts-core/vitest.config.base.mjs',
       'node_modules/@cyanheads/mcp-ts-core/config/',
@@ -595,7 +679,7 @@ describe('lint-packaging · post-bundle content check (check 8)', () => {
       'node_modules/@cyanheads/mcp-ts-core/scripts/devcheck.ts',
       'node_modules/@cyanheads/mcp-ts-core/templates/CLAUDE.md',
       'node_modules/@cyanheads/mcp-ts-core/templates/src/index.ts',
-      'node_modules/a/node_modules/@cyanheads/mcp-ts-core/CLAUDE.md',
+      'node_modules/a/node_modules/@cyanheads/mcp-ts-core/biome.json',
       'node_modules/a/node_modules/better-sqlite3/deps/sqlite3/sqlite3.h',
     ];
 
@@ -613,19 +697,27 @@ describe('lint-packaging · post-bundle content check (check 8)', () => {
       expect(cleanFilterBuildOnlyEntries(LISTING)).toEqual(BUILD_ONLY);
     });
 
-    it('fails an uncleaned listing with one error per class, naming the count and a sample', () => {
-      const errors = checkBundleEntries(LISTING, 'dist/test.mcpb');
-      expect(errors).toHaveLength(2);
-      expect(errors[0]).toContain('dist/test.mcpb contains 23 node-gyp build entries');
-      expect(errors[0]).toContain('\n      node_modules/better-sqlite3/build/Makefile');
-      expect(errors[0]).toContain('clean-mcpb.ts');
-      expect(errors[1]).toContain('dist/test.mcpb contains 15 build-only package entries');
-      expect(errors[1]).toContain('\n      node_modules/better-sqlite3/deps/');
-      expect(errors[1]).toContain('clean-mcpb.ts');
+    it('puts each entry in one class: the agent-doc selector takes the root agent files', () => {
+      expect(LISTING.filter((entry) => AGENT_DOC_ENTRY.test(entry))).toEqual(AGENT_DOCS);
+      expect(cleanFilterAgentDocEntries(LISTING)).toEqual(AGENT_DOCS);
+      expect(AGENT_DOCS.filter((entry) => BUILD_ONLY_ENTRY.test(entry))).toEqual([]);
     });
 
-    it('passes the listing once both classes are stripped', () => {
-      const stripped = new Set([...NODE_GYP, ...BUILD_ONLY]);
+    it('fails an uncleaned listing with one error per class, naming the count and a sample', () => {
+      const errors = checkBundleEntries(LISTING, 'dist/test.mcpb');
+      expect(errors).toHaveLength(3);
+      expect(errors[0]).toContain('dist/test.mcpb contains 3 node_modules agent-doc entries');
+      expect(errors[0]).toContain('\n      node_modules/@cyanheads/mcp-ts-core/CLAUDE.md');
+      expect(errors[1]).toContain('dist/test.mcpb contains 23 node-gyp build entries');
+      expect(errors[1]).toContain('\n      node_modules/better-sqlite3/build/Makefile');
+      expect(errors[1]).toContain('clean-mcpb.ts');
+      expect(errors[2]).toContain('dist/test.mcpb contains 13 build-only package entries');
+      expect(errors[2]).toContain('\n      node_modules/better-sqlite3/deps/');
+      expect(errors[2]).toContain('clean-mcpb.ts');
+    });
+
+    it('passes the listing once every class is stripped', () => {
+      const stripped = new Set([...AGENT_DOCS, ...NODE_GYP, ...BUILD_ONLY]);
       const cleaned = LISTING.filter((entry) => !stripped.has(entry));
       expect(checkBundleEntries(cleaned, 'dist/test.mcpb')).toEqual([]);
       expect(cleaned).toContain('node_modules/better-sqlite3/build/Release/better_sqlite3.node');
@@ -2587,6 +2679,36 @@ describe('lint-packaging · published skills (check 17, #429)', () => {
         'skills/foo/SKILL.md: frontmatter name "bar" must match the last path segment "foo"',
       );
       expect(code).toBe(1);
+    });
+
+    it('validates through the source when the package self-reference does not resolve (#797)', () => {
+      // A copy of the script beside links to this repository's src/ and node_modules/,
+      // outside any package that exports `@cyanheads/mcp-ts-core/linter`: check 17
+      // reaches `validateSkillTree` only through the source fallback, built or not.
+      const framework = mkdtempSync(join(tmpdir(), 'lint-packaging-framework-'));
+      mkdirSync(join(framework, 'scripts'));
+      copyFileSync(SCRIPT, join(framework, 'scripts/lint-packaging.ts'));
+      symlinkSync(join(REPO_ROOT, 'src'), join(framework, 'src'), 'dir');
+      symlinkSync(join(REPO_ROOT, 'node_modules'), join(framework, 'node_modules'), 'dir');
+      try {
+        const cwd = project({
+          'package.json': '{"name":"probe-mcp-server","version":"0.1.0"}',
+          'skills/foo/SKILL.md': conformant('bar'),
+        });
+        const result = spawnSync('bun', ['run', join(framework, 'scripts/lint-packaging.ts')], {
+          cwd,
+          encoding: 'utf8',
+        });
+        expect(`${result.stdout}${result.stderr}`).toContain(
+          'skills/foo/SKILL.md: frontmatter name "bar" must match the last path segment "foo"',
+        );
+        expect(result.status).toBe(1);
+      } finally {
+        // Drop the links first so the recursive remove can never reach the repo.
+        unlinkSync(join(framework, 'src'));
+        unlinkSync(join(framework, 'node_modules'));
+        rmSync(framework, { recursive: true, force: true });
+      }
     });
   });
 });

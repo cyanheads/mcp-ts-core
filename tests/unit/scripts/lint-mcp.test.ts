@@ -16,7 +16,15 @@
  */
 
 import { spawnSync } from 'node:child_process';
-import { mkdirSync, mkdtempSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs';
+import {
+  copyFileSync,
+  mkdirSync,
+  mkdtempSync,
+  rmSync,
+  symlinkSync,
+  unlinkSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -535,6 +543,35 @@ describe('lint-mcp · CLI over a project tree', () => {
       expect(run.stderr).toContain(SERVER_JSON_FAILURE);
       expect(run.stderr).toContain(importFailure(`${TOOLS}/peer.tool.ts`));
       expect(run.stderr).toContain('\nFailed: 2 error(s), 0 warning(s).\n');
+    });
+  });
+
+  describe('framework source fallback (#797)', () => {
+    it('lints through the source when the package self-reference does not resolve', () => {
+      // A copy of the script beside a link to this repository's src/, outside any
+      // package that exports `@cyanheads/mcp-ts-core/linter`: the run reaches
+      // `validateDefinitions` only through the source fallback, built or not. The
+      // project's node_modules link above the copy resolves its bare imports and
+      // never holds the package itself.
+      const framework = join(root, 'framework');
+      mkdirSync(join(framework, 'scripts'), { recursive: true });
+      copyFileSync(SCRIPT, join(framework, 'scripts/lint-mcp.ts'));
+      symlinkSync(join(REPO_ROOT, 'src'), join(framework, 'src'), 'dir');
+      try {
+        const cwd = project({ [`${TOOLS}/echo.tool.ts`]: CLEAN_TOOL });
+        const result = spawnSync('bun', ['run', join(framework, 'scripts/lint-mcp.ts')], {
+          cwd,
+          encoding: 'utf-8',
+        });
+        expect(result.stderr).toBe('');
+        expect(result.stdout).toBe(
+          'Linting 1 tool(s), 0 resource(s), 0 prompt(s) from 1 file(s)...\n\nAll definitions valid.\n',
+        );
+        expect(result.status).toBe(0);
+      } finally {
+        // Drop the link first so the recursive remove can never reach the repo's src/.
+        unlinkSync(join(framework, 'src'));
+      }
     });
   });
 });

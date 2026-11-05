@@ -1076,6 +1076,17 @@ async function verifyScaffoldDevcheck(
   }
 }
 
+/**
+ * A scaffold test-tree module whose one export is a type query over each
+ * `scripts/*.ts` the package ships, as `init` copies them into `scripts/`.
+ */
+function shippedScriptsProbeSource(pkg: PackageJson): string {
+  const queries = pkg.files
+    .filter((entry) => entry.startsWith('scripts/') && entry.endsWith('.ts'))
+    .map((entry) => `  typeof import('../${entry.slice(0, -'.ts'.length)}.js'),`);
+  return ['export type ShippedScripts = [', ...queries, '];', ''].join('\n');
+}
+
 async function verifyCli(
   consumerDir: string,
   installedPackageDir: string,
@@ -1146,9 +1157,16 @@ async function verifyCli(
   );
   assertSuccess(install, 'installed CLI scaffold install');
 
+  // A server's typecheck reaches a copied script as soon as one of its tests
+  // imports it, so a probe pulls every shipped script into the scaffold's own
+  // program for this run (#797), then goes before the steps below read the
+  // scaffold as `init` wrote it.
+  const probe = join(projectDir, 'tests', 'shipped-scripts.typecheck.ts');
+  await writeFile(probe, shippedScriptsProbeSource(pkg));
   const tsc = join(projectDir, 'node_modules', 'typescript', 'bin', 'tsc');
   const typecheck = await run(tsc, ['--project', 'tsconfig.json', '--pretty', 'false'], projectDir);
-  assertSuccess(typecheck, 'installed CLI scaffold typecheck (src + tests)');
+  await rm(probe);
+  assertSuccess(typecheck, 'installed CLI scaffold typecheck (src + tests + shipped scripts)');
   // The scaffold sets `tsBuildInfoFile` and inherits `incremental` from the
   // shipped base; without it, tsc exits 0 and silently writes no build info.
   await access(join(projectDir, '.tsbuildinfo'), constants.R_OK);
