@@ -1,9 +1,9 @@
 /**
  * @fileoverview Tests for the `.husky/pre-commit` hook (issue #543). The hook
- * must pass only flags devcheck recognizes and run Biome read-only: an unknown
- * flag is ignored with a warning, leaving devcheck in auto-fix mode, where
- * `biome check --write` rewrites the working tree after the index was staged
- * and the commit records the unfixed content.
+ * must pass only flags devcheck recognizes and run Biome read-only: devcheck
+ * rejects an unknown flag before any check runs (#691), and a hook that ran
+ * Biome without `--no-fix` would let `biome check --write` rewrite the working
+ * tree after the index was staged, so the commit records the unfixed content.
  *
  * Faithful reproduction: a throwaway git repository with this repo's hook as
  * its hooks directory, `devcheck.ts` copied under `scripts/` (it resolves its
@@ -103,7 +103,9 @@ describe('.husky/pre-commit (#543)', { timeout: 30_000 }, () => {
       cwd: dir,
       encoding: 'utf-8',
     });
-    expect(`${help.stdout}${help.stderr}`).not.toContain('Unknown flag');
+    expect(help.stderr).toBe('');
+    expect(help.stdout).toContain('Usage:');
+    expect(help.status).toBe(0);
   });
 
   it('fails a commit that stages a Biome-fixable file and leaves the working tree untouched', () => {
@@ -112,7 +114,7 @@ describe('.husky/pre-commit (#543)', { timeout: 30_000 }, () => {
 
     const commit = git(dir, ['commit', '-m', 'fixable']);
 
-    expect(commit.out).not.toContain('Unknown flag');
+    expect(commit.out).not.toContain('Unknown option');
     expect(commit.out).not.toContain('biome check --write');
     expect(biomeResult(commit.out)).toContain('FAILED');
     expect(commit.code).not.toBe(0);
@@ -126,7 +128,7 @@ describe('.husky/pre-commit (#543)', { timeout: 30_000 }, () => {
 
     const commit = git(dir, ['commit', '-m', 'clean']);
 
-    expect(commit.out).not.toContain('Unknown flag');
+    expect(commit.out).not.toContain('Unknown option');
     expect(biomeResult(commit.out)).toContain('PASSED');
     expect(readFileSync(resolve(dir, 'src/index.ts'), 'utf-8')).toBe(CLEAN);
   });
