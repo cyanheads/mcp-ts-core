@@ -28,6 +28,7 @@ import type {
   SyncPage,
   SyncState,
 } from '@/services/mirror/types.js';
+import { JsonRpcErrorCode, McpError } from '@/types-global/errors.js';
 
 /** A sync generator that yields nothing — a stand-in when a test doesn't care about sync itself. */
 const emptySync: SyncGenerator = async function* (): AsyncGenerator<SyncPage> {};
@@ -246,7 +247,17 @@ describe('defineMirror — runSync() option wiring', () => {
 
     const firstRun = mirror.runSync({ mode: 'refresh' });
     await entered.promise;
-    await expect(mirror.runSync({ mode: 'refresh' })).rejects.toThrow(/already in progress/);
+    const overlap = await mirror.runSync({ mode: 'refresh' }).catch((err: unknown) => err);
+    expect(overlap).toBeInstanceOf(McpError);
+    expect(overlap).toMatchObject({
+      code: JsonRpcErrorCode.Conflict,
+      message: 'Mirror "scheduled-mirror" sync is already in progress.',
+    });
+    // The same reason the cross-process lease rejects with, so one catch covers both.
+    expect((overlap as McpError).data).toEqual({
+      mirror: 'scheduled-mirror',
+      reason: 'sync_locked',
+    });
     expect(generatorRuns).toBe(1);
 
     release.resolve();
@@ -335,6 +346,35 @@ describe('defineMirror — error surfacing', () => {
         sync: emptySync,
       }),
     ).toThrow(/primaryKey/);
+  });
+
+  it.each([0, -1, 1.5, Number.NaN, Number.POSITIVE_INFINITY])(
+    'rejects syncLeaseTtlMs %s at construction with a ConfigurationError',
+    (syncLeaseTtlMs) => {
+      expect(() =>
+        defineMirror({
+          name: 'ttl-mirror',
+          store: makeFakeStore(),
+          sync: emptySync,
+          syncLeaseTtlMs,
+        }),
+      ).toThrow(
+        expect.objectContaining({
+          code: JsonRpcErrorCode.ConfigurationError,
+          message: 'Mirror "ttl-mirror" syncLeaseTtlMs must be a positive integer of milliseconds.',
+        }),
+      );
+    },
+  );
+
+  it('accepts a positive integer syncLeaseTtlMs on a store without a sync lease', async () => {
+    const mirror = defineMirror({
+      name: 'm',
+      store: makeFakeStore(),
+      sync: emptySync,
+      syncLeaseTtlMs: 1,
+    });
+    await expect(mirror.runSync({ mode: 'init' })).resolves.toMatchObject({ pagesFetched: 0 });
   });
 
   it('leaves the store in an error state with the thrown message recorded after a failed run', async () => {

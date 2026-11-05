@@ -45,6 +45,8 @@ export type {
   RunSyncOptions,
   SyncContext,
   SyncGenerator,
+  SyncLease,
+  SyncLeaseStore,
   SyncMode,
   SyncPage,
   SyncProgress,

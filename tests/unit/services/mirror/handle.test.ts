@@ -401,6 +401,52 @@ describe('openSqliteHandle', () => {
       expect(handle.prepare<{ n: number }>('SELECT COUNT(*) AS n FROM t').get()?.n).toBe(0);
     });
 
+    it("transaction(fn, 'immediate') takes the write lock at BEGIN; a deferred one waits for its first write", async () => {
+      const writer = await open('txn-immediate.db');
+      writer.exec('CREATE TABLE t (id TEXT)');
+      // A second connection that fails at once rather than waiting on a lock.
+      const other = await open('txn-immediate.db', { busyTimeoutMs: 0 });
+      const writeFromOther = (): string => {
+        try {
+          other.prepare('INSERT INTO t (id) VALUES (?)').run('other');
+          return 'written';
+        } catch (err) {
+          return String((err as { code?: unknown }).code);
+        }
+      };
+
+      expect(writer.transaction(writeFromOther, 'immediate')).toBe('SQLITE_BUSY');
+      expect(writer.transaction(writeFromOther)).toBe('written');
+      expect(writer.transaction(writeFromOther, 'deferred')).toBe('written');
+    });
+
+    it("transaction(fn, 'immediate') rolls back on a throw and nests an inner transaction as a savepoint", async () => {
+      const handle = await open('txn-immediate-nested.db');
+      handle.exec('CREATE TABLE t (id TEXT PRIMARY KEY)');
+      const insert = handle.prepare('INSERT INTO t (id) VALUES (?)');
+      const ids = () => handle.prepare<{ id: string }>('SELECT id FROM t ORDER BY id').all();
+
+      handle.transaction(() => {
+        insert.run('outer');
+        handle.transaction(() => insert.run('inner-kept'));
+        expect(() =>
+          handle.transaction(() => {
+            insert.run('inner-undone');
+            throw new Error('inner rollback');
+          }),
+        ).toThrow('inner rollback');
+      }, 'immediate');
+      expect(ids()).toEqual([{ id: 'inner-kept' }, { id: 'outer' }]);
+
+      expect(() =>
+        handle.transaction(() => {
+          insert.run('undone');
+          throw new Error('outer rollback');
+        }, 'immediate'),
+      ).toThrow('outer rollback');
+      expect(ids()).toEqual([{ id: 'inner-kept' }, { id: 'outer' }]);
+    });
+
     it('creates missing parent directories before opening', async () => {
       const nested = join(dir, 'a', 'b', 'c', 'nested.db');
       const handle = await openSqliteHandle(nested);

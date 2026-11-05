@@ -6,7 +6,7 @@
  * @module services/mirror/core/defineMirror
  */
 
-import { conflict } from '@/types-global/errors.js';
+import { configurationError, conflict } from '@/types-global/errors.js';
 import { logger } from '@/utils/internal/logger.js';
 import { requestContextService } from '@/utils/internal/requestContext.js';
 import type {
@@ -43,7 +43,12 @@ export interface Mirror {
   raw(): Promise<SqliteHandle>;
   /** `true` once a full sync has ever completed (queryable even mid-refresh). */
   ready(): Promise<boolean>;
-  /** Run a full (`init`) or incremental (`refresh`) sync. */
+  /**
+   * Run a full (`init`) or incremental (`refresh`) sync. Rejects `Conflict`
+   * with `data.reason: 'sync_locked'` while another run holds the mirror (on
+   * this instance, or in another process or instance on the same store), and
+   * with `'sync_lease_lost'` when another one took this run's lease over.
+   */
   runSync(options: MirrorRunOptions): Promise<SyncResult>;
   /** Current sync status, including the durable `ready` marker. */
   status(): Promise<MirrorStatus>;
@@ -100,8 +105,18 @@ function ctxFrom(meta?: Readonly<Record<string, unknown>>) {
  * ```
  */
 export function defineMirror(definition: MirrorDefinition): Mirror {
-  const { name, store, sync } = definition;
+  const { name, store, sync, syncLeaseTtlMs } = definition;
+  if (
+    syncLeaseTtlMs !== undefined &&
+    !(Number.isSafeInteger(syncLeaseTtlMs) && syncLeaseTtlMs > 0)
+  ) {
+    throw configurationError(
+      `Mirror "${name}" syncLeaseTtlMs must be a positive integer of milliseconds.`,
+      { syncLeaseTtlMs },
+    );
+  }
   const log = definition.logger ?? defaultLogger;
+  // The per-instance fast path; the store's lease, when it has one, covers other instances.
   let syncRunning = false;
 
   return {
@@ -110,7 +125,10 @@ export function defineMirror(definition: MirrorDefinition): Mirror {
 
     async runSync(options: MirrorRunOptions): Promise<SyncResult> {
       if (syncRunning) {
-        throw conflict(`Mirror "${name}" sync is already in progress.`, { mirror: name });
+        throw conflict(`Mirror "${name}" sync is already in progress.`, {
+          mirror: name,
+          reason: 'sync_locked',
+        });
       }
 
       syncRunning = true;
@@ -120,7 +138,12 @@ export function defineMirror(definition: MirrorDefinition): Mirror {
           mode: options.mode,
           ...(options.onProgress && { onProgress: options.onProgress }),
         };
-        return await runSyncCore(store, sync, { log, signal }, runOptions);
+        return await runSyncCore(
+          store,
+          sync,
+          { log, signal, ...(syncLeaseTtlMs !== undefined && { syncLeaseTtlMs }) },
+          runOptions,
+        );
       } finally {
         syncRunning = false;
       }

@@ -34,7 +34,14 @@ export interface SqliteHandle {
   close(): void;
   exec(sql: string): void;
   prepare<TRow = unknown>(sql: string): SqliteStatement<TRow>;
-  transaction<T>(fn: () => T): T;
+  /**
+   * Run `fn` in a transaction: committed when it returns, rolled back when it
+   * throws. `'deferred'` (the default) takes the write lock at its first
+   * write; `'immediate'` takes it at `BEGIN`, waiting up to `busy_timeout` for
+   * another connection's, so a read inside `fn` cannot go stale before `fn`
+   * writes. Called inside another transaction, it runs as a savepoint of it.
+   */
+  transaction<T>(fn: () => T, mode?: 'deferred' | 'immediate'): T;
 }
 
 /** Options for {@link openSqliteHandle}. */
@@ -76,7 +83,8 @@ interface SqliteDriver {
     get(...p: unknown[]): unknown;
     run(...p: unknown[]): { changes: number; lastInsertRowid: number | bigint };
   };
-  transaction<T>(fn: () => T): () => T;
+  /** Both drivers return a callable that begins `DEFERRED`, with `.immediate()` beginning `IMMEDIATE`. */
+  transaction<T>(fn: () => T): (() => T) & { immediate(): T };
 }
 
 interface BunDatabaseCtor {
@@ -113,7 +121,14 @@ function wrapDriver(db: SqliteDriver, close: () => void): SqliteHandle {
         run: (...params) => stmt.run(...(params as unknown[])),
       };
     },
-    transaction: <T>(fn: () => T): T => db.transaction(fn)(),
+    transaction: <T>(fn: () => T, mode: 'deferred' | 'immediate' = 'deferred'): T => {
+      /**
+       * The driver's own wrapper issues ROLLBACK only while a transaction is
+       * still open, so an error that already ended it is the one that surfaces.
+       */
+      const run = db.transaction(fn);
+      return mode === 'immediate' ? run.immediate() : run();
+    },
   };
 }
 
@@ -186,8 +201,8 @@ async function enableWal(handle: SqliteHandle, deadline: number): Promise<void> 
 }
 
 /** Both drivers name the extended result code on `code`: `SQLITE_BUSY`, `SQLITE_BUSY_RECOVERY`, … */
-function isBusy(err: unknown): boolean {
-  const code = (err as { code?: unknown }).code;
+export function isBusy(err: unknown): boolean {
+  const code = (err as { code?: unknown } | null | undefined)?.code;
   return typeof code === 'string' && code.startsWith('SQLITE_BUSY');
 }
 

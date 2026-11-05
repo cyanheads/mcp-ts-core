@@ -1,9 +1,9 @@
 /**
  * @fileoverview Embedded-SQLite implementation of {@link MirrorStore}. Owns the
- * primary table, optional FTS5 index, the `mirror_sync_state` row, schema
- * versioning + migration runner, generic flat queries, and the raw-handle
- * escape hatch. Lazy-opens on first use (memoized) and is then backed by
- * synchronous driver calls.
+ * primary table, optional FTS5 index, the `mirror_sync_state` row, the
+ * cross-process sync lease (`mirror_sync_lease`), schema versioning + migration
+ * runner, generic flat queries, and the raw-handle escape hatch. Lazy-opens on
+ * first use (memoized) and is then backed by synchronous driver calls.
  * @module services/mirror/sqlite/sqliteMirrorStore
  */
 
@@ -18,9 +18,12 @@ import type {
   QueryOptions,
   QueryResult,
   SqlValue,
+  SyncLease,
+  SyncLeaseStore,
   SyncState,
 } from '../types.js';
 import {
+  isBusy,
   MIRROR_STORE_UNAVAILABLE_HINT,
   type OpenHandleOptions,
   openSqliteHandle,
@@ -137,30 +140,95 @@ export function sqliteMirrorStore(spec: SqliteMirrorStoreSpec): MirrorStore {
     }
   }
 
+  /** Upsert `records` and delete `tombstones`. Runs inside the caller's transaction. */
+  function writeBatch(handle: SqliteHandle, records: MirrorRow[], tombstones: string[]): void {
+    if (records.length === 0 && tombstones.length === 0) return;
+    const cols = allColumns;
+    const placeholders = cols.map(() => '?').join(', ');
+    const updates = cols
+      .filter((c) => c !== spec.primaryKey)
+      .map((c) => `${c} = excluded.${c}`)
+      .join(', ');
+    // No non-PK columns → a bare PK table; ON CONFLICT DO NOTHING keeps upsert idempotent.
+    const conflict = updates
+      ? `ON CONFLICT(${spec.primaryKey}) DO UPDATE SET ${updates}`
+      : `ON CONFLICT(${spec.primaryKey}) DO NOTHING`;
+    const upsert = handle.prepare(
+      `INSERT INTO ${spec.table}(${cols.join(', ')}) VALUES (${placeholders}) ${conflict}`,
+    );
+    const remove = handle.prepare(`DELETE FROM ${spec.table} WHERE ${spec.primaryKey} = ?`);
+    for (const record of records) {
+      upsert.run(...cols.map((c) => record[c] ?? null));
+    }
+    for (const id of tombstones) remove.run(id);
+  }
+
+  const syncLease: SyncLeaseStore = {
+    async claim(owner: string, ttlMs: number): Promise<SyncLease | undefined> {
+      try {
+        const { handle } = await open();
+        const now = Date.now();
+        // One statement, so the expiry check and the takeover happen under one write lock.
+        const claimed = handle
+          .prepare<{ generation: number }>(
+            `UPDATE mirror_sync_lease SET owner = ?, generation = generation + 1, expires_at = ?
+             WHERE id = 1 AND (owner IS NULL OR expires_at <= ?)
+             RETURNING generation`,
+          )
+          .get(owner, now + ttlMs, now);
+        // bun:sqlite reports no row as null, better-sqlite3 as undefined.
+        return claimed ? { owner, generation: claimed.generation, ttlMs } : undefined;
+      } catch (err) {
+        /**
+         * A write lock held past `busy_timeout`, met by the claim or by the
+         * open before it, belongs to a connection writing to the store right
+         * now: the store is in use, not unavailable.
+         */
+        if (isBusy(err) || (err instanceof Error && isBusy(err.cause))) return undefined;
+        throw err;
+      }
+    },
+
+    async commit(
+      lease: SyncLease,
+      state: SyncState,
+      records: MirrorRow[] = [],
+      tombstones: string[] = [],
+    ): Promise<boolean> {
+      const { handle } = await open();
+      return handle.transaction(() => {
+        const held = handle
+          .prepare(`SELECT 1 FROM mirror_sync_lease WHERE id = 1 AND owner = ? AND generation = ?`)
+          .get(lease.owner, lease.generation);
+        if (!held) return false;
+        writeBatch(handle, records, tombstones);
+        writeSyncState(handle, state);
+        // Last, so the expiry counts from the commit, however long the page took.
+        return stampLeaseExpiry(handle, lease);
+      }, 'immediate');
+    },
+
+    async release(lease: SyncLease): Promise<void> {
+      const { handle } = await open();
+      handle
+        .prepare(
+          `UPDATE mirror_sync_lease SET owner = NULL, expires_at = NULL
+           WHERE id = 1 AND owner = ? AND generation = ?`,
+        )
+        .run(lease.owner, lease.generation);
+    },
+
+    async renew(lease: SyncLease): Promise<boolean> {
+      const { handle } = await open();
+      return stampLeaseExpiry(handle, lease);
+    },
+  };
+
   const store: MirrorStore = {
     async applyBatch(records: MirrorRow[], tombstones: string[]): Promise<void> {
       if (records.length === 0 && tombstones.length === 0) return;
       const { handle } = await open();
-      const cols = allColumns;
-      const placeholders = cols.map(() => '?').join(', ');
-      const updates = cols
-        .filter((c) => c !== spec.primaryKey)
-        .map((c) => `${c} = excluded.${c}`)
-        .join(', ');
-      // No non-PK columns → a bare PK table; ON CONFLICT DO NOTHING keeps upsert idempotent.
-      const conflict = updates
-        ? `ON CONFLICT(${spec.primaryKey}) DO UPDATE SET ${updates}`
-        : `ON CONFLICT(${spec.primaryKey}) DO NOTHING`;
-      const upsert = handle.prepare(
-        `INSERT INTO ${spec.table}(${cols.join(', ')}) VALUES (${placeholders}) ${conflict}`,
-      );
-      const remove = handle.prepare(`DELETE FROM ${spec.table} WHERE ${spec.primaryKey} = ?`);
-      handle.transaction(() => {
-        for (const record of records) {
-          upsert.run(...cols.map((c) => record[c] ?? null));
-        }
-        for (const id of tombstones) remove.run(id);
-      });
+      handle.transaction(() => writeBatch(handle, records, tombstones));
     },
 
     async query(options: QueryOptions): Promise<QueryResult> {
@@ -258,6 +326,8 @@ export function sqliteMirrorStore(spec: SqliteMirrorStoreSpec): MirrorStore {
       const { handle } = await open();
       return readSyncState(handle);
     },
+
+    syncLease,
 
     async writeState(state: SyncState): Promise<void> {
       const { handle } = await open();
@@ -463,24 +533,42 @@ function writeSyncState(handle: SqliteHandle, state: SyncState): void {
     );
 }
 
+/** Push `lease`'s expiry out by its TTL from now; `false` when `lease` no longer holds. */
+function stampLeaseExpiry(handle: SqliteHandle, lease: SyncLease): boolean {
+  return (
+    handle
+      .prepare(
+        `UPDATE mirror_sync_lease SET expires_at = ?
+         WHERE id = 1 AND owner = ? AND generation = ?`,
+      )
+      .run(Date.now() + lease.ttlMs, lease.owner, lease.generation).changes === 1
+  );
+}
+
 // ---------------------------------------------------------------------------
 // Schema versioning
 // ---------------------------------------------------------------------------
 
 /**
  * Apply pending migrations: each one with `stored < version <= target`, in
- * ascending order, in its own transaction and stamped as it completes, then a
- * final stamp to `target`. A brand-new database (no `schema_version` row) is at
- * version 0 and takes the same path, so a migration that owns auxiliary objects
- * the declarative DDL knows nothing about (junction tables, denormalized
- * counters) creates them on first open as well as on upgrade. `Migration.up`
- * therefore runs against a database that already has the current declarative
- * shape and must tolerate it.
+ * ascending order, then a final stamp to `target`. A brand-new database (no
+ * `schema_version` row) is at version 0 and takes the same path, so a migration
+ * that owns auxiliary objects the declarative DDL knows nothing about (junction
+ * tables, denormalized counters) creates them on first open as well as on
+ * upgrade. `Migration.up` therefore runs against a database that already has
+ * the current declarative shape and must tolerate it.
+ *
+ * Each migration runs exactly once per database, atomically with its stamp: one
+ * `BEGIN IMMEDIATE` transaction re-reads the stored version under the write
+ * lock, skips the migration when another opener already applied it, runs `up`,
+ * and stamps its version. A concurrent opener waits on that lock (up to
+ * `busy_timeout`) and then skips; a throw from `up` or from the stamp leaves
+ * nothing of the migration applied and the version unchanged. The final stamp
+ * re-reads the same way and only ever raises the version. An up-to-date store
+ * takes no write lock: its version read is the fast path.
  */
 function runMigrations(handle: SqliteHandle, target: number, migrations: Migration[]): void {
-  const stored =
-    handle.prepare<{ version: number }>(`SELECT MAX(version) AS version FROM schema_version`).get()
-      ?.version ?? 0;
+  const stored = readSchemaVersion(handle);
   if (stored >= target) return;
 
   const pending = migrations
@@ -488,18 +576,27 @@ function runMigrations(handle: SqliteHandle, target: number, migrations: Migrati
     .sort((a, b) => a.version - b.version);
   for (const m of pending) {
     handle.transaction(() => {
+      if (readSchemaVersion(handle) >= m.version) return;
       m.up(handle);
-    });
-    stampVersion(handle, m.version);
+      stampVersion(handle, m.version);
+    }, 'immediate');
   }
-  stampVersion(handle, target);
+  handle.transaction(() => {
+    if (readSchemaVersion(handle) < target) stampVersion(handle, target);
+  }, 'immediate');
 }
 
+function readSchemaVersion(handle: SqliteHandle): number {
+  return (
+    handle.prepare<{ version: number }>(`SELECT MAX(version) AS version FROM schema_version`).get()
+      ?.version ?? 0
+  );
+}
+
+/** Replace the stored version. Runs inside the caller's transaction. */
 function stampVersion(handle: SqliteHandle, version: number): void {
-  handle.transaction(() => {
-    handle.prepare(`DELETE FROM schema_version`).run();
-    handle
-      .prepare(`INSERT INTO schema_version(version, applied_at) VALUES (?, ?)`)
-      .run(version, new Date().toISOString());
-  });
+  handle.prepare(`DELETE FROM schema_version`).run();
+  handle
+    .prepare(`INSERT INTO schema_version(version, applied_at) VALUES (?, ?)`)
+    .run(version, new Date().toISOString());
 }

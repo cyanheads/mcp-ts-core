@@ -1,8 +1,8 @@
 /**
  * @fileoverview DDL generation for the SQLite mirror store. Builds the primary
  * table, secondary indexes, an optional FTS5 external-content index with sync
- * triggers, the single-row `mirror_sync_state` table, and the `schema_version`
- * table — all from a declarative column/FTS spec.
+ * triggers, the single-row `mirror_sync_state` and `mirror_sync_lease` tables,
+ * and the `schema_version` table — all from a declarative column/FTS spec.
  * @module services/mirror/sqlite/schema
  */
 
@@ -125,6 +125,18 @@ export function buildSchemaSql(spec: SchemaSpec): string {
   error TEXT
 );`,
     `INSERT OR IGNORE INTO mirror_sync_state(id, status) VALUES (1, 'pending');`,
+    /**
+     * The cross-process sync lease: unheld while `owner` is NULL; `expires_at`
+     * is epoch ms. A framework table, so an existing store gains it on its next
+     * open without a migration of the server's own.
+     */
+    `CREATE TABLE IF NOT EXISTS mirror_sync_lease (
+  id INTEGER PRIMARY KEY CHECK (id = 1),
+  owner TEXT,
+  generation INTEGER NOT NULL DEFAULT 0,
+  expires_at INTEGER
+);`,
+    `INSERT OR IGNORE INTO mirror_sync_lease(id, generation) VALUES (1, 0);`,
   );
 
   return parts.join('\n\n');

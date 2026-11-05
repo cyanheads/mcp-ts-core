@@ -2,12 +2,15 @@
  * @fileoverview Sync runner — drives a server's `sync` generator against a
  * {@link MirrorStore} for full init and incremental refresh. Owns the
  * cursor/checkpoint state machine, per-page persistence, resume-on-interrupt,
- * and terminal status transitions.
+ * terminal status transitions, and, with a store that provides a `syncLease`,
+ * the cross-process lease every write of a run is fenced on.
  * @module services/mirror/core/runner
  */
 
+import { conflict, McpError } from '@/types-global/errors.js';
 import type {
   MirrorLogger,
+  MirrorRow,
   MirrorStore,
   RunSyncOptions,
   SyncGenerator,
@@ -18,6 +21,24 @@ import type {
 /** Minimal context the runner consumes — a duck-typed logger plus cancellation. */
 export interface RunnerContext {
   log: MirrorLogger;
+  signal: AbortSignal;
+  /**
+   * How long, in ms, the run's sync lease stays live after its last commit or
+   * renewal. Default 120000. Used only with a store that provides `syncLease`.
+   */
+  syncLeaseTtlMs?: number;
+}
+
+const DEFAULT_SYNC_LEASE_TTL_MS = 120_000;
+
+/** How the run persists: fenced on a lease, or straight to a store without one. */
+interface RunWrites {
+  commitPage(records: MirrorRow[], tombstones: string[], state: SyncState): Promise<void>;
+  commitState(state: SyncState): Promise<void>;
+  log: MirrorLogger;
+  /** Aborted when the run loses its lease or cannot renew it; the reason says which. */
+  lost?: AbortSignal;
+  /** The generator's signal: the caller's, plus lease loss. */
   signal: AbortSignal;
 }
 
@@ -34,12 +55,88 @@ export interface RunnerContext {
  * the last yielded page. On success the volatile `cursor` is cleared and
  * `completedAt`/`total` advance; on failure they are preserved (a failed
  * refresh on top of a complete mirror stays "ready").
+ *
+ * With a store that provides `syncLease`, the run first claims the lease and
+ * rejects `Conflict` (`data.reason: 'sync_locked'`) while another process or
+ * instance holds it live; the generator never runs then. Each page's records,
+ * tombstones, and state commit in one transaction fenced on the lease, and a
+ * timer renews it between pages. A run whose lease was taken over aborts its
+ * generator, writes nothing more, and rejects `Conflict`
+ * (`data.reason: 'sync_lease_lost'`). The lease is released when the run settles.
  */
 export async function runSync(
   store: MirrorStore,
   sync: SyncGenerator,
   ctx: RunnerContext,
   options: RunSyncOptions,
+): Promise<SyncResult> {
+  const leases = store.syncLease;
+  if (!leases) {
+    return runPages(store, sync, options, {
+      log: ctx.log,
+      signal: ctx.signal,
+      async commitPage(records, tombstones, state) {
+        await store.applyBatch(records, tombstones);
+        await store.writeState(state);
+      },
+      commitState: (state) => store.writeState(state),
+    });
+  }
+
+  const lease = await leases.claim(
+    crypto.randomUUID(),
+    ctx.syncLeaseTtlMs ?? DEFAULT_SYNC_LEASE_TTL_MS,
+  );
+  if (!lease) {
+    throw conflict('Mirror sync is already in progress in another process or instance.', {
+      reason: 'sync_locked',
+    });
+  }
+
+  const lost = new AbortController();
+  const fenced = async (state: SyncState, records?: MirrorRow[], tombstones?: string[]) => {
+    if (await leases.commit(lease, state, records, tombstones)) return;
+    const error = leaseLost();
+    lost.abort(error);
+    throw error;
+  };
+  let renewal: Promise<void> | undefined;
+  const renewTimer = setInterval(() => {
+    renewal ??= leases
+      .renew(lease)
+      .then(
+        (held) => {
+          if (!held) lost.abort(leaseLost());
+        },
+        (err: unknown) => {
+          lost.abort(err);
+        },
+      )
+      .finally(() => {
+        renewal = undefined;
+      });
+  }, lease.ttlMs / 3);
+
+  try {
+    return await runPages(store, sync, options, {
+      log: ctx.log,
+      lost: lost.signal,
+      signal: AbortSignal.any([ctx.signal, lost.signal]),
+      commitPage: (records, tombstones, state) => fenced(state, records, tombstones),
+      commitState: (state) => fenced(state),
+    });
+  } finally {
+    clearInterval(renewTimer);
+    await renewal;
+    await leases.release(lease);
+  }
+}
+
+async function runPages(
+  store: MirrorStore,
+  sync: SyncGenerator,
+  options: RunSyncOptions,
+  run: RunWrites,
 ): Promise<SyncResult> {
   const existing = await store.readState();
   // An init re-runs from scratch only when the prior run completed; otherwise it
@@ -55,7 +152,7 @@ export async function runSync(
   let cursor = startCursor;
   let checkpoint = startCheckpoint;
 
-  await store.writeState({ status: 'in_progress', startedAt, cursor, checkpoint });
+  await run.commitState({ status: 'in_progress', startedAt, cursor, checkpoint });
 
   let pagesFetched = 0;
   let recordsApplied = 0;
@@ -66,23 +163,28 @@ export async function runSync(
       mode: options.mode,
       cursor: startCursor,
       checkpoint: startCheckpoint,
-      signal: ctx.signal,
+      signal: run.signal,
     })) {
-      ctx.signal.throwIfAborted();
+      run.signal.throwIfAborted();
       const tombstones = page.tombstones ?? [];
-      await store.applyBatch(page.records, tombstones);
+      // Durable high-water mark advances monotonically (lexicographic compare).
+      const nextCheckpoint =
+        page.checkpoint && (!checkpoint || page.checkpoint > checkpoint)
+          ? page.checkpoint
+          : checkpoint;
+      await run.commitPage(page.records, tombstones, {
+        status: 'in_progress',
+        startedAt,
+        cursor: page.cursor,
+        checkpoint: nextCheckpoint,
+      });
+      // Only a committed page moves the position a failure records.
+      cursor = page.cursor;
+      checkpoint = nextCheckpoint;
 
       pagesFetched += 1;
       recordsApplied += page.records.length;
       tombstonesApplied += tombstones.length;
-
-      cursor = page.cursor;
-      // Durable high-water mark advances monotonically (lexicographic compare).
-      if (page.checkpoint && (!checkpoint || page.checkpoint > checkpoint)) {
-        checkpoint = page.checkpoint;
-      }
-
-      await store.writeState({ status: 'in_progress', startedAt, cursor, checkpoint });
       options.onProgress?.({
         pages: pagesFetched,
         records: recordsApplied,
@@ -92,10 +194,10 @@ export async function runSync(
       });
     }
 
-    ctx.signal.throwIfAborted();
+    run.signal.throwIfAborted();
     const total = await store.count();
-    ctx.signal.throwIfAborted();
-    await store.writeState({
+    run.signal.throwIfAborted();
+    await run.commitState({
       status: 'complete',
       startedAt,
       checkpoint,
@@ -103,7 +205,7 @@ export async function runSync(
       completedAt: new Date().toISOString(),
       total,
     });
-    ctx.log.info?.('Mirror sync complete', {
+    run.log.info?.('Mirror sync complete', {
       mode: options.mode,
       pagesFetched,
       recordsApplied,
@@ -112,16 +214,27 @@ export async function runSync(
     });
     return { pagesFetched, recordsApplied, tombstonesApplied, total };
   } catch (err) {
-    const message = err instanceof Error ? err.message : String(err);
-    const errorState: SyncState = {
-      status: 'error',
-      startedAt,
-      cursor,
-      checkpoint,
-      error: message,
-    };
-    await store.writeState(errorState);
-    ctx.log.error?.('Mirror sync failed', { mode: options.mode, error: message });
-    throw err;
+    // After a lost lease the generator may stop with its own abort error; the loss is the cause.
+    const failure: unknown = run.lost?.aborted ? run.lost.reason : err;
+    if (isLeaseLost(failure)) {
+      run.log.warning?.('Mirror sync lost its lease', { mode: options.mode });
+      throw failure;
+    }
+    const message = failure instanceof Error ? failure.message : String(failure);
+    run.log.error?.('Mirror sync failed', { mode: options.mode, error: message });
+    // Throws `sync_lease_lost` instead when the lease was taken over meanwhile.
+    await run.commitState({ status: 'error', startedAt, cursor, checkpoint, error: message });
+    throw failure;
   }
+}
+
+function leaseLost(): McpError {
+  return conflict(
+    'Mirror sync lost its lease to another process or instance and wrote nothing after the takeover.',
+    { reason: 'sync_lease_lost' },
+  );
+}
+
+function isLeaseLost(err: unknown): boolean {
+  return err instanceof McpError && err.data?.reason === 'sync_lease_lost';
 }

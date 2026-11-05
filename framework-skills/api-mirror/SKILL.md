@@ -4,7 +4,7 @@ description: >
   Stand up a persistent, self-refreshing local mirror of a bulk upstream dataset with the MirrorService (@cyanheads/mcp-ts-core/mirror). Use when a server wraps a large or slow API and should query a synced local index (embedded SQLite + FTS5) instead of paginating the live API per request.
 metadata:
   author: cyanheads
-  version: "1.6"
+  version: "1.7"
   audience: external
   type: reference
 ---
@@ -59,7 +59,7 @@ Two resume dimensions, deliberately separate. Conflating them silently corrupts 
 | Lifetime | One run; may expire; **cleared on completion** | Persists; **advances monotonically, only on success** |
 | Used for | Resuming an interrupted `init` | Seeding the next `refresh` |
 
-Why they can't merge: during a from-scratch init the records aren't ordered by the high-water field, so the max-so-far is not a valid resume position — only the cursor is. After a completed init the cursor is meaningless, but the high-water mark is the correct refresh seed. The framework persists both per page and threads the right one back into `sync()` per mode. **The checkpoint must be lexicographically monotonic** (ISO 8601 works); the runner advances the stored checkpoint only when a page's value compares greater.
+Why they can't merge: during a from-scratch init the records aren't ordered by the high-water field, so the max-so-far is not a valid resume position — only the cursor is. After a completed init the cursor is meaningless, but the high-water mark is the correct refresh seed. The framework persists both per page and threads the right one back into `sync()` per mode. **The checkpoint must be lexicographically monotonic** (ISO 8601 works); the runner advances the stored checkpoint only when a page's value compares greater. A sync that walks several partitions in turn (one congress, collection, or feed after another, each ordered by the high-water field on its own) yields its checkpoint only with the final page: a mid-walk value from an early partition can already sit past a later partition's unvisited updates, so a refresh that fails there would skip them on every later run.
 
 ## What you own vs. what the framework owns
 
@@ -84,7 +84,7 @@ A store that cannot be opened or initialized (a lock held past `busyTimeoutMs`, 
 
 For access paths the generic query can't express — junction tables for index-backed multi-value filtering, denormalized counters, bespoke `bm25` weighting — use the **raw handle**: `const db = await mirror.raw();` then run prepared statements against your own auxiliary tables (declare them via a migration). Add the auxiliary DDL in a `migrations` step; maintain it from your `sync` mapping or SQL triggers. SQLite never indexes a foreign-key child column on its own. Give every auxiliary table an index whose leading column is the one your writes match on, usually the parent's primary key. Without it, a per-record rebuild such as `DELETE FROM paper_categories WHERE paper_id = ?`, or an `ON DELETE CASCADE` fired by a tombstone, scans the whole table on every row, and a page that should take milliseconds takes minutes on a million-row junction. Confirm with `EXPLAIN QUERY PLAN`: the plan should say `SEARCH … USING INDEX`, never `SCAN`.
 
-A migration runs identically on first creation and on upgrade: a fresh database runs every migration up to `version` right after the declarative DDL, an existing one runs only those above its stored version. So `up()` must tolerate a database that already has the current declarative shape — `CREATE TABLE IF NOT EXISTS` for auxiliary objects, never an `ALTER` that assumes an older layout of a declared column.
+A migration runs identically on first creation and on upgrade: a fresh database runs every migration up to `version` right after the declarative DDL, an existing one runs only those above its stored version. So `up()` must tolerate a database that already has the current declarative shape — `CREATE TABLE IF NOT EXISTS` for auxiliary objects, never an `ALTER` that assumes an older layout of a declared column. Each migration runs exactly once per database, in one write transaction with its version stamp: processes opening the store together wait on the write lock and skip what another already applied, and a throw from `up()` leaves nothing of it applied and the version unchanged. It need not be idempotent.
 
 ## Readiness — key off the completion marker, not live status
 
@@ -97,6 +97,18 @@ The service owns `runSync` + state; it does not schedule. Wire "self-refreshing"
 - **Refresh** — register `runSync({ mode: 'refresh' })` on a cron via `schedulerService` from `@cyanheads/mcp-ts-core/utils`, inside `setup()`. Gate on transport (HTTP) when stdio operators run it out-of-band.
 - **Off the serving thread** — SQLite calls are synchronous, so each write transaction a sync runs blocks the event loop until it commits. A refresh whose pages or post-sync recomputes take seconds stalls every request, `/healthz` included, for that long. Run such a scheduled sync in a child process instead: spawn `process.execPath` with `process.execArgv` and a compiled job entry in `dist/`, relay its log lines, and in `teardown` stop it with SIGTERM, then SIGKILL after a grace period. In-process scheduling suits mirrors whose transactions stay short.
 - **Init** — run out-of-band (a CLI script / one-shot), never on startup: a full init can take hours and must not block the server. It is idempotent and resumable — re-running after an interrupt continues from the persisted cursor.
+- **One sync at a time per store** — the SQLite store carries a sync lease, so an init CLI, a scheduled refresh in a child process, and every stdio session on one store file never sync at once. A run that finds the lease held rejects `Conflict` with `data.reason: 'sync_locked'` before its generator runs, as does an overlapping run on the same instance. A scheduled job skips on that reason and rethrows anything else:
+
+  ```ts
+  await mirror.runSync({ mode: 'refresh' }).catch((err) => {
+    if (err.data?.reason !== 'sync_locked') throw err; // another process is syncing
+  });
+  ```
+
+  A run renews its lease at each page commit and on a timer between pages. If it stops renewing for `syncLeaseTtlMs` (a `defineMirror` option, default 2 minutes; a crashed holder blocks other runs that long), another run may take the lease over, and the lapsed run writes nothing more and rejects `data.reason: 'sync_lease_lost'`. Raise the TTL when a generator spends longer than that on synchronous work between yields. Writes a server makes through `raw()` outside the page commit are not fenced.
+
+  With the lease, each page and the run's state commit through it, not through the store's `applyBatch` and `writeState`. A store wrapper that overrides those two to check or rewrite sync writes must leave the lease out, or its overrides never run: build it from `rest` in `const { syncLease, ...rest } = store`. Such a store keeps only the per-instance guard, so one sync at a time per store becomes the server's to enforce.
+- **CLI logging** — a lifecycle script runs outside `createApp()`, so nothing initializes the logger for it. Call `await logger.initialize(config.logLevel, 'stdio')` (`logger` from `@cyanheads/mcp-ts-core/utils`, `config` from `@cyanheads/mcp-ts-core/config`) before the first log line, in the shared context shim the scripts import. Records logged before `initialize()` wait in a bounded buffer that is discarded at exit, so an uninitialized CLI runs an hours-long init with no output, its errors included. The `'stdio'` transport writes JSON lines to stderr and leaves stdout empty.
 
 ### Shipping the mirror CLI in a production Docker image
 
@@ -136,4 +148,6 @@ RUN echo '{"compilerOptions":{"baseUrl":".","paths":{"@/*":["./dist/*"]}}}' > ts
 - [ ] Read path gated on `await mirror.ready()` with a live fallback when not ready
 - [ ] `better-sqlite3` added as a peer dependency for Node deployments; mirror disabled on Workers
 - [ ] Refresh wired via `schedulerService` in `setup()`; init runs out-of-band
+- [ ] A scheduled `runSync` skips on `data.reason === 'sync_locked'` and rethrows anything else
+- [ ] Mirror CLI scripts call `logger.initialize(config.logLevel, 'stdio')` before logging
 - [ ] `bun run devcheck` passes

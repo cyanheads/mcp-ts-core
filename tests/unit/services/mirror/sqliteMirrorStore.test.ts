@@ -6,17 +6,21 @@
  * @module tests/unit/services/mirror/sqliteMirrorStore
  */
 
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdir, mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { MIRROR_STORE_UNAVAILABLE_HINT } from '@/services/mirror/sqlite/handle.js';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import {
+  MIRROR_STORE_UNAVAILABLE_HINT,
+  openSqliteHandle,
+} from '@/services/mirror/sqlite/handle.js';
 import {
   type SqliteMirrorStoreSpec,
   sqliteMirrorStore,
 } from '@/services/mirror/sqlite/sqliteMirrorStore.js';
-import type { MirrorRow, MirrorStore } from '@/services/mirror/types.js';
+import type { MirrorRow, MirrorStore, SqliteHandle } from '@/services/mirror/types.js';
 import { JsonRpcErrorCode, McpError } from '@/types-global/errors.js';
+import { runMirrorProcess } from './mirror-process.js';
 
 function specFor(
   path: string,
@@ -411,6 +415,89 @@ describe('sqliteMirrorStore', () => {
   });
 });
 
+/**
+ * The store's sync lease, two store instances (separate connections) on one
+ * file, with expiry driven by the faked clock.
+ */
+describe('sqliteMirrorStore sync lease', () => {
+  const TTL_MS = 1_000;
+  let dir: string;
+  let holder: MirrorStore;
+  let other: MirrorStore;
+
+  beforeEach(async () => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    dir = await mkdtemp(join(tmpdir(), 'mirror-store-lease-test-'));
+    holder = sqliteMirrorStore(specFor(join(dir, 'mirror.db')));
+    other = sqliteMirrorStore(specFor(join(dir, 'mirror.db')));
+  });
+  afterEach(async () => {
+    vi.useRealTimers();
+    await Promise.all([holder.close(), other.close()]);
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  it('claims a free lease, refuses a second claim while it is live, and frees it on release', async () => {
+    const lease = await holder.syncLease!.claim('holder', TTL_MS);
+    expect(lease).toEqual({ owner: 'holder', generation: 1, ttlMs: TTL_MS });
+    await expect(other.syncLease!.claim('other', TTL_MS)).resolves.toBeUndefined();
+
+    await holder.syncLease!.release(lease!);
+    await expect(other.syncLease!.claim('other', TTL_MS)).resolves.toEqual({
+      owner: 'other',
+      generation: 2,
+      ttlMs: TTL_MS,
+    });
+  });
+
+  it('keeps a lease live until its expiry and lets it be taken over from that instant, with the next generation', async () => {
+    const lease = await holder.syncLease!.claim('holder', TTL_MS);
+    vi.setSystemTime(Date.now() + TTL_MS - 1);
+    await expect(other.syncLease!.claim('other', TTL_MS)).resolves.toBeUndefined();
+    vi.setSystemTime(Date.now() + 1);
+    const taken = await other.syncLease!.claim('other', TTL_MS);
+    expect(taken).toEqual({ owner: 'other', generation: 2, ttlMs: TTL_MS });
+
+    // The holder whose lease was taken over can no longer write, renew, or release.
+    await expect(
+      holder.syncLease!.commit(
+        lease!,
+        { status: 'in_progress', cursor: 'stale' },
+        [rec('stale')],
+        [],
+      ),
+    ).resolves.toBe(false);
+    expect(await holder.getByIds(['stale'])).toEqual([]);
+    expect(await holder.readState()).toEqual({ status: 'pending' });
+    await expect(holder.syncLease!.renew(lease!)).resolves.toBe(false);
+    await holder.syncLease!.release(lease!);
+    await expect(other.syncLease!.renew(taken!)).resolves.toBe(true);
+    await expect(holder.syncLease!.claim('third', TTL_MS)).resolves.toBeUndefined();
+  });
+
+  it('commits records, tombstones, and state together, and pushes the expiry out from the commit', async () => {
+    const lease = (await holder.syncLease!.claim('holder', TTL_MS))!;
+    const state = { status: 'in_progress' as const, cursor: 'c1', checkpoint: '2024-01-01' };
+    await expect(holder.syncLease!.commit(lease, state, [rec('1'), rec('2')], [])).resolves.toBe(
+      true,
+    );
+    await expect(
+      holder.syncLease!.commit(lease, { ...state, cursor: 'c2' }, [], ['1']),
+    ).resolves.toBe(true);
+    expect((await holder.getByIds(['1', '2'])).map((r) => r.id)).toEqual(['2']);
+    expect(await holder.readState()).toEqual({ ...state, cursor: 'c2' });
+
+    // A state-only commit renews too: the expiry counts from the last commit.
+    vi.setSystemTime(Date.now() + TTL_MS - 1);
+    await expect(holder.syncLease!.commit(lease, { status: 'in_progress' })).resolves.toBe(true);
+    vi.setSystemTime(Date.now() + TTL_MS - 1);
+    await expect(other.syncLease!.claim('other', TTL_MS)).resolves.toBeUndefined();
+    await expect(holder.syncLease!.renew(lease)).resolves.toBe(true);
+    vi.setSystemTime(Date.now() + TTL_MS - 1);
+    await expect(other.syncLease!.claim('other', TTL_MS)).resolves.toBeUndefined();
+  });
+});
+
 describe('sqliteMirrorStore migrations', () => {
   let dir: string;
 
@@ -577,4 +664,250 @@ describe('sqliteMirrorStore migrations', () => {
     expect(await migLogCount(again)).toBe(1);
     await again.close();
   });
+
+  /** Adds `meta.etag`, a migration that fails if it runs a second time. */
+  const addEtag = (h: SqliteHandle): void => {
+    h.exec('CREATE TABLE meta (k TEXT)');
+    h.exec('ALTER TABLE meta ADD COLUMN etag TEXT');
+  };
+
+  it.each([
+    [
+      'its up() throws after writing, a committed inner transaction included',
+      (h: SqliteHandle) => {
+        h.transaction(() => addEtag(h));
+        throw new Error('migration exploded');
+      },
+    ],
+    [
+      'its version stamp is refused after up() returns',
+      (h: SqliteHandle) => {
+        addEtag(h);
+        h.exec(
+          "CREATE TRIGGER refuse_stamp BEFORE INSERT ON schema_version BEGIN SELECT RAISE(ABORT, 'stamp refused'); END",
+        );
+      },
+    ],
+  ])('applies nothing and keeps the stored version when %s', async (_label, up) => {
+    const path = join(dir, 'atomic.db');
+    const v1 = sqliteMirrorStore(specFor(path));
+    await v1.count();
+    await v1.close();
+
+    const failing = sqliteMirrorStore(
+      specFor(path, { version: 2, migrations: [{ version: 2, up }] }),
+    );
+    await expect(failing.count()).rejects.toMatchObject({ code: JsonRpcErrorCode.DatabaseError });
+    await failing.close();
+
+    const handle = await openSqliteHandle(path);
+    try {
+      expect(
+        handle.prepare<{ v: number }>(`SELECT MAX(version) AS v FROM schema_version`).get()?.v,
+      ).toBe(1);
+      expect(
+        handle
+          .prepare<{ name: string }>(
+            `SELECT name FROM sqlite_master WHERE name IN ('meta', 'refuse_stamp')`,
+          )
+          .all(),
+      ).toEqual([]);
+    } finally {
+      handle.close();
+    }
+  });
+
+  it('nests a handle.transaction() inside up() as a savepoint of the migration transaction', async () => {
+    const store = sqliteMirrorStore(
+      specFor(join(dir, 'nested.db'), {
+        version: 2,
+        migrations: [
+          {
+            version: 2,
+            up: (h) => {
+              h.exec('CREATE TABLE mig_log (x TEXT)');
+              const insert = h.prepare('INSERT INTO mig_log (x) VALUES (?)');
+              h.transaction(() => insert.run('kept'));
+              expect(() =>
+                h.transaction(() => {
+                  insert.run('undone');
+                  throw new Error('inner rollback');
+                }),
+              ).toThrow('inner rollback');
+            },
+          },
+        ],
+      }),
+    );
+    await store.count();
+    const handle = await store.raw();
+    expect(handle.prepare<{ x: string }>('SELECT x FROM mig_log').all()).toEqual([{ x: 'kept' }]);
+    expect(await schemaVersion(store)).toBe(2);
+    await store.close();
+  });
+
+  it("holds the store's write lock from a migration's version re-read through its up(), so no other opener can write in between", async () => {
+    const path = join(dir, 'locked.db');
+    const v1 = sqliteMirrorStore(specFor(path));
+    await v1.count();
+    await v1.close();
+
+    // Another connection that fails at once rather than waiting on a lock.
+    const other = await openSqliteHandle(path, { busyTimeoutMs: 0 });
+    const writeLock: string[] = [];
+    try {
+      const store = sqliteMirrorStore(
+        specFor(path, {
+          version: 2,
+          migrations: [
+            {
+              version: 2,
+              up: () => {
+                try {
+                  other.exec('BEGIN IMMEDIATE');
+                  other.exec('ROLLBACK');
+                  writeLock.push('free');
+                } catch (err) {
+                  writeLock.push(String((err as { code?: unknown }).code));
+                }
+              },
+            },
+          ],
+        }),
+      );
+      await store.count();
+      expect(await schemaVersion(store)).toBe(2);
+      await store.close();
+    } finally {
+      other.close();
+    }
+    expect(writeLock).toEqual(['SQLITE_BUSY']);
+  });
+});
+
+/**
+ * Two real processes on one store file, on this runtime's driver. The late
+ * opener pauses after reading the stored version until the early opener's
+ * open has finished, the window in which both read a version a migration
+ * has not yet raised.
+ */
+describe('sqliteMirrorStore migrations across processes', () => {
+  const PROCESS_TIMEOUT_MS = 60_000;
+  let dir: string;
+  let barriers: string;
+  let path: string;
+
+  beforeEach(async () => {
+    dir = await mkdtemp(join(tmpdir(), 'mirror-migrate-process-test-'));
+    barriers = join(dir, 'barriers');
+    await mkdir(barriers);
+    path = join(dir, 'shared.db');
+    // The store at version 1, declared as the child declares it.
+    const v1 = sqliteMirrorStore({
+      path,
+      table: 'items',
+      primaryKey: 'id',
+      columns: { id: 'TEXT' },
+    });
+    await v1.count();
+    await v1.close();
+  });
+  afterEach(async () => {
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  async function inspect() {
+    const handle = await openSqliteHandle(path);
+    try {
+      const has = (name: string) =>
+        (handle
+          .prepare<{ n: number }>(`SELECT COUNT(*) AS n FROM sqlite_master WHERE name = ?`)
+          .get(name)?.n ?? 0) > 0;
+      return {
+        version: handle.prepare<{ v: number }>(`SELECT MAX(version) AS v FROM schema_version`).get()
+          ?.v,
+        migLog: has('mig_log')
+          ? handle
+              .prepare<{ version: number }>(`SELECT version FROM mig_log ORDER BY rowid`)
+              .all()
+              .map((r) => r.version)
+          : null,
+        etagColumns: has('meta')
+          ? handle
+              .prepare<{ name: string }>(`PRAGMA table_info(meta)`)
+              .all()
+              .filter((c) => c.name === 'etag').length
+          : 0,
+      };
+    } finally {
+      handle.close();
+    }
+  }
+
+  it.each([
+    ['log', { version: 2, migLog: [2], etagColumns: 0 }],
+    ['add-column', { version: 2, migLog: null, etagColumns: 1 }],
+  ] as const)(
+    'applies a pending %s migration once when two processes open the store together',
+    async (kind, after) => {
+      const migrations = [{ kind, version: 2 }];
+      const [late, early] = await Promise.all([
+        runMirrorProcess({
+          role: 'open',
+          barriers,
+          path,
+          version: 2,
+          migrations,
+          pauseAfterVersionRead: { signal: 'late-read', waitFor: 'early-open' },
+        }),
+        runMirrorProcess({
+          role: 'open',
+          barriers,
+          path,
+          version: 2,
+          migrations,
+          startAfter: 'late-read',
+          signalWhenOpen: 'early-open',
+        }),
+      ]);
+
+      expect(early).toEqual({ ok: true, upCalls: 1 });
+      expect(late).toEqual({ ok: true, upCalls: 0 });
+      expect(await inspect()).toEqual(after);
+    },
+    PROCESS_TIMEOUT_MS,
+  );
+
+  it(
+    'never lowers the version a newer opener stamped',
+    async () => {
+      const [older, newer] = await Promise.all([
+        runMirrorProcess({
+          role: 'open',
+          barriers,
+          path,
+          version: 2,
+          migrations: [{ kind: 'log', version: 2 }],
+          pauseAfterVersionRead: { signal: 'older-read', waitFor: 'newer-open' },
+        }),
+        runMirrorProcess({
+          role: 'open',
+          barriers,
+          path,
+          version: 3,
+          migrations: [
+            { kind: 'log', version: 2 },
+            { kind: 'log', version: 3 },
+          ],
+          startAfter: 'older-read',
+          signalWhenOpen: 'newer-open',
+        }),
+      ]);
+
+      expect(newer).toEqual({ ok: true, upCalls: 2 });
+      expect(older).toEqual({ ok: true, upCalls: 0 });
+      expect(await inspect()).toEqual({ version: 3, migLog: [2, 3], etagColumns: 0 });
+    },
+    PROCESS_TIMEOUT_MS,
+  );
 });

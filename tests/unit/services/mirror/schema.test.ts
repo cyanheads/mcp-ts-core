@@ -66,6 +66,12 @@ describe('buildSchemaSql', () => {
       "INSERT OR IGNORE INTO mirror_sync_state(id, status) VALUES (1, 'pending')",
     );
   });
+
+  it('always emits the single-row sync lease table and its unheld seed row', () => {
+    const sql = buildSchemaSql(baseSpec);
+    expect(sql).toContain('CREATE TABLE IF NOT EXISTS mirror_sync_lease');
+    expect(sql).toContain('INSERT OR IGNORE INTO mirror_sync_lease(id, generation) VALUES (1, 0)');
+  });
 });
 
 describe('validateSchemaSpec', () => {
@@ -123,6 +129,12 @@ describe('generated DDL executes', () => {
       )
       .get('entanglement');
     expect(hit?.id).toBe('1');
+    expect(
+      handle.prepare('SELECT owner, generation, expires_at FROM mirror_sync_lease').all(),
+    ).toEqual([{ owner: null, generation: 0, expires_at: null }]);
+    // Idempotent on every open: a second run leaves the one row as it is.
+    expect(() => handle.exec(buildSchemaSql(baseSpec))).not.toThrow();
+    expect(handle.prepare('SELECT COUNT(*) AS n FROM mirror_sync_lease').get()).toEqual({ n: 1 });
     handle.close();
   });
 });

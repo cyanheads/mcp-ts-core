@@ -78,8 +78,10 @@ export type SyncMode = 'init' | 'refresh';
 
 /**
  * One page yielded by a server's `sync` generator. The framework upserts the
- * records, deletes the tombstones, and persists the cursor/checkpoint — all in
- * one transaction per page — so an interrupt resumes from the last yielded page.
+ * records, deletes the tombstones, and persists the cursor/checkpoint, so an
+ * interrupt resumes from the last yielded page. With a store that provides a
+ * `syncLease` (the SQLite store does), the three commit in one transaction per
+ * page; a store without one commits the records and the state as two writes.
  */
 export interface SyncPage {
   /**
@@ -176,13 +178,57 @@ export interface QueryResult {
 /** A schema migration: bump `version` and apply `up` on open when the stored version is lower. */
 export interface Migration {
   /**
-   * Apply the migration. Runs inside the open handle, on first creation as well
-   * as on upgrade, so it must be idempotent and tolerate a database that already
-   * has the current declarative schema.
+   * Apply the migration. Runs on first creation as well as on upgrade, against
+   * a database that already has the current declarative schema, which it must
+   * tolerate. It runs exactly once per database, in one write transaction with
+   * its version stamp: concurrent openers wait on the write lock and then skip
+   * it, and a throw leaves nothing of it applied, so it need not be idempotent.
+   * A `handle.transaction()` inside it runs as a savepoint of that transaction.
    */
   up(handle: SqliteHandle): void;
   /** Target schema version this migration produces. */
   version: number;
+}
+
+/** A sync run's hold on a store's sync lease, returned by {@link SyncLeaseStore.claim}. */
+export interface SyncLease {
+  /** Claim counter. Every claim advances it, so a holder whose lease was taken over no longer matches. */
+  generation: number;
+  /** Random id of the run that claimed it. */
+  owner: string;
+  /** How long, in ms, the lease stays live after each commit or renewal. */
+  ttlMs: number;
+}
+
+/**
+ * The cross-process sync lease a store can provide. `runSync` claims it before
+ * a run, makes every write of the run through `commit`, renews it between
+ * pages, and releases it when the run settles. Each write checks the lease's
+ * owner and generation inside the transaction that makes it, so a run whose
+ * lease another process or instance took over writes nothing more.
+ */
+export interface SyncLeaseStore {
+  /**
+   * Claim the lease for `owner`, taking it over once its holder's expiry has
+   * passed. Resolves `undefined` while another holder's lease is live, and
+   * when another connection holds the store's write lock past `busy_timeout`.
+   */
+  claim(owner: string, ttlMs: number): Promise<SyncLease | undefined>;
+  /**
+   * Commit `state`, with a page's records and tombstones when given, in one
+   * transaction, and push the lease's expiry out from the moment it commits.
+   * Resolves `false`, having written nothing, when `lease` no longer holds.
+   */
+  commit(
+    lease: SyncLease,
+    state: SyncState,
+    records?: MirrorRow[],
+    tombstones?: string[],
+  ): Promise<boolean>;
+  /** Release the lease if `lease` still holds it; a lease taken over stays with its new holder. */
+  release(lease: SyncLease): Promise<void>;
+  /** Push the lease's expiry out by its TTL. Resolves `false` when `lease` no longer holds. */
+  renew(lease: SyncLease): Promise<boolean>;
 }
 
 /**
@@ -215,6 +261,17 @@ export interface MirrorStore extends AsyncDisposable {
   raw(): Promise<SqliteHandle>;
   /** Read the persisted sync state. */
   readState(): Promise<SyncState>;
+  /**
+   * Cross-process sync lease. With it, `runSync` rejects `Conflict`
+   * (`data.reason: 'sync_locked'`) while another process or instance holds a
+   * live lease on the store, and fences every write of a run on the lease.
+   * Each page and the run's state then commit through the lease, not through
+   * {@link MirrorStore.applyBatch} or {@link MirrorStore.writeState}, so a
+   * wrapper that overrides those to observe or alter sync writes must omit it
+   * (`const { syncLease, ...rest } = store`). Optional: a store without it gets
+   * only `defineMirror`'s per-instance guard.
+   */
+  syncLease?: SyncLeaseStore;
   /** Write the persisted sync state. Durable fields (`completedAt`/`total`) are preserved when omitted. */
   writeState(state: SyncState): Promise<void>;
 }
@@ -229,4 +286,12 @@ export interface MirrorDefinition {
   store: MirrorStore;
   /** The ingester — the one irreducibly per-source part. */
   sync: SyncGenerator;
+  /**
+   * How long, in ms, a sync run's lease stays live after its last commit or
+   * renewal; a run renews it every third of this between pages. Once it lapses,
+   * another process or instance may take the lease over, and the lapsed run
+   * writes nothing more. A positive integer; default 120000 (2 minutes). Used
+   * with a store that provides `syncLease`, the SQLite store included.
+   */
+  syncLeaseTtlMs?: number;
 }
