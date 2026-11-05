@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.13.19](changelog/0.13.x/0.13.19.md) — 2026-11-05 · 🛡️ Security
+
+Canvas gains DataCanvas.acquireShared and a hardened SQL gate, mirrors gain a cross-process sync lease, metric helpers bind to the running SDK, escapeMarkdownInline runs in linear time, and the bundle cleaner keeps runtime skills/ modules.
+
 ## [0.13.18](changelog/0.13.x/0.13.18.md) — 2026-10-25 · 🛡️ Security
 
 A server can publish Agent Skills from a root skills/ tree and serve them over MCP with createApp({ skills }), the scaffold gains the Agent Plugins root plugin.json and mcp.json, and .mcpb bundles drop dev paths, node-gyp output, and build-only files.

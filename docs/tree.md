@@ -1,6 +1,6 @@
 # mcp-ts-core - Directory Structure
 
-Generated on: 2026-10-26 01:29:12
+Generated on: 2026-11-05 19:49:56
 
 ```text
 mcp-ts-core/
@@ -787,6 +787,7 @@ mcp-ts-core/
 │   │   │   ├── canvas-error-surfaces.test.ts
 │   │   │   ├── canvas-gate-bypass.test.ts
 │   │   │   ├── canvas-scratch.test.ts
+│   │   │   ├── canvas-shared.test.ts
 │   │   │   └── canvas-spillover.test.ts
 │   │   ├── tools/
 │   │   │   ├── template-cat-fact.tool.test.ts
@@ -938,6 +939,7 @@ mcp-ts-core/
 │   │   │   ├── check-skills-sync.test.ts
 │   │   │   ├── clean-buildinfo.test.ts
 │   │   │   ├── clean-mcpb.test.ts
+│   │   │   ├── devcheck-args.test.ts
 │   │   │   ├── devcheck-audit-classifier.test.ts
 │   │   │   ├── devcheck-gate-semantics.test.ts
 │   │   │   ├── devcheck-git-guard.test.ts
@@ -953,6 +955,7 @@ mcp-ts-core/
 │   │   │   ├── lint-packaging.test.ts
 │   │   │   ├── prune-musl-packages.test.ts
 │   │   │   ├── release-github.test.ts
+│   │   │   ├── shipped-scripts.test.ts
 │   │   │   └── tree.test.ts
 │   │   ├── services/
 │   │   │   ├── canvas/
@@ -979,6 +982,8 @@ mcp-ts-core/
 │   │   │   ├── mirror/
 │   │   │   │   ├── defineMirror.test.ts
 │   │   │   │   ├── handle.test.ts
+│   │   │   │   ├── mirror-process-child.ts
+│   │   │   │   ├── mirror-process.ts
 │   │   │   │   ├── runner.test.ts
 │   │   │   │   ├── schema.test.ts
 │   │   │   │   ├── sqliteMirrorStore.test.ts
