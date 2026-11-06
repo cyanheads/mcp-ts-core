@@ -315,6 +315,53 @@ export function storageProviderTests(harness: StorageProviderHarness): void {
       });
     });
 
+    /**
+     * No two keys here differ only in case: a provider backed by a
+     * case-insensitive filesystem would store them as one, which is a separate
+     * contract from how `list` compares a prefix.
+     */
+    it('matches list prefixes case-sensitively', async () => {
+      await storageA.setMany(
+        new Map<string, unknown>([
+          ['case/item-1', 1],
+          ['case/Item-2', 2],
+          ['case/ITEM-3', 3],
+          ['case/iTem-4', 4],
+        ]),
+        contextA,
+      );
+
+      await expect(storageA.list('case/item', contextA)).resolves.toMatchObject({
+        keys: ['case/item-1'],
+      });
+      const pages = await walkPages('case/item', 1);
+      expect(pages.map((page) => page.keys)).toEqual([['case/item-1']]);
+      expect(pages.at(-1)?.nextCursor).toBeUndefined();
+      await expect(storageA.list('case/I', contextA)).resolves.toMatchObject({
+        keys: ['case/ITEM-3', 'case/Item-2'],
+      });
+    });
+
+    it('lists a 60-character prefix holding underscores, page by page', async () => {
+      const prefix = `long/${'a_'.repeat(26)}bc/`;
+      expect(prefix).toHaveLength(60);
+      const matching = [`${prefix}1`, `${prefix}2`, `${prefix}3`];
+      await storageA.setMany(
+        new Map<string, unknown>([
+          ...matching.map((key, index): [string, unknown] => [key, index]),
+          [`long/${'a_'.repeat(26)}bd/1`, 'sibling'],
+          [prefix.slice(0, -2), 'shorter'],
+          [`long/${'a-'.repeat(26)}bc/1`, 'underscore read as a wildcard'],
+        ]),
+        contextA,
+      );
+
+      await expect(storageA.list(prefix, contextA)).resolves.toMatchObject({ keys: matching });
+      const pages = await walkPages(prefix, 1);
+      expect(pages.flatMap((page) => page.keys)).toEqual(matching);
+      expect(pages.at(-1)?.nextCursor).toBeUndefined();
+    });
+
     it('walks every key exactly once and ends without a cursor on an exact-multiple page', async () => {
       const keys = Array.from(
         { length: 12 },

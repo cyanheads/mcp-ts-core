@@ -11,7 +11,7 @@ import type {
   ListResult,
   StorageOptions,
 } from '@/storage/core/IStorageProvider.js';
-import { escapeLikePattern, serializeValue } from '@/storage/core/providerHelpers.js';
+import { serializeValue } from '@/storage/core/providerHelpers.js';
 import { decodeCursor, encodeCursor } from '@/storage/core/storageValidation.js';
 import {
   configurationError,
@@ -31,6 +31,35 @@ const D1_MAX_BOUND_PARAMETERS = 100;
 /** Keys per `getMany` statement: the parameter limit less the statement's tenant and `now` binds. */
 const GET_MANY_CHUNK_SIZE = D1_MAX_BOUND_PARAMETERS - 2;
 
+/** The largest code point: nothing sorts between a string ending in it and that string's successor. */
+const MAX_CODE_POINT = 0x10ffff;
+
+/**
+ * The least string above every string that starts with `prefix`, in the order
+ * D1 compares TEXT (bytewise UTF-8, which is code point order): the prefix with
+ * its last code point incremented. A last code point of U+10FFFF has no
+ * successor, so it is dropped and the one before it incremented; a prefix made
+ * only of U+10FFFF has no upper bound and returns `undefined`.
+ *
+ * D1 stores a lone surrogate as its three-byte generalized-UTF-8 form, which
+ * sorts by its value between U+D7FF and U+E000, so a lone surrogate increments
+ * like any code point. The one exception: a low surrogate written after a lone
+ * high surrogate would pair with it, so that successor skips to U+E000 — no
+ * stored key holds a lone low surrogate there, for the same reason.
+ */
+function prefixUpperBound(prefix: string): string | undefined {
+  // Code points, with a surrogate pair as one and a lone surrogate as itself.
+  const codePoints = Array.from(prefix);
+  while (codePoints.length > 0) {
+    const last = (codePoints.pop() as string).codePointAt(0) as number;
+    if (last === MAX_CODE_POINT) continue;
+    const rest = codePoints.join('');
+    const next = last + 1 === 0xdc00 && /[\uD800-\uDBFF]$/.test(rest) ? 0xe000 : last + 1;
+    return rest + String.fromCodePoint(next);
+  }
+  return undefined;
+}
+
 /**
  * Cloudflare D1 storage provider implementation.
  *
@@ -41,9 +70,17 @@ const GET_MANY_CHUNK_SIZE = D1_MAX_BOUND_PARAMETERS - 2;
  * - Cursor-based pagination with tenant-bound security
  * - Strong consistency (vs KV's eventual consistency)
  *
- * Schema Requirements:
- * - Table: kv_store (tenant_id, key, value, expires_at)
- * - See docs/cloudflare-d1-schema.sql for setup
+ * Schema Requirements (create the table before the first call; the primary key
+ * is the index every lookup and `list` range uses):
+ * ```sql
+ * CREATE TABLE IF NOT EXISTS kv_store (
+ *   tenant_id  TEXT NOT NULL,
+ *   key        TEXT NOT NULL,
+ *   value      TEXT NOT NULL,
+ *   expires_at INTEGER,
+ *   PRIMARY KEY (tenant_id, key)
+ * );
+ * ```
  *
  * Performance Characteristics:
  * - Reads: ~50-100ms (depends on query complexity)
@@ -249,38 +286,39 @@ export class D1Provider implements IStorageProvider {
           }
         }
 
-        // Query with prefix matching and TTL filtering
-        const now = this.getNow();
-        let stmt: ReturnType<D1Database['prepare']>;
-
-        if (lastKey) {
-          // Cursor-based pagination: fetch keys after lastKey
-          stmt = this.db
-            .prepare(
-              `SELECT key FROM ${this.tableName}
-               WHERE tenant_id = ?
-                 AND key LIKE ? ESCAPE '\\'
-                 AND key > ?
-                 AND (expires_at IS NULL OR expires_at > ?)
-               ORDER BY key
-               LIMIT ?`,
-            )
-            .bind(tenantId, `${escapeLikePattern(prefix)}%`, lastKey, now, limit + 1);
-        } else {
-          // Initial page: no cursor
-          stmt = this.db
-            .prepare(
-              `SELECT key FROM ${this.tableName}
-               WHERE tenant_id = ?
-                 AND key LIKE ? ESCAPE '\\'
-                 AND (expires_at IS NULL OR expires_at > ?)
-               ORDER BY key
-               LIMIT ?`,
-            )
-            .bind(tenantId, `${escapeLikePattern(prefix)}%`, now, limit + 1);
+        /**
+         * The prefix is a key range, not a `LIKE`: D1 caps a `LIKE`/`GLOB`
+         * pattern at 50 bytes, and `LIKE` ignores ASCII case. The bounds, the
+         * cursor, and `ORDER BY key` all compare under the same BINARY
+         * collation, and the `(tenant_id, key)` primary key serves the range.
+         */
+        const conditions = ['tenant_id = ?'];
+        const params: unknown[] = [tenantId];
+        if (prefix !== '') {
+          conditions.push('key >= ?');
+          params.push(prefix);
+          const upperBound = prefixUpperBound(prefix);
+          if (upperBound !== undefined) {
+            conditions.push('key < ?');
+            params.push(upperBound);
+          }
         }
+        if (lastKey) {
+          conditions.push('key > ?');
+          params.push(lastKey);
+        }
+        conditions.push('(expires_at IS NULL OR expires_at > ?)');
+        params.push(this.getNow(), limit + 1);
 
-        const result = await stmt.all<{ key: string }>();
+        const result = await this.db
+          .prepare(
+            `SELECT key FROM ${this.tableName}
+             WHERE ${conditions.join(' AND ')}
+             ORDER BY key
+             LIMIT ?`,
+          )
+          .bind(...params)
+          .all<{ key: string }>();
         const rows = result.results ?? [];
 
         // Check if there are more results (for pagination)

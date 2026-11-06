@@ -261,7 +261,13 @@ describe('D1Provider', () => {
   });
 
   describe('list', () => {
-    it('should return matching keys, binding the escaped prefix and the default limit + 1 probe', async () => {
+    /** The last statement's SQL with its whitespace collapsed. */
+    const lastSql = () =>
+      String(mockDb.prepare.mock.lastCall?.[0] ?? '')
+        .replace(/\s+/g, ' ')
+        .trim();
+
+    it('should match the prefix with a key range, binding it and the default limit + 1 probe', async () => {
       const prepared = mockDb.prepare();
       prepared.bind().all.mockResolvedValue({ results: [{ key: 'key_1' }, { key: 'key_2' }] });
 
@@ -269,15 +275,19 @@ describe('D1Provider', () => {
 
       expect(result.keys).toEqual(['key_1', 'key_2']);
       expect(result.nextCursor).toBeUndefined();
+      expect(lastSql()).toBe(
+        'SELECT key FROM kv_store WHERE tenant_id = ? AND key >= ? AND key < ? AND (expires_at IS NULL OR expires_at > ?) ORDER BY key LIMIT ?',
+      );
       expect(prepared.bind).toHaveBeenLastCalledWith(
         'tenant-1',
-        'key\\_%',
+        'key_',
+        'key`',
         expect.any(Number),
         1001,
       );
     });
 
-    it('should return a cursor on the last shown key when the limit + 1 probe finds more', async () => {
+    it('should bind no key bounds for an empty prefix, and return a cursor when the limit + 1 probe finds more', async () => {
       const prepared = mockDb.prepare();
       prepared.bind().all.mockResolvedValue({
         results: [{ key: 'a' }, { key: 'b' }, { key: 'c' }],
@@ -287,10 +297,13 @@ describe('D1Provider', () => {
 
       expect(result.keys).toEqual(['a', 'b']);
       expect(result.nextCursor).toBe(encodeCursor('b', 'tenant-1'));
-      expect(prepared.bind).toHaveBeenLastCalledWith('tenant-1', '%', expect.any(Number), 3);
+      expect(lastSql()).toBe(
+        'SELECT key FROM kv_store WHERE tenant_id = ? AND (expires_at IS NULL OR expires_at > ?) ORDER BY key LIMIT ?',
+      );
+      expect(prepared.bind).toHaveBeenLastCalledWith('tenant-1', expect.any(Number), 3);
     });
 
-    it('should paginate after the decoded cursor key', async () => {
+    it('should paginate after the decoded cursor key inside the prefix range', async () => {
       const prepared = mockDb.prepare();
       prepared.bind().all.mockResolvedValue({ results: [{ key: 'key-2' }, { key: 'key-3' }] });
       const cursor = encodeCursor('key-1', 'tenant-1');
@@ -298,14 +311,71 @@ describe('D1Provider', () => {
       const result = await d1Provider.list('tenant-1', 'key', context, { cursor, limit: 10 });
 
       expect(result.keys).toEqual(['key-2', 'key-3']);
-      expect(mockDb.prepare).toHaveBeenLastCalledWith(expect.stringContaining('AND key > ?'));
+      expect(lastSql()).toBe(
+        'SELECT key FROM kv_store WHERE tenant_id = ? AND key >= ? AND key < ? AND key > ? AND (expires_at IS NULL OR expires_at > ?) ORDER BY key LIMIT ?',
+      );
       expect(prepared.bind).toHaveBeenLastCalledWith(
         'tenant-1',
-        'key%',
+        'key',
+        'kez',
         'key-1',
         expect.any(Number),
         11,
       );
+    });
+
+    it('should page an empty prefix after the cursor key alone', async () => {
+      const prepared = mockDb.prepare();
+      prepared.bind().all.mockResolvedValue({ results: [{ key: 'b' }] });
+      const cursor = encodeCursor('a', 'tenant-1');
+
+      await d1Provider.list('tenant-1', '', context, { cursor, limit: 1 });
+
+      expect(lastSql()).toContain('WHERE tenant_id = ? AND key > ? AND (expires_at');
+      expect(prepared.bind).toHaveBeenLastCalledWith('tenant-1', 'a', expect.any(Number), 2);
+    });
+
+    /**
+     * The upper bound is the least string above every string that starts with
+     * the prefix, in the code point order D1 compares TEXT in.
+     */
+    it.each([
+      ['an ASCII prefix', 'user/', 'user0'],
+      ['a prefix ending in _', 'lit_', 'lit`'],
+      ['a prefix ending in z', 'z', '{'],
+      ['a 512-character prefix', 'x'.repeat(512), `${'x'.repeat(511)}y`],
+      ['a prefix ending in U+FFFF', 'a￿', 'a\u{10000}'],
+      ['a prefix ending in a supplementary code point', 'a\u{1F600}', 'a\u{1F601}'],
+      ['a prefix ending in U+10FFFF, carried to the code point before it', 'a\u{10FFFF}', 'b'],
+      ['a carry past two U+10FFFF code points', 'ab\u{10FFFF}\u{10FFFF}', 'ac'],
+      ['a prefix ending in U+D7FF', 'a퟿', 'a\uD800'],
+      ['a prefix ending in a lone high surrogate', 'a\uD800', 'a\uD801'],
+      ['a prefix ending in a lone low surrogate', 'a\uDFFF', 'a'],
+      ['a lone high surrogate after a lone high surrogate', 'a\uD800\uDBFF', 'a\uD800'],
+    ])('should bound %s', async (_label, prefix, upper) => {
+      const prepared = mockDb.prepare();
+      prepared.bind().all.mockResolvedValue({ results: [] });
+
+      await d1Provider.list('tenant-1', prefix, context);
+
+      expect(prepared.bind).toHaveBeenLastCalledWith(
+        'tenant-1',
+        prefix,
+        upper,
+        expect.any(Number),
+        1001,
+      );
+    });
+
+    it('should omit the upper bound for a prefix of U+10FFFF code points only', async () => {
+      const prepared = mockDb.prepare();
+      prepared.bind().all.mockResolvedValue({ results: [] });
+      const prefix = '\u{10FFFF}\u{10FFFF}';
+
+      await d1Provider.list('tenant-1', prefix, context);
+
+      expect(lastSql()).toContain('WHERE tenant_id = ? AND key >= ? AND (expires_at');
+      expect(prepared.bind).toHaveBeenLastCalledWith('tenant-1', prefix, expect.any(Number), 1001);
     });
 
     it('should reject a cursor issued for a different tenant', async () => {
