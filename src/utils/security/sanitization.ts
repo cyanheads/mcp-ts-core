@@ -36,7 +36,7 @@ async function loadSanitizeHtml() {
   _sanitizeHtmlFn ??= (
     await import('sanitize-html').catch(() => {
       throw configurationError(
-        'Install "sanitize-html" to use HTML sanitization: bun add sanitize-html',
+        'HTML sanitization needs the optional peer dependency "sanitize-html", which is not installed. Add it to the server\'s dependencies.',
       );
     })
   ).default;

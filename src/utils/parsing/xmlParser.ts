@@ -31,7 +31,7 @@ async function getFxp(): Promise<FxpModule> {
   if (_fxp) return _fxp;
   _fxp = await (import(FXP_MODULE) as Promise<FxpModule>).catch(() => {
     throw configurationError(
-      'Install "fast-xml-parser" to use XML parsing: bun add fast-xml-parser',
+      'XML parsing needs the optional peer dependency "fast-xml-parser", which is not installed. Add it to the server\'s dependencies.',
     );
   });
   return _fxp;

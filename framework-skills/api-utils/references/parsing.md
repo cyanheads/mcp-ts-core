@@ -127,7 +127,7 @@ const strict = await jsonParser.parse<Config>(jsonString, 0);
 | `extractText` | async | `(input, options?, context?) -> Promise<ExtractTextResult>` |
 | `saveDocument` | async | `(doc, context?) -> Promise<Uint8Array>` |
 
-`budget` is `ParserInputBudgetOptions` (`{ maxBytes?: number }`); on `mergePdfs` it bounds the inputs' combined size. `extractText`'s `input` is raw bytes (`Uint8Array | ArrayBuffer`, the `unpdf`-only path) or a loaded `PDFDocument`, which is serialized with `save()` first.
+`budget` is `ParserInputBudgetOptions` (`{ maxBytes?: number }`); on `mergePdfs` it bounds the inputs' combined size. `extractText`'s `input` is raw bytes (`Uint8Array | ArrayBuffer`, the `unpdf`-only path; a Node `Buffer` from `readFile` works) or a loaded `PDFDocument`, which is serialized with `save()` first. Bytes are read from a copy, so the same buffer can go to `loadDocument` or storage afterward.
 
 ### Option types
 

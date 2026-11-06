@@ -39,12 +39,12 @@ import { assertTextInputBudget } from './inputBudget.js';
 
 const getDefuddle = lazyImport<typeof import('defuddle/node')>(
   () => import('defuddle/node'),
-  'Install "defuddle" to use HTML article extraction: bun add defuddle linkedom',
+  'HTML article extraction needs the optional peer dependencies "defuddle" and "linkedom", which are not installed. Add them to the server\'s dependencies.',
 );
 
 const getLinkedom = lazyImport<typeof import('linkedom')>(
   () => import('linkedom'),
-  'Install "linkedom" to use HTML article extraction: bun add defuddle linkedom',
+  'HTML article extraction needs the optional peer dependencies "defuddle" and "linkedom", which are not installed. Add them to the server\'s dependencies.',
 );
 
 /** Shape of items in defuddle's `metaTags` array. Inlined rather than imported

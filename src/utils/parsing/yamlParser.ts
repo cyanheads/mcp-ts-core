@@ -20,7 +20,7 @@ import { thinkBlockRegex } from './thinkBlock.js';
 
 const getYaml = lazyImport(
   () => import('js-yaml'),
-  'Install "js-yaml" to use YAML parsing: bun add js-yaml',
+  'YAML parsing needs the optional peer dependency "js-yaml", which is not installed. Add it to the server\'s dependencies.',
 );
 
 /**

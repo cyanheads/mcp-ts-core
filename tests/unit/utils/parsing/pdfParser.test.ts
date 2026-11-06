@@ -1056,6 +1056,30 @@ describe('PdfParser', () => {
       expect(result.totalPages).toBe(2);
     });
 
+    it("leaves the caller's Uint8Array intact, so the same bytes can be read again", async () => {
+      const sizeBefore = pdfBytes.byteLength;
+      await parser.extractText(pdfBytes, undefined, context);
+
+      expect(pdfBytes.byteLength).toBe(sizeBefore);
+      const again = await parser.extractText(pdfBytes, { mergePages: true }, context);
+      expect(again.text).toContain('Bytes page 2');
+    });
+
+    it("leaves the caller's ArrayBuffer intact", async () => {
+      const ab = new ArrayBuffer(pdfBytes.byteLength);
+      new Uint8Array(ab).set(pdfBytes);
+      await parser.extractText(ab, undefined, context);
+
+      expect(ab.byteLength).toBe(pdfBytes.byteLength);
+    });
+
+    it('accepts a Node Buffer, as readFile returns', async () => {
+      const result = await parser.extractText(Buffer.from(pdfBytes), { mergePages: true }, context);
+
+      expect(result.totalPages).toBe(2);
+      expect(result.text).toContain('Bytes page 1');
+    });
+
     it('should log inputKind: "bytes" when bytes are passed', async () => {
       const debugSpy = vi.spyOn(logger, 'debug');
       await parser.extractText(pdfBytes, undefined, context);

@@ -46,7 +46,7 @@ import { withSpan } from '@/utils/telemetry/trace.js';
 
 const importOpenAI = lazyImport(
   () => import('openai'),
-  'Install "openai" to use the OpenRouter LLM provider: bun add openai',
+  'The OpenRouter LLM provider needs the optional peer dependency "openai", which is not installed. Add it to the server\'s dependencies.',
 );
 
 /**

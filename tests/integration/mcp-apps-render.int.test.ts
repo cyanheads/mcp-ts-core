@@ -310,7 +310,9 @@ console.log(JSON.stringify({ absent, exports: Object.keys(module), message: erro
         reason: 'missing_peer',
         package: '@modelcontextprotocol/client',
       });
-      expect(neither.message).toContain('bun add -d @modelcontextprotocol/client');
+      expect(neither.message).toBe(
+        'renderAppTool needs the optional peer dependency "@modelcontextprotocol/client", which is not installed. Add it to the project\'s devDependencies.',
+      );
 
       await symlink(
         join(REPO, 'node_modules/@modelcontextprotocol/client'),
@@ -322,7 +324,9 @@ console.log(JSON.stringify({ absent, exports: Object.keys(module), message: erro
         reason: 'missing_peer',
         package: '@modelcontextprotocol/ext-apps',
       });
-      expect(withoutBridge.message).toContain('bun add -d @modelcontextprotocol/ext-apps');
+      expect(withoutBridge.message).toBe(
+        'renderAppTool needs the optional peer dependency "@modelcontextprotocol/ext-apps", which is not installed. Add it to the project\'s devDependencies.',
+      );
     },
     RUN_TIMEOUT_MS,
   );

@@ -13,7 +13,7 @@ import { type RequestContext, withExtra } from '@/utils/internal/requestContext.
 
 const getChrono = lazyImport(
   () => import('chrono-node'),
-  'Install "chrono-node" to use date parsing: bun add chrono-node',
+  'Date parsing needs the optional peer dependency "chrono-node", which is not installed. Add it to the server\'s dependencies.',
 );
 
 /**

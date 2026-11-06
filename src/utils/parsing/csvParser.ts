@@ -21,7 +21,7 @@ import { thinkBlockRegex } from './thinkBlock.js';
 
 const importPapa = lazyImport(
   () => import('papaparse'),
-  'Install "papaparse" to use CSV parsing: bun add papaparse',
+  'CSV parsing needs the optional peer dependency "papaparse", which is not installed. Add it to the server\'s dependencies.',
 );
 
 let _papa: typeof Papa | undefined;

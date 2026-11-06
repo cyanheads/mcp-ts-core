@@ -22,12 +22,12 @@ import {
 
 const getPdfLib = lazyImport(
   () => import('pdf-lib'),
-  'Install "pdf-lib" to use PDF operations: bun add pdf-lib',
+  'PDF operations need the optional peer dependency "pdf-lib", which is not installed. Add it to the server\'s dependencies.',
 );
 
 const getUnpdf = lazyImport(
   () => import('unpdf'),
-  'Install "unpdf" to use PDF text extraction: bun add unpdf',
+  'PDF text extraction needs the optional peer dependency "unpdf", which is not installed. Add it to the server\'s dependencies.',
 );
 
 /**
@@ -1107,7 +1107,8 @@ export class PdfParser {
    * passed, the doc is serialized via `pdf-lib`'s `save()` before extraction.
    * Compatible with Cloudflare Workers and other serverless environments.
    *
-   * @param input - Raw PDF bytes (`Uint8Array` | `ArrayBuffer`) or a loaded `PDFDocument`.
+   * @param input - Raw PDF bytes (`Uint8Array`, a Node `Buffer` included, or `ArrayBuffer`)
+   *   or a loaded `PDFDocument`. Bytes are read from a copy, so the caller's buffer stays usable.
    * @param options - Optional extraction options. Set `mergePages: true` to get a
    *   single concatenated string instead of one string per page.
    * @param context - Optional context for correlated logging and error metadata. The
@@ -1149,7 +1150,8 @@ export class PdfParser {
 
     if (isBytes) {
       assertBinaryInputBudget(input, options);
-      pdfBytes = input instanceof ArrayBuffer ? new Uint8Array(input) : input;
+      // pdf.js rejects a Node `Buffer` and empties the buffer it reads, so it gets a plain copy.
+      pdfBytes = new Uint8Array(input instanceof ArrayBuffer ? input.slice(0) : input);
     } else {
       let rawBytes: Uint8Array;
       try {

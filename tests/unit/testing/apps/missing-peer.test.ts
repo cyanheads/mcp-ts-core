@@ -1,7 +1,8 @@
 /**
  * @fileoverview Tests that `renderAppTool` loads its optional peers lazily: importing the
  * subpath needs neither, and a run without one rejects with a configuration error naming
- * the package and its install command. Each case simulates one failed peer import.
+ * the package to add to the project's devDependencies. Each case simulates one failed peer
+ * import.
  * @module tests/unit/testing/apps/missing-peer.test
  */
 
@@ -77,7 +78,7 @@ describe('renderAppTool without its optional peers', () => {
     await expect(render()).resolves.toMatchObject({
       name: 'McpError',
       code: JsonRpcErrorCode.ConfigurationError,
-      message: `renderAppTool needs the optional peer dependency ${pkg}, which is not installed. Install it with \`bun add -d ${pkg}\`.`,
+      message: `renderAppTool needs the optional peer dependency "${pkg}", which is not installed. Add it to the project's devDependencies.`,
       data: { reason: 'missing_peer', package: pkg },
     });
   });

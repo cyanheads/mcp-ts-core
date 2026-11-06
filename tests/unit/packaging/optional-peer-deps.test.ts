@@ -7,10 +7,15 @@
  * Relies on `verbatimModuleSyntax: true` in tsconfig — TypeScript enforces
  * that type-only imports use `import type`, so any non-`import type` line
  * is guaranteed to be a value import.
+ *
+ * Also verifies no string in source names a package manager's add command:
+ * a missing-peer message tells the reader to declare the package, since the
+ * server may be installed with any package manager.
  * @module tests/unit/packaging/optional-peer-deps
  */
 import { readdirSync, readFileSync } from 'node:fs';
 import { join, relative } from 'node:path';
+import ts from 'typescript-v6';
 import { describe, expect, it } from 'vitest';
 
 const ROOT = join(import.meta.dirname, '..', '..', '..');
@@ -58,6 +63,33 @@ function extractPackageName(specifier: string): string {
   return specifier.split('/')[0]!;
 }
 
+/** A package manager's command that adds a dependency (`npm i` but not `npm init`). */
+const ADD_COMMAND = /\b(?:bun add|npm (?:install|i)|pnpm add|yarn add)\b/;
+
+interface SourceLiteral {
+  location: string;
+  text: string;
+}
+
+/**
+ * Every string and template-literal text in a source file. Parsed rather than
+ * matched line by line: comments are not syntax nodes, so a JSDoc install note
+ * never reaches the scan, and each `${…}`-separated part of a template is read.
+ */
+function sourceLiterals(file: string): SourceLiteral[] {
+  const source = ts.createSourceFile(file, readFileSync(file, 'utf8'), ts.ScriptTarget.Latest);
+  const literals: SourceLiteral[] = [];
+  const visit = (node: ts.Node): void => {
+    if (ts.isStringLiteralLike(node) || ts.isTemplateLiteralToken(node)) {
+      const line = source.getLineAndCharacterOfPosition(node.getStart(source)).line + 1;
+      literals.push({ location: `${relative(ROOT, file)}:${line}`, text: node.text });
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(source);
+  return literals;
+}
+
 describe('optional peer dependencies', () => {
   it('are never eagerly imported (value imports) in source files', () => {
     const optionalDeps = new Set(getOptionalPeerDeps());
@@ -99,5 +131,25 @@ describe('optional peer dependencies', () => {
         ...violations,
       ].join('\n'),
     ).toHaveLength(0);
+  });
+
+  it('are never named with a package manager command in a source string', () => {
+    const literals = [...walkTs(SRC)].flatMap(sourceLiterals);
+    // The scan reaches the missing-peer messages themselves, so an empty result means something.
+    expect(literals.some(({ text }) => text.includes('needs the optional peer dependenc'))).toBe(
+      true,
+    );
+
+    const violations = literals
+      .filter(({ text }) => ADD_COMMAND.test(text))
+      .map(({ location, text }) => `  ${location} → ${text}`);
+    expect(
+      violations,
+      [
+        'Found a package manager command in a source string.',
+        "A missing-peer message names the package and says to add it to the server's dependencies.\n",
+        ...violations,
+      ].join('\n'),
+    ).toEqual([]);
   });
 });

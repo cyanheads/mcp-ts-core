@@ -200,7 +200,7 @@ async function loadPeer<T>(pkg: string, load: () => Promise<T>): Promise<T> {
     const missing = MISSING_SPECIFIER.exec(errorMessage(err))?.[1];
     if (missing === pkg || missing?.startsWith(`${pkg}/`)) {
       throw configurationError(
-        `renderAppTool needs the optional peer dependency ${pkg}, which is not installed. Install it with \`bun add -d ${pkg}\`.`,
+        `renderAppTool needs the optional peer dependency "${pkg}", which is not installed. Add it to the project's devDependencies.`,
         { reason: 'missing_peer', package: pkg },
         { cause: err },
       );

@@ -107,7 +107,8 @@ describe('PdfParser.extractText failures that are not the input', () => {
 
       await expect(new fresh.PdfParser().extractText(bytes)).rejects.toMatchObject({
         code: JsonRpcErrorCode.ConfigurationError,
-        message: expect.stringContaining('bun add unpdf'),
+        message:
+          'PDF text extraction needs the optional peer dependency "unpdf", which is not installed. Add it to the server\'s dependencies.',
       });
     } finally {
       vi.doUnmock('unpdf');

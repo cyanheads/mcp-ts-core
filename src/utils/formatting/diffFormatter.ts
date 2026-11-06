@@ -13,7 +13,7 @@ import { logger } from '@/utils/internal/logger.js';
 
 const getDiff = lazyImport(
   () => import('diff'),
-  'Install "diff" to use diff formatting: bun add diff',
+  'Diff formatting needs the optional peer dependency "diff", which is not installed. Add it to the server\'s dependencies.',
 );
 
 import {

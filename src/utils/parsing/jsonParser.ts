@@ -17,7 +17,7 @@ import { thinkBlockRegex } from './thinkBlock.js';
 
 const getPartialJson = lazyImport(
   () => import('partial-json'),
-  'Install "partial-json" to use partial JSON parsing: bun add partial-json',
+  'Partial JSON parsing needs the optional peer dependency "partial-json", which is not installed. Add it to the server\'s dependencies.',
 );
 
 /**
