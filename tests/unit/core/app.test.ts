@@ -324,6 +324,9 @@ import { prompt } from '@/mcp-server/prompts/utils/promptDefinition.js';
 import { resource } from '@/mcp-server/resources/utils/resourceDefinition.js';
 import { disabledTool, tool } from '@/mcp-server/tools/utils/toolDefinition.js';
 import { JsonRpcErrorCode } from '@/types-global/errors.js';
+import { runtimeCaps } from '@/utils/internal/runtime.js';
+
+import packageJson from '../../../package.json' with { type: 'json' };
 
 describe('core/app', () => {
   let originalEnv: NodeJS.ProcessEnv;
@@ -1083,6 +1086,7 @@ describe('core/app', () => {
     const written = stderrWriteSpy.mock.calls.map((call) => String(call[0])).join('');
     expect(written).toContain('Configuration error — server failed to start');
     expect(written).toContain('Server setup failed');
+    expect(written).toContain('Check your .env file or environment variables, then retry.');
     expect(written).toContain('Set DEBUG=true for the full stack trace.');
     expect(written).not.toContain('Data:');
 
@@ -1204,6 +1208,133 @@ describe('core/app', () => {
     stderrWriteSpy.mockRestore();
     processExitSpy.mockRestore();
   });
+
+  // -------------------------------------------------------------------------
+  // Node.js engines floor
+  // -------------------------------------------------------------------------
+
+  describe('Node.js engines floor', () => {
+    const NODE_22_MESSAGE =
+      "@cyanheads/mcp-ts-core requires Node.js >=24.0.0, but this server is running Node.js 22.23.3 (/usr/local/bin/node). Point the client's command at a Node.js 24+ binary, or run the server under Bun >=1.4.0.";
+    const originalCaps = { ...runtimeCaps };
+    const versionsDescriptor = Object.getOwnPropertyDescriptor(
+      process,
+      'versions',
+    ) as PropertyDescriptor;
+    const execPathDescriptor = Object.getOwnPropertyDescriptor(
+      process,
+      'execPath',
+    ) as PropertyDescriptor;
+    let processExitSpy: ReturnType<typeof vi.spyOn>;
+    let stderrWriteSpy: ReturnType<typeof vi.spyOn>;
+
+    /** Stubs what the check reads: the reported Node.js version, the binary path, the runtime flags, and the `Deno` global. */
+    const runOn = (node: string, runtime: 'bun' | 'deno' | 'node' | 'worker' = 'node'): void => {
+      Object.defineProperty(process, 'versions', {
+        ...versionsDescriptor,
+        value: { ...versionsDescriptor.value, node },
+      });
+      Object.defineProperty(process, 'execPath', {
+        ...execPathDescriptor,
+        value: '/usr/local/bin/node',
+      });
+      runtimeCaps.isNode = true;
+      runtimeCaps.isBun = runtime === 'bun';
+      runtimeCaps.isWorkerLike = runtime === 'worker';
+      if (runtime === 'deno') vi.stubGlobal('Deno', { version: { deno: '2.1.4' } });
+    };
+
+    beforeEach(() => {
+      processExitSpy = vi
+        .spyOn(process, 'exit')
+        .mockImplementation(((_: number) => undefined as never) as typeof process.exit);
+      stderrWriteSpy = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+    });
+
+    afterEach(() => {
+      Object.defineProperty(process, 'versions', versionsDescriptor);
+      Object.defineProperty(process, 'execPath', execPathDescriptor);
+      Object.assign(runtimeCaps, originalCaps);
+      vi.unstubAllGlobals();
+      stderrWriteSpy.mockRestore();
+      processExitSpy.mockRestore();
+    });
+
+    it('refuses to start below the floor through the banner, before any service, setup(), or transport', async () => {
+      runOn('22.23.3');
+      const setup = vi.fn();
+
+      await expect(createApp({ setup })).rejects.toMatchObject({
+        code: JsonRpcErrorCode.ConfigurationError,
+        message: NODE_22_MESSAGE,
+      });
+
+      expect(processExitSpy).toHaveBeenCalledWith(1);
+      const written = stderrWriteSpy.mock.calls.map((call: unknown[]) => String(call[0])).join('');
+      expect(written).toContain('Configuration error — server failed to start');
+      expect(written).toContain(NODE_22_MESSAGE);
+      // No environment variable changes the runtime, so the banner's env advice is left out.
+      expect(written).not.toContain('.env');
+      expect(setup).not.toHaveBeenCalled();
+      expect(mockCreateStorageProvider).not.toHaveBeenCalled();
+      expect(mockLogger.initialize).not.toHaveBeenCalled();
+      expect(MockTransportManager).not.toHaveBeenCalled();
+      expect(mockTransportManager.instance.start).not.toHaveBeenCalled();
+    });
+
+    it.each(['23.11.0-rc.1', '22.0.0-nightly20250101abcdef'])(
+      'refuses a prerelease whose X.Y.Z is below the floor (%s)',
+      async (node) => {
+        runOn(node);
+        const setup = vi.fn();
+
+        await expect(createApp({ setup })).rejects.toMatchObject({
+          code: JsonRpcErrorCode.ConfigurationError,
+          message: expect.stringContaining(`running Node.js ${node} (/usr/local/bin/node).`),
+        });
+
+        expect(processExitSpy).toHaveBeenCalledWith(1);
+        expect(setup).not.toHaveBeenCalled();
+      },
+    );
+
+    it.each([
+      ['the floor itself', '24.0.0', 'node'],
+      ['a newer release', '26.13.0', 'node'],
+      ['a prerelease of the floor, judged on its X.Y.Z', '24.0.0-rc.1', 'node'],
+      ['a nightly of a newer major', '25.0.0-nightly20260101abcdef', 'node'],
+      ['a version string with no X.Y.Z', 'custom-build', 'node'],
+      ['an empty version string', '', 'node'],
+      ['Bun, whatever Node.js version it reports', '22.23.3', 'bun'],
+      ['Deno, whatever Node.js version it reports', '22.11.0', 'deno'],
+      ['a Worker isolate under nodejs_compat', '22.19.0', 'worker'],
+    ] as const)('starts on %s (%s)', async (_label, node, runtime) => {
+      runOn(node, runtime);
+      const setup = vi.fn();
+
+      const handle = await createApp({ setup });
+
+      expect(processExitSpy).not.toHaveBeenCalled();
+      expect(setup).toHaveBeenCalledOnce();
+      expect(mockTransportManager.instance.start).toHaveBeenCalledOnce();
+      await handle.shutdown();
+    });
+
+    it('leaves the check out of composeServices, which createWorkerHandler shares', async () => {
+      runOn('22.23.3');
+      const setup = vi.fn();
+
+      await expect(composeServices({ setup })).resolves.toHaveProperty('createServer');
+
+      expect(setup).toHaveBeenCalledOnce();
+      expect(processExitSpy).not.toHaveBeenCalled();
+    });
+
+    it('reads its floor from an engines.node that is a single >=X.Y.Z comparator', () => {
+      expect(packageJson.engines.node).toMatch(/^>=\d+\.\d+\.\d+$/);
+    });
+  });
+
   // -------------------------------------------------------------------------
   // Stdin EOF (#322)
   // -------------------------------------------------------------------------
