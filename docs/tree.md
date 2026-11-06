@@ -1,6 +1,6 @@
 # mcp-ts-core - Directory Structure
 
-Generated on: 2026-11-06 12:17:38
+Generated on: 2026-11-06 20:24:51
 
 ```text
 mcp-ts-core/
@@ -302,7 +302,8 @@ mcp-ts-core/
 │   │   ├── gcPressure.ts
 │   │   ├── index.ts
 │   │   ├── serverManifest.ts
-│   │   └── worker.ts
+│   │   ├── worker.ts
+│   │   └── workerEnvBindings.ts
 │   ├── linter/
 │   │   ├── rules/
 │   │   │   ├── definition-rules.ts
@@ -411,6 +412,7 @@ mcp-ts-core/
 │   │   ├── inputRequired.ts
 │   │   ├── notifications.ts
 │   │   ├── outputContract.ts
+│   │   ├── protocolError.ts
 │   │   ├── server.ts
 │   │   ├── skills.ts
 │   │   └── types.ts
@@ -801,6 +803,7 @@ mcp-ts-core/
 │   ├── soak/
 │   │   └── http-memory.soak.test.ts
 │   ├── types/
+│   │   ├── canvas-describe.test-d.ts
 │   │   ├── context-helpers.test-d.ts
 │   │   ├── error-contract.test-d.ts
 │   │   ├── handler-context.test-d.ts
@@ -916,6 +919,7 @@ mcp-ts-core/
 │   │   │   ├── inputRequired.serving.test.ts
 │   │   │   ├── inputRequired.test.ts
 │   │   │   ├── notifications.test.ts
+│   │   │   ├── protocolError.test.ts
 │   │   │   ├── server.test.ts
 │   │   │   ├── skills.test.ts
 │   │   │   └── unserializableErrorData.wire.test.ts
@@ -1135,6 +1139,7 @@ mcp-ts-core/
 │   │   ├── fetch-with-timeout.worker.test.ts
 │   │   ├── lifecycle-failures.worker.test.ts
 │   │   ├── logger-shutdown.worker.test.ts
+│   │   ├── pdf-text.worker.test.ts
 │   │   ├── request-state.worker.test.ts
 │   │   ├── storage-d1.worker.test.ts
 │   │   ├── storage-failures.worker.test.ts

@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.13.21](changelog/0.13.x/0.13.21.md) — 2026-11-06 · 🛡️ Security
+
+Worker string bindings now reach every configuration variable, JWT audience and issuer included, and DEV_MCP_AUTH_BYPASS needs a non-production ENVIRONMENT. MCP_HTTP_ENDPOINT_PATH and MCP_PUBLIC_URL are normalized or refused, and the mirror, canvas, D1, and KV stores get fixes.
+
 ## [0.13.20](changelog/0.13.x/0.13.20.md) — 2026-11-06 · 🛡️ Security
 
 A session bound to an identity resumes only for a request with the same tenant ID, client ID, and subject. createApp refuses Node.js below 24, resource reads keep a ProtocolError code and log failures, and CSV and JSON canvas export stops scaling memory with rows.
