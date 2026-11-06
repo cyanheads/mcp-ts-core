@@ -71,6 +71,7 @@ import {
   pipeFileToStream,
   resolveExportPath,
   safeSizeBytes,
+  singleWriterCopySource,
   tempFilePathFor,
 } from './exportWriter.js';
 
@@ -88,10 +89,11 @@ type DuckDBTimestampValue = InstanceType<DuckDBModule['DuckDBTimestampValue']>;
 type DuckDBDateValue = InstanceType<DuckDBModule['DuckDBDateValue']>;
 
 /**
- * `memory_limit` budgeted per engine thread. DuckDB v2.0 holds a buffer of
- * several MiB per thread through a `COPY` and fails with Out of Memory, where
- * v1.5 spills, once those buffers near the limit; at 32 MB per thread it
- * fails, at 64 MB it spills.
+ * `memory_limit` budgeted per engine thread, bounding the write buffers each
+ * thread of a Parquet `COPY` holds. A CSV or JSON batch copy also holds one
+ * per thread, which DuckDB v2.0 allocates inside `memory_limit` (v1.5
+ * allocated them outside it rather than spilling them); those exports run on
+ * one thread instead — see {@link singleWriterCopySource}.
  */
 const MEMORY_MB_PER_THREAD = 64;
 
@@ -594,13 +596,26 @@ export class DuckdbProvider implements IDataCanvasProvider {
 
     const formatClause = copyFormatClause(target.format);
     return await this.withConnection(record, options?.signal, EXPORT_CANCELLED, async (conn) => {
+      /**
+       * One transaction, so the count, the column list, and the COPY read one
+       * version of the object: another call can stage it again between two
+       * statements, and a union over a stale column count fails to bind.
+       */
+      await conn.run('BEGIN TRANSACTION');
       const rowCount = await this.countRows(conn, tableName);
+      /**
+       * CSV and JSON run the single-writer source (see singleWriterCopySource);
+       * Parquet keeps the plain COPY, whose per-thread buffers the thread cap bounds.
+       */
+      const source =
+        target.format === 'parquet'
+          ? quoteIdentifier(tableName)
+          : singleWriterCopySource(tableName, (await this.columnNames(conn, tableName)).length);
 
       if (isPathTarget(target)) {
         const absolutePath = await resolveExportPath(this.options.exportRootPath, target.path);
-        await conn.run(
-          `COPY ${quoteIdentifier(tableName)} TO '${escapeSqlString(absolutePath)}' ${formatClause}`,
-        );
+        await conn.run(`COPY ${source} TO '${escapeSqlString(absolutePath)}' ${formatClause}`);
+        await conn.run('COMMIT');
         const sizeBytes = await safeSizeBytes(absolutePath);
         return {
           format: target.format,
@@ -615,9 +630,8 @@ export class DuckdbProvider implements IDataCanvasProvider {
       // itself fails we must unlink here before re-throwing.
       const tempPath = tempFilePathFor(record.scratchDir, target.format);
       try {
-        await conn.run(
-          `COPY ${quoteIdentifier(tableName)} TO '${escapeSqlString(tempPath)}' ${formatClause}`,
-        );
+        await conn.run(`COPY ${source} TO '${escapeSqlString(tempPath)}' ${formatClause}`);
+        await conn.run('COMMIT');
       } catch (copyErr) {
         await unlink(tempPath).catch(() => {});
         throw copyErr;
@@ -1632,7 +1646,11 @@ export const DUCKDB_ERROR_REASONS = {
    * refusing a file, which is an I/O fault.
    */
   sqlReadOnly: 'sql_read_only',
-  /** A gated SELECT that prepared cleanly and then failed on the staged data. */
+  /**
+   * A gated SELECT, or a view an export or import reads, that prepared cleanly
+   * and then failed while it ran: on the staged data, or on an argument a
+   * function rejects as it runs.
+   */
   sqlExecutionError: 'sql_execution_error',
 } as const;
 
@@ -1657,6 +1675,14 @@ const SQL_READ_ONLY_RECOVERY =
  * prepared, so the fault is in the data the caller asked the engine to
  * process, not in the engine.
  *
+ * BINDER joins them because a binder error that reaches the classifier was
+ * raised while a prepared statement ran: the gate refuses a SELECT that fails
+ * to prepare as `invalid_sql` before anything runs. Two sources remain, both
+ * the caller's SQL: a table function rejecting its arguments as it runs (a
+ * zero step or an infinite bound in `range` or `generate_series`), and a view
+ * bound by an export or import after the table it reads was staged again
+ * without the column it names.
+ *
  * `@duckdb/node-api` surfaces a bare `Error` — no `errorType`, no `code` — and
  * `@duckdb/node-bindings` binds neither `duckdb_error_data_error_type` nor
  * `duckdb_result_error_type`, so the leading class prefix is the only
@@ -1665,10 +1691,10 @@ const SQL_READ_ONLY_RECOVERY =
  * split and diverge only after `Out of `, and an engine fault whose message
  * merely quotes a data-error class mid-sentence is still an engine fault.
  */
-const DUCKDB_EXECUTION_ERROR_PREFIX = /^(Conversion|Invalid Input|Out of Range) Error\b/;
+const DUCKDB_EXECUTION_ERROR_PREFIX = /^(Conversion|Invalid Input|Out of Range|Binder) Error\b/;
 
 /** A class {@link DUCKDB_EXECUTION_ERROR_PREFIX} captures. */
-type ExecutionErrorClass = 'Conversion' | 'Invalid Input' | 'Out of Range';
+type ExecutionErrorClass = 'Conversion' | 'Invalid Input' | 'Out of Range' | 'Binder';
 
 /** The `sql_execution_error` recovery per execution-error class, each the fix that class calls for. */
 const EXECUTION_ERROR_RECOVERY: Record<ExecutionErrorClass, string> = {
@@ -1678,6 +1704,8 @@ const EXECUTION_ERROR_RECOVERY: Record<ExecutionErrorClass, string> = {
     'Filter out the rows whose values the function cannot read, or use the function’s TRY variant where it has one, such as TRY_CAST or TRY_STRPTIME.',
   'Out of Range':
     'Cast to a wider type such as HUGEINT or DOUBLE before the arithmetic that overflows, or filter out the rows whose values are out of range.',
+  Binder:
+    'Correct the argument the message names, such as a zero step or an infinite bound in range or generate_series. When it names a column, define the view that reads it again over the tables as now staged.',
 };
 
 /**

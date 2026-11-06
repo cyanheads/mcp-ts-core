@@ -1,9 +1,9 @@
 /**
- * @fileoverview Path resolution and sandboxing for canvas exports. Path
- * targets are resolved against `CANVAS_EXPORT_PATH`; absolute paths and `..`
- * traversal are rejected. Stream targets write a scratch file in the
- * provider's private scratch directory, pipe it to the caller's
- * `WritableStream`, then unlink.
+ * @fileoverview Path resolution and sandboxing for canvas exports, and the
+ * source and format clauses of the `COPY` an export runs. Path targets are
+ * resolved against `CANVAS_EXPORT_PATH`; absolute paths and `..` traversal are
+ * rejected. Stream targets write a scratch file in the provider's private
+ * scratch directory, pipe it to the caller's `WritableStream`, then unlink.
  * @module src/services/canvas/providers/duckdb/exportWriter
  */
 
@@ -12,6 +12,7 @@ import { lstat, mkdir, open, stat, unlink } from 'node:fs/promises';
 import { isAbsolute, join, relative, resolve, sep } from 'node:path';
 
 import { validationError } from '@/types-global/errors.js';
+import { quoteIdentifier } from '../../core/sqlGate.js';
 import type { ExportFormat, ExportTarget } from '../../types.js';
 
 /**
@@ -76,6 +77,26 @@ export function copyFormatClause(format: ExportFormat): string {
     case 'json':
       return "(FORMAT 'json')";
   }
+}
+
+/**
+ * The `COPY` source a CSV or JSON export of `tableName` runs: the table or view
+ * followed by an empty `range(0)` branch of `columnCount` NULLs, one per column.
+ *
+ * With insertion order preserved, DuckDB plans `COPY "t"` to CSV or JSON as a
+ * batch copy whose writer holds each batch's whole text in one buffer per
+ * thread, and v2.0 allocates those buffers inside `memory_limit`, so wide rows
+ * run out of memory. A `range()` source has no batch index, so this union
+ * plans DuckDB's single-writer `COPY_TO_FILE`, which flushes to the file as it
+ * writes, on one engine thread. `UNION ALL` keeps the table's insertion order
+ * and a view's `ORDER BY`. The memory bound rests on the planner keeping the
+ * empty branch: an engine that prunes it, as DuckDB already prunes
+ * `WHERE false`, plans the batch copy again, so row order still holds, the
+ * bound does not, and the wide-row export smoke test fails.
+ */
+export function singleWriterCopySource(tableName: string, columnCount: number): string {
+  const nulls = Array.from({ length: columnCount }, () => 'NULL').join(', ');
+  return `(SELECT * FROM ${quoteIdentifier(tableName)} UNION ALL SELECT ${nulls} FROM range(0))`;
 }
 
 /**

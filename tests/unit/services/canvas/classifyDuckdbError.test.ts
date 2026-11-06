@@ -243,12 +243,19 @@ describe('classifyDuckdbError', () => {
 
 /**
  * DuckDB's own `Exception::IsExecutionError` is exactly CONVERSION,
- * INVALID_INPUT, and OUT_OF_RANGE. `@duckdb/node-api` surfaces a bare `Error`
- * with no `errorType`, so the leading class prefix is the only discriminator
- * in process — and it has to be anchored, since `Out of Range Error` and
- * `Out of Memory Error` sit on opposite sides of the split.
+ * INVALID_INPUT, and OUT_OF_RANGE. A BINDER error joins them here: the
+ * provider refuses a statement that fails to prepare before it runs, so a
+ * binder error reaching the classifier was raised while a prepared statement
+ * ran. `@duckdb/node-api` surfaces a bare `Error` with no `errorType`, so the
+ * leading class prefix is the only discriminator in process — and it has to be
+ * anchored, since `Out of Range Error` and `Out of Memory Error` sit on
+ * opposite sides of the split.
  */
 describe('classifyDuckdbError · execution-time data errors (#451)', () => {
+  /** The recovery a binder error raised while a prepared statement runs calls for. */
+  const BINDER_EXECUTION_HINT =
+    'Correct the argument the message names, such as a zero step or an infinite bound in range or generate_series. When it names a column, define the view that reads it again over the tables as now staged.';
+
   /** Each class with a message measured from DuckDB v2.0.0, and the recovery that class calls for. */
   const EXECUTION_MESSAGES = [
     [
@@ -267,6 +274,11 @@ describe('classifyDuckdbError · execution-time data errors (#451)', () => {
       'Out of Range Error: Overflow in addition of INT64 (9223372036854775807 + 1)!',
       'Cast to a wider type such as HUGEINT or DOUBLE before the arithmetic that overflows, or filter out the rows whose values are out of range.',
     ],
+    // A series rejecting its arguments as it runs, the same on v1.5.6.
+    ['Binder Error: interval cannot be 0!', BINDER_EXECUTION_HINT],
+    ['Binder Error: RANGE with infinite bounds is not supported', BINDER_EXECUTION_HINT],
+    // A view whose staged table no longer has the column it reads, bound by an export.
+    ['Binder Error: Referenced column "a" not found in FROM clause!', BINDER_EXECUTION_HINT],
   ] as const;
 
   it.each(EXECUTION_MESSAGES)(
@@ -415,6 +427,7 @@ function engineMessages(size: number): Error[] {
     `Parser Error: syntax error at or near "+"\n\nLINE 1: ${fill('SELECT 1 + ')}`,
     `Catalog Error: ${fill('Catalog Error: ')}`,
     `IO Error: ${fill('/srv/exports/')}`,
+    fill('Binder Erro'),
   ].map((message) => new Error(message));
 }
 
@@ -434,6 +447,7 @@ describe('engine-message classification cost', () => {
         undefined,
         undefined,
         'sql_parse_error',
+        undefined,
         undefined,
         undefined,
       ]);
@@ -458,6 +472,7 @@ describe('engine-message classification cost', () => {
         PARSE_HINT,
         "Correct the function, type, collation, or schema name the message reports missing — list the staged tables with this server's dataframe-describe tool.",
         "Send a read-only SELECT over the staged tables — list them with this server's dataframe-describe tool. This surface reads no files and cannot create, alter, or drop anything.",
+        BINDER_HINT,
       ]);
       return () => {
         for (const message of messages) prepareFailureRecovery(message);

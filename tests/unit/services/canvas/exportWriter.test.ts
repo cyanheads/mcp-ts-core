@@ -17,6 +17,7 @@ import {
   isPathTarget,
   pipeFileToStream,
   resolveExportPath,
+  singleWriterCopySource,
   tempFilePathFor,
 } from '@/services/canvas/providers/duckdb/exportWriter.js';
 
@@ -139,6 +140,21 @@ describe('copyFormatClause', () => {
     ['json', "(FORMAT 'json')"],
   ] as const)('emits the COPY format clause for %s', (format, clause) => {
     expect(copyFormatClause(format)).toBe(clause);
+  });
+});
+
+describe('singleWriterCopySource', () => {
+  it.each([
+    [1, '(SELECT * FROM "t" UNION ALL SELECT NULL FROM range(0))'],
+    [3, '(SELECT * FROM "t" UNION ALL SELECT NULL, NULL, NULL FROM range(0))'],
+  ] as const)('unions the object with an empty range(0) branch of %i NULLs', (count, source) => {
+    expect(singleWriterCopySource('t', count)).toBe(source);
+  });
+
+  it('quotes the object name as an identifier', () => {
+    expect(singleWriterCopySource('my"t', 1)).toBe(
+      '(SELECT * FROM "my""t" UNION ALL SELECT NULL FROM range(0))',
+    );
   });
 });
 

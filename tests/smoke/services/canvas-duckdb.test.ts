@@ -24,6 +24,7 @@ import {
   collectDisallowedOperators,
 } from '@/services/canvas/core/sqlGate.js';
 import { DuckdbProvider } from '@/services/canvas/providers/duckdb/DuckdbProvider.js';
+import { copyFormatClause } from '@/services/canvas/providers/duckdb/exportWriter.js';
 import { JsonRpcErrorCode, McpError } from '@/types-global/errors.js';
 import type { RequestContext } from '@/utils/internal/requestContext.js';
 
@@ -32,6 +33,15 @@ const ctx: RequestContext = {
   timestamp: '2026-01-01T00:00:00.000Z',
   tenantId: 'smoke-tenant',
 };
+
+/** The leading `i` of each data line of an export, in file order; a CSV's `i` header dropped. */
+async function exportedIds(path: string, format: 'csv' | 'json'): Promise<number[]> {
+  const lines = (await readFile(path, 'utf8')).split('\n');
+  expect(lines.pop()).toBe('');
+  if (format === 'json') return lines.map((line) => (JSON.parse(line) as { i: number }).i);
+  expect(lines.shift()).toMatch(/^i(,|$)/);
+  return lines.map((line) => Number.parseInt(line, 10));
+}
 
 describe('canvas · DuckDB round trip', () => {
   let canvas: DataCanvas;
@@ -321,6 +331,108 @@ describe('canvas · DuckDB round trip', () => {
         await rm(outside, { recursive: true, force: true });
       }
     });
+  });
+
+  // A CSV or JSON export writes the bytes a plain COPY of the object writes, in
+  // the table's insertion order or a view's ORDER BY, past one row group. At one
+  // engine thread DuckDB writes in order either way, so the order cases catch a
+  // reordering export only on a host with two or more cores.
+  describe('CSV and JSON export bytes and row order', () => {
+    const ORDERED_ROWS = 400_000;
+    let exporting: CanvasInstance;
+
+    beforeAll(async () => {
+      exporting = await canvas.acquire(undefined, ctx);
+      await exporting.query(
+        `SELECT * FROM (VALUES
+          (1, 1.5::DOUBLE, 12.345::DECIMAL(18, 3), 'plain', DATE '2024-01-02', TIMESTAMP '2024-01-02 03:04:05.678', true, [1, 2, NULL], {'k': 'v', 'n': 1}, MAP {'a': 1}, 'z'),
+          (2, -0.25, -1.5, 'has "quotes", a comma', NULL, NULL, false, [], {'k': NULL, 'n': NULL}, MAP {}, NULL),
+          (3, NULL, NULL, 'line one' || chr(10) || 'line two', DATE '1970-01-01', TIMESTAMP '1970-01-01 00:00:00', NULL, NULL, NULL, NULL, NULL)
+        ) AS v(i, d, n, s, dt, ts, b, l, st, m, z)`,
+        { registerAs: 'mixed' },
+      );
+      // Four row groups of 122,880 rows.
+      await exporting.query(`SELECT i FROM range(${ORDERED_ROWS}) r(i)`, {
+        registerAs: 'ordered',
+      });
+      await exporting.registerView('ordered_desc', 'SELECT i FROM ordered ORDER BY i DESC');
+    });
+
+    it.each(['csv', 'json'] as const)(
+      'writes the %s bytes a plain COPY of a mixed-type table writes',
+      async (format) => {
+        const result = await exporting.export('mixed', { format, path: `mixed.${format}` });
+        expect(result.rowCount).toBe(3);
+
+        // biome-ignore lint/complexity/useLiteralKeys: deliberate access to the private record to run a plain COPY past the provider's export.
+        const record = provider['canvases'].get(exporting.canvasId)!;
+        const plainPath = join(exportRoot, `mixed-plain.${format}`);
+        await record.controlConnection.run(
+          `COPY "mixed" TO '${plainPath}' ${copyFormatClause(format)}`,
+        );
+        const written = await readFile(join(exportRoot, `mixed.${format}`), 'utf8');
+        expect(written).toBe(await readFile(plainPath, 'utf8'));
+        expect(written).toContain(
+          format === 'csv' ? '"has ""quotes"", a comma"' : '"has \\"quotes\\", a comma"',
+        );
+      },
+    );
+
+    it.each(['csv', 'json'] as const)(
+      'writes every row of a table spanning several row groups as %s in insertion order',
+      async (format) => {
+        const result = await exporting.export('ordered', { format, path: `ordered.${format}` });
+        expect(result.rowCount).toBe(ORDERED_ROWS);
+        const ids = await exportedIds(join(exportRoot, `ordered.${format}`), format);
+        expect(ids).toHaveLength(ORDERED_ROWS);
+        expect(ids.findIndex((id, line) => id !== line)).toBe(-1);
+      },
+    );
+
+    it.each(['csv', 'json'] as const)(
+      'writes a view as %s in the order its ORDER BY sets',
+      async (format) => {
+        const result = await exporting.export('ordered_desc', {
+          format,
+          path: `ordered_desc.${format}`,
+        });
+        expect(result.rowCount).toBe(ORDERED_ROWS);
+        const ids = await exportedIds(join(exportRoot, `ordered_desc.${format}`), format);
+        expect(ids).toHaveLength(ORDERED_ROWS);
+        expect(ids.findIndex((id, line) => id !== ORDERED_ROWS - 1 - line)).toBe(-1);
+      },
+    );
+
+    // An export reads one version of the object: its row count, its column
+    // list, and its COPY all see the table as it stood when the export began.
+    it.each(['csv', 'json'] as const)(
+      'writes the %s rows a table held when the export began, though another call stages it again before the COPY',
+      async (format) => {
+        const table = `restaged_${format}`;
+        await exporting.registerTable(table, [{ i: 0 }, { i: 1 }]);
+        const internals = provider as unknown as {
+          countRows(connection: unknown, name: string): Promise<number>;
+        };
+        const countRows = internals.countRows.bind(provider);
+        const spy = vi.spyOn(internals, 'countRows').mockImplementationOnce(async (...args) => {
+          const counted = await countRows(...args);
+          await exporting.registerTable(table, [{ i: 7, extra: 'x' }]);
+          return counted;
+        });
+        try {
+          const result = await exporting.export(table, { format, path: `${table}.${format}` });
+          expect(spy).toHaveBeenCalledOnce();
+          expect(result.rowCount).toBe(2);
+          expect(await exportedIds(join(exportRoot, `${table}.${format}`), format)).toEqual([0, 1]);
+        } finally {
+          spy.mockRestore();
+        }
+        // The call that staged it again committed: later reads see its table.
+        expect((await exporting.query(`SELECT i, extra FROM ${table}`)).rows).toEqual([
+          { i: '7', extra: 'x' },
+        ]);
+      },
+    );
   });
 
   it('drop and clear behave correctly', async () => {
@@ -954,6 +1066,182 @@ describe('canvas · DuckDB round trip', () => {
     });
   });
 
+  // range() and generate_series() called with constant arguments plan under
+  // their own names and pass the gate, for calendar spines and gap-filling. A
+  // staged table named `range` is on the canvas throughout: a bare `FROM range`
+  // reads it, and every call below still binds the function.
+  describe('range() and generate_series() series', () => {
+    const BINDER_EXECUTION_HINT =
+      'Correct the argument the message names, such as a zero step or an infinite bound in range or generate_series. When it names a column, define the view that reads it again over the tables as now staged.';
+    let series: CanvasInstance;
+
+    beforeAll(async () => {
+      series = await canvas.acquire(undefined, ctx);
+      await series.registerTable('series_src', [{ x: 1 }, { x: 2 }, { x: 3 }]);
+      await series.registerTable('range', [{ x: 7 }]);
+    });
+
+    const ADMITTED = [
+      ['range(n)', 'SELECT * FROM range(3)', 3],
+      ['range(a, b, step)', 'SELECT * FROM range(1, 10, 2)', 5],
+      [
+        'range over TIMESTAMP with an INTERVAL step',
+        "SELECT * FROM range(TIMESTAMP '2024-01-01', TIMESTAMP '2024-01-04', INTERVAL 1 DAY)",
+        3,
+      ],
+      [
+        'range over TIMESTAMPTZ with an INTERVAL step',
+        "SELECT * FROM range(TIMESTAMPTZ '2024-01-01 00:00:00+00', TIMESTAMPTZ '2024-01-03 00:00:00+00', INTERVAL 1 DAY)",
+        2,
+      ],
+      ['generate_series(a, b)', 'SELECT * FROM generate_series(1, 3)', 3],
+      [
+        'generate_series over TIMESTAMP with an INTERVAL step',
+        "SELECT * FROM generate_series(TIMESTAMP '2024-01-01', TIMESTAMP '2024-01-03', INTERVAL 1 DAY)",
+        3,
+      ],
+      [
+        'generate_series over TIMESTAMPTZ with an INTERVAL step',
+        "SELECT * FROM generate_series(TIMESTAMPTZ '2024-01-01 00:00:00+00', TIMESTAMPTZ '2024-01-03 00:00:00+00', INTERVAL 1 DAY)",
+        3,
+      ],
+      ['a quoted, schema-qualified "range"', 'SELECT * FROM system.main."range"(3)', 3],
+      [
+        'a spine left-joined to a staged table',
+        'SELECT r.i, count(s.x) AS n FROM range(5) r(i) LEFT JOIN series_src s ON s.x = r.i GROUP BY r.i',
+        5,
+      ],
+    ] as const;
+    const admitted = ADMITTED.map(([label, sql, rows], i) => [label, sql, rows, i] as const);
+
+    it.each(admitted)('query() admits %s', async (_label, sql, rows) => {
+      const result = await series.query(sql);
+      expect(result.rowCount).toBe(rows);
+      expect(result.rows).toHaveLength(rows);
+    });
+
+    it.each(admitted)('query({ registerAs }) admits %s', async (_label, sql, rows, i) => {
+      const result = await series.query(sql, { registerAs: `series_t_${i}` });
+      expect(result).toMatchObject({ tableName: `series_t_${i}`, rowCount: rows });
+    });
+
+    it.each(admitted)('registerView() admits %s', async (_label, sql, rows, i) => {
+      await series.registerView(`series_v_${i}`, sql);
+      const result = await series.query(`SELECT count(*)::INTEGER AS n FROM series_v_${i}`);
+      expect(result.rows).toEqual([{ n: rows }]);
+    });
+
+    it('fills the gaps of a spine with zero counts, in spine order', async () => {
+      const result = await series.query(
+        'SELECT r.i, count(s.x)::INTEGER AS n FROM range(5) r(i) LEFT JOIN series_src s ON s.x = r.i GROUP BY r.i ORDER BY r.i',
+      );
+      expect(result.rows).toEqual([
+        { i: '0', n: 0 },
+        { i: '1', n: 1 },
+        { i: '2', n: 1 },
+        { i: '3', n: 1 },
+        { i: '4', n: 0 },
+      ]);
+    });
+
+    it('reads the staged table named range bare, and binds the function when called', async () => {
+      expect((await series.query('SELECT * FROM range')).rows).toEqual([{ x: '7' }]);
+      expect((await series.query('SELECT * FROM range(3)')).rows).toEqual([
+        { range: '0' },
+        { range: '1' },
+        { range: '2' },
+      ]);
+    });
+
+    it('returns rowLimit rows of a trillion-row series, marked truncated', async () => {
+      const result = await series.query('SELECT * FROM range(1000000000000)', { rowLimit: 100 });
+      expect(result).toMatchObject({ rowCount: 100, truncated: true });
+      expect(result.rows).toHaveLength(100);
+      expect(result.rows[0]).toEqual({ range: '0' });
+      expect(result.rows[99]).toEqual({ range: '99' });
+    });
+
+    const BAD_ARGUMENTS = [
+      ['a zero range step', 'SELECT * FROM range(0, 10, 0)'],
+      ['a zero generate_series step', 'SELECT * FROM generate_series(0, 10, 0)'],
+      [
+        'a zero INTERVAL step',
+        "SELECT * FROM generate_series(TIMESTAMP '2024-01-01', TIMESTAMP '2024-01-02', INTERVAL 0 DAY)",
+      ],
+      [
+        'infinite TIMESTAMP bounds',
+        "SELECT * FROM range(TIMESTAMP '-infinity', TIMESTAMP 'infinity', INTERVAL 1 DAY)",
+      ],
+    ] as const;
+
+    /** The rejection of an argument the series rejects as it runs, after the gate prepared it. */
+    function expectArgumentRejection(error: unknown): void {
+      expect(error).toBeInstanceOf(McpError);
+      expect(error).toMatchObject({
+        code: JsonRpcErrorCode.ValidationError,
+        data: { reason: 'sql_execution_error', recovery: { hint: BINDER_EXECUTION_HINT } },
+      });
+      expect((error as McpError).message).toMatch(/^Canvas query failed: Binder Error: \S/);
+    }
+
+    it.each(BAD_ARGUMENTS)('query() refuses %s as sql_execution_error', async (_label, sql) => {
+      expectArgumentRejection(
+        await series.query(sql).then(
+          () => undefined,
+          (err: unknown) => err,
+        ),
+      );
+    });
+
+    it.each(BAD_ARGUMENTS.map(([label, sql], i) => [label, sql, i] as const))(
+      'query({ registerAs }) refuses %s as sql_execution_error and leaves no table',
+      async (_label, sql, i) => {
+        const tableName = `series_bad_${i}`;
+        expectArgumentRejection(
+          await series.query(sql, { registerAs: tableName }).then(
+            () => undefined,
+            (err: unknown) => err,
+          ),
+        );
+        expect(await series.describe({ tableName })).toEqual([]);
+      },
+    );
+
+    it('registers a view over a zero step and refuses the query that reads it', async () => {
+      await series.registerView('series_zero_step', 'SELECT * FROM range(0, 10, 0)');
+      expectArgumentRejection(
+        await series.query('SELECT * FROM series_zero_step').then(
+          () => undefined,
+          (err: unknown) => err,
+        ),
+      );
+    });
+
+    // The same class covers a view an export binds after its table was staged
+    // again without the column the view reads.
+    it.each(['csv', 'json', 'parquet'] as const)(
+      'refuses a %s export of a view whose table lost the column it reads as sql_execution_error',
+      async (format) => {
+        const table = `series_stale_${format}`;
+        await series.registerTable(table, [{ a: 1, b: 2 }]);
+        await series.registerView(`${table}_v`, `SELECT a FROM ${table}`);
+        await series.registerTable(table, [{ b: 3 }]);
+        const error = await series
+          .export(`${table}_v`, { format, path: `${table}.${format}` })
+          .then(
+            () => undefined,
+            (err: unknown) => err,
+          );
+        expect(error).toBeInstanceOf(McpError);
+        expect(error).toMatchObject({
+          code: JsonRpcErrorCode.ValidationError,
+          data: { reason: 'sql_execution_error', recovery: { hint: BINDER_EXECUTION_HINT } },
+        });
+        expect((error as McpError).message).toMatch(/^Canvas query failed: Binder Error: \S/);
+      },
+    );
+  });
+
   // A server learns the column types of a caller's (already-gated) SQL by
   // describing it through query() over a string literal. The literal is gated
   // as its own statement, so the metadata query runs where a computed string
@@ -1297,8 +1585,8 @@ describe('canvas · DuckDB round trip', () => {
     });
   });
 
-  // DuckDB v2.0 runs a COPY out of memory, where v1.5 spills, once its
-  // per-thread buffers near memory_limit; a 256 MB canvas runs at most 4.
+  // Each thread of a Parquet COPY holds write buffers of its own, which DuckDB
+  // v2.0 allocates inside memory_limit; a 256 MB canvas runs at most 4.
   it('caps engine threads at one per 64 MB of memory_limit, below the count DuckDB detects', async () => {
     const plain = await DuckDBInstance.create(':memory:');
     const connection = await plain.connect();
@@ -1572,6 +1860,93 @@ describe('canvas · DuckDB round trip', () => {
     expect(mcpErr.code).toBe(-32010);
     expect((mcpErr.data as { reason?: string } | undefined)?.reason).toBeUndefined();
   });
+});
+
+/**
+ * With insertion order preserved, DuckDB plans a CSV or JSON `COPY` of a table
+ * as a batch copy whose writer holds each batch's whole text in one buffer per
+ * thread; v2.0 allocates those inside `memory_limit` and fails with Out of
+ * Memory once rows are wide. The export's single-writer statement flushes as it
+ * writes. A 128 MB canvas runs two engine threads; at one thread DuckDB plans
+ * the single-writer copy on its own, so on a single-core host these cases pass
+ * with either statement.
+ */
+describe('canvas · CSV and JSON export of wide rows', () => {
+  /**
+   * About 82 MB of text for each format, past the 64 MiB a batch buffer can
+   * hold before it asks for 128 MiB. A JSON copy also holds a working set that
+   * grows with row width, not row count, so JSON carries the same text in rows
+   * half as wide, which keeps the case within the 128 MB canvas.
+   */
+  const FIXTURES = {
+    csv: { table: 'wide_csv', rows: 20_000, width: 4096 },
+    json: { table: 'wide_json', rows: 40_000, width: 2048 },
+  } as const;
+  let wideProvider: DuckdbProvider;
+  let wideExportRoot: string;
+  let wide: CanvasInstance;
+
+  beforeAll(async () => {
+    wideExportRoot = await mkdtemp(join(tmpdir(), 'canvas-smoke-wide-'));
+    wideProvider = new DuckdbProvider({
+      memoryLimitMb: 128,
+      exportRootPath: wideExportRoot,
+      defaultRowLimit: 100,
+      schemaSniffRows: 10,
+    });
+    const wideCanvas = new DataCanvas(
+      wideProvider,
+      new CanvasRegistry(wideProvider, {
+        ttlMs: 60_000,
+        absoluteCapMs: 600_000,
+        maxCanvasesPerTenant: 10,
+        sweeperIntervalMs: 0,
+      }),
+    );
+    wide = await wideCanvas.acquire(undefined, ctx);
+    for (const { table, rows, width } of Object.values(FIXTURES)) {
+      await wide.query(
+        `SELECT i, rpad('AAA-' || i || '-', ${width}, 'x') AS pad FROM range(${rows}) r(i)`,
+        { registerAs: table },
+      );
+    }
+  });
+
+  afterAll(async () => {
+    await wideProvider?.shutdown();
+    await rm(wideExportRoot, { recursive: true, force: true });
+  });
+
+  it.each(['csv', 'json'] as const)(
+    'exports 82 MB of wide rows as %s to a path, in order',
+    async (format) => {
+      const { table, rows } = FIXTURES[format];
+      const result = await wide.export(table, { format, path: `${table}.${format}` });
+      expect(result.rowCount).toBe(rows);
+      const ids = await exportedIds(join(wideExportRoot, `${table}.${format}`), format);
+      expect(ids).toHaveLength(rows);
+      expect(ids.findIndex((id, line) => id !== line)).toBe(-1);
+    },
+  );
+
+  it.each(['csv', 'json'] as const)(
+    'exports 82 MB of wide rows as %s to a stream',
+    async (format) => {
+      const { table, rows, width } = FIXTURES[format];
+      let bytes = 0;
+      let lines = 0;
+      const stream = new WritableStream<Uint8Array>({
+        write(chunk) {
+          bytes += chunk.byteLength;
+          for (const byte of chunk) if (byte === 0x0a) lines += 1;
+        },
+      });
+      const result = await wide.export(table, { format, stream });
+      expect(result).toMatchObject({ rowCount: rows, sizeBytes: bytes });
+      expect(bytes).toBeGreaterThan(rows * width);
+      expect(lines).toBe(format === 'csv' ? rows + 1 : rows);
+    },
+  );
 });
 
 /**

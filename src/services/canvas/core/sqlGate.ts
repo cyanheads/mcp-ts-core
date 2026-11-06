@@ -150,6 +150,14 @@ export const ALLOWED_PLAN_OPERATORS: ReadonlySet<string> = new Set([
   'DUMMY_SCAN',
   'EMPTY_RESULT',
   'IN_MEMORY_TABLE_SCAN',
+  /**
+   * Generated series. A table function plans under its own name, so these admit
+   * only the `range` and `generate_series` table overloads called with constant
+   * arguments; a column (lateral) or subquery argument plans as INOUT_FUNCTION,
+   * which stays off this list, and a subquery's own operators stay in the plan.
+   */
+  'RANGE',
+  'GENERATE_SERIES',
   // Projection / filter
   'PROJECTION',
   'FILTER',

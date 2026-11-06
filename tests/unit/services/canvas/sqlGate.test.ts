@@ -477,6 +477,11 @@ describe('sqlGate · the plan walk reads the function each scan names', () => {
       'non-string extra_info values',
       [scanNode('SEQ_SCAN', { Function: 42, Projections: [['read_csv']], Filters: null })],
     ],
+    ['a range() series', [scanNode('RANGE', { Function: 'RANGE', 'Estimated Cardinality': '3' })]],
+    [
+      'a generate_series() series',
+      [scanNode('GENERATE_SERIES', { Function: 'GENERATE_SERIES', 'Estimated Cardinality': '3' })],
+    ],
   ])('passes %s', (_label, plan) => {
     expect(collectPlanViolations(plan)).toEqual({
       offending: new Set(),
@@ -1265,6 +1270,37 @@ describe('sqlGate · exported allowlists', () => {
     for (const op of ['PRAGMA_VERSION', 'PRAGMA_TABLE_INFO', 'PRAGMA_STORAGE_INFO']) {
       expect(ALLOWED_PLAN_OPERATORS.has(op)).toBe(false);
     }
+  });
+
+  it('allowlist admits the RANGE and GENERATE_SERIES scans a constant-argument call plans as', () => {
+    expect(ALLOWED_PLAN_OPERATORS.has('RANGE')).toBe(true);
+    expect(ALLOWED_PLAN_OPERATORS.has('GENERATE_SERIES')).toBe(true);
+  });
+
+  // `SELECT * FROM t, range(t.x)` on DuckDB v1.5.6: a column argument plans the
+  // series as INOUT_FUNCTION, which stays off the allowlist.
+  it('refuses a series called with a column argument as INOUT_FUNCTION', () => {
+    const plan = [
+      scanNode('LEFT_DELIM_JOIN', { 'Join Type': 'INNER' }, [
+        scanNode('SEQ_SCAN', { Table: 'memory.main.t', Projections: 'x' }),
+        scanNode('HASH_JOIN', { 'Join Type': 'INNER' }, [
+          scanNode('COLUMN_DATA_SCAN', { 'Estimated Cardinality': '1' }),
+          scanNode('INOUT_FUNCTION', { Name: 'range', 'Estimated Cardinality': '0' }, [
+            scanNode('PROJECTION', { Projections: ['x', 'x'] }, [
+              scanNode('DELIM_SCAN', { 'Delim Index': '1' }),
+            ]),
+          ]),
+        ]),
+        scanNode('HASH_GROUP_BY', { Groups: '#0' }),
+      ]),
+    ];
+    expect(collectPlanViolations(plan)).toEqual({
+      offending: new Set(['INOUT_FUNCTION']),
+      deniedFunctions: new Set(),
+    });
+    expect(gateRejection(() => assertPlanReadOnly(plan)).data?.operators).toEqual([
+      'INOUT_FUNCTION',
+    ]);
   });
 
   it('plan operator allowlist explicitly excludes write/external operators', () => {

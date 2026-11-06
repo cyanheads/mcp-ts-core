@@ -20,7 +20,7 @@ import { chmod, mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { basename, join } from 'node:path';
 
-import { DuckDBInstance } from '@duckdb/node-api';
+import { DuckDBInstance, version as duckdbVersion } from '@duckdb/node-api';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
 import type { CanvasInstance } from '@/services/canvas/core/CanvasInstance.js';
@@ -270,13 +270,34 @@ const PLAN_WALK_READS: Corpus = [
   ['a quoted duckdb_settings()', () => 'SELECT * FROM "duckdb_settings"()'],
   ['a quoted duckdb_temporary_files()', () => 'SELECT * FROM "duckdb_temporary_files"()'],
   ['duckdb_profiling_settings()', () => 'SELECT * FROM duckdb_profiling_settings()'],
-  ['duckdb_external_resources()', () => 'SELECT * FROM duckdb_external_resources()'],
   ['SHOW TABLES inside a query() literal', () => `SELECT * FROM query('SHOW TABLES')`],
   [
     'a catalog view inside a query() literal',
     () => `SELECT * FROM query('SELECT * FROM duckdb_tables')`,
   ],
 ];
+
+/**
+ * Series called with a column or a subquery argument, each with an operator its
+ * refusal must name. Only a constant-argument call plans as `RANGE` or
+ * `GENERATE_SERIES`; these plan as `INOUT_FUNCTION`, and a subquery's own
+ * operators stay in the plan the walk reads.
+ */
+const SERIES_PLAN_REFUSALS: ReadonlyArray<readonly [label: string, sql: string, operator: string]> =
+  [
+    ['a lateral range(t.x)', 'SELECT t.x, r.range FROM t, range(t.x) r', 'INOUT_FUNCTION'],
+    [
+      'a lateral generate_series(1, t.x)',
+      'SELECT * FROM t, generate_series(1, t.x)',
+      'INOUT_FUNCTION',
+    ],
+    ['a subquery argument', 'SELECT * FROM range((SELECT max(x) FROM t))', 'INOUT_FUNCTION'],
+    [
+      'a catalog read in a subquery argument',
+      'SELECT * FROM range((SELECT count(*) FROM duckdb_settings()))',
+      'DUCKDB_SETTINGS',
+    ],
+  ];
 
 /**
  * Calls the parse tree refuses by name: functions DuckDB resolves while
@@ -320,6 +341,11 @@ const PARSED_FUNCTION_CALLS: ReadonlyArray<readonly [label: string, fn: string, 
   ['current_schema()', 'current_schema', 'SELECT current_schema() AS v'],
   ['current_schemas()', 'current_schemas', 'SELECT current_schemas(true) AS v'],
   ['in_search_path()', 'in_search_path', `SELECT in_search_path('memory', 'main') AS v`],
+  [
+    'current_setting() in a range() argument',
+    'current_setting',
+    `SELECT * FROM range(length(current_setting('temp_directory')))`,
+  ],
   [
     'query() over a concatenated settings read',
     'query',
@@ -1299,6 +1325,31 @@ describe('canvas · SQL gate refuses reads only the engine or the plan walk can 
     PLAN_WALK_READS,
     ([, sql]) => sql(),
     (err) => expectPlanWalkRefusal(err),
+  );
+
+  // DuckDB v2.0 plans duckdb_external_resources() as its own scan, which the
+  // plan walk refuses; v1.5 has no such function and refuses the call itself.
+  acrossEntryPoints(
+    'duckdb_external_resources()',
+    'extres',
+    [['duckdb_external_resources()', () => 'SELECT * FROM duckdb_external_resources()']] as const,
+    ([, sql]) => sql(),
+    (err) =>
+      expect(err.data?.reason).toBe(
+        duckdbVersion().startsWith('v1.') ? 'invalid_sql' : 'plan_operator_not_allowed',
+      ),
+  );
+
+  acrossEntryPoints(
+    'series over a column or a subquery',
+    'series',
+    SERIES_PLAN_REFUSALS,
+    ([, sql]) => sql,
+    (err, [, , operator]) => {
+      expect(err.code).toBe(JsonRpcErrorCode.ValidationError);
+      expect(err.data?.reason).toBe('plan_operator_not_allowed');
+      expect(err.data?.operators).toContain(operator);
+    },
   );
 
   acrossEntryPoints(
