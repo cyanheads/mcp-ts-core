@@ -19,6 +19,9 @@ import { pathToFileURL } from 'node:url';
 import type { Migration, SyncPage } from '@/services/mirror/types.js';
 import type {
   BarrierStep,
+  BindOutcome,
+  BindReport,
+  BindTask,
   MigrationTask,
   MirrorProcessTask,
   OpenReport,
@@ -64,20 +67,27 @@ async function registerSourceHooks(): Promise<void> {
 if (!process.versions.bun) await registerSourceHooks();
 
 const { defineMirror } = await import('@/services/mirror/core/defineMirror.js');
+const { openSqliteHandle } = await import('@/services/mirror/sqlite/handle.js');
 const { sqliteMirrorStore } = await import('@/services/mirror/sqlite/sqliteMirrorStore.js');
 
 const task = JSON.parse(process.argv[2] ?? '') as MirrorProcessTask;
 const cell = new Int32Array(new SharedArrayBuffer(4));
 
+/** The task's barrier directory. A bind task coordinates with no other process, so it has none. */
+function barrierDir(): string {
+  if (task.role === 'bind') throw new Error('A bind task has no barrier directory.');
+  return task.barriers;
+}
+
 function signal(name: string | undefined): void {
-  if (name) writeFileSync(join(task.barriers, name), '');
+  if (name) writeFileSync(join(barrierDir(), name), '');
 }
 
 /** Blocks the thread until barrier `name` exists — for waits inside synchronous driver calls. */
 function waitSync(name: string | undefined): void {
   if (!name) return;
   const deadline = performance.now() + BARRIER_DEADLINE_MS;
-  while (!existsSync(join(task.barriers, name))) {
+  while (!existsSync(join(barrierDir(), name))) {
     if (performance.now() > deadline) throw new Error(`Barrier "${name}" never opened.`);
     Atomics.wait(cell, 0, 0, POLL_MS);
   }
@@ -87,7 +97,7 @@ function waitSync(name: string | undefined): void {
 async function waitAsync(name: string | undefined): Promise<void> {
   if (!name) return;
   const deadline = performance.now() + BARRIER_DEADLINE_MS;
-  while (!existsSync(join(task.barriers, name))) {
+  while (!existsSync(join(barrierDir(), name))) {
     if (performance.now() > deadline) throw new Error(`Barrier "${name}" never opened.`);
     await delay(POLL_MS);
   }
@@ -103,7 +113,7 @@ async function rendezvous(meet: Rendezvous | undefined): Promise<void> {
   if (!meet) return;
   signal(`${meet.barrier}-${process.pid}`);
   const arrived = () =>
-    readdirSync(task.barriers).filter((name) => name.startsWith(`${meet.barrier}-`)).length;
+    readdirSync(barrierDir()).filter((name) => name.startsWith(`${meet.barrier}-`)).length;
   const deadline = performance.now() + BARRIER_DEADLINE_MS;
   while (arrived() < meet.processes) {
     if (performance.now() > deadline) throw new Error(`Rendezvous "${meet.barrier}" never filled.`);
@@ -268,5 +278,34 @@ async function runSyncTask(run: SyncTask): Promise<SyncReport> {
   }
 }
 
-const report = task.role === 'open' ? await openStore(task) : await runSyncTask(task);
+/** Binds a bare `DataView`, then a bare `Uint8Array`, so a bind that ends the process reports nothing. */
+async function bindBytes(bind: BindTask): Promise<BindReport> {
+  const handle = await openSqliteHandle(bind.path);
+  const attempt = (value: unknown): BindOutcome => {
+    try {
+      return {
+        ok: true,
+        row: handle.prepare(bind.sql).get(...([...bind.leading, value] as never[])),
+      };
+    } catch (err) {
+      const { name, message } = err as Error;
+      return { ok: false, error: { name, message } };
+    }
+  };
+  try {
+    return {
+      dataView: attempt(new DataView(new Uint8Array([1, 2]).buffer)),
+      uint8Array: attempt(new Uint8Array([1, 2])),
+    };
+  } finally {
+    handle.close();
+  }
+}
+
+const report =
+  task.role === 'bind'
+    ? await bindBytes(task)
+    : task.role === 'open'
+      ? await openStore(task)
+      : await runSyncTask(task);
 process.stdout.write(`${JSON.stringify(report)}\n`);

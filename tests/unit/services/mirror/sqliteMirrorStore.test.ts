@@ -6,7 +6,7 @@
  * @module tests/unit/services/mirror/sqliteMirrorStore
  */
 
-import { mkdir, mkdtemp, rm } from 'node:fs/promises';
+import { mkdir, mkdtemp, open, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -23,7 +23,9 @@ import {
 import type {
   MirrorRow,
   MirrorStore,
+  QueryFilter,
   SqliteHandle,
+  SqlValue,
   SyncContext,
   SyncPage,
 } from '@/services/mirror/types.js';
@@ -61,6 +63,9 @@ const rec = (id: string, over: Partial<MirrorRow> = {}): MirrorRow => ({
   year: 2024,
   ...over,
 });
+
+/** A runtime value outside the declared type, as unvalidated JSON or a source produces. */
+const untyped = (value: unknown) => value as never;
 
 describe('sqliteMirrorStore', () => {
   let dir: string;
@@ -205,8 +210,60 @@ describe('sqliteMirrorStore', () => {
       ['TEXT', ['1', '2']],
     ] as const)('reads a bigint id against a %s key as its digits', async (decl, seed) => {
       const typed = await storeKeyedBy(decl, [...seed]);
-      const ids = [2n, '1', 2n ** 70n] as never;
+      const ids = [2n, '1'] as never;
       expect(titles(await typed.getByIds(ids))).toEqual(['row 2', 'row 1']);
+    });
+
+    it('rejects a bigint id outside the signed 64-bit range, as an eq filter on the key does', async () => {
+      const textKeyed = await storeKeyedBy('TEXT', ['1180591620717411303424']);
+      const refusal = { code: JsonRpcErrorCode.ValidationError, data: { parameter: 1 } };
+      await expect(textKeyed.getByIds(['1', 2n ** 70n] as never)).rejects.toMatchObject(refusal);
+      await expect(
+        textKeyed.query({
+          filters: [{ column: 'id', op: 'eq', value: (2n ** 70n) as never }],
+          limit: 10,
+          offset: 0,
+        }),
+      ).rejects.toMatchObject(refusal);
+    });
+
+    // Untyped code can hand over ids of other kinds; each finds what an eq filter finds.
+    it.each<[string, Array<string | number>, unknown, string[]]>([
+      ['TEXT', ['2024', '2024.0'], 2024, ['row 2024']],
+      ['TEXT', ['1', 'true'], true, ['row 1']],
+      ['TEXT', ['5.5'], 5.5, ['row 5.5']],
+      ['TEXT', ['9007199254740993'], 9007199254740993n, ['row 9007199254740993']],
+      ['INTEGER', [5, 6], 5, ['row 5']],
+      ['INTEGER', [1, 2], true, ['row 1']],
+      ['REAL', [1.5, 2], 1.5, ['row 1.5']],
+      ['REAL', [9007199254740992], '9007199254740993', []],
+      ['NUMERIC', [2024], '2024.0', ['row 2024']],
+    ])(
+      'matches a %s key seeded %j with the untyped id %s, as an eq filter on the key does',
+      async (decl, seed, id, expected) => {
+        const typed = await storeKeyedBy(decl, seed);
+        const rows = await typed.getByIds([id] as never);
+        expect(titles(rows)).toEqual(expected);
+        const viaEq = await typed.query({
+          filters: [{ column: 'id', op: 'eq', value: id as never }],
+          limit: 10,
+          offset: 0,
+        });
+        expect(rows).toEqual(viaEq.rows);
+      },
+    );
+
+    it("returns a BLOB key's row for its bytes at each position requested, as an eq filter on the key does", async () => {
+      const bytes = () => Uint8Array.of(0x35);
+      const blobKeyed = await storeKeyedBy('BLOB', [bytes() as never, '5']);
+      const rows = await blobKeyed.getByIds([bytes(), '5', 'missing', bytes()] as never);
+      expect(titles(rows)).toEqual(['row 53', 'row 5', 'row 53']);
+      const viaEq = await blobKeyed.query({
+        filters: [{ column: 'id', op: 'eq', value: bytes() as never }],
+        limit: 10,
+        offset: 0,
+      });
+      expect(rows[0]).toEqual(viaEq.rows[0]);
     });
 
     // Statistics on a store this small lead SQLite to read the table before the id list.
@@ -460,6 +517,173 @@ describe('sqliteMirrorStore', () => {
     ).rejects.toThrow(/Unknown mirror sort column/);
   });
 
+  it('rejects a primary key that columns only inherits from Object.prototype at construction', () => {
+    expect(() =>
+      sqliteMirrorStore(specFor(join(dir, 'inherited.db'), { primaryKey: 'toString' })),
+    ).toThrowError(expect.objectContaining({ code: JsonRpcErrorCode.ConfigurationError }));
+  });
+
+  it.each(['like', 'IN', 'toString', '__proto__', undefined])(
+    'rejects the filter op %s with ValidationError before preparing any statement',
+    async (op) => {
+      const handle = await store.raw();
+      const prepare = vi.spyOn(handle, 'prepare');
+      try {
+        const error = await store
+          .query({
+            filters: [
+              { column: 'category', op: 'eq', value: 'cs.LG' },
+              { column: 'title', op: op as never, value: 'x' },
+            ],
+            limit: 1,
+            offset: 0,
+          })
+          .then(
+            () => expect.unreachable('expected the query to reject'),
+            (err: unknown) => err,
+          );
+        expect(error).toMatchObject({
+          code: JsonRpcErrorCode.ValidationError,
+          data: { field: 'filters[1].op', operators: ['eq', 'ne', 'gt', 'gte', 'lt', 'lte', 'in'] },
+        });
+        if (typeof op === 'string') expect((error as McpError).message).toContain(`"${op}"`);
+        expect(prepare).not.toHaveBeenCalled();
+      } finally {
+        prepare.mockRestore();
+      }
+    },
+  );
+
+  it.each(['eq', 'ne', 'gt', 'gte', 'lt', 'lte'] as const)(
+    'rejects an array value on the %s operator, naming filters[i].value',
+    async (op) => {
+      await store.applyBatch([rec('1', { year: 2022 }), rec('2', { year: 2023 })], []);
+      for (const value of [[2023], [2023, 2024], []]) {
+        await expect(
+          store.query({
+            filters: [
+              { column: 'category', op: 'eq', value: 'cs.LG' },
+              { column: 'year', op, value },
+            ],
+            limit: 10,
+            offset: 0,
+          }),
+        ).rejects.toMatchObject({
+          code: JsonRpcErrorCode.ValidationError,
+          message: `Mirror filters[1].value is an array; the ${op} operator takes a string, a number, or null, and only in takes a list.`,
+          data: { field: 'filters[1].value' },
+        });
+      }
+    },
+  );
+
+  it.each(['ascending', 'ASC', 'up', undefined])(
+    'rejects the sort direction %s with ValidationError naming sort.direction',
+    async (direction) => {
+      await store.applyBatch([rec('1', { year: 2022 }), rec('2', { year: 2023 })], []);
+      await expect(
+        store.query({
+          sort: { column: 'year', direction: direction as never },
+          limit: 10,
+          offset: 0,
+        }),
+      ).rejects.toMatchObject({
+        code: JsonRpcErrorCode.ValidationError,
+        message: 'Mirror sort.direction must be "asc" or "desc".',
+        data: { field: 'sort.direction' },
+      });
+    },
+  );
+
+  it.each(['"unbalanced', 'a OR', 'nosuchcol:x', 'AND', '(a', 'a)', 'NEAR(a b, x)', 'NEAR/3', '*'])(
+    "rejects the malformed match %j with ValidationError carrying SQLite's message, under every sort",
+    async (match) => {
+      await store.applyBatch([rec('1', { title: 'hello world' })], []);
+      for (const sort of [undefined, 'relevance', { column: 'year', direction: 'asc' }] as const) {
+        const error = await store
+          .query({ match, ...(sort !== undefined && { sort }), limit: 10, offset: 0 })
+          .then(
+            () => expect.unreachable('expected the query to reject'),
+            (err: unknown) => err,
+          );
+        expect(error).toBeInstanceOf(McpError);
+        expect(error).toMatchObject({
+          code: JsonRpcErrorCode.ValidationError,
+          data: { field: 'match' },
+          cause: { code: 'SQLITE_ERROR' },
+        });
+        const { message, cause } = error as McpError & { cause: Error };
+        expect(message).toBe(`Mirror match is not a valid FTS5 query: ${cause.message}.`);
+      }
+    },
+  );
+
+  it.each(['NEAR(a)', '^hello', '-title:abstract', 'title:hello', 'hel*', '"hello world"'])(
+    'runs the valid match %j',
+    async (match) => {
+      await store.applyBatch([rec('1', { title: 'hello world' })], []);
+      await expect(store.query({ match, limit: 10, offset: 0 })).resolves.toMatchObject({
+        total: expect.any(Number),
+      });
+    },
+  );
+
+  it("passes a store's own failure under a valid match through unchanged: a dropped FTS table", async () => {
+    await store.applyBatch([rec('1', { title: 'hello world' })], []);
+    (await store.raw()).exec('DROP TABLE papers_fts');
+    const error = await store.query({ match: 'hello', limit: 10, offset: 0 }).then(
+      () => expect.unreachable('expected the query to reject'),
+      (err: unknown) => err,
+    );
+    expect(error).not.toBeInstanceOf(McpError);
+    expect(error).toMatchObject({
+      code: 'SQLITE_ERROR',
+      message: expect.stringContaining('papers_fts'),
+    });
+  });
+
+  it("passes a store's own failure under a valid match through unchanged: corrupted FTS pages", async () => {
+    const path = join(dir, 'corrupt.db');
+    const seeded = sqliteMirrorStore(specFor(path));
+    await seeded.applyBatch(
+      Array.from({ length: 4_000 }, (_, k) =>
+        rec(`r${k}`, { title: `hello word${k} ${'lorem ipsum dolor '.repeat(8)}` }),
+      ),
+      [],
+    );
+    const seededHandle = await seeded.raw();
+    const pageSize =
+      seededHandle.prepare<{ page_size: number }>('PRAGMA page_size').get()?.page_size ?? 0;
+    const roots = seededHandle
+      .prepare<{ rootpage: number }>(
+        `SELECT rootpage FROM sqlite_schema WHERE name IN ('papers_fts_data', 'papers_fts_idx')`,
+      )
+      .all();
+    seededHandle.exec('PRAGMA wal_checkpoint(TRUNCATE)');
+    await seeded.close();
+    expect(roots).toHaveLength(2);
+    const file = await open(path, 'r+');
+    try {
+      for (const { rootpage } of roots) {
+        await file.write(Buffer.alloc(pageSize, 0xff), 0, pageSize, (rootpage - 1) * pageSize);
+      }
+    } finally {
+      await file.close();
+    }
+
+    const corrupted = sqliteMirrorStore(specFor(path));
+    try {
+      const error = await corrupted.query({ match: 'hello', limit: 10, offset: 0 }).then(
+        () => expect.unreachable('expected the query to reject'),
+        (err: unknown) => err,
+      );
+      expect(error).not.toBeInstanceOf(McpError);
+      expect(error).toMatchObject({ code: expect.stringMatching(/^SQLITE_CORRUPT/) });
+    } finally {
+      await corrupted.close();
+    }
+  });
+
   it('round-trips sync state and preserves durable markers on omission', async () => {
     await store.writeState({
       status: 'complete',
@@ -589,9 +813,6 @@ describe('sqliteMirrorStore value binding', () => {
   let dir: string;
   let store: MirrorStore;
 
-  /** A runtime value outside the declared type, as unvalidated JSON or a source produces. */
-  const untyped = (value: unknown) => value as never;
-
   beforeEach(async () => {
     dir = await mkdtemp(join(tmpdir(), 'mirror-store-binding-test-'));
     store = sqliteMirrorStore({
@@ -619,6 +840,11 @@ describe('sqliteMirrorStore value binding', () => {
          FROM items WHERE id = ?`,
       )
       .get(id);
+  }
+
+  /** Ids of the rows `filter` matches. */
+  async function matching(filter: QueryFilter): Promise<unknown[]> {
+    return (await store.query({ filters: [filter], limit: 10, offset: 0 })).rows.map((r) => r.id);
   }
 
   const validation = (field: string, kind: string) => ({
@@ -691,6 +917,29 @@ describe('sqliteMirrorStore value binding', () => {
       expect((await store.getByIds(['kept', 'big'])).map((r) => r.id)).toEqual(['kept']);
     },
   );
+
+  it('stores a safe integer as its digits in a TEXT column and as an integer in an untyped one, so a filter of its text or its number matches', async () => {
+    await store.applyBatch([{ id: 'a', note: 2024, extra: 5 }], []);
+    expect(await stored('a')).toMatchObject({
+      note: '2024',
+      noteType: 'text',
+      extraType: 'integer',
+    });
+
+    expect(await matching({ column: 'note', op: 'eq', value: '2024' })).toEqual(['a']);
+    expect(await matching({ column: 'note', op: 'eq', value: 2024 })).toEqual(['a']);
+    expect(await matching({ column: 'note', op: 'in', value: [2024] })).toEqual(['a']);
+    // The FTS index holds the token 2024 alone, with no fractional part.
+    expect((await store.query({ match: '0', limit: 10, offset: 0 })).total).toBe(0);
+  });
+
+  it('binds a safe integer as an integer in raw() SQL, so integer arithmetic applies', async () => {
+    const handle = await store.raw();
+    expect(handle.prepare('SELECT ? / 2 AS v, typeof(?) AS t').get(5, 5)).toEqual({
+      v: 2,
+      t: 'integer',
+    });
+  });
 
   it('stores both signed 64-bit bounds and a small bigint in a record as integers', async () => {
     await store.applyBatch(
@@ -772,6 +1021,41 @@ describe('sqliteMirrorStore value binding', () => {
     ).rejects.toMatchObject(validation('match', 'an object'));
   });
 
+  it.each<[string, () => unknown]>([
+    ['an ArrayBuffer', () => new Uint8Array([1, 2]).buffer],
+    [
+      'a SharedArrayBuffer',
+      () => {
+        const shared = new SharedArrayBuffer(2);
+        new Uint8Array(shared).set([1, 2]);
+        return shared;
+      },
+    ],
+    [
+      'a DataView with a byte offset',
+      () => new DataView(new Uint8Array([9, 1, 2, 9]).buffer, 1, 2),
+    ],
+    ['a Uint16Array', () => new Uint16Array(new Uint8Array([1, 2]).buffer)],
+    ['a Buffer', () => Buffer.from([1, 2])],
+  ])(
+    'stores %s as a blob of the bytes it views as a record field, and matches it as a filter value',
+    async (_label, bytes) => {
+      await store.applyBatch(
+        [
+          { id: 'a', extra: untyped(bytes()) },
+          { id: 'b', extra: 'other' },
+        ],
+        [],
+      );
+      expect(await stored('a')).toMatchObject({ extra: '0102', extraType: 'blob' });
+
+      expect(await matching({ column: 'extra', op: 'eq', value: untyped(bytes()) })).toEqual(['a']);
+      expect(await matching({ column: 'extra', op: 'in', value: [untyped(bytes())] })).toEqual([
+        'a',
+      ]);
+    },
+  );
+
   it('stores undefined and NaN as NULL and a Uint8Array as a blob', async () => {
     await store.applyBatch(
       [
@@ -795,6 +1079,287 @@ describe('sqliteMirrorStore value binding', () => {
       extraType: 'blob',
     });
   });
+});
+
+/**
+ * An `in` list binds as one parameter. It must match exactly the rows the same
+ * list matches bound one parameter per value, which is how the raw handle binds
+ * it here: on every column affinity, for every kind of value the store binds.
+ */
+describe('sqliteMirrorStore in filter', () => {
+  let dir: string;
+  let store: MirrorStore;
+
+  /**
+   * One column per SQLite affinity: TEXT, INTEGER, REAL, NUMERIC, BLOB, and
+   * none, plus the two other spellings of REAL affinity (`FLOA`, `DOUB`).
+   */
+  const COLUMNS = ['t', 'i', 'r', 'nu', 'b', 'x', 'fl', 'db'] as const;
+  type Column = (typeof COLUMNS)[number];
+
+  beforeEach(async () => {
+    dir = await mkdtemp(join(tmpdir(), 'mirror-store-in-test-'));
+    store = sqliteMirrorStore({
+      path: join(dir, 'in.db'),
+      table: 'items',
+      primaryKey: 'id',
+      columns: {
+        id: 'TEXT',
+        t: 'TEXT',
+        i: 'INTEGER',
+        r: 'REAL',
+        nu: 'NUMERIC',
+        b: 'BLOB',
+        x: '',
+        fl: 'FLOAT',
+        db: 'DOUBLE PRECISION',
+      },
+      indexes: [{ columns: ['t'] }, { columns: ['r'] }],
+    });
+  });
+  afterEach(async () => {
+    await store.close();
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  /** Ids of the rows an `in` filter on `column` matches, through the store. */
+  async function matched(column: Column | 'id', value: unknown): Promise<unknown[]> {
+    const { rows } = await store.query({
+      filters: [{ column, op: 'in', value: untyped(value) }],
+      sort: { column: 'id', direction: 'asc' },
+      limit: 1_000,
+      offset: 0,
+    });
+    return rows.map((r) => r.id);
+  }
+
+  /** Ids of the rows `column IN (?, …)` matches with each value its own parameter. */
+  async function matchedPositionally(column: Column, values: unknown[]): Promise<unknown[]> {
+    const handle = await store.raw();
+    return handle
+      .prepare<{ id: string }>(
+        `SELECT id FROM items WHERE ${column} IN (${values.map(() => '?').join(', ')}) ORDER BY id`,
+      )
+      .all(...values.map(untyped))
+      .map((r) => r.id);
+  }
+
+  /** Each value stored in every column of its own row. */
+  const STORED: unknown[] = [
+    '5',
+    '05',
+    '5.0',
+    'abc',
+    '2024',
+    '1',
+    '0',
+    '0.0',
+    'true',
+    '9007199254740993',
+    'x\ud800y',
+    'a"b\\c\u0000d',
+    5,
+    5.5,
+    2024,
+    1,
+    0,
+    -0,
+    0.1,
+    2 ** 53,
+    2 ** 53 + 2,
+    1e21,
+    Number.POSITIVE_INFINITY,
+    Number.NEGATIVE_INFINITY,
+    null,
+    9007199254740993n,
+    2n ** 63n - 1n,
+    Uint8Array.of(0x35),
+  ];
+
+  async function seedEveryColumn(): Promise<void> {
+    await store.applyBatch(
+      STORED.map((value, k) => {
+        const row: Record<string, unknown> = { id: `row${String(k).padStart(2, '0')}` };
+        for (const column of COLUMNS) row[column] = value;
+        return row as MirrorRow;
+      }),
+      [],
+    );
+  }
+
+  it.each<[string, unknown[], boolean]>([
+    ['a numeric string', ['5'], true],
+    ['a zero-padded numeric string', ['05'], true],
+    ['a numeric string past 2^53', ['9007199254740993'], true],
+    ['a string with a lone surrogate', ['x\ud800y'], true],
+    ['a string with a quote, a backslash, and a NUL', ['a"b\\c\u0000d'], true],
+    ['plain text', ['abc'], true],
+    ['null', [null], false],
+    ['undefined', [undefined], false],
+    ['NaN', [Number.NaN], false],
+    ['true', [true], true],
+    ['false', [false], true],
+    ['a safe integer', [2024], true],
+    ['zero', [0], true],
+    ['negative zero', [-0], true],
+    ['a fraction', [5.5], true],
+    ['a fraction with no exact decimal form', [0.1], true],
+    ['a whole number past 2^53', [2 ** 53], true],
+    ['a number past the signed 64-bit range', [1e21], true],
+    ['Infinity', [Number.POSITIVE_INFINITY], true],
+    ['-Infinity', [Number.NEGATIVE_INFINITY], true],
+    ['a small bigint', [5n], true],
+    ['a bigint past 2^53', [9007199254740993n], true],
+    ['the largest signed 64-bit bigint', [2n ** 63n - 1n], true],
+    ['bytes', [Uint8Array.of(0x35)], true],
+    ['a repeated value', [5, 5], true],
+    ['an empty list', [], false],
+    [
+      'a mixed list',
+      [5, -0, 2 ** 53, Number.POSITIVE_INFINITY, true, 'a"b\\c\u0000d', null, 5n, 5.5, '1'],
+      true,
+    ],
+    ['a mixed list holding bytes', ['abc', Uint8Array.of(0x35), 5], true],
+  ])(
+    'matches the rows %s matches bound one parameter per value, in every column affinity',
+    async (_label, list, matchesSome) => {
+      await seedEveryColumn();
+      const positional: Array<{ column: Column; ids: unknown[] }> = [];
+      const oneParameter: Array<{ column: Column; ids: unknown[] }> = [];
+      for (const column of COLUMNS) {
+        positional.push({ column, ids: await matchedPositionally(column, list) });
+        oneParameter.push({ column, ids: await matched(column, list) });
+      }
+      expect(positional.some(({ ids }) => ids.length > 0)).toBe(matchesSome);
+      expect(oneParameter).toEqual(positional);
+    },
+  );
+
+  it('matches the rows each value names, once each', async () => {
+    await store.applyBatch(
+      [
+        { id: 'year', t: '2024', i: 2024 },
+        { id: 'five', t: '5', i: 5 },
+        { id: 'one', t: '1', i: 1 },
+        { id: 'bytes', b: untyped(Uint8Array.of(1, 2)) },
+        { id: 'empty', t: null, i: null, b: null },
+      ],
+      [],
+    );
+    expect(await matched('t', [2024])).toEqual(['year']);
+    expect(await matched('i', ['05'])).toEqual(['five']);
+    expect(await matched('i', [true])).toEqual(['one']);
+    expect(await matched('t', [null])).toEqual([]);
+    expect(await matched('i', [])).toEqual([]);
+    await expect(
+      store.query({ filters: [{ column: 'i', op: 'in', value: [5, 5] }], limit: 10, offset: 0 }),
+    ).resolves.toEqual({
+      rows: [{ id: 'five', t: '5', i: 5, r: null, nu: null, b: null, x: null, fl: null, db: null }],
+      total: 1,
+    });
+    expect(await matched('b', [Uint8Array.of(1, 2)])).toEqual(['bytes']);
+  });
+
+  it("returns the page of an in list of 40,000 values, past the bound-parameter ceiling of the Node driver's SQLite", async () => {
+    await store.applyBatch(
+      [
+        { id: 'first', t: 'k1' },
+        { id: 'last', t: 'k39999' },
+        { id: 'outside', t: 'k40000' },
+      ],
+      [],
+    );
+    const value = Array.from({ length: 40_000 }, (_, k) => `k${k}`);
+    const result = await store.query({
+      filters: [{ column: 't', op: 'in', value }],
+      sort: { column: 'id', direction: 'asc' },
+      limit: 1,
+      offset: 1,
+    });
+    expect(result).toEqual({
+      rows: [
+        {
+          id: 'last',
+          t: 'k39999',
+          i: null,
+          r: null,
+          nu: null,
+          b: null,
+          x: null,
+          fl: null,
+          db: null,
+        },
+      ],
+      total: 2,
+    });
+  });
+
+  it.each<[Column | 'id', SqlValue[], RegExp]>([
+    ['t', ['a', 'b'], /^SEARCH items USING (?:COVERING )?INDEX items_t_idx \(t=\?\)$/],
+    ['r', [1.5, 2], /^SEARCH items USING (?:COVERING )?INDEX items_r_idx \(r=\?\)$/],
+    [
+      'id',
+      ['a', 'b'],
+      /^SEARCH items USING (?:COVERING )?INDEX sqlite_autoindex_items_1 \(id=\?\)$/,
+    ],
+  ])(
+    "searches the %s column's index for each value of an in list rather than scanning the table",
+    async (column, value, search) => {
+      const handle = await store.raw();
+      const prepare = vi.spyOn(handle, 'prepare');
+      let prepared: string[];
+      try {
+        await store.query({ filters: [{ column, op: 'in', value }], limit: 1_000, offset: 0 });
+        prepared = prepare.mock.calls.map(([sql]) => sql);
+      } finally {
+        prepare.mockRestore();
+      }
+      const rowStatement = prepared.find((sql) => sql.startsWith('SELECT items.'));
+      expect(rowStatement).toBeDefined();
+      const plan = handle
+        .prepare<{ detail: string }>(`EXPLAIN QUERY PLAN ${rowStatement}`)
+        .all(JSON.stringify(value), 1_000, 0)
+        .map((step) => step.detail);
+      expect(plan).toContainEqual(expect.stringMatching(search));
+      expect(plan.filter((step) => /^SCAN items\b/.test(step))).toEqual([]);
+    },
+  );
+
+  it.each([
+    ['a constraint name', 'REAL CONSTRAINT r_any CHECK (r IS NOT NULL OR 1)'],
+    ['a default', "REAL DEFAULT 'TEXT'"],
+    ['a check', "REAL CHECK (typeof(r) <> 'noblob')"],
+  ])(
+    'compares an integer past 2^53 exactly on a REAL column whose declaration names another type in %s',
+    async (_label, declaration) => {
+      const real = sqliteMirrorStore({
+        path: join(dir, 'real.db'),
+        table: 'items',
+        primaryKey: 'id',
+        columns: { id: 'TEXT', r: declaration },
+      });
+      try {
+        // Stored as the double 2^53, which no integer past it equals.
+        await real.applyBatch([{ id: 'two53', r: 2 ** 53 }], []);
+        const handle = await real.raw();
+        for (const value of [9007199254740993n, '9007199254740993']) {
+          const positional = handle
+            .prepare<{ id: string }>('SELECT id FROM items WHERE r IN (?)')
+            .all(untyped(value))
+            .map((row) => row.id);
+          const { rows } = await real.query({
+            filters: [{ column: 'r', op: 'in', value: untyped([value]) }],
+            limit: 10,
+            offset: 0,
+          });
+          expect(positional).toEqual([]);
+          expect(rows.map((row) => row.id)).toEqual(positional);
+        }
+      } finally {
+        await real.close();
+      }
+    },
+  );
 });
 
 /**

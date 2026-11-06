@@ -15,6 +15,7 @@ import {
   type SchemaSpec,
   validateSchemaSpec,
 } from '@/services/mirror/sqlite/schema.js';
+import { JsonRpcErrorCode } from '@/types-global/errors.js';
 
 const baseSpec: SchemaSpec = {
   table: 'papers',
@@ -92,6 +93,27 @@ describe('validateSchemaSpec', () => {
       /index column/,
     );
   });
+
+  // `columns` is a plain object, so these names reach it through Object.prototype.
+  it.each(
+    ['toString', 'constructor', '__proto__'].flatMap(
+      (name): Array<[string, string, SchemaSpec, RegExp]> => [
+        ['primaryKey', name, { ...baseSpec, primaryKey: name }, /primaryKey/],
+        ['an FTS column', name, { ...baseSpec, fts: ['title', name] }, /FTS column/],
+        ['an index column', name, { ...baseSpec, indexes: [{ columns: [name] }] }, /index column/],
+      ],
+    ),
+  )(
+    'rejects %s named %s, which columns only inherits, with ConfigurationError',
+    (_role, _name, spec, message) => {
+      expect(() => validateSchemaSpec(spec)).toThrowError(
+        expect.objectContaining({
+          code: JsonRpcErrorCode.ConfigurationError,
+          message: expect.stringMatching(message),
+        }),
+      );
+    },
+  );
 
   it('rejects a tokenizer containing a double quote', () => {
     expect(() => validateSchemaSpec({ ...baseSpec, ftsTokenizer: 'bad"tok' })).toThrow(

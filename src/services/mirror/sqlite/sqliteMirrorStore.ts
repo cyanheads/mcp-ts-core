@@ -70,14 +70,23 @@ export interface SqliteMirrorStoreSpec extends SchemaSpec {
   version?: number;
 }
 
-const SQL_OP: Record<Exclude<FilterOp, 'in'>, string> = {
-  eq: '=',
-  ne: '!=',
-  gt: '>',
-  gte: '>=',
-  lt: '<',
-  lte: '<=',
-};
+/**
+ * The SQL operator of each scalar filter op. A Map, so an op a caller names
+ * after an `Object.prototype` member (`toString`, `__proto__`) finds nothing.
+ */
+const SQL_OP: ReadonlyMap<string, string> = new Map(
+  Object.entries({
+    eq: '=',
+    ne: '!=',
+    gt: '>',
+    gte: '>=',
+    lt: '<',
+    lte: '<=',
+  } satisfies Record<Exclude<FilterOp, 'in'>, string>),
+);
+
+/** Every filter op a query accepts. */
+const FILTER_OPS = [...SQL_OP.keys(), 'in'];
 
 /** Internal handle to an opened store plus its derived metadata. */
 interface OpenStore {
@@ -94,6 +103,11 @@ export function sqliteMirrorStore(spec: SqliteMirrorStoreSpec): MirrorStore {
   // Fail fast on a malformed spec at construction time, not first query.
   const { ftsColumns } = validateSchemaSpec(spec);
   const allColumns = Object.keys(spec.columns);
+  const realColumns = new Set(
+    Object.entries(spec.columns)
+      .filter(([, decl]) => hasRealAffinity(decl))
+      .map(([name]) => name),
+  );
   const ftsTable = `${spec.table}_fts`;
   const limits: SqliteMirrorStoreLimits = spec.limits ?? {};
 
@@ -190,7 +204,6 @@ export function sqliteMirrorStore(spec: SqliteMirrorStoreSpec): MirrorStore {
              RETURNING generation`,
           )
           .get(owner, now + ttlMs, now);
-        // bun:sqlite reports no row as null, better-sqlite3 as undefined.
         return claimed ? { owner, generation: claimed.generation, ttlMs } : undefined;
       } catch (err) {
         /**
@@ -260,6 +273,7 @@ export function sqliteMirrorStore(spec: SqliteMirrorStoreSpec): MirrorStore {
       const { handle } = store;
       const { clauses: filterClauses, params: filterParams } = buildFilterClauses(
         options.filters ?? [],
+        realColumns,
       );
       const relevance = options.sort === 'relevance' && Boolean(options.match);
 
@@ -274,10 +288,9 @@ export function sqliteMirrorStore(spec: SqliteMirrorStoreSpec): MirrorStore {
         countParams.unshift(options.match);
       }
       const countWhere = countClauses.length > 0 ? `WHERE ${countClauses.join(' AND ')}` : '';
-      const total =
-        handle
-          .prepare<{ n: number }>(`SELECT COUNT(*) AS n FROM ${spec.table} ${countWhere}`)
-          .get(...countParams)?.n ?? 0;
+      const countStatement = handle.prepare<{ n: number }>(
+        `SELECT COUNT(*) AS n FROM ${spec.table} ${countWhere}`,
+      );
 
       // Row fetch. For relevance sort, apply MATCH on the JOINed FTS table so
       // `bm25()` is scored in that MATCH's context; the subquery form leaves
@@ -304,12 +317,33 @@ export function sqliteMirrorStore(spec: SqliteMirrorStoreSpec): MirrorStore {
         ? `ORDER BY bm25(${ftsTable}) ASC`
         : buildOrderBy(options.sort, spec.table);
 
-      const rows = handle
-        .prepare<MirrorRow>(
-          `SELECT ${selectCols} FROM ${spec.table} ${join} ${rowWhere} ${orderBy} LIMIT ? OFFSET ?`,
-        )
-        .all(...rowParams, options.limit, options.offset);
-      return { rows, total };
+      const rowStatement = handle.prepare<MirrorRow>(
+        `SELECT ${selectCols} FROM ${spec.table} ${join} ${rowWhere} ${orderBy} LIMIT ? OFFSET ?`,
+      );
+
+      try {
+        const total = countStatement.get(...countParams)?.n ?? 0;
+        const rows = rowStatement.all(...rowParams, options.limit, options.offset);
+        return { rows, total };
+      } catch (err) {
+        /**
+         * FTS5 parses `match` only when a statement steps, and every parse
+         * error it raises carries SQLite's generic `SQLITE_ERROR` on both
+         * drivers, so with `match` set that exact code here is the caller's
+         * expression. The store's own failures are not: a missing FTS table or
+         * schema drift fails at `prepare()` above, and corruption, I/O, and busy
+         * errors carry other codes (`SQLITE_CORRUPT*`, `SQLITE_IOERR*`,
+         * `SQLITE_BUSY*`); those pass through unchanged.
+         */
+        if (options.match && err instanceof Error && 'code' in err && err.code === 'SQLITE_ERROR') {
+          throw validationError(
+            `Mirror match is not a valid FTS5 query: ${err.message}.`,
+            { field: 'match' },
+            { cause: err },
+          );
+        }
+        throw err;
+      }
     },
 
     async getByIds(ids: string[]): Promise<MirrorRow[]> {
@@ -325,22 +359,30 @@ export function sqliteMirrorStore(spec: SqliteMirrorStoreSpec): MirrorStore {
       const { handle } = await open();
       /**
        * SQLite compares each id with the key as `pk = ?` would, so an INTEGER
-       * key matches `'1'` and `'01'` alike, while `json_each` carries each id's
-       * position: a repeated id returns its row each time and a missing one
-       * drops out. The whole list binds as one parameter, so its length never
-       * meets the driver's bound-variable ceiling. Columns are table-qualified
-       * because `json_each` has its own (`id`, `key`, `value`, …), and its alias
-       * extends the table name, so the two never collide. JSON has no bigint,
-       * so one from untyped code is sent as its digits, as a string id is.
+       * key matches `'1'` and `'01'` alike and a TEXT key matches the number
+       * `2024` as `'2024'`: each id is encoded as its bound value is, and the
+       * unary `+` drops `json_each`'s BLOB affinity, as a bound parameter has
+       * none. `json_each` carries each id's position: a repeated id returns its
+       * row each time and a missing one drops out. The whole list binds as one
+       * parameter, so its length never meets the driver's bound-variable
+       * ceiling. Columns are table-qualified because `json_each` has its own
+       * (`id`, `key`, `value`, …), and its alias extends the table name, so the
+       * two never collide. A list holding an id JSON cannot carry (bytes, or
+       * a bigint outside the signed 64-bit range, which binding refuses) looks
+       * each id up on its own, as an `eq` filter on the key would.
        */
       const requested = `${spec.table}_ids`;
       const columns = allColumns.map((c) => `${spec.table}.${c}`).join(', ');
-      const idList = JSON.stringify(ids, (_key, value: unknown) =>
-        typeof value === 'bigint' ? String(value) : value,
-      );
+      const idList = jsonList(ids);
+      if (idList === undefined) {
+        const byId = handle.prepare<MirrorRow>(
+          `SELECT ${columns} FROM ${spec.table} WHERE ${spec.primaryKey} = ?`,
+        );
+        return ids.flatMap((id) => byId.all(id));
+      }
       return handle
         .prepare<MirrorRow>(
-          `SELECT ${columns} FROM json_each(?) AS ${requested} JOIN ${spec.table} ON ${spec.table}.${spec.primaryKey} = ${requested}.value ORDER BY ${requested}.key`,
+          `SELECT ${columns} FROM json_each(?) AS ${requested} JOIN ${spec.table} ON ${spec.table}.${spec.primaryKey} = +${requested}.value ORDER BY ${requested}.key`,
         )
         .all(idList);
     },
@@ -424,16 +466,62 @@ export function sqliteMirrorStore(spec: SqliteMirrorStoreSpec): MirrorStore {
  * wherever it binds a value. Bound alone, an object is each driver's
  * named-parameter list, so `bun:sqlite` binds the `?` as NULL (a record passed
  * as a tombstone deletes nothing) while `better-sqlite3` throws; bound beside
- * other values, each driver fails with its own error. Byte arrays (typed
- * arrays, `ArrayBuffer`) go to the driver as they are.
+ * other values, each driver fails with its own error. Bytes (typed arrays,
+ * `DataView`, `ArrayBuffer`, `SharedArrayBuffer`) go to the handle, which
+ * binds them as a blob.
  */
 function isObjectValue(value: unknown): value is object {
   return (
     typeof value === 'object' &&
     value !== null &&
     !ArrayBuffer.isView(value) &&
-    !(value instanceof ArrayBuffer)
+    !(value instanceof ArrayBuffer) &&
+    !(value instanceof SharedArrayBuffer)
   );
+}
+
+/**
+ * `values` as one JSON array whose `json_each` values carry the storage class
+ * each binds as positionally, or `undefined` when one has no such JSON form:
+ * bytes, which JSON cannot carry, and a bigint outside the signed 64-bit range,
+ * which binding refuses.
+ */
+function jsonList(values: readonly unknown[]): string | undefined {
+  const elements: string[] = [];
+  for (const value of values) {
+    const element = jsonElement(value);
+    if (element === undefined) return undefined;
+    elements.push(element);
+  }
+  return `[${elements.join(',')}]`;
+}
+
+/**
+ * The JSON text `json_each` reads back as `value` bound positionally: a safe
+ * integer other than `-0`, a boolean, and an in-range bigint as INTEGER digits;
+ * any other number through `toExponential()`, which reads back as REAL, with
+ * `±Infinity` as `±9e999` and `NaN` as null. A string is made well-formed
+ * first, since both drivers bind a lone surrogate as U+FFFD, where JSON's
+ * `\ud800` escape would decode to the surrogate's own bytes.
+ */
+function jsonElement(value: unknown): string | undefined {
+  switch (typeof value) {
+    case 'string':
+      return JSON.stringify(value.toWellFormed());
+    case 'number':
+      if (Number.isSafeInteger(value) && !Object.is(value, -0)) return String(value);
+      if (Number.isNaN(value)) return 'null';
+      if (!Number.isFinite(value)) return value > 0 ? '9e999' : '-9e999';
+      return value.toExponential();
+    case 'boolean':
+      return value ? '1' : '0';
+    case 'bigint':
+      return BigInt.asIntN(64, value) === value ? String(value) : undefined;
+    case 'undefined':
+      return 'null';
+    default:
+      return value === null ? 'null' : undefined;
+  }
 }
 
 /** The refusal of an {@link isObjectValue} value at `field`, naming its kind without echoing it. */
@@ -489,6 +577,29 @@ function validateQueryOptions(options: QueryOptions, limits: SqliteMirrorStoreLi
       max: maxFilters,
     });
   }
+  for (const [i, { op, value }] of filters.entries()) {
+    if (op === 'in') continue;
+    if (!SQL_OP.has(op)) {
+      const named = typeof op === 'string' ? ` ${JSON.stringify(op)}` : '';
+      throw validationError(
+        `Unknown mirror filter operator${named} at filters[${i}].op; use one of ${FILTER_OPS.join(', ')}.`,
+        { field: `filters[${i}].op`, operators: FILTER_OPS },
+      );
+    }
+    if (Array.isArray(value)) {
+      throw validationError(
+        `Mirror filters[${i}].value is an array; the ${op} operator takes a string, a number, or null, and only in takes a list.`,
+        { field: `filters[${i}].value` },
+      );
+    }
+  }
+
+  const { sort } = options;
+  if (sort && sort !== 'relevance' && sort.direction !== 'asc' && sort.direction !== 'desc') {
+    throw validationError('Mirror sort.direction must be "asc" or "desc".', {
+      field: 'sort.direction',
+    });
+  }
 
   if (filterValues === undefined) return;
   const filterValueCount = filters.reduce((count, filter) => {
@@ -503,7 +614,22 @@ function validateQueryOptions(options: QueryOptions, limits: SqliteMirrorStoreLi
   }
 }
 
-function buildFilterClauses(filters: QueryFilter[]): { clauses: string[]; params: SqlValue[] } {
+/**
+ * The `WHERE` terms and parameters of `filters`. An `in` list binds as one
+ * parameter however long it is, read back through `json_each`, so it never
+ * meets the driver's bound-parameter ceiling. Its unary `+` drops `json_each`'s
+ * BLOB affinity, as a bound parameter has none, so the column's own affinity
+ * applies to each value: a `TEXT` column matches `2024` as `'2024'`. On a
+ * `REAL` column (`realColumns`) that subquery would convert each value to REAL
+ * before comparing, rounding an integer past 2^53 (a bigint, or text such as
+ * `'9007199254740993'`) onto a stored double a bound parameter never equals;
+ * plain `value` compares there as a bound parameter does. A list holding a
+ * value with no JSON form keeps one parameter per value.
+ */
+function buildFilterClauses(
+  filters: QueryFilter[],
+  realColumns: ReadonlySet<string>,
+): { clauses: string[]; params: SqlValue[] } {
   const clauses: string[] = [];
   const params: SqlValue[] = [];
   for (const [i, f] of filters.entries()) {
@@ -518,16 +644,42 @@ function buildFilterClauses(filters: QueryFilter[]): { clauses: string[]; params
       }
       const objectAt = values.findIndex(isObjectValue);
       if (objectAt !== -1) throw objectValueError(values[objectAt], at(objectAt));
-      clauses.push(`${f.column} IN (${values.map(() => '?').join(', ')})`);
-      params.push(...values);
+      const list = jsonList(values);
+      if (list === undefined) {
+        clauses.push(`${f.column} IN (${values.map(() => '?').join(', ')})`);
+        params.push(...values);
+      } else {
+        const element = realColumns.has(f.column) ? 'value' : '+value';
+        clauses.push(`${f.column} IN (SELECT ${element} FROM json_each(?))`);
+        params.push(list);
+      }
       continue;
     }
-    const value = Array.isArray(f.value) ? (f.value[0] ?? null) : f.value;
+    // validateQueryOptions refused an unknown op and an array on a scalar one.
+    const { value } = f;
     if (isObjectValue(value)) throw objectValueError(value, at(0));
-    clauses.push(`${f.column} ${SQL_OP[f.op]} ?`);
+    clauses.push(`${f.column} ${SQL_OP.get(f.op)} ?`);
     params.push(value);
   }
   return { clauses, params };
+}
+
+/**
+ * Whether SQLite gives a column declared `decl` REAL affinity: its type name
+ * names `REAL`, `FLOA`, or `DOUB` and none of `INT`, `CHAR`, `CLOB`, `TEXT`, or
+ * `BLOB` (https://sqlite.org/datatype3.html#determination_of_column_affinity).
+ * The type name is the declaration up to its first column constraint, so the
+ * text of a constraint (its name, a `CHECK` expression, a `DEFAULT` string)
+ * never counts.
+ */
+function hasRealAffinity(decl: string): boolean {
+  const [type = ''] = decl
+    .toUpperCase()
+    .split(
+      /\b(?:CONSTRAINT|PRIMARY|NOT|NULL|UNIQUE|CHECK|DEFAULT|COLLATE|REFERENCES|GENERATED|AS)\b/,
+      1,
+    );
+  return /REAL|FLOA|DOUB/.test(type) && !/INT|CHAR|CLOB|TEXT|BLOB/.test(type);
 }
 
 function buildOrderBy(sort: QueryOptions['sort'], table: string): string {

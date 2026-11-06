@@ -38,7 +38,11 @@ function assertIdentifier(value: string, role: string): void {
   }
 }
 
-/** Validate a {@link SchemaSpec} and return its FTS column set (validated). */
+/**
+ * Validate a {@link SchemaSpec} and return its FTS column set (validated). A
+ * name counts as declared only as an own key of `columns`, never one it
+ * inherits from `Object.prototype` (`toString`, `constructor`, `__proto__`).
+ */
 export function validateSchemaSpec(spec: SchemaSpec): { ftsColumns: string[]; tokenizer: string } {
   assertIdentifier(spec.table, 'table');
   const columnNames = Object.keys(spec.columns);
@@ -48,7 +52,7 @@ export function validateSchemaSpec(spec: SchemaSpec): { ftsColumns: string[]; to
     });
   }
   for (const col of columnNames) assertIdentifier(col, 'column');
-  if (!(spec.primaryKey in spec.columns)) {
+  if (!Object.hasOwn(spec.columns, spec.primaryKey)) {
     throw configurationError(
       `Mirror primaryKey "${spec.primaryKey}" is not among the declared columns.`,
       { primaryKey: spec.primaryKey, columns: columnNames },
@@ -57,7 +61,7 @@ export function validateSchemaSpec(spec: SchemaSpec): { ftsColumns: string[]; to
 
   const ftsColumns = spec.fts ?? [];
   for (const col of ftsColumns) {
-    if (!(col in spec.columns)) {
+    if (!Object.hasOwn(spec.columns, col)) {
       throw configurationError(`Mirror FTS column "${col}" is not a declared column.`, {
         column: col,
         columns: columnNames,
@@ -74,7 +78,7 @@ export function validateSchemaSpec(spec: SchemaSpec): { ftsColumns: string[]; to
 
   for (const idx of spec.indexes ?? []) {
     for (const col of idx.columns) {
-      if (!(col in spec.columns)) {
+      if (!Object.hasOwn(spec.columns, col)) {
         throw configurationError(`Mirror index column "${col}" is not a declared column.`, {
           column: col,
         });

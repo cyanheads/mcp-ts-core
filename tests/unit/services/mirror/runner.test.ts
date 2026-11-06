@@ -86,6 +86,33 @@ function makeSync(src: FakeSource): SyncGenerator {
   };
 }
 
+type LogLine = [level: string, message: string, meta?: Readonly<Record<string, unknown>>];
+
+/** A logger that records every line it is given, with its level and fields. */
+function recordingLogger(): { lines: LogLine[]; log: MirrorLogger } {
+  const lines: LogLine[] = [];
+  const at = (level: string) => (message: string, meta?: Readonly<Record<string, unknown>>) => {
+    lines.push(meta === undefined ? [level, message] : [level, message, meta]);
+  };
+  return {
+    lines,
+    log: {
+      debug: at('debug'),
+      info: at('info'),
+      notice: at('notice'),
+      warning: at('warning'),
+      error: at('error'),
+    },
+  };
+}
+
+/** Settles only by rejecting with `signal`'s reason, once it has aborted — a source waiting on its signal. */
+const abortedBy = (signal: AbortSignal): Promise<never> =>
+  new Promise((_resolve, reject) => {
+    if (signal.aborted) reject(signal.reason);
+    signal.addEventListener('abort', () => reject(signal.reason), { once: true });
+  });
+
 describe('mirror runner / defineMirror', () => {
   let dir: string;
   let dbPath: string;
@@ -722,7 +749,7 @@ describe('mirror runner / defineMirror', () => {
   });
 });
 
-describe('runSync (direct) — defensive logger handling', () => {
+describe('runSync (direct) — logging and cancellation', () => {
   /** A minimal spec-conformant MirrorStore double — just enough state to drive runSync directly. */
   function makeMinimalStore(): MirrorStore {
     let state: SyncState = { status: 'pending' };
@@ -785,32 +812,37 @@ describe('runSync (direct) — defensive logger handling', () => {
     ).rejects.toThrow('boom');
   });
 
-  it('checks cancellation before applying a yielded page', async () => {
+  it('checks cancellation before applying a yielded page, and logs the stop at info', async () => {
     const controller = new AbortController();
     controller.abort(new Error('cancel before apply'));
     const store = makeMinimalStore();
     const applyBatch = vi.spyOn(store, 'applyBatch');
     const writeState = vi.spyOn(store, 'writeState');
+    const { log, lines } = recordingLogger();
     const sync: SyncGenerator = async function* (): AsyncGenerator<SyncPage> {
       yield { records: [{ id: 'must-not-apply' }] };
     };
 
     await expect(
-      runSync(store, sync, { log: {}, signal: controller.signal }, { mode: 'init' }),
+      runSync(store, sync, { log, signal: controller.signal }, { mode: 'init' }),
     ).rejects.toThrow('cancel before apply');
     expect(applyBatch).not.toHaveBeenCalled();
     expect(writeState.mock.calls.at(-1)?.[0]).toMatchObject({
       status: 'error',
       error: 'cancel before apply',
     });
+    expect(lines).toEqual([
+      ['info', 'Mirror sync stopped', { mode: 'init', reason: 'cancel before apply' }],
+    ]);
   });
 
-  it('checks cancellation after the last page before terminal count and completion', async () => {
+  it('checks cancellation after the last page before terminal count and completion, and logs the stop at info', async () => {
     const controller = new AbortController();
     const store = makeMinimalStore();
     const applyBatch = vi.spyOn(store, 'applyBatch');
     const count = vi.spyOn(store, 'count');
     const writeState = vi.spyOn(store, 'writeState');
+    const { log, lines } = recordingLogger();
     const sync: SyncGenerator = async function* (): AsyncGenerator<SyncPage> {
       yield { records: [{ id: 'applied-before-cancel' }] };
     };
@@ -819,7 +851,7 @@ describe('runSync (direct) — defensive logger handling', () => {
       runSync(
         store,
         sync,
-        { log: {}, signal: controller.signal },
+        { log, signal: controller.signal },
         {
           mode: 'refresh',
           onProgress: () => controller.abort(new Error('cancel before completion')),
@@ -833,6 +865,104 @@ describe('runSync (direct) — defensive logger handling', () => {
       error: 'cancel before completion',
     });
     expect(writeState.mock.calls.some(([state]) => state.status === 'complete')).toBe(false);
+    expect(lines).toEqual([
+      ['info', 'Mirror sync stopped', { mode: 'refresh', reason: 'cancel before completion' }],
+    ]);
+  });
+
+  it('logs a run the caller stops after a page at info, records error at that page, and the next run of its mode resumes there', async () => {
+    const controller = new AbortController();
+    const reason = new Error('operator stopped the init');
+    const store = makeMinimalStore();
+    const { log, lines } = recordingLogger();
+    const received: Array<Pick<SyncContext, 'checkpoint' | 'cursor'>> = [];
+    const sync: SyncGenerator = async function* ({
+      cursor,
+      checkpoint,
+      signal,
+    }): AsyncGenerator<SyncPage> {
+      received.push({ cursor, checkpoint });
+      if (cursor) return; // The resumed run has nothing left to fetch.
+      yield { records: [{ id: '1' }], cursor: 'c1', checkpoint: 'k1' };
+      await abortedBy(signal);
+    };
+
+    await expect(
+      runSync(
+        store,
+        sync,
+        { log, signal: controller.signal },
+        { mode: 'init', onProgress: () => controller.abort(reason) },
+      ),
+    ).rejects.toBe(reason);
+    expect(lines).toEqual([
+      ['info', 'Mirror sync stopped', { mode: 'init', reason: 'operator stopped the init' }],
+    ]);
+    expect(await store.readState()).toMatchObject({
+      status: 'error',
+      mode: 'init',
+      cursor: 'c1',
+      checkpoint: 'k1',
+      error: 'operator stopped the init',
+    });
+
+    await runSync(store, sync, { log: {}, signal: new AbortController().signal }, { mode: 'init' });
+    expect(received).toEqual([
+      { cursor: undefined, checkpoint: undefined },
+      { cursor: 'c1', checkpoint: 'k1' },
+    ]);
+  });
+
+  it("logs a stop at info naming the caller's reason, and records and rethrows what the source threw", async () => {
+    const controller = new AbortController();
+    const thrown = new Error('upstream fetch aborted');
+    const store = makeMinimalStore();
+    const { log, lines } = recordingLogger();
+    const sync: SyncGenerator = async function* ({ signal }): AsyncGenerator<SyncPage> {
+      yield { records: [{ id: '1' }], cursor: 'c1' };
+      await abortedBy(signal).catch(() => {
+        throw thrown;
+      });
+    };
+
+    await expect(
+      runSync(
+        store,
+        sync,
+        { log, signal: controller.signal },
+        { mode: 'refresh', onProgress: () => controller.abort(new Error('server shutting down')) },
+      ),
+    ).rejects.toBe(thrown);
+    expect(lines).toEqual([
+      ['info', 'Mirror sync stopped', { mode: 'refresh', reason: 'server shutting down' }],
+    ]);
+    expect(await store.readState()).toMatchObject({
+      status: 'error',
+      cursor: 'c1',
+      error: 'upstream fetch aborted',
+    });
+  });
+
+  it("logs a source's own timeout at error as a failure while the caller's signal is not aborted", async () => {
+    const timeout = new DOMException('The operation timed out.', 'TimeoutError');
+    const store = makeMinimalStore();
+    const { log, lines } = recordingLogger();
+    const sync: SyncGenerator = async function* (): AsyncGenerator<SyncPage> {
+      yield { records: [{ id: '1' }], cursor: 'c1' };
+      throw timeout;
+    };
+
+    await expect(
+      runSync(store, sync, { log, signal: new AbortController().signal }, { mode: 'refresh' }),
+    ).rejects.toBe(timeout);
+    expect(lines).toEqual([
+      ['error', 'Mirror sync failed', { mode: 'refresh', error: 'The operation timed out.' }],
+    ]);
+    expect(await store.readState()).toMatchObject({
+      status: 'error',
+      cursor: 'c1',
+      error: 'The operation timed out.',
+    });
   });
 });
 
@@ -1138,6 +1268,45 @@ describe('mirror runner — sync lease across store instances on one file', () =
 
     holder.resume();
     await expect(holding).resolves.toMatchObject({ pagesFetched: 1 });
+  });
+
+  it('logs a run the caller stops after a page at info, records error at that page, releases its lease, and rejects with the reason', async () => {
+    const { log, lines } = recordingLogger();
+    const controller = new AbortController();
+    const reason = new Error('server shutting down');
+    const stopped = instance(
+      async function* ({ signal }): AsyncGenerator<SyncPage> {
+        yield pageOf('a', stamp(0));
+        await abortedBy(signal);
+      },
+      { logger: log },
+    );
+
+    expect(
+      await rejection(
+        stopped.runSync({
+          mode: 'refresh',
+          signal: controller.signal,
+          onProgress: () => controller.abort(reason),
+        }),
+      ),
+    ).toBe(reason);
+    expect(lines).toEqual([
+      ['info', 'Mirror sync stopped', { mode: 'refresh', reason: 'server shutting down' }],
+    ]);
+    expect(await stopped.store.readState()).toMatchObject({
+      status: 'error',
+      mode: 'refresh',
+      cursor: 'after-a',
+      checkpoint: stamp(0),
+      error: 'server shutting down',
+    });
+    // Released: another instance's run claims the lease at once.
+    const next = counted([pageOf('b', stamp(1))]);
+    await expect(instance(next.sync).runSync({ mode: 'refresh' })).resolves.toMatchObject({
+      pagesFetched: 1,
+    });
+    expect(next.counter.runs).toBe(1);
   });
 
   it("commits a page's records and its state in one transaction", async () => {

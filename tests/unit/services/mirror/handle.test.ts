@@ -9,9 +9,9 @@
  * `bunx vitest` (pool: 'forks') executes under Node with `better-sqlite3`, while
  * `bun run test:all` (test:coverage) executes under Bun with `bun:sqlite` — so the
  * Bun driver branch is exercised on the release gate. The two drivers differ in
- * low-level behavior (no-match get() → undefined vs null, and parameter-mismatch
- * error text), so assertions here stay driver-agnostic and the
- * better-sqlite3-only driver-selection branches are gated to the Node runtime.
+ * low-level behavior (parameter-mismatch error text, among others), so
+ * assertions here stay driver-agnostic and the better-sqlite3-only
+ * driver-selection branches are gated to the Node runtime.
  * @module tests/unit/services/mirror/handle
  */
 
@@ -27,6 +27,7 @@ import {
 } from '@/services/mirror/sqlite/handle.js';
 import { JsonRpcErrorCode, McpError } from '@/types-global/errors.js';
 import { runtimeCaps } from '@/utils/internal/runtime.js';
+import { runMirrorProcess } from './mirror-process.js';
 
 /**
  * The active SQLite driver depends on the runtime: `bun:sqlite` under Bun
@@ -34,6 +35,9 @@ import { runtimeCaps } from '@/utils/internal/runtime.js';
  * that are meaningful for only one driver are gated on this flag.
  */
 const IS_BUN = runtimeCaps.isBun;
+
+/** Ceiling for a test that runs a child process, which loads `src/` before its first statement. */
+const PROCESS_TIMEOUT_MS = 60_000;
 
 /** Root ignores file modes, so a `chmod` cannot make a path unreadable or unwritable. */
 const RUNNING_AS_ROOT = process.getuid?.() === 0;
@@ -163,7 +167,7 @@ describe('openSqliteHandle', () => {
           expect(error).toMatchObject({
             code: JsonRpcErrorCode.ConfigurationError,
             message:
-              'Install "better-sqlite3" to use the SQLite mirror store on Node: bun add better-sqlite3',
+              'The SQLite mirror store on Node.js needs the optional peer dependency "better-sqlite3", which is not installed. Add it to the server\'s dependencies, or run the server on Bun, which has SQLite built in.',
             cause: expect.any(Error),
           });
           // No `data` at all, so the store's path never reaches the caller (#635).
@@ -377,6 +381,20 @@ describe('openSqliteHandle', () => {
       expect(all).toEqual([{ id: '1' }]);
     });
 
+    it('get() returns undefined when no row matches, for a SELECT and for an UPDATE … RETURNING, and the row when its one column is NULL', async () => {
+      const handle = await open('get-miss.db');
+      handle.exec('CREATE TABLE t (id TEXT PRIMARY KEY, n INTEGER)');
+      handle.prepare('INSERT INTO t (id, n) VALUES (?, ?)').run('1', null);
+
+      expect(handle.prepare('SELECT 1 AS n WHERE 0').get()).toBeUndefined();
+      expect(handle.prepare('SELECT id FROM t WHERE id = ?').get('missing')).toBeUndefined();
+      expect(
+        handle.prepare('UPDATE t SET n = 1 WHERE id = ? RETURNING id').get('missing'),
+      ).toBeUndefined();
+      expect(handle.prepare('SELECT NULL AS n').get()).toEqual({ n: null });
+      expect(handle.prepare('SELECT n FROM t WHERE id = ?').get('1')).toEqual({ n: null });
+    });
+
     it('transaction() commits every write on success', async () => {
       const handle = await open('txn-commit.db');
       handle.exec('CREATE TABLE t (id TEXT PRIMARY KEY)');
@@ -510,6 +528,73 @@ describe('openSqliteHandle', () => {
       ]);
     });
 
+    it('binds a safe integer as an integer in every column type, through run(), get(), and all()', async () => {
+      const handle = await open('safe-integers.db');
+      handle.exec('CREATE TABLE t (k TEXT, s TEXT, i INTEGER, r REAL, nu NUMERIC, b BLOB, x)');
+      const insert = handle.prepare('INSERT INTO t VALUES (?, ?, ?, ?, ?, ?, ?)');
+      insert.run('a-five', 5, 5, 5, 5, 5, 5);
+      insert.run('b-year', 2024, 2024, 2024, 2024, 2024, 2024);
+
+      const columns = (n: number, text: string) => ({
+        s: text,
+        ts: 'text',
+        i: n,
+        ti: 'integer',
+        r: n,
+        tr: 'real',
+        nu: n,
+        tnu: 'integer',
+        b: n,
+        tb: 'integer',
+        x: n,
+        tx: 'integer',
+      });
+      expect(
+        handle
+          .prepare(
+            'SELECT k, s, typeof(s) AS ts, i, typeof(i) AS ti, r, typeof(r) AS tr, nu, typeof(nu) AS tnu, b, typeof(b) AS tb, x, typeof(x) AS tx FROM t ORDER BY k',
+          )
+          .all(),
+      ).toEqual([
+        { k: 'a-five', ...columns(5, '5') },
+        { k: 'b-year', ...columns(2024, '2024') },
+      ]);
+      expect(handle.prepare('SELECT typeof(?) AS t, CAST(? AS TEXT) AS text').get(5, 5)).toEqual({
+        t: 'integer',
+        text: '5',
+      });
+      expect(handle.prepare('SELECT k FROM t WHERE s = ?').all('2024')).toEqual([{ k: 'b-year' }]);
+    });
+
+    it.each([
+      ['-0', 'real', -0, '0.0'],
+      ['1.5', 'real', 1.5, '1.5'],
+      ['2 ** 53', 'real', 2 ** 53, '9007199254740992.0'],
+      ['1e21', 'real', 1e21, '1.0e+21'],
+      ['Infinity', 'real', Number.POSITIVE_INFINITY, 'Inf'],
+      ['NaN', 'null', Number.NaN, null],
+    ])(
+      'binds the number %s as %s, outside the safe integers that bind as integers',
+      async (_label, type, value, text) => {
+        const handle = await open('non-integers.db');
+        expect(
+          handle.prepare('SELECT typeof(?) AS t, CAST(? AS TEXT) AS text').get(value, value),
+        ).toEqual({ t: type, text });
+      },
+    );
+
+    it('reads a bound or stored safe integer back as a number, not a bigint', async () => {
+      const handle = await open('integer-readback.db');
+      handle.exec('CREATE TABLE t (i INTEGER, x)');
+      const result = handle.prepare('INSERT INTO t VALUES (?, ?)').run(2024, 7);
+      expect(result.changes).toBe(1);
+
+      expect(handle.prepare('SELECT ? AS v').get(5)).toEqual({ v: 5 });
+      expect(handle.prepare('SELECT i, x FROM t').all()).toEqual([{ i: 2024, x: 7 }]);
+      const row = handle.prepare<{ i: unknown; x: unknown }>('SELECT i, x FROM t').get();
+      expect([typeof row?.i, typeof row?.x]).toEqual(['number', 'number']);
+    });
+
     it.each([
       ['2n ** 63n', 2n ** 63n],
       ['2n ** 70n', 2n ** 70n],
@@ -553,12 +638,216 @@ describe('openSqliteHandle', () => {
       });
     });
 
-    it("passes a lone object through as the driver's named parameters", async () => {
-      const handle = await open('named.db');
-      // bun:sqlite keys named parameters with their prefix; better-sqlite3 without it.
-      const named = IS_BUN ? { $a: 'seven' } : { a: 'seven' };
-      expect(handle.prepare('SELECT $a AS v').get(untyped(named))).toEqual({ v: 'seven' });
+    it.each(['$', ':', '@'])(
+      'binds a lone plain object by unprefixed key to %sa parameters, the spelling both drivers accept',
+      async (prefix) => {
+        const handle = await open('named.db');
+        expect(handle.prepare(`SELECT ${prefix}a AS v`).get(untyped({ a: 'seven' }))).toEqual({
+          v: 'seven',
+        });
+      },
+    );
+
+    it("maps a named-parameter object's values as it maps positional ones", async () => {
+      const handle = await open('named-values.db');
+      expect(
+        handle
+          .prepare(
+            'SELECT $t AS t, typeof($t) AS tt, $f AS f, CAST($n AS TEXT) AS n, typeof($n) AS tn, CAST($big AS TEXT) AS big, $s AS s, $z AS z',
+          )
+          .get(untyped({ t: true, f: false, n: 2024, big: 2n ** 63n - 1n, s: 'text', z: null })),
+      ).toEqual({
+        t: 1,
+        tt: 'integer',
+        f: 0,
+        n: '2024',
+        tn: 'integer',
+        big: '9223372036854775807',
+        s: 'text',
+        z: null,
+      });
     });
+
+    it('maps a null-prototype named-parameter object as it maps a plain one', async () => {
+      const handle = await open('named-null-prototype.db');
+      const nullPrototype = (fields: Record<string, unknown>) =>
+        Object.assign(Object.create(null) as Record<string, unknown>, fields);
+
+      expect(
+        handle
+          .prepare('SELECT $t AS t, typeof($t) AS tt, CAST($n AS TEXT) AS n')
+          .get(untyped(nullPrototype({ t: true, n: 2024 }))),
+      ).toEqual({ t: 1, tt: 'integer', n: '2024' });
+      expect(() =>
+        handle.prepare('SELECT $wide AS wide').get(untyped(nullPrototype({ wide: 2n ** 64n }))),
+      ).toThrowError(
+        expect.objectContaining({
+          code: JsonRpcErrorCode.ValidationError,
+          data: { parameter: 'wide' },
+        }),
+      );
+    });
+
+    it('rejects a bigint outside the signed 64-bit range in a named-parameter object, naming its key', async () => {
+      const handle = await open('named-bigint.db');
+      expect(() =>
+        handle.prepare('SELECT $a AS a, $wide AS wide').get(untyped({ a: 1, wide: 2n ** 64n })),
+      ).toThrowError(
+        expect.objectContaining({
+          code: JsonRpcErrorCode.ValidationError,
+          message:
+            'Mirror SQL parameter "wide" is a bigint outside the signed 64-bit range SQLite stores; pass it as a string instead.',
+          data: { parameter: 'wide' },
+        }),
+      );
+    });
+
+    it('leaves the named-parameter object the caller passed unchanged', async () => {
+      const handle = await open('named-unchanged.db');
+      const view = new DataView(new Uint8Array([1, 2]).buffer);
+      const named = { a: true, b: 7, c: view };
+      expect(handle.prepare('SELECT $a AS a, $b AS b, hex($c) AS c').get(untyped(named))).toEqual({
+        a: 1,
+        b: 7,
+        c: '0102',
+      });
+      expect(named).toStrictEqual({ a: true, b: 7, c: view });
+      expect(named.c).toBe(view);
+    });
+
+    /**
+     * Both drivers read one array passed alone as its elements bound
+     * positionally. Beside other arguments they part ways: `bun:sqlite` binds a
+     * leading array alone and ignores what follows, and refuses a later one,
+     * while `better-sqlite3` spreads every array where it sits.
+     */
+    it('binds an array passed alone as its elements bound positionally, each mapped as a positional value is, through run(), get(), and all()', async () => {
+      const handle = await open('array-alone.db');
+      handle.exec('CREATE TABLE t (k TEXT, s TEXT, i INTEGER, x)');
+      handle.prepare('INSERT INTO t VALUES (?, ?, ?, ?)').run(untyped(['a', 2024, true, 5]));
+
+      expect(
+        handle
+          .prepare('SELECT k, s, typeof(s) AS ts, i, typeof(i) AS ti, x, typeof(x) AS tx FROM t')
+          .all(),
+      ).toEqual([{ k: 'a', s: '2024', ts: 'text', i: 1, ti: 'integer', x: 5, tx: 'integer' }]);
+      expect(
+        handle.prepare('SELECT v, typeof(v) AS t FROM (SELECT ? AS v)').get(untyped([5])),
+      ).toEqual({ v: 5, t: 'integer' });
+      expect(
+        handle.prepare('SELECT k FROM t WHERE i = ? AND s = ?').all(untyped([true, 2024])),
+      ).toEqual([{ k: 'a' }]);
+    });
+
+    it.each<[string, unknown[], number]>([
+      ['passed alone', [[1, 2n ** 64n]], 2],
+      ['after another argument', ['a', [true, 2n ** 64n]], 3],
+      ['before another argument', [[2n ** 64n], 'a'], 1],
+    ])(
+      'rejects a bigint outside the signed 64-bit range in an array %s, naming the position better-sqlite3 binds it at',
+      async (_label, args, parameter) => {
+        const handle = await open('array-bigint.db');
+        const select = handle.prepare('SELECT ? AS a, ? AS b, ? AS c');
+        const refusal = expect.objectContaining({
+          code: JsonRpcErrorCode.ValidationError,
+          message: `Mirror SQL parameter ${parameter} is a bigint outside the signed 64-bit range SQLite stores; pass it as a string instead.`,
+          data: { parameter },
+        });
+        expect(() => select.get(...args.map(untyped))).toThrowError(refusal);
+        expect(() => select.all(...args.map(untyped))).toThrowError(refusal);
+        expect(() => select.run(...args.map(untyped))).toThrowError(refusal);
+      },
+    );
+
+    it('leaves the array the caller passed unchanged', async () => {
+      const handle = await open('array-unchanged.db');
+      const view = new DataView(new Uint8Array([1, 2]).buffer);
+      const args = [true, 7, view];
+      expect(
+        handle.prepare('SELECT ? AS a, typeof(?) AS b, hex(?) AS c').get(untyped(args)),
+      ).toEqual({ a: 1, b: 'integer', c: '0102' });
+      expect(args).toStrictEqual([true, 7, view]);
+      expect(args[2]).toBe(view);
+    });
+
+    /** Each value views the bytes `01 02`, whatever the platform's byte order. */
+    const byteValues: Array<[string, () => unknown]> = [
+      ['an ArrayBuffer', () => new Uint8Array([1, 2]).buffer],
+      [
+        'a SharedArrayBuffer',
+        () => {
+          const shared = new SharedArrayBuffer(2);
+          new Uint8Array(shared).set([1, 2]);
+          return shared;
+        },
+      ],
+      ['a DataView', () => new DataView(new Uint8Array([1, 2]).buffer)],
+      [
+        'a DataView with a byte offset',
+        () => new DataView(new Uint8Array([9, 1, 2, 9]).buffer, 1, 2),
+      ],
+      ['a Uint16Array', () => new Uint16Array(new Uint8Array([1, 2]).buffer)],
+      ['a Buffer', () => Buffer.from([1, 2])],
+      ['a Uint8Array with a byte offset', () => new Uint8Array([9, 1, 2, 9]).subarray(1, 3)],
+    ];
+
+    it.each(byteValues)(
+      'binds %s as a blob of the bytes it views, positionally and in a named-parameter object, through run(), get(), and all()',
+      async (_label, bytes) => {
+        const handle = await open('bytes.db');
+        handle.exec('CREATE TABLE t (k TEXT, b BLOB)');
+        handle.prepare('INSERT INTO t VALUES (?, ?)').run('positional', untyped(bytes()));
+        handle.prepare('INSERT INTO t VALUES ($k, $b)').run(untyped({ k: 'named', b: bytes() }));
+
+        expect(
+          handle
+            .prepare('SELECT k, typeof(b) AS t, hex(b) AS h FROM t WHERE b = ? ORDER BY k')
+            .all(untyped(bytes())),
+        ).toEqual([
+          { k: 'named', t: 'blob', h: '0102' },
+          { k: 'positional', t: 'blob', h: '0102' },
+        ]);
+        expect(
+          handle.prepare('SELECT typeof($v) AS t, hex($v) AS h').get(untyped({ v: bytes() })),
+        ).toEqual({ t: 'blob', h: '0102' });
+      },
+    );
+
+    it.each(byteValues)(
+      'binds %s inside an array passed alone as a blob of the bytes it views',
+      async (_label, bytes) => {
+        const handle = await open('array-bytes.db');
+        expect(
+          handle.prepare('SELECT typeof(?) AS t, hex(?) AS h').get(untyped([bytes(), bytes()])),
+        ).toEqual({ t: 'blob', h: '0102' });
+      },
+    );
+
+    /**
+     * Bound bare where a statement with named or numbered parameters reads its
+     * named-parameter object, a `DataView` once ended a Node process inside
+     * `better-sqlite3`, past any `try`; a child process stands in for the
+     * runner's own.
+     */
+    it.each<[string, unknown[]]>([
+      ['SELECT ?1 AS v', []],
+      ['SELECT $a AS v', []],
+      ['SELECT ? AS u, $a AS v', [1]],
+    ])(
+      'binds a bare DataView to %s as a Uint8Array there binds, and the process keeps running',
+      async (sql, leading) => {
+        const report = await runMirrorProcess({
+          role: 'bind',
+          path: join(dir, 'bare-dataview.db'),
+          sql,
+          leading,
+        });
+        expect(report.dataView).toEqual(report.uint8Array);
+        // better-sqlite3 refuses bytes where it reads the named-parameter object, catchably.
+        if (!IS_BUN) expect(report.dataView.ok).toBe(false);
+      },
+      PROCESS_TIMEOUT_MS,
+    );
   });
 
   describe('lifecycle: open / close / use-after-close', () => {

@@ -5,8 +5,10 @@
  * parent directory that cannot be created. Every surface a caller reads (the
  * `runToolContract` envelope, `tools/call` through the production tool
  * factory, `resources/read`, `prompts/get`) names the store by its basename and
- * carries a recovery hint, never the host directory. The suite runs on both
- * drivers: `bun:sqlite` on the Bun lane, `better-sqlite3` on the Node lane.
+ * carries a recovery hint, never the host directory. A malformed full-text
+ * `match` is told apart from such failures: it reaches the wire as the
+ * caller's own invalid input. The suite runs on both drivers: `bun:sqlite` on
+ * the Bun lane, `better-sqlite3` on the Node lane.
  * @module tests/unit/services/mirror/storeFailureWire
  */
 
@@ -305,5 +307,65 @@ describe('a broken mirror store on the wire (#635)', () => {
       .prepare<{ journal_mode: string }>('PRAGMA journal_mode')
       .get();
     expect(journal?.journal_mode).toBe('wal');
+  });
+});
+
+describe('a full-text match on the wire', () => {
+  let dir: string;
+  let store: MirrorStore;
+
+  beforeEach(async () => {
+    dir = await mkdtemp(join(tmpdir(), 'mirror-match-wire-test-'));
+    store = sqliteMirrorStore({
+      path: join(dir, STORE_FILE),
+      table: 'records',
+      primaryKey: 'id',
+      columns: { id: 'TEXT', title: 'TEXT' },
+      fts: ['title'],
+    });
+    await store.applyBatch([{ id: '1', title: 'hello world' }], []);
+  });
+
+  afterEach(async () => {
+    await store.close();
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  const searchTool = (target: MirrorStore) =>
+    tool('mirror_search', {
+      description: 'Search mirrored rows.',
+      input: z.object({ match: z.string().describe('FTS5 match expression') }),
+      output: z.object({ total: z.number().describe('Matching rows') }),
+      handler: async ({ match }) => ({
+        total: (await target.query({ match, limit: 10, offset: 0 })).total,
+      }),
+    });
+
+  /** The error a tool result carries on `structuredContent`, and its `content[]` text. */
+  function toolError(result: CallToolResult) {
+    expect(result.isError).toBe(true);
+    const { error } = result.structuredContent as {
+      error: { code: number; data?: Record<string, unknown>; message: string };
+    };
+    const text = result.content.map((block) => (block.type === 'text' ? block.text : '')).join('');
+    return { error, text };
+  }
+
+  it.each(['a OR', '"unbalanced', 'nosuchcol:x'])(
+    "returns ValidationError (-32007) with SQLite's reason for the malformed match %j, on both surfaces",
+    async (match) => {
+      const { error, text } = toolError(await runToolContract(searchTool(store), { match }));
+      expect(error.code).toBe(JsonRpcErrorCode.ValidationError);
+      expect(error.message).toMatch(/^Mirror match is not a valid FTS5 query: .+\.$/);
+      expect(error.data).toMatchObject({ field: 'match' });
+      expect(text).toContain(`Error: ${error.message}`);
+    },
+  );
+
+  it('keeps a store failure under a valid match off ValidationError', async () => {
+    (await store.raw()).exec('DROP TABLE records_fts');
+    const { error } = toolError(await runToolContract(searchTool(store), { match: 'hello' }));
+    expect(error.code).not.toBe(JsonRpcErrorCode.ValidationError);
+    expect(error.message).toContain('records_fts');
   });
 });

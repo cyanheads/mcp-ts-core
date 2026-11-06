@@ -33,6 +33,8 @@ const DEFAULT_SYNC_LEASE_TTL_MS = 120_000;
 
 /** How the run persists: fenced on a lease, or straight to a store without one. */
 interface RunWrites {
+  /** The caller's own signal: aborted when the caller stops the run. */
+  caller: AbortSignal;
   commitPage(records: MirrorRow[], tombstones: string[], state: SyncState): Promise<void>;
   commitState(state: SyncState): Promise<void>;
   log: MirrorLogger;
@@ -62,6 +64,13 @@ interface RunWrites {
  * `completedAt`/`total` advance; on failure they are preserved (a failed
  * refresh on top of a complete mirror stays "ready").
  *
+ * A failure is recorded as status `error` with its message and rethrown, and
+ * logged as `Mirror sync failed` at `error`. When the caller's signal has
+ * aborted by then, whatever the generator threw, the run was stopped, not
+ * failed: it logs `Mirror sync stopped` at `info` with the abort reason's
+ * message instead, and records and rethrows the same way, so the next run of
+ * its mode resumes from its last page.
+ *
  * With a store that provides `syncLease`, the run first claims the lease and
  * rejects `Conflict` (`data.reason: 'sync_locked'`) while another process or
  * instance holds it live; the generator never runs then. Each page's records,
@@ -79,6 +88,7 @@ export async function runSync(
   const leases = store.syncLease;
   if (!leases) {
     return runPages(store, sync, options, {
+      caller: ctx.signal,
       log: ctx.log,
       signal: ctx.signal,
       async commitPage(records, tombstones, state) {
@@ -125,6 +135,7 @@ export async function runSync(
 
   try {
     return await runPages(store, sync, options, {
+      caller: ctx.signal,
       log: ctx.log,
       lost: lost.signal,
       signal: AbortSignal.any([ctx.signal, lost.signal]),
@@ -234,12 +245,21 @@ async function runPages(
       run.log.warning?.('Mirror sync lost its lease', { mode });
       throw failure;
     }
-    const message = failure instanceof Error ? failure.message : String(failure);
-    run.log.error?.('Mirror sync failed', { mode, error: message });
+    const message = messageOf(failure);
+    // The caller ended the run, whatever the generator threw on the way out.
+    if (run.caller.aborted) {
+      run.log.info?.('Mirror sync stopped', { mode, reason: messageOf(run.caller.reason) });
+    } else {
+      run.log.error?.('Mirror sync failed', { mode, error: message });
+    }
     // Throws `sync_lease_lost` instead when the lease was taken over meanwhile.
     await run.commitState({ status: 'error', mode, startedAt, cursor, checkpoint, error: message });
     throw failure;
   }
+}
+
+function messageOf(value: unknown): string {
+  return value instanceof Error ? value.message : String(value);
 }
 
 function leaseLost(): McpError {

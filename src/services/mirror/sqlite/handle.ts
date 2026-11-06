@@ -22,19 +22,31 @@ import {
 import { runtimeCaps } from '@/utils/internal/runtime.js';
 
 /**
- * Primitive value storable in a mirror column. Values outside it that
- * unvalidated JSON or a source can still produce bind the same on both
- * drivers: a boolean as the integer `1`/`0` (`'1'`/`'0'` in a `TEXT` column),
- * a `bigint` in the signed 64-bit range as an integer, and a `Uint8Array` as a
- * blob. A `bigint` outside that range is refused with `ValidationError`, as is
- * an object, array, or `Date` in the store's records, tombstones, ids,
- * filters, and `match`.
+ * Primitive value storable in a mirror column. A number binds the same on both
+ * drivers: a safe integer other than `-0` as an integer (`'2024'`, not
+ * `'2024.0'`, in a `TEXT` column), any other number as REAL, and `NaN` as
+ * NULL; an integer column reads back as a number either way. Values outside it
+ * that unvalidated JSON or a source can still produce bind the same on both
+ * drivers too: a boolean as the integer `1`/`0` (`'1'`/`'0'` in a `TEXT`
+ * column), a `bigint` in the signed 64-bit range as an integer, and bytes (an
+ * `ArrayBuffer`, `SharedArrayBuffer`, `DataView`, typed array, or `Buffer`) as
+ * a blob of the bytes they view. A `bigint` outside that range is refused with
+ * `ValidationError`, as is an object, array, or `Date` in the store's records,
+ * tombstones, ids, filters, and `match`.
  */
 export type SqlValue = string | number | null;
 
 /**
  * Runtime-agnostic prepared statement — the intersection of the `bun:sqlite`
- * and `better-sqlite3` statement APIs. Bound parameters are passed positionally.
+ * and `better-sqlite3` statement APIs. Parameters bind the same on both
+ * drivers in two forms: positionally, for anonymous `?` placeholders, as
+ * separate arguments or as one array passed alone (`get([a, b])` binds as
+ * `get(a, b)`); or as one plain object passed alone, keyed by name without the
+ * prefix, for `$name`, `:name`, and `@name` placeholders. An array's elements
+ * and an object's values are mapped as positional values are, in a copy, so
+ * the caller's array or object is never changed. Numbered `?NNN` placeholders,
+ * prefixed keys, an object beside positional values, and an array beside other
+ * arguments each bind differently on the two drivers.
  */
 export interface SqliteStatement<TRow = unknown> {
   all(...params: SqlValue[]): TRow[];
@@ -123,28 +135,85 @@ const INT64_MIN = -(2n ** 63n);
 const INT64_MAX = 2n ** 63n - 1n;
 
 /**
- * Give the positional parameters of a statement one binding on both drivers.
- * A boolean binds as the integer `1n`/`0n`: `bun:sqlite` already binds it as
- * an integer, `better-sqlite3` refuses it, and a JS number would bind as REAL
- * on `better-sqlite3`, storing `'1.0'` in a `TEXT` column. A bigint outside
- * the signed 64-bit range is refused, where `bun:sqlite` would wrap it and
- * `better-sqlite3` throw a `RangeError`. Objects pass through untouched: bound
- * alone, one is the driver's named-parameter list. `params` is the call's own
- * rest array, so a boolean is replaced in place and nothing is allocated.
+ * Give a statement's parameters one binding on both drivers. Each positional
+ * value is mapped by {@link bindValue}, in place: `params` is the call's own
+ * rest array. An array or a plain object is mapped into a copy, so the
+ * caller's own is never changed. An array's elements are mapped as positional
+ * values, since both drivers read an array passed alone as its elements bound
+ * positionally; a plain object is the driver's named-parameter list, so its
+ * own values are mapped keyed as the caller keyed them. Positions count an
+ * array's elements where `better-sqlite3` spreads them, so a refusal names the
+ * position that driver binds the value at, which is `bun:sqlite`'s too
+ * wherever it binds the value: a leading array, whose elements alone it binds.
  */
 function bindParams(params: unknown[]): unknown[] {
+  let position = 0;
   for (let i = 0; i < params.length; i++) {
     const value = params[i];
-    if (typeof value === 'boolean') {
-      params[i] = value ? 1n : 0n;
-    } else if (typeof value === 'bigint' && (value < INT64_MIN || value > INT64_MAX)) {
-      throw validationError(
-        `Mirror SQL parameter ${i + 1} is a bigint outside the signed 64-bit range SQLite stores; pass it as a string instead.`,
-        { parameter: i + 1 },
-      );
+    if (Array.isArray(value)) {
+      const before = position;
+      params[i] = Array.from(value, (element, j) => bindValue(element, before + j + 1));
+      position += value.length;
+      continue;
     }
+    position += 1;
+    params[i] = isPlainObject(value)
+      ? Object.fromEntries(Object.entries(value).map(([key, v]) => [key, bindValue(v, key)]))
+      : bindValue(value, position);
   }
   return params;
+}
+
+/**
+ * The binding both drivers give `value`, the parameter at position or key
+ * `parameter`. `better-sqlite3` binds every JS number as REAL and `bun:sqlite`
+ * a safe integer as INTEGER, so a safe integer other than `-0` is passed as a
+ * bigint: an INTEGER on both, storing `'5'`, not `'5.0'`, in a `TEXT` column.
+ * Other numbers (`-0`, fractions, `±Infinity`, whole numbers past the safe
+ * range) bind as REAL on both, and `NaN` as NULL; neither driver reads a bound
+ * bigint back as anything but a number. A boolean binds as the integer
+ * `1n`/`0n`, which `bun:sqlite` already does and `better-sqlite3` refuses. A
+ * bigint outside the signed 64-bit range is refused, where `bun:sqlite` would
+ * wrap it and `better-sqlite3` throw a `RangeError`. An `ArrayBuffer`,
+ * `SharedArrayBuffer`, or `DataView` is passed as a `Uint8Array` over the same
+ * bytes: `bun:sqlite` binds each as a blob of the bytes it views, while
+ * `better-sqlite3` refuses them, and a `DataView` where it reads its
+ * named-parameter object ends the process. Typed arrays already bind as a
+ * blob of their viewed bytes on both.
+ */
+function bindValue(value: unknown, parameter: number | string): unknown {
+  switch (typeof value) {
+    case 'number':
+      return Number.isSafeInteger(value) && !Object.is(value, -0) ? BigInt(value) : value;
+    case 'boolean':
+      return value ? 1n : 0n;
+    case 'bigint':
+      if (value < INT64_MIN || value > INT64_MAX) {
+        const name = typeof parameter === 'number' ? parameter : JSON.stringify(parameter);
+        throw validationError(
+          `Mirror SQL parameter ${name} is a bigint outside the signed 64-bit range SQLite stores; pass it as a string instead.`,
+          { parameter },
+        );
+      }
+      return value;
+    case 'object':
+      if (value instanceof ArrayBuffer || value instanceof SharedArrayBuffer) {
+        return new Uint8Array(value);
+      }
+      if (value instanceof DataView) {
+        return new Uint8Array(value.buffer, value.byteOffset, value.byteLength);
+      }
+      return value;
+    default:
+      return value;
+  }
+}
+
+/** An object whose prototype is `Object.prototype` or `null`: what `better-sqlite3` reads as named parameters. */
+function isPlainObject(value: unknown): value is object {
+  if (typeof value !== 'object' || value === null) return false;
+  const prototype: unknown = Object.getPrototypeOf(value);
+  return prototype === Object.prototype || prototype === null;
 }
 
 /** Adapts a driver to the runtime-neutral {@link SqliteHandle}; `close` is driver-specific. */
@@ -158,7 +227,8 @@ function wrapDriver(db: SqliteDriver, close: () => void): SqliteHandle {
       const stmt = db.prepare(sql);
       return {
         all: (...params) => stmt.all(...bindParams(params)) as TRow[],
-        get: (...params) => stmt.get(...bindParams(params)) as TRow | undefined,
+        // bun:sqlite reports no row as null, better-sqlite3 as undefined; a row is always an object.
+        get: (...params) => (stmt.get(...bindParams(params)) ?? undefined) as TRow | undefined,
         run: (...params) => stmt.run(...bindParams(params)),
       };
     },
@@ -266,7 +336,7 @@ async function openBetterSqlite3Handle(path: string): Promise<SqliteHandle> {
   } catch (err) {
     /* istanbul ignore next -- missing-dep path; better-sqlite3 is installed in the test env */
     throw configurationError(
-      'Install "better-sqlite3" to use the SQLite mirror store on Node: bun add better-sqlite3',
+      'The SQLite mirror store on Node.js needs the optional peer dependency "better-sqlite3", which is not installed. Add it to the server\'s dependencies, or run the server on Bun, which has SQLite built in.',
       undefined,
       { cause: err },
     );

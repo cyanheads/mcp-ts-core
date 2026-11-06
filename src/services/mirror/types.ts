@@ -39,15 +39,16 @@ export interface MirrorLogger {
  *   cleared on completion. The runner threads it back into `sync()` to resume an
  *   interrupted run of the same `mode`.
  * - `checkpoint` is the **durable** high-water mark (e.g. the max record
- *   datestamp). It advances monotonically and only on success, and seeds the
- *   next incremental refresh.
+ *   datestamp). It advances monotonically with each committed page, a failed
+ *   or stopped run keeps the value it reached, and it seeds the next
+ *   incremental refresh, the checkpoint of an interrupted init included.
  *
  * They cannot be merged: for a token-paged source the mid-run cursor is not a
  * valid refresh seed, and the high-water mark is not a valid mid-run resume
  * position.
  */
 export interface SyncState {
-  /** Durable incremental high-water mark; advances only on success. */
+  /** Durable incremental high-water mark; advances with each committed page, and a failed or stopped run keeps it. */
   checkpoint?: string | undefined;
   /** ISO 8601 timestamp the last run completed successfully. Drives readiness. */
   completedAt?: string | undefined;

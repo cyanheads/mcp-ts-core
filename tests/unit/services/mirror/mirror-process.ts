@@ -2,7 +2,8 @@
  * @fileoverview Runs `mirror-process-child.ts` as a separate OS process on the
  * runtime running the tests (`process.execPath`): Bun with `bun:sqlite`, Node
  * with `better-sqlite3`. Mirror tests use it to put two real processes on one
- * store file. The children coordinate through barrier files in a directory the
+ * store file, and to run a bind that could end its process outside the test
+ * runner's own. The children coordinate through barrier files in a directory the
  * test owns; the parent only waits for each child to exit and reads the one
  * JSON report line it prints.
  * @module tests/unit/services/mirror/mirror-process
@@ -85,7 +86,19 @@ export interface SyncTask {
   writer: string;
 }
 
-export type MirrorProcessTask = OpenTask | SyncTask;
+/**
+ * Open a handle at `path` and run `sql` through `get()` twice: with a bare
+ * `DataView`, then a bare `Uint8Array`, each over the bytes `01 02`, bound
+ * after the `leading` values.
+ */
+export interface BindTask {
+  leading: unknown[];
+  path: string;
+  role: 'bind';
+  sql: string;
+}
+
+export type MirrorProcessTask = BindTask | OpenTask | SyncTask;
 
 /** What a failed open or sync rejected with. */
 export interface ProcessError {
@@ -107,13 +120,26 @@ export interface SyncReport {
   result?: { pagesFetched: number; recordsApplied: number; total: number };
 }
 
+/** What one `get()` call of a {@link BindTask} returned, or the class and message it threw. */
+export type BindOutcome =
+  | { ok: true; row: unknown }
+  | { error: { message: string; name: string }; ok: false };
+
+export interface BindReport {
+  dataView: BindOutcome;
+  uint8Array: BindOutcome;
+}
+
+type MirrorProcessReport = BindReport | OpenReport | SyncReport;
+
 const CHILD = join(import.meta.dirname, 'mirror-process-child.ts');
 const ROOT = join(import.meta.dirname, '..', '..', '..', '..');
 
+export function runMirrorProcess(task: BindTask): Promise<BindReport>;
 export function runMirrorProcess(task: OpenTask): Promise<OpenReport>;
 export function runMirrorProcess(task: SyncTask): Promise<SyncReport>;
 /** Runs `task` in a child process and resolves its report; rejects when the child exits non-zero. */
-export function runMirrorProcess(task: MirrorProcessTask): Promise<OpenReport | SyncReport> {
+export function runMirrorProcess(task: MirrorProcessTask): Promise<MirrorProcessReport> {
   const child = spawn(process.execPath, [CHILD, JSON.stringify(task)], {
     cwd: ROOT,
     stdio: ['ignore', 'pipe', 'pipe'],
@@ -134,7 +160,7 @@ export function runMirrorProcess(task: MirrorProcessTask): Promise<OpenReport | 
         reject(new Error(`Mirror process (${task.role}) exited ${code}: ${stderr}`));
         return;
       }
-      resolve(JSON.parse(report) as OpenReport | SyncReport);
+      resolve(JSON.parse(report) as MirrorProcessReport);
     });
   });
 }
