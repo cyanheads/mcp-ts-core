@@ -25,6 +25,12 @@ import { type RequestContext, withExtra } from '@/utils/internal/requestContext.
 
 const DEFAULT_LIST_LIMIT = 1000;
 
+/** D1's per-statement bound-parameter limit: https://developers.cloudflare.com/d1/platform/limits/ */
+const D1_MAX_BOUND_PARAMETERS = 100;
+
+/** Keys per `getMany` statement: the parameter limit less the statement's tenant and `now` binds. */
+const GET_MANY_CHUNK_SIZE = D1_MAX_BOUND_PARAMETERS - 2;
+
 /**
  * Cloudflare D1 storage provider implementation.
  *
@@ -304,9 +310,11 @@ export class D1Provider implements IStorageProvider {
   }
 
   /**
-   * Retrieves multiple values in a single operation.
-   * More efficient than multiple individual get() calls.
-   * Uses SQL IN clause for batch fetching.
+   * Retrieves multiple values in one round trip. D1 binds at most 100 parameters
+   * per statement, so the distinct keys are split into chunks that leave room for
+   * the tenant and `now` binds, and every chunk runs in a single `db.batch()`:
+   * one query against the per-invocation limit, one transaction snapshot, and
+   * expiry judged against one instant.
    */
   async getMany<T>(
     tenantId: string,
@@ -321,27 +329,32 @@ export class D1Provider implements IStorageProvider {
 
         logger.debug(`[D1Provider] Getting ${keys.length} keys in batch`, context);
 
-        // Build SQL IN clause
-        const placeholders = keys.map(() => '?').join(',');
+        const uniqueKeys = [...new Set(keys)];
         const now = this.getNow();
+        const chunks = Array.from(
+          { length: Math.ceil(uniqueKeys.length / GET_MANY_CHUNK_SIZE) },
+          (_, index) =>
+            uniqueKeys.slice(index * GET_MANY_CHUNK_SIZE, (index + 1) * GET_MANY_CHUNK_SIZE),
+        );
+        const statements = chunks.map((chunk) =>
+          this.db
+            .prepare(
+              `SELECT key, value, expires_at FROM ${this.tableName}
+               WHERE tenant_id = ?
+                 AND key IN (${chunk.map(() => '?').join(',')})
+                 AND (expires_at IS NULL OR expires_at > ?)`,
+            )
+            .bind(tenantId, ...chunk, now),
+        );
 
-        const stmt = this.db
-          .prepare(
-            `SELECT key, value, expires_at FROM ${this.tableName}
-             WHERE tenant_id = ?
-               AND key IN (${placeholders})
-               AND (expires_at IS NULL OR expires_at > ?)`,
-          )
-          .bind(tenantId, ...keys, now);
-
-        const result = await stmt.all<{
+        const chunkResults = await this.db.batch<{
           key: string;
           value: string;
           expires_at: number | null;
-        }>();
+        }>(statements);
 
         const results = new Map<string, T>();
-        const rows = result.results ?? [];
+        const rows = chunkResults.flatMap((result) => result.results ?? []);
 
         for (const row of rows) {
           try {

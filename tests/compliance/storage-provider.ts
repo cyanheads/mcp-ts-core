@@ -4,6 +4,7 @@
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
+import { createContextState } from '@/core/context.js';
 import type { IStorageProvider, ListResult } from '@/storage/core/IStorageProvider.js';
 import { StorageService } from '@/storage/core/StorageService.js';
 import { JsonRpcErrorCode } from '@/types-global/errors.js';
@@ -164,6 +165,53 @@ export function storageProviderTests(harness: StorageProviderHarness): void {
       await expect(storageA.getMany([], contextA)).resolves.toEqual(new Map());
       await expect(storageA.setMany(new Map(), contextA)).resolves.toBeUndefined();
       await expect(storageA.deleteMany([], contextA)).resolves.toBe(0);
+    });
+
+    it('reads batches past 100 keys, and a 1,000-key ctx.state.list page, with every value', async () => {
+      const keys = Array.from(
+        { length: 1_000 },
+        (_, index) => `bulk/${String(index).padStart(4, '0')}`,
+      );
+      const stored = new Map(keys.map((key, index) => [key, { index }]));
+      await storageA.setMany(stored, contextA);
+      const expectedFor = (wanted: string[]) =>
+        new Map(wanted.map((key) => [key, stored.get(key)]));
+
+      // D1 binds at most 100 parameters per statement; these straddle its chunk boundaries.
+      for (const count of [98, 99, 196, 197, 1_000]) {
+        const wanted = keys.slice(0, count);
+        await expect(storageA.getMany(wanted, contextA)).resolves.toEqual(expectedFor(wanted));
+      }
+
+      // Repeated and missing keys interleaved across every chunk.
+      const present = keys.slice(0, 250);
+      const mixed = present.flatMap((key, index) =>
+        index % 3 === 0 ? [key, `bulk-missing/${index}`, key] : [key],
+      );
+      await expect(storageA.getMany(mixed, contextA)).resolves.toEqual(expectedFor(present));
+
+      // ctx.state.list reads the page's values through getMany when the provider lists keys only.
+      const state = createContextState(storageA, contextA, new AbortController().signal);
+      const page = await state.list('bulk/');
+      expect(page.cursor).toBeUndefined();
+      expect(page.items).toEqual(keys.map((key) => ({ key, value: stored.get(key) })));
+
+      if (capabilities.deterministicTtl) {
+        const shortLived = Array.from({ length: 50 }, (_, index) => `bulk-ttl/${index}`);
+        await storageA.setMany(new Map(shortLived.map((key) => [key, 'short'])), contextA, {
+          ttl: 1,
+        });
+        // One short-lived key before every four permanent ones, so each chunk holds some.
+        const interleaved = shortLived.flatMap((key, index) => [
+          key,
+          ...keys.slice(index * 4, index * 4 + 4),
+        ]);
+        await expect(storageA.getMany(interleaved, contextA)).resolves.toHaveProperty('size', 250);
+        now += 1_001;
+        await expect(storageA.getMany(interleaved, contextA)).resolves.toEqual(
+          expectedFor(keys.slice(0, 200)),
+        );
+      }
     });
 
     it('isolates batch reads, overwrites, and deletes for colliding tenant keys', async () => {

@@ -2,7 +2,7 @@
  * @fileoverview Unit tests for the D1Provider.
  * @module tests/storage/providers/cloudflare/d1Provider.test
  */
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { RequestContext } from '@/utils/internal/requestContext.js';
 import { requestContextService } from '@/utils/internal/requestContext.js';
 import { encodeCursor } from '../../../../../src/storage/core/storageValidation.js';
@@ -20,6 +20,67 @@ const createMockD1Database = () => ({
   }),
   batch: vi.fn(),
 });
+
+/** D1's per-statement bound-parameter limit: https://developers.cloudflare.com/d1/platform/limits/ */
+const D1_BOUND_PARAMETER_LIMIT = 100;
+
+interface StoredRow {
+  expiresAt?: number | null;
+  key: string;
+  tenant: string;
+  value: unknown;
+}
+
+interface FakeStatement {
+  params: unknown[];
+  sql: string;
+}
+
+/**
+ * A D1 fake that answers the `getMany` SELECT (`tenant_id = ? AND key IN (…)
+ * AND (expires_at IS NULL OR expires_at > ?)`) from stored rows and, like D1,
+ * rejects any statement binding more than 100 parameters — on `all()` and inside
+ * `batch()` alike, where one failing statement fails the whole batch.
+ */
+const createRowStoreD1 = (rows: StoredRow[]) => {
+  const execute = (statement: FakeStatement) => {
+    if (statement.params.length > D1_BOUND_PARAMETER_LIMIT) {
+      throw new Error('D1_ERROR: too many SQL variables: SQLITE_ERROR');
+    }
+    const [tenant, ...rest] = statement.params;
+    const now = rest.pop() as number;
+    const keys = new Set(rest);
+    return {
+      results: rows
+        .filter(
+          (row) =>
+            row.tenant === tenant &&
+            keys.has(row.key) &&
+            (row.expiresAt == null || row.expiresAt > now),
+        )
+        .map((row) => ({
+          key: row.key,
+          value: JSON.stringify(row.value),
+          expires_at: row.expiresAt ?? null,
+        })),
+    };
+  };
+  const all = vi.fn(async (statement: FakeStatement) => execute(statement));
+  const db = {
+    prepare: vi.fn((sql: string) => ({
+      bind: (...params: unknown[]) => {
+        const statement: FakeStatement & { all: () => Promise<unknown> } = {
+          sql,
+          params,
+          all: () => all(statement),
+        };
+        return statement;
+      },
+    })),
+    batch: vi.fn(async (statements: FakeStatement[]) => statements.map(execute)),
+  };
+  return { all, db };
+};
 
 describe('D1Provider', () => {
   let d1Provider: D1Provider;
@@ -330,9 +391,11 @@ describe('D1Provider', () => {
       expect(mockDb.batch).not.toHaveBeenCalled();
     });
 
-    it('getMany should return 0 entries for empty keys', async () => {
+    it('getMany should return 0 entries for empty keys without issuing a query', async () => {
       const result = await d1Provider.getMany('tenant-1', [], context);
       expect(result.size).toBe(0);
+      expect(mockDb.prepare).not.toHaveBeenCalled();
+      expect(mockDb.batch).not.toHaveBeenCalled();
     });
 
     it('setMany should bind a computed expires_at for every entry when a TTL is provided', async () => {
@@ -372,13 +435,14 @@ describe('D1Provider', () => {
     });
 
     it('getMany should retrieve and parse multiple keys', async () => {
-      const stmt = mockDb.prepare().bind();
-      stmt.all.mockResolvedValue({
-        results: [
-          { key: 'k1', value: JSON.stringify({ n: 1 }), expires_at: null },
-          { key: 'k2', value: JSON.stringify({ n: 2 }), expires_at: null },
-        ],
-      });
+      mockDb.batch.mockResolvedValue([
+        {
+          results: [
+            { key: 'k1', value: JSON.stringify({ n: 1 }), expires_at: null },
+            { key: 'k2', value: JSON.stringify({ n: 2 }), expires_at: null },
+          ],
+        },
+      ]);
 
       const result = await d1Provider.getMany<{ n: number }>('tenant-1', ['k1', 'k2'], context);
 
@@ -391,27 +455,119 @@ describe('D1Provider', () => {
     });
 
     it('getMany should throw McpError when a row fails JSON parsing', async () => {
-      const stmt = mockDb.prepare().bind();
-      stmt.all.mockResolvedValue({
-        results: [{ key: 'bad', value: 'not-json{{', expires_at: null }],
-      });
+      mockDb.batch.mockResolvedValue([
+        { results: [{ key: 'bad', value: 'not-json{{', expires_at: null }] },
+      ]);
 
-      await expect(d1Provider.getMany('tenant-1', ['bad'], context)).rejects.toThrow(McpError);
+      await expect(d1Provider.getMany('tenant-1', ['bad'], context)).rejects.toMatchObject({
+        code: JsonRpcErrorCode.SerializationError,
+      });
     });
 
     it('getMany should default to an empty map when results is undefined', async () => {
-      const stmt = mockDb.prepare().bind();
-      stmt.all.mockResolvedValue({});
+      mockDb.batch.mockResolvedValue([{}]);
 
       const result = await d1Provider.getMany('tenant-1', ['a'], context);
       expect(result.size).toBe(0);
     });
 
     it('getMany should propagate database errors', async () => {
-      const stmt = mockDb.prepare().bind();
-      stmt.all.mockRejectedValue(new Error('D1_ERROR: no such table'));
+      mockDb.batch.mockRejectedValue(new Error('D1_ERROR: no such table'));
 
       await expect(d1Provider.getMany('tenant-1', ['a'], context)).rejects.toThrow(McpError);
+    });
+  });
+
+  describe('getMany past the D1 bound-parameter limit', () => {
+    const tenant = 'tenant-1';
+    const NOW = 1_800_000_000_000;
+    const keyAt = (index: number) => `k/${String(index).padStart(4, '0')}`;
+    const keysUpTo = (count: number) => Array.from({ length: count }, (_, index) => keyAt(index));
+    const storedRows = (count: number): StoredRow[] =>
+      keysUpTo(count).map((key, index) => ({ key, tenant, value: { index } }));
+    const batchedStatements = (db: ReturnType<typeof createRowStoreD1>['db']): FakeStatement[] =>
+      db.batch.mock.calls[0]?.[0] ?? [];
+
+    afterEach(() => {
+      vi.restoreAllMocks();
+    });
+
+    it.each([
+      [98, [100]],
+      [99, [100, 3]],
+      [196, [100, 100]],
+      [197, [100, 100, 3]],
+    ])(
+      'reads %i keys through one batch whose statements bind %j parameters',
+      async (count, bindCounts) => {
+        // Stored keys beyond the requested ones must stay out of the result.
+        const { all, db } = createRowStoreD1(storedRows(count + 5));
+        const provider = new D1Provider(db as any);
+        const keys = keysUpTo(count);
+
+        const result = await provider.getMany<{ index: number }>(tenant, keys, context);
+
+        expect(result).toEqual(new Map(keys.map((key, index) => [key, { index }])));
+        expect(db.batch).toHaveBeenCalledOnce();
+        expect(all).not.toHaveBeenCalled();
+        const statements = batchedStatements(db);
+        expect(statements.map((statement) => statement.params.length)).toEqual(bindCounts);
+        for (const statement of statements) {
+          expect(statement.params[0]).toBe(tenant);
+          expect(statement.sql.match(/\?/g)).toHaveLength(statement.params.length);
+        }
+        const boundKeys = statements.flatMap((statement) => statement.params.slice(1, -1));
+        expect(boundKeys.sort()).toEqual(keys);
+      },
+    );
+
+    it('binds one now to every chunk', async () => {
+      let clock = NOW;
+      vi.spyOn(Date, 'now').mockImplementation(() => clock++);
+      const { db } = createRowStoreD1(storedRows(197));
+      const provider = new D1Provider(db as any);
+
+      await provider.getMany(tenant, keysUpTo(197), context);
+
+      const statements = batchedStatements(db);
+      expect(statements).toHaveLength(3);
+      expect(new Set(statements.map((statement) => statement.params.at(-1)))).toEqual(
+        new Set([NOW]),
+      );
+    });
+
+    it('binds each distinct key once when the list repeats keys', async () => {
+      const { db } = createRowStoreD1(storedRows(98));
+      const provider = new D1Provider(db as any);
+      const keys = keysUpTo(98);
+
+      const result = await provider.getMany(tenant, [...keys, ...keys], context);
+
+      expect(result.size).toBe(98);
+      expect(batchedStatements(db).map((statement) => statement.params.length)).toEqual([100]);
+    });
+
+    it('omits missing keys and keys expired at the bound now, in every chunk', async () => {
+      vi.spyOn(Date, 'now').mockReturnValue(NOW);
+      const expired = new Set([keyAt(5), keyAt(120), keyAt(195)]);
+      const missing = new Set([keyAt(10), keyAt(150), keyAt(196)]);
+      /** Expiry at exactly `now` is expired; the rest are permanent or live one millisecond longer. */
+      const expiresAtFor = (key: string, index: number): number | null => {
+        if (expired.has(key)) return NOW;
+        return index % 2 === 0 ? null : NOW + 1;
+      };
+      const rows = storedRows(197).flatMap((row, index) =>
+        missing.has(row.key) ? [] : [{ ...row, expiresAt: expiresAtFor(row.key, index) }],
+      );
+      const { db } = createRowStoreD1(rows);
+      const provider = new D1Provider(db as any);
+
+      const result = await provider.getMany(tenant, keysUpTo(197), context);
+
+      expect(batchedStatements(db)).toHaveLength(3);
+      expect([...result.keys()].sort()).toEqual(
+        keysUpTo(197).filter((key) => !expired.has(key) && !missing.has(key)),
+      );
     });
   });
 
