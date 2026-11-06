@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.13.20](changelog/0.13.x/0.13.20.md) — 2026-11-06 · 🛡️ Security
+
+A session bound to an identity resumes only for a request with the same tenant ID, client ID, and subject. createApp refuses Node.js below 24, resource reads keep a ProtocolError code and log failures, and CSV and JSON canvas export stops scaling memory with rows.
+
 ## [0.13.19](changelog/0.13.x/0.13.19.md) — 2026-11-05 · 🛡️ Security
 
 Canvas gains DataCanvas.acquireShared and a hardened SQL gate, mirrors gain a cross-process sync lease, metric helpers bind to the running SDK, escapeMarkdownInline runs in linear time, and the bundle cleaner keeps runtime skills/ modules.

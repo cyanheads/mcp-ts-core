@@ -1,6 +1,6 @@
 # mcp-ts-core - Directory Structure
 
-Generated on: 2026-11-05 19:49:56
+Generated on: 2026-11-06 12:17:38
 
 ```text
 mcp-ts-core/
@@ -406,6 +406,7 @@ mcp-ts-core/
 │   │   │   ├── heartbeat.ts
 │   │   │   └── manager.ts
 │   │   ├── cacheHints.ts
+│   │   ├── failureSeverity.ts
 │   │   ├── handlerContext.ts
 │   │   ├── inputRequired.ts
 │   │   ├── notifications.ts
