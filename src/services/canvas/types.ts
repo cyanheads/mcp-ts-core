@@ -9,6 +9,15 @@
  * Column type tag used when an explicit schema is provided to
  * {@link IDataCanvasProvider.registerTable}. The DuckDB provider maps these
  * to native DuckDB types; future engines map to their nearest equivalents.
+ *
+ * On a column `describe()` reports, the tag is a registration-oriented
+ * approximation of the engine's type: a numeric type takes the tag that holds
+ * every one of its values exactly (`INTEGER` for `TINYINT`, `SMALLINT`,
+ * `UTINYINT`, and `USMALLINT`; `BIGINT` for `UINTEGER`), and a type no tag
+ * holds (`UBIGINT`, `HUGEINT`, `UHUGEINT`, `DECIMAL`, `BIGNUM`, and any other
+ * type outside this list) is `VARCHAR`. The tag does not predict the JSON form
+ * of a value `query()` returns: `BIGINT` values are strings, `UINTEGER` values
+ * numbers. {@link DescribedColumn.engineType} carries the exact type.
  */
 export type ColumnType =
   | 'VARCHAR'
@@ -31,6 +40,18 @@ export interface ColumnSchema {
   type: ColumnType;
 }
 
+/** A column as {@link CanvasInstance.describe} reports it. */
+export interface DescribedColumn extends ColumnSchema {
+  /**
+   * The column's type exactly as the engine spells it — DuckDB's
+   * `information_schema.columns.data_type` (`DECIMAL(10,2)`, `BIGINT[]`,
+   * `STRUCT(a INTEGER, b VARCHAR)`, `TIMESTAMP WITH TIME ZONE`). `describe()`
+   * sets it on every column; optional so a `TableInfo` built by hand compiles
+   * without it.
+   */
+  engineType?: string;
+}
+
 /** Object kind exposed by {@link TableInfo}. Views are read-only derived projections. */
 export type CanvasObjectKind = 'table' | 'view';
 
@@ -44,7 +65,7 @@ export interface TableInfo {
    */
   approxSizeBytes?: number;
   /** Resolved schema for the table or view. */
-  columns: ColumnSchema[];
+  columns: DescribedColumn[];
   /**
    * ISO 8601 wall-clock expiry for this table's per-table TTL. Present only
    * when the table was registered with a `ttlMs` option. When absent, the
@@ -56,8 +77,9 @@ export interface TableInfo {
   /** Canvas-local name. */
   name: string;
   /**
-   * Row count. For views, this is materialized at describe time via `COUNT(*)`
-   * — not free; treat as an approximation if the view is expensive.
+   * Row count, taken when `describe()` runs. A view is counted by reading it, so
+   * a view that cannot be read against the tables as now staged has no count:
+   * `describe()` rejects with `view_unreadable` instead of answering one.
    */
   rowCount: number;
 }
@@ -168,7 +190,9 @@ export type ExportFormat = 'csv' | 'parquet' | 'json';
 
 /**
  * Discriminated export target. Path-targeted exports are sandboxed to
- * `CANVAS_EXPORT_PATH`; absolute paths and `..` traversal are rejected.
+ * `CANVAS_EXPORT_PATH`; absolute paths and `..` traversal are rejected. A path
+ * export is written beside its target and renamed over it once complete, so
+ * one that rejects leaves the target as it found it.
  */
 export type ExportTarget =
   | { format: ExportFormat; path: string }
@@ -196,6 +220,8 @@ export interface ExportResult {
 export interface DescribeOptions {
   /** When set, return only entries with this kind. */
   kind?: CanvasObjectKind;
+  /** Cancellation signal — interrupts the call's own connection, as {@link QueryOptions.signal} does. */
+  signal?: AbortSignal;
   /** When set, return only the named table or view. */
   tableName?: string;
 }

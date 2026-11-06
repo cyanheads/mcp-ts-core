@@ -7,13 +7,18 @@
  * @module tests/smoke/canvas-duckdb.test
  */
 
-import { existsSync } from 'node:fs';
-import { mkdtemp, readdir, readFile, realpath, rm } from 'node:fs/promises';
+import { existsSync, rmSync, symlinkSync } from 'node:fs';
+import { mkdir, mkdtemp, readdir, readFile, realpath, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { basename, join, sep } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 
-import { DuckDBConnection, DuckDBInstance, version as duckdbVersion } from '@duckdb/node-api';
+import {
+  DuckDBAppender,
+  DuckDBConnection,
+  DuckDBInstance,
+  version as duckdbVersion,
+} from '@duckdb/node-api';
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 
 import type { CanvasInstance } from '@/services/canvas/core/CanvasInstance.js';
@@ -24,7 +29,8 @@ import {
   collectDisallowedOperators,
 } from '@/services/canvas/core/sqlGate.js';
 import { DuckdbProvider } from '@/services/canvas/providers/duckdb/DuckdbProvider.js';
-import { copyFormatClause } from '@/services/canvas/providers/duckdb/exportWriter.js';
+import * as exportWriter from '@/services/canvas/providers/duckdb/exportWriter.js';
+import type { ExportFormat } from '@/services/canvas/types.js';
 import { JsonRpcErrorCode, McpError } from '@/types-global/errors.js';
 import type { RequestContext } from '@/utils/internal/requestContext.js';
 
@@ -34,13 +40,48 @@ const ctx: RequestContext = {
   tenantId: 'smoke-tenant',
 };
 
-/** The leading `i` of each data line of an export, in file order; a CSV's `i` header dropped. */
-async function exportedIds(path: string, format: 'csv' | 'json'): Promise<number[]> {
+/** Rows a statement over Parquet files answers, on an engine of its own: the canvas gate refuses `read_parquet`. */
+async function readParquet(sql: string): Promise<Record<string, unknown>[]> {
+  const instance = await DuckDBInstance.create(':memory:');
+  const connection = await instance.connect();
+  try {
+    return (await connection.runAndReadAll(sql)).getRowObjectsJson() as Record<string, unknown>[];
+  } finally {
+    connection.closeSync();
+    instance.closeSync();
+  }
+}
+
+/** The `i` of each row of an export, in file order; a CSV's `i` header dropped. */
+async function exportedIds(path: string, format: ExportFormat): Promise<number[]> {
+  if (format === 'parquet') {
+    const rows = await readParquet(
+      `SELECT i FROM read_parquet('${path}', file_row_number = true) ORDER BY file_row_number`,
+    );
+    return rows.map((row) => Number(row.i));
+  }
   const lines = (await readFile(path, 'utf8')).split('\n');
   expect(lines.pop()).toBe('');
   if (format === 'json') return lines.map((line) => (JSON.parse(line) as { i: number }).i);
   expect(lines.shift()).toMatch(/^i(,|$)/);
   return lines.map((line) => Number.parseInt(line, 10));
+}
+
+/** The `McpError` a canvas call rejects with; fails the test when it resolves. */
+async function rejectionOf(call: Promise<unknown>): Promise<McpError> {
+  const error = await call.then(
+    () => undefined,
+    (err: unknown) => err,
+  );
+  expect(error).toBeInstanceOf(McpError);
+  return error as McpError;
+}
+
+/** The path exports' staging files left anywhere under `root`. */
+async function stagingFiles(root: string): Promise<string[]> {
+  return (await readdir(root, { recursive: true })).filter((name) =>
+    basename(name).endsWith('.partial'),
+  );
 }
 
 describe('canvas · DuckDB round trip', () => {
@@ -59,7 +100,8 @@ describe('canvas · DuckDB round trip', () => {
     const registry = new CanvasRegistry(provider, {
       ttlMs: 60_000,
       absoluteCapMs: 600_000,
-      maxCanvasesPerTenant: 100,
+      // Most tests in this group acquire a canvas of their own and none releases it.
+      maxCanvasesPerTenant: 200,
       sweeperIntervalMs: 0,
     });
     canvas = new DataCanvas(provider, registry);
@@ -333,11 +375,12 @@ describe('canvas · DuckDB round trip', () => {
     });
   });
 
-  // A CSV or JSON export writes the bytes a plain COPY of the object writes, in
-  // the table's insertion order or a view's ORDER BY, past one row group. At one
-  // engine thread DuckDB writes in order either way, so the order cases catch a
-  // reordering export only on a host with two or more cores.
-  describe('CSV and JSON export bytes and row order', () => {
+  // A CSV or JSON export writes the bytes a plain COPY of the object writes, and
+  // a Parquet export the schema and rows (its row groups are capped, so its
+  // bytes differ), in the table's insertion order or a view's ORDER BY, past one
+  // row group. At one engine thread DuckDB writes in order either way, so the
+  // order cases catch a reordering export only on a host with two or more cores.
+  describe('export bytes and row order', () => {
     const ORDERED_ROWS = 400_000;
     let exporting: CanvasInstance;
 
@@ -368,7 +411,7 @@ describe('canvas · DuckDB round trip', () => {
         const record = provider['canvases'].get(exporting.canvasId)!;
         const plainPath = join(exportRoot, `mixed-plain.${format}`);
         await record.controlConnection.run(
-          `COPY "mixed" TO '${plainPath}' ${copyFormatClause(format)}`,
+          `COPY "mixed" TO '${plainPath}' ${exportWriter.copyFormatClause(format, duckdbVersion())}`,
         );
         const written = await readFile(join(exportRoot, `mixed.${format}`), 'utf8');
         expect(written).toBe(await readFile(plainPath, 'utf8'));
@@ -378,7 +421,34 @@ describe('canvas · DuckDB round trip', () => {
       },
     );
 
-    it.each(['csv', 'json'] as const)(
+    it('writes a mixed-type table as Parquet that reads back the schema and rows a plain COPY of it does', async () => {
+      const result = await exporting.export('mixed', { format: 'parquet', path: 'mixed.parquet' });
+      expect(result.rowCount).toBe(3);
+
+      // biome-ignore lint/complexity/useLiteralKeys: deliberate access to the private record to run a plain COPY past the provider's export.
+      const record = provider['canvases'].get(exporting.canvasId)!;
+      const plainPath = join(exportRoot, 'mixed-plain.parquet');
+      await record.controlConnection.run(`COPY "mixed" TO '${plainPath}' (FORMAT 'parquet')`);
+      const schemaOf = (path: string) =>
+        readParquet(`SELECT column_name, column_type FROM (DESCRIBE FROM read_parquet('${path}'))`);
+      const rowsOf = (path: string) =>
+        readParquet(
+          `SELECT * EXCLUDE (file_row_number) FROM read_parquet('${path}', file_row_number = true) ORDER BY file_row_number`,
+        );
+      const writtenPath = join(exportRoot, 'mixed.parquet');
+      const schema = await schemaOf(writtenPath);
+      expect(schema).toHaveLength(11);
+      expect(schema).toEqual(await schemaOf(plainPath));
+      const rows = await rowsOf(writtenPath);
+      expect(rows.map((row) => row.s)).toEqual([
+        'plain',
+        'has "quotes", a comma',
+        'line one\nline two',
+      ]);
+      expect(rows).toEqual(await rowsOf(plainPath));
+    });
+
+    it.each(['csv', 'json', 'parquet'] as const)(
       'writes every row of a table spanning several row groups as %s in insertion order',
       async (format) => {
         const result = await exporting.export('ordered', { format, path: `ordered.${format}` });
@@ -389,7 +459,7 @@ describe('canvas · DuckDB round trip', () => {
       },
     );
 
-    it.each(['csv', 'json'] as const)(
+    it.each(['csv', 'json', 'parquet'] as const)(
       'writes a view as %s in the order its ORDER BY sets',
       async (format) => {
         const result = await exporting.export('ordered_desc', {
@@ -405,7 +475,7 @@ describe('canvas · DuckDB round trip', () => {
 
     // An export reads one version of the object: its row count, its column
     // list, and its COPY all see the table as it stood when the export began.
-    it.each(['csv', 'json'] as const)(
+    it.each(['csv', 'json', 'parquet'] as const)(
       'writes the %s rows a table held when the export began, though another call stages it again before the COPY',
       async (format) => {
         const table = `restaged_${format}`;
@@ -1012,6 +1082,286 @@ describe('canvas · DuckDB round trip', () => {
     });
   });
 
+  // Issue #597 — a statement DuckDB parses as a SELECT is a read whatever it
+  // opens with, so one that fails to prepare keeps its missing table and its
+  // binder detail. A statement DuckDB cannot parse is read by its opening, past
+  // comments and parentheses. A PIVOT without an IN list creates a type before
+  // its SELECT runs, and is refused before it is prepared, naming the list.
+  describe('issue #597 — reads that open with something other than SELECT, WITH, or FROM', () => {
+    const MISSING_TABLE_HINT =
+      "Re-run the tool that produced this table to stage it again, or list the currently staged tables with this server's dataframe-describe tool.";
+    const PARSE_HINT =
+      'Fix the SQL syntax the message names and send a single read-only SELECT. Put AS before an alias that is a SQL keyword, or double-quote it.';
+    const NON_SELECT_HINT =
+      'Rewrite as a single SELECT — this surface is read-only and cannot create, alter, or drop tables.';
+    const PIVOT_HINT =
+      'A PIVOT runs as one SELECT only when it lists its values, as ON column IN (value, ...): list them, or rewrite as a single SELECT — this surface is read-only and cannot create, alter, or drop tables.';
+    let reads: CanvasInstance;
+
+    beforeAll(async () => {
+      reads = await canvas.acquire(undefined, ctx);
+      await reads.registerTable('t597', [
+        { category: 'a', v: 1 },
+        { category: 'b', v: 2 },
+      ]);
+    });
+
+    /** The types created on the canvas's own engine, read past the gate. */
+    async function userTypes(): Promise<unknown[]> {
+      // biome-ignore lint/complexity/useLiteralKeys: deliberate access to the private record to read the engine's catalog past the gate.
+      const connection = provider['canvases'].get(reads.canvasId)!.controlConnection;
+      const reader = await connection.runAndReadAll(
+        'SELECT type_name FROM duckdb_types() WHERE NOT internal',
+      );
+      return reader.getRowObjectsJson();
+    }
+
+    /** Each read DuckDB parses as a SELECT, over `table`, and the rows it answers when `table` is t597. */
+    const READS: [label: string, sql: (table: string) => string, rows: unknown][] = [
+      ['SUMMARIZE', (t) => `SUMMARIZE ${t}`, { column_name: ['category', 'v'], count: ['2', '2'] }],
+      [
+        'SUMMARIZE over a SELECT',
+        (t) => `SUMMARIZE SELECT * FROM ${t}`,
+        { column_name: ['category', 'v'], count: ['2', '2'] },
+      ],
+      [
+        'DESCRIBE',
+        (t) => `DESCRIBE ${t}`,
+        { column_name: ['category', 'v'], column_type: ['VARCHAR', 'BIGINT'] },
+      ],
+      [
+        'SHOW',
+        (t) => `SHOW ${t}`,
+        { column_name: ['category', 'v'], column_type: ['VARCHAR', 'BIGINT'] },
+      ],
+      [
+        'TABLE',
+        (t) => `TABLE ${t}`,
+        [
+          { category: 'a', v: '1' },
+          { category: 'b', v: '2' },
+        ],
+      ],
+      [
+        'PIVOT … IN',
+        (t) => `PIVOT ${t} ON category IN ('a', 'b') USING sum(v)`,
+        [{ a: '1', b: '2' }],
+      ],
+      [
+        'UNPIVOT',
+        (t) => `UNPIVOT ${t} ON v INTO NAME k VALUE val`,
+        [
+          { category: 'a', k: 'v', val: '1' },
+          { category: 'b', k: 'v', val: '2' },
+        ],
+      ],
+      ['VALUES over a subquery', (t) => `VALUES ((SELECT max(v) FROM ${t}))`, [{ col0: '2' }]],
+      [
+        'a parenthesised SELECT',
+        (t) => `(SELECT * FROM ${t} ORDER BY category)`,
+        [
+          { category: 'a', v: '1' },
+          { category: 'b', v: '2' },
+        ],
+      ],
+      [
+        'a doubly parenthesised SELECT',
+        (t) => `((SELECT v FROM ${t} ORDER BY v))`,
+        [{ v: '1' }, { v: '2' }],
+      ],
+      [
+        'a SELECT behind a block comment',
+        (t) => `/* c */ SELECT v FROM ${t} ORDER BY v`,
+        [{ v: '1' }, { v: '2' }],
+      ],
+      [
+        'a SELECT behind a line comment',
+        (t) => `-- c\nSELECT v FROM ${t} ORDER BY v`,
+        [{ v: '1' }, { v: '2' }],
+      ],
+      [
+        'a SELECT behind a nested comment',
+        (t) => `/* a /* b */ c */ SELECT v FROM ${t} ORDER BY v`,
+        [{ v: '1' }, { v: '2' }],
+      ],
+    ];
+    const readCases = READS.map(([label, sql, rows], i) => [label, sql, rows, i] as const);
+
+    /** `rows` as `expected` names it: the listed columns of each row, or the rows whole. */
+    function shapeOf(rows: Record<string, unknown>[], expected: unknown): unknown {
+      if (Array.isArray(expected)) return rows;
+      return Object.fromEntries(
+        Object.keys(expected as object).map((column) => [column, rows.map((row) => row[column])]),
+      );
+    }
+
+    it.each(readCases)('%s with its table staged answers as before', async (_label, sql, rows) => {
+      const result = await reads.query(sql('t597'));
+      expect(shapeOf(result.rows, rows)).toEqual(rows);
+    });
+
+    it.each(readCases)(
+      '%s over a missing table is missing_table through query() and registerView()',
+      async (_label, sql, _rows, i) => {
+        for (const run of [
+          () => reads.query(sql('gone597')),
+          () => reads.registerView(`v597_${i}`, sql('gone597')),
+        ]) {
+          const error = await rejectionOf(run());
+          expect(error.code).toBe(JsonRpcErrorCode.NotFound);
+          expect(error.data).toEqual({
+            reason: 'missing_table',
+            tableName: 'gone597',
+            recovery: { hint: MISSING_TABLE_HINT },
+          });
+        }
+      },
+    );
+
+    it.each([
+      ['VALUES over an unknown function', 'VALUES (no_such_fn597(1))', 'no_such_fn597'],
+      ['a parenthesised SELECT of an unknown column', '(SELECT nope597 FROM t597)', 'nope597'],
+      ['UNPIVOT on an unknown column', 'UNPIVOT t597 ON nope597 INTO NAME k VALUE val', 'nope597'],
+      [
+        'DESCRIBE over a SELECT of an unknown column',
+        'DESCRIBE SELECT nope597 FROM t597',
+        'nope597',
+      ],
+      [
+        'a SELECT behind a comment of an unknown column',
+        '/* c */ SELECT nope597 FROM t597',
+        'nope597',
+      ],
+    ])(
+      '%s is invalid_sql with the binder detail through query() and registerView()',
+      async (_label, sql, name) => {
+        for (const run of [() => reads.query(sql), () => reads.registerView('v597_bad', sql)]) {
+          const error = await rejectionOf(run());
+          expect(error.code).toBe(JsonRpcErrorCode.ValidationError);
+          expect(error.data?.reason).toBe('invalid_sql');
+          expect(error.data?.binderMessage).toContain(name);
+          expect(error.data).not.toHaveProperty('tableName');
+        }
+      },
+    );
+
+    it.each([
+      ['a block comment', '/* c */ SELECT * FRM t597'],
+      ['a line comment', '-- c\nSELECT * FRM t597'],
+      ['a parenthesis', '(SELECT * FRM t597)'],
+      ['a comment and a parenthesis', '/* c */ (VALUES (1) x y z)'],
+    ])(
+      'a read behind %s that fails to parse is invalid_sql with the parser message',
+      async (_label, sql) => {
+        const error = await rejectionOf(reads.query(sql));
+        expect(error.code).toBe(JsonRpcErrorCode.ValidationError);
+        expect(error.message).toMatch(/^Canvas query failed to prepare: .*Parser Error: /);
+        expect(error.data).toMatchObject({
+          reason: 'invalid_sql',
+          binderMessage: expect.stringMatching(/Parser Error: /),
+          recovery: { hint: PARSE_HINT },
+        });
+      },
+    );
+
+    it.each([
+      ['a block comment', '/* SELECT */ DELET FROM t597'],
+      ['a parenthesis', '(DELET FROM t597)'],
+    ])(
+      'a statement behind %s that fails to parse and opens with no read stays non_select_statement',
+      async (_label, sql) => {
+        const error = await rejectionOf(reads.query(sql));
+        expect(error.message).toBe(
+          'Canvas query must be SELECT; the statement could not be parsed or prepared.',
+        );
+        expect(error.data).toEqual({
+          reason: 'non_select_statement',
+          statementType: 'UNKNOWN',
+          recovery: { hint: NON_SELECT_HINT },
+        });
+      },
+    );
+
+    it.each([
+      ['PIVOT', 'PIVOT t597 ON category USING sum(v)'],
+      ['PIVOT_WIDER', 'PIVOT_WIDER t597 ON category USING sum(v)'],
+      ['a PIVOT inside a SELECT', 'SELECT * FROM (PIVOT t597 ON category USING sum(v))'],
+      ['a PIVOT over a missing table', 'PIVOT gone597 ON category USING sum(v)'],
+    ])(
+      '%s without an IN list is non_select_statement naming the list, and creates no type',
+      async (_label, sql) => {
+        for (const run of [
+          () => reads.query(sql),
+          () => reads.registerView('v597_pivot', sql),
+          () => reads.query(sql, { registerAs: 'ra597_pivot' }),
+        ]) {
+          const error = await rejectionOf(run());
+          expect(error.code).toBe(JsonRpcErrorCode.ValidationError);
+          expect(error.message).toBe('Canvas query must be SELECT.');
+          expect(error.data).toEqual({
+            reason: 'non_select_statement',
+            statementType: 'UNKNOWN',
+            recovery: { hint: PIVOT_HINT },
+          });
+        }
+        expect(await userTypes()).toEqual([]);
+      },
+    );
+
+    // The control for the check above: run past the gate, the same PIVOT
+    // creates a type on the engine.
+    it('a PIVOT without an IN list creates a type when an engine runs it', async () => {
+      const plain = await DuckDBInstance.create(':memory:');
+      const connection = await plain.connect();
+      try {
+        await connection.run(
+          "CREATE TABLE t597 AS SELECT * FROM (VALUES ('a', 1), ('b', 2)) v(category, v)",
+        );
+        await connection.run('PIVOT t597 ON category USING sum(v)');
+        const reader = await connection.runAndReadAll(
+          'SELECT type_name FROM duckdb_types() WHERE NOT internal',
+        );
+        expect(reader.getRowObjectsJson()).toHaveLength(1);
+      } finally {
+        connection.closeSync();
+        plain.closeSync();
+      }
+    });
+
+    it.each([
+      'WITH x AS (SELECT 1) DELETE FROM gone597',
+      '/* c */ DELETE FROM gone597',
+      "COPY t597 TO 'x597.csv'",
+      'EXPLAIN SELECT * FROM t597',
+      'PRAGMA version',
+      'DELETE FROM "pivot"',
+      'EXPLAIN SELECT 1 AS pivot',
+    ])('%s stays non_select_statement, refused before it is prepared', async (sql) => {
+      const error = await rejectionOf(reads.query(sql));
+      expect(error.message).toBe('Canvas query must be SELECT.');
+      expect(error.data).toEqual({
+        reason: 'non_select_statement',
+        statementType: 'UNKNOWN',
+        recovery: { hint: NON_SELECT_HINT },
+      });
+    });
+
+    it.each([
+      'SELECT 1; SELECT 2 AS pivot',
+      'PIVOT t597 ON category USING sum(v); SELECT 1',
+      "SELECT 1; PIVOT t597 ON category IN ('a') USING sum(v)",
+    ])('%s, several statements holding the word PIVOT, stays multi_statement', async (sql) => {
+      const error = await rejectionOf(reads.query(sql));
+      expect(error.data?.reason).toBe('multi_statement');
+      expect(await userTypes()).toEqual([]);
+    });
+
+    it.each(['SHOW TABLES', 'DESCRIBE'])('%s stays plan_operator_not_allowed', async (sql) => {
+      const error = await rejectionOf(reads.query(sql));
+      expect(error.data?.reason).toBe('plan_operator_not_allowed');
+    });
+  });
+
   // DuckDB's FROM-first syntax is a read-only SELECT: it prepares as SELECT and
   // passes the gate. When one fails to prepare, it is classified like any
   // other SELECT — the binder detail, not the non-SELECT rejection.
@@ -1520,6 +1870,39 @@ describe('canvas · DuckDB round trip', () => {
       expect(await rowsOf(instance, 'cancelled')).toEqual([{ id: '1' }]);
     });
 
+    // The appender writes its rows to the table as a chunk fills and as it
+    // closes; the engine's message, from a row it could not allocate.
+    it.each(['endRow', 'closeSync'] as const)(
+      'keeps the previous table when the appender runs out of memory in %s, a DatabaseError cut before the SET advice',
+      async (method) => {
+        await instance.registerTable('appended', [{ id: 1 }], { schema: idSchema });
+        const first =
+          'Failed to append: could not allocate block of size 256.0 KiB (60.8 MiB/61.0 MiB used)';
+        const engineError = new Error(
+          `${first}\n\nPossible solutions:\n* Reducing the number of threads (SET threads=X)\n* Disabling insertion-order preservation (SET preserve_insertion_order=false)\n* Increasing the memory limit (SET memory_limit='...GB')`,
+        );
+        const original = DuckDBAppender.prototype[method];
+        const spy = vi.spyOn(DuckDBAppender.prototype, method).mockImplementationOnce(function (
+          this: DuckDBAppender,
+        ) {
+          original.call(this);
+          throw engineError;
+        });
+        try {
+          const error = await rejectionOf(
+            instance.registerTable('appended', [{ id: 2 }], { schema: idSchema }),
+          );
+          expect(error.code).toBe(JsonRpcErrorCode.DatabaseError);
+          expect(error.data).toBeUndefined();
+          expect(error.message).toBe(first);
+          expect(error.cause).toBe(engineError);
+        } finally {
+          spy.mockRestore();
+        }
+        expect(await rowsOf(instance, 'appended')).toEqual([{ id: 1 }]);
+      },
+    );
+
     it('leaves no table when a first registration fails', async () => {
       function* failing() {
         yield { id: 10 };
@@ -1585,8 +1968,9 @@ describe('canvas · DuckDB round trip', () => {
     });
   });
 
-  // Each thread of a Parquet COPY holds write buffers of its own, which DuckDB
-  // v2.0 allocates inside memory_limit; a 256 MB canvas runs at most 4.
+  // A query or registerAs runs on every engine thread, and each thread holds
+  // working memory of its own inside memory_limit (an export runs on one); a
+  // 256 MB canvas runs at most 4.
   it('caps engine threads at one per 64 MB of memory_limit, below the count DuckDB detects', async () => {
     const plain = await DuckDBInstance.create(':memory:');
     const connection = await plain.connect();
@@ -1725,6 +2109,165 @@ describe('canvas · DuckDB round trip', () => {
     expect(labelCol?.nullable).toBe(true);
   });
 
+  // #500 — describe() reports each column's type exactly as the engine spells
+  // it, as engineType. The coarse tag gives a numeric type the tag that holds
+  // every one of its values; one no tag holds stays VARCHAR.
+  describe('describe() column types (#500)', () => {
+    /** Column name, the SQL producing it, coarse tag, engine type, and the JSON value query() returns. */
+    const COLUMNS: readonly (readonly [string, string, string, string, unknown])[] = [
+      ['ti', '1::TINYINT', 'INTEGER', 'TINYINT', 1],
+      ['si', '2::SMALLINT', 'INTEGER', 'SMALLINT', 2],
+      ['uti', '3::UTINYINT', 'INTEGER', 'UTINYINT', 3],
+      ['usi', '4::USMALLINT', 'INTEGER', 'USMALLINT', 4],
+      ['ui', '5::UINTEGER', 'BIGINT', 'UINTEGER', 5],
+      ['ub', '6::UBIGINT', 'VARCHAR', 'UBIGINT', '6'],
+      ['hi', '7::HUGEINT', 'VARCHAR', 'HUGEINT', '7'],
+      ['uhi', '8::UHUGEINT', 'VARCHAR', 'UHUGEINT', '8'],
+      ['dec', '12.345::DECIMAL(18,3)', 'VARCHAR', 'DECIMAL(18,3)', '12.345'],
+      ['lit', '1.5', 'VARCHAR', 'DECIMAL(2,1)', '1.5'],
+      ['bn', '123::VARINT', 'VARCHAR', 'BIGNUM', '123'],
+      ['tm', "TIME '03:04:05'", 'VARCHAR', 'TIME', '03:04:05'],
+      ['ttz', "TIMETZ '03:04:05+00'", 'VARCHAR', 'TIME WITH TIME ZONE', '03:04:05+00'],
+      ['tns', "TIME_NS '03:04:05.123456789'", 'VARCHAR', 'TIME_NS', '03:04:05.123456789'],
+      [
+        'tstz',
+        "TIMESTAMPTZ '2024-01-02 03:04:05+00'",
+        'TIMESTAMP',
+        'TIMESTAMP WITH TIME ZONE',
+        // Rendered in the process's own time zone.
+        expect.stringMatching(/^2024-01-0[12] \d\d:\d\d:05[+-]\d\d/),
+      ],
+      ['iv', 'INTERVAL 1 DAY', 'VARCHAR', 'INTERVAL', { months: 0, days: 1, micros: '0' }],
+      [
+        'u',
+        "'00000000-0000-0000-0000-000000000001'::UUID",
+        'VARCHAR',
+        'UUID',
+        '00000000-0000-0000-0000-000000000001',
+      ],
+      ['bt', "'101'::BIT", 'VARCHAR', 'BIT', '101'],
+      ['en', "'a'::ENUM('a', 'b')", 'VARCHAR', "ENUM('a', 'b')", 'a'],
+      [
+        'g',
+        "'POINT(1 2)'::GEOMETRY",
+        'VARCHAR',
+        'GEOMETRY',
+        '\\x01\\x01\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\xF0?\\x00\\x00\\x00\\x00\\x00\\x00\\x00@',
+      ],
+      ['li', '[1, 2]::INTEGER[]', 'VARCHAR', 'INTEGER[]', [1, 2]],
+      ['ar', '[1, 2, 3]::INTEGER[3]', 'VARCHAR', 'INTEGER[3]', [1, 2, 3]],
+      // A list or array of timestamps is a list: it takes the tag every other list does.
+      [
+        'tsl',
+        "[TIMESTAMP '2024-01-02 03:04:05']",
+        'VARCHAR',
+        'TIMESTAMP[]',
+        ['2024-01-02 03:04:05'],
+      ],
+      [
+        'tsa',
+        "[TIMESTAMP '2024-01-02 03:04:05']::TIMESTAMP[1]",
+        'VARCHAR',
+        'TIMESTAMP[1]',
+        ['2024-01-02 03:04:05'],
+      ],
+      [
+        'tsn',
+        "TIMESTAMP_NS '2024-01-02 03:04:05.123456789'",
+        'TIMESTAMP',
+        'TIMESTAMP_NS',
+        '2024-01-02 03:04:05.123456789',
+      ],
+      [
+        'st',
+        "{'a': 1, 'b': 'x'}::STRUCT(a INTEGER, b VARCHAR)",
+        'VARCHAR',
+        'STRUCT(a INTEGER, b VARCHAR)',
+        { a: 1, b: 'x' },
+      ],
+      ['mp', "MAP {'k': 1}", 'VARCHAR', 'MAP(VARCHAR, INTEGER)', [{ key: 'k', value: 1 }]],
+      [
+        'un',
+        'union_value(i := 1)::UNION(i INTEGER, s VARCHAR)',
+        'VARCHAR',
+        'UNION(i INTEGER, s VARCHAR)',
+        { tag: 'i', value: 1 },
+      ],
+    ];
+    let typed: CanvasInstance;
+
+    beforeAll(async () => {
+      typed = await canvas.acquire(undefined, ctx);
+      await typed.query(`SELECT ${COLUMNS.map(([name, sql]) => `${sql} AS ${name}`).join(', ')}`, {
+        registerAs: 'all_types',
+      });
+    });
+
+    it('returns the same query() row value for every column type', async () => {
+      const { rows } = await typed.query('SELECT * FROM all_types');
+      expect(rows).toEqual([
+        Object.fromEntries(COLUMNS.map(([name, , , , value]) => [name, value])),
+      ]);
+    });
+
+    it('reports each column with its engine type verbatim and the tag that holds its values', async () => {
+      const [info] = await typed.describe({ tableName: 'all_types' });
+      expect(info?.columns).toEqual(
+        COLUMNS.map(([name, , type, engineType]) => ({ name, type, engineType, nullable: true })),
+      );
+
+      // biome-ignore lint/complexity/useLiteralKeys: deliberate access to the private record to read the engine's catalog past the gate.
+      const record = provider['canvases'].get(typed.canvasId)!;
+      const catalog = await record.controlConnection.runAndReadAll(
+        "SELECT data_type FROM information_schema.columns WHERE table_name = 'all_types' ORDER BY ordinal_position",
+      );
+      expect(info?.columns.map((c) => c.engineType)).toEqual(
+        catalog.getRowObjectsJson().map((row) => row.data_type),
+      );
+    });
+
+    it('describes the columns ordinary SQL produces with their engine types', async () => {
+      await typed.registerTable('t500', [
+        { year: 2024, v: 1 },
+        { year: 2025, v: 2 },
+      ]);
+      await typed.query(
+        `SELECT SUM(CAST(year AS INTEGER)) AS s, CAST(v AS DECIMAL(10,2)) AS d,
+                CAST(1 AS SMALLINT) AS sm, 1.5 AS lit, LIST(v) AS l FROM t500 GROUP BY v`,
+        { registerAs: 'r500' },
+      );
+      const [info] = await typed.describe({ tableName: 'r500' });
+      expect(info?.columns.map((c) => [c.name, c.type, c.engineType])).toEqual([
+        ['s', 'VARCHAR', 'HUGEINT'],
+        ['d', 'VARCHAR', 'DECIMAL(10,2)'],
+        ['sm', 'INTEGER', 'SMALLINT'],
+        ['lit', 'VARCHAR', 'DECIMAL(2,1)'],
+        ['l', 'VARCHAR', 'BIGINT[]'],
+      ]);
+    });
+
+    it('describes a column registered with each tag as that tag, spelled the same by the engine', async () => {
+      const tags = [
+        'VARCHAR',
+        'INTEGER',
+        'BIGINT',
+        'DOUBLE',
+        'BOOLEAN',
+        'TIMESTAMP',
+        'DATE',
+        'JSON',
+        'BLOB',
+      ] as const;
+      await typed.registerTable('tagged', [], {
+        schema: tags.map((type, i) => ({ name: `c${i}`, type })),
+      });
+      const [info] = await typed.describe({ tableName: 'tagged' });
+      expect(info?.columns.map((c) => [c.type, c.engineType])).toEqual(
+        tags.map((type) => [type, type]),
+      );
+    });
+  });
+
   // importFrom's sourceKind resolution — COPY works directly against a VIEW
   // name, not just a base table. Every existing importFrom test copies a
   // table; this exercises the view branch of lookupKind().
@@ -1765,9 +2308,9 @@ describe('canvas · DuckDB round trip', () => {
     expect((mcpErr.data as { reason?: string })?.reason).toBe('import_view_clash');
   });
 
-  // isSelectShaped's `with` branch — a CTE-prefixed query with a bad column
-  // must classify as invalid_sql (not non_select_statement), same as the
-  // plain-`select` case already covered by issue #236 above.
+  // A CTE-prefixed query with a bad column must classify as invalid_sql (not
+  // non_select_statement), same as the plain-`select` case already covered by
+  // issue #236 above.
   it('issue #236 — a malformed column inside a WITH/CTE query also yields invalid_sql', async () => {
     const instance = await canvas.acquire(undefined, ctx);
     await instance.registerTable('cte_source', [{ id: 1 }]);
@@ -1869,9 +2412,12 @@ describe('canvas · DuckDB round trip', () => {
  * Memory once rows are wide. The export's single-writer statement flushes as it
  * writes. A 128 MB canvas runs two engine threads; at one thread DuckDB plans
  * the single-writer copy on its own, so on a single-core host these cases pass
- * with either statement.
+ * with either statement. A Parquet `COPY` buffers a whole row group, 122,880
+ * rows by default, and asks for one 128 MiB block for a column of 1 KB strings:
+ * Parquet exports and `importFrom` write from the same single-writer statement
+ * with each row group capped, whatever the engine thread count.
  */
-describe('canvas · CSV and JSON export of wide rows', () => {
+describe('canvas · export of wide rows', () => {
   /**
    * About 82 MB of text for each format, past the 64 MiB a batch buffer can
    * hold before it asks for 128 MiB. A JSON copy also holds a working set that
@@ -1882,9 +2428,21 @@ describe('canvas · CSV and JSON export of wide rows', () => {
     csv: { table: 'wide_csv', rows: 20_000, width: 4096 },
     json: { table: 'wide_json', rows: 40_000, width: 2048 },
   } as const;
+  /** About 150 MB of 1 KB rows, staged on a canvas of their own. */
+  const PARQUET_ROWS = 150_000;
   let wideProvider: DuckdbProvider;
   let wideExportRoot: string;
+  let wideCanvas: DataCanvas;
   let wide: CanvasInstance;
+  let wideParquet: CanvasInstance;
+
+  /** `rows` rows of `i` and a 1 KB string, staged as `table` on `instance`. */
+  async function stageKbRows(instance: CanvasInstance, table: string, rows: number): Promise<void> {
+    await instance.query(
+      `SELECT i, rpad('AAA-' || i || '-', 1024, 'x') AS pad FROM range(${rows}) r(i)`,
+      { registerAs: table, preview: 0 },
+    );
+  }
 
   beforeAll(async () => {
     wideExportRoot = await mkdtemp(join(tmpdir(), 'canvas-smoke-wide-'));
@@ -1894,7 +2452,7 @@ describe('canvas · CSV and JSON export of wide rows', () => {
       defaultRowLimit: 100,
       schemaSniffRows: 10,
     });
-    const wideCanvas = new DataCanvas(
+    wideCanvas = new DataCanvas(
       wideProvider,
       new CanvasRegistry(wideProvider, {
         ttlMs: 60_000,
@@ -1910,7 +2468,9 @@ describe('canvas · CSV and JSON export of wide rows', () => {
         { registerAs: table },
       );
     }
-  });
+    wideParquet = await wideCanvas.acquire(undefined, ctx);
+    await stageKbRows(wideParquet, 'kb_rows', PARQUET_ROWS);
+  }, 120_000);
 
   afterAll(async () => {
     await wideProvider?.shutdown();
@@ -1947,6 +2507,363 @@ describe('canvas · CSV and JSON export of wide rows', () => {
       expect(lines).toBe(format === 'csv' ? rows + 1 : rows);
     },
   );
+
+  it('exports 150 MB of 1 KB rows as Parquet to a path, in order', async () => {
+    const result = await wideParquet.export('kb_rows', { format: 'parquet', path: 'kb.parquet' });
+    expect(result.rowCount).toBe(PARQUET_ROWS);
+    const ids = await exportedIds(join(wideExportRoot, 'kb.parquet'), 'parquet');
+    expect(ids).toHaveLength(PARQUET_ROWS);
+    expect(ids.findIndex((id, line) => id !== line)).toBe(-1);
+  }, 120_000);
+
+  it('exports 150 MB of 1 KB rows as Parquet to a stream', async () => {
+    let bytes = 0;
+    const head: number[] = [];
+    const stream = new WritableStream<Uint8Array>({
+      write(chunk) {
+        bytes += chunk.byteLength;
+        if (head.length < 4) head.push(...chunk.subarray(0, 4 - head.length));
+      },
+    });
+    const result = await wideParquet.export('kb_rows', { format: 'parquet', stream });
+    expect(result).toMatchObject({ rowCount: PARQUET_ROWS, sizeBytes: bytes });
+    expect(Buffer.from(head).toString('latin1')).toBe('PAR1');
+  }, 120_000);
+
+  it('copies 150 MB of 1 KB rows to a second 128 MB canvas with importFrom', async () => {
+    const target = await wideCanvas.acquire(undefined, ctx);
+    const imported = await target.importFrom(wideParquet.canvasId, 'kb_rows');
+    expect(imported).toMatchObject({ tableName: 'kb_rows', rowCount: PARQUET_ROWS });
+    const summary = await target.query(
+      'SELECT count(*) AS n, min(i) AS lo, max(i) AS hi, max(length(pad)) AS width FROM kb_rows',
+    );
+    expect(summary.rows).toEqual([
+      { n: String(PARQUET_ROWS), lo: '0', hi: String(PARQUET_ROWS - 1), width: '1024' },
+    ]);
+    await wideCanvas.drop(target.canvasId, ctx);
+  }, 120_000);
+
+  // A row-group cap on a plain COPY is not enough: at two threads the batch copy
+  // holds encoded row groups until earlier ones flush, so this table fails.
+  it('exports 1,000,000 rows of 1 KB as Parquet, in order', async () => {
+    const million = await wideCanvas.acquire(undefined, ctx);
+    try {
+      await stageKbRows(million, 'kb_million', 1_000_000);
+      const result = await million.export('kb_million', {
+        format: 'parquet',
+        path: 'kb_million.parquet',
+      });
+      expect(result.rowCount).toBe(1_000_000);
+      const ids = await exportedIds(join(wideExportRoot, 'kb_million.parquet'), 'parquet');
+      expect(ids).toHaveLength(1_000_000);
+      expect(ids.findIndex((id, line) => id !== line)).toBe(-1);
+    } finally {
+      await wideCanvas.drop(million.canvasId, ctx);
+    }
+  }, 300_000);
+});
+
+/**
+ * An export that runs out of memory fails with a typed reason and a hint for its
+ * format. A JSON export holds about 13 copies of a 2,048-row slice as JSON text
+ * (about 10 on DuckDB 1.5) and a CSV export about 3, so at the 64 MB minimum 4 KB
+ * rows fail as JSON while they export as CSV, and 16 KB rows fail as CSV.
+ */
+describe('canvas · export out of memory (#826)', () => {
+  const JSON_HINT =
+    'A JSON export needs roughly 26 MB of canvas memory per KB of row width, since it holds about 13 copies of 2,048 rows as JSON text at once. Export as CSV or Parquet, which need far less, or export a selection that leaves out the widest columns.';
+  const ROWS_HINT =
+    'The export holds 2,048 rows in memory at a time, and rows this wide do not fit in the canvas memory limit. Export a selection that leaves out the widest columns, or ask the operator to raise CANVAS_DEFAULT_MEMORY_LIMIT_MB.';
+  let oomProvider: DuckdbProvider;
+  let oomExportRoot: string;
+  let oomCanvas: DataCanvas;
+  /** 2,000 rows of 4 KB. */
+  let narrow: CanvasInstance;
+  /** 6,144 rows of 16 KB. */
+  let wide: CanvasInstance;
+
+  beforeAll(async () => {
+    oomExportRoot = await mkdtemp(join(tmpdir(), 'canvas-smoke-oom-'));
+    oomProvider = new DuckdbProvider({
+      memoryLimitMb: 64,
+      exportRootPath: oomExportRoot,
+      defaultRowLimit: 100,
+      schemaSniffRows: 10,
+    });
+    oomCanvas = new DataCanvas(
+      oomProvider,
+      new CanvasRegistry(oomProvider, {
+        ttlMs: 60_000,
+        absoluteCapMs: 600_000,
+        maxCanvasesPerTenant: 10,
+        sweeperIntervalMs: 0,
+      }),
+    );
+    narrow = await oomCanvas.acquire(undefined, ctx);
+    await narrow.registerTable(
+      't',
+      Array.from({ length: 2000 }, (_, i) => ({ i, pad: 'x'.repeat(4096) })),
+    );
+    wide = await oomCanvas.acquire(undefined, ctx);
+    await wide.query(`SELECT i, repeat('x', 16384) AS pad FROM range(6144) r(i)`, {
+      registerAs: 't',
+      preview: 0,
+    });
+  }, 120_000);
+
+  afterAll(async () => {
+    await oomProvider?.shutdown();
+    await rm(oomExportRoot, { recursive: true, force: true });
+  });
+
+  /** An export's out-of-memory rejection, its message one line with none of DuckDB's SET advice. */
+  function expectOutOfMemory(error: McpError, format: ExportFormat, hint: string): void {
+    expect(error.code).toBe(JsonRpcErrorCode.DatabaseError);
+    expect(error.data).toEqual({ reason: 'export_out_of_memory', format, recovery: { hint } });
+    expect(error.message).toMatch(/^Out of Memory Error: [^\n]+$/);
+    expect(error.message).not.toMatch(/Possible solutions|SET /);
+  }
+
+  it('exports 2,000 rows of 4 KB as CSV and refuses them as JSON, naming CSV and Parquet', async () => {
+    const csv = await narrow.export('t', { format: 'csv', path: 'narrow.csv' });
+    expect(csv.rowCount).toBe(2000);
+    const error = await rejectionOf(narrow.export('t', { format: 'json', path: 'narrow.json' }));
+    expectOutOfMemory(error, 'json', JSON_HINT);
+  }, 60_000);
+
+  it('refuses 6,144 rows of 16 KB as CSV with the row-width hint', async () => {
+    const error = await rejectionOf(wide.export('t', { format: 'csv', path: 'wide.csv' }));
+    expectOutOfMemory(error, 'csv', ROWS_HINT);
+  }, 60_000);
+
+  it('refuses the same rows as JSON to a stream', async () => {
+    const error = await rejectionOf(
+      narrow.export('t', { format: 'json', stream: new WritableStream<Uint8Array>() }),
+    );
+    expectOutOfMemory(error, 'json', JSON_HINT);
+  }, 60_000);
+
+  // query() and registerAs are not exports: no reason, only DuckDB's SET advice cut.
+  it.each([
+    ['query()', {}],
+    ['registerAs', { registerAs: 'listed', preview: 0 }],
+  ])(
+    'keeps %s out of memory a DatabaseError with no reason',
+    async (_label, options) => {
+      const error = await rejectionOf(wide.query('SELECT list(pad) AS l FROM t', options));
+      expect(error.code).toBe(JsonRpcErrorCode.DatabaseError);
+      expect(error.data?.reason).toBeUndefined();
+      expect(error.message).toMatch(/^Out of Memory Error: [^\n]+$/);
+    },
+    60_000,
+  );
+
+  it('gives a registration that runs out of memory no reason', async () => {
+    const error = await narrow.registerTable('huge', [{ s: 'x'.repeat(72_000_000) }]).then(
+      () => undefined,
+      (err: unknown) => err,
+    );
+    expect(error).toBeInstanceOf(Error);
+    expect((error as Error).message).toMatch(/could not allocate/);
+    expect((error as { data?: { reason?: string } }).data?.reason).toBeUndefined();
+  }, 60_000);
+});
+
+/**
+ * A path export writes `.<name>.<UUID>.partial` beside its target and renames it
+ * over the target once its transaction commits: a call that rejects leaves the
+ * target as it found it, and one that resolves publishes the whole file. The
+ * cancelled cases sit in `canvas · cancellation before execution`, which can
+ * abort between the engine's statements.
+ */
+describe('canvas · path export publication (#740)', () => {
+  const ROWS = 5000;
+  let publishProvider: DuckdbProvider;
+  let publishRoot: string;
+  let publishing: CanvasInstance;
+
+  beforeAll(async () => {
+    publishRoot = await mkdtemp(join(tmpdir(), 'canvas-smoke-publish-'));
+    publishProvider = new DuckdbProvider({
+      memoryLimitMb: 256,
+      exportRootPath: publishRoot,
+      defaultRowLimit: 100,
+      schemaSniffRows: 10,
+    });
+    const publishCanvas = new DataCanvas(
+      publishProvider,
+      new CanvasRegistry(publishProvider, {
+        ttlMs: 60_000,
+        absoluteCapMs: 600_000,
+        maxCanvasesPerTenant: 10,
+        sweeperIntervalMs: 0,
+      }),
+    );
+    publishing = await publishCanvas.acquire(undefined, ctx);
+    await publishing.query(`SELECT i FROM range(${ROWS}) r(i)`, { registerAs: 'rows', preview: 0 });
+    await publishing.registerTable('raw', [{ v: '1' }, { v: 'x' }]);
+    await publishing.registerView('fails_when_run', 'SELECT v::INTEGER AS v FROM raw');
+  });
+
+  afterAll(async () => {
+    await publishProvider?.shutdown();
+    await rm(publishRoot, { recursive: true, force: true });
+  });
+
+  it.each(['csv', 'json', 'parquet'] as const)(
+    'replaces a file at the target with a resolved %s export and returns what it wrote',
+    async (format) => {
+      const path = `rows.${format}`;
+      const absolute = join(publishRoot, path);
+      await writeFile(absolute, 'prior');
+      const result = await publishing.export('rows', { format, path });
+      const { size } = await stat(absolute);
+      expect(result).toEqual({ format, path: absolute, sizeBytes: size, rowCount: ROWS });
+      const ids = await exportedIds(absolute, format);
+      expect(ids).toHaveLength(ROWS);
+      expect(ids.findIndex((id, line) => id !== line)).toBe(-1);
+      expect(await stagingFiles(publishRoot)).toEqual([]);
+    },
+  );
+
+  it.each(['csv', 'json', 'parquet'] as const)(
+    'leaves no target and no staging file when the %s COPY fails in the engine',
+    async (format) => {
+      // The count reads no column, so the cast fails in the COPY.
+      expect((await publishing.query('SELECT count(*) AS n FROM fails_when_run')).rows).toEqual([
+        { n: '2' },
+      ]);
+      const error = await rejectionOf(
+        publishing.export('fails_when_run', { format, path: `fails.${format}` }),
+      );
+      expect(error.data?.reason).toBe('sql_execution_error');
+      expect(existsSync(join(publishRoot, `fails.${format}`))).toBe(false);
+      expect(await stagingFiles(publishRoot)).toEqual([]);
+    },
+  );
+
+  it('leaves a directory at the target and no staging file when the rename fails, naming the requested path', async () => {
+    await mkdir(join(publishRoot, 'taken'));
+    await writeFile(join(publishRoot, 'taken', 'inner.txt'), 'kept');
+    const error = await rejectionOf(publishing.export('rows', { format: 'csv', path: 'taken' }));
+    expect(error.code).toBe(JsonRpcErrorCode.DatabaseError);
+    expect(error.data?.reason).toBeUndefined();
+    expect(error.message).toContain(`"${join('[path]', 'taken')}"`);
+    expect(error.message).not.toContain('.partial');
+    expect(await readFile(join(publishRoot, 'taken', 'inner.txt'), 'utf8')).toBe('kept');
+    expect(await stagingFiles(publishRoot)).toEqual([]);
+  });
+
+  it('names the requested path, not the staging file, when its directory is missing', async () => {
+    const error = await rejectionOf(
+      publishing.export('rows', { format: 'csv', path: join('missing', 'out.csv') }),
+    );
+    expect(error.code).toBe(JsonRpcErrorCode.DatabaseError);
+    expect(error.message).toContain(`"${join('[path]', 'missing', 'out.csv')}"`);
+    expect(error.message).not.toContain('.partial');
+    expect(await stagingFiles(publishRoot)).toEqual([]);
+  });
+});
+
+/**
+ * An export or import that reads a view whose table is gone fails the way a
+ * query of the view does: the missing table, which the caller stages again, not
+ * an engine fault.
+ */
+describe('canvas · export and import of a view whose table is gone', () => {
+  let orphanProvider: DuckdbProvider;
+  let orphanRoot: string;
+  let source: CanvasInstance;
+  let target: CanvasInstance;
+
+  beforeAll(async () => {
+    orphanRoot = await mkdtemp(join(tmpdir(), 'canvas-smoke-orphan-'));
+    orphanProvider = new DuckdbProvider({
+      memoryLimitMb: 256,
+      exportRootPath: orphanRoot,
+      defaultRowLimit: 100,
+      schemaSniffRows: 10,
+    });
+    const orphanCanvas = new DataCanvas(
+      orphanProvider,
+      new CanvasRegistry(orphanProvider, {
+        ttlMs: 60_000,
+        absoluteCapMs: 600_000,
+        maxCanvasesPerTenant: 10,
+        sweeperIntervalMs: 0,
+      }),
+    );
+    source = await orphanCanvas.acquire(undefined, ctx);
+    target = await orphanCanvas.acquire(undefined, ctx);
+    await source.registerTable('gone', [{ x: 1 }]);
+    await source.registerView('orphan', 'SELECT x FROM gone');
+    expect(await source.drop('gone')).toBe(true);
+  });
+
+  afterAll(async () => {
+    await orphanProvider?.shutdown();
+    await rm(orphanRoot, { recursive: true, force: true });
+  });
+
+  /** What query() of the view raises, the shape the other calls must match. */
+  async function queryRejection(): Promise<{ code: number; data: unknown; message: string }> {
+    const { code, data, message } = await rejectionOf(source.query('SELECT * FROM orphan'));
+    expect({ code, reason: data?.reason, tableName: data?.tableName }).toEqual({
+      code: JsonRpcErrorCode.NotFound,
+      reason: 'missing_table',
+      tableName: 'gone',
+    });
+    return { code, data, message };
+  }
+
+  it.each(['csv', 'json', 'parquet'] as const)(
+    'refuses a %s export with the missing table query() reports',
+    async (format) => {
+      const { code, data, message } = await rejectionOf(
+        source.export('orphan', { format, path: `orphan.${format}` }),
+      );
+      expect({ code, data, message }).toEqual(await queryRejection());
+      expect(existsSync(join(orphanRoot, `orphan.${format}`))).toBe(false);
+    },
+  );
+
+  it('refuses an import with the missing table query() reports, and imports nothing', async () => {
+    const { code, data, message } = await rejectionOf(target.importFrom(source.canvasId, 'orphan'));
+    expect({ code, data, message }).toEqual(await queryRejection());
+    expect(await target.describe()).toEqual([]);
+  });
+
+  // The source is looked up before the copy begins, so another call can drop it in between.
+  it('refuses an import whose source table is dropped once looked up, naming the source table', async () => {
+    await source.registerTable('dropped', [{ x: 1 }]);
+    const internals = orphanProvider as unknown as {
+      lookupKind(connection: unknown, name: string): Promise<string | undefined>;
+    };
+    const lookupKind = internals.lookupKind.bind(orphanProvider);
+    const spy = vi.spyOn(internals, 'lookupKind').mockImplementationOnce(async (...args) => {
+      const kind = await lookupKind(...args);
+      await source.drop('dropped');
+      return kind;
+    });
+    try {
+      const error = await rejectionOf(target.importFrom(source.canvasId, 'dropped'));
+      expect(spy).toHaveBeenCalled();
+      expect({ code: error.code, data: error.data }).toEqual({
+        code: JsonRpcErrorCode.NotFound,
+        data: {
+          reason: 'missing_table',
+          sourceCanvasId: source.canvasId,
+          sourceTableName: 'dropped',
+          recovery: {
+            hint: "Re-check the source table name, or list the tables staged on the source canvas with this server's dataframe-describe tool.",
+          },
+        },
+      });
+    } finally {
+      spy.mockRestore();
+    }
+    expect(await target.describe()).toEqual([]);
+  });
 });
 
 /**
@@ -2053,6 +2970,414 @@ describe('canvas · DESCRIBE, SUMMARIZE, and SHOW kept as a table or a view (#75
       expect(await kept.describe({ tableName: `kept_v_${i}` })).toEqual([]);
     },
   );
+});
+
+/**
+ * describe() reads every object in scope before it answers. A registered view
+ * stops being readable in five ways, each driven here through the lifecycle
+ * wrapper a server calls; a view describe() cannot read rejects the call once,
+ * naming every such view and the engine's reason, and never answers with a
+ * count it did not take (#838).
+ */
+describe('canvas · describe() over a view that cannot be read (#838)', () => {
+  const VIEW_UNREADABLE_HINT =
+    'Drop each view the message names, or define it again over the tables as now staged.';
+  const DAY_MS = 24 * 60 * 60 * 1000;
+  let now = 1_000_000;
+  let viewExportRoot: string;
+  let viewRegistry: CanvasRegistry;
+  let viewCanvas: DataCanvas;
+
+  beforeAll(async () => {
+    viewExportRoot = await mkdtemp(join(tmpdir(), 'canvas-smoke-unreadable-'));
+    const viewProvider = new DuckdbProvider({
+      memoryLimitMb: 256,
+      exportRootPath: viewExportRoot,
+      defaultRowLimit: 1000,
+      schemaSniffRows: 100,
+    });
+    viewRegistry = new CanvasRegistry(
+      viewProvider,
+      {
+        ttlMs: DAY_MS,
+        absoluteCapMs: 7 * DAY_MS,
+        maxCanvasesPerTenant: 100,
+        sweeperIntervalMs: 0,
+      },
+      () => now,
+    );
+    viewCanvas = new DataCanvas(viewProvider, viewRegistry);
+  });
+
+  afterAll(async () => {
+    if (viewCanvas) await viewCanvas.shutdown(ctx);
+    await rm(viewExportRoot, { recursive: true, force: true });
+  });
+
+  /** A canvas holding a readable table `healthy` and a readable view `healthy_v` over it. */
+  async function stagedCanvas(): Promise<CanvasInstance> {
+    const instance = await viewCanvas.acquire(undefined, ctx);
+    await instance.registerTable(
+      'healthy',
+      [
+        { id: 1, label: 'a' },
+        { id: 2, label: 'b' },
+      ],
+      {
+        schema: [
+          { name: 'id', type: 'INTEGER' },
+          { name: 'label', type: 'VARCHAR' },
+        ],
+      },
+    );
+    await instance.registerView('healthy_v', 'SELECT id FROM healthy WHERE id > 1');
+    return instance;
+  }
+
+  type Entry = [name: string, kind: string, rowCount: number, columns: string[]];
+
+  /** Each entry's name, kind, row count, and column names, in the order describe() returns them. */
+  function entries(tables: Awaited<ReturnType<CanvasInstance['describe']>>): Entry[] {
+    return tables.map((t) => [t.name, t.kind, t.rowCount, t.columns.map((c) => c.name)]);
+  }
+
+  const HEALTHY: Entry = ['healthy', 'table', 2, ['id', 'label']];
+  const HEALTHY_V: Entry = ['healthy_v', 'view', 1, ['id']];
+
+  /** One view_unreadable rejection naming each `[view, engine error class]`, in order. */
+  function expectUnreadable(error: unknown, views: readonly (readonly [string, string])[]): void {
+    expect(error).toBeInstanceOf(McpError);
+    const mcp = error as McpError;
+    expect(mcp.code).toBe(JsonRpcErrorCode.ValidationError);
+    expect(mcp.data).toEqual({
+      reason: 'view_unreadable',
+      views: views.map(([name, engineClass]) => ({
+        name,
+        engineMessage: expect.stringMatching(new RegExp(`^${engineClass} Error: \\S`)),
+      })),
+      recovery: { hint: VIEW_UNREADABLE_HINT },
+    });
+    const named = mcp.data?.views as { engineMessage: string; name: string }[];
+    expect(named).toHaveLength(views.length);
+    for (const view of named) {
+      expect(mcp.message).toContain(`"${view.name}"`);
+      expect(mcp.message).toContain(view.engineMessage);
+    }
+  }
+
+  /** Each way a registered view `rv` stops being readable, and the engine class its read then fails with. */
+  const ROUTES: readonly (readonly [string, string, (c: CanvasInstance) => Promise<void>])[] = [
+    [
+      'a series argument the engine rejects as it runs',
+      'Binder',
+      async (c) => {
+        await c.registerView('rv', 'SELECT * FROM range(0, 10, 0)');
+      },
+    ],
+    [
+      'its table dropped',
+      'Catalog',
+      async (c) => {
+        await c.registerTable('base', [{ c: 1 }]);
+        await c.registerView('rv', 'SELECT c FROM base');
+        expect(await c.drop('base')).toBe(true);
+      },
+    ],
+    [
+      'a definition that reads itself',
+      'Binder',
+      async (c) => {
+        await c.registerView('rv', 'SELECT 1 AS c');
+        await c.registerView('rv', 'SELECT * FROM rv');
+      },
+    ],
+    [
+      'its table expired and swept',
+      'Catalog',
+      async (c) => {
+        await c.registerTable('base', [{ c: 1 }], { ttlMs: 60_000 });
+        await c.registerView('rv', 'SELECT c FROM base');
+        now += 60_001;
+        await viewRegistry.sweep();
+      },
+    ],
+    [
+      'its table staged again without the column it reads',
+      'Binder',
+      async (c) => {
+        await c.registerTable('base', [{ c: 1, d: 2 }]);
+        await c.registerView('rv', 'SELECT c FROM base');
+        await c.registerTable('base', [{ d: 3 }]);
+      },
+    ],
+    [
+      'a filter that cannot convert a value of its table as staged again',
+      'Conversion',
+      async (c) => {
+        await c.registerTable('base', [{ v: '1' }]);
+        await c.registerView('rv', 'SELECT v FROM base WHERE v::INTEGER > 0');
+        await c.registerTable('base', [{ v: '1' }, { v: 'x' }]);
+      },
+    ],
+    [
+      'a filter whose function rejects a value of its table as staged again',
+      'Invalid Input',
+      async (c) => {
+        await c.registerTable('base', [{ d: '2024-01-01' }]);
+        await c.registerView('rv', "SELECT d FROM base WHERE strptime(d, '%Y-%m-%d') IS NOT NULL");
+        await c.registerTable('base', [{ d: 'none' }]);
+      },
+    ],
+    [
+      'a filter whose arithmetic leaves its type on a value of its table as staged again',
+      'Out of Range',
+      async (c) => {
+        const schema = [{ name: 'n', type: 'INTEGER' as const }];
+        await c.registerTable('base', [{ n: 1 }], { schema });
+        await c.registerView('rv', 'SELECT n FROM base WHERE abs(n + 1) > 0');
+        await c.registerTable('base', [{ n: 2_147_483_647 }], { schema });
+      },
+    ],
+  ];
+
+  it('answers every entry and count on a canvas whose views all read', async () => {
+    const instance = await stagedCanvas();
+    await instance.registerView('series_v', 'SELECT * FROM range(3)');
+    const SERIES_V: Entry = ['series_v', 'view', 3, ['range']];
+    expect(entries(await instance.describe())).toEqual([HEALTHY, HEALTHY_V, SERIES_V]);
+    expect(entries(await instance.describe({ kind: 'view' }))).toEqual([HEALTHY_V, SERIES_V]);
+    expect(entries(await instance.describe({ kind: 'table' }))).toEqual([HEALTHY]);
+    expect(entries(await instance.describe({ tableName: 'healthy_v' }))).toEqual([HEALTHY_V]);
+  });
+
+  it.each(ROUTES)(
+    'rejects describe() as view_unreadable when a view has %s',
+    async (_label, engineClass, breakView) => {
+      const instance = await stagedCanvas();
+      await breakView(instance);
+
+      for (const options of [undefined, { kind: 'view' as const }, { tableName: 'rv' }]) {
+        expectUnreadable(await rejectionOf(instance.describe(options)), [['rv', engineClass]]);
+      }
+
+      // Calls whose scope leaves the view out answer as they did.
+      const tables = entries(await instance.describe({ kind: 'table' }));
+      expect(tables.filter(([name]) => name !== 'base')).toEqual([HEALTHY]);
+      expect(entries(await instance.describe({ tableName: 'healthy' }))).toEqual([HEALTHY]);
+      expect(entries(await instance.describe({ tableName: 'healthy_v' }))).toEqual([HEALTHY_V]);
+
+      expect(await instance.drop('rv')).toBe(true);
+      const after = entries(await instance.describe());
+      expect(after.filter(([name]) => name !== 'base')).toEqual([HEALTHY, HEALTHY_V]);
+    },
+  );
+
+  it('names every view it cannot read in one rejection', async () => {
+    const instance = await stagedCanvas();
+    await instance.registerView('rv_a', 'SELECT * FROM range(0, 10, 0)');
+    await instance.registerTable('base', [{ c: 1 }]);
+    await instance.registerView('rv_b', 'SELECT c FROM base');
+    expect(await instance.drop('base')).toBe(true);
+
+    const both = [
+      ['rv_a', 'Binder'],
+      ['rv_b', 'Catalog'],
+    ] as const;
+    expectUnreadable(await rejectionOf(instance.describe()), both);
+    expectUnreadable(await rejectionOf(instance.describe({ kind: 'view' })), both);
+  });
+
+  it('passes the caller signal through the canvas handle', async () => {
+    const instance = await stagedCanvas();
+    const controller = new AbortController();
+    controller.abort();
+    const error = await rejectionOf(instance.describe({ signal: controller.signal }));
+    expect(error).toBeInstanceOf(McpError);
+    expect(error).toMatchObject({
+      code: JsonRpcErrorCode.Timeout,
+      message: 'Canvas describe was cancelled.',
+      data: { reason: 'cancelled' },
+    });
+  });
+
+  it('reports a drop that conflicts with a registration in flight as a DatabaseError', async () => {
+    const instance = await viewCanvas.acquire(undefined, ctx);
+    await instance.registerTable('busy', [{ x: 1 }]);
+    const { promise: held, resolve: release } = Promise.withResolvers<void>();
+    const { promise: staging, resolve: staged } = Promise.withResolvers<void>();
+    async function* rows(): AsyncGenerator<Record<string, unknown>> {
+      yield { x: 2 };
+      staged();
+      await held;
+      yield { x: 3 };
+    }
+    const registration = instance.registerTable('busy', rows(), {
+      schema: [{ name: 'x', type: 'INTEGER' }],
+    });
+
+    await staging;
+    const failure = await rejectionOf(instance.drop('busy'));
+    release();
+    await registration;
+
+    expect(failure).toBeInstanceOf(McpError);
+    expect(failure.code).toBe(JsonRpcErrorCode.DatabaseError);
+    const { cause } = failure;
+    expect(cause).toBeInstanceOf(Error);
+    expect(failure.message).toBe((cause as Error).message);
+    // The registration it conflicted with committed.
+    expect((await instance.query('SELECT x FROM busy ORDER BY x')).rows).toEqual([
+      { x: 2 },
+      { x: 3 },
+    ]);
+  });
+});
+
+/**
+ * describe() runs on a connection of its own and honors its caller's signal
+ * the way query() does: an abort rejects it as cancelled, and a describe in
+ * progress leaves the canvas's other calls free to run.
+ */
+describe('canvas · describe cancellation', () => {
+  let describeExportRoot: string;
+  let describeProvider: DuckdbProvider;
+  /** Called with each statement a connection begins, once the engine has it. */
+  let onStatement: ((sql: string) => void) | undefined;
+  const spies: { mockRestore(): void }[] = [];
+
+  beforeAll(async () => {
+    describeExportRoot = await mkdtemp(join(tmpdir(), 'canvas-smoke-describe-abort-'));
+    describeProvider = new DuckdbProvider({
+      memoryLimitMb: 256,
+      exportRootPath: describeExportRoot,
+      defaultRowLimit: 100,
+      schemaSniffRows: 10,
+    });
+    await describeProvider.initCanvas('descab0001', ctx);
+    await describeProvider.registerTable(
+      'descab0001',
+      't',
+      Array.from({ length: 1_500 }, (_, x) => ({ x })),
+      ctx,
+    );
+    await describeProvider.registerView(
+      'descab0001',
+      'v_small',
+      'SELECT x FROM t WHERE x < 3',
+      ctx,
+    );
+    await describeProvider.registerView(
+      'descab0001',
+      'v_wide',
+      'SELECT a.x FROM t a, t b, t c, t d',
+      ctx,
+    );
+
+    // A per-call statement reaches the engine through extractStatements; one
+    // on the canvas's own connection through runAndReadAll.
+    const originalExtract = DuckDBConnection.prototype.extractStatements;
+    spies.push(
+      vi.spyOn(DuckDBConnection.prototype, 'extractStatements').mockImplementation(async function (
+        this: DuckDBConnection,
+        sql: string,
+      ) {
+        const extracted = await originalExtract.call(this, sql);
+        onStatement?.(sql);
+        return extracted;
+      }),
+    );
+    const originalRead = DuckDBConnection.prototype.runAndReadAll;
+    spies.push(
+      vi.spyOn(DuckDBConnection.prototype, 'runAndReadAll').mockImplementation(function (
+        this: DuckDBConnection,
+        ...args
+      ) {
+        const read = originalRead.apply(this, args);
+        onStatement?.(args[0]);
+        return read;
+      }),
+    );
+  });
+
+  afterAll(async () => {
+    for (const spy of spies) spy.mockRestore();
+    await describeProvider?.shutdown();
+    await rm(describeExportRoot, { recursive: true, force: true });
+  });
+
+  function expectCancelled(error: unknown): void {
+    expect(error).toBeInstanceOf(McpError);
+    expect((error as McpError).code).toBe(JsonRpcErrorCode.Timeout);
+    expect((error as McpError).data?.reason).toBe('cancelled');
+    expect((error as McpError).message).toBe('Canvas describe was cancelled.');
+  }
+
+  it('rejects an already-aborted describe as cancelled', async () => {
+    const controller = new AbortController();
+    controller.abort();
+    const error = await describeProvider
+      .describe('descab0001', ctx, { tableName: 'v_small', signal: controller.signal })
+      .then(
+        () => undefined,
+        (err: unknown) => err,
+      );
+    expectCancelled(error);
+  });
+
+  it('rejects a describe aborted once it begins reading a view as cancelled', async () => {
+    const controller = new AbortController();
+    onStatement = (sql) => {
+      if (sql === 'SELECT COUNT(*) AS n FROM "v_small"') controller.abort();
+    };
+    try {
+      const error = await describeProvider
+        .describe('descab0001', ctx, { tableName: 'v_small', signal: controller.signal })
+        .then(
+          () => undefined,
+          (err: unknown) => err,
+        );
+      expect(controller.signal.aborted).toBe(true);
+      expectCancelled(error);
+    } finally {
+      onStatement = undefined;
+    }
+    // The canvas still answers.
+    expect(
+      (await describeProvider.describe('descab0001', ctx, { tableName: 'v_small' }))[0]?.rowCount,
+    ).toBe(3);
+  });
+
+  it('leaves a query on the same canvas free to run while a describe is in progress', async () => {
+    const controller = new AbortController();
+    const { promise: reading, resolve: readingStarted } = Promise.withResolvers<void>();
+    onStatement = (sql) => {
+      if (sql === 'SELECT COUNT(*) AS n FROM "v_wide"') readingStarted();
+    };
+    let settled = false;
+    const outcome = describeProvider
+      .describe('descab0001', ctx, { tableName: 'v_wide', signal: controller.signal })
+      .then(
+        () => undefined,
+        (err: unknown) => err,
+      )
+      .finally(() => {
+        settled = true;
+      });
+    try {
+      await reading;
+      const result = await describeProvider.query(
+        'descab0001',
+        'SELECT count(*)::INTEGER AS n FROM t',
+        ctx,
+      );
+      expect(result.rows).toEqual([{ n: 1_500 }]);
+      expect(settled).toBe(false);
+    } finally {
+      onStatement = undefined;
+      controller.abort();
+    }
+    expectCancelled(await outcome);
+  }, 60_000);
 });
 
 // An abort reaches a running query as an engine interrupt and surfaces as a
@@ -2173,6 +3498,8 @@ describe('canvas · cancellation before execution', () => {
   const closed = new Set<DuckDBConnection>();
   /** When set, called with each statement a per-call connection has prepared, before it runs. */
   let onPrepared: ((sql: string) => void) | undefined;
+  /** When set, called as a per-call connection closes, once its call's statements are done. */
+  let onClosed: (() => void) | undefined;
 
   beforeAll(async () => {
     exportRoot = await mkdtemp(join(tmpdir(), 'canvas-smoke-early-abort-'));
@@ -2191,6 +3518,15 @@ describe('canvas · cancellation before execution', () => {
       ctx,
     );
     await provider.registerTable('earlyab001', 'small', [{ x: 1 }, { x: 2 }, { x: 3 }], ctx);
+    // Path-export publication runs on a canvas of its own, keeping the table
+    // lists the cases above assert unchanged.
+    await provider.initCanvas('earlyab003', ctx);
+    await provider.query(
+      'earlyab003',
+      'SELECT i, md5(i::VARCHAR) AS s FROM range(200000) r(i)',
+      ctx,
+      { registerAs: 'publish', preview: 0 },
+    );
 
     const started = performance.now();
     const unaborted = await provider.query('earlyab001', CROSS_JOIN, ctx, {
@@ -2214,6 +3550,7 @@ describe('canvas · cancellation before execution', () => {
     ) {
       closed.add(this);
       originalClose.call(this);
+      if (opened.has(this)) onClosed?.();
     });
     const originalExtract = DuckDBConnection.prototype.extractStatements;
     vi.spyOn(DuckDBConnection.prototype, 'extractStatements').mockImplementation(async function (
@@ -2456,6 +3793,148 @@ describe('canvas · cancellation before execution', () => {
     queueMicrotask(() => controller.abort());
     expectCancelled((await outcome).error, 'Canvas import was cancelled.');
     expect(await tableNames('earlyab002')).toEqual([]);
+  });
+
+  /** How a path export of `publish`, on its own canvas, settles; `prepared` sees each statement it prepares. */
+  async function publish(
+    format: ExportFormat,
+    path: string,
+    prepared: (sql: string, controller: AbortController) => void,
+  ): Promise<{ error: unknown; signal: AbortSignal }> {
+    const controller = new AbortController();
+    onPrepared = (sql) => prepared(sql, controller);
+    try {
+      const { error } = await settle(() =>
+        provider.export('earlyab003', 'publish', { format, path }, ctx, {
+          signal: controller.signal,
+        }),
+      );
+      return { error, signal: controller.signal };
+    } finally {
+      onPrepared = undefined;
+    }
+  }
+
+  /** Aborts as the export's COMMIT is prepared: its COPY has written the whole file by then. */
+  const abortAtCommit = (sql: string, controller: AbortController) => {
+    if (sql === 'COMMIT') controller.abort();
+  };
+
+  it.each(['csv', 'json', 'parquet'] as const)(
+    'rejects a %s export aborted as its COMMIT is prepared, publishing nothing and leaving a prior file as it was',
+    async (format) => {
+      const fresh = `commit-fresh.${format}`;
+      const first = await publish(format, fresh, abortAtCommit);
+      expect(first.signal.aborted).toBe(true);
+      expectCancelled(first.error, 'Canvas export was cancelled.');
+      expect(existsSync(join(exportRoot, fresh))).toBe(false);
+
+      const prior = `commit-prior.${format}`;
+      await writeFile(join(exportRoot, prior), 'prior');
+      const second = await publish(format, prior, abortAtCommit);
+      expectCancelled(second.error, 'Canvas export was cancelled.');
+      expect(await readFile(join(exportRoot, prior), 'utf8')).toBe('prior');
+      expect(await stagingFiles(exportRoot)).toEqual([]);
+
+      // Resolved, the export replaces the prior file whole.
+      const resolved = await publish(format, prior, () => {});
+      expect(resolved.error).toBeUndefined();
+      expect((await stat(join(exportRoot, prior))).size).toBeGreaterThan(200_000);
+      const ids = await exportedIds(join(exportRoot, prior), format);
+      expect(ids).toHaveLength(200_000);
+      expect(ids.findIndex((id, line) => id !== line)).toBe(-1);
+      expect(await stagingFiles(exportRoot)).toEqual([]);
+    },
+    60_000,
+  );
+
+  // A regression guard, not a reproduction: an interrupt as the COPY starts was
+  // already honored before any file was written. The COMMIT cases above are the
+  // reproduction, since by then the COPY has written the whole file.
+  it('rejects a Parquet export aborted as its COPY starts and leaves no target file', async () => {
+    const { error, signal } = await publish('parquet', 'copy-start.parquet', (sql, controller) => {
+      if (sql.startsWith('COPY')) controller.abort();
+    });
+    expect(signal.aborted).toBe(true);
+    expectCancelled(error, 'Canvas export was cancelled.');
+    expect(existsSync(join(exportRoot, 'copy-start.parquet'))).toBe(false);
+    expect(await stagingFiles(exportRoot)).toEqual([]);
+  });
+
+  // The target's path checks run again once the export commits, before the rename.
+  it('refuses to publish over a target that became a symbolic link as the export committed', async () => {
+    const outside = await mkdtemp(join(tmpdir(), 'canvas-smoke-publish-outside-'));
+    try {
+      const destination = join(outside, 'kept.csv');
+      await writeFile(destination, 'outside');
+      const linked = join(exportRoot, 'linked.csv');
+      const { error } = await publish('csv', 'linked.csv', (sql) => {
+        if (sql !== 'COMMIT') return;
+        rmSync(linked, { force: true });
+        symlinkSync(destination, linked);
+      });
+      expect(error).toBeInstanceOf(McpError);
+      expect((error as McpError).data?.reason).toBe('export_path_symlink');
+      expect(await readFile(destination, 'utf8')).toBe('outside');
+      expect(await readFile(linked, 'utf8')).toBe('outside');
+      expect(await stagingFiles(exportRoot)).toEqual([]);
+    } finally {
+      await rm(join(exportRoot, 'linked.csv'), { force: true });
+      await rm(outside, { recursive: true, force: true });
+    }
+  });
+
+  // The last cancellation check comes after the export's connection is done, just before the rename.
+  it('rejects a path export aborted as its connection closes after COMMIT, leaving a prior file as it was', async () => {
+    const prior = 'close-prior.parquet';
+    await writeFile(join(exportRoot, prior), 'prior');
+    const controller = new AbortController();
+    onClosed = () => controller.abort();
+    let outcome: { error: unknown };
+    try {
+      outcome = await settle(() =>
+        provider.export('earlyab003', 'publish', { format: 'parquet', path: prior }, ctx, {
+          signal: controller.signal,
+        }),
+      );
+    } finally {
+      onClosed = undefined;
+    }
+    expect(controller.signal.aborted).toBe(true);
+    expectCancelled(outcome.error, 'Canvas export was cancelled.');
+    expect(await readFile(join(exportRoot, prior), 'utf8')).toBe('prior');
+    expect(await stagingFiles(exportRoot)).toEqual([]);
+  });
+
+  // It also comes after the target's path is checked again: nothing runs between it and the rename.
+  it('rejects a path export aborted while its target path is checked again, leaving a prior file as it was', async () => {
+    const prior = 'recheck-prior.csv';
+    await writeFile(join(exportRoot, prior), 'prior');
+    const controller = new AbortController();
+    const resolveExportPath = exportWriter.resolveExportPath;
+    let targetChecks = 0;
+    const recheck = vi
+      .spyOn(exportWriter, 'resolveExportPath')
+      .mockImplementation(async (root, requested) => {
+        const resolved = await resolveExportPath(root, requested);
+        // The target is checked before its COPY, then again once the export commits.
+        if (requested === prior && ++targetChecks === 2) controller.abort();
+        return resolved;
+      });
+    let outcome: { error: unknown };
+    try {
+      outcome = await settle(() =>
+        provider.export('earlyab003', 'publish', { format: 'csv', path: prior }, ctx, {
+          signal: controller.signal,
+        }),
+      );
+    } finally {
+      recheck.mockRestore();
+    }
+    expect(targetChecks).toBe(2);
+    expectCancelled(outcome.error, 'Canvas export was cancelled.');
+    expect(await readFile(join(exportRoot, prior), 'utf8')).toBe('prior');
+    expect(await stagingFiles(exportRoot)).toEqual([]);
   });
 
   it('closes every per-call connection and still answers each entry point un-aborted', async () => {

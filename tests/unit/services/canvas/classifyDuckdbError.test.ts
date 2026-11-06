@@ -331,6 +331,87 @@ describe('classifyDuckdbError · execution-time data errors (#451)', () => {
 });
 
 // ---------------------------------------------------------------------------
+// Out-of-memory messages
+// ---------------------------------------------------------------------------
+
+/** DuckDB's tuning advice, measured from v2.0.0: every statement in it is one a canvas refuses. */
+const TUNING_ADVICE =
+  "\n\nPossible solutions:\n* Reducing the number of threads (SET threads=X)\n* Disabling insertion-order preservation (SET preserve_insertion_order=false)\n* Increasing the memory limit (SET memory_limit='...GB')\n\nSee also https://duckdb.org/docs/current/guides/performance/how_to_tune_workloads";
+
+describe('classifyDuckdbError · out-of-memory messages', () => {
+  it.each([
+    'Out of Memory Error: failed to allocate data of size 16.0 MiB (57.3 MiB/61.0 MiB used)',
+    'Out of Memory Error: could not allocate block of size 256.0 KiB (60.8 MiB/61.0 MiB used)',
+    // The appender reports the engine's message without its class.
+    'Failed to append: could not allocate block of size 256.0 KiB (60.8 MiB/61.0 MiB used)',
+  ])('keeps %s a DatabaseError with no reason, cut before the SET advice', (first) => {
+    const original = new Error(`${first}${TUNING_ADVICE}`);
+    const mcp = classifyDuckdbError(original) as McpError;
+    expect(mcp.code).toBe(JsonRpcErrorCode.DatabaseError);
+    expect(mcp.data?.reason).toBeUndefined();
+    expect(mcp.message).toBe(first);
+    expect(mcp.cause).toBe(original);
+  });
+
+  it('redacts host paths in what it keeps', () => {
+    const mcp = classifyDuckdbError(
+      new Error(`Out of Memory Error: could not write "/srv/exports/x.tmp"${TUNING_ADVICE}`),
+      ['/srv/exports'],
+    ) as McpError;
+    expect(mcp.message).toBe('Out of Memory Error: could not write "[path]/x.tmp"');
+  });
+
+  it('keeps the advice in a message of any other class, which quotes it rather than carries it', () => {
+    const message = `IO Error: Cannot open file "/srv/exports/x.csv": Permission denied${TUNING_ADVICE}`;
+    expect((classifyDuckdbError(new Error(message)) as McpError).message).toBe(message);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// A table missing while a prepared statement runs
+// ---------------------------------------------------------------------------
+
+describe('classifyDuckdbError · a table missing while a statement runs', () => {
+  /** The recovery query() gives a missing table. */
+  const MISSING_TABLE_HINT =
+    "Re-run the tool that produced this table to stage it again, or list the currently staged tables with this server's dataframe-describe tool.";
+
+  // Measured from DuckDB v2.0.0: an export's count and an import's COPY of a
+  // view whose table was dropped.
+  it.each([
+    ['base', 'Catalog Error: Table with name base does not exist!\nDid you mean "pg_sequence"?'],
+    [
+      'base',
+      `Catalog Error: Table with name base does not exist!\nDid you mean "pg_sequence"?\n\nLINE 1: COPY "v" TO '/tmp/mcp-canvas-x/0f3c.parquet'\n                                                    ^^^^`,
+    ],
+    ['my table', 'Catalog Error: Table with name my table does not exist!'],
+  ])('raises the missing_table NotFound query() raises for %s', (tableName, message) => {
+    const original = new Error(message);
+    const mcp = classifyDuckdbError(original, ['/tmp/mcp-canvas-x']) as McpError;
+    expect(mcp.code).toBe(JsonRpcErrorCode.NotFound);
+    expect(mcp.message).toBe(
+      `Canvas table "${tableName}" does not exist. The table may have expired, been dropped, or the name may be mistyped.`,
+    );
+    expect(mcp.data).toEqual({
+      reason: 'missing_table',
+      tableName,
+      recovery: { hint: MISSING_TABLE_HINT },
+    });
+    expect(mcp.cause).toBe(original);
+  });
+
+  it.each([
+    'Catalog Error: Table with name "nos.t" does not exist because schema "nos" does not exist.',
+    'Catalog Error: Scalar Function with name nofunc does not exist!',
+    'IO Error: Cannot open file "/srv/Catalog Error: Table with name x does not exist!": Permission denied',
+  ])('keeps %s a DatabaseError', (message) => {
+    const mcp = classifyDuckdbError(new Error(message)) as McpError;
+    expect(mcp.code).toBe(JsonRpcErrorCode.DatabaseError);
+    expect(mcp.data?.reason).toBeUndefined();
+  });
+});
+
+// ---------------------------------------------------------------------------
 // The recovery a SELECT that fails to parse or prepare carries (#803)
 // ---------------------------------------------------------------------------
 
@@ -428,6 +509,9 @@ function engineMessages(size: number): Error[] {
     `Catalog Error: ${fill('Catalog Error: ')}`,
     `IO Error: ${fill('/srv/exports/')}`,
     fill('Binder Erro'),
+    `Catalog Error: Table with name ${fill('a does not exist')}`,
+    `Catalog Error: Table with name ${fill('x')} does not exist!`,
+    `Out of Memory Error: ${fill('x')}\n\nPossible solutions:\n${fill('* SET x\n')}`,
   ].map((message) => new Error(message));
 }
 
@@ -450,8 +534,12 @@ describe('engine-message classification cost', () => {
         undefined,
         undefined,
         undefined,
+        undefined,
+        'missing_table',
+        undefined,
       ]);
       expect(classified[8]?.message).not.toContain('/srv/exports');
+      expect(classified[12]?.message).not.toContain('Possible solutions');
       return () => {
         for (const err of errors) classifyDuckdbError(err, ['/srv/exports', '/tmp/mcp-canvas-x']);
       };
@@ -472,6 +560,9 @@ describe('engine-message classification cost', () => {
         PARSE_HINT,
         "Correct the function, type, collation, or schema name the message reports missing — list the staged tables with this server's dataframe-describe tool.",
         "Send a read-only SELECT over the staged tables — list them with this server's dataframe-describe tool. This surface reads no files and cannot create, alter, or drop anything.",
+        BINDER_HINT,
+        "Correct the function, type, collation, or schema name the message reports missing — list the staged tables with this server's dataframe-describe tool.",
+        "Correct the function, type, collation, or schema name the message reports missing — list the staged tables with this server's dataframe-describe tool.",
         BINDER_HINT,
       ]);
       return () => {

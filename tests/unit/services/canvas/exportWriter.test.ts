@@ -8,12 +8,13 @@
 
 import { mkdir, mkdtemp, readdir, readFile, rm, stat, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { basename, dirname, join, sep } from 'node:path';
+import { basename, dirname, join, resolve, sep } from 'node:path';
 
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
 import {
   copyFormatClause,
+  exportStagingPath,
   isPathTarget,
   pipeFileToStream,
   resolveExportPath,
@@ -135,11 +136,16 @@ describe('resolveExportPath', () => {
 
 describe('copyFormatClause', () => {
   it.each([
-    ['csv', "(FORMAT 'csv', HEADER true)"],
-    ['parquet', "(FORMAT 'parquet')"],
-    ['json', "(FORMAT 'json')"],
-  ] as const)('emits the COPY format clause for %s', (format, clause) => {
-    expect(copyFormatClause(format)).toBe(clause);
+    ['csv', 'v2.0.0', "(FORMAT 'csv', HEADER true)"],
+    ['csv', 'v1.5.6', "(FORMAT 'csv', HEADER true)"],
+    ['json', 'v2.0.0', "(FORMAT 'json')"],
+    ['json', 'v1.5.6', "(FORMAT 'json')"],
+    // A row group holds one 2,048-row slice's worth: by bytes on v2.0, by rows
+    // on v1.5, which refuses ROW_GROUP_SIZE_BYTES while insertion order is kept.
+    ['parquet', 'v2.0.0', "(FORMAT 'parquet', ROW_GROUP_SIZE_BYTES '8MB')"],
+    ['parquet', 'v1.5.6', "(FORMAT 'parquet', ROW_GROUP_SIZE 2048)"],
+  ] as const)('emits the COPY format clause for %s on DuckDB %s', (format, engine, clause) => {
+    expect(copyFormatClause(format, engine)).toBe(clause);
   });
 });
 
@@ -187,6 +193,80 @@ describe('tempFilePathFor', () => {
       const missing = join(root, 'not-created');
       tempFilePathFor(missing, 'csv');
       await expect(stat(missing)).rejects.toMatchObject({ code: 'ENOENT' });
+      expect(await readdir(root)).toEqual([]);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+});
+
+// A path export writes `.<name>.<UUID>.partial` beside its target, then renames
+// it over the target; the staging path passes the same sandbox checks.
+describe('exportStagingPath', () => {
+  const UUID = '[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}';
+
+  it.each([
+    ['out.csv', '.', 'out.csv'],
+    ['sub/dir/out.parquet', join('sub', 'dir'), 'out.parquet'],
+    ["it's.json", '.', "it's.json"],
+  ])('names %s .<name>.<uuid>.partial in the same directory', (requested, dir, name) => {
+    const staging = exportStagingPath(requested);
+    expect(dirname(staging)).toBe(dir);
+    expect(basename(staging)).toMatch(
+      new RegExp(`^\\.${name.replaceAll('.', '\\.')}\\.${UUID}\\.partial$`),
+    );
+  });
+
+  it.each(['sub/.', 'sub/x/..', 'sub/x/../.', 'a/../out.csv'])(
+    'names %s beside the file the target resolves to',
+    (requested) => {
+      const target = resolve(sep, 'root', requested);
+      const staging = resolve(sep, 'root', exportStagingPath(requested));
+      expect(dirname(staging)).toBe(dirname(target));
+      expect(basename(staging)).toMatch(
+        new RegExp(`^\\.${basename(target).replaceAll('.', '\\.')}\\.${UUID}\\.partial$`),
+      );
+    },
+  );
+
+  it('never repeats a name', () => {
+    const names = new Set(Array.from({ length: 1000 }, () => exportStagingPath('out.csv')));
+    expect(names.size).toBe(1000);
+  });
+
+  // The suffix and leading dot add 46 bytes, leaving 209 of a 255-byte file name.
+  it.each([
+    ['a 209-byte name', 'b'.repeat(209), 'b'.repeat(209)],
+    ['a 210-byte name', 'b'.repeat(210), 'b'.repeat(209)],
+    ['a 255-byte name', `${'a'.repeat(251)}.csv`, 'a'.repeat(209)],
+    ['two-byte characters', `${'é'.repeat(122)}.csv`, 'é'.repeat(104)],
+    ['three-byte characters', `${'語'.repeat(83)}.csv`, '語'.repeat(69)],
+    ['four-byte characters', `${'😀'.repeat(62)}.csv`, '😀'.repeat(52)],
+  ])(
+    'cuts %s at a code point boundary to fit 255 bytes, and the file system takes it',
+    async (_label, name, kept) => {
+      const root = await mkdtemp(join(tmpdir(), 'canvas-staging-'));
+      try {
+        await writeFile(join(root, name), 'target');
+        const staging = exportStagingPath(name);
+        expect(basename(staging)).toMatch(new RegExp(`^\\.${kept}\\.${UUID}\\.partial$`, 'u'));
+        expect(new TextEncoder().encode(basename(staging)).length).toBeLessThanOrEqual(255);
+        await writeFile(await resolveExportPath(root, staging), 'staged');
+        expect((await readdir(root)).sort()).toEqual([basename(staging), name].sort());
+      } finally {
+        await rm(root, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it('stays inside the sandbox exactly when the target does', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'canvas-staging-'));
+    try {
+      const staging = await resolveExportPath(root, exportStagingPath('sub/out.csv'));
+      expect(dirname(staging)).toBe(join(root, 'sub'));
+      await expect(resolveExportPath(root, exportStagingPath('../out.csv'))).rejects.toMatchObject({
+        data: { reason: 'export_path_escapes' },
+      });
       expect(await readdir(root)).toEqual([]);
     } finally {
       await rm(root, { recursive: true, force: true });

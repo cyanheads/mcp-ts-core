@@ -57,7 +57,11 @@ export const ALLOWED_STATEMENT_TYPES: ReadonlySet<DuckdbStatementType> = new Set
 export const SQL_GATE_REASONS = {
   multiStatement: 'multi_statement',
   nonSelectStatement: 'non_select_statement',
-  /** SELECT-shaped statement that failed to parse or prepare (syntax, unknown column/function/expression). */
+  /**
+   * A read that failed to prepare (unknown column/function/expression), as
+   * DuckDB's parse of it says, or a statement that failed to parse and opens
+   * like a read ({@link isReadShaped}).
+   */
   invalidSql: 'invalid_sql',
   planOperatorNotAllowed: 'plan_operator_not_allowed',
   deniedFunction: 'denied_function',
@@ -1001,6 +1005,71 @@ export function assertSelectOnly(input: {
       ...gateRecovery(SQL_GATE_REASONS.nonSelectStatement),
     });
   }
+}
+
+/**
+ * The `non_select_statement` recovery for a statement holding a PIVOT that
+ * DuckDB could not take as one SELECT. Worded as a fact, so it still reads true
+ * for a statement refused for another reason that merely holds the keyword.
+ */
+const PIVOT_RECOVERY =
+  'A PIVOT runs as one SELECT only when it lists its values, as ON column IN (value, ...): list them, or rewrite as a single SELECT — this surface is read-only and cannot create, alter, or drop tables.';
+
+/**
+ * `PIVOT`, or DuckDB's synonym `PIVOT_WIDER`, with the prefix that makes the
+ * word a name rather than the keyword (an alias after `AS`, a column after a
+ * `.`) captured so the caller can pass over it.
+ */
+const PIVOT_WORD = /(\bas\s+|\.\s*)?\bpivot(?:_wider)?\b/gi;
+
+/** A double-quoted or backtick-quoted name, which never holds a keyword. */
+const QUOTED_NAME = /"(?:[^"]|"")*"|`(?:[^`]|``)*`/g;
+
+/**
+ * Layers 2-3 for a statement DuckDB could not take as one SELECT — it extracted
+ * several statements, or its serializer cannot represent the one — that holds a
+ * PIVOT keyword outside comments, string literals, and quoted names. A PIVOT
+ * without an IN list is such a statement: DuckDB creates an enum type of the
+ * pivoted column's values before its SELECT runs, which v1.5 extracts as two
+ * statements and v2.0 as one its serializer cannot represent. Either way it is
+ * refused as `non_select_statement`, before anything is prepared, with a hint
+ * naming the list. Called only on that path: a PIVOT that lists its values is
+ * one SELECT and never reaches it. A text with a `;` before its last statement
+ * is the caller's several statements, left to `multi_statement`.
+ */
+export function assertNoPivot(sql: string): void {
+  const code = stripCommentsAndLiterals(sql).replace(QUOTED_NAME, '""');
+  let end = code.length;
+  while (end > 0 && /[\s;]/.test(code.charAt(end - 1))) end--;
+  if (code.lastIndexOf(';', end - 1) !== -1) return;
+  for (const [, nameBefore] of code.matchAll(PIVOT_WORD)) {
+    if (nameBefore !== undefined) continue;
+    throw validationError('Canvas query must be SELECT.', {
+      reason: SQL_GATE_REASONS.nonSelectStatement,
+      statementType: 'UNKNOWN',
+      recovery: { hint: PIVOT_RECOVERY },
+    });
+  }
+}
+
+/**
+ * An opening, past the whitespace and opening parentheses DuckDB skips, with a
+ * keyword DuckDB parses as a query. A character class then a keyword: no
+ * nested repetition, so a run that ends in anything else fails in linear time.
+ */
+const READ_OPENING =
+  /^[\s(]*(?:select|with|from|values|table|pivot|pivot_wider|unpivot|pivot_longer|summarize|describe|show)\b/i;
+
+/**
+ * Whether a statement DuckDB could not parse opens like a read: past its leading
+ * comments, whitespace, and opening parentheses, with a keyword DuckDB parses as
+ * a query. Read over {@link stripCommentsAndLiterals}, so a keyword inside a
+ * comment or string literal never counts, in time linear in the input. A
+ * statement DuckDB parses has a parse tree to say whether it is a read, and is
+ * never classified by this.
+ */
+export function isReadShaped(sql: string): boolean {
+  return READ_OPENING.test(stripCommentsAndLiterals(sql));
 }
 
 /**

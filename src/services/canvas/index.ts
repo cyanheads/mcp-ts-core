@@ -58,6 +58,7 @@ export type {
   CanvasObjectKind,
   ColumnSchema,
   ColumnType,
+  DescribedColumn,
   DescribeOptions,
   ExportFormat,
   ExportOptions,

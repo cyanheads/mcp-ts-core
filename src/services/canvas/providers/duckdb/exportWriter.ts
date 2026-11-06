@@ -2,14 +2,16 @@
  * @fileoverview Path resolution and sandboxing for canvas exports, and the
  * source and format clauses of the `COPY` an export runs. Path targets are
  * resolved against `CANVAS_EXPORT_PATH`; absolute paths and `..` traversal are
- * rejected. Stream targets write a scratch file in the provider's private
- * scratch directory, pipe it to the caller's `WritableStream`, then unlink.
+ * rejected. A path export writes a staging file beside its target and renames
+ * it over the target once written. Stream targets write a scratch file in the
+ * provider's private scratch directory, pipe it to the caller's
+ * `WritableStream`, then unlink.
  * @module src/services/canvas/providers/duckdb/exportWriter
  */
 
 import { randomUUID } from 'node:crypto';
-import { lstat, mkdir, open, stat, unlink } from 'node:fs/promises';
-import { isAbsolute, join, relative, resolve, sep } from 'node:path';
+import { lstat, mkdir, open, unlink } from 'node:fs/promises';
+import { basename, dirname, isAbsolute, join, normalize, relative, resolve, sep } from 'node:path';
 
 import { validationError } from '@/types-global/errors.js';
 import { quoteIdentifier } from '../../core/sqlGate.js';
@@ -67,26 +69,41 @@ export async function resolveExportPath(rootPath: string, requested: string): Pr
   return candidate;
 }
 
-/** Map an export format to a DuckDB `COPY ... TO ... (FORMAT ...)` clause. */
-export function copyFormatClause(format: ExportFormat): string {
+/**
+ * Map an export format to a DuckDB `COPY ... TO ... (FORMAT ...)` clause for
+ * the engine `engineVersion` names (`duckdb.version()`, such as `v2.0.0`).
+ *
+ * A Parquet row group stays in memory until it is flushed, and the default
+ * holds 122,880 rows, which for rows of a few KB passes a canvas's memory
+ * limit. The cap keeps a row group to about one 2,048-row slice of a wide
+ * table: by bytes on v2.0, so a narrow table keeps full-size row groups, and by
+ * rows on v1.5, which refuses `ROW_GROUP_SIZE_BYTES` while insertion order is
+ * preserved. The writer cuts a group only between slices, so a group never
+ * holds less than one slice.
+ */
+export function copyFormatClause(format: ExportFormat, engineVersion: string): string {
   switch (format) {
     case 'csv':
       return "(FORMAT 'csv', HEADER true)";
     case 'parquet':
-      return "(FORMAT 'parquet')";
+      return engineVersion.startsWith('v1.')
+        ? "(FORMAT 'parquet', ROW_GROUP_SIZE 2048)"
+        : "(FORMAT 'parquet', ROW_GROUP_SIZE_BYTES '8MB')";
     case 'json':
       return "(FORMAT 'json')";
   }
 }
 
 /**
- * The `COPY` source a CSV or JSON export of `tableName` runs: the table or view
- * followed by an empty `range(0)` branch of `columnCount` NULLs, one per column.
+ * The `COPY` source every export of `tableName` runs, and the staging copy of
+ * an `importFrom()`: the table or view followed by an empty `range(0)` branch
+ * of `columnCount` NULLs, one per column.
  *
- * With insertion order preserved, DuckDB plans `COPY "t"` to CSV or JSON as a
- * batch copy whose writer holds each batch's whole text in one buffer per
- * thread, and v2.0 allocates those buffers inside `memory_limit`, so wide rows
- * run out of memory. A `range()` source has no batch index, so this union
+ * With insertion order preserved, DuckDB plans `COPY "t"` as a batch copy that
+ * holds several batches per engine thread at once: to CSV or JSON, each
+ * batch's whole text in one buffer, which v2.0 allocates inside
+ * `memory_limit`; to Parquet, a row group per thread. Wide rows run out of
+ * memory either way. A `range()` source has no batch index, so this union
  * plans DuckDB's single-writer `COPY_TO_FILE`, which flushes to the file as it
  * writes, on one engine thread. `UNION ALL` keeps the table's insertion order
  * and a view's `ORDER BY`. The memory bound rests on the planner keeping the
@@ -147,14 +164,28 @@ export function tempFilePathFor(dir: string, format: ExportFormat): string {
   return join(dir, `${randomUUID()}.${format}`);
 }
 
-/** Best-effort file size lookup. Returns 0 on failure. */
-export async function safeSizeBytes(path: string): Promise<number> {
-  try {
-    const info = await stat(path);
-    return info.size;
-  } catch {
-    return 0;
-  }
+/** The longest file name ext4, APFS, and most other filesystems accept, in UTF-8 bytes. */
+const FILE_NAME_MAX_BYTES = 255;
+
+/**
+ * The path, relative like `requested`, a path export writes before renaming
+ * it over `requested`: `.<name>.<UUID>.partial` in the directory of the file
+ * `requested` resolves to, its `.` and `..` segments applied first, so the
+ * rename stays on one filesystem and the staging path passes the same
+ * {@link resolveExportPath} checks the target does. `<name>` is cut at a code
+ * point boundary when the staging name would pass {@link FILE_NAME_MAX_BYTES},
+ * so a target name the filesystem accepts never fails on the suffix.
+ */
+export function exportStagingPath(requested: string): string {
+  const suffix = `.${randomUUID()}.partial`;
+  const target = normalize(requested);
+  const name = basename(target);
+  // encodeInto writes whole code points only, so `read` never splits one.
+  const { read } = new TextEncoder().encodeInto(
+    name,
+    new Uint8Array(FILE_NAME_MAX_BYTES - 1 - suffix.length),
+  );
+  return join(dirname(target), `.${name.slice(0, read)}${suffix}`);
 }
 
 /** Discriminator for {@link ExportTarget}. */

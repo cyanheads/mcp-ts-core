@@ -38,6 +38,7 @@ const ctx: RequestContext = {
 const CASES = [
   'multi_statement',
   'non_select_statement',
+  'non_select_statement_pivot',
   'invalid_sql',
   'invalid_sql_parse',
   'invalid_sql_catalog',
@@ -61,6 +62,8 @@ const CASES = [
   'sql_read_only_outside_path',
   'sql_read_only_file_reference',
   'denied_function_setting_read',
+  'view_unreadable',
+  'export_out_of_memory',
 ] as const;
 
 type ProbeCase = (typeof CASES)[number];
@@ -92,6 +95,10 @@ const canvasProbe = tool('canvas_probe', {
         break;
       case 'non_select_statement':
         await workspace.query('DROP TABLE probe');
+        break;
+      // DuckDB cannot take a PIVOT without an IN list as one SELECT.
+      case 'non_select_statement_pivot':
+        await workspace.query('PIVOT probe ON id USING count(*)');
         break;
       case 'invalid_sql':
         await workspace.query('SELECT nonexistent_col FROM probe');
@@ -181,6 +188,16 @@ const canvasProbe = tool('canvas_probe', {
       case 'denied_function_setting_read':
         await workspace.query(`SELECT current_setting('temp_directory') AS v`);
         break;
+      // The series argument registers, and the engine rejects it as the view is read.
+      case 'view_unreadable':
+        await workspace.registerView('probe_unreadable', 'SELECT * FROM range(0, 10, 0)');
+        await workspace.describe({ tableName: 'probe_unreadable' });
+        break;
+      // A JSON export holds about 13 copies of 2,048 rows as JSON text: 16 KB
+      // rows need more than the 256 MB canvas holds.
+      case 'export_out_of_memory':
+        await workspace.export('probe_wide', { format: 'json', path: 'probe_wide.json' });
+        break;
     }
     return { unreachable: true };
   },
@@ -202,6 +219,10 @@ const EXPECTED: Record<ProbeCase, { hint: string; reason: string }> = {
   non_select_statement: {
     reason: 'non_select_statement',
     hint: 'Rewrite as a single SELECT — this surface is read-only and cannot create, alter, or drop tables.',
+  },
+  non_select_statement_pivot: {
+    reason: 'non_select_statement',
+    hint: 'A PIVOT runs as one SELECT only when it lists its values, as ON column IN (value, ...): list them, or rewrite as a single SELECT — this surface is read-only and cannot create, alter, or drop tables.',
   },
   invalid_sql: {
     reason: 'invalid_sql',
@@ -283,6 +304,14 @@ const EXPECTED: Record<ProbeCase, { hint: string; reason: string }> = {
     reason: 'sql_read_only',
     hint: SQL_READ_ONLY_HINT,
   },
+  view_unreadable: {
+    reason: 'view_unreadable',
+    hint: 'Drop each view the message names, or define it again over the tables as now staged.',
+  },
+  export_out_of_memory: {
+    reason: 'export_out_of_memory',
+    hint: 'A JSON export needs roughly 26 MB of canvas memory per KB of row width, since it holds about 13 copies of 2,048 rows as JSON text at once. Export as CSV or Parquet, which need far less, or export a selection that leaves out the widest columns.',
+  },
 };
 
 /** Framework API a caller holding only MCP tools cannot invoke. */
@@ -327,6 +356,10 @@ describe('canvas · error surfaces (#299, #451)', () => {
     importSource = await canvas.acquire(undefined, ctx);
     await workspace.registerTable('probe', [{ id: 1 }, { id: 2 }]);
     await workspace.registerTable('probe_text', [{ amount: '12' }, { amount: 'n/a' }]);
+    await workspace.query(`SELECT i, repeat('x', 16384) AS pad FROM range(2048) r(i)`, {
+      registerAs: 'probe_wide',
+      preview: 0,
+    });
   });
 
   afterAll(async () => {

@@ -14,6 +14,7 @@ import {
   ALLOWED_STATEMENT_TYPES,
   assertNoDeniedFunctions,
   assertNoDeniedParsedFunctions,
+  assertNoPivot,
   assertNoSystemCatalogs,
   assertPlanReadOnly,
   assertQueryNesting,
@@ -28,12 +29,13 @@ import {
   DENIED_TABLE_FUNCTIONS,
   findFileReference,
   INTERNAL_METADATA_VIEWS,
+  isReadShaped,
   MAX_QUERY_NESTING,
   quoteIdentifier,
   SQL_GATE_REASONS,
   type SqlGateReason,
 } from '@/services/canvas/core/sqlGate.js';
-import { McpError } from '@/types-global/errors.js';
+import { JsonRpcErrorCode, McpError } from '@/types-global/errors.js';
 import { readCommonMark } from '../../../helpers/commonmark.js';
 import { expectLinearCost } from '../../../helpers/cpu-time.js';
 
@@ -1833,6 +1835,189 @@ describe('sqlGate · the text scans read string literals and comments as the eng
 });
 
 // ---------------------------------------------------------------------------
+// Statements DuckDB could not parse, or could not take as one SELECT (#597)
+// ---------------------------------------------------------------------------
+
+/** The `non_select_statement` recovery for a statement holding a PIVOT. */
+const PIVOT_HINT =
+  'A PIVOT runs as one SELECT only when it lists its values, as ON column IN (value, ...): list them, or rewrite as a single SELECT — this surface is read-only and cannot create, alter, or drop tables.';
+
+/**
+ * A statement DuckDB cannot parse has no parse tree to say whether it is a
+ * read, so its opening decides: past the comments, whitespace, and opening
+ * parentheses DuckDB skips, read as the text scans read it.
+ */
+describe('sqlGate · isReadShaped', () => {
+  it.each([
+    'SELECT 1',
+    'select 1',
+    'SELECT* FROM t',
+    'WITH x AS (SELECT 1) SELECT * FROM x',
+    'FROM t',
+    'VALUES (1)',
+    'TABLE t',
+    "PIVOT t ON c IN ('a') USING sum(v)",
+    'PIVOT_WIDER t ON c USING sum(v)',
+    'UNPIVOT t ON v INTO NAME k VALUE val',
+    'PIVOT_LONGER t ON v INTO NAME k VALUE val',
+    'SUMMARIZE t',
+    'DESCRIBE t',
+    'SHOW t',
+    '(SELECT 1)',
+    '((SELECT 1))',
+    '( (\n\tSELECT 1 ) )',
+    '\n\t SELECT 1',
+    '/* c */ SELECT 1',
+    '/* c */SELECT 1',
+    '-- c\nSELECT 1',
+    '-- c\r\nSELECT 1',
+    '/* a /* b */ c */ SELECT 1',
+    '/* a */ ( -- b\n SELECT 1)',
+    "/* c */ SELECT 'unterminated",
+    // The engine never closes the outer comment; past that, each closes at its first terminator.
+    '/* a /* b */ SELECT 1',
+  ])('reads %j as a read', (sql) => {
+    expect(isReadShaped(sql)).toBe(true);
+  });
+
+  it.each([
+    '',
+    'DELETE FROM t',
+    'INSERT INTO t SELECT 1',
+    'CREATE TABLE x AS SELECT 1',
+    "COPY t TO 'x.csv'",
+    'EXPLAIN SELECT 1',
+    'PRAGMA version',
+    'SELECTED 1',
+    'WITHOUT 1',
+    'TABLES',
+    '/* SELECT */ DELETE FROM t',
+    '-- SELECT\nDELETE FROM t',
+    '-- SELECT 1',
+    '/* SELECT 1',
+    "'SELECT' 1",
+    '"select" FROM t',
+    '$$SELECT$$',
+    '(DELETE FROM t)',
+  ])('does not read %j as a read', (sql) => {
+    expect(isReadShaped(sql)).toBe(false);
+  });
+
+  it('reads past a run of whitespace, parentheses, or comments in time linear in its length', () => {
+    // Whole units, so a run of comments ends closed.
+    const fill = (unit: string, size: number) => unit.repeat(Math.ceil(size / unit.length));
+    const runsAt = (size: number) => [
+      fill(' ', size),
+      fill('(', size),
+      fill('( \n', size),
+      fill('\r\n', size),
+      fill('/* */', size),
+      fill('/* /* */ */', size),
+      fill('-- x\n', size),
+    ];
+    // Openers the engine never closes: the rest is read as written, so no read follows.
+    const unclosedAt = (size: number) => [fill('/*', size), `/*${fill('x', size)}`];
+    expectLinearCost((size) => {
+      const runs = runsAt(size);
+      const unclosed = unclosedAt(size);
+      // At this size the check reads past each run to the keyword after it.
+      for (const sql of runs) expect(isReadShaped(`${sql}SELECT 1`)).toBe(true);
+      for (const sql of unclosed) expect(isReadShaped(`${sql} SELECT 1`)).toBe(false);
+      const refused = [...runs, ...unclosed].map((sql) => `${sql}!`);
+      return () => {
+        for (const sql of refused) isReadShaped(sql);
+      };
+    });
+  });
+});
+
+/**
+ * A PIVOT without an IN list creates an enum type before its SELECT runs, so
+ * DuckDB v1.5 extracts it as two statements and v2.0 as one its serializer
+ * cannot represent. Either way it is refused, naming the list.
+ */
+describe('sqlGate · assertNoPivot', () => {
+  it.each([
+    'PIVOT t ON c USING sum(v)',
+    'pivot t on c using sum(v)',
+    'PIVOT_WIDER t ON c USING sum(v)',
+    'SELECT * FROM (PIVOT t ON c USING sum(v))',
+    'WITH p AS (PIVOT t ON c USING sum(v)) SELECT * FROM p',
+    '/* c */ PIVOT t ON c USING sum(v);',
+  ])('refuses %j as non_select_statement, naming the IN list', (sql) => {
+    const err = gateRejection(() => assertNoPivot(sql));
+    expect(err.code).toBe(JsonRpcErrorCode.ValidationError);
+    expect(err.message).toBe('Canvas query must be SELECT.');
+    expect(err.data).toEqual({
+      reason: SQL_GATE_REASONS.nonSelectStatement,
+      statementType: 'UNKNOWN',
+      recovery: { hint: PIVOT_HINT },
+    });
+  });
+
+  it.each([
+    'SELECT 1; SELECT 2',
+    'UNPIVOT t ON v INTO NAME k VALUE val',
+    'PIVOT_LONGER t ON v INTO NAME k VALUE val',
+    'SELECT * FROM pivot_t',
+    'SELECT * FROM t_pivot',
+    "SELECT 'PIVOT t ON c USING sum(v)' AS q",
+    'SELECT 1 -- PIVOT t ON c USING sum(v)',
+    '/* PIVOT */ DELETE FROM t',
+    'DELETE FROM t',
+  ])('passes %j, which holds no PIVOT keyword', (sql) => {
+    expect(() => assertNoPivot(sql)).not.toThrow();
+  });
+
+  it.each([
+    'SELECT 1; SELECT 2 AS pivot',
+    'PIVOT t ON c USING sum(v); SELECT 1',
+    'SELECT 1; PIVOT t ON c USING sum(v)',
+    'DELETE FROM "pivot"',
+    'DELETE FROM t WHERE "my pivot" = 1',
+    'DELETE FROM t WHERE t.pivot = 1',
+    'EXPLAIN SELECT 1 AS pivot',
+    "COPY (SELECT 1 AS PIVOT_WIDER) TO 'x.csv'",
+  ])('passes %j, whose PIVOT is a name or one of several statements', (sql) => {
+    expect(() => assertNoPivot(sql)).not.toThrow();
+  });
+
+  it.each([
+    'SELECT x AS pivot FROM (PIVOT t ON c USING sum(v))',
+    'WITH p AS(PIVOT t ON c USING sum(v)) SELECT * FROM p',
+    'PIVOT t ON c USING sum(v); -- done',
+  ])('refuses %j, which holds a PIVOT keyword beside a name', (sql) => {
+    expect(gateRejection(() => assertNoPivot(sql)).data).toEqual(
+      expect.objectContaining({ recovery: { hint: PIVOT_HINT } }),
+    );
+  });
+
+  it('finds a PIVOT keyword in time linear in the SQL length', () => {
+    const fill = (unit: string, size: number) =>
+      unit.repeat(Math.ceil(size / unit.length)).slice(0, size);
+    const sqlAt = (size: number) => [
+      fill('pivot_', size),
+      fill('unpivot ', size),
+      fill('pivo', size),
+      fill('/*', size),
+      fill(' ', size),
+    ];
+    expectLinearCost((size) => {
+      const inputs = sqlAt(size);
+      // The scan reads each input to its end at this size: a PIVOT after it is found.
+      for (const sql of inputs) {
+        expect(gateRejection(() => assertNoPivot(`${sql} PIVOT t ON c USING sum(v)`)).data).toEqual(
+          expect.objectContaining({ recovery: { hint: PIVOT_HINT } }),
+        );
+      }
+      return () => {
+        for (const sql of inputs) assertNoPivot(sql);
+      };
+    });
+  });
+});
+
+// ---------------------------------------------------------------------------
 // Recovery hints (#299)
 // ---------------------------------------------------------------------------
 
@@ -1864,6 +2049,11 @@ const GATE_HINT_CASES: [SqlGateReason, () => void, string][] = [
     SQL_GATE_REASONS.nonSelectStatement,
     () => assertSelectOnly({ statementCount: 1, statementType: 'DROP' }),
     'Rewrite as a single SELECT — this surface is read-only and cannot create, alter, or drop tables.',
+  ],
+  [
+    SQL_GATE_REASONS.nonSelectStatement,
+    () => assertNoPivot('PIVOT t ON c USING sum(v)'),
+    PIVOT_HINT,
   ],
   [
     SQL_GATE_REASONS.planOperatorNotAllowed,

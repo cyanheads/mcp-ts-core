@@ -743,9 +743,10 @@ describe('canvas · SHOW over a staged table or view (#800)', () => {
     expect(result.rows.map((row) => row.column_name)).toEqual(['x']);
   });
 
-  it('refuses SHOW of a name nothing staged as non_select_statement', async () => {
+  it('refuses SHOW of a name nothing staged as missing_table', async () => {
     const err = await refusalOf(() => instance.query('SHOW missing_tbl'));
-    expect(err.data?.reason).toBe('non_select_statement');
+    expect(err.data?.reason).toBe('missing_table');
+    expect(err.data?.tableName).toBe('missing_tbl');
   });
 
   it.each([
