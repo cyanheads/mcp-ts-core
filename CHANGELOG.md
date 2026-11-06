@@ -4,7 +4,7 @@ All notable changes to this project. Each entry links to its full per-version fi
 
 ## [0.13.21](changelog/0.13.x/0.13.21.md) — 2026-11-06 · 🛡️ Security
 
-Worker string bindings now reach every configuration variable, JWT audience and issuer included, and DEV_MCP_AUTH_BYPASS needs a non-production ENVIRONMENT. MCP_HTTP_ENDPOINT_PATH and MCP_PUBLIC_URL are normalized or refused, and the mirror, canvas, D1, and KV stores get fixes.
+Worker string bindings now reach every configuration variable that has an effect on a Worker, JWT audience and issuer included, and DEV_MCP_AUTH_BYPASS needs a non-production ENVIRONMENT. MCP_HTTP_ENDPOINT_PATH and MCP_PUBLIC_URL are normalized or refused, and the mirror, canvas, D1, and KV stores get fixes.
 
 ## [0.13.20](changelog/0.13.x/0.13.20.md) — 2026-11-06 · 🛡️ Security
 
