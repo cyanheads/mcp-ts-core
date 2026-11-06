@@ -73,8 +73,8 @@ export async function resolveExportPath(rootPath: string, requested: string): Pr
  * Map an export format to a DuckDB `COPY ... TO ... (FORMAT ...)` clause for
  * the engine `engineVersion` names (`duckdb.version()`, such as `v2.0.0`).
  *
- * A Parquet row group stays in memory until it is flushed, and the default
- * holds 122,880 rows, which for rows of a few KB passes a canvas's memory
+ * A Parquet row group stays in memory until it is flushed, and the engine's
+ * default row group holds too many wide rows to fit in a canvas's memory
  * limit. The cap keeps a row group to about one 2,048-row slice of a wide
  * table: by bytes on v2.0, so a narrow table keeps full-size row groups, and by
  * rows on v1.5, which refuses `ROW_GROUP_SIZE_BYTES` while insertion order is
