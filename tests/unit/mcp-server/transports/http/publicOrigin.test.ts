@@ -29,6 +29,8 @@ describe('resolvePublicOrigin', () => {
   it.each([
     ['https://public.example/prefix', 'https://public.example/prefix'],
     ['https://public.example/prefix/', 'https://public.example/prefix'],
+    ['https://public.example/prefix//', 'https://public.example/prefix'],
+    ['https://public.example//', 'https://public.example'],
     ['https://trusted.example:8443', 'https://trusted.example:8443'],
   ])('keeps the ASCII public URL %s as %s', (publicUrl, expected) => {
     expect(resolvePublicOrigin(publicUrl, 'http://127.0.0.1:3010/mcp')).toBe(expected);

@@ -14,11 +14,13 @@ import {
   waitOnExecutionContext,
 } from 'cloudflare:test';
 import { env } from 'cloudflare:workers';
+import { ProxyTracerProvider, trace } from '@opentelemetry/api';
 import { SignJWT } from 'jose';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { config, resetConfig } from '@/config/index.js';
 import { tool, z } from '@/core/index.js';
 import { createWorkerHandler } from '@/core/worker.js';
+import { JsonRpcErrorCode } from '@/types-global/errors.js';
 import { logger } from '@/utils/internal/logger.js';
 import worker, {
   createWorkerLifecycleTestHandler,
@@ -413,6 +415,241 @@ describe('createWorkerHandler in the Workers runtime', () => {
       });
       expect([config.environment, config.mcpTransportType]).toEqual(['production', 'http']);
     });
+  });
+
+  /**
+   * The lane's miniflare bindings populate `process.env` at load; a variable
+   * passed only in the fetch `env` reaches config only through the handler's
+   * own binding injection, as on a Worker whose `process.env` is not populated
+   * from its bindings.
+   */
+  describe('auth checks configured by bindings alone (#837)', () => {
+    const KEYS = [
+      'MCP_AUTH_MODE',
+      'MCP_AUTH_SECRET_KEY',
+      'MCP_JWT_EXPECTED_AUDIENCE',
+      'MCP_JWT_EXPECTED_ISSUER',
+      'MCP_SERVER_RESOURCE_IDENTIFIER',
+      'MCP_TRANSPORT_TYPE',
+      'NODE_ENV',
+    ] as const;
+    const saved = new Map(KEYS.map((key) => [key, process.env[key]]));
+    const SECRET = 'worker-binding-audience-secret-0123456789';
+    const AUDIENCE = 'https://mcp.example.com';
+    const ISSUER = 'https://issuer.example.com';
+
+    afterEach(() => {
+      for (const [key, value] of saved) {
+        if (value === undefined) delete process.env[key];
+        else process.env[key] = value;
+      }
+      resetConfig();
+    });
+
+    const sign = (claims: { aud: string; iss: string }) =>
+      new SignJWT({ client_id: 'worker-binding-client', scope: 'tool:probe:read', tid: 'tenant-1' })
+        .setProtectedHeader({ alg: 'HS256' })
+        .setAudience(claims.aud)
+        .setIssuer(claims.iss)
+        .setIssuedAt()
+        .setExpirationTime('5m')
+        .sign(new TextEncoder().encode(SECRET));
+
+    it('rejects a token for another audience or another issuer, and accepts a matching one', async () => {
+      for (const key of KEYS) delete process.env[key];
+      const handler = createWorkerHandler({ tools: [] });
+      const bindings = {
+        ...env,
+        MCP_AUTH_MODE: 'jwt',
+        MCP_AUTH_SECRET_KEY: SECRET,
+        MCP_JWT_EXPECTED_AUDIENCE: AUDIENCE,
+        MCP_JWT_EXPECTED_ISSUER: ISSUER,
+      };
+      const initialize = async (token: string) => {
+        const ctx = createExecutionContext();
+        const response = await handler.fetch(
+          new Request('http://example.com/mcp', {
+            method: 'POST',
+            headers: { ...MCP_HEADERS, Authorization: `Bearer ${token}` },
+            body: initializeBody(1),
+          }),
+          bindings,
+          ctx,
+        );
+        await waitOnExecutionContext(ctx);
+        return response;
+      };
+
+      // Each binding is checked on its own: a token wrong in only one claim is refused.
+      const otherAudience = await initialize(
+        await sign({ aud: 'https://other-service.example', iss: ISSUER }),
+      );
+      const otherIssuer = await initialize(
+        await sign({ aud: AUDIENCE, iss: 'https://other-issuer.example' }),
+      );
+      const matching = await initialize(await sign({ aud: AUDIENCE, iss: ISSUER }));
+
+      expect([otherAudience.status, otherIssuer.status, matching.status]).toEqual([401, 401, 200]);
+    });
+
+    it('carries a bound MCP_SERVER_RESOURCE_IDENTIFIER into config', async () => {
+      for (const key of KEYS) delete process.env[key];
+      const handler = createWorkerHandler({ tools: [] });
+      const ctx = createExecutionContext();
+
+      const response = await handler.fetch(
+        new Request('http://example.com/healthz'),
+        lifecycleEnv({ MCP_SERVER_RESOURCE_IDENTIFIER: 'https://mcp.example.com/mcp' }),
+        ctx,
+      );
+      await waitOnExecutionContext(ctx);
+
+      expect(response.status).toBe(200);
+      expect(config.mcpServerResourceIdentifier).toBe('https://mcp.example.com/mcp');
+    });
+
+    /**
+     * A Worker that registers its own tracer provider receives every framework
+     * span from a tracer whose scope is `OTEL_SERVICE_NAME` and `OTEL_SERVICE_VERSION`.
+     */
+    it('names the tracer scope of a tool call from bound OTEL_SERVICE_NAME and OTEL_SERVICE_VERSION', async () => {
+      const otelKeys = ['OTEL_SERVICE_NAME', 'OTEL_SERVICE_VERSION'] as const;
+      const savedOtel = otelKeys.map((key) => [key, process.env[key]] as const);
+      for (const key of [...KEYS, ...otelKeys]) delete process.env[key];
+      const scopes: Array<[string, string | undefined]> = [];
+      const noopTracer = new ProxyTracerProvider().getTracer('noop');
+      const registered = trace.setGlobalTracerProvider({
+        getTracer(name, version) {
+          scopes.push([name, version]);
+          return noopTracer;
+        },
+      });
+      try {
+        expect(registered).toBe(true);
+        const scopeProbe = tool('scope_probe', {
+          description: 'Answers once, so the call runs inside a framework span.',
+          input: z.object({}),
+          output: z.object({ ok: z.boolean().describe('Always true') }),
+          handler: () => ({ ok: true }),
+        });
+        const handler = createWorkerHandler({ tools: [scopeProbe] });
+        const bindings = {
+          ...env,
+          OTEL_SERVICE_NAME: 'bound-otel-service',
+          OTEL_SERVICE_VERSION: '7.7.7',
+        };
+        const post = async (body: string, sessionId?: string | null) => {
+          const ctx = createExecutionContext();
+          const response = await handler.fetch(
+            new Request('http://example.com/mcp', {
+              method: 'POST',
+              headers: { ...MCP_HEADERS, ...(sessionId && { 'Mcp-Session-Id': sessionId }) },
+              body,
+            }),
+            bindings,
+            ctx,
+          );
+          await waitOnExecutionContext(ctx);
+          return response;
+        };
+
+        const init = await post(initializeBody(1));
+        const call = await post(
+          jsonrpc(2, 'tools/call', { name: 'scope_probe', arguments: {} }),
+          init.headers.get('Mcp-Session-Id'),
+        );
+        await call.text();
+
+        expect(call.status).toBe(200);
+        expect(scopes).toContainEqual(['bound-otel-service', '7.7.7']);
+      } finally {
+        trace.disable();
+        for (const [key, value] of savedOtel) {
+          if (value === undefined) delete process.env[key];
+          else process.env[key] = value;
+        }
+      }
+    });
+  });
+
+  /**
+   * On Cloudflare Workers, `DEV_MCP_AUTH_BYPASS` is honored only when the
+   * environment is explicitly `development` or `testing`, here declared by the
+   * `ENVIRONMENT` binding. The flag is
+   * written to `process.env`, where a same-named binding sits on a Worker whose
+   * `process.env` is populated from its bindings; JWT mode with no secret
+   * makes an answered `initialize` one the bypass let through. This lane binds
+   * `ENVIRONMENT`, so each case clears it from `process.env` as well as from the
+   * bindings the handler receives: a Worker's two views of a binding agree.
+   */
+  describe('the dev auth bypass and the ENVIRONMENT binding', () => {
+    const KEYS = [
+      'DEV_MCP_AUTH_BYPASS',
+      'ENVIRONMENT',
+      'MCP_AUTH_MODE',
+      'MCP_AUTH_SECRET_KEY',
+      'MCP_TRANSPORT_TYPE',
+      'NODE_ENV',
+    ] as const;
+    const saved = new Map(KEYS.map((key) => [key, process.env[key]]));
+
+    afterEach(() => {
+      for (const [key, value] of saved) {
+        if (value === undefined) delete process.env[key];
+        else process.env[key] = value;
+      }
+      resetConfig();
+    });
+
+    /** Sends `initialize` with a token no key verifies, the bypass on, and `environment` as the only `ENVIRONMENT` binding. */
+    async function initializeWithBypass(environment: string | undefined): Promise<Response> {
+      for (const key of KEYS) delete process.env[key];
+      process.env.DEV_MCP_AUTH_BYPASS = 'true';
+      const { ENVIRONMENT: _lane, ...bindings } = env;
+      const handler = createWorkerHandler({ tools: [] });
+      const ctx = createExecutionContext();
+      const response = await handler.fetch(
+        new Request('http://example.com/mcp', {
+          method: 'POST',
+          headers: { ...MCP_HEADERS, Authorization: 'Bearer not-a-jwt' },
+          body: initializeBody(1),
+        }),
+        { ...bindings, MCP_AUTH_MODE: 'jwt', ...(environment && { ENVIRONMENT: environment }) },
+        ctx,
+      );
+      await waitOnExecutionContext(ctx);
+      return response;
+    }
+
+    it('refuses to serve without an ENVIRONMENT binding, naming DEV_MCP_AUTH_BYPASS and ENVIRONMENT', async () => {
+      const critSpy = vi.spyOn(logger, 'crit');
+
+      const response = await initializeWithBypass(undefined);
+
+      expect(response.status).toBe(500);
+      const failure = critSpy.mock.calls.find(
+        ([message]) => message === 'Failed to initialize Cloudflare Worker.',
+      )?.[1];
+      expect(failure).toMatchObject({ code: JsonRpcErrorCode.ConfigurationError });
+      expect((failure as Error).message).toContain('DEV_MCP_AUTH_BYPASS (devMcpAuthBypass)');
+      expect((failure as Error).message).toContain('ENVIRONMENT=development');
+    });
+
+    it.each(['production', 'staging'])('refuses to serve with ENVIRONMENT=%s', async (bound) => {
+      const response = await initializeWithBypass(bound);
+
+      expect(response.status).toBe(500);
+    });
+
+    it.each(['development', 'testing'] as const)(
+      'honors the bypass with ENVIRONMENT=%s',
+      async (bound) => {
+        const response = await initializeWithBypass(bound);
+
+        expect(response.status).toBe(200);
+        expect([config.environment, config.devMcpAuthBypass]).toEqual([bound, true]);
+      },
+    );
   });
 
   describe('request URL log boundary', () => {

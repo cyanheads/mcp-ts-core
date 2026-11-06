@@ -4,7 +4,7 @@ description: >
   Canonical reference for the unified `Context` object passed to every tool and resource handler in `@cyanheads/mcp-ts-core`. Covers the full interface, its `RequestContext` base, all sub-APIs (`ctx.log`, `ctx.state`, `ctx.requestInput`, `ctx.inputs`, `ctx.clientCapabilities`, `ctx.enrich`, `ctx.content`), and when to use each.
 metadata:
   author: cyanheads
-  version: "2.17"
+  version: "2.18"
   audience: external
   type: reference
 ---
@@ -647,7 +647,7 @@ for (const item of items) {
 
 ## `ctx.uri`
 
-Present only for resource handlers. The raw `URL` object for the matched resource URI.
+Present only for resource handlers. The `URL` the SDK parsed from the request URI and matched against the template, so a raw space or non-ASCII character in the request is already percent-encoded here (`myscheme://§ 1/data` reads as `myscheme://%C2%A7%201/data`). `createApp({ decodeResourceParams: true })` decodes `params` and never `ctx.uri`, which reads the same with the switch on or off.
 
 ```ts
 export const myResource = resource('myscheme://{itemId}/data', {
@@ -659,7 +659,7 @@ export const myResource = resource('myscheme://{itemId}/data', {
 });
 ```
 
-Prefer `params` (the extracted URI template variables) over parsing `ctx.uri` manually. `ctx.uri` is available when the raw URL string is needed.
+Prefer `params` (the extracted URI template variables) over parsing `ctx.uri` manually. `ctx.uri` is available when the raw URL string is needed. Each variable in `params` arrives percent-encoded unless the server sets `decodeResourceParams`. Turning that switch on and deleting the handler's own `decodeURIComponent` are one change, or the handler decodes twice. See `add-resource` § Percent-encoded template variables.
 
 ---
 

@@ -192,8 +192,13 @@ export const httpErrorHandler = async <TBindings extends object = HonoNodeBindin
   // Attempt to get the request ID from the body, but don't fail if it's not there or unreadable.
   // The response echoes it whole; the records carry it capped, as `jsonRpcId` (#584).
   let requestId: string | number | null = null;
-  // Only attempt to read the body if it hasn't been consumed already.
-  if (c.req.raw.bodyUsed === false) {
+  /**
+   * By the time most errors arrive the body has been read — the body-limit
+   * guard seeds Hono's body cache, and the dispatch route's `c.req.json()`
+   * fills it — and `c.req.json()` reads from that cache. The raw stream is read
+   * only when nothing has; a body consumed outside Hono leaves no id to find.
+   */
+  if (Object.keys(c.req.bodyCache).length > 0 || c.req.raw.bodyUsed === false) {
     try {
       const body: unknown = await c.req.json();
       const id = getProperty(body, 'id');

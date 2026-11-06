@@ -9,16 +9,25 @@ import { HTTPException } from 'hono/http-exception';
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
 import { z } from 'zod';
 import { httpErrorHandler } from '@/mcp-server/transports/http/httpErrorHandler.js';
+import { createHttpApp } from '@/mcp-server/transports/http/httpTransport.js';
 import type { HonoNodeBindings } from '@/mcp-server/transports/http/httpTypes.js';
+import type { SessionStore } from '@/mcp-server/transports/http/sessionStore.js';
 import { JsonRpcErrorCode, McpError } from '@/types-global/errors.js';
 import { ErrorHandler } from '@/utils/internal/error-handler/errorHandler.js';
 import { logger } from '@/utils/internal/logger.js';
+import { defaultServerManifest } from '../../../../helpers/fixtures.js';
 
 const { mockConfig, mockCounterAdd } = vi.hoisted(() => ({
   mockCounterAdd: vi.fn(),
   mockConfig: {
     mcpServerName: 'test-server',
     mcpPublicUrl: undefined as string | undefined,
+    // Read by `createHttpApp`, for the cases served through the transport app.
+    mcpAuthMode: 'none',
+    mcpHttpEndpointPath: '/mcp',
+    mcpHttpMaxBodyBytes: 1_048_576,
+    mcpSessionMode: 'stateful',
+    mcpStatefulSessionStaleTimeoutMs: 60_000,
     openTelemetry: {
       serviceName: 'test-server',
       serviceVersion: '0.0.0',
@@ -34,6 +43,7 @@ vi.mock('@/config/index.js', () => ({
 vi.mock('@/utils/telemetry/metrics.js', () => ({
   createCounter: vi.fn(() => ({ add: mockCounterAdd })),
   createHistogram: vi.fn(() => ({ record: vi.fn() })),
+  createObservableGauge: vi.fn(),
 }));
 
 vi.mock('@/utils/internal/logger.js', () => ({
@@ -97,6 +107,7 @@ describe('HTTP Error Handler', () => {
           bodyUsed: false,
           signal: new AbortController().signal,
         } as Request,
+        bodyCache: {},
         json: vi.fn(async () => ({ id: 'test-request-123' })),
       } as any,
       status: vi.fn((code: number) => {
@@ -242,7 +253,7 @@ describe('HTTP Error Handler', () => {
       expect((jsonResponseData as any).id).toBeNull();
     });
 
-    test('should use null id when body already consumed', async () => {
+    test('should use null id when the body was consumed and nothing cached it', async () => {
       mockContext.req!.raw = {
         bodyUsed: true,
         signal: new AbortController().signal,
@@ -253,6 +264,23 @@ describe('HTTP Error Handler', () => {
 
       expect(mockContext.req?.json).not.toHaveBeenCalled();
       expect((jsonResponseData as any).id).toBeNull();
+    });
+
+    test('should read the id through the body cache when the body was consumed into it', async () => {
+      mockContext.req!.raw = {
+        bodyUsed: true,
+        signal: new AbortController().signal,
+      } as Request;
+      mockContext.req!.bodyCache = { text: Promise.resolve('{"id":77}') } as any;
+      mockContext.req!.json = vi.fn(async () => ({ id: 77 })) as any;
+
+      await httpErrorHandler(
+        new Error('Test error'),
+        mockContext as Context<{ Bindings: HonoNodeBindings }>,
+      );
+
+      expect(mockContext.req?.json).toHaveBeenCalledOnce();
+      expect((jsonResponseData as any).id).toBe(77);
     });
   });
 
@@ -434,6 +462,15 @@ describe('HTTP Error Handler', () => {
           'https://mcp.example.com/p"q',
           'https://mcp.example.com/p%22q/.well-known/oauth-protected-resource',
         ],
+        [
+          'https://pub.example/prefix',
+          'https://pub.example/prefix/.well-known/oauth-protected-resource',
+        ],
+        [
+          'https://pub.example/prefix/',
+          'https://pub.example/prefix/.well-known/oauth-protected-resource',
+        ],
+        ['http://127.0.0.1:8080', 'http://127.0.0.1:8080/.well-known/oauth-protected-resource'],
       ])(
         'answers 401 with a serialized resource_metadata for MCP_PUBLIC_URL %s',
         async (publicUrl, resourceMetadata) => {
@@ -688,6 +725,126 @@ describe('HTTP Error Handler', () => {
         )?.[1] as { extra?: Record<string, unknown> } | undefined;
       expect(record?.extra?.jsonRpcId).toBeNull();
       expect(record?.extra).not.toHaveProperty('jsonRpcIdLength');
+    });
+  });
+
+  // #685 — the routes ahead of the handler read the body first, so the id has
+  // to come from Hono's body cache; only a body nothing read is read raw.
+  describe('the JSON-RPC id once something read the body (#685)', () => {
+    /** Answers one POST whose route reads the body as `read` says, then fails with a 401. */
+    async function idAfterRead(read: 'hono' | 'raw' | 'none', body: string): Promise<unknown> {
+      const app = new Hono<{ Bindings: HonoNodeBindings }>();
+      app.post('/mcp', async (c) => {
+        if (read === 'hono') await c.req.json().catch(() => undefined);
+        if (read === 'raw') await c.req.raw.text();
+        throw new McpError(JsonRpcErrorCode.Unauthorized, 'Unauthorized');
+      });
+      app.onError(httpErrorHandler);
+      const response = await app.request('http://localhost/mcp', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body,
+      });
+      expect(response.status).toBe(401);
+      return ((await response.json()) as { id: unknown }).id;
+    }
+
+    test.each([
+      ['a number id', 77, '{"jsonrpc":"2.0","id":77,"method":"tools/list"}'],
+      ['a string id', 'abc', '{"jsonrpc":"2.0","id":"abc","method":"tools/list"}'],
+      ['a fractional id', 1.5, '{"jsonrpc":"2.0","id":1.5,"method":"tools/list"}'],
+      ['a null id', null, '{"jsonrpc":"2.0","id":null,"method":"tools/list"}'],
+      ['no id', null, '{"jsonrpc":"2.0","method":"notifications/initialized"}'],
+      ['a batch', null, '[{"jsonrpc":"2.0","id":77,"method":"tools/list"}]'],
+      ['invalid JSON', null, '{"jsonrpc":'],
+      ['an empty body', null, ''],
+    ])(
+      'answers a body with %s with id %j after the route read it through Hono',
+      async (_l, id, body) => {
+        expect(await idAfterRead('hono', body)).toStrictEqual(id);
+      },
+    );
+
+    test('echoes the id from a body nothing read', async () => {
+      expect(await idAfterRead('none', '{"jsonrpc":"2.0","id":77,"method":"tools/list"}')).toBe(77);
+    });
+
+    test('answers a null id for a body consumed past Hono, which no cache holds', async () => {
+      expect(await idAfterRead('raw', '{"jsonrpc":"2.0","id":77,"method":"tools/list"}')).toBe(
+        null,
+      );
+    });
+
+    describe('through the HTTP transport app with the session store at capacity', () => {
+      afterEach(() => {
+        mockConfig.mcpHttpMaxBodyBytes = 1_048_576;
+      });
+
+      /** The real transport app, its session store forced to capacity, served `body`. */
+      async function serveAtCapacity(maxBodyBytes: number, body: string): Promise<Response> {
+        mockConfig.mcpHttpMaxBodyBytes = maxBodyBytes;
+        const serverFactory = vi.fn(async () => {
+          throw new Error('A server at capacity builds no instance.');
+        });
+        const { app, close, sessionStore } = await createHttpApp(
+          serverFactory,
+          { requestId: 'test-parent', timestamp: new Date().toISOString() },
+          defaultServerManifest,
+        );
+        try {
+          // The real capacity check, without opening every session first.
+          Object.assign(sessionStore as SessionStore, { maxSessions: 0 });
+          return await app.request('http://localhost/mcp', {
+            method: 'POST',
+            headers: {
+              'content-type': 'application/json',
+              accept: 'application/json, text/event-stream',
+            },
+            body,
+          });
+        } finally {
+          await close();
+        }
+      }
+
+      const initialize = (id: number | string) =>
+        JSON.stringify({
+          jsonrpc: '2.0',
+          id,
+          method: 'initialize',
+          params: {
+            protocolVersion: '2025-06-18',
+            capabilities: {},
+            clientInfo: { name: 'capacity-test', version: '1.0.0' },
+          },
+        });
+
+      test.each([
+        ['the default body limit', 77, 1_048_576],
+        ['the default body limit', 'abc', 1_048_576],
+        ['the body limit off', 77, 0],
+        ['the body limit off', 'abc', 0],
+      ])('answers 503 under %s echoing id %j', async (_l, id, maxBodyBytes) => {
+        const response = await serveAtCapacity(maxBodyBytes, initialize(id));
+
+        expect(response.status).toBe(503);
+        expect(await response.json()).toMatchObject({
+          error: {
+            code: JsonRpcErrorCode.ServiceUnavailable,
+            message: expect.stringContaining('Maximum session capacity reached'),
+          },
+          id,
+        });
+      });
+
+      test('still answers a body over the limit with the 413, before any handler', async () => {
+        const response = await serveAtCapacity(64, initialize('x'.repeat(256)));
+
+        expect(response.status).toBe(413);
+        expect(await response.json()).toEqual({
+          error: expect.stringContaining('exceeds the 64-byte limit'),
+        });
+      });
     });
   });
 });

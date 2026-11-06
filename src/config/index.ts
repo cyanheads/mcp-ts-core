@@ -102,6 +102,114 @@ const otlpSignalEndpoint = (
   return `${baseEndpoint.endsWith('/') ? baseEndpoint : `${baseEndpoint}/`}${signalPath}`;
 };
 
+/** A leading scheme (`https:`): RFC 3986 reads a first segment holding a colon as one. */
+const URL_SCHEME = /^[A-Za-z][A-Za-z0-9+.-]*:/;
+/** Characters an advertised URL cannot carry as written: a client sends them encoded, or (`\`) as `/`. */
+const UNSAFE_PATH_CHARACTER = /[\s\\\p{Cc}]/u;
+/** Hono route syntax: a wildcard, a regex pattern, or a named parameter segment. */
+const ROUTE_SYNTAX = /[*{}]|(?:^|\/):/;
+
+/**
+ * Decodes the percent-escapes the router decodes, as Hono's `getPath` does
+ * before matching: `decodeURI` with every `%25` kept as written, so a path
+ * holding an escaped `%` (`/a%2541`) is served and advertised as written.
+ * `undefined` for a malformed escape.
+ */
+function decodeLikeRouter(path: string): string | undefined {
+  try {
+    return decodeURI(path.replaceAll('%25', '%2525'));
+  } catch {
+    return undefined;
+  }
+}
+
+/** RFC 3986 §5.2.4 `remove_dot_segments` over an absolute path, as a client resolves one before sending it. */
+function removeDotSegments(path: string): string {
+  const segments = path.split('/').slice(1);
+  const output: string[] = [];
+  for (const [i, segment] of segments.entries()) {
+    if (segment === '.' || segment === '..') {
+      if (segment === '..') output.pop();
+      if (i === segments.length - 1) output.push('');
+    } else {
+      output.push(segment);
+    }
+  }
+  return `/${output.join('/')}`;
+}
+
+/**
+ * `MCP_HTTP_ENDPOINT_PATH`, normalized once so the route and every URL derived
+ * from it (the server card, the protected-resource metadata and its
+ * path-suffixed route, the landing page, `robots.txt`) name the same path. A
+ * value with one reading is normalized — surrounding whitespace, a missing
+ * leading slash, dot segments, and escapes the router decodes anyway — and any
+ * other fails startup.
+ */
+const endpointPath = z.string().transform((value, ctx) => {
+  const refuse = (message: string) => {
+    ctx.addIssue({ code: 'custom', message });
+    return z.NEVER;
+  };
+  const urlRefusal =
+    'MCP_HTTP_ENDPOINT_PATH must be a path such as /mcp, not a URL; set the public origin in MCP_PUBLIC_URL.';
+
+  const trimmed = value.trim();
+  if (URL_SCHEME.test(trimmed)) return refuse(urlRefusal);
+  const decoded = decodeLikeRouter(trimmed.startsWith('/') ? trimmed : `/${trimmed}`);
+  if (decoded === undefined) {
+    return refuse(
+      'MCP_HTTP_ENDPOINT_PATH has a malformed percent-escape: each % must start a %XX escape of valid UTF-8; write a literal % as %25.',
+    );
+  }
+  if (/[?#]/.test(decoded)) {
+    return refuse('MCP_HTTP_ENDPOINT_PATH must not contain a query (?) or fragment (#).');
+  }
+  if (UNSAFE_PATH_CHARACTER.test(decoded)) {
+    return refuse(
+      'MCP_HTTP_ENDPOINT_PATH must not contain whitespace, a control character, or a backslash, raw or percent-encoded.',
+    );
+  }
+  if (ROUTE_SYNTAX.test(decoded)) {
+    return refuse(
+      'MCP_HTTP_ENDPOINT_PATH must not contain *, {, }, or a segment starting with :, which the router reads as route patterns.',
+    );
+  }
+  const path = removeDotSegments(decoded);
+  // A leading `//` reads as a network-path reference to another host.
+  return path.startsWith('//') ? refuse(urlRefusal) : path;
+});
+
+/**
+ * `MCP_PUBLIC_URL`, the base every advertised URL appends a path to: an `http`
+ * or `https` scheme, a host, an optional port, and an optional path prefix.
+ * A query or fragment would swallow the appended path, so both are refused,
+ * as is user info. No message carries the value.
+ */
+const publicBaseUrl = z.url().superRefine((value, ctx) => {
+  const url = URL.parse(value);
+  // Unparseable: `z.url()` has already reported it.
+  if (url === null) return;
+  if (url.protocol !== 'http:' && url.protocol !== 'https:') {
+    ctx.addIssue({ code: 'custom', message: 'MCP_PUBLIC_URL must use the http or https scheme.' });
+  }
+  if (url.username !== '' || url.password !== '') {
+    ctx.addIssue({
+      code: 'custom',
+      message:
+        'MCP_PUBLIC_URL must not contain user info: give only the scheme, host, port, and path prefix.',
+    });
+  }
+  // The serialization keeps an empty query or fragment's delimiter, which `search` and `hash` do not.
+  if (/[?#]/.test(url.href)) {
+    ctx.addIssue({
+      code: 'custom',
+      message:
+        'MCP_PUBLIC_URL must not contain a query (?) or fragment (#): every advertised URL appends a path to it.',
+    });
+  }
+});
+
 // --- Schema Definition ---
 const ConfigSchema = z
   .object({
@@ -187,7 +295,7 @@ const ConfigSchema = z
     ),
     mcpHttpPort: z.coerce.number().int().min(0).max(65535).default(3010),
     mcpHttpHost: z.string().default('127.0.0.1'),
-    mcpHttpEndpointPath: z.string().default('/mcp'),
+    mcpHttpEndpointPath: endpointPath.default('/mcp'),
     /**
      * Maximum accepted HTTP request body size in bytes for the MCP endpoint.
      * Oversized requests are rejected with 413 before the per-request
@@ -220,7 +328,7 @@ const ConfigSchema = z
      * (Cloudflare Tunnel, Caddy, nginx, ALB) so emitted URLs carry the
      * public `https://` scheme instead of the proxy-to-container `http://`.
      */
-    mcpPublicUrl: z.preprocess(emptyStringAsUndefined, z.url().optional()),
+    mcpPublicUrl: z.preprocess(emptyStringAsUndefined, publicBaseUrl.optional()),
     mcpHttpMaxPortRetries: z.coerce.number().int().min(0).default(15),
     mcpHttpPortRetryDelayMs: envTimerMs(0).default(50),
     mcpStatefulSessionStaleTimeoutMs: envTimerMs(1).default(1_800_000),
@@ -508,6 +616,32 @@ const ConfigSchema = z
     }
   });
 
+/** The `ENVIRONMENT` values, aliases included, under which a Worker honors `DEV_MCP_AUTH_BYPASS`. */
+const NON_PRODUCTION_ENVIRONMENTS: ReadonlySet<string> = new Set([
+  'development',
+  'dev',
+  'testing',
+  'test',
+]);
+
+/**
+ * `ConfigSchema` for a Worker whose env sets no environment. A Worker's
+ * environment is what its `ENVIRONMENT` binding declares (read as `NODE_ENV`)
+ * or a `NODE_ENV` that reaches `process.env`, and `DEV_MCP_AUTH_BYPASS` is
+ * honored only when that declaration is `development` or `testing`;
+ * `ConfigSchema` itself refuses it in `production`.
+ */
+const WorkerConfigWithoutEnvironmentSchema = ConfigSchema.superRefine((data, ctx) => {
+  if (data.devMcpAuthBypass) {
+    ctx.addIssue({
+      code: 'custom',
+      path: ['devMcpAuthBypass'],
+      message:
+        'On Cloudflare Workers, DEV_MCP_AUTH_BYPASS is honored only when ENVIRONMENT is explicitly set to development or testing. Set ENVIRONMENT=development for local development, or unset DEV_MCP_AUTH_BYPASS.',
+    });
+  }
+});
+
 // --- Parsing Logic ---
 const parseConfig = (envOverrides?: Record<string, string | undefined>) => {
   // Lazy .env loading — only in a real Node/Bun process, only once, only when not using overrides
@@ -539,10 +673,8 @@ const parseConfig = (envOverrides?: Record<string, string | undefined>) => {
       name: read('pkg.name', 'PACKAGE_NAME') ?? consumerPkg.name ?? frameworkPkg.name,
       version:
         read('pkg.version', 'PACKAGE_VERSION') ?? consumerPkg.version ?? frameworkPkg.version,
-      description:
-        read('pkg.description', 'PACKAGE_DESCRIPTION') ??
-        consumerPkg.description ??
-        frameworkPkg.description,
+      // No framework fallback: a server with no description of its own advertises none.
+      description: read('pkg.description', 'PACKAGE_DESCRIPTION') ?? consumerPkg.description,
       keywords:
         read('pkg.keywords', 'PACKAGE_KEYWORDS')
           ?.split(',')
@@ -729,7 +861,19 @@ const parseConfig = (envOverrides?: Record<string, string | undefined>) => {
     openrouterAppName: env.OPENROUTER_APP_NAME ?? parsedPkg.name,
   };
 
-  const parsedConfig = ConfigSchema.safeParse(finalRawConfig);
+  /**
+   * A Worker that declares no environment parses against the schema that
+   * requires one for the dev bypass. The declaration is read as `NODE_ENV`;
+   * until a Worker's first request copies its `ENVIRONMENT` binding there, a
+   * `process.env` populated from the bindings holds it as `ENVIRONMENT`.
+   */
+  const schema =
+    runtimeCaps.isWorkerLike &&
+    rawConfig.environment === undefined &&
+    !NON_PRODUCTION_ENVIRONMENTS.has(env.ENVIRONMENT?.toLowerCase() ?? '')
+      ? WorkerConfigWithoutEnvironmentSchema
+      : ConfigSchema;
+  const parsedConfig = schema.safeParse(finalRawConfig);
 
   if (!parsedConfig.success) {
     const issues = toEnvIssues(parsedConfig.error.issues, envVarByPath);

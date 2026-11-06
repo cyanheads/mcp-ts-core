@@ -148,6 +148,24 @@ export interface CreateAppOptions<TSupabaseClient extends object = SupabaseClien
   /** Options affecting the `Context` object passed to handlers. */
   context?: ContextOptions;
   /**
+   * Percent-decode each matched resource URI template variable once before
+   * `params` validation, whether or not the definition declares `params`.
+   * Off by default: a handler receives each variable exactly as the request
+   * URI carries it, so `§ 141.61` arrives as `%C2%A7%20141.61`.
+   *
+   * Decoding inverts the SDK's encoding for the variable's operator:
+   * `decodeURIComponent` for `{v}`, `{.v}`, `{/v}`, `{?v}`, and `{&v}`, and
+   * `decodeURI` for `{+v}` and `{#v}`, which keeps reserved-character escapes
+   * such as `%2F` encoded. Each element of an exploded variable is decoded,
+   * and `+` stays `+`. A malformed escape refuses the read as a `params`
+   * rejection does (`-32007` with `data.issues` naming the variable).
+   * `ctx.uri` and completion callbacks are unchanged.
+   *
+   * Turning this on and deleting a handler's own `decodeURIComponent` are one
+   * change: a handler that keeps decoding decodes twice.
+   */
+  decodeResourceParams?: boolean;
+  /**
    * One-line description shown in client listings and the server card.
    * When set, this takes priority over the `MCP_SERVER_DESCRIPTION` env var
    * and `package.json` `description`. Forwarded to the `McpServer` constructor
@@ -255,7 +273,8 @@ export interface CreateAppOptions<TSupabaseClient extends object = SupabaseClien
    * requirement never refuses a stdio start.
    *
    * Cloudflare Workers are outside this contract: `MCP_SESSION_MODE` is not in
-   * `CORE_ENV_BINDINGS`, so a `[vars]` entry reaches `process.env` only through
+   * `CORE_ENV_BINDINGS`, so on a Worker whose `process.env` is not populated
+   * from its bindings, a `[vars]` entry reaches `process.env` only through
    * `extraEnvBindings`.
    *
    * @example
@@ -577,7 +596,7 @@ export async function composeServices<TSupabaseClient extends object = SupabaseC
     }
     const { createClient } = await import('@supabase/supabase-js').catch(() => {
       throw configurationError(
-        'Install "@supabase/supabase-js" to use Supabase storage: bun add @supabase/supabase-js',
+        'Supabase storage needs the optional peer dependency "@supabase/supabase-js", which is not installed. Add it to the server\'s dependencies.',
       );
     });
     supabaseClient = createClient<Database>(config.supabase.url, config.supabase.serviceRoleKey, {
@@ -670,9 +689,16 @@ export async function composeServices<TSupabaseClient extends object = SupabaseC
     logger,
     storage: storageService,
     exposeStatelessSessionId,
+    ...(options.decodeResourceParams && { decodeResourceParams: true }),
     ...(requestState && { requestState }),
   });
   const promptRegistry = new PromptRegistry(prompts, logger, requestState);
+
+  /**
+   * Resolved once, so `initialize` and every manifest surface (server card,
+   * `GET` on the endpoint, landing page) carry the same description or none.
+   */
+  const serverDescription = description || config.mcpServerDescription;
 
   const createServer: FrameworkServerFactory = (ctx) =>
     createMcpServerInstance({
@@ -681,7 +707,7 @@ export async function composeServices<TSupabaseClient extends object = SupabaseC
       notifier: notify,
       ...(requestState && { requestState }),
       ...(cacheHints && { cacheHints }),
-      ...(description && { description }),
+      ...(serverDescription && { description: serverDescription }),
       ...(extensions && { extensions }),
       ...(icons && { icons }),
       ...(instructions && { instructions }),
@@ -698,7 +724,7 @@ export async function composeServices<TSupabaseClient extends object = SupabaseC
     tools,
     resources,
     prompts,
-    ...(description && { description }),
+    ...(serverDescription && { description: serverDescription }),
     ...(extensions && { extensions }),
     ...(icons && { icons }),
     ...(landing && { landing }),

@@ -22,6 +22,7 @@ import {
   createLandingPageHandler,
   renderLandingPage,
 } from '@/mcp-server/transports/http/landing-page/index.js';
+import { createServerCardHandler } from '@/mcp-server/transports/http/serverCard.js';
 import { MODERN_PROTOCOL_REVISION } from '@/mcp-server/types.js';
 import { ADVERSARIAL_STRINGS } from '@/testing/fuzz.js';
 import { logger } from '@/utils/internal/logger.js';
@@ -1288,6 +1289,33 @@ describe('createLandingPageHandler — memoization when publicUrl is set', () =>
       expect.objectContaining({ extra: expect.objectContaining({ cached: false }) }),
     );
   });
+
+  test.each([
+    ['https://例え.jp/prefix', 'https://xn--r8jz45g.jp/prefix'],
+    ['https://API.Example.com:443/p"q', 'https://api.example.com/p%22q'],
+    ['https://mcp.example.com/prefix/', 'https://mcp.example.com/prefix'],
+  ])(
+    'renders publicUrl %j as the serialized URL the server card carries',
+    async (publicUrl, origin) => {
+      const manifest: ServerManifest = {
+        ...defaultServerManifest,
+        transport: { ...defaultServerManifest.transport, publicUrl },
+      };
+      const app = new Hono();
+      app.get('/', createLandingPageHandler(manifest));
+      app.get('/.well-known/mcp.json', createServerCardHandler(manifest));
+
+      const page = await (await app.fetch(new Request('http://internal.container/'))).text();
+      const cardResponse = await app.fetch(
+        new Request('http://internal.container/.well-known/mcp.json'),
+      );
+      const card = (await cardResponse.json()) as { endpoints: { streamable_http: string } };
+
+      expect(card.endpoints.streamable_http).toBe(`${origin}/mcp`);
+      expect(page).toContain(`${origin}/mcp`);
+      expect(page).toContain(`<link rel="canonical" href="${origin}/" />`);
+    },
+  );
 
   test('precomputed degraded body still omits tool inventory', async () => {
     const manifest: ServerManifest = {

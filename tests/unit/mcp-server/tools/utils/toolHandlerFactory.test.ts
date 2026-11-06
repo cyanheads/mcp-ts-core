@@ -11,7 +11,14 @@ import type {
   ClientCapabilities,
   ContentBlock,
 } from '@modelcontextprotocol/server';
-import { inputRequired, SdkError, SdkErrorCode } from '@modelcontextprotocol/server';
+import {
+  inputRequired,
+  ProtocolError,
+  ResourceNotFoundError,
+  SdkError,
+  SdkErrorCode,
+  UrlElicitationRequiredError,
+} from '@modelcontextprotocol/server';
 import { AjvJsonSchemaValidator } from '@modelcontextprotocol/server/validators/ajv';
 import fc from 'fast-check';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
@@ -125,6 +132,8 @@ import {
 } from '@/mcp-server/tools/utils/toolOutputSchema.js';
 import { buildToolErrorResult } from '@/mcp-server/tools/utils/toolResult.js';
 import { ErrorHandler } from '@/utils/internal/error-handler/errorHandler.js';
+import { measureToolExecution } from '@/utils/internal/performance.js';
+import { TOOL_FAILURE_PAYLOAD_MESSAGE_PREFIX } from '@/utils/internal/telemetryMessages.js';
 import { fetchWithTimeout } from '@/utils/network/fetchWithTimeout.js';
 import { createPacer } from '@/utils/network/pacer.js';
 
@@ -2886,6 +2895,140 @@ describe('createToolHandler', () => {
 
       const text = (firstBlock(result) as { text: string }).text;
       expect(text).toBe(`Error: Boom\n\n(request ${REQUEST_ID})`);
+    });
+  });
+
+  describe('an SDK ProtocolError the handler throws (#828)', () => {
+    const elicitations = [
+      {
+        mode: 'url' as const,
+        message: 'Sign in to continue.',
+        url: 'https://example.com/sign-in',
+        elicitationId: 'e1',
+      },
+    ];
+
+    /** A tool whose handler throws `thrown()`. */
+    const throwing = (thrown: () => unknown) =>
+      createToolHandler(
+        tool('protocol_error_tool', {
+          description: 'Throws an SDK error.',
+          input: z.object({}),
+          output: z.object({ ok: z.boolean().describe('Never returned.') }),
+          handler: () => {
+            throw thrown();
+          },
+        }) as AnyToolDefinition,
+        services,
+        notifiers,
+      );
+
+    /** The `Error in tool:` records the call wrote, as `[level, message, errorCode]`. */
+    const errorRecords = () =>
+      (['error', 'notice', 'info'] as const).flatMap((level) =>
+        mockLogger[level].mock.calls
+          .filter(([message]) => String(message).startsWith('Error in tool:'))
+          .map(([message, context]) => [
+            level,
+            message,
+            (context as { extra: { errorCode: unknown } }).extra.errorCode,
+          ]),
+      );
+
+    it('keeps its code, message, and object data in structuredContent.error, with the request id', async () => {
+      const result = await throwing(() => new ProtocolError(-32099, 'custom', { detail: 1 }))(
+        {},
+        makeServerContext(),
+      );
+
+      expect(result.isError).toBe(true);
+      expect(result.structuredContent).toEqual({
+        error: { code: -32099, message: 'custom', data: { detail: 1, requestId: REQUEST_ID } },
+      });
+      expect((firstBlock(result) as { text: string }).text).toBe(
+        `Error: custom\n\n(request ${REQUEST_ID})`,
+      );
+      expect(errorRecords()).toEqual([
+        ['error', 'Error in tool:protocol_error_tool: custom', -32099],
+      ]);
+    });
+
+    it('leaves the measured region as the McpError it stands for, which the completion record and span classify', async () => {
+      let leftMeasurement: unknown;
+      vi.mocked(measureToolExecution).mockImplementationOnce(async (fn, context) => {
+        try {
+          return await fn(context as never, () => {});
+        } catch (error) {
+          leftMeasurement = error;
+          throw error;
+        }
+      });
+
+      await throwing(() => new ResourceNotFoundError('sdk://gone'))({}, makeServerContext());
+
+      expect(leftMeasurement).toBeInstanceOf(McpError);
+      expect(ErrorHandler.determineErrorCode(leftMeasurement)).toBe(JsonRpcErrorCode.InvalidParams);
+    });
+
+    it('hands a UrlElicitationRequiredError back to the SDK after logging it, and writes no failure payload', async () => {
+      Object.assign(mockConfig, {
+        logToolFailurePayloads: true,
+        logToolFailurePayloadMaxBytes: 4096,
+      });
+      try {
+        const rejection = await throwing(() => new UrlElicitationRequiredError(elicitations))(
+          {},
+          makeServerContext(),
+        ).then(
+          () => expect.unreachable('expected the call to reject'),
+          (error: unknown) => error,
+        );
+
+        expect(rejection).toBeInstanceOf(ProtocolError);
+        expect(rejection).toMatchObject({
+          code: -32042,
+          message: 'URL elicitation required',
+          data: { elicitations, requestId: REQUEST_ID },
+        });
+        expect(errorRecords()).toEqual([
+          ['error', 'Error in tool:protocol_error_tool: URL elicitation required', -32042],
+        ]);
+        const payloads = mockLogger.error.mock.calls.filter(([message]) =>
+          String(message).startsWith(TOOL_FAILURE_PAYLOAD_MESSAGE_PREFIX),
+        );
+        expect(payloads).toEqual([]);
+      } finally {
+        Object.assign(mockConfig, {
+          logToolFailurePayloads: undefined,
+          logToolFailurePayloadMaxBytes: undefined,
+        });
+      }
+    });
+
+    it('keeps an McpError a handler built with -32042 a tool result', async () => {
+      const result = await throwing(
+        () => new McpError(-32042 as JsonRpcErrorCode, 'Sign in first.', { elicitations }),
+      )({}, makeServerContext());
+
+      expect(result.isError).toBe(true);
+      expect(envelope(result)).toEqual({
+        code: -32042,
+        message: 'Sign in first.',
+        data: { elicitations, requestId: REQUEST_ID },
+      });
+    });
+
+    it('settles a UrlElicitationRequiredError thrown after the abort as RequestCancelled', async () => {
+      const result = await throwing(() => new UrlElicitationRequiredError(elicitations))(
+        {},
+        makeServerContext({ signal: AbortSignal.abort('client disconnected') }),
+      );
+
+      expect(result.isError).toBe(true);
+      expect(envelope(result)).toMatchObject({
+        code: JsonRpcErrorCode.RequestCancelled,
+        message: 'URL elicitation required',
+      });
     });
   });
 

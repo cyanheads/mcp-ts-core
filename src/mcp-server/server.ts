@@ -37,8 +37,10 @@ export interface McpServerDeps {
   cacheHints?: CacheHints;
   config: AppConfig;
   /**
-   * One-line description forwarded to `new McpServer({ serverInfo })`.
-   * Explicit option wins over `MCP_SERVER_DESCRIPTION` / `package.json`.
+   * One-line description forwarded to `new McpServer({ serverInfo })` as
+   * given; absent, `serverInfo` carries none. `composeServices` resolves it
+   * (the `createApp` option, else `MCP_SERVER_DESCRIPTION`, else
+   * `package.json`) and hands the same value to the server manifest.
    */
   description?: string;
   /**

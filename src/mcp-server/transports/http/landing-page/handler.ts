@@ -57,17 +57,21 @@ const CONTENT_SECURITY_POLICY = [
  * so both page variants (full and degraded) are rendered once at factory
  * time and served from memory on each request — the render pipeline then
  * only runs when the origin must be derived per-request from
- * `new URL(c.req.url).origin`.
+ * `new URL(c.req.url).origin`. Either way the base URL is
+ * {@link resolvePublicOrigin}'s serialization, the one the server card, the
+ * protected-resource metadata, and the 401 challenge carry.
  */
 export function createLandingPageHandler(
   manifest: ServerManifest,
   authStrategy?: AuthStrategy | null,
 ) {
   const { publicUrl } = manifest.transport;
-  const precomputed = publicUrl
+  // With a public URL set, `resolvePublicOrigin` never reads its request URL argument.
+  const publicOrigin = publicUrl && resolvePublicOrigin(publicUrl, publicUrl);
+  const precomputed = publicOrigin
     ? {
-        full: renderLandingPage(manifest, publicUrl, false),
-        degraded: renderLandingPage(manifest, publicUrl, true),
+        full: renderLandingPage(manifest, publicOrigin, false),
+        degraded: renderLandingPage(manifest, publicOrigin, true),
       }
     : null;
 
@@ -81,7 +85,6 @@ export function createLandingPageHandler(
     const context = requestContextService.createRequestContext({
       operation: 'landingPageHandler',
     });
-    const baseUrl = resolvePublicOrigin(publicUrl, c.req.url);
 
     let isAuthenticated = false;
     if (verifier) {
@@ -108,7 +111,7 @@ export function createLandingPageHandler(
       ? degraded
         ? precomputed.degraded
         : precomputed.full
-      : renderLandingPage(manifest, baseUrl, degraded);
+      : renderLandingPage(manifest, resolvePublicOrigin(publicUrl, c.req.url), degraded);
 
     logger.debug(
       'Serving landing page.',

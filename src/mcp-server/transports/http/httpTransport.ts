@@ -354,7 +354,7 @@ export async function createHttpApp<TBindings extends object = HonoNodeBindings>
       logger.debug('OTel request tracing middleware enabled for MCP endpoint.', transportContext);
     } catch {
       logger.warning(
-        '@hono/otel not installed — HTTP instrumentation disabled. Install with: bun add @hono/otel',
+        "@hono/otel is not installed, so HTTP instrumentation is disabled. Add it to the server's dependencies to enable it.",
         transportContext,
       );
     }

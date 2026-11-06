@@ -528,8 +528,10 @@ function normalizeEnvExample(
 export interface BuildServerManifestInput {
   config: AppConfig;
   /**
-   * Explicit description — overrides `config.mcpServerDescription`
-   * (`MCP_SERVER_DESCRIPTION` / `package.json` `description`).
+   * The server's description, used as given and never read from `config`:
+   * `composeServices` resolves it once (the `createApp` option, else
+   * `config.mcpServerDescription`) and hands the same value to
+   * `initialize`, so the two cannot disagree. Absent, the manifest has none.
    */
   description?: string;
   extensions?: Record<string, object>;
@@ -654,12 +656,7 @@ export function buildServerManifest(input: BuildServerManifestInput): ServerMani
     server: {
       name: config.mcpServerName,
       version: config.mcpServerVersion,
-      // Explicit option wins; fall back to env/package.json config value.
-      ...(description
-        ? { description }
-        : config.mcpServerDescription
-          ? { description: config.mcpServerDescription }
-          : {}),
+      ...(description && { description }),
       ...(config.mcpServerKeywords?.length && { keywords: config.mcpServerKeywords }),
       ...(config.mcpServerHomepage && { homepage: config.mcpServerHomepage }),
       ...(title && { title }),

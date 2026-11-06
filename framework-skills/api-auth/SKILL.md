@@ -4,7 +4,7 @@ description: >
   Authentication, authorization, and multi-tenancy patterns for `@cyanheads/mcp-ts-core`. Use when implementing auth scopes on tools/resources, configuring auth modes (none/jwt/oauth), working with JWT/OAuth env vars, or understanding how tenantId flows through ctx.state.
 metadata:
   author: cyanheads
-  version: "1.8"
+  version: "1.9"
   audience: external
   type: reference
 ---
@@ -80,11 +80,11 @@ Set via `MCP_AUTH_MODE` environment variable.
 | `MCP_AUTH_SECRET_KEY` | Yes (unless bypass) | Signing secret for HS256 JWT verification. Must be ≥ 32 characters. |
 | `MCP_JWT_EXPECTED_AUDIENCE` | No (recommended) | Expected `aud` claim. Unset, JWT mode accepts any token signed with the key whatever its `aud`, so a token minted for another service that shares the key is accepted; when a key is loaded without it, startup logs one `warning` naming this variable. |
 | `MCP_JWT_EXPECTED_ISSUER` | No | Expected `iss` claim. Any holder of a shared HS256 key can write any `iss`, so pair it with `MCP_JWT_EXPECTED_AUDIENCE` rather than setting it alone. |
-| `DEV_MCP_AUTH_BYPASS` | No | Set to `true` to skip JWT verification in development. Blocked in `NODE_ENV=production`. |
+| `DEV_MCP_AUTH_BYPASS` | No | Set to `true` to skip JWT verification in development. Blocked in `NODE_ENV=production`. On Cloudflare Workers, honored only when the environment is explicitly `development` or `testing`, declared by `ENVIRONMENT` or by a `NODE_ENV` that reaches `process.env`. |
 | `DEV_MCP_CLIENT_ID` | No | Client ID injected when bypass is active (default: `'dev-client-id'`). |
 | `DEV_MCP_SCOPES` | No | Comma-separated scopes injected when bypass is active (default: `['dev-scope']`). |
 
-**Important:** With `MCP_AUTH_MODE=jwt`, a missing `MCP_AUTH_SECRET_KEY` is a **fatal startup error** unless `DEV_MCP_AUTH_BYPASS=true` is explicitly set. Setting `DEV_MCP_AUTH_BYPASS` in production (`NODE_ENV=production`) is rejected at config parse time.
+**Important:** With `MCP_AUTH_MODE=jwt`, a missing `MCP_AUTH_SECRET_KEY` is a **fatal startup error** unless `DEV_MCP_AUTH_BYPASS=true` is explicitly set. Setting `DEV_MCP_AUTH_BYPASS` in production (`NODE_ENV=production`) is rejected at config parse time. On Cloudflare Workers, `DEV_MCP_AUTH_BYPASS` is honored only when the Worker's environment is explicitly `development` or `testing`, declared by the `ENVIRONMENT` binding or by a `NODE_ENV` that reaches `process.env`: with the flag on and neither set, initialization fails with a `ConfigurationError` naming `DEV_MCP_AUTH_BYPASS` and `ENVIRONMENT`, and the Worker serves nothing. For local development, set `ENVIRONMENT=development` beside the flag.
 
 ### OAuth config
 

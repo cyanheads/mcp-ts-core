@@ -699,14 +699,14 @@ describe('buildServerManifest — server identity fields (#213)', () => {
     expect(manifest.server.description).toBe('from option');
   });
 
-  test('config.mcpServerDescription is used as fallback when no explicit description', () => {
+  test('takes the description as given, never from config.mcpServerDescription', () => {
     const manifest = buildServerManifest({
       config: stubConfig({ mcpServerDescription: 'from config' }),
       tools: [],
       resources: [],
       prompts: [],
     });
-    expect(manifest.server.description).toBe('from config');
+    expect(manifest.server).not.toHaveProperty('description');
   });
 
   test('description is absent when neither explicit option nor config value is set', () => {

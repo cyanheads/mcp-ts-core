@@ -10,7 +10,10 @@ import {
   isCompletable,
   type JSONRPCMessage,
   McpServer,
+  ProtocolError,
+  ResourceNotFoundError,
   type ServerContext,
+  UrlElicitationRequiredError,
 } from '@modelcontextprotocol/server';
 import { serveStdio } from '@modelcontextprotocol/server/stdio';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -576,6 +579,98 @@ describe('PromptRegistry', () => {
       expect(result.value).toMatchObject({ resultType: 'input_required' });
       expect(result.errorRecords).toEqual([]);
       expect(result.cancelledRecords).toEqual([]);
+    });
+  });
+
+  describe('an SDK ProtocolError generate() throws (#828)', () => {
+    afterEach(() => {
+      vi.restoreAllMocks();
+    });
+
+    const elicitations = [
+      {
+        mode: 'url' as const,
+        message: 'Sign in to continue.',
+        url: 'https://example.com/sign-in',
+        elicitationId: 'e1',
+      },
+    ];
+
+    /** Registers an argless prompt throwing `thrown()` and calls it under `signal`. */
+    async function callThrowing(thrown: () => unknown, signal = new AbortController().signal) {
+      const errorSpy = vi.spyOn(logger, 'error').mockImplementation(() => {});
+      const infoSpy = vi.spyOn(logger, 'info').mockImplementation(() => {});
+      const def = prompt('protocol_prompt', {
+        description: 'Throws an SDK error.',
+        generate: () => {
+          throw thrown();
+        },
+      });
+      await new PromptRegistry([def], logger).registerAll(mockServer);
+      const handler = mockServer.registerPrompt.mock.calls[0][2] as (
+        ctx: unknown,
+      ) => Promise<unknown>;
+      const rejection = await handler({ mcpReq: { id: 'p-1', signal } }).then(
+        () => expect.unreachable('expected prompts/get to reject'),
+        (error: unknown) => error as { code: number; data?: Record<string, unknown> },
+      );
+      const completion = infoSpy.mock.calls.findLast(
+        ([msg]) => msg === TELEMETRY_LOG_MESSAGES.promptGenerationFinished,
+      )?.[1] as { extra: { metrics: Record<string, unknown> } } | undefined;
+      const records = errorSpy.mock.calls
+        .filter(([msg]) => String(msg).startsWith('Error in prompt:protocol_prompt'))
+        .map(
+          ([, context]) =>
+            context as unknown as { requestId: string; extra: { errorCode: unknown } },
+        );
+      return { rejection, metrics: completion?.extra.metrics, records };
+    }
+
+    it('answers with its code, message, and object data plus the request id, the code on both records', async () => {
+      const { rejection, metrics, records } = await callThrowing(
+        () => new ProtocolError(-32099, 'custom', { detail: 1 }),
+      );
+
+      expect(rejection).toBeInstanceOf(McpError);
+      expect(rejection).toMatchObject({ code: -32099, message: 'custom' });
+      expect(rejection.data).toEqual({ detail: 1, requestId: records[0]?.requestId });
+      expect(records.map((record) => record.extra.errorCode)).toEqual([-32099]);
+      expect(metrics).toMatchObject({ isSuccess: false, errorCode: '-32099' });
+    });
+
+    it('answers a ResourceNotFoundError with its uri and the request id', async () => {
+      const { rejection, records } = await callThrowing(
+        () => new ResourceNotFoundError('sdk://gone'),
+      );
+
+      expect(rejection.code).toBe(JsonRpcErrorCode.InvalidParams);
+      expect(rejection.data).toEqual({ uri: 'sdk://gone', requestId: records[0]?.requestId });
+    });
+
+    it('hands a UrlElicitationRequiredError back to the SDK as a ProtocolError after logging it', async () => {
+      const { rejection, metrics, records } = await callThrowing(
+        () => new UrlElicitationRequiredError(elicitations),
+      );
+
+      expect(rejection).toBeInstanceOf(ProtocolError);
+      expect(rejection).not.toBeInstanceOf(McpError);
+      expect(rejection).toMatchObject({
+        code: -32042,
+        message: 'URL elicitation required',
+        data: { elicitations, requestId: records[0]?.requestId },
+      });
+      expect(metrics).toMatchObject({ isSuccess: false, errorCode: '-32042' });
+    });
+
+    it('settles one thrown after the abort as RequestCancelled', async () => {
+      const { rejection, metrics } = await callThrowing(
+        () => new UrlElicitationRequiredError(elicitations),
+        AbortSignal.abort('client disconnected'),
+      );
+
+      expect(rejection).toBeInstanceOf(McpError);
+      expect(rejection.code).toBe(JsonRpcErrorCode.RequestCancelled);
+      expect(metrics).toMatchObject({ errorCode: String(JsonRpcErrorCode.RequestCancelled) });
     });
   });
 

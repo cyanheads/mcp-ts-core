@@ -9,7 +9,12 @@
  * @module tests/testing/run-tool-contract-parity.test
  */
 
-import type { CallToolResult } from '@modelcontextprotocol/server';
+import {
+  type CallToolResult,
+  ProtocolError,
+  ResourceNotFoundError,
+  UrlElicitationRequiredError,
+} from '@modelcontextprotocol/server';
 import { describe, expect, it } from 'vitest';
 import { z } from 'zod';
 
@@ -234,6 +239,71 @@ describe('runToolContract classification that must not move', () => {
     expect(envelope(helper).code).toBe(envelope(production).code);
     expect(envelope(helper).message).toBe(envelope(production).message);
     expect(envelope(helper).data).toEqual(envelope(production).data);
+  });
+});
+
+// Issue #828 — an SDK ProtocolError keeps its code and data in the helper as in
+// production; a URL elicitation, which production hands back to the SDK, rejects.
+describe('runToolContract SDK ProtocolError', () => {
+  const throwing = (thrown: () => unknown) =>
+    tool('parity_protocol', {
+      description: 'Throws an SDK error.',
+      input: z.object({}),
+      output: z.object({ ok: z.boolean().describe('Never returned.') }),
+      handler: () => {
+        throw thrown();
+      },
+    }) as AnyToolDefinition;
+
+  it.each([
+    [
+      'a ProtocolError with data',
+      () => new ProtocolError(-32099, 'custom', { detail: 1 }),
+      { code: -32099, message: 'custom', data: { detail: 1 } },
+    ],
+    [
+      'a ResourceNotFoundError',
+      () => new ResourceNotFoundError('sdk://gone'),
+      { code: -32602, message: 'Resource not found: sdk://gone', data: { uri: 'sdk://gone' } },
+    ],
+  ])('publishes the production envelope for %s', async (_label, thrown, expected) => {
+    const production = await viaFactory(throwing(thrown), {});
+    const helper = await runToolContract(throwing(thrown), {} as never);
+
+    expect(envelope(production)).toEqual(expected);
+    expect(helper).toEqual(production);
+  });
+
+  it('rejects a UrlElicitationRequiredError with the ProtocolError production hands back, minus its request id', async () => {
+    const elicitations = [
+      {
+        mode: 'url' as const,
+        message: 'Sign in.',
+        url: 'https://example.com/in',
+        elicitationId: 'e1',
+      },
+    ];
+    const definition = throwing(() => new UrlElicitationRequiredError(elicitations));
+
+    const production = (await createToolHandler(
+      definition,
+      services,
+      notifiers,
+    )({}, makeServerContext()).catch((error: unknown) => error)) as ProtocolError;
+    const helper = (await runToolContract(definition, {} as never).catch(
+      (error: unknown) => error,
+    )) as ProtocolError;
+
+    expect(production).toBeInstanceOf(ProtocolError);
+    expect(helper).toBeInstanceOf(ProtocolError);
+    const { requestId, ...data } = production.data as Record<string, unknown>;
+    expect(requestId).toEqual(expect.any(String));
+    expect(data).toEqual({ elicitations });
+    expect([helper.code, helper.message, helper.data]).toEqual([
+      production.code,
+      production.message,
+      data,
+    ]);
   });
 });
 

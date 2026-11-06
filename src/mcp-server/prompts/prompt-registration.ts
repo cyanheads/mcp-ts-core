@@ -19,6 +19,7 @@ import {
   sealSignal,
 } from '@/mcp-server/inputRequired.js';
 import type { AnyPromptDefinition } from '@/mcp-server/prompts/utils/promptDefinition.js';
+import { fromProtocolError, urlElicitationHandback } from '@/mcp-server/protocolError.js';
 import { JsonRpcErrorCode, McpError } from '@/types-global/errors.js';
 import { asRequestCancelled, ErrorHandler } from '@/utils/internal/error-handler/errorHandler.js';
 import { readWireErrorData } from '@/utils/internal/error-handler/helpers.js';
@@ -143,12 +144,14 @@ export class PromptRegistry {
                     // the completion record carries `-32011` for a cancelled
                     // request (#770). An input-required signal leaves with its
                     // `requestState` sealed when a key is configured, so a
-                    // sealing failure is a failed call like any other;
-                    // anything else leaves as itself, never awaited (#697).
+                    // sealing failure is a failed call like any other; an SDK
+                    // `ProtocolError` leaves as the `McpError` it stands for,
+                    // so the record carries its code; anything else leaves as
+                    // itself, never awaited (#697).
                     throw asRequestCancelled(
                       isInputRequiredSignal(error)
                         ? await sealSignal(error, this.requestState, serverContext)
-                        : error,
+                        : fromProtocolError(error),
                       signal,
                     );
                   }
@@ -172,16 +175,21 @@ export class PromptRegistry {
                * and the call's `requestId` (#576) — the same wire shape as
                * tools and resources. That `data` is a copy, left out when it
                * cannot be read (#697), with every field one the wire carries.
+               * A URL elicitation goes back to the SDK as a protocol error,
+               * whose era rule decides what the client receives.
                */
               const handled = ErrorHandler.handleError(error, {
                 operation: `prompt:${promptDef.name}`,
                 context: requestContext,
               });
-              throw new McpError(
-                handled instanceof McpError ? handled.code : JsonRpcErrorCode.InternalError,
-                handled.message,
-                { ...readWireErrorData(error), requestId: requestContext.requestId },
-                { cause: error },
+              throw (
+                urlElicitationHandback(error, requestContext.requestId) ??
+                new McpError(
+                  handled instanceof McpError ? handled.code : JsonRpcErrorCode.InternalError,
+                  handled.message,
+                  { ...readWireErrorData(error), requestId: requestContext.requestId },
+                  { cause: error },
+                )
               );
             }
           },

@@ -41,6 +41,7 @@ import {
   declaredResponses,
   isInputRequiredSignal,
 } from '@/mcp-server/inputRequired.js';
+import { fromProtocolError, urlElicitationHandback } from '@/mcp-server/protocolError.js';
 import { parseToolArguments } from '@/mcp-server/tools/utils/arguments/index.js';
 import type { AnyToolDefinition } from '@/mcp-server/tools/utils/toolDefinition.js';
 import {
@@ -564,7 +565,11 @@ export interface RunToolContractOptions {
  * so the envelope is `InvalidParams` (`-32602`) with the tool-naming message a
  * client receives, not a `ValidationError` the wire never carries. An output
  * that breaks the `output` or `enrichment` schema fails as the factory's
- * `InternalError` (`-32603`) naming that contract.
+ * `InternalError` (`-32603`) naming that contract. An SDK `ProtocolError` the
+ * handler throws keeps its code, message, and object `data`, as in production,
+ * except a URL elicitation (`-32042`): production hands that back to the SDK
+ * as a protocol error, so the runner rejects with the `ProtocolError`
+ * production hands back, minus `data.requestId`.
  *
  * A cancellation settles as it does in production: once `context.signal` has
  * fired, the call returns `RequestCancelled` (`-32011`) whether the handler
@@ -605,8 +610,10 @@ export async function runToolContract<TDefinition extends AnyToolDefinition>(
   } catch (error) {
     const { failure } = resolveDeclaredFailure(
       definition.errors,
-      asRequestCancelled(error, ctx.signal),
+      asRequestCancelled(fromProtocolError(error), ctx.signal),
     );
+    const handback = urlElicitationHandback(failure);
+    if (handback) throw handback;
     return classifyAndBuildToolErrorResult(failure);
   }
 }

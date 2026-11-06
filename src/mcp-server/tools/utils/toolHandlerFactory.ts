@@ -27,6 +27,7 @@ import {
   sealSignal,
 } from '@/mcp-server/inputRequired.js';
 import type { NotifierSources } from '@/mcp-server/notifications.js';
+import { fromProtocolError, urlElicitationHandback } from '@/mcp-server/protocolError.js';
 import { isScopeRefusal, withRequiredScopes } from '@/mcp-server/transports/auth/lib/authUtils.js';
 import { type ErrorContractSeverity, JsonRpcErrorCode, McpError } from '@/types-global/errors.js';
 import { resolvePartialResultKeys } from '@/utils/formatting/partialResult.js';
@@ -78,7 +79,8 @@ export type { NotifierSources } from '@/mcp-server/notifications.js';
  * - Measures execution time
  * - Formats response via `format` or JSON default
  * - Catches errors and returns `isError: true`, counting one raised before the
- *   measured region (the scope check, argument validation) on `mcp.tool.rejections`
+ *   measured region (the scope check, argument validation) on `mcp.tool.rejections`;
+ *   a thrown URL elicitation (`-32042`) is logged, then rethrown for the SDK
  */
 export function createToolHandler(
   def: AnyToolDefinition,
@@ -169,11 +171,13 @@ export function createToolHandler(
             // derived from what leaves this callback (#421). An input-required
             // signal leaves with its `requestState` sealed when a key is
             // configured, so a sealing failure is a failed call like any other;
-            // anything else leaves as itself, never awaited (#697).
+            // an SDK `ProtocolError` leaves as the `McpError` it stands for, so
+            // those two carry its code; anything else leaves as itself, never
+            // awaited (#697).
             throw asRequestCancelled(
               isInputRequiredSignal(error)
                 ? await sealSignal(error, services.requestState, serverContext)
-                : error,
+                : fromProtocolError(error),
               request.signal,
             );
           }
@@ -224,6 +228,14 @@ export function createToolHandler(
         }),
       });
       if (!measured) recordToolRejection(def.name, failure);
+      /**
+       * A URL elicitation goes back to the SDK as a protocol error, whose era
+       * rule decides what the client receives; an `isError` result would strand
+       * its `elicitations` where no client decodes them. It is no
+       * `CallToolResult`, so it writes no failure-payload record.
+       */
+      const handback = urlElicitationHandback(failure, appContext.requestId);
+      if (handback) throw handback;
       const result = classifyAndBuildToolErrorResult(failure, appContext.requestId);
       if (config.logToolFailurePayloads) {
         logFailurePayload(services.logger, def.name, appContext, input, result, severity);

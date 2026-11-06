@@ -2,12 +2,14 @@
  * @fileoverview Unit tests for configuration parsing.
  * @module tests/config/index.test
  */
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
+import { Hono } from 'hono';
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 
+import { resetAppRootCache } from '../../../src/config/appRoot.js';
 import { JsonRpcErrorCode, McpError } from '../../../src/types-global/errors.js';
 
 // Native `process.loadEnvFile()` writes to the live env object, which the
@@ -69,6 +71,40 @@ describe('config parsing', () => {
     process.env.PACKAGE_KEYWORDS = 'health, medical ,epidemiology,';
     const parsed = parseConfig();
     expect(parsed.mcpServerKeywords).toEqual(['health', 'medical', 'epidemiology']);
+  });
+
+  describe('the description comes from the served package or the environment only', () => {
+    const originalArgv1 = process.argv[1] ?? '';
+    let appRoot: string;
+
+    beforeEach(() => {
+      appRoot = realpathSync(mkdtempSync(join(tmpdir(), 'mcp-config-description-')));
+    });
+
+    afterEach(() => {
+      process.argv[1] = originalArgv1;
+      resetAppRootCache();
+      rmSync(appRoot, { force: true, recursive: true });
+    });
+
+    it.each([
+      ['has one', { description: 'The served server.' }, 'The served server.'],
+      ['has none', {}, undefined],
+    ])('reads the description of a served manifest that %s', (_has, fields, expected) => {
+      writeFileSync(
+        join(appRoot, 'package.json'),
+        JSON.stringify({ name: 'served-server', version: '1.0.0', ...fields }),
+      );
+      process.argv[1] = join(appRoot, 'index.js');
+      writeFileSync(process.argv[1], '');
+      resetAppRootCache();
+
+      const parsed = parseConfig({ MCP_SERVER_DESCRIPTION: '', PACKAGE_DESCRIPTION: '' });
+
+      expect(parsed.mcpServerName).toBe('served-server');
+      expect(parsed.pkg.description).toBe(expected);
+      expect(parsed.mcpServerDescription).toBe(expected);
+    });
   });
 
   it('rejects DEV_MCP_AUTH_BYPASS=true in production', () => {
@@ -556,6 +592,62 @@ describe('config parsing', () => {
     consoleSpy.mockRestore();
   });
 
+  describe('MCP_PUBLIC_URL is a base URL every advertised path appends to', () => {
+    it.each([
+      'https://pub.example/prefix',
+      'https://pub.example/prefix/',
+      'http://127.0.0.1:8080',
+      'https://例え.jp',
+      'https://例え.jp/prefix',
+    ])('accepts %j as written', (value) => {
+      expect(parseConfig({ MCP_PUBLIC_URL: value }).mcpPublicUrl).toBe(value);
+    });
+
+    it.each([
+      'https://pub.example/prefix?x=1',
+      'https://pub.example/prefix?',
+      'https://pub.example?x=1',
+      'https://pub.example/prefix#frag',
+      'https://pub.example/prefix#',
+      'https://user:secret@pub.example',
+      'https://user@pub.example',
+      'ftp://pub.example',
+      'javascript:alert(1)',
+      'mailto:a@b.example',
+    ])('rejects %j, naming MCP_PUBLIC_URL without echoing the value', (value) => {
+      const error = rejection({ MCP_PUBLIC_URL: value });
+
+      expect(error.message).toContain('  - MCP_PUBLIC_URL (mcpPublicUrl): ');
+      expect(error.data?.issues).toEqual([
+        expect.objectContaining({ envVar: 'MCP_PUBLIC_URL', path: 'mcpPublicUrl' }),
+      ]);
+      expect(JSON.stringify({ message: error.message, data: error.data })).not.toContain(value);
+    });
+
+    it('keeps user info out of the error and the startup console', () => {
+      process.stdout.isTTY = true;
+      const consoleSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+      let error: unknown;
+      try {
+        parseConfig({ MCP_PUBLIC_URL: 'https://user:secret@pub.example' });
+      } catch (caught) {
+        error = caught;
+      }
+      const printed = JSON.stringify(consoleSpy.mock.calls);
+      consoleSpy.mockRestore();
+
+      expect(error).toBeInstanceOf(McpError);
+      expect(printed).toContain('MCP_PUBLIC_URL');
+      for (const surface of [
+        (error as McpError).message,
+        JSON.stringify((error as McpError).data),
+        printed,
+      ]) {
+        expect(surface).not.toContain('secret');
+      }
+    });
+  });
+
   /** The `ConfigurationError` `parseConfig` throws for `overrides`. */
   function rejection(overrides: Record<string, string>): McpError {
     const consoleSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
@@ -625,6 +717,87 @@ describe('config parsing', () => {
       });
 
       expect(error.message).toContain('  - MCP_AUTH_SECRET_KEY (mcpAuthSecretKey): ');
+    });
+  });
+
+  describe('MCP_HTTP_ENDPOINT_PATH reads as the one path the route and every advertised URL use', () => {
+    const endpointPath = (value: string | undefined) =>
+      parseConfig({ MCP_HTTP_ENDPOINT_PATH: value }).mcpHttpEndpointPath;
+
+    it.each([
+      ['api/mcp', '/api/mcp'],
+      [' /api/mcp ', '/api/mcp'],
+      ['/a/./mcp', '/a/mcp'],
+      ['/a/../mcp', '/mcp'],
+      ['/a/%2E%2E/mcp', '/mcp'],
+      ['/a/b/..', '/a/'],
+      ['/a%7Eb', '/a~b'],
+    ])('normalizes %j to %j', (value, expected) => {
+      expect(endpointPath(value)).toBe(expected);
+    });
+
+    it.each([undefined, '', '   '])('defaults %j to /mcp', (value) => {
+      expect(endpointPath(value)).toBe('/mcp');
+    });
+
+    it.each(['/mcp', '/api/mcp/', '/', '/a%2Fb', '/mcp:v2', '/é', '/a//b', '/a"b'])(
+      'keeps %j as written',
+      (value) => {
+        expect(endpointPath(value)).toBe(value);
+      },
+    );
+
+    // The router reads `%25` as written (Hono's `getPath` shields it from `decodeURI`), so a route registered with it is reached at that path.
+    it.each(['/a%25', '/a%25b', '/a%2541', '/a%2520b', '/a%252Fb'])(
+      'keeps %j, which the router never decodes, as written',
+      (value) => {
+        expect(endpointPath(value)).toBe(value);
+      },
+    );
+
+    it.each(['api/mcp', '/a/%2E%2E/mcp', '/a%7Eb', '/a%2Fb', '/é', '/a%25', '/a%2541', '/a%252Fb'])(
+      'serves %j at the URL a client builds from the path it advertises',
+      async (value) => {
+        const path = endpointPath(value);
+        const app = new Hono().all(path, (c) => c.text('endpoint'));
+
+        const response = await app.request(new URL(path, 'http://127.0.0.1:3010').href);
+
+        expect(response.status).toBe(200);
+      },
+    );
+
+    it.each([
+      '//x',
+      ' //x',
+      '/.//x',
+      'https://host/mcp',
+      'mcp:v2',
+      '/mcp?x=1',
+      '/mcp?',
+      '/mcp#f',
+      '/a b',
+      '/a%20b',
+      '/a\u0001b',
+      '/a\tb',
+      '/a\u007fb',
+      '/a\\b',
+      '/a%zz',
+      '/a%',
+      '*',
+      '/mcp/*',
+      '/a%2Ab',
+      '/{id}',
+      '/a}b',
+      '/mcp/:id',
+      ':id',
+    ])('rejects %j, naming MCP_HTTP_ENDPOINT_PATH', (value) => {
+      const error = rejection({ MCP_HTTP_ENDPOINT_PATH: value });
+
+      expect(error.message).toContain('  - MCP_HTTP_ENDPOINT_PATH (mcpHttpEndpointPath): ');
+      expect(error.data?.issues).toEqual([
+        expect.objectContaining({ envVar: 'MCP_HTTP_ENDPOINT_PATH', path: 'mcpHttpEndpointPath' }),
+      ]);
     });
   });
 
@@ -867,5 +1040,133 @@ describe('.env loading', () => {
     expect(thrown).toBeInstanceOf(Error);
     expect((thrown as McpError).code).toBe(JsonRpcErrorCode.ConfigurationError);
     expect((thrown as McpError).cause).toMatchObject({ code: 'EACCES' });
+  });
+});
+
+describe('on Cloudflare Workers, DEV_MCP_AUTH_BYPASS is honored only with ENVIRONMENT set to development or testing', () => {
+  const RUNTIME_MODULE = '../../../src/utils/internal/runtime.js';
+
+  /** `parseConfig` from a fresh module graph whose runtime detection reports a Worker. */
+  const workerParseConfig = async () => {
+    vi.resetModules();
+    vi.doMock(RUNTIME_MODULE, async (importOriginal) => {
+      const actual =
+        await importOriginal<typeof import('../../../src/utils/internal/runtime.js')>();
+      return { runtimeCaps: { ...actual.runtimeCaps, isWorkerLike: true } };
+    });
+    return (await import('../../../src/config/index.js')).parseConfig;
+  };
+
+  /**
+   * JWT mode with no secret, so a parse that succeeds is one that honored the
+   * bypass. On a Worker, `NODE_ENV` is what the `ENVIRONMENT` binding feeds.
+   */
+  const bypassOn = (nodeEnv: string | undefined) => ({
+    DEV_MCP_AUTH_BYPASS: 'YES',
+    MCP_AUTH_MODE: 'jwt',
+    MCP_AUTH_SECRET_KEY: '',
+    NODE_ENV: nodeEnv,
+  });
+
+  afterEach(() => {
+    vi.doUnmock(RUNTIME_MODULE);
+    vi.resetModules();
+    vi.restoreAllMocks();
+  });
+
+  it.each([
+    ['unset', undefined],
+    ['blank', ''],
+  ])(
+    'refuses the bypass when the environment is %s, naming DEV_MCP_AUTH_BYPASS and ENVIRONMENT',
+    async (_label, nodeEnv) => {
+      const parse = await workerParseConfig();
+      vi.spyOn(console, 'error').mockImplementation(() => {});
+
+      let thrown: unknown;
+      try {
+        parse(bypassOn(nodeEnv));
+      } catch (error) {
+        thrown = error;
+      }
+
+      // A fresh module graph has its own `McpError` class, so match on the code.
+      expect(thrown).toMatchObject({ code: JsonRpcErrorCode.ConfigurationError });
+      const error = thrown as McpError;
+      expect(error.message).toContain('  - DEV_MCP_AUTH_BYPASS (devMcpAuthBypass): ');
+      expect(error.message).toContain('ENVIRONMENT=development');
+      expect(error.data?.issues).toEqual([
+        expect.objectContaining({ envVar: 'DEV_MCP_AUTH_BYPASS', path: 'devMcpAuthBypass' }),
+      ]);
+      expect(JSON.stringify({ message: error.message, data: error.data })).not.toContain('YES');
+    },
+  );
+
+  it.each(['development', 'dev', 'testing', 'test'])(
+    'honors the bypass when the environment is set to %s',
+    async (nodeEnv) => {
+      const parsed = (await workerParseConfig())(bypassOn(nodeEnv));
+
+      expect(parsed.devMcpAuthBypass).toBe(true);
+      expect(parsed.mcpAuthMode).toBe('jwt');
+      expect(parsed.mcpAuthSecretKey).toBeUndefined();
+    },
+  );
+
+  it.each(['development', 'DEV', 'testing', 'test'])(
+    'honors the bypass before NODE_ENV is set when a populated ENVIRONMENT declares %s',
+    async (environment) => {
+      const parsed = (await workerParseConfig())({
+        ...bypassOn(undefined),
+        ENVIRONMENT: environment,
+      });
+
+      expect(parsed.devMcpAuthBypass).toBe(true);
+      expect(parsed.mcpAuthSecretKey).toBeUndefined();
+    },
+  );
+
+  it.each(['production', 'prod', 'staging', ''])(
+    'refuses the bypass before NODE_ENV is set when a populated ENVIRONMENT is %j',
+    async (environment) => {
+      const parse = await workerParseConfig();
+      vi.spyOn(console, 'error').mockImplementation(() => {});
+
+      let thrown: unknown;
+      try {
+        parse({ ...bypassOn(undefined), ENVIRONMENT: environment });
+      } catch (error) {
+        thrown = error;
+      }
+
+      expect(thrown).toMatchObject({ code: JsonRpcErrorCode.ConfigurationError });
+      expect((thrown as McpError).data?.issues).toEqual([
+        expect.objectContaining({ envVar: 'DEV_MCP_AUTH_BYPASS', path: 'devMcpAuthBypass' }),
+      ]);
+    },
+  );
+
+  it.each(['false', ''])(
+    'accepts an unset environment while DEV_MCP_AUTH_BYPASS is %j',
+    async (value) => {
+      const parsed = (await workerParseConfig())({
+        DEV_MCP_AUTH_BYPASS: value,
+        MCP_AUTH_MODE: '',
+        NODE_ENV: undefined,
+      });
+
+      expect(parsed.devMcpAuthBypass).toBe(false);
+      expect(parsed.environment).toBe('development');
+    },
+  );
+
+  it('leaves the bypass and its development default to a runtime that is not a Worker', async () => {
+    const { runtimeCaps } = await import('../../../src/utils/internal/runtime.js');
+    expect(runtimeCaps.isWorkerLike).toBe(false);
+
+    const parsed = parseConfig(bypassOn(undefined));
+
+    expect(parsed.environment).toBe('development');
+    expect(parsed.devMcpAuthBypass).toBe(true);
   });
 });

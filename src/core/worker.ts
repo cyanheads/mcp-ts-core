@@ -22,6 +22,7 @@ import type { Hono } from 'hono';
 import { resetConfig } from '@/config/index.js';
 import { normalizeLogLevelAlias } from '@/config/logLevelAlias.js';
 import { type CreateAppOptions, composeServices } from '@/core/app.js';
+import { CORE_ENV_BINDINGS, type CoreStringBindings } from '@/core/workerEnvBindings.js';
 import { createHttpApp } from '@/mcp-server/transports/http/httpTransport.js';
 import { asError, readField } from '@/utils/internal/error-handler/helpers.js';
 import { logger, type McpLogLevel } from '@/utils/internal/logger.js';
@@ -30,8 +31,13 @@ import { requestContextService, withExtra } from '@/utils/internal/requestContex
 /**
  * Cloudflare Worker Bindings with proper type safety.
  * No index signature — servers extend via intersection types.
+ *
+ * Every string binding is copied into `process.env` for config parsing on each
+ * request, under its own name except `ENVIRONMENT` (→ `NODE_ENV`) and
+ * `LOG_LEVEL` (→ `MCP_LOG_LEVEL`), so it applies whether or not the runtime
+ * populates `process.env` from bindings.
  */
-export interface CloudflareBindings {
+export interface CloudflareBindings extends CoreStringBindings {
   AI?: Ai;
   /**
    * DataCanvas provider type. Surfaced here so an explicit
@@ -41,37 +47,14 @@ export interface CloudflareBindings {
    */
   CANVAS_PROVIDER_TYPE?: string;
   DB?: D1Database;
-  ENVIRONMENT?: string;
   KV_NAMESPACE?: KVNamespace;
-  LOG_LEVEL?: string;
-  LOG_TOOL_FAILURE_PAYLOAD_MAX_BYTES?: string;
-  LOG_TOOL_FAILURE_PAYLOADS?: string;
-  MCP_ALLOWED_ORIGINS?: string;
-  MCP_AUTH_MODE?: string;
-  MCP_AUTH_SECRET_KEY?: string;
-  MCP_PUBLIC_URL?: string;
   /**
    * Opt-in `requestState` sealing key (≥ 32 bytes). Set it as a secret on the
    * Worker: isolates share nothing, so a 2026-07-28 retry lands wherever the
    * platform routes it and verifies only against the same key.
    */
   MCP_REQUEST_STATE_KEY?: string;
-  OAUTH_AUDIENCE?: string;
-  OAUTH_ISSUER_URL?: string;
-  OAUTH_JWKS_URI?: string;
-  OPENROUTER_API_KEY?: string;
-  OTEL_ENABLED?: string;
-  OTEL_EXPORTER_OTLP_METRICS_ENDPOINT?: string;
-  OTEL_EXPORTER_OTLP_TRACES_ENDPOINT?: string;
   R2_BUCKET?: R2Bucket;
-  SPEECH_STT_API_KEY?: string;
-  SPEECH_STT_ENABLED?: string;
-  SPEECH_TTS_API_KEY?: string;
-  SPEECH_TTS_ENABLED?: string;
-  STORAGE_PROVIDER_TYPE?: string;
-  SUPABASE_ANON_KEY?: string;
-  SUPABASE_SERVICE_ROLE_KEY?: string;
-  SUPABASE_URL?: string;
 }
 
 /**
@@ -129,35 +112,6 @@ export interface WorkerHandlerOptions
 
 /** Hono env shape for Workers. */
 type WorkerEnv = { Bindings: CloudflareBindings };
-
-/** Core string bindings injected into process.env for config parsing. */
-const CORE_ENV_BINDINGS: ReadonlyArray<[keyof CloudflareBindings, string]> = [
-  ['ENVIRONMENT', 'NODE_ENV'],
-  ['LOG_LEVEL', 'MCP_LOG_LEVEL'],
-  ['LOG_TOOL_FAILURE_PAYLOADS', 'LOG_TOOL_FAILURE_PAYLOADS'],
-  ['LOG_TOOL_FAILURE_PAYLOAD_MAX_BYTES', 'LOG_TOOL_FAILURE_PAYLOAD_MAX_BYTES'],
-  ['MCP_AUTH_MODE', 'MCP_AUTH_MODE'],
-  ['MCP_AUTH_SECRET_KEY', 'MCP_AUTH_SECRET_KEY'],
-  ['MCP_PUBLIC_URL', 'MCP_PUBLIC_URL'],
-  ['MCP_REQUEST_STATE_KEY', 'MCP_REQUEST_STATE_KEY'],
-  ['OPENROUTER_API_KEY', 'OPENROUTER_API_KEY'],
-  ['SUPABASE_URL', 'SUPABASE_URL'],
-  ['SUPABASE_ANON_KEY', 'SUPABASE_ANON_KEY'],
-  ['SUPABASE_SERVICE_ROLE_KEY', 'SUPABASE_SERVICE_ROLE_KEY'],
-  ['STORAGE_PROVIDER_TYPE', 'STORAGE_PROVIDER_TYPE'],
-  ['CANVAS_PROVIDER_TYPE', 'CANVAS_PROVIDER_TYPE'],
-  ['OAUTH_ISSUER_URL', 'OAUTH_ISSUER_URL'],
-  ['OAUTH_AUDIENCE', 'OAUTH_AUDIENCE'],
-  ['OAUTH_JWKS_URI', 'OAUTH_JWKS_URI'],
-  ['MCP_ALLOWED_ORIGINS', 'MCP_ALLOWED_ORIGINS'],
-  ['SPEECH_TTS_ENABLED', 'SPEECH_TTS_ENABLED'],
-  ['SPEECH_TTS_API_KEY', 'SPEECH_TTS_API_KEY'],
-  ['SPEECH_STT_ENABLED', 'SPEECH_STT_ENABLED'],
-  ['SPEECH_STT_API_KEY', 'SPEECH_STT_API_KEY'],
-  ['OTEL_ENABLED', 'OTEL_ENABLED'],
-  ['OTEL_EXPORTER_OTLP_TRACES_ENDPOINT', 'OTEL_EXPORTER_OTLP_TRACES_ENDPOINT'],
-  ['OTEL_EXPORTER_OTLP_METRICS_ENDPOINT', 'OTEL_EXPORTER_OTLP_METRICS_ENDPOINT'],
-] as const;
 
 /** Core object bindings stored on globalThis for storage/AI providers. */
 const CORE_OBJECT_BINDINGS: ReadonlyArray<[keyof CloudflareBindings, string]> = [

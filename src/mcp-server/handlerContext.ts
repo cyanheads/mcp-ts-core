@@ -32,6 +32,13 @@ import type { RequestContext } from '@/utils/internal/requestContext.js';
 /** Services a handler factory builds `Context` from. */
 export interface HandlerServices {
   /**
+   * When true, the resource factory percent-decodes each matched URI template
+   * variable once, per its operator, before `params` validation. Wired from
+   * `createApp({ decodeResourceParams })`; absent, handlers receive the raw
+   * captures. Resources only.
+   */
+  decodeResourceParams?: boolean;
+  /**
    * When true, surface `ctx.sessionId` even in stateless HTTP mode (per-request
    * generated token). Wired from `createApp({ context: { exposeStatelessSessionId } })`.
    * Default false — `ctx.sessionId` is only set when the session has

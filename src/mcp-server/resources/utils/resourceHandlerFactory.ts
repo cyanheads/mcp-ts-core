@@ -7,7 +7,9 @@
 import {
   type InputRequiredResult,
   ProtocolError,
+  ProtocolErrorCode,
   type ReadResourceResult,
+  ResourceNotFoundError,
   type ServerContext,
   type Variables,
 } from '@modelcontextprotocol/server';
@@ -29,12 +31,12 @@ import {
 } from '@/mcp-server/inputRequired.js';
 import type { NotifierSources } from '@/mcp-server/notifications.js';
 import { parseOutputContract } from '@/mcp-server/outputContract.js';
+import { fromProtocolError, urlElicitationHandback } from '@/mcp-server/protocolError.js';
 import type { AnyResourceDefinition } from '@/mcp-server/resources/utils/resourceDefinition.js';
 import { isScopeRefusal, withRequiredScopes } from '@/mcp-server/transports/auth/lib/authUtils.js';
 import { JsonRpcErrorCode, McpError } from '@/types-global/errors.js';
 import { asRequestCancelled, ErrorHandler } from '@/utils/internal/error-handler/errorHandler.js';
 import {
-  copyFields,
   errorText,
   isInstance,
   loggedStack,
@@ -111,6 +113,95 @@ function observableResourceUri(uri: URL): { uri: string; uriLength?: number } {
 }
 
 // ---------------------------------------------------------------------------
+// Template-variable decoding
+// ---------------------------------------------------------------------------
+
+/**
+ * What a template variable carrying a malformed percent-escape is refused
+ * with. Fixed, so a client reads the same text on every runtime: the engine's
+ * own `URIError` text differs between Bun and Node.
+ */
+const MALFORMED_ESCAPE_MESSAGE =
+  'Invalid percent-encoding: each % must begin a %XX escape of valid UTF-8. Encode a literal % as %25.';
+
+/** The RFC 6570 expression operators the SDK's `UriTemplate` recognizes. */
+const TEMPLATE_OPERATORS = new Set(['+', '#', '.', '/', '?', '&']);
+
+type Decode = (value: string) => string;
+
+/**
+ * Each variable a read's match can carry, mapped to the inverse of the
+ * encoding `UriTemplate.expand` applies for its operator: `decodeURI` for a
+ * `{+v}` or `{#v}` variable, whose reserved-character escapes (`%2F`, `%3F`, …)
+ * stay encoded, and `decodeURIComponent` for every other. Expressions are read
+ * as the SDK parses them, since `UriTemplate` keeps its parsed parts private:
+ * each `{` to the next `}`, the operator its first character, names split on
+ * `,` with `*` dropped. Only names the SDK captures are mapped — every name of
+ * a `?` or `&` expression, the first of any other — and a repeated name takes
+ * its last occurrence, as the match does. One pass over the template.
+ */
+function templateVariableDecoders(uriTemplate: string): Map<string, Decode> {
+  const decoders = new Map<string, Decode>();
+  let open = uriTemplate.indexOf('{');
+  while (open !== -1) {
+    const close = uriTemplate.indexOf('}', open);
+    if (close === -1) break;
+    const expression = uriTemplate.slice(open + 1, close);
+    const first = expression.charAt(0);
+    const operator = TEMPLATE_OPERATORS.has(first) ? first : '';
+    const names = expression
+      .slice(operator.length)
+      .split(',')
+      .map((name) => name.replace('*', '').trim())
+      .filter((name) => name.length > 0);
+    const decode = operator === '+' || operator === '#' ? decodeURI : decodeURIComponent;
+    for (const name of operator === '?' || operator === '&' ? names : names.slice(0, 1)) {
+      decoders.set(name, decode);
+    }
+    open = uriTemplate.indexOf('{', close + 1);
+  }
+  return decoders;
+}
+
+/**
+ * `variables` with each template variable percent-decoded once by its
+ * operator's decoder, and each element of an exploded one, which the SDK has
+ * already split on its raw `,`. A name the template does not capture passes
+ * through as is. Any malformed escape throws one `ZodError` holding an issue
+ * per malformed value, at the variable's path and the element's index, so the
+ * read is refused as the `params` gate refuses a value.
+ */
+function decodeTemplateVariables(
+  variables: Variables,
+  decoders: ReadonlyMap<string, Decode>,
+): Variables {
+  const issues: ZodError['issues'] = [];
+  const decodeAt = (decode: Decode, value: string, path: Array<string | number>): string => {
+    try {
+      return decode(value);
+    } catch {
+      // Both decoders throw only `URIError`, and only for a malformed escape.
+      issues.push({ code: 'custom', path, message: MALFORMED_ESCAPE_MESSAGE });
+      return value;
+    }
+  };
+  const decoded = Object.fromEntries(
+    Object.entries(variables).map(([name, value]) => {
+      const decode = decoders.get(name);
+      if (!decode) return [name, value];
+      return [
+        name,
+        typeof value === 'string'
+          ? decodeAt(decode, value, [name])
+          : value.map((element, index) => decodeAt(decode, element, [name, index])),
+      ];
+    }),
+  );
+  if (issues.length > 0) throw new ZodError(issues);
+  return decoded;
+}
+
+// ---------------------------------------------------------------------------
 // Factory
 // ---------------------------------------------------------------------------
 
@@ -122,6 +213,7 @@ function observableResourceUri(uri: URL): { uri: string; uriLength?: number } {
  * - Creates RequestContext from SDK context (for tracing)
  * - Creates unified Context with `ctx.uri` set
  * - Checks inline `auth` scopes if defined
+ * - Percent-decodes template variables when `decodeResourceParams` is on
  * - Validates params via Zod schema
  * - Formats response via `format` or JSON default
  * - Catches errors, writes one failure record per failed read (#734), and
@@ -141,6 +233,10 @@ export function createResourceHandler(
   const mimeType = def.mimeType ?? 'application/json';
   const formatter = def.format ?? defaultResponseFormatter;
   const resourceName = def.name ?? def.uriTemplate;
+  // Read from the template once, at registration, never per read.
+  const decoders = services.decodeResourceParams
+    ? templateVariableDecoders(def.uriTemplate)
+    : undefined;
 
   return async (
     uri,
@@ -165,7 +261,7 @@ export function createResourceHandler(
 
     /**
      * Set once the read reaches the measured region; a `ZodError` raised before
-     * it is the `params` gate's rejection.
+     * it is the `params` gate's rejection, a malformed template escape included.
      */
     let measured = false;
 
@@ -175,8 +271,9 @@ export function createResourceHandler(
         withRequiredScopes(def.auth, appContext);
       }
 
-      // Validate params via schema if defined
-      const validatedParams = def.params ? def.params.parse(variables) : variables;
+      // Decoded before validation, so `params` checks the value the handler receives.
+      const matched = decoders ? decodeTemplateVariables(variables, decoders) : variables;
+      const validatedParams = def.params ? def.params.parse(matched) : matched;
 
       // Execute the handler AND the response pipeline under one measurement:
       // output-schema validation and `format()` decide the client-visible
@@ -222,13 +319,13 @@ export function createResourceHandler(
             // derived from what leaves this callback (#421). An input-required
             // signal leaves with its `requestState` sealed when a key is
             // configured, so a sealing failure is a failed read like any other;
-            // an SDK `ProtocolError` leaves as the `McpError` it stands for, so
-            // those two carry its code (#583); anything else leaves as itself,
-            // never awaited (#697).
+            // an SDK `ProtocolError` leaves as the `McpError` it stands for, a
+            // legacy not-found as the SDK's own, so those two carry its code
+            // (#583); anything else leaves as itself, never awaited (#697).
             throw asRequestCancelled(
               isInputRequiredSignal(error)
                 ? await sealSignal(error, services.requestState, serverContext)
-                : fromProtocolError(error),
+                : fromProtocolError(fromLegacyNotFound(error)),
               request.signal,
             );
           }
@@ -284,44 +381,42 @@ export function createResourceHandler(
             isScopeRefusal(failure)) && { includeStack: false }),
         },
       );
-      throw withRequestId(failure, appContext.requestId);
+      // A URL elicitation goes back to the SDK, whose era rule decides what the client receives.
+      throw (
+        urlElicitationHandback(failure, appContext.requestId) ??
+        withRequestId(failure, appContext.requestId)
+      );
     }
   };
 }
 
 /**
- * An SDK `ProtocolError` (`ResourceNotFoundError`, `UrlElicitationRequiredError`,
- * …) as an `McpError` with its `code`, `message`, and object `data`, so a read
- * answers with the JSON-RPC error the handler stated, as it does for an
- * `McpError`: a `ResourceNotFoundError` reaches the client exactly as the SDK's
- * own miss does. `data` that is not a plain object is left off, since an
- * `McpError` carries a record. Matched with the SDK's brand-checked
- * `instanceof`, so a copy built by `@modelcontextprotocol/client` counts. The
- * result keeps the thrown error's stack — or none when it cannot be read, so a
- * record written from it never starts in this factory — and takes the thrown
- * error as its `cause`.
+ * A `ProtocolError` carrying the legacy resource-not-found code (`-32002`) and
+ * a string `data.uri`, as the error the SDK's `ProtocolError.fromError` rebuilds
+ * from it: `ResourceNotFoundError(uri, message)`, so the read answers in the
+ * not-found shape — `-32602` with `data` exactly `{ uri }` — that a client
+ * recognizes. The SDK rewrites an outgoing `-32002` to `-32602` and keeps the
+ * `data`, which a client then cannot read as not-found once it carries more
+ * than `uri`. Other keys are dropped, as `fromError` drops them. The result
+ * keeps the thrown error's stack when it can be read.
  *
- * Every other value is returned as is — an `SdkError` included, which the
- * classifier maps — and so is a `ProtocolError` whose `code` cannot be read or
- * is not an integer the SDK would write. Never throws on the thrown error (#697).
+ * Every other value is returned as is, a `-32002` without a string `data.uri`
+ * included. Never throws on the thrown error (#697).
  */
-function fromProtocolError(error: unknown): unknown {
-  if (!isInstance(error, ProtocolError)) return error;
-  const code = readField(error, 'code');
-  if (!Number.isSafeInteger(code)) return error;
+function fromLegacyNotFound(error: unknown): unknown {
+  if (
+    !isInstance(error, ProtocolError) ||
+    readField(error, 'code') !== ProtocolErrorCode.ResourceNotFound
+  ) {
+    return error;
+  }
   const data = readField(error, 'data');
-  const converted = new McpError(
-    code as JsonRpcErrorCode,
-    errorText(readField(error, 'message')),
-    typeof data === 'object' && data !== null && !isInstance(data, Array)
-      ? copyFields(data as Record<string, unknown>)
-      : undefined,
-    { cause: error },
-  );
+  const uri = typeof data === 'object' && data !== null ? readField(data, 'uri') : undefined;
+  if (typeof uri !== 'string' || uri === UNREADABLE) return error;
+  const notFound = new ResourceNotFoundError(uri, errorText(readField(error, 'message')));
   const stack = readField(error, 'stack');
-  if (typeof stack === 'string' && stack !== UNREADABLE) converted.stack = stack;
-  else delete converted.stack;
-  return converted;
+  if (typeof stack === 'string' && stack !== UNREADABLE) notFound.stack = stack;
+  return notFound;
 }
 
 /**

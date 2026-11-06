@@ -13,5 +13,5 @@
  */
 export function resolvePublicOrigin(publicUrl: string | undefined, requestUrl: string): string {
   const url = publicUrl === undefined ? new URL(requestUrl).origin : new URL(publicUrl).href;
-  return url.replace(/\/$/, '');
+  return url.replace(/\/+$/, '');
 }

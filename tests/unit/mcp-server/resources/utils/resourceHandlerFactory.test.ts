@@ -158,6 +158,55 @@ const services: HandlerServices = {
 
 const notifiers: NotifierSources = {};
 
+type WireResponse = { result?: { contents: unknown[] }; error?: unknown };
+
+/**
+ * Reads each of `uris` from `def` served on a real `McpServer` through a real
+ * `Client`, so the SDK matches each URI and hands the factory its raw
+ * captures. Returns each response as the server wrote it — JSON round-tripped,
+ * `id` and `jsonrpc` dropped — and what each `readResource` call resolved or
+ * rejected with.
+ */
+async function serveAndRead(
+  def: AnyResourceDefinition,
+  uris: string[],
+  handlerServices: HandlerServices = services,
+): Promise<{ responses: WireResponse[]; settled: unknown[] }> {
+  const server = new McpServer(
+    { name: 'resource-wire', version: '0.0.0' },
+    { capabilities: { resources: {} } },
+  );
+  server.registerResource(
+    def.name ?? def.uriTemplate,
+    new ResourceTemplate(def.uriTemplate, { list: undefined }),
+    { mimeType: 'application/json' },
+    createResourceHandler(def, handlerServices, notifiers),
+  );
+  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+  const responses: WireResponse[] = [];
+  let capturing = false;
+  const send = serverTransport.send.bind(serverTransport);
+  serverTransport.send = (message, options) => {
+    const { id: _id, jsonrpc: _jsonrpc, ...written } = JSON.parse(JSON.stringify(message));
+    if (capturing && ('result' in written || 'error' in written)) responses.push(written);
+    return send(message, options);
+  };
+  const client = new Client({ name: 'resource-wire-client', version: '0.0.0' });
+  await server.connect(serverTransport);
+  await client.connect(clientTransport);
+  capturing = true;
+  try {
+    const settled: unknown[] = [];
+    for (const uri of uris) {
+      settled.push(await client.readResource({ uri }).catch((error: unknown) => error));
+    }
+    return { responses, settled };
+  } finally {
+    await client.close();
+    await server.close();
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -967,6 +1016,317 @@ describe('createResourceHandler', () => {
   });
 
   // -----------------------------------------------------------------------
+  // Template-variable decoding
+  // -----------------------------------------------------------------------
+
+  describe('template-variable decoding (#490)', () => {
+    const MALFORMED =
+      'Invalid percent-encoding: each % must begin a %XX escape of valid UTF-8. Encode a literal % as %25.';
+
+    /**
+     * Each response {@link serveAndRead} writes for `uris`, read from a resource
+     * whose handler answers with the params it was handed and `ctx.uri.href`.
+     */
+    async function readOnTheWire(
+      uriTemplate: string,
+      uris: string[],
+      options: { decode?: boolean; params?: AnyResourceDefinition['params'] } = {},
+    ): Promise<WireResponse[]> {
+      const def: AnyResourceDefinition = {
+        uriTemplate,
+        name: 'decoding',
+        description: 'Answers with what it was handed.',
+        ...(options.params && { params: options.params }),
+        handler: (params, ctx) => ({ params, uri: ctx.uri?.href }),
+      };
+      const { responses } = await serveAndRead(
+        def,
+        uris,
+        options.decode === undefined
+          ? services
+          : { ...services, decodeResourceParams: options.decode },
+      );
+      return responses;
+    }
+
+    /** The one read's `contents` on the wire. */
+    async function readContentsOnTheWire(
+      uriTemplate: string,
+      uri: string,
+      options: Parameters<typeof readOnTheWire>[2] = {},
+    ): Promise<unknown[] | undefined> {
+      const [response] = await readOnTheWire(uriTemplate, [uri], options);
+      expect(response?.error).toBeUndefined();
+      return response?.result?.contents;
+    }
+
+    /** The `contents` a read answers with when the handler was handed `params`. */
+    const answered = (href: string, params: unknown) => [
+      {
+        uri: href,
+        mimeType: 'application/json',
+        text: JSON.stringify({ params, uri: href }, null, 2),
+      },
+    ];
+
+    /** A `params` schema accepting each variable of `variables` as its SDK shape. */
+    const paramsFor = (variables: Record<string, unknown>) =>
+      z.object(
+        Object.fromEntries(
+          Object.keys(variables).map((name) => [
+            name,
+            z.union([z.string(), z.array(z.string())]).describe(name),
+          ]),
+        ),
+      );
+
+    /** Template, read URI, `ctx.uri.href`, the raw captures, and those captures decoded once. */
+    const CASES: Array<
+      [
+        label: string,
+        uriTemplate: string,
+        uri: string,
+        href: string,
+        raw: Record<string, string | string[]>,
+        decoded: Record<string, string | string[]>,
+      ]
+    > = [
+      [
+        '{id} sent encoded',
+        'example://item/{id}',
+        'example://item/%C2%A7%20141.61',
+        'example://item/%C2%A7%20141.61',
+        { id: '%C2%A7%20141.61' },
+        { id: '§ 141.61' },
+      ],
+      [
+        '{id} sent raw',
+        'example://item/{id}',
+        'example://item/§ 141.61',
+        'example://item/%C2%A7%20141.61',
+        { id: '%C2%A7%20141.61' },
+        { id: '§ 141.61' },
+      ],
+      [
+        '{id} holding an escaped %',
+        'example://item/{id}',
+        'example://item/100%2541',
+        'example://item/100%2541',
+        { id: '100%2541' },
+        { id: '100%41' },
+      ],
+      [
+        '{id} holding %2F and +',
+        'example://item/{id}',
+        'example://item/a%2Fb+c',
+        'example://item/a%2Fb+c',
+        { id: 'a%2Fb+c' },
+        { id: 'a/b+c' },
+      ],
+      [
+        '{ids*} exploded',
+        'example://ids/{ids*}',
+        'example://ids/a%20b,c%2Cd',
+        'example://ids/a%20b,c%2Cd',
+        { ids: ['a%20b', 'c%2Cd'] },
+        { ids: ['a b', 'c,d'] },
+      ],
+      [
+        '{ids*} with one element',
+        'example://ids/{ids*}',
+        'example://ids/c%2Cd',
+        'example://ids/c%2Cd',
+        { ids: 'c%2Cd' },
+        { ids: 'c,d' },
+      ],
+      [
+        '{+path} reserved expansion',
+        'example://file/{+path}',
+        'example://file/a%2Fb/my%20f',
+        'example://file/a%2Fb/my%20f',
+        { path: 'a%2Fb/my%20f' },
+        { path: 'a%2Fb/my f' },
+      ],
+      [
+        '{#frag} fragment expansion',
+        'example://doc{#frag}',
+        'example://doc#a%2Fb%20c',
+        'example://doc#a%2Fb%20c',
+        { frag: '#a%2Fb%20c' },
+        { frag: '#a%2Fb c' },
+      ],
+      [
+        '{/seg} path segment',
+        'example://seg{/seg}',
+        'example://seg/x%20y%2Fz',
+        'example://seg/x%20y%2Fz',
+        { seg: 'x%20y%2Fz' },
+        { seg: 'x y/z' },
+      ],
+      [
+        '{.ext} label',
+        'example://file{.ext}',
+        'example://file.tar%20gz',
+        'example://file.tar%20gz',
+        { ext: 'tar%20gz' },
+        { ext: 'tar gz' },
+      ],
+      [
+        '{?q} query',
+        'example://q{?q}',
+        'example://q?q=a%20b+c',
+        'example://q?q=a%20b+c',
+        { q: 'a%20b+c' },
+        { q: 'a b+c' },
+      ],
+      [
+        '{?a}{&b} query continuation',
+        'example://q{?a}{&b}',
+        'example://q?a=x%26y&b=y%20z',
+        'example://q?a=x%26y&b=y%20z',
+        { a: 'x%26y', b: 'y%20z' },
+        { a: 'x&y', b: 'y z' },
+      ],
+    ];
+
+    it.each(CASES)(
+      'hands %s over raw while the switch is unset or false',
+      async (_label, uriTemplate, uri, href, raw) => {
+        for (const decode of [undefined, false]) {
+          const options = decode === undefined ? {} : { decode };
+          expect(await readContentsOnTheWire(uriTemplate, uri, options)).toStrictEqual(
+            answered(href, raw),
+          );
+          expect(
+            await readContentsOnTheWire(uriTemplate, uri, { ...options, params: paramsFor(raw) }),
+          ).toStrictEqual(answered(href, raw));
+        }
+      },
+    );
+
+    it.each(CASES)(
+      'decodes %s once with the switch set, with or without params, ctx.uri unchanged',
+      async (_label, uriTemplate, uri, href, _raw, decoded) => {
+        expect(await readContentsOnTheWire(uriTemplate, uri, { decode: true })).toStrictEqual(
+          answered(href, decoded),
+        );
+        expect(
+          await readContentsOnTheWire(uriTemplate, uri, {
+            decode: true,
+            params: paramsFor(decoded),
+          }),
+        ).toStrictEqual(answered(href, decoded));
+      },
+    );
+
+    it('validates params against the decoded value', async () => {
+      const params = z.object({
+        id: z
+          .string()
+          .regex(/^§ \d+/)
+          .describe('Section number'),
+      });
+
+      const [decodedRead, rawRead] = [
+        await readOnTheWire('example://item/{id}', ['example://item/§ 141.61'], {
+          decode: true,
+          params,
+        }),
+        await readOnTheWire('example://item/{id}', ['example://item/§ 141.61'], { params }),
+      ];
+
+      expect(decodedRead[0]?.result?.contents).toStrictEqual(
+        answered('example://item/%C2%A7%20141.61', { id: '§ 141.61' }),
+      );
+      expect(rawRead[0]?.error).toMatchObject({
+        code: JsonRpcErrorCode.ValidationError,
+        data: { issues: [{ path: ['id'] }] },
+      });
+    });
+
+    /** The read's failure record, after asserting it wrote exactly one, at notice. */
+    function onlyNoticeRecord(): { message: string; record: { extra: Record<string, any> } } {
+      const levels = ['debug', 'info', 'notice', 'warning', 'error', 'crit', 'emerg'] as const;
+      const records = levels.flatMap((level) =>
+        mockLogger[level].mock.calls.flatMap(([message, record]) =>
+          typeof message === 'string' && message.startsWith('Error in resource:')
+            ? [{ level, message, record: record as { extra: Record<string, any> } }]
+            : [],
+        ),
+      );
+      expect(records.map(({ level }) => level)).toEqual(['notice']);
+      return records[0] as { message: string; record: { extra: Record<string, any> } };
+    }
+
+    it.each([
+      ['without params', undefined],
+      ['with params', z.object({ id: z.string().describe('id') })],
+    ])(
+      'rejects a malformed escape %s as the params gate rejects a value, at notice with no stack',
+      async (_label, params) => {
+        const [unset] = await readOnTheWire('example://item/{id}', ['example://item/%E0%A4%A'], {
+          ...(params && { params }),
+        });
+        vi.clearAllMocks();
+
+        const [decoded] = await readOnTheWire('example://item/{id}', ['example://item/%E0%A4%A'], {
+          decode: true,
+          ...(params && { params }),
+        });
+
+        // Unset, the capture reaches the handler as sent.
+        expect(unset?.result?.contents).toStrictEqual(
+          answered('example://item/%E0%A4%A', { id: '%E0%A4%A' }),
+        );
+        expect(decoded).toStrictEqual({
+          error: {
+            code: JsonRpcErrorCode.ValidationError,
+            message: `id: ${MALFORMED}`,
+            data: {
+              issues: [{ code: 'custom', path: ['id'], message: MALFORMED }],
+              requestId: 'test-req-id',
+            },
+          },
+        });
+        const { message, record } = onlyNoticeRecord();
+        expect(message).toBe(`Error in resource:decoding: id: ${MALFORMED}`);
+        expect(record.extra.stack).toBeUndefined();
+        const { causeChain = [] } = record.extra.errorData as { causeChain?: object[] };
+        expect(causeChain.some((node) => 'stack' in node)).toBe(false);
+        expect(JSON.stringify(record)).not.toMatch(/URI ?(error|malformed)/i);
+      },
+    );
+
+    it('names every malformed element of an exploded variable, and a reserved expansion’s', async () => {
+      const [exploded, reserved] = [
+        await readOnTheWire('example://ids/{ids*}', ['example://ids/ok%20,%E0%A4%A,%ZZ'], {
+          decode: true,
+        }),
+        await readOnTheWire('example://file/{+path}', ['example://file/a/%E0%A4%A'], {
+          decode: true,
+        }),
+      ];
+
+      expect(exploded[0]?.error).toStrictEqual({
+        code: JsonRpcErrorCode.ValidationError,
+        message: `ids.1: ${MALFORMED} (+1 more)`,
+        data: {
+          issues: [
+            { code: 'custom', path: ['ids', 1], message: MALFORMED },
+            { code: 'custom', path: ['ids', 2], message: MALFORMED },
+          ],
+          requestId: 'test-req-id',
+        },
+      });
+      expect(reserved[0]?.error).toMatchObject({
+        code: JsonRpcErrorCode.ValidationError,
+        message: `path: ${MALFORMED}`,
+        data: { issues: [{ code: 'custom', path: ['path'], message: MALFORMED }] },
+      });
+    });
+  });
+
+  // -----------------------------------------------------------------------
   // Error handling
   // -----------------------------------------------------------------------
 
@@ -1627,7 +1987,7 @@ describe('createResourceHandler', () => {
         });
       });
 
-      it('keeps a UrlElicitationRequiredError’s elicitations', async () => {
+      it('hands a UrlElicitationRequiredError back to the SDK as a ProtocolError, its elicitations kept (#828)', async () => {
         const elicitations = [
           {
             mode: 'url' as const,
@@ -1636,11 +1996,25 @@ describe('createResourceHandler', () => {
             elicitationId: 'e1',
           },
         ];
+        const handler = createResourceHandler(
+          throwing(new UrlElicitationRequiredError(elicitations)) as AnyResourceDefinition,
+          services,
+          notifiers,
+        );
 
-        const rejection = await readThrowing(new UrlElicitationRequiredError(elicitations));
+        const rejection = await handler(new URL('sdk://x'), { id: 'x' }, makeServerContext()).then(
+          () => expect.unreachable('expected the read to fail'),
+          (error: unknown) => error,
+        );
 
-        expect(rejection.code).toBe(-32042);
-        expect(rejection.data).toEqual({ elicitations, requestId: 'test-req-id' });
+        // The SDK applies its era rule only to a ProtocolError (#828).
+        expect(rejection).toBeInstanceOf(ProtocolError);
+        expect(rejection).not.toBeInstanceOf(McpError);
+        expect(rejection).toMatchObject({
+          code: -32042,
+          data: { elicitations, requestId: 'test-req-id' },
+        });
+        expect(completionMetrics()).toMatchObject({ isSuccess: false, errorCode: '-32042' });
       });
 
       it.each([
@@ -1673,54 +2047,123 @@ describe('createResourceHandler', () => {
       });
 
       it('answers a real client exactly as the SDK’s own miss does', async () => {
-        const server = new McpServer(
-          { name: 'resource-not-found-wire', version: '0.0.0' },
-          { capabilities: { resources: {} } },
+        const {
+          responses,
+          settled: [thrown, miss],
+        } = await serveAndRead(
+          throwing(new ResourceNotFoundError('sdk://gone')) as AnyResourceDefinition,
+          ['sdk://gone', 'nothere://x'],
         );
-        server.registerResource(
-          'sdk-errors',
-          new ResourceTemplate('sdk://{id}', { list: undefined }),
-          { description: 'Throws the SDK not-found error.', mimeType: 'application/json' },
-          createResourceHandler(
-            throwing(new ResourceNotFoundError('sdk://gone')) as AnyResourceDefinition,
-            services,
-            notifiers,
-          ),
-        );
-        const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
-        const errors: unknown[] = [];
-        const send = serverTransport.send.bind(serverTransport);
-        serverTransport.send = (message, options) => {
-          const written = JSON.parse(JSON.stringify(message)) as { error?: unknown };
-          if (written.error) errors.push(written.error);
-          return send(message, options);
-        };
-        const client = new Client({ name: 'resource-not-found-client', version: '0.0.0' });
-        await server.connect(serverTransport);
-        await client.connect(clientTransport);
 
-        try {
-          const thrown = await client.readResource({ uri: 'sdk://gone' }).catch((e: unknown) => e);
-          const miss = await client.readResource({ uri: 'nothere://x' }).catch((e: unknown) => e);
+        expect(responses.map((response) => response.error)).toEqual([
+          {
+            code: -32602,
+            message: 'Resource not found: sdk://gone',
+            data: { uri: 'sdk://gone' },
+          },
+          {
+            code: -32602,
+            message: 'Resource not found: nothere://x',
+            data: { uri: 'nothere://x' },
+          },
+        ]);
+        expect(thrown).toBeInstanceOf(ClientResourceNotFoundError);
+        expect(miss).toBeInstanceOf(ClientResourceNotFoundError);
+      });
 
-          expect(errors).toEqual([
-            {
-              code: -32602,
-              message: 'Resource not found: sdk://gone',
-              data: { uri: 'sdk://gone' },
+      describe('the legacy -32002 not-found code (#829)', () => {
+        it('answers it in the not-found shape: -32602, the thrown message, data exactly { uri }', async () => {
+          const span = {
+            setAttributes: vi.fn(),
+            setAttribute: vi.fn(),
+            setStatus: vi.fn(),
+            recordException: vi.fn(),
+            end: vi.fn(),
+          };
+          const tracerSpy = vi.spyOn(trace, 'getTracer').mockReturnValue({
+            startActiveSpan: (_name: string, cb: (s: unknown) => unknown) => cb(span),
+          } as never);
+
+          try {
+            const rejection = await readThrowing(
+              new ProtocolError(-32002, 'Resource not found', { uri: 'sdk://old' }),
+            );
+
+            expect(rejection.code).toBe(JsonRpcErrorCode.InvalidParams);
+            expect(rejection.message).toBe('Resource not found');
+            expect(rejection.data).toEqual({ uri: 'sdk://old' });
+            expect(completionMetrics()).toMatchObject({ isSuccess: false, errorCode: '-32602' });
+            expect(span.setAttribute).toHaveBeenCalledWith('mcp.resource.error_code', '-32602');
+          } finally {
+            tracerSpy.mockRestore();
+          }
+        });
+
+        it('logs it at notice with no stack, as the SDK’s own miss logs', async () => {
+          await readThrowing(new ProtocolError(-32002, 'Resource not found', { uri: 'sdk://old' }));
+
+          const at = (level: 'error' | 'notice') =>
+            mockLogger[level].mock.calls.filter(([message]) =>
+              String(message).startsWith('Error in resource:'),
+            );
+          expect(at('error')).toEqual([]);
+          expect(at('notice')).toHaveLength(1);
+          const [message, record] = at('notice')[0] as [string, { extra: Record<string, unknown> }];
+          expect(message).toBe('Error in resource:sdk-errors: Resource not found');
+          expect(record.extra.errorCode).toBe(JsonRpcErrorCode.InvalidParams);
+          expect(record.extra).not.toHaveProperty('stack');
+        });
+
+        it('drops every key but the uri, as the SDK client drops it', async () => {
+          const rejection = await readThrowing(
+            new ProtocolError(-32002, 'Gone', { uri: 'sdk://x', why: 'moved' }),
+          );
+
+          expect(rejection.code).toBe(JsonRpcErrorCode.InvalidParams);
+          expect(rejection.message).toBe('Gone');
+          expect(rejection.data).toEqual({ uri: 'sdk://x' });
+        });
+
+        it.each([
+          ['no uri', { id: 1 }],
+          ['a uri that is not a string', { uri: 7 }],
+        ])('answers one with %s as it always has', async (_label, data) => {
+          const rejection = await readThrowing(new ProtocolError(-32002, 'Gone', data));
+
+          expect(rejection.code).toBe(-32002);
+          expect(rejection.data).toEqual({ ...data, requestId: 'test-req-id' });
+        });
+
+        it('answers one whose uri cannot be read as it always has (#697)', async () => {
+          const data = Object.defineProperty({}, 'uri', {
+            enumerable: true,
+            get() {
+              throw new Error('revoked');
             },
-            {
-              code: -32602,
-              message: 'Resource not found: nothere://x',
-              data: { uri: 'nothere://x' },
-            },
+          });
+
+          const rejection = await readThrowing(new ProtocolError(-32002, 'Gone', data));
+
+          expect(rejection.code).toBe(-32002);
+          expect(rejection.data).toEqual({ requestId: 'test-req-id' });
+        });
+
+        it('reaches a real client as the SDK’s ResourceNotFoundError', async () => {
+          const {
+            responses,
+            settled: [thrown],
+          } = await serveAndRead(
+            throwing(
+              new ProtocolError(-32002, 'Resource not found', { uri: 'sdk://old' }),
+            ) as AnyResourceDefinition,
+            ['sdk://old'],
+          );
+
+          expect(responses.map((response) => response.error)).toEqual([
+            { code: -32602, message: 'Resource not found', data: { uri: 'sdk://old' } },
           ]);
           expect(thrown).toBeInstanceOf(ClientResourceNotFoundError);
-          expect(miss).toBeInstanceOf(ClientResourceNotFoundError);
-        } finally {
-          await client.close();
-          await server.close();
-        }
+        });
       });
     });
 
