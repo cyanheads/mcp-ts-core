@@ -140,7 +140,6 @@
             ],
             "mimeType": "application/json",
             "name": "Item 1",
-            "title": "Contract Item",
             "uri": "contract://item/1"
           }
         ]

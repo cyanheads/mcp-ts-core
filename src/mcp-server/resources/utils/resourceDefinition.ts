@@ -120,7 +120,9 @@ export interface ResourceDefinition<
     ? z.infer<TOutput> | Promise<z.infer<TOutput>>
     : unknown | Promise<unknown>;
   /**
-   * Optional provider for resource discovery/listing.
+   * Optional provider for resource discovery/listing. Each entry inherits the
+   * template's `description`, `mimeType`, `annotations`, `size`, and `_meta`
+   * unless it sets its own; it never inherits `title`.
    */
   list?: (extra: ListExtra) => ListResourcesResult | Promise<ListResourcesResult>;
   /** Default MIME type for response content. */
@@ -141,7 +143,7 @@ export interface ResourceDefinition<
    * domain-namespaced subdirectories or a filename that doesn't mirror `name`).
    */
   sourceUrl?: string;
-  /** Human-readable title for UI display. */
+  /** Human-readable title for UI display. `list()` entries do not inherit it. */
   title?: string;
   /** URI template for resource registration (e.g., 'myscheme://{itemId}/data'). */
   uriTemplate: string;

@@ -3,6 +3,7 @@
  * @module src/mcp-server/resources/resource-registration
  */
 import {
+  type ListResourcesCallback,
   type McpServer,
   ResourceTemplate,
   type ServerNotifier,
@@ -23,6 +24,28 @@ import { requestContextService } from '@/utils/internal/requestContext.js';
 
 function hasUriTemplateVariables(uriTemplate: string): boolean {
   return /\{[^}]+\}/.test(uriTemplate);
+}
+
+/**
+ * A template's `list()` with every entry carrying its own `title` key, set or
+ * `undefined`. The SDK lists each entry as `{ ...templateMetadata, ...entry }`,
+ * so an entry without the key would take the template's title — the
+ * registration name when none is declared — and a client that displays `title`
+ * over `name` would show that one label on every entry. An explicit
+ * `undefined` wins the spread and drops out of the serialized entry. Every
+ * other template field is still inherited, and the result's other fields and
+ * a rejection pass through as `list()` produced them.
+ */
+function listWithOwnTitles(
+  list: NonNullable<AnyResourceDefinition['list']>,
+): ListResourcesCallback {
+  return async (extra) => {
+    const result = await list(extra);
+    return {
+      ...result,
+      resources: result.resources.map((entry) => ({ title: undefined, ...entry })),
+    };
+  };
 }
 
 export class ResourceRegistry {
@@ -121,7 +144,7 @@ export class ResourceRegistry {
 
         if (hasUriTemplateVariables(def.uriTemplate)) {
           const template = new ResourceTemplate(def.uriTemplate, {
-            list: def.list,
+            list: def.list && listWithOwnTitles(def.list),
             ...(def.complete && { complete: def.complete }),
           });
 

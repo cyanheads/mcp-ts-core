@@ -67,7 +67,6 @@
             "description": "Echo a message from the URI. Replace this with your first real resource.",
             "mimeType": "application/json",
             "name": "Echo Hello",
-            "title": "template-echo-resource",
             "uri": "echo://hello"
           }
         ]

@@ -2,11 +2,15 @@
  * @fileoverview Tests for resource registration system.
  * @module tests/mcp-server/resources/resource-registration.test
  */
-import { ResourceTemplate } from '@modelcontextprotocol/server';
+import { Client, InMemoryTransport } from '@modelcontextprotocol/client';
+import { McpServer, ResourceTemplate } from '@modelcontextprotocol/server';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { z } from 'zod';
 import { ResourceRegistry } from '@/mcp-server/resources/resource-registration.js';
-import { resource } from '@/mcp-server/resources/utils/resourceDefinition.js';
+import {
+  type AnyResourceDefinition,
+  resource,
+} from '@/mcp-server/resources/utils/resourceDefinition.js';
 import type { HandlerServices } from '@/mcp-server/resources/utils/resourceHandlerFactory.js';
 import { JsonRpcErrorCode } from '@/types-global/errors.js';
 import { makeSenderlessServerContext, makeServerContext } from '../../../helpers/server-context.js';
@@ -394,6 +398,261 @@ describe('ResourceRegistry', () => {
 
       const call = mockServer.registerResource.mock.calls[0];
       expect(call[2].examples).toEqual([{ name: 'Ex1', uri: 'ex://1' }]);
+    });
+  });
+
+  describe('resources/list entries of a template (#690)', () => {
+    /**
+     * Registers `defs` on a real `McpServer`, connects a client, and returns
+     * the `resources/list` and `resources/templates/list` results as the server
+     * wrote them: JSON round-tripped, so a key sent as `undefined` is absent,
+     * as on every real transport.
+     */
+    async function listedOnTheWire(defs: AnyResourceDefinition[]) {
+      const server = new McpServer(
+        { name: 'resource-list-wire', version: '0.0.0' },
+        { capabilities: { resources: {} } },
+      );
+      await new ResourceRegistry(defs, services).registerAll(server);
+      const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+      const written: Array<{ result?: Record<string, unknown> }> = [];
+      const send = serverTransport.send.bind(serverTransport);
+      serverTransport.send = (message, options) => {
+        written.push(JSON.parse(JSON.stringify(message)));
+        return send(message, options);
+      };
+      const client = new Client({ name: 'resource-list-client', version: '0.0.0' });
+      await server.connect(serverTransport);
+      await client.connect(clientTransport);
+      try {
+        await client.listResources();
+        await client.listResourceTemplates();
+        const result = (key: string) => written.find((m) => m.result && key in m.result)?.result;
+        return {
+          resources: result('resources')?.resources,
+          resourceTemplates: result('resourceTemplates')?.resourceTemplates,
+        };
+      } finally {
+        await client.close();
+        await server.close();
+      }
+    }
+
+    /** The `ResourceTemplate` the registry builds for `def`. */
+    async function registeredTemplate(def: AnyResourceDefinition): Promise<ResourceTemplate> {
+      await new ResourceRegistry([def], services).registerAll(mockServer);
+      return mockServer.registerResource.mock.calls[0][1] as ResourceTemplate;
+    }
+
+    const ECHO_DESCRIPTION =
+      'Echo a message from the URI. Replace this with your first real resource.';
+
+    it("lists the scaffold's entry without the registration name, which resources/templates/list keeps as the title", async () => {
+      const echo = resource('echo://{message}', {
+        name: 'template-echo-resource',
+        description: ECHO_DESCRIPTION,
+        mimeType: 'application/json',
+        params: z.object({ message: z.string().describe('The message to echo back.') }),
+        handler: (params) => ({ message: params.message }),
+        list: () => ({ resources: [{ uri: 'echo://hello', name: 'Echo Hello' }] }),
+      });
+
+      const { resources, resourceTemplates } = await listedOnTheWire([echo]);
+
+      expect(resources).toStrictEqual([
+        {
+          uri: 'echo://hello',
+          name: 'Echo Hello',
+          description: ECHO_DESCRIPTION,
+          mimeType: 'application/json',
+        },
+      ]);
+      expect(resourceTemplates).toStrictEqual([
+        {
+          name: 'template-echo-resource',
+          uriTemplate: 'echo://{message}',
+          title: 'template-echo-resource',
+          description: ECHO_DESCRIPTION,
+          mimeType: 'application/json',
+        },
+      ]);
+    });
+
+    it('lists entries with every template field but its declared title, which resources/templates/list advertises', async () => {
+      const annotations = {
+        audience: ['user' as const],
+        priority: 0.4,
+        lastModified: '2026-01-02T03:04:05Z',
+      };
+      const titled = resource('titled://{id}', {
+        name: 'titled-template',
+        title: 'Titled Template',
+        description: 'Reads one titled item.',
+        mimeType: 'text/markdown',
+        size: 42,
+        examples: [{ name: 'First', uri: 'titled://1' }],
+        annotations,
+        _meta: { 'vendor/owner': 'catalog' },
+        handler: () => '',
+        list: () => ({ resources: [{ uri: 'titled://1', name: 'One' }] }),
+      });
+
+      const { resources, resourceTemplates } = await listedOnTheWire([titled]);
+
+      expect(resources).toStrictEqual([
+        {
+          uri: 'titled://1',
+          name: 'One',
+          description: 'Reads one titled item.',
+          mimeType: 'text/markdown',
+          size: 42,
+          examples: [{ name: 'First', uri: 'titled://1' }],
+          annotations,
+          _meta: { 'vendor/owner': 'catalog' },
+        },
+      ]);
+      expect(resourceTemplates).toStrictEqual([
+        {
+          name: 'titled-template',
+          uriTemplate: 'titled://{id}',
+          title: 'Titled Template',
+          description: 'Reads one titled item.',
+          mimeType: 'text/markdown',
+          size: 42,
+          examples: [{ name: 'First', uri: 'titled://1' }],
+          annotations,
+          _meta: { 'vendor/owner': 'catalog' },
+        },
+      ]);
+    });
+
+    it('keeps the title, description, and mimeType an entry sets itself', async () => {
+      const def = resource('own://{id}', {
+        name: 'own-fields',
+        title: 'Template Title',
+        description: 'Template description.',
+        mimeType: 'application/json',
+        handler: () => ({}),
+        list: () => ({
+          resources: [
+            {
+              uri: 'own://1',
+              name: 'One',
+              title: 'Entry Title',
+              description: 'Entry description.',
+              mimeType: 'text/plain',
+            },
+            { uri: 'own://2', name: 'Two' },
+          ],
+        }),
+      });
+
+      const { resources } = await listedOnTheWire([def]);
+
+      expect(resources).toStrictEqual([
+        {
+          uri: 'own://1',
+          name: 'One',
+          title: 'Entry Title',
+          description: 'Entry description.',
+          mimeType: 'text/plain',
+        },
+        {
+          uri: 'own://2',
+          name: 'Two',
+          description: 'Template description.',
+          mimeType: 'application/json',
+        },
+      ]);
+    });
+
+    it('leaves a static resource’s entry as it was, its title included', async () => {
+      const page = resource('ui://app/page.html', {
+        name: 'app-page',
+        title: 'App Page',
+        description: 'A static page.',
+        mimeType: 'text/html',
+        handler: () => '<html></html>',
+      });
+
+      const { resources } = await listedOnTheWire([page]);
+
+      expect(resources).toStrictEqual([
+        {
+          uri: 'ui://app/page.html',
+          name: 'app-page',
+          title: 'App Page',
+          description: 'A static page.',
+          mimeType: 'text/html',
+        },
+      ]);
+    });
+
+    it('passes an async list’s result through, pagination fields included, each entry carrying its own title key', async () => {
+      const template = await registeredTemplate(
+        resource('paged://{id}', {
+          name: 'paged',
+          title: 'Paged Template',
+          description: 'Paged items.',
+          handler: () => ({}),
+          list: async () => ({
+            resources: [
+              { uri: 'paged://1', name: 'One' },
+              { uri: 'paged://2', name: 'Two', title: 'Second' },
+            ],
+            nextCursor: 'page-2',
+            _meta: { 'vendor/total': 40 },
+          }),
+        }),
+      );
+
+      const listed = await template.listCallback?.(makeServerContext());
+
+      expect(listed).toStrictEqual({
+        resources: [
+          { title: undefined, uri: 'paged://1', name: 'One' },
+          { uri: 'paged://2', name: 'Two', title: 'Second' },
+        ],
+        nextCursor: 'page-2',
+        _meta: { 'vendor/total': 40 },
+      });
+    });
+
+    it.each([
+      [
+        'throws',
+        (failure: Error) => (): never => {
+          throw failure;
+        },
+      ],
+      [
+        'rejects',
+        (failure: Error) => async (): Promise<never> => {
+          throw failure;
+        },
+      ],
+    ])('rethrows the very error a list that %s raises', async (_label, makeList) => {
+      const failure = new Error('Catalog offline.');
+      const template = await registeredTemplate(
+        resource('failing://{id}', {
+          name: 'failing',
+          description: 'Fails to list.',
+          handler: () => ({}),
+          list: makeList(failure),
+        }),
+      );
+
+      await expect(
+        Promise.resolve().then(() => template.listCallback?.(makeServerContext())),
+      ).rejects.toBe(failure);
+    });
+
+    it('registers no list callback for a template without list()', async () => {
+      const template = await registeredTemplate(
+        resource('unlisted://{id}', { description: 'Not listed.', handler: () => ({}) }),
+      );
+
+      expect(template.listCallback).toBeUndefined();
     });
   });
 });
