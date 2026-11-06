@@ -84,6 +84,7 @@ function makeFakeStore(initial: SyncState = { status: 'pending' }) {
     async writeState(next: SyncState) {
       state = {
         status: next.status,
+        mode: next.mode,
         cursor: next.cursor,
         checkpoint: next.checkpoint,
         startedAt: next.startedAt,

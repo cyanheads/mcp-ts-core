@@ -17,6 +17,15 @@ export interface BarrierStep {
   waitFor?: string;
 }
 
+/**
+ * Processes that start together: each marks its arrival at `barrier` (a file
+ * named `<barrier>-<pid>`), then waits until `processes` have arrived.
+ */
+export interface Rendezvous {
+  barrier: string;
+  processes: number;
+}
+
 /** A migration the child declares; `log` appends its version to `mig_log`, `add-column` adds `meta.etag`. */
 export interface MigrationTask {
   kind: 'add-column' | 'log';
@@ -29,6 +38,12 @@ export interface OpenTask {
   migrations: MigrationTask[];
   path: string;
   /**
+   * Runs once, right after the opener's first read of the sync state table's
+   * columns returns: its check for the `mode` column, made before it takes the
+   * write lock.
+   */
+  pauseAfterModeCheck?: BarrierStep;
+  /**
    * Runs on the first read of the first migration's `version`. The migration
    * runner reads a migration's version only after it has read the stored
    * version, so this pauses the opener between that read and anything it applies.
@@ -38,6 +53,8 @@ export interface OpenTask {
   /** Created once the open, migrations included, has completed. */
   signalWhenOpen?: string;
   startAfter?: string;
+  /** Opens once every process of the rendezvous, this one included, has reached it. */
+  startWith?: Rendezvous;
   version: number;
 }
 

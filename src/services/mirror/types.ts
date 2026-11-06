@@ -37,7 +37,7 @@ export interface MirrorLogger {
  * - `cursor` is the **volatile** intra-run resume position (e.g. an OAI-PMH
  *   resumption token). It is valid only within a single run, may expire, and is
  *   cleared on completion. The runner threads it back into `sync()` to resume an
- *   interrupted init.
+ *   interrupted run of the same `mode`.
  * - `checkpoint` is the **durable** high-water mark (e.g. the max record
  *   datestamp). It advances monotonically and only on success, and seeds the
  *   next incremental refresh.
@@ -55,6 +55,13 @@ export interface SyncState {
   cursor?: string | undefined;
   /** Message from the last failed run, set when `status === 'error'`. */
   error?: string | undefined;
+  /**
+   * Mode of the run that wrote this state. It scopes `cursor`: a run resumes an
+   * interrupted state's cursor only when its own mode matches. A state without
+   * one reads as an `init`'s, as every state did before runs recorded it, so a
+   * store must persist it for an interrupted `refresh` to resume.
+   */
+  mode?: SyncMode | undefined;
   /** ISO 8601 timestamp the current run started. */
   startedAt?: string | undefined;
   status: SyncStatus;
@@ -66,7 +73,13 @@ export interface SyncState {
 export interface SyncContext {
   /** Durable high-water mark to harvest from (refresh; also init-resume recovery). */
   checkpoint?: string | undefined;
-  /** Volatile resume position from a prior interrupted run (init only). */
+  /**
+   * Volatile resume position from an interrupted run (`in_progress` or `error`)
+   * of the same mode; absent otherwise. The source owns its validity: when the
+   * upstream rejects it (an expired OAI-PMH resumption token, say), continue
+   * from `checkpoint` in the same run. When the source throws instead, the run
+   * records the same cursor again, so every later run of this mode fails on it.
+   */
   cursor?: string | undefined;
   /** `init` for a full harvest, `refresh` for an incremental one. */
   mode: SyncMode;
@@ -247,7 +260,13 @@ export interface MirrorStore extends AsyncDisposable {
   close(): Promise<void>;
   /** Total record count. */
   count(): Promise<number>;
-  /** Fetch records by primary-key list, preserving input order; missing keys skipped. */
+  /**
+   * Fetch, for each id in order, the row whose primary key matches it as the
+   * key column compares values: the row an `eq` filter on the key, or a
+   * tombstone with that id, hits. Against an `INTEGER` key, `'1'` and `'01'`
+   * both find key 1; a `TEXT` key matches exactly. A repeated id returns its
+   * row at each position; an id with no row is skipped.
+   */
   getByIds(ids: string[]): Promise<MirrorRow[]>;
   /** `PRAGMA integrity_check` + `quick_check`. */
   integrityCheck(): Promise<{ ok: boolean; results: string[] }>;

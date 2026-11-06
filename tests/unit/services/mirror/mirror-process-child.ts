@@ -12,7 +12,7 @@
  * @module tests/unit/services/mirror/mirror-process-child
  */
 
-import { existsSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { pathToFileURL } from 'node:url';
@@ -24,6 +24,7 @@ import type {
   OpenReport,
   OpenTask,
   ProcessError,
+  Rendezvous,
   SyncReport,
   SyncTask,
 } from './mirror-process.js';
@@ -97,6 +98,19 @@ async function step(barrier: BarrierStep | undefined): Promise<void> {
   await waitAsync(barrier?.waitFor);
 }
 
+/** Marks this process's arrival at the rendezvous, then waits until every expected process has arrived. */
+async function rendezvous(meet: Rendezvous | undefined): Promise<void> {
+  if (!meet) return;
+  signal(`${meet.barrier}-${process.pid}`);
+  const arrived = () =>
+    readdirSync(task.barriers).filter((name) => name.startsWith(`${meet.barrier}-`)).length;
+  const deadline = performance.now() + BARRIER_DEADLINE_MS;
+  while (arrived() < meet.processes) {
+    if (performance.now() > deadline) throw new Error(`Rendezvous "${meet.barrier}" never filled.`);
+    await delay(POLL_MS);
+  }
+}
+
 function describeError(err: unknown): ProcessError {
   if (!(err instanceof Error)) return { message: String(err) };
   const { code, data } = err as { code?: number; data?: unknown };
@@ -123,6 +137,47 @@ function migrationFor(spec: MigrationTask, onUp: () => void): Migration {
   };
 }
 
+/** Variable specifiers, as `src/` loads the drivers, so `tsc` resolves neither. */
+const BUN_SQLITE: string = 'bun:sqlite';
+const BETTER_SQLITE3: string = 'better-sqlite3';
+
+interface DriverStatement {
+  get(...params: unknown[]): unknown;
+}
+interface DriverPrototype {
+  prepare(this: unknown, sql: string, ...rest: unknown[]): DriverStatement;
+}
+
+/**
+ * Runs `pause` once, right after the first read of the sync state table's
+ * columns returns. The store makes that read through the runtime's driver, and
+ * the driver's `prepare` is the one seam below the store, so this wraps it.
+ */
+async function pauseAfterModeCheck(pause: BarrierStep): Promise<void> {
+  const driver: { prototype: DriverPrototype } = process.versions.bun
+    ? (await import(BUN_SQLITE)).Database
+    : (await import(BETTER_SQLITE3)).default;
+  const prepare = driver.prototype.prepare;
+  let paused = false;
+  driver.prototype.prepare = function (sql, ...rest) {
+    const statement = prepare.call(this, sql, ...rest);
+    if (paused || !sql.includes('table_info') || !sql.includes('mirror_sync_state')) {
+      return statement;
+    }
+    const get = statement.get.bind(statement);
+    statement.get = (...params) => {
+      const row = get(...params);
+      if (!paused) {
+        paused = true;
+        signal(pause.signal);
+        waitSync(pause.waitFor);
+      }
+      return row;
+    };
+    return statement;
+  };
+}
+
 /** `migration` with `pause` run on the first read of its `version`. */
 function pausedAtVersionRead(migration: Migration, pause: BarrierStep): Migration {
   let paused = false;
@@ -141,6 +196,8 @@ function pausedAtVersionRead(migration: Migration, pause: BarrierStep): Migratio
 
 async function openStore(open: OpenTask): Promise<OpenReport> {
   await waitAsync(open.startAfter);
+  await rendezvous(open.startWith);
+  if (open.pauseAfterModeCheck) await pauseAfterModeCheck(open.pauseAfterModeCheck);
   let upCalls = 0;
   const migrations = open.migrations.map((spec, index) => {
     const migration = migrationFor(spec, () => {

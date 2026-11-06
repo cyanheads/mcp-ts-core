@@ -33,7 +33,11 @@ export type MirrorRunOptions = RunSyncOptions & {
 export interface Mirror {
   /** Close the underlying store. */
   close(): Promise<void>;
-  /** Fetch records by primary-key list, preserving input order. */
+  /**
+   * Fetch, for each id in order, the row whose primary key matches it as the
+   * key column compares values (as an `eq` filter on the key does), skipping
+   * ids with no row. See {@link MirrorStore.getByIds}.
+   */
   getByIds(ids: string[]): Promise<MirrorRow[]>;
   /** Stable name from the definition. */
   readonly name: string;

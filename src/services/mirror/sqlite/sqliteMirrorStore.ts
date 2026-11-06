@@ -8,7 +8,7 @@
  */
 
 import { basename } from 'node:path';
-import { databaseError, validationError } from '@/types-global/errors.js';
+import { databaseError, type McpError, validationError } from '@/types-global/errors.js';
 import type {
   FilterOp,
   Migration,
@@ -20,6 +20,7 @@ import type {
   SqlValue,
   SyncLease,
   SyncLeaseStore,
+  SyncMode,
   SyncState,
 } from '../types.js';
 import {
@@ -112,6 +113,7 @@ export function sqliteMirrorStore(spec: SqliteMirrorStoreSpec): MirrorStore {
       const handle = await openSqliteHandle(spec.path, handleOptions);
       try {
         handle.exec(buildSchemaSql(spec));
+        addSyncStateMode(handle);
         runMigrations(handle, spec.version ?? 1, spec.migrations ?? []);
       } catch (err) {
         handle.close();
@@ -157,10 +159,22 @@ export function sqliteMirrorStore(spec: SqliteMirrorStoreSpec): MirrorStore {
       `INSERT INTO ${spec.table}(${cols.join(', ')}) VALUES (${placeholders}) ${conflict}`,
     );
     const remove = handle.prepare(`DELETE FROM ${spec.table} WHERE ${spec.primaryKey} = ?`);
+    // The position in an error is looked up only on the failure path.
     for (const record of records) {
-      upsert.run(...cols.map((c) => record[c] ?? null));
+      upsert.run(
+        ...cols.map((c) => {
+          const value = record[c] ?? null;
+          if (isObjectValue(value)) {
+            throw objectValueError(value, `records[${records.indexOf(record)}].${c}`);
+          }
+          return value;
+        }),
+      );
     }
-    for (const id of tombstones) remove.run(id);
+    for (const id of tombstones) {
+      if (isObjectValue(id)) throw objectValueError(id, `tombstones[${tombstones.indexOf(id)}]`);
+      remove.run(id);
+    }
   }
 
   const syncLease: SyncLeaseStore = {
@@ -233,6 +247,7 @@ export function sqliteMirrorStore(spec: SqliteMirrorStoreSpec): MirrorStore {
 
     async query(options: QueryOptions): Promise<QueryResult> {
       validateQueryOptions(options, limits);
+      if (isObjectValue(options.match)) throw objectValueError(options.match, 'match');
       const store = await open();
       if (options.match && !store.hasFts) {
         throw validationError('This mirror has no FTS index; `match` is not supported.', {
@@ -304,16 +319,30 @@ export function sqliteMirrorStore(spec: SqliteMirrorStoreSpec): MirrorStore {
           max: limits.getByIds,
         });
       }
+      const objectAt = ids.findIndex(isObjectValue);
+      if (objectAt !== -1) throw objectValueError(ids[objectAt], `ids[${objectAt}]`);
       if (ids.length === 0) return [];
       const { handle } = await open();
-      const placeholders = ids.map(() => '?').join(', ');
-      const rows = handle
+      /**
+       * SQLite compares each id with the key as `pk = ?` would, so an INTEGER
+       * key matches `'1'` and `'01'` alike, while `json_each` carries each id's
+       * position: a repeated id returns its row each time and a missing one
+       * drops out. The whole list binds as one parameter, so its length never
+       * meets the driver's bound-variable ceiling. Columns are table-qualified
+       * because `json_each` has its own (`id`, `key`, `value`, …), and its alias
+       * extends the table name, so the two never collide. JSON has no bigint,
+       * so one from untyped code is sent as its digits, as a string id is.
+       */
+      const requested = `${spec.table}_ids`;
+      const columns = allColumns.map((c) => `${spec.table}.${c}`).join(', ');
+      const idList = JSON.stringify(ids, (_key, value: unknown) =>
+        typeof value === 'bigint' ? String(value) : value,
+      );
+      return handle
         .prepare<MirrorRow>(
-          `SELECT ${allColumns.join(', ')} FROM ${spec.table} WHERE ${spec.primaryKey} IN (${placeholders})`,
+          `SELECT ${columns} FROM json_each(?) AS ${requested} JOIN ${spec.table} ON ${spec.table}.${spec.primaryKey} = ${requested}.value ORDER BY ${requested}.key`,
         )
-        .all(...ids);
-      const byId = new Map(rows.map((r) => [r[spec.primaryKey], r]));
-      return ids.map((id) => byId.get(id)).filter((r): r is MirrorRow => r !== undefined);
+        .all(idList);
     },
 
     async count(): Promise<number> {
@@ -387,6 +416,35 @@ export function sqliteMirrorStore(spec: SqliteMirrorStoreSpec): MirrorStore {
 }
 
 // ---------------------------------------------------------------------------
+// Value binding
+// ---------------------------------------------------------------------------
+
+/**
+ * Whether `value` is an object, array, or `Date`, which the store refuses
+ * wherever it binds a value. Bound alone, an object is each driver's
+ * named-parameter list, so `bun:sqlite` binds the `?` as NULL (a record passed
+ * as a tombstone deletes nothing) while `better-sqlite3` throws; bound beside
+ * other values, each driver fails with its own error. Byte arrays (typed
+ * arrays, `ArrayBuffer`) go to the driver as they are.
+ */
+function isObjectValue(value: unknown): value is object {
+  return (
+    typeof value === 'object' &&
+    value !== null &&
+    !ArrayBuffer.isView(value) &&
+    !(value instanceof ArrayBuffer)
+  );
+}
+
+/** The refusal of an {@link isObjectValue} value at `field`, naming its kind without echoing it. */
+function objectValueError(value: unknown, field: string): McpError {
+  const kind = Array.isArray(value) ? 'an array' : value instanceof Date ? 'a Date' : 'an object';
+  return validationError(`Mirror ${field} is ${kind}; it must be a string, a number, or null.`, {
+    field,
+  });
+}
+
+// ---------------------------------------------------------------------------
 // Query building
 // ---------------------------------------------------------------------------
 
@@ -448,19 +506,26 @@ function validateQueryOptions(options: QueryOptions, limits: SqliteMirrorStoreLi
 function buildFilterClauses(filters: QueryFilter[]): { clauses: string[]; params: SqlValue[] } {
   const clauses: string[] = [];
   const params: SqlValue[] = [];
-  for (const f of filters) {
+  for (const [i, f] of filters.entries()) {
+    // Where a refused value sat: an element of an array `value`, or `value` itself.
+    const at = (j: number) =>
+      Array.isArray(f.value) ? `filters[${i}].value[${j}]` : `filters[${i}].value`;
     if (f.op === 'in') {
       const values = Array.isArray(f.value) ? f.value : [f.value];
       if (values.length === 0) {
         clauses.push('0'); // empty IN matches nothing
         continue;
       }
+      const objectAt = values.findIndex(isObjectValue);
+      if (objectAt !== -1) throw objectValueError(values[objectAt], at(objectAt));
       clauses.push(`${f.column} IN (${values.map(() => '?').join(', ')})`);
       params.push(...values);
       continue;
     }
+    const value = Array.isArray(f.value) ? (f.value[0] ?? null) : f.value;
+    if (isObjectValue(value)) throw objectValueError(value, at(0));
     clauses.push(`${f.column} ${SQL_OP[f.op]} ?`);
-    params.push(Array.isArray(f.value) ? (f.value[0] ?? null) : f.value);
+    params.push(value);
   }
   return { clauses, params };
 }
@@ -481,21 +546,40 @@ interface SyncStateRow {
   completed_at: string | null;
   cursor: string | null;
   error: string | null;
+  mode: string | null;
   started_at: string | null;
   status: string;
   total: number | null;
 }
 
+/**
+ * Give a store created before sync state recorded its run's mode the `mode`
+ * column. A store that has it takes no write lock; otherwise the check repeats
+ * under the write lock before the `ALTER`, so processes opening such a store
+ * together add the column once and every one of their opens succeeds.
+ */
+function addSyncStateMode(handle: SqliteHandle): void {
+  const hasMode = () =>
+    handle
+      .prepare(`SELECT 1 FROM pragma_table_info('mirror_sync_state') WHERE name = 'mode'`)
+      .get() != null;
+  if (hasMode()) return;
+  handle.transaction(() => {
+    if (!hasMode()) handle.exec(`ALTER TABLE mirror_sync_state ADD COLUMN mode TEXT`);
+  }, 'immediate');
+}
+
 function readSyncState(handle: SqliteHandle): SyncState {
   const row = handle
     .prepare<SyncStateRow>(
-      `SELECT status, cursor, checkpoint, started_at, completed_at, total, error
+      `SELECT status, mode, cursor, checkpoint, started_at, completed_at, total, error
        FROM mirror_sync_state WHERE id = 1`,
     )
     .get();
   if (!row) return { status: 'pending' };
   return {
     status: row.status as SyncState['status'],
+    ...(row.mode != null && { mode: row.mode as SyncMode }),
     ...(row.cursor != null && { cursor: row.cursor }),
     ...(row.checkpoint != null && { checkpoint: row.checkpoint }),
     ...(row.started_at != null && { startedAt: row.started_at }),
@@ -516,7 +600,7 @@ function writeSyncState(handle: SqliteHandle, state: SyncState): void {
   handle
     .prepare(
       `UPDATE mirror_sync_state
-       SET status = ?, cursor = ?, checkpoint = ?, started_at = ?,
+       SET status = ?, mode = ?, cursor = ?, checkpoint = ?, started_at = ?,
            completed_at = COALESCE(?, completed_at),
            total = COALESCE(?, total),
            error = ?
@@ -524,6 +608,7 @@ function writeSyncState(handle: SqliteHandle, state: SyncState): void {
     )
     .run(
       state.status,
+      state.mode ?? null,
       state.cursor ?? null,
       state.checkpoint ?? null,
       state.startedAt ?? null,

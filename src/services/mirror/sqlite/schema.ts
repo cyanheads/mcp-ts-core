@@ -114,6 +114,10 @@ export function buildSchemaSql(spec: SchemaSpec): string {
   }
 
   parts.push(
+    /**
+     * `mode` is last: a store created before it existed gains it on open by
+     * `ALTER TABLE … ADD COLUMN`, which appends, so both layouts match.
+     */
     `CREATE TABLE IF NOT EXISTS mirror_sync_state (
   id INTEGER PRIMARY KEY CHECK (id = 1),
   status TEXT NOT NULL,
@@ -122,7 +126,8 @@ export function buildSchemaSql(spec: SchemaSpec): string {
   started_at TEXT,
   completed_at TEXT,
   total INTEGER,
-  error TEXT
+  error TEXT,
+  mode TEXT
 );`,
     `INSERT OR IGNORE INTO mirror_sync_state(id, status) VALUES (1, 'pending');`,
     /**

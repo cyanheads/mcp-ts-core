@@ -1,8 +1,9 @@
 /**
  * @fileoverview Tests for the runtime-agnostic SQLite handle — prepare/exec/query
  * against the driver actually available on this test runtime, connection pragmas,
- * open/close lifecycle including statement finalization on close, and the
- * driver-selection / missing-driver branches.
+ * parameter binding of values the two drivers treat differently, open/close
+ * lifecycle including statement finalization on close, and the driver-selection /
+ * missing-driver branches.
  *
  * Runtime note: this suite runs under two configs with different SQLite drivers.
  * `bunx vitest` (pool: 'forks') executes under Node with `better-sqlite3`, while
@@ -453,6 +454,110 @@ describe('openSqliteHandle', () => {
       handles.push(handle);
       handle.exec('CREATE TABLE t (id TEXT)');
       expect(handle.prepare<{ n: number }>('SELECT COUNT(*) AS n FROM t').get()?.n).toBe(0);
+    });
+  });
+
+  /**
+   * Values outside `SqlValue` that the two drivers would bind differently on
+   * their own get one binding on both runtimes, through every statement method.
+   */
+  describe('parameter binding', () => {
+    /** A runtime value outside the declared parameter type, as unvalidated JSON or a source produces. */
+    const untyped = (value: unknown) => value as never;
+
+    it('binds a boolean as the integer 1 or 0 in every column type, through run(), get(), and all()', async () => {
+      const handle = await open('booleans.db');
+      handle.exec('CREATE TABLE t (k TEXT, s TEXT, i INTEGER, r REAL, x)');
+      const insert = handle.prepare('INSERT INTO t VALUES (?, ?, ?, ?, ?)');
+      insert.run('true', untyped(true), untyped(true), untyped(true), untyped(true));
+      insert.run('false', untyped(false), untyped(false), untyped(false), untyped(false));
+
+      expect(
+        handle
+          .prepare(
+            'SELECT k, s, typeof(s) AS ts, i, typeof(i) AS ti, r, typeof(r) AS tr, x, typeof(x) AS tx FROM t ORDER BY k DESC',
+          )
+          .all(),
+      ).toEqual([
+        {
+          k: 'true',
+          s: '1',
+          ts: 'text',
+          i: 1,
+          ti: 'integer',
+          r: 1,
+          tr: 'real',
+          x: 1,
+          tx: 'integer',
+        },
+        {
+          k: 'false',
+          s: '0',
+          ts: 'text',
+          i: 0,
+          ti: 'integer',
+          r: 0,
+          tr: 'real',
+          x: 0,
+          tx: 'integer',
+        },
+      ]);
+      expect(
+        handle.prepare('SELECT v, typeof(v) AS ty FROM (SELECT ? AS v)').get(untyped(true)),
+      ).toEqual({ v: 1, ty: 'integer' });
+      expect(handle.prepare('SELECT k FROM t WHERE x = ?').all(untyped(false))).toEqual([
+        { k: 'false' },
+      ]);
+    });
+
+    it.each([
+      ['2n ** 63n', 2n ** 63n],
+      ['2n ** 70n', 2n ** 70n],
+      ['-(2n ** 63n) - 1n', -(2n ** 63n) - 1n],
+    ])(
+      'rejects the bigint %s, outside the signed 64-bit range, naming its parameter position, through run(), get(), and all()',
+      async (_label, value) => {
+        const handle = await open('bigint-out-of-range.db');
+        handle.exec('CREATE TABLE t (a TEXT, n INTEGER)');
+        const insert = handle.prepare('INSERT INTO t VALUES (?, ?)');
+        const select = handle.prepare('SELECT a FROM t WHERE a = ? AND n = ?');
+        const refusal = expect.objectContaining({
+          code: JsonRpcErrorCode.ValidationError,
+          message:
+            'Mirror SQL parameter 2 is a bigint outside the signed 64-bit range SQLite stores; pass it as a string instead.',
+          data: { parameter: 2 },
+        });
+
+        expect(() => insert.run('a', untyped(value))).toThrowError(refusal);
+        expect(handle.prepare<{ n: number }>('SELECT COUNT(*) AS n FROM t').get()?.n).toBe(0);
+        expect(() => select.get('a', untyped(value))).toThrowError(refusal);
+        expect(() => select.all('a', untyped(value))).toThrowError(refusal);
+      },
+    );
+
+    it('binds both signed 64-bit bounds and a small bigint as integers', async () => {
+      const handle = await open('bigint-bounds.db');
+      expect(
+        handle
+          .prepare(
+            'SELECT CAST(a AS TEXT) AS a, typeof(a) AS ta, CAST(b AS TEXT) AS b, typeof(b) AS tb, c, typeof(c) AS tc FROM (SELECT ? AS a, ? AS b, ? AS c)',
+          )
+          .get(untyped(2n ** 63n - 1n), untyped(-(2n ** 63n)), untyped(5n)),
+      ).toEqual({
+        a: '9223372036854775807',
+        ta: 'integer',
+        b: '-9223372036854775808',
+        tb: 'integer',
+        c: 5,
+        tc: 'integer',
+      });
+    });
+
+    it("passes a lone object through as the driver's named parameters", async () => {
+      const handle = await open('named.db');
+      // bun:sqlite keys named parameters with their prefix; better-sqlite3 without it.
+      const named = IS_BUN ? { $a: 'seven' } : { a: 'seven' };
+      expect(handle.prepare('SELECT $a AS v').get(untyped(named))).toEqual({ v: 'seven' });
     });
   });
 

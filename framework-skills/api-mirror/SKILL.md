@@ -4,7 +4,7 @@ description: >
   Stand up a persistent, self-refreshing local mirror of a bulk upstream dataset with the MirrorService (@cyanheads/mcp-ts-core/mirror). Use when a server wraps a large or slow API and should query a synced local index (embedded SQLite + FTS5) instead of paginating the live API per request.
 metadata:
   author: cyanheads
-  version: "1.7"
+  version: "1.8"
   audience: external
   type: reference
 ---
@@ -57,9 +57,11 @@ Two resume dimensions, deliberately separate. Conflating them silently corrupts 
 |---|---|---|
 | Meaning | Volatile intra-run resume position (e.g. an OAI-PMH resumption token, a page token) | Durable incremental high-water mark (e.g. the max record datestamp) |
 | Lifetime | One run; may expire; **cleared on completion** | Persists; **advances monotonically, only on success** |
-| Used for | Resuming an interrupted `init` | Seeding the next `refresh` |
+| Used for | Resuming an interrupted run of the same mode | Seeding the next `refresh` |
 
-Why they can't merge: during a from-scratch init the records aren't ordered by the high-water field, so the max-so-far is not a valid resume position — only the cursor is. After a completed init the cursor is meaningless, but the high-water mark is the correct refresh seed. The framework persists both per page and threads the right one back into `sync()` per mode. **The checkpoint must be lexicographically monotonic** (ISO 8601 works); the runner advances the stored checkpoint only when a page's value compares greater. A sync that walks several partitions in turn (one congress, collection, or feed after another, each ordered by the high-water field on its own) yields its checkpoint only with the final page: a mid-walk value from an early partition can already sit past a later partition's unvisited updates, so a refresh that fails there would skip them on every later run.
+Why they can't merge: during a from-scratch init the records aren't ordered by the high-water field, so the max-so-far is not a valid resume position — only the cursor is. After a completed init the cursor is meaningless, but the high-water mark is the correct refresh seed. **The checkpoint must be lexicographically monotonic** (ISO 8601 works); the runner advances the stored checkpoint only when a page's value compares greater. A sync that walks several partitions in turn (one congress, collection, or feed after another, each ordered by the high-water field on its own) yields its checkpoint only with the final page: a mid-walk value from an early partition can already sit past a later partition's unvisited updates, so a refresh that fails there would skip them on every later run.
+
+**Resume rule.** The framework persists both per page, with the mode of the run that wrote them. A run continues an interrupted run of its own mode (`in_progress` after a kill, `error` after a caught failure): `sync()` receives that run's `cursor` and `checkpoint`. Otherwise an `init` receives neither and a `refresh` receives only `checkpoint`. A state written before runs recorded their mode reads as an `init`'s; the SQLite store adds the column on open, with no migration of yours. The source owns the cursor's validity: when its upstream rejects a resumed cursor (an expired OAI-PMH resumption token, `badResumptionToken`), continue from `checkpoint` in the same run. The runner has no expiry signal, so a source that throws instead fails every later run of that mode on the same cursor.
 
 ## What you own vs. what the framework owns
 
@@ -73,6 +75,8 @@ Why they can't merge: during a from-scratch init the records aren't ordered by t
 | Generic `query()` + the raw-handle escape hatch | Server-specific access paths via the raw handle |
 
 A store that cannot be opened or initialized (a lock held past `busyTimeoutMs`, an unreadable or corrupted file, a parent directory that cannot be created, a migration that throws) rejects with `DatabaseError` (`-32010`). The caller sees the store's file name and a `data.recovery.hint`, never its directory; the driver or filesystem error stays on `cause` for the log.
+
+Values the store binds (record fields, tombstones, ids, filter values, `match`) are strings, numbers, or null. A boolean, as `JSON.parse` produces, stores as the integer `1`/`0` on both runtimes (`'1'`/`'0'` in a `TEXT` column). An object, array, or `Date` rejects with `ValidationError` naming where it sat (`records[3].authors`, `tombstones[0]`), and so does a `bigint` outside the signed 64-bit range, by its parameter position. Serialize structured fields to JSON text, and pass primary-key values, not records, as tombstones.
 
 ## Querying
 
@@ -94,7 +98,7 @@ A migration runs identically on first creation and on upgrade: a fresh database 
 
 The service owns `runSync` + state; it does not schedule. Wire "self-refreshing" yourself:
 
-- **Refresh** — register `runSync({ mode: 'refresh' })` on a cron via `schedulerService` from `@cyanheads/mcp-ts-core/utils`, inside `setup()`. Gate on transport (HTTP) when stdio operators run it out-of-band.
+- **Refresh** — register `runSync({ mode: 'refresh' })` on a cron via `schedulerService` from `@cyanheads/mcp-ts-core/utils`, inside `setup()`. Gate on transport (HTTP) when stdio operators run it out-of-band. A refresh cut short by a time budget, a crash, or an upstream error resumes its cursor on the next refresh, so a budget smaller than the run of records sharing one checkpoint value still advances.
 - **Off the serving thread** — SQLite calls are synchronous, so each write transaction a sync runs blocks the event loop until it commits. A refresh whose pages or post-sync recomputes take seconds stalls every request, `/healthz` included, for that long. Run such a scheduled sync in a child process instead: spawn `process.execPath` with `process.execArgv` and a compiled job entry in `dist/`, relay its log lines, and in `teardown` stop it with SIGTERM, then SIGKILL after a grace period. In-process scheduling suits mirrors whose transactions stay short.
 - **Init** — run out-of-band (a CLI script / one-shot), never on startup: a full init can take hours and must not block the server. It is idempotent and resumable — re-running after an interrupt continues from the persisted cursor.
 - **One sync at a time per store** — the SQLite store carries a sync lease, so an init CLI, a scheduled refresh in a child process, and every stdio session on one store file never sync at once. A run that finds the lease held rejects `Conflict` with `data.reason: 'sync_locked'` before its generator runs, as does an overlapping run on the same instance. A scheduled job skips on that reason and rethrows anything else:

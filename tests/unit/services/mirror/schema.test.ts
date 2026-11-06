@@ -137,4 +137,32 @@ describe('generated DDL executes', () => {
     expect(handle.prepare('SELECT COUNT(*) AS n FROM mirror_sync_lease').get()).toEqual({ n: 1 });
     handle.close();
   });
+
+  it('creates the sync state row with the mode column last, where adding it to an older store puts it', async () => {
+    const handle = await openSqliteHandle(join(dir, 'state.db'));
+    try {
+      handle.exec(buildSchemaSql(baseSpec));
+      expect(
+        handle
+          .prepare<{ name: string; type: string }>(`PRAGMA table_info(mirror_sync_state)`)
+          .all()
+          .map(({ name, type }) => `${name} ${type}`),
+      ).toEqual([
+        'id INTEGER',
+        'status TEXT',
+        'cursor TEXT',
+        'checkpoint TEXT',
+        'started_at TEXT',
+        'completed_at TEXT',
+        'total INTEGER',
+        'error TEXT',
+        'mode TEXT',
+      ]);
+      expect(handle.prepare('SELECT status, mode FROM mirror_sync_state').all()).toEqual([
+        { status: 'pending', mode: null },
+      ]);
+    } finally {
+      handle.close();
+    }
+  });
 });

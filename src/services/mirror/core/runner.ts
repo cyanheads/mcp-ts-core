@@ -45,11 +45,17 @@ interface RunWrites {
 /**
  * Run one sync cycle.
  *
- * - `init` performs a full harvest. With no prior state it starts from scratch;
- *   if a previous init left an incomplete dataset (status `in_progress` from a
- *   crash, or `error` from a caught failure) and a `cursor` was persisted, it
- *   resumes from that cursor, with `checkpoint` available for recovery.
+ * - `init` performs a full harvest, from scratch unless it continues an
+ *   interrupted init.
  * - `refresh` performs an incremental harvest from the durable `checkpoint`.
+ *
+ * Every state write records the run's mode. A run continues an interrupted run
+ * (status `in_progress` from a crash, or `error` from a caught failure) only
+ * when that run had the same mode: `sync()` then receives its persisted
+ * `cursor` and `checkpoint`, and the run keeps its `startedAt` when it resumes
+ * a cursor. Otherwise an `init` receives neither and a `refresh` only
+ * `checkpoint`. A state with no recorded mode, written before runs recorded
+ * one, reads as an init's.
  *
  * State is persisted after every page, so an interrupt at any point resumes from
  * the last yielded page. On success the volatile `cursor` is cleared and
@@ -138,21 +144,27 @@ async function runPages(
   options: RunSyncOptions,
   run: RunWrites,
 ): Promise<SyncResult> {
+  const { mode } = options;
   const existing = await store.readState();
-  // An init re-runs from scratch only when the prior run completed; otherwise it
-  // resumes from a persisted cursor (crash mid-write, or caught error mid-init).
-  const incompleteInit = options.mode === 'init' && existing.status !== 'complete';
-  const resuming = incompleteInit && existing.cursor !== undefined;
+  /**
+   * A run continues the stored position only when a run of its own mode was
+   * interrupted (killed mid-run, or failed): a cursor belongs to the query of
+   * the run that wrote it. A state without a recorded mode was written before
+   * runs recorded one, when only an init resumed, so it reads as an init's.
+   */
+  const continuing =
+    (existing.status === 'in_progress' || existing.status === 'error') &&
+    (existing.mode ?? 'init') === mode;
+  const resuming = continuing && existing.cursor !== undefined;
 
   const startCursor = resuming ? existing.cursor : undefined;
-  const startCheckpoint =
-    options.mode === 'refresh' || incompleteInit ? existing.checkpoint : undefined;
+  const startCheckpoint = mode === 'refresh' || continuing ? existing.checkpoint : undefined;
   const startedAt = (resuming && existing.startedAt) || new Date().toISOString();
 
   let cursor = startCursor;
   let checkpoint = startCheckpoint;
 
-  await run.commitState({ status: 'in_progress', startedAt, cursor, checkpoint });
+  await run.commitState({ status: 'in_progress', mode, startedAt, cursor, checkpoint });
 
   let pagesFetched = 0;
   let recordsApplied = 0;
@@ -160,7 +172,7 @@ async function runPages(
 
   try {
     for await (const page of sync({
-      mode: options.mode,
+      mode,
       cursor: startCursor,
       checkpoint: startCheckpoint,
       signal: run.signal,
@@ -174,6 +186,7 @@ async function runPages(
           : checkpoint;
       await run.commitPage(page.records, tombstones, {
         status: 'in_progress',
+        mode,
         startedAt,
         cursor: page.cursor,
         checkpoint: nextCheckpoint,
@@ -199,6 +212,7 @@ async function runPages(
     run.signal.throwIfAborted();
     await run.commitState({
       status: 'complete',
+      mode,
       startedAt,
       checkpoint,
       cursor: undefined, // volatile cursor is meaningless once complete
@@ -206,7 +220,7 @@ async function runPages(
       total,
     });
     run.log.info?.('Mirror sync complete', {
-      mode: options.mode,
+      mode,
       pagesFetched,
       recordsApplied,
       tombstonesApplied,
@@ -217,13 +231,13 @@ async function runPages(
     // After a lost lease the generator may stop with its own abort error; the loss is the cause.
     const failure: unknown = run.lost?.aborted ? run.lost.reason : err;
     if (isLeaseLost(failure)) {
-      run.log.warning?.('Mirror sync lost its lease', { mode: options.mode });
+      run.log.warning?.('Mirror sync lost its lease', { mode });
       throw failure;
     }
     const message = failure instanceof Error ? failure.message : String(failure);
-    run.log.error?.('Mirror sync failed', { mode: options.mode, error: message });
+    run.log.error?.('Mirror sync failed', { mode, error: message });
     // Throws `sync_lease_lost` instead when the lease was taken over meanwhile.
-    await run.commitState({ status: 'error', startedAt, cursor, checkpoint, error: message });
+    await run.commitState({ status: 'error', mode, startedAt, cursor, checkpoint, error: message });
     throw failure;
   }
 }

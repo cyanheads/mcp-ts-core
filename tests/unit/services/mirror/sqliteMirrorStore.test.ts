@@ -10,15 +10,23 @@ import { mkdir, mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { defineMirror } from '@/services/mirror/core/defineMirror.js';
 import {
   MIRROR_STORE_UNAVAILABLE_HINT,
   openSqliteHandle,
 } from '@/services/mirror/sqlite/handle.js';
+import { buildSchemaSql } from '@/services/mirror/sqlite/schema.js';
 import {
   type SqliteMirrorStoreSpec,
   sqliteMirrorStore,
 } from '@/services/mirror/sqlite/sqliteMirrorStore.js';
-import type { MirrorRow, MirrorStore, SqliteHandle } from '@/services/mirror/types.js';
+import type {
+  MirrorRow,
+  MirrorStore,
+  SqliteHandle,
+  SyncContext,
+  SyncPage,
+} from '@/services/mirror/types.js';
 import { JsonRpcErrorCode, McpError } from '@/types-global/errors.js';
 import { runMirrorProcess } from './mirror-process.js';
 
@@ -116,6 +124,163 @@ describe('sqliteMirrorStore', () => {
     await store.applyBatch([rec('a'), rec('b'), rec('c')], []);
     const rows = await store.getByIds(['c', 'missing', 'a']);
     expect(rows.map((r) => r.id)).toEqual(['c', 'a']);
+  });
+
+  /**
+   * `getByIds` matches each id as the key column compares it: the row an `eq`
+   * filter on the key, or a tombstone with that id, hits. Each case seeds its
+   * own store keyed by the declared type under test.
+   */
+  describe('getByIds matching on the key column', () => {
+    let keyed: MirrorStore[];
+
+    beforeEach(() => {
+      keyed = [];
+    });
+    afterEach(async () => {
+      await Promise.all(keyed.map((s) => s.close()));
+    });
+
+    /** A store keyed by `id` declared as `decl`, holding one row per seed id titled `row <id>`. */
+    async function storeKeyedBy(decl: string, ids: Array<string | number>): Promise<MirrorStore> {
+      const keyedStore = sqliteMirrorStore({
+        path: join(dir, `keyed-${keyed.length}.db`),
+        table: 'items',
+        primaryKey: 'id',
+        columns: { id: decl, title: 'TEXT' },
+      });
+      keyed.push(keyedStore);
+      await keyedStore.applyBatch(
+        ids.map((id) => ({ id, title: `row ${id}` })),
+        [],
+      );
+      return keyedStore;
+    }
+
+    const titles = (rows: MirrorRow[]): unknown[] => rows.map((r) => r.title);
+
+    it('returns INTEGER-keyed rows for string ids, in the requested order', async () => {
+      const integerKeyed = await storeKeyedBy('INTEGER', [1, 2]);
+      expect(await integerKeyed.getByIds(['1', '2'])).toEqual([
+        { id: 1, title: 'row 1' },
+        { id: 2, title: 'row 2' },
+      ]);
+      expect(await integerKeyed.getByIds(['2', '1'])).toEqual([
+        { id: 2, title: 'row 2' },
+        { id: 1, title: 'row 1' },
+      ]);
+    });
+
+    it.each([
+      ['INTEGER', [1, 2], '01', 'row 1'],
+      ['INTEGER', [1, 2], '1.0', 'row 1'],
+      ['INTEGER', [1, 2], ' 1', 'row 1'],
+      ['REAL', [1.5, 2], '1.5', 'row 1.5'],
+      ['REAL', [1.5, 2], '2.0', 'row 2'],
+      ['NUMERIC', [1, 1.5], '1.0', 'row 1'],
+    ] as const)(
+      'matches a %s key seeded %j with id %j, as an eq filter on the key does',
+      async (decl, seed, id, title) => {
+        const typed = await storeKeyedBy(decl, [...seed]);
+        const rows = await typed.getByIds([id]);
+        expect(titles(rows)).toEqual([title]);
+        const viaEq = await typed.query({
+          filters: [{ column: 'id', op: 'eq', value: id }],
+          limit: 10,
+          offset: 0,
+        });
+        expect(rows).toEqual(viaEq.rows);
+      },
+    );
+
+    it('skips an id with no row and one the key affinity cannot equate', async () => {
+      const integerKeyed = await storeKeyedBy('INTEGER', [1, 2]);
+      expect(await integerKeyed.getByIds(['0x1'])).toEqual([]);
+      expect(titles(await integerKeyed.getByIds(['1', '3', '2']))).toEqual(['row 1', 'row 2']);
+    });
+
+    // Ids are typed as strings; untyped code can still hand over a bigint.
+    it.each([
+      ['INTEGER', [1, 2]],
+      ['TEXT', ['1', '2']],
+    ] as const)('reads a bigint id against a %s key as its digits', async (decl, seed) => {
+      const typed = await storeKeyedBy(decl, [...seed]);
+      const ids = [2n, '1', 2n ** 70n] as never;
+      expect(titles(await typed.getByIds(ids))).toEqual(['row 2', 'row 1']);
+    });
+
+    // Statistics on a store this small lead SQLite to read the table before the id list.
+    it.each([
+      ['INTEGER', [1, 2]],
+      ['TEXT', ['1', '2']],
+    ] as const)(
+      'returns %s-keyed rows in the requested order after ANALYZE',
+      async (decl, seed) => {
+        const typed = await storeKeyedBy(decl, [...seed]);
+        (await typed.raw()).exec('ANALYZE');
+        expect(titles(await typed.getByIds(['2', '1']))).toEqual(['row 2', 'row 1']);
+        expect(titles(await typed.getByIds(['1', '2', '1']))).toEqual(['row 1', 'row 2', 'row 1']);
+      },
+    );
+
+    it("returns a repeated id's row at each position it is requested", async () => {
+      const integerKeyed = await storeKeyedBy('INTEGER', [1, 2]);
+      expect(titles(await integerKeyed.getByIds(['1', '2', '1']))).toEqual([
+        'row 1',
+        'row 2',
+        'row 1',
+      ]);
+    });
+
+    it('finds an INTEGER key above 2^53 by its exact digits, not its rounded neighbour', async () => {
+      // INTEGER affinity stores each seed string as the exact 64-bit integer.
+      const integerKeyed = await storeKeyedBy('INTEGER', ['9007199254740992', '9007199254740993']);
+      expect(titles(await integerKeyed.getByIds(['9007199254740993']))).toEqual([
+        'row 9007199254740993',
+      ]);
+    });
+
+    it("accepts 32,767 ids, one past the bound-parameter ceiling of the Node driver's SQLite", async () => {
+      const textKeyed = await storeKeyedBy('TEXT', ['a', 'b']);
+      const ids = [...Array.from({ length: 32_765 }, (_, i) => `missing-${i}`), 'b', 'a'];
+      expect(ids).toHaveLength(32_767);
+      expect(titles(await textKeyed.getByIds(ids))).toEqual(['row b', 'row a']);
+    });
+
+    it('matches a TEXT key exactly, so 01 and 1 stay different rows', async () => {
+      const textKeyed = await storeKeyedBy('TEXT', ['1', '01']);
+      expect(titles(await textKeyed.getByIds(['01', '1', ' 1', '1.0']))).toEqual([
+        'row 01',
+        'row 1',
+      ]);
+    });
+
+    it.each(['INTEGER', 'REAL', 'NUMERIC', 'TEXT'])(
+      "looks each id up through the %s key's index rather than scanning the table",
+      async (decl) => {
+        const typed = await storeKeyedBy(decl, ['1']);
+        const handle = await typed.raw();
+        const prepare = vi.spyOn(handle, 'prepare');
+        let prepared: string[];
+        try {
+          expect(titles(await typed.getByIds(['1']))).toEqual(['row 1']);
+          prepared = prepare.mock.calls.map(([sql]) => sql);
+        } finally {
+          prepare.mockRestore();
+        }
+        expect(prepared).toHaveLength(1);
+        const plan = handle
+          .prepare<{ detail: string }>(`EXPLAIN QUERY PLAN ${prepared[0]}`)
+          .all('["1"]')
+          .map((step) => step.detail);
+        expect(plan).toContainEqual(
+          expect.stringMatching(
+            /^SEARCH items USING (?:INTEGER PRIMARY KEY|INDEX sqlite_autoindex_items_1) \(/,
+          ),
+        );
+        expect(plan.filter((step) => /^SCAN items\b/.test(step))).toEqual([]);
+      },
+    );
   });
 
   it('matches via FTS and returns total', async () => {
@@ -412,6 +577,223 @@ describe('sqliteMirrorStore', () => {
     });
     expect(result.total).toBe(2);
     expect(result.rows.map((r) => r.id)).toEqual(['1', '4']);
+  });
+});
+
+/**
+ * Values outside `SqlValue` reach the store from unvalidated JSON and source
+ * code. Each kind binds the same on both runtimes or is refused naming where
+ * it sat; the handle's own mapping is covered in `handle.test.ts`.
+ */
+describe('sqliteMirrorStore value binding', () => {
+  let dir: string;
+  let store: MirrorStore;
+
+  /** A runtime value outside the declared type, as unvalidated JSON or a source produces. */
+  const untyped = (value: unknown) => value as never;
+
+  beforeEach(async () => {
+    dir = await mkdtemp(join(tmpdir(), 'mirror-store-binding-test-'));
+    store = sqliteMirrorStore({
+      path: join(dir, 'binding.db'),
+      table: 'items',
+      primaryKey: 'id',
+      columns: { id: 'TEXT', flag: 'INTEGER', note: 'TEXT', n: 'INTEGER', extra: '' },
+      fts: ['note'],
+    });
+  });
+  afterEach(async () => {
+    await store.close();
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  /** Each column of row `id` as text, with its SQLite storage class. */
+  async function stored(id: string): Promise<unknown> {
+    const handle = await store.raw();
+    return handle
+      .prepare(
+        `SELECT CAST(flag AS TEXT) AS flag, typeof(flag) AS flagType,
+                CAST(note AS TEXT) AS note, typeof(note) AS noteType,
+                CAST(n AS TEXT) AS n, typeof(n) AS nType,
+                hex(extra) AS extra, typeof(extra) AS extraType
+         FROM items WHERE id = ?`,
+      )
+      .get(id);
+  }
+
+  const validation = (field: string, kind: string) => ({
+    code: JsonRpcErrorCode.ValidationError,
+    message: `Mirror ${field} is ${kind}; it must be a string, a number, or null.`,
+    data: { field },
+  });
+
+  it('stores a boolean from parsed JSON as the integer 1 or 0, and as the text 1 or 0 in a TEXT column', async () => {
+    await store.applyBatch(
+      JSON.parse(
+        '[{"id":"a","flag":true,"note":true},{"id":"b","flag":false,"note":false}]',
+      ) as MirrorRow[],
+      [],
+    );
+    expect(await store.getByIds(['a', 'b'])).toEqual([
+      { id: 'a', flag: 1, note: '1', n: null, extra: null },
+      { id: 'b', flag: 0, note: '0', n: null, extra: null },
+    ]);
+  });
+
+  it('binds true as the integer 1 as a filter value, a raw() parameter, and a tombstone', async () => {
+    await store.applyBatch(
+      [
+        { id: '1', flag: 1 },
+        { id: '2', flag: 0 },
+      ],
+      [],
+    );
+    const flagged = await store.query({
+      filters: [{ column: 'flag', op: 'eq', value: untyped(true) }],
+      limit: 10,
+      offset: 0,
+    });
+    expect(flagged.rows.map((r) => r.id)).toEqual(['1']);
+
+    const handle = await store.raw();
+    expect(
+      handle.prepare('SELECT v, typeof(v) AS ty FROM (SELECT ? AS v)').get(untyped(true)),
+    ).toEqual({ v: 1, ty: 'integer' });
+
+    // The TEXT key compares the integer 1 as the text '1'.
+    await store.applyBatch([], [untyped(true)]);
+    expect((await store.getByIds(['1', '2'])).map((r) => r.id)).toEqual(['2']);
+  });
+
+  it.each([
+    ['above', 2n ** 63n],
+    ['below', -(2n ** 63n) - 1n],
+  ])(
+    'rejects a bigint %s the signed 64-bit range in a record, a tombstone, and a raw() parameter',
+    async (_side, value) => {
+      await store.applyBatch([{ id: 'kept', n: 1 }], []);
+      const bigintParameter = (parameter: number) => ({
+        code: JsonRpcErrorCode.ValidationError,
+        data: { parameter },
+      });
+
+      // `n` is the fourth column the upsert binds.
+      await expect(store.applyBatch([{ id: 'big', n: untyped(value) }], [])).rejects.toMatchObject(
+        bigintParameter(4),
+      );
+      await expect(store.applyBatch([], [untyped(value)])).rejects.toMatchObject(
+        bigintParameter(1),
+      );
+      const handle = await store.raw();
+      expect(() => handle.prepare('SELECT ? AS v').get(untyped(value))).toThrowError(
+        expect.objectContaining(bigintParameter(1)),
+      );
+      expect((await store.getByIds(['kept', 'big'])).map((r) => r.id)).toEqual(['kept']);
+    },
+  );
+
+  it('stores both signed 64-bit bounds and a small bigint in a record as integers', async () => {
+    await store.applyBatch(
+      [
+        { id: 'max', n: untyped(2n ** 63n - 1n) },
+        { id: 'min', n: untyped(-(2n ** 63n)) },
+        { id: 'five', n: untyped(5n) },
+      ],
+      [],
+    );
+    expect(await stored('max')).toMatchObject({ n: '9223372036854775807', nType: 'integer' });
+    expect(await stored('min')).toMatchObject({ n: '-9223372036854775808', nType: 'integer' });
+    expect(await stored('five')).toMatchObject({ n: '5', nType: 'integer' });
+  });
+
+  it('rejects a record passed as a tombstone and keeps the row it named', async () => {
+    await store.applyBatch([{ id: 'a', note: 'kept' }], []);
+    await expect(store.applyBatch([], [untyped({ id: 'a' })])).rejects.toMatchObject(
+      validation('tombstones[0]', 'an object'),
+    );
+    expect(await store.getByIds(['a'])).toEqual([
+      { id: 'a', flag: null, note: 'kept', n: null, extra: null },
+    ]);
+  });
+
+  it.each([
+    ['an object', { token: 'secret-value-1' }],
+    ['an array', ['secret-value-1']],
+    ['a Date', new Date('2031-02-03T04:05:06.000Z')],
+  ])(
+    'rejects %s as a record value, naming its column without echoing it, and writes nothing of the batch',
+    async (kind, value) => {
+      const error = await store
+        .applyBatch(
+          [
+            { id: 'first', note: 'fine' },
+            { id: 'second', note: untyped(value) },
+          ],
+          [],
+        )
+        .then(
+          () => undefined,
+          (err: unknown) => err,
+        );
+      expect(error).toMatchObject(validation('records[1].note', kind));
+      const surface = JSON.stringify({
+        message: (error as McpError).message,
+        data: (error as McpError).data,
+      });
+      expect(surface).not.toContain('secret-value-1');
+      expect(surface).not.toContain('2031');
+      expect(await store.count()).toBe(0);
+    },
+  );
+
+  it('rejects an object as a getByIds id, a filter value, an in-list element, and a match, naming each', async () => {
+    await expect(store.getByIds(['a', untyped({ id: 'a' })])).rejects.toMatchObject(
+      validation('ids[1]', 'an object'),
+    );
+    await expect(
+      store.query({
+        filters: [{ column: 'flag', op: 'eq', value: untyped({ flag: 1 }) }],
+        limit: 1,
+        offset: 0,
+      }),
+    ).rejects.toMatchObject(validation('filters[0].value', 'an object'));
+    await expect(
+      store.query({
+        filters: [
+          { column: 'note', op: 'eq', value: 'x' },
+          { column: 'flag', op: 'in', value: [1, untyped([2])] },
+        ],
+        limit: 1,
+        offset: 0,
+      }),
+    ).rejects.toMatchObject(validation('filters[1].value[1]', 'an array'));
+    await expect(
+      store.query({ match: untyped({ q: 'x' }), limit: 1, offset: 0 }),
+    ).rejects.toMatchObject(validation('match', 'an object'));
+  });
+
+  it('stores undefined and NaN as NULL and a Uint8Array as a blob', async () => {
+    await store.applyBatch(
+      [
+        {
+          id: 'a',
+          flag: Number.NaN,
+          n: untyped(undefined),
+          extra: untyped(new Uint8Array([1, 2])),
+        },
+      ],
+      [],
+    );
+    expect(await stored('a')).toEqual({
+      flag: null,
+      flagType: 'null',
+      note: null,
+      noteType: 'null',
+      n: null,
+      nType: 'null',
+      extra: '0102',
+      extraType: 'blob',
+    });
   });
 });
 
@@ -907,6 +1289,264 @@ describe('sqliteMirrorStore migrations across processes', () => {
       expect(newer).toEqual({ ok: true, upCalls: 2 });
       expect(older).toEqual({ ok: true, upCalls: 0 });
       expect(await inspect()).toEqual({ version: 3, migLog: [2, 3], etagColumns: 0 });
+    },
+    PROCESS_TIMEOUT_MS,
+  );
+});
+
+describe('sqliteMirrorStore sync state mode', () => {
+  let dir: string;
+  let store: MirrorStore;
+
+  beforeEach(async () => {
+    dir = await mkdtemp(join(tmpdir(), 'mirror-state-mode-test-'));
+    store = sqliteMirrorStore(specFor(join(dir, 'mirror.db')));
+  });
+  afterEach(async () => {
+    await store.close();
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  it('round-trips the mode through writeState, and a write without one clears it', async () => {
+    const written = {
+      status: 'in_progress' as const,
+      mode: 'refresh' as const,
+      cursor: 'tok-1',
+      checkpoint: '2024-05-02',
+    };
+    await store.writeState(written);
+    expect(await store.readState()).toEqual(written);
+
+    await store.writeState({ status: 'error', cursor: 'tok-2', error: 'upstream failed' });
+    expect(await store.readState()).toEqual({
+      status: 'error',
+      cursor: 'tok-2',
+      error: 'upstream failed',
+    });
+  });
+
+  it('round-trips the mode through a sync lease commit', async () => {
+    const lease = (await store.syncLease!.claim('holder', 1_000))!;
+    const committed = { status: 'in_progress' as const, mode: 'init' as const, cursor: 'c1' };
+    await expect(store.syncLease!.commit(lease, committed, [rec('1')], [])).resolves.toBe(true);
+    expect(await store.readState()).toEqual(committed);
+    await store.syncLease!.release(lease);
+  });
+});
+
+/** `mirror_sync_state` as stores created before sync state recorded its run's mode declared it. */
+const SYNC_STATE_WITHOUT_MODE_DDL = `CREATE TABLE mirror_sync_state (
+  id INTEGER PRIMARY KEY CHECK (id = 1),
+  status TEXT NOT NULL,
+  cursor TEXT,
+  checkpoint TEXT,
+  started_at TEXT,
+  completed_at TEXT,
+  total INTEGER,
+  error TEXT
+);`;
+
+/** The row a refresh that failed on top of a complete mirror left in such a store. */
+const FAILED_REFRESH_STATE = {
+  status: 'error',
+  cursor: 'REFRESH-TOKEN',
+  checkpoint: '2026-01-02',
+  startedAt: '2026-01-02T00:00:00.000Z',
+  completedAt: '2026-01-01T00:00:00.000Z',
+  total: 1,
+  error: 'upstream failed',
+} as const;
+
+/**
+ * Writes the store `spec` declares as one created before sync state recorded
+ * its run's mode: the state table as those stores declared it, holding
+ * {@link FAILED_REFRESH_STATE}, every other table from the generated DDL (which
+ * leaves an existing state table alone), and version 1 stamped.
+ */
+async function writeStoreWithoutMode(spec: SqliteMirrorStoreSpec): Promise<void> {
+  const handle = await openSqliteHandle(spec.path);
+  try {
+    handle.exec(SYNC_STATE_WITHOUT_MODE_DDL);
+    handle.exec(buildSchemaSql(spec));
+    handle
+      .prepare(`INSERT INTO schema_version (version, applied_at) VALUES (1, ?)`)
+      .run('2026-01-01T00:00:00.000Z');
+    const s = FAILED_REFRESH_STATE;
+    handle
+      .prepare(
+        `UPDATE mirror_sync_state
+         SET status = ?, cursor = ?, checkpoint = ?, started_at = ?, completed_at = ?, total = ?, error = ?
+         WHERE id = 1`,
+      )
+      .run(s.status, s.cursor, s.checkpoint, s.startedAt, s.completedAt, s.total, s.error);
+  } finally {
+    handle.close();
+  }
+}
+
+const syncStateColumns = (handle: SqliteHandle): string[] =>
+  handle
+    .prepare<{ name: string }>(`PRAGMA table_info(mirror_sync_state)`)
+    .all()
+    .map((c) => c.name);
+
+describe('sqliteMirrorStore schema upgrade', () => {
+  let dir: string;
+  let path: string;
+
+  beforeEach(async () => {
+    dir = await mkdtemp(join(tmpdir(), 'mirror-upgrade-test-'));
+    path = join(dir, 'older.db');
+    await writeStoreWithoutMode(specFor(path));
+  });
+  afterEach(async () => {
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  it('gives a store created without the mode column that column on open, once, keeping its state', async () => {
+    const fresh = sqliteMirrorStore(specFor(join(dir, 'fresh.db')));
+    const upgraded = sqliteMirrorStore(specFor(path));
+    try {
+      expect(await upgraded.readState()).toEqual(FAILED_REFRESH_STATE);
+      const columns = syncStateColumns(await upgraded.raw());
+      expect(columns.filter((name) => name === 'mode')).toEqual(['mode']);
+      expect(columns).toEqual(syncStateColumns(await fresh.raw()));
+      await upgraded.writeState({ status: 'in_progress', mode: 'refresh', cursor: 'c1' });
+    } finally {
+      await Promise.all([fresh.close(), upgraded.close()]);
+    }
+
+    // Opening it again finds the column and adds none.
+    const reopened = sqliteMirrorStore(specFor(path));
+    try {
+      expect(await reopened.readState()).toEqual({
+        status: 'in_progress',
+        mode: 'refresh',
+        cursor: 'c1',
+        completedAt: FAILED_REFRESH_STATE.completedAt,
+        total: FAILED_REFRESH_STATE.total,
+      });
+      expect(syncStateColumns(await reopened.raw()).filter((name) => name === 'mode')).toEqual([
+        'mode',
+      ]);
+    } finally {
+      await reopened.close();
+    }
+  });
+
+  it.each([
+    ['init', { mode: 'init', cursor: 'REFRESH-TOKEN', checkpoint: '2026-01-02' }],
+    ['refresh', { mode: 'refresh', checkpoint: '2026-01-02' }],
+  ] as const)(
+    'hands a %s run what it received before the column existed: the error row reads as an init’s',
+    async (mode, expected) => {
+      const received: Array<Pick<SyncContext, 'checkpoint' | 'cursor' | 'mode'>> = [];
+      const mirror = defineMirror({
+        name: 'older',
+        store: sqliteMirrorStore(specFor(path)),
+        async *sync(ctx): AsyncGenerator<SyncPage> {
+          received.push({ mode: ctx.mode, cursor: ctx.cursor, checkpoint: ctx.checkpoint });
+          yield { records: [] };
+        },
+      });
+      try {
+        await mirror.runSync({ mode });
+        expect(received).toEqual([expected]);
+      } finally {
+        await mirror.close();
+      }
+    },
+  );
+});
+
+/**
+ * Real processes opening one store created without the mode column, on this
+ * runtime's driver.
+ */
+describe('sqliteMirrorStore schema upgrade across processes', () => {
+  const PROCESS_TIMEOUT_MS = 60_000;
+  const PROCESSES = 6;
+  let dir: string;
+  let barriers: string;
+  let path: string;
+
+  async function expectOneModeColumn(): Promise<void> {
+    const handle = await openSqliteHandle(path);
+    try {
+      expect(syncStateColumns(handle).filter((name) => name === 'mode')).toEqual(['mode']);
+      expect(handle.prepare('SELECT status, cursor, mode FROM mirror_sync_state').all()).toEqual([
+        { status: 'error', cursor: 'REFRESH-TOKEN', mode: null },
+      ]);
+    } finally {
+      handle.close();
+    }
+  }
+
+  beforeEach(async () => {
+    dir = await mkdtemp(join(tmpdir(), 'mirror-upgrade-process-test-'));
+    barriers = join(dir, 'barriers');
+    await mkdir(barriers);
+    path = join(dir, 'shared.db');
+    // The store as the child declares it.
+    await writeStoreWithoutMode({
+      path,
+      table: 'items',
+      primaryKey: 'id',
+      columns: { id: 'TEXT' },
+    });
+  });
+  afterEach(async () => {
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  it(
+    'opens in every process that opens it at once, and ends with one mode column',
+    async () => {
+      const reports = await Promise.all(
+        Array.from({ length: PROCESSES }, () =>
+          runMirrorProcess({
+            role: 'open',
+            barriers,
+            path,
+            version: 1,
+            migrations: [],
+            startWith: { barrier: 'start', processes: PROCESSES },
+          }),
+        ),
+      );
+
+      expect(reports).toEqual(Array.from({ length: PROCESSES }, () => ({ ok: true, upCalls: 0 })));
+      await expectOneModeColumn();
+    },
+    PROCESS_TIMEOUT_MS,
+  );
+
+  it(
+    'opens in a process that found no mode column just before another process added it',
+    async () => {
+      const [late, early] = await Promise.all([
+        runMirrorProcess({
+          role: 'open',
+          barriers,
+          path,
+          version: 1,
+          migrations: [],
+          pauseAfterModeCheck: { signal: 'late-checked', waitFor: 'early-open' },
+        }),
+        runMirrorProcess({
+          role: 'open',
+          barriers,
+          path,
+          version: 1,
+          migrations: [],
+          startAfter: 'late-checked',
+          signalWhenOpen: 'early-open',
+        }),
+      ]);
+
+      expect(early).toEqual({ ok: true, upCalls: 0 });
+      expect(late).toEqual({ ok: true, upCalls: 0 });
+      await expectOneModeColumn();
     },
     PROCESS_TIMEOUT_MS,
   );

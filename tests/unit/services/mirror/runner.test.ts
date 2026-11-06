@@ -20,6 +20,7 @@ import type {
   SqliteHandle,
   SyncContext,
   SyncGenerator,
+  SyncMode,
   SyncPage,
   SyncState,
 } from '@/services/mirror/types.js';
@@ -45,23 +46,27 @@ interface FakeSource {
   throwAtPage?: number;
 }
 
-/** A token-paged source: cursor is the record offset; checkpoint is the max stamp. */
+/**
+ * A token-paged source over `src.records` in upstream order (ascending stamp).
+ * The cursor is the index of the next record, so a run handed one continues
+ * where the interrupted run stopped, whichever its mode; a refresh without one
+ * starts at the first record past its checkpoint. The checkpoint is the max stamp.
+ */
 function makeSync(src: FakeSource): SyncGenerator {
   return async function* sync(ctx: SyncContext): AsyncGenerator<SyncPage> {
     src.received.push(ctx);
-    const visible =
-      ctx.mode === 'refresh' && ctx.checkpoint
-        ? src.records.filter((r) => String(r.stamp) > (ctx.checkpoint as string))
-        : src.records;
-    let offset = ctx.mode === 'init' && ctx.cursor ? Number(ctx.cursor) : 0;
+    const records = src.records;
+    const since = ctx.mode === 'refresh' ? ctx.checkpoint : undefined;
+    const pastSince = since ? records.findIndex((r) => String(r.stamp) > since) : 0;
+    let offset = ctx.cursor ? Number(ctx.cursor) : pastSince === -1 ? records.length : pastSince;
     let pageIndex = 0;
     let tombstonesEmitted = false;
 
-    while (offset < visible.length) {
+    while (offset < records.length) {
       if (src.throwAtPage !== undefined && pageIndex === src.throwAtPage) {
         throw new Error('simulated upstream failure');
       }
-      const slice = visible.slice(offset, offset + src.pageSize);
+      const slice = records.slice(offset, offset + src.pageSize);
       offset += slice.length;
       const checkpoint = maxStamp(slice);
       const tombstones =
@@ -70,7 +75,7 @@ function makeSync(src: FakeSource): SyncGenerator {
       yield {
         records: slice,
         ...(tombstones.length > 0 && { tombstones }),
-        cursor: offset < visible.length ? String(offset) : src.finalCursor,
+        cursor: offset < records.length ? String(offset) : src.finalCursor,
         ...(checkpoint && { checkpoint }),
       };
       pageIndex += 1;
@@ -240,9 +245,9 @@ describe('mirror runner / defineMirror', () => {
     expect((await mirror.status()).ready).toBe(true);
     await mirror.close();
 
-    // status is already 'complete', so incompleteInit is false on this second
-    // init regardless of the checkpoint left over from the first run — it must
-    // restart from scratch, not resume.
+    // status is already 'complete', so this second init continues no run,
+    // whatever checkpoint the first one left — it must restart from scratch,
+    // not resume.
     const second: FakeSource = { records: corpusOf(4), pageSize: 4, received: [] };
     const mirror2 = mirrorFor(second);
     await mirror2.runSync({ mode: 'init' });
@@ -378,6 +383,342 @@ describe('mirror runner / defineMirror', () => {
     expect(state.status).toBe('error');
     expect(state.error).toBe('a plain string failure, not an Error instance');
     await mirror.close();
+  });
+
+  it.each([
+    ['init', 'its sync lease'],
+    ['refresh', 'its sync lease'],
+    ['init', 'writeState, on a store without a lease'],
+    ['refresh', 'writeState, on a store without a lease'],
+  ] as const)(
+    'records mode %s on every state write a run makes through %s',
+    async (mode, through) => {
+      const sqlite = sqliteMirrorStore({
+        path: dbPath,
+        table: 'docs',
+        primaryKey: 'id',
+        columns: { id: 'TEXT', title: 'TEXT', stamp: 'TEXT' },
+      });
+      const { syncLease: _lease, ...leaseless } = sqlite;
+      const store: MirrorStore = through === 'its sync lease' ? sqlite : leaseless;
+      const seen: Array<Pick<SyncState, 'mode' | 'status'>> = [];
+      const snapshot = async () => {
+        const { mode: writer, status } = await store.readState();
+        seen.push({ mode: writer, status });
+      };
+      // Reads the start-of-run write, then the page's write, then fails or returns.
+      const run = (failing: boolean): SyncGenerator =>
+        async function* (): AsyncGenerator<SyncPage> {
+          await snapshot();
+          yield { records: [{ id: 'a', title: 'A', stamp: stamp(0) }], cursor: 'c1' };
+          await snapshot();
+          if (failing) throw new Error('upstream failed after a page');
+        };
+      const ctx = { log: {}, signal: new AbortController().signal };
+      try {
+        await runSync(store, run(false), ctx, { mode });
+        await snapshot();
+        await expect(runSync(store, run(true), ctx, { mode })).rejects.toThrow(
+          'upstream failed after a page',
+        );
+        await snapshot();
+        expect(seen).toEqual([
+          { status: 'in_progress', mode },
+          { status: 'in_progress', mode },
+          { status: 'complete', mode },
+          { status: 'in_progress', mode },
+          { status: 'in_progress', mode },
+          { status: 'error', mode },
+        ]);
+      } finally {
+        await sqlite.close();
+      }
+    },
+  );
+
+  /**
+   * Which run's position a sync continues. Each case leaves the store the way
+   * earlier runs did, its start recorded as STAGED_START, then runs `next` over
+   * the full eight-record corpus with a source that does not fail.
+   */
+  describe('which interrupted run a sync resumes', () => {
+    const STAGED_START = '2024-02-01T00:00:00.000Z';
+
+    /** Runs `mode` over the first `upTo` records, two per page, failing at page `throwAtPage` when given. */
+    const runOver = (mode: SyncMode, upTo: number, throwAtPage?: number) =>
+      mirrorFor({
+        records: corpusOf(upTo),
+        pageSize: 2,
+        received: [],
+        ...(throwAtPage !== undefined && { throwAtPage }),
+      }).runSync({ mode });
+    const failing = (run: Promise<unknown>) => expect(run).rejects.toThrow(/simulated/);
+    /** Rewrites the stored state with `change` applied, every other field as stored. */
+    const restage = async (change: Partial<SyncState>) => {
+      const { store } = mirrorFor({ records: [], pageSize: 1, received: [] });
+      await store.writeState({ ...(await store.readState()), ...change });
+    };
+    const then =
+      (...steps: Array<() => Promise<unknown>>) =>
+      async () => {
+        for (const step of steps) await step();
+      };
+
+    // Leaves error, cursor '4', checkpoint stamp(3): pages p0–p3 applied.
+    const initFailed = () => failing(runOver('init', 8, 2));
+    // After an init of p0–p3, leaves error, cursor '6', checkpoint stamp(5): pages p4–p5 applied.
+    const refreshFailed = then(
+      () => runOver('init', 4),
+      () => failing(runOver('refresh', 8, 1)),
+    );
+    // After an init of p0–p3, leaves error with no cursor, checkpoint stamp(3): no page applied.
+    const refreshFailedFirstPage = then(
+      () => runOver('init', 4),
+      () => failing(runOver('refresh', 8, 0)),
+    );
+    // A kill runs no catch block. It leaves the in_progress state its last page
+    // committed, whose mode, cursor, checkpoint, and start the error state repeats.
+    const killed = () => restage({ status: 'in_progress', error: undefined });
+    // A store written before runs recorded their mode.
+    const unrecorded = () => restage({ mode: undefined });
+
+    interface ResumeCase {
+      applied: number;
+      checkpoint?: string;
+      cursor?: string;
+      keepsStart: boolean;
+      next: SyncMode;
+      prior: string;
+      stage: () => Promise<unknown>;
+    }
+
+    it.each<ResumeCase>([
+      {
+        prior: 'a failed init',
+        stage: initFailed,
+        next: 'init',
+        cursor: '4',
+        checkpoint: stamp(3),
+        applied: 4,
+        keepsStart: true,
+      },
+      {
+        prior: 'a killed init',
+        stage: then(initFailed, killed),
+        next: 'init',
+        cursor: '4',
+        checkpoint: stamp(3),
+        applied: 4,
+        keepsStart: true,
+      },
+      {
+        prior: 'a failed init',
+        stage: initFailed,
+        next: 'refresh',
+        checkpoint: stamp(3),
+        applied: 4,
+        keepsStart: false,
+      },
+      {
+        prior: 'a killed init',
+        stage: then(initFailed, killed),
+        next: 'refresh',
+        checkpoint: stamp(3),
+        applied: 4,
+        keepsStart: false,
+      },
+      {
+        prior: 'a failed refresh',
+        stage: refreshFailed,
+        next: 'init',
+        applied: 8,
+        keepsStart: false,
+      },
+      {
+        prior: 'a killed refresh',
+        stage: then(refreshFailed, killed),
+        next: 'init',
+        applied: 8,
+        keepsStart: false,
+      },
+      {
+        prior: 'a failed refresh',
+        stage: refreshFailed,
+        next: 'refresh',
+        cursor: '6',
+        checkpoint: stamp(5),
+        applied: 2,
+        keepsStart: true,
+      },
+      {
+        prior: 'a killed refresh',
+        stage: then(refreshFailed, killed),
+        next: 'refresh',
+        cursor: '6',
+        checkpoint: stamp(5),
+        applied: 2,
+        keepsStart: true,
+      },
+      // It continues that refresh, but with no cursor to resume the run starts afresh.
+      {
+        prior: 'a refresh that failed before its first page',
+        stage: refreshFailedFirstPage,
+        next: 'refresh',
+        checkpoint: stamp(3),
+        applied: 4,
+        keepsStart: false,
+      },
+      {
+        prior: 'a completed init',
+        stage: () => runOver('init', 4),
+        next: 'init',
+        applied: 8,
+        keepsStart: false,
+      },
+      {
+        prior: 'a completed init',
+        stage: () => runOver('init', 4),
+        next: 'refresh',
+        checkpoint: stamp(3),
+        applied: 4,
+        keepsStart: false,
+      },
+      {
+        prior: 'a completed refresh',
+        stage: then(
+          () => runOver('init', 4),
+          () => runOver('refresh', 6),
+        ),
+        next: 'init',
+        applied: 8,
+        keepsStart: false,
+      },
+      {
+        prior: 'a completed refresh',
+        stage: then(
+          () => runOver('init', 4),
+          () => runOver('refresh', 6),
+        ),
+        next: 'refresh',
+        checkpoint: stamp(5),
+        applied: 2,
+        keepsStart: false,
+      },
+      // A state with no recorded mode reads as an init's, as every state did before modes were recorded.
+      {
+        prior: 'a failed refresh, its mode unrecorded',
+        stage: then(refreshFailed, unrecorded),
+        next: 'init',
+        cursor: '6',
+        checkpoint: stamp(5),
+        applied: 2,
+        keepsStart: true,
+      },
+      {
+        prior: 'a killed refresh, its mode unrecorded',
+        stage: then(refreshFailed, killed, unrecorded),
+        next: 'init',
+        cursor: '6',
+        checkpoint: stamp(5),
+        applied: 2,
+        keepsStart: true,
+      },
+      {
+        prior: 'a failed refresh, its mode unrecorded',
+        stage: then(refreshFailed, unrecorded),
+        next: 'refresh',
+        checkpoint: stamp(5),
+        applied: 2,
+        keepsStart: false,
+      },
+      {
+        prior: 'a killed refresh, its mode unrecorded',
+        stage: then(refreshFailed, killed, unrecorded),
+        next: 'refresh',
+        checkpoint: stamp(5),
+        applied: 2,
+        keepsStart: false,
+      },
+    ])(
+      'after $prior, a run of mode $next receives cursor $cursor and checkpoint $checkpoint',
+      async ({ stage, next, cursor, checkpoint, applied, keepsStart }) => {
+        await stage();
+        await restage({ startedAt: STAGED_START });
+
+        const src: FakeSource = { records: corpusOf(8), pageSize: 2, received: [] };
+        const mirror = mirrorFor(src);
+        const result = await mirror.runSync({ mode: next });
+
+        expect(
+          src.received.map(({ mode, cursor, checkpoint }) => ({ mode, cursor, checkpoint })),
+        ).toEqual([{ mode: next, cursor, checkpoint }]);
+        expect(result.recordsApplied).toBe(applied);
+        expect(await mirror.store.count()).toBe(8);
+        const state = await mirror.store.readState();
+        expect(state.status).toBe('complete');
+        expect(state.startedAt === STAGED_START).toBe(keepsStart);
+      },
+    );
+
+    it('resumes an interrupted refresh from its own cursor, so a run of records sharing one checkpoint value all gets applied', async () => {
+      const received: Array<Pick<SyncContext, 'checkpoint' | 'cursor' | 'mode'>> = [];
+      const committed: string[][] = [];
+      // A refresh pages through r0–r4, all stamped '2026-06-04', and its budget
+      // allows two pages per run: it fails while pages remain.
+      const sync: SyncGenerator = async function* (ctx): AsyncGenerator<SyncPage> {
+        if (ctx.mode === 'init') {
+          yield {
+            records: [{ id: 'seed', title: 'seed', stamp: '2026-06-03' }],
+            checkpoint: '2026-06-03',
+          };
+          return;
+        }
+        received.push({ mode: ctx.mode, cursor: ctx.cursor, checkpoint: ctx.checkpoint });
+        const run: string[] = [];
+        committed.push(run);
+        let page = Number(ctx.cursor ?? 0);
+        for (let pages = 0; pages < 2 && page < 5; pages += 1, page += 1) {
+          const id = `r${page}`;
+          yield {
+            records: [{ id, title: id, stamp: '2026-06-04' }],
+            cursor: String(page + 1),
+            checkpoint: '2026-06-04',
+          };
+          // The runner resumes the generator only once the page has committed.
+          run.push(id);
+        }
+        if (page < 5) throw new Error('refresh budget spent');
+      };
+      const mirror = defineMirror({
+        name: 'shared-checkpoint',
+        store: sqliteMirrorStore({
+          path: dbPath,
+          table: 'docs',
+          primaryKey: 'id',
+          columns: { id: 'TEXT', title: 'TEXT', stamp: 'TEXT' },
+        }),
+        sync,
+      });
+      mirrors.add(mirror);
+
+      await mirror.runSync({ mode: 'init' });
+      await expect(mirror.runSync({ mode: 'refresh' })).rejects.toThrow('refresh budget spent');
+      await expect(mirror.runSync({ mode: 'refresh' })).rejects.toThrow('refresh budget spent');
+      await expect(mirror.runSync({ mode: 'refresh' })).resolves.toMatchObject({
+        recordsApplied: 1,
+        total: 6,
+      });
+
+      expect(received).toEqual([
+        { mode: 'refresh', cursor: undefined, checkpoint: '2026-06-03' },
+        { mode: 'refresh', cursor: '2', checkpoint: '2026-06-04' },
+        { mode: 'refresh', cursor: '4', checkpoint: '2026-06-04' },
+      ]);
+      expect(committed).toEqual([['r0', 'r1'], ['r2', 'r3'], ['r4']]);
+      const state = await mirror.store.readState();
+      expect(state).toMatchObject({ status: 'complete', checkpoint: '2026-06-04' });
+      expect(state.cursor).toBeUndefined();
+    });
   });
 });
 

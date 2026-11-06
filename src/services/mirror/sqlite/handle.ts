@@ -13,10 +13,23 @@
 import { mkdir } from 'node:fs/promises';
 import { basename, dirname, resolve as resolvePath } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
-import { configurationError, databaseError, McpError } from '@/types-global/errors.js';
+import {
+  configurationError,
+  databaseError,
+  McpError,
+  validationError,
+} from '@/types-global/errors.js';
 import { runtimeCaps } from '@/utils/internal/runtime.js';
 
-/** Primitive value storable in a mirror column. Buffers/bigints are out of scope for v1. */
+/**
+ * Primitive value storable in a mirror column. Values outside it that
+ * unvalidated JSON or a source can still produce bind the same on both
+ * drivers: a boolean as the integer `1`/`0` (`'1'`/`'0'` in a `TEXT` column),
+ * a `bigint` in the signed 64-bit range as an integer, and a `Uint8Array` as a
+ * blob. A `bigint` outside that range is refused with `ValidationError`, as is
+ * an object, array, or `Date` in the store's records, tombstones, ids,
+ * filters, and `match`.
+ */
 export type SqlValue = string | number | null;
 
 /**
@@ -106,6 +119,34 @@ interface BetterSqlite3Ctor {
   new (path: string): SqliteDriver & { close(): void };
 }
 
+const INT64_MIN = -(2n ** 63n);
+const INT64_MAX = 2n ** 63n - 1n;
+
+/**
+ * Give the positional parameters of a statement one binding on both drivers.
+ * A boolean binds as the integer `1n`/`0n`: `bun:sqlite` already binds it as
+ * an integer, `better-sqlite3` refuses it, and a JS number would bind as REAL
+ * on `better-sqlite3`, storing `'1.0'` in a `TEXT` column. A bigint outside
+ * the signed 64-bit range is refused, where `bun:sqlite` would wrap it and
+ * `better-sqlite3` throw a `RangeError`. Objects pass through untouched: bound
+ * alone, one is the driver's named-parameter list. `params` is the call's own
+ * rest array, so a boolean is replaced in place and nothing is allocated.
+ */
+function bindParams(params: unknown[]): unknown[] {
+  for (let i = 0; i < params.length; i++) {
+    const value = params[i];
+    if (typeof value === 'boolean') {
+      params[i] = value ? 1n : 0n;
+    } else if (typeof value === 'bigint' && (value < INT64_MIN || value > INT64_MAX)) {
+      throw validationError(
+        `Mirror SQL parameter ${i + 1} is a bigint outside the signed 64-bit range SQLite stores; pass it as a string instead.`,
+        { parameter: i + 1 },
+      );
+    }
+  }
+  return params;
+}
+
 /** Adapts a driver to the runtime-neutral {@link SqliteHandle}; `close` is driver-specific. */
 function wrapDriver(db: SqliteDriver, close: () => void): SqliteHandle {
   return {
@@ -116,9 +157,9 @@ function wrapDriver(db: SqliteDriver, close: () => void): SqliteHandle {
     prepare: <TRow>(sql: string): SqliteStatement<TRow> => {
       const stmt = db.prepare(sql);
       return {
-        all: (...params) => stmt.all(...(params as unknown[])) as TRow[],
-        get: (...params) => stmt.get(...(params as unknown[])) as TRow | undefined,
-        run: (...params) => stmt.run(...(params as unknown[])),
+        all: (...params) => stmt.all(...bindParams(params)) as TRow[],
+        get: (...params) => stmt.get(...bindParams(params)) as TRow | undefined,
+        run: (...params) => stmt.run(...bindParams(params)),
       };
     },
     transaction: <T>(fn: () => T, mode: 'deferred' | 'immediate' = 'deferred'): T => {
