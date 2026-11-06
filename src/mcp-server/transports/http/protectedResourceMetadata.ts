@@ -35,7 +35,14 @@ export function protectedResourceMetadataHandler(c: Context): Response {
   });
 
   const origin = resolvePublicOrigin(config.mcpPublicUrl, c.req.url);
-  const resource = config.mcpServerResourceIdentifier ?? config.oauthAudience ?? `${origin}/mcp`;
+  /**
+   * RFC 9728 §3.3: the resource is the URL a client requests the MCP endpoint
+   * at — the configured path verbatim, the only URL the endpoint answers at.
+   */
+  const resource =
+    config.mcpServerResourceIdentifier ??
+    config.oauthAudience ??
+    `${origin}${config.mcpHttpEndpointPath}`;
 
   const metadata: Record<string, unknown> = {
     resource,

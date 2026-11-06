@@ -350,6 +350,32 @@ describe('HTTP Transport', () => {
       });
     });
 
+    test('names the configured endpoint URL as the resource at both well-known paths for a custom endpoint path', async () => {
+      await withConfigOverrides(
+        {
+          mcpAuthMode: 'jwt',
+          mcpHttpEndpointPath: '/api/mcp',
+          mcpServerResourceIdentifier: undefined,
+          oauthAudience: undefined,
+        },
+        async () => {
+          const { app } = await buildApp();
+
+          for (const path of [
+            '/.well-known/oauth-protected-resource',
+            '/.well-known/oauth-protected-resource/api/mcp',
+          ]) {
+            const response = await app.request(path, { method: 'GET' });
+
+            expect(response.status).toBe(200);
+            expect(((await response.json()) as Record<string, unknown>).resource).toBe(
+              'http://localhost/api/mcp',
+            );
+          }
+        },
+      );
+    });
+
     // Serving Protected Resource Metadata declares the server an OAuth-protected
     // resource. In `none` mode that sends a discovering client into an OAuth flow
     // it can never complete — no authorization_servers to register with — so the
@@ -1100,6 +1126,78 @@ describe('HTTP Transport', () => {
         expect(sessionStore?.getConnection(sessionId)?.singleRequestIds.size).toBe(0);
       });
     });
+
+    // A session created under a client alone is bound to that exact identity: a
+    // token of the same client that also carries a subject is another principal.
+    test.each<[string, (sessionId: string) => RequestInit, string]>([
+      [
+        'a POST',
+        (sessionId) => ({
+          method: 'POST',
+          headers: legacyHeaders({ 'mcp-session-id': sessionId }),
+          body: JSON.stringify({ jsonrpc: '2.0', method: 'tools/list', id: 2 }),
+        }),
+        'Session not found or expired',
+      ],
+      [
+        'a GET stream',
+        (sessionId) => ({
+          method: 'GET',
+          headers: { origin: ORIGIN, accept: 'text/event-stream', 'mcp-session-id': sessionId },
+        }),
+        'Session not found or expired',
+      ],
+      [
+        'a DELETE',
+        (sessionId) => ({
+          method: 'DELETE',
+          headers: { origin: ORIGIN, 'mcp-session-id': sessionId },
+        }),
+        'Session not found or access denied',
+      ],
+    ])(
+      'refuses %s from the same client carrying a subject the session lacks with 404',
+      async (_label, init, error) => {
+        await withStatefulMode(async () => {
+          const warning = vi.spyOn(logger, 'warning');
+          const { app, sessionStore } = await buildApp();
+          const clientOnly: AuthInfo = { token: 'token-c', clientId: 'client-c', scopes: [] };
+
+          const initialized = await asIdentity(clientOnly, () =>
+            app.request(ENDPOINT, {
+              method: 'POST',
+              headers: legacyHeaders(),
+              body: initializeBody(),
+            }),
+          );
+          await initialized.text();
+          const sessionId = initialized.headers.get('mcp-session-id') as string;
+          expect(sessionId).toBeTruthy();
+
+          const response = await asIdentity({ ...clientOnly, subject: 'user-c' }, () =>
+            app.request(ENDPOINT, init(sessionId)),
+          );
+
+          expect(response.status).toBe(404);
+          expect(await response.json()).toEqual({ error });
+          expect(warning).toHaveBeenCalledWith(
+            'Session subject mismatch - possible hijacking attempt',
+            expect.objectContaining({ operation: 'SessionStore.isValidForIdentity' }),
+          );
+          // The session survives the refusal and still serves its owner.
+          expect((sessionStore as SessionStore).getSessionCount()).toBe(1);
+          const owner = await asIdentity(clientOnly, () =>
+            app.request(ENDPOINT, {
+              method: 'POST',
+              headers: legacyHeaders({ 'mcp-session-id': sessionId }),
+              body: JSON.stringify({ jsonrpc: '2.0', method: 'tools/list', id: 3 }),
+            }),
+          );
+          expect(owner.status).toBe(200);
+          await owner.text();
+        });
+      },
+    );
 
     describe('DELETE', () => {
       test('terminates the session and makes it unreachable', async () => {

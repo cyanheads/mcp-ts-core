@@ -12,6 +12,7 @@ const defaultMockConfig = {
   oauthAudience: undefined as string | undefined,
   oauthIssuerUrl: 'https://issuer.example.com',
   mcpPublicUrl: undefined as string | undefined,
+  mcpHttpEndpointPath: '/mcp',
 };
 const mockConfig = { ...defaultMockConfig };
 
@@ -144,4 +145,39 @@ describe('protectedResourceMetadataHandler', () => {
 
     expect(data.resource).toBe('https://mcp.example.com/mcp');
   });
+
+  /**
+   * RFC 9728 §3.3: the document at the path-suffixed URL names the resource the
+   * suffix was derived from, and the one at a 401's `resource_metadata` URL (the
+   * bare path) names the URL the client requested. Both are the MCP endpoint,
+   * written with the configured path verbatim — the only URL it answers at.
+   */
+  it.each([
+    ['/api/mcp', undefined, 'http://host.example/api/mcp'],
+    ['/api/mcp/', undefined, 'http://host.example/api/mcp/'],
+    ['/', undefined, 'http://host.example/'],
+    ['/api/mcp', 'https://public.example/prefix', 'https://public.example/prefix/api/mcp'],
+  ])(
+    'advertises the endpoint URL for endpoint path %s (public URL %s) at every mounted path',
+    async (endpointPath, publicUrl, resource) => {
+      mockConfig.mcpAuthMode = 'jwt';
+      mockConfig.mcpHttpEndpointPath = endpointPath;
+      mockConfig.mcpPublicUrl = publicUrl;
+      // The transport mounts the suffixed variant only for a non-root endpoint.
+      const paths = ['/.well-known/oauth-protected-resource'];
+      if (endpointPath !== '/') paths.push(`/.well-known/oauth-protected-resource${endpointPath}`);
+      const app = new Hono();
+      for (const path of paths) app.get(path, protectedResourceMetadataHandler);
+
+      for (const path of paths) {
+        const response = await app.request(`http://host.example${path}`);
+
+        expect(response.status).toBe(200);
+        expect(await readMetadata(response)).toEqual({
+          bearer_methods_supported: ['header'],
+          resource,
+        });
+      }
+    },
+  );
 });

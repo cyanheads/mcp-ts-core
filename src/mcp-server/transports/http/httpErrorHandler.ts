@@ -123,15 +123,26 @@ export const httpErrorHandler = async <TBindings extends object = HonoNodeBindin
       break;
     case JsonRpcErrorCode.Unauthorized:
       status = 401;
-      // RFC 9728 §7: 401 responses MUST include WWW-Authenticate with resource_metadata URL.
-      // /.well-known/oauth-protected-resource is always mounted regardless of auth mode.
-      // https://datatracker.ietf.org/doc/html/rfc9728#section-7
+      /**
+       * The MCP authorization spec requires a 401 to name the Protected Resource
+       * Metadata URL in `WWW-Authenticate` (RFC 9728 §5.1). That route is mounted
+       * only when MCP_AUTH_MODE is not `none`.
+       * https://datatracker.ietf.org/doc/html/rfc9728#section-5.1
+       */
       {
         const origin = resolvePublicOrigin(config.mcpPublicUrl, c.req.url);
         const resourceMetadataUrl = `${origin}/.well-known/oauth-protected-resource`;
+        /**
+         * The realm is an RFC 9110 §5.6.4 quoted-string of printable ASCII:
+         * `"` and `\` become quoted-pairs and every other code point becomes
+         * `?`. A Fetch `Headers` refuses CR, LF, NUL, and anything above U+00FF,
+         * node:http refuses the other controls when it writes the response, and
+         * Latin-1 reaches a UTF-8 reader as a stray byte.
+         */
+        const realm = config.mcpServerName.replace(/[^\x20-\x7E]/gu, '?').replace(/["\\]/g, '\\$&');
         c.header(
           'WWW-Authenticate',
-          `Bearer realm="${config.mcpServerName}", resource_metadata="${resourceMetadataUrl}"`,
+          `Bearer realm="${realm}", resource_metadata="${resourceMetadataUrl}"`,
         );
         logger.debug(
           'Added WWW-Authenticate header for 401 response.',

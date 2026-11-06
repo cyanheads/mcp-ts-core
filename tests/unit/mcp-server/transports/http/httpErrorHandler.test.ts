@@ -4,7 +4,7 @@
  */
 
 import { trace } from '@opentelemetry/api';
-import type { Context } from 'hono';
+import { type Context, Hono } from 'hono';
 import { HTTPException } from 'hono/http-exception';
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
 import { z } from 'zod';
@@ -373,6 +373,82 @@ describe('HTTP Error Handler', () => {
 
       const wwwAuthHeader = headers.get('www-authenticate');
       expect(wwwAuthHeader).toBeUndefined();
+    });
+
+    describe('a configured server name or public URL', () => {
+      /** RFC 9110 quoted-strings of printable ASCII, `"` and `\` as quoted-pairs. */
+      const CHALLENGE =
+        /^Bearer realm="(?:[ !#-[\]-~]|\\["\\])*", resource_metadata="[!#-[\]-~]+"$/;
+      const RESOURCE_METADATA = 'http://localhost/.well-known/oauth-protected-resource';
+
+      /**
+       * Answers an unauthenticated POST through a real Hono app, so the challenge
+       * goes through the runtime's own `Headers` — the mocked context above
+       * stores any string — and a value it refuses would cost the 401.
+       */
+      async function challengeResponse(): Promise<Response> {
+        const app = new Hono<{ Bindings: HonoNodeBindings }>();
+        app.post('/mcp', () => {
+          throw new McpError(
+            JsonRpcErrorCode.Unauthorized,
+            'Missing or invalid Authorization header. Bearer scheme required.',
+          );
+        });
+        app.onError(httpErrorHandler);
+        return await app.request('http://localhost/mcp', {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'ping' }),
+        });
+      }
+
+      afterEach(() => {
+        mockConfig.mcpServerName = 'test-server';
+      });
+
+      test.each([
+        { label: 'double quotes', name: 'acme "prod" server', realm: 'acme \\"prod\\" server' },
+        { label: 'a backslash', name: 'a\\b', realm: 'a\\\\b' },
+        { label: 'CJK', name: '服务器', realm: '???' },
+        { label: 'an astral emoji', name: 'rocket 🚀', realm: 'rocket ?' },
+        { label: 'Latin-1', name: 'café', realm: 'caf?' },
+        { label: 'CR LF', name: 'a\u{d}\u{a}b', realm: 'a??b' },
+        { label: 'U+0000', name: 'a\u{0}b', realm: 'a?b' },
+        { label: 'U+0001', name: 'a\u{1}b', realm: 'a?b' },
+        { label: 'U+007F', name: 'a\u{7f}b', realm: 'a?b' },
+        { label: 'printable ASCII', name: 'test-server', realm: 'test-server' },
+      ])('answers 401 with realm $realm for a server name with $label', async ({ name, realm }) => {
+        mockConfig.mcpServerName = name;
+
+        const response = await challengeResponse();
+
+        expect(response.status).toBe(401);
+        const challenge = response.headers.get('www-authenticate');
+        expect(challenge).toBe(`Bearer realm="${realm}", resource_metadata="${RESOURCE_METADATA}"`);
+        expect(challenge).toMatch(CHALLENGE);
+      });
+
+      test.each([
+        ['https://例え.jp', 'https://xn--r8jz45g.jp/.well-known/oauth-protected-resource'],
+        [
+          'https://mcp.example.com/p"q',
+          'https://mcp.example.com/p%22q/.well-known/oauth-protected-resource',
+        ],
+      ])(
+        'answers 401 with a serialized resource_metadata for MCP_PUBLIC_URL %s',
+        async (publicUrl, resourceMetadata) => {
+          mockConfig.mcpPublicUrl = publicUrl;
+
+          const response = await challengeResponse();
+
+          expect(response.status).toBe(401);
+          const challenge = response.headers.get('www-authenticate');
+          expect(challenge).toBe(
+            `Bearer realm="test-server", resource_metadata="${resourceMetadata}"`,
+          );
+          expect(challenge).toMatch(CHALLENGE);
+        },
+      );
     });
   });
 

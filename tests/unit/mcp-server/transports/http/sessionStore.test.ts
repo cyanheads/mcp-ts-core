@@ -220,6 +220,24 @@ describe('SessionStore - Security & Tenant Isolation', () => {
       expect(store.isValidForIdentity(SESSION_1, { tenantId: 'tenant-b' })).toBe(false);
       expect(store.isValidForIdentity(SESSION_1, { tenantId: 'tenant-a' })).toBe(true);
     });
+
+    const FULL: SessionIdentity = { tenantId: 'tenant-a', clientId: 'client-1', subject: 'user-1' };
+
+    it.each<[string, SessionIdentity | undefined]>([
+      ['a different tenant', { ...FULL, tenantId: 'tenant-b' }],
+      ['a different client', { ...FULL, clientId: 'client-2' }],
+      ['a different subject', { ...FULL, subject: 'user-2' }],
+      ['no tenant', { clientId: 'client-1', subject: 'user-1' }],
+      ['no client', { tenantId: 'tenant-a', subject: 'user-1' }],
+      ['no subject', { tenantId: 'tenant-a', clientId: 'client-1' }],
+      ['no identity', undefined],
+    ])('REJECTS a fully bound session for a request with %s', (_label, identity) => {
+      register(SESSION_1, FULL);
+
+      expect(store.isValidForIdentity(SESSION_1, identity)).toBe(false);
+      // The refusal leaves the binding intact for the owner.
+      expect(store.isValidForIdentity(SESSION_1, { ...FULL })).toBe(true);
+    });
   });
 
   describe('Tenant Isolation - Security', () => {
@@ -282,12 +300,12 @@ describe('SessionStore - Security & Tenant Isolation', () => {
   });
 
   describe('Partial Identity Matching', () => {
-    it('validates when only tenantId is set', () => {
+    it('accepts a tenant-only session only for that tenant with no other field', () => {
       register(SESSION_1, { tenantId: 'tenant-a' });
 
       expect(store.isValidForIdentity(SESSION_1, { tenantId: 'tenant-a' })).toBe(true);
       expect(store.isValidForIdentity(SESSION_1, { tenantId: 'tenant-a', clientId: 'any' })).toBe(
-        true,
+        false,
       );
     });
 
@@ -296,6 +314,47 @@ describe('SessionStore - Security & Tenant Isolation', () => {
 
       expect(store.isValidForIdentity(SESSION_1, { clientId: 'client-1' })).toBe(true);
       expect(store.isValidForIdentity(SESSION_1, { clientId: 'client-2' })).toBe(false);
+    });
+
+    it('REJECTS a client-only session for the same client carrying a subject or tenant', () => {
+      register(SESSION_1, { clientId: 'client-1' });
+
+      expect(store.isValidForIdentity(SESSION_1, { clientId: 'client-1', subject: 'user-1' })).toBe(
+        false,
+      );
+      expect(
+        store.isValidForIdentity(SESSION_1, { clientId: 'client-1', tenantId: 'tenant-a' }),
+      ).toBe(false);
+      expect(store.isValidForIdentity(SESSION_1, { clientId: 'client-1' })).toBe(true);
+    });
+
+    it('treats an empty-string field as absent', () => {
+      register(SESSION_1, { clientId: 'client-1', subject: '' });
+      register(SESSION_2, { clientId: 'client-1' });
+
+      expect(store.isValidForIdentity(SESSION_1, { clientId: 'client-1', subject: '' })).toBe(true);
+      expect(store.isValidForIdentity(SESSION_1, { clientId: 'client-1' })).toBe(true);
+      expect(store.isValidForIdentity(SESSION_1, { clientId: 'client-1', subject: 'user-1' })).toBe(
+        false,
+      );
+      expect(store.isValidForIdentity(SESSION_2, { clientId: 'client-1', subject: '' })).toBe(true);
+    });
+
+    // A token whose `tid` claim is `""` reaches the store as `tenantId: ''`.
+    it('treats an empty-string tenant as absent', () => {
+      register(SESSION_1, { clientId: 'client-1', tenantId: '' });
+      register(SESSION_2, { clientId: 'client-1' });
+
+      expect(store.isValidForIdentity(SESSION_1, { clientId: 'client-1', tenantId: '' })).toBe(
+        true,
+      );
+      expect(store.isValidForIdentity(SESSION_1, { clientId: 'client-1' })).toBe(true);
+      expect(
+        store.isValidForIdentity(SESSION_1, { clientId: 'client-1', tenantId: 'tenant-a' }),
+      ).toBe(false);
+      expect(store.isValidForIdentity(SESSION_2, { clientId: 'client-1', tenantId: '' })).toBe(
+        true,
+      );
     });
   });
 

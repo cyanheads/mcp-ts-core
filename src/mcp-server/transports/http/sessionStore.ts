@@ -201,9 +201,13 @@ export class SessionStore {
    * Security checks:
    * 1. Session existence
    * 2. Staleness timeout
-   * 3. Tenant ID match (if session has tenantId)
-   * 4. Client ID match (if session has clientId)
-   * 5. Subject match (if session has subject)
+   * 3. Tenant ID match
+   * 4. Client ID match
+   * 5. Subject match
+   *
+   * Once a session is identity-bound, the request's tenant ID, client ID, and
+   * subject must each equal the session's: a request that adds, drops, or
+   * changes any of them is refused. An absent field and `""` are the same value.
    *
    * Binds the identity atomically on the first authenticated request when the
    * session was created unauthenticated.
@@ -265,8 +269,11 @@ export class SessionStore {
       return false;
     }
 
-    // Verify tenant ID match — reject if session is bound but request lacks or mismatches
-    if (session.tenantId && session.tenantId !== identity.tenantId) {
+    /**
+     * Each field must match exactly, an absent field included. `""` compares as
+     * absent because the session never stores one (`register` drops it).
+     */
+    if ((session.tenantId ?? '') !== (identity.tenantId ?? '')) {
       warn('Session tenant mismatch - possible hijacking attempt', {
         sessionTenant: session.tenantId,
         requestTenant: identity.tenantId,
@@ -275,8 +282,7 @@ export class SessionStore {
       return false;
     }
 
-    // Verify client ID match — reject if session is bound but request lacks or mismatches
-    if (session.clientId && session.clientId !== identity.clientId) {
+    if ((session.clientId ?? '') !== (identity.clientId ?? '')) {
       warn('Session client mismatch - possible hijacking attempt', {
         sessionClient: session.clientId,
         requestClient: identity.clientId,
@@ -285,8 +291,7 @@ export class SessionStore {
       return false;
     }
 
-    // Verify subject match — reject if session is bound but request lacks or mismatches
-    if (session.subject && session.subject !== identity.subject) {
+    if ((session.subject ?? '') !== (identity.subject ?? '')) {
       warn('Session subject mismatch - possible hijacking attempt', {
         sessionSubject: session.subject,
         requestSubject: identity.subject,

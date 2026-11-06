@@ -57,6 +57,7 @@ vi.mock('@/utils/internal/requestContext.js', () => ({
 }));
 
 import { type SessionConnection, SessionStore } from '@/mcp-server/transports/http/sessionStore.js';
+import { logger } from '@/utils/internal/logger.js';
 
 /** Valid 64-character hex session ID for all tests. */
 const SESSION_ID = 'a'.repeat(64);
@@ -157,6 +158,39 @@ describe('SessionStore — mcp.sessions.events counter', () => {
       'mcp.session.event': 'rejected',
     });
   });
+
+  it.each([
+    [
+      'subject',
+      { clientId: 'client-1', subject: 'user-1' },
+      'Session subject mismatch - possible hijacking attempt',
+      { sessionSubject: undefined, requestSubject: 'user-1' },
+    ],
+    [
+      'tenant',
+      { clientId: 'client-1', tenantId: 'tenant-a' },
+      'Session tenant mismatch - possible hijacking attempt',
+      { sessionTenant: undefined, requestTenant: 'tenant-a' },
+    ],
+  ])(
+    'records "rejected" and warns when the request carries a %s the session lacks',
+    (_field, identity, message, extra) => {
+      store.register(SESSION_ID, connection(), { clientId: 'client-1' });
+      mockCounterAdd.mockClear();
+
+      const valid = store.isValidForIdentity(SESSION_ID, identity);
+
+      expect(valid).toBe(false);
+      expect(mockCounterAdd).toHaveBeenCalledTimes(1);
+      expect(mockCounterAdd).toHaveBeenCalledWith(1, {
+        'mcp.session.event': 'rejected',
+      });
+      expect(logger.warning).toHaveBeenCalledWith(
+        message,
+        expect.objectContaining({ operation: 'SessionStore.isValidForIdentity', extra }),
+      );
+    },
+  );
 
   it('records "rejected" when session has identity but request has none', () => {
     store.register(SESSION_ID, connection(), {

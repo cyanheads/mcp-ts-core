@@ -25,11 +25,15 @@ const MAX_SESSIONS = 2;
 /** Slot index → the 64-hex session ID the store is keyed by. */
 const SESSION_IDS = [0, 1, 2, 3].map((slot) => String(slot).repeat(64));
 
-/** Identity pool; index 0 is the unauthenticated caller. */
+/**
+ * Identity pool; index 0 is the unauthenticated caller. Index 3 shares index
+ * 1's client but carries no tenant or subject, so it is a different principal.
+ */
 const IDENTITIES: (SessionIdentity | undefined)[] = [
   undefined,
   { tenantId: 'tenant-a', clientId: 'client-a', subject: 'subject-a' },
   { tenantId: 'tenant-b', clientId: 'client-b', subject: 'subject-b' },
+  { clientId: 'client-a' },
 ];
 
 /**
