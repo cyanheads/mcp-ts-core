@@ -600,7 +600,8 @@ export type HandlerContext<
  *
  * Either error's stack starts at the line that called `fail`, with this
  * module's frames cut, as an error factory's does (#694): the `Error in tool:`
- * record's `stack` opens on the handler's `throw ctx.fail(…)`.
+ * or `Error in resource:` record's `stack` opens on the handler's
+ * `throw ctx.fail(…)`.
  */
 export function createFail(errors: readonly ErrorContract[]): TypedFail<string> {
   const byReason = new Map<string, ErrorContract>();

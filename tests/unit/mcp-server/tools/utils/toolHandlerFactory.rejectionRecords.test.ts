@@ -455,7 +455,7 @@ describe('a tool refused for a missing scope (#585)', () => {
     });
   });
 
-  it('writes only the scope check’s records for a resource read its auth check refuses', async () => {
+  it('writes the scope check’s record and one notice failure record, with no stack, for a resource read its auth check refuses', async () => {
     const scopedResource = resource('records://{id}', {
       description: 'Requires a scope.',
       mimeType: 'application/json',
@@ -471,8 +471,22 @@ describe('a tool refused for a missing scope (#585)', () => {
       ),
     ).rejects.toMatchObject({ code: JsonRpcErrorCode.Forbidden });
 
-    expect(nonDebugWrites()).toEqual([['warn', 'Authorization failed: Missing required scopes.']]);
-    expect(adds('mcp.errors.classified')).toEqual([]);
+    // pino has no `notice` level; the logger writes it as `info`.
+    expect(nonDebugWrites()).toEqual([
+      ['warn', 'Authorization failed: Missing required scopes.'],
+      ['info', 'Error in resource:records://{id}: Insufficient permissions.'],
+    ]);
+    expect(levelOf('Error in resource:')).toBe('notice');
+    const record = writes.find((w) => w.msg.startsWith('Error in resource:'));
+    expect(record?.fields).not.toHaveProperty('stack');
+    expect(adds('mcp.errors.classified')).toEqual([
+      {
+        'mcp.error.classified_code': String(JsonRpcErrorCode.Forbidden),
+        'mcp.error.category': 'client',
+        'mcp.error.severity': 'notice',
+        operation: 'resource:records://{id}',
+      },
+    ]);
   });
 });
 

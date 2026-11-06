@@ -4,14 +4,17 @@
  * @module src/mcp-server/resources/utils/resourceHandlerFactory
  */
 
-import type {
-  InputRequiredResult,
-  ReadResourceResult,
-  ServerContext,
-  Variables,
+import {
+  type InputRequiredResult,
+  ProtocolError,
+  type ReadResourceResult,
+  type ServerContext,
+  type Variables,
 } from '@modelcontextprotocol/server';
+import { ZodError } from 'zod';
 
 import { resolveDeclaredFailure } from '@/core/context.js';
+import { failureSeverity } from '@/mcp-server/failureSeverity.js';
 import {
   buildHandlerContext,
   type HandlerServices,
@@ -19,6 +22,7 @@ import {
   resolveHandlerRequest,
 } from '@/mcp-server/handlerContext.js';
 import {
+  CLIENT_CAPABILITY_MISSING_REASON,
   type ClientCapabilityView,
   isInputRequiredSignal,
   sealSignal,
@@ -26,11 +30,16 @@ import {
 import type { NotifierSources } from '@/mcp-server/notifications.js';
 import { parseOutputContract } from '@/mcp-server/outputContract.js';
 import type { AnyResourceDefinition } from '@/mcp-server/resources/utils/resourceDefinition.js';
-import { withRequiredScopes } from '@/mcp-server/transports/auth/lib/authUtils.js';
+import { isScopeRefusal, withRequiredScopes } from '@/mcp-server/transports/auth/lib/authUtils.js';
 import { JsonRpcErrorCode, McpError } from '@/types-global/errors.js';
 import { asRequestCancelled, ErrorHandler } from '@/utils/internal/error-handler/errorHandler.js';
 import {
+  copyFields,
+  errorText,
   isInstance,
+  loggedStack,
+  readErrorData,
+  readField,
   readWireErrorData,
   UNREADABLE,
 } from '@/utils/internal/error-handler/helpers.js';
@@ -115,8 +124,9 @@ function observableResourceUri(uri: URL): { uri: string; uriLength?: number } {
  * - Checks inline `auth` scopes if defined
  * - Validates params via Zod schema
  * - Formats response via `format` or JSON default
- * - Catches errors and re-throws for the SDK, with the declared recovery filled
- *   (#579) and the read's request id added (#576)
+ * - Catches errors, writes one failure record per failed read (#734), and
+ *   re-throws for the SDK, with the declared recovery filled (#579) and the
+ *   read's request id added (#576)
  */
 export function createResourceHandler(
   def: AnyResourceDefinition,
@@ -153,6 +163,12 @@ export function createResourceHandler(
       },
     });
 
+    /**
+     * Set once the read reaches the measured region; a `ZodError` raised before
+     * it is the `params` gate's rejection.
+     */
+    let measured = false;
+
     try {
       // Check inline auth scopes
       if (def.auth && def.auth.length > 0) {
@@ -166,6 +182,7 @@ export function createResourceHandler(
       // output-schema validation and `format()` decide the client-visible
       // outcome, so a failure in either is a failed read. Closing the span when
       // the handler returned recorded those as successes (#346).
+      measured = true;
       return await measureResourceExecution(
         async (spanContext, recordOutput) => {
           const ctx = buildHandlerContext(
@@ -205,11 +222,13 @@ export function createResourceHandler(
             // derived from what leaves this callback (#421). An input-required
             // signal leaves with its `requestState` sealed when a key is
             // configured, so a sealing failure is a failed read like any other;
-            // anything else leaves as itself, never awaited (#697).
+            // an SDK `ProtocolError` leaves as the `McpError` it stands for, so
+            // those two carry its code (#583); anything else leaves as itself,
+            // never awaited (#697).
             throw asRequestCancelled(
               isInputRequiredSignal(error)
                 ? await sealSignal(error, services.requestState, serverContext)
-                : error,
+                : fromProtocolError(error),
               request.signal,
             );
           }
@@ -225,23 +244,122 @@ export function createResourceHandler(
       // an `McpError` carrying the reason and hint (#379).
       if (isInputRequiredSignal(error)) return error.result;
 
-      // Classified without logging: the completion record carries the code.
-      const { failure } = resolveDeclaredFailure(def.errors, asMcpError(error));
+      /**
+       * One reason-to-entry lookup: the declared recovery fills a failure that
+       * carries none (#579) and the entry's severity sets the record's level.
+       * Filled before `handleError`, so the record and the client's error carry
+       * the same hint.
+       */
+      const { entry, failure } = resolveDeclaredFailure(def.errors, asMcpError(error));
+      /**
+       * Read once, through a copy: the failure may be a thrown value whose
+       * `data` cannot be read (#697).
+       */
+      const data = readErrorData(failure);
+      /**
+       * The read's own routine refusals, neither with a reason an entry could
+       * name: the `params` gate's rejection, and the spec's not-found shape.
+       */
+      const refusal =
+        (!measured && isInstance(error, ZodError)) ||
+        isResourceNotFound(ErrorHandler.determineErrorCode(failure), data);
+      const severity =
+        failureSeverity(entry, failure, data?.reason) ?? (refusal ? 'notice' : undefined);
+      /**
+       * The record carries what the client receives, so a `ZodError` is logged
+       * as its classified failure, its issues bounded (#710), and an `McpError`
+       * with its declared hint; any other value is logged as itself, with its
+       * own name, stack, and cause chain. No refusal is a fault in this server,
+       * so none logs a stack (#651). `handleError` returns the error rebuilt
+       * with more `data`; the client's error is built from `failure` instead.
+       */
+      ErrorHandler.handleError(
+        isInstance(error, McpError) || isInstance(error, ZodError) ? failure : error,
+        {
+          operation: `resource:${resourceName}`,
+          context: appContext,
+          ...(severity !== undefined && { severity }),
+          ...((refusal ||
+            data?.reason === CLIENT_CAPABILITY_MISSING_REASON ||
+            isScopeRefusal(failure)) && { includeStack: false }),
+        },
+      );
       throw withRequestId(failure, appContext.requestId);
     }
   };
 }
 
 /**
+ * An SDK `ProtocolError` (`ResourceNotFoundError`, `UrlElicitationRequiredError`,
+ * …) as an `McpError` with its `code`, `message`, and object `data`, so a read
+ * answers with the JSON-RPC error the handler stated, as it does for an
+ * `McpError`: a `ResourceNotFoundError` reaches the client exactly as the SDK's
+ * own miss does. `data` that is not a plain object is left off, since an
+ * `McpError` carries a record. Matched with the SDK's brand-checked
+ * `instanceof`, so a copy built by `@modelcontextprotocol/client` counts. The
+ * result keeps the thrown error's stack — or none when it cannot be read, so a
+ * record written from it never starts in this factory — and takes the thrown
+ * error as its `cause`.
+ *
+ * Every other value is returned as is — an `SdkError` included, which the
+ * classifier maps — and so is a `ProtocolError` whose `code` cannot be read or
+ * is not an integer the SDK would write. Never throws on the thrown error (#697).
+ */
+function fromProtocolError(error: unknown): unknown {
+  if (!isInstance(error, ProtocolError)) return error;
+  const code = readField(error, 'code');
+  if (!Number.isSafeInteger(code)) return error;
+  const data = readField(error, 'data');
+  const converted = new McpError(
+    code as JsonRpcErrorCode,
+    errorText(readField(error, 'message')),
+    typeof data === 'object' && data !== null && !isInstance(data, Array)
+      ? copyFields(data as Record<string, unknown>)
+      : undefined,
+    { cause: error },
+  );
+  const stack = readField(error, 'stack');
+  if (typeof stack === 'string' && stack !== UNREADABLE) converted.stack = stack;
+  else delete converted.stack;
+  return converted;
+}
+
+/**
  * The thrown value as an `McpError`, classified by {@link ErrorHandler.classifyOnly}
  * when it is not one: a `params` rejection or a handler-thrown `ZodError` carries
  * its issues as `classifyOnly` bounds them, the first 10 with `issuesCount` beside
- * a cut list (#710).
+ * a cut list (#710). A classified `Error` takes the thrown one's stack — a
+ * `ZodError`'s header line as its one-line summary, never Zod's JSON of every
+ * issue — or none when it has none, as a `ZodError` from `safeParse` has none
+ * on Bun, so a record written from it never starts in this factory.
  */
 function asMcpError(error: unknown): McpError {
   if (isInstance(error, McpError)) return error;
   const { code, message, data } = ErrorHandler.classifyOnly(error);
-  return new McpError(code, message, data, { cause: error });
+  const classified = new McpError(code, message, data, { cause: error });
+  if (isInstance(error, Error)) {
+    const stack = loggedStack(error, readField(error, 'stack'));
+    if (typeof stack === 'string') classified.stack = stack;
+    else delete classified.stack;
+  }
+  return classified;
+}
+
+/**
+ * Whether `code` and `data` are the spec's resource-not-found shape: a `-32602`
+ * whose `data` is exactly `{ uri }`, which clients recognize by that exact
+ * `data`. It carries no `reason`, so no `errors[]` entry can set its level.
+ */
+function isResourceNotFound(
+  code: JsonRpcErrorCode,
+  data: Record<string, unknown> | undefined,
+): boolean {
+  return (
+    code === JsonRpcErrorCode.InvalidParams &&
+    data !== undefined &&
+    typeof data.uri === 'string' &&
+    Object.keys(data).length === 1
+  );
 }
 
 /**
@@ -264,12 +382,7 @@ function asMcpError(error: unknown): McpError {
 function withRequestId(error: McpError, requestId: string): McpError {
   const { code, message } = ErrorHandler.classifyOnly(error);
   const data = readWireErrorData(error);
-  const isResourceNotFound =
-    code === JsonRpcErrorCode.InvalidParams &&
-    data !== undefined &&
-    typeof data.uri === 'string' &&
-    Object.keys(data).length === 1;
-  if (isResourceNotFound) {
+  if (isResourceNotFound(code, data)) {
     return message === UNREADABLE ? new McpError(code, message, data, { cause: error }) : error;
   }
   return new McpError(code, message, { ...data, requestId }, { cause: error });

@@ -123,11 +123,12 @@ export interface ErrorHandlerOptions {
   /**
    * Level to emit this failure's log record at, in place of `error`.
    *
-   * Set by the tool handler factory when the thrown error's `data.reason` names
-   * a contract entry declaring one (#380), to `notice` for the framework's
-   * own `invalid_arguments` and `client_capability_missing` refusals when no
-   * entry declares one (#567), and to `notice` for a scope check's
-   * missing-scope refusal (#585). It moves the level of that one record
+   * Set by the tool and resource handler factories when the thrown error's
+   * `data.reason` names a contract entry declaring one (#380), to `notice` for
+   * the framework's own `invalid_arguments` and `client_capability_missing`
+   * refusals when no entry declares one (#567), to `notice` for a scope check's
+   * missing-scope refusal (#585), and, on a resource read, to `notice` for a
+   * `params` rejection and the not-found shape. It moves the level of that one record
    * and adds `mcp.error.severity` to the `mcp.errors.classified` increment;
    * everything else the handler does — the span status, the rebuilt `McpError`,
    * the structured fields — is unchanged. A `RequestCancelled` keeps its own

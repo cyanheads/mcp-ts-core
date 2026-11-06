@@ -419,8 +419,9 @@ export class ErrorHandler {
      * under `server` rather than upstream throttling (#481). The resolved
      * severity is a bounded dimension and rides as an attribute; it is present
      * only when one resolved — a declared entry's, or `notice` for the
-     * framework's argument and capability refusals (#567) and a scope check's
-     * missing-scope refusal (#585). The `reason` behind any of them never
+     * framework's argument and capability refusals (#567), a scope check's
+     * missing-scope refusal (#585), and a resource read's `params` rejection or
+     * not-found shape. The `reason` behind any of them never
      * becomes a metric attribute —
      * unbounded across a fleet, so it belongs on the span and in the log.
      */
@@ -514,8 +515,10 @@ export class ErrorHandler {
   /**
    * Classifies an error and returns its JSON-RPC error code and message without
    * logging, OTel side effects, or error wrapping. Use this when you need error
-   * classification but the caller handles logging/rethrowing (e.g., the resource
-   * handler factory, whose completion record carries the code).
+   * classification but the caller handles logging/rethrowing: the resource
+   * handler factory, which builds a read's JSON-RPC error from it and writes
+   * the failure record through {@link ErrorHandler.handleError} itself; the tool
+   * error-result builder; and the HTTP transport's error handler.
    *
    * A `ZodError`'s `data` is `{ issues }` so clients can render field-level
    * errors, bounded as the tool argument rejection's is (#710): within the caps

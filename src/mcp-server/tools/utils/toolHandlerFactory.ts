@@ -13,6 +13,7 @@ import type {
 import { config } from '@/config/index.js';
 import type { Context } from '@/core/context.js';
 import { readEnrichmentStore, resolveDeclaredFailure } from '@/core/context.js';
+import { failureSeverity } from '@/mcp-server/failureSeverity.js';
 import {
   buildHandlerContext,
   type HandlerServices,
@@ -27,12 +28,7 @@ import {
 } from '@/mcp-server/inputRequired.js';
 import type { NotifierSources } from '@/mcp-server/notifications.js';
 import { isScopeRefusal, withRequiredScopes } from '@/mcp-server/transports/auth/lib/authUtils.js';
-import {
-  type ErrorContract,
-  type ErrorContractSeverity,
-  JsonRpcErrorCode,
-  McpError,
-} from '@/types-global/errors.js';
+import { type ErrorContractSeverity, JsonRpcErrorCode, McpError } from '@/types-global/errors.js';
 import { resolvePartialResultKeys } from '@/utils/formatting/partialResult.js';
 import { asRequestCancelled, ErrorHandler } from '@/utils/internal/error-handler/errorHandler.js';
 import { isInstance, readErrorData } from '@/utils/internal/error-handler/helpers.js';
@@ -69,50 +65,6 @@ export type { NotifierSources } from '@/mcp-server/notifications.js';
 // ---------------------------------------------------------------------------
 // Factory
 // ---------------------------------------------------------------------------
-
-/**
- * The two reasons the framework raises itself, both a refusal of the call
- * rather than a fault in this server: `invalid_arguments`, only from the schema
- * gate in {@link parseToolArguments}, and `client_capability_missing`, only
- * from `ctx.requestInput`'s capability gate.
- */
-const FRAMEWORK_REFUSAL_REASONS: ReadonlySet<string> = new Set([
-  INVALID_ARGUMENTS_REASON,
-  CLIENT_CAPABILITY_MISSING_REASON,
-]);
-
-/**
- * The level the `Error in tool:<name>` record is emitted at, or `undefined` to
- * keep `error`.
- *
- * A severity the matched `errors[]` entry declares wins (#380). Otherwise one
- * of the framework's own refusals logs at `notice`: a reason in
- * {@link FRAMEWORK_REFUSAL_REASONS} (#567) — a caller's arguments failing the
- * tool's schema, or a client connection that cannot serve an input request —
- * and a scope check's missing-scope refusal (#585), from the inline `auth`
- * check or a handler's `checkScopes`, recognized by the mark those utilities
- * put on it rather than by its `Forbidden` code. Each is routine traffic, and a
- * schema that wrongly rejects valid calls still shows per tool on
- * `mcp.tool.rejections`. Everything else — a plain `Error`, an undeclared
- * reason, an entry with no severity, a missing auth context, a handler's own
- * `forbidden()`, an upstream 403, an output-contract failure — keeps `error`.
- * A cancellation takes `handleError`'s own `info` path whatever this returns.
- * The three framework refusals also log without a stack, whatever level this
- * resolves for them (#651).
- *
- * Resolved here rather than in `ErrorHandler`, which also serves services,
- * prompts, and transports and knows neither the definition nor the schema gate.
- * `reason` is the failure's `data.reason`, as {@link readErrorData} reads it.
- */
-function failureSeverity(
-  entry: ErrorContract | undefined,
-  failure: unknown,
-  reason: unknown,
-): ErrorContractSeverity | undefined {
-  if (entry?.severity !== undefined) return entry.severity;
-  if (isScopeRefusal(failure)) return 'notice';
-  return typeof reason === 'string' && FRAMEWORK_REFUSAL_REASONS.has(reason) ? 'notice' : undefined;
-}
 
 /**
  * Creates an MCP tool handler from a tool definition.

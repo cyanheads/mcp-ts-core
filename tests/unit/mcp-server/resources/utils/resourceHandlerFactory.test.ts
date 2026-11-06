@@ -7,14 +7,26 @@
  */
 
 import {
+  Client,
+  ResourceNotFoundError as ClientResourceNotFoundError,
+  InMemoryTransport,
+} from '@modelcontextprotocol/client';
+import {
   type InputRequiredResult,
   inputRequired,
+  McpServer,
+  ProtocolError,
   type ReadResourceResult,
+  ResourceNotFoundError,
+  ResourceTemplate,
+  SdkError,
+  SdkErrorCode,
+  UrlElicitationRequiredError,
 } from '@modelcontextprotocol/server';
 import { SpanStatusCode, trace } from '@opentelemetry/api';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { z } from 'zod';
-import { JsonRpcErrorCode, McpError } from '@/types-global/errors.js';
+import { invalidParams, JsonRpcErrorCode, McpError, notFound } from '@/types-global/errors.js';
 import {
   EVERY_INPUT_CAPABILITY,
   legacyCapabilityView,
@@ -101,6 +113,7 @@ import {
   type HandlerServices,
   type NotifierSources,
 } from '@/mcp-server/resources/utils/resourceHandlerFactory.js';
+import { authContext } from '@/mcp-server/transports/auth/lib/authContext.js';
 import { ErrorHandler } from '@/utils/internal/error-handler/errorHandler.js';
 import { TELEMETRY_LOG_MESSAGES } from '@/utils/internal/telemetryMessages.js';
 import { withSpan } from '@/utils/telemetry/trace.js';
@@ -958,40 +971,407 @@ describe('createResourceHandler', () => {
   // -----------------------------------------------------------------------
 
   describe('Error handling', () => {
-    it('leaves a declared severity inert on the resource path (#380)', async () => {
-      // Resources re-throw after `classifyOnly` and the SDK owns the log, so
-      // there is no `handleError` call for a severity to move. The field is
-      // accepted on the contract and changes nothing here.
-      const def = resource('sev://{id}', {
-        description: 'Declines a read.',
-        params: z.object({ id: z.string().describe('id') }),
-        errors: [
-          {
-            reason: 'consent_declined',
-            code: JsonRpcErrorCode.InvalidRequest,
-            when: 'The caller declined the confirmation prompt.',
-            severity: 'notice',
-            recovery: 'Re-run the read and confirm the prompt to proceed.',
+    describe('the failure record (#734)', () => {
+      const RECOVERY = 'Read a different record id instead.';
+
+      /** A failure record: an `Error in resource:` or `Cancelled resource:` line, at any level. */
+      type FailureRecord = {
+        level: string;
+        message: string;
+        record: { requestId?: string; extra: Record<string, any> };
+      };
+
+      /** Every failure record written since the mocks were last cleared. */
+      function failureRecords(): FailureRecord[] {
+        return (['debug', 'info', 'notice', 'warning', 'error', 'crit', 'emerg'] as const).flatMap(
+          (level) =>
+            mockLogger[level].mock.calls.flatMap(([message, record]) =>
+              typeof message === 'string' &&
+              (message.startsWith('Error in resource:') ||
+                message.startsWith('Cancelled resource:'))
+                ? [{ level, message, record: record as FailureRecord['record'] }]
+                : [],
+            ),
+        );
+      }
+
+      /** The read's failure record, after asserting it wrote exactly one. */
+      function onlyFailureRecord(): FailureRecord {
+        const records = failureRecords();
+        expect(records).toHaveLength(1);
+        return records[0] as FailureRecord;
+      }
+
+      /** Whether `record` carries a stack anywhere: its own, or a cause-chain node's. */
+      function hasStack(record: FailureRecord): boolean {
+        const { causeChain = [] } = record.record.extra.errorData as { causeChain?: object[] };
+        return record.record.extra.stack !== undefined || causeChain.some((n) => 'stack' in n);
+      }
+
+      /**
+       * A `records` resource that requires `auth` when given. Its handler runs
+       * `fail`, throws what it returns (a `ctx.fail` error), and succeeds when
+       * it returns nothing.
+       */
+      function records(fail: (ctx: any) => unknown, auth?: string[]) {
+        return resource('records://{id}', {
+          name: 'records',
+          description: 'Fails in a chosen way.',
+          params: z.object({
+            id: z
+              .string()
+              .regex(/^[a-z]+$/)
+              .describe('Id'),
+          }),
+          ...(auth && { auth }),
+          errors: [
+            {
+              reason: 'gone',
+              code: JsonRpcErrorCode.NotFound,
+              when: 'The record is gone.',
+              recovery: RECOVERY,
+            },
+            {
+              reason: 'consent_declined',
+              code: JsonRpcErrorCode.InvalidRequest,
+              when: 'The caller declined the confirmation prompt.',
+              severity: 'notice',
+              recovery: 'Re-run the read and confirm the prompt to proceed.',
+            },
+          ],
+          handler: async (_params, ctx) => {
+            const failure = await fail(ctx);
+            if (failure !== undefined) throw failure;
+            return { ok: true };
           },
-        ],
-        handler: (_params, ctx) => {
-          throw ctx.fail('consent_declined', 'Declined.');
+        });
+      }
+
+      /** Reads `def` with `variables`; resolves to the rejection, or the result when it succeeds. */
+      async function read(
+        def: unknown,
+        variables: Record<string, unknown> = { id: 'x' },
+        options: {
+          capabilities?: Parameters<typeof legacyCapabilityView>[0];
+          signal?: AbortSignal;
+        } = {},
+      ): Promise<unknown> {
+        const handler = createResourceHandler(
+          def as AnyResourceDefinition,
+          services,
+          notifiers,
+          options.capabilities && legacyCapabilityView(options.capabilities),
+        );
+        return handler(
+          new URL('records://x'),
+          variables as never,
+          makeServerContext(options.signal ? { signal: options.signal } : {}),
+        ).catch((error: unknown) => error);
+      }
+
+      /** Two layers below the handler, as a real service's fetch path sits. */
+      const recordService = {
+        read(id: string): never {
+          return recordService.fetch(id);
         },
+        fetch(id: string): never {
+          throw notFound(
+            `Record ${id} is gone.`,
+            { reason: 'gone' },
+            { cause: new Error('upstream answered 404') },
+          );
+        },
+      };
+
+      it('logs ctx.fail at error with its message, reason, hint, and the throw site’s stack', async () => {
+        let thrown: McpError | undefined;
+
+        const rejection = (await read(
+          records((ctx) => {
+            thrown = ctx.fail('gone');
+            return thrown;
+          }),
+        )) as McpError;
+
+        const { level, message, record } = onlyFailureRecord();
+        expect(rejection.code).toBe(JsonRpcErrorCode.NotFound);
+        expect(level).toBe('error');
+        expect(message).toBe('Error in resource:records: The record is gone.');
+        expect(record.extra.errorCode).toBe(JsonRpcErrorCode.NotFound);
+        expect(record.extra.errorData).toMatchObject({
+          reason: 'gone',
+          recovery: { hint: RECOVERY },
+        });
+        expect(record.extra.stack).toBe(thrown?.stack);
+        // The record and the envelope name the same request.
+        expect(record.requestId).toBe(rejection.data?.requestId);
       });
 
-      const handler = createResourceHandler(def as AnyResourceDefinition, services, notifiers);
+      it('logs a declared reason a service throws at error, with its cause chain', async () => {
+        await read(records(() => recordService.read('x')));
 
-      await expect(
-        handler(new URL('sev://x'), { id: 'x' }, makeServerContext()),
-      ).rejects.toMatchObject({ code: JsonRpcErrorCode.InvalidRequest });
-      expect(mockLogger.notice).not.toHaveBeenCalledWith(
-        expect.stringContaining('Error in'),
-        expect.anything(),
+        const { level, message, record } = onlyFailureRecord();
+        expect(level).toBe('error');
+        expect(message).toBe('Error in resource:records: Record x is gone.');
+        expect(record.extra.errorData).toMatchObject({
+          reason: 'gone',
+          recovery: { hint: RECOVERY },
+          rootCause: { name: 'Error', message: 'upstream answered 404' },
+        });
+        expect(record.extra.errorData.causeChain).toHaveLength(2);
+        // The service's own frame leads the stack.
+        expect(record.extra.stack.split('\n')[1]).toContain('resourceHandlerFactory.test.ts');
+      });
+
+      it('logs at the severity the matched entry declares (#380)', async () => {
+        const rejection = await read(records((ctx) => ctx.fail('consent_declined', 'Declined.')));
+
+        expect(rejection).toMatchObject({ code: JsonRpcErrorCode.InvalidRequest });
+        const { level, message, record } = onlyFailureRecord();
+        expect(level).toBe('notice');
+        expect(message).toBe('Error in resource:records: Declined.');
+        expect(record.extra.errorData).toMatchObject({ reason: 'consent_declined' });
+        // A declared level moves the record, never its stack.
+        expect(record.extra.stack).toEqual(expect.any(String));
+      });
+
+      it('logs a plain Error with its own stack and cause chain, not a frame in the factory', async () => {
+        const thrown = new Error('boom from handler', { cause: new Error('root cause') });
+
+        const rejection = (await read(
+          records(() => {
+            throw thrown;
+          }),
+        )) as McpError;
+
+        expect(rejection.code).toBe(JsonRpcErrorCode.InternalError);
+        const { level, message, record } = onlyFailureRecord();
+        expect(level).toBe('error');
+        expect(message).toBe('Error in resource:records: boom from handler');
+        expect(record.extra.errorCode).toBe(JsonRpcErrorCode.InternalError);
+        expect(record.extra.originalErrorType).toBe('Error');
+        expect(record.extra.stack).toBe(thrown.stack);
+        expect(record.extra.errorData.rootCause).toEqual({ name: 'Error', message: 'root cause' });
+      });
+
+      it('logs no stack for a ProtocolError whose stack cannot be read, never a frame in the factory', async () => {
+        const thrown = Object.defineProperty(
+          new ProtocolError(-32099, 'Stack unreadable.', { detail: 1 }),
+          'stack',
+          {
+            configurable: true,
+            get() {
+              throw new Error('stack getter');
+            },
+          },
+        );
+
+        const rejection = (await read(records(() => thrown))) as McpError;
+
+        expect(rejection.code).toBe(-32099);
+        const { level, record } = onlyFailureRecord();
+        expect(level).toBe('error');
+        expect(record.extra.stack).toBeUndefined();
+      });
+
+      const ids = Array.from({ length: 1000 }, (_, i) => `x${i}`);
+      const idList = z.array(z.string().regex(/^\d+$/));
+
+      it.each([
+        [
+          'thrown by parse()',
+          (): z.ZodError => {
+            try {
+              idList.parse(ids);
+            } catch (error) {
+              return error as z.ZodError;
+            }
+            throw new Error('expected parse() to throw');
+          },
+        ],
+        ['built by safeParse()', () => idList.safeParse(ids).error as z.ZodError],
+      ])(
+        'logs a ZodError %s at error, its issues bounded, from the throw site',
+        async (_label, make) => {
+          const thrown = make();
+
+          const rejection = (await read(
+            records(() => {
+              throw thrown;
+            }),
+          )) as McpError;
+
+          const { level, record } = onlyFailureRecord();
+          expect(level).toBe('error');
+          expect(record.extra.errorData.issues).toHaveLength(10);
+          expect(record.extra.errorData.issuesCount).toBe(1000);
+          // The ZodError's own stack with its header the one-line summary, never
+          // Zod's JSON — or none where the runtime gives it none — never the
+          // classified error's frames in the factory.
+          expect(record.extra.stack).toBe(thrown.stack?.replace(thrown.message, rejection.message));
+          expect(String(record.extra.stack)).not.toContain('"origin"');
+          expect(JSON.stringify(record)).not.toContain('"path":[10]');
+        },
       );
-      expect(mockLogger.error).not.toHaveBeenCalledWith(
-        expect.stringContaining('Error in'),
-        expect.anything(),
-      );
+
+      it('logs a params rejection at notice, with no stack, under the request id the client gets', async () => {
+        const rejection = (await read(
+          records(() => undefined),
+          { id: 'ABC1' },
+        )) as McpError;
+
+        expect(rejection.code).toBe(JsonRpcErrorCode.ValidationError);
+        const { level, message, record } = onlyFailureRecord();
+        expect(level).toBe('notice');
+        expect(message).toBe(
+          'Error in resource:records: id: Invalid string: must match pattern /^[a-z]+$/',
+        );
+        expect(record.extra.errorData.issues).toHaveLength(1);
+        expect(hasStack({ level, message, record })).toBe(false);
+        expect(record.requestId).toBe(rejection.data?.requestId);
+        // Measured nothing: the record is the read's only line.
+        expect(mockLogger.info).not.toHaveBeenCalledWith(
+          TELEMETRY_LOG_MESSAGES.resourceReadFinished,
+          expect.anything(),
+        );
+      });
+
+      it('logs the first 10 issues and issuesCount for a params rejection past the caps (#710)', async () => {
+        const def = resource('items://{ids*}', {
+          name: 'items',
+          description: 'Items by id.',
+          params: z.object({
+            ids: z.array(z.string().regex(/^\d+$/).describe('Id')).describe('Ids'),
+          }),
+          handler: () => ({ ok: true }),
+        });
+
+        await read(def, { ids });
+
+        const { level, record } = onlyFailureRecord();
+        expect(level).toBe('notice');
+        expect(record.extra.errorData.issues).toHaveLength(10);
+        expect(record.extra.errorData.issuesCount).toBe(1000);
+        expect(JSON.stringify(record)).not.toContain('"path":["ids",10]');
+      });
+
+      it.each([
+        [
+          'an invalidParams with data exactly { uri }',
+          () => invalidParams('Resource not found', { uri: 'records://x' }),
+        ],
+        ['an SDK ResourceNotFoundError', () => new ResourceNotFoundError('records://x')],
+      ])('logs %s, the resource-not-found shape, at notice with no stack', async (_label, make) => {
+        const rejection = (await read(
+          records(() => {
+            throw make();
+          }),
+        )) as McpError;
+
+        expect(rejection.data).toEqual({ uri: 'records://x' });
+        const failure = onlyFailureRecord();
+        expect(failure.level).toBe('notice');
+        expect(failure.record.extra.errorCode).toBe(JsonRpcErrorCode.InvalidParams);
+        expect(hasStack(failure)).toBe(false);
+      });
+
+      it('logs a client_capability_missing refusal at notice with no stack', async () => {
+        const asks = records((ctx) =>
+          ctx.requestInput({
+            inputRequests: {
+              confirm: inputRequired.elicit({
+                message: 'Read it?',
+                requestedSchema: z.object({ ok: z.boolean().describe('Confirm the read.') }),
+              }),
+            },
+          }),
+        );
+
+        await read(asks, { id: 'x' }, { capabilities: {} });
+
+        const failure = onlyFailureRecord();
+        expect(failure.level).toBe('notice');
+        expect(failure.record.extra.errorData).toMatchObject({
+          reason: 'client_capability_missing',
+        });
+        expect(hasStack(failure)).toBe(false);
+      });
+
+      describe('under MCP_AUTH_MODE=jwt', () => {
+        const AUTH_INFO = {
+          token: 'probe-token',
+          clientId: 'probe-client',
+          scopes: ['other:read'],
+          subject: 'probe-user',
+        };
+
+        /** Reads a scoped `records` resource, inside a token holding `other:read` when `authenticated`. */
+        async function scopedRead(authenticated: boolean): Promise<McpError> {
+          mockConfig.mcpAuthMode = 'jwt';
+          try {
+            const run = () => read(records(() => undefined, ['records:read']));
+            return (await (authenticated
+              ? authContext.run({ authInfo: AUTH_INFO }, run)
+              : run())) as McpError;
+          } finally {
+            mockConfig.mcpAuthMode = 'none';
+          }
+        }
+
+        it('logs a missing-scope refusal at notice with no stack', async () => {
+          const rejection = await scopedRead(true);
+
+          expect(rejection.code).toBe(JsonRpcErrorCode.Forbidden);
+          const failure = onlyFailureRecord();
+          expect(failure.level).toBe('notice');
+          expect(failure.message).toBe('Error in resource:records: Insufficient permissions.');
+          expect(hasStack(failure)).toBe(false);
+          expect(failure.record.requestId).toBe(rejection.data?.requestId);
+        });
+
+        it('logs a missing auth context at error, with its stack', async () => {
+          const rejection = await scopedRead(false);
+
+          expect(rejection.code).toBe(JsonRpcErrorCode.Unauthorized);
+          const failure = onlyFailureRecord();
+          expect(failure.level).toBe('error');
+          expect(failure.record.extra.stack).toEqual(expect.any(String));
+        });
+      });
+
+      it('writes no failure record for an input_required round', async () => {
+        const asks = records((ctx) =>
+          ctx.requestInput({
+            inputRequests: {
+              confirm: inputRequired.elicit({
+                message: 'Read it?',
+                requestedSchema: z.object({ ok: z.boolean().describe('Confirm the read.') }),
+              }),
+            },
+          }),
+        );
+
+        const result = await read(asks);
+
+        expect(result).toMatchObject({ resultType: 'input_required' });
+        expect(failureRecords()).toEqual([]);
+      });
+
+      it('writes one info Cancelled record for a cancelled read, nothing at error', async () => {
+        await read(
+          records(() => {
+            throw new ProtocolError(-32099, 'thrown after the abort');
+          }),
+          { id: 'x' },
+          { signal: AbortSignal.abort('caller gave up') },
+        );
+
+        const { level, message, record } = onlyFailureRecord();
+        expect(level).toBe('info');
+        expect(message).toBe('Cancelled resource:records: thrown after the abort');
+        expect(record.extra.errorCode).toBe(JsonRpcErrorCode.RequestCancelled);
+        expect(record.extra.stack).toBeUndefined();
+      });
     });
 
     describe('declared recovery fill (#579) and the request id (#576)', () => {
@@ -1152,6 +1532,195 @@ describe('createResourceHandler', () => {
 
         expect(rejection.data).toEqual({ reason: 'gone', requestId: 'test-req-id' });
         expect(thrown.data).toEqual({ reason: 'gone' });
+      });
+    });
+
+    describe('an SDK ProtocolError the handler throws (#583)', () => {
+      /** A resource whose handler throws `thrown`. */
+      const throwing = (thrown: unknown) =>
+        resource('sdk://{id}', {
+          name: 'sdk-errors',
+          description: 'Throws an SDK error.',
+          params: z.object({ id: z.string().describe('id') }),
+          handler: () => {
+            throw thrown;
+          },
+        });
+
+      /** What a read of a resource whose handler throws `thrown` rejects with. */
+      async function readThrowing(thrown: unknown): Promise<McpError> {
+        const handler = createResourceHandler(
+          throwing(thrown) as AnyResourceDefinition,
+          services,
+          notifiers,
+        );
+        const rejection = await handler(new URL('sdk://x'), { id: 'x' }, makeServerContext()).then(
+          () => {
+            throw new Error('expected the read to fail');
+          },
+          (error: unknown) => error,
+        );
+        expect(rejection).toBeInstanceOf(McpError);
+        return rejection as McpError;
+      }
+
+      it('answers a ResourceNotFoundError in the spec shape, its code on the completion record and span', async () => {
+        const span = {
+          setAttributes: vi.fn(),
+          setAttribute: vi.fn(),
+          setStatus: vi.fn(),
+          recordException: vi.fn(),
+          end: vi.fn(),
+        };
+        const tracerSpy = vi.spyOn(trace, 'getTracer').mockReturnValue({
+          startActiveSpan: (_name: string, cb: (s: unknown) => unknown) => cb(span),
+        } as never);
+
+        try {
+          const rejection = await readThrowing(new ResourceNotFoundError('sdk://gone'));
+
+          expect(rejection.code).toBe(JsonRpcErrorCode.InvalidParams);
+          expect(rejection.message).toBe('Resource not found: sdk://gone');
+          expect(rejection.data).toEqual({ uri: 'sdk://gone' });
+          expect(completionMetrics()).toMatchObject({ isSuccess: false, errorCode: '-32602' });
+          expect(span.setAttribute).toHaveBeenCalledWith('mcp.resource.error_code', '-32602');
+        } finally {
+          tracerSpy.mockRestore();
+        }
+      });
+
+      it('recognizes a ProtocolError another bundled copy of the SDK built', async () => {
+        // The client package bundles its own copy: only the SDK's brand check matches it.
+        expect(ClientResourceNotFoundError).not.toBe(ResourceNotFoundError);
+
+        const rejection = await readThrowing(new ClientResourceNotFoundError('sdk://gone'));
+
+        expect(rejection.code).toBe(JsonRpcErrorCode.InvalidParams);
+        expect(rejection.data).toEqual({ uri: 'sdk://gone' });
+      });
+
+      it('keeps any other ProtocolError’s code, message, and data, adding the request id', async () => {
+        const rejection = await readThrowing(new ProtocolError(-32099, 'custom', { detail: 1 }));
+
+        expect(rejection.code).toBe(-32099);
+        expect(rejection.message).toBe('custom');
+        expect(rejection.data).toEqual({ detail: 1, requestId: 'test-req-id' });
+        expect(completionMetrics()).toMatchObject({ isSuccess: false, errorCode: '-32099' });
+      });
+
+      it('logs it at error with the throw site’s stack and itself as the root cause (#734)', async () => {
+        const thrown = new ProtocolError(-32099, 'custom', { detail: 1 });
+
+        await readThrowing(thrown);
+
+        const records = mockLogger.error.mock.calls.filter(([message]) =>
+          String(message).startsWith('Error in resource:'),
+        );
+        expect(records).toHaveLength(1);
+        const [message, record] = records[0] as [string, { extra: Record<string, any> }];
+        expect(message).toBe('Error in resource:sdk-errors: custom');
+        expect(record.extra.errorCode).toBe(-32099);
+        expect(record.extra.stack).toBe(thrown.stack);
+        expect(record.extra.errorData.rootCause).toEqual({
+          name: 'ProtocolError',
+          message: 'custom',
+        });
+      });
+
+      it('keeps a UrlElicitationRequiredError’s elicitations', async () => {
+        const elicitations = [
+          {
+            mode: 'url' as const,
+            message: 'Sign in to continue.',
+            url: 'https://example.com/sign-in',
+            elicitationId: 'e1',
+          },
+        ];
+
+        const rejection = await readThrowing(new UrlElicitationRequiredError(elicitations));
+
+        expect(rejection.code).toBe(-32042);
+        expect(rejection.data).toEqual({ elicitations, requestId: 'test-req-id' });
+      });
+
+      it.each([
+        ['a string', 'detail'],
+        ['an array', [1, 2]],
+        ['null', null],
+      ])('carries only the request id when its data is %s', async (_label, data) => {
+        const rejection = await readThrowing(new ProtocolError(-32099, 'custom', data));
+
+        expect(rejection.code).toBe(-32099);
+        expect(rejection.data).toEqual({ requestId: 'test-req-id' });
+      });
+
+      it('classifies a ProtocolError whose code is not an integer as any other thrown value', async () => {
+        const rejection = await readThrowing(
+          Object.assign(new ProtocolError(-32099, 'custom'), { code: 1.5 }),
+        );
+
+        expect(rejection.code).toBe(JsonRpcErrorCode.InternalError);
+        expect(rejection.data).toEqual({ requestId: 'test-req-id' });
+      });
+
+      it('classifies an SdkError as it always has', async () => {
+        const rejection = await readThrowing(
+          new SdkError(SdkErrorCode.ConnectionClosed, 'Connection closed'),
+        );
+
+        expect(rejection.code).toBe(JsonRpcErrorCode.RequestCancelled);
+        expect(completionMetrics()).toMatchObject({ errorCode: 'UNHANDLED_ERROR' });
+      });
+
+      it('answers a real client exactly as the SDK’s own miss does', async () => {
+        const server = new McpServer(
+          { name: 'resource-not-found-wire', version: '0.0.0' },
+          { capabilities: { resources: {} } },
+        );
+        server.registerResource(
+          'sdk-errors',
+          new ResourceTemplate('sdk://{id}', { list: undefined }),
+          { description: 'Throws the SDK not-found error.', mimeType: 'application/json' },
+          createResourceHandler(
+            throwing(new ResourceNotFoundError('sdk://gone')) as AnyResourceDefinition,
+            services,
+            notifiers,
+          ),
+        );
+        const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+        const errors: unknown[] = [];
+        const send = serverTransport.send.bind(serverTransport);
+        serverTransport.send = (message, options) => {
+          const written = JSON.parse(JSON.stringify(message)) as { error?: unknown };
+          if (written.error) errors.push(written.error);
+          return send(message, options);
+        };
+        const client = new Client({ name: 'resource-not-found-client', version: '0.0.0' });
+        await server.connect(serverTransport);
+        await client.connect(clientTransport);
+
+        try {
+          const thrown = await client.readResource({ uri: 'sdk://gone' }).catch((e: unknown) => e);
+          const miss = await client.readResource({ uri: 'nothere://x' }).catch((e: unknown) => e);
+
+          expect(errors).toEqual([
+            {
+              code: -32602,
+              message: 'Resource not found: sdk://gone',
+              data: { uri: 'sdk://gone' },
+            },
+            {
+              code: -32602,
+              message: 'Resource not found: nothere://x',
+              data: { uri: 'nothere://x' },
+            },
+          ]);
+          expect(thrown).toBeInstanceOf(ClientResourceNotFoundError);
+          expect(miss).toBeInstanceOf(ClientResourceNotFoundError);
+        } finally {
+          await client.close();
+          await server.close();
+        }
       });
     });
 
@@ -1459,6 +2028,17 @@ describe('createResourceHandler', () => {
       expect(completionMetrics()).toMatchObject({
         errorCode: String(JsonRpcErrorCode.RequestCancelled),
         isSuccess: false,
+      });
+    });
+
+    it('overrides an SDK ProtocolError’s own code (#583)', async () => {
+      const thrown = new ProtocolError(-32099, 'custom', { detail: 1 });
+
+      expect(await codeOfThrow('cancelled://protocol', thrown, AbortSignal.abort('probe'))).toBe(
+        JsonRpcErrorCode.RequestCancelled,
+      );
+      expect(completionMetrics()).toMatchObject({
+        errorCode: String(JsonRpcErrorCode.RequestCancelled),
       });
     });
 

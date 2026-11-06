@@ -375,21 +375,22 @@ export interface ErrorContract {
   /**
    * Log level for this failure mode, when `error` overstates it.
    *
-   * An outcome a tool declares here is a modeled result, not an incident: a
+   * An outcome a definition declares here is a modeled result, not an incident: a
    * caller who answers no to a confirmation prompt, a lookup whose miss is an
    * ordinary answer. Logging those identically to an upstream fault leaves the
    * error stream unreadable at the level log-based alerting works on, and the
    * alternative — dropping `ctx.fail` for them — forfeits the typed contract,
    * the recovery hint, and the wire envelope.
    *
-   * **Tools only, and logging only.** Resolved in the tool handler factory
-   * against the thrown error's `data.reason`; resources write no failure record,
-   * so there is no level to set. Nothing client-visible moves —
-   * `isError`, the JSON-RPC code, `structuredContent.error`, and the `content[]`
-   * text are built from the thrown error and are byte-identical either way. The
-   * span still closes ERROR and `mcp.tool.calls` / `mcp.tool.errors` still count
-   * the call: splitting those series would redefine what an error rate means.
-   * The one metric that reflects it is an `mcp.error.severity` attribute on
+   * **Logging only.** Resolved in the tool and resource handler factories
+   * against the thrown error's `data.reason`, it sets the level of the call's
+   * `Error in tool:<name>` or `Error in resource:<name>` record. Nothing
+   * client-visible moves — a tool's `isError`, `structuredContent.error`, and
+   * `content[]` text and a resource read's JSON-RPC error are built from the
+   * thrown error and are byte-identical either way. The span still closes ERROR
+   * and the `mcp.tool.*` / `mcp.resource.*` series still count the call:
+   * splitting those series would redefine what an error rate means. The one
+   * metric that reflects it is an `mcp.error.severity` attribute on
    * `mcp.errors.classified`.
    *
    * A cancelled request keeps its own `info`, stack-free path regardless.
