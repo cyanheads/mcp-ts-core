@@ -48,14 +48,20 @@ export class KvProvider implements IStorageProvider {
     await this.kv.put(kvKey, json, putOptions);
   }
 
+  /**
+   * Reads as text and parses here, so only a stored value that is not JSON
+   * becomes `SerializationError`; a rejected read (outage, rate limit, a key
+   * over KV's length limit) is classified as every other KV call's is.
+   */
   async get<T>(tenantId: string, key: string, context: RequestContext): Promise<T | null> {
     const kvKey = this.getKvKey(tenantId, key);
     return await ErrorHandler.tryCatch(
       async () => {
         logger.debug(`[KvProvider] Getting key: ${kvKey}`, context);
+        const text = await this.kv.get(kvKey, 'text');
+        if (text === null) return null;
         try {
-          const result = await this.kv.get<T>(kvKey, 'json');
-          return result; // null indicates not found
+          return JSON.parse(text) as T;
         } catch (error: unknown) {
           throw new McpError(
             JsonRpcErrorCode.SerializationError,

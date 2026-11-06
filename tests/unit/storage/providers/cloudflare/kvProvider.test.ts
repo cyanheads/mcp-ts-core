@@ -8,7 +8,8 @@ import type { RequestContext } from '@/utils/internal/requestContext.js';
 import { requestContextService } from '@/utils/internal/requestContext.js';
 import { encodeCursor } from '../../../../../src/storage/core/storageValidation.js';
 import { KvProvider } from '../../../../../src/storage/providers/cloudflare/kvProvider.js';
-import { McpError } from '../../../../../src/types-global/errors.js';
+import { JsonRpcErrorCode, McpError } from '../../../../../src/types-global/errors.js';
+import { defaultIsTransient } from '../../../../../src/utils/network/retry.js';
 
 // Mock KVNamespace
 const createMockKvNamespace = () => ({
@@ -45,15 +46,60 @@ describe('KvProvider', () => {
       mockKv.get.mockResolvedValue(null);
       const result = await kvProvider.get('tenant-1', 'key-1', context);
       expect(result).toBeNull();
-      expect(mockKv.get).toHaveBeenCalledWith('tenant-1:key-1', 'json');
+      expect(mockKv.get).toHaveBeenCalledWith('tenant-1:key-1', 'text');
     });
 
-    it('should throw McpError on JSON parsing error', async () => {
-      const parsingError = new Error('Invalid JSON');
-      mockKv.get.mockRejectedValue(parsingError);
+    it('should parse the stored JSON text', async () => {
+      mockKv.get.mockResolvedValue('{"data":"stored"}');
 
-      await expect(kvProvider.get('tenant-1', 'key-1', context)).rejects.toThrow(McpError);
+      await expect(kvProvider.get('tenant-1', 'key-1', context)).resolves.toEqual({
+        data: 'stored',
+      });
     });
+
+    it('should report a stored value that is not JSON as SerializationError', async () => {
+      mockKv.get.mockResolvedValue('{invalid');
+
+      const error = await kvProvider.get('tenant-1', 'key-1', context).catch((e: unknown) => e);
+
+      expect(error).toBeInstanceOf(McpError);
+      expect(error).toMatchObject({
+        code: JsonRpcErrorCode.SerializationError,
+        message: '[KvProvider] Failed to parse JSON for key: tenant-1:key-1',
+      });
+      expect(defaultIsTransient(error)).toBe(false);
+    });
+
+    it.each([
+      ['KV GET failed: 503 Service Unavailable', JsonRpcErrorCode.ServiceUnavailable, true],
+      ['KV GET failed: 429 Too Many Requests', JsonRpcErrorCode.RateLimited, true],
+      [
+        'KV GET failed: 414 UTF-8 encoded length of 513 exceeds key length limit of 512.',
+        JsonRpcErrorCode.InternalError,
+        false,
+      ],
+    ])(
+      'should classify a rejected read (%s) as the other KV methods do',
+      async (message, code, transient) => {
+        mockKv.get.mockRejectedValue(new Error(message));
+        mockKv.put.mockRejectedValue(new Error(message.replace('GET', 'PUT')));
+
+        const getError = await kvProvider
+          .get('tenant-1', 'key-1', context)
+          .catch((e: unknown) => e);
+        const getManyError = await kvProvider
+          .getMany('tenant-1', ['key-1'], context)
+          .catch((e: unknown) => e);
+        const setError = await kvProvider
+          .set('tenant-1', 'key-1', 1, context)
+          .catch((e: unknown) => e);
+
+        expect(getError).toMatchObject({ code });
+        expect(defaultIsTransient(getError)).toBe(transient);
+        expect(getManyError).toMatchObject({ code });
+        expect(setError).toMatchObject({ code });
+      },
+    );
   });
 
   describe('set', () => {
@@ -191,7 +237,7 @@ describe('KvProvider', () => {
   describe('batch operations', () => {
     it('getMany should read each tenant-prefixed key and omit misses', async () => {
       mockKv.get.mockImplementation(async (kvKey: string) =>
-        kvKey === 'tenant-1:b' ? null : `value-of-${kvKey}`,
+        kvKey === 'tenant-1:b' ? null : JSON.stringify(`value-of-${kvKey}`),
       );
 
       const result = await kvProvider.getMany<string>('tenant-1', ['a', 'b', 'c'], context);
@@ -202,7 +248,7 @@ describe('KvProvider', () => {
           ['c', 'value-of-tenant-1:c'],
         ]),
       );
-      expect(mockKv.get).toHaveBeenCalledWith('tenant-1:b', 'json');
+      expect(mockKv.get).toHaveBeenCalledWith('tenant-1:b', 'text');
     });
 
     it('setMany should delegate writes with provided options', async () => {

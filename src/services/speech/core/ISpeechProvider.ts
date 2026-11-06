@@ -20,7 +20,7 @@ import type {
 export interface ISpeechProvider {
   /**
    * Retrieve the list of voices available from this provider.
-   * Only meaningful for TTS providers; STT-only providers should throw.
+   * Only meaningful for TTS providers; STT-only providers should reject.
    *
    * @returns Resolved array of available {@link Voice} objects.
    * @throws {McpError} With `MethodNotFound` if the provider does not support TTS,

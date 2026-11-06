@@ -1,7 +1,7 @@
 /**
  * @fileoverview OpenAI Whisper speech-to-text provider implementation.
  * Wraps the OpenAI audio transcriptions API (`POST /audio/transcriptions`) to provide
- * STT transcription in multiple languages. TTS is not supported and will throw `MethodNotFound`.
+ * STT transcription in multiple languages. TTS is not supported and rejects with `MethodNotFound`.
  * Audio is submitted as multipart `FormData`; the 25 MB Whisper file-size limit is enforced
  * before the network call.
  * @module src/services/speech/providers/whisper.provider
@@ -100,12 +100,14 @@ export class WhisperProvider implements ISpeechProvider {
    * Not supported — Whisper is an STT-only provider.
    *
    * @param _options - Unused.
-   * @throws {McpError} Always, with `MethodNotFound`.
+   * @returns A Promise that always rejects with `McpError(MethodNotFound)`; nothing is thrown synchronously.
    */
   textToSpeech(_options: TextToSpeechOptions): Promise<TextToSpeechResult> {
-    throw new McpError(
-      JsonRpcErrorCode.MethodNotFound,
-      'Text-to-speech is not supported by Whisper provider',
+    return Promise.reject(
+      new McpError(
+        JsonRpcErrorCode.MethodNotFound,
+        'Text-to-speech is not supported by Whisper provider',
+      ),
     );
   }
 
@@ -271,12 +273,14 @@ export class WhisperProvider implements ISpeechProvider {
   /**
    * Not applicable — Whisper is an STT-only provider with no voice concept.
    *
-   * @throws {McpError} Always, with `MethodNotFound`.
+   * @returns A Promise that always rejects with `McpError(MethodNotFound)`; nothing is thrown synchronously.
    */
   getVoices(): Promise<Voice[]> {
-    throw new McpError(
-      JsonRpcErrorCode.MethodNotFound,
-      'Voice listing is not supported by Whisper provider (STT only)',
+    return Promise.reject(
+      new McpError(
+        JsonRpcErrorCode.MethodNotFound,
+        'Voice listing is not supported by Whisper provider (STT only)',
+      ),
     );
   }
 

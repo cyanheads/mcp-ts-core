@@ -1,7 +1,7 @@
 /**
  * @fileoverview ElevenLabs text-to-speech provider implementation.
  * Wraps the ElevenLabs v1 REST API to provide TTS synthesis and voice listing.
- * STT is not supported by ElevenLabs and will throw `MethodNotFound`.
+ * STT is not supported by ElevenLabs and rejects with `MethodNotFound`.
  * @module src/services/speech/providers/elevenlabs.provider
  */
 
@@ -217,12 +217,14 @@ export class ElevenLabsProvider implements ISpeechProvider {
    * Not supported — ElevenLabs is a TTS-only provider.
    *
    * @param _options - Unused.
-   * @throws {McpError} Always, with `MethodNotFound`.
+   * @returns A Promise that always rejects with `McpError(MethodNotFound)`; nothing is thrown synchronously.
    */
   speechToText(_options: SpeechToTextOptions): Promise<SpeechToTextResult> {
-    throw new McpError(
-      JsonRpcErrorCode.MethodNotFound,
-      'Speech-to-text is not supported by ElevenLabs provider',
+    return Promise.reject(
+      new McpError(
+        JsonRpcErrorCode.MethodNotFound,
+        'Speech-to-text is not supported by ElevenLabs provider',
+      ),
     );
   }
 

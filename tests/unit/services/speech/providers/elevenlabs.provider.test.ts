@@ -251,10 +251,17 @@ describe('ElevenLabsProvider', () => {
   });
 
   describe('speechToText', () => {
-    it('should throw not supported error', () => {
-      expect(() => provider.speechToText({ audio: Buffer.from('test') })).toThrow(
-        'Speech-to-text is not supported by ElevenLabs provider',
-      );
+    it('rejects as not supported instead of throwing before a Promise exists', async () => {
+      let pending: Promise<unknown> | undefined;
+      expect(() => {
+        pending = provider.speechToText({ audio: Buffer.from('test') });
+      }).not.toThrow();
+
+      await expect(pending).rejects.toMatchObject({
+        code: JsonRpcErrorCode.MethodNotFound,
+        message: 'Speech-to-text is not supported by ElevenLabs provider',
+      });
+      expect(fetchMock.calls).toHaveLength(0);
     });
   });
 

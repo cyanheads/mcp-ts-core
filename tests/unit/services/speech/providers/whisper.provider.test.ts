@@ -6,7 +6,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { WhisperProvider } from '@/services/speech/providers/whisper.provider.js';
 import { createMockContext } from '@/testing/index.js';
-import { McpError } from '@/types-global/errors.js';
+import { JsonRpcErrorCode, McpError } from '@/types-global/errors.js';
 
 // Mock fetchWithTimeout
 vi.mock('@/utils/network/fetchWithTimeout.js', async (importOriginal) => {
@@ -72,10 +72,17 @@ describe('WhisperProvider', () => {
   });
 
   describe('textToSpeech', () => {
-    it('should throw not supported error', () => {
-      expect(() => provider.textToSpeech({ text: 'Hello' })).toThrow(
-        'Text-to-speech is not supported by Whisper provider',
-      );
+    it('rejects as not supported instead of throwing before a Promise exists', async () => {
+      let pending: Promise<unknown> | undefined;
+      expect(() => {
+        pending = provider.textToSpeech({ text: 'Hello' });
+      }).not.toThrow();
+
+      await expect(pending).rejects.toMatchObject({
+        code: JsonRpcErrorCode.MethodNotFound,
+        message: 'Text-to-speech is not supported by Whisper provider',
+      });
+      expect(mockFetch).not.toHaveBeenCalled();
     });
   });
 
@@ -250,10 +257,17 @@ describe('WhisperProvider', () => {
   });
 
   describe('getVoices', () => {
-    it('should throw not supported error', () => {
-      expect(() => provider.getVoices()).toThrow(
-        'Voice listing is not supported by Whisper provider',
-      );
+    it('rejects as not supported instead of throwing before a Promise exists', async () => {
+      let pending: Promise<unknown> | undefined;
+      expect(() => {
+        pending = provider.getVoices();
+      }).not.toThrow();
+
+      await expect(pending).rejects.toMatchObject({
+        code: JsonRpcErrorCode.MethodNotFound,
+        message: 'Voice listing is not supported by Whisper provider (STT only)',
+      });
+      expect(mockFetch).not.toHaveBeenCalled();
     });
   });
 

@@ -9,6 +9,7 @@ import { D1Provider } from '@/storage/providers/cloudflare/d1Provider.js';
 import { KvProvider } from '@/storage/providers/cloudflare/kvProvider.js';
 import { R2Provider } from '@/storage/providers/cloudflare/r2Provider.js';
 import { JsonRpcErrorCode } from '@/types-global/errors.js';
+import { defaultIsTransient } from '@/utils/network/retry.js';
 
 const context = {
   tenantId: 'failure-test',
@@ -51,6 +52,49 @@ describe('Worker storage failures', () => {
     expect(listed.keys).toHaveLength(1);
     expect(listed.keys[0]?.expiration).toBeGreaterThanOrEqual(before + 60);
     await expect(provider.get(context.tenantId, 'bad', context)).resolves.toBe('recovered');
+  });
+
+  it('reports a KV read the backend rejects by its own classification, not as corrupt data', async () => {
+    const provider = new KvProvider(env.KV_NAMESPACE);
+    // `failure-test:` plus 510 characters is over KV's 512-byte key limit, so the real binding rejects.
+    const overLong = 'k'.repeat(510);
+
+    const getError = await provider
+      .get(context.tenantId, overLong, context)
+      .catch((error: unknown) => error);
+    const getManyError = await provider
+      .getMany(context.tenantId, [overLong], context)
+      .catch((error: unknown) => error);
+
+    expect(getError).toMatchObject({ code: expect.any(Number) });
+    expect((getError as { code: number }).code).not.toBe(JsonRpcErrorCode.SerializationError);
+    expect(defaultIsTransient(getError)).toBe(false);
+    expect((getManyError as { code: number }).code).toBe((getError as { code: number }).code);
+    await expect(provider.get(context.tenantId, 'absent', context)).resolves.toBeNull();
+  });
+
+  it('reports a KV outage on get and getMany as ServiceUnavailable, which retries treat as transient', async () => {
+    const unavailable = new Proxy(env.KV_NAMESPACE, {
+      get(target, property, receiver) {
+        if (property === 'get') {
+          return () => Promise.reject(new Error('KV GET failed: 503 Service Unavailable'));
+        }
+        const value = Reflect.get(target, property, receiver);
+        return typeof value === 'function' ? value.bind(target) : value;
+      },
+    });
+    const provider = new KvProvider(unavailable);
+
+    const getError = await provider
+      .get(context.tenantId, 'key', context)
+      .catch((error: unknown) => error);
+    const getManyError = await provider
+      .getMany(context.tenantId, ['key'], context)
+      .catch((error: unknown) => error);
+
+    expect(getError).toMatchObject({ code: JsonRpcErrorCode.ServiceUnavailable });
+    expect(defaultIsTransient(getError)).toBe(true);
+    expect(getManyError).toMatchObject({ code: JsonRpcErrorCode.ServiceUnavailable });
   });
 
   it('reads legacy R2 values, reports corrupt JSON, and recovers after replacement', async () => {
