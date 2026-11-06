@@ -2,10 +2,11 @@
  * @fileoverview Unit tests for authentication strategy factory.
  * @module tests/mcp-server/transports/auth/authFactory
  */
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createAuthStrategy } from '@/mcp-server/transports/auth/authFactory.js';
 import { JwtStrategy } from '@/mcp-server/transports/auth/strategies/jwtStrategy.js';
 import { OauthStrategy } from '@/mcp-server/transports/auth/strategies/oauthStrategy.js';
+import { logger } from '@/utils/internal/logger.js';
 
 const { mockConfig } = vi.hoisted(() => ({
   mockConfig: {
@@ -27,6 +28,10 @@ describe('createAuthStrategy', () => {
     mockConfig.mcpAuthSecretKey = undefined;
     mockConfig.oauthIssuerUrl = undefined;
     mockConfig.oauthAudience = undefined;
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
   });
 
   it('should return JwtStrategy when auth mode is "jwt"', () => {
@@ -61,4 +66,23 @@ describe('createAuthStrategy', () => {
 
     expect(() => createAuthStrategy()).toThrow('Unknown authentication mode: unknown-auth-mode');
   });
+
+  it.each<[string, Partial<typeof mockConfig>, number]>([
+    ['jwt', { mcpAuthSecretKey: 'test-secret-key-that-is-at-least-32-chars-long' }, 1],
+    ['oauth', { oauthIssuerUrl: 'https://example.com', oauthAudience: 'test-audience' }, 0],
+    ['none', {}, 0],
+  ])(
+    'warns about an unset MCP_JWT_EXPECTED_AUDIENCE only in jwt mode (%s)',
+    (mode, overrides, expected) => {
+      Object.assign(mockConfig, { mcpAuthMode: mode, ...overrides });
+      const warning = vi.spyOn(logger, 'warning');
+
+      createAuthStrategy();
+
+      const audienceWarnings = warning.mock.calls.filter(([message]) =>
+        String(message).includes('MCP_JWT_EXPECTED_AUDIENCE'),
+      );
+      expect(audienceWarnings).toHaveLength(expected);
+    },
+  );
 });

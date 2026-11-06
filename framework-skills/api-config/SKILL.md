@@ -4,7 +4,7 @@ description: >
   Reference for core and server configuration in `@cyanheads/mcp-ts-core`. Covers env var tables with defaults, priority order, server-specific Zod schema pattern, and Workers lazy-parsing requirement.
 metadata:
   author: cyanheads
-  version: "1.29"
+  version: "1.30"
   audience: external
   type: reference
 ---
@@ -147,8 +147,8 @@ await createApp({ sessionMode: { default: 'stateful', require: 'stateful' } }); 
 | `OAUTH_JWKS_COOLDOWN_MS` | `oauthJwksCooldownMs` | `300000` | 5 min; min time between JWKS refetches; integer ms, 0–2147483647; 0 disables the cooldown |
 | `OAUTH_JWKS_TIMEOUT_MS` | `oauthJwksTimeoutMs` | `5000` | JWKS fetch timeout; integer ms, 1–2147483647 |
 | `DEV_MCP_AUTH_BYPASS` | `devMcpAuthBypass` | `false` | Skip auth in development; blocked in `production` |
-| `MCP_JWT_EXPECTED_ISSUER` | `mcpJwtExpectedIssuer` | — | Optional issuer validation for JWT mode |
-| `MCP_JWT_EXPECTED_AUDIENCE` | `mcpJwtExpectedAudience` | — | Optional audience validation for JWT mode |
+| `MCP_JWT_EXPECTED_ISSUER` | `mcpJwtExpectedIssuer` | — | Optional issuer validation for JWT mode; with a shared HS256 key it does not stop another service's token on its own — pair it with `MCP_JWT_EXPECTED_AUDIENCE` |
+| `MCP_JWT_EXPECTED_AUDIENCE` | `mcpJwtExpectedAudience` | — | Optional audience validation for JWT mode. Unset, any token signed with `MCP_AUTH_SECRET_KEY` is accepted whatever its `aud`, and a strategy that loads a key logs a `WARNING` at startup naming this variable |
 | `DEV_MCP_CLIENT_ID` | `devMcpClientId` | — | Dev-only: override client ID |
 | `DEV_MCP_SCOPES` | `devMcpScopes` | — | Dev-only: comma-separated scope overrides |
 

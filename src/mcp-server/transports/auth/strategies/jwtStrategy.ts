@@ -57,6 +57,16 @@ export class JwtStrategy implements AuthStrategy {
     } else {
       this.logger.info('JWT secret key loaded successfully.', context);
       this.secretKey = new TextEncoder().encode(secretKey);
+      /**
+       * The warning keys on the audience alone: with a shared HS256 key, any
+       * holder of the key can write any `iss`, so an issuer pin stops nothing.
+       */
+      if (!this.expectedAudience) {
+        this.logger.warning(
+          "MCP_JWT_EXPECTED_AUDIENCE is not set — JWT mode accepts any token signed with MCP_AUTH_SECRET_KEY whatever its aud claim, so a token minted for another service that shares the key is accepted here. Set MCP_JWT_EXPECTED_AUDIENCE (and MCP_JWT_EXPECTED_ISSUER) to the values this server's tokens carry.",
+          context,
+        );
+      }
     }
   }
 
