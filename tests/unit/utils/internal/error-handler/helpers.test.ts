@@ -1,6 +1,6 @@
 /**
  * @fileoverview Test suite for error handler helper utilities — getErrorName, getErrorMessage,
- * formatZodErrorMessage, extractErrorCauseChain.
+ * formatZodErrorMessage, extractErrorCauseChain, and the server-only keys readWireErrorData drops.
  * @module tests/utils/internal/error-handler/helpers.test
  */
 
@@ -16,8 +16,12 @@ import {
   getErrorMessage,
   getErrorName,
   isInstance,
+  readErrorData,
+  readWireErrorData,
   recordSpanFailure,
+  serverOnlyFields,
 } from '@/utils/internal/error-handler/helpers.js';
+import { toLogValue } from '@/utils/internal/logValue.js';
 
 describe('Error Handler Helpers', () => {
   // ─── getErrorName ────────────────────────────────────────────────────────────
@@ -629,6 +633,86 @@ describe('Error Handler Helpers', () => {
           depth: 1,
         },
       ]);
+    });
+  });
+
+  // ─── Server-only data keys (#590) ────────────────────────────────────────────
+
+  describe('server-only data keys (#590)', () => {
+    const BODY = 'upstream detail';
+    const SERVER_SIDE = {
+      status: 400,
+      body: BODY,
+      responseBody: BODY,
+      reason: 'upstream_rejected',
+    };
+
+    /** An error whose `data` marks `keys` server-only, beside fields that reach the wire. */
+    function marked(keys: readonly string[]): McpError {
+      return new McpError(JsonRpcErrorCode.InvalidParams, 'Upstream returned HTTP 400.', {
+        ...SERVER_SIDE,
+        ...serverOnlyFields(keys),
+      });
+    }
+
+    it('readWireErrorData drops the keys the marker names and the marker itself', () => {
+      const wire = readWireErrorData(marked(['body', 'responseBody']));
+
+      expect(wire).toEqual({ status: 400, reason: 'upstream_rejected' });
+      expect(Object.getOwnPropertySymbols(wire)).toEqual([]);
+    });
+
+    it('keeps a key the marker does not name', () => {
+      expect(readWireErrorData(marked(['responseBody']))).toEqual({
+        status: 400,
+        body: BODY,
+        reason: 'upstream_rejected',
+      });
+    });
+
+    it('sends an unmarked body as thrown', () => {
+      const error = new McpError(JsonRpcErrorCode.InvalidParams, 'Bad input.', { body: BODY });
+
+      expect(readWireErrorData(error)).toEqual({ body: BODY });
+    });
+
+    it('leaves the thrown error’s own data whole', () => {
+      const error = marked(['body', 'responseBody']);
+
+      readWireErrorData(error);
+
+      expect(error.data).toMatchObject(SERVER_SIDE);
+      expect(Object.getOwnPropertySymbols(error.data)).toHaveLength(1);
+    });
+
+    it('carries the marker through readErrorData and a spread, so a rebuilt error stays filtered', () => {
+      const error = marked(['body', 'responseBody']);
+      const copy = readErrorData(error);
+      expect(copy).toMatchObject(SERVER_SIDE);
+
+      for (const rebuilt of [
+        new McpError(error.code, 'Wrapped.', copy),
+        new McpError(error.code, 'Wrapped.', { ...error.data, attempt: 2 }, { cause: error }),
+      ]) {
+        expect(rebuilt.data).toMatchObject({ body: BODY, responseBody: BODY });
+        expect(readWireErrorData(rebuilt)).toMatchObject({ status: 400 });
+        expect(readWireErrorData(rebuilt)).not.toHaveProperty('body');
+        expect(readWireErrorData(rebuilt)).not.toHaveProperty('responseBody');
+      }
+    });
+
+    it('neither JSON.stringify nor the log walk writes the marker; both write the body', () => {
+      const data = readErrorData(marked(['body', 'responseBody']));
+      const logged = toLogValue({ errorData: data }) as { errorData: Record<string, unknown> };
+
+      expect(JSON.parse(JSON.stringify(data))).toEqual(SERVER_SIDE);
+      expect(logged.errorData).toEqual(SERVER_SIDE);
+      expect(Object.getOwnPropertySymbols(logged.errorData)).toEqual([]);
+    });
+
+    it('serverOnlyFields marks nothing for no keys', () => {
+      expect(serverOnlyFields([])).toBeUndefined();
+      expect(readWireErrorData(marked([]))).toEqual(SERVER_SIDE);
     });
   });
 

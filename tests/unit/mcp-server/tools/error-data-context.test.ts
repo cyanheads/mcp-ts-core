@@ -3,9 +3,10 @@
  * formatters as their context argument. After an elicitation round that `ctx`
  * carries what the user typed (`ctx.inputs.responses`), so no framework error
  * built from it may carry the context as `McpError.data` — that payload is
- * returned verbatim as `structuredContent.error.data` (#548). Runs the real
- * handler factory, storage service, parsers, and formatters: a stubbed service
- * would never build the error this covers.
+ * returned verbatim as `structuredContent.error.data` (#548); nor may that
+ * payload carry an upstream error body the HTTP helpers captured, unless the
+ * call opts in (#590). Runs the real handler factory, storage service, parsers,
+ * and formatters: a stubbed service would never build the error this covers.
  * @module tests/unit/mcp-server/tools/error-data-context.test
  */
 
@@ -27,11 +28,14 @@ import { createToolHandler } from '@/mcp-server/tools/utils/toolHandlerFactory.j
 import { StorageService } from '@/storage/core/StorageService.js';
 import { FileSystemProvider } from '@/storage/providers/fileSystem/fileSystemProvider.js';
 import { InMemoryProvider } from '@/storage/providers/inMemory/inMemoryProvider.js';
+import { JsonRpcErrorCode, McpError } from '@/types-global/errors.js';
 import { diffFormatter } from '@/utils/formatting/diffFormatter.js';
 import { tableFormatter } from '@/utils/formatting/tableFormatter.js';
 import { treeFormatter } from '@/utils/formatting/treeFormatter.js';
 import { logger } from '@/utils/internal/logger.js';
+import { toLogValue } from '@/utils/internal/logValue.js';
 import { fetchWithTimeout } from '@/utils/network/fetchWithTimeout.js';
+import { httpErrorFromResponse } from '@/utils/network/httpError.js';
 import { csvParser } from '@/utils/parsing/csvParser.js';
 import { htmlExtractor } from '@/utils/parsing/htmlExtractor.js';
 import { Allow, jsonParser } from '@/utils/parsing/jsonParser.js';
@@ -205,8 +209,9 @@ describe('framework error data built from a handler ctx (#548)', () => {
 
     beforeAll(() => {
       root = mkdtempSync(join(tmpdir(), 'error-data-context-'));
-      mkdirSync(join(root, 'default', 'note'), { recursive: true });
-      writeFileSync(join(root, 'default', 'note', '42'), 'not json{');
+      // Key `note/42` of tenant `default`, at the provider's own layout.
+      mkdirSync(join(root, '_v2', 'default', 'note'), { recursive: true });
+      writeFileSync(join(root, '_v2', 'default', 'note', '42.json'), 'not json{');
     });
 
     afterAll(() => {
@@ -259,6 +264,155 @@ describe('framework error data built from a handler ctx (#548)', () => {
         expect.stringMatching(/Fetch failed|Network error/),
         expect.objectContaining({ requestId: ctx.requestId }),
       );
+    });
+  });
+
+  /**
+   * An upstream's error body is captured for server code and the failure
+   * record, and left off `structuredContent.error.data` unless the call opts in
+   * (#590). Through the real handler factory, so every copy of `data` the
+   * framework makes on the way — the declared-recovery fill, the handler
+   * record — runs.
+   */
+  describe('a captured upstream error body (#590)', () => {
+    const BODY = '{"error":"param dte is not a valid date"}';
+    const badRequest = () => new Response(BODY, { status: 400, statusText: 'Bad Request' });
+    const WIRE_400 = {
+      status: 400,
+      statusText: 'Bad Request',
+      statusCode: 400,
+      requestId: expect.any(String),
+    };
+
+    afterEach(() => {
+      vi.unstubAllGlobals();
+    });
+
+    /** Runs a tool whose handler runs `fail`, through the real handler factory. */
+    async function failedCall(fail: (ctx: Context) => Promise<unknown>): Promise<CallToolResult> {
+      const def = tool('lookup', {
+        description: 'Repro.',
+        input: z.object({}),
+        output: z.object({ ok: z.boolean().describe('Always true') }),
+        errors: [
+          {
+            reason: 'upstream_rejected',
+            code: JsonRpcErrorCode.InvalidParams,
+            when: 'The upstream rejected the query',
+            recovery: 'Check the date parameters, then retry the call.',
+            thrownBy: 'service',
+          },
+        ],
+        async handler(_input, ctx) {
+          await fail(ctx);
+          return { ok: true };
+        },
+      });
+      const handler = createToolHandler(
+        def as AnyToolDefinition,
+        services as never,
+        {},
+        legacyCapabilityView({}),
+      );
+      return (await handler({}, makeServerContext({}))) as CallToolResult;
+    }
+
+    /** The `content[]` text, the call's own request id written as `<id>`. */
+    function contentText(result: CallToolResult): string {
+      const [block] = result.content as { text: string }[];
+      return String(block?.text).replace(String(errorData(result)?.requestId), '<id>');
+    }
+
+    it('leaves httpErrorFromResponse’s body off structuredContent.error.data', async () => {
+      vi.spyOn(logger, 'error').mockImplementation(() => {});
+
+      const result = await failedCall(async () => {
+        throw await httpErrorFromResponse(badRequest(), { service: 'Upstream' });
+      });
+
+      expect(errorData(result)).toEqual(WIRE_400);
+      expect(contentText(result)).not.toContain('dte');
+    });
+
+    it('leaves fetchWithTimeout’s body off structuredContent.error.data', async () => {
+      vi.spyOn(logger, 'error').mockImplementation(() => {});
+      vi.stubGlobal(
+        'fetch',
+        vi.fn(async () => new Response(BODY, { status: 503, statusText: 'Service Unavailable' })),
+      );
+
+      const result = await failedCall((ctx) =>
+        fetchWithTimeout('https://api.example.com/items', 1_000, ctx),
+      );
+
+      expect(errorData(result)).toEqual({
+        status: 503,
+        statusText: 'Service Unavailable',
+        statusCode: 503,
+        errorSource: 'FetchHttpError',
+        requestId: expect.any(String),
+      });
+    });
+
+    it('keeps the body off an McpError rebuilt from a spread of the helper’s data', async () => {
+      vi.spyOn(logger, 'error').mockImplementation(() => {});
+
+      const result = await failedCall(async () => {
+        const upstream = await httpErrorFromResponse(badRequest(), { service: 'Upstream' });
+        throw new McpError(
+          upstream.code,
+          'Lookup failed.',
+          { ...upstream.data, lookup: 'dte' },
+          { cause: upstream },
+        );
+      });
+
+      expect(errorData(result)).toEqual({ ...WIRE_400, lookup: 'dte' });
+    });
+
+    it('keeps the body off a failure the declared recovery fills', async () => {
+      vi.spyOn(logger, 'error').mockImplementation(() => {});
+
+      const result = await failedCall(async () => {
+        throw await httpErrorFromResponse(badRequest(), {
+          service: 'Upstream',
+          data: { reason: 'upstream_rejected' },
+        });
+      });
+
+      expect(errorData(result)).toEqual({
+        ...WIRE_400,
+        reason: 'upstream_rejected',
+        recovery: { hint: 'Check the date parameters, then retry the call.' },
+      });
+    });
+
+    it('sends today’s structuredContent.error.data under exposeBody: true, content[] unchanged', async () => {
+      vi.spyOn(logger, 'error').mockImplementation(() => {});
+      const fail = (exposeBody: boolean) => async () => {
+        throw await httpErrorFromResponse(badRequest(), { service: 'Upstream', exposeBody });
+      };
+
+      const exposed = await failedCall(fail(true));
+      const kept = await failedCall(fail(false));
+
+      expect(errorData(exposed)).toEqual({ ...WIRE_400, body: BODY, responseBody: BODY });
+      expect(contentText(exposed)).toBe(contentText(kept));
+    });
+
+    it('writes the body on the handler’s failure record, and never the marker', async () => {
+      const errorSpy = vi.spyOn(logger, 'error').mockImplementation(() => {});
+
+      await failedCall(async () => {
+        throw await httpErrorFromResponse(badRequest(), { service: 'Upstream' });
+      });
+
+      const call = errorSpy.mock.calls.find(([message]) =>
+        String(message).startsWith('Error in tool:lookup'),
+      );
+      const written = toLogValue(call?.[1]) as { extra: { errorData: Record<string, unknown> } };
+      expect(written.extra.errorData).toMatchObject({ body: BODY, responseBody: BODY });
+      expect(Object.getOwnPropertySymbols(written.extra.errorData)).toEqual([]);
     });
   });
 

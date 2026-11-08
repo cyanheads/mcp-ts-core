@@ -12,8 +12,9 @@ import type { RequestContext } from '@/utils/internal/requestContext.js';
 /**
  * Structured payload for an error's JSON-RPC `data` field.
  *
- * `data` reaches the client verbatim — a tool returns it as
- * `structuredContent.error.data` — so pass the explicit fields the caller acts
+ * `data` reaches the client — a tool returns it as
+ * `structuredContent.error.data`, less any fields the HTTP helpers mark
+ * server-only — so pass the explicit fields the caller acts
  * on (the rejected key, a limit, a `reason`), never a request context. A
  * handler `ctx` carries request metadata and, after an elicitation round, what
  * the user typed (`ctx.inputs.responses`); the context belongs in the log.

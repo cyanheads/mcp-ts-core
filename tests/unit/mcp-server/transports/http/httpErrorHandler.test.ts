@@ -15,6 +15,7 @@ import type { SessionStore } from '@/mcp-server/transports/http/sessionStore.js'
 import { JsonRpcErrorCode, McpError } from '@/types-global/errors.js';
 import { ErrorHandler } from '@/utils/internal/error-handler/errorHandler.js';
 import { logger } from '@/utils/internal/logger.js';
+import { httpErrorFromResponse } from '@/utils/network/httpError.js';
 import { defaultServerManifest } from '../../../../helpers/fixtures.js';
 
 const { mockConfig, mockCounterAdd } = vi.hoisted(() => ({
@@ -572,6 +573,49 @@ describe('HTTP Error Handler', () => {
       expect((jsonResponseData as any).error).toMatchObject({
         code: JsonRpcErrorCode.InternalError,
         data: { requestId: 'test-req-id' },
+      });
+    });
+
+    test('leaves a captured upstream body off data, the rest kept (#590)', async () => {
+      const error = await httpErrorFromResponse(
+        new Response('upstream detail', { status: 400, statusText: 'Bad Request' }),
+        { service: 'Upstream' },
+      );
+
+      await httpErrorHandler(error, mockContext as Context<{ Bindings: HonoNodeBindings }>);
+
+      expect(error.data?.body).toBe('upstream detail');
+      expect((jsonResponseData as any).error.data).toEqual({
+        status: 400,
+        statusText: 'Bad Request',
+        statusCode: 400,
+        requestId: 'test-req-id',
+      });
+    });
+
+    test('sends a body the thrown data carries unmarked (#590)', async () => {
+      const error = new McpError(JsonRpcErrorCode.InvalidParams, 'Bad date.', {
+        body: 'Check the dte parameter.',
+      });
+
+      await httpErrorHandler(error, mockContext as Context<{ Bindings: HonoNodeBindings }>);
+
+      expect((jsonResponseData as any).error.data).toEqual({
+        body: 'Check the dte parameter.',
+        requestId: 'test-req-id',
+      });
+    });
+
+    test('writes a data field the wire cannot carry as [Unreadable], the rest sent', async () => {
+      const error = new McpError(JsonRpcErrorCode.ServiceUnavailable, 'down', { id: 1, bad: 10n });
+
+      await httpErrorHandler(error, mockContext as Context<{ Bindings: HonoNodeBindings }>);
+
+      expect(statusValue).toBe(503);
+      expect((jsonResponseData as any).error.data).toEqual({
+        id: 1,
+        bad: '[Unreadable]',
+        requestId: 'test-req-id',
       });
     });
   });

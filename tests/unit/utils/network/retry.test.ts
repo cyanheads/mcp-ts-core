@@ -7,6 +7,7 @@ import { afterEach, beforeEach, describe, expect, it, type MockInstance, vi } fr
 import { z } from 'zod';
 
 import { JsonRpcErrorCode, McpError } from '../../../../src/types-global/errors.js';
+import { readWireErrorData } from '../../../../src/utils/internal/error-handler/helpers.js';
 import { logger } from '../../../../src/utils/internal/logger.js';
 import { fetchWithTimeout } from '../../../../src/utils/network/fetchWithTimeout.js';
 import {
@@ -1159,6 +1160,129 @@ describe('withRetry over fetchWithTimeout — upstream 5xx policy (#323)', () =>
     expect(error.data?.errorSource).toBe('FetchSignalTimeout');
     expect(error.data).not.toHaveProperty('retryAttempts');
     expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  // #604 — the real-peer counterpart lives in fetchWithTimeout.bodyDeadline.test.ts.
+  it('keeps a cancellation that cuts a 5xx body capture out of the retry loop', async () => {
+    vi.spyOn(logger, 'info').mockImplementation(() => {});
+    const controller = new AbortController();
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockImplementation(async (_url, init) => {
+      const signal = init?.signal as AbortSignal;
+      if (signal.aborted) throw signal.reason;
+      // A body that stalls, then errors with the signal's reason, as a runtime's does.
+      const body = new ReadableStream<Uint8Array>({
+        start(stream) {
+          stream.enqueue(new TextEncoder().encode('partial'));
+          signal.addEventListener('abort', () => stream.error(signal.reason), { once: true });
+        },
+      });
+      return new Response(body, { status: 503 });
+    });
+
+    const promise = withRetry(
+      () =>
+        fetchWithTimeout('https://api.example.com/x', 30_000, context, {
+          signal: controller.signal,
+        }),
+      { baseDelayMs: 10, jitter: 0, maxRetries: 3, operation: 'fetchThing', context },
+    ).catch((e: unknown) => e);
+
+    controller.abort('client disconnected');
+    const error = (await promise) as McpError;
+
+    expect(error.code).toBe(JsonRpcErrorCode.RequestCancelled);
+    expect(error.data).toEqual({ errorSource: 'FetchAborted' });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  // #799 — nobody withdrew the request, so it is an upstream failure to retry.
+  it('retries an AbortError neither signal raised through the full budget', async () => {
+    const infoSpy = vi.spyOn(logger, 'info').mockImplementation(() => {});
+    const fetchMock = vi
+      .spyOn(globalThis, 'fetch')
+      .mockRejectedValue(new DOMException('aborted', 'AbortError'));
+
+    const error = (await withRetry(
+      () =>
+        fetchWithTimeout('https://api.example.com/x', 30_000, context, {
+          signal: new AbortController().signal,
+        }),
+      { baseDelayMs: 1, jitter: 0, maxRetries: 2, operation: 'fetchThing', context },
+    ).catch((e: unknown) => e)) as McpError;
+
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+    expect(error.code).toBe(JsonRpcErrorCode.ServiceUnavailable);
+    expect(error.data).toMatchObject({
+      originalErrorName: 'AbortError',
+      errorSource: 'FetchNetworkErrorWrapper',
+      retryAttempts: 3,
+    });
+    expect(infoSpy).not.toHaveBeenCalled();
+  });
+
+  // #819 — the retry count was already right; the exhausted error is now classified.
+  it('exhausts a 2xx body that fails mid-read to the classified network failure', async () => {
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockImplementation(
+      async () =>
+        new Response(
+          new ReadableStream<Uint8Array>({
+            start(stream) {
+              stream.enqueue(new TextEncoder().encode('{"partial":'));
+            },
+            pull(stream) {
+              stream.error(new TypeError('terminated'));
+            },
+          }),
+          { status: 200 },
+        ),
+    );
+
+    const error = (await withRetry(
+      async () => {
+        const response = await fetchWithTimeout('https://api.example.com/x', 30_000, context);
+        return await response.text();
+      },
+      { baseDelayMs: 1, jitter: 0, maxRetries: 2, operation: 'fetchThing', context },
+    ).catch((e: unknown) => e)) as McpError;
+
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+    expect(error).toBeInstanceOf(McpError);
+    expect(error.code).toBe(JsonRpcErrorCode.ServiceUnavailable);
+    expect(error.message).toBe(
+      'Network error during fetch GET https://api.example.com/…: terminated (failed after 3 attempts)',
+    );
+    expect(error.data).toEqual({
+      originalErrorName: 'TypeError',
+      errorSource: 'FetchNetworkErrorWrapper',
+      retryAttempts: 3,
+      operation: 'fetchThing',
+    });
+  });
+
+  // #590 — the exhausted error is rebuilt from a copy of `data`, marker included.
+  it('keeps the captured body on the exhausted error, and off the wire', async () => {
+    vi.spyOn(globalThis, 'fetch').mockImplementation(
+      async () => new Response('upstream boom', { status: 503 }),
+    );
+
+    const error = (await withRetry(
+      () => fetchWithTimeout('https://api.example.com/x', 30_000, context),
+      { baseDelayMs: 1, jitter: 0, maxRetries: 1, operation: 'fetchThing', context },
+    ).catch((e: unknown) => e)) as McpError;
+
+    expect(error.data).toMatchObject({
+      body: 'upstream boom',
+      responseBody: 'upstream boom',
+      retryAttempts: 2,
+    });
+    expect(readWireErrorData(error)).toEqual({
+      status: 503,
+      statusText: '',
+      statusCode: 503,
+      errorSource: 'FetchHttpError',
+      retryAttempts: 2,
+      operation: 'fetchThing',
+    });
   });
 });
 

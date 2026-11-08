@@ -72,11 +72,12 @@ export function copyFields<T extends object>(value: T | undefined): T | undefine
 
 /**
  * A shallow copy of the `data` a thrown `McpError` carries, so the error path
- * reads plain fields rather than the thrown value's. Nothing is serialized: the
- * log record writes the copy through the bounded log walk, and the wire
- * boundaries check it with {@link readWireErrorData}. `undefined` when `error`
- * is not an `McpError`, carries no object `data`, or its `data` cannot be read
- * or copied — a getter, a revoked `Proxy`, a throwing `ownKeys` trap.
+ * reads plain fields rather than the thrown value's — server-only fields and
+ * their marker included. Nothing is serialized: the log record writes the copy
+ * through the bounded log walk, and the wire boundaries check it with
+ * {@link readWireErrorData}, which drops the server-only fields. `undefined`
+ * when `error` is not an `McpError`, carries no object `data`, or its `data`
+ * cannot be read or copied — a getter, a revoked `Proxy`, a throwing `ownKeys` trap.
  */
 export function readErrorData(error: unknown): Record<string, unknown> | undefined {
   if (!isInstance(error, McpError)) return;
@@ -118,7 +119,28 @@ function wireField(value: unknown): unknown {
 }
 
 /**
+ * Names the fields of an error's `data` that stay on the server: server code
+ * reads them and the log record writes them, and {@link readWireErrorData}
+ * leaves them out of every client envelope. A Symbol key, so `JSON.stringify`
+ * and the log walk, which read string keys only, never write the marker itself;
+ * enumerable, so every spread of `data` — the `McpError` constructor,
+ * {@link readErrorData}, `withRetry`'s exhausted error, a consumer's
+ * `{ ...error.data }` — carries it along with the fields it names.
+ */
+const SERVER_ONLY_KEYS = Symbol('mcp-ts-core.serverOnlyKeys');
+
+/**
+ * The marker naming `keys` server-only, as a fragment to spread into an
+ * `McpError`'s `data`; `undefined` for no keys, so the spread adds nothing. The
+ * HTTP helpers mark the upstream body they capture with it.
+ */
+export function serverOnlyFields(keys: readonly string[]): Record<symbol, unknown> | undefined {
+  return keys.length > 0 ? { [SERVER_ONLY_KEYS]: keys } : undefined;
+}
+
+/**
  * {@link readErrorData} for a response: every field is one the wire carries.
+ * The fields {@link serverOnlyFields} marks are left out, and so is the marker.
  * A field `JSON.stringify` cannot write is {@link UNREADABLE}, since a response
  * holding one is never sent and the client waits for it, and a field that takes
  * more than {@link WIRE_VALUES} JSON values to write is `'[Truncated]'`. Every
@@ -128,6 +150,10 @@ function wireField(value: unknown): unknown {
 export function readWireErrorData(error: unknown): Record<string, unknown> | undefined {
   const copy = readErrorData(error);
   if (copy === undefined) return;
+  const marked = copy as Record<symbol, unknown>;
+  const serverOnly = marked[SERVER_ONLY_KEYS];
+  if (Array.isArray(serverOnly)) for (const key of serverOnly) delete copy[key];
+  delete marked[SERVER_ONLY_KEYS];
   for (const key of Object.keys(copy)) copy[key] = wireField(copy[key]);
   return copy;
 }

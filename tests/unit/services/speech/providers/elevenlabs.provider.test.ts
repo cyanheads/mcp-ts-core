@@ -241,11 +241,13 @@ describe('ElevenLabsProvider', () => {
     });
 
     it('should report an unreadable audio body as ServiceUnavailable', async () => {
+      // fetchWithTimeout classifies the mid-body failure; the provider passes it through.
       fetchMock.route({ match: TTS_URL, respond: brokenBodyResponse });
 
       await expect(provider.textToSpeech({ text: 'Hello' })).rejects.toMatchObject({
         code: JsonRpcErrorCode.ServiceUnavailable,
-        message: expect.stringContaining('Failed to convert text to speech'),
+        message: expect.stringContaining('connection reset'),
+        data: { errorSource: 'FetchNetworkErrorWrapper' },
       });
     });
   });

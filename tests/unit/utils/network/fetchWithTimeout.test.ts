@@ -13,6 +13,7 @@ import {
 import { createToolHandler } from '../../../../src/mcp-server/tools/utils/toolHandlerFactory.js';
 import { JsonRpcErrorCode, McpError } from '../../../../src/types-global/errors.js';
 import { ErrorHandler } from '../../../../src/utils/internal/error-handler/errorHandler.js';
+import { readWireErrorData } from '../../../../src/utils/internal/error-handler/helpers.js';
 import { logger } from '../../../../src/utils/internal/logger.js';
 import { withExtra } from '../../../../src/utils/internal/requestContext.js';
 import { fetchWithTimeout } from '../../../../src/utils/network/fetchWithTimeout.js';
@@ -518,6 +519,177 @@ describe('fetchWithTimeout', () => {
     });
   });
 
+  /**
+   * Nobody withdrew the request, so the rejection's name says nothing about the
+   * caller: it is an upstream or runtime failure like any other.
+   */
+  describe('an AbortError neither signal raised (#799)', () => {
+    it.each([
+      ['a caller signal that never aborts', () => ({ signal: new AbortController().signal })],
+      ['no caller signal', () => undefined],
+    ])(
+      'classifies a fetch rejecting AbortError with %s as a network failure',
+      async (_label, options) => {
+        const infoSpy = vi.spyOn(logger, 'info').mockImplementation(() => {});
+        const rejection = new DOMException('aborted', 'AbortError');
+        vi.spyOn(globalThis, 'fetch').mockRejectedValue(rejection);
+
+        const error = (await fetchWithTimeout(
+          'https://example.com',
+          30_000,
+          context,
+          options(),
+        ).catch((e: unknown) => e)) as McpError;
+
+        expect(error).toBeInstanceOf(McpError);
+        expect(error.code).toBe(JsonRpcErrorCode.ServiceUnavailable);
+        expect(error.message).toBe('Network error during fetch GET https://example.com: aborted');
+        expect(error.data).toEqual({
+          originalErrorName: 'AbortError',
+          errorSource: 'FetchNetworkErrorWrapper',
+        });
+        expect(error.cause).toBe(rejection);
+        expect(errorSpy).toHaveBeenCalledWith(
+          'Network error during fetch GET https://example.com: aborted',
+          expect.objectContaining({
+            extra: expect.objectContaining({
+              originalErrorName: 'AbortError',
+              errorSource: 'FetchNetworkError',
+            }),
+          }),
+        );
+        expect(infoSpy).not.toHaveBeenCalled();
+      },
+    );
+  });
+
+  /**
+   * The upstream answered non-2xx and its body capture rejected. Which signal
+   * cut it decides the outcome: the caller's, when it fired first; otherwise
+   * the status the upstream already reported. Real-peer cases live in
+   * `fetchWithTimeout.bodyDeadline.test.ts`; these pin the precedence races.
+   */
+  describe('a non-2xx body capture cut short (#604)', () => {
+    afterEach(() => {
+      vi.useRealTimers();
+    });
+
+    /**
+     * A 503 whose body sends one chunk and then errors with the request
+     * signal's reason when it aborts, as a runtime's body stream does.
+     * `afterAbort` runs inside that same abort dispatch.
+     */
+    function stalled503(afterAbort?: () => void) {
+      return vi.spyOn(globalThis, 'fetch').mockImplementation(async (_url, init) => {
+        const signal = init?.signal as AbortSignal;
+        const body = new ReadableStream<Uint8Array>({
+          start(controller) {
+            controller.enqueue(new TextEncoder().encode('partial error body'));
+            signal.addEventListener(
+              'abort',
+              () => {
+                controller.error(signal.reason);
+                afterAbort?.();
+              },
+              { once: true },
+            );
+          },
+        });
+        return new Response(body, { status: 503, statusText: 'Service Unavailable' });
+      });
+    }
+
+    it('reports the cancellation when the caller fired first, even with timeoutMs right behind it', async () => {
+      const infoSpy = vi.spyOn(logger, 'info').mockImplementation(() => {});
+      vi.useFakeTimers();
+      // The helper's own deadline expires inside the caller's abort dispatch.
+      stalled503(() => vi.advanceTimersByTime(1000));
+      const caller = new AbortController();
+
+      const promise = fetchWithTimeout('https://example.com', 1000, context, {
+        signal: caller.signal,
+      }).catch((e: unknown) => e);
+      caller.abort('client disconnected');
+      const error = (await promise) as McpError;
+
+      expect(error.code).toBe(JsonRpcErrorCode.RequestCancelled);
+      expect(error.data).toEqual({ errorSource: 'FetchAborted' });
+      expect(infoSpy).toHaveBeenCalledTimes(1);
+      expect(errorSpy).not.toHaveBeenCalled();
+    });
+
+    it('keeps the status when timeoutMs fired first, even with the caller right behind it', async () => {
+      vi.spyOn(logger, 'info').mockImplementation(() => {});
+      vi.useFakeTimers();
+      const caller = new AbortController();
+      stalled503(() => caller.abort('client disconnected'));
+
+      const promise = fetchWithTimeout('https://example.com', 1000, context, {
+        signal: caller.signal,
+      }).catch((e: unknown) => e);
+      await vi.advanceTimersByTimeAsync(1000);
+      const error = (await promise) as McpError;
+
+      expect(caller.signal.aborted).toBe(true);
+      expect(error.code).toBe(JsonRpcErrorCode.ServiceUnavailable);
+      expect(error.data).toMatchObject({
+        status: 503,
+        body: 'Could not read response body',
+        errorSource: 'FetchHttpError',
+      });
+    });
+
+    it('keeps the status of a capture that completed before the caller aborted', async () => {
+      const infoSpy = vi.spyOn(logger, 'info').mockImplementation(() => {});
+      vi.spyOn(globalThis, 'fetch').mockResolvedValue(
+        new Response('upstream down', { status: 503 }),
+      );
+      const caller = new AbortController();
+      // The failure record is written after the capture completes and before the throw.
+      errorSpy.mockImplementation((message: unknown) => {
+        if (String(message).startsWith('Fetch failed')) caller.abort('client disconnected');
+      });
+
+      const error = (await fetchWithTimeout('https://example.com', 1000, context, {
+        signal: caller.signal,
+      }).catch((e: unknown) => e)) as McpError;
+
+      expect(caller.signal.aborted).toBe(true);
+      expect(error.code).toBe(JsonRpcErrorCode.ServiceUnavailable);
+      expect(error.data).toMatchObject({ body: 'upstream down', errorSource: 'FetchHttpError' });
+      expect(infoSpy).not.toHaveBeenCalled();
+    });
+
+    it('keeps the status of a capture that failed with an AbortError neither signal raised', async () => {
+      const infoSpy = vi.spyOn(logger, 'info').mockImplementation(() => {});
+      vi.spyOn(globalThis, 'fetch').mockResolvedValue(
+        new Response(
+          new ReadableStream<Uint8Array>({
+            start(controller) {
+              controller.enqueue(new TextEncoder().encode('partial'));
+            },
+            pull(controller) {
+              controller.error(new DOMException('aborted', 'AbortError'));
+            },
+          }),
+          { status: 503 },
+        ),
+      );
+
+      const error = (await fetchWithTimeout('https://example.com', 1000, context, {
+        signal: new AbortController().signal,
+      }).catch((e: unknown) => e)) as McpError;
+
+      expect(error.code).toBe(JsonRpcErrorCode.ServiceUnavailable);
+      expect(error.data).toMatchObject({
+        status: 503,
+        body: 'Could not read response body',
+        errorSource: 'FetchHttpError',
+      });
+      expect(infoSpy).not.toHaveBeenCalled();
+    });
+  });
+
   it('emits both status/body and legacy statusCode/responseBody with equal values (#279)', async () => {
     vi.spyOn(globalThis, 'fetch').mockResolvedValue(
       new Response('boom', { status: 500, statusText: 'Internal Server Error' }),
@@ -533,6 +705,53 @@ describe('fetchWithTimeout', () => {
     expect(data.body).toBe('boom');
     expect(data.responseBody).toBe('boom');
     expect(data.body).toBe(data.responseBody);
+  });
+
+  describe('the captured body stays server-side by default (#590)', () => {
+    const BODY = 'upstream down: see trace 7f3a';
+    const upstreamDown = () =>
+      new Response(BODY, { status: 503, statusText: 'Service Unavailable' });
+    const WIRE = {
+      status: 503,
+      statusText: 'Service Unavailable',
+      statusCode: 503,
+      errorSource: 'FetchHttpError',
+    };
+
+    it('keeps data.body and data.responseBody readable, and off the wire', async () => {
+      vi.spyOn(globalThis, 'fetch').mockResolvedValue(upstreamDown());
+
+      const error = (await fetchWithTimeout('https://example.com', 1000, context).catch(
+        (e: unknown) => e,
+      )) as McpError;
+
+      expect(error.data).toMatchObject({ body: BODY, responseBody: BODY });
+      expect(Object.getOwnPropertySymbols(error.data)).toHaveLength(1);
+      expect(readWireErrorData(error)).toEqual(WIRE);
+    });
+
+    it('still writes the body on its failure record', async () => {
+      vi.spyOn(globalThis, 'fetch').mockResolvedValue(upstreamDown());
+
+      await fetchWithTimeout('https://example.com', 1000, context).catch(() => {});
+
+      expect(errorSpy).toHaveBeenCalledWith(
+        'Fetch failed for https://example.com with status 503.',
+        expect.objectContaining({ extra: expect.objectContaining({ responseBody: BODY }) }),
+      );
+    });
+
+    it('sends today’s wire shape under exposeErrorBody: true, and never hands the option to fetch', async () => {
+      const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValue(upstreamDown());
+
+      const error = (await fetchWithTimeout('https://example.com', 1000, context, {
+        exposeErrorBody: true,
+      }).catch((e: unknown) => e)) as McpError;
+
+      expect(readWireErrorData(error)).toEqual({ ...WIRE, body: BODY, responseBody: BODY });
+      expect(Object.getOwnPropertySymbols(error.data)).toEqual([]);
+      expect(fetchMock.mock.calls[0]?.[1]).not.toHaveProperty('exposeErrorBody');
+    });
   });
 
   describe('expectedStatuses (#256)', () => {
@@ -777,29 +996,61 @@ describe('fetchWithTimeout', () => {
       expect(vi.getTimerCount()).toBe(0);
     });
 
-    it('surfaces a mid-body upstream failure as itself and disarms the deadline', async () => {
-      vi.useFakeTimers();
-      const reset = new TypeError('terminated');
-      vi.spyOn(globalThis, 'fetch').mockResolvedValue(
-        new Response(
-          new ReadableStream<Uint8Array>({
-            start(controller) {
-              controller.enqueue(firstChunk());
-            },
-            pull(controller) {
-              controller.error(reset);
-            },
+    /**
+     * Neither signal fired, so this is no timeout or cancellation: the body read
+     * rejects with the network-failure wrapper the header phase would have
+     * thrown (#819) — an `AbortError` from the stream itself included (#799).
+     */
+    it.each([
+      ['a reset', () => new TypeError('terminated')],
+      ['an AbortError', () => new DOMException('aborted', 'AbortError')],
+    ])(
+      'classifies %s mid-body as a network failure and disarms the deadline',
+      async (_label, makeFailure) => {
+        const infoSpy = vi.spyOn(logger, 'info').mockImplementation(() => {});
+        vi.useFakeTimers();
+        const failure = makeFailure();
+        vi.spyOn(globalThis, 'fetch').mockResolvedValue(
+          new Response(
+            new ReadableStream<Uint8Array>({
+              start(controller) {
+                controller.enqueue(firstChunk());
+              },
+              pull(controller) {
+                controller.error(failure);
+              },
+            }),
+            { status: 200 },
+          ),
+        );
+
+        const response = await fetchWithTimeout('https://example.com', 30_000, context);
+        const error = (await response.text().catch((e: unknown) => e)) as McpError;
+
+        expect(error).toBeInstanceOf(McpError);
+        expect(error.code).toBe(JsonRpcErrorCode.ServiceUnavailable);
+        expect(error.message).toBe(
+          `Network error during fetch GET https://example.com: ${failure.message}`,
+        );
+        expect(error.data).toEqual({
+          originalErrorName: failure.name,
+          errorSource: 'FetchNetworkErrorWrapper',
+        });
+        expect(error.cause).toBe(failure);
+        expect(errorSpy).toHaveBeenCalledTimes(1);
+        expect(errorSpy).toHaveBeenCalledWith(
+          `Network error during fetch GET https://example.com: ${failure.message}`,
+          expect.objectContaining({
+            extra: expect.objectContaining({
+              originalErrorName: failure.name,
+              errorSource: 'FetchNetworkError',
+            }),
           }),
-          { status: 200 },
-        ),
-      );
-
-      const response = await fetchWithTimeout('https://example.com', 30_000, context);
-
-      // Neither signal fired, so this is no timeout or cancellation to relabel.
-      await expect(response.text()).rejects.toBe(reset);
-      expect(vi.getTimerCount()).toBe(0);
-    });
+        );
+        expect(infoSpy).not.toHaveBeenCalled();
+        expect(vi.getTimerCount()).toBe(0);
+      },
+    );
 
     it('carries a followed redirect across the passthrough', async () => {
       const upstream = new Response('moved here', { status: 200 });

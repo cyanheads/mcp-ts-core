@@ -126,7 +126,10 @@ export class WhisperProvider implements ISpeechProvider {
    *   `duration`, `words` (if timestamps were requested), and `metadata` containing
    *   `modelId`, `provider`, and `task`.
    * @throws {McpError} With `InvalidParams` for missing audio, invalid base64, or audio > 25 MB.
-   * @throws {McpError} With `InternalError` if the Whisper API call fails.
+   * @throws {McpError} The failure `fetchWithTimeout` raises, unchanged: a status-mapped
+   *   code for a non-2xx (`Unauthorized`, `RateLimited`, `ServiceUnavailable`, …),
+   *   `Timeout`, `RequestCancelled`, or `ServiceUnavailable` for a network failure.
+   * @throws {McpError} With `ServiceUnavailable` when the transcription cannot be parsed.
    */
   async speechToText(options: SpeechToTextOptions): Promise<SpeechToTextResult> {
     const context = requestContextService.createRequestContext({

@@ -24,7 +24,7 @@ export interface ISpeechProvider {
    *
    * @returns Resolved array of available {@link Voice} objects.
    * @throws {McpError} With `MethodNotFound` if the provider does not support TTS,
-   *   or with `InternalError` / `ServiceUnavailable` if the API call fails.
+   *   or with the status-mapped code, `Timeout`, or `ServiceUnavailable` the provider's HTTP call fails with.
    */
   getVoices(): Promise<Voice[]>;
 
@@ -51,7 +51,8 @@ export interface ISpeechProvider {
    * @returns Resolved {@link SpeechToTextResult} containing the transcript, detected language,
    *   duration, and optional word-level timestamps.
    * @throws {McpError} With `MethodNotFound` if the provider does not support STT,
-   *   `InvalidParams` for invalid or oversized audio, or `InternalError` on API failure.
+   *   `InvalidParams` for invalid or oversized audio, or the status-mapped code, `Timeout`, or
+   *   `ServiceUnavailable` the provider's HTTP call fails with.
    */
   speechToText(options: SpeechToTextOptions): Promise<SpeechToTextResult>;
 
@@ -75,7 +76,8 @@ export interface ISpeechProvider {
    * @returns Resolved {@link TextToSpeechResult} containing audio data as a Buffer,
    *   character count, format, and provider metadata.
    * @throws {McpError} With `MethodNotFound` if the provider does not support TTS,
-   *   `InvalidParams` for empty or oversized text, or `InternalError` on API failure.
+   *   `InvalidParams` for empty or oversized text, or the status-mapped code, `Timeout`, or
+   *   `ServiceUnavailable` the provider's HTTP call fails with.
    */
   textToSpeech(options: TextToSpeechOptions): Promise<TextToSpeechResult>;
 }

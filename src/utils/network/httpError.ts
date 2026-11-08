@@ -6,6 +6,7 @@
  */
 
 import { JsonRpcErrorCode, McpError } from '@/types-global/errors.js';
+import { serverOnlyFields } from '@/utils/internal/error-handler/helpers.js';
 import { readBoundedResponseText } from '@/utils/network/responseBody.js';
 
 /**
@@ -152,9 +153,12 @@ export interface HttpErrorFromResponseOptions {
    */
   bodyLimit?: number;
   /**
-   * Read the response body and include it (truncated) in `error.data.body`.
-   * Default: `true`. Set `false` if the body has already been consumed elsewhere
-   * or for binary responses where text capture is not useful.
+   * Read the response body and include it (truncated) in `error.data.body` and
+   * `error.data.responseBody`, where server code reads it and the log record
+   * writes it; the client receives it only under
+   * {@link HttpErrorFromResponseOptions.exposeBody}. Default: `true`. Set `false`
+   * if the body has already been consumed elsewhere, for binary responses where
+   * text capture is not useful, or to keep the body out of the logs as well.
    */
   captureBody?: boolean;
   /**
@@ -177,7 +181,9 @@ export interface HttpErrorFromResponseOptions {
    * override the defaults on key collision.
    *
    * `error.data` is forwarded to the client as `structuredContent.error.data`,
-   * so treat everything put here as client-visible.
+   * the captured body aside, so treat everything put here as client-visible — a
+   * `body` or `responseBody` included, which replaces the captured one and
+   * reaches the client as given.
    */
   data?: Record<string, unknown>;
   /**
@@ -191,6 +197,19 @@ export interface HttpErrorFromResponseOptions {
    * `Location` can itself carry a sensitive path, query, or token.
    */
   errorHeaders?: string[];
+  /**
+   * Send the captured body to the client with the rest of `error.data`, as
+   * `structuredContent.error.data.body` and `responseBody`. Default: `false`:
+   * the body stays on the server, readable on `error.data` and written to the
+   * log record, and every client envelope — a tool's `structuredContent.error`,
+   * a resource read's or prompt's JSON-RPC `error.data`, the HTTP transport's
+   * error response — leaves it out, because an upstream's error text is written
+   * for its own operators rather than for every caller. Opt in per call for an
+   * upstream whose error text is safe and useful to the agent, such as a
+   * validation message naming the rejected parameter. `content[]` never carries
+   * the body either way.
+   */
+  exposeBody?: boolean;
   /**
    * Put the full `response.url` — path and query string included — on
    * `error.data.url`. Default: `false`, because `error.data` reaches the client
@@ -214,7 +233,10 @@ const DEFAULT_BODY_LIMIT = 500;
  * and optional body capture.
  *
  * Reads the response body (consuming it) when `captureBody` is true, so callers
- * must `response.clone()` first if they intend to read the body elsewhere.
+ * must `response.clone()` first if they intend to read the body elsewhere. The
+ * captured body stays on the server: `error.data.body` and
+ * `error.data.responseBody` read it, the log record writes it, and every client
+ * envelope leaves it out unless `exposeBody` is set.
  *
  * Always returns an `McpError` even for 1xx/2xx — the caller is expected to have
  * verified `!response.ok` first, but the helper falls back to a sensible code
@@ -268,6 +290,7 @@ export async function httpErrorFromResponse(
     cause,
     codeOverride,
     errorHeaders,
+    exposeBody = false,
   } = options;
 
   const code =
@@ -288,6 +311,15 @@ export async function httpErrorFromResponse(
   }
 
   const retryAfter = response.headers.get('retry-after') ?? undefined;
+  /**
+   * The captured body's keys, kept off the wire unless the call opts in. A key
+   * the caller's `data` replaces holds the caller's own value, which reaches the
+   * client as any caller field does.
+   */
+  const serverOnly =
+    body === undefined || exposeBody
+      ? []
+      : ['body', 'responseBody'].filter((key) => !Object.hasOwn(extraData ?? {}, key));
 
   const data: Record<string, unknown> = {
     // The full URL is opt-in: `error.data` reaches the client, and a request URL
@@ -305,6 +337,7 @@ export async function httpErrorFromResponse(
     ...(retryAfter !== undefined && { retryAfter }),
     ...httpStatusRetryability(response.status),
     ...selectErrorHeaders(response.headers, errorHeaders),
+    ...serverOnlyFields(serverOnly),
     ...extraData,
   };
 

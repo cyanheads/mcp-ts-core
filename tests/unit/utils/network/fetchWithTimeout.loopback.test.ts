@@ -45,6 +45,13 @@ async function listen(server: Server | NetServer): Promise<string> {
 beforeAll(async () => {
   httpServer = createServer((req, res) => {
     lastRequestUrl = req.url;
+    if (req.url?.startsWith('/reset/')) {
+      // Part of a 2xx body, then the connection drops — after the bytes flush,
+      // so the headers always land first.
+      res.writeHead(200, { 'content-type': 'application/json', 'content-length': '100' });
+      res.write('{"partial":"twenty-b', () => req.socket.destroy());
+      return;
+    }
     res.writeHead(404, { 'content-type': 'text/plain' });
     res.end('not found');
   });
@@ -149,6 +156,53 @@ describe('fetchWithTimeout names a request by its origin (#626)', () => {
     }
     expectNoPath(error.message);
     expectNoPath(everyRecord());
+  });
+});
+
+describe('a 2xx body that fails mid-read reaches the tool envelope as a network failure (#819)', () => {
+  it('answers ServiceUnavailable with the wrapper data, naming the request by origin', async () => {
+    // Node rejects the read with `TypeError: terminated`, Bun with an
+    // `ECONNRESET`-coded TypeError; read the shape off a raw fetch.
+    const raw = (await (await fetch(`${httpOrigin}/reset/x`)).text().catch((e: unknown) => e)) as {
+      message: string;
+      name: string;
+    };
+    const def = tool('reverse_geocode', {
+      description: 'Reverse-geocodes a point.',
+      input: z.object({}),
+      output: z.object({ ok: z.boolean().describe('Never returned.') }),
+      async handler(_input, ctx) {
+        const response = await fetchWithTimeout(`${httpOrigin}/reset${KEY_PATH}`, 30_000, ctx);
+        await response.text();
+        return { ok: true };
+      },
+    });
+    const handler = createToolHandler(
+      def as AnyToolDefinition,
+      { logger: logger as never, storage: createInMemoryStorage() },
+      {},
+    );
+
+    const result = (await handler({}, makeServerContext())) as CallToolResult;
+
+    expect(result.isError).toBe(true);
+    expect(result.structuredContent).toEqual({
+      error: {
+        code: JsonRpcErrorCode.ServiceUnavailable,
+        message: `Network error during fetch GET ${httpOrigin}/…?…: ${raw.message}`,
+        data: {
+          originalErrorName: raw.name,
+          errorSource: 'FetchNetworkErrorWrapper',
+          requestId: expect.any(String),
+        },
+      },
+    });
+    const text = (result.content[0] as { text: string }).text;
+    expect(text.startsWith(`Error: Network error during fetch GET ${httpOrigin}/…?…: `)).toBe(true);
+    expectNoPath(text);
+    expectNoPath(JSON.stringify(result.structuredContent));
+    expectNoPath(everyRecord());
+    expect(lastRequestUrl).toBe(`/reset${KEY_PATH}`);
   });
 });
 

@@ -11,6 +11,7 @@ import {
   timeout,
   validationError,
 } from '@/types-global/errors.js';
+import { serverOnlyFields } from '@/utils/internal/error-handler/helpers.js';
 import { logger } from '@/utils/internal/logger.js';
 import { type RequestContext, withExtra } from '@/utils/internal/requestContext.js';
 import { runtimeCaps } from '@/utils/internal/runtime.js';
@@ -23,7 +24,11 @@ import { readBoundedResponseText } from '@/utils/network/responseBody.js';
 import { causeChainForLog } from '@/utils/network/retry.js';
 import { createHistogram } from '@/utils/telemetry/metrics.js';
 
-/** Default captured bytes of an upstream error response body. Keeps tool errors from poisoning the agent's context. */
+/**
+ * Default captured bytes of an upstream error response body: what server code
+ * reads and the failure record writes, and — under `exposeErrorBody` — what
+ * reaches the agent's context.
+ */
 const ERROR_BODY_LIMIT = 500;
 
 /**
@@ -129,10 +134,11 @@ function withRedactedMessage(error: Error, message: string): Error {
 export interface FetchWithTimeoutOptions extends Omit<RequestInit, 'signal'> {
   /**
    * Bytes of a non-2xx response body captured into `error.data.body` and the
-   * failure log. The cap bounds how much upstream text reaches the agent's
-   * context; it is not a judgement about which part of the body is diagnostic,
-   * so an over-budget document is captured from both ends around an elision
-   * marker rather than head-truncated.
+   * failure log. The cap bounds how much upstream text server code and the log
+   * receive, and the agent's context under
+   * {@link FetchWithTimeoutOptions.exposeErrorBody}; it is not a judgement
+   * about which part of the body is diagnostic, so an over-budget document is
+   * captured from both ends around an elision marker rather than head-truncated.
    *
    * Raise it for an upstream whose error documents are larger than the useful
    * window (a verbose HTML or XML fault wrapper). Default: `500`.
@@ -166,6 +172,18 @@ export interface FetchWithTimeoutOptions extends Omit<RequestInit, 'signal'> {
    * Default: empty — every non-2xx response is logged at `error`.
    */
   expectedStatuses?: number[];
+  /**
+   * Send a non-2xx response's captured body to the client with the rest of
+   * `error.data`, as `structuredContent.error.data.body` and `responseBody`.
+   * Default: `false`: the body stays on the server, readable on `error.data` and
+   * written to the failure record, and every client envelope — a tool's
+   * `structuredContent.error`, a resource read's or prompt's JSON-RPC
+   * `error.data`, the HTTP transport's error response — leaves it out, because
+   * an upstream's error text is written for its own operators rather than for
+   * every caller. Opt in per call for an upstream whose error text is safe and
+   * useful to the agent. Never forwarded to `fetch`.
+   */
+  exposeErrorBody?: boolean;
   /**
    * When `true`, rejects requests to non-global/reserved IP ranges and localhost.
    *
@@ -210,7 +228,10 @@ export interface FetchWithTimeoutOptions extends Omit<RequestInit, 'signal'> {
    * member fired — throws `Timeout` with `data.errorSource: 'FetchSignalTimeout'`,
    * logged at `error`, and not retried by `withRetry`'s default predicate, since a
    * retry would reuse the fired signal. Any other abort is the caller going away and throws
-   * `RequestCancelled` — logged at `info`, and never retried by `withRetry`.
+   * `RequestCancelled` — logged at `info`, and never retried by `withRetry`. Either
+   * holds in every phase: before the headers, during a 2xx body read, and while a
+   * non-2xx body is still being captured, where the abort is reported in place of
+   * the status. A capture that completed before the abort reports its status.
    */
   signal?: AbortSignal;
 }
@@ -512,7 +533,7 @@ async function assertDnsNotPrivate(hostname: string): Promise<void> {
 function withBodyDeadline(
   response: Response,
   body: NonNullable<Response['body']>,
-  deadline: { settle: () => void; classify: (error: unknown) => unknown },
+  deadline: { settle: () => void; classify: (error: unknown) => McpError },
 ): Response {
   const source = body.getReader();
   const monitored = new ReadableStream<Uint8Array>({
@@ -562,7 +583,9 @@ function withBodyDeadline(
  * when the deadline expires is aborted mid-read and the caller's
  * `.text()`/`.json()` rejects with the same `Timeout` `McpError` the header
  * phase would have thrown. A caller that never reads the body has its stream
- * aborted at the deadline rather than held open.
+ * aborted at the deadline rather than held open. A body that fails mid-stream
+ * with neither signal behind it — a dropped connection — rejects the read with
+ * the `ServiceUnavailable` a network failure before the headers raises.
  *
  * When `options.rejectPrivateIPs` is `true`, the target URL is validated before the
  * request is sent, and every 3xx carrying a `Location` is followed manually with
@@ -571,11 +594,12 @@ function withBodyDeadline(
  * URL would, with no record here.
  *
  * Non-2xx responses are treated as errors. The response body is captured under a
- * byte budget (`options.errorBodyLimit`, default {@link ERROR_BODY_LIMIT}) to avoid
- * context-window poisoning when an upstream returns an HTML error page, logged,
- * and wrapped in a `McpError` whose code is mapped from the HTTP status via
- * {@link httpStatusToErrorCode} (e.g. 400 → `InvalidParams`, 403 → `Forbidden`,
- * 404 → `NotFound`, 429 → `RateLimited`, 5xx → `ServiceUnavailable`/`Timeout`).
+ * byte budget (`options.errorBodyLimit`, default {@link ERROR_BODY_LIMIT}), logged,
+ * and kept on the server — every client envelope leaves it out unless
+ * `options.exposeErrorBody` is set — on a `McpError` whose code is mapped from the
+ * HTTP status via {@link httpStatusToErrorCode} (e.g. 400 → `InvalidParams`,
+ * 403 → `Forbidden`, 404 → `NotFound`, 429 → `RateLimited`, 504 → `Timeout`,
+ * other 5xx → `ServiceUnavailable`).
  * A 501 additionally carries `data.retryable: false`, so `withRetry` fails it
  * fast instead of re-attempting a method the upstream does not implement. A 3xx
  * reaches this path when it is not followed — under `redirect: 'manual'`, or with
@@ -592,6 +616,7 @@ function withBodyDeadline(
  *   - `rejectPrivateIPs`: Block requests to private/internal IP space (SSRF protection).
  *   - `signal`: External `AbortSignal` to cancel the request independently of the timeout.
  *   - `errorBodyLimit`: Bytes of a non-2xx body captured into `error.data.body`.
+ *   - `exposeErrorBody`: Send that captured body to the client; it stays server-side by default.
  *   - `errorHeaders`: Response headers copied onto `error.data.headers` on a non-2xx.
  *   - All other standard `RequestInit` fields (method, headers, body, etc.) are forwarded.
  * @returns A promise resolving to the `Response` object on HTTP 2xx. On a response
@@ -604,21 +629,29 @@ function withBodyDeadline(
  *   `too_many_redirects` past 5 hops. Thrown with no record here; the caller logs it.
  * @throws {McpError} `Timeout` if the exchange exceeds `timeoutMs`. Raised from the
  *   call itself when the deadline expires before headers, and from the body read
- *   when it expires during the stream.
+ *   when it expires during the stream. A deadline that expires while a non-2xx body
+ *   is being captured cuts only the diagnostic text: the status-mapped error below
+ *   is thrown instead.
  * @throws {McpError} `Timeout` with `data.errorSource: 'FetchSignalTimeout'` if the
- *   external signal aborts with a `TimeoutError` reason (a caller-side deadline).
- *   Outside `withRetry`'s default transient set, like `RequestCancelled`.
+ *   external signal aborts with a `TimeoutError` reason (a caller-side deadline),
+ *   in any phase — a non-2xx body capture it cuts included, reported in place of the
+ *   status. Outside `withRetry`'s default transient set, like `RequestCancelled`.
  * @throws {McpError} `RequestCancelled` if the request is cancelled via the external
  *   signal for any other reason — likewise from the body read when the cancellation
- *   lands mid-stream. Logged at `info` and outside `withRetry`'s transient set.
+ *   lands mid-stream, and in place of the status when it cuts a non-2xx body capture.
+ *   Logged at `info` and outside `withRetry`'s transient set.
  * @throws {McpError} A status-mapped code (`InvalidParams`/`Unauthorized`/`Forbidden`/
  *   `NotFound`/`RateLimited`/`ServiceUnavailable`/...) if the server returns a non-2xx
  *   status. `error.data` carries `{ status, statusText, body, retryAfter?, headers? }` —
  *   plus the legacy aliases `statusCode` (= `status`) and `responseBody` (= `body`), kept
- *   for existing consumers and slated for consolidation in a future major. List a status in
- *   `options.expectedStatuses` to log it at `debug` rather than `error` (still thrown).
- * @throws {McpError} `ServiceUnavailable` if a network-level error occurs — an
- *   unparseable redirect `Location` included — chaining
+ *   for existing consumers and slated for consolidation in a future major. `body` is
+ *   `'Could not read response body'` when the capture failed or `timeoutMs` cut it.
+ *   `body` and `responseBody` stay server-side: readable here and in the failure record,
+ *   and left out of every client envelope unless `options.exposeErrorBody` is set. List a
+ *   status in `options.expectedStatuses` to log it at `debug` rather than `error` (still thrown).
+ * @throws {McpError} `ServiceUnavailable` if a network-level error occurs — before the
+ *   headers, or from the body read when a 2xx body fails mid-stream; an unparseable
+ *   redirect `Location` and an `AbortError` neither signal raised included — chaining
  *   the runtime's rejection as `cause` so its transport `code` (`ECONNREFUSED`,
  *   `ConnectionRefused`) survives; the failure record carries it as `causeChain`.
  * @example
@@ -671,6 +704,7 @@ export async function fetchWithTimeout(
     expectedStatuses,
     errorBodyLimit = ERROR_BODY_LIMIT,
     errorHeaders,
+    exposeErrorBody = false,
     ...fetchInit
   } = options ?? {};
 
@@ -709,8 +743,8 @@ export async function fetchWithTimeout(
    * below leaves it armed for the caller's read instead of disarming it at return.
    */
   let deadlineFollowsBody = false;
-  // Every failure below logs `context`; its thrown `data` is client-visible and
-  // carries no request metadata (#548).
+  // Every failure below logs `context`; its thrown `data` reaches the client, a
+  // captured body aside (#590), and carries no request metadata (#548).
   const timeoutFailure = (): McpError => {
     logger.error(
       `${operationDescription} timed out after ${timeoutMs}ms.`,
@@ -745,6 +779,46 @@ export async function fetchWithTimeout(
       errorSource: 'FetchAborted',
     });
   };
+  /**
+   * A failure of the exchange that neither signal raised — before the headers,
+   * or partway through a 2xx body. An `AbortError` lands here too when neither
+   * signal aborted: nobody withdrew the request, so it is an upstream or runtime
+   * failure like any other, inside `withRetry`'s transient set.
+   */
+  const networkFailure = (error: unknown): McpError => {
+    const errorMessage = redactEmbeddedUrls(error instanceof Error ? error.message : String(error));
+    /**
+     * The runtime's rejection is chained as the wrapper's `cause`, where
+     * `handleError` reads its message into the logged `rootCause` and cause
+     * chain. A URL it quotes is redacted on the rejection itself first; its
+     * identity, `code`, and every other field stay as the runtime set them. A
+     * rejection whose `message` cannot be written is chained as a stand-in instead.
+     */
+    const cause =
+      error instanceof Error && !(error instanceof McpError)
+        ? withRedactedMessage(error, errorMessage)
+        : error;
+    const originalErrorName = error instanceof Error ? error.name : 'UnknownError';
+    const causeChain = causeChainForLog(cause);
+    logger.error(
+      `Network error during ${operationDescription}: ${errorMessage}`,
+      withExtra(context, {
+        originalErrorName,
+        errorSource: 'FetchNetworkError',
+        ...(causeChain && { causeChain }),
+      }),
+    );
+
+    if (error instanceof McpError) return error;
+
+    // A non-`Error` rejection carries no transport code, and chaining its raw
+    // text would put back the URL `errorMessage` redacted.
+    return serviceUnavailable(
+      `Network error during ${operationDescription}: ${errorMessage}`,
+      { originalErrorName, errorSource: 'FetchNetworkErrorWrapper' },
+      cause instanceof Error ? { cause } : undefined,
+    );
+  };
 
   const startTime = performance.now();
   const method = (fetchInit.method ?? 'GET').toUpperCase();
@@ -754,6 +828,13 @@ export async function fetchWithTimeout(
    * tell it from a `fetch` rejection by identity rather than by type.
    */
   let hopRejection: McpError | undefined;
+  /**
+   * The failure the non-2xx branch already classified and logged — the
+   * status-mapped error, or the caller abort that cut its body capture — held
+   * so the catch below rethrows it by identity instead of classifying it again
+   * against signals that may have fired since.
+   */
+  let responseFailure: McpError | undefined;
 
   try {
     let currentUrl: string | URL = url;
@@ -814,7 +895,23 @@ export async function fetchWithTimeout(
       if (!response.ok) {
         const responseBody = await readBoundedResponseText(response, errorBodyLimit, {
           scanBytes: ERROR_BODY_SCAN_LIMIT,
-        }).catch(() => 'Could not read response body');
+        }).catch(() => {
+          /**
+           * A caller signal that cut the capture outranks the status: the
+           * caller withdrew the exchange, or its own deadline fired, before the
+           * failure could be reported, and a retry could only reuse the fired
+           * signal. `AbortSignal.any` keeps the reason of whichever signal
+           * fired first, so `timeoutMs` firing ahead of the caller leaves its
+           * own reason. A capture `timeoutMs` cut, or one that failed on its
+           * own, still reports the status: the upstream already answered, and
+           * `Retry-After`, a 501's opt-out, and `expectedStatuses` hang on it.
+           */
+          if (fetchSignal.aborted && fetchSignal.reason !== timeoutReason) {
+            responseFailure = abortedFailure();
+            throw responseFailure;
+          }
+          return 'Could not read response body';
+        });
         // Callers that treat a status as expected (e.g. 404 → empty result) get a
         // debug line instead of error; the thrown McpError below is unchanged.
         const logMessage = `Fetch failed for ${redactUrl(currentUrl)} with status ${response.status}.`;
@@ -831,7 +928,7 @@ export async function fetchWithTimeout(
         }
         const code = httpStatusToErrorCode(response.status) ?? JsonRpcErrorCode.InternalError;
         const retryAfter = response.headers.get('retry-after');
-        throw new McpError(
+        responseFailure = new McpError(
           code,
           `Fetch failed for ${redactUrl(currentUrl)}. Status: ${response.status}`,
           {
@@ -847,8 +944,11 @@ export async function fetchWithTimeout(
             ...httpStatusRetryability(response.status),
             ...selectErrorHeaders(response.headers, errorHeaders),
             errorSource: 'FetchHttpError',
+            // The upstream's own text stays server-side unless the call opts in (#590).
+            ...(!exposeErrorBody && serverOnlyFields(['body', 'responseBody'])),
           },
         );
+        throw responseFailure;
       }
 
       logger.debug(
@@ -873,17 +973,16 @@ export async function fetchWithTimeout(
         classify: (error) => {
           if (controller.signal.reason === timeoutReason) return timeoutFailure();
           if (fetchSignal.aborted) return abortedFailure();
-          return error;
+          return networkFailure(error);
         },
       });
     }
   } catch (error: unknown) {
-    // A status-mapped HTTP error from the non-OK branch was already logged there,
-    // at the severity the caller asked for (`expectedStatuses` → debug). Re-throw
-    // it as-is instead of relabeling it a network error and logging it again.
-    if (error instanceof McpError && error.data?.errorSource === 'FetchHttpError') {
-      throw error;
-    }
+    // The non-OK branch already classified and logged its failure — a status
+    // at the severity the caller asked for (`expectedStatuses` → debug), or the
+    // caller abort that cut the capture. Re-throw it as-is instead of
+    // relabeling it and logging it again.
+    if (responseFailure && error === responseFailure) throw error;
 
     /**
      * Classify aborts from the signals, not from the rejection value. `fetch`
@@ -897,10 +996,10 @@ export async function fetchWithTimeout(
     }
 
     // External signal abort — a client disconnect, or a caller deadline, which
-    // `abortedFailure` tells apart by the reason. The `AbortError` fallback
-    // covers an abort raised somewhere other than the two signals composed
-    // here, such as a response body stream.
-    if (fetchSignal.aborted || (error instanceof Error && error.name === 'AbortError')) {
+    // `abortedFailure` tells apart by the reason. A rejection named
+    // `AbortError` with neither signal aborted is no abort of ours, and falls
+    // through to the network failure below.
+    if (fetchSignal.aborted) {
       throw abortedFailure();
     }
 
@@ -913,40 +1012,7 @@ export async function fetchWithTimeout(
      */
     if (hopRejection && error === hopRejection) throw error;
 
-    const errorMessage = redactEmbeddedUrls(error instanceof Error ? error.message : String(error));
-    /**
-     * The runtime's rejection is chained as the wrapper's `cause`, where
-     * `handleError` reads its message into the logged `rootCause` and cause
-     * chain. A URL it quotes is redacted on the rejection itself first; its
-     * identity, `code`, and every other field stay as the runtime set them. A
-     * rejection whose `message` cannot be written is chained as a stand-in instead.
-     */
-    const cause =
-      error instanceof Error && !(error instanceof McpError)
-        ? withRedactedMessage(error, errorMessage)
-        : error;
-    const originalErrorName = error instanceof Error ? error.name : 'UnknownError';
-    const causeChain = causeChainForLog(cause);
-    logger.error(
-      `Network error during ${operationDescription}: ${errorMessage}`,
-      withExtra(context, {
-        originalErrorName,
-        errorSource: 'FetchNetworkError',
-        ...(causeChain && { causeChain }),
-      }),
-    );
-
-    if (error instanceof McpError) {
-      throw error;
-    }
-
-    // A non-`Error` rejection carries no transport code, and chaining its raw
-    // text would put back the URL `errorMessage` redacted.
-    throw serviceUnavailable(
-      `Network error during ${operationDescription}: ${errorMessage}`,
-      { originalErrorName, errorSource: 'FetchNetworkErrorWrapper' },
-      cause instanceof Error ? { cause } : undefined,
-    );
+    throw networkFailure(error);
   } finally {
     if (!deadlineFollowsBody) clearTimeout(timeoutId);
     const durationS = (performance.now() - startTime) / 1000;

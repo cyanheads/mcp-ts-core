@@ -109,7 +109,11 @@ export class ElevenLabsProvider implements ISpeechProvider {
    *   `'mp3'`, `characterCount` equal to `options.text.length`, and `metadata` containing
    *   `voiceId`, `modelId`, and `provider`.
    * @throws {McpError} With `InvalidParams` for empty text or text > 5 000 chars.
-   * @throws {McpError} With `InternalError` if the ElevenLabs API call fails.
+   * @throws {McpError} The failure `fetchWithTimeout` raises, unchanged: a status-mapped
+   *   code for a non-2xx (`Unauthorized`, `RateLimited`, `ServiceUnavailable`, …),
+   *   `Timeout`, `RequestCancelled`, or `ServiceUnavailable` for a network failure, an
+   *   audio body that fails mid-read included.
+   * @throws {McpError} With `ServiceUnavailable` for any other failure of the call.
    */
   async textToSpeech(options: TextToSpeechOptions): Promise<TextToSpeechResult> {
     const context = requestContextService.createRequestContext({
@@ -235,7 +239,10 @@ export class ElevenLabsProvider implements ISpeechProvider {
    *
    * @returns Resolved array of {@link Voice} objects. The array may be empty if the
    *   account has no voices configured.
-   * @throws {McpError} With `InternalError` if the ElevenLabs API call fails.
+   * @throws {McpError} The failure `fetchWithTimeout` raises, unchanged: a status-mapped
+   *   code for a non-2xx, `Timeout`, `RequestCancelled`, or `ServiceUnavailable` for a
+   *   network failure.
+   * @throws {McpError} With `ServiceUnavailable` when the voice list cannot be parsed.
    */
   async getVoices(): Promise<Voice[]> {
     const context = requestContextService.createRequestContext({

@@ -17,7 +17,7 @@ import { JsonRpcErrorCode } from '@/types-global/errors.js';
 import { asRequestCancelled, ErrorHandler } from '@/utils/internal/error-handler/errorHandler.js';
 import {
   isInstance,
-  readErrorData,
+  readWireErrorData,
   recordSpanFailure,
 } from '@/utils/internal/error-handler/helpers.js';
 import { logger } from '@/utils/internal/logger.js';
@@ -82,10 +82,15 @@ export const httpErrorHandler = async <TBindings extends object = HonoNodeBindin
    */
   const error = asRequestCancelled(err, c.req.raw.signal);
 
-  // Capture original McpError data before enrichment — handleError adds internal
-  // details (operation context, classification fields) that must not leak.
-  // Read guarded: a route can throw a value whose `data` throws on read (#701).
-  const originalData = readErrorData(error);
+  /**
+   * Capture original McpError data before enrichment — handleError adds internal
+   * details (operation context, classification fields) that must not leak. Read
+   * as every client envelope reads it: guarded, since a route can throw a value
+   * whose `data` throws on read (#701); without the fields marked server-only,
+   * such as a captured upstream body (#590); and with every field one the
+   * response can carry.
+   */
+  const originalData = readWireErrorData(error);
 
   // Pre-classify to split expected client errors (4xx) from unexpected server
   // errors (5xx). Client errors get a compact warning log without stack traces;
@@ -217,8 +222,8 @@ export const httpErrorHandler = async <TBindings extends object = HonoNodeBindin
 
   c.status(status);
   /**
-   * `data` carries what a thrown `McpError` declared plus this handler's own
-   * `requestId` (#576) — the id its `Client error:` or `Error in httpTransport`
+   * `data` carries what a thrown `McpError` declared for the client plus this
+   * handler's own `requestId` (#576) — the id its `Client error:` or `Error in httpTransport`
    * record logs, so a failure reported from the client can be matched to it.
    * Set last, so it replaces a thrown `data.requestId`.
    */

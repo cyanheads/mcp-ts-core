@@ -6,6 +6,7 @@
 import { describe, expect, it } from 'vitest';
 
 import { JsonRpcErrorCode, McpError } from '@/types-global/errors.js';
+import { readWireErrorData } from '@/utils/internal/error-handler/helpers.js';
 import {
   httpErrorFromResponse,
   httpStatusRetryability,
@@ -446,6 +447,72 @@ describe('httpErrorFromResponse', () => {
 
     expect(error.data).not.toHaveProperty('body');
     expect(error.data).not.toHaveProperty('responseBody');
+  });
+
+  describe('the captured body stays server-side by default (#590)', () => {
+    const BODY = '{"error":"param dte is not a valid date"}';
+    const badRequest = () => makeResponse(400, { body: BODY, statusText: 'Bad Request' });
+    const WIRE = { status: 400, statusText: 'Bad Request', statusCode: 400 };
+
+    it('keeps data.body and data.responseBody readable, and off the wire', async () => {
+      const error = await httpErrorFromResponse(badRequest(), { service: 'Upstream' });
+
+      expect(error.data).toMatchObject({ body: BODY, responseBody: BODY });
+      expect(readWireErrorData(error)).toEqual(WIRE);
+    });
+
+    it('marks the body with one enumerable Symbol key that no string-keyed read sees', async () => {
+      const data = (await httpErrorFromResponse(badRequest())).data as Record<string, unknown>;
+      const symbols = Object.getOwnPropertySymbols(data);
+
+      expect(symbols).toHaveLength(1);
+      expect(Object.getOwnPropertyDescriptor(data, symbols[0] as symbol)?.enumerable).toBe(true);
+      expect(Object.keys(data)).toEqual([
+        'status',
+        'statusText',
+        'body',
+        'statusCode',
+        'responseBody',
+      ]);
+      expect(JSON.parse(JSON.stringify(data))).toEqual({
+        ...WIRE,
+        body: BODY,
+        responseBody: BODY,
+      });
+    });
+
+    it('sends today’s wire shape under exposeBody: true, with no marker', async () => {
+      const error = await httpErrorFromResponse(badRequest(), { exposeBody: true });
+
+      expect(readWireErrorData(error)).toEqual({ ...WIRE, body: BODY, responseBody: BODY });
+      expect(Object.getOwnPropertySymbols(error.data)).toEqual([]);
+    });
+
+    it('sends a body the caller’s data supplies, the captured alias kept server-side', async () => {
+      const error = await httpErrorFromResponse(badRequest(), {
+        data: { body: 'Check the dte parameter.' },
+      });
+
+      expect(error.data).toMatchObject({ body: 'Check the dte parameter.', responseBody: BODY });
+      expect(readWireErrorData(error)).toEqual({ ...WIRE, body: 'Check the dte parameter.' });
+    });
+
+    it('adds neither a body key nor the marker under captureBody: false', async () => {
+      const error = await httpErrorFromResponse(badRequest(), { captureBody: false });
+
+      expect(error.data).toEqual(WIRE);
+      expect(Object.getOwnPropertySymbols(error.data)).toEqual([]);
+    });
+
+    it('adds no marker when the body cannot be read', async () => {
+      const response = badRequest();
+      await response.text();
+
+      const error = await httpErrorFromResponse(response);
+
+      expect(error.data).toEqual(WIRE);
+      expect(Object.getOwnPropertySymbols(error.data)).toEqual([]);
+    });
   });
 });
 
