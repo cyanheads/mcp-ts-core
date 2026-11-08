@@ -481,7 +481,7 @@ describe('httpErrorFromResponse', () => {
       });
     });
 
-    it('sends today’s wire shape under exposeBody: true, with no marker', async () => {
+    it('sends body and responseBody on the wire under exposeBody: true, with no marker', async () => {
       const error = await httpErrorFromResponse(badRequest(), { exposeBody: true });
 
       expect(readWireErrorData(error)).toEqual({ ...WIRE, body: BODY, responseBody: BODY });

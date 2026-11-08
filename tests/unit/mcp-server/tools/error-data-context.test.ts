@@ -387,7 +387,7 @@ describe('framework error data built from a handler ctx (#548)', () => {
       });
     });
 
-    it('sends today’s structuredContent.error.data under exposeBody: true, content[] unchanged', async () => {
+    it('sends body and responseBody on structuredContent.error.data under exposeBody: true, content[] unchanged', async () => {
       vi.spyOn(logger, 'error').mockImplementation(() => {});
       const fail = (exposeBody: boolean) => async () => {
         throw await httpErrorFromResponse(badRequest(), { service: 'Upstream', exposeBody });

@@ -741,7 +741,7 @@ describe('fetchWithTimeout', () => {
       );
     });
 
-    it('sends today’s wire shape under exposeErrorBody: true, and never hands the option to fetch', async () => {
+    it('sends body and responseBody on the wire under exposeErrorBody: true, and never hands the option to fetch', async () => {
       const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValue(upstreamDown());
 
       const error = (await fetchWithTimeout('https://example.com', 1000, context, {
