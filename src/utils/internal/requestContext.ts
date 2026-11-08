@@ -62,8 +62,9 @@ export interface AuthContext {
   /** Tenant identifier from the `tid` JWT claim. Present only for multi-tenant tokens. */
   tenantId?: string;
   /**
-   * Raw bearer token from the validated request. Forwarded so handlers can
-   * relay it to upstream APIs in on-behalf-of / PAT pass-through flows.
+   * Raw bearer token from the validated request, for handlers that need to
+   * inspect it. Never relay it to an upstream API: the MCP authorization spec
+   * forbids token passthrough, so upstream calls use their own credentials.
    * Redacted by the framework logger's log-data walk, which matches the `token`
    * key at any depth; avoid passing it to telemetry sinks that bypass that layer.
    */

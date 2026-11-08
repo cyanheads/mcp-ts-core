@@ -4,7 +4,7 @@ description: >
   Canonical reference for the unified `Context` object passed to every tool and resource handler in `@cyanheads/mcp-ts-core`. Covers the full interface, its `RequestContext` base, all sub-APIs (`ctx.log`, `ctx.state`, `ctx.requestInput`, `ctx.inputs`, `ctx.clientCapabilities`, `ctx.enrich`, `ctx.content`), and when to use each.
 metadata:
   author: cyanheads
-  version: "2.18"
+  version: "2.19"
   audience: external
   type: reference
 ---
@@ -245,6 +245,7 @@ if (page.cursor) { /* more pages available */ }
 - Keys are tenant-prefixed internally; handlers never need to namespace manually.
 - **Values round-trip as JSON** on every provider, `in-memory` included: reads return the JSON form, so a `Date` comes back as its ISO string, a `Map` as `{}`, and a returned object never shares identity with the one written. Validate reads with a schema that matches the stored form (`z.string()` for a date, not `z.date()`). A `bigint`, a cyclic reference, or a top-level `undefined`, function, or symbol throws `McpError(SerializationError)` before anything is written; in `setMany`, one such value rejects the whole batch.
 - **Key charset:** `^[a-zA-Z0-9_.\-/]+$`, 1024 chars max, no `..`. Slashes are the namespace separator — a colon (`item:123`) throws `McpError(ValidationError)` on every call. The rule covers `list` prefixes and every key in a batch operation. `createMockContext().state` enforces it identically, so an illegal key fails in the test rather than in a deployment.
+- **Backend key limits:** some providers fit fewer keys than the charset allows, and reject the rest with `McpError(ValidationError)` before any backend call — in a batch, before the first one. `cloudflare-kv` and `cloudflare-r2` store each value under `<tenantId>:<key>`, capped at 512 and 1,024 bytes, so a two-character tenant fits keys of 509 and 1,021 characters and a 128-character tenant 383 and 895; the error names the longest key the tenant can use. `filesystem` stores each `/`-separated segment as a file or directory name of at most 255 bytes, in which an uppercase letter or `.` takes three, so a last segment holds at most 250 lowercase or 83 uppercase characters.
 - **Workers persistence:** The `in-memory` provider loses data on cold starts. Use `cloudflare-kv`, `cloudflare-r2`, or `cloudflare-d1` for durable storage in Workers.
 
 ---
@@ -810,7 +811,8 @@ export const search = tool('search', {
 ctx.enrich(fields: Record<string, unknown>): void
 
 // Strict (HandlerContext<R, E> when the definition declares an enrichment block):
-ctx.enrich(fields: Partial<z.infer<ZodObject<E>>>): void
+// Takes each field's input side (z.input): a z.stringbool() field takes 'true'.
+ctx.enrich(fields: Partial<z.input<ZodObject<E>>>): void
 
 // Kind-tagged field-helpers (always present) — write a conventional key and tag
 // the content[] trailer rendering:
@@ -832,9 +834,9 @@ ctx.enrich.truncated({ shown, cap, ceiling?, guidance? }): void
 | Aspect | Detail |
 |:-------|:-------|
 | Accumulation | Each call merges its fields onto the request; later calls override earlier keys. |
-| Both surfaces | Merged into `structuredContent` (validated against `output.extend(enrichment)`) and appended to `content[]` as a trailer — even when the tool defines no `format()`. |
+| Both surfaces | Merged into `structuredContent` (validated against the `enrichment` block and merged onto the parsed `output`) and appended to `content[]` as a trailer — even when the tool defines no `format()`. |
 | Domain payload untouched | `content[]` renders the handler's return via `format()` (or the JSON default); enrichment is a separate trailer, never double-rendered. The handler return must NOT carry enrichment fields. |
-| Required-field guard | A required enrichment field never populated fails the effective-output parse — the bug surfaces loudly rather than dropping silently. |
+| Required-field guard | A required enrichment field never populated fails the enrichment parse — the bug surfaces loudly rather than dropping silently. |
 | No block | Calling `ctx.enrich` on a tool that declared no `enrichment` is a silent no-op (values are stripped by the parse) — the price of service-layer callability. |
 | Service usage | Services accepting `ctx: Context` can call `ctx.enrich(...)`; the value reaches `structuredContent` exactly as if the handler had. |
 | `format-parity` | Enrichment lives outside `output`, so the `format-parity` lint never requires it in `format()`. |
@@ -849,7 +851,7 @@ For tools that cap a list (i.e. have a `limit`/`per_page`/`page_size`/`max_resul
 ```ts
 enrichment: {
   // Optional: truncated() writes these only when the cap is hit, and a required
-  // enrichment field left unset fails the effective-output parse on every complete result.
+  // enrichment field left unset fails the enrichment parse on every complete result.
   truncated: z.boolean().optional().describe('True when the list was capped.'),
   shown: z.number().optional().describe('Number of items returned.'),
   cap: z.number().optional().describe('The limit that was applied.'),

@@ -22,7 +22,7 @@ export function arrayBufferToBase64(buffer: ArrayBuffer): string {
     // Node.js/Bun environment — Buffer is fastest
     return Buffer.from(buffer).toString('base64');
   } else {
-    // workerd/browser — Uint8Array.toBase64() is available on V8 25+ / workerd
+    // workerd/browser — Uint8Array.toBase64() is available on V8 14+ (Node 25+) / workerd
     return new Uint8Array(buffer).toBase64();
   }
 }
@@ -69,7 +69,7 @@ export function base64ToString(base64: string): string {
     // Node.js/Bun environment — Buffer is fastest
     return Buffer.from(base64, 'base64').toString('utf-8');
   } else {
-    // workerd/browser — Uint8Array.fromBase64() is available on V8 25+ / workerd
+    // workerd/browser — Uint8Array.fromBase64() is available on V8 14+ (Node 25+) / workerd
     return new TextDecoder().decode(Uint8Array.fromBase64(base64));
   }
 }
