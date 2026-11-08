@@ -28,21 +28,43 @@ export function effectiveOutputSchema(def: AnyToolDefinition): ZodObject<ZodRawS
   return def.output.extend(def.enrichment) as ZodObject<ZodRawShape>;
 }
 
+/** Each tool's {@link enrichmentSchema}, built on its first successful call. */
+const enrichmentSchemas = new WeakMap<AnyToolDefinition, ZodObject>();
+
+/** Refuses an enriched key that names a declared `output` field ({@link enrichmentSchema}). */
+const OUTPUT_FIELD = z
+  .never({ error: 'Declared in output; enrichment cannot replace it' })
+  .optional();
+
 /**
- * The schema accumulated enrichment values are parsed against: a tool's
- * `enrichment` block, under its `output` root's unknown-key policy, so a key
- * the block never declared (enriched through the loose service-layer `ctx`) is
- * stripped, kept, or refused exactly as it would be beside the domain fields of
- * the one `structuredContent` object it lands in. A required field the handler
- * never populated fails here, surfacing the authoring bug loudly.
+ * The schema `def`'s accumulated enrichment values are parsed against:
+ * `enrichment`, its declared block, under its `output` root's unknown-key
+ * policy, so a key the block never declared (enriched through the loose
+ * service-layer `ctx`) is stripped, kept, or refused as it would be beside the
+ * domain fields of the one `structuredContent` object it lands in. Under an
+ * open root (`.passthrough()`, `.catchall()`) a key naming a declared `output`
+ * field is refused rather than kept, because the merge would put it over that
+ * field's parsed value unparsed. A required field the handler never populated
+ * fails here, surfacing the authoring bug loudly. Built once per tool.
  */
-export function enrichmentSchema(
-  output: AnyToolDefinition['output'],
-  enrichment: ZodRawShape,
-): ZodObject {
-  const block = z.object(enrichment);
-  const catchall = output.def.catchall;
-  return catchall === undefined ? block : block.catchall(catchall);
+export function enrichmentSchema(def: AnyToolDefinition, enrichment: ZodRawShape): ZodObject {
+  const built = enrichmentSchemas.get(def);
+  if (built) return built;
+  const catchall = def.output.def.catchall;
+  let schema = z.object(enrichment);
+  if (catchall !== undefined) {
+    const outputFields = Object.keys(def.output.shape).filter(
+      (key) => !Object.hasOwn(enrichment, key),
+    );
+    schema = z
+      .object({
+        ...Object.fromEntries(outputFields.map((key) => [key, OUTPUT_FIELD])),
+        ...enrichment,
+      })
+      .catchall(catchall);
+  }
+  enrichmentSchemas.set(def, schema);
+  return schema;
 }
 
 /**

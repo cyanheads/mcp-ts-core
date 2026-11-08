@@ -355,6 +355,11 @@ describe('enrichment block', () => {
       ctx.enrich({ totalCount: 1, stray: 'never declared' });
     }
 
+    /** A service helper that enriches a key the tool's `output` declares. */
+    function enrichOutputField(ctx: { enrich: (fields: Record<string, unknown>) => void }): void {
+      ctx.enrich({ items: 'not a list' });
+    }
+
     it('returns a z.stringbool() output field as its parsed boolean', async () => {
       const t = tool('stringbool_enriched', {
         description: 'Search.',
@@ -426,6 +431,37 @@ describe('enrichment block', () => {
       });
       expect(lastText(result.content)).toBe('\n\n**totalCount:** 1\n**stray:** `never declared`');
     });
+
+    it.each([
+      ['.passthrough()', z.object({ items: z.array(z.string()).describe('items') }).passthrough()],
+      [
+        '.catchall()',
+        z.object({ items: z.array(z.string()).describe('items') }).catchall(z.string()),
+      ],
+    ])(
+      'refuses a service-layer key naming a declared output field under a %s root, naming the enrichment contract',
+      async (_root, output) => {
+        const t = tool('open_root_enriched', {
+          description: 'Search.',
+          input: z.object({ q: z.string().describe('q') }),
+          output,
+          enrichment: { totalCount: z.number().describe('total') },
+          handler: (_input, ctx) => {
+            ctx.enrich.total(1);
+            enrichOutputField(ctx);
+            return { items: ['a'] };
+          },
+        });
+
+        const handler = createToolHandler(t as AnyToolDefinition, services, notifiers);
+        const result = (await handler({ q: 'x' }, makeServerContext())) as CallToolResult;
+
+        expect(result.isError).toBe(true);
+        expect((result.structuredContent as { error: { message: string } }).error.message).toBe(
+          'Tool open_root_enriched returned enrichment that does not match its enrichment schema: items: Declared in output; enrichment cannot replace it',
+        );
+      },
+    );
 
     it('rejects an undeclared service-layer key under a .strict() output root, naming the enrichment contract', async () => {
       const t = tool('strict_enriched', {

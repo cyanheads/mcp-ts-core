@@ -449,7 +449,9 @@ function renderEnrichmentTrailer(
  * field the handler never populated fails that parse, surfacing the authoring
  * bug as a loud `InternalError` naming the enrichment contract rather than
  * dropping it silently (#480); so does an undeclared `error` key an open root
- * kept ({@link refuseErrorKey}).
+ * kept ({@link refuseErrorKey}), and, under an open root, an enriched key
+ * naming a declared `output` field, which the merge would otherwise put over
+ * that field's parsed value.
  */
 export function buildToolSuccessResult(
   def: AnyToolDefinition,
@@ -464,7 +466,7 @@ export function buildToolSuccessResult(
   const values = store?.values ?? {};
   const subject = { kind: 'Tool', name: def.name, contract: 'enrichment' } as const;
   const enrichment = parseOutputContract(
-    enrichmentSchema(def.output, def.enrichment),
+    enrichmentSchema(def, def.enrichment),
     values,
     subject,
   ) as Record<string, unknown>;
