@@ -294,7 +294,7 @@ describe('enrichment block', () => {
       expect(lastText(result.content)).toContain('99');
     });
 
-    it('renders the trailer from what the effective-output parse kept', async () => {
+    it('renders the trailer from what the enrichment parse kept', async () => {
       // The loose service-layer shape can carry a key the block never declared,
       // and a nested default only exists once the block has parsed the value.
       function runService(ctx: { enrich: (fields: Record<string, unknown>) => void }): void {
@@ -342,8 +342,116 @@ describe('enrichment block', () => {
     });
   });
 
+  /**
+   * The handler's return is parsed against `output` once; the enrichment values
+   * are parsed against the block and merged onto that parsed value. Parsing the
+   * merged object against `output.extend(enrichment)` re-parsed the domain value,
+   * failing a field whose parsed value is not valid input to it and applying a
+   * transform twice (#846).
+   */
+  describe('domain value parsed once beside an enrichment block (#846)', () => {
+    /** A service helper that only knows the loose Context shape. */
+    function enrichFromService(ctx: { enrich: (fields: Record<string, unknown>) => void }): void {
+      ctx.enrich({ totalCount: 1, stray: 'never declared' });
+    }
+
+    it('returns a z.stringbool() output field as its parsed boolean', async () => {
+      const t = tool('stringbool_enriched', {
+        description: 'Search.',
+        input: z.object({ q: z.string().describe('q') }),
+        output: z.object({ flag: z.stringbool().describe('flag') }),
+        enrichment: { totalCount: z.number().describe('total') },
+        handler: (_input, ctx) => {
+          ctx.enrich.total(3);
+          // The field's input form, which the parse turns into the boolean the
+          // handler's declared return type (the output side) describes.
+          return { flag: 'yes' } as never;
+        },
+      });
+
+      const handler = createToolHandler(t as AnyToolDefinition, services, notifiers);
+      const result = await handler({ q: 'x' }, makeServerContext());
+
+      expect(result.isError).toBeUndefined();
+      expect(result.structuredContent).toEqual({ flag: true, totalCount: 3 });
+      expect(JSON.parse((blocks(result)[0] as { text: string }).text)).toEqual({ flag: true });
+      expect(lastText(result.content)).toBe('\n\n**3 total**');
+    });
+
+    it('applies an output transform once, on both surfaces', async () => {
+      const t = tool('transform_enriched', {
+        description: 'Search.',
+        input: z.object({ q: z.string().describe('q') }),
+        output: z.object({
+          title: z
+            .string()
+            .transform((s) => `${s}!`)
+            .pipe(z.string())
+            .describe('title'),
+        }),
+        enrichment: { totalCount: z.number().describe('total') },
+        handler: (_input, ctx) => {
+          ctx.enrich.total(1);
+          return { title: 'a' };
+        },
+        format: (r) => [{ type: 'text', text: `Title: ${r.title}` }],
+      });
+
+      const handler = createToolHandler(t as AnyToolDefinition, services, notifiers);
+      const result = await handler({ q: 'x' }, makeServerContext());
+
+      expect(result.structuredContent).toEqual({ title: 'a!', totalCount: 1 });
+      expect(allText(result.content)).toEqual(['Title: a!', '\n\n**1 total**']);
+    });
+
+    it('keeps an undeclared service-layer key under a .passthrough() output root', async () => {
+      const t = tool('passthrough_enriched', {
+        description: 'Search.',
+        input: z.object({ q: z.string().describe('q') }),
+        output: z.object({ items: z.array(z.string()).describe('items') }).passthrough(),
+        enrichment: { totalCount: z.number().describe('total') },
+        handler: (_input, ctx) => {
+          enrichFromService(ctx);
+          return { items: [] };
+        },
+      });
+
+      const handler = createToolHandler(t as AnyToolDefinition, services, notifiers);
+      const result = await handler({ q: 'x' }, makeServerContext());
+
+      expect(result.structuredContent).toEqual({
+        items: [],
+        totalCount: 1,
+        stray: 'never declared',
+      });
+      expect(lastText(result.content)).toBe('\n\n**totalCount:** 1\n**stray:** `never declared`');
+    });
+
+    it('rejects an undeclared service-layer key under a .strict() output root, naming the enrichment contract', async () => {
+      const t = tool('strict_enriched', {
+        description: 'Search.',
+        input: z.object({ q: z.string().describe('q') }),
+        output: z.object({ items: z.array(z.string()).describe('items') }).strict(),
+        enrichment: { totalCount: z.number().describe('total') },
+        handler: (_input, ctx) => {
+          enrichFromService(ctx);
+          return { items: [] };
+        },
+      });
+
+      const handler = createToolHandler(t as AnyToolDefinition, services, notifiers);
+      const result = (await handler({ q: 'x' }, makeServerContext())) as CallToolResult;
+      const issue = z.object({}).strict().safeParse({ stray: 0 }).error?.issues[0]?.message;
+
+      expect(result.isError).toBe(true);
+      expect((result.structuredContent as { error: { message: string } }).error.message).toBe(
+        `Tool strict_enriched returned enrichment that does not match its enrichment schema: ${issue}`,
+      );
+    });
+  });
+
   describe('guards and no-op behavior', () => {
-    it('fails the effective-output parse when a required enrichment field is never populated', async () => {
+    it('fails the enrichment parse when a required enrichment field is never populated', async () => {
       const t = tool('missing_required_enrich', {
         description: 'Search.',
         input: z.object({ q: z.string().describe('q') }),

@@ -7,10 +7,11 @@
  */
 
 import type { CallToolResult, ContentBlock } from '@modelcontextprotocol/server';
+import { z } from 'zod';
 
 import type { Context, EnrichmentStore } from '@/core/context.js';
 import { readContentStore, readEnrichmentStore } from '@/core/context.js';
-import { parseOutputContract } from '@/mcp-server/outputContract.js';
+import { type OutputContractSubject, parseOutputContract } from '@/mcp-server/outputContract.js';
 import { internalError, type JsonRpcErrorCode, McpError } from '@/types-global/errors.js';
 import { codeFence, codeSpan } from '@/utils/formatting/codeSpan.js';
 import {
@@ -20,7 +21,7 @@ import {
 import { ErrorHandler } from '@/utils/internal/error-handler/errorHandler.js';
 import { isInstance, readWireErrorData } from '@/utils/internal/error-handler/helpers.js';
 import type { AnyToolDefinition } from './toolDefinition.js';
-import { effectiveOutputSchema } from './toolOutputSchema.js';
+import { enrichmentSchema } from './toolOutputSchema.js';
 
 // ---------------------------------------------------------------------------
 // Default formatter
@@ -259,18 +260,39 @@ function readLiterals(error: unknown): readonly string[] {
 // ---------------------------------------------------------------------------
 
 /**
+ * Refuses a present top-level `error` key, whatever its value, and passes every
+ * other key through. Only ever parsed against a value that carries the key.
+ */
+const RESERVED_ERROR_KEY = z.looseObject({
+  error: z
+    .never({ error: 'Reserved for the failure envelope; a successful result cannot carry it' })
+    .optional(),
+});
+
+/**
+ * Fails a parsed success value carrying a top-level `error` key as a violation
+ * of `subject`'s contract. `structuredContent.error` is the failure envelope on
+ * the wire, so a success carrying one — envelope-shaped or not — reads as a
+ * failure to clients. `tool()` refuses an `error` field declared in `output` or
+ * `enrichment`; this catches the key an open root (`.passthrough()`,
+ * `.catchall()`) keeps undeclared.
+ */
+function refuseErrorKey(value: Record<string, unknown>, subject: OutputContractSubject): void {
+  if (Object.hasOwn(value, 'error')) parseOutputContract(RESERVED_ERROR_KEY, value, subject);
+}
+
+/**
  * Parses a handler's returned value against the tool's `output` schema. A value
- * that breaks it fails as `InternalError` naming the tool and the output
- * contract — a server fault, never the caller's `ValidationError` (#480).
- * {@link createToolHandler} and the `runToolContract` test helper both route
- * through it.
+ * that breaks it, or carries a top-level `error` key ({@link refuseErrorKey}),
+ * fails as `InternalError` naming the tool and the output contract — a server
+ * fault, never the caller's `ValidationError` (#480). {@link createToolHandler}
+ * and the `runToolContract` test helper both route through it.
  */
 export function parseToolOutput(def: AnyToolDefinition, value: unknown): Record<string, unknown> {
-  return parseOutputContract(def.output, value, {
-    kind: 'Tool',
-    name: def.name,
-    contract: 'output',
-  }) as Record<string, unknown>;
+  const subject = { kind: 'Tool', name: def.name, contract: 'output' } as const;
+  const parsed = parseOutputContract(def.output, value, subject) as Record<string, unknown>;
+  refuseErrorKey(parsed, subject);
+  return parsed;
 }
 
 /**
@@ -352,10 +374,10 @@ function joinTrailerFields(fields: string[]): string {
  * `total` line, and the `notice` blockquote, whose author escapes any untrusted
  * text embedded in it.
  *
- * `parsed` is the validated effective output, so renderers receive the typed,
- * post-parse value rather than the raw accumulator entry. The rendered markdown
- * is appended to `content[]` only — `structuredContent` is built separately from
- * the raw merged values and never carries this trailer text. The trailer text
+ * `parsed` is the parsed enrichment, so renderers receive the typed, post-parse
+ * value rather than the raw accumulator entry. The rendered markdown is
+ * appended to `content[]` only — `structuredContent` is built separately from
+ * the parsed values and never carries this trailer text. The trailer text
  * leads with a blank-line separator so it stands off the preceding block on
  * clients that concatenate adjacent text blocks with no join (#257); markdown
  * collapses consecutive blank lines, so clients that do insert their own
@@ -370,8 +392,8 @@ function renderEnrichmentTrailer(
 ): ContentBlock[] {
   const fields: string[] = [];
   for (const key of Object.keys(store.values)) {
-    // Skip keys the effective-output parse stripped (enriched but not declared in
-    // the block) — the trailer mirrors what reached structuredContent.
+    // Skip keys the enrichment parse stripped (enriched but not declared in the
+    // block) — the trailer mirrors what reached structuredContent.
     if (!(key in parsed)) continue;
     const value = parsed[key];
     const cfg = trailer?.[key];
@@ -413,16 +435,21 @@ function renderEnrichmentTrailer(
 /**
  * Shapes the success `CallToolResult` surfaces from the validated domain payload
  * plus any accumulated enrichment:
- * - `structuredContent` — domain output merged with enrichment (validated against
- *   `output.extend(enrichment)`); the bare domain output when no enrichment block.
+ * - `structuredContent` — the domain output with the enrichment merged onto it;
+ *   the bare domain output when no enrichment block.
  * - `content[]` — the caller-rendered domain content (from `format()` or the
  *   JSON-stringify default, applied to the **domain payload only**) with the
  *   enrichment trailer always appended. Rendering the domain payload — never the
  *   merged object — keeps enrichment out of the JSON blob and avoids double-render.
  *
- * A required enrichment field the handler never populated fails the parse here,
- * surfacing the authoring bug as a loud `InternalError` naming the enrichment
- * contract rather than dropping it silently (#480).
+ * Only the enrichment values are parsed here, against {@link enrichmentSchema}:
+ * `domainValidated` is already the parse of the handler's return against
+ * `output`, and parsing it again would refuse a field whose parsed value is not
+ * valid input to it and apply a transform twice (#846). A required enrichment
+ * field the handler never populated fails that parse, surfacing the authoring
+ * bug as a loud `InternalError` naming the enrichment contract rather than
+ * dropping it silently (#480); so does an undeclared `error` key an open root
+ * kept ({@link refuseErrorKey}).
  */
 export function buildToolSuccessResult(
   def: AnyToolDefinition,
@@ -435,17 +462,19 @@ export function buildToolSuccessResult(
   }
   const store = readEnrichmentStore(ctx);
   const values = store?.values ?? {};
-  const structuredContent = parseOutputContract(
-    effectiveOutputSchema(def),
-    { ...domainValidated, ...values },
-    { kind: 'Tool', name: def.name, contract: 'enrichment' },
+  const subject = { kind: 'Tool', name: def.name, contract: 'enrichment' } as const;
+  const enrichment = parseOutputContract(
+    enrichmentSchema(def.output, def.enrichment),
+    values,
+    subject,
   ) as Record<string, unknown>;
+  refuseErrorKey(enrichment, subject);
   const trailer =
     store && Object.keys(values).length > 0
-      ? renderEnrichmentTrailer(store, def.enrichmentTrailer, structuredContent)
+      ? renderEnrichmentTrailer(store, def.enrichmentTrailer, enrichment)
       : [];
   return {
-    structuredContent,
+    structuredContent: { ...domainValidated, ...enrichment },
     content: trailer.length > 0 ? [...domainContent, ...trailer] : domainContent,
   };
 }

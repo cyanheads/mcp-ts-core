@@ -113,9 +113,10 @@ export function createToolHandler(
       }
 
       // Validate input. The SDK's own argument check is deliberately deferred
-      // to here (see `deferInputValidation`) so a rejection carries the
-      // structured error envelope; the message and `InvalidParams`
-      // classification match what the SDK produced before (#377).
+      // to here (see `deferValidation`, which defers its output check too,
+      // #846) so a rejection carries the structured error envelope; the message
+      // and `InvalidParams` classification match what the SDK produced before
+      // (#377).
       const validatedInput = parseToolArguments(def, input, {
         context: appContext,
         ...(services.input && { input: services.input }),

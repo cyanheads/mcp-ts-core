@@ -6,7 +6,7 @@ import type { McpServer, ServerNotifier, ToolCallback } from '@modelcontextproto
 
 import type { ClientCapabilityView } from '@/mcp-server/inputRequired.js';
 import type { ResourceSubscriptions } from '@/mcp-server/notifications.js';
-import { deferInputValidation } from '@/mcp-server/tools/utils/deferredInputSchema.js';
+import { deferValidation } from '@/mcp-server/tools/utils/deferredSchema.js';
 import { getDisabledMetadata } from '@/mcp-server/tools/utils/disabled-tool.js';
 import type { AnyToolDefinition } from '@/mcp-server/tools/utils/toolDefinition.js';
 import {
@@ -135,11 +135,14 @@ export class ToolRegistry {
         const handler = createToolHandler(tool, this.services, notifiers, capabilities);
         const title = tool.title ?? tool.annotations?.title ?? deriveTitleFromName(tool.name);
 
-        // Advertised verbatim; the same schema rejects the same arguments one
-        // layer down, where a rejection can carry the framework's structured
-        // error envelope (#377). The SDK reads it through `~standard` like any
-        // other Standard Schema, but types the parameter as Zod.
-        const inputSchema = deferInputValidation(tool.input) as unknown as typeof tool.input;
+        /**
+         * Both schemas are advertised verbatim and parsed only by the handler:
+         * the arguments against `input`, where a rejection can carry the
+         * framework's structured error envelope (#377), and the result against
+         * `output` (+ `enrichment`), once (#846). The SDK reads them through
+         * `~standard` like any other Standard Schema.
+         */
+        const inputSchema = deferValidation(tool.input);
 
         // Type assertion required: SDK's conditional types don't resolve with erased generics
         server.registerTool(
@@ -148,11 +151,11 @@ export class ToolRegistry {
             title,
             description: tool.description,
             inputSchema,
-            outputSchema: advertisedOutputSchema(tool),
+            outputSchema: deferValidation(advertisedOutputSchema(tool)),
             ...(tool.annotations && { annotations: tool.annotations }),
             ...(tool._meta && { _meta: tool._meta }),
           },
-          handler as ToolCallback<typeof tool.input>,
+          handler as ToolCallback<typeof inputSchema>,
         );
 
         logger.debug(`Tool '${tool.name}' registered successfully.`, registrationContext);

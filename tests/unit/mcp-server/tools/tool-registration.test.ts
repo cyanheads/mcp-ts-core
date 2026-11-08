@@ -3,27 +3,42 @@
  * @module tests/mcp-server/tools/tool-registration.test
  */
 import { Client } from '@modelcontextprotocol/client';
-import { InMemoryTransport, McpServer } from '@modelcontextprotocol/server';
+import { type CallToolResult, InMemoryTransport, McpServer } from '@modelcontextprotocol/server';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { z } from 'zod';
+import { type ZodRawShape, z } from 'zod';
 import { ToolRegistry } from '@/mcp-server/tools/tool-registration.js';
 import { disabledTool } from '@/mcp-server/tools/utils/disabled-tool.js';
-import { tool } from '@/mcp-server/tools/utils/toolDefinition.js';
+import { type AnyToolDefinition, tool } from '@/mcp-server/tools/utils/toolDefinition.js';
 import type { HandlerServices } from '@/mcp-server/tools/utils/toolHandlerFactory.js';
+import { advertisedOutputSchema } from '@/mcp-server/tools/utils/toolOutputSchema.js';
+import { runToolContract } from '@/testing/index.js';
 import { JsonRpcErrorCode } from '@/types-global/errors.js';
+import { withoutRequestId } from '../../../helpers/tool-result.js';
 
 /**
- * Input schemas reach `registerTool` through the validation-deferring wrapper
- * (#377), so what they advertise is a JSON Schema projection rather than a Zod
- * `.shape` — this reads it the way the SDK does.
+ * Both schemas reach `registerTool` through the validation-deferring wrapper
+ * (#377, #846), so what they advertise is a JSON Schema projection rather than
+ * a Zod `.shape` — this reads it the way the SDK does: `input` for
+ * `inputSchema`, `output` for `outputSchema`.
  */
-function advertisedInput(schema: unknown): Record<string, unknown> {
+function advertised(schema: unknown, io: 'input' | 'output'): Record<string, unknown> {
   const standard = (
     schema as {
-      '~standard': { jsonSchema: { input: (o: { target: string }) => Record<string, unknown> } };
+      '~standard': {
+        jsonSchema: Record<'input' | 'output', (o: { target: string }) => Record<string, unknown>>;
+      };
     }
   )['~standard'];
-  return standard.jsonSchema.input({ target: 'draft-2020-12' });
+  return standard.jsonSchema[io]({ target: 'draft-2020-12' });
+}
+
+/** The result surfaces a caller reads, without the SDK client's parse artifacts. */
+function surfaces(result: Pick<CallToolResult, 'content' | 'isError' | 'structuredContent'>) {
+  return {
+    content: result.content,
+    isError: result.isError,
+    structuredContent: result.structuredContent,
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -117,6 +132,26 @@ const services: HandlerServices = {
   logger: mockLogger as any,
   storage: mockStorage as any,
 };
+
+/** Registers `defs` on an in-memory `McpServer` and connects an SDK `Client` to it. */
+async function serve(defs: AnyToolDefinition[]) {
+  const server = new McpServer(
+    { name: 'served-tools', version: '0.0.0' },
+    { capabilities: { tools: {} } },
+  );
+  await new ToolRegistry(defs, services).registerAll(server);
+  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+  const client = new Client({ name: 'served-tools-client', version: '0.0.0' });
+  await server.connect(serverTransport);
+  await client.connect(clientTransport);
+  return {
+    client,
+    async close() {
+      await client.close();
+      await server.close();
+    },
+  };
+}
 
 describe('ToolRegistry', () => {
   let mockServer: any;
@@ -263,23 +298,32 @@ describe('ToolRegistry', () => {
       const call = mockServer.registerTool.mock.calls[0];
       expect(call[1].inputSchema).toBeDefined();
       expect(call[1].outputSchema).toBeDefined();
-      expect(advertisedInput(call[1].inputSchema).properties).toHaveProperty('name');
-      expect(call[1].outputSchema.shape.greeting).toBeDefined();
+      expect(advertised(call[1].inputSchema, 'input').properties).toHaveProperty('name');
+      expect(advertised(call[1].outputSchema, 'output').properties).toHaveProperty('greeting');
     });
 
     it('should advertise the widened output schema, not the strict parse schema', async () => {
       const registry = new ToolRegistry([typedTool], services);
       await registry.registerAll(mockServer);
 
-      const advertised = mockServer.registerTool.mock.calls[0][1].outputSchema;
+      const registered = mockServer.registerTool.mock.calls[0][1].outputSchema;
+      const projection = advertised(registered, 'output');
       // Registration advertises `advertisedOutputSchema` — success fields
-      // optional plus a declared `error` envelope (#241).
-      expect(advertised).not.toBe(typedTool.output);
-      expect(advertised.shape.error).toBeDefined();
-      expect(advertised.safeParse({ error: { code: -32001, message: 'nope' } }).success).toBe(true);
-      expect(typedTool.output.safeParse({ error: { code: -32001, message: 'nope' } }).success).toBe(
-        false,
+      // optional plus a declared `error` envelope (#241) — byte for byte.
+      expect(projection).toEqual(
+        z.toJSONSchema(advertisedOutputSchema(typedTool as AnyToolDefinition), {
+          target: 'draft-2020-12',
+          io: 'output',
+        }),
       );
+      expect(projection.properties).toHaveProperty('error');
+      expect(projection.required).toBeUndefined();
+      expect(z.toJSONSchema(typedTool.output, { io: 'output' }).required).toEqual(['greeting']);
+      // The SDK re-validates `structuredContent` through this schema after the
+      // handler returns; it passes the value through, so the framework's strict
+      // parse of `output` is the only output check (#846).
+      const sent = { greeting: 42 };
+      expect(registered['~standard'].validate(sent)).toEqual({ value: sent });
     });
 
     it.each([
@@ -301,15 +345,7 @@ describe('ToolRegistry', () => {
           output: output as z.ZodObject<{ id: z.ZodString }>,
           handler: () => ({ id: 'a', extra: 'kept' }) as { id: string },
         });
-        const server = new McpServer(
-          { name: 'open-output', version: '0.0.0' },
-          { capabilities: { tools: {} } },
-        );
-        await new ToolRegistry([openOutput], services).registerAll(server);
-        const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
-        const client = new Client({ name: 'open-output-client', version: '0.0.0' });
-        await server.connect(serverTransport);
-        await client.connect(clientTransport);
+        const { client, close } = await serve([openOutput as AnyToolDefinition]);
         try {
           const { tools } = await client.listTools();
           const result = await client.callTool({ name: 'open_output_tool', arguments: {} });
@@ -318,11 +354,279 @@ describe('ToolRegistry', () => {
           expect(result.isError).toBeUndefined();
           expect(result.structuredContent).toEqual({ id: 'a', extra: 'kept' });
         } finally {
-          await client.close();
-          await server.close();
+          await close();
         }
       },
     );
+  });
+
+  /**
+   * Output fields whose parsed value is not valid input to the field itself: the
+   * framework parses a handler's result once, and nothing downstream may parse
+   * that output again (#846). Each row is the field, what the handler returns,
+   * and the parsed value a caller receives.
+   */
+  describe('served tools/call output parsed once (#846)', () => {
+    const fieldRows: Array<
+      [string, ZodRawShape, Record<string, unknown>, Record<string, unknown>]
+    > = [
+      [
+        'z.stringbool()',
+        { flag: z.stringbool().describe('Flag') },
+        { flag: 'true' },
+        { flag: true },
+      ],
+      [
+        'a cross-type .pipe()',
+        {
+          len: z
+            .string()
+            .transform((s) => s.length)
+            .pipe(z.number())
+            .describe('Length'),
+        },
+        { len: 'hello' },
+        { len: 5 },
+      ],
+      [
+        'z.codec()',
+        {
+          n: z.codec(z.string(), z.number(), { decode: Number, encode: String }).describe('Number'),
+        },
+        { n: '42' },
+        { n: 42 },
+      ],
+      [
+        'a z.stringbool() nested in an array of objects',
+        {
+          items: z.array(z.object({ flag: z.stringbool().describe('Flag') })).describe('Items'),
+        },
+        { items: [{ flag: 'yes' }, { flag: 'off' }] },
+        { items: [{ flag: true }, { flag: false }] },
+      ],
+    ];
+
+    /** A tool returning `returned` through `shape`, enriching `note` when `enriched`. */
+    function fieldTool(
+      name: string,
+      shape: ZodRawShape,
+      returned: Record<string, unknown>,
+      enriched: boolean,
+    ): AnyToolDefinition {
+      return tool(name, {
+        description: 'Returns one field whose parsed value is not valid input to the field.',
+        input: z.object({}),
+        output: z.object(shape),
+        ...(enriched && { enrichment: { note: z.string().optional().describe('Note') } }),
+        handler: (_input: unknown, ctx: any) => {
+          if (enriched) ctx.enrich({ note: 'hi' });
+          return returned;
+        },
+      } as any) as AnyToolDefinition;
+    }
+
+    const rows = fieldRows.flatMap(([label, shape, returned, parsed]) =>
+      [false, true].map((enriched) => [label, enriched, shape, returned, parsed] as const),
+    );
+
+    it.each(rows)(
+      'returns %s parsed (enrichment declared: %s) on both surfaces',
+      async (_label, enriched, shape, returned, parsed) => {
+        const def = fieldTool('field_tool', shape, returned, enriched);
+        const { client, close } = await serve([def]);
+        try {
+          const result = await client.callTool({ name: 'field_tool', arguments: {} });
+
+          expect(result.isError).toBeUndefined();
+          expect(result.structuredContent).toEqual(enriched ? { ...parsed, note: 'hi' } : parsed);
+          const content = result.content as Array<{ text: string; type: 'text' }>;
+          expect(JSON.parse(content[0]?.text ?? '')).toEqual(parsed);
+          expect(content.slice(1).map((block) => block.text)).toEqual(
+            enriched ? ['\n\n**note:** `hi`'] : [],
+          );
+          // The served call and the test kit's contract runner agree.
+          expect(surfaces(result)).toEqual(surfaces(await runToolContract(def, {})));
+        } finally {
+          await close();
+        }
+      },
+    );
+
+    it.each(rows)(
+      'advertises the widened projection of %s unchanged (enrichment declared: %s)',
+      async (_label, enriched, shape, returned) => {
+        const def = fieldTool('field_tool', shape, returned, enriched);
+        const { client, close } = await serve([def]);
+        try {
+          const { tools } = await client.listTools();
+
+          expect(tools[0]?.outputSchema).toEqual(
+            z.toJSONSchema(advertisedOutputSchema(def), { target: 'draft-2020-12', io: 'output' }),
+          );
+        } finally {
+          await close();
+        }
+      },
+    );
+
+    it('still fails a result that breaks output as -32603 naming the output contract', async () => {
+      const def = fieldTool(
+        'flag_bad',
+        { flag: z.stringbool().describe('Flag') },
+        { flag: 'maybe' },
+        false,
+      );
+      const { client, close } = await serve([def]);
+      try {
+        const result = (await client.callTool({
+          name: 'flag_bad',
+          arguments: {},
+        })) as CallToolResult;
+        const { error } = result.structuredContent as { error: { code: number; message: string } };
+        const issue = z.stringbool().safeParse('maybe').error?.issues[0]?.message;
+
+        expect(result.isError).toBe(true);
+        expect(error.code).toBe(JsonRpcErrorCode.InternalError);
+        expect(error.message).toBe(
+          `Tool flag_bad returned output that does not match its output schema: flag: ${issue}`,
+        );
+        expect(surfaces(withoutRequestId(result))).toEqual(
+          surfaces(await runToolContract(def, {})),
+        );
+      } finally {
+        await close();
+      }
+    });
+
+    it('still fails a required enrichment field never populated, naming the enrichment contract', async () => {
+      const def = tool('flag_unenriched', {
+        description: 'Declares a required enrichment field it never populates.',
+        input: z.object({}),
+        output: z.object({ flag: z.stringbool().describe('Flag') }),
+        enrichment: { total: z.number().describe('Required total') },
+        handler: () => ({ flag: 'true' }) as never,
+      }) as AnyToolDefinition;
+      const { client, close } = await serve([def]);
+      try {
+        const result = (await client.callTool({
+          name: 'flag_unenriched',
+          arguments: {},
+        })) as CallToolResult;
+        const { error } = result.structuredContent as { error: { code: number; message: string } };
+        const issue = z.number().safeParse(undefined).error?.issues[0]?.message;
+
+        expect(result.isError).toBe(true);
+        expect(error.code).toBe(JsonRpcErrorCode.InternalError);
+        expect(error.message).toBe(
+          `Tool flag_unenriched returned enrichment that does not match its enrichment schema: total: ${issue}`,
+        );
+        expect(surfaces(withoutRequestId(result))).toEqual(
+          surfaces(await runToolContract(def, {})),
+        );
+      } finally {
+        await close();
+      }
+    });
+  });
+
+  /**
+   * `structuredContent.error` is the failure envelope on the wire, so a success
+   * carrying one reads as a failure. `tool()` refuses an `error` field declared
+   * in `output` or `enrichment`; an open root can still return one undeclared.
+   */
+  describe('a successful result carrying a top-level error key', () => {
+    const reserved =
+      'error: Reserved for the failure envelope; a successful result cannot carry it';
+
+    /** Calls `def` served and through `runToolContract`, asserting the two agree. */
+    async function callBoth(def: AnyToolDefinition) {
+      const { client, close } = await serve([def]);
+      try {
+        const result = (await client.callTool({ name: def.name, arguments: {} })) as CallToolResult;
+        const contract = await runToolContract(def, {});
+        return { contract, result };
+      } finally {
+        await close();
+      }
+    }
+
+    it.each([
+      [
+        'a string under .passthrough()',
+        z.object({ id: z.string().describe('ID') }).passthrough(),
+        'x',
+      ],
+      [
+        'an envelope-shaped object under .passthrough()',
+        z.object({ id: z.string().describe('ID') }).passthrough(),
+        { code: JsonRpcErrorCode.NotFound, message: 'looks like a failure' },
+      ],
+      [
+        'null under .passthrough()',
+        z.object({ id: z.string().describe('ID') }).passthrough(),
+        null,
+      ],
+      [
+        'a string under .catchall(z.string())',
+        z.object({ id: z.string().describe('ID') }).catchall(z.string()),
+        'boom',
+      ],
+    ])('fails %s as -32603 naming the output contract', async (_label, output, value) => {
+      const def = tool('open_error_key', {
+        description: 'Returns an undeclared error key its open root keeps.',
+        input: z.object({}),
+        output: output as z.ZodObject<{ id: z.ZodString }>,
+        handler: () => ({ id: 'a', error: value }) as never,
+      }) as AnyToolDefinition;
+
+      const { contract, result } = await callBoth(def);
+      const { error } = result.structuredContent as { error: { code: number; message: string } };
+
+      expect(result.isError).toBe(true);
+      expect(error.code).toBe(JsonRpcErrorCode.InternalError);
+      expect(error.message).toBe(
+        `Tool open_error_key returned output that does not match its output schema: ${reserved}`,
+      );
+      expect(surfaces(withoutRequestId(result))).toEqual(surfaces(contract));
+    });
+
+    it('fails an undeclared error key enriched under .passthrough(), naming the enrichment contract', async () => {
+      const def = tool('open_error_enriched', {
+        description: 'Enriches an undeclared error key from the service layer.',
+        input: z.object({}),
+        output: z.object({ id: z.string().describe('ID') }).passthrough(),
+        enrichment: { totalCount: z.number().describe('Total') },
+        handler: (_input, ctx) => {
+          (ctx.enrich as (fields: Record<string, unknown>) => void)({ totalCount: 1, error: 'x' });
+          return { id: 'a' };
+        },
+      }) as AnyToolDefinition;
+
+      const { contract, result } = await callBoth(def);
+      const { error } = result.structuredContent as { error: { code: number; message: string } };
+
+      expect(result.isError).toBe(true);
+      expect(error.code).toBe(JsonRpcErrorCode.InternalError);
+      expect(error.message).toBe(
+        `Tool open_error_enriched returned enrichment that does not match its enrichment schema: ${reserved}`,
+      );
+      expect(surfaces(withoutRequestId(result))).toEqual(surfaces(contract));
+    });
+
+    it('drops an undeclared error key under a default (stripping) root and succeeds', async () => {
+      const def = tool('strip_error_key', {
+        description: 'Returns an undeclared error key its root strips.',
+        input: z.object({}),
+        output: z.object({ id: z.string().describe('ID') }),
+        handler: () => ({ id: 'a', error: 'x' }) as never,
+      }) as AnyToolDefinition;
+
+      const { contract, result } = await callBoth(def);
+
+      expect(result.isError).toBeUndefined();
+      expect(result.structuredContent).toEqual({ id: 'a' });
+      expect(surfaces(result)).toEqual(surfaces(contract));
+    });
   });
 
   describe('Annotations', () => {

@@ -158,7 +158,7 @@ export interface ToolDefinition<
    * **Type-driven.** When declared, `ctx.enrich(...)` is typed to a `Partial` of
    * these fields. Enrichment is not part of `output`, so `format-parity` never
    * touches it. A *required* enrichment field that is never populated fails the
-   * effective-output parse — surfacing the bug rather than dropping it silently.
+   * enrichment parse — surfacing the bug rather than dropping it silently.
    * Keys must be disjoint from `output` keys (lint-enforced; `.extend` would
    * otherwise silently override).
    */
@@ -227,6 +227,12 @@ export interface ToolDefinition<
    * the declared fields; without it, the loose base `enrich` is available (a
    * no-op merge, since nothing reads it).
    *
+   * Returns the `output` schema's *input* type, because that is what the
+   * framework parses the return against; `format()` and clients receive the
+   * parsed (output) type. The two differ only where the schema changes a value —
+   * a `.default()` makes its field optional here, and a `z.stringbool()` takes
+   * `'true'` and reaches `format()` as `true`.
+   *
    * Declared as a method (not an arrow property) so TypeScript checks the
    * signature bivariantly — concrete tools with narrow `ctx.fail` / `ctx.enrich`
    * types remain assignable to the type-erased `AnyToolDefinition` array.
@@ -234,7 +240,7 @@ export interface ToolDefinition<
   handler(
     input: z.infer<TInput>,
     ctx: HandlerContext<ReasonOf<TErrors>, TEnrich>,
-  ): Promise<z.infer<TOutput>> | z.infer<TOutput>;
+  ): Promise<z.input<TOutput>> | z.input<TOutput>;
   /**
    * Zod schema for input validation. All fields need `.describe()`.
    *

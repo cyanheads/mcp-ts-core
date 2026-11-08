@@ -1,7 +1,8 @@
 /**
- * @fileoverview The output schemas derived from a tool definition: the one a
- * successful result is parsed against, and the widened one `tools/list`
- * advertises so an error envelope validates in strict clients.
+ * @fileoverview The output schemas derived from a tool definition: the full
+ * success shape, the enrichment schema accumulated values are parsed against,
+ * and the widened schema `tools/list` advertises so an error envelope validates
+ * in strict clients.
  * @module src/mcp-server/tools/utils/toolOutputSchema
  */
 
@@ -11,17 +12,37 @@ import { terminateSentence } from '@/utils/formatting/sentence.js';
 import type { AnyToolDefinition } from './toolDefinition.js';
 
 /**
- * The schema the framework **parses** a successful result against: the declared
- * `output`, extended with the `enrichment` block when one is declared. Strict by
- * construction — a required enrichment field the handler never populated fails
- * here, surfacing the authoring bug loudly.
+ * The full shape of a successful `structuredContent`: the declared `output`,
+ * extended with the `enrichment` block when one is declared — the success
+ * branch {@link advertisedOutputSchema} widens.
  *
- * This is deliberately *not* what is advertised — see
- * {@link advertisedOutputSchema}.
+ * Never parsed against: a successful result is parsed in two disjoint halves,
+ * once each — the handler's return against `output`, then the accumulated
+ * enrichment against {@link enrichmentSchema} — because a second parse of the
+ * domain value refuses any field whose parsed value is not valid input to it
+ * (`z.stringbool()`, a cross-type `.pipe()`, a codec) and applies a transform
+ * twice (#846).
  */
 export function effectiveOutputSchema(def: AnyToolDefinition): ZodObject<ZodRawShape> {
   if (!def.enrichment) return def.output;
   return def.output.extend(def.enrichment) as ZodObject<ZodRawShape>;
+}
+
+/**
+ * The schema accumulated enrichment values are parsed against: a tool's
+ * `enrichment` block, under its `output` root's unknown-key policy, so a key
+ * the block never declared (enriched through the loose service-layer `ctx`) is
+ * stripped, kept, or refused exactly as it would be beside the domain fields of
+ * the one `structuredContent` object it lands in. A required field the handler
+ * never populated fails here, surfacing the authoring bug loudly.
+ */
+export function enrichmentSchema(
+  output: AnyToolDefinition['output'],
+  enrichment: ZodRawShape,
+): ZodObject {
+  const block = z.object(enrichment);
+  const catchall = output.def.catchall;
+  return catchall === undefined ? block : block.catchall(catchall);
 }
 
 /**
@@ -97,9 +118,10 @@ function toolErrorEnvelopeSchema(def: AnyToolDefinition): ZodType {
  * trip, and `{}` — a handler that returned nothing — is rejected, which the
  * success-only schema never caught either.
  *
- * Emission only. {@link buildToolSuccessResult} keeps parsing against
- * {@link effectiveOutputSchema}, so the required-enrichment authoring check is
- * unaffected.
+ * Emission only, registered through `deferValidation` so the SDK never parses
+ * a result against it (#846). The framework's own parse of `output` and
+ * {@link enrichmentSchema} stays the one check, so the required-enrichment
+ * authoring check is unaffected.
  */
 export function advertisedOutputSchema(def: AnyToolDefinition): ZodObject<ZodRawShape> {
   const success = effectiveOutputSchema(def);

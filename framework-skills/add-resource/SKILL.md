@@ -4,7 +4,7 @@ description: >
   Scaffold a new MCP resource definition. Use when the user asks to add a resource, expose data via URI, or create a readable endpoint.
 metadata:
   author: cyanheads
-  version: "1.9"
+  version: "1.10"
   audience: external
   type: reference
 ---
@@ -194,7 +194,7 @@ Beyond `description`, `params`, `handler`, and `list`, the builder also supports
 | Field | Purpose |
 |:------|:--------|
 | `name` | Short human-readable name for `resources/list`. Defaults to a slug derived from the URI template if omitted. |
-| `output` | Optional Zod schema for runtime validation of the handler return value (parity with `tool()`'s `output`). |
+| `output` | Optional Zod schema the handler's return is parsed against once, before `format()` (parity with `tool()`'s `output`): the handler returns the schema's input type (`z.input`), and `format()` receives the parsed value. |
 | `format` | Optional formatter mapping the handler's return to the `ReadResourceResult.contents[]` shape. Default: string passthrough; objects serialized to JSON. Override when you need to attach permissions, custom encodings, or split into multiple content items. |
 | `annotations` | Resource annotations (e.g., `audience`, `priority`) — see `ResourceAnnotations`. |
 | `title` | Human-readable display title (defaults to `name`). On a template it names the template in `resources/templates/list`; the entries its `list()` returns never inherit it, so set `title` on an entry to give it one, or the client shows the entry's `name`. Those entries do inherit the template's `description`, `mimeType`, `annotations`, `size`, `examples`, and `_meta` unless they set their own. |

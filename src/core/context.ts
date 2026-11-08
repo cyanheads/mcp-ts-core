@@ -445,7 +445,7 @@ export type EnrichKind = 'notice' | 'total' | 'echo' | 'delta';
 export interface EnrichmentStore {
   /** Per-key render kind set by the field-helpers. Absent keys render generically. */
   kinds: Map<string, EnrichKind>;
-  /** Accumulated field values, insertion-ordered. Merged into the effective output. */
+  /** Accumulated field values, insertion-ordered. Parsed, then merged onto the domain output. */
   values: Record<string, unknown>;
 }
 
@@ -503,10 +503,11 @@ export type Enrich<T = Record<string, unknown>> = ((fields: T) => void) & Enrich
 /**
  * Strict, typed `enrich` attached to `HandlerContext<R, E>` when a tool declares
  * an `enrichment` block. `E` is the declared `ZodRawShape`; `enrich` accepts a
- * `Partial` of the inferred fields so it can be called incrementally — the
- * effective-output parse enforces that required fields end up populated.
+ * `Partial` of the fields' *input* types — what the framework parses the
+ * accumulated values against — so it can be called incrementally; the
+ * enrichment parse enforces that required fields end up populated.
  */
-export type TypedEnrich<E extends ZodRawShape> = Enrich<Partial<z.infer<ZodObject<E>>>>;
+export type TypedEnrich<E extends ZodRawShape> = Enrich<Partial<z.input<ZodObject<E>>>>;
 
 // ---------------------------------------------------------------------------
 // Content collection — non-text content blocks on the success path

@@ -5,16 +5,13 @@
  * @module tests/types/handler-context.test-d
  */
 
-import type {
-  Context,
-  Enrich,
-  HandlerContext,
-  ReasonOf,
-  TypedEnrich,
-} from '@cyanheads/mcp-ts-core';
-import { tool, z } from '@cyanheads/mcp-ts-core';
-import { type ErrorContract, JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { describe, expectTypeOf, it } from 'vitest';
+// The package's root and `/errors` entry modules, read from `src/`: the package
+// name resolves through `exports` to `dist/`, which is only as current as the
+// last build.
+import type { Context, Enrich, HandlerContext, ReasonOf, TypedEnrich } from '@/core/index.js';
+import { tool, z } from '@/core/index.js';
+import { type ErrorContract, JsonRpcErrorCode } from '@/types-global/errors.js';
 
 // ---------------------------------------------------------------------------
 // Fixture contract and enrichment shape
@@ -80,6 +77,19 @@ describe('HandlerContext<R, E> — enrichment dimension', () => {
     type EnrichFn = Ctx['enrich'];
     expectTypeOf<EnrichFn>().toExtend<Enrich>();
   });
+
+  it("enrich takes each field's input form, which the framework parses (#846)", () => {
+    const shape = {
+      flag: z.stringbool().describe('Flag.'),
+      pageSize: z.number().default(25).describe('Page size.'),
+    };
+    type EnrichParam = Parameters<HandlerContext<never, typeof shape>['enrich']>[0];
+
+    expectTypeOf<EnrichParam>().toEqualTypeOf<{
+      flag?: string;
+      pageSize?: number | undefined;
+    }>();
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -106,6 +116,29 @@ describe('tool() handler — HandlerContext<R, E> end-to-end narrowing', () => {
         // @ts-expect-error — 'undeclaredField' is not in the enrichment shape
         ctx.enrich({ undeclaredField: 'oops' });
 
+        return { r: 'ok' };
+      },
+    });
+  });
+
+  it('enrich takes a z.stringbool() field as a string; its trailer render receives the boolean', () => {
+    tool('demo', {
+      description: 'demo',
+      input: z.object({ q: z.string().describe('query') }),
+      output: z.object({ r: z.string().describe('result') }),
+      enrichment: { cached: z.stringbool().describe('Served from cache.') },
+      enrichmentTrailer: {
+        cached: {
+          render(value) {
+            expectTypeOf(value).toEqualTypeOf<boolean>();
+            return '';
+          },
+        },
+      },
+      async handler(_input, ctx) {
+        ctx.enrich({ cached: 'yes' });
+        // @ts-expect-error — the parse takes the string form, not the boolean it yields
+        ctx.enrich({ cached: true });
         return { r: 'ok' };
       },
     });

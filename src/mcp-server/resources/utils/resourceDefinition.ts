@@ -112,12 +112,18 @@ export interface ResourceDefinition<
   /**
    * The core handler function. Receives validated params and unified Context.
    * URI is available on `ctx.uri`. Throw on failure.
+   *
+   * With an `output` schema, returns that schema's *input* type, because that
+   * is what the framework parses the return against; `format()` receives the
+   * parsed value. The two differ only where the schema changes a value — a
+   * `.default()` makes its field optional here, and a `z.stringbool()` takes
+   * `'true'` and reaches `format()` as `true`.
    */
   handler(
     params: z.infer<TParams>,
     ctx: HandlerContext<ReasonOf<TErrors>>,
   ): TOutput extends ZodObject<ZodRawShape>
-    ? z.infer<TOutput> | Promise<z.infer<TOutput>>
+    ? z.input<TOutput> | Promise<z.input<TOutput>>
     : unknown | Promise<unknown>;
   /**
    * Optional provider for resource discovery/listing. Each entry inherits the

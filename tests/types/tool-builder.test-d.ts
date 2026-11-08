@@ -5,15 +5,13 @@
  * @module tests/types/tool-builder.test-d
  */
 
-import type {
-  ContentBlock,
-  HandlerContext,
-  ReasonOf,
-  ToolDefinition,
-} from '@cyanheads/mcp-ts-core';
-import { tool, z } from '@cyanheads/mcp-ts-core';
-import { type ErrorContract, JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { describe, expectTypeOf, it } from 'vitest';
+// The package's root and `/errors` entry modules, read from `src/`: the package
+// name resolves through `exports` to `dist/`, which is only as current as the
+// last build.
+import type { ContentBlock, HandlerContext, ReasonOf, ToolDefinition } from '@/core/index.js';
+import { tool, z } from '@/core/index.js';
+import { type ErrorContract, JsonRpcErrorCode } from '@/types-global/errors.js';
 
 // ---------------------------------------------------------------------------
 // Fixture schemas
@@ -99,6 +97,67 @@ describe('tool() output inference', () => {
     // 'total' is required by the output schema
     expectTypeOf<() => Promise<{ items: string[] }>>().not.toExtend<Handler>();
   });
+
+  /**
+   * The handler returns what the framework parses — the output schema's input
+   * side — and `format()` receives the parse (#846).
+   */
+  it('a z.stringbool() field takes its input form from the handler and reaches format() parsed', () => {
+    const flagTool = tool('flag', {
+      description: 'demo',
+      input: INPUT,
+      output: z.object({ flag: z.stringbool().describe('Flag.') }),
+      async handler(_input, _ctx) {
+        return { flag: 'true' };
+      },
+      format(result) {
+        expectTypeOf(result).toEqualTypeOf<{ flag: boolean }>();
+        return [];
+      },
+    });
+
+    expectTypeOf<Awaited<ReturnType<(typeof flagTool)['handler']>>>().toEqualTypeOf<{
+      flag: string;
+    }>();
+  });
+
+  it('a z.boolean() field is unchanged: the handler returns a boolean and format() sees one', () => {
+    const flagTool = tool('flag', {
+      description: 'demo',
+      input: INPUT,
+      output: z.object({ flag: z.boolean().describe('Flag.') }),
+      async handler(_input, _ctx) {
+        return { flag: true };
+      },
+      format(result) {
+        expectTypeOf(result).toEqualTypeOf<{ flag: boolean }>();
+        return [];
+      },
+    });
+    type Handler = (typeof flagTool)['handler'];
+
+    expectTypeOf<Awaited<ReturnType<Handler>>>().toEqualTypeOf<{ flag: boolean }>();
+    expectTypeOf<() => Promise<{ flag: string }>>().not.toExtend<Handler>();
+  });
+
+  it('a .default() field may be omitted by the handler and is present in format()', () => {
+    const pagedTool = tool('paged', {
+      description: 'demo',
+      input: INPUT,
+      output: z.object({ page: z.number().default(1).describe('Page number.') }),
+      async handler(_input, _ctx) {
+        return {};
+      },
+      format(result) {
+        expectTypeOf(result).toEqualTypeOf<{ page: number }>();
+        return [];
+      },
+    });
+
+    expectTypeOf<Awaited<ReturnType<(typeof pagedTool)['handler']>>>().toEqualTypeOf<{
+      page?: number | undefined;
+    }>();
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -119,7 +178,7 @@ describe('ToolDefinition structural types', () => {
     expectTypeOf<HandlerCtx>().toEqualTypeOf<ExpectedCtx>();
   });
 
-  it('ToolDefinition handler return type matches z.infer<TOutput>', () => {
+  it('ToolDefinition handler return type matches z.input<TOutput>', () => {
     type MyTool = ToolDefinition<typeof INPUT, typeof OUTPUT, undefined, undefined>;
     type RetType = Awaited<ReturnType<MyTool['handler']>>;
     expectTypeOf<RetType>().toEqualTypeOf<{ items: string[]; total: number }>();
