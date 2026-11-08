@@ -1,6 +1,7 @@
 /**
  * @fileoverview Building blocks shared by storage providers: the JSON encoding
- * guard every provider runs before it writes, and — for backends with no
+ * guard every provider runs before it writes, the length check for backends
+ * that store each value under a `tenantId:key` name, and — for backends with no
  * native batch, TTL, or page primitive — batch operations as parallel fan-out
  * over the single-key methods, the TTL envelope the blob-style providers
  * store, one page of a sorted key list, and the SQL `LIKE` escape.
@@ -9,7 +10,8 @@
 
 import type { StorageOptions } from '@/storage/core/IStorageProvider.js';
 import { encodeCursor } from '@/storage/core/storageValidation.js';
-import { serializationError } from '@/types-global/errors.js';
+import { serializationError, validationError } from '@/types-global/errors.js';
+import { utf8ByteLength } from '@/utils/parsing/inputBudget.js';
 
 // ---------------------------------------------------------------------------
 // Value encoding
@@ -53,6 +55,35 @@ export function encodeEntries(
   encode: (key: string, value: unknown) => string = serializeValue,
 ): Map<string, string> {
   return new Map(Array.from(entries, ([key, value]) => [key, encode(key, value)]));
+}
+
+// ---------------------------------------------------------------------------
+// Stored names
+// ---------------------------------------------------------------------------
+
+/** A backend that stores each value under a `tenantId:key` name of at most `maxBytes` UTF-8 bytes. */
+export interface StoredNameLimit {
+  /** The backend as an error names it, e.g. `Cloudflare KV`. */
+  backend: string;
+  maxBytes: number;
+}
+
+/**
+ * The `tenantId:key` name a backend stores `key` under, checked against the
+ * backend's cap so an over-long key rejects before any call reaches it — a
+ * batch names every key before its first call. Throws
+ * `McpError(ValidationError)` naming the backend, its cap, and the longest key
+ * this tenant can use; `data` carries the key, cut past 50 characters as
+ * `validateKey` cuts it, and never the tenant ID.
+ */
+export function storedName(tenantId: string, key: string, limit: StoredNameLimit): string {
+  const name = `${tenantId}:${key}`;
+  if (utf8ByteLength(name) <= limit.maxBytes) return name;
+  const longestKeyBytes = limit.maxBytes - utf8ByteLength(tenantId) - 1;
+  throw validationError(
+    `Key is too long for ${limit.backend}, which limits a stored name (the tenant ID, a colon, and the key) to ${limit.maxBytes} bytes. The longest key this tenant can use is ${longestKeyBytes} bytes.`,
+    { key: key.length > 50 ? `${key.substring(0, 50)}...` : key },
+  );
 }
 
 // ---------------------------------------------------------------------------

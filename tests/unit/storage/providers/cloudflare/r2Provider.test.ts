@@ -7,7 +7,7 @@ import type { RequestContext } from '@/utils/internal/requestContext.js';
 import { requestContextService } from '@/utils/internal/requestContext.js';
 import { encodeCursor } from '../../../../../src/storage/core/storageValidation.js';
 import { R2Provider } from '../../../../../src/storage/providers/cloudflare/r2Provider.js';
-import { McpError } from '../../../../../src/types-global/errors.js';
+import { JsonRpcErrorCode, McpError } from '../../../../../src/types-global/errors.js';
 
 // Mock R2Bucket
 const createMockR2Bucket = () => ({
@@ -280,6 +280,87 @@ describe('R2Provider', () => {
       const count = await r2Provider.deleteMany('tenant-1', [], context);
       expect(count).toBe(0);
       expect(mockBucket.delete).not.toHaveBeenCalled();
+    });
+
+    it.each([
+      [1_000, [1_000]],
+      [1_001, [1_000, 1]],
+      [2_500, [1_000, 1_000, 500]],
+    ])(
+      'should send %i keys in calls of at most 1,000, the most one R2 delete accepts',
+      async (count, callSizes) => {
+        const keys = Array.from({ length: count }, (_, index) => `key-${index}`);
+
+        await expect(r2Provider.deleteMany('tenant-1', keys, context)).resolves.toBe(count);
+
+        const sent = mockBucket.delete.mock.calls.map(([names]) => names as string[]);
+        expect(sent.map((names) => names.length)).toEqual(callSizes);
+        expect(sent.flat()).toEqual(keys.map((key) => `tenant-1:${key}`));
+      },
+    );
+  });
+
+  describe('stored name length', () => {
+    // `t1:` plus the key: 1,021 characters make a 1,024-byte name, R2's cap.
+    const fits = 'k'.repeat(1_021);
+    const tooLong = 'k'.repeat(1_022);
+    const tooLongError = {
+      code: JsonRpcErrorCode.ValidationError,
+      message:
+        'Key is too long for Cloudflare R2, which limits a stored name (the tenant ID, a colon, and the key) to 1024 bytes. The longest key this tenant can use is 1021 bytes.',
+      data: expect.objectContaining({ key: `${'k'.repeat(50)}...` }),
+    };
+    const operations: Record<string, (key: string) => Promise<unknown>> = {
+      get: (key) => r2Provider.get('t1', key, context),
+      set: (key) => r2Provider.set('t1', key, 1, context),
+      delete: (key) => r2Provider.delete('t1', key, context),
+      getMany: (key) => r2Provider.getMany('t1', [key], context),
+      setMany: (key) => r2Provider.setMany('t1', new Map([[key, 1]]), context),
+      deleteMany: (key) => r2Provider.deleteMany('t1', [key], context),
+    };
+    const sentNames = () =>
+      [
+        ...mockBucket.get.mock.calls,
+        ...mockBucket.put.mock.calls,
+        ...mockBucket.delete.mock.calls,
+      ].flatMap(([name]) => name);
+
+    beforeEach(() => {
+      mockBucket.get.mockResolvedValue(null);
+    });
+
+    it.each(Object.keys(operations))(
+      '%s stores a 1,024-byte name and rejects a 1,025-byte one before calling R2',
+      async (operation) => {
+        const run = operations[operation] as (key: string) => Promise<unknown>;
+        await run(fits);
+        expect(sentNames()).toEqual([`t1:${fits}`]);
+
+        await expect(run(tooLong)).rejects.toMatchObject(tooLongError);
+        expect(sentNames()).toHaveLength(1);
+      },
+    );
+
+    it('rejects a batch holding one over-limit key before any read, write, or delete', async () => {
+      const keys = ['first', tooLong, 'last'];
+
+      await expect(r2Provider.getMany('t1', keys, context)).rejects.toMatchObject(tooLongError);
+      await expect(
+        r2Provider.setMany('t1', new Map(keys.map((key) => [key, 1])), context),
+      ).rejects.toMatchObject(tooLongError);
+      await expect(r2Provider.deleteMany('t1', keys, context)).rejects.toMatchObject(tooLongError);
+      expect(sentNames()).toEqual([]);
+    });
+
+    it('names the longest key for the tenant at hand', async () => {
+      const tenantId = `T${'x'.repeat(126)}Z`;
+      await r2Provider.set(tenantId, 'k'.repeat(895), 1, context);
+
+      await expect(r2Provider.set(tenantId, 'k'.repeat(896), 1, context)).rejects.toMatchObject({
+        code: JsonRpcErrorCode.ValidationError,
+        message: expect.stringContaining('The longest key this tenant can use is 895 bytes.'),
+      });
+      expect(mockBucket.put).toHaveBeenCalledOnce();
     });
   });
 

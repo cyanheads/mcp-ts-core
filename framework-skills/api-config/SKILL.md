@@ -4,7 +4,7 @@ description: >
   Reference for core and server configuration in `@cyanheads/mcp-ts-core`. Covers env var tables with defaults, priority order, server-specific Zod schema pattern, and Workers lazy-parsing requirement.
 metadata:
   author: cyanheads
-  version: "1.31"
+  version: "1.32"
   audience: external
   type: reference
 ---
@@ -159,7 +159,7 @@ await createApp({ sessionMode: { default: 'stateful', require: 'stateful' } }); 
 | Env Var | `AppConfig` field | Default | Notes |
 |:--------|:-----------------|:--------|:------|
 | `STORAGE_PROVIDER_TYPE` | `storage.providerType` | `in-memory` | `in-memory` \| `filesystem` \| `supabase` \| `cloudflare-r2` \| `cloudflare-kv` \| `cloudflare-d1`; aliases: `mem`, `fs` |
-| `STORAGE_FILESYSTEM_PATH` | `storage.filesystemPath` | `./.storage` | Used only when `providerType` is `filesystem` |
+| `STORAGE_FILESYSTEM_PATH` | `storage.filesystemPath` | `./.storage` | Used only when `providerType` is `filesystem`. Data lives under `<path>/_v2/`: a directory per tenant, a `.json` file per key, every name percent-encoded, so each tenant ID has a directory of its own and each key a file of its own. A tenant ID whose encoding passes the 255-byte name limit is named `%%` and its SHA-256 instead. A path in the earlier layout (tenant directories at its top level) is copied into `_v2/` once, when the first provider over it is constructed, and left in place unread; a warning names it. An uppercase letter or `.` takes three bytes of the filesystem's 255-byte name limit, so a key's last `/`-separated segment holds at most 250 lowercase or 83 uppercase characters, and a longer one throws `ValidationError` before any filesystem call (a batch, before its first) |
 
 ---
 

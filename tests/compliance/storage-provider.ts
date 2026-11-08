@@ -315,11 +315,6 @@ export function storageProviderTests(harness: StorageProviderHarness): void {
       });
     });
 
-    /**
-     * No two keys here differ only in case: a provider backed by a
-     * case-insensitive filesystem would store them as one, which is a separate
-     * contract from how `list` compares a prefix.
-     */
     it('matches list prefixes case-sensitively', async () => {
       await storageA.setMany(
         new Map<string, unknown>([
@@ -340,6 +335,170 @@ export function storageProviderTests(harness: StorageProviderHarness): void {
       await expect(storageA.list('case/I', contextA)).resolves.toMatchObject({
         keys: ['case/ITEM-3', 'case/Item-2'],
       });
+    });
+
+    it('keeps keys that differ only in case distinct', async () => {
+      await storageA.setMany(
+        new Map<string, unknown>([
+          ['user/1', 'one'],
+          ['User/2', 'two'],
+          ['USER/3', 'three'],
+        ]),
+        contextA,
+      );
+
+      await expect(storageA.list('user/', contextA)).resolves.toMatchObject({ keys: ['user/1'] });
+      await expect(storageA.list('User/', contextA)).resolves.toMatchObject({ keys: ['User/2'] });
+      await expect(storageA.list('USER/', contextA)).resolves.toMatchObject({ keys: ['USER/3'] });
+      await expect(storageA.get('user/2', contextA)).resolves.toBeNull();
+      await expect(storageA.get('User/2', contextA)).resolves.toBe('two');
+
+      await storageA.set('Rk', 'upper', contextA);
+      await storageA.set('rk', 'lower', contextA);
+      await expect(storageA.get('Rk', contextA)).resolves.toBe('upper');
+      await storageA.delete('rk', contextA);
+      await expect(storageA.getMany(['Rk', 'rk', 'USER/3'], contextA)).resolves.toEqual(
+        new Map([
+          ['Rk', 'upper'],
+          ['USER/3', 'three'],
+        ]),
+      );
+    });
+
+    it('keeps a dot segment distinct from the key it would normalize to', async () => {
+      await storageA.set('x/./y', 'dotted', contextA);
+      await storageA.set('x/y', 'plain', contextA);
+
+      await expect(storageA.get('x/./y', contextA)).resolves.toBe('dotted');
+      await expect(storageA.get('x/y', contextA)).resolves.toBe('plain');
+      await expect(storageA.list('x/./', contextA)).resolves.toMatchObject({ keys: ['x/./y'] });
+      await expect(storageA.list('x/', contextA)).resolves.toMatchObject({
+        keys: ['x/./y', 'x/y'],
+      });
+    });
+
+    it.each([
+      ['a', 'a/b'],
+      ['a/b', 'a'],
+    ])(
+      'stores a key beside a key it prefixes when %s is written before %s',
+      async (first, second) => {
+        await storageA.set(first, `value of ${first}`, contextA);
+        await storageA.set(second, `value of ${second}`, contextA);
+
+        await expect(storageA.getMany(['a', 'a/b'], contextA)).resolves.toEqual(
+          new Map([
+            ['a', 'value of a'],
+            ['a/b', 'value of a/b'],
+          ]),
+        );
+        await expect(storageA.list('a', contextA)).resolves.toMatchObject({ keys: ['a', 'a/b'] });
+        await storageA.delete('a', contextA);
+        await expect(storageA.list('a', contextA)).resolves.toMatchObject({ keys: ['a/b'] });
+      },
+    );
+
+    it('round-trips and lists empty, dot, and slash-edge segments as written', async () => {
+      const edges = ['.', '/', '/lead', 'm//n', 't/'];
+      await storageA.setMany(new Map(edges.map((key) => [key, `value of ${key}`])), contextA);
+
+      for (const key of edges) {
+        await expect(storageA.get(key, contextA)).resolves.toBe(`value of ${key}`);
+      }
+      // The spellings path normalization would collapse these keys into.
+      await expect(storageA.getMany(['m/n', 't', 'lead'], contextA)).resolves.toEqual(new Map());
+      await expect(storageA.list('', contextA)).resolves.toMatchObject({
+        keys: ['.', '/', '/lead', 'm//n', 't/'],
+      });
+      await expect(storageA.list('/', contextA)).resolves.toMatchObject({ keys: ['/', '/lead'] });
+      await expect(storageA.list('m/', contextA)).resolves.toMatchObject({ keys: ['m//n'] });
+      await expect(storageA.list('t/', contextA)).resolves.toMatchObject({ keys: ['t/'] });
+      await expect(storageA.deleteMany(['/', 't/'], contextA)).resolves.toBe(2);
+      await expect(storageA.list('', contextA)).resolves.toMatchObject({
+        keys: ['.', '/lead', 'm//n'],
+      });
+    });
+
+    it('isolates every tenant ID from every other', async () => {
+      const forTenant = (tenantId: string) => ({
+        context: contextFor(tenantId),
+        storage: new StorageService(provider),
+        tenantId,
+      });
+      const mixed = forTenant('TenantA');
+      const lower = forTenant('tenanta');
+      const upper = forTenant('TENANTA');
+      const tenants = [mixed, lower, upper];
+      for (const { context, storage, tenantId } of tenants) {
+        await storage.set('k', `value of ${tenantId}`, context);
+      }
+
+      for (const { context, storage, tenantId } of tenants) {
+        await expect(storage.get('k', context)).resolves.toBe(`value of ${tenantId}`);
+        await expect(storage.list('', context)).resolves.toMatchObject({ keys: ['k'] });
+      }
+
+      await lower.storage.delete('k', lower.context);
+      await expect(lower.storage.get('k', lower.context)).resolves.toBeNull();
+      await expect(mixed.storage.get('k', mixed.context)).resolves.toBe('value of TenantA');
+      await expect(upper.storage.get('k', upper.context)).resolves.toBe('value of TENANTA');
+
+      await expect(upper.storage.clear(upper.context)).resolves.toBe(1);
+      await expect(upper.storage.list('', upper.context)).resolves.toMatchObject({ keys: [] });
+      await expect(mixed.storage.get('k', mixed.context)).resolves.toBe('value of TenantA');
+      await expect(mixed.storage.list('', mixed.context)).resolves.toMatchObject({ keys: ['k'] });
+    });
+
+    it('gives every valid tenant ID a keyspace of its own, the longest included', async () => {
+      const forTenant = (tenantId: string) => ({
+        context: contextFor(tenantId),
+        storage: new StorageService(provider),
+        tenantId,
+      });
+      const upper = forTenant('U'.repeat(86));
+      const lower = forTenant('u'.repeat(86));
+      const longest = forTenant('V'.repeat(128));
+      const oneLetterApart = forTenant(`${'V'.repeat(127)}v`);
+      const mixed = forTenant(`${'Ab.'.repeat(42)}Ab`);
+      const tenants = [upper, lower, longest, oneLetterApart, mixed];
+      for (const { context, storage, tenantId } of tenants) {
+        await storage.set('one', `one of ${tenantId}`, context);
+        await storage.setMany(
+          new Map([
+            ['batch/a', 'a'],
+            ['batch/b', `b of ${tenantId}`],
+          ]),
+          context,
+        );
+      }
+
+      for (const { context, storage, tenantId } of tenants) {
+        await expect(storage.get('one', context)).resolves.toBe(`one of ${tenantId}`);
+        await expect(storage.getMany(['batch/a', 'batch/b'], context)).resolves.toEqual(
+          new Map([
+            ['batch/a', 'a'],
+            ['batch/b', `b of ${tenantId}`],
+          ]),
+        );
+        await expect(storage.list('', context)).resolves.toMatchObject({
+          keys: ['batch/a', 'batch/b', 'one'],
+        });
+      }
+
+      await expect(upper.storage.delete('one', upper.context)).resolves.toBe(true);
+      await expect(upper.storage.deleteMany(['batch/a'], upper.context)).resolves.toBe(1);
+      await expect(longest.storage.clear(longest.context)).resolves.toBe(3);
+
+      await expect(upper.storage.list('', upper.context)).resolves.toMatchObject({
+        keys: ['batch/b'],
+      });
+      await expect(longest.storage.list('', longest.context)).resolves.toMatchObject({ keys: [] });
+      for (const { context, storage, tenantId } of [lower, oneLetterApart, mixed]) {
+        await expect(storage.get('one', context)).resolves.toBe(`one of ${tenantId}`);
+        await expect(storage.list('', context)).resolves.toMatchObject({
+          keys: ['batch/a', 'batch/b', 'one'],
+        });
+      }
     });
 
     it('lists a 60-character prefix holding underscores, page by page', async () => {

@@ -4,10 +4,12 @@
  * handler factory, and each method meets a fault the host or the caller's key
  * produces: an unreadable file, a read-only directory, an unlistable
  * subdirectory, a storage root that cannot hold a new tenant, a key segment past
- * the file-name limit. The result names the key and never the storage root, and
- * the provider's own `Error in FileSystemProvider.<op>` record keeps the raw
- * `fs` error — its `code` and path — in `causeChain`. Runs on both lanes: Bun
- * and Node raise different `fs` errors for the same fault.
+ * the file-name limit, a key whose path passes the host's path limit. The
+ * result names the key and never the storage root, and the provider's own
+ * `Error in FileSystemProvider.<op>` record keeps the raw `fs` error — its
+ * `code` and path — in `causeChain`; a key segment past the name limit rejects
+ * before any `fs` call, so nothing on disk changes. Runs on both lanes: Bun and
+ * Node raise different `fs` errors for the same fault.
  * @module tests/unit/storage/providers/fileSystem/fileSystemProvider.failureWire.test
  */
 
@@ -40,6 +42,8 @@ import { legacyCapabilityView, makeServerContext } from '../../../../helpers/ser
 /** The tenant a stdio-shaped call resolves to, and so the directory its keys live in. */
 const TENANT = 'default';
 const LONG_KEY = 'a'.repeat(300);
+/** Five segments of 80 uppercase letters: each name fits, the whole path passes macOS's 1,024 bytes. */
+const DEEP_KEY = Array.from({ length: 5 }, () => 'A'.repeat(80)).join('/');
 
 const readMessage = (key: string) => `Failed to read stored value for key "${key}".`;
 const writeMessage = (key: string) => `Failed to write stored value for key "${key}".`;
@@ -73,8 +77,12 @@ interface Fault {
   ): Promise<(() => Promise<unknown>) | undefined>;
   call(ctx: Context, storage: StorageService): Promise<unknown>;
   code: JsonRpcErrorCode;
-  /** The raw `fs` error's `code` on the record's `causeChain`. */
-  errno: string;
+  /**
+   * The raw `fs` error's `code` on the record's `causeChain`, or `undefined`
+   * for a fault the provider rejects before any `fs` call: the data root then
+   * holds no tenant directory.
+   */
+  errno: string | undefined;
   message: string;
   name: string;
   /** The provider method whose `Error in FileSystemProvider.<op>` record is checked. */
@@ -88,12 +96,14 @@ async function seed(root: string, ...keys: string[]) {
   for (const key of keys) await provider.set(TENANT, key, { seeded: key }, context);
 }
 
-const tenantDir = (root: string) => join(root, TENANT);
+/** The provider's data root under `root`, which holds one directory per tenant. */
+const dataDir = (root: string) => join(root, '_v2');
+const tenantDir = (root: string) => join(dataDir(root), TENANT);
 
 /** `item/1` unreadable and unwritable; `item/2` beside it untouched. */
 async function lockItem(root: string, setMode: (path: string, mode: number) => Promise<void>) {
   await seed(root, 'item/1', 'item/2');
-  const file = join(tenantDir(root), 'item', '1');
+  const file = join(tenantDir(root), 'item', '1.json');
   await setMode(file, 0o000);
   return file;
 }
@@ -207,10 +217,11 @@ const FAULTS: Fault[] = [
   },
   ...(['get', 'set', 'delete'] as const).map(
     (operation): Fault => ({
-      name: `${operation} for a tenant the storage root cannot hold`,
+      name: `${operation} for a tenant the data root cannot hold`,
       async arrange(root, setMode) {
-        await setMode(root, 0o555);
-        return () => mkdir(join(root, 'probe'));
+        new FileSystemProvider(root);
+        await setMode(dataDir(root), 0o555);
+        return () => mkdir(join(dataDir(root), 'probe'));
       },
       call: (ctx) =>
         operation === 'set' ? ctx.state.set('k', { v: 1 }) : ctx.state[operation]('k'),
@@ -229,6 +240,19 @@ const FAULTS: Fault[] = [
       operation,
       code: JsonRpcErrorCode.ValidationError,
       message: tooLongMessage(LONG_KEY),
+      errno: undefined,
+    }),
+  ),
+  // Only macOS caps a path at 1,024 bytes, so only there does a key of this length reach it.
+  ...(process.platform === 'darwin' ? (['get', 'set'] as const) : []).map(
+    (operation): Fault => ({
+      name: `${operation} of a key whose path passes the host's path limit`,
+      arrange: async () => undefined,
+      call: (ctx) =>
+        operation === 'set' ? ctx.state.set(DEEP_KEY, { v: 1 }) : ctx.state.get(DEEP_KEY),
+      operation,
+      code: JsonRpcErrorCode.ValidationError,
+      message: tooLongMessage(DEEP_KEY),
       errno: 'ENAMETOOLONG',
     }),
   ),
@@ -323,6 +347,10 @@ describe('a filesystem storage fault on the wire (#645)', () => {
     expect(error.data).not.toHaveProperty('rootCause');
     expectNoStorageRoot(JSON.stringify(error.data));
 
+    if (fault.errno === undefined) {
+      expect(await readdir(dataDir(root))).toEqual([]);
+      return;
+    }
     // The provider's own record keeps the raw fs error for the operator.
     const raw = loggedCauseChain(fault.operation)?.find((node) => node.code === fault.errno);
     expect(raw, `a ${fault.errno} node on causeChain`).toBeDefined();

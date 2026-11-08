@@ -21,8 +21,10 @@ import {
   encodeEntries,
   encodeEnvelope,
   getManyViaGet,
+  type StoredNameLimit,
   serializeValue,
   setManyViaSet,
+  storedName,
 } from '@/storage/core/providerHelpers.js';
 import { decodeCursor, encodeCursor } from '@/storage/core/storageValidation.js';
 import { configurationError, JsonRpcErrorCode, McpError } from '@/types-global/errors.js';
@@ -33,6 +35,10 @@ import { type RequestContext, withExtra } from '@/utils/internal/requestContext.
 const DEFAULT_LIST_LIMIT = 1000;
 /** R2 rejects `list()` limits above 1000, so the +1 page probe clamps here. */
 const R2_MAX_LIST_LIMIT = 1000;
+/** One R2 `delete()` takes at most 1,000 keys. */
+const R2_MAX_DELETE_KEYS = 1000;
+/** R2 caps an object key at 1,024 bytes (https://developers.cloudflare.com/r2/platform/limits/). */
+const R2_NAME_LIMIT: StoredNameLimit = { backend: 'Cloudflare R2', maxBytes: 1024 };
 
 export class R2Provider implements IStorageProvider {
   private readonly bucket: R2Bucket;
@@ -44,19 +50,20 @@ export class R2Provider implements IStorageProvider {
     this.bucket = bucket;
   }
 
+  /** The R2 object key for `key`; throws `ValidationError` past R2's 1,024-byte limit. */
   private getR2Key(tenantId: string, key: string): string {
-    return `${tenantId}:${key}`;
+    return storedName(tenantId, key, R2_NAME_LIMIT);
   }
 
   /** Decodes a stored envelope; `null` once its TTL has lapsed. */
-  private parseAndValidate<T>(raw: string, tenantId: string, key: string): T | null {
+  private parseAndValidate<T>(raw: string, r2Key: string): T | null {
     let decoded: DecodedEnvelope<T>;
     try {
       decoded = decodeEnvelope<T>(raw);
     } catch (error: unknown) {
       throw new McpError(
         JsonRpcErrorCode.SerializationError,
-        `[R2Provider] Failed to parse JSON for key: ${this.getR2Key(tenantId, key)}`,
+        `[R2Provider] Failed to parse JSON for key: ${r2Key}`,
         undefined,
         { cause: error },
       );
@@ -65,16 +72,16 @@ export class R2Provider implements IStorageProvider {
   }
 
   async get<T>(tenantId: string, key: string, context: RequestContext): Promise<T | null> {
-    const r2Key = this.getR2Key(tenantId, key);
     return await ErrorHandler.tryCatch(
       async () => {
+        const r2Key = this.getR2Key(tenantId, key);
         logger.debug(`[R2Provider] Getting key: ${r2Key}`, context);
         const object = await this.bucket.get(r2Key);
         if (object === null) {
           return null;
         }
         const text = await object.text();
-        const value = this.parseAndValidate<T>(text, tenantId, key);
+        const value = this.parseAndValidate<T>(text, r2Key);
         if (value === null) {
           // best-effort cleanup if expired
           await this.bucket.delete(r2Key).catch(() => {});
@@ -97,9 +104,9 @@ export class R2Provider implements IStorageProvider {
     context: RequestContext,
     options?: StorageOptions,
   ): Promise<void> {
-    const r2Key = this.getR2Key(tenantId, key);
     return await ErrorHandler.tryCatch(
       async () => {
+        const r2Key = this.getR2Key(tenantId, key);
         logger.debug(`[R2Provider] Setting key: ${r2Key}`, withExtra(context, { options }));
         await this.bucket.put(r2Key, encodeEnvelope(serializeValue(key, value), options));
         logger.debug(`[R2Provider] Successfully set key: ${r2Key}`, context);
@@ -121,9 +128,9 @@ export class R2Provider implements IStorageProvider {
    * still be racy under eventual consistency.
    */
   async delete(tenantId: string, key: string, context: RequestContext): Promise<boolean> {
-    const r2Key = this.getR2Key(tenantId, key);
     return await ErrorHandler.tryCatch(
       async () => {
+        const r2Key = this.getR2Key(tenantId, key);
         logger.debug(`[R2Provider] Deleting key: ${r2Key}`, context);
         await this.bucket.delete(r2Key);
         logger.debug(`[R2Provider] Successfully deleted key: ${r2Key}`, context);
@@ -143,7 +150,7 @@ export class R2Provider implements IStorageProvider {
     context: RequestContext,
     options?: ListOptions,
   ): Promise<ListResult> {
-    const r2Prefix = this.getR2Key(tenantId, prefix);
+    const r2Prefix = `${tenantId}:${prefix}`;
     return await ErrorHandler.tryCatch(
       async () => {
         logger.debug(
@@ -209,7 +216,11 @@ export class R2Provider implements IStorageProvider {
     context: RequestContext,
   ): Promise<Map<string, T>> {
     return await ErrorHandler.tryCatch(
-      () => getManyViaGet(keys, (key) => this.get<T>(tenantId, key, context)),
+      () => {
+        // Every name is checked before the first read reaches R2.
+        for (const key of keys) this.getR2Key(tenantId, key);
+        return getManyViaGet(keys, (key) => this.get<T>(tenantId, key, context));
+      },
       {
         operation: 'R2Provider.getMany',
         context,
@@ -226,11 +237,15 @@ export class R2Provider implements IStorageProvider {
   ): Promise<void> {
     return await ErrorHandler.tryCatch(
       () => {
+        // Every value is encoded and every name checked before the first write.
         const documents = encodeEntries(entries, (key, value) =>
           encodeEnvelope(serializeValue(key, value), options),
         );
-        return setManyViaSet(documents, async (key, body) => {
-          await this.bucket.put(this.getR2Key(tenantId, key), body);
+        const named = new Map(
+          Array.from(documents, ([key, body]) => [this.getR2Key(tenantId, key), body]),
+        );
+        return setManyViaSet(named, async (r2Key, body) => {
+          await this.bucket.put(r2Key, body);
         });
       },
       {
@@ -242,7 +257,8 @@ export class R2Provider implements IStorageProvider {
   }
 
   /**
-   * Deletes multiple keys in a single R2 batch operation.
+   * Deletes multiple keys through R2's batch delete, at most 1,000 keys per
+   * call, after checking every name.
    *
    * Note: R2 batch delete is idempotent — it does not report which keys actually
    * existed. The returned count reflects the number of keys requested for deletion,
@@ -257,7 +273,9 @@ export class R2Provider implements IStorageProvider {
 
         logger.debug(`[R2Provider] Batch deleting ${keys.length} keys`, context);
         const r2Keys = keys.map((key) => this.getR2Key(tenantId, key));
-        await this.bucket.delete(r2Keys);
+        for (let start = 0; start < r2Keys.length; start += R2_MAX_DELETE_KEYS) {
+          await this.bucket.delete(r2Keys.slice(start, start + R2_MAX_DELETE_KEYS));
+        }
         return keys.length;
       },
       {

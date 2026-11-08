@@ -15,6 +15,7 @@ import {
   paginateSortedKeys,
   serializeValue,
   setManyViaSet,
+  storedName,
 } from '@/storage/core/providerHelpers.js';
 import { decodeCursor } from '@/storage/core/storageValidation.js';
 import { JsonRpcErrorCode, McpError } from '@/types-global/errors.js';
@@ -202,5 +203,51 @@ describe('escapeLikePattern', () => {
   it('escapes LIKE wildcards and the escape character', () => {
     expect(escapeLikePattern('a%b_c\\d')).toBe('a\\%b\\_c\\\\d');
     expect(escapeLikePattern('plain')).toBe('plain');
+  });
+});
+
+describe('storedName', () => {
+  const KV = { backend: 'Cloudflare KV', maxBytes: 512 };
+  it.each([
+    ['t1', 509],
+    [`T${'x'.repeat(126)}Z`, 383],
+  ])(
+    'names a key of tenant %s as tenant:key up to %i bytes, and rejects one byte more',
+    (tenantId, length) => {
+      const key = 'k'.repeat(length);
+      expect(storedName(tenantId, key, KV)).toBe(`${tenantId}:${key}`);
+      expect(() => storedName(tenantId, `${key}k`, KV)).toThrow(McpError);
+    },
+  );
+
+  it('measures the name in UTF-8 bytes', () => {
+    // `é` is two bytes: 't1:' plus 254 of them is 511 bytes, plus 255 is 513.
+    expect(storedName('t1', 'é'.repeat(254), KV)).toBe(`t1:${'é'.repeat(254)}`);
+    expect(() => storedName('t1', 'é'.repeat(255), KV)).toThrow(McpError);
+  });
+
+  it('rejects past the cap with a ValidationError naming the backend, the cap, and the longest key', () => {
+    const tenantId = 'tenant-carried-in-no-data';
+    let error: unknown;
+    try {
+      storedName(tenantId, 'k'.repeat(600), KV);
+    } catch (thrown: unknown) {
+      error = thrown;
+    }
+
+    expect(error).toBeInstanceOf(McpError);
+    expect(error).toMatchObject({
+      code: JsonRpcErrorCode.ValidationError,
+      message:
+        'Key is too long for Cloudflare KV, which limits a stored name (the tenant ID, a colon, and the key) to 512 bytes. The longest key this tenant can use is 486 bytes.',
+      data: { key: `${'k'.repeat(50)}...` },
+    });
+    expect(JSON.stringify((error as McpError).data)).not.toContain(tenantId);
+  });
+
+  it('keeps a key of 50 characters or fewer whole in data', () => {
+    expect(() => storedName('t'.repeat(600), 'short', KV)).toThrow(
+      expect.objectContaining({ data: { key: 'short' } }),
+    );
   });
 });

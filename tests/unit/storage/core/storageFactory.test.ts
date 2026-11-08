@@ -2,6 +2,9 @@
  * @fileoverview Unit tests for storage provider factory.
  * @module tests/storage/core/storageFactory
  */
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { AppConfig } from '@/config/index.js';
 
@@ -45,16 +48,19 @@ describe('createStorageProvider', () => {
 
   describe('filesystem provider', () => {
     it('should create FileSystemProvider with valid path', () => {
+      const filesystemPath = mkdtempSync(join(tmpdir(), 'storage-factory-test-'));
       const mockConfig = {
         storage: {
           providerType: 'filesystem' as const,
-          filesystemPath: '/tmp/test-storage',
+          filesystemPath,
         },
       } as AppConfig;
 
-      const provider = createStorageProvider(mockConfig);
-
-      expect(provider).toBeInstanceOf(FileSystemProvider);
+      try {
+        expect(createStorageProvider(mockConfig)).toBeInstanceOf(FileSystemProvider);
+      } finally {
+        rmSync(filesystemPath, { recursive: true, force: true });
+      }
     });
 
     it('should throw McpError when filesystem path is missing', () => {

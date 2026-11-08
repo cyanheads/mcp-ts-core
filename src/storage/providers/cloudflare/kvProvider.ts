@@ -14,16 +14,23 @@ import {
   deleteManyViaDelete,
   encodeEntries,
   getManyViaGet,
+  type StoredNameLimit,
   serializeValue,
   setManyViaSet,
+  storedName,
 } from '@/storage/core/providerHelpers.js';
 import { decodeCursor, encodeCursor } from '@/storage/core/storageValidation.js';
 import { configurationError, JsonRpcErrorCode, McpError } from '@/types-global/errors.js';
 import { ErrorHandler } from '@/utils/internal/error-handler/errorHandler.js';
 import { logger } from '@/utils/internal/logger.js';
 import { type RequestContext, withExtra } from '@/utils/internal/requestContext.js';
+import { utf8ByteLength } from '@/utils/parsing/inputBudget.js';
 
 const DEFAULT_LIST_LIMIT = 1000;
+/** KV returns at most 1,000 keys per `list()` call and rejects a larger `limit`. */
+const KV_MAX_LIST_LIMIT = 1000;
+/** KV caps a key name at 512 bytes (https://developers.cloudflare.com/kv/platform/limits/). */
+const KV_NAME_LIMIT: StoredNameLimit = { backend: 'Cloudflare KV', maxBytes: 512 };
 
 export class KvProvider implements IStorageProvider {
   private readonly kv: KVNamespace;
@@ -35,8 +42,9 @@ export class KvProvider implements IStorageProvider {
     this.kv = kv;
   }
 
+  /** The KV name for `key`; throws `ValidationError` past KV's 512-byte name limit. */
   private getKvKey(tenantId: string, key: string): string {
-    return `${tenantId}:${key}`;
+    return storedName(tenantId, key, KV_NAME_LIMIT);
   }
 
   /** Writes an already-encoded value; Cloudflare KV requires `expirationTtl` >= 60 seconds. */
@@ -50,13 +58,13 @@ export class KvProvider implements IStorageProvider {
 
   /**
    * Reads as text and parses here, so only a stored value that is not JSON
-   * becomes `SerializationError`; a rejected read (outage, rate limit, a key
-   * over KV's length limit) is classified as every other KV call's is.
+   * becomes `SerializationError`; a rejected read (an outage, a rate limit) is
+   * classified as every other KV call's is.
    */
   async get<T>(tenantId: string, key: string, context: RequestContext): Promise<T | null> {
-    const kvKey = this.getKvKey(tenantId, key);
     return await ErrorHandler.tryCatch(
       async () => {
+        const kvKey = this.getKvKey(tenantId, key);
         logger.debug(`[KvProvider] Getting key: ${kvKey}`, context);
         const text = await this.kv.get(kvKey, 'text');
         if (text === null) return null;
@@ -86,9 +94,9 @@ export class KvProvider implements IStorageProvider {
     context: RequestContext,
     options?: StorageOptions,
   ): Promise<void> {
-    const kvKey = this.getKvKey(tenantId, key);
     return await ErrorHandler.tryCatch(
       async () => {
+        const kvKey = this.getKvKey(tenantId, key);
         logger.debug(`[KvProvider] Setting key: ${kvKey}`, withExtra(context, { options }));
         await this.put(kvKey, serializeValue(key, value), options);
         logger.debug(`[KvProvider] Successfully set key: ${kvKey}`, context);
@@ -111,9 +119,9 @@ export class KvProvider implements IStorageProvider {
    * consistency, so we accept the imprecise return value.
    */
   async delete(tenantId: string, key: string, context: RequestContext): Promise<boolean> {
-    const kvKey = this.getKvKey(tenantId, key);
     return await ErrorHandler.tryCatch(
       async () => {
+        const kvKey = this.getKvKey(tenantId, key);
         logger.debug(`[KvProvider] Deleting key: ${kvKey}`, context);
         // KV delete is idempotent — always succeeds regardless of key existence
         await this.kv.delete(kvKey);
@@ -134,7 +142,7 @@ export class KvProvider implements IStorageProvider {
     context: RequestContext,
     options?: ListOptions,
   ): Promise<ListResult> {
-    const kvPrefix = this.getKvKey(tenantId, prefix);
+    const kvPrefix = `${tenantId}:${prefix}`;
     return await ErrorHandler.tryCatch(
       async () => {
         logger.debug(
@@ -142,14 +150,20 @@ export class KvProvider implements IStorageProvider {
           withExtra(context, { options }),
         );
 
-        const limit = options?.limit ?? DEFAULT_LIST_LIMIT;
+        // Decode tenant-bound cursor to get the native KV cursor
+        const resumeFrom = options?.cursor
+          ? decodeCursor(options.cursor, tenantId, context)
+          : undefined;
+        // No stored name is long enough to start with this prefix, and KV rejects it.
+        if (utf8ByteLength(kvPrefix) > KV_NAME_LIMIT.maxBytes) return { keys: [] };
+
         const listOptions: import('@cloudflare/workers-types').KVNamespaceListOptions = {
           prefix: kvPrefix,
-          limit,
+          // A page can hold fewer keys than asked for; the cursor below continues it.
+          limit: Math.min(options?.limit ?? DEFAULT_LIST_LIMIT, KV_MAX_LIST_LIMIT),
         };
-        if (options?.cursor) {
-          // Decode tenant-bound cursor to get the native KV cursor
-          listOptions.cursor = decodeCursor(options.cursor, tenantId, context);
+        if (resumeFrom) {
+          listOptions.cursor = resumeFrom;
         }
         const listed = await this.kv.list(listOptions);
 
@@ -186,7 +200,11 @@ export class KvProvider implements IStorageProvider {
     context: RequestContext,
   ): Promise<Map<string, T>> {
     return await ErrorHandler.tryCatch(
-      () => getManyViaGet(keys, (key) => this.get<T>(tenantId, key, context)),
+      () => {
+        // Every name is checked before the first read reaches KV.
+        for (const key of keys) this.getKvKey(tenantId, key);
+        return getManyViaGet(keys, (key) => this.get<T>(tenantId, key, context));
+      },
       {
         operation: 'KvProvider.getMany',
         context,
@@ -202,10 +220,13 @@ export class KvProvider implements IStorageProvider {
     options?: StorageOptions,
   ): Promise<void> {
     return await ErrorHandler.tryCatch(
-      () =>
-        setManyViaSet(encodeEntries(entries), (key, json) =>
-          this.put(this.getKvKey(tenantId, key), json, options),
-        ),
+      () => {
+        // Every value is encoded and every name checked before the first write.
+        const named = new Map(
+          Array.from(encodeEntries(entries), ([key, json]) => [this.getKvKey(tenantId, key), json]),
+        );
+        return setManyViaSet(named, (kvKey, json) => this.put(kvKey, json, options));
+      },
       {
         operation: 'KvProvider.setMany',
         context,
@@ -216,7 +237,11 @@ export class KvProvider implements IStorageProvider {
 
   async deleteMany(tenantId: string, keys: string[], context: RequestContext): Promise<number> {
     return await ErrorHandler.tryCatch(
-      () => deleteManyViaDelete(keys, (key) => this.delete(tenantId, key, context)),
+      () => {
+        // Every name is checked before the first delete reaches KV.
+        for (const key of keys) this.getKvKey(tenantId, key);
+        return deleteManyViaDelete(keys, (key) => this.delete(tenantId, key, context));
+      },
       {
         operation: 'KvProvider.deleteMany',
         context,
@@ -236,7 +261,7 @@ export class KvProvider implements IStorageProvider {
         while (!listComplete) {
           const listOpts: import('@cloudflare/workers-types').KVNamespaceListOptions = {
             prefix: kvPrefix,
-            limit: 1000,
+            limit: KV_MAX_LIST_LIMIT,
           };
           if (cursor) {
             listOpts.cursor = cursor;

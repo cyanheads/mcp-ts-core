@@ -4,7 +4,7 @@ description: >
   Cloudflare Workers deployment using `createWorkerHandler` from `@cyanheads/mcp-ts-core/worker`. Covers the full handler signature, binding types, CloudflareBindings extensibility, runtime compatibility guards, and wrangler.toml requirements.
 metadata:
   author: cyanheads
-  version: "1.12"
+  version: "1.13"
   audience: external
   type: reference
 ---
@@ -164,8 +164,8 @@ In Workers, only these storage providers are allowed:
 | Provider | Notes |
 |:---------|:------|
 | `in-memory` | Default — data lost on cold start, no persistence |
-| `cloudflare-kv` | KV namespace binding — eventually consistent |
-| `cloudflare-r2` | R2 bucket binding — object storage |
+| `cloudflare-kv` | KV namespace binding — eventually consistent. Each value is stored under `<tenantId>:<key>`, capped at 512 bytes: a key past it throws `ValidationError` before the binding is called |
+| `cloudflare-r2` | R2 bucket binding — object storage. Each value is stored under `<tenantId>:<key>`, capped at 1,024 bytes: a key past it throws `ValidationError` before the binding is called |
 | `cloudflare-d1` | D1 database binding — SQLite-compatible |
 
 `filesystem`, `supabase`, and unknown provider types are not on the whitelist:
@@ -372,12 +372,17 @@ beforeAll(async () => {
 });
 ```
 
-### R2 list limit
+### List page size on KV and R2
 
-The R2 provider fetches `limit + 1` objects to detect further pages. Miniflare caps R2 `MaxKeys` at 1000, so the default `limit=1000` → request 1001 → error. Pass `limit: 100` (or any value ≤ 999) to `ctx.state.list()` in test fixtures to stay under the cap:
+KV and R2 return at most 1,000 keys per `list()` call. Both providers ask for no more than that, so `ctx.state.list()` accepts any `limit` up to the framework's 10,000 on either binding, Miniflare included; a page asked for more than 1,000 keys holds at most 1,000 and carries a cursor. Follow `cursor` until it is absent rather than counting items:
 
 ```ts
-const result = await ctx.state.list(prefix, { limit: 100 });
+let cursor: string | undefined;
+do {
+  const page = await ctx.state.list(prefix, { limit: 5_000, ...(cursor && { cursor }) });
+  // ... page.items
+  cursor = page.cursor;
+} while (cursor);
 ```
 
 ### Storage probe pattern

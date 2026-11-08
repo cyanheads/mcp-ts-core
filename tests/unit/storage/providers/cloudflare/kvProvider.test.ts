@@ -232,6 +232,105 @@ describe('KvProvider', () => {
 
       await expect(kvProvider.list('tenant-1', 'key', context)).rejects.toThrow(McpError);
     });
+
+    it.each([1_001, 10_000])(
+      'should ask KV for at most 1,000 keys when the limit is %i, returning its cursor',
+      async (limit) => {
+        mockKv.list.mockResolvedValue({
+          keys: [{ name: 'tenant-1:key-1' }],
+          list_complete: false,
+          cursor: 'native-next',
+        });
+
+        const result = await kvProvider.list('tenant-1', 'key', context, { limit });
+
+        expect(mockKv.list).toHaveBeenCalledWith({ prefix: 'tenant-1:key', limit: 1000 });
+        expect(result).toEqual({
+          keys: ['key-1'],
+          nextCursor: encodeCursor('native-next', 'tenant-1'),
+        });
+      },
+    );
+  });
+
+  describe('stored name length', () => {
+    // `t1:` plus the key: 509 characters make a 512-byte name, KV's cap.
+    const fits = 'k'.repeat(509);
+    const tooLong = 'k'.repeat(510);
+    const tooLongError = {
+      code: JsonRpcErrorCode.ValidationError,
+      message:
+        'Key is too long for Cloudflare KV, which limits a stored name (the tenant ID, a colon, and the key) to 512 bytes. The longest key this tenant can use is 509 bytes.',
+      data: expect.objectContaining({ key: `${'k'.repeat(50)}...` }),
+    };
+    const operations: Record<string, (key: string) => Promise<unknown>> = {
+      get: (key) => kvProvider.get('t1', key, context),
+      set: (key) => kvProvider.set('t1', key, 1, context),
+      delete: (key) => kvProvider.delete('t1', key, context),
+      getMany: (key) => kvProvider.getMany('t1', [key], context),
+      setMany: (key) => kvProvider.setMany('t1', new Map([[key, 1]]), context),
+      deleteMany: (key) => kvProvider.deleteMany('t1', [key], context),
+    };
+    const kvCalls = () =>
+      mockKv.get.mock.calls.length + mockKv.put.mock.calls.length + mockKv.delete.mock.calls.length;
+
+    beforeEach(() => {
+      mockKv.get.mockResolvedValue(null);
+    });
+
+    it.each(Object.keys(operations))(
+      '%s stores a 512-byte name and rejects a 513-byte one before calling KV',
+      async (operation) => {
+        const run = operations[operation] as (key: string) => Promise<unknown>;
+        await run(fits);
+        const named = [
+          ...mockKv.get.mock.calls,
+          ...mockKv.put.mock.calls,
+          ...mockKv.delete.mock.calls,
+        ].map(([name]) => name);
+        expect(named).toEqual([`t1:${fits}`]);
+
+        await expect(run(tooLong)).rejects.toMatchObject(tooLongError);
+        expect(kvCalls()).toBe(1);
+      },
+    );
+
+    it('rejects a batch holding one over-limit key before any read, write, or delete', async () => {
+      const keys = ['first', tooLong, 'last'];
+
+      await expect(kvProvider.getMany('t1', keys, context)).rejects.toMatchObject(tooLongError);
+      await expect(
+        kvProvider.setMany('t1', new Map(keys.map((key) => [key, 1])), context),
+      ).rejects.toMatchObject(tooLongError);
+      await expect(kvProvider.deleteMany('t1', keys, context)).rejects.toMatchObject(tooLongError);
+      expect(kvCalls()).toBe(0);
+    });
+
+    it('names the longest key for the tenant at hand', async () => {
+      const tenantId = `T${'x'.repeat(126)}Z`;
+      await kvProvider.set(tenantId, 'k'.repeat(383), 1, context);
+
+      await expect(kvProvider.set(tenantId, 'k'.repeat(384), 1, context)).rejects.toMatchObject({
+        code: JsonRpcErrorCode.ValidationError,
+        message: expect.stringContaining('The longest key this tenant can use is 383 bytes.'),
+      });
+      expect(mockKv.put).toHaveBeenCalledOnce();
+    });
+
+    it('lists nothing for a prefix past the cap, without calling KV, after checking the cursor', async () => {
+      await expect(kvProvider.list('t1', tooLong, context)).resolves.toEqual({ keys: [] });
+      await expect(
+        kvProvider.list('t1', tooLong, context, { cursor: encodeCursor('native', 't1') }),
+      ).resolves.toEqual({ keys: [] });
+      await expect(
+        kvProvider.list('t1', tooLong, context, { cursor: encodeCursor('native', 'other') }),
+      ).rejects.toMatchObject({ code: JsonRpcErrorCode.InvalidParams });
+      expect(mockKv.list).not.toHaveBeenCalled();
+
+      mockKv.list.mockResolvedValue({ keys: [], list_complete: true });
+      await kvProvider.list('t1', fits, context);
+      expect(mockKv.list).toHaveBeenCalledWith({ prefix: `t1:${fits}`, limit: 1000 });
+    });
   });
 
   describe('batch operations', () => {
