@@ -1,6 +1,6 @@
 # mcp-ts-core - Directory Structure
 
-Generated on: 2026-11-06 20:24:51
+Generated on: 2026-11-08 08:57:18
 
 ```text
 mcp-ts-core/
@@ -348,7 +348,7 @@ mcp-ts-core/
 │   │   │   │   │   ├── rejection.ts
 │   │   │   │   │   ├── repair.ts
 │   │   │   │   │   └── telemetry.ts
-│   │   │   │   ├── deferredInputSchema.ts
+│   │   │   │   ├── deferredSchema.ts
 │   │   │   │   ├── disabled-tool.ts
 │   │   │   │   ├── headerParam.ts
 │   │   │   │   ├── schemaShape.ts
@@ -525,7 +525,8 @@ mcp-ts-core/
 │   │   │   ├── requestContext.ts
 │   │   │   ├── runtime.ts
 │   │   │   ├── startupBanner.ts
-│   │   │   └── telemetryMessages.ts
+│   │   │   ├── telemetryMessages.ts
+│   │   │   └── versionTriple.ts
 │   │   ├── metrics/
 │   │   │   └── tokenCounter.ts
 │   │   ├── network/
@@ -809,6 +810,7 @@ mcp-ts-core/
 │   │   ├── handler-context.test-d.ts
 │   │   ├── mock-context.test-d.ts
 │   │   ├── request-context.test-d.ts
+│   │   ├── resource-builder.test-d.ts
 │   │   ├── retry.test-d.ts
 │   │   ├── tool-builder.test-d.ts
 │   │   ├── tool-contract-suite.test-d.ts
@@ -868,7 +870,7 @@ mcp-ts-core/
 │   │   │   │   ├── utils/
 │   │   │   │   │   ├── arguments/
 │   │   │   │   │   │   └── parseToolArguments.test.ts
-│   │   │   │   │   ├── deferredInputSchema.test.ts
+│   │   │   │   │   ├── deferredSchema.test.ts
 │   │   │   │   │   ├── header-param.test.ts
 │   │   │   │   │   ├── renderToolContent.test.ts
 │   │   │   │   │   ├── schemaShape.test.ts

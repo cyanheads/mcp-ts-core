@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.13.22](changelog/0.13.x/0.13.22.md) — 2026-11-08 · ⚠️ Breaking · 🛡️ Security
+
+Filesystem storage keeps every valid key as written and gives every tenant its own directory, captured upstream error bodies stay off client envelopes by default, tool output fields with transforming schemas stop failing successful calls, and engines.bun rises to >=1.4.4.
+
 ## [0.13.21](changelog/0.13.x/0.13.21.md) — 2026-11-06 · 🛡️ Security
 
 Worker string bindings now reach every configuration variable that has an effect on a Worker, JWT audience and issuer included, and DEV_MCP_AUTH_BYPASS needs a non-production ENVIRONMENT. MCP_HTTP_ENDPOINT_PATH and MCP_PUBLIC_URL are normalized or refused, and the mirror, canvas, D1, and KV stores get fixes.
