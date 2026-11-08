@@ -35,6 +35,7 @@ import {
   literalTagIssue,
   type RejectedArguments,
   selectUnionBranches,
+  withoutMismeasured,
 } from './issues.js';
 import type { AliasCollision, PrevalidatedArguments } from './prevalidation.js';
 
@@ -111,7 +112,10 @@ function renderIssueMessage(issue: ArgumentIssue, absent: boolean): string {
 /**
  * The rendering {@link renderIssueMessage} reads from, stopped once it is
  * {@link RENDERED_LENGTH} characters long: the selected branches, each
- * rendered once and joined on ` or `, a branch already rendered skipped.
+ * rendered once and joined on ` or `, a branch already rendered skipped. Each
+ * branch renders without a length check Zod measured on a value of the wrong
+ * type ({@link withoutMismeasured}, #719); the selection reads every issue,
+ * as the repair's does.
  */
 function composeIssueMessage(issue: ArgumentIssue, absent: boolean): string {
   if (issue.code === 'invalid_union') {
@@ -123,7 +127,12 @@ function composeIssueMessage(issue: ArgumentIssue, absent: boolean): string {
     const rendered = new Set<string>();
     let length = 0;
     for (const branch of branches) {
-      const text = joinReadable(branch, '; ', (branchIssue) =>
+      const shown = withoutMismeasured(
+        branch,
+        (branchIssue) => branchIssue,
+        (branchIssue) => branchIssue.path,
+      );
+      const text = joinReadable(shown, '; ', (branchIssue) =>
         renderBranchIssue(branchIssue, absent),
       );
       if (rendered.has(text)) continue;
@@ -176,7 +185,7 @@ function renderBranchIssue(issue: ArgumentIssue, absent: boolean): string {
  * Renders an argument-validation failure the way the MCP SDK renders its own,
  * so the readable diagnostic — the offending key or field, and why it failed —
  * is unchanged for clients that read `content[]` text. The framework owns this
- * rejection (see `deferInputValidation`) purely so it can also carry
+ * rejection (see `deferValidation`) purely so it can also carry
  * `structuredContent.error`.
  *
  * `lines` are the rejection's {@link issueLines}, and `rejected.args` the

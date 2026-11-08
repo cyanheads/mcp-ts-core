@@ -376,7 +376,7 @@
     "rejected": {
       "content": [
         {
-          "text": "Error: Input validation error: Invalid arguments for tool contract_probe: limit: Invalid input: expected number, received string\n\nRecovery: Send limit as a number, not a string.\n\n(reason invalid_arguments · request <requestId>)",
+          "text": "Error: Input validation error: Invalid arguments for tool contract_probe: limit: Too big: expected number to be <=50\n\n(reason invalid_arguments · request <requestId>)",
           "type": "text"
         }
       ],
@@ -387,7 +387,7 @@
           "data": {
             "issues": [
               {
-                "code": "invalid_type",
+                "code": "too_big",
                 "path": [
                   "limit"
                 ]
@@ -395,11 +395,11 @@
             ],
             "reason": "invalid_arguments",
             "recovery": {
-              "hint": "Send limit as a number, not a string."
+              "hint": "limit: Too big: expected number to be <=50"
             },
             "requestId": "<requestId>"
           },
-          "message": "Input validation error: Invalid arguments for tool contract_probe: limit: Invalid input: expected number, received string"
+          "message": "Input validation error: Invalid arguments for tool contract_probe: limit: Too big: expected number to be <=50"
         }
       }
     }

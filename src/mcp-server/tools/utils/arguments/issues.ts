@@ -158,6 +158,9 @@ function failsBelowRoot(branch: readonly ArgumentIssue[]): boolean {
  *   (`z.union([z.array(Item), Item])`) that branch merely says the value is
  *   the other shape; the branch that failed inside the value is the one that
  *   says what to change. When every branch fails at its root, none is dropped.
+ *   A length check Zod measured on the value beside that `invalid_type`
+ *   ({@link withoutMismeasured}) does not count: `z.string().min(2)` refuses a
+ *   list as a type, whatever length it then reads off the list.
  */
 export function selectUnionBranches(
   branches: ReadonlyArray<readonly ArgumentIssue[]>,
@@ -171,10 +174,26 @@ export function selectUnionBranches(
     });
   }
   if (!selected.some(failsBelowRoot)) return selected;
-  return selected.filter((branch) => {
-    const only = onlyIssue(branch);
-    return !(only?.code === 'invalid_type' && only.path.length === 0);
-  });
+  return selected.filter((branch) => !refusesRootType(branch));
+}
+
+/**
+ * Whether a branch's one issue, past any length check Zod measured on the
+ * wrong type ({@link withoutMismeasured}), is a root `invalid_type`. A value
+ * refused at the root as a type is never descended into, so only a branch
+ * whose every issue sits at its root is filtered.
+ */
+function refusesRootType(branch: readonly ArgumentIssue[]): boolean {
+  const shown =
+    branch.length > 1 && !failsBelowRoot(branch)
+      ? withoutMismeasured(
+          branch,
+          (issue) => issue,
+          (issue) => issue.path,
+        )
+      : branch;
+  const only = onlyIssue(shown);
+  return only?.code === 'invalid_type' && only.path.length === 0;
 }
 
 /**
@@ -208,19 +227,25 @@ export function renderedIssues(
   prefix: readonly PropertyKey[] = [],
   leftOut?: (path: readonly PropertyKey[]) => boolean,
 ): LocatedIssue[] {
-  return issues.flatMap((issue) => {
-    const path = [...prefix, ...issue.path];
+  const located: LocatedIssue[] = [];
+  for (const issue of issues) {
+    // At the root an issue's own path is its full path, shared rather than copied.
+    const path = prefix.length === 0 ? issue.path : [...prefix, ...issue.path];
     if (issue.code === 'invalid_union') {
       const [branch, ...others] = selectUnionBranches(
         issue.errors,
         leftOut && ((at) => leftOut([...path, ...at])),
       );
       if (branch && others.length === 0 && failsBelowRoot(branch)) {
-        return withRivals(renderedIssues(branch, path, leftOut), issue.errors, path);
+        for (const entry of withRivals(renderedIssues(branch, path, leftOut), issue.errors, path)) {
+          located.push(entry);
+        }
+        continue;
       }
     }
-    return [{ issue, path }];
-  });
+    located.push({ issue, path });
+  }
+  return located;
 }
 
 /**
@@ -262,20 +287,71 @@ function withRivals(
  * that a union every branch of which failed on one literal at one path renders
  * as that literal's issue at its full path, naming every branch's value
  * ({@link literalTagIssue}) — `target.kind: Invalid option: expected one of
- * "a"|"b"`, or `Provide target.kind.` when the tag was left out. The repair
- * reads {@link renderedIssues} itself, where such a union stays one value, and
- * reads its tag there as a field holding every branch's literal (#714), as it
- * reads an unknown discriminator: `1` sent for tags `"1"` and `"2"` becomes
- * `"1"`. `rejected` tells a literal the caller left out from one it sent wrong.
+ * "a"|"b"`, or `Provide target.kind.` when the tag was left out — and that a
+ * length check Zod measured on a value of the wrong type is left out
+ * ({@link withoutMismeasured}). The repair reads {@link renderedIssues} itself,
+ * where such a union stays one value, and reads its tag there as a field
+ * holding every branch's literal (#714), as it reads an unknown discriminator:
+ * `1` sent for tags `"1"` and `"2"` becomes `"1"`. `rejected` tells a literal
+ * the caller left out from one it sent wrong.
  */
 export function issueLines(
   issues: readonly ArgumentIssue[],
   rejected: RejectedArguments,
-): LocatedIssue[] {
+): readonly LocatedIssue[] {
   const leftOut = (path: readonly PropertyKey[]) => isAbsent(argumentOf(rejected, path));
-  return renderedIssues(issues, [], leftOut).map((entry) => {
+  const lines = renderedIssues(issues, [], leftOut).map((entry) => {
     const tag = literalTagIssue(entry.issue);
     return tag ? { issue: tag, path: [...entry.path, ...tag.path] } : entry;
+  });
+  return withoutMismeasured(
+    lines,
+    (line) => line.issue,
+    (line) => line.path,
+  );
+}
+
+/** A `too_big` or `too_small`: a length, size, or range check, naming the type it measured as `origin`. */
+function isSizeIssue(
+  issue: ArgumentIssue,
+): issue is Extract<ArgumentIssue, { code: 'too_big' | 'too_small' }> {
+  return issue.code === 'too_big' || issue.code === 'too_small';
+}
+
+/** A type a size issue measured or an `invalid_type` expected, an integer read as a number. */
+function measuredType(type: string): string {
+  return type === 'int' ? 'number' : type;
+}
+
+/**
+ * `entries` without each `too_big` / `too_small` whose `origin` is no type an
+ * `invalid_type` at the same path expects (#719). Zod runs a length check on
+ * any value that has a `length`, so a string sent for `z.array(…).max(10)`
+ * also draws `Too big: expected string to have <=10 characters` — a bound the
+ * caller is not asked to meet, contradicting the wrong-type line beside it.
+ * Only the message and the hint read this: `data.issues` keeps Zod's list
+ * (#648), and the repair reads every issue. `entries` comes back as is when it
+ * holds no size issue, so a rejection without one pays a single scan.
+ */
+export function withoutMismeasured<T>(
+  entries: readonly T[],
+  issueOf: (entry: T) => ArgumentIssue,
+  pathOf: (entry: T) => readonly PropertyKey[],
+): readonly T[] {
+  if (!entries.some((entry) => isSizeIssue(issueOf(entry)))) return entries;
+  const expected = new Map<string, Set<string>>();
+  for (const entry of entries) {
+    const issue = issueOf(entry);
+    if (issue.code !== 'invalid_type') continue;
+    const at = JSON.stringify(pathOf(entry));
+    expected.set(at, (expected.get(at) ?? new Set()).add(measuredType(issue.expected)));
+  }
+  if (expected.size === 0) return entries;
+  return entries.filter((entry) => {
+    const issue = issueOf(entry);
+    if (!isSizeIssue(issue)) return true;
+    const types = expected.get(JSON.stringify(pathOf(entry)));
+    return !types || types.has(measuredType(issue.origin));
   });
 }
 

@@ -80,11 +80,32 @@ export function inputVariants(schema: unknown): readonly ZodObject<ZodRawShape>[
   return isZodObjectSchema(schema) ? [schema] : [];
 }
 
-/** The caller's value one step down, or `undefined` when nothing owns one there. */
+/**
+ * The caller's value one step down, or `undefined` when nothing owns one there.
+ *
+ * A number step into an array is checked with `in` first, which answers what
+ * `Object.hasOwn` would for an index the array does not hold, and for one it
+ * holds when its prototype is `Array.prototype` and that prototype's chain
+ * holds nothing at the index. Every other step asks `Object.hasOwn`.
+ */
 export function stepInto(value: unknown, step: PropertyKey): unknown {
+  // `in` reads a number step as an index, where `Object.hasOwn` first writes it as a string key.
+  if (typeof step === 'number' && Array.isArray(value)) {
+    if (!(step in value)) return undefined;
+    if (Object.getPrototypeOf(value) === Array.prototype && !(step in Array.prototype)) {
+      return value[step];
+    }
+  }
   return value !== null && typeof value === 'object' && Object.hasOwn(value, step)
     ? (value as Record<PropertyKey, unknown>)[step]
     : undefined;
+}
+
+/** The caller's value at `path`, each step read by {@link stepInto}. */
+export function stepAlong(value: unknown, path: readonly PropertyKey[]): unknown {
+  let at = value;
+  for (const step of path) at = stepInto(at, step);
+  return at;
 }
 
 /** The Zod 4 definition fields {@link walkTo} reads beyond `ZodDef`'s. */
@@ -197,8 +218,83 @@ export function routesThroughPipeAt(
   value: unknown,
   transforms: TransformCache = new Map(),
 ): boolean {
+  if (pipesBelow(schema) === 'none') return false;
   const piped = (node: unknown): true | undefined => routesThroughPipe(node) || undefined;
   return walkTo(schema, path, 0, value, transforms, piped, 'any') === true;
+}
+
+/**
+ * Whether every path of `schema` names the caller's own value: no transform
+ * sits anywhere below it, so {@link argumentAt} reads each path off the
+ * arguments as sent, outside any transform's output, and a repair of a value
+ * at its issue path is the one written in place.
+ */
+export function readsAsSent(schema: unknown): boolean {
+  return pipesBelow(schema) !== 'transforming';
+}
+
+/**
+ * The pipes anywhere below a schema, read once per schema: `'none'`,
+ * `'plain'` when none transforms the value its output schema receives
+ * ({@link transformsIn}), or `'transforming'`. Every schema a walk can enter
+ * is searched — wrappers, `z.lazy()`, both sides of a pipe or an
+ * intersection, union options, and what an object, record, array, or tuple
+ * holds — so a walk down any path of a schema that reaches no pipe meets
+ * none, and one that reaches no transforming pipe reads only the caller's
+ * value.
+ */
+function pipesBelow(schema: unknown): PipesBelow {
+  if (schema === null || typeof schema !== 'object') return 'none';
+  let found = schemaPipes.get(schema);
+  if (found === undefined) {
+    try {
+      found = searchPipes(schema);
+    } catch {
+      // A `z.lazy()` or shape getter that throws: walked path by path, running only the getters on it.
+      found = 'transforming';
+    }
+    schemaPipes.set(schema, found);
+  }
+  return found;
+}
+
+/** What {@link pipesBelow} finds. */
+type PipesBelow = 'none' | 'plain' | 'transforming';
+
+/** What {@link pipesBelow} found for each schema it searched; a schema never changes once built. */
+const schemaPipes = new WeakMap<object, PipesBelow>();
+
+/** {@link pipesBelow}, searched: each schema reachable from `schema` visited once. */
+function searchPipes(schema: object): PipesBelow {
+  let found: PipesBelow = 'none';
+  const seen = new Set<unknown>();
+  const pending: unknown[] = [schema];
+  while (pending.length > 0) {
+    const node = pending.pop();
+    const def = zodDef(node) as WalkedDef | undefined;
+    if (!def || seen.has(node)) continue;
+    seen.add(node);
+    if (def.type === 'pipe') {
+      if (transformsIn(def.in)) return 'transforming';
+      found = 'plain';
+    }
+    if (def.type === 'lazy') pending.push(lazyInner(node));
+    pending.push(
+      def.in,
+      def.out,
+      def.innerType,
+      def.left,
+      def.right,
+      def.catchall,
+      def.element,
+      def.valueType,
+      def.rest,
+      ...(def.options ?? []),
+      ...(def.items ?? []),
+      ...Object.values(def.shape ?? {}),
+    );
+  }
+  return found;
 }
 
 /**
@@ -221,8 +317,11 @@ export function argumentAt(
   value: unknown,
   transforms: TransformCache = new Map(),
 ): ArgumentAt {
+  if (readsAsSent(schema)) {
+    const at = stepAlong(value, path);
+    return { known: true, received: at, sent: at, sites: NO_SITES, transformed: false, value: at };
+  }
   // Only a walk trying one union option comes back unresolved; this one reads on in the value.
-  const walks: Walks = new Map();
   const at = walkArgument(
     schema,
     path,
@@ -231,12 +330,9 @@ export function argumentAt(
     undefined,
     false,
     transforms,
-    walks,
+    undefined,
   ) as WalkedArgument;
-  const sent =
-    at.transformed || at.sites.length === 0
-      ? at.value
-      : path.reduce<unknown>((current, step) => stepInto(current, step), value);
+  const sent = at.transformed || at.sites.length === 0 ? at.value : stepAlong(value, path);
   return { ...at, sent };
 }
 
@@ -249,10 +345,14 @@ interface SiteList {
   readonly site: TransformSite;
 }
 
+/** No transform above a path: what {@link siteArray} gives for an empty list, shared. */
+const NO_SITES: readonly TransformSite[] = Object.freeze([]);
+
 /** The sites of a {@link SiteList}, outermost first. */
-function siteArray(list: SiteList | undefined): TransformSite[] {
+function siteArray(list: SiteList | undefined): readonly TransformSite[] {
+  if (!list) return NO_SITES;
   const sites: TransformSite[] = [];
-  for (let entry = list; entry; entry = entry.outer) sites.push(entry.site);
+  for (let entry: SiteList | undefined = list; entry; entry = entry.outer) sites.push(entry.site);
   return sites.reverse();
 }
 
@@ -281,7 +381,7 @@ function walkArgument(
   sites: SiteList | undefined,
   strict: boolean,
   transforms: TransformCache,
-  walks: Walks,
+  walks: Walks | undefined,
 ): WalkedArgument | undefined {
   let node = schema;
   let current = value;
@@ -356,6 +456,25 @@ function walkArgument(
  * element's or property's own, not the field's.
  */
 export function routesThroughPipe(schema: unknown): boolean {
+  if (schema === null || typeof schema !== 'object') return false;
+  let routes = routingSchemas.get(schema);
+  if (routes === undefined) {
+    routes = routesThroughPipeUncached(schema);
+    routingSchemas.set(schema, routes);
+  }
+  return routes;
+}
+
+/**
+ * What {@link routesThroughPipe} found for each schema it was asked about. A
+ * schema's definition, a `z.lazy()` getter's result included, never changes
+ * once built, so neither does the answer; a repair asks it of one field per
+ * value it reads as another type.
+ */
+const routingSchemas = new WeakMap<object, boolean>();
+
+/** {@link routesThroughPipe}, worked out. */
+function routesThroughPipeUncached(schema: object): boolean {
   const seen = new Set<unknown>();
   const piped = (node: unknown): boolean => {
     const def = zodDef(node) as WalkedDef | undefined;
@@ -401,7 +520,7 @@ function walkTo<T>(
   transforms: TransformCache,
   found: (node: unknown) => T | undefined,
   readings: 'any' | 'one' = 'one',
-  walks: Walks = new Map(),
+  walks?: Walks,
 ): T | undefined {
   const def = zodDef(schema) as WalkedDef | undefined;
   if (!def) return undefined;
@@ -422,6 +541,8 @@ function walkTo<T>(
   }
   if (def.innerType !== undefined) return on(def.innerType, index, value);
   if (def.type === 'union' || (def.type === 'intersection' && readings === 'any')) {
+    // Made at the first union or intersection, so every walk below one shares it.
+    walks ??= new Map();
     const walked = walkedAt(walks, [def, index]);
     if (walked.has(value)) return walked.get(value) as T | undefined;
     let result: T | undefined;
@@ -541,7 +662,7 @@ function unionThrough(
   value: unknown,
   sites: SiteList | undefined,
   transforms: TransformCache,
-  walks: Walks,
+  walks: Walks = new Map(),
 ): WalkedArgument | undefined {
   const walked = walkedAt(walks, [def, index, sites]);
   if (walked.has(value)) return walked.get(value) as WalkedArgument | undefined;

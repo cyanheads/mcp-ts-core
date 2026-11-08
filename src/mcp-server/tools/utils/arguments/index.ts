@@ -56,12 +56,15 @@
  * one in the hint (#639), since an unknown or dropped key would send the caller
  * looking for a typo. Its issues come from a parse with only the repairs that
  * held applied (#706), so a value the schema accepted once repaired is not
- * reported and one it refused is reported as sent — unless that parse
- * validates, which only a union or a cross-field refinement allows, and the
- * first parse is reported instead; the rejection itself never mentions a
- * repair. A value that held only written in place below a transform that
- * reorders or rewrites it is reported as sent too: the issues name positions in
- * the transform's output, where a repair written in place is not.
+ * reported, one that still fails only a size or range check of its own is
+ * reported by that check (#745), and one it otherwise refused is reported as
+ * sent — unless that parse validates, which only a union or a cross-field
+ * refinement allows, and the first parse is reported instead; the rejection
+ * itself never mentions a repair. A value that held only written in place below
+ * a transform that reorders or rewrites it is reported as sent too: the issues
+ * name positions in the transform's output, where a repair written in place is
+ * not. Its message and hint leave out a length check Zod ran on a value of the
+ * wrong type (#719); `data.issues` keeps it.
  *
  * The split between log and counter is deliberate, and lives in `telemetry.ts`.
  * Counter attributes are bounded and author- or framework-defined — the

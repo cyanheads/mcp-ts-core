@@ -7,6 +7,8 @@
  * path's object and value through the same walk, transforms re-applied.
  * @module tests/unit/mcp-server/tools/utils/schemaShape.test
  */
+import { runInNewContext } from 'node:vm';
+
 import { describe, expect, it } from 'vitest';
 import { z } from 'zod';
 
@@ -51,8 +53,10 @@ describe('isDiscriminatedUnionSchema', () => {
   });
 
   it('false for a plain z.union() — Zod tags both as `union`', () => {
-    // The discriminator string is the only thing separating them, and a bare
-    // union gives the model no key to choose a branch by.
+    /**
+     * The discriminator string is the only thing separating them, and a bare
+     * union gives the model no key to choose a branch by.
+     */
     expect(isDiscriminatedUnionSchema(z.union([byId, byName]))).toBe(false);
   });
 
@@ -98,6 +102,103 @@ describe('stepInto', () => {
     ['a step into null', null, 'a'],
   ])('reads nothing for %s', (_label, value, step) => {
     expect(stepInto(value, step)).toBeUndefined();
+  });
+
+  describe('an own property only, whatever holds the value', () => {
+    const wide = Array.from({ length: 20 }, (_, i) => `e${i}`);
+    /** Holes at 1 through 11. */
+    const holed: unknown[] = ['a'];
+    holed[12] = 'm';
+    /** Own keys an array index never names. */
+    const keyed = Object.assign(['a'], {
+      '1.5': 'fraction',
+      '-1': 'negative',
+      NaN: 'nan',
+      Infinity: 'infinity',
+      '4294967295': 'past the last index',
+    });
+    const accessor: unknown[] = [];
+    Object.defineProperty(accessor, 11, { enumerable: true, get: () => 'got' });
+    class Shelf extends Array<unknown> {}
+    Object.defineProperty(Shelf.prototype, 11, { value: 'inherited' });
+    const shelf = Shelf.from(['own']);
+    const adopted = Object.setPrototypeOf(['own'], ['inherited', 'inherited']) as unknown[];
+    const orphan = Object.setPrototypeOf(['own'], null) as unknown[];
+    const foreign = runInNewContext('["own"]') as unknown[];
+    const foreignInherited = runInNewContext(
+      'Array.prototype[11] = "inherited"; ["own"]',
+    ) as unknown[];
+    const tag = Symbol('tag');
+
+    it.each([
+      ['an element past index 9', wide, 15, 'e15'],
+      ['an index past the end', wide, 20, undefined],
+      ['a hole', holed, 5, undefined],
+      ['the element past the holes', holed, 12, 'm'],
+      ['an own non-index key named by a fraction', keyed, 1.5, 'fraction'],
+      ['an own key named by a negative number', keyed, -1, 'negative'],
+      ['an own key named by NaN', keyed, Number.NaN, 'nan'],
+      ['an own key named by Infinity', keyed, Number.POSITIVE_INFINITY, 'infinity'],
+      ['an own key past the last array index', keyed, 4_294_967_295, 'past the last index'],
+      ['-0 as index 0', keyed, -0, 'a'],
+      ['a fraction no key names', wide, 1.5, undefined],
+      ['a negative number no key names', wide, -1, undefined],
+      ['an own accessor element', accessor, 11, 'got'],
+      ['a subclassed array’s own element', shelf, 0, 'own'],
+      ['an index only a subclass prototype holds', shelf, 11, undefined],
+      ['an index only a custom prototype holds', adopted, 1, undefined],
+      ['an own element of a null-prototype array', orphan, 0, 'own'],
+      ['a missing index of a null-prototype array', orphan, 3, undefined],
+      ['an own element of another realm’s array', foreign, 0, 'own'],
+      ['an index only another realm’s Array.prototype holds', foreignInherited, 11, undefined],
+      ['an own element of a frozen array', Object.freeze(['own']), 0, 'own'],
+      ['an own element through a forwarding proxy', new Proxy(['own'], {}), 0, 'own'],
+      ['a missing index through a forwarding proxy', new Proxy(['own'], {}), 1, undefined],
+      ['a typed array element', new Uint8Array([7, 8]), 1, 8],
+      ['a typed array index past the end', new Uint8Array([7, 8]), 5, undefined],
+      ['an array element named by a string', wide, '3', 'e3'],
+      ['an array’s length', wide, 'length', 20],
+      ['an array’s own symbol key', Object.assign([], { [tag]: 'symbol' }), tag, 'symbol'],
+      ['a function’s own property', Object.assign(() => 0, { a: 1 }), 'a', undefined],
+      ['a step into undefined', undefined, 0, undefined],
+    ])('reads %s', (_label, value, step, expected) => {
+      expect(stepInto(value, step)).toBe(expected);
+    });
+
+    it('reads an accessor element through its getter once', () => {
+      let reads = 0;
+      const counted: unknown[] = [];
+      Object.defineProperty(counted, 0, {
+        get: () => {
+          reads++;
+          return 'got';
+        },
+      });
+
+      expect(stepInto(counted, 0)).toBe('got');
+      expect(reads).toBe(1);
+    });
+
+    it('reads an own element, never an index Array.prototype or Object.prototype holds', () => {
+      Object.defineProperty(Array.prototype, 14, { configurable: true, value: 'array' });
+      Object.defineProperty(Object.prototype, 15, { configurable: true, value: 'object' });
+      let read: unknown[];
+      try {
+        read = [
+          stepInto(wide, 14),
+          stepInto(wide, 15),
+          stepInto(['own'], 14),
+          stepInto(['own'], 15),
+          stepInto(holed, 14),
+          stepInto({}, 15),
+        ];
+      } finally {
+        Reflect.deleteProperty(Array.prototype, 14);
+        Reflect.deleteProperty(Object.prototype, 15);
+      }
+
+      expect(read).toEqual(['e14', 'e15', undefined, undefined, undefined, undefined]);
+    });
   });
 });
 
@@ -420,6 +521,86 @@ describe('argumentAt (#599)', () => {
     expect(runs).toBe(1);
   });
 
+  describe('over a schema with no transform below it', () => {
+    const Node: z.ZodType = z.lazy(() =>
+      z.union([
+        z.object({ kind: z.literal('leaf'), v: z.string() }),
+        z.object({ kind: z.literal('list'), items: z.array(Node) }),
+      ]),
+    );
+    const fields = z.object({
+      tagged: union.optional(),
+      nodes: Node.optional(),
+      open: z.object({ a: z.string() }).catchall(z.number()).optional(),
+      record: z.record(z.string(), z.array(z.number())).optional(),
+      pair: z.tuple([z.string(), z.number()]).optional(),
+      both: z.intersection(z.object({ a: z.string() }), z.object({ b: z.number() })).optional(),
+      checked: z.string().pipe(z.string().min(2)).optional(),
+      measured: z
+        .string()
+        .transform((text) => text.length)
+        .optional(),
+    });
+    /** The same fields beside a transform, so every read of a path walks the schema. */
+    const walked = fields.extend({ wrapped: z.preprocess(String, z.string()).optional() });
+
+    it.each([
+      ['a discriminated variant’s field', { tagged: { mode: 'byId', id: 7 } }, ['tagged', 'id'], 7],
+      [
+        'a field beside a tag no variant takes',
+        { tagged: { mode: 'x', id: 7 } },
+        ['tagged', 'id'],
+        7,
+      ],
+      [
+        'a field two levels into a recursive union',
+        { nodes: { kind: 'list', items: [{ kind: 'list', items: [{ kind: 'leaf', v: 3 }] }] } },
+        ['nodes', 'items', 0, 'items', 0, 'v'],
+        3,
+      ],
+      ['a key a catchall types', { open: { a: 'x', extra: 'y' } }, ['open', 'extra'], 'y'],
+      ['a record entry’s element', { record: { k: [1, 'two'] } }, ['record', 'k', 1], 'two'],
+      ['a tuple item', { pair: ['a', 'b'] }, ['pair', 1], 'b'],
+      ['one side of an intersection', { both: { a: 1, b: 'x' } }, ['both', 'b'], 'x'],
+      ['a field a plain pipe checks', { checked: 5 }, ['checked'], 5],
+      ['a field a transform reads after its type', { measured: 5 }, ['measured'], 5],
+      ['a key no object declares', { nowhere: { deep: 1 } }, ['nowhere', 'deep'], 1],
+      [
+        'a path past a value of the wrong shape',
+        { nodes: 'text' },
+        ['nodes', 'items', 0],
+        undefined,
+      ],
+      ['a path into a value left out', {}, ['nodes', 'items', 0], undefined],
+    ])('reads %s as the caller sent it, walked or not', (_label, args, path, value) => {
+      const read = {
+        known: true,
+        received: value,
+        sent: value,
+        sites: [],
+        transformed: false,
+        value,
+      };
+
+      expect(argumentAt(fields, path, args)).toEqual(read);
+      expect(argumentAt(walked, path, args)).toEqual(read);
+    });
+
+    it('reads a path beside a z.lazy() whose getter throws', () => {
+      const unbuilt = z.object({
+        a: z.string(),
+        later: z
+          .lazy((): z.ZodString => {
+            throw new Error('Not built yet.');
+          })
+          .optional(),
+      });
+
+      expect(argumentAt(unbuilt, ['a'], { a: 5 })).toMatchObject({ known: true, value: 5 });
+      expect(routesThroughPipeAt(unbuilt, ['a'], { a: 5 })).toBe(false);
+    });
+  });
+
   describe('through a union at every level of a recursive schema', () => {
     /** A filter tree whose every level is a discriminated union, as a recursive query input is. */
     const Filter: z.ZodType = z.lazy(() =>
@@ -428,7 +609,11 @@ describe('argumentAt (#599)', () => {
         z.object({ type: z.literal('not'), filter: Filter }),
       ]),
     );
-    const tree = z.object({ where: Filter });
+    /**
+     * The preprocess beside the filter keeps every read on the walk: a schema
+     * with no transform below it is read off the arguments alone.
+     */
+    const tree = z.object({ where: Filter, note: z.preprocess(String, z.string()).optional() });
     /** `depth` levels of `not` above a leaf, and the path to the leaf's value. */
     const nested = (depth: number) => {
       let where: Record<string, unknown> = { type: 'leaf', value: 5 };
@@ -470,8 +655,10 @@ describe('argumentAt (#599)', () => {
       const shallow = walkCost(125);
       const deep = walkCost(deepest);
 
-      // Each side walks 2,000 levels in all: linear is ~1×, a re-walk of the
-      // rest of the path at every union ~16×.
+      /**
+       * Each side walks 2,000 levels in all: linear is ~1×, a re-walk of the
+       * rest of the path at every union ~16×.
+       */
       expect(deep / shallow).toBeLessThan(4);
       // Under a few ms on Bun and Node; re-walking at every union took ~0.5 s.
       expect(deep).toBeLessThan(100);
@@ -486,7 +673,11 @@ describe('argumentAt (#599)', () => {
         z.object({ all: z.array(Clause), w: z.number() }),
       ]),
     );
-    const tree = z.object({ where: Clause });
+    /**
+     * The preprocess beside the clauses keeps every read on the walk: a schema
+     * with no pipe below it is read off the arguments alone.
+     */
+    const tree = z.object({ where: Clause, note: z.preprocess(String, z.string()).optional() });
     /** `depth` levels of `all` above a leaf, and the path to the leaf's `v`. */
     const nested = (depth: number) => {
       let where: Record<string, unknown> = { v: 'ab' };
@@ -546,8 +737,10 @@ describe('argumentAt (#599)', () => {
         return cpuMs(walkAll);
       };
 
-      // Each side walks 200 levels in all: linear is ~1×, a re-walk of the
-      // path from the root at every step ~8×.
+      /**
+       * Each side walks 200 levels in all: linear is ~1×, a re-walk of the
+       * path from the root at every step ~8×.
+       */
       expect(walkCost(deepest) / walkCost(25)).toBeLessThan(4);
     });
   });

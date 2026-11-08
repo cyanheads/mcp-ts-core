@@ -12,7 +12,7 @@ import {
   argumentAt,
   objectSchemaAt,
   routesThroughPipeAt,
-  stepInto,
+  stepAlong,
   type TransformCache,
   type TransformSite,
 } from '../schemaShape.js';
@@ -70,6 +70,23 @@ export type Repair = (
   readonly within?: readonly TransformSite[];
 };
 
+/** The repair {@link repairAsSent} made: the arguments it wrote, and its repairs and their kinds. */
+export interface OriginalRepair {
+  readonly args: unknown;
+  /**
+   * Whether {@link repairRepresentations}, given the same issues as the
+   * rejection renders them, makes exactly these repairs wherever the schema
+   * reads every value as sent ({@link readsAsSent}): no issue is a union's,
+   * which the rendering reads below its own path; no value an issue names is
+   * `null` or a string that is no JSON text, the values only the substitution
+   * repairs; and no two repairs share a path. The substitution is then this
+   * repair itself.
+   */
+  readonly exhaustive: boolean;
+  readonly kinds: readonly CoercionKind[];
+  readonly repairs: readonly Repair[];
+}
+
 /** What {@link repairRepresentations} produced. */
 export interface RepairedArguments {
   /** The repaired arguments — the input itself when nothing was repairable. */
@@ -84,7 +101,11 @@ export interface RepairedArguments {
   readonly inPlace?: { readonly args: unknown; readonly kinds: readonly CoercionKind[] };
   /** Each kind that fired at least once, in {@link COERCION_KINDS} order. */
   readonly kinds: readonly CoercionKind[];
-  /** Every repair {@link RepairedArguments.args} carries, one per path, in issue order. */
+  /**
+   * Every repair {@link RepairedArguments.args} was written from, one per path,
+   * in issue order — one below another included, which the write leaves to the
+   * one above it ({@link applyRepairs}).
+   */
   readonly repairs: readonly Repair[];
   /**
    * The arguments without the original repairs `args` adds beside the
@@ -213,8 +234,11 @@ export interface RepairedArguments {
  * Every value is read beside the caller's arguments, each transform at most
  * once per value through `transforms`, and the repairs found are written in
  * one {@link applyRepairs} pass per placement, so the work is linear in the
- * issues however many values one array holds. They come back as `repairs`,
- * one per path.
+ * issues however many values one array holds, a small multiple of the parse of
+ * the same arguments. They come back as `repairs`, one per path. When they are
+ * the original repairs one for one — every value the rendered issues name is
+ * one Zod's own issues name, and takes the same repair there — the
+ * substitution is `original` itself, written once.
  *
  * `args` is the argument itself when nothing was repairable, which is the
  * signal the caller uses to skip the second parse.
@@ -224,30 +248,32 @@ export function repairRepresentations(
   issues: readonly LocatedIssue[],
   input: ToolInputSchema,
   transforms: TransformCache,
-  original: readonly Repair[] = [],
+  original?: OriginalRepair,
 ): RepairedArguments {
   let repairs: Repair[] = [];
   let inPlace: Repair[] = [];
-  const claimed = new Set<string>();
-  const placed = new Set<string>();
+  const marks: PathMark = {};
   const strayed: Stray[] = [];
+  const originals = original?.repairs ?? [];
+  /** How many of `originals`, in order, a read here took up as its own repair. */
+  let matched = 0;
   for (const { issue, path, tag } of valueReads(issues)) {
     if (path.length === 0) continue;
-    const key = JSON.stringify(path);
-    if (claimed.has(key) && placed.has(key)) continue;
+    const mark = markAt(marks, path);
+    if (mark.claimed && mark.placed) continue;
     const at = argumentAt(input, path, args, transforms);
     if (at.known && at.sites.length === 0) {
       // The path names the caller's own value, so both placements are one.
-      placed.add(key);
-    } else if (!placed.has(key)) {
-      const repair = inPlaceRepair(args, path, issue);
+      mark.placed = true;
+    } else if (!mark.placed) {
+      const repair = inPlaceRepair(stepAlong(args, path), path, issue);
       if (repair) {
         inPlace.push(repair);
-        placed.add(key);
+        mark.placed = true;
       }
     }
-    if (claimed.has(key) || !at.known) continue;
-    const within = at.sites.length > 0 ? { within: at.sites } : {};
+    if (mark.claimed || !at.known) continue;
+    const within = at.sites.length > 0 ? { within: at.sites } : undefined;
     const sent = at.value;
     if (sent === null) {
       if (!unsetAt(input, args, path, transforms)) continue;
@@ -258,10 +284,17 @@ export function repairRepresentations(
       if (READS_A_STRING.has(repair.kind) && routesThroughPipeAt(input, path, args, transforms)) {
         continue;
       }
-      repairs.push({ kind: repair.kind, path, sent, value: repair.value, ...within });
+      // The next original repair, where this one is it: the same kind and value at Zod's own issue path.
+      const next = originals[matched];
+      if (!within && next && sameWrite(next, path, repair)) {
+        repairs.push(next);
+        matched++;
+      } else {
+        repairs.push({ kind: repair.kind, path, sent, value: repair.value, ...within });
+      }
       if (tag && selectsRival(tag, repair.value)) strayed.push({ at: tag.at, path });
     }
-    claimed.add(key);
+    mark.claimed = true;
   }
   if (strayed.length > 0) {
     const leftBehind = belowStrayedBranch(strayed);
@@ -269,23 +302,51 @@ export function repairRepresentations(
     inPlace = inPlace.filter((repair) => !leftBehind(repair.path));
   }
   const rendered = repairs;
-  repairs = withOriginal(repairs, original, claimed, (path) => {
-    const at = argumentAt(input, path, args, transforms);
-    return at.known && at.sites.length === 0;
-  });
-  const repaired = repairs.length === 0 ? args : applyRepairs(args, repairs);
+  // A read here took up every original repair, so none is left for the rendered issues to lack.
+  if (matched < originals.length) {
+    repairs = withOriginal(repairs, originals, marks, (path) => {
+      const at = argumentAt(input, path, args, transforms);
+      return at.known && at.sites.length === 0;
+    });
+  }
   const result: RepairedArguments = {
-    args: repaired,
-    kinds: kindsOf(repairs),
-    repairs,
+    ...(original && sameRepairs(repairs, original.repairs)
+      ? original
+      : {
+          args: repairs.length === 0 ? args : applyRepairs(args, repairs),
+          kinds: kindsOf(repairs),
+          repairs,
+        }),
     ...unaidedBy(args, rendered, repairs),
   };
   if (inPlace.length === 0) return result;
-  const placedRepairs = [...repairs.filter(({ within }) => !within), ...inPlace];
+  const placedRepairs = [...result.repairs.filter(({ within }) => !within), ...inPlace];
   const writtenInPlace = applyRepairs(args, placedRepairs);
   // Where the transform leaves every value at its own position, both placements are one parse.
-  if (sameValue(writtenInPlace, repaired)) return result;
+  if (sameValue(writtenInPlace, result.args)) return result;
   return { ...result, inPlace: { args: writtenInPlace, kinds: kindsOf(placedRepairs) } };
+}
+
+/** Whether `repairs` are `original`'s, repair for repair. */
+function sameRepairs(repairs: readonly Repair[], original: readonly Repair[]): boolean {
+  return (
+    repairs.length === original.length &&
+    repairs.every((repair, index) => repair === original[index])
+  );
+}
+
+/**
+ * Whether an original repair ({@link repairAsSent}) writes what `repair` would
+ * at `path`: the same kind and value at the same issue path. Such a read takes
+ * the original repair up as its own.
+ */
+function sameWrite(original: Repair, path: readonly PropertyKey[], repair: ValueRepair): boolean {
+  return (
+    original.path === path &&
+    original.kind === repair.kind &&
+    'value' in original &&
+    Object.is(original.value, repair.value)
+  );
 }
 
 /**
@@ -302,11 +363,11 @@ export function repairRepresentations(
 function withOriginal(
   repairs: Repair[],
   original: readonly Repair[],
-  claimed: ReadonlySet<string>,
+  marks: PathMark,
   own: (path: readonly PropertyKey[]) => boolean,
 ): Repair[] {
   const added = original.filter(
-    (repair) => !claimed.has(JSON.stringify(repair.path)) && own(repair.path),
+    (repair) => !markedAt(marks, repair.path)?.claimed && own(repair.path),
   );
   if (added.length === 0) return repairs;
   interface Node {
@@ -393,19 +454,92 @@ interface Stray {
  * left whole at which every branch listed the values it takes
  * ({@link everyBranchRefuses}).
  */
-function* valueReads(issues: readonly LocatedIssue[]): Generator<ValueRead> {
+function valueReads(issues: readonly LocatedIssue[]): ValueRead[] {
+  const reads: ValueRead[] = [];
   for (const entry of issues) {
-    const read = unmatchedDiscriminator(entry.issue) ?? entry.issue;
+    const discriminator = unmatchedDiscriminator(entry.issue);
+    const read = discriminator ?? entry.issue;
     const { path, rivals } = entry;
     if (rivals) {
       // Each rival's path is branch-relative, so the union sits that many steps up.
       const at = path.slice(0, path.length - (rivals[0]?.path.length ?? 0));
-      yield { issue: asUnionIssue(read, rivals), path, tag: { at, own: read, rivals } };
+      reads.push({ issue: asUnionIssue(read, rivals), path, tag: { at, own: read, rivals } });
     } else {
-      yield { issue: read, path };
+      reads.push(discriminator ? { issue: read, path } : entry);
     }
-    yield* everyBranchRefuses(entry);
+    if (entry.issue.code === 'invalid_union') everyBranchRefuses(entry, reads);
   }
+  return reads;
+}
+
+/**
+ * A trie node's children, by path step: a step that is an array index in a
+ * plain array, the index a repair inside a list most often takes, and any
+ * other step in a `Map`, each compared as itself.
+ */
+interface StepChildren<T> {
+  elements?: T[];
+  named?: Map<PropertyKey, T>;
+}
+
+/** The highest array index: `2 ** 32 - 2`. */
+const MAX_ARRAY_INDEX = 4_294_967_294;
+
+/** Whether a step is an array index, which {@link StepChildren} keeps in `elements`. */
+function isArrayIndex(step: PropertyKey): step is number {
+  return typeof step === 'number' && Number.isInteger(step) && step >= 0 && step <= MAX_ARRAY_INDEX;
+}
+
+/** The child at `step`, or `undefined` when none was made. */
+function childAt<T>(node: StepChildren<T>, step: PropertyKey): T | undefined {
+  return isArrayIndex(step) ? node.elements?.[step] : node.named?.get(step);
+}
+
+/** Sets the child at `step`. */
+function setChildAt<T>(node: StepChildren<T>, step: PropertyKey, child: T): void {
+  if (isArrayIndex(step)) {
+    node.elements ??= [];
+    node.elements[step] = child;
+  } else {
+    node.named ??= new Map();
+    node.named.set(step, child);
+  }
+}
+
+/**
+ * The marks {@link repairRepresentations} sets on the paths it reads, one node
+ * per path step. A step is compared as itself, so two paths share a node
+ * exactly when `JSON.stringify` writes them alike: `0` and `"0"` stay apart.
+ */
+interface PathMark extends StepChildren<PathMark> {
+  /** A repair was found at this path. */
+  claimed?: true;
+  /** This path's in-place placement is settled. */
+  placed?: true;
+}
+
+/** The mark at `path` below `root`, made on first use. */
+function markAt(root: PathMark, path: readonly PropertyKey[]): PathMark {
+  let node = root;
+  for (const step of path) {
+    let next = childAt(node, step);
+    if (!next) {
+      next = {};
+      setChildAt(node, step, next);
+    }
+    node = next;
+  }
+  return node;
+}
+
+/** The mark at `path` below `root`, or `undefined` when none was made. */
+function markedAt(root: PathMark, path: readonly PropertyKey[]): PathMark | undefined {
+  let node: PathMark | undefined = root;
+  for (const step of path) {
+    node = childAt(node, step);
+    if (!node) return;
+  }
+  return node;
 }
 
 /**
@@ -485,9 +619,9 @@ function unmatchedDiscriminator(issue: ArgumentIssue): ArgumentIssue | undefined
  * Each branch's values are mapped by path once, and a candidate is looked up
  * in the other branches' maps: scanning them for it instead costs the square
  * of the issues on a union whose branches each report many values at paths
- * the others lack.
+ * the others lack. The reads are added to `reads`.
  */
-function* everyBranchRefuses({ issue, path }: LocatedIssue): Generator<ValueRead> {
+function everyBranchRefuses({ issue, path }: LocatedIssue, reads: ValueRead[]): void {
   if (issue.code !== 'invalid_union') return;
   const [first, ...others] = issue.errors.map((branch) => {
     const byPath = new Map<string, ArgumentIssue>();
@@ -504,14 +638,15 @@ function* everyBranchRefuses({ issue, path }: LocatedIssue): Generator<ValueRead
   for (const [at, listed] of first) {
     const rivals = others.map((branch) => branch.get(at));
     if (rivals.every((rival): rival is ArgumentIssue => rival !== undefined)) {
-      yield { issue: asUnionIssue(listed, rivals), path: [...path, ...listed.path] };
+      reads.push({ issue: asUnionIssue(listed, rivals), path: [...path, ...listed.path] });
     }
   }
 }
 
 /** Each kind `repairs` holds, in {@link COERCION_KINDS} order. */
 function kindsOf(repairs: readonly Repair[]): readonly CoercionKind[] {
-  const fired = new Set(repairs.map((repair) => repair.kind));
+  const fired = new Set<CoercionKind>();
+  for (const { kind } of repairs) fired.add(kind);
   return (Object.keys(COERCION_KINDS) as CoercionKind[]).filter((kind) => fired.has(kind));
 }
 
@@ -523,18 +658,19 @@ const IN_PLACE_KINDS: ReadonlySet<CoercionKind> = new Set([
 ]);
 
 /**
- * The repair the value at `path` in the arguments as sent takes, written back
- * at that same path — for a path below a transform, whose issue names a value
- * in the transform's output, the value read can be another one or none at
- * all. Only {@link IN_PLACE_KINDS}: each reads nothing but the value and the
- * issue, so it needs no schema at a path the arguments as sent do not follow.
+ * The repair of `sent`, the value the arguments as sent hold at `path`,
+ * written back at that same path. Below a transform, whose issue names a value
+ * in the transform's output, `sent` can be another value or none at all. Only
+ * {@link IN_PLACE_KINDS}: each reads nothing but the value and the issue, so
+ * it needs no schema at a path the arguments as sent do not follow.
  */
 function inPlaceRepair(
-  args: unknown,
+  sent: unknown,
   path: readonly PropertyKey[],
   issue: ArgumentIssue,
 ): Repair | undefined {
-  const sent = path.reduce<unknown>((value, step) => stepInto(value, step), args);
+  // Only a number or JSON text takes one of those kinds; any other value's repair is never kept.
+  if (typeof sent !== 'number' && !(typeof sent === 'string' && opensJson(sent.trim()))) return;
   const repair = repairValue(sent, issue);
   if (!repair || !IN_PLACE_KINDS.has(repair.kind)) return;
   return { kind: repair.kind, path, sent, value: repair.value };
@@ -551,25 +687,32 @@ function inPlaceRepair(
  * so a stringified list for a field whose other branch splits or wraps a
  * string parses back into the list, as that reading gave it. `undefined` when
  * nothing repairs.
+ *
+ * It also says whether these are the repairs {@link repairRepresentations}
+ * would make of the same issues over a schema that reads them as sent
+ * ({@link readsAsSent}), as {@link OriginalRepair.exhaustive}.
  */
 export function repairAsSent(
   args: unknown,
   issues: readonly ArgumentIssue[],
-):
-  | {
-      readonly args: unknown;
-      readonly kinds: readonly CoercionKind[];
-      readonly repairs: readonly Repair[];
-    }
-  | undefined {
+): OriginalRepair | undefined {
   const repairs: Repair[] = [];
+  let exhaustive = true;
   for (const issue of issues) {
+    // A union is read below its own path, beside the value it rejected.
+    if (issue.code === 'invalid_union') exhaustive = false;
     if (issue.path.length === 0) continue;
-    const repair = inPlaceRepair(args, issue.path, issue);
+    const sent = stepAlong(args, issue.path);
+    // `null`, and a string that is no JSON text, take a kind only the substitution makes.
+    if (sent === null || (typeof sent === 'string' && !opensJson(sent.trim()))) exhaustive = false;
+    const repair = inPlaceRepair(sent, issue.path, issue);
     if (repair) repairs.push(repair);
   }
   if (repairs.length === 0) return;
-  return { args: applyRepairs(args, repairs), kinds: kindsOf(repairs), repairs };
+  const written = applyRepairs(args, repairs);
+  // The substitution makes one repair per path, so two at one path are not its repairs.
+  if (repairTree(repairs).sharedPath) exhaustive = false;
+  return { args: written, exhaustive, kinds: kindsOf(repairs), repairs };
 }
 
 /**
@@ -604,8 +747,10 @@ function unsetAt(
   const shape = objectSchemaAt(input, path.slice(0, -1), args, transforms)?.shape;
   if (!shape || !Object.hasOwn(shape, key)) return false;
   const field = shape[key] as ZodType;
-  // An author check or transform that throws on `undefined` throws for the
-  // omitted key too; here it only means the `null` keeps its rejection.
+  /**
+   * An author check or transform that throws on `undefined` throws for the
+   * omitted key too; here it only means the `null` keeps its rejection.
+   */
   try {
     return !field.safeParse(null).success && field.safeParse(undefined).success;
   } catch {
@@ -649,14 +794,12 @@ function repairValue(value: unknown, issue: ArgumentIssue): ValueRepair | undefi
   }
   if (typeof value !== 'string') return undefined;
   const trimmed = value.trim();
-  const kind = trimmed.startsWith('[')
-    ? 'stringified_array'
-    : trimmed.startsWith('{')
-      ? 'stringified_object'
-      : undefined;
-  if (kind) {
+  if (opensJson(trimmed)) {
     try {
-      return { kind, value: JSON.parse(trimmed) };
+      return {
+        kind: trimmed.startsWith('[') ? 'stringified_array' : 'stringified_object',
+        value: JSON.parse(trimmed),
+      };
     } catch {
       return undefined;
     }
@@ -669,6 +812,11 @@ function repairValue(value: unknown, issue: ArgumentIssue): ValueRepair | undefi
 
 /** A repair that replaces a value — every kind but `null_as_absent`'s deletion. */
 type ValueRepair = Pick<Extract<Repair, { value: unknown }>, 'kind' | 'value'>;
+
+/** Whether a trimmed string opens a JSON array or object, the only way {@link repairValue} reads one that does. */
+function opensJson(trimmed: string): boolean {
+  return trimmed.startsWith('[') || trimmed.startsWith('{');
+}
 
 /**
  * Whether a string sent where an array was expected is its one element, as
@@ -710,8 +858,17 @@ function scalarFromString(
   return undefined;
 }
 
-/** What {@link scalarTypesAt} returns for an issue that takes a string some way. */
-const NO_SCALARS: ReadonlySet<NonStringScalar> = new Set();
+/**
+ * Each set {@link scalarTypesAt} returns, by the flags it is built from — 1
+ * for `number`, 2 for `boolean` — shared, since a repair asks once per value.
+ * `0` is what an issue that takes a string some way gets.
+ */
+const SCALAR_SETS: readonly ReadonlySet<NonStringScalar>[] = [
+  new Set(),
+  new Set(['number']),
+  new Set(['boolean']),
+  new Set(['number', 'boolean']),
+];
 
 /**
  * The scalar types a string could be converted into at an issue — empty unless
@@ -733,38 +890,56 @@ const NO_SCALARS: ReadonlySet<NonStringScalar> = new Set();
  * ({@link unmatchedDiscriminator}).
  */
 function scalarTypesAt(issue: ArgumentIssue): ReadonlySet<NonStringScalar> {
-  const types = new Set<NonStringScalar>();
-  const admits = (candidate: ArgumentIssue): boolean => {
-    switch (candidate.code) {
-      case 'invalid_type':
-        if (candidate.expected === 'number') types.add('number');
-        else if (candidate.expected === 'boolean') types.add('boolean');
-        else return candidate.expected === 'null';
-        return true;
-      case 'invalid_value':
-        return (
-          candidate.values.length > 0 &&
-          candidate.values.every((value) => {
-            if (typeof value === 'number') types.add('number');
-            else if (typeof value === 'boolean') types.add('boolean');
-            else return value === null;
-            return true;
-          })
-        );
-      default:
-        return false;
-    }
-  };
+  if (issue.code !== 'invalid_union')
+    return SCALAR_SETS[scalarFlags(issue)] as ReadonlySet<NonStringScalar>;
+  let flags = 0;
   const gated =
-    issue.code === 'invalid_union'
-      ? issue.errors.length > 0 &&
-        issue.errors.every(
-          (branch) =>
-            branch.length > 0 &&
-            branch.every((branchIssue) => branchIssue.path.length === 0 && admits(branchIssue)),
-        )
-      : admits(issue);
-  return gated ? types : NO_SCALARS;
+    issue.errors.length > 0 &&
+    issue.errors.every(
+      (branch) =>
+        branch.length > 0 &&
+        branch.every((branchIssue) => {
+          if (branchIssue.path.length > 0) return false;
+          const admitted = scalarFlags(branchIssue);
+          flags |= admitted;
+          return admitted !== 0 || admitsNull(branchIssue);
+        }),
+    );
+  return SCALAR_SETS[gated ? flags : 0] as ReadonlySet<NonStringScalar>;
+}
+
+/**
+ * The {@link SCALAR_SETS} flags of the scalar types one issue says the
+ * value failed for, where it accepts nothing but numbers, booleans, and
+ * `null` — `0` when it takes anything else, or only `null` ({@link admitsNull}).
+ */
+function scalarFlags(issue: ArgumentIssue): number {
+  switch (issue.code) {
+    case 'invalid_type':
+      return issue.expected === 'number' ? 1 : issue.expected === 'boolean' ? 2 : 0;
+    case 'invalid_value': {
+      if (issue.values.length === 0) return 0;
+      let flags = 0;
+      for (const value of issue.values) {
+        if (typeof value === 'number') flags |= 1;
+        else if (typeof value === 'boolean') flags |= 2;
+        else if (value !== null) return 0;
+      }
+      return flags;
+    }
+    default:
+      return 0;
+  }
+}
+
+/** Whether an issue accepts only `null` — a union branch that leaves the scalar gate open. */
+function admitsNull(issue: ArgumentIssue): boolean {
+  if (issue.code === 'invalid_type') return issue.expected === 'null';
+  return (
+    issue.code === 'invalid_value' &&
+    issue.values.length > 0 &&
+    issue.values.every((value) => value === null)
+  );
 }
 
 /**
@@ -808,13 +983,49 @@ function failedAsNumber(issue: ArgumentIssue): boolean {
   }
 }
 
-/** The repairs below one container, keyed by the path step that reaches each. */
-interface RepairNode {
-  children?: Map<string, RepairNode>;
+/** The repairs below one container, keyed by the {@link stepKey} of the path step that reaches each. */
+interface RepairNode extends StepChildren<RepairNode> {
+  /** Where {@link RepairNode.repair} sits in the repairs the tree was built from. */
+  index?: number;
+  /**
+   * Set on the root when one of the repairs the tree was built from lies below
+   * another, whose value {@link applyRepairs} writes in its place.
+   */
+  nested?: true;
   repair?: Repair;
+  /** Set on the root when two of the repairs the tree was built from share a path. */
+  sharedPath?: true;
   /** The transforms at this position, outermost first, whose output the repairs below sit in. */
   sites?: readonly TransformSite[];
+  /** Each child's {@link stepKey}, in the order the children were made. */
+  steps?: PropertyKey[];
 }
+
+/**
+ * The key a path step takes in a {@link RepairNode}'s children. Two steps name
+ * one position when `String()` writes them alike — `0` and `"0"` one element,
+ * `"01"` another — so a string `String()` writes for a number is keyed as that
+ * number, and an array index, the step most repairs take, stays one.
+ */
+function stepKey(step: PropertyKey): PropertyKey {
+  if (typeof step === 'number') return step;
+  if (typeof step === 'symbol') return String(step);
+  // What `String()` writes for a number opens with a digit, `-`, `I`nfinity, or `N`aN.
+  const first = step.charCodeAt(0);
+  if ((first < 48 || first > 57) && first !== 45 && first !== 73 && first !== 78) return step;
+  const number = Number(step);
+  return String(number) === step ? number : step;
+}
+
+/**
+ * The tree {@link repairTree} built for each set of repairs, so one set
+ * written by {@link applyRepairs} and checked by {@link heldRepairs} is walked
+ * into a tree once. A set is never changed once built.
+ */
+const repairTrees = new WeakMap<readonly Repair[], RepairNode>();
+
+/** A repair's `within` when it sits below no transform. */
+const NO_TRANSFORMS: readonly TransformSite[] = [];
 
 /**
  * `repairs` as a tree of their paths, each transform a repair sits inside
@@ -822,9 +1033,12 @@ interface RepairNode {
  * first, and so does a position two repairs' transforms share.
  */
 function repairTree(repairs: readonly Repair[]): RepairNode {
+  const built = repairTrees.get(repairs);
+  if (built) return built;
   const root: RepairNode = {};
-  for (const repair of repairs) {
-    const { path, within = [] } = repair;
+  for (let index = 0; index < repairs.length; index++) {
+    const repair = repairs[index] as Repair;
+    const { path, within = NO_TRANSFORMS } = repair;
     let node = root;
     let next = 0;
     for (let depth = 0; ; depth++) {
@@ -832,17 +1046,27 @@ function repairTree(repairs: readonly Repair[]): RepairNode {
       while (within[next]?.depth === depth) next++;
       if (next > first && !node.sites) node.sites = within.slice(first, next);
       if (depth === path.length) break;
-      node.children ??= new Map();
-      const step = String(path[depth]);
-      let child = node.children.get(step);
+      if (node.repair) root.nested = true;
+      const step = stepKey(path[depth] as PropertyKey);
+      let child = childAt(node, step);
       if (!child) {
         child = {};
-        node.children.set(step, child);
+        setChildAt(node, step, child);
+        node.steps ??= [];
+        node.steps.push(step);
       }
       node = child;
     }
-    node.repair ??= repair;
+    if (node.repair) {
+      root.sharedPath = true;
+    } else {
+      // A child is on the path of a repair made earlier, which now lies below this one.
+      if (node.steps) root.nested = true;
+      node.repair = repair;
+      node.index = index;
+    }
   }
+  repairTrees.set(repairs, root);
   return root;
 }
 
@@ -851,7 +1075,8 @@ function repairTree(repairs: readonly Repair[]): RepairNode {
  * leaving the caller's own objects untouched — so a thousand repaired elements
  * of one array cost one copy of it, not a thousand. A `null_as_absent` repair
  * leaves its key out of the copy of the object that holds it. A path two
- * repairs share takes the first. Any subset of one call's
+ * repairs share takes the first, and a repair below another is never written:
+ * the value of the one above it is. Any subset of one call's
  * {@link RepairedArguments.repairs} can be written, which is how
  * {@link parseToolArguments} builds a rejection from the repairs that held.
  *
@@ -863,7 +1088,10 @@ function repairTree(repairs: readonly Repair[]): RepairNode {
  * with values the repair never wrote. Otherwise every repair inside that
  * output is dropped and the argument is left as sent, so the call keeps its
  * rejection. A transform that throws on the output counts as one that changed
- * it. Nested transforms are checked at each position, innermost first.
+ * it, and so does an output holding an array the write would copy that owns a
+ * key besides its elements ({@link ownsNonIndexKey}): the copy would drop the
+ * key, and the re-parse would judge a value the transform never made. Nested
+ * transforms are checked at each position, innermost first.
  *
  * Object copies go through `Object.fromEntries`, which *defines* each property
  * rather than assigning it. `copy[key] = value` would route a caller's own
@@ -874,62 +1102,134 @@ function repairTree(repairs: readonly Repair[]): RepairNode {
  * added or renamed, and none is dropped but a deleted one.
  */
 export function applyRepairs(args: unknown, repairs: readonly Repair[]): unknown {
-  return applyNode(args, repairTree(repairs));
+  return applyNode(args, repairTree(repairs), false);
 }
+
+/**
+ * The checks a value of the type its field takes fails for its magnitude — a
+ * length, a range, a step. Each repair keeps the magnitude the caller sent (the
+ * number `"600"` spells, the digits `String(n)` writes, the decoded list's
+ * length), so such a check at the repaired value is the caller's own failure.
+ */
+const MAGNITUDE_CHECKS: ReadonlySet<ArgumentIssue['code']> = new Set([
+  'too_big',
+  'too_small',
+  'not_multiple_of',
+]);
 
 /**
  * The repairs a failed re-parse kept (#706): each one no issue of `issues` lies
  * at or below — the re-parse accepted the value it wrote, and whatever still
- * fails is somewhere else. A union's issue counts at its own path and every
- * branch's issues at theirs, whichever branch the rendering would select: a
- * repair one branch accepts and another refuses at the same path did not hold,
- * because the repaired value is what the refusing branch would then report.
+ * fails is somewhere else — except a {@link MAGNITUDE_CHECKS} issue at the
+ * repair's own path, which leaves it held (#745): the re-parse took the
+ * repaired type and refused only its size, so the rejection reports that
+ * check, exactly as a call sending the type gets it (`"600"` against `.max(500)`
+ * reads as `600` does). Any other issue there, and any issue below it, inside
+ * the repaired value, breaks it. A union's issue counts at its own path and
+ * every branch's issues at theirs, whichever branch the rendering would select:
+ * a repair one branch accepts and another refuses at the same path did not
+ * hold, because the repaired value is what the refusing branch would then
+ * report.
  *
- * Each issue walks the tree of repair paths along its own path, so the check
- * is linear in the issues and the repairs together, however many of each one
- * array carries. An issue is walked from a node once (#648): Zod hands every
- * branch that parsed the same value the same issue objects, so a recursive
- * union whose `and` and `or` branches share a clause lists it under both, and
- * walking each listing would double the walk per level of the caller's
- * nesting.
+ * A repair below another in `repairs` held exactly when the outermost one above
+ * it did ({@link followOutermost}). Such a pair reads one value the caller sent
+ * twice — a stringified list a `z.preprocess()` wraps, decoded where it was
+ * sent and again as the one element the wrap made of it — and
+ * {@link applyRepairs} writes only the outer reading, so the re-parse never
+ * judged the inner one: its issues at `tags.0` measured the first element of
+ * the decoded list.
+ *
+ * Each issue walks the tree of repair paths along its own path — the tree
+ * {@link applyRepairs} wrote the same repairs from — so the check is linear in
+ * the issues and the repairs together, however many of each one array
+ * carries. An issue inside a union is walked from a node once (#648): Zod
+ * hands every branch that parsed the same value the same issue objects, so a
+ * recursive union whose `and` and `or` branches share a clause lists it under
+ * both, and walking each listing would double the walk per level of the
+ * caller's nesting.
  */
 export function heldRepairs(
   repairs: readonly Repair[],
   issues: readonly ArgumentIssue[],
 ): readonly Repair[] {
-  const broken = new Set<Repair>();
+  /** A flag per repair, by its place in `repairs`, set once an issue breaks it. */
+  const broken = new Uint8Array(repairs.length);
   const walked = new Map<RepairNode, Set<ArgumentIssue>>();
   const strike = (from: RepairNode, issue: ArgumentIssue): void => {
-    const seen = walked.get(from) ?? new Set<ArgumentIssue>();
-    if (seen.has(issue)) return;
-    walked.set(from, seen.add(issue));
+    const { path } = issue;
+    // The depth a magnitude check leaves its repair held at: its own path's last step.
+    const holdsAt = MAGNITUDE_CHECKS.has(issue.code) ? path.length - 1 : -1;
     let node = from;
-    for (const step of issue.path) {
-      const child = node.children?.get(String(step));
+    for (let depth = 0; depth < path.length; depth++) {
+      const child = childAt(node, stepKey(path[depth] as PropertyKey));
       if (!child) return;
       node = child;
-      if (node.repair) broken.add(node.repair);
+      if (node.index !== undefined && depth !== holdsAt) broken[node.index] = 1;
     }
     if (issue.code !== 'invalid_union') return;
+    const seen = walked.get(node) ?? new Set<ArgumentIssue>();
+    walked.set(node, seen);
     for (const branch of issue.errors) {
-      for (const branchIssue of branch) strike(node, branchIssue);
+      for (const branchIssue of branch) {
+        if (seen.has(branchIssue)) continue;
+        seen.add(branchIssue);
+        strike(node, branchIssue);
+      }
     }
   };
   const tree = repairTree(repairs);
   for (const issue of issues) strike(tree, issue);
-  return repairs.filter((repair) => !broken.has(repair));
+  if (tree.nested) followOutermost(tree, broken);
+  return repairs.filter((_, index) => broken[index] === 0);
+}
+
+/**
+ * Gives each repair at or below `node` that lies below another the `broken`
+ * flag of the outermost one above it, `outer`: {@link applyRepairs} writes that
+ * one's value at its path and never descends past it.
+ */
+function followOutermost(node: RepairNode, broken: Uint8Array, outer?: number): void {
+  const { index } = node;
+  if (index !== undefined && outer !== undefined) broken[index] = broken[outer] as number;
+  const above = outer ?? index;
+  for (const step of node.steps ?? []) {
+    followOutermost(childAt(node, step) as RepairNode, broken, above);
+  }
 }
 
 /**
  * {@link applyRepairs} for one value and the repairs at and below it. At a
  * transform's position the repairs below are written into its output instead,
- * kept only when every transform there returns the result unchanged.
+ * kept only when the output could be copied whole ({@link UNCOPIED}) and every
+ * transform there returns the result unchanged. `inOutput` says `value` sits
+ * inside a transform's output.
  */
-function applyNode(value: unknown, node: RepairNode): unknown {
+function applyNode(value: unknown, node: RepairNode, inOutput: boolean): unknown {
   const { repair, sites } = node;
-  if (!sites || repair) return writeNode(value, node);
-  const written = writeNode(sites[sites.length - 1]?.output, node);
-  return sites.every((site) => returnsUnchanged(site.transform, written)) ? written : value;
+  if (!sites || repair) return writeNode(value, node, inOutput);
+  const written = writeNode(sites.at(-1)?.output, node, true);
+  return written !== UNCOPIED && sites.every((site) => returnsUnchanged(site.transform, written))
+    ? written
+    : value;
+}
+
+/**
+ * What {@link writeNode} gives back, inside a transform's output, for an array
+ * that owns a key besides its elements ({@link ownsNonIndexKey}): the
+ * transform's position then leaves the argument as sent ({@link applyNode}).
+ */
+const UNCOPIED = Symbol('uncopied');
+
+/**
+ * Whether an array owns a key besides its elements and `length` — a string no
+ * index spells, or a symbol — which a copy of its elements drops. An ordinary
+ * array lists its own keys indices first, then `length`, then the rest in the
+ * order they were made, so the last key answers. Only a transform's output can
+ * hold such an array, so only an array copied inside one is asked: the question
+ * costs a key per element.
+ */
+function ownsNonIndexKey(array: readonly unknown[]): boolean {
+  return Reflect.ownKeys(array).at(-1) !== 'length';
 }
 
 /** Whether `transform` applied to `value` gives back a value structurally equal to it. */
@@ -972,29 +1272,38 @@ function isPlainObject(value: unknown): value is Record<string, unknown> {
 /**
  * Writes the repairs at and below `node` onto `value` itself. A deletion is
  * applied by the object holding the key, so a value reached through one comes
- * back as sent.
+ * back as sent. Inside a transform's output (`inOutput`), an array that owns a
+ * key besides its elements, at or below `value`, makes it {@link UNCOPIED}.
  */
-function writeNode(value: unknown, node: RepairNode): unknown {
-  const { children, repair } = node;
+function writeNode(value: unknown, node: RepairNode, inOutput: boolean): unknown {
+  const { repair, steps } = node;
   if (repair) return repair.kind === 'null_as_absent' ? value : repair.value;
-  if (!children || value === null || typeof value !== 'object') return value;
+  if (!steps || value === null || typeof value !== 'object') return value;
 
   if (Array.isArray(value)) {
+    if (inOutput && ownsNonIndexKey(value)) return UNCOPIED;
     const copy = [...value];
-    for (const [step, child] of children) {
-      const index = Number(step);
-      if (Number.isInteger(index) && index >= 0 && index < copy.length) {
-        copy[index] = applyNode(value[index], child);
+    for (const step of steps) {
+      // An element's step is the number `stepKey` keys it as; `"1.0"` or `"01"` names a property.
+      if (typeof step === 'number' && Number.isInteger(step) && step >= 0 && step < copy.length) {
+        const written = applyNode(value[step], childAt(node, step) as RepairNode, inOutput);
+        if (written === UNCOPIED) return UNCOPIED;
+        copy[step] = written;
       }
     }
     return copy;
   }
 
-  return Object.fromEntries(
+  let uncopied = false;
+  const copy = Object.fromEntries(
     Object.entries(value as Record<string, unknown>).flatMap(([key, entry]) => {
-      const child = children.get(key);
+      const child = childAt(node, stepKey(key));
       if (!child) return [[key, entry]];
-      return child.repair?.kind === 'null_as_absent' ? [] : [[key, applyNode(entry, child)]];
+      if (child.repair?.kind === 'null_as_absent') return [];
+      const written = applyNode(entry, child, inOutput);
+      if (written === UNCOPIED) uncopied = true;
+      return [[key, written]];
     }),
   );
+  return uncopied ? UNCOPIED : copy;
 }

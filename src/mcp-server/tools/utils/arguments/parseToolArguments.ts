@@ -9,7 +9,7 @@
 import type { ZodError, z } from 'zod';
 
 import type { RequestContext } from '@/utils/internal/requestContext.js';
-import type { TransformCache } from '../schemaShape.js';
+import { readsAsSent, type TransformCache } from '../schemaShape.js';
 import type { AnyToolDefinition } from '../toolDefinition.js';
 import { renderedIssues } from './issues.js';
 import {
@@ -23,6 +23,7 @@ import {
   applyRepairs,
   type CoercionKind,
   heldRepairs,
+  type RepairedArguments,
   repairAsSent,
   repairRepresentations,
   sameValue,
@@ -78,6 +79,9 @@ export interface ParseToolArgumentsOptions {
  * validated keeps its value. Every path the
  * repair, the message, and the hint read is walked through the input schema,
  * a transform on the way re-applied once per value for the whole call.
+ * A call whose first parse fails — repaired, re-parsed, and then accepted or
+ * rejected — costs a small multiple of that parse of the same arguments,
+ * however many values they hold (#739).
  * When that attempt still fails and its drop discarded a key,
  * {@link prevalidateAliasFirst} reruns the stages alias-first and the same
  * parse-then-repair runs on the result, kept only if it validates (#563).
@@ -90,8 +94,9 @@ export interface ParseToolArgumentsOptions {
  * (#706, {@link repairAttempt}), rendered from those same arguments: a value
  * the schema accepted once repaired is not reported — one that held only
  * written in place below a transform that reorders or rewrites it excepted —
- * and one whose repair the schema refused is reported as sent, so a call no
- * repair helped gets exactly
+ * one that still fails only a size or range check of its own is reported by
+ * that check (#745), and one whose repair the schema otherwise refused is
+ * reported as sent, so a call no repair helped gets exactly
  * the rejection it gets under `input: { coerce: false }` — as does one the
  * held repairs alone would validate (only a union or a cross-field refinement
  * allows that), held values included. It carries the rewrites and
@@ -141,8 +146,10 @@ function repairOrReject<TDefinition extends AnyToolDefinition>(
   firstError: ZodError,
   options: ParseToolArgumentsOptions,
 ): z.infer<TDefinition['input']> {
-  // One cache for the whole call: the repair, the message, and the hint each
-  // read paths through the same transforms, which then run once per value (#599).
+  /**
+   * One cache for the whole call: the repair, the message, and the hint each
+   * read paths through the same transforms, which then run once per value (#599).
+   */
   const transforms: TransformCache = new Map();
   const parsed = repairAttempt(def, first.args, firstError, options.input, transforms);
   if (parsed.success) return accept(def, first, parsed, options.context);
@@ -192,14 +199,17 @@ type ParsedAttempt =
  *
  * A call that still fails is rejected from the attempt's arguments with only
  * the repairs that held applied (#706) — those {@link heldRepairs} finds no
- * re-parse issue at or below. Every repair held: the re-parse is the
+ * re-parse issue at or below but a size or range check at the repaired value
+ * itself (#745). Every repair held: the re-parse is the
  * rejection. None did: the first parse is, exactly as under `coerce: false`.
  * Some did: one more parse, of the arguments with those written. It only
  * reports, never admits: when it validates — possible only where the schema
  * judges one value by another, as a union or a cross-field refinement does —
  * the first parse is the rejection, so which calls validate never rests on
  * it. Short of that fallback, no reported issue names a value the caller sent
- * and the schema accepted once repaired, and a value whose repair the schema
+ * and the schema accepted once repaired, a value that still fails only its own
+ * size or range check is reported by that check, as a call sending the
+ * repaired type gets it, and a value whose repair the schema otherwise
  * refused is reported as sent — but a value that held only written in place,
  * below a transform that reorders or rewrites it, is judged here by the
  * substitution, whose issues name positions in the transform's output, and is
@@ -225,13 +235,11 @@ function repairAttempt(
   const parseRepaired = (repaired: unknown) =>
     original && sameValue(repaired, original.args) ? originalParse : reparse(def, repaired);
 
-  const repair = repairRepresentations(
-    args,
-    renderedIssues(error.issues),
-    def.input,
-    transforms,
-    original?.repairs,
-  );
+  // The original repair, when it is every repair the substitution would make, is the substitution.
+  const repair: RepairedArguments =
+    original?.exhaustive && readsAsSent(def.input)
+      ? original
+      : repairRepresentations(args, renderedIssues(error.issues), def.input, transforms, original);
   if (repair.inPlace) {
     const placed = parseRepaired(repair.inPlace.args);
     if (placed?.success) return { success: true, data: placed.data, coerced: repair.inPlace.kinds };

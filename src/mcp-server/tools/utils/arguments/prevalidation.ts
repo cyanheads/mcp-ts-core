@@ -215,9 +215,11 @@ function planFor(input: ToolInputSchema): InputPlan {
   const allKeys = new Set<string>();
   for (const variant of variants) for (const key of variant.plan.keys) allKeys.add(key);
 
-  // A union root can carry no valid designation at all (every field sits under
-  // `oneOf`), and an invalid one already failed in `tool()`, so this only ever
-  // collects root properties of an object root.
+  /**
+   * A union root can carry no valid designation at all (every field sits under
+   * `oneOf`), and an invalid one already failed in `tool()`, so this only ever
+   * collects root properties of an object root.
+   */
   const scan = scanHeaderDesignations(input);
   const headerTargets = new Set<string>(
     scan?.valid
@@ -335,12 +337,14 @@ function applyAliases(
   };
 
   const move = (alias: string, target: string, kind: AliasKind): void => {
-    // `target` is a declared key read off the Zod shape, never caller text — an
-    // object literal resolves `__proto__` to the prototype setter rather than a
-    // key, so a shape cannot declare one and this assignment cannot reach it.
-    // `alias` is caller text, but it is only read and deleted, both own-property
-    // operations. The spread defines rather than assigns, so an own `__proto__`
-    // elsewhere in the arguments survives the copy.
+    /**
+     * `target` is a declared key read off the Zod shape, never caller text — an
+     * object literal resolves `__proto__` to the prototype setter rather than a
+     * key, so a shape cannot declare one and this assignment cannot reach it.
+     * `alias` is caller text, but it is only read and deleted, both own-property
+     * operations. The spread defines rather than assigns, so an own `__proto__`
+     * elsewhere in the arguments survives the copy.
+     */
     rewritten ??= { ...args };
     rewritten[target] = rewritten[alias];
     delete rewritten[alias];
@@ -358,8 +362,10 @@ function applyAliases(
   for (const [alias, target] of Object.entries(declared ?? {})) resolve(alias, target, 'declared');
 
   if (caseStyle) {
-    // Snapshot first: `move` only ever removes an undeclared key and adds a
-    // declared one, so the remaining candidates are unaffected.
+    /**
+     * Snapshot first: `move` only ever removes an undeclared key and adds a
+     * declared one, so the remaining candidates are unaffected.
+     */
     for (const key of Object.keys(current())) {
       if (variant.keys.has(key) || unfolded.has(key)) continue;
       const target = variant.folded.get(foldArgumentKey(key));
@@ -482,9 +488,11 @@ function dropIgnoredKeys(
     if (plan.allKeys.has(key)) continue;
     const listed = ignoreList.has(key);
     if (!listed && !(underscoreRule && key.startsWith('_'))) continue;
-    // Spread copies own properties by definition, so a caller's own `__proto__`
-    // survives as a key instead of re-prototyping the copy; `delete` on that own
-    // property is equally safe.
+    /**
+     * Spread copies own properties by definition, so a caller's own `__proto__`
+     * survives as a key instead of re-prototyping the copy; `delete` on that own
+     * property is equally safe.
+     */
     kept ??= { ...args };
     delete kept[key];
     if (!listed) ignored.push(key);
@@ -523,8 +531,10 @@ function runStages(
   const ignoreList = ignoreListFor(options);
 
   if (order === 'drop-first') {
-    // The drop has already removed every undeclared ignore-listed key, so the
-    // case-style pass folds whatever is left, exactly as it always has.
+    /**
+     * The drop has already removed every undeclared ignore-listed key, so the
+     * case-style pass folds whatever is left.
+     */
     const drop = dropIgnoredKeys(record, plan, options, ignoreList);
     const rewrite = applyAliases(def, drop.args, plan, options, NO_KEYS);
     const changes = [...drop.changes, ...rewrite.changes];

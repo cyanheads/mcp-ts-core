@@ -76,6 +76,7 @@ import {
   type InputHandlingOptions,
   parseToolArguments,
 } from '@/mcp-server/tools/utils/arguments/index.js';
+import { heldRepairs, type Repair } from '@/mcp-server/tools/utils/arguments/repair.js';
 import type { AnyToolDefinition } from '@/mcp-server/tools/utils/toolDefinition.js';
 import { headerParam, tool } from '@/mcp-server/tools/utils/toolDefinition.js';
 import {
@@ -1041,9 +1042,11 @@ describe('tool argument pre-validation', () => {
       ['the drop stage', '{"__proto__": {"query": "smuggled"}}'],
       ['the alias-first retry', '{"__proto__": {"query": "smuggled"}, "_max_results": 5}'],
     ])('never lets an own __proto__ key re-prototype the copy %s makes', async (_label, raw) => {
-      // JSON.parse creates `__proto__` as an own data property. A copy that
-      // assigned it rather than defining it would hand the parse an object
-      // inheriting `query`, which Zod reads — a value the caller never sent.
+      /**
+       * JSON.parse creates `__proto__` as an own data property. A copy that
+       * assigned it rather than defining it would hand the parse an object
+       * inheriting `query`, which Zod reads — a value the caller never sent.
+       */
       const result = await call(search, JSON.parse(raw));
 
       expect(seen).toBeUndefined();
@@ -1308,8 +1311,10 @@ describe('tool argument pre-validation', () => {
     });
 
     it('labels the canonical target and the kind, never the caller-supplied alias', async () => {
-      // Every permutation folds onto one declared key, so one bounded label
-      // covers them all rather than minting a series per spelling.
+      /**
+       * Every permutation folds onto one declared key, so one bounded label
+       * covers them all rather than minting a series per spelling.
+       */
       for (const alias of ['max_results', 'Max-Results', 'MAXRESULTS']) {
         await call(search, { query: 'x', [alias]: 5 });
       }
@@ -1492,9 +1497,11 @@ describe('tool argument pre-validation', () => {
     ])(
       'keeps dropping an underscore spelling the call validates without, carrying %s',
       async (_label, value) => {
-        // The call validates with the key dropped, so the alias-first retry
-        // never runs — whatever the value would have done at the target
-        // (#563, class i).
+        /**
+         * The call validates with the key dropped, so the alias-first retry
+         * never runs — whatever the value would have done at the target
+         * (#563, class i).
+         */
         const result = await call(search, { query: 'abc', _max_results: value });
 
         expect(result.isError).toBeUndefined();
@@ -1535,8 +1542,10 @@ describe('tool argument pre-validation', () => {
     });
 
     it('still drops an underscore key whose target is already present, as before', async () => {
-      // The call validates with `_query` dropped, so no retry runs — and the
-      // alias stage would decline a rewrite onto a key the caller also sent.
+      /**
+       * The call validates with `_query` dropped, so no retry runs — and the
+       * alias stage would decline a rewrite onto a key the caller also sent.
+       */
       const result = await call(search, { query: 'x', _query: 'y' });
 
       expect(result.isError).toBeUndefined();
@@ -1569,8 +1578,10 @@ describe('tool argument pre-validation', () => {
     ])(
       'keeps dropping an ignore-listed key a declared alias names when the call validates without it (%s)',
       async (_label, value) => {
-        // #563, class ii: the drop runs first, so the alias only fires on a
-        // call that fails without it.
+        /**
+         * #563, class ii: the drop runs first, so the alias only fires on a
+         * call that fails without it.
+         */
         const result = await call(ignoreListedAlias, { query: 'x', toolCallId: value });
 
         expect(result.isError).toBeUndefined();
@@ -1601,8 +1612,10 @@ describe('tool argument pre-validation', () => {
     });
 
     it('drops a declared underscore alias beside a case variant of its target, and folds the variant', async () => {
-      // #563, class iii: the first order drops `_q` and folds `QUERY` onto
-      // `query`, which validates — so the alias-first order never runs.
+      /**
+       * #563, class iii: the first order drops `_q` and folds `QUERY` onto
+       * `query`, which validates — so the alias-first order never runs.
+       */
       const result = await call(underscoreAliased, { _q: 'x', QUERY: 'y' });
 
       expect(result.isError).toBeUndefined();
@@ -1668,8 +1681,10 @@ describe('tool argument pre-validation', () => {
     });
 
     it('never case-folds an ignore-listed client artifact in the alias-first retry either', async () => {
-      // The retry rewrites `_query`; folding `_meta` onto the declared string
-      // `meta` there would fail the call the retry exists to rescue.
+      /**
+       * The retry rewrites `_query`; folding `_meta` onto the declared string
+       * `meta` there would fail the call the retry exists to rescue.
+       */
       const result = await call(metaField, { _meta: { progressToken: 1 }, _query: 'x' });
 
       expect(result.isError).toBeUndefined();
@@ -2085,9 +2100,11 @@ describe('tool argument pre-validation', () => {
     });
 
     it('repairs only the fields the rejection names, leaving a valid look-alike alone', async () => {
-      // `note` is a valid string that happens to read as JSON, so it is not in
-      // the issue list. Repairing it too would turn it into an array and lose a
-      // repair that should have succeeded.
+      /**
+       * `note` is a valid string that happens to read as JSON, so it is not in
+       * the issue list. Repairing it too would turn it into an array and lose a
+       * repair that should have succeeded.
+       */
       const result = await call(mixedRepair, { statusFilter: '["A"]', note: '[1,2]' });
 
       expect(result.isError).toBeUndefined();
@@ -2095,11 +2112,13 @@ describe('tool argument pre-validation', () => {
     });
 
     it('never lets an own __proto__ key re-prototype the repaired copy', async () => {
-      // JSON.parse creates `__proto__` as an own data property. An open root
-      // keeps it, so the repair's copy of the root is what has to preserve it —
-      // a plain `copy[key] = value` would route through the prototype setter,
-      // dropping the key and handing the re-parse a poisoned object. Zod reads
-      // inherited properties, so `polluted` would then reach the handler.
+      /**
+       * JSON.parse creates `__proto__` as an own data property. An open root
+       * keeps it, so the repair's copy of the root is what has to preserve it —
+       * a plain `copy[key] = value` would route through the prototype setter,
+       * dropping the key and handing the re-parse a poisoned object. Zod reads
+       * inherited properties, so `polluted` would then reach the handler.
+       */
       const args = JSON.parse('{"__proto__": {"polluted": true}, "statusFilter": "[\\"A\\"]"}');
       const result = await call(openRepair, args);
 
@@ -2431,8 +2450,10 @@ describe('tool argument pre-validation', () => {
     });
 
     it('throws the coerce: false rejection for a number outside a literal set that also lists a number', async () => {
-      // `"7"` is in the set, but so is a number: the field takes numbers, and
-      // 7 is a wrong one rather than a string sent as an integer.
+      /**
+       * `"7"` is in the set, but so is a number: the field takes numbers, and
+       * 7 is a wrong one rather than a string sent as an integer.
+       */
       await expectOriginalRejection(mixedLiteral, { days: 7 });
       expect(adds('mcp.input.coerced')).toEqual([]);
     });
@@ -2584,7 +2605,6 @@ describe('tool argument pre-validation', () => {
       ['a 20-digit integer', { maxResults: '12345678901234567890' }],
       ['a capitalized boolean', { freeFullText: 'True' }],
       ['a numeric boolean', { freeFullText: '1' }],
-      ['a number an .int().min(1) field refuses', { rank: '0' }],
       ['a fraction a z.int() field refuses', { whole: '2.5' }],
       ['a number outside a numeric literal set', { days: '8' }],
       ['a number at a field that also takes a string literal', { limitOrAuto: '15' }],
@@ -2594,6 +2614,19 @@ describe('tool argument pre-validation', () => {
       ['a number sent for a list of numbers', { counts: '15' }],
     ])('throws the coerce: false rejection for %s', async (_label, args) => {
       await expectOriginalRejection(scalars, args);
+      expect(adds('mcp.input.coerced')).toEqual([]);
+    });
+
+    it('reports the .min() a number an .int().min(1) field refuses, not its type (#745)', async () => {
+      const result = await call(scalars, { rank: '0' });
+
+      expect(envelope(result).data?.issues).toEqual([
+        expect.objectContaining({ code: 'too_small', minimum: 1, path: ['rank'] }),
+      ]);
+      expect(envelope(result).data?.recovery?.hint).toBe(
+        'rank: Too small: expected number to be >=1',
+      );
+      expect(seen).toBeUndefined();
       expect(adds('mcp.input.coerced')).toEqual([]);
     });
 
@@ -3016,8 +3049,10 @@ describe('tool argument pre-validation', () => {
     );
 
     it('keeps the rejection when the field’s own check throws on an unset value', async () => {
-      // The check reads `length` off `undefined`, so the call with `code` omitted
-      // throws too; the `null` call keeps the rejection that tells the caller what to send.
+      /**
+       * The check reads `length` off `undefined`, so the call with `code` omitted
+       * throws too; the `null` call keeps the rejection that tells the caller what to send.
+       */
       const guarded = tool('prevalidation_guarded', {
         description: 'Takes an optional code whose check reads its length.',
         input: z.object({
@@ -3202,9 +3237,11 @@ describe('tool argument pre-validation', () => {
     });
 
     it('repairs a value once when two issues name its path', async () => {
-      // Zod reports `invalid_type` and the array's own `too_big` at one path for
-      // a string sent to `z.array(z.string()).max(2)`: the string has five
-      // characters. The decoded array is what the re-parse reads.
+      /**
+       * Zod reports `invalid_type` and the array's own `too_big` at one path for
+       * a string sent to `z.array(z.string()).max(2)`: the string has five
+       * characters. The decoded array is what the re-parse reads.
+       */
       const capped = tool('prevalidation_capped_list', {
         description: 'Takes at most two tags.',
         input: z.object({ tags: z.array(z.string()).max(2).describe('Tags.') }),
@@ -3219,6 +3256,53 @@ describe('tool argument pre-validation', () => {
       expect(adds('mcp.input.coerced')).toEqual([
         { 'mcp.tool.name': 'prevalidation_capped_list', 'mcp.input.coercion': 'stringified_array' },
       ]);
+    });
+
+    describe('beside a value only the later repair reads', () => {
+      const countedNote = tool('prevalidation_counted_note', {
+        description: 'Takes a count as text, IDs, and an optional note.',
+        input: z.object({
+          count: z.string().describe('Count, as text.'),
+          ids: z
+            .union([z.string(), z.array(z.string())])
+            .optional()
+            .describe('One ID or several.'),
+          limit: z.number().optional().describe('Limit.'),
+          note: z.string().optional().describe('Note.'),
+        }),
+        output: ok,
+        handler: record,
+      });
+
+      it.each([
+        ['null sent for an optional field', { count: 5, note: null }, { count: '5' }],
+        ['a string sent for a number', { count: 5, limit: '3' }, { count: '5', limit: 3 }],
+        [
+          'integers inside a union field’s surviving branch',
+          { count: 5, ids: [1, 2] },
+          { count: '5', ids: ['1', '2'] },
+        ],
+      ])('repairs an integer sent for a string beside %s', (_label, args, expected) => {
+        expect(parseToolArguments(countedNote, args)).toEqual(expected);
+      });
+
+      it('reports a value two issues name as sent when its repair held for neither', () => {
+        // An intersection raises one issue per side at the value's own path.
+        const coded = tool('prevalidation_intersected_code', {
+          description: 'Takes a code both sides of an intersection check.',
+          input: z.object({
+            code: z.intersection(z.string().regex(/^a/), z.string()).describe('Code.'),
+          }),
+          output: ok,
+          handler: record,
+        });
+
+        expect(() => parseToolArguments(coded, { code: 5 })).toThrow(
+          'Input validation error: Invalid arguments for tool prevalidation_intersected_code: ' +
+            'code: Invalid input: expected string, received number, ' +
+            'code: Invalid input: expected string, received number',
+        );
+      });
     });
   });
 
@@ -3348,6 +3432,45 @@ describe('tool argument pre-validation', () => {
       expect(adds('mcp.input.coerced')).toEqual([]);
     });
 
+    it('reports, row by row, only the repairs that did not hold among many of several kinds', async () => {
+      const tagged = tool('prevalidation_tagged_rows', {
+        description: 'Takes rows with a count, an optional note, and a lowercase tag.',
+        input: z.object({
+          rows: z
+            .array(
+              z.object({
+                n: z.number().describe('Count.'),
+                note: z.string().optional().describe('Note.'),
+                tag: z
+                  .string()
+                  .regex(/^[a-z]+$/)
+                  .describe('Tag.'),
+              }),
+            )
+            .describe('Rows.'),
+        }),
+        output: ok,
+        handler: record,
+      });
+      // `n` and `note` hold in every row; `tag`'s digits fail the pattern, so it is reported as sent.
+      const rows = Array.from({ length: 12 }, (_, i) => ({ n: String(i), note: null, tag: i }));
+
+      const result = await call(tagged, { rows });
+      const { data, message } = envelope(result);
+      const tagAsNumber = (i: number) =>
+        `rows.${i}.tag: Invalid input: expected string, received number`;
+
+      expect(message).toBe(
+        `${preamble('prevalidation_tagged_rows')}${Array.from({ length: 10 }, (_, i) => tagAsNumber(i)).join(', ')} (+2 more)`,
+      );
+      expect(data?.recovery?.hint).toBe(
+        `${Array.from({ length: 10 }, (_, i) => `Send rows.${i}.tag as a string, not a number.`).join(' ')} (+2 more)`,
+      );
+      expect((data as { issuesCount?: number }).issuesCount).toBe(12);
+      expect(issuePaths(result)).toEqual(Array.from({ length: 10 }, (_, i) => ['rows', i, 'tag']));
+      expect(adds('mcp.input.coerced')).toEqual([]);
+    });
+
     it('reports a refinement the first parse never reached once the held repairs reach it', async () => {
       const result = await call(distinctPmids, { pmids: [123, 123] });
 
@@ -3382,8 +3505,10 @@ describe('tool argument pre-validation', () => {
     it('keeps every issue as sent under coerce: false', async () => {
       const result = await call(cappedPmids, { pmids: FOURTEEN_PMIDS }, { coerce: false });
 
-      // Zod checks the list's `.max()` before its elements, so the rejection as
-      // sent is the list's own `too_big`, with none of the 14 integers.
+      /**
+       * Zod checks the list's `.max()` before its elements, so the rejection as
+       * sent is the list's own `too_big`, with none of the 14 integers.
+       */
       expect(issuePaths(result)).toEqual([['pmids']]);
       expect(envelope(result).data).not.toHaveProperty('issuesCount');
       expect(envelope(result).message).toBe(`${preamble('prevalidation_capped_pmids')}${TOO_BIG}`);
@@ -3538,6 +3663,582 @@ describe('tool argument pre-validation', () => {
       );
       expect(seen).toBeUndefined();
     });
+
+    describe('a repaired value whose only remaining failure at its path is a size or range check (#745)', () => {
+      const pageSize = tool('prevalidation_page_size', {
+        description: 'Takes a bounded page size.',
+        input: z.object({ limit: z.number().int().min(1).max(500).describe('Page size.') }),
+        output: ok,
+        handler: record,
+      });
+      /** A tool whose one field, `key`, is `schema`. */
+      const checked = (key: string, schema: z.ZodType) =>
+        tool('prevalidation_checked_field', {
+          description: 'Takes one checked field.',
+          input: z.object({ [key]: schema.describe('Checked field.') }),
+          output: ok,
+          handler: record,
+        });
+      const LIMIT_TOO_BIG = 'limit: Too big: expected number to be <=500';
+      /**
+       * `inner` under a `z.preprocess()` that wraps a lone value as a list and
+       * hands a list on — as is, or copied. A stringified list there is
+       * repaired twice: decoded where the caller sent it, and decoded again as
+       * the one element the wrap made of it.
+       */
+      const listed = (inner: z.ZodType, copy = false) =>
+        z.preprocess(
+          (value) => (Array.isArray(value) ? (copy ? [...value] : value) : [value]),
+          inner,
+        );
+
+      it('reports the check exactly as a call sending the repaired type gets it, on both surfaces', async () => {
+        const repaired = await call(pageSize, { limit: '600' });
+        const typed = await call(pageSize, { limit: 600 });
+
+        expect(envelope(repaired).data?.issues).toEqual([
+          expect.objectContaining({ code: 'too_big', maximum: 500, path: ['limit'] }),
+        ]);
+        expect(envelope(repaired).message).toBe(
+          preamble('prevalidation_page_size') + LIMIT_TOO_BIG,
+        );
+        expect(envelope(repaired).data?.recovery?.hint).toBe(LIMIT_TOO_BIG);
+        // A restatement-only hint drops the Recovery line (#459).
+        expect(text(repaired)).toBe(
+          `Error: ${preamble('prevalidation_page_size')}${LIMIT_TOO_BIG}\n\n` +
+            `(reason invalid_arguments · request ${envelope(repaired).data?.requestId})`,
+        );
+        expect(withoutRequestId(repaired)).toEqual(withoutRequestId(typed));
+        expect(adds('mcp.input.coerced')).toEqual([]);
+        expect(seen).toBeUndefined();
+      });
+
+      it.each([
+        [
+          'a number below a .min()',
+          'limit',
+          z.number().int().min(1).max(500),
+          { limit: '0' },
+          'limit: Too small: expected number to be >=1',
+        ],
+        [
+          'a number off a .multipleOf()',
+          'n',
+          z.number().multipleOf(5),
+          { n: '7' },
+          'n: Invalid number: must be a multiple of 5',
+        ],
+        [
+          'an element past its .max(), beside one that holds',
+          'ids',
+          z.array(z.number().max(500)),
+          { ids: ['600', '1'] },
+          'ids.0: Too big: expected number to be <=500',
+        ],
+        [
+          'a number past the .max() of a number | null field',
+          'limit',
+          z.union([z.number().max(500), z.null()]),
+          { limit: '600' },
+          LIMIT_TOO_BIG,
+        ],
+        [
+          'an integer past a string .max()',
+          'code',
+          z.string().max(5),
+          { code: 1234567 },
+          'code: Too big: expected string to have <=5 characters',
+        ],
+        [
+          'a stringified list under a .min()',
+          'tags',
+          z.array(z.string()).min(2),
+          { tags: '["a"]' },
+          'tags: Too small: expected array to have >=2 items',
+        ],
+        [
+          'a lone string wrapped into a list under a .min() (#719)',
+          'barcodes',
+          z.array(z.string()).min(2).max(10),
+          { barcodes: '3017620422003' },
+          'barcodes: Too small: expected array to have >=2 items',
+        ],
+        [
+          'a lone string wrapped into a list element under a .min()',
+          'rows',
+          z.array(z.array(z.string()).min(2).max(3)),
+          { rows: ['abcdef'] },
+          'rows.0: Too small: expected array to have >=2 items',
+        ],
+        [
+          'a stringified list a wrapping preprocess hands on, its length under a .min()',
+          'tags',
+          listed(z.array(z.number().multipleOf(5)).min(2)),
+          { tags: '[]' },
+          'tags: Too small: expected array to have >=2 items',
+        ],
+        [
+          'a stringified list a copying preprocess hands on, its length off a .length()',
+          'tags',
+          listed(z.array(z.number().multipleOf(5)).length(3), true),
+          { tags: '[5,10]' },
+          'tags: Too small: expected array to have exactly 3 items',
+        ],
+      ])('reports %s as that check', async (_label, key, schema, args, line) => {
+        const result = await call(checked(key, schema), args);
+
+        expect(envelope(result).data?.issues).toEqual([
+          expect.objectContaining({
+            code: expect.stringMatching(/^(too_big|too_small|not_multiple_of)$/),
+          }),
+        ]);
+        expect(envelope(result).message).toBe(preamble('prevalidation_checked_field') + line);
+        expect(envelope(result).data?.recovery?.hint).toBe(line);
+        expect(text(result)).not.toContain('Recovery:');
+        expect(seen).toBeUndefined();
+      });
+
+      it.each([
+        ['a fraction an .int() refuses', pageSize, { limit: '2.5' }],
+        [
+          'a range check beside a refinement at the same path',
+          checked(
+            'n',
+            z
+              .number()
+              .max(500)
+              .refine((n) => n % 2 === 0, 'Send an even number.'),
+          ),
+          { n: '601' },
+        ],
+        [
+          'a size check beside a wrong type at the same path',
+          checked('code', z.string().min(10)),
+          { code: '["a"]' },
+        ],
+        [
+          'a range check inside the repaired value',
+          checked('ids', z.array(z.number().max(500))),
+          { ids: '[600]' },
+        ],
+        [
+          'a union whose every branch still fails its own check',
+          checked('n', z.union([z.number().max(5), z.number().min(10)])),
+          { n: '7' },
+        ],
+      ])('reports %s as sent — the coerce: false rejection', async (_label, def, args) => {
+        await expectOriginalRejection(def, args);
+      });
+
+      it.each([
+        [
+          'a wrapping preprocess, its decoded elements off a .multipleOf()',
+          checked('tags', listed(z.array(z.number().multipleOf(5)).min(2))),
+          { tags: '[1,2]' },
+          'tags',
+          '>=2 items',
+        ],
+        [
+          'a copying preprocess, its decoded elements off a .multipleOf()',
+          checked('tags', listed(z.array(z.number().multipleOf(5)).min(2), true)),
+          { tags: '[1,2]' },
+          'tags',
+          '>=2 items',
+        ],
+        [
+          'a wrapping preprocess under a .length(), its decoded elements off a .multipleOf()',
+          checked('tags', listed(z.array(z.number().multipleOf(5)).length(3))),
+          { tags: '[1,2]' },
+          'tags',
+          'exactly 3 items',
+        ],
+        [
+          'a wrapping preprocess, its one decoded element past a .max()',
+          checked('tags', listed(z.array(z.number().max(5)).min(2))),
+          { tags: '[6]' },
+          'tags',
+          '>=2 items',
+        ],
+        [
+          'a wrapping preprocess in each element of an outer list',
+          checked('tags', z.array(listed(z.array(z.number().multipleOf(5)).min(2)))),
+          { tags: ['[1,2]'] },
+          'tags.0',
+          '>=2 items',
+        ],
+        [
+          'a wrapping preprocess, its second decoded element past a .max()',
+          checked('tags', listed(z.array(z.number().max(1)).min(2))),
+          { tags: '[1,2]' },
+          'tags',
+          '>=2 items',
+        ],
+        [
+          'a wrapping preprocess, its second decoded element refused by a refinement',
+          checked(
+            'tags',
+            listed(z.array(z.number().refine((n) => n < 2, 'Send a number below 2.')).min(2)),
+          ),
+          { tags: '[1,2]' },
+          'tags',
+          '>=2 items',
+        ],
+      ])(
+        'reports a stringified list under %s as sent, never as the list the wrap made of it',
+        async (_label, def, args, at, bound) => {
+          const result = await expectOriginalRejection(def, args);
+          const tooSmall = `${at}: Too small: expected array to have ${bound}`;
+
+          expect(envelope(result).message).toBe(
+            `${preamble('prevalidation_checked_field')}${at}.0: Invalid input: expected number, ` +
+              `received string, ${tooSmall}`,
+          );
+          expect(envelope(result).data?.recovery?.hint).toBe(
+            `Send ${at}.0 as a number, not a string. ${tooSmall}.`,
+          );
+          expect(seen).toBeUndefined();
+        },
+      );
+
+      it.each([
+        ['made before the one below it', false],
+        ['made after the one below it', true],
+      ])('holds a repair below another exactly when that one, %s, holds', (_label, innerFirst) => {
+        /** The stringified list decoded where it was sent, and again as the wrap's one element. */
+        const outer: Repair = {
+          kind: 'stringified_array',
+          path: ['tags'],
+          sent: '[1,2]',
+          value: [1, 2],
+        };
+        const inner: Repair = { ...outer, path: ['tags', 0] };
+        const repairs = innerFirst ? [inner, outer] : [outer, inner];
+        const list = z.object({ tags: z.array(z.number().multipleOf(5)).min(2) });
+        const issuesOf = (tags: unknown) => list.safeParse({ tags }).error!.issues;
+
+        // `tags.0` is the decoded list's first element, off its .multipleOf(): the outer repair broke.
+        expect(heldRepairs(repairs, issuesOf([1, 2]))).toEqual([]);
+        // The decoded list is only short of its .min(), at the outer repair's own path: both held.
+        expect(heldRepairs(repairs, issuesOf([5]))).toEqual(repairs);
+      });
+
+      it('names the wrong type under coerce: false', async () => {
+        const result = await call(pageSize, { limit: '600' }, { coerce: false });
+
+        expect(envelope(result).message).toBe(
+          `${preamble('prevalidation_page_size')}limit: Invalid input: expected number, received string`,
+        );
+        expect(envelope(result).data?.recovery?.hint).toBe('Send limit as a number, not a string.');
+      });
+
+      it('reports the check beside a value whose repair did not hold, which is reported as sent', async () => {
+        const result = await call(
+          checked('row', z.object({ limit: z.number().max(500), date: z.iso.date() })),
+          { row: { limit: '600', date: 20260922 } },
+        );
+
+        expect(issuePaths(result)).toEqual([
+          ['row', 'limit'],
+          ['row', 'date'],
+        ]);
+        expect(envelope(result).data?.recovery?.hint).toBe(
+          'row.limit: Too big: expected number to be <=500. Send row.date as a string, not a number.',
+        );
+      });
+
+      /** The message `parseToolArguments` rejects `args` with. */
+      const rejectionMessage = (def: AnyToolDefinition, args: unknown): string => {
+        try {
+          parseToolArguments(def, args);
+        } catch (error) {
+          return (error as Error).message;
+        }
+        throw new Error('Expected a rejection.');
+      };
+
+      it.each([
+        [
+          'a recursive union, every level lifted past a tag',
+          (() => {
+            /** Every level keeps the branch whose tag matches; the other fails on its tag alone. */
+            const Limited: z.ZodType = z.lazy(() =>
+              z.union([
+                z.object({ op: z.literal('not'), filter: Limited.optional() }),
+                z.object({ op: z.literal('lim'), limit: z.number().max(500).optional() }),
+              ]),
+            );
+            return tool('prevalidation_limited_filter', {
+              description: 'Takes a chain of negated limits.',
+              input: z.object({ where: Limited.describe('Filter.') }),
+              output: ok,
+              handler: record,
+            });
+          })(),
+          (depth: number) => {
+            let node: unknown = { op: 'lim', limit: '600' };
+            for (let level = 0; level < depth; level++) node = { op: 'not', filter: node };
+            return { where: node };
+          },
+          (depth: number) =>
+            `${['where', ...Array.from({ length: depth }, () => 'filter')].join('.')}.limit: ` +
+            'Too big: expected number to be <=500',
+        ],
+        [
+          'a recursive object, in a list of leaves at the bottom',
+          (() => {
+            /** A node with a child of its own kind, and leaves under a bounded limit. */
+            const LimitNode: z.ZodType = z.lazy(() =>
+              z.object({
+                child: LimitNode.optional(),
+                leaves: z.array(z.object({ limit: z.number().max(500) })).optional(),
+              }),
+            );
+            return tool('prevalidation_limit_tree', {
+              description: 'Takes a tree of bounded leaves.',
+              input: z.object({ root: LimitNode.describe('Root node.') }),
+              output: ok,
+              handler: record,
+            });
+          })(),
+          (depth: number) => {
+            let node: Record<string, unknown> = { leaves: [{ limit: '5' }, { limit: '600' }] };
+            for (let level = 0; level < depth; level++) node = { child: node };
+            return { root: node };
+          },
+          (depth: number) =>
+            `${['root', ...Array.from({ length: depth }, () => 'child')].join('.')}.leaves.1.limit: ` +
+            'Too big: expected number to be <=500',
+        ],
+      ])(
+        'holds a repair past its own check at every depth of %s, in time linear in the depth',
+        (_label, def, args, line) => {
+          const costs: number[] = [];
+          for (const depth of [8, 16, 24]) {
+            expect(rejectionMessage(def, args(depth)), `depth ${depth}`).toBe(
+              preamble(def.name) + line(depth),
+            );
+            const built = args(depth);
+            const rejection = cpuMs(() => {
+              try {
+                parseToolArguments(def, built);
+              } catch {
+                // Rejected, as pinned above.
+              }
+            });
+            // Checked per depth, so a walk that doubles per level fails by 16 rather than running on.
+            expect(rejection, `depth ${depth}`).toBeLessThan(100);
+            costs.push(rejection);
+          }
+
+          // 3× the depth: linear stays under ~3×, a walk that doubles per level is 65,536×.
+          expect(costs[2]! / costs[0]!).toBeLessThan(6);
+        },
+      );
+    });
+  });
+
+  // -----------------------------------------------------------------------
+  // #719 — a length check Zod measured on a value of the wrong type
+  // -----------------------------------------------------------------------
+
+  describe('a length check Zod measured on a value of the wrong type (#719)', () => {
+    const barcodes = tool('prevalidation_barcodes', {
+      description: 'Takes two to ten barcodes.',
+      input: z.object({
+        barcodes: z
+          .array(z.string().describe('Barcode.'))
+          .min(2)
+          .max(10)
+          .describe('2–10 barcodes.'),
+      }),
+      output: ok,
+      handler: record,
+    });
+    const named = tool('prevalidation_named', {
+      description: 'Takes a name.',
+      input: z.object({ name: z.string().min(2).describe('Name.') }),
+      output: ok,
+      handler: record,
+    });
+    const rowsOfCells = tool('prevalidation_rows_of_cells', {
+      description: 'Takes rows of two or three cells.',
+      input: z.object({
+        rows: z.array(z.array(z.string()).min(2).max(3)).describe('Rows.'),
+      }),
+      output: ok,
+      handler: record,
+    });
+    const preamble = (name: string) =>
+      `Input validation error: Invalid arguments for tool ${name}: `;
+    const issueShapes = (result: CallToolResult) =>
+      (envelope(result).data?.issues as Array<Record<string, unknown>> | undefined)?.map(
+        ({ code, expected, origin, path }) => ({ code, expected, origin, path }),
+      );
+
+    it.each([
+      [
+        'a joined string sent for a list',
+        barcodes,
+        { barcodes: '3017620422003,3017620422004' },
+        'barcodes: Invalid input: expected array, received string',
+        'Send barcodes as an array, not a string.',
+        [
+          { code: 'invalid_type', expected: 'array', origin: undefined, path: ['barcodes'] },
+          { code: 'too_big', expected: undefined, origin: 'string', path: ['barcodes'] },
+        ],
+      ],
+      [
+        'a list sent for a string',
+        named,
+        { name: ['a'] },
+        'name: Invalid input: expected string, received array',
+        'Send name as a string, not an array.',
+        [
+          { code: 'invalid_type', expected: 'string', origin: undefined, path: ['name'] },
+          { code: 'too_small', expected: undefined, origin: 'array', path: ['name'] },
+        ],
+      ],
+      [
+        'a joined string sent for a list element',
+        rowsOfCells,
+        { rows: ['ab,cdef'] },
+        'rows.0: Invalid input: expected array, received string',
+        'Send rows.0 as an array, not a string.',
+        [
+          { code: 'invalid_type', expected: 'array', origin: undefined, path: ['rows', 0] },
+          { code: 'too_big', expected: undefined, origin: 'string', path: ['rows', 0] },
+        ],
+      ],
+    ])(
+      'renders only the wrong type for %s, keeping both issues in data.issues',
+      async (_label, def, args, line, hint, issues) => {
+        const result = await call(def, args);
+
+        expect(envelope(result).message).toBe(preamble(def.name) + line);
+        expect(envelope(result).data?.recovery?.hint).toBe(hint);
+        expect(text(result)).toBe(
+          `Error: ${preamble(def.name)}${line}\n\nRecovery: ${hint}\n\n` +
+            `(reason invalid_arguments · request ${envelope(result).data?.requestId})`,
+        );
+        expect(issueShapes(result)).toEqual(issues);
+      },
+    );
+
+    it('renders only the wrong type under coerce: false', async () => {
+      const result = await call(barcodes, { barcodes: '3017620422003' }, { coerce: false });
+
+      expect(envelope(result).message).toBe(
+        `${preamble('prevalidation_barcodes')}barcodes: Invalid input: expected array, received string`,
+      );
+      expect(envelope(result).data?.recovery?.hint).toBe(
+        'Send barcodes as an array, not a string.',
+      );
+      expect(issueShapes(result)?.map(({ code }) => code)).toEqual(['invalid_type', 'too_big']);
+    });
+
+    it('renders each union branch without the length its wrong type was measured by', async () => {
+      const listOrNumber = tool('prevalidation_list_or_number', {
+        description: 'Takes a short list or a number.',
+        input: z.object({
+          v: z.union([z.array(z.string()).max(10), z.number()]).describe('A list or a number.'),
+        }),
+        output: ok,
+        handler: record,
+      });
+      const LINE =
+        'v: Invalid input: expected array, received string or Invalid input: expected number, received string';
+
+      const result = await call(listOrNumber, { v: 'abcdefghijkl' });
+
+      expect(envelope(result).message).toBe(preamble('prevalidation_list_or_number') + LINE);
+      expect(envelope(result).data?.recovery?.hint).toBe(LINE);
+      // Zod's own branch list keeps the length issue.
+      const [union] = (envelope(result).data?.issues ?? []) as Array<{
+        errors: Array<Array<{ code: string }>>;
+      }>;
+      expect(union?.errors.map((branch) => branch.map(({ code }) => code))).toEqual([
+        ['invalid_type', 'too_big'],
+        ['invalid_type'],
+      ]);
+    });
+
+    it('renders a length check on a branch whose type the value has beside the wrong type of another', async () => {
+      const listOrString = tool('prevalidation_list_or_string', {
+        description: 'Takes a short list or a short string.',
+        input: z.object({
+          v: z
+            .union([z.array(z.string()).max(2), z.string().max(2)])
+            .describe('A list or a string.'),
+        }),
+        output: ok,
+        handler: record,
+      });
+
+      const result = await call(listOrString, { v: ['a', 'b', 'c'] });
+
+      expect(envelope(result).message).toBe(
+        `${preamble('prevalidation_list_or_string')}v: Too big: expected array to have <=2 items or ` +
+          'Invalid input: expected string, received array',
+      );
+    });
+
+    it('keeps a length check on the declared type', async () => {
+      const result = await call(barcodes, { barcodes: ['3017620422003'] });
+
+      expect(envelope(result).message).toBe(
+        `${preamble('prevalidation_barcodes')}barcodes: Too small: expected array to have >=2 items`,
+      );
+    });
+
+    it('keeps a range check beside an integer expectation, which a number satisfies', async () => {
+      const wholeAndSmall = tool('prevalidation_whole_and_small', {
+        description: 'Takes a small whole number.',
+        input: z.object({ n: z.intersection(z.int(), z.number().max(5)).describe('N.') }),
+        output: ok,
+        handler: record,
+      });
+
+      const result = await call(wholeAndSmall, { n: 7.5 });
+
+      expect(envelope(result).message).toBe(
+        `${preamble('prevalidation_whole_and_small')}n: Invalid input: expected int, received number, ` +
+          'n: Too big: expected number to be <=5',
+      );
+    });
+
+    it('counts the lines left after the drop in (+N more), and every issue in issuesCount', async () => {
+      const rows = Array.from({ length: 12 }, (_, i) => `a${i},b${i},c${i},d${i}`);
+
+      const result = await call(rowsOfCells, { rows });
+      const { data, message } = envelope(result);
+
+      expect(message).toBe(
+        preamble('prevalidation_rows_of_cells') +
+          Array.from(
+            { length: 10 },
+            (_, i) => `rows.${i}: Invalid input: expected array, received string`,
+          ).join(', ') +
+          ' (+2 more)',
+      );
+      expect(data?.recovery?.hint).toBe(
+        `${Array.from({ length: 10 }, (_, i) => `Send rows.${i} as an array, not a string.`).join(' ')} (+2 more)`,
+      );
+      expect((data as { issuesCount?: number }).issuesCount).toBe(24);
+    });
+
+    it('still wraps a lone string whose first parse measured it as a string', async () => {
+      const capped = tool('prevalidation_capped_codes_list', {
+        description: 'Takes at most three codes.',
+        input: z.object({ codes: z.array(z.string()).max(3).describe('Codes.') }),
+        output: ok,
+        handler: record,
+      });
+
+      const result = await call(capped, { codes: 'abcdef' });
+
+      expect(result.isError).toBeUndefined();
+      expect(seen).toEqual({ codes: ['abcdef'] });
+    });
   });
 
   // -----------------------------------------------------------------------
@@ -3556,6 +4257,90 @@ describe('tool argument pre-validation', () => {
           'mcp.input.coercion': 'integer_as_string',
         },
       ]);
+    });
+
+    describe('beside a branch that refuses the value as a type and measured its length too (#492, #719)', () => {
+      const nameOrCounts = tool('prevalidation_name_or_counts', {
+        description: 'Takes a name of two or more characters, or a list of counts.',
+        input: z.object({
+          v: z
+            .union([z.string().min(2), z.array(z.number())])
+            .optional()
+            .describe('A name or counts.'),
+          bounded: z
+            .union([z.string().min(2).max(9), z.array(z.number())])
+            .optional()
+            .describe('A bounded name or counts.'),
+          rows: z
+            .array(z.union([z.string().min(2), z.array(z.number())]))
+            .optional()
+            .describe('Names or lists of counts.'),
+          nested: z
+            .union([z.string().min(2), z.array(z.union([z.string().min(3), z.array(z.number())]))])
+            .optional()
+            .describe('A name, or rows of names or counts.'),
+          ids: z
+            .union([z.string().min(2), z.array(z.string())])
+            .optional()
+            .describe('A name or IDs.'),
+        }),
+        output: ok,
+        handler: record,
+      });
+
+      it.each([
+        ['a list element', { v: ['5'] }, { v: [5] }, 'string_as_number'],
+        [
+          'a list element beside two length checks',
+          { bounded: ['5'] },
+          { bounded: [5] },
+          'string_as_number',
+        ],
+        [
+          'each element of a list of such unions',
+          { rows: [['5'], ['6']] },
+          { rows: [[5], [6]] },
+          'string_as_number',
+        ],
+        [
+          'a union nested in the surviving branch',
+          { nested: [['5']] },
+          { nested: [[5]] },
+          'string_as_number',
+        ],
+        ['an integer sent for a string element', { ids: [5] }, { ids: ['5'] }, 'integer_as_string'],
+      ])(
+        'repairs %s inside the one branch that failed below its root',
+        async (_label, args, expected, kind) => {
+          const result = await call(nameOrCounts, args);
+
+          expect(result.isError).toBeUndefined();
+          expect(seen).toEqual(expected);
+          expect(adds('mcp.input.coerced')).toEqual([
+            { 'mcp.tool.name': 'prevalidation_name_or_counts', 'mcp.input.coercion': kind },
+          ]);
+        },
+      );
+
+      it('renders only the branch that failed below its root for a value no repair helps', async () => {
+        const result = await expectOriginalRejection(nameOrCounts, { v: ['x'] });
+
+        expect(envelope(result).message).toBe(
+          'Input validation error: Invalid arguments for tool prevalidation_name_or_counts: ' +
+            'v.0: Invalid input: expected number, received string',
+        );
+        expect(envelope(result).data?.recovery?.hint).toBe('Send v.0 as a number, not a string.');
+      });
+
+      it('keeps the rejection under coerce: false', async () => {
+        const result = await call(nameOrCounts, { v: ['5'] }, { coerce: false });
+
+        expect(envelope(result).message).toBe(
+          'Input validation error: Invalid arguments for tool prevalidation_name_or_counts: ' +
+            'v.0: Invalid input: expected number, received string',
+        );
+        expect(adds('mcp.input.coerced')).toEqual([]);
+      });
     });
 
     it.each([
@@ -3621,9 +4406,11 @@ describe('tool argument pre-validation', () => {
       ['a lone string beside a branch holding one string there', { listOrBlank: { v: 'a' } }],
       ['a number inside a list beside a list of one number', { fivesOrTexts: [6] }],
     ])('gates %s as a plain union field would', async (_label, args) => {
-      // A rendering-dropped branch whose one literal sits at the repaired path
-      // still takes that type there: `z.union([z.literal(5), z.string()])`
-      // keeps `6` rejected, and so does the same choice inside a branch.
+      /**
+       * A rendering-dropped branch whose one literal sits at the repaired path
+       * still takes that type there: `z.union([z.literal(5), z.string()])`
+       * keeps `6` rejected, and so does the same choice inside a branch.
+       */
       await expectOriginalRejection(unionBranches, args);
       expect(adds('mcp.input.coerced')).toEqual([]);
     });
@@ -3663,8 +4450,10 @@ describe('tool argument pre-validation', () => {
     });
 
     it('reports a branch repair another branch refuses as sent, never as repaired (#706)', async () => {
-      // Branch `a` takes `id: "7"` but still needs a number `n`; branch `b`
-      // refuses the repaired `"7"` at the same path, so the repair did not hold.
+      /**
+       * Branch `a` takes `id: "7"` but still needs a number `n`; branch `b`
+       * refuses the repaired `"7"` at the same path, so the repair did not hold.
+       */
       const result = await expectOriginalRejection(unionBranches, {
         guarded: { kind: 'a', id: 7, n: true },
       });
@@ -4155,9 +4944,11 @@ describe('tool argument pre-validation', () => {
     });
 
     it('repairs nothing else in a branch the repaired tag does not select, in both shapes', async () => {
-      // In the plain union, branch 2 fails only on its tag, so the rejection reads
-      // branch 1's other values; the repaired tag `2` selects branch 2, where `id: 7`
-      // was valid as sent.
+      /**
+       * In the plain union, branch 2 fails only on its tag, so the rejection reads
+       * branch 1's other values; the repaired tag `2` selects branch 2, where `id: 7`
+       * was valid as sent.
+       */
       const crossed = (union: 'discriminated' | 'plain') => {
         const variants = [
           z.object({ kind: z.literal(1).describe('Kind.'), id: z.string().describe('ID.') }),
@@ -4285,8 +5076,10 @@ describe('tool argument pre-validation', () => {
     });
 
     it('keeps the rejection of a quoted tag beside a branch tagged by a string', async () => {
-      // `"1"` might be a misspelled `"x"`: the field takes strings there, as #707's
-      // `z.union([z.number(), z.literal('auto')])` does.
+      /**
+       * `"1"` might be a misspelled `"x"`: the field takes strings there, as #707's
+       * `z.union([z.number(), z.literal('auto')])` does.
+       */
       const besideString = taking(
         z.object({
           s: z
@@ -4586,6 +5379,80 @@ describe('tool argument pre-validation', () => {
       expect(adds('mcp.input.coerced')).toEqual([]);
     });
 
+    it.each(['1.0', '01', '1e0', ' 1', '-0', ''])(
+      'never writes a repair at a list’s own %j key into the element that key reads as a number',
+      async (key) => {
+        /** The list as sent, carrying JSON text under `key`: a property only a transform can give a list. */
+        const withKey = (value: unknown) =>
+          Array.isArray(value) ? Object.assign([...value], { [key]: '["z"]' }) : value;
+        const index = Number(key);
+        const definition = tool('prevalidation_list_key', {
+          description: 'Takes a list a preprocess gives a non-index key.',
+          input: z.object({
+            items: z
+              .preprocess(
+                withKey,
+                z.array(z.union([z.string(), z.array(z.string())])).superRefine((list, ctx) => {
+                  if (!Array.isArray(list[index])) {
+                    ctx.addIssue({ code: 'custom', message: 'Expected a list', path: [key] });
+                  }
+                }),
+              )
+              .describe('Items.'),
+          }),
+          output: ok,
+          handler: record,
+        });
+
+        // The repair reads the JSON text at the key; element `index` stays as the caller sent it.
+        const result = await expectOriginalRejection(definition, { items: ['a', 'b'] });
+
+        expect(envelope(result).message).toBe(
+          `Input validation error: Invalid arguments for tool prevalidation_list_key: items.${key}: Expected a list`,
+        );
+        expect(seen).toBeUndefined();
+        expect(adds('mcp.input.coerced')).toEqual([]);
+      },
+    );
+
+    it.each([
+      ['a custom list check', z.custom<unknown[]>((value) => Array.isArray(value))],
+      ['an unknown value', z.unknown()],
+    ])(
+      'leaves the argument as sent when the list a preprocess makes owns a key besides its elements, read by %s',
+      async (_label, out: z.ZodType) => {
+        /** A lone value wrapped with JSON text under its own `x` key; a list passed through as sent. */
+        const withX = (value: unknown) =>
+          Array.isArray(value) ? value : Object.assign([value], { x: '["z"]' });
+        const definition = tool('prevalidation_list_own_key', {
+          description: 'Takes a list a preprocess gives an own key.',
+          input: z.object({
+            items: z
+              .preprocess(
+                withX,
+                out.superRefine((list, ctx) => {
+                  if (typeof (list as Record<string, unknown>).x === 'string') {
+                    ctx.addIssue({ code: 'custom', message: 'Expected x as a list', path: ['x'] });
+                  }
+                }),
+              )
+              .describe('Items.'),
+          }),
+          output: ok,
+          handler: record,
+        });
+
+        // A copy of the list's elements would drop `x`, and with it the only failure.
+        const result = await expectOriginalRejection(definition, { items: 'a' });
+
+        expect(envelope(result).message).toBe(
+          'Input validation error: Invalid arguments for tool prevalidation_list_own_key: items.x: Expected x as a list',
+        );
+        expect(seen).toBeUndefined();
+        expect(adds('mcp.input.coerced')).toEqual([]);
+      },
+    );
+
     it('reports only what still fails once a repair below the preprocess held (#706)', async () => {
       const result = await call(preprocessed, { items: { name: 'abc', year: 2020, kind: 'zzz' } });
 
@@ -4694,8 +5561,10 @@ describe('tool argument pre-validation', () => {
 
       expect(result.isError).toBeUndefined();
       expect(seen).toEqual({ spec: ['abc'] });
-      // The first parse alone runs it: the decoded list takes the list branch.
-      // A repair walk past the original repair re-applies it, three runs in all.
+      /**
+       * The first parse alone runs it: the decoded list takes the list branch.
+       * A repair walk past the original repair re-applies it, three runs in all.
+       */
       expect(calls).toBe(1);
     });
 
@@ -4905,6 +5774,21 @@ describe('tool argument pre-validation', () => {
           ])
           .describe('IDs, as a list or as JSON text.'),
       });
+      /** A string marked, so a value the preprocess ran over reads apart from one it did not. */
+      const mark = (entry: unknown) => (typeof entry === 'string' ? `${entry}!` : entry);
+      /** An object of positions, listed in key order and marked. */
+      const listed = items(
+        (value) => (isRecord(value) ? Object.values(value).map(mark) : value),
+        strings,
+      );
+      /** A list, keyed by position and marked. */
+      const keyed = items(
+        (value) =>
+          Array.isArray(value)
+            ? Object.fromEntries(value.map((entry, i) => [String(i), mark(entry)]))
+            : value,
+        z.record(z.string(), z.string()),
+      );
       const idAsNumber = (index: number) =>
         `ids.${index}: Invalid input: expected string, received number`;
 
@@ -5077,6 +5961,18 @@ describe('tool argument pre-validation', () => {
           { accepted: { items: ['5', 'a'] } },
         ],
         ['a list a preprocess marks', banged, { items: [1] }, { accepted: { items: ['1!'] } }],
+        [
+          'an object of positions a preprocess lists, repaired at the key the position names',
+          listed,
+          { items: { 0: 5, 1: 'a' } },
+          { accepted: { items: ['5!', 'a!'] } },
+        ],
+        [
+          'a list a preprocess keys by position, repaired at the position the key names',
+          keyed,
+          { items: [5, 'a'] },
+          { accepted: { items: { 0: '5!', 1: 'a!' } } },
+        ],
         [
           'a mixed list a preprocess marks',
           banged,
@@ -5319,8 +6215,10 @@ describe('tool argument pre-validation', () => {
 
         const result = await call(definition, { ids: '[1, 2]', count: '3' });
 
-        // The decoded list takes the number branch, so the integer repairs the
-        // lifted string branch asked for below it are never written.
+        /**
+         * The decoded list takes the number branch, so the integer repairs the
+         * lifted string branch asked for below it are never written.
+         */
         expect(result.isError).toBeUndefined();
         expect(seen).toEqual({ ids: [1, 2], count: 3 });
         expect(adds('mcp.input.coerced')).toEqual(
@@ -6034,8 +6932,10 @@ describe('tool argument pre-validation', () => {
         // 16× the values: linear is ~16×, a copy of the arguments per value ~256×.
         expect(at80k / at5k).toBeLessThan(64);
         expect(at20k / at5k).toBeLessThan(12);
-        // Under 1.6 s on Bun and Node, coverage included, the 20-level tree the
-        // slowest (80,000 nulls 20 levels deep); one copy per value took 8 s.
+        /**
+         * Under 1.6 s on Bun and Node, coverage included, the 20-level tree the
+         * slowest (80,000 nulls 20 levels deep); one copy per value took 8 s.
+         */
         expect(at80k).toBeLessThan(4_000);
       },
       120_000,
@@ -6052,8 +6952,10 @@ describe('tool argument pre-validation', () => {
       expect(parseToolArguments(search, args)).toEqual({ query: 'x' });
 
       parse();
-      // With case-style aliases off nothing is folded: the two cost about the same,
-      // where folding every discarded key cost ~90× more.
+      /**
+       * With case-style aliases off nothing is folded: the two cost about the same,
+       * where folding every discarded key cost ~90× more.
+       */
       expect(parse() / parse({ caseStyleAliases: false })).toBeLessThan(8);
     });
 
@@ -6080,6 +6982,57 @@ describe('tool argument pre-validation', () => {
       // The 40,000 values whose repair did not hold, of which a rejection carries the first 10 (#648).
       expect(rejection.data.issuesCount).toBe(40_000);
       expect(paths).toEqual(Array.from({ length: 10 }, (_, i) => ['ids', 2 * i]));
+    });
+
+    describe('at a small multiple of the parse of the same arguments', () => {
+      const flags = tool('prevalidation_flags', {
+        description: 'Takes a list of flags.',
+        input: z.object({ flags: z.array(z.boolean()).describe('Flags.') }),
+        output: ok,
+        handler: record,
+      });
+      /**
+       * Thread CPU of `parseToolArguments` over `args`, rejection included,
+       * against `safeParse` of the same arguments.
+       */
+      const costToParse = (definition: AnyToolDefinition, args: unknown): number => {
+        const [parse = 0, through = 0] = fastestCpuMs([
+          () => definition.input.safeParse(args),
+          () => {
+            try {
+              parseToolArguments(definition, args);
+            } catch {
+              // A rejected call is timed through its whole rejection.
+            }
+          },
+        ]);
+        return through / parse;
+      };
+
+      it('rejects 80,000 values the repair reads and none holds', () => {
+        const args = { flags: Array.from({ length: 80_000 }, () => 1) };
+        expect(() => parseToolArguments(flags, args)).toThrow(/Invalid arguments/);
+
+        // ~6× on Bun, ~5× on Node, ~8× under coverage.
+        expect(costToParse(flags, args)).toBeLessThan(13);
+      });
+
+      it('accepts 80,000 values the repair reads as another type (#707)', () => {
+        const ids = Array.from({ length: 80_000 }, (_, i) => i);
+        const args = { ids: ids.map(String) };
+        expect(parseToolArguments(numbers, args)).toEqual({ ids });
+
+        // ~4× on Bun and Node, ~7.5× under coverage.
+        expect(costToParse(numbers, args)).toBeLessThan(11);
+      });
+
+      it('rejects 80,000 repaired values half of which hold (#706)', () => {
+        const args = { ids: Array.from({ length: 80_000 }, (_, i) => (i % 2 ? i : -i - 1)) };
+        expect(() => parseToolArguments(digits, args)).toThrow(/Invalid arguments/);
+
+        // ~6× on Bun and Node, ~8× under coverage.
+        expect(costToParse(digits, args)).toBeLessThan(12);
+      });
     });
 
     it('rejects a value 500 levels into a recursive union at about the cost of the parse', () => {
@@ -6111,9 +7064,11 @@ describe('tool argument pre-validation', () => {
       const parse = cpuMs(() => filtered.input.safeParse(args));
       const rejection = parseCost(filtered, () => args, 0);
 
-      // Reading the leaf's path for the repair, the message, and the hint once
-      // each cost ~70× the parse at 2,000 levels, a ratio that grows with the
-      // depth, when every union re-walked the rest of the path.
+      /**
+       * Reading the leaf's path for the repair, the message, and the hint once
+       * each cost ~70× the parse at 2,000 levels, a ratio that grows with the
+       * depth, when every union re-walked the rest of the path.
+       */
       expect(rejection / parse).toBeLessThan(10);
     });
 
@@ -6325,8 +7280,10 @@ describe('tool argument pre-validation', () => {
         () => parseToolArguments(paged, args),
       ]);
 
-      // ~1.8× the parse on Bun and Node, ~2.6× under coverage; ~6× when such a
-      // call still ran both key stages and built the repair's transform cache.
+      /**
+       * ~1.8× the parse on Bun and Node, ~2.6× under coverage; ~6× when such a
+       * call still ran both key stages and built the repair's transform cache.
+       */
       expect(through / parse).toBeLessThan(4);
     });
   });
@@ -6347,8 +7304,10 @@ describe('tool argument pre-validation', () => {
         'targetQuery: Too small: expected string to have >=3 characters. ' +
           'Validated query as targetQuery.',
       );
-      // #493 drops a restatement-only Recovery line; this one carries a
-      // framework sentence, so it reaches the text surface.
+      /**
+       * #493 drops a restatement-only Recovery line; this one carries a
+       * framework sentence, so it reaches the text surface.
+       */
       expect(text(result)).toBe(
         'Error: Input validation error: Invalid arguments for tool prevalidation_min_target: ' +
           'targetQuery: Too small: expected string to have >=3 characters\n\n' +
@@ -6488,8 +7447,10 @@ describe('tool argument pre-validation', () => {
       expect(seen).toEqual(viaProduction);
     });
 
-    // The helper adds no request id (#576); the production side drops its own
-    // before each comparison.
+    /**
+     * The helper adds no request id (#576); the production side drops its own
+     * before each comparison.
+     */
     it('publishes the production envelope when the step cannot rescue the call', async () => {
       const production = withoutRequestId(await call(search, { query: 'x', salt: true }));
       const helper = await runToolContract(
@@ -6510,7 +7471,7 @@ describe('tool argument pre-validation', () => {
       ['a discarded object repair (#479)', objecty, { target: '{"type":"path"}' }],
       ['a discarded integer repair (#487)', numericIds, { recall: 2001 }],
       ['a refused number branch (#487)', numericIds, { positiveOrText: -1 }],
-      ['a discarded number repair (#707)', scalars, { rank: '0' }],
+      ['a number repair held past a range check (#707, #745)', scalars, { rank: '0' }],
       ['a refused string branch (#707)', scalars, { limitOrAuto: '15' }],
       ['a comma-joined string for a list (#602)', lists, { parkCode: 'yell,grca' }],
       ['a discarded list wrap (#602)', lists, { letters: 'c' }],
