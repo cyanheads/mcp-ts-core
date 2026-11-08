@@ -1215,7 +1215,7 @@ describe('core/app', () => {
 
   describe('Node.js engines floor', () => {
     const NODE_22_MESSAGE =
-      "@cyanheads/mcp-ts-core requires Node.js >=24.0.0, but this server is running Node.js 22.23.3 (/usr/local/bin/node). Point the client's command at a Node.js 24+ binary, or run the server under Bun >=1.4.0.";
+      "@cyanheads/mcp-ts-core requires Node.js >=24.0.0, but this server is running Node.js 22.23.3 (/usr/local/bin/node). Point the client's command at a Node.js 24+ binary, or run the server under Bun >=1.4.4.";
     const originalCaps = { ...runtimeCaps };
     const versionsDescriptor = Object.getOwnPropertyDescriptor(
       process,

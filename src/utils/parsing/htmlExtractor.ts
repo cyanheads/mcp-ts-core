@@ -172,9 +172,14 @@ export class HtmlExtractor {
   /**
    * Extracts the main article content from an HTML string.
    *
-   * Async due to lazy loading of `defuddle` and `linkedom`, and because
-   * Defuddle's node entry is itself async (supports async fallback extractors
-   * gated by `useAsync`).
+   * Async only for the lazy loading of `defuddle` and `linkedom` and for
+   * Defuddle's node entry, which can await the fallback extractors `useAsync`
+   * enables. The extraction itself runs synchronously on the calling thread,
+   * blocking the event loop until it finishes: it takes no abort signal and
+   * cannot be interrupted once it starts, and `maxBytes` bounds the input's
+   * size, not the CPU time spent on it. A server that extracts untrusted HTML
+   * should run it off its serving thread (a worker thread or a child process),
+   * so one request cannot stall every other request on the process.
    *
    * @param html - Raw HTML string to extract from.
    * @param options - Optional extraction options (format, URL, content selector, etc.).

@@ -15,6 +15,7 @@
  * @module tests/unit/services/mirror/handle
  */
 
+import { existsSync } from 'node:fs';
 import { chmod, mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -27,6 +28,7 @@ import {
 } from '@/services/mirror/sqlite/handle.js';
 import { JsonRpcErrorCode, McpError } from '@/types-global/errors.js';
 import { runtimeCaps } from '@/utils/internal/runtime.js';
+import packageJson from '../../../../package.json' with { type: 'json' };
 import { runMirrorProcess } from './mirror-process.js';
 
 /**
@@ -178,6 +180,70 @@ describe('openSqliteHandle', () => {
         }
       },
     );
+  });
+
+  /**
+   * Bun below the floor drops the error of a failing statement that more SQL
+   * follows in one `exec`, so the open refuses it. The version is stubbed, and
+   * `runtimeCaps.isBun` forced on, so the refusal runs on both test lanes.
+   */
+  describe('Bun engines floor', () => {
+    const versionsDescriptor = Object.getOwnPropertyDescriptor(
+      process,
+      'versions',
+    ) as PropertyDescriptor;
+    const originalIsBun = runtimeCaps.isBun;
+
+    /** Stubs what the check reads: the reported Bun version and the runtime flag. */
+    function reportBun(bun: string, isBun = true): void {
+      Object.defineProperty(process, 'versions', {
+        ...versionsDescriptor,
+        value: { ...versionsDescriptor.value, bun },
+      });
+      runtimeCaps.isBun = isBun;
+    }
+
+    afterEach(() => {
+      Object.defineProperty(process, 'versions', versionsDescriptor);
+      runtimeCaps.isBun = originalIsBun;
+    });
+
+    it('refuses to open on a Bun below the floor, naming both versions, before it creates anything', async () => {
+      reportBun('1.4.3');
+      const parent = join(dir, 'never-created');
+
+      const error = await openFailure(join(parent, 'records.db'));
+
+      expect(error).toBeInstanceOf(McpError);
+      expect(error).toMatchObject({
+        code: JsonRpcErrorCode.ConfigurationError,
+        message:
+          'The SQLite mirror store needs Bun 1.4.4 or later, but this server is running Bun 1.4.3. Upgrade Bun, or run the server on Node.js with the "better-sqlite3" peer dependency installed.',
+        data: { reason: 'unsupported_bun_version' },
+      });
+      expect(existsSync(parent)).toBe(false);
+    });
+
+    it.runIf(IS_BUN).each([
+      ['the floor itself', '1.4.4'],
+      ['a version string with no X.Y.Z', 'custom-build'],
+    ])('opens on %s (%s)', async (_label, bun) => {
+      reportBun(bun);
+      const handle = await open(`floor-${bun}.db`);
+      handle.exec('CREATE TABLE t (id TEXT)');
+      expect(handle.prepare<{ n: number }>('SELECT COUNT(*) AS n FROM t').get()?.n).toBe(0);
+    });
+
+    it.skipIf(IS_BUN)('never checks Node.js, whatever Bun version a process reports', async () => {
+      reportBun('1.0.0', false);
+      const handle = await open('node-not-checked.db');
+      handle.exec('CREATE TABLE t (id TEXT)');
+      expect(handle.prepare<{ n: number }>('SELECT COUNT(*) AS n FROM t').get()?.n).toBe(0);
+    });
+
+    it('reads its floor from an engines.bun that is a single >=X.Y.Z comparator', () => {
+      expect(packageJson.engines.bun).toMatch(/^>=\d+\.\d+\.\d+$/);
+    });
   });
 
   describe('connection pragmas', () => {
@@ -473,6 +539,47 @@ describe('openSqliteHandle', () => {
       handle.exec('CREATE TABLE t (id TEXT)');
       expect(handle.prepare<{ n: number }>('SELECT COUNT(*) AS n FROM t').get()?.n).toBe(0);
     });
+
+    /** The ids in `u`, ascending, as one comma-separated string. */
+    const ids = (handle: SqliteHandle) =>
+      handle
+        .prepare<{ ids: string }>(
+          'SELECT group_concat(id) AS ids FROM (SELECT id FROM u ORDER BY id)',
+        )
+        .get()?.ids;
+
+    it('runs every statement of a multi-statement exec that succeeds', async () => {
+      const handle = await open('multi-ok.db');
+      handle.exec('CREATE TABLE u (id INTEGER PRIMARY KEY); INSERT INTO u VALUES (1);');
+      handle.exec('INSERT INTO u VALUES (2); INSERT INTO u VALUES (3); INSERT INTO u VALUES (4);');
+      expect(ids(handle)).toBe('1,2,3,4');
+    });
+
+    it.each([
+      ['the first', 'INSERT INTO u VALUES (1); INSERT INTO u VALUES (2);', '1'],
+      [
+        'a middle',
+        'INSERT INTO u VALUES (3); INSERT INTO u VALUES (1); INSERT INTO u VALUES (4);',
+        '1,3',
+      ],
+    ])(
+      'throws when %s statement of a multi-statement exec fails, and runs nothing after it',
+      async (_label, sql, kept) => {
+        const handle = await open('multi-fail.db');
+        handle.exec('CREATE TABLE u (id INTEGER PRIMARY KEY); INSERT INTO u VALUES (1);');
+
+        let error: unknown;
+        try {
+          handle.exec(sql);
+        } catch (err) {
+          error = err;
+        }
+
+        expect(error).toMatchObject({ code: expect.stringMatching(/^SQLITE_CONSTRAINT/) });
+        // exec opens no transaction: a statement before the failure stays applied.
+        expect(ids(handle)).toBe(kept);
+      },
+    );
   });
 
   /**

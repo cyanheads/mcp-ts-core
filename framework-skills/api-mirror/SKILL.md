@@ -4,14 +4,14 @@ description: >
   Stand up a persistent, self-refreshing local mirror of a bulk upstream dataset with the MirrorService (@cyanheads/mcp-ts-core/mirror). Use when a server wraps a large or slow API and should query a synced local index (embedded SQLite + FTS5) instead of paginating the live API per request.
 metadata:
   author: cyanheads
-  version: "1.9"
+  version: "1.10"
   audience: external
   type: reference
 ---
 
 ## Context
 
-The MirrorService owns the source-agnostic half of a local mirror — the embedded store, the sync-state machine, the runner — so a server supplies only the two parts that are irreducibly per-source: the **ingester** (a `sync` generator) and the **schema**. It targets the embedded-SQLite tier (~10⁴–10⁷ rows). Node/Bun only: `bun:sqlite` is built-in on Bun, `better-sqlite3` is an optional peer dependency on Node; the store is unavailable on Workers (no SQLite, no persistent filesystem).
+The MirrorService owns the source-agnostic half of a local mirror — the embedded store, the sync-state machine, the runner — so a server supplies only the two parts that are irreducibly per-source: the **ingester** (a `sync` generator) and the **schema**. It targets the embedded-SQLite tier (~10⁴–10⁷ rows). Node/Bun only: `bun:sqlite` is built-in on Bun, `better-sqlite3` is an optional peer dependency on Node; the store is unavailable on Workers (no SQLite, no persistent filesystem). On Bun the store needs 1.4.4 or later, the framework's `engines.bun` floor. An older Bun keeps running a multi-statement `exec` past a statement that fails, so a migration that fails partway is recorded as applied; opening a store there rejects with `ConfigurationError` (`data.reason: 'unsupported_bun_version'`) naming both versions, before any file is created. Bun does not enforce `engines` itself, at install or at run.
 
 Import from `@cyanheads/mcp-ts-core/mirror`.
 
@@ -90,7 +90,7 @@ The raw handle (`raw()`, a migration's `up(handle)`) binds every value the same 
 
 For access paths the generic query can't express — junction tables for index-backed multi-value filtering, denormalized counters, bespoke `bm25` weighting — use the **raw handle**: `const db = await mirror.raw();` then run prepared statements against your own auxiliary tables (declare them via a migration). Add the auxiliary DDL in a `migrations` step; maintain it from your `sync` mapping or SQL triggers. SQLite never indexes a foreign-key child column on its own. Give every auxiliary table an index whose leading column is the one your writes match on, usually the parent's primary key. Without it, a per-record rebuild such as `DELETE FROM paper_categories WHERE paper_id = ?`, or an `ON DELETE CASCADE` fired by a tombstone, scans the whole table on every row, and a page that should take milliseconds takes minutes on a million-row junction. Confirm with `EXPLAIN QUERY PLAN`: the plan should say `SEARCH … USING INDEX`, never `SCAN`.
 
-A migration runs identically on first creation and on upgrade: a fresh database runs every migration up to `version` right after the declarative DDL, an existing one runs only those above its stored version. So `up()` must tolerate a database that already has the current declarative shape — `CREATE TABLE IF NOT EXISTS` for auxiliary objects, never an `ALTER` that assumes an older layout of a declared column. Each migration runs exactly once per database, in one write transaction with its version stamp: processes opening the store together wait on the write lock and skip what another already applied, and a throw from `up()` leaves nothing of it applied and the version unchanged. It need not be idempotent.
+A migration runs identically on first creation and on upgrade: a fresh database runs every migration up to `version` right after the declarative DDL, an existing one runs only those above its stored version. So `up()` must tolerate a database that already has the current declarative shape — `CREATE TABLE IF NOT EXISTS` for auxiliary objects, never an `ALTER` that assumes an older layout of a declared column. Each migration runs exactly once per database, in one write transaction with its version stamp: processes opening the store together wait on the write lock and skip what another already applied, and a throw from `up()` leaves nothing of it applied and the version unchanged. It need not be idempotent. `handle.exec()` runs a multi-statement string in order and throws at the first statement that fails, running nothing after it, so a failure partway through one `exec` aborts the migration like any other throw.
 
 ## Readiness — key off the completion marker, not live status
 
@@ -156,6 +156,7 @@ RUN echo '{"compilerOptions":{"baseUrl":".","paths":{"@/*":["./dist/*"]}}}' > ts
 - [ ] Every auxiliary table has an index led by the column its writes match on (`EXPLAIN QUERY PLAN` shows no `SCAN`)
 - [ ] Read path gated on `await mirror.ready()` with a live fallback when not ready
 - [ ] `better-sqlite3` added to the server's `dependencies` for Node deployments; mirror disabled on Workers
+- [ ] Bun deployments run Bun 1.4.4 or later: `engines.bun`, `packageManager`, and the Dockerfile's `oven/bun` tags
 - [ ] Refresh wired via `schedulerService` in `setup()`; init runs out-of-band
 - [ ] A scheduled `runSync` takes its job's own `signal`, returns when that controller aborted, skips on `data.reason === 'sync_locked'`, and rethrows anything else
 - [ ] Mirror CLI scripts call `logger.initialize(config.logLevel, 'stdio')` before logging

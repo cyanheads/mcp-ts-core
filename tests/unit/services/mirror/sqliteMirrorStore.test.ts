@@ -6,6 +6,7 @@
  * @module tests/unit/services/mirror/sqliteMirrorStore
  */
 
+import { existsSync } from 'node:fs';
 import { mkdir, mkdtemp, open, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -30,6 +31,7 @@ import type {
   SyncPage,
 } from '@/services/mirror/types.js';
 import { JsonRpcErrorCode, McpError } from '@/types-global/errors.js';
+import { runtimeCaps } from '@/utils/internal/runtime.js';
 import { runMirrorProcess } from './mirror-process.js';
 
 function specFor(
@@ -1556,6 +1558,50 @@ describe('sqliteMirrorStore migrations', () => {
     await repaired.close();
   });
 
+  it('applies nothing of a migration whose multi-statement exec fails before its last statement', async () => {
+    const path = join(dir, 'partial.db');
+    const v1 = sqliteMirrorStore(specFor(path));
+    await v1.count();
+    await v1.close();
+
+    const failing = sqliteMirrorStore(
+      specFor(path, {
+        version: 2,
+        migrations: [
+          {
+            version: 2,
+            up: (h) =>
+              h.exec(
+                'CREATE TABLE mig_log (x INTEGER PRIMARY KEY); INSERT INTO mig_log VALUES (1); INSERT INTO mig_log VALUES (1); CREATE TABLE never_created (x);',
+              ),
+          },
+        ],
+      }),
+    );
+    const error = await failing.count().catch((err: unknown) => err);
+    await failing.close();
+
+    expect(error).toMatchObject({
+      code: JsonRpcErrorCode.DatabaseError,
+      cause: { code: expect.stringMatching(/^SQLITE_CONSTRAINT/) },
+    });
+    const handle = await openSqliteHandle(path);
+    try {
+      expect(
+        handle.prepare<{ v: number }>(`SELECT MAX(version) AS v FROM schema_version`).get()?.v,
+      ).toBe(1);
+      expect(
+        handle
+          .prepare<{ name: string }>(
+            `SELECT name FROM sqlite_master WHERE name IN ('mig_log', 'never_created')`,
+          )
+          .all(),
+      ).toEqual([]);
+    } finally {
+      handle.close();
+    }
+  });
+
   it('names a store whose migration throws by its basename, with a recovery hint and no path (#635)', async () => {
     const failing = sqliteMirrorStore(
       specFor(join(dir, 'failing.db'), {
@@ -1729,6 +1775,48 @@ describe('sqliteMirrorStore migrations', () => {
       other.close();
     }
     expect(writeLock).toEqual(['SQLITE_BUSY']);
+  });
+});
+
+/** The handle's Bun floor, seen from the store: the refusal reaches the caller as thrown. */
+describe('sqliteMirrorStore on a Bun below the engines floor', () => {
+  const versionsDescriptor = Object.getOwnPropertyDescriptor(
+    process,
+    'versions',
+  ) as PropertyDescriptor;
+  const originalIsBun = runtimeCaps.isBun;
+  let dir: string;
+
+  beforeEach(async () => {
+    dir = await mkdtemp(join(tmpdir(), 'mirror-bun-floor-test-'));
+    Object.defineProperty(process, 'versions', {
+      ...versionsDescriptor,
+      value: { ...versionsDescriptor.value, bun: '1.4.3' },
+    });
+    runtimeCaps.isBun = true;
+  });
+  afterEach(async () => {
+    Object.defineProperty(process, 'versions', versionsDescriptor);
+    runtimeCaps.isBun = originalIsBun;
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  it('rejects the first call with the ConfigurationError, unwrapped, and creates no file', async () => {
+    const path = join(dir, 'store', 'records.db');
+    const store = sqliteMirrorStore(specFor(path));
+
+    const error = await store.count().catch((err: unknown) => err);
+    await store.close();
+
+    expect(error).toBeInstanceOf(McpError);
+    expect(error).toMatchObject({
+      code: JsonRpcErrorCode.ConfigurationError,
+      message: expect.stringContaining(
+        'needs Bun 1.4.4 or later, but this server is running Bun 1.4.3.',
+      ),
+      data: { reason: 'unsupported_bun_version' },
+    });
+    expect(existsSync(join(dir, 'store'))).toBe(false);
   });
 });
 

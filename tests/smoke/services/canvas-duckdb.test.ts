@@ -8,7 +8,17 @@
  */
 
 import { existsSync, rmSync, symlinkSync } from 'node:fs';
-import { mkdir, mkdtemp, readdir, readFile, realpath, rm, stat, writeFile } from 'node:fs/promises';
+import {
+  lstat,
+  mkdir,
+  mkdtemp,
+  readdir,
+  readFile,
+  realpath,
+  rm,
+  stat,
+  writeFile,
+} from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { basename, join, sep } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
@@ -2762,6 +2772,91 @@ describe('canvas · path export publication (#740)', () => {
     expect(error.message).toContain(`"${join('[path]', 'missing', 'out.csv')}"`);
     expect(error.message).not.toContain('.partial');
     expect(await stagingFiles(publishRoot)).toEqual([]);
+  });
+
+  /**
+   * Runs `call` with `resolveExportPath` wrapped: `onTargetCheck` receives the
+   * number of each check of `path` that returns, counted from 1, and
+   * `targetChecks` counts every check of `path`, a rejected one included.
+   * Checks of the staging path are not counted.
+   */
+  async function withTargetChecks<T>(
+    path: string,
+    onTargetCheck: (check: number) => void,
+    call: () => Promise<T>,
+  ): Promise<{ settled: T; targetChecks: number }> {
+    const resolveExportPath = exportWriter.resolveExportPath;
+    let targetChecks = 0;
+    const spy = vi
+      .spyOn(exportWriter, 'resolveExportPath')
+      .mockImplementation(async (root, requested) => {
+        const check = requested === path ? ++targetChecks : undefined;
+        const resolved = await resolveExportPath(root, requested);
+        if (check !== undefined) onTargetCheck(check);
+        return resolved;
+      });
+    try {
+      return { settled: await call(), targetChecks };
+    } finally {
+      spy.mockRestore();
+    }
+  }
+
+  it('refuses to publish over a target that is a symbolic link at its final path check, leaving the link and its target as they were', async () => {
+    const outside = await mkdtemp(join(tmpdir(), 'canvas-smoke-publish-outside-'));
+    const linked = join(publishRoot, 'linked-first.csv');
+    try {
+      const destination = join(outside, 'kept.csv');
+      await writeFile(destination, 'outside');
+
+      const { settled: error, targetChecks } = await withTargetChecks(
+        'linked-first.csv',
+        (check) => {
+          if (check === 1) symlinkSync(destination, linked);
+        },
+        () => rejectionOf(publishing.export('rows', { format: 'csv', path: 'linked-first.csv' })),
+      );
+
+      expect(error.data?.reason).toBe('export_path_symlink');
+      expect(targetChecks).toBe(2);
+      expect(await readFile(destination, 'utf8')).toBe('outside');
+      expect((await lstat(linked)).isSymbolicLink()).toBe(true);
+      expect(await stagingFiles(publishRoot)).toEqual([]);
+    } finally {
+      await rm(linked, { force: true });
+      await rm(outside, { recursive: true, force: true });
+    }
+  });
+
+  it("replaces a symbolic link at the target with the export rather than writing through it, leaving the link's target as it was", async () => {
+    const outside = await mkdtemp(join(tmpdir(), 'canvas-smoke-publish-outside-'));
+    const linked = join(publishRoot, 'linked-last.csv');
+    try {
+      const destination = join(outside, 'kept.csv');
+      await writeFile(destination, 'outside');
+
+      const { settled: result, targetChecks } = await withTargetChecks(
+        'linked-last.csv',
+        (check) => {
+          if (check === 2) symlinkSync(destination, linked);
+        },
+        () => publishing.export('rows', { format: 'csv', path: 'linked-last.csv' }),
+      );
+
+      expect(result).toMatchObject({ format: 'csv', path: linked, rowCount: ROWS });
+      expect(targetChecks).toBe(2);
+      expect(await readFile(destination, 'utf8')).toBe('outside');
+      const published = await lstat(linked);
+      expect(published.isSymbolicLink()).toBe(false);
+      expect(published.isFile()).toBe(true);
+      const ids = await exportedIds(linked, 'csv');
+      expect(ids).toHaveLength(ROWS);
+      expect(ids.findIndex((id, line) => id !== line)).toBe(-1);
+      expect(await stagingFiles(publishRoot)).toEqual([]);
+    } finally {
+      await rm(linked, { force: true });
+      await rm(outside, { recursive: true, force: true });
+    }
   });
 });
 

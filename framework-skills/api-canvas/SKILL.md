@@ -4,7 +4,7 @@ description: >
   DataCanvas primitive reference — a Tier 3 SQL/analytical workspace for tabular MCP servers, backed by DuckDB. Use when registering tables from upstream APIs, running ad-hoc SQL across them, and exporting results. Covers the acquire → register → query → export flow, per-table TTL, the token-sharing pattern for multi-agent collaboration, env config, and Cloudflare Workers fail-closed behavior.
 metadata:
   author: cyanheads
-  version: "2.14"
+  version: "2.15"
   audience: external
   type: reference
 ---
@@ -127,7 +127,7 @@ Dropping or expiring a canvas removes its spill directory once the calls still r
 
 ### Engine file access
 
-Each canvas's DuckDB instance reads and writes files only under `CANVAS_EXPORT_PATH` and the private scratch directory, and its configuration is locked when the canvas is created, so no statement can widen that bound or raise the memory limit. A read naming any other path is refused by the engine itself, beneath the [SQL gate](#instancequerysql-options). The export root is part of the bound: a broad `CANVAS_EXPORT_PATH` widens what the engine can reach.
+Each canvas's DuckDB instance reads and writes files only under `CANVAS_EXPORT_PATH` and the private scratch directory, and its configuration is locked when the canvas is created, so no statement can widen that bound or raise the memory limit. A read naming any other path is refused by the engine itself, beneath the [SQL gate](#instancequerysql-options). The export root is part of the bound: a broad `CANVAS_EXPORT_PATH` widens what the engine can reach. It is also a trust boundary: it must be writable only by the server's own user.
 
 ---
 
@@ -285,7 +285,7 @@ Every export writes rows in the table's insertion order, or in the order a view'
 
 An export the engine runs out of memory writing fails with `DatabaseError`, `data.reason: 'export_out_of_memory'`, `data.format` naming the format, the first line of the engine's message, and a hint for that format: JSON's names CSV and Parquet, which need far less; CSV's and Parquet's name an export of a selection that leaves out the widest columns, or a larger `CANVAS_DEFAULT_MEMORY_LIMIT_MB`. `query()` and `registerTable()` running out of memory stay `DatabaseError` with no reason.
 
-A path export writes `.<name>.<UUID>.partial` beside its target, through the same sandbox and symbolic-link checks as the target (`<name>` shortened at a character boundary when the staging name would pass 255 bytes), and renames it over the target once its transaction commits, after checking the target's path again. An export that rejects, cancelled included, removes the staging file and leaves the target as it found it: a file already there keeps its content and a missing one is not created. One that resolves replaces the target whole; `sizeBytes` is the size of the file it wrote. Error messages name the requested path, never the staging file. A stream export writes no staging file; to Parquet it writes with the same single writer and row-group cap as a path export, so it carries the rows, row order, and column types a path export of that table does.
+A path export writes `.<name>.<UUID>.partial` beside its target, through the same sandbox and symbolic-link checks as the target (`<name>` shortened at a character boundary when the staging name would pass 255 bytes), and renames it over the target once its transaction commits, after checking the target's path again. A target that is a symbolic link at either check fails the export with `export_path_symlink`, and the rename replaces a link at the target rather than writing through it. An export that rejects, cancelled included, removes the staging file and leaves the target as it found it: a file already there keeps its content and a missing one is not created. One that resolves replaces the target whole; `sizeBytes` is the size of the file it wrote. Error messages name the requested path, never the staging file. A stream export writes no staging file; to Parquet it writes with the same single writer and row-group cap as a path export, so it carries the rows, row order, and column types a path export of that table does.
 
 ```ts
 // Path target — written inside the sandbox.

@@ -20,6 +20,9 @@ import {
   validationError,
 } from '@/types-global/errors.js';
 import { runtimeCaps } from '@/utils/internal/runtime.js';
+import { enginesFloor, isBelow, parseVersionTriple } from '@/utils/internal/versionTriple.js';
+
+import frameworkPackageJson from '../../../../package.json' with { type: 'json' };
 
 /**
  * Primitive value storable in a mirror column. A number binds the same on both
@@ -57,6 +60,11 @@ export interface SqliteStatement<TRow = unknown> {
 /** Runtime-agnostic database handle. Synchronous — both drivers are synchronous. */
 export interface SqliteHandle {
   close(): void;
+  /**
+   * Run every statement in `sql`, in order, outside any transaction. The
+   * first statement that fails throws, and nothing after it runs; the
+   * statements before it stay applied.
+   */
   exec(sql: string): void;
   prepare<TRow = unknown>(sql: string): SqliteStatement<TRow>;
   /**
@@ -90,6 +98,9 @@ const BETTER_SQLITE3_SPECIFIER: string = 'better-sqlite3';
 
 /** Pause between attempts to switch a contended file to WAL. */
 const WAL_RETRY_INTERVAL_MS = 10;
+
+/** `data.reason` of the refusal an open on a Bun below the `engines.bun` floor throws. */
+const UNSUPPORTED_BUN_REASON = 'unsupported_bun_version';
 
 /**
  * The caller-facing `data.recovery.hint` on a store that fails to open or
@@ -250,18 +261,21 @@ function wrapDriver(db: SqliteDriver, close: () => void): SqliteHandle {
  * processes coexist without spurious `database is locked` errors. An open that
  * meets another connection's lock waits it out for up to `busyTimeoutMs`.
  *
- * Throws `ConfigurationError` on Node when `better-sqlite3` is not installed,
- * and `DatabaseError` for any other open failure — creating the parent
- * directory included — with the driver or filesystem error on `cause` and the
- * connection already closed. Neither error carries the path, since a handler
- * forwards message and `data` to the caller: the `DatabaseError` names the
- * store by its basename and its `data` holds only a recovery hint, and the
- * `ConfigurationError` carries no `data`.
+ * Throws `ConfigurationError` on a Bun below the framework's `engines.bun`
+ * floor (`data.reason: 'unsupported_bun_version'`) before it creates or opens
+ * anything, on Node when `better-sqlite3` is not installed, and `DatabaseError`
+ * for any other open failure — creating the parent directory included — with
+ * the driver or filesystem error on `cause` and the connection already closed.
+ * None of them carries the path, since a handler forwards message and `data`
+ * to the caller: the `DatabaseError` names the store by its basename and its
+ * `data` holds only a recovery hint, and a `ConfigurationError` carries at
+ * most a `reason`.
  */
 export async function openSqliteHandle(
   path: string,
   options: OpenHandleOptions = {},
 ): Promise<SqliteHandle> {
+  assertSupportedBunVersion();
   const startedAt = performance.now();
   const busyTimeoutMs = options.busyTimeoutMs ?? 5000;
 
@@ -269,8 +283,6 @@ export async function openSqliteHandle(
   try {
     await mkdir(dirname(resolvePath(path)), { recursive: true });
     handle = runtimeCaps.isBun ? await openBunHandle(path) : await openBetterSqlite3Handle(path);
-    // One statement per call: bun:sqlite's multi-statement `exec` drops the
-    // step error of a statement followed by more text (oven-sh/bun#37415).
     // NORMAL synchronous is the WAL-recommended durability/throughput balance.
     handle.exec(`PRAGMA busy_timeout = ${busyTimeoutMs}`);
     await enableWal(handle, startedAt + busyTimeoutMs);
@@ -318,10 +330,35 @@ export function isBusy(err: unknown): boolean {
 }
 
 /**
+ * Refuses a Bun below the framework's `engines.bun` floor. Before Bun 1.4.4,
+ * `bun:sqlite`'s `exec` drops the error of a failing statement that more SQL
+ * follows and runs the rest (oven-sh/bun#37415), so a migration that fails
+ * partway would run its remaining statements and be recorded as applied.
+ * `bun:sqlite` offers no way to step through a statement list, so `exec`
+ * cannot be wrapped to catch it; and Bun enforces `engines` neither at install
+ * nor at run, so the open checks the version itself. Node.js is never checked,
+ * and neither is a Bun version with no leading `X.Y.Z`.
+ *
+ * @throws {McpError} `ConfigurationError` naming the floor and the running
+ *   version, with `data.reason` `unsupported_bun_version`.
+ */
+function assertSupportedBunVersion(): void {
+  if (!runtimeCaps.isBun) return;
+  const floor = enginesFloor(frameworkPackageJson.engines.bun);
+  const running = process.versions.bun;
+  const version = running === undefined ? undefined : parseVersionTriple(running);
+  if (!floor || !version || !isBelow(version, floor)) return;
+  throw configurationError(
+    `The SQLite mirror store needs Bun ${floor.join('.')} or later, but this server is running Bun ${running}. Upgrade Bun, or run the server on Node.js with the "better-sqlite3" peer dependency installed.`,
+    { reason: UNSUPPORTED_BUN_REASON },
+  );
+}
+
+/**
  * Bun driver. Closes with `close(true)` so statements the store still holds
  * (`applyBatch`'s per-call upsert/remove) are finalized with the connection
- * rather than keeping the file open until garbage collection. Bun 1.4 is the
- * floor for that call: earlier versions threw `database is locked` instead.
+ * rather than keeping the file open until garbage collection; Bun before 1.4
+ * threw `database is locked` on that call instead.
  */
 async function openBunHandle(path: string): Promise<SqliteHandle> {
   const mod = (await import(BUN_SQLITE_SPECIFIER)) as unknown as { Database: BunDatabaseCtor };

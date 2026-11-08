@@ -1,14 +1,16 @@
 /**
  * @fileoverview PDF text extraction against a stubbed `unpdf`: how the
  * decoded-image ceiling reaches pdf.js (absent unless the caller asks for one),
- * and how failures that are not unreadable input stay `InternalError` while a
- * missing `unpdf` peer keeps its `ConfigurationError`.
+ * that the document opened for extraction is destroyed whether extraction
+ * resolves or rejects, and how failures that are not unreadable input stay
+ * `InternalError` while a missing `unpdf` peer keeps its `ConfigurationError`.
  * @module tests/utils/parsing/pdfParser.imageCap.test
  */
 
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
-const { extractTextMock, getDocumentProxyMock } = vi.hoisted(() => ({
+const { destroyMock, extractTextMock, getDocumentProxyMock } = vi.hoisted(() => ({
+  destroyMock: vi.fn(),
   extractTextMock: vi.fn(),
   getDocumentProxyMock: vi.fn(),
 }));
@@ -26,8 +28,72 @@ const bytes = new Uint8Array([1, 2, 3]);
 
 beforeEach(() => {
   vi.clearAllMocks();
-  getDocumentProxyMock.mockResolvedValue({ proxy: true });
+  destroyMock.mockResolvedValue(undefined);
+  // pdf.js 6's shape: `destroy()` lives on the loading task, and the proxy has none of its own.
+  getDocumentProxyMock.mockResolvedValue({ loadingTask: { destroy: destroyMock } });
   extractTextMock.mockResolvedValue({ totalPages: 1, text: ['page'] });
+});
+
+describe('PdfParser.extractText document lifecycle', () => {
+  it('destroys the document once after a successful extraction, after the text pass', async () => {
+    await expect(parser.extractText(bytes, { mergePages: true })).resolves.toEqual({
+      totalPages: 1,
+      text: ['page'],
+    });
+    expect(destroyMock).toHaveBeenCalledOnce();
+    expect(destroyMock.mock.invocationCallOrder[0]).toBeGreaterThan(
+      extractTextMock.mock.invocationCallOrder[0] as number,
+    );
+  });
+
+  it.each([
+    [
+      'an unreadable-input name',
+      Object.assign(new Error('Invalid PDF structure.'), { name: 'InvalidPDFException' }),
+      JsonRpcErrorCode.ValidationError,
+    ],
+    [
+      'any other failure',
+      new TypeError('pdf.getPage is not a function'),
+      JsonRpcErrorCode.InternalError,
+    ],
+  ])(
+    'destroys the document once when the text pass rejects with %s, keeping its classification',
+    async (_label, failure, code) => {
+      extractTextMock.mockRejectedValueOnce(failure);
+
+      await expect(parser.extractText(bytes)).rejects.toMatchObject({
+        code,
+        message: `Failed to extract text from PDF: ${failure.message}`,
+        data: { reason: 'pdf_text_extract_failed' },
+      });
+      expect(destroyMock).toHaveBeenCalledOnce();
+    },
+  );
+
+  it('fails as InternalError when destroying the document rejects after the text pass', async () => {
+    destroyMock.mockRejectedValueOnce(new Error('worker already terminated'));
+
+    await expect(parser.extractText(bytes)).rejects.toMatchObject({
+      code: JsonRpcErrorCode.InternalError,
+      message: 'Failed to extract text from PDF: worker already terminated',
+      data: { reason: 'pdf_text_extract_failed' },
+    });
+  });
+
+  it("keeps the text pass's failure and classification when destroying the document also rejects", async () => {
+    extractTextMock.mockRejectedValueOnce(
+      Object.assign(new Error('Invalid PDF structure.'), { name: 'InvalidPDFException' }),
+    );
+    destroyMock.mockRejectedValueOnce(new Error('worker already terminated'));
+
+    await expect(parser.extractText(bytes)).rejects.toMatchObject({
+      code: JsonRpcErrorCode.ValidationError,
+      message: 'Failed to extract text from PDF: Invalid PDF structure.',
+      data: { reason: 'pdf_text_extract_failed' },
+    });
+    expect(destroyMock).toHaveBeenCalledOnce();
+  });
 });
 
 describe('PdfParser.extractText decoded-image ceiling', () => {

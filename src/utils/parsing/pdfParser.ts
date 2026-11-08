@@ -1185,9 +1185,25 @@ export class PdfParser {
           ? await getDocumentProxy(pdfBytes)
           : await getDocumentProxy(pdfBytes, { maxImageSize: options.maxImageSize });
 
-      const result: { totalPages: number; text: string | string[] } = mergePages
-        ? await unpdfExtractText(pdfProxy, { mergePages: true })
-        : await unpdfExtractText(pdfProxy, { mergePages: false });
+      /**
+       * unpdf destroys only the documents it opens itself, and pdf.js 6 puts
+       * `destroy()` on the loading task, not the proxy. Without it the
+       * document's pages and fonts wait for garbage collection. A failed
+       * destroy fails a call whose text pass succeeded, and never replaces the
+       * text pass's own failure, which carries the input's classification.
+       */
+      let result: { totalPages: number; text: string | string[] };
+      let extracted = false;
+      try {
+        result = mergePages
+          ? await unpdfExtractText(pdfProxy, { mergePages: true })
+          : await unpdfExtractText(pdfProxy, { mergePages: false });
+        extracted = true;
+      } finally {
+        await pdfProxy.loadingTask.destroy().catch((err: unknown) => {
+          if (extracted) throw err;
+        });
+      }
 
       logger.debug(
         'Successfully extracted text from PDF.',

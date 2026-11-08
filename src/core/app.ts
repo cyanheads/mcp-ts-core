@@ -60,6 +60,7 @@ import {
 import { logger, type McpLogLevel } from '@/utils/internal/logger.js';
 import { requestContextService, withExtra } from '@/utils/internal/requestContext.js';
 import { runtimeCaps } from '@/utils/internal/runtime.js';
+import { enginesFloor, isBelow, parseVersionTriple } from '@/utils/internal/versionTriple.js';
 import { schedulerService } from '@/utils/scheduling/scheduler.js';
 import { RateLimiter } from '@/utils/security/rateLimiter.js';
 import {
@@ -806,16 +807,6 @@ function printStartupConfigError(err: McpError): void {
 }
 
 /**
- * The `X.Y.Z` a version string starts with, as numbers. A prerelease or build
- * suffix is ignored, so a nightly or release candidate is judged by the release
- * it precedes; a string with no leading `X.Y.Z` yields `undefined`.
- */
-function parseVersionTriple(version: string): readonly [number, number, number] | undefined {
-  const match = /^(\d+)\.(\d+)\.(\d+)/.exec(version);
-  return match ? [Number(match[1]), Number(match[2]), Number(match[3])] : undefined;
-}
-
-/**
  * Refuses a real Node.js below the framework's `engines.node` floor. npm and
  * npx only warn on an engines mismatch, and an older Node.js boots cleanly, then
  * fails on the first call into an API it lacks (`ctx.log` reaches `Promise.try`)
@@ -834,13 +825,11 @@ function assertSupportedNodeVersion(): void {
   if (!runtimeCaps.isNode || runtimeCaps.isBun || runtimeCaps.isWorkerLike) return;
   if ('Deno' in globalThis) return;
   const { bun: bunRange, node: nodeRange } = frameworkPackageJson.engines;
-  const floor = nodeRange.startsWith('>=') ? parseVersionTriple(nodeRange.slice(2)) : undefined;
+  const floor = enginesFloor(nodeRange);
   const running = process.versions.node;
   const version = parseVersionTriple(running);
-  if (!floor || !version) return;
+  if (!floor || !version || !isBelow(version, floor)) return;
   const [major, minor, patch] = floor;
-  // Lexicographic comparison of the two triples.
-  if ((version[0] - major || version[1] - minor || version[2] - patch) >= 0) return;
   const floorLabel = minor === 0 && patch === 0 ? `${major}` : `${major}.${minor}.${patch}`;
   throw configurationError(
     `${frameworkPackageJson.name} requires Node.js ${nodeRange}, but this server is running Node.js ${running} (${process.execPath}). Point the client's command at a Node.js ${floorLabel}+ binary, or run the server under Bun ${bunRange}.`,
